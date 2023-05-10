@@ -1,8 +1,31 @@
 RRR
 ---
 
-    000 ddd aaa bbb oooo
-    001 ddd aaa bbb oooo
+    00 o ddd aaa bbb oooo
+
+    ldb 
+    stb
+    ldw
+    stw
+    ldd
+    std
+    ldl
+    stl
+    add
+    sub
+    mul
+    div
+    and
+    or
+    xor
+    asr
+    lsr
+    lsl
+    
+    fadd
+    fsub
+    fmul
+    fdiv
 
 RRI
 ---
@@ -12,7 +35,10 @@ RRI
     100 aaa bbb iiiiiii     bls
     101 aaa bbb iiiiiii     addi
     110 aaa bbb 0000000     jalr
-    110 aaa bbb iiiiiii     jalr
+    110 aaa bbb iiiiiii     
+    110 000 000 oooo iii
+      rts
+      rti
 
 RI
 --
