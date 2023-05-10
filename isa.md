@@ -1,52 +1,25 @@
 RRR
 ---
 
-    000 dd tt aa bb ooooo
+    000 ddd aaa bbb oooo
+    001 ddd aaa bbb oooo
+
+RRI
+---
+
+    010 aaa bbb iiiiiii
+    011 aaa bbb iiiiiii
+    100 aaa bbb iiiiiii
+    101 aaa bbb iiiiiii
+    110 aaa bbb iiiiiii
 
 RI
 --
 
-    001 rr ooo iiiiiiii
+    111 rrr oo iiiiiiii
 
     ldi
     sli
     -
     -
-    -
-    -
-    -
-    -
 
-RRI
----
-
-    01 o xx tt yy oo iiiii
-
-    ld
-    st
-    addi
-    ori
-    andi
-    asr
-    lsr
-    lsl
-
-B
--
-
-    100 cccc iiiiiiiii
-
-M
--
-
-    101 ooooooooooooo
-
-R
--
-
-    110 rr ooooooooooo
-
-???
----
-
-    111
