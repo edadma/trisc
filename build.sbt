@@ -22,13 +22,12 @@ lazy val trisc = crossProject(JSPlatform, JVMPlatform, NativePlatform)
     organization := "io.github.edadma",
     githubOwner := "edadma",
     githubRepository := name.value,
-//    libraryDependencies += "org.scalatest" %%% "scalatest" % "3.2.15" % "test",
-//    libraryDependencies ++= Seq(
-//      "io.github.edadma" %%% "cross-platform" % "0.1.1"
-//    ),
+    libraryDependencies += "org.scalatest" %%% "scalatest" % "3.2.15" % "test",
+    libraryDependencies ++= Seq(
+    ),
     libraryDependencies ++= Seq(
       "com.github.scopt" %%% "scopt" % "4.1.0",
-//      "com.lihaoyi" %%% "pprint" % "0.8.1" % "test",
+      "com.lihaoyi" %%% "pprint" % "0.8.1" % "test",
     ),
     publishMavenStyle := true,
     Test / publishArtifact := false,
