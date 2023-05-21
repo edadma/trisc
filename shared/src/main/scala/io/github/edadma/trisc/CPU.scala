@@ -46,7 +46,7 @@ object CPU:
       "pattern should comprise only 0's, 1's, letters or -'s",
     )
 
-    val ranges = Map((p drop 1 map { case Range(v, l, u) => v(0) -> (l.toInt, u.toInt) }): _*)
+    val ranges = Map(p drop 1 map { case Range(v, l, u) => v(0) -> (l.toInt, u.toInt) }: _*)
 
     require(
       ranges forall { case (_, (l, u)) => 0 <= l && l <= u },
