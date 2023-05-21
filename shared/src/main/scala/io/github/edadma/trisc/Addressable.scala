@@ -12,29 +12,23 @@ trait Addressable:
   def readByte(addr: Long): Int
   def writeByte(addr: Long, data: Int): Unit
 
-  def readShort(addr: Long, endian: Endian): Int =
-    endian match
-      case Endian.Big    => readByte(addr) << 8 | readByte(addr + 1)
-      case Endian.Little => readByte(addr + 1) << 8 | readByte(addr)
+  def readShort(addr: Long): Int = readByte(addr) << 8 | readByte(addr + 1)
 
-  def writeShort(addr: Long, data: Short, endian: Endian): Unit =
-    endian match
-      case Endian.Big =>
-        writeByte(addr, data >> 8)
-        writeByte(addr + 1, data)
-      case Endian.Little =>
-        writeByte(addr + 1, data >> 8)
-        writeByte(addr, data)
+  def writeShort(addr: Long, data: Int): Unit =
+    writeByte(addr, data >> 8)
+    writeByte(addr + 1, data)
 
-  def readInt(addr: Long, endian: Endian): Int =
-    endian match
-      case Endian.Big    => readShort(addr, endian) << 16 | readShort(addr + 2, endian)
-      case Endian.Little => readShort(addr + 2, endian) << 16 | readShort(addr, endian)
+  def readInt(addr: Long): Int = readShort(addr) << 16 | readShort(addr + 2)
 
-  def readLong(addr: Long, endian: Endian): Long =
-    endian match
-      case Endian.Big    => readInt(addr, endian).toLong << 32 | readInt(addr + 4, endian) & 0xffffffff
-      case Endian.Little => readInt(addr + 4, endian).toLong << 32 | readInt(addr, endian) & 0xffffffff
+  def writeInt(addr: Long, data: Int): Unit =
+    writeShort(addr, data >> 16)
+    writeShort(addr + 2, data)
+
+  def readLong(addr: Long): Long = readInt(addr).toLong << 32 | readInt(addr + 4) & 0xffffffff
+
+  def writeLong(addr: Long, data: Long): Unit =
+    writeInt(addr, (data >> 32).toInt)
+    writeInt(addr + 4, data.toInt)
 
   def baseAddress: String = f"$base%08x".toUpperCase
 

@@ -3,7 +3,7 @@ package io.github.edadma.trisc
 import scala.collection.immutable
 import scala.collection.mutable.ListBuffer
 
-class CPU:
+class CPU(mem: Addressable):
   val r = immutable.ArraySeq(
     new Reg0,
     new Reg,
@@ -34,7 +34,7 @@ object CPU:
     case class Variable(v: Char, lower: Int, upper: Int, bits: List[Int])
 
     val Range = "([a-zA-Z]):([0-9]+)-([0-9]+)" r
-    val p = pattern replace(" ", "") split ";"
+    val p = pattern replace (" ", "") split ";"
 
     require(p.nonEmpty, "empty pattern")
 
@@ -56,11 +56,11 @@ object CPU:
     val (constant, variables) = {
       def scan(acc: Int, pos: Int, chars: List[Char], vars: Map[Char, List[Int]]): (Int, Map[Char, List[Int]]) =
         chars match {
-          case Nil => (acc, vars)
-          case '0' :: t => scan(acc, pos << 1, t, vars)
-          case '1' :: t => scan(acc | pos, pos << 1, t, vars)
+          case Nil                       => (acc, vars)
+          case '0' :: t                  => scan(acc, pos << 1, t, vars)
+          case '1' :: t                  => scan(acc | pos, pos << 1, t, vars)
           case v :: t if vars contains v => scan(acc, pos << 1, t, vars + (v -> (vars(v) :+ pos)))
-          case v :: t => scan(acc, pos << 1, t, vars + (v -> List(pos)))
+          case v :: t                    => scan(acc, pos << 1, t, vars + (v -> List(pos)))
         }
 
       scan(0, 1, bits.reverse.toList, Map())
@@ -78,9 +78,9 @@ object CPU:
 
     def int2bits(res: Int, n: Int, bits: List[Int]): Int =
       bits match {
-        case Nil => res
+        case Nil                   => res
         case b :: t if (n & 1) > 0 => int2bits(res | b, n >> 1, t)
-        case b :: t => int2bits(res, n >> 1, t)
+        case b :: t                => int2bits(res, n >> 1, t)
       }
 
     enumerate(
