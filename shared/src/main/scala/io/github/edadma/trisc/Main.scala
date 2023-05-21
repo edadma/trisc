@@ -1,4 +1,4 @@
 package io.github.edadma.trisc
 
 @main def run(): Unit =
-  println("Hello world")
+  println(CPU.generate("1 a"))
