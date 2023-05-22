@@ -30,10 +30,27 @@ class Reg0 extends Reg:
   override def write(v: Int): Unit = {}
 
 object CPU:
+  private val instructions = Array.fill[Instruction](0x10000)(IllegalInstruction)
+
+  private def populate(pattern: String, inst: Map[Char, Int] => Instruction) =
+    for ((idx, m) <- generate(pattern))
+      instructions(idx) = inst(m)
+
+  private def populate(insts: List[(String, Map[Char, Int] => Instruction)]): Unit =
+    for ((p, c) <- insts)
+      populate(p, c)
+
+  def buildInstructionTable: Unit =
+    populate(
+      List[(String, Map[Char, Int] => Instruction)](
+        "111 rrr 00 iiiiiiii" -> ((operands: Map[Char, Int]) => new LDI(operands('r'), operands('i'))),
+      ),
+    )
+
   def generate(pattern: String) =
     case class Variable(v: Char, lower: Int, upper: Int, bits: List[Int])
 
-    val Range = "([a-zA-Z]):([0-9]+)-([0-9]+)" r
+    val Range = "([a-zA-Z]):([0-9]+)-([0-9]+)".r
     val p = pattern replace (" ", "") split ";"
 
     require(p.nonEmpty, "empty pattern")
