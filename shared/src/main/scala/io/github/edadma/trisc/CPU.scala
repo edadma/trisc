@@ -19,6 +19,7 @@ class CPU(mem: Addressable):
   var running: Boolean = false
   var vector: Int = -1
   var inst: Int = 0
+  var trace: Boolean = false
 
   def reset(): Unit =
     for i <- 1 until 8 do r(i) write 0
@@ -27,9 +28,14 @@ class CPU(mem: Addressable):
     vector = 0
 
   def execute(): Unit =
-    if vector >= 0 then pc = mem.readInt(vector * 4)
+    if vector >= 0 then
+      pc = mem.readInt(vector * 4)
+      vector = -1
 
     inst = mem.readShort(pc)
+
+    if trace then println((pc.toHexString, inst.toHexString))
+
     pc += 2
     Decode(inst)(this)
 
@@ -71,6 +77,7 @@ object Decode:
     populate(
       List[(String, Map[Char, Int] => Instruction)](
         "111 rrr 00 iiiiiiii" -> ((operands: Map[Char, Int]) => new LDI(operands('r'), operands('i'))),
+        "110 000 000 11 00000" -> ((operands: Map[Char, Int]) => BRK),
       ),
     )
 
