@@ -14,23 +14,50 @@ class CPU(mem: Addressable):
     new Reg,
     new Reg,
   )
-
+  var pc = 0
   var status: Int = 0
+  var running: Boolean = false
+  var vector: Int = -1
+  var inst: Int = 0
 
-class Reg:
-  private var r: Int = 0
+  def reset(): Unit =
+    for i <- 1 until 8 do r(i) write 0
 
-  def read: Int = r
+    running = true
+    vector = 0
 
-  def write(v: Int): Unit = r = v
+  def execute(): Unit =
+    if vector >= 0 then pc = mem.readInt(vector * 4)
 
-class Reg0 extends Reg:
-  override def read: Int = 0
+    inst = mem.readShort(pc)
+    pc += 2
+    Decode(inst)(this)
 
-  override def write(v: Int): Unit = {}
+  def run(): Unit =
+    while running do execute()
 
-object CPU:
+  def resume(): Unit =
+    running = true
+    run()
+
+  class Reg:
+    private var r: Int = 0
+
+    def read: Int = r
+
+    def write(v: Int): Unit = r = v
+
+  class Reg0 extends Reg:
+    override def read: Int = 0
+
+    override def write(v: Int): Unit = {}
+
+object Decode:
   private val instructions = Array.fill[Instruction](0x10000)(IllegalInstruction)
+
+  buildInstructionTable()
+
+  def apply(inst: Int): Instruction = instructions(inst)
 
   private def populate(pattern: String, inst: Map[Char, Int] => Instruction) =
     for ((idx, m) <- generate(pattern))
@@ -40,7 +67,7 @@ object CPU:
     for ((p, c) <- insts)
       populate(p, c)
 
-  def buildInstructionTable: Unit =
+  def buildInstructionTable(): Unit =
     populate(
       List[(String, Map[Char, Int] => Instruction)](
         "111 rrr 00 iiiiiiii" -> ((operands: Map[Char, Int]) => new LDI(operands('r'), operands('i'))),

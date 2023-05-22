@@ -93,7 +93,7 @@ def mkrom(insts: IndexedSeq[String]): ROM =
     val s = n.replace(" ", "")
 
     if s.length == 4 || s.length == 8 then s.grouped(2) map (d => Integer.parseInt(d, 16))
-    else if s.length == 32 then s.grouped(8) map (d => Integer.parseInt(d, 2))
+    else if s.length == 16 then s.grouped(8) map (d => Integer.parseInt(d, 2))
     else sys.error(s"bad literal '$n'")
 
   new ROM(insts.flatMap(inst => literal(inst).map(_.toByte).toIndexedSeq), 0)
