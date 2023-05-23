@@ -75,7 +75,13 @@ class RAM(val base: Long, val size: Long) extends Addressable:
     require(base <= addr && addr < base + size, "address out of range")
     seq((addr - base).toInt) = data.toByte
 
-class ROM(seq: immutable.IndexedSeq[Byte], val base: Long) extends Addressable:
+trait ReadOnlyAddressable extends Addressable:
+  def writeByte(addr: Long, data: Int): Unit = sys.error(s"$name not writable at address ${addr.toHexString}")
+
+trait WriteOnlyAddressable extends Addressable:
+  def readByte(addr: Long): Int = sys.error(s"$name not readable at address ${addr.toHexString}")
+
+class ROM(seq: immutable.IndexedSeq[Byte], val base: Long) extends ReadOnlyAddressable:
   val name = "ROM"
   require(base >= 0, "base is negative")
   require(seq.nonEmpty, "Addressable is empty")
@@ -86,8 +92,6 @@ class ROM(seq: immutable.IndexedSeq[Byte], val base: Long) extends Addressable:
     require(base <= addr && addr < base + size, "address out of range")
     seq((addr - base).toInt) & 0xff
 
-  def writeByte(addr: Long, data: Int): Unit = sys.error("not writable")
-
 def mkrom(insts: IndexedSeq[String]): ROM =
   def literal(n: String): Iterator[Int] =
     val s = n.replace(" ", "")
@@ -97,3 +101,8 @@ def mkrom(insts: IndexedSeq[String]): ROM =
     else sys.error(s"bad literal '$n'")
 
   new ROM(insts.flatMap(inst => literal(inst).map(_.toByte).toIndexedSeq), 0)
+
+abstract class OutputDevice(addr: Long) extends WriteOnlyAddressable:
+  def emulation(data: Int): Unit
+
+  def writeByte(addr: Long, data: Int): Unit = emulation(data)

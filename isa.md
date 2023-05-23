@@ -49,7 +49,6 @@ RI
 
     ldi     00
     ldis    01
-    sli     02
-    -
-    -
+    sli     10
+    sti     11
 
