@@ -3,7 +3,7 @@ package io.github.edadma.trisc
 import scala.collection.immutable
 import scala.collection.mutable.ListBuffer
 
-class CPU(mem: Addressable) extends Addressable:
+class CPU(mem: Addressable, interrupts: List[CPU => Unit]) extends Addressable:
   val name: String = mem.name
   val base: Long = mem.base
   val size: Long = mem.size
@@ -48,7 +48,15 @@ class CPU(mem: Addressable) extends Addressable:
     Decode(inst)(this)
 
   def run(): Unit =
-    while running do execute()
+    var count = 0
+
+    while running && count < 1000 do
+      execute()
+      count += 1
+
+    if running then
+      interrupts foreach (_(this))
+      run()
 
   def resume(): Unit =
     running = true

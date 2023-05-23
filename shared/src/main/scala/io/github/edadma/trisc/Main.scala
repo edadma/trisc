@@ -24,7 +24,7 @@ package io.github.edadma.trisc
 
 //  for i <- 0L until rom.size do println(rom.readByte(i).toHexString)
 
-  val cpu = new CPU(mem) // { trace = true }
+  val cpu = new CPU(mem, Nil) // { trace = true }
 
   cpu.reset()
   cpu.run()
