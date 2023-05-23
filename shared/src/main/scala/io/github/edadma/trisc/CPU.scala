@@ -76,7 +76,7 @@ object Decode:
   def buildInstructionTable(): Unit =
     populate(
       List[(String, Map[Char, Int] => Instruction)](
-        "111 rrr 00 iiiiiiii" -> ((operands: Map[Char, Int]) => new LDI(operands('r'), operands('i'))),
+        "111 rrr 00 iiiiiiii" -> ((operands: Map[Char, Int]) => new LDI(operands('r'), operands('i').toByte)),
         "110 000 000 11 00000" -> ((operands: Map[Char, Int]) => BRK),
       ),
     )
