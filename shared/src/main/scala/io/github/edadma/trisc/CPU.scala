@@ -86,6 +86,9 @@ object Decode:
         "100 aaa bbb iiiiiii" -> ((operands: Map[Char, Int]) =>
           new BLS(operands('a'), operands('b'), operands('i').toByte)
         ),
+        "010 aaa bbb iiiiiii" -> ((operands: Map[Char, Int]) =>
+          new BEQ(operands('a'), operands('b'), operands('i').toByte)
+        ),
       ),
     )
 

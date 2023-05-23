@@ -20,3 +20,6 @@ class ADDI(a: Int, b: Int, imm: Int) extends Instruction:
 
 class BLS(a: Int, b: Int, imm: Int) extends Instruction:
   def apply(cpu: CPU): Unit = if cpu.r(a).read < cpu.r(b).read then cpu.pc += imm
+
+class BEQ(a: Int, b: Int, imm: Int) extends Instruction:
+  def apply(cpu: CPU): Unit = if cpu.r(a).read == cpu.r(b).read then cpu.pc += imm
