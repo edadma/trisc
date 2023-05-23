@@ -3,7 +3,7 @@ package io.github.edadma.trisc
 import scala.collection.immutable
 import scala.collection.mutable.ListBuffer
 
-class CPU(mem: Addressable):
+class CPU(private[trisc] val mem: Addressable):
   val r = immutable.ArraySeq(
     new Reg0,
     new Reg,
