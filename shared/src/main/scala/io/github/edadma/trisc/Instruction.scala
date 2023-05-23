@@ -17,3 +17,6 @@ object BRK extends Instruction:
 
 class ADDI(a: Int, b: Int, imm: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read + imm)
+
+class BLS(a: Int, b: Int, imm: Int) extends Instruction:
+  def apply(cpu: CPU): Unit = if cpu.r(a).read < cpu.r(b).read then cpu.pc += imm
