@@ -9,5 +9,8 @@ object IllegalInstruction extends Instruction:
 class LDI(r: Int, imm: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.r(r) write imm
 
+class SLI(r: Int, imm: Int) extends Instruction:
+  def apply(cpu: CPU): Unit = cpu.r(r).write((cpu.r(r).read << 8) | imm)
+
 object BRK extends Instruction:
   def apply(cpu: CPU): Unit = cpu.running = false

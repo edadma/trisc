@@ -47,8 +47,9 @@ RI
 
     111 rrr oo iiiiiiii
 
-    ldi
-    sli
+    ldi     00
+    ldis    01
+    sli     02
     -
     -
 
