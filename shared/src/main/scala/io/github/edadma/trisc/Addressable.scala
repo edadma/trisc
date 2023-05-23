@@ -92,7 +92,7 @@ class ROM(seq: immutable.IndexedSeq[Byte], val base: Long) extends ReadOnlyAddre
     require(base <= addr && addr < base + size, "address out of range")
     seq((addr - base).toInt) & 0xff
 
-def mkrom(insts: IndexedSeq[String]): ROM =
+def mkROM(insts: IndexedSeq[String]): ROM =
   def literal(n: String): Iterator[Int] =
     val s = n.replace(" ", "")
 

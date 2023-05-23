@@ -3,7 +3,7 @@ package io.github.edadma.trisc
 @main def run(): Unit =
   val mem = new Memory(
     "Memory",
-    mkrom(
+    mkROM(
       IndexedSeq(
         "00000004", // reset vector
         "111 001 01 0000 0001", // LDI r1, 1
