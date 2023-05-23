@@ -3,7 +3,15 @@ package io.github.edadma.trisc
 import scala.collection.immutable
 import scala.collection.mutable.ListBuffer
 
-class CPU(private[trisc] val mem: Addressable):
+class CPU(mem: Addressable) extends Addressable:
+  val name: String = mem.name
+  val base: Long = mem.base
+  val size: Long = mem.size
+
+  def readByte(addr: Long): Int = mem.readByte(addr)
+
+  def writeByte(addr: Long, data: Long): Unit = mem.writeByte(addr, data)
+
   val r = immutable.ArraySeq(
     new Reg0,
     new Reg,
@@ -29,10 +37,10 @@ class CPU(private[trisc] val mem: Addressable):
 
   def execute(): Unit =
     if vector >= 0 then
-      pc = mem.readInt(vector * 4)
+      pc = readInt(vector * 4)
       vector = -1
 
-    inst = mem.readShort(pc)
+    inst = readShort(pc)
 
     if trace then println((pc.toHexString, inst.toHexString))
 

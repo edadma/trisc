@@ -25,7 +25,7 @@ class BEQ(a: Int, b: Int, imm: Int) extends Instruction:
   def apply(cpu: CPU): Unit = if cpu.r(a).read == cpu.r(b).read then cpu.pc += imm
 
 class STI(r: Int, imm: Int) extends Instruction:
-  def apply(cpu: CPU): Unit = cpu.mem.writeByte(cpu.r(r).read, imm)
+  def apply(cpu: CPU): Unit = cpu.writeByte(cpu.r(r).read, imm)
 
 class STB(d: Int, a: Int, b: Int) extends Instruction:
-  def apply(cpu: CPU): Unit = cpu.mem.writeByte(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)
+  def apply(cpu: CPU): Unit = cpu.writeByte(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)
