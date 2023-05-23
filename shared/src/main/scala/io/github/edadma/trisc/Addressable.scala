@@ -101,8 +101,3 @@ def mkROM(insts: IndexedSeq[String]): ROM =
     else sys.error(s"bad literal '$n'")
 
   new ROM(insts.flatMap(inst => literal(inst).map(_.toByte).toIndexedSeq), 0)
-
-abstract class ByteOutputDevice(addr: Long) extends WriteOnlyAddressable:
-  def emulation(data: Long): Unit
-
-  def writeByte(addr: Long, data: Long): Unit = emulation(data)
