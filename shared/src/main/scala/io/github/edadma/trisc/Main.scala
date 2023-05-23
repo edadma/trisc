@@ -4,7 +4,8 @@ package io.github.edadma.trisc
   val rom = mkrom(
     IndexedSeq(
       "00000004", // reset vector
-      "111 001 00 1111 1110", // LDI r1, 0xFE
+      "111 001 01 1111 1110", // LDI r1, 0xFE
+      "101 010 001 0000101", // ADDI r2, r1, 5
       "110 000 000 11 00000", // BRK
     ),
   )
@@ -16,3 +17,4 @@ package io.github.edadma.trisc
   cpu.reset()
   cpu.run()
   println(cpu.r(1).read)
+  println(cpu.r(2).read)

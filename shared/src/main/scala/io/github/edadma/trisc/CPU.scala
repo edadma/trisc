@@ -78,11 +78,11 @@ object Decode:
       List[(String, Map[Char, Int] => Instruction)](
         "111 rrr 00 iiiiiiii" -> ((operands: Map[Char, Int]) => new LDI(operands('r'), operands('i'))), // ldi
         "111 rrr 01 iiiiiiii" -> ((operands: Map[Char, Int]) => new LDI(operands('r'), operands('i').toByte)), // ldis
-        "111 rrr 11 iiiiiiii" -> ((operands: Map[Char, Int]) => new SLI(operands('r'), operands('i'))), // sli
+        "111 rrr 11 iiiiiiii" -> ((operands: Map[Char, Int]) => new SLI(operands('r'), operands('i'))),
         "110 000 000 11 00000" -> ((operands: Map[Char, Int]) => BRK),
         "101 aaa bbb iiiiiii" -> ((operands: Map[Char, Int]) =>
-          new ADDI(operands('a'), operands('b'), operands('i'))
-        ), // addi
+          new ADDI(operands('a'), operands('b'), operands('i').toByte)
+        ),
       ),
     )
 
