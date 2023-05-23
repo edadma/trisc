@@ -82,16 +82,18 @@ object Decode:
         "111 rrr 11 iiiiiiii" -> ((operands: Map[Char, Int]) => new STI(operands('r'), operands('i'))),
         "110 000 000 11 00000" -> ((operands: Map[Char, Int]) => BRK),
         "101 aaa bbb iiiiiii" -> ((operands: Map[Char, Int]) =>
-          new ADDI(operands('a'), operands('b'), operands('i').toByte)
+          new ADDI(operands('a'), operands('b'), ext(operands('i')))
         ),
         "100 aaa bbb iiiiiii" -> ((operands: Map[Char, Int]) =>
-          new BLS(operands('a'), operands('b'), operands('i').toByte)
+          new BLS(operands('a'), operands('b'), ext(operands('i')))
         ),
         "010 aaa bbb iiiiiii" -> ((operands: Map[Char, Int]) =>
-          new BEQ(operands('a'), operands('b'), operands('i').toByte)
+          new BEQ(operands('a'), operands('b'), ext(operands('i')))
         ),
       ),
     )
+
+  def ext(imm7: Int): Int = if (imm7 & 0x40) != 0 then imm7 | 0xffffff80 else imm7
 
   def generate(pattern: String) =
     case class Variable(v: Char, lower: Int, upper: Int, bits: List[Int])

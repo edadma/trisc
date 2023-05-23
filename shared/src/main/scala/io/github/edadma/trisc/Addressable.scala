@@ -54,11 +54,11 @@ class Memory(val name: String, blocks: Addressable*) extends Addressable:
         if addr < prec.base + prec.size then Some(prec) else None
       case Right(idx) => Some(mem(idx))
 
-  private def badAddress: Nothing = sys.error("address not found")
+  private def badAddress(addr: Long): Nothing = sys.error(s"address not found: ${addr.toHexString}")
 
-  def readByte(addr: Long): Int = block(addr) getOrElse badAddress readByte addr
+  def readByte(addr: Long): Int = block(addr) getOrElse badAddress(addr) readByte addr
 
-  def writeByte(addr: Long, data: Int): Unit = block(addr) getOrElse badAddress writeByte (addr, data)
+  def writeByte(addr: Long, data: Int): Unit = block(addr) getOrElse badAddress(addr) writeByte (addr, data)
 
 class RAM(val base: Long, val size: Long) extends Addressable:
   val name = "RAM"
