@@ -81,15 +81,10 @@ object Decode:
         "111 rrr 10 iiiiiiii" -> ((operands: Map[Char, Int]) => new SLI(operands('r'), operands('i'))),
         "111 rrr 11 iiiiiiii" -> ((operands: Map[Char, Int]) => new STI(operands('r'), operands('i'))),
         "110 000 000 11 00000" -> ((operands: Map[Char, Int]) => BRK),
-        "101 aaa bbb iiiiiii" -> ((operands: Map[Char, Int]) =>
-          new ADDI(operands('a'), operands('b'), ext(operands('i')))
-        ),
-        "100 aaa bbb iiiiiii" -> ((operands: Map[Char, Int]) =>
-          new BLS(operands('a'), operands('b'), ext(operands('i')))
-        ),
-        "010 aaa bbb iiiiiii" -> ((operands: Map[Char, Int]) =>
-          new BEQ(operands('a'), operands('b'), ext(operands('i')))
-        ),
+        "101 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new ADDI(args('a'), args('b'), ext(args('i')))),
+        "100 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BLS(args('a'), args('b'), ext(args('i')))),
+        "010 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BEQ(args('a'), args('b'), ext(args('i')))),
+        "00 0 ddd aaa bbb 0001" -> ((args: Map[Char, Int]) => new STB(args('d'), args('a'), args('b'))),
       ),
     )
 
