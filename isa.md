@@ -3,8 +3,8 @@ RRR
 
     00 o ddd aaa bbb oooo
 
-    ldb 
-    stb
+    ldb 00000
+    stb 00001
     ldw
     stw
     ldd

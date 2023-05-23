@@ -10,17 +10,17 @@ trait Addressable:
   def base: Long
   def size: Long
   def readByte(addr: Long): Int
-  def writeByte(addr: Long, data: Int): Unit
+  def writeByte(addr: Long, data: Long): Unit
 
   def readShort(addr: Long): Int = readByte(addr) << 8 | readByte(addr + 1)
 
-  def writeShort(addr: Long, data: Int): Unit =
+  def writeShort(addr: Long, data: Long): Unit =
     writeByte(addr, data >> 8)
     writeByte(addr + 1, data)
 
   def readInt(addr: Long): Int = readShort(addr) << 16 | readShort(addr + 2)
 
-  def writeInt(addr: Long, data: Int): Unit =
+  def writeInt(addr: Long, data: Long): Unit =
     writeShort(addr, data >> 16)
     writeShort(addr + 2, data)
 
@@ -58,7 +58,7 @@ class Memory(val name: String, blocks: Addressable*) extends Addressable:
 
   def readByte(addr: Long): Int = block(addr) getOrElse badAddress(addr) readByte addr
 
-  def writeByte(addr: Long, data: Int): Unit = block(addr) getOrElse badAddress(addr) writeByte (addr, data)
+  def writeByte(addr: Long, data: Long): Unit = block(addr) getOrElse badAddress(addr) writeByte (addr, data)
 
 class RAM(val base: Long, val size: Long) extends Addressable:
   val name = "RAM"
@@ -71,12 +71,12 @@ class RAM(val base: Long, val size: Long) extends Addressable:
     require(base <= addr && addr < base + size, "address out of range")
     seq((addr - base).toInt) & 0xff
 
-  def writeByte(addr: Long, data: Int): Unit =
+  def writeByte(addr: Long, data: Long): Unit =
     require(base <= addr && addr < base + size, "address out of range")
     seq((addr - base).toInt) = data.toByte
 
 trait ReadOnlyAddressable extends Addressable:
-  def writeByte(addr: Long, data: Int): Unit = sys.error(s"$name not writable at address ${addr.toHexString}")
+  def writeByte(addr: Long, data: Long): Unit = sys.error(s"$name not writable at address ${addr.toHexString}")
 
 trait WriteOnlyAddressable extends Addressable:
   def readByte(addr: Long): Int = sys.error(s"$name not readable at address ${addr.toHexString}")
@@ -102,7 +102,7 @@ def mkrom(insts: IndexedSeq[String]): ROM =
 
   new ROM(insts.flatMap(inst => literal(inst).map(_.toByte).toIndexedSeq), 0)
 
-abstract class OutputDevice(addr: Long) extends WriteOnlyAddressable:
-  def emulation(data: Int): Unit
+abstract class ByteOutputDevice(addr: Long) extends WriteOnlyAddressable:
+  def emulation(data: Long): Unit
 
-  def writeByte(addr: Long, data: Int): Unit = emulation(data)
+  def writeByte(addr: Long, data: Long): Unit = emulation(data)

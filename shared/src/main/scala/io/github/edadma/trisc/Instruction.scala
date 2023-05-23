@@ -26,3 +26,6 @@ class BEQ(a: Int, b: Int, imm: Int) extends Instruction:
 
 class STI(r: Int, imm: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.mem.writeByte(cpu.r(r).read, imm)
+
+class STB(d: Int, a: Int, b: Int) extends Instruction:
+  def apply(cpu: CPU): Unit = cpu.mem.writeByte(cpu.r(d).read + cpu.r(a).read, cpu.r(a).read)

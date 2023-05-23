@@ -47,16 +47,16 @@ class CPU(private[trisc] val mem: Addressable):
     run()
 
   class Reg:
-    private var r: Int = 0
+    private var r: Long = 0
 
-    def read: Int = r
+    def read: Long = r
 
-    def write(v: Int): Unit = r = v
+    def write(v: Long): Unit = r = v
 
   class Reg0 extends Reg:
-    override def read: Int = 0
+    override def read: Long = 0
 
-    override def write(v: Int): Unit = {}
+    override def write(v: Long): Unit = {}
 
 object Decode:
   private val instructions = Array.fill[Instruction](0x10000)(IllegalInstruction)
