@@ -14,3 +14,6 @@ class SLI(r: Int, imm: Int) extends Instruction:
 
 object BRK extends Instruction:
   def apply(cpu: CPU): Unit = cpu.running = false
+
+class ADDI(a: Int, b: Int, imm: Int) extends Instruction:
+  def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read + imm)
