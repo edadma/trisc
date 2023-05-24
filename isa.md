@@ -38,7 +38,7 @@ RRI
     110 aaa bbb 0000000     jalr
     110 aaa bbb 00 ooooo    (ooooo != 0) 32 RR instructions
     110 000 000 01 iiiii    trap
-    110 000 000 11 ooooo    32 no operand instructions
+    110 000 000 10 ooooo    32 no operand instructions
       brk   00000
       rts
       rti
@@ -49,7 +49,7 @@ RI
     111 rrr oo iiiiiiii (r != 0)
 
     ldi     00
-    ldis    01
+    ldis    01  // can be done using ADDI
     sli     10
     sti     11
 
