@@ -13,14 +13,15 @@ class RTC(val base: Long) extends ReadOnlyAddressable:
   val size = 6
 
   var lastread: Long = 0
-  var time: LocalDateTime = null
+  var time: LocalDateTime = LocalDateTime.now(ZoneId.systemDefault())
 
   val SECOND = 0
   val MINUTE = 1
   val HOUR = 2
   val DAY = 3
   val MONTH = 4
-  val YEAR = 5
+  val DOW = 5
+  val YEAR = 6
 
   def readByte(addr: Long): Int =
     val now = System.currentTimeMillis
@@ -30,9 +31,10 @@ class RTC(val base: Long) extends ReadOnlyAddressable:
       time = LocalDateTime.now(ZoneId.systemDefault())
 
     addr - base match
-      case SECOND => time.getSecond
-      case MINUTE => time.getMinute
-      case HOUR   => time.getHour
-      case DAY    => time.getDayOfMonth
-      case MONTH  => time.getMonthValue
-      case YEAR   => time.getYear
+      case SECOND => toBCD(time.getSecond)
+      case MINUTE => toBCD(time.getMinute)
+      case HOUR   => toBCD(time.getHour)
+      case DAY    => toBCD(time.getDayOfMonth)
+      case MONTH  => toBCD(time.getMonthValue)
+      case DOW    => time.getDayOfWeek.getValue
+      case YEAR   => toBCD(time.getYear)
