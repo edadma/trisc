@@ -67,12 +67,20 @@ class CPU(mem: Addressable, interrupts: List[CPU => Unit]) extends Addressable:
 
     def read: Long = r
 
+    def readf: Double = java.lang.Double.longBitsToDouble(r)
+
     def write(v: Long): Unit = r = v
+
+    def write(v: Double): Unit = r = java.lang.Double.doubleToLongBits(v)
 
   class Reg0 extends Reg:
     override def read: Long = 0
 
+    override def readf: Double = 0
+
     override def write(v: Long): Unit = {}
+
+    override def write(v: Double): Unit = {}
 
 object Decode:
   private val instructions = Array.fill[Instruction](0x10000)(IllegalInstruction)

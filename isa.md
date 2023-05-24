@@ -15,6 +15,7 @@ RRR
     sub
     mul
     div
+    rem
     and
     or
     xor
@@ -38,17 +39,21 @@ RRI
     110 aaa bbb ooooooo     
     110 000 000 01 iiiii    trap
     110 000 000 11 ooooo    32 no operand instructions
-      brk
+      brk   00000
       rts
       rti
 
 RI
 --
 
-    111 rrr oo iiiiiiii
+    111 rrr oo iiiiiiii (r != 0)
 
     ldi     00
     ldis    01
     sli     10
     sti     11
 
+R
+-
+
+    111 000 rrr ooooooo
