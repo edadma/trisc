@@ -36,7 +36,7 @@ RRI
     100 aaa bbb iiiiiii     bls
     101 aaa bbb iiiiiii     addi
     110 aaa bbb 0000000     jalr
-    110 aaa bbb ooooooo     
+    110 aaa bbb 00 ooooo    (ooooo != 0) 32 RR instructions
     110 000 000 01 iiiii    trap
     110 000 000 11 ooooo    32 no operand instructions
       brk   00000
