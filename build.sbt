@@ -24,6 +24,7 @@ lazy val trisc = crossProject(JSPlatform, JVMPlatform, NativePlatform)
     githubRepository := name.value,
     libraryDependencies += "org.scalatest" %%% "scalatest" % "3.2.15" % "test",
     libraryDependencies ++= Seq(
+      "org.scala-lang.modules" %%% "scala-parser-combinators" % "2.3.0",
     ),
     libraryDependencies ++= Seq(
       "com.github.scopt" %%% "scopt" % "4.1.0",
