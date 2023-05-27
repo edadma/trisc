@@ -45,7 +45,13 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
 
   lazy val literal: P[LiteralExpr] = numericLit ^^ LiteralExpr.apply
 
+  lazy val string: P[StringExpr] = stringLit ^^ StringExpr.apply
+
+  lazy val reference: P[ReferenceExpr] = ident ^^ ReferenceExpr.apply
+
   lazy val expression: P[Expr] = positioned(
     register
-      | literal,
+      | literal
+      | string
+      | reference,
   )
