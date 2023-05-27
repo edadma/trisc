@@ -26,8 +26,15 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |r6
                           |r7
                           |sp
+                          |ldi
+                          |addi
+                          |stb
+                          |sti
+                          |bls
+                          |beq
+                          |brk
                           |""".trim.stripMargin split "\\s+")
-  lexical.delimiters ++= ("+ - * / % ( )" split ' ')
+  lexical.delimiters ++= ("+ - * / % ( ) : ," split ' ')
 
   type P[+T] = PackratParser[T]
 
@@ -55,3 +62,18 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
       | string
       | reference,
   )
+
+  lazy val label: P[LabelLine] = ident ~ ":" ^^ { case l ~ _ => LabelLine(l) }
+
+  lazy val line: P[Line] =
+    label
+//      | label ~ instruction
+      | instruction
+
+  lazy val mnemonics: P[String] =
+    "ldi" | "addi" | "stb" | "sti" | "bls" | "beq" | "brk"
+
+  lazy val instruction: P[InstructionLine] =
+    mnemonics ~ repsep(expression, ",") ^^ { case m ~ es =>
+      InstructionLine(m, es)
+    }

@@ -7,7 +7,7 @@ case class AssemblyAST(lines: Seq[Line])
 trait Line extends Positional
 
 case class LabelLine(name: String) extends Line
-case class InstructionLine(mnemonic: String, operands: Expr) extends Line
+case class InstructionLine(mnemonic: String, operands: Seq[Expr]) extends Line
 case class SegmentLine(name: String) extends Line
 case class EquateLine(name: String, expr: Expr) extends Line
 
