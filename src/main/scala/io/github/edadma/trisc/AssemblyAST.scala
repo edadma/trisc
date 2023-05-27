@@ -2,7 +2,7 @@ package io.github.edadma.trisc
 
 import scala.util.parsing.input.Positional
 
-case class Code(lines: Seq[Line])
+case class AssemblyAST(lines: Seq[Line])
 
 trait Line extends Positional
 
@@ -18,3 +18,5 @@ case class LiteralExpr(n: Number) extends Expr
 case class ReferenceExpr(ref: String) extends Expr
 case class BinaryExpr(left: Expr, op: String, right: Expr) extends Expr
 case class IndirectExpr(expr: Expr) extends Expr
+
+case class BinaryExpression(left: Expr, op: String, right: Expr) extends Expr

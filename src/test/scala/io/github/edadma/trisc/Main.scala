@@ -1,4 +1,8 @@
-package io.github.edadma.cross_template
+package io.github.edadma.trisc
+
+import pprint.pprintln
 
 @main def run(): Unit =
-  println("Hello world")
+  val r = AssemblyParser.parseExpr("r3")
+
+  pprintln(r)
