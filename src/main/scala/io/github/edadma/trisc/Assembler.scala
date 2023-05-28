@@ -66,7 +66,6 @@ class Assembler(stacked: Boolean = false):
     }
 
     pprintln(equates)
-    pprintln(segments)
 
     lines foreach {
       case SegmentLineAST(name) => segment = segments(name)
@@ -86,5 +85,8 @@ class Assembler(stacked: Boolean = false):
             case LiteralExprAST(n: Long) if !n.isValidByte => problem(o2, "immediate must be a byte value")
             case LiteralExprAST(n: Long)                   => n.toInt
 
-        add(3 -> 0xe, 3 -> reg, 2 -> opcode, 8 -> imm)
+        add(3 -> 7, 3 -> reg, 2 -> opcode, 8 -> imm)
+        println(((segment.code(segment.code.length - 2) & 0xff).toHexString, (segment.code.last & 0xff).toHexString))
     }
+
+    pprintln(segments)

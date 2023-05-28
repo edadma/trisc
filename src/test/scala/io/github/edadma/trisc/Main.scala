@@ -6,7 +6,7 @@ import pprint.pprintln
   val r = new Assembler().assemble(
     """
       |stop = 3
-      |stopreg = r1
+      |stopreg = r4
       |
       |loop
       |  ldi stopreg, stop
