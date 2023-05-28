@@ -8,6 +8,7 @@ case class LabelLineAST(name: String) extends LineAST
 case class InstructionLineAST(mnemonic: String, operands: Seq[ExprAST]) extends LineAST
 case class SegmentLineAST(name: String) extends LineAST
 case class EquateLineAST(name: String, expr: ExprAST) extends LineAST
+case class IncludeLineAST(path: String) extends LineAST
 
 trait ExprAST extends Positional
 

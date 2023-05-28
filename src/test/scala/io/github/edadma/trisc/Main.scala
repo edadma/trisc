@@ -5,8 +5,13 @@ import pprint.pprintln
 @main def run(): Unit =
   val r = AssemblyParser.parseAssembly(
     """
+      |include 'io'
+      |
+      |stop = 3
+      |stopreg = r1
+      |
       |loop
-      |  ldi r1, 3
+      |  ldi stopreg, stop
       |  """.stripMargin,
   )
 
