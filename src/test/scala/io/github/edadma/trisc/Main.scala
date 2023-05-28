@@ -7,7 +7,7 @@ import pprint.pprintln
     """
       |segment code
       |segment data
-      |v1:
+      |v1 db 5, 6, 7
       |segment code
       |  ldi r3, 4
       |  """.stripMargin,

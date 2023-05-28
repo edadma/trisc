@@ -24,6 +24,10 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |equate
                           |segment
                           |include
+                          |db
+                          |ds
+                          |di
+                          |dl
                           |r0
                           |r1
                           |r2
@@ -71,12 +75,13 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
 
   lazy val reference: P[ReferenceExprAST] = ident ^^ ReferenceExprAST.apply
 
-  lazy val expression: P[ExprAST] = positioned(
-    register
-      | literal
+  lazy val value: P[ExprAST] = positioned(
+    literal
       | string
       | reference,
   )
+
+  lazy val expression: P[ExprAST] = positioned(register | value)
 
   lazy val label: P[LabelLineAST] = ident <~ opt(":") ^^ LabelLineAST.apply
 
@@ -86,12 +91,20 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
 
   lazy val include: P[IncludeLineAST] = "include" ~> stringLit ^^ IncludeLineAST.apply
 
+  lazy val data: P[DataLineAST] = ("db" | "ds" | "di" | "dl") ~ rep1sep(value, ",") ^^ {
+    case "db" ~ d => DataLineAST(1, d)
+    case "ds" ~ d => DataLineAST(2, d)
+    case "di" ~ d => DataLineAST(4, d)
+    case "dl" ~ d => DataLineAST(8, d)
+  }
+
   lazy val simpleLine: P[LineAST] =
     segment
       | equate
       | label
       | include
       | instruction
+      | data
 
   lazy val line: P[Seq[LineAST]] =
     simpleLine ^^ (Seq(_))

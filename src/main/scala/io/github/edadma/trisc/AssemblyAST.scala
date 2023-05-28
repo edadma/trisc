@@ -9,6 +9,7 @@ case class InstructionLineAST(mnemonic: String, operands: Seq[ExprAST]) extends 
 case class SegmentLineAST(name: String) extends LineAST
 case class EquateLineAST(name: String, expr: ExprAST) extends LineAST
 case class IncludeLineAST(path: String) extends LineAST
+case class DataLineAST(width: Int, data: Seq[ExprAST]) extends LineAST
 
 trait ExprAST extends Positional
 

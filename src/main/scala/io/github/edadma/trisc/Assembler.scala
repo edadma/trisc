@@ -34,7 +34,7 @@ class Assembler(stacked: Boolean = false):
             case None       => problem(e, s"unrecognized equate '$ref'")
             case Some(expr) => fold(expr)
 
-    def add(pieces: (Int, Int)*): Unit =
+    def addInstruction(pieces: (Int, Int)*): Unit =
       var inst = 0
       var shift = 16
 
@@ -62,6 +62,13 @@ class Assembler(stacked: Boolean = false):
         if equates contains name then problem(equate, s"duplicate equate '$name'")
         if segments.exists((_, s) => s.symbols contains name) then problem(equate, s"label '$name' already defined")
         equates(name) = expr
+      case DataLineAST(width, data) =>
+        for d <- data do
+          segment.size +=
+            (d match
+              case StringExprAST(s) => s.length
+              case _                => width
+            )
       case _: InstructionLineAST => segment.size += 2
     }
 
@@ -78,6 +85,15 @@ class Assembler(stacked: Boolean = false):
       case SegmentLineAST(name) => segment = segments(name)
       case LabelLineAST(_)      =>
       case EquateLineAST(_, _)  =>
+      case DataLineAST(width, data) =>
+        for d <- data do
+          width match
+            case 1 =>
+              val value = fold()
+              segment.code += value.toByte
+            case 2 =>
+              segment.code +=
+
       case InstructionLineAST(mnemonic @ "ldi", Seq(o1, o2)) =>
         val opcode =
           mnemonic match
@@ -92,7 +108,7 @@ class Assembler(stacked: Boolean = false):
             case LiteralExprAST(n: Long) if !n.isValidByte => problem(o2, "immediate must be a byte value")
             case LiteralExprAST(n: Long)                   => n.toInt
 
-        add(3 -> 7, 3 -> reg, 2 -> opcode, 8 -> imm)
+        addInstruction(3 -> 7, 3 -> reg, 2 -> opcode, 8 -> imm)
     }
 
     pprintln(segments)
