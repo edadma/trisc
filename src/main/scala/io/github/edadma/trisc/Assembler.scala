@@ -86,7 +86,8 @@ class Assembler(stacked: Boolean = false):
             case LiteralExprAST(n: Long)                   => n.toInt
 
         add(3 -> 7, 3 -> reg, 2 -> opcode, 8 -> imm)
-        println(((segment.code(segment.code.length - 2) & 0xff).toHexString, (segment.code.last & 0xff).toHexString))
     }
 
     pprintln(segments)
+
+    segments foreach ((name, seg) => println((name, seg.code map (b => (b & 0xff).toHexString))))
