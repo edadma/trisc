@@ -34,6 +34,14 @@ class Assembler(stacked: Boolean = false):
             case None       => problem(e, s"unrecognized equate '$ref'")
             case Some(expr) => fold(expr)
 
+    def eval(e: ExprAST): Number =
+      e match
+        case LiteralExprAST(n) => n
+        case ReferenceExprAST(ref) =>
+          equates get ref match
+            case None       => problem(e, s"unrecognized equate '$ref'")
+            case Some(expr) => eval(expr)
+
     def addInstruction(pieces: (Int, Int)*): Unit =
       var inst = 0
       var shift = 16
@@ -89,11 +97,52 @@ class Assembler(stacked: Boolean = false):
         for d <- data do
           width match
             case 1 =>
-              val value = fold()
-              segment.code += value.toByte
+              eval(d) match
+                case _: Double                => problem(d, "expected a byte value, found float")
+                case v: Long if v.isValidByte => segment.code += v.toByte
+                case _                        => problem(d, "expected a byte value, out of range")
             case 2 =>
-              segment.code +=
+              eval(d) match
+                case _: Double => problem(d, "expected a short value, found float")
+                case v: Long if v.isValidShort =>
+                  segment.code += (v >> 8).toByte
+                  segment.code += v.toByte
+                case _ => problem(d, "expected a short value, out of range")
+            case 4 =>
+              eval(d) match
+                case _: Double => problem(d, "expected an int value, found float")
+                case v: Long if v.isValidInt =>
+                  segment.code += (v >> 24).toByte
+                  segment.code += (v >> 16).toByte
+                  segment.code += (v >> 8).toByte
+                  segment.code += v.toByte
+                case _ => problem(d, "expected a short value, out of range")
+            case 8 =>
+              eval(d) match
+                case _: Double => problem(d, "expected an int value, found float")
+                case v: Long =>
+                  segment.code += (v >> 56).toByte
+                  segment.code += (v >> 48).toByte
+                  segment.code += (v >> 40).toByte
+                  segment.code += (v >> 32).toByte
+                  segment.code += (v >> 24).toByte
+                  segment.code += (v >> 16).toByte
+                  segment.code += (v >> 8).toByte
+                  segment.code += v.toByte
+            case 0 =>
+              val v =
+                eval(d) match
+                  case d: Double => java.lang.Double.doubleToLongBits(d)
+                  case l: Long   => java.lang.Double.doubleToLongBits(l)
 
+              segment.code += (v >> 56).toByte
+              segment.code += (v >> 48).toByte
+              segment.code += (v >> 40).toByte
+              segment.code += (v >> 32).toByte
+              segment.code += (v >> 24).toByte
+              segment.code += (v >> 16).toByte
+              segment.code += (v >> 8).toByte
+              segment.code += v.toByte
       case InstructionLineAST(mnemonic @ "ldi", Seq(o1, o2)) =>
         val opcode =
           mnemonic match
