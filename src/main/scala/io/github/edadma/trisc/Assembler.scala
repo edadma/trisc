@@ -150,7 +150,7 @@ class Assembler(stacked: Boolean = false):
         val reg =
           fold(o1) match
             case RegisterExprAST(reg) => reg
-            case _                    => problem(o1, "expected register")
+            case _                    => problem(o1, "expected register as first operand")
         val imm =
           fold(o2) match
             case LiteralExprAST(_: Double)                 => problem(o2, "immediate must be integral")
@@ -158,6 +158,28 @@ class Assembler(stacked: Boolean = false):
             case LiteralExprAST(n: Long)                   => n.toInt
 
         addInstruction(3 -> 7, 3 -> reg, 2 -> opcode, 8 -> imm)
+      case InstructionLineAST(mnemonic @ ("beq" | "blu" | "bls" | "addi"), Seq(o1, o2, o3)) =>
+        val opcode =
+          mnemonic match
+            case "beq"  => 2
+            case "blu"  => 3
+            case "bls"  => 4
+            case "addi" => 5
+        val reg1 =
+          fold(o1) match
+            case RegisterExprAST(reg) => reg
+            case _                    => problem(o1, "expected register as first operand")
+        val reg2 =
+          fold(o2) match
+            case RegisterExprAST(reg) => reg
+            case _                    => problem(o2, "expected register as second operand")
+        val imm =
+          fold(o3) match
+            case LiteralExprAST(_: Double)                        => problem(o2, "immediate must be integral")
+            case LiteralExprAST(n: Long) if -128 <= n && n <= 127 => n.toInt
+            case _: LiteralExprAST                                => problem(o2, "immediate must be a byte value")
+
+        addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm)
     }
 
     pprintln(segments)
