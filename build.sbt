@@ -29,7 +29,7 @@ lazy val trisc = project
     ),
     libraryDependencies ++= Seq(
       "com.github.scopt" %% "scopt" % "4.1.0",
-      "com.lihaoyi" %% "pprint" % "0.8.1" % "test",
+      "com.lihaoyi" %% "pprint" % "0.8.1", /*% "test"*/
     ),
     publishMavenStyle := true,
     Test / publishArtifact := false,

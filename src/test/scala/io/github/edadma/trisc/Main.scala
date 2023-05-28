@@ -3,15 +3,14 @@ package io.github.edadma.trisc
 import pprint.pprintln
 
 @main def run(): Unit =
-  val r = AssemblyParser.parseAssembly(
+  val r = new Assembler().assemble(
     """
-      |include 'io'
-      |
       |stop = 3
       |stopreg = r1
       |
       |loop
       |  ldi stopreg, stop
+      |end
       |  """.stripMargin,
   )
 
