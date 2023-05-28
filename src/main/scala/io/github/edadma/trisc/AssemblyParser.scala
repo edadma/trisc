@@ -8,8 +8,14 @@ import scala.util.parsing.input.CharSequenceReader
 object AssemblyParser extends StandardTokenParsers with PackratParsers with ImplicitConversions:
   override val lexical = new AssemblyLexer
 
-  def parseExpr(input: String): Expr =
+  def parseExpression(input: String): ExprAST =
     phrase(expression)(new lexical.Scanner(new PackratReader(new CharSequenceReader(input)))) match {
+      case Success(ast, _) => ast
+      case e: NoSuccess    => sys.error(s"parse error: $e")
+    }
+
+  def parseAssembly(input: String): Seq[LineAST] =
+    phrase(assembly)(new lexical.Scanner(new PackratReader(new CharSequenceReader(input)))) match {
       case Success(ast, _) => ast
       case e: NoSuccess    => sys.error(s"parse error: $e")
     }
@@ -34,38 +40,40 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |beq
                           |brk
                           |""".trim.stripMargin split "\\s+")
-  lexical.delimiters ++= ("+ - * / % ( ) : ," split ' ')
+  lexical.delimiters ++= ("+ - * / % ( ) : , \n" split ' ')
 
   type P[+T] = PackratParser[T]
 
-//  lazy val assembly: P[Seq[LineAST]] = rep1(declaration)
+  lazy val nl: P[_] = rep("\n")
 
-  lazy val register: P[RegisterExpr] =
-    "r0" ^^^ RegisterExpr(0)
-      | "r1" ^^^ RegisterExpr(1)
-      | "r2" ^^^ RegisterExpr(2)
-      | "r3" ^^^ RegisterExpr(3)
-      | "r4" ^^^ RegisterExpr(4)
-      | "r5" ^^^ RegisterExpr(5)
-      | "r6" ^^^ RegisterExpr(6)
-      | "r7" ^^^ RegisterExpr(7)
+  lazy val assembly: P[Seq[LineAST]] = nl ~> repsep(line, nl) <~ nl
 
-  lazy val literal: P[LiteralExpr] = numericLit ^^ LiteralExpr.apply
+  lazy val register: P[RegisterExprAST] =
+    "r0" ^^^ RegisterExprAST(0)
+      | "r1" ^^^ RegisterExprAST(1)
+      | "r2" ^^^ RegisterExprAST(2)
+      | "r3" ^^^ RegisterExprAST(3)
+      | "r4" ^^^ RegisterExprAST(4)
+      | "r5" ^^^ RegisterExprAST(5)
+      | "r6" ^^^ RegisterExprAST(6)
+      | "r7" ^^^ RegisterExprAST(7)
 
-  lazy val string: P[StringExpr] = stringLit ^^ StringExpr.apply
+  lazy val literal: P[LiteralExprAST] = numericLit ^^ LiteralExprAST.apply
 
-  lazy val reference: P[ReferenceExpr] = ident ^^ ReferenceExpr.apply
+  lazy val string: P[StringExprAST] = stringLit ^^ StringExprAST.apply
 
-  lazy val expression: P[Expr] = positioned(
+  lazy val reference: P[ReferenceExprAST] = ident ^^ ReferenceExprAST.apply
+
+  lazy val expression: P[ExprAST] = positioned(
     register
       | literal
       | string
       | reference,
   )
 
-  lazy val label: P[LabelLine] = ident ~ ":" ^^ { case l ~ _ => LabelLine(l) }
+  lazy val label: P[LabelLineAST] = ident <~ opt(":") ^^ LabelLineAST.apply
 
-  lazy val line: P[Line] =
+  lazy val line: P[LineAST] =
     label
 //      | label ~ instruction
       | instruction
@@ -73,7 +81,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
   lazy val mnemonics: P[String] =
     "ldi" | "addi" | "stb" | "sti" | "bls" | "beq" | "brk"
 
-  lazy val instruction: P[InstructionLine] =
+  lazy val instruction: P[InstructionLineAST] =
     mnemonics ~ repsep(expression, ",") ^^ { case m ~ es =>
-      InstructionLine(m, es)
+      InstructionLineAST(m, es)
     }

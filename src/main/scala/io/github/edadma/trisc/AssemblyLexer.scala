@@ -46,3 +46,5 @@ class AssemblyLexer extends StdLexical:
       | EofCh ^^^ EOF
       | delim
       | failure("illegal character")
+
+  override def whitespaceChar: Parser[Char] = elem("space char", ch => ch <= ' ' && ch != '\n' && ch != EofCh)
