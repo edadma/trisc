@@ -14,7 +14,7 @@ case class Segment(org: Long, chunks: Seq[Chunk])
 class Assembler(stacked: Boolean = false):
   private case class Pass1Segment(
       var size: Long = 0,
-      symbols: mutable.HashMap[String, Long] = new mutable.HashMap,
+      var symbols: mutable.HashMap[String, Long] = new mutable.HashMap,
       code: ArrayBuffer[Byte] = new ArrayBuffer,
   )
 
@@ -66,6 +66,13 @@ class Assembler(stacked: Boolean = false):
     }
 
     pprintln(equates)
+
+    if stacked then
+      var start: Long = segments.values.head.size
+
+      for s <- segments.values.tail do
+        s.symbols = s.symbols map ((name, offset) => name -> (start + offset))
+        start += s.size
 
     lines foreach {
       case SegmentLineAST(name) => segment = segments(name)

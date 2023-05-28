@@ -3,14 +3,13 @@ package io.github.edadma.trisc
 import pprint.pprintln
 
 @main def run(): Unit =
-  val r = new Assembler().assemble(
+  val r = new Assembler(stacked = true).assemble(
     """
-      |stop = 3
-      |stopreg = r4
-      |
-      |loop
-      |  ldi stopreg, stop
-      |end
+      |segment code
+      |segment data
+      |v1:
+      |segment code
+      |  ldi r3, 4
       |  """.stripMargin,
   )
 
