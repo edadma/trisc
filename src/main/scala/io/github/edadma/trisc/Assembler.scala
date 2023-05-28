@@ -2,6 +2,7 @@ package io.github.edadma.trisc
 
 import pprint.pprintln
 
+import scala.annotation.tailrec
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
@@ -22,6 +23,16 @@ class Assembler(stacked: Boolean = false):
     val equates = new mutable.HashMap[String, ExprAST]
     val segments = new mutable.LinkedHashMap[String, Pass1Segment]
     var segment = Pass1Segment()
+
+    @tailrec
+    def fold(e: ExprAST): ExprAST =
+      e match
+        case lit: LiteralExprAST  => lit
+        case reg: RegisterExprAST => reg
+        case ReferenceExprAST(ref) =>
+          equates get ref match
+            case None       => problem(e, s"unrecognized equate '$ref'")
+            case Some(expr) => fold(expr)
 
     def add(pieces: (Int, Int)*): Unit =
       var inst = 0
@@ -44,12 +55,12 @@ class Assembler(stacked: Boolean = false):
             segments(name) = segment
           case Some(s) => segment = s
       case label @ LabelLineAST(name) =>
-        if segments.exists((_, s) => s.symbols contains name) then problem(label.pos, s"duplicate label '$name'")
-        if equates contains name then problem(label.pos, s"equate '$name' already defined")
+        if segments.exists((_, s) => s.symbols contains name) then problem(label, s"duplicate label '$name'")
+        if equates contains name then problem(label, s"equate '$name' already defined")
         segment.symbols(name) = segment.size
       case equate @ EquateLineAST(name, expr) =>
-        if equates contains name then problem(equate.pos, s"duplicate equate '$name'")
-        if segments.exists((_, s) => s.symbols contains name) then problem(equate.pos, s"label '$name' already defined")
+        if equates contains name then problem(equate, s"duplicate equate '$name'")
+        if segments.exists((_, s) => s.symbols contains name) then problem(equate, s"label '$name' already defined")
         equates(name) = expr
       case _: InstructionLineAST => segment.size += 2
     }
@@ -61,9 +72,19 @@ class Assembler(stacked: Boolean = false):
       case SegmentLineAST(name) => segment = segments(name)
       case LabelLineAST(_)      =>
       case EquateLineAST(_, _)  =>
-      case InstructionLineAST(mnemonic @ "ldi", Seq(RegisterExprAST(reg), LiteralExprAST(n))) =>
+      case InstructionLineAST(mnemonic @ "ldi", Seq(o1, o2)) =>
         val opcode =
           mnemonic match
             case "ldi" => 0
-        add(3 -> 0xe, 3 -> reg, 2 -> opcode, 8 -> n)
+        val reg =
+          fold(o1) match
+            case RegisterExprAST(reg) => reg
+            case _                    => problem(o1, "expected register")
+        val imm =
+          fold(o2) match
+            case LiteralExprAST(_: Double)                 => problem(o2, "immediate must be integral")
+            case LiteralExprAST(n: Long) if !n.isValidByte => problem(o2, "immediate must be a byte value")
+            case LiteralExprAST(n: Long)                   => n.toInt
+
+        add(3 -> 0xe, 3 -> reg, 2 -> opcode, 8 -> imm)
     }

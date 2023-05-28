@@ -13,7 +13,7 @@ case class IncludeLineAST(path: String) extends LineAST
 trait ExprAST extends Positional
 
 case class RegisterExprAST(reg: Int) extends ExprAST
-case class LiteralExprAST(n: String) extends ExprAST
+case class LiteralExprAST(n: Number) extends ExprAST
 case class ReferenceExprAST(ref: String) extends ExprAST
 case class StringExprAST(ref: String) extends ExprAST
 case class BinaryExprAST(left: ExprAST, op: String, right: ExprAST) extends ExprAST

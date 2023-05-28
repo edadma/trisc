@@ -6,6 +6,9 @@ import scala.util.parsing.input.CharSequenceReader.EofCh
 class AssemblyLexer extends StdLexical:
   private def digits = rep1(digit) ^^ (_.mkString)
 
+  private def hexdigits =
+    rep1(digit | 'a' | 'A' | 'b' | 'B' | 'c' | 'C' | 'd' | 'D' | 'e' | 'E' | 'f' | 'F') ^^ (_.mkString)
+
   private def exponent = (elem('e') | 'E') ~ opt(elem('+') | '-') ~ digits ^^ {
     case e ~ None ~ exp    => List(e, exp).mkString
     case e ~ Some(s) ~ exp => List(e, s, exp).mkString
@@ -25,6 +28,7 @@ class AssemblyLexer extends StdLexical:
       | digits ~ optExponent ^^ { case intPart ~ exp =>
         NumericLit(s"$intPart$exp")
       }
+      | '0' ~> 'x' ~> hexdigits ^^ NumericLit.apply
       | (elem('\'') | '"') >> { c =>
         rep(
           guard(not(c | elem('\n'))) ~> (('\\' ~> accept(
