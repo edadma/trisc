@@ -34,4 +34,8 @@ class Assembler(stacked: Boolean = false):
       case equate @ EquateLineAST(name, expr) =>
         if equates contains name then problem(equate.pos, s"duplicate equate '$name'")
         if segments.exists((_, s) => s.symbols contains name) then problem(equate.pos, s"label '$name' already defined")
+      case InstructionLineAST(mnemonic @ "ldi", Seq(RegisterExprAST(reg), LiteralExprAST(n))) =>
+        val opcode =
+          mnemonic match
+            case "ldi" => 0
     }
