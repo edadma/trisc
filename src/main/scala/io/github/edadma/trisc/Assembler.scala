@@ -98,20 +98,20 @@ class Assembler(stacked: Boolean = false):
           width match
             case 1 =>
               eval(d) match
-                case _: Double                => problem(d, "expected a byte value, found float")
-                case v: Long if v.isValidByte => segment.code += v.toByte
-                case _                        => problem(d, "expected a byte value, out of range")
+                case _: java.lang.Double => problem(d, "expected a byte value, found float")
+                case v: java.lang.Long if v.asInstanceOf[Long].isValidByte => segment.code += v.toByte
+                case _ => problem(d, "expected a byte value, out of range")
             case 2 =>
               eval(d) match
-                case _: Double => problem(d, "expected a short value, found float")
-                case v: Long if v.isValidShort =>
+                case _: java.lang.Double => problem(d, "expected a short value, found float")
+                case v: java.lang.Long if v.asInstanceOf[Long].isValidShort =>
                   segment.code += (v >> 8).toByte
                   segment.code += v.toByte
                 case _ => problem(d, "expected a short value, out of range")
             case 4 =>
               eval(d) match
-                case _: Double => problem(d, "expected an int value, found float")
-                case v: Long if v.isValidInt =>
+                case _: java.lang.Double => problem(d, "expected an int value, found float")
+                case v: java.lang.Long if v.asInstanceOf[Long].isValidInt =>
                   segment.code += (v >> 24).toByte
                   segment.code += (v >> 16).toByte
                   segment.code += (v >> 8).toByte
