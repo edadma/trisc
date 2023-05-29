@@ -75,11 +75,11 @@ class Assembler(stacked: Boolean = false):
     pprintln(equates)
 
     if stacked then
-      var start: Long = segments.values.head.size
+      var base: Long = segments.values.head.size
 
       for s <- segments.values.tail do
-        s.symbols = s.symbols map ((name, offset) => name -> (start + offset))
-        start += s.size
+        s.symbols = s.symbols map ((name, offset) => name -> (base + offset))
+        base += s.size
 
     lines foreach {
       case SegmentLineAST(name) => segment = segments(name)
