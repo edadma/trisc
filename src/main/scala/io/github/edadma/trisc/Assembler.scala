@@ -185,6 +185,31 @@ class Assembler(stacked: Boolean = false):
             case _: LongExprAST                          => problem(o2, "immediate must be a byte value")
 
         addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm)
+      case InstructionLineAST(mnemonic @ ("ldb" | "stb"), Seq(o1, o2, o3)) =>
+        val opcode =
+          mnemonic match
+            case "ldb" => 0
+            case "stb" => 1
+        val reg1 =
+          fold(o1) match
+            case RegisterExprAST(reg) => reg
+            case _                    => problem(o1, "expected register as first operand")
+        val reg2 =
+          fold(o2) match
+            case RegisterExprAST(reg) => reg
+            case _                    => problem(o2, "expected register as second operand")
+        val reg3 =
+          fold(o3) match
+            case RegisterExprAST(reg) => reg
+            case _                    => problem(o1, "expected register as third operand")
+
+        addInstruction(3 -> 0, 3 -> reg1, 3 -> reg2, 3 -> reg3, 4 -> opcode)
+      case InstructionLineAST(mnemonic @ ("brk"), Nil) =>
+        val opcode =
+          mnemonic match
+            case "brk" => 0
+
+        addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 2, 5 -> opcode)
     }
 
     pprintln(segments)
