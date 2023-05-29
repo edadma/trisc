@@ -49,7 +49,7 @@ RI
     111 rrr oo iiiiiiii (r != 0)
 
     ldi     00
-    ldis    01  // can be done using ADDI
+    ---     01  // can be done using ADDI
     sli     10
     sti     11
 

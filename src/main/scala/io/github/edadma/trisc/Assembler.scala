@@ -147,10 +147,11 @@ class Assembler(stacked: Boolean = false):
                   segment.code += (v >> 16).toByte
                   segment.code += (v >> 8).toByte
                   segment.code += v.toByte
-      case InstructionLineAST(mnemonic @ "ldi", Seq(o1, o2)) =>
+      case InstructionLineAST(mnemonic @ ("ldi" | "sti"), Seq(o1, o2)) =>
         val opcode =
           mnemonic match
             case "ldi" => 0
+            case "sti" => 3
         val reg =
           fold(o1) match
             case RegisterExprAST(reg) => reg
