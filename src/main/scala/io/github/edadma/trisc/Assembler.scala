@@ -66,7 +66,7 @@ class Assembler(stacked: Boolean = false):
         for d <- data do
           segment.size +=
             (d match
-              case StringExprAST(s) => s.length
+              case StringExprAST(s) => s.getBytes(scala.io.Codec.UTF8.charSet).length
               case _                => width
             )
       case _: InstructionLineAST => segment.size += 2
