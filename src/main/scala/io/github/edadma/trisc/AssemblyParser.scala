@@ -64,13 +64,11 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
       | "r6" ^^^ RegisterExprAST(6)
       | "r7" ^^^ RegisterExprAST(7)
 
-  lazy val number: P[Number] = numericLit ^^ { n =>
-    if n.startsWith("0x") then java.lang.Long.parseLong(n.drop(2), 16).asInstanceOf[Number]
-    else if n.contains('.') || n.contains('e') || n.contains('E') then n.toDouble.asInstanceOf[Number]
-    else n.toLong.asInstanceOf[Number]
+  lazy val literal: P[ExprAST] = numericLit ^^ { n =>
+    if n.startsWith("0x") then LongExprAST(java.lang.Long.parseLong(n.drop(2), 16))
+    else if n.contains('.') || n.contains('e') || n.contains('E') then DoubleExprAST(n.toDouble)
+    else LongExprAST(n.toLong)
   }
-
-  lazy val literal: P[LiteralExprAST] = number ^^ LiteralExprAST.apply
 
   lazy val string: P[StringExprAST] = stringLit ^^ StringExprAST.apply
 
