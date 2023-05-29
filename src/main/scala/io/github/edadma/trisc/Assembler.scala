@@ -29,7 +29,14 @@ class Assembler(stacked: Boolean = false):
       e match
         case lit: (LongExprAST | DoubleExprAST) => lit
         case reg: RegisterExprAST               => reg
-        // string / immediate
+        case StringExprAST(s) if immediate =>
+          if s.isEmpty || s.length > 1 then problem(e, "expected a single character")
+
+          val v = LongExprAST(s.codePointAt(0))
+
+          v.setPos(e.pos)
+          v
+        case s: StringExprAST => s
         case ReferenceExprAST(ref) =>
           equates get ref match
             case None =>
@@ -158,10 +165,10 @@ class Assembler(stacked: Boolean = false):
             case RegisterExprAST(reg) => reg
             case _                    => problem(o1, "expected register as first operand")
         val imm =
-          fold(o2) match
+          fold(o2, immediate = true) match
             case _: DoubleExprAST                        => problem(o2, "immediate must be integral")
             case LongExprAST(n) if -128 <= n && n <= 127 => n.toInt
-            case _: LongExprAST                          => problem(o2, "immediate must be a byte value")
+            case _: LongExprAST                          => problem(o2, "immediate must be a signed byte value")
 
         addInstruction(3 -> 7, 3 -> reg, 2 -> opcode, 8 -> imm)
       case InstructionLineAST(mnemonic @ ("beq" | "blu" | "bls" | "addi"), Seq(o1, o2, o3)) =>
@@ -181,9 +188,9 @@ class Assembler(stacked: Boolean = false):
             case _                    => problem(o2, "expected register as second operand")
         val imm =
           fold(o3, immediate = true) match
-            case _: DoubleExprAST                        => problem(o2, "immediate must be integral")
-            case LongExprAST(n) if -128 <= n && n <= 127 => n.toInt
-            case _: LongExprAST                          => problem(o2, "immediate must be a byte value")
+            case _: DoubleExprAST                      => problem(o2, "immediate must be integral")
+            case LongExprAST(n) if -64 <= n && n <= 63 => n.toInt
+            case _: LongExprAST                        => problem(o2, "immediate must be a signed 7-bit value")
 
         addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm)
       case InstructionLineAST(mnemonic @ ("ldb" | "stb"), Seq(o1, o2, o3)) =>

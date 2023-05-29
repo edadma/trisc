@@ -17,5 +17,5 @@ case class RegisterExprAST(reg: Int) extends ExprAST
 case class LongExprAST(n: Long) extends ExprAST
 case class DoubleExprAST(n: Double) extends ExprAST
 case class ReferenceExprAST(ref: String) extends ExprAST
-case class StringExprAST(ref: String) extends ExprAST
+case class StringExprAST(s: String) extends ExprAST
 case class BinaryExprAST(left: ExprAST, op: String, right: ExprAST) extends ExprAST
