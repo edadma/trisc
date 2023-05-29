@@ -6,12 +6,11 @@ import pprint.pprintln
   val r = new Assembler(stacked = true).assemble(
     """
       |segment code
-      |segment data
-      |v1 db 5, 6, 7
-      |segment code
-      |loop
+      |dd reset
+      |
+      |reset
       |  ldi r3, 4
-      |  beq r0, r0, loop
+      |  beq r0, r0, reset
       |  """.stripMargin,
   )
 

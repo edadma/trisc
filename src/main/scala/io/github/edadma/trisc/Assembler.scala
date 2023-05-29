@@ -25,7 +25,7 @@ class Assembler(stacked: Boolean = false):
     var segment = Pass1Segment()
 
     @tailrec
-    def fold(e: ExprAST): ExprAST =
+    def fold(e: ExprAST, absolute: Boolean = false): ExprAST =
       e match
         case lit: (LongExprAST | DoubleExprAST) => lit
         case reg: RegisterExprAST               => reg
@@ -33,8 +33,10 @@ class Assembler(stacked: Boolean = false):
           equates get ref match
             case None =>
               segments.values.find(s => s.symbols contains ref) match
-                case None    => problem(e, s"unrecognized equate '$ref'")
-                case Some(s) => LongExprAST(s.symbols(ref) - (segment.code.length + 2))
+                case None => problem(e, s"unrecognized equate or label '$ref'")
+                case Some(s) =>
+                  println((ref, s.symbols(ref)))
+                  LongExprAST(if absolute then s.symbols(ref) else s.symbols(ref) - (segment.code.length + 2))
             case Some(expr) => fold(expr)
 
     def addInstruction(pieces: (Int, Int)*): Unit =
@@ -94,24 +96,24 @@ class Assembler(stacked: Boolean = false):
       case DataLineAST(width, Nil) => segment.code ++= (if width == 0 then Seq.fill(8)(0) else Seq.fill(width)(0))
       case DataLineAST(width, data) =>
         for d <- data do
-          d match
+          fold(d, true) match
             case StringExprAST(s) => segment.code ++= s.getBytes(scala.io.Codec.UTF8.charSet)
-            case _ =>
+            case value =>
               width match
                 case 1 =>
-                  fold(d) match
+                  value match
                     case _: DoubleExprAST                => problem(d, "expected an int value, found float")
                     case LongExprAST(v) if v.isValidByte => segment.code += v.toByte
                     case _                               => problem(d, "expected a byte value, out of range")
                 case 2 =>
-                  fold(d) match
+                  value match
                     case _: DoubleExprAST => problem(d, "expected an int value, found float")
                     case LongExprAST(v) if v.isValidShort =>
                       segment.code += (v >> 8).toByte
                       segment.code += v.toByte
                     case _ => problem(d, "expected a short value, out of range")
                 case 4 =>
-                  fold(d) match
+                  value match
                     case _: DoubleExprAST => problem(d, "expected an int value, found float")
                     case LongExprAST(v) if v.isValidInt =>
                       segment.code += (v >> 24).toByte
@@ -120,7 +122,7 @@ class Assembler(stacked: Boolean = false):
                       segment.code += v.toByte
                     case _ => problem(d, "expected a short value, out of range")
                 case 8 =>
-                  fold(d) match
+                  value match
                     case _: DoubleExprAST => problem(d, "expected an int value, found float")
                     case LongExprAST(v) =>
                       segment.code += (v >> 56).toByte
@@ -133,7 +135,7 @@ class Assembler(stacked: Boolean = false):
                       segment.code += v.toByte
                 case 0 =>
                   val v =
-                    fold(d) match
+                    value match
                       case DoubleExprAST(d) => java.lang.Double.doubleToLongBits(d)
                       case LongExprAST(l)   => l
 
