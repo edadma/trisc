@@ -9,7 +9,9 @@ import pprint.pprintln
       |segment data
       |v1 db 5, 6, 7
       |segment code
+      |loop
       |  ldi r3, 4
+      |  beq r0, r0, loop
       |  """.stripMargin,
   )
 

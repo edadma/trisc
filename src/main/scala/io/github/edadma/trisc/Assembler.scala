@@ -31,7 +31,10 @@ class Assembler(stacked: Boolean = false):
         case reg: RegisterExprAST               => reg
         case ReferenceExprAST(ref) =>
           equates get ref match
-            case None       => problem(e, s"unrecognized equate '$ref'")
+            case None =>
+              segments.values.find(s => s.symbols contains ref) match
+                case None    => problem(e, s"unrecognized equate '$ref'")
+                case Some(s) => LongExprAST(s.symbols(ref) - (segment.code.length + 2))
             case Some(expr) => fold(expr)
 
     def addInstruction(pieces: (Int, Int)*): Unit =
@@ -39,8 +42,10 @@ class Assembler(stacked: Boolean = false):
       var shift = 16
 
       for (w, v) <- pieces do
+        val mask = (1 << w) - 1
+
         shift -= w
-        inst |= v << shift
+        inst |= (v & mask) << shift
 
       segment.code += (inst >> 8).toByte
       segment.code += inst.toByte
