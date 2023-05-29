@@ -3,26 +3,26 @@ package io.github.edadma.trisc
 import pprint.pprintln
 
 import scala.annotation.tailrec
-import scala.collection.mutable
+import scala.collection.{immutable, mutable}
 import scala.collection.mutable.ArrayBuffer
 
 trait Chunk
 case class DataChunk(data: Seq[Byte]) extends Chunk
 
-case class Segment(org: Long, chunks: Seq[Chunk])
+case class Segment(name: String, chunks: Seq[Chunk])
 
 class Assembler(stacked: Boolean = false):
-  private case class Pass1Segment(
+  private case class AssemblySegment(
       var size: Long = 0,
       var symbols: mutable.HashMap[String, Long] = new mutable.HashMap,
       code: ArrayBuffer[Byte] = new ArrayBuffer,
   )
 
-  def assemble(src: String): Unit /*Seq[Segment]*/ =
+  def assemble(src: String): Seq[Segment] =
     val lines = AssemblyParser.parseAssembly(src)
     val equates = new mutable.HashMap[String, ExprAST]
-    val segments = new mutable.LinkedHashMap[String, Pass1Segment]
-    var segment = Pass1Segment()
+    val segments = new mutable.LinkedHashMap[String, AssemblySegment]
+    var segment = AssemblySegment()
 
     @tailrec
     def fold(e: ExprAST, absolute: Boolean = false, immediate: Boolean = false): ExprAST =
@@ -66,7 +66,7 @@ class Assembler(stacked: Boolean = false):
       case SegmentLineAST(name) =>
         segments get name match
           case None =>
-            segment = Pass1Segment()
+            segment = AssemblySegment()
             segments(name) = segment
           case Some(s) => segment = s
       case label @ LabelLineAST(name) =>
@@ -88,7 +88,7 @@ class Assembler(stacked: Boolean = false):
       case _: InstructionLineAST => segment.size += 2
     }
 
-    pprintln(equates)
+//    pprintln(equates)
 
     if stacked then
       var base = segments.values.head.size
@@ -220,6 +220,7 @@ class Assembler(stacked: Boolean = false):
         addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 2, 5 -> opcode)
     }
 
-    pprintln(segments)
+//    pprintln(segments)
+//    segments foreach ((name, seg) => println((name, seg.code map (b => (b & 0xff).toHexString))))
 
-    segments foreach ((name, seg) => println((name, seg.code map (b => (b & 0xff).toHexString))))
+    segments.toSeq map ((n, s) => Segment(n, Seq(DataChunk(s.code to immutable.ArraySeq))))
