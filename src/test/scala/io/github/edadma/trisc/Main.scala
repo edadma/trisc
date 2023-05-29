@@ -5,11 +5,17 @@ import pprint.pprintln
 @main def run(): Unit =
   val r = new Assembler(stacked = true).assemble(
     """
+      |STDOUT = 0xF0
+      |
       |segment code
       |dd reset
       |
       |reset
-      |  ldi r3, 4
+      |  ldi r1, 1          // start counter at 1
+      |  ldi r3, STDOUT     // r3 contains stdout device address
+      |  addi r4, r1, '0'   // convert counter to ASCII character
+      |  stb r3, r0, r4 // output counter character
+      |  sti r3, '\n' // output linefeed character
       |  beq r0, r0, reset
       |  """.stripMargin,
   )
