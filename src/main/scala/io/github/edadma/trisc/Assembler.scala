@@ -87,32 +87,49 @@ class Assembler(stacked: Boolean = false):
       case EquateLineAST(_, _)  =>
       case DataLineAST(width, data) =>
         for d <- data do
-          width match
-            case 1 =>
-              fold(d) match
-                case _: DoubleExprAST                => problem(d, "expected an int value, found float")
-                case LongExprAST(v) if v.isValidByte => segment.code += v.toByte
-                case _                               => problem(d, "expected a byte value, out of range")
-            case 2 =>
-              fold(d) match
-                case _: DoubleExprAST => problem(d, "expected an int value, found float")
-                case LongExprAST(v) if v.isValidShort =>
-                  segment.code += (v >> 8).toByte
-                  segment.code += v.toByte
-                case _ => problem(d, "expected a short value, out of range")
-            case 4 =>
-              fold(d) match
-                case _: DoubleExprAST => problem(d, "expected an int value, found float")
-                case LongExprAST(v) if v.isValidInt =>
-                  segment.code += (v >> 24).toByte
-                  segment.code += (v >> 16).toByte
-                  segment.code += (v >> 8).toByte
-                  segment.code += v.toByte
-                case _ => problem(d, "expected a short value, out of range")
-            case 8 =>
-              fold(d) match
-                case _: DoubleExprAST => problem(d, "expected an int value, found float")
-                case LongExprAST(v) =>
+          d match
+            case StringExprAST(s) => segment.code ++= s.getBytes(scala.io.Codec.UTF8.charSet)
+            case _ =>
+              width match
+                case 1 =>
+                  fold(d) match
+                    case _: DoubleExprAST                => problem(d, "expected an int value, found float")
+                    case LongExprAST(v) if v.isValidByte => segment.code += v.toByte
+                    case _                               => problem(d, "expected a byte value, out of range")
+                case 2 =>
+                  fold(d) match
+                    case _: DoubleExprAST => problem(d, "expected an int value, found float")
+                    case LongExprAST(v) if v.isValidShort =>
+                      segment.code += (v >> 8).toByte
+                      segment.code += v.toByte
+                    case _ => problem(d, "expected a short value, out of range")
+                case 4 =>
+                  fold(d) match
+                    case _: DoubleExprAST => problem(d, "expected an int value, found float")
+                    case LongExprAST(v) if v.isValidInt =>
+                      segment.code += (v >> 24).toByte
+                      segment.code += (v >> 16).toByte
+                      segment.code += (v >> 8).toByte
+                      segment.code += v.toByte
+                    case _ => problem(d, "expected a short value, out of range")
+                case 8 =>
+                  fold(d) match
+                    case _: DoubleExprAST => problem(d, "expected an int value, found float")
+                    case LongExprAST(v) =>
+                      segment.code += (v >> 56).toByte
+                      segment.code += (v >> 48).toByte
+                      segment.code += (v >> 40).toByte
+                      segment.code += (v >> 32).toByte
+                      segment.code += (v >> 24).toByte
+                      segment.code += (v >> 16).toByte
+                      segment.code += (v >> 8).toByte
+                      segment.code += v.toByte
+                case 0 =>
+                  val v =
+                    fold(d) match
+                      case DoubleExprAST(d) => java.lang.Double.doubleToLongBits(d)
+                      case LongExprAST(l)   => java.lang.Double.doubleToLongBits(l)
+
                   segment.code += (v >> 56).toByte
                   segment.code += (v >> 48).toByte
                   segment.code += (v >> 40).toByte
@@ -121,20 +138,6 @@ class Assembler(stacked: Boolean = false):
                   segment.code += (v >> 16).toByte
                   segment.code += (v >> 8).toByte
                   segment.code += v.toByte
-            case 0 =>
-              val v =
-                fold(d) match
-                  case DoubleExprAST(d) => java.lang.Double.doubleToLongBits(d)
-                  case LongExprAST(l)   => java.lang.Double.doubleToLongBits(l)
-
-              segment.code += (v >> 56).toByte
-              segment.code += (v >> 48).toByte
-              segment.code += (v >> 40).toByte
-              segment.code += (v >> 32).toByte
-              segment.code += (v >> 24).toByte
-              segment.code += (v >> 16).toByte
-              segment.code += (v >> 8).toByte
-              segment.code += v.toByte
       case InstructionLineAST(mnemonic @ "ldi", Seq(o1, o2)) =>
         val opcode =
           mnemonic match
