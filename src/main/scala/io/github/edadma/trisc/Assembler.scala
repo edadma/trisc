@@ -75,7 +75,7 @@ class Assembler(stacked: Boolean = false):
     pprintln(equates)
 
     if stacked then
-      var base: Long = segments.values.head.size
+      var base = segments.values.head.size
 
       for s <- segments.values.tail do
         s.symbols = s.symbols map ((name, offset) => name -> (base + offset))
