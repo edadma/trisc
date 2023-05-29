@@ -67,12 +67,13 @@ class Assembler(stacked: Boolean = false):
         if equates contains name then problem(equate, s"duplicate equate '$name'")
         if segments.exists((_, s) => s.symbols contains name) then problem(equate, s"label '$name' already defined")
         equates(name) = expr
+      case DataLineAST(width, Nil) => segment.size += (if width == 0 then 8 else width)
       case DataLineAST(width, data) =>
         for d <- data do
           segment.size +=
             (d match
               case StringExprAST(s) => s.getBytes(scala.io.Codec.UTF8.charSet).length
-              case _                => width
+              case _                => if width == 0 then 8 else width
             )
       case _: InstructionLineAST => segment.size += 2
     }
@@ -87,9 +88,10 @@ class Assembler(stacked: Boolean = false):
         base += s.size
 
     lines foreach {
-      case SegmentLineAST(name) => segment = segments(name)
-      case LabelLineAST(_)      =>
-      case EquateLineAST(_, _)  =>
+      case SegmentLineAST(name)    => segment = segments(name)
+      case LabelLineAST(_)         =>
+      case EquateLineAST(_, _)     =>
+      case DataLineAST(width, Nil) => segment.code ++= (if width == 0 then Seq.fill(8)(0) else Seq.fill(width)(0))
       case DataLineAST(width, data) =>
         for d <- data do
           d match
@@ -133,7 +135,7 @@ class Assembler(stacked: Boolean = false):
                   val v =
                     fold(d) match
                       case DoubleExprAST(d) => java.lang.Double.doubleToLongBits(d)
-                      case LongExprAST(l)   => java.lang.Double.doubleToLongBits(l)
+                      case LongExprAST(l)   => l
 
                   segment.code += (v >> 56).toByte
                   segment.code += (v >> 48).toByte
