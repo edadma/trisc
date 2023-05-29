@@ -25,10 +25,11 @@ class Assembler(stacked: Boolean = false):
     var segment = Pass1Segment()
 
     @tailrec
-    def fold(e: ExprAST, absolute: Boolean = false): ExprAST =
+    def fold(e: ExprAST, absolute: Boolean = false, immediate: Boolean = false): ExprAST =
       e match
         case lit: (LongExprAST | DoubleExprAST) => lit
         case reg: RegisterExprAST               => reg
+        // string / immediate
         case ReferenceExprAST(ref) =>
           equates get ref match
             case None =>
@@ -179,7 +180,7 @@ class Assembler(stacked: Boolean = false):
             case RegisterExprAST(reg) => reg
             case _                    => problem(o2, "expected register as second operand")
         val imm =
-          fold(o3) match
+          fold(o3, immediate = true) match
             case _: DoubleExprAST                        => problem(o2, "immediate must be integral")
             case LongExprAST(n) if -128 <= n && n <= 127 => n.toInt
             case _: LongExprAST                          => problem(o2, "immediate must be a byte value")
