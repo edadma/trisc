@@ -3,7 +3,7 @@ package io.github.edadma.trisc
 import pprint.pprintln
 
 @main def run(): Unit =
-  val r = new Assembler(stacked = true).assemble(
+  val segs = new Assembler(stacked = true).assemble(
     """
       |STDOUT = 0xF0
       |
@@ -25,7 +25,13 @@ import pprint.pprintln
       |  """.stripMargin,
   )
 
-  pprintln(r)
+  pprintln(segs)
+
+  val mem = new Memory(
+    "Memory",
+    new ROM(segs map (s => s.chunks.map(c => )), 0),
+    new Stdout(0xf0),
+  )
 
 //  val mem = new Memory(
 //    "Memory",
@@ -49,8 +55,8 @@ import pprint.pprintln
 //  )
 //
 //  //  for i <- 0L until rom.size do println(rom.readByte(i).toHexString)
-//
-//  val cpu = new CPU(mem, Nil) // { trace = true }
-//
-//  cpu.reset()
-//  cpu.run()
+
+  val cpu = new CPU(mem, Nil) // { trace = true }
+
+  cpu.reset()
+  cpu.run()
