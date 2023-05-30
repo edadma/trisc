@@ -17,7 +17,7 @@ import pprint.pprintln
       |  addi r4, r1, '0'   // convert counter to ASCII character
       |  stb r3, r0, r4     // output counter character
       |  sti r3, '\n'       // output linefeed character
-      |  addi  r1, r1, 1    // increment counter
+      |  addi r1, r1, 1     // increment counter
       |  ldi r2, 5          // we so that we can compare counter to 5
       |  bls r2, r1, end    // is 5 < counter? if so, jump to end program
       |  beq r0, r0, loop   // jump back to loop start for next iteration
