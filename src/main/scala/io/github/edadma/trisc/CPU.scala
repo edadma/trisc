@@ -8,7 +8,8 @@ import scala.collection.mutable.ListBuffer
 
 enum Status(bit: Int):
   case Interrupts extends Status(1)
-  case Supervisor extends Status(2)
+  case Mode extends Status(2)
+  case C extends Status(4)
 
 class CPU(mem: Addressable, interrupts: List[CPU => Unit]) extends Addressable:
   val name: String = mem.name
@@ -48,7 +49,8 @@ class CPU(mem: Addressable, interrupts: List[CPU => Unit]) extends Addressable:
     running = true
     vector = 0
     set(Status.Interrupts, false)
-    set(Status.Supervisor, true)
+    set(Status.Mode, true)
+    set(Status.C, false)
 
   def execute(): Unit =
     if vector >= 0 then
