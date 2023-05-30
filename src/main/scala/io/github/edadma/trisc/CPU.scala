@@ -3,6 +3,13 @@ package io.github.edadma.trisc
 import scala.collection.immutable
 import scala.collection.mutable.ListBuffer
 
+//    for i <- 1 to 7 do cpu.sr(i) = cpu.r(i).read
+//    cpu.spc = cpu.pc
+
+enum Status(bit: Int):
+  case Interrupts extends Status(1)
+  case Supervisor extends Status(2)
+
 class CPU(mem: Addressable, interrupts: List[CPU => Unit]) extends Addressable:
   val name: String = mem.name
   val base: Long = mem.base
@@ -25,17 +32,23 @@ class CPU(mem: Addressable, interrupts: List[CPU => Unit]) extends Addressable:
   var sr = new Array[Long](7)
   var pc: Long = 0
   var spc: Long = 0
-  var status: Int = 0
+  var psr: Int = 0
   var running: Boolean = false
   var vector: Int = -1
   var inst: Int = 0
   var trace: Boolean = false
+
+  def test(bit: Status): Boolean = (psr & bit.ordinal) != 0
+
+  def set(bit: Status, set: Boolean): Unit = if set then psr |= bit.ordinal else psr &= ~bit.ordinal
 
   def reset(): Unit =
     for i <- 1 until 8 do r(i) write 0
 
     running = true
     vector = 0
+    set(Status.Interrupts, false)
+    set(Status.Supervisor, true)
 
   def execute(): Unit =
     if vector >= 0 then

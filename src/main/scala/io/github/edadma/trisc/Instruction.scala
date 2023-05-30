@@ -17,12 +17,9 @@ object BRK extends Instruction:
 
 object RTE extends Instruction:
   def apply(cpu: CPU): Unit =
-    for i <- 1 to 7 do cpu.r(i).write cpu.sr(i)
-    cpu.pc = cpu.scp
-    // enable interrupts
-
-//    for i <- 1 to 7 do cpu.sr(i) = cpu.r(i).read
-//    cpu.spc = cpu.cp
+    for i <- 1 to 7 do cpu.r(i) write cpu.sr(i)
+    cpu.pc = cpu.spc
+    cpu.set(Status.Interrupts, false)
 
 class ADDI(a: Int, b: Int, imm: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read + imm)
