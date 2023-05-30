@@ -43,7 +43,6 @@ class Assembler(stacked: Boolean = false):
               segments.values.find(s => s.symbols contains ref) match
                 case None => problem(e, s"unrecognized equate or label '$ref'")
                 case Some(s) =>
-                  println((ref, s.symbols(ref)))
                   LongExprAST(if absolute then s.symbols(ref) else s.symbols(ref) - (segment.code.length + 2))
             case Some(expr) => fold(expr)
 

@@ -21,6 +21,7 @@ class AssemblyLexer extends StdLexical:
 
   override def token: Parser[Token] =
     identChar ~ rep(identChar | digit) ^^ { case first ~ rest => processIdent(first :: rest mkString "") }
+      | '0' ~> 'x' ~> hexdigits ^^ (n => NumericLit("0x" ++ n))
       | opt(digits) ~ '.' ~ digits ~ optExponent ^^ {
         case Some(intPart) ~ _ ~ fracPart ~ exp => NumericLit(s"$intPart.$fracPart$exp")
         case None ~ _ ~ fracPart ~ exp          => NumericLit(s".$fracPart$exp")
@@ -28,7 +29,6 @@ class AssemblyLexer extends StdLexical:
       | digits ~ optExponent ^^ { case intPart ~ exp =>
         NumericLit(s"$intPart$exp")
       }
-      | '0' ~> 'x' ~> hexdigits ^^ NumericLit.apply
       | (elem('\'') | '"') >> { c =>
         rep(
           guard(not(c | elem('\n'))) ~> (('\\' ~> accept(

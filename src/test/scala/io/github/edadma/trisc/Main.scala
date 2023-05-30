@@ -5,7 +5,7 @@ import pprint.pprintln
 @main def run(): Unit =
   val segs = new Assembler(stacked = true).assemble(
     """
-      |STDOUT = 0xF0
+      |STDOUT = 0x78
       |
       |segment code
       |dd reset
@@ -25,12 +25,14 @@ import pprint.pprintln
       |  """.stripMargin,
   )
 
-  pprintln(segs)
+//  pprintln(segs)
 
+  val chunks = segs flatMap (_.chunks)
+  val code = chunks flatMap { case DataChunk(data) => data } to IndexedSeq
   val mem = new Memory(
     "Memory",
-    new ROM(segs map (s => s.chunks.map(c => )), 0),
-    new Stdout(0xf0),
+    new ROM(code, 0),
+    new Stdout(0x78),
   )
 
 //  val mem = new Memory(
@@ -48,7 +50,7 @@ import pprint.pprintln
 //        "111 010 01 0000 0101", // LDI r2, 5 // 5 -> r2 so that we can compare counter to 5
 //        "100 010 001 000 0010", // BLS r2, r1, 2 // is 5 < counter? if so, jump to end program
 //        "010 000 000 111 0010", // BEQ r0, r0, 0x72 // jump back to loop start
-//        "110 000 000 11 00000", // BRK // end program
+//        "110 000 000 10 00000", // BRK // end program
 //      ),
 //    ),
 //    new Stdout(0xf0),
