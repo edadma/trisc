@@ -22,7 +22,9 @@ class CPU(mem: Addressable, interrupts: List[CPU => Unit]) extends Addressable:
     new Reg,
     new Reg,
   )
-  var pc = 0
+  var sr = new Array[Long](7)
+  var pc: Long = 0
+  var spc: Long = 0
   var status: Int = 0
   var running: Boolean = false
   var vector: Int = -1
@@ -105,6 +107,7 @@ object Decode:
         "111 rrr 10 iiiiiiii" -> ((operands: Map[Char, Int]) => new SLI(operands('r'), operands('i'))),
         "111 rrr 11 iiiiiiii" -> ((operands: Map[Char, Int]) => new STI(operands('r'), operands('i'))),
         "110 000 000 10 00000" -> ((operands: Map[Char, Int]) => BRK),
+        "110 000 000 10 00010" -> ((operands: Map[Char, Int]) => RTE),
         "101 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new ADDI(args('a'), args('b'), ext(args('i')))),
         "100 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BLS(args('a'), args('b'), ext(args('i')))),
         "010 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BEQ(args('a'), args('b'), ext(args('i')))),

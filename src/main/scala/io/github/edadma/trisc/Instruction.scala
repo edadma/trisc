@@ -15,6 +15,15 @@ class SLI(r: Int, imm: Int) extends Instruction:
 object BRK extends Instruction:
   def apply(cpu: CPU): Unit = cpu.running = false
 
+object RTE extends Instruction:
+  def apply(cpu: CPU): Unit =
+    for i <- 1 to 7 do cpu.r(i).write cpu.sr(i)
+    cpu.pc = cpu.scp
+    // enable interrupts
+
+//    for i <- 1 to 7 do cpu.sr(i) = cpu.r(i).read
+//    cpu.spc = cpu.cp
+
 class ADDI(a: Int, b: Int, imm: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read + imm)
 

@@ -211,10 +211,12 @@ class Assembler(stacked: Boolean = false):
             case _                    => problem(o1, "expected register as third operand")
 
         addInstruction(3 -> 0, 3 -> reg1, 3 -> reg2, 3 -> reg3, 4 -> opcode)
-      case InstructionLineAST(mnemonic @ ("brk"), Nil) =>
+      case InstructionLineAST(mnemonic @ ("brk" | "rts" | "rte"), Nil) =>
         val opcode =
           mnemonic match
             case "brk" => 0
+            case "rts" => 1
+            case "rte" => 2
 
         addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 2, 5 -> opcode)
     }
