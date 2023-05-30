@@ -40,8 +40,8 @@ RRI
     110 000 000 01 iiiii    trap
     110 000 000 10 ooooo    32 no operand instructions
       brk   00000
-      rts
-      rti
+      rts   00001
+      rte   00010
 
 RI
 --
