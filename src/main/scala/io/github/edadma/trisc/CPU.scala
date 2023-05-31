@@ -4,7 +4,7 @@ import scala.annotation.tailrec
 import scala.collection.immutable
 import scala.collection.mutable.ListBuffer
 
-enum Status(bit: Int):
+enum Status(val bit: Int):
   case Ind extends Status(1)
   case Mode extends Status(2)
   case C extends Status(4)
@@ -42,9 +42,10 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   var limit: Int = -1
   var trace: Boolean = false
 
-  def test(bit: Status): Boolean = (psr & bit.ordinal) != 0
+  def test(bit: Status): Boolean = (psr & bit.bit) != 0
 
-  def set(bit: Status, set: Boolean): Unit = if set then psr |= bit.ordinal else psr &= ~bit.ordinal
+  def set(status: Status, set: Boolean): Unit =
+    if set then psr |= status.bit else psr &= ~status.bit
 
   def reset(): Unit =
     for i <- 1 until 8 do r(i) write 0

@@ -43,7 +43,10 @@ import pprint.pprintln
       |  sts r1, r0, r2
       |  ldi r1, TIMER_START
       |  sti r1, 1
-      |  sei
+      |  cli
+      |  ldi r1, STDOUT
+      |  sti r1, '-'
+      |  sti r1, '\n'
       |loop
       |  beq r0, r0, loop
       |timer
