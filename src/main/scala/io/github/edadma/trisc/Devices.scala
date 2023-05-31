@@ -8,6 +8,32 @@ class Stdout(val base: Long) extends WriteOnlyAddressable:
 
   def writeByte(addr: Long, data: Long): Unit = print(data.toChar.toString)
 
+class Timer(val base: Long) extends WriteOnlyAddressable:
+  val name = "timer"
+  val size = 1
+
+  val DELAY_HI = 0
+  val DELAY_LO = 1
+  val START = 2
+
+  var delay: Long = 0
+  var start: Boolean = false
+  var last: Long = 0
+
+  def writeByte(addr: Long, data: Long): Unit =
+    addr - base match
+      case DELAY_HI => delay = (delay & 0xff) | (data << 8)
+      case DELAY_LO => delay = (delay & 0xff00) | (data & 0xff)
+      case START =>
+        start = data != 0
+
+        if start then last = System.currentTimeMillis()
+
+    def interrupt(cpu: CPU): Unit =
+      if start && System.currentTimeMillis() - last >= delay then
+        last += delay
+        cpu.interrupt()
+
 class RTC(val base: Long) extends ReadOnlyAddressable:
   val name = "RTC"
   val size = 6

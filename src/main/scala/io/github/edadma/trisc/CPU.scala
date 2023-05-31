@@ -3,13 +3,14 @@ package io.github.edadma.trisc
 import scala.collection.immutable
 import scala.collection.mutable.ListBuffer
 
-//    for i <- 1 to 7 do cpu.sr(i) = cpu.r(i).read
-//    cpu.spc = cpu.pc
-
 enum Status(bit: Int):
-  case Interrupts extends Status(1)
+  case Ind extends Status(1)
   case Mode extends Status(2)
   case C extends Status(4)
+  case Irq extends Status(8)
+
+enum State:
+  case Reset, Interrupt, Halt, Run
 
 class CPU(mem: Addressable, interrupts: List[CPU => Unit]) extends Addressable:
   val name: String = mem.name
@@ -34,8 +35,7 @@ class CPU(mem: Addressable, interrupts: List[CPU => Unit]) extends Addressable:
   var pc: Long = 0
   var spc: Long = 0
   var psr: Int = 0
-  var running: Boolean = false
-  var vector: Int = -1
+  var state: State = State.Halt
   var inst: Int = 0
   var trace: Boolean = false
 
@@ -46,16 +46,23 @@ class CPU(mem: Addressable, interrupts: List[CPU => Unit]) extends Addressable:
   def reset(): Unit =
     for i <- 1 until 8 do r(i) write 0
 
-    running = true
-    vector = 0
-    set(Status.Interrupts, false)
+    state = State.Reset
+    set(Status.Ind, true)
     set(Status.Mode, true)
     set(Status.C, false)
 
+  def interrupt(): Unit =
+    set(Status.Irq, true)
+
+    if !test(Status.Ind) then
+      state = State.Interrupt
+      for i <- 1 to 7 do sr(i) = r(i).read
+      spc = pc
+
   def execute(): Unit =
-    if vector >= 0 then
-      pc = readInt(vector * 4)
-      vector = -1
+    if state.ordinal < State.Halt.ordinal then
+      pc = readInt(state.ordinal * 4)
+      state = State.Run
 
     inst = readShort(pc)
 
@@ -67,16 +74,16 @@ class CPU(mem: Addressable, interrupts: List[CPU => Unit]) extends Addressable:
   def run(): Unit =
     var count = 0
 
-    while running && count < 1000 do
+    while state != State.Halt && count < 1000 do
       execute()
       count += 1
 
-    if running then
+    if state != State.Halt then
       interrupts foreach (_(this))
       run()
 
   def resume(): Unit =
-    running = true
+    state = State.Run
     run()
 
   class Reg:

@@ -42,6 +42,8 @@ RRI
       brk   00000
       rts   00001
       rte   00010
+      sei   00011
+      cli   00100
 
 RI
 --
