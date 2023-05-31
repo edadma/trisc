@@ -11,7 +11,7 @@ enum Status(val bit: Int):
   case Irq extends Status(8)
 
 enum State:
-  case Reset, Interrupt, Halt, Run
+  case Reset, Interrupt, DivisionByZero, Trap0, Trap1, Halt, Run
 
 class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   val name: String = mem.name
@@ -36,6 +36,7 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   var pc: Long = 0
   var spc: Long = 0
   var psr: Int = 0
+  var spsr: Int = 0
   var state: State = State.Halt
   var inst: Int = 0
 
@@ -57,13 +58,13 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   def interrupt(): Unit =
     set(Status.Irq, true)
 
-    if !test(Status.Ind) then
-      state = State.Interrupt
-      for i <- 1 to 7 do sr(i) = r(i).read
-      spc = pc
+    if !test(Status.Ind) then state = State.Interrupt
 
   def execute(): Unit =
     if state.ordinal < State.Halt.ordinal then
+      for i <- 1 to 7 do sr(i) = r(i).read
+      spc = pc
+      spsr = psr
       pc = readInt(state.ordinal * 4)
       state = State.Run
 
