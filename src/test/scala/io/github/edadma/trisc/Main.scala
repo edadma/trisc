@@ -3,12 +3,37 @@ package io.github.edadma.trisc
 import pprint.pprintln
 
 @main def run(): Unit =
+//  val segs = new Assembler(stacked = true).assemble(
+//    """
+//      |STDOUT = 0x78
+//      |
+//      |segment code
+//      |dw reset
+//      |
+//      |reset
+//      |  ldi r1, 1          // start counter at 1
+//      |  ldi r3, STDOUT     // r3 contains stdout device address
+//      |loop
+//      |  addi r4, r1, '0'   // convert counter to ASCII character
+//      |  stb r3, r0, r4     // output counter character
+//      |  sti r3, '\n'       // output linefeed character
+//      |  addi r1, r1, 1     // increment counter
+//      |  ldi r2, 5          // we so that we can compare counter to 5
+//      |  bls r2, r1, end    // is 5 < counter? if so, jump to end of program
+//      |  beq r0, r0, loop   // jump back to loop start for next iteration
+//      |end
+//      |  brk                // end program
+//      |  """.stripMargin,
+//  )
+
   val segs = new Assembler(stacked = true).assemble(
     """
       |STDOUT = 0x78
+      |TIMER = 0x7A
       |
       |segment code
       |dw reset
+      |dw timer
       |
       |reset
       |  ldi r1, 1          // start counter at 1
@@ -22,6 +47,7 @@ import pprint.pprintln
       |  bls r2, r1, end    // is 5 < counter? if so, jump to end of program
       |  beq r0, r0, loop   // jump back to loop start for next iteration
       |end
+      |timer
       |  brk                // end program
       |  """.stripMargin,
   )
@@ -34,6 +60,7 @@ import pprint.pprintln
     "Memory",
     new ROM(code, 0),
     new Stdout(0x78),
+    new Timer(0x7a),
   )
 
 //  val mem = new Memory(

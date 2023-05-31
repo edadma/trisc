@@ -13,13 +13,13 @@ class SLI(r: Int, imm: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.r(r).write((cpu.r(r).read << 8) | imm)
 
 object BRK extends Instruction:
-  def apply(cpu: CPU): Unit = cpu.running = false
+  def apply(cpu: CPU): Unit = cpu.state = State.Halt
 
 object RTE extends Instruction:
   def apply(cpu: CPU): Unit =
     for i <- 1 to 7 do cpu.r(i) write cpu.sr(i)
     cpu.pc = cpu.spc
-    cpu.set(Status.Interrupts, false)
+    cpu.set(Status.Ind, false)
 
 class ADDI(a: Int, b: Int, imm: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read + imm)
