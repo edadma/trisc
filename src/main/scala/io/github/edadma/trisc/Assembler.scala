@@ -171,6 +171,14 @@ class Assembler(stacked: Boolean = false):
             case _: LongExprAST                          => problem(o2, "immediate must be a byte value")
 
         addInstruction(3 -> 7, 3 -> reg, 2 -> opcode, 8 -> imm)
+      case InstructionLineAST(mnemonic @ ("trap"), Seq(o1)) =>
+        val imm =
+          fold(o1, immediate = true) match
+            case _: DoubleExprAST                   => problem(o1, "immediate must be integral")
+            case LongExprAST(n) if 0 <= n && n <= 7 => n.toInt
+            case _: LongExprAST                     => problem(o1, "immediate must be between 0 and 7")
+
+        addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 1, 5 -> imm)
       case InstructionLineAST(mnemonic @ ("beq" | "blu" | "bls" | "addi"), Seq(o1, o2, o3)) =>
         val opcode =
           mnemonic match

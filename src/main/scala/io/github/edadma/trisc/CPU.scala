@@ -11,14 +11,16 @@ enum Status(val bit: Int):
   case Irq extends Status(8)
 
 enum State:
-  case Reset, Interrupt, DivisionByZero, Trap0, Trap1, Halt, Run
+  case Reset, Interrupt, DivisionByZero,
+    Trap0, Trap1, Trap2, Trap3, Trap4, Trap5, Trap6, Trap7,
+    Halt, Run
 
 class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   val name: String = mem.name
   val base: Long = mem.base
   val size: Long = mem.size
 
-  def readByte(addr: Long): Int = mem.readByte(addr)
+  def readByte(addr: Long): Int = mem.readByte(addr) & 0xff
 
   def writeByte(addr: Long, data: Long): Unit = mem.writeByte(addr, data)
 
@@ -132,9 +134,10 @@ object Decode:
   def buildInstructionTable(): Unit =
     populate(
       List[(String, Map[Char, Int] => Instruction)](
-        "111 rrr 00 iiiiiiii" -> ((operands: Map[Char, Int]) => new LDI(operands('r'), operands('i'))), // ldi
+        "111 rrr 00 iiiiiiii" -> ((operands: Map[Char, Int]) => new LDI(operands('r'), operands('i'))),
         "111 rrr 10 iiiiiiii" -> ((operands: Map[Char, Int]) => new SLI(operands('r'), operands('i'))),
         "111 rrr 11 iiiiiiii" -> ((operands: Map[Char, Int]) => new STI(operands('r'), operands('i'))),
+        "110 000 000 01 iiiii" -> ((operands: Map[Char, Int]) => new TRAP(operands('i'))),
         "110 000 000 10 00000" -> ((operands: Map[Char, Int]) => BRK),
         "110 000 000 10 00010" -> ((operands: Map[Char, Int]) => RTE),
         "110 000 000 10 00011" -> ((operands: Map[Char, Int]) => SEI),

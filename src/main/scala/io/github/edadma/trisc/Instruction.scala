@@ -12,6 +12,9 @@ class LDI(r: Int, imm: Int) extends Instruction:
 class SLI(r: Int, imm: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.r(r).write((cpu.r(r).read << 8) | imm)
 
+class TRAP(imm: Int) extends Instruction:
+  def apply(cpu: CPU): Unit = cpu.state = State.fromOrdinal(State.Trap0.ordinal + imm)
+
 object BRK extends Instruction:
   def apply(cpu: CPU): Unit = cpu.state = State.Halt
 

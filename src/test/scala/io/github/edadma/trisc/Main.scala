@@ -35,6 +35,8 @@ import pprint.pprintln
       |segment code
       |dw reset
       |dw timer
+      |dw 0
+      |dw trap0
       |
       |reset
       |  ldi r1, TIMER_DELAY
@@ -44,15 +46,19 @@ import pprint.pprintln
       |  ldi r1, TIMER_START
       |  sti r1, 1
       |  cli
-      |  ldi r1, STDOUT
-      |  sti r1, '-'
-      |  sti r1, '\n'
+      |  ldi r1, '-'
+      |  trap 0
       |loop
       |  beq r0, r0, loop
       |timer
       |  ldi r1, STDOUT
       |  sti r1, 'A'
       |  sti r1, '\n'
+      |  rte
+      |trap0
+      |  ldi r2, STDOUT
+      |  stb r2, r0, r1
+      |  sti r2, '\n'
       |  rte
       |  """.stripMargin,
   )
@@ -92,7 +98,7 @@ import pprint.pprintln
 //
 //  //  for i <- 0L until rom.size do println(rom.readByte(i).toHexString)
 
-  val cpu = new CPU(mem, List(timer)) /*{ trace = true }*/ { limit = 30000 }
+  val cpu = new CPU(mem, List(timer)) { trace = true; limit = 30000 }
 
   cpu.reset()
   val start = System.currentTimeMillis()
