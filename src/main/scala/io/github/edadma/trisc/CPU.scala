@@ -42,10 +42,9 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   var limit: Int = -1
   var trace: Boolean = false
 
-  def test(bit: Status): Boolean = (psr & bit.bit) != 0
+  def test(status: Status): Boolean = (psr & status.bit) != 0
 
-  def set(status: Status, set: Boolean): Unit =
-    if set then psr |= status.bit else psr &= ~status.bit
+  def set(status: Status, set: Boolean): Unit = if set then psr |= status.bit else psr &= ~status.bit
 
   def reset(): Unit =
     for i <- 1 until 8 do r(i) write 0
