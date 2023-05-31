@@ -8,9 +8,9 @@ class Stdout(val base: Long) extends WriteOnlyAddressable:
 
   def writeByte(addr: Long, data: Long): Unit = print(data.toChar.toString)
 
-class Timer(val base: Long) extends WriteOnlyAddressable:
+class Timer(val base: Long) extends WriteOnlyAddressable with (CPU => Unit):
   val name = "timer"
-  val size = 1
+  val size = 3
 
   val DELAY_HI = 0
   val DELAY_LO = 1
@@ -29,10 +29,10 @@ class Timer(val base: Long) extends WriteOnlyAddressable:
 
         if start then last = System.currentTimeMillis()
 
-    def interrupt(cpu: CPU): Unit =
-      if start && System.currentTimeMillis() - last >= delay then
-        last += delay
-        cpu.interrupt()
+  def apply(cpu: CPU): Unit =
+    if start && System.currentTimeMillis() - last >= delay then
+      last += delay
+      cpu.interrupt()
 
 class RTC(val base: Long) extends ReadOnlyAddressable:
   val name = "RTC"

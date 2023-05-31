@@ -13,7 +13,7 @@ enum Status(bit: Int):
 enum State:
   case Reset, Interrupt, Halt, Run
 
-class CPU(mem: Addressable, interrupts: List[CPU => Unit]) extends Addressable:
+class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   val name: String = mem.name
   val base: Long = mem.base
   val size: Long = mem.size
@@ -32,7 +32,7 @@ class CPU(mem: Addressable, interrupts: List[CPU => Unit]) extends Addressable:
     new Reg,
     new Reg,
   )
-  var sr = new Array[Long](7)
+  var sr = new Array[Long](8)
   var pc: Long = 0
   var spc: Long = 0
   var psr: Int = 0

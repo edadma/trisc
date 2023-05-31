@@ -30,7 +30,7 @@ import pprint.pprintln
     """
       |STDOUT = 0x78
       |TIMER_DELAY = 0x7A
-      |TIMER_START = 0x7B
+      |TIMER_START = 0x7C
       |
       |segment code
       |dw reset
@@ -39,8 +39,8 @@ import pprint.pprintln
       |reset
       |  ldi r1, TIMER_DELAY
       |  ldi r2, 1
-      |  sli r2, f4
-      |  sts r1, r2, r0
+      |  sli r2, 0xf4
+      |  sts r1, r0, r2
       |  ldi r1, TIMER_START
       |  sti r1, 1
       |  sei
@@ -58,11 +58,12 @@ import pprint.pprintln
 
   val chunks = segs flatMap (_.chunks)
   val code = chunks flatMap { case DataChunk(data) => data } to IndexedSeq
+  val timer = new Timer(0x7a)
   val mem = new Memory(
     "Memory",
     new ROM(code, 0),
     new Stdout(0x78),
-    new Timer(0x7a),
+    timer,
   )
 
 //  val mem = new Memory(
@@ -88,7 +89,7 @@ import pprint.pprintln
 //
 //  //  for i <- 0L until rom.size do println(rom.readByte(i).toHexString)
 
-  val cpu = new CPU(mem, Nil) /*{ trace = true }*/ { limit = 30000 }
+  val cpu = new CPU(mem, List(timer)) /*{ trace = true }*/ { limit = 30000 }
 
   cpu.reset()
   val start = System.currentTimeMillis()
