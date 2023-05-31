@@ -29,15 +29,28 @@ import pprint.pprintln
   val segs = new Assembler(stacked = true).assemble(
     """
       |STDOUT = 0x78
-      |TIMER = 0x7A
+      |TIMER_DELAY = 0x7A
+      |TIMER_START = 0x7B
       |
       |segment code
       |dw reset
       |dw timer
       |
       |reset
-      |  beq r0, r0, reset
+      |  ldi r1, TIMER_DELAY
+      |  ldi r2, 1
+      |  sli r2, f4
+      |  sts r1, r2, r0
+      |  ldi r1, TIMER_START
+      |  sti r1, 1
+      |  sei
+      |loop
+      |  beq r0, r0, loop
       |timer
+      |  ldi r1, STDOUT
+      |  sti r1, 'A'
+      |  sti r1, '\n'
+      |  rte
       |  """.stripMargin,
   )
 

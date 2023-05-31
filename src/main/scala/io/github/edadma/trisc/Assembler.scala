@@ -154,10 +154,11 @@ class Assembler(stacked: Boolean = false):
                   segment.code += (v >> 16).toByte
                   segment.code += (v >> 8).toByte
                   segment.code += v.toByte
-      case InstructionLineAST(mnemonic @ ("ldi" | "sti"), Seq(o1, o2)) =>
+      case InstructionLineAST(mnemonic @ ("ldi" | "sli" | "sti"), Seq(o1, o2)) =>
         val opcode =
           mnemonic match
             case "ldi" => 0
+            case "sli" => 2
             case "sti" => 3
         val reg =
           fold(o1) match
@@ -213,12 +214,14 @@ class Assembler(stacked: Boolean = false):
             case _                    => problem(o1, "expected register as third operand")
 
         addInstruction(3 -> 0, 3 -> reg1, 3 -> reg2, 3 -> reg3, 4 -> opcode)
-      case InstructionLineAST(mnemonic @ ("brk" | "rts" | "rte"), Nil) =>
+      case InstructionLineAST(mnemonic @ ("brk" | "rts" | "rte" | "sei" | "cli"), Nil) =>
         val opcode =
           mnemonic match
             case "brk" => 0
             case "rts" => 1
             case "rte" => 2
+            case "sei" => 3
+            case "cli" => 4
 
         addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 2, 5 -> opcode)
     }

@@ -21,6 +21,12 @@ object RTE extends Instruction:
     cpu.pc = cpu.spc
     cpu.set(Status.Ind, false)
 
+object SEI extends Instruction:
+  def apply(cpu: CPU): Unit = cpu.set(Status.Ind, true)
+
+object CLI extends Instruction:
+  def apply(cpu: CPU): Unit = cpu.set(Status.Ind, false)
+
 class ADDI(a: Int, b: Int, imm: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read + imm)
 

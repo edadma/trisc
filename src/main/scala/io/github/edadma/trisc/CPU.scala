@@ -131,11 +131,12 @@ object Decode:
     populate(
       List[(String, Map[Char, Int] => Instruction)](
         "111 rrr 00 iiiiiiii" -> ((operands: Map[Char, Int]) => new LDI(operands('r'), operands('i'))), // ldi
-        "111 rrr 01 iiiiiiii" -> ((operands: Map[Char, Int]) => new LDI(operands('r'), operands('i').toByte)), // ldis
         "111 rrr 10 iiiiiiii" -> ((operands: Map[Char, Int]) => new SLI(operands('r'), operands('i'))),
         "111 rrr 11 iiiiiiii" -> ((operands: Map[Char, Int]) => new STI(operands('r'), operands('i'))),
         "110 000 000 10 00000" -> ((operands: Map[Char, Int]) => BRK),
         "110 000 000 10 00010" -> ((operands: Map[Char, Int]) => RTE),
+        "110 000 000 10 00011" -> ((operands: Map[Char, Int]) => SEI),
+        "110 000 000 10 00100" -> ((operands: Map[Char, Int]) => CLI),
         "101 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new ADDI(args('a'), args('b'), ext(args('i')))),
         "100 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BLS(args('a'), args('b'), ext(args('i')))),
         "010 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BEQ(args('a'), args('b'), ext(args('i')))),
