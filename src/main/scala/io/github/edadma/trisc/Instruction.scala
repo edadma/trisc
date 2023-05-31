@@ -19,7 +19,7 @@ object RTE extends Instruction:
   def apply(cpu: CPU): Unit =
     for i <- 1 to 7 do cpu.r(i) write cpu.sr(i)
     cpu.pc = cpu.spc
-    cpu.set(Status.Ind, false)
+    cpu.psr = cpu.spsr
 
 object SEI extends Instruction:
   def apply(cpu: CPU): Unit =

@@ -67,6 +67,7 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
       spsr = psr
       pc = readInt(state.ordinal * 4)
       state = State.Run
+      set(Status.Mode, true)
 
     inst = readShort(pc)
 
