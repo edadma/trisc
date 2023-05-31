@@ -1,5 +1,6 @@
 package io.github.edadma.trisc
 
+import scala.annotation.tailrec
 import scala.collection.immutable
 import scala.collection.mutable.ListBuffer
 
@@ -37,6 +38,8 @@ class CPU(mem: Addressable, interrupts: List[CPU => Unit]) extends Addressable:
   var psr: Int = 0
   var state: State = State.Halt
   var inst: Int = 0
+
+  var limit: Int = -1
   var trace: Boolean = false
 
   def test(bit: Status): Boolean = (psr & bit.ordinal) != 0
@@ -71,14 +74,17 @@ class CPU(mem: Addressable, interrupts: List[CPU => Unit]) extends Addressable:
     pc += 2
     Decode(inst)(this)
 
-  def run(): Unit =
+  @tailrec
+  final def run(): Unit =
     var count = 0
 
     while state != State.Halt && count < 1000 do
       execute()
       count += 1
 
-    if state != State.Halt then
+    if limit > 0 then limit -= 1
+
+    if state != State.Halt && limit != 0 then
       interrupts foreach (_(this))
       run()
 
@@ -134,6 +140,7 @@ object Decode:
         "100 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BLS(args('a'), args('b'), ext(args('i')))),
         "010 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BEQ(args('a'), args('b'), ext(args('i')))),
         "00 0 ddd aaa bbb 0001" -> ((args: Map[Char, Int]) => new STB(args('d'), args('a'), args('b'))),
+        "00 0 ddd aaa bbb 0011" -> ((args: Map[Char, Int]) => new STS(args('d'), args('a'), args('b'))),
       ),
     )
 

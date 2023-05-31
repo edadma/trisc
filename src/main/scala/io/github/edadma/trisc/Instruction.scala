@@ -35,3 +35,6 @@ class STI(r: Int, imm: Int) extends Instruction:
 
 class STB(d: Int, a: Int, b: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.writeByte(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)
+
+class STS(d: Int, a: Int, b: Int) extends Instruction:
+  def apply(cpu: CPU): Unit = cpu.writeShort(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)

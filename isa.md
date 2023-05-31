@@ -5,12 +5,12 @@ RRR
 
     ldb 00000
     stb 00001
+    lds 00010
+    sts 00011
     ldw
     stw
     ldd
     std
-    ldl
-    stl
     add
     sub
     mul

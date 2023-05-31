@@ -36,19 +36,8 @@ import pprint.pprintln
       |dw timer
       |
       |reset
-      |  ldi r1, 1          // start counter at 1
-      |  ldi r3, STDOUT     // r3 contains stdout device address
-      |loop
-      |  addi r4, r1, '0'   // convert counter to ASCII character
-      |  stb r3, r0, r4     // output counter character
-      |  sti r3, '\n'       // output linefeed character
-      |  addi r1, r1, 1     // increment counter
-      |  ldi r2, 5          // we so that we can compare counter to 5
-      |  bls r2, r1, end    // is 5 < counter? if so, jump to end of program
-      |  beq r0, r0, loop   // jump back to loop start for next iteration
-      |end
+      |  beq r0, r0, reset
       |timer
-      |  brk                // end program
       |  """.stripMargin,
   )
 
@@ -86,7 +75,9 @@ import pprint.pprintln
 //
 //  //  for i <- 0L until rom.size do println(rom.readByte(i).toHexString)
 
-  val cpu = new CPU(mem, Nil) // { trace = true }
+  val cpu = new CPU(mem, Nil) /*{ trace = true }*/ { limit = 30000 }
 
   cpu.reset()
+  val start = System.currentTimeMillis()
   cpu.run()
+  println(System.currentTimeMillis() - start)

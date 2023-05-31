@@ -192,11 +192,13 @@ class Assembler(stacked: Boolean = false):
             case _: LongExprAST                        => problem(o2, "immediate must be a signed 7-bit value")
 
         addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm)
-      case InstructionLineAST(mnemonic @ ("ldb" | "stb"), Seq(o1, o2, o3)) =>
+      case InstructionLineAST(mnemonic @ ("ldb" | "stb" | "lds" | "sts"), Seq(o1, o2, o3)) =>
         val opcode =
           mnemonic match
             case "ldb" => 0
             case "stb" => 1
+            case "lds" => 2
+            case "sts" => 3
         val reg1 =
           fold(o1) match
             case RegisterExprAST(reg) => reg

@@ -25,10 +25,10 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |segment
                           |include
                           |db
+                          |ds
                           |dw
-                          |dd
                           |dl
-                          |df
+                          |dd
                           |r0
                           |r1
                           |r2
@@ -90,12 +90,12 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
 
   lazy val include: P[IncludeLineAST] = "include" ~> stringLit ^^ IncludeLineAST.apply
 
-  lazy val data: P[DataLineAST] = ("db" | "ds" | "dw" | "dd" | "df") ~ repsep(value, ",") ^^ {
+  lazy val data: P[DataLineAST] = ("db" | "ds" | "dw" | "dl" | "dd") ~ repsep(value, ",") ^^ {
     case "db" ~ d => DataLineAST(1, d)
     case "ds" ~ d => DataLineAST(2, d)
     case "dw" ~ d => DataLineAST(4, d)
-    case "dd" ~ d => DataLineAST(8, d)
-    case "df" ~ d => DataLineAST(0, d)
+    case "dl" ~ d => DataLineAST(8, d)
+    case "dd" ~ d => DataLineAST(0, d)
   }
 
   lazy val simpleLine: P[LineAST] =
