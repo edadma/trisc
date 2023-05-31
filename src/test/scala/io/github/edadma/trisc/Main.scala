@@ -98,7 +98,9 @@ import pprint.pprintln
 //
 //  //  for i <- 0L until rom.size do println(rom.readByte(i).toHexString)
 
-  val cpu = new CPU(mem, List(timer)) { trace = true; limit = 30000 }
+  val cpu = new CPU(mem, List(timer)) { /*trace = true;*/
+    limit = 30000
+  }
 
   cpu.reset()
   val start = System.currentTimeMillis()
