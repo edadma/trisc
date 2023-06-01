@@ -71,7 +71,7 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
       state = State.Run
       set(Status.Mode, true)
 
-    inst = readShort(pc)
+    inst = readShortUnsigned(pc)
 
     if trace then println((pc.toHexString, inst.toHexString))
 
@@ -142,9 +142,7 @@ object Decode:
         "110 000 000 10 00010" -> ((operands: Map[Char, Int]) => RTE),
         "110 000 000 10 00011" -> ((operands: Map[Char, Int]) => SEI),
         "110 000 000 10 00100" -> ((operands: Map[Char, Int]) => CLI),
-        "101 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) =>
-          new ADDI(args('a'), args('b'), ext(args('i')))
-        ), // don't use ext(); instead allow imm to be signed and truncate if needed
+        "101 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new ADDI(args('a'), args('b'), ext(args('i')))),
         "100 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BLS(args('a'), args('b'), ext(args('i')))),
         "010 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BEQ(args('a'), args('b'), ext(args('i')))),
         "00 0 ddd aaa bbb 0000" -> ((args: Map[Char, Int]) => new LDB(args('d'), args('a'), args('b'))),
