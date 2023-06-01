@@ -43,8 +43,20 @@ class BEQ(a: Int, b: Int, imm: Int) extends Instruction:
 class STI(r: Int, imm: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.writeByte(cpu.r(r).read, imm)
 
+class LDB(d: Int, a: Int, b: Int) extends Instruction:
+  def apply(cpu: CPU): Unit = cpu.r(b) write cpu.readByte(cpu.r(d).read + cpu.r(a).read)
+
 class STB(d: Int, a: Int, b: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.writeByte(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)
 
+class LDS(d: Int, a: Int, b: Int) extends Instruction:
+  def apply(cpu: CPU): Unit = cpu.r(b) write cpu.readShort(cpu.r(d).read + cpu.r(a).read)
+
 class STS(d: Int, a: Int, b: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.writeShort(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)
+
+class LDW(d: Int, a: Int, b: Int) extends Instruction:
+  def apply(cpu: CPU): Unit = cpu.r(b) write cpu.readInt(cpu.r(d).read + cpu.r(a).read)
+
+class STW(d: Int, a: Int, b: Int) extends Instruction:
+  def apply(cpu: CPU): Unit = cpu.writeInt(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)

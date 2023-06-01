@@ -145,8 +145,12 @@ object Decode:
         "101 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new ADDI(args('a'), args('b'), ext(args('i')))),
         "100 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BLS(args('a'), args('b'), ext(args('i')))),
         "010 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BEQ(args('a'), args('b'), ext(args('i')))),
+        "00 0 ddd aaa bbb 0000" -> ((args: Map[Char, Int]) => new LDB(args('d'), args('a'), args('b'))),
         "00 0 ddd aaa bbb 0001" -> ((args: Map[Char, Int]) => new STB(args('d'), args('a'), args('b'))),
+        "00 0 ddd aaa bbb 0010" -> ((args: Map[Char, Int]) => new LDS(args('d'), args('a'), args('b'))),
         "00 0 ddd aaa bbb 0011" -> ((args: Map[Char, Int]) => new STS(args('d'), args('a'), args('b'))),
+        "00 0 ddd aaa bbb 0100" -> ((args: Map[Char, Int]) => new LDW(args('d'), args('a'), args('b'))),
+        "00 0 ddd aaa bbb 0101" -> ((args: Map[Char, Int]) => new STW(args('d'), args('a'), args('b'))),
       ),
     )
 

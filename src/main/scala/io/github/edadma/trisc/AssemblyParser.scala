@@ -43,13 +43,17 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |bls
                           |brk
                           |cli
+                          |ldb
                           |ldi
+                          |lds
+                          |ldw
                           |rte
                           |sei
                           |sli
                           |stb
                           |sti
                           |sts
+                          |stw
                           |trap
                           |""".trim.stripMargin split "\\s+")
   lexical.delimiters ++= ("+ - * / % ( ) : , = \n" split ' ')
@@ -117,7 +121,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
       | label ~ instruction ^^ { case l ~ i => Seq(l, i) }
 
   lazy val mnemonics: P[String] =
-    "addi" | "beq" | "bls" | "brk" | "cli" | "ldi" | "rte" | "sei" | "sli" | "stb" | "sti" | "sts" | "trap"
+    "addi" | "beq" | "bls" | "brk" | "cli" | "ldb" | "ldi" | "lds" | "ldw" | "rte" | "sei" | "sli" | "stb" | "sti" | "sts" | "stw" | "trap"
 
   lazy val instruction: P[InstructionLineAST] =
     mnemonics ~ repsep(expression, ",") ^^ { case m ~ es =>

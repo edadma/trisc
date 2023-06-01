@@ -7,8 +7,8 @@ RRR
     stb 00001
     lds 00010
     sts 00011
-    ldw
-    stw
+    ldw 00100
+    stw 00101
     ldd
     std
     add
