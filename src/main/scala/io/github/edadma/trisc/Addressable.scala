@@ -12,19 +12,25 @@ trait Addressable:
   def readByte(addr: Long): Int
   def writeByte(addr: Long, data: Long): Unit
 
-  def readShort(addr: Long): Int = readByte(addr) << 8 | readByte(addr + 1)
+  def readByteUnsigned(addr: Long): Int = readByte(addr) & 0xff
+
+  def readShort(addr: Long): Int = readByte(addr) << 8 | readByteUnsigned(addr + 1)
+
+  def readShortUnsigned(addr: Long): Int = readShort(addr) & 0xffff
 
   def writeShort(addr: Long, data: Long): Unit =
     writeByte(addr, data >> 8)
     writeByte(addr + 1, data)
 
-  def readInt(addr: Long): Int = readShort(addr) << 16 | readShort(addr + 2)
+  def readInt(addr: Long): Int = readShort(addr) << 16 | readShortUnsigned(addr + 2)
+
+  def readIntUnsigned(addr: Long): Long = readInt(addr) & 0xffffffffL
 
   def writeInt(addr: Long, data: Long): Unit =
     writeShort(addr, data >> 16)
     writeShort(addr + 2, data)
 
-  def readLong(addr: Long): Long = readInt(addr).toLong << 32 | readInt(addr + 4) & 0xffffffff
+  def readLong(addr: Long): Long = readInt(addr).toLong << 32 | readIntUnsigned(addr + 4)
 
   def writeLong(addr: Long, data: Long): Unit =
     writeInt(addr, (data >> 32).toInt)
@@ -69,7 +75,7 @@ class RAM(val base: Long, val size: Long) extends Addressable:
 
   def readByte(addr: Long): Int =
     require(base <= addr && addr < base + size, "address out of range")
-    seq((addr - base).toInt) & 0xff
+    seq((addr - base).toInt)
 
   def writeByte(addr: Long, data: Long): Unit =
     require(base <= addr && addr < base + size, "address out of range")
@@ -90,7 +96,7 @@ class ROM(seq: immutable.IndexedSeq[Byte], val base: Long) extends ReadOnlyAddre
 
   def readByte(addr: Long): Int =
     require(base <= addr && addr < base + size, "address out of range")
-    seq((addr - base).toInt) & 0xff
+    seq((addr - base).toInt)
 
 def mkROM(insts: IndexedSeq[String]): ROM =
   def literal(n: String): Iterator[Int] =

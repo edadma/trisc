@@ -35,15 +35,15 @@ RRI
     011 aaa bbb iiiiiii     blu
     100 aaa bbb iiiiiii     bls
     101 aaa bbb iiiiiii     addi
-    110 aaa bbb 0000000     jalr
-    110 aaa bbb 00 ooooo    (ooooo != 0) 32 RR instructions
+    110 aaa bbb 00 ooooo    32 RR instructions
+        jalr    00000
     110 000 000 01 iiiii    trap
     110 000 000 10 ooooo    32 no operand instructions
-      brk   00000
-      rts   00001
-      rte   00010
-      sei   00011
-      cli   00100
+        brk   00000
+        rts   00001
+        rte   00010
+        sei   00011
+        cli   00100
 
 RI
 --
@@ -51,7 +51,7 @@ RI
     111 rrr oo iiiiiiii (r != 0)
 
     ldi     00
-    ---     01  // can be done using ADDI
+    ---     01
     sli     10
     sti     11
 
