@@ -56,10 +56,18 @@ import pprint.pprintln
       |  sti r1, '\n'
       |  rte
       |trap0
-      |  ldi r2, STDOUT
-      |  stb r2, r0, r1
-      |  sti r2, '\n'
+      |  beq r1, r0, characterOutput
+      |  addi r1, r1, -1
+      |  beq r1, r0, stringOutput
+      |  brk
+      |characterOutput
+      |  ldi r3, STDOUT
+      |  stb r3, r0, r2
+      |  sti r3, '\n'
       |  rte
+      |stringOutput
+      |  ldi r3, STDOUT
+      |
       |  """.stripMargin,
   )
 

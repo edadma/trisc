@@ -12,17 +12,17 @@ case class DataChunk(data: Seq[Byte]) extends Chunk
 case class Segment(name: String, chunks: Seq[Chunk])
 
 class Assembler(stacked: Boolean = false):
-  private case class AssemblySegment(
-      var size: Long = 0,
-      var symbols: mutable.HashMap[String, Long] = new mutable.HashMap,
-      code: ArrayBuffer[Byte] = new ArrayBuffer,
-  )
+  private class PassSegment:
+    var size: Long = 0
+    var symbols: mutable.HashMap[String, Long] = new mutable.HashMap
+    val code: ArrayBuffer[Byte] = new ArrayBuffer
+    var last: Option[String] = None
 
   def assemble(src: String): Seq[Segment] =
     val lines = AssemblyParser.parseAssembly(src)
     val equates = new mutable.HashMap[String, ExprAST]
-    val segments = new mutable.LinkedHashMap[String, AssemblySegment]
-    var segment = AssemblySegment()
+    val segments = new mutable.LinkedHashMap[String, PassSegment]
+    var segment = PassSegment()
 
     @tailrec
     def fold(e: ExprAST, absolute: Boolean = false, immediate: Boolean = false): ExprAST =
@@ -65,7 +65,7 @@ class Assembler(stacked: Boolean = false):
       case SegmentLineAST(name) =>
         segments get name match
           case None =>
-            segment = AssemblySegment()
+            segment = PassSegment()
             segments(name) = segment
           case Some(s) => segment = s
       case label @ LabelLineAST(name) =>
@@ -201,7 +201,10 @@ class Assembler(stacked: Boolean = false):
             case _: LongExprAST                        => problem(o2, "immediate must be a signed 7-bit value")
 
         addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm)
-      case InstructionLineAST(mnemonic @ ("ldb" | "stb" | "lds" | "sts" | "ldw" | "stw"), Seq(o1, o2, o3)) =>
+      case InstructionLineAST(
+            mnemonic @ ("ldb" | "stb" | "lds" | "sts" | "ldw" | "stw" | "ldd" | "std"),
+            Seq(o1, o2, o3),
+          ) =>
         val opcode =
           mnemonic match
             case "ldb" => 0
@@ -210,6 +213,8 @@ class Assembler(stacked: Boolean = false):
             case "sts" => 3
             case "ldw" => 4
             case "stw" => 5
+            case "ldd" => 6
+            case "std" => 7
         val reg1 =
           fold(o1) match
             case RegisterExprAST(reg) => reg

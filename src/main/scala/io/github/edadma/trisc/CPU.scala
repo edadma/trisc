@@ -151,6 +151,8 @@ object Decode:
         "000 ddd aaa bbb 0011" -> ((args: Map[Char, Int]) => new STS(args('d'), args('a'), args('b'))),
         "000 ddd aaa bbb 0100" -> ((args: Map[Char, Int]) => new LDW(args('d'), args('a'), args('b'))),
         "000 ddd aaa bbb 0101" -> ((args: Map[Char, Int]) => new STW(args('d'), args('a'), args('b'))),
+        "000 ddd aaa bbb 0100" -> ((args: Map[Char, Int]) => new LDD(args('d'), args('a'), args('b'))),
+        "000 ddd aaa bbb 0101" -> ((args: Map[Char, Int]) => new STD(args('d'), args('a'), args('b'))),
       ),
     )
 

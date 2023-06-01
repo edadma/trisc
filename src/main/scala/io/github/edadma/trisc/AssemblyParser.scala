@@ -44,6 +44,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |brk
                           |cli
                           |ldb
+                          |ldd
                           |ldi
                           |lds
                           |ldw
@@ -51,12 +52,13 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |sei
                           |sli
                           |stb
+                          |std
                           |sti
                           |sts
                           |stw
                           |trap
                           |""".trim.stripMargin split "\\s+")
-  lexical.delimiters ++= ("+ - * / % ( ) : , = \n" split ' ')
+  lexical.delimiters ++= ("+ - * / % ( ) : , = . \n" split ' ')
 
   type P[+T] = PackratParser[T]
 
@@ -84,8 +86,9 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
 
   lazy val reference: P[ReferenceExprAST] = ident ^^ ReferenceExprAST.apply
 
-  lazy val value: P[ExprAST] = positioned(
-    literal
+  lazy val primary: P[ExprAST] = positioned(
+    register
+      | literal
       | string
       | reference,
   )
@@ -100,7 +103,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
 
   lazy val include: P[IncludeLineAST] = "include" ~> stringLit ^^ IncludeLineAST.apply
 
-  lazy val data: P[DataLineAST] = ("db" | "ds" | "dw" | "dl" | "dd") ~ repsep(value, ",") ^^ {
+  lazy val data: P[DataLineAST] = ("db" | "ds" | "dw" | "dl" | "dd") ~ repsep(expression, ",") ^^ {
     case "db" ~ d => DataLineAST(1, d)
     case "ds" ~ d => DataLineAST(2, d)
     case "dw" ~ d => DataLineAST(4, d)
@@ -121,7 +124,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
       | label ~ instruction ^^ { case l ~ i => Seq(l, i) }
 
   lazy val mnemonics: P[String] =
-    "addi" | "beq" | "bls" | "brk" | "cli" | "ldb" | "ldi" | "lds" | "ldw" | "rte" | "sei" | "sli" | "stb" | "sti" | "sts" | "stw" | "trap"
+    "addi" | "beq" | "bls" | "brk" | "cli" | "ldb" | "ldd" | "ldi" | "lds" | "ldw" | "rte" | "sei" | "sli" | "stb" | "std" | "sti" | "sts" | "stw" | "trap"
 
   lazy val instruction: P[InstructionLineAST] =
     mnemonics ~ repsep(expression, ",") ^^ { case m ~ es =>

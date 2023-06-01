@@ -60,3 +60,9 @@ class LDW(d: Int, a: Int, b: Int) extends Instruction:
 
 class STW(d: Int, a: Int, b: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.writeInt(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)
+
+class LDD(d: Int, a: Int, b: Int) extends Instruction:
+  def apply(cpu: CPU): Unit = cpu.r(b) write cpu.readLong(cpu.r(d).read + cpu.r(a).read)
+
+class STD(d: Int, a: Int, b: Int) extends Instruction:
+  def apply(cpu: CPU): Unit = cpu.writeLong(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)
