@@ -19,3 +19,4 @@ case class DoubleExprAST(n: Double) extends ExprAST
 case class ReferenceExprAST(ref: String) extends ExprAST
 case class StringExprAST(s: String) extends ExprAST
 case class BinaryExprAST(left: ExprAST, op: String, right: ExprAST) extends ExprAST
+case class UnaryExprAST(op: String, expr: ExprAST) extends ExprAST

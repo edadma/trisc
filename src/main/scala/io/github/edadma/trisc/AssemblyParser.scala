@@ -93,7 +93,10 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
       | reference,
   )
 
-  lazy val expression: P[ExprAST] = positioned(register | value)
+  lazy val expression: P[ExprAST] = positioned(
+    "-" ~ primary ^^ UnaryExprAST.apply
+      | primary,
+  )
 
   lazy val label: P[LabelLineAST] = ident <~ opt(":") ^^ LabelLineAST.apply
 

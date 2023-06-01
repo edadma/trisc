@@ -24,7 +24,6 @@ class Assembler(stacked: Boolean = false):
     val segments = new mutable.LinkedHashMap[String, PassSegment]
     var segment = PassSegment()
 
-    @tailrec
     def fold(e: ExprAST, absolute: Boolean = false, immediate: Boolean = false): ExprAST =
       e match
         case lit: (LongExprAST | DoubleExprAST) => lit
@@ -44,7 +43,12 @@ class Assembler(stacked: Boolean = false):
                 case None => problem(e, s"unrecognized equate or label '$ref'")
                 case Some(s) =>
                   LongExprAST(if absolute then s.symbols(ref) else s.symbols(ref) - (segment.code.length + 2))
-            case Some(expr) => fold(expr)
+            case Some(expr) => fold(expr, absolute, immediate)
+        case UnaryExprAST("-", expr) =>
+          fold(expr, absolute, immediate) match
+            case LongExprAST(n)   => LongExprAST(-n)
+            case DoubleExprAST(n) => DoubleExprAST(-n)
+            case e                => e
 
     def addInstruction(pieces: (Int, Int)*): Unit =
       var inst = 0
