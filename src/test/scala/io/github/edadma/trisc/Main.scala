@@ -67,7 +67,9 @@ import pprint.pprintln
       |  rte
       |stringOutput
       |  ldi r3, STDOUT
-      |
+      |  ldb r4, r2, r0
+      |  stb r3, r0, r4
+      |  beg r4, r0, .done
       |  """.stripMargin,
   )
 
