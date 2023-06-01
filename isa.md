@@ -1,14 +1,14 @@
 RRR
 ---
 
-    00 o ddd aaa bbb oooo
+    000 ddd aaa bbb oooo
 
-    ldb 00000
-    stb 00001
-    lds 00010
-    sts 00011
-    ldw 00100
-    stw 00101
+    ldb 0000
+    stb 0001
+    lds 0010
+    sts 0011
+    ldw 0100
+    stw 0101
     ldd
     std
     add
@@ -19,10 +19,12 @@ RRR
     and
     or
     xor
+
+    001 ddd aaa bbb oooo
+
     asr
     lsr
-    lsl
-    
+    lsl 
     fadd
     fsub
     fmul
@@ -35,8 +37,23 @@ RRI
     011 aaa bbb iiiiiii     blu
     100 aaa bbb iiiiiii     bls
     101 aaa bbb iiiiiii     addi
+
+RR
+--
+
     110 aaa bbb 00 ooooo    32 RR instructions
         jalr    00000
+        zeb     00001
+        zes     00010
+        zew     00011
+        seb     00100
+        ses     00101
+        sew     00110
+        neg     00111
+        not     01000
+        fneg    01001
+        finv    01010
+
     110 000 000 01 iiiii    trap
     110 000 000 10 ooooo    32 no operand instructions
         brk   00000
