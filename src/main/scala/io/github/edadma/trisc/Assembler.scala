@@ -5,6 +5,7 @@ import pprint.pprintln
 import scala.annotation.tailrec
 import scala.collection.{immutable, mutable}
 import scala.collection.mutable.ArrayBuffer
+import scala.util.parsing.input.Positional
 
 trait Chunk
 case class DataChunk(data: Seq[Byte]) extends Chunk
@@ -63,6 +64,20 @@ class Assembler(stacked: Boolean = false):
       segment.code += (inst >> 8).toByte
       segment.code += inst.toByte
 
+    def locals(expr: ExprAST): Unit =
+      expr match
+        case l @ LocalExprAST(local, _) =>
+          l.ref = s"${segment.last getOrElse problem(expr, "no preceding label")}.$local"
+        case BinaryExprAST(l, _, r) =>
+          locals(l)
+          locals(r)
+        case _ =>
+
+    def addSymbol(sym: Positional, name: String): Unit =
+      if segments.exists((_, s) => s.symbols contains name) then problem(sym, s"duplicate label '$name'")
+      if equates contains name then problem(sym, s"equate '$name' already defined")
+      segment.symbols(name) = segment.size
+
     segments("_default_") = segment
 
     lines foreach {
@@ -73,9 +88,10 @@ class Assembler(stacked: Boolean = false):
             segments(name) = segment
           case Some(s) => segment = s
       case label @ LabelLineAST(name) =>
-        if segments.exists((_, s) => s.symbols contains name) then problem(label, s"duplicate label '$name'")
-        if equates contains name then problem(label, s"equate '$name' already defined")
-        segment.symbols(name) = segment.size
+        addSymbol(label, name)
+        segment.last = Some(name)
+      case local @ LocalLineAST(name) =>
+        addSymbol(local, s"${segment.last getOrElse problem(local, "no preceding label")}.$name")
       case equate @ EquateLineAST(name, expr) =>
         if equates contains name then problem(equate, s"duplicate equate '$name'")
         if segments.exists((_, s) => s.symbols contains name) then problem(equate, s"label '$name' already defined")
