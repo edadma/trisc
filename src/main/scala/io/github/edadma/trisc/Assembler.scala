@@ -45,6 +45,11 @@ class Assembler(stacked: Boolean = false):
                 case Some(s) =>
                   LongExprAST(if absolute then s.symbols(ref) else s.symbols(ref) - (segment.code.length + 2))
             case Some(expr) => fold(expr, absolute, immediate)
+        case LocalExprAST(_, ref) =>
+          segments.values.find(s => s.symbols contains ref) match
+            case None => problem(e, s"unrecognized label '$ref'")
+            case Some(s) =>
+              LongExprAST(if absolute then s.symbols(ref) else s.symbols(ref) - (segment.code.length + 2))
         case UnaryExprAST("-", expr) =>
           fold(expr, absolute, immediate) match
             case LongExprAST(n)   => LongExprAST(-n)
