@@ -26,47 +26,78 @@ import pprint.pprintln
 //      |  """.stripMargin,
 //  )
 
+  val segs = new Assembler(stacked = true).assemble(
+    """
+      |STDOUT = 0x78
+      |TIMER_DELAY = 0x7A
+      |TIMER_START = 0x7C
+      |
+      |segment code
+      |dw reset
+      |dw timer
+      |dw 0
+      |dw trap0
+      |
+      |reset
+      |  ldi r1, TIMER_DELAY
+      |  ldi r2, 1
+      |  sli r2, 0xf4
+      |  sts r1, r0, r2
+      |  ldi r1, TIMER_START
+      |  sti r1, 1
+      |  cli
+      |  ldi r1, 1
+      |  ldi r2, startMessage
+      |  trap 0
+      |loop
+      |  beq r0, r0, loop
+      |timer
+      |  ldi r1, STDOUT
+      |  sti r1, 'A'
+      |  sti r1, '\n'
+      |  rte
+      |trap0
+      |  beq r1, r0, characterOutput
+      |  addi r1, r1, -1
+      |  beq r1, r0, stringOutput
+      |  brk
+      |characterOutput
+      |  ldi r3, STDOUT
+      |  stb r3, r0, r2
+      |  sti r3, '\n'
+      |  rte
+      |stringOutput
+      |  ldi r3, STDOUT
+      |.char
+      |  ldb r4, r2, r0
+      |  beq r4, r0, .done
+      |  stb r3, r0, r4
+      |  addi r2, r2, 1
+      |  beq r0, r0, .char
+      |.done
+      |  rte
+      |
+      |startMessage
+      |  db "start\n", 0
+      |  """.stripMargin,
+  )
+
 //  val segs = new Assembler(stacked = true).assemble(
 //    """
 //      |STDOUT = 0x78
-//      |TIMER_DELAY = 0x7A
-//      |TIMER_START = 0x7C
 //      |
 //      |segment code
 //      |dw reset
-//      |dw timer
+//      |dw 0
 //      |dw 0
 //      |dw trap0
 //      |
 //      |reset
-//      |  ldi r1, TIMER_DELAY
-//      |  ldi r2, 1
-//      |  sli r2, 0xf4
-//      |  sts r1, r0, r2
-//      |  ldi r1, TIMER_START
-//      |  sti r1, 1
-//      |  cli
 //      |  ldi r1, 1
 //      |  ldi r2, startMessage
 //      |  trap 0
-//      |loop
-//      |  beq r0, r0, loop
-//      |timer
-//      |  ldi r1, STDOUT
-//      |  sti r1, 'A'
-//      |  sti r1, '\n'
-//      |  rte
-//      |trap0
-//      |  beq r1, r0, characterOutput
-//      |  addi r1, r1, -1
-//      |  beq r1, r0, stringOutput
 //      |  brk
-//      |characterOutput
-//      |  ldi r3, STDOUT
-//      |  stb r3, r0, r2
-//      |  sti r3, '\n'
-//      |  rte
-//      |stringOutput
+//      |trap0
 //      |  ldi r3, STDOUT
 //      |.char
 //      |  ldb r4, r2, r0
@@ -75,46 +106,12 @@ import pprint.pprintln
 //      |  addi r2, r2, 1
 //      |  beq r0, r0, .char
 //      |.done
-//      |  sti r3, '\n'
 //      |  rte
 //      |
 //      |startMessage
-//      |  db "start", 0
+//      |  db "start\n", 0
 //      |  """.stripMargin,
 //  )
-
-val segs = new Assembler(stacked = true).assemble(
-  """
-    |STDOUT = 0x78
-    |TIMER_DELAY = 0x7A
-    |TIMER_START = 0x7C
-    |
-    |segment code
-    |dw reset
-    |dw timer
-    |dw 0
-    |dw trap0
-    |
-    |reset
-    |  ldi r1, 1
-    |  ldi r2, startMessage
-    |  trap 0
-    |  brk
-    |trap0
-    |  ldi r3, STDOUT
-    |.char
-    |  ldb r4, r2, r0
-    |  beq r4, r0, .done
-    |  stb r3, r0, r4
-    |  addi r2, r2, 1
-    |  beq r0, r0, .char
-    |.done
-    |  rte
-    |
-    |startMessage
-    |  db "start\n", 0
-    |  """.stripMargin,
-)
 
 //  pprintln(segs)
 

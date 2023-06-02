@@ -134,7 +134,7 @@ class Assembler(stacked: Boolean = false):
       case DataLineAST(width, Nil) => segment.code ++= (if width == 0 then Seq.fill(8)(0) else Seq.fill(width)(0))
       case DataLineAST(width, data) =>
         for d <- data do
-          fold(d, true) match
+          fold(d, absolute = true) match
             case StringExprAST(s) => segment.code ++= s.getBytes(scala.io.Codec.UTF8.charSet)
             case value =>
               width match
@@ -196,7 +196,7 @@ class Assembler(stacked: Boolean = false):
             case RegisterExprAST(reg) => reg
             case _                    => problem(o1, "expected register as first operand")
         val imm =
-          fold(o2, immediate = true) match
+          fold(o2, absolute = true, immediate = true) match
             case _: DoubleExprAST                        => problem(o2, "immediate must be integral")
             case LongExprAST(n) if -128 <= n && n <= 255 => n.toInt
             case _: LongExprAST                          => problem(o2, "immediate must be a byte value")
