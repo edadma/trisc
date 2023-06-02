@@ -105,7 +105,9 @@ class Assembler(stacked: Boolean = false):
               case StringExprAST(s) => s.getBytes(scala.io.Codec.UTF8.charSet).length
               case _                => if width == 0 then 8 else width
             )
-      case _: InstructionLineAST => segment.size += 2
+      case InstructionLineAST(_, operands) =>
+        segment.size += 2
+        operands foreach locals
     }
 
 //    pprintln(equates)
@@ -120,6 +122,7 @@ class Assembler(stacked: Boolean = false):
     lines foreach {
       case SegmentLineAST(name)    => segment = segments(name)
       case LabelLineAST(_)         =>
+      case LocalLineAST(_)         =>
       case EquateLineAST(_, _)     =>
       case DataLineAST(width, Nil) => segment.code ++= (if width == 0 then Seq.fill(8)(0) else Seq.fill(width)(0))
       case DataLineAST(width, data) =>
