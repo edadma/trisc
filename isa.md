@@ -76,3 +76,12 @@ R
 -
 
     111 000 rrr ooooooo
+    
+    pshb 0000000
+    popb 0000001
+    pshs 0000010
+    pops 0000011
+    pshw 0000100
+    popw 0000101
+    pshd 0000110
+    popd 0000111

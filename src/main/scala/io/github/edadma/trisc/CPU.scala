@@ -134,9 +134,9 @@ object Decode:
   def buildInstructionTable(): Unit =
     populate(
       List[(String, Map[Char, Int] => Instruction)](
-        "111 rrr 00 iiiiiiii" -> ((operands: Map[Char, Int]) => new LDI(operands('r'), operands('i'))),
-        "111 rrr 10 iiiiiiii" -> ((operands: Map[Char, Int]) => new SLI(operands('r'), operands('i'))),
-        "111 rrr 11 iiiiiiii" -> ((operands: Map[Char, Int]) => new STI(operands('r'), operands('i'))),
+        "111 rrr 00 iiiiiiii; r:1-7" -> ((operands: Map[Char, Int]) => new LDI(operands('r'), operands('i'))),
+        "111 rrr 10 iiiiiiii; r:1-7" -> ((operands: Map[Char, Int]) => new SLI(operands('r'), operands('i'))),
+        "111 rrr 11 iiiiiiii; r:1-7" -> ((operands: Map[Char, Int]) => new STI(operands('r'), operands('i'))),
         "110 000 000 01 iiiii" -> ((operands: Map[Char, Int]) => new TRAP(operands('i'))),
         "110 aaa bbb 00 00000; b:1-7" -> ((args: Map[Char, Int]) => new JALR(args('a'), args('b'))),
         "110 000 000 00 00000" -> ((operands: Map[Char, Int]) => HALT),
