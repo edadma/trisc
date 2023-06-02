@@ -99,6 +99,7 @@ class Assembler(stacked: Boolean = false):
       case DataLineAST(width, Nil) => segment.size += (if width == 0 then 8 else width)
       case DataLineAST(width, data) =>
         for d <- data do
+          locals(d)
           segment.size +=
             (d match
               case StringExprAST(s) => s.getBytes(scala.io.Codec.UTF8.charSet).length

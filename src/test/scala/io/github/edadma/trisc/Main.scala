@@ -46,7 +46,8 @@ import pprint.pprintln
       |  ldi r1, TIMER_START
       |  sti r1, 1
       |  cli
-      |  ldi r1, '-'
+      |  ldi r1, 0
+      |  ldi r2, '-'
       |  trap 0
       |loop
       |  beq r0, r0, loop
@@ -67,9 +68,14 @@ import pprint.pprintln
       |  rte
       |stringOutput
       |  ldi r3, STDOUT
+      |.char
       |  ldb r4, r2, r0
       |  stb r3, r0, r4
-      |  beg r4, r0, .done
+      |  beq r4, r0, .done
+      |  beq r0, r0, .char
+      |.done
+      |  sti r4, '\n'
+      |  rte
       |  """.stripMargin,
   )
 

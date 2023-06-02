@@ -86,11 +86,14 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
 
   lazy val reference: P[ReferenceExprAST] = ident ^^ ReferenceExprAST.apply
 
+  lazy val localReference: P[LocalExprAST] = "." ~> ident ^^ (l => LocalExprAST(l, null))
+
   lazy val primary: P[ExprAST] = positioned(
     register
       | literal
       | string
-      | reference,
+      | reference
+      | localReference,
   )
 
   lazy val expression: P[ExprAST] = positioned(
@@ -99,6 +102,8 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
   )
 
   lazy val label: P[LabelLineAST] = ident <~ opt(":") ^^ LabelLineAST.apply
+
+  lazy val local: P[LocalLineAST] = "." ~> ident <~ opt(":") ^^ LocalLineAST.apply
 
   lazy val segment: P[SegmentLineAST] = "segment" ~> ident ^^ SegmentLineAST.apply
 
@@ -118,6 +123,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
     segment
       | equate
       | label
+      | local
       | include
       | instruction
       | data
