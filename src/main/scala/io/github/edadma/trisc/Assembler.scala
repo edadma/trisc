@@ -260,18 +260,23 @@ class Assembler(stacked: Boolean = false):
             case _                    => problem(o1, "expected register as third operand")
 
         addInstruction(3 -> 0, 3 -> reg1, 3 -> reg2, 3 -> reg3, 4 -> opcode)
-      case InstructionLineAST(mnemonic @ ("rts" | "rte" | "sei" | "cli"), Nil) =>
+      case InstructionLineAST(mnemonic @ ("rte" | "sei" | "cli"), Nil) =>
         val opcode =
           mnemonic match
-            case "brk" => 0
-            case "rts" => 1
             case "rte" => 2
             case "sei" => 3
             case "cli" => 4
 
         addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 2, 5 -> opcode)
-      case InstructionLineAST("halt", Nil) =>
-        addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 0, 5 -> 0)
+      case InstructionLineAST("halt", Nil) => addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 0, 5 -> 0)
+      case InstructionLineAST("bra", Seq(o)) =>
+        val imm =
+          fold(o, immediate = true) match
+            case _: DoubleExprAST                      => problem(o, "immediate must be integral")
+            case LongExprAST(n) if -64 <= n && n <= 63 => n.toInt
+            case _: LongExprAST                        => problem(o, "immediate must be a signed 7-bit value")
+
+        addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm)
     }
 
     pprintln(segments)

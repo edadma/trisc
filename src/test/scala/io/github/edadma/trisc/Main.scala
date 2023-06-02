@@ -20,7 +20,7 @@ import pprint.pprintln
 //      |  addi r1, r1, 1     // increment counter
 //      |  ldi r2, 5          // we so that we can compare counter to 5
 //      |  bls r2, r1, end    // is 5 < counter? if so, jump to end of program
-//      |  beq r0, r0, loop   // jump back to loop start for next iteration
+//      |  bra loop   // jump back to loop start for next iteration
 //      |end
 //      |  brk                // end program
 //      |  """.stripMargin,
@@ -50,7 +50,7 @@ import pprint.pprintln
       |  ldi r2, startMessage
       |  trap 0
       |loop
-      |  beq r0, r0, loop
+      |  bra loop
       |timer
       |  ldi r1, STDOUT
       |  sti r1, 'A'
@@ -73,7 +73,7 @@ import pprint.pprintln
       |  beq r4, r0, .done
       |  stb r3, r0, r4
       |  addi r2, r2, 1
-      |  beq r0, r0, .char
+      |  bra .char
       |.done
       |  rte
       |
@@ -104,7 +104,7 @@ import pprint.pprintln
 //      |  beq r4, r0, .done
 //      |  stb r3, r0, r4
 //      |  addi r2, r2, 1
-//      |  beq r0, r0, .char
+//      |  bra .char
 //      |.done
 //      |  rte
 //      |

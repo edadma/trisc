@@ -57,7 +57,7 @@ RR
     110 000 000 01 iiiii    trap
     110 000 000 10 ooooo    32 no operand instructions
         ---   00000
-        rts   00001
+        ---   00001
         rte   00010
         sei   00011
         cli   00100
