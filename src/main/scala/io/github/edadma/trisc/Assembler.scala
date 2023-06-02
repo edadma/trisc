@@ -19,6 +19,8 @@ class Assembler(stacked: Boolean = false):
     val code: ArrayBuffer[Byte] = new ArrayBuffer
     var last: Option[String] = None
 
+    override def toString: String = symbols.toString
+
   def assemble(src: String): Seq[Segment] =
     val lines = AssemblyParser.parseAssembly(src)
     val equates = new mutable.HashMap[String, ExprAST]
@@ -270,7 +272,7 @@ class Assembler(stacked: Boolean = false):
         addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 2, 5 -> opcode)
     }
 
-//    pprintln(segments)
+    pprintln(segments)
 //    segments foreach ((name, seg) => println((name, seg.code map (b => (b & 0xff).toHexString))))
 
     segments.toSeq map ((n, s) => Segment(n, Seq(DataChunk(s.code to immutable.ArraySeq))))
