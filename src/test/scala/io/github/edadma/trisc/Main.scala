@@ -98,6 +98,9 @@ import pprint.pprintln
       |  ldi r2, 'A'
       |  ldi r1, characterOutput
       |  jalr r3, r1
+      |  ldi r2, 'B'
+      |  ldi r1, characterOutput
+      |  jalr r3, r1
       |  halt
       |characterOutput
       |  ldi r4, STDOUT
