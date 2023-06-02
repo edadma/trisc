@@ -46,8 +46,8 @@ import pprint.pprintln
       |  ldi r1, TIMER_START
       |  sti r1, 1
       |  cli
-      |  ldi r1, 0
-      |  ldi r2, '-'
+      |  ldi r1, 1
+      |  ldi r2, startMessage
       |  trap 0
       |loop
       |  beq r0, r0, loop
@@ -76,6 +76,9 @@ import pprint.pprintln
       |.done
       |  sti r4, '\n'
       |  rte
+      |  
+      |startMessage
+      |  db "start", 0
       |  """.stripMargin,
   )
 
