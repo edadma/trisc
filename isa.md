@@ -9,8 +9,8 @@ RRR
     sts 0011
     ldw 0100
     stw 0101
-    ldd
-    std
+    ldd 0110
+    std 0111
     add
     sub
     mul
@@ -56,7 +56,7 @@ RR
 
     110 000 000 01 iiiii    trap
     110 000 000 10 ooooo    32 no operand instructions
-        brk   00000
+        ---   00000
         rts   00001
         rte   00010
         sei   00011

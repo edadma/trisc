@@ -60,7 +60,7 @@ import pprint.pprintln
       |  beq r1, r0, characterOutput
       |  addi r1, r1, -1
       |  beq r1, r0, stringOutput
-      |  brk
+      |  halt
       |characterOutput
       |  ldi r3, STDOUT
       |  stb r3, r0, r2

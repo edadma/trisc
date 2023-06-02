@@ -138,7 +138,7 @@ object Decode:
         "111 rrr 10 iiiiiiii" -> ((operands: Map[Char, Int]) => new SLI(operands('r'), operands('i'))),
         "111 rrr 11 iiiiiiii" -> ((operands: Map[Char, Int]) => new STI(operands('r'), operands('i'))),
         "110 000 000 01 iiiii" -> ((operands: Map[Char, Int]) => new TRAP(operands('i'))),
-        "110 000 000 10 00000" -> ((operands: Map[Char, Int]) => BRK),
+        "110 000 000 00 00000" -> ((operands: Map[Char, Int]) => BRK),
         "110 000 000 10 00010" -> ((operands: Map[Char, Int]) => RTE),
         "110 000 000 10 00011" -> ((operands: Map[Char, Int]) => SEI),
         "110 000 000 10 00100" -> ((operands: Map[Char, Int]) => CLI),

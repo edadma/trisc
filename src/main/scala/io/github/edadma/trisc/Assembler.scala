@@ -260,7 +260,7 @@ class Assembler(stacked: Boolean = false):
             case _                    => problem(o1, "expected register as third operand")
 
         addInstruction(3 -> 0, 3 -> reg1, 3 -> reg2, 3 -> reg3, 4 -> opcode)
-      case InstructionLineAST(mnemonic @ ("brk" | "rts" | "rte" | "sei" | "cli"), Nil) =>
+      case InstructionLineAST(mnemonic @ ("rts" | "rte" | "sei" | "cli"), Nil) =>
         val opcode =
           mnemonic match
             case "brk" => 0
@@ -270,6 +270,8 @@ class Assembler(stacked: Boolean = false):
             case "cli" => 4
 
         addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 2, 5 -> opcode)
+      case InstructionLineAST("halt", Nil) =>
+        addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 0, 5 -> 0)
     }
 
     pprintln(segments)
