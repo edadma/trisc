@@ -260,6 +260,20 @@ class Assembler(stacked: Boolean = false):
             case _                    => problem(o1, "expected register as third operand")
 
         addInstruction(3 -> 0, 3 -> reg1, 3 -> reg2, 3 -> reg3, 4 -> opcode)
+      case InstructionLineAST(mnemonic @ ("jalr"), Seq(o1, o2)) =>
+        val opcode =
+          mnemonic match
+            case "jalr" => 0
+        val reg1 =
+          fold(o1) match
+            case RegisterExprAST(reg) => reg
+            case _                    => problem(o1, "expected register as first operand")
+        val reg2 =
+          fold(o2) match
+            case RegisterExprAST(reg) => reg
+            case _                    => problem(o2, "expected register as second operand")
+
+        addInstruction(3 -> 0, 3 -> reg1, 3 -> reg2, 4 -> opcode)
       case InstructionLineAST(mnemonic @ ("rte" | "sei" | "cli"), Nil) =>
         val opcode =
           mnemonic match

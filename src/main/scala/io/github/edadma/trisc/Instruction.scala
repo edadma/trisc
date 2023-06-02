@@ -12,10 +12,15 @@ class LDI(r: Int, imm: Int) extends Instruction:
 class SLI(r: Int, imm: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.r(r).write((cpu.r(r).read << 8) | imm)
 
+class JALR(a: Int, b: Int) extends Instruction:
+  def apply(cpu: CPU): Unit =
+    cpu.r(a) write cpu.pc
+    cpu.pc = cpu.r(b).read
+
 class TRAP(imm: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.state = State.fromOrdinal(State.Trap0.ordinal + imm)
 
-object BRK extends Instruction:
+object HALT extends Instruction:
   def apply(cpu: CPU): Unit = cpu.state = State.Halt
 
 object RTE extends Instruction:
