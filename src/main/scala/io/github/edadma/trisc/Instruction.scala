@@ -44,25 +44,25 @@ class STI(r: Int, imm: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.writeByte(cpu.r(r).read, imm)
 
 class LDB(d: Int, a: Int, b: Int) extends Instruction:
-  def apply(cpu: CPU): Unit = cpu.r(b) write cpu.readByte(cpu.r(d).read + cpu.r(a).read)
+  def apply(cpu: CPU): Unit = cpu.r(d) write cpu.readByte(cpu.r(a).read + cpu.r(b).read)
 
 class STB(d: Int, a: Int, b: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.writeByte(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)
 
 class LDS(d: Int, a: Int, b: Int) extends Instruction:
-  def apply(cpu: CPU): Unit = cpu.r(b) write cpu.readShort(cpu.r(d).read + cpu.r(a).read)
+  def apply(cpu: CPU): Unit = cpu.r(d) write cpu.readShort(cpu.r(a).read + cpu.r(b).read)
 
 class STS(d: Int, a: Int, b: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.writeShort(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)
 
 class LDW(d: Int, a: Int, b: Int) extends Instruction:
-  def apply(cpu: CPU): Unit = cpu.r(b) write cpu.readInt(cpu.r(d).read + cpu.r(a).read)
+  def apply(cpu: CPU): Unit = cpu.r(d) write cpu.readInt(cpu.r(a).read + cpu.r(b).read)
 
 class STW(d: Int, a: Int, b: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.writeInt(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)
 
 class LDD(d: Int, a: Int, b: Int) extends Instruction:
-  def apply(cpu: CPU): Unit = cpu.r(b) write cpu.readLong(cpu.r(d).read + cpu.r(a).read)
+  def apply(cpu: CPU): Unit = cpu.r(d) write cpu.readLong(cpu.r(a).read + cpu.r(b).read)
 
 class STD(d: Int, a: Int, b: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.writeLong(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)

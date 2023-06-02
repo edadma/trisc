@@ -70,11 +70,12 @@ import pprint.pprintln
       |  ldi r3, STDOUT
       |.char
       |  ldb r4, r2, r0
-      |  stb r3, r0, r4
       |  beq r4, r0, .done
+      |  stb r3, r0, r4
+      |  addi r2, r2, 1
       |  beq r0, r0, .char
       |.done
-      |  sti r4, '\n'
+      |  sti r3, '\n'
       |  rte
       |  
       |startMessage
