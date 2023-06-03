@@ -74,7 +74,7 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
     val inst = readShortUnsigned(pc)
     val decoded = Decode(inst)
 
-    if trace then println(f"$pc%04x: ${decoded.mnemonic}%-4s $inst%04x")
+    if trace then println(f"$pc%04x: $inst%04x  ${decoded.disassemble(this)}")
 
     pc += 2
     decoded(this)

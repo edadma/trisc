@@ -249,6 +249,7 @@ class Assembler(stacked: Boolean = false):
             case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => n.toInt
             case _: LongExprAST => problem(o3, "immediate must be an even signed 8-bit value")
 
+        println((mnemonic, imm))
         addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm / 2)
       case InstructionLineAST(
             mnemonic @ ("ldb" | "stb" | "lds" | "sts" | "ldw" | "stw" | "ldd" | "std"),

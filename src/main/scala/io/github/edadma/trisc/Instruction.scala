@@ -63,14 +63,15 @@ class ADDI(a: Int, b: Int, imm: Int) extends SimpleInstruction:
 
   def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read + imm)
 
-abstract class BranchInstruction()
+abstract class BranchInstruction(a: Int, b: Int, imm: Int) extends Instruction:
+  def disassemble(cpu: CPU): String = f"$mnemonic r$a, r$b, ${cpu.pc + 2 + imm * 2}%04x ($imm)"
 
 class BLS(a: Int, b: Int, imm: Int) extends SimpleInstruction:
   val mnemonic = "bls"
 
   def apply(cpu: CPU): Unit = if cpu.r(a).read < cpu.r(b).read then cpu.pc += imm * 2
 
-class BEQ(a: Int, b: Int, imm: Int) extends SimpleInstruction:
+class BEQ(a: Int, b: Int, imm: Int) extends BranchInstruction(a, b, imm):
   val mnemonic = "beq"
 
   def apply(cpu: CPU): Unit = if cpu.r(a).read == cpu.r(b).read then cpu.pc += imm * 2
