@@ -18,15 +18,22 @@ class Assembler(stacked: Boolean = false):
 
   private class PassSegment:
     var size: Long = 0
-    var symbols: mutable.HashMap[String, Long] = new mutable.HashMap
+    val symbols: ArrayBuffer[String] = new ArrayBuffer
     val code: ArrayBuffer[Byte] = new ArrayBuffer
     var last: Option[String] = None
 
     override def toString: String = symbols.toString
 
+  private trait Symbol:
+    val name: String
+
+  private case class EquateSymbol(name: String, value: ExprAST) extends Symbol
+  private case class LabelSymbol(name: String, var value: Long) extends Symbol
+  private case class ExternSymbol(name: String) extends Symbol
+
   def assemble(src: String): Seq[Segment] =
     val lines = AssemblyParser.parseAssembly(src)
-    val equates = new mutable.HashMap[String, ExprAST]
+    val symbols = new mutable.HashMap[String, Symbol]
     val segments = new mutable.LinkedHashMap[String, PassSegment]
     var segment = PassSegment()
 
@@ -43,18 +50,16 @@ class Assembler(stacked: Boolean = false):
           v
         case s: StringExprAST => s
         case ReferenceExprAST(ref) =>
-          equates get ref match
-            case None =>
-              segments.values.find(s => s.symbols contains ref) match
-                case None => problem(e, s"unrecognized equate or label '$ref'")
-                case Some(s) =>
-                  LongExprAST(if absolute then s.symbols(ref) else s.symbols(ref) - (segment.code.length + 2))
-            case Some(expr) => fold(expr, absolute, immediate)
+          symbols get ref match
+            case None => problem(e, s"unrecognized equate or label '$ref'")
+            case Some(LabelSymbol(_, value)) =>
+              LongExprAST(if absolute then value else value - (segment.code.length + 2))
+            case Some(EquateSymbol(_, value)) => fold(value, absolute, immediate)
         case LocalExprAST(_, ref) =>
-          segments.values.find(s => s.symbols contains ref) match
+          symbols get ref match
             case None => problem(e, s"unrecognized label '$ref'")
-            case Some(s) =>
-              LongExprAST(if absolute then s.symbols(ref) else s.symbols(ref) - (segment.code.length + 2))
+            case Some(LabelSymbol(_, value)) =>
+              LongExprAST(if absolute then value else value - (segment.code.length + 2))
         case UnaryExprAST("-", expr) =>
           fold(expr, absolute, immediate) match
             case LongExprAST(n)   => LongExprAST(-n)
@@ -84,9 +89,9 @@ class Assembler(stacked: Boolean = false):
         case _ =>
 
     def addSymbol(sym: Positional, name: String): Unit =
-      if segments.exists((_, s) => s.symbols contains name) then problem(sym, s"duplicate label '$name'")
-      if equates contains name then problem(sym, s"equate '$name' already defined")
-      segment.symbols(name) = segment.size
+      if symbols contains name then problem(sym, s"symbol '$name' already defined")
+      symbols(name) = LabelSymbol(name, segment.size)
+      segment.symbols += name
 
     segments("_default_") = segment
 
@@ -103,9 +108,8 @@ class Assembler(stacked: Boolean = false):
       case local @ LocalLineAST(name) =>
         addSymbol(local, s"${segment.last getOrElse problem(local, "no preceding label")}.$name")
       case equate @ EquateLineAST(name, expr) =>
-        if equates contains name then problem(equate, s"duplicate equate '$name'")
-        if segments.exists((_, s) => s.symbols contains name) then problem(equate, s"label '$name' already defined")
-        equates(name) = expr
+        if symbols contains name then problem(equate, s"duplicate definition of '$name'")
+        symbols(name) = EquateSymbol(name, expr)
       case DataLineAST(width, Nil) => segment.size += (if width == 0 then 8 else width)
       case DataLineAST(width, data) =>
         val startingSize = segment.size
@@ -139,7 +143,7 @@ class Assembler(stacked: Boolean = false):
       var base = segments.values.head.size
 
       for s <- segments.values.tail do
-        s.symbols mapValuesInPlace ((_, offset) => base + offset)
+        s.symbols foreach (n => symbols(n).asInstanceOf[LabelSymbol].value += base)
         base += s.size
 
     lines foreach {
