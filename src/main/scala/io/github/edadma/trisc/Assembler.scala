@@ -274,14 +274,24 @@ class Assembler(stacked: Boolean = false):
             case _                    => problem(o2, "expected register as second operand")
 
         addInstruction(3 -> 6, 3 -> reg1, 3 -> reg2, 4 -> opcode)
-      case InstructionLineAST(mnemonic @ ("rte" | "sei" | "cli"), Nil) =>
+      case InstructionLineAST(mnemonic @ ("rte"), Nil) =>
         val opcode =
           mnemonic match
-            case "rte" => 2
-            case "sei" => 3
-            case "cli" => 4
+            case "rte" => 10
 
-        addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 2, 5 -> opcode)
+        addInstruction(3 -> 7, 3 -> 0, 3 -> 0, 7 -> opcode)
+      case InstructionLineAST(mnemonic @ ("spsr" | "gpsr"), Seq(o)) =>
+        val opcode =
+          mnemonic match
+            case "spsr" => 8
+            case "gpsr" => 9
+            case "rte"  => 10
+        val reg =
+          fold(o) match
+            case RegisterExprAST(reg) => reg
+            case _                    => problem(o, "expected register as first operand")
+
+        addInstruction(3 -> 7, 3 -> 0, 3 -> reg, 7 -> opcode)
       case InstructionLineAST("halt", Nil) => addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 0, 5 -> 0)
       case InstructionLineAST("bra", Seq(o)) =>
         val imm =

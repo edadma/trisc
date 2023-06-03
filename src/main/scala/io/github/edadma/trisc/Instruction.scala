@@ -29,12 +29,11 @@ object RTE extends Instruction:
     cpu.pc = cpu.spc
     cpu.psr = cpu.spsr
 
-object SEI extends Instruction:
-  def apply(cpu: CPU): Unit =
-    cpu.set(Status.Ind, true)
+class SPSR(r: Int) extends Instruction:
+  def apply(cpu: CPU): Unit = cpu.psr = cpu.r(r).read.toInt
 
-object CLI extends Instruction:
-  def apply(cpu: CPU): Unit = cpu.set(Status.Ind, false)
+class GPSR(r: Int) extends Instruction:
+  def apply(cpu: CPU): Unit = cpu.r(r) write cpu.psr & 0xffffffff
 
 class ADDI(a: Int, b: Int, imm: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read + imm)
