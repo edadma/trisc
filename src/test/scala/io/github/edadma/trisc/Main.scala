@@ -152,7 +152,7 @@ import pprint.pprintln
   val cpu = new CPU(mem, List(timer)) {
     trace = true
     clump = 1
-    limit = 10
+    limit = 20
   }
 
   cpu.reset()
