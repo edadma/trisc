@@ -273,7 +273,27 @@ class Assembler(stacked: Boolean = false):
             case RegisterExprAST(reg) => reg
             case _                    => problem(o2, "expected register as second operand")
 
-        addInstruction(3 -> 6, 3 -> reg1, 3 -> reg2, 4 -> opcode)
+        addInstruction(3 -> 6, 3 -> reg1, 3 -> reg2, 2 -> 0, 5 -> opcode)
+      case InstructionLineAST(mnemonic @ ("ld" | "st"), Seq(o1, o2, o3)) =>
+        val opcode =
+          mnemonic match
+            case "ld" => 2
+            case "st" => 3
+        val reg1 =
+          fold(o1) match
+            case RegisterExprAST(reg) => reg
+            case _                    => problem(o1, "expected register as first operand")
+        val reg2 =
+          fold(o2) match
+            case RegisterExprAST(reg) => reg
+            case _                    => problem(o2, "expected register as second operand")
+        val imm =
+          fold(o3, absolute = true, immediate = true) match
+            case _: DoubleExprAST                                  => problem(o3, "immediate must be integral")
+            case LongExprAST(n) if 0 <= n && n <= 62 && n % 2 == 0 => n.toInt
+            case _: LongExprAST => problem(o3, "immediate must be an even non-negative value between 0 and 62")
+
+        addInstruction(3 -> 6, 3 -> reg1, 3 -> reg2, 2 -> opcode, 5 -> imm / 2)
       case InstructionLineAST(mnemonic @ ("rte"), Nil) =>
         val opcode =
           mnemonic match

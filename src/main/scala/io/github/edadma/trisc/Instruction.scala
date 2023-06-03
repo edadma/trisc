@@ -50,6 +50,12 @@ class STI(r: Int, imm: Int) extends Instruction:
 class LDB(d: Int, a: Int, b: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.r(d) write cpu.readByte(cpu.r(a).read + cpu.r(b).read)
 
+class LD(a: Int, b: Int, imm: Int) extends Instruction:
+  def apply(cpu: CPU): Unit = cpu.r(a) write cpu.readInt(cpu.r(b).read + imm * 2)
+
+class ST(a: Int, b: Int, imm: Int) extends Instruction:
+  def apply(cpu: CPU): Unit = cpu.writeInt(cpu.r(b).read + imm * 2, cpu.r(a).read)
+
 class STB(d: Int, a: Int, b: Int) extends Instruction:
   def apply(cpu: CPU): Unit = cpu.writeByte(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)
 
