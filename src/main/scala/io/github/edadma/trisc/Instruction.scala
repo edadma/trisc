@@ -13,15 +13,23 @@ object IllegalInstruction extends SimpleInstruction:
 
   def apply(cpu: CPU): Unit = sys.error("illegal instruction")
 
-class LDI(r: Int, imm: Int) extends SimpleInstruction:
+abstract class ImmediateInstruction(r: Int, imm: Int) extends Instruction:
+  def disassemble(cpu: CPU): String = f"$mnemonic r$r, 0x$imm%02x ($imm)"
+
+class LDI(r: Int, imm: Int) extends ImmediateInstruction(r, imm):
   val mnemonic = "ldi"
 
   def apply(cpu: CPU): Unit = cpu.r(r) write imm
 
-class SLI(r: Int, imm: Int) extends SimpleInstruction:
+class SLI(r: Int, imm: Int) extends ImmediateInstruction(r, imm):
   val mnemonic = "sli"
 
   def apply(cpu: CPU): Unit = cpu.r(r).write((cpu.r(r).read << 8) | imm)
+
+class STI(r: Int, imm: Int) extends ImmediateInstruction(r, imm):
+  val mnemonic = "sti"
+
+  def apply(cpu: CPU): Unit = cpu.writeByte(cpu.r(r).read, imm)
 
 class JALR(a: Int, b: Int) extends SimpleInstruction:
   val mnemonic = "jalr"
@@ -58,7 +66,10 @@ class GPSR(r: Int) extends SimpleInstruction:
 
   def apply(cpu: CPU): Unit = cpu.r(r) write cpu.psr & 0xffffffff
 
-class ADDI(a: Int, b: Int, imm: Int) extends SimpleInstruction:
+abstract class ImmediateSignedInstruction(a: Int, b: Int, imm: Int) extends Instruction:
+  def disassemble(cpu: CPU): String = f"$mnemonic r$a, r$b, 0x$imm%02x ($imm)"
+
+class ADDI(a: Int, b: Int, imm: Int) extends ImmediateSignedInstruction(a, b, imm):
   val mnemonic = "addi"
 
   def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read + imm)
@@ -75,11 +86,6 @@ class BEQ(a: Int, b: Int, imm: Int) extends BranchInstruction(a, b, imm):
   val mnemonic = "beq"
 
   def apply(cpu: CPU): Unit = if cpu.r(a).read == cpu.r(b).read then cpu.pc += imm * 2
-
-class STI(r: Int, imm: Int) extends SimpleInstruction:
-  val mnemonic = "sti"
-
-  def apply(cpu: CPU): Unit = cpu.writeByte(cpu.r(r).read, imm)
 
 class LDB(d: Int, a: Int, b: Int) extends SimpleInstruction:
   val mnemonic = "ldb"
