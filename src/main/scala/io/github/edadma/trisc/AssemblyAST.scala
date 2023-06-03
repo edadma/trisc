@@ -11,7 +11,7 @@ case class SegmentLineAST(name: String) extends LineAST
 case class EquateLineAST(name: String, expr: ExprAST) extends LineAST
 case class IncludeLineAST(path: String) extends LineAST
 case class DataLineAST(width: Int, data: Seq[ExprAST]) extends LineAST
-case class ReserveLineAST(width: Int, n: ExprASTt) extends LineAST
+case class ReserveLineAST(width: Int, n: ExprAST) extends LineAST
 
 trait ExprAST extends Positional
 

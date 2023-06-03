@@ -128,7 +128,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
     case "dd" ~ d => DataLineAST(0, d)
   }
 
-  lazy val reserve: P[DataLineAST] = ("resb" | "ress" | "resw" | "resl" | "resd") ~ expression ^^ {
+  lazy val reserve: P[ReserveLineAST] = ("resb" | "ress" | "resw" | "resl" | "resd") ~ expression ^^ {
     case "resb" ~ n => ReserveLineAST(1, n)
     case "ress" ~ n => ReserveLineAST(2, n)
     case "resw" ~ n => ReserveLineAST(4, n)

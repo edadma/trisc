@@ -116,11 +116,10 @@ class Assembler(stacked: Boolean = false):
               case _                => if width == 0 then 8 else width
             )
       case ReserveLineAST(width, n) =>
-        val count =
-          fold(absolute = true, n) match
-            case LongExprAST(count) if 0 < count && count <= 10 * M =>
-              segment.size += count * (if width == 0 then 8 else width)
-            case _ => problem(n, s"must be a positve integer up to 10 billion")
+        fold(n, absolute = true) match
+          case LongExprAST(count) if 0 < count && count <= 10 * M =>
+            segment.size += count * (if width == 0 then 8 else width)
+          case _ => problem(n, s"must be a positive integer up to 10 meg")
       case InstructionLineAST(_, operands) =>
         segment.size += 2
         operands foreach locals
@@ -194,6 +193,11 @@ class Assembler(stacked: Boolean = false):
                   segment.code += (v >> 16).toByte
                   segment.code += (v >> 8).toByte
                   segment.code += v.toByte
+      case ReserveLineAST(width, n) =>
+        fold(n, absolute = true) match
+          case LongExprAST(count) if 0 < count && count <= 10 * M =>
+            segment.code ++= Seq.fill(count.toInt * (if width == 0 then 8 else width))(0)
+          case _ => problem(n, s"must be a positive integer up to 10 meg")
       case InstructionLineAST(mnemonic @ ("ldi" | "sli" | "sti"), Seq(o1, o2)) =>
         val opcode =
           mnemonic match
