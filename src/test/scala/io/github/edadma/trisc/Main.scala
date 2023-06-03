@@ -31,9 +31,9 @@ import pprint.pprintln
 
   val segs = new Assembler(stacked = true).assemble(
     """
-      |STDOUT = 0x78
-      |TIMER_DELAY = 0x7A
-      |TIMER_START = 0x7C
+      |STDOUT = 0xF8
+      |TIMER_DELAY = 0xFA
+      |TIMER_START = 0xFC
       |
       |segment code
       |dw reset
@@ -45,6 +45,12 @@ import pprint.pprintln
       |  dw firstMessage
       |  dw secondMessage
       |  dw thirdMessage
+      |
+      |byte resb 3
+      |short ress 3
+      |word resw 3
+      |long resl 3
+      |double resd 3
       |
       |firstMessage db "first\n",0
       |secondMessage db "second\n",0
@@ -177,11 +183,11 @@ import pprint.pprintln
 
   val chunks = segs flatMap (_.chunks)
   val code = chunks flatMap { case DataChunk(data) => data } to IndexedSeq
-  val timer = new Timer(0x7a)
+  val timer = new Timer(0xfa)
   val mem = new Memory(
     "Memory",
     new ROM(code, 0),
-    new Stdout(0x78),
+    new Stdout(0xf8),
     timer,
   )
 

@@ -108,18 +108,26 @@ class Assembler(stacked: Boolean = false):
         equates(name) = expr
       case DataLineAST(width, Nil) => segment.size += (if width == 0 then 8 else width)
       case DataLineAST(width, data) =>
+        val startingSize = segment.size
+
         for d <- data do
           locals(d)
           segment.size +=
             (d match
-              case StringExprAST(s) => s.getBytes(scala.io.Codec.UTF8.charSet).length
+              case StringExprAST(s) => (s.getBytes(scala.io.Codec.UTF8.charSet).length + 1) & 0xfffffffe
               case _                => if width == 0 then 8 else width
             )
+
+        if (segment.size - startingSize) % 2 == 1 then segment.size += 1
       case ReserveLineAST(width, n) =>
+        val startingSize = segment.size
+
         fold(n, absolute = true) match
           case LongExprAST(count) if 0 < count && count <= 10 * M =>
-            segment.size += count * (if width == 0 then 8 else width)
+            segment.size += count.toInt * (if width == 0 then 8 else width)
           case _ => problem(n, s"must be a positive integer up to 10 meg")
+
+        if (segment.size - startingSize) % 2 == 1 then segment.size += 1
       case InstructionLineAST(_, operands) =>
         segment.size += 2
         operands foreach locals
@@ -131,7 +139,7 @@ class Assembler(stacked: Boolean = false):
       var base = segments.values.head.size
 
       for s <- segments.values.tail do
-        s.symbols = s.symbols map ((name, offset) => name -> (base + offset))
+        s.symbols mapValuesInPlace ((_, offset) => base + offset)
         base += s.size
 
     lines foreach {
@@ -141,9 +149,16 @@ class Assembler(stacked: Boolean = false):
       case EquateLineAST(_, _)     =>
       case DataLineAST(width, Nil) => segment.code ++= (if width == 0 then Seq.fill(8)(0) else Seq.fill(width)(0))
       case DataLineAST(width, data) =>
+        val startingLength = segment.code.length
+
         for d <- data do
           fold(d, absolute = true) match
-            case StringExprAST(s) => segment.code ++= s.getBytes(scala.io.Codec.UTF8.charSet)
+            case StringExprAST(s) =>
+              val bytes = s.getBytes(scala.io.Codec.UTF8.charSet)
+
+              segment.code ++= bytes
+
+              if bytes.length % 2 == 1 then segment.code += 0
             case value =>
               width match
                 case 1 =>
@@ -193,11 +208,17 @@ class Assembler(stacked: Boolean = false):
                   segment.code += (v >> 16).toByte
                   segment.code += (v >> 8).toByte
                   segment.code += v.toByte
+
+        if (segment.code.length - startingLength) % 2 == 1 then segment.code += 0
       case ReserveLineAST(width, n) =>
+        val startingLength = segment.code.length
+
         fold(n, absolute = true) match
           case LongExprAST(count) if 0 < count && count <= 10 * M =>
             segment.code ++= Seq.fill(count.toInt * (if width == 0 then 8 else width))(0)
           case _ => problem(n, s"must be a positive integer up to 10 meg")
+
+        if (segment.code.length - startingLength) % 2 == 1 then segment.code += 0
       case InstructionLineAST(mnemonic @ ("ldi" | "sli" | "sti"), Seq(o1, o2)) =>
         val opcode =
           mnemonic match
@@ -354,7 +375,7 @@ class Assembler(stacked: Boolean = false):
         addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm / 2)
     }
 
-//    pprintln(segments)
+    pprintln(segments)
 //    segments foreach ((name, seg) => println((name, seg.code map (b => (b & 0xff).toHexString))))
 
     segments.toSeq map ((n, s) => Segment(n, Seq(DataChunk(s.code to immutable.ArraySeq))))
