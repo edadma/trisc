@@ -23,9 +23,9 @@ import pprint.pprintln
       |  addi r1, r1, 1     // increment counter
       |  ldi r2, 5          // we so that we can compare counter to 5
       |  bls r2, r1, end    // is 5 < counter? if so, jump to end of program
-      |  bra loop   // jump back to loop start for next iteration
+      |  bra loop           // jump back to loop start for next iteration
       |end
-      |  brk                // end program
+      |  halt
       |  """.stripMargin,
   )
 
@@ -150,9 +150,9 @@ import pprint.pprintln
 //  //  for i <- 0L until rom.size do println(rom.readByte(i).toHexString)
 
   val cpu = new CPU(mem, List(timer)) {
-    trace = true
-    clump = 1
-    limit = 20
+//    trace = true
+//    clump = 1
+//    limit = 20
   }
 
   cpu.reset()

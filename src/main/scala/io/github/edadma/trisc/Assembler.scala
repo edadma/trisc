@@ -249,7 +249,6 @@ class Assembler(stacked: Boolean = false):
             case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => n.toInt
             case _: LongExprAST => problem(o3, "immediate must be an even signed 8-bit value")
 
-        println((mnemonic, imm))
         addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm / 2)
       case InstructionLineAST(
             mnemonic @ ("ldb" | "stb" | "lds" | "sts" | "ldw" | "stw" | "ldd" | "std"),
@@ -335,14 +334,14 @@ class Assembler(stacked: Boolean = false):
       case InstructionLineAST("bra", Seq(o)) =>
         val imm =
           fold(o, immediate = true) match
-            case _: DoubleExprAST                      => problem(o, "immediate must be integral")
-            case LongExprAST(n) if -64 <= n && n <= 63 => n.toInt
-            case _: LongExprAST                        => problem(o, "immediate must be a signed 7-bit value")
+            case _: DoubleExprAST                                      => problem(o, "immediate must be integral")
+            case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => n.toInt
+            case _: LongExprAST => problem(o, "immediate must ben even signed 8-bit value")
 
-        addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm)
+        addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm / 2)
     }
 
-    pprintln(segments)
+//    pprintln(segments)
 //    segments foreach ((name, seg) => println((name, seg.code map (b => (b & 0xff).toHexString))))
 
     segments.toSeq map ((n, s) => Segment(n, Seq(DataChunk(s.code to immutable.ArraySeq))))
