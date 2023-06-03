@@ -55,12 +55,8 @@ RR
         finv    01010
 
     110 000 000 01 iiiii    trap
-    110 000 000 10 ooooo    32 no operand instructions
-        ---   00000
-        ---   00001
-        rte   00010
-        sei   00011
-        cli   00100
+    110 aaa bbb 10 iiiii    ld
+    110 aaa bbb 11 iiiii    st
 
 RI
 --
@@ -85,3 +81,6 @@ R
     popw 0000101
     pshd 0000110
     popd 0000111
+    lpsr 0001000
+    spsr 0001001
+    rte  0001010
