@@ -210,12 +210,9 @@ class Assembler(stacked: Boolean = false):
             case _: LongExprAST                     => problem(o1, "immediate must be between 0 and 7")
 
         addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 1, 5 -> imm)
-      case InstructionLineAST(mnemonic @ ("beq" | "blu" | "bls" | "addi"), Seq(o1, o2, o3)) =>
+      case InstructionLineAST(mnemonic @ ("addi"), Seq(o1, o2, o3)) =>
         val opcode =
           mnemonic match
-            case "beq"  => 2
-            case "blu"  => 3
-            case "bls"  => 4
             case "addi" => 5
         val reg1 =
           fold(o1) match
@@ -227,11 +224,32 @@ class Assembler(stacked: Boolean = false):
             case _                    => problem(o2, "expected register as second operand")
         val imm =
           fold(o3, immediate = true) match
-            case _: DoubleExprAST                      => problem(o2, "immediate must be integral")
+            case _: DoubleExprAST                      => problem(o3, "immediate must be integral")
             case LongExprAST(n) if -64 <= n && n <= 63 => n.toInt
-            case _: LongExprAST                        => problem(o2, "immediate must be a signed 7-bit value")
+            case _: LongExprAST                        => problem(o3, "immediate must be a signed 7-bit value")
 
         addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm)
+      case InstructionLineAST(mnemonic @ ("beq" | "blu" | "bls"), Seq(o1, o2, o3)) =>
+        val opcode =
+          mnemonic match
+            case "beq" => 2
+            case "blu" => 3
+            case "bls" => 4
+        val reg1 =
+          fold(o1) match
+            case RegisterExprAST(reg) => reg
+            case _                    => problem(o1, "expected register as first operand")
+        val reg2 =
+          fold(o2) match
+            case RegisterExprAST(reg) => reg
+            case _                    => problem(o2, "expected register as second operand")
+        val imm =
+          fold(o3, immediate = true) match
+            case _: DoubleExprAST                                      => problem(o3, "immediate must be integral")
+            case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => n.toInt
+            case _: LongExprAST => problem(o3, "immediate must be an even signed 8-bit value")
+
+        addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm / 2)
       case InstructionLineAST(
             mnemonic @ ("ldb" | "stb" | "lds" | "sts" | "ldw" | "stw" | "ldd" | "std"),
             Seq(o1, o2, o3),
