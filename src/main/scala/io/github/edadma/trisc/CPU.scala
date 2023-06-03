@@ -40,9 +40,9 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   var psr: Int = 0
   var spsr: Int = 0
   var state: State = State.Halt
-  var inst: Int = 0
 
   var limit: Int = -1
+  var clump: Int = 1000
   var trace: Boolean = false
 
   def test(status: Status): Boolean = (psr & status.bit) != 0
@@ -71,18 +71,19 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
       state = State.Run
       set(Status.Mode, true)
 
-    inst = readShortUnsigned(pc)
+    val inst = readShortUnsigned(pc)
+    val decoded = Decode(inst)
 
-    if trace then println((pc.toHexString, inst.toHexString))
+    if trace then println(f"$pc%04x: ${decoded.mnemonic}%-4s $inst%04x")
 
     pc += 2
-    Decode(inst)(this)
+    decoded(this)
 
   @tailrec
   final def run(): Unit =
     var count = 0
 
-    while state != State.Halt && count < 1000 do
+    while state != State.Halt && count < clump do
       execute()
       count += 1
 
