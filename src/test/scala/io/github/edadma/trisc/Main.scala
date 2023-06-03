@@ -3,29 +3,88 @@ package io.github.edadma.trisc
 import pprint.pprintln
 
 @main def run(): Unit =
+//  val segs = new Assembler(stacked = true).assemble(
+//    """
+//      |STDOUT = 0x78
+//      |
+//      |segment code
+//      |dw reset
+//      |dw 0
+//      |dw 0
+//      |dw 0
+//      |
+//      |reset
+//      |  ldi r1, 1          // start counter at 1
+//      |  ldi r3, STDOUT     // r3 contains stdout device address
+//      |loop
+//      |  addi r4, r1, '0'   // convert counter to ASCII character
+//      |  stb r3, r0, r4     // output counter character
+//      |  sti r3, '\n'       // output linefeed character
+//      |  addi r1, r1, 1     // increment counter
+//      |  ldi r2, 5          // we so that we can compare counter to 5
+//      |  bls r2, r1, end    // is 5 < counter? if so, jump to end of program
+//      |  bra loop           // jump back to loop start for next iteration
+//      |end
+//      |  halt
+//      |  """.stripMargin,
+//  )
+
   val segs = new Assembler(stacked = true).assemble(
     """
       |STDOUT = 0x78
+      |TIMER_DELAY = 0x7A
+      |TIMER_START = 0x7C
       |
       |segment code
       |dw reset
       |dw 0
       |dw 0
-      |dw 0
+      |dw trap0
+      |
+      |table
+      |  dw firstMessage
+      |  dw secondMessage
+      |  dw thirdMessage
+      |
+      |firstMessage db "first\n",0
+      |secondMessage db "second\n",0
+      |thirdMessage db "third\n",0
       |
       |reset
-      |  ldi r1, 1          // start counter at 1
-      |  ldi r3, STDOUT     // r3 contains stdout device address
-      |loop
-      |  addi r4, r1, '0'   // convert counter to ASCII character
-      |  stb r3, r0, r4     // output counter character
-      |  sti r3, '\n'       // output linefeed character
-      |  addi r1, r1, 1     // increment counter
-      |  ldi r2, 5          // we so that we can compare counter to 5
-      |  bls r2, r1, end    // is 5 < counter? if so, jump to end of program
-      |  bra loop           // jump back to loop start for next iteration
-      |end
+      |  ldi r1, 0
+      |  spsr r1
+      |
+      |  ldi r1, 1
+      |
+      |  ldi r3, table
+      |
+      |  ld r2, r3, 0
+      |  trap 0
+      |  ld r2, r3, 4
+      |  trap 0
+      |  ld r2, r3, 8
+      |  trap 0
       |  halt
+      |trap0
+      |  beq r1, r0, characterOutput
+      |  addi r1, r1, -1
+      |  beq r1, r0, stringOutput
+      |  halt
+      |characterOutput
+      |  ldi r3, STDOUT
+      |  stb r3, r0, r2
+      |  sti r3, '\n'
+      |  rte
+      |stringOutput
+      |  ldi r3, STDOUT
+      |.char
+      |  ldb r4, r2, r0
+      |  beq r4, r0, .done
+      |  stb r3, r0, r4
+      |  addi r2, r2, 1
+      |  bra .char
+      |.done
+      |  rte
       |  """.stripMargin,
   )
 
@@ -152,7 +211,7 @@ import pprint.pprintln
   val cpu = new CPU(mem, List(timer)) {
 //    trace = true
 //    clump = 1
-//    limit = 20
+    limit = 30000
   }
 
   cpu.reset()

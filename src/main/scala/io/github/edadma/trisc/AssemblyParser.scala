@@ -25,10 +25,10 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |segment
                           |include
                           |db
+                          |dd
+                          |dl
                           |ds
                           |dw
-                          |dl
-                          |dd
                           |r0
                           |r1
                           |r2
@@ -51,6 +51,11 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |ldi
                           |lds
                           |ldw
+                          |resb
+                          |resd
+                          |resl
+                          |ress
+                          |resw
                           |rte
                           |sli
                           |spsr
@@ -123,6 +128,14 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
     case "dd" ~ d => DataLineAST(0, d)
   }
 
+  lazy val reserve: P[DataLineAST] = ("resb" | "ress" | "resw" | "resl" | "resd") ~ expression ^^ {
+    case "resb" ~ n => ReserveLineAST(1, n)
+    case "ress" ~ n => ReserveLineAST(2, n)
+    case "resw" ~ n => ReserveLineAST(4, n)
+    case "resl" ~ n => ReserveLineAST(8, n)
+    case "resd" ~ n => ReserveLineAST(0, n)
+  }
+
   lazy val simpleLine: P[LineAST] =
     segment
       | equate
@@ -131,6 +144,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
       | include
       | instruction
       | data
+      | reserve
 
   lazy val line: P[Seq[LineAST]] =
     simpleLine ^^ (Seq(_))

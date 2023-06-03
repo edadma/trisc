@@ -13,6 +13,9 @@ case class DataChunk(data: Seq[Byte]) extends Chunk
 case class Segment(name: String, chunks: Seq[Chunk])
 
 class Assembler(stacked: Boolean = false):
+  val K = 1024
+  val M = K * K
+
   private class PassSegment:
     var size: Long = 0
     var symbols: mutable.HashMap[String, Long] = new mutable.HashMap
@@ -112,6 +115,12 @@ class Assembler(stacked: Boolean = false):
               case StringExprAST(s) => s.getBytes(scala.io.Codec.UTF8.charSet).length
               case _                => if width == 0 then 8 else width
             )
+      case ReserveLineAST(width, n) =>
+        val count =
+          fold(absolute = true, n) match
+            case LongExprAST(count) if 0 < count && count <= 10 * M =>
+              segment.size += count * (if width == 0 then 8 else width)
+            case _ => problem(n, s"must be a positve integer up to 10 billion")
       case InstructionLineAST(_, operands) =>
         segment.size += 2
         operands foreach locals
