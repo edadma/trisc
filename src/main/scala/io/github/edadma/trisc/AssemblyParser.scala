@@ -144,7 +144,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
     case "resd" ~ n => ReserveLineAST(0, n)
   }
 
-  lazy val simpleLine: P[LineAST] =
+  lazy val simpleLine: P[LineAST] = positioned(
     segment
       | equate
       | label
@@ -152,7 +152,8 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
       | include
       | instruction
       | data
-      | reserve
+      | reserve,
+  )
 
   lazy val line: P[Seq[LineAST]] =
     simpleLine ^^ (Seq(_))

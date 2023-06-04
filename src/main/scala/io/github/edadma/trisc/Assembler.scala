@@ -28,12 +28,13 @@ class Assembler(stacked: Boolean = false):
     val name: String
 
   private case class EquateSymbol(name: String, value: ExprAST) extends Symbol
-  private case class LabelSymbol(name: String, var value: Long) extends Symbol
+  private case class LabelSymbol(name: String, var value: Long, sym: Positional, var referenced: Boolean = false)
+      extends Symbol
   private case class ExternSymbol(name: String) extends Symbol
 
   def assemble(src: String): Seq[Segment] =
     val lines = AssemblyParser.parseAssembly(src)
-    val symbols = new mutable.HashMap[String, Symbol]
+    val symbols = new mutable.LinkedHashMap[String, Symbol]
     val segments = new mutable.LinkedHashMap[String, PassSegment]
     var segment = PassSegment()
 
@@ -52,13 +53,15 @@ class Assembler(stacked: Boolean = false):
         case ReferenceExprAST(ref) =>
           symbols get ref match
             case None => problem(e, s"unrecognized equate or label '$ref'")
-            case Some(LabelSymbol(_, value)) =>
+            case Some(l @ LabelSymbol(_, value, _, _)) =>
+              l.referenced = true
               LongExprAST(if absolute then value else value - (segment.code.length + 2))
             case Some(EquateSymbol(_, value)) => fold(value, absolute, immediate)
         case LocalExprAST(_, ref) =>
           symbols get ref match
             case None => problem(e, s"unrecognized label '$ref'")
-            case Some(LabelSymbol(_, value)) =>
+            case Some(l @ LabelSymbol(_, value, _, _)) =>
+              l.referenced = true
               LongExprAST(if absolute then value else value - (segment.code.length + 2))
         case UnaryExprAST("-", expr) =>
           fold(expr, absolute, immediate) match
@@ -89,8 +92,8 @@ class Assembler(stacked: Boolean = false):
         case _ =>
 
     def addSymbol(sym: Positional, name: String): Unit =
-      if symbols contains name then problem(sym, s"symbol '$name' already defined")
-      symbols(name) = LabelSymbol(name, segment.size)
+      if symbols contains name then problem(sym, s"duplicate symbol: '$name'")
+      symbols(name) = LabelSymbol(name, segment.size, sym)
       segment.symbols += name
 
     segments("_default_") = segment
@@ -386,6 +389,11 @@ class Assembler(stacked: Boolean = false):
             case _: LongExprAST => problem(o, "immediate must ben even signed 8-bit value")
 
         addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm / 2)
+    }
+
+    symbols.values foreach {
+      case LabelSymbol(name, _, sym, false) => warning(sym, s"Warning: label '$name' never referenced")
+      case _                                =>
     }
 
     pprintln(segments)
