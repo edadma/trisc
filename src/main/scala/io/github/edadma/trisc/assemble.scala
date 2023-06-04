@@ -148,9 +148,9 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     seg.symbols foreach (n => symbols(n).asInstanceOf[LabelSymbol].value += org)
     seg.org = org
 
-  var base = segments.values.head.size
+  var base = 0L
 
-  for (n, s) <- segments.tail do
+  for (n, s) <- segments do
     orgs get n match
       case None =>
         if stacked then

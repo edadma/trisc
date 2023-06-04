@@ -38,8 +38,10 @@ class JALR(a: Int, b: Int) extends SimpleInstruction:
     cpu.r(a) write cpu.pc
     cpu.pc = cpu.r(b).read
 
-class TRAP(imm: Int) extends SimpleInstruction:
+class TRAP(imm: Int) extends Instruction:
   val mnemonic = "trap"
+
+  def disassemble(cpu: CPU): String = s"$mnemonic $imm"
 
   def apply(cpu: CPU): Unit = cpu.state = State.fromOrdinal(State.Trap0.ordinal + imm)
 
@@ -75,7 +77,7 @@ class ADDI(a: Int, b: Int, imm: Int) extends ImmediateSignedInstruction(a, b, im
   def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read + imm)
 
 abstract class BranchInstruction(a: Int, b: Int, imm: Int) extends Instruction:
-  def disassemble(cpu: CPU): String = f"$mnemonic r$a, r$b, ${cpu.pc + 2 + imm * 2}%04x ($imm)"
+  def disassemble(cpu: CPU): String = f"$mnemonic r$a, r$b, 0x${cpu.pc + 2 + imm * 2}%04x ($imm)"
 
 class BLS(a: Int, b: Int, imm: Int) extends SimpleInstruction:
   val mnemonic = "bls"
@@ -135,12 +137,15 @@ class LDB(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
 
   def apply(cpu: CPU): Unit = cpu.r(d) write cpu.readByte(cpu.r(a).read + cpu.r(b).read)
 
-class LD(a: Int, b: Int, imm: Int) extends SimpleInstruction:
+abstract class LDSTInstruction(a: Int, b: Int, imm: Int) extends Instruction:
+  def disassemble(cpu: CPU): String = f"$mnemonic r$a, r$b, 0x${imm * 2}%02x (${imm * 2})"
+
+class LD(a: Int, b: Int, imm: Int) extends LDSTInstruction(a, b, imm):
   val mnemonic = "ld"
 
   def apply(cpu: CPU): Unit = cpu.r(a) write cpu.readInt(cpu.r(b).read + imm * 2)
 
-class ST(a: Int, b: Int, imm: Int) extends SimpleInstruction:
+class ST(a: Int, b: Int, imm: Int) extends LDSTInstruction(a, b, imm):
   val mnemonic = "st"
 
   def apply(cpu: CPU): Unit = cpu.writeInt(cpu.r(b).read + imm * 2, cpu.r(a).read)

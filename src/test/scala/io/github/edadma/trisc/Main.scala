@@ -29,78 +29,6 @@ import pprint.pprintln
 //      |  """.stripMargin,
 //  )
 
-  val segs = assemble(
-    """
-      |STDOUT = 0xF8
-      |TIMER_DELAY = 0xFA
-      |TIMER_START = 0xFC
-      |
-      |dw _reset_
-      |dw 0
-      |dw 0
-      |dw _trap0_
-      |
-      |segment code
-      |
-      |_reset_
-      |  ldi r1, 0
-      |  spsr r1
-      |
-      |  ldi r1, 1
-      |
-      |  movi r3, table
-      |
-      |  ld r2, r3, 0
-      |  trap 0
-      |  ld r2, r3, 4
-      |  trap 0
-      |  ld r2, r3, 8
-      |  trap 0
-      |  halt
-      |
-      |table
-      |  dw firstMessage
-      |  dw secondMessage
-      |  dw thirdMessage
-      |
-      |firstMessage db "first",0
-      |secondMessage db "second",0
-      |thirdMessage db "third",0
-      |
-      |_trap0_
-      |  beq r1, r0, .characterOutput
-      |  ldi r3, 1
-      |  beq r1, r3, .stringOutput
-      |  ldi r3, 2
-      |  beq r1, r3, .numberOutput
-      |  ldi r2, .trap0error
-      |.stringOutput
-      |  movi r3, STDOUT
-      |.char
-      |  ldb r4, r2, r0
-      |  beq r4, r0, .done
-      |  stb r4, r3, r0
-      |  addi r2, r2, 1
-      |  bra .char
-      |.done
-      |  sti r3, '\n'
-      |  rte
-      |.characterOutput
-      |  movi r3, STDOUT
-      |  stb r2, r3, r0
-      |  sti r3, '\n'
-      |  rte
-      |.numberOutput
-      |  // r2: n
-      |  // r3: radix
-      |  rem r5, r2, r4
-      |  addi r5, r5, '0'
-      |.trap0error db "unknown operation",0
-      |
-      |//segment bss
-      |  """.stripMargin,
-  )
-
 //  val segs = new Assembler(stacked = true).assemble(
 //    """
 //      |STDOUT = 0x78
@@ -185,6 +113,78 @@ import pprint.pprintln
 //      |  jalr r0, r3
 //      |  """.stripMargin,
 //  )
+
+  val segs = assemble(
+    """
+      |STDOUT = 0xF8
+      |TIMER_DELAY = 0xFA
+      |TIMER_START = 0xFC
+      |
+      |dw _reset_
+      |dw 0
+      |dw 0
+      |dw _trap0_
+      |
+      |segment code
+      |
+      |_reset_
+      |  ldi r1, 0
+      |  spsr r1
+      |
+      |  ldi r1, 1
+      |
+      |  movi r3, table
+      |
+      |  ld r2, r3, 0
+      |  trap 0
+      |  ld r2, r3, 4
+      |  trap 0
+      |  ld r2, r3, 8
+      |  trap 0
+      |  halt
+      |
+      |table
+      |  dw firstMessage
+      |  dw secondMessage
+      |  dw thirdMessage
+      |
+      |firstMessage db "first",0
+      |secondMessage db "second",0
+      |thirdMessage db "third",0
+      |
+      |_trap0_
+      |  beq r1, r0, .characterOutput
+      |  ldi r3, 1
+      |  beq r1, r3, .stringOutput
+      |  ldi r3, 2
+      |  beq r1, r3, .numberOutput
+      |  ldi r2, .trap0error
+      |.stringOutput
+      |  movi r3, STDOUT
+      |.char
+      |  ldb r4, r2, r0
+      |  beq r4, r0, .done
+      |  stb r4, r3, r0
+      |  addi r2, r2, 1
+      |  bra .char
+      |.done
+      |  sti r3, '\n'
+      |  rte
+      |.characterOutput
+      |  movi r3, STDOUT
+      |  stb r2, r3, r0
+      |  sti r3, '\n'
+      |  rte
+      |.numberOutput
+      |  // r2: n
+      |  // r3: radix
+      |  rem r5, r2, r4
+      |  addi r5, r5, '0'
+      |.trap0error db "unknown operation",0
+      |
+      |//segment bss
+      |  """.stripMargin,
+  )
 
 //  pprintln(segs)
 
