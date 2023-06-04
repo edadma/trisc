@@ -79,6 +79,10 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
     pc += 2
     decoded(this)
 
+    if trace then
+      for i <- 1 to 7 do print(f"  r$i:${r(i).read}%04x")
+      println
+
   @tailrec
   final def run(): Unit =
     var count = 0
