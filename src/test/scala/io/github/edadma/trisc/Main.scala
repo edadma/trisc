@@ -78,7 +78,7 @@ import pprint.pprintln
       |  halt
       |characterOutput
       |  ldi r3, STDOUT
-      |  stb r3, r0, r2
+      |  stb r2, r3, r0
       |  sti r3, '\n'
       |  rte
       |stringOutput
@@ -86,7 +86,7 @@ import pprint.pprintln
       |.char
       |  ldb r4, r2, r0
       |  beq r4, r0, .done
-      |  stb r3, r0, r4
+      |  stb r4, r3, r0
       |  addi r2, r2, 1
       |  bra .char
       |.done
@@ -215,7 +215,7 @@ import pprint.pprintln
 //  //  for i <- 0L until rom.size do println(rom.readByte(i).toHexString)
 
   val cpu = new CPU(mem, List(timer)) {
-    trace = true
+//    trace = true
 //    clump = 1
     limit = 30000
   }

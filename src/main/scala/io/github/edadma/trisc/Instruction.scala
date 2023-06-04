@@ -87,6 +87,9 @@ class BEQ(a: Int, b: Int, imm: Int) extends BranchInstruction(a, b, imm):
 
   def apply(cpu: CPU): Unit = if cpu.r(a).read == cpu.r(b).read then cpu.pc += imm * 2
 
+abstract class RRRInstruction(a: Int, b: Int, imm: Int) extends Instruction:
+  def disassemble(cpu: CPU): String = f"$mnemonic r$a, r$b, ${cpu.pc + 2 + imm * 2}%04x ($imm)"
+
 class LDB(d: Int, a: Int, b: Int) extends SimpleInstruction:
   val mnemonic = "ldb"
 
@@ -102,37 +105,37 @@ class ST(a: Int, b: Int, imm: Int) extends SimpleInstruction:
 
   def apply(cpu: CPU): Unit = cpu.writeInt(cpu.r(b).read + imm * 2, cpu.r(a).read)
 
-class STB(d: Int, a: Int, b: Int) extends SimpleInstruction:
+class STB(a: Int, b: Int, c: Int) extends SimpleInstruction:
   val mnemonic = "stb"
 
-  def apply(cpu: CPU): Unit = cpu.writeByte(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)
+  def apply(cpu: CPU): Unit = cpu.writeByte(cpu.r(b).read + cpu.r(c).read, cpu.r(a).read)
 
 class LDS(d: Int, a: Int, b: Int) extends SimpleInstruction:
   val mnemonic = "lds"
 
   def apply(cpu: CPU): Unit = cpu.r(d) write cpu.readShort(cpu.r(a).read + cpu.r(b).read)
 
-class STS(d: Int, a: Int, b: Int) extends SimpleInstruction:
+class STS(a: Int, b: Int, c: Int) extends SimpleInstruction:
   val mnemonic = "sts"
 
-  def apply(cpu: CPU): Unit = cpu.writeShort(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)
+  def apply(cpu: CPU): Unit = cpu.writeShort(cpu.r(b).read + cpu.r(c).read, cpu.r(a).read)
 
 class LDW(d: Int, a: Int, b: Int) extends SimpleInstruction:
   val mnemonic = "ldw"
 
   def apply(cpu: CPU): Unit = cpu.r(d) write cpu.readInt(cpu.r(a).read + cpu.r(b).read)
 
-class STW(d: Int, a: Int, b: Int) extends SimpleInstruction:
+class STW(a: Int, b: Int, c: Int) extends SimpleInstruction:
   val mnemonic = "stw"
 
-  def apply(cpu: CPU): Unit = cpu.writeInt(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)
+  def apply(cpu: CPU): Unit = cpu.writeInt(cpu.r(b).read + cpu.r(c).read, cpu.r(a).read)
 
 class LDD(d: Int, a: Int, b: Int) extends SimpleInstruction:
   val mnemonic = "ldd"
 
   def apply(cpu: CPU): Unit = cpu.r(d) write cpu.readLong(cpu.r(a).read + cpu.r(b).read)
 
-class STD(d: Int, a: Int, b: Int) extends SimpleInstruction:
+class STD(a: Int, b: Int, c: Int) extends SimpleInstruction:
   val mnemonic = "std"
 
-  def apply(cpu: CPU): Unit = cpu.writeLong(cpu.r(d).read + cpu.r(a).read, cpu.r(b).read)
+  def apply(cpu: CPU): Unit = cpu.writeLong(cpu.r(b).read + cpu.r(c).read, cpu.r(a).read)

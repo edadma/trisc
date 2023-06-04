@@ -11,14 +11,14 @@ RRR
     stw 0101
     ldd 0110
     std 0111
-    add
-    sub
-    mul
-    div
-    rem
-    and
-    or
-    xor
+    add 1000
+    sub 1001
+    mul 1010
+    div 1011
+    rem 1100
+    and 1101
+    or  1110
+    xor 1111
 
     001 ddd aaa bbb oooo
 
