@@ -416,6 +416,17 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
       addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> (imm >> 8)) // ldi r(reg), >imm
       addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff)) // sli r(reg), <imm
     case InstructionLineAST("nop", Nil) => addInstruction(3 -> 5, 3 -> 0, 3 -> 0, 7 -> 0) // addi r0, r0, 0
+    case InstructionLineAST("mov", Seq(o1, o2)) =>
+      val reg1 =
+        fold(o1) match
+          case RegisterExprAST(reg) => reg
+          case _                    => problem(o1, "expected register as first operand")
+      val reg2 =
+        fold(o2) match
+          case RegisterExprAST(reg) => reg
+          case _                    => problem(o2, "expected register as second operand")
+
+      addInstruction(3 -> 5, 3 -> reg1, 3 -> reg2, 7 -> 0) // addi r(reg1), r(reg2), 0
   }
 
   symbols.values foreach {

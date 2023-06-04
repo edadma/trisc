@@ -174,7 +174,7 @@ import pprint.pprintln
       |  beq r2, r0, .done
       |  bra .digit
       |.done
-      |  addi r2, r4, 0
+      |  mov r2, r4
       |  bra stringOutput
       |trap0error db "unknown operation",0
       |
