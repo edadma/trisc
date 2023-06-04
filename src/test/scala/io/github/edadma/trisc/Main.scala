@@ -132,7 +132,7 @@ import pprint.pprintln
       |  spsr r1
       |
       |  ldi r1, 2
-      |  ldi r2, 34
+      |  movi r2, 45678
       |  ldi r3, 10
       |  trap 0
       |  halt
@@ -170,8 +170,8 @@ import pprint.pprintln
       |  rem r5, r2, r3
       |  addi r5, r5, '0'
       |  stb r5, r4, r0
-      |  div r5, r2, r3
-      |  beq r5, r0, .done
+      |  div r2, r2, r3
+      |  beq r2, r0, .done
       |  bra .digit
       |.done
       |  addi r2, r4, 0
