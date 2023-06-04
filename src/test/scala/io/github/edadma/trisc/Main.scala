@@ -116,9 +116,9 @@ import pprint.pprintln
 
   val segs = assemble(
     """
-      |STDOUT = 0xF8
-      |TIMER_DELAY = 0xFA
-      |TIMER_START = 0xFC
+      |STDOUT = 0xFFF8
+      |TIMER_DELAY = 0xFFFA
+      |TIMER_START = 0xFFFC
       |
       |dw _reset_
       |dw 0
@@ -141,6 +141,7 @@ import pprint.pprintln
       |  trap 0
       |  ld r2, r3, 8
       |  trap 0
+      |  movi 
       |  halt
       |
       |table
@@ -182,19 +183,22 @@ import pprint.pprintln
       |  addi r5, r5, '0'
       |.trap0error db "unknown operation",0
       |
-      |//segment bss
+      |segment bss
+      |buf resb 20
       |  """.stripMargin,
+    orgs = Map("bss" -> 0x1000),
   )
 
 //  pprintln(segs)
 
   val chunks = segs flatMap (_.chunks)
   val code = chunks flatMap { case DataChunk(data) => data } to IndexedSeq
-  val timer = new Timer(0xfa)
+  val timer = new Timer(0xfffa)
   val mem = new Memory(
     "Memory",
     new ROM(code, 0),
-    new Stdout(0xf8),
+    new RAM(0x1000, 0x1000),
+    new Stdout(0xfff8),
     timer,
   )
 
