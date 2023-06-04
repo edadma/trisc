@@ -48,7 +48,7 @@ import pprint.pprintln
       |
       |  ldi r1, 1
       |
-      |  ldi r3, table
+      |  movi r3, table
       |
       |  ld r2, r3, 0
       |  trap 0
@@ -73,7 +73,7 @@ import pprint.pprintln
       |  beq r1, r3, stringOutput
       |  ldi r2, trap0error
       |stringOutput
-      |  ldi r3, STDOUT
+      |  movi r3, STDOUT
       |.char
       |  ldb r4, r2, r0
       |  beq r4, r0, .done
@@ -83,7 +83,7 @@ import pprint.pprintln
       |.done
       |  rte
       |characterOutput
-      |  ldi r3, STDOUT
+      |  movi r3, STDOUT
       |  stb r2, r3, r0
       |  rte
       |trap0error db "unknown operation\n",0

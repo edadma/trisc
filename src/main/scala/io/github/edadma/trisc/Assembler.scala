@@ -135,8 +135,12 @@ class Assembler(stacked: Boolean = false):
           case _ => problem(n, s"must be a positive integer up to 10 meg")
 
         if (segment.size - startingSize) % 2 == 1 then segment.size += 1
-      case InstructionLineAST(_, operands) =>
-        segment.size += 2
+      case InstructionLineAST(mnemonic, operands) =>
+        segment.size += (
+          mnemonic match
+            case "movi" => 4
+            case _      => 2
+        )
         operands foreach locals
     }
 
@@ -388,6 +392,24 @@ class Assembler(stacked: Boolean = false):
             case _: LongExprAST => problem(o, "immediate must ben even signed 8-bit value")
 
         addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm / 2)
+      case InstructionLineAST("movi", Seq(o1, o2)) =>
+//        val opcode =
+//          mnemonic match
+//            case "ldi" => 0
+//            case "sli" => 2
+//            case "sti" => 3
+        val reg =
+          fold(o1) match
+            case RegisterExprAST(reg) => reg
+            case _                    => problem(o1, "expected register as first operand")
+        val imm =
+          fold(o2, absolute = true, immediate = true) match
+            case _: DoubleExprAST                        => problem(o2, "immediate must be integral")
+            case LongExprAST(n) if 0 <= n && n <= 0xffff => n.toInt
+            case _: LongExprAST                          => problem(o2, "immediate must be a byte value")
+
+        addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> (imm >> 8)) // ldi r(reg), >imm
+        addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff)) // sli r(reg), <imm
     }
 
     symbols.values foreach {
@@ -395,7 +417,7 @@ class Assembler(stacked: Boolean = false):
       case _                                =>
     }
 
-    pprintln(segments)
+//    pprintln(segments)
 //    segments foreach ((name, seg) => println((name, seg.code map (b => (b & 0xff).toHexString))))
 
     segments.toSeq map ((n, s) => Segment(n, Seq(DataChunk(s.code to immutable.ArraySeq))))
