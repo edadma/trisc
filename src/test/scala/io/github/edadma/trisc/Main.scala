@@ -132,17 +132,17 @@ import pprint.pprintln
       |  spsr r1
       |
       |  ldi r1, 2
-      |  ldi r2, 5
+      |  ldi r2, 34
       |  ldi r3, 10
       |  trap 0
       |  halt
       |
       |_trap0_
       |  beq r1, r0, characterOutput
-      |  ldi r3, 1
-      |  beq r1, r3, stringOutput
-      |  ldi r3, 2
-      |  beq r1, r3, numberOutput
+      |  ldi r4, 1
+      |  beq r1, r4, stringOutput
+      |  ldi r4, 2
+      |  beq r1, r4, numberOutput
       |  ldi r2, trap0error
       |stringOutput
       |  movi r3, STDOUT
@@ -164,7 +164,7 @@ import pprint.pprintln
       |  // r2: n
       |  // r3: radix
       |  movi r4, buf
-      |  addi r4, r4, 20
+      |  addi r4, r4, 19
       |.digit
       |  addi r4, r4, -1
       |  rem r5, r2, r3
@@ -174,7 +174,7 @@ import pprint.pprintln
       |  beq r5, r0, .done
       |  bra .digit
       |.done
-      |  addi r2, r5, 0
+      |  addi r2, r4, 0
       |  bra stringOutput
       |trap0error db "unknown operation",0
       |
@@ -313,7 +313,7 @@ import pprint.pprintln
 //  //  for i <- 0L until rom.size do println(rom.readByte(i).toHexString)
 
   val cpu = new CPU(mem, List(timer)) {
-    trace = true
+//    trace = true
 //    clump = 1
     limit = 30000
   }
