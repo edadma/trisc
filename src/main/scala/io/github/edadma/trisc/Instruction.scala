@@ -88,7 +88,47 @@ class BEQ(a: Int, b: Int, imm: Int) extends BranchInstruction(a, b, imm):
   def apply(cpu: CPU): Unit = if cpu.r(a).read == cpu.r(b).read then cpu.pc += imm * 2
 
 abstract class RRRInstruction(a: Int, b: Int, c: Int) extends Instruction:
-  def disassemble(cpu: CPU): String = f"$mnemonic r$a, r$b, r$c"
+  def disassemble(cpu: CPU): String = s"$mnemonic r$a, r$b, r$c"
+
+class ADD(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "add"
+
+  def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read + cpu.r(b).read)
+
+class SUB(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "sub"
+
+  def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read - cpu.r(b).read)
+
+class MUL(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "mul"
+
+  def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read * cpu.r(b).read)
+
+class DIV(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "div"
+
+  def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read / cpu.r(b).read)
+
+class REM(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "rem"
+
+  def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read % cpu.r(b).read)
+
+class AND(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "add"
+
+  def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read & cpu.r(b).read)
+
+class OR(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "add"
+
+  def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read | cpu.r(b).read)
+
+class XOR(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "add"
+
+  def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read ^ cpu.r(b).read)
 
 class LDB(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "ldb"

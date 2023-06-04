@@ -38,10 +38,13 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |r6
                           |r7
                           |sp
+                          |add
                           |addi
+                          |and
                           |beq
                           |bls
                           |bra
+                          |div
                           |gpsr
                           |halt
                           |jalr
@@ -51,11 +54,14 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |ldi
                           |lds
                           |ldw
+                          |mul
+                          |or
                           |resb
                           |resd
                           |resl
                           |ress
                           |resw
+                          |rem
                           |rte
                           |sli
                           |spsr
@@ -65,7 +71,9 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |sti
                           |sts
                           |stw
+                          |sub
                           |trap
+                          |xor
                           |""".trim.stripMargin split "\\s+")
   lexical.delimiters ++= ("+ - * / % ( ) : , = . \n" split ' ')
 
@@ -151,7 +159,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
       | label ~ instruction ^^ { case l ~ i => Seq(l, i) }
 
   lazy val mnemonics: P[String] =
-    "addi" | "beq" | "bls" | "bra" | "gpsr" | "halt" | "jalr" | "ld" | "ldb" | "ldd" | "ldi" | "lds" | "ldw" | "rte" | "sli" | "spsr" | "st" | "stb" | "std" | "sti" | "sts" | "stw" | "trap"
+    "add" | "addi" | "and" | "beq" | "bls" | "bra" | "div" | "gpsr" | "halt" | "jalr" | "ld" | "ldb" | "ldd" | "ldi" | "lds" | "ldw" | "mul" | "or" | "rem" | "rte" | "sli" | "spsr" | "st" | "stb" | "std" | "sti" | "sts" | "stw" | "sub" | "trap" | "xor"
 
   lazy val instruction: P[InstructionLineAST] =
     mnemonics ~ repsep(expression, ",") ^^ { case m ~ es =>

@@ -289,7 +289,8 @@ class Assembler(stacked: Boolean = false):
 
         addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm / 2)
       case InstructionLineAST(
-            mnemonic @ ("ldb" | "stb" | "lds" | "sts" | "ldw" | "stw" | "ldd" | "std"),
+            mnemonic @ ("ldb" | "stb" | "lds" | "sts" | "ldw" | "stw" | "ldd" | "std" | "add" | "sub" | "mul" | "div" |
+            "rem" | "and" | "or" | "xor"),
             Seq(o1, o2, o3),
           ) =>
         val opcode =
@@ -302,6 +303,14 @@ class Assembler(stacked: Boolean = false):
             case "stw" => 5
             case "ldd" => 6
             case "std" => 7
+            case "add" => 8
+            case "sub" => 9
+            case "mul" => 10
+            case "div" => 11
+            case "rem" => 12
+            case "and" => 13
+            case "or"  => 14
+            case "xor" => 15
         val reg1 =
           fold(o1) match
             case RegisterExprAST(reg) => reg
