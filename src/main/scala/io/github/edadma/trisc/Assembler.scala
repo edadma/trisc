@@ -383,7 +383,7 @@ class Assembler(stacked: Boolean = false):
             case _                    => problem(o, "expected register as first operand")
 
         addInstruction(3 -> 7, 3 -> 0, 3 -> reg, 7 -> opcode)
-      case InstructionLineAST("halt", Nil) => addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 0, 5 -> 0)
+      case InstructionLineAST("halt", Nil) => addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 0, 5 -> 0) // jalr 0,0
       case InstructionLineAST("bra", Seq(o)) =>
         val imm =
           fold(o, immediate = true) match
@@ -391,13 +391,8 @@ class Assembler(stacked: Boolean = false):
             case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => n.toInt
             case _: LongExprAST => problem(o, "immediate must ben even signed 8-bit value")
 
-        addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm / 2)
+        addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm / 2) // beq r0, r0, imm
       case InstructionLineAST("movi", Seq(o1, o2)) =>
-//        val opcode =
-//          mnemonic match
-//            case "ldi" => 0
-//            case "sli" => 2
-//            case "sti" => 3
         val reg =
           fold(o1) match
             case RegisterExprAST(reg) => reg
@@ -410,6 +405,7 @@ class Assembler(stacked: Boolean = false):
 
         addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> (imm >> 8)) // ldi r(reg), >imm
         addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff)) // sli r(reg), <imm
+      case InstructionLineAST("nop", Nil) => addInstruction(3 -> 5, 3 -> 0, 3 -> 0, 7 -> 0) // addi r0, r0, 0
     }
 
     symbols.values foreach {
