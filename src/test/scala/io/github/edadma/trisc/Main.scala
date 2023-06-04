@@ -5,7 +5,7 @@ import pprint.pprintln
 @main def run(): Unit =
 //  val segs = new Assembler(stacked = true).assemble(
 //    """
-//      |STDOUT = 0x78
+//      |STDOUT = 0xF8
 //      |
 //      |segment code
 //      |dw reset
@@ -73,14 +73,9 @@ import pprint.pprintln
       |  halt
       |trap0
       |  beq r1, r0, characterOutput
-      |  addi r1, r1, -1
-      |  beq r1, r0, stringOutput
-      |  halt
-      |characterOutput
-      |  ldi r3, STDOUT
-      |  stb r2, r3, r0
-      |  sti r3, '\n'
-      |  rte
+      |  ldi r3, 1
+      |  beq r1, r3, stringOutput
+      |  ldi r2, trap0error
       |stringOutput
       |  ldi r3, STDOUT
       |.char
@@ -91,6 +86,11 @@ import pprint.pprintln
       |  bra .char
       |.done
       |  rte
+      |characterOutput
+      |  ldi r3, STDOUT
+      |  stb r2, r3, r0
+      |  rte
+      |trap0error db "unknown operation\n",0
       |  """.stripMargin,
   )
 
