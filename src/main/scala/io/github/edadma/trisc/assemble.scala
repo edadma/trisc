@@ -13,12 +13,14 @@ case class DataChunk(data: Seq[Byte]) extends Chunk
 case class Segment(name: String, chunks: Seq[Chunk])
 
 private class PassSegment:
+  var org: Long = 0
   var size: Long = 0
   val symbols: ArrayBuffer[String] = new ArrayBuffer
   val code: ArrayBuffer[Byte] = new ArrayBuffer
   var last: Option[String] = None
 
-  override def toString: String = symbols.toString
+  override def toString: String =
+    s"org: ${org.toHexString}; size: ${size.toHexString}; symbols: [${symbols mkString ", "}]"
 
 private trait Symbol:
   val name: String
@@ -144,6 +146,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
 
   def relocate(seg: PassSegment, org: Long): Unit =
     seg.symbols foreach (n => symbols(n).asInstanceOf[LabelSymbol].value += org)
+    seg.org = org
 
   var base = segments.values.head.size
 
@@ -156,6 +159,8 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
       case Some(o) =>
         relocate(s, o)
         if stacked then base = o + s.size
+
+  segment = segments("_default_")
 
   lines foreach {
     case SegmentLineAST(name)    => segment = segments(name)
@@ -381,7 +386,6 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         mnemonic match
           case "spsr" => 8
           case "gpsr" => 9
-          case "rte"  => 10
       val reg =
         fold(o) match
           case RegisterExprAST(reg) => reg
@@ -418,7 +422,9 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case _                                =>
   }
 
-//    pprintln(segments)
+  pprintln(segments)
+  pprintln(symbols)
+  println(segments("_default_").code)
 //    segments foreach ((name, seg) => println((name, seg.code map (b => (b & 0xff).toHexString))))
 
   segments.toSeq map ((n, s) => Segment(n, Seq(DataChunk(s.code to immutable.ArraySeq))))

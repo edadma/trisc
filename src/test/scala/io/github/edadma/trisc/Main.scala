@@ -97,8 +97,7 @@ import pprint.pprintln
       |  addi r5, r5, '0'
       |.trap0error db "unknown operation",0
       |
-      |segment bss
-      |buf resb 20
+      |//segment bss
       |  """.stripMargin,
   )
 

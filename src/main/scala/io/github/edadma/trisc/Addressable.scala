@@ -60,7 +60,7 @@ class Memory(val name: String, blocks: Addressable*) extends Addressable:
         if addr < prec.base + prec.size then Some(prec) else None
       case Right(idx) => Some(mem(idx))
 
-  private def badAddress(addr: Long): Nothing = sys.error(s"address not found: ${addr.toHexString}")
+  private def badAddress(addr: Long): Nothing = sys.error(s"address not found: ${addr.toHexString} ($addr)")
 
   def readByte(addr: Long): Int = block(addr) getOrElse badAddress(addr) readByte addr
 
