@@ -21,7 +21,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
     }
 
   lexical.reserved ++= ("""
-                          |equate
+                          |equ
                           |segment
                           |include
                           |db
@@ -124,7 +124,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
 
   lazy val segment: P[SegmentLineAST] = "segment" ~> ident ^^ SegmentLineAST.apply
 
-  lazy val equate: P[EquateLineAST] = ident ~ (("equate" | "=") ~> expression) ^^ EquateLineAST.apply
+  lazy val equate: P[EquateLineAST] = ident ~ (("equ" | "=") ~> expression) ^^ EquateLineAST.apply
 
   lazy val include: P[IncludeLineAST] = "include" ~> stringLit ^^ IncludeLineAST.apply
 

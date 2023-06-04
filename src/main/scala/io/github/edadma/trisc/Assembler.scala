@@ -142,12 +142,11 @@ class Assembler(stacked: Boolean = false):
 
 //    pprintln(equates)
 
-    if stacked then
-      var base = segments.values.head.size
+    var base = segments.values.head.size
 
-      for s <- segments.values.tail do
-        s.symbols foreach (n => symbols(n).asInstanceOf[LabelSymbol].value += base)
-        base += s.size
+    for (n, s) <- segments.tail do
+      s.symbols foreach (n => symbols(n).asInstanceOf[LabelSymbol].value += base)
+      base += s.size
 
     lines foreach {
       case SegmentLineAST(name)    => segment = segments(name)

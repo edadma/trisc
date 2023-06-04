@@ -35,26 +35,12 @@ import pprint.pprintln
       |TIMER_DELAY = 0xFA
       |TIMER_START = 0xFC
       |
-      |segment code
       |dw reset
       |dw 0
       |dw 0
       |dw trap0
       |
-      |table
-      |  dw firstMessage
-      |  dw secondMessage
-      |  dw thirdMessage
-      |
-      |byte resb 3
-      |short ress 3
-      |word resw 3
-      |long resl 3
-      |double resd 3
-      |
-      |firstMessage db "first\n",0
-      |secondMessage db "second\n",0
-      |thirdMessage db "third\n",0
+      |segment code
       |
       |reset
       |  ldi r1, 0
@@ -71,6 +57,16 @@ import pprint.pprintln
       |  ld r2, r3, 8
       |  trap 0
       |  halt
+      |
+      |table
+      |  dw firstMessage
+      |  dw secondMessage
+      |  dw thirdMessage
+      |
+      |firstMessage db "first\n",0
+      |secondMessage db "second\n",0
+      |thirdMessage db "third\n",0
+      |
       |trap0
       |  beq r1, r0, characterOutput
       |  ldi r3, 1
