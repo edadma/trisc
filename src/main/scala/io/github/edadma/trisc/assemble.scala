@@ -28,7 +28,7 @@ private case class LabelSymbol(name: String, var value: Long, sym: Positional, v
     extends Symbol
 private case class ExternSymbol(name: String) extends Symbol
 
-def assemble(src: String): Seq[Segment] =
+def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map()): Seq[Segment] =
   val lines = AssemblyParser.parseAssembly(src)
   val symbols = new mutable.LinkedHashMap[String, Symbol]
   val segments = new mutable.LinkedHashMap[String, PassSegment]
@@ -142,11 +142,20 @@ def assemble(src: String): Seq[Segment] =
 
 //    pprintln(equates)
 
+  def relocate(seg: PassSegment, org: Long): Unit =
+    seg.symbols foreach (n => symbols(n).asInstanceOf[LabelSymbol].value += org)
+
   var base = segments.values.head.size
 
   for (n, s) <- segments.tail do
-    s.symbols foreach (n => symbols(n).asInstanceOf[LabelSymbol].value += base)
-    base += s.size
+    orgs get n match
+      case None =>
+        if stacked then
+          relocate(s, base)
+          base += s.size
+      case Some(o) =>
+        relocate(s, o)
+        if stacked then base = o + s.size
 
   lines foreach {
     case SegmentLineAST(name)    => segment = segments(name)
