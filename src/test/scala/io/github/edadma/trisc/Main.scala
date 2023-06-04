@@ -222,7 +222,7 @@ import pprint.pprintln
 //  //  for i <- 0L until rom.size do println(rom.readByte(i).toHexString)
 
   val cpu = new CPU(mem, List(timer)) {
-//    trace = true
+    trace = true
 //    clump = 1
     limit = 30000
   }
