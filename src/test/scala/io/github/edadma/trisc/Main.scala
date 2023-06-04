@@ -131,38 +131,20 @@ import pprint.pprintln
       |  ldi r1, 0
       |  spsr r1
       |
-      |  ldi r1, 1
-      |
-      |  movi r3, table
-      |
-      |  ld r2, r3, 0
+      |  ldi r1, 2
+      |  ldi r2, 5
+      |  ldi r3, 10
       |  trap 0
-      |  ld r2, r3, 4
-      |  trap 0
-      |  ld r2, r3, 8
-      |  trap 0
-      |  movi r2, buf
-      |  sti r2, 'A'
-      |  ldb r3, r2, r0
       |  halt
       |
-      |table
-      |  dw firstMessage
-      |  dw secondMessage
-      |  dw thirdMessage
-      |
-      |firstMessage db "first",0
-      |secondMessage db "second",0
-      |thirdMessage db "third",0
-      |
       |_trap0_
-      |  beq r1, r0, .characterOutput
+      |  beq r1, r0, characterOutput
       |  ldi r3, 1
-      |  beq r1, r3, .stringOutput
+      |  beq r1, r3, stringOutput
       |  ldi r3, 2
-      |  beq r1, r3, .numberOutput
-      |  ldi r2, .trap0error
-      |.stringOutput
+      |  beq r1, r3, numberOutput
+      |  ldi r2, trap0error
+      |stringOutput
       |  movi r3, STDOUT
       |.char
       |  ldb r4, r2, r0
@@ -173,23 +155,126 @@ import pprint.pprintln
       |.done
       |  sti r3, '\n'
       |  rte
-      |.characterOutput
+      |characterOutput
       |  movi r3, STDOUT
       |  stb r2, r3, r0
       |  sti r3, '\n'
       |  rte
-      |.numberOutput
+      |numberOutput
       |  // r2: n
       |  // r3: radix
-      |  rem r5, r2, r4
+      |  movi r4, buf
+      |  addi r4, r4, 20
+      |.digit
+      |  addi r4, r4, -1
+      |  rem r5, r2, r3
       |  addi r5, r5, '0'
-      |.trap0error db "unknown operation",0
+      |  stb r5, r4, r0
+      |  div r5, r2, r3
+      |  beq r5, r0, .done
+      |  bra .digit
+      |.done
+      |  addi r2, r5, 0
+      |  bra stringOutput
+      |trap0error db "unknown operation",0
       |
       |segment bss
       |buf resb 20
       |  """.stripMargin,
     orgs = Map("bss" -> 0x1000),
   )
+
+//  val segs = assemble(
+//    """
+//      |STDOUT = 0xFFF8
+//      |TIMER_DELAY = 0xFFFA
+//      |TIMER_START = 0xFFFC
+//      |
+//      |dw _reset_
+//      |dw 0
+//      |dw 0
+//      |dw _trap0_
+//      |
+//      |segment code
+//      |
+//      |_reset_
+//      |  ldi r1, 0
+//      |  spsr r1
+//      |
+//      |  ldi r1, 1
+//      |
+//      |  movi r3, table
+//      |
+//      |  ld r2, r3, 0
+//      |  trap 0
+//      |  ld r2, r3, 4
+//      |  trap 0
+//      |  ld r2, r3, 8
+//      |  trap 0
+//      |  movi r2, buf
+//      |  sti r2, 'A'
+//      |  ldb r3, r2, r0
+//      |
+//      |  ldi r1, 2
+//      |  ldi r2, 123
+//      |  trap 0
+//      |  halt
+//      |
+//      |table
+//      |  dw firstMessage
+//      |  dw secondMessage
+//      |  dw thirdMessage
+//      |
+//      |firstMessage db "first",0
+//      |secondMessage db "second",0
+//      |thirdMessage db "third",0
+//      |
+//      |_trap0_
+//      |  beq r1, r0, characterOutput
+//      |  ldi r3, 1
+//      |  beq r1, r3, stringOutput
+//      |  ldi r3, 2
+//      |  beq r1, r3, numberOutput
+//      |  ldi r2, trap0error
+//      |stringOutput
+//      |  movi r3, STDOUT
+//      |.char
+//      |  ldb r4, r2, r0
+//      |  beq r4, r0, .done
+//      |  stb r4, r3, r0
+//      |  addi r2, r2, 1
+//      |  bra .char
+//      |.done
+//      |  sti r3, '\n'
+//      |  rte
+//      |characterOutput
+//      |  movi r3, STDOUT
+//      |  stb r2, r3, r0
+//      |  sti r3, '\n'
+//      |  rte
+//      |numberOutput
+//      |  // r2: n
+//      |  // r3: radix
+//      |  movi r4, buf
+//      |  addi r4, r4, 20
+//      |.digit
+//      |  addi r4, r4, -1
+//      |  rem r5, r2, r3
+//      |  addi r5, r5, '0'
+//      |  stb r5, r4, r0
+//      |  div r5, r2, r3
+//      |  beq r5, r0, .done
+//      |  bra .digit
+//      |.done
+//      |  addi r2, r5, 0
+//      |  bra stringOutput
+//      |trap0error db "unknown operation",0
+//      |
+//      |segment bss
+//      |buf resb 20
+//      |  """.stripMargin,
+//    orgs = Map("bss" -> 0x1000),
+//  )
 
 //  pprintln(segs)
 
@@ -228,7 +313,7 @@ import pprint.pprintln
 //  //  for i <- 0L until rom.size do println(rom.readByte(i).toHexString)
 
   val cpu = new CPU(mem, List(timer)) {
-//    trace = true
+    trace = true
 //    clump = 1
     limit = 30000
   }
