@@ -154,6 +154,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     orgs get n match
       case None =>
         if stacked then
+          println(("relocate", n, base))
           relocate(s, base)
           base += s.size
       case Some(o) =>
@@ -423,7 +424,10 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
   }
 
   pprintln(segments)
-  pprintln(symbols)
+  symbols.values foreach {
+    case LabelSymbol(n, v, _, _) => println((n, v.toHexString))
+    case _                       =>
+  }
   println(segments("_default_").code)
 //    segments foreach ((name, seg) => println((name, seg.code map (b => (b & 0xff).toHexString))))
 
