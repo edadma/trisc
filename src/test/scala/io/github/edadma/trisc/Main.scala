@@ -141,7 +141,9 @@ import pprint.pprintln
       |  trap 0
       |  ld r2, r3, 8
       |  trap 0
-      |  movi 
+      |  movi r2, buf
+      |  sti r2, 'A'
+      |  ldb r3, r2, r0
       |  halt
       |
       |table
