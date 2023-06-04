@@ -29,20 +29,20 @@ import pprint.pprintln
 //      |  """.stripMargin,
 //  )
 
-  val segs = new Assembler(stacked = true).assemble(
+  val segs = assemble(
     """
       |STDOUT = 0xF8
       |TIMER_DELAY = 0xFA
       |TIMER_START = 0xFC
       |
-      |dw reset
+      |dw _reset_
       |dw 0
       |dw 0
-      |dw trap0
+      |dw _trap0_
       |
       |segment code
       |
-      |reset
+      |_reset_
       |  ldi r1, 0
       |  spsr r1
       |
@@ -63,16 +63,18 @@ import pprint.pprintln
       |  dw secondMessage
       |  dw thirdMessage
       |
-      |firstMessage db "first\n",0
-      |secondMessage db "second\n",0
-      |thirdMessage db "third\n",0
+      |firstMessage db "first",0
+      |secondMessage db "second",0
+      |thirdMessage db "third",0
       |
-      |trap0
-      |  beq r1, r0, characterOutput
+      |_trap0_
+      |  beq r1, r0, .characterOutput
       |  ldi r3, 1
-      |  beq r1, r3, stringOutput
-      |  ldi r2, trap0error
-      |stringOutput
+      |  beq r1, r3, .stringOutput
+      |  ldi r3, 2
+      |  beq r1, r3, .numberOutput
+      |  ldi r2, .trap0error
+      |.stringOutput
       |  movi r3, STDOUT
       |.char
       |  ldb r4, r2, r0
@@ -81,12 +83,19 @@ import pprint.pprintln
       |  addi r2, r2, 1
       |  bra .char
       |.done
+      |  sti r3, '\n'
       |  rte
-      |characterOutput
+      |.characterOutput
       |  movi r3, STDOUT
       |  stb r2, r3, r0
+      |  sti r3, '\n'
       |  rte
-      |trap0error db "unknown operation\n",0
+      |.numberOutput
+      |  // r2: n
+      |  // r3: radix
+      |  rem r5, r2, r4
+      |  addi r5, r5, '0'
+      |.trap0error db "unknown operation",0
       |  """.stripMargin,
   )
 
