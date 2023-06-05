@@ -9,4 +9,8 @@ def error(elem: Positional, msg: String): String =
 
 def problem(elem: Positional, msg: String): Nothing = sys.error(error(elem, msg))
 
+def problem(msg: String): Nothing =
+  Console.err.println(msg)
+  sys.exit(1)
+
 def warning(elem: Positional, msg: String): Unit = println(error(elem, msg))

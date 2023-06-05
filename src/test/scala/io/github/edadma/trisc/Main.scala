@@ -283,7 +283,7 @@ import pprint.pprintln
   val timer = new Timer(0xfffa)
   val mem = new Memory(
     "Memory",
-    new ROM(code, 0),
+//    new ROM(code, 0),
     new RAM(0x1000, 0x1000),
     new Stdout(0xfff8),
     timer,

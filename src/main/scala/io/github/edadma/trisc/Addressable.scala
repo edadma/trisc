@@ -66,8 +66,7 @@ class Memory(val name: String, blocks: Addressable*) extends Addressable:
 
   def writeByte(addr: Long, data: Long): Unit = block(addr) getOrElse badAddress(addr) writeByte (addr, data)
 
-class RAM(val base: Long, val size: Long) extends Addressable:
-  val name = "RAM"
+abstract class AbstractRAM extends Addressable:
   require(base >= 0, "base is negative")
   require(0 <= size && size <= Int.MaxValue, "size out of range")
 
@@ -76,6 +75,13 @@ class RAM(val base: Long, val size: Long) extends Addressable:
   def readByte(addr: Long): Int =
     require(base <= addr && addr < base + size, "address out of range")
     seq((addr - base).toInt)
+
+class RAM(val base: Long, val size: Long) extends AbstractRAM:
+  val name = "RAM"
+  require(base >= 0, "base is negative")
+  require(0 <= size && size <= Int.MaxValue, "size out of range")
+
+  val seq = mutable.ArraySeq.fill(size.toInt)(0.asInstanceOf[Byte])
 
   def writeByte(addr: Long, data: Long): Unit =
     require(base <= addr && addr < base + size, "address out of range")
@@ -87,23 +93,15 @@ trait ReadOnlyAddressable extends Addressable:
 trait WriteOnlyAddressable extends Addressable:
   def readByte(addr: Long): Int = sys.error(s"$name not readable at address ${addr.toHexString}")
 
-class ROM(seq: immutable.IndexedSeq[Byte], val base: Long) extends ReadOnlyAddressable:
+class ROM(val base: Long, val size: Long) extends AbstractRAM with ReadOnlyAddressable:
   val name = "ROM"
-  require(base >= 0, "base is negative")
-  require(seq.nonEmpty, "Addressable is empty")
 
-  val size = seq.length
-
-  def readByte(addr: Long): Int =
-    require(base <= addr && addr < base + size, "address out of range")
-    seq((addr - base).toInt)
-
-def mkROM(insts: IndexedSeq[String]): ROM =
-  def literal(n: String): Iterator[Int] =
-    val s = n.replace(" ", "")
-
-    if s.length == 4 || s.length == 8 then s.grouped(2) map (d => Integer.parseInt(d, 16))
-    else if s.length == 16 then s.grouped(8) map (d => Integer.parseInt(d, 2))
-    else sys.error(s"bad literal '$n'")
-
-  new ROM(insts.flatMap(inst => literal(inst).map(_.toByte).toIndexedSeq), 0)
+//def mkROM(insts: IndexedSeq[String]): ROM =
+//  def literal(n: String): Iterator[Int] =
+//    val s = n.replace(" ", "")
+//
+//    if s.length == 4 || s.length == 8 then s.grouped(2) map (d => Integer.parseInt(d, 16))
+//    else if s.length == 16 then s.grouped(8) map (d => Integer.parseInt(d, 2))
+//    else sys.error(s"bad literal '$n'")
+//
+//  new ROM(insts.flatMap(inst => literal(inst).map(_.toByte).toIndexedSeq), 0)
