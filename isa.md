@@ -29,6 +29,7 @@ RRR
     fsub
     fmul
     fdiv
+    fpow
 
 RRI
 ---
@@ -51,8 +52,10 @@ RR
         sew     00110
         neg     00111
         not     01000
-        fneg    01001
-        finv    01010
+        cvt     01001
+        fneg    01010
+        finv    01011
+        fint    01100
 
     110 000 000 01 iiiii    trap
     110 aaa bbb 10 iiiii    ld

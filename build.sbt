@@ -7,7 +7,7 @@ lazy val trisc = project
   .in(file("."))
   .settings(
     name := "trisc",
-    description := "Example sbt project that compiles using Scala 3",
+    description := "TRISC",
     version := "0.0.1",
     scalaVersion := "3.2.2",
     scalacOptions ++=
