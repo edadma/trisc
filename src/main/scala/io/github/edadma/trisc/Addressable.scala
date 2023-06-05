@@ -78,10 +78,6 @@ abstract class AbstractRAM extends Addressable:
 
 class RAM(val base: Long, val size: Long) extends AbstractRAM:
   val name = "RAM"
-  require(base >= 0, "base is negative")
-  require(0 <= size && size <= Int.MaxValue, "size out of range")
-
-  val seq = mutable.ArraySeq.fill(size.toInt)(0.asInstanceOf[Byte])
 
   def writeByte(addr: Long, data: Long): Unit =
     require(base <= addr && addr < base + size, "address out of range")
