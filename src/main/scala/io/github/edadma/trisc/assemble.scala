@@ -15,12 +15,12 @@ class Segment(val name: String):
   var size: Long = 0
   var length: Long = 0
   val symbols: ArrayBuffer[String] = new ArrayBuffer
-  val content: ArrayBuffer[Chunk] = new ArrayBuffer
+  val chunks: ArrayBuffer[Chunk] = new ArrayBuffer
   var last: Option[String] = None
 
   def +=(b: Byte): Unit =
-    if content.isEmpty || !content.last.isInstanceOf[DataChunk] then content += DataChunk()
-    content.last.asInstanceOf[DataChunk].data += b
+    if chunks.isEmpty || !chunks.last.isInstanceOf[DataChunk] then chunks += DataChunk()
+    chunks.last.asInstanceOf[DataChunk].data += b
     length += 1
 
   def ++=(bs: Seq[Byte]): Unit = bs foreach (b => +=(b))
@@ -41,7 +41,7 @@ def serialize(segs: Seq[Segment]): String =
 
   for s <- segs do
     buf ++= s"SEGMENT:${s.name},${s.org.toHexString}\n"
-    s.content foreach {
+    s.chunks foreach {
       case DataChunk(data) => buf ++= s"DATA:${data map (b => f"$b%02x") mkString}\n"
       case c               => sys.error(s"can't serialize $c")
     }
