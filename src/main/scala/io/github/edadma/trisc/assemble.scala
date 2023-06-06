@@ -36,7 +36,7 @@ private case class LabelSymbol(name: String, var value: Long, sym: Positional, v
     extends Symbol
 private case class ExternSymbol(name: String) extends Symbol
 
-def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map()): Seq[Segment] =
+def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map(), addresses: Int = 2): Seq[Segment] =
   val lines = AssemblyParser.parseAssembly(src)
   val symbols = new mutable.LinkedHashMap[String, Symbol]
   val segments = new mutable.LinkedHashMap[String, Segment]
@@ -142,7 +142,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case InstructionLineAST(mnemonic, operands) =>
       segment.size += (
         mnemonic match
-          case "movi" => 4
+          case "movi" => addresses * 2
           case _      => 2
       )
       operands foreach locals
@@ -414,12 +414,24 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o1, "expected register as first operand")
       val imm =
         fold(o2, absolute = true, immediate = true) match
-          case _: DoubleExprAST                        => problem(o2, "immediate must be integral")
-          case LongExprAST(n) if 0 <= n && n <= 0xffff => n.toInt
-          case _: LongExprAST                          => problem(o2, "immediate must be a byte value")
+          case _: DoubleExprAST                            => problem(o2, "immediate must be integral")
+          case LongExprAST(n) if 0 <= n && n <= 0x7fffffff => n.toInt
+          case _: LongExprAST                              => problem(o2, "immediate must be a byte value")
 
-      addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> (imm >> 8)) // ldi r(reg), >imm
-      addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff)) // sli r(reg), <imm
+      addresses match
+        case 1 => addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> (imm & 0xff)) // ldi r(reg), <imm
+        case 2 =>
+          addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> ((imm >> 8) & 0xff)) // ldi r(reg), >imm
+          addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff)) // sli r(reg), <imm
+        case 3 =>
+          addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> ((imm >> 16) & 0xff)) // ldi r(reg), >>imm
+          addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> ((imm >> 8) & 0xff)) // sli r(reg), >imm
+          addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff)) // sli r(reg), <imm
+        case 4 =>
+          addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> ((imm >> 24) & 0xff)) // ldi r(reg), >>imm
+          addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> ((imm >> 16) & 0xff)) // sli r(reg), >>imm
+          addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> ((imm >> 8) & 0xff)) // sli r(reg), >imm
+          addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff)) // sli r(reg), <imm
     case InstructionLineAST("nop", Nil) => addInstruction(3 -> 5, 3 -> 0, 3 -> 0, 7 -> 0) // addi r0, r0, 0
     case InstructionLineAST("mov", Seq(o1, o2)) =>
       val reg1 =
