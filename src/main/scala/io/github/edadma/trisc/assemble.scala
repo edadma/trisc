@@ -24,7 +24,7 @@ class Segment(val name: String):
     chunks.last.asInstanceOf[DataChunk].data += b
     length += 1
 
-  def ++=(bs: Seq[Byte]): Unit = bs foreach (b => +=(b))
+  def ++=(bs: IterableOnce[Byte]): Unit = bs.iterator foreach (b => +=(b))
 
   override def toString: String =
     s"org: ${org.toHexString}; size: ${size.toHexString}; symbols: [${symbols mkString ", "}]"
