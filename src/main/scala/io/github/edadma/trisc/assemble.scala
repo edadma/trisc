@@ -44,6 +44,7 @@ def serialize(segs: Seq[Segment]): String =
     buf ++= s"SEGMENT:${s.name},${s.org.toHexString}\n"
     s.chunks foreach {
       case DataChunk(data) => buf ++= s"DATA:${data map (b => f"$b%02x") mkString}\n"
+      case ResChunk(size)  => buf ++= s"RES:${size.toHexString}\n"
       case c               => sys.error(s"can't serialize $c")
     }
 
