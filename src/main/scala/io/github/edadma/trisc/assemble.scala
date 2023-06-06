@@ -54,8 +54,12 @@ def serialize(segs: Seq[Segment]): String =
 
 def deserialize(tof: String): Seq[Segment] =
   val lines = scala.io.Source.fromString(tof).getLines
+  var v = 0
 
-  lines foreach { case "TOF v1" =>
+  lines.zipWithIndex map ((s, idx) => (s.trim, idx + 1)) foreach {
+    case (s, _) if s.isEmpty     =>
+    case ("TOF v1", _) if v == 0 => v = 1
+    case (_, l) if v == 0        => sys.error(s"missing magic on line $l")
   }
 
 def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map(), addresses: Int = 2): Seq[Segment] =
