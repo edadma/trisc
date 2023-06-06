@@ -24,6 +24,8 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
 
   def writeByte(addr: Long, data: Long): Unit = mem.writeByte(addr, data)
 
+  def loadByte(addr: Long, data: Long): Unit = mem.loadByte(addr, data)
+
   val r = immutable.ArraySeq(
     new Reg0,
     new Reg,

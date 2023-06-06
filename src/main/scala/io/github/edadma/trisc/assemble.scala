@@ -8,16 +8,22 @@ import scala.collection.mutable.ArrayBuffer
 import scala.util.parsing.input.Positional
 
 trait Chunk
-case class DataChunk(data: Seq[Byte]) extends Chunk
+case class DataChunk(data: ArrayBuffer[Byte] = new ArrayBuffer) extends Chunk
 
-case class Segment(name: String, chunks: Seq[Chunk])
-
-private class PassSegment:
+class Segment(val name: String):
   var org: Long = 0
   var size: Long = 0
+  var length: Long = 0
   val symbols: ArrayBuffer[String] = new ArrayBuffer
-  val code: ArrayBuffer[Byte] = new ArrayBuffer
+  val content: ArrayBuffer[Chunk] = new ArrayBuffer
   var last: Option[String] = None
+
+  def +=(b: Byte): Unit =
+    if content.isEmpty || !content.last.isInstanceOf[DataChunk] then content += DataChunk()
+    content.last.asInstanceOf[DataChunk].data += b
+    length += 1
+
+  def ++=(bs: Seq[Byte]): Unit = bs foreach (b => +=(b))
 
   override def toString: String =
     s"org: ${org.toHexString}; size: ${size.toHexString}; symbols: [${symbols mkString ", "}]"
@@ -33,8 +39,8 @@ private case class ExternSymbol(name: String) extends Symbol
 def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map()): Seq[Segment] =
   val lines = AssemblyParser.parseAssembly(src)
   val symbols = new mutable.LinkedHashMap[String, Symbol]
-  val segments = new mutable.LinkedHashMap[String, PassSegment]
-  var segment = PassSegment()
+  val segments = new mutable.LinkedHashMap[String, Segment]
+  var segment = Segment("_default_")
 
   def fold(e: ExprAST, absolute: Boolean = false, immediate: Boolean = false): ExprAST =
     e match
@@ -53,14 +59,14 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case None => problem(e, s"unrecognized symbol '$ref'")
           case Some(l @ LabelSymbol(_, value, _, _)) =>
             l.referenced = true
-            LongExprAST(if absolute then value else value - (segment.code.length + 2 + segment.org))
+            LongExprAST(if absolute then value else value - (segment.length + 2 + segment.org))
           case Some(EquateSymbol(_, value)) => fold(value, absolute, immediate)
       case LocalExprAST(_, ref) =>
         symbols get ref match
           case None => problem(e, s"unrecognized symbol '$ref'")
           case Some(l @ LabelSymbol(_, value, _, _)) =>
             l.referenced = true
-            LongExprAST(if absolute then value else value - (segment.code.length + 2 + segment.org))
+            LongExprAST(if absolute then value else value - (segment.length + 2 + segment.org))
       case UnaryExprAST("-", expr) =>
         fold(expr, absolute, immediate) match
           case LongExprAST(n)   => LongExprAST(-n)
@@ -77,8 +83,8 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
       shift -= w
       inst |= (v & mask) << shift
 
-    segment.code += (inst >> 8).toByte
-    segment.code += inst.toByte
+    segment += (inst >> 8).toByte
+    segment += inst.toByte
 
   def locals(expr: ExprAST): Unit =
     expr match
@@ -100,7 +106,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case SegmentLineAST(name) =>
       segments get name match
         case None =>
-          segment = PassSegment()
+          segment = Segment(name)
           segments(name) = segment
         case Some(s) => segment = s
     case label @ LabelLineAST(name) =>
@@ -144,7 +150,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
 
 //    pprintln(equates)
 
-  def relocate(seg: PassSegment, org: Long): Unit =
+  def relocate(seg: Segment, org: Long): Unit =
     seg.symbols foreach (n => symbols(n).asInstanceOf[LabelSymbol].value += org)
     seg.org = org
 
@@ -167,78 +173,78 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case LabelLineAST(_)         =>
     case LocalLineAST(_)         =>
     case EquateLineAST(_, _)     =>
-    case DataLineAST(width, Nil) => segment.code ++= (if width == 0 then Seq.fill(8)(0) else Seq.fill(width)(0))
+    case DataLineAST(width, Nil) => segment ++= (if width == 0 then Seq.fill(8)(0) else Seq.fill(width)(0))
     case DataLineAST(width, data) =>
-      val startingLength = segment.code.length
+      val startingLength = segment.length
 
       for d <- data do
         fold(d, absolute = true) match
           case StringExprAST(s) =>
             val bytes = s.getBytes(scala.io.Codec.UTF8.charSet)
 
-            segment.code ++= bytes
+            segment ++= bytes
 
-            if bytes.length % 2 == 1 then segment.code += 0
+            if bytes.length % 2 == 1 then segment += 0
           case value =>
             width match
               case 1 =>
                 value match
                   case _: DoubleExprAST                => problem(d, "expected an int value, found float")
-                  case LongExprAST(v) if v.isValidByte => segment.code += v.toByte
+                  case LongExprAST(v) if v.isValidByte => segment += v.toByte
                   case _                               => problem(d, "expected a byte value, out of range")
               case 2 =>
                 value match
                   case _: DoubleExprAST => problem(d, "expected an int value, found float")
                   case LongExprAST(v) if v.isValidShort =>
-                    segment.code += (v >> 8).toByte
-                    segment.code += v.toByte
+                    segment += (v >> 8).toByte
+                    segment += v.toByte
                   case _ => problem(d, "expected a short value, out of range")
               case 4 =>
                 value match
                   case _: DoubleExprAST => problem(d, "expected an int value, found float")
                   case LongExprAST(v) if v.isValidInt =>
-                    segment.code += (v >> 24).toByte
-                    segment.code += (v >> 16).toByte
-                    segment.code += (v >> 8).toByte
-                    segment.code += v.toByte
+                    segment += (v >> 24).toByte
+                    segment += (v >> 16).toByte
+                    segment += (v >> 8).toByte
+                    segment += v.toByte
                   case _ => problem(d, "expected a short value, out of range")
               case 8 =>
                 value match
                   case _: DoubleExprAST => problem(d, "expected an int value, found float")
                   case LongExprAST(v) =>
-                    segment.code += (v >> 56).toByte
-                    segment.code += (v >> 48).toByte
-                    segment.code += (v >> 40).toByte
-                    segment.code += (v >> 32).toByte
-                    segment.code += (v >> 24).toByte
-                    segment.code += (v >> 16).toByte
-                    segment.code += (v >> 8).toByte
-                    segment.code += v.toByte
+                    segment += (v >> 56).toByte
+                    segment += (v >> 48).toByte
+                    segment += (v >> 40).toByte
+                    segment += (v >> 32).toByte
+                    segment += (v >> 24).toByte
+                    segment += (v >> 16).toByte
+                    segment += (v >> 8).toByte
+                    segment += v.toByte
               case 0 =>
                 val v =
                   value match
                     case DoubleExprAST(d) => java.lang.Double.doubleToLongBits(d)
                     case LongExprAST(l)   => l
 
-                segment.code += (v >> 56).toByte
-                segment.code += (v >> 48).toByte
-                segment.code += (v >> 40).toByte
-                segment.code += (v >> 32).toByte
-                segment.code += (v >> 24).toByte
-                segment.code += (v >> 16).toByte
-                segment.code += (v >> 8).toByte
-                segment.code += v.toByte
+                segment += (v >> 56).toByte
+                segment += (v >> 48).toByte
+                segment += (v >> 40).toByte
+                segment += (v >> 32).toByte
+                segment += (v >> 24).toByte
+                segment += (v >> 16).toByte
+                segment += (v >> 8).toByte
+                segment += v.toByte
 
-      if (segment.code.length - startingLength) % 2 == 1 then segment.code += 0
+      if (segment.length - startingLength) % 2 == 1 then segment += 0
     case ReserveLineAST(width, n) =>
-      val startingLength = segment.code.length
+      val startingLength = segment.length
 
       fold(n, absolute = true) match
         case LongExprAST(count) if 0 < count && count <= 10 * 1024 * 1024 =>
-          segment.code ++= Seq.fill(count.toInt * (if width == 0 then 8 else width))(0)
+          segment ++= Seq.fill(count.toInt * (if width == 0 then 8 else width))(0)
         case _ => problem(n, s"must be a positive integer up to 10 meg")
 
-      if (segment.code.length - startingLength) % 2 == 1 then segment.code += 0
+      if (segment.length - startingLength) % 2 == 1 then segment += 0
     case InstructionLineAST(mnemonic @ ("ldi" | "sli" | "sti"), Seq(o1, o2)) =>
       val opcode =
         mnemonic match
@@ -438,8 +444,8 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
 //    case LabelSymbol(n, v, _, _) => println((n, v.toHexString))
 //    case _                       =>
 //  }
-//  println(segments("_default_").code)
+//  println(segments("_default_"))
 
 //    segments foreach ((name, seg) => println((name, seg.code map (b => (b & 0xff).toHexString))))
 
-  segments.toSeq map ((n, s) => Segment(n, Seq(DataChunk(s.code to immutable.ArraySeq))))
+  segments.values.toSeq

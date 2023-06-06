@@ -11,6 +11,7 @@ trait Addressable:
   def size: Long
   def readByte(addr: Long): Int
   def writeByte(addr: Long, data: Long): Unit
+  def loadByte(addr: Long, data: Long): Unit
 
   def readByteUnsigned(addr: Long): Int = readByte(addr) & 0xff
 
@@ -66,18 +67,22 @@ class Memory(val name: String, blocks: Addressable*) extends Addressable:
 
   def writeByte(addr: Long, data: Long): Unit = block(addr) getOrElse badAddress(addr) writeByte (addr, data)
 
-abstract class AbstractRAM extends Addressable:
+  def loadByte(addr: Long, data: Long): Unit = block(addr) getOrElse badAddress(addr) loadByte (addr, data)
+
+abstract class ArrayAddressable extends Addressable:
   require(base >= 0, "base is negative")
   require(0 <= size && size <= Int.MaxValue, "size out of range")
 
-  val seq = mutable.ArraySeq.fill(size.toInt)(0.asInstanceOf[Byte])
+  protected val seq: mutable.ArraySeq[Byte] = mutable.ArraySeq.fill(size.toInt)(0.asInstanceOf[Byte])
 
   def readByte(addr: Long): Int =
     require(base <= addr && addr < base + size, "address out of range")
     seq((addr - base).toInt)
 
-class RAM(val base: Long, val size: Long) extends AbstractRAM:
+class RAM(val base: Long, val size: Long) extends ArrayAddressable:
   val name = "RAM"
+
+  def loadByte(addr: Long, data: Long): Unit = writeByte(addr, data)
 
   def writeByte(addr: Long, data: Long): Unit =
     require(base <= addr && addr < base + size, "address out of range")
@@ -89,8 +94,12 @@ trait ReadOnlyAddressable extends Addressable:
 trait WriteOnlyAddressable extends Addressable:
   def readByte(addr: Long): Int = sys.error(s"$name not readable at address ${addr.toHexString}")
 
-class ROM(val base: Long, val size: Long) extends AbstractRAM with ReadOnlyAddressable:
+class ROM(val base: Long, val size: Long) extends ArrayAddressable with ReadOnlyAddressable:
   val name = "ROM"
+
+  def loadByte(addr: Long, data: Long): Unit =
+    require(base <= addr && addr < base + size, "address out of range")
+    seq((addr - base).toInt) = data.toByte
 
 //def mkROM(insts: IndexedSeq[String]): ROM =
 //  def literal(n: String): Iterator[Int] =

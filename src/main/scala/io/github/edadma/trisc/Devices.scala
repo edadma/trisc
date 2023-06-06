@@ -2,13 +2,16 @@ package io.github.edadma.trisc
 
 import java.time.{LocalDateTime, ZoneId}
 
-class Stdout(val base: Long) extends WriteOnlyAddressable:
+trait Device extends Addressable:
+  def loadByte(addr: Long, data: Long): Unit = sys.error("attempting to load a byte into memory-mapped device")
+
+class Stdout(val base: Long) extends Device with WriteOnlyAddressable:
   val name = "stdout"
   val size = 1
 
   def writeByte(addr: Long, data: Long): Unit = print(data.toChar.toString)
 
-class Timer(val base: Long) extends WriteOnlyAddressable with (CPU => Unit):
+class Timer(val base: Long) extends Device with WriteOnlyAddressable with (CPU => Unit):
   val name = "timer"
   val size = 3
 
@@ -34,7 +37,7 @@ class Timer(val base: Long) extends WriteOnlyAddressable with (CPU => Unit):
       last += delay
       cpu.interrupt()
 
-class RTC(val base: Long) extends ReadOnlyAddressable:
+class RTC(val base: Long) extends Device with ReadOnlyAddressable:
   val name = "RTC"
   val size = 6
 
