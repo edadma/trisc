@@ -3,7 +3,7 @@ package io.github.edadma.trisc
 import pprint.pprintln
 
 import scala.annotation.tailrec
-import scala.collection.{immutable, mutable}
+import scala.collection.{mutable, immutable}
 import scala.collection.mutable.ArrayBuffer
 import scala.util.parsing.input.Positional
 
@@ -36,31 +36,6 @@ private case class EquateSymbol(name: String, value: ExprAST) extends Symbol
 private case class LabelSymbol(name: String, var value: Long, sym: Positional, var referenced: Boolean = false)
     extends Symbol
 private case class ExternSymbol(name: String) extends Symbol
-
-def serialize(segs: Seq[Segment]): String =
-  val buf = new StringBuilder
-
-  buf ++= "TOF v1\n"
-
-  for s <- segs do
-    buf ++= s"SEGMENT:${s.name},${s.org.toHexString}\n"
-    s.chunks foreach {
-      case DataChunk(data) => buf ++= s"DATA:${data map (b => f"$b%02x") mkString}\n"
-      case ResChunk(size)  => buf ++= s"RES:${size.toHexString}\n"
-      case c               => sys.error(s"can't serialize $c")
-    }
-
-  buf.toString
-
-def deserialize(tof: String): Seq[Segment] =
-  val lines = scala.io.Source.fromString(tof).getLines
-  var v = 0
-
-  lines.zipWithIndex map ((s, idx) => (s.trim, idx + 1)) foreach {
-    case (s, _) if s.isEmpty     =>
-    case ("TOF v1", _) if v == 0 => v = 1
-    case (_, l) if v == 0        => sys.error(s"missing magic on line $l")
-  }
 
 def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map(), addresses: Int = 2): Seq[Segment] =
   val lines = AssemblyParser.parseAssembly(src)

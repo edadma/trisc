@@ -281,6 +281,7 @@ import pprint.pprintln
   val s = serialize(segs)
 
   println(s)
+
 //  val chunks = segs flatMap (_.chunks)
 //  val code = chunks flatMap { case DataChunk(data) => data } to IndexedSeq
   val timer = new Timer(0xfffa)
