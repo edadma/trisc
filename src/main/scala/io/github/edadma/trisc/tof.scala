@@ -24,7 +24,7 @@ def deserialize(tof: String): Seq[Segment] =
 
   lines.zipWithIndex map ((s, idx) => (s.trim, idx + 1)) foreach {
     case (s, _) if s.isEmpty             =>
-    case (s"TOF v$n", _) if !versions(n) => sys.error(s"TOF version must be one of: $versions")
+    case (s"TOF v$n", l) if !versions(n) => sys.error(s"TOF version must be one of [$versions] on line $l")
     case (s"TOF v$n", _) if v == 0       => v = n.toInt
     case (_, l) if v == 0                => sys.error(s"missing magic on line $l")
     case (s"SEGMENT:$name,$org", l)      =>
