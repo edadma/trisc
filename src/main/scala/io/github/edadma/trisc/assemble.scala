@@ -40,6 +40,8 @@ private case class ExternSymbol(name: String) extends Symbol
 def serialize(segs: Seq[Segment]): String =
   val buf = new StringBuilder
 
+  buf ++= "TOF v1\n"
+
   for s <- segs do
     buf ++= s"SEGMENT:${s.name},${s.org.toHexString}\n"
     s.chunks foreach {
@@ -49,6 +51,12 @@ def serialize(segs: Seq[Segment]): String =
     }
 
   buf.toString
+
+def deserialize(tof: String): Seq[Segment] =
+  val lines = scala.io.Source.fromString(tof).getLines
+
+  lines foreach { case "TOF v1" =>
+  }
 
 def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map(), addresses: Int = 2): Seq[Segment] =
   val lines = AssemblyParser.parseAssembly(src)
