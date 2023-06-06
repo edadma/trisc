@@ -9,6 +9,7 @@ import scala.util.parsing.input.Positional
 
 trait Chunk
 case class DataChunk(data: ArrayBuffer[Byte] = new ArrayBuffer) extends Chunk
+case class ResChunk(size: Long) extends Chunk
 
 class Segment(val name: String):
   var org: Long = 0
@@ -253,10 +254,12 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
 
       fold(n, absolute = true) match
         case LongExprAST(count) if 0 < count && count <= 10 * 1024 * 1024 =>
-          segment ++= Seq.fill(count.toInt * (if width == 0 then 8 else width))(0)
-        case _ => problem(n, s"must be a positive integer up to 10 meg")
+          val size = count * (if width == 0 then 8 else width)
+          val align = if size % 2 == 1 then 1 else 0
 
-      if (segment.length - startingLength) % 2 == 1 then segment += 0
+          segment.chunks += ResChunk(size + align)
+          segment.length += size + align
+        case _ => problem(n, s"must be a positive integer up to 10 meg")
     case InstructionLineAST(mnemonic @ ("ldi" | "sli" | "sti"), Seq(o1, o2)) =>
       val opcode =
         mnemonic match
