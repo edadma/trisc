@@ -1,7 +1,7 @@
 package io.github.edadma.trisc
 
-import scala.collection.immutable
-import scala.collection.mutable.ListBuffer
+import scala.collection.{immutable, mutable}
+import scala.collection.mutable.{ArrayBuffer, ListBuffer}
 
 object TOF:
   trait Chunk
@@ -12,7 +12,7 @@ object TOF:
   case class Segment(name: String, org: Long, chunks: Seq[Chunk])
 
   class TOFBuilder:
-
+    val segments = new mutable.LinkedHashMap[String, (Long, ListBuffer[(String, Int | ArrayBuffer[Byte])])]
     def tof: TOF = null
 
   def builder: TOFBuilder = new TOFBuilder
