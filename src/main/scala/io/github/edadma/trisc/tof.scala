@@ -1,14 +1,16 @@
 package io.github.edadma.trisc
 
 import scala.collection.immutable
+import scala.collection.mutable.ListBuffer
 
 def serialize(segs: Seq[Segment]): String =
   val buf = new StringBuilder
 
   buf ++= "TOF v1\n"
 
-  for s <- segs do
+  for s <- segs if s.length > 0 do
     buf ++= s"SEGMENT:${s.name},${s.org.toHexString}\n"
+
     s.chunks foreach {
       case DataChunk(data) => buf ++= s"DATA:${data map (b => f"$b%02x") mkString}\n"
       case ResChunk(size)  => buf ++= s"RES:${size.toHexString}\n"
@@ -21,6 +23,7 @@ def deserialize(tof: String): Seq[Segment] =
   val lines = scala.io.Source.fromString(tof).getLines
   val versions = immutable.TreeSet("1")
   var v = 0
+  val segments = new ListBuffer[Segment]
   var segment: Segment = null
 
   lines.zipWithIndex map ((s, idx) => (s.trim, idx + 1)) foreach {
@@ -31,6 +34,7 @@ def deserialize(tof: String): Seq[Segment] =
     case (s"SEGMENT:$name,$org", l) =>
       segment = Segment(name)
       segment.org = java.lang.Long.parseUnsignedLong(org, 16)
+      segments += segment
     case (s"DATA:$data", l) =>
       segment ++= data grouped 2 map (b => java.lang.Byte.parseByte(b, 16))
     case (s"RES:$size", l) =>
@@ -38,4 +42,4 @@ def deserialize(tof: String): Seq[Segment] =
     case (_, l) => sys.error(s"error on line $l")
   }
 
-  null
+  segments.toSeq
