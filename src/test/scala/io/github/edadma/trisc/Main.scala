@@ -289,6 +289,17 @@ import pprint.pprintln
     timer,
   )
 
+//  val cpu = new CPU(mem, List(timer)) {
+//    //    trace = true
+//    //    clump = 1
+//    limit = 30000
+//  }
+//
+//  cpu.reset()
+//  val start = System.currentTimeMillis()
+//  cpu.run()
+//  println(System.currentTimeMillis() - start)
+
 //  val mem = new Memory(
 //    "Memory",
 //    mkROM(
@@ -311,14 +322,3 @@ import pprint.pprintln
 //  )
 //
 //  //  for i <- 0L until rom.size do println(rom.readByte(i).toHexString)
-
-  val cpu = new CPU(mem, List(timer)) {
-//    trace = true
-//    clump = 1
-    limit = 30000
-  }
-
-  cpu.reset()
-  val start = System.currentTimeMillis()
-  cpu.run()
-  println(System.currentTimeMillis() - start)

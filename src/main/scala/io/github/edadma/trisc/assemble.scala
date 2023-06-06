@@ -36,6 +36,18 @@ private case class LabelSymbol(name: String, var value: Long, sym: Positional, v
     extends Symbol
 private case class ExternSymbol(name: String) extends Symbol
 
+def serialize(segs: Seq[Segment]): String =
+  val buf = new StringBuilder
+
+  for s <- segs do
+    buf ++= s"SEGMENT:${s.name},${s.org.toHexString}\n"
+    s.content foreach {
+      case DataChunk(data) => buf ++= s"DATA:${data map (b => f"$b%02x") mkString}\n"
+      case c               => sys.error(s"can't serialize $c")
+    }
+
+  buf.toString
+
 def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map(), addresses: Int = 2): Seq[Segment] =
   val lines = AssemblyParser.parseAssembly(src)
   val symbols = new mutable.LinkedHashMap[String, Symbol]
@@ -182,7 +194,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case StringExprAST(s) =>
             val bytes = s.getBytes(scala.io.Codec.UTF8.charSet)
 
-            segment ++= bytes
+            segment ++= immutable.ArraySeq.unsafeWrapArray(bytes)
 
             if bytes.length % 2 == 1 then segment += 0
           case value =>
