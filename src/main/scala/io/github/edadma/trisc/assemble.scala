@@ -250,12 +250,10 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
 
       if (segment.length - startingLength) % 2 == 1 then segment += 0
     case ReserveLineAST(width, n) =>
-      val startingLength = segment.length
-
       fold(n, absolute = true) match
         case LongExprAST(count) if 0 < count && count <= 10 * 1024 * 1024 =>
           val size = count * (if width == 0 then 8 else width)
-          val align = if size % 2 == 1 then 1 else 0
+          val align = size % 2
 
           segment.chunks += ResChunk(size + align)
           segment.length += size + align
