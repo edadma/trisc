@@ -114,7 +114,7 @@ import pprint.pprintln
 //      |  """.stripMargin,
 //  )
 
-  val segs = assemble(
+  val tof = assemble(
     """
       |STDOUT = 0xFFF8
       |TIMER_DELAY = 0xFFFA
@@ -278,7 +278,7 @@ import pprint.pprintln
 
 //  pprintln(segs)
 
-  val s = serialize(segs)
+  val s = serialize(tof)
 
   println(s)
 

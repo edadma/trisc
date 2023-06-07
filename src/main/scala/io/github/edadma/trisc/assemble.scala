@@ -7,7 +7,7 @@ import scala.collection.{mutable, immutable}
 import scala.collection.mutable.ArrayBuffer
 import scala.util.parsing.input.Positional
 
-def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map(), addresses: Int = 2): Seq[Pass1] =
+def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map(), addresses: Int = 2): TOF =
   class Pass1(val name: String):
     var org: Long = 0
     var size: Long = 0
@@ -28,6 +28,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
   val symbols = new mutable.LinkedHashMap[String, Symbol]
   val segments = new mutable.LinkedHashMap[String, Pass1]
   var segment = Pass1("_default_")
+  val builder = TOF.builder
 
   def addSymbol(sym: Positional, name: String): Unit =
     if symbols contains name then problem(sym, s"duplicate symbol: '$name'")
@@ -42,6 +43,39 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         locals(l)
         locals(r)
       case _ =>
+
+  def fold(e: ExprAST, absolute: Boolean = false, immediate: Boolean = false, references: Boolean = true): ExprAST =
+    e match
+      case lit: (LongExprAST | DoubleExprAST) => lit
+      case reg: RegisterExprAST               => reg
+      case StringExprAST(s) if immediate =>
+        if s.isEmpty || s.length > 1 then problem(e, "expected a single character")
+
+        val v = LongExprAST(s.codePointAt(0))
+
+        v.setPos(e.pos)
+        v
+      case s: StringExprAST => s
+      case ReferenceExprAST(ref) =>
+        if !references then problem(e, s"references not allowed here")
+
+        symbols get ref match
+          case None => problem(e, s"unrecognized symbol '$ref'")
+          case Some(l @ LabelSymbol(_, value, _, _)) =>
+            l.referenced = true
+            LongExprAST(if absolute then value else value - (builder.length + 2 + builder.org))
+          case Some(EquateSymbol(_, value)) => fold(value, absolute, immediate)
+      case LocalExprAST(_, ref) =>
+        symbols get ref match
+          case None => problem(e, s"unrecognized symbol '$ref'")
+          case Some(l @ LabelSymbol(_, value, _, _)) =>
+            l.referenced = true
+            LongExprAST(if absolute then value else value - (builder.length + 2 + builder.org))
+      case UnaryExprAST("-", expr) =>
+        fold(expr, absolute, immediate) match
+          case LongExprAST(n)   => LongExprAST(-n)
+          case DoubleExprAST(n) => DoubleExprAST(-n)
+          case e                => e
 
   segments("_default_") = segment
 
@@ -109,39 +143,6 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         relocate(s, o)
         if stacked then base = o + s.size
 
-  val builder = TOF.builder
-
-  def fold(e: ExprAST, absolute: Boolean = false, immediate: Boolean = false): ExprAST =
-    e match
-      case lit: (LongExprAST | DoubleExprAST) => lit
-      case reg: RegisterExprAST               => reg
-      case StringExprAST(s) if immediate =>
-        if s.isEmpty || s.length > 1 then problem(e, "expected a single character")
-
-        val v = LongExprAST(s.codePointAt(0))
-
-        v.setPos(e.pos)
-        v
-      case s: StringExprAST => s
-      case ReferenceExprAST(ref) =>
-        symbols get ref match
-          case None => problem(e, s"unrecognized symbol '$ref'")
-          case Some(l @ LabelSymbol(_, value, _, _)) =>
-            l.referenced = true
-            LongExprAST(if absolute then value else value - (builder.length + 2 + builder.org))
-          case Some(EquateSymbol(_, value)) => fold(value, absolute, immediate)
-      case LocalExprAST(_, ref) =>
-        symbols get ref match
-          case None => problem(e, s"unrecognized symbol '$ref'")
-          case Some(l @ LabelSymbol(_, value, _, _)) =>
-            l.referenced = true
-            LongExprAST(if absolute then value else value - (builder.length + 2 + builder.org))
-      case UnaryExprAST("-", expr) =>
-        fold(expr, absolute, immediate) match
-          case LongExprAST(n)   => LongExprAST(-n)
-          case DoubleExprAST(n) => DoubleExprAST(-n)
-          case e                => e
-
   def addInstruction(pieces: (Int, Int)*): Unit =
     var inst = 0
     var shift = 16
@@ -179,7 +180,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
               case 1 =>
                 value match
                   case _: DoubleExprAST                => problem(d, "expected an int value, found float")
-                  case LongExprAST(v) if v.isValidByte => segment += v.toByte
+                  case LongExprAST(v) if v.isValidByte => builder += v.toByte
                   case _                               => problem(d, "expected a byte value, out of range")
               case 2 =>
                 value match
@@ -232,7 +233,6 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           val align = size % 2
 
           builder.addRes((size + align).toInt)
-          builder.length += size + align
         case _ => problem(n, s"must be a positive integer up to 10 meg")
     case InstructionLineAST(mnemonic @ ("ldi" | "sli" | "sti"), Seq(o1, o2)) =>
       val opcode =

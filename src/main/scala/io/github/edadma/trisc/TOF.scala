@@ -31,7 +31,7 @@ object TOF:
     def segmentDefined(name: String): Boolean = segments contains name
 
     def segment(name: String, org: Long): Unit =
-      current = segments get name match
+      segments get name match
         case None =>
           current = new TOFBuilderSegment(org)
           segments(name) = current
@@ -46,7 +46,9 @@ object TOF:
 
     def ++=(bs: IterableOnce[Byte]): Unit = bs.iterator foreach (b => +=(b))
 
-    def addRes(size: Int): Unit = current.chunks += TOFBuilderChunk("res", size)
+    def addRes(size: Int): Unit =
+      current.chunks += TOFBuilderChunk("res", size)
+      current.length += size
 
   def builder: TOFBuilder = new TOFBuilder
 
@@ -73,7 +75,7 @@ object TOF:
 
     b.tof
 
-class TOF(val segments: Seq[Pass1]):
+class TOF(val segments: Seq[TOF.Segment]):
   def serialize: String =
     val buf = new StringBuilder
 
@@ -83,9 +85,9 @@ class TOF(val segments: Seq[Pass1]):
       buf ++= s"SEGMENT:${s.name},${s.org.toHexString}\n"
 
       s.chunks foreach {
-        case DataChunk(data) => buf ++= s"DATA:${data map (b => f"$b%02x") mkString}\n"
-        case ResChunk(size)  => buf ++= s"RES:${size.toHexString}\n"
-        case c               => sys.error(s"can't serialize $c")
+        case TOF.DataChunk(data) => buf ++= s"DATA:${data map (b => f"$b%02x") mkString}\n"
+        case TOF.ResChunk(size)  => buf ++= s"RES:${size.toHexString}\n"
+        case c                   => sys.error(s"can't serialize $c")
       }
 
     buf.toString
