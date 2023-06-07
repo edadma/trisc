@@ -14,17 +14,9 @@ case class ResChunk(size: Long) extends Chunk
 class Segment(val name: String):
   var org: Long = 0
   var size: Long = 0
-  var length: Long = 0
   val symbols: ArrayBuffer[String] = new ArrayBuffer
   val chunks: ArrayBuffer[Chunk] = new ArrayBuffer
   var last: Option[String] = None
-
-  def +=(b: Byte): Unit =
-    if chunks.isEmpty || !chunks.last.isInstanceOf[DataChunk] then chunks += DataChunk()
-    chunks.last.asInstanceOf[DataChunk].data += b
-    length += 1
-
-  def ++=(bs: IterableOnce[Byte]): Unit = bs.iterator foreach (b => +=(b))
 
   override def toString: String =
     s"org: ${org.toHexString}; size: ${size.toHexString}; symbols: [${symbols mkString ", "}]"

@@ -12,27 +12,39 @@ object TOF:
   case class Segment(name: String, org: Long, chunks: Seq[Chunk])
 
   class TOFBuilder:
-    val segments = new mutable.LinkedHashMap[String, (Long, ListBuffer[(String, Int | ArrayBuffer[Byte])])]
-    var current: ListBuffer[(String, Int | ArrayBuffer[Byte])] = current
-    var length = 0L
+    private case class TOFBuilderChunk(typ: String, data: Int | ArrayBuffer[Byte])
+    private class TOFBuilderSegment(
+        val org: Long,
+        val chunks: ListBuffer[TOFBuilderChunk] = new ListBuffer,
+        var length: Long = 0,
+    )
+
+    private val segments = new mutable.LinkedHashMap[String, TOFBuilderSegment]
+    private var current: TOFBuilderSegment = current
+
+    def org: Long = current.org
+
+    def length: Long = current.length
 
     def tof: TOF = null
 
     def addSegment(name: String, org: Long): Boolean =
       if segments contains name then false
       else
-        current = new ListBuffer
-        segments(name) = (org, current)
+        current = new TOFBuilderSegment(org)
+        segments(name) = current
         true
 
     def +=(b: Byte): Unit =
-      if current.isEmpty || current.last._1 != "data" then current += ("data" -> new ArrayBuffer[Byte])
-      current.last._2.asInstanceOf[ArrayBuffer[Byte]] += b
-      length += 1
+      if current.chunks.isEmpty || current.chunks.last.typ != "data" then
+        current.chunks += TOFBuilderChunk("data", new ArrayBuffer[Byte])
+
+      current.chunks.last.data.asInstanceOf[ArrayBuffer[Byte]] += b
+      current.length += 1
 
     def ++=(bs: IterableOnce[Byte]): Unit = bs.iterator foreach (b => +=(b))
 
-    def addRes(size: Int): Unit = current += ("res" -> size)
+    def addRes(size: Int): Unit = current.chunks += TOFBuilderChunk("res", size)
 
   def builder: TOFBuilder = new TOFBuilder
 
