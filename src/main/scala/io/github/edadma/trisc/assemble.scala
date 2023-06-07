@@ -7,77 +7,32 @@ import scala.collection.{mutable, immutable}
 import scala.collection.mutable.ArrayBuffer
 import scala.util.parsing.input.Positional
 
-trait Chunk
-case class DataChunk(data: ArrayBuffer[Byte] = new ArrayBuffer) extends Chunk
-case class ResChunk(size: Long) extends Chunk
+def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map(), addresses: Int = 2): Seq[Pass1] =
+  class Pass1(val name: String):
+    var org: Long = 0
+    var size: Long = 0
+    val symbols: ArrayBuffer[String] = new ArrayBuffer
+    var last: Option[String] = None
 
-class Segment(val name: String):
-  var org: Long = 0
-  var size: Long = 0
-  val symbols: ArrayBuffer[String] = new ArrayBuffer
-  val chunks: ArrayBuffer[Chunk] = new ArrayBuffer
-  var last: Option[String] = None
+    override def toString: String =
+      s"org: ${org.toHexString}; size: ${size.toHexString}; symbols: [${symbols mkString ", "}]"
 
-  override def toString: String =
-    s"org: ${org.toHexString}; size: ${size.toHexString}; symbols: [${symbols mkString ", "}]"
+  trait Symbol:
+    val name: String
 
-private trait Symbol:
-  val name: String
+  case class EquateSymbol(name: String, value: ExprAST) extends Symbol
+  case class LabelSymbol(name: String, var value: Long, sym: Positional, var referenced: Boolean = false) extends Symbol
+  case class ExternSymbol(name: String) extends Symbol
 
-private case class EquateSymbol(name: String, value: ExprAST) extends Symbol
-private case class LabelSymbol(name: String, var value: Long, sym: Positional, var referenced: Boolean = false)
-    extends Symbol
-private case class ExternSymbol(name: String) extends Symbol
-
-def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map(), addresses: Int = 2): Seq[Segment] =
   val lines = AssemblyParser.parseAssembly(src)
   val symbols = new mutable.LinkedHashMap[String, Symbol]
-  val segments = new mutable.LinkedHashMap[String, Segment]
-  var segment = Segment("_default_")
+  val segments = new mutable.LinkedHashMap[String, Pass1]
+  var segment = Pass1("_default_")
 
-  def fold(e: ExprAST, absolute: Boolean = false, immediate: Boolean = false): ExprAST =
-    e match
-      case lit: (LongExprAST | DoubleExprAST) => lit
-      case reg: RegisterExprAST               => reg
-      case StringExprAST(s) if immediate =>
-        if s.isEmpty || s.length > 1 then problem(e, "expected a single character")
-
-        val v = LongExprAST(s.codePointAt(0))
-
-        v.setPos(e.pos)
-        v
-      case s: StringExprAST => s
-      case ReferenceExprAST(ref) =>
-        symbols get ref match
-          case None => problem(e, s"unrecognized symbol '$ref'")
-          case Some(l @ LabelSymbol(_, value, _, _)) =>
-            l.referenced = true
-            LongExprAST(if absolute then value else value - (segment.length + 2 + segment.org))
-          case Some(EquateSymbol(_, value)) => fold(value, absolute, immediate)
-      case LocalExprAST(_, ref) =>
-        symbols get ref match
-          case None => problem(e, s"unrecognized symbol '$ref'")
-          case Some(l @ LabelSymbol(_, value, _, _)) =>
-            l.referenced = true
-            LongExprAST(if absolute then value else value - (segment.length + 2 + segment.org))
-      case UnaryExprAST("-", expr) =>
-        fold(expr, absolute, immediate) match
-          case LongExprAST(n)   => LongExprAST(-n)
-          case DoubleExprAST(n) => DoubleExprAST(-n)
-          case e                => e
-
-  def addInstruction(pieces: (Int, Int)*): Unit =
-    var inst = 0
-    var shift = 16
-
-    for (w, v) <- pieces do
-      val mask = (1 << w) - 1
-
-      shift -= w
-      inst |= (v & mask) << shift
-
-    segment += (inst >> 8).toByte
-    segment += inst.toByte
+  def addSymbol(sym: Positional, name: String): Unit =
+    if symbols contains name then problem(sym, s"duplicate symbol: '$name'")
+    symbols(name) = LabelSymbol(name, segment.size, sym)
+    segment.symbols += name
 
   def locals(expr: ExprAST): Unit =
     expr match
@@ -88,18 +43,13 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         locals(r)
       case _ =>
 
-  def addSymbol(sym: Positional, name: String): Unit =
-    if symbols contains name then problem(sym, s"duplicate symbol: '$name'")
-    symbols(name) = LabelSymbol(name, segment.size, sym)
-    segment.symbols += name
-
   segments("_default_") = segment
 
   lines foreach {
     case SegmentLineAST(name) =>
       segments get name match
         case None =>
-          segment = Segment(name)
+          segment = Pass1(name)
           segments(name) = segment
         case Some(s) => segment = s
     case label @ LabelLineAST(name) =>
@@ -143,7 +93,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
 
 //    pprintln(equates)
 
-  def relocate(seg: Segment, org: Long): Unit =
+  def relocate(seg: Pass1, org: Long): Unit =
     seg.symbols foreach (n => symbols(n).asInstanceOf[LabelSymbol].value += org)
     seg.org = org
 
@@ -159,25 +109,71 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         relocate(s, o)
         if stacked then base = o + s.size
 
+  val builder = TOF.builder
+
+  def fold(e: ExprAST, absolute: Boolean = false, immediate: Boolean = false): ExprAST =
+    e match
+      case lit: (LongExprAST | DoubleExprAST) => lit
+      case reg: RegisterExprAST               => reg
+      case StringExprAST(s) if immediate =>
+        if s.isEmpty || s.length > 1 then problem(e, "expected a single character")
+
+        val v = LongExprAST(s.codePointAt(0))
+
+        v.setPos(e.pos)
+        v
+      case s: StringExprAST => s
+      case ReferenceExprAST(ref) =>
+        symbols get ref match
+          case None => problem(e, s"unrecognized symbol '$ref'")
+          case Some(l @ LabelSymbol(_, value, _, _)) =>
+            l.referenced = true
+            LongExprAST(if absolute then value else value - (builder.length + 2 + builder.org))
+          case Some(EquateSymbol(_, value)) => fold(value, absolute, immediate)
+      case LocalExprAST(_, ref) =>
+        symbols get ref match
+          case None => problem(e, s"unrecognized symbol '$ref'")
+          case Some(l @ LabelSymbol(_, value, _, _)) =>
+            l.referenced = true
+            LongExprAST(if absolute then value else value - (builder.length + 2 + builder.org))
+      case UnaryExprAST("-", expr) =>
+        fold(expr, absolute, immediate) match
+          case LongExprAST(n)   => LongExprAST(-n)
+          case DoubleExprAST(n) => DoubleExprAST(-n)
+          case e                => e
+
+  def addInstruction(pieces: (Int, Int)*): Unit =
+    var inst = 0
+    var shift = 16
+
+    for (w, v) <- pieces do
+      val mask = (1 << w) - 1
+
+      shift -= w
+      inst |= (v & mask) << shift
+
+    builder += (inst >> 8).toByte
+    builder += inst.toByte
+
   segment = segments("_default_")
 
   lines foreach {
-    case SegmentLineAST(name)    => segment = segments(name)
+    case SegmentLineAST(name)    => builder.segment(name, segments(name).org)
     case LabelLineAST(_)         =>
     case LocalLineAST(_)         =>
     case EquateLineAST(_, _)     =>
-    case DataLineAST(width, Nil) => segment ++= (if width == 0 then Seq.fill(8)(0) else Seq.fill(width)(0))
+    case DataLineAST(width, Nil) => builder ++= (if width == 0 then Seq.fill(8)(0) else Seq.fill(width)(0))
     case DataLineAST(width, data) =>
-      val startingLength = segment.length
+      val startingLength = builder.length
 
       for d <- data do
         fold(d, absolute = true) match
           case StringExprAST(s) =>
             val bytes = s.getBytes(scala.io.Codec.UTF8.charSet)
 
-            segment ++= immutable.ArraySeq.unsafeWrapArray(bytes)
+            builder ++= immutable.ArraySeq.unsafeWrapArray(bytes)
 
-            if bytes.length % 2 == 1 then segment += 0
+            if bytes.length % 2 == 1 then builder += 0
           case value =>
             width match
               case 1 =>
@@ -189,54 +185,54 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
                 value match
                   case _: DoubleExprAST => problem(d, "expected an int value, found float")
                   case LongExprAST(v) if v.isValidShort =>
-                    segment += (v >> 8).toByte
-                    segment += v.toByte
+                    builder += (v >> 8).toByte
+                    builder += v.toByte
                   case _ => problem(d, "expected a short value, out of range")
               case 4 =>
                 value match
                   case _: DoubleExprAST => problem(d, "expected an int value, found float")
                   case LongExprAST(v) if v.isValidInt =>
-                    segment += (v >> 24).toByte
-                    segment += (v >> 16).toByte
-                    segment += (v >> 8).toByte
-                    segment += v.toByte
+                    builder += (v >> 24).toByte
+                    builder += (v >> 16).toByte
+                    builder += (v >> 8).toByte
+                    builder += v.toByte
                   case _ => problem(d, "expected a short value, out of range")
               case 8 =>
                 value match
                   case _: DoubleExprAST => problem(d, "expected an int value, found float")
                   case LongExprAST(v) =>
-                    segment += (v >> 56).toByte
-                    segment += (v >> 48).toByte
-                    segment += (v >> 40).toByte
-                    segment += (v >> 32).toByte
-                    segment += (v >> 24).toByte
-                    segment += (v >> 16).toByte
-                    segment += (v >> 8).toByte
-                    segment += v.toByte
+                    builder += (v >> 56).toByte
+                    builder += (v >> 48).toByte
+                    builder += (v >> 40).toByte
+                    builder += (v >> 32).toByte
+                    builder += (v >> 24).toByte
+                    builder += (v >> 16).toByte
+                    builder += (v >> 8).toByte
+                    builder += v.toByte
               case 0 =>
                 val v =
                   value match
                     case DoubleExprAST(d) => java.lang.Double.doubleToLongBits(d)
                     case LongExprAST(l)   => l
 
-                segment += (v >> 56).toByte
-                segment += (v >> 48).toByte
-                segment += (v >> 40).toByte
-                segment += (v >> 32).toByte
-                segment += (v >> 24).toByte
-                segment += (v >> 16).toByte
-                segment += (v >> 8).toByte
-                segment += v.toByte
+                builder += (v >> 56).toByte
+                builder += (v >> 48).toByte
+                builder += (v >> 40).toByte
+                builder += (v >> 32).toByte
+                builder += (v >> 24).toByte
+                builder += (v >> 16).toByte
+                builder += (v >> 8).toByte
+                builder += v.toByte
 
-      if (segment.length - startingLength) % 2 == 1 then segment += 0
+      if (builder.length - startingLength) % 2 == 1 then builder += 0
     case ReserveLineAST(width, n) =>
       fold(n, absolute = true) match
         case LongExprAST(count) if 0 < count && count <= 10 * 1024 * 1024 =>
           val size = count * (if width == 0 then 8 else width)
           val align = size % 2
 
-          segment.chunks += ResChunk(size + align)
-          segment.length += size + align
+          builder.addRes((size + align).toInt)
+          builder.length += size + align
         case _ => problem(n, s"must be a positive integer up to 10 meg")
     case InstructionLineAST(mnemonic @ ("ldi" | "sli" | "sti"), Seq(o1, o2)) =>
       val opcode =
@@ -453,4 +449,4 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
 
 //    segments foreach ((name, seg) => println((name, seg.code map (b => (b & 0xff).toHexString))))
 
-  segments.values.toSeq
+  builder.tof

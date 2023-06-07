@@ -73,7 +73,7 @@ object TOF:
 
     b.tof
 
-class TOF(val segments: Seq[Segment]):
+class TOF(val segments: Seq[Pass1]):
   def serialize: String =
     val buf = new StringBuilder
 
