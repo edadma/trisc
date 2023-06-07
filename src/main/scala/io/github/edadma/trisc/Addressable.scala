@@ -13,6 +13,8 @@ trait Addressable:
   def writeByte(addr: Long, data: Long): Unit
   def loadByte(addr: Long, data: Long): Unit
 
+  def load(addr: Long, data: Iterable[Byte]): Unit = data.zipWithIndex foreach ((b, idx) => loadByte(addr + idx, b))
+
   def readByteUnsigned(addr: Long): Int = readByte(addr) & 0xff
 
   def readShort(addr: Long): Int = readByte(addr) << 8 | readByteUnsigned(addr + 1)

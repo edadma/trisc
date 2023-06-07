@@ -120,12 +120,12 @@ import pprint.pprintln
       |TIMER_DELAY = 0xFFFA
       |TIMER_START = 0xFFFC
       |
+      |segment code
+      |
       |dw _reset_
       |dw 0
       |dw 0
       |dw _trap0_
-      |
-      |segment code
       |
       |_reset_
       |  ldi r1, 0
@@ -278,32 +278,31 @@ import pprint.pprintln
 
 //  pprintln(segs)
 
-  pprintln(tof)
-  val s = tof.serialize
-
-  println(s)
+  println(tof.serialize)
 
 //  val chunks = segs flatMap (_.chunks)
 //  val code = chunks flatMap { case DataChunk(data) => data } to IndexedSeq
   val timer = new Timer(0xfffa)
   val mem = new Memory(
     "Memory",
-//    new ROM(code, 0),
+    new ROM(0, 0x1000),
     new RAM(0x1000, 0x1000),
     new Stdout(0xfff8),
     timer,
   )
 
-//  val cpu = new CPU(mem, List(timer)) {
-//    //    trace = true
-//    //    clump = 1
-//    limit = 30000
-//  }
-//
-//  cpu.reset()
-//  val start = System.currentTimeMillis()
-//  cpu.run()
-//  println(System.currentTimeMillis() - start)
+  tof.load(mem)
+
+  val cpu = new CPU(mem, List(timer)) {
+    //    trace = true
+    //    clump = 1
+    limit = 30000
+  }
+
+  cpu.reset()
+  val start = System.currentTimeMillis()
+  cpu.run()
+  println(System.currentTimeMillis() - start)
 
 //  val mem = new Memory(
 //    "Memory",

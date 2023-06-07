@@ -87,6 +87,17 @@ object TOF:
     b.tof
 
 class TOF(val segments: Seq[TOF.Segment]):
+  def load(mem: Addressable): Unit =
+    for TOF.Segment(name, org, chunks) <- segments do
+      var addr = org
+
+      chunks foreach {
+        case TOF.DataChunk(data) =>
+          mem.load(addr, data)
+          addr += data.length
+        case TOF.ResChunk(size) => addr += size
+      }
+
   def serialize: String =
     val buf = new StringBuilder
 
