@@ -1,6 +1,6 @@
 package io.github.edadma.trisc
 
-class Emulator(memory: Seq[(String, String, Long)]) extends Addressable:
+class Emulator(memory: Seq[(String, String, Long)]) /*extends Addressable*/:
   def load(tof: TOF): Unit = {}
 
   def run(): Unit = {}
