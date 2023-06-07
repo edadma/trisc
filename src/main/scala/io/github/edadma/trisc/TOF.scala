@@ -28,12 +28,14 @@ object TOF:
 
     def tof: TOF = null
 
-    def addSegment(name: String, org: Long): Boolean =
-      if segments contains name then false
-      else
-        current = new TOFBuilderSegment(org)
-        segments(name) = current
-        true
+    def segmentDefined(name: String): Boolean = segments contains name
+
+    def segment(name: String, org: Long): Unit =
+      current = segments get name match
+        case None =>
+          current = new TOFBuilderSegment(org)
+          segments(name) = current
+        case Some(s) => current = s
 
     def +=(b: Byte): Unit =
       if current.chunks.isEmpty || current.chunks.last.typ != "data" then
@@ -59,7 +61,9 @@ object TOF:
       case (s"TOF v$n", l) if !versions(n) => sys.error(s"TOF version must be one of [$versions] on line $l")
       case (s"TOF v$n", _) if v == 0       => v = n.toInt
       case (_, l) if v == 0                => sys.error(s"missing magic on line $l")
-      case (s"SEGMENT:$name,$org", l)      => b.addSegment(name, java.lang.Long.parseUnsignedLong(org, 16))
+      case (s"SEGMENT:$name,$org", l) =>
+        if b.segmentDefined(name) then sys.error(s"duplicate segment on line $l")
+        b.segment(name, java.lang.Long.parseUnsignedLong(org, 16))
       case (s"DATA:$data", l) =>
         b ++= data grouped 2 map (b => java.lang.Byte.parseByte(b, 16))
       case (s"RES:$size", l) =>
