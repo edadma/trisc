@@ -278,7 +278,8 @@ import pprint.pprintln
 
 //  pprintln(segs)
 
-  val s = serialize(tof)
+  pprintln(tof)
+  val s = tof.serialize
 
   println(s)
 

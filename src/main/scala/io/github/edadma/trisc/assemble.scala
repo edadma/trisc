@@ -156,7 +156,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     builder += (inst >> 8).toByte
     builder += inst.toByte
 
-  segment = segments("_default_")
+  builder.segment("_default_", segments("_default_").org)
 
   lines foreach {
     case SegmentLineAST(name)    => builder.segment(name, segments(name).org)
