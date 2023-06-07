@@ -13,7 +13,7 @@ object TOF:
 
   class TOFBuilder:
     val segments = new mutable.LinkedHashMap[String, (Long, ListBuffer[(String, Int | ArrayBuffer[Byte])])]
-    var current: ListBuffer[(String, Int | ArrayBuffer[Byte])]
+    var current: ListBuffer[(String, Int | ArrayBuffer[Byte])] = current
     var length = 0L
 
     def tof: TOF = null
