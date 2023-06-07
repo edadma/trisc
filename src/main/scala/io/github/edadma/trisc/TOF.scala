@@ -13,34 +13,49 @@ object TOF:
 
   class TOFBuilder:
     val segments = new mutable.LinkedHashMap[String, (Long, ListBuffer[(String, Int | ArrayBuffer[Byte])])]
+    var current: ListBuffer[(String, Int | ArrayBuffer[Byte])]
+    var length = 0L
+
     def tof: TOF = null
+
+    def addSegment(name: String, org: Long): Boolean =
+      if segments contains name then false
+      else
+        current = new ListBuffer
+        segments(name) = (org, current)
+        true
+
+    def +=(b: Byte): Unit =
+      if current.isEmpty || current.last._1 != "data" then current += ("data" -> new ArrayBuffer[Byte])
+      current.last._2.asInstanceOf[ArrayBuffer[Byte]] += b
+      length += 1
+
+    def ++=(bs: IterableOnce[Byte]): Unit = bs.iterator foreach (b => +=(b))
+
+    def addRes(size: Int): Unit = current += ("res" -> size)
 
   def builder: TOFBuilder = new TOFBuilder
 
-  def deserialize(tof: String): Seq[Segment] =
+  def deserialize(tof: String): TOF =
     val lines = scala.io.Source.fromString(tof).getLines
     val versions = immutable.TreeSet("1")
     var v = 0
-    val segments = new ListBuffer[Segment]
-    var segment: Segment = null
+    val b = builder
 
     lines.zipWithIndex map ((s, idx) => (s.trim, idx + 1)) foreach {
       case (s, _) if s.isEmpty             =>
       case (s"TOF v$n", l) if !versions(n) => sys.error(s"TOF version must be one of [$versions] on line $l")
       case (s"TOF v$n", _) if v == 0       => v = n.toInt
       case (_, l) if v == 0                => sys.error(s"missing magic on line $l")
-      case (s"SEGMENT:$name,$org", l) =>
-        segment = Segment(name)
-        segment.org = java.lang.Long.parseUnsignedLong(org, 16)
-        segments += segment
+      case (s"SEGMENT:$name,$org", l)      => b.addSegment(name, java.lang.Long.parseUnsignedLong(org, 16))
       case (s"DATA:$data", l) =>
-        segment ++= data grouped 2 map (b => java.lang.Byte.parseByte(b, 16))
+        b ++= data grouped 2 map (b => java.lang.Byte.parseByte(b, 16))
       case (s"RES:$size", l) =>
-        segment.chunks += ResChunk(java.lang.Long.parseUnsignedLong(size, 16))
+        b addRes java.lang.Integer.parseUnsignedInt(size, 16)
       case (_, l) => sys.error(s"error on line $l")
     }
 
-    segments.toSeq
+    b.tof
 
 class TOF(val segments: Seq[Segment]):
   def serialize: String =
