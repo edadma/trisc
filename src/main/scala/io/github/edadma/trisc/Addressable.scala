@@ -82,6 +82,8 @@ abstract class ArrayAddressable extends Addressable:
     require(base <= addr && addr < base + size, "address out of range")
     seq((addr - base).toInt)
 
+  def clear(): Unit = for (i <- seq.indices) seq(i) = 0
+
 class RAM(val base: Long, val size: Long) extends ArrayAddressable:
   val name = "RAM"
 
