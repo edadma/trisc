@@ -26,7 +26,18 @@ object TOF:
 
     def length: Long = current.length
 
-    def tof: TOF = null
+    def tof: TOF =
+      TOF(
+        (for (name, seg) <- segments if seg.length > 0
+        yield Segment(
+          name,
+          seg.org,
+          seg.chunks.toSeq map {
+            case TOFBuilderChunk("data", data: ArrayBuffer[Byte]) => DataChunk(data.toSeq)
+            case TOFBuilderChunk("res", size: Int)                => ResChunk(size)
+          },
+        )) toSeq,
+      )
 
     def segmentDefined(name: String): Boolean = segments contains name
 
