@@ -44,9 +44,10 @@ trait Addressable:
 class Memory(val name: String, blocks: Addressable*) extends Addressable:
   require(blocks.nonEmpty, "memory must contain at least one Addressable block")
 
-  val mem = blocks.sortBy(_.base).to(immutable.ArraySeq)
-  val base = mem.head.base
-  val size = mem.last.base + mem.last.size - base
+  private val mem = blocks.sortBy(_.base).to(immutable.ArraySeq)
+
+  val base: Long = mem.head.base
+  val size: Long = mem.last.base + mem.last.size - base
 
   for i <- mem.indices do
     if i < mem.length - 1 && mem(i).base + mem(i).size > mem(i + 1).base then
