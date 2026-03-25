@@ -28,11 +28,37 @@ class BufferedDevice(
     buffer(off) = data.toByte
     onWrite(off, data)
 
-class Stdout(val base: Long) extends Device with WriteOnlyAddressable:
+class Stdout(val base: Long, output: String => Unit = s => print(s)) extends Device with WriteOnlyAddressable:
   val name = "stdout"
   val size = 1
 
-  def writeByte(addr: Long, data: Long): Unit = print(data.toChar.toString)
+  private var utf8Buf = 0
+  private var utf8Remaining = 0
+
+  def writeByte(addr: Long, data: Long): Unit =
+    val b = (data & 0xff).toInt
+
+    if utf8Remaining > 0 then
+      if (b & 0xc0) == 0x80 then
+        utf8Buf = (utf8Buf << 6) | (b & 0x3f)
+        utf8Remaining -= 1
+        if utf8Remaining == 0 then
+          output(new String(Character.toChars(utf8Buf)))
+      else
+        // invalid continuation — reset and treat as new byte
+        utf8Remaining = 0
+        writeByte(addr, data)
+    else if (b & 0x80) == 0 then
+      output(b.toChar.toString)
+    else if (b & 0xe0) == 0xc0 then
+      utf8Buf = b & 0x1f
+      utf8Remaining = 1
+    else if (b & 0xf0) == 0xe0 then
+      utf8Buf = b & 0x0f
+      utf8Remaining = 2
+    else if (b & 0xf8) == 0xf0 then
+      utf8Buf = b & 0x07
+      utf8Remaining = 3
 
 class Timer(val base: Long, clock: () => Long = () => System.currentTimeMillis()) extends Device with (CPU => Unit):
   val name = "timer"

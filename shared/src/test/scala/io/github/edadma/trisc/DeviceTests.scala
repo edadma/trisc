@@ -6,7 +6,7 @@ class DeviceTests extends TestHelpers {
 
   // ===== Stdout =====
 
-  "stdout outputs character" in {
+  "stdout outputs ASCII character" in {
     val output = runProgram(
       """STDOUT = 0xFF8
         |dw 8
@@ -20,6 +20,68 @@ class DeviceTests extends TestHelpers {
         |halt
         |""".stripMargin)
     output shouldBe "ABC"
+  }
+
+  "stdout handles UTF-8 2-byte sequence" in {
+    val buf = new StringBuilder
+    val dev = new Stdout(0x100, s => buf ++= s)
+    // é = U+00E9 = 0xC3 0xA9
+    dev.writeByte(0x100, 0xC3)
+    dev.writeByte(0x100, 0xA9)
+    buf.toString shouldBe "é"
+  }
+
+  "stdout handles UTF-8 3-byte sequence" in {
+    val buf = new StringBuilder
+    val dev = new Stdout(0x100, s => buf ++= s)
+    // € = U+20AC = 0xE2 0x82 0xAC
+    dev.writeByte(0x100, 0xE2)
+    dev.writeByte(0x100, 0x82)
+    dev.writeByte(0x100, 0xAC)
+    buf.toString shouldBe "€"
+  }
+
+  "stdout handles UTF-8 4-byte sequence" in {
+    val buf = new StringBuilder
+    val dev = new Stdout(0x100, s => buf ++= s)
+    // 😀 = U+1F600 = 0xF0 0x9F 0x98 0x80
+    dev.writeByte(0x100, 0xF0)
+    dev.writeByte(0x100, 0x9F)
+    dev.writeByte(0x100, 0x98)
+    dev.writeByte(0x100, 0x80)
+    buf.toString shouldBe "\uD83D\uDE00"
+  }
+
+  "stdout handles mixed ASCII and UTF-8" in {
+    val buf = new StringBuilder
+    val dev = new Stdout(0x100, s => buf ++= s)
+    // "Hé!" = H, é (2-byte), !
+    dev.writeByte(0x100, 'H')
+    dev.writeByte(0x100, 0xC3)
+    dev.writeByte(0x100, 0xA9)
+    dev.writeByte(0x100, '!')
+    buf.toString shouldBe "Hé!"
+  }
+
+  "stdout handles consecutive multi-byte sequences" in {
+    val buf = new StringBuilder
+    val dev = new Stdout(0x100, s => buf ++= s)
+    // "éà" = two 2-byte sequences
+    // é = 0xC3 0xA9, à = 0xC3 0xA0
+    dev.writeByte(0x100, 0xC3)
+    dev.writeByte(0x100, 0xA9)
+    dev.writeByte(0x100, 0xC3)
+    dev.writeByte(0x100, 0xA0)
+    buf.toString shouldBe "éà"
+  }
+
+  "stdout recovers from invalid continuation byte" in {
+    val buf = new StringBuilder
+    val dev = new Stdout(0x100, s => buf ++= s)
+    // Start 2-byte sequence then send ASCII instead of continuation
+    dev.writeByte(0x100, 0xC3) // start of 2-byte
+    dev.writeByte(0x100, 'X')  // not a continuation byte — should reset and output X
+    buf.toString shouldBe "X"
   }
 
   // ===== Timer =====
