@@ -215,6 +215,101 @@ class NOT(a: Int, b: Int) extends RRInstruction(a, b):
 
   def apply(cpu: CPU): Unit = cpu.r(a).write(~cpu.r(b).read)
 
+// Stack ops (R format — use r7 as stack pointer)
+
+abstract class RInstruction(r: Int) extends Instruction:
+  def disassemble(cpu: CPU): String = s"$mnemonic r$r"
+
+class PSHB(r: Int) extends RInstruction(r):
+  val mnemonic = "pshb"
+
+  def apply(cpu: CPU): Unit =
+    cpu.r(7).write(cpu.r(7).read - 1)
+    cpu.writeByte(cpu.r(7).read, cpu.r(r).read)
+
+class POPB(r: Int) extends RInstruction(r):
+  val mnemonic = "popb"
+
+  def apply(cpu: CPU): Unit =
+    cpu.r(r).write(cpu.readByte(cpu.r(7).read))
+    cpu.r(7).write(cpu.r(7).read + 1)
+
+class PSHS(r: Int) extends RInstruction(r):
+  val mnemonic = "pshs"
+
+  def apply(cpu: CPU): Unit =
+    cpu.r(7).write(cpu.r(7).read - 2)
+    cpu.writeShort(cpu.r(7).read, cpu.r(r).read)
+
+class POPS(r: Int) extends RInstruction(r):
+  val mnemonic = "pops"
+
+  def apply(cpu: CPU): Unit =
+    cpu.r(r).write(cpu.readShort(cpu.r(7).read))
+    cpu.r(7).write(cpu.r(7).read + 2)
+
+class PSHW(r: Int) extends RInstruction(r):
+  val mnemonic = "pshw"
+
+  def apply(cpu: CPU): Unit =
+    cpu.r(7).write(cpu.r(7).read - 4)
+    cpu.writeInt(cpu.r(7).read, cpu.r(r).read)
+
+class POPW(r: Int) extends RInstruction(r):
+  val mnemonic = "popw"
+
+  def apply(cpu: CPU): Unit =
+    cpu.r(r).write(cpu.readInt(cpu.r(7).read))
+    cpu.r(7).write(cpu.r(7).read + 4)
+
+class PSHD(r: Int) extends RInstruction(r):
+  val mnemonic = "pshd"
+
+  def apply(cpu: CPU): Unit =
+    cpu.r(7).write(cpu.r(7).read - 8)
+    cpu.writeLong(cpu.r(7).read, cpu.r(r).read)
+
+class POPD(r: Int) extends RInstruction(r):
+  val mnemonic = "popd"
+
+  def apply(cpu: CPU): Unit =
+    cpu.r(r).write(cpu.readLong(cpu.r(7).read))
+    cpu.r(7).write(cpu.r(7).read + 8)
+
+// Floating point RRR (001 block)
+
+class FADD(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "fadd"
+
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).readf + cpu.r(b).readf)
+
+class FSUB(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "fsub"
+
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).readf - cpu.r(b).readf)
+
+class FMUL(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "fmul"
+
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).readf * cpu.r(b).readf)
+
+class FDIV(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "fdiv"
+
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).readf / cpu.r(b).readf)
+
+// Floating point RR (110 block)
+
+class FNEG(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "fneg"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(-cpu.r(b).readf)
+
+class FINV(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "finv"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(1.0 / cpu.r(b).readf)
+
 class AUIPC(r: Int, imm: Int) extends ImmediateInstruction(r, imm):
   val mnemonic = "auipc"
 
