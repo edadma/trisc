@@ -3,13 +3,29 @@ package io.github.edadma.trisc
 import scala.collection.{immutable, mutable}
 import scala.collection.mutable.{ArrayBuffer, ListBuffer}
 
+enum SymbolType:
+  case Func, Data, Const
+
+enum RelocType:
+  case MOVI2, MOVI3, MOVI4, ABS32
+
+case class TOFSymbol(name: String, offset: Long, typ: SymbolType, size: Option[Long] = None)
+case class TOFReloc(typ: RelocType, offset: Long, symbol: String)
+
 object TOF:
   trait Chunk
 
   case class DataChunk(data: Seq[Byte]) extends Chunk
   case class ResChunk(size: Long) extends Chunk
 
-  case class Segment(name: String, org: Long, chunks: Seq[Chunk])
+  case class Segment(
+      name: String,
+      org: Long,
+      chunks: Seq[Chunk],
+      symbols: Seq[TOFSymbol] = Nil,
+      externs: Seq[String] = Nil,
+      relocs: Seq[TOFReloc] = Nil,
+  )
 
   class TOFBuilder:
     private case class TOFBuilderChunk(typ: String, data: Int | ArrayBuffer[Byte])
@@ -17,6 +33,9 @@ object TOF:
         val org: Long,
         val chunks: ListBuffer[TOFBuilderChunk] = new ListBuffer,
         var length: Long = 0,
+        val symbols: ArrayBuffer[TOFSymbol] = new ArrayBuffer,
+        val externs: mutable.LinkedHashSet[String] = new mutable.LinkedHashSet,
+        val relocs: ArrayBuffer[TOFReloc] = new ArrayBuffer,
     )
 
     private val segments = new mutable.LinkedHashMap[String, TOFBuilderSegment]
@@ -25,6 +44,15 @@ object TOF:
     def org: Long = current.org
 
     def length: Long = current.length
+
+    def addSymbol(name: String, offset: Long, typ: SymbolType, size: Option[Long] = None): Unit =
+      current.symbols += TOFSymbol(name, offset, typ, size)
+
+    def addExtern(name: String): Unit =
+      current.externs += name
+
+    def addReloc(typ: RelocType, offset: Long, symbol: String): Unit =
+      current.relocs += TOFReloc(typ, offset, symbol)
 
     def tof: TOF =
       TOF(
@@ -37,6 +65,9 @@ object TOF:
             case TOFBuilderChunk("res", size: Int)                => ResChunk(size)
             case chunk => sys.error(s"unexpected chunk: $chunk")
           },
+          seg.symbols.toSeq,
+          seg.externs.toSeq,
+          seg.relocs.toSeq,
         )).toSeq,
       )
 
@@ -64,32 +95,14 @@ object TOF:
 
   def builder: TOFBuilder = new TOFBuilder
 
-  def deserialize(tof: String): TOF =
-    val lines = scala.io.Source.fromString(tof).getLines
-    val versions = immutable.TreeSet("1")
-    var v = 0
-    val b = builder
-
-    lines.zipWithIndex map ((s, idx) => (s.trim, idx + 1)) foreach {
-      case (s, _) if s.isEmpty             =>
-      case (s"TOF v$n", l) if !versions(n) => sys.error(s"TOF version must be one of [$versions] on line $l")
-      case (s"TOF v$n", _) if v == 0       => v = n.toInt
-      case (_, l) if v == 0                => sys.error(s"missing magic on line $l")
-      case (s"SEGMENT:$name,$org", l) =>
-        if b.segmentDefined(name) then sys.error(s"duplicate segment on line $l")
-        b.segment(name, java.lang.Long.parseLong(org, 16))
-      case (s"DATA:$data", l) =>
-        b ++= data.grouped(2).map(s => Integer.parseInt(s, 16).toByte)
-      case (s"RES:$size", l) =>
-        b.addRes(Integer.parseInt(size, 16))
-      case (_, l) => sys.error(s"error on line $l")
-    }
-
-    b.tof
+  def deserialize(tof: String): TOF = readTOF(tof)
 
 class TOF(val segments: Seq[TOF.Segment]):
+
+  // --- Loading ---
+
   def load(mem: Addressable): Unit =
-    for TOF.Segment(name, org, chunks) <- segments do
+    for TOF.Segment(name, org, chunks, _, _, _) <- segments do
       var addr = org
 
       chunks foreach {
@@ -99,13 +112,58 @@ class TOF(val segments: Seq[TOF.Segment]):
         case TOF.ResChunk(size) => addr += size
       }
 
+  // --- Query ---
+
+  def isFullyResolved: Boolean = segments.forall(s => s.externs.isEmpty && s.relocs.isEmpty)
+
+  def allSymbols: Seq[(String, TOFSymbol)] =
+    for seg <- segments; sym <- seg.symbols yield (seg.name, sym)
+
+  def allExterns: Seq[(String, String)] =
+    for seg <- segments; ext <- seg.externs yield (seg.name, ext)
+
+  def allRelocs: Seq[(String, TOFReloc)] =
+    for seg <- segments; reloc <- seg.relocs yield (seg.name, reloc)
+
+  def symbolByName(name: String): Option[TOFSymbol] =
+    segments.flatMap(_.symbols).find(_.name == name)
+
+  def segment(name: String): Option[TOF.Segment] =
+    segments.find(_.name == name)
+
+  def segmentNames: Seq[String] = segments.map(_.name)
+
+  def totalDataSize: Long =
+    segments.map { seg =>
+      seg.chunks.map {
+        case TOF.DataChunk(data) => data.length.toLong
+        case TOF.ResChunk(size)  => size
+      }.sum
+    }.sum
+
+  // --- Serialization ---
+
   def serialize: String =
     val buf = new StringBuilder
 
-    buf ++= "TOF v1\n"
+    buf ++= "TOF v2\n"
 
     for s <- segments do
       buf ++= s"SEGMENT:${s.name},${s.org.toHexString}\n"
+
+      for sym <- s.symbols do
+        val typStr = sym.typ match
+          case SymbolType.Func  => "func"
+          case SymbolType.Data  => "data"
+          case SymbolType.Const => "const"
+        val sizeStr = sym.size.map(sz => s",${sz.toHexString}").getOrElse("")
+        buf ++= s"SYMBOL:${sym.name},${sym.offset.toHexString},$typStr$sizeStr\n"
+
+      for ext <- s.externs do
+        buf ++= s"EXTERN:$ext\n"
+
+      for reloc <- s.relocs do
+        buf ++= s"RELOC:${reloc.typ},${reloc.offset.toHexString},${reloc.symbol}\n"
 
       s.chunks foreach {
         case TOF.DataChunk(data) => buf ++= s"DATA:${data.map(b => f"${b & 0xff}%02x").mkString}\n"

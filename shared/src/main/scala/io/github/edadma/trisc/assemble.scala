@@ -7,7 +7,7 @@ import scala.collection.{mutable, immutable}
 import scala.collection.mutable.ArrayBuffer
 import scala.util.parsing.input.Positional
 
-def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map(), addresses: Int = 2): TOF =
+def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map(), addresses: Int = 2, relocatable: Boolean = false): TOF =
   class Pass1(val name: String):
     var org: Long = 0
     var size: Long = 0
@@ -60,7 +60,9 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         if !references then problem(e, s"references not allowed here")
 
         symbols.get(ref) match
-          case None => problem(e, s"unrecognized symbol '$ref'")
+          case None =>
+            if relocatable then e // return unresolved — caller handles relocation
+            else problem(e, s"unrecognized symbol '$ref'")
           case Some(l @ LabelSymbol(_, value, _, _)) =>
             l.referenced = true
             LongExprAST(if absolute then value else value - (builder.length + 2 + builder.org))
@@ -128,8 +130,6 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
       operands foreach locals
   }
 
-//    pprintln(equates)
-
   def relocate(seg: Pass1, org: Long): Unit =
     seg.symbols foreach (n => symbols(n).asInstanceOf[LabelSymbol].value += org)
     seg.org = org
@@ -159,10 +159,49 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     builder += (inst >> 8).toByte
     builder += inst.toByte
 
+  def emitMoviReloc(reg: Int, symbolName: String): Unit =
+    val offset = builder.length
+    val relocType = addresses match
+      case 2 => RelocType.MOVI2
+      case 3 => RelocType.MOVI3
+      case 4 => RelocType.MOVI4
+      case _ => sys.error(s"unsupported address size $addresses for relocation")
+    builder.addExtern(symbolName)
+    builder.addReloc(relocType, offset, symbolName)
+    // emit zero placeholders
+    for _ <- 0 until addresses do
+      addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> 0)
+
+  def emitAbs32Reloc(symbolName: String): Unit =
+    val offset = builder.length
+    builder.addExtern(symbolName)
+    builder.addReloc(RelocType.ABS32, offset, symbolName)
+    // emit zero placeholder
+    builder += 0.toByte
+    builder += 0.toByte
+    builder += 0.toByte
+    builder += 0.toByte
+
   builder.segment("_default_", segments("_default_").org)
 
+  // In relocatable mode, export all global labels as symbols
+  if relocatable then
+    for (name, sym) <- symbols do
+      sym match
+        case LabelSymbol(n, value, _, _) if !n.contains('.') =>
+          builder.addSymbol(n, value, SymbolType.Func)
+        case _ =>
+
   lines foreach {
-    case SegmentLineAST(name)    => builder.segment(name, segments(name).org)
+    case SegmentLineAST(name) =>
+      builder.segment(name, segments(name).org)
+      // emit symbols for this segment too
+      if relocatable then
+        for symName <- segments(name).symbols do
+          symbols.get(symName) match
+            case Some(LabelSymbol(n, value, _, _)) if !n.contains('.') =>
+              builder.addSymbol(n, value, SymbolType.Func)
+            case _ =>
     case LabelLineAST(_)         =>
     case LocalLineAST(_)         =>
     case EquateLineAST(_, _)     =>
@@ -172,6 +211,8 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
 
       for d <- data do
         fold(d, absolute = true) match
+          case ReferenceExprAST(ref) if relocatable && width == 4 =>
+            emitAbs32Reloc(ref)
           case StringExprAST(s) =>
             val bytes = s.getBytes(scala.io.Codec.UTF8.charSet)
 
@@ -456,7 +497,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         fold(o, immediate = true) match
           case _: DoubleExprAST                                      => problem(o, "immediate must be integral")
           case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => n.toInt
-          case _: LongExprAST => problem(o, "immediate must ben even signed 8-bit value")
+          case _: LongExprAST => problem(o, "immediate must be an even signed 8-bit value")
 
       addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm / 2) // beq r0, r0, imm
     case InstructionLineAST("movi", Seq(o1, o2)) =>
@@ -464,26 +505,29 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         fold(o1) match
           case RegisterExprAST(reg) => reg
           case _                    => problem(o1, "expected register as first operand")
-      val imm =
-        fold(o2, absolute = true, immediate = true) match
-          case _: DoubleExprAST                            => problem(o2, "immediate must be integral")
-          case LongExprAST(n) if 0 <= n && n <= 0x7fffffff => n.toInt
-          case _: LongExprAST                              => problem(o2, "immediate must be a byte value")
+      fold(o2, absolute = true, immediate = true) match
+        case ReferenceExprAST(ref) if relocatable =>
+          emitMoviReloc(reg, ref)
+        case result =>
+          val imm = result match
+            case _: DoubleExprAST                            => problem(o2, "immediate must be integral")
+            case LongExprAST(n) if 0 <= n && n <= 0x7fffffff => n.toInt
+            case _: LongExprAST                              => problem(o2, "immediate out of range")
 
-      addresses match
-        case 1 => addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> (imm & 0xff)) // ldi r(reg), <imm
-        case 2 =>
-          addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> ((imm >> 8) & 0xff)) // ldi r(reg), >imm
-          addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff)) // sli r(reg), <imm
-        case 3 =>
-          addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> ((imm >> 16) & 0xff)) // ldi r(reg), >>imm
-          addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> ((imm >> 8) & 0xff)) // sli r(reg), >imm
-          addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff)) // sli r(reg), <imm
-        case 4 =>
-          addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> ((imm >> 24) & 0xff)) // ldi r(reg), >>imm
-          addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> ((imm >> 16) & 0xff)) // sli r(reg), >>imm
-          addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> ((imm >> 8) & 0xff)) // sli r(reg), >imm
-          addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff)) // sli r(reg), <imm
+          addresses match
+            case 1 => addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> (imm & 0xff))
+            case 2 =>
+              addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> ((imm >> 8) & 0xff))
+              addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff))
+            case 3 =>
+              addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> ((imm >> 16) & 0xff))
+              addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> ((imm >> 8) & 0xff))
+              addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff))
+            case 4 =>
+              addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> ((imm >> 24) & 0xff))
+              addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> ((imm >> 16) & 0xff))
+              addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> ((imm >> 8) & 0xff))
+              addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff))
     case InstructionLineAST("nop", Nil) => addInstruction(3 -> 5, 3 -> 0, 3 -> 0, 7 -> 0) // addi r0, r0, 0
     case InstructionLineAST("mov", Seq(o1, o2)) =>
       val reg1 =
@@ -499,10 +543,9 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case InstructionLineAST("ret", Nil) =>
       addInstruction(3 -> 6, 3 -> 0, 3 -> 7, 2 -> 0, 5 -> 0) // jalr r0, r7
     case InstructionLineAST(mnemonic @ ("bgt" | "bgu"), Seq(o1, o2, o3)) =>
-      // bgt r1, r2, target → bls r2, r1, target (swap operands)
       val baseOpcode = mnemonic match
-        case "bgt" => 4 // bls
-        case "bgu" => 3 // blu
+        case "bgt" => 4
+        case "bgu" => 3
       val reg1 =
         fold(o1) match
           case RegisterExprAST(reg) => reg
@@ -517,15 +560,14 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => n.toInt
           case _: LongExprAST => problem(o3, "immediate must be an even signed 8-bit value")
 
-      addInstruction(3 -> baseOpcode, 3 -> reg2, 3 -> reg1, 7 -> imm / 2) // swapped operands
+      addInstruction(3 -> baseOpcode, 3 -> reg2, 3 -> reg1, 7 -> imm / 2)
     case InstructionLineAST(mnemonic @ ("bne" | "bge" | "bgeu" | "ble" | "bleu"), Seq(o1, o2, o3)) =>
-      // Inverted branch: emit the opposite condition skipping over a bra
       val (baseOpcode, swap) = mnemonic match
-        case "bne"  => (2, false) // invert beq
-        case "bge"  => (4, false) // invert bls
-        case "bgeu" => (3, false) // invert blu
-        case "ble"  => (4, true)  // invert bgt → invert swapped bls
-        case "bleu" => (3, true)  // invert bgu → invert swapped blu
+        case "bne"  => (2, false)
+        case "bge"  => (4, false)
+        case "bgeu" => (3, false)
+        case "ble"  => (4, true)
+        case "bleu" => (3, true)
       val reg1 =
         fold(o1) match
           case RegisterExprAST(reg) => reg
@@ -537,26 +579,18 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
       val imm =
         fold(o3, immediate = true) match
           case _: DoubleExprAST                                      => problem(o3, "immediate must be integral")
-          case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => (n - 2).toInt // adjust: skip the extra bra
+          case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => (n - 2).toInt
           case _: LongExprAST => problem(o3, "immediate must be an even signed 8-bit value")
 
       val (r1, r2) = if swap then (reg2, reg1) else (reg1, reg2)
-      addInstruction(3 -> baseOpcode, 3 -> r1, 3 -> r2, 7 -> 1) // base branch: skip 1 instruction (the bra)
-      addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm / 2)      // bra target (beq r0, r0, imm)
+      addInstruction(3 -> baseOpcode, 3 -> r1, 3 -> r2, 7 -> 1)
+      addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm / 2)
   }
 
-  symbols.values foreach {
-    case LabelSymbol(name, _, sym, false) => warning(sym, s"Warning: label '$name' never referenced")
-    case _                                =>
-  }
-
-//  pprintln(segments)
-//  symbols.values foreach {
-//    case LabelSymbol(n, v, _, _) => println((n, v.toHexString))
-//    case _                       =>
-//  }
-//  println(segments("_default_"))
-
-//    segments foreach ((name, seg) => println((name, seg.code map (b => (b & 0xff).toHexString))))
+  if !relocatable then
+    symbols.values foreach {
+      case LabelSymbol(name, _, sym, false) => warning(sym, s"Warning: label '$name' never referenced")
+      case _                                =>
+    }
 
   builder.tof
