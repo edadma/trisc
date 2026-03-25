@@ -10,6 +10,7 @@ case class InstructionLineAST(mnemonic: String, operands: Seq[ExprAST]) extends 
 case class SegmentLineAST(name: String) extends LineAST
 case class EquateLineAST(name: String, expr: ExprAST) extends LineAST
 case class IncludeLineAST(path: String) extends LineAST
+case class EntryLineAST(name: String) extends LineAST
 case class ExternLineAST(name: String) extends LineAST
 case class GlobalLineAST(name: String, typ: SymbolType, size: Option[Long] = None) extends LineAST
 case class CommentLineAST(text: String) extends LineAST

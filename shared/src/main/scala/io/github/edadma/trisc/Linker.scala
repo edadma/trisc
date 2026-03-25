@@ -78,7 +78,13 @@ object Linker:
           case RelocType.MOVI4 =>
             patchMovi(seg.data, reloc.offset.toInt, addr, 4)
 
-    // Phase 5: produce output TOF (fully resolved, no externs/relocs)
+    // Phase 5: resolve entry point
+    val entry = tofs.flatMap(_.entry).lastOption
+    for name <- entry do
+      if !globalSymbols.contains(name) then
+        throw LinkerError(s"entry point '$name' is not a defined symbol")
+
+    // Phase 6: produce output TOF (fully resolved, no externs/relocs)
     val outSegments = placed.map { seg =>
       TOF.Segment(
         seg.name,
@@ -88,7 +94,7 @@ object Linker:
       )
     }.toSeq
 
-    TOF(outSegments)
+    TOF(entry, outSegments)
 
   /** Patch a MOVI instruction sequence (ldi + N-1 sli instructions).
     * Each instruction is 16 bits: 111 rrr oo iiiiiiii

@@ -32,6 +32,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
   val globals = new mutable.LinkedHashMap[String, GlobalLineAST]
   val declaredExterns = new mutable.LinkedHashSet[String]
   val referencedExterns = new mutable.LinkedHashSet[String]
+  var entryPoint: Option[String] = None
 
   def addSymbol(sym: Positional, name: String): Unit =
     if symbols contains name then problem(sym, s"duplicate symbol: '$name'")
@@ -105,6 +106,9 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case equate @ EquateLineAST(name, expr) =>
       if symbols contains name then problem(equate, s"duplicate definition of '$name'")
       symbols(name) = EquateSymbol(name, expr)
+    case e @ EntryLineAST(name) =>
+      if entryPoint.isDefined then problem(e, "duplicate entry directive")
+      entryPoint = Some(name)
     case ext @ ExternLineAST(name) =>
       if symbols contains name then problem(ext, s"duplicate symbol: '$name'")
       symbols(name) = ExternSymbol(name)
@@ -149,6 +153,10 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     symbols.get(name) match
       case Some(_: LabelSymbol) => // ok
       case _                    => problem(g, s"global '$name' does not refer to a defined label")
+
+  // Set entry point on builder
+  for name <- entryPoint do
+    builder.setEntry(name)
 
   def relocate(seg: Pass1, org: Long): Unit =
     seg.symbols foreach (n => symbols(n).asInstanceOf[LabelSymbol].value += org)
@@ -205,21 +213,32 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
   builder.segment("_default_", segments("_default_").org)
 
   // Emit symbols: if globals are declared, use those; otherwise in relocatable mode export all non-local labels
+  val emittedSymbols = new mutable.LinkedHashSet[String]
+
   def emitSymbols(): Unit =
     if globals.nonEmpty then
       for (name, g) <- globals do
         symbols.get(name) match
           case Some(LabelSymbol(_, value, _, _)) =>
             builder.addSymbol(name, value, g.typ, g.size)
+            emittedSymbols += name
           case _ => // already validated above
     else if relocatable then
       for (name, sym) <- symbols do
         sym match
           case LabelSymbol(n, value, _, _) if !n.contains('.') =>
             builder.addSymbol(n, value, SymbolType.Func)
+            emittedSymbols += n
           case _ =>
-
   emitSymbols()
+
+  // Emit entry symbol for _default_ segment if it belongs there and wasn't already emitted
+  for ep <- entryPoint if !emittedSymbols.contains(ep) && segments("_default_").symbols.contains(ep) do
+    symbols.get(ep) match
+      case Some(LabelSymbol(_, value, _, _)) =>
+        builder.addSymbol(ep, value - segments("_default_").org, SymbolType.Func)
+        emittedSymbols += ep
+      case _ =>
 
   // Pass 2: code generation
   lines foreach {
@@ -231,16 +250,26 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           symbols.get(gname) match
             case Some(LabelSymbol(n, value, _, _)) if segments(name).symbols.contains(n) =>
               builder.addSymbol(n, value, g.typ, g.size)
+              emittedSymbols += n
             case _ =>
       else if relocatable then
         for symName <- segments(name).symbols do
           symbols.get(symName) match
             case Some(LabelSymbol(n, value, _, _)) if !n.contains('.') =>
               builder.addSymbol(n, value, SymbolType.Func)
+              emittedSymbols += n
             case _ =>
+      // emit entry symbol for this segment if not already emitted
+      for ep <- entryPoint if !emittedSymbols.contains(ep) && segments(name).symbols.contains(ep) do
+        symbols.get(ep) match
+          case Some(LabelSymbol(_, value, _, _)) =>
+            builder.addSymbol(ep, value - segments(name).org, SymbolType.Func)
+            emittedSymbols += ep
+          case _ =>
     case LabelLineAST(_)         =>
     case LocalLineAST(_)         =>
     case EquateLineAST(_, _)     =>
+    case EntryLineAST(_)             =>
     case ExternLineAST(_)            =>
     case GlobalLineAST(_, _, _)     =>
     case CommentLineAST(text)       => builder.addComment(text)

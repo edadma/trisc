@@ -41,8 +41,11 @@ object TOF:
 
     private val segments = new mutable.LinkedHashMap[String, TOFBuilderSegment]
     private var current: TOFBuilderSegment = current
+    private var _entry: Option[String] = None
 
     def org: Long = current.org
+
+    def setEntry(name: String): Unit = _entry = Some(name)
 
     def length: Long = current.length
 
@@ -60,6 +63,7 @@ object TOF:
 
     def tof: TOF =
       TOF(
+        _entry,
         (for (name, seg) <- segments if seg.length > 0 || seg.chunks.nonEmpty
         yield Segment(
           name,
@@ -167,6 +171,7 @@ object TOF:
           line match
             case s"# $text"       => b.addComment(text)
             case s"#$text"        => b.addComment(text)
+            case s"ENTRY:$name"   => b.setEntry(name)
             case s"SEGMENT:$rest" => parseSegment(rest)
             case s"SYMBOL:$rest"  => parseSymbol(rest)
             case s"EXTERN:$name"  => b.addExtern(name)
@@ -179,7 +184,9 @@ object TOF:
 
     b.tof
 
-class TOF(val segments: Seq[TOF.Segment]):
+class TOF(val entry: Option[String], val segments: Seq[TOF.Segment]):
+
+  def this(segments: Seq[TOF.Segment]) = this(None, segments)
 
   // --- Loading ---
 
@@ -198,6 +205,14 @@ class TOF(val segments: Seq[TOF.Segment]):
   // --- Query ---
 
   def isFullyResolved: Boolean = segments.forall(s => s.externs.isEmpty && s.relocs.isEmpty)
+
+  def entryAddress: Option[Long] =
+    entry.flatMap { name =>
+      for
+        seg <- segments.find(_.symbols.exists(_.name == name))
+        sym <- seg.symbols.find(_.name == name)
+      yield seg.org + sym.offset
+    }
 
   def allSymbols: Seq[(String, TOFSymbol)] =
     for seg <- segments; sym <- seg.symbols yield (seg.name, sym)
@@ -231,6 +246,9 @@ class TOF(val segments: Seq[TOF.Segment]):
     val buf = new StringBuilder
 
     buf ++= "TOF v2\n"
+
+    for e <- entry do
+      buf ++= s"ENTRY:$e\n"
 
     for s <- segments do
       buf ++= s"SEGMENT:${s.name},${s.org.toHexString}\n"

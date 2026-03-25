@@ -55,6 +55,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |bne
                           |bra
                           |div
+                          |entry
                           |extern
                           |fadd
                           |fdiv
@@ -170,6 +171,8 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
 
   lazy val include: P[IncludeLineAST] = "include" ~> stringLit ^^ IncludeLineAST.apply
 
+  lazy val entryDecl: P[EntryLineAST] = "entry" ~> ident ^^ EntryLineAST.apply
+
   lazy val externDecl: P[ExternLineAST] = "extern" ~> ident ^^ ExternLineAST.apply
 
   lazy val globalDecl: P[GlobalLineAST] =
@@ -213,6 +216,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
   lazy val simpleLine: P[LineAST] = positioned(
     comment
       | segment
+      | entryDecl
       | externDecl
       | globalDecl
       | equate
