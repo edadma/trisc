@@ -39,7 +39,7 @@ class Timer(val base: Long) extends Device with WriteOnlyAddressable with (CPU =
 
 class RTC(val base: Long) extends Device with ReadOnlyAddressable:
   val name = "RTC"
-  val size = 6
+  val size = 7
 
   var lastread: Long = 0
   var time: LocalDateTime = LocalDateTime.now(ZoneId.systemDefault())
@@ -66,4 +66,4 @@ class RTC(val base: Long) extends Device with ReadOnlyAddressable:
       case DAY    => toBCD(time.getDayOfMonth)
       case MONTH  => toBCD(time.getMonthValue)
       case DOW    => time.getDayOfWeek.getValue
-      case YEAR   => toBCD(time.getYear)
+      case YEAR   => toBCD(time.getYear % 100)
