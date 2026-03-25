@@ -206,8 +206,13 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
     case other ~ _ => sys.error(s"unexpected reserve directive: $other")
   }
 
+  lazy val comment: P[CommentLineAST] = accept("comment", {
+    case lexical.StringLit(s) if s.startsWith("#") => CommentLineAST(s.drop(1).trim)
+  })
+
   lazy val simpleLine: P[LineAST] = positioned(
-    segment
+    comment
+      | segment
       | externDecl
       | globalDecl
       | equate

@@ -47,8 +47,14 @@ class AssemblyLexer extends StdLexical:
           ) ^^ (ds => Integer.parseInt(ds.mkString, 16).toChar))) | chrExcept('\\')),
         ) <~ c
       } ^^ (l => StringLit(l.mkString))
+      | '#' ~> rep(chrExcept('\n', EofCh)) ^^ (cs => StringLit("#" + cs.mkString))
       | EofCh ^^^ EOF
       | delim
       | failure("illegal character")
+
+  override def whitespace: Parser[Any] = rep[Any](
+    whitespaceChar
+      | ';' ~ rep(chrExcept('\n', EofCh)),
+  )
 
   override def whitespaceChar: Parser[Char] = elem("space char", ch => ch <= ' ' && ch != '\n' && ch != EofCh)

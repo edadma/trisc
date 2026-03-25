@@ -22,8 +22,9 @@ object Linker:
       val buf = new ArrayBuffer[Byte]
       for chunk <- chunks do
         chunk match
-          case TOF.DataChunk(data) => buf ++= data
-          case TOF.ResChunk(size)  => for _ <- 0L until size do buf += 0.toByte
+          case TOF.DataChunk(data)   => buf ++= data
+          case TOF.ResChunk(size)    => for _ <- 0L until size do buf += 0.toByte
+          case TOF.CommentChunk(_)   =>
       buf
 
     // Phase 2: place segments sequentially from baseAddress

@@ -17,6 +17,7 @@ object TOF:
 
   case class DataChunk(data: Seq[Byte]) extends Chunk
   case class ResChunk(size: Long) extends Chunk
+  case class CommentChunk(text: String) extends Chunk
 
   case class Segment(
       name: String,
@@ -28,7 +29,7 @@ object TOF:
   )
 
   class TOFBuilder:
-    private case class TOFBuilderChunk(typ: String, data: Int | ArrayBuffer[Byte])
+    private case class TOFBuilderChunk(typ: String, data: Int | ArrayBuffer[Byte] | String)
     private class TOFBuilderSegment(
         val org: Long,
         val chunks: ListBuffer[TOFBuilderChunk] = new ListBuffer,
@@ -54,15 +55,19 @@ object TOF:
     def addReloc(typ: RelocType, offset: Long, symbol: String): Unit =
       current.relocs += TOFReloc(typ, offset, symbol)
 
+    def addComment(text: String): Unit =
+      current.chunks += TOFBuilderChunk("comment", text)
+
     def tof: TOF =
       TOF(
-        (for (name, seg) <- segments if seg.length > 0
+        (for (name, seg) <- segments if seg.length > 0 || seg.chunks.nonEmpty
         yield Segment(
           name,
           seg.org,
           seg.chunks.toSeq.map {
             case TOFBuilderChunk("data", data: ArrayBuffer[Byte]) => DataChunk(data.toSeq)
             case TOFBuilderChunk("res", size: Int)                => ResChunk(size)
+            case TOFBuilderChunk("comment", text: String)         => CommentChunk(text)
             case chunk => sys.error(s"unexpected chunk: $chunk")
           },
           seg.symbols.toSeq,
@@ -160,6 +165,8 @@ object TOF:
             case _                                   => err("expected TOF version header")
         else
           line match
+            case s"# $text"       => b.addComment(text)
+            case s"#$text"        => b.addComment(text)
             case s"SEGMENT:$rest" => parseSegment(rest)
             case s"SYMBOL:$rest"  => parseSymbol(rest)
             case s"EXTERN:$name"  => b.addExtern(name)
@@ -184,7 +191,8 @@ class TOF(val segments: Seq[TOF.Segment]):
         case TOF.DataChunk(data) =>
           mem.load(addr, data)
           addr += data.length
-        case TOF.ResChunk(size) => addr += size
+        case TOF.ResChunk(size)   => addr += size
+        case TOF.CommentChunk(_)  =>
       }
 
   // --- Query ---
@@ -213,6 +221,7 @@ class TOF(val segments: Seq[TOF.Segment]):
       seg.chunks.map {
         case TOF.DataChunk(data) => data.length.toLong
         case TOF.ResChunk(size)  => size
+        case _                   => 0L
       }.sum
     }.sum
 
@@ -241,9 +250,10 @@ class TOF(val segments: Seq[TOF.Segment]):
         buf ++= s"RELOC:${reloc.typ},${reloc.offset.toHexString},${reloc.symbol}\n"
 
       s.chunks foreach {
-        case TOF.DataChunk(data) => buf ++= s"DATA:${data.map(b => f"${b & 0xff}%02x").mkString}\n"
-        case TOF.ResChunk(size)  => buf ++= s"RES:${size.toHexString}\n"
-        case c                   => sys.error(s"can't serialize $c")
+        case TOF.CommentChunk(text) => buf ++= s"# $text\n"
+        case TOF.DataChunk(data)    => buf ++= s"DATA:${data.map(b => f"${b & 0xff}%02x").mkString}\n"
+        case TOF.ResChunk(size)     => buf ++= s"RES:${size.toHexString}\n"
+        case c                      => sys.error(s"can't serialize $c")
       }
 
     buf.toString
