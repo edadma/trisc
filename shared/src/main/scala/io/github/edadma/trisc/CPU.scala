@@ -154,6 +154,7 @@ object Decode:
         "111 000 000 0001010" -> (_ => RTE),
         "101 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new ADDI(args('a'), args('b'), ext(args('i')))),
         "100 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BLS(args('a'), args('b'), ext(args('i')))),
+        "011 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BLU(args('a'), args('b'), ext(args('i')))),
         "010 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BEQ(args('a'), args('b'), ext(args('i')))),
         "001 ddd aaa bbb 0011" -> ((args: Map[Char, Int]) => new SLT(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 0100" -> ((args: Map[Char, Int]) => new SLTU(args('d'), args('a'), args('b'))),

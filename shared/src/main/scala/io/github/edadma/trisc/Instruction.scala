@@ -84,6 +84,14 @@ class BLS(a: Int, b: Int, imm: Int) extends BranchInstruction(a, b, imm):
 
   def apply(cpu: CPU): Unit = if cpu.r(a).read < cpu.r(b).read then cpu.pc += imm * 2
 
+class BLU(a: Int, b: Int, imm: Int) extends BranchInstruction(a, b, imm):
+  val mnemonic = "blu"
+
+  def apply(cpu: CPU): Unit =
+    val ua = cpu.r(a).read + Long.MinValue
+    val ub = cpu.r(b).read + Long.MinValue
+    if ua < ub then cpu.pc += imm * 2
+
 class BEQ(a: Int, b: Int, imm: Int) extends BranchInstruction(a, b, imm):
   val mnemonic = "beq"
 
