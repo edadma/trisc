@@ -1,8 +1,8 @@
 package io.github.edadma.trisc
 
-import java.time.LocalDateTime
-
 class DeviceTests extends TestHelpers {
+
+  val fixedTime: TimeFields = TimeFields(second = 45, minute = 30, hour = 14, day = 25, month = 3, dow = 2, year = 2026)
 
   // ===== Stdout =====
 
@@ -175,77 +175,70 @@ class DeviceTests extends TestHelpers {
   // ===== RTC =====
 
   "RTC has size 7" in {
-    val rtc = new RTC(0x200)
+    val rtc = new RTC(0x200, () => fixedTime)
     rtc.size shouldBe 7
   }
 
-  "RTC second is valid BCD" in {
-    val rtc = new RTC(0x200)
-    val sec = rtc.readByte(0x200) // SECOND
-    // BCD byte: each nibble 0-9, value 0-59
-    (sec & 0x0F) should be <= 9
-    ((sec >> 4) & 0x0F) should be <= 5
+  "RTC second returns BCD" in {
+    val rtc = new RTC(0x200, () => fixedTime)
+    rtc.readByte(0x200) shouldBe toBCD(45) // 0x45
   }
 
-  "RTC minute is valid BCD" in {
-    val rtc = new RTC(0x200)
-    val min = rtc.readByte(0x201) // MINUTE
-    (min & 0x0F) should be <= 9
-    ((min >> 4) & 0x0F) should be <= 5
+  "RTC minute returns BCD" in {
+    val rtc = new RTC(0x200, () => fixedTime)
+    rtc.readByte(0x201) shouldBe toBCD(30) // 0x30
   }
 
-  "RTC hour is valid BCD" in {
-    val rtc = new RTC(0x200)
-    val hour = rtc.readByte(0x202) // HOUR
-    (hour & 0x0F) should be <= 9
-    ((hour >> 4) & 0x0F) should be <= 2
+  "RTC hour returns BCD" in {
+    val rtc = new RTC(0x200, () => fixedTime)
+    rtc.readByte(0x202) shouldBe toBCD(14) // 0x14
   }
 
-  "RTC day is valid BCD (1-31)" in {
-    val rtc = new RTC(0x200)
-    val day = rtc.readByte(0x203) // DAY
-    val dayVal = (day & 0x0F) + ((day >> 4) & 0x0F) * 10
-    dayVal should be >= 1
-    dayVal should be <= 31
+  "RTC day returns BCD" in {
+    val rtc = new RTC(0x200, () => fixedTime)
+    rtc.readByte(0x203) shouldBe toBCD(25) // 0x25
   }
 
-  "RTC month is valid BCD (1-12)" in {
-    val rtc = new RTC(0x200)
-    val month = rtc.readByte(0x204) // MONTH
-    val monthVal = (month & 0x0F) + ((month >> 4) & 0x0F) * 10
-    monthVal should be >= 1
-    monthVal should be <= 12
+  "RTC month returns BCD" in {
+    val rtc = new RTC(0x200, () => fixedTime)
+    rtc.readByte(0x204) shouldBe toBCD(3) // 0x03
   }
 
-  "RTC day-of-week is 1-7" in {
-    val rtc = new RTC(0x200)
-    val dow = rtc.readByte(0x205) // DOW
-    dow should be >= 1
-    dow should be <= 7
+  "RTC day-of-week returns raw value" in {
+    val rtc = new RTC(0x200, () => fixedTime)
+    rtc.readByte(0x205) shouldBe 2
   }
 
-  "RTC year is 2-digit BCD (0-99)" in {
-    val rtc = new RTC(0x200)
-    val year = rtc.readByte(0x206) // YEAR
-    (year & 0x0F) should be <= 9
-    ((year >> 4) & 0x0F) should be <= 9
-    val yearVal = (year & 0x0F) + ((year >> 4) & 0x0F) * 10
-    yearVal should be >= 0
-    yearVal should be <= 99
-  }
-
-  "RTC year matches current year mod 100" in {
-    val rtc = new RTC(0x200)
-    val year = rtc.readByte(0x206)
-    val yearVal = (year & 0x0F) + ((year >> 4) & 0x0F) * 10
-    yearVal shouldBe (LocalDateTime.now().getYear % 100)
+  "RTC year returns 2-digit BCD" in {
+    val rtc = new RTC(0x200, () => fixedTime)
+    rtc.readByte(0x206) shouldBe toBCD(26) // 2026 % 100 = 26 → 0x26
   }
 
   "RTC caches reads within 50ms" in {
-    val rtc = new RTC(0x200)
-    val sec1 = rtc.readByte(0x200)
-    val sec2 = rtc.readByte(0x200) // should return same cached value
-    sec1 shouldBe sec2
+    var calls = 0
+    val rtc = new RTC(0x200, () => { calls += 1; fixedTime })
+    rtc.readByte(0x200)
+    rtc.readByte(0x201)
+    rtc.readByte(0x202)
+    // Initial read + all within 50ms cache window = only 1 call to timeSource
+    calls shouldBe 1
+  }
+
+  "RTC updates time source after cache expires" in {
+    var second = 10
+    val rtc = new RTC(0x200, () => fixedTime.copy(second = second))
+    rtc.readByte(0x200) shouldBe toBCD(10)
+    second = 11
+    // Force cache expiry by advancing past 50ms
+    Thread.sleep(60)
+    rtc.readByte(0x200) shouldBe toBCD(11)
+  }
+
+  "RTC is read-only" in {
+    val rtc = new RTC(0x200, () => fixedTime)
+    an[Exception] should be thrownBy {
+      rtc.writeByte(0x200, 0)
+    }
   }
 
   // ===== CallbackDevice =====

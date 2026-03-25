@@ -1,7 +1,5 @@
 package io.github.edadma.trisc
 
-import java.time.{LocalDateTime, ZoneId}
-
 trait Device extends Addressable:
   def loadByte(addr: Long, data: Long): Unit = sys.error("attempting to load a byte into memory-mapped device")
 
@@ -85,33 +83,27 @@ class RNG(val base: Long, seed: Option[Long] = None) extends Device with ReadOnl
 
   def readByte(addr: Long): Int = random.nextInt(256)
 
-class RTC(val base: Long) extends Device with ReadOnlyAddressable:
+case class TimeFields(second: Int, minute: Int, hour: Int, day: Int, month: Int, dow: Int, year: Int)
+
+class RTC(val base: Long, timeSource: () => TimeFields) extends Device with ReadOnlyAddressable:
   val name = "RTC"
   val size = 7
 
-  var lastread: Long = 0
-  var time: LocalDateTime = LocalDateTime.now(ZoneId.systemDefault())
-
-  val SECOND = 0
-  val MINUTE = 1
-  val HOUR = 2
-  val DAY = 3
-  val MONTH = 4
-  val DOW = 5
-  val YEAR = 6
+  private var lastRead: Long = System.currentTimeMillis
+  private var cached: TimeFields = timeSource()
 
   def readByte(addr: Long): Int =
     val now = System.currentTimeMillis
 
-    if (now - lastread > 50)
-      lastread = now
-      time = LocalDateTime.now(ZoneId.systemDefault())
+    if now - lastRead > 50 then
+      lastRead = now
+      cached = timeSource()
 
     addr - base match
-      case SECOND => toBCD(time.getSecond)
-      case MINUTE => toBCD(time.getMinute)
-      case HOUR   => toBCD(time.getHour)
-      case DAY    => toBCD(time.getDayOfMonth)
-      case MONTH  => toBCD(time.getMonthValue)
-      case DOW    => time.getDayOfWeek.getValue
-      case YEAR   => toBCD(time.getYear % 100)
+      case 0 => toBCD(cached.second)
+      case 1 => toBCD(cached.minute)
+      case 2 => toBCD(cached.hour)
+      case 3 => toBCD(cached.day)
+      case 4 => toBCD(cached.month)
+      case 5 => cached.dow
+      case 6 => toBCD(cached.year % 100)
