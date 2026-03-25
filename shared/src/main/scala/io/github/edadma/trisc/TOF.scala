@@ -32,11 +32,12 @@ object TOF:
         yield Segment(
           name,
           seg.org,
-          seg.chunks.toSeq map {
+          seg.chunks.toSeq.map {
             case TOFBuilderChunk("data", data: ArrayBuffer[Byte]) => DataChunk(data.toSeq)
             case TOFBuilderChunk("res", size: Int)                => ResChunk(size)
+            case chunk => sys.error(s"unexpected chunk: $chunk")
           },
-        )) toSeq,
+        )).toSeq,
       )
 
     def segmentDefined(name: String): Boolean = segments contains name

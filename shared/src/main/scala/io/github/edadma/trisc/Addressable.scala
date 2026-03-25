@@ -66,11 +66,11 @@ class Memory(val name: String, blocks: Addressable*) extends Addressable:
 
   private def badAddress(addr: Long): Nothing = sys.error(s"address not found: ${addr.toHexString} ($addr)")
 
-  def readByte(addr: Long): Int = block(addr) getOrElse badAddress(addr) readByte addr
+  def readByte(addr: Long): Int = block(addr).getOrElse(badAddress(addr)).readByte(addr)
 
-  def writeByte(addr: Long, data: Long): Unit = block(addr) getOrElse badAddress(addr) writeByte (addr, data)
+  def writeByte(addr: Long, data: Long): Unit = block(addr).getOrElse(badAddress(addr)).writeByte(addr, data)
 
-  def loadByte(addr: Long, data: Long): Unit = block(addr) getOrElse badAddress(addr) loadByte (addr, data)
+  def loadByte(addr: Long, data: Long): Unit = block(addr).getOrElse(badAddress(addr)).loadByte(addr, data)
 
 abstract class ArrayAddressable extends Addressable:
   require(base >= 0, "base is negative")

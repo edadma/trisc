@@ -19,7 +19,7 @@ abstract class ImmediateInstruction(r: Int, imm: Int) extends Instruction:
 class LDI(r: Int, imm: Int) extends ImmediateInstruction(r, imm):
   val mnemonic = "ldi"
 
-  def apply(cpu: CPU): Unit = cpu.r(r) write imm
+  def apply(cpu: CPU): Unit = cpu.r(r).write(imm)
 
 class SLI(r: Int, imm: Int) extends ImmediateInstruction(r, imm):
   val mnemonic = "sli"
@@ -35,7 +35,7 @@ class JALR(a: Int, b: Int) extends SimpleInstruction:
   val mnemonic = "jalr"
 
   def apply(cpu: CPU): Unit =
-    cpu.r(a) write cpu.pc
+    cpu.r(a).write(cpu.pc)
     cpu.pc = cpu.r(b).read
 
 class TRAP(imm: Int) extends Instruction:
@@ -54,7 +54,7 @@ object RTE extends SimpleInstruction:
   val mnemonic = "rte"
 
   def apply(cpu: CPU): Unit =
-    for i <- 1 to 7 do cpu.r(i) write cpu.sr(i)
+    for i <- 1 to 7 do cpu.r(i).write(cpu.sr(i))
     cpu.pc = cpu.spc
     cpu.psr = cpu.spsr
 
@@ -66,7 +66,7 @@ class SPSR(r: Int) extends SimpleInstruction:
 class GPSR(r: Int) extends SimpleInstruction:
   val mnemonic = "gpsr"
 
-  def apply(cpu: CPU): Unit = cpu.r(r) write cpu.psr & 0xffffffff
+  def apply(cpu: CPU): Unit = cpu.r(r).write(cpu.psr & 0xffffffff)
 
 abstract class ImmediateSignedInstruction(a: Int, b: Int, imm: Int) extends Instruction:
   def disassemble(cpu: CPU): String = f"$mnemonic r$a, r$b, 0x$imm%02x ($imm)"
@@ -103,47 +103,47 @@ abstract class RRRInstruction(a: Int, b: Int, c: Int) extends Instruction:
 class ADD(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "add"
 
-  def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read + cpu.r(b).read)
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read + cpu.r(b).read)
 
 class SUB(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "sub"
 
-  def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read - cpu.r(b).read)
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read - cpu.r(b).read)
 
 class MUL(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "mul"
 
-  def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read * cpu.r(b).read)
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read * cpu.r(b).read)
 
 class DIV(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "div"
 
-  def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read / cpu.r(b).read)
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read / cpu.r(b).read)
 
 class REM(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "rem"
 
-  def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read % cpu.r(b).read)
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read % cpu.r(b).read)
 
 class AND(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "and"
 
-  def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read & cpu.r(b).read)
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read & cpu.r(b).read)
 
 class OR(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "or"
 
-  def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read | cpu.r(b).read)
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read | cpu.r(b).read)
 
 class XOR(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "xor"
 
-  def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read ^ cpu.r(b).read)
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read ^ cpu.r(b).read)
 
 class SLT(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "slt"
 
-  def apply(cpu: CPU): Unit = cpu.r(d) write (if cpu.r(a).read < cpu.r(b).read then 1 else 0)
+  def apply(cpu: CPU): Unit = cpu.r(d).write(if cpu.r(a).read < cpu.r(b).read then 1 else 0)
 
 class SLTU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "sltu"
@@ -151,7 +151,7 @@ class SLTU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   def apply(cpu: CPU): Unit =
     val ua = cpu.r(a).read + Long.MinValue
     val ub = cpu.r(b).read + Long.MinValue
-    cpu.r(d) write (if ua < ub then 1 else 0)
+    cpu.r(d).write(if ua < ub then 1 else 0)
 
 class AUIPC(r: Int, imm: Int) extends ImmediateInstruction(r, imm):
   val mnemonic = "auipc"
@@ -161,7 +161,7 @@ class AUIPC(r: Int, imm: Int) extends ImmediateInstruction(r, imm):
 class LDB(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "ldb"
 
-  def apply(cpu: CPU): Unit = cpu.r(d) write cpu.readByte(cpu.r(a).read + cpu.r(b).read)
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.readByte(cpu.r(a).read + cpu.r(b).read))
 
 abstract class LDSTInstruction(a: Int, b: Int, imm: Int) extends Instruction:
   def disassemble(cpu: CPU): String = f"$mnemonic r$a, r$b, 0x${imm * 2}%02x (${imm * 2})"
@@ -169,7 +169,7 @@ abstract class LDSTInstruction(a: Int, b: Int, imm: Int) extends Instruction:
 class LD(a: Int, b: Int, imm: Int) extends LDSTInstruction(a, b, imm):
   val mnemonic = "ld"
 
-  def apply(cpu: CPU): Unit = cpu.r(a) write cpu.readInt(cpu.r(b).read + imm * 2)
+  def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.readInt(cpu.r(b).read + imm * 2))
 
 class ST(a: Int, b: Int, imm: Int) extends LDSTInstruction(a, b, imm):
   val mnemonic = "st"
@@ -184,7 +184,7 @@ class STB(a: Int, b: Int, c: Int) extends RRRInstruction(a, b, c):
 class LDS(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "lds"
 
-  def apply(cpu: CPU): Unit = cpu.r(d) write cpu.readShort(cpu.r(a).read + cpu.r(b).read)
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.readShort(cpu.r(a).read + cpu.r(b).read))
 
 class STS(a: Int, b: Int, c: Int) extends RRRInstruction(a, b, c):
   val mnemonic = "sts"
@@ -194,7 +194,7 @@ class STS(a: Int, b: Int, c: Int) extends RRRInstruction(a, b, c):
 class LDW(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "ldw"
 
-  def apply(cpu: CPU): Unit = cpu.r(d) write cpu.readInt(cpu.r(a).read + cpu.r(b).read)
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.readInt(cpu.r(a).read + cpu.r(b).read))
 
 class STW(a: Int, b: Int, c: Int) extends RRRInstruction(a, b, c):
   val mnemonic = "stw"
@@ -204,7 +204,7 @@ class STW(a: Int, b: Int, c: Int) extends RRRInstruction(a, b, c):
 class LDD(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "ldd"
 
-  def apply(cpu: CPU): Unit = cpu.r(d) write cpu.readLong(cpu.r(a).read + cpu.r(b).read)
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.readLong(cpu.r(a).read + cpu.r(b).read))
 
 class STD(a: Int, b: Int, c: Int) extends RRRInstruction(a, b, c):
   val mnemonic = "std"

@@ -52,7 +52,7 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   def set(status: Status, set: Boolean): Unit = if set then psr |= status.bit else psr &= ~status.bit
 
   def reset(): Unit =
-    for i <- 1 until 8 do r(i) write 0
+    for i <- 1 until 8 do r(i).write(0)
 
     state = State.Reset
     set(Status.Ind, true)
@@ -184,7 +184,7 @@ object Decode:
     case class Variable(v: Char, lower: Int, upper: Int, bits: List[Int])
 
     val Range = "([a-zA-Z]):([0-9]+)-([0-9]+)".r
-    val p = pattern replace (" ", "") split ";"
+    val p = pattern.replace(" ", "").split(";")
 
     require(p.nonEmpty, "empty pattern")
 
@@ -196,10 +196,10 @@ object Decode:
       "pattern should comprise only 0's, 1's, letters or -'s",
     )
 
-    val ranges = Map(p drop 1 map { case Range(v, l, u) => v(0) -> (l.toInt, u.toInt) }: _*)
+    val ranges = Map(p.drop(1).map { case Range(v, l, u) => v(0) -> (l.toInt, u.toInt) }*)
 
     require(
-      ranges forall { case (_, (l, u)) => 0 <= l && l <= u },
+      ranges.forall { case (_, (l, u)) => 0 <= l && l <= u },
       "first value of range must be less than or equal to second and be non-negative",
     )
 

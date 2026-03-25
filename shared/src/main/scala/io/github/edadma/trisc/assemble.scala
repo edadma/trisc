@@ -59,18 +59,20 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
       case ReferenceExprAST(ref) =>
         if !references then problem(e, s"references not allowed here")
 
-        symbols get ref match
+        symbols.get(ref) match
           case None => problem(e, s"unrecognized symbol '$ref'")
           case Some(l @ LabelSymbol(_, value, _, _)) =>
             l.referenced = true
             LongExprAST(if absolute then value else value - (builder.length + 2 + builder.org))
           case Some(EquateSymbol(_, value)) => fold(value, absolute, immediate)
+          case Some(s) => problem(e, s"unexpected symbol type for '$ref': $s")
       case LocalExprAST(_, ref) =>
-        symbols get ref match
+        symbols.get(ref) match
           case None => problem(e, s"unrecognized symbol '$ref'")
           case Some(l @ LabelSymbol(_, value, _, _)) =>
             l.referenced = true
             LongExprAST(if absolute then value else value - (builder.length + 2 + builder.org))
+          case Some(s) => problem(e, s"unexpected symbol type for '$ref': $s")
       case UnaryExprAST("-", expr) =>
         fold(expr, absolute, immediate) match
           case LongExprAST(n)   => LongExprAST(-n)

@@ -81,12 +81,12 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |sub
                           |trap
                           |xor
-                          |""".trim.stripMargin split "\\s+")
+                          |""".trim.stripMargin.split("\\s+"))
   lexical.delimiters ++= ("+ - * / % ( ) : , = . \n" split ' ')
 
   type P[+T] = PackratParser[T]
 
-  lazy val nl: P[_] = rep("\n")
+  lazy val nl: P[?] = rep("\n")
 
   lazy val assembly: P[Seq[LineAST]] = nl ~> repsep(line, nl) <~ nl ^^ (_.flatten)
 
@@ -141,6 +141,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
     case "dw" ~ d => DataLineAST(4, d)
     case "dl" ~ d => DataLineAST(8, d)
     case "dd" ~ d => DataLineAST(0, d)
+    case other ~ _ => sys.error(s"unexpected data directive: $other")
   }
 
   lazy val reserve: P[ReserveLineAST] = ("resb" | "ress" | "resw" | "resl" | "resd") ~ expression ^^ {
@@ -149,6 +150,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
     case "resw" ~ n => ReserveLineAST(4, n)
     case "resl" ~ n => ReserveLineAST(8, n)
     case "resd" ~ n => ReserveLineAST(0, n)
+    case other ~ _ => sys.error(s"unexpected reserve directive: $other")
   }
 
   lazy val simpleLine: P[LineAST] = positioned(
