@@ -121,8 +121,9 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case InstructionLineAST(mnemonic, operands) =>
       segment.size += (
         mnemonic match
-          case "movi" => addresses * 2
-          case _      => 2
+          case "movi"                                          => addresses * 2
+          case "bne" | "bge" | "bgeu" | "ble" | "bleu"        => 4 // inverted branch + bra
+          case _                                               => 2
       )
       operands foreach locals
   }
@@ -315,7 +316,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
       addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm / 2)
     case InstructionLineAST(
           mnemonic @ ("ldb" | "stb" | "lds" | "sts" | "ldw" | "stw" | "ldd" | "std" | "add" | "sub" | "mul" | "div" |
-          "rem" | "and" | "or" | "xor" | "slt" | "sltu"),
+          "rem" | "and" | "or" | "xor" | "asr" | "lsr" | "lsl" | "slt" | "sltu"),
           Seq(o1, o2, o3),
         ) =>
       val (prefix, opcode) =
@@ -336,6 +337,9 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case "and"  => (0, 13)
           case "or"   => (0, 14)
           case "xor"  => (0, 15)
+          case "asr"  => (1, 0)
+          case "lsr"  => (1, 1)
+          case "lsl"  => (1, 2)
           case "slt"  => (1, 3)
           case "sltu" => (1, 4)
       val reg1 =
@@ -403,6 +407,27 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o, "expected register as first operand")
 
       addInstruction(3 -> 7, 3 -> 0, 3 -> reg, 7 -> opcode)
+    case InstructionLineAST(mnemonic @ ("zeb" | "zes" | "zew" | "seb" | "ses" | "sew" | "neg" | "not"), Seq(o1, o2)) =>
+      val opcode =
+        mnemonic match
+          case "zeb" => 1
+          case "zes" => 2
+          case "zew" => 3
+          case "seb" => 4
+          case "ses" => 5
+          case "sew" => 6
+          case "neg" => 7
+          case "not" => 8
+      val reg1 =
+        fold(o1) match
+          case RegisterExprAST(reg) => reg
+          case _                    => problem(o1, "expected register as first operand")
+      val reg2 =
+        fold(o2) match
+          case RegisterExprAST(reg) => reg
+          case _                    => problem(o2, "expected register as second operand")
+
+      addInstruction(3 -> 6, 3 -> reg1, 3 -> reg2, 2 -> 0, 5 -> opcode)
     case InstructionLineAST("halt", Nil) => addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 0, 5 -> 0) // jalr 0,0
     case InstructionLineAST("bra", Seq(o)) =>
       val imm =
@@ -449,6 +474,53 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o2, "expected register as second operand")
 
       addInstruction(3 -> 5, 3 -> reg1, 3 -> reg2, 7 -> 0) // addi r(reg1), r(reg2), 0
+    case InstructionLineAST("ret", Nil) =>
+      addInstruction(3 -> 6, 3 -> 0, 3 -> 7, 2 -> 0, 5 -> 0) // jalr r0, r7
+    case InstructionLineAST(mnemonic @ ("bgt" | "bgu"), Seq(o1, o2, o3)) =>
+      // bgt r1, r2, target → bls r2, r1, target (swap operands)
+      val baseOpcode = mnemonic match
+        case "bgt" => 4 // bls
+        case "bgu" => 3 // blu
+      val reg1 =
+        fold(o1) match
+          case RegisterExprAST(reg) => reg
+          case _                    => problem(o1, "expected register as first operand")
+      val reg2 =
+        fold(o2) match
+          case RegisterExprAST(reg) => reg
+          case _                    => problem(o2, "expected register as second operand")
+      val imm =
+        fold(o3, immediate = true) match
+          case _: DoubleExprAST                                      => problem(o3, "immediate must be integral")
+          case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => n.toInt
+          case _: LongExprAST => problem(o3, "immediate must be an even signed 8-bit value")
+
+      addInstruction(3 -> baseOpcode, 3 -> reg2, 3 -> reg1, 7 -> imm / 2) // swapped operands
+    case InstructionLineAST(mnemonic @ ("bne" | "bge" | "bgeu" | "ble" | "bleu"), Seq(o1, o2, o3)) =>
+      // Inverted branch: emit the opposite condition skipping over a bra
+      val (baseOpcode, swap) = mnemonic match
+        case "bne"  => (2, false) // invert beq
+        case "bge"  => (4, false) // invert bls
+        case "bgeu" => (3, false) // invert blu
+        case "ble"  => (4, true)  // invert bgt → invert swapped bls
+        case "bleu" => (3, true)  // invert bgu → invert swapped blu
+      val reg1 =
+        fold(o1) match
+          case RegisterExprAST(reg) => reg
+          case _                    => problem(o1, "expected register as first operand")
+      val reg2 =
+        fold(o2) match
+          case RegisterExprAST(reg) => reg
+          case _                    => problem(o2, "expected register as second operand")
+      val imm =
+        fold(o3, immediate = true) match
+          case _: DoubleExprAST                                      => problem(o3, "immediate must be integral")
+          case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => (n - 2).toInt // adjust: skip the extra bra
+          case _: LongExprAST => problem(o3, "immediate must be an even signed 8-bit value")
+
+      val (r1, r2) = if swap then (reg2, reg1) else (reg1, reg2)
+      addInstruction(3 -> baseOpcode, 3 -> r1, 3 -> r2, 7 -> 1) // base branch: skip 1 instruction (the bra)
+      addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm / 2)      // bra target (beq r0, r0, imm)
   }
 
   symbols.values foreach {

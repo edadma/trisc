@@ -153,6 +153,68 @@ class SLTU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
     val ub = cpu.r(b).read + Long.MinValue
     cpu.r(d).write(if ua < ub then 1 else 0)
 
+// Shifts (RRR 001 block)
+
+class ASR(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "asr"
+
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read >> cpu.r(b).read.toInt)
+
+class LSR(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "lsr"
+
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read >>> cpu.r(b).read.toInt)
+
+class LSL(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "lsl"
+
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read << cpu.r(b).read.toInt)
+
+// Unary ops (RR 110 block)
+
+abstract class RRInstruction(a: Int, b: Int) extends Instruction:
+  def disassemble(cpu: CPU): String = s"$mnemonic r$a, r$b"
+
+class ZEB(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "zeb"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read & 0xff)
+
+class ZES(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "zes"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read & 0xffff)
+
+class ZEW(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "zew"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read & 0xffffffffL)
+
+class SEB(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "seb"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read.toByte.toLong)
+
+class SES(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "ses"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read.toShort.toLong)
+
+class SEW(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "sew"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read.toInt.toLong)
+
+class NEG(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "neg"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(-cpu.r(b).read)
+
+class NOT(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "not"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(~cpu.r(b).read)
+
 class AUIPC(r: Int, imm: Int) extends ImmediateInstruction(r, imm):
   val mnemonic = "auipc"
 

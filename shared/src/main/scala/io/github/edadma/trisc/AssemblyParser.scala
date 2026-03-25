@@ -41,10 +41,18 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |add
                           |addi
                           |and
+                          |asr
                           |auipc
                           |beq
+                          |bge
+                          |bgeu
+                          |bgt
+                          |bgu
+                          |ble
+                          |bleu
                           |bls
                           |blu
+                          |bne
                           |bra
                           |div
                           |gpsr
@@ -56,10 +64,14 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |ldi
                           |lds
                           |ldw
+                          |lsl
+                          |lsr
                           |mov
                           |movi
                           |mul
+                          |neg
                           |nop
+                          |not
                           |or
                           |resb
                           |resd
@@ -67,7 +79,11 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |ress
                           |resw
                           |rem
+                          |ret
                           |rte
+                          |seb
+                          |ses
+                          |sew
                           |sli
                           |slt
                           |sltu
@@ -81,6 +97,9 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |sub
                           |trap
                           |xor
+                          |zeb
+                          |zes
+                          |zew
                           |""".trim.stripMargin.split("\\s+"))
   lexical.delimiters ++= ("+ - * / % ( ) : , = . \n" split ' ')
 
@@ -169,7 +188,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
       | label ~ instruction ^^ { case l ~ i => Seq(l, i) }
 
   lazy val mnemonics: P[String] =
-    "add" | "addi" | "and" | "auipc" | "beq" | "bls" | "blu" | "bra" | "div" | "gpsr" | "halt" | "jalr" | "ld" | "ldb" | "ldd" | "ldi" | "lds" | "ldw" | "mov" | "movi" | "mul" | "nop" | "or" | "rem" | "rte" | "sli" | "slt" | "sltu" | "spsr" | "st" | "stb" | "std" | "sti" | "sts" | "stw" | "sub" | "trap" | "xor"
+    "add" | "addi" | "and" | "asr" | "auipc" | "beq" | "bge" | "bgeu" | "bgt" | "bgu" | "ble" | "bleu" | "bls" | "blu" | "bne" | "bra" | "div" | "gpsr" | "halt" | "jalr" | "ld" | "ldb" | "ldd" | "ldi" | "lds" | "ldw" | "lsl" | "lsr" | "mov" | "movi" | "mul" | "neg" | "nop" | "not" | "or" | "rem" | "ret" | "rte" | "seb" | "ses" | "sew" | "sli" | "slt" | "sltu" | "spsr" | "st" | "stb" | "std" | "sti" | "sts" | "stw" | "sub" | "trap" | "xor" | "zeb" | "zes" | "zew"
 
   lazy val instruction: P[InstructionLineAST] =
     mnemonics ~ repsep(expression, ",") ^^ { case m ~ es =>
