@@ -212,60 +212,42 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
 
   builder.segment("_default_", segments("_default_").org)
 
-  // Emit symbols: if globals are declared, use those; otherwise in relocatable mode export all non-local labels
+  // Emit symbols for a segment: globals, relocatable auto-exports, and entry point
   val emittedSymbols = new mutable.LinkedHashSet[String]
 
-  def emitSymbols(): Unit =
+  def emitSymbolsForSegment(segName: String): Unit =
+    val seg = segments(segName)
+    val org = seg.org
+
     if globals.nonEmpty then
-      for (name, g) <- globals do
-        symbols.get(name) match
+      for (gname, g) <- globals if seg.symbols.contains(gname) do
+        symbols.get(gname) match
           case Some(LabelSymbol(_, value, _, _)) =>
-            builder.addSymbol(name, value, g.typ, g.size)
-            emittedSymbols += name
-          case _ => // already validated above
+            builder.addSymbol(gname, value - org, g.typ, g.size)
+            emittedSymbols += gname
+          case _ =>
     else if relocatable then
-      for (name, sym) <- symbols do
-        sym match
-          case LabelSymbol(n, value, _, _) if !n.contains('.') =>
-            builder.addSymbol(n, value, SymbolType.Func)
+      for symName <- seg.symbols do
+        symbols.get(symName) match
+          case Some(LabelSymbol(n, value, _, _)) if !n.contains('.') =>
+            builder.addSymbol(n, value - org, SymbolType.Func)
             emittedSymbols += n
           case _ =>
-  emitSymbols()
+    // Always emit entry point symbol if it belongs to this segment
+    for ep <- entryPoint if !emittedSymbols.contains(ep) && seg.symbols.contains(ep) do
+      symbols.get(ep) match
+        case Some(LabelSymbol(_, value, _, _)) =>
+          builder.addSymbol(ep, value - org, SymbolType.Func)
+          emittedSymbols += ep
+        case _ =>
 
-  // Emit entry symbol for _default_ segment if it belongs there and wasn't already emitted
-  for ep <- entryPoint if !emittedSymbols.contains(ep) && segments("_default_").symbols.contains(ep) do
-    symbols.get(ep) match
-      case Some(LabelSymbol(_, value, _, _)) =>
-        builder.addSymbol(ep, value - segments("_default_").org, SymbolType.Func)
-        emittedSymbols += ep
-      case _ =>
+  emitSymbolsForSegment("_default_")
 
   // Pass 2: code generation
   lines foreach {
     case SegmentLineAST(name) =>
       builder.segment(name, segments(name).org)
-      // emit symbols for this segment too
-      if globals.nonEmpty then
-        for (gname, g) <- globals do
-          symbols.get(gname) match
-            case Some(LabelSymbol(n, value, _, _)) if segments(name).symbols.contains(n) =>
-              builder.addSymbol(n, value, g.typ, g.size)
-              emittedSymbols += n
-            case _ =>
-      else if relocatable then
-        for symName <- segments(name).symbols do
-          symbols.get(symName) match
-            case Some(LabelSymbol(n, value, _, _)) if !n.contains('.') =>
-              builder.addSymbol(n, value, SymbolType.Func)
-              emittedSymbols += n
-            case _ =>
-      // emit entry symbol for this segment if not already emitted
-      for ep <- entryPoint if !emittedSymbols.contains(ep) && segments(name).symbols.contains(ep) do
-        symbols.get(ep) match
-          case Some(LabelSymbol(_, value, _, _)) =>
-            builder.addSymbol(ep, value - segments(name).org, SymbolType.Func)
-            emittedSymbols += ep
-          case _ =>
+      emitSymbolsForSegment(name)
     case LabelLineAST(_)         =>
     case LocalLineAST(_)         =>
     case EquateLineAST(_, _)     =>
