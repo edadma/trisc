@@ -15,6 +15,21 @@ class CallbackDevice(
   def readByte(addr: Long): Int = onRead(addr - base)
   def writeByte(addr: Long, data: Long): Unit = onWrite(addr - base, data)
 
+class BufferedDevice(
+    name: String,
+    base: Long,
+    size: Long,
+    onWrite: (Long, Long) => Unit = (_, _) => (),
+) extends CallbackDevice(name, base, size, onWrite):
+  val buffer: Array[Byte] = new Array[Byte](size.toInt)
+
+  override def readByte(addr: Long): Int = buffer((addr - base).toInt) & 0xff
+
+  override def writeByte(addr: Long, data: Long): Unit =
+    val off = (addr - base).toInt
+    buffer(off) = data.toByte
+    onWrite(off, data)
+
 class Stdout(val base: Long) extends Device with WriteOnlyAddressable:
   val name = "stdout"
   val size = 1

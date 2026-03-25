@@ -202,6 +202,94 @@ class DeviceTests extends TestHelpers {
     dev.readByte(0x701) shouldBe 0x34
   }
 
+  // ===== BufferedDevice =====
+
+  "BufferedDevice stores written bytes" in {
+    val dev = new BufferedDevice("fb", 0x800, 16)
+    dev.writeByte(0x800, 0xAA)
+    dev.writeByte(0x80F, 0xBB)
+    dev.readByte(0x800) shouldBe 0xAA
+    dev.readByte(0x80F) shouldBe 0xBB
+  }
+
+  "BufferedDevice starts zeroed" in {
+    val dev = new BufferedDevice("fb", 0x800, 8)
+    for i <- 0 until 8 do
+      dev.readByte(0x800 + i) shouldBe 0
+  }
+
+  "BufferedDevice fires callback with offset and data" in {
+    var lastOff = -1L
+    var lastData = -1L
+    val dev = new BufferedDevice("fb", 0x800, 4,
+      onWrite = (off, data) =>
+        lastOff = off
+        lastData = data)
+    dev.writeByte(0x802, 0x42)
+    lastOff shouldBe 2
+    lastData shouldBe 0x42
+    dev.buffer(2) shouldBe 0x42
+  }
+
+  "BufferedDevice buffer is updated before callback fires" in {
+    var cbValues = List.empty[Long]
+    val dev = new BufferedDevice("fb", 0x800, 4,
+      onWrite = (_, data) => cbValues = cbValues :+ data)
+    dev.writeByte(0x800, 0x11)
+    dev.writeByte(0x801, 0x22)
+    cbValues shouldBe List(0x11L, 0x22L)
+    // verify buffer reflects the writes
+    dev.buffer(0) shouldBe 0x11.toByte
+    dev.buffer(1) shouldBe 0x22.toByte
+  }
+
+  "BufferedDevice reads back without callback" in {
+    val dev = new BufferedDevice("fb", 0x800, 4)
+    dev.writeByte(0x800, 0x12)
+    dev.writeByte(0x801, 0x34)
+    dev.writeByte(0x802, 0x56)
+    dev.writeByte(0x803, 0x78)
+    dev.readByte(0x800) shouldBe 0x12
+    dev.readByte(0x801) shouldBe 0x34
+    dev.readByte(0x802) shouldBe 0x56
+    dev.readByte(0x803) shouldBe 0x78
+  }
+
+  "BufferedDevice buffer is directly accessible" in {
+    val dev = new BufferedDevice("fb", 0x800, 4)
+    dev.writeByte(0x800, 0xAA)
+    dev.buffer(0) shouldBe 0xAA.toByte
+    dev.buffer.length shouldBe 4
+  }
+
+  "BufferedDevice works with CPU (display pattern)" in {
+    var dirtyPixels = List.empty[(Int, Int)]
+    val dev = new BufferedDevice("display", 0xE00, 8,
+      onWrite = (off, data) => dirtyPixels = dirtyPixels :+ (off.toInt, data.toInt))
+    val mem = new Memory("Memory", new RAM(0, 0xE00), dev)
+    val tof = assemble(
+      """DISPLAY = 0xE00
+        |dw 8
+        |dw 0
+        |dw 0
+        |dw 0
+        |movi r3, DISPLAY
+        |ldi r1, 0xFF
+        |stb r1, r3, r0
+        |ldi r4, 3
+        |ldi r1, 0x80
+        |stb r1, r3, r4
+        |halt
+        |""".stripMargin)
+    tof.load(mem)
+    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    cpu.reset()
+    cpu.run()
+    dirtyPixels shouldBe List((0, 0xFF), (3, 0x80))
+    dev.readByte(0xE00) shouldBe 0xFF
+    dev.readByte(0xE03) shouldBe 0x80
+  }
+
   // ===== RNG =====
 
   "RNG has size 1" in {
