@@ -121,6 +121,74 @@ class DeviceTests extends TestHelpers {
     sec1 shouldBe sec2
   }
 
+  // ===== RNG =====
+
+  "RNG has size 1" in {
+    val rng = new RNG(0x300)
+    rng.size shouldBe 1
+  }
+
+  "RNG is read-only" in {
+    val rng = new RNG(0x300)
+    an[Exception] should be thrownBy {
+      rng.writeByte(0x300, 0x42)
+    }
+  }
+
+  "RNG returns values in 0-255 range" in {
+    val rng = new RNG(0x300, Some(42))
+    for _ <- 0 until 100 do
+      val v = rng.readByte(0x300)
+      v should be >= 0
+      v should be <= 255
+  }
+
+  "RNG with seed produces deterministic sequence" in {
+    val rng1 = new RNG(0x300, Some(12345))
+    val rng2 = new RNG(0x300, Some(12345))
+    for _ <- 0 until 20 do
+      rng1.readByte(0x300) shouldBe rng2.readByte(0x300)
+  }
+
+  "RNG without seed produces values (non-deterministic)" in {
+    val rng = new RNG(0x300)
+    // Just verify it doesn't throw and returns bytes
+    val values = (0 until 10).map(_ => rng.readByte(0x300))
+    values.foreach { v =>
+      v should be >= 0
+      v should be <= 255
+    }
+  }
+
+  "RNG returns varying values" in {
+    val rng = new RNG(0x300, Some(42))
+    val values = (0 until 20).map(_ => rng.readByte(0x300)).toSet
+    values.size should be > 1 // not all the same
+  }
+
+  "RNG works as memory-mapped device in CPU" in {
+    val rng = new RNG(0xFF0, Some(42))
+    val expected = new java.util.Random(42)
+    val mem = new Memory("Memory", new RAM(0, 0xFF0), rng)
+    val tof = assemble(
+      """RNG = 0xFF0
+        |dw 8
+        |dw 0
+        |dw 0
+        |dw 0
+        |movi r3, RNG
+        |ldb r1, r3, r0
+        |ldb r2, r3, r0
+        |halt
+        |""".stripMargin)
+    tof.load(mem)
+    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    cpu.reset()
+    cpu.run()
+    cpu.r(1).read shouldBe expected.nextInt(256)
+    cpu.r(2).read shouldBe expected.nextInt(256)
+  }
+
   // ===== BCD helper =====
 
   "toBCD converts 0" in {

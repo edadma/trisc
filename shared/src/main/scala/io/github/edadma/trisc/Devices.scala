@@ -37,6 +37,16 @@ class Timer(val base: Long) extends Device with WriteOnlyAddressable with (CPU =
       last += delay
       cpu.interrupt()
 
+class RNG(val base: Long, seed: Option[Long] = None) extends Device with ReadOnlyAddressable:
+  val name = "RNG"
+  val size = 1
+
+  private val random = seed match
+    case Some(s) => new java.util.Random(s)
+    case None    => new java.util.Random()
+
+  def readByte(addr: Long): Int = random.nextInt(256)
+
 class RTC(val base: Long) extends Device with ReadOnlyAddressable:
   val name = "RTC"
   val size = 7
