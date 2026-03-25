@@ -29,6 +29,9 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
   val segments = new mutable.LinkedHashMap[String, Pass1]
   var segment = Pass1("_default_")
   val builder = TOF.builder
+  val globals = new mutable.LinkedHashMap[String, GlobalLineAST]
+  val declaredExterns = new mutable.LinkedHashSet[String]
+  val referencedExterns = new mutable.LinkedHashSet[String]
 
   def addSymbol(sym: Positional, name: String): Unit =
     if symbols contains name then problem(sym, s"duplicate symbol: '$name'")
@@ -60,6 +63,9 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         if !references then problem(e, s"references not allowed here")
 
         symbols.get(ref) match
+          case Some(_: ExternSymbol) =>
+            referencedExterns += ref
+            e // return unresolved — caller handles relocation
           case None =>
             if relocatable then e // return unresolved — caller handles relocation
             else problem(e, s"unrecognized symbol '$ref'")
@@ -83,6 +89,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
 
   segments("_default_") = segment
 
+  // Pass 1: size calculation and symbol registration
   lines foreach {
     case SegmentLineAST(name) =>
       segments get name match
@@ -98,6 +105,12 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case equate @ EquateLineAST(name, expr) =>
       if symbols contains name then problem(equate, s"duplicate definition of '$name'")
       symbols(name) = EquateSymbol(name, expr)
+    case ext @ ExternLineAST(name) =>
+      if symbols contains name then problem(ext, s"duplicate symbol: '$name'")
+      symbols(name) = ExternSymbol(name)
+      declaredExterns += name
+    case g @ GlobalLineAST(name, typ, size) =>
+      globals(name) = g
     case DataLineAST(width, Nil) => segment.size += (if width == 0 then 8 else width)
     case DataLineAST(width, data) =>
       val startingSize = segment.size
@@ -129,6 +142,12 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
       )
       operands foreach locals
   }
+
+  // Validate globals reference existing labels
+  for (name, g) <- globals do
+    symbols.get(name) match
+      case Some(_: LabelSymbol) => // ok
+      case _                    => problem(g, s"global '$name' does not refer to a defined label")
 
   def relocate(seg: Pass1, org: Long): Unit =
     seg.symbols foreach (n => symbols(n).asInstanceOf[LabelSymbol].value += org)
@@ -184,19 +203,35 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
 
   builder.segment("_default_", segments("_default_").org)
 
-  // In relocatable mode, export all global labels as symbols
-  if relocatable then
-    for (name, sym) <- symbols do
-      sym match
-        case LabelSymbol(n, value, _, _) if !n.contains('.') =>
-          builder.addSymbol(n, value, SymbolType.Func)
-        case _ =>
+  // Emit symbols: if globals are declared, use those; otherwise in relocatable mode export all non-local labels
+  def emitSymbols(): Unit =
+    if globals.nonEmpty then
+      for (name, g) <- globals do
+        symbols.get(name) match
+          case Some(LabelSymbol(_, value, _, _)) =>
+            builder.addSymbol(name, value, g.typ, g.size)
+          case _ => // already validated above
+    else if relocatable then
+      for (name, sym) <- symbols do
+        sym match
+          case LabelSymbol(n, value, _, _) if !n.contains('.') =>
+            builder.addSymbol(n, value, SymbolType.Func)
+          case _ =>
 
+  emitSymbols()
+
+  // Pass 2: code generation
   lines foreach {
     case SegmentLineAST(name) =>
       builder.segment(name, segments(name).org)
       // emit symbols for this segment too
-      if relocatable then
+      if globals.nonEmpty then
+        for (gname, g) <- globals do
+          symbols.get(gname) match
+            case Some(LabelSymbol(n, value, _, _)) if segments(name).symbols.contains(n) =>
+              builder.addSymbol(n, value, g.typ, g.size)
+            case _ =>
+      else if relocatable then
         for symName <- segments(name).symbols do
           symbols.get(symName) match
             case Some(LabelSymbol(n, value, _, _)) if !n.contains('.') =>
@@ -205,13 +240,15 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case LabelLineAST(_)         =>
     case LocalLineAST(_)         =>
     case EquateLineAST(_, _)     =>
+    case ExternLineAST(_)        =>
+    case GlobalLineAST(_, _, _)  =>
     case DataLineAST(width, Nil) => builder ++= (if width == 0 then Seq.fill(8)(0) else Seq.fill(width)(0))
     case DataLineAST(width, data) =>
       val startingLength = builder.length
 
       for d <- data do
         fold(d, absolute = true) match
-          case ReferenceExprAST(ref) if relocatable && width == 4 =>
+          case ReferenceExprAST(ref) if (relocatable || declaredExterns.contains(ref)) && width == 4 =>
             emitAbs32Reloc(ref)
           case StringExprAST(s) =>
             val bytes = s.getBytes(scala.io.Codec.UTF8.charSet)
@@ -506,7 +543,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case RegisterExprAST(reg) => reg
           case _                    => problem(o1, "expected register as first operand")
       fold(o2, absolute = true, immediate = true) match
-        case ReferenceExprAST(ref) if relocatable =>
+        case ReferenceExprAST(ref) if relocatable || declaredExterns.contains(ref) =>
           emitMoviReloc(reg, ref)
         case result =>
           val imm = result match
@@ -587,10 +624,15 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
       addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm / 2)
   }
 
+  // Warnings and validation
   if !relocatable then
     symbols.values foreach {
       case LabelSymbol(name, _, sym, false) => warning(sym, s"Warning: label '$name' never referenced")
       case _                                =>
     }
+
+  for name <- declaredExterns do
+    if !referencedExterns.contains(name) then
+      println(s"Warning: extern '$name' declared but never referenced")
 
   builder.tof

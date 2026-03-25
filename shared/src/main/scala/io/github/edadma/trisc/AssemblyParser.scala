@@ -55,12 +55,14 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |bne
                           |bra
                           |div
+                          |extern
                           |fadd
                           |fdiv
                           |finv
                           |fmul
                           |fneg
                           |fsub
+                          |global
                           |gpsr
                           |halt
                           |jalr
@@ -168,6 +170,24 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
 
   lazy val include: P[IncludeLineAST] = "include" ~> stringLit ^^ IncludeLineAST.apply
 
+  lazy val externDecl: P[ExternLineAST] = "extern" ~> ident ^^ ExternLineAST.apply
+
+  lazy val globalDecl: P[GlobalLineAST] =
+    "global" ~> ident ~ opt("," ~> ident ~ opt("," ~> numericLit)) ^^ {
+      case name ~ None => GlobalLineAST(name, SymbolType.Func)
+      case name ~ Some(typ ~ size) =>
+        val symType = typ match
+          case "func"  => SymbolType.Func
+          case "data"  => SymbolType.Data
+          case "const" => SymbolType.Const
+          case other   => sys.error(s"unknown symbol type '$other' (expected func, data, or const)")
+        val symSize = size.map(s =>
+          if s.startsWith("0x") then java.lang.Long.parseLong(s.drop(2), 16)
+          else s.toLong
+        )
+        GlobalLineAST(name, symType, symSize)
+    }
+
   lazy val data: P[DataLineAST] = ("db" | "ds" | "dw" | "dl" | "dd") ~ repsep(expression, ",") ^^ {
     case "db" ~ d => DataLineAST(1, d)
     case "ds" ~ d => DataLineAST(2, d)
@@ -188,6 +208,8 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
 
   lazy val simpleLine: P[LineAST] = positioned(
     segment
+      | externDecl
+      | globalDecl
       | equate
       | label
       | local

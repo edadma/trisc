@@ -123,7 +123,6 @@ class AssemblerTests extends TestHelpers {
   "relocatable mode resolves local references normally" in {
     val tof = assemble("main\n  movi r1, main\n  halt\n", relocatable = true)
     val seg = tof.segments.head
-    // main is defined locally, so no extern/reloc needed
     seg.externs shouldBe empty
     seg.relocs shouldBe empty
   }
@@ -156,11 +155,9 @@ class AssemblerTests extends TestHelpers {
   }
 
   "relocatable mode movi placeholder is correct size" in {
-    // movi with addresses=2 should emit 4 bytes (2 instructions)
     val tof = assemble("movi r1, ext\nhalt\n", relocatable = true, addresses = 2)
     val seg = tof.segments.head
     seg.relocs.head.offset shouldBe 0
-    // The data should have 4 bytes for movi (2 instructions) + 2 bytes for halt = 6 bytes total
     val dataSize = seg.chunks.collect { case TOF.DataChunk(d) => d.length }.sum
     dataSize shouldBe 6
   }
@@ -169,8 +166,186 @@ class AssemblerTests extends TestHelpers {
     val tof = assemble("dw ext\nhalt\n", relocatable = true)
     val seg = tof.segments.head
     seg.relocs.head.offset shouldBe 0
-    // 4 bytes for dw placeholder + 2 bytes for halt = 6 bytes
     val dataSize = seg.chunks.collect { case TOF.DataChunk(d) => d.length }.sum
     dataSize shouldBe 6
+  }
+
+  // ===== extern directive =====
+
+  "extern declares external symbol" in {
+    val tof = assemble(
+      """extern printf
+        |main
+        |  movi r1, printf
+        |  halt
+        |""".stripMargin, relocatable = true)
+    val seg = tof.segments.head
+    seg.externs should contain("printf")
+    seg.relocs.length shouldBe 1
+    seg.relocs.head.symbol shouldBe "printf"
+  }
+
+  "extern works without relocatable mode for movi" in {
+    val tof = assemble(
+      """extern printf
+        |main
+        |  movi r1, printf
+        |  halt
+        |""".stripMargin)
+    val seg = tof.segments.head
+    seg.externs should contain("printf")
+    seg.relocs.length shouldBe 1
+    seg.relocs.head.symbol shouldBe "printf"
+  }
+
+  "extern works without relocatable mode for dw" in {
+    val tof = assemble(
+      """extern handler
+        |dw handler
+        |halt
+        |""".stripMargin)
+    val seg = tof.segments.head
+    seg.externs should contain("handler")
+    seg.relocs.length shouldBe 1
+    seg.relocs.head.typ shouldBe RelocType.ABS32
+  }
+
+  "extern rejects duplicate with label" in {
+    an[Exception] should be thrownBy {
+      assemble("foo\n  halt\nextern foo\n")
+    }
+  }
+
+  "extern rejects duplicate with another extern" in {
+    an[Exception] should be thrownBy {
+      assemble("extern foo\nextern foo\nhalt\n")
+    }
+  }
+
+  "undeclared symbol in non-relocatable mode still errors" in {
+    an[Exception] should be thrownBy {
+      assemble("movi r1, unknown\nhalt\n")
+    }
+  }
+
+  // ===== global directive =====
+
+  "global exports label with func type" in {
+    val tof = assemble(
+      """global main, func
+        |main
+        |  halt
+        |""".stripMargin, relocatable = true)
+    val sym = tof.symbolByName("main").get
+    sym.typ shouldBe SymbolType.Func
+  }
+
+  "global exports label with data type" in {
+    val tof = assemble(
+      """global buf, data
+        |buf resb 16
+        |""".stripMargin, relocatable = true)
+    val sym = tof.symbolByName("buf").get
+    sym.typ shouldBe SymbolType.Data
+  }
+
+  "global exports label with data type and size" in {
+    val tof = assemble(
+      """global buf, data, 256
+        |buf resb 256
+        |""".stripMargin, relocatable = true)
+    val sym = tof.symbolByName("buf").get
+    sym.typ shouldBe SymbolType.Data
+    sym.size shouldBe Some(256)
+  }
+
+  "global with const type on equate is not yet supported" in {
+    pending
+  }
+
+  "global defaults to func type when no type specified" in {
+    val tof = assemble(
+      """global main
+        |main
+        |  halt
+        |""".stripMargin, relocatable = true)
+    val sym = tof.symbolByName("main").get
+    sym.typ shouldBe SymbolType.Func
+  }
+
+  "global with hex size" in {
+    val tof = assemble(
+      """global buf, data, 0x100
+        |buf resb 256
+        |""".stripMargin, relocatable = true)
+    val sym = tof.symbolByName("buf").get
+    sym.size shouldBe Some(256)
+  }
+
+  "global overrides default export — only globals are exported" in {
+    val tof = assemble(
+      """global main, func
+        |main
+        |  halt
+        |helper
+        |  halt
+        |""".stripMargin, relocatable = true)
+    val syms = tof.segments.head.symbols
+    syms.map(_.name) should contain("main")
+    syms.map(_.name) should not contain "helper"
+  }
+
+  "multiple globals" in {
+    val tof = assemble(
+      """global foo, func
+        |global bar, func
+        |foo
+        |  halt
+        |bar
+        |  halt
+        |""".stripMargin, relocatable = true)
+    val syms = tof.segments.head.symbols
+    syms.map(_.name) should contain("foo")
+    syms.map(_.name) should contain("bar")
+    syms.length shouldBe 2
+  }
+
+  "global referencing nonexistent label errors" in {
+    an[Exception] should be thrownBy {
+      assemble("global missing, func\nhalt\n", relocatable = true)
+    }
+  }
+
+  // ===== extern + global + linker integration =====
+
+  "extern + global end-to-end with linker" in {
+    val main = assemble(
+      """extern helper
+        |global main, func
+        |dw main
+        |dw 0
+        |dw 0
+        |dw 0
+        |main
+        |  movi r1, helper
+        |  jalr r7, r1
+        |  halt
+        |""".stripMargin)
+    val lib = assemble(
+      """global helper, func
+        |helper
+        |  ldi r2, 42
+        |  jalr r0, r7
+        |""".stripMargin, relocatable = true)
+
+    val linked = Linker.link(Seq(main, lib))
+    linked.isFullyResolved shouldBe true
+
+    val mem = new Memory("Memory", new RAM(0, 0x1000))
+    linked.load(mem)
+    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    cpu.reset()
+    cpu.run()
+    cpu.r(2).read shouldBe 42
   }
 }
