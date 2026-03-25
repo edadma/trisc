@@ -134,6 +134,29 @@ class DeviceTests extends TestHelpers {
     timer.fired shouldBe false
   }
 
+  "timer does not drift when checked late" in {
+    var t = 0L
+    val timer = new Timer(0x100, () => t)
+    timer.writeByte(0x103, 0x0A) // period = 10
+    timer.writeByte(0x104, 0x01) // start at t=0
+    val cpu = new CPU(new RAM(0, 256), Nil) { set(Status.Ind, false) }
+
+    // First fire checked late at t=13 (3ms late)
+    t = 13
+    timer(cpu)
+    timer.fired shouldBe true
+    timer.writeByte(0x105, 0x00) // acknowledge
+
+    // Next fire should be at t=20, not t=23
+    t = 19
+    timer(cpu)
+    timer.fired shouldBe false // not yet
+
+    t = 20
+    timer(cpu)
+    timer.fired shouldBe true // fires at 20, not 23
+  }
+
   "timer start resets clock and clears fired" in {
     var t = 0L
     val timer = new Timer(0x100, () => t)
