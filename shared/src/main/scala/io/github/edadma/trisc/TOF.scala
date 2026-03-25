@@ -76,11 +76,11 @@ object TOF:
       case (_, l) if v == 0                => sys.error(s"missing magic on line $l")
       case (s"SEGMENT:$name,$org", l) =>
         if b.segmentDefined(name) then sys.error(s"duplicate segment on line $l")
-        b.segment(name, java.lang.Long.parseUnsignedLong(org, 16))
+        b.segment(name, java.lang.Long.parseLong(org, 16))
       case (s"DATA:$data", l) =>
-        b ++= data grouped 2 map (b => java.lang.Integer.parseInt(b, 16).toByte)
+        b ++= data.grouped(2).map(s => Integer.parseInt(s, 16).toByte)
       case (s"RES:$size", l) =>
-        b addRes java.lang.Integer.parseUnsignedInt(size, 16)
+        b.addRes(Integer.parseInt(size, 16))
       case (_, l) => sys.error(s"error on line $l")
     }
 
@@ -107,7 +107,7 @@ class TOF(val segments: Seq[TOF.Segment]):
       buf ++= s"SEGMENT:${s.name},${s.org.toHexString}\n"
 
       s.chunks foreach {
-        case TOF.DataChunk(data) => buf ++= s"DATA:${data map (b => f"$b%02x") mkString}\n"
+        case TOF.DataChunk(data) => buf ++= s"DATA:${data.map(b => f"${b & 0xff}%02x").mkString}\n"
         case TOF.ResChunk(size)  => buf ++= s"RES:${size.toHexString}\n"
         case c                   => sys.error(s"can't serialize $c")
       }

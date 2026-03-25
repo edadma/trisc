@@ -1,8 +1,15 @@
 # TRISC
 
+![Maven Central](https://img.shields.io/maven-central/v/io.github.edadma/trisc_sjs1_3)
+[![Last Commit](https://img.shields.io/github/last-commit/edadma/trisc)](https://github.com/edadma/trisc/commits)
+![GitHub](https://img.shields.io/github/license/edadma/trisc)
+![Scala Version](https://img.shields.io/badge/Scala-3.8.2-blue.svg)
+![ScalaJS Version](https://img.shields.io/badge/Scala.js-1.20.2-blue.svg)
+![Scala Native Version](https://img.shields.io/badge/Scala_Native-0.5.10-blue.svg)
+
 A 16-bit RISC CPU emulator and assembler written in Scala 3.
 
-TRISC has a fixed-width 16-bit instruction set with 8 general-purpose registers, memory-mapped I/O, interrupt handling, and a two-pass assembler with segments, symbols, and pseudo-instructions. It targets the JVM and is suitable for educational use, hobby OS experiments, or as a platform for exploring CPU design.
+TRISC has a fixed-width 16-bit instruction set with 8 general-purpose registers, memory-mapped I/O, interrupt handling, and a two-pass assembler with segments, symbols, and pseudo-instructions. It compiles to JVM, JavaScript (Scala.js), and native executables (Scala Native), and is suitable for educational use, hobby OS experiments, or as a platform for exploring CPU design.
 
 ## Architecture
 
