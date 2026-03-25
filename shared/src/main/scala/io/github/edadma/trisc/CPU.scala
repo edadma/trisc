@@ -11,7 +11,7 @@ enum Status(val bit: Int):
   case Irq extends Status(8)
 
 enum State:
-  case Reset, Interrupt, DivisionByZero,
+  case Reset, Interrupt, MisalignedAccess,
     Trap0, Trap1, Trap2, Trap3, Trap4, Trap5, Trap6, Trap7,
     Halt, Run
 
@@ -25,6 +25,30 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   def writeByte(addr: Long, data: Long): Unit = mem.writeByte(addr, data)
 
   def loadByte(addr: Long, data: Long): Unit = mem.loadByte(addr, data)
+
+  private def checkAlign(addr: Long, align: Int): Boolean =
+    if (addr & (align - 1)) != 0 then
+      state = State.MisalignedAccess
+      true
+    else false
+
+  override def readShort(addr: Long): Int =
+    if checkAlign(addr, 2) then 0 else mem.readShort(addr)
+
+  override def readInt(addr: Long): Int =
+    if checkAlign(addr, 4) then 0 else mem.readInt(addr)
+
+  override def readLong(addr: Long): Long =
+    if checkAlign(addr, 8) then 0 else mem.readLong(addr)
+
+  override def writeShort(addr: Long, data: Long): Unit =
+    if !checkAlign(addr, 2) then mem.writeShort(addr, data)
+
+  override def writeInt(addr: Long, data: Long): Unit =
+    if !checkAlign(addr, 4) then mem.writeInt(addr, data)
+
+  override def writeLong(addr: Long, data: Long): Unit =
+    if !checkAlign(addr, 8) then mem.writeLong(addr, data)
 
   val r = immutable.ArraySeq(
     new Reg0,

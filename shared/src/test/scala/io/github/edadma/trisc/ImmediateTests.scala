@@ -109,12 +109,13 @@ class ImmediateTests extends TestHelpers {
   "auipc followed by ld for PC-relative load" in {
     val cpu = runCPU(VECTORS +
       """auipc r1, 0
-        |ld r2, r1, 6
+        |ld r2, r1, 8
         |halt
+        |align 4
         |dw 0x1234
         |""".stripMargin)
-    // auipc at 16 → r1=16, ld at 18, halt at 20, data at 22
-    // ld r2, r1, 6 → readInt(16 + 6) = readInt(22)
+    // auipc at 16 → r1=16, ld at 18, halt at 20, align pads to 24, data at 24
+    // ld r2, r1, 8 → readInt(16 + 8) = readInt(24)
     cpu.r(2).read shouldBe 0x1234
   }
 

@@ -21,6 +21,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
     }
 
   lexical.reserved ++= ("""
+                          |align
                           |equ
                           |segment
                           |include
@@ -171,6 +172,11 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
 
   lazy val include: P[IncludeLineAST] = "include" ~> stringLit ^^ IncludeLineAST.apply
 
+  lazy val alignDir: P[AlignLineAST] = "align" ~> numericLit ^^ { n =>
+    val a = if n.startsWith("0x") then Integer.parseInt(n.drop(2), 16) else n.toInt
+    AlignLineAST(a)
+  }
+
   lazy val entryDecl: P[EntryLineAST] = "entry" ~> ident ^^ EntryLineAST.apply
 
   lazy val externDecl: P[ExternLineAST] = "extern" ~> ident ^^ ExternLineAST.apply
@@ -216,6 +222,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
   lazy val simpleLine: P[LineAST] = positioned(
     comment
       | segment
+      | alignDir
       | entryDecl
       | externDecl
       | globalDecl

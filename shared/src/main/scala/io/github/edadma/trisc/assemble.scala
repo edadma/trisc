@@ -116,6 +116,9 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case g @ GlobalLineAST(name, typ, size) =>
       globals(name) = g
     case CommentLineAST(_) => // pass 1: skip comments
+    case AlignLineAST(alignment) =>
+      val pad = ((alignment - (segment.size % alignment)) % alignment).toInt
+      segment.size += pad
     case DataLineAST(width, Nil) => segment.size += (if width == 0 then 8 else width)
     case DataLineAST(width, data) =>
       val startingSize = segment.size
@@ -255,6 +258,9 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case ExternLineAST(_)            =>
     case GlobalLineAST(_, _, _)     =>
     case CommentLineAST(text)       => builder.addComment(text)
+    case AlignLineAST(alignment) =>
+      val pad = ((alignment - (builder.length % alignment)) % alignment).toInt
+      for _ <- 0 until pad do builder += 0.toByte
     case DataLineAST(width, Nil) => builder ++= (if width == 0 then Seq.fill(8)(0) else Seq.fill(width)(0))
     case DataLineAST(width, data) =>
       val startingLength = builder.length

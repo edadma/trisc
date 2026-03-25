@@ -35,7 +35,7 @@ class LoadStoreTests extends TestHelpers {
   // ===== LDS / STS =====
 
   "sts and lds basic" in {
-    val cpu = runCPU(VECTORS + "movi r1, 0x1234\nmovi r2, buf\nsts r1, r2, r0\nlds r3, r2, r0\nhalt\nbuf ds 0\n")
+    val cpu = runCPU(VECTORS + "movi r1, 0x1234\nmovi r2, buf\nsts r1, r2, r0\nlds r3, r2, r0\nhalt\nalign 2\nbuf ds 0\n")
     cpu.r(3).read shouldBe 0x1234
   }
 
@@ -47,6 +47,7 @@ class LoadStoreTests extends TestHelpers {
         |sts r1, r2, r3
         |lds r4, r2, r3
         |halt
+        |align 2
         |buf resb 8
         |""".stripMargin)
     cpu.r(4).read shouldBe 0x5678
@@ -62,6 +63,7 @@ class LoadStoreTests extends TestHelpers {
         |stw r1, r2, r0
         |ldw r3, r2, r0
         |halt
+        |align 4
         |buf resb 4
         |""".stripMargin)
     cpu.r(3).read shouldBe cpu.r(1).read
@@ -75,6 +77,7 @@ class LoadStoreTests extends TestHelpers {
         |stw r1, r2, r3
         |ldw r4, r2, r3
         |halt
+        |align 4
         |buf resb 8
         |""".stripMargin)
     cpu.r(4).read shouldBe 0x42
@@ -96,6 +99,7 @@ class LoadStoreTests extends TestHelpers {
         |std r1, r2, r0
         |ldd r3, r2, r0
         |halt
+        |align 8
         |buf resb 8
         |""".stripMargin)
     cpu.r(3).read shouldBe cpu.r(1).read
@@ -109,6 +113,7 @@ class LoadStoreTests extends TestHelpers {
         |std r1, r2, r3
         |ldd r4, r2, r3
         |halt
+        |align 8
         |buf resb 16
         |""".stripMargin)
     cpu.r(4).read shouldBe 42
@@ -117,7 +122,7 @@ class LoadStoreTests extends TestHelpers {
   // ===== LD / ST (immediate offset) =====
 
   "ld and st with offset 0" in {
-    val cpu = runCPU(VECTORS + "ldi r1, 42\nmovi r2, buf\nst r1, r2, 0\nld r3, r2, 0\nhalt\nbuf resb 4\n")
+    val cpu = runCPU(VECTORS + "ldi r1, 42\nmovi r2, buf\nst r1, r2, 0\nld r3, r2, 0\nhalt\nalign 4\nbuf resb 4\n")
     cpu.r(3).read shouldBe 42
   }
 
@@ -134,6 +139,7 @@ class LoadStoreTests extends TestHelpers {
         |ld r6, r4, 4
         |ld r7, r4, 8
         |halt
+        |align 4
         |buf resb 12
         |""".stripMargin)
     cpu.r(5).read shouldBe 11
@@ -141,8 +147,8 @@ class LoadStoreTests extends TestHelpers {
     cpu.r(7).read shouldBe 33
   }
 
-  "ld and st max offset (62)" in {
-    val cpu = runCPU(VECTORS + "ldi r1, 99\nmovi r2, buf\nst r1, r2, 62\nld r3, r2, 62\nhalt\nbuf resb 66\n")
+  "ld and st max aligned offset (60)" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 99\nmovi r2, buf\nst r1, r2, 60\nld r3, r2, 60\nhalt\nalign 4\nbuf resb 64\n")
     cpu.r(3).read shouldBe 99
   }
 }
