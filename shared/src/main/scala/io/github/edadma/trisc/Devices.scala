@@ -30,10 +30,30 @@ class BufferedDevice(
 
 class Stdout(val base: Long, output: String => Unit = s => print(s)) extends Device with WriteOnlyAddressable:
   val name = "stdout"
-  val size = 1
+  val size = 4
 
   private var utf8Buf = 0
   private var utf8Remaining = 0
+  private var highSurrogate: Int = 0
+
+  override def writeShort(addr: Long, data: Long): Unit =
+    val u = (data & 0xffff).toInt
+    if highSurrogate != 0 then
+      if u >= 0xdc00 && u <= 0xdfff then
+        val cp = 0x10000 + ((highSurrogate - 0xd800) << 10) + (u - 0xdc00)
+        highSurrogate = 0
+        output(new String(Character.toChars(cp)))
+      else
+        highSurrogate = 0
+        writeShort(addr, data)
+    else if u >= 0xd800 && u <= 0xdbff then
+      highSurrogate = u
+    else
+      output(new String(Character.toChars(u)))
+
+  override def writeInt(addr: Long, data: Long): Unit =
+    val cp = (data & 0x1fffff).toInt
+    output(new String(Character.toChars(cp)))
 
   def writeByte(addr: Long, data: Long): Unit =
     val b = (data & 0xff).toInt

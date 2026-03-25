@@ -75,6 +75,82 @@ class DeviceTests extends TestHelpers {
     buf.toString shouldBe "éà"
   }
 
+  // ===== Stdout UTF-16 (writeShort) =====
+
+  "stdout handles UTF-16 BMP character" in {
+    val buf = new StringBuilder
+    val dev = new Stdout(0x100, s => buf ++= s)
+    dev.writeShort(0x100, 0x00E9) // é
+    buf.toString shouldBe "é"
+  }
+
+  "stdout handles UTF-16 ASCII via writeShort" in {
+    val buf = new StringBuilder
+    val dev = new Stdout(0x100, s => buf ++= s)
+    dev.writeShort(0x100, 'A')
+    dev.writeShort(0x100, 'B')
+    buf.toString shouldBe "AB"
+  }
+
+  "stdout handles UTF-16 surrogate pair" in {
+    val buf = new StringBuilder
+    val dev = new Stdout(0x100, s => buf ++= s)
+    // 😀 = U+1F600 = surrogate pair D83D DE00
+    dev.writeShort(0x100, 0xD83D)
+    dev.writeShort(0x100, 0xDE00)
+    buf.toString shouldBe "\uD83D\uDE00"
+  }
+
+  "stdout handles UTF-16 mixed BMP and surrogate" in {
+    val buf = new StringBuilder
+    val dev = new Stdout(0x100, s => buf ++= s)
+    dev.writeShort(0x100, 'H')
+    dev.writeShort(0x100, 0xD83D)
+    dev.writeShort(0x100, 0xDE00)
+    dev.writeShort(0x100, '!')
+    buf.toString shouldBe "H\uD83D\uDE00!"
+  }
+
+  "stdout recovers from orphaned high surrogate" in {
+    val buf = new StringBuilder
+    val dev = new Stdout(0x100, s => buf ++= s)
+    dev.writeShort(0x100, 0xD83D) // high surrogate
+    dev.writeShort(0x100, 'X')    // not a low surrogate — reset and output X
+    buf.toString shouldBe "X"
+  }
+
+  // ===== Stdout UTF-32 (writeInt) =====
+
+  "stdout handles UTF-32 ASCII" in {
+    val buf = new StringBuilder
+    val dev = new Stdout(0x100, s => buf ++= s)
+    dev.writeInt(0x100, 'A')
+    buf.toString shouldBe "A"
+  }
+
+  "stdout handles UTF-32 BMP codepoint" in {
+    val buf = new StringBuilder
+    val dev = new Stdout(0x100, s => buf ++= s)
+    dev.writeInt(0x100, 0x00E9) // é
+    buf.toString shouldBe "é"
+  }
+
+  "stdout handles UTF-32 supplementary codepoint" in {
+    val buf = new StringBuilder
+    val dev = new Stdout(0x100, s => buf ++= s)
+    dev.writeInt(0x100, 0x1F600) // 😀
+    buf.toString shouldBe "\uD83D\uDE00"
+  }
+
+  "stdout handles UTF-32 CJK character" in {
+    val buf = new StringBuilder
+    val dev = new Stdout(0x100, s => buf ++= s)
+    dev.writeInt(0x100, 0x4E16) // 世
+    buf.toString shouldBe "世"
+  }
+
+  // ===== Stdout UTF-8 error recovery =====
+
   "stdout recovers from invalid continuation byte" in {
     val buf = new StringBuilder
     val dev = new Stdout(0x100, s => buf ++= s)

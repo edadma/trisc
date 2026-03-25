@@ -70,6 +70,12 @@ class Memory(val name: String, blocks: Addressable*) extends Addressable:
 
   def writeByte(addr: Long, data: Long): Unit = block(addr).getOrElse(badAddress(addr)).writeByte(addr, data)
 
+  override def writeShort(addr: Long, data: Long): Unit = block(addr).getOrElse(badAddress(addr)).writeShort(addr, data)
+
+  override def writeInt(addr: Long, data: Long): Unit = block(addr).getOrElse(badAddress(addr)).writeInt(addr, data)
+
+  override def writeLong(addr: Long, data: Long): Unit = block(addr).getOrElse(badAddress(addr)).writeLong(addr, data)
+
   def loadByte(addr: Long, data: Long): Unit = block(addr).getOrElse(badAddress(addr)).loadByte(addr, data)
 
 abstract class ArrayAddressable extends Addressable:
