@@ -86,6 +86,38 @@ class ImmediateTests extends TestHelpers {
     output shouldBe "Hi"
   }
 
+  // ===== AUIPC =====
+
+  "auipc loads PC-relative address" in {
+    val cpu = runCPU(VECTORS +
+      """auipc r1, 0
+        |halt
+        |""".stripMargin)
+    // vector table is 4 dw = 16 bytes, auipc at address 16
+    cpu.r(1).read shouldBe 16
+  }
+
+  "auipc with nonzero immediate" in {
+    val cpu = runCPU(VECTORS +
+      """auipc r1, 1
+        |halt
+        |""".stripMargin)
+    // auipc at address 16, PC-2 + (1<<8) = 16 + 256 = 272
+    cpu.r(1).read shouldBe 272
+  }
+
+  "auipc followed by ld for PC-relative load" in {
+    val cpu = runCPU(VECTORS +
+      """auipc r1, 0
+        |ld r2, r1, 6
+        |halt
+        |dw 0x1234
+        |""".stripMargin)
+    // auipc at 16 → r1=16, ld at 18, halt at 20, data at 22
+    // ld r2, r1, 6 → readInt(16 + 6) = readInt(22)
+    cpu.r(2).read shouldBe 0x1234
+  }
+
   // ===== ADDI =====
 
   "addi basic" in {

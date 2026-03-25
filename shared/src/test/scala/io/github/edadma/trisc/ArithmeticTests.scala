@@ -91,4 +91,54 @@ class ArithmeticTests extends TestHelpers {
     val cpu = runCPU(VECTORS + "ldi r2, 7\nrem r1, r0, r2\nhalt\n")
     cpu.r(1).read shouldBe 0
   }
+
+  // ===== SLT =====
+
+  "slt sets 1 when less" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 3\nldi r2, 5\nslt r3, r1, r2\nhalt\n")
+    cpu.r(3).read shouldBe 1
+  }
+
+  "slt sets 0 when equal" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 5\nldi r2, 5\nslt r3, r1, r2\nhalt\n")
+    cpu.r(3).read shouldBe 0
+  }
+
+  "slt sets 0 when greater" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 7\nldi r2, 3\nslt r3, r1, r2\nhalt\n")
+    cpu.r(3).read shouldBe 0
+  }
+
+  "slt handles negative values" in {
+    val cpu = runCPU(VECTORS +
+      """ldi r1, 5
+        |ldi r2, 10
+        |sub r1, r0, r1
+        |slt r3, r1, r2
+        |halt
+        |""".stripMargin)
+    cpu.r(3).read shouldBe 1 // -5 < 10
+  }
+
+  // ===== SLTU =====
+
+  "sltu sets 1 when less (unsigned)" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 3\nldi r2, 5\nsltu r3, r1, r2\nhalt\n")
+    cpu.r(3).read shouldBe 1
+  }
+
+  "sltu sets 0 when equal" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 5\nldi r2, 5\nsltu r3, r1, r2\nhalt\n")
+    cpu.r(3).read shouldBe 0
+  }
+
+  "sltu treats negative as large unsigned" in {
+    val cpu = runCPU(VECTORS +
+      """ldi r1, 5
+        |sub r2, r0, r1
+        |sltu r3, r1, r2
+        |halt
+        |""".stripMargin)
+    cpu.r(3).read shouldBe 1 // 5 < (large unsigned value of -5)
+  }
 }

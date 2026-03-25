@@ -22,14 +22,16 @@ RRR
 
     001 ddd aaa bbb oooo
 
-    asr
-    lsr
-    lsl 
-    fadd
-    fsub
-    fmul
-    fdiv
-    fpow
+    asr  0000
+    lsr  0001
+    lsl  0010
+    slt  0011
+    sltu 0100
+    fadd 1000
+    fsub 1001
+    fmul 1010
+    fdiv 1011
+    fpow 1100
 
 RRI
 ---
@@ -67,7 +69,7 @@ RI
     111 rrr oo iiiiiiii (r != 0)
 
     ldi     00
-    ---     01
+    auipc   01
     sli     10
     sti     11
 

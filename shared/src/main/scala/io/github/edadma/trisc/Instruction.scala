@@ -132,6 +132,24 @@ class XOR(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
 
   def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read ^ cpu.r(b).read)
 
+class SLT(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "slt"
+
+  def apply(cpu: CPU): Unit = cpu.r(d) write (if cpu.r(a).read < cpu.r(b).read then 1 else 0)
+
+class SLTU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "sltu"
+
+  def apply(cpu: CPU): Unit =
+    val ua = cpu.r(a).read + Long.MinValue
+    val ub = cpu.r(b).read + Long.MinValue
+    cpu.r(d) write (if ua < ub then 1 else 0)
+
+class AUIPC(r: Int, imm: Int) extends ImmediateInstruction(r, imm):
+  val mnemonic = "auipc"
+
+  def apply(cpu: CPU): Unit = cpu.r(r).write(cpu.pc - 2 + (imm << 8))
+
 class LDB(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "ldb"
 

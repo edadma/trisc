@@ -41,6 +41,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |add
                           |addi
                           |and
+                          |auipc
                           |beq
                           |bls
                           |bra
@@ -67,6 +68,8 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |rem
                           |rte
                           |sli
+                          |slt
+                          |sltu
                           |spsr
                           |st
                           |stb
@@ -163,7 +166,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
       | label ~ instruction ^^ { case l ~ i => Seq(l, i) }
 
   lazy val mnemonics: P[String] =
-    "add" | "addi" | "and" | "beq" | "bls" | "bra" | "div" | "gpsr" | "halt" | "jalr" | "ld" | "ldb" | "ldd" | "ldi" | "lds" | "ldw" | "mov" | "movi" | "mul" | "nop" | "or" | "rem" | "rte" | "sli" | "spsr" | "st" | "stb" | "std" | "sti" | "sts" | "stw" | "sub" | "trap" | "xor"
+    "add" | "addi" | "and" | "auipc" | "beq" | "bls" | "bra" | "div" | "gpsr" | "halt" | "jalr" | "ld" | "ldb" | "ldd" | "ldi" | "lds" | "ldw" | "mov" | "movi" | "mul" | "nop" | "or" | "rem" | "rte" | "sli" | "slt" | "sltu" | "spsr" | "st" | "stb" | "std" | "sti" | "sts" | "stw" | "sub" | "trap" | "xor"
 
   lazy val instruction: P[InstructionLineAST] =
     mnemonics ~ repsep(expression, ",") ^^ { case m ~ es =>
