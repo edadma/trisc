@@ -78,7 +78,7 @@ object TOF:
         if b.segmentDefined(name) then sys.error(s"duplicate segment on line $l")
         b.segment(name, java.lang.Long.parseUnsignedLong(org, 16))
       case (s"DATA:$data", l) =>
-        b ++= data grouped 2 map (b => java.lang.Byte.parseByte(b, 16))
+        b ++= data grouped 2 map (b => java.lang.Integer.parseInt(b, 16).toByte)
       case (s"RES:$size", l) =>
         b addRes java.lang.Integer.parseUnsignedInt(size, 16)
       case (_, l) => sys.error(s"error on line $l")

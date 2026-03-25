@@ -79,7 +79,7 @@ class ADDI(a: Int, b: Int, imm: Int) extends ImmediateSignedInstruction(a, b, im
 abstract class BranchInstruction(a: Int, b: Int, imm: Int) extends Instruction:
   def disassemble(cpu: CPU): String = f"$mnemonic r$a, r$b, 0x${cpu.pc + 2 + imm * 2}%04x ($imm)"
 
-class BLS(a: Int, b: Int, imm: Int) extends SimpleInstruction:
+class BLS(a: Int, b: Int, imm: Int) extends BranchInstruction(a, b, imm):
   val mnemonic = "bls"
 
   def apply(cpu: CPU): Unit = if cpu.r(a).read < cpu.r(b).read then cpu.pc += imm * 2
@@ -118,17 +118,17 @@ class REM(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read % cpu.r(b).read)
 
 class AND(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
-  val mnemonic = "add"
+  val mnemonic = "and"
 
   def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read & cpu.r(b).read)
 
 class OR(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
-  val mnemonic = "add"
+  val mnemonic = "or"
 
   def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read | cpu.r(b).read)
 
 class XOR(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
-  val mnemonic = "add"
+  val mnemonic = "xor"
 
   def apply(cpu: CPU): Unit = cpu.r(d) write (cpu.r(a).read ^ cpu.r(b).read)
 
