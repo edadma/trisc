@@ -7,7 +7,9 @@ object Linker:
   case class LinkerError(msg: String) extends RuntimeException(msg)
 
   def link(tofs: Seq[TOF], baseAddress: Long = 0, addresses: Int = 2): TOF =
-    // Collect all segments, flattening data into mutable byte arrays for patching
+    link(tofs, LinkerScript(), baseAddress, addresses)
+
+  def link(tofs: Seq[TOF], script: LinkerScript, baseAddress: Long, addresses: Int): TOF =
     case class PlacedSegment(
         name: String,
         org: Long,
@@ -27,16 +29,60 @@ object Linker:
           case TOF.CommentChunk(_)   =>
       buf
 
-    // Phase 2: place segments sequentially from baseAddress
-    var nextAddr = baseAddress
-    val placed = new ArrayBuffer[PlacedSegment]
+    // Collect all input segments with their flattened data
+    case class InputSegment(
+        name: String,
+        originalOrg: Long,
+        data: ArrayBuffer[Byte],
+        symbols: Seq[TOFSymbol],
+        externs: Seq[String],
+        relocs: Seq[TOFReloc],
+    )
 
+    val inputSegments = new ArrayBuffer[InputSegment]
     for tof <- tofs do
       for seg <- tof.segments do
-        val data = flattenChunks(seg.chunks)
-        val org = if seg.org != 0 then seg.org else nextAddr
-        placed += PlacedSegment(seg.name, org, data, seg.symbols, seg.externs, seg.relocs)
-        nextAddr = org + data.length
+        inputSegments += InputSegment(seg.name, seg.org, flattenChunks(seg.chunks), seg.symbols, seg.externs, seg.relocs)
+
+    // Phase 2: place segments using linker script or sequential placement
+    val sectionDefs = script.sections.map(s => s.name -> s).toMap
+    val placed = new ArrayBuffer[PlacedSegment]
+    val placedByName = new mutable.LinkedHashMap[String, PlacedSegment]
+    var nextAddr = baseAddress
+
+    // If the script defines sections, place them in script order first,
+    // then place any remaining segments sequentially
+    val scriptSectionNames = script.sections.map(_.name).toSet
+
+    // Resolve placement for a section
+    def resolveOrg(seg: InputSegment): Long =
+      sectionDefs.get(seg.name) match
+        case Some(SectionDef(_, SectionPlacement.At(addr))) => addr
+        case Some(SectionDef(_, SectionPlacement.After(ref))) =>
+          placedByName.get(ref) match
+            case Some(prev) => prev.org + prev.data.length
+            case None => throw LinkerError(s"section '${seg.name}' placed AFTER '$ref', but '$ref' has not been placed yet")
+        case None =>
+          if seg.originalOrg != 0 then seg.originalOrg
+          else nextAddr
+
+    // Place segments that have script definitions first (in script order)
+    for secDef <- script.sections do
+      val matching = inputSegments.filter(_.name == secDef.name)
+      for seg <- matching do
+        val org = resolveOrg(seg)
+        val ps = PlacedSegment(seg.name, org, seg.data, seg.symbols, seg.externs, seg.relocs)
+        placed += ps
+        placedByName(seg.name) = ps
+        nextAddr = org + seg.data.length
+
+    // Place remaining segments not in the script
+    for seg <- inputSegments if !scriptSectionNames.contains(seg.name) do
+      val org = resolveOrg(seg)
+      val ps = PlacedSegment(seg.name, org, seg.data, seg.symbols, seg.externs, seg.relocs)
+      placed += ps
+      placedByName(seg.name) = ps
+      nextAddr = org + seg.data.length
 
     // Phase 3: build global symbol table
     val globalSymbols = new mutable.LinkedHashMap[String, (Long, TOFSymbol)]
@@ -50,7 +96,6 @@ object Linker:
 
     // Phase 4: resolve relocations
     for seg <- placed do
-      // Check all externs are resolvable
       for ext <- seg.externs do
         if !globalSymbols.contains(ext) then
           throw LinkerError(s"undefined symbol: '$ext'")
@@ -78,33 +123,27 @@ object Linker:
           case RelocType.MOVI4 =>
             patchMovi(seg.data, reloc.offset.toInt, addr, 4)
 
-    // Phase 5: resolve entry point
-    val entry = tofs.flatMap(_.entry).lastOption
+    // Phase 5: resolve entry point (script entry overrides TOF entry)
+    val entry = script.entry.orElse(tofs.flatMap(_.entry).lastOption)
     for name <- entry do
       if !globalSymbols.contains(name) then
         throw LinkerError(s"entry point '$name' is not a defined symbol")
 
-    // Phase 6: produce output TOF (fully resolved, no externs/relocs)
+    // Phase 6: produce output TOF
     val outSegments = placed.map { seg =>
       TOF.Segment(
         seg.name,
         seg.org,
         Seq(TOF.DataChunk(seg.data.toSeq)),
-        seg.symbols.map(s => s.copy(offset = s.offset)), // keep symbols for debugging
+        seg.symbols.map(s => s.copy(offset = s.offset)),
       )
     }.toSeq
 
     TOF(entry, outSegments)
 
-  /** Patch a MOVI instruction sequence (ldi + N-1 sli instructions).
-    * Each instruction is 16 bits: 111 rrr oo iiiiiiii
-    * The immediate byte field is bits 7-0 of each instruction word.
-    */
   private def patchMovi(data: ArrayBuffer[Byte], offset: Int, addr: Long, n: Int): Unit =
     val a = addr.toInt
-    // Bytes are stored big-endian. Each instruction is 2 bytes.
-    // The immediate is the low 8 bits of the instruction word (second byte, bits 7-0).
     for i <- 0 until n do
-      val byteIdx = offset + i * 2 + 1 // second byte of each instruction
+      val byteIdx = offset + i * 2 + 1
       val shift = (n - 1 - i) * 8
       data(byteIdx) = ((a >> shift) & 0xff).toByte
