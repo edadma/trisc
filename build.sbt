@@ -1,17 +1,19 @@
 import xerial.sbt.Sonatype.sonatypeCentralHost
 
-ThisBuild / licenses             := Seq("ISC" -> url("https://opensource.org/licenses/ISC"))
-ThisBuild / versionScheme        := Some("semver-spec")
-ThisBuild / evictionErrorLevel   := Level.Warn
-ThisBuild / scalaVersion         := "3.8.2"
-ThisBuild / organization         := "io.github.edadma"
-ThisBuild / organizationName     := "edadma"
-ThisBuild / organizationHomepage := Some(url("https://github.com/edadma"))
-ThisBuild / version              := "0.0.1"
+ThisBuild / licenses               := Seq("ISC" -> url("https://opensource.org/licenses/ISC"))
+ThisBuild / versionScheme          := Some("semver-spec")
+ThisBuild / evictionErrorLevel     := Level.Warn
+ThisBuild / scalaVersion           := "3.8.2"
+ThisBuild / organization           := "io.github.edadma"
+ThisBuild / organizationName       := "edadma"
+ThisBuild / organizationHomepage   := Some(url("https://github.com/edadma"))
+ThisBuild / version                := "0.0.1"
 ThisBuild / sonatypeCredentialHost := sonatypeCentralHost
 
 ThisBuild / publishConfiguration := publishConfiguration.value.withOverwrite(true).withChecksums(Vector.empty)
 ThisBuild / resolvers += Resolver.mavenLocal
+ThisBuild / resolvers += Resolver.sonatypeCentralSnapshots
+ThisBuild / resolvers += Resolver.sonatypeCentralRepo("releases")
 
 ThisBuild / sonatypeProfileName := "io.github.edadma"
 
