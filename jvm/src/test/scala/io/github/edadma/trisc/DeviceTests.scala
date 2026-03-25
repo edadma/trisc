@@ -24,25 +24,129 @@ class DeviceTests extends TestHelpers {
 
   // ===== Timer =====
 
-  "timer device has correct size" in {
+  "timer has correct size" in {
     val timer = new Timer(0x100)
-    timer.size shouldBe 3
+    timer.size shouldBe 6
   }
 
-  "timer delay registers accept writes" in {
+  "timer period registers accept 32-bit write" in {
     val timer = new Timer(0x100)
-    timer.writeByte(0x100, 0x01) // DELAY_HI
-    timer.writeByte(0x101, 0xF4) // DELAY_LO = 0x01F4 = 500ms
-    timer.delay shouldBe 0x01F4
+    timer.writeByte(0x100, 0x00) // period byte 0 (MSB)
+    timer.writeByte(0x101, 0x01) // period byte 1
+    timer.writeByte(0x102, 0x00) // period byte 2
+    timer.writeByte(0x103, 0x00) // period byte 3 (LSB)
+    timer.period shouldBe 0x00010000L // 65536ms
+  }
+
+  "timer period small value" in {
+    var t = 0L
+    val timer = new Timer(0x100, () => t)
+    timer.writeByte(0x100, 0x00)
+    timer.writeByte(0x101, 0x00)
+    timer.writeByte(0x102, 0x00)
+    timer.writeByte(0x103, 0x0A) // 10ms
+    timer.period shouldBe 10
   }
 
   "timer does not fire before started" in {
-    val timer = new Timer(0x100)
-    timer.writeByte(0x100, 0x00)
-    timer.writeByte(0x101, 0x01)
+    var t = 0L
+    val timer = new Timer(0x100, () => t)
+    timer.writeByte(0x103, 0x0A) // period = 10
+    t = 100
     val cpu = new CPU(new RAM(0, 256), Nil)
-    timer(cpu) // should not interrupt
+    timer(cpu)
     cpu.state should not be State.Interrupt
+  }
+
+  "timer fires after period elapses" in {
+    var t = 0L
+    val timer = new Timer(0x100, () => t)
+    timer.writeByte(0x103, 0x0A) // period = 10
+    timer.writeByte(0x104, 0x01) // start
+    t = 10
+    val cpu = new CPU(new RAM(0, 256), Nil) { set(Status.Ind, false) }
+    timer(cpu)
+    timer.fired shouldBe true
+  }
+
+  "timer does not fire before period elapses" in {
+    var t = 0L
+    val timer = new Timer(0x100, () => t)
+    timer.writeByte(0x103, 0x0A) // period = 10
+    timer.writeByte(0x104, 0x01) // start
+    t = 5
+    val cpu = new CPU(new RAM(0, 256), Nil)
+    timer(cpu)
+    timer.fired shouldBe false
+  }
+
+  "timer auto-reloads for periodic interrupts" in {
+    var t = 0L
+    val timer = new Timer(0x100, () => t)
+    timer.writeByte(0x103, 0x0A) // period = 10
+    timer.writeByte(0x104, 0x01) // start
+    val cpu = new CPU(new RAM(0, 256), Nil) { set(Status.Ind, false) }
+
+    t = 10
+    timer(cpu)
+    timer.fired shouldBe true
+    timer.writeByte(0x105, 0x00) // acknowledge
+
+    t = 20
+    timer(cpu)
+    timer.fired shouldBe true // fired again
+  }
+
+  "timer status reads fired flag" in {
+    var t = 0L
+    val timer = new Timer(0x100, () => t)
+    timer.readByte(0x105) shouldBe 0 // not fired
+    timer.writeByte(0x103, 0x0A)
+    timer.writeByte(0x104, 0x01)
+    t = 10
+    val cpu = new CPU(new RAM(0, 256), Nil) { set(Status.Ind, false) }
+    timer(cpu)
+    timer.readByte(0x105) shouldBe 1 // fired
+  }
+
+  "timer acknowledge clears fired flag" in {
+    var t = 0L
+    val timer = new Timer(0x100, () => t)
+    timer.writeByte(0x103, 0x0A)
+    timer.writeByte(0x104, 0x01)
+    t = 10
+    val cpu = new CPU(new RAM(0, 256), Nil) { set(Status.Ind, false) }
+    timer(cpu)
+    timer.readByte(0x105) shouldBe 1
+    timer.writeByte(0x105, 0x00) // acknowledge
+    timer.readByte(0x105) shouldBe 0
+  }
+
+  "timer stop halts firing" in {
+    var t = 0L
+    val timer = new Timer(0x100, () => t)
+    timer.writeByte(0x103, 0x0A)
+    timer.writeByte(0x104, 0x01) // start
+    timer.writeByte(0x104, 0x00) // stop
+    t = 100
+    val cpu = new CPU(new RAM(0, 256), Nil)
+    timer(cpu)
+    timer.fired shouldBe false
+  }
+
+  "timer start resets clock and clears fired" in {
+    var t = 0L
+    val timer = new Timer(0x100, () => t)
+    timer.writeByte(0x103, 0x0A)
+    timer.writeByte(0x104, 0x01) // start at t=0
+    t = 10
+    val cpu = new CPU(new RAM(0, 256), Nil) { set(Status.Ind, false) }
+    timer(cpu) // fires
+    timer.fired shouldBe true
+    t = 15
+    timer.writeByte(0x104, 0x01) // restart at t=15
+    timer.fired shouldBe false // cleared by restart
+    timer.running shouldBe true
   }
 
   // ===== RTC =====

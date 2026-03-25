@@ -36,30 +36,43 @@ class Stdout(val base: Long) extends Device with WriteOnlyAddressable:
 
   def writeByte(addr: Long, data: Long): Unit = print(data.toChar.toString)
 
-class Timer(val base: Long) extends Device with WriteOnlyAddressable with (CPU => Unit):
+class Timer(val base: Long, clock: () => Long = () => System.currentTimeMillis()) extends Device with (CPU => Unit):
   val name = "timer"
-  val size = 3
+  val size = 6
 
-  val DELAY_HI = 0
-  val DELAY_LO = 1
-  val START = 2
+  private val PERIOD = 0 // 4 bytes, W
+  private val CONTROL = 4 // 1 byte, W
+  private val STATUS = 5 // 1 byte, R/W
 
-  var delay: Long = 0
-  var start: Boolean = false
-  var last: Long = 0
+  var period: Long = 0
+  var running: Boolean = false
+  var fired: Boolean = false
+  private var last: Long = 0
+
+  def readByte(addr: Long): Int =
+    addr - base match
+      case STATUS => if fired then 1 else 0
+      case _      => 0
 
   def writeByte(addr: Long, data: Long): Unit =
     addr - base match
-      case DELAY_HI => delay = (delay & 0xff) | (data << 8)
-      case DELAY_LO => delay = (delay & 0xff00) | (data & 0xff)
-      case START =>
-        start = data != 0
-
-        if start then last = System.currentTimeMillis()
+      case 0 => period = (period & 0x00ffffffL) | ((data & 0xff) << 24)
+      case 1 => period = (period & 0xff00ffffL) | ((data & 0xff) << 16)
+      case 2 => period = (period & 0xffff00ffL) | ((data & 0xff) << 8)
+      case 3 => period = (period & 0xffffff00L) | (data & 0xff)
+      case CONTROL =>
+        running = data != 0
+        if running then
+          last = clock()
+          fired = false
+      case STATUS =>
+        fired = false // acknowledge
+      case _ =>
 
   def apply(cpu: CPU): Unit =
-    if start && System.currentTimeMillis() - last >= delay then
-      last += delay
+    if running && clock() - last >= period then
+      last += period
+      fired = true
       cpu.interrupt()
 
 class RNG(val base: Long, seed: Option[Long] = None) extends Device with ReadOnlyAddressable:
