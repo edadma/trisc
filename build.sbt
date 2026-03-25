@@ -58,6 +58,7 @@ lazy val trisc = crossProject(JSPlatform, JVMPlatform, NativePlatform)
     libraryDependencies ++= Seq(
       "com.github.scopt" %%% "scopt" % "4.1.0",
       "com.lihaoyi" %%% "pprint" % "0.9.0",
+      "io.github.edadma" %%% "gramma" % "0.0.2",
     ),
     publishMavenStyle      := true,
     Test / publishArtifact := false,
