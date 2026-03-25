@@ -5,6 +5,16 @@ import java.time.{LocalDateTime, ZoneId}
 trait Device extends Addressable:
   def loadByte(addr: Long, data: Long): Unit = sys.error("attempting to load a byte into memory-mapped device")
 
+class CallbackDevice(
+    val name: String,
+    val base: Long,
+    val size: Long,
+    onWrite: (Long, Long) => Unit = (_, _) => (),
+    onRead: Long => Int = _ => 0,
+) extends Device:
+  def readByte(addr: Long): Int = onRead(addr - base)
+  def writeByte(addr: Long, data: Long): Unit = onWrite(addr - base, data)
+
 class Stdout(val base: Long) extends Device with WriteOnlyAddressable:
   val name = "stdout"
   val size = 1

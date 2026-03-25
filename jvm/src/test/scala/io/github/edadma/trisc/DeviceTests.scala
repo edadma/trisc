@@ -121,6 +121,87 @@ class DeviceTests extends TestHelpers {
     sec1 shouldBe sec2
   }
 
+  // ===== CallbackDevice =====
+
+  "CallbackDevice fires onWrite with offset and data" in {
+    var written = List.empty[(Long, Long)]
+    val dev = new CallbackDevice("test", 0x400, 4, onWrite = (off, data) => written = written :+ (off, data))
+    dev.writeByte(0x400, 0x11)
+    dev.writeByte(0x401, 0x22)
+    dev.writeByte(0x403, 0xFF)
+    written shouldBe List((0L, 0x11L), (1L, 0x22L), (3L, 0xFFL))
+  }
+
+  "CallbackDevice fires onRead with offset" in {
+    val dev = new CallbackDevice("test", 0x400, 4, onRead = off => (off * 10).toInt)
+    dev.readByte(0x400) shouldBe 0
+    dev.readByte(0x401) shouldBe 10
+    dev.readByte(0x403) shouldBe 30
+  }
+
+  "CallbackDevice defaults to no-op write and zero read" in {
+    val dev = new CallbackDevice("test", 0x400, 2)
+    dev.writeByte(0x400, 0xFF) // should not throw
+    dev.readByte(0x400) shouldBe 0
+  }
+
+  "CallbackDevice as write-only (like display command register)" in {
+    var lastCmd = 0L
+    val dev = new CallbackDevice("display", 0x500, 8,
+      onWrite = (off, data) => if off == 0 then lastCmd = data)
+    dev.writeByte(0x500, 42)
+    lastCmd shouldBe 42
+    dev.writeByte(0x501, 99) // different offset, no effect on lastCmd
+    lastCmd shouldBe 42
+  }
+
+  "CallbackDevice as read-write (like framebuffer status)" in {
+    var ready = false
+    val dev = new CallbackDevice("fb", 0x600, 2,
+      onWrite = (off, data) => if off == 0 then ready = (data != 0),
+      onRead = off => if off == 1 then (if ready then 1 else 0) else 0)
+    dev.readByte(0x601) shouldBe 0
+    dev.writeByte(0x600, 1)
+    dev.readByte(0x601) shouldBe 1
+    dev.writeByte(0x600, 0)
+    dev.readByte(0x601) shouldBe 0
+  }
+
+  "CallbackDevice works with CPU" in {
+    var captured = List.empty[Byte]
+    val dev = new CallbackDevice("out", 0xFF0, 1,
+      onWrite = (_, data) => captured = captured :+ data.toByte)
+    val mem = new Memory("Memory", new RAM(0, 0xFF0), dev)
+    val tof = assemble(
+      """dw 8
+        |dw 0
+        |dw 0
+        |dw 0
+        |movi r3, 0xFF0
+        |ldi r1, 'X'
+        |stb r1, r3, r0
+        |ldi r1, 'Y'
+        |stb r1, r3, r0
+        |halt
+        |""".stripMargin)
+    tof.load(mem)
+    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    cpu.reset()
+    cpu.run()
+    captured shouldBe List('X'.toByte, 'Y'.toByte)
+  }
+
+  "CallbackDevice with buffer pattern (multi-byte write)" in {
+    val buf = new Array[Byte](8)
+    val dev = new CallbackDevice("buf", 0x700, 8,
+      onWrite = (off, data) => buf(off.toInt) = data.toByte,
+      onRead = off => buf(off.toInt))
+    dev.writeByte(0x700, 0x12)
+    dev.writeByte(0x701, 0x34)
+    dev.readByte(0x700) shouldBe 0x12
+    dev.readByte(0x701) shouldBe 0x34
+  }
+
   // ===== RNG =====
 
   "RNG has size 1" in {
