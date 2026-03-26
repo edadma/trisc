@@ -1863,6 +1863,178 @@ class SyslTests extends AnyFreeSpec with Matchers {
     eval("main() -> int = '世'\n") shouldBe 19990
   }
 
+  // ===== Bitwise operators =====
+
+  "bitwise and" in {
+    eval("main() -> int = 0xFF & 0x0F\n") shouldBe 0x0F
+  }
+
+  "bitwise or" in {
+    eval("main() -> int = 0xF0 | 0x0F\n") shouldBe 0xFF
+  }
+
+  "bitwise xor" in {
+    eval("main() -> int = 0xFF ^ 0x0F\n") shouldBe 0xF0
+  }
+
+  "bitwise not" in {
+    eval("main() -> int = ~0 & 0xFF\n") shouldBe 0xFF
+  }
+
+  "left shift" in {
+    eval("main() -> int = 1 << 8\n") shouldBe 256
+  }
+
+  "right shift" in {
+    eval("main() -> int = 256 >> 4\n") shouldBe 16
+  }
+
+  "right shift preserves sign" in {
+    eval("main() -> int = -1 >> 1\n") shouldBe -1
+  }
+
+  // ===== Bitwise precedence (corrected from C) =====
+
+  "bitwise and higher than comparison" in {
+    eval(
+      """main() -> int
+        |    x = 0xF0
+        |    mask = 0x0F
+        |    if x & mask == 0 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "bitwise or higher than comparison" in {
+    eval(
+      """main() -> int
+        |    if 0xF0 | 0x0F == 0xFF then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "shift higher than bitwise and" in {
+    eval("main() -> int = 1 << 4 & 0xFF\n") shouldBe 16
+  }
+
+  "bitwise and higher than bitwise xor" in {
+    eval("main() -> int = 0xFF & 0x0F ^ 0x05\n") shouldBe 0x0A
+  }
+
+  "bitwise xor higher than bitwise or" in {
+    eval("main() -> int = 0x0F ^ 0x03 | 0xF0\n") shouldBe 0xFC
+  }
+
+  "complex bitwise expression" in {
+    eval("main() -> int = (0xAB & 0xF0) | (0xCD & 0x0F)\n") shouldBe 0xAD
+  }
+
+  // ===== Bitwise compound assignment =====
+
+  "&= basic" in {
+    eval(
+      """main() -> int
+        |    x = 0xFF
+        |    x &= 0x0F
+        |    x
+        |""".stripMargin) shouldBe 0x0F
+  }
+
+  "|= basic" in {
+    eval(
+      """main() -> int
+        |    x = 0xF0
+        |    x |= 0x0F
+        |    x
+        |""".stripMargin) shouldBe 0xFF
+  }
+
+  "^= basic" in {
+    eval(
+      """main() -> int
+        |    x = 0xFF
+        |    x ^= 0x0F
+        |    x
+        |""".stripMargin) shouldBe 0xF0
+  }
+
+  "<<= basic" in {
+    eval(
+      """main() -> int
+        |    x = 1
+        |    x <<= 8
+        |    x
+        |""".stripMargin) shouldBe 256
+  }
+
+  ">>= basic" in {
+    eval(
+      """main() -> int
+        |    x = 256
+        |    x >>= 4
+        |    x
+        |""".stripMargin) shouldBe 16
+  }
+
+  // ===== Bitwise in real code =====
+
+  "extract nibbles" in {
+    eval(
+      """main() -> int
+        |    x = 0xAB
+        |    hi = (x >> 4) & 0x0F
+        |    lo = x & 0x0F
+        |    hi * 16 + lo
+        |""".stripMargin) shouldBe 0xAB
+  }
+
+  "set and clear bits" in {
+    eval(
+      """main() -> int
+        |    flags = 0
+        |    flags |= 1 << 3
+        |    flags |= 1 << 5
+        |    has_bit_3 = if flags & (1 << 3) != 0 then 1 else 0
+        |    has_bit_4 = if flags & (1 << 4) != 0 then 1 else 0
+        |    flags &= ~(1 << 3)
+        |    cleared = if flags & (1 << 3) != 0 then 1 else 0
+        |    has_bit_3 * 100 + has_bit_4 * 10 + cleared
+        |""".stripMargin) shouldBe 100
+  }
+
+  "swap with xor" in {
+    eval(
+      """main() -> int
+        |    a = 42
+        |    b = 99
+        |    a ^= b
+        |    b ^= a
+        |    a ^= b
+        |    a * 1000 + b
+        |""".stripMargin) shouldBe 99042
+  }
+
+  "power of two check" in {
+    eval(
+      """isPow2(n: int) -> int = if n > 0 && n & (n - 1) == 0 then 1 else 0
+        |
+        |main() -> int
+        |    isPow2(16) * 100 + isPow2(15) * 10 + isPow2(1)
+        |""".stripMargin) shouldBe 101
+  }
+
+  // ===== Hex literals =====
+
+  "hex literal" in {
+    eval("main() -> int = 0xFF\n") shouldBe 255
+  }
+
+  "hex literal uppercase" in {
+    eval("main() -> int = 0XFF\n") shouldBe 255
+  }
+
+  "hex literal zero" in {
+    eval("main() -> int = 0x0\n") shouldBe 0
+  }
+
   // ===== Byte arrays and string literals =====
 
   "byte array declaration" in {

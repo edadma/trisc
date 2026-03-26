@@ -101,11 +101,16 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val l = toLong(cell.value)
         val r = toLong(evalAny(value, env))
         cell.value = IntVal(op match
-          case "+" => l + r
-          case "-" => l - r
-          case "*" => l * r
-          case "/" => if r == 0 then throw RuntimeError("division by zero") else l / r
-          case "%" => if r == 0 then throw RuntimeError("modulo by zero") else l % r
+          case "+"  => l + r
+          case "-"  => l - r
+          case "*"  => l * r
+          case "/"  => if r == 0 then throw RuntimeError("division by zero") else l / r
+          case "%"  => if r == 0 then throw RuntimeError("modulo by zero") else l % r
+          case "&"  => l & r
+          case "|"  => l | r
+          case "^"  => l ^ r
+          case "<<" => l << r.toInt
+          case ">>" => l >> r.toInt
         )
 
       case DerefAssignStmtAST(pointer, value) =>
@@ -225,6 +230,11 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case ">"  => if l > r then 1L else 0L
               case "<=" => if l <= r then 1L else 0L
               case ">=" => if l >= r then 1L else 0L
+              case "&"  => l & r
+              case "|"  => l | r
+              case "^"  => l ^ r
+              case "<<" => l << r.toInt
+              case ">>" => l >> r.toInt
               case _    => throw RuntimeError(s"unknown operator: $op")
             )
 
@@ -233,6 +243,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         IntVal(op match
           case "-" => -v
           case "!" => if v == 0 then 1L else 0L
+          case "~" => ~v
           case _   => throw RuntimeError(s"unknown unary operator: $op")
         )
 

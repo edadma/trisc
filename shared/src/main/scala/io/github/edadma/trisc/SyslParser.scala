@@ -71,7 +71,7 @@ class SyslParser extends StandardTokenParsers {
     whileStmt | returnStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
 
   lazy val compoundOp: Parser[String] =
-    "+=" | "-=" | "*=" | "/=" | "%="
+    "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^="
 
   lazy val identStmt: Parser[StmtAST] =
     ident ~ (":" ~> typeExpr) ^^ { case name ~ t => VarStmtAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t)) } |
@@ -150,7 +150,7 @@ class SyslParser extends StandardTokenParsers {
     "==" | "!=" | "<=" | ">=" | "<" | ">"
 
   lazy val comparison: Parser[ExpressionAST] =
-    additive ~ rep(comparisonOp ~ additive) ^^ {
+    bitwiseOr ~ rep(comparisonOp ~ bitwiseOr) ^^ {
       case first ~ Nil => first
       case first ~ chain =>
         val operands = first :: chain.map { case _ ~ operand => operand }
@@ -158,6 +158,26 @@ class SyslParser extends StandardTokenParsers {
         val pairs = for i <- ops.indices yield
           BinaryAST(operands(i), ops(i), operands(i + 1))
         pairs.reduceLeft((l, r) => BinaryAST(l, "&&", r))
+    }
+
+  lazy val bitwiseOr: Parser[ExpressionAST] =
+    bitwiseXor ~ rep("|" ~> bitwiseXor) ^^ {
+      case first ~ rest => rest.foldLeft(first)((l, r) => BinaryAST(l, "|", r))
+    }
+
+  lazy val bitwiseXor: Parser[ExpressionAST] =
+    bitwiseAnd ~ rep("^" ~> bitwiseAnd) ^^ {
+      case first ~ rest => rest.foldLeft(first)((l, r) => BinaryAST(l, "^", r))
+    }
+
+  lazy val bitwiseAnd: Parser[ExpressionAST] =
+    shift ~ rep("&" ~> shift) ^^ {
+      case first ~ rest => rest.foldLeft(first)((l, r) => BinaryAST(l, "&", r))
+    }
+
+  lazy val shift: Parser[ExpressionAST] =
+    additive ~ rep(("<<" | ">>") ~ additive) ^^ {
+      case first ~ rest => rest.foldLeft(first) { case (l, op ~ r) => BinaryAST(l, op, r) }
     }
 
   lazy val additive: Parser[ExpressionAST] =
@@ -175,6 +195,7 @@ class SyslParser extends StandardTokenParsers {
       "--" ~> ident ^^ PreDecAST.apply |
       "-" ~> unary ^^ (e => UnaryAST("-", e)) |
       "!" ~> unary ^^ (e => UnaryAST("!", e)) |
+      "~" ~> unary ^^ (e => UnaryAST("~", e)) |
       "*" ~> unary ^^ DerefAST.apply |
       "&" ~> ident ~ ("[" ~> expr <~ "]") ^^ { case name ~ idx => AddrOfIndexAST(VarRefAST(name), idx) } |
       "&" ~> ident ^^ AddrOfAST.apply |

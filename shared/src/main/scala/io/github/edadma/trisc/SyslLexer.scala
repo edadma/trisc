@@ -1,6 +1,7 @@
 package io.github.edadma.trisc
 
 import io.github.edadma.indentation.IndentationLexical
+import scala.util.parsing.input.CharSequenceReader.EofCh
 
 class SyslLexical extends IndentationLexical(
   newlineBeforeIndent = true,
@@ -20,11 +21,22 @@ class SyslLexical extends IndentationLexical(
 
   delimiters ++= List(
     "(", ")", "[", "]",
-    "++", "--", "+", "-", "*", "/", "%",
+    "++", "--",
+    "+", "-", "*", "/", "%",
+    "<<", ">>",
     "==", "!=", "<=", ">=", "<", ">",
     "&&", "||", "!",
+    "&", "|", "^", "~",
     "=", "+=", "-=", "*=", "/=", "%=",
+    "&=", "|=", "^=", "<<=", ">>=",
     "->",
-    ",", ":", "&",
+    ",", ":",
   )
+
+  private def hexDigit = elem("hex digit", c => c.isDigit || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F')
+
+  override def token: Parser[Token] =
+    '0' ~> (elem('x') | elem('X')) ~> rep1(hexDigit) ^^ { digits =>
+      NumericLit(java.lang.Long.parseLong(digits.mkString, 16).toString)
+    } | super.token
 }
