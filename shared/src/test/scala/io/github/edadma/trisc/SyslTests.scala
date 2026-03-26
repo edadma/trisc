@@ -1855,6 +1855,14 @@ class SyslTests extends AnyFreeSpec with Matchers {
         |""".stripMargin) shouldBe "Hi!"
   }
 
+  "char literal unicode BMP" in {
+    eval("main() -> int = 'é'\n") shouldBe 233
+  }
+
+  "char literal unicode CJK" in {
+    eval("main() -> int = '世'\n") shouldBe 19990
+  }
+
   // ===== String library functions (in sysl) =====
 
   "strlen implementation" in {
