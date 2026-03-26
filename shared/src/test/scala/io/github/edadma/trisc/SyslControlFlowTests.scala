@@ -7,7 +7,7 @@ class SyslControlFlowTests extends SyslTestHelpers {
   "if true branch" in {
     eval(
       """main() -> int
-        |    if 1
+        |    if true
         |        return 42
         |    return 0
         |""".stripMargin) shouldBe 42
@@ -16,7 +16,7 @@ class SyslControlFlowTests extends SyslTestHelpers {
   "if false branch" in {
     eval(
       """main() -> int
-        |    if 0
+        |    if false
         |        return 42
         |    return 0
         |""".stripMargin) shouldBe 0
@@ -58,17 +58,17 @@ class SyslControlFlowTests extends SyslTestHelpers {
   }
 
   "if then else inline expression" in {
-    eval("main() -> int = if 1 then 42 else 0\n") shouldBe 42
+    eval("main() -> int = if true then 42 else 0\n") shouldBe 42
   }
 
   "if then else inline false branch" in {
-    eval("main() -> int = if 0 then 42 else 99\n") shouldBe 99
+    eval("main() -> int = if false then 42 else 99\n") shouldBe 99
   }
 
   "if as expression in variable" in {
     eval(
       """main() -> int
-        |    x = if 1 then 42 else 0
+        |    x = if true then 42 else 0
         |    x
         |""".stripMargin) shouldBe 42
   }
@@ -77,7 +77,7 @@ class SyslControlFlowTests extends SyslTestHelpers {
     eval(
       """double(x: int) -> int = x * 2
         |
-        |main() -> int = double(if 1 then 21 else 0)
+        |main() -> int = double(if true then 21 else 0)
         |""".stripMargin) shouldBe 42
   }
 
@@ -103,7 +103,7 @@ class SyslControlFlowTests extends SyslTestHelpers {
   }
 
   "nested if expressions" in {
-    eval("main() -> int = if 1 then if 0 then 1 else 2 else 3\n") shouldBe 2
+    eval("main() -> int = if true then if false then 1 else 2 else 3\n") shouldBe 2
   }
 
   // ===== elif =====
@@ -279,7 +279,7 @@ class SyslControlFlowTests extends SyslTestHelpers {
     eval(
       """main() -> int
         |    x = 0
-        |    while 0
+        |    while false
         |        x = 42
         |    return x
         |""".stripMargin) shouldBe 0
@@ -325,7 +325,7 @@ class SyslControlFlowTests extends SyslTestHelpers {
     eval(
       """main() -> int
         |    x = 0
-        |    while 0 do x = 42
+        |    while false do x = 42
         |    x
         |""".stripMargin) shouldBe 0
   }
@@ -363,7 +363,7 @@ class SyslControlFlowTests extends SyslTestHelpers {
   "if without else returns 0" in {
     eval(
       """main() -> int
-        |    x = if 0 then 42
+        |    x = if false then 42
         |    x
         |""".stripMargin) shouldBe 0
   }
@@ -401,7 +401,7 @@ class SyslControlFlowTests extends SyslTestHelpers {
     eval(
       """main() -> int
         |    x = 0
-        |    if 1
+        |    if true
         |        x = 42
         |    x
         |""".stripMargin) shouldBe 42
@@ -410,7 +410,7 @@ class SyslControlFlowTests extends SyslTestHelpers {
   "if block without then, with else block" in {
     eval(
       """main() -> int
-        |    if 0
+        |    if false
         |        1
         |    else
         |        2
@@ -421,19 +421,19 @@ class SyslControlFlowTests extends SyslTestHelpers {
     eval(
       """main() -> int
         |    x = 0
-        |    if 1 then x = 42
+        |    if true then x = 42
         |    x
         |""".stripMargin) shouldBe 42
   }
 
   "if then inline, with inline else" in {
-    eval("main() -> int = if 1 then 42 else 0\n") shouldBe 42
+    eval("main() -> int = if true then 42 else 0\n") shouldBe 42
   }
 
   "if then inline, with block else" in {
     eval(
       """main() -> int
-        |    if 0 then 42
+        |    if false then 42
         |    else
         |        99
         |""".stripMargin) shouldBe 99
@@ -443,7 +443,7 @@ class SyslControlFlowTests extends SyslTestHelpers {
     eval(
       """main() -> int
         |    x = 0
-        |    if 1 then
+        |    if true then
         |        x = 42
         |    x
         |""".stripMargin) shouldBe 42
@@ -452,7 +452,7 @@ class SyslControlFlowTests extends SyslTestHelpers {
   "if then block, with else block" in {
     eval(
       """main() -> int
-        |    if 1 then
+        |    if true then
         |        42
         |    else
         |        99
@@ -485,7 +485,7 @@ class SyslControlFlowTests extends SyslTestHelpers {
   "if then inline return" in {
     eval(
       """main() -> int
-        |    if 1 then return 42
+        |    if true then return 42
         |    0
         |""".stripMargin) shouldBe 42
   }

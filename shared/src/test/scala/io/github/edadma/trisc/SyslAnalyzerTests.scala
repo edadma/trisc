@@ -55,11 +55,11 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   }
 
   "logical and produces bool" in {
-    analyzeExprType("main() -> int = 1 && 1\n") shouldBe BoolType
+    analyzeExprType("main() -> int = true && true\n") shouldBe BoolType
   }
 
   "logical or produces bool" in {
-    analyzeExprType("main() -> int = 0 || 1\n") shouldBe BoolType
+    analyzeExprType("main() -> int = false || true\n") shouldBe BoolType
   }
 
   "unary minus preserves type" in {
@@ -67,7 +67,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   }
 
   "unary not produces bool" in {
-    analyzeExprType("main() -> int = !0\n") shouldBe BoolType
+    analyzeExprType("main() -> int = !false\n") shouldBe BoolType
   }
 
   "bitwise and produces int" in {
@@ -184,7 +184,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   // ===== If expression type =====
 
   "if expression type from then branch" in {
-    analyzeExprType("main() -> int = if 1 then 42 else 0\n") shouldBe IntType
+    analyzeExprType("main() -> int = if true then 42 else 0\n") shouldBe IntType
   }
 
   // ===== Pointer arithmetic type =====

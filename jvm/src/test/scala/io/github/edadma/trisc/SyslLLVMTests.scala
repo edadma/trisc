@@ -150,7 +150,7 @@ class SyslLLVMTests extends AnyFreeSpec with Matchers {
   "if true" in {
     runExitCode(
       """main() -> int
-        |    if 1
+        |    if true
         |        return 42
         |    0
         |""".stripMargin) shouldBe 42
@@ -159,7 +159,7 @@ class SyslLLVMTests extends AnyFreeSpec with Matchers {
   "if false" in {
     runExitCode(
       """main() -> int
-        |    if 0
+        |    if false
         |        return 42
         |    7
         |""".stripMargin) shouldBe 7

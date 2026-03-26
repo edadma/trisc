@@ -57,19 +57,19 @@ class SyslExprTests extends SyslTestHelpers {
   // ===== Logical =====
 
   "logical and" in {
-    eval("main() -> int = 1 && 1\n") shouldBe 1
+    eval("main() -> int = true && true\n") shouldBe 1
   }
 
   "logical and short-circuit" in {
-    eval("main() -> int = 0 && 1\n") shouldBe 0
+    eval("main() -> int = false && true\n") shouldBe 0
   }
 
   "logical or" in {
-    eval("main() -> int = 0 || 1\n") shouldBe 1
+    eval("main() -> int = false || true\n") shouldBe 1
   }
 
   "logical not" in {
-    eval("main() -> int = !0\n") shouldBe 1
+    eval("main() -> int = !false\n") shouldBe 1
   }
 
   // ===== Chained comparisons =====

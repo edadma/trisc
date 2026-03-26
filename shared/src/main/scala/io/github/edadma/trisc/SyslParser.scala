@@ -52,7 +52,7 @@ class SyslParser extends StandardTokenParsers {
     ident ~ (":" ~> typeRef) ^^ { case name ~ t => ParamAST(name, t) }
 
   lazy val typeName: Parser[String] =
-    "int" | "char" | "byte" | "void" | ident
+    "int" | "char" | "byte" | "bool" | "void" | ident
 
   // Full type reference: *int, **int, [5]int, int, etc.
   lazy val typeRef: Parser[String] =

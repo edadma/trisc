@@ -63,6 +63,7 @@ class SyslAnalyzer:
     case "int"  => IntType
     case "char" => CharType
     case "byte" => ByteType
+    case "bool" => BoolType
     case "void" => VoidType
     case s if s.startsWith("*") =>
       PtrType(resolveTypeName(s.drop(1)))
@@ -140,6 +141,7 @@ class SyslAnalyzer:
 
       case WhileStmtAST(cond, body) =>
         val tCond = analyzeExpr(cond)
+        if tCond.typ != BoolType then throw AnalysisError(s"while condition must be bool, got ${tCond.typ}")
         TWhileStmt(tCond, analyzeBlock(body))
 
       case ExprStmtAST(expr) =>
@@ -199,7 +201,9 @@ class SyslAnalyzer:
         val tOperand = analyzeExpr(operand)
         val resultType = op match
           case "-" | "~" => tOperand.typ
-          case "!" => BoolType
+          case "!" =>
+            if tOperand.typ != BoolType then throw AnalysisError(s"unary ! requires bool, got ${tOperand.typ}")
+            BoolType
         TUnary(op, tOperand, resultType)
 
       case BinaryAST(left, op, right) =>
@@ -211,7 +215,10 @@ class SyslAnalyzer:
             if tLeft.typ == IntType || tRight.typ == IntType then IntType
             else tLeft.typ
           case "==" | "!=" | "<" | ">" | "<=" | ">=" => BoolType
-          case "&&" | "||" => BoolType
+          case "&&" | "||" =>
+            if tLeft.typ != BoolType then throw AnalysisError(s"$op requires bool operands, got ${tLeft.typ}")
+            if tRight.typ != BoolType then throw AnalysisError(s"$op requires bool operands, got ${tRight.typ}")
+            BoolType
           case _ => throw AnalysisError(s"unknown operator: $op")
         TBinary(tLeft, op, tRight, resultType)
 
@@ -222,6 +229,7 @@ class SyslAnalyzer:
 
       case IfExprAST(cond, thenBody, elseBody) =>
         val tCond = analyzeExpr(cond)
+        if tCond.typ != BoolType then throw AnalysisError(s"if condition must be bool, got ${tCond.typ}")
         val tThen = analyzeBlock(thenBody)
         val tElse = elseBody.map(analyzeBlock)
         val resultType = tThen.lastOption match

@@ -148,7 +148,7 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
   "if true branch" in {
     compileAndRun(
       """main() -> int
-        |    if 1
+        |    if true
         |        return 42
         |    0
         |""".stripMargin) shouldBe 42
@@ -157,7 +157,7 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
   "if false branch" in {
     compileAndRun(
       """main() -> int
-        |    if 0
+        |    if false
         |        return 42
         |    0
         |""".stripMargin) shouldBe 0

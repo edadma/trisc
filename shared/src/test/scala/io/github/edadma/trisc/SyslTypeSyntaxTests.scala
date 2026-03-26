@@ -173,6 +173,74 @@ class SyslTypeSyntaxTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 42
   }
 
+  // ===== Bool type =====
+
+  "bool variable declaration" in {
+    eval(
+      """main() -> int
+        |    flag: bool = true
+        |    if flag then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "bool parameter" in {
+    eval(
+      """choose(flag: bool, a: int, b: int) -> int = if flag then a else b
+        |
+        |main() -> int = choose(true, 42, 0)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "bool return type" in {
+    eval(
+      """isPositive(x: int) -> bool = x > 0
+        |
+        |main() -> int = if isPositive(5) then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  // ===== Strong bool checking =====
+
+  "analyzer rejects int in if condition" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """main() -> int
+        |    if 1
+        |        42
+        |    0
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "analyzer rejects int in while condition" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """main() -> int
+        |    while 1
+        |        0
+        |    0
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "analyzer rejects int in && operand" in {
+    val Right(ast) = (new SyslParser).parseProgram("main() -> int = 1 && 1\n"): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "analyzer rejects int in ! operand" in {
+    val Right(ast) = (new SyslParser).parseProgram("main() -> int = !0\n"): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "analyzer accepts bool in if condition" in {
+    val Right(ast) = (new SyslParser).parseProgram("main() -> int = if true then 1 else 0\n"): @unchecked
+    (new SyslAnalyzer).analyze(ast) // should not throw
+  }
+
+  "analyzer accepts comparison in if condition" in {
+    val Right(ast) = (new SyslParser).parseProgram("main() -> int = if 3 < 5 then 1 else 0\n"): @unchecked
+    (new SyslAnalyzer).analyze(ast) // should not throw
+  }
+
   // ===== Analyzer rejects indexing plain int =====
 
   "analyzer rejects indexing int" in {
