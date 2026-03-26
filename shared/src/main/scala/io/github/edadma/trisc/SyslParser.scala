@@ -37,7 +37,7 @@ object SyslParser extends StdParsers(SyslLexer):
       block(stmts) ^^ { body => FunDeclAST(name, params, None, BlockBodyAST(body)): DeclAST }
 
   def bodyExprOrBlock(using ctx: ParseCtx): P[FunBodyAST] =
-    block(stmts) ^^ (s => BlockBodyAST(s): FunBodyAST) |
+    block(stmts) ^^ (s => BlockBodyAST(s, isExprBlock = true): FunBodyAST) |
       expr ^^ (e => ExprBodyAST(e): FunBodyAST)
 
   def declRest(name: String)(using ctx: ParseCtx): P[DeclAST] =
@@ -64,8 +64,15 @@ object SyslParser extends StdParsers(SyslLexer):
       ":" ~> typeName ~ ("=" ~> expr) ^^ { case t ~ e => VarStmtAST(name, Some(t), e): StmtAST } |
         ":=" ~> expr ^^ { e => VarStmtAST(name, None, e): StmtAST } |
         "=" ~> expr ^^ { e => AssignStmtAST(name, e): StmtAST } |
-        "(" ~> repsep(expr, ",") <~ ")" ^^ { args => ExprStmtAST(CallAST(name, args)): StmtAST }
+        "(" ~> repsep(expr, ",") <~ ")" ^^ { args => ExprStmtAST(CallAST(name, args)): StmtAST } |
+        continueExpr(VarRefAST(name)) ^^ { e => ExprStmtAST(e): StmtAST }
     }
+
+  // Continue parsing an expression given a left-hand operand already parsed
+  def continueExpr(left: ExpressionAST)(using ctx: ParseCtx): P[ExpressionAST] =
+    val op = "+" | "-" | "*" | "/" | "%" | "==" | "!=" | "<=" | ">=" | "<" | ">" | "&&" | "||"
+    op ~ expr ^^ { case o ~ r => BinaryAST(left, o, r) } |
+      succeed(left)
 
   def ifStmt(using ctx: ParseCtx): P[IfStmtAST] =
     "if" ~> expr ~ block(stmts) >> { case cond ~ thenBody =>

@@ -51,7 +51,14 @@ class SyslTests extends AnyFreeSpec with Matchers {
   }
 
   "expression function with block body" in {
-    pending // TODO: = block syntax needs investigation
+    eval(
+      """compute(x: int) =
+        |    y := x * 2
+        |    z := y + 1
+        |    z
+        |
+        |main() -> int = compute(20)
+        |""".stripMargin) shouldBe 41
   }
 
   // ===== Arithmetic =====
