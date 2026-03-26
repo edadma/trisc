@@ -18,18 +18,34 @@ object SyslParser extends StdParsers(SyslLexer):
   // --- Declarations ---
 
   def decl(using ctx: ParseCtx): P[DeclAST] =
-    typeName ~ ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ block(stmts) ^^ {
-      case rt ~ name ~ params ~ body => FunDeclAST(rt, name, params, body): DeclAST
-    } |
-      typeName ~ ident ~ opt("=" ~> expr) ^^ {
-        case t ~ name ~ init => VarDeclAST(t, name, init): DeclAST
-      }
-
-  def param(using ctx: ParseCtx): P[ParamAST] =
-    typeName ~ ident ^^ { case t ~ name => ParamAST(t, name) }
+    ident >> { name =>
+      "(" ~> repsep(param, ",") <~ ")" >> { params =>
+        funRest(name, params)
+      } |
+        declRest(name)
+    }
 
   def typeName(using ctx: ParseCtx): P[String] =
-    "int" | "char" | "void"
+    "int" | "char" | "void" | ident
+
+  def funRest(name: String, params: List[ParamAST])(using ctx: ParseCtx): P[DeclAST] =
+    "->" ~> typeName >> { rt =>
+      "=" ~> bodyExprOrBlock ^^ { body => FunDeclAST(name, params, Some(rt), body): DeclAST } |
+        block(stmts) ^^ { body => FunDeclAST(name, params, Some(rt), BlockBodyAST(body)): DeclAST }
+    } |
+      "=" ~> bodyExprOrBlock ^^ { body => FunDeclAST(name, params, None, body): DeclAST } |
+      block(stmts) ^^ { body => FunDeclAST(name, params, None, BlockBodyAST(body)): DeclAST }
+
+  def bodyExprOrBlock(using ctx: ParseCtx): P[FunBodyAST] =
+    block(stmts) ^^ (s => BlockBodyAST(s): FunBodyAST) |
+      expr ^^ (e => ExprBodyAST(e): FunBodyAST)
+
+  def declRest(name: String)(using ctx: ParseCtx): P[DeclAST] =
+    ":" ~> typeName ~ ("=" ~> expr) ^^ { case t ~ e => VarDeclAST(name, Some(t), e): DeclAST } |
+      ":=" ~> expr ^^ { e => VarDeclAST(name, None, e): DeclAST }
+
+  def param(using ctx: ParseCtx): P[ParamAST] =
+    ident ~ (":" ~> typeName) ^^ { case name ~ t => ParamAST(name, t) }
 
   // --- Statements ---
 
@@ -40,12 +56,25 @@ object SyslParser extends StdParsers(SyslLexer):
     ifStmt ^^ (s => s: StmtAST) |
       whileStmt ^^ (s => s: StmtAST) |
       returnStmt ^^ (s => s: StmtAST) |
-      varStmt ^^ (s => s: StmtAST) |
-      assignOrExprStmt
+      identStmt |
+      expr ^^ (e => ExprStmtAST(e): StmtAST)
+
+  def identStmt(using ctx: ParseCtx): P[StmtAST] =
+    ident >> { name =>
+      ":" ~> typeName ~ ("=" ~> expr) ^^ { case t ~ e => VarStmtAST(name, Some(t), e): StmtAST } |
+        ":=" ~> expr ^^ { e => VarStmtAST(name, None, e): StmtAST } |
+        "=" ~> expr ^^ { e => AssignStmtAST(name, e): StmtAST } |
+        "(" ~> repsep(expr, ",") <~ ")" ^^ { args => ExprStmtAST(CallAST(name, args)): StmtAST }
+    }
 
   def ifStmt(using ctx: ParseCtx): P[IfStmtAST] =
-    "if" ~> expr ~ block(stmts) ~ opt(newline ~> "else" ~> (block(stmts) | (ifStmt ^^ (s => List(s))))) ^^ {
-      case cond ~ thenBody ~ elseBody => IfStmtAST(cond, thenBody, elseBody)
+    "if" ~> expr ~ block(stmts) >> { case cond ~ thenBody =>
+      if peek(newline ~> keyword("else")) then
+        newline ~> "else" ~> (block(stmts) | (ifStmt ^^ (s => List(s)))) ^^ { elseBody =>
+          IfStmtAST(cond, thenBody, Some(elseBody))
+        }
+      else
+        succeed(IfStmtAST(cond, thenBody, None))
     }
 
   def whileStmt(using ctx: ParseCtx): P[WhileStmtAST] =
@@ -55,15 +84,6 @@ object SyslParser extends StdParsers(SyslLexer):
 
   def returnStmt(using ctx: ParseCtx): P[ReturnStmtAST] =
     "return" ~> opt(expr) ^^ ReturnStmtAST.apply
-
-  def varStmt(using ctx: ParseCtx): P[VarStmtAST] =
-    typeName ~ ident ~ opt("=" ~> expr) ^^ {
-      case t ~ name ~ init => VarStmtAST(t, name, init)
-    }
-
-  def assignOrExprStmt(using ctx: ParseCtx): P[StmtAST] =
-    ident ~ ("=" ~> expr) ^^ { case name ~ value => AssignStmtAST(name, value) } |
-      expr ^^ ExprStmtAST.apply
 
   // --- Expressions (precedence climbing) ---
 
@@ -95,6 +115,10 @@ object SyslParser extends StdParsers(SyslLexer):
   def primary(using ctx: ParseCtx): P[ExpressionAST] =
     numericLit ^^ (n => IntLitAST(n.toLong)) |
       stringLit ^^ StringLitAST.apply |
-      ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |
-      ident ^^ VarRefAST.apply |
+      "true" ^^ (_ => BoolLitAST(true)) |
+      "false" ^^ (_ => BoolLitAST(false)) |
+      ident >> { name =>
+        "(" ~> repsep(expr, ",") <~ ")" ^^ (args => CallAST(name, args): ExpressionAST) |
+          succeed(VarRefAST(name): ExpressionAST)
+      } |
       "(" ~> expr <~ ")"

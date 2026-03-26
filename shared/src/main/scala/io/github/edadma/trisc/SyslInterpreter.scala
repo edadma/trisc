@@ -16,13 +16,11 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   )
 
   def run(program: ProgramAST): Long =
-    // Register all declarations
     for decl <- program.decls do
       decl match
         case f: FunDeclAST => functions(f.name) = f
-        case VarDeclAST(_, name, init) => globals(name) = init.map(e => eval(e, mutable.LinkedHashMap.empty)).getOrElse(0)
+        case VarDeclAST(name, _, init) => globals(name) = eval(init, mutable.LinkedHashMap.empty)
 
-    // Call main
     functions.get("main") match
       case Some(main) => call(main, Nil)
       case None => throw RuntimeError("no main function")
@@ -30,23 +28,25 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private def call(fun: FunDeclAST, args: List[Long]): Long =
     val env = mutable.LinkedHashMap[String, Long]()
 
-    // Bind parameters
     for (param, arg) <- fun.params.zip(args) do
       env(param.name) = arg
 
-    try
-      execBlock(fun.body, env)
-      0 // void return
-    catch
-      case ReturnException(v) => v
+    fun.body match
+      case ExprBodyAST(expr) => eval(expr, env)
+      case BlockBodyAST(stmts) =>
+        try
+          execBlock(stmts, env)
+          0
+        catch
+          case ReturnException(v) => v
 
   private def execBlock(stmts: List[StmtAST], env: mutable.LinkedHashMap[String, Long]): Unit =
     for stmt <- stmts do exec(stmt, env)
 
   private def exec(stmt: StmtAST, env: mutable.LinkedHashMap[String, Long]): Unit =
     stmt match
-      case VarStmtAST(_, name, init) =>
-        env(name) = init.map(e => eval(e, env)).getOrElse(0)
+      case VarStmtAST(name, _, init) =>
+        env(name) = eval(init, env)
 
       case AssignStmtAST(target, value) =>
         val v = eval(value, env)
@@ -70,9 +70,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private def eval(expr: ExpressionAST, env: mutable.LinkedHashMap[String, Long]): Long =
     expr match
       case IntLitAST(n) => n
-
       case CharLitAST(c) => c.toLong
-
+      case BoolLitAST(b) => if b then 1 else 0
       case StringLitAST(_) => throw RuntimeError("string values not yet supported in expressions")
 
       case VarRefAST(name) =>
@@ -82,7 +81,6 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case BinaryAST(left, op, right) =>
         val l = eval(left, env)
-        // Short-circuit for logical operators
         op match
           case "&&" => if l == 0 then 0 else if eval(right, env) != 0 then 1 else 0
           case "||" => if l != 0 then 1 else if eval(right, env) != 0 then 1 else 0

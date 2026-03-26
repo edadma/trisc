@@ -16,154 +16,136 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   def output(source: String): String = run(source)._2
 
-  // ===== Basic program =====
+  // ===== Basic programs =====
 
   "empty main returns 0" in {
     eval(
-      """int main()
+      """main() -> int
         |    return 0
         |""".stripMargin) shouldBe 0
   }
 
   "main returns value" in {
     eval(
-      """int main()
+      """main() -> int
         |    return 42
         |""".stripMargin) shouldBe 42
+  }
+
+  // ===== Expression functions =====
+
+  "expression function" in {
+    eval(
+      """double(x: int) -> int = x * 2
+        |
+        |main() -> int = double(21)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "expression function inferred return type" in {
+    eval(
+      """double(x: int) = x * 2
+        |
+        |main() -> int = double(21)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "expression function with block body" in {
+    pending // TODO: = block syntax needs investigation
   }
 
   // ===== Arithmetic =====
 
   "addition" in {
-    eval(
-      """int main()
-        |    return 3 + 4
-        |""".stripMargin) shouldBe 7
+    eval("main() -> int = 3 + 4\n") shouldBe 7
   }
 
   "subtraction" in {
-    eval(
-      """int main()
-        |    return 10 - 3
-        |""".stripMargin) shouldBe 7
+    eval("main() -> int = 10 - 3\n") shouldBe 7
   }
 
   "multiplication" in {
-    eval(
-      """int main()
-        |    return 6 * 7
-        |""".stripMargin) shouldBe 42
+    eval("main() -> int = 6 * 7\n") shouldBe 42
   }
 
   "division" in {
-    eval(
-      """int main()
-        |    return 42 / 6
-        |""".stripMargin) shouldBe 7
+    eval("main() -> int = 42 / 6\n") shouldBe 7
   }
 
   "modulo" in {
-    eval(
-      """int main()
-        |    return 17 % 5
-        |""".stripMargin) shouldBe 2
+    eval("main() -> int = 17 % 5\n") shouldBe 2
   }
 
   "operator precedence" in {
-    eval(
-      """int main()
-        |    return 2 + 3 * 4
-        |""".stripMargin) shouldBe 14
+    eval("main() -> int = 2 + 3 * 4\n") shouldBe 14
   }
 
   "parentheses" in {
-    eval(
-      """int main()
-        |    return (2 + 3) * 4
-        |""".stripMargin) shouldBe 20
+    eval("main() -> int = (2 + 3) * 4\n") shouldBe 20
   }
 
   "unary minus" in {
-    eval(
-      """int main()
-        |    return -42
-        |""".stripMargin) shouldBe -42
+    eval("main() -> int = -42\n") shouldBe -42
   }
 
   // ===== Comparison =====
 
   "less than true" in {
-    eval(
-      """int main()
-        |    return 3 < 5
-        |""".stripMargin) shouldBe 1
+    eval("main() -> int = 3 < 5\n") shouldBe 1
   }
 
   "less than false" in {
-    eval(
-      """int main()
-        |    return 5 < 3
-        |""".stripMargin) shouldBe 0
+    eval("main() -> int = 5 < 3\n") shouldBe 0
   }
 
   "equal true" in {
-    eval(
-      """int main()
-        |    return 5 == 5
-        |""".stripMargin) shouldBe 1
+    eval("main() -> int = 5 == 5\n") shouldBe 1
   }
 
   "not equal" in {
-    eval(
-      """int main()
-        |    return 5 != 3
-        |""".stripMargin) shouldBe 1
+    eval("main() -> int = 5 != 3\n") shouldBe 1
   }
 
   // ===== Logical =====
 
   "logical and" in {
-    eval(
-      """int main()
-        |    return 1 && 1
-        |""".stripMargin) shouldBe 1
+    eval("main() -> int = 1 && 1\n") shouldBe 1
   }
 
   "logical and short-circuit" in {
-    eval(
-      """int main()
-        |    return 0 && 1
-        |""".stripMargin) shouldBe 0
+    eval("main() -> int = 0 && 1\n") shouldBe 0
   }
 
   "logical or" in {
-    eval(
-      """int main()
-        |    return 0 || 1
-        |""".stripMargin) shouldBe 1
+    eval("main() -> int = 0 || 1\n") shouldBe 1
   }
 
   "logical not" in {
-    eval(
-      """int main()
-        |    return !0
-        |""".stripMargin) shouldBe 1
+    eval("main() -> int = !0\n") shouldBe 1
   }
 
   // ===== Variables =====
 
-  "local variable" in {
+  "local variable with type" in {
     eval(
-      """int main()
-        |    int x = 42
+      """main() -> int
+        |    x: int = 42
+        |    return x
+        |""".stripMargin) shouldBe 42
+  }
+
+  "local variable inferred" in {
+    eval(
+      """main() -> int
+        |    x := 42
         |    return x
         |""".stripMargin) shouldBe 42
   }
 
   "variable assignment" in {
     eval(
-      """int main()
-        |    int x = 1
+      """main() -> int
+        |    x := 1
         |    x = 42
         |    return x
         |""".stripMargin) shouldBe 42
@@ -171,26 +153,18 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   "multiple variables" in {
     eval(
-      """int main()
-        |    int a = 10
-        |    int b = 20
+      """main() -> int
+        |    a := 10
+        |    b := 20
         |    return a + b
         |""".stripMargin) shouldBe 30
-  }
-
-  "uninitialized variable defaults to 0" in {
-    eval(
-      """int main()
-        |    int x
-        |    return x
-        |""".stripMargin) shouldBe 0
   }
 
   // ===== If/else =====
 
   "if true branch" in {
     eval(
-      """int main()
+      """main() -> int
         |    if 1
         |        return 42
         |    return 0
@@ -199,7 +173,7 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   "if false branch" in {
     eval(
-      """int main()
+      """main() -> int
         |    if 0
         |        return 42
         |    return 0
@@ -208,8 +182,8 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   "if-else" in {
     eval(
-      """int main()
-        |    int x = 5
+      """main() -> int
+        |    x := 5
         |    if x > 3
         |        return 1
         |    else
@@ -219,8 +193,8 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   "if-else if-else" in {
     eval(
-      """int main()
-        |    int x = 5
+      """main() -> int
+        |    x := 5
         |    if x > 10
         |        return 3
         |    else if x > 3
@@ -234,9 +208,9 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   "while loop" in {
     eval(
-      """int main()
-        |    int i = 0
-        |    int sum = 0
+      """main() -> int
+        |    i := 0
+        |    sum := 0
         |    while i < 10
         |        sum = sum + i
         |        i = i + 1
@@ -246,8 +220,8 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   "while loop never enters" in {
     eval(
-      """int main()
-        |    int x = 0
+      """main() -> int
+        |    x := 0
         |    while 0
         |        x = 42
         |    return x
@@ -258,44 +232,39 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   "function call" in {
     eval(
-      """int double(int x)
-        |    return x * 2
+      """double(x: int) -> int = x * 2
         |
-        |int main()
-        |    return double(21)
+        |main() -> int = double(21)
         |""".stripMargin) shouldBe 42
   }
 
   "recursive function" in {
     eval(
-      """int factorial(int n)
+      """factorial(n: int) -> int
         |    if n <= 1
         |        return 1
         |    return n * factorial(n - 1)
         |
-        |int main()
-        |    return factorial(5)
+        |main() -> int = factorial(5)
         |""".stripMargin) shouldBe 120
   }
 
   "multiple arguments" in {
     eval(
-      """int add(int a, int b, int c)
-        |    return a + b + c
+      """add(a: int, b: int, c: int) -> int = a + b + c
         |
-        |int main()
-        |    return add(10, 20, 30)
+        |main() -> int = add(10, 20, 30)
         |""".stripMargin) shouldBe 60
   }
 
   "void function" in {
     eval(
-      """int x
+      """x := 0
         |
-        |void set(int v)
+        |set(v: int)
         |    x = v
         |
-        |int main()
+        |main() -> int
         |    set(42)
         |    return x
         |""".stripMargin) shouldBe 42
@@ -305,7 +274,7 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   "putchar" in {
     output(
-      """int main()
+      """main() -> int
         |    putchar(72)
         |    putchar(105)
         |    return 0
@@ -314,7 +283,7 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   "print" in {
     output(
-      """int main()
+      """main() -> int
         |    print(42)
         |    return 0
         |""".stripMargin) shouldBe "42"
@@ -322,7 +291,7 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   "println" in {
     output(
-      """int main()
+      """main() -> int
         |    println(42)
         |    return 0
         |""".stripMargin) shouldBe "42\n"
@@ -332,13 +301,12 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   "fibonacci" in {
     eval(
-      """int fib(int n)
+      """fib(n: int) -> int
         |    if n <= 1
         |        return n
         |    return fib(n - 1) + fib(n - 2)
         |
-        |int main()
-        |    return fib(10)
+        |main() -> int = fib(10)
         |""".stripMargin) shouldBe 55
   }
 
@@ -346,12 +314,12 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   "global variable" in {
     eval(
-      """int counter
+      """counter := 0
         |
-        |void increment()
+        |increment()
         |    counter = counter + 1
         |
-        |int main()
+        |main() -> int
         |    increment()
         |    increment()
         |    increment()

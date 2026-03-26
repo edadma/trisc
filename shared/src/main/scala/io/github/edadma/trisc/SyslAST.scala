@@ -7,14 +7,19 @@ case class ProgramAST(decls: List[DeclAST])
 
 // Declarations
 trait DeclAST extends Positional
-case class FunDeclAST(returnType: String, name: String, params: List[ParamAST], body: List[StmtAST]) extends DeclAST
-case class VarDeclAST(typ: String, name: String, init: Option[ExpressionAST]) extends DeclAST
+case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[String], body: FunBodyAST) extends DeclAST
+case class VarDeclAST(name: String, typ: Option[String], init: ExpressionAST) extends DeclAST
 
-case class ParamAST(typ: String, name: String) extends Positional
+case class ParamAST(name: String, typ: String) extends Positional
+
+// Function body
+trait FunBodyAST
+case class ExprBodyAST(expr: ExpressionAST) extends FunBodyAST
+case class BlockBodyAST(stmts: List[StmtAST]) extends FunBodyAST
 
 // Statements
 trait StmtAST extends Positional
-case class VarStmtAST(typ: String, name: String, init: Option[ExpressionAST]) extends StmtAST
+case class VarStmtAST(name: String, typ: Option[String], init: ExpressionAST) extends StmtAST
 case class AssignStmtAST(target: String, value: ExpressionAST) extends StmtAST
 case class ReturnStmtAST(value: Option[ExpressionAST]) extends StmtAST
 case class IfStmtAST(cond: ExpressionAST, thenBody: List[StmtAST], elseBody: Option[List[StmtAST]]) extends StmtAST
@@ -26,6 +31,7 @@ trait ExpressionAST extends Positional
 case class IntLitAST(value: Long) extends ExpressionAST
 case class CharLitAST(value: Char) extends ExpressionAST
 case class StringLitAST(value: String) extends ExpressionAST
+case class BoolLitAST(value: Boolean) extends ExpressionAST
 case class VarRefAST(name: String) extends ExpressionAST
 case class BinaryAST(left: ExpressionAST, op: String, right: ExpressionAST) extends ExpressionAST
 case class UnaryAST(op: String, operand: ExpressionAST) extends ExpressionAST
