@@ -298,6 +298,115 @@ class SyslTests extends AnyFreeSpec with Matchers {
     eval("main() -> int = if 1 then if 0 then 1 else 2 else 3\n") shouldBe 2
   }
 
+  // ===== elif =====
+
+  "elif basic" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if x > 10
+        |        3
+        |    elif x > 3
+        |        2
+        |    else
+        |        1
+        |""".stripMargin) shouldBe 2
+  }
+
+  "elif with then" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if x > 10 then 3
+        |    elif x > 3 then 2
+        |    else 1
+        |""".stripMargin) shouldBe 2
+  }
+
+  "multiple elifs" in {
+    eval(
+      """main() -> int
+        |    x = 25
+        |    if x > 100
+        |        5
+        |    elif x > 50
+        |        4
+        |    elif x > 20
+        |        3
+        |    elif x > 10
+        |        2
+        |    else
+        |        1
+        |""".stripMargin) shouldBe 3
+  }
+
+  "elif without else" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    r = 0
+        |    if x > 10
+        |        r = 3
+        |    elif x > 3
+        |        r = 2
+        |    r
+        |""".stripMargin) shouldBe 2
+  }
+
+  "elif first branch taken" in {
+    eval(
+      """main() -> int
+        |    x = 50
+        |    if x > 10
+        |        1
+        |    elif x > 5
+        |        2
+        |    else
+        |        3
+        |""".stripMargin) shouldBe 1
+  }
+
+  "elif last else taken" in {
+    eval(
+      """main() -> int
+        |    x = 1
+        |    if x > 10
+        |        3
+        |    elif x > 5
+        |        2
+        |    else
+        |        1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "elif with then and blocks" in {
+    eval(
+      """main() -> int
+        |    x = 15
+        |    if x > 20 then
+        |        3
+        |    elif x > 10 then
+        |        2
+        |    else
+        |        1
+        |""".stripMargin) shouldBe 2
+  }
+
+  "elif mixed with else if" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if x > 10
+        |        3
+        |    elif x > 7
+        |        2
+        |    else if x > 3
+        |        1
+        |    else
+        |        0
+        |""".stripMargin) shouldBe 1
+  }
+
   // ===== While =====
 
   "while loop" in {

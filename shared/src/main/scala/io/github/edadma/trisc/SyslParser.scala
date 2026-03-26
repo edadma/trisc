@@ -94,24 +94,31 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val ifExpr: Parser[IfExprAST] =
     "if" ~> logicalOr ~ ("then" ~> thenBody) ^^ { case cond ~ ((tb, eb)) => IfExprAST(cond, tb, eb) } |
-      "if" ~> logicalOr ~ block ~ opt(Newline ~> elseClause) ^^ {
+      "if" ~> logicalOr ~ block ~ opt(Newline ~> elseOrElif) ^^ {
+        case cond ~ body ~ elseBody => IfExprAST(cond, body, elseBody)
+      }
+
+  lazy val elifExpr: Parser[IfExprAST] =
+    "elif" ~> logicalOr ~ ("then" ~> thenBody) ^^ { case cond ~ ((tb, eb)) => IfExprAST(cond, tb, eb) } |
+      "elif" ~> logicalOr ~ block ~ opt(Newline ~> elseOrElif) ^^ {
         case cond ~ body ~ elseBody => IfExprAST(cond, body, elseBody)
       }
 
   lazy val thenBody: Parser[(List[StmtAST], Option[List[StmtAST]])] =
-    block ~ opt(Newline ~> elseClause) ^^ { case body ~ eb => (body, eb) } |
+    block ~ opt(Newline ~> elseOrElif) ^^ { case body ~ eb => (body, eb) } |
       inlineStmt ~ opt(elseInline) ^^ { case s ~ eb => (List(s), eb) }
 
   lazy val elseInline: Parser[List[StmtAST]] =
     "else" ~> (ifExpr ^^ (e => List(ExprStmtAST(e))) | inlineStmt ^^ (s => List(s))) |
-      Newline ~> elseClause
+      Newline ~> elseOrElif
 
-  lazy val elseClause: Parser[List[StmtAST]] =
-    "else" ~> (
-      ifExpr ^^ (e => List(ExprStmtAST(e))) |
-        block |
-        inlineStmt ^^ (s => List(s))
-    )
+  lazy val elseOrElif: Parser[List[StmtAST]] =
+    elifExpr ^^ (e => List(ExprStmtAST(e))) |
+      "else" ~> (
+        ifExpr ^^ (e => List(ExprStmtAST(e))) |
+          block |
+          inlineStmt ^^ (s => List(s))
+      )
 
   lazy val inlineStmt: Parser[StmtAST] =
     returnStmt |
