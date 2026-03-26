@@ -142,6 +142,16 @@ class SyslAnalyzer:
       case ReturnStmtAST(value) =>
         TReturnStmt(value.map(analyzeExpr))
 
+      case ForStmtAST(init, cond, update, body) =>
+        val tInit = analyzeStmt(init)
+        val tCond = analyzeExpr(cond)
+        if tCond.typ != BoolType then throw AnalysisError(s"for condition must be bool, got ${tCond.typ}")
+        loopDepth += 1
+        val tBody = analyzeBlock(body)
+        val tUpdate = analyzeStmt(update)
+        loopDepth -= 1
+        TForStmt(tInit, tCond, tUpdate, tBody)
+
       case WhileStmtAST(cond, body) =>
         val tCond = analyzeExpr(cond)
         if tCond.typ != BoolType then throw AnalysisError(s"while condition must be bool, got ${tCond.typ}")

@@ -26,6 +26,7 @@ case class DerefAssignStmtAST(pointer: ExpressionAST, value: ExpressionAST) exte
 case class IndexAssignStmtAST(array: ExpressionAST, index: ExpressionAST, value: ExpressionAST) extends StmtAST
 case class ReturnStmtAST(value: Option[ExpressionAST]) extends StmtAST
 case class WhileStmtAST(cond: ExpressionAST, body: List[StmtAST]) extends StmtAST
+case class ForStmtAST(init: StmtAST, cond: ExpressionAST, update: StmtAST, body: List[StmtAST]) extends StmtAST
 case class BreakStmtAST() extends StmtAST
 case class ContinueStmtAST() extends StmtAST
 case class ExprStmtAST(expr: ExpressionAST) extends StmtAST

@@ -128,6 +128,17 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TReturnStmt(value) =>
         throw ReturnException(value.map(evalAny(_, env)).getOrElse(IntVal(0)))
 
+      case TForStmt(init, cond, update, body) =>
+        exec(init, env)
+        var running = true
+        while running && toLong(evalAny(cond, env)) != 0 do
+          try
+            execBlock(body, env)
+            exec(update, env)
+          catch
+            case BreakException => running = false
+            case ContinueException => exec(update, env) // continue still runs update
+
       case TWhileStmt(cond, body) =>
         var running = true
         while running && toLong(evalAny(cond, env)) != 0 do

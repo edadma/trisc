@@ -24,6 +24,7 @@ case class TDerefAssignStmt(pointer: TExpr, value: TExpr) extends TStmt
 case class TIndexAssignStmt(array: TExpr, index: TExpr, value: TExpr) extends TStmt
 case class TReturnStmt(value: Option[TExpr]) extends TStmt
 case class TWhileStmt(cond: TExpr, body: List[TStmt]) extends TStmt
+case class TForStmt(init: TStmt, cond: TExpr, update: TStmt, body: List[TStmt]) extends TStmt
 case object TBreakStmt extends TStmt
 case object TContinueStmt extends TStmt
 case class TExprStmt(expr: TExpr) extends TStmt
