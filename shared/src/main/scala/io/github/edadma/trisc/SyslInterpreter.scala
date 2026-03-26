@@ -2,25 +2,31 @@ package io.github.edadma.trisc
 
 import scala.collection.mutable
 
-class Cell(var value: Any)
+enum Value:
+  case IntVal(n: Long)
+  case PtrVal(cell: Cell)
+
+class Cell(var value: Value)
 
 class SyslInterpreter(output: String => Unit = s => print(s)):
-  case class ReturnException(value: Any) extends RuntimeException
+  import Value.*
+
+  case class ReturnException(value: Value) extends RuntimeException
   case class RuntimeError(msg: String) extends RuntimeException(msg)
 
   private type Env = mutable.LinkedHashMap[String, Cell]
 
-  private def toLong(v: Any): Long = v match
-    case n: Long => n
-    case _       => throw RuntimeError(s"expected integer, got ${v.getClass.getSimpleName}")
+  private def toLong(v: Value): Long = v match
+    case IntVal(n) => n
+    case PtrVal(_) => throw RuntimeError("expected integer, got pointer")
 
   private val globals: Env = new mutable.LinkedHashMap
   private val functions = new mutable.LinkedHashMap[String, FunDeclAST]
 
-  private val builtins: Map[String, List[Any] => Any] = Map(
+  private val builtins: Map[String, List[Value] => Value] = Map(
     "putchar" -> (args => { output(toLong(args.head).toChar.toString); args.head }),
-    "print" -> (args => { args.foreach(a => output(toLong(a).toString)); 0L }),
-    "println" -> (args => { args.foreach(a => output(toLong(a).toString)); output("\n"); 0L }),
+    "print" -> (args => { args.foreach(a => output(toLong(a).toString)); IntVal(0) }),
+    "println" -> (args => { args.foreach(a => output(toLong(a).toString)); output("\n"); IntVal(0) }),
   )
 
   def run(program: ProgramAST): Long =
@@ -28,14 +34,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       decl match
         case f: FunDeclAST => functions(f.name) = f
         case VarDeclAST(name, _, init) =>
-          val cell = new Cell(evalAny(init, new mutable.LinkedHashMap))
-          globals(name) = cell
+          globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
     functions.get("main") match
       case Some(main) => toLong(call(main, Nil))
       case None => throw RuntimeError("no main function")
 
-  private def call(fun: FunDeclAST, args: List[Any]): Any =
+  private def call(fun: FunDeclAST, args: List[Value]): Value =
     val env: Env = new mutable.LinkedHashMap
 
     for (param, arg) <- fun.params.zip(args) do
@@ -49,13 +54,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         catch
           case ReturnException(v) => v
 
-  private def evalBlock(stmts: List[StmtAST], env: Env): Any =
+  private def evalBlock(stmts: List[StmtAST], env: Env): Value =
     if stmts.nonEmpty then
       execBlock(stmts.init, env)
       stmts.last match
         case ExprStmtAST(expr) => evalAny(expr, env)
-        case other => exec(other, env); 0L
-    else 0L
+        case other => exec(other, env); IntVal(0)
+    else IntVal(0)
 
   private def execBlock(stmts: List[StmtAST], env: Env): Unit =
     for stmt <- stmts do exec(stmt, env)
@@ -63,9 +68,9 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private def lookupCell(name: String, env: Env): Cell =
     env.getOrElse(name, globals.getOrElse(name, throw RuntimeError(s"undefined variable: $name")))
 
-  private def derefCell(v: Any): Cell = v match
-    case c: Cell => c
-    case _       => throw RuntimeError("cannot dereference non-pointer")
+  private def derefCell(v: Value): Cell = v match
+    case PtrVal(c) => c
+    case _         => throw RuntimeError("cannot dereference non-pointer")
 
   private def exec(stmt: StmtAST, env: Env): Unit =
     stmt match
@@ -83,7 +88,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         cell.value = evalAny(value, env)
 
       case ReturnStmtAST(value) =>
-        throw ReturnException(value.map(evalAny(_, env)).getOrElse(0L))
+        throw ReturnException(value.map(evalAny(_, env)).getOrElse(IntVal(0)))
 
       case WhileStmtAST(cond, body) =>
         while toLong(evalAny(cond, env)) != 0 do execBlock(body, env)
@@ -91,21 +96,18 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case ExprStmtAST(expr) =>
         evalAny(expr, env)
 
-  // evalAny returns the raw value — could be Long or Cell (pointer)
-  private def evalAny(expr: ExpressionAST, env: Env): Any =
+  private def evalAny(expr: ExpressionAST, env: Env): Value =
     expr match
-      case IntLitAST(n) => n
-      case CharLitAST(c) => c.toLong
-      case BoolLitAST(b) => if b then 1L else 0L
+      case IntLitAST(n) => IntVal(n)
+      case CharLitAST(c) => IntVal(c.toLong)
+      case BoolLitAST(b) => IntVal(if b then 1L else 0L)
       case StringLitAST(_) => throw RuntimeError("string values not yet supported")
 
       case VarRefAST(name) => lookupCell(name, env).value
 
-      case AddrOfAST(name) => lookupCell(name, env) // return the Cell itself
+      case AddrOfAST(name) => PtrVal(lookupCell(name, env))
 
-      case DerefAST(expr) =>
-        val cell = derefCell(evalAny(expr, env))
-        cell.value
+      case DerefAST(expr) => derefCell(evalAny(expr, env)).value
 
       case IfExprAST(cond, thenBody, elseBody) =>
         if toLong(evalAny(cond, env)) != 0 then
@@ -113,16 +115,16 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         else
           elseBody match
             case Some(stmts) => evalBlock(stmts, env)
-            case None => 0L
+            case None => IntVal(0)
 
       case BinaryAST(left, op, right) =>
         val l = toLong(evalAny(left, env))
         op match
-          case "&&" => if l == 0 then 0L else if toLong(evalAny(right, env)) != 0 then 1L else 0L
-          case "||" => if l != 0 then 1L else if toLong(evalAny(right, env)) != 0 then 1L else 0L
+          case "&&" => IntVal(if l == 0 then 0L else if toLong(evalAny(right, env)) != 0 then 1L else 0L)
+          case "||" => IntVal(if l != 0 then 1L else if toLong(evalAny(right, env)) != 0 then 1L else 0L)
           case _ =>
             val r = toLong(evalAny(right, env))
-            (op match
+            IntVal(op match
               case "+"  => l + r
               case "-"  => l - r
               case "*"  => l * r
@@ -139,10 +141,11 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case UnaryAST(op, operand) =>
         val v = toLong(evalAny(operand, env))
-        op match
+        IntVal(op match
           case "-" => -v
           case "!" => if v == 0 then 1L else 0L
           case _   => throw RuntimeError(s"unknown unary operator: $op")
+        )
 
       case CallAST(name, args) =>
         val argValues = args.map(evalAny(_, env))
