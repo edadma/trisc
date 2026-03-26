@@ -52,7 +52,7 @@ class SyslParser extends StandardTokenParsers {
     ident ~ (":" ~> typeName) ^^ { case name ~ t => ParamAST(name, t) }
 
   lazy val typeName: Parser[String] =
-    "int" | "char" | "void" | ident
+    "int" | "char" | "byte" | "void" | ident
 
   lazy val typeExpr: Parser[String] =
     "[" ~> numericLit ~ ("]" ~> typeName) ^^ { case n ~ t => s"[$n]$t" }
@@ -205,7 +205,7 @@ class SyslParser extends StandardTokenParsers {
   lazy val primary: Parser[ExpressionAST] =
     numericLit ^^ (n => IntLitAST(n.toLong)) |
       charLit |
-      stringLit ^^ StringLitAST.apply |
+      stringLit ^^ StringLitExprAST.apply |
       "true" ^^^ BoolLitAST(true) |
       "false" ^^^ BoolLitAST(false) |
       ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |

@@ -48,3 +48,4 @@ case class AddrOfIndexAST(array: ExpressionAST, index: ExpressionAST) extends Ex
 case class DerefAST(expr: ExpressionAST) extends ExpressionAST
 case class IndexAST(expr: ExpressionAST, index: ExpressionAST) extends ExpressionAST
 case class ArrayDeclAST(size: Int, elemType: String) extends ExpressionAST
+case class StringLitExprAST(value: String) extends ExpressionAST

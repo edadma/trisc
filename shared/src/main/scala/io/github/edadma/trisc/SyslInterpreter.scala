@@ -134,6 +134,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case BoolLitAST(b) => IntVal(if b then 1L else 0L)
       case StringLitAST(_) => throw RuntimeError("string values not yet supported")
 
+      case StringLitExprAST(s) =>
+        val bytes = s.getBytes("UTF-8")
+        val cells = Array.fill(bytes.length + 1)(new Cell(IntVal(0)))
+        for i <- bytes.indices do cells(i).value = IntVal(bytes(i) & 0xff)
+        // last cell stays 0 (null terminator)
+        ArrVal(cells, 0)
+
       case VarRefAST(name) => lookupCell(name, env).value
 
       case AddrOfAST(name) => PtrVal(lookupCell(name, env))

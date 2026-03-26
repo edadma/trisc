@@ -1863,6 +1863,93 @@ class SyslTests extends AnyFreeSpec with Matchers {
     eval("main() -> int = '世'\n") shouldBe 19990
   }
 
+  // ===== Byte arrays and string literals =====
+
+  "byte array declaration" in {
+    eval(
+      """main() -> int
+        |    buf: [4]byte
+        |    buf[0] = 72
+        |    buf[1] = 105
+        |    buf[0] + buf[1]
+        |""".stripMargin) shouldBe 177
+  }
+
+  "string literal creates null-terminated byte array" in {
+    eval(
+      """main() -> int
+        |    s = "Hello"
+        |    s[0]
+        |""".stripMargin) shouldBe 72 // 'H'
+  }
+
+  "string literal null terminated" in {
+    eval(
+      """main() -> int
+        |    s = "Hi"
+        |    s[2]
+        |""".stripMargin) shouldBe 0
+  }
+
+  "string literal with strlen" in {
+    eval(
+      """strlen(s: int) -> int
+        |    n = 0
+        |    while s[n] != 0 do n++
+        |    n
+        |
+        |main() -> int = strlen("Hello")
+        |""".stripMargin) shouldBe 5
+  }
+
+  "string literal with puts" in {
+    output(
+      """puts(s: int)
+        |    i = 0
+        |    while s[i] != 0
+        |        putchar(s[i])
+        |        i += 1
+        |
+        |main() -> int
+        |    puts("Hello")
+        |    0
+        |""".stripMargin) shouldBe "Hello"
+  }
+
+  "string literal passed to function" in {
+    eval(
+      """first(s: int) -> int = s[0]
+        |
+        |main() -> int = first("ABC")
+        |""".stripMargin) shouldBe 65
+  }
+
+  "string literal UTF-8 encoding" in {
+    eval(
+      """strlen(s: int) -> int
+        |    n = 0
+        |    while s[n] != 0 do n++
+        |    n
+        |
+        |main() -> int = strlen("café")
+        |""".stripMargin) shouldBe 5 // 'é' is 2 bytes in UTF-8
+  }
+
+  "string literal in variable" in {
+    output(
+      """puts(s: int)
+        |    i = 0
+        |    while s[i] != 0
+        |        putchar(s[i])
+        |        i += 1
+        |
+        |main() -> int
+        |    greeting = "Hi!"
+        |    puts(greeting)
+        |    0
+        |""".stripMargin) shouldBe "Hi!"
+  }
+
   // ===== String library functions (in sysl) =====
 
   "strlen implementation" in {

@@ -13,7 +13,7 @@ class SyslLexical extends IndentationLexical(
 ) {
   reserved ++= List(
     "if", "then", "elif", "else", "while", "do", "for", "return",
-    "int", "char", "void",
+    "int", "char", "byte", "void",
     "true", "false",
     "end",
   )
