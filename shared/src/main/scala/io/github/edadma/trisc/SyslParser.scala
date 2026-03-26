@@ -230,12 +230,19 @@ class SyslParser extends StandardTokenParsers {
       )
     }, s => s"invalid char literal: '$s'")
 
+  lazy val castType: Parser[String] =
+    "int" | "char" | "byte" | "bool"
+
+  lazy val cast: Parser[CastAST] =
+    castType ~ ("(" ~> expr <~ ")") ^^ { case t ~ e => CastAST(t, e) }
+
   lazy val primary: Parser[ExpressionAST] =
     numericLit ^^ (n => IntLitAST(n.toLong)) |
       charLit |
       stringLit ^^ StringLitExprAST.apply |
       "true" ^^^ BoolLitAST(true) |
       "false" ^^^ BoolLitAST(false) |
+      cast |
       ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |
       ident ^^ VarRefAST.apply |
       "(" ~> expr <~ ")"

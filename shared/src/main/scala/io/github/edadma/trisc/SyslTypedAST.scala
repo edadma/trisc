@@ -46,4 +46,5 @@ case class TPostDec(name: String, typ: SyslType) extends TExpr
 case class TUnary(op: String, operand: TExpr, typ: SyslType) extends TExpr
 case class TBinary(left: TExpr, op: String, right: TExpr, typ: SyslType) extends TExpr
 case class TCall(name: String, args: List[TExpr], typ: SyslType) extends TExpr
+case class TCast(expr: TExpr, typ: SyslType) extends TExpr
 case class TIfExpr(cond: TExpr, thenBody: List[TStmt], elseBody: Option[List[TStmt]], typ: SyslType) extends TExpr

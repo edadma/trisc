@@ -241,6 +241,16 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case _   => throw RuntimeError(s"unknown unary operator: $op")
         )
 
+      case TCast(inner, target) =>
+        val v = evalAny(inner, env)
+        import SyslType.*
+        target match
+          case BoolType => IntVal(if toLong(v) != 0 then 1L else 0L)
+          case IntType => IntVal(toLong(v))
+          case CharType => IntVal(toLong(v) & 0xFFFFFFFFL) // 32-bit codepoint
+          case ByteType => IntVal(toLong(v) & 0xFFL)
+          case _ => v
+
       case TCall(name, args, _) =>
         val argValues = args.map(evalAny(_, env))
         builtins.get(name) match

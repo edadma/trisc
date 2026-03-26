@@ -226,6 +226,18 @@ class SyslAnalyzer:
           case _ => throw AnalysisError(s"unknown operator: $op")
         TBinary(tLeft, op, tRight, resultType)
 
+      case CastAST(targetType, inner) =>
+        val tInner = analyzeExpr(inner)
+        val target = resolveTypeName(targetType)
+        // Validate cast is possible
+        (tInner.typ, target) match
+          case (from, to) if from == to => // no-op cast
+          case (from, BoolType) if from.isNumeric => // numeric to bool: != 0
+          case (BoolType, to) if to.isNumeric => // bool to numeric: true=1, false=0
+          case (from, to) if from.isNumeric && to.isNumeric => // numeric to numeric
+          case (from, to) => throw AnalysisError(s"cannot cast $from to $to")
+        TCast(tInner, target)
+
       case CallAST(name, args) =>
         val funInfo = lookupFun(name)
         val tArgs = args.map(analyzeExpr)
