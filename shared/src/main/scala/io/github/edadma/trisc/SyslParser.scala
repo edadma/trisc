@@ -2,10 +2,9 @@ package io.github.edadma.trisc
 
 import io.github.edadma.indentation.IndentationLexical
 import scala.util.parsing.combinator.syntactical.StandardTokenParsers
-import scala.util.parsing.combinator.PackratParsers
 import scala.util.parsing.input.CharSequenceReader
 
-object SyslParser extends StandardTokenParsers with PackratParsers {
+class SyslParser extends StandardTokenParsers {
 
   override val lexical: SyslLexical = new SyslLexical
 
@@ -14,19 +13,18 @@ object SyslParser extends StandardTokenParsers with PackratParsers {
   // --- Entry point ---
 
   def parseProgram(source: String): Either[String, ProgramAST] =
-    val tokens = lexical.read(new CharSequenceReader(source))
-    phrase(program)(tokens) match
+    phrase(program)(lexical.read(new CharSequenceReader(source))) match
       case Success(result, _) => Right(result)
       case ns: NoSuccess      => Left(ns.toString)
 
   // --- Program ---
 
-  lazy val program: PackratParser[ProgramAST] =
+  lazy val program: Parser[ProgramAST] =
     repsep(decl, rep1(Newline)) <~ opt(rep(Newline)) ^^ ProgramAST.apply
 
   // --- Declarations ---
 
-  lazy val decl: PackratParser[DeclAST] =
+  lazy val decl: Parser[DeclAST] =
     ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
       case name ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body)
     } |
@@ -40,39 +38,39 @@ object SyslParser extends StandardTokenParsers with PackratParsers {
         case name ~ e => VarDeclAST(name, None, e)
       }
 
-  lazy val funRest: PackratParser[(Option[String], FunBodyAST)] =
+  lazy val funRest: Parser[(Option[String], FunBodyAST)] =
     "->" ~> typeName ~ ("=" ~> bodyExprOrBlock) ^^ { case rt ~ body => (Some(rt), body) } |
       "->" ~> typeName ~ block ^^ { case rt ~ body => (Some(rt), BlockBodyAST(body)) } |
       "=" ~> bodyExprOrBlock ^^ { body => (None, body) } |
       block ^^ { body => (None, BlockBodyAST(body)) }
 
-  lazy val bodyExprOrBlock: PackratParser[FunBodyAST] =
+  lazy val bodyExprOrBlock: Parser[FunBodyAST] =
     Newline ~> Indent ~> stmts <~ opt(Newline) <~ Dedent ^^ (s => BlockBodyAST(s)) |
       expr ^^ ExprBodyAST.apply
 
-  lazy val param: PackratParser[ParamAST] =
+  lazy val param: Parser[ParamAST] =
     ident ~ (":" ~> typeName) ^^ { case name ~ t => ParamAST(name, t) }
 
-  lazy val typeName: PackratParser[String] =
+  lazy val typeName: Parser[String] =
     "int" | "char" | "void" | ident
 
-  lazy val typeExpr: PackratParser[String] =
+  lazy val typeExpr: Parser[String] =
     "[" ~> numericLit ~ ("]" ~> typeName) ^^ { case n ~ t => s"[$n]$t" }
 
   // --- Block ---
 
-  lazy val block: PackratParser[List[StmtAST]] =
+  lazy val block: Parser[List[StmtAST]] =
     Newline ~> Indent ~> stmts <~ opt(Newline) <~ Dedent
 
   // --- Statements ---
 
-  lazy val stmts: PackratParser[List[StmtAST]] =
+  lazy val stmts: Parser[List[StmtAST]] =
     rep1sep(stmt, rep1(Newline))
 
-  lazy val stmt: PackratParser[StmtAST] =
+  lazy val stmt: Parser[StmtAST] =
     whileStmt | returnStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
 
-  lazy val identStmt: PackratParser[StmtAST] =
+  lazy val identStmt: Parser[StmtAST] =
     ident ~ (":" ~> typeExpr) ^^ { case name ~ t => VarStmtAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t)) } |
       ident ~ (":" ~> typeName) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ ("[" ~> expr <~ "]") ~ ("=" ~> expr) ^^ { case name ~ idx ~ value =>
@@ -80,41 +78,41 @@ object SyslParser extends StandardTokenParsers with PackratParsers {
       } |
       ident ~ ("=" ~> expr) ^^ { case name ~ e => AssignStmtAST(name, e) }
 
-  lazy val derefAssignStmt: PackratParser[StmtAST] =
+  lazy val derefAssignStmt: Parser[StmtAST] =
     "*" ~> unary ~ ("=" ~> expr) ^^ { case ptr ~ value => DerefAssignStmtAST(ptr, value) }
 
-  lazy val whileStmt: PackratParser[WhileStmtAST] =
+  lazy val whileStmt: Parser[WhileStmtAST] =
     "while" ~> expr ~ block ^^ { case cond ~ body => WhileStmtAST(cond, body) }
 
-  lazy val returnStmt: PackratParser[ReturnStmtAST] =
+  lazy val returnStmt: Parser[ReturnStmtAST] =
     "return" ~> opt(expr) ^^ ReturnStmtAST.apply
 
   // --- Expressions ---
 
-  lazy val expr: PackratParser[ExpressionAST] = ifExpr | logicalOr
+  lazy val expr: Parser[ExpressionAST] = ifExpr | logicalOr
 
-  lazy val ifExpr: PackratParser[IfExprAST] =
+  lazy val ifExpr: Parser[IfExprAST] =
     "if" ~> logicalOr ~ ("then" ~> thenBody) ^^ { case cond ~ ((tb, eb)) => IfExprAST(cond, tb, eb) } |
       "if" ~> logicalOr ~ block ~ opt(Newline ~> elseClause) ^^ {
         case cond ~ body ~ elseBody => IfExprAST(cond, body, elseBody)
       }
 
-  lazy val thenBody: PackratParser[(List[StmtAST], Option[List[StmtAST]])] =
+  lazy val thenBody: Parser[(List[StmtAST], Option[List[StmtAST]])] =
     block ~ opt(Newline ~> elseClause) ^^ { case body ~ eb => (body, eb) } |
       inlineStmt ~ opt(elseInline) ^^ { case s ~ eb => (List(s), eb) }
 
-  lazy val elseInline: PackratParser[List[StmtAST]] =
+  lazy val elseInline: Parser[List[StmtAST]] =
     "else" ~> (ifExpr ^^ (e => List(ExprStmtAST(e))) | inlineStmt ^^ (s => List(s))) |
       Newline ~> elseClause
 
-  lazy val elseClause: PackratParser[List[StmtAST]] =
+  lazy val elseClause: Parser[List[StmtAST]] =
     "else" ~> (
       ifExpr ^^ (e => List(ExprStmtAST(e))) |
         block |
         inlineStmt ^^ (s => List(s))
     )
 
-  lazy val inlineStmt: PackratParser[StmtAST] =
+  lazy val inlineStmt: Parser[StmtAST] =
     returnStmt |
       "*" ~> unary ~ ("=" ~> expr) ^^ { case ptr ~ value => DerefAssignStmtAST(ptr, value) } |
       ident ~ ("[" ~> expr <~ "]") ~ ("=" ~> expr) ^^ { case name ~ idx ~ value =>
@@ -125,20 +123,20 @@ object SyslParser extends StandardTokenParsers with PackratParsers {
 
   // --- Precedence climbing ---
 
-  lazy val logicalOr: PackratParser[ExpressionAST] =
+  lazy val logicalOr: Parser[ExpressionAST] =
     logicalAnd ~ rep("||" ~> logicalAnd) ^^ {
       case first ~ rest => rest.foldLeft(first)((l, r) => BinaryAST(l, "||", r))
     }
 
-  lazy val logicalAnd: PackratParser[ExpressionAST] =
+  lazy val logicalAnd: Parser[ExpressionAST] =
     comparison ~ rep("&&" ~> comparison) ^^ {
       case first ~ rest => rest.foldLeft(first)((l, r) => BinaryAST(l, "&&", r))
     }
 
-  lazy val comparisonOp: PackratParser[String] =
+  lazy val comparisonOp: Parser[String] =
     "==" | "!=" | "<=" | ">=" | "<" | ">"
 
-  lazy val comparison: PackratParser[ExpressionAST] =
+  lazy val comparison: Parser[ExpressionAST] =
     additive ~ rep(comparisonOp ~ additive) ^^ {
       case first ~ Nil => first
       case first ~ chain =>
@@ -149,17 +147,17 @@ object SyslParser extends StandardTokenParsers with PackratParsers {
         pairs.reduceLeft((l, r) => BinaryAST(l, "&&", r))
     }
 
-  lazy val additive: PackratParser[ExpressionAST] =
+  lazy val additive: Parser[ExpressionAST] =
     multiplicative ~ rep(("+" | "-") ~ multiplicative) ^^ {
       case first ~ rest => rest.foldLeft(first) { case (l, op ~ r) => BinaryAST(l, op, r) }
     }
 
-  lazy val multiplicative: PackratParser[ExpressionAST] =
+  lazy val multiplicative: Parser[ExpressionAST] =
     unary ~ rep(("*" | "/" | "%") ~ unary) ^^ {
       case first ~ rest => rest.foldLeft(first) { case (l, op ~ r) => BinaryAST(l, op, r) }
     }
 
-  lazy val unary: PackratParser[ExpressionAST] =
+  lazy val unary: Parser[ExpressionAST] =
     "-" ~> unary ^^ (e => UnaryAST("-", e)) |
       "!" ~> unary ^^ (e => UnaryAST("!", e)) |
       "*" ~> unary ^^ DerefAST.apply |
@@ -167,12 +165,12 @@ object SyslParser extends StandardTokenParsers with PackratParsers {
       "&" ~> ident ^^ AddrOfAST.apply |
       postfix
 
-  lazy val postfix: PackratParser[ExpressionAST] =
+  lazy val postfix: Parser[ExpressionAST] =
     primary ~ rep("[" ~> expr <~ "]") ^^ {
       case base ~ indices => indices.foldLeft(base)((e, idx) => IndexAST(e, idx))
     }
 
-  lazy val primary: PackratParser[ExpressionAST] =
+  lazy val primary: Parser[ExpressionAST] =
     numericLit ^^ (n => IntLitAST(n.toLong)) |
       stringLit ^^ StringLitAST.apply |
       "true" ^^^ BoolLitAST(true) |

@@ -7,7 +7,7 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   def run(source: String): (Long, String) =
     val buf = new StringBuilder
-    val Right(program) = SyslParser.parseProgram(source): @unchecked
+    val Right(program) = (new SyslParser).parseProgram(source): @unchecked
     val interp = new SyslInterpreter(s => buf ++= s)
     val result = interp.run(program)
     (result, buf.toString)
@@ -550,7 +550,7 @@ class SyslTests extends AnyFreeSpec with Matchers {
   // ===== Error cases =====
 
   "undefined variable error" in {
-    val result = SyslParser.parseProgram("main() -> int = x\n")
+    val result = (new SyslParser).parseProgram("main() -> int = x\n")
     result match
       case Right(program) =>
         val interp = new SyslInterpreter()
@@ -559,7 +559,7 @@ class SyslTests extends AnyFreeSpec with Matchers {
   }
 
   "undefined function error" in {
-    val result = SyslParser.parseProgram("main() -> int = unknown()\n")
+    val result = (new SyslParser).parseProgram("main() -> int = unknown()\n")
     result match
       case Right(program) =>
         val interp = new SyslInterpreter()
@@ -568,7 +568,7 @@ class SyslTests extends AnyFreeSpec with Matchers {
   }
 
   "division by zero error" in {
-    val result = SyslParser.parseProgram("main() -> int = 42 / 0\n")
+    val result = (new SyslParser).parseProgram("main() -> int = 42 / 0\n")
     result match
       case Right(program) =>
         val interp = new SyslInterpreter()
