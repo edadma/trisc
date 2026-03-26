@@ -82,7 +82,8 @@ class SyslParser extends StandardTokenParsers {
     "*" ~> unary ~ ("=" ~> expr) ^^ { case ptr ~ value => DerefAssignStmtAST(ptr, value) }
 
   lazy val whileStmt: Parser[WhileStmtAST] =
-    "while" ~> expr ~ block ^^ { case cond ~ body => WhileStmtAST(cond, body) }
+    "while" ~> expr ~ ("do" ~> (block | inlineStmt ^^ (s => List(s)))) ^^ { case cond ~ body => WhileStmtAST(cond, body) } |
+      "while" ~> expr ~ block ^^ { case cond ~ body => WhileStmtAST(cond, body) }
 
   lazy val returnStmt: Parser[ReturnStmtAST] =
     "return" ~> opt(expr) ^^ ReturnStmtAST.apply

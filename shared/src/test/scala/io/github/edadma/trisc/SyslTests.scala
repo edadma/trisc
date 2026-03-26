@@ -322,6 +322,51 @@ class SyslTests extends AnyFreeSpec with Matchers {
         |""".stripMargin) shouldBe 0
   }
 
+  // ===== While with do =====
+
+  "while do block" in {
+    eval(
+      """main() -> int
+        |    i = 0
+        |    sum = 0
+        |    while i < 10 do
+        |        sum = sum + i
+        |        i = i + 1
+        |    sum
+        |""".stripMargin) shouldBe 45
+  }
+
+  "while do inline" in {
+    eval(
+      """main() -> int
+        |    i = 0
+        |    while i < 5 do i = i + 1
+        |    i
+        |""".stripMargin) shouldBe 5
+  }
+
+  "while do inline function call" in {
+    eval(
+      """inc(p: int) -> int
+        |    *p = *p + 1
+        |    *p
+        |
+        |main() -> int
+        |    i = 0
+        |    while i < 5 do inc(&i)
+        |    i
+        |""".stripMargin) shouldBe 5
+  }
+
+  "while do never enters" in {
+    eval(
+      """main() -> int
+        |    x = 0
+        |    while 0 do x = 42
+        |    x
+        |""".stripMargin) shouldBe 0
+  }
+
   // ===== Functions =====
 
   "function call" in {
