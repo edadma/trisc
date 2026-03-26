@@ -1,9 +1,22 @@
 package io.github.edadma.trisc
 
-import io.github.edadma.gramma.*
+import io.github.edadma.indentation.IndentationLexical
 
-object SyslLexer extends StdLexer:
-  override protected def indentSensitive: Boolean = true
+class SyslLexical extends IndentationLexical(
+  newlineBeforeIndent = true,
+  newlineAfterDedent = true,
+  startLineJoining = List("(", "["),
+  endLineJoining = List(")", "]"),
+  lineComment = "//",
+  blockCommentStart = "/*",
+  blockCommentEnd = "*/",
+) {
+  reserved ++= List(
+    "if", "then", "else", "while", "for", "return",
+    "int", "char", "void",
+    "true", "false",
+    "end",
+  )
 
   delimiters ++= List(
     "(", ")", "[", "]",
@@ -13,13 +26,4 @@ object SyslLexer extends StdLexer:
     "=", "->",
     ",", ":", "&",
   )
-
-  reserved ++= List(
-    "if", "then", "else", "while", "for", "return",
-    "int", "char", "void",
-    "true", "false",
-    "var",
-  )
-
-  override protected def skip(using ctx: LexCtx): Unit =
-    skipWhitespace("//", "/*", "*/", false)
+}

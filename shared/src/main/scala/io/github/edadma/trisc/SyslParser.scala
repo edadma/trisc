@@ -1,182 +1,158 @@
 package io.github.edadma.trisc
 
-import io.github.edadma.gramma.*
-import scala.language.implicitConversions
+import io.github.edadma.indentation.IndentationLexical
+import scala.util.parsing.combinator.syntactical.StandardTokenParsers
+import scala.util.parsing.combinator.PackratParsers
+import scala.util.parsing.input.CharSequenceReader
 
-object SyslParser extends StdParsers(SyslLexer):
+object SyslParser extends StandardTokenParsers with PackratParsers {
+
+  override val lexical: SyslLexical = new SyslLexical
+
+  import lexical.{Newline, Indent, Dedent}
 
   // --- Entry point ---
 
-  def parseProgram(source: String): Either[ParseError, ProgramAST] =
-    parseSource(source)(program)
+  def parseProgram(source: String): Either[String, ProgramAST] =
+    val tokens = lexical.read(new CharSequenceReader(source))
+    phrase(program)(tokens) match
+      case Success(result, _) => Right(result)
+      case ns: NoSuccess      => Left(ns.toString)
 
   // --- Program ---
 
-  def program(using ctx: ParseCtx): P[ProgramAST] =
-    repsep(decl, rep1(newline)) ^^ ProgramAST.apply
+  lazy val program: PackratParser[ProgramAST] =
+    repsep(decl, rep1(Newline)) <~ opt(rep(Newline)) ^^ ProgramAST.apply
 
   // --- Declarations ---
 
-  def decl(using ctx: ParseCtx): P[DeclAST] =
-    ident >> { name =>
-      "(" ~> repsep(param, ",") <~ ")" >> { params =>
-        funRest(name, params)
+  lazy val decl: PackratParser[DeclAST] =
+    ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
+      case name ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body)
+    } |
+      ident ~ (":" ~> typeName) ~ ("=" ~> expr) ^^ {
+        case name ~ t ~ e => VarDeclAST(name, Some(t), e)
       } |
-        declRest(name)
-    }
+      ident ~ ("=" ~> expr) ^^ {
+        case name ~ e => VarDeclAST(name, None, e)
+      }
 
-  def typeName(using ctx: ParseCtx): P[String] =
+  lazy val funRest: PackratParser[(Option[String], FunBodyAST)] =
+    "->" ~> typeName ~ ("=" ~> bodyExprOrBlock) ^^ { case rt ~ body => (Some(rt), body) } |
+      "->" ~> typeName ~ block ^^ { case rt ~ body => (Some(rt), BlockBodyAST(body)) } |
+      "=" ~> bodyExprOrBlock ^^ { body => (None, body) } |
+      block ^^ { body => (None, BlockBodyAST(body)) }
+
+  lazy val bodyExprOrBlock: PackratParser[FunBodyAST] =
+    Newline ~> Indent ~> stmts <~ opt(Newline) <~ Dedent ^^ (s => BlockBodyAST(s)) |
+      expr ^^ ExprBodyAST.apply
+
+  lazy val param: PackratParser[ParamAST] =
+    ident ~ (":" ~> typeName) ^^ { case name ~ t => ParamAST(name, t) }
+
+  lazy val typeName: PackratParser[String] =
     "int" | "char" | "void" | ident
 
-  def funRest(name: String, params: List[ParamAST])(using ctx: ParseCtx): P[DeclAST] =
-    "->" ~> typeName >> { rt =>
-      "=" ~> bodyExprOrBlock ^^ { body => FunDeclAST(name, params, Some(rt), body): DeclAST } |
-        block(stmts) ^^ { body => FunDeclAST(name, params, Some(rt), BlockBodyAST(body)): DeclAST }
-    } |
-      "=" ~> bodyExprOrBlock ^^ { body => FunDeclAST(name, params, None, body): DeclAST } |
-      block(stmts) ^^ { body => FunDeclAST(name, params, None, BlockBodyAST(body)): DeclAST }
+  // --- Block ---
 
-  def bodyExprOrBlock(using ctx: ParseCtx): P[FunBodyAST] =
-    block(stmts) ^^ (s => BlockBodyAST(s): FunBodyAST) |
-      expr ^^ (e => ExprBodyAST(e): FunBodyAST)
-
-  def declRest(name: String)(using ctx: ParseCtx): P[DeclAST] =
-    ":" ~> typeName ~ ("=" ~> expr) ^^ { case t ~ e => VarDeclAST(name, Some(t), e): DeclAST } |
-      "=" ~> expr ^^ { e => VarDeclAST(name, None, e): DeclAST }
-
-  def param(using ctx: ParseCtx): P[ParamAST] =
-    ident ~ (":" ~> typeName) ^^ { case name ~ t => ParamAST(name, t) }
+  lazy val block: PackratParser[List[StmtAST]] =
+    Newline ~> Indent ~> stmts <~ opt(Newline) <~ Dedent
 
   // --- Statements ---
 
-  def stmts(using ctx: ParseCtx): P[List[StmtAST]] =
-    rep1sep(stmt, newline)
+  lazy val stmts: PackratParser[List[StmtAST]] =
+    rep1sep(stmt, rep1(Newline))
 
-  def stmt(using ctx: ParseCtx): P[StmtAST] =
-    whileStmt ^^ (s => s: StmtAST) |
-      returnStmt ^^ (s => s: StmtAST) |
-      identStmt |
-      expr ^^ (e => ExprStmtAST(e): StmtAST)
+  lazy val stmt: PackratParser[StmtAST] =
+    whileStmt | returnStmt | identStmt | expr ^^ ExprStmtAST.apply
 
-  def identStmt(using ctx: ParseCtx): P[StmtAST] =
-    ident >> { name =>
-      ":" ~> typeName ~ ("=" ~> expr) ^^ { case t ~ e => VarStmtAST(name, Some(t), e): StmtAST } |
-        "=" ~> expr ^^ { e => AssignStmtAST(name, e): StmtAST } |
-        "(" ~> repsep(expr, ",") <~ ")" ^^ { args => ExprStmtAST(CallAST(name, args)): StmtAST } |
-        continueExpr(VarRefAST(name)) ^^ { e => ExprStmtAST(e): StmtAST }
-    }
+  lazy val identStmt: PackratParser[StmtAST] =
+    ident ~ (":" ~> typeName) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
+      ident ~ ("=" ~> expr) ^^ { case name ~ e => AssignStmtAST(name, e) }
 
-  // Continue parsing an expression given a left-hand operand already parsed
-  def continueExpr(left: ExpressionAST)(using ctx: ParseCtx): P[ExpressionAST] =
-    val op = "+" | "-" | "*" | "/" | "%" | "==" | "!=" | "<=" | ">=" | "<" | ">" | "&&" | "||"
-    op ~ expr ^^ { case o ~ r => BinaryAST(left, o, r) } |
-      succeed(left)
+  lazy val whileStmt: PackratParser[WhileStmtAST] =
+    "while" ~> expr ~ block ^^ { case cond ~ body => WhileStmtAST(cond, body) }
 
-  def ifExpr(using ctx: ParseCtx): P[IfExprAST] =
-    "if" ~> expr >> { cond =>
-      // if cond then <inline-expr-or-block>
-      "then" ~> ifThenBody(cond) |
-        // if cond <block>
-        block(stmts) >> { thenBody =>
-          ifElsePart(cond, thenBody)
-        }
-    }
-
-  def ifThenBody(cond: ExpressionAST)(using ctx: ParseCtx): P[IfExprAST] =
-    // then + block on next line
-    block(stmts) >> { thenBody => ifElsePart(cond, thenBody) } |
-      // then + inline statement(s)
-      inlineStmt >> { s =>
-        ifElseInline(cond, List(s))
-      }
-
-  def inlineStmt(using ctx: ParseCtx): P[StmtAST] =
-    returnStmt ^^ (s => s: StmtAST) |
-      ident >> { name =>
-        "=" ~> expr ^^ { e => AssignStmtAST(name, e): StmtAST } |
-          "(" ~> repsep(expr, ",") <~ ")" >> { args =>
-            continueExpr(CallAST(name, args)) ^^ { e => ExprStmtAST(e): StmtAST }
-          } |
-          continueExpr(VarRefAST(name)) ^^ { e => ExprStmtAST(e): StmtAST }
-      } |
-      expr ^^ (e => ExprStmtAST(e): StmtAST)
-
-  def ifElsePart(cond: ExpressionAST, thenBody: List[StmtAST])(using ctx: ParseCtx): P[IfExprAST] =
-    if peek(newline ~> keyword("else")) then
-      newline ~> "else" ~> (
-        block(stmts) ^^ { elseBody => IfExprAST(cond, thenBody, Some(elseBody)) } |
-          ifExpr ^^ { elif => IfExprAST(cond, thenBody, Some(List(ExprStmtAST(elif)))) }
-      )
-    else
-      succeed(IfExprAST(cond, thenBody, None))
-
-  def ifElseInline(cond: ExpressionAST, thenBody: List[StmtAST])(using ctx: ParseCtx): P[IfExprAST] =
-    "else" ~> (
-      ifExpr ^^ { elif => IfExprAST(cond, thenBody, Some(List(ExprStmtAST(elif)))) } |
-        inlineStmt ^^ { s => IfExprAST(cond, thenBody, Some(List(s))) }
-    ) |
-      (if peek(newline ~> keyword("else")) then
-        newline ~> "else" ~> (
-          block(stmts) ^^ { elseBody => IfExprAST(cond, thenBody, Some(elseBody)) } |
-            ifExpr ^^ { elif => IfExprAST(cond, thenBody, Some(List(ExprStmtAST(elif)))) } |
-            inlineStmt ^^ { s => IfExprAST(cond, thenBody, Some(List(s))) }
-        )
-      else
-        succeed(IfExprAST(cond, thenBody, None))
-      )
-
-  def whileStmt(using ctx: ParseCtx): P[WhileStmtAST] =
-    "while" ~> expr ~ block(stmts) ^^ {
-      case cond ~ body => WhileStmtAST(cond, body)
-    }
-
-  def returnStmt(using ctx: ParseCtx): P[ReturnStmtAST] =
+  lazy val returnStmt: PackratParser[ReturnStmtAST] =
     "return" ~> opt(expr) ^^ ReturnStmtAST.apply
 
-  // --- Expressions (precedence climbing) ---
+  // --- Expressions ---
 
-  def expr(using ctx: ParseCtx): P[ExpressionAST] = logicalOr
+  lazy val expr: PackratParser[ExpressionAST] = ifExpr | logicalOr
 
-  def logicalOr(using ctx: ParseCtx): P[ExpressionAST] =
-    leftAssoc(logicalAnd, "||")((l, op, r) => BinaryAST(l, op, r))
+  lazy val ifExpr: PackratParser[IfExprAST] =
+    "if" ~> logicalOr ~ ("then" ~> thenBody) ^^ { case cond ~ ((tb, eb)) => IfExprAST(cond, tb, eb) } |
+      "if" ~> logicalOr ~ block ~ opt(Newline ~> elseClause) ^^ {
+        case cond ~ body ~ elseBody => IfExprAST(cond, body, elseBody)
+      }
 
-  def logicalAnd(using ctx: ParseCtx): P[ExpressionAST] =
-    leftAssoc(comparison, "&&")((l, op, r) => BinaryAST(l, op, r))
+  lazy val thenBody: PackratParser[(List[StmtAST], Option[List[StmtAST]])] =
+    block ~ opt(Newline ~> elseClause) ^^ { case body ~ eb => (body, eb) } |
+      inlineStmt ~ opt(elseInline) ^^ { case s ~ eb => (List(s), eb) }
 
-  def comparisonOp(using ctx: ParseCtx): P[String] =
+  lazy val elseInline: PackratParser[List[StmtAST]] =
+    "else" ~> (ifExpr ^^ (e => List(ExprStmtAST(e))) | inlineStmt ^^ (s => List(s))) |
+      Newline ~> elseClause
+
+  lazy val elseClause: PackratParser[List[StmtAST]] =
+    "else" ~> (
+      ifExpr ^^ (e => List(ExprStmtAST(e))) |
+        block |
+        inlineStmt ^^ (s => List(s))
+    )
+
+  lazy val inlineStmt: PackratParser[StmtAST] =
+    returnStmt |
+      ident ~ ("=" ~> expr) ^^ { case name ~ e => AssignStmtAST(name, e) } |
+      expr ^^ ExprStmtAST.apply
+
+  // --- Precedence climbing ---
+
+  lazy val logicalOr: PackratParser[ExpressionAST] =
+    logicalAnd ~ rep("||" ~> logicalAnd) ^^ {
+      case first ~ rest => rest.foldLeft(first)((l, r) => BinaryAST(l, "||", r))
+    }
+
+  lazy val logicalAnd: PackratParser[ExpressionAST] =
+    comparison ~ rep("&&" ~> comparison) ^^ {
+      case first ~ rest => rest.foldLeft(first)((l, r) => BinaryAST(l, "&&", r))
+    }
+
+  lazy val comparisonOp: PackratParser[String] =
     "==" | "!=" | "<=" | ">=" | "<" | ">"
 
-  def comparison(using ctx: ParseCtx): P[ExpressionAST] =
+  lazy val comparison: PackratParser[ExpressionAST] =
     additive ~ rep(comparisonOp ~ additive) ^^ {
       case first ~ Nil => first
       case first ~ chain =>
         val operands = first :: chain.map { case _ ~ operand => operand }
         val ops = chain.map { case op ~ _ => op }
-        // desugar: a op1 b op2 c → (a op1 b) && (b op2 c)
         val pairs = for i <- ops.indices yield
           BinaryAST(operands(i), ops(i), operands(i + 1))
         pairs.reduceLeft((l, r) => BinaryAST(l, "&&", r))
     }
 
-  def additive(using ctx: ParseCtx): P[ExpressionAST] =
-    leftAssoc(multiplicative, "+" | "-")((l, op, r) => BinaryAST(l, op, r))
+  lazy val additive: PackratParser[ExpressionAST] =
+    multiplicative ~ rep(("+" | "-") ~ multiplicative) ^^ {
+      case first ~ rest => rest.foldLeft(first) { case (l, op ~ r) => BinaryAST(l, op, r) }
+    }
 
-  def multiplicative(using ctx: ParseCtx): P[ExpressionAST] =
-    leftAssoc(unary, "*" | "/" | "%")((l, op, r) => BinaryAST(l, op, r))
+  lazy val multiplicative: PackratParser[ExpressionAST] =
+    unary ~ rep(("*" | "/" | "%") ~ unary) ^^ {
+      case first ~ rest => rest.foldLeft(first) { case (l, op ~ r) => BinaryAST(l, op, r) }
+    }
 
-  def unary(using ctx: ParseCtx): P[ExpressionAST] =
+  lazy val unary: PackratParser[ExpressionAST] =
     "-" ~> unary ^^ (e => UnaryAST("-", e)) |
       "!" ~> unary ^^ (e => UnaryAST("!", e)) |
       primary
 
-  def primary(using ctx: ParseCtx): P[ExpressionAST] =
-    ifExpr ^^ (e => e: ExpressionAST) |
-      numericLit ^^ (n => IntLitAST(n.toLong)) |
+  lazy val primary: PackratParser[ExpressionAST] =
+    numericLit ^^ (n => IntLitAST(n.toLong)) |
       stringLit ^^ StringLitAST.apply |
-      "true" ^^ (_ => BoolLitAST(true)) |
-      "false" ^^ (_ => BoolLitAST(false)) |
-      ident >> { name =>
-        "(" ~> repsep(expr, ",") <~ ")" ^^ (args => CallAST(name, args): ExpressionAST) |
-          succeed(VarRefAST(name): ExpressionAST)
-      } |
+      "true" ^^^ BoolLitAST(true) |
+      "false" ^^^ BoolLitAST(false) |
+      ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |
+      ident ^^ VarRefAST.apply |
       "(" ~> expr <~ ")"
+}

@@ -1,6 +1,6 @@
 package io.github.edadma.trisc
 
-import io.github.edadma.gramma.Positional
+import scala.util.parsing.input.Positional
 
 // Top-level
 case class ProgramAST(decls: List[DeclAST])
