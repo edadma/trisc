@@ -96,6 +96,18 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         else if globals.contains(target) then globals(target).value = v
         else env(target) = new Cell(v)
 
+      case CompoundAssignStmtAST(target, op, value) =>
+        val cell = lookupCell(target, env)
+        val l = toLong(cell.value)
+        val r = toLong(evalAny(value, env))
+        cell.value = IntVal(op match
+          case "+" => l + r
+          case "-" => l - r
+          case "*" => l * r
+          case "/" => if r == 0 then throw RuntimeError("division by zero") else l / r
+          case "%" => if r == 0 then throw RuntimeError("modulo by zero") else l % r
+        )
+
       case DerefAssignStmtAST(pointer, value) =>
         val cell = derefCell(evalAny(pointer, env))
         cell.value = evalAny(value, env)

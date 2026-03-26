@@ -70,12 +70,16 @@ class SyslParser extends StandardTokenParsers {
   lazy val stmt: Parser[StmtAST] =
     whileStmt | returnStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
 
+  lazy val compoundOp: Parser[String] =
+    "+=" | "-=" | "*=" | "/=" | "%="
+
   lazy val identStmt: Parser[StmtAST] =
     ident ~ (":" ~> typeExpr) ^^ { case name ~ t => VarStmtAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t)) } |
       ident ~ (":" ~> typeName) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ ("[" ~> expr <~ "]") ~ ("=" ~> expr) ^^ { case name ~ idx ~ value =>
         IndexAssignStmtAST(VarRefAST(name), idx, value)
       } |
+      ident ~ compoundOp ~ expr ^^ { case name ~ op ~ e => CompoundAssignStmtAST(name, op.init, e) } |
       ident ~ ("=" ~> expr) ^^ { case name ~ e => AssignStmtAST(name, e) }
 
   lazy val derefAssignStmt: Parser[StmtAST] =
@@ -126,6 +130,7 @@ class SyslParser extends StandardTokenParsers {
       ident ~ ("[" ~> expr <~ "]") ~ ("=" ~> expr) ^^ { case name ~ idx ~ value =>
         IndexAssignStmtAST(VarRefAST(name), idx, value)
       } |
+      ident ~ compoundOp ~ expr ^^ { case name ~ op ~ e => CompoundAssignStmtAST(name, op.init, e) } |
       ident ~ ("=" ~> expr) ^^ { case name ~ e => AssignStmtAST(name, e) } |
       expr ^^ ExprStmtAST.apply
 

@@ -577,6 +577,84 @@ class SyslTests extends AnyFreeSpec with Matchers {
         |""".stripMargin) shouldBe 0
   }
 
+  // ===== Compound assignment =====
+
+  "+= basic" in {
+    eval(
+      """main() -> int
+        |    x = 10
+        |    x += 5
+        |    x
+        |""".stripMargin) shouldBe 15
+  }
+
+  "-= basic" in {
+    eval(
+      """main() -> int
+        |    x = 10
+        |    x -= 3
+        |    x
+        |""".stripMargin) shouldBe 7
+  }
+
+  "*= basic" in {
+    eval(
+      """main() -> int
+        |    x = 6
+        |    x *= 7
+        |    x
+        |""".stripMargin) shouldBe 42
+  }
+
+  "/= basic" in {
+    eval(
+      """main() -> int
+        |    x = 42
+        |    x /= 6
+        |    x
+        |""".stripMargin) shouldBe 7
+  }
+
+  "%= basic" in {
+    eval(
+      """main() -> int
+        |    x = 17
+        |    x %= 5
+        |    x
+        |""".stripMargin) shouldBe 2
+  }
+
+  "+= in while loop" in {
+    eval(
+      """main() -> int
+        |    sum = 0
+        |    i = 0
+        |    while i < 5
+        |        sum += i
+        |        i += 1
+        |    sum
+        |""".stripMargin) shouldBe 10
+  }
+
+  "+= with expression" in {
+    eval(
+      """main() -> int
+        |    x = 10
+        |    y = 5
+        |    x += y * 2
+        |    x
+        |""".stripMargin) shouldBe 20
+  }
+
+  "+= inline with while do" in {
+    eval(
+      """main() -> int
+        |    i = 0
+        |    while i < 10 do i += 1
+        |    i
+        |""".stripMargin) shouldBe 10
+  }
+
   // ===== While with do =====
 
   "while do block" in {
