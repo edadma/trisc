@@ -78,7 +78,7 @@ class SyslAnalyzer:
       case (a, b) if a == b => true
       case (IntType, CharType) | (CharType, IntType) => true
       case (IntType, ByteType) | (ByteType, IntType) => true
-      case (IntType, BoolType) | (BoolType, IntType) => true
+      // bool and int are NOT compatible — use explicit casts
       case (CharType, ByteType) | (ByteType, CharType) => true
       case (ArrayType(e1, _), PtrType(e2)) if e1 == e2 => true
       case (ArrayType(e1, _), ArrayType(e2, _)) if e1 == e2 => true
@@ -111,6 +111,8 @@ class SyslAnalyzer:
       case VarStmtAST(name, typOpt, init) =>
         val tInit = analyzeExpr(init)
         val declType = typOpt.map(resolveTypeName).getOrElse(tInit.typ)
+        if typOpt.isDefined && !compatible(tInit.typ, declType) then
+          throw AnalysisError(s"cannot assign ${tInit.typ} to $declType variable '$name'")
         if localScope != null then
           localScope(name) = SymInfo(name, declType, true)
         TVarStmt(name, declType, tInit)
@@ -212,6 +214,8 @@ class SyslAnalyzer:
         val resultType = op match
           case "+" | "-" if tLeft.typ.isPointerLike && tRight.typ.isNumeric => tLeft.typ
           case "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>" =>
+            if !tLeft.typ.isNumeric || !tRight.typ.isNumeric then
+              throw AnalysisError(s"operator $op requires numeric types, got ${tLeft.typ} $op ${tRight.typ}")
             if tLeft.typ == IntType || tRight.typ == IntType then IntType
             else tLeft.typ
           case "==" | "!=" | "<" | ">" | "<=" | ">=" => BoolType

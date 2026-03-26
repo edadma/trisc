@@ -10,6 +10,12 @@ enum SyslType:
   case ArrayType(elem: SyslType, size: Int)
 
   def isNumeric: Boolean = this match
+    case IntType | CharType | ByteType => true
+    case _ => false
+
+  def isIntegral: Boolean = isNumeric
+
+  def isBoolOrNumeric: Boolean = this match
     case IntType | CharType | ByteType | BoolType => true
     case _ => false
 

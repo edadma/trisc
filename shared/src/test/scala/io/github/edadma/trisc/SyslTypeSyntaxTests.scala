@@ -241,6 +241,36 @@ class SyslTypeSyntaxTests extends SyslTestHelpers {
     (new SyslAnalyzer).analyze(ast) // should not throw
   }
 
+  // ===== Bool/int incompatibility =====
+
+  "analyzer rejects assigning int to bool variable" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """main() -> int
+        |    x: bool = 42
+        |    0
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "analyzer rejects assigning bool to int variable" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """main() -> int
+        |    x: int = true
+        |    0
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "analyzer rejects bool in arithmetic" in {
+    val Right(ast) = (new SyslParser).parseProgram("main() -> int = true + 1\n"): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "comparison result is bool not int" in {
+    // This should work: comparison produces bool, if accepts bool
+    eval("main() -> int = if 3 < 5 then 1 else 0\n") shouldBe 1
+  }
+
   // ===== Analyzer rejects indexing plain int =====
 
   "analyzer rejects indexing int" in {
