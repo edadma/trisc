@@ -166,7 +166,9 @@ class SyslParser extends StandardTokenParsers {
     }
 
   lazy val unary: Parser[ExpressionAST] =
-    "-" ~> unary ^^ (e => UnaryAST("-", e)) |
+    "++" ~> ident ^^ PreIncAST.apply |
+      "--" ~> ident ^^ PreDecAST.apply |
+      "-" ~> unary ^^ (e => UnaryAST("-", e)) |
       "!" ~> unary ^^ (e => UnaryAST("!", e)) |
       "*" ~> unary ^^ DerefAST.apply |
       "&" ~> ident ~ ("[" ~> expr <~ "]") ^^ { case name ~ idx => AddrOfIndexAST(VarRefAST(name), idx) } |
@@ -174,9 +176,11 @@ class SyslParser extends StandardTokenParsers {
       postfix
 
   lazy val postfix: Parser[ExpressionAST] =
-    primary ~ rep("[" ~> expr <~ "]") ^^ {
-      case base ~ indices => indices.foldLeft(base)((e, idx) => IndexAST(e, idx))
-    }
+    ident <~ "++" ^^ PostIncAST.apply |
+      ident <~ "--" ^^ PostDecAST.apply |
+      primary ~ rep("[" ~> expr <~ "]") ^^ {
+        case base ~ indices => indices.foldLeft(base)((e, idx) => IndexAST(e, idx))
+      }
 
   lazy val primary: Parser[ExpressionAST] =
     numericLit ^^ (n => IntLitAST(n.toLong)) |

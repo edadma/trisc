@@ -453,6 +453,106 @@ class SyslTests extends AnyFreeSpec with Matchers {
         |""".stripMargin) shouldBe 2
   }
 
+  // ===== Increment/decrement =====
+
+  "prefix increment" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    ++x
+        |""".stripMargin) shouldBe 6
+  }
+
+  "prefix increment returns new value" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    y = ++x
+        |    y
+        |""".stripMargin) shouldBe 6
+  }
+
+  "prefix decrement" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    --x
+        |""".stripMargin) shouldBe 4
+  }
+
+  "postfix increment returns old value" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    y = x++
+        |    y
+        |""".stripMargin) shouldBe 5
+  }
+
+  "postfix increment modifies variable" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    x++
+        |    x
+        |""".stripMargin) shouldBe 6
+  }
+
+  "postfix decrement returns old value" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    y = x--
+        |    y
+        |""".stripMargin) shouldBe 5
+  }
+
+  "postfix decrement modifies variable" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    x--
+        |    x
+        |""".stripMargin) shouldBe 4
+  }
+
+  "increment in while loop" in {
+    eval(
+      """main() -> int
+        |    i = 0
+        |    sum = 0
+        |    while i < 5
+        |        sum = sum + i
+        |        ++i
+        |    sum
+        |""".stripMargin) shouldBe 10
+  }
+
+  "postfix in expression" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    x++ + 10
+        |""".stripMargin) shouldBe 15
+  }
+
+  "prefix in expression" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    ++x + 10
+        |""".stripMargin) shouldBe 16
+  }
+
+  "while with do and postfix increment" in {
+    eval(
+      """main() -> int
+        |    i = 0
+        |    while i < 5 do i++
+        |    i
+        |""".stripMargin) shouldBe 5
+  }
+
   // ===== While =====
 
   "while loop" in {

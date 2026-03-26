@@ -133,6 +133,30 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case ArrVal(cells, off) => ArrVal(cells, off + idx)
           case _ => PtrVal(indexCell(arrVal, idx))
 
+      case PreIncAST(name) =>
+        val cell = lookupCell(name, env)
+        val v = toLong(cell.value) + 1
+        cell.value = IntVal(v)
+        IntVal(v)
+
+      case PreDecAST(name) =>
+        val cell = lookupCell(name, env)
+        val v = toLong(cell.value) - 1
+        cell.value = IntVal(v)
+        IntVal(v)
+
+      case PostIncAST(name) =>
+        val cell = lookupCell(name, env)
+        val old = toLong(cell.value)
+        cell.value = IntVal(old + 1)
+        IntVal(old)
+
+      case PostDecAST(name) =>
+        val cell = lookupCell(name, env)
+        val old = toLong(cell.value)
+        cell.value = IntVal(old - 1)
+        IntVal(old)
+
       case DerefAST(expr) => derefCell(evalAny(expr, env)).value
 
       case IndexAST(arr, index) =>
