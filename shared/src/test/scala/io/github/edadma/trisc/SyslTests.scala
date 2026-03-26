@@ -53,8 +53,8 @@ class SyslTests extends AnyFreeSpec with Matchers {
   "expression function with block body" in {
     eval(
       """compute(x: int) =
-        |    y := x * 2
-        |    z := y + 1
+        |    y = x * 2
+        |    z = y + 1
         |    z
         |
         |main() -> int = compute(20)
@@ -133,7 +133,7 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   // ===== Variables =====
 
-  "local variable with type" in {
+  "local variable with type annotation" in {
     eval(
       """main() -> int
         |    x: int = 42
@@ -144,7 +144,7 @@ class SyslTests extends AnyFreeSpec with Matchers {
   "local variable inferred" in {
     eval(
       """main() -> int
-        |    x := 42
+        |    x = 42
         |    return x
         |""".stripMargin) shouldBe 42
   }
@@ -152,7 +152,7 @@ class SyslTests extends AnyFreeSpec with Matchers {
   "variable assignment" in {
     eval(
       """main() -> int
-        |    x := 1
+        |    x = 1
         |    x = 42
         |    return x
         |""".stripMargin) shouldBe 42
@@ -161,8 +161,8 @@ class SyslTests extends AnyFreeSpec with Matchers {
   "multiple variables" in {
     eval(
       """main() -> int
-        |    a := 10
-        |    b := 20
+        |    a = 10
+        |    b = 20
         |    return a + b
         |""".stripMargin) shouldBe 30
   }
@@ -190,7 +190,7 @@ class SyslTests extends AnyFreeSpec with Matchers {
   "if-else" in {
     eval(
       """main() -> int
-        |    x := 5
+        |    x = 5
         |    if x > 3
         |        return 1
         |    else
@@ -201,7 +201,7 @@ class SyslTests extends AnyFreeSpec with Matchers {
   "if-else if-else" in {
     eval(
       """main() -> int
-        |    x := 5
+        |    x = 5
         |    if x > 10
         |        return 3
         |    else if x > 3
@@ -216,8 +216,8 @@ class SyslTests extends AnyFreeSpec with Matchers {
   "while loop" in {
     eval(
       """main() -> int
-        |    i := 0
-        |    sum := 0
+        |    i = 0
+        |    sum = 0
         |    while i < 10
         |        sum = sum + i
         |        i = i + 1
@@ -228,7 +228,7 @@ class SyslTests extends AnyFreeSpec with Matchers {
   "while loop never enters" in {
     eval(
       """main() -> int
-        |    x := 0
+        |    x = 0
         |    while 0
         |        x = 42
         |    return x
@@ -266,7 +266,7 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   "void function" in {
     eval(
-      """x := 0
+      """x =0
         |
         |set(v: int)
         |    x = v
@@ -321,7 +321,7 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   "global variable" in {
     eval(
-      """counter := 0
+      """counter =0
         |
         |increment()
         |    counter = counter + 1

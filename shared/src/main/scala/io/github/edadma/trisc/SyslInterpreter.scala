@@ -58,7 +58,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val v = eval(value, env)
         if env.contains(target) then env(target) = v
         else if globals.contains(target) then globals(target) = v
-        else throw RuntimeError(s"undefined variable: $target")
+        else env(target) = v // first assignment = declaration
 
       case ReturnStmtAST(value) =>
         throw ReturnException(value.map(e => eval(e, env)).getOrElse(0))

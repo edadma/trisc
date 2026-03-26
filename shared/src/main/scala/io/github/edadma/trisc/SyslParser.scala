@@ -42,7 +42,7 @@ object SyslParser extends StdParsers(SyslLexer):
 
   def declRest(name: String)(using ctx: ParseCtx): P[DeclAST] =
     ":" ~> typeName ~ ("=" ~> expr) ^^ { case t ~ e => VarDeclAST(name, Some(t), e): DeclAST } |
-      ":=" ~> expr ^^ { e => VarDeclAST(name, None, e): DeclAST }
+      "=" ~> expr ^^ { e => VarDeclAST(name, None, e): DeclAST }
 
   def param(using ctx: ParseCtx): P[ParamAST] =
     ident ~ (":" ~> typeName) ^^ { case name ~ t => ParamAST(name, t) }
@@ -62,7 +62,6 @@ object SyslParser extends StdParsers(SyslLexer):
   def identStmt(using ctx: ParseCtx): P[StmtAST] =
     ident >> { name =>
       ":" ~> typeName ~ ("=" ~> expr) ^^ { case t ~ e => VarStmtAST(name, Some(t), e): StmtAST } |
-        ":=" ~> expr ^^ { e => VarStmtAST(name, None, e): StmtAST } |
         "=" ~> expr ^^ { e => AssignStmtAST(name, e): StmtAST } |
         "(" ~> repsep(expr, ",") <~ ")" ^^ { args => ExprStmtAST(CallAST(name, args)): StmtAST } |
         continueExpr(VarRefAST(name)) ^^ { e => ExprStmtAST(e): StmtAST }
