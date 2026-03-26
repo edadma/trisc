@@ -1049,6 +1049,39 @@ class SyslTests extends AnyFreeSpec with Matchers {
         |""".stripMargin) shouldBe 3
   }
 
+  "double pointer" in {
+    eval(
+      """main() -> int
+        |    x = 42
+        |    p = &x
+        |    pp = &p
+        |    **pp
+        |""".stripMargin) shouldBe 42
+  }
+
+  "double pointer write" in {
+    eval(
+      """main() -> int
+        |    x = 0
+        |    p = &x
+        |    pp = &p
+        |    **pp = 99
+        |    x
+        |""".stripMargin) shouldBe 99
+  }
+
+  "double pointer redirect" in {
+    eval(
+      """main() -> int
+        |    x = 10
+        |    y = 20
+        |    p = &x
+        |    pp = &p
+        |    *pp = &y
+        |    *p
+        |""".stripMargin) shouldBe 20
+  }
+
   "pointer in while loop" in {
     eval(
       """main() -> int
