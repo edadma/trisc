@@ -75,7 +75,13 @@ class SyslParser extends StandardTokenParsers {
     rep1sep(stmt, rep1(Newline))
 
   lazy val stmt: Parser[StmtAST] =
-    whileStmt | returnStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+    whileStmt | returnStmt | breakStmt | continueStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+
+  lazy val breakStmt: Parser[BreakStmtAST] =
+    "break" ^^^ BreakStmtAST()
+
+  lazy val continueStmt: Parser[ContinueStmtAST] =
+    "continue" ^^^ ContinueStmtAST()
 
   lazy val compoundOp: Parser[String] =
     "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^="
@@ -132,7 +138,7 @@ class SyslParser extends StandardTokenParsers {
       )
 
   lazy val inlineStmt: Parser[StmtAST] =
-    returnStmt |
+    breakStmt | continueStmt | returnStmt |
       "*" ~> unary ~ ("=" ~> expr) ^^ { case ptr ~ value => DerefAssignStmtAST(ptr, value) } |
       ident ~ ("[" ~> expr <~ "]") ~ ("=" ~> expr) ^^ { case name ~ idx ~ value =>
         IndexAssignStmtAST(VarRefAST(name), idx, value)

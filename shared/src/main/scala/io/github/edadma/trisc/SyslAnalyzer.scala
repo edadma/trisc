@@ -12,6 +12,7 @@ class SyslAnalyzer:
   private val globalScope = new mutable.LinkedHashMap[String, SymInfo]
   private val functions = new mutable.LinkedHashMap[String, FunInfo]
   private var localScope: mutable.LinkedHashMap[String, SymInfo] = null
+  private var loopDepth: Int = 0
 
   private val builtinFunctions = Map(
     "putchar" -> FunInfo("putchar", List("c" -> IntType), IntType),
@@ -144,7 +145,18 @@ class SyslAnalyzer:
       case WhileStmtAST(cond, body) =>
         val tCond = analyzeExpr(cond)
         if tCond.typ != BoolType then throw AnalysisError(s"while condition must be bool, got ${tCond.typ}")
-        TWhileStmt(tCond, analyzeBlock(body))
+        loopDepth += 1
+        val tBody = analyzeBlock(body)
+        loopDepth -= 1
+        TWhileStmt(tCond, tBody)
+
+      case BreakStmtAST() =>
+        if loopDepth == 0 then throw AnalysisError("break outside of loop")
+        TBreakStmt
+
+      case ContinueStmtAST() =>
+        if loopDepth == 0 then throw AnalysisError("continue outside of loop")
+        TContinueStmt
 
       case ExprStmtAST(expr) =>
         TExprStmt(analyzeExpr(expr))

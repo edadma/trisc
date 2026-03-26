@@ -13,6 +13,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   import Value.*
 
   case class ReturnException(value: Value) extends RuntimeException
+  case object BreakException extends RuntimeException
+  case object ContinueException extends RuntimeException
   case class RuntimeError(msg: String) extends RuntimeException(msg)
 
   private type Env = mutable.LinkedHashMap[String, Cell]
@@ -127,7 +129,16 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         throw ReturnException(value.map(evalAny(_, env)).getOrElse(IntVal(0)))
 
       case TWhileStmt(cond, body) =>
-        while toLong(evalAny(cond, env)) != 0 do execBlock(body, env)
+        var running = true
+        while running && toLong(evalAny(cond, env)) != 0 do
+          try
+            execBlock(body, env)
+          catch
+            case BreakException => running = false
+            case ContinueException => // skip rest of body, re-check condition
+
+      case TBreakStmt => throw BreakException
+      case TContinueStmt => throw ContinueException
 
       case TExprStmt(expr) =>
         evalAny(expr, env)
