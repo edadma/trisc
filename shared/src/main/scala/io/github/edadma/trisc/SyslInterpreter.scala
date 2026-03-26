@@ -18,12 +18,12 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private type Env = mutable.LinkedHashMap[String, Cell]
 
   private def toLong(v: Value): Long = v match
-    case IntVal(n)       => n
-    case PtrVal(_)       => throw RuntimeError("expected integer, got pointer")
-    case ArrVal(_, _)    => throw RuntimeError("expected integer, got array")
+    case IntVal(n)    => n
+    case PtrVal(_)    => throw RuntimeError("expected integer, got pointer")
+    case ArrVal(_, _) => throw RuntimeError("expected integer, got array")
 
   private val globals: Env = new mutable.LinkedHashMap
-  private val functions = new mutable.LinkedHashMap[String, FunDeclAST]
+  private val functions = new mutable.LinkedHashMap[String, TFunDecl]
 
   private val builtins: Map[String, List[Value] => Value] = Map(
     "putchar" -> (args => { output(toLong(args.head).toChar.toString); args.head }),
@@ -31,40 +31,40 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     "println" -> (args => { args.foreach(a => output(toLong(a).toString)); output("\n"); IntVal(0) }),
   )
 
-  def run(program: ProgramAST): Long =
+  def run(program: TProgram): Long =
     for decl <- program.decls do
       decl match
-        case f: FunDeclAST => functions(f.name) = f
-        case VarDeclAST(name, _, init) =>
+        case f: TFunDecl => functions(f.name) = f
+        case TVarDecl(name, _, init) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
     functions.get("main") match
       case Some(main) => toLong(call(main, Nil))
       case None => throw RuntimeError("no main function")
 
-  private def call(fun: FunDeclAST, args: List[Value]): Value =
+  private def call(fun: TFunDecl, args: List[Value]): Value =
     val env: Env = new mutable.LinkedHashMap
 
     for (param, arg) <- fun.params.zip(args) do
       env(param.name) = new Cell(arg)
 
     fun.body match
-      case ExprBodyAST(expr) => evalAny(expr, env)
-      case BlockBodyAST(stmts) =>
+      case TExprBody(expr) => evalAny(expr, env)
+      case TBlockBody(stmts) =>
         try
           evalBlock(stmts, env)
         catch
           case ReturnException(v) => v
 
-  private def evalBlock(stmts: List[StmtAST], env: Env): Value =
+  private def evalBlock(stmts: List[TStmt], env: Env): Value =
     if stmts.nonEmpty then
       execBlock(stmts.init, env)
       stmts.last match
-        case ExprStmtAST(expr) => evalAny(expr, env)
+        case TExprStmt(expr) => evalAny(expr, env)
         case other => exec(other, env); IntVal(0)
     else IntVal(0)
 
-  private def execBlock(stmts: List[StmtAST], env: Env): Unit =
+  private def execBlock(stmts: List[TStmt], env: Env): Unit =
     for stmt <- stmts do exec(stmt, env)
 
   private def lookupCell(name: String, env: Env): Cell =
@@ -85,18 +85,18 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       else throw RuntimeError("cannot index a non-array pointer with offset != 0")
     case _ => throw RuntimeError("cannot index non-array")
 
-  private def exec(stmt: StmtAST, env: Env): Unit =
+  private def exec(stmt: TStmt, env: Env): Unit =
     stmt match
-      case VarStmtAST(name, _, init) =>
+      case TVarStmt(name, _, init) =>
         env(name) = new Cell(evalAny(init, env))
 
-      case AssignStmtAST(target, value) =>
+      case TAssignStmt(target, value) =>
         val v = evalAny(value, env)
         if env.contains(target) then env(target).value = v
         else if globals.contains(target) then globals(target).value = v
         else env(target) = new Cell(v)
 
-      case CompoundAssignStmtAST(target, op, value) =>
+      case TCompoundAssignStmt(target, op, value) =>
         val cell = lookupCell(target, env)
         val l = toLong(cell.value)
         val r = toLong(evalAny(value, env))
@@ -113,86 +113,83 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case ">>" => l >> r.toInt
         )
 
-      case DerefAssignStmtAST(pointer, value) =>
+      case TDerefAssignStmt(pointer, value) =>
         val cell = derefCell(evalAny(pointer, env))
         cell.value = evalAny(value, env)
 
-      case IndexAssignStmtAST(array, index, value) =>
+      case TIndexAssignStmt(array, index, value) =>
         val arr = evalAny(array, env)
         val idx = toLong(evalAny(index, env)).toInt
         val cell = indexCell(arr, idx)
         cell.value = evalAny(value, env)
 
-      case ReturnStmtAST(value) =>
+      case TReturnStmt(value) =>
         throw ReturnException(value.map(evalAny(_, env)).getOrElse(IntVal(0)))
 
-      case WhileStmtAST(cond, body) =>
+      case TWhileStmt(cond, body) =>
         while toLong(evalAny(cond, env)) != 0 do execBlock(body, env)
 
-      case ExprStmtAST(expr) =>
+      case TExprStmt(expr) =>
         evalAny(expr, env)
 
-  private def evalAny(expr: ExpressionAST, env: Env): Value =
+  private def evalAny(expr: TExpr, env: Env): Value =
     expr match
-      case IntLitAST(n) => IntVal(n)
-      case CharLitAST(c) => IntVal(c.toLong)
-      case BoolLitAST(b) => IntVal(if b then 1L else 0L)
-      case StringLitAST(_) => throw RuntimeError("string values not yet supported")
+      case TIntLit(n, _) => IntVal(n)
+      case TBoolLit(b, _) => IntVal(if b then 1L else 0L)
 
-      case StringLitExprAST(s) =>
+      case TStringLit(s, _) =>
         val bytes = s.getBytes("UTF-8")
         val cells = Array.fill(bytes.length + 1)(new Cell(IntVal(0)))
         for i <- bytes.indices do cells(i).value = IntVal(bytes(i) & 0xff)
-        // last cell stays 0 (null terminator)
         ArrVal(cells, 0)
 
-      case VarRefAST(name) => lookupCell(name, env).value
+      case TArrayDecl(size, _, _) =>
+        val cells = Array.fill(size)(new Cell(IntVal(0)))
+        ArrVal(cells, 0)
 
-      case AddrOfAST(name) => PtrVal(lookupCell(name, env))
+      case TVarRef(name, _) => lookupCell(name, env).value
 
-      case AddrOfIndexAST(array, index) =>
+      case TAddrOf(name, _) => PtrVal(lookupCell(name, env))
+
+      case TAddrOfIndex(array, index, _) =>
         val arrVal = evalAny(array, env)
         val idx = toLong(evalAny(index, env)).toInt
         arrVal match
           case ArrVal(cells, off) => ArrVal(cells, off + idx)
           case _ => PtrVal(indexCell(arrVal, idx))
 
-      case PreIncAST(name) =>
+      case TPreInc(name, _) =>
         val cell = lookupCell(name, env)
         val v = toLong(cell.value) + 1
         cell.value = IntVal(v)
         IntVal(v)
 
-      case PreDecAST(name) =>
+      case TPreDec(name, _) =>
         val cell = lookupCell(name, env)
         val v = toLong(cell.value) - 1
         cell.value = IntVal(v)
         IntVal(v)
 
-      case PostIncAST(name) =>
+      case TPostInc(name, _) =>
         val cell = lookupCell(name, env)
         val old = toLong(cell.value)
         cell.value = IntVal(old + 1)
         IntVal(old)
 
-      case PostDecAST(name) =>
+      case TPostDec(name, _) =>
         val cell = lookupCell(name, env)
         val old = toLong(cell.value)
         cell.value = IntVal(old - 1)
         IntVal(old)
 
-      case DerefAST(expr) => derefCell(evalAny(expr, env)).value
+      case TDeref(inner, _) => derefCell(evalAny(inner, env)).value
 
-      case IndexAST(arr, index) =>
+      case TIndex(arr, index, _) =>
         val arrVal = evalAny(arr, env)
         val idx = toLong(evalAny(index, env)).toInt
         indexCell(arrVal, idx).value
 
-      case ArrayDeclAST(size, _) =>
-        val cells = Array.fill(size)(new Cell(IntVal(0)))
-        ArrVal(cells, 0)
-
-      case IfExprAST(cond, thenBody, elseBody) =>
+      case TIfExpr(cond, thenBody, elseBody, _) =>
         if toLong(evalAny(cond, env)) != 0 then
           evalBlock(thenBody, env)
         else
@@ -200,16 +197,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             case Some(stmts) => evalBlock(stmts, env)
             case None => IntVal(0)
 
-      case BinaryAST(left, op, right) =>
+      case TBinary(left, op, right, _) =>
         val lv = evalAny(left, env)
-        // pointer arithmetic: arr + int or ptr + int
         (lv, op) match
           case (ArrVal(cells, off), "+") =>
-            val r = toLong(evalAny(right, env)).toInt
-            return ArrVal(cells, off + r)
+            return ArrVal(cells, off + toLong(evalAny(right, env)).toInt)
           case (ArrVal(cells, off), "-") =>
-            val r = toLong(evalAny(right, env)).toInt
-            return ArrVal(cells, off - r)
+            return ArrVal(cells, off - toLong(evalAny(right, env)).toInt)
           case _ =>
 
         val l = toLong(lv)
@@ -238,7 +232,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case _    => throw RuntimeError(s"unknown operator: $op")
             )
 
-      case UnaryAST(op, operand) =>
+      case TUnary(op, operand, _) =>
         val v = toLong(evalAny(operand, env))
         IntVal(op match
           case "-" => -v
@@ -247,7 +241,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case _   => throw RuntimeError(s"unknown unary operator: $op")
         )
 
-      case CallAST(name, args) =>
+      case TCall(name, args, _) =>
         val argValues = args.map(evalAny(_, env))
         builtins.get(name) match
           case Some(f) => f(argValues)

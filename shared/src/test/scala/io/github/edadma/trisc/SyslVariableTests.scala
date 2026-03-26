@@ -95,11 +95,7 @@ class SyslVariableTests extends SyslTestHelpers {
   // ===== Error cases =====
 
   "undefined variable error" in {
-    val result = (new SyslParser).parseProgram("main() -> int = x\n")
-    result match
-      case Right(program) =>
-        val interp = new SyslInterpreter()
-        an[Exception] should be thrownBy interp.run(program)
-      case Left(_) => fail("should parse")
+    val Right(ast) = (new SyslParser).parseProgram("main() -> int = x\n"): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
   }
 }

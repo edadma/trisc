@@ -7,9 +7,10 @@ trait SyslTestHelpers extends AnyFreeSpec with Matchers {
 
   def run(source: String): (Long, String) =
     val buf = new StringBuilder
-    val Right(program) = (new SyslParser).parseProgram(source): @unchecked
+    val Right(ast) = (new SyslParser).parseProgram(source): @unchecked
+    val typed = (new SyslAnalyzer).analyze(ast)
     val interp = new SyslInterpreter(s => buf ++= s)
-    val result = interp.run(program)
+    val result = interp.run(typed)
     (result, buf.toString)
 
   def eval(source: String): Long = run(source)._1

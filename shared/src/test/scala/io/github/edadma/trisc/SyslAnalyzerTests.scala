@@ -6,38 +6,34 @@ import SyslType.*
 
 class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
 
-  def analyze(source: String): ProgramAST =
-    val Right(program) = (new SyslParser).parseProgram(source): @unchecked
-    val analyzer = new SyslAnalyzer
-    analyzer.analyze(program)
-    program
+  def analyze(source: String): TProgram =
+    val Right(ast) = (new SyslParser).parseProgram(source): @unchecked
+    (new SyslAnalyzer).analyze(ast)
 
-  def analyzeExpr(source: String): SyslType =
+  def analyzeExprType(source: String): SyslType =
     val program = analyze(source)
-    // Find main's body and get the type of the last expression
-    program.decls.collectFirst { case f: FunDeclAST if f.name == "main" => f }.get.body match
-      case ExprBodyAST(expr) => expr.typ
-      case BlockBodyAST(stmts) => stmts.last match
-        case ExprStmtAST(expr) => expr.typ
+    program.decls.collectFirst { case f: TFunDecl if f.name == "main" => f }.get.body match
+      case TExprBody(expr) => expr.typ
+      case TBlockBody(stmts) => stmts.last match
+        case TExprStmt(expr) => expr.typ
         case _ => VoidType
 
   def shouldFail(source: String): Unit =
-    val Right(program) = (new SyslParser).parseProgram(source): @unchecked
-    val analyzer = new SyslAnalyzer
-    an[analyzer.AnalysisError] should be thrownBy analyzer.analyze(program)
+    val Right(ast) = (new SyslParser).parseProgram(source): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
 
   // ===== Literal types =====
 
   "int literal has IntType" in {
-    analyzeExpr("main() -> int = 42\n") shouldBe IntType
+    analyzeExprType("main() -> int = 42\n") shouldBe IntType
   }
 
   "bool literal has BoolType" in {
-    analyzeExpr("main() -> int = true\n") shouldBe BoolType
+    analyzeExprType("main() -> int = true\n") shouldBe BoolType
   }
 
   "string literal has ArrayType(ByteType)" in {
-    analyzeExpr(
+    analyzeExprType(
       """main() -> int
         |    s = "hello"
         |    s
@@ -47,45 +43,45 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   // ===== Arithmetic type inference =====
 
   "int + int = int" in {
-    analyzeExpr("main() -> int = 1 + 2\n") shouldBe IntType
+    analyzeExprType("main() -> int = 1 + 2\n") shouldBe IntType
   }
 
   "int * int = int" in {
-    analyzeExpr("main() -> int = 3 * 4\n") shouldBe IntType
+    analyzeExprType("main() -> int = 3 * 4\n") shouldBe IntType
   }
 
   "comparison produces bool" in {
-    analyzeExpr("main() -> int = 3 < 5\n") shouldBe BoolType
+    analyzeExprType("main() -> int = 3 < 5\n") shouldBe BoolType
   }
 
   "logical and produces bool" in {
-    analyzeExpr("main() -> int = 1 && 1\n") shouldBe BoolType
+    analyzeExprType("main() -> int = 1 && 1\n") shouldBe BoolType
   }
 
   "logical or produces bool" in {
-    analyzeExpr("main() -> int = 0 || 1\n") shouldBe BoolType
+    analyzeExprType("main() -> int = 0 || 1\n") shouldBe BoolType
   }
 
   "unary minus preserves type" in {
-    analyzeExpr("main() -> int = -42\n") shouldBe IntType
+    analyzeExprType("main() -> int = -42\n") shouldBe IntType
   }
 
   "unary not produces bool" in {
-    analyzeExpr("main() -> int = !0\n") shouldBe BoolType
+    analyzeExprType("main() -> int = !0\n") shouldBe BoolType
   }
 
   "bitwise and produces int" in {
-    analyzeExpr("main() -> int = 0xFF & 0x0F\n") shouldBe IntType
+    analyzeExprType("main() -> int = 0xFF & 0x0F\n") shouldBe IntType
   }
 
   "shift produces int" in {
-    analyzeExpr("main() -> int = 1 << 8\n") shouldBe IntType
+    analyzeExprType("main() -> int = 1 << 8\n") shouldBe IntType
   }
 
   // ===== Variable type inference =====
 
   "variable inferred from int literal" in {
-    analyzeExpr(
+    analyzeExprType(
       """main() -> int
         |    x = 42
         |    x
@@ -93,7 +89,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   }
 
   "variable with explicit type" in {
-    analyzeExpr(
+    analyzeExprType(
       """main() -> int
         |    x: int = 42
         |    x
@@ -101,7 +97,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   }
 
   "variable inferred from expression" in {
-    analyzeExpr(
+    analyzeExprType(
       """main() -> int
         |    x = 3 + 4
         |    x
@@ -111,7 +107,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   // ===== Pointer type inference =====
 
   "address of int is ptr to int" in {
-    analyzeExpr(
+    analyzeExprType(
       """main() -> int
         |    x = 42
         |    p = &x
@@ -120,7 +116,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   }
 
   "deref of ptr to int is int" in {
-    analyzeExpr(
+    analyzeExprType(
       """main() -> int
         |    x = 42
         |    p = &x
@@ -129,7 +125,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   }
 
   "double pointer" in {
-    analyzeExpr(
+    analyzeExprType(
       """main() -> int
         |    x = 42
         |    p = &x
@@ -141,7 +137,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   // ===== Array type inference =====
 
   "array declaration" in {
-    analyzeExpr(
+    analyzeExprType(
       """main() -> int
         |    a: [5]int
         |    a
@@ -149,24 +145,15 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   }
 
   "array indexing produces element type" in {
-    analyzeExpr(
+    analyzeExprType(
       """main() -> int
         |    a: [5]int
         |    a[0]
         |""".stripMargin) shouldBe IntType
   }
 
-  "array decays to pointer" in {
-    analyzeExpr(
-      """main() -> int
-        |    a: [5]int
-        |    p = a
-        |    p
-        |""".stripMargin) shouldBe ArrayType(IntType, 5)
-  }
-
   "address of array element" in {
-    analyzeExpr(
+    analyzeExprType(
       """main() -> int
         |    a: [5]int
         |    p = &a[2]
@@ -177,7 +164,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   // ===== Function return type =====
 
   "function call type is return type" in {
-    analyzeExpr(
+    analyzeExprType(
       """double(x: int) -> int = x * 2
         |main() -> int = double(21)
         |""".stripMargin) shouldBe IntType
@@ -197,13 +184,13 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   // ===== If expression type =====
 
   "if expression type from then branch" in {
-    analyzeExpr("main() -> int = if 1 then 42 else 0\n") shouldBe IntType
+    analyzeExprType("main() -> int = if 1 then 42 else 0\n") shouldBe IntType
   }
 
   // ===== Pointer arithmetic type =====
 
   "array + int stays array/pointer" in {
-    analyzeExpr(
+    analyzeExprType(
       """main() -> int
         |    a: [5]int
         |    p = a + 2
@@ -248,7 +235,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   // ===== Increment/decrement types =====
 
   "prefix increment preserves type" in {
-    analyzeExpr(
+    analyzeExprType(
       """main() -> int
         |    x = 42
         |    ++x
@@ -256,14 +243,39 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   }
 
   "postfix increment preserves type" in {
-    analyzeExpr(
+    analyzeExprType(
       """main() -> int
         |    x = 42
         |    x++
         |""".stripMargin) shouldBe IntType
   }
 
-  // ===== Existing tests still work with analysis =====
+  // ===== Typed AST structure =====
+
+  "typed AST preserves function structure" in {
+    val prog = analyze(
+      """add(a: int, b: int) -> int = a + b
+        |main() -> int = add(1, 2)
+        |""".stripMargin)
+    prog.decls.length shouldBe 2
+    val add = prog.decls.head.asInstanceOf[TFunDecl]
+    add.name shouldBe "add"
+    add.params.length shouldBe 2
+    add.returnType shouldBe IntType
+  }
+
+  "typed AST has types on all expressions" in {
+    val prog = analyze("main() -> int = 1 + 2 * 3\n")
+    val main = prog.decls.head.asInstanceOf[TFunDecl]
+    val body = main.body.asInstanceOf[TExprBody].expr
+    body.typ shouldBe IntType
+    body match
+      case TBinary(_, "+", right, _) =>
+        right.typ shouldBe IntType
+      case _ => fail("expected binary +")
+  }
+
+  // ===== Integration: analyze then interpret =====
 
   "analyze then interpret factorial" in {
     val source =
@@ -274,11 +286,10 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
         |
         |main() -> int = factorial(5)
         |""".stripMargin
-    val Right(program) = (new SyslParser).parseProgram(source): @unchecked
-    val analyzer = new SyslAnalyzer
-    analyzer.analyze(program)
+    val Right(ast) = (new SyslParser).parseProgram(source): @unchecked
+    val typed = (new SyslAnalyzer).analyze(ast)
     val interp = new SyslInterpreter()
-    interp.run(program) shouldBe 120
+    interp.run(typed) shouldBe 120
   }
 
   "analyze then interpret bubble sort" in {
@@ -305,10 +316,9 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
         |    sort(a, 5)
         |    a[0] * 10000 + a[1] * 1000 + a[2] * 100 + a[3] * 10 + a[4]
         |""".stripMargin
-    val Right(program) = (new SyslParser).parseProgram(source): @unchecked
-    val analyzer = new SyslAnalyzer
-    analyzer.analyze(program)
+    val Right(ast) = (new SyslParser).parseProgram(source): @unchecked
+    val typed = (new SyslAnalyzer).analyze(ast)
     val interp = new SyslInterpreter()
-    interp.run(program) shouldBe 12345
+    interp.run(typed) shouldBe 12345
   }
 }

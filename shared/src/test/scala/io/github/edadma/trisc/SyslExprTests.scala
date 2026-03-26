@@ -519,12 +519,10 @@ class SyslExprTests extends SyslTestHelpers {
   // ===== Error case: division by zero =====
 
   "division by zero error" in {
-    val result = (new SyslParser).parseProgram("main() -> int = 42 / 0\n")
-    result match
-      case Right(program) =>
-        val interp = new SyslInterpreter()
-        an[Exception] should be thrownBy interp.run(program)
-      case Left(_) => fail("should parse")
+    val Right(ast) = (new SyslParser).parseProgram("main() -> int = 42 / 0\n"): @unchecked
+    val typed = (new SyslAnalyzer).analyze(ast)
+    val interp = new SyslInterpreter()
+    an[Exception] should be thrownBy interp.run(typed)
   }
 
 }

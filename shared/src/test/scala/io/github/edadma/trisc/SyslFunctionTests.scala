@@ -275,11 +275,7 @@ class SyslFunctionTests extends SyslTestHelpers {
   // ===== Error case: undefined function error =====
 
   "undefined function error" in {
-    val result = (new SyslParser).parseProgram("main() -> int = unknown()\n")
-    result match
-      case Right(program) =>
-        val interp = new SyslInterpreter()
-        an[Exception] should be thrownBy interp.run(program)
-      case Left(_) => fail("should parse")
+    val Right(ast) = (new SyslParser).parseProgram("main() -> int = unknown()\n"): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
   }
 }
