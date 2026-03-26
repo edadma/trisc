@@ -53,8 +53,7 @@ object SyslParser extends StdParsers(SyslLexer):
     rep1sep(stmt, newline)
 
   def stmt(using ctx: ParseCtx): P[StmtAST] =
-    ifStmt ^^ (s => s: StmtAST) |
-      whileStmt ^^ (s => s: StmtAST) |
+    whileStmt ^^ (s => s: StmtAST) |
       returnStmt ^^ (s => s: StmtAST) |
       identStmt |
       expr ^^ (e => ExprStmtAST(e): StmtAST)
@@ -73,15 +72,40 @@ object SyslParser extends StdParsers(SyslLexer):
     op ~ expr ^^ { case o ~ r => BinaryAST(left, o, r) } |
       succeed(left)
 
-  def ifStmt(using ctx: ParseCtx): P[IfStmtAST] =
-    "if" ~> expr ~ block(stmts) >> { case cond ~ thenBody =>
-      if peek(newline ~> keyword("else")) then
-        newline ~> "else" ~> (block(stmts) | (ifStmt ^^ (s => List(s)))) ^^ { elseBody =>
-          IfStmtAST(cond, thenBody, Some(elseBody))
+  def ifExpr(using ctx: ParseCtx): P[IfExprAST] =
+    "if" ~> expr >> { cond =>
+      // if cond then <inline-expr-or-block>
+      "then" ~> ifThenBody(cond) |
+        // if cond <block>
+        block(stmts) >> { thenBody =>
+          ifElsePart(cond, thenBody)
         }
-      else
-        succeed(IfStmtAST(cond, thenBody, None))
     }
+
+  def ifThenBody(cond: ExpressionAST)(using ctx: ParseCtx): P[IfExprAST] =
+    // then + block on next line
+    block(stmts) >> { thenBody => ifElsePart(cond, thenBody) } |
+      // then + inline statement(s)
+      inlineStmt >> { s =>
+        ifElseInline(cond, List(s))
+      }
+
+  def inlineStmt(using ctx: ParseCtx): P[StmtAST] =
+    returnStmt ^^ (s => s: StmtAST) |
+      expr ^^ (e => ExprStmtAST(e): StmtAST)
+
+  def ifElsePart(cond: ExpressionAST, thenBody: List[StmtAST])(using ctx: ParseCtx): P[IfExprAST] =
+    if peek(newline ~> keyword("else")) then
+      newline ~> "else" ~> (
+        block(stmts) ^^ { elseBody => IfExprAST(cond, thenBody, Some(elseBody)) } |
+          ifExpr ^^ { elif => IfExprAST(cond, thenBody, Some(List(ExprStmtAST(elif)))) }
+      )
+    else
+      succeed(IfExprAST(cond, thenBody, None))
+
+  def ifElseInline(cond: ExpressionAST, thenBody: List[StmtAST])(using ctx: ParseCtx): P[IfExprAST] =
+    "else" ~> inlineStmt ^^ { s => IfExprAST(cond, thenBody, Some(List(s))) } |
+      succeed(IfExprAST(cond, thenBody, None))
 
   def whileStmt(using ctx: ParseCtx): P[WhileStmtAST] =
     "while" ~> expr ~ block(stmts) ^^ {
@@ -119,7 +143,8 @@ object SyslParser extends StdParsers(SyslLexer):
       primary
 
   def primary(using ctx: ParseCtx): P[ExpressionAST] =
-    numericLit ^^ (n => IntLitAST(n.toLong)) |
+    ifExpr ^^ (e => e: ExpressionAST) |
+      numericLit ^^ (n => IntLitAST(n.toLong)) |
       stringLit ^^ StringLitAST.apply |
       "true" ^^ (_ => BoolLitAST(true)) |
       "false" ^^ (_ => BoolLitAST(false)) |

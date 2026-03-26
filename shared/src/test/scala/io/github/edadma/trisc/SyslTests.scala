@@ -238,6 +238,66 @@ class SyslTests extends AnyFreeSpec with Matchers {
         |""".stripMargin) shouldBe 2
   }
 
+  // ===== If with then (inline) =====
+
+  "if then inline expression" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if x > 3 then return 1
+        |    0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "if then else inline expression" in {
+    eval("main() -> int = if 1 then 42 else 0\n") shouldBe 42
+  }
+
+  "if then else inline false branch" in {
+    eval("main() -> int = if 0 then 42 else 99\n") shouldBe 99
+  }
+
+  "if as expression in variable" in {
+    eval(
+      """main() -> int
+        |    x = if 1 then 42 else 0
+        |    x
+        |""".stripMargin) shouldBe 42
+  }
+
+  "if as expression in argument" in {
+    eval(
+      """double(x: int) -> int = x * 2
+        |
+        |main() -> int = double(if 1 then 21 else 0)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "if then with block body" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if x > 3 then
+        |        return 1
+        |    0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "if then else with block bodies" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if x > 3 then
+        |        42
+        |    else
+        |        0
+        |""".stripMargin) shouldBe 42
+  }
+
+  "nested if expressions" in {
+    eval("main() -> int = if 1 then if 0 then 1 else 2 else 3\n") shouldBe 2
+  }
+
   // ===== While =====
 
   "while loop" in {

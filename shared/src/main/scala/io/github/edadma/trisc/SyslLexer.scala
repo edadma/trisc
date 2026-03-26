@@ -15,7 +15,7 @@ object SyslLexer extends StdLexer:
   )
 
   reserved ++= List(
-    "if", "else", "while", "for", "return",
+    "if", "then", "else", "while", "for", "return",
     "int", "char", "void",
     "true", "false",
     "var",

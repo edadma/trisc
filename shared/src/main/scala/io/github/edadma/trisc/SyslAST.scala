@@ -22,7 +22,6 @@ trait StmtAST extends Positional
 case class VarStmtAST(name: String, typ: Option[String], init: ExpressionAST) extends StmtAST
 case class AssignStmtAST(target: String, value: ExpressionAST) extends StmtAST
 case class ReturnStmtAST(value: Option[ExpressionAST]) extends StmtAST
-case class IfStmtAST(cond: ExpressionAST, thenBody: List[StmtAST], elseBody: Option[List[StmtAST]]) extends StmtAST
 case class WhileStmtAST(cond: ExpressionAST, body: List[StmtAST]) extends StmtAST
 case class ExprStmtAST(expr: ExpressionAST) extends StmtAST
 
@@ -36,3 +35,4 @@ case class VarRefAST(name: String) extends ExpressionAST
 case class BinaryAST(left: ExpressionAST, op: String, right: ExpressionAST) extends ExpressionAST
 case class UnaryAST(op: String, operand: ExpressionAST) extends ExpressionAST
 case class CallAST(name: String, args: List[ExpressionAST]) extends ExpressionAST
+case class IfExprAST(cond: ExpressionAST, thenBody: List[StmtAST], elseBody: Option[List[StmtAST]]) extends ExpressionAST

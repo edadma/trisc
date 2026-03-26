@@ -62,9 +62,6 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case ReturnStmtAST(value) =>
         throw ReturnException(value.map(e => eval(e, env)).getOrElse(0))
 
-      case IfStmtAST(cond, thenBody, elseBody) =>
-        if eval(cond, env) != 0 then execBlock(thenBody, env)
-        else elseBody.foreach(execBlock(_, env))
 
       case WhileStmtAST(cond, body) =>
         while eval(cond, env) != 0 do execBlock(body, env)
@@ -111,6 +108,25 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case "-" => -v
           case "!" => if v == 0 then 1 else 0
           case _   => throw RuntimeError(s"unknown unary operator: $op")
+
+      case IfExprAST(cond, thenBody, elseBody) =>
+        if eval(cond, env) != 0 then
+          if thenBody.nonEmpty then
+            execBlock(thenBody.init, env)
+            thenBody.last match
+              case ExprStmtAST(e) => eval(e, env)
+              case ReturnStmtAST(v) => throw ReturnException(v.map(eval(_, env)).getOrElse(0))
+              case other => exec(other, env); 0
+          else 0
+        else
+          elseBody match
+            case Some(stmts) if stmts.nonEmpty =>
+              execBlock(stmts.init, env)
+              stmts.last match
+                case ExprStmtAST(e) => eval(e, env)
+                case ReturnStmtAST(v) => throw ReturnException(v.map(eval(_, env)).getOrElse(0))
+                case other => exec(other, env); 0
+            case _ => 0
 
       case CallAST(name, args) =>
         val argValues = args.map(eval(_, env))
