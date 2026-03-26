@@ -187,8 +187,24 @@ class SyslParser extends StandardTokenParsers {
         case base ~ indices => indices.foldLeft(base)((e, idx) => IndexAST(e, idx))
       }
 
+  lazy val charLit: Parser[ExpressionAST] =
+    stringLit ^? ({
+      case s if s.length == 1 => IntLitAST(s.charAt(0).toLong)
+      case s if s.length == 2 && s.charAt(0) == '\\' => IntLitAST(s.charAt(1) match
+        case 'n' => '\n'.toLong
+        case 't' => '\t'.toLong
+        case 'r' => '\r'.toLong
+        case '0' => 0L
+        case '\\' => '\\'.toLong
+        case '\'' => '\''.toLong
+        case '"' => '"'.toLong
+        case c => c.toLong
+      )
+    }, s => s"invalid char literal: '$s'")
+
   lazy val primary: Parser[ExpressionAST] =
     numericLit ^^ (n => IntLitAST(n.toLong)) |
+      charLit |
       stringLit ^^ StringLitAST.apply |
       "true" ^^^ BoolLitAST(true) |
       "false" ^^^ BoolLitAST(false) |

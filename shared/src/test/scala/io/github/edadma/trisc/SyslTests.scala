@@ -1798,4 +1798,129 @@ class SyslTests extends AnyFreeSpec with Matchers {
         |    sum
         |""".stripMargin) shouldBe 150
   }
+
+  // ===== Char literals =====
+
+  "char literal basic" in {
+    eval("main() -> int = 'A'\n") shouldBe 65
+  }
+
+  "char literal in arithmetic" in {
+    eval("main() -> int = 'A' + 1\n") shouldBe 66
+  }
+
+  "char literal comparison" in {
+    eval("main() -> int = if 'A' < 'B' then 1 else 0\n") shouldBe 1
+  }
+
+  "char literal escape newline" in {
+    eval("main() -> int = '\\n'\n") shouldBe 10
+  }
+
+  "char literal escape tab" in {
+    eval("main() -> int = '\\t'\n") shouldBe 9
+  }
+
+  "char literal escape null" in {
+    eval("main() -> int = '\\0'\n") shouldBe 0
+  }
+
+  "char literal escape backslash" in {
+    eval("main() -> int = '\\\\'\n") shouldBe 92
+  }
+
+  "putchar with char literal" in {
+    output(
+      """main() -> int
+        |    putchar('H')
+        |    putchar('i')
+        |    0
+        |""".stripMargin) shouldBe "Hi"
+  }
+
+  "char conversion digit to int" in {
+    eval("main() -> int = '5' - '0'\n") shouldBe 5
+  }
+
+  "char in array" in {
+    output(
+      """main() -> int
+        |    msg: [3]int
+        |    msg[0] = 'H'
+        |    msg[1] = 'i'
+        |    msg[2] = '!'
+        |    i = 0
+        |    while i < 3 do putchar(msg[i++])
+        |    0
+        |""".stripMargin) shouldBe "Hi!"
+  }
+
+  // ===== String library functions (in sysl) =====
+
+  "strlen implementation" in {
+    eval(
+      """strlen(s: int) -> int
+        |    n = 0
+        |    while s[n] != 0 do n++
+        |    n
+        |
+        |main() -> int
+        |    str: [6]int
+        |    str[0] = 'H'
+        |    str[1] = 'e'
+        |    str[2] = 'l'
+        |    str[3] = 'l'
+        |    str[4] = 'o'
+        |    str[5] = 0
+        |    strlen(str)
+        |""".stripMargin) shouldBe 5
+  }
+
+  "puts implementation" in {
+    output(
+      """puts(s: int)
+        |    i = 0
+        |    while s[i] != 0
+        |        putchar(s[i])
+        |        i += 1
+        |
+        |main() -> int
+        |    str: [4]int
+        |    str[0] = 'H'
+        |    str[1] = 'i'
+        |    str[2] = '!'
+        |    str[3] = 0
+        |    puts(str)
+        |    0
+        |""".stripMargin) shouldBe "Hi!"
+  }
+
+  "strcmp implementation" in {
+    eval(
+      """strcmp(a: int, b: int) -> int
+        |    i = 0
+        |    while a[i] != 0 && a[i] == b[i] do i++
+        |    a[i] - b[i]
+        |
+        |main() -> int
+        |    s1: [4]int
+        |    s2: [4]int
+        |    s3: [4]int
+        |    s1[0] = 'a'
+        |    s1[1] = 'b'
+        |    s1[2] = 'c'
+        |    s1[3] = 0
+        |    s2[0] = 'a'
+        |    s2[1] = 'b'
+        |    s2[2] = 'c'
+        |    s2[3] = 0
+        |    s3[0] = 'a'
+        |    s3[1] = 'b'
+        |    s3[2] = 'd'
+        |    s3[3] = 0
+        |    eq = strcmp(s1, s2)
+        |    lt = strcmp(s1, s3)
+        |    if eq == 0 && lt < 0 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
 }
