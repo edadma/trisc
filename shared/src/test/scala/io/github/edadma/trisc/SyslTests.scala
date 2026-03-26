@@ -923,6 +923,155 @@ class SyslTests extends AnyFreeSpec with Matchers {
     eval("main() -> int = if 1 != 2 != 3 then 1 else 0\n") shouldBe 1
   }
 
+  // ===== Arrays =====
+
+  "array declaration and indexing" in {
+    eval(
+      """main() -> int
+        |    a: [5]int
+        |    a[0] = 42
+        |    a[0]
+        |""".stripMargin) shouldBe 42
+  }
+
+  "array multiple elements" in {
+    eval(
+      """main() -> int
+        |    a: [3]int
+        |    a[0] = 10
+        |    a[1] = 20
+        |    a[2] = 30
+        |    a[0] + a[1] + a[2]
+        |""".stripMargin) shouldBe 60
+  }
+
+  "array zero initialized" in {
+    eval(
+      """main() -> int
+        |    a: [3]int
+        |    a[0] + a[1] + a[2]
+        |""".stripMargin) shouldBe 0
+  }
+
+  "array decays to pointer" in {
+    eval(
+      """main() -> int
+        |    a: [5]int
+        |    a[0] = 42
+        |    p = a
+        |    *p
+        |""".stripMargin) shouldBe 42
+  }
+
+  "pointer from array with indexing" in {
+    eval(
+      """main() -> int
+        |    a: [5]int
+        |    a[2] = 99
+        |    p = a
+        |    p[2]
+        |""".stripMargin) shouldBe 99
+  }
+
+  "pointer arithmetic on array" in {
+    eval(
+      """main() -> int
+        |    a: [5]int
+        |    a[3] = 77
+        |    p = a + 3
+        |    *p
+        |""".stripMargin) shouldBe 77
+  }
+
+  "pointer subtraction on array" in {
+    eval(
+      """main() -> int
+        |    a: [5]int
+        |    a[1] = 88
+        |    p = a + 3
+        |    q = p - 2
+        |    *q
+        |""".stripMargin) shouldBe 88
+  }
+
+  "array pass to function" in {
+    eval(
+      """sum(arr: int, n: int) -> int
+        |    total = 0
+        |    i = 0
+        |    while i < n
+        |        total = total + arr[i]
+        |        i = i + 1
+        |    total
+        |
+        |main() -> int
+        |    a: [3]int
+        |    a[0] = 10
+        |    a[1] = 20
+        |    a[2] = 30
+        |    sum(a, 3)
+        |""".stripMargin) shouldBe 60
+  }
+
+  "array modify through function" in {
+    eval(
+      """fill(arr: int, n: int, val: int)
+        |    i = 0
+        |    while i < n
+        |        arr[i] = val
+        |        i = i + 1
+        |
+        |main() -> int
+        |    a: [3]int
+        |    fill(a, 3, 42)
+        |    a[0] + a[1] + a[2]
+        |""".stripMargin) shouldBe 126
+  }
+
+  "p[0] same as *p for scalar pointer" in {
+    eval(
+      """main() -> int
+        |    x = 42
+        |    p = &x
+        |    p[0]
+        |""".stripMargin) shouldBe 42
+  }
+
+  "array in while loop" in {
+    eval(
+      """main() -> int
+        |    a: [10]int
+        |    i = 0
+        |    while i < 10
+        |        a[i] = i * i
+        |        i = i + 1
+        |    a[5]
+        |""".stripMargin) shouldBe 25
+  }
+
+  "array with pointer arithmetic in expression" in {
+    eval(
+      """main() -> int
+        |    a: [5]int
+        |    a[0] = 1
+        |    a[1] = 2
+        |    a[2] = 3
+        |    *(a + 0) + *(a + 1) + *(a + 2)
+        |""".stripMargin) shouldBe 6
+  }
+
+  "nested array indexing via pointer" in {
+    eval(
+      """main() -> int
+        |    a: [3]int
+        |    a[0] = 100
+        |    a[1] = 200
+        |    a[2] = 300
+        |    p = a
+        |    p[0] + p[1] + p[2]
+        |""".stripMargin) shouldBe 600
+  }
+
   // ===== Pointers =====
 
   "address-of and dereference basic" in {

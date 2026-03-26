@@ -5,6 +5,7 @@ import scala.collection.mutable
 enum Value:
   case IntVal(n: Long)
   case PtrVal(cell: Cell)
+  case ArrVal(cells: Array[Cell], offset: Int)
 
 class Cell(var value: Value)
 
@@ -17,8 +18,9 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private type Env = mutable.LinkedHashMap[String, Cell]
 
   private def toLong(v: Value): Long = v match
-    case IntVal(n) => n
-    case PtrVal(_) => throw RuntimeError("expected integer, got pointer")
+    case IntVal(n)       => n
+    case PtrVal(_)       => throw RuntimeError("expected integer, got pointer")
+    case ArrVal(_, _)    => throw RuntimeError("expected integer, got array")
 
   private val globals: Env = new mutable.LinkedHashMap
   private val functions = new mutable.LinkedHashMap[String, FunDeclAST]
@@ -69,8 +71,19 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     env.getOrElse(name, globals.getOrElse(name, throw RuntimeError(s"undefined variable: $name")))
 
   private def derefCell(v: Value): Cell = v match
-    case PtrVal(c) => c
-    case _         => throw RuntimeError("cannot dereference non-pointer")
+    case PtrVal(c)          => c
+    case ArrVal(cells, off) => cells(off)
+    case _                  => throw RuntimeError("cannot dereference non-pointer")
+
+  private def indexCell(v: Value, idx: Int): Cell = v match
+    case ArrVal(cells, off) =>
+      val i = off + idx
+      if i < 0 || i >= cells.length then throw RuntimeError(s"array index out of bounds: $i")
+      cells(i)
+    case PtrVal(c) =>
+      if idx == 0 then c
+      else throw RuntimeError("cannot index a non-array pointer with offset != 0")
+    case _ => throw RuntimeError("cannot index non-array")
 
   private def exec(stmt: StmtAST, env: Env): Unit =
     stmt match
@@ -85,6 +98,12 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case DerefAssignStmtAST(pointer, value) =>
         val cell = derefCell(evalAny(pointer, env))
+        cell.value = evalAny(value, env)
+
+      case IndexAssignStmtAST(array, index, value) =>
+        val arr = evalAny(array, env)
+        val idx = toLong(evalAny(index, env)).toInt
+        val cell = indexCell(arr, idx)
         cell.value = evalAny(value, env)
 
       case ReturnStmtAST(value) =>
@@ -109,6 +128,15 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case DerefAST(expr) => derefCell(evalAny(expr, env)).value
 
+      case IndexAST(arr, index) =>
+        val arrVal = evalAny(arr, env)
+        val idx = toLong(evalAny(index, env)).toInt
+        indexCell(arrVal, idx).value
+
+      case ArrayDeclAST(size, _) =>
+        val cells = Array.fill(size)(new Cell(IntVal(0)))
+        ArrVal(cells, 0)
+
       case IfExprAST(cond, thenBody, elseBody) =>
         if toLong(evalAny(cond, env)) != 0 then
           evalBlock(thenBody, env)
@@ -118,7 +146,18 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             case None => IntVal(0)
 
       case BinaryAST(left, op, right) =>
-        val l = toLong(evalAny(left, env))
+        val lv = evalAny(left, env)
+        // pointer arithmetic: arr + int or ptr + int
+        (lv, op) match
+          case (ArrVal(cells, off), "+") =>
+            val r = toLong(evalAny(right, env)).toInt
+            return ArrVal(cells, off + r)
+          case (ArrVal(cells, off), "-") =>
+            val r = toLong(evalAny(right, env)).toInt
+            return ArrVal(cells, off - r)
+          case _ =>
+
+        val l = toLong(lv)
         op match
           case "&&" => IntVal(if l == 0 then 0L else if toLong(evalAny(right, env)) != 0 then 1L else 0L)
           case "||" => IntVal(if l != 0 then 1L else if toLong(evalAny(right, env)) != 0 then 1L else 0L)

@@ -30,6 +30,9 @@ object SyslParser extends StandardTokenParsers with PackratParsers {
     ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
       case name ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body)
     } |
+      ident ~ (":" ~> typeExpr) ^^ {
+        case name ~ t => VarDeclAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t))
+      } |
       ident ~ (":" ~> typeName) ~ ("=" ~> expr) ^^ {
         case name ~ t ~ e => VarDeclAST(name, Some(t), e)
       } |
@@ -53,6 +56,9 @@ object SyslParser extends StandardTokenParsers with PackratParsers {
   lazy val typeName: PackratParser[String] =
     "int" | "char" | "void" | ident
 
+  lazy val typeExpr: PackratParser[String] =
+    "[" ~> numericLit ~ ("]" ~> typeName) ^^ { case n ~ t => s"[$n]$t" }
+
   // --- Block ---
 
   lazy val block: PackratParser[List[StmtAST]] =
@@ -67,11 +73,15 @@ object SyslParser extends StandardTokenParsers with PackratParsers {
     whileStmt | returnStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
 
   lazy val identStmt: PackratParser[StmtAST] =
-    ident ~ (":" ~> typeName) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
+    ident ~ (":" ~> typeExpr) ^^ { case name ~ t => VarStmtAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t)) } |
+      ident ~ (":" ~> typeName) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
+      ident ~ ("[" ~> expr <~ "]") ~ ("=" ~> expr) ^^ { case name ~ idx ~ value =>
+        IndexAssignStmtAST(VarRefAST(name), idx, value)
+      } |
       ident ~ ("=" ~> expr) ^^ { case name ~ e => AssignStmtAST(name, e) }
 
-  lazy val derefAssignStmt: PackratParser[DerefAssignStmtAST] =
-    "*" ~> expr ~ ("=" ~> expr) ^^ { case ptr ~ value => DerefAssignStmtAST(ptr, value) }
+  lazy val derefAssignStmt: PackratParser[StmtAST] =
+    "*" ~> unary ~ ("=" ~> expr) ^^ { case ptr ~ value => DerefAssignStmtAST(ptr, value) }
 
   lazy val whileStmt: PackratParser[WhileStmtAST] =
     "while" ~> expr ~ block ^^ { case cond ~ body => WhileStmtAST(cond, body) }
@@ -106,7 +116,10 @@ object SyslParser extends StandardTokenParsers with PackratParsers {
 
   lazy val inlineStmt: PackratParser[StmtAST] =
     returnStmt |
-      "*" ~> expr ~ ("=" ~> expr) ^^ { case ptr ~ value => DerefAssignStmtAST(ptr, value) } |
+      "*" ~> unary ~ ("=" ~> expr) ^^ { case ptr ~ value => DerefAssignStmtAST(ptr, value) } |
+      ident ~ ("[" ~> expr <~ "]") ~ ("=" ~> expr) ^^ { case name ~ idx ~ value =>
+        IndexAssignStmtAST(VarRefAST(name), idx, value)
+      } |
       ident ~ ("=" ~> expr) ^^ { case name ~ e => AssignStmtAST(name, e) } |
       expr ^^ ExprStmtAST.apply
 
@@ -151,7 +164,12 @@ object SyslParser extends StandardTokenParsers with PackratParsers {
       "!" ~> unary ^^ (e => UnaryAST("!", e)) |
       "*" ~> unary ^^ DerefAST.apply |
       "&" ~> ident ^^ AddrOfAST.apply |
-      primary
+      postfix
+
+  lazy val postfix: PackratParser[ExpressionAST] =
+    primary ~ rep("[" ~> expr <~ "]") ^^ {
+      case base ~ indices => indices.foldLeft(base)((e, idx) => IndexAST(e, idx))
+    }
 
   lazy val primary: PackratParser[ExpressionAST] =
     numericLit ^^ (n => IntLitAST(n.toLong)) |
