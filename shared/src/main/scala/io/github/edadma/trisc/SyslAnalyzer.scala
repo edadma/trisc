@@ -160,6 +160,14 @@ class SyslAnalyzer:
         loopDepth -= 1
         TWhileStmt(tCond, tBody)
 
+      case DoWhileStmtAST(cond, body) =>
+        val tCond = analyzeExpr(cond)
+        if tCond.typ != BoolType then throw AnalysisError(s"do/while condition must be bool, got ${tCond.typ}")
+        loopDepth += 1
+        val tBody = analyzeBlock(body)
+        loopDepth -= 1
+        TDoWhileStmt(tCond, tBody)
+
       case BreakStmtAST() =>
         if loopDepth == 0 then throw AnalysisError("break outside of loop")
         TBreakStmt

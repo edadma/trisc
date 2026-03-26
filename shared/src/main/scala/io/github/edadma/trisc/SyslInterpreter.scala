@@ -148,6 +148,16 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             case BreakException => running = false
             case ContinueException => // skip rest of body, re-check condition
 
+      case TDoWhileStmt(cond, body) =>
+        var running = true
+        while running do
+          try
+            execBlock(body, env)
+          catch
+            case BreakException    => running = false
+            case ContinueException => // skip rest of body, re-check condition
+          if running then running = toLong(evalAny(cond, env)) != 0
+
       case TBreakStmt => throw BreakException
       case TContinueStmt => throw ContinueException
 

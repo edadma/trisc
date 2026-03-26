@@ -75,7 +75,7 @@ class SyslParser extends StandardTokenParsers {
     rep1sep(stmt, rep1(Newline))
 
   lazy val stmt: Parser[StmtAST] =
-    forStmt | whileStmt | returnStmt | breakStmt | continueStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+    forStmt | doWhileStmt | whileStmt | returnStmt | breakStmt | continueStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
 
   lazy val breakStmt: Parser[BreakStmtAST] =
     "break" ^^^ BreakStmtAST()
@@ -108,6 +108,11 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val forUpdate: Parser[StmtAST] =
     identStmt | expr ^^ ExprStmtAST.apply
+
+  lazy val doWhileStmt: Parser[DoWhileStmtAST] =
+    "do" ~> block ~ (Newline ~> "while" ~> expr) ^^ { case body ~ cond => DoWhileStmtAST(cond, body) } |
+      "do" ~> inlineStmt ~ ("while" ~> expr) ^^ { case stmt ~ cond => DoWhileStmtAST(cond, List(stmt)) } |
+      "do" ~> inlineStmt ~ (Newline ~> "while" ~> expr) ^^ { case stmt ~ cond => DoWhileStmtAST(cond, List(stmt)) }
 
   lazy val whileStmt: Parser[WhileStmtAST] =
     "while" ~> expr ~ ("do" ~> (block | inlineStmt ^^ (s => List(s)))) ^^ { case cond ~ body => WhileStmtAST(cond, body) } |
