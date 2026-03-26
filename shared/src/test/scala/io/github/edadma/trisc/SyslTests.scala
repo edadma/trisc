@@ -408,7 +408,7 @@ class SyslTests extends AnyFreeSpec with Matchers {
 
   "global variable" in {
     eval(
-      """counter =0
+      """counter = 0
         |
         |increment()
         |    counter = counter + 1
@@ -419,5 +419,197 @@ class SyslTests extends AnyFreeSpec with Matchers {
         |    increment()
         |    return counter
         |""".stripMargin) shouldBe 3
+  }
+
+  "global variable with expression initializer" in {
+    eval(
+      """x = 2 + 3
+        |
+        |main() -> int = x
+        |""".stripMargin) shouldBe 5
+  }
+
+  // ===== Chained comparisons =====
+
+  "chained comparison lower <= x <= upper" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if 1 <= x <= 10 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "chained comparison out of range" in {
+    eval(
+      """main() -> int
+        |    x = 15
+        |    if 1 <= x <= 10 then 1 else 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "chained comparison three operators" in {
+    eval(
+      """main() -> int
+        |    if 1 < 2 < 3 < 4 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "chained comparison three operators fails" in {
+    eval(
+      """main() -> int
+        |    if 1 < 2 < 3 < 2 then 1 else 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "chained comparison mixed operators" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if 0 < x <= 5 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "chained comparison with == and !=" in {
+    eval("main() -> int = if 5 == 5 != 0 then 1 else 0\n") shouldBe 1
+  }
+
+  "single comparison still works" in {
+    eval("main() -> int = if 3 < 5 then 1 else 0\n") shouldBe 1
+  }
+
+  // ===== Boolean literals =====
+
+  "true literal" in {
+    eval("main() -> int = if true then 1 else 0\n") shouldBe 1
+  }
+
+  "false literal" in {
+    eval("main() -> int = if false then 1 else 0\n") shouldBe 0
+  }
+
+  // ===== Nested calls =====
+
+  "nested function calls" in {
+    eval(
+      """double(x: int) -> int = x * 2
+        |triple(x: int) -> int = x * 3
+        |
+        |main() -> int = double(triple(7))
+        |""".stripMargin) shouldBe 42
+  }
+
+  // ===== Complex conditions =====
+
+  "complex if condition" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    y = 3
+        |    if x > 3 && y < 10 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  // ===== Nested while =====
+
+  "nested while loops" in {
+    eval(
+      """main() -> int
+        |    sum = 0
+        |    i = 0
+        |    while i < 3
+        |        j = 0
+        |        while j < 3
+        |            sum = sum + 1
+        |            j = j + 1
+        |        i = i + 1
+        |    sum
+        |""".stripMargin) shouldBe 9
+  }
+
+  // ===== Multiple functions =====
+
+  "multiple functions calling each other" in {
+    eval(
+      """isEven(n: int) -> int = if n == 0 then 1 else isOdd(n - 1)
+        |isOdd(n: int) -> int = if n == 0 then 0 else isEven(n - 1)
+        |
+        |main() -> int = isEven(10)
+        |""".stripMargin) shouldBe 1
+  }
+
+  // ===== Unary precedence =====
+
+  "unary minus with multiplication" in {
+    eval("main() -> int = -3 * 2\n") shouldBe -6
+  }
+
+  "unary not with comparison" in {
+    eval("main() -> int = if !(3 > 5) then 1 else 0\n") shouldBe 1
+  }
+
+  // ===== Error cases =====
+
+  "undefined variable error" in {
+    val result = SyslParser.parseProgram("main() -> int = x\n")
+    result match
+      case Right(program) =>
+        val interp = new SyslInterpreter()
+        an[Exception] should be thrownBy interp.run(program)
+      case Left(_) => fail("should parse")
+  }
+
+  "undefined function error" in {
+    val result = SyslParser.parseProgram("main() -> int = unknown()\n")
+    result match
+      case Right(program) =>
+        val interp = new SyslInterpreter()
+        an[Exception] should be thrownBy interp.run(program)
+      case Left(_) => fail("should parse")
+  }
+
+  "division by zero error" in {
+    val result = SyslParser.parseProgram("main() -> int = 42 / 0\n")
+    result match
+      case Right(program) =>
+        val interp = new SyslInterpreter()
+        an[Exception] should be thrownBy interp.run(program)
+      case Left(_) => fail("should parse")
+  }
+
+  // ===== If without else returns 0 =====
+
+  "if without else returns 0" in {
+    eval(
+      """main() -> int
+        |    x = if 0 then 42
+        |    x
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ===== Abs using if expression =====
+
+  "abs function with if expression" in {
+    eval(
+      """abs(x: int) -> int = if x >= 0 then x else -x
+        |
+        |main() -> int = abs(-42)
+        |""".stripMargin) shouldBe 42
+  }
+
+  // ===== Clamp using chained comparison =====
+
+  "clamp with chained comparison" in {
+    eval(
+      """clamp(x: int, lo: int, hi: int) -> int =
+        |    if x < lo then lo
+        |    else if x > hi then hi
+        |    else x
+        |
+        |main() -> int
+        |    a = clamp(5, 0, 10)
+        |    b = clamp(-5, 0, 10)
+        |    c = clamp(15, 0, 10)
+        |    a + b + c
+        |""".stripMargin) shouldBe 15
   }
 }

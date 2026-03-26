@@ -104,8 +104,19 @@ object SyslParser extends StdParsers(SyslLexer):
       succeed(IfExprAST(cond, thenBody, None))
 
   def ifElseInline(cond: ExpressionAST, thenBody: List[StmtAST])(using ctx: ParseCtx): P[IfExprAST] =
-    "else" ~> inlineStmt ^^ { s => IfExprAST(cond, thenBody, Some(List(s))) } |
-      succeed(IfExprAST(cond, thenBody, None))
+    "else" ~> (
+      ifExpr ^^ { elif => IfExprAST(cond, thenBody, Some(List(ExprStmtAST(elif)))) } |
+        inlineStmt ^^ { s => IfExprAST(cond, thenBody, Some(List(s))) }
+    ) |
+      (if peek(newline ~> keyword("else")) then
+        newline ~> "else" ~> (
+          block(stmts) ^^ { elseBody => IfExprAST(cond, thenBody, Some(elseBody)) } |
+            ifExpr ^^ { elif => IfExprAST(cond, thenBody, Some(List(ExprStmtAST(elif)))) } |
+            inlineStmt ^^ { s => IfExprAST(cond, thenBody, Some(List(s))) }
+        )
+      else
+        succeed(IfExprAST(cond, thenBody, None))
+      )
 
   def whileStmt(using ctx: ParseCtx): P[WhileStmtAST] =
     "while" ~> expr ~ block(stmts) ^^ {
@@ -123,13 +134,22 @@ object SyslParser extends StdParsers(SyslLexer):
     leftAssoc(logicalAnd, "||")((l, op, r) => BinaryAST(l, op, r))
 
   def logicalAnd(using ctx: ParseCtx): P[ExpressionAST] =
-    leftAssoc(equality, "&&")((l, op, r) => BinaryAST(l, op, r))
+    leftAssoc(comparison, "&&")((l, op, r) => BinaryAST(l, op, r))
 
-  def equality(using ctx: ParseCtx): P[ExpressionAST] =
-    leftAssoc(comparison, "==" | "!=")((l, op, r) => BinaryAST(l, op, r))
+  def comparisonOp(using ctx: ParseCtx): P[String] =
+    "==" | "!=" | "<=" | ">=" | "<" | ">"
 
   def comparison(using ctx: ParseCtx): P[ExpressionAST] =
-    leftAssoc(additive, "<=" | ">=" | "<" | ">")((l, op, r) => BinaryAST(l, op, r))
+    additive ~ rep(comparisonOp ~ additive) ^^ {
+      case first ~ Nil => first
+      case first ~ chain =>
+        val operands = first :: chain.map { case _ ~ operand => operand }
+        val ops = chain.map { case op ~ _ => op }
+        // desugar: a op1 b op2 c → (a op1 b) && (b op2 c)
+        val pairs = for i <- ops.indices yield
+          BinaryAST(operands(i), ops(i), operands(i + 1))
+        pairs.reduceLeft((l, r) => BinaryAST(l, "&&", r))
+    }
 
   def additive(using ctx: ParseCtx): P[ExpressionAST] =
     leftAssoc(multiplicative, "+" | "-")((l, op, r) => BinaryAST(l, op, r))
