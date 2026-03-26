@@ -31,7 +31,7 @@ class SyslParser extends StandardTokenParsers {
       ident ~ (":" ~> typeExpr) ^^ {
         case name ~ t => VarDeclAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t))
       } |
-      ident ~ (":" ~> typeName) ~ ("=" ~> expr) ^^ {
+      ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ {
         case name ~ t ~ e => VarDeclAST(name, Some(t), e)
       } |
       ident ~ ("=" ~> expr) ^^ {
@@ -39,8 +39,8 @@ class SyslParser extends StandardTokenParsers {
       }
 
   lazy val funRest: Parser[(Option[String], FunBodyAST)] =
-    "->" ~> typeName ~ ("=" ~> bodyExprOrBlock) ^^ { case rt ~ body => (Some(rt), body) } |
-      "->" ~> typeName ~ block ^^ { case rt ~ body => (Some(rt), BlockBodyAST(body)) } |
+    "->" ~> typeRef ~ ("=" ~> bodyExprOrBlock) ^^ { case rt ~ body => (Some(rt), body) } |
+      "->" ~> typeRef ~ block ^^ { case rt ~ body => (Some(rt), BlockBodyAST(body)) } |
       "=" ~> bodyExprOrBlock ^^ { body => (None, body) } |
       block ^^ { body => (None, BlockBodyAST(body)) }
 
@@ -49,13 +49,20 @@ class SyslParser extends StandardTokenParsers {
       expr ^^ ExprBodyAST.apply
 
   lazy val param: Parser[ParamAST] =
-    ident ~ (":" ~> typeName) ^^ { case name ~ t => ParamAST(name, t) }
+    ident ~ (":" ~> typeRef) ^^ { case name ~ t => ParamAST(name, t) }
 
   lazy val typeName: Parser[String] =
     "int" | "char" | "byte" | "void" | ident
 
+  // Full type reference: *int, **int, [5]int, int, etc.
+  lazy val typeRef: Parser[String] =
+    "*" ~> typeRef ^^ (t => s"*$t") |
+      "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => s"[$n]$t" } |
+      typeName
+
+  // Array type for variable declarations: [5]int
   lazy val typeExpr: Parser[String] =
-    "[" ~> numericLit ~ ("]" ~> typeName) ^^ { case n ~ t => s"[$n]$t" }
+    "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => s"[$n]$t" }
 
   // --- Block ---
 
@@ -75,7 +82,7 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val identStmt: Parser[StmtAST] =
     ident ~ (":" ~> typeExpr) ^^ { case name ~ t => VarStmtAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t)) } |
-      ident ~ (":" ~> typeName) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
+      ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ ("[" ~> expr <~ "]") ~ ("=" ~> expr) ^^ { case name ~ idx ~ value =>
         IndexAssignStmtAST(VarRefAST(name), idx, value)
       } |

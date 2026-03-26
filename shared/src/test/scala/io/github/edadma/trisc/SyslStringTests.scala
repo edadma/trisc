@@ -96,7 +96,7 @@ class SyslStringTests extends SyslTestHelpers {
 
   "string literal with strlen" in {
     eval(
-      """strlen(s: int) -> int
+      """strlen(s: *byte) -> int
         |    n = 0
         |    while s[n] != 0 do n++
         |    n
@@ -107,7 +107,7 @@ class SyslStringTests extends SyslTestHelpers {
 
   "string literal with puts" in {
     output(
-      """puts(s: int)
+      """puts(s: *byte)
         |    i = 0
         |    while s[i] != 0
         |        putchar(s[i])
@@ -121,7 +121,7 @@ class SyslStringTests extends SyslTestHelpers {
 
   "string literal passed to function" in {
     eval(
-      """first(s: int) -> int = s[0]
+      """first(s: *byte) -> int = s[0]
         |
         |main() -> int = first("ABC")
         |""".stripMargin) shouldBe 65
@@ -129,7 +129,7 @@ class SyslStringTests extends SyslTestHelpers {
 
   "string literal UTF-8 encoding" in {
     eval(
-      """strlen(s: int) -> int
+      """strlen(s: *byte) -> int
         |    n = 0
         |    while s[n] != 0 do n++
         |    n
@@ -140,7 +140,7 @@ class SyslStringTests extends SyslTestHelpers {
 
   "string literal in variable" in {
     output(
-      """puts(s: int)
+      """puts(s: *byte)
         |    i = 0
         |    while s[i] != 0
         |        putchar(s[i])
@@ -157,7 +157,7 @@ class SyslStringTests extends SyslTestHelpers {
 
   "strlen implementation" in {
     eval(
-      """strlen(s: int) -> int
+      """strlen(s: *byte) -> int
         |    n = 0
         |    while s[n] != 0 do n++
         |    n
@@ -176,7 +176,7 @@ class SyslStringTests extends SyslTestHelpers {
 
   "puts implementation" in {
     output(
-      """puts(s: int)
+      """puts(s: *byte)
         |    i = 0
         |    while s[i] != 0
         |        putchar(s[i])
@@ -195,7 +195,7 @@ class SyslStringTests extends SyslTestHelpers {
 
   "strcmp implementation" in {
     eval(
-      """strcmp(a: int, b: int) -> int
+      """strcmp(a: *byte, b: *byte) -> int
         |    i = 0
         |    while a[i] != 0 && a[i] == b[i] do i++
         |    a[i] - b[i]

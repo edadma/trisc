@@ -75,7 +75,7 @@ class SyslPointerArrayTests extends SyslTestHelpers {
 
   "array pass to function" in {
     eval(
-      """sum(arr: int, n: int) -> int
+      """sum(arr: *int, n: int) -> int
         |    total = 0
         |    i = 0
         |    while i < n
@@ -94,7 +94,7 @@ class SyslPointerArrayTests extends SyslTestHelpers {
 
   "array modify through function" in {
     eval(
-      """fill(arr: int, n: int, val: int)
+      """fill(arr: *int, n: int, val: int)
         |    i = 0
         |    while i < n
         |        arr[i] = val
@@ -196,7 +196,7 @@ class SyslPointerArrayTests extends SyslTestHelpers {
 
   "pointer as function argument (pass by pointer)" in {
     eval(
-      """set_to_42(p: int)
+      """set_to_42(p: *int)
         |    *p = 42
         |
         |main() -> int
@@ -208,7 +208,7 @@ class SyslPointerArrayTests extends SyslTestHelpers {
 
   "swap via pointers" in {
     eval(
-      """swap(a: int, b: int)
+      """swap(a: *int, b: *int)
         |    tmp = *a
         |    *a = *b
         |    *b = tmp
@@ -225,7 +225,7 @@ class SyslPointerArrayTests extends SyslTestHelpers {
     eval(
       """g = 0
         |
-        |set_global(p: int)
+        |set_global(p: *int)
         |    *p = 99
         |
         |main() -> int
@@ -265,7 +265,7 @@ class SyslPointerArrayTests extends SyslTestHelpers {
 
   "increment via pointer" in {
     eval(
-      """inc(p: int)
+      """inc(p: *int)
         |    *p = *p + 1
         |
         |main() -> int
@@ -378,7 +378,7 @@ class SyslPointerArrayTests extends SyslTestHelpers {
 
   "function does pointer arithmetic on array arg" in {
     eval(
-      """third(arr: int) -> int = *(arr + 2)
+      """third(arr: *int) -> int = *(arr + 2)
         |
         |main() -> int
         |    a: [5]int
@@ -434,7 +434,7 @@ class SyslPointerArrayTests extends SyslTestHelpers {
 
   "bubble sort" in {
     eval(
-      """sort(arr: int, n: int)
+      """sort(arr: *int, n: int)
         |    i = 0
         |    while i < n - 1
         |        j = 0
@@ -460,7 +460,7 @@ class SyslPointerArrayTests extends SyslTestHelpers {
 
   "reverse array in place" in {
     eval(
-      """reverse(arr: int, n: int)
+      """reverse(arr: *int, n: int)
         |    i = 0
         |    j = n - 1
         |    while i < j

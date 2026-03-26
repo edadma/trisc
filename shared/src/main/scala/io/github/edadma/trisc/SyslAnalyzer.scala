@@ -64,6 +64,8 @@ class SyslAnalyzer:
     case "char" => CharType
     case "byte" => ByteType
     case "void" => VoidType
+    case s if s.startsWith("*") =>
+      PtrType(resolveTypeName(s.drop(1)))
     case s if s.startsWith("[") =>
       val size = s.drop(1).takeWhile(_.isDigit).toInt
       val elem = s.dropWhile(_ != ']').drop(1)
@@ -176,7 +178,6 @@ class SyslAnalyzer:
         val resultType = tInner.typ match
           case PtrType(t) => t
           case ArrayType(t, _) => t
-          case IntType => IntType
           case t => throw AnalysisError(s"cannot dereference $t")
         TDeref(tInner, resultType)
 
@@ -186,7 +187,6 @@ class SyslAnalyzer:
         val elemType = tArr.typ match
           case ArrayType(elem, _) => elem
           case PtrType(elem) => elem
-          case IntType => IntType
           case t => throw AnalysisError(s"cannot index $t")
         TIndex(tArr, tIndex, elemType)
 

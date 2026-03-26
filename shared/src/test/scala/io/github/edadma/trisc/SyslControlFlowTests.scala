@@ -310,7 +310,7 @@ class SyslControlFlowTests extends SyslTestHelpers {
 
   "while do inline function call" in {
     eval(
-      """inc(p: int) -> int
+      """inc(p: *int) -> int
         |    *p = *p + 1
         |    *p
         |

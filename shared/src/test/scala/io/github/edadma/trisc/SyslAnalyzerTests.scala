@@ -294,7 +294,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
 
   "analyze then interpret bubble sort" in {
     val source =
-      """sort(arr: int, n: int)
+      """sort(arr: *int, n: int)
         |    i = 0
         |    while i < n - 1
         |        j = 0
