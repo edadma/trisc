@@ -407,6 +407,52 @@ class SyslTests extends AnyFreeSpec with Matchers {
         |""".stripMargin) shouldBe 1
   }
 
+  "else with nested if block" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if x > 10
+        |        3
+        |    else
+        |        if x > 3
+        |            2
+        |        else
+        |            1
+        |""".stripMargin) shouldBe 2
+  }
+
+  "else with deeply nested if blocks" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if x > 100
+        |        4
+        |    else
+        |        if x > 50
+        |            3
+        |        else
+        |            if x > 3
+        |                2
+        |            else
+        |                1
+        |""".stripMargin) shouldBe 2
+  }
+
+  "else-if (no extra indent) three branches" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if x > 100
+        |        4
+        |    else if x > 50
+        |        3
+        |    else if x > 3
+        |        2
+        |    else
+        |        1
+        |""".stripMargin) shouldBe 2
+  }
+
   // ===== While =====
 
   "while loop" in {
