@@ -114,6 +114,107 @@ class TOFTests extends TestHelpers {
     tof2.segments.head.symbols.map(_.name) shouldBe Seq("foo", "bar", "baz")
   }
 
+  // ===== Type info on symbols =====
+
+  "func symbol with type info round-trips" in {
+    val b = TOF.builder
+    b.segment("code", 0)
+    b.addSymbol("add", 0, SymbolType.Func, typeInfo = Some("2 int int int"))
+    b += 0.toByte
+    b += 0.toByte
+    val tof = b.tof
+    val s = tof.serialize
+    s should include("SYMBOL:add,0,func,2 int int int")
+    val tof2 = TOF.deserialize(s)
+    val sym = tof2.segments.head.symbols.head
+    sym shouldBe TOFSymbol("add", 0, SymbolType.Func, typeInfo = Some("2 int int int"))
+  }
+
+  "func symbol with no params round-trips" in {
+    val b = TOF.builder
+    b.segment("code", 0)
+    b.addSymbol("getval", 0, SymbolType.Func, typeInfo = Some("0 int"))
+    b += 0.toByte
+    b += 0.toByte
+    val tof = b.tof
+    val tof2 = TOF.deserialize(tof.serialize)
+    tof2.segments.head.symbols.head.typeInfo shouldBe Some("0 int")
+  }
+
+  "func symbol with pointer types round-trips" in {
+    val b = TOF.builder
+    b.segment("code", 0)
+    b.addSymbol("swap", 0, SymbolType.Func, typeInfo = Some("2 ptr int ptr int void"))
+    b += 0.toByte
+    b += 0.toByte
+    val tof = b.tof
+    val tof2 = TOF.deserialize(tof.serialize)
+    tof2.segments.head.symbols.head.typeInfo shouldBe Some("2 ptr int ptr int void")
+  }
+
+  "func symbol without type info still works" in {
+    val b = TOF.builder
+    b.segment("code", 0)
+    b.addSymbol("legacy", 0x10, SymbolType.Func)
+    b += 0.toByte
+    b += 0.toByte
+    val tof = b.tof
+    val tof2 = TOF.deserialize(tof.serialize)
+    tof2.segments.head.symbols.head shouldBe TOFSymbol("legacy", 0x10, SymbolType.Func)
+  }
+
+  "data symbol with type info round-trips" in {
+    val b = TOF.builder
+    b.segment("data", 0)
+    b.addSymbol("counter", 0, SymbolType.Data, typeInfo = Some("int"))
+    b += 0.toByte
+    b += 0.toByte
+    val tof = b.tof
+    val s = tof.serialize
+    s should include("SYMBOL:counter,0,data,int")
+    val tof2 = TOF.deserialize(s)
+    val sym = tof2.segments.head.symbols.head
+    sym shouldBe TOFSymbol("counter", 0, SymbolType.Data, typeInfo = Some("int"))
+  }
+
+  "data symbol with size and type info round-trips" in {
+    val b = TOF.builder
+    b.segment("data", 0)
+    b.addSymbol("buf", 0, SymbolType.Data, Some(40), Some("arr 5 int"))
+    b += 0.toByte
+    b += 0.toByte
+    val tof = b.tof
+    val s = tof.serialize
+    s should include("SYMBOL:buf,0,data,28,arr 5 int")
+    val tof2 = TOF.deserialize(s)
+    val sym = tof2.segments.head.symbols.head
+    sym shouldBe TOFSymbol("buf", 0, SymbolType.Data, Some(40), Some("arr 5 int"))
+  }
+
+  "data symbol with size only (no type info) still works" in {
+    val b = TOF.builder
+    b.segment("data", 0)
+    b.addSymbol("buffer", 0, SymbolType.Data, Some(64))
+    b += 0.toByte
+    b += 0.toByte
+    val tof = b.tof
+    val tof2 = TOF.deserialize(tof.serialize)
+    tof2.segments.head.symbols.head shouldBe TOFSymbol("buffer", 0, SymbolType.Data, Some(64))
+  }
+
+  "const symbol with type info round-trips" in {
+    val b = TOF.builder
+    b.segment("code", 0)
+    b.addSymbol("MAX", 0xff, SymbolType.Const, typeInfo = Some("int"))
+    b += 0.toByte
+    b += 0.toByte
+    val tof = b.tof
+    val s = tof.serialize
+    s should include("SYMBOL:MAX,ff,const,int")
+    val tof2 = TOF.deserialize(s)
+    tof2.segments.head.symbols.head shouldBe TOFSymbol("MAX", 0xff, SymbolType.Const, typeInfo = Some("int"))
+  }
+
   // ===== Externs =====
 
   "serialize/deserialize extern" in {

@@ -12,7 +12,7 @@ case class EquateLineAST(name: String, expr: ExprAST) extends LineAST
 case class IncludeLineAST(path: String) extends LineAST
 case class EntryLineAST(name: String) extends LineAST
 case class ExternLineAST(name: String) extends LineAST
-case class GlobalLineAST(name: String, typ: SymbolType, size: Option[Long] = None) extends LineAST
+case class GlobalLineAST(name: String, typ: SymbolType, size: Option[Long] = None, typeInfo: Option[String] = None) extends LineAST
 case class AlignLineAST(alignment: Int) extends LineAST
 case class CommentLineAST(text: String) extends LineAST
 case class DataLineAST(width: Int, data: Seq[ExprAST]) extends LineAST

@@ -31,3 +31,40 @@ enum SyslType:
     case VoidType => "void"
     case PtrType(t) => s"*$t"
     case ArrayType(t, n) => s"[$n]$t"
+
+  def toPrefix: String = this match
+    case IntType        => "int"
+    case CharType       => "char"
+    case ByteType       => "byte"
+    case BoolType       => "bool"
+    case VoidType       => "void"
+    case PtrType(t)     => s"ptr ${t.toPrefix}"
+    case ArrayType(t, n) => s"arr $n ${t.toPrefix}"
+
+object SyslType:
+  def fromPrefix(s: String): SyslType =
+    val tokens = s.split("\\s+").iterator
+    parseType(tokens)
+
+  def parseType(tokens: Iterator[String]): SyslType =
+    tokens.next() match
+      case "int"  => IntType
+      case "char" => CharType
+      case "byte" => ByteType
+      case "bool" => BoolType
+      case "void" => VoidType
+      case "ptr"  => PtrType(parseType(tokens))
+      case "arr" =>
+        val size = tokens.next().toInt
+        ArrayType(parseType(tokens), size)
+      case other => throw IllegalArgumentException(s"unknown type token: '$other'")
+
+  def funcSigToPrefix(params: List[SyslType], ret: SyslType): String =
+    s"${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}"
+
+  def funcSigFromPrefix(s: String): (List[SyslType], SyslType) =
+    val tokens = s.split("\\s+").iterator
+    val nparams = tokens.next().toInt
+    val params = (1 to nparams).map(_ => parseType(tokens)).toList
+    val ret = parseType(tokens)
+    (params, ret)

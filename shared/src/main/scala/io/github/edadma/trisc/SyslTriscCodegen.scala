@@ -10,6 +10,9 @@ class SyslTriscCodegen(addresses: Int = 2):
     labelCounter += 1
     s".${prefix}_$labelCounter"
 
+  private def funcSig(f: TFunDecl): String =
+    SyslType.funcSigToPrefix(f.params.map(_.typ), f.returnType)
+
   def generate(program: TProgram): String =
     out.clear()
     labelCounter = 0
@@ -21,15 +24,16 @@ class SyslTriscCodegen(addresses: Int = 2):
     }
     if hasMain then
       emit("entry main")
-      emit("global main, func")
+      val mainDecl = program.decls.collectFirst { case f @ TFunDecl("main", _, _, _) => f }.get
+      emit(s"global main, func, ${funcSig(mainDecl)}")
 
     // Emit globals
     for decl <- program.decls do
       decl match
-        case TVarDecl(name, _, _) =>
-          emit(s"global $name, data")
-        case TFunDecl(name, _, _, _) if name != "main" =>
-          emit(s"global $name, func")
+        case TVarDecl(name, typ, _) =>
+          emit(s"global $name, data, ${typ.toPrefix}")
+        case f @ TFunDecl(name, _, _, _) if name != "main" =>
+          emit(s"global $name, func, ${funcSig(f)}")
         case _ =>
 
     // Emit functions

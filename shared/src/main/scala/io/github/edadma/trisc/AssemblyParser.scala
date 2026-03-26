@@ -181,20 +181,33 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
 
   lazy val externDecl: P[ExternLineAST] = "extern" ~> ident ^^ ExternLineAST.apply
 
+  lazy val typeInfoToken: P[String] = ident | numericLit
+  lazy val commaField: P[Seq[String]] = "," ~> rep1(typeInfoToken)
+
   lazy val globalDecl: P[GlobalLineAST] =
-    "global" ~> ident ~ opt("," ~> ident ~ opt("," ~> numericLit)) ^^ {
+    "global" ~> ident ~ opt("," ~> ident ~ rep(commaField)) ^^ {
       case name ~ None => GlobalLineAST(name, SymbolType.Func)
-      case name ~ Some(typ ~ size) =>
-        val symType = typ match
+      case name ~ Some(typStr ~ fields) =>
+        val symType = typStr match
           case "func"  => SymbolType.Func
           case "data"  => SymbolType.Data
           case "const" => SymbolType.Const
           case other   => sys.error(s"unknown symbol type '$other' (expected func, data, or const)")
-        val symSize = size.map(s =>
-          if s.startsWith("0x") then java.lang.Long.parseLong(s.drop(2), 16)
-          else s.toLong
-        )
-        GlobalLineAST(name, symType, symSize)
+        val isHex = (s: String) =>
+          val raw = if s.startsWith("0x") || s.startsWith("0X") then s.drop(2) else s
+          raw.nonEmpty && raw.forall(c => c.isDigit || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F')
+        val parseNum = (s: String) => if s.startsWith("0x") then java.lang.Long.parseLong(s.drop(2), 16) else s.toLong
+        val (symSize, typeInfo) = fields match
+          case Nil => (None, None)
+          case List(tokens) =>
+            if symType == SymbolType.Data && tokens.size == 1 && isHex(tokens.head) then
+              (Some(parseNum(tokens.head)), None)
+            else
+              (None, Some(tokens.mkString(" ")))
+          case List(sizeTokens, tiTokens) =>
+            (Some(parseNum(sizeTokens.head)), Some(tiTokens.mkString(" ")))
+          case _ => sys.error("too many fields in global directive")
+        GlobalLineAST(name, symType, symSize, typeInfo)
     }
 
   lazy val data: P[DataLineAST] = ("db" | "ds" | "dw" | "dl" | "dd") ~ repsep(expression, ",") ^^ {

@@ -113,7 +113,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
       if symbols contains name then problem(ext, s"duplicate symbol: '$name'")
       symbols(name) = ExternSymbol(name)
       declaredExterns += name
-    case g @ GlobalLineAST(name, typ, size) =>
+    case g @ GlobalLineAST(name, typ, size, typeInfo) =>
       globals(name) = g
     case CommentLineAST(_) => // pass 1: skip comments
     case AlignLineAST(alignment) =>
@@ -226,7 +226,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
       for (gname, g) <- globals if seg.symbols.contains(gname) do
         symbols.get(gname) match
           case Some(LabelSymbol(_, value, _, _)) =>
-            builder.addSymbol(gname, value - org, g.typ, g.size)
+            builder.addSymbol(gname, value - org, g.typ, g.size, g.typeInfo)
             emittedSymbols += gname
           case _ =>
     else if relocatable then
@@ -256,7 +256,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case EquateLineAST(_, _)     =>
     case EntryLineAST(_)             =>
     case ExternLineAST(_)            =>
-    case GlobalLineAST(_, _, _)     =>
+    case GlobalLineAST(_, _, _, _)  =>
     case CommentLineAST(text)       => builder.addComment(text)
     case AlignLineAST(alignment) =>
       val pad = ((alignment - (builder.length % alignment)) % alignment).toInt

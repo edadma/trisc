@@ -9,7 +9,7 @@ enum SymbolType:
 enum RelocType:
   case MOVI2, MOVI3, MOVI4, ABS32
 
-case class TOFSymbol(name: String, offset: Long, typ: SymbolType, size: Option[Long] = None)
+case class TOFSymbol(name: String, offset: Long, typ: SymbolType, size: Option[Long] = None, typeInfo: Option[String] = None)
 case class TOFReloc(typ: RelocType, offset: Long, symbol: String)
 
 object TOF:
@@ -49,8 +49,8 @@ object TOF:
 
     def length: Long = current.length
 
-    def addSymbol(name: String, offset: Long, typ: SymbolType, size: Option[Long] = None): Unit =
-      current.symbols += TOFSymbol(name, offset, typ, size)
+    def addSymbol(name: String, offset: Long, typ: SymbolType, size: Option[Long] = None, typeInfo: Option[String] = None): Unit =
+      current.symbols += TOFSymbol(name, offset, typ, size, typeInfo)
 
     def addExtern(name: String): Unit =
       current.externs += name
@@ -126,17 +126,27 @@ object TOF:
           b.segment(name, parseLong(org))
         case _ => err(s"bad SEGMENT line, expected SEGMENT:name,org")
 
+    def isHexNumber(s: String): Boolean =
+      s.nonEmpty && s.forall(c => c.isDigit || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F')
+
     def parseSymbol(rest: String): Unit =
       rest.split(",").toSeq match
+        case Seq(name, offset, "func", ti) =>
+          b.addSymbol(name, parseLong(offset), SymbolType.Func, typeInfo = Some(ti))
         case Seq(name, offset, "func") =>
           b.addSymbol(name, parseLong(offset), SymbolType.Func)
-        case Seq(name, offset, "data", size) =>
-          b.addSymbol(name, parseLong(offset), SymbolType.Data, Some(parseLong(size)))
+        case Seq(name, offset, "data", size, ti) =>
+          b.addSymbol(name, parseLong(offset), SymbolType.Data, Some(parseLong(size)), Some(ti))
+        case Seq(name, offset, "data", sizeOrTi) =>
+          if isHexNumber(sizeOrTi) then b.addSymbol(name, parseLong(offset), SymbolType.Data, Some(parseLong(sizeOrTi)))
+          else b.addSymbol(name, parseLong(offset), SymbolType.Data, typeInfo = Some(sizeOrTi))
         case Seq(name, offset, "data") =>
           b.addSymbol(name, parseLong(offset), SymbolType.Data)
+        case Seq(name, offset, "const", ti) =>
+          b.addSymbol(name, parseLong(offset), SymbolType.Const, typeInfo = Some(ti))
         case Seq(name, offset, "const") =>
           b.addSymbol(name, parseLong(offset), SymbolType.Const)
-        case _ => err(s"bad SYMBOL line, expected SYMBOL:name,offset,type[,size]")
+        case _ => err(s"bad SYMBOL line, expected SYMBOL:name,offset,type[,size][,typeinfo]")
 
     def parseReloc(rest: String): Unit =
       rest.split(",", 3).toSeq match
@@ -259,7 +269,8 @@ class TOF(val entry: Option[String], val segments: Seq[TOF.Segment]):
           case SymbolType.Data  => "data"
           case SymbolType.Const => "const"
         val sizeStr = sym.size.map(sz => s",${sz.toHexString}").getOrElse("")
-        buf ++= s"SYMBOL:${sym.name},${sym.offset.toHexString},$typStr$sizeStr\n"
+        val tiStr = sym.typeInfo.map(ti => s",$ti").getOrElse("")
+        buf ++= s"SYMBOL:${sym.name},${sym.offset.toHexString},$typStr$sizeStr$tiStr\n"
 
       for ext <- s.externs do
         buf ++= s"EXTERN:$ext\n"
