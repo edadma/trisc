@@ -126,6 +126,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case AddrOfAST(name) => PtrVal(lookupCell(name, env))
 
+      case AddrOfIndexAST(array, index) =>
+        val arrVal = evalAny(array, env)
+        val idx = toLong(evalAny(index, env)).toInt
+        arrVal match
+          case ArrVal(cells, off) => ArrVal(cells, off + idx)
+          case _ => PtrVal(indexCell(arrVal, idx))
+
       case DerefAST(expr) => derefCell(evalAny(expr, env)).value
 
       case IndexAST(arr, index) =>

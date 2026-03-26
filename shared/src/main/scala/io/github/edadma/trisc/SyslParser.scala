@@ -163,6 +163,7 @@ object SyslParser extends StandardTokenParsers with PackratParsers {
     "-" ~> unary ^^ (e => UnaryAST("-", e)) |
       "!" ~> unary ^^ (e => UnaryAST("!", e)) |
       "*" ~> unary ^^ DerefAST.apply |
+      "&" ~> ident ~ ("[" ~> expr <~ "]") ^^ { case name ~ idx => AddrOfIndexAST(VarRefAST(name), idx) } |
       "&" ~> ident ^^ AddrOfAST.apply |
       postfix
 
