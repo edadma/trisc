@@ -298,6 +298,11 @@ class FDIV(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
 
   def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).readf / cpu.r(b).readf)
 
+class FPOW(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "fpow"
+
+  def apply(cpu: CPU): Unit = cpu.r(d).write(math.pow(cpu.r(a).readf, cpu.r(b).readf))
+
 // Floating point RR (110 block)
 
 class FNEG(a: Int, b: Int) extends RRInstruction(a, b):
@@ -309,6 +314,16 @@ class FINV(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "finv"
 
   def apply(cpu: CPU): Unit = cpu.r(a).write(1.0 / cpu.r(b).readf)
+
+class CVT(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "cvt"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read.toDouble)
+
+class FINT(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "fint"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).readf.toLong)
 
 class AUIPC(r: Int, imm: Int) extends ImmediateInstruction(r, imm):
   val mnemonic = "auipc"
