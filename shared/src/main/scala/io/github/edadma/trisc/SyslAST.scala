@@ -21,6 +21,7 @@ case class BlockBodyAST(stmts: List[StmtAST]) extends FunBodyAST
 trait StmtAST extends Positional
 case class VarStmtAST(name: String, typ: Option[String], init: ExpressionAST) extends StmtAST
 case class AssignStmtAST(target: String, value: ExpressionAST) extends StmtAST
+case class DerefAssignStmtAST(pointer: ExpressionAST, value: ExpressionAST) extends StmtAST
 case class ReturnStmtAST(value: Option[ExpressionAST]) extends StmtAST
 case class WhileStmtAST(cond: ExpressionAST, body: List[StmtAST]) extends StmtAST
 case class ExprStmtAST(expr: ExpressionAST) extends StmtAST
@@ -36,3 +37,5 @@ case class BinaryAST(left: ExpressionAST, op: String, right: ExpressionAST) exte
 case class UnaryAST(op: String, operand: ExpressionAST) extends ExpressionAST
 case class CallAST(name: String, args: List[ExpressionAST]) extends ExpressionAST
 case class IfExprAST(cond: ExpressionAST, thenBody: List[StmtAST], elseBody: Option[List[StmtAST]]) extends ExpressionAST
+case class AddrOfAST(name: String) extends ExpressionAST
+case class DerefAST(expr: ExpressionAST) extends ExpressionAST

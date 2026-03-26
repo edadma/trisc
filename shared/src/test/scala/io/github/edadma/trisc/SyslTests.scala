@@ -922,4 +922,143 @@ class SyslTests extends AnyFreeSpec with Matchers {
   "chained != comparison" in {
     eval("main() -> int = if 1 != 2 != 3 then 1 else 0\n") shouldBe 1
   }
+
+  // ===== Pointers =====
+
+  "address-of and dereference basic" in {
+    eval(
+      """main() -> int
+        |    x = 42
+        |    p = &x
+        |    *p
+        |""".stripMargin) shouldBe 42
+  }
+
+  "deref assignment changes original variable" in {
+    eval(
+      """main() -> int
+        |    x = 10
+        |    p = &x
+        |    *p = 42
+        |    x
+        |""".stripMargin) shouldBe 42
+  }
+
+  "pointer to different variables" in {
+    eval(
+      """main() -> int
+        |    x = 10
+        |    y = 20
+        |    p = &x
+        |    q = &y
+        |    *p + *q
+        |""".stripMargin) shouldBe 30
+  }
+
+  "pointer reassignment" in {
+    eval(
+      """main() -> int
+        |    x = 10
+        |    y = 20
+        |    p = &x
+        |    p = &y
+        |    *p
+        |""".stripMargin) shouldBe 20
+  }
+
+  "pointer as function argument (pass by pointer)" in {
+    eval(
+      """set_to_42(p: int)
+        |    *p = 42
+        |
+        |main() -> int
+        |    x = 0
+        |    set_to_42(&x)
+        |    x
+        |""".stripMargin) shouldBe 42
+  }
+
+  "swap via pointers" in {
+    eval(
+      """swap(a: int, b: int)
+        |    tmp = *a
+        |    *a = *b
+        |    *b = tmp
+        |
+        |main() -> int
+        |    x = 10
+        |    y = 20
+        |    swap(&x, &y)
+        |    x * 100 + y
+        |""".stripMargin) shouldBe 2010
+  }
+
+  "pointer to global variable" in {
+    eval(
+      """g = 0
+        |
+        |set_global(p: int)
+        |    *p = 99
+        |
+        |main() -> int
+        |    set_global(&g)
+        |    g
+        |""".stripMargin) shouldBe 99
+  }
+
+  "deref in expression" in {
+    eval(
+      """main() -> int
+        |    x = 21
+        |    p = &x
+        |    *p * 2
+        |""".stripMargin) shouldBe 42
+  }
+
+  "deref in if condition" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    p = &x
+        |    if *p > 3 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "deref in function call argument" in {
+    eval(
+      """double(n: int) -> int = n * 2
+        |
+        |main() -> int
+        |    x = 21
+        |    p = &x
+        |    double(*p)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "increment via pointer" in {
+    eval(
+      """inc(p: int)
+        |    *p = *p + 1
+        |
+        |main() -> int
+        |    x = 0
+        |    inc(&x)
+        |    inc(&x)
+        |    inc(&x)
+        |    x
+        |""".stripMargin) shouldBe 3
+  }
+
+  "pointer in while loop" in {
+    eval(
+      """main() -> int
+        |    x = 0
+        |    p = &x
+        |    i = 0
+        |    while i < 5
+        |        *p = *p + i
+        |        i = i + 1
+        |    x
+        |""".stripMargin) shouldBe 10
+  }
 }

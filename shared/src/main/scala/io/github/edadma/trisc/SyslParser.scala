@@ -64,11 +64,14 @@ object SyslParser extends StandardTokenParsers with PackratParsers {
     rep1sep(stmt, rep1(Newline))
 
   lazy val stmt: PackratParser[StmtAST] =
-    whileStmt | returnStmt | identStmt | expr ^^ ExprStmtAST.apply
+    whileStmt | returnStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
 
   lazy val identStmt: PackratParser[StmtAST] =
     ident ~ (":" ~> typeName) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ ("=" ~> expr) ^^ { case name ~ e => AssignStmtAST(name, e) }
+
+  lazy val derefAssignStmt: PackratParser[DerefAssignStmtAST] =
+    "*" ~> expr ~ ("=" ~> expr) ^^ { case ptr ~ value => DerefAssignStmtAST(ptr, value) }
 
   lazy val whileStmt: PackratParser[WhileStmtAST] =
     "while" ~> expr ~ block ^^ { case cond ~ body => WhileStmtAST(cond, body) }
@@ -103,6 +106,7 @@ object SyslParser extends StandardTokenParsers with PackratParsers {
 
   lazy val inlineStmt: PackratParser[StmtAST] =
     returnStmt |
+      "*" ~> expr ~ ("=" ~> expr) ^^ { case ptr ~ value => DerefAssignStmtAST(ptr, value) } |
       ident ~ ("=" ~> expr) ^^ { case name ~ e => AssignStmtAST(name, e) } |
       expr ^^ ExprStmtAST.apply
 
@@ -145,6 +149,8 @@ object SyslParser extends StandardTokenParsers with PackratParsers {
   lazy val unary: PackratParser[ExpressionAST] =
     "-" ~> unary ^^ (e => UnaryAST("-", e)) |
       "!" ~> unary ^^ (e => UnaryAST("!", e)) |
+      "*" ~> unary ^^ DerefAST.apply |
+      "&" ~> ident ^^ AddrOfAST.apply |
       primary
 
   lazy val primary: PackratParser[ExpressionAST] =
