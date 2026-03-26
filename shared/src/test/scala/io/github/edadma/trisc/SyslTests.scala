@@ -25,11 +25,38 @@ class SyslTests extends AnyFreeSpec with Matchers {
         |""".stripMargin) shouldBe 0
   }
 
-  "main returns value" in {
+  "main returns value with return" in {
     eval(
       """main() -> int
         |    return 42
         |""".stripMargin) shouldBe 42
+  }
+
+  "main returns last expression" in {
+    eval(
+      """main() -> int
+        |    42
+        |""".stripMargin) shouldBe 42
+  }
+
+  "block returns last expression after statements" in {
+    eval(
+      """main() -> int
+        |    x = 10
+        |    y = 20
+        |    x + y
+        |""".stripMargin) shouldBe 30
+  }
+
+  "recursive function without explicit return" in {
+    eval(
+      """factorial(n: int) -> int
+        |    if n <= 1
+        |        return 1
+        |    n * factorial(n - 1)
+        |
+        |main() -> int = factorial(5)
+        |""".stripMargin) shouldBe 120
   }
 
   // ===== Expression functions =====

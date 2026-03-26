@@ -37,7 +37,7 @@ object SyslParser extends StdParsers(SyslLexer):
       block(stmts) ^^ { body => FunDeclAST(name, params, None, BlockBodyAST(body)): DeclAST }
 
   def bodyExprOrBlock(using ctx: ParseCtx): P[FunBodyAST] =
-    block(stmts) ^^ (s => BlockBodyAST(s, isExprBlock = true): FunBodyAST) |
+    block(stmts) ^^ (s => BlockBodyAST(s): FunBodyAST) |
       expr ^^ (e => ExprBodyAST(e): FunBodyAST)
 
   def declRest(name: String)(using ctx: ParseCtx): P[DeclAST] =

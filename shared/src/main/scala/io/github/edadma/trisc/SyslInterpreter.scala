@@ -33,16 +33,15 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
     fun.body match
       case ExprBodyAST(expr) => eval(expr, env)
-      case BlockBodyAST(stmts, isExprBlock) =>
+      case BlockBodyAST(stmts) =>
         try
-          if isExprBlock && stmts.nonEmpty then
+          if stmts.nonEmpty then
             execBlock(stmts.init, env)
             stmts.last match
               case ExprStmtAST(expr) => eval(expr, env)
+              case ReturnStmtAST(value) => value.map(eval(_, env)).getOrElse(0)
               case other => exec(other, env); 0
-          else
-            execBlock(stmts, env)
-            0
+          else 0
         catch
           case ReturnException(v) => v
 

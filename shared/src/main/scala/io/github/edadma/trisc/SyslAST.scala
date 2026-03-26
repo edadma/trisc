@@ -15,7 +15,7 @@ case class ParamAST(name: String, typ: String) extends Positional
 // Function body
 trait FunBodyAST
 case class ExprBodyAST(expr: ExpressionAST) extends FunBodyAST
-case class BlockBodyAST(stmts: List[StmtAST], isExprBlock: Boolean = false) extends FunBodyAST
+case class BlockBodyAST(stmts: List[StmtAST]) extends FunBodyAST
 
 // Statements
 trait StmtAST extends Positional
