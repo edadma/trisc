@@ -92,6 +92,13 @@ object SyslParser extends StdParsers(SyslLexer):
 
   def inlineStmt(using ctx: ParseCtx): P[StmtAST] =
     returnStmt ^^ (s => s: StmtAST) |
+      ident >> { name =>
+        "=" ~> expr ^^ { e => AssignStmtAST(name, e): StmtAST } |
+          "(" ~> repsep(expr, ",") <~ ")" >> { args =>
+            continueExpr(CallAST(name, args)) ^^ { e => ExprStmtAST(e): StmtAST }
+          } |
+          continueExpr(VarRefAST(name)) ^^ { e => ExprStmtAST(e): StmtAST }
+      } |
       expr ^^ (e => ExprStmtAST(e): StmtAST)
 
   def ifElsePart(cond: ExpressionAST, thenBody: List[StmtAST])(using ctx: ParseCtx): P[IfExprAST] =

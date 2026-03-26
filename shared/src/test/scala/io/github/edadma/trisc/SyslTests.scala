@@ -612,4 +612,314 @@ class SyslTests extends AnyFreeSpec with Matchers {
         |    a + b + c
         |""".stripMargin) shouldBe 15
   }
+
+  // ===== Syntactic edge cases: if/then/else combinations =====
+
+  "if block without then, no else" in {
+    eval(
+      """main() -> int
+        |    x = 0
+        |    if 1
+        |        x = 42
+        |    x
+        |""".stripMargin) shouldBe 42
+  }
+
+  "if block without then, with else block" in {
+    eval(
+      """main() -> int
+        |    if 0
+        |        1
+        |    else
+        |        2
+        |""".stripMargin) shouldBe 2
+  }
+
+  "if then inline, no else" in {
+    eval(
+      """main() -> int
+        |    x = 0
+        |    if 1 then x = 42
+        |    x
+        |""".stripMargin) shouldBe 42
+  }
+
+  "if then inline, with inline else" in {
+    eval("main() -> int = if 1 then 42 else 0\n") shouldBe 42
+  }
+
+  "if then inline, with block else" in {
+    eval(
+      """main() -> int
+        |    if 0 then 42
+        |    else
+        |        99
+        |""".stripMargin) shouldBe 99
+  }
+
+  "if then block, no else" in {
+    eval(
+      """main() -> int
+        |    x = 0
+        |    if 1 then
+        |        x = 42
+        |    x
+        |""".stripMargin) shouldBe 42
+  }
+
+  "if then block, with else block" in {
+    eval(
+      """main() -> int
+        |    if 1 then
+        |        42
+        |    else
+        |        99
+        |""".stripMargin) shouldBe 42
+  }
+
+  "if then block, with else if block" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if x > 10 then
+        |        3
+        |    else if x > 3 then
+        |        2
+        |    else
+        |        1
+        |""".stripMargin) shouldBe 2
+  }
+
+  "if then inline, else if inline, else inline" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if x > 10 then 3
+        |    else if x > 3 then 2
+        |    else 1
+        |""".stripMargin) shouldBe 2
+  }
+
+  "if then inline return" in {
+    eval(
+      """main() -> int
+        |    if 1 then return 42
+        |    0
+        |""".stripMargin) shouldBe 42
+  }
+
+  "if block, else if inline" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if x > 10
+        |        3
+        |    else if x > 3 then 2
+        |    else 1
+        |""".stripMargin) shouldBe 2
+  }
+
+  // ===== Syntactic edge cases: function forms =====
+
+  "function with -> return type, = expression" in {
+    eval(
+      """f() -> int = 42
+        |main() -> int = f()
+        |""".stripMargin) shouldBe 42
+  }
+
+  "function with -> return type, = block" in {
+    eval(
+      """f() -> int =
+        |    x = 21
+        |    x * 2
+        |
+        |main() -> int = f()
+        |""".stripMargin) shouldBe 42
+  }
+
+  "function with -> return type, regular block" in {
+    eval(
+      """f() -> int
+        |    return 42
+        |
+        |main() -> int = f()
+        |""".stripMargin) shouldBe 42
+  }
+
+  "function with -> return type, block last expression" in {
+    eval(
+      """f() -> int
+        |    42
+        |
+        |main() -> int = f()
+        |""".stripMargin) shouldBe 42
+  }
+
+  "function no return type, = expression (inferred)" in {
+    eval(
+      """f() = 42
+        |main() -> int = f()
+        |""".stripMargin) shouldBe 42
+  }
+
+  "function no return type, = block (inferred)" in {
+    eval(
+      """f() =
+        |    x = 21
+        |    x * 2
+        |
+        |main() -> int = f()
+        |""".stripMargin) shouldBe 42
+  }
+
+  "function no return type, block void" in {
+    output(
+      """f()
+        |    print(42)
+        |
+        |main() -> int
+        |    f()
+        |    0
+        |""".stripMargin) shouldBe "42"
+  }
+
+  "function no return type, block with last expression" in {
+    eval(
+      """f()
+        |    42
+        |
+        |main() -> int = f()
+        |""".stripMargin) shouldBe 42
+  }
+
+  // ===== Syntactic edge cases: variables =====
+
+  "typed variable declaration" in {
+    eval(
+      """main() -> int
+        |    x: int = 42
+        |    x
+        |""".stripMargin) shouldBe 42
+  }
+
+  "untyped variable then reassign" in {
+    eval(
+      """main() -> int
+        |    x = 1
+        |    x = 2
+        |    x = 3
+        |    x
+        |""".stripMargin) shouldBe 3
+  }
+
+  "variable used in its own initialization expression" in {
+    eval(
+      """main() -> int
+        |    x = 10
+        |    x = x + 5
+        |    x
+        |""".stripMargin) shouldBe 15
+  }
+
+  // ===== Syntactic edge cases: return =====
+
+  "explicit return in middle of block" in {
+    eval(
+      """main() -> int
+        |    x = 10
+        |    if x > 5
+        |        return 1
+        |    0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "return from nested while" in {
+    eval(
+      """main() -> int
+        |    i = 0
+        |    while i < 100
+        |        if i == 42
+        |            return i
+        |        i = i + 1
+        |    0
+        |""".stripMargin) shouldBe 42
+  }
+
+  "return void (no value)" in {
+    output(
+      """f()
+        |    print(1)
+        |    return
+        |    print(2)
+        |
+        |main() -> int
+        |    f()
+        |    0
+        |""".stripMargin) shouldBe "1"
+  }
+
+  // ===== Syntactic edge cases: expressions as statements =====
+
+  "bare function call as statement" in {
+    output(
+      """main() -> int
+        |    print(42)
+        |    0
+        |""".stripMargin) shouldBe "42"
+  }
+
+  "bare expression as last statement" in {
+    eval(
+      """main() -> int
+        |    x = 40
+        |    x + 2
+        |""".stripMargin) shouldBe 42
+  }
+
+  // ===== Edge cases: empty-ish programs =====
+
+  "single expression function" in {
+    eval("main() -> int = 42\n") shouldBe 42
+  }
+
+  "function with no parameters" in {
+    eval(
+      """f() -> int = 42
+        |main() -> int = f()
+        |""".stripMargin) shouldBe 42
+  }
+
+  "function with four parameters" in {
+    eval(
+      """f(a: int, b: int, c: int, d: int) -> int = a + b + c + d
+        |main() -> int = f(1, 2, 3, 4)
+        |""".stripMargin) shouldBe 10
+  }
+
+  // ===== Chained comparison edge cases =====
+
+  "single comparison is not chained" in {
+    eval("main() -> int = if 3 < 5 then 1 else 0\n") shouldBe 1
+  }
+
+  "two comparisons chained" in {
+    eval("main() -> int = if 1 < 2 < 3 then 1 else 0\n") shouldBe 1
+  }
+
+  "four comparisons chained" in {
+    eval("main() -> int = if 1 < 2 <= 3 < 4 <= 5 then 1 else 0\n") shouldBe 1
+  }
+
+  "chained comparison short-circuits on first false" in {
+    eval("main() -> int = if 1 < 2 > 3 < 4 then 1 else 0\n") shouldBe 0
+  }
+
+  "chained == comparison" in {
+    eval("main() -> int = if 5 == 5 == 5 then 1 else 0\n") shouldBe 1
+  }
+
+  "chained != comparison" in {
+    eval("main() -> int = if 1 != 2 != 3 then 1 else 0\n") shouldBe 1
+  }
 }
