@@ -29,7 +29,8 @@ case class WhileStmtAST(cond: ExpressionAST, body: List[StmtAST]) extends StmtAS
 case class ExprStmtAST(expr: ExpressionAST) extends StmtAST
 
 // Expressions
-trait ExpressionAST extends Positional
+trait ExpressionAST extends Positional:
+  var typ: SyslType = null
 case class IntLitAST(value: Long) extends ExpressionAST
 case class CharLitAST(value: Char) extends ExpressionAST
 case class StringLitAST(value: String) extends ExpressionAST
