@@ -298,6 +298,15 @@ class SyslParser extends StandardTokenParsers {
       )
     }, s => s"invalid char literal: '$s'")
 
+  // sizeof argument: try pointer/array/func types first, then bare name
+  // A bare name could be a type (struct) or a variable — analyzer decides
+  lazy val sizeofArg: Parser[ExpressionAST] =
+    "*" ~> typeRef ^^ (t => SizeofTypeAST(s"*$t")) |
+      "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => SizeofTypeAST(s"[$n]$t") } |
+      funcTypeRef ^^ SizeofTypeAST.apply |
+      ("int" | "char" | "byte" | "bool" | "void") ^^ SizeofTypeAST.apply |
+      expr ^^ SizeofExprAST.apply
+
   lazy val castType: Parser[String] =
     "int" | "char" | "byte" | "bool"
 
@@ -310,7 +319,7 @@ class SyslParser extends StandardTokenParsers {
       stringLit ^^ StringLitExprAST.apply |
       "true" ^^^ BoolLitAST(true) |
       "false" ^^^ BoolLitAST(false) |
-      "sizeof" ~> "(" ~> typeRef <~ ")" ^^ SizeofAST.apply |
+      "sizeof" ~> "(" ~> sizeofArg <~ ")" |
       cast |
       ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |
       ident ^^ VarRefAST.apply |

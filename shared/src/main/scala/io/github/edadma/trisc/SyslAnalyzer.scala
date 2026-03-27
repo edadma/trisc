@@ -274,9 +274,17 @@ class SyslAnalyzer:
         val t = resolveTypeName(typStr)
         TArrayDecl(size, typStr, t)
 
-      case SizeofAST(typeName) =>
+      case SizeofTypeAST(typeName) =>
         val t = resolveTypeName(typeName)
         TSizeof(t.sizeOf, IntType)
+
+      case SizeofExprAST(VarRefAST(name)) if structTypes.contains(name) =>
+        // sizeof(StructName) — treat as type sizeof
+        TSizeof(structTypes(name).sizeOf, IntType)
+
+      case SizeofExprAST(inner) =>
+        val tInner = analyzeExpr(inner)
+        TSizeof(tInner.typ.sizeOf, IntType)
 
       case FieldPreIncAST(obj, field) =>
         val tObj = analyzeExpr(obj)

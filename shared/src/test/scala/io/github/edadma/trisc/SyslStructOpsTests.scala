@@ -56,6 +56,52 @@ class SyslStructOpsTests extends SyslTestHelpers {
     eval("main() -> int = sizeof(int) + sizeof(byte)\n") shouldBe 9
   }
 
+  // ===== sizeof expression =====
+
+  "sizeof variable" in {
+    eval(
+      """main() -> int
+        |    x = 42
+        |    sizeof(x)
+        |""".stripMargin) shouldBe 8
+  }
+
+  "sizeof array variable" in {
+    eval(
+      """main() -> int
+        |    arr: [5]int
+        |    sizeof(arr)
+        |""".stripMargin) shouldBe 40
+  }
+
+  "sizeof struct variable" in {
+    eval(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |main() -> int
+        |    p: Point
+        |    sizeof(p)
+        |""".stripMargin) shouldBe 16
+  }
+
+  "sizeof expression result" in {
+    eval(
+      """main() -> int
+        |    x = 42
+        |    sizeof(x + 1)
+        |""".stripMargin) shouldBe 8
+  }
+
+  "sizeof bool variable" in {
+    eval(
+      """main() -> int
+        |    b = true
+        |    sizeof(b)
+        |""".stripMargin) shouldBe 8
+  }
+
   // ===== Field compound assignment =====
 
   "field plus equals" in {
