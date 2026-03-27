@@ -332,8 +332,8 @@ class SyslTypeSyntaxTests extends SyslTestHelpers {
     main.body match
       case TBlockBody(stmts) =>
         stmts(1) match
-          case TAssignStmt("p", TAddrOf("x", PtrType(SyslType.IntType(64)))) => // correct
-          case other => fail(s"expected TAssignStmt with PtrType(I64), got $other")
+          case TAssignStmt("p", TAddrOf("x", PtrType(SyslType.IntType(32)))) => // correct
+          case other => fail(s"expected TAssignStmt with PtrType(I32), got $other")
       case _ => fail("expected block body")
   }
 }

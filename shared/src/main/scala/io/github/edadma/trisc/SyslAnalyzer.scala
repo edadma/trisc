@@ -17,9 +17,9 @@ class SyslAnalyzer:
   private var loopDepth: Int = 0
 
   private val builtinFunctions = Map(
-    "putchar" -> FunInfo("putchar", List("c" -> I64), I64),
-    "print" -> FunInfo("print", List("n" -> I64), VoidType),
-    "println" -> FunInfo("println", List("n" -> I64), VoidType),
+    "putchar" -> FunInfo("putchar", List("c" -> I32), I32),
+    "print" -> FunInfo("print", List("n" -> I32), VoidType),
+    "println" -> FunInfo("println", List("n" -> I32), VoidType),
   )
 
   def registerImport(meta: ModuleMeta): Unit =
@@ -93,8 +93,9 @@ class SyslAnalyzer:
         TVarDecl(name, declType, tInit, isPrivate)
 
   private def resolveTypeName(name: String): SyslType = name match
-    case "int" | "i64" => I64
-    case "char" | "i32" => I32
+    case "int" | "i32" => I32
+    case "char" => I32
+    case "i64" => I64
     case "byte" | "i8"  => I8
     case "i16"  => I16
     case "bool" => BoolType
@@ -269,7 +270,7 @@ class SyslAnalyzer:
 
   private def analyzeExpr(expr: ExpressionAST): TExpr =
     expr match
-      case IntLitAST(n) => TIntLit(n, I64)
+      case IntLitAST(n) => TIntLit(n, I32)
       case CharLitAST(c) => TIntLit(c.toLong, I32)
       case BoolLitAST(b) => TBoolLit(b, BoolType)
       case StringLitAST(s) => TStringLit(s, ArrayType(I8, 0))
@@ -280,15 +281,15 @@ class SyslAnalyzer:
 
       case SizeofTypeAST(typeName) =>
         val t = resolveTypeName(typeName)
-        TSizeof(t.sizeOf, I64)
+        TSizeof(t.sizeOf, I32)
 
       case SizeofExprAST(VarRefAST(name)) if structTypes.contains(name) =>
         // sizeof(StructName) — treat as type sizeof
-        TSizeof(structTypes(name).sizeOf, I64)
+        TSizeof(structTypes(name).sizeOf, I32)
 
       case SizeofExprAST(inner) =>
         val tInner = analyzeExpr(inner)
-        TSizeof(tInner.typ.sizeOf, I64)
+        TSizeof(tInner.typ.sizeOf, I32)
 
       case FieldPreIncAST(obj, field) =>
         val tObj = analyzeExpr(obj)
@@ -411,8 +412,10 @@ class SyslAnalyzer:
           case "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>" =>
             if !tLeft.typ.isNumeric || !tRight.typ.isNumeric then
               throw AnalysisError(s"operator $op requires numeric types, got ${tLeft.typ} $op ${tRight.typ}")
-            if tLeft.typ == I64 || tRight.typ == I64 then I64
-            else tLeft.typ
+            // Promote to wider type
+            (tLeft.typ, tRight.typ) match
+              case (IntType(a), IntType(b)) => IntType(a max b)
+              case _ => tLeft.typ
           case "==" | "!=" | "<" | ">" | "<=" | ">=" => BoolType
           case "&&" | "||" =>
             if tLeft.typ != BoolType then throw AnalysisError(s"$op requires bool operands, got ${tLeft.typ}")

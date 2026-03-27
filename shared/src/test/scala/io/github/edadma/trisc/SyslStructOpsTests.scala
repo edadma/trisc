@@ -8,7 +8,7 @@ class SyslStructOpsTests extends SyslTestHelpers {
   // ===== sizeof =====
 
   "sizeof(int)" in {
-    eval("main() -> int = sizeof(int)\n") shouldBe 8
+    eval("main() -> int = sizeof(int)\n") shouldBe 4
   }
 
   "sizeof(byte)" in {
@@ -28,7 +28,7 @@ class SyslStructOpsTests extends SyslTestHelpers {
   }
 
   "sizeof array" in {
-    eval("main() -> int = sizeof([5]int)\n") shouldBe 40
+    eval("main() -> int = sizeof([5]int)\n") shouldBe 20
   }
 
   "sizeof struct" in {
@@ -38,7 +38,7 @@ class SyslStructOpsTests extends SyslTestHelpers {
         |    y: int
         |
         |main() -> int = sizeof(Point)
-        |""".stripMargin) shouldBe 16
+        |""".stripMargin) shouldBe 8
   }
 
   "sizeof struct three fields" in {
@@ -49,11 +49,11 @@ class SyslStructOpsTests extends SyslTestHelpers {
         |    z: int
         |
         |main() -> int = sizeof(Vec3)
-        |""".stripMargin) shouldBe 24
+        |""".stripMargin) shouldBe 12
   }
 
   "sizeof in expression" in {
-    eval("main() -> int = sizeof(int) + sizeof(byte)\n") shouldBe 9
+    eval("main() -> int = sizeof(int) + sizeof(byte)\n") shouldBe 5
   }
 
   // ===== sizeof expression =====
@@ -63,7 +63,7 @@ class SyslStructOpsTests extends SyslTestHelpers {
       """main() -> int
         |    x = 42
         |    sizeof(x)
-        |""".stripMargin) shouldBe 8
+        |""".stripMargin) shouldBe 4
   }
 
   "sizeof array variable" in {
@@ -71,7 +71,7 @@ class SyslStructOpsTests extends SyslTestHelpers {
       """main() -> int
         |    arr: [5]int
         |    sizeof(arr)
-        |""".stripMargin) shouldBe 40
+        |""".stripMargin) shouldBe 20
   }
 
   "sizeof struct variable" in {
@@ -83,7 +83,7 @@ class SyslStructOpsTests extends SyslTestHelpers {
         |main() -> int
         |    p: Point
         |    sizeof(p)
-        |""".stripMargin) shouldBe 16
+        |""".stripMargin) shouldBe 8
   }
 
   "sizeof expression result" in {
@@ -91,7 +91,7 @@ class SyslStructOpsTests extends SyslTestHelpers {
       """main() -> int
         |    x = 42
         |    sizeof(x + 1)
-        |""".stripMargin) shouldBe 8
+        |""".stripMargin) shouldBe 4
   }
 
   "sizeof bool variable" in {

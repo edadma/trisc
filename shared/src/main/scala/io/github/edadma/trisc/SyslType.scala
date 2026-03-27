@@ -43,8 +43,8 @@ enum SyslType:
   override def toString: String = this match
     case IntType(8) => "byte"
     case IntType(16) => "i16"
-    case IntType(32) => "char"
-    case IntType(64) => "int"
+    case IntType(32) => "int"
+    case IntType(64) => "i64"
     case IntType(w) => s"i$w"
     case BoolType => "bool"
     case VoidType => "void"
@@ -72,7 +72,7 @@ object SyslType:
   // Source-level aliases
   val Byte: IntType = I8
   val Char: IntType = I32
-  val Int: IntType = I64
+  val Int: IntType = I32
 
   def fromPrefix(s: String): SyslType =
     val tokens = s.split("\\s+").iterator
@@ -85,7 +85,7 @@ object SyslType:
       case s if s.startsWith("i") && s.drop(1).forall(_.isDigit) =>
         IntType(s.drop(1).toInt)
       // Legacy prefix names for backward compatibility
-      case "int"  => I64
+      case "int"  => I32
       case "char" => I32
       case "byte" => I8
       case "ptr"  => PtrType(parseType(tokens))

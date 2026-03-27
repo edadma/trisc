@@ -48,7 +48,7 @@ class SyslLLVMCodegen:
     hasReturned = false
 
     val retType = if fun.name == "main" then "i64" else llvmType(fun.returnType)
-    val params = fun.params.map(p => s"${llvmType(SyslType.I64)} %${p.name}_arg").mkString(", ")
+    val params = fun.params.map(p => s"${llvmType(p.typ)} %${p.name}_arg").mkString(", ")
 
     emit(s"define $retType @${fun.name}($params) {")
     emit("entry:")

@@ -24,8 +24,8 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
 
   // ===== Literal types =====
 
-  "int literal has I64" in {
-    analyzeExprType("main() -> int = 42\n") shouldBe I64
+  "int literal has I32" in {
+    analyzeExprType("main() -> int = 42\n") shouldBe I32
   }
 
   "bool literal has BoolType" in {
@@ -43,11 +43,11 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   // ===== Arithmetic type inference =====
 
   "int + int = int" in {
-    analyzeExprType("main() -> int = 1 + 2\n") shouldBe I64
+    analyzeExprType("main() -> int = 1 + 2\n") shouldBe I32
   }
 
   "int * int = int" in {
-    analyzeExprType("main() -> int = 3 * 4\n") shouldBe I64
+    analyzeExprType("main() -> int = 3 * 4\n") shouldBe I32
   }
 
   "comparison produces bool" in {
@@ -63,7 +63,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   }
 
   "unary minus preserves type" in {
-    analyzeExprType("main() -> int = -42\n") shouldBe I64
+    analyzeExprType("main() -> int = -42\n") shouldBe I32
   }
 
   "unary not produces bool" in {
@@ -71,11 +71,11 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   }
 
   "bitwise and produces int" in {
-    analyzeExprType("main() -> int = 0xFF & 0x0F\n") shouldBe I64
+    analyzeExprType("main() -> int = 0xFF & 0x0F\n") shouldBe I32
   }
 
   "shift produces int" in {
-    analyzeExprType("main() -> int = 1 << 8\n") shouldBe I64
+    analyzeExprType("main() -> int = 1 << 8\n") shouldBe I32
   }
 
   // ===== Variable type inference =====
@@ -85,7 +85,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
       """main() -> int
         |    x = 42
         |    x
-        |""".stripMargin) shouldBe I64
+        |""".stripMargin) shouldBe I32
   }
 
   "variable with explicit type" in {
@@ -93,7 +93,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
       """main() -> int
         |    x: int = 42
         |    x
-        |""".stripMargin) shouldBe I64
+        |""".stripMargin) shouldBe I32
   }
 
   "variable inferred from expression" in {
@@ -101,7 +101,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
       """main() -> int
         |    x = 3 + 4
         |    x
-        |""".stripMargin) shouldBe I64
+        |""".stripMargin) shouldBe I32
   }
 
   // ===== Pointer type inference =====
@@ -112,7 +112,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
         |    x = 42
         |    p = &x
         |    p
-        |""".stripMargin) shouldBe PtrType(I64)
+        |""".stripMargin) shouldBe PtrType(I32)
   }
 
   "deref of ptr to int is int" in {
@@ -121,7 +121,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
         |    x = 42
         |    p = &x
         |    *p
-        |""".stripMargin) shouldBe I64
+        |""".stripMargin) shouldBe I32
   }
 
   "double pointer" in {
@@ -131,7 +131,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
         |    p = &x
         |    pp = &p
         |    pp
-        |""".stripMargin) shouldBe PtrType(PtrType(I64))
+        |""".stripMargin) shouldBe PtrType(PtrType(I32))
   }
 
   // ===== Array type inference =====
@@ -141,7 +141,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
       """main() -> int
         |    a: [5]int
         |    a
-        |""".stripMargin) shouldBe ArrayType(I64, 5)
+        |""".stripMargin) shouldBe ArrayType(I32, 5)
   }
 
   "array indexing produces element type" in {
@@ -149,7 +149,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
       """main() -> int
         |    a: [5]int
         |    a[0]
-        |""".stripMargin) shouldBe I64
+        |""".stripMargin) shouldBe I32
   }
 
   "address of array element" in {
@@ -158,7 +158,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
         |    a: [5]int
         |    p = &a[2]
         |    p
-        |""".stripMargin) shouldBe PtrType(I64)
+        |""".stripMargin) shouldBe PtrType(I32)
   }
 
   // ===== Function return type =====
@@ -167,7 +167,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
     analyzeExprType(
       """double(x: int) -> int = x * 2
         |main() -> int = double(21)
-        |""".stripMargin) shouldBe I64
+        |""".stripMargin) shouldBe I32
   }
 
   "void function call" in {
@@ -184,7 +184,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
   // ===== If expression type =====
 
   "if expression type from then branch" in {
-    analyzeExprType("main() -> int = if true then 42 else 0\n") shouldBe I64
+    analyzeExprType("main() -> int = if true then 42 else 0\n") shouldBe I32
   }
 
   // ===== Pointer arithmetic type =====
@@ -195,7 +195,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
         |    a: [5]int
         |    p = a + 2
         |    p
-        |""".stripMargin) shouldBe ArrayType(I64, 5)
+        |""".stripMargin) shouldBe ArrayType(I32, 5)
   }
 
   // ===== Error detection =====
@@ -239,7 +239,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
       """main() -> int
         |    x = 42
         |    ++x
-        |""".stripMargin) shouldBe I64
+        |""".stripMargin) shouldBe I32
   }
 
   "postfix increment preserves type" in {
@@ -247,7 +247,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
       """main() -> int
         |    x = 42
         |    x++
-        |""".stripMargin) shouldBe I64
+        |""".stripMargin) shouldBe I32
   }
 
   // ===== Typed AST structure =====
@@ -261,17 +261,17 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
     val add = prog.decls.head.asInstanceOf[TFunDecl]
     add.name shouldBe "add"
     add.params.length shouldBe 2
-    add.returnType shouldBe I64
+    add.returnType shouldBe I32
   }
 
   "typed AST has types on all expressions" in {
     val prog = analyze("main() -> int = 1 + 2 * 3\n")
     val main = prog.decls.head.asInstanceOf[TFunDecl]
     val body = main.body.asInstanceOf[TExprBody].expr
-    body.typ shouldBe I64
+    body.typ shouldBe I32
     body match
       case TBinary(_, "+", right, _) =>
-        right.typ shouldBe I64
+        right.typ shouldBe I32
       case _ => fail("expected binary +")
   }
 

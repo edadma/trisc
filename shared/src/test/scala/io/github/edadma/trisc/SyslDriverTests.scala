@@ -26,7 +26,7 @@ class SyslDriverTests extends AnyFreeSpec with Matchers {
         """main() -> int = 42
           |""".stripMargin
     ))
-    result.units.head.smeta should include("FUNC main 0 i64")
+    result.units.head.smeta should include("FUNC main 0 i32")
   }
 
   "single file has no externals" in {
@@ -231,10 +231,10 @@ class SyslDriverTests extends AnyFreeSpec with Matchers {
           |""".stripMargin
     ))
     val mathMeta = result.units.find(_.name == "math").get.smeta
-    mathMeta should include("FUNC add 2 i64 i64 i64")
-    mathMeta should include("FUNC mul 2 i64 i64 i64")
+    mathMeta should include("FUNC add 2 i32 i32 i32")
+    mathMeta should include("FUNC mul 2 i32 i32 i32")
     val mainMeta = result.units.find(_.name == "main").get.smeta
-    mainMeta should include("FUNC main 0 i64")
+    mainMeta should include("FUNC main 0 i32")
   }
 
   // ===== Round-trip: smeta from one unit usable by another =====
@@ -253,6 +253,6 @@ class SyslDriverTests extends AnyFreeSpec with Matchers {
     val meta = ModuleMeta.fromSmeta(mathSmeta)
     meta.publicSymbols.length shouldBe 1
     meta.publicSymbols.head.name shouldBe "add"
-    meta.publicSymbols.head.typ shouldBe SymbolMeta.Kind.Func(List(I64, I64), I64)
+    meta.publicSymbols.head.typ shouldBe SymbolMeta.Kind.Func(List(I32, I32), I32)
   }
 }

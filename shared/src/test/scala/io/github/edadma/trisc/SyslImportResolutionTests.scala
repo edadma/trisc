@@ -173,6 +173,6 @@ class SyslImportResolutionTests extends AnyFreeSpec with Matchers {
     val mainBody = typed.decls.head.asInstanceOf[TFunDecl].body.asInstanceOf[TExprBody].expr
     mainBody shouldBe a[TCall]
     mainBody.asInstanceOf[TCall].name shouldBe "add"
-    mainBody.asInstanceOf[TCall].typ shouldBe I64
+    mainBody.asInstanceOf[TCall].typ shouldBe I32
   }
 }

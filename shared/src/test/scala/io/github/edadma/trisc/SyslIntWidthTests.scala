@@ -40,11 +40,11 @@ class SyslIntWidthTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 100000
   }
 
-  "int is alias for i64" in {
+  "int is alias for i32" in {
     eval(
       """main() -> int
         |    var x: int = 42
-        |    var y: i64 = x
+        |    var y: i32 = x
         |    y
         |""".stripMargin) shouldBe 42
   }
@@ -132,8 +132,8 @@ class SyslIntWidthTests extends SyslTestHelpers {
     eval("main() -> int = sizeof(i64)\n") shouldBe 8
   }
 
-  "sizeof(int) equals sizeof(i64)" in {
-    eval("main() -> int = sizeof(int) == sizeof(i64)\n") shouldBe 1
+  "sizeof(int) equals sizeof(i32)" in {
+    eval("main() -> int = sizeof(int) == sizeof(i32)\n") shouldBe 1
   }
 
   "sizeof(byte) equals sizeof(i8)" in {
@@ -278,7 +278,7 @@ class SyslIntWidthTests extends SyslTestHelpers {
   }
 
   "legacy prefix names still parse" in {
-    SyslType.fromPrefix("int") shouldBe IntType(64)
+    SyslType.fromPrefix("int") shouldBe IntType(32)
     SyslType.fromPrefix("byte") shouldBe IntType(8)
     SyslType.fromPrefix("char") shouldBe IntType(32)
   }
