@@ -11,6 +11,7 @@ class SyslAnalyzer:
 
   private val globalScope = new mutable.LinkedHashMap[String, SymInfo]
   private val functions = new mutable.LinkedHashMap[String, FunInfo]
+  private val externalSymbols = new mutable.LinkedHashSet[String]
   private var localScope: mutable.LinkedHashMap[String, SymInfo] = null
   private var loopDepth: Int = 0
 
@@ -19,6 +20,24 @@ class SyslAnalyzer:
     "print" -> FunInfo("print", List("n" -> IntType), VoidType),
     "println" -> FunInfo("println", List("n" -> IntType), VoidType),
   )
+
+  def registerImport(meta: ModuleMeta): Unit =
+    for sym <- meta.publicSymbols do
+      sym.typ match
+        case SymbolMeta.Kind.Func(params, returnType) =>
+          val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
+          if functions.contains(sym.name) || builtinFunctions.contains(sym.name) then
+            throw AnalysisError(s"imported symbol '${sym.name}' conflicts with existing function")
+          functions(sym.name) = FunInfo(sym.name, paramPairs, returnType)
+          externalSymbols += sym.name
+        case SymbolMeta.Kind.Data(dataType) =>
+          if globalScope.contains(sym.name) then
+            throw AnalysisError(s"imported symbol '${sym.name}' conflicts with existing global")
+          globalScope(sym.name) = SymInfo(sym.name, dataType, mutable = false)
+          externalSymbols += sym.name
+
+  def isExternal(name: String): Boolean = externalSymbols.contains(name)
+  def externals: Set[String] = externalSymbols.toSet
 
   def analyze(program: ProgramAST): TProgram =
     // First pass: register all functions and globals
