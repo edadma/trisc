@@ -205,11 +205,25 @@ class SyslTriscCodegen(addresses: Int = 2):
       case TContinueStmt =>
         emit(s"  bra ${continueLabels.top}")
 
-      case TDerefAssignStmt(_, _) =>
-        emit("  # TODO: TDerefAssignStmt (needs pointer support)")
+      case TDerefAssignStmt(pointer, value) =>
+        genExpr(value)           // r1 = value to store
+        emit("  pshd r1")
+        genExpr(pointer)         // r1 = address
+        emit("  popd r2")        // r2 = value
+        emit("  std r2, r1, r0") // store value at address
 
-      case TIndexAssignStmt(_, _, _) =>
-        emit("  # TODO: TIndexAssignStmt (needs array/pointer support)")
+      case TIndexAssignStmt(array, index, value) =>
+        genExpr(value)           // r1 = value
+        emit("  pshd r1")
+        genExpr(index)           // r1 = index
+        emit("  pshd r1")
+        genExpr(array)           // r1 = array base address
+        emit("  popd r2")        // r2 = index
+        emit("  ldi r3, 8")
+        emit("  mul r2, r2, r3") // r2 = index * 8 (element size)
+        emit("  add r1, r1, r2") // r1 = base + offset
+        emit("  popd r2")        // r2 = value
+        emit("  std r2, r1, r0") // store value at computed address
 
       case _ =>
         emit(s"  # TODO: ${stmt.getClass.getSimpleName}")
@@ -260,6 +274,17 @@ class SyslTriscCodegen(addresses: Int = 2):
         emit(s"$trueLabel")
         emit("  ldi r1, 1")
         emit(s"$endLabel")
+
+      case TBinary(left, op @ ("+" | "-"), right, _) if left.typ.isPointerLike =>
+        // Pointer arithmetic: ptr + int → ptr (scale by element size)
+        genExpr(left)        // r1 = pointer
+        emit("  pshd r1")
+        genExpr(right)       // r1 = integer offset
+        emit("  ldi r3, 8")
+        emit("  mul r1, r1, r3") // scale by element size
+        emit("  popd r2")   // r2 = pointer
+        if op == "+" then emit("  add r1, r2, r1")
+        else emit("  sub r1, r2, r1")
 
       case TBinary(left, op, right, _) =>
         genExpr(left)        // r1 = left
@@ -403,6 +428,57 @@ class SyslTriscCodegen(addresses: Int = 2):
         emit(s"  movi r4, $name") // use r4 as temp for function address
         emit(s"  jalr r6, r4")
 
+      case TAddrOf(name, _) =>
+        // Compute stack address of local variable
+        emitLocalAddr(name, 1) // r1 = address of variable
+
+      case TAddrOfIndex(array, index, _) =>
+        genExpr(index)           // r1 = index
+        emit("  pshd r1")
+        genExpr(array)           // r1 = array base address
+        emit("  popd r2")        // r2 = index
+        emit("  ldi r3, 8")
+        emit("  mul r2, r2, r3") // r2 = index * 8
+        emit("  add r1, r1, r2") // r1 = base + offset
+
+      case TDeref(inner, _) =>
+        genExpr(inner)           // r1 = pointer address
+        emit("  ldd r1, r1, r0") // r1 = value at that address
+
+      case TIndex(array, index, _) =>
+        genExpr(index)           // r1 = index
+        emit("  pshd r1")
+        genExpr(array)           // r1 = array base address
+        emit("  popd r2")        // r2 = index
+        emit("  ldi r3, 8")
+        emit("  mul r2, r2, r3") // r2 = index * 8
+        emit("  add r1, r1, r2") // r1 = element address
+        emit("  ldd r1, r1, r0") // r1 = value at element
+
+      case TArrayDecl(size, _, _) =>
+        // Allocate array on stack: size * 8 bytes
+        val totalBytes = size * 8
+        emit(s"  addi r7, r7, -$totalBytes") // grow stack
+        emit("  mov r1, r7")                  // r1 = address of array start
+        stackOffset -= totalBytes
+
+      case TStringLit(value, _) =>
+        // Allocate string bytes on stack (UTF-8 + null terminator)
+        val bytes = value.getBytes("UTF-8")
+        val totalSlots = bytes.length + 1 // +1 for null terminator
+        val totalBytes = totalSlots * 8
+        emit(s"  addi r7, r7, -$totalBytes")
+        emit("  mov r1, r7") // r1 = base address
+        // Initialize each byte as a 64-bit value
+        for (b, i) <- bytes.zipWithIndex do
+          emit(s"  ldi r2, ${b & 0xff}")
+          emit(s"  addi r3, r1, ${i * 8}")
+          emit(s"  std r2, r3, r0")
+        // Null terminator
+        emit(s"  addi r3, r1, ${bytes.length * 8}")
+        emit(s"  std r0, r3, r0")
+        stackOffset -= totalBytes
+
       case TIfExpr(cond, thenBody, elseBody, _) =>
         val elseLabel = newLabel("else")
         val endLabel = newLabel("endif")
@@ -416,6 +492,14 @@ class SyslTriscCodegen(addresses: Int = 2):
 
       case _ =>
         emit(s"  # TODO: ${expr.getClass.getSimpleName}")
+
+  // Element size in bytes for stack/memory layout (all values stored as 64-bit)
+  private def elemSize(typ: SyslType): Int = 8
+
+  // Emit address of local variable into target register
+  private def emitLocalAddr(name: String, reg: Int): Unit =
+    val local = locals(name)
+    emit(s"  addi r$reg, r5, ${local.offset}")
 
   private def emit(line: String): Unit =
     out ++= line

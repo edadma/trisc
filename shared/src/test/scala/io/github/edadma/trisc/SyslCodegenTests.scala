@@ -401,4 +401,73 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
   "byte cast preserves low bits" in {
     compileAndRun("main() -> int = byte(0xff)\n") shouldBe 255
   }
+
+  // ===== Arrays =====
+
+  "array declaration and indexing" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    arr[1]
+        |""".stripMargin) shouldBe 20
+  }
+
+  "array sum" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [5]int
+        |    for i = 0; i < 5; i++
+        |        arr[i] = i * 10
+        |    arr[0] + arr[1] + arr[2] + arr[3] + arr[4]
+        |""".stripMargin) shouldBe 100
+  }
+
+  "array with loop" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [5]int
+        |    for i = 0; i < 5; i++
+        |        arr[i] = i + 1
+        |    sum = 0
+        |    for i = 0; i < 5; i++
+        |        sum += arr[i]
+        |    sum
+        |""".stripMargin) shouldBe 15
+  }
+
+  // ===== Pointers =====
+
+  "address-of and dereference" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 42
+        |    p = &x
+        |    *p
+        |""".stripMargin) shouldBe 42
+  }
+
+  "write through pointer" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 10
+        |    p = &x
+        |    *p = 99
+        |    x
+        |""".stripMargin) shouldBe 99
+  }
+
+  "pointer to array element" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]int
+        |    arr[0] = 100
+        |    arr[1] = 200
+        |    arr[2] = 300
+        |    p = &arr[1]
+        |    *p
+        |""".stripMargin) shouldBe 200
+  }
 }
