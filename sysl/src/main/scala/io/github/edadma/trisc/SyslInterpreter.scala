@@ -24,6 +24,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case IntVal(n)    => n
     case PtrVal(_)    => throw RuntimeError("expected integer, got pointer")
     case ArrVal(_, _) => throw RuntimeError("expected integer, got array")
+    case FuncVal(_)   => throw RuntimeError("expected integer, got function")
 
   private val globals: Env = new mutable.LinkedHashMap
   private val functions = new mutable.LinkedHashMap[String, TFunDecl]
