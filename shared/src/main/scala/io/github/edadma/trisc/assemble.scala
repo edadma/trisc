@@ -379,7 +379,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case LongExprAST(n) if 0 <= n && n <= 7 => n.toInt
           case _: LongExprAST                     => problem(o1, "immediate must be between 0 and 7")
 
-      addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 1, 5 -> imm)
+      addInstruction(3 -> 7, 3 -> 0, 3 -> 0, 4 -> 3, 3 -> imm)
     case InstructionLineAST(mnemonic @ ("addi"), Seq(o1, o2, o3)) =>
       val opcode =
         mnemonic match

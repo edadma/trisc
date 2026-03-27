@@ -84,7 +84,7 @@ RR
         max     11110    (ra = max(ra, rb) signed)
         exg     11111    (swap ra and rb)
 
-    110 000 000 01 iiiii    trap
+    110 aaa bbb 01 iiiii    (free — 32 two-register + 5-bit immediate encodings)
     110 aaa bbb 10 iiiii    ld
     110 aaa bbb 11 iiiii    st
 
@@ -125,3 +125,11 @@ R
     sti     0010011    (enable interrupts, supervisor only)
     swsp    0010100    (swap r7 and usp, supervisor only)
     tsr     0010101    (read cycle counter into rN)
+    trap0   0011000    (system call 0)
+    trap1   0011001    (system call 1)
+    trap2   0011010    (system call 2)
+    trap3   0011011    (system call 3)
+    trap4   0011100    (system call 4)
+    trap5   0011101    (system call 5)
+    trap6   0011110    (system call 6)
+    trap7   0011111    (system call 7)

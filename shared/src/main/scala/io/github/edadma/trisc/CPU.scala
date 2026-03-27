@@ -234,7 +234,7 @@ object Decode:
         "111 rrr 00 iiiiiiii; r:1-7" -> ((operands: Map[Char, Int]) => new LDI(operands('r'), operands('i'))),
         "111 rrr 10 iiiiiiii; r:1-7" -> ((operands: Map[Char, Int]) => new SLI(operands('r'), operands('i'))),
         "111 rrr 11 iiiiiiii; r:1-7" -> ((operands: Map[Char, Int]) => new STI(operands('r'), operands('i'))),
-        "110 000 000 01 iiiii" -> ((operands: Map[Char, Int]) => new TRAP(operands('i'))),
+        "111 000 rrr 0011 iii" -> ((operands: Map[Char, Int]) => new TRAP(operands('i'))),
         "110 aaa bbb 00 00000; b:1-7" -> ((args: Map[Char, Int]) => new JALR(args('a'), args('b'))),
         "110 000 000 00 00000" -> (_ => HALT),
         "110 aaa bbb 00 00001" -> ((args: Map[Char, Int]) => new ZEB(args('a'), args('b'))),
