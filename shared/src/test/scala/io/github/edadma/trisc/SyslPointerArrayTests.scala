@@ -94,10 +94,10 @@ class SyslPointerArrayTests extends SyslTestHelpers {
 
   "array modify through function" in {
     eval(
-      """fill(arr: *int, n: int, val: int)
+      """fill(arr: *int, n: int, v: int)
         |    i = 0
         |    while i < n
-        |        arr[i] = val
+        |        arr[i] = v
         |        i = i + 1
         |
         |main() -> int

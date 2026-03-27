@@ -9,7 +9,7 @@ case class ProgramAST(decls: List[DeclAST])
 trait DeclAST extends Positional
 case class ImportDeclAST(path: String) extends DeclAST
 case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[String], body: FunBodyAST, isPrivate: Boolean = false) extends DeclAST
-case class VarDeclAST(name: String, typ: Option[String], init: ExpressionAST, isPrivate: Boolean = false) extends DeclAST
+case class VarDeclAST(name: String, typ: Option[String], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true) extends DeclAST
 
 case class ParamAST(name: String, typ: String) extends Positional
 
@@ -20,7 +20,7 @@ case class BlockBodyAST(stmts: List[StmtAST]) extends FunBodyAST
 
 // Statements
 trait StmtAST extends Positional
-case class VarStmtAST(name: String, typ: Option[String], init: ExpressionAST) extends StmtAST
+case class VarStmtAST(name: String, typ: Option[String], init: ExpressionAST, isMutable: Boolean = true) extends StmtAST
 case class AssignStmtAST(target: String, value: ExpressionAST) extends StmtAST
 case class CompoundAssignStmtAST(target: String, op: String, value: ExpressionAST) extends StmtAST
 case class DerefAssignStmtAST(pointer: ExpressionAST, value: ExpressionAST) extends StmtAST

@@ -50,7 +50,7 @@ class SyslAnalyzer:
           if functions.contains(name) || builtinFunctions.contains(name) then
             throw AnalysisError(s"duplicate function: '$name'", decl)
           functions(name) = FunInfo(name, paramTypes, retType)
-        case VarDeclAST(name, _, _, _) =>
+        case VarDeclAST(name, _, _, _, _) =>
           if globalScope.contains(name) then
             throw AnalysisError(s"duplicate global: '$name'", decl)
 
@@ -75,11 +75,11 @@ class SyslAnalyzer:
         localScope = null
         TFunDecl(name, tParams, funInfo.returnType, tBody, isPrivate)
 
-      case VarDeclAST(name, typOpt, init, isPrivate) =>
+      case VarDeclAST(name, typOpt, init, isPrivate, isMutable) =>
         localScope = new mutable.LinkedHashMap
         val tInit = analyzeExpr(init)
         val declType = typOpt.map(resolveTypeName).getOrElse(tInit.typ)
-        globalScope(name) = SymInfo(name, declType, true)
+        globalScope(name) = SymInfo(name, declType, isMutable)
         localScope = null
         TVarDecl(name, declType, tInit, isPrivate)
 
@@ -159,22 +159,24 @@ class SyslAnalyzer:
 
   private def analyzeStmt(stmt: StmtAST): TStmt =
     stmt match
-      case VarStmtAST(name, typOpt, init) =>
+      case VarStmtAST(name, typOpt, init, isMutable) =>
         val tInit = analyzeExpr(init)
         val declType = typOpt.map(resolveTypeName).getOrElse(tInit.typ)
         if typOpt.isDefined && !compatible(tInit.typ, declType) then
           throw AnalysisError(s"cannot assign ${tInit.typ} to $declType variable '$name'")
         if localScope != null then
-          localScope(name) = SymInfo(name, declType, true)
+          localScope(name) = SymInfo(name, declType, isMutable)
         TVarStmt(name, declType, tInit)
 
       case AssignStmtAST(target, value) =>
         val tValue = analyzeExpr(value)
-        lookupOrCreate(target, tValue.typ)
+        val sym = lookupOrCreate(target, tValue.typ)
+        if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$target'")
         TAssignStmt(target, tValue)
 
       case CompoundAssignStmtAST(target, op, value) =>
         val sym = lookup(target)
+        if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$target'")
         val tValue = analyzeExpr(value)
         TCompoundAssignStmt(target, op, tValue)
 

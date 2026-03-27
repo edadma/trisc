@@ -30,18 +30,21 @@ class SyslParser extends StandardTokenParsers {
   lazy val importDecl: Parser[ImportDeclAST] =
     "import" ~> stringLit ^^ ImportDeclAST.apply
 
+  private def mutability: Parser[Boolean] =
+    "var" ^^^ true | "val" ^^^ false
+
   def declBody(priv: Boolean): Parser[DeclAST] =
     ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
       case name ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body, priv)
     } |
-      opt("var") ~> ident ~ (":" ~> typeExpr) ^^ {
-        case name ~ t => VarDeclAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t), priv)
+      opt(mutability) ~ ident ~ (":" ~> typeExpr) ^^ {
+        case mut ~ name ~ t => VarDeclAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t), priv, mut.getOrElse(true))
       } |
-      opt("var") ~> ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ {
-        case name ~ t ~ e => VarDeclAST(name, Some(t), e, priv)
+      opt(mutability) ~ ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ {
+        case mut ~ name ~ t ~ e => VarDeclAST(name, Some(t), e, priv, mut.getOrElse(true))
       } |
-      opt("var") ~> ident ~ ("=" ~> expr) ^^ {
-        case name ~ e => VarDeclAST(name, None, e, priv)
+      opt(mutability) ~ ident ~ ("=" ~> expr) ^^ {
+        case mut ~ name ~ e => VarDeclAST(name, None, e, priv, mut.getOrElse(true))
       }
 
   lazy val funRest: Parser[(Option[String], FunBodyAST)] =
@@ -102,9 +105,9 @@ class SyslParser extends StandardTokenParsers {
     "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^="
 
   lazy val identStmt: Parser[StmtAST] =
-    "var" ~> ident ~ (":" ~> typeExpr) ^^ { case name ~ t => VarStmtAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t)) } |
-      "var" ~> ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
-      "var" ~> ident ~ ("=" ~> expr) ^^ { case name ~ e => VarStmtAST(name, None, e) } |
+    mutability ~ ident ~ (":" ~> typeExpr) ^^ { case mut ~ name ~ t => VarStmtAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t), mut) } |
+      mutability ~ ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ { case mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut) } |
+      mutability ~ ident ~ ("=" ~> expr) ^^ { case mut ~ name ~ e => VarStmtAST(name, None, e, mut) } |
       ident ~ (":" ~> typeExpr) ^^ { case name ~ t => VarStmtAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t)) } |
       ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ ("[" ~> expr <~ "]") ~ ("=" ~> expr) ^^ { case name ~ idx ~ value =>
