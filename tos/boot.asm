@@ -128,6 +128,9 @@ boot
 global timer_isr, func
 
 timer_isr
+  ; Disable interrupts while we do the context switch
+  cli
+
   ; Save r1-r6 in one instruction (r1 pushed first = deepest)
   pshr r6
   ; Save user stack pointer
@@ -147,6 +150,9 @@ timer_isr
   susp r1
   ; Restore r1-r6 in one instruction (r6 popped first = shallowest)
   popr r6
+
+  ; Re-enable interrupts before returning
+  sti
 
   ; Return to new thread (pops PC and PSR)
   rte

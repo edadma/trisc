@@ -233,7 +233,9 @@ class SyslTriscCodegen(addresses: Int = 2):
         emit("  pshd r1")
         genExpr(pointer)         // r1 = address
         emit("  popd r2")        // r2 = value
-        emit("  std r2, r1, r0") // store value at address
+        // TODO: use width-appropriate stb/sts/stw when packed memory
+        // layouts are implemented. Currently all values are 64-bit on stack.
+        emit("  std r2, r1, r0")
 
       case TIndexAssignStmt(array, index, value) =>
         genExpr(value)           // r1 = value
@@ -410,13 +412,11 @@ class SyslTriscCodegen(addresses: Int = 2):
             emit("  ldi r1, 0")
             emit(s"$end")
           case IntType(8) =>
-            emit("  ldi r2, 255")
-            emit("  and r1, r1, r2") // mask to 8 bits
+            emit("  zeb r1, r1")   // zero-extend byte: mask to 8 bits
           case IntType(16) =>
-            emit("  movi r2, 65535")
-            emit("  and r1, r1, r2") // mask to 16 bits
+            emit("  zes r1, r1")   // zero-extend short: mask to 16 bits
           case IntType(32) =>
-            emit("  zew r1, r1") // zero-extend word: mask to 32 bits
+            emit("  zew r1, r1")   // zero-extend word: mask to 32 bits
           case IntType(64) =>
             // no-op — already 64-bit
           case _: IntType =>
@@ -493,7 +493,9 @@ class SyslTriscCodegen(addresses: Int = 2):
 
       case TDeref(inner, _) =>
         genExpr(inner)           // r1 = pointer address
-        emit("  ldd r1, r1, r0") // r1 = value at that address
+        // TODO: use width-appropriate ldb/lds/ldw + sext when packed memory
+        // layouts are implemented. Currently all values are 64-bit on stack.
+        emit("  ldd r1, r1, r0")
 
       case TIndex(array, index, _) =>
         genExpr(index)           // r1 = index
