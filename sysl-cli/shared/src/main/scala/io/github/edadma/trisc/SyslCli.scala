@@ -147,8 +147,8 @@ object SyslCli:
         val tofs = for unit <- result.units yield
           val asm = codegen.generate(unit.typed)
           assemble(asm, relocatable = true)
-        // Include runtime stubs (putchar, print, println) — linker ignores unused symbols
-        val linked = Linker.link(tofs :+ Runtime.tof)
+        // Boot vector table first, then user code, then I/O stubs
+        val linked = Linker.link(Runtime.bootTof +: tofs :+ Runtime.ioTof)
         val outFile = cmd.output.getOrElse("out.tof")
         writeFile(outFile, linked.serialize)
         System.err.println(s"  -> $outFile")

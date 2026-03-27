@@ -1,12 +1,22 @@
 package io.github.edadma.trisc
 
-// Minimal TRISC runtime stubs for I/O builtins.
+// Minimal TRISC runtime: vector table + I/O stubs.
 // Linked with user code when emitting TOF.
 object Runtime:
   val stdoutAddress = 0xFF00L // near top of default 64KB address space
+  val initialSSP: Long = stdoutAddress - 8 // stack grows down, below stdout device
 
-  val source: String =
-    s"""; TRISC runtime library
+  // Boot module — must be linked first so vector table is at address 0.
+  // Like the 68000: vector[0] = initial SSP, vector[1] = initial PC.
+  val bootSource: String =
+    s"""extern main
+       |; vector table (address 0)
+       |  dl $initialSSP
+       |  dl main
+       |""".stripMargin
+
+  val ioSource: String =
+    s"""; TRISC runtime I/O library
        |; putchar: write low byte of r1 to stdout device, return r1
        |putchar
        |  movi r2, ${stdoutAddress}
@@ -29,4 +39,5 @@ object Runtime:
        |  jalr r0, r6
        |""".stripMargin
 
-  def tof: TOF = assemble(source, relocatable = true)
+  def bootTof: TOF = assemble(bootSource, relocatable = true)
+  def ioTof: TOF = assemble(ioSource, relocatable = true)

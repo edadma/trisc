@@ -174,10 +174,7 @@ object TriscCli:
     val mem = new Memory("Memory", ram, stdout)
     linked.load(mem)
     val cpu = new CPU(mem, Nil)
-    cpu.pc = linked.entryAddress.getOrElse(0L)
-    cpu.state = State.Run
-    cpu.set(Status.Mode, true) // supervisor mode so halt works
-    cpu.r(7).write(ramSize - 8)
+    cpu.reset() // like 68000: reads SSP from vector[0], PC from vector[1], enters supervisor mode
     (cpu, mem)
 
   private def executeRun(cmd: RunCommand): Unit =
