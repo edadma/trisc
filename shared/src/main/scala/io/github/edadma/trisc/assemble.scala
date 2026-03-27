@@ -520,13 +520,14 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case "swsp"  => 20
 
       addInstruction(3 -> 7, 3 -> 0, 3 -> 0, 7 -> opcode)
-    case InstructionLineAST(mnemonic @ ("spsr" | "gpsr" | "gusp" | "susp"), Seq(o)) =>
+    case InstructionLineAST(mnemonic @ ("spsr" | "gpsr" | "gusp" | "susp" | "tsr"), Seq(o)) =>
       val opcode =
         mnemonic match
           case "spsr" => 8
           case "gusp" => 13
           case "susp" => 14
           case "gpsr" => 9
+          case "tsr"  => 21
       val reg =
         fold(o) match
           case RegisterExprAST(reg) => reg

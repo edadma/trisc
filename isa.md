@@ -121,3 +121,4 @@ R
     cli     0010010    (disable interrupts, supervisor only)
     sti     0010011    (enable interrupts, supervisor only)
     swsp    0010100    (swap r7 and usp, supervisor only)
+    tsr     0010101    (read cycle counter into rN)

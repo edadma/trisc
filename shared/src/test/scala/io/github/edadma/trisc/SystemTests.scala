@@ -565,4 +565,31 @@ class SystemTests extends TestHelpers {
         |""".stripMargin)
     cpu.r(1).read shouldBe cpu.r(2).read
   }
+
+  // ===== TSR (read cycle counter) =====
+
+  "tsr reads nonzero cycle count" in {
+    val cpu = runCPU(VECTORS +
+      """nop
+        |nop
+        |nop
+        |tsr r1
+        |halt
+        |""".stripMargin)
+    cpu.r(1).read should be > 0L
+  }
+
+  "tsr increases with more instructions" in {
+    val cpu = runCPU(VECTORS +
+      """tsr r1
+        |nop
+        |nop
+        |nop
+        |nop
+        |nop
+        |tsr r2
+        |halt
+        |""".stripMargin)
+    (cpu.r(2).read - cpu.r(1).read) shouldBe 6 // 5 nops + 1 for the first tsr itself
+  }
 }

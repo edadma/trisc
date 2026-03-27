@@ -70,6 +70,7 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   var state: State = State.Halt
   var reservationAddr: Long = 0
   var reservationValid: Boolean = false
+  var cycles: Long = 0
   private var inException: Boolean = false
 
   var limit: Int = -1
@@ -84,6 +85,7 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
     for i <- 1 until 8 do r(i).write(0)
 
     usp = 0
+    cycles = 0
     inException = false
     state = State.Reset
     set(Status.Ind, true)
@@ -156,6 +158,7 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
     if trace then println(f"$pc%04x: $inst%04x  ${decoded.disassemble(this)}")
 
     pc += 2
+    cycles += 1
 
     // Capture T state before instruction — trace fires based on T at start of instruction (like 68k)
     val traceEnabled = test(Status.T)
@@ -285,6 +288,7 @@ object Decode:
         "111 000 000 0010010" -> (_ => CLI),
         "111 000 000 0010011" -> (_ => STI),
         "111 000 000 0010100" -> (_ => SWSP),
+        "111 000 rrr 0010101" -> ((operands: Map[Char, Int]) => new TSR(operands('r'))),
         "101 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new ADDI(args('a'), args('b'), ext(args('i')))),
         "100 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BLS(args('a'), args('b'), ext(args('i')))),
         "011 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BLU(args('a'), args('b'), ext(args('i')))),

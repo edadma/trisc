@@ -650,6 +650,13 @@ object SWSP extends SimpleInstruction:
       cpu.r(7).write(cpu.usp)
       cpu.usp = tmp
 
+// TSR — read cycle counter
+
+class TSR(r: Int) extends RInstruction(r):
+  val mnemonic = "tsr"
+
+  def apply(cpu: CPU): Unit = cpu.r(r).write(cpu.cycles)
+
 class AUIPC(r: Int, imm: Int) extends ImmediateInstruction(r, imm):
   val mnemonic = "auipc"
 
