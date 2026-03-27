@@ -1,9 +1,7 @@
 package io.github.edadma.trisc
 
 enum SyslType:
-  case IntType
-  case CharType
-  case ByteType
+  case IntType(width: Int)   // i8, i16, i32, i64
   case BoolType
   case VoidType
   case PtrType(pointee: SyslType)
@@ -12,31 +10,42 @@ enum SyslType:
   case StructType(name: String, fields: List[(String, SyslType)])
 
   def isNumeric: Boolean = this match
-    case IntType | CharType | ByteType => true
+    case _: IntType => true
     case _ => false
 
   def isIntegral: Boolean = isNumeric
 
   def isBoolOrNumeric: Boolean = this match
-    case IntType | CharType | ByteType | BoolType => true
+    case _: IntType | BoolType => true
     case _ => false
 
   def isPointerLike: Boolean = this match
     case PtrType(_) | ArrayType(_, _) => true
     case _ => false
 
+  // Size in bytes
   def sizeOf: Long = this match
-    case IntType | CharType | BoolType | VoidType => 8
-    case ByteType => 1
+    case IntType(w) => w / 8
+    case BoolType => 1
+    case VoidType => 0
     case PtrType(_) => 8
     case FuncType(_, _) => 8
     case ArrayType(elem, size) => elem.sizeOf * size
     case StructType(_, fields) => fields.map(_._2.sizeOf).sum
 
+  // Width in bits (for integer types)
+  def bitWidth: Int = this match
+    case IntType(w) => w
+    case BoolType => 8
+    case PtrType(_) => 64
+    case _ => 64
+
   override def toString: String = this match
-    case IntType => "int"
-    case CharType => "char"
-    case ByteType => "byte"
+    case IntType(8) => "byte"
+    case IntType(16) => "i16"
+    case IntType(32) => "char"
+    case IntType(64) => "int"
+    case IntType(w) => s"i$w"
     case BoolType => "bool"
     case VoidType => "void"
     case PtrType(t) => s"*$t"
@@ -45,28 +54,40 @@ enum SyslType:
     case StructType(name, _) => name
 
   def toPrefix: String = this match
-    case IntType        => "int"
-    case CharType       => "char"
-    case ByteType       => "byte"
-    case BoolType       => "bool"
-    case VoidType       => "void"
-    case PtrType(t)     => s"ptr ${t.toPrefix}"
+    case IntType(w) => s"i$w"
+    case BoolType => "bool"
+    case VoidType => "void"
+    case PtrType(t) => s"ptr ${t.toPrefix}"
     case ArrayType(t, n) => s"arr $n ${t.toPrefix}"
     case FuncType(params, ret) => s"func ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}"
     case StructType(name, fields) => s"struct $name ${fields.size} ${fields.map((n, t) => s"$n ${t.toPrefix}").mkString(" ")}"
 
 object SyslType:
+  // Canonical type aliases
+  val I8: IntType = IntType(8)
+  val I16: IntType = IntType(16)
+  val I32: IntType = IntType(32)
+  val I64: IntType = IntType(64)
+
+  // Source-level aliases
+  val Byte: IntType = I8
+  val Char: IntType = I32
+  val Int: IntType = I64
+
   def fromPrefix(s: String): SyslType =
     val tokens = s.split("\\s+").iterator
     parseType(tokens)
 
   def parseType(tokens: Iterator[String]): SyslType =
     tokens.next() match
-      case "int"  => IntType
-      case "char" => CharType
-      case "byte" => ByteType
       case "bool" => BoolType
       case "void" => VoidType
+      case s if s.startsWith("i") && s.drop(1).forall(_.isDigit) =>
+        IntType(s.drop(1).toInt)
+      // Legacy prefix names for backward compatibility
+      case "int"  => I64
+      case "char" => I32
+      case "byte" => I8
       case "ptr"  => PtrType(parseType(tokens))
       case "arr" =>
         val size = tokens.next().toInt

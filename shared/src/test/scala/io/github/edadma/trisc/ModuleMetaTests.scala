@@ -20,7 +20,7 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
     meta.symbols.length shouldBe 2
     val add = meta.symbols(0)
     add.name shouldBe "add"
-    add.typ shouldBe SymbolMeta.Kind.Func(List(IntType, IntType), IntType)
+    add.typ shouldBe SymbolMeta.Kind.Func(List(I64, I64), I64)
     add.isPrivate shouldBe false
   }
 
@@ -30,7 +30,7 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |main() -> int = x
         |""".stripMargin))
     val x = meta.symbols.find(_.name == "x").get
-    x.typ shouldBe SymbolMeta.Kind.Data(IntType)
+    x.typ shouldBe SymbolMeta.Kind.Data(I64)
   }
 
   "marks private symbols" in {
@@ -60,12 +60,12 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |""".stripMargin))
     val text = meta.toSmeta
     text should include("SMETA v1")
-    text should include("FUNC add 2 int int int")
-    text should include("FUNC main 0 int")
+    text should include("FUNC add 2 i64 i64 i64")
+    text should include("FUNC main 0 i64")
     val meta2 = ModuleMeta.fromSmeta(text)
     meta2.symbols.length shouldBe 2
     meta2.symbols(0).name shouldBe "add"
-    meta2.symbols(0).typ shouldBe SymbolMeta.Kind.Func(List(IntType, IntType), IntType)
+    meta2.symbols(0).typ shouldBe SymbolMeta.Kind.Func(List(I64, I64), I64)
   }
 
   "round-trips private symbols" in {
@@ -86,9 +86,9 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |main() -> int = x
         |""".stripMargin))
     val text = meta.toSmeta
-    text should include("DATA x int")
+    text should include("DATA x i64")
     val meta2 = ModuleMeta.fromSmeta(text)
-    meta2.symbols.find(_.name == "x").get.typ shouldBe SymbolMeta.Kind.Data(IntType)
+    meta2.symbols.find(_.name == "x").get.typ shouldBe SymbolMeta.Kind.Data(I64)
   }
 
   "round-trips pointer types" in {
@@ -100,10 +100,10 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |main() -> int = 0
         |""".stripMargin))
     val text = meta.toSmeta
-    text should include("FUNC swap 2 ptr int ptr int void")
+    text should include("FUNC swap 2 ptr i64 ptr i64 void")
     val meta2 = ModuleMeta.fromSmeta(text)
     val swap = meta2.symbols.find(_.name == "swap").get
-    swap.typ shouldBe SymbolMeta.Kind.Func(List(PtrType(IntType), PtrType(IntType)), VoidType)
+    swap.typ shouldBe SymbolMeta.Kind.Func(List(PtrType(I64), PtrType(I64)), VoidType)
   }
 
   "round-trips array types" in {
@@ -112,9 +112,9 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |main() -> int = 0
         |""".stripMargin))
     val text = meta.toSmeta
-    text should include("DATA buf arr 10 int")
+    text should include("DATA buf arr 10 i64")
     val meta2 = ModuleMeta.fromSmeta(text)
-    meta2.symbols.find(_.name == "buf").get.typ shouldBe SymbolMeta.Kind.Data(ArrayType(IntType, 10))
+    meta2.symbols.find(_.name == "buf").get.typ shouldBe SymbolMeta.Kind.Data(ArrayType(I64, 10))
   }
 
   "round-trips no-param void function" in {
@@ -138,8 +138,8 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |main() -> int = 0
         |""".stripMargin))
     val asm = meta.toAsmGlobals
-    asm should include("global add, func, 2 int int int")
-    asm should include("global main, func, 0 int")
+    asm should include("global add, func, 2 i64 i64 i64")
+    asm should include("global main, func, 0 i64")
     asm should not include "helper"
   }
 
@@ -149,13 +149,13 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |main() -> int = x
         |""".stripMargin))
     val asm = meta.toAsmGlobals
-    asm should include("global x, data, int")
+    asm should include("global x, data, i64")
   }
 
   // ===== Error handling =====
 
   "fromSmeta rejects missing header" in {
-    an[IllegalArgumentException] should be thrownBy ModuleMeta.fromSmeta("FUNC add 0 int\n")
+    an[IllegalArgumentException] should be thrownBy ModuleMeta.fromSmeta("FUNC add 0 i64\n")
   }
 
   "fromSmeta rejects empty input" in {

@@ -17,9 +17,9 @@ class SyslAnalyzer:
   private var loopDepth: Int = 0
 
   private val builtinFunctions = Map(
-    "putchar" -> FunInfo("putchar", List("c" -> IntType), IntType),
-    "print" -> FunInfo("print", List("n" -> IntType), VoidType),
-    "println" -> FunInfo("println", List("n" -> IntType), VoidType),
+    "putchar" -> FunInfo("putchar", List("c" -> I64), I64),
+    "print" -> FunInfo("print", List("n" -> I64), VoidType),
+    "println" -> FunInfo("println", List("n" -> I64), VoidType),
   )
 
   def registerImport(meta: ModuleMeta): Unit =
@@ -93,9 +93,10 @@ class SyslAnalyzer:
         TVarDecl(name, declType, tInit, isPrivate)
 
   private def resolveTypeName(name: String): SyslType = name match
-    case "int"  => IntType
-    case "char" => CharType
-    case "byte" => ByteType
+    case "int" | "i64" => I64
+    case "char" | "i32" => I32
+    case "byte" | "i8"  => I8
+    case "i16"  => I16
     case "bool" => BoolType
     case "void" => VoidType
     case s if s.startsWith("*") =>
@@ -137,12 +138,10 @@ class SyslAnalyzer:
   private def compatible(from: SyslType, to: SyslType): Boolean =
     (from, to) match
       case (a, b) if a == b => true
-      case (IntType, CharType) | (CharType, IntType) => true
-      case (IntType, ByteType) | (ByteType, IntType) => true
+      case (_: IntType, _: IntType) => true  // all integer types are compatible
       // bool and int are NOT compatible — use explicit casts
-      case (CharType, ByteType) | (ByteType, CharType) => true
-      case (IntType, PtrType(_)) => true    // int to pointer (e.g., memory-mapped I/O addresses)
-      case (PtrType(_), IntType) => true    // pointer to int
+      case (_: IntType, PtrType(_)) => true    // int to pointer (e.g., memory-mapped I/O addresses)
+      case (PtrType(_), _: IntType) => true    // pointer to int
       case (ArrayType(e1, _), PtrType(e2)) if e1 == e2 => true
       case (ArrayType(e1, _), ArrayType(e2, _)) if e1 == e2 => true
       case _ => false
@@ -270,26 +269,26 @@ class SyslAnalyzer:
 
   private def analyzeExpr(expr: ExpressionAST): TExpr =
     expr match
-      case IntLitAST(n) => TIntLit(n, IntType)
-      case CharLitAST(c) => TIntLit(c.toLong, CharType)
+      case IntLitAST(n) => TIntLit(n, I64)
+      case CharLitAST(c) => TIntLit(c.toLong, I32)
       case BoolLitAST(b) => TBoolLit(b, BoolType)
-      case StringLitAST(s) => TStringLit(s, ArrayType(ByteType, 0))
-      case StringLitExprAST(s) => TStringLit(s, ArrayType(ByteType, 0))
+      case StringLitAST(s) => TStringLit(s, ArrayType(I8, 0))
+      case StringLitExprAST(s) => TStringLit(s, ArrayType(I8, 0))
       case ArrayDeclAST(size, typStr) =>
         val t = resolveTypeName(typStr)
         TArrayDecl(size, typStr, t)
 
       case SizeofTypeAST(typeName) =>
         val t = resolveTypeName(typeName)
-        TSizeof(t.sizeOf, IntType)
+        TSizeof(t.sizeOf, I64)
 
       case SizeofExprAST(VarRefAST(name)) if structTypes.contains(name) =>
         // sizeof(StructName) — treat as type sizeof
-        TSizeof(structTypes(name).sizeOf, IntType)
+        TSizeof(structTypes(name).sizeOf, I64)
 
       case SizeofExprAST(inner) =>
         val tInner = analyzeExpr(inner)
-        TSizeof(tInner.typ.sizeOf, IntType)
+        TSizeof(tInner.typ.sizeOf, I64)
 
       case FieldPreIncAST(obj, field) =>
         val tObj = analyzeExpr(obj)
@@ -412,7 +411,7 @@ class SyslAnalyzer:
           case "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>" =>
             if !tLeft.typ.isNumeric || !tRight.typ.isNumeric then
               throw AnalysisError(s"operator $op requires numeric types, got ${tLeft.typ} $op ${tRight.typ}")
-            if tLeft.typ == IntType || tRight.typ == IntType then IntType
+            if tLeft.typ == I64 || tRight.typ == I64 then I64
             else tLeft.typ
           case "==" | "!=" | "<" | ">" | "<=" | ">=" => BoolType
           case "&&" | "||" =>

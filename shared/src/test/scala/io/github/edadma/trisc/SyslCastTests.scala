@@ -114,8 +114,8 @@ class SyslCastTests extends SyslTestHelpers {
     val typed = (new SyslAnalyzer).analyze(ast)
     val main = typed.decls.collectFirst { case f: TFunDecl if f.name == "main" => f }.get
     main.body match
-      case TExprBody(TCast(_, IntType)) => // correct
-      case other => fail(s"expected TCast to IntType, got $other")
+      case TExprBody(TCast(_, SyslType.IntType(64))) => // correct
+      case other => fail(s"expected TCast to I64, got $other")
   }
 
   // ===== Practical usage =====

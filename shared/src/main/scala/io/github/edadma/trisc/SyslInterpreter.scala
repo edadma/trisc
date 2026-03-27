@@ -327,9 +327,11 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         import SyslType.*
         target match
           case BoolType => IntVal(if toLong(v) != 0 then 1L else 0L)
-          case IntType => IntVal(toLong(v))
-          case CharType => IntVal(toLong(v) & 0xFFFFFFFFL) // 32-bit codepoint
-          case ByteType => IntVal(toLong(v) & 0xFFL)
+          case IntType(64) => IntVal(toLong(v))
+          case IntType(32) => IntVal(toLong(v) & 0xFFFFFFFFL) // 32-bit
+          case IntType(16) => IntVal(toLong(v) & 0xFFFFL)     // 16-bit
+          case IntType(8)  => IntVal(toLong(v) & 0xFFL)       // 8-bit
+          case _: IntType  => IntVal(toLong(v))                // other widths: no-op
           case _ => v
 
       case TSizeof(size, _) => IntVal(size)

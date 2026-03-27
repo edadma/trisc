@@ -409,13 +409,18 @@ class SyslTriscCodegen(addresses: Int = 2):
             emit(s"$isZero")
             emit("  ldi r1, 0")
             emit(s"$end")
-          case ByteType =>
+          case IntType(8) =>
             emit("  ldi r2, 255")
             emit("  and r1, r1, r2") // mask to 8 bits
-          case CharType =>
+          case IntType(16) =>
+            emit("  movi r2, 65535")
+            emit("  and r1, r1, r2") // mask to 16 bits
+          case IntType(32) =>
             emit("  zew r1, r1") // zero-extend word: mask to 32 bits
-          case IntType =>
-            // no-op — already int-sized
+          case IntType(64) =>
+            // no-op — already 64-bit
+          case _: IntType =>
+            // other widths: no-op
           case _ =>
 
       case TUnary("-", operand, _) =>

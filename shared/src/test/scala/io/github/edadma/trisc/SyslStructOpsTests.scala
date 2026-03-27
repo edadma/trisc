@@ -16,11 +16,11 @@ class SyslStructOpsTests extends SyslTestHelpers {
   }
 
   "sizeof(bool)" in {
-    eval("main() -> int = sizeof(bool)\n") shouldBe 8
+    eval("main() -> int = sizeof(bool)\n") shouldBe 1
   }
 
   "sizeof(char)" in {
-    eval("main() -> int = sizeof(char)\n") shouldBe 8
+    eval("main() -> int = sizeof(char)\n") shouldBe 4
   }
 
   "sizeof pointer" in {
@@ -99,7 +99,7 @@ class SyslStructOpsTests extends SyslTestHelpers {
       """main() -> int
         |    b = true
         |    sizeof(b)
-        |""".stripMargin) shouldBe 8
+        |""".stripMargin) shouldBe 1
   }
 
   // ===== Field compound assignment =====

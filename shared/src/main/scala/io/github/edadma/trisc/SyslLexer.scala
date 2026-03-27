@@ -17,6 +17,7 @@ class SyslLexical extends IndentationLexical(
     "import", "private", "var", "val", "struct", "sizeof", "asm",
     "func",
     "int", "char", "byte", "bool", "void",
+    "i8", "i16", "i32", "i64",
     "true", "false",
     "end",
   )
