@@ -1,72 +1,210 @@
-# ============================================================================
-# TOS — User tasks (Sysl)
-# ============================================================================
-#
-# Simple user-mode threads that demonstrate preemptive multitasking.
-# Each task runs in user mode with its own stack.
-# The timer interrupt preempts them transparently.
-#
-# Stdout device: write a byte to 0xFFE0 to print a character.
-#
-# ============================================================================
+/*
+ * ============================================================================
+ * TOS (Tiny OS) — User Tasks
+ * ============================================================================
+ *
+ * These are the actual programs that run as threads under TOS.
+ * Each task runs in user mode with its own user stack.
+ * The timer interrupt preempts them transparently — they don't
+ * need to know they're being scheduled.
+ *
+ * When you run TOS, you should see interleaved output from the
+ * different tasks, demonstrating preemptive multitasking:
+ *
+ *   AABBCCAABB1AABB2AABB3...
+ *
+ * The exact interleaving depends on the timer tick rate and the
+ * length of each task's busy-wait loop.
+ *
+ * ============================================================================
+ */
 
-# Stdout device address
+
+/*
+ * ============================================================================
+ * I/O Constants
+ * ============================================================================
+ */
+
+// Stdout device address.
+// Writing a byte to this address outputs a character.
 val STDOUT = 0xFFE0
 
 
-# ============================================================================
-# putc — write a single character to stdout
-# ============================================================================
+/*
+ * ============================================================================
+ * putc — Write a single character to stdout
+ * ============================================================================
+ *
+ * This is a direct memory-mapped I/O write. In a real OS with memory
+ * protection, user tasks wouldn't have direct access to device memory.
+ * They'd use a system call (TRAP) instead. For now, we allow it.
+ *
+ * Arguments:
+ *   ch — ASCII character code to print (only low 8 bits are used)
+ *
+ * ============================================================================
+ */
 
 putc(ch: int)
-    val p: *byte = STDOUT
-    *p = byte(ch)
+    // Cast the stdout address to a pointer to int.
+    // Writing to the device outputs that character.
+    val p: *int = STDOUT   // pointer to the stdout device
+    *p = ch                // write the character
 
 
-# ============================================================================
-# Task A — prints "AAAA..." with a delay between each
-# ============================================================================
+/*
+ * ============================================================================
+ * print_num — Print an integer as a decimal string
+ * ============================================================================
+ *
+ * Prints a non-negative integer to stdout.
+ * For negative numbers, prints a '-' prefix.
+ *
+ * Algorithm: extract digits from least significant to most significant,
+ * store them in a buffer, then print in reverse order.
+ *
+ * Arguments:
+ *   n — the integer to print
+ *
+ * ============================================================================
+ */
 
-task_a()
-    while true
-        putc(65)
-        delay(500)
+print_num(n: int)
+    // Handle negative numbers
+    if n < 0
+        putc(45)            // print '-' (ASCII 45)
+        n = 0 - n           // make positive (crude, doesn't handle MIN_INT)
+
+    // Handle zero as a special case
+    if n == 0
+        putc(48)            // print '0' (ASCII 48)
+        return
+
+    // Extract digits into a buffer (max 20 digits for 64-bit int)
+    var buf: [20]int        // buffer to hold digits
+    var len = 0             // number of digits extracted
+
+    var remaining = n       // working copy of n
+    while remaining > 0
+        buf[len] = remaining % 10   // extract least significant digit
+        len += 1
+        remaining = remaining / 10  // shift right by one decimal place
+
+    // Print digits in reverse order (most significant first)
+    var i = len - 1
+    while i >= 0
+        putc(buf[i] + 48)  // convert digit (0-9) to ASCII ('0'-'9')
+        i -= 1
 
 
-# ============================================================================
-# Task B — prints "BBBB..." with a delay between each
-# ============================================================================
-
-task_b()
-    while true
-        putc(66)
-        delay(500)
-
-
-# ============================================================================
-# delay — busy wait loop
-# ============================================================================
-#
-# The exact timing depends on CPU speed, but this gives the timer
-# interrupt a chance to fire and preempt the task.
-#
-# ============================================================================
+/*
+ * ============================================================================
+ * delay — Busy-wait loop
+ * ============================================================================
+ *
+ * Burns CPU cycles to create a visible delay between task outputs.
+ * The exact timing depends on CPU clock speed, but the important
+ * thing is that it gives the timer interrupt a chance to fire and
+ * preempt this task.
+ *
+ * In a real RTOS, tasks would use a sleep() system call instead
+ * of busy-waiting, which would block the thread and let others run.
+ *
+ * Arguments:
+ *   n — number of loop iterations (higher = longer delay)
+ *
+ * ============================================================================
+ */
 
 delay(n: int)
-    var i = 0
-    while i < n
-        i += 1
+    var i = 0               // loop counter
+    while i < n             // spin for n iterations
+        i += 1              // each iteration takes a few instructions
 
 
-# ============================================================================
-# idle_task — runs when no other thread is ready
-# ============================================================================
-#
-# In a real RTOS this would use WFI to halt the CPU until the next
-# interrupt, saving power. For now it just spins.
-#
-# ============================================================================
+/*
+ * ============================================================================
+ * Task A — Prints 'A' repeatedly
+ * ============================================================================
+ *
+ * This task demonstrates the simplest possible thread: an infinite
+ * loop that does I/O and delays. The timer interrupt preempts it
+ * periodically, switching to another thread.
+ *
+ * ============================================================================
+ */
+
+task_a()
+    while true              // run forever
+        putc(65)            // print 'A' (ASCII 65)
+        delay(2000)         // wait a while (lets timer preempt us)
+
+
+/*
+ * ============================================================================
+ * Task B — Prints 'B' repeatedly
+ * ============================================================================
+ *
+ * Same as Task A but prints 'B'. When both tasks run concurrently,
+ * you'll see interleaved A's and B's in the output.
+ *
+ * ============================================================================
+ */
+
+task_b()
+    while true              // run forever
+        putc(66)            // print 'B' (ASCII 66)
+        delay(2000)         // wait a while
+
+
+/*
+ * ============================================================================
+ * Task C — Counts and prints digits
+ * ============================================================================
+ *
+ * A slightly more interesting task: counts from 0 to 9 repeatedly,
+ * printing each digit. Demonstrates that threads maintain their
+ * own local state across context switches.
+ *
+ * The variable 'count' lives on Task C's user stack. When the timer
+ * preempts Task C and switches to another thread, 'count' is preserved
+ * on the stack. When Task C resumes, it continues from where it left off.
+ *
+ * ============================================================================
+ */
+
+task_c()
+    var count = 0           // local counter — preserved across preemptions
+    while true              // run forever
+        putc(count + 48)    // print digit as ASCII ('0' = 48, '1' = 49, etc.)
+        count += 1          // increment counter
+        if count >= 10      // wrap around after '9'
+            count = 0
+        delay(3000)         // slightly longer delay than A and B
+
+
+/*
+ * ============================================================================
+ * Idle Task — Lowest priority, runs when nothing else can
+ * ============================================================================
+ *
+ * Every RTOS needs an idle task. It's always runnable and has the
+ * lowest priority. When all other threads are blocked (future feature),
+ * the scheduler runs the idle task.
+ *
+ * In a power-conscious system, the idle task would execute the WFI
+ * (Wait For Interrupt) instruction to halt the CPU until the next
+ * interrupt, saving power. For now, it just spins.
+ *
+ * The idle task is important because the scheduler must always have
+ * at least one runnable thread. Without it, a context switch with
+ * no runnable threads would crash.
+ *
+ * ============================================================================
+ */
 
 idle_task()
-    while true
-        delay(1)
+    while true              // run forever
+        delay(100)          // minimal delay — just spin
+        // In the future: wfi (wait for interrupt)
