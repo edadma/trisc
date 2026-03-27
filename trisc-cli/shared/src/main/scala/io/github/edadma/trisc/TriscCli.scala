@@ -176,6 +176,7 @@ object TriscCli:
     val cpu = new CPU(mem, Nil)
     cpu.pc = linked.entryAddress.getOrElse(0L)
     cpu.state = State.Run
+    cpu.set(Status.Mode, true) // supervisor mode so halt works
     cpu.r(7).write(ramSize - 8)
     (cpu, mem)
 
