@@ -32,8 +32,9 @@ class SyslLLVMCodegen:
     // Generate functions
     for decl <- program.decls do
       decl match
+        case _: TImportDecl => // skip
         case f: TFunDecl => genFunction(f)
-        case TVarDecl(name, _, _) =>
+        case TVarDecl(name, _, _, _) =>
           emit(s"@$name = global i64 0")
     emit("")
 

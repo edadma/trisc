@@ -24,13 +24,14 @@ class SyslAnalyzer:
     // First pass: register all functions and globals
     for decl <- program.decls do
       decl match
-        case FunDeclAST(name, params, returnType, _) =>
+        case ImportDeclAST(_) => // handled later
+        case FunDeclAST(name, params, returnType, _, _) =>
           val paramTypes = params.map(p => (p.name, resolveTypeName(p.typ)))
           val retType = returnType.map(resolveTypeName).getOrElse(VoidType)
           if functions.contains(name) || builtinFunctions.contains(name) then
             throw AnalysisError(s"duplicate function: '$name'", decl)
           functions(name) = FunInfo(name, paramTypes, retType)
-        case VarDeclAST(name, _, _) =>
+        case VarDeclAST(name, _, _, _) =>
           if globalScope.contains(name) then
             throw AnalysisError(s"duplicate global: '$name'", decl)
 
@@ -40,7 +41,10 @@ class SyslAnalyzer:
 
   private def analyzeDecl(decl: DeclAST): TDecl =
     decl match
-      case FunDeclAST(name, params, _, body) =>
+      case ImportDeclAST(path) =>
+        TImportDecl(path)
+
+      case FunDeclAST(name, params, _, body, isPrivate) =>
         localScope = new mutable.LinkedHashMap
         val funInfo = functions(name)
         for (paramName, paramType) <- funInfo.params do
@@ -50,15 +54,15 @@ class SyslAnalyzer:
           case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
         val tParams = funInfo.params.map((n, t) => TParam(n, t))
         localScope = null
-        TFunDecl(name, tParams, funInfo.returnType, tBody)
+        TFunDecl(name, tParams, funInfo.returnType, tBody, isPrivate)
 
-      case VarDeclAST(name, typOpt, init) =>
+      case VarDeclAST(name, typOpt, init, isPrivate) =>
         localScope = new mutable.LinkedHashMap
         val tInit = analyzeExpr(init)
         val declType = typOpt.map(resolveTypeName).getOrElse(tInit.typ)
         globalScope(name) = SymInfo(name, declType, true)
         localScope = null
-        TVarDecl(name, declType, tInit)
+        TVarDecl(name, declType, tInit, isPrivate)
 
   private def resolveTypeName(name: String): SyslType = name match
     case "int"  => IntType

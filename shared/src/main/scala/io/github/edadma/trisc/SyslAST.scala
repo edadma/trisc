@@ -7,8 +7,9 @@ case class ProgramAST(decls: List[DeclAST])
 
 // Declarations
 trait DeclAST extends Positional
-case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[String], body: FunBodyAST) extends DeclAST
-case class VarDeclAST(name: String, typ: Option[String], init: ExpressionAST) extends DeclAST
+case class ImportDeclAST(path: String) extends DeclAST
+case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[String], body: FunBodyAST, isPrivate: Boolean = false) extends DeclAST
+case class VarDeclAST(name: String, typ: Option[String], init: ExpressionAST, isPrivate: Boolean = false) extends DeclAST
 
 case class ParamAST(name: String, typ: String) extends Positional
 

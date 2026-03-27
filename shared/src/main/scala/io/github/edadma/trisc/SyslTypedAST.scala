@@ -5,8 +5,9 @@ case class TProgram(decls: List[TDecl])
 
 // Declarations
 trait TDecl
-case class TFunDecl(name: String, params: List[TParam], returnType: SyslType, body: TFunBody) extends TDecl
-case class TVarDecl(name: String, typ: SyslType, init: TExpr) extends TDecl
+case class TImportDecl(path: String) extends TDecl
+case class TFunDecl(name: String, params: List[TParam], returnType: SyslType, body: TFunBody, isPrivate: Boolean = false) extends TDecl
+case class TVarDecl(name: String, typ: SyslType, init: TExpr, isPrivate: Boolean = false) extends TDecl
 
 case class TParam(name: String, typ: SyslType)
 

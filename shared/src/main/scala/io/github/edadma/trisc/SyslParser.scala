@@ -25,17 +25,23 @@ class SyslParser extends StandardTokenParsers {
   // --- Declarations ---
 
   lazy val decl: Parser[DeclAST] =
+    importDecl | "private" ~> declBody(true) | declBody(false)
+
+  lazy val importDecl: Parser[ImportDeclAST] =
+    "import" ~> stringLit ^^ ImportDeclAST.apply
+
+  def declBody(priv: Boolean): Parser[DeclAST] =
     ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
-      case name ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body)
+      case name ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body, priv)
     } |
       ident ~ (":" ~> typeExpr) ^^ {
-        case name ~ t => VarDeclAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t))
+        case name ~ t => VarDeclAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t), priv)
       } |
       ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ {
-        case name ~ t ~ e => VarDeclAST(name, Some(t), e)
+        case name ~ t ~ e => VarDeclAST(name, Some(t), e, priv)
       } |
       ident ~ ("=" ~> expr) ^^ {
-        case name ~ e => VarDeclAST(name, None, e)
+        case name ~ e => VarDeclAST(name, None, e, priv)
       }
 
   lazy val funRest: Parser[(Option[String], FunBodyAST)] =

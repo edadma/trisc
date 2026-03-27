@@ -19,28 +19,29 @@ class SyslTriscCodegen(addresses: Int = 2):
 
     // Emit entry point
     val hasMain = program.decls.exists {
-      case TFunDecl("main", _, _, _) => true
+      case TFunDecl("main", _, _, _, _) => true
       case _ => false
     }
     if hasMain then
       emit("entry main")
-      val mainDecl = program.decls.collectFirst { case f @ TFunDecl("main", _, _, _) => f }.get
+      val mainDecl = program.decls.collectFirst { case f @ TFunDecl("main", _, _, _, _) => f }.get
       emit(s"global main, func, ${funcSig(mainDecl)}")
 
-    // Emit globals
+    // Emit globals (only public symbols get global directives)
     for decl <- program.decls do
       decl match
-        case TVarDecl(name, typ, _) =>
+        case TVarDecl(name, typ, _, isPrivate) if !isPrivate =>
           emit(s"global $name, data, ${typ.toPrefix}")
-        case f @ TFunDecl(name, _, _, _) if name != "main" =>
+        case f @ TFunDecl(name, _, _, _, isPrivate) if !isPrivate && name != "main" =>
           emit(s"global $name, func, ${funcSig(f)}")
         case _ =>
 
     // Emit functions
     for decl <- program.decls do
       decl match
+        case _: TImportDecl => // skip
         case f: TFunDecl => genFunction(f)
-        case TVarDecl(name, typ, init) =>
+        case TVarDecl(name, typ, init, _) =>
           emit(s"# global: $name")
           emit(s"$name")
           emit(s"  dw 0") // TODO: global initializers

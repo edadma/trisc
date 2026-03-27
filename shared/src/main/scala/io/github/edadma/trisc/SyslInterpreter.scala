@@ -36,8 +36,9 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   def run(program: TProgram): Long =
     for decl <- program.decls do
       decl match
+        case _: TImportDecl => // not handled in interpreter
         case f: TFunDecl => functions(f.name) = f
-        case TVarDecl(name, _, init) =>
+        case TVarDecl(name, _, init, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
     functions.get("main") match
