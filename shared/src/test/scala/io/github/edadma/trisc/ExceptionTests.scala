@@ -18,6 +18,7 @@ class ExceptionTests extends TestHelpers {
         |dw 0
         |dw 0
         |dw 0
+        |dw 0
         |halt
         |start
         |  ldi r1, 42
@@ -32,6 +33,7 @@ class ExceptionTests extends TestHelpers {
     val output = runProgram(
       """STDOUT = 0xFF8
         |dw reset
+        |dw 0
         |dw 0
         |dw 0
         |dw handler
@@ -51,6 +53,7 @@ class ExceptionTests extends TestHelpers {
   "trap preserves and restores registers via rte" in {
     val cpu = runCPU(
       """dw reset
+        |dw 0
         |dw 0
         |dw 0
         |dw handler
@@ -75,6 +78,7 @@ class ExceptionTests extends TestHelpers {
       """dw reset
         |dw 0
         |dw 0
+        |dw 0
         |dw handler
         |reset
         |  ldi r1, 0
@@ -93,6 +97,7 @@ class ExceptionTests extends TestHelpers {
   "rte restores all registers" in {
     val cpu = runCPU(
       """dw reset
+        |dw 0
         |dw 0
         |dw 0
         |dw handler
@@ -124,6 +129,7 @@ class ExceptionTests extends TestHelpers {
   "rte restores PSR" in {
     val cpu = runCPU(
       """dw reset
+        |dw 0
         |dw 0
         |dw 0
         |dw handler
@@ -160,6 +166,7 @@ class ExceptionTests extends TestHelpers {
       """STDOUT = 0xFF8
         |dw reset
         |dw isr
+        |dw 0
         |dw 0
         |dw 0
         |reset

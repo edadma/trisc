@@ -11,9 +11,9 @@ enum Status(val bit: Int):
   case Irq extends Status(8)
 
 enum State:
-  case Reset, Interrupt, MisalignedAccess,
+  case Reset, Interrupt, MisalignedAccess, PrivilegeViolation,
     Trap0, Trap1, Trap2, Trap3, Trap4, Trap5, Trap6, Trap7,
-    Halt, Run
+    Halt, Run, Wfi
 
 class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   val name: String = mem.name
@@ -66,6 +66,8 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   var psr: Int = 0
   var spsr: Int = 0
   var state: State = State.Halt
+  var reservationAddr: Long = 0
+  var reservationValid: Boolean = false
 
   var limit: Int = -1
   var clump: Int = 1000
@@ -96,6 +98,7 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
       pc = readInt(state.ordinal * 4)
       state = State.Run
       set(Status.Mode, true)
+      reservationValid = false
 
     val inst = readShortUnsigned(pc)
     val decoded = Decode(inst)
@@ -113,7 +116,7 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   final def run(): Unit =
     var count = 0
 
-    while state != State.Halt && count < clump do
+    while state != State.Halt && state != State.Wfi && count < clump do
       execute()
       count += 1
 
@@ -183,6 +186,12 @@ object Decode:
         "110 aaa bbb 00 01011" -> ((args: Map[Char, Int]) => new FINV(args('a'), args('b'))),
         "110 aaa bbb 00 01001" -> ((args: Map[Char, Int]) => new CVT(args('a'), args('b'))),
         "110 aaa bbb 00 01100" -> ((args: Map[Char, Int]) => new FINT(args('a'), args('b'))),
+        "110 aaa bbb 00 01101" -> ((args: Map[Char, Int]) => new FSQRT(args('a'), args('b'))),
+        "110 aaa bbb 00 01110" -> ((args: Map[Char, Int]) => new FABS(args('a'), args('b'))),
+        "110 aaa bbb 00 01111" -> ((args: Map[Char, Int]) => new LL(args('a'), args('b'))),
+        "110 aaa bbb 00 10000" -> ((args: Map[Char, Int]) => new SC(args('a'), args('b'))),
+        "110 aaa bbb 00 10001" -> ((args: Map[Char, Int]) => new CLZ(args('a'), args('b'))),
+        "110 aaa bbb 00 10010" -> ((args: Map[Char, Int]) => new CTZ(args('a'), args('b'))),
         "110 aaa bbb 10 iiiii" -> ((args: Map[Char, Int]) => new LD(args('a'), args('b'), args('i'))),
         "110 aaa bbb 11 iiiii" -> ((args: Map[Char, Int]) => new ST(args('a'), args('b'), args('i'))),
         "111 000 rrr 0000000" -> ((operands: Map[Char, Int]) => new PSHB(operands('r'))),
@@ -196,20 +205,29 @@ object Decode:
         "111 000 rrr 0001000" -> ((operands: Map[Char, Int]) => new SPSR(operands('r'))),
         "111 000 rrr 0001001" -> ((operands: Map[Char, Int]) => new GPSR(operands('r'))),
         "111 000 000 0001010" -> (_ => RTE),
+        "111 000 000 0001011" -> (_ => FENCE),
+        "111 000 000 0001100" -> (_ => WFI),
         "101 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new ADDI(args('a'), args('b'), ext(args('i')))),
         "100 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BLS(args('a'), args('b'), ext(args('i')))),
         "011 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BLU(args('a'), args('b'), ext(args('i')))),
         "010 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BEQ(args('a'), args('b'), ext(args('i')))),
+        // 001 block: shifts, comparisons, carry, unsigned, float
         "001 ddd aaa bbb 0000" -> ((args: Map[Char, Int]) => new ASR(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 0001" -> ((args: Map[Char, Int]) => new LSR(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 0010" -> ((args: Map[Char, Int]) => new LSL(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 0011" -> ((args: Map[Char, Int]) => new SLT(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 0100" -> ((args: Map[Char, Int]) => new SLTU(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 1000" -> ((args: Map[Char, Int]) => new FADD(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 1001" -> ((args: Map[Char, Int]) => new FSUB(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 1010" -> ((args: Map[Char, Int]) => new FMUL(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 1011" -> ((args: Map[Char, Int]) => new FDIV(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 1100" -> ((args: Map[Char, Int]) => new FPOW(args('d'), args('a'), args('b'))),
+        "001 ddd aaa bbb 0101" -> ((args: Map[Char, Int]) => new ADC(args('d'), args('a'), args('b'))),
+        "001 ddd aaa bbb 0110" -> ((args: Map[Char, Int]) => new SBC(args('d'), args('a'), args('b'))),
+        "001 ddd aaa bbb 0111" -> ((args: Map[Char, Int]) => new MULU(args('d'), args('a'), args('b'))),
+        "001 ddd aaa bbb 1000" -> ((args: Map[Char, Int]) => new DIVU(args('d'), args('a'), args('b'))),
+        "001 ddd aaa bbb 1001" -> ((args: Map[Char, Int]) => new REMU(args('d'), args('a'), args('b'))),
+        "001 ddd aaa bbb 1010" -> ((args: Map[Char, Int]) => new FSLT(args('d'), args('a'), args('b'))),
+        "001 ddd aaa bbb 1011" -> ((args: Map[Char, Int]) => new FADD(args('d'), args('a'), args('b'))),
+        "001 ddd aaa bbb 1100" -> ((args: Map[Char, Int]) => new FSUB(args('d'), args('a'), args('b'))),
+        "001 ddd aaa bbb 1101" -> ((args: Map[Char, Int]) => new FMUL(args('d'), args('a'), args('b'))),
+        "001 ddd aaa bbb 1110" -> ((args: Map[Char, Int]) => new FDIV(args('d'), args('a'), args('b'))),
+        "001 ddd aaa bbb 1111" -> ((args: Map[Char, Int]) => new FPOW(args('d'), args('a'), args('b'))),
         "111 rrr 01 iiiiiiii; r:1-7" -> ((operands: Map[Char, Int]) => new AUIPC(operands('r'), operands('i'))),
         "000 ddd aaa bbb 0000" -> ((args: Map[Char, Int]) => new LDB(args('d'), args('a'), args('b'))),
         "000 aaa bbb ccc 0001" -> ((args: Map[Char, Int]) => new STB(args('a'), args('b'), args('c'))),

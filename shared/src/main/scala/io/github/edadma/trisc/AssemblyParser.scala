@@ -39,6 +39,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |r6
                           |r7
                           |sp
+                          |adc
                           |add
                           |addi
                           |and
@@ -55,10 +56,15 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |blu
                           |bne
                           |bra
+                          |clz
+                          |ctz
+                          |cvt
                           |div
+                          |divu
                           |entry
                           |extern
-                          |cvt
+                          |fabs
+                          |fence
                           |fadd
                           |fdiv
                           |fint
@@ -66,6 +72,8 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |fmul
                           |fneg
                           |fpow
+                          |fslt
+                          |fsqrt
                           |fsub
                           |global
                           |gpsr
@@ -76,12 +84,14 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |ldd
                           |ldi
                           |lds
+                          |ll
                           |ldw
                           |lsl
                           |lsr
                           |mov
                           |movi
                           |mul
+                          |mulu
                           |neg
                           |nop
                           |not
@@ -100,8 +110,11 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |ress
                           |resw
                           |rem
+                          |remu
                           |ret
                           |rte
+                          |sbc
+                          |sc
                           |seb
                           |ses
                           |sew
@@ -117,6 +130,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |stw
                           |sub
                           |trap
+                          |wfi
                           |xor
                           |zeb
                           |zes
@@ -243,7 +257,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
       | label ~ instruction ^^ { case l ~ i => Seq(l, i) }
 
   lazy val mnemonics: P[String] =
-    "add" | "addi" | "and" | "asr" | "auipc" | "beq" | "bge" | "bgeu" | "bgt" | "bgu" | "ble" | "bleu" | "bls" | "blu" | "bne" | "bra" | "cvt" | "div" | "fadd" | "fdiv" | "fint" | "finv" | "fmul" | "fneg" | "fpow" | "fsub" | "gpsr" | "halt" | "jalr" | "ld" | "ldb" | "ldd" | "ldi" | "lds" | "ldw" | "lsl" | "lsr" | "mov" | "movi" | "mul" | "neg" | "nop" | "not" | "or" | "popb" | "popd" | "pops" | "popw" | "pshb" | "pshd" | "pshs" | "pshw" | "rem" | "ret" | "rte" | "seb" | "ses" | "sew" | "sli" | "slt" | "sltu" | "spsr" | "st" | "stb" | "std" | "sti" | "sts" | "stw" | "sub" | "trap" | "xor" | "zeb" | "zes" | "zew"
+    "adc" | "add" | "addi" | "and" | "asr" | "auipc" | "beq" | "bge" | "bgeu" | "bgt" | "bgu" | "ble" | "bleu" | "bls" | "blu" | "bne" | "bra" | "clz" | "ctz" | "cvt" | "div" | "divu" | "fabs" | "fadd" | "fdiv" | "fence" | "fint" | "finv" | "fmul" | "fneg" | "fpow" | "fslt" | "fsqrt" | "fsub" | "gpsr" | "halt" | "jalr" | "ld" | "ldb" | "ldd" | "ldi" | "lds" | "ldw" | "ll" | "lsl" | "lsr" | "mov" | "movi" | "mul" | "mulu" | "neg" | "nop" | "not" | "or" | "popb" | "popd" | "pops" | "popw" | "pshb" | "pshd" | "pshs" | "pshw" | "rem" | "remu" | "ret" | "rte" | "sbc" | "sc" | "seb" | "ses" | "sew" | "sli" | "slt" | "sltu" | "spsr" | "st" | "stb" | "std" | "sti" | "sts" | "stw" | "sub" | "trap" | "wfi" | "xor" | "zeb" | "zes" | "zew"
 
   lazy val instruction: P[InstructionLineAST] =
     mnemonics ~ repsep(expression, ",") ^^ { case m ~ es =>

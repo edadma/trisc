@@ -7,7 +7,8 @@ trait TestHelpers extends AnyFreeSpec with Matchers {
 
   val VECTORS =
     """
-      |dw 8
+      |dw 20
+      |dw 0
       |dw 0
       |dw 0
       |dw 0

@@ -54,14 +54,18 @@ object RTE extends SimpleInstruction:
   val mnemonic = "rte"
 
   def apply(cpu: CPU): Unit =
-    for i <- 1 to 7 do cpu.r(i).write(cpu.sr(i))
-    cpu.pc = cpu.spc
-    cpu.psr = cpu.spsr
+    if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
+    else
+      for i <- 1 to 7 do cpu.r(i).write(cpu.sr(i))
+      cpu.pc = cpu.spc
+      cpu.psr = cpu.spsr
 
 class SPSR(r: Int) extends SimpleInstruction:
   val mnemonic = "spsr"
 
-  def apply(cpu: CPU): Unit = cpu.psr = cpu.r(r).read.toInt
+  def apply(cpu: CPU): Unit =
+    if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
+    else cpu.psr = cpu.r(r).read.toInt
 
 class GPSR(r: Int) extends SimpleInstruction:
   val mnemonic = "gpsr"
@@ -103,17 +107,32 @@ abstract class RRRInstruction(a: Int, b: Int, c: Int) extends Instruction:
 class ADD(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "add"
 
-  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read + cpu.r(b).read)
+  def apply(cpu: CPU): Unit =
+    val va = cpu.r(a).read
+    val vb = cpu.r(b).read
+    val result = va + vb
+    cpu.r(d).write(result)
+    // Carry: unsigned overflow if result < either operand
+    cpu.set(Status.C, (result + Long.MinValue) < (va + Long.MinValue))
 
 class SUB(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "sub"
 
-  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read - cpu.r(b).read)
+  def apply(cpu: CPU): Unit =
+    val va = cpu.r(a).read
+    val vb = cpu.r(b).read
+    cpu.r(d).write(va - vb)
+    // Borrow: unsigned underflow if a < b
+    cpu.set(Status.C, (va + Long.MinValue) < (vb + Long.MinValue))
 
 class MUL(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "mul"
 
-  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read * cpu.r(b).read)
+  def apply(cpu: CPU): Unit =
+    val va = cpu.r(a).read
+    val vb = cpu.r(b).read
+    cpu.r(d).write(va * vb)
+    cpu.r((d + 1) & 7).write(java.lang.Math.multiplyHigh(va, vb))
 
 class DIV(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "div"
@@ -152,6 +171,67 @@ class SLTU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
     val ua = cpu.r(a).read + Long.MinValue
     val ub = cpu.r(b).read + Long.MinValue
     cpu.r(d).write(if ua < ub then 1 else 0)
+
+// Carry arithmetic (RRR 001 block)
+
+class ADC(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "adc"
+
+  def apply(cpu: CPU): Unit =
+    val va = cpu.r(a).read
+    val vb = cpu.r(b).read
+    val carry = if cpu.test(Status.C) then 1L else 0L
+    val result = va + vb + carry
+    cpu.r(d).write(result)
+    // Carry if (va + vb) overflowed, or (va + vb + carry) overflowed
+    val sum1 = va + vb
+    val overflow1 = (sum1 + Long.MinValue) < (va + Long.MinValue)
+    val overflow2 = (result + Long.MinValue) < (sum1 + Long.MinValue)
+    cpu.set(Status.C, overflow1 || overflow2)
+
+class SBC(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "sbc"
+
+  def apply(cpu: CPU): Unit =
+    val va = cpu.r(a).read
+    val vb = cpu.r(b).read
+    val borrow = if cpu.test(Status.C) then 1L else 0L
+    val result = va - vb - borrow
+    cpu.r(d).write(result)
+    // Borrow if a < b, or a == b and borrow was set
+    val ua = va + Long.MinValue
+    val ub = vb + Long.MinValue
+    cpu.set(Status.C, ua < ub || (ua == ub && borrow != 0))
+
+// Unsigned arithmetic (RRR 001 block)
+
+class MULU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "mulu"
+
+  def apply(cpu: CPU): Unit =
+    val va = cpu.r(a).read
+    val vb = cpu.r(b).read
+    cpu.r(d).write(va * vb)
+    // Unsigned multiply high: multiplyHigh gives signed high, correct for unsigned
+    val hi = java.lang.Math.multiplyHigh(va, vb) + (if va < 0 then vb else 0L) + (if vb < 0 then va else 0L)
+    cpu.r((d + 1) & 7).write(hi)
+
+class DIVU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "divu"
+
+  def apply(cpu: CPU): Unit = cpu.r(d).write(java.lang.Long.divideUnsigned(cpu.r(a).read, cpu.r(b).read))
+
+class REMU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "remu"
+
+  def apply(cpu: CPU): Unit = cpu.r(d).write(java.lang.Long.remainderUnsigned(cpu.r(a).read, cpu.r(b).read))
+
+// Float comparison (RRR 001 block)
+
+class FSLT(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "fslt"
+
+  def apply(cpu: CPU): Unit = cpu.r(d).write(if cpu.r(a).readf < cpu.r(b).readf then 1 else 0)
 
 // Shifts (RRR 001 block)
 
@@ -324,6 +404,63 @@ class FINT(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "fint"
 
   def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).readf.toLong)
+
+class FSQRT(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "fsqrt"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(math.sqrt(cpu.r(b).readf))
+
+class FABS(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "fabs"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(math.abs(cpu.r(b).readf))
+
+// Atomics (RR 110 block)
+
+class LL(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "ll"
+
+  def apply(cpu: CPU): Unit =
+    val addr = cpu.r(b).read
+    cpu.r(a).write(cpu.readLong(addr))
+    cpu.reservationAddr = addr
+    cpu.reservationValid = true
+
+class SC(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "sc"
+
+  def apply(cpu: CPU): Unit =
+    val addr = cpu.r(b).read
+    if cpu.reservationValid && cpu.reservationAddr == addr then
+      cpu.writeLong(addr, cpu.r(a).read)
+      cpu.r(a).write(1)
+    else
+      cpu.r(a).write(0)
+    cpu.reservationValid = false
+
+// Bit counting (RR 110 block)
+
+class CLZ(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "clz"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(java.lang.Long.numberOfLeadingZeros(cpu.r(b).read))
+
+class CTZ(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "ctz"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(java.lang.Long.numberOfTrailingZeros(cpu.r(b).read))
+
+// System (R format)
+
+object FENCE extends SimpleInstruction:
+  val mnemonic = "fence"
+
+  def apply(cpu: CPU): Unit = () // memory ordering barrier — NOP for single-core emulator
+
+object WFI extends SimpleInstruction:
+  val mnemonic = "wfi"
+
+  def apply(cpu: CPU): Unit = cpu.state = State.Wfi
 
 class AUIPC(r: Int, imm: Int) extends ImmediateInstruction(r, imm):
   val mnemonic = "auipc"

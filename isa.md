@@ -11,9 +11,9 @@ RRR
     stw 0101
     ldd 0110
     std 0111
-    add 1000
-    sub 1001
-    mul 1010
+    add 1000    (sets carry)
+    sub 1001    (sets carry/borrow)
+    mul 1010    (low → rd, high → rd+1)
     div 1011
     rem 1100
     and 1101
@@ -27,11 +27,17 @@ RRR
     lsl  0010
     slt  0011
     sltu 0100
-    fadd 1000
-    fsub 1001
-    fmul 1010
-    fdiv 1011
-    fpow 1100
+    adc  0101    (add with carry, sets carry)
+    sbc  0110    (subtract with borrow, sets carry)
+    mulu 0111    (unsigned, low → rd, high → rd+1)
+    divu 1000
+    remu 1001
+    fslt 1010
+    fadd 1011
+    fsub 1100
+    fmul 1101
+    fdiv 1110
+    fpow 1111
 
 RRI
 ---
@@ -58,6 +64,12 @@ RR
         fneg    01010
         finv    01011
         fint    01100
+        fsqrt   01101
+        fabs    01110
+        ll      01111    (load-linked, sets reservation)
+        sc      10000    (store-conditional, clears reservation)
+        clz     10001
+        ctz     10010
 
     110 000 000 01 iiiii    trap
     110 aaa bbb 10 iiiii    ld
@@ -77,15 +89,17 @@ R
 -
 
     111 000 rrr ooooooo
-    
-    pshb 0000000
-    popb 0000001
-    pshs 0000010
-    pops 0000011
-    pshw 0000100
-    popw 0000101
-    pshd 0000110
-    popd 0000111
-    spsr 0001000
-    gpsr 0001001
-    rte  0001010
+
+    pshb  0000000
+    popb  0000001
+    pshs  0000010
+    pops  0000011
+    pshw  0000100
+    popw  0000101
+    pshd  0000110
+    popd  0000111
+    spsr  0001000    (supervisor only)
+    gpsr  0001001
+    rte   0001010    (supervisor only)
+    fence 0001011
+    wfi   0001100

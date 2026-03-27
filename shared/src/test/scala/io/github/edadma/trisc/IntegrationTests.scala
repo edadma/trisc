@@ -48,6 +48,7 @@ class IntegrationTests extends TestHelpers {
         |dw reset
         |dw 0
         |dw 0
+        |dw 0
         |dw trap0
         |reset
         |  ldi r1, 0
