@@ -15,7 +15,7 @@ class SyslLLVMCodegen:
     labelCounter += 1
     s"${prefix}_$labelCounter"
 
-  private case class LocalVar(name: String, reg: String) // reg is the alloca'd pointer
+  private case class LocalVar(name: String, reg: String, typ: SyslType)
 
   private var locals: mutable.LinkedHashMap[String, LocalVar] = null
   private var currentFunction: TFunDecl = null
@@ -33,9 +33,10 @@ class SyslLLVMCodegen:
     for decl <- program.decls do
       decl match
         case _: TImportDecl => // skip
+        case _: TStructDecl => // type only
         case f: TFunDecl => genFunction(f)
-        case TVarDecl(name, _, _, _) =>
-          emit(s"@$name = global i64 0")
+        case TVarDecl(name, typ, _, _) =>
+          emit(s"@$name = global ${llvmType(typ)} 0")
     emit("")
 
     out.toString
@@ -55,16 +56,23 @@ class SyslLLVMCodegen:
 
     // Allocate and store parameters
     for param <- fun.params do
+      val lt = llvmType(param.typ)
       val alloca = newReg()
-      emit(s"  $alloca = alloca i64")
-      emit(s"  store i64 %${param.name}_arg, i64* $alloca")
-      locals(param.name) = LocalVar(param.name, alloca)
+      emit(s"  $alloca = alloca $lt")
+      emit(s"  store $lt %${param.name}_arg, $lt* $alloca")
+      locals(param.name) = LocalVar(param.name, alloca, param.typ)
 
     // Generate body
     fun.body match
       case TExprBody(expr) =>
         val result = genExpr(expr)
-        emit(s"  ret $retType $result")
+        val rt = exprType(expr)
+        if retType != rt then
+          val cast = newReg()
+          emit(s"  $cast = sext $rt $result to $retType")
+          emit(s"  ret $retType $cast")
+        else
+          emit(s"  ret $retType $result")
       case TBlockBody(stmts) =>
         genBlock(stmts, retType)
 
@@ -81,7 +89,13 @@ class SyslLLVMCodegen:
         stmts.last match
           case TExprStmt(expr) =>
             val result = genExpr(expr)
-            emit(s"  ret $retType $result")
+            val rt = exprType(expr)
+            if retType != rt then
+              val cast = newReg()
+              emit(s"  $cast = sext $rt $result to $retType")
+              emit(s"  ret $retType $cast")
+            else
+              emit(s"  ret $retType $result")
             hasReturned = true
           case other =>
             genStmt(other)
@@ -92,30 +106,54 @@ class SyslLLVMCodegen:
       emit(s"  ret $retType 0")
       hasReturned = true
 
+  // Get LLVM type string for an expression based on its type
+  private def exprType(expr: TExpr): String = llvmType(expr.typ)
+
   private def genStmt(stmt: TStmt): Unit =
     stmt match
-      case TVarStmt(name, _, init) =>
+      case TVarStmt(name, typ, init) =>
+        val lt = llvmType(typ)
         val alloca = newReg()
-        emit(s"  $alloca = alloca i64")
+        emit(s"  $alloca = alloca $lt")
         val value = genExpr(init)
-        emit(s"  store i64 $value, i64* $alloca")
-        locals(name) = LocalVar(name, alloca)
+        val vt = exprType(init)
+        if vt != lt then
+          val cast = newReg()
+          emit(s"  $cast = sext $vt $value to $lt")
+          emit(s"  store $lt $cast, $lt* $alloca")
+        else
+          emit(s"  store $lt $value, $lt* $alloca")
+        locals(name) = LocalVar(name, alloca, typ)
 
       case TAssignStmt(target, value) =>
         val v = genExpr(value)
         if locals.contains(target) then
-          emit(s"  store i64 $v, i64* ${locals(target).reg}")
+          val local = locals(target)
+          val lt = llvmType(local.typ)
+          val vt = exprType(value)
+          if vt != lt then
+            val cast = newReg()
+            emit(s"  $cast = sext $vt $v to $lt")
+            emit(s"  store $lt $cast, $lt* ${local.reg}")
+          else
+            emit(s"  store $lt $v, $lt* ${local.reg}")
         else
-          // New local
+          val lt = exprType(value)
           val alloca = newReg()
-          emit(s"  $alloca = alloca i64")
-          emit(s"  store i64 $v, i64* $alloca")
-          locals(target) = LocalVar(target, alloca)
+          emit(s"  $alloca = alloca $lt")
+          emit(s"  store $lt $v, $lt* $alloca")
+          locals(target) = LocalVar(target, alloca, value.typ)
 
       case TReturnStmt(Some(value)) =>
         val v = genExpr(value)
         val retType = if currentFunction.name == "main" then "i64" else llvmType(currentFunction.returnType)
-        emit(s"  ret $retType $v")
+        val vt = exprType(value)
+        if vt != retType then
+          val cast = newReg()
+          emit(s"  $cast = sext $vt $v to $retType")
+          emit(s"  ret $retType $cast")
+        else
+          emit(s"  ret $retType $v")
         hasReturned = true
 
       case TReturnStmt(None) =>
@@ -132,8 +170,9 @@ class SyslLLVMCodegen:
         emit(s"  br label %$condLabel")
         emit(s"$condLabel:")
         val c = genExpr(cond)
+        val ct = exprType(cond)
         val cBool = newReg()
-        emit(s"  $cBool = icmp ne i64 $c, 0")
+        emit(s"  $cBool = icmp ne $ct $c, 0")
         emit(s"  br i1 $cBool, label %$bodyLabel, label %$endLabel")
         emit(s"$bodyLabel:")
         for s <- body do genStmt(s)
@@ -144,6 +183,7 @@ class SyslLLVMCodegen:
         emit(s"  ; TODO: ${stmt.getClass.getSimpleName}")
 
   private def genExpr(expr: TExpr): String =
+    val t = exprType(expr)
     expr match
       case TIntLit(n, _) => n.toString
       case TBoolLit(true, _) => "1"
@@ -151,116 +191,128 @@ class SyslLLVMCodegen:
 
       case TVarRef(name, _) =>
         if locals.contains(name) then
+          val local = locals(name)
+          val lt = llvmType(local.typ)
           val r = newReg()
-          emit(s"  $r = load i64, i64* ${locals(name).reg}")
+          emit(s"  $r = load $lt, $lt* ${local.reg}")
           r
         else
           val r = newReg()
-          emit(s"  $r = load i64, i64* @$name")
+          emit(s"  $r = load $t, $t* @$name")
           r
 
       case TBinary(left, op, right, _) =>
         val l = genExpr(left)
         val r = genExpr(right)
+        val lt = exprType(left)
         val result = newReg()
         op match
-          case "+"  => emit(s"  $result = add i64 $l, $r")
-          case "-"  => emit(s"  $result = sub i64 $l, $r")
-          case "*"  => emit(s"  $result = mul i64 $l, $r")
-          case "/"  => emit(s"  $result = sdiv i64 $l, $r")
-          case "%"  => emit(s"  $result = srem i64 $l, $r")
-          case "&"  => emit(s"  $result = and i64 $l, $r")
-          case "|"  => emit(s"  $result = or i64 $l, $r")
-          case "^"  => emit(s"  $result = xor i64 $l, $r")
-          case "<<" => emit(s"  $result = shl i64 $l, $r")
-          case ">>" => emit(s"  $result = ashr i64 $l, $r")
+          case "+"  => emit(s"  $result = add $lt $l, $r")
+          case "-"  => emit(s"  $result = sub $lt $l, $r")
+          case "*"  => emit(s"  $result = mul $lt $l, $r")
+          case "/"  => emit(s"  $result = sdiv $lt $l, $r")
+          case "%"  => emit(s"  $result = srem $lt $l, $r")
+          case "&"  => emit(s"  $result = and $lt $l, $r")
+          case "|"  => emit(s"  $result = or $lt $l, $r")
+          case "^"  => emit(s"  $result = xor $lt $l, $r")
+          case "<<" => emit(s"  $result = shl $lt $l, $r")
+          case ">>" => emit(s"  $result = ashr $lt $l, $r")
           case "==" =>
             val cmp = newReg()
-            emit(s"  $cmp = icmp eq i64 $l, $r")
-            emit(s"  $result = zext i1 $cmp to i64")
+            emit(s"  $cmp = icmp eq $lt $l, $r")
+            emit(s"  $result = zext i1 $cmp to $lt")
           case "!=" =>
             val cmp = newReg()
-            emit(s"  $cmp = icmp ne i64 $l, $r")
-            emit(s"  $result = zext i1 $cmp to i64")
+            emit(s"  $cmp = icmp ne $lt $l, $r")
+            emit(s"  $result = zext i1 $cmp to $lt")
           case "<" =>
             val cmp = newReg()
-            emit(s"  $cmp = icmp slt i64 $l, $r")
-            emit(s"  $result = zext i1 $cmp to i64")
+            emit(s"  $cmp = icmp slt $lt $l, $r")
+            emit(s"  $result = zext i1 $cmp to $lt")
           case ">" =>
             val cmp = newReg()
-            emit(s"  $cmp = icmp sgt i64 $l, $r")
-            emit(s"  $result = zext i1 $cmp to i64")
+            emit(s"  $cmp = icmp sgt $lt $l, $r")
+            emit(s"  $result = zext i1 $cmp to $lt")
           case "<=" =>
             val cmp = newReg()
-            emit(s"  $cmp = icmp sle i64 $l, $r")
-            emit(s"  $result = zext i1 $cmp to i64")
+            emit(s"  $cmp = icmp sle $lt $l, $r")
+            emit(s"  $result = zext i1 $cmp to $lt")
           case ">=" =>
             val cmp = newReg()
-            emit(s"  $cmp = icmp sge i64 $l, $r")
-            emit(s"  $result = zext i1 $cmp to i64")
+            emit(s"  $cmp = icmp sge $lt $l, $r")
+            emit(s"  $result = zext i1 $cmp to $lt")
           case "&&" =>
             val lBool = newReg()
             val rBool = newReg()
             val andResult = newReg()
-            emit(s"  $lBool = icmp ne i64 $l, 0")
-            emit(s"  $rBool = icmp ne i64 $r, 0")
+            emit(s"  $lBool = icmp ne $lt $l, 0")
+            emit(s"  $rBool = icmp ne $lt $r, 0")
             emit(s"  $andResult = and i1 $lBool, $rBool")
-            emit(s"  $result = zext i1 $andResult to i64")
+            emit(s"  $result = zext i1 $andResult to $lt")
           case "||" =>
             val lBool = newReg()
             val rBool = newReg()
             val orResult = newReg()
-            emit(s"  $lBool = icmp ne i64 $l, 0")
-            emit(s"  $rBool = icmp ne i64 $r, 0")
+            emit(s"  $lBool = icmp ne $lt $l, 0")
+            emit(s"  $rBool = icmp ne $lt $r, 0")
             emit(s"  $orResult = or i1 $lBool, $rBool")
-            emit(s"  $result = zext i1 $orResult to i64")
+            emit(s"  $result = zext i1 $orResult to $lt")
         result
 
       case TUnary("-", operand, _) =>
         val v = genExpr(operand)
+        val vt = exprType(operand)
         val result = newReg()
-        emit(s"  $result = sub i64 0, $v")
+        emit(s"  $result = sub $vt 0, $v")
         result
 
       case TUnary("!", operand, _) =>
         val v = genExpr(operand)
+        val vt = exprType(operand)
         val cmp = newReg()
         val result = newReg()
-        emit(s"  $cmp = icmp eq i64 $v, 0")
-        emit(s"  $result = zext i1 $cmp to i64")
+        emit(s"  $cmp = icmp eq $vt $v, 0")
+        emit(s"  $result = zext i1 $cmp to $vt")
         result
 
       case TUnary("~", operand, _) =>
         val v = genExpr(operand)
+        val vt = exprType(operand)
         val result = newReg()
-        emit(s"  $result = xor i64 $v, -1")
+        emit(s"  $result = xor $vt $v, -1")
         result
 
       case TCall("putchar", List(arg), _) =>
         val v = genExpr(arg)
-        val truncated = newReg()
+        val vt = exprType(arg)
+        val truncated = if vt != "i32" then
+          val tr = newReg()
+          emit(s"  $tr = trunc $vt $v to i32")
+          tr
+        else v
         val result = newReg()
-        emit(s"  $truncated = trunc i64 $v to i32")
         emit(s"  $result = call i32 @putchar(i32 $truncated)")
         val ext = newReg()
-        emit(s"  $ext = sext i32 $result to i64")
+        emit(s"  $ext = sext i32 $result to $t")
         ext
 
       case TCall("print", List(arg), _) =>
         val v = genExpr(arg)
+        val vt = exprType(arg)
         val result = newReg()
-        emit(s"""  $result = call i32 (i8*, ...) @printf(i8* getelementptr ([4 x i8], [4 x i8]* @.fmt_d, i32 0, i32 0), i64 $v)""")
+        emit(s"""  $result = call i32 (i8*, ...) @printf(i8* getelementptr ([4 x i8], [4 x i8]* @.fmt_d, i32 0, i32 0), $vt $v)""")
         "0"
 
       case TCall("println", List(arg), _) =>
         val v = genExpr(arg)
+        val vt = exprType(arg)
         val result = newReg()
-        emit(s"""  $result = call i32 (i8*, ...) @printf(i8* getelementptr ([5 x i8], [5 x i8]* @.fmt_dn, i32 0, i32 0), i64 $v)""")
+        emit(s"""  $result = call i32 (i8*, ...) @printf(i8* getelementptr ([5 x i8], [5 x i8]* @.fmt_dn, i32 0, i32 0), $vt $v)""")
         "0"
 
       case TCall(name, args, _) =>
-        val argVals = args.map(genExpr)
-        val argStr = argVals.map(v => s"i64 $v").mkString(", ")
+        val argVals = args.map(a => (genExpr(a), exprType(a)))
+        val argStr = argVals.map((v, vt) => s"$vt $v").mkString(", ")
         val retType = llvmType(expr.typ)
         if retType == "void" then
           emit(s"  call void @$name($argStr)")
@@ -270,10 +322,11 @@ class SyslLLVMCodegen:
           emit(s"  $result = call $retType @$name($argStr)")
           result
 
-      case TIfExpr(cond, thenBody, elseBody, _) =>
+      case TIfExpr(cond, thenBody, elseBody, typ) =>
         val c = genExpr(cond)
+        val ct = exprType(cond)
         val cBool = newReg()
-        emit(s"  $cBool = icmp ne i64 $c, 0")
+        emit(s"  $cBool = icmp ne $ct $c, 0")
         val thenLabel = newLabel("then")
         val elseLabel = newLabel("else")
         val mergeLabel = newLabel("merge")
@@ -290,10 +343,7 @@ class SyslLLVMCodegen:
             case Some(other) => genStmt(other)
             case None =>
         val thenReturned = hasReturned
-        val thenExitLabel = if !thenReturned then
-          emit(s"  br label %$mergeLabel")
-          thenLabel + "_exit"
-        else thenLabel
+        if !thenReturned then emit(s"  br label %$mergeLabel")
         hasReturned = savedHasReturned
 
         emit(s"$elseLabel:")
@@ -314,7 +364,7 @@ class SyslLLVMCodegen:
         emit(s"$mergeLabel:")
         if !thenReturned && !elseReturned then
           val phi = newReg()
-          emit(s"  $phi = phi i64 [ $thenVal, %$thenLabel ], [ $elseVal, %$elseLabel ]")
+          emit(s"  $phi = phi $t [ $thenVal, %$thenLabel ], [ $elseVal, %$elseLabel ]")
           phi
         else "0"
 
@@ -323,13 +373,10 @@ class SyslLLVMCodegen:
         "0"
 
   private def llvmType(t: SyslType): String = t match
-    case SyslType.IntType(64) => "i64"
-    case SyslType.IntType(32) => "i32"
-    case SyslType.IntType(16) => "i16"
-    case SyslType.IntType(8) => "i8"
-    case _: SyslType.IntType => "i64"
-    case SyslType.BoolType => "i64"
+    case SyslType.IntType(w) => s"i$w"
+    case SyslType.BoolType => "i8"
     case SyslType.VoidType => "void"
+    case SyslType.PtrType(_) => "i64"
     case _ => "i64"
 
   private def emit(line: String): Unit =
