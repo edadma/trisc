@@ -36,11 +36,104 @@ class SyslTriscCodegen(addresses: Int = 2):
 
     out.toString
 
-  private case class LocalVar(name: String, offset: Int)
+  private case class LocalVar(name: String, offset: Int, typ: SyslType)
 
   private var locals: mutable.LinkedHashMap[String, LocalVar] = null
   private var stackOffset: Int = 0
   private var currentFunction: TFunDecl = null
+
+  // Size of a type on the stack in bytes, rounded up to alignment
+  private def stackSize(typ: SyslType): Int =
+    val raw = typ.sizeOf.toInt
+    val align = stackAlign(typ)
+    ((raw + align - 1) / align) * align
+
+  // Natural alignment for a type
+  private def stackAlign(typ: SyslType): Int = typ match
+    case SyslType.IntType(w) => (w / 8).min(8)
+    case SyslType.BoolType => 1
+    case SyslType.PtrType(_) => 8
+    case SyslType.FuncType(_, _) => 8
+    case SyslType.ArrayType(elem, _) => stackAlign(elem)
+    case SyslType.StructType(_, fields) => if fields.isEmpty then 1 else fields.map(f => stackAlign(f._2)).max
+    case _ => 8
+
+  // Emit load from [rBase + 0] into rDest, using width-appropriate instruction
+  private def emitLoad(destReg: Int, addrReg: Int, typ: SyslType): Unit =
+    typ match
+      case SyslType.IntType(8) | SyslType.BoolType =>
+        emit(s"  ldb r$destReg, r$addrReg, r0")
+        emit(s"  ldi r2, 8")
+        emit(s"  sext r$destReg, r2")
+      case SyslType.IntType(16) =>
+        emit(s"  lds r$destReg, r$addrReg, r0")
+        emit(s"  ldi r2, 16")
+        emit(s"  sext r$destReg, r2")
+      case SyslType.IntType(32) =>
+        emit(s"  ldw r$destReg, r$addrReg, r0")
+        emit(s"  ldi r2, 32")
+        emit(s"  sext r$destReg, r2")
+      case _ =>
+        emit(s"  ldd r$destReg, r$addrReg, r0")
+
+  // Emit store from rSrc to [rBase + 0], using width-appropriate instruction
+  private def emitStore(srcReg: Int, addrReg: Int, typ: SyslType): Unit =
+    typ match
+      case SyslType.IntType(8) | SyslType.BoolType =>
+        emit(s"  stb r$srcReg, r$addrReg, r0")
+      case SyslType.IntType(16) =>
+        emit(s"  sts r$srcReg, r$addrReg, r0")
+      case SyslType.IntType(32) =>
+        emit(s"  stw r$srcReg, r$addrReg, r0")
+      case _ =>
+        emit(s"  std r$srcReg, r$addrReg, r0")
+
+  // Emit push r1 with type-appropriate width
+  private def emitPush(typ: SyslType): Unit =
+    val size = stackSize(typ)
+    typ match
+      case SyslType.IntType(8) | SyslType.BoolType =>
+        emit("  pshb r1")
+      case SyslType.IntType(16) =>
+        emit("  pshs r1")
+      case SyslType.IntType(32) =>
+        emit("  pshw r1")
+      case _ =>
+        emit("  pshd r1")
+
+  // Emit pop into r1 with type-appropriate width + sign extend
+  private def emitPop(reg: Int, typ: SyslType): Unit =
+    typ match
+      case SyslType.IntType(8) | SyslType.BoolType =>
+        emit(s"  popb r$reg")
+        emit(s"  ldi r2, 8")
+        emit(s"  sext r$reg, r2")
+      case SyslType.IntType(16) =>
+        emit(s"  pops r$reg")
+        emit(s"  ldi r2, 16")
+        emit(s"  sext r$reg, r2")
+      case SyslType.IntType(32) =>
+        emit(s"  popw r$reg")
+        emit(s"  ldi r2, 32")
+        emit(s"  sext r$reg, r2")
+      case _ =>
+        emit(s"  popd r$reg")
+
+  // Allocate a local variable on the stack, return its offset from fp
+  // Emits code to grow the stack pointer
+  private def allocLocal(name: String, typ: SyslType): LocalVar =
+    val size = stackSize(typ)
+    val align = stackAlign(typ)
+    val oldOffset = stackOffset
+    // Align the stack offset downward
+    stackOffset -= size
+    stackOffset = stackOffset & ~(align - 1) // align down
+    // Grow the stack by the difference
+    val growth = oldOffset - stackOffset
+    emitAddImm(7, 7, -growth)
+    val local = LocalVar(name, stackOffset, typ)
+    locals(name) = local
+    local
 
   private def genFunction(fun: TFunDecl): Unit =
     currentFunction = fun
@@ -55,16 +148,19 @@ class SyslTriscCodegen(addresses: Int = 2):
     emit("  pshd r5")       // save frame pointer
     emit("  mov r5, r7")    // frame pointer = stack pointer
 
-    // First param comes in r1, push to local frame
+    // First param comes in r1, push to local frame with proper width
     // Remaining params were pushed by caller above our frame
     if fun.params.nonEmpty then
-      stackOffset -= 8
-      locals(fun.params.head.name) = LocalVar(fun.params.head.name, stackOffset)
-      emit("  pshd r1")
-    // Stack args (params 1+) are above saved lr/fp: fp+16, fp+24, ...
+      val p = fun.params.head
+      val local = allocLocal(p.name, p.typ)
+      emitAddImm(2, 5, local.offset)
+      emitStore(1, 2, p.typ)
+    // Stack args (params 1+) are above saved lr/fp
+    // Caller pushed them with proper widths, calculate offsets
+    var callerArgOffset = 16 // start above saved lr(8) + fp(8)
     for (param, i) <- fun.params.zipWithIndex.drop(1) do
-      val callerOffset = 16 + (i - 1) * 8 // above saved lr(+8) and fp(+8)
-      locals(param.name) = LocalVar(param.name, callerOffset)
+      locals(param.name) = LocalVar(param.name, callerArgOffset, param.typ)
+      callerArgOffset += stackSize(param.typ)
 
     // Generate body
     fun.body match
@@ -124,38 +220,39 @@ class SyslTriscCodegen(addresses: Int = 2):
 
   private def genStmt(stmt: TStmt): Unit =
     stmt match
-      case TVarStmt(name, _, init) =>
+      case TVarStmt(name, typ, init) =>
         genExpr(init) // result in r1
-        stackOffset -= 8
-        locals(name) = LocalVar(name, stackOffset)
-        emit("  pshd r1") // push to stack
+        val local = allocLocal(name, typ)
+        emitAddImm(2, 5, local.offset)
+        emitStore(1, 2, typ)
 
       case TAssignStmt(target, value) =>
         genExpr(value) // result in r1
-        if locals.contains(target) then
-          val local = locals(target)
-          emitAddImm(2, 5, local.offset)
-          emit(s"  std r1, r2, r0")
-        else
-          // New local variable (first assignment = declaration)
-          stackOffset -= 8
-          locals(target) = LocalVar(target, stackOffset)
-          emit("  pshd r1")
-
-      case TCompoundAssignStmt(target, op, value) =>
-        genExpr(value) // r1 = right operand
-        emit("  pshd r1")
         if locals != null && locals.contains(target) then
           val local = locals(target)
           emitAddImm(2, 5, local.offset)
-          emit(s"  ldd r1, r2, r0")
+          emitStore(1, 2, local.typ)
+        else
+          // New local variable (first assignment = declaration, infer type)
+          val typ = value.typ
+          val local = allocLocal(target, typ)
+          emitAddImm(2, 5, local.offset)
+          emitStore(1, 2, typ)
+
+      case TCompoundAssignStmt(target, op, value) =>
+        genExpr(value) // r1 = right operand
+        emit("  pshd r1") // always save as 64-bit temp
+        if locals != null && locals.contains(target) then
+          val local = locals(target)
+          emitAddImm(2, 5, local.offset)
+          emitLoad(1, 2, local.typ)
           emit("  popd r3")
           emitBinOp(op)
           emitAddImm(2, 5, local.offset)
-          emit(s"  std r1, r2, r0")
+          emitStore(1, 2, local.typ)
         else
           emit(s"  movi r2, $target")
-          emit(s"  ldd r1, r2, r0")
+          emit(s"  ldd r1, r2, r0") // globals are always 64-bit for now
           emit("  popd r3")
           emitBinOp(op)
           emit(s"  movi r2, $target")
@@ -230,25 +327,31 @@ class SyslTriscCodegen(addresses: Int = 2):
 
       case TDerefAssignStmt(pointer, value) =>
         genExpr(value)           // r1 = value to store
-        emit("  pshd r1")
+        emit("  pshd r1")       // save as 64-bit temp
         genExpr(pointer)         // r1 = address
         emit("  popd r2")        // r2 = value
-        // TODO: use width-appropriate stb/sts/stw when packed memory
-        // layouts are implemented. Currently all values are 64-bit on stack.
-        emit("  std r2, r1, r0")
+        // Store with width matching pointee type
+        pointer.typ match
+          case SyslType.PtrType(pointee) => emitStore(2, 1, pointee)
+          case _ => emit("  std r2, r1, r0")
 
       case TIndexAssignStmt(array, index, value) =>
+        val elemType = array.typ match
+          case SyslType.ArrayType(e, _) => e
+          case SyslType.PtrType(e) => e
+          case _ => SyslType.I64
+        val elemSize = stackSize(elemType)
         genExpr(value)           // r1 = value
-        emit("  pshd r1")
+        emit("  pshd r1")       // save as 64-bit temp
         genExpr(index)           // r1 = index
         emit("  pshd r1")
         genExpr(array)           // r1 = array base address
         emit("  popd r2")        // r2 = index
-        emit("  ldi r3, 8")
-        emit("  mul r2, r2, r3") // r2 = index * 8 (element size)
+        emit(s"  ldi r3, $elemSize")
+        emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = base + offset
         emit("  popd r2")        // r2 = value
-        emit("  std r2, r1, r0") // store value at computed address
+        emitStore(2, 1, elemType)
 
       case _ =>
         emit(s"  # TODO: ${stmt.getClass.getSimpleName}")
@@ -269,10 +372,10 @@ class SyslTriscCodegen(addresses: Int = 2):
         if locals != null && locals.contains(name) then
           val local = locals(name)
           emitAddImm(2, 5, local.offset)
-          emit(s"  ldd r1, r2, r0")
+          emitLoad(1, 2, local.typ)
         else
           emit(s"  movi r1, $name")
-          emit(s"  ldd r1, r1, r0")
+          emit(s"  ldd r1, r1, r0") // globals are 64-bit for now
 
       case TBinary(left, "&&", right, _) =>
         val falseLabel = newLabel("and_false")
@@ -302,10 +405,14 @@ class SyslTriscCodegen(addresses: Int = 2):
 
       case TBinary(left, op @ ("+" | "-"), right, _) if left.typ.isPointerLike =>
         // Pointer arithmetic: ptr + int → ptr (scale by element size)
+        val elemSize = left.typ match
+          case SyslType.PtrType(e) => stackSize(e)
+          case SyslType.ArrayType(e, _) => stackSize(e)
+          case _ => 8
         genExpr(left)        // r1 = pointer
         emit("  pshd r1")
         genExpr(right)       // r1 = integer offset
-        emit("  ldi r3, 8")
+        emit(s"  ldi r3, $elemSize")
         emit("  mul r1, r1, r3") // scale by element size
         emit("  popd r2")   // r2 = pointer
         if op == "+" then emit("  add r1, r2, r1")
@@ -362,40 +469,40 @@ class SyslTriscCodegen(addresses: Int = 2):
             emit("  xor r1, r1, r3") // flip
 
       case TPreInc(name, typ) =>
-        val step = if typ.isPointerLike then 8 else 1
+        val step = if typ.isPointerLike then stackSize(typ).max(1) else 1
         val local = locals(name)
         emitAddImm(2, 5, local.offset)
-        emit(s"  ldd r1, r2, r0")
+        emitLoad(1, 2, local.typ)
         emit(s"  addi r1, r1, $step")
         emitAddImm(2, 5, local.offset)
-        emit(s"  std r1, r2, r0")
+        emitStore(1, 2, local.typ)
 
       case TPreDec(name, typ) =>
-        val step = if typ.isPointerLike then 8 else 1
+        val step = if typ.isPointerLike then stackSize(typ).max(1) else 1
         val local = locals(name)
         emitAddImm(2, 5, local.offset)
-        emit(s"  ldd r1, r2, r0")
+        emitLoad(1, 2, local.typ)
         emit(s"  addi r1, r1, -$step")
         emitAddImm(2, 5, local.offset)
-        emit(s"  std r1, r2, r0")
+        emitStore(1, 2, local.typ)
 
       case TPostInc(name, typ) =>
-        val step = if typ.isPointerLike then 8 else 1
+        val step = if typ.isPointerLike then stackSize(typ).max(1) else 1
         val local = locals(name)
         emitAddImm(2, 5, local.offset)
-        emit(s"  ldd r1, r2, r0")
+        emitLoad(1, 2, local.typ)
         emit(s"  addi r3, r1, $step")
         emitAddImm(2, 5, local.offset)
-        emit(s"  std r3, r2, r0")
+        emitStore(3, 2, local.typ)
 
       case TPostDec(name, typ) =>
-        val step = if typ.isPointerLike then 8 else 1
+        val step = if typ.isPointerLike then stackSize(typ).max(1) else 1
         val local = locals(name)
         emitAddImm(2, 5, local.offset)
-        emit(s"  ldd r1, r2, r0")
+        emitLoad(1, 2, local.typ)
         emit(s"  addi r3, r1, -$step")
         emitAddImm(2, 5, local.offset)
-        emit(s"  std r3, r2, r0")
+        emitStore(3, 2, local.typ)
 
       case TCast(inner, target) =>
         genExpr(inner)
@@ -482,36 +589,39 @@ class SyslTriscCodegen(addresses: Int = 2):
         // Compute stack address of local variable
         emitLocalAddr(name, 1) // r1 = address of variable
 
-      case TAddrOfIndex(array, index, _) =>
+      case TAddrOfIndex(array, index, SyslType.PtrType(elemType)) =>
+        val elemSize = stackSize(elemType)
         genExpr(index)           // r1 = index
         emit("  pshd r1")
         genExpr(array)           // r1 = array base address
         emit("  popd r2")        // r2 = index
-        emit("  ldi r3, 8")
-        emit("  mul r2, r2, r3") // r2 = index * 8
+        emit(s"  ldi r3, $elemSize")
+        emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = base + offset
 
-      case TDeref(inner, _) =>
+      case TDeref(inner, typ) =>
         genExpr(inner)           // r1 = pointer address
-        // TODO: use width-appropriate ldb/lds/ldw + sext when packed memory
-        // layouts are implemented. Currently all values are 64-bit on stack.
-        emit("  ldd r1, r1, r0")
+        emitLoad(1, 1, typ)      // load with width matching pointee type
 
-      case TIndex(array, index, _) =>
+      case TIndex(array, index, elemType) =>
+        val elemSize = stackSize(elemType)
         genExpr(index)           // r1 = index
         emit("  pshd r1")
         genExpr(array)           // r1 = array base address
         emit("  popd r2")        // r2 = index
-        emit("  ldi r3, 8")
-        emit("  mul r2, r2, r3") // r2 = index * 8
+        emit(s"  ldi r3, $elemSize")
+        emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = element address
-        emit("  ldd r1, r1, r0") // r1 = value at element
+        emitLoad(1, 1, elemType) // load with proper width
 
-      case TArrayDecl(size, _, _) =>
-        // Allocate array on stack: size * 8 bytes
-        val totalBytes = size * 8
-        emitAddImm(7, 7, -totalBytes) // grow stack
-        emit("  mov r1, r7")                  // r1 = address of array start
+      case TArrayDecl(size, elemTypStr, typ) =>
+        // Allocate array on stack with proper element size
+        val elemType = typ match
+          case SyslType.ArrayType(e, _) => e
+          case _ => SyslType.I64
+        val totalBytes = size * stackSize(elemType)
+        emitAddImm(7, 7, -totalBytes)
+        emit("  mov r1, r7")     // r1 = address of array start
         stackOffset -= totalBytes
 
       case TStringLit(value, _) =>
