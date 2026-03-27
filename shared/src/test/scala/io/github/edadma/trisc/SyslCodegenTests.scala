@@ -493,8 +493,12 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
         |""".stripMargin) shouldBe 42
   }
 
-  // 4-arg calls not yet supported: r4 used for function address
-  // "function with four args" is pending until ABI redesign
+  "function with four args" in {
+    compileAndRun(
+      """sum4(a: int, b: int, c: int, d: int) -> int = a + b + c + d
+        |main() -> int = sum4(10, 11, 12, 9)
+        |""".stripMargin) shouldBe 42
+  }
 
   // ===== Global variables =====
 

@@ -54,14 +54,16 @@ class SyslTriscCodegen(addresses: Int = 2):
     emit("  pshd r5")       // save frame pointer
     emit("  mov r5, r7")    // frame pointer = stack pointer
 
-    // Allocate space for parameters on the frame
-    // Parameters come in r1-r4, copy to stack
-    for (param, i) <- fun.params.zipWithIndex do
+    // First param comes in r1, push to local frame
+    // Remaining params were pushed by caller above our frame
+    if fun.params.nonEmpty then
       stackOffset -= 8
-      locals(param.name) = LocalVar(param.name, stackOffset)
-      if i < 4 then
-        emit(s"  pshd r${i + 1}")  // push param register to stack
-      // TODO: handle > 4 params from stack
+      locals(fun.params.head.name) = LocalVar(fun.params.head.name, stackOffset)
+      emit("  pshd r1")
+    // Stack args (params 1+) are above saved lr/fp: fp+16, fp+24, ...
+    for (param, i) <- fun.params.zipWithIndex.drop(1) do
+      val callerOffset = 16 + (i - 1) * 8 // above saved lr(+8) and fp(+8)
+      locals(param.name) = LocalVar(param.name, callerOffset)
 
     // Generate body
     fun.body match
@@ -414,18 +416,19 @@ class SyslTriscCodegen(addresses: Int = 2):
         emit("  not r1, r1")
 
       case TCall(name, args, _) =>
-        // Evaluate all args left to right, push to stack
-        for arg <- args do
+        // Push stack args (args 1+) right-to-left so arg[1] is at lowest addr
+        for arg <- args.drop(1).reverse do
           genExpr(arg)
           emit("  pshd r1")
-        // Pop args into registers (up to 4)
-        val regArgs = args.length.min(4)
-        for i <- (0 until regArgs).reverse do
-          emit(s"  popd r${i + 1}")
-        // r4 is used for function address; max 3 register args
-        // TODO: support 4+ args via stack passing
+        // First arg (if any) goes in r1
+        if args.nonEmpty then genExpr(args.head)
+        // Call
         emit(s"  movi r4, $name")
         emit("  jalr r6, r4")
+        // Clean up stack args
+        if args.length > 1 then
+          val stackArgBytes = (args.length - 1) * 8
+          emit(s"  addi r7, r7, $stackArgBytes")
 
       case TAddrOf(name, _) =>
         // Compute stack address of local variable
