@@ -140,14 +140,25 @@ object Linker:
       if !globalSymbols.contains(name) then
         throw LinkerError(s"entry point '$name' is not a defined symbol")
 
-    // Phase 6: produce output TOF
-    val outSegments = placed.map { seg =>
-      TOF.Segment(
-        seg.name,
-        seg.org,
-        Seq(TOF.DataChunk(seg.data.toSeq)),
-        seg.symbols.map(s => s.copy(offset = s.offset)),
-      )
+    // Phase 6: merge same-named segments into single contiguous segments.
+    // This is required because TOF serialize/deserialize uses segment name as key,
+    // so multiple segments with the same name would lose their distinct origins.
+    val mergedSegments = new mutable.LinkedHashMap[String, (Long, ArrayBuffer[Byte], ArrayBuffer[TOFSymbol])]
+    for seg <- placed do
+      mergedSegments.get(seg.name) match
+        case None =>
+          mergedSegments(seg.name) = (seg.org, ArrayBuffer.from(seg.data), ArrayBuffer.from(seg.symbols))
+        case Some((baseOrg, mergedData, mergedSyms)) =>
+          val dataOffset = (seg.org - baseOrg).toInt
+          // Pad if there's a gap between segments
+          while mergedData.length < dataOffset do mergedData += 0.toByte
+          mergedData ++= seg.data
+          // Adjust symbol offsets relative to merged segment start
+          for sym <- seg.symbols do
+            mergedSyms += sym.copy(offset = sym.offset + dataOffset)
+
+    val outSegments = mergedSegments.map { case (name, (segOrg, data, syms)) =>
+      TOF.Segment(name, segOrg, Seq(TOF.DataChunk(data.toSeq)), syms.toSeq)
     }.toSeq
 
     TOF(entry, outSegments)

@@ -124,11 +124,12 @@ class AssemblerTests extends TestHelpers {
     seg.relocs.head.symbol shouldBe "handler"
   }
 
-  "relocatable mode resolves local references normally" in {
+  "relocatable mode defers local absolute references to linker" in {
     val tof = assemble("main\n  movi r1, main\n  halt\n", relocatable = true)
     val seg = tof.segments.head
-    seg.externs shouldBe empty
-    seg.relocs shouldBe empty
+    // Local movi generates a relocation so the linker can adjust the address
+    seg.relocs should not be empty
+    seg.relocs.head.symbol shouldBe "main"
   }
 
   "relocatable TOF round-trips through serialize/deserialize" in {

@@ -161,9 +161,10 @@ class LinkerTests extends TestHelpers {
     val b = assemble("ldi r2, 2\nhalt\n", relocatable = true)
 
     val linked = Linker.link(Seq(a, b), baseAddress = 0x100)
+    // Same-named segments get merged; check data contains both
     linked.segments(0).org shouldBe 0x100
-    // first segment is 4 bytes (ldi=2 + halt=2)
-    linked.segments(1).org shouldBe 0x104
+    val data = linked.segments(0).chunks.head.asInstanceOf[TOF.DataChunk].data
+    data.length shouldBe 8 // 4 bytes from a + 4 bytes from b
   }
 
   "segment with explicit org keeps its origin" in {
@@ -248,5 +249,103 @@ class LinkerTests extends TestHelpers {
     val s = linked.serialize
     val reloaded = TOF.deserialize(s)
     reloaded.serialize shouldBe s
+  }
+
+  // ===== Multi-segment round-trip (boot + code) =====
+
+  "linked multi-segment TOF round-trips correctly" in {
+    val boot = assemble(
+      s"""extern main
+         |  dl ${Runtime.initialSSP}
+         |  dl main
+         |""".stripMargin, relocatable = true)
+    val code = assemble(
+      """entry main
+        |main
+        |  ldi r1, 42
+        |  halt
+        |""".stripMargin, relocatable = true)
+
+    val linked = Linker.link(Seq(boot, code))
+    val s = linked.serialize
+    val reloaded = TOF.deserialize(s)
+
+    // Load and run the reloaded TOF
+    val mem = new Memory("Memory", new RAM(0, 0x1000))
+    reloaded.load(mem)
+    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    cpu.reset()
+    cpu.run()
+    cpu.r(1).read shouldBe 42
+  }
+
+  "movi reloc is applied before merge" in {
+    val boot = assemble(
+      s"""extern main
+         |  dl ${Runtime.initialSSP}
+         |  dl main
+         |""".stripMargin, relocatable = true)
+    val code = assemble(
+      """entry main
+        |target
+        |  ldi r1, 42
+        |  halt
+        |main
+        |  movi r1, target
+        |  halt
+        |""".stripMargin, relocatable = true)
+
+    val linked = Linker.link(Seq(boot, code))
+
+    // Load into memory and check that movi was patched
+    val mem = new Memory("Memory", new RAM(0, 0x1000))
+    linked.load(mem)
+
+    // target is at offset 0 in user segment, which is placed at 0x10
+    // So target absolute address = 0x10
+    // main is at offset 4 in user segment = 0x14
+    // movi r1, target starts at 0x14
+    // After patching: first instr byte 1 should be 0x00, second instr byte 1 should be 0x10
+    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    cpu.reset()
+    cpu.run()
+    cpu.r(1).read shouldBe 0x10 // r1 = address of target
+  }
+
+  "linked multi-segment TOF with function call round-trips correctly" in {
+    // Use the real sysl pipeline: parse, analyze, codegen, assemble, link with runtime
+    val parser = new SyslParser
+    val Right(ast) = parser.parseProgram(
+      """twice(x: int) -> int = x * 2
+        |main() -> int = twice(21)
+        |""".stripMargin): @unchecked
+    val analyzer = new SyslAnalyzer
+    val typed = analyzer.analyze(ast)
+    val codegen = new SyslTriscCodegen
+    val asm = codegen.generate(typed)
+    val userTof = assemble(asm, relocatable = true)
+    val linked = Linker.link(Seq(Runtime.bootTof, userTof, Runtime.ioTof))
+
+    // Verify it works before round-trip
+    val stdout1 = new Stdout(Runtime.stdoutAddress)
+    val ram1 = new RAM(0, Runtime.stdoutAddress.toInt)
+    val mem1 = new Memory("Memory", ram1, stdout1)
+    linked.load(mem1)
+    val cpu1 = new CPU(mem1, Nil) { limit = 100000 }
+    cpu1.reset()
+    cpu1.run()
+    cpu1.r(1).read shouldBe 42
+
+    // Now round-trip through serialize/deserialize
+    val s = linked.serialize
+    val reloaded = TOF.deserialize(s)
+    val stdout2 = new Stdout(Runtime.stdoutAddress)
+    val ram2 = new RAM(0, Runtime.stdoutAddress.toInt)
+    val mem2 = new Memory("Memory", ram2, stdout2)
+    reloaded.load(mem2)
+    val cpu2 = new CPU(mem2, Nil) { limit = 100000 }
+    cpu2.reset()
+    cpu2.run()
+    cpu2.r(1).read shouldBe 42
   }
 }
