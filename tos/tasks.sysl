@@ -1,0 +1,72 @@
+# ============================================================================
+# TOS — User tasks (Sysl)
+# ============================================================================
+#
+# Simple user-mode threads that demonstrate preemptive multitasking.
+# Each task runs in user mode with its own stack.
+# The timer interrupt preempts them transparently.
+#
+# Stdout device: write a byte to 0xFFE0 to print a character.
+#
+# ============================================================================
+
+# Stdout device address
+val STDOUT = 0xFFE0
+
+
+# ============================================================================
+# putc — write a single character to stdout
+# ============================================================================
+
+putc(ch: int)
+    val p: *byte = STDOUT
+    *p = byte(ch)
+
+
+# ============================================================================
+# Task A — prints "AAAA..." with a delay between each
+# ============================================================================
+
+task_a()
+    while true
+        putc(65)
+        delay(500)
+
+
+# ============================================================================
+# Task B — prints "BBBB..." with a delay between each
+# ============================================================================
+
+task_b()
+    while true
+        putc(66)
+        delay(500)
+
+
+# ============================================================================
+# delay — busy wait loop
+# ============================================================================
+#
+# The exact timing depends on CPU speed, but this gives the timer
+# interrupt a chance to fire and preempt the task.
+#
+# ============================================================================
+
+delay(n: int)
+    var i = 0
+    while i < n
+        i += 1
+
+
+# ============================================================================
+# idle_task — runs when no other thread is ready
+# ============================================================================
+#
+# In a real RTOS this would use WFI to halt the CPU until the next
+# interrupt, saving power. For now it just spins.
+#
+# ============================================================================
+
+idle_task()
+    while true
+        delay(1)
