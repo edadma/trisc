@@ -1,229 +1,138 @@
 package io.github.edadma.trisc
 
-import scala.util.parsing.combinator.{ImplicitConversions, PackratParsers}
-import scala.util.parsing.combinator.lexical.StdLexical
-import scala.util.parsing.combinator.syntactical.StandardTokenParsers
-import scala.util.parsing.input.CharSequenceReader
+import scala.util.parsing.combinator.RegexParsers
 
-object AssemblyParser extends StandardTokenParsers with PackratParsers with ImplicitConversions:
-  override val lexical = new AssemblyLexer
+object AssemblyParser extends RegexParsers:
+  // Skip spaces, tabs, and ; comments, but NOT newlines (they delimit lines)
+  override val whiteSpace = "([ \t]|;[^\n]*)+".r
 
   def parseExpression(input: String): ExprAST =
-    phrase(expression)(new lexical.Scanner(new PackratReader(new CharSequenceReader(input)))) match {
+    parseAll(expression, input) match
       case Success(ast, _) => ast
       case e: NoSuccess    => sys.error(s"parse error: $e")
-    }
 
   def parseAssembly(input: String): Seq[LineAST] =
-    phrase(assembly)(new lexical.Scanner(new PackratReader(new CharSequenceReader(input)))) match {
+    parseAll(assembly, input) match
       case Success(ast, _) => ast
       case e: NoSuccess    => sys.error(s"parse error: $e")
-    }
 
-  lexical.reserved ++= ("""
-                          |align
-                          |equ
-                          |segment
-                          |include
-                          |db
-                          |dd
-                          |dl
-                          |ds
-                          |dw
-                          |r0
-                          |r1
-                          |r2
-                          |r3
-                          |r4
-                          |r5
-                          |r6
-                          |r7
-                          |sp
-                          |adc
-                          |add
-                          |addi
-                          |and
-                          |asr
-                          |auipc
-                          |bclr
-                          |beq
-                          |bge
-                          |bgeu
-                          |bgt
-                          |bgu
-                          |ble
-                          |bleu
-                          |bls
-                          |blu
-                          |bne
-                          |bra
-                          |bset
-                          |btst
-                          |chk
-                          |cli
-                          |clz
-                          |cnt
-                          |ctz
-                          |cvt
-                          |div
-                          |divu
-                          |entry
-                          |exg
-                          |extern
-                          |fabs
-                          |fence
-                          |fadd
-                          |fdiv
-                          |fint
-                          |finv
-                          |fmul
-                          |fneg
-                          |fpow
-                          |fseq
-                          |fslt
-                          |fsqrt
-                          |fsub
-                          |global
-                          |gpsr
-                          |gusp
-                          |halt
-                          |jalr
-                          |ld
-                          |ldb
-                          |ldd
-                          |ldi
-                          |lds
-                          |ll
-                          |ldw
-                          |max
-                          |min
-                          |lsl
-                          |lsr
-                          |mov
-                          |movi
-                          |mul
-                          |mulu
-                          |neg
-                          |nop
-                          |not
-                          |or
-                          |popb
-                          |popd
-                          |popr
-                          |pops
-                          |popw
-                          |pshb
-                          |pshd
-                          |pshr
-                          |pshs
-                          |pshw
-                          |resb
-                          |resd
-                          |resl
-                          |ress
-                          |resw
-                          |rem
-                          |remu
-                          |ret
-                          |rev
-                          |rol
-                          |ror
-                          |rte
-                          |sbc
-                          |sc
-                          |seb
-                          |ses
-                          |sew
-                          |sext
-                          |sli
-                          |slt
-                          |sltu
-                          |spsr
-                          |st
-                          |stb
-                          |std
-                          |sti
-                          |sts
-                          |stw
-                          |sub
-                          |susp
-                          |swsp
-                          |trap
-                          |trapv
-                          |tsr
-                          |wfi
-                          |xor
-                          |zeb
-                          |zes
-                          |zew
-                          |""".trim.stripMargin.split("\\s+"))
-  lexical.delimiters ++= ("+ - * / % ( ) : , = . \n" split ' ')
+  // Newlines (one or more)
+  private val nl: Parser[Any] = rep1("\n")
+  private val optNl: Parser[Any] = rep("\n")
 
-  type P[+T] = PackratParser[T]
+  private lazy val assembly: Parser[Seq[LineAST]] = optNl ~> repsep(line, nl) <~ optNl ^^ (_.flatten)
 
-  lazy val nl: P[?] = rep("\n")
+  // --- Tokens ---
 
-  lazy val assembly: P[Seq[LineAST]] = nl ~> repsep(line, nl) <~ nl ^^ (_.flatten)
+  private val ident: Parser[String] = "[a-zA-Z_][a-zA-Z0-9_]*".r
 
-  lazy val register: P[RegisterExprAST] =
-    "r0" ^^^ RegisterExprAST(0)
-      | "r1" ^^^ RegisterExprAST(1)
-      | "r2" ^^^ RegisterExprAST(2)
-      | "r3" ^^^ RegisterExprAST(3)
-      | "r4" ^^^ RegisterExprAST(4)
-      | "r5" ^^^ RegisterExprAST(5)
-      | "r6" ^^^ RegisterExprAST(6)
-      | "r7" ^^^ RegisterExprAST(7)
+  private val hexLit: Parser[String] = "0[xX][0-9a-fA-F]+".r
 
-  lazy val literal: P[ExprAST] = numericLit ^^ { n =>
-    if n.startsWith("0x") then LongExprAST(java.lang.Long.parseLong(n.drop(2), 16))
-    else if n.contains('.') || n.contains('e') || n.contains('E') then DoubleExprAST(n.toDouble)
-    else LongExprAST(n.toLong)
-  }
+  private val floatLit: Parser[String] = "[0-9]+\\.[0-9]+([eE][+-]?[0-9]+)?".r | "[0-9]+[eE][+-]?[0-9]+".r
 
-  lazy val string: P[StringExprAST] = stringLit ^^ StringExprAST.apply
+  private val intLit: Parser[String] = "[0-9]+".r
 
-  lazy val reference: P[ReferenceExprAST] = ident ^^ ReferenceExprAST.apply
+  private def escape: Parser[Char] =
+    "\\" ~> (
+      "n" ^^^ '\n'
+      | "r" ^^^ '\r'
+      | "t" ^^^ '\t'
+      | "b" ^^^ '\b'
+      | "f" ^^^ '\f'
+      | "0" ^^^ '\u0000'
+      | "\\" ^^^ '\\'
+      | "'" ^^^ '\''
+      | "\"" ^^^ '"'
+      | "x" ~> "[0-9a-fA-F]{2}".r ^^ (s => Integer.parseInt(s, 16).toChar)
+      | "u" ~> "[0-9a-fA-F]{4}".r ^^ (s => Integer.parseInt(s, 16).toChar)
+    )
 
-  lazy val localReference: P[LocalExprAST] = "." ~> ident ^^ (l => LocalExprAST(l, null))
+  private val stringLit: Parser[String] =
+    "\"" ~> rep(escape | "[^\"\\\\\\n]".r ^^ (_.charAt(0))) <~ "\"" ^^ (_.mkString)
 
-  lazy val primary: P[ExprAST] = positioned(
+  private val charLit: Parser[Long] =
+    "'" ~> (escape | "[^'\\\\\\n]".r ^^ (_.charAt(0))) <~ "'" ^^ (_.toLong)
+
+  // --- Registers ---
+
+  private val register: Parser[RegisterExprAST] =
+    "\\br[0-7]\\b".r ^^ (s => RegisterExprAST(s.charAt(1) - '0'))
+    | kw("sp") ^^^ RegisterExprAST(7)
+
+  // --- Expressions ---
+
+  private lazy val primary: Parser[ExprAST] =
     register
-      | literal
-      | string
-      | reference
-      | localReference,
+    | hexLit ^^ (s => LongExprAST(java.lang.Long.parseLong(s.drop(2), 16)))
+    | floatLit ^^ (s => DoubleExprAST(s.toDouble))
+    | charLit ^^ (n => LongExprAST(n))
+    | intLit ^^ (s => LongExprAST(s.toLong))
+    | stringLit ^^ StringExprAST.apply
+    | "." ~> ident ^^ (l => LocalExprAST(l, null))
+    | ident ^^ ReferenceExprAST.apply
+    | "(" ~> expression <~ ")"
+
+  private lazy val unary: Parser[ExprAST] =
+    "-" ~> primary ^^ (e => UnaryExprAST("-", e))
+    | primary
+
+  private lazy val expression: Parser[ExprAST] = unary
+
+  // --- Mnemonics ---
+
+  private val mnemonicSet = Set(
+    "adc", "add", "addi", "and", "asr", "auipc",
+    "bclr", "beq", "bge", "bgeu", "bgt", "bgu", "ble", "bleu", "bls", "blu", "bne", "bra", "bset", "btst",
+    "chk", "cli", "clz", "cnt", "ctz", "cvt",
+    "div", "divu",
+    "exg",
+    "fabs", "fadd", "fdiv", "fence", "fint", "finv", "fmul", "fneg", "fpow", "fseq", "fslt", "fsqrt", "fsub",
+    "gpsr", "gusp",
+    "halt",
+    "jalr",
+    "ld", "ldb", "ldd", "ldi", "lds", "ldw", "ll", "lsl", "lsr",
+    "max", "min", "mov", "movi", "mul", "mulu",
+    "neg", "nop", "not",
+    "or",
+    "popb", "popd", "popr", "pops", "popw", "pshb", "pshd", "pshr", "pshs", "pshw",
+    "rem", "remu", "ret", "rev", "rol", "ror", "rte",
+    "sbc", "sc", "seb", "ses", "sew", "sext", "sli", "slt", "sltu", "spsr",
+    "st", "stb", "std", "sti", "sts", "stw", "sub", "susp", "swsp",
+    "trap", "trapv", "tsr",
+    "wfi",
+    "xor",
+    "zeb", "zes", "zew",
   )
 
-  lazy val expression: P[ExprAST] = positioned(
-    "-" ~ primary ^^ UnaryExprAST.apply
-      | primary,
-  )
+  private val mnemonic: Parser[String] = ident.filter(mnemonicSet.contains) withFailureMessage "expected mnemonic"
 
-  lazy val label: P[LabelLineAST] = ident <~ opt(":") ^^ LabelLineAST.apply
+  private val instruction: Parser[InstructionLineAST] =
+    mnemonic ~ repsep(expression, ",") ^^ { case m ~ es => InstructionLineAST(m, es) }
 
-  lazy val local: P[LocalLineAST] = "." ~> ident <~ opt(":") ^^ LocalLineAST.apply
+  // --- Directives ---
 
-  lazy val segment: P[SegmentLineAST] = "segment" ~> ident ^^ SegmentLineAST.apply
+  private val directiveSet = Set("align", "db", "dd", "dl", "ds", "dw", "entry", "equ", "extern", "global", "include", "resb", "resd", "resl", "ress", "resw", "segment")
 
-  lazy val equate: P[EquateLineAST] = ident ~ (("equ" | "=") ~> expression) ^^ EquateLineAST.apply
+  private val segment: Parser[SegmentLineAST] = kw("segment") ~> ident ^^ SegmentLineAST.apply
 
-  lazy val include: P[IncludeLineAST] = "include" ~> stringLit ^^ IncludeLineAST.apply
+  private val equate: Parser[EquateLineAST] = (ident <~ (kw("equ") | "=")) ~ expression ^^ { case n ~ e => EquateLineAST(n, e) }
 
-  lazy val alignDir: P[AlignLineAST] = "align" ~> numericLit ^^ { n =>
-    val a = if n.startsWith("0x") then Integer.parseInt(n.drop(2), 16) else n.toInt
+  private val include: Parser[IncludeLineAST] = kw("include") ~> stringLit ^^ IncludeLineAST.apply
+
+  private val alignDir: Parser[AlignLineAST] = kw("align") ~> (hexLit | intLit) ^^ { n =>
+    val a = if n.startsWith("0x") || n.startsWith("0X") then Integer.parseInt(n.drop(2), 16) else n.toInt
     AlignLineAST(a)
   }
 
-  lazy val entryDecl: P[EntryLineAST] = "entry" ~> ident ^^ EntryLineAST.apply
+  private val entryDecl: Parser[EntryLineAST] = kw("entry") ~> ident ^^ EntryLineAST.apply
 
-  lazy val externDecl: P[ExternLineAST] = "extern" ~> ident ^^ ExternLineAST.apply
+  private val externDecl: Parser[ExternLineAST] = kw("extern") ~> ident ^^ ExternLineAST.apply
 
-  lazy val typeInfoToken: P[String] = ident | numericLit
-  lazy val commaField: P[Seq[String]] = "," ~> rep1(typeInfoToken)
+  private val typeInfoToken: Parser[String] = ident | hexLit | intLit
+  private val commaField: Parser[Seq[String]] = "," ~> rep1(typeInfoToken)
 
-  lazy val globalDecl: P[GlobalLineAST] =
-    "global" ~> ident ~ opt("," ~> ident ~ rep(commaField)) ^^ {
+  private val globalDecl: Parser[GlobalLineAST] =
+    kw("global") ~> ident ~ opt("," ~> ident ~ rep(commaField)) ^^ {
       case name ~ None => GlobalLineAST(name, SymbolType.Func)
       case name ~ Some(typStr ~ fields) =>
         val symType = typStr match
@@ -248,52 +157,60 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
         GlobalLineAST(name, symType, symSize, typeInfo)
     }
 
-  lazy val data: P[DataLineAST] = ("db" | "ds" | "dw" | "dl" | "dd") ~ repsep(expression, ",") ^^ {
-    case "db" ~ d => DataLineAST(1, d)
-    case "ds" ~ d => DataLineAST(2, d)
-    case "dw" ~ d => DataLineAST(4, d)
-    case "dl" ~ d => DataLineAST(8, d)
-    case "dd" ~ d => DataLineAST(0, d)
-    case other ~ _ => sys.error(s"unexpected data directive: $other")
-  }
+  private def kw(s: String): Parser[String] = s"\\b$s\\b".r
 
-  lazy val reserve: P[ReserveLineAST] = ("resb" | "ress" | "resw" | "resl" | "resd") ~ expression ^^ {
-    case "resb" ~ n => ReserveLineAST(1, n)
-    case "ress" ~ n => ReserveLineAST(2, n)
-    case "resw" ~ n => ReserveLineAST(4, n)
-    case "resl" ~ n => ReserveLineAST(8, n)
-    case "resd" ~ n => ReserveLineAST(0, n)
-    case other ~ _ => sys.error(s"unexpected reserve directive: $other")
-  }
-
-  lazy val comment: P[CommentLineAST] = accept("comment", {
-    case lexical.StringLit(s) if s.startsWith("#") => CommentLineAST(s.drop(1).trim)
-  })
-
-  lazy val simpleLine: P[LineAST] = positioned(
-    comment
-      | segment
-      | alignDir
-      | entryDecl
-      | externDecl
-      | globalDecl
-      | equate
-      | label
-      | local
-      | include
-      | instruction
-      | data
-      | reserve,
-  )
-
-  lazy val line: P[Seq[LineAST]] =
-    simpleLine ^^ (Seq(_))
-      | label ~ instruction ^^ { case l ~ i => Seq(l, i) }
-
-  lazy val mnemonics: P[String] =
-    "adc" | "add" | "addi" | "and" | "asr" | "auipc" | "bclr" | "beq" | "bge" | "bgeu" | "bgt" | "bgu" | "ble" | "bleu" | "bls" | "blu" | "bne" | "bra" | "bset" | "btst" | "chk" | "cli" | "clz" | "cnt" | "ctz" | "cvt" | "div" | "divu" | "fabs" | "fadd" | "fdiv" | "fence" | "fint" | "finv" | "fmul" | "fneg" | "fpow" | "fseq" | "fslt" | "fsqrt" | "fsub" | "gpsr" | "gusp" | "exg" | "halt" | "jalr" | "ld" | "ldb" | "ldd" | "ldi" | "lds" | "ldw" | "ll" | "lsl" | "lsr" | "max" | "min" | "mov" | "movi" | "mul" | "mulu" | "neg" | "nop" | "not" | "or" | "popb" | "popd" | "popr" | "pops" | "popw" | "pshb" | "pshd" | "pshr" | "pshs" | "pshw" | "rem" | "remu" | "ret" | "rev" | "rol" | "ror" | "rte" | "sbc" | "sc" | "seb" | "ses" | "sew" | "sext" | "sli" | "slt" | "sltu" | "spsr" | "st" | "stb" | "std" | "sti" | "sts" | "stw" | "sub" | "susp" | "swsp" | "trap" | "trapv" | "tsr" | "wfi" | "xor" | "zeb" | "zes" | "zew"
-
-  lazy val instruction: P[InstructionLineAST] =
-    mnemonics ~ repsep(expression, ",") ^^ { case m ~ es =>
-      InstructionLineAST(m, es)
+  private val data: Parser[DataLineAST] =
+    (kw("db") | kw("ds") | kw("dw") | kw("dl") | kw("dd")) ~ repsep(expression, ",") ^^ {
+      case "db" ~ d => DataLineAST(1, d)
+      case "ds" ~ d => DataLineAST(2, d)
+      case "dw" ~ d => DataLineAST(4, d)
+      case "dl" ~ d => DataLineAST(8, d)
+      case "dd" ~ d => DataLineAST(0, d)
+      case other ~ _ => sys.error(s"unexpected data directive: $other")
     }
+
+  private val reserve: Parser[ReserveLineAST] =
+    (kw("resb") | kw("ress") | kw("resw") | kw("resl") | kw("resd")) ~ expression ^^ {
+      case "resb" ~ n => ReserveLineAST(1, n)
+      case "ress" ~ n => ReserveLineAST(2, n)
+      case "resw" ~ n => ReserveLineAST(4, n)
+      case "resl" ~ n => ReserveLineAST(8, n)
+      case "resd" ~ n => ReserveLineAST(0, n)
+      case other ~ _ => sys.error(s"unexpected reserve directive: $other")
+    }
+
+  // --- Comments ---
+
+  private val comment: Parser[CommentLineAST] = "#[^\n]*".r ^^ (s => CommentLineAST(s.drop(1).trim))
+
+  // --- Labels ---
+
+  // A colon-labeled ident is always a label (even if it matches a mnemonic)
+  private val colonLabel: Parser[LabelLineAST] = ident <~ ":" ^^ LabelLineAST.apply
+  // A bare ident is a label only if it's not a mnemonic or directive
+  private val bareLabel: Parser[LabelLineAST] = ident.filter(s => !mnemonicSet.contains(s) && !directiveSet.contains(s)) ^^ LabelLineAST.apply
+  private val label: Parser[LabelLineAST] = colonLabel | bareLabel
+
+  private val local: Parser[LocalLineAST] = "." ~> ident <~ opt(":") ^^ LocalLineAST.apply
+
+  // --- Lines ---
+
+  private lazy val directive: Parser[LineAST] =
+    comment | segment | alignDir | entryDecl | externDecl | globalDecl | include | data | reserve
+
+  // Order matters:
+  // 1. colonLabel first — `add:` is always a label
+  // 2. directives and instructions before bare labels
+  // 3. bare labels last (only non-mnemonic/directive identifiers)
+  private lazy val simpleLine: Parser[LineAST] =
+    directive | colonLabel | equate | instruction | local | bareLabel
+
+  private lazy val labeledLine: Parser[LineAST] = instruction | directive
+
+  private lazy val line: Parser[Seq[LineAST]] =
+    // Label (with colon) followed by instruction/directive on same line
+    (ident <~ ":") ~ labeledLine ^^ { case l ~ i => Seq(LabelLineAST(l), i) }
+    // Non-mnemonic/directive ident (no colon) followed by instruction/directive on same line
+    | (ident.filter(s => !mnemonicSet.contains(s) && !directiveSet.contains(s))) ~ labeledLine ^^ { case l ~ i => Seq(LabelLineAST(l), i) }
+    | simpleLine ^^ (Seq(_))
+    | success(Seq.empty)
