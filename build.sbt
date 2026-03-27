@@ -168,6 +168,9 @@ lazy val syslCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   )
   .dependsOn(sysl, asm, tof)
   .jsSettings(jsSettings)
+  .jsSettings(
+    scalaJSUseMainModuleInitializer := true,
+  )
   .jvmSettings(jvmNativeStubs)
   .nativeSettings(jvmNativeStubs)
 
