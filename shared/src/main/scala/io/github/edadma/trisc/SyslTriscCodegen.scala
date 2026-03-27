@@ -210,6 +210,11 @@ class SyslTriscCodegen(addresses: Int = 2):
       case TContinueStmt =>
         emit(s"  bra ${continueLabels.top}")
 
+      case TAsmStmt(code) =>
+        // Emit each line of inline assembly verbatim
+        for line <- code.split("\\\\n|\\n") do
+          emit(s"  ${line.trim}")
+
       case TDerefAssignStmt(pointer, value) =>
         genExpr(value)           // r1 = value to store
         emit("  pshd r1")

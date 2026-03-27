@@ -260,6 +260,9 @@ class SyslAnalyzer:
         if loopDepth == 0 then throw AnalysisError("continue outside of loop")
         TContinueStmt
 
+      case AsmStmtAST(code) =>
+        TAsmStmt(code)
+
       case ExprStmtAST(expr) =>
         TExprStmt(analyzeExpr(expr))
 

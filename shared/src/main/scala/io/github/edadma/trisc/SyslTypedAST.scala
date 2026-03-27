@@ -32,6 +32,7 @@ case class TForStmt(init: TStmt, cond: TExpr, update: TStmt, body: List[TStmt]) 
 case class TDoWhileStmt(cond: TExpr, body: List[TStmt]) extends TStmt
 case object TBreakStmt extends TStmt
 case object TContinueStmt extends TStmt
+case class TAsmStmt(code: String) extends TStmt
 case class TExprStmt(expr: TExpr) extends TStmt
 
 // Expressions — every expression carries its type

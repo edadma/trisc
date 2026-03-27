@@ -186,6 +186,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TBreakStmt => throw BreakException
       case TContinueStmt => throw ContinueException
 
+      case TAsmStmt(_) => // no-op in interpreter
+
       case TExprStmt(expr) =>
         evalAny(expr, env)
 

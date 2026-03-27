@@ -206,5 +206,4 @@ task_c()
 
 idle_task()
     while true              // run forever
-        delay(100)          // minimal delay — just spin
-        // In the future: wfi (wait for interrupt)
+        asm("wfi")          // halt CPU until next interrupt — saves power
