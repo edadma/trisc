@@ -36,10 +36,17 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private val globals: Env = new mutable.LinkedHashMap
   private val functions = new mutable.LinkedHashMap[String, TFunDecl]
 
+  // Format a double consistently across platforms: no trailing .0 for whole numbers
+  private def formatDouble(d: Double): String =
+    if d.isWhole && !d.isInfinite && !d.isNaN then
+      val l = d.toLong
+      l.toString
+    else d.toString
+
   private val builtins: Map[String, List[Value] => Value] = Map(
     "putchar" -> (args => { output(toLong(args.head).toChar.toString); args.head }),
-    "print" -> (args => { args.foreach { case FloatVal(d) => output(d.toString); case a => output(toLong(a).toString) }; IntVal(0) }),
-    "println" -> (args => { args.foreach { case FloatVal(d) => output(d.toString); case a => output(toLong(a).toString) }; output("\n"); IntVal(0) }),
+    "print" -> (args => { args.foreach { case FloatVal(d) => output(formatDouble(d)); case a => output(toLong(a).toString) }; IntVal(0) }),
+    "println" -> (args => { args.foreach { case FloatVal(d) => output(formatDouble(d)); case a => output(toLong(a).toString) }; output("\n"); IntVal(0) }),
   )
 
   def run(program: TProgram): Long =

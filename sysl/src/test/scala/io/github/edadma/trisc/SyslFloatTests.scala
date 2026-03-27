@@ -22,7 +22,7 @@ class SyslFloatTests extends SyslTestHelpers {
         |    y: double = 2.5
         |    println(x + y)
         |    return 0
-        |""".stripMargin) shouldBe "4.0\n"
+        |""".stripMargin) shouldBe "4\n"
   }
 
   "float subtraction" in {
@@ -32,7 +32,7 @@ class SyslFloatTests extends SyslTestHelpers {
         |    y: double = 2.5
         |    println(x - y)
         |    return 0
-        |""".stripMargin) shouldBe "3.0\n"
+        |""".stripMargin) shouldBe "3\n"
   }
 
   "float multiplication" in {
@@ -42,7 +42,7 @@ class SyslFloatTests extends SyslTestHelpers {
         |    y: double = 4.0
         |    println(x * y)
         |    return 0
-        |""".stripMargin) shouldBe "12.0\n"
+        |""".stripMargin) shouldBe "12\n"
   }
 
   "float division" in {
@@ -177,7 +177,7 @@ class SyslFloatTests extends SyslTestHelpers {
         |    y: double = double(x)
         |    println(y)
         |    return 0
-        |""".stripMargin) shouldBe "42.0\n"
+        |""".stripMargin) shouldBe "42\n"
   }
 
   "cast double to int truncates" in {
@@ -209,7 +209,7 @@ class SyslFloatTests extends SyslTestHelpers {
         |    x += 2.5
         |    println(x)
         |    return 0
-        |""".stripMargin) shouldBe "4.0\n"
+        |""".stripMargin) shouldBe "4\n"
   }
 
   "float compound multiply" in {
@@ -219,7 +219,7 @@ class SyslFloatTests extends SyslTestHelpers {
         |    x *= 2.0
         |    println(x)
         |    return 0
-        |""".stripMargin) shouldBe "6.0\n"
+        |""".stripMargin) shouldBe "6\n"
   }
 
   // ===== Float in loops =====
@@ -246,7 +246,7 @@ class SyslFloatTests extends SyslTestHelpers {
         |main() -> int
         |    println(square(3.0))
         |    return 0
-        |""".stripMargin) shouldBe "9.0\n"
+        |""".stripMargin) shouldBe "9\n"
   }
 
   "float function return" in {
