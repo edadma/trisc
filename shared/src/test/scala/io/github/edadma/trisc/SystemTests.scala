@@ -101,7 +101,7 @@ class SystemTests extends TestHelpers {
         |dd 0xFF0
         |dd reset
         |dd isr
-        |resb 112
+        |resb 136
         |reset
         |  ldi r1, 2
         |  spsr r1
@@ -135,7 +135,7 @@ class SystemTests extends TestHelpers {
       """dd 0xFF0
         |dd reset
         |dd isr
-        |resb 112
+        |resb 136
         |reset
         |  ldi r1, 2
         |  spsr r1
@@ -167,7 +167,7 @@ class SystemTests extends TestHelpers {
         |dd 0
         |dd privhandler
         |dd 0
-        |resb 64
+        |resb 88
         |reset
         |  movi r1, 0xE00
         |  susp r1
@@ -210,7 +210,7 @@ class SystemTests extends TestHelpers {
         |dd 0
         |dd privhandler
         |dd 0
-        |resb 64
+        |resb 88
         |reset
         |  movi r1, 0xE00
         |  susp r1
@@ -242,7 +242,7 @@ class SystemTests extends TestHelpers {
         |dd 0
         |dd privhandler
         |dd 0
-        |resb 64
+        |resb 88
         |reset
         |  movi r1, 0xE00
         |  susp r1
@@ -273,7 +273,7 @@ class SystemTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
-        |resb 56
+        |resb 80
         |reset
         |  ldi r1, 2
         |  spsr r1
@@ -301,7 +301,7 @@ class SystemTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd trap0handler
-        |resb 56
+        |resb 80
         |reset
         |  movi r1, 0xE00
         |  susp r1
@@ -330,7 +330,7 @@ class SystemTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd trap0handler
-        |resb 56
+        |resb 80
         |reset
         |  ldi r1, 4
         |  spsr r1
@@ -367,7 +367,7 @@ class SystemTests extends TestHelpers {
         |dd 0
         |dd privhandler
         |dd 0
-        |resb 64
+        |resb 88
         |reset
         |  movi r1, 0xE00
         |  susp r1
@@ -396,7 +396,7 @@ class SystemTests extends TestHelpers {
         |dd privhandler
         |dd 0
         |dd trap0handler
-        |resb 56
+        |resb 80
         |reset
         |  movi r1, 0xE00
         |  susp r1
@@ -437,7 +437,7 @@ class SystemTests extends TestHelpers {
       """dd 0xFF0
         |dd reset
         |dd isr
-        |resb 112
+        |resb 136
         |reset
         |  ldi r1, 2
         |  spsr r1
@@ -466,7 +466,7 @@ class SystemTests extends TestHelpers {
       """dd 0xFF0
         |dd reset
         |dd isr
-        |resb 112
+        |resb 136
         |reset
         |  ldi r1, 3
         |  spsr r1
@@ -497,7 +497,7 @@ class SystemTests extends TestHelpers {
         |dd privhandler
         |dd 0
         |dd trap0handler
-        |resb 56
+        |resb 80
         |reset
         |  movi r1, 0xE00
         |  susp r1

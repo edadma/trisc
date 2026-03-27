@@ -6,8 +6,8 @@ class IntegrationTests extends TestHelpers {
     val output = runProgram(
       """STDOUT = 0xFF8
         |dd 0xFF0
-        |dd 136
-        |resb 120
+        |dd 160
+        |resb 144
         |ldi r1, 1
         |movi r3, STDOUT
         |loop
@@ -54,7 +54,7 @@ class IntegrationTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd trap0
-        |resb 56
+        |resb 80
         |reset
         |  ldi r1, 2
         |  spsr r1

@@ -15,7 +15,7 @@ class NewExceptionTests extends TestHelpers {
         |dd handler
         |dd 0
         |dd 0
-        |resb 64
+        |resb 88
         |reset
         |  ldi r1, 42
         |  halt
@@ -46,7 +46,7 @@ class NewExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
-        |resb 64
+        |resb 88
         |reset
         |  ldi r1, 42
         |  div r2, r1, r0
@@ -70,7 +70,7 @@ class NewExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
-        |resb 64
+        |resb 88
         |reset
         |  ldi r1, 42
         |  rem r2, r1, r0
@@ -94,7 +94,7 @@ class NewExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
-        |resb 64
+        |resb 88
         |reset
         |  ldi r1, 42
         |  divu r2, r1, r0
@@ -118,7 +118,7 @@ class NewExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
-        |resb 64
+        |resb 88
         |reset
         |  ldi r1, 42
         |  remu r2, r1, r0
@@ -152,7 +152,7 @@ class NewExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
-        |resb 64
+        |resb 88
         |reset
         |  ldi r1, 2
         |  spsr r1
@@ -181,7 +181,7 @@ class NewExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
-        |resb 64
+        |resb 88
         |reset
         |  movi r1, 0x1000
         |  ldb r2, r1, r0
@@ -210,7 +210,7 @@ class NewExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
-        |resb 64
+        |resb 88
         |reset
         |  movi r1, 0x1000
         |  stb r2, r1, r0
@@ -241,7 +241,7 @@ class NewExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
-        |resb 64
+        |resb 88
         |reset
         |  movi r1, 0x1000
         |  jalr r0, r1
