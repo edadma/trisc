@@ -11,7 +11,7 @@ case class CompileCommand(
     emit: String = "asm", // asm, tof, llvm
 ) extends SyslCommand
 case class RunCommand(
-    input: String = "",
+    inputs: Seq[String] = Seq.empty,
 ) extends SyslCommand
 
 case class SyslConfig(
@@ -63,14 +63,15 @@ object SyslCli:
         ),
       // run: interpret via tree-walker
       cmd("run")
-        .text("Interpret a Sysl program")
+        .text("Interpret a Sysl program (file, files, or directory)")
         .action((_, c) => c.copy(command = RunCommand()))
         .children(
-          arg[String]("<source>")
-            .text("Sysl source file to interpret")
+          arg[String]("<source>...")
+            .unbounded()
+            .text("Sysl source files or a directory")
             .action((v, c) =>
               c.copy(command = c.command match
-                case rc: RunCommand => rc.copy(input = v)
+                case rc: RunCommand => rc.copy(inputs = rc.inputs :+ v)
                 case other          => other
               )
             ),
@@ -106,8 +107,8 @@ object SyslCli:
         c.command match
           case CompileCommand(inputs, _, _) if inputs.isEmpty =>
             failure("No input files specified")
-          case RunCommand(input) if input.isEmpty =>
-            failure("No input file specified for run")
+          case RunCommand(inputs) if inputs.isEmpty =>
+            failure("No input files specified for run")
           case _ => success
       ),
     )
@@ -168,23 +169,30 @@ object SyslCli:
       case _ => System.err.println(s"Unknown emit format: ${cmd.emit}")
 
   private def executeRun(cmd: RunCommand): Unit =
-    val file = new File(cmd.input)
-    if !file.exists() then
-      System.err.println(s"error: file not found: ${cmd.input}")
-      sys.exit(1)
+    val sources = resolveSources(cmd.inputs)
 
-    val source = readFile(cmd.input)
-    val parser = new SyslParser
-    parser.parseProgram(source) match
-      case Left(err) =>
-        System.err.println(s"parse error: $err")
-        sys.exit(1)
-      case Right(ast) =>
-        val analyzer = new SyslAnalyzer
-        val typed = analyzer.analyze(ast)
-        val interpreter = new SyslInterpreter()
-        val result = interpreter.run(typed)
-        if result != 0 then println(result)
+    if sources.size == 1 then
+      // Single file: parse → analyze → interpret directly
+      val source = sources.values.head
+      val parser = new SyslParser
+      parser.parseProgram(source) match
+        case Left(err) =>
+          System.err.println(s"parse error: $err")
+          sys.exit(1)
+        case Right(ast) =>
+          val analyzer = new SyslAnalyzer
+          val typed = analyzer.analyze(ast)
+          val interpreter = new SyslInterpreter()
+          val result = interpreter.run(typed)
+          if result != 0 then println(result)
+    else
+      // Multi-file: use driver, merge typed ASTs, then interpret
+      val driver = new SyslDriver
+      val result = driver.compile(sources)
+      val merged = TProgram(result.units.flatMap(_.typed.decls))
+      val interpreter = new SyslInterpreter()
+      val value = interpreter.run(merged)
+      if value != 0 then println(value)
 
   private def resolveSources(inputs: Seq[String]): Map[String, String] =
     if inputs.size == 1 then
