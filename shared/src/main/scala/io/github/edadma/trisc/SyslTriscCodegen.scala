@@ -593,11 +593,12 @@ class SyslTriscCodegen(addresses: Int = 2):
         emitLoad(1, 1, elemType) // load with proper width
 
       case TArrayDecl(size, elemTypStr, typ) =>
-        // Allocate array on stack with proper element size
+        // Allocate array on stack with proper element size, rounded up to 8
         val elemType = typ match
           case SyslType.ArrayType(e, _) => e
           case _ => SyslType.I64
-        val totalBytes = size * stackSize(elemType)
+        val rawBytes = size * stackSize(elemType)
+        val totalBytes = (rawBytes + 7) & ~7 // keep SP 8-byte aligned
         emitAddImm(7, 7, -totalBytes)
         emit("  mov r1, r7")     // r1 = address of array start
         stackOffset -= totalBytes
