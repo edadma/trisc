@@ -296,8 +296,10 @@ kernel_main()
      * starts periodic interrupts. Each interrupt fires the timer ISR,
      * which calls schedule() to perform a context switch.
      */
-    val timer: *int = TIMER_DEVICE
-    *timer = TICK_MS        // start timer: interrupt every TICK_MS ms
+    // Write period (4 bytes) and control (1 byte) to timer device.
+    // Timer layout: offset 0-3 = period (ms), offset 4 = control (nonzero=start)
+    // We use asm because the timer needs specific write widths (stw + stb).
+    asm("movi r1, 0xFFE8\nldi r2, 10\nstw r2, r1, r0\naddi r1, r1, 4\nldi r2, 1\nstb r2, r1, r0")
 
     /*
      * Launch the first thread.

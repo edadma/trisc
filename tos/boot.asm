@@ -59,31 +59,25 @@
 
 segment vectors
 
-; Vector 0: Reset
-  dw boot
-; Vector 1: Misaligned access
-  dw default_isr
-; Vector 2: Illegal instruction
-  dw default_isr
-; Vector 3: Privilege violation
-  dw default_isr
-; Vector 4: System call (TRAP instruction)
-  dw trap_handler
-; Vector 5: Timer interrupt
-  dw timer_isr
-; Vector 6: External interrupt
-  dw default_isr
-; Vector 7: Reserved
-  dw default_isr
-; Vectors 8-15: Reserved
-  dw default_isr
-  dw default_isr
-  dw default_isr
-  dw default_isr
-  dw default_isr
-  dw default_isr
-  dw default_isr
-  dw default_isr
+; Reset vector is special: slot 0 = initial SSP, slot 1 = initial PC
+; (each slot is 8 bytes since CPU uses readLong)
+  dl 0xF000                ; Vector 0: Initial SSP (kernel stack top)
+  dl boot                  ; Vector 1: Initial PC (boot entry point)
+; Exception vectors (8 bytes each)
+  dl default_isr           ; Vector 2: Misaligned access
+  dl default_isr           ; Vector 3: Illegal instruction
+  dl default_isr           ; Vector 4: Privilege violation
+  dl trap_handler          ; Vector 5: System call (TRAP)
+  dl timer_isr             ; Vector 6: Timer interrupt
+  dl default_isr           ; Vector 7: External interrupt
+  dl default_isr           ; Vector 8: Reserved
+  dl default_isr           ; Vector 9: Overflow
+  dl default_isr           ; Vector 10: Bounds check
+  dl default_isr           ; Vector 11: Trace
+  dl default_isr           ; Vector 12: Reserved
+  dl default_isr           ; Vector 13: Reserved
+  dl default_isr           ; Vector 14: Reserved
+  dl default_isr           ; Vector 15: Reserved
 
 
 segment code
@@ -102,9 +96,8 @@ global boot, func
 entry boot
 
 boot
-  ; r7 (SSP) = top of kernel supervisor stack
-  movi r7, 0xF000
-  ; call kernel_main (never returns)
+  ; SSP is already set from vector table slot 0 (0xF000)
+  ; Call kernel_main (never returns)
   movi r4, kernel_main
   jalr r6, r4
 

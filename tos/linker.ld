@@ -13,7 +13,7 @@
 # ============================================================================
 
 MEMORY
-    vectors : ORIGIN = 0x0000, LENGTH = 0x0040
+    vectors : ORIGIN = 0x0000, LENGTH = 0x0080
     code    : ORIGIN = 0x0100, LENGTH = 0xDEFF
 
 SECTIONS
