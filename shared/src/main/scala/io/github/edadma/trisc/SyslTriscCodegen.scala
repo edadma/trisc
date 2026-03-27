@@ -10,31 +10,15 @@ class SyslTriscCodegen(addresses: Int = 2):
     labelCounter += 1
     s".${prefix}_$labelCounter"
 
-  private def funcSig(f: TFunDecl): String =
-    SyslType.funcSigToPrefix(f.params.map(_.typ), f.returnType)
-
   def generate(program: TProgram): String =
     out.clear()
     labelCounter = 0
 
-    // Emit entry point
-    val hasMain = program.decls.exists {
-      case TFunDecl("main", _, _, _, _) => true
-      case _ => false
-    }
-    if hasMain then
-      emit("entry main")
-      val mainDecl = program.decls.collectFirst { case f @ TFunDecl("main", _, _, _, _) => f }.get
-      emit(s"global main, func, ${funcSig(mainDecl)}")
-
-    // Emit globals (only public symbols get global directives)
-    for decl <- program.decls do
-      decl match
-        case TVarDecl(name, typ, _, isPrivate) if !isPrivate =>
-          emit(s"global $name, data, ${typ.toPrefix}")
-        case f @ TFunDecl(name, _, _, _, isPrivate) if !isPrivate && name != "main" =>
-          emit(s"global $name, func, ${funcSig(f)}")
-        case _ =>
+    // Emit entry point and global directives from module metadata
+    val meta = ModuleMeta.fromProgram(program)
+    val hasMain = meta.symbols.exists(s => s.name == "main" && s.typ.isInstanceOf[SymbolMeta.Kind.Func])
+    if hasMain then emit("entry main")
+    out ++= meta.toAsmGlobals
 
     // Emit functions
     for decl <- program.decls do
