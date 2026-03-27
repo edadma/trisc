@@ -122,7 +122,6 @@ object TOF:
     def parseSegment(rest: String): Unit =
       rest.split(",", 2).toSeq match
         case Seq(name, org) =>
-          if b.segmentDefined(name) then err(s"duplicate segment '$name'")
           b.segment(name, parseLong(org))
         case _ => err(s"bad SEGMENT line, expected SEGMENT:name,org")
 

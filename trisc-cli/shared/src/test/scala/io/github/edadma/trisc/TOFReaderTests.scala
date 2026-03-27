@@ -52,10 +52,12 @@ class TOFReaderTests extends TestHelpers {
     tof.segment("data").get.org shouldBe 0x100
   }
 
-  "rejects duplicate segment" in {
-    val ex = the[TOFReadError] thrownBy
-      TOF.fromString("TOF v2\nSEGMENT:code,0\nDATA:00\nSEGMENT:code,100\nDATA:01\n")
-    ex.msg should include("duplicate segment")
+  "duplicate segment name merges data" in {
+    val tof = TOF.fromString("TOF v2\nSEGMENT:code,0\nDATA:00\nSEGMENT:code,100\nDATA:01\n")
+    tof.segments should have size 1
+    // Both DATA lines merged into the same segment's chunk list
+    val data = tof.segments.head.chunks.head.asInstanceOf[TOF.DataChunk].data
+    data shouldBe Seq(0, 1)
   }
 
   // ===== DATA =====
