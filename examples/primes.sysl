@@ -1,0 +1,15 @@
+// Sieve of Eratosthenes — counts primes up to 100
+main() -> int
+    arr: [101]byte
+    // Initialize: 0 = prime candidate, 1 = not prime
+    arr[0] = 1
+    arr[1] = 1
+    for i = 2; i * i <= 100; i++
+        if arr[i] == 0 then
+            for j = i * i; j <= 100; j += i
+                arr[j] = 1
+    // Count primes
+    count = 0
+    for i = 2; i <= 100; i++
+        if arr[i] == 0 then count += 1
+    count

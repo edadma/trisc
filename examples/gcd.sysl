@@ -1,0 +1,9 @@
+// Euclidean GCD
+gcd(a: int, b: int) -> int
+    while b != 0
+        var t: int = b
+        b = a % b
+        a = t
+    a
+
+main() -> int = gcd(48, 18)  // 6

@@ -1,0 +1,12 @@
+// Pointer demo — swap two values using pointers
+swap(a: *int, b: *int) -> int
+    var t: int = *a
+    *a = *b
+    *b = t
+    0
+
+main() -> int
+    var x: int = 10
+    var y: int = 20
+    swap(&x, &y)
+    x  // should be 20
