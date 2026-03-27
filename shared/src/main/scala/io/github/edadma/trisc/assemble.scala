@@ -413,7 +413,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
       addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm / 2)
     case InstructionLineAST(
           mnemonic @ ("ldb" | "stb" | "lds" | "sts" | "ldw" | "stw" | "ldd" | "std" | "add" | "sub" | "mul" | "div" |
-          "rem" | "and" | "or" | "xor" | "asr" | "lsr" | "lsl" | "slt" | "sltu" | "fadd" | "fsub" | "fmul" | "fdiv"),
+          "rem" | "and" | "or" | "xor" | "asr" | "lsr" | "lsl" | "slt" | "sltu" | "fadd" | "fsub" | "fmul" | "fdiv" | "fpow"),
           Seq(o1, o2, o3),
         ) =>
       val (prefix, opcode) =
@@ -443,6 +443,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case "fsub" => (1, 9)
           case "fmul" => (1, 10)
           case "fdiv" => (1, 11)
+          case "fpow" => (1, 12)
       val reg1 =
         fold(o1) match
           case RegisterExprAST(reg) => reg
@@ -508,7 +509,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o, "expected register as first operand")
 
       addInstruction(3 -> 7, 3 -> 0, 3 -> reg, 7 -> opcode)
-    case InstructionLineAST(mnemonic @ ("zeb" | "zes" | "zew" | "seb" | "ses" | "sew" | "neg" | "not" | "fneg" | "finv"), Seq(o1, o2)) =>
+    case InstructionLineAST(mnemonic @ ("zeb" | "zes" | "zew" | "seb" | "ses" | "sew" | "neg" | "not" | "cvt" | "fneg" | "finv" | "fint"), Seq(o1, o2)) =>
       val opcode =
         mnemonic match
           case "zeb"  => 1
@@ -519,8 +520,10 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case "sew"  => 6
           case "neg"  => 7
           case "not"  => 8
+          case "cvt"  => 9
           case "fneg" => 10
           case "finv" => 11
+          case "fint" => 12
       val reg1 =
         fold(o1) match
           case RegisterExprAST(reg) => reg
