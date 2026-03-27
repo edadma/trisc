@@ -408,10 +408,10 @@ class FDIV(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
 
   def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).readf / cpu.r(b).readf)
 
-class FPOW(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
-  val mnemonic = "fpow"
+class FSEQ(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "fseq"
 
-  def apply(cpu: CPU): Unit = cpu.r(d).write(math.pow(cpu.r(a).readf, cpu.r(b).readf))
+  def apply(cpu: CPU): Unit = cpu.r(d).write(if cpu.r(a).readf == cpu.r(b).readf then 1 else 0)
 
 // Floating point RR (110 block)
 
@@ -444,6 +444,13 @@ class FABS(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "fabs"
 
   def apply(cpu: CPU): Unit = cpu.r(a).write(math.abs(cpu.r(b).readf))
+
+// Floating point RR 01 (110 block, sub-format 01)
+
+class FPOW(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "fpow"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(math.pow(cpu.r(a).readf, cpu.r(b).readf))
 
 // Atomics (RR 110 block)
 

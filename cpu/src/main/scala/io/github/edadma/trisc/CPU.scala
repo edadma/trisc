@@ -268,6 +268,8 @@ object Decode:
         "110 aaa bbb 00 11101" -> ((args: Map[Char, Int]) => new MIN(args('a'), args('b'))),
         "110 aaa bbb 00 11110" -> ((args: Map[Char, Int]) => new MAX(args('a'), args('b'))),
         "110 aaa bbb 00 11111" -> ((args: Map[Char, Int]) => new EXG(args('a'), args('b'))),
+        // RR 01 sub-format: two-register destructive operations
+        "110 aaa bbb 01 00000" -> ((args: Map[Char, Int]) => new FPOW(args('a'), args('b'))),
         "110 aaa bbb 10 iiiii" -> ((args: Map[Char, Int]) => new LD(args('a'), args('b'), args('i'))),
         "110 aaa bbb 11 iiiii" -> ((args: Map[Char, Int]) => new ST(args('a'), args('b'), args('i'))),
         "111 000 rrr 0000000" -> ((operands: Map[Char, Int]) => new PSHB(operands('r'))),
@@ -312,7 +314,7 @@ object Decode:
         "001 ddd aaa bbb 1100" -> ((args: Map[Char, Int]) => new FSUB(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 1101" -> ((args: Map[Char, Int]) => new FMUL(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 1110" -> ((args: Map[Char, Int]) => new FDIV(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 1111" -> ((args: Map[Char, Int]) => new FPOW(args('d'), args('a'), args('b'))),
+        "001 ddd aaa bbb 1111" -> ((args: Map[Char, Int]) => new FSEQ(args('d'), args('a'), args('b'))),
         "111 rrr 01 iiiiiiii; r:1-7" -> ((operands: Map[Char, Int]) => new AUIPC(operands('r'), operands('i'))),
         "000 ddd aaa bbb 0000" -> ((args: Map[Char, Int]) => new LDB(args('d'), args('a'), args('b'))),
         "000 aaa bbb ccc 0001" -> ((args: Map[Char, Int]) => new STB(args('a'), args('b'), args('c'))),

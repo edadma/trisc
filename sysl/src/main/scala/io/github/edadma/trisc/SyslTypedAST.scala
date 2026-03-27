@@ -40,6 +40,7 @@ trait TExpr:
   def typ: SyslType
 
 case class TIntLit(value: Long, typ: SyslType) extends TExpr
+case class TFloatLit(value: Double, typ: SyslType) extends TExpr
 case class TBoolLit(value: Boolean, typ: SyslType) extends TExpr
 case class TStringLit(value: String, typ: SyslType) extends TExpr
 case class TArrayDecl(size: Int, elemType: String, typ: SyslType) extends TExpr

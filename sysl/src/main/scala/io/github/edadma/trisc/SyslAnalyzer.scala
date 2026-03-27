@@ -96,6 +96,7 @@ class SyslAnalyzer:
     case "int" | "i32" => I32
     case "char" => I32
     case "i64" => I64
+    case "double" | "f64" => DoubleType
     case "byte" | "i8"  => I8
     case "i16"  => I16
     case "bool" => BoolType
@@ -140,6 +141,9 @@ class SyslAnalyzer:
     (from, to) match
       case (a, b) if a == b => true
       case (_: IntType, _: IntType) => true  // all integer types are compatible
+      case (DoubleType, DoubleType) => true
+      case (_: IntType, DoubleType) => true  // implicit int→float promotion
+      case (DoubleType, _: IntType) => true  // float→int (truncation)
       // bool and int are NOT compatible — use explicit casts
       case (_: IntType, PtrType(_)) => true    // int to pointer (e.g., memory-mapped I/O addresses)
       case (PtrType(_), _: IntType) => true    // pointer to int
@@ -271,6 +275,7 @@ class SyslAnalyzer:
   private def analyzeExpr(expr: ExpressionAST): TExpr =
     expr match
       case IntLitAST(n) => TIntLit(n, I32)
+      case FloatLitAST(d) => TFloatLit(d, DoubleType)
       case CharLitAST(c) => TIntLit(c.toLong, I32)
       case BoolLitAST(b) => TBoolLit(b, BoolType)
       case StringLitAST(s) => TStringLit(s, ArrayType(I8, 0))
@@ -398,7 +403,10 @@ class SyslAnalyzer:
       case UnaryAST(op, operand) =>
         val tOperand = analyzeExpr(operand)
         val resultType = op match
-          case "-" | "~" => tOperand.typ
+          case "-" => tOperand.typ
+          case "~" =>
+            if !tOperand.typ.isIntegral then throw AnalysisError(s"unary ~ requires integral type, got ${tOperand.typ}")
+            tOperand.typ
           case "!" =>
             if tOperand.typ != BoolType then throw AnalysisError(s"unary ! requires bool, got ${tOperand.typ}")
             BoolType
@@ -409,10 +417,17 @@ class SyslAnalyzer:
         val tRight = analyzeExpr(right)
         val resultType = op match
           case "+" | "-" if tLeft.typ.isPointerLike && tRight.typ.isNumeric => tLeft.typ
-          case "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>" =>
+          case "+" | "-" | "*" | "/" =>
             if !tLeft.typ.isNumeric || !tRight.typ.isNumeric then
               throw AnalysisError(s"operator $op requires numeric types, got ${tLeft.typ} $op ${tRight.typ}")
-            // Promote to wider type
+            // Promote to wider type; float wins over int
+            (tLeft.typ, tRight.typ) match
+              case (DoubleType, _) | (_, DoubleType) => DoubleType
+              case (IntType(a), IntType(b)) => IntType(a max b)
+              case _ => tLeft.typ
+          case "%" | "&" | "|" | "^" | "<<" | ">>" =>
+            if !tLeft.typ.isIntegral || !tRight.typ.isIntegral then
+              throw AnalysisError(s"operator $op requires integral types, got ${tLeft.typ} $op ${tRight.typ}")
             (tLeft.typ, tRight.typ) match
               case (IntType(a), IntType(b)) => IntType(a max b)
               case _ => tLeft.typ
@@ -422,7 +437,10 @@ class SyslAnalyzer:
             if tRight.typ != BoolType then throw AnalysisError(s"$op requires bool operands, got ${tRight.typ}")
             BoolType
           case _ => throw AnalysisError(s"unknown operator: $op")
-        TBinary(tLeft, op, tRight, resultType)
+        // Insert implicit int→float promotion casts for mixed operands
+        val promotedLeft = if resultType == DoubleType && tLeft.typ.isIntegral then TCast(tLeft, DoubleType) else tLeft
+        val promotedRight = if resultType == DoubleType && tRight.typ.isIntegral then TCast(tRight, DoubleType) else tRight
+        TBinary(promotedLeft, op, promotedRight, resultType)
 
       case CastAST(targetType, inner) =>
         val tInner = analyzeExpr(inner)
@@ -432,7 +450,9 @@ class SyslAnalyzer:
           case (from, to) if from == to => // no-op cast
           case (from, BoolType) if from.isNumeric => // numeric to bool: != 0
           case (BoolType, to) if to.isNumeric => // bool to numeric: true=1, false=0
-          case (from, to) if from.isNumeric && to.isNumeric => // numeric to numeric
+          case (_: IntType, DoubleType) => // int to float (cvt)
+          case (DoubleType, _: IntType) => // float to int (fint)
+          case (from, to) if from.isIntegral && to.isIntegral => // integer to integer
           case (from, to) => throw AnalysisError(s"cannot cast $from to $to")
         TCast(tInner, target)
 

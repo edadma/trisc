@@ -165,8 +165,8 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
 
   "function call type is return type" in {
     analyzeExprType(
-      """double(x: int) -> int = x * 2
-        |main() -> int = double(21)
+      """dbl(x: int) -> int = x * 2
+        |main() -> int = dbl(21)
         |""".stripMargin) shouldBe I32
   }
 

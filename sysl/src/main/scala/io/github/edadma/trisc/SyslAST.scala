@@ -40,6 +40,7 @@ case class ExprStmtAST(expr: ExpressionAST) extends StmtAST
 // Expressions
 trait ExpressionAST extends Positional
 case class IntLitAST(value: Long) extends ExpressionAST
+case class FloatLitAST(value: Double) extends ExpressionAST
 case class CharLitAST(value: Char) extends ExpressionAST
 case class StringLitAST(value: String) extends ExpressionAST
 case class BoolLitAST(value: Boolean) extends ExpressionAST

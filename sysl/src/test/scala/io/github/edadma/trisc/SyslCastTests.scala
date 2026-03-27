@@ -78,8 +78,8 @@ class SyslCastTests extends SyslTestHelpers {
 
   "cast in function argument" in {
     eval(
-      """double(x: int) -> int = x * 2
-        |main() -> int = double(int('!'))
+      """dbl(x: int) -> int = x * 2
+        |main() -> int = dbl(int('!'))
         |""".stripMargin) shouldBe 66
   }
 

@@ -4,6 +4,7 @@ import scala.collection.mutable
 
 enum Value:
   case IntVal(n: Long)
+  case FloatVal(d: Double)
   case PtrVal(cell: Cell)
   case ArrVal(cells: Array[Cell], offset: Int)
   case FuncVal(name: String)
@@ -22,17 +23,23 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
   private def toLong(v: Value): Long = v match
     case IntVal(n)    => n
+    case FloatVal(d)  => d.toLong
     case PtrVal(_)    => throw RuntimeError("expected integer, got pointer")
     case ArrVal(_, _) => throw RuntimeError("expected integer, got array")
     case FuncVal(_)   => throw RuntimeError("expected integer, got function")
+
+  private def toDouble(v: Value): Double = v match
+    case FloatVal(d)  => d
+    case IntVal(n)    => n.toDouble
+    case _            => throw RuntimeError("expected numeric value")
 
   private val globals: Env = new mutable.LinkedHashMap
   private val functions = new mutable.LinkedHashMap[String, TFunDecl]
 
   private val builtins: Map[String, List[Value] => Value] = Map(
     "putchar" -> (args => { output(toLong(args.head).toChar.toString); args.head }),
-    "print" -> (args => { args.foreach(a => output(toLong(a).toString)); IntVal(0) }),
-    "println" -> (args => { args.foreach(a => output(toLong(a).toString)); output("\n"); IntVal(0) }),
+    "print" -> (args => { args.foreach { case FloatVal(d) => output(d.toString); case a => output(toLong(a).toString) }; IntVal(0) }),
+    "println" -> (args => { args.foreach { case FloatVal(d) => output(d.toString); case a => output(toLong(a).toString) }; output("\n"); IntVal(0) }),
   )
 
   def run(program: TProgram): Long =
@@ -104,20 +111,34 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TCompoundAssignStmt(target, op, value) =>
         val cell = lookupCell(target, env)
-        val l = toLong(cell.value)
-        val r = toLong(evalAny(value, env))
-        cell.value = IntVal(op match
-          case "+"  => l + r
-          case "-"  => l - r
-          case "*"  => l * r
-          case "/"  => if r == 0 then throw RuntimeError("division by zero") else l / r
-          case "%"  => if r == 0 then throw RuntimeError("modulo by zero") else l % r
-          case "&"  => l & r
-          case "|"  => l | r
-          case "^"  => l ^ r
-          case "<<" => l << r.toInt
-          case ">>" => l >> r.toInt
-        )
+        val rv = evalAny(value, env)
+        (cell.value, rv) match
+          case (FloatVal(_), _) | (_, FloatVal(_)) =>
+            val l = toDouble(cell.value)
+            val r = toDouble(rv)
+            cell.value = FloatVal(op match
+              case "+"  => l + r
+              case "-"  => l - r
+              case "*"  => l * r
+              case "/"  => l / r
+              case "%"  => l % r
+              case _    => throw RuntimeError(s"unsupported float compound operator: $op")
+            )
+          case _ =>
+            val l = toLong(cell.value)
+            val r = toLong(rv)
+            cell.value = IntVal(op match
+              case "+"  => l + r
+              case "-"  => l - r
+              case "*"  => l * r
+              case "/"  => if r == 0 then throw RuntimeError("division by zero") else l / r
+              case "%"  => if r == 0 then throw RuntimeError("modulo by zero") else l % r
+              case "&"  => l & r
+              case "|"  => l | r
+              case "^"  => l ^ r
+              case "<<" => l << r.toInt
+              case ">>" => l >> r.toInt
+            )
 
       case TDerefAssignStmt(pointer, value) =>
         val cell = derefCell(evalAny(pointer, env))
@@ -195,6 +216,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private def evalAny(expr: TExpr, env: Env): Value =
     expr match
       case TIntLit(n, _) => IntVal(n)
+      case TFloatLit(d, _) => FloatVal(d)
       case TBoolLit(b, _) => IntVal(if b then 1L else 0L)
 
       case TStringLit(s, _) =>
@@ -288,51 +310,89 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             return ArrVal(cells, off - toLong(evalAny(right, env)).toInt)
           case _ =>
 
-        val l = toLong(lv)
+        // Short-circuit logical operators
         op match
-          case "&&" => IntVal(if l == 0 then 0L else if toLong(evalAny(right, env)) != 0 then 1L else 0L)
-          case "||" => IntVal(if l != 0 then 1L else if toLong(evalAny(right, env)) != 0 then 1L else 0L)
+          case "&&" =>
+            val l = toLong(lv)
+            return IntVal(if l == 0 then 0L else if toLong(evalAny(right, env)) != 0 then 1L else 0L)
+          case "||" =>
+            val l = toLong(lv)
+            return IntVal(if l != 0 then 1L else if toLong(evalAny(right, env)) != 0 then 1L else 0L)
           case _ =>
-            val r = toLong(evalAny(right, env))
-            IntVal(op match
-              case "+"  => l + r
-              case "-"  => l - r
-              case "*"  => l * r
-              case "/"  => if r == 0 then throw RuntimeError("division by zero") else l / r
-              case "%"  => if r == 0 then throw RuntimeError("modulo by zero") else l % r
-              case "==" => if l == r then 1L else 0L
-              case "!=" => if l != r then 1L else 0L
-              case "<"  => if l < r then 1L else 0L
-              case ">"  => if l > r then 1L else 0L
-              case "<=" => if l <= r then 1L else 0L
-              case ">=" => if l >= r then 1L else 0L
-              case "&"  => l & r
-              case "|"  => l | r
-              case "^"  => l ^ r
-              case "<<" => l << r.toInt
-              case ">>" => l >> r.toInt
-              case _    => throw RuntimeError(s"unknown operator: $op")
+
+        val rv = evalAny(right, env)
+
+        // Float path: if either operand is float, use float arithmetic
+        (lv, rv) match
+          case (FloatVal(_), _) | (_, FloatVal(_)) =>
+            val l = toDouble(lv)
+            val r = toDouble(rv)
+            return (op match
+              case "+"  => FloatVal(l + r)
+              case "-"  => FloatVal(l - r)
+              case "*"  => FloatVal(l * r)
+              case "/"  => FloatVal(l / r)
+              case "%"  => FloatVal(l % r)
+              case "==" => IntVal(if l == r then 1L else 0L)
+              case "!=" => IntVal(if l != r then 1L else 0L)
+              case "<"  => IntVal(if l < r then 1L else 0L)
+              case ">"  => IntVal(if l > r then 1L else 0L)
+              case "<=" => IntVal(if l <= r then 1L else 0L)
+              case ">=" => IntVal(if l >= r then 1L else 0L)
+              case _    => throw RuntimeError(s"unsupported float operator: $op")
             )
+          case _ =>
+
+        // Integer path
+        val l = toLong(lv)
+        val r = toLong(rv)
+        IntVal(op match
+          case "+"  => l + r
+          case "-"  => l - r
+          case "*"  => l * r
+          case "/"  => if r == 0 then throw RuntimeError("division by zero") else l / r
+          case "%"  => if r == 0 then throw RuntimeError("modulo by zero") else l % r
+          case "==" => if l == r then 1L else 0L
+          case "!=" => if l != r then 1L else 0L
+          case "<"  => if l < r then 1L else 0L
+          case ">"  => if l > r then 1L else 0L
+          case "<=" => if l <= r then 1L else 0L
+          case ">=" => if l >= r then 1L else 0L
+          case "&"  => l & r
+          case "|"  => l | r
+          case "^"  => l ^ r
+          case "<<" => l << r.toInt
+          case ">>" => l >> r.toInt
+          case _    => throw RuntimeError(s"unknown operator: $op")
+        )
 
       case TUnary(op, operand, _) =>
-        val v = toLong(evalAny(operand, env))
-        IntVal(op match
-          case "-" => -v
-          case "!" => if v == 0 then 1L else 0L
-          case "~" => ~v
-          case _   => throw RuntimeError(s"unknown unary operator: $op")
-        )
+        val v = evalAny(operand, env)
+        v match
+          case FloatVal(d) =>
+            op match
+              case "-" => FloatVal(-d)
+              case _   => throw RuntimeError(s"unsupported float unary operator: $op")
+          case _ =>
+            val n = toLong(v)
+            IntVal(op match
+              case "-" => -n
+              case "!" => if n == 0 then 1L else 0L
+              case "~" => ~n
+              case _   => throw RuntimeError(s"unknown unary operator: $op")
+            )
 
       case TCast(inner, target) =>
         val v = evalAny(inner, env)
         import SyslType.*
         target match
+          case DoubleType  => FloatVal(toDouble(v))
           case BoolType => IntVal(if toLong(v) != 0 then 1L else 0L)
           case IntType(64) => IntVal(toLong(v))
-          case IntType(32) => IntVal(toLong(v) & 0xFFFFFFFFL) // 32-bit
-          case IntType(16) => IntVal(toLong(v) & 0xFFFFL)     // 16-bit
-          case IntType(8)  => IntVal(toLong(v) & 0xFFL)       // 8-bit
-          case _: IntType  => IntVal(toLong(v))                // other widths: no-op
+          case IntType(32) => IntVal(toLong(v) & 0xFFFFFFFFL)
+          case IntType(16) => IntVal(toLong(v) & 0xFFFFL)
+          case IntType(8)  => IntVal(toLong(v) & 0xFFL)
+          case _: IntType  => IntVal(toLong(v))
           case _ => v
 
       case TSizeof(size, _) => IntVal(size)

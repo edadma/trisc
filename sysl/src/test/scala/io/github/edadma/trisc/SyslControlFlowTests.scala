@@ -75,9 +75,9 @@ class SyslControlFlowTests extends SyslTestHelpers {
 
   "if as expression in argument" in {
     eval(
-      """double(x: int) -> int = x * 2
+      """dbl(x: int) -> int = x * 2
         |
-        |main() -> int = double(if true then 21 else 0)
+        |main() -> int = dbl(if true then 21 else 0)
         |""".stripMargin) shouldBe 42
   }
 

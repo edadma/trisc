@@ -71,8 +71,8 @@ class SyslIntWidthTests extends SyslTestHelpers {
 
   "i16 parameter" in {
     eval(
-      """double(x: i16) -> i16 = x * 2
-        |main() -> int = double(21)
+      """dbl(x: i16) -> i16 = x * 2
+        |main() -> int = dbl(21)
         |""".stripMargin) shouldBe 42
   }
 

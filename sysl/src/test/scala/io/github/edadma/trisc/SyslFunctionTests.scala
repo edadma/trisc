@@ -49,17 +49,17 @@ class SyslFunctionTests extends SyslTestHelpers {
 
   "expression function" in {
     eval(
-      """double(x: int) -> int = x * 2
+      """dbl(x: int) -> int = x * 2
         |
-        |main() -> int = double(21)
+        |main() -> int = dbl(21)
         |""".stripMargin) shouldBe 42
   }
 
   "expression function inferred return type" in {
     eval(
-      """double(x: int) = x * 2
+      """dbl(x: int) = x * 2
         |
-        |main() -> int = double(21)
+        |main() -> int = dbl(21)
         |""".stripMargin) shouldBe 42
   }
 
@@ -78,9 +78,9 @@ class SyslFunctionTests extends SyslTestHelpers {
 
   "function call" in {
     eval(
-      """double(x: int) -> int = x * 2
+      """dbl(x: int) -> int = x * 2
         |
-        |main() -> int = double(21)
+        |main() -> int = dbl(21)
         |""".stripMargin) shouldBe 42
   }
 
@@ -160,10 +160,10 @@ class SyslFunctionTests extends SyslTestHelpers {
 
   "nested function calls" in {
     eval(
-      """double(x: int) -> int = x * 2
+      """dbl(x: int) -> int = x * 2
         |triple(x: int) -> int = x * 3
         |
-        |main() -> int = double(triple(7))
+        |main() -> int = dbl(triple(7))
         |""".stripMargin) shouldBe 42
   }
 
