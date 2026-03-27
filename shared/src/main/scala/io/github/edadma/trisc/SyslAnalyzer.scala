@@ -11,6 +11,7 @@ class SyslAnalyzer:
 
   private val globalScope = new mutable.LinkedHashMap[String, SymInfo]
   private val functions = new mutable.LinkedHashMap[String, FunInfo]
+  private val structTypes = new mutable.LinkedHashMap[String, SyslType.StructType]
   private val externalSymbols = new mutable.LinkedHashSet[String]
   private var localScope: mutable.LinkedHashMap[String, SymInfo] = null
   private var loopDepth: Int = 0
@@ -44,6 +45,10 @@ class SyslAnalyzer:
     for decl <- program.decls do
       decl match
         case ImportDeclAST(_) => // handled later
+        case StructDeclAST(name, fields) =>
+          if structTypes.contains(name) then throw AnalysisError(s"duplicate struct: '$name'", decl)
+          val resolvedFields = fields.map((n, t) => (n, resolveTypeName(t)))
+          structTypes(name) = SyslType.StructType(name, resolvedFields)
         case FunDeclAST(name, params, returnType, _, _) =>
           val paramTypes = params.map(p => (p.name, resolveTypeName(p.typ)))
           val retType = returnType.map(resolveTypeName).getOrElse(VoidType)
@@ -62,6 +67,10 @@ class SyslAnalyzer:
     decl match
       case ImportDeclAST(path) =>
         TImportDecl(path)
+
+      case StructDeclAST(name, _) =>
+        val st = structTypes(name)
+        TStructDecl(name, st.fields)
 
       case FunDeclAST(name, params, _, body, isPrivate) =>
         localScope = new mutable.LinkedHashMap
@@ -95,6 +104,7 @@ class SyslAnalyzer:
       val size = s.drop(1).takeWhile(_.isDigit).toInt
       val elem = s.dropWhile(_ != ']').drop(1)
       ArrayType(resolveTypeName(elem), size)
+    case name if structTypes.contains(name) => structTypes(name)
     case s if s.startsWith("func(") =>
       val inner = s.drop(5) // after "func("
       val (paramStrs, rest) = parseFuncTypeParams(inner)
@@ -191,6 +201,17 @@ class SyslAnalyzer:
         val tValue = analyzeExpr(value)
         TIndexAssignStmt(tArray, tIndex, tValue)
 
+      case FieldAssignStmtAST(obj, field, value) =>
+        val tObj = analyzeExpr(obj)
+        val tValue = analyzeExpr(value)
+        val (resolvedObj, structType) = tObj.typ match
+          case st: StructType => (tObj, st)
+          case PtrType(st: StructType) => (TDeref(tObj, st), st)
+          case other => throw AnalysisError(s"cannot access field '$field' on $other")
+        val idx = structType.fields.indexWhere(_._1 == field)
+        if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
+        TFieldAssignStmt(resolvedObj, idx, tValue)
+
       case ReturnStmtAST(value) =>
         TReturnStmt(value.map(analyzeExpr))
 
@@ -242,6 +263,12 @@ class SyslAnalyzer:
         val t = resolveTypeName(typStr)
         TArrayDecl(size, typStr, t)
 
+      case StructInitAST(typeName) =>
+        val t = resolveTypeName(typeName)
+        t match
+          case st: StructType => TStructLit(st)
+          case _ => throw AnalysisError(s"'$typeName' is not a struct type")
+
       case VarRefAST(name) =>
         // Check if name is a function (used as a value = function pointer)
         if functions.contains(name) then
@@ -283,6 +310,17 @@ class SyslAnalyzer:
           case PtrType(elem) => elem
           case t => throw AnalysisError(s"cannot index $t")
         TIndex(tArr, tIndex, elemType)
+
+      case FieldAccessAST(obj, field) =>
+        val tObj = analyzeExpr(obj)
+        // Auto-dereference pointers to structs (p.x works like (*p).x)
+        val (resolvedObj, structType) = tObj.typ match
+          case st: StructType => (tObj, st)
+          case PtrType(st: StructType) => (TDeref(tObj, st), st)
+          case other => throw AnalysisError(s"cannot access field '$field' on $other")
+        val idx = structType.fields.indexWhere(_._1 == field)
+        if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
+        TFieldAccess(resolvedObj, idx, structType.fields(idx)._2)
 
       case PreIncAST(name) => TPreInc(name, lookup(name).typ)
       case PreDecAST(name) => TPreDec(name, lookup(name).typ)

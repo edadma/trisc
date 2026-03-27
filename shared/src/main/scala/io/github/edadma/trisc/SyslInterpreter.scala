@@ -38,6 +38,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     for decl <- program.decls do
       decl match
         case _: TImportDecl => // not handled in interpreter
+        case _: TStructDecl => // type only, no runtime effect
         case f: TFunDecl => functions(f.name) = f
         case TVarDecl(name, _, init, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
@@ -126,6 +127,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val idx = toLong(evalAny(index, env)).toInt
         val cell = indexCell(arr, idx)
         cell.value = evalAny(value, env)
+
+      case TFieldAssignStmt(obj, fieldIndex, value) =>
+        val ArrVal(cells, off) = evalAny(obj, env): @unchecked
+        cells(off + fieldIndex).value = evalAny(value, env)
 
       case TReturnStmt(value) =>
         throw ReturnException(value.map(evalAny(_, env)).getOrElse(IntVal(0)))
@@ -306,6 +311,14 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case CharType => IntVal(toLong(v) & 0xFFFFFFFFL) // 32-bit codepoint
           case ByteType => IntVal(toLong(v) & 0xFFL)
           case _ => v
+
+      case TStructLit(SyslType.StructType(_, fields)) =>
+        val cells = Array.fill(fields.size)(new Cell(IntVal(0)))
+        ArrVal(cells, 0)
+
+      case TFieldAccess(obj, fieldIndex, _) =>
+        val ArrVal(cells, off) = evalAny(obj, env): @unchecked
+        cells(off + fieldIndex).value
 
       case TFuncRef(name, _) => FuncVal(name)
 

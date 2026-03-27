@@ -9,6 +9,7 @@ enum SyslType:
   case PtrType(pointee: SyslType)
   case ArrayType(elem: SyslType, size: Int)
   case FuncType(params: List[SyslType], returnType: SyslType)
+  case StructType(name: String, fields: List[(String, SyslType)])
 
   def isNumeric: Boolean = this match
     case IntType | CharType | ByteType => true
@@ -33,6 +34,7 @@ enum SyslType:
     case PtrType(t) => s"*$t"
     case ArrayType(t, n) => s"[$n]$t"
     case FuncType(params, ret) => s"func(${params.mkString(",")}) -> $ret"
+    case StructType(name, _) => name
 
   def toPrefix: String = this match
     case IntType        => "int"
@@ -43,6 +45,7 @@ enum SyslType:
     case PtrType(t)     => s"ptr ${t.toPrefix}"
     case ArrayType(t, n) => s"arr $n ${t.toPrefix}"
     case FuncType(params, ret) => s"func ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}"
+    case StructType(name, fields) => s"struct $name ${fields.size} ${fields.map((n, t) => s"$n ${t.toPrefix}").mkString(" ")}"
 
 object SyslType:
   def fromPrefix(s: String): SyslType =
@@ -65,6 +68,15 @@ object SyslType:
         val params = (1 to nparams).map(_ => parseType(tokens)).toList
         val ret = parseType(tokens)
         FuncType(params, ret)
+      case "struct" =>
+        val name = tokens.next()
+        val nfields = tokens.next().toInt
+        val fields = (1 to nfields).map { _ =>
+          val fname = tokens.next()
+          val ftype = parseType(tokens)
+          (fname, ftype)
+        }.toList
+        StructType(name, fields)
       case other => throw IllegalArgumentException(s"unknown type token: '$other'")
 
   def funcSigToPrefix(params: List[SyslType], ret: SyslType): String =

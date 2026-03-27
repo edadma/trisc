@@ -10,6 +10,7 @@ trait DeclAST extends Positional
 case class ImportDeclAST(path: String) extends DeclAST
 case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[String], body: FunBodyAST, isPrivate: Boolean = false) extends DeclAST
 case class VarDeclAST(name: String, typ: Option[String], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true) extends DeclAST
+case class StructDeclAST(name: String, fields: List[(String, String)]) extends DeclAST
 
 case class ParamAST(name: String, typ: String) extends Positional
 
@@ -25,6 +26,7 @@ case class AssignStmtAST(target: String, value: ExpressionAST) extends StmtAST
 case class CompoundAssignStmtAST(target: String, op: String, value: ExpressionAST) extends StmtAST
 case class DerefAssignStmtAST(pointer: ExpressionAST, value: ExpressionAST) extends StmtAST
 case class IndexAssignStmtAST(array: ExpressionAST, index: ExpressionAST, value: ExpressionAST) extends StmtAST
+case class FieldAssignStmtAST(obj: ExpressionAST, field: String, value: ExpressionAST) extends StmtAST
 case class ReturnStmtAST(value: Option[ExpressionAST]) extends StmtAST
 case class WhileStmtAST(cond: ExpressionAST, body: List[StmtAST]) extends StmtAST
 case class ForStmtAST(init: StmtAST, cond: ExpressionAST, update: StmtAST, body: List[StmtAST]) extends StmtAST
@@ -53,5 +55,7 @@ case class AddrOfAST(name: String) extends ExpressionAST
 case class AddrOfIndexAST(array: ExpressionAST, index: ExpressionAST) extends ExpressionAST
 case class DerefAST(expr: ExpressionAST) extends ExpressionAST
 case class IndexAST(expr: ExpressionAST, index: ExpressionAST) extends ExpressionAST
+case class FieldAccessAST(obj: ExpressionAST, field: String) extends ExpressionAST
 case class ArrayDeclAST(size: Int, elemType: String) extends ExpressionAST
+case class StructInitAST(typeName: String) extends ExpressionAST
 case class StringLitExprAST(value: String) extends ExpressionAST

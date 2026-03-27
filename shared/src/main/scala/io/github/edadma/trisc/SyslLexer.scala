@@ -14,7 +14,7 @@ class SyslLexical extends IndentationLexical(
 ) {
   reserved ++= List(
     "if", "then", "elif", "else", "while", "do", "for", "break", "continue", "return",
-    "import", "private", "var", "val",
+    "import", "private", "var", "val", "struct",
     "func",
     "int", "char", "byte", "bool", "void",
     "true", "false",
@@ -32,7 +32,7 @@ class SyslLexical extends IndentationLexical(
     "=", "+=", "-=", "*=", "/=", "%=",
     "&=", "|=", "^=", "<<=", ">>=",
     "->",
-    ",", ":", ";",
+    ",", ":", ";", ".",
   )
 
   private def hexDigit = elem("hex digit", c => c.isDigit || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F')
