@@ -310,7 +310,7 @@ class SyslParser extends StandardTokenParsers {
       stringLit ^^ StringLitExprAST.apply |
       "true" ^^^ BoolLitAST(true) |
       "false" ^^^ BoolLitAST(false) |
-      "sizeof" ~> typeRef ^^ SizeofAST.apply |
+      "sizeof" ~> "(" ~> typeRef <~ ")" ^^ SizeofAST.apply |
       cast |
       ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |
       ident ^^ VarRefAST.apply |

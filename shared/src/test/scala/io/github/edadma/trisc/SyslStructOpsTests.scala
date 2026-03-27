@@ -7,28 +7,28 @@ class SyslStructOpsTests extends SyslTestHelpers {
 
   // ===== sizeof =====
 
-  "sizeof int" in {
-    eval("main() -> int = sizeof int\n") shouldBe 8
+  "sizeof(int)" in {
+    eval("main() -> int = sizeof(int)\n") shouldBe 8
   }
 
-  "sizeof byte" in {
-    eval("main() -> int = sizeof byte\n") shouldBe 1
+  "sizeof(byte)" in {
+    eval("main() -> int = sizeof(byte)\n") shouldBe 1
   }
 
-  "sizeof bool" in {
-    eval("main() -> int = sizeof bool\n") shouldBe 8
+  "sizeof(bool)" in {
+    eval("main() -> int = sizeof(bool)\n") shouldBe 8
   }
 
-  "sizeof char" in {
-    eval("main() -> int = sizeof char\n") shouldBe 8
+  "sizeof(char)" in {
+    eval("main() -> int = sizeof(char)\n") shouldBe 8
   }
 
   "sizeof pointer" in {
-    eval("main() -> int = sizeof *int\n") shouldBe 8
+    eval("main() -> int = sizeof(*int)\n") shouldBe 8
   }
 
   "sizeof array" in {
-    eval("main() -> int = sizeof [5]int\n") shouldBe 40
+    eval("main() -> int = sizeof([5]int)\n") shouldBe 40
   }
 
   "sizeof struct" in {
@@ -37,7 +37,7 @@ class SyslStructOpsTests extends SyslTestHelpers {
         |    x: int
         |    y: int
         |
-        |main() -> int = sizeof Point
+        |main() -> int = sizeof(Point)
         |""".stripMargin) shouldBe 16
   }
 
@@ -48,12 +48,12 @@ class SyslStructOpsTests extends SyslTestHelpers {
         |    y: int
         |    z: int
         |
-        |main() -> int = sizeof Vec3
+        |main() -> int = sizeof(Vec3)
         |""".stripMargin) shouldBe 24
   }
 
   "sizeof in expression" in {
-    eval("main() -> int = sizeof int + sizeof byte\n") shouldBe 9
+    eval("main() -> int = sizeof(int) + sizeof(byte)\n") shouldBe 9
   }
 
   // ===== Field compound assignment =====
@@ -210,8 +210,8 @@ class SyslStructOpsTests extends SyslTestHelpers {
         |    b: int
         |
         |main() -> int
-        |    val size = sizeof Pair
-        |    size / sizeof int
+        |    val size = sizeof(Pair)
+        |    size / sizeof(int)
         |""".stripMargin) shouldBe 2
   }
 }
