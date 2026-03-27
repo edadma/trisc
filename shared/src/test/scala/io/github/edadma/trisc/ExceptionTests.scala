@@ -14,11 +14,14 @@ class ExceptionTests extends TestHelpers {
 
   "reset vector is loaded from address 0" in {
     val cpu = runCPU(
-      """dw start
-        |dw 0
-        |dw 0
-        |dw 0
-        |dw 0
+      """dd start
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
         |halt
         |start
         |  ldi r1, 42
@@ -29,14 +32,18 @@ class ExceptionTests extends TestHelpers {
 
   // ===== TRAP =====
 
-  "trap 0 dispatches to vector 3" in {
+  "trap 0 dispatches to vector 8" in {
     val output = runProgram(
       """STDOUT = 0xFF8
-        |dw reset
-        |dw 0
-        |dw 0
-        |dw 0
-        |dw handler
+        |dd reset
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd handler
         |reset
         |  ldi r1, 0
         |  spsr r1
@@ -52,11 +59,15 @@ class ExceptionTests extends TestHelpers {
 
   "trap preserves and restores registers via rte" in {
     val cpu = runCPU(
-      """dw reset
-        |dw 0
-        |dw 0
-        |dw 0
-        |dw handler
+      """dd reset
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd handler
         |reset
         |  ldi r1, 0
         |  spsr r1
@@ -75,11 +86,15 @@ class ExceptionTests extends TestHelpers {
 
   "trap resumes at instruction after trap" in {
     val cpu = runCPU(
-      """dw reset
-        |dw 0
-        |dw 0
-        |dw 0
-        |dw handler
+      """dd reset
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd handler
         |reset
         |  ldi r1, 0
         |  spsr r1
@@ -96,11 +111,15 @@ class ExceptionTests extends TestHelpers {
 
   "rte restores all registers" in {
     val cpu = runCPU(
-      """dw reset
-        |dw 0
-        |dw 0
-        |dw 0
-        |dw handler
+      """dd reset
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd handler
         |reset
         |  ldi r1, 0
         |  spsr r1
@@ -128,11 +147,15 @@ class ExceptionTests extends TestHelpers {
 
   "rte restores PSR" in {
     val cpu = runCPU(
-      """dw reset
-        |dw 0
-        |dw 0
-        |dw 0
-        |dw handler
+      """dd reset
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd handler
         |reset
         |  ldi r1, 0
         |  spsr r1
@@ -164,11 +187,14 @@ class ExceptionTests extends TestHelpers {
     val mem = new Memory("Memory", new RAM(0, 0xFF8), stdout)
     val tof = assemble(
       """STDOUT = 0xFF8
-        |dw reset
-        |dw isr
-        |dw 0
-        |dw 0
-        |dw 0
+        |dd reset
+        |dd isr
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
         |reset
         |  ldi r1, 0
         |  spsr r1

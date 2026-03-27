@@ -61,10 +61,14 @@ class ControlTests extends TestHelpers {
   "jalr subroutine call and return" in {
     val output = runProgram(
       """STDOUT = 0xFF8
-        |dw 8
-        |dw 0
-        |dw 0
-        |dw 0
+        |dd 64
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
         |ldi r2, 'A'
         |movi r1, printChar
         |jalr r7, r1

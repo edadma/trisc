@@ -11,7 +11,7 @@ abstract class SimpleInstruction extends Instruction:
 object IllegalInstruction extends SimpleInstruction:
   val mnemonic = "Illegal"
 
-  def apply(cpu: CPU): Unit = sys.error("illegal instruction")
+  def apply(cpu: CPU): Unit = cpu.state = State.UnimplementedOpcode
 
 abstract class ImmediateInstruction(r: Int, imm: Int) extends Instruction:
   def disassemble(cpu: CPU): String = f"$mnemonic r$r, 0x$imm%02x ($imm)"
@@ -137,12 +137,16 @@ class MUL(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
 class DIV(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "div"
 
-  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read / cpu.r(b).read)
+  def apply(cpu: CPU): Unit =
+    if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
+    else cpu.r(d).write(cpu.r(a).read / cpu.r(b).read)
 
 class REM(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "rem"
 
-  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read % cpu.r(b).read)
+  def apply(cpu: CPU): Unit =
+    if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
+    else cpu.r(d).write(cpu.r(a).read % cpu.r(b).read)
 
 class AND(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "and"
@@ -219,12 +223,16 @@ class MULU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
 class DIVU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "divu"
 
-  def apply(cpu: CPU): Unit = cpu.r(d).write(java.lang.Long.divideUnsigned(cpu.r(a).read, cpu.r(b).read))
+  def apply(cpu: CPU): Unit =
+    if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
+    else cpu.r(d).write(java.lang.Long.divideUnsigned(cpu.r(a).read, cpu.r(b).read))
 
 class REMU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "remu"
 
-  def apply(cpu: CPU): Unit = cpu.r(d).write(java.lang.Long.remainderUnsigned(cpu.r(a).read, cpu.r(b).read))
+  def apply(cpu: CPU): Unit =
+    if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
+    else cpu.r(d).write(java.lang.Long.remainderUnsigned(cpu.r(a).read, cpu.r(b).read))
 
 // Float comparison (RRR 001 block)
 

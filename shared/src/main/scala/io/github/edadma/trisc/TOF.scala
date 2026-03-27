@@ -7,7 +7,7 @@ enum SymbolType:
   case Func, Data, Const
 
 enum RelocType:
-  case MOVI2, MOVI3, MOVI4, ABS32
+  case MOVI2, MOVI3, MOVI4, ABS32, ABS64
 
 case class TOFSymbol(name: String, offset: Long, typ: SymbolType, size: Option[Long] = None, typeInfo: Option[String] = None)
 case class TOFReloc(typ: RelocType, offset: Long, symbol: String)
@@ -156,6 +156,7 @@ object TOF:
             case "MOVI3" => RelocType.MOVI3
             case "MOVI4" => RelocType.MOVI4
             case "ABS32" => RelocType.ABS32
+            case "ABS64" => RelocType.ABS64
             case _       => err(s"unknown relocation type '$typStr'")
           b.addReloc(typ, parseLong(offset), name)
         case _ => err(s"bad RELOC line, expected RELOC:type,offset,symbol")

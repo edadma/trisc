@@ -7,11 +7,14 @@ trait TestHelpers extends AnyFreeSpec with Matchers {
 
   val VECTORS =
     """
-      |dw 20
-      |dw 0
-      |dw 0
-      |dw 0
-      |dw 0
+      |dd 64
+      |dd 0
+      |dd 0
+      |dd 0
+      |dd 0
+      |dd 0
+      |dd 0
+      |dd 0
       |""".stripMargin
 
   def mkCPU(program: String, memSize: Int = 0x1000, addresses: Int = 2): (CPU, StringBuilder) =

@@ -13,10 +13,14 @@ class LinkerTests extends TestHelpers {
 
   "link two TOFs with cross-references" in {
     val main = assemble(
-      """dw start
-        |dw 0
-        |dw 0
-        |dw 0
+      """dd start
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
         |start
         |  movi r1, helper
         |  jalr r7, r1
@@ -97,9 +101,6 @@ class LinkerTests extends TestHelpers {
   "ABS32 relocation patches dw correctly" in {
     val main = assemble(
       """dw handler
-        |dw 0
-        |dw 0
-        |dw 0
         |halt
         |""".stripMargin, relocatable = true)
     val handlers = assemble(
@@ -112,18 +113,22 @@ class LinkerTests extends TestHelpers {
 
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     linked.load(mem)
-    // The reset vector (address 0) should contain the address of handler
-    // main segment: 16 bytes vectors + 2 bytes halt = 18 bytes
-    // handler starts at offset 18
-    mem.readInt(0) shouldBe 18
+    // The dw at address 0 should contain the address of handler
+    // main segment: 4 bytes dw + 2 bytes halt = 6 bytes
+    // handler starts at offset 6
+    mem.readInt(0) shouldBe 6
   }
 
-  "ABS32 relocation in vector table enables CPU reset dispatch" in {
+  "ABS64 relocation in vector table enables CPU reset dispatch" in {
     val main = assemble(
-      """dw start
-        |dw 0
-        |dw 0
-        |dw 0
+      """dl start
+        |dl 0
+        |dl 0
+        |dl 0
+        |dl 0
+        |dl 0
+        |dl 0
+        |dl 0
         |nop
         |""".stripMargin, relocatable = true)
     val code = assemble(
@@ -203,10 +208,14 @@ class LinkerTests extends TestHelpers {
 
     val main = assemble(
       """STDOUT = 0xFF8
-        |dw start
-        |dw 0
-        |dw 0
-        |dw 0
+        |dd start
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
         |start
         |  movi r7, 0xF00
         |  movi r1, printA

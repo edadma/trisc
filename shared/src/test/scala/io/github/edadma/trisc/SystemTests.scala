@@ -98,11 +98,14 @@ class SystemTests extends TestHelpers {
     val mem = new Memory("Memory", new RAM(0, 0xFF8), stdout)
     val tof = assemble(
       """STDOUT = 0xFF8
-        |dw reset
-        |dw isr
-        |dw 0
-        |dw 0
-        |dw 0
+        |dd reset
+        |dd isr
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
         |reset
         |  ldi r1, 0
         |  spsr r1
@@ -133,11 +136,14 @@ class SystemTests extends TestHelpers {
       if callCount == 3 then cpu.interrupt()
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     val tof = assemble(
-      """dw reset
-        |dw isr
-        |dw 0
-        |dw 0
-        |dw 0
+      """dd reset
+        |dd isr
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
         |reset
         |  ldi r1, 0
         |  spsr r1
@@ -160,11 +166,14 @@ class SystemTests extends TestHelpers {
 
   "spsr in user mode triggers privilege violation" in {
     val cpu = runCPU(
-      """dw reset
-        |dw 0
-        |dw 0
-        |dw privhandler
-        |dw 0
+      """dd reset
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd privhandler
+        |dd 0
         |reset
         |  ldi r1, 0
         |  spsr r1
@@ -194,11 +203,14 @@ class SystemTests extends TestHelpers {
   "spsr clears mode bit then second spsr faults" in {
     // Verify the sequence: spsr with Mode=0 clears Mode, next spsr fails.
     val cpu = runCPU(
-      """dw reset
-        |dw 0
-        |dw 0
-        |dw privhandler
-        |dw 0
+      """dd reset
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd privhandler
+        |dd 0
         |reset
         |  ldi r1, 0
         |  spsr r1
@@ -219,11 +231,14 @@ class SystemTests extends TestHelpers {
 
   "rte in user mode triggers privilege violation" in {
     val cpu = runCPU(
-      """dw reset
-        |dw 0
-        |dw 0
-        |dw privhandler
-        |dw 0
+      """dd reset
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd privhandler
+        |dd 0
         |reset
         |  ldi r1, 0
         |  spsr r1
@@ -242,11 +257,15 @@ class SystemTests extends TestHelpers {
     // After reset we are in supervisor mode. rte should work (it returns to saved PC).
     // Use trap to set up a proper return context, then rte in handler (supervisor mode).
     val cpu = runCPU(
-      """dw reset
-        |dw 0
-        |dw 0
-        |dw 0
-        |dw handler
+      """dd reset
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd handler
         |reset
         |  ldi r1, 0
         |  spsr r1
@@ -264,11 +283,14 @@ class SystemTests extends TestHelpers {
 
   "gpsr works in user mode" in {
     val cpu = runCPU(
-      """dw reset
-        |dw 0
-        |dw 0
-        |dw 0
-        |dw 0
+      """dd reset
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
         |reset
         |  ldi r1, 0
         |  spsr r1
@@ -283,11 +305,14 @@ class SystemTests extends TestHelpers {
 
   "gpsr reads correct PSR value after clearing mode" in {
     val cpu = runCPU(
-      """dw reset
-        |dw 0
-        |dw 0
-        |dw 0
-        |dw 0
+      """dd reset
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
         |reset
         |  ldi r1, 4
         |  spsr r1
@@ -313,11 +338,14 @@ class SystemTests extends TestHelpers {
 
   "privilege violation handler runs in supervisor mode" in {
     val cpu = runCPU(
-      """dw reset
-        |dw 0
-        |dw 0
-        |dw privhandler
-        |dw 0
+      """dd reset
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd privhandler
+        |dd 0
         |reset
         |  ldi r1, 0
         |  spsr r1
@@ -334,11 +362,14 @@ class SystemTests extends TestHelpers {
 
   "privilege violation saves and restores registers via rte" in {
     val cpu = runCPU(
-      """dw reset
-        |dw 0
-        |dw 0
-        |dw privhandler
-        |dw 0
+      """dd reset
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd privhandler
+        |dd 0
         |reset
         |  ldi r1, 0
         |  spsr r1
@@ -371,11 +402,14 @@ class SystemTests extends TestHelpers {
         cpu.interrupt()
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     val tof = assemble(
-      """dw reset
-        |dw isr
-        |dw 0
-        |dw 0
-        |dw 0
+      """dd reset
+        |dd isr
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
         |reset
         |  ldi r1, 0
         |  spsr r1
@@ -401,11 +435,14 @@ class SystemTests extends TestHelpers {
     val interruptSource: CPU => Unit = cpu => cpu.interrupt()
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     val tof = assemble(
-      """dw reset
-        |dw isr
-        |dw 0
-        |dw 0
-        |dw 0
+      """dd reset
+        |dd isr
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
         |reset
         |  ldi r1, 1
         |  spsr r1
@@ -426,11 +463,14 @@ class SystemTests extends TestHelpers {
   "gpsr does not trigger privilege violation even after mode cleared" in {
     // Explicitly test that gpsr after clearing mode does NOT cause a fault
     val cpu = runCPU(
-      """dw reset
-        |dw 0
-        |dw 0
-        |dw privhandler
-        |dw 0
+      """dd reset
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd privhandler
+        |dd 0
         |reset
         |  ldi r1, 0
         |  spsr r1

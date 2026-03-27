@@ -15,10 +15,14 @@ class AssemblerTests extends TestHelpers {
 
   "handles segments with orgs" in {
     val cpu = runCPU(
-      """dw reset
-        |dw 0
-        |dw 0
-        |dw 0
+      """dd reset
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
         |reset
         |  movi r1, data
         |  ldw r2, r1, r0
@@ -68,10 +72,10 @@ class AssemblerTests extends TestHelpers {
     cpu.r(4).read shouldBe 'B'
   }
 
-  "illegal instruction throws" in {
-    an[Exception] should be thrownBy {
-      IllegalInstruction(new CPU(new RAM(0, 64), Nil))
-    }
+  "illegal instruction sets UnimplementedOpcode state" in {
+    val cpu = new CPU(new RAM(0, 64), Nil)
+    IllegalInstruction(cpu)
+    cpu.state shouldBe State.UnimplementedOpcode
   }
 
   // ===== Relocatable mode =====
@@ -322,10 +326,14 @@ class AssemblerTests extends TestHelpers {
     val main = assemble(
       """extern helper
         |global main, func
-        |dw main
-        |dw 0
-        |dw 0
-        |dw 0
+        |dd main
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
+        |dd 0
         |main
         |  movi r1, helper
         |  jalr r7, r1
