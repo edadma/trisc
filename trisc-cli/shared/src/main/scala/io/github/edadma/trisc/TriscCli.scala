@@ -8,6 +8,7 @@ case class RunCommand(
     memSize: Int = 0x10000,
     limit: Int = 0,
     trace: Boolean = false,
+    gui: Boolean = false,
 ) extends TriscCommand
 case class AsmCommand(
     input: String = "",
@@ -58,6 +59,14 @@ object TriscCli:
             .action((_, c) =>
               c.copy(command = c.command match
                 case rc: RunCommand => rc.copy(trace = true)
+                case other          => other
+              )
+            ),
+          opt[Unit]("gui")
+            .text("Open GUI emulator window")
+            .action((_, c) =>
+              c.copy(command = c.command match
+                case rc: RunCommand => rc.copy(gui = true)
                 case other          => other
               )
             ),
@@ -128,7 +137,7 @@ object TriscCli:
         ),
       checkConfig(c =>
         c.command match
-          case RunCommand(input, _, _, _) if input.isEmpty =>
+          case rc: RunCommand if rc.input.isEmpty =>
             failure("No input file specified for run")
           case AsmCommand(input, _) if input.isEmpty =>
             failure("No input file specified for asm")
@@ -143,6 +152,9 @@ object TriscCli:
   def parse(args: Seq[String]): Option[TriscConfig] =
     OParser.parse(parser, args, TriscConfig())
 
+  // Platform-specific GUI launcher — set by JVM entry point
+  var guiLauncher: Option[(RunCommand, TOF) => Unit] = None
+
   def execute(config: TriscConfig): Unit =
     config.command match
       case cmd: RunCommand   => executeRun(cmd)
@@ -150,28 +162,39 @@ object TriscCli:
       case cmd: LinkCommand  => executeLink(cmd)
       case cmd: DisasmCommand => executeDisasm(cmd)
 
-  private def executeRun(cmd: RunCommand): Unit =
+  def loadTof(cmd: RunCommand): TOF =
     val tofStr = readFile(cmd.input)
     val tof = TOF.deserialize(tofStr)
-    val linked =
-      if tof.entryAddress.isDefined then tof  // already linked
-      else Linker.link(Seq(tof))
+    if tof.entryAddress.isDefined then tof else Linker.link(Seq(tof))
 
-    val stdout = new Stdout(Runtime.stdoutAddress)
-    val ramSize = Runtime.stdoutAddress.toInt // RAM up to stdout device
+  def setupCpu(linked: TOF, outputFn: String => Unit = s => print(s)): (CPU, Memory) =
+    val stdout = new Stdout(Runtime.stdoutAddress, outputFn)
+    val ramSize = Runtime.stdoutAddress.toInt
     val ram = new RAM(0, ramSize)
     val mem = new Memory("Memory", ram, stdout)
     linked.load(mem)
-
     val cpu = new CPU(mem, Nil)
-    if cmd.limit > 0 then cpu.limit = cmd.limit
     cpu.pc = linked.entryAddress.getOrElse(0L)
     cpu.state = State.Run
     cpu.r(7).write(ramSize - 8)
-    cpu.run()
+    (cpu, mem)
 
-    val result = cpu.r(1).read
-    if result != 0 then System.err.println(s"exit: $result")
+  private def executeRun(cmd: RunCommand): Unit =
+    val linked = loadTof(cmd)
+
+    if cmd.gui then
+      guiLauncher match
+        case Some(launch) => launch(cmd, linked)
+        case None =>
+          System.err.println("error: --gui not available on this platform")
+          return
+
+    else
+      val (cpu, _) = setupCpu(linked)
+      if cmd.limit > 0 then cpu.limit = cmd.limit
+      cpu.run()
+      val result = cpu.r(1).read
+      if result != 0 then System.err.println(s"exit: $result")
 
   private def executeAsm(cmd: AsmCommand): Unit =
     val source = readFile(cmd.input)
