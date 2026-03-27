@@ -129,4 +129,87 @@ class UnaryTests extends TestHelpers {
     val cpu = runCPU(VECTORS + "movi r1, 0x1234\nsew r2, r1\nhalt\n")
     cpu.r(2).read shouldBe 0x1234
   }
+
+  // ===== REV (byte-reverse) =====
+
+  "rev of 0 is 0" in {
+    val cpu = runCPU(VECTORS +
+      """rev r1, r0
+        |halt
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 0
+  }
+
+  "rev of 0x0102 swaps bytes" in {
+    val cpu = runCPU(VECTORS +
+      """ldi r1, 1
+        |sli r1, 2
+        |rev r2, r1
+        |halt
+        |""".stripMargin)
+    cpu.r(2).read shouldBe 0x0201000000000000L
+  }
+
+  "rev twice is identity" in {
+    val cpu = runCPU(VECTORS +
+      """ldi r1, 0xAB
+        |rev r2, r1
+        |rev r3, r2
+        |halt
+        |""".stripMargin)
+    cpu.r(3).read shouldBe 0xAB
+  }
+
+  // ===== SEXT (sign-extend from bit width) =====
+
+  "sext from 8 bits, positive" in {
+    val cpu = runCPU(VECTORS +
+      """ldi r1, 0x7F
+        |ldi r2, 8
+        |sext r1, r2
+        |halt
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 0x7F
+  }
+
+  "sext from 8 bits, negative" in {
+    val cpu = runCPU(VECTORS +
+      """ldi r1, 0x80
+        |ldi r2, 8
+        |sext r1, r2
+        |halt
+        |""".stripMargin)
+    cpu.r(1).read shouldBe -128L
+  }
+
+  "sext from 16 bits, negative" in {
+    val cpu = runCPU(VECTORS +
+      """ldi r1, 0xFF
+        |sli r1, 0xFE
+        |ldi r2, 16
+        |sext r1, r2
+        |halt
+        |""".stripMargin)
+    cpu.r(1).read shouldBe -2L
+  }
+
+  "sext from 1 bit" in {
+    val cpu = runCPU(VECTORS +
+      """ldi r1, 1
+        |ldi r2, 1
+        |sext r1, r2
+        |halt
+        |""".stripMargin)
+    cpu.r(1).read shouldBe -1L
+  }
+
+  "sext with width 0 is identity" in {
+    val cpu = runCPU(VECTORS +
+      """ldi r1, 42
+        |ldi r2, 0
+        |sext r1, r2
+        |halt
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 42
+  }
 }

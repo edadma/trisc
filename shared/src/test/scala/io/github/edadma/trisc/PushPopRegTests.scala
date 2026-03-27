@@ -1,8 +1,8 @@
 package io.github.edadma.trisc
 
-class MovemTests extends TestHelpers {
+class PushPopRegTests extends TestHelpers {
 
-  // ===== MOVEM.SAVE =====
+  // ===== PSHR =====
 
   "pshr r1 pushes r1 only" in {
     val cpu = runCPU(VECTORS +
@@ -52,7 +52,7 @@ class MovemTests extends TestHelpers {
     cpu.readLong(0xFF0 - 48) shouldBe 60
   }
 
-  // ===== MOVEM.RESTORE =====
+  // ===== POPR =====
 
   "popr r1 pops r1 only" in {
     val cpu = runCPU(VECTORS +

@@ -144,4 +144,41 @@ class BitCountTests extends TestHelpers {
         |""".stripMargin)
     cpu.r(2).read shouldBe 1
   }
+
+  // ===== CNT (population count) =====
+
+  "cnt of 0 is 0" in {
+    val cpu = runCPU(VECTORS +
+      """cnt r1, r0
+        |halt
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 0
+  }
+
+  "cnt of 1 is 1" in {
+    val cpu = runCPU(VECTORS +
+      """ldi r1, 1
+        |cnt r2, r1
+        |halt
+        |""".stripMargin)
+    cpu.r(2).read shouldBe 1
+  }
+
+  "cnt of 0xFF is 8" in {
+    val cpu = runCPU(VECTORS +
+      """ldi r1, 0xFF
+        |cnt r2, r1
+        |halt
+        |""".stripMargin)
+    cpu.r(2).read shouldBe 8
+  }
+
+  "cnt of 0x55 is 4" in {
+    val cpu = runCPU(VECTORS +
+      """ldi r1, 0x55
+        |cnt r2, r1
+        |halt
+        |""".stripMargin)
+    cpu.r(2).read shouldBe 4
+  }
 }

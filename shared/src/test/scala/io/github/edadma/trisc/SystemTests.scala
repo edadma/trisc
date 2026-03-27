@@ -517,4 +517,52 @@ class SystemTests extends TestHelpers {
     cpu.r(3).read shouldBe 88
     cpu.state shouldBe State.Halt
   }
+
+  // ===== CLI (disable interrupts) =====
+
+  "cli sets Ind flag" in {
+    val cpu = runCPU(VECTORS +
+      """cli
+        |gpsr r1
+        |halt
+        |""".stripMargin)
+    (cpu.r(1).read & 1) shouldBe 1
+  }
+
+  // ===== STI (enable interrupts) =====
+
+  "sti clears Ind flag" in {
+    val cpu = runCPU(VECTORS +
+      """cli
+        |sti
+        |gpsr r1
+        |halt
+        |""".stripMargin)
+    (cpu.r(1).read & 1) shouldBe 0
+  }
+
+  // ===== SWSP (swap r7 and usp) =====
+
+  "swsp swaps r7 and usp" in {
+    val cpu = runCPU(VECTORS +
+      """movi r1, 0x800
+        |susp r1
+        |swsp
+        |gusp r2
+        |halt
+        |""".stripMargin)
+    cpu.r(7).read shouldBe 0x800
+    cpu.r(2).read should not be 0x800L
+  }
+
+  "swsp twice is identity" in {
+    val cpu = runCPU(VECTORS +
+      """gusp r1
+        |swsp
+        |swsp
+        |gusp r2
+        |halt
+        |""".stripMargin)
+    cpu.r(1).read shouldBe cpu.r(2).read
+  }
 }

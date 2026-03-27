@@ -76,6 +76,10 @@ RR
         bclr    10110    (ra = ra & ~(1 << rb))
         rol     10111    (ra = ra rotate left by rb)
         ror     11000    (ra = ra rotate right by rb)
+        cnt     11001    (ra = popcount of rb)
+        rev     11010    (ra = byte-reverse of rb)
+        sext    11011    (sign-extend ra from bit width rb)
+        mov     11100    (ra = rb)
 
     110 000 000 01 iiiii    trap
     110 aaa bbb 10 iiiii    ld
@@ -114,3 +118,6 @@ R
     trapv   0001111    (traps if V flag set)
     pshr    0010000    (push r1-rN onto stack)
     popr    0010001    (pop rN-r1 from stack)
+    cli     0010010    (disable interrupts, supervisor only)
+    sti     0010011    (enable interrupts, supervisor only)
+    swsp    0010100    (swap r7 and usp, supervisor only)
