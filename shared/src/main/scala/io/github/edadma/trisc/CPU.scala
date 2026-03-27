@@ -14,7 +14,7 @@ enum State:
   case Reset, Interrupt, InstructionAccess, DataAccess, MisalignedAccess,
     UnimplementedOpcode, PrivilegeViolation, IllegalDivide,
     Trap0, Trap1, Trap2, Trap3, Trap4, Trap5, Trap6, Trap7,
-    Halt, Run, Wfi
+    Halt, Run, Wfi, DoubleFault
 
 class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   val name: String = mem.name
@@ -61,14 +61,13 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
     new Reg,
     new Reg,
   )
-  var sr = new Array[Long](8)
   var pc: Long = 0
-  var spc: Long = 0
   var psr: Int = 0
-  var spsr: Int = 0
+  var usp: Long = 0
   var state: State = State.Halt
   var reservationAddr: Long = 0
   var reservationValid: Boolean = false
+  private var inException: Boolean = false
 
   var limit: Int = -1
   var clump: Int = 1000
@@ -81,6 +80,8 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   def reset(): Unit =
     for i <- 1 until 8 do r(i).write(0)
 
+    usp = 0
+    inException = false
     state = State.Reset
     set(Status.Ind, true)
     set(Status.Mode, true)
@@ -91,15 +92,51 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
 
     if !test(Status.Ind) then state = State.Interrupt
 
+  private def enterException(): Unit =
+    if inException then
+      state = State.DoubleFault
+      return
+
+    inException = true
+
+    try
+      if state == State.Reset then
+        // Reset is special (like 68000): load SSP from vector 0, PC from vector 1
+        r(7).write(mem.readLong(0))
+        pc = mem.readLong(8)
+        state = State.Run
+        set(Status.Mode, true)
+        set(Status.Ind, true)
+        reservationValid = false
+      else
+        // Swap r7 <-> usp if coming from user mode
+        if !test(Status.Mode) then
+          val tmp = r(7).read
+          r(7).write(usp)
+          usp = tmp
+
+        // Push PSR then PC onto supervisor stack (8 bytes each)
+        r(7).write(r(7).read - 8)
+        mem.writeLong(r(7).read, psr)
+        r(7).write(r(7).read - 8)
+        mem.writeLong(r(7).read, pc)
+
+        // Load PC from vector table (offset by 1 since reset occupies slots 0 and 1)
+        pc = mem.readLong((state.ordinal + 1) * 8)
+        state = State.Run
+        set(Status.Mode, true)
+        set(Status.Ind, true)
+        reservationValid = false
+    catch
+      case _: RuntimeException =>
+        state = State.DoubleFault
+    finally
+      inException = false
+
   def execute(): Unit =
     if state.ordinal < State.Halt.ordinal then
-      for i <- 1 to 7 do sr(i) = r(i).read
-      spc = pc
-      spsr = psr
-      pc = readLong(state.ordinal * 8)
-      state = State.Run
-      set(Status.Mode, true)
-      reservationValid = false
+      enterException()
+      if state == State.DoubleFault then return
 
     val inst =
       try readShortUnsigned(pc)
@@ -127,13 +164,13 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   final def run(): Unit =
     var count = 0
 
-    while state != State.Halt && state != State.Wfi && count < clump do
+    while state != State.Halt && state != State.Wfi && state != State.DoubleFault && count < clump do
       execute()
       count += 1
 
     if limit > 0 then limit -= 1
 
-    if state != State.Halt && limit != 0 then
+    if state != State.Halt && state != State.DoubleFault && limit != 0 then
       interrupts foreach (_(this))
       run()
 
@@ -218,6 +255,8 @@ object Decode:
         "111 000 000 0001010" -> (_ => RTE),
         "111 000 000 0001011" -> (_ => FENCE),
         "111 000 000 0001100" -> (_ => WFI),
+        "111 000 rrr 0001101" -> ((operands: Map[Char, Int]) => new GUSP(operands('r'))),
+        "111 000 rrr 0001110" -> ((operands: Map[Char, Int]) => new SUSP(operands('r'))),
         "101 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new ADDI(args('a'), args('b'), ext(args('i')))),
         "100 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BLS(args('a'), args('b'), ext(args('i')))),
         "011 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BLU(args('a'), args('b'), ext(args('i')))),

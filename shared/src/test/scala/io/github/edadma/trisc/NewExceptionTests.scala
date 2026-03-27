@@ -2,11 +2,12 @@ package io.github.edadma.trisc
 
 class NewExceptionTests extends TestHelpers {
 
-  // ===== Unimplemented Opcode (vector 5) =====
+  // ===== Unimplemented Opcode (vector 6) =====
 
-  "unimplemented opcode dispatches to vector 5" in {
+  "unimplemented opcode dispatches to vector 6" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -14,6 +15,7 @@ class NewExceptionTests extends TestHelpers {
         |dd handler
         |dd 0
         |dd 0
+        |resb 64
         |reset
         |  ldi r1, 42
         |  halt
@@ -31,11 +33,12 @@ class NewExceptionTests extends TestHelpers {
     cpu.state shouldBe State.UnimplementedOpcode
   }
 
-  // ===== Illegal Integer Divide (vector 7) =====
+  // ===== Illegal Integer Divide (vector 8) =====
 
   "div by zero triggers illegal divide exception" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -43,6 +46,7 @@ class NewExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
+        |resb 64
         |reset
         |  ldi r1, 42
         |  div r2, r1, r0
@@ -57,7 +61,8 @@ class NewExceptionTests extends TestHelpers {
 
   "rem by zero triggers illegal divide exception" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -65,6 +70,7 @@ class NewExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
+        |resb 64
         |reset
         |  ldi r1, 42
         |  rem r2, r1, r0
@@ -79,7 +85,8 @@ class NewExceptionTests extends TestHelpers {
 
   "divu by zero triggers illegal divide exception" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -87,6 +94,7 @@ class NewExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
+        |resb 64
         |reset
         |  ldi r1, 42
         |  divu r2, r1, r0
@@ -101,7 +109,8 @@ class NewExceptionTests extends TestHelpers {
 
   "remu by zero triggers illegal divide exception" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -109,6 +118,7 @@ class NewExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
+        |resb 64
         |reset
         |  ldi r1, 42
         |  remu r2, r1, r0
@@ -131,9 +141,10 @@ class NewExceptionTests extends TestHelpers {
     cpu.r(3).read shouldBe 6
   }
 
-  "divide exception preserves registers via rte" in {
+  "divide exception preserves registers when handler does not clobber" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -141,8 +152,9 @@ class NewExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
+        |resb 64
         |reset
-        |  ldi r1, 0
+        |  ldi r1, 2
         |  spsr r1
         |  ldi r1, 42
         |  div r2, r1, r0
@@ -155,12 +167,13 @@ class NewExceptionTests extends TestHelpers {
     cpu.r(3).read shouldBe 88
   }
 
-  // ===== Data Access (vector 3) =====
+  // ===== Data Access (vector 4, slot 4) =====
 
   "load from unmapped address triggers data access exception" in {
     val mem = new Memory("Memory", new RAM(0, 256))
     val tof = assemble(
-      """dd reset
+      """dd 0xF0
+        |dd reset
         |dd 0
         |dd 0
         |dd handler
@@ -168,6 +181,7 @@ class NewExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
+        |resb 64
         |reset
         |  movi r1, 0x1000
         |  ldb r2, r1, r0
@@ -187,7 +201,8 @@ class NewExceptionTests extends TestHelpers {
   "store to unmapped address triggers data access exception" in {
     val mem = new Memory("Memory", new RAM(0, 256))
     val tof = assemble(
-      """dd reset
+      """dd 0xF0
+        |dd reset
         |dd 0
         |dd 0
         |dd handler
@@ -195,6 +210,7 @@ class NewExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
+        |resb 64
         |reset
         |  movi r1, 0x1000
         |  stb r2, r1, r0
@@ -211,12 +227,13 @@ class NewExceptionTests extends TestHelpers {
     cpu.r(3).read shouldBe 77
   }
 
-  // ===== Instruction Access (vector 2) =====
+  // ===== Instruction Access (vector 3, slot 3) =====
 
   "fetch from unmapped address triggers instruction access exception" in {
     val mem = new Memory("Memory", new RAM(0, 256))
     val tof = assemble(
-      """dd reset
+      """dd 0xF0
+        |dd reset
         |dd 0
         |dd handler
         |dd 0
@@ -224,6 +241,7 @@ class NewExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
+        |resb 64
         |reset
         |  movi r1, 0x1000
         |  jalr r0, r1

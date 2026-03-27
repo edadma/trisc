@@ -102,4 +102,6 @@ R
     gpsr  0001001
     rte   0001010    (supervisor only)
     fence 0001011
-    wfi   0001100
+    wfi   0001100    (supervisor only)
+    gusp  0001101    (supervisor only)
+    susp  0001110    (supervisor only)

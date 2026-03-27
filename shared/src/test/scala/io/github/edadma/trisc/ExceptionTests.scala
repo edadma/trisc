@@ -12,16 +12,11 @@ class ExceptionTests extends TestHelpers {
     cpu.test(Status.C) shouldBe false
   }
 
-  "reset vector is loaded from address 0" in {
+  "reset loads SSP from address 0 and PC from address 8" in {
     val cpu = runCPU(
-      """dd start
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
+      """dd 0xFF0
+        |dd start
+        |resb 120
         |halt
         |start
         |  ldi r1, 42
@@ -32,9 +27,10 @@ class ExceptionTests extends TestHelpers {
 
   // ===== TRAP =====
 
-  "trap 0 dispatches to vector 8" in {
+  "trap 0 dispatches to vector 9" in {
     val output = runProgram(
       """STDOUT = 0xFF8
+        |dd 0xFF0
         |dd reset
         |dd 0
         |dd 0
@@ -44,9 +40,8 @@ class ExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
+        |resb 56
         |reset
-        |  ldi r1, 0
-        |  spsr r1
         |  trap 0
         |  halt
         |handler
@@ -57,9 +52,10 @@ class ExceptionTests extends TestHelpers {
     output shouldBe "T"
   }
 
-  "trap preserves and restores registers via rte" in {
+  "trap preserves registers when handler does not clobber them" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -68,16 +64,13 @@ class ExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
+        |resb 56
         |reset
-        |  ldi r1, 0
-        |  spsr r1
         |  ldi r1, 42
         |  ldi r2, 99
         |  trap 0
         |  halt
         |handler
-        |  ldi r1, 0
-        |  ldi r2, 0
         |  rte
         |""".stripMargin)
     cpu.r(1).read shouldBe 42
@@ -86,7 +79,8 @@ class ExceptionTests extends TestHelpers {
 
   "trap resumes at instruction after trap" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -95,9 +89,8 @@ class ExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
+        |resb 56
         |reset
-        |  ldi r1, 0
-        |  spsr r1
         |  trap 0
         |  ldi r1, 77
         |  halt
@@ -109,9 +102,10 @@ class ExceptionTests extends TestHelpers {
 
   // ===== RTE =====
 
-  "rte restores all registers" in {
+  "rte pops PC and PSR from stack" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -120,34 +114,29 @@ class ExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
+        |resb 56
         |reset
-        |  ldi r1, 0
-        |  spsr r1
         |  ldi r1, 1
         |  ldi r2, 2
-        |  ldi r3, 3
-        |  ldi r4, 4
-        |  ldi r5, 5
-        |  ldi r6, 6
-        |  ldi r7, 7
         |  trap 0
+        |  ldi r3, 33
         |  halt
         |handler
+        |  ; handler clobbers r1 and r2 — rte does NOT restore them
         |  ldi r1, 0
         |  ldi r2, 0
-        |  ldi r3, 0
-        |  ldi r4, 0
-        |  ldi r5, 0
-        |  ldi r6, 0
-        |  ldi r7, 0
         |  rte
         |""".stripMargin)
-    for i <- 1 to 7 do cpu.r(i).read shouldBe i
+    ; // rte only restores PC and PSR, not registers
+    cpu.r(1).read shouldBe 0  // clobbered by handler
+    cpu.r(2).read shouldBe 0  // clobbered by handler
+    cpu.r(3).read shouldBe 33 // resumes after trap
   }
 
   "rte restores PSR" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -156,8 +145,9 @@ class ExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
+        |resb 56
         |reset
-        |  ldi r1, 0
+        |  ldi r1, 2
         |  spsr r1
         |  trap 0
         |  gpsr r1
@@ -165,12 +155,13 @@ class ExceptionTests extends TestHelpers {
         |handler
         |  rte
         |""".stripMargin)
-    cpu.r(1).read shouldBe 0
+    ; // PSR was set to 2 (Mode only), trap saved it, rte restored it
+    cpu.r(1).read shouldBe 2
   }
 
   // ===== Interrupts =====
 
-  "interrupt dispatches to vector 1 when enabled" in {
+  "interrupt dispatches to vector 2 when enabled" in {
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
       val name = "stdout"
@@ -187,15 +178,13 @@ class ExceptionTests extends TestHelpers {
     val mem = new Memory("Memory", new RAM(0, 0xFF8), stdout)
     val tof = assemble(
       """STDOUT = 0xFF8
+        |dd 0xFF0
         |dd reset
         |dd isr
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
+        |resb 112
         |reset
+        |  movi r1, 0xE00
+        |  susp r1
         |  ldi r1, 0
         |  spsr r1
         |loop
@@ -215,7 +204,7 @@ class ExceptionTests extends TestHelpers {
   "interrupt is masked when Ind is set" in {
     val interruptSource: CPU => Unit = cpu => cpu.interrupt()
     val mem = new Memory("Memory", new RAM(0, 0x1000))
-    val tof = assemble(VECTORS + "ldi r1, 1\nspsr r1\nldi r1, 42\nhalt\n")
+    val tof = assemble(VECTORS + "ldi r1, 3\nspsr r1\nldi r1, 42\nhalt\n")
     tof.load(mem)
     val cpu = new CPU(mem, List(interruptSource)) { limit = 100 }
     cpu.reset()

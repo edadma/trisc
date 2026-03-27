@@ -13,14 +13,9 @@ class LinkerTests extends TestHelpers {
 
   "link two TOFs with cross-references" in {
     val main = assemble(
-      """dd start
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
+      """dd 0xFF0
+        |dd start
+        |resb 120
         |start
         |  movi r1, helper
         |  jalr r7, r1
@@ -121,14 +116,9 @@ class LinkerTests extends TestHelpers {
 
   "ABS64 relocation in vector table enables CPU reset dispatch" in {
     val main = assemble(
-      """dl start
-        |dl 0
-        |dl 0
-        |dl 0
-        |dl 0
-        |dl 0
-        |dl 0
-        |dl 0
+      """dd 0xFF0
+        |dl start
+        |resb 120
         |nop
         |""".stripMargin, relocatable = true)
     val code = assemble(
@@ -208,14 +198,9 @@ class LinkerTests extends TestHelpers {
 
     val main = assemble(
       """STDOUT = 0xFF8
+        |dd 0xFF0
         |dd start
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
+        |resb 120
         |start
         |  movi r7, 0xF00
         |  movi r1, printA
