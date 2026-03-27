@@ -77,6 +77,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |fsub
                           |global
                           |gpsr
+                          |gusp
                           |halt
                           |jalr
                           |ld
@@ -129,6 +130,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |sts
                           |stw
                           |sub
+                          |susp
                           |trap
                           |wfi
                           |xor
@@ -270,7 +272,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
       | label ~ instruction ^^ { case l ~ i => Seq(l, i) }
 
   lazy val mnemonics: P[String] =
-    "adc" | "add" | "addi" | "and" | "asr" | "auipc" | "beq" | "bge" | "bgeu" | "bgt" | "bgu" | "ble" | "bleu" | "bls" | "blu" | "bne" | "bra" | "clz" | "ctz" | "cvt" | "div" | "divu" | "fabs" | "fadd" | "fdiv" | "fence" | "fint" | "finv" | "fmul" | "fneg" | "fpow" | "fslt" | "fsqrt" | "fsub" | "gpsr" | "halt" | "jalr" | "ld" | "ldb" | "ldd" | "ldi" | "lds" | "ldw" | "ll" | "lsl" | "lsr" | "mov" | "movi" | "mul" | "mulu" | "neg" | "nop" | "not" | "or" | "popb" | "popd" | "pops" | "popw" | "pshb" | "pshd" | "pshs" | "pshw" | "rem" | "remu" | "ret" | "rte" | "sbc" | "sc" | "seb" | "ses" | "sew" | "sli" | "slt" | "sltu" | "spsr" | "st" | "stb" | "std" | "sti" | "sts" | "stw" | "sub" | "trap" | "wfi" | "xor" | "zeb" | "zes" | "zew"
+    "adc" | "add" | "addi" | "and" | "asr" | "auipc" | "beq" | "bge" | "bgeu" | "bgt" | "bgu" | "ble" | "bleu" | "bls" | "blu" | "bne" | "bra" | "clz" | "ctz" | "cvt" | "div" | "divu" | "fabs" | "fadd" | "fdiv" | "fence" | "fint" | "finv" | "fmul" | "fneg" | "fpow" | "fslt" | "fsqrt" | "fsub" | "gpsr" | "gusp" | "halt" | "jalr" | "ld" | "ldb" | "ldd" | "ldi" | "lds" | "ldw" | "ll" | "lsl" | "lsr" | "mov" | "movi" | "mul" | "mulu" | "neg" | "nop" | "not" | "or" | "popb" | "popd" | "pops" | "popw" | "pshb" | "pshd" | "pshs" | "pshw" | "rem" | "remu" | "ret" | "rte" | "sbc" | "sc" | "seb" | "ses" | "sew" | "sli" | "slt" | "sltu" | "spsr" | "st" | "stb" | "std" | "sti" | "sts" | "stw" | "sub" | "susp" | "trap" | "wfi" | "xor" | "zeb" | "zes" | "zew"
 
   lazy val instruction: P[InstructionLineAST] =
     mnemonics ~ repsep(expression, ",") ^^ { case m ~ es =>

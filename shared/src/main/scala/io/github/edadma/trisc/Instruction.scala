@@ -48,7 +48,9 @@ class TRAP(imm: Int) extends Instruction:
 object HALT extends SimpleInstruction:
   val mnemonic = "halt"
 
-  def apply(cpu: CPU): Unit = cpu.state = State.Halt
+  def apply(cpu: CPU): Unit =
+    if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
+    else cpu.state = State.Halt
 
 object RTE extends SimpleInstruction:
   val mnemonic = "rte"
@@ -56,9 +58,16 @@ object RTE extends SimpleInstruction:
   def apply(cpu: CPU): Unit =
     if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
     else
-      for i <- 1 to 7 do cpu.r(i).write(cpu.sr(i))
-      cpu.pc = cpu.spc
-      cpu.psr = cpu.spsr
+      // Pop PC then PSR from supervisor stack (reverse of push)
+      cpu.pc = cpu.readLong(cpu.r(7).read)
+      cpu.r(7).write(cpu.r(7).read + 8)
+      cpu.psr = cpu.readLong(cpu.r(7).read).toInt
+      cpu.r(7).write(cpu.r(7).read + 8)
+      // Swap r7 <-> usp if returning to user mode
+      if !cpu.test(Status.Mode) then
+        val tmp = cpu.r(7).read
+        cpu.r(7).write(cpu.usp)
+        cpu.usp = tmp
 
 class SPSR(r: Int) extends SimpleInstruction:
   val mnemonic = "spsr"
@@ -468,7 +477,23 @@ object FENCE extends SimpleInstruction:
 object WFI extends SimpleInstruction:
   val mnemonic = "wfi"
 
-  def apply(cpu: CPU): Unit = cpu.state = State.Wfi
+  def apply(cpu: CPU): Unit =
+    if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
+    else cpu.state = State.Wfi
+
+class GUSP(r: Int) extends RInstruction(r):
+  val mnemonic = "gusp"
+
+  def apply(cpu: CPU): Unit =
+    if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
+    else cpu.r(r).write(cpu.usp)
+
+class SUSP(r: Int) extends RInstruction(r):
+  val mnemonic = "susp"
+
+  def apply(cpu: CPU): Unit =
+    if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
+    else cpu.usp = cpu.r(r).read
 
 class AUIPC(r: Int, imm: Int) extends ImmediateInstruction(r, imm):
   val mnemonic = "auipc"

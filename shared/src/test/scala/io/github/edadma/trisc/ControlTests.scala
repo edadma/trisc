@@ -61,14 +61,9 @@ class ControlTests extends TestHelpers {
   "jalr subroutine call and return" in {
     val output = runProgram(
       """STDOUT = 0xFF8
-        |dd 64
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
+        |dd 0xFF0
+        |dd 136
+        |resb 120
         |ldi r2, 'A'
         |movi r1, printChar
         |jalr r7, r1
@@ -105,8 +100,8 @@ class ControlTests extends TestHelpers {
   }
 
   "gpsr reads processor status register" in {
-    val cpu = runCPU(VECTORS + "ldi r1, 5\nspsr r1\ngpsr r2\nhalt\n")
-    cpu.r(2).read shouldBe 5
+    val cpu = runCPU(VECTORS + "ldi r1, 7\nspsr r1\ngpsr r2\nhalt\n")
+    cpu.r(2).read shouldBe 7
   }
 
   "spsr then gpsr round-trips" in {

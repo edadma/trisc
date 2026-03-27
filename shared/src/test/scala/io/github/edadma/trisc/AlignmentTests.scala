@@ -41,7 +41,8 @@ class AlignmentTests extends TestHelpers {
 
   "misaligned short read triggers exception" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -49,8 +50,9 @@ class AlignmentTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
+        |resb 64
         |reset
-        |  ldi r1, 0
+        |  ldi r1, 2
         |  spsr r1
         |  movi r2, buf
         |  addi r2, r2, 1
@@ -69,7 +71,8 @@ class AlignmentTests extends TestHelpers {
 
   "misaligned word read triggers exception" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -77,8 +80,9 @@ class AlignmentTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
+        |resb 64
         |reset
-        |  ldi r1, 0
+        |  ldi r1, 2
         |  spsr r1
         |  movi r2, buf
         |  addi r2, r2, 2
@@ -96,7 +100,8 @@ class AlignmentTests extends TestHelpers {
 
   "misaligned double read triggers exception" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -104,8 +109,9 @@ class AlignmentTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
+        |resb 64
         |reset
-        |  ldi r1, 0
+        |  ldi r1, 2
         |  spsr r1
         |  movi r2, buf
         |  addi r2, r2, 4

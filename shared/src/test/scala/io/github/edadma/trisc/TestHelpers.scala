@@ -5,16 +5,13 @@ import org.scalatest.matchers.should.Matchers
 
 trait TestHelpers extends AnyFreeSpec with Matchers {
 
+  // Vector table: slot 0 = initial SSP, slot 1 = initial PC, slots 2-16 = exception/trap handlers
+  // 17 slots × 8 bytes = 136 bytes, code starts at address 136
   val VECTORS =
     """
-      |dd 64
-      |dd 0
-      |dd 0
-      |dd 0
-      |dd 0
-      |dd 0
-      |dd 0
-      |dd 0
+      |dd 0xFF0
+      |dd 136
+      |resb 120
       |""".stripMargin
 
   def mkCPU(program: String, memSize: Int = 0x1000, addresses: Int = 2): (CPU, StringBuilder) =

@@ -5,14 +5,9 @@ class IntegrationTests extends TestHelpers {
   "loop counting to 3 with output" in {
     val output = runProgram(
       """STDOUT = 0xFF8
-        |dd 64
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
+        |dd 0xFF0
+        |dd 136
+        |resb 120
         |ldi r1, 1
         |movi r3, STDOUT
         |loop
@@ -49,6 +44,7 @@ class IntegrationTests extends TestHelpers {
   "number to string conversion" in {
     val output = runProgram(
       """STDOUT = 0x1FF8
+        |dd 0x1FF0
         |dd reset
         |dd 0
         |dd 0
@@ -58,8 +54,9 @@ class IntegrationTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd trap0
+        |resb 56
         |reset
-        |  ldi r1, 0
+        |  ldi r1, 2
         |  spsr r1
         |  movi r2, 123
         |  ldi r3, 10

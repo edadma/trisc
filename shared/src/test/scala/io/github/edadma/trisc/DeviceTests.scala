@@ -9,14 +9,9 @@ class DeviceTests extends TestHelpers {
   "stdout outputs ASCII character" in {
     val output = runProgram(
       """STDOUT = 0xFF8
-        |dd 64
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
+        |dd 0xFF0
+        |dd 136
+        |resb 120
         |movi r1, STDOUT
         |sti r1, 'A'
         |sti r1, 'B'
@@ -435,14 +430,9 @@ class DeviceTests extends TestHelpers {
       onWrite = (_, data) => captured = captured :+ data.toByte)
     val mem = new Memory("Memory", new RAM(0, 0xFF0), dev)
     val tof = assemble(
-      """dd 64
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
+      """dd 0xFE0
+        |dd 136
+        |resb 120
         |movi r3, 0xFF0
         |ldi r1, 'X'
         |stb r1, r3, r0
@@ -535,14 +525,9 @@ class DeviceTests extends TestHelpers {
     val mem = new Memory("Memory", new RAM(0, 0xE00), dev)
     val tof = assemble(
       """DISPLAY = 0xE00
-        |dd 64
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
+        |dd 0xDF0
+        |dd 136
+        |resb 120
         |movi r3, DISPLAY
         |ldi r1, 0xFF
         |stb r1, r3, r0
@@ -611,14 +596,9 @@ class DeviceTests extends TestHelpers {
     val mem = new Memory("Memory", new RAM(0, 0xFF0), rng)
     val tof = assemble(
       """RNG = 0xFF0
-        |dd 64
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
+        |dd 0xFE0
+        |dd 136
+        |resb 120
         |movi r3, RNG
         |ldb r1, r3, r0
         |ldb r2, r3, r0

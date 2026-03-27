@@ -75,7 +75,8 @@ class AtomicTests extends TestHelpers {
 
   "sc after trap invalidates reservation" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -84,8 +85,9 @@ class AtomicTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
+        |resb 56
         |reset
-        |  ldi r1, 0
+        |  ldi r1, 2
         |  spsr r1
         |  movi r3, data
         |  ll r1, r3

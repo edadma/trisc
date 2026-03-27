@@ -98,16 +98,12 @@ class SystemTests extends TestHelpers {
     val mem = new Memory("Memory", new RAM(0, 0xFF8), stdout)
     val tof = assemble(
       """STDOUT = 0xFF8
+        |dd 0xFF0
         |dd reset
         |dd isr
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
+        |resb 112
         |reset
-        |  ldi r1, 0
+        |  ldi r1, 2
         |  spsr r1
         |  wfi
         |  ldi r1, 42
@@ -136,16 +132,12 @@ class SystemTests extends TestHelpers {
       if callCount == 3 then cpu.interrupt()
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     val tof = assemble(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd isr
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
+        |resb 112
         |reset
-        |  ldi r1, 0
+        |  ldi r1, 2
         |  spsr r1
         |  ldi r3, 10
         |  wfi
@@ -166,7 +158,8 @@ class SystemTests extends TestHelpers {
 
   "spsr in user mode triggers privilege violation" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -174,7 +167,12 @@ class SystemTests extends TestHelpers {
         |dd 0
         |dd privhandler
         |dd 0
+        |resb 64
         |reset
+        |  movi r1, 0xE00
+        |  susp r1
+        |  movi r1, 0xE00
+        |  susp r1
         |  ldi r1, 0
         |  spsr r1
         |  ldi r1, 5
@@ -203,7 +201,8 @@ class SystemTests extends TestHelpers {
   "spsr clears mode bit then second spsr faults" in {
     // Verify the sequence: spsr with Mode=0 clears Mode, next spsr fails.
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -211,7 +210,10 @@ class SystemTests extends TestHelpers {
         |dd 0
         |dd privhandler
         |dd 0
+        |resb 64
         |reset
+        |  movi r1, 0xE00
+        |  susp r1
         |  ldi r1, 0
         |  spsr r1
         |  ldi r3, 1
@@ -231,7 +233,8 @@ class SystemTests extends TestHelpers {
 
   "rte in user mode triggers privilege violation" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -239,7 +242,10 @@ class SystemTests extends TestHelpers {
         |dd 0
         |dd privhandler
         |dd 0
+        |resb 64
         |reset
+        |  movi r1, 0xE00
+        |  susp r1
         |  ldi r1, 0
         |  spsr r1
         |  rte
@@ -257,7 +263,8 @@ class SystemTests extends TestHelpers {
     // After reset we are in supervisor mode. rte should work (it returns to saved PC).
     // Use trap to set up a proper return context, then rte in handler (supervisor mode).
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -266,8 +273,9 @@ class SystemTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
+        |resb 56
         |reset
-        |  ldi r1, 0
+        |  ldi r1, 2
         |  spsr r1
         |  trap 0
         |  ldi r1, 77
@@ -283,7 +291,8 @@ class SystemTests extends TestHelpers {
 
   "gpsr works in user mode" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -291,21 +300,28 @@ class SystemTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
+        |dd trap0handler
+        |resb 56
         |reset
+        |  movi r1, 0xE00
+        |  susp r1
         |  ldi r1, 0
         |  spsr r1
         |  gpsr r2
+        |  trap 0
+        |trap0handler
         |  halt
         |""".stripMargin)
     // After spsr r1 (r1=0), Mode is cleared. gpsr should still work.
-    // PSR should be 0 (all flags cleared).
+    // PSR should be 0 (all flags cleared). Trap back to supervisor for halt.
     cpu.r(2).read shouldBe 0
     cpu.state shouldBe State.Halt
   }
 
   "gpsr reads correct PSR value after clearing mode" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -313,14 +329,18 @@ class SystemTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
+        |dd trap0handler
+        |resb 56
         |reset
         |  ldi r1, 4
         |  spsr r1
         |  gpsr r2
+        |  trap 0
+        |trap0handler
         |  halt
         |""".stripMargin)
     // spsr r1 with r1=4 sets C flag, clears Mode and Ind.
-    // gpsr should read 4.
+    // gpsr should read 4. Trap back to supervisor for halt.
     cpu.r(2).read shouldBe 4
   }
 
@@ -338,7 +358,8 @@ class SystemTests extends TestHelpers {
 
   "privilege violation handler runs in supervisor mode" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -346,7 +367,10 @@ class SystemTests extends TestHelpers {
         |dd 0
         |dd privhandler
         |dd 0
+        |resb 64
         |reset
+        |  movi r1, 0xE00
+        |  susp r1
         |  ldi r1, 0
         |  spsr r1
         |  spsr r1
@@ -356,13 +380,14 @@ class SystemTests extends TestHelpers {
         |  halt
         |""".stripMargin)
     // The handler should be in supervisor mode (Mode bit set).
-    // Exception entry sets Mode but does not set Ind, so PSR = Mode(2) only.
-    cpu.r(3).read shouldBe 2
+    // Exception entry sets Mode(2) and Ind(1), so PSR = 3.
+    cpu.r(3).read shouldBe 3
   }
 
-  "privilege violation saves and restores registers via rte" in {
+  "privilege violation handler resumes after faulting instruction via rte" in {
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -370,25 +395,32 @@ class SystemTests extends TestHelpers {
         |dd 0
         |dd privhandler
         |dd 0
+        |dd trap0handler
+        |resb 56
         |reset
+        |  movi r1, 0xE00
+        |  susp r1
         |  ldi r1, 0
         |  spsr r1
         |  ldi r1, 10
         |  ldi r2, 20
         |  rte
         |  ldi r3, 30
-        |  halt
+        |  trap 0
         |privhandler
-        |  ldi r1, 0
-        |  ldi r2, 0
+        |  ; rte does not restore registers, handler does not clobber r1, r2
         |  ldi r5, 55
         |  rte
+        |trap0handler
+        |  halt
         |""".stripMargin)
-    // rte in user mode faults. Handler clobbers r1, r2, sets r5=55.
-    // rte in handler restores r1=10, r2=20 from saved regs, resumes after the faulting rte.
+    // rte in user mode faults. Handler sets r5=55 but does not touch r1,r2.
+    // rte in handler pops PC and PSR, resumes after the faulting rte.
+    // trap 0 returns to supervisor mode for halt.
     cpu.r(1).read shouldBe 10
     cpu.r(2).read shouldBe 20
     cpu.r(3).read shouldBe 30
+    cpu.r(5).read shouldBe 55
     cpu.state shouldBe State.Halt
   }
 
@@ -402,16 +434,12 @@ class SystemTests extends TestHelpers {
         cpu.interrupt()
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     val tof = assemble(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd isr
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
+        |resb 112
         |reset
-        |  ldi r1, 0
+        |  ldi r1, 2
         |  spsr r1
         |  fence
         |  wfi
@@ -435,16 +463,12 @@ class SystemTests extends TestHelpers {
     val interruptSource: CPU => Unit = cpu => cpu.interrupt()
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     val tof = assemble(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd isr
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
+        |resb 112
         |reset
-        |  ldi r1, 1
+        |  ldi r1, 3
         |  spsr r1
         |  wfi
         |  ldi r1, 42
@@ -463,7 +487,8 @@ class SystemTests extends TestHelpers {
   "gpsr does not trigger privilege violation even after mode cleared" in {
     // Explicitly test that gpsr after clearing mode does NOT cause a fault
     val cpu = runCPU(
-      """dd reset
+      """dd 0xFF0
+        |dd reset
         |dd 0
         |dd 0
         |dd 0
@@ -471,18 +496,24 @@ class SystemTests extends TestHelpers {
         |dd 0
         |dd privhandler
         |dd 0
+        |dd trap0handler
+        |resb 56
         |reset
+        |  movi r1, 0xE00
+        |  susp r1
         |  ldi r1, 0
         |  spsr r1
         |  gpsr r2
         |  ldi r3, 88
-        |  halt
+        |  trap 0
         |privhandler
         |  ldi r3, 11
         |  halt
+        |trap0handler
+        |  halt
         |""".stripMargin)
     // If gpsr triggered a privilege violation, r3 would be 11.
-    // It should NOT fault, so r3 should be 88.
+    // It should NOT fault, so r3 should be 88. Trap 0 returns to supervisor for halt.
     cpu.r(3).read shouldBe 88
     cpu.state shouldBe State.Halt
   }
