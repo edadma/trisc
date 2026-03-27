@@ -120,8 +120,8 @@ boot
 ; Stack frame layout after saving (lowest address = top of stack):
 ;
 ;   Offset  Contents     Saved by
-;   SP+0    USP          ISR (this code)
-;   SP+8    r6           ISR
+;   SP+0    USP          ISR (gusp + pshd)
+;   SP+8    r6           ISR (pshr r6 — pushes r1 through r6)
 ;   SP+16   r5           ISR
 ;   SP+24   r4           ISR
 ;   SP+32   r3           ISR
@@ -135,13 +135,8 @@ boot
 global timer_isr, func
 
 timer_isr
-  ; Save current thread's registers
-  pshd r1
-  pshd r2
-  pshd r3
-  pshd r4
-  pshd r5
-  pshd r6
+  ; Save r1-r6 in one instruction (r1 pushed first = deepest)
+  pshr r6
   ; Save user stack pointer
   gusp r1
   pshd r1
@@ -154,16 +149,11 @@ timer_isr
   ; Switch to new thread's stack: schedule() returned new SSP in r1
   mov  r7, r1
 
-  ; Restore new thread's registers
-  popd r1
   ; Restore user stack pointer
-  susp r1
-  popd r6
-  popd r5
-  popd r4
-  popd r3
-  popd r2
   popd r1
+  susp r1
+  ; Restore r1-r6 in one instruction (r6 popped first = shallowest)
+  popr r6
 
   ; Return to new thread (pops PC and PSR)
   rte
@@ -198,12 +188,7 @@ start_first_thread
   ; Restore context (same sequence as timer ISR exit)
   popd r1
   susp r1
-  popd r6
-  popd r5
-  popd r4
-  popd r3
-  popd r2
-  popd r1
+  popr r6
 
   ; RTE into user mode
   rte
