@@ -588,6 +588,68 @@ class ROR(a: Int, b: Int) extends RRInstruction(a, b):
     val v = cpu.r(a).read
     cpu.r(a).write((v >>> shift) | (v << (64 - shift)))
 
+// Population count (RR format)
+
+class CNT(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "cnt"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(java.lang.Long.bitCount(cpu.r(b).read))
+
+// Byte-reverse (RR format)
+
+class REV(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "rev"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(java.lang.Long.reverseBytes(cpu.r(b).read))
+
+// Sign-extend from bit width (RR format)
+
+class SEXT(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "sext"
+
+  def apply(cpu: CPU): Unit =
+    val w = cpu.r(b).read.toInt & 63
+    if w > 0 then
+      val shift = 64 - w
+      cpu.r(a).write((cpu.r(a).read << shift) >> shift)
+
+// Dedicated move (RR format)
+
+class MOV(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "mov"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read)
+
+// CLI — disable interrupts (set Ind flag)
+
+object CLI extends SimpleInstruction:
+  val mnemonic = "cli"
+
+  def apply(cpu: CPU): Unit =
+    if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
+    else cpu.set(Status.Ind, true)
+
+// STI — enable interrupts (clear Ind flag)
+
+object STI extends SimpleInstruction:
+  val mnemonic = "sti"
+
+  def apply(cpu: CPU): Unit =
+    if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
+    else cpu.set(Status.Ind, false)
+
+// SWSP — swap r7 and usp
+
+object SWSP extends SimpleInstruction:
+  val mnemonic = "swsp"
+
+  def apply(cpu: CPU): Unit =
+    if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
+    else
+      val tmp = cpu.r(7).read
+      cpu.r(7).write(cpu.usp)
+      cpu.usp = tmp
+
 class AUIPC(r: Int, imm: Int) extends ImmediateInstruction(r, imm):
   val mnemonic = "auipc"
 
