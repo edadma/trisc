@@ -75,7 +75,23 @@ object SyslCli:
               )
             ),
         ),
-      // Allow bare args (no subcommand) to default to compile
+      // Allow bare options/args (no subcommand) to default to compile
+      opt[String]('o', "output")
+        .hidden()
+        .action((v, c) =>
+          c.copy(command = c.command match
+            case cc: CompileCommand => cc.copy(output = Some(v))
+            case other              => other
+          )
+        ),
+      opt[String]("emit")
+        .hidden()
+        .action((v, c) =>
+          c.copy(command = c.command match
+            case cc: CompileCommand => cc.copy(emit = v)
+            case other              => other
+          )
+        ),
       arg[String]("<source>...")
         .unbounded()
         .optional()
