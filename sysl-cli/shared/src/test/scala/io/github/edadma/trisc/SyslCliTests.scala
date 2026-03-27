@@ -143,9 +143,9 @@ class SyslCliTests extends AnyFreeSpec with Matchers {
 
   "interpret function pointers" in {
     val (result, _) = interpret(
-      """double(x: int) -> int = x * 2
+      """twice(x: int) -> int = x * 2
         |apply(f: func(int) -> int, x: int) -> int = f(x)
-        |main() -> int = apply(double, 21)
+        |main() -> int = apply(twice, 21)
         |""".stripMargin)
     result shouldBe 42
   }
