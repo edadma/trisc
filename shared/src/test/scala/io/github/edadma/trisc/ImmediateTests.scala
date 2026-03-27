@@ -93,8 +93,8 @@ class ImmediateTests extends TestHelpers {
       """auipc r1, 0
         |halt
         |""".stripMargin)
-    // vector table is 4 dw = 16 bytes, auipc at address 16
-    cpu.r(1).read shouldBe 16
+    // vector table is 5 dw = 20 bytes, auipc at address 20
+    cpu.r(1).read shouldBe 20
   }
 
   "auipc with nonzero immediate" in {
@@ -102,8 +102,8 @@ class ImmediateTests extends TestHelpers {
       """auipc r1, 1
         |halt
         |""".stripMargin)
-    // auipc at address 16, PC-2 + (1<<8) = 16 + 256 = 272
-    cpu.r(1).read shouldBe 272
+    // auipc at address 20, PC-2 + (1<<8) = 20 + 256 = 276
+    cpu.r(1).read shouldBe 276
   }
 
   "auipc followed by ld for PC-relative load" in {
