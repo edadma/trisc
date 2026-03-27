@@ -192,29 +192,51 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case ArrVal(cells, off) => ArrVal(cells, off + idx)
           case _ => PtrVal(indexCell(arrVal, idx))
 
-      case TPreInc(name, _) =>
+      case TPreInc(name, typ) =>
         val cell = lookupCell(name, env)
-        val v = toLong(cell.value) + 1
-        cell.value = IntVal(v)
-        IntVal(v)
+        cell.value match
+          case ArrVal(cells, off) =>
+            val nv = ArrVal(cells, off + 1)
+            cell.value = nv
+            nv
+          case _ =>
+            val v = toLong(cell.value) + 1
+            cell.value = IntVal(v)
+            IntVal(v)
 
-      case TPreDec(name, _) =>
+      case TPreDec(name, typ) =>
         val cell = lookupCell(name, env)
-        val v = toLong(cell.value) - 1
-        cell.value = IntVal(v)
-        IntVal(v)
+        cell.value match
+          case ArrVal(cells, off) =>
+            val nv = ArrVal(cells, off - 1)
+            cell.value = nv
+            nv
+          case _ =>
+            val v = toLong(cell.value) - 1
+            cell.value = IntVal(v)
+            IntVal(v)
 
-      case TPostInc(name, _) =>
+      case TPostInc(name, typ) =>
         val cell = lookupCell(name, env)
-        val old = toLong(cell.value)
-        cell.value = IntVal(old + 1)
-        IntVal(old)
+        cell.value match
+          case old @ ArrVal(cells, off) =>
+            cell.value = ArrVal(cells, off + 1)
+            old
+          case _ =>
+            val old = toLong(cell.value)
+            cell.value = IntVal(old + 1)
+            IntVal(old)
 
-      case TPostDec(name, _) =>
+      case TPostDec(name, typ) =>
         val cell = lookupCell(name, env)
-        val old = toLong(cell.value)
-        cell.value = IntVal(old - 1)
-        IntVal(old)
+        cell.value match
+          case old @ ArrVal(cells, off) =>
+            cell.value = ArrVal(cells, off - 1)
+            old
+          case _ =>
+            val old = toLong(cell.value)
+            cell.value = IntVal(old - 1)
+            IntVal(old)
 
       case TDeref(inner, _) => derefCell(evalAny(inner, env)).value
 

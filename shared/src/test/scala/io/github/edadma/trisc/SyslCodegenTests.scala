@@ -535,6 +535,19 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
         |""".stripMargin) shouldBe 42
   }
 
+  "pointer increment" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    p = &arr[0]
+        |    p++
+        |    *p
+        |""".stripMargin) shouldBe 20
+  }
+
   "function pointer reassignment" in {
     compileAndRun(
       """myDouble(x: int) -> int = x * 2

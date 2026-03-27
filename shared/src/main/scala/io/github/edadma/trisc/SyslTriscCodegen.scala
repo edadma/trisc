@@ -341,35 +341,39 @@ class SyslTriscCodegen(addresses: Int = 2):
             emit("  ldi r3, 1")
             emit("  xor r1, r1, r3") // flip
 
-      case TPreInc(name, _) =>
+      case TPreInc(name, typ) =>
+        val step = if typ.isPointerLike then 8 else 1
         val local = locals(name)
         emit(s"  addi r2, r5, ${local.offset}")
         emit(s"  ldd r1, r2, r0")
-        emit("  addi r1, r1, 1")
-        emit(s"  addi r2, r5, ${local.offset}")
-        emit(s"  std r1, r2, r0") // store incremented, return new value
-
-      case TPreDec(name, _) =>
-        val local = locals(name)
-        emit(s"  addi r2, r5, ${local.offset}")
-        emit(s"  ldd r1, r2, r0")
-        emit("  addi r1, r1, -1")
+        emit(s"  addi r1, r1, $step")
         emit(s"  addi r2, r5, ${local.offset}")
         emit(s"  std r1, r2, r0")
 
-      case TPostInc(name, _) =>
-        val local = locals(name)
-        emit(s"  addi r2, r5, ${local.offset}")
-        emit(s"  ldd r1, r2, r0") // r1 = old value (returned)
-        emit("  addi r3, r1, 1")  // r3 = new value
-        emit(s"  addi r2, r5, ${local.offset}")
-        emit(s"  std r3, r2, r0") // store new value
-
-      case TPostDec(name, _) =>
+      case TPreDec(name, typ) =>
+        val step = if typ.isPointerLike then 8 else 1
         val local = locals(name)
         emit(s"  addi r2, r5, ${local.offset}")
         emit(s"  ldd r1, r2, r0")
-        emit("  addi r3, r1, -1")
+        emit(s"  addi r1, r1, -$step")
+        emit(s"  addi r2, r5, ${local.offset}")
+        emit(s"  std r1, r2, r0")
+
+      case TPostInc(name, typ) =>
+        val step = if typ.isPointerLike then 8 else 1
+        val local = locals(name)
+        emit(s"  addi r2, r5, ${local.offset}")
+        emit(s"  ldd r1, r2, r0")
+        emit(s"  addi r3, r1, $step")
+        emit(s"  addi r2, r5, ${local.offset}")
+        emit(s"  std r3, r2, r0")
+
+      case TPostDec(name, typ) =>
+        val step = if typ.isPointerLike then 8 else 1
+        val local = locals(name)
+        emit(s"  addi r2, r5, ${local.offset}")
+        emit(s"  ldd r1, r2, r0")
+        emit(s"  addi r3, r1, -$step")
         emit(s"  addi r2, r5, ${local.offset}")
         emit(s"  std r3, r2, r0")
 

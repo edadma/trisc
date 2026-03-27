@@ -499,4 +499,66 @@ class SyslPointerArrayTests extends SyslTestHelpers {
         |    sum
         |""".stripMargin) shouldBe 150
   }
+
+  // ===== Pointer increment/decrement =====
+
+  "pointer pre-increment" in {
+    eval(
+      """main() -> int
+        |    arr: [3]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    p = &arr[0]
+        |    ++p
+        |    *p
+        |""".stripMargin) shouldBe 20
+  }
+
+  "pointer post-increment" in {
+    eval(
+      """main() -> int
+        |    arr: [3]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    p = &arr[0]
+        |    first = *p
+        |    p++
+        |    second = *p
+        |    first + second
+        |""".stripMargin) shouldBe 30
+  }
+
+  "pointer pre-decrement" in {
+    eval(
+      """main() -> int
+        |    arr: [3]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    p = &arr[2]
+        |    --p
+        |    *p
+        |""".stripMargin) shouldBe 20
+  }
+
+  "pointer iterate with increment" in {
+    eval(
+      """main() -> int
+        |    arr: [4]int
+        |    arr[0] = 1
+        |    arr[1] = 2
+        |    arr[2] = 3
+        |    arr[3] = 4
+        |    p = &arr[0]
+        |    sum = 0
+        |    i = 0
+        |    while i < 4
+        |        sum = sum + *p
+        |        p++
+        |        i = i + 1
+        |    sum
+        |""".stripMargin) shouldBe 10
+  }
 }
