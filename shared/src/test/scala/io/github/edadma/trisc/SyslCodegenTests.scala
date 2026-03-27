@@ -186,4 +186,219 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
         |    sum
         |""".stripMargin) shouldBe 10
   }
+
+  // ===== Comparisons (full set) =====
+
+  "less than or equal true" in {
+    compileAndRun("main() -> int = 3 <= 5\n") shouldBe 1
+  }
+
+  "less than or equal equal" in {
+    compileAndRun("main() -> int = 5 <= 5\n") shouldBe 1
+  }
+
+  "less than or equal false" in {
+    compileAndRun("main() -> int = 7 <= 5\n") shouldBe 0
+  }
+
+  "greater than or equal true" in {
+    compileAndRun("main() -> int = 5 >= 3\n") shouldBe 1
+  }
+
+  "greater than or equal equal" in {
+    compileAndRun("main() -> int = 5 >= 5\n") shouldBe 1
+  }
+
+  "greater than or equal false" in {
+    compileAndRun("main() -> int = 3 >= 5\n") shouldBe 0
+  }
+
+  // ===== Logical operators =====
+
+  "and true true" in {
+    compileAndRun("main() -> int = true && true\n") shouldBe 1
+  }
+
+  "and true false" in {
+    compileAndRun("main() -> int = true && false\n") shouldBe 0
+  }
+
+  "and false short-circuits" in {
+    compileAndRun("main() -> int = false && true\n") shouldBe 0
+  }
+
+  "or false false" in {
+    compileAndRun("main() -> int = false || false\n") shouldBe 0
+  }
+
+  "or true short-circuits" in {
+    compileAndRun("main() -> int = true || false\n") shouldBe 1
+  }
+
+  "or false true" in {
+    compileAndRun("main() -> int = false || true\n") shouldBe 1
+  }
+
+  // ===== Compound assignment =====
+
+  "plus equals" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 10
+        |    x += 5
+        |    x
+        |""".stripMargin) shouldBe 15
+  }
+
+  "minus equals" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 10
+        |    x -= 3
+        |    x
+        |""".stripMargin) shouldBe 7
+  }
+
+  "times equals" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 5
+        |    x *= 4
+        |    x
+        |""".stripMargin) shouldBe 20
+  }
+
+  // ===== Pre/post increment/decrement =====
+
+  "pre-increment" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 5
+        |    ++x
+        |""".stripMargin) shouldBe 6
+  }
+
+  "post-increment returns old value" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 5
+        |    x++
+        |""".stripMargin) shouldBe 5
+  }
+
+  "post-increment modifies variable" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 5
+        |    x++
+        |    x
+        |""".stripMargin) shouldBe 6
+  }
+
+  "pre-decrement" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 5
+        |    --x
+        |""".stripMargin) shouldBe 4
+  }
+
+  // ===== For loop =====
+
+  "for loop sum" in {
+    compileAndRun(
+      """main() -> int
+        |    sum = 0
+        |    for i = 0; i < 5; i++
+        |        sum += i
+        |    sum
+        |""".stripMargin) shouldBe 10
+  }
+
+  "for loop factorial" in {
+    compileAndRun(
+      """main() -> int
+        |    result = 1
+        |    for i = 1; i <= 5; i++
+        |        result *= i
+        |    result
+        |""".stripMargin) shouldBe 120
+  }
+
+  // ===== Do/while =====
+
+  "do/while loop" in {
+    compileAndRun(
+      """main() -> int
+        |    i = 0
+        |    do
+        |        i += 1
+        |    while i < 5
+        |    i
+        |""".stripMargin) shouldBe 5
+  }
+
+  "do/while executes at least once" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 0
+        |    do
+        |        x = 42
+        |    while false
+        |    x
+        |""".stripMargin) shouldBe 42
+  }
+
+  // ===== Break/continue =====
+
+  "break in while" in {
+    compileAndRun(
+      """main() -> int
+        |    i = 0
+        |    while true
+        |        if i == 5 then break
+        |        i += 1
+        |    i
+        |""".stripMargin) shouldBe 5
+  }
+
+  "break in for" in {
+    compileAndRun(
+      """main() -> int
+        |    sum = 0
+        |    for i = 0; i < 100; i++
+        |        if i == 5 then break
+        |        sum += i
+        |    sum
+        |""".stripMargin) shouldBe 10
+  }
+
+  "continue in for" in {
+    compileAndRun(
+      """main() -> int
+        |    sum = 0
+        |    for i = 0; i < 10; i++
+        |        if i % 2 == 0 then continue
+        |        sum += i
+        |    sum
+        |""".stripMargin) shouldBe 25
+  }
+
+  // ===== Casts =====
+
+  "bool cast from nonzero" in {
+    compileAndRun("main() -> int = bool(42)\n") shouldBe 1
+  }
+
+  "bool cast from zero" in {
+    compileAndRun("main() -> int = bool(0)\n") shouldBe 0
+  }
+
+  "byte cast truncates" in {
+    compileAndRun("main() -> int = byte(256)\n") shouldBe 0
+  }
+
+  "byte cast preserves low bits" in {
+    compileAndRun("main() -> int = byte(0xff)\n") shouldBe 255
+  }
 }

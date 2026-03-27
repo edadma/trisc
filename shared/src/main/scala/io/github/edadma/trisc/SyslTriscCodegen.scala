@@ -98,6 +98,10 @@ class SyslTriscCodegen(addresses: Int = 2):
     if currentFunction.name == "main" then emit("  halt")
     else emit("  jalr r0, r6")
 
+  // Break/continue label stacks
+  private val breakLabels = new mutable.Stack[String]
+  private val continueLabels = new mutable.Stack[String]
+
   private def genStmt(stmt: TStmt): Unit =
     stmt match
       case TVarStmt(name, _, init) =>
@@ -118,6 +122,27 @@ class SyslTriscCodegen(addresses: Int = 2):
           locals(target) = LocalVar(target, stackOffset)
           emit("  pshd r1")
 
+      case TCompoundAssignStmt(target, op, value) =>
+        genExpr(value) // r1 = right operand
+        emit("  pshd r1")
+        val local = locals(target)
+        emit(s"  addi r2, r5, ${local.offset}")
+        emit(s"  ldd r1, r2, r0") // r1 = current value
+        emit("  popd r3")         // r3 = right operand
+        op match
+          case "+"  => emit("  add r1, r1, r3")
+          case "-"  => emit("  sub r1, r1, r3")
+          case "*"  => emit("  mul r1, r1, r3")
+          case "/"  => emit("  div r1, r1, r3")
+          case "%"  => emit("  rem r1, r1, r3")
+          case "&"  => emit("  and r1, r1, r3")
+          case "|"  => emit("  or r1, r1, r3")
+          case "^"  => emit("  xor r1, r1, r3")
+          case "<<" => emit("  lsl r1, r1, r3")
+          case ">>" => emit("  asr r1, r1, r3")
+        emit(s"  addi r2, r5, ${local.offset}")
+        emit(s"  std r1, r2, r0")
+
       case TReturnStmt(Some(value)) =>
         genExpr(value) // result in r1
         emitEpilogue()
@@ -132,12 +157,59 @@ class SyslTriscCodegen(addresses: Int = 2):
       case TWhileStmt(cond, body) =>
         val loopLabel = newLabel("while")
         val endLabel = newLabel("endwhile")
+        breakLabels.push(endLabel)
+        continueLabels.push(loopLabel)
         emit(s"$loopLabel")
-        genExpr(cond) // result in r1
+        genExpr(cond)
         emit(s"  beq r1, r0, $endLabel")
         for stmt <- body do genStmt(stmt)
         emit(s"  bra $loopLabel")
         emit(s"$endLabel")
+        breakLabels.pop()
+        continueLabels.pop()
+
+      case TForStmt(init, cond, update, body) =>
+        val loopLabel = newLabel("for")
+        val updateLabel = newLabel("forupdate")
+        val endLabel = newLabel("endfor")
+        genStmt(init)
+        breakLabels.push(endLabel)
+        continueLabels.push(updateLabel)
+        emit(s"$loopLabel")
+        genExpr(cond)
+        emit(s"  beq r1, r0, $endLabel")
+        for stmt <- body do genStmt(stmt)
+        emit(s"$updateLabel")
+        genStmt(update)
+        emit(s"  bra $loopLabel")
+        emit(s"$endLabel")
+        breakLabels.pop()
+        continueLabels.pop()
+
+      case TDoWhileStmt(cond, body) =>
+        val loopLabel = newLabel("dowhile")
+        val endLabel = newLabel("enddowhile")
+        breakLabels.push(endLabel)
+        continueLabels.push(loopLabel)
+        emit(s"$loopLabel")
+        for stmt <- body do genStmt(stmt)
+        genExpr(cond)
+        emit(s"  bne r1, r0, $loopLabel")
+        emit(s"$endLabel")
+        breakLabels.pop()
+        continueLabels.pop()
+
+      case TBreakStmt =>
+        emit(s"  bra ${breakLabels.top}")
+
+      case TContinueStmt =>
+        emit(s"  bra ${continueLabels.top}")
+
+      case TDerefAssignStmt(_, _) =>
+        emit("  # TODO: TDerefAssignStmt (needs pointer support)")
+
+      case TIndexAssignStmt(_, _, _) =>
+        emit("  # TODO: TIndexAssignStmt (needs array/pointer support)")
 
       case _ =>
         emit(s"  # TODO: ${stmt.getClass.getSimpleName}")
@@ -162,6 +234,32 @@ class SyslTriscCodegen(addresses: Int = 2):
         else
           emit(s"  movi r1, $name")
           emit(s"  ldw r1, r1, r0")
+
+      case TBinary(left, "&&", right, _) =>
+        val falseLabel = newLabel("and_false")
+        val endLabel = newLabel("and_end")
+        genExpr(left)
+        emit(s"  beq r1, r0, $falseLabel") // short-circuit: left is false
+        genExpr(right)
+        emit(s"  beq r1, r0, $falseLabel") // right is false
+        emit("  ldi r1, 1")
+        emit(s"  bra $endLabel")
+        emit(s"$falseLabel")
+        emit("  ldi r1, 0")
+        emit(s"$endLabel")
+
+      case TBinary(left, "||", right, _) =>
+        val trueLabel = newLabel("or_true")
+        val endLabel = newLabel("or_end")
+        genExpr(left)
+        emit(s"  bne r1, r0, $trueLabel") // short-circuit: left is true
+        genExpr(right)
+        emit(s"  bne r1, r0, $trueLabel") // right is true
+        emit("  ldi r1, 0")
+        emit(s"  bra $endLabel")
+        emit(s"$trueLabel")
+        emit("  ldi r1, 1")
+        emit(s"$endLabel")
 
       case TBinary(left, op, right, _) =>
         genExpr(left)        // r1 = left
@@ -199,38 +297,75 @@ class SyslTriscCodegen(addresses: Int = 2):
             emit("  ldi r1, 0")
             emit(s"$end")
           case "<" =>
-            val lt = newLabel("lt")
-            val end = newLabel("end")
-            emit(s"  bls r1, r2, $lt")
-            emit("  ldi r1, 0")
-            emit(s"  bra $end")
-            emit(s"$lt")
-            emit("  ldi r1, 1")
-            emit(s"$end")
+            emit("  slt r1, r1, r2") // r1 = (r1 < r2) ? 1 : 0
           case ">" =>
-            val gt = newLabel("gt")
-            val end = newLabel("end")
-            emit(s"  bls r2, r1, $gt")
-            emit("  ldi r1, 0")
-            emit(s"  bra $end")
-            emit(s"$gt")
-            emit("  ldi r1, 1")
-            emit(s"$end")
+            emit("  slt r1, r2, r1") // r1 = (r2 < r1) ? 1 : 0
           case "<=" =>
-            val le = newLabel("le")
-            val end = newLabel("end")
-            emit(s"  bgt r1, r2, $le")
-            emit("  ldi r1, 1")
-            emit(s"  bra $le")
-            emit(s"$le")
-            emit("  ldi r1, 0") // TODO: fix logic
-            emit(s"$end")
+            // r1 <= r2 iff !(r2 < r1)
+            emit("  slt r1, r2, r1") // r1 = (r2 < r1)
+            emit("  ldi r3, 1")
+            emit("  xor r1, r1, r3") // flip: 0→1, 1→0
           case ">=" =>
-            emit("  # TODO: >=")
-          case "&&" =>
-            emit("  # TODO: &&")
-          case "||" =>
-            emit("  # TODO: ||")
+            // r1 >= r2 iff !(r1 < r2)
+            emit("  slt r1, r1, r2") // r1 = (r1 < r2)
+            emit("  ldi r3, 1")
+            emit("  xor r1, r1, r3") // flip
+
+      case TPreInc(name, _) =>
+        val local = locals(name)
+        emit(s"  addi r2, r5, ${local.offset}")
+        emit(s"  ldd r1, r2, r0")
+        emit("  addi r1, r1, 1")
+        emit(s"  addi r2, r5, ${local.offset}")
+        emit(s"  std r1, r2, r0") // store incremented, return new value
+
+      case TPreDec(name, _) =>
+        val local = locals(name)
+        emit(s"  addi r2, r5, ${local.offset}")
+        emit(s"  ldd r1, r2, r0")
+        emit("  addi r1, r1, -1")
+        emit(s"  addi r2, r5, ${local.offset}")
+        emit(s"  std r1, r2, r0")
+
+      case TPostInc(name, _) =>
+        val local = locals(name)
+        emit(s"  addi r2, r5, ${local.offset}")
+        emit(s"  ldd r1, r2, r0") // r1 = old value (returned)
+        emit("  addi r3, r1, 1")  // r3 = new value
+        emit(s"  addi r2, r5, ${local.offset}")
+        emit(s"  std r3, r2, r0") // store new value
+
+      case TPostDec(name, _) =>
+        val local = locals(name)
+        emit(s"  addi r2, r5, ${local.offset}")
+        emit(s"  ldd r1, r2, r0")
+        emit("  addi r3, r1, -1")
+        emit(s"  addi r2, r5, ${local.offset}")
+        emit(s"  std r3, r2, r0")
+
+      case TCast(inner, target) =>
+        genExpr(inner)
+        import SyslType.*
+        target match
+          case BoolType =>
+            // nonzero → 1, zero → 0
+            val isZero = newLabel("iszero")
+            val end = newLabel("end")
+            emit(s"  beq r1, r0, $isZero")
+            emit("  ldi r1, 1")
+            emit(s"  bra $end")
+            emit(s"$isZero")
+            emit("  ldi r1, 0")
+            emit(s"$end")
+          case ByteType =>
+            emit("  ldi r2, 255")
+            emit("  and r1, r1, r2") // mask to 8 bits
+          case CharType =>
+            // mask to 32 bits — no-op on 64-bit registers for values < 2^32
+            // TODO: proper 32-bit mask when needed (needs movi for 0xFFFFFFFF)
+          case IntType =>
+            // no-op — already int-sized
+          case _ =>
 
       case TUnary("-", operand, _) =>
         genExpr(operand)
