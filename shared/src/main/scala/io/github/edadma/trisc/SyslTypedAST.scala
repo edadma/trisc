@@ -25,6 +25,7 @@ case class TCompoundAssignStmt(target: String, op: String, value: TExpr) extends
 case class TDerefAssignStmt(pointer: TExpr, value: TExpr) extends TStmt
 case class TIndexAssignStmt(array: TExpr, index: TExpr, value: TExpr) extends TStmt
 case class TFieldAssignStmt(obj: TExpr, fieldIndex: Int, value: TExpr) extends TStmt
+case class TFieldCompoundAssignStmt(obj: TExpr, fieldIndex: Int, op: String, value: TExpr) extends TStmt
 case class TReturnStmt(value: Option[TExpr]) extends TStmt
 case class TWhileStmt(cond: TExpr, body: List[TStmt]) extends TStmt
 case class TForStmt(init: TStmt, cond: TExpr, update: TStmt, body: List[TStmt]) extends TStmt
@@ -47,7 +48,12 @@ case class TAddrOfIndex(array: TExpr, index: TExpr, typ: SyslType) extends TExpr
 case class TDeref(expr: TExpr, typ: SyslType) extends TExpr
 case class TIndex(expr: TExpr, index: TExpr, typ: SyslType) extends TExpr
 case class TFieldAccess(obj: TExpr, fieldIndex: Int, typ: SyslType) extends TExpr
+case class TFieldPreInc(obj: TExpr, fieldIndex: Int, typ: SyslType) extends TExpr
+case class TFieldPreDec(obj: TExpr, fieldIndex: Int, typ: SyslType) extends TExpr
+case class TFieldPostInc(obj: TExpr, fieldIndex: Int, typ: SyslType) extends TExpr
+case class TFieldPostDec(obj: TExpr, fieldIndex: Int, typ: SyslType) extends TExpr
 case class TStructLit(typ: SyslType) extends TExpr
+case class TSizeof(size: Long, typ: SyslType.IntType.type) extends TExpr
 case class TPreInc(name: String, typ: SyslType) extends TExpr
 case class TPreDec(name: String, typ: SyslType) extends TExpr
 case class TPostInc(name: String, typ: SyslType) extends TExpr

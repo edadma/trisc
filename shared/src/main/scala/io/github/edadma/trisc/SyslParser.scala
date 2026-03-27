@@ -125,6 +125,9 @@ class SyslParser extends StandardTokenParsers {
       ident ~ ("[" ~> expr <~ "]") ~ ("=" ~> expr) ^^ { case name ~ idx ~ value =>
         IndexAssignStmtAST(VarRefAST(name), idx, value)
       } |
+      ident ~ ("." ~> ident) ~ compoundOp ~ expr ^^ { case obj ~ field ~ op ~ value =>
+        FieldCompoundAssignStmtAST(VarRefAST(obj), field, op.init, value)
+      } |
       ident ~ ("." ~> ident) ~ ("=" ~> expr) ^^ { case obj ~ field ~ value =>
         FieldAssignStmtAST(VarRefAST(obj), field, value)
       } |
@@ -256,7 +259,9 @@ class SyslParser extends StandardTokenParsers {
     }
 
   lazy val unary: Parser[ExpressionAST] =
-    "++" ~> ident ^^ PreIncAST.apply |
+    "++" ~> ident ~ ("." ~> ident) ^^ { case obj ~ field => FieldPreIncAST(VarRefAST(obj), field) } |
+      "--" ~> ident ~ ("." ~> ident) ^^ { case obj ~ field => FieldPreDecAST(VarRefAST(obj), field) } |
+      "++" ~> ident ^^ PreIncAST.apply |
       "--" ~> ident ^^ PreDecAST.apply |
       "-" ~> unary ^^ (e => UnaryAST("-", e)) |
       "!" ~> unary ^^ (e => UnaryAST("!", e)) |
@@ -267,7 +272,9 @@ class SyslParser extends StandardTokenParsers {
       postfix
 
   lazy val postfix: Parser[ExpressionAST] =
-    ident <~ "++" ^^ PostIncAST.apply |
+    ident ~ ("." ~> ident) <~ "++" ^^ { case obj ~ field => FieldPostIncAST(VarRefAST(obj), field) } |
+      ident ~ ("." ~> ident) <~ "--" ^^ { case obj ~ field => FieldPostDecAST(VarRefAST(obj), field) } |
+      ident <~ "++" ^^ PostIncAST.apply |
       ident <~ "--" ^^ PostDecAST.apply |
       primary ~ rep(("[" ~> expr <~ "]") ^^ (idx => Left(idx)) | ("." ~> ident) ^^ (f => Right(f))) ^^ {
         case base ~ ops => ops.foldLeft(base) {
@@ -303,6 +310,7 @@ class SyslParser extends StandardTokenParsers {
       stringLit ^^ StringLitExprAST.apply |
       "true" ^^^ BoolLitAST(true) |
       "false" ^^^ BoolLitAST(false) |
+      "sizeof" ~> typeRef ^^ SizeofAST.apply |
       cast |
       ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |
       ident ^^ VarRefAST.apply |

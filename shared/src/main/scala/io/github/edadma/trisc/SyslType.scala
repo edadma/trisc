@@ -25,6 +25,14 @@ enum SyslType:
     case PtrType(_) | ArrayType(_, _) => true
     case _ => false
 
+  def sizeOf: Long = this match
+    case IntType | CharType | BoolType | VoidType => 8
+    case ByteType => 1
+    case PtrType(_) => 8
+    case FuncType(_, _) => 8
+    case ArrayType(elem, size) => elem.sizeOf * size
+    case StructType(_, fields) => fields.map(_._2.sizeOf).sum
+
   override def toString: String = this match
     case IntType => "int"
     case CharType => "char"

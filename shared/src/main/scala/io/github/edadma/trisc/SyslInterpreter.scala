@@ -132,6 +132,24 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val ArrVal(cells, off) = evalAny(obj, env): @unchecked
         cells(off + fieldIndex).value = evalAny(value, env)
 
+      case TFieldCompoundAssignStmt(obj, fieldIndex, op, value) =>
+        val ArrVal(cells, off) = evalAny(obj, env): @unchecked
+        val cell = cells(off + fieldIndex)
+        val l = toLong(cell.value)
+        val r = toLong(evalAny(value, env))
+        cell.value = IntVal(op match
+          case "+"  => l + r
+          case "-"  => l - r
+          case "*"  => l * r
+          case "/"  => l / r
+          case "%"  => l % r
+          case "&"  => l & r
+          case "|"  => l | r
+          case "^"  => l ^ r
+          case "<<" => l << r.toInt
+          case ">>" => l >> r.toInt
+        )
+
       case TReturnStmt(value) =>
         throw ReturnException(value.map(evalAny(_, env)).getOrElse(IntVal(0)))
 
@@ -311,6 +329,36 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case CharType => IntVal(toLong(v) & 0xFFFFFFFFL) // 32-bit codepoint
           case ByteType => IntVal(toLong(v) & 0xFFL)
           case _ => v
+
+      case TSizeof(size, _) => IntVal(size)
+
+      case TFieldPreInc(obj, fieldIndex, _) =>
+        val ArrVal(cells, off) = evalAny(obj, env): @unchecked
+        val cell = cells(off + fieldIndex)
+        val v = toLong(cell.value) + 1
+        cell.value = IntVal(v)
+        IntVal(v)
+
+      case TFieldPreDec(obj, fieldIndex, _) =>
+        val ArrVal(cells, off) = evalAny(obj, env): @unchecked
+        val cell = cells(off + fieldIndex)
+        val v = toLong(cell.value) - 1
+        cell.value = IntVal(v)
+        IntVal(v)
+
+      case TFieldPostInc(obj, fieldIndex, _) =>
+        val ArrVal(cells, off) = evalAny(obj, env): @unchecked
+        val cell = cells(off + fieldIndex)
+        val old = toLong(cell.value)
+        cell.value = IntVal(old + 1)
+        IntVal(old)
+
+      case TFieldPostDec(obj, fieldIndex, _) =>
+        val ArrVal(cells, off) = evalAny(obj, env): @unchecked
+        val cell = cells(off + fieldIndex)
+        val old = toLong(cell.value)
+        cell.value = IntVal(old - 1)
+        IntVal(old)
 
       case TStructLit(SyslType.StructType(_, fields)) =>
         val cells = Array.fill(fields.size)(new Cell(IntVal(0)))

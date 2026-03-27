@@ -27,6 +27,7 @@ case class CompoundAssignStmtAST(target: String, op: String, value: ExpressionAS
 case class DerefAssignStmtAST(pointer: ExpressionAST, value: ExpressionAST) extends StmtAST
 case class IndexAssignStmtAST(array: ExpressionAST, index: ExpressionAST, value: ExpressionAST) extends StmtAST
 case class FieldAssignStmtAST(obj: ExpressionAST, field: String, value: ExpressionAST) extends StmtAST
+case class FieldCompoundAssignStmtAST(obj: ExpressionAST, field: String, op: String, value: ExpressionAST) extends StmtAST
 case class ReturnStmtAST(value: Option[ExpressionAST]) extends StmtAST
 case class WhileStmtAST(cond: ExpressionAST, body: List[StmtAST]) extends StmtAST
 case class ForStmtAST(init: StmtAST, cond: ExpressionAST, update: StmtAST, body: List[StmtAST]) extends StmtAST
@@ -56,6 +57,11 @@ case class AddrOfIndexAST(array: ExpressionAST, index: ExpressionAST) extends Ex
 case class DerefAST(expr: ExpressionAST) extends ExpressionAST
 case class IndexAST(expr: ExpressionAST, index: ExpressionAST) extends ExpressionAST
 case class FieldAccessAST(obj: ExpressionAST, field: String) extends ExpressionAST
+case class FieldPreIncAST(obj: ExpressionAST, field: String) extends ExpressionAST
+case class FieldPreDecAST(obj: ExpressionAST, field: String) extends ExpressionAST
+case class FieldPostIncAST(obj: ExpressionAST, field: String) extends ExpressionAST
+case class FieldPostDecAST(obj: ExpressionAST, field: String) extends ExpressionAST
 case class ArrayDeclAST(size: Int, elemType: String) extends ExpressionAST
 case class StructInitAST(typeName: String) extends ExpressionAST
+case class SizeofAST(typeName: String) extends ExpressionAST
 case class StringLitExprAST(value: String) extends ExpressionAST

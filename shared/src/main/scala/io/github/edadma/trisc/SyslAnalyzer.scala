@@ -212,6 +212,17 @@ class SyslAnalyzer:
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
         TFieldAssignStmt(resolvedObj, idx, tValue)
 
+      case FieldCompoundAssignStmtAST(obj, field, op, value) =>
+        val tObj = analyzeExpr(obj)
+        val tValue = analyzeExpr(value)
+        val (resolvedObj, structType) = tObj.typ match
+          case st: StructType => (tObj, st)
+          case PtrType(st: StructType) => (TDeref(tObj, st), st)
+          case other => throw AnalysisError(s"cannot access field '$field' on $other")
+        val idx = structType.fields.indexWhere(_._1 == field)
+        if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
+        TFieldCompoundAssignStmt(resolvedObj, idx, op, tValue)
+
       case ReturnStmtAST(value) =>
         TReturnStmt(value.map(analyzeExpr))
 
@@ -262,6 +273,50 @@ class SyslAnalyzer:
       case ArrayDeclAST(size, typStr) =>
         val t = resolveTypeName(typStr)
         TArrayDecl(size, typStr, t)
+
+      case SizeofAST(typeName) =>
+        val t = resolveTypeName(typeName)
+        TSizeof(t.sizeOf, IntType)
+
+      case FieldPreIncAST(obj, field) =>
+        val tObj = analyzeExpr(obj)
+        val (resolvedObj, structType) = tObj.typ match
+          case st: StructType => (tObj, st)
+          case PtrType(st: StructType) => (TDeref(tObj, st), st)
+          case other => throw AnalysisError(s"cannot access field '$field' on $other")
+        val idx = structType.fields.indexWhere(_._1 == field)
+        if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
+        TFieldPreInc(resolvedObj, idx, structType.fields(idx)._2)
+
+      case FieldPreDecAST(obj, field) =>
+        val tObj = analyzeExpr(obj)
+        val (resolvedObj, structType) = tObj.typ match
+          case st: StructType => (tObj, st)
+          case PtrType(st: StructType) => (TDeref(tObj, st), st)
+          case other => throw AnalysisError(s"cannot access field '$field' on $other")
+        val idx = structType.fields.indexWhere(_._1 == field)
+        if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
+        TFieldPreDec(resolvedObj, idx, structType.fields(idx)._2)
+
+      case FieldPostIncAST(obj, field) =>
+        val tObj = analyzeExpr(obj)
+        val (resolvedObj, structType) = tObj.typ match
+          case st: StructType => (tObj, st)
+          case PtrType(st: StructType) => (TDeref(tObj, st), st)
+          case other => throw AnalysisError(s"cannot access field '$field' on $other")
+        val idx = structType.fields.indexWhere(_._1 == field)
+        if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
+        TFieldPostInc(resolvedObj, idx, structType.fields(idx)._2)
+
+      case FieldPostDecAST(obj, field) =>
+        val tObj = analyzeExpr(obj)
+        val (resolvedObj, structType) = tObj.typ match
+          case st: StructType => (tObj, st)
+          case PtrType(st: StructType) => (TDeref(tObj, st), st)
+          case other => throw AnalysisError(s"cannot access field '$field' on $other")
+        val idx = structType.fields.indexWhere(_._1 == field)
+        if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
+        TFieldPostDec(resolvedObj, idx, structType.fields(idx)._2)
 
       case StructInitAST(typeName) =>
         val t = resolveTypeName(typeName)
