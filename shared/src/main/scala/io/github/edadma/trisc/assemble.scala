@@ -213,6 +213,13 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     builder += 0.toByte
     builder += 0.toByte
 
+  def emitAbs64Reloc(symbolName: String): Unit =
+    val offset = builder.length
+    builder.addExtern(symbolName)
+    builder.addReloc(RelocType.ABS64, offset, symbolName)
+    // emit zero placeholder
+    for _ <- 0 until 8 do builder += 0.toByte
+
   builder.segment("_default_", segments("_default_").org)
 
   // Emit symbols for a segment: globals, relocatable auto-exports, and entry point
@@ -269,6 +276,8 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         fold(d, absolute = true) match
           case ReferenceExprAST(ref) if (relocatable || declaredExterns.contains(ref)) && width == 4 =>
             emitAbs32Reloc(ref)
+          case ReferenceExprAST(ref) if (relocatable || declaredExterns.contains(ref)) && width == 8 =>
+            emitAbs64Reloc(ref)
           case StringExprAST(s) =>
             val bytes = s.getBytes(scala.io.Codec.UTF8.charSet)
 

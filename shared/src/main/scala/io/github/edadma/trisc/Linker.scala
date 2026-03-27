@@ -114,6 +114,17 @@ object Linker:
             seg.data(off + 2) = ((addr >> 8) & 0xff).toByte
             seg.data(off + 3) = (addr & 0xff).toByte
 
+          case RelocType.ABS64 =>
+            val off = reloc.offset.toInt
+            seg.data(off) = ((addr >> 56) & 0xff).toByte
+            seg.data(off + 1) = ((addr >> 48) & 0xff).toByte
+            seg.data(off + 2) = ((addr >> 40) & 0xff).toByte
+            seg.data(off + 3) = ((addr >> 32) & 0xff).toByte
+            seg.data(off + 4) = ((addr >> 24) & 0xff).toByte
+            seg.data(off + 5) = ((addr >> 16) & 0xff).toByte
+            seg.data(off + 6) = ((addr >> 8) & 0xff).toByte
+            seg.data(off + 7) = (addr & 0xff).toByte
+
           case RelocType.MOVI2 =>
             patchMovi(seg.data, reloc.offset.toInt, addr, 2)
 

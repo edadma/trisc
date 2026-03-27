@@ -11,7 +11,8 @@ enum Status(val bit: Int):
   case Irq extends Status(8)
 
 enum State:
-  case Reset, Interrupt, MisalignedAccess, PrivilegeViolation,
+  case Reset, Interrupt, InstructionAccess, DataAccess, MisalignedAccess,
+    UnimplementedOpcode, PrivilegeViolation, IllegalDivide,
     Trap0, Trap1, Trap2, Trap3, Trap4, Trap5, Trap6, Trap7,
     Halt, Run, Wfi
 
@@ -95,18 +96,28 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
       for i <- 1 to 7 do sr(i) = r(i).read
       spc = pc
       spsr = psr
-      pc = readInt(state.ordinal * 4)
+      pc = readLong(state.ordinal * 8)
       state = State.Run
       set(Status.Mode, true)
       reservationValid = false
 
-    val inst = readShortUnsigned(pc)
+    val inst =
+      try readShortUnsigned(pc)
+      catch
+        case _: RuntimeException =>
+          state = State.InstructionAccess
+          return
+
     val decoded = Decode(inst)
 
     if trace then println(f"$pc%04x: $inst%04x  ${decoded.disassemble(this)}")
 
     pc += 2
-    decoded(this)
+
+    try decoded(this)
+    catch
+      case _: RuntimeException =>
+        if state == State.Run then state = State.DataAccess
 
     if trace then
       for i <- 1 to 7 do print(f"  r$i:${r(i).read}%04x")
