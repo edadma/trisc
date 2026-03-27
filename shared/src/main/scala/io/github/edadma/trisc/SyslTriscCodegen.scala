@@ -24,6 +24,7 @@ class SyslTriscCodegen(addresses: Int = 2):
     for decl <- program.decls do
       decl match
         case _: TImportDecl => // skip
+        case _: TStructDecl => // type-only, no code to emit
         case f: TFunDecl => genFunction(f)
         case TVarDecl(name, typ, init, _) =>
           emit(s"# global: $name")
@@ -96,6 +97,20 @@ class SyslTriscCodegen(addresses: Int = 2):
       emit("  ldi r1, 0")
       emitEpilogue()
 
+  // Emit binary operation: r1 = r1 op r3
+  private def emitBinOp(op: String): Unit =
+    op match
+      case "+"  => emit("  add r1, r1, r3")
+      case "-"  => emit("  sub r1, r1, r3")
+      case "*"  => emit("  mul r1, r1, r3")
+      case "/"  => emit("  div r1, r1, r3")
+      case "%"  => emit("  rem r1, r1, r3")
+      case "&"  => emit("  and r1, r1, r3")
+      case "|"  => emit("  or r1, r1, r3")
+      case "^"  => emit("  xor r1, r1, r3")
+      case "<<" => emit("  lsl r1, r1, r3")
+      case ">>" => emit("  asr r1, r1, r3")
+
   private def emitEpilogue(): Unit =
     emit("  mov r7, r5")
     emit("  popd r5")
@@ -119,7 +134,7 @@ class SyslTriscCodegen(addresses: Int = 2):
         genExpr(value) // result in r1
         if locals.contains(target) then
           val local = locals(target)
-          emit(s"  addi r2, r5, ${local.offset}")
+          emitAddImm(2, 5, local.offset)
           emit(s"  std r1, r2, r0")
         else
           // New local variable (first assignment = declaration)
@@ -130,23 +145,21 @@ class SyslTriscCodegen(addresses: Int = 2):
       case TCompoundAssignStmt(target, op, value) =>
         genExpr(value) // r1 = right operand
         emit("  pshd r1")
-        val local = locals(target)
-        emit(s"  addi r2, r5, ${local.offset}")
-        emit(s"  ldd r1, r2, r0") // r1 = current value
-        emit("  popd r3")         // r3 = right operand
-        op match
-          case "+"  => emit("  add r1, r1, r3")
-          case "-"  => emit("  sub r1, r1, r3")
-          case "*"  => emit("  mul r1, r1, r3")
-          case "/"  => emit("  div r1, r1, r3")
-          case "%"  => emit("  rem r1, r1, r3")
-          case "&"  => emit("  and r1, r1, r3")
-          case "|"  => emit("  or r1, r1, r3")
-          case "^"  => emit("  xor r1, r1, r3")
-          case "<<" => emit("  lsl r1, r1, r3")
-          case ">>" => emit("  asr r1, r1, r3")
-        emit(s"  addi r2, r5, ${local.offset}")
-        emit(s"  std r1, r2, r0")
+        if locals != null && locals.contains(target) then
+          val local = locals(target)
+          emitAddImm(2, 5, local.offset)
+          emit(s"  ldd r1, r2, r0")
+          emit("  popd r3")
+          emitBinOp(op)
+          emitAddImm(2, 5, local.offset)
+          emit(s"  std r1, r2, r0")
+        else
+          emit(s"  movi r2, $target")
+          emit(s"  ldd r1, r2, r0")
+          emit("  popd r3")
+          emitBinOp(op)
+          emit(s"  movi r2, $target")
+          emit(s"  std r1, r2, r0")
 
       case TReturnStmt(Some(value)) =>
         genExpr(value) // result in r1
@@ -253,7 +266,7 @@ class SyslTriscCodegen(addresses: Int = 2):
       case TVarRef(name, _) =>
         if locals != null && locals.contains(name) then
           val local = locals(name)
-          emit(s"  addi r2, r5, ${local.offset}")
+          emitAddImm(2, 5, local.offset)
           emit(s"  ldd r1, r2, r0")
         else
           emit(s"  movi r1, $name")
@@ -349,37 +362,37 @@ class SyslTriscCodegen(addresses: Int = 2):
       case TPreInc(name, typ) =>
         val step = if typ.isPointerLike then 8 else 1
         val local = locals(name)
-        emit(s"  addi r2, r5, ${local.offset}")
+        emitAddImm(2, 5, local.offset)
         emit(s"  ldd r1, r2, r0")
         emit(s"  addi r1, r1, $step")
-        emit(s"  addi r2, r5, ${local.offset}")
+        emitAddImm(2, 5, local.offset)
         emit(s"  std r1, r2, r0")
 
       case TPreDec(name, typ) =>
         val step = if typ.isPointerLike then 8 else 1
         val local = locals(name)
-        emit(s"  addi r2, r5, ${local.offset}")
+        emitAddImm(2, 5, local.offset)
         emit(s"  ldd r1, r2, r0")
         emit(s"  addi r1, r1, -$step")
-        emit(s"  addi r2, r5, ${local.offset}")
+        emitAddImm(2, 5, local.offset)
         emit(s"  std r1, r2, r0")
 
       case TPostInc(name, typ) =>
         val step = if typ.isPointerLike then 8 else 1
         val local = locals(name)
-        emit(s"  addi r2, r5, ${local.offset}")
+        emitAddImm(2, 5, local.offset)
         emit(s"  ldd r1, r2, r0")
         emit(s"  addi r3, r1, $step")
-        emit(s"  addi r2, r5, ${local.offset}")
+        emitAddImm(2, 5, local.offset)
         emit(s"  std r3, r2, r0")
 
       case TPostDec(name, typ) =>
         val step = if typ.isPointerLike then 8 else 1
         val local = locals(name)
-        emit(s"  addi r2, r5, ${local.offset}")
+        emitAddImm(2, 5, local.offset)
         emit(s"  ldd r1, r2, r0")
         emit(s"  addi r3, r1, -$step")
-        emit(s"  addi r2, r5, ${local.offset}")
+        emitAddImm(2, 5, local.offset)
         emit(s"  std r3, r2, r0")
 
       case TCast(inner, target) =>
@@ -440,7 +453,7 @@ class SyslTriscCodegen(addresses: Int = 2):
         // Clean up stack args
         if args.length > 1 then
           val stackArgBytes = (args.length - 1) * 8
-          emit(s"  addi r7, r7, $stackArgBytes")
+          emitAddImm(7, 7, stackArgBytes)
 
       case TIndirectCall(callee, args, _) =>
         // Push stack args (args 1+) right-to-left
@@ -458,7 +471,7 @@ class SyslTriscCodegen(addresses: Int = 2):
         // Clean up stack args
         if args.length > 1 then
           val stackArgBytes = (args.length - 1) * 8
-          emit(s"  addi r7, r7, $stackArgBytes")
+          emitAddImm(7, 7, stackArgBytes)
 
       case TAddrOf(name, _) =>
         // Compute stack address of local variable
@@ -490,7 +503,7 @@ class SyslTriscCodegen(addresses: Int = 2):
       case TArrayDecl(size, _, _) =>
         // Allocate array on stack: size * 8 bytes
         val totalBytes = size * 8
-        emit(s"  addi r7, r7, -$totalBytes") // grow stack
+        emitAddImm(7, 7, -totalBytes) // grow stack
         emit("  mov r1, r7")                  // r1 = address of array start
         stackOffset -= totalBytes
 
@@ -499,7 +512,7 @@ class SyslTriscCodegen(addresses: Int = 2):
         val bytes = value.getBytes("UTF-8")
         val totalSlots = bytes.length + 1 // +1 for null terminator
         val totalBytes = totalSlots * 8
-        emit(s"  addi r7, r7, -$totalBytes")
+        emitAddImm(7, 7, -totalBytes)
         emit("  mov r1, r7") // r1 = base address
         // Initialize each byte as a 64-bit value
         for (b, i) <- bytes.zipWithIndex do
@@ -528,10 +541,22 @@ class SyslTriscCodegen(addresses: Int = 2):
   // Element size in bytes for stack/memory layout (all values stored as 64-bit)
   private def elemSize(typ: SyslType): Int = 8
 
+  // Emit reg = base + offset, handling large offsets that don't fit in addi
+  private def emitAddImm(destReg: Int, baseReg: Int, offset: Int): Unit =
+    if offset >= -64 && offset <= 63 then
+      emit(s"  addi r$destReg, r$baseReg, $offset")
+    else if offset >= 0 then
+      emit(s"  movi r$destReg, $offset")
+      emit(s"  add r$destReg, r$baseReg, r$destReg")
+    else
+      // Negative offset: load absolute value, subtract
+      emit(s"  movi r$destReg, ${-offset}")
+      emit(s"  sub r$destReg, r$baseReg, r$destReg")
+
   // Emit address of local variable into target register
   private def emitLocalAddr(name: String, reg: Int): Unit =
     val local = locals(name)
-    emit(s"  addi r$reg, r5, ${local.offset}")
+    emitAddImm(reg, 5, local.offset)
 
   private def emit(line: String): Unit =
     out ++= line

@@ -165,11 +165,12 @@ create_thread(entry_point: int, usp: int, ssp: int, name: *byte)
     // The TCB just records the SSP (which points to the top of the
     // constructed frame above) plus metadata.
     val idx = thread_count  // index for the new thread
+    var t: *Task = &tasks[idx]  // pointer to the new TCB entry
 
-    tasks[idx].ssp = sp     // save the constructed stack pointer
-    tasks[idx].state = STATE_READY   // thread is ready to run
-    tasks[idx].priority = 0          // default priority
-    tasks[idx].name = name           // save the name pointer
+    t.ssp = sp              // save the constructed stack pointer
+    t.state = STATE_READY   // thread is ready to run
+    t.priority = 0          // default priority
+    t.name = name           // save the name pointer
 
     // Increment the thread count.
     thread_count += 1
@@ -210,10 +211,11 @@ schedule(current_ssp: int) -> int
      * stack. We just need to record WHERE that saved context is
      * (i.e., what the SSP was after all the pushes).
      */
-    tasks[current_thread].ssp = current_ssp
+    var cur: *Task = &tasks[current_thread]
+    cur.ssp = current_ssp
 
     // Mark current thread as ready (no longer running)
-    tasks[current_thread].state = STATE_READY
+    cur.state = STATE_READY
 
     /*
      * Find the next runnable thread.
@@ -231,15 +233,16 @@ schedule(current_ssp: int) -> int
     // For now, all threads are always READY.
 
     // Switch to the next thread
-    current_thread = next                  // update the global
-    tasks[next].state = STATE_RUNNING      // mark as running
+    current_thread = next
+    var nxt: *Task = &tasks[next]
+    nxt.state = STATE_RUNNING
 
     /*
      * Return the new thread's saved SSP.
      * The timer ISR will set r7 = this value and pop all registers
      * from the new thread's stack, then RTE back to user mode.
      */
-    tasks[next].ssp
+    nxt.ssp
 
 
 /*
@@ -292,8 +295,6 @@ kernel_main()
      * Writing the interval (in milliseconds) to the timer device
      * starts periodic interrupts. Each interrupt fires the timer ISR,
      * which calls schedule() to perform a context switch.
-     *
-     * We cast the timer device address to a pointer and write through it.
      */
     val timer: *int = TIMER_DEVICE
     *timer = TICK_MS        // start timer: interrupt every TICK_MS ms
@@ -309,4 +310,5 @@ kernel_main()
      * This function never returns. From this point on, the kernel
      * only runs inside interrupt handlers (timer ISR, trap handler).
      */
-    start_first_thread(tasks[0].ssp)
+    var first: *Task = &tasks[0]
+    start_first_thread(first.ssp)

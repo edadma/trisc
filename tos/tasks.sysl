@@ -47,10 +47,9 @@ val STDOUT = 0xFFE0
  */
 
 putc(ch: int)
-    // Cast the stdout address to a pointer to int.
-    // Writing to the device outputs that character.
-    val p: *int = STDOUT   // pointer to the stdout device
-    *p = ch                // write the character
+    // Write character to stdout device via memory-mapped I/O.
+    val p: *int = STDOUT
+    *p = ch
 
 
 /*

@@ -141,6 +141,8 @@ class SyslAnalyzer:
       case (IntType, ByteType) | (ByteType, IntType) => true
       // bool and int are NOT compatible — use explicit casts
       case (CharType, ByteType) | (ByteType, CharType) => true
+      case (IntType, PtrType(_)) => true    // int to pointer (e.g., memory-mapped I/O addresses)
+      case (PtrType(_), IntType) => true    // pointer to int
       case (ArrayType(e1, _), PtrType(e2)) if e1 == e2 => true
       case (ArrayType(e1, _), ArrayType(e2, _)) if e1 == e2 => true
       case _ => false
