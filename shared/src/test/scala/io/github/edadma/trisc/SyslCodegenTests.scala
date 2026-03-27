@@ -560,4 +560,536 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
         |    a + b
         |""".stripMargin) shouldBe 50
   }
+
+  // ===== Width-Aware Stack Layout Tests =====
+
+  // --- Locals at each width ---
+
+  "i8 local store and load" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: byte = 42
+        |    x
+        |""".stripMargin) shouldBe 42
+  }
+
+  "i16 local store and load" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: i16 = 1000
+        |    x
+        |""".stripMargin) shouldBe 1000
+  }
+
+  "i32 local store and load" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: int = 50000
+        |    x
+        |""".stripMargin) shouldBe 50000
+  }
+
+  "i64 local store and load" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: i64 = 50000
+        |    x
+        |""".stripMargin) shouldBe 50000
+  }
+
+  // --- Multiple locals of different widths ---
+
+  "mixed width locals" in {
+    compileAndRun(
+      """main() -> int
+        |    var a: byte = 10
+        |    var b: i16 = 20
+        |    var c: int = 30
+        |    var d: i64 = 40
+        |    a + b + c + d
+        |""".stripMargin) shouldBe 100
+  }
+
+  "mixed width locals reverse order" in {
+    compileAndRun(
+      """main() -> int
+        |    var d: i64 = 40
+        |    var c: int = 30
+        |    var b: i16 = 20
+        |    var a: byte = 10
+        |    a + b + c + d
+        |""".stripMargin) shouldBe 100
+  }
+
+  "mixed width locals with reassignment" in {
+    compileAndRun(
+      """main() -> int
+        |    var a: byte = 1
+        |    var b: int = 2
+        |    a = 10
+        |    b = 20
+        |    a + b
+        |""".stripMargin) shouldBe 30
+  }
+
+  // --- Arrays at each element width ---
+
+  "i8 array" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]byte
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    arr[0] + arr[1] + arr[2]
+        |""".stripMargin) shouldBe 60
+  }
+
+  "i16 array" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]i16
+        |    arr[0] = 100
+        |    arr[1] = 200
+        |    arr[2] = 300
+        |    arr[0] + arr[1] + arr[2]
+        |""".stripMargin) shouldBe 600
+  }
+
+  "i32 array" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]int
+        |    arr[0] = 1000
+        |    arr[1] = 2000
+        |    arr[2] = 3000
+        |    arr[0] + arr[1] + arr[2]
+        |""".stripMargin) shouldBe 6000
+  }
+
+  "i64 array" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]i64
+        |    arr[0] = 10000
+        |    arr[1] = 20000
+        |    arr[2] = 30000
+        |    arr[0] + arr[1] + arr[2]
+        |""".stripMargin) shouldBe 60000
+  }
+
+  "i32 array with loop" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [5]int
+        |    for i = 0; i < 5; i++
+        |        arr[i] = (i + 1) * 10
+        |    sum = 0
+        |    for i = 0; i < 5; i++
+        |        sum += arr[i]
+        |    sum
+        |""".stripMargin) shouldBe 150
+  }
+
+  // --- Pointer dereference at each width ---
+
+  "pointer deref i8" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: byte = 42
+        |    var p: *byte = &x
+        |    *p
+        |""".stripMargin) shouldBe 42
+  }
+
+  "pointer deref i16" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: i16 = 1234
+        |    var p: *i16 = &x
+        |    *p
+        |""".stripMargin) shouldBe 1234
+  }
+
+  "pointer deref i32" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: int = 56789
+        |    var p: *int = &x
+        |    *p
+        |""".stripMargin) shouldBe 56789
+  }
+
+  "write through i32 pointer" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: int = 0
+        |    var p: *int = &x
+        |    *p = 99
+        |    x
+        |""".stripMargin) shouldBe 99
+  }
+
+  "write through i8 pointer" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: byte = 0
+        |    var p: *byte = &x
+        |    *p = 77
+        |    x
+        |""".stripMargin) shouldBe 77
+  }
+
+  // --- Pointer arithmetic at each width ---
+
+  "pointer increment i32 array" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    p = &arr[0]
+        |    p++
+        |    *p
+        |""".stripMargin) shouldBe 20
+  }
+
+  "pointer increment i8 array" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]byte
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    p = &arr[0]
+        |    p++
+        |    *p
+        |""".stripMargin) shouldBe 20
+  }
+
+  "pointer increment i64 array" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]i64
+        |    arr[0] = 100
+        |    arr[1] = 200
+        |    arr[2] = 300
+        |    p = &arr[0]
+        |    p++
+        |    *p
+        |""".stripMargin) shouldBe 200
+  }
+
+  "pointer arithmetic add i32" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [4]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    arr[3] = 40
+        |    p = &arr[0]
+        |    val q: *int = p + 2
+        |    *q
+        |""".stripMargin) shouldBe 30
+  }
+
+  "pointer decrement i32 array" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    p = &arr[2]
+        |    p--
+        |    *p
+        |""".stripMargin) shouldBe 20
+  }
+
+  // --- Global variables at each width ---
+
+  "i32 global variable" in {
+    compileAndRun(
+      """var g: int = 42
+        |main() -> int = g
+        |""".stripMargin) shouldBe 42
+  }
+
+  "i32 global compound assign" in {
+    compileAndRun(
+      """var g: int = 10
+        |main() -> int
+        |    g += 5
+        |    g
+        |""".stripMargin) shouldBe 15
+  }
+
+  "bool global variable" in {
+    compileAndRun(
+      """var g: bool = true
+        |main() -> int
+        |    if g then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  // --- Function args with different widths ---
+
+  "i32 function arg preserved" in {
+    compileAndRun(
+      """double(x: int) -> int = x * 2
+        |main() -> int = double(21)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "two i32 args" in {
+    compileAndRun(
+      """myAdd(a: int, b: int) -> int = a + b
+        |main() -> int = myAdd(20, 22)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "three i32 args" in {
+    compileAndRun(
+      """mySum(a: int, b: int, c: int) -> int = a + b + c
+        |main() -> int = mySum(10, 20, 12)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "four i32 args" in {
+    compileAndRun(
+      """mySum4(a: int, b: int, c: int, d: int) -> int = a + b + c + d
+        |main() -> int = mySum4(10, 11, 12, 9)
+        |""".stripMargin) shouldBe 42
+  }
+
+  // --- addr-of with typed index ---
+
+  "addr-of i32 array element" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]int
+        |    arr[0] = 100
+        |    arr[1] = 200
+        |    arr[2] = 300
+        |    p = &arr[2]
+        |    *p
+        |""".stripMargin) shouldBe 300
+  }
+
+  // --- Compound assign on narrow locals ---
+
+  "compound assign i8 local" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: byte = 5
+        |    x += 3
+        |    x
+        |""".stripMargin) shouldBe 8
+  }
+
+  "compound assign i16 local" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: i16 = 100
+        |    x += 50
+        |    x
+        |""".stripMargin) shouldBe 150
+  }
+
+  "compound assign i32 local" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: int = 100
+        |    x *= 3
+        |    x
+        |""".stripMargin) shouldBe 300
+  }
+
+  "multiple compound assigns mixed widths" in {
+    compileAndRun(
+      """main() -> int
+        |    var a: byte = 10
+        |    var b: int = 20
+        |    a += 5
+        |    b += 10
+        |    a + b
+        |""".stripMargin) shouldBe 45
+  }
+
+  // --- Narrow globals ---
+
+  "i8 global read" in {
+    compileAndRun(
+      """var g: byte = 42
+        |main() -> int = g
+        |""".stripMargin) shouldBe 42
+  }
+
+  "i16 global read" in {
+    compileAndRun(
+      """var g: i16 = 1000
+        |main() -> int = g
+        |""".stripMargin) shouldBe 1000
+  }
+
+  "i64 global read" in {
+    compileAndRun(
+      """var g: i64 = 50000
+        |main() -> int = g
+        |""".stripMargin) shouldBe 50000
+  }
+
+  "i8 global compound assign" in {
+    compileAndRun(
+      """var g: byte = 10
+        |main() -> int
+        |    g += 5
+        |    g
+        |""".stripMargin) shouldBe 15
+  }
+
+  "i16 global compound assign" in {
+    compileAndRun(
+      """var g: i16 = 100
+        |main() -> int
+        |    g += 50
+        |    g
+        |""".stripMargin) shouldBe 150
+  }
+
+  // --- Pointer deref write at each width ---
+
+  "write through i16 pointer" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: i16 = 0
+        |    var p: *i16 = &x
+        |    *p = 999
+        |    x
+        |""".stripMargin) shouldBe 999
+  }
+
+  "write through i64 pointer" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: i64 = 0
+        |    var p: *i64 = &x
+        |    *p = 12345
+        |    x
+        |""".stripMargin) shouldBe 12345
+  }
+
+  // --- Narrow loop counter ---
+
+  "i8 loop counter" in {
+    compileAndRun(
+      """main() -> int
+        |    sum = 0
+        |    for var i: byte = 0; i < 10; i++
+        |        sum += 1
+        |    sum
+        |""".stripMargin) shouldBe 10
+  }
+
+  // --- Narrow array with loop ---
+
+  "i8 array with loop" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [5]byte
+        |    for i = 0; i < 5; i++
+        |        arr[i] = i + 1
+        |    sum = 0
+        |    for i = 0; i < 5; i++
+        |        sum += arr[i]
+        |    sum
+        |""".stripMargin) shouldBe 15
+  }
+
+  "i16 array with loop" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [5]i16
+        |    for i = 0; i < 5; i++
+        |        arr[i] = (i + 1) * 100
+        |    sum = 0
+        |    for i = 0; i < 5; i++
+        |        sum += arr[i]
+        |    sum
+        |""".stripMargin) shouldBe 1500
+  }
+
+  // --- Pointer arithmetic i16 ---
+
+  "pointer increment i16 array" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]i16
+        |    arr[0] = 100
+        |    arr[1] = 200
+        |    arr[2] = 300
+        |    p = &arr[0]
+        |    p++
+        |    *p
+        |""".stripMargin) shouldBe 200
+  }
+
+  // --- Call chain with narrow return ---
+
+  "function stores result in narrow local" in {
+    compileAndRun(
+      """triple(x: int) -> int = x * 3
+        |main() -> int
+        |    var r: int = triple(14)
+        |    r
+        |""".stripMargin) shouldBe 42
+  }
+
+  "chained function calls" in {
+    compileAndRun(
+      """inc(x: int) -> int = x + 1
+        |double(x: int) -> int = x * 2
+        |main() -> int
+        |    var x: int = 10
+        |    x = double(inc(x))
+        |    x
+        |""".stripMargin) shouldBe 22
+  }
+
+  // --- Pre-inc/dec on narrow locals ---
+
+  "pre-increment i32 local" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: int = 41
+        |    ++x
+        |""".stripMargin) shouldBe 42
+  }
+
+  "pre-decrement i32 local" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: int = 43
+        |    --x
+        |""".stripMargin) shouldBe 42
+  }
+
+  "post-increment i32 returns old value" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: int = 42
+        |    x++
+        |""".stripMargin) shouldBe 42
+  }
+
+  "post-increment i32 modifies variable" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: int = 41
+        |    x++
+        |    x
+        |""".stripMargin) shouldBe 42
+  }
 }
