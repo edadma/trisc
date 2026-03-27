@@ -415,6 +415,9 @@ class SyslTriscCodegen(addresses: Int = 2):
         genExpr(operand)
         emit("  not r1, r1")
 
+      case TFuncRef(name, _) =>
+        emit(s"  movi r1, $name") // r1 = address of function
+
       case TCall(name, args, _) =>
         // Push stack args (args 1+) right-to-left so arg[1] is at lowest addr
         for arg <- args.drop(1).reverse do
@@ -424,6 +427,24 @@ class SyslTriscCodegen(addresses: Int = 2):
         if args.nonEmpty then genExpr(args.head)
         // Call
         emit(s"  movi r4, $name")
+        emit("  jalr r6, r4")
+        // Clean up stack args
+        if args.length > 1 then
+          val stackArgBytes = (args.length - 1) * 8
+          emit(s"  addi r7, r7, $stackArgBytes")
+
+      case TIndirectCall(callee, args, _) =>
+        // Push stack args (args 1+) right-to-left
+        for arg <- args.drop(1).reverse do
+          genExpr(arg)
+          emit("  pshd r1")
+        // First arg (if any) goes in r1
+        if args.nonEmpty then genExpr(args.head)
+        // Save r1 (first arg), load function pointer into r4, restore r1
+        if args.nonEmpty then emit("  pshd r1")
+        genExpr(callee)          // r1 = function pointer
+        emit("  mov r4, r1")     // r4 = function address
+        if args.nonEmpty then emit("  popd r1")
         emit("  jalr r6, r4")
         // Clean up stack args
         if args.length > 1 then

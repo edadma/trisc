@@ -515,4 +515,36 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
         |main() -> int = flag
         |""".stripMargin, memSize = 0x2000) shouldBe 1
   }
+
+  // ===== Function pointers =====
+
+  "function pointer call" in {
+    compileAndRun(
+      """myDouble(x: int) -> int = x * 2
+        |main() -> int
+        |    f = myDouble
+        |    f(21)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "pass function pointer as argument" in {
+    compileAndRun(
+      """myDouble(x: int) -> int = x * 2
+        |apply(f: func(int) -> int, x: int) -> int = f(x)
+        |main() -> int = apply(myDouble, 21)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "function pointer reassignment" in {
+    compileAndRun(
+      """myDouble(x: int) -> int = x * 2
+        |myTriple(x: int) -> int = x * 3
+        |main() -> int
+        |    f = myDouble
+        |    a = f(10)
+        |    f = myTriple
+        |    b = f(10)
+        |    a + b
+        |""".stripMargin) shouldBe 50
+  }
 }
