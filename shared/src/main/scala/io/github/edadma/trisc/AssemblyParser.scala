@@ -45,6 +45,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |and
                           |asr
                           |auipc
+                          |bclr
                           |beq
                           |bge
                           |bgeu
@@ -56,6 +57,8 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |blu
                           |bne
                           |bra
+                          |bset
+                          |btst
                           |chk
                           |clz
                           |ctz
@@ -100,10 +103,12 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |or
                           |popb
                           |popd
+                          |popr
                           |pops
                           |popw
                           |pshb
                           |pshd
+                          |pshr
                           |pshs
                           |pshw
                           |resb
@@ -114,6 +119,8 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
                           |rem
                           |remu
                           |ret
+                          |rol
+                          |ror
                           |rte
                           |sbc
                           |sc
@@ -274,7 +281,7 @@ object AssemblyParser extends StandardTokenParsers with PackratParsers with Impl
       | label ~ instruction ^^ { case l ~ i => Seq(l, i) }
 
   lazy val mnemonics: P[String] =
-    "adc" | "add" | "addi" | "and" | "asr" | "auipc" | "beq" | "bge" | "bgeu" | "bgt" | "bgu" | "ble" | "bleu" | "bls" | "blu" | "bne" | "bra" | "chk" | "clz" | "ctz" | "cvt" | "div" | "divu" | "fabs" | "fadd" | "fdiv" | "fence" | "fint" | "finv" | "fmul" | "fneg" | "fpow" | "fslt" | "fsqrt" | "fsub" | "gpsr" | "gusp" | "halt" | "jalr" | "ld" | "ldb" | "ldd" | "ldi" | "lds" | "ldw" | "ll" | "lsl" | "lsr" | "mov" | "movi" | "mul" | "mulu" | "neg" | "nop" | "not" | "or" | "popb" | "popd" | "pops" | "popw" | "pshb" | "pshd" | "pshs" | "pshw" | "rem" | "remu" | "ret" | "rte" | "sbc" | "sc" | "seb" | "ses" | "sew" | "sli" | "slt" | "sltu" | "spsr" | "st" | "stb" | "std" | "sti" | "sts" | "stw" | "sub" | "susp" | "trap" | "trapv" | "wfi" | "xor" | "zeb" | "zes" | "zew"
+    "adc" | "add" | "addi" | "and" | "asr" | "auipc" | "bclr" | "beq" | "bge" | "bgeu" | "bgt" | "bgu" | "ble" | "bleu" | "bls" | "blu" | "bne" | "bra" | "bset" | "btst" | "chk" | "clz" | "ctz" | "cvt" | "div" | "divu" | "fabs" | "fadd" | "fdiv" | "fence" | "fint" | "finv" | "fmul" | "fneg" | "fpow" | "fslt" | "fsqrt" | "fsub" | "gpsr" | "gusp" | "halt" | "jalr" | "ld" | "ldb" | "ldd" | "ldi" | "lds" | "ldw" | "ll" | "lsl" | "lsr" | "mov" | "movi" | "mul" | "mulu" | "neg" | "nop" | "not" | "or" | "popb" | "popd" | "popr" | "pops" | "popw" | "pshb" | "pshd" | "pshr" | "pshs" | "pshw" | "rem" | "remu" | "ret" | "rol" | "ror" | "rte" | "sbc" | "sc" | "seb" | "ses" | "sew" | "sli" | "slt" | "sltu" | "spsr" | "st" | "stb" | "std" | "sti" | "sts" | "stw" | "sub" | "susp" | "trap" | "trapv" | "wfi" | "xor" | "zeb" | "zes" | "zew"
 
   lazy val instruction: P[InstructionLineAST] =
     mnemonics ~ repsep(expression, ",") ^^ { case m ~ es =>

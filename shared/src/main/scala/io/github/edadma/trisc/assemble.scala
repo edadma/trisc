@@ -530,7 +530,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o, "expected register as first operand")
 
       addInstruction(3 -> 7, 3 -> 0, 3 -> reg, 7 -> opcode)
-    case InstructionLineAST(mnemonic @ ("zeb" | "zes" | "zew" | "seb" | "ses" | "sew" | "neg" | "not" | "cvt" | "fneg" | "finv" | "fint" | "fsqrt" | "fabs" | "ll" | "sc" | "clz" | "ctz" | "chk"), Seq(o1, o2)) =>
+    case InstructionLineAST(mnemonic @ ("zeb" | "zes" | "zew" | "seb" | "ses" | "sew" | "neg" | "not" | "cvt" | "fneg" | "finv" | "fint" | "fsqrt" | "fabs" | "ll" | "sc" | "clz" | "ctz" | "chk" | "btst" | "bset" | "bclr" | "rol" | "ror"), Seq(o1, o2)) =>
       val opcode =
         mnemonic match
           case "zeb"   => 1
@@ -552,6 +552,11 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case "clz"   => 17
           case "ctz"   => 18
           case "chk"   => 19
+          case "btst"  => 20
+          case "bset"  => 21
+          case "bclr"  => 22
+          case "rol"   => 23
+          case "ror"   => 24
       val reg1 =
         fold(o1) match
           case RegisterExprAST(reg) => reg
@@ -562,6 +567,17 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o2, "expected register as second operand")
 
       addInstruction(3 -> 6, 3 -> reg1, 3 -> reg2, 2 -> 0, 5 -> opcode)
+    case InstructionLineAST(mnemonic @ ("pshr" | "popr"), Seq(o)) =>
+      val opcode = mnemonic match
+        case "pshr" => 16
+        case "popr" => 17
+      val reg =
+        fold(o) match
+          case RegisterExprAST(reg) if reg >= 1 && reg <= 7 => reg
+          case RegisterExprAST(_) => problem(o, "register must be r1-r7")
+          case _ => problem(o, "expected register as operand")
+
+      addInstruction(3 -> 7, 3 -> 0, 3 -> reg, 7 -> opcode)
     case InstructionLineAST(mnemonic @ ("pshb" | "popb" | "pshs" | "pops" | "pshw" | "popw" | "pshd" | "popd"), Seq(o)) =>
       val opcode = mnemonic match
         case "pshb" => 0

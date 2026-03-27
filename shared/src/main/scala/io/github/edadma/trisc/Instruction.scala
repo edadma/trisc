@@ -522,6 +522,72 @@ class SUSP(r: Int) extends RInstruction(r):
     if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
     else cpu.usp = cpu.r(r).read
 
+// Multi-register push/pop (R format)
+// r field = upper register bound (1-6), pushes/pops r1 through rN
+
+class PSHR(r: Int) extends Instruction:
+  val mnemonic = "pshr"
+
+  def disassemble(cpu: CPU): String = s"$mnemonic r$r"
+
+  def apply(cpu: CPU): Unit =
+    // Push r1 through rN onto stack (r1 first = deepest)
+    for i <- 1 to r do
+      cpu.r(7).write(cpu.r(7).read - 8)
+      cpu.writeLong(cpu.r(7).read, cpu.r(i).read)
+
+class POPR(r: Int) extends Instruction:
+  val mnemonic = "popr"
+
+  def disassemble(cpu: CPU): String = s"$mnemonic r$r"
+
+  def apply(cpu: CPU): Unit =
+    // Pop rN through r1 from stack (rN first = shallowest)
+    for i <- r to 1 by -1 do
+      cpu.r(i).write(cpu.readLong(cpu.r(7).read))
+      cpu.r(7).write(cpu.r(7).read + 8)
+
+// Bit manipulation (RR format)
+
+class BTST(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "btst"
+
+  def apply(cpu: CPU): Unit =
+    val bit = cpu.r(b).read.toInt & 63
+    cpu.r(a).write(if (cpu.r(a).read & (1L << bit)) != 0 then 1 else 0)
+
+class BSET(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "bset"
+
+  def apply(cpu: CPU): Unit =
+    val bit = cpu.r(b).read.toInt & 63
+    cpu.r(a).write(cpu.r(a).read | (1L << bit))
+
+class BCLR(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "bclr"
+
+  def apply(cpu: CPU): Unit =
+    val bit = cpu.r(b).read.toInt & 63
+    cpu.r(a).write(cpu.r(a).read & ~(1L << bit))
+
+// Rotate (RR format)
+
+class ROL(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "rol"
+
+  def apply(cpu: CPU): Unit =
+    val shift = cpu.r(b).read.toInt & 63
+    val v = cpu.r(a).read
+    cpu.r(a).write((v << shift) | (v >>> (64 - shift)))
+
+class ROR(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "ror"
+
+  def apply(cpu: CPU): Unit =
+    val shift = cpu.r(b).read.toInt & 63
+    val v = cpu.r(a).read
+    cpu.r(a).write((v >>> shift) | (v << (64 - shift)))
+
 class AUIPC(r: Int, imm: Int) extends ImmediateInstruction(r, imm):
   val mnemonic = "auipc"
 

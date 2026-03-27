@@ -71,6 +71,11 @@ RR
         clz     10001
         ctz     10010
         chk     10011    (traps if ra < 0 or ra > rb)
+        btst    10100    (ra = (ra >> rb) & 1)
+        bset    10101    (ra = ra | (1 << rb))
+        bclr    10110    (ra = ra & ~(1 << rb))
+        rol     10111    (ra = ra rotate left by rb)
+        ror     11000    (ra = ra rotate right by rb)
 
     110 000 000 01 iiiii    trap
     110 aaa bbb 10 iiiii    ld
@@ -106,4 +111,6 @@ R
     wfi   0001100    (supervisor only)
     gusp  0001101    (supervisor only)
     susp  0001110    (supervisor only)
-    trapv 0001111    (traps if V flag set)
+    trapv   0001111    (traps if V flag set)
+    pshr    0010000    (push r1-rN onto stack)
+    popr    0010001    (pop rN-r1 from stack)
