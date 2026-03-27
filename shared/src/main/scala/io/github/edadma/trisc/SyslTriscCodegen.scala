@@ -27,17 +27,20 @@ class SyslTriscCodegen(addresses: Int = 2):
         case _: TStructDecl => // type-only, no code to emit
         case f: TFunDecl => genFunction(f)
         case TVarDecl(name, typ, init, _) =>
+          globals(name) = typ
           emit(s"# global: $name")
           emit(s"$name")
+          val directive = emitDataDirective(typ)
           init match
-            case TIntLit(n, _) => emit(s"  dl $n")
-            case TBoolLit(b, _) => emit(s"  dl ${if b then 1 else 0}")
-            case _ => emit(s"  dl 0") // complex initializers not yet supported
+            case TIntLit(n, _) => emit(s"  $directive $n")
+            case TBoolLit(b, _) => emit(s"  $directive ${if b then 1 else 0}")
+            case _ => emit(s"  $directive 0")
 
     out.toString
 
   private case class LocalVar(name: String, offset: Int, typ: SyslType)
 
+  private val globals = new mutable.LinkedHashMap[String, SyslType]
   private var locals: mutable.LinkedHashMap[String, LocalVar] = null
   private var stackOffset: Int = 0
   private var currentFunction: TFunDecl = null
@@ -58,21 +61,17 @@ class SyslTriscCodegen(addresses: Int = 2):
     case SyslType.StructType(_, fields) => if fields.isEmpty then 1 else fields.map(f => stackAlign(f._2)).max
     case _ => 8
 
-  // Emit load from [rBase + 0] into rDest, using width-appropriate instruction
+  // Emit load from [rBase + 0] into rDest, using width-appropriate instruction.
+  // The CPU's ldb/lds/ldw already sign-extend via Int→Long in Register.write,
+  // so no explicit sext is needed.
   private def emitLoad(destReg: Int, addrReg: Int, typ: SyslType): Unit =
     typ match
       case SyslType.IntType(8) | SyslType.BoolType =>
         emit(s"  ldb r$destReg, r$addrReg, r0")
-        emit(s"  ldi r2, 8")
-        emit(s"  sext r$destReg, r2")
       case SyslType.IntType(16) =>
         emit(s"  lds r$destReg, r$addrReg, r0")
-        emit(s"  ldi r2, 16")
-        emit(s"  sext r$destReg, r2")
       case SyslType.IntType(32) =>
         emit(s"  ldw r$destReg, r$addrReg, r0")
-        emit(s"  ldi r2, 32")
-        emit(s"  sext r$destReg, r2")
       case _ =>
         emit(s"  ldd r$destReg, r$addrReg, r0")
 
@@ -88,47 +87,15 @@ class SyslTriscCodegen(addresses: Int = 2):
       case _ =>
         emit(s"  std r$srcReg, r$addrReg, r0")
 
-  // Emit push r1 with type-appropriate width
-  private def emitPush(typ: SyslType): Unit =
-    val size = stackSize(typ)
-    typ match
-      case SyslType.IntType(8) | SyslType.BoolType =>
-        emit("  pshb r1")
-      case SyslType.IntType(16) =>
-        emit("  pshs r1")
-      case SyslType.IntType(32) =>
-        emit("  pshw r1")
-      case _ =>
-        emit("  pshd r1")
-
-  // Emit pop into r1 with type-appropriate width + sign extend
-  private def emitPop(reg: Int, typ: SyslType): Unit =
-    typ match
-      case SyslType.IntType(8) | SyslType.BoolType =>
-        emit(s"  popb r$reg")
-        emit(s"  ldi r2, 8")
-        emit(s"  sext r$reg, r2")
-      case SyslType.IntType(16) =>
-        emit(s"  pops r$reg")
-        emit(s"  ldi r2, 16")
-        emit(s"  sext r$reg, r2")
-      case SyslType.IntType(32) =>
-        emit(s"  popw r$reg")
-        emit(s"  ldi r2, 32")
-        emit(s"  sext r$reg, r2")
-      case _ =>
-        emit(s"  popd r$reg")
-
-  // Allocate a local variable on the stack, return its offset from fp
-  // Emits code to grow the stack pointer
+  // Allocate a local variable on the stack, return its offset from fp.
+  // SP must stay 8-byte aligned (pshd/popd require it), so the growth
+  // is always rounded up to a multiple of 8.  The variable still uses
+  // width-aware loads/stores via its typ.
   private def allocLocal(name: String, typ: SyslType): LocalVar =
     val size = stackSize(typ)
-    val align = stackAlign(typ)
     val oldOffset = stackOffset
-    // Align the stack offset downward
     stackOffset -= size
-    stackOffset = stackOffset & ~(align - 1) // align down
-    // Grow the stack by the difference
+    stackOffset = stackOffset & ~7 // keep 8-byte aligned
     val growth = oldOffset - stackOffset
     emitAddImm(7, 7, -growth)
     val local = LocalVar(name, stackOffset, typ)
@@ -155,12 +122,10 @@ class SyslTriscCodegen(addresses: Int = 2):
       val local = allocLocal(p.name, p.typ)
       emitAddImm(2, 5, local.offset)
       emitStore(1, 2, p.typ)
-    // Stack args (params 1+) are above saved lr/fp
-    // Caller pushed them with proper widths, calculate offsets
-    var callerArgOffset = 16 // start above saved lr(8) + fp(8)
+    // Stack args (params 1+) are above saved lr/fp in 64-bit slots
     for (param, i) <- fun.params.zipWithIndex.drop(1) do
-      locals(param.name) = LocalVar(param.name, callerArgOffset, param.typ)
-      callerArgOffset += stackSize(param.typ)
+      val callerOffset = 16 + (i - 1) * 8 // 8-byte slots above saved lr(+8) and fp(+8)
+      locals(param.name) = LocalVar(param.name, callerOffset, SyslType.I64)
 
     // Generate body
     fun.body match
@@ -251,12 +216,13 @@ class SyslTriscCodegen(addresses: Int = 2):
           emitAddImm(2, 5, local.offset)
           emitStore(1, 2, local.typ)
         else
+          val gtyp = globals.getOrElse(target, SyslType.I64)
           emit(s"  movi r2, $target")
-          emit(s"  ldd r1, r2, r0") // globals are always 64-bit for now
+          emitLoad(1, 2, gtyp)
           emit("  popd r3")
           emitBinOp(op)
           emit(s"  movi r2, $target")
-          emit(s"  std r1, r2, r0")
+          emitStore(1, 2, gtyp)
 
       case TReturnStmt(Some(value)) =>
         genExpr(value) // result in r1
@@ -375,7 +341,7 @@ class SyslTriscCodegen(addresses: Int = 2):
           emitLoad(1, 2, local.typ)
         else
           emit(s"  movi r1, $name")
-          emit(s"  ldd r1, r1, r0") // globals are 64-bit for now
+          emitLoad(1, 1, globals.getOrElse(name, SyslType.I64))
 
       case TBinary(left, "&&", right, _) =>
         val falseLabel = newLabel("and_false")
@@ -469,7 +435,10 @@ class SyslTriscCodegen(addresses: Int = 2):
             emit("  xor r1, r1, r3") // flip
 
       case TPreInc(name, typ) =>
-        val step = if typ.isPointerLike then stackSize(typ).max(1) else 1
+        val step = typ match
+          case SyslType.PtrType(pointee) => stackSize(pointee).max(1)
+          case SyslType.ArrayType(elem, _) => stackSize(elem).max(1)
+          case _ => 1
         val local = locals(name)
         emitAddImm(2, 5, local.offset)
         emitLoad(1, 2, local.typ)
@@ -478,7 +447,10 @@ class SyslTriscCodegen(addresses: Int = 2):
         emitStore(1, 2, local.typ)
 
       case TPreDec(name, typ) =>
-        val step = if typ.isPointerLike then stackSize(typ).max(1) else 1
+        val step = typ match
+          case SyslType.PtrType(pointee) => stackSize(pointee).max(1)
+          case SyslType.ArrayType(elem, _) => stackSize(elem).max(1)
+          case _ => 1
         val local = locals(name)
         emitAddImm(2, 5, local.offset)
         emitLoad(1, 2, local.typ)
@@ -487,7 +459,10 @@ class SyslTriscCodegen(addresses: Int = 2):
         emitStore(1, 2, local.typ)
 
       case TPostInc(name, typ) =>
-        val step = if typ.isPointerLike then stackSize(typ).max(1) else 1
+        val step = typ match
+          case SyslType.PtrType(pointee) => stackSize(pointee).max(1)
+          case SyslType.ArrayType(elem, _) => stackSize(elem).max(1)
+          case _ => 1
         val local = locals(name)
         emitAddImm(2, 5, local.offset)
         emitLoad(1, 2, local.typ)
@@ -496,7 +471,10 @@ class SyslTriscCodegen(addresses: Int = 2):
         emitStore(3, 2, local.typ)
 
       case TPostDec(name, typ) =>
-        val step = if typ.isPointerLike then stackSize(typ).max(1) else 1
+        val step = typ match
+          case SyslType.PtrType(pointee) => stackSize(pointee).max(1)
+          case SyslType.ArrayType(elem, _) => stackSize(elem).max(1)
+          case _ => 1
         val local = locals(name)
         emitAddImm(2, 5, local.offset)
         emitLoad(1, 2, local.typ)
@@ -655,20 +633,26 @@ class SyslTriscCodegen(addresses: Int = 2):
       case _ =>
         emit(s"  # TODO: ${expr.getClass.getSimpleName}")
 
-  // Element size in bytes for stack/memory layout (all values stored as 64-bit)
-  private def elemSize(typ: SyslType): Int = 8
-
   // Emit reg = base + offset, handling large offsets that don't fit in addi
   private def emitAddImm(destReg: Int, baseReg: Int, offset: Int): Unit =
     if offset >= -64 && offset <= 63 then
       emit(s"  addi r$destReg, r$baseReg, $offset")
-    else if offset >= 0 then
-      emit(s"  movi r$destReg, $offset")
-      emit(s"  add r$destReg, r$baseReg, r$destReg")
     else
-      // Negative offset: load absolute value, subtract
-      emit(s"  movi r$destReg, ${-offset}")
-      emit(s"  sub r$destReg, r$baseReg, r$destReg")
+      // Use a temp register to avoid clobbering baseReg when destReg == baseReg
+      val tmp = if destReg == 3 then 2 else 3
+      if offset >= 0 then
+        emit(s"  movi r$tmp, $offset")
+        emit(s"  add r$destReg, r$baseReg, r$tmp")
+      else
+        emit(s"  movi r$tmp, ${-offset}")
+        emit(s"  sub r$destReg, r$baseReg, r$tmp")
+
+  // Data directive for a type: db (1 byte), ds (2), dw (4), dl (8)
+  private def emitDataDirective(typ: SyslType): String = typ match
+    case SyslType.IntType(8) | SyslType.BoolType => "db"
+    case SyslType.IntType(16) => "ds"
+    case SyslType.IntType(32) => "dw"
+    case _ => "dl"
 
   // Emit address of local variable into target register
   private def emitLocalAddr(name: String, reg: Int): Unit =
