@@ -37,7 +37,7 @@ RRR
     fsub 1100
     fmul 1101
     fdiv 1110
-    fpow 1111
+    fseq 1111
 
 RRI
 ---
@@ -84,7 +84,8 @@ RR
         max     11110    (ra = max(ra, rb) signed)
         exg     11111    (swap ra and rb)
 
-    110 aaa bbb 01 iiiii    (free — 32 two-register + 5-bit immediate encodings)
+    110 aaa bbb 01 ooooo    31 RR01 instructions
+        fpow    00000    (ra = pow(ra, rb), destructive)
     110 aaa bbb 10 iiiii    ld
     110 aaa bbb 11 iiiii    st
 

@@ -423,7 +423,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case InstructionLineAST(
           mnemonic @ ("ldb" | "stb" | "lds" | "sts" | "ldw" | "stw" | "ldd" | "std" | "add" | "sub" | "mul" | "div" |
           "rem" | "and" | "or" | "xor" | "asr" | "lsr" | "lsl" | "slt" | "sltu" | "adc" | "sbc" | "mulu" | "divu" |
-          "remu" | "fslt" | "fadd" | "fsub" | "fmul" | "fdiv" | "fpow"),
+          "remu" | "fslt" | "fadd" | "fsub" | "fmul" | "fdiv" | "fseq"),
           Seq(o1, o2, o3),
         ) =>
       val (prefix, opcode) =
@@ -459,7 +459,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case "fsub" => (1, 12)
           case "fmul" => (1, 13)
           case "fdiv" => (1, 14)
-          case "fpow" => (1, 15)
+          case "fseq" => (1, 15)
       val reg1 =
         fold(o1) match
           case RegisterExprAST(reg) => reg
@@ -578,6 +578,20 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o2, "expected register as second operand")
 
       addInstruction(3 -> 6, 3 -> reg1, 3 -> reg2, 2 -> 0, 5 -> opcode)
+    case InstructionLineAST(mnemonic @ ("fpow"), Seq(o1, o2)) =>
+      val opcode =
+        mnemonic match
+          case "fpow" => 0
+      val reg1 =
+        fold(o1) match
+          case RegisterExprAST(reg) => reg
+          case _                    => problem(o1, "expected register as first operand")
+      val reg2 =
+        fold(o2) match
+          case RegisterExprAST(reg) => reg
+          case _                    => problem(o2, "expected register as second operand")
+
+      addInstruction(3 -> 6, 3 -> reg1, 3 -> reg2, 2 -> 1, 5 -> opcode)
     case InstructionLineAST(mnemonic @ ("pshr" | "popr"), Seq(o)) =>
       val opcode = mnemonic match
         case "pshr" => 16

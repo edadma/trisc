@@ -8,15 +8,19 @@ enum SyslType:
   case ArrayType(elem: SyslType, size: Int)
   case FuncType(params: List[SyslType], returnType: SyslType)
   case StructType(name: String, fields: List[(String, SyslType)])
+  case DoubleType
 
   def isNumeric: Boolean = this match
     case _: IntType => true
+    case DoubleType => true
     case _ => false
 
-  def isIntegral: Boolean = isNumeric
+  def isIntegral: Boolean = this match
+    case _: IntType => true
+    case _ => false
 
   def isBoolOrNumeric: Boolean = this match
-    case _: IntType | BoolType => true
+    case _: IntType | BoolType | DoubleType => true
     case _ => false
 
   def isPointerLike: Boolean = this match
@@ -31,11 +35,13 @@ enum SyslType:
     case PtrType(_) => 8
     case FuncType(_, _) => 8
     case ArrayType(elem, size) => elem.sizeOf * size
+    case DoubleType => 8
     case StructType(_, fields) => fields.map(_._2.sizeOf).sum
 
   // Width in bits (for integer types)
   def bitWidth: Int = this match
     case IntType(w) => w
+    case DoubleType => 64
     case BoolType => 8
     case PtrType(_) => 64
     case _ => 64
@@ -46,6 +52,7 @@ enum SyslType:
     case IntType(32) => "int"
     case IntType(64) => "i64"
     case IntType(w) => s"i$w"
+    case DoubleType => "f64"
     case BoolType => "bool"
     case VoidType => "void"
     case PtrType(t) => s"*$t"
@@ -55,6 +62,7 @@ enum SyslType:
 
   def toPrefix: String = this match
     case IntType(w) => s"i$w"
+    case DoubleType => "f64"
     case BoolType => "bool"
     case VoidType => "void"
     case PtrType(t) => s"ptr ${t.toPrefix}"
@@ -73,6 +81,7 @@ object SyslType:
   val Byte: IntType = I8
   val Char: IntType = I32
   val Int: IntType = I32
+  val Double: DoubleType.type = DoubleType
 
   def fromPrefix(s: String): SyslType =
     val tokens = s.split("\\s+").iterator
@@ -84,6 +93,7 @@ object SyslType:
       case "void" => VoidType
       case s if s.startsWith("i") && s.drop(1).forall(_.isDigit) =>
         IntType(s.drop(1).toInt)
+      case "f64" | "double" => DoubleType
       // Legacy prefix names for backward compatibility
       case "int"  => I32
       case "char" => I32
