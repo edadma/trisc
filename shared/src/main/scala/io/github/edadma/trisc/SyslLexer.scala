@@ -14,7 +14,7 @@ class SyslLexical extends IndentationLexical(
 ) {
   reserved ++= List(
     "if", "then", "elif", "else", "while", "do", "for", "break", "continue", "return",
-    "import", "private",
+    "import", "private", "var",
     "func",
     "int", "char", "byte", "bool", "void",
     "true", "false",

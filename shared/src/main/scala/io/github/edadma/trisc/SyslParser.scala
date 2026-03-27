@@ -34,13 +34,13 @@ class SyslParser extends StandardTokenParsers {
     ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
       case name ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body, priv)
     } |
-      ident ~ (":" ~> typeExpr) ^^ {
+      opt("var") ~> ident ~ (":" ~> typeExpr) ^^ {
         case name ~ t => VarDeclAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t), priv)
       } |
-      ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ {
+      opt("var") ~> ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ {
         case name ~ t ~ e => VarDeclAST(name, Some(t), e, priv)
       } |
-      ident ~ ("=" ~> expr) ^^ {
+      opt("var") ~> ident ~ ("=" ~> expr) ^^ {
         case name ~ e => VarDeclAST(name, None, e, priv)
       }
 
@@ -102,7 +102,10 @@ class SyslParser extends StandardTokenParsers {
     "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^="
 
   lazy val identStmt: Parser[StmtAST] =
-    ident ~ (":" ~> typeExpr) ^^ { case name ~ t => VarStmtAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t)) } |
+    "var" ~> ident ~ (":" ~> typeExpr) ^^ { case name ~ t => VarStmtAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t)) } |
+      "var" ~> ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
+      "var" ~> ident ~ ("=" ~> expr) ^^ { case name ~ e => VarStmtAST(name, None, e) } |
+      ident ~ (":" ~> typeExpr) ^^ { case name ~ t => VarStmtAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t)) } |
       ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ ("[" ~> expr <~ "]") ~ ("=" ~> expr) ^^ { case name ~ idx ~ value =>
         IndexAssignStmtAST(VarRefAST(name), idx, value)
