@@ -62,8 +62,8 @@ class ControlTests extends TestHelpers {
     val output = runProgram(
       """STDOUT = 0xFF8
         |dd 0xFF0
-        |dd 136
-        |resb 120
+        |dd 160
+        |resb 144
         |ldi r2, 'A'
         |movi r1, printChar
         |jalr r7, r1

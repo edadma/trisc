@@ -9,11 +9,14 @@ enum Status(val bit: Int):
   case Mode extends Status(2)
   case C extends Status(4)
   case Irq extends Status(8)
+  case T extends Status(16)
+  case V extends Status(32)
 
 enum State:
   case Reset, Interrupt, InstructionAccess, DataAccess, MisalignedAccess,
     UnimplementedOpcode, PrivilegeViolation, IllegalDivide,
     Trap0, Trap1, Trap2, Trap3, Trap4, Trap5, Trap6, Trap7,
+    Trace, Overflow, BoundsCheck,
     Halt, Run, Wfi, DoubleFault
 
 class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
@@ -86,6 +89,8 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
     set(Status.Ind, true)
     set(Status.Mode, true)
     set(Status.C, false)
+    set(Status.T, false)
+    set(Status.V, false)
 
   def interrupt(): Unit =
     set(Status.Irq, true)
@@ -126,6 +131,7 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
         state = State.Run
         set(Status.Mode, true)
         set(Status.Ind, true)
+        set(Status.T, false)
         reservationValid = false
     catch
       case _: RuntimeException =>
@@ -151,10 +157,16 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
 
     pc += 2
 
+    // Capture T state before instruction — trace fires based on T at start of instruction (like 68k)
+    val traceEnabled = test(Status.T)
+
     try decoded(this)
     catch
       case _: RuntimeException =>
         if state == State.Run then state = State.DataAccess
+
+    // Trace exception: fires after instruction completes if T was set BEFORE it executed
+    if state == State.Run && traceEnabled then state = State.Trace
 
     if trace then
       for i <- 1 to 7 do print(f"  r$i:${r(i).read}%04x")
@@ -240,6 +252,7 @@ object Decode:
         "110 aaa bbb 00 10000" -> ((args: Map[Char, Int]) => new SC(args('a'), args('b'))),
         "110 aaa bbb 00 10001" -> ((args: Map[Char, Int]) => new CLZ(args('a'), args('b'))),
         "110 aaa bbb 00 10010" -> ((args: Map[Char, Int]) => new CTZ(args('a'), args('b'))),
+        "110 aaa bbb 00 10011" -> ((args: Map[Char, Int]) => new CHK(args('a'), args('b'))),
         "110 aaa bbb 10 iiiii" -> ((args: Map[Char, Int]) => new LD(args('a'), args('b'), args('i'))),
         "110 aaa bbb 11 iiiii" -> ((args: Map[Char, Int]) => new ST(args('a'), args('b'), args('i'))),
         "111 000 rrr 0000000" -> ((operands: Map[Char, Int]) => new PSHB(operands('r'))),
@@ -255,6 +268,7 @@ object Decode:
         "111 000 000 0001010" -> (_ => RTE),
         "111 000 000 0001011" -> (_ => FENCE),
         "111 000 000 0001100" -> (_ => WFI),
+        "111 000 000 0001111" -> (_ => TRAPV),
         "111 000 rrr 0001101" -> ((operands: Map[Char, Int]) => new GUSP(operands('r'))),
         "111 000 rrr 0001110" -> ((operands: Map[Char, Int]) => new SUSP(operands('r'))),
         "101 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new ADDI(args('a'), args('b'), ext(args('i')))),

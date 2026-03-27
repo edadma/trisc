@@ -61,8 +61,8 @@ class ImmediateTests extends TestHelpers {
     val output = runProgram(
       """STDOUT = 0xFF8
         |dd 0xFF0
-        |dd 136
-        |resb 120
+        |dd 160
+        |resb 144
         |movi r1, STDOUT
         |sti r1, 'A'
         |halt
@@ -74,8 +74,8 @@ class ImmediateTests extends TestHelpers {
     val output = runProgram(
       """STDOUT = 0xFF8
         |dd 0xFF0
-        |dd 136
-        |resb 120
+        |dd 160
+        |resb 144
         |movi r1, STDOUT
         |sti r1, 'H'
         |sti r1, 'i'
@@ -91,8 +91,8 @@ class ImmediateTests extends TestHelpers {
       """auipc r1, 0
         |halt
         |""".stripMargin)
-    // vector table is 17 slots × 8 bytes = 136 bytes, auipc at address 136
-    cpu.r(1).read shouldBe 136
+    // vector table is 20 slots × 8 bytes = 160 bytes, auipc at address 160
+    cpu.r(1).read shouldBe 160
   }
 
   "auipc with nonzero immediate" in {
@@ -100,8 +100,8 @@ class ImmediateTests extends TestHelpers {
       """auipc r1, 1
         |halt
         |""".stripMargin)
-    // auipc at address 136, PC-2 + (1<<8) = 136 + 256 = 392
-    cpu.r(1).read shouldBe 392
+    // auipc at address 160, PC-2 + (1<<8) = 160 + 256 = 416
+    cpu.r(1).read shouldBe 416
   }
 
   "auipc followed by ld for PC-relative load" in {
@@ -112,8 +112,8 @@ class ImmediateTests extends TestHelpers {
         |align 4
         |dw 0x1234
         |""".stripMargin)
-    // auipc at 136 → r1=136, ld at 138, halt at 140, align pads to 144, data at 144
-    // ld r2, r1, 8 → readInt(136 + 8) = readInt(144)
+    // auipc at 160 → r1=160, ld at 162, halt at 164, align pads to 168, data at 168
+    // ld r2, r1, 8 → readInt(160 + 8) = readInt(168)
     cpu.r(2).read shouldBe 0x1234
   }
 

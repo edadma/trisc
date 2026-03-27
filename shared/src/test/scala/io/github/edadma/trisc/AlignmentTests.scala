@@ -50,7 +50,7 @@ class AlignmentTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
-        |resb 64
+        |resb 88
         |reset
         |  ldi r1, 2
         |  spsr r1
@@ -80,7 +80,7 @@ class AlignmentTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
-        |resb 64
+        |resb 88
         |reset
         |  ldi r1, 2
         |  spsr r1
@@ -109,7 +109,7 @@ class AlignmentTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
-        |resb 64
+        |resb 88
         |reset
         |  ldi r1, 2
         |  spsr r1

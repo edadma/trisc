@@ -4,8 +4,8 @@ class StackTests extends TestHelpers {
 
   val STACK_VECTORS: String =
     """dd 0xFF0
-      |dd 136
-      |resb 120
+      |dd 160
+      |resb 144
       |""".stripMargin
 
   def withStack(body: String): String =
@@ -271,8 +271,8 @@ class StackTests extends TestHelpers {
   "push/pop in subroutine preserves caller registers" in {
     val cpu = runCPU(
       """dd 0xFF0
-        |dd 136
-        |resb 120
+        |dd 160
+        |resb 144
         |movi r7, 0xF00
         |ldi r1, 42
         |ldi r2, 99

@@ -23,8 +23,11 @@ Slot | Address | Purpose
 14   | 0x70    | Trap 5
 15   | 0x78    | Trap 6
 16   | 0x80    | Trap 7
+17   | 0x88    | Trace (single-step)
+18   | 0x90    | Overflow (trapv with V flag set)
+19   | 0x98    | Bounds Check (chk out of range)
 
-Total: 17 slots × 8 bytes = 136 bytes (0x00–0x87)
+Total: 20 slots × 8 bytes = 160 bytes (0x00–0x9F)
 
 Reset
 -----
@@ -32,7 +35,7 @@ Reset
 Reset is handled specially (68000-style):
 1. SSP loaded from vector slot 0
 2. PC loaded from vector slot 1
-3. Mode and Ind set, C cleared
+3. Mode and Ind set, C and T cleared
 4. No stack frame is pushed
 
 Exception Entry (all except Reset)
@@ -44,7 +47,8 @@ Exception Entry (all except Reset)
 4. Push PC onto supervisor stack (8 bytes, r7 -= 8)
 5. Load PC from vector table: slot = (exception ordinal + 1)
 6. Set Mode and Ind in PSR (supervisor mode, interrupts disabled)
-7. Invalidate LL/SC reservation
+7. Clear T in PSR (prevents infinite trace loops)
+8. Invalidate LL/SC reservation
 
 Stack frame layout (16 bytes):
     r7 → [ saved PC  ] (8 bytes)
@@ -78,6 +82,44 @@ Dual Stack Pointers (68000-style)
 - On exception entry from user mode: r7 and usp are swapped
 - On RTE to user mode: r7 and usp are swapped back
 - gusp/susp allow the supervisor to read/write the user stack pointer
+
+PSR (Processor Status Register)
+-------------------------------
+
+Bit | Name | Description
+--- | ---- | -----------
+0   | Ind  | Interrupt Disable (1 = interrupts masked)
+1   | Mode | Privilege Mode (0 = user, 1 = supervisor)
+2   | C    | Carry/Borrow flag (set by add, sub, adc, sbc)
+3   | Irq  | Interrupt pending
+4   | T    | Trace (fires Trace exception after each instruction)
+5   | V    | Overflow (signed overflow from add, sub, adc, sbc, neg)
+
+Trace Mode
+----------
+
+When T is set in PSR, a Trace exception fires after every instruction.
+This enables single-step debugging (68k-style semantics).
+
+Key details:
+- Trace fires based on T state BEFORE the instruction executes
+- spsr that sets T does NOT itself trigger trace — the next instruction does
+- rte in the handler does NOT trigger trace (T was clear before rte) even
+  though it restores T — the next instruction at the return point does
+- Exception entry automatically clears T to prevent infinite trace loops
+- The saved PSR retains T=1, so rte naturally continues single-stepping
+
+Overflow Flag
+-------------
+
+V is set when a signed arithmetic operation overflows:
+- add/adc: both operands have same sign but result has different sign
+- sub/sbc: operands have different signs and result differs from first operand
+- neg: only overflows when negating the minimum value (Long.MinValue)
+
+The trapv instruction traps to the Overflow vector if V is set.
+The chk instruction traps to the BoundsCheck vector if the value is
+out of range (ra < 0 or ra > rb, signed comparison).
 
 Double Fault
 ------------

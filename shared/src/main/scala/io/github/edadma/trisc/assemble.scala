@@ -508,12 +508,13 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _: LongExprAST => problem(o3, "immediate must be an even non-negative value between 0 and 62")
 
       addInstruction(3 -> 6, 3 -> reg1, 3 -> reg2, 2 -> opcode, 5 -> imm / 2)
-    case InstructionLineAST(mnemonic @ ("rte" | "fence" | "wfi"), Nil) =>
+    case InstructionLineAST(mnemonic @ ("rte" | "fence" | "wfi" | "trapv"), Nil) =>
       val opcode =
         mnemonic match
           case "rte"   => 10
           case "fence" => 11
           case "wfi"   => 12
+          case "trapv" => 15
 
       addInstruction(3 -> 7, 3 -> 0, 3 -> 0, 7 -> opcode)
     case InstructionLineAST(mnemonic @ ("spsr" | "gpsr" | "gusp" | "susp"), Seq(o)) =>
@@ -529,7 +530,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o, "expected register as first operand")
 
       addInstruction(3 -> 7, 3 -> 0, 3 -> reg, 7 -> opcode)
-    case InstructionLineAST(mnemonic @ ("zeb" | "zes" | "zew" | "seb" | "ses" | "sew" | "neg" | "not" | "cvt" | "fneg" | "finv" | "fint" | "fsqrt" | "fabs" | "ll" | "sc" | "clz" | "ctz"), Seq(o1, o2)) =>
+    case InstructionLineAST(mnemonic @ ("zeb" | "zes" | "zew" | "seb" | "ses" | "sew" | "neg" | "not" | "cvt" | "fneg" | "finv" | "fint" | "fsqrt" | "fabs" | "ll" | "sc" | "clz" | "ctz" | "chk"), Seq(o1, o2)) =>
       val opcode =
         mnemonic match
           case "zeb"   => 1
@@ -550,6 +551,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case "sc"    => 16
           case "clz"   => 17
           case "ctz"   => 18
+          case "chk"   => 19
       val reg1 =
         fold(o1) match
           case RegisterExprAST(reg) => reg

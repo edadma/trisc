@@ -16,7 +16,7 @@ class ExceptionTests extends TestHelpers {
     val cpu = runCPU(
       """dd 0xFF0
         |dd start
-        |resb 120
+        |resb 144
         |halt
         |start
         |  ldi r1, 42
@@ -40,7 +40,7 @@ class ExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
-        |resb 56
+        |resb 80
         |reset
         |  trap 0
         |  halt
@@ -64,7 +64,7 @@ class ExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
-        |resb 56
+        |resb 80
         |reset
         |  ldi r1, 42
         |  ldi r2, 99
@@ -89,7 +89,7 @@ class ExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
-        |resb 56
+        |resb 80
         |reset
         |  trap 0
         |  ldi r1, 77
@@ -114,7 +114,7 @@ class ExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
-        |resb 56
+        |resb 80
         |reset
         |  ldi r1, 1
         |  ldi r2, 2
@@ -145,7 +145,7 @@ class ExceptionTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
-        |resb 56
+        |resb 80
         |reset
         |  ldi r1, 2
         |  spsr r1
@@ -181,7 +181,7 @@ class ExceptionTests extends TestHelpers {
         |dd 0xFF0
         |dd reset
         |dd isr
-        |resb 112
+        |resb 136
         |reset
         |  movi r1, 0xE00
         |  susp r1

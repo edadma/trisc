@@ -123,6 +123,8 @@ class ADD(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
     cpu.r(d).write(result)
     // Carry: unsigned overflow if result < either operand
     cpu.set(Status.C, (result + Long.MinValue) < (va + Long.MinValue))
+    // Overflow: signed overflow if same-sign inputs produce different-sign result
+    cpu.set(Status.V, ((~(va ^ vb) & (va ^ result)) < 0))
 
 class SUB(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "sub"
@@ -130,9 +132,12 @@ class SUB(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   def apply(cpu: CPU): Unit =
     val va = cpu.r(a).read
     val vb = cpu.r(b).read
-    cpu.r(d).write(va - vb)
+    val result = va - vb
+    cpu.r(d).write(result)
     // Borrow: unsigned underflow if a < b
     cpu.set(Status.C, (va + Long.MinValue) < (vb + Long.MinValue))
+    // Overflow: signed overflow if different-sign inputs and result differs from va
+    cpu.set(Status.V, (((va ^ vb) & (va ^ result)) < 0))
 
 class MUL(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "mul"
@@ -201,6 +206,8 @@ class ADC(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
     val overflow1 = (sum1 + Long.MinValue) < (va + Long.MinValue)
     val overflow2 = (result + Long.MinValue) < (sum1 + Long.MinValue)
     cpu.set(Status.C, overflow1 || overflow2)
+    // Signed overflow: same-sign inputs produce different-sign result
+    cpu.set(Status.V, ((~(va ^ vb) & (va ^ result)) < 0))
 
 class SBC(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "sbc"
@@ -215,6 +222,8 @@ class SBC(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
     val ua = va + Long.MinValue
     val ub = vb + Long.MinValue
     cpu.set(Status.C, ua < ub || (ua == ub && borrow != 0))
+    // Signed overflow: different-sign inputs and result differs from va
+    cpu.set(Status.V, (((va ^ vb) & (va ^ result)) < 0))
 
 // Unsigned arithmetic (RRR 001 block)
 
@@ -305,7 +314,11 @@ class SEW(a: Int, b: Int) extends RRInstruction(a, b):
 class NEG(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "neg"
 
-  def apply(cpu: CPU): Unit = cpu.r(a).write(-cpu.r(b).read)
+  def apply(cpu: CPU): Unit =
+    val v = cpu.r(b).read
+    cpu.r(a).write(-v)
+    // Overflow only when negating Long.MinValue (result == Long.MinValue)
+    cpu.set(Status.V, v == Long.MinValue)
 
 class NOT(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "not"
@@ -473,6 +486,20 @@ object FENCE extends SimpleInstruction:
   val mnemonic = "fence"
 
   def apply(cpu: CPU): Unit = () // memory ordering barrier — NOP for single-core emulator
+
+object TRAPV extends SimpleInstruction:
+  val mnemonic = "trapv"
+
+  def apply(cpu: CPU): Unit =
+    if cpu.test(Status.V) then cpu.state = State.Overflow
+
+class CHK(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "chk"
+
+  def apply(cpu: CPU): Unit =
+    val va = cpu.r(a).read
+    val vb = cpu.r(b).read
+    if va < 0 || va > vb then cpu.state = State.BoundsCheck
 
 object WFI extends SimpleInstruction:
   val mnemonic = "wfi"
