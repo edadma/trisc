@@ -534,7 +534,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o, "expected register as first operand")
 
       addInstruction(3 -> 7, 3 -> 0, 3 -> reg, 7 -> opcode)
-    case InstructionLineAST(mnemonic @ ("zeb" | "zes" | "zew" | "seb" | "ses" | "sew" | "neg" | "not" | "cvt" | "fneg" | "finv" | "fint" | "fsqrt" | "fabs" | "ll" | "sc" | "clz" | "ctz" | "chk" | "btst" | "bset" | "bclr" | "rol" | "ror" | "cnt" | "rev" | "sext" | "mov"), Seq(o1, o2)) =>
+    case InstructionLineAST(mnemonic @ ("zeb" | "zes" | "zew" | "seb" | "ses" | "sew" | "neg" | "not" | "cvt" | "fneg" | "finv" | "fint" | "fsqrt" | "fabs" | "ll" | "sc" | "clz" | "ctz" | "chk" | "btst" | "bset" | "bclr" | "rol" | "ror" | "cnt" | "rev" | "sext" | "mov" | "min" | "max" | "exg"), Seq(o1, o2)) =>
       val opcode =
         mnemonic match
           case "zeb"   => 1
@@ -565,6 +565,9 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case "rev"   => 26
           case "sext"  => 27
           case "mov"   => 28
+          case "min"   => 29
+          case "max"   => 30
+          case "exg"   => 31
       val reg1 =
         fold(o1) match
           case RegisterExprAST(reg) => reg

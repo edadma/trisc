@@ -108,4 +108,67 @@ class ControlTests extends TestHelpers {
     val cpu = runCPU(VECTORS + "ldi r1, 0x0A\nspsr r1\ngpsr r3\nhalt\n")
     cpu.r(3).read shouldBe 0x0A
   }
+
+  // ===== MIN =====
+
+  "min picks smaller value" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 10\nldi r2, 3\nmin r1, r2\nhalt\n")
+    cpu.r(1).read shouldBe 3
+  }
+
+  "min with equal values" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 5\nldi r2, 5\nmin r1, r2\nhalt\n")
+    cpu.r(1).read shouldBe 5
+  }
+
+  "min keeps ra when ra is smaller" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 2\nldi r2, 9\nmin r1, r2\nhalt\n")
+    cpu.r(1).read shouldBe 2
+  }
+
+  "min with negative values" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 5\nsub r2, r0, r1\nmin r1, r2\nhalt\n")
+    cpu.r(1).read shouldBe -5
+  }
+
+  // ===== MAX =====
+
+  "max picks larger value" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 3\nldi r2, 10\nmax r1, r2\nhalt\n")
+    cpu.r(1).read shouldBe 10
+  }
+
+  "max with equal values" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 5\nldi r2, 5\nmax r1, r2\nhalt\n")
+    cpu.r(1).read shouldBe 5
+  }
+
+  "max keeps ra when ra is larger" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 9\nldi r2, 2\nmax r1, r2\nhalt\n")
+    cpu.r(1).read shouldBe 9
+  }
+
+  "max with negative values" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 5\nsub r2, r0, r1\nmax r1, r2\nhalt\n")
+    cpu.r(1).read shouldBe 5
+  }
+
+  // ===== EXG =====
+
+  "exg swaps two registers" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 42\nldi r2, 99\nexg r1, r2\nhalt\n")
+    cpu.r(1).read shouldBe 99
+    cpu.r(2).read shouldBe 42
+  }
+
+  "exg with same register is identity" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 77\nexg r1, r1\nhalt\n")
+    cpu.r(1).read shouldBe 77
+  }
+
+  "exg twice restores original" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 10\nldi r2, 20\nexg r1, r2\nexg r1, r2\nhalt\n")
+    cpu.r(1).read shouldBe 10
+    cpu.r(2).read shouldBe 20
+  }
 }

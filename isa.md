@@ -80,6 +80,9 @@ RR
         rev     11010    (ra = byte-reverse of rb)
         sext    11011    (sign-extend ra from bit width rb)
         mov     11100    (ra = rb)
+        min     11101    (ra = min(ra, rb) signed)
+        max     11110    (ra = max(ra, rb) signed)
+        exg     11111    (swap ra and rb)
 
     110 000 000 01 iiiii    trap
     110 aaa bbb 10 iiiii    ld

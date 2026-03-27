@@ -620,6 +620,26 @@ class MOV(a: Int, b: Int) extends RRInstruction(a, b):
 
   def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read)
 
+class MIN(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "min"
+
+  def apply(cpu: CPU): Unit =
+    if cpu.r(b).read < cpu.r(a).read then cpu.r(a).write(cpu.r(b).read)
+
+class MAX(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "max"
+
+  def apply(cpu: CPU): Unit =
+    if cpu.r(b).read > cpu.r(a).read then cpu.r(a).write(cpu.r(b).read)
+
+class EXG(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "exg"
+
+  def apply(cpu: CPU): Unit =
+    val tmp = cpu.r(a).read
+    cpu.r(a).write(cpu.r(b).read)
+    cpu.r(b).write(tmp)
+
 // CLI — disable interrupts (set Ind flag)
 
 object CLI extends SimpleInstruction:
