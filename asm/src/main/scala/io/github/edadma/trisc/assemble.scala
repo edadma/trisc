@@ -200,9 +200,9 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
       case _ => sys.error(s"unsupported address size $addresses for relocation")
     builder.addExtern(symbolName)
     builder.addReloc(relocType, offset, symbolName)
-    // emit zero placeholders
-    for _ <- 0 until addresses do
-      addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> 0)
+    // emit zero placeholders (first uses mode 0 = load, rest use mode 2 = extend)
+    for i <- 0 until addresses do
+      addInstruction(3 -> 7, 3 -> reg, 2 -> (if i == 0 then 0 else 2), 8 -> 0)
 
   def emitAbs32Reloc(symbolName: String): Unit =
     val offset = builder.length

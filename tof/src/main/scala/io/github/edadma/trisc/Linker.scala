@@ -54,10 +54,14 @@ object Linker:
     // then place any remaining segments sequentially
     val scriptSectionNames = script.sections.map(_.name).toSet
 
+    // Track which script sections have had their first segment placed
+    val sectionPlaced = new mutable.HashSet[String]
+
     // Resolve placement for a section
     def resolveOrg(seg: InputSegment): Long =
       sectionDefs.get(seg.name) match
-        case Some(SectionDef(_, SectionPlacement.At(addr))) => addr
+        case Some(SectionDef(_, SectionPlacement.At(addr))) if !sectionPlaced.contains(seg.name) => addr
+        case Some(SectionDef(_, SectionPlacement.At(_))) => nextAddr
         case Some(SectionDef(_, SectionPlacement.After(ref))) =>
           placedByName.get(ref) match
             case Some(prev) => prev.org + prev.data.length
@@ -71,6 +75,7 @@ object Linker:
       val matching = inputSegments.filter(_.name == secDef.name)
       for seg <- matching do
         val org = resolveOrg(seg)
+        sectionPlaced += seg.name
         val ps = PlacedSegment(seg.name, org, seg.data, seg.symbols, seg.externs, seg.relocs)
         placed += ps
         placedByName(seg.name) = ps
