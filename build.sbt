@@ -37,50 +37,152 @@ ThisBuild / description := "TRISC - a 16-bit RISC CPU emulator and assembler"
 
 ThisBuild / publishTo := sonatypePublishToBundle.value
 
-lazy val trisc = crossProject(JSPlatform, JVMPlatform, NativePlatform)
-  .in(file("."))
+lazy val commonScalacOptions = Seq(
+  "-deprecation",
+  "-feature",
+  "-unchecked",
+  "-language:postfixOps",
+  "-language:implicitConversions",
+  "-language:existentials",
+  "-language:dynamics",
+)
+
+lazy val commonSettings = Seq(
+  scalacOptions ++= commonScalacOptions,
+  libraryDependencies += "org.scalatest" %%% "scalatest" % "3.2.19" % "test",
+  publishMavenStyle      := true,
+  Test / publishArtifact := false,
+)
+
+lazy val jsSettings = Seq(
+  jsEnv := new org.scalajs.jsenv.nodejs.NodeJSEnv(),
+  scalaJSLinkerConfig ~= { _.withModuleKind(ModuleKind.ESModule) },
+  scalaJSLinkerConfig ~= { _.withSourceMap(false) },
+  Test / scalaJSUseMainModuleInitializer := false,
+  Test / scalaJSUseTestModuleInitializer := true,
+)
+
+lazy val jvmNativeStubs = Seq(
+  libraryDependencies += "org.scala-js" %% "scalajs-stubs" % "1.1.0" % "provided",
+)
+
+// --- Sub-projects ---
+
+lazy val utils = crossProject(JSPlatform, JVMPlatform, NativePlatform)
+  .crossType(CrossType.Pure)
+  .in(file("utils"))
+  .settings(commonSettings)
   .settings(
-    name := "trisc",
-    scalacOptions ++=
-      Seq(
-        "-deprecation",
-        "-feature",
-        "-unchecked",
-        "-language:postfixOps",
-        "-language:implicitConversions",
-        "-language:existentials",
-        "-language:dynamics",
-      ),
-    libraryDependencies += "org.scalatest" %%% "scalatest" % "3.2.19" % "test",
+    name := "trisc-utils",
+    libraryDependencies += "org.scala-lang.modules" %%% "scala-parser-combinators" % "2.4.0",
+  )
+  .jsSettings(jsSettings)
+  .jvmSettings(jvmNativeStubs)
+  .nativeSettings(jvmNativeStubs)
+
+lazy val mem = crossProject(JSPlatform, JVMPlatform, NativePlatform)
+  .crossType(CrossType.Pure)
+  .in(file("mem"))
+  .settings(commonSettings)
+  .settings(name := "trisc-mem")
+  .dependsOn(utils)
+  .jsSettings(jsSettings)
+  .jvmSettings(jvmNativeStubs)
+  .nativeSettings(jvmNativeStubs)
+
+lazy val tof = crossProject(JSPlatform, JVMPlatform, NativePlatform)
+  .crossType(CrossType.Pure)
+  .in(file("tof"))
+  .settings(commonSettings)
+  .settings(
+    name := "trisc-tof",
+    libraryDependencies += "org.scala-lang.modules" %%% "scala-parser-combinators" % "2.4.0",
+  )
+  .dependsOn(mem)
+  .jsSettings(jsSettings)
+  .jvmSettings(jvmNativeStubs)
+  .nativeSettings(jvmNativeStubs)
+
+lazy val asm = crossProject(JSPlatform, JVMPlatform, NativePlatform)
+  .crossType(CrossType.Pure)
+  .in(file("asm"))
+  .settings(commonSettings)
+  .settings(
+    name := "trisc-asm",
     libraryDependencies ++= Seq(
       "org.scala-lang.modules" %%% "scala-parser-combinators" % "2.4.0",
+      "com.lihaoyi" %%% "pprint" % "0.9.0",
     ),
+  )
+  .dependsOn(tof)
+  .jsSettings(jsSettings)
+  .jvmSettings(jvmNativeStubs)
+  .nativeSettings(jvmNativeStubs)
+
+lazy val cpu = crossProject(JSPlatform, JVMPlatform, NativePlatform)
+  .crossType(CrossType.Pure)
+  .in(file("cpu"))
+  .settings(commonSettings)
+  .settings(name := "trisc-cpu")
+  .dependsOn(mem)
+  .jsSettings(jsSettings)
+  .jvmSettings(jvmNativeStubs)
+  .nativeSettings(jvmNativeStubs)
+
+lazy val sysl = crossProject(JSPlatform, JVMPlatform, NativePlatform)
+  .crossType(CrossType.Pure)
+  .in(file("sysl"))
+  .settings(commonSettings)
+  .settings(
+    name := "trisc-sysl",
+    libraryDependencies ++= Seq(
+      "org.scala-lang.modules" %%% "scala-parser-combinators" % "2.4.0",
+      "io.github.edadma" %%% "indentation" % "0.0.1",
+    ),
+  )
+  .jsSettings(jsSettings)
+  .jvmSettings(jvmNativeStubs)
+  .nativeSettings(jvmNativeStubs)
+
+lazy val triscCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
+  .in(file("trisc-cli"))
+  .settings(commonSettings)
+  .settings(
+    name := "trisc-cli",
     libraryDependencies ++= Seq(
       "com.github.scopt" %%% "scopt" % "4.1.0",
       "com.lihaoyi" %%% "pprint" % "0.9.0",
-      "io.github.edadma" %%% "indentation" % "0.0.1",
     ),
-    publishMavenStyle      := true,
-    Test / publishArtifact := false,
   )
-  .jvmSettings(
-    libraryDependencies += "org.scala-js" %% "scalajs-stubs" % "1.1.0" % "provided",
+  .dependsOn(cpu, asm, sysl)
+  .jsSettings(jsSettings)
+  .jvmSettings(jvmNativeStubs)
+  .nativeSettings(jvmNativeStubs)
+
+lazy val syslCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
+  .in(file("sysl-cli"))
+  .settings(commonSettings)
+  .settings(
+    name := "sysl-cli",
+    libraryDependencies += "com.github.scopt" %%% "scopt" % "4.1.0",
   )
-  .nativeSettings(
-    libraryDependencies += "org.scala-js" %% "scalajs-stubs" % "1.1.0" % "provided",
-  )
-  .jsSettings(
-    jsEnv := new org.scalajs.jsenv.nodejs.NodeJSEnv(),
-    scalaJSLinkerConfig ~= { _.withModuleKind(ModuleKind.ESModule) },
-    scalaJSLinkerConfig ~= { _.withSourceMap(false) },
-    Test / scalaJSUseMainModuleInitializer := false,
-    Test / scalaJSUseTestModuleInitializer := true,
-    scalaJSUseMainModuleInitializer        := true,
-  )
+  .dependsOn(sysl)
+  .jsSettings(jsSettings)
+  .jvmSettings(jvmNativeStubs)
+  .nativeSettings(jvmNativeStubs)
 
 lazy val root = project
   .in(file("."))
-  .aggregate(trisc.js, trisc.jvm, trisc.native)
+  .aggregate(
+    utils.jvm, utils.js, utils.native,
+    mem.jvm, mem.js, mem.native,
+    tof.jvm, tof.js, tof.native,
+    asm.jvm, asm.js, asm.native,
+    cpu.jvm, cpu.js, cpu.native,
+    sysl.jvm, sysl.js, sysl.native,
+    triscCli.jvm, triscCli.js, triscCli.native,
+    syslCli.jvm, syslCli.js, syslCli.native,
+  )
   .settings(
     name                := "trisc",
     publish / skip      := true,
