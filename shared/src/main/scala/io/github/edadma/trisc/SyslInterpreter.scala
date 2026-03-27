@@ -6,6 +6,7 @@ enum Value:
   case IntVal(n: Long)
   case PtrVal(cell: Cell)
   case ArrVal(cells: Array[Cell], offset: Int)
+  case FuncVal(name: String)
 
 class Cell(var value: Value)
 
@@ -284,7 +285,19 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case ByteType => IntVal(toLong(v) & 0xFFL)
           case _ => v
 
+      case TFuncRef(name, _) => FuncVal(name)
+
       case TCall(name, args, _) =>
+        val argValues = args.map(evalAny(_, env))
+        builtins.get(name) match
+          case Some(f) => f(argValues)
+          case None =>
+            functions.get(name) match
+              case Some(fun) => call(fun, argValues)
+              case None => throw RuntimeError(s"undefined function: $name")
+
+      case TIndirectCall(callee, args, _) =>
+        val FuncVal(name) = evalAny(callee, env): @unchecked
         val argValues = args.map(evalAny(_, env))
         builtins.get(name) match
           case Some(f) => f(argValues)

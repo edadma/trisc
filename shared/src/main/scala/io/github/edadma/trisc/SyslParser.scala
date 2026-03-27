@@ -60,11 +60,20 @@ class SyslParser extends StandardTokenParsers {
   lazy val typeName: Parser[String] =
     "int" | "char" | "byte" | "bool" | "void" | ident
 
-  // Full type reference: *int, **int, [5]int, int, etc.
+  // Full type reference: *int, **int, [5]int, func(int)->int, int, etc.
   lazy val typeRef: Parser[String] =
     "*" ~> typeRef ^^ (t => s"*$t") |
       "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => s"[$n]$t" } |
+      funcTypeRef |
       typeName
+
+  lazy val funcTypeRef: Parser[String] =
+    "func" ~> "(" ~> repsep(typeRef, ",") ~ (")" ~> "->" ~> typeRef) ^^ {
+      case params ~ ret => s"func(${params.mkString(",")})->$ret"
+    } |
+      "func" ~> "(" ~> repsep(typeRef, ",") <~ ")" ^^ {
+        params => s"func(${params.mkString(",")})->void"
+      }
 
   // Array type for variable declarations: [5]int
   lazy val typeExpr: Parser[String] =

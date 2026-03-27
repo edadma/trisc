@@ -8,6 +8,7 @@ enum SyslType:
   case VoidType
   case PtrType(pointee: SyslType)
   case ArrayType(elem: SyslType, size: Int)
+  case FuncType(params: List[SyslType], returnType: SyslType)
 
   def isNumeric: Boolean = this match
     case IntType | CharType | ByteType => true
@@ -31,6 +32,7 @@ enum SyslType:
     case VoidType => "void"
     case PtrType(t) => s"*$t"
     case ArrayType(t, n) => s"[$n]$t"
+    case FuncType(params, ret) => s"func(${params.mkString(",")}) -> $ret"
 
   def toPrefix: String = this match
     case IntType        => "int"
@@ -40,6 +42,7 @@ enum SyslType:
     case VoidType       => "void"
     case PtrType(t)     => s"ptr ${t.toPrefix}"
     case ArrayType(t, n) => s"arr $n ${t.toPrefix}"
+    case FuncType(params, ret) => s"func ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}"
 
 object SyslType:
   def fromPrefix(s: String): SyslType =
@@ -57,6 +60,11 @@ object SyslType:
       case "arr" =>
         val size = tokens.next().toInt
         ArrayType(parseType(tokens), size)
+      case "func" =>
+        val nparams = tokens.next().toInt
+        val params = (1 to nparams).map(_ => parseType(tokens)).toList
+        val ret = parseType(tokens)
+        FuncType(params, ret)
       case other => throw IllegalArgumentException(s"unknown type token: '$other'")
 
   def funcSigToPrefix(params: List[SyslType], ret: SyslType): String =

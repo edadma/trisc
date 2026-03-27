@@ -95,7 +95,34 @@ class SyslAnalyzer:
       val size = s.drop(1).takeWhile(_.isDigit).toInt
       val elem = s.dropWhile(_ != ']').drop(1)
       ArrayType(resolveTypeName(elem), size)
+    case s if s.startsWith("func(") =>
+      val inner = s.drop(5) // after "func("
+      val (paramStrs, rest) = parseFuncTypeParams(inner)
+      val params = paramStrs.map(resolveTypeName)
+      val ret = if rest.startsWith("->") then resolveTypeName(rest.drop(2)) else VoidType
+      FuncType(params, ret)
     case other => throw AnalysisError(s"unknown type: '$other'")
+
+  // Parse comma-separated params from "int,int)->int" returning (List("int","int"), "->int")
+  private def parseFuncTypeParams(s: String): (List[String], String) =
+    var depth = 0
+    var i = 0
+    val params = new mutable.ListBuffer[String]
+    var start = 0
+    while i < s.length do
+      s(i) match
+        case '(' => depth += 1; i += 1
+        case ')' =>
+          if depth == 0 then
+            if i > start then params += s.substring(start, i)
+            return (params.toList, s.drop(i + 1))
+          depth -= 1; i += 1
+        case ',' if depth == 0 =>
+          params += s.substring(start, i)
+          i += 1
+          start = i
+        case _ => i += 1
+    (params.toList, "")
 
   private def compatible(from: SyslType, to: SyslType): Boolean =
     (from, to) match
@@ -214,8 +241,16 @@ class SyslAnalyzer:
         TArrayDecl(size, typStr, t)
 
       case VarRefAST(name) =>
-        val sym = lookup(name)
-        TVarRef(name, sym.typ)
+        // Check if name is a function (used as a value = function pointer)
+        if functions.contains(name) then
+          val f = functions(name)
+          TFuncRef(name, FuncType(f.params.map(_._2), f.returnType))
+        else if builtinFunctions.contains(name) then
+          val f = builtinFunctions(name)
+          TFuncRef(name, FuncType(f.params.map(_._2), f.returnType))
+        else
+          val sym = lookup(name)
+          TVarRef(name, sym.typ)
 
       case AddrOfAST(name) =>
         val sym = lookup(name)
@@ -292,9 +327,19 @@ class SyslAnalyzer:
         TCast(tInner, target)
 
       case CallAST(name, args) =>
-        val funInfo = lookupFun(name)
         val tArgs = args.map(analyzeExpr)
-        TCall(name, tArgs, funInfo.returnType)
+        // Check if it's a direct function call or an indirect call through a variable
+        if functions.contains(name) || builtinFunctions.contains(name) then
+          val funInfo = lookupFun(name)
+          TCall(name, tArgs, funInfo.returnType)
+        else
+          // Try as a variable of FuncType
+          val sym = lookup(name)
+          sym.typ match
+            case FuncType(params, returnType) =>
+              TIndirectCall(TVarRef(name, sym.typ), tArgs, returnType)
+            case other =>
+              throw AnalysisError(s"'$name' is not a function (type: $other)")
 
       case IfExprAST(cond, thenBody, elseBody) =>
         val tCond = analyzeExpr(cond)
