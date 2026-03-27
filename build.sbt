@@ -166,7 +166,7 @@ lazy val syslCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
     name := "sysl-cli",
     libraryDependencies += "com.github.scopt" %%% "scopt" % "4.1.0",
   )
-  .dependsOn(sysl)
+  .dependsOn(sysl, asm, tof)
   .jsSettings(jsSettings)
   .jvmSettings(jvmNativeStubs)
   .nativeSettings(jvmNativeStubs)
