@@ -470,4 +470,45 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
         |    *p
         |""".stripMargin) shouldBe 200
   }
+
+  // ===== Char cast =====
+
+  "char cast truncates to 32 bits" in {
+    compileAndRun("main() -> int = char(65)\n") shouldBe 65
+  }
+
+  // ===== Multi-arg function calls =====
+
+  "function with two args" in {
+    compileAndRun(
+      """myAdd(a: int, b: int) -> int = a + b
+        |main() -> int = myAdd(20, 22)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "function with three args" in {
+    compileAndRun(
+      """sum3(a: int, b: int, c: int) -> int = a + b + c
+        |main() -> int = sum3(10, 20, 12)
+        |""".stripMargin) shouldBe 42
+  }
+
+  // 4-arg calls not yet supported: r4 used for function address
+  // "function with four args" is pending until ABI redesign
+
+  // ===== Global variables =====
+
+  "global variable with initializer" in {
+    compileAndRun(
+      """x = 42
+        |main() -> int = x
+        |""".stripMargin, memSize = 0x2000) shouldBe 42
+  }
+
+  "global variable bool initializer" in {
+    compileAndRun(
+      """flag = true
+        |main() -> int = flag
+        |""".stripMargin, memSize = 0x2000) shouldBe 1
+  }
 }

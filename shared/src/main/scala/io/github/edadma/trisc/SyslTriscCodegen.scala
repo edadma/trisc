@@ -28,7 +28,10 @@ class SyslTriscCodegen(addresses: Int = 2):
         case TVarDecl(name, typ, init, _) =>
           emit(s"# global: $name")
           emit(s"$name")
-          emit(s"  dw 0") // TODO: global initializers
+          init match
+            case TIntLit(n, _) => emit(s"  dl $n")
+            case TBoolLit(b, _) => emit(s"  dl ${if b then 1 else 0}")
+            case _ => emit(s"  dl 0") // complex initializers not yet supported
 
     out.toString
 
@@ -247,7 +250,7 @@ class SyslTriscCodegen(addresses: Int = 2):
           emit(s"  ldd r1, r2, r0")
         else
           emit(s"  movi r1, $name")
-          emit(s"  ldw r1, r1, r0")
+          emit(s"  ldd r1, r1, r0")
 
       case TBinary(left, "&&", right, _) =>
         val falseLabel = newLabel("and_false")
@@ -386,8 +389,7 @@ class SyslTriscCodegen(addresses: Int = 2):
             emit("  ldi r2, 255")
             emit("  and r1, r1, r2") // mask to 8 bits
           case CharType =>
-            // mask to 32 bits — no-op on 64-bit registers for values < 2^32
-            // TODO: proper 32-bit mask when needed (needs movi for 0xFFFFFFFF)
+            emit("  zew r1, r1") // zero-extend word: mask to 32 bits
           case IntType =>
             // no-op — already int-sized
           case _ =>
@@ -412,21 +414,18 @@ class SyslTriscCodegen(addresses: Int = 2):
         emit("  not r1, r1")
 
       case TCall(name, args, _) =>
-        // Push args in reverse, then call
-        for (arg, i) <- args.zipWithIndex.reverse do
+        // Evaluate all args left to right, push to stack
+        for arg <- args do
           genExpr(arg)
-          if i < 4 then
-            emit(s"  mov r${i + 1}, r1") // TODO: this clobbers r1 for later args
-          else
-            emit("  pshd r1")
-        // For now, simple approach: evaluate args left to right into regs
-        for (arg, i) <- args.zipWithIndex do
-          if i < 4 then
-            genExpr(arg)
-            if i > 0 then emit(s"  mov r${i + 1}, r1")
-            // r1 stays for first arg
-        emit(s"  movi r4, $name") // use r4 as temp for function address
-        emit(s"  jalr r6, r4")
+          emit("  pshd r1")
+        // Pop args into registers (up to 4)
+        val regArgs = args.length.min(4)
+        for i <- (0 until regArgs).reverse do
+          emit(s"  popd r${i + 1}")
+        // r4 is used for function address; max 3 register args
+        // TODO: support 4+ args via stack passing
+        emit(s"  movi r4, $name")
+        emit("  jalr r6, r4")
 
       case TAddrOf(name, _) =>
         // Compute stack address of local variable
