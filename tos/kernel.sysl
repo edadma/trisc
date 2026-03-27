@@ -295,11 +295,13 @@ kernel_main()
      * Writing the interval (in milliseconds) to the timer device
      * starts periodic interrupts. Each interrupt fires the timer ISR,
      * which calls schedule() to perform a context switch.
+     *
+     * Timer layout: offset 0-3 = period (i32, ms), offset 4 = control (i8, nonzero=start)
      */
-    // Write period (4 bytes) and control (1 byte) to timer device.
-    // Timer layout: offset 0-3 = period (ms), offset 4 = control (nonzero=start)
-    // We use asm because the timer needs specific write widths (stw + stb).
-    asm("movi r1, 0xFFE8\nldi r2, 10\nstw r2, r1, r0\naddi r1, r1, 4\nldi r2, 1\nstb r2, r1, r0")
+    val period: *i32 = TIMER_DEVICE
+    *period = TICK_MS
+    val control: *i8 = TIMER_DEVICE + 4
+    *control = 1
 
     /*
      * Launch the first thread.
