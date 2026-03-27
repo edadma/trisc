@@ -254,12 +254,12 @@ class SyslPointerArrayTests extends SyslTestHelpers {
 
   "deref in function call argument" in {
     eval(
-      """double(n: int) -> int = n * 2
+      """dbl(n: int) -> int = n * 2
         |
         |main() -> int
         |    x = 21
         |    p = &x
-        |    double(*p)
+        |    dbl(*p)
         |""".stripMargin) shouldBe 42
   }
 
@@ -367,12 +367,12 @@ class SyslPointerArrayTests extends SyslTestHelpers {
 
   "array element as function argument" in {
     eval(
-      """double(x: int) -> int = x * 2
+      """dbl(x: int) -> int = x * 2
         |
         |main() -> int
         |    a: [3]int
         |    a[1] = 21
-        |    double(a[1])
+        |    dbl(a[1])
         |""".stripMargin) shouldBe 42
   }
 

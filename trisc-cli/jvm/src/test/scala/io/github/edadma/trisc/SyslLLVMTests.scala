@@ -125,9 +125,9 @@ class SyslLLVMTests extends AnyFreeSpec with Matchers {
 
   "function call" in {
     runExitCode(
-      """double(x: int) -> int = x * 2
+      """dbl(x: int) -> int = x * 2
         |
-        |main() -> int = double(21)
+        |main() -> int = dbl(21)
         |""".stripMargin) shouldBe 42
   }
 

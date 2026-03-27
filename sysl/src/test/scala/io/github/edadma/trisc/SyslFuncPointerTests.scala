@@ -9,18 +9,18 @@ class SyslFuncPointerTests extends SyslTestHelpers {
 
   "assign function to variable and call" in {
     eval(
-      """double(x: int) -> int = x * 2
+      """dbl(x: int) -> int = x * 2
         |main() -> int
-        |    f: func(int) -> int = double
+        |    f: func(int) -> int = dbl
         |    f(21)
         |""".stripMargin) shouldBe 42
   }
 
   "function pointer with inferred type" in {
     eval(
-      """double(x: int) -> int = x * 2
+      """dbl(x: int) -> int = x * 2
         |main() -> int
-        |    f = double
+        |    f = dbl
         |    f(21)
         |""".stripMargin) shouldBe 42
   }
@@ -29,18 +29,18 @@ class SyslFuncPointerTests extends SyslTestHelpers {
 
   "pass function as argument" in {
     eval(
-      """double(x: int) -> int = x * 2
+      """dbl(x: int) -> int = x * 2
         |apply(f: func(int) -> int, x: int) -> int = f(x)
-        |main() -> int = apply(double, 21)
+        |main() -> int = apply(dbl, 21)
         |""".stripMargin) shouldBe 42
   }
 
   "pass different functions" in {
     eval(
-      """double(x: int) -> int = x * 2
+      """dbl(x: int) -> int = x * 2
         |triple(x: int) -> int = x * 3
         |apply(f: func(int) -> int, x: int) -> int = f(x)
-        |main() -> int = apply(double, 10) + apply(triple, 10)
+        |main() -> int = apply(dbl, 10) + apply(triple, 10)
         |""".stripMargin) shouldBe 50
   }
 
@@ -48,7 +48,7 @@ class SyslFuncPointerTests extends SyslTestHelpers {
 
   "map-like: apply function to array elements" in {
     output(
-      """double(x: int) -> int = x * 2
+      """dbl(x: int) -> int = x * 2
         |forEach(arr: *int, n: int, f: func(int) -> int)
         |    for i = 0; i < n; i++
         |        print(f(arr[i]))
@@ -57,7 +57,7 @@ class SyslFuncPointerTests extends SyslTestHelpers {
         |    arr[0] = 1
         |    arr[1] = 2
         |    arr[2] = 3
-        |    forEach(&arr[0], 3, double)
+        |    forEach(&arr[0], 3, dbl)
         |    0
         |""".stripMargin) shouldBe "246"
   }
@@ -66,10 +66,10 @@ class SyslFuncPointerTests extends SyslTestHelpers {
 
   "reassign function pointer" in {
     eval(
-      """double(x: int) -> int = x * 2
+      """dbl(x: int) -> int = x * 2
         |triple(x: int) -> int = x * 3
         |main() -> int
-        |    f = double
+        |    f = dbl
         |    a = f(10)
         |    f = triple
         |    b = f(10)
@@ -104,9 +104,9 @@ class SyslFuncPointerTests extends SyslTestHelpers {
 
   "analyzer infers FuncType from function name" in {
     val Right(ast) = (new SyslParser).parseProgram(
-      """double(x: int) -> int = x * 2
+      """dbl(x: int) -> int = x * 2
         |main() -> int
-        |    f = double
+        |    f = dbl
         |    f(21)
         |""".stripMargin): @unchecked
     val typed = (new SyslAnalyzer).analyze(ast)

@@ -167,9 +167,9 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
 
   "function call" in {
     compileAndRun(
-      """double(x: int) -> int = x * 2
+      """dbl(x: int) -> int = x * 2
         |
-        |main() -> int = double(21)
+        |main() -> int = dbl(21)
         |""".stripMargin) shouldBe 42
   }
 
@@ -838,8 +838,8 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
 
   "i32 function arg preserved" in {
     compileAndRun(
-      """double(x: int) -> int = x * 2
-        |main() -> int = double(21)
+      """dbl(x: int) -> int = x * 2
+        |main() -> int = dbl(21)
         |""".stripMargin) shouldBe 42
   }
 
@@ -1050,10 +1050,10 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
   "chained function calls" in {
     compileAndRun(
       """inc(x: int) -> int = x + 1
-        |double(x: int) -> int = x * 2
+        |dbl(x: int) -> int = x * 2
         |main() -> int
         |    var x: int = 10
-        |    x = double(inc(x))
+        |    x = dbl(inc(x))
         |    x
         |""".stripMargin) shouldBe 22
   }
