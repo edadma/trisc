@@ -5,11 +5,13 @@ import java.awt.*
 import java.awt.event.*
 import java.util.concurrent.ConcurrentLinkedQueue
 
-class TerminalWidget(val cols: Int = 80, val rows: Int = 24) extends JComponent with KeyListener:
-  private val cells = Array.fill(rows * cols)(' ')
-  private val fgColors = Array.fill(rows * cols)(Color.GREEN)
-  private val bgColors = Array.fill(rows * cols)(Color.BLACK)
-  private val attrs = Array.fill(rows * cols)(0) // bit flags: 1=blink
+class TerminalWidget(initCols: Int = 80, initRows: Int = 24) extends JComponent with KeyListener:
+  var cols: Int = initCols
+  var rows: Int = initRows
+  private var cells = Array.fill(rows * cols)(' ')
+  private var fgColors = Array.fill(rows * cols)(Color.GREEN)
+  private var bgColors = Array.fill(rows * cols)(Color.BLACK)
+  private var attrs = Array.fill(rows * cols)(0) // bit flags: 1=blink
 
   var cursorRow: Int = 0
   var cursorCol: Int = 0
@@ -37,6 +39,18 @@ class TerminalWidget(val cols: Int = 80, val rows: Int = 24) extends JComponent 
     repaint()
   })
   blinkTimer.start()
+
+  def setResolution(newCols: Int, newRows: Int): Unit =
+    cols = math.max(1, math.min(newCols, 256))
+    rows = math.max(1, math.min(newRows, 128))
+    cells = Array.fill(rows * cols)(' ')
+    fgColors = Array.fill(rows * cols)(Color.GREEN)
+    bgColors = Array.fill(rows * cols)(Color.BLACK)
+    attrs = Array.fill(rows * cols)(0)
+    cursorRow = 0
+    cursorCol = 0
+    revalidate()
+    repaint()
 
   override def addNotify(): Unit =
     super.addNotify()

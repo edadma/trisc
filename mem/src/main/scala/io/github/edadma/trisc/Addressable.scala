@@ -99,6 +99,8 @@ abstract class ArrayAddressable extends Addressable:
 class RAM(val base: Long, val size: Long) extends ArrayAddressable:
   val name = "RAM"
 
+  def bytes: mutable.ArraySeq[Byte] = seq
+
   def loadByte(addr: Long, data: Long): Unit = writeByte(addr, data)
 
   def writeByte(addr: Long, data: Long): Unit =

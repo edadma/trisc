@@ -1,0 +1,89 @@
+Circles — draws filled circles of various colors and sizes on the framebuffer.
+Switches from text mode to 320x200 framebuffer, draws circles using midpoint
+algorithm, then halts.
+
+  DISPLAY_CTRL = 0xFF06
+  FB_BASE = 0x10000
+  FB_WIDTH = 320
+  FB_HEIGHT = 200
+
+  // Write a byte to the display controller
+  dc_write(offset: int, v: int)
+      p: *i8 = DISPLAY_CTRL + offset
+      *p = byte(v)
+
+  // Switch to framebuffer mode at 320x200
+  init_fb()
+      dc_write(0, 1)           // MODE = framebuffer
+      dc_write(2, FB_WIDTH >> 8)   // WIDTH_HI
+      dc_write(3, FB_WIDTH & 0xFF) // WIDTH_LO
+      dc_write(4, FB_HEIGHT >> 8)  // HEIGHT_HI
+      dc_write(5, FB_HEIGHT & 0xFF) // HEIGHT_LO
+      dc_write(1, 1)           // COMMIT
+
+  // Set a pixel at (x, y) with RGBA color
+  set_pixel(x: int, y: int, r: int, g: int, b: int)
+      if x >= 0 && x < FB_WIDTH && y >= 0 && y < FB_HEIGHT
+          offset = (y * FB_WIDTH + x) * 4
+          p: *i8 = FB_BASE + offset
+          *p = byte(r)
+          p = p + 1
+          *p = byte(g)
+          p = p + 1
+          *p = byte(b)
+          p = p + 1
+          *p = byte(255)
+
+  // Draw a horizontal line from x0 to x1 at row y
+  hline(x0: int, x1: int, y: int, r: int, g: int, b: int)
+      if y < 0 || y >= FB_HEIGHT then return
+      var left: int = x0
+      var right: int = x1
+      if left < 0 then left = 0
+      if right >= FB_WIDTH then right = FB_WIDTH - 1
+      for x = left; x <= right; x++
+          set_pixel(x, y, r, g, b)
+
+  // Draw a filled circle using scanline approach
+  fill_circle(cx: int, cy: int, radius: int, r: int, g: int, b: int)
+      for dy = -radius; dy <= radius; dy++
+          // dx*dx + dy*dy <= radius*radius
+          // dx <= sqrt(radius*radius - dy*dy)
+          // Use integer approximation: find max dx where dx*dx <= rr - dy*dy
+          rr = radius * radius
+          dd = dy * dy
+          if dd <= rr
+              // Find dx by scanning (simple for small radii)
+              var dx: int = 0
+              while (dx + 1) * (dx + 1) <= rr - dd
+                  dx++
+              hline(cx - dx, cx + dx, cy + dy, r, g, b)
+
+  main() -> int
+      init_fb()
+
+      // Large red circle in the center
+      fill_circle(160, 100, 60, 220, 40, 40)
+
+      // Medium green circle, top-left
+      fill_circle(70, 50, 35, 40, 200, 40)
+
+      // Medium blue circle, top-right
+      fill_circle(250, 50, 35, 40, 40, 220)
+
+      // Small yellow circle
+      fill_circle(100, 150, 20, 240, 240, 40)
+
+      // Small cyan circle
+      fill_circle(220, 150, 20, 40, 240, 240)
+
+      // Small magenta circle
+      fill_circle(160, 170, 15, 240, 40, 240)
+
+      // Tiny white circle
+      fill_circle(50, 130, 10, 255, 255, 255)
+
+      // Tiny orange circle
+      fill_circle(270, 130, 10, 255, 165, 0)
+
+      0

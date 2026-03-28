@@ -14,9 +14,19 @@ object EmulatorGui:
 
       val terminal = new TerminalWidget()
       val parser = new ANSIParser(terminal)
+      val framebuffer = new FramebufferWidget()
       val keyboard = new KeyboardDevice(Runtime.keyboardAddress, terminal)
+      val fbMemory = new RAM(Runtime.framebufferAddress, Runtime.framebufferMaxSize)
 
-      frame.getContentPane.add(terminal, BorderLayout.CENTER)
+      // Display panel with CardLayout for switching terminal/framebuffer
+      val displayPanel = new JPanel(new CardLayout())
+      displayPanel.add(terminal, "terminal")
+      displayPanel.add(framebuffer, "framebuffer")
+      frame.getContentPane.add(displayPanel, BorderLayout.CENTER)
+
+      val displayCtrl = new DisplayController(
+        Runtime.displayCtrlAddress, terminal, framebuffer, fbMemory, displayPanel, frame,
+      )
 
       // Status bar
       val statusBar = new JLabel(" Ready")
@@ -43,7 +53,9 @@ object EmulatorGui:
         if SwingUtilities.isEventDispatchThread then update.run()
         else SwingUtilities.invokeAndWait(update)
 
-      var cpuState: (CPU, Memory) = TriscCli.setupCpu(linked, outputFn, Seq(keyboard))
+      val guiDevices = Seq(keyboard, displayCtrl, fbMemory)
+
+      var cpuState: (CPU, Memory) = TriscCli.setupCpu(linked, outputFn, guiDevices)
       var cpu = cpuState._1
       if cmd.limit > 0 then cpu.limit = cmd.limit
 
@@ -51,7 +63,8 @@ object EmulatorGui:
         val pc = f"${cpu.pc}%04X"
         val r1 = cpu.r(1).read
         val cpuState = cpu.state
-        statusBar.setText(s" PC=$pc  R1=$r1  State=$cpuState")
+        val mode = if displayCtrl.currentMode == 0 then "Text" else "FB"
+        statusBar.setText(s" PC=$pc  R1=$r1  State=$cpuState  Display=$mode")
 
       // Run in background thread
       runBtn.addActionListener(_ => {
@@ -78,10 +91,13 @@ object EmulatorGui:
       resetBtn.addActionListener(_ => {
         terminal.clear(Color.GREEN, Color.BLACK)
         parser.reset()
-        cpuState = TriscCli.setupCpu(linked, outputFn, Seq(keyboard))
+        val layout = displayPanel.getLayout.asInstanceOf[CardLayout]
+        layout.show(displayPanel, "terminal")
+        cpuState = TriscCli.setupCpu(linked, outputFn, guiDevices)
         cpu = cpuState._1
         if cmd.limit > 0 then cpu.limit = cmd.limit
         updateStatus()
+        frame.pack()
       })
 
       updateStatus()
