@@ -149,6 +149,7 @@ object Linker:
                   case RelocType.MOVI2 => 2
                   case RelocType.MOVI3 => 3
                   case RelocType.MOVI4 => 4
+                  case _               => throw LinkerError(s"unexpected reloc type in MOVI branch: ${reloc.typ}")
                 // Read current address from movi instruction bytes
                 var old = 0L
                 for i <- 0 until n do old = (old << 8) | (seg.data(off + i * 2 + 1) & 0xff)
