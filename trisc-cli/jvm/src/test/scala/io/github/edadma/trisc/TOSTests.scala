@@ -5,7 +5,7 @@ import org.scalatest.matchers.should.Matchers
 
 class TOSTests extends AnyFreeSpec with Matchers {
 
-  val bootAsm = scala.io.Source.fromFile("boot.asm").mkString
+  val bootAsm = scala.io.Source.fromFile("tos/boot.asm").mkString
   val kernelSysl = scala.io.Source.fromFile("tos/kernel.sysl").mkString
   val tasksSysl = scala.io.Source.fromFile("examples/tos-demo/tasks.sysl").mkString
   val mainSysl = scala.io.Source.fromFile("examples/tos-demo/main.sysl").mkString

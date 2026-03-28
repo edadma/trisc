@@ -10,7 +10,7 @@ echo "=== Compiling Sysl sources ==="
 sbt -error "syslCliJVM/run compile --emit tof -o demo.tof tos/kernel.sysl examples/tos-demo/main.sysl examples/tos-demo/tasks.sysl"
 
 echo "=== Assembling boot.asm ==="
-sbt -error "triscCliJVM/run asm boot.asm"
+sbt -error "triscCliJVM/run asm tos/boot.asm"
 
 echo "=== Linking ==="
 sbt -error "triscCliJVM/run link -o program.tof boot.tof demo.tof"
