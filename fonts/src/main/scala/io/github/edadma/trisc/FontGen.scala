@@ -116,7 +116,7 @@ object FontGen:
       pw.println(s"${indent}FONT_COUNT = $charCount")
       pw.println()
 
-      pw.print(s"${indent}font_data = [")
+      pw.print(s"${indent}font_data: [${totalBytes}]byte = [")
       for i <- 0 until totalBytes do
         if i > 0 then pw.print(", ")
         if i % 16 == 0 then

@@ -33,6 +33,10 @@ class DisplayController(
   private def width: Int = (widthHi << 8) | widthLo
   private def height: Int = (heightHi << 8) | heightLo
 
+  // Current framebuffer dimensions (updated on commit, used by blitter)
+  var currentFBWidth: Int = 640
+  var currentFBHeight: Int = 480
+
   def readByte(addr: Long): Int =
     (addr - base).toInt match
       case MODE      => mode
@@ -57,7 +61,10 @@ class DisplayController(
     val w = width
     val h = height
     // Clear memory synchronously before the CPU continues drawing
-    if mode == 1 then fbMemory.clear()
+    if mode == 1 then
+      fbMemory.clear()
+      currentFBWidth = w
+      currentFBHeight = h
     val update: Runnable = () => {
       val layout = displayPanel.getLayout.asInstanceOf[CardLayout]
       if mode == 0 then

@@ -471,6 +471,8 @@ class SyslAnalyzer:
           case (_: IntType, DoubleType) => // int to float (cvt)
           case (DoubleType, _: IntType) => // float to int (fint)
           case (from, to) if from.isIntegral && to.isIntegral => // integer to integer
+          case (_: PtrType, to) if to.isIntegral => // pointer to integer
+          case (from, _: PtrType) if from.isIntegral => // integer to pointer
           case (from, to) => throw AnalysisError(s"cannot cast $from to $to")
         TCast(tInner, target)
 

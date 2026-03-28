@@ -10,7 +10,7 @@ FONT_FIRST = 32
 FONT_LAST = 126
 FONT_COUNT = 95
 
-font_data = [
+font_data: [16150]byte = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
@@ -1035,26 +1035,33 @@ init_fb()
     dc_write(5, FB_HEIGHT & 0xFF)
     dc_write(1, 1)
 
+// Blitter registers
+BLITTER = 0x10000C
+
+blit_write(offset: int, v: int)
+    p: *i8 = BLITTER + offset
+    *p = byte(v)
+
+blit_write32(offset: int, v: int)
+    p: *i32 = BLITTER + offset
+    *p = v
+
+blit_write16(offset: int, v: int)
+    p: *i16 = BLITTER + offset
+    *p = i16(v)
+
 draw_char(x: int, y: int, ch: int, r: int, g: int, b: int)
     if ch < FONT_FIRST || ch > FONT_LAST then return
-    if y + FONT_CELL_H < 0 || y >= FB_HEIGHT || x + FONT_CELL_W < 0 || x >= FB_WIDTH then return
     idx = ch - FONT_FIRST
-    base = idx * FONT_CELL_W * FONT_CELL_H
-    stride = FB_WIDTH * 4
-    for row = 0; row < FONT_CELL_H; row++
-        py = y + row
-        if py >= 0 && py < FB_HEIGHT
-            rowAddr: *i32 = FB_BASE + py * stride + x * 4
-            fontIdx = base + row * FONT_CELL_W
-            for col = 0; col < FONT_CELL_W; col++
-                a = font_data[fontIdx + col]
-                if a > 0
-                    px = x + col
-                    if px >= 0 && px < FB_WIDTH
-                        ra = (r * a) >> 8
-                        ga = (g * a) >> 8
-                        ba = (b * a) >> 8
-                        *(rowAddr + col) = (ra << 24) | (ga << 16) | (ba << 8) | 255
+    src = int(&font_data[idx * FONT_CELL_W * FONT_CELL_H])
+    blit_write32(0, src)
+    blit_write16(4, x)
+    blit_write16(6, y)
+    blit_write16(8, FONT_CELL_W)
+    blit_write16(10, FONT_CELL_H)
+    blit_write32(12, (r << 24) | (g << 16) | (b << 8) | 255)
+    blit_write(16, 0)
+    blit_write(17, 1)
 
 draw_text(x: int, y: int, s: *int, len: int, r: int, g: int, b: int)
     for i = 0; i < len; i++
@@ -1062,9 +1069,6 @@ draw_text(x: int, y: int, s: *int, len: int, r: int, g: int, b: int)
 
 main() -> int
     init_fb()
-    msg = [72, 101, 108, 108, 111, 32, 87, 111, 114, 108, 100, 33]
-    draw_text(50, 50, msg, 12, 255, 255, 255)
-    draw_text(50, 80, msg, 12, 255, 80, 80)
-    draw_text(50, 110, msg, 12, 80, 255, 80)
-    draw_text(50, 140, msg, 12, 80, 200, 255)
+    // Just draw a single 'A' to test the blitter
+    draw_char(100, 100, 65, 255, 255, 255)
     0
