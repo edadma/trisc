@@ -459,6 +459,126 @@ class LinkerTests extends TestHelpers {
     cpu.state shouldBe State.Halt
   }
 
+  // ===== Relocatable linking with unresolved externs =====
+
+  "relocatable link preserves unresolved externs" in {
+    val tof = assemble(
+      """extern putchar
+        |global main, func
+        |main
+        |  movi r1, putchar
+        |  halt
+        |""".stripMargin, relocatable = true)
+
+    val linked = Linker.link(Seq(tof), relocatable = true)
+    linked.tofType shouldBe TOFType.Relocatable
+    linked.allExterns.map(_._2) should contain("putchar")
+  }
+
+  "relocatable link preserves unresolved relocs" in {
+    val tof = assemble(
+      """extern putchar
+        |global main, func
+        |main
+        |  movi r1, putchar
+        |  halt
+        |""".stripMargin, relocatable = true)
+
+    val linked = Linker.link(Seq(tof), relocatable = true)
+    // Should have a reloc for putchar that's still named (not empty)
+    val namedRelocs = linked.allRelocs.filter(_._2.symbol == "putchar")
+    namedRelocs should not be empty
+  }
+
+  "relocatable link resolves cross-module refs but preserves runtime externs" in {
+    val main = assemble(
+      """extern helper
+        |extern putchar
+        |global main, func
+        |main
+        |  movi r1, helper
+        |  movi r2, putchar
+        |  halt
+        |""".stripMargin, relocatable = true)
+    val lib = assemble(
+      """global helper, func
+        |helper
+        |  ldi r2, 42
+        |  jalr r0, r7
+        |""".stripMargin, relocatable = true)
+
+    val linked = Linker.link(Seq(main, lib), relocatable = true)
+    linked.tofType shouldBe TOFType.Relocatable
+    // helper should be resolved (not in externs)
+    linked.allExterns.map(_._2) should not contain "helper"
+    // putchar should still be unresolved
+    linked.allExterns.map(_._2) should contain("putchar")
+  }
+
+  "relocatable link then final link resolves all symbols" in {
+    val main = assemble(
+      """extern helper
+        |extern putchar
+        |global main, func
+        |main
+        |  movi r1, helper
+        |  movi r2, putchar
+        |  halt
+        |""".stripMargin, relocatable = true)
+    val lib = assemble(
+      """global helper, func
+        |helper
+        |  ldi r2, 42
+        |  jalr r0, r7
+        |""".stripMargin, relocatable = true)
+    val runtime = assemble(
+      """global putchar, func
+        |putchar
+        |  jalr r0, r7
+        |""".stripMargin, relocatable = true)
+
+    // First: relocatable link of user modules
+    val partial = Linker.link(Seq(main, lib), relocatable = true)
+    partial.allExterns.map(_._2) should contain("putchar")
+
+    // Then: final link with runtime
+    val linked = Linker.link(Seq(partial, runtime))
+    linked.tofType shouldBe TOFType.Executable
+    linked.allExterns shouldBe empty
+  }
+
+  "relocatable link round-trips with unresolved externs" in {
+    val tof = assemble(
+      """extern putchar
+        |global main, func
+        |main
+        |  movi r1, putchar
+        |  halt
+        |""".stripMargin, relocatable = true)
+
+    val linked = Linker.link(Seq(tof), relocatable = true)
+    val serialized = linked.serialize
+    val deserialized = TOF.deserialize(serialized)
+
+    deserialized.tofType shouldBe TOFType.Relocatable
+    deserialized.allExterns.map(_._2) should contain("putchar")
+    deserialized.allRelocs.length shouldBe linked.allRelocs.length
+  }
+
+  "non-relocatable link still rejects unresolved symbols" in {
+    val tof = assemble(
+      """extern nowhere
+        |global main, func
+        |main
+        |  movi r1, nowhere
+        |  halt
+        |""".stripMargin, relocatable = true)
+
+    val ex = the[Linker.LinkerError] thrownBy Linker.link(Seq(tof))
+    ex.msg should include("undefined symbol")
+    ex.msg should include("nowhere")
+  }
+
   "relocatable executable with vector table loads at different base" in {
     val boot = assemble(
       """extern main

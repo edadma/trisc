@@ -103,59 +103,97 @@ object Linker:
         globalSymbols(sym.name) = (absAddr, sym)
 
     // Phase 4: resolve relocations
-    // When producing a relocatable executable, collect base-relative relocs per placed segment
+    // When producing a relocatable output, unresolved externs are preserved
     val outputRelocs = new ArrayBuffer[ArrayBuffer[TOFReloc]]
+    val outputExterns = new ArrayBuffer[ArrayBuffer[String]]
 
     for seg <- placed do
-      for ext <- seg.externs do
-        if !globalSymbols.contains(ext) then
-          throw LinkerError(s"undefined symbol: '$ext'")
+      if !relocatable then
+        for ext <- seg.externs do
+          if !globalSymbols.contains(ext) then
+            throw LinkerError(s"undefined symbol: '$ext'")
 
-      val segRelocs = if relocatable then
-        val buf = new ArrayBuffer[TOFReloc]
-        outputRelocs += buf
-        buf
-      else
-        outputRelocs += ArrayBuffer.empty
-        null
+      val segRelocs = new ArrayBuffer[TOFReloc]
+      outputRelocs += segRelocs
+      val segExterns = new ArrayBuffer[String]
+      outputExterns += segExterns
+
+      // Collect unresolved externs for relocatable output
+      if relocatable then
+        for ext <- seg.externs do
+          if !globalSymbols.contains(ext) && !segExterns.contains(ext) then
+            segExterns += ext
 
       for reloc <- seg.relocs do
-        val (addr, _) = globalSymbols.getOrElse(
-          reloc.symbol,
-          throw LinkerError(s"undefined symbol: '${reloc.symbol}'"),
-        )
+        if reloc.symbol.isEmpty then
+          // Already resolved (base-relative) — adjust for new segment placement
+          val off = reloc.offset.toInt
+          val delta = seg.org
+          if delta != 0 then
+            reloc.typ match
+              case RelocType.ABS32 =>
+                val old = ((seg.data(off) & 0xff) << 24) | ((seg.data(off + 1) & 0xff) << 16) |
+                  ((seg.data(off + 2) & 0xff) << 8) | (seg.data(off + 3) & 0xff)
+                val addr = old.toLong + delta
+                seg.data(off) = ((addr >> 24) & 0xff).toByte
+                seg.data(off + 1) = ((addr >> 16) & 0xff).toByte
+                seg.data(off + 2) = ((addr >> 8) & 0xff).toByte
+                seg.data(off + 3) = (addr & 0xff).toByte
+              case RelocType.ABS64 =>
+                var old = 0L
+                for i <- 0 until 8 do old = (old << 8) | (seg.data(off + i) & 0xff)
+                val addr = old + delta
+                for i <- 0 until 8 do seg.data(off + i) = ((addr >> ((7 - i) * 8)) & 0xff).toByte
+              case RelocType.MOVI2 | RelocType.MOVI3 | RelocType.MOVI4 =>
+                val n = reloc.typ match
+                  case RelocType.MOVI2 => 2
+                  case RelocType.MOVI3 => 3
+                  case RelocType.MOVI4 => 4
+                // Read current address from movi instruction bytes
+                var old = 0L
+                for i <- 0 until n do old = (old << 8) | (seg.data(off + i * 2 + 1) & 0xff)
+                patchMovi(seg.data, off, old + delta, n)
+          if relocatable then segRelocs += reloc
+        else globalSymbols.get(reloc.symbol) match
+          case Some((addr, _)) =>
+            reloc.typ match
+              case RelocType.ABS32 =>
+                val off = reloc.offset.toInt
+                seg.data(off) = ((addr >> 24) & 0xff).toByte
+                seg.data(off + 1) = ((addr >> 16) & 0xff).toByte
+                seg.data(off + 2) = ((addr >> 8) & 0xff).toByte
+                seg.data(off + 3) = (addr & 0xff).toByte
 
-        reloc.typ match
-          case RelocType.ABS32 =>
-            val off = reloc.offset.toInt
-            seg.data(off) = ((addr >> 24) & 0xff).toByte
-            seg.data(off + 1) = ((addr >> 16) & 0xff).toByte
-            seg.data(off + 2) = ((addr >> 8) & 0xff).toByte
-            seg.data(off + 3) = (addr & 0xff).toByte
+              case RelocType.ABS64 =>
+                val off = reloc.offset.toInt
+                seg.data(off) = ((addr >> 56) & 0xff).toByte
+                seg.data(off + 1) = ((addr >> 48) & 0xff).toByte
+                seg.data(off + 2) = ((addr >> 40) & 0xff).toByte
+                seg.data(off + 3) = ((addr >> 32) & 0xff).toByte
+                seg.data(off + 4) = ((addr >> 24) & 0xff).toByte
+                seg.data(off + 5) = ((addr >> 16) & 0xff).toByte
+                seg.data(off + 6) = ((addr >> 8) & 0xff).toByte
+                seg.data(off + 7) = (addr & 0xff).toByte
 
-          case RelocType.ABS64 =>
-            val off = reloc.offset.toInt
-            seg.data(off) = ((addr >> 56) & 0xff).toByte
-            seg.data(off + 1) = ((addr >> 48) & 0xff).toByte
-            seg.data(off + 2) = ((addr >> 40) & 0xff).toByte
-            seg.data(off + 3) = ((addr >> 32) & 0xff).toByte
-            seg.data(off + 4) = ((addr >> 24) & 0xff).toByte
-            seg.data(off + 5) = ((addr >> 16) & 0xff).toByte
-            seg.data(off + 6) = ((addr >> 8) & 0xff).toByte
-            seg.data(off + 7) = (addr & 0xff).toByte
+              case RelocType.MOVI2 =>
+                patchMovi(seg.data, reloc.offset.toInt, addr, 2)
 
-          case RelocType.MOVI2 =>
-            patchMovi(seg.data, reloc.offset.toInt, addr, 2)
+              case RelocType.MOVI3 =>
+                patchMovi(seg.data, reloc.offset.toInt, addr, 3)
 
-          case RelocType.MOVI3 =>
-            patchMovi(seg.data, reloc.offset.toInt, addr, 3)
+              case RelocType.MOVI4 =>
+                patchMovi(seg.data, reloc.offset.toInt, addr, 4)
 
-          case RelocType.MOVI4 =>
-            patchMovi(seg.data, reloc.offset.toInt, addr, 4)
+            // Preserve reloc as base-relative (resolved symbol)
+            if relocatable then
+              segRelocs += TOFReloc(reloc.typ, reloc.offset, "")
 
-        // Preserve reloc as base-relative (empty symbol name)
-        if relocatable then
-          segRelocs += TOFReloc(reloc.typ, reloc.offset, "")
+          case None if relocatable =>
+            // Unresolved — preserve reloc with original symbol name
+            segRelocs += reloc
+
+          case None =>
+            throw LinkerError(s"undefined symbol: '${reloc.symbol}'")
 
     // Phase 5: resolve entry point (script entry overrides TOF entry)
     val entry = script.entry.orElse(tofs.flatMap(_.entry).lastOption)
@@ -166,13 +204,14 @@ object Linker:
     // Phase 6: merge same-named segments into single contiguous segments.
     // This is required because TOF serialize/deserialize uses segment name as key,
     // so multiple segments with the same name would lose their distinct origins.
-    val mergedSegments = new mutable.LinkedHashMap[String, (Long, ArrayBuffer[Byte], ArrayBuffer[TOFSymbol], ArrayBuffer[TOFReloc])]
+    val mergedSegments = new mutable.LinkedHashMap[String, (Long, ArrayBuffer[Byte], ArrayBuffer[TOFSymbol], ArrayBuffer[TOFReloc], ArrayBuffer[String])]
     for (seg, idx) <- placed.zipWithIndex do
       val segRelocs = outputRelocs(idx)
+      val segExterns = outputExterns(idx)
       mergedSegments.get(seg.name) match
         case None =>
-          mergedSegments(seg.name) = (seg.org, ArrayBuffer.from(seg.data), ArrayBuffer.from(seg.symbols), ArrayBuffer.from(segRelocs))
-        case Some((baseOrg, mergedData, mergedSyms, mergedRelocs)) =>
+          mergedSegments(seg.name) = (seg.org, ArrayBuffer.from(seg.data), ArrayBuffer.from(seg.symbols), ArrayBuffer.from(segRelocs), ArrayBuffer.from(segExterns))
+        case Some((baseOrg, mergedData, mergedSyms, mergedRelocs, mergedExterns)) =>
           val dataOffset = (seg.org - baseOrg).toInt
           // Pad if there's a gap between segments
           while mergedData.length < dataOffset do mergedData += 0.toByte
@@ -183,11 +222,14 @@ object Linker:
           // Adjust reloc offsets relative to merged segment start
           for reloc <- segRelocs do
             mergedRelocs += reloc.copy(offset = reloc.offset + dataOffset)
+          // Merge unresolved externs (deduplicate)
+          for ext <- segExterns do
+            if !mergedExterns.contains(ext) then mergedExterns += ext
 
     val outType = if relocatable then TOFType.Relocatable else TOFType.Executable
 
-    val outSegments = mergedSegments.map { case (name, (segOrg, data, syms, relocs)) =>
-      TOF.Segment(name, segOrg, Seq(TOF.DataChunk(data.toSeq)), syms.toSeq, relocs = relocs.toSeq)
+    val outSegments = mergedSegments.map { case (name, (segOrg, data, syms, relocs, externs)) =>
+      TOF.Segment(name, segOrg, Seq(TOF.DataChunk(data.toSeq)), syms.toSeq, externs = externs.toSeq, relocs = relocs.toSeq)
     }.toSeq
 
     TOF(entry, outSegments, outType)

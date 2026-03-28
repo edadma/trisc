@@ -1,10 +1,10 @@
 // Function pointer demo — apply a function to a value twice
-double(x: int) -> int = x * 2
+twice(x: int) -> int = x * 2
 square(x: int) -> int = x * x
 
 apply_twice(f: func(int) -> int, x: int) -> int = f(f(x))
 
 main() -> int
-    a = apply_twice(double, 3)   // double(double(3)) = 12
+    a = apply_twice(twice, 3)   // twice(twice(3)) = 12
     b = apply_twice(square, 2)   // square(square(2)) = 16
     a + b                        // 28

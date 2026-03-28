@@ -162,6 +162,84 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
         |""".stripMargin) shouldBe 0
   }
 
+  "if-then-else expression" in {
+    compileAndRun(
+      """main() -> int
+        |    x = -42
+        |    if x < 0 then -x else x
+        |""".stripMargin) shouldBe 42
+  }
+
+  "abs function" in {
+    compileAndRun(
+      """abs_val(x: int) -> int
+        |    if x < 0 then -x else x
+        |
+        |main() -> int = abs_val(-42)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "multifile abs function" in {
+    val sources = Map(
+      "math" ->
+        """abs_val(x: int) -> int
+          |    if x < 0 then -x else x
+          |""".stripMargin,
+      "main" ->
+        """import "math"
+          |
+          |main() -> int = abs_val(-42)
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    val result = driver.compile(sources)
+    val codegen = new SyslTriscCodegen
+    val tofs = for unit <- result.units yield
+      val asm = codegen.generate(unit.typed)
+      assemble(asm, relocatable = true)
+    val linked = Linker.link(Runtime.bootTof +: tofs :+ Runtime.ioTof)
+    val stdout = new Stdout(Runtime.stdoutAddress)
+    val ram = new RAM(0, Runtime.stdoutAddress.toInt)
+    val mem = new Memory("Memory", ram, stdout)
+    linked.load(mem)
+    val cpu = new CPU(mem, Nil) { limit = 100000 }
+    cpu.reset()
+    cpu.run()
+    cpu.r(1).read shouldBe 42
+  }
+
+  "multifile abs function two-stage link" in {
+    val sources = Map(
+      "math" ->
+        """abs_val(x: int) -> int
+          |    if x < 0 then -x else x
+          |""".stripMargin,
+      "main" ->
+        """import "math"
+          |
+          |main() -> int = abs_val(-42)
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    val result = driver.compile(sources)
+    val codegen = new SyslTriscCodegen
+    val tofs = for unit <- result.units yield
+      val asm = codegen.generate(unit.typed)
+      assemble(asm, relocatable = true)
+    // Stage 1: link user modules into single relocatable TOF
+    val partial = Linker.link(tofs, relocatable = true)
+    // Stage 2: link with runtime (what trisc run does)
+    val linked = Linker.link(Seq(Runtime.bootTof, partial, Runtime.ioTof))
+    val stdout = new Stdout(Runtime.stdoutAddress)
+    val ram = new RAM(0, Runtime.stdoutAddress.toInt)
+    val mem = new Memory("Memory", ram, stdout)
+    linked.load(mem)
+    val cpu = new CPU(mem, Nil) { limit = 100000 }
+    cpu.reset()
+    cpu.run()
+    cpu.r(1).read shouldBe 42
+  }
+
   // ===== Function calls =====
 
   "function call" in {
