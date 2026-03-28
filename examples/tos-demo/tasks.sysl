@@ -1,10 +1,8 @@
 /*
  * TOS Demo — User tasks
  *
- * Each task runs in user mode with its own stack.
- * The timer interrupt preempts them transparently.
- *
- * Expected output: interleaved characters like AABB0AABB1AABB2...
+ * Simple preemptive multitasking demo.
+ * Each task prints its letter in a loop with a busy-wait delay.
  */
 
 val STDOUT = 0xFF00
@@ -21,22 +19,9 @@ delay(n: int)
 task_a()
     while true
         putc(65)            // 'A'
-        delay(2000)
+        delay(5000)
 
 task_b()
     while true
         putc(66)            // 'B'
-        delay(2000)
-
-task_c()
-    var count = 0
-    while true
-        putc(count + 48)    // '0'-'9'
-        count += 1
-        if count >= 10
-            count = 0
-        delay(3000)
-
-idle_task()
-    while true
-        asm("wfi")
+        delay(5000)

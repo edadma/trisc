@@ -59,6 +59,7 @@ struct Task
 var tasks: [8]Task
 var current_thread = 0
 var thread_count = 0
+var ticks = 0              // incremented on each context switch
 
 
 /*
@@ -146,6 +147,8 @@ create_thread(entry_point: int, usp: int, ssp: int, name: *byte)
  */
 
 schedule(current_ssp: int) -> int
+    ticks += 1
+
     var cur: *Task = &tasks[current_thread]
     cur.ssp = current_ssp
     cur.state = STATE_READY
