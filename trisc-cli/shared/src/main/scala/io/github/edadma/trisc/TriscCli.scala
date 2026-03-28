@@ -223,8 +223,9 @@ object TriscCli:
     // Disassemble all code segments
     for seg <- linked.segments do
       val end = seg.org + seg.chunks.map {
-        case TOF.DataChunk(d) => d.length.toLong
-        case TOF.ResChunk(s)  => s
+        case TOF.DataChunk(d)  => d.length.toLong
+        case TOF.ResChunk(s)   => s
+        case TOF.CommentChunk(_) => 0L
       }.sum
       println(disasm.disassembleRange(seg.org, end))
 

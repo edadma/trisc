@@ -113,7 +113,7 @@ object TOF:
 
   def deserialize(tof: String): TOF = fromString(tof)
 
-  private val SupportedVersions = immutable.TreeSet("1")
+  private val SupportedVersions = immutable.TreeSet("1", "2")
 
   def fromString(source: String): TOF =
     val b = builder
