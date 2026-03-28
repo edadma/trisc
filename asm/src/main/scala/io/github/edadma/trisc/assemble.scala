@@ -34,10 +34,24 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
   val referencedExterns = new mutable.LinkedHashSet[String]
   var entryPoint: Option[String] = None
 
+  // Branch relaxation tracking
+  case class BranchRecord(
+    segmentName: String,
+    offsetInSegment: Long,
+    targetSymbol: Option[String],
+    shortSize: Int,
+    longSize: Int,
+    var relaxed: Boolean = false,
+  )
+  val branchRecords = new ArrayBuffer[BranchRecord]
+  val symbolSegment = new mutable.LinkedHashMap[String, String]
+  val relaxationExports = new mutable.LinkedHashSet[String]
+
   def addSymbol(sym: Positional, name: String): Unit =
     if symbols contains name then problem(sym, s"duplicate symbol: '$name'")
     symbols(name) = LabelSymbol(name, segment.size, sym)
     segment.symbols += name
+    symbolSegment(name) = segment.name
 
   def locals(expr: ExprAST): Unit =
     expr match
@@ -143,14 +157,70 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
 
       if (segment.size - startingSize) % 2 == 1 then segment.size += 1
     case InstructionLineAST(mnemonic, operands) =>
-      segment.size += (
-        mnemonic match
-          case "movi"                                          => addresses * 2
-          case "bne" | "bge" | "bgeu" | "ble" | "bleu"        => 4 // inverted branch + bra
-          case _                                               => 2
-      )
       operands foreach locals
+      mnemonic match
+        case "bra" | "beq" | "blu" | "bls" | "bgt" | "bgu" | "bne" | "bge" | "bgeu" | "ble" | "bleu" =>
+          val targetOp = if mnemonic == "bra" then operands.head else operands(2)
+          val targetSym = targetOp match
+            case ReferenceExprAST(name)            => Some(name)
+            case l: LocalExprAST if l.ref != null  => Some(l.ref)
+            case _                                 => None
+          val (short, long) = mnemonic match
+            case "bra"                                          => (2, addresses * 2 + 2)
+            case "beq" | "blu" | "bls" | "bgt" | "bgu"         => (2, addresses * 2 + 6)
+            case _                                              => (4, addresses * 2 + 4) // bne, bge, bgeu, ble, bleu
+          branchRecords += BranchRecord(segment.name, segment.size, targetSym, short, long)
+          segment.size += short
+        case "movi" =>
+          segment.size += addresses * 2
+        case _ =>
+          segment.size += 2
   }
+
+  // Branch relaxation: iteratively relax branches that don't fit short form
+  def adjustedOffset(segName: String, initialOffset: Long): Long =
+    var adj = initialOffset
+    for b <- branchRecords if b.segmentName == segName && b.relaxed && b.offsetInSegment < initialOffset do
+      adj += b.longSize - b.shortSize
+    adj
+
+  var relaxationChanged = true
+  while relaxationChanged do
+    relaxationChanged = false
+    for b <- branchRecords if !b.relaxed do
+      b.targetSymbol match
+        case Some(symName) =>
+          symbols.get(symName) match
+            case Some(LabelSymbol(_, targetOffset, _, _)) if symbolSegment.get(symName).contains(b.segmentName) =>
+              val branchAdj = adjustedOffset(b.segmentName, b.offsetInSegment)
+              val targetAdj = adjustedOffset(b.segmentName, targetOffset)
+              val offset = targetAdj - (branchAdj + 2)
+              if offset % 2 != 0 || offset < -128 || offset > 126 then
+                b.relaxed = true
+                relaxationChanged = true
+            case _ =>
+              // Cross-segment, extern, or unknown — always relax
+              b.relaxed = true
+              relaxationChanged = true
+        case None => // literal offset, no relaxation needed
+
+  // Apply relaxation adjustments to symbol values and segment sizes
+  for (name, sym) <- symbols do
+    sym match
+      case l: LabelSymbol =>
+        symbolSegment.get(name) match
+          case Some(segName) => l.value = adjustedOffset(segName, l.value)
+          case None =>
+      case _ =>
+
+  for (segName, seg) <- segments do
+    val delta = branchRecords.filter(b => b.segmentName == segName && b.relaxed).map(b => (b.longSize - b.shortSize).toLong).sum
+    seg.size += delta
+
+  // Track local symbols that need export for long branch relocations
+  if relocatable then
+    for b <- branchRecords if b.relaxed do
+      b.targetSymbol.foreach(relaxationExports += _)
 
   // Validate globals reference existing labels
   for (name, g) <- globals do
@@ -221,6 +291,38 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     // emit zero placeholder
     for _ <- 0 until 8 do builder += 0.toByte
 
+  def emitMoviImm(reg: Int, imm: Int): Unit =
+    addresses match
+      case 1 => addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> (imm & 0xff))
+      case 2 =>
+        addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> ((imm >> 8) & 0xff))
+        addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff))
+      case 3 =>
+        addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> ((imm >> 16) & 0xff))
+        addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> ((imm >> 8) & 0xff))
+        addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff))
+      case 4 =>
+        addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> ((imm >> 24) & 0xff))
+        addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> ((imm >> 16) & 0xff))
+        addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> ((imm >> 8) & 0xff))
+        addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff))
+
+  // Emit long branch: movi r4, <target>; jalr r0, r4
+  // Uses r4 as assembler scratch register (caller-saved per ABI)
+  def emitLongBranch(operand: ExprAST): Unit =
+    val symRef: Option[String] = operand match
+      case ReferenceExprAST(name)            => Some(name)
+      case l: LocalExprAST if l.ref != null  => Some(l.ref)
+      case _                                 => None
+    symRef match
+      case Some(ref) if relocatable || declaredExterns.contains(ref) =>
+        emitMoviReloc(4, ref)
+      case _ =>
+        fold(operand, absolute = true, immediate = true) match
+          case LongExprAST(addr) => emitMoviImm(4, addr.toInt)
+          case other             => problem(operand, s"unexpected branch target")
+    addInstruction(3 -> 6, 3 -> 0, 3 -> 4, 2 -> 0, 5 -> 0) // jalr r0, r4
+
   builder.segment("_default_", segments("_default_").org)
 
   // Emit symbols for a segment: globals, relocatable auto-exports, and entry point
@@ -251,10 +353,18 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           builder.addSymbol(ep, value - org, SymbolType.Func)
           emittedSymbols += ep
         case _ =>
+    // Export symbols needed for long branch relocations
+    for symName <- seg.symbols if relaxationExports.contains(symName) && !emittedSymbols.contains(symName) do
+      symbols.get(symName) match
+        case Some(LabelSymbol(_, value, _, _)) =>
+          builder.addSymbol(symName, value - org, SymbolType.Func)
+          emittedSymbols += symName
+        case _ =>
 
   emitSymbolsForSegment("_default_")
 
   // Pass 2: code generation
+  var branchIndex = 0
   lines foreach {
     case SegmentLineAST(name) =>
       builder.segment(name, segments(name).org)
@@ -415,6 +525,8 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
 
       addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm)
     case InstructionLineAST(mnemonic @ ("beq" | "blu" | "bls"), Seq(o1, o2, o3)) =>
+      val br = branchRecords(branchIndex)
+      branchIndex += 1
       val opcode =
         mnemonic match
           case "beq" => 2
@@ -428,13 +540,17 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         fold(o2) match
           case RegisterExprAST(reg) => reg
           case _                    => problem(o2, "expected register as second operand")
-      val imm =
-        fold(o3, immediate = true) match
-          case _: DoubleExprAST                                      => problem(o3, "immediate must be integral")
-          case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => n.toInt
-          case _: LongExprAST => problem(o3, "immediate must be an even signed 8-bit value")
-
-      addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm / 2)
+      if br.relaxed then
+        addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> 1) // cond +2: skip bra
+        addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> (addresses * 2 + 2) / 2) // bra over long jump
+        emitLongBranch(o3)
+      else
+        val imm =
+          fold(o3, immediate = true) match
+            case _: DoubleExprAST                                      => problem(o3, "immediate must be integral")
+            case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => n.toInt
+            case _: LongExprAST => problem(o3, "immediate must be an even signed 8-bit value")
+        addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm / 2)
     case InstructionLineAST(
           mnemonic @ ("ldb" | "stb" | "lds" | "sts" | "ldw" | "stw" | "ldd" | "std" | "add" | "sub" | "mul" | "div" |
           "rem" | "and" | "or" | "xor" | "asr" | "lsr" | "lsl" | "slt" | "sltu" | "adc" | "sbc" | "mulu" | "divu" |
@@ -636,13 +752,17 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
       addInstruction(3 -> 7, 3 -> 0, 3 -> reg, 7 -> opcode)
     case InstructionLineAST("halt", Nil) => addInstruction(3 -> 6, 3 -> 0, 3 -> 0, 2 -> 0, 5 -> 0) // jalr 0,0
     case InstructionLineAST("bra", Seq(o)) =>
-      val imm =
-        fold(o, immediate = true) match
-          case _: DoubleExprAST                                      => problem(o, "immediate must be integral")
-          case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => n.toInt
-          case _: LongExprAST => problem(o, "immediate must be an even signed 8-bit value")
-
-      addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm / 2) // beq r0, r0, imm
+      val br = branchRecords(branchIndex)
+      branchIndex += 1
+      if br.relaxed then
+        emitLongBranch(o)
+      else
+        val imm =
+          fold(o, immediate = true) match
+            case _: DoubleExprAST                                      => problem(o, "immediate must be integral")
+            case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => n.toInt
+            case _: LongExprAST => problem(o, "immediate must be an even signed 8-bit value")
+        addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm / 2) // beq r0, r0, imm
     case InstructionLineAST("movi", Seq(o1, o2)) =>
       val reg =
         fold(o1) match
@@ -675,6 +795,8 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case InstructionLineAST("ret", Nil) =>
       addInstruction(3 -> 6, 3 -> 0, 3 -> 7, 2 -> 0, 5 -> 0) // jalr r0, r7
     case InstructionLineAST(mnemonic @ ("bgt" | "bgu"), Seq(o1, o2, o3)) =>
+      val br = branchRecords(branchIndex)
+      branchIndex += 1
       val baseOpcode = mnemonic match
         case "bgt" => 4
         case "bgu" => 3
@@ -686,14 +808,20 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         fold(o2) match
           case RegisterExprAST(reg) => reg
           case _                    => problem(o2, "expected register as second operand")
-      val imm =
-        fold(o3, immediate = true) match
-          case _: DoubleExprAST                                      => problem(o3, "immediate must be integral")
-          case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => n.toInt
-          case _: LongExprAST => problem(o3, "immediate must be an even signed 8-bit value")
-
-      addInstruction(3 -> baseOpcode, 3 -> reg2, 3 -> reg1, 7 -> imm / 2)
+      if br.relaxed then
+        addInstruction(3 -> baseOpcode, 3 -> reg2, 3 -> reg1, 7 -> 1) // cond +2: skip bra
+        addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> (addresses * 2 + 2) / 2) // bra over long jump
+        emitLongBranch(o3)
+      else
+        val imm =
+          fold(o3, immediate = true) match
+            case _: DoubleExprAST                                      => problem(o3, "immediate must be integral")
+            case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => n.toInt
+            case _: LongExprAST => problem(o3, "immediate must be an even signed 8-bit value")
+        addInstruction(3 -> baseOpcode, 3 -> reg2, 3 -> reg1, 7 -> imm / 2)
     case InstructionLineAST(mnemonic @ ("bne" | "bge" | "bgeu" | "ble" | "bleu"), Seq(o1, o2, o3)) =>
+      val br = branchRecords(branchIndex)
+      branchIndex += 1
       val (baseOpcode, swap) = mnemonic match
         case "bne"  => (2, false)
         case "bge"  => (4, false)
@@ -708,15 +836,18 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         fold(o2) match
           case RegisterExprAST(reg) => reg
           case _                    => problem(o2, "expected register as second operand")
-      val imm =
-        fold(o3, immediate = true) match
-          case _: DoubleExprAST                                      => problem(o3, "immediate must be integral")
-          case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => (n - 2).toInt
-          case _: LongExprAST => problem(o3, "immediate must be an even signed 8-bit value")
-
       val (r1, r2) = if swap then (reg2, reg1) else (reg1, reg2)
-      addInstruction(3 -> baseOpcode, 3 -> r1, 3 -> r2, 7 -> 1)
-      addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm / 2)
+      if br.relaxed then
+        addInstruction(3 -> baseOpcode, 3 -> r1, 3 -> r2, 7 -> (addresses * 2 + 2) / 2) // skip long jump
+        emitLongBranch(o3)
+      else
+        val imm =
+          fold(o3, immediate = true) match
+            case _: DoubleExprAST                                      => problem(o3, "immediate must be integral")
+            case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => (n - 2).toInt
+            case _: LongExprAST => problem(o3, "immediate must be an even signed 8-bit value")
+        addInstruction(3 -> baseOpcode, 3 -> r1, 3 -> r2, 7 -> 1)
+        addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm / 2)
   }
 
   // Warnings and validation
