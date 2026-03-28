@@ -6,6 +6,7 @@ object Runtime:
   val stdoutAddress = 0xFF00L // near top of default 64KB address space
   val keyboardAddress = 0xFF04L // keyboard device: +0 = status, +1 = data (right after stdout)
   val displayCtrlAddress = 0xFF06L // display controller: mode, commit, width, height (6 bytes)
+  val timerAddress = 0xFFE8L // timer device: +0-3 = period (i32, ms), +4 = control (i8)
   val framebufferAddress = 0x10000L // framebuffer pixel data (RGBA, max 640x480)
   val framebufferMaxSize: Long = 1920 * 1080 * 4 // 8,294,400 bytes
   val initialSSP: Long = stdoutAddress - 8 // stack grows down, below devices

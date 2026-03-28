@@ -24,6 +24,24 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
     cpu.run()
     cpu.r(1).read
 
+  /** Compile multiple Sysl source files together and run via CPU. */
+  def compileMultiAndRun(sources: Map[String, String]): Long =
+    val driver = new SyslDriver
+    val result = driver.compile(sources)
+    val codegen = new SyslTriscCodegen
+    val tofs = for unit <- result.units yield
+      val asm = codegen.generate(unit.typed)
+      assemble(asm, relocatable = true)
+    val linked = Linker.link(Seq(Runtime.bootTof) ++ tofs ++ Seq(Runtime.ioTof))
+    val stdout = new Stdout(Runtime.stdoutAddress)
+    val ram = new RAM(0, Runtime.stdoutAddress.toInt)
+    val mem = new Memory("Memory", ram, stdout)
+    linked.load(mem)
+    val cpu = new CPU(mem, Nil) { limit = 100000 }
+    cpu.reset()
+    cpu.run()
+    cpu.r(1).read
+
   // ===== Constants =====
 
   "return constant 0" in {
@@ -1174,6 +1192,8 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
     compileAndRun(
       """main() -> int
         |    arr: [101]byte
+        |    for i = 0; i <= 100; i++
+        |        arr[i] = 0
         |    arr[0] = 1
         |    arr[1] = 1
         |    for i = 2; i * i <= 100; i++
@@ -1185,5 +1205,217 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
         |        if arr[i] == 0 then count += 1
         |    count
         |""".stripMargin) shouldBe 25
+  }
+
+  // ===== Bug fix: global arrays must reserve full size =====
+
+  "global array reserves correct space" in {
+    compileAndRun(
+      """var arr: [4]int
+        |
+        |main() -> int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    arr[3] = 40
+        |    arr[0] + arr[1] + arr[2] + arr[3]
+        |""".stripMargin) shouldBe 100
+  }
+
+  "global array does not overlap next global" in {
+    compileAndRun(
+      """var arr: [4]int
+        |var sentinel = 99
+        |
+        |main() -> int
+        |    arr[0] = 1
+        |    arr[1] = 2
+        |    arr[2] = 3
+        |    arr[3] = 4
+        |    sentinel
+        |""".stripMargin) shouldBe 99
+  }
+
+  // ===== Bug fix: global array/struct returns address, not value =====
+
+  "global array address used in addr-of-index" in {
+    compileAndRun(
+      """var arr: [4]int
+        |
+        |main() -> int
+        |    arr[2] = 42
+        |    var p: *int = &arr[2]
+        |    *p
+        |""".stripMargin) shouldBe 42
+  }
+
+  // ===== Bug fix: struct field access and assignment =====
+
+  "struct field write and read through pointer" in {
+    compileAndRun(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |var p: Point
+        |
+        |main() -> int
+        |    var pp: *Point = &p
+        |    pp.x = 10
+        |    pp.y = 32
+        |    pp.x + pp.y
+        |""".stripMargin) shouldBe 42
+  }
+
+  "struct field access second field" in {
+    compileAndRun(
+      """struct Pair
+        |    first: int
+        |    second: int
+        |
+        |var p: Pair
+        |
+        |main() -> int
+        |    var pp: *Pair = &p
+        |    pp.first = 100
+        |    pp.second = 200
+        |    pp.second
+        |""".stripMargin) shouldBe 200
+  }
+
+  "struct array with field access" in {
+    compileAndRun(
+      """struct Entry
+        |    key: int
+        |    value: int
+        |
+        |var entries: [3]Entry
+        |
+        |main() -> int
+        |    var e: *Entry = &entries[0]
+        |    e.key = 1
+        |    e.value = 10
+        |    e = &entries[1]
+        |    e.key = 2
+        |    e.value = 20
+        |    e = &entries[2]
+        |    e.key = 3
+        |    e.value = 30
+        |    var sum = 0
+        |    e = &entries[0]
+        |    sum = sum + e.value
+        |    e = &entries[1]
+        |    sum = sum + e.value
+        |    e = &entries[2]
+        |    sum = sum + e.value
+        |    sum
+        |""".stripMargin) shouldBe 60
+  }
+
+  // ===== Bug fix: linker segment alignment =====
+
+  "multi-module globals remain aligned after linking" in {
+    compileMultiAndRun(Map(
+      "lib" ->
+        """helper() -> int = 42
+          |""".stripMargin,
+      "app" ->
+        """import "lib"
+          |
+          |val MAGIC = 12345
+          |
+          |main() -> int
+          |    val v = MAGIC
+          |    helper() + v
+          |""".stripMargin
+    )) shouldBe 12387
+  }
+
+  // ===== Bug fix: struct field compound assignment =====
+
+  "struct field compound assign +=" in {
+    compileAndRun(
+      """struct Counter
+        |    value: int
+        |
+        |var c: Counter
+        |
+        |main() -> int
+        |    var p: *Counter = &c
+        |    p.value = 10
+        |    p.value += 32
+        |    p.value
+        |""".stripMargin) shouldBe 42
+  }
+
+  "struct field compound assign -=" in {
+    compileAndRun(
+      """struct Counter
+        |    value: int
+        |
+        |var c: Counter
+        |
+        |main() -> int
+        |    var p: *Counter = &c
+        |    p.value = 50
+        |    p.value -= 8
+        |    p.value
+        |""".stripMargin) shouldBe 42
+  }
+
+  "struct field compound assign *= on first field" in {
+    compileAndRun(
+      """struct Pair
+        |    a: int
+        |    b: int
+        |
+        |var p: Pair
+        |
+        |main() -> int
+        |    var pp: *Pair = &p
+        |    pp.a = 7
+        |    pp.a *= 6
+        |    pp.a
+        |""".stripMargin) shouldBe 42
+  }
+
+  "struct field compound assign *= on second field" in {
+    compileAndRun(
+      """struct Pair
+        |    a: int
+        |    b: int
+        |
+        |var p: Pair
+        |
+        |main() -> int
+        |    var pp: *Pair = &p
+        |    pp.a = 5
+        |    pp.b = 7
+        |    pp.b *= 6
+        |    pp.b
+        |""".stripMargin) shouldBe 42
+  }
+
+  // ===== Bug fix: addr-of global variable =====
+
+  "addr-of global scalar" in {
+    compileAndRun(
+      """var x = 42
+        |
+        |main() -> int
+        |    var p: *int = &x
+        |    *p
+        |""".stripMargin) shouldBe 42
+  }
+
+  "addr-of global and write through pointer" in {
+    compileAndRun(
+      """var x = 0
+        |
+        |main() -> int
+        |    var p: *int = &x
+        |    *p = 42
+        |    x
+        |""".stripMargin) shouldBe 42
   }
 }

@@ -82,7 +82,7 @@ object Linker:
         val ps = PlacedSegment(seg.name, org, seg.data, seg.symbols, seg.externs, seg.relocs)
         placed += ps
         placedByName(seg.name) = ps
-        nextAddr = org + seg.data.length
+        nextAddr = (org + seg.data.length + 7) & ~7L // 8-byte align for next segment
 
     // Place remaining segments not in the script
     for seg <- inputSegments if !scriptSectionNames.contains(seg.name) do
@@ -90,7 +90,7 @@ object Linker:
       val ps = PlacedSegment(seg.name, org, seg.data, seg.symbols, seg.externs, seg.relocs)
       placed += ps
       placedByName(seg.name) = ps
-      nextAddr = org + seg.data.length
+      nextAddr = (org + seg.data.length + 7) & ~7L // 8-byte align for next segment
 
     // Phase 3: build global symbol table
     val globalSymbols = new mutable.LinkedHashMap[String, (Long, TOFSymbol)]

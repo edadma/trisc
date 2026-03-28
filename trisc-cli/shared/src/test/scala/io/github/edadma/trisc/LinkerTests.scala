@@ -55,8 +55,8 @@ class LinkerTests extends TestHelpers {
     cpu.state = State.Run
     cpu.run()
     // r1 should contain the address of 'target'
-    // caller is 6 bytes (movi=4 + halt=2), target is at offset 6
-    cpu.r(1).read shouldBe 6
+    // caller is 6 bytes (movi=4 + halt=2), aligned to 8, target at offset 8
+    cpu.r(1).read shouldBe 8
   }
 
   "MOVI3 relocation patches correctly" in {
@@ -71,7 +71,7 @@ class LinkerTests extends TestHelpers {
     cpu.pc = 0
     cpu.state = State.Run
     cpu.run()
-    // caller is 8 bytes (movi=6 + halt=2), target at offset 8
+    // caller is 8 bytes (movi=6 + halt=2), already aligned, target at offset 8
     cpu.r(1).read shouldBe 8
   }
 
@@ -87,8 +87,8 @@ class LinkerTests extends TestHelpers {
     cpu.pc = 0
     cpu.state = State.Run
     cpu.run()
-    // caller is 10 bytes (movi=8 + halt=2), target at offset 10
-    cpu.r(1).read shouldBe 10
+    // caller is 10 bytes (movi=8 + halt=2), aligned to 16, target at offset 16
+    cpu.r(1).read shouldBe 16
   }
 
   // ===== ABS32 relocation patching =====
@@ -109,9 +109,9 @@ class LinkerTests extends TestHelpers {
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     linked.load(mem)
     // The dw at address 0 should contain the address of handler
-    // main segment: 4 bytes dw + 2 bytes halt = 6 bytes
-    // handler starts at offset 6
-    mem.readInt(0) shouldBe 6
+    // main segment: 4 bytes dw + 2 bytes halt = 6 bytes, aligned to 8
+    // handler starts at offset 8
+    mem.readInt(0) shouldBe 8
   }
 
   "ABS64 relocation in vector table enables CPU reset dispatch" in {
@@ -161,10 +161,10 @@ class LinkerTests extends TestHelpers {
     val b = assemble("ldi r2, 2\nhalt\n", relocatable = true)
 
     val linked = Linker.link(Seq(a, b), baseAddress = 0x100)
-    // Same-named segments get merged; check data contains both
+    // Same-named segments get merged with 8-byte alignment padding between units
     linked.segments(0).org shouldBe 0x100
     val data = linked.segments(0).chunks.head.asInstanceOf[TOF.DataChunk].data
-    data.length shouldBe 8 // 4 bytes from a + 4 bytes from b
+    data.length shouldBe 12 // 4 bytes from a + 4 padding (align 8) + 4 bytes from b
   }
 
   "segment with explicit org keeps its origin" in {

@@ -5,9 +5,10 @@ import org.scalatest.matchers.should.Matchers
 
 class TOSTests extends AnyFreeSpec with Matchers {
 
-  val bootAsm = scala.io.Source.fromFile("tos/boot.asm").mkString
+  val bootAsm = scala.io.Source.fromFile("boot.asm").mkString
   val kernelSysl = scala.io.Source.fromFile("tos/kernel.sysl").mkString
-  val tasksSysl = scala.io.Source.fromFile("tos/tasks.sysl").mkString
+  val tasksSysl = scala.io.Source.fromFile("examples/tos-demo/tasks.sysl").mkString
+  val mainSysl = scala.io.Source.fromFile("examples/tos-demo/main.sysl").mkString
 
   "boot.asm assembles" in {
     val tof = assemble(bootAsm, relocatable = true)
@@ -26,43 +27,24 @@ class TOSTests extends AnyFreeSpec with Matchers {
     result shouldBe a[Right[?, ?]]
   }
 
-  "kernel.sysl analyzes" in {
-    val parser = new SyslParser
-    // Parse both Sysl files together (same module)
-    val combined = kernelSysl + "\n" + tasksSysl
-    val Right(ast) = parser.parseProgram(combined): @unchecked
-    val analyzer = new SyslAnalyzer
-    // Register assembly symbols as external functions
-    // (these are defined in boot.asm, called from kernel.sysl)
-    val bootMeta = ModuleMeta.fromSmeta(
-      """SMETA v1
-        |FUNC start_first_thread 1 int void
-        |""".stripMargin)
-    analyzer.registerImport(bootMeta)
-    val typed = analyzer.analyze(ast)
-    typed.decls should not be empty
-  }
-
   "TOS compiles and links" in {
     // Step 1: Assemble boot.asm
     val bootTof = assemble(bootAsm, relocatable = true)
 
-    // Step 2: Compile Sysl files together
-    val parser = new SyslParser
-    val combined = kernelSysl + "\n" + tasksSysl
-    val Right(ast) = parser.parseProgram(combined): @unchecked
-    val analyzer = new SyslAnalyzer
-    // Register start_first_thread as external
-    val bootMeta = ModuleMeta.fromSmeta(
-      """SMETA v1
-        |FUNC start_first_thread 1 int void
-        |""".stripMargin)
-    analyzer.registerImport(bootMeta)
-    val typed = analyzer.analyze(ast)
-    val asmCode = (new SyslTriscCodegen).generate(typed)
-    val syslTof = assemble(asmCode, relocatable = true)
+    // Step 2: Compile Sysl files together (kernel + demo)
+    val driver = new SyslDriver
+    val result = driver.compile(Map(
+      "kernel" -> kernelSysl,
+      "tasks" -> tasksSysl,
+      "main" -> mainSysl,
+    ))
+    val codegen = new SyslTriscCodegen
+    val tofs = for unit <- result.units yield
+      val asm = codegen.generate(unit.typed)
+      assemble(asm, relocatable = true)
+    val syslTof = Linker.link(tofs, relocatable = true)
 
-    // Step 3: Link
+    // Step 3: Link with boot
     val linked = Linker.link(Seq(bootTof, syslTof))
     linked.segments should not be empty
     linked.entryAddress shouldBe defined

@@ -36,11 +36,17 @@ class SyslTriscCodegen(addresses: Int = 2):
           globals(name) = typ
           emit(s"# global: $name")
           emit(s"$name")
-          val directive = emitDataDirective(typ)
-          init match
-            case TIntLit(n, _) => emit(s"  $directive $n")
-            case TBoolLit(b, _) => emit(s"  $directive ${if b then 1 else 0}")
-            case _ => emit(s"  $directive 0")
+          typ match
+            case SyslType.ArrayType(elem, count) =>
+              emit(s"  resb ${stackSize(elem) * count}")
+            case _: SyslType.StructType =>
+              emit(s"  resb ${stackSize(typ)}")
+            case _ =>
+              val directive = emitDataDirective(typ)
+              init match
+                case TIntLit(n, _) => emit(s"  $directive $n")
+                case TBoolLit(b, _) => emit(s"  $directive ${if b then 1 else 0}")
+                case _ => emit(s"  $directive 0")
 
     // Emit string literal data
     if stringLiterals.nonEmpty then
@@ -337,6 +343,43 @@ class SyslTriscCodegen(addresses: Int = 2):
         emit("  popd r2")        // r2 = value
         emitStore(2, 1, elemType)
 
+      case TFieldAssignStmt(obj, fieldIndex, value) =>
+        val st = obj.typ.asInstanceOf[SyslType.StructType]
+        val off = fieldOffset(st, fieldIndex)
+        val fieldType = st.fields(fieldIndex)._2
+        genExpr(value)             // r1 = value
+        emit("  pshd r1")
+        emitStructAddr(obj)        // r1 = struct address
+        if off != 0 then emitAddImm(1, 1, off)
+        emit("  popd r2")          // r2 = value
+        emitStore(2, 1, fieldType)
+
+      case TFieldCompoundAssignStmt(obj, fieldIndex, op, value) =>
+        val st = obj.typ.asInstanceOf[SyslType.StructType]
+        val off = fieldOffset(st, fieldIndex)
+        val fieldType = st.fields(fieldIndex)._2
+        // Step 1: compute field address and push it (safe from mul d+1 clobber)
+        emitStructAddr(obj)        // r1 = struct address
+        if off != 0 then emitAddImm(1, 1, off)
+        emit("  pshd r1")        // save field address on stack
+        // Step 2: load current value
+        emitLoad(1, 1, fieldType) // r1 = current field value
+        emit("  pshd r1")        // save current value
+        // Step 3: compute rhs
+        genExpr(value)             // r1 = rhs value
+        // Step 4: arithmetic (current op rhs)
+        emit("  popd r2")        // r2 = current value
+        op match
+          case "+" => emit("  add r2, r2, r1")
+          case "-" => emit("  sub r2, r2, r1")
+          case "*" => emit("  mul r2, r2, r1")
+          case "/" => emit("  div r2, r2, r1")
+          case "%" => emit("  rem r2, r2, r1")
+          case _   => emit(s"  # TODO: compound assign op $op")
+        // Step 5: store result (field address is safely on stack)
+        emit("  popd r1")        // r1 = field address
+        emitStore(2, 1, fieldType)
+
       case _ =>
         emit(s"  # TODO: ${stmt.getClass.getSimpleName}")
 
@@ -352,14 +395,22 @@ class SyslTriscCodegen(addresses: Int = 2):
       case TBoolLit(true, _) => emit("  ldi r1, 1")
       case TBoolLit(false, _) => emit("  ldi r1, 0")
 
-      case TVarRef(name, _) =>
+      case TVarRef(name, typ) =>
         if locals != null && locals.contains(name) then
           val local = locals(name)
-          emitAddImm(2, 5, local.offset)
-          emitLoad(1, 2, local.typ)
+          local.typ match
+            case _: SyslType.ArrayType | _: SyslType.StructType =>
+              emitAddImm(1, 5, local.offset) // arrays/structs: address, not value
+            case _ =>
+              emitAddImm(2, 5, local.offset)
+              emitLoad(1, 2, local.typ)
         else
           emit(s"  movi r1, $name")
-          emitLoad(1, 1, globals.getOrElse(name, SyslType.I64))
+          globals.getOrElse(name, SyslType.I64) match
+            case _: SyslType.ArrayType | _: SyslType.StructType =>
+              () // arrays/structs: address is the value
+            case gt =>
+              emitLoad(1, 1, gt)
 
       case TBinary(left, "&&", right, _) =>
         val falseLabel = newLabel("and_false")
@@ -580,8 +631,10 @@ class SyslTriscCodegen(addresses: Int = 2):
           emitAddImm(7, 7, stackArgBytes)
 
       case TAddrOf(name, _) =>
-        // Compute stack address of local variable
-        emitLocalAddr(name, 1) // r1 = address of variable
+        if locals != null && locals.contains(name) then
+          emitLocalAddr(name, 1) // r1 = stack address of local variable
+        else
+          emit(s"  movi r1, $name") // r1 = address of global variable
 
       case TAddrOfIndex(array, index, SyslType.PtrType(elemType)) =>
         val elemSize = stackSize(elemType)
@@ -592,6 +645,13 @@ class SyslTriscCodegen(addresses: Int = 2):
         emit(s"  ldi r3, $elemSize")
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = base + offset
+
+      case TFieldAccess(obj, fieldIndex, fieldType) =>
+        val st = obj.typ.asInstanceOf[SyslType.StructType]
+        val off = fieldOffset(st, fieldIndex)
+        emitStructAddr(obj)        // r1 = struct address
+        if off != 0 then emitAddImm(1, 1, off)
+        emitLoad(1, 1, fieldType)  // r1 = field value
 
       case TDeref(inner, typ) =>
         genExpr(inner)           // r1 = pointer address
@@ -731,6 +791,17 @@ class SyslTriscCodegen(addresses: Int = 2):
       else
         emit(s"  movi r$tmp, ${-offset}")
         emit(s"  sub r$destReg, r$baseReg, r$tmp")
+
+  // Compute byte offset of field at given index within a struct type
+  private def fieldOffset(structType: SyslType.StructType, fieldIndex: Int): Int =
+    structType.fields.take(fieldIndex).map(_._2.sizeOf.toInt).sum
+
+  // Emit code to compute the address of a struct from a TFieldAccess obj expression.
+  // The analyzer wraps pointer-to-struct access in TDeref, so we unwrap it to get the address.
+  private def emitStructAddr(obj: TExpr): Unit =
+    obj match
+      case TDeref(ptr, _) => genExpr(ptr) // pointer to struct — address is the pointer value
+      case _ => genExpr(obj) // struct value (local/global) — genExpr produces address for struct types
 
   // Data directive for a type: db (1 byte), ds (2), dw (4), dl (8)
   private def emitDataDirective(typ: SyslType): String = typ match

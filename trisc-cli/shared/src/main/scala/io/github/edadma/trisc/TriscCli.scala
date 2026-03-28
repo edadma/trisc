@@ -169,11 +169,12 @@ object TriscCli:
 
   def setupCpu(linked: TOF, outputFn: String => Unit = s => print(s), extraDevices: Seq[Addressable] = Nil): (CPU, Memory) =
     val stdout = new Stdout(Runtime.stdoutAddress, outputFn)
+    val timer = new Timer(Runtime.timerAddress)
     val ramSize = Runtime.stdoutAddress.toInt
     val ram = new RAM(0, ramSize)
-    val mem = new Memory("Memory", (Seq(ram, stdout) ++ extraDevices)*)
+    val mem = new Memory("Memory", (Seq(ram, stdout, timer) ++ extraDevices)*)
     linked.load(mem)
-    val cpu = new CPU(mem, Nil)
+    val cpu = new CPU(mem, Seq(timer))
     cpu.reset() // like 68000: reads SSP from vector[0], PC from vector[1], enters supervisor mode
     (cpu, mem)
 
@@ -189,6 +190,7 @@ object TriscCli:
 
     else
       val (cpu, _) = setupCpu(linked)
+      if cmd.trace then cpu.trace = true
       if cmd.limit > 0 then cpu.limit = cmd.limit
       cpu.run()
       val result = cpu.r(1).read
