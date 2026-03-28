@@ -387,9 +387,9 @@ class TOFTests extends TestHelpers {
 
   // ===== Version handling =====
 
-  "serializes as v2" in {
+  "serializes as v1" in {
     val tof = assemble(VECTORS + "halt\n")
-    tof.serialize should startWith("TOF v2")
+    tof.serialize should startWith("TOF v1")
   }
 
   "rejects unknown version" in {

@@ -49,12 +49,12 @@ class EntryTests extends TestHelpers {
   // ===== TOF.fromString =====
 
   "fromString reads ENTRY line" in {
-    val tof = TOF.fromString("TOF v2\nENTRY:main\nSEGMENT:code,0\nSYMBOL:main,0,func\nDATA:00\n")
+    val tof = TOF.fromString("TOF v1\nENTRY:main\nSEGMENT:code,0\nSYMBOL:main,0,func\nDATA:00\n")
     tof.entry shouldBe Some("main")
   }
 
   "fromString without ENTRY has no entry" in {
-    val tof = TOF.fromString("TOF v2\nSEGMENT:code,0\nDATA:00\n")
+    val tof = TOF.fromString("TOF v1\nSEGMENT:code,0\nDATA:00\n")
     tof.entry shouldBe None
   }
 

@@ -113,7 +113,7 @@ object TOF:
 
   def deserialize(tof: String): TOF = fromString(tof)
 
-  private val SupportedVersions = immutable.TreeSet("1", "2")
+  private val SupportedVersions = immutable.TreeSet("1")
 
   def fromString(source: String): TOF =
     val b = builder
@@ -317,7 +317,7 @@ class TOF(val entry: Option[String], val segments: Seq[TOF.Segment], val tofType
   def serialize: String =
     val buf = new StringBuilder
 
-    buf ++= "TOF v2\n"
+    buf ++= "TOF v1\n"
 
     tofType match
       case TOFType.Executable  => buf ++= "TYPE:executable\n"

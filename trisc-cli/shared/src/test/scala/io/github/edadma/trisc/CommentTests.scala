@@ -118,20 +118,20 @@ class CommentTests extends TestHelpers {
   // ===== # comments in TOF.fromString =====
 
   "TOF.fromString preserves # comments" in {
-    val input = "TOF v2\nSEGMENT:code,0\n# hello world\nDATA:002a\n"
+    val input = "TOF v1\nSEGMENT:code,0\n# hello world\nDATA:002a\n"
     val tof = TOF.fromString(input)
     val s = tof.serialize
     s should include("# hello world")
   }
 
   "TOF.fromString handles # comment at start of segment" in {
-    val input = "TOF v2\nSEGMENT:code,0\n# first line\nDATA:00\n"
+    val input = "TOF v1\nSEGMENT:code,0\n# first line\nDATA:00\n"
     val tof = TOF.fromString(input)
     tof.segments.head.chunks.head shouldBe a[TOF.CommentChunk]
   }
 
   "TOF.fromString handles # comment between data chunks" in {
-    val input = "TOF v2\nSEGMENT:code,0\nDATA:01\n# middle\nDATA:02\n"
+    val input = "TOF v1\nSEGMENT:code,0\nDATA:01\n# middle\nDATA:02\n"
     val tof = TOF.fromString(input)
     tof.segments.head.chunks(1) shouldBe TOF.CommentChunk("middle")
   }

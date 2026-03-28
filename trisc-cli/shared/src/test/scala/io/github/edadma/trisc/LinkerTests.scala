@@ -237,10 +237,10 @@ class LinkerTests extends TestHelpers {
 
   // ===== Serialization round-trip =====
 
-  "linked TOF serializes as v2" in {
+  "linked TOF serializes as v1" in {
     val tof = assemble("ldi r1, 42\nhalt\n", relocatable = true)
     val linked = Linker.link(Seq(tof))
-    linked.serialize should startWith("TOF v2")
+    linked.serialize should startWith("TOF v1")
   }
 
   "linked TOF round-trips through serialize/deserialize" in {
