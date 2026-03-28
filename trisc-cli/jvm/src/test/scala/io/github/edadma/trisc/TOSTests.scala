@@ -7,6 +7,7 @@ class TOSTests extends AnyFreeSpec with Matchers {
 
   val bootAsm = scala.io.Source.fromFile("tos/boot.asm").mkString
   val kernelSysl = scala.io.Source.fromFile("tos/kernel.sysl").mkString
+  val servicesSysl = scala.io.Source.fromFile("tos/services.sysl").mkString
   val tasksSysl = scala.io.Source.fromFile("examples/tos-demo/tasks.sysl").mkString
   val mainSysl = scala.io.Source.fromFile("examples/tos-demo/main.sysl").mkString
 
@@ -35,6 +36,7 @@ class TOSTests extends AnyFreeSpec with Matchers {
     val driver = new SyslDriver
     val result = driver.compile(Map(
       "kernel" -> kernelSysl,
+      "services" -> servicesSysl,
       "tasks" -> tasksSysl,
       "main" -> mainSysl,
     ))
@@ -182,7 +184,7 @@ class TOSTests extends AnyFreeSpec with Matchers {
     val bootTof = assemble(bootAsm, relocatable = true)
 
     // Compile kernel + user sources together
-    val allSources = Map("kernel" -> kernelSysl) ++ userSources
+    val allSources = Map("kernel" -> kernelSysl, "services" -> servicesSysl) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
     val codegen = new SyslTriscCodegen
@@ -215,7 +217,7 @@ class TOSTests extends AnyFreeSpec with Matchers {
     val (_, output) = runTOS(Map(
       "app" ->
         """import "kernel"
-          |extern putc(ch: int)
+          |import "services"
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
@@ -239,7 +241,7 @@ class TOSTests extends AnyFreeSpec with Matchers {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import "kernel"
-          |extern putc(ch: int)
+          |import "services"
           |
           |kernel_main() -> int
           |    create_thread(task1, 0x6000, 0x5000, "t1")
@@ -267,8 +269,7 @@ class TOSTests extends AnyFreeSpec with Matchers {
     val (_, output) = runTOS(Map(
       "app" ->
         """import "kernel"
-          |extern putc(ch: int)
-          |extern sleep(ticks: int)
+          |import "services"
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
@@ -293,8 +294,7 @@ class TOSTests extends AnyFreeSpec with Matchers {
   "TOS: two tasks interleave with sleep" in {
     val (_, output) = runTOS(Map(
       "tasks" ->
-        """extern putc(ch: int)
-          |extern sleep(ticks: int)
+        """import "services"
           |
           |task_a()
           |    var i = 0

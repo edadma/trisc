@@ -205,36 +205,22 @@ extern terminate_current
 ; Syscall wrappers — called from user Sysl code
 ; ============================================================================
 ;
-; Sysl calling convention: first arg in r1, rest on stack.
-; These wrappers shuffle r1 → r2 (arg) and load syscall number into r1.
+; syscall(number: int, arg: int) -> int
+;
+; Generic syscall bridge. Sysl calling convention:
+;   r1 = first arg (syscall number)
+;   second arg pushed on stack by caller
+;
+; Trap convention: r1 = number, r2 = arg
 ;
 ; ============================================================================
 
-; sleep(ticks: int)
-global sleep, func
+global syscall, func
 
-sleep
-  mov  r2, r1           ; r2 = ticks (was first Sysl arg)
-  ldi  r1, 0            ; r1 = SYS_SLEEP
-  trap 0
-  jalr r0, r6           ; return to caller
-
-; putc(ch: int)
-global putc, func
-
-putc
-  mov  r2, r1           ; r2 = char
-  ldi  r1, 1            ; r1 = SYS_PUTC
-  trap 0
-  jalr r0, r6
-
-; yield()
-global yield, func
-
-yield
-  ldi  r1, 2            ; r1 = SYS_YIELD
-  trap 0
-  jalr r0, r6
+syscall
+  ldd  r2, r7, r0      ; r2 = arg (on stack, pushed by caller)
+  trap 0                ; r1 = number, r2 = arg
+  jalr r0, r6           ; return (r1 = return value from trap handler)
 
 ; thread_exit — trampoline for tasks that return from their entry function.
 ; create_thread sets r6 in the fake context to this address, so when a
@@ -243,6 +229,7 @@ global thread_exit, func
 
 thread_exit
   ldi  r1, 3            ; r1 = SYS_EXIT
+  ldi  r2, 0            ; r2 = unused
   trap 0
   ; never returns — schedule switches to another thread
 

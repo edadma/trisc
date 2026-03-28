@@ -15,8 +15,7 @@
  *   ...
  */
 
-extern sleep(ticks: int)
-extern putc(ch: int)
+import "services"
 
 task_a()
     while true
