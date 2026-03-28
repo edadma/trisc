@@ -605,8 +605,8 @@ class LinkerTests extends TestHelpers {
     val abs64Relocs = linked.allRelocs.filter(_._2.typ == RelocType.ABS64)
     abs64Relocs should not be empty
 
-    // Verify relocs: should have ABS64 (dd _start) and MOVI2 (movi r4, main)
-    val moviRelocs = linked.allRelocs.filter(_._2.typ == RelocType.MOVI2)
+    // Verify relocs: should have ABS64 (dd _start) and MOVI4 (movi r4, main)
+    val moviRelocs = linked.allRelocs.filter(_._2.typ == RelocType.MOVI4)
     moviRelocs should not be empty
 
     // Now load at offset 0x400

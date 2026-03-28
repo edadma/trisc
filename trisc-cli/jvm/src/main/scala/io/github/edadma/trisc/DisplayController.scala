@@ -56,6 +56,8 @@ class DisplayController(
   private def commit(): Unit =
     val w = width
     val h = height
+    // Clear memory synchronously before the CPU continues drawing
+    if mode == 1 then fbMemory.clear()
     val update: Runnable = () => {
       val layout = displayPanel.getLayout.asInstanceOf[CardLayout]
       if mode == 0 then
@@ -63,7 +65,6 @@ class DisplayController(
         terminal.clear(java.awt.Color.GREEN, java.awt.Color.BLACK)
         layout.show(displayPanel, "terminal")
       else
-        fbMemory.clear()
         framebuffer.setResolution(w, h)
         layout.show(displayPanel, "framebuffer")
       frame.pack()

@@ -15,11 +15,11 @@
 ;
 ; ============================================================================
 
-STDOUT = 0xFF00
+STDOUT = 0x100000
 
 segment vectors
 
-  dl 0xFEF8              ; Slot 0:  Initial SSP (below stdout at 0xFF00)
+  dl 0x0FFFF8            ; Slot 0:  Initial SSP (below devices at 0x100000)
   dl boot                ; Slot 1:  Initial PC
   dl default_isr         ; Slot 2:  Interrupt
   dl default_isr         ; Slot 3:  InstructionAccess

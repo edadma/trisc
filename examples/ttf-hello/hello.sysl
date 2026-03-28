@@ -1,5 +1,5 @@
-DISPLAY_CTRL = 0xFF06
-FB_BASE = 0x10000
+DISPLAY_CTRL = 0x100006
+FB_BASE = 0x200000
 FB_WIDTH = 640
 FB_HEIGHT = 480
 
@@ -10,7 +10,7 @@ FONT_FIRST = 32
 FONT_LAST = 126
 FONT_COUNT = 95
 
-font_data: [16150]byte = [
+font_data = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
@@ -1035,27 +1035,26 @@ init_fb()
     dc_write(5, FB_HEIGHT & 0xFF)
     dc_write(1, 1)
 
-set_pixel(x: int, y: int, r: int, g: int, b: int, a: int)
-    if x >= 0 && x < FB_WIDTH && y >= 0 && y < FB_HEIGHT
-        offset = (y * FB_WIDTH + x) * 4
-        p: *i8 = FB_BASE + offset
-        *p = byte(r * a / 255)
-        p = p + 1
-        *p = byte(g * a / 255)
-        p = p + 1
-        *p = byte(b * a / 255)
-        p = p + 1
-        *p = byte(255)
-
 draw_char(x: int, y: int, ch: int, r: int, g: int, b: int)
     if ch < FONT_FIRST || ch > FONT_LAST then return
+    if y + FONT_CELL_H < 0 || y >= FB_HEIGHT || x + FONT_CELL_W < 0 || x >= FB_WIDTH then return
     idx = ch - FONT_FIRST
     base = idx * FONT_CELL_W * FONT_CELL_H
+    stride = FB_WIDTH * 4
     for row = 0; row < FONT_CELL_H; row++
-        for col = 0; col < FONT_CELL_W; col++
-            a = font_data[base + row * FONT_CELL_W + col] & 0xFF
-            if a > 0
-                set_pixel(x + col, y + row, r, g, b, a)
+        py = y + row
+        if py >= 0 && py < FB_HEIGHT
+            rowAddr: *i32 = FB_BASE + py * stride + x * 4
+            fontIdx = base + row * FONT_CELL_W
+            for col = 0; col < FONT_CELL_W; col++
+                a = font_data[fontIdx + col]
+                if a > 0
+                    px = x + col
+                    if px >= 0 && px < FB_WIDTH
+                        ra = (r * a) >> 8
+                        ga = (g * a) >> 8
+                        ba = (b * a) >> 8
+                        *(rowAddr + col) = (ra << 24) | (ga << 16) | (ba << 8) | 255
 
 draw_text(x: int, y: int, s: *int, len: int, r: int, g: int, b: int)
     for i = 0; i < len; i++
@@ -1064,12 +1063,8 @@ draw_text(x: int, y: int, s: *int, len: int, r: int, g: int, b: int)
 main() -> int
     init_fb()
     msg = [72, 101, 108, 108, 111, 32, 87, 111, 114, 108, 100, 33]
-    // White on black
     draw_text(50, 50, msg, 12, 255, 255, 255)
-    // Red
     draw_text(50, 80, msg, 12, 255, 80, 80)
-    // Green
     draw_text(50, 110, msg, 12, 80, 255, 80)
-    // Cyan
     draw_text(50, 140, msg, 12, 80, 200, 255)
     0

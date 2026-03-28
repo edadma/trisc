@@ -2,7 +2,7 @@ package io.github.edadma.trisc
 
 import scala.collection.mutable
 
-class SyslTriscCodegen(addresses: Int = 2):
+class SyslTriscCodegen(addresses: Int = 4):
   private val out = new StringBuilder
   private var labelCounter = 0
   private val stringLiterals = new mutable.ListBuffer[(String, String)]() // (label, value)

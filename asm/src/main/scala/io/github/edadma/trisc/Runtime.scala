@@ -3,12 +3,12 @@ package io.github.edadma.trisc
 // Minimal TRISC runtime: vector table + I/O stubs.
 // Linked with user code when emitting TOF.
 object Runtime:
-  val stdoutAddress = 0xFF00L // near top of default 64KB address space
-  val keyboardAddress = 0xFF04L // keyboard device: +0 = status, +1 = data (right after stdout)
-  val displayCtrlAddress = 0xFF06L // display controller: mode, commit, width, height (6 bytes)
-  val timerAddress = 0xFFE8L // timer device: +0-3 = period (i32, ms), +4 = control (i8)
-  val framebufferAddress = 0x10000L // framebuffer pixel data (RGBA, max 640x480)
-  val framebufferMaxSize: Long = 1920 * 1080 * 4 // 8,294,400 bytes
+  val stdoutAddress = 0x100000L // 1MB — devices start here, RAM below
+  val keyboardAddress = 0x100004L
+  val displayCtrlAddress = 0x100006L
+  val timerAddress = 0x10000CL
+  val framebufferAddress = 0x200000L // 2MB — framebuffer pixel data
+  val framebufferMaxSize: Long = 1920 * 1080 * 4
   val initialSSP: Long = stdoutAddress - 8 // stack grows down, below devices
 
   // Boot module — must be linked first so vector table is at address 0.

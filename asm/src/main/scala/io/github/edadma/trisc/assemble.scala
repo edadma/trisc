@@ -7,7 +7,7 @@ import scala.collection.{mutable, immutable}
 import scala.collection.mutable.ArrayBuffer
 import scala.util.parsing.input.Positional
 
-def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map(), addresses: Int = 2, relocatable: Boolean = false): TOF =
+def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map(), addresses: Int = 4, relocatable: Boolean = false): TOF =
   class Pass1(val name: String):
     var org: Long = 0
     var size: Long = 0
