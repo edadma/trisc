@@ -22,13 +22,11 @@ class SyslTriscCodegen(addresses: Int = 4):
     if hasMain then emit("entry main")
     out ++= meta.toAsmGlobals
 
-    // Emit functions first, then globals (with alignment)
+    // Emit ALL globals first (with alignment), then ALL functions
     var emittedGlobalAlign = false
+    // Pass 1: emit globals
     for decl <- program.decls do
       decl match
-        case _: TImportDecl => // skip
-        case _: TStructDecl => // type-only, no code to emit
-        case f: TFunDecl => genFunction(f)
         case TVarDecl(name, typ, init, _) =>
           if !emittedGlobalAlign then
             emit("  align 8")
@@ -59,6 +57,13 @@ class SyslTriscCodegen(addresses: Int = 4):
                     case TIntLit(n, _) => emit(s"  $directive $n")
                     case TBoolLit(b, _) => emit(s"  $directive ${if b then 1 else 0}")
                     case _ => emit(s"  $directive 0")
+        case _ => // skip non-globals in first pass
+
+    // Pass 2: emit functions
+    for decl <- program.decls do
+      decl match
+        case f: TFunDecl => genFunction(f)
+        case _ => // skip
 
     // Emit string literal data
     if stringLiterals.nonEmpty then

@@ -2,6 +2,7 @@ DISPLAY_CTRL = 0x100006
 FB_BASE = 0x200000
 FB_WIDTH = 640
 FB_HEIGHT = 480
+// BLITTER address is 0x10000C, used directly in functions
 
 // Font data: Monaco.ttf, 16px, 10x17 cells, 95 glyphs
 FONT_CELL_W = 10
@@ -1035,19 +1036,16 @@ init_fb()
     dc_write(5, FB_HEIGHT & 0xFF)
     dc_write(1, 1)
 
-// Blitter registers
-BLITTER = 0x10000C
-
 blit_write(offset: int, v: int)
-    p: *i8 = BLITTER + offset
+    p: *i8 = 0x10000C + offset
     *p = byte(v)
 
 blit_write32(offset: int, v: int)
-    p: *i32 = BLITTER + offset
+    p: *i32 = 0x10000C + offset
     *p = v
 
 blit_write16(offset: int, v: int)
-    p: *i16 = BLITTER + offset
+    p: *i16 = 0x10000C + offset
     *p = i16(v)
 
 draw_char(x: int, y: int, ch: int, r: int, g: int, b: int)
@@ -1069,6 +1067,9 @@ draw_text(x: int, y: int, s: *int, len: int, r: int, g: int, b: int)
 
 main() -> int
     init_fb()
-    // Just draw a single 'A' to test the blitter
-    draw_char(100, 100, 65, 255, 255, 255)
+    msg = [72, 101, 108, 108, 111, 32, 87, 111, 114, 108, 100, 33]
+    draw_text(50, 50, msg, 12, 255, 255, 255)
+    draw_text(50, 80, msg, 12, 255, 80, 80)
+    draw_text(50, 110, msg, 12, 80, 255, 80)
+    draw_text(50, 140, msg, 12, 80, 200, 255)
     0

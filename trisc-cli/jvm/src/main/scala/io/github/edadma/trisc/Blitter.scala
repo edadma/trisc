@@ -62,8 +62,6 @@ class Blitter(val base: Long, mem: Addressable, fbMemory: RAM, fbWidth: () => In
     val fh = fbHeight()
     val fb = fbMemory.bytes
 
-    System.err.println(s"[Blitter] op=$op src=$srcAddr dst=($dstX,$dstY) size=${w}x$h color=($cr,$cg,$cb,$ca) fb=${fw}x$fh")
-
     op match
       case 0 => alphaBlitByte(srcAddr, dstX, dstY, w, h, cr, cg, cb, fw, fh, fb)
       case 1 => solidFill(dstX, dstY, w, h, cr, cg, cb, ca, fw, fh, fb)
