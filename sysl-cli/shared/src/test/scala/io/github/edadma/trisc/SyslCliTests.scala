@@ -253,7 +253,7 @@ class SyslCliTests extends AnyFreeSpec with Matchers {
     val codegen = new SyslTriscCodegen
     val asm = codegen.generate(typed)
     asm should include("main")
-    asm should include("halt")
+    asm should include("jalr r0, r6")
   }
 
   "compile to tof produces linkable output" in {
