@@ -997,15 +997,26 @@ draw_char(x: int, y: int, ch: int, r: int, g: int, b: int)
             if a > 0
                 set_pixel(x + col, y + row, r, g, b, a)
 
-draw_text(x: int, y: int, s: *byte, len: int, r: int, g: int, b: int)
+draw_text(x: int, y: int, s: *int, len: int, r: int, g: int, b: int)
     for i = 0; i < len; i++
         draw_char(x + i * FONT_CELL_W, y, s[i], r, g, b)
 
+// Fill a rectangle to test framebuffer works
+fill_rect(x0: int, y0: int, w: int, h: int, r: int, g: int, b: int)
+    for row = 0; row < h; row++
+        for col = 0; col < w; col++
+            set_pixel(x0 + col, y0 + row, r, g, b, 255)
+
 main() -> int
     init_fb()
+
+    // Draw a white test rectangle first
+    fill_rect(200, 200, 200, 150, 255, 255, 255)
+
+    // Draw text over it in dark color so it's visible either way
     msg = [72, 101, 108, 108, 111, 32, 87, 111, 114, 108, 100, 33]
-    draw_text(220, 220, &msg[0], 12, 255, 255, 255)
-    draw_text(220, 250, &msg[0], 12, 0, 255, 100)
-    draw_text(220, 280, &msg[0], 12, 100, 200, 255)
-    draw_text(220, 310, &msg[0], 12, 255, 230, 50)
+    draw_text(210, 210, msg, 12, 0, 0, 0)
+    draw_text(210, 230, msg, 12, 200, 0, 0)
+    draw_text(210, 250, msg, 12, 0, 0, 200)
+    draw_text(210, 270, msg, 12, 0, 150, 0)
     0

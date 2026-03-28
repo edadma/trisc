@@ -222,23 +222,54 @@ class SyslTriscCodegen(addresses: Int = 2):
   private def genStmt(stmt: TStmt): Unit =
     stmt match
       case TVarStmt(name, typ, init) =>
-        genExpr(init) // result in r1
-        val local = allocLocal(name, typ)
-        emitAddImm(2, 5, local.offset)
-        emitStore(1, 2, typ)
+        init match
+          case TArrayLit(elements, SyslType.ArrayType(elemType, size)) =>
+            // Allocate array inline on stack (same layout as TArrayDecl)
+            val rawBytes = size * stackSize(elemType)
+            val totalBytes = (rawBytes + 7) & ~7
+            emitAddImm(7, 7, -totalBytes)
+            stackOffset -= totalBytes
+            val local = LocalVar(name, stackOffset, typ)
+            locals(name) = local
+            // Store each element
+            for (elem, i) <- elements.zipWithIndex do
+              genExpr(elem)
+              val off = local.offset + i * stackSize(elemType)
+              emitAddImm(2, 5, off)
+              emitStore(1, 2, elemType)
+          case _ =>
+            genExpr(init) // result in r1
+            val local = allocLocal(name, typ)
+            emitAddImm(2, 5, local.offset)
+            emitStore(1, 2, typ)
 
       case TAssignStmt(target, value) =>
-        genExpr(value) // result in r1
         if locals != null && locals.contains(target) then
+          genExpr(value)
           val local = locals(target)
           emitAddImm(2, 5, local.offset)
           emitStore(1, 2, local.typ)
         else
           // New local variable (first assignment = declaration, infer type)
-          val typ = value.typ
-          val local = allocLocal(target, typ)
-          emitAddImm(2, 5, local.offset)
-          emitStore(1, 2, typ)
+          value match
+            case TArrayLit(elements, SyslType.ArrayType(elemType, size)) =>
+              val rawBytes = size * stackSize(elemType)
+              val totalBytes = (rawBytes + 7) & ~7
+              emitAddImm(7, 7, -totalBytes)
+              stackOffset -= totalBytes
+              val local = LocalVar(target, stackOffset, value.typ)
+              locals(target) = local
+              for (elem, i) <- elements.zipWithIndex do
+                genExpr(elem)
+                val off = local.offset + i * stackSize(elemType)
+                emitAddImm(2, 5, off)
+                emitStore(1, 2, elemType)
+            case _ =>
+              genExpr(value)
+              val typ = value.typ
+              val local = allocLocal(target, typ)
+              emitAddImm(2, 5, local.offset)
+              emitStore(1, 2, typ)
 
       case TCompoundAssignStmt(target, op, value) =>
         genExpr(value) // r1 = right operand
