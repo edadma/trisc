@@ -199,6 +199,21 @@ lazy val docsCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .jvmSettings(jvmNativeStubs)
   .nativeSettings(jvmNativeStubs)
 
+lazy val ttf = project
+  .in(file("ttf/scala"))
+  .settings(commonSettings)
+  .settings(name := "trisc-ttf")
+
+lazy val fonts = project
+  .in(file("fonts"))
+  .enablePlugins(ScalaNativePlugin)
+  .settings(
+    scalacOptions ++= commonScalacOptions,
+    name := "trisc-fonts",
+    libraryDependencies += "io.github.edadma" %%% "freetype" % "0.0.1",
+    nativeConfig ~= { _.withLinkingOptions(Seq("-L/opt/homebrew/lib")) },
+  )
+
 lazy val root = project
   .in(file("."))
   .aggregate(
@@ -212,6 +227,8 @@ lazy val root = project
     triscCli.jvm, triscCli.js, triscCli.native,
     syslCli.jvm, syslCli.js, syslCli.native,
     docsCli.jvm, docsCli.js, docsCli.native,
+    ttf,
+    fonts,
   )
   .settings(
     name                := "trisc",

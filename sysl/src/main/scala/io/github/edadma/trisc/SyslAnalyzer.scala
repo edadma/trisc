@@ -291,6 +291,11 @@ class SyslAnalyzer:
         val t = resolveTypeName(typStr)
         TArrayDecl(size, typStr, t)
 
+      case ArrayLitAST(elements) =>
+        val tElems = elements.map(analyzeExpr)
+        val elemType = tElems.head.typ
+        TArrayLit(tElems, SyslType.ArrayType(elemType, tElems.length))
+
       case SizeofTypeAST(typeName) =>
         val t = resolveTypeName(typeName)
         TSizeof(t.sizeOf, I32)
