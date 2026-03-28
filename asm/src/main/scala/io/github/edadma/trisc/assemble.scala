@@ -7,7 +7,7 @@ import scala.collection.{mutable, immutable}
 import scala.collection.mutable.ArrayBuffer
 import scala.util.parsing.input.Positional
 
-def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map(), addresses: Int = 2, relocatable: Boolean = false): TOF =
+def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map(), addresses: Int = 4, relocatable: Boolean = false): TOF =
   class Pass1(val name: String):
     var org: Long = 0
     var size: Long = 0
@@ -134,9 +134,15 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case AlignLineAST(alignment) =>
       val pad = ((alignment - (segment.size % alignment)) % alignment).toInt
       segment.size += pad
-    case DataLineAST(width, Nil) => segment.size += (if width == 0 then 8 else width)
+    case DataLineAST(width, Nil) =>
+      if width >= 2 then
+        val align = width.min(8)
+        segment.size += ((align - (segment.size % align)) % align).toInt
+      segment.size += (if width == 0 then 8 else width)
     case DataLineAST(width, data) =>
-      val startingSize = segment.size
+      if width >= 2 then
+        val align = width.min(8)
+        segment.size += ((align - (segment.size % align)) % align).toInt
 
       for d <- data do
         locals(d)
@@ -146,17 +152,19 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
             case _                => if width == 0 then 8 else width
           )
 
-      if (segment.size - startingSize) % 2 == 1 then segment.size += 1
     case ReserveLineAST(width, n) =>
-      val startingSize = segment.size
-
       fold(n, absolute = true) match
         case LongExprAST(count) if 0 < count && count <= 10 * 1024 * 1024 =>
           segment.size += count.toInt * (if width == 0 then 8 else width)
         case _ => problem(n, s"must be a positive integer up to 10 meg")
 
-      if (segment.size - startingSize) % 2 == 1 then segment.size += 1
     case InstructionLineAST(mnemonic, operands) =>
+      // Auto-align to halfword before instructions, and update any label at the unaligned position
+      if segment.size % 2 == 1 then
+        // Update labels that were just defined at the odd position
+        for name <- segment.symbols if symbols(name).isInstanceOf[LabelSymbol] && symbols(name).asInstanceOf[LabelSymbol].value == segment.size do
+          symbols(name).asInstanceOf[LabelSymbol].value += 1
+        segment.size += 1
       operands foreach locals
       mnemonic match
         case "bra" | "beq" | "blu" | "bls" | "bgt" | "bgu" | "bne" | "bge" | "bgeu" | "ble" | "bleu" =>
@@ -248,7 +256,12 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         relocate(s, o)
         if stacked then base = o + s.size
 
+  def autoAlign(n: Int): Unit =
+    val pad = ((n - (builder.length % n)) % n).toInt
+    for _ <- 0 until pad do builder += 0.toByte
+
   def addInstruction(pieces: (Int, Int)*): Unit =
+    autoAlign(2)
     var inst = 0
     var shift = 16
 
@@ -262,6 +275,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     builder += inst.toByte
 
   def emitMoviReloc(reg: Int, symbolName: String): Unit =
+    autoAlign(2)
     val offset = builder.length
     val relocType = addresses match
       case 2 => RelocType.MOVI2
@@ -369,7 +383,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case SegmentLineAST(name) =>
       builder.segment(name, segments(name).org)
       emitSymbolsForSegment(name)
-    case LabelLineAST(_)         =>
+    case LabelLineAST(_)         => // labels don't emit bytes; alignment handled by instructions
     case LocalLineAST(_)         =>
     case EquateLineAST(_, _)     =>
     case EntryLineAST(_)             =>
@@ -379,8 +393,11 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case AlignLineAST(alignment) =>
       val pad = ((alignment - (builder.length % alignment)) % alignment).toInt
       for _ <- 0 until pad do builder += 0.toByte
-    case DataLineAST(width, Nil) => builder ++= (if width == 0 then Seq.fill(8)(0) else Seq.fill(width)(0))
+    case DataLineAST(width, Nil) =>
+      if width >= 2 then autoAlign(width.min(8))
+      builder ++= (if width == 0 then Seq.fill(8)(0) else Seq.fill(width)(0))
     case DataLineAST(width, data) =>
+      if width >= 2 then autoAlign(width.min(8))
       val startingLength = builder.length
 
       for d <- data do
@@ -400,8 +417,8 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
               case 1 =>
                 value match
                   case _: DoubleExprAST                => problem(d, "expected an int value, found float")
-                  case LongExprAST(v) if v.isValidByte => builder += v.toByte
-                  case _                               => problem(d, "expected a byte value, out of range")
+                  case LongExprAST(v) if -128 <= v && v <= 255 => builder += v.toByte
+                  case _                                       => problem(d, "expected a byte value, out of range")
               case 2 =>
                 value match
                   case _: DoubleExprAST => problem(d, "expected an int value, found float")
@@ -459,14 +476,12 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
                     builder += (v >> 8).toByte
                     builder += v.toByte
 
-      if (builder.length - startingLength) % 2 == 1 then builder += 0
+      // No automatic padding — use explicit 'align' directives when needed
     case ReserveLineAST(width, n) =>
       fold(n, absolute = true) match
         case LongExprAST(count) if 0 < count && count <= 10 * 1024 * 1024 =>
           val size = count * (if width == 0 then 8 else width)
-          val align = size % 2
-
-          builder.addRes((size + align).toInt)
+          builder.addRes(size.toInt)
         case _ => problem(n, s"must be a positive integer up to 10 meg")
     case InstructionLineAST(mnemonic @ ("auipc"), Seq(o1, o2)) =>
       val reg =

@@ -95,7 +95,7 @@ class AssemblerTests extends TestHelpers {
   }
 
   "relocatable mode emits MOVI2 relocation for unresolved reference" in {
-    val tof = assemble("main\n  movi r1, printf\n  halt\n", relocatable = true)
+    val tof = assemble("main\n  movi r1, printf\n  halt\n", relocatable = true, addresses = 2)
     val seg = tof.segments.head
     seg.externs should contain("printf")
     seg.relocs.length shouldBe 1

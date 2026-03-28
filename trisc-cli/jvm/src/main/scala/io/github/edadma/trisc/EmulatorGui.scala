@@ -53,9 +53,25 @@ object EmulatorGui:
         if SwingUtilities.isEventDispatchThread then update.run()
         else SwingUtilities.invokeAndWait(update)
 
-      val guiDevices = Seq(keyboard, displayCtrl, fbMemory)
+      // Blitter needs memory access for reading source data — use a proxy
+      // that gets wired to the real Memory after setupCpu creates it
+      var memRef: Addressable = null
+      val memProxy: Addressable = new Addressable {
+        val name = "memProxy"; val base = 0L; val size = 0L
+        def readByte(addr: Long): Int = memRef.readByte(addr)
+        def writeByte(addr: Long, data: Long): Unit = ()
+        def loadByte(addr: Long, data: Long): Unit = ()
+        override def readInt(addr: Long): Int = memRef.readInt(addr)
+      }
+      val blitter = new Blitter(
+        Runtime.blitterAddress, memProxy, fbMemory,
+        () => displayCtrl.currentFBWidth, () => displayCtrl.currentFBHeight,
+      )
+
+      val guiDevices = Seq(keyboard, displayCtrl, fbMemory, blitter)
 
       var cpuState: (CPU, Memory) = TriscCli.setupCpu(linked, outputFn, guiDevices)
+      memRef = cpuState._2 // wire up the memory proxy
       var cpu = cpuState._1
       if cmd.limit > 0 then cpu.limit = cmd.limit
 
@@ -95,6 +111,7 @@ object EmulatorGui:
         layout.show(displayPanel, "terminal")
         cpuState = TriscCli.setupCpu(linked, outputFn, guiDevices)
         cpu = cpuState._1
+        memRef = cpuState._2
         if cmd.limit > 0 then cpu.limit = cmd.limit
         updateStatus()
         frame.pack()

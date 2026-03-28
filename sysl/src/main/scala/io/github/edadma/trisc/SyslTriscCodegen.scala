@@ -2,7 +2,7 @@ package io.github.edadma.trisc
 
 import scala.collection.mutable
 
-class SyslTriscCodegen(addresses: Int = 2):
+class SyslTriscCodegen(addresses: Int = 4):
   private val out = new StringBuilder
   private var labelCounter = 0
   private val stringLiterals = new mutable.ListBuffer[(String, String)]() // (label, value)
@@ -22,8 +22,9 @@ class SyslTriscCodegen(addresses: Int = 2):
     if hasMain then emit("entry main")
     out ++= meta.toAsmGlobals
 
-    // Emit functions first, then globals (with alignment)
+    // Emit ALL globals first (with alignment), then ALL functions
     var emittedGlobalAlign = false
+    // Pass 1: emit globals
     for decl <- program.decls do
       decl match
         case _: TImportDecl => // skip
@@ -38,8 +39,11 @@ class SyslTriscCodegen(addresses: Int = 2):
           emit(s"# global: $name")
           emit(s"$name")
           init match
-            case TArrayLit(elements, SyslType.ArrayType(elemType, _)) =>
-              val elemDir = emitDataDirective(elemType)
+            case TArrayLit(elements, _) =>
+              val declElemType = typ match
+                case SyslType.ArrayType(e, _) => e
+                case _ => SyslType.I64
+              val elemDir = emitDataDirective(declElemType)
               for elem <- elements do
                 elem match
                   case TIntLit(n, _) => emit(s"  $elemDir $n")
@@ -57,6 +61,13 @@ class SyslTriscCodegen(addresses: Int = 2):
                     case TIntLit(n, _) => emit(s"  $directive $n")
                     case TBoolLit(b, _) => emit(s"  $directive ${if b then 1 else 0}")
                     case _ => emit(s"  $directive 0")
+        case _ => // skip non-globals in first pass
+
+    // Pass 2: emit functions
+    for decl <- program.decls do
+      decl match
+        case f: TFunDecl => genFunction(f)
+        case _ => // skip
 
     // Emit string literal data
     if stringLiterals.nonEmpty then
@@ -220,14 +231,30 @@ class SyslTriscCodegen(addresses: Int = 2):
   private def genStmt(stmt: TStmt): Unit =
     stmt match
       case TVarStmt(name, typ, init) =>
-        genExpr(init) // result in r1
-        val local = allocLocal(name, typ)
-        emitAddImm(2, 5, local.offset)
-        emitStore(1, 2, typ)
+        init match
+          case TArrayLit(elements, SyslType.ArrayType(elemType, size)) =>
+            // Allocate array inline on stack (same layout as TArrayDecl)
+            val rawBytes = size * stackSize(elemType)
+            val totalBytes = (rawBytes + 7) & ~7
+            emitAddImm(7, 7, -totalBytes)
+            stackOffset -= totalBytes
+            val local = LocalVar(name, stackOffset, typ)
+            locals(name) = local
+            // Store each element
+            for (elem, i) <- elements.zipWithIndex do
+              genExpr(elem)
+              val off = local.offset + i * stackSize(elemType)
+              emitAddImm(2, 5, off)
+              emitStore(1, 2, elemType)
+          case _ =>
+            genExpr(init) // result in r1
+            val local = allocLocal(name, typ)
+            emitAddImm(2, 5, local.offset)
+            emitStore(1, 2, typ)
 
       case TAssignStmt(target, value) =>
-        genExpr(value) // result in r1
         if locals != null && locals.contains(target) then
+          genExpr(value)
           val local = locals(target)
           emitAddImm(2, 5, local.offset)
           emitStore(1, 2, local.typ)
@@ -238,10 +265,25 @@ class SyslTriscCodegen(addresses: Int = 2):
           emitStore(2, 1, globals(target))
         else
           // New local variable (first assignment = declaration, infer type)
-          val typ = value.typ
-          val local = allocLocal(target, typ)
-          emitAddImm(2, 5, local.offset)
-          emitStore(1, 2, typ)
+          value match
+            case TArrayLit(elements, SyslType.ArrayType(elemType, size)) =>
+              val rawBytes = size * stackSize(elemType)
+              val totalBytes = (rawBytes + 7) & ~7
+              emitAddImm(7, 7, -totalBytes)
+              stackOffset -= totalBytes
+              val local = LocalVar(target, stackOffset, value.typ)
+              locals(target) = local
+              for (elem, i) <- elements.zipWithIndex do
+                genExpr(elem)
+                val off = local.offset + i * stackSize(elemType)
+                emitAddImm(2, 5, off)
+                emitStore(1, 2, elemType)
+            case _ =>
+              genExpr(value)
+              val typ = value.typ
+              val local = allocLocal(target, typ)
+              emitAddImm(2, 5, local.offset)
+              emitStore(1, 2, typ)
 
       case TCompoundAssignStmt(target, op, value) =>
         genExpr(value) // r1 = right operand
