@@ -993,7 +993,7 @@ draw_char(x: int, y: int, ch: int, r: int, g: int, b: int)
     base = idx * FONT_CELL_W * FONT_CELL_H
     for row = 0; row < FONT_CELL_H; row++
         for col = 0; col < FONT_CELL_W; col++
-            a = font_data[base + row * FONT_CELL_W + col]
+            a = font_data[base + row * FONT_CELL_W + col] & 0xFF
             if a > 0
                 set_pixel(x + col, y + row, r, g, b, a)
 

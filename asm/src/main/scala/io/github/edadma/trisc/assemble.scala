@@ -400,8 +400,8 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
               case 1 =>
                 value match
                   case _: DoubleExprAST                => problem(d, "expected an int value, found float")
-                  case LongExprAST(v) if v.isValidByte => builder += v.toByte
-                  case _                               => problem(d, "expected a byte value, out of range")
+                  case LongExprAST(v) if -128 <= v && v <= 255 => builder += v.toByte
+                  case _                                       => problem(d, "expected a byte value, out of range")
               case 2 =>
                 value match
                   case _: DoubleExprAST => problem(d, "expected an int value, found float")

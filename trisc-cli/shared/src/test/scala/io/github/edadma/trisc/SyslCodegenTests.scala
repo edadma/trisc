@@ -1418,4 +1418,55 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
         |    x
         |""".stripMargin) shouldBe 42
   }
+
+  // ===== Array literal codegen =====
+
+  "global array literal indexing" in {
+    compileAndRun(
+      """data = [10, 20, 30]
+        |main() -> int = data[1]
+        |""".stripMargin) shouldBe 20
+  }
+
+  "global byte array literal uses db directives" in {
+    compileAndRun(
+      """vals: [4]byte = [0x10, 0x20, 0x30, 0x40]
+        |main() -> int = vals[2]
+        |""".stripMargin) shouldBe 0x30
+  }
+
+  "global byte array with values above 127" in {
+    compileAndRun(
+      """data: [3]byte = [0x80, 0xCC, 0xFF]
+        |main() -> int = data[1] & 0xFF
+        |""".stripMargin) shouldBe 0xCC
+  }
+
+  "global byte array sum with unsigned masking" in {
+    compileAndRun(
+      """data: [3]byte = [100, 200, 50]
+        |main() -> int
+        |    a = data[0] & 0xFF
+        |    b = data[1] & 0xFF
+        |    c = data[2] & 0xFF
+        |    a + b + c
+        |""".stripMargin) shouldBe 350
+  }
+
+  "local array literal indexing" in {
+    compileAndRun(
+      """main() -> int
+        |    a = [5, 15, 25]
+        |    a[0] + a[1] + a[2]
+        |""".stripMargin) shouldBe 45
+  }
+
+  "array literal passed to function" in {
+    compileAndRun(
+      """sum3(p: *int) -> int = p[0] + p[1] + p[2]
+        |main() -> int
+        |    a = [100, 200, 300]
+        |    sum3(a)
+        |""".stripMargin) shouldBe 600
+  }
 }

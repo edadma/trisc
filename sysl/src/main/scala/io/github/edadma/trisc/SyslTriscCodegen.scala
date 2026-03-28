@@ -37,8 +37,11 @@ class SyslTriscCodegen(addresses: Int = 2):
           emit(s"# global: $name")
           emit(s"$name")
           init match
-            case TArrayLit(elements, SyslType.ArrayType(elemType, _)) =>
-              val elemDir = emitDataDirective(elemType)
+            case TArrayLit(elements, _) =>
+              val declElemType = typ match
+                case SyslType.ArrayType(e, _) => e
+                case _ => SyslType.I64
+              val elemDir = emitDataDirective(declElemType)
               for elem <- elements do
                 elem match
                   case TIntLit(n, _) => emit(s"  $elemDir $n")
