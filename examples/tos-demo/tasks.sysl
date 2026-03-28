@@ -1,27 +1,13 @@
-/*
- * TOS Demo — User tasks
- *
- * Simple preemptive multitasking demo.
- * Each task prints its letter in a loop with a busy-wait delay.
- */
-
 val STDOUT = 0xFF00
 
 putc(ch: int)
     val p: *i8 = STDOUT
     *p = ch
 
-delay(n: int)
-    var i = 0
-    while i < n
-        i += 1
-
 task_a()
     while true
-        putc(65)            // 'A'
-        delay(5000)
+        putc(65)
 
 task_b()
     while true
-        putc(66)            // 'B'
-        delay(5000)
+        putc(66)

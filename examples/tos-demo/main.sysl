@@ -11,15 +11,15 @@ import "kernel"
 import "tasks"
 
 val TIMER_DEVICE = 0xFFE8
-val TICK_MS = 10
+val TICK_CYCLES = 10000
 
 kernel_main() -> int
     create_thread(task_a, 0x6000, 0x5000, "task_a")
     create_thread(task_b, 0x8000, 0x7000, "task_b")
 
-    // Start the timer (10ms tick)
+    // Start the timer (10000 cycles per tick)
     val period: *i32 = TIMER_DEVICE
-    *period = TICK_MS
+    *period = TICK_CYCLES
     val control: *i8 = TIMER_DEVICE + 4
     *control = 1
 
