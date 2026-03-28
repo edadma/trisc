@@ -144,38 +144,37 @@ global trap_handler, func
 trap_handler
   cli
 
-  ; Dispatch on syscall number (r1)
-  ; putc is fast — handle before saving full context
-  ldi r3, 1
-  beq r1, r3, .sys_putc        ; 1 = putc (no context switch needed)
-
-  ; For sleep/yield, save full context first (before calling kernel)
+  ; Save full context first — never clobber user registers before saving
   pshr r6                       ; save user's r1-r6
   gusp r1
   pshd r1                       ; save USP
 
-  ; Reload syscall number and arg from saved context on stack
+  ; Reload syscall number and arg from saved context
   ; Stack: [USP(+0), r6(+8), r5(+16), r4(+24), r3(+32), r2(+40), r1(+48), PC(+56), PSR(+64)]
   addi r3, r7, 48
   ldd r1, r3, r0               ; r1 = saved r1 (syscall number)
   addi r3, r7, 40
   ldd r2, r3, r0               ; r2 = saved r2 (arg)
 
+  ; Dispatch on syscall number
   beq r1, r0, .sys_sleep       ; 0 = sleep
+  ldi r3, 1
+  beq r1, r3, .sys_putc        ; 1 = putc
   ldi r3, 2
   beq r1, r3, .sys_yield       ; 2 = yield
+  ldi r3, 3
+  beq r1, r3, .sys_exit        ; 3 = exit
 
-  ; Unknown — restore and return
-  popd r1
-  susp r1
-  popr r6
-  sti
-  rte
+  ; Unknown syscall — halt (indicates a bug)
+  halt
 
-; --- putc: write r2 to stdout, return (no context switch) ---
+; --- putc: write char, restore and return (no context switch) ---
 .sys_putc
   movi r3, STDOUT
   stb  r2, r3, r0
+  popd r1
+  susp r1
+  popr r6
   sti
   rte
 
@@ -187,10 +186,17 @@ trap_handler
 
 ; --- sleep: block current thread, then context switch ---
 .sys_sleep
-  ; r2 = number of ticks to sleep (reloaded from saved context)
   mov  r1, r2                   ; r1 = ticks arg for sleep_current
   movi r4, sleep_current
   jalr r6, r4                   ; marks current thread BLOCKED
+  bra do_schedule
+
+; --- exit: terminate current thread, context switch away ---
+extern terminate_current
+
+.sys_exit
+  movi r4, terminate_current
+  jalr r6, r4                   ; marks current thread TERMINATED
   bra do_schedule
 
 
@@ -228,6 +234,16 @@ yield
   ldi  r1, 2            ; r1 = SYS_YIELD
   trap 0
   jalr r0, r6
+
+; thread_exit — trampoline for tasks that return from their entry function.
+; create_thread sets r6 in the fake context to this address, so when a
+; task's main function does "jalr r0, r6" (return), it lands here.
+global thread_exit, func
+
+thread_exit
+  ldi  r1, 3            ; r1 = SYS_EXIT
+  trap 0
+  ; never returns — schedule switches to another thread
 
 
 ; ============================================================================

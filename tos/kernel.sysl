@@ -8,6 +8,7 @@
  *   - Thread creation (building initial stack frames)
  *   - Scheduler (round-robin with sleep support)
  *   - sleep_current() — blocks current thread until wake time
+ *   - terminate_current() — marks current thread as terminated
  *
  * All kernel services are accessed through trap 0 (syscall).
  * The trap handler in boot.asm dispatches based on r1:
@@ -43,6 +44,8 @@ var current_thread = 0
 var thread_count = 0
 var ticks = 0
 
+extern thread_exit()
+
 
 /*
  * ============================================================================
@@ -68,7 +71,7 @@ create_thread(entry_point: int, usp: int, ssp: int, name: *byte)
     sp -= 8
     *sp = 0                 // r5
     sp -= 8
-    *sp = 0                 // r6
+    *sp = thread_exit       // r6 = return address (exit trampoline)
     sp -= 8
     *sp = usp               // USP
 
@@ -91,6 +94,17 @@ sleep_current(nticks: int)
     var cur: *Task = &tasks[current_thread]
     cur.state = STATE_BLOCKED
     cur.wake_tick = ticks + nticks
+
+
+/*
+ * ============================================================================
+ * terminate_current — Mark the current thread as terminated
+ * ============================================================================
+ */
+
+terminate_current()
+    var cur: *Task = &tasks[current_thread]
+    cur.state = STATE_TERMINATED
 
 
 /*
