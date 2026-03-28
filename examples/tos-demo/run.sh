@@ -12,5 +12,5 @@ sbt -error "triscCliJVM/run asm boot.asm"
 echo "=== Linking ==="
 sbt -error "triscCliJVM/run link -o program.tof boot.tof demo.tof"
 
-echo "=== Running TOS demo ==="
-sbt -error 'set ThisBuild / run / fork := true' "triscCliJVM/run run --limit 50000 $(pwd)/program.tof"
+echo "=== Running TOS demo (Ctrl-C to stop) ==="
+sbt 'set ThisBuild / run / fork := true' "triscCliJVM/run run --limit 50000 $(pwd)/program.tof"
