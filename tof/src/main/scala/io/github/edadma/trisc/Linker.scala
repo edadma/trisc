@@ -126,7 +126,33 @@ object Linker:
 
       for reloc <- seg.relocs do
         if reloc.symbol.isEmpty then
-          // Already resolved (base-relative) — preserve as-is
+          // Already resolved (base-relative) — adjust for new segment placement
+          val off = reloc.offset.toInt
+          val delta = seg.org
+          if delta != 0 then
+            reloc.typ match
+              case RelocType.ABS32 =>
+                val old = ((seg.data(off) & 0xff) << 24) | ((seg.data(off + 1) & 0xff) << 16) |
+                  ((seg.data(off + 2) & 0xff) << 8) | (seg.data(off + 3) & 0xff)
+                val addr = old.toLong + delta
+                seg.data(off) = ((addr >> 24) & 0xff).toByte
+                seg.data(off + 1) = ((addr >> 16) & 0xff).toByte
+                seg.data(off + 2) = ((addr >> 8) & 0xff).toByte
+                seg.data(off + 3) = (addr & 0xff).toByte
+              case RelocType.ABS64 =>
+                var old = 0L
+                for i <- 0 until 8 do old = (old << 8) | (seg.data(off + i) & 0xff)
+                val addr = old + delta
+                for i <- 0 until 8 do seg.data(off + i) = ((addr >> ((7 - i) * 8)) & 0xff).toByte
+              case RelocType.MOVI2 | RelocType.MOVI3 | RelocType.MOVI4 =>
+                val n = reloc.typ match
+                  case RelocType.MOVI2 => 2
+                  case RelocType.MOVI3 => 3
+                  case RelocType.MOVI4 => 4
+                // Read current address from movi instruction bytes
+                var old = 0L
+                for i <- 0 until n do old = (old << 8) | (seg.data(off + i * 2 + 1) & 0xff)
+                patchMovi(seg.data, off, old + delta, n)
           if relocatable then segRelocs += reloc
         else globalSymbols.get(reloc.symbol) match
           case Some((addr, _)) =>
