@@ -6,6 +6,8 @@ import java.awt.event.*
 
 object EmulatorGui:
   def launch(cmd: RunCommand, linked: TOF): Unit =
+    val latch = new java.util.concurrent.CountDownLatch(1)
+
     SwingUtilities.invokeLater(() => {
       val frame = new JFrame("TRISC Emulator")
       frame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE)
@@ -71,7 +73,7 @@ object EmulatorGui:
 
       // Step one instruction
       stepBtn.addActionListener(_ => {
-        if cpu.state == State.Run then
+        if cpu.state == State.Run || cpu.state.ordinal < State.Halt.ordinal then
           cpu.execute()
           updateStatus()
       })
@@ -86,6 +88,12 @@ object EmulatorGui:
       })
 
       updateStatus()
+      frame.addWindowListener(new WindowAdapter {
+        override def windowClosed(e: WindowEvent): Unit = latch.countDown()
+      })
+
       frame.setLocationRelativeTo(null)
       frame.setVisible(true)
     })
+
+    latch.await()
