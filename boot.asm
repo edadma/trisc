@@ -144,7 +144,13 @@ global trap_handler, func
 trap_handler
   cli
 
-  ; Save full context first — never clobber user registers before saving
+  ; Fast path: putc (syscall 1) — no context save needed.
+  ; Only r3 is clobbered, which is fine since we RTE directly
+  ; (hardware restores PC+PSR, user r1-r6 are untouched on stack).
+  addi r3, r1, -1
+  beq r3, r0, .sys_putc        ; r1 == 1 → putc
+
+  ; Slow path: save full context for syscalls that context-switch
   pshr r6                       ; save user's r1-r6
   gusp r1
   pshd r1                       ; save USP
@@ -156,10 +162,8 @@ trap_handler
   addi r3, r7, 40
   ldd r2, r3, r0               ; r2 = saved r2 (arg)
 
-  ; Dispatch on syscall number
+  ; Dispatch
   beq r1, r0, .sys_sleep       ; 0 = sleep
-  ldi r3, 1
-  beq r1, r3, .sys_putc        ; 1 = putc
   ldi r3, 2
   beq r1, r3, .sys_yield       ; 2 = yield
   ldi r3, 3
@@ -168,13 +172,10 @@ trap_handler
   ; Unknown syscall — halt (indicates a bug)
   halt
 
-; --- putc: write char, restore and return (no context switch) ---
+; --- putc: fast path, no context save ---
 .sys_putc
   movi r3, STDOUT
   stb  r2, r3, r0
-  popd r1
-  susp r1
-  popr r6
   sti
   rte
 

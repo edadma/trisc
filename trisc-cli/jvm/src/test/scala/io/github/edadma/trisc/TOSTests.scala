@@ -173,4 +173,161 @@ class TOSTests extends AnyFreeSpec with Matchers {
     output shouldBe "ABCDE\n"
     cpu.state shouldBe State.Halt
   }
+
+  // ===== TOS integration tests =====
+
+  /** Compile TOS kernel + user tasks, link with boot.asm, run on CPU with timer. */
+  def runTOS(userSources: Map[String, String], maxCycles: Int = 500000000): (CPU, String) =
+    // Assemble boot.asm
+    val bootTof = assemble(bootAsm, relocatable = true)
+
+    // Compile kernel + user sources together
+    val allSources = Map("kernel" -> kernelSysl) ++ userSources
+    val driver = new SyslDriver
+    val result = driver.compile(allSources)
+    val codegen = new SyslTriscCodegen
+    val tofs = for unit <- result.units yield
+      val asm = codegen.generate(unit.typed)
+      assemble(asm, relocatable = true)
+    val syslTof = Linker.link(tofs, relocatable = true)
+
+    // Link all
+    val linked = Linker.link(Seq(bootTof, syslTof))
+
+    // Set up CPU with stdout + timer
+    val output = new StringBuilder
+    val stdout = new Device with WriteOnlyAddressable {
+      val name = "stdout"
+      val base: Long = 0xFF00
+      val size: Long = 1
+      def writeByte(addr: Long, data: Long): Unit = output += data.toChar
+      override def loadByte(addr: Long, data: Long): Unit = ()
+    }
+    val timer = new Timer(0xFFE8L)
+    val mem = new Memory("Memory", new RAM(0, 0xFF00), stdout, timer)
+    linked.load(mem)
+    val cpu = new CPU(mem, Seq(timer)) { this.limit = maxCycles }
+    cpu.reset()
+    cpu.run()
+    (cpu, output.toString)
+
+  "TOS: putc syscall prints character" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |extern putc(ch: int)
+          |
+          |kernel_main() -> int
+          |    create_thread(task, 0x6000, 0x5000, "task")
+          |    val period: *i32 = 0xFFE8
+          |    *period = 10
+          |    val control: *i8 = 0xFFEC
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task()
+          |    putc(72)
+          |    putc(105)
+          |    putc(10)
+          |""".stripMargin
+    ), maxCycles = 100000)
+
+    output should startWith("Hi\n")
+  }
+
+  "TOS: thread exit works cleanly" in {
+    val (cpu, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |extern putc(ch: int)
+          |
+          |kernel_main() -> int
+          |    create_thread(task1, 0x6000, 0x5000, "t1")
+          |    create_thread(task2, 0x8000, 0x7000, "t2")
+          |    val period: *i32 = 0xFFE8
+          |    *period = 10
+          |    val control: *i8 = 0xFFEC
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task1()
+          |    putc(65)
+          |
+          |task2()
+          |    putc(66)
+          |""".stripMargin
+    ), maxCycles = 100000)
+
+    // Both tasks print and exit — output should contain both A and B
+    output should include("A")
+    output should include("B")
+  }
+
+  "TOS: sleep syscall delays output" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |extern putc(ch: int)
+          |extern sleep(ticks: int)
+          |
+          |kernel_main() -> int
+          |    create_thread(task, 0x6000, 0x5000, "task")
+          |    val period: *i32 = 0xFFE8
+          |    *period = 10
+          |    val control: *i8 = 0xFFEC
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task()
+          |    putc(65)
+          |    sleep(5)
+          |    putc(66)
+          |    sleep(5)
+          |    putc(67)
+          |""".stripMargin
+    ))
+
+    output should startWith("ABC")
+  }
+
+  "TOS: two tasks interleave with sleep" in {
+    val (_, output) = runTOS(Map(
+      "tasks" ->
+        """extern putc(ch: int)
+          |extern sleep(ticks: int)
+          |
+          |task_a()
+          |    var i = 0
+          |    while i < 3
+          |        putc(65)
+          |        sleep(10)
+          |        i += 1
+          |
+          |task_b()
+          |    var i = 0
+          |    while i < 3
+          |        putc(66)
+          |        sleep(20)
+          |        i += 1
+          |""".stripMargin,
+      "app" ->
+        """import "kernel"
+          |import "tasks"
+          |
+          |kernel_main() -> int
+          |    create_thread(task_a, 0x6000, 0x5000, "a")
+          |    create_thread(task_b, 0x8000, 0x7000, "b")
+          |    val period: *i32 = 0xFFE8
+          |    *period = 10
+          |    val control: *i8 = 0xFFEC
+          |    *control = 1
+          |    first_thread_ssp()
+          |""".stripMargin
+    ))
+
+    // A prints at ticks 0,10,20 — B prints at ticks 0,20,40
+    // Expected pattern: AB A AB A B (roughly 2:1)
+    output.count(_ == 'A') shouldBe 3
+    output.count(_ == 'B') shouldBe 3
+  }
 }
