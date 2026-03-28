@@ -259,6 +259,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitAddImm(2, 5, local.offset)
           emitStore(1, 2, local.typ)
         else if globals.contains(target) then
+          genExpr(value)
           emit(s"  pshd r1")
           emit(s"  movi r1, $target")
           emit(s"  popd r2")
