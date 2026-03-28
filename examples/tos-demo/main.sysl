@@ -10,7 +10,7 @@
 import "kernel"
 import "tasks"
 
-val TIMER_DEVICE = 0xFFE8
+val TIMER_DEVICE = 0x100020
 val TICK_MS = 10
 
 kernel_main() -> int

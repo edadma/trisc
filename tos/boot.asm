@@ -13,7 +13,7 @@
 ;
 ; ============================================================================
 
-STDOUT = 0xFF00
+STDOUT = 0x100000
 
 ; ============================================================================
 ; Exception Vector Table
@@ -21,7 +21,7 @@ STDOUT = 0xFF00
 
 segment vectors
 
-  dl 0xF000                ; Slot 0:  Initial SSP (kernel stack top)
+  dl 0x0FFFF8              ; Slot 0:  Initial SSP (kernel stack top, below devices)
   dl boot                  ; Slot 1:  Initial PC
   dl timer_isr             ; Slot 2:  Interrupt
   dl default_isr           ; Slot 3:  InstructionAccess
@@ -99,7 +99,7 @@ do_schedule
   bne  r1, r0, restore_thread
 
   ; No threads ready — kernel idle with wfi
-  movi r7, 0xF000              ; clean kernel stack
+  movi r7, 0x0FFFF8            ; clean kernel stack (below devices)
   movi r2, current_thread
   ldi  r1, -1                  ; mark no current thread
   stw  r1, r2, r0

@@ -200,13 +200,13 @@ class TOSTests extends AnyFreeSpec with Matchers {
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
       val name = "stdout"
-      val base: Long = 0xFF00
+      val base: Long = 0x100000
       val size: Long = 1
       def writeByte(addr: Long, data: Long): Unit = output += data.toChar
       override def loadByte(addr: Long, data: Long): Unit = ()
     }
-    val timer = new Timer(0xFFE8L)
-    val mem = new Memory("Memory", new RAM(0, 0xFF00), stdout, timer)
+    val timer = new Timer(0x100020L)
+    val mem = new Memory("Memory", new RAM(0, 0x100000), stdout, timer)
     linked.load(mem)
     val cpu = new CPU(mem, Seq(timer)) { this.limit = maxCycles }
     cpu.reset()
@@ -221,9 +221,9 @@ class TOSTests extends AnyFreeSpec with Matchers {
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
-          |    val period: *i32 = 0xFFE8
+          |    val period: *i32 = 0x100020
           |    *period = 10
-          |    val control: *i8 = 0xFFEC
+          |    val control: *i8 = 0x100024
           |    *control = 1
           |    first_thread_ssp()
           |
@@ -246,9 +246,9 @@ class TOSTests extends AnyFreeSpec with Matchers {
           |kernel_main() -> int
           |    create_thread(task1, 0x6000, 0x5000, "t1")
           |    create_thread(task2, 0x8000, 0x7000, "t2")
-          |    val period: *i32 = 0xFFE8
+          |    val period: *i32 = 0x100020
           |    *period = 10
-          |    val control: *i8 = 0xFFEC
+          |    val control: *i8 = 0x100024
           |    *control = 1
           |    first_thread_ssp()
           |
@@ -273,9 +273,9 @@ class TOSTests extends AnyFreeSpec with Matchers {
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
-          |    val period: *i32 = 0xFFE8
+          |    val period: *i32 = 0x100020
           |    *period = 10
-          |    val control: *i8 = 0xFFEC
+          |    val control: *i8 = 0x100024
           |    *control = 1
           |    first_thread_ssp()
           |
@@ -317,9 +317,9 @@ class TOSTests extends AnyFreeSpec with Matchers {
           |kernel_main() -> int
           |    create_thread(task_a, 0x6000, 0x5000, "a")
           |    create_thread(task_b, 0x8000, 0x7000, "b")
-          |    val period: *i32 = 0xFFE8
+          |    val period: *i32 = 0x100020
           |    *period = 10
-          |    val control: *i8 = 0xFFEC
+          |    val control: *i8 = 0x100024
           |    *control = 1
           |    first_thread_ssp()
           |""".stripMargin

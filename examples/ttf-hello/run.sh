@@ -1,6 +1,6 @@
 #!/bin/bash
-# Build the ttf-hello example
-# Usage: bash examples/ttf-hello/build.sh
+# Build and run the ttf-hello example
+# Usage: bash examples/ttf-hello/run.sh
 set -e
 
 DIR=examples/ttf-hello
@@ -14,5 +14,5 @@ sbt -error "triscCliJVM/run asm examples/bare-metal-hello/boot.asm -o $DIR/boot.
 echo "=== Linking ==="
 sbt -error "triscCliJVM/run link $DIR/boot.tof $DIR/hello.tof -o $DIR/program.tof"
 
-echo "=== Done ==="
-echo "Run: sbt \"triscCliJVM/run run --gui $DIR/program.tof\""
+echo "=== Running ==="
+sbt -error "triscCliJVM/run run --gui $DIR/program.tof"
