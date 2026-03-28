@@ -20,6 +20,8 @@ class SyslAnalyzer:
     "putchar" -> FunInfo("putchar", List("c" -> I32), I32),
     "print" -> FunInfo("print", List("n" -> I32), VoidType),
     "println" -> FunInfo("println", List("n" -> I32), VoidType),
+    "puts" -> FunInfo("puts", List("s" -> StringType), VoidType),
+    "puti" -> FunInfo("puti", List("n" -> I32), VoidType),
   )
 
   def registerImport(meta: ModuleMeta): Unit =
@@ -101,6 +103,9 @@ class SyslAnalyzer:
     case "i16"  => I16
     case "bool" => BoolType
     case "void" => VoidType
+    case "string" => StringType
+    case s if s.startsWith("[]") =>
+      SliceType(resolveTypeName(s.drop(2)))
     case s if s.startsWith("*") =>
       PtrType(resolveTypeName(s.drop(1)))
     case s if s.startsWith("[") =>
@@ -149,6 +154,8 @@ class SyslAnalyzer:
       case (PtrType(_), _: IntType) => true    // pointer to int
       case (ArrayType(e1, _), PtrType(e2)) if e1 == e2 => true
       case (ArrayType(e1, _), ArrayType(e2, _)) if e1 == e2 => true
+      case (ArrayType(e1, _), SliceType(e2)) if e1 == e2 => true  // fixed array → slice
+      case (SliceType(e1), SliceType(e2)) if e1 == e2 => true
       case _ => false
 
   private def lookup(name: String): SymInfo =
@@ -278,8 +285,8 @@ class SyslAnalyzer:
       case FloatLitAST(d) => TFloatLit(d, DoubleType)
       case CharLitAST(c) => TIntLit(c.toLong, I32)
       case BoolLitAST(b) => TBoolLit(b, BoolType)
-      case StringLitAST(s) => TStringLit(s, ArrayType(I8, 0))
-      case StringLitExprAST(s) => TStringLit(s, ArrayType(I8, 0))
+      case StringLitAST(s) => TStringLit(s, StringType)
+      case StringLitExprAST(s) => TStringLit(s, StringType)
       case ArrayDeclAST(size, typStr) =>
         val t = resolveTypeName(typStr)
         TArrayDecl(size, typStr, t)
@@ -372,6 +379,8 @@ class SyslAnalyzer:
         val resultType = tInner.typ match
           case PtrType(t) => t
           case ArrayType(t, _) => t
+          case StringType => throw AnalysisError("cannot dereference string — use indexing instead")
+          case SliceType(_) => throw AnalysisError("cannot dereference slice — use indexing instead")
           case t => throw AnalysisError(s"cannot dereference $t")
         TDeref(tInner, resultType)
 
@@ -381,6 +390,8 @@ class SyslAnalyzer:
         val elemType = tArr.typ match
           case ArrayType(elem, _) => elem
           case PtrType(elem) => elem
+          case SliceType(elem) => elem
+          case StringType => I8
           case t => throw AnalysisError(s"cannot index $t")
         TIndex(tArr, tIndex, elemType)
 
@@ -416,6 +427,8 @@ class SyslAnalyzer:
         val tLeft = analyzeExpr(left)
         val tRight = analyzeExpr(right)
         val resultType = op match
+          case "+" | "-" if tLeft.typ == StringType && tRight.typ.isNumeric =>
+            throw AnalysisError("pointer arithmetic not allowed on string")
           case "+" | "-" if tLeft.typ.isPointerLike && tRight.typ.isNumeric => tLeft.typ
           case "+" | "-" | "*" | "/" =>
             if !tLeft.typ.isNumeric || !tRight.typ.isNumeric then
@@ -455,6 +468,21 @@ class SyslAnalyzer:
           case (from, to) if from.isIntegral && to.isIntegral => // integer to integer
           case (from, to) => throw AnalysisError(s"cannot cast $from to $to")
         TCast(tInner, target)
+
+      case CallAST("len", args) =>
+        if args.size != 1 then throw AnalysisError("len() takes exactly 1 argument")
+        val tArg = analyzeExpr(args.head)
+        tArg.typ match
+          case StringType | SliceType(_) | ArrayType(_, _) => TLen(tArg, I32)
+          case t => throw AnalysisError(s"len() not supported on $t")
+
+      case CallAST("cap", args) =>
+        if args.size != 1 then throw AnalysisError("cap() takes exactly 1 argument")
+        val tArg = analyzeExpr(args.head)
+        tArg.typ match
+          case SliceType(_) => TCap(tArg, I32)
+          case ArrayType(_, _) => TCap(tArg, I32)
+          case t => throw AnalysisError(s"cap() not supported on $t")
 
       case CallAST(name, args) =>
         val tArgs = args.map(analyzeExpr)

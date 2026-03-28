@@ -66,7 +66,7 @@ class SyslStringTests extends SyslTestHelpers {
     eval("main() -> int = '世'\n") shouldBe 19990
   }
 
-  // ===== Byte arrays and string literals =====
+  // ===== Byte arrays =====
 
   "byte array declaration" in {
     eval(
@@ -78,7 +78,9 @@ class SyslStringTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 177
   }
 
-  "string literal creates null-terminated byte array" in {
+  // ===== String type =====
+
+  "string literal indexing" in {
     eval(
       """main() -> int
         |    s = "Hello"
@@ -86,74 +88,84 @@ class SyslStringTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 72 // 'H'
   }
 
-  "string literal null terminated" in {
+  "string literal len" in {
+    eval("main() -> int = len(\"Hello\")\n") shouldBe 5
+  }
+
+  "string literal len UTF-8" in {
+    eval("main() -> int = len(\"café\")\n") shouldBe 5 // 'é' is 2 bytes in UTF-8
+  }
+
+  "string literal indexing returns byte" in {
     eval(
       """main() -> int
-        |    s = "Hi"
-        |    s[2]
-        |""".stripMargin) shouldBe 0
+        |    s = "AB"
+        |    s[0] + s[1]
+        |""".stripMargin) shouldBe 131 // 65 + 66
   }
 
-  "string literal with strlen" in {
-    eval(
-      """strlen(s: *byte) -> int
-        |    n = 0
-        |    while s[n] != 0 do n++
-        |    n
-        |
-        |main() -> int = strlen("Hello")
-        |""".stripMargin) shouldBe 5
+  "string bounds check" in {
+    assertThrows[RuntimeException] {
+      eval(
+        """main() -> int
+          |    s = "Hi"
+          |    s[2]
+          |""".stripMargin)
+    }
   }
 
-  "string literal with puts" in {
+  "string negative index bounds check" in {
+    assertThrows[RuntimeException] {
+      eval(
+        """main() -> int
+          |    s = "Hi"
+          |    s[-1]
+          |""".stripMargin)
+    }
+  }
+
+  "puts builtin" in {
     output(
-      """puts(s: *byte)
-        |    i = 0
-        |    while s[i] != 0
-        |        putchar(s[i])
-        |        i += 1
-        |
-        |main() -> int
+      """main() -> int
         |    puts("Hello")
         |    0
         |""".stripMargin) shouldBe "Hello"
   }
 
-  "string literal passed to function" in {
-    eval(
-      """first(s: *byte) -> int = s[0]
-        |
-        |main() -> int = first("ABC")
-        |""".stripMargin) shouldBe 65
-  }
-
-  "string literal UTF-8 encoding" in {
-    eval(
-      """strlen(s: *byte) -> int
-        |    n = 0
-        |    while s[n] != 0 do n++
-        |    n
-        |
-        |main() -> int = strlen("café")
-        |""".stripMargin) shouldBe 5 // 'é' is 2 bytes in UTF-8
-  }
-
-  "string literal in variable" in {
+  "puti builtin" in {
     output(
-      """puts(s: *byte)
-        |    i = 0
-        |    while s[i] != 0
-        |        putchar(s[i])
-        |        i += 1
-        |
-        |main() -> int
-        |    greeting = "Hi!"
+      """main() -> int
+        |    puti(42)
+        |    0
+        |""".stripMargin) shouldBe "42"
+  }
+
+  "string variable" in {
+    output(
+      """main() -> int
+        |    greeting: string = "Hi!"
         |    puts(greeting)
         |    0
         |""".stripMargin) shouldBe "Hi!"
   }
 
-  // ===== String library functions (in sysl) =====
+  "string passed to function" in {
+    eval(
+      """first(s: string) -> int = s[0]
+        |
+        |main() -> int = first("ABC")
+        |""".stripMargin) shouldBe 65
+  }
+
+  "len in function" in {
+    eval(
+      """length(s: string) -> int = len(s)
+        |
+        |main() -> int = length("Hello")
+        |""".stripMargin) shouldBe 5
+  }
+
+  // ===== Old-style *byte string functions (still work with raw pointers) =====
 
   "strlen implementation" in {
     eval(
@@ -174,9 +186,9 @@ class SyslStringTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 5
   }
 
-  "puts implementation" in {
+  "puts with byte array" in {
     output(
-      """puts(s: *byte)
+      """myputs(s: *byte)
         |    i = 0
         |    while s[i] != 0
         |        putchar(s[i])
@@ -188,7 +200,7 @@ class SyslStringTests extends SyslTestHelpers {
         |    str[1] = 'i'
         |    str[2] = '!'
         |    str[3] = 0
-        |    puts(str)
+        |    myputs(str)
         |    0
         |""".stripMargin) shouldBe "Hi!"
   }

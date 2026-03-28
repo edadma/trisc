@@ -8,6 +8,8 @@ enum Value:
   case PtrVal(cell: Cell)
   case ArrVal(cells: Array[Cell], offset: Int)
   case FuncVal(name: String)
+  case StrVal(s: String)
+  case SliceVal(cells: Array[Cell], offset: Int, length: Int, capacity: Int)
 
 class Cell(var value: Value)
 
@@ -25,8 +27,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case IntVal(n)    => n
     case FloatVal(d)  => d.toLong
     case PtrVal(_)    => throw RuntimeError("expected integer, got pointer")
-    case ArrVal(_, _) => throw RuntimeError("expected integer, got array")
-    case FuncVal(_)   => throw RuntimeError("expected integer, got function")
+    case ArrVal(_, _)       => throw RuntimeError("expected integer, got array")
+    case FuncVal(_)         => throw RuntimeError("expected integer, got function")
+    case StrVal(_)          => throw RuntimeError("expected integer, got string")
+    case SliceVal(_, _, _, _) => throw RuntimeError("expected integer, got slice")
 
   private def toDouble(v: Value): Double = v match
     case FloatVal(d)  => d
@@ -47,6 +51,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     "putchar" -> (args => { output(toLong(args.head).toChar.toString); args.head }),
     "print" -> (args => { args.foreach { case FloatVal(d) => output(formatDouble(d)); case a => output(toLong(a).toString) }; IntVal(0) }),
     "println" -> (args => { args.foreach { case FloatVal(d) => output(formatDouble(d)); case a => output(toLong(a).toString) }; output("\n"); IntVal(0) }),
+    "puts" -> (args => { args.head match { case StrVal(s) => output(s); case _ => throw RuntimeError("puts: expected string") }; IntVal(0) }),
+    "puti" -> (args => { output(toLong(args.head).toString); IntVal(0) }),
   )
 
   def run(program: TProgram): Long =
@@ -227,10 +233,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TBoolLit(b, _) => IntVal(if b then 1L else 0L)
 
       case TStringLit(s, _) =>
-        val bytes = s.getBytes("UTF-8")
-        val cells = Array.fill(bytes.length + 1)(new Cell(IntVal(0)))
-        for i <- bytes.indices do cells(i).value = IntVal(bytes(i) & 0xff)
-        ArrVal(cells, 0)
+        StrVal(s)
 
       case TArrayDecl(size, _, _) =>
         val cells = Array.fill(size)(new Cell(IntVal(0)))
@@ -298,7 +301,16 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TIndex(arr, index, _) =>
         val arrVal = evalAny(arr, env)
         val idx = toLong(evalAny(index, env)).toInt
-        indexCell(arrVal, idx).value
+        arrVal match
+          case StrVal(s) =>
+            val bytes = s.getBytes("UTF-8")
+            if idx < 0 || idx >= bytes.length then throw RuntimeError(s"string index out of bounds: $idx (length ${bytes.length})")
+            IntVal(bytes(idx) & 0xff)
+          case SliceVal(cells, off, len, _) =>
+            if idx < 0 || idx >= len then throw RuntimeError(s"slice index out of bounds: $idx (length $len)")
+            cells(off + idx).value
+          case _ =>
+            indexCell(arrVal, idx).value
 
       case TIfExpr(cond, thenBody, elseBody, _) =>
         if toLong(evalAny(cond, env)) != 0 then
@@ -403,6 +415,19 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case _ => v
 
       case TSizeof(size, _) => IntVal(size)
+
+      case TLen(inner, _) =>
+        evalAny(inner, env) match
+          case StrVal(s) => IntVal(s.getBytes("UTF-8").length.toLong)
+          case SliceVal(_, _, len, _) => IntVal(len.toLong)
+          case ArrVal(cells, _) => IntVal(cells.length.toLong)
+          case _ => throw RuntimeError("len: unsupported type")
+
+      case TCap(inner, _) =>
+        evalAny(inner, env) match
+          case SliceVal(_, _, _, cap) => IntVal(cap.toLong)
+          case ArrVal(cells, _) => IntVal(cells.length.toLong)
+          case _ => throw RuntimeError("cap: unsupported type")
 
       case TFieldPreInc(obj, fieldIndex, _) =>
         val ArrVal(cells, off) = evalAny(obj, env): @unchecked

@@ -72,11 +72,12 @@ class SyslParser extends StandardTokenParsers {
     ident ~ (":" ~> typeRef) ^^ { case name ~ t => ParamAST(name, t) }
 
   lazy val typeName: Parser[String] =
-    "int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "double" | "f64" | "bool" | "void" | ident
+    "int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "double" | "f64" | "bool" | "void" | "string" | ident
 
-  // Full type reference: *int, **int, [5]int, func(int)->int, int, etc.
+  // Full type reference: *int, **int, [5]int, []int (slice), func(int)->int, string, int, etc.
   lazy val typeRef: Parser[String] =
     "*" ~> typeRef ^^ (t => s"*$t") |
+      "[" ~> "]" ~> typeRef ^^ (t => s"[]$t") |
       "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => s"[$n]$t" } |
       funcTypeRef |
       typeName
@@ -307,7 +308,8 @@ class SyslParser extends StandardTokenParsers {
     "*" ~> typeRef ^^ (t => SizeofTypeAST(s"*$t")) |
       "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => SizeofTypeAST(s"[$n]$t") } |
       funcTypeRef ^^ SizeofTypeAST.apply |
-      ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "double" | "f64" | "bool" | "void") ^^ SizeofTypeAST.apply |
+      "[" ~> "]" ~> typeRef ^^ (t => SizeofTypeAST(s"[]$t")) |
+      ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "double" | "f64" | "bool" | "void" | "string") ^^ SizeofTypeAST.apply |
       expr ^^ SizeofExprAST.apply
 
   lazy val castType: Parser[String] =

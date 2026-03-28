@@ -32,12 +32,12 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
     analyzeExprType("main() -> int = true\n") shouldBe BoolType
   }
 
-  "string literal has ArrayType(I8)" in {
+  "string literal has StringType" in {
     analyzeExprType(
       """main() -> int
         |    s = "hello"
         |    s
-        |""".stripMargin) shouldBe ArrayType(I8, 0)
+        |""".stripMargin) shouldBe StringType
   }
 
   // ===== Arithmetic type inference =====
