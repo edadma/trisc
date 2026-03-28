@@ -81,29 +81,36 @@ object FontGen:
               fontData(baseOff + dy * cellW + dx) = src.toByte
 
     // Generate sysl source
+    val literate = outputPath.endsWith(".lsysl")
+    val indent = if literate then "  " else ""
+    val dataIndent = if literate then "      " else "    "
     val pw = new PrintWriter(new FileWriter(outputPath))
     try
-      pw.println(s"Font data generated from ${fontPath.split('/').last} at ${pixelSize}px.")
-      pw.println(s"Cell size: ${cellW}x${cellH}, characters 32-126 (${charCount} glyphs).")
-      pw.println(s"Each glyph is ${cellW * cellH} bytes (row-major, 1 byte per pixel, grayscale alpha).")
-      pw.println()
-      pw.println(s"  FONT_CELL_W = $cellW")
-      pw.println(s"  FONT_CELL_H = $cellH")
-      pw.println(s"  FONT_FIRST = $FIRST_CHAR")
-      pw.println(s"  FONT_LAST = $LAST_CHAR")
-      pw.println(s"  FONT_COUNT = $charCount")
+      if literate then
+        pw.println(s"Font data generated from ${fontPath.split('/').last} at ${pixelSize}px.")
+        pw.println(s"Cell size: ${cellW}x${cellH}, characters 32-126 (${charCount} glyphs).")
+        pw.println(s"Each glyph is ${cellW * cellH} bytes (row-major, 1 byte per pixel, grayscale alpha).")
+        pw.println()
+      else
+        pw.println(s"// Font data: ${fontPath.split('/').last}, ${pixelSize}px, ${cellW}x${cellH} cells, ${charCount} glyphs")
+
+      pw.println(s"${indent}FONT_CELL_W = $cellW")
+      pw.println(s"${indent}FONT_CELL_H = $cellH")
+      pw.println(s"${indent}FONT_FIRST = $FIRST_CHAR")
+      pw.println(s"${indent}FONT_LAST = $LAST_CHAR")
+      pw.println(s"${indent}FONT_COUNT = $charCount")
       pw.println()
 
       // Emit the font data array
-      pw.print(s"  font_data: [${totalBytes}]byte = [")
+      pw.print(s"${indent}font_data: [${totalBytes}]byte = [")
       for i <- 0 until totalBytes do
         if i > 0 then pw.print(", ")
         if i % 16 == 0 then
           pw.println()
-          pw.print("      ")
+          pw.print(dataIndent)
         pw.print(s"0x${"%02x".format(fontData(i) & 0xff)}")
       pw.println()
-      pw.println("  ]")
+      pw.println(s"${indent}]")
     finally
       pw.close()
 
