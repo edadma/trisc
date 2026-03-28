@@ -18,8 +18,8 @@ cd "$REPO_ROOT"
 
 DIR=examples/bare-metal-hello
 
-echo "=== Compiling hello.sysl → hello.tof ==="
-sbt -error "syslCliJVM/run compile $DIR/hello.sysl --emit tof -o $DIR/hello.tof"
+echo "=== Compiling hello.lsysl → hello.tof ==="
+sbt -error "syslCliJVM/run compile $DIR/hello.lsysl --emit tof -o $DIR/hello.tof"
 
 echo "=== Assembling boot.asm → boot.tof ==="
 sbt -error "triscCliJVM/run asm $DIR/boot.asm -o $DIR/boot.tof"
