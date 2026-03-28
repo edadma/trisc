@@ -199,6 +199,11 @@ lazy val docsCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .jvmSettings(jvmNativeStubs)
   .nativeSettings(jvmNativeStubs)
 
+lazy val ttf = project
+  .in(file("ttf/scala"))
+  .settings(commonSettings)
+  .settings(name := "trisc-ttf")
+
 lazy val root = project
   .in(file("."))
   .aggregate(
@@ -212,6 +217,7 @@ lazy val root = project
     triscCli.jvm, triscCli.js, triscCli.native,
     syslCli.jvm, syslCli.js, syslCli.native,
     docsCli.jvm, docsCli.js, docsCli.native,
+    ttf,
   )
   .settings(
     name                := "trisc",
