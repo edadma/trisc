@@ -2,8 +2,6 @@ package io.github.edadma.trisc
 
 import scopt.OParser
 
-import java.io.File
-
 sealed trait SyslCommand
 case class CompileCommand(
     inputs: Seq[String] = Seq.empty,
@@ -116,10 +114,18 @@ object SyslCli:
   def parse(args: Seq[String]): Option[SyslConfig] =
     OParser.parse(parser, args, SyslConfig())
 
+  private case class CliError(msg: String) extends RuntimeException(msg)
+
+  private def fail(msg: String): Nothing =
+    System.err.println(msg)
+    throw CliError(msg)
+
   def execute(config: SyslConfig): Unit =
-    config.command match
-      case cmd: CompileCommand => executeCompile(cmd)
-      case cmd: RunCommand     => executeRun(cmd)
+    try
+      config.command match
+        case cmd: CompileCommand => executeCompile(cmd)
+        case cmd: RunCommand     => executeRun(cmd)
+    catch case CliError(_) => () // already printed
 
   private def executeCompile(cmd: CompileCommand): Unit =
     val sources = resolveSources(cmd.inputs)
@@ -132,14 +138,8 @@ object SyslCli:
         val codegen = new SyslTriscCodegen
         for unit <- result.units do
           val asm = codegen.generate(unit.typed)
-          val outFile = cmd.output match
-            case Some(out) if result.units.size == 1 => out
-            case Some(out) =>
-              val dir = new File(out)
-              if !dir.exists() then dir.mkdirs()
-              new File(dir, unit.name + ".asm").getPath
-            case None => unit.name + ".asm"
-          writeFile(outFile, asm)
+          val outFile = outputPath(cmd.output, unit.name, ".asm", result.units.size)
+          io.writeFile(outFile, asm)
           System.err.println(s"  ${unit.name} -> $outFile")
 
       case "tof" =>
@@ -147,28 +147,16 @@ object SyslCli:
         for unit <- result.units do
           val asm = codegen.generate(unit.typed)
           val tof = assemble(asm, relocatable = true)
-          val outFile = cmd.output match
-            case Some(out) if result.units.size == 1 => out
-            case Some(out) =>
-              val dir = new File(out)
-              if !dir.exists() then dir.mkdirs()
-              new File(dir, unit.name + ".tof").getPath
-            case None => unit.name + ".tof"
-          writeFile(outFile, tof.serialize)
+          val outFile = outputPath(cmd.output, unit.name, ".tof", result.units.size)
+          io.writeFile(outFile, tof.serialize)
           System.err.println(s"  ${unit.name} -> $outFile")
 
       case "llvm" =>
         val codegen = new SyslLLVMCodegen
         for unit <- result.units do
           val ir = codegen.generate(unit.typed)
-          val outFile = cmd.output match
-            case Some(out) if result.units.size == 1 => out
-            case Some(out) =>
-              val dir = new File(out)
-              if !dir.exists() then dir.mkdirs()
-              new File(dir, unit.name + ".ll").getPath
-            case None => unit.name + ".ll"
-          writeFile(outFile, ir)
+          val outFile = outputPath(cmd.output, unit.name, ".ll", result.units.size)
+          io.writeFile(outFile, ir)
           System.err.println(s"  ${unit.name} -> $outFile")
 
       case _ => System.err.println(s"Unknown emit format: ${cmd.emit}")
@@ -182,8 +170,7 @@ object SyslCli:
       val parser = new SyslParser
       parser.parseProgram(source) match
         case Left(err) =>
-          System.err.println(s"parse error: $err")
-          sys.exit(1)
+          fail(s"parse error: $err")
         case Right(ast) =>
           val analyzer = new SyslAnalyzer
           val typed = analyzer.analyze(ast)
@@ -199,32 +186,37 @@ object SyslCli:
       val value = interpreter.run(merged)
       if value != 0 then println(value)
 
+  private def io: FileOps = FileOps.instance
+
+  private def isSyslSource(name: String): Boolean =
+    name.endsWith(".sysl") || name.endsWith(".lsysl")
+
+  private def resolveSource(path: String): (String, String) =
+    val name = io.fileName(path)
+    val raw = io.readFile(path)
+    if name.endsWith(".lsysl") then
+      val doc = new LiterateParser().parse(raw)
+      (name.stripSuffix(".lsysl"), LiterateRenderer.tangle(doc))
+    else
+      (name.stripSuffix(".sysl"), raw)
+
   private def resolveSources(inputs: Seq[String]): Map[String, String] =
-    if inputs.size == 1 then
-      val f = new File(inputs.head)
-      if f.isDirectory then
-        val files = f.listFiles().filter(_.getName.endsWith(".sysl"))
-        if files.isEmpty then
-          System.err.println(s"error: no .sysl files in directory: ${inputs.head}")
-          sys.exit(1)
-        files.map(f => (f.getName.stripSuffix(".sysl"), readFile(f.getPath))).toMap
-      else
-        Map(f.getName.stripSuffix(".sysl") -> readFile(f.getPath))
+    if inputs.size == 1 && io.isDirectory(inputs.head) then
+      val files = io.listFiles(inputs.head).filter(f => isSyslSource(io.fileName(f)))
+      if files.isEmpty then
+        fail(s"error: no .sysl or .lsysl files in directory: ${inputs.head}")
+      files.map(f => resolveSource(f)).toMap
     else
       inputs.map { path =>
-        val f = new File(path)
-        if !f.exists() then
-          System.err.println(s"error: file not found: $path")
-          sys.exit(1)
-        (f.getName.stripSuffix(".sysl"), readFile(f.getPath))
+        if !io.exists(path) then
+          fail(s"error: file not found: $path")
+        resolveSource(path)
       }.toMap
 
-  private def readFile(path: String): String =
-    val source = scala.io.Source.fromFile(path)
-    try source.mkString
-    finally source.close()
-
-  private def writeFile(path: String, content: String): Unit =
-    val writer = new java.io.PrintWriter(path)
-    try writer.write(content)
-    finally writer.close()
+  private def outputPath(output: Option[String], name: String, ext: String, unitCount: Int): String =
+    output match
+      case Some(out) if unitCount == 1 => out
+      case Some(out) =>
+        if !io.exists(out) then io.mkdirs(out)
+        io.joinPath(out, name + ext)
+      case None => name + ext

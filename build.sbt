@@ -129,6 +129,15 @@ lazy val cpu = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .jvmSettings(jvmNativeStubs)
   .nativeSettings(jvmNativeStubs)
 
+lazy val docs = crossProject(JSPlatform, JVMPlatform, NativePlatform)
+  .crossType(CrossType.Pure)
+  .in(file("docs"))
+  .settings(commonSettings)
+  .settings(name := "trisc-docs")
+  .jsSettings(jsSettings)
+  .jvmSettings(jvmNativeStubs)
+  .nativeSettings(jvmNativeStubs)
+
 lazy val sysl = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .crossType(CrossType.Pure)
   .in(file("sysl"))
@@ -140,6 +149,7 @@ lazy val sysl = crossProject(JSPlatform, JVMPlatform, NativePlatform)
       "io.github.edadma" %%% "indentation" % "0.0.1",
     ),
   )
+  .dependsOn(docs)
   .jsSettings(jsSettings)
   .jvmSettings(jvmNativeStubs)
   .nativeSettings(jvmNativeStubs)
@@ -168,6 +178,24 @@ lazy val syslCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   )
   .dependsOn(sysl, asm, tof)
   .jsSettings(jsSettings)
+  .jsSettings(
+    scalaJSUseMainModuleInitializer := true,
+  )
+  .jvmSettings(jvmNativeStubs)
+  .nativeSettings(jvmNativeStubs)
+
+lazy val docsCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
+  .in(file("docs-cli"))
+  .settings(commonSettings)
+  .settings(
+    name := "docs-cli",
+    libraryDependencies += "com.github.scopt" %%% "scopt" % "4.1.0",
+  )
+  .dependsOn(docs)
+  .jsSettings(jsSettings)
+  .jsSettings(
+    scalaJSUseMainModuleInitializer := true,
+  )
   .jvmSettings(jvmNativeStubs)
   .nativeSettings(jvmNativeStubs)
 
@@ -179,9 +207,11 @@ lazy val root = project
     tof.jvm, tof.js, tof.native,
     asm.jvm, asm.js, asm.native,
     cpu.jvm, cpu.js, cpu.native,
+    docs.jvm, docs.js, docs.native,
     sysl.jvm, sysl.js, sysl.native,
     triscCli.jvm, triscCli.js, triscCli.native,
     syslCli.jvm, syslCli.js, syslCli.native,
+    docsCli.jvm, docsCli.js, docsCli.native,
   )
   .settings(
     name                := "trisc",
