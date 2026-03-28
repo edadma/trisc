@@ -167,11 +167,11 @@ object TriscCli:
     val tof = TOF.deserialize(tofStr)
     if tof.tofType == TOFType.Executable then tof else Linker.link(Seq(Runtime.bootTof, tof, Runtime.ioTof))
 
-  def setupCpu(linked: TOF, outputFn: String => Unit = s => print(s)): (CPU, Memory) =
+  def setupCpu(linked: TOF, outputFn: String => Unit = s => print(s), extraDevices: Seq[Addressable] = Nil): (CPU, Memory) =
     val stdout = new Stdout(Runtime.stdoutAddress, outputFn)
     val ramSize = Runtime.stdoutAddress.toInt
     val ram = new RAM(0, ramSize)
-    val mem = new Memory("Memory", ram, stdout)
+    val mem = new Memory("Memory", (Seq(ram, stdout) ++ extraDevices)*)
     linked.load(mem)
     val cpu = new CPU(mem, Nil)
     cpu.reset() // like 68000: reads SSP from vector[0], PC from vector[1], enters supervisor mode

@@ -11,18 +11,12 @@ object EmulatorGui:
     SwingUtilities.invokeLater(() => {
       val frame = new JFrame("TRISC Emulator")
       frame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE)
-      frame.setSize(720, 480)
 
-      val console = new JTextArea()
-      console.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 14))
-      console.setBackground(Color.BLACK)
-      console.setForeground(Color.GREEN)
-      console.setCaretColor(Color.GREEN)
-      console.setEditable(false)
-      console.setLineWrap(true)
+      val terminal = new TerminalWidget()
+      val parser = new ANSIParser(terminal)
+      val keyboard = new KeyboardDevice(Runtime.keyboardAddress, terminal)
 
-      val scrollPane = new JScrollPane(console)
-      frame.getContentPane.add(scrollPane, BorderLayout.CENTER)
+      frame.getContentPane.add(terminal, BorderLayout.CENTER)
 
       // Status bar
       val statusBar = new JLabel(" Ready")
@@ -40,14 +34,16 @@ object EmulatorGui:
       toolbar.add(resetBtn)
       frame.getContentPane.add(toolbar, BorderLayout.NORTH)
 
-      // CPU setup — output to console on EDT
+      // CPU setup — output feeds the ANSI parser on the EDT
       val outputFn: String => Unit = s =>
-        SwingUtilities.invokeLater(() => {
-          console.append(s)
-          console.setCaretPosition(console.getDocument.getLength)
-        })
+        val update: Runnable = () => {
+          for b <- s.getBytes("UTF-8") do parser.feed(b & 0xff)
+          terminal.repaint()
+        }
+        if SwingUtilities.isEventDispatchThread then update.run()
+        else SwingUtilities.invokeAndWait(update)
 
-      var cpuState: (CPU, Memory) = TriscCli.setupCpu(linked, outputFn)
+      var cpuState: (CPU, Memory) = TriscCli.setupCpu(linked, outputFn, Seq(keyboard))
       var cpu = cpuState._1
       if cmd.limit > 0 then cpu.limit = cmd.limit
 
@@ -80,8 +76,9 @@ object EmulatorGui:
 
       // Reset
       resetBtn.addActionListener(_ => {
-        console.setText("")
-        cpuState = TriscCli.setupCpu(linked, outputFn)
+        terminal.clear(Color.GREEN, Color.BLACK)
+        parser.reset()
+        cpuState = TriscCli.setupCpu(linked, outputFn, Seq(keyboard))
         cpu = cpuState._1
         if cmd.limit > 0 then cpu.limit = cmd.limit
         updateStatus()
@@ -92,8 +89,10 @@ object EmulatorGui:
         override def windowClosed(e: WindowEvent): Unit = latch.countDown()
       })
 
+      frame.pack()
       frame.setLocationRelativeTo(null)
       frame.setVisible(true)
+      terminal.requestFocusInWindow()
     })
 
     latch.await()

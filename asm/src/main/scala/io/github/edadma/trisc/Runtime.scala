@@ -4,7 +4,8 @@ package io.github.edadma.trisc
 // Linked with user code when emitting TOF.
 object Runtime:
   val stdoutAddress = 0xFF00L // near top of default 64KB address space
-  val initialSSP: Long = stdoutAddress - 8 // stack grows down, below stdout device
+  val keyboardAddress = 0xFF04L // keyboard device: +0 = status, +1 = data (right after stdout)
+  val initialSSP: Long = stdoutAddress - 8 // stack grows down, below devices
 
   // Boot module — must be linked first so vector table is at address 0.
   // Like the 68000: vector[0] = initial SSP, vector[1] = initial PC.
@@ -63,6 +64,22 @@ object Runtime:
        |  stb r1, r2, r0
        |  ldi r1, 10
        |  stb r1, r2, r0
+       |  jalr r0, r6
+       |
+       |; kbhit: return 1 in r1 if keyboard has data, 0 otherwise
+       |kbhit
+       |  movi r2, ${keyboardAddress}
+       |  ldb r1, r2, r0
+       |  jalr r0, r6
+       |
+       |; getchar: block until keyboard has data, return byte in r1
+       |getchar
+       |  movi r2, ${keyboardAddress}
+       |_getchar_wait
+       |  ldb r1, r2, r0
+       |  beq r1, r0, _getchar_wait
+       |  addi r2, r2, 1
+       |  ldb r1, r2, r0
        |  jalr r0, r6
        |""".stripMargin
 
