@@ -66,3 +66,4 @@ global default_isr, func
 
 default_isr
   halt
+  align 8
