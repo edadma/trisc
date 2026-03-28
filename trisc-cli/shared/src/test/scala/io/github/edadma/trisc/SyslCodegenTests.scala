@@ -1092,8 +1092,7 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
         |""".stripMargin) shouldBe 42
   }
 
-  // Blocked on codegen bug: for-update `i++` clobbers r3 when variable offset requires movi
-  "sieve of eratosthenes" ignore {
+  "sieve of eratosthenes" in {
     compileAndRun(
       """main() -> int
         |    arr: [101]byte

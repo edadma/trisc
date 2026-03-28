@@ -469,7 +469,6 @@ class SyslTriscCodegen(addresses: Int = 2):
         emitAddImm(2, 5, local.offset)
         emitLoad(1, 2, local.typ)
         emit(s"  addi r3, r1, $step")
-        emitAddImm(2, 5, local.offset)
         emitStore(3, 2, local.typ)
 
       case TPostDec(name, typ) =>
@@ -481,7 +480,6 @@ class SyslTriscCodegen(addresses: Int = 2):
         emitAddImm(2, 5, local.offset)
         emitLoad(1, 2, local.typ)
         emit(s"  addi r3, r1, -$step")
-        emitAddImm(2, 5, local.offset)
         emitStore(3, 2, local.typ)
 
       case TCast(inner, target) =>
