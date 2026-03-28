@@ -189,17 +189,29 @@ object SyslCli:
 
   private def io: FileOps = FileOps.instance
 
+  private def isSyslSource(name: String): Boolean =
+    name.endsWith(".sysl") || name.endsWith(".lsysl")
+
+  private def resolveSource(path: String): (String, String) =
+    val name = io.fileName(path)
+    val raw = io.readFile(path)
+    if name.endsWith(".lsysl") then
+      val doc = new LiterateParser().parse(raw)
+      (name.stripSuffix(".lsysl"), LiterateRenderer.tangle(doc))
+    else
+      (name.stripSuffix(".sysl"), raw)
+
   private def resolveSources(inputs: Seq[String]): Map[String, String] =
     if inputs.size == 1 && io.isDirectory(inputs.head) then
-      val files = io.listFiles(inputs.head).filter(io.fileName(_).endsWith(".sysl"))
+      val files = io.listFiles(inputs.head).filter(f => isSyslSource(io.fileName(f)))
       if files.isEmpty then
-        fail(s"error: no .sysl files in directory: ${inputs.head}")
-      files.map(f => (io.fileName(f).stripSuffix(".sysl"), io.readFile(f))).toMap
+        fail(s"error: no .sysl or .lsysl files in directory: ${inputs.head}")
+      files.map(f => resolveSource(f)).toMap
     else
       inputs.map { path =>
         if !io.exists(path) then
           fail(s"error: file not found: $path")
-        (io.fileName(path).stripSuffix(".sysl"), io.readFile(path))
+        resolveSource(path)
       }.toMap
 
   private def outputPath(output: Option[String], name: String, ext: String, unitCount: Int): String =

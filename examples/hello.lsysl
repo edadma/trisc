@@ -1,0 +1,11 @@
+@main
+This is a simple hello world program written in literate SysL.
+It demonstrates the basic literate programming features.
+@
+
+The main function prints "Hi" by calling putchar for each character.
+    main() -> int
+        putchar(72)
+        putchar(105)
+        putchar(10)
+        0
