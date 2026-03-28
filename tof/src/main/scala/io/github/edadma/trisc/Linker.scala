@@ -6,10 +6,13 @@ import scala.collection.mutable.ArrayBuffer
 object Linker:
   case class LinkerError(msg: String) extends RuntimeException(msg)
 
-  def link(tofs: Seq[TOF], baseAddress: Long = 0, addresses: Int = 2): TOF =
-    link(tofs, LinkerScript(), baseAddress, addresses)
+  def link(tofs: Seq[TOF], baseAddress: Long = 0, addresses: Int = 2, relocatable: Boolean = false): TOF =
+    link(tofs, LinkerScript(), baseAddress, addresses, relocatable)
 
   def link(tofs: Seq[TOF], script: LinkerScript, baseAddress: Long, addresses: Int): TOF =
+    link(tofs, script, baseAddress, addresses, false)
+
+  def link(tofs: Seq[TOF], script: LinkerScript, baseAddress: Long, addresses: Int, relocatable: Boolean): TOF =
     case class PlacedSegment(
         name: String,
         org: Long,
@@ -100,10 +103,21 @@ object Linker:
         globalSymbols(sym.name) = (absAddr, sym)
 
     // Phase 4: resolve relocations
+    // When producing a relocatable executable, collect base-relative relocs per placed segment
+    val outputRelocs = new ArrayBuffer[ArrayBuffer[TOFReloc]]
+
     for seg <- placed do
       for ext <- seg.externs do
         if !globalSymbols.contains(ext) then
           throw LinkerError(s"undefined symbol: '$ext'")
+
+      val segRelocs = if relocatable then
+        val buf = new ArrayBuffer[TOFReloc]
+        outputRelocs += buf
+        buf
+      else
+        outputRelocs += ArrayBuffer.empty
+        null
 
       for reloc <- seg.relocs do
         val (addr, _) = globalSymbols.getOrElse(
@@ -139,6 +153,10 @@ object Linker:
           case RelocType.MOVI4 =>
             patchMovi(seg.data, reloc.offset.toInt, addr, 4)
 
+        // Preserve reloc as base-relative (empty symbol name)
+        if relocatable then
+          segRelocs += TOFReloc(reloc.typ, reloc.offset, "")
+
     // Phase 5: resolve entry point (script entry overrides TOF entry)
     val entry = script.entry.orElse(tofs.flatMap(_.entry).lastOption)
     for name <- entry do
@@ -148,12 +166,13 @@ object Linker:
     // Phase 6: merge same-named segments into single contiguous segments.
     // This is required because TOF serialize/deserialize uses segment name as key,
     // so multiple segments with the same name would lose their distinct origins.
-    val mergedSegments = new mutable.LinkedHashMap[String, (Long, ArrayBuffer[Byte], ArrayBuffer[TOFSymbol])]
-    for seg <- placed do
+    val mergedSegments = new mutable.LinkedHashMap[String, (Long, ArrayBuffer[Byte], ArrayBuffer[TOFSymbol], ArrayBuffer[TOFReloc])]
+    for (seg, idx) <- placed.zipWithIndex do
+      val segRelocs = outputRelocs(idx)
       mergedSegments.get(seg.name) match
         case None =>
-          mergedSegments(seg.name) = (seg.org, ArrayBuffer.from(seg.data), ArrayBuffer.from(seg.symbols))
-        case Some((baseOrg, mergedData, mergedSyms)) =>
+          mergedSegments(seg.name) = (seg.org, ArrayBuffer.from(seg.data), ArrayBuffer.from(seg.symbols), ArrayBuffer.from(segRelocs))
+        case Some((baseOrg, mergedData, mergedSyms, mergedRelocs)) =>
           val dataOffset = (seg.org - baseOrg).toInt
           // Pad if there's a gap between segments
           while mergedData.length < dataOffset do mergedData += 0.toByte
@@ -161,12 +180,17 @@ object Linker:
           // Adjust symbol offsets relative to merged segment start
           for sym <- seg.symbols do
             mergedSyms += sym.copy(offset = sym.offset + dataOffset)
+          // Adjust reloc offsets relative to merged segment start
+          for reloc <- segRelocs do
+            mergedRelocs += reloc.copy(offset = reloc.offset + dataOffset)
 
-    val outSegments = mergedSegments.map { case (name, (segOrg, data, syms)) =>
-      TOF.Segment(name, segOrg, Seq(TOF.DataChunk(data.toSeq)), syms.toSeq)
+    val outType = if relocatable then TOFType.Relocatable else TOFType.Executable
+
+    val outSegments = mergedSegments.map { case (name, (segOrg, data, syms, relocs)) =>
+      TOF.Segment(name, segOrg, Seq(TOF.DataChunk(data.toSeq)), syms.toSeq, relocs = relocs.toSeq)
     }.toSeq
 
-    TOF(entry, outSegments)
+    TOF(entry, outSegments, outType)
 
   private def patchMovi(data: ArrayBuffer[Byte], offset: Int, addr: Long, n: Int): Unit =
     val a = addr.toInt

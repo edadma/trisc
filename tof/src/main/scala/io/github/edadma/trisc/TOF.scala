@@ -9,6 +9,9 @@ enum SymbolType:
 enum RelocType:
   case MOVI2, MOVI3, MOVI4, ABS32, ABS64
 
+enum TOFType:
+  case Object, Executable, Relocatable
+
 case class TOFSymbol(name: String, offset: Long, typ: SymbolType, size: Option[Long] = None, typeInfo: Option[String] = None)
 case class TOFReloc(typ: RelocType, offset: Long, symbol: String)
 
@@ -42,10 +45,13 @@ object TOF:
     private val segments = new mutable.LinkedHashMap[String, TOFBuilderSegment]
     private var current: TOFBuilderSegment = current
     private var _entry: Option[String] = None
+    private var _tofType: TOFType = TOFType.Object
 
     def org: Long = current.org
 
     def setEntry(name: String): Unit = _entry = Some(name)
+
+    def setType(typ: TOFType): Unit = _tofType = typ
 
     def length: Long = current.length
 
@@ -78,6 +84,7 @@ object TOF:
           seg.externs.toSeq,
           seg.relocs.toSeq,
         )).toSeq,
+        _tofType,
       )
 
     def segmentDefined(name: String): Boolean = segments contains name
@@ -181,6 +188,12 @@ object TOF:
           line match
             case s"# $text"       => b.addComment(text)
             case s"#$text"        => b.addComment(text)
+            case s"TYPE:$typStr"  =>
+              typStr match
+                case "object"      => b.setType(TOFType.Object)
+                case "executable"  => b.setType(TOFType.Executable)
+                case "relocatable" => b.setType(TOFType.Relocatable)
+                case _             => err(s"unknown TOF type '$typStr'")
             case s"ENTRY:$name"   => b.setEntry(name)
             case s"SEGMENT:$rest" => parseSegment(rest)
             case s"SYMBOL:$rest"  => parseSymbol(rest)
@@ -194,7 +207,7 @@ object TOF:
 
     b.tof
 
-class TOF(val entry: Option[String], val segments: Seq[TOF.Segment]):
+class TOF(val entry: Option[String], val segments: Seq[TOF.Segment], val tofType: TOFType = TOFType.Object):
 
   def this(segments: Seq[TOF.Segment]) = this(None, segments)
 
@@ -212,6 +225,51 @@ class TOF(val entry: Option[String], val segments: Seq[TOF.Segment]):
         case TOF.CommentChunk(_)  =>
       }
 
+  def load(mem: Addressable, baseAddress: Long): Unit =
+    val linkTimeBase = segments.headOption.map(_.org).getOrElse(0L)
+    val delta = baseAddress - linkTimeBase
+
+    // Load segment data at adjusted addresses
+    for seg <- segments do
+      var addr = seg.org + delta
+      seg.chunks foreach {
+        case TOF.DataChunk(data) =>
+          mem.load(addr, data)
+          addr += data.length
+        case TOF.ResChunk(size) => addr += size
+        case TOF.CommentChunk(_) =>
+      }
+
+    // Patch relocations in memory
+    for seg <- segments do
+      val segBase = seg.org + delta
+      for reloc <- seg.relocs do
+        val patchAddr = segBase + reloc.offset
+        reloc.typ match
+          case RelocType.ABS32 =>
+            val oldVal = mem.readInt(patchAddr)
+            mem.writeInt(patchAddr, (oldVal + delta).toInt)
+          case RelocType.ABS64 =>
+            val oldVal = mem.readLong(patchAddr)
+            mem.writeLong(patchAddr, oldVal + delta)
+          case rt @ (RelocType.MOVI2 | RelocType.MOVI3 | RelocType.MOVI4) =>
+            val n = rt match
+              case RelocType.MOVI2 => 2
+              case RelocType.MOVI3 => 3
+              case RelocType.MOVI4 => 4
+            patchMoviInMemory(mem, patchAddr, delta, n)
+
+  private def patchMoviInMemory(mem: Addressable, addr: Long, delta: Long, n: Int): Unit =
+    // Read current encoded address from instruction immediate bytes
+    var current = 0L
+    for i <- 0 until n do
+      current = (current << 8) | mem.readByteUnsigned(addr + i * 2 + 1)
+    // Apply delta and write back
+    val newVal = current + delta
+    for i <- 0 until n do
+      val shift = (n - 1 - i) * 8
+      mem.writeByte(addr + i * 2 + 1, (newVal >> shift) & 0xff)
+
   // --- Query ---
 
   def isFullyResolved: Boolean = segments.forall(s => s.externs.isEmpty && s.relocs.isEmpty)
@@ -223,6 +281,10 @@ class TOF(val entry: Option[String], val segments: Seq[TOF.Segment]):
         sym <- seg.symbols.find(_.name == name)
       yield seg.org + sym.offset
     }
+
+  def entryAddress(baseAddress: Long): Option[Long] =
+    val linkTimeBase = segments.headOption.map(_.org).getOrElse(0L)
+    entryAddress.map(_ + baseAddress - linkTimeBase)
 
   def allSymbols: Seq[(String, TOFSymbol)] =
     for seg <- segments; sym <- seg.symbols yield (seg.name, sym)
@@ -256,6 +318,11 @@ class TOF(val entry: Option[String], val segments: Seq[TOF.Segment]):
     val buf = new StringBuilder
 
     buf ++= "TOF v2\n"
+
+    tofType match
+      case TOFType.Executable  => buf ++= "TYPE:executable\n"
+      case TOFType.Relocatable => buf ++= "TYPE:relocatable\n"
+      case TOFType.Object      => // omit for backward compatibility
 
     for e <- entry do
       buf ++= s"ENTRY:$e\n"

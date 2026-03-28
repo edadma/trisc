@@ -348,4 +348,163 @@ class LinkerTests extends TestHelpers {
     cpu2.run()
     cpu2.r(1).read shouldBe 42
   }
+
+  // ===== Relocatable executables =====
+
+  "relocatable link produces Relocatable type" in {
+    val main = assemble(
+      """extern helper
+        |global main, func
+        |main
+        |  movi r1, helper
+        |  jalr r7, r1
+        |  halt
+        |""".stripMargin)
+    val lib = assemble(
+      """global helper, func
+        |helper
+        |  ldi r2, 42
+        |  jalr r0, r7
+        |""".stripMargin, relocatable = true)
+
+    val linked = Linker.link(Seq(main, lib), relocatable = true)
+    linked.tofType shouldBe TOFType.Relocatable
+  }
+
+  "relocatable link preserves relocs with empty symbol" in {
+    val tof = assemble(
+      """global main, func
+        |main
+        |  movi r1, main
+        |  halt
+        |""".stripMargin, relocatable = true)
+
+    val linked = Linker.link(Seq(tof), relocatable = true)
+    linked.allRelocs should not be empty
+    linked.allRelocs.foreach { case (_, reloc) =>
+      reloc.symbol shouldBe ""
+    }
+    linked.allExterns shouldBe empty
+  }
+
+  "relocatable link round-trips through serialize/deserialize" in {
+    val tof = assemble(
+      """global main, func
+        |main
+        |  movi r1, main
+        |  halt
+        |""".stripMargin, relocatable = true)
+
+    val linked = Linker.link(Seq(tof), relocatable = true)
+    val serialized = linked.serialize
+    val deserialized = TOF.deserialize(serialized)
+
+    deserialized.tofType shouldBe TOFType.Relocatable
+    deserialized.allRelocs.length shouldBe linked.allRelocs.length
+  }
+
+  "relocatable executable loads and runs at link-time base" in {
+    val boot = assemble(
+      """dd 0xFF0
+        |dd main
+        |resb 144
+        |""".stripMargin, relocatable = true)
+    val prog = assemble(
+      """global main, func
+        |main
+        |  ldi r1, 42
+        |  halt
+        |""".stripMargin, relocatable = true)
+
+    val linked = Linker.link(Seq(boot, prog), relocatable = true)
+    val mem = new Memory("Memory", new RAM(0, 0x1000))
+    linked.load(mem) // load at link-time base (0)
+    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    cpu.reset()
+    cpu.run()
+    cpu.r(1).read shouldBe 42
+    cpu.state shouldBe State.Halt
+  }
+
+  "relocatable executable loads and runs at different base" in {
+    val boot = assemble(
+      """extern target
+        |global _start, func
+        |entry _start
+        |_start
+        |  movi r4, target
+        |  jalr r6, r4
+        |  halt
+        |""".stripMargin, relocatable = true)
+    val prog = assemble(
+      """global target, func
+        |target
+        |  ldi r1, 99
+        |  jalr r0, r6
+        |""".stripMargin, relocatable = true)
+
+    val linked = Linker.link(Seq(boot, prog), relocatable = true)
+
+    // Load at offset 0x200 instead of 0
+    val base = 0x200L
+    val mem = new Memory("Memory", new RAM(0, 0x1000))
+    linked.load(mem, base)
+    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    cpu.pc = linked.entryAddress(base).get
+    cpu.psr = 0x02 // supervisor mode
+    cpu.state = State.Run
+    cpu.r(7).write(0xF00)
+    cpu.run()
+    cpu.r(1).read shouldBe 99
+    cpu.state shouldBe State.Halt
+  }
+
+  "relocatable executable with vector table loads at different base" in {
+    val boot = assemble(
+      """extern main
+        |dd 0x1F00
+        |dd _start
+        |resb 144
+        |global _start, func
+        |entry _start
+        |_start
+        |  movi r4, main
+        |  jalr r6, r4
+        |  halt
+        |""".stripMargin, relocatable = true)
+    val prog = assemble(
+      """global main, func
+        |main
+        |  ldi r1, 77
+        |  jalr r0, r6
+        |""".stripMargin, relocatable = true)
+
+    val linked = Linker.link(Seq(boot, prog), relocatable = true)
+
+    // Verify ABS64 relocs exist (from dd _start reference in vector table)
+    val abs64Relocs = linked.allRelocs.filter(_._2.typ == RelocType.ABS64)
+    abs64Relocs should not be empty
+
+    // Verify relocs: should have ABS64 (dd _start) and MOVI2 (movi r4, main)
+    val moviRelocs = linked.allRelocs.filter(_._2.typ == RelocType.MOVI2)
+    moviRelocs should not be empty
+
+    // Now load at offset 0x400
+    val base = 0x400L
+    val mem = new Memory("Memory", new RAM(0, 0x2000))
+    linked.load(mem, base)
+
+    // Read relocated vector table
+    val pc = mem.readLong(base + 8)
+    pc should be >= base
+
+    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    cpu.pc = pc
+    cpu.psr = 0x02 // supervisor mode, interrupts enabled
+    cpu.state = State.Run
+    cpu.r(7).write(0x1F00)
+    cpu.run()
+    cpu.r(1).read shouldBe 77
+    cpu.state shouldBe State.Halt
+  }
 }
