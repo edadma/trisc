@@ -165,7 +165,7 @@ object TriscCli:
   def loadTof(cmd: RunCommand): TOF =
     val tofStr = readFile(cmd.input)
     val tof = TOF.deserialize(tofStr)
-    if tof.entryAddress.isDefined then tof else Linker.link(Seq(tof))
+    if tof.entryAddress.isDefined then tof else Linker.link(Seq(Runtime.bootTof, Runtime.ioTof, tof))
 
   def setupCpu(linked: TOF, outputFn: String => Unit = s => print(s)): (CPU, Memory) =
     val stdout = new Stdout(Runtime.stdoutAddress, outputFn)

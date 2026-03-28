@@ -1091,4 +1091,22 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
         |    x
         |""".stripMargin) shouldBe 42
   }
+
+  // Blocked on codegen bug: for-update `i++` clobbers r3 when variable offset requires movi
+  "sieve of eratosthenes" ignore {
+    compileAndRun(
+      """main() -> int
+        |    arr: [101]byte
+        |    arr[0] = 1
+        |    arr[1] = 1
+        |    for i = 2; i * i <= 100; i++
+        |        if arr[i] == 0 then
+        |            for j = i * i; j <= 100; j += i
+        |                arr[j] = 1
+        |    count = 0
+        |    for i = 2; i <= 100; i++
+        |        if arr[i] == 0 then count += 1
+        |    count
+        |""".stripMargin) shouldBe 25
+  }
 }
