@@ -60,8 +60,10 @@ class DisplayController(
       val layout = displayPanel.getLayout.asInstanceOf[CardLayout]
       if mode == 0 then
         terminal.setResolution(w, h)
+        terminal.clear(java.awt.Color.GREEN, java.awt.Color.BLACK)
         layout.show(displayPanel, "terminal")
       else
+        fbMemory.clear()
         framebuffer.setResolution(w, h)
         layout.show(displayPanel, "framebuffer")
       frame.pack()
