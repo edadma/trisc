@@ -17,10 +17,12 @@ class FramebufferWidget extends JComponent:
   refreshTimer.start()
 
   def setResolution(w: Int, h: Int): Unit =
-    fbWidth = math.max(1, math.min(w, 640))
-    fbHeight = math.max(1, math.min(h, 480))
+    fbWidth = math.max(1, math.min(w, 1920))
+    fbHeight = math.max(1, math.min(h, 1080))
     image = new BufferedImage(fbWidth, fbHeight, BufferedImage.TYPE_INT_ARGB)
-    scale = math.max(1, math.min(960 / fbWidth, 720 / fbHeight))
+    // Scale up small resolutions to fill ~960x720, 1:1 for anything larger
+    scale = if fbWidth >= 960 || fbHeight >= 720 then 1
+            else math.max(1, math.min(960 / fbWidth, 720 / fbHeight))
     revalidate()
 
   override def getPreferredSize: Dimension =

@@ -7,7 +7,7 @@ object Runtime:
   val keyboardAddress = 0xFF04L // keyboard device: +0 = status, +1 = data (right after stdout)
   val displayCtrlAddress = 0xFF06L // display controller: mode, commit, width, height (6 bytes)
   val framebufferAddress = 0x10000L // framebuffer pixel data (RGBA, max 640x480)
-  val framebufferMaxSize: Long = 640 * 480 * 4 // 1,228,800 bytes
+  val framebufferMaxSize: Long = 1920 * 1080 * 4 // 8,294,400 bytes
   val initialSSP: Long = stdoutAddress - 8 // stack grows down, below devices
 
   // Boot module — must be linked first so vector table is at address 0.
