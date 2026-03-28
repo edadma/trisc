@@ -90,7 +90,7 @@ class ADDI(a: Int, b: Int, imm: Int) extends ImmediateSignedInstruction(a, b, im
   def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.r(b).read + imm)
 
 abstract class BranchInstruction(a: Int, b: Int, imm: Int) extends Instruction:
-  def disassemble(cpu: CPU): String = f"$mnemonic r$a, r$b, 0x${cpu.pc + 2 + imm * 2}%04x ($imm)"
+  def disassemble(cpu: CPU): String = f"$mnemonic r$a, r$b, 0x${cpu.pc + imm * 2}%04x ($imm)"
 
 class BLS(a: Int, b: Int, imm: Int) extends BranchInstruction(a, b, imm):
   val mnemonic = "bls"

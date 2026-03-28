@@ -183,7 +183,7 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
       execute()
       count += 1
 
-    if limit > 0 && count > 0 then limit -= 1 // don't count wfi idle against limit
+    if limit > 0 then limit -= 1
 
     if state != State.Halt && state != State.DoubleFault && limit != 0 then
       interrupts foreach (_(this))
