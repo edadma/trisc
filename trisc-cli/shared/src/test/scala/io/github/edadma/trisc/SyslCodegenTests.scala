@@ -1418,4 +1418,268 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
         |    x
         |""".stripMargin) shouldBe 42
   }
+
+  // ===== Global variable operations =====
+
+  "global compound assign +=" in {
+    compileAndRun(
+      """var counter = 10
+        |
+        |main() -> int
+        |    counter += 32
+        |    counter
+        |""".stripMargin) shouldBe 42
+  }
+
+  "global compound assign += multiple times" in {
+    compileAndRun(
+      """var counter = 0
+        |
+        |inc()
+        |    counter += 1
+        |
+        |main() -> int
+        |    inc()
+        |    inc()
+        |    inc()
+        |    counter
+        |""".stripMargin) shouldBe 3
+  }
+
+  "global assign from local" in {
+    compileAndRun(
+      """var result = 0
+        |
+        |main() -> int
+        |    var x = 42
+        |    result = x
+        |    result
+        |""".stripMargin) shouldBe 42
+  }
+
+  "global assign from expression" in {
+    compileAndRun(
+      """var current = 0
+        |var count = 5
+        |var result = 0
+        |
+        |main() -> int
+        |    var next = current + 1
+        |    if next >= count
+        |        next = 0
+        |    result = next
+        |    result
+        |""".stripMargin) shouldBe 1
+  }
+
+  "global read in arithmetic" in {
+    compileAndRun(
+      """var base = 40
+        |
+        |main() -> int
+        |    var x = base + 2
+        |    x
+        |""".stripMargin) shouldBe 42
+  }
+
+  "compare local to global" in {
+    compileAndRun(
+      """var limit = 5
+        |
+        |main() -> int
+        |    var i = 0
+        |    var sum = 0
+        |    while i < limit
+        |        sum += 1
+        |        i += 1
+        |    sum
+        |""".stripMargin) shouldBe 5
+  }
+
+  "compare local >= global with wrap" in {
+    compileAndRun(
+      """var thread_count = 3
+        |
+        |main() -> int
+        |    var next = 2
+        |    next += 1
+        |    if next >= thread_count
+        |        next = 0
+        |    next
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ===== Struct pointer sequences =====
+
+  "multiple field writes then read all" in {
+    compileAndRun(
+      """struct TCB
+        |    ssp: int
+        |    state: int
+        |    priority: int
+        |
+        |var tcb: TCB
+        |
+        |main() -> int
+        |    var p: *TCB = &tcb
+        |    p.ssp = 100
+        |    p.state = 200
+        |    p.priority = 300
+        |    p.ssp + p.state + p.priority
+        |""".stripMargin) shouldBe 600
+  }
+
+  "write field then overwrite same field" in {
+    compileAndRun(
+      """struct Pair
+        |    a: int
+        |    b: int
+        |
+        |var p: Pair
+        |
+        |main() -> int
+        |    var pp: *Pair = &p
+        |    pp.a = 99
+        |    pp.a = 42
+        |    pp.a
+        |""".stripMargin) shouldBe 42
+  }
+
+  "function returns struct field" in {
+    compileAndRun(
+      """struct Entry
+        |    value: int
+        |
+        |var e: Entry
+        |
+        |get_value() -> int
+        |    var p: *Entry = &e
+        |    p.value
+        |
+        |main() -> int
+        |    var p: *Entry = &e
+        |    p.value = 42
+        |    get_value()
+        |""".stripMargin) shouldBe 42
+  }
+
+  // ===== Array index + struct field (MUL interaction) =====
+
+  "index struct array then read field" in {
+    compileAndRun(
+      """struct Item
+        |    x: int
+        |    y: int
+        |
+        |var items: [4]Item
+        |
+        |main() -> int
+        |    var p: *Item = &items[0]
+        |    p.x = 10
+        |    p.y = 20
+        |    p = &items[1]
+        |    p.x = 30
+        |    p.y = 40
+        |    p = &items[2]
+        |    p.x = 50
+        |    p.y = 60
+        |    var q: *Item = &items[1]
+        |    q.x + q.y
+        |""".stripMargin) shouldBe 70
+  }
+
+  "index struct array with variable index" in {
+    compileAndRun(
+      """struct Slot
+        |    data: int
+        |
+        |var slots: [4]Slot
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 4
+        |        var p: *Slot = &slots[i]
+        |        p.data = (i + 1) * 10
+        |        i += 1
+        |    var p: *Slot = &slots[2]
+        |    p.data
+        |""".stripMargin) shouldBe 30
+  }
+
+  "index struct array with global index" in {
+    compileAndRun(
+      """struct Slot
+        |    data: int
+        |
+        |var slots: [4]Slot
+        |var idx = 0
+        |
+        |main() -> int
+        |    var p: *Slot = &slots[0]
+        |    p.data = 10
+        |    p = &slots[1]
+        |    p.data = 20
+        |    p = &slots[2]
+        |    p.data = 30
+        |    idx = 2
+        |    p = &slots[idx]
+        |    p.data
+        |""".stripMargin) shouldBe 30
+  }
+
+  // ===== Full scheduler pattern =====
+
+  "scheduler pattern: index, write fields, pick next, return field" in {
+    compileAndRun(
+      """struct Task
+        |    ssp: int
+        |    state: int
+        |
+        |var tasks: [3]Task
+        |var current = 0
+        |var count = 3
+        |var ticks = 0
+        |
+        |schedule(cur_ssp: int) -> int
+        |    ticks += 1
+        |    var cur: *Task = &tasks[current]
+        |    cur.ssp = cur_ssp
+        |    cur.state = 0
+        |    var next = current + 1
+        |    if next >= count
+        |        next = 0
+        |    current = next
+        |    var nxt: *Task = &tasks[next]
+        |    nxt.state = 1
+        |    nxt.ssp
+        |
+        |main() -> int
+        |    // Initialize: thread 0 ssp=100, thread 1 ssp=200, thread 2 ssp=300
+        |    var p: *Task = &tasks[0]
+        |    p.ssp = 100
+        |    p = &tasks[1]
+        |    p.ssp = 200
+        |    p = &tasks[2]
+        |    p.ssp = 300
+        |
+        |    // Simulate: current=0, call schedule(111)
+        |    // Should save 111 to tasks[0].ssp, pick next=1, return tasks[1].ssp=200
+        |    var r1 = schedule(111)
+        |
+        |    // Now current=1, call schedule(222)
+        |    // Should save 222 to tasks[1].ssp, pick next=2, return tasks[2].ssp=300
+        |    var r2 = schedule(222)
+        |
+        |    // Now current=2, call schedule(333)
+        |    // Should save 333 to tasks[2].ssp, pick next=0 (wrap), return tasks[0].ssp=111
+        |    var r3 = schedule(333)
+        |
+        |    // Verify: r1=200, r2=300, r3=111, ticks=3
+        |    if r1 != 200 then return 1
+        |    if r2 != 300 then return 2
+        |    if r3 != 111 then return 3
+        |    if ticks != 3 then return 4
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
 }

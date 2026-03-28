@@ -230,6 +230,11 @@ class SyslTriscCodegen(addresses: Int = 2):
           val local = locals(target)
           emitAddImm(2, 5, local.offset)
           emitStore(1, 2, local.typ)
+        else if globals.contains(target) then
+          emit(s"  pshd r1")
+          emit(s"  movi r1, $target")
+          emit(s"  popd r2")
+          emitStore(2, 1, globals(target))
         else
           // New local variable (first assignment = declaration, infer type)
           val typ = value.typ
