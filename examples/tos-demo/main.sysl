@@ -11,7 +11,7 @@ import "kernel"
 import "tasks"
 
 val TIMER_DEVICE = 0xFFE8
-val TICK_CYCLES = 10000
+val TICK_CYCLES = 100000
 
 kernel_main() -> int
     create_thread(task_a, 0x6000, 0x5000, "task_a")

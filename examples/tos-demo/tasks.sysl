@@ -1,3 +1,14 @@
+/*
+ * TOS Demo — User tasks
+ *
+ * Two tasks print at different intervals using the kernel tick counter.
+ * Each tick = one context switch (timer period in CPU cycles).
+ *
+ * Task A prints every 10 ticks, Task B every 20 ticks.
+ */
+
+import "kernel"
+
 val STDOUT = 0xFF00
 
 putc(ch: int)
@@ -5,9 +16,17 @@ putc(ch: int)
     *p = ch
 
 task_a()
+    var last = ticks
     while true
-        putc(65)
+        if ticks - last >= 10
+            putc(65)            // 'A'
+            putc(10)            // newline
+            last = ticks
 
 task_b()
+    var last = ticks
     while true
-        putc(66)
+        if ticks - last >= 20
+            putc(66)            // 'B'
+            putc(10)            // newline
+            last = ticks
