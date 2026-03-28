@@ -44,6 +44,9 @@ class SyslTriscCodegen(addresses: Int = 2):
 
     // Emit string literal data
     if stringLiterals.nonEmpty then
+      for (label, value) <- stringLiterals do
+        val bytes = value.getBytes("UTF-8")
+        emit(s"global $label, data, ${bytes.length + 1}")
       emit("  align 8")
       for (label, value) <- stringLiterals do
         val bytes = value.getBytes("UTF-8")
@@ -666,7 +669,8 @@ class SyslTriscCodegen(addresses: Int = 2):
       case TStringLit(value, _) =>
         // String struct: ptr(8 bytes) + len(4 bytes) = 16 bytes (aligned)
         val bytes = value.getBytes("UTF-8")
-        val strLabel = newLabel("str")
+        labelCounter += 1
+        val strLabel = s"__str_$labelCounter"
         stringLiterals += ((strLabel, value))
         // Allocate 16 bytes on stack for string struct
         emitAddImm(7, 7, -16)

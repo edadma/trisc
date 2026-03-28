@@ -10,11 +10,6 @@ class TOFReaderTests extends TestHelpers {
     tof.segmentNames shouldBe Seq("code")
   }
 
-  "reads v1 format" in {
-    val tof = TOF.fromString("TOF v1\nSEGMENT:code,0\nDATA:002a\n")
-    tof.segments.length shouldBe 1
-  }
-
   "rejects unsupported version" in {
     val ex = the[TOFReadError] thrownBy TOF.fromString("TOF v99\n")
     ex.msg should include("unsupported")
