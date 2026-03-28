@@ -1,43 +1,19 @@
 ; ============================================================================
-; TOS (Tiny OS) — Boot and Interrupt Glue
+; TOS (Tiny OS) — Boot, ISR, Trap Handler, Syscall Wrappers
 ; ============================================================================
 ;
-; This file contains the parts of TOS that MUST be written in assembly:
+; Syscall convention:
+;   r1 = syscall number, r2 = arg1
+;   Return value in r1
 ;
-;   1. Vector table — hardware requires this at address 0x0000
-;   2. Boot entry   — calls kernel_main(), uses return value to start
-;                     the first thread
-;   3. Timer ISR    — saves/restores all registers around the Sysl
-;                     scheduler call, then executes RTE
-;   4. TRAP handler — system call entry point (placeholder)
-;   5. Default ISR  — catches unhandled interrupts
-;
-; kernel_main() is provided by the application. It must:
-;   - Call create_thread() for each task
-;   - Start the timer
-;   - Return the first thread's SSP
-;
-; ============================================================================
-; Memory Map
-; ============================================================================
-;
-;   Address Range     Purpose
-;   0x0000 - 0x009F   Exception vector table (20 slots x 8 bytes)
-;   0x00A0 - 0x3FFF   Kernel + Sysl code + data
-;   0x4000 - 0x4FFF   Thread 0 supervisor stack (grows down from 0x5000)
-;   0x5000 - 0x5FFF   Thread 0 user stack      (grows down from 0x6000)
-;   0x6000 - 0x6FFF   Thread 1 supervisor stack (grows down from 0x7000)
-;   0x7000 - 0x7FFF   Thread 1 user stack      (grows down from 0x8000)
-;   0x8000 - 0x8FFF   Thread 2 supervisor stack (grows down from 0x9000)
-;   0x9000 - 0x9FFF   Thread 2 user stack      (grows down from 0xA000)
-;   0xA000 - 0xAFFF   Thread 3 supervisor stack (grows down from 0xB000)
-;   0xB000 - 0xBFFF   Thread 3 user stack      (grows down from 0xC000)
-;   0xE000 - 0xEFFF   Kernel supervisor stack   (grows down from 0xF000)
-;   0xFF00            Stdout device (write byte to print character)
-;   0xFFE8            Timer device  (write interval in ms to start)
+; Syscall numbers:
+;   0 = sleep(ticks)    — block current thread for N ticks
+;   1 = putc(char)      — write character to stdout
+;   2 = yield()         — voluntary context switch
 ;
 ; ============================================================================
 
+STDOUT = 0xFF00
 
 ; ============================================================================
 ; Exception Vector Table
@@ -72,11 +48,6 @@ segment code
 ; ============================================================================
 ; boot — Reset vector handler
 ; ============================================================================
-;
-; Calls kernel_main() which returns the first thread's SSP in r1.
-; Then restores the fake context and RTEs into user mode.
-;
-; ============================================================================
 
 extern kernel_main
 
@@ -91,12 +62,6 @@ boot
 ; ============================================================================
 ; start_first_thread — Begin executing the first thread
 ; ============================================================================
-;
-; r1 = supervisor stack pointer of the first thread.
-; Restores the fake context built by create_thread() and RTEs into
-; user mode. Never returns.
-;
-; ============================================================================
 
 global start_first_thread, func
 
@@ -109,46 +74,160 @@ start_first_thread
 
 
 ; ============================================================================
-; timer_isr — Timer Interrupt Service Routine
+; context_switch — Common save/schedule/restore sequence
 ; ============================================================================
 ;
-; Saves full context, calls schedule(), switches to new thread's stack,
-; restores context, RTEs.
+; Called with interrupts disabled, in supervisor mode.
+; Saves current thread's full context, calls schedule(),
+; restores next thread's context and RTEs.
 ;
 ; ============================================================================
 
 extern schedule
 
+context_switch
+  pshr r6               ; save r1-r6
+  gusp r1               ; get user stack pointer
+  pshd r1               ; save USP
+
+  mov  r1, r7           ; r1 = current SSP (with saved context)
+  movi r4, schedule
+  jalr r6, r4           ; r1 = next thread's SSP
+
+  mov  r7, r1           ; switch to next thread's stack
+  popd r1               ; restore USP
+  susp r1
+  popr r6               ; restore r1-r6
+  sti                   ; re-enable interrupts
+  rte                   ; return to next thread
+
+
+; ============================================================================
+; timer_isr — Timer Interrupt Service Routine
+; ============================================================================
+
 global timer_isr, func
 
 timer_isr
   cli
-  pshr r6
+  bra context_switch
+
+
+; ============================================================================
+; trap_handler — System Call Handler
+; ============================================================================
+;
+; Entry: r1 = syscall number, r2 = arg1
+; Hardware has pushed PC and PSR onto supervisor stack.
+;
+; ============================================================================
+
+extern sleep_current
+
+global trap_handler, func
+
+trap_handler
+  cli
+
+  ; Dispatch on syscall number (r1)
+  ; putc is fast — handle before saving full context
+  ldi r3, 1
+  beq r1, r3, .sys_putc        ; 1 = putc (no context switch needed)
+
+  ; For sleep/yield, save full context first (before calling kernel)
+  pshr r6                       ; save user's r1-r6
   gusp r1
-  pshd r1
+  pshd r1                       ; save USP
 
-  mov  r1, r7
-  movi r4, schedule
-  jalr r6, r4
+  ; Reload syscall number and arg from saved context on stack
+  ; Stack: [USP(+0), r6(+8), r5(+16), r4(+24), r3(+32), r2(+40), r1(+48), PC(+56), PSR(+64)]
+  addi r3, r7, 48
+  ldd r1, r3, r0               ; r1 = saved r1 (syscall number)
+  addi r3, r7, 40
+  ldd r2, r3, r0               ; r2 = saved r2 (arg)
 
-  mov  r7, r1
+  beq r1, r0, .sys_sleep       ; 0 = sleep
+  ldi r3, 2
+  beq r1, r3, .sys_yield       ; 2 = yield
 
+  ; Unknown — restore and return
   popd r1
   susp r1
   popr r6
+  sti
+  rte
 
+; --- putc: write r2 to stdout, return (no context switch) ---
+.sys_putc
+  movi r3, STDOUT
+  stb  r2, r3, r0
+  sti
+  rte
+
+; --- yield: voluntary context switch (context already saved) ---
+.sys_yield
+  mov  r1, r7                   ; r1 = current SSP
+  movi r4, schedule
+  jalr r6, r4                   ; r1 = next thread's SSP
+  mov  r7, r1
+  popd r1
+  susp r1
+  popr r6
+  sti
+  rte
+
+; --- sleep: block current thread, then context switch ---
+.sys_sleep
+  ; r2 = number of ticks to sleep (reloaded from saved context)
+  mov  r1, r2                   ; r1 = ticks arg for sleep_current
+  movi r4, sleep_current
+  jalr r6, r4                   ; marks current thread BLOCKED
+  ; Now do context switch (context already saved on stack)
+  mov  r1, r7                   ; r1 = current SSP
+  movi r4, schedule
+  jalr r6, r4                   ; r1 = next thread's SSP
+  mov  r7, r1
+  popd r1
+  susp r1
+  popr r6
   sti
   rte
 
 
 ; ============================================================================
-; trap_handler — System Call Handler (placeholder)
+; Syscall wrappers — called from user Sysl code
+; ============================================================================
+;
+; Sysl calling convention: first arg in r1, rest on stack.
+; These wrappers shuffle r1 → r2 (arg) and load syscall number into r1.
+;
 ; ============================================================================
 
-global trap_handler, func
+; sleep(ticks: int)
+global sleep, func
 
-trap_handler
-  rte
+sleep
+  mov  r2, r1           ; r2 = ticks (was first Sysl arg)
+  ldi  r1, 0            ; r1 = SYS_SLEEP
+  trap 0
+  jalr r0, r6           ; return to caller
+
+; putc(ch: int)
+global putc, func
+
+putc
+  mov  r2, r1           ; r2 = char
+  ldi  r1, 1            ; r1 = SYS_PUTC
+  trap 0
+  jalr r0, r6
+
+; yield()
+global yield, func
+
+yield
+  ldi  r1, 2            ; r1 = SYS_YIELD
+  trap 0
+  jalr r0, r6
 
 
 ; ============================================================================

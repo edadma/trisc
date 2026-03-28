@@ -33,6 +33,7 @@ class SyslLLVMCodegen:
     for decl <- program.decls do
       decl match
         case _: TImportDecl => // skip
+        case _: TExternFuncDecl => // skip
         case _: TStructDecl => // type only
         case f: TFunDecl => genFunction(f)
         case TVarDecl(name, typ, _, _) =>

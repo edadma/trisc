@@ -59,6 +59,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     for decl <- program.decls do
       decl match
         case _: TImportDecl => // not handled in interpreter
+        case _: TExternFuncDecl => // not handled in interpreter
         case _: TStructDecl => // type only, no runtime effect
         case f: TFunDecl => functions(f.name) = f
         case TVarDecl(name, _, init, _) =>

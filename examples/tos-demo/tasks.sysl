@@ -1,32 +1,35 @@
 /*
  * TOS Demo — User tasks
  *
- * Two tasks print at different intervals using the kernel tick counter.
- * Each tick = one context switch (timer period in CPU cycles).
+ * Tasks use kernel syscalls:
+ *   sleep(ticks) — block for N timer ticks (100 ticks ≈ 1 second)
+ *   putc(char)   — write character to stdout
  *
- * Task A prints every 10 ticks, Task B every 20 ticks.
+ * Expected output:
+ *   A
+ *   A
+ *   B
+ *   A
+ *   A
+ *   B
+ *   ...
  */
 
-import "kernel"
-
-val STDOUT = 0xFF00
-
-putc(ch: int)
-    val p: *i8 = STDOUT
-    *p = ch
+extern sleep(ticks: int)
+extern putc(ch: int)
 
 task_a()
-    var last = ticks
     while true
-        if ticks - last >= 10
-            putc(65)            // 'A'
-            putc(10)            // newline
-            last = ticks
+        putc(65)            // 'A'
+        putc(10)            // newline
+        sleep(100)          // ~1 second
 
 task_b()
-    var last = ticks
     while true
-        if ticks - last >= 20
-            putc(66)            // 'B'
-            putc(10)            // newline
-            last = ticks
+        putc(66)            // 'B'
+        putc(10)            // newline
+        sleep(200)          // ~2 seconds
+
+idle_task()
+    while true
+        0                   // spin — timer preempts us

@@ -27,6 +27,7 @@ class SyslTriscCodegen(addresses: Int = 2):
     for decl <- program.decls do
       decl match
         case _: TImportDecl => // skip
+        case _: TExternFuncDecl => // skip — resolved by linker
         case _: TStructDecl => // type-only, no code to emit
         case f: TFunDecl => genFunction(f)
         case TVarDecl(name, typ, init, _) =>

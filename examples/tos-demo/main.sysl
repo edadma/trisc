@@ -1,9 +1,9 @@
 /*
- * TOS Demo — Kernel initialization (application-provided)
+ * TOS Demo — Kernel initialization
  *
  * kernel_main() is called by boot.asm. It must:
- *   1. Create all user threads via create_thread()
- *   2. Start the timer for preemptive scheduling
+ *   1. Create all user threads
+ *   2. Start the timer
  *   3. Return the first thread's SSP
  */
 
@@ -11,15 +11,16 @@ import "kernel"
 import "tasks"
 
 val TIMER_DEVICE = 0xFFE8
-val TICK_CYCLES = 100000
+val TICK_MS = 10
 
 kernel_main() -> int
     create_thread(task_a, 0x6000, 0x5000, "task_a")
     create_thread(task_b, 0x8000, 0x7000, "task_b")
+    create_thread(idle_task, 0xA000, 0x9000, "idle")
 
-    // Start the timer (10000 cycles per tick)
+    // Start timer: 10ms per tick (100 ticks = 1 second)
     val period: *i32 = TIMER_DEVICE
-    *period = TICK_CYCLES
+    *period = TICK_MS
     val control: *i8 = TIMER_DEVICE + 4
     *control = 1
 

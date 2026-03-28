@@ -25,7 +25,7 @@ class SyslParser extends StandardTokenParsers {
   // --- Declarations ---
 
   lazy val decl: Parser[DeclAST] =
-    importDecl | structDecl | "private" ~> declBody(true) | declBody(false)
+    importDecl | externFuncDecl | structDecl | "private" ~> declBody(true) | declBody(false)
 
   lazy val structDecl: Parser[StructDeclAST] =
     "struct" ~> ident ~ (Newline ~> Indent ~> rep1sep(structField, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
@@ -37,6 +37,11 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val importDecl: Parser[ImportDeclAST] =
     "import" ~> stringLit ^^ ImportDeclAST.apply
+
+  lazy val externFuncDecl: Parser[ExternFuncDeclAST] =
+    "extern" ~> ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ opt("->" ~> typeRef) ^^ {
+      case name ~ params ~ rt => ExternFuncDeclAST(name, params, rt)
+    }
 
   private def mutability: Parser[Boolean] =
     "var" ^^^ true | "val" ^^^ false

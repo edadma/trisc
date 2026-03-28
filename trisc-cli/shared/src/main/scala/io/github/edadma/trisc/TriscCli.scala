@@ -169,14 +169,12 @@ object TriscCli:
 
   def setupCpu(linked: TOF, outputFn: String => Unit = s => { print(s); System.out.flush() }, extraDevices: Seq[Addressable] = Nil): (CPU, Memory) =
     val stdout = new Stdout(Runtime.stdoutAddress, outputFn)
-    var cpuRef: CPU = null
-    val timer = new Timer(Runtime.timerAddress, clock = () => if cpuRef != null then cpuRef.cycles else 0)
+    val timer = new Timer(Runtime.timerAddress)
     val ramSize = Runtime.stdoutAddress.toInt
     val ram = new RAM(0, ramSize)
     val mem = new Memory("Memory", (Seq(ram, stdout, timer) ++ extraDevices)*)
     linked.load(mem)
     val cpu = new CPU(mem, Seq(timer))
-    cpuRef = cpu
     cpu.reset() // like 68000: reads SSP from vector[0], PC from vector[1], enters supervisor mode
     (cpu, mem)
 

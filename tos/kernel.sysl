@@ -6,11 +6,14 @@
  * OS primitives:
  *   - Thread data structures (TCB)
  *   - Thread creation (building initial stack frames)
- *   - Scheduler (round-robin)
+ *   - Scheduler (round-robin with sleep support)
+ *   - sleep_current() — blocks current thread until wake time
  *
- * The application provides kernel_main(), which calls create_thread()
- * for each task, starts the timer, and returns the first thread's SSP.
- * Boot assembly handles the rest (start_first_thread via RTE).
+ * All kernel services are accessed through trap 0 (syscall).
+ * The trap handler in boot.asm dispatches based on r1:
+ *   0 = sleep(ticks)    — block for N timer ticks
+ *   1 = putc(char)      — write character to stdout
+ *   2 = yield()         — voluntary context switch
  *
  * ============================================================================
  */
@@ -35,18 +38,12 @@ val STATE_TERMINATED = 3
  * ============================================================================
  * Thread Control Block (TCB)
  * ============================================================================
- *
- * The entire register context (r1-r6, USP, PC, PSR) lives on the
- * thread's supervisor stack, not in the TCB. The TCB only stores
- * the supervisor stack pointer, which points to the saved context.
- *
- * ============================================================================
  */
 
 struct Task
     ssp: int
     state: int
-    priority: int
+    wake_tick: int
     name: *byte
 
 
@@ -59,7 +56,7 @@ struct Task
 var tasks: [8]Task
 var current_thread = 0
 var thread_count = 0
-var ticks = 0              // incremented on each context switch
+var ticks = 0
 
 
 /*
@@ -67,41 +64,25 @@ var ticks = 0              // incremented on each context switch
  * create_thread — Create a new thread
  * ============================================================================
  *
- * Builds a fake stack frame on the thread's supervisor stack so that
- * the scheduler can "restore" it as if the thread had been preempted.
+ * Builds a fake stack frame so the scheduler can "restore" it.
  *
- * Frame layout (same as what the timer ISR saves):
- *
- *   Offset  Contents     Value for new thread
- *   SP+0    USP          user stack top
- *   SP+8    r6           0
- *   SP+16   r5           0
- *   SP+24   r4           0
- *   SP+32   r3           0
- *   SP+40   r2           0
- *   SP+48   r1           0
- *   SP+56   PC           entry_point
- *   SP+64   PSR          0 (user mode, interrupts enabled)
- *
- * Arguments:
- *   entry_point — address of the thread's start function
- *   usp         — top of user stack (grows downward)
- *   ssp         — top of supervisor stack (grows downward)
- *   name        — pointer to a string name (for debugging)
- *
+ * Frame layout (matches timer ISR save order):
+ *   SP+0:  USP          SP+32: r3
+ *   SP+8:  r6           SP+40: r2
+ *   SP+16: r5           SP+48: r1
+ *   SP+24: r4           SP+56: PC
+ *                        SP+64: PSR
  * ============================================================================
  */
 
 create_thread(entry_point: int, usp: int, ssp: int, name: *byte)
     var sp = ssp
 
-    // Hardware-pushed part (bottom of frame)
     sp -= 8
     *sp = 0                 // PSR = 0 (user mode, interrupts enabled)
     sp -= 8
-    *sp = entry_point       // PC = thread entry point
+    *sp = entry_point       // PC
 
-    // ISR-saved part (top of frame)
     sp -= 8
     *sp = 0                 // r1
     sp -= 8
@@ -115,33 +96,47 @@ create_thread(entry_point: int, usp: int, ssp: int, name: *byte)
     sp -= 8
     *sp = 0                 // r6
 
-    // USP
     sp -= 8
-    *sp = usp
+    *sp = usp               // USP
 
-    // Store in TCB array
     val idx = thread_count
     var t: *Task = &tasks[idx]
     t.ssp = sp
     t.state = STATE_READY
-    t.priority = 0
+    t.wake_tick = 0
     t.name = name
     thread_count += 1
 
 
 /*
  * ============================================================================
- * schedule — Round-robin scheduler
+ * sleep_current — Block the current thread for N ticks
  * ============================================================================
  *
- * Called from the timer ISR with the current thread's SSP.
- * Saves SSP, picks next runnable thread, returns its SSP.
+ * Called from the trap handler (in supervisor mode) before schedule().
+ * Sets the current thread to BLOCKED with a wake time.
  *
- * Arguments:
- *   current_ssp — current thread's supervisor stack pointer
+ * ============================================================================
+ */
+
+sleep_current(nticks: int)
+    var cur: *Task = &tasks[current_thread]
+    cur.state = STATE_BLOCKED
+    cur.wake_tick = ticks + nticks
+
+
+/*
+ * ============================================================================
+ * schedule — Round-robin scheduler with sleep support
+ * ============================================================================
  *
- * Returns:
- *   Next thread's supervisor stack pointer
+ * Called from timer ISR and trap handler.
+ *   1. Saves current SSP into TCB
+ *   2. Wakes any threads whose sleep time has expired
+ *   3. Picks the next READY thread (round-robin)
+ *   4. Returns that thread's SSP
+ *
+ * If no threads are READY, returns the current thread's SSP (no switch).
  *
  * ============================================================================
  */
@@ -149,27 +144,45 @@ create_thread(entry_point: int, usp: int, ssp: int, name: *byte)
 schedule(current_ssp: int) -> int
     ticks += 1
 
+    // Save current thread's stack pointer
     var cur: *Task = &tasks[current_thread]
     cur.ssp = current_ssp
-    cur.state = STATE_READY
+    if cur.state == STATE_RUNNING
+        cur.state = STATE_READY
 
+    // Wake threads whose sleep time has expired
+    var i = 0
+    while i < thread_count
+        var t: *Task = &tasks[i]
+        if t.state == STATE_BLOCKED
+            if ticks >= t.wake_tick
+                t.state = STATE_READY
+        i += 1
+
+    // Find next READY thread (round-robin)
     var next = current_thread + 1
     if next >= thread_count
         next = 0
+    var checked = 0
+    while checked < thread_count
+        var t: *Task = &tasks[next]
+        if t.state == STATE_READY
+            current_thread = next
+            t.state = STATE_RUNNING
+            return t.ssp
+        next += 1
+        if next >= thread_count
+            next = 0
+        checked += 1
 
-    current_thread = next
-    var nxt: *Task = &tasks[next]
-    nxt.state = STATE_RUNNING
-    nxt.ssp
+    // No ready threads — stay on current (shouldn't happen with idle task)
+    cur.state = STATE_RUNNING
+    current_ssp
 
 
 /*
  * ============================================================================
  * first_thread_ssp — Return SSP of thread 0
- * ============================================================================
- *
- * Called by kernel_main after creating all threads, to pass to boot asm.
- *
  * ============================================================================
  */
 

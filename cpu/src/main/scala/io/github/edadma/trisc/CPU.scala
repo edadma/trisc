@@ -74,7 +74,7 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
   private var inException: Boolean = false
 
   var limit: Int = -1
-  var clump: Int = 100
+  var clump: Int = 1000
   var trace: Boolean = false
 
   def test(status: Status): Boolean = (psr & status.bit) != 0

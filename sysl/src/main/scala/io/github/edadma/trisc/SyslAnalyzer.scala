@@ -47,6 +47,13 @@ class SyslAnalyzer:
     for decl <- program.decls do
       decl match
         case ImportDeclAST(_) => // handled later
+        case ExternFuncDeclAST(name, params, returnType) =>
+          val paramTypes = params.map(p => (p.name, resolveTypeName(p.typ)))
+          val retType = returnType.map(resolveTypeName).getOrElse(VoidType)
+          if functions.contains(name) || builtinFunctions.contains(name) then
+            throw AnalysisError(s"duplicate function: '$name'", decl)
+          functions(name) = FunInfo(name, paramTypes, retType)
+          externalSymbols += name
         case StructDeclAST(name, fields) =>
           if structTypes.contains(name) then throw AnalysisError(s"duplicate struct: '$name'", decl)
           val resolvedFields = fields.map((n, t) => (n, resolveTypeName(t)))
@@ -69,6 +76,11 @@ class SyslAnalyzer:
     decl match
       case ImportDeclAST(path) =>
         TImportDecl(path)
+
+      case ExternFuncDeclAST(name, params, returnType) =>
+        val paramTypes = params.map(p => resolveTypeName(p.typ))
+        val retType = returnType.map(resolveTypeName).getOrElse(VoidType)
+        TExternFuncDecl(name, paramTypes, retType)
 
       case StructDeclAST(name, _) =>
         val st = structTypes(name)
