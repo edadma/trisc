@@ -16,7 +16,7 @@ class SyslLexical extends IndentationLexical(
     "if", "then", "elif", "else", "while", "do", "for", "break", "continue", "return",
     "import", "private", "var", "val", "struct", "sizeof", "asm",
     "func",
-    "int", "char", "byte", "bool", "void",
+    "int", "char", "byte", "bool", "void", "string",
     "i8", "i16", "i32", "i64", "double", "f64",
     "true", "false",
     "end",

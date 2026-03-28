@@ -9,6 +9,8 @@ enum SyslType:
   case FuncType(params: List[SyslType], returnType: SyslType)
   case StructType(name: String, fields: List[(String, SyslType)])
   case DoubleType
+  case StringType
+  case SliceType(elem: SyslType)
 
   def isNumeric: Boolean = this match
     case _: IntType => true
@@ -24,7 +26,7 @@ enum SyslType:
     case _ => false
 
   def isPointerLike: Boolean = this match
-    case PtrType(_) | ArrayType(_, _) => true
+    case PtrType(_) | ArrayType(_, _) | SliceType(_) => true
     case _ => false
 
   // Size in bytes
@@ -36,6 +38,8 @@ enum SyslType:
     case FuncType(_, _) => 8
     case ArrayType(elem, size) => elem.sizeOf * size
     case DoubleType => 8
+    case StringType => 12        // ptr(8) + len(4)
+    case SliceType(_) => 16      // ptr(8) + len(4) + cap(4)
     case StructType(_, fields) => fields.map(_._2.sizeOf).sum
 
   // Width in bits (for integer types)
@@ -59,6 +63,8 @@ enum SyslType:
     case ArrayType(t, n) => s"[$n]$t"
     case FuncType(params, ret) => s"func(${params.mkString(",")}) -> $ret"
     case StructType(name, _) => name
+    case StringType => "string"
+    case SliceType(t) => s"[]$t"
 
   def toPrefix: String = this match
     case IntType(w) => s"i$w"
@@ -68,6 +74,8 @@ enum SyslType:
     case PtrType(t) => s"ptr ${t.toPrefix}"
     case ArrayType(t, n) => s"arr $n ${t.toPrefix}"
     case FuncType(params, ret) => s"func ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}"
+    case StringType => "string"
+    case SliceType(t) => s"slice ${t.toPrefix}"
     case StructType(name, fields) => s"struct $name ${fields.size} ${fields.map((n, t) => s"$n ${t.toPrefix}").mkString(" ")}"
 
 object SyslType:
@@ -98,7 +106,9 @@ object SyslType:
       case "int"  => I32
       case "char" => I32
       case "byte" => I8
+      case "string" => StringType
       case "ptr"  => PtrType(parseType(tokens))
+      case "slice" => SliceType(parseType(tokens))
       case "arr" =>
         val size = tokens.next().toInt
         ArrayType(parseType(tokens), size)

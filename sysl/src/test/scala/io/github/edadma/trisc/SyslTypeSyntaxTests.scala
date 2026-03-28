@@ -123,42 +123,30 @@ class SyslTypeSyntaxTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 99
   }
 
-  // ===== *byte parameter for string functions =====
+  // ===== string parameter for string functions =====
 
-  "strlen with *byte parameter" in {
+  "len with string parameter" in {
     eval(
-      """strlen(s: *byte) -> int
-        |    n = 0
-        |    while s[n] != 0 do n++
-        |    n
+      """length(s: string) -> int = len(s)
         |
-        |main() -> int = strlen("Hello")
+        |main() -> int = length("Hello")
         |""".stripMargin) shouldBe 5
   }
 
-  "puts with *byte parameter" in {
+  "puts with string parameter" in {
     output(
-      """puts(s: *byte)
-        |    i = 0
-        |    while s[i] != 0
-        |        putchar(s[i])
-        |        i += 1
-        |
-        |main() -> int
+      """main() -> int
         |    puts("Hi!")
         |    0
         |""".stripMargin) shouldBe "Hi!"
   }
 
-  "strcmp with *byte parameters" in {
+  "string indexing in function" in {
     eval(
-      """strcmp(a: *byte, b: *byte) -> int
-        |    i = 0
-        |    while a[i] != 0 && a[i] == b[i] do i++
-        |    a[i] - b[i]
+      """first_byte(s: string) -> int = s[0]
         |
         |main() -> int
-        |    if strcmp("abc", "abc") == 0 then 1 else 0
+        |    if first_byte("abc") == 97 then 1 else 0
         |""".stripMargin) shouldBe 1
   }
 

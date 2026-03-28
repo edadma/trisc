@@ -67,3 +67,5 @@ case class TIndirectCall(callee: TExpr, args: List[TExpr], typ: SyslType) extend
 case class TFuncRef(name: String, typ: SyslType) extends TExpr
 case class TCast(expr: TExpr, typ: SyslType) extends TExpr
 case class TIfExpr(cond: TExpr, thenBody: List[TStmt], elseBody: Option[List[TStmt]], typ: SyslType) extends TExpr
+case class TLen(expr: TExpr, typ: SyslType) extends TExpr
+case class TCap(expr: TExpr, typ: SyslType) extends TExpr

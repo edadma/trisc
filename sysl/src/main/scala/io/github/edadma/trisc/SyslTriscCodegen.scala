@@ -5,6 +5,7 @@ import scala.collection.mutable
 class SyslTriscCodegen(addresses: Int = 2):
   private val out = new StringBuilder
   private var labelCounter = 0
+  private val stringLiterals = new mutable.ListBuffer[(String, String)]() // (label, value)
 
   private def newLabel(prefix: String): String =
     labelCounter += 1
@@ -13,6 +14,7 @@ class SyslTriscCodegen(addresses: Int = 2):
   def generate(program: TProgram): String =
     out.clear()
     labelCounter = 0
+    stringLiterals.clear()
 
     // Emit entry point and global directives from module metadata
     val meta = ModuleMeta.fromProgram(program)
@@ -40,6 +42,15 @@ class SyslTriscCodegen(addresses: Int = 2):
             case TBoolLit(b, _) => emit(s"  $directive ${if b then 1 else 0}")
             case _ => emit(s"  $directive 0")
 
+    // Emit string literal data
+    if stringLiterals.nonEmpty then
+      emit("  align 8")
+      for (label, value) <- stringLiterals do
+        val bytes = value.getBytes("UTF-8")
+        emit(s"$label")
+        for b <- bytes do emit(s"  db ${b & 0xff}")
+        emit("  db 0") // null terminator for C interop
+
     out.toString
 
   private case class LocalVar(name: String, offset: Int, typ: SyslType)
@@ -63,6 +74,8 @@ class SyslTriscCodegen(addresses: Int = 2):
     case SyslType.FuncType(_, _) => 8
     case SyslType.ArrayType(elem, _) => stackAlign(elem)
     case SyslType.StructType(_, fields) => if fields.isEmpty then 1 else fields.map(f => stackAlign(f._2)).max
+    case SyslType.StringType => 8    // contains a pointer
+    case SyslType.SliceType(_) => 8  // contains a pointer
     case _ => 8
 
   // Emit load from [rBase + 0] into rDest, using width-appropriate instruction.
@@ -581,6 +594,53 @@ class SyslTriscCodegen(addresses: Int = 2):
         genExpr(inner)           // r1 = pointer address
         emitLoad(1, 1, typ)      // load with width matching pointee type
 
+      case TIndex(array, index, elemType) if array.typ == SyslType.StringType =>
+        // String indexing: bounds-checked byte access
+        genExpr(index)           // r1 = index
+        emit("  pshd r1")
+        genExpr(array)           // r1 = string struct address
+        emit("  popd r2")        // r2 = index
+        // Bounds check: 0 <= index < len
+        emit("  addi r3, r1, 8")
+        emit("  ldw r3, r3, r0") // r3 = len
+        emit("  slt r4, r2, r0") // r4 = (index < 0)
+        val boundsOk = newLabel("bounds_ok")
+        emit(s"  bne r4, r0, .bounds_error")
+        emit("  slt r4, r2, r3") // r4 = (index < len)
+        emit(s"  bne r4, r0, $boundsOk")
+        emit(".bounds_error")
+        emit("  brk")            // trap on out of bounds
+        emit(s"$boundsOk")
+        // Load byte at ptr + index
+        emit("  ldd r1, r1, r0") // r1 = ptr (from struct offset 0)
+        emit("  add r1, r1, r2") // r1 = ptr + index
+        emit("  ldb r1, r1, r0") // r1 = byte at that address
+
+      case TIndex(array, index, elemType) if array.typ.isInstanceOf[SyslType.SliceType] =>
+        // Slice indexing: bounds-checked element access
+        val elemSize = stackSize(elemType)
+        genExpr(index)           // r1 = index
+        emit("  pshd r1")
+        genExpr(array)           // r1 = slice struct address
+        emit("  popd r2")        // r2 = index
+        // Bounds check
+        emit("  addi r3, r1, 8")
+        emit("  ldw r3, r3, r0") // r3 = len
+        emit("  slt r4, r2, r0")
+        val boundsOk = newLabel("bounds_ok")
+        emit(s"  bne r4, r0, .bounds_error")
+        emit("  slt r4, r2, r3")
+        emit(s"  bne r4, r0, $boundsOk")
+        emit(".bounds_error")
+        emit("  brk")
+        emit(s"$boundsOk")
+        // Load element at ptr + index * elemSize
+        emit("  ldd r1, r1, r0") // r1 = ptr
+        emit(s"  ldi r3, $elemSize")
+        emit("  mul r2, r2, r3")
+        emit("  add r1, r1, r2")
+        emitLoad(1, 1, elemType)
+
       case TIndex(array, index, elemType) =>
         val elemSize = stackSize(elemType)
         genExpr(index)           // r1 = index
@@ -604,21 +664,19 @@ class SyslTriscCodegen(addresses: Int = 2):
         stackOffset -= totalBytes
 
       case TStringLit(value, _) =>
-        // Allocate string bytes on stack (UTF-8 + null terminator)
+        // String struct: ptr(8 bytes) + len(4 bytes) = 16 bytes (aligned)
         val bytes = value.getBytes("UTF-8")
-        val totalSlots = bytes.length + 1 // +1 for null terminator
-        val totalBytes = totalSlots * 8
-        emitAddImm(7, 7, -totalBytes)
-        emit("  mov r1, r7") // r1 = base address
-        // Initialize each byte as a 64-bit value
-        for (b, i) <- bytes.zipWithIndex do
-          emit(s"  ldi r2, ${b & 0xff}")
-          emit(s"  addi r3, r1, ${i * 8}")
-          emit(s"  std r2, r3, r0")
-        // Null terminator
-        emit(s"  addi r3, r1, ${bytes.length * 8}")
-        emit(s"  std r0, r3, r0")
-        stackOffset -= totalBytes
+        val strLabel = newLabel("str")
+        stringLiterals += ((strLabel, value))
+        // Allocate 16 bytes on stack for string struct
+        emitAddImm(7, 7, -16)
+        emit("  mov r1, r7")         // r1 = struct address
+        emit(s"  movi r2, $strLabel") // r2 = ptr to static data
+        emit("  std r2, r1, r0")      // store ptr at offset 0
+        emit(s"  ldi r2, ${bytes.length}")
+        emit("  addi r3, r1, 8")
+        emit("  stw r2, r3, r0")      // store len at offset 8
+        stackOffset -= 16
 
       case TIfExpr(cond, thenBody, elseBody, _) =>
         val elseLabel = newLabel("else")
@@ -630,6 +688,28 @@ class SyslTriscCodegen(addresses: Int = 2):
         emit(s"$elseLabel")
         elseBody.foreach(stmts => for stmt <- stmts do genStmt(stmt))
         emit(s"$endLabel")
+
+      case TLen(inner, _) =>
+        genExpr(inner)           // r1 = struct address (string or slice)
+        inner.typ match
+          case SyslType.StringType | SyslType.SliceType(_) =>
+            emit("  addi r1, r1, 8")
+            emit("  ldw r1, r1, r0") // len at offset 8
+          case SyslType.ArrayType(_, size) =>
+            emit(s"  ldi r1, $size") // compile-time constant
+          case _ =>
+            emit("  # TODO: len on unsupported type")
+
+      case TCap(inner, _) =>
+        genExpr(inner)           // r1 = struct address
+        inner.typ match
+          case SyslType.SliceType(_) =>
+            emit("  addi r1, r1, 12")
+            emit("  ldw r1, r1, r0") // cap at offset 12
+          case SyslType.ArrayType(_, size) =>
+            emit(s"  ldi r1, $size") // cap == size for fixed arrays
+          case _ =>
+            emit("  # TODO: cap on unsupported type")
 
       case _ =>
         emit(s"  # TODO: ${expr.getClass.getSimpleName}")
