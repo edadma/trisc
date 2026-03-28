@@ -1,12 +1,12 @@
 #!/bin/bash
 # ============================================================================
-# TOS Hello World — build and run
+# Bare-metal Hello World — build and run
 # ============================================================================
 #
-# Compiles a Sysl hello-world program, assembles the TOS boot stub,
-# links them into a single executable, and runs it on the TRISC emulator.
+# Compiles a Sysl hello-world program to a relocatable TOF, assembles
+# the boot stub, links them, and runs it on the TRISC emulator.
 #
-# Usage (from repo root):  ./examples/tos-hello/build.sh
+# Usage (from repo root):  ./examples/bare-metal-hello/build.sh
 #
 # ============================================================================
 
@@ -16,16 +16,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-DIR=examples/tos-hello
+DIR=examples/bare-metal-hello
 
-echo "=== Compiling hello.sysl → hello.asm ==="
-sbt -error "syslCliJVM/run compile $DIR/hello.sysl --emit asm -o $DIR/hello.asm"
+echo "=== Compiling hello.sysl → hello.tof ==="
+sbt -error "syslCliJVM/run compile $DIR/hello.sysl --emit tof -o $DIR/hello.tof"
 
 echo "=== Assembling boot.asm → boot.tof ==="
 sbt -error "triscCliJVM/run asm $DIR/boot.asm -o $DIR/boot.tof"
-
-echo "=== Assembling hello.asm → hello.tof ==="
-sbt -error "triscCliJVM/run asm $DIR/hello.asm -o $DIR/hello.tof"
 
 echo "=== Linking boot.tof + hello.tof → program.tof ==="
 sbt -error "triscCliJVM/run link $DIR/boot.tof $DIR/hello.tof -o $DIR/program.tof"

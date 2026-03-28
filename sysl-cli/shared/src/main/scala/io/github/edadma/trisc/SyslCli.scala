@@ -144,14 +144,18 @@ object SyslCli:
 
       case "tof" =>
         val codegen = new SyslTriscCodegen
-        val tofs = for unit <- result.units yield
+        for unit <- result.units do
           val asm = codegen.generate(unit.typed)
-          assemble(asm, relocatable = true)
-        // Boot vector table first, then user code, then I/O stubs
-        val linked = Linker.link(Runtime.bootTof +: tofs :+ Runtime.ioTof)
-        val outFile = cmd.output.getOrElse("out.tof")
-        writeFile(outFile, linked.serialize)
-        System.err.println(s"  -> $outFile")
+          val tof = assemble(asm, relocatable = true)
+          val outFile = cmd.output match
+            case Some(out) if result.units.size == 1 => out
+            case Some(out) =>
+              val dir = new File(out)
+              if !dir.exists() then dir.mkdirs()
+              new File(dir, unit.name + ".tof").getPath
+            case None => unit.name + ".tof"
+          writeFile(outFile, tof.serialize)
+          System.err.println(s"  ${unit.name} -> $outFile")
 
       case "llvm" =>
         val codegen = new SyslLLVMCodegen
