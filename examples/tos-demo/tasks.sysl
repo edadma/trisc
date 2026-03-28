@@ -29,7 +29,3 @@ task_b()
         putc(66)            // 'B'
         putc(10)            // newline
         sleep(200)          // ~2 seconds
-
-idle_task()
-    while true
-        0                   // spin — timer preempts us

@@ -84,16 +84,31 @@ start_first_thread
 ; ============================================================================
 
 extern schedule
+extern current_thread
 
 context_switch
   pshr r6               ; save r1-r6
   gusp r1               ; get user stack pointer
   pshd r1               ; save USP
 
+do_schedule
   mov  r1, r7           ; r1 = current SSP (with saved context)
   movi r4, schedule
-  jalr r6, r4           ; r1 = next thread's SSP
+  jalr r6, r4           ; r1 = next thread's SSP (or 0 = idle)
 
+  bne  r1, r0, restore_thread
+
+  ; No threads ready — kernel idle with wfi
+  movi r7, 0xF000              ; clean kernel stack
+  movi r2, current_thread
+  ldi  r1, -1                  ; mark no current thread
+  stw  r1, r2, r0
+  sti                          ; enable interrupts for timer
+idle_spin
+  wfi                          ; halt until timer fires
+  bra idle_spin                ; timer ISR will context_switch to a woken thread
+
+restore_thread
   mov  r7, r1           ; switch to next thread's stack
   popd r1               ; restore USP
   susp r1
@@ -166,15 +181,9 @@ trap_handler
 
 ; --- yield: voluntary context switch (context already saved) ---
 .sys_yield
-  mov  r1, r7                   ; r1 = current SSP
-  movi r4, schedule
-  jalr r6, r4                   ; r1 = next thread's SSP
-  mov  r7, r1
-  popd r1
-  susp r1
-  popr r6
-  sti
-  rte
+  ; Context already saved by pshr/pshd above.
+  ; Jump to the schedule+dispatch part of context_switch.
+  bra do_schedule
 
 ; --- sleep: block current thread, then context switch ---
 .sys_sleep
@@ -182,16 +191,7 @@ trap_handler
   mov  r1, r2                   ; r1 = ticks arg for sleep_current
   movi r4, sleep_current
   jalr r6, r4                   ; marks current thread BLOCKED
-  ; Now do context switch (context already saved on stack)
-  mov  r1, r7                   ; r1 = current SSP
-  movi r4, schedule
-  jalr r6, r4                   ; r1 = next thread's SSP
-  mov  r7, r1
-  popd r1
-  susp r1
-  popr r6
-  sti
-  rte
+  bra do_schedule
 
 
 ; ============================================================================

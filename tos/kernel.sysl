@@ -15,30 +15,21 @@
  *   1 = putc(char)      — write character to stdout
  *   2 = yield()         — voluntary context switch
  *
+ * When no threads are READY, schedule() returns 0.
+ * The assembly caller then does wfi until the next timer interrupt
+ * wakes a sleeping thread.
+ *
  * ============================================================================
  */
 
-
-/*
- * ============================================================================
- * Constants
- * ============================================================================
- */
 
 val MAX_THREADS = 8
 
-// Thread states
 val STATE_READY      = 0
 val STATE_RUNNING    = 1
 val STATE_BLOCKED    = 2
 val STATE_TERMINATED = 3
 
-
-/*
- * ============================================================================
- * Thread Control Block (TCB)
- * ============================================================================
- */
 
 struct Task
     ssp: int
@@ -46,12 +37,6 @@ struct Task
     wake_tick: int
     name: *byte
 
-
-/*
- * ============================================================================
- * Kernel Global State
- * ============================================================================
- */
 
 var tasks: [8]Task
 var current_thread = 0
@@ -61,17 +46,7 @@ var ticks = 0
 
 /*
  * ============================================================================
- * create_thread — Create a new thread
- * ============================================================================
- *
- * Builds a fake stack frame so the scheduler can "restore" it.
- *
- * Frame layout (matches timer ISR save order):
- *   SP+0:  USP          SP+32: r3
- *   SP+8:  r6           SP+40: r2
- *   SP+16: r5           SP+48: r1
- *   SP+24: r4           SP+56: PC
- *                        SP+64: PSR
+ * create_thread
  * ============================================================================
  */
 
@@ -79,10 +54,9 @@ create_thread(entry_point: int, usp: int, ssp: int, name: *byte)
     var sp = ssp
 
     sp -= 8
-    *sp = 0                 // PSR = 0 (user mode, interrupts enabled)
+    *sp = 0                 // PSR
     sp -= 8
     *sp = entry_point       // PC
-
     sp -= 8
     *sp = 0                 // r1
     sp -= 8
@@ -95,7 +69,6 @@ create_thread(entry_point: int, usp: int, ssp: int, name: *byte)
     *sp = 0                 // r5
     sp -= 8
     *sp = 0                 // r6
-
     sp -= 8
     *sp = usp               // USP
 
@@ -112,11 +85,6 @@ create_thread(entry_point: int, usp: int, ssp: int, name: *byte)
  * ============================================================================
  * sleep_current — Block the current thread for N ticks
  * ============================================================================
- *
- * Called from the trap handler (in supervisor mode) before schedule().
- * Sets the current thread to BLOCKED with a wake time.
- *
- * ============================================================================
  */
 
 sleep_current(nticks: int)
@@ -130,13 +98,8 @@ sleep_current(nticks: int)
  * schedule — Round-robin scheduler with sleep support
  * ============================================================================
  *
- * Called from timer ISR and trap handler.
- *   1. Saves current SSP into TCB
- *   2. Wakes any threads whose sleep time has expired
- *   3. Picks the next READY thread (round-robin)
- *   4. Returns that thread's SSP
- *
- * If no threads are READY, returns the current thread's SSP (no switch).
+ * Returns next thread's SSP, or 0 if no threads are READY.
+ * When 0 is returned, the assembly caller does wfi + retries.
  *
  * ============================================================================
  */
@@ -144,11 +107,12 @@ sleep_current(nticks: int)
 schedule(current_ssp: int) -> int
     ticks += 1
 
-    // Save current thread's stack pointer
-    var cur: *Task = &tasks[current_thread]
-    cur.ssp = current_ssp
-    if cur.state == STATE_RUNNING
-        cur.state = STATE_READY
+    // Save current thread (skip when idle, current_thread == -1)
+    if current_thread >= 0
+        var cur: *Task = &tasks[current_thread]
+        cur.ssp = current_ssp
+        if cur.state == STATE_RUNNING
+            cur.state = STATE_READY
 
     // Wake threads whose sleep time has expired
     var i = 0
@@ -175,14 +139,13 @@ schedule(current_ssp: int) -> int
             next = 0
         checked += 1
 
-    // No ready threads — stay on current (shouldn't happen with idle task)
-    cur.state = STATE_RUNNING
-    current_ssp
+    // No ready threads — return 0 to signal idle
+    0
 
 
 /*
  * ============================================================================
- * first_thread_ssp — Return SSP of thread 0
+ * first_thread_ssp
  * ============================================================================
  */
 

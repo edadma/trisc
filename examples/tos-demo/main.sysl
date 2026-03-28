@@ -16,7 +16,6 @@ val TICK_MS = 10
 kernel_main() -> int
     create_thread(task_a, 0x6000, 0x5000, "task_a")
     create_thread(task_b, 0x8000, 0x7000, "task_b")
-    create_thread(idle_task, 0xA000, 0x9000, "idle")
 
     // Start timer: 10ms per tick (100 ticks = 1 second)
     val period: *i32 = TIMER_DEVICE
