@@ -239,6 +239,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val cells = Array.fill(size)(new Cell(IntVal(0)))
         ArrVal(cells, 0)
 
+      case TArrayLit(elements, _) =>
+        val cells = elements.map(e => new Cell(evalAny(e, env))).toArray
+        ArrVal(cells, 0)
+
       case TVarRef(name, _) => lookupCell(name, env).value
 
       case TAddrOf(name, _) => PtrVal(lookupCell(name, env))

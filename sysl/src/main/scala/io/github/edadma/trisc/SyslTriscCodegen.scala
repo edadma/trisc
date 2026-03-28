@@ -40,6 +40,16 @@ class SyslTriscCodegen(addresses: Int = 2):
           init match
             case TIntLit(n, _) => emit(s"  $directive $n")
             case TBoolLit(b, _) => emit(s"  $directive ${if b then 1 else 0}")
+            case TArrayLit(elements, SyslType.ArrayType(elemType, _)) =>
+              val elemDir = emitDataDirective(elemType)
+              for elem <- elements do
+                elem match
+                  case TIntLit(n, _) => emit(s"  $elemDir $n")
+                  case TBoolLit(b, _) => emit(s"  $elemDir ${if b then 1 else 0}")
+                  case _ => emit(s"  $elemDir 0")
+            case TArrayDecl(size, _, SyslType.ArrayType(elemType, _)) =>
+              val elemDir = emitDataDirective(elemType)
+              for _ <- 0 until size do emit(s"  $elemDir 0")
             case _ => emit(s"  $directive 0")
 
     // Emit string literal data
@@ -665,6 +675,22 @@ class SyslTriscCodegen(addresses: Int = 2):
         emitAddImm(7, 7, -totalBytes)
         emit("  mov r1, r7")     // r1 = address of array start
         stackOffset -= totalBytes
+
+      case TArrayLit(elements, SyslType.ArrayType(elemType, size)) =>
+        // Allocate on stack, then store each element
+        val rawBytes = size * stackSize(elemType)
+        val totalBytes = (rawBytes + 7) & ~7
+        emitAddImm(7, 7, -totalBytes)
+        stackOffset -= totalBytes
+        val baseOffset = stackOffset
+        // Store each element
+        for (elem, i) <- elements.zipWithIndex do
+          genExpr(elem) // r1 = value
+          val off = baseOffset + i * stackSize(elemType)
+          emitAddImm(2, 5, off)
+          emitStore(1, 2, elemType)
+        // r1 = base address
+        emitAddImm(1, 5, baseOffset)
 
       case TStringLit(value, _) =>
         // String struct: ptr(8 bytes) + len(4 bytes) = 16 bytes (aligned)

@@ -45,6 +45,9 @@ class SyslParser extends StandardTokenParsers {
     ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
       case name ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body, priv)
     } |
+      opt(mutability) ~ ident ~ (":" ~> typeExpr) ~ ("=" ~> expr) ^^ {
+        case mut ~ name ~ t ~ e => VarDeclAST(name, Some(t), e, priv, mut.getOrElse(true))
+      } |
       opt(mutability) ~ ident ~ (":" ~> typeExpr) ^^ {
         case mut ~ name ~ t => VarDeclAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t), priv, mut.getOrElse(true))
       } |
@@ -120,9 +123,11 @@ class SyslParser extends StandardTokenParsers {
     "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^="
 
   lazy val identStmt: Parser[StmtAST] =
-    mutability ~ ident ~ (":" ~> typeExpr) ^^ { case mut ~ name ~ t => VarStmtAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t), mut) } |
+    mutability ~ ident ~ (":" ~> typeExpr) ~ ("=" ~> expr) ^^ { case mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut) } |
+      mutability ~ ident ~ (":" ~> typeExpr) ^^ { case mut ~ name ~ t => VarStmtAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t), mut) } |
       mutability ~ ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ { case mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut) } |
       mutability ~ ident ~ ("=" ~> expr) ^^ { case mut ~ name ~ e => VarStmtAST(name, None, e, mut) } |
+      ident ~ (":" ~> typeExpr) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ (":" ~> typeExpr) ^^ { case name ~ t => VarStmtAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t)) } |
       ident ~ (":" ~> ident) ~ not("=") ^^ { case name ~ t ~ _ => VarStmtAST(name, Some(t), StructInitAST(t)) } |
       ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
@@ -324,6 +329,7 @@ class SyslParser extends StandardTokenParsers {
       stringLit ^^ StringLitExprAST.apply |
       "true" ^^^ BoolLitAST(true) |
       "false" ^^^ BoolLitAST(false) |
+      "[" ~> rep1sep(expr, ",") <~ "]" ^^ ArrayLitAST.apply |
       "sizeof" ~> "(" ~> sizeofArg <~ ")" |
       cast |
       ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |

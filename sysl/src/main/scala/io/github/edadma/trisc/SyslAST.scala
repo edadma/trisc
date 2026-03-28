@@ -64,6 +64,7 @@ case class FieldPreDecAST(obj: ExpressionAST, field: String) extends ExpressionA
 case class FieldPostIncAST(obj: ExpressionAST, field: String) extends ExpressionAST
 case class FieldPostDecAST(obj: ExpressionAST, field: String) extends ExpressionAST
 case class ArrayDeclAST(size: Int, elemType: String) extends ExpressionAST
+case class ArrayLitAST(elements: List[ExpressionAST]) extends ExpressionAST
 case class StructInitAST(typeName: String) extends ExpressionAST
 case class SizeofTypeAST(typeName: String) extends ExpressionAST
 case class SizeofExprAST(expr: ExpressionAST) extends ExpressionAST
