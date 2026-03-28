@@ -118,4 +118,48 @@ class DisassemblerTests extends TestHelpers {
     result shouldBe defined
     result.get should include("main:")
   }
+
+  "disassemble after TOF serialize/deserialize round-trip" in {
+    val tof = assemble(
+      """global main, func
+        |main
+        |  ldi r1, 42
+        |  halt
+        |""".stripMargin, relocatable = true)
+    val serialized = tof.serialize
+    val deserialized = TOF.deserialize(serialized)
+    val linked = Linker.link(Seq(deserialized))
+    val mem = new Memory("test", new RAM(0, 0x100))
+    linked.load(mem)
+    val dis = Disassembler.fromTOF(mem, linked)
+    val result = dis.disassembleFunction("main")
+    result shouldBe defined
+    result.get should include("ldi")
+  }
+
+  "disassemble handles CommentChunks in segments" in {
+    val tof = assemble(
+      """global main, func
+        |; this is a comment
+        |main
+        |  ldi r1, 42
+        |  halt
+        |""".stripMargin, relocatable = true)
+    val serialized = tof.serialize
+    val deserialized = TOF.deserialize(serialized)
+    val linked = Linker.link(Seq(deserialized))
+    // Compute segment end the same way executeDisasm does
+    for seg <- linked.segments do
+      val end = seg.org + seg.chunks.map {
+        case TOF.DataChunk(d)    => d.length.toLong
+        case TOF.ResChunk(s)     => s
+        case TOF.CommentChunk(_) => 0L
+      }.sum
+      end should be > seg.org
+    val mem = new Memory("test", new RAM(0, 0x100))
+    linked.load(mem)
+    val dis = Disassembler.fromTOF(mem, linked)
+    val output = dis.disassembleRange(0, 4)
+    output should include("ldi")
+  }
 }
