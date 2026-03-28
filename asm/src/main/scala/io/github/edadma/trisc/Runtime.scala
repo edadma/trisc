@@ -8,11 +8,38 @@ object Runtime:
 
   // Boot module — must be linked first so vector table is at address 0.
   // Like the 68000: vector[0] = initial SSP, vector[1] = initial PC.
+  // Full 20-slot vector table matching CPU State enum ordering.
   val bootSource: String =
     s"""extern main
-       |; vector table (address 0)
+       |; vector table (20 slots x 8 bytes = 160 bytes)
        |  dl $initialSSP
-       |  dl main
+       |  dl _start
+       |  dl _fault
+       |  dl _fault
+       |  dl _fault
+       |  dl _fault
+       |  dl _fault
+       |  dl _fault
+       |  dl _fault
+       |  dl _fault
+       |  dl _fault
+       |  dl _fault
+       |  dl _fault
+       |  dl _fault
+       |  dl _fault
+       |  dl _fault
+       |  dl _fault
+       |  dl _fault
+       |  dl _fault
+       |  dl _fault
+       |; boot: call main, then halt
+       |_start
+       |  movi r4, main
+       |  jalr r6, r4
+       |  halt
+       |_fault
+       |  halt
+       |  align 8
        |""".stripMargin
 
   val ioSource: String =

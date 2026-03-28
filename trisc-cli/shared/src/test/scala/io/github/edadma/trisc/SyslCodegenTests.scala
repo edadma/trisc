@@ -10,18 +10,17 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
     val typed = (new SyslAnalyzer).analyze(ast)
     (new SyslTriscCodegen).generate(typed)
 
-  def compileAndRun(source: String, memSize: Int = 0x1000): Long =
+  def compileAndRun(source: String, memSize: Int = 0): Long =
     val asm = compile(source)
     // println(asm) // uncomment to debug
     val tof = assemble(asm, relocatable = true)
-    val linked = Linker.link(Seq(tof))
-    val mem = new Memory("Memory", new RAM(0, memSize))
+    val linked = Linker.link(Seq(Runtime.bootTof, tof, Runtime.ioTof))
+    val stdout = new Stdout(Runtime.stdoutAddress)
+    val ram = new RAM(0, Runtime.stdoutAddress.toInt)
+    val mem = new Memory("Memory", ram, stdout)
     linked.load(mem)
     val cpu = new CPU(mem, Nil) { limit = 100000 }
-    cpu.pc = linked.entryAddress.get
-    cpu.state = State.Run
-    // Set up stack pointer
-    cpu.r(7).write(memSize - 8)
+    cpu.reset()
     cpu.run()
     cpu.r(1).read
 

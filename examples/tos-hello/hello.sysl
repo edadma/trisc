@@ -1,0 +1,12 @@
+// Hello World — a user program linked against the TOS boot stub.
+// Prints "Hello" via putchar (provided by boot.asm) and returns.
+// The boot stub halts after main returns.
+
+main() -> int
+    putchar(72)   // H
+    putchar(101)  // e
+    putchar(108)  // l
+    putchar(108)  // l
+    putchar(111)  // o
+    putchar(10)   // newline
+    0

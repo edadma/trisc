@@ -20,13 +20,17 @@ class SyslTriscCodegen(addresses: Int = 2):
     if hasMain then emit("entry main")
     out ++= meta.toAsmGlobals
 
-    // Emit functions
+    // Emit functions first, then globals (with alignment)
+    var emittedGlobalAlign = false
     for decl <- program.decls do
       decl match
         case _: TImportDecl => // skip
         case _: TStructDecl => // type-only, no code to emit
         case f: TFunDecl => genFunction(f)
         case TVarDecl(name, typ, init, _) =>
+          if !emittedGlobalAlign then
+            emit("  align 8")
+            emittedGlobalAlign = true
           globals(name) = typ
           emit(s"# global: $name")
           emit(s"$name")
@@ -134,8 +138,7 @@ class SyslTriscCodegen(addresses: Int = 2):
         emit("  mov r7, r5")    // restore stack
         emit("  popd r5")       // restore frame pointer
         emit("  popd r6")       // restore link register
-        if fun.name == "main" then emit("  halt")
-        else emit("  jalr r0, r6") // return
+        emit("  jalr r0, r6") // return
       case TBlockBody(stmts) =>
         genBlock(stmts)
 
@@ -176,8 +179,7 @@ class SyslTriscCodegen(addresses: Int = 2):
     emit("  mov r7, r5")
     emit("  popd r5")
     emit("  popd r6")
-    if currentFunction.name == "main" then emit("  halt")
-    else emit("  jalr r0, r6")
+    emit("  jalr r0, r6")
 
   // Break/continue label stacks
   private val breakLabels = new mutable.Stack[String]

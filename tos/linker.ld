@@ -7,17 +7,13 @@
 # The vector table must be at address 0x0000 because the CPU reads
 # exception vectors from fixed addresses starting there.
 #
-# Code and data start at 0x0100, leaving room for the 64-byte
-# vector table (16 vectors × 4 bytes = 64 bytes).
+# 20 vectors x 8 bytes = 160 bytes (0xA0).
+# Code starts at 0x00A0 immediately after the vector table.
 #
 # ============================================================================
 
-MEMORY
-    vectors : ORIGIN = 0x0000, LENGTH = 0x0080
-    code    : ORIGIN = 0x0100, LENGTH = 0xDEFF
-
 SECTIONS
-    .vectors : { *(vectors) } > vectors
-    .code    : { *(code) }    > code
+    vectors: 0x0000
+    code: AFTER vectors
 
 ENTRY boot
