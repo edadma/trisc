@@ -170,6 +170,14 @@ trap_handler
   beq r1, r3, .sys_total_switches ; 13 = total_switches
   ldi r3, 14
   beq r1, r3, .sys_set_watchdog ; 14 = set_watchdog(limit)
+  ldi r3, 15
+  beq r1, r3, .sys_panic       ; 15 = panic
+  ldi r3, 16
+  beq r1, r3, .sys_check_stack ; 16 = check_stack(addr)
+  ldi r3, 17
+  beq r1, r3, .sys_suspend     ; 17 = suspend(id)
+  ldi r3, 18
+  beq r1, r3, .sys_resume      ; 18 = resume(id)
 
   ; Slow path: save full context for syscalls that context-switch
   pshr r6                       ; save user's r1-r6
@@ -376,6 +384,66 @@ extern kernel_set_watchdog
   pshd r6
   mov  r1, r2
   movi r4, kernel_set_watchdog
+  jalr r6, r4
+  popd r6
+  popd r5
+  popd r4
+  popd r2
+  sti
+  rte
+
+; panic: terminate all threads — needs context switch
+extern kernel_panic
+
+.sys_panic
+  pshr r6
+  gusp r1
+  pshd r1
+  movi r4, kernel_panic
+  jalr r6, r4
+  bra do_schedule
+
+; check_stack(addr): check canary at address r2
+extern check_stack_at
+
+.sys_check_stack
+  pshd r2
+  pshd r4
+  pshd r5
+  pshd r6
+  mov  r1, r2
+  movi r4, check_stack_at
+  jalr r6, r4
+  popd r6
+  popd r5
+  popd r4
+  popd r2
+  sti
+  rte
+
+; suspend(id): suspend thread r2 — needs context switch if suspending self
+extern suspend_thread
+
+.sys_suspend
+  pshr r6
+  gusp r1
+  pshd r1
+  addi r3, r7, 40
+  ldd r1, r3, r0
+  movi r4, suspend_thread
+  jalr r6, r4
+  bra do_schedule
+
+; resume(id): resume suspended thread r2
+extern resume_thread
+
+.sys_resume
+  pshd r2
+  pshd r4
+  pshd r5
+  pshd r6
+  mov  r1, r2
+  movi r4, resume_thread
   jalr r6, r4
   popd r6
   popd r5

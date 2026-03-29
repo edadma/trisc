@@ -464,4 +464,161 @@ class TOSThreadTests extends TOSTestHelpers {
     output should include("A")
     output should include("C")
   }
+
+  // ===== putstr =====
+
+  "TOS: putstr prints string" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(task, 0x6000, 0x5000, "t")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task()
+          |    putstr("Hi")
+          |    putc(10)
+          |""".stripMargin
+    ))
+
+    output should startWith("Hi\n")
+  }
+
+  // ===== Stack canary =====
+
+  "TOS: stack canary intact after normal execution" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(task, 0x6000, 0x5000, "t")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task()
+          |    val ok = check_stack(0x6000)
+          |    if ok == 1
+          |        putc(89)
+          |    else
+          |        putc(78)
+          |""".stripMargin
+    ))
+
+    output should include("Y")
+  }
+
+  // ===== Suspend / Resume =====
+
+  "TOS: suspend and resume thread" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(worker, 0x6000, 0x5000, "w")
+          |    create_thread(controller, 0x8000, 0x7000, "c")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |worker()
+          |    var i = 0
+          |    while i < 5
+          |        putc(65 + i)
+          |        sleep(20)
+          |        i += 1
+          |
+          |controller()
+          |    sleep(10)
+          |    suspend(0)
+          |    putc(83)
+          |    sleep(30)
+          |    resume(0)
+          |    putc(82)
+          |""".stripMargin
+    ))
+
+    // Worker prints A then sleeps, controller suspends, prints S,
+    // resumes, prints R. Worker continues printing after resume.
+    output should include("A")
+    output should include("S")
+    output should include("R")
+  }
+
+  "TOS: suspended thread state is queryable" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(target, 0x6000, 0x5000, "t")
+          |    create_thread(checker, 0x8000, 0x7000, "c")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |target()
+          |    sleep(100)
+          |
+          |checker()
+          |    sleep(5)
+          |    suspend(0)
+          |    sleep(5)
+          |    val s = get_thread_state(0)
+          |    if s == 5
+          |        putc(89)
+          |    else
+          |        putc(78)
+          |""".stripMargin
+    ))
+
+    // 5 = STATE_SUSPENDED
+    output should include("Y")
+  }
+
+  // ===== Panic =====
+
+  "TOS: panic terminates all threads" in {
+    val (cpu, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(task, 0x6000, 0x5000, "t")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task()
+          |    putc(65)
+          |    panic()
+          |    putc(66)
+          |""".stripMargin
+    ))
+
+    // A prints, panics, B (after panic) should not print
+    output should include("A")
+    output should not include("B")
+    cpu.state shouldBe State.Wfi
+  }
 }
