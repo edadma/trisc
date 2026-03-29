@@ -1,0 +1,157 @@
+@main
+TOS (Tiny OS) — Kernel
+
+OS primitives:
+  - Thread data structures (TCB)
+  - Thread creation (building initial stack frames)
+  - Scheduler (round-robin with sleep support)
+  - sleep_current() — blocks current thread until wake time
+  - terminate_current() — marks current thread as terminated
+
+All kernel services are accessed through trap 0 (syscall).
+The trap handler in boot.asm dispatches based on r1:
+  0 = sleep(ticks)    — block for N timer ticks
+  1 = putc(char)      — write character to stdout
+  2 = yield()         — voluntary context switch
+
+When no threads are READY, schedule() returns 0.
+The assembly caller then does wfi until the next timer interrupt
+wakes a sleeping thread.
+@
+
+  val MAX_THREADS = 8
+
+  val STATE_READY      = 0
+  val STATE_RUNNING    = 1
+  val STATE_BLOCKED    = 2
+  val STATE_TERMINATED = 3
+
+
+  struct Task
+      ssp: int
+      state: int
+      wake_tick: int
+      name: *byte
+
+
+  var tasks: [8]Task
+  var current_thread = 0
+  var thread_count = 0
+  var ticks = 0
+
+  extern thread_exit()
+
+@api create_thread(entry_point, usp, ssp, name) — Register a new thread.
+
+@tech
+Build an initial stack frame so the scheduler can context-switch
+into a new thread as if it were resuming from an interrupt.
+The frame must match the layout that boot.asm expects:
+  PSR, PC, r1–r6, USP  (9 × 8 bytes, top to bottom)
+@
+
+  create_thread(entry_point: int, usp: int, ssp: int, name: *byte)
+      var sp = ssp
+
+      sp -= 8
+      *sp = 0                 // PSR
+      sp -= 8
+      *sp = entry_point       // PC
+      sp -= 8
+      *sp = 0                 // r1
+      sp -= 8
+      *sp = 0                 // r2
+      sp -= 8
+      *sp = 0                 // r3
+      sp -= 8
+      *sp = 0                 // r4
+      sp -= 8
+      *sp = 0                 // r5
+      sp -= 8
+      *sp = thread_exit       // r6 = return address (exit trampoline)
+      sp -= 8
+      *sp = usp               // USP
+
+      val idx = thread_count
+      var t: *Task = &tasks[idx]
+      t.ssp = sp
+      t.state = STATE_READY
+      t.wake_tick = 0
+      t.name = name
+      thread_count += 1
+
+@api sleep_current(nticks) — Block the current thread for N ticks.
+
+  sleep_current(nticks: int)
+      var cur: *Task = &tasks[current_thread]
+      cur.state = STATE_BLOCKED
+      cur.wake_tick = ticks + nticks
+
+@api terminate_current() — Mark the current thread as terminated.
+
+  terminate_current()
+      var cur: *Task = &tasks[current_thread]
+      cur.state = STATE_TERMINATED
+
+@api schedule(current_ssp) -> int — Round-robin scheduler.
+
+@tech
+Returns next thread's SSP, or 0 if no threads are READY.
+When 0 is returned, the assembly caller does wfi + retries.
+
+Steps:
+  1. Increment tick counter
+  2. Save current thread's SSP (skip when idle)
+  3. Wake any blocked threads whose sleep time has expired
+  4. Round-robin scan for next READY thread
+  5. Return its SSP, or 0 if all threads are blocked/terminated
+@
+
+  schedule(current_ssp: int) -> int
+      ticks += 1
+
+      // Save current thread (skip when idle, current_thread == -1)
+      if current_thread >= 0
+          var cur: *Task = &tasks[current_thread]
+          cur.ssp = current_ssp
+          if cur.state == STATE_RUNNING
+              cur.state = STATE_READY
+
+      // Wake threads whose sleep time has expired
+      var i = 0
+      while i < thread_count
+          var t: *Task = &tasks[i]
+          if t.state == STATE_BLOCKED
+              if ticks >= t.wake_tick
+                  t.state = STATE_READY
+          i += 1
+
+      // Find next READY thread (round-robin)
+      var next = current_thread + 1
+      if next >= thread_count
+          next = 0
+      var checked = 0
+      while checked < thread_count
+          var t: *Task = &tasks[next]
+          if t.state == STATE_READY
+              current_thread = next
+              t.state = STATE_RUNNING
+              return t.ssp
+          next += 1
+          if next >= thread_count
+              next = 0
+          checked += 1
+
+      // No ready threads — return 0 to signal idle
+      0
+
+@api first_thread_ssp() -> int — Return the SSP of thread 0.
+
+@tech
+Called by boot.asm after kernel_main() returns, so boot can
+context-switch into the first thread.
+@
+
+  first_thread_ssp() -> int
+      var first: *Task = &tasks[0]
+      first.ssp

@@ -7,7 +7,7 @@ set -e
 cd "$(git rev-parse --show-toplevel)"
 
 echo "=== Compiling Sysl sources ==="
-sbt -error "syslCliJVM/run compile --emit tof -o demo.tof tos/kernel.sysl tos/services.sysl examples/tos-demo/main.sysl examples/tos-demo/tasks.sysl"
+sbt -error "syslCliJVM/run compile --emit tof -o demo.tof tos/kernel.lsysl tos/services.lsysl examples/tos-demo/main.lsysl examples/tos-demo/tasks.lsysl"
 
 echo "=== Assembling boot.asm ==="
 sbt -error "triscCliJVM/run asm tos/boot.asm"

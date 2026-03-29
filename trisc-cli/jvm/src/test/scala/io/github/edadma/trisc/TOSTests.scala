@@ -5,11 +5,16 @@ import org.scalatest.matchers.should.Matchers
 
 class TOSTests extends AnyFreeSpec with Matchers {
 
+  private def readLsysl(path: String): String =
+    val raw = scala.io.Source.fromFile(path).mkString
+    val doc = new LiterateParser().parse(raw)
+    LiterateRenderer.tangle(doc)
+
   val bootAsm = scala.io.Source.fromFile("tos/boot.asm").mkString
-  val kernelSysl = scala.io.Source.fromFile("tos/kernel.sysl").mkString
-  val servicesSysl = scala.io.Source.fromFile("tos/services.sysl").mkString
-  val tasksSysl = scala.io.Source.fromFile("examples/tos-demo/tasks.sysl").mkString
-  val mainSysl = scala.io.Source.fromFile("examples/tos-demo/main.sysl").mkString
+  val kernelSysl = readLsysl("tos/kernel.lsysl")
+  val servicesSysl = readLsysl("tos/services.lsysl")
+  val tasksSysl = readLsysl("examples/tos-demo/tasks.lsysl")
+  val mainSysl = readLsysl("examples/tos-demo/main.lsysl")
 
   "boot.asm assembles" in {
     val tof = assemble(bootAsm, relocatable = true)
