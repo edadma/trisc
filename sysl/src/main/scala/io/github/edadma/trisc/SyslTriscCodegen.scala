@@ -257,6 +257,19 @@ class SyslTriscCodegen(addresses: Int = 4):
               val off = local.offset + i * stackSize(elemType)
               emitAddImm(2, 5, off)
               emitStore(1, 2, elemType)
+          case TStructLit(st @ SyslType.StructType(_, _)) =>
+            // Allocate struct on stack and zero-initialize
+            val totalSize = stackSize(st)
+            val aligned = (totalSize + 7) & ~7
+            emitAddImm(7, 7, -aligned)
+            stackOffset -= aligned
+            val local = LocalVar(name, stackOffset, typ)
+            locals(name) = local
+            // Zero-fill
+            emitAddImm(1, 5, local.offset)
+            for i <- 0 until aligned by 8 do
+              emitAddImm(2, 1, i)
+              emit("  std r0, r2, r0")
           case _ =>
             genExpr(init) // result in r1
             val local = allocLocal(name, typ)
@@ -290,6 +303,17 @@ class SyslTriscCodegen(addresses: Int = 4):
                 val off = local.offset + i * stackSize(elemType)
                 emitAddImm(2, 5, off)
                 emitStore(1, 2, elemType)
+            case TStructLit(st @ SyslType.StructType(_, _)) =>
+              val totalSize = stackSize(st)
+              val aligned = (totalSize + 7) & ~7
+              emitAddImm(7, 7, -aligned)
+              stackOffset -= aligned
+              val local = LocalVar(target, stackOffset, value.typ)
+              locals(target) = local
+              emitAddImm(1, 5, local.offset)
+              for i <- 0 until aligned by 8 do
+                emitAddImm(2, 1, i)
+                emit("  std r0, r2, r0")
             case _ =>
               genExpr(value)
               val typ = value.typ
@@ -439,12 +463,16 @@ class SyslTriscCodegen(addresses: Int = 4):
         // Step 4: arithmetic (current op rhs)
         emit("  popd r2")        // r2 = current value
         op match
-          case "+" => emit("  add r2, r2, r1")
-          case "-" => emit("  sub r2, r2, r1")
-          case "*" => emit("  mul r2, r2, r1")
-          case "/" => emit("  div r2, r2, r1")
-          case "%" => emit("  rem r2, r2, r1")
-          case _   => emit(s"  # TODO: compound assign op $op")
+          case "+"  => emit("  add r2, r2, r1")
+          case "-"  => emit("  sub r2, r2, r1")
+          case "*"  => emit("  mul r2, r2, r1")
+          case "/"  => emit("  div r2, r2, r1")
+          case "%"  => emit("  rem r2, r2, r1")
+          case "&"  => emit("  and r2, r2, r1")
+          case "|"  => emit("  or r2, r2, r1")
+          case "^"  => emit("  xor r2, r2, r1")
+          case "<<" => emit("  lsl r2, r2, r1")
+          case ">>" => emit("  asr r2, r2, r1")
         // Step 5: store result (field address is safely on stack)
         emit("  popd r1")        // r1 = field address
         emitStore(2, 1, fieldType)
@@ -871,6 +899,77 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit(s"  ldi r1, $size") // cap == size for fixed arrays
           case _ =>
             emit("  # TODO: cap on unsupported type")
+
+      case TFloatLit(d, _) =>
+        val bits = java.lang.Double.doubleToRawLongBits(d)
+        emit(s"  movi r1, $bits  # float $d")
+
+      case TSizeof(size, _) =>
+        if size >= 0 && size <= 255 then
+          emit(s"  ldi r1, $size")
+        else
+          emit(s"  movi r1, $size")
+
+      case TStructLit(st @ SyslType.StructType(_, fields)) =>
+        val totalSize = stackSize(st)
+        val aligned = (totalSize + 7) & ~7
+        emitAddImm(7, 7, -aligned)
+        stackOffset -= aligned
+        // Zero-initialize the struct via byte fill
+        emit("  mov r1, r7")  // r1 = struct base address
+        for i <- 0 until aligned by 8 do
+          emitAddImm(2, 1, i)
+          emit("  std r0, r2, r0")
+
+      case TFieldPreInc(obj, fieldIndex, _) =>
+        val st = obj.typ.asInstanceOf[SyslType.StructType]
+        val off = fieldOffset(st, fieldIndex)
+        val fieldType = st.fields(fieldIndex)._2
+        emitStructAddr(obj)
+        if off != 0 then emitAddImm(1, 1, off)
+        emit("  pshd r1")           // save field address
+        emitLoad(1, 1, fieldType)    // r1 = current value
+        emit("  addi r1, r1, 1")    // increment
+        emit("  popd r2")           // r2 = field address
+        emitStore(1, 2, fieldType)   // store incremented value
+        // r1 = new value (returned)
+
+      case TFieldPreDec(obj, fieldIndex, _) =>
+        val st = obj.typ.asInstanceOf[SyslType.StructType]
+        val off = fieldOffset(st, fieldIndex)
+        val fieldType = st.fields(fieldIndex)._2
+        emitStructAddr(obj)
+        if off != 0 then emitAddImm(1, 1, off)
+        emit("  pshd r1")
+        emitLoad(1, 1, fieldType)
+        emit("  addi r1, r1, -1")
+        emit("  popd r2")
+        emitStore(1, 2, fieldType)
+
+      case TFieldPostInc(obj, fieldIndex, _) =>
+        val st = obj.typ.asInstanceOf[SyslType.StructType]
+        val off = fieldOffset(st, fieldIndex)
+        val fieldType = st.fields(fieldIndex)._2
+        emitStructAddr(obj)
+        if off != 0 then emitAddImm(1, 1, off)
+        emit("  pshd r1")           // save field address
+        emitLoad(1, 1, fieldType)    // r1 = current value (return this)
+        emit("  addi r3, r1, 1")    // r3 = incremented
+        emit("  popd r2")           // r2 = field address
+        emitStore(3, 2, fieldType)   // store incremented value
+        // r1 = old value (returned)
+
+      case TFieldPostDec(obj, fieldIndex, _) =>
+        val st = obj.typ.asInstanceOf[SyslType.StructType]
+        val off = fieldOffset(st, fieldIndex)
+        val fieldType = st.fields(fieldIndex)._2
+        emitStructAddr(obj)
+        if off != 0 then emitAddImm(1, 1, off)
+        emit("  pshd r1")
+        emitLoad(1, 1, fieldType)
+        emit("  addi r3, r1, -1")
+        emit("  popd r2")
+        emitStore(3, 2, fieldType)
 
       case _ =>
         emit(s"  # TODO: ${expr.getClass.getSimpleName}")
