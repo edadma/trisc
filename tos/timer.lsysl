@@ -1,10 +1,10 @@
 @main
 TOS Timer Driver
 
-Handles timer IRQ 0. Acknowledges the timer device and calls the
-kernel to increment ticks and wake sleeping threads. The IRQ
-dispatcher in boot.asm handles the context switch after this
-handler returns.
+Handles timer IRQ 0. Acknowledges the timer device so it can
+fire again. The tick counting and thread wake logic lives in
+the kernel's schedule() function, which runs after every
+context switch.
 
 Device registers:
   0x100020 + 0-3 = PERIOD (4 bytes, write)
@@ -18,7 +18,6 @@ Device registers:
   val TIMER_IRQ     = 0
 
   extern register_irq(irq: int, handler: int)
-  extern tick_and_wake()
 
 @api timer_init(period_ms) — Initialize and start the timer, register IRQ handler.
 
@@ -38,16 +37,10 @@ Device registers:
 
 @tech
 timer_handler — Called by the generic IRQ dispatcher in boot.asm.
-
-Acknowledges the timer and updates kernel tick/wake state. The
-dispatcher handles the context switch after this returns (since
-IRQ 0 always triggers preemption).
+Just acknowledges the timer device. The dispatcher handles the
+context switch, and schedule() handles tick counting and waking.
 @
 
   timer_handler()
-      // Acknowledge timer (clears fired flag and lowers IRQ on controller)
       val status: *i8 = TIMER_STATUS
       *status = 0
-
-      // Kernel handles tick counting and waking sleeping threads
-      tick_and_wake()

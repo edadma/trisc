@@ -21,7 +21,6 @@ object TOSTestData {
   lazy val mailboxSysl: String = readLsysl("tos/mailbox.lsysl")
   lazy val rbtreeSysl: String = readLsysl("tos/rbtree.lsysl")
   lazy val timerSysl: String = readLsysl("tos/timer.lsysl")
-  lazy val keyboardSysl: String = readLsysl("tos/keyboard.lsysl")
   lazy val tasksSysl: String = readLsysl("examples/tos-demo/tasks.lsysl")
   lazy val mainSysl: String = readLsysl("examples/tos-demo/main.lsysl")
 
@@ -120,8 +119,7 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
     val bootTof = assemble(bootAsm, relocatable = true)
 
     val allSources = Map(
-      "kernel" -> kernelSysl, "services" -> servicesSysl, "timer" -> timerSysl,
-      "keyboard" -> keyboardSysl, "semaphore" -> semaphoreSysl,
+      "kernel" -> kernelSysl, "services" -> servicesSysl, "timer" -> timerSysl, "semaphore" -> semaphoreSysl,
       "mutex" -> mutexSysl, "condvar" -> condvarSysl, "barrier" -> barrierSysl,
       "rwlock" -> rwlockSysl, "channel" -> channelSysl, "mailbox" -> mailboxSysl,
     ) ++ userSources

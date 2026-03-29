@@ -23,7 +23,7 @@ segment vectors
 
   dl 0x0FFFF8              ; Slot 0:  Initial SSP (kernel stack top, below devices)
   dl boot                  ; Slot 1:  Initial PC
-  dl irq_handler           ; Slot 2:  Interrupt
+  dl timer_isr             ; Slot 2:  Interrupt (use timer_isr until IRQ dispatch is debugged)
   dl default_isr           ; Slot 3:  InstructionAccess
   dl default_isr           ; Slot 4:  DataAccess
   dl default_isr           ; Slot 5:  MisalignedAccess
@@ -118,17 +118,20 @@ restore_thread
 
 
 ; ============================================================================
-; irq_handler — Generic Interrupt Dispatcher
+; timer_isr — Direct timer ISR (used until IRQ dispatch is fully debugged)
 ; ============================================================================
-;
-; Reads INTC CLAIM to identify the IRQ source, then dispatches to the
-; registered handler via irq_handlers table. If the handler needs a
-; context switch, it jumps to context_switch itself.
-;
-; Handlers that DON'T context-switch must sti + rte on their own.
-; Handlers that DO context-switch jump to context_switch (which does
-; sti + rte after scheduling).
-;
+
+TIMER_STATUS = 0x100025
+
+global timer_isr, func
+
+timer_isr
+  cli
+  bra context_switch
+
+
+; ============================================================================
+; irq_handler — Generic Interrupt Dispatcher (WIP — not yet wired to vector)
 ; ============================================================================
 
 INTC_CLAIM = 0x100028    ; INTC base (0x100026) + offset 2
@@ -139,9 +142,9 @@ global irq_handler, func
 
 irq_handler
   cli
-  ; Save full context FIRST, before clobbering any registers
+  ; Save full context before clobbering any registers
   pshr r6               ; save r1-r6
-  gusp r1               ; get user stack pointer
+  gusp r1
   pshd r1               ; save USP
 
   ; Read CLAIM — identifies source and auto-clears pending
@@ -152,14 +155,14 @@ irq_handler
   ldi  r3, 0xFF
   beq  r1, r3, .irq_restore
 
-  ; Save IRQ number for post-handler decision
+  ; Save IRQ number
   pshd r1
 
   ; Look up handler: irq_handlers[r1] (array of 8-byte pointers)
   movi r2, irq_handlers
   ldi  r3, 8
-  mul  r3, r1, r3         ; r3 = r1 * 8
-  add  r2, r2, r3         ; r2 = &irq_handlers[r1]
+  mul  r3, r1, r3
+  add  r2, r2, r3
   ldd  r2, r2, r0         ; r2 = handler function pointer
 
   ; If no handler registered (null), skip
@@ -174,7 +177,7 @@ irq_handler
   ; Timer (IRQ 0) triggers context switch for preemption
   beq  r1, r0, do_schedule
 
-  ; Non-timer IRQs: restore and return to interrupted thread
+  ; Non-timer IRQs: restore and return
   bra .irq_restore
 
 .irq_pop_restore
@@ -221,10 +224,6 @@ trap_handler
   beq r1, r3, .sys_thread_name ; 9 = thread_name(id)
   ldi r3, 10
   beq r1, r3, .sys_sleep_until ; 10 = sleep_until(tick)
-  ldi r3, 11
-  beq r1, r3, .sys_kbhit       ; 11 = kbhit
-  ldi r3, 12
-  beq r1, r3, .sys_getkey      ; 12 = getkey
 
   ; Slow path: save full context for syscalls that context-switch
   pshr r6                       ; save user's r1-r6
@@ -369,41 +368,6 @@ extern sleep_until_current
   movi r4, sleep_until_current
   jalr r6, r4
   bra do_schedule
-
-
-; kbhit: return 1 if keyboard event buffered, 0 otherwise
-extern kb_has_key
-
-.sys_kbhit
-  pshd r2
-  pshd r4
-  pshd r5
-  pshd r6
-  movi r4, kb_has_key
-  jalr r6, r4
-  popd r6
-  popd r5
-  popd r4
-  popd r2
-  sti
-  rte
-
-; getkey: return next keyboard event (packed) or 0
-extern kb_read_key
-
-.sys_getkey
-  pshd r2
-  pshd r4
-  pshd r5
-  pshd r6
-  movi r4, kb_read_key
-  jalr r6, r4
-  popd r6
-  popd r5
-  popd r4
-  popd r2
-  sti
-  rte
 
 
 ; ============================================================================

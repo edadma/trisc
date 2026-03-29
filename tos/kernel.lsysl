@@ -72,30 +72,8 @@ from bit 0.
 
   extern thread_exit()
 
-@api register_irq(irq, handler) — Register a handler function for an IRQ line.
-
   register_irq(irq: int, handler: int)
       irq_handlers[irq] = handler
-
-@api tick_and_wake() — Increment tick counter and wake sleeping threads.
-
-@tech
-Called by the timer driver on each timer interrupt. Separated from
-the timer driver so that kernel internals (tasks array, enqueue)
-stay encapsulated in the kernel module.
-@
-
-  tick_and_wake()
-      ticks += 1
-
-      var i = 0
-      while i < thread_count
-          if tasks[i].state == STATE_BLOCKED
-              if ticks >= tasks[i].wake_tick
-                  tasks[i].state = STATE_READY
-                  tasks[i].quantum = DEFAULT_QUANTUM
-                  enqueue(tasks[i].priority, i)
-          i += 1
 
 @tech
 ensure_queues_init — Lazily initialize queues on first use.
@@ -289,6 +267,8 @@ Steps:
 @
 
   schedule(current_ssp: int) -> int
+      ticks += 1
+
       // Save current thread (skip when idle, current_thread == -1)
       if current_thread >= 0
           tasks[current_thread].ssp = current_ssp
@@ -300,6 +280,16 @@ Steps:
                   tasks[current_thread].quantum = DEFAULT_QUANTUM
               // Re-enqueue at back of its priority queue
               enqueue(tasks[current_thread].priority, current_thread)
+
+      // Wake threads whose sleep time has expired
+      var i = 0
+      while i < thread_count
+          if tasks[i].state == STATE_BLOCKED
+              if ticks >= tasks[i].wake_tick
+                  tasks[i].state = STATE_READY
+                  tasks[i].quantum = DEFAULT_QUANTUM
+                  enqueue(tasks[i].priority, i)
+          i += 1
 
       // Find highest-priority non-empty queue (lowest number)
       var pri = 0
