@@ -45,7 +45,7 @@ class LinkerTests extends TestHelpers {
     val caller = assemble("movi r1, target\nhalt\n", relocatable = true, addresses = 2)
     val callee = assemble("target\n  ldi r2, 99\n  halt\n", relocatable = true, addresses = 2)
 
-    val linked = Linker.link(Seq(caller, callee), addresses = 2)
+    val linked = Linker.link(Seq(caller, callee))
     linked.isFullyResolved shouldBe true
 
     val mem = new Memory("Memory", new RAM(0, 0x1000))
@@ -63,7 +63,7 @@ class LinkerTests extends TestHelpers {
     val caller = assemble("movi r1, target\nhalt\n", relocatable = true, addresses = 3)
     val callee = assemble("target\n  ldi r2, 77\n  halt\n", relocatable = true, addresses = 3)
 
-    val linked = Linker.link(Seq(caller, callee), addresses = 3)
+    val linked = Linker.link(Seq(caller, callee))
 
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     linked.load(mem)
@@ -79,7 +79,7 @@ class LinkerTests extends TestHelpers {
     val caller = assemble("movi r1, target\nhalt\n", relocatable = true, addresses = 4)
     val callee = assemble("target\n  ldi r2, 55\n  halt\n", relocatable = true, addresses = 4)
 
-    val linked = Linker.link(Seq(caller, callee), addresses = 4)
+    val linked = Linker.link(Seq(caller, callee))
 
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     linked.load(mem)
