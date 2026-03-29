@@ -22,53 +22,28 @@ class SyslTriscCodegen(addresses: Int = 4):
     if hasMain then emit("entry main")
     out ++= meta.toAsmGlobals
 
-    // Emit ALL globals first (with alignment), then ALL functions
-    // Pass 1: emit globals
+    // Collect globals into data (initialized) and bss (zero-initialized) lists
+    val dataGlobals = new mutable.ListBuffer[TDecl]
+    val bssGlobals = new mutable.ListBuffer[TDecl]
+
     for decl <- program.decls do
       decl match
-        case _: TImportDecl => // skip
-        case _: TExternFuncDecl => // skip — resolved by linker
-        case _: TStructDecl => // type-only, no code to emit
-        case _: TEnumDecl => // type-only, no code to emit
-        case _: TTypeAliasDecl => // type-only, no code to emit
-        case _: TFunDecl => // skip — emitted in Pass 2
-        case TVarDecl(name, typ, init, _) =>
-          val align = stackAlign(typ)
-          if align > 1 then emit(s"  align $align")
-          globals(name) = typ
-          emit(s"# global: $name")
-          emit(s"$name:")
-          init match
-            case TArrayLit(elements, _) =>
-              val declElemType = typ match
-                case SyslType.ArrayType(e, _) => e
-                case _ => SyslType.I64
-              val elemDir = emitDataDirective(declElemType)
-              for elem <- elements do
-                constEval(elem) match
-                  case Some(n) => emit(s"  $elemDir $n")
-                  case None => emit(s"  $elemDir 0")
-            case _ =>
-              typ match
-                case SyslType.ArrayType(elem, count) =>
-                  emit(s"  resb ${stackSize(elem) * count}")
-                case _: SyslType.StructType =>
-                  emit(s"  resb ${stackSize(typ)}")
-                case _ =>
-                  val directive = emitDataDirective(typ)
-                  constEval(init) match
-                    case Some(n) => emit(s"  $directive $n")
-                    case None => emit(s"  $directive 0")
-        case _ => // skip non-globals in first pass
+        case v @ TVarDecl(_, typ, init, _) =>
+          globals(v.name) = typ
+          if isZeroInit(typ, init) then bssGlobals += v
+          else dataGlobals += v
+        case _ => // functions, externs, types — handled below
 
-    // Pass 2: emit functions
+    // Emit code segment — functions
+    emit("segment code")
     for decl <- program.decls do
       decl match
         case f: TFunDecl => genFunction(f)
         case _ => // skip
 
-    // Emit string literal data
+    // Emit rodata segment — string literals
     if stringLiterals.nonEmpty then
+      emit("segment rodata")
       for (label, value) <- stringLiterals do
         val bytes = value.getBytes("UTF-8")
         emit(s"global $label, data, ${bytes.length + 1}")
@@ -77,7 +52,53 @@ class SyslTriscCodegen(addresses: Int = 4):
         val bytes = value.getBytes("UTF-8")
         emit(s"$label:")
         for b <- bytes do emit(s"  db ${b & 0xff}")
-        emit("  db 0") // null terminator for C interop
+        emit("  db 0") // null terminator
+
+    // Emit data segment — initialized globals
+    if dataGlobals.nonEmpty then
+      emit("segment data")
+      for decl <- dataGlobals do
+        decl match
+          case TVarDecl(name, typ, init, _) =>
+            val align = stackAlign(typ)
+            if align > 1 then emit(s"  align $align")
+            emit(s"# global: $name")
+            emit(s"$name:")
+            init match
+              case TArrayLit(elements, _) =>
+                val declElemType = typ match
+                  case SyslType.ArrayType(e, _) => e
+                  case _ => SyslType.I64
+                val elemDir = emitDataDirective(declElemType)
+                for elem <- elements do
+                  constEval(elem) match
+                    case Some(n) => emit(s"  $elemDir $n")
+                    case None => emit(s"  $elemDir 0")
+              case _ =>
+                val directive = emitDataDirective(typ)
+                constEval(init) match
+                  case Some(n) => emit(s"  $directive $n")
+                  case None => emit(s"  $directive 0")
+          case _ =>
+
+    // Emit bss segment — zero-initialized globals (arrays, structs, uninitialized)
+    if bssGlobals.nonEmpty then
+      emit("segment bss")
+      for decl <- bssGlobals do
+        decl match
+          case TVarDecl(name, typ, _, _) =>
+            val align = stackAlign(typ)
+            if align > 1 then emit(s"  align $align")
+            emit(s"# global: $name")
+            emit(s"$name:")
+            typ match
+              case SyslType.ArrayType(elem, count) =>
+                emit(s"  resb ${stackSize(elem) * count}")
+              case _: SyslType.StructType =>
+                emit(s"  resb ${stackSize(typ)}")
+              case _ =>
+                emit(s"  resb ${stackSize(typ)}")
+          case _ =>
 
     out.toString
 
@@ -87,6 +108,20 @@ class SyslTriscCodegen(addresses: Int = 4):
   private var locals: mutable.LinkedHashMap[String, LocalVar] = null
   private var stackOffset: Int = 0
   private var currentFunction: TFunDecl = null
+
+  // Determine if a global variable should go in bss (zero-initialized) vs data
+  private def isZeroInit(typ: SyslType, init: TExpr): Boolean =
+    init match
+      case TArrayLit(_, _) => false // array literal has explicit values → data
+      case _ =>
+        typ match
+          case SyslType.ArrayType(_, _) => true // uninitialized array → bss
+          case _: SyslType.StructType => true // struct → bss
+          case _ =>
+            constEval(init) match
+              case Some(0) => true // explicitly zero → bss
+              case None => true // no initializer → bss
+              case _ => false // nonzero constant → data
 
   // Size of a type on the stack in bytes, rounded up to alignment
   private def stackSize(typ: SyslType): Int =

@@ -102,6 +102,18 @@ object Linker:
           throw LinkerError(s"duplicate symbol: '${sym.name}'")
         globalSymbols(sym.name) = (absAddr, sym)
 
+    // Phase 3b: resolve linker script SYMBOL definitions
+    for symDef <- script.symbols do
+      val addr = symDef.value match
+        case SymbolValue.Absolute(a) => a
+        case SymbolValue.AfterSection(ref) =>
+          placedByName.get(ref) match
+            case Some(prev) => (prev.org + prev.data.length + 7) & ~7L // 8-byte aligned
+            case None => nextAddr // section not found, use next available
+      if globalSymbols.contains(symDef.name) then
+        throw LinkerError(s"linker symbol '${symDef.name}' conflicts with an existing symbol")
+      globalSymbols(symDef.name) = (addr, TOFSymbol(symDef.name, 0, SymbolType.Data, Some(8)))
+
     // Phase 4: resolve relocations
     // When producing a relocatable output, unresolved externs are preserved
     val outputRelocs = new ArrayBuffer[ArrayBuffer[TOFReloc]]
