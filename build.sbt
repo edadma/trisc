@@ -217,21 +217,35 @@ lazy val fonts = project
 lazy val root = project
   .in(file("."))
   .aggregate(
-    utils.jvm, /* utils.js, */ utils.native,
-    mem.jvm, /* mem.js, */ mem.native,
-    tof.jvm, /* tof.js, */ tof.native,
-    asm.jvm, /* asm.js, */ asm.native,
-    cpu.jvm, /* cpu.js, */ cpu.native,
-    docs.jvm, /* docs.js, */ docs.native,
-    sysl.jvm, /* sysl.js, */ sysl.native,
-    triscCli.jvm, /* triscCli.js, */ triscCli.native,
-    syslCli.jvm, /* syslCli.js, */ syslCli.native,
-    docsCli.jvm, /* docsCli.js, */ docsCli.native,
+    utils.jvm, /* utils.js, utils.native, */
+    mem.jvm, /* mem.js, mem.native, */
+    tof.jvm, /* tof.js, tof.native, */
+    asm.jvm, /* asm.js, asm.native, */
+    cpu.jvm, /* cpu.js, cpu.native, */
+    docs.jvm, /* docs.js, docs.native, */
+    sysl.jvm, /* sysl.js, sysl.native, */
+    triscCli.jvm, /* triscCli.js, triscCli.native, */
+    syslCli.jvm, /* syslCli.js, syslCli.native, */
+    docsCli.jvm, /* docsCli.js, docsCli.native, */
     ttf,
-    fonts,
+    /* fonts, */
   )
   .settings(
     name                := "trisc",
     publish / skip      := true,
     publishLocal / skip := true,
   )
+
+// Custom commands for platform-specific test runs
+commands ++= Seq(
+  Command.command("testNative") { state =>
+    "utilsNative/test" :: "memNative/test" :: "tofNative/test" :: "asmNative/test" ::
+    "cpuNative/test" :: "docsNative/test" :: "syslNative/test" ::
+    "triscCliNative/test" :: "syslCliNative/test" :: "docsCliNative/test" :: state
+  },
+  Command.command("testJS") { state =>
+    "utilsJS/test" :: "memJS/test" :: "tofJS/test" :: "asmJS/test" ::
+    "cpuJS/test" :: "docsJS/test" :: "syslJS/test" ::
+    "triscCliJS/test" :: "syslCliJS/test" :: "docsCliJS/test" :: state
+  },
+)
