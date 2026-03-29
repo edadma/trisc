@@ -19,7 +19,7 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
     val ram = new RAM(0, Runtime.stdoutAddress.toInt)
     val mem = new Memory("Memory", ram, stdout)
     linked.load(mem)
-    val cpu = new CPU(mem, Nil) { limit = 100000 }
+    val cpu = new CPU(mem) { limit = 100000 }
     cpu.reset()
     cpu.run()
     cpu.r(1).read
@@ -37,7 +37,7 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
     val ram = new RAM(0, Runtime.stdoutAddress.toInt)
     val mem = new Memory("Memory", ram, stdout)
     linked.load(mem)
-    val cpu = new CPU(mem, Nil) { limit = 100000 }
+    val cpu = new CPU(mem) { limit = 100000 }
     cpu.reset()
     cpu.run()
     cpu.r(1).read
@@ -220,7 +220,7 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
     val ram = new RAM(0, Runtime.stdoutAddress.toInt)
     val mem = new Memory("Memory", ram, stdout)
     linked.load(mem)
-    val cpu = new CPU(mem, Nil) { limit = 100000 }
+    val cpu = new CPU(mem) { limit = 100000 }
     cpu.reset()
     cpu.run()
     cpu.r(1).read shouldBe 42
@@ -252,7 +252,7 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
     val ram = new RAM(0, Runtime.stdoutAddress.toInt)
     val mem = new Memory("Memory", ram, stdout)
     linked.load(mem)
-    val cpu = new CPU(mem, Nil) { limit = 100000 }
+    val cpu = new CPU(mem) { limit = 100000 }
     cpu.reset()
     cpu.run()
     cpu.r(1).read shouldBe 42

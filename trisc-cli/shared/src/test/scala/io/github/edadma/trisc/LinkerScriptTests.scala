@@ -232,7 +232,7 @@ class LinkerScriptTests extends TestHelpers {
 
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     linked.load(mem)
-    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000 }
     cpu.pc = linked.entryAddress.get
     cpu.state = State.Run
     cpu.run()

@@ -73,7 +73,7 @@ class SystemTests extends TestHelpers {
         |halt
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, Nil) { limit = 100 }
+    val cpu = new CPU(mem) { limit = 100 }
     cpu.reset()
     cpu.run()
     // CPU should be stuck in Wfi state; r1 should still be 10
@@ -92,7 +92,7 @@ class SystemTests extends TestHelpers {
     }
     var interruptFired = false
     val interruptSource: CPU => Unit = cpu =>
-      if !interruptFired then
+      if !interruptFired && cpu.state == State.Wfi then
         interruptFired = true
         cpu.interrupt()
     val mem = new Memory("Memory", new RAM(0, 0xFF8), stdout)
@@ -114,7 +114,7 @@ class SystemTests extends TestHelpers {
         |  rte
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, List(interruptSource)) { limit = 10000 }
+    val cpu = new CPU(mem, interruptSource) { limit = 10000 }
     cpu.reset()
     cpu.run()
     // After wfi resumes via interrupt, isr writes 'W' to stdout and rte returns.
@@ -125,11 +125,12 @@ class SystemTests extends TestHelpers {
   }
 
   "wfi does not execute next instruction before interrupt" in {
-    // Use a delayed interrupt: first callback does nothing, second fires.
-    var callCount = 0
+    // Interrupt fires only when CPU reaches WFI state.
+    var interruptFired = false
     val interruptSource: CPU => Unit = cpu =>
-      callCount += 1
-      if callCount == 3 then cpu.interrupt()
+      if !interruptFired && cpu.state == State.Wfi then
+        interruptFired = true
+        cpu.interrupt()
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     val tof = assemble(
       """dd 0xFF0
@@ -147,7 +148,7 @@ class SystemTests extends TestHelpers {
         |  rte
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, List(interruptSource)) { limit = 10000 }
+    val cpu = new CPU(mem, interruptSource) { limit = 10000 }
     cpu.reset()
     cpu.run()
     // r3 should be 20 after resuming (not still 10)
@@ -429,7 +430,7 @@ class SystemTests extends TestHelpers {
   "fence before wfi does not interfere" in {
     var interruptFired = false
     val interruptSource: CPU => Unit = cpu =>
-      if !interruptFired then
+      if !interruptFired && cpu.state == State.Wfi then
         interruptFired = true
         cpu.interrupt()
     val mem = new Memory("Memory", new RAM(0, 0x1000))
@@ -449,7 +450,7 @@ class SystemTests extends TestHelpers {
         |  rte
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, List(interruptSource)) { limit = 10000 }
+    val cpu = new CPU(mem, interruptSource) { limit = 10000 }
     cpu.reset()
     cpu.run()
     cpu.r(1).read shouldBe 99
@@ -477,7 +478,7 @@ class SystemTests extends TestHelpers {
         |  rte
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, List(interruptSource)) { limit = 100 }
+    val cpu = new CPU(mem, interruptSource) { limit = 100 }
     cpu.reset()
     cpu.run()
     // Should exhaust the limit while stuck in Wfi

@@ -8,7 +8,7 @@ enum Status(val bit: Int):
   case Ind extends Status(1)
   case Mode extends Status(2)
   case C extends Status(4)
-  case Irq extends Status(8)
+  // bit 3 (8) reserved — formerly Irq, now handled by external interrupt controller
   case T extends Status(16)
   case V extends Status(32)
 
@@ -19,7 +19,7 @@ enum State:
     Trace, Overflow, BoundsCheck,
     Halt, Run, Wfi, DoubleFault
 
-class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
+class CPU(mem: Addressable, irq: CPU => Unit = _ => ()) extends Addressable:
   val name: String = mem.name
   val base: Long = mem.base
   val size: Long = mem.size
@@ -95,8 +95,6 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
     set(Status.V, false)
 
   def interrupt(): Unit =
-    set(Status.Irq, true)
-
     if !test(Status.Ind) then state = State.Interrupt
 
   private def enterException(): Unit =
@@ -185,8 +183,11 @@ class CPU(mem: Addressable, interrupts: Seq[CPU => Unit]) extends Addressable:
 
     if limit > 0 then limit -= 1
 
+    irq(this)
+
+    if state == State.Wfi && limit < 0 then Thread.sleep(1)
+
     if state != State.Halt && state != State.DoubleFault && limit != 0 then
-      interrupts foreach (_(this))
       run()
 
   def resume(): Unit =

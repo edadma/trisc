@@ -151,7 +151,7 @@ class TOSTests extends AnyFreeSpec with Matchers {
     }
     val mem = new Memory("Memory", new RAM(0, 0x10000), stdout)
     linked.load(mem)
-    val cpu = new CPU(mem, Nil) { limit = 100000 }
+    val cpu = new CPU(mem) { limit = 100000 }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)
@@ -234,7 +234,7 @@ class TOSTests extends AnyFreeSpec with Matchers {
     val timer = new Timer(0x100020L)
     val mem = new Memory("Memory", new RAM(0, 0x100000), stdout, timer)
     linked.load(mem)
-    val cpu = new CPU(mem, Seq(timer)) { this.limit = maxCycles }
+    val cpu = new CPU(mem, timer) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)

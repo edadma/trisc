@@ -190,7 +190,7 @@ class DeviceTests extends TestHelpers {
     val timer = new Timer(0x100, () => t)
     timer.writeByte(0x103, 0x0A) // period = 10
     t = 100
-    val cpu = new CPU(new RAM(0, 256), Nil)
+    val cpu = new CPU(new RAM(0, 256))
     timer(cpu)
     cpu.state should not be State.Interrupt
   }
@@ -201,7 +201,7 @@ class DeviceTests extends TestHelpers {
     timer.writeByte(0x103, 0x0A) // period = 10
     timer.writeByte(0x104, 0x01) // start
     t = 10
-    val cpu = new CPU(new RAM(0, 256), Nil) { set(Status.Ind, false) }
+    val cpu = new CPU(new RAM(0, 256)) { set(Status.Ind, false) }
     timer(cpu)
     timer.fired shouldBe true
   }
@@ -212,7 +212,7 @@ class DeviceTests extends TestHelpers {
     timer.writeByte(0x103, 0x0A) // period = 10
     timer.writeByte(0x104, 0x01) // start
     t = 5
-    val cpu = new CPU(new RAM(0, 256), Nil)
+    val cpu = new CPU(new RAM(0, 256))
     timer(cpu)
     timer.fired shouldBe false
   }
@@ -222,7 +222,7 @@ class DeviceTests extends TestHelpers {
     val timer = new Timer(0x100, () => t)
     timer.writeByte(0x103, 0x0A) // period = 10
     timer.writeByte(0x104, 0x01) // start
-    val cpu = new CPU(new RAM(0, 256), Nil) { set(Status.Ind, false) }
+    val cpu = new CPU(new RAM(0, 256)) { set(Status.Ind, false) }
 
     t = 10
     timer(cpu)
@@ -241,7 +241,7 @@ class DeviceTests extends TestHelpers {
     timer.writeByte(0x103, 0x0A)
     timer.writeByte(0x104, 0x01)
     t = 10
-    val cpu = new CPU(new RAM(0, 256), Nil) { set(Status.Ind, false) }
+    val cpu = new CPU(new RAM(0, 256)) { set(Status.Ind, false) }
     timer(cpu)
     timer.readByte(0x105) shouldBe 1 // fired
   }
@@ -252,7 +252,7 @@ class DeviceTests extends TestHelpers {
     timer.writeByte(0x103, 0x0A)
     timer.writeByte(0x104, 0x01)
     t = 10
-    val cpu = new CPU(new RAM(0, 256), Nil) { set(Status.Ind, false) }
+    val cpu = new CPU(new RAM(0, 256)) { set(Status.Ind, false) }
     timer(cpu)
     timer.readByte(0x105) shouldBe 1
     timer.writeByte(0x105, 0x00) // acknowledge
@@ -266,7 +266,7 @@ class DeviceTests extends TestHelpers {
     timer.writeByte(0x104, 0x01) // start
     timer.writeByte(0x104, 0x00) // stop
     t = 100
-    val cpu = new CPU(new RAM(0, 256), Nil)
+    val cpu = new CPU(new RAM(0, 256))
     timer(cpu)
     timer.fired shouldBe false
   }
@@ -276,7 +276,7 @@ class DeviceTests extends TestHelpers {
     val timer = new Timer(0x100, () => t)
     timer.writeByte(0x103, 0x0A) // period = 10
     timer.writeByte(0x104, 0x01) // start at t=0
-    val cpu = new CPU(new RAM(0, 256), Nil) { set(Status.Ind, false) }
+    val cpu = new CPU(new RAM(0, 256)) { set(Status.Ind, false) }
 
     // First fire checked late at t=13 (3ms late)
     t = 13
@@ -300,7 +300,7 @@ class DeviceTests extends TestHelpers {
     timer.writeByte(0x103, 0x0A)
     timer.writeByte(0x104, 0x01) // start at t=0
     t = 10
-    val cpu = new CPU(new RAM(0, 256), Nil) { set(Status.Ind, false) }
+    val cpu = new CPU(new RAM(0, 256)) { set(Status.Ind, false) }
     timer(cpu) // fires
     timer.fired shouldBe true
     t = 15
@@ -441,7 +441,7 @@ class DeviceTests extends TestHelpers {
         |halt
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000 }
     cpu.reset()
     cpu.run()
     captured shouldBe List('X'.toByte, 'Y'.toByte)
@@ -537,7 +537,7 @@ class DeviceTests extends TestHelpers {
         |halt
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000 }
     cpu.reset()
     cpu.run()
     dirtyPixels shouldBe List((0, 0xFF), (3, 0x80))
@@ -605,7 +605,7 @@ class DeviceTests extends TestHelpers {
         |halt
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000 }
     cpu.reset()
     cpu.run()
     cpu.r(1).read shouldBe expected.nextInt(256)
