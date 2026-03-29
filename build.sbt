@@ -217,16 +217,16 @@ lazy val fonts = project
 lazy val root = project
   .in(file("."))
   .aggregate(
-    utils.jvm, utils.js, utils.native,
-    mem.jvm, mem.js, mem.native,
-    tof.jvm, tof.js, tof.native,
-    asm.jvm, asm.js, asm.native,
-    cpu.jvm, cpu.js, cpu.native,
-    docs.jvm, docs.js, docs.native,
-    sysl.jvm, sysl.js, sysl.native,
-    triscCli.jvm, triscCli.js, triscCli.native,
-    syslCli.jvm, syslCli.js, syslCli.native,
-    docsCli.jvm, docsCli.js, docsCli.native,
+    utils.jvm, /* utils.js, */ utils.native,
+    mem.jvm, /* mem.js, */ mem.native,
+    tof.jvm, /* tof.js, */ tof.native,
+    asm.jvm, /* asm.js, */ asm.native,
+    cpu.jvm, /* cpu.js, */ cpu.native,
+    docs.jvm, /* docs.js, */ docs.native,
+    sysl.jvm, /* sysl.js, */ sysl.native,
+    triscCli.jvm, /* triscCli.js, */ triscCli.native,
+    syslCli.jvm, /* syslCli.js, */ syslCli.native,
+    docsCli.jvm, /* docsCli.js, */ docsCli.native,
     ttf,
     fonts,
   )
