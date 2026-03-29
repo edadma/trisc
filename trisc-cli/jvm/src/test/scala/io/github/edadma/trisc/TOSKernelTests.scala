@@ -7,13 +7,11 @@ class TOSKernelTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |task()
@@ -31,14 +29,12 @@ class TOSKernelTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread(task1, 0x6000, 0x5000, "t1")
           |    create_thread(task2, 0x8000, 0x7000, "t2")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |task1()
@@ -59,13 +55,11 @@ class TOSKernelTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |task()
@@ -102,14 +96,12 @@ class TOSKernelTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "tasks"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread(task_a, 0x6000, 0x5000, "a")
           |    create_thread(task_b, 0x8000, 0x7000, "b")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |""".stripMargin
     ))

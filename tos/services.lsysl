@@ -30,6 +30,8 @@ Syscall numbers:
   val SYS_THREAD_STATE = 8
   val SYS_THREAD_NAME  = 9
   val SYS_SLEEP_UNTIL  = 10
+  val SYS_KBHIT        = 11
+  val SYS_GETKEY       = 12
 
 @api sleep(ticks) — Block the calling thread for N timer ticks.
 
@@ -85,3 +87,13 @@ Syscall numbers:
 
   sleep_until(tick: int)
       syscall(SYS_SLEEP_UNTIL, tick)
+
+@api kbhit() -> int — Return 1 if a keyboard event is buffered.
+
+  kbhit() -> int
+      syscall(SYS_KBHIT, 0)
+
+@api getkey() -> int — Return next keyboard event (packed: scancode|flags|mods), or 0.
+
+  getkey() -> int
+      syscall(SYS_GETKEY, 0)

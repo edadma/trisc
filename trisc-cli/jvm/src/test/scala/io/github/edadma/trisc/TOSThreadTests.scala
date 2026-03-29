@@ -7,14 +7,12 @@ class TOSThreadTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread(worker, 0x6000, 0x5000, "worker")
           |    create_thread(joiner, 0x8000, 0x7000, "joiner")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |worker()
@@ -39,14 +37,12 @@ class TOSThreadTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread(fast, 0x6000, 0x5000, "fast")
           |    create_thread(slow, 0x8000, 0x7000, "slow")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |fast()
@@ -69,14 +65,12 @@ class TOSThreadTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread_pri(task_b, 0x8000, 0x7000, "b", 1)
           |    create_thread_pri(task_a, 0x6000, 0x5000, "a", 0)
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |task_a()
@@ -98,14 +92,12 @@ class TOSThreadTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread_pri(task_a, 0x6000, 0x5000, "a", 1)
           |    create_thread_pri(task_b, 0x8000, 0x7000, "b", 1)
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |task_a()
@@ -134,13 +126,11 @@ class TOSThreadTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |task()
@@ -157,13 +147,11 @@ class TOSThreadTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |task()
@@ -185,14 +173,12 @@ class TOSThreadTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread(task0, 0x6000, 0x5000, "t0")
           |    create_thread(task1, 0x8000, 0x7000, "t1")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |task0()
@@ -213,15 +199,13 @@ class TOSThreadTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
           |    create_thread(task2, 0x8000, 0x7000, "task2")
           |    create_thread(task3, 0xA000, 0x9000, "task3")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |task()
@@ -244,14 +228,12 @@ class TOSThreadTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread(checker, 0x6000, 0x5000, "checker")
           |    create_thread(sleeper, 0x8000, 0x7000, "sleeper")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |checker()
@@ -274,13 +256,11 @@ class TOSThreadTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |task()

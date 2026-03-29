@@ -9,6 +9,7 @@ class TOSCommTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |import "channel"
           |
           |var ch: Channel
@@ -18,10 +19,7 @@ class TOSCommTests extends TOSTestHelpers {
           |    chan_init(&ch, &buf[0], 4)
           |    create_thread(sender, 0x6000, 0x5000, "s")
           |    create_thread(receiver, 0x8000, 0x7000, "r")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |sender()
@@ -44,6 +42,7 @@ class TOSCommTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |import "channel"
           |
           |var ch: Channel
@@ -53,10 +52,7 @@ class TOSCommTests extends TOSTestHelpers {
           |    chan_init(&ch, &buf[0], 2)
           |    create_thread(sender, 0x6000, 0x5000, "s")
           |    create_thread(receiver, 0x8000, 0x7000, "r")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |sender()
@@ -87,6 +83,7 @@ class TOSCommTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |import "mailbox"
           |
           |var mb: Mailbox
@@ -95,10 +92,7 @@ class TOSCommTests extends TOSTestHelpers {
           |    mbox_init(&mb)
           |    create_thread(sender, 0x6000, 0x5000, "s")
           |    create_thread(receiver, 0x8000, 0x7000, "r")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |sender()
@@ -120,6 +114,7 @@ class TOSCommTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |import "mailbox"
           |
           |var mb: Mailbox
@@ -128,10 +123,7 @@ class TOSCommTests extends TOSTestHelpers {
           |    mbox_init(&mb)
           |    create_thread(sender, 0x6000, 0x5000, "s")
           |    create_thread(receiver, 0x8000, 0x7000, "r")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |sender()
