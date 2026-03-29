@@ -12,6 +12,8 @@ class SyslAnalyzer:
   private val globalScope = new mutable.LinkedHashMap[String, SymInfo]
   private val functions = new mutable.LinkedHashMap[String, FunInfo]
   private val structTypes = new mutable.LinkedHashMap[String, SyslType.StructType]
+  private val enumTypes = new mutable.LinkedHashMap[String, Map[String, Long]]  // enum name → (member name → value)
+  private val typeAliases = new mutable.LinkedHashMap[String, String]  // alias name → target type string
   private val externalSymbols = new mutable.LinkedHashSet[String]
   private var localScope: mutable.LinkedHashMap[String, SymInfo] = null
   private var loopDepth: Int = 0
@@ -64,6 +66,18 @@ class SyslAnalyzer:
           if functions.contains(name) || builtinFunctions.contains(name) then
             throw AnalysisError(s"duplicate function: '$name'", decl)
           functions(name) = FunInfo(name, paramTypes, retType)
+        case EnumDeclAST(name, members) =>
+          if enumTypes.contains(name) then throw AnalysisError(s"duplicate enum: '$name'", decl)
+          var nextValue = 0L
+          val resolved = members.map { (memberName, explicitValue) =>
+            val value = explicitValue.getOrElse(nextValue)
+            nextValue = value + 1
+            (memberName, value)
+          }
+          enumTypes(name) = resolved.toMap
+        case TypeAliasDeclAST(name, target) =>
+          if typeAliases.contains(name) then throw AnalysisError(s"duplicate type alias: '$name'", decl)
+          typeAliases(name) = target
         case VarDeclAST(name, _, _, _, _) =>
           if globalScope.contains(name) then
             throw AnalysisError(s"duplicate global: '$name'", decl)
@@ -85,6 +99,13 @@ class SyslAnalyzer:
       case StructDeclAST(name, _) =>
         val st = structTypes(name)
         TStructDecl(name, st.fields)
+
+      case EnumDeclAST(name, _) =>
+        val members = enumTypes(name).toList.sortBy(_._2)
+        TEnumDecl(name, members)
+
+      case TypeAliasDeclAST(name, target) =>
+        TTypeAliasDecl(name, resolveTypeName(target))
 
       case FunDeclAST(name, params, _, body, isPrivate) =>
         localScope = new mutable.LinkedHashMap
@@ -129,6 +150,7 @@ class SyslAnalyzer:
       val size = s.drop(1).takeWhile(_.isDigit).toInt
       val elem = s.dropWhile(_ != ']').drop(1)
       ArrayType(resolveTypeName(elem), size)
+    case name if typeAliases.contains(name) => resolveTypeName(typeAliases(name))
     case name if structTypes.contains(name) => structTypes(name)
     case s if s.startsWith("func(") =>
       val inner = s.drop(5) // after "func("
@@ -317,6 +339,7 @@ class SyslAnalyzer:
   private def analyzeExpr(expr: ExpressionAST): TExpr =
     expr match
       case IntLitAST(n) => TIntLit(n, I32)
+      case TypedIntLitAST(n, typeName) => TIntLit(n, resolveTypeName(typeName))
       case FloatLitAST(d) => TFloatLit(d, DoubleType)
       case CharLitAST(c) => TIntLit(c.toLong, U32)
       case BoolLitAST(b) => TBoolLit(b, BoolType)
@@ -434,6 +457,11 @@ class SyslAnalyzer:
           case StringType => I8
           case t => throw AnalysisError(s"cannot index $t")
         TIndex(tArr, tIndex, elemType)
+
+      case FieldAccessAST(VarRefAST(enumName), member) if enumTypes.contains(enumName) =>
+        val members = enumTypes(enumName)
+        if !members.contains(member) then throw AnalysisError(s"enum $enumName has no member '$member'")
+        TIntLit(members(member), I32)
 
       case FieldAccessAST(obj, field) =>
         val tObj = analyzeExpr(obj)

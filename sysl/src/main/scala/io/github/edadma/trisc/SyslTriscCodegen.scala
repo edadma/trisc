@@ -30,6 +30,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         case _: TImportDecl => // skip
         case _: TExternFuncDecl => // skip — resolved by linker
         case _: TStructDecl => // type-only, no code to emit
+        case _: TEnumDecl => // type-only, no code to emit
+        case _: TTypeAliasDecl => // type-only, no code to emit
         case _: TFunDecl => // skip — emitted in Pass 2
         case TVarDecl(name, typ, init, _) =>
           if !emittedGlobalAlign then

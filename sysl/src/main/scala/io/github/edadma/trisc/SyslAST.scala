@@ -12,6 +12,8 @@ case class ExternFuncDeclAST(name: String, params: List[ParamAST], returnType: O
 case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[String], body: FunBodyAST, isPrivate: Boolean = false) extends DeclAST
 case class VarDeclAST(name: String, typ: Option[String], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true) extends DeclAST
 case class StructDeclAST(name: String, fields: List[(String, String)]) extends DeclAST
+case class EnumDeclAST(name: String, members: List[(String, Option[Long])]) extends DeclAST
+case class TypeAliasDeclAST(name: String, target: String) extends DeclAST
 
 case class ParamAST(name: String, typ: String) extends Positional
 
@@ -41,6 +43,7 @@ case class ExprStmtAST(expr: ExpressionAST) extends StmtAST
 // Expressions
 trait ExpressionAST extends Positional
 case class IntLitAST(value: Long) extends ExpressionAST
+case class TypedIntLitAST(value: Long, typeName: String) extends ExpressionAST  // e.g., 100u32
 case class FloatLitAST(value: Double) extends ExpressionAST
 case class CharLitAST(value: Char) extends ExpressionAST
 case class StringLitAST(value: String) extends ExpressionAST

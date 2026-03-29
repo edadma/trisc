@@ -25,7 +25,7 @@ class SyslParser extends StandardTokenParsers {
   // --- Declarations ---
 
   lazy val decl: Parser[DeclAST] =
-    importDecl | externFuncDecl | structDecl | "private" ~> declBody(true) | declBody(false)
+    importDecl | externFuncDecl | structDecl | enumDecl | typeAliasDecl | "private" ~> declBody(true) | declBody(false)
 
   lazy val structDecl: Parser[StructDeclAST] =
     "struct" ~> ident ~ (Newline ~> Indent ~> rep1sep(structField, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
@@ -34,6 +34,18 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val structField: Parser[(String, String)] =
     ident ~ (":" ~> typeRef) ^^ { case name ~ typ => (name, typ) }
+
+  lazy val enumDecl: Parser[EnumDeclAST] =
+    "enum" ~> ident ~ (Newline ~> Indent ~> rep1sep(enumMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
+      case name ~ members => EnumDeclAST(name, members)
+    }
+
+  lazy val enumMember: Parser[(String, Option[Long])] =
+    ident ~ ("=" ~> numericLit) ^^ { case name ~ value => (name, Some(value.toLong)) } |
+      ident ^^ (name => (name, None))
+
+  lazy val typeAliasDecl: Parser[TypeAliasDeclAST] =
+    "type" ~> ident ~ ("=" ~> typeRef) ^^ { case name ~ target => TypeAliasDeclAST(name, target) }
 
   lazy val importDecl: Parser[ImportDeclAST] =
     "import" ~> stringLit ^^ ImportDeclAST.apply
@@ -329,7 +341,13 @@ class SyslParser extends StandardTokenParsers {
     castType ~ ("(" ~> expr <~ ")") ^^ { case t ~ e => CastAST(t, e) }
 
   lazy val primary: Parser[ExpressionAST] =
-    numericLit ^^ (n => if n.contains('.') || n.contains('e') || n.contains('E') then FloatLitAST(n.toDouble) else IntLitAST(n.toLong)) |
+    numericLit ^^ { n =>
+      if n.contains(':') then
+        val Array(value, suffix) = n.split(':')
+        TypedIntLitAST(value.toLong, suffix)
+      else if n.contains('.') || n.contains('e') || n.contains('E') then FloatLitAST(n.toDouble)
+      else IntLitAST(n.toLong)
+    } |
       charLit |
       stringLit ^^ StringLitExprAST.apply |
       "true" ^^^ BoolLitAST(true) |

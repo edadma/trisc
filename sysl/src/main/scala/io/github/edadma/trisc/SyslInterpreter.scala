@@ -61,6 +61,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TImportDecl => // not handled in interpreter
         case _: TExternFuncDecl => // not handled in interpreter
         case _: TStructDecl => // type only, no runtime effect
+        case _: TEnumDecl => // type only, no runtime effect
+        case _: TTypeAliasDecl => // type only, no runtime effect
         case f: TFunDecl => functions(f.name) = f
         case TVarDecl(name, _, init, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
