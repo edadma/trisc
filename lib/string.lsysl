@@ -1,0 +1,86 @@
+@main
+String Utilities
+
+Core string operations for the Sysl standard library.
+Operates on null-terminated byte strings.
+No OS dependency — usable in bare-metal programs.
+@
+
+@api strcmp(a, b) -> int — Compare two null-terminated strings lexicographically.
+Returns 0 if equal, <0 if a<b, >0 if a>b.
+
+  strcmp(a: *byte, b: *byte) -> int
+      var i = 0
+      while a[i] != 0 && b[i] != 0
+          val d = a[i] - b[i]
+          if d != 0
+              return d
+          i += 1
+      a[i] - b[i]
+
+@api strncmp(a, b, n) -> int — Compare at most n bytes of two strings.
+
+  strncmp(a: *byte, b: *byte, n: int) -> int
+      var i = 0
+      while i < n && a[i] != 0 && b[i] != 0
+          val d = a[i] - b[i]
+          if d != 0
+              return d
+          i += 1
+      if i == n
+          return 0
+      a[i] - b[i]
+
+@api strcpy(dst, src) — Copy null-terminated string src to dst, including the terminator.
+
+  strcpy(dst: *byte, src: *byte)
+      var i = 0
+      while src[i] != 0
+          dst[i] = src[i]
+          i += 1
+      dst[i] = 0
+
+@api strncpy(dst, src, n) — Copy at most n bytes from src to dst. Pads with zeros if src is shorter.
+
+  strncpy(dst: *byte, src: *byte, n: int)
+      var i = 0
+      while i < n && src[i] != 0
+          dst[i] = src[i]
+          i += 1
+      while i < n
+          dst[i] = 0
+          i += 1
+
+@api strcat(dst, src) — Append src to the end of dst.
+
+  strcat(dst: *byte, src: *byte)
+      var i = 0
+      while dst[i] != 0
+          i += 1
+      var j = 0
+      while src[j] != 0
+          dst[i] = src[j]
+          i += 1
+          j += 1
+      dst[i] = 0
+
+@api strchr(s, c) -> int — Return the index of the first occurrence of byte c in s, or -1 if not found.
+
+  strchr(s: *byte, c: int) -> int
+      var i = 0
+      while s[i] != 0
+          if s[i] == c
+              return i
+          i += 1
+      -1
+
+@api strrchr(s, c) -> int — Return the index of the last occurrence of byte c in s, or -1 if not found.
+
+  strrchr(s: *byte, c: int) -> int
+      var result = -1
+      var i = 0
+      while s[i] != 0
+          if s[i] == c
+              result = i
+          i += 1
+      result

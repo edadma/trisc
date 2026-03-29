@@ -14,6 +14,7 @@ class SyslAnalyzer:
   private val structTypes = new mutable.LinkedHashMap[String, SyslType.StructType]
   private val enumTypes = new mutable.LinkedHashMap[String, Map[String, Long]]  // enum name → (member name → value)
   private val typeAliases = new mutable.LinkedHashMap[String, String]  // alias name → target type string
+  private val methods = new mutable.LinkedHashMap[String, mutable.Set[String]]  // struct name → set of method names
   private val externalSymbols = new mutable.LinkedHashSet[String]
   private var localScope: mutable.LinkedHashMap[String, SymInfo] = null
   private var loopDepth: Int = 0
@@ -68,6 +69,13 @@ class SyslAnalyzer:
           if functions.contains(name) || builtinFunctions.contains(name) then
             throw AnalysisError(s"duplicate function: '$name'", decl)
           functions(name) = FunInfo(name, paramTypes, retType)
+          // Register as method if name matches StructName_methodName pattern
+          val underscoreIdx = name.indexOf('_')
+          if underscoreIdx > 0 && params.nonEmpty && params.head.name == "self" then
+            val structName = name.substring(0, underscoreIdx)
+            val methodName = name.substring(underscoreIdx + 1)
+            if structTypes.contains(structName) then
+              methods.getOrElseUpdate(structName, mutable.Set.empty) += methodName
         case EnumDeclAST(name, members) =>
           if enumTypes.contains(name) then throw AnalysisError(s"duplicate enum: '$name'", decl)
           var nextValue = 0L
@@ -588,6 +596,27 @@ class SyslAnalyzer:
           case SliceType(_) => TCap(tArg, I32)
           case ArrayType(_, _) => TCap(tArg, I32)
           case t => throw AnalysisError(s"cap() not supported on $t")
+
+      case MethodCallAST(obj, method, args) =>
+        val tObj = analyzeExpr(obj)
+        val tArgs = args.map(analyzeExpr)
+        // Determine the struct type and build self argument
+        val (structName, selfArg) = tObj.typ match
+          case st @ StructType(name, _) =>
+            // Need address of struct — build &obj
+            val addr = tObj match
+              case TVarRef(n, _) => TAddrOf(n, PtrType(st))
+              case TFieldAccess(innerObj, idx, _) => TAddrOfField(innerObj, idx, PtrType(st))
+              case _ => throw AnalysisError(s"cannot call method on this struct expression")
+            (name, addr)
+          case PtrType(StructType(name, _)) => (name, tObj) // already a pointer
+          case other => throw AnalysisError(s"cannot call method '$method' on $other")
+        // Look up the method
+        val funcName = s"${structName}_$method"
+        if !functions.contains(funcName) then
+          throw AnalysisError(s"struct $structName has no method '$method'")
+        val funInfo = functions(funcName)
+        TCall(funcName, selfArg :: tArgs, funInfo.returnType)
 
       case CallAST(name, args) =>
         val tArgs = args.map(analyzeExpr)
