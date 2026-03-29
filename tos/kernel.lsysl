@@ -131,12 +131,31 @@ are scheduled round-robin.
       t.join_target = -1
       thread_count += 1
 
-@api sleep_current(nticks) — Block the current thread for N ticks.
+@api sleep_current(nticks) — Block the current thread for N ticks (relative).
 
   sleep_current(nticks: int)
       var cur: *Task = &tasks[current_thread]
       cur.state = STATE_BLOCKED
       cur.wake_tick = ticks + nticks
+
+@api sleep_until_current(target_tick) — Block the current thread until an absolute tick.
+
+  sleep_until_current(target_tick: int)
+      var cur: *Task = &tasks[current_thread]
+      cur.state = STATE_BLOCKED
+      cur.wake_tick = target_tick
+
+@api query_thread_state(id) -> int — Return the state of a thread.
+
+  query_thread_state(id: int) -> int
+      var t: *Task = &tasks[id]
+      t.state
+
+@api query_thread_name(id) -> *byte — Return the name pointer of a thread.
+
+  query_thread_name(id: int) -> *byte
+      var t: *Task = &tasks[id]
+      t.name
 
 @api terminate_current() — Mark the current thread as terminated.
 

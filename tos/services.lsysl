@@ -2,25 +2,34 @@
 TOS System Services
 
 User-facing API for TOS kernel services.
-Import this module to use sleep, putc, yield, exit, join, thread_id.
 
 Syscall numbers:
-  0 = sleep    — block for N timer ticks
-  1 = putc     — write character to stdout
-  2 = yield    — voluntary context switch
-  3 = exit     — terminate current thread
-  4 = join     — wait for another thread to terminate
-  5 = thread_id — get current thread index
+  0 = sleep         — block for N timer ticks
+  1 = putc          — write character to stdout
+  2 = yield         — voluntary context switch
+  3 = exit          — terminate current thread
+  4 = join          — wait for another thread to terminate
+  5 = thread_id     — get current thread index
+  6 = uptime        — get tick counter
+  7 = thread_count  — get number of created threads
+  8 = thread_state  — get state of a thread
+  9 = thread_name   — get name pointer of a thread
+  10 = sleep_until  — block until absolute tick
 @
 
   extern syscall(number: int, arg: int) -> int
 
-  val SYS_SLEEP     = 0
-  val SYS_PUTC      = 1
-  val SYS_YIELD     = 2
-  val SYS_EXIT      = 3
-  val SYS_JOIN      = 4
-  val SYS_THREAD_ID = 5
+  val SYS_SLEEP        = 0
+  val SYS_PUTC         = 1
+  val SYS_YIELD        = 2
+  val SYS_EXIT         = 3
+  val SYS_JOIN         = 4
+  val SYS_THREAD_ID    = 5
+  val SYS_UPTIME       = 6
+  val SYS_THREAD_COUNT = 7
+  val SYS_THREAD_STATE = 8
+  val SYS_THREAD_NAME  = 9
+  val SYS_SLEEP_UNTIL  = 10
 
 @api sleep(ticks) — Block the calling thread for N timer ticks.
 
@@ -42,7 +51,7 @@ Syscall numbers:
   exit()
       syscall(SYS_EXIT, 0)
 
-@api join(thread_id) — Wait for the specified thread to terminate.
+@api join(id) — Wait for the specified thread to terminate.
 
   join(id: int)
       syscall(SYS_JOIN, id)
@@ -51,3 +60,28 @@ Syscall numbers:
 
   thread_id() -> int
       syscall(SYS_THREAD_ID, 0)
+
+@api uptime() -> int — Return the current tick counter.
+
+  uptime() -> int
+      syscall(SYS_UPTIME, 0)
+
+@api get_thread_count() -> int — Return the number of created threads.
+
+  get_thread_count() -> int
+      syscall(SYS_THREAD_COUNT, 0)
+
+@api get_thread_state(id) -> int — Return the state of a thread (0=ready, 1=running, 2=blocked, 3=terminated, 4=joining).
+
+  get_thread_state(id: int) -> int
+      syscall(SYS_THREAD_STATE, id)
+
+@api get_thread_name(id) -> int — Return the name pointer of a thread.
+
+  get_thread_name(id: int) -> int
+      syscall(SYS_THREAD_NAME, id)
+
+@api sleep_until(tick) — Block until the tick counter reaches the given value.
+
+  sleep_until(tick: int)
+      syscall(SYS_SLEEP_UNTIL, tick)

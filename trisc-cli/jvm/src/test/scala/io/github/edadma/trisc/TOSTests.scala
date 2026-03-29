@@ -1135,4 +1135,174 @@ class TOSTests extends AnyFreeSpec with Matchers {
     output.count(_ == 'A') shouldBe 3
     output.count(_ == 'B') shouldBe 3
   }
+
+  // ===== Thread management & timing syscall tests =====
+
+  "TOS: uptime returns a value" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(task, 0x6000, 0x5000, "task")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task()
+          |    val t = uptime()
+          |    putc(89)
+          |""".stripMargin
+    ))
+
+    output should include("Y")
+  }
+
+  "TOS: uptime increases after sleep" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(task, 0x6000, 0x5000, "task")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task()
+          |    val t1 = uptime()
+          |    sleep(10)
+          |    val t2 = uptime()
+          |    if t2 > t1
+          |        putc(89)
+          |    else
+          |        putc(78)
+          |""".stripMargin
+    ))
+
+    output should include("Y")
+  }
+
+  "TOS: thread_id returns current thread index" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(task0, 0x6000, 0x5000, "t0")
+          |    create_thread(task1, 0x8000, 0x7000, "t1")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task0()
+          |    putc(48 + thread_id())
+          |
+          |task1()
+          |    putc(48 + thread_id())
+          |""".stripMargin
+    ))
+
+    // task0 prints '0', task1 prints '1'
+    output should include("0")
+    output should include("1")
+  }
+
+  "TOS: get_thread_count returns number of threads" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(task, 0x6000, 0x5000, "task")
+          |    create_thread(task2, 0x8000, 0x7000, "task2")
+          |    create_thread(task3, 0xA000, 0x9000, "task3")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task()
+          |    putc(48 + get_thread_count())
+          |
+          |task2()
+          |    sleep(100)
+          |
+          |task3()
+          |    sleep(100)
+          |""".stripMargin
+    ))
+
+    // 3 threads created, prints '3'
+    output should include("3")
+  }
+
+  "TOS: get_thread_state returns correct states" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(checker, 0x6000, 0x5000, "checker")
+          |    create_thread(sleeper, 0x8000, 0x7000, "sleeper")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |checker()
+          |    sleep(10)
+          |    // sleeper should be blocked (state 2)
+          |    val s = get_thread_state(1)
+          |    putc(48 + s)
+          |
+          |sleeper()
+          |    sleep(100)
+          |""".stripMargin
+    ))
+
+    // sleeper is blocked (state 2), prints '2'
+    output should include("2")
+  }
+
+  "TOS: sleep_until blocks until absolute tick" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(task, 0x6000, 0x5000, "task")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task()
+          |    val target = uptime() + 20
+          |    sleep_until(target)
+          |    val now = uptime()
+          |    if now >= target
+          |        putc(89)
+          |    else
+          |        putc(78)
+          |""".stripMargin
+    ))
+
+    output should include("Y")
+  }
 }

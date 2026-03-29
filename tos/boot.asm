@@ -144,11 +144,24 @@ global trap_handler, func
 trap_handler
   cli
 
-  ; Fast path: putc (syscall 1) — no context save needed.
+  ; Fast path: syscalls that don't context-switch.
   ; Only r3 is clobbered, which is fine since we RTE directly
   ; (hardware restores PC+PSR, user r1-r6 are untouched on stack).
+  ; Return values go in r1.
   addi r3, r1, -1
-  beq r3, r0, .sys_putc        ; r1 == 1 → putc
+  beq r3, r0, .sys_putc        ; 1 = putc
+  ldi r3, 5
+  beq r1, r3, .sys_thread_id   ; 5 = thread_id
+  ldi r3, 6
+  beq r1, r3, .sys_uptime      ; 6 = uptime
+  ldi r3, 7
+  beq r1, r3, .sys_thread_count ; 7 = thread_count
+  ldi r3, 8
+  beq r1, r3, .sys_thread_state ; 8 = thread_state(id)
+  ldi r3, 9
+  beq r1, r3, .sys_thread_name ; 9 = thread_name(id)
+  ldi r3, 10
+  beq r1, r3, .sys_sleep_until ; 10 = sleep_until(tick)
 
   ; Slow path: save full context for syscalls that context-switch
   pshr r6                       ; save user's r1-r6
@@ -170,8 +183,6 @@ trap_handler
   beq r1, r3, .sys_exit        ; 3 = exit
   ldi r3, 4
   beq r1, r3, .sys_join        ; 4 = join
-  ldi r3, 5
-  beq r1, r3, .sys_thread_id   ; 5 = thread_id
 
   ; Unknown syscall — halt (indicates a bug)
   halt
@@ -213,22 +224,88 @@ extern join_current
   jalr r6, r4                   ; marks current thread JOINING
   bra do_schedule
 
-; --- thread_id: return current thread index ---
+; --- Fast-path query syscalls ---
+; These don't context-switch. Result returned in r1, then sti + rte.
+
+; thread_id: return current thread index
 ; (current_thread already declared extern above)
 
 .sys_thread_id
-  ; Return current_thread in r1 via saved context
-  ; Stack: [USP(+0), r6(+8), r5(+16), r4(+24), r3(+32), r2(+40), r1(+48)]
   movi r3, current_thread
-  ldw  r1, r3, r0               ; r1 = current_thread
-  addi r3, r7, 48
-  std  r1, r3, r0               ; overwrite saved r1 with thread id
-  ; Restore context and return (no context switch needed)
-  popd r1
-  susp r1                       ; restore USP
-  popr r6                       ; restore r1-r6 (r1 now has thread id)
+  ldw  r1, r3, r0
   sti
   rte
+
+; uptime: return tick counter
+extern ticks
+
+.sys_uptime
+  movi r3, ticks
+  ldw  r1, r3, r0
+  sti
+  rte
+
+; thread_count: return number of created threads
+extern thread_count
+
+.sys_thread_count
+  movi r3, thread_count
+  ldw  r1, r3, r0
+  sti
+  rte
+
+; thread_state(id): return state of thread r2
+; Calls a kernel function, so we must save/restore r2-r6.
+extern query_thread_state
+
+.sys_thread_state
+  pshd r2
+  pshd r4
+  pshd r5
+  pshd r6
+  mov  r1, r2
+  movi r4, query_thread_state
+  jalr r6, r4
+  popd r6
+  popd r5
+  popd r4
+  popd r2
+  sti
+  rte
+
+; thread_name(id): return name pointer of thread r2
+extern query_thread_name
+
+.sys_thread_name
+  pshd r2
+  pshd r4
+  pshd r5
+  pshd r6
+  mov  r1, r2
+  movi r4, query_thread_name
+  jalr r6, r4
+  popd r6
+  popd r5
+  popd r4
+  popd r2
+  sti
+  rte
+
+; sleep_until(tick): block until absolute tick — needs context switch
+extern sleep_until_current
+
+.sys_sleep_until
+  ; This one DOES context-switch, but we put it in the fast-path
+  ; dispatch for numbering. Save full context now.
+  pshr r6
+  gusp r1
+  pshd r1
+  ; Reload arg from saved r2
+  addi r3, r7, 40
+  ldd r1, r3, r0               ; r1 = saved r2 (target tick)
+  movi r4, sleep_until_current
+  jalr r6, r4
+  bra do_schedule
 
 
 ; ============================================================================
