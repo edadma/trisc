@@ -12,7 +12,7 @@ object EmulatorGui:
       val frame = new JFrame("TRISC Emulator")
       frame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE)
 
-      val terminal = new TerminalWidget()
+      val terminal = new TerminalEmulator()
       val parser = new ANSIParser(terminal)
       val framebuffer = new FramebufferWidget()
       val fbMemory = new RAM(Runtime.framebufferAddress, Runtime.framebufferMaxSize)

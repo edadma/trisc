@@ -1,0 +1,69 @@
+val KB_STATUS: *i8 = 0x100004
+val KB_SCANCODE: *i8 = 0x100005
+val KB_FLAGS: *i8 = 0x100006
+val KB_MODIFIERS: *i8 = 0x100007
+
+val MS_STATUS: *i8 = 0x10002A
+val MS_BUTTONS: *i8 = 0x10002B
+val MS_X: *i16 = 0x10002C
+val MS_Y: *i16 = 0x10002E
+
+main()
+    putstr("Input test - press keys, move mouse\n")
+
+    while true
+        if *KB_STATUS & 1
+            val sc = *KB_SCANCODE
+            val flags = *KB_FLAGS
+            val mods = *KB_MODIFIERS
+            putstr("KB: sc=")
+            puthex(sc)
+            if flags & 1
+                putstr(" DN")
+            else
+                putstr(" UP")
+            if mods & 1
+                putstr(" SH")
+            if mods & 2
+                putstr(" CT")
+            if mods & 4
+                putstr(" AL")
+            putchar(10)
+
+        if *MS_STATUS & 1
+            val buttons = *MS_BUTTONS
+            val x = *MS_X
+            val y = *MS_Y
+            putstr("MS: x=")
+            putdec(x)
+            putstr(" y=")
+            putdec(y)
+            putstr(" b=")
+            puthex(buttons)
+            putchar(10)
+
+putstr(s: *i8)
+    while *s
+        putchar(*s)
+        s = s + 1
+
+puthex(v: i32)
+    val hi = (v >> 4) & 0xF
+    val lo = v & 0xF
+    if hi > 9
+        putchar(hi - 10 + 65)
+    else
+        putchar(hi + 48)
+    if lo > 9
+        putchar(lo - 10 + 65)
+    else
+        putchar(lo + 48)
+
+putdec(v: i32)
+    if v < 0
+        putchar(45)
+        putdec(-v)
+        return
+    if v >= 10
+        putdec(v / 10)
+    putchar((v % 10) + 48)

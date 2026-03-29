@@ -2,7 +2,7 @@ package io.github.edadma.trisc
 
 import java.awt.Color
 
-class ANSIParser(terminal: TerminalWidget):
+class ANSIParser(terminal: TerminalEmulator):
   private enum ParserState:
     case Normal, Escape, CSI, OSC
 

@@ -2,7 +2,7 @@ package io.github.edadma.trisc
 
 import javax.swing.*
 import java.awt.*
-class TerminalWidget(initCols: Int = 80, initRows: Int = 24) extends JComponent:
+class TerminalEmulator(initCols: Int = 80, initRows: Int = 24) extends JComponent:
   var cols: Int = initCols
   var rows: Int = initRows
   private var cells = Array.fill(rows * cols)(' ')
