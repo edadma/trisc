@@ -1,0 +1,86 @@
+@main
+TOS Keyboard Driver
+
+Handles keyboard IRQ 1. Reads USB HID scancodes from the device
+and stores them in a ring buffer. Provides getkey/kbhit for
+syscall access.
+
+Device registers:
+  0x100004 + 0 = STATUS (bit 0 = event ready)
+  0x100004 + 1 = SCANCODE (read consumes event, clears IRQ)
+  0x100004 + 2 = FLAGS (bit 0 = press/release)
+  0x100004 + 3 = MODIFIERS (shift/ctrl/alt/meta bitmask)
+@
+
+  val KB_STATUS:   *i8 = 0x100004
+  val KB_SCANCODE: *i8 = 0x100005
+  val KB_FLAGS:    *i8 = 0x100006
+  val KB_MODS:     *i8 = 0x100007
+  val KB_IRQ = 1
+
+  extern register_irq(irq: int, handler: int)
+
+@tech
+Ring buffer for keyboard events. Each event is stored as a packed
+32-bit value: scancode(8) | flags(8) | modifiers(8) | reserved(8).
+@
+
+  val KB_BUF_SIZE = 32
+  var kb_buf: [32]int
+  var kb_head = 0
+  var kb_tail = 0
+  var kb_count = 0
+
+@api keyboard_init() — Register the keyboard IRQ handler.
+
+  keyboard_init()
+      register_irq(KB_IRQ, keyboard_handler)
+
+@tech
+keyboard_handler — Called by the generic IRQ dispatcher.
+
+Reads all pending events from the device and buffers them.
+Does NOT context-switch — returns to the interrupted thread.
+@
+
+  keyboard_handler()
+      while (*KB_STATUS & 1) != 0
+          val sc = *KB_SCANCODE
+          val flags = *KB_FLAGS
+          val mods = *KB_MODS
+          if kb_count < KB_BUF_SIZE
+              kb_buf[kb_tail] = (sc << 24) | (flags << 16) | (mods << 8)
+              kb_tail = (kb_tail + 1) % KB_BUF_SIZE
+              kb_count += 1
+
+@api kb_has_key() -> int — Return 1 if a key event is buffered, 0 otherwise.
+
+  kb_has_key() -> int
+      if kb_count > 0
+          return 1
+      0
+
+@api kb_read_key() -> int — Return next buffered key event (packed), or 0 if empty.
+
+  kb_read_key() -> int
+      if kb_count == 0
+          return 0
+      val evt = kb_buf[kb_head]
+      kb_head = (kb_head + 1) % KB_BUF_SIZE
+      kb_count -= 1
+      evt
+
+@api kb_scancode(evt) -> int — Extract scancode from packed event.
+
+  kb_scancode(evt: int) -> int
+      (evt >> 24) & 0xFF
+
+@api kb_is_press(evt) -> int — Return 1 if event is a key press, 0 if release.
+
+  kb_is_press(evt: int) -> int
+      (evt >> 16) & 1
+
+@api kb_modifiers(evt) -> int — Extract modifier bitmask from packed event.
+
+  kb_modifiers(evt: int) -> int
+      (evt >> 8) & 0xFF

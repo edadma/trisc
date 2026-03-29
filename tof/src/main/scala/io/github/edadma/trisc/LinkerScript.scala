@@ -1,18 +1,22 @@
 package io.github.edadma.trisc
 
+import scala.collection.mutable
 import scala.util.parsing.combinator.RegexParsers
 
 case class MemoryRegion(name: String, base: Long, size: Long)
 
-enum SectionPlacement:
-  case At(address: Long)
-  case After(sectionName: String)
+case class SectionDef(name: String, address: Option[Long] = None)
 
-case class SectionDef(name: String, placement: SectionPlacement)
+enum SymbolValue:
+  case Absolute(address: Long)
+  case AfterSection(sectionName: String)
+
+case class SymbolDef(name: String, value: SymbolValue)
 
 case class LinkerScript(
     memory: Seq[MemoryRegion] = Nil,
     sections: Seq[SectionDef] = Nil,
+    symbols: Seq[SymbolDef] = Nil,
     entry: Option[String] = None,
 )
 
@@ -45,28 +49,34 @@ object LinkerScriptParser extends RegexParsers:
   private def memoryBlock: Parser[Seq[MemoryRegion]] =
     ws ~> "MEMORY" ~> nl ~> rep(memoryRegion)
 
-  private def sectionPlacement: Parser[SectionPlacement] =
-    "AFTER" ~> ws1 ~> ident ^^ SectionPlacement.After.apply |
-      num ^^ SectionPlacement.At.apply
-
   private def sectionDef: Parser[SectionDef] =
-    ws1 ~> ident ~ (ws ~> ":" ~> ws ~> sectionPlacement) <~ (comment | nl) ^^ {
-      case name ~ placement => SectionDef(name, placement)
+    ws1 ~> ident ~ opt(ws ~> ":" ~> ws ~> num) <~ (comment | nl) ^^ {
+      case name ~ addr => SectionDef(name, addr)
     }
 
   private def sectionsBlock: Parser[Seq[SectionDef]] =
     ws ~> "SECTIONS" ~> nl ~> rep(sectionDef)
 
+  private def symbolValue: Parser[SymbolValue] =
+    "AFTER" ~> ws1 ~> ident ^^ SymbolValue.AfterSection.apply |
+      num ^^ SymbolValue.Absolute.apply
+
+  private def symbolLine: Parser[SymbolDef] =
+    ws ~> "SYMBOL" ~> ws1 ~> ident ~ (ws ~> "=" ~> ws ~> symbolValue) <~ (comment | nl) ^^ {
+      case name ~ value => SymbolDef(name, value)
+    }
+
   private def entryLine: Parser[String] =
     ws ~> "ENTRY" ~> ws1 ~> ident <~ (comment | nl)
 
   private def block: Parser[Any] =
-    memoryBlock | sectionsBlock | entryLine | emptyLine
+    memoryBlock | sectionsBlock | symbolLine | entryLine | emptyLine
 
   private def script: Parser[LinkerScript] =
     skipLines ~> rep(block) <~ ws ^^ { blocks =>
       var memory = Seq.empty[MemoryRegion]
       var sections = Seq.empty[SectionDef]
+      val symbols = new mutable.ListBuffer[SymbolDef]
       var entry: Option[String] = None
 
       for b <- blocks do
@@ -75,10 +85,11 @@ object LinkerScriptParser extends RegexParsers:
             memory = ms.asInstanceOf[Seq[MemoryRegion]]
           case ss: Seq[?] if ss.headOption.exists(_.isInstanceOf[SectionDef]) =>
             sections = ss.asInstanceOf[Seq[SectionDef]]
+          case sd: SymbolDef => symbols += sd
           case s: String => entry = Some(s)
           case _         =>
 
-      LinkerScript(memory, sections, entry)
+      LinkerScript(memory, sections, symbols.toSeq, entry)
     }
 
   def parse(input: String): Either[String, LinkerScript] =

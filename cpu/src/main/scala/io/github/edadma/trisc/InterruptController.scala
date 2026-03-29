@@ -1,5 +1,7 @@
 package io.github.edadma.trisc
 
+import io.github.edadma.logger._
+
 class InterruptController(val base: Long) extends Device with (CPU => Unit):
   val name = "InterruptController"
   val size = 4
@@ -11,17 +13,29 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
 
   private var pending: Int = 0
   private var enabled: Int = 0xff // all sources enabled by default
+  private var delivered: Int = 0 // IRQs signaled to CPU but not yet claimed
   private var tickables: List[() => Unit] = Nil
+  val log: Logger = {
+    val l = new Logger(new ConsoleHandler, new DefaultLogFormatter(includeTimestamp = false))
+    l.setLogLevel(LogLevel.OFF)
+    l
+  }
 
-  def raise(irq: Int): Unit = pending |= (1 << irq)
+  def raise(irq: Int): Unit =
+    pending |= (1 << irq)
+    delivered &= ~(1 << irq)
+    log.trace(f"raise IRQ $irq — pending=$pending%02x delivered=$delivered%02x", category = "INTC")
 
-  def lower(irq: Int): Unit = pending &= ~(1 << irq)
+  def lower(irq: Int): Unit =
+    pending &= ~(1 << irq)
+    log.trace(f"lower IRQ $irq — pending=$pending%02x", category = "INTC")
 
   def addTickable(tick: () => Unit): Unit = tickables = tick :: tickables
 
   def clearTickables(): Unit =
     tickables = Nil
     pending = 0
+    delivered = 0
 
   def readByte(addr: Long): Int =
     (addr - base).toInt match
@@ -32,7 +46,8 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
         if active == 0 then 0xff
         else
           val irq = Integer.numberOfTrailingZeros(active)
-          pending &= ~(1 << irq) // auto-clear on claim (like RISC-V PLIC)
+          pending &= ~(1 << irq)
+          delivered &= ~(1 << irq)
           irq
       case _ => 0
 
@@ -42,11 +57,12 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
       case ACK =>
         val irq = data.toInt & 7
         pending &= ~(1 << irq)
+        delivered &= ~(1 << irq)
       case _ =>
 
   def apply(cpu: CPU): Unit =
     tickables.foreach(_())
-    val active = pending & enabled
+    val active = (pending & enabled) & ~delivered
     if active != 0 then
-      pending &= ~active // edge-triggered: clear on delivery
+      delivered |= active
       cpu.interrupt()

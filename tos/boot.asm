@@ -117,15 +117,71 @@ restore_thread
   rte                   ; return to next thread
 
 
-; ============================================================================
-; timer_isr — Timer Interrupt Service Routine
-; ============================================================================
-
 global timer_isr, func
 
 timer_isr
   cli
   bra context_switch
+
+
+; ============================================================================
+; irq_handler — Generic Interrupt Dispatcher
+; ============================================================================
+
+INTC_CLAIM = 0x100028    ; INTC base (0x100026) + offset 2
+
+extern irq_handlers
+
+global irq_handler, func
+
+irq_handler
+  cli
+  ; Save full context before clobbering any registers
+  pshr r6               ; save r1-r6
+  gusp r1
+  pshd r1               ; save USP
+
+  ; Read CLAIM — identifies source and auto-clears pending
+  movi r2, INTC_CLAIM
+  ldb  r1, r2, r0        ; r1 = IRQ number (0xFF if spurious)
+
+  ; Check for spurious interrupt
+  ldi  r3, 0xFF
+  beq  r1, r3, .irq_restore
+
+  ; Save IRQ number
+  pshd r1
+
+  ; Look up handler: irq_handlers[r1] (array of 8-byte pointers)
+  movi r2, irq_handlers
+  ldi  r3, 3
+  lsl  r3, r1, r3         ; r3 = r1 << 3 = r1 * 8
+  add  r2, r2, r3
+  ldd  r2, r2, r0         ; r2 = handler function pointer
+
+  ; If no handler registered (null), skip
+  beq  r2, r0, .irq_pop_restore
+
+  ; Call the handler
+  jalr r6, r2
+
+  ; Recover IRQ number
+  popd r1
+
+  ; Timer (IRQ 0) triggers context switch for preemption
+  beq  r1, r0, do_schedule
+
+  ; Non-timer IRQs: restore and return
+  bra .irq_restore
+
+.irq_pop_restore
+  popd r1               ; discard saved IRQ number
+.irq_restore
+  popd r1               ; restore USP
+  susp r1
+  popr r6               ; restore r1-r6
+  sti
+  rte
 
 
 ; ============================================================================

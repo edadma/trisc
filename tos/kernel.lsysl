@@ -135,7 +135,13 @@ Each timer has:
 
   var timers: [8]SoftTimer
 
+  val MAX_IRQS = 8
+  var irq_handlers: [8]int
+
   extern thread_exit()
+
+  register_irq(irq: int, handler: int)
+      irq_handlers[irq] = handler
 
 @tech
 ensure_queues_init — Lazily initialize queues on first use.

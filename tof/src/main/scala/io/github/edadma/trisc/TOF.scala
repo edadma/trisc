@@ -29,6 +29,7 @@ object TOF:
       symbols: Seq[TOFSymbol] = Nil,
       externs: Seq[String] = Nil,
       relocs: Seq[TOFReloc] = Nil,
+      explicitOrg: Boolean = false,
   )
 
   class TOFBuilder:
@@ -40,6 +41,7 @@ object TOF:
         val symbols: ArrayBuffer[TOFSymbol] = new ArrayBuffer,
         val externs: mutable.LinkedHashSet[String] = new mutable.LinkedHashSet,
         val relocs: ArrayBuffer[TOFReloc] = new ArrayBuffer,
+        var explicitOrg: Boolean = false,
     )
 
     private val segments = new mutable.LinkedHashMap[String, TOFBuilderSegment]
@@ -83,16 +85,17 @@ object TOF:
           seg.symbols.toSeq,
           seg.externs.toSeq,
           seg.relocs.toSeq,
+          seg.explicitOrg,
         )).toSeq,
         _tofType,
       )
 
     def segmentDefined(name: String): Boolean = segments contains name
 
-    def segment(name: String, org: Long): Unit =
+    def segment(name: String, org: Long, explicitOrg: Boolean = false): Unit =
       segments get name match
         case None =>
-          current = new TOFBuilderSegment(org)
+          current = new TOFBuilderSegment(org, explicitOrg = explicitOrg)
           segments(name) = current
         case Some(s) => current = s
 
@@ -214,7 +217,7 @@ class TOF(val entry: Option[String], val segments: Seq[TOF.Segment], val tofType
   // --- Loading ---
 
   def load(mem: Addressable): Unit =
-    for TOF.Segment(name, org, chunks, _, _, _) <- segments do
+    for TOF.Segment(name, org, chunks, _, _, _, _) <- segments do
       var addr = org
 
       chunks foreach {

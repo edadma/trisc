@@ -2,7 +2,9 @@ package io.github.edadma.trisc
 
 import scala.annotation.tailrec
 import scala.collection.immutable
+import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
+import io.github.edadma.logger._
 
 enum Status(val bit: Int):
   case Ind extends Status(1)
@@ -77,6 +79,22 @@ class CPU(mem: Addressable, irq: CPU => Unit = _ => ()) extends Addressable:
   var clump: Int = 1000
   var trace: Boolean = false
 
+  // Logging — OFF by default, enable with cpu.log.setLogLevel(LogLevel.DEBUG)
+  val log: Logger = {
+    val l = new Logger(new ConsoleHandler, new DefaultLogFormatter(includeTimestamp = false))
+    l.setLogLevel(LogLevel.OFF)
+    l
+  }
+
+  // Breakpoints
+  private val breakpoints = mutable.Set.empty[Long]
+  private var breakpointHit: Boolean = false
+
+  def addBreakpoint(addr: Long): Unit = breakpoints += addr
+  def removeBreakpoint(addr: Long): Unit = breakpoints -= addr
+  def clearBreakpoints(): Unit = breakpoints.clear()
+  def listBreakpoints(): Set[Long] = breakpoints.toSet
+
   def test(status: Status): Boolean = (psr & status.bit) != 0
 
   def set(status: Status, set: Boolean): Unit = if set then psr |= status.bit else psr &= ~status.bit
@@ -99,10 +117,13 @@ class CPU(mem: Addressable, irq: CPU => Unit = _ => ()) extends Addressable:
 
   private def enterException(): Unit =
     if inException then
+      log.error(f"DoubleFault at pc=$pc%04x, original exception=$state", category = "CPU")
+      logRegisters()
       state = State.DoubleFault
       return
 
     inException = true
+    log.debug(f"Exception: $state at pc=$pc%04x ssp=${r(7).read}%04x", category = "CPU")
 
     try
       if state == State.Reset then
@@ -127,7 +148,9 @@ class CPU(mem: Addressable, irq: CPU => Unit = _ => ()) extends Addressable:
         mem.writeLong(r(7).read, pc)
 
         // Load PC from vector table (offset by 1 since reset occupies slots 0 and 1)
-        pc = mem.readLong((state.ordinal + 1) * 8)
+        val vector = (state.ordinal + 1) * 8
+        pc = mem.readLong(vector)
+        log.debug(f"  → vector[$vector%02x] = $pc%04x, new ssp=${r(7).read}%04x", category = "CPU")
         state = State.Run
         set(Status.Mode, true)
         set(Status.Ind, true)
@@ -135,25 +158,41 @@ class CPU(mem: Addressable, irq: CPU => Unit = _ => ()) extends Addressable:
         reservationValid = false
     catch
       case _: RuntimeException =>
+        log.error(f"DoubleFault during exception entry at pc=$pc%04x", category = "CPU")
         state = State.DoubleFault
     finally
       inException = false
+
+  private def logRegisters(): Unit =
+    val regs = (1 to 7).map(i => f"r$i=${r(i).read}%x").mkString(" ")
+    log.trace(f"  $regs usp=$usp%x psr=$psr%x", category = "CPU")
 
   def execute(): Unit =
     if state.ordinal < State.Halt.ordinal then
       enterException()
       if state == State.DoubleFault then return
 
+    // Breakpoint check
+    if breakpoints.nonEmpty && breakpoints.contains(pc) then
+      log.info(f"Breakpoint hit at pc=$pc%04x", category = "CPU")
+      logRegisters()
+      breakpointHit = true
+      state = State.Halt
+      return
+
     val inst =
       try readShortUnsigned(pc)
       catch
         case _: RuntimeException =>
+          log.warn(f"InstructionAccess fault at pc=$pc%04x", category = "CPU")
           state = State.InstructionAccess
           return
 
     val decoded = Decode(inst)
 
     if trace then println(f"$pc%04x: $inst%04x  ${decoded.disassemble(this)}")
+
+    log.trace(f"$pc%04x: ${decoded.disassemble(this)}", category = "CPU")
 
     pc += 2
     cycles += 1
@@ -164,7 +203,9 @@ class CPU(mem: Addressable, irq: CPU => Unit = _ => ()) extends Addressable:
     try decoded(this)
     catch
       case _: RuntimeException =>
-        if state == State.Run then state = State.DataAccess
+        if state == State.Run then
+          log.warn(f"DataAccess fault at pc=${pc - 2}%04x", category = "CPU")
+          state = State.DataAccess
 
     // Trace exception: fires after instruction completes if T was set BEFORE it executed
     if state == State.Run && traceEnabled then state = State.Trace

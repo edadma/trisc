@@ -2,6 +2,7 @@ package io.github.edadma.trisc
 
 import org.scalatest.freespec.AnyFreeSpec
 import org.scalatest.matchers.should.Matchers
+import io.github.edadma.logger._
 
 object TOSTestData {
   private def readLsysl(path: String): String =
@@ -22,6 +23,11 @@ object TOSTestData {
   lazy val rbtreeSysl: String = readLsysl("tos/rbtree.lsysl")
   lazy val rmutexSysl: String = readLsysl("tos/rmutex.lsysl")
   lazy val qsetSysl: String = readLsysl("tos/qset.lsysl")
+  lazy val timerSysl: String = readLsysl("tos/timer.lsysl")
+  lazy val linkerScript: LinkerScript =
+    LinkerScriptParser.parse(scala.io.Source.fromFile("tos/linker.ld").mkString) match
+      case Right(s) => s
+      case Left(e) => throw new RuntimeException(s"Failed to parse linker script: $e")
   lazy val tasksSysl: String = readLsysl("examples/tos-demo/tasks.lsysl")
   lazy val mainSysl: String = readLsysl("examples/tos-demo/main.lsysl")
 
@@ -120,7 +126,7 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
     val bootTof = assemble(bootAsm, relocatable = true)
 
     val allSources = Map(
-      "kernel" -> kernelSysl, "services" -> servicesSysl, "semaphore" -> semaphoreSysl,
+      "kernel" -> kernelSysl, "services" -> servicesSysl, "timer" -> timerSysl, "semaphore" -> semaphoreSysl,
       "mutex" -> mutexSysl, "condvar" -> condvarSysl, "barrier" -> barrierSysl,
       "rwlock" -> rwlockSysl, "channel" -> channelSysl, "mailbox" -> mailboxSysl,
       "rmutex" -> rmutexSysl, "qset" -> qsetSysl,
@@ -149,6 +155,9 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
     val mem = new Memory("Memory", new RAM(0, 0x100000), stdout, intc, timer)
     linked.load(mem)
     val cpu = new CPU(mem, intc) { this.limit = maxCycles }
+    if maxCycles <= 1000 then
+      cpu.log.setLogLevel(LogLevel.TRACE)
+      cpu.log.setHandler(new FileHandler("/tmp/trisc_debug.log"))
     cpu.reset()
     cpu.run()
     (cpu, output.toString)
