@@ -21,6 +21,7 @@ object TOSTestData {
   lazy val mailboxSysl: String = readLsysl("tos/mailbox.lsysl")
   lazy val rbtreeSysl: String = readLsysl("tos/rbtree.lsysl")
   lazy val rmutexSysl: String = readLsysl("tos/rmutex.lsysl")
+  lazy val qsetSysl: String = readLsysl("tos/qset.lsysl")
   lazy val tasksSysl: String = readLsysl("examples/tos-demo/tasks.lsysl")
   lazy val mainSysl: String = readLsysl("examples/tos-demo/main.lsysl")
 
@@ -122,7 +123,7 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
       "kernel" -> kernelSysl, "services" -> servicesSysl, "semaphore" -> semaphoreSysl,
       "mutex" -> mutexSysl, "condvar" -> condvarSysl, "barrier" -> barrierSysl,
       "rwlock" -> rwlockSysl, "channel" -> channelSysl, "mailbox" -> mailboxSysl,
-      "rmutex" -> rmutexSysl,
+      "rmutex" -> rmutexSysl, "qset" -> qsetSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)

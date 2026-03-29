@@ -209,4 +209,85 @@ class TOSNotifyTests extends TOSTestHelpers {
     output should include("W")
     output.indexOf('W') should be > output.indexOf('U')
   }
+
+  // ===== Queue sets =====
+
+  "TOS: qset_wait returns ready slot" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "qset"
+          |
+          |var qs: QueueSet
+          |
+          |kernel_main() -> int
+          |    val sid = qset_init(&qs)
+          |    qset_add(&qs, sid, 10)
+          |    qset_add(&qs, sid, 20)
+          |    create_thread(waiter, 0x6000, 0x5000, "w")
+          |    create_thread(poster, 0x8000, 0x7000, "p")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |waiter()
+          |    val id = qset_wait(&qs, 0)
+          |    if id == 20
+          |        putc(89)
+          |    else
+          |        putc(78)
+          |
+          |poster()
+          |    sleep(10)
+          |    qset_notify(&qs, 1)
+          |""".stripMargin
+    ))
+
+    // Poster notifies slot 1 (id=20). Waiter should get 20.
+    output should include("Y")
+  }
+
+  "TOS: qset_wait returns first ready of multiple" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "qset"
+          |
+          |var qs: QueueSet
+          |
+          |kernel_main() -> int
+          |    val sid = qset_init(&qs)
+          |    qset_add(&qs, sid, 10)
+          |    qset_add(&qs, sid, 20)
+          |    qset_add(&qs, sid, 30)
+          |    create_thread(waiter, 0x6000, 0x5000, "w")
+          |    create_thread(poster, 0x8000, 0x7000, "p")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |waiter()
+          |    val id1 = qset_wait(&qs, 0)
+          |    val id2 = qset_wait(&qs, 0)
+          |    if id1 == 10
+          |        putc(65)
+          |    if id2 == 30
+          |        putc(66)
+          |
+          |poster()
+          |    sleep(5)
+          |    qset_notify(&qs, 0)
+          |    qset_notify(&qs, 2)
+          |""".stripMargin
+    ))
+
+    output should include("A")
+    output should include("B")
+  }
 }
