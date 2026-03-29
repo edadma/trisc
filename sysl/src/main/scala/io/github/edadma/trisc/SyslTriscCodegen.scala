@@ -45,10 +45,9 @@ class SyslTriscCodegen(addresses: Int = 4):
                 case _ => SyslType.I64
               val elemDir = emitDataDirective(declElemType)
               for elem <- elements do
-                elem match
-                  case TIntLit(n, _) => emit(s"  $elemDir $n")
-                  case TBoolLit(b, _) => emit(s"  $elemDir ${if b then 1 else 0}")
-                  case _ => emit(s"  $elemDir 0")
+                constEval(elem) match
+                  case Some(n) => emit(s"  $elemDir $n")
+                  case None => emit(s"  $elemDir 0")
             case _ =>
               typ match
                 case SyslType.ArrayType(elem, count) =>
@@ -57,10 +56,9 @@ class SyslTriscCodegen(addresses: Int = 4):
                   emit(s"  resb ${stackSize(typ)}")
                 case _ =>
                   val directive = emitDataDirective(typ)
-                  init match
-                    case TIntLit(n, _) => emit(s"  $directive $n")
-                    case TBoolLit(b, _) => emit(s"  $directive ${if b then 1 else 0}")
-                    case _ => emit(s"  $directive 0")
+                  constEval(init) match
+                    case Some(n) => emit(s"  $directive $n")
+                    case None => emit(s"  $directive 0")
         case _ => // skip non-globals in first pass
 
     // Pass 2: emit functions
@@ -108,6 +106,18 @@ class SyslTriscCodegen(addresses: Int = 4):
     case SyslType.StringType => 8    // contains a pointer
     case SyslType.SliceType(_) => 8  // contains a pointer
     case _ => 8
+
+  // Try to evaluate a constant expression at compile time.
+  // Returns Some(value) for integer constants, None otherwise.
+  private def constEval(expr: TExpr): Option[Long] = expr match
+    case TIntLit(n, _) => Some(n)
+    case TBoolLit(b, _) => Some(if b then 1 else 0)
+    case TUnary("-", operand, _) => constEval(operand).map(-_)
+    case TUnary("~", operand, _) => constEval(operand).map(~_)
+    case TBinary(left, "+", right, _) => for l <- constEval(left); r <- constEval(right) yield l + r
+    case TBinary(left, "-", right, _) => for l <- constEval(left); r <- constEval(right) yield l - r
+    case TBinary(left, "*", right, _) => for l <- constEval(left); r <- constEval(right) yield l * r
+    case _ => None
 
   // Emit load from [rBase + 0] into rDest, using width-appropriate instruction.
   // The CPU's ldb/lds/ldw already sign-extend via Int→Long in Register.write,
