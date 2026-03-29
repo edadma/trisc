@@ -174,7 +174,7 @@ object TriscCli:
     val ram = new RAM(0, ramSize)
     val mem = new Memory("Memory", (Seq(ram, stdout, timer) ++ extraDevices)*)
     linked.load(mem)
-    val cpu = new CPU(mem, Seq(timer))
+    val cpu = new CPU(mem, timer)
     cpu.reset() // like 68000: reads SSP from vector[0], PC from vector[1], enters supervisor mode
     (cpu, mem)
 

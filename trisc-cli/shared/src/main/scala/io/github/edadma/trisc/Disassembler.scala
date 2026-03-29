@@ -5,7 +5,7 @@ class Disassembler(mem: Addressable, symbols: Map[Long, String] = Map.empty):
   private val dummyMem: Memory = mem match
     case m: Memory => m
     case a: Addressable => new Memory("disasm", a)
-  private val dummyCpu = new CPU(dummyMem, Nil)
+  private val dummyCpu = new CPU(dummyMem)
 
   def disassembleAt(addr: Long): (String, Int) =
     val inst = mem.readShortUnsigned(addr)

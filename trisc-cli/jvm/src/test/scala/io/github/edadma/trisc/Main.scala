@@ -293,7 +293,7 @@ import pprint.pprintln
 
   tof.load(mem)
 
-  val cpu = new CPU(mem, List(timer)) {
+  val cpu = new CPU(mem, timer) {
     //    trace = true
     //    clump = 1
     limit = 30000

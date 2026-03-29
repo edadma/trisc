@@ -28,7 +28,7 @@ class NewExceptionTests extends TestHelpers {
   }
 
   "illegal instruction object sets UnimplementedOpcode" in {
-    val cpu = new CPU(new RAM(0, 256), Nil)
+    val cpu = new CPU(new RAM(0, 256))
     IllegalInstruction(cpu)
     cpu.state shouldBe State.UnimplementedOpcode
   }
@@ -192,7 +192,7 @@ class NewExceptionTests extends TestHelpers {
         |  halt
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000 }
     cpu.reset()
     cpu.run()
     cpu.r(3).read shouldBe 77
@@ -221,7 +221,7 @@ class NewExceptionTests extends TestHelpers {
         |  halt
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000 }
     cpu.reset()
     cpu.run()
     cpu.r(3).read shouldBe 77
@@ -251,7 +251,7 @@ class NewExceptionTests extends TestHelpers {
         |  halt
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000 }
     cpu.reset()
     cpu.run()
     cpu.r(3).read shouldBe 77

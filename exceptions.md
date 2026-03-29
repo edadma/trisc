@@ -91,7 +91,7 @@ Bit | Name | Description
 0   | Ind  | Interrupt Disable (1 = interrupts masked)
 1   | Mode | Privilege Mode (0 = user, 1 = supervisor)
 2   | C    | Carry/Borrow flag (set by add, sub, adc, sbc)
-3   | Irq  | Interrupt pending
+3   | —    | Reserved
 4   | T    | Trace (fires Trace exception after each instruction)
 5   | V    | Overflow (signed overflow from add, sub, adc, sbc, neg)
 

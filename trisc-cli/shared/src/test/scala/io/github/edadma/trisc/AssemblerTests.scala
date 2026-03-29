@@ -73,7 +73,7 @@ class AssemblerTests extends TestHelpers {
   }
 
   "illegal instruction sets UnimplementedOpcode state" in {
-    val cpu = new CPU(new RAM(0, 64), Nil)
+    val cpu = new CPU(new RAM(0, 64))
     IllegalInstruction(cpu)
     cpu.state shouldBe State.UnimplementedOpcode
   }
@@ -352,7 +352,7 @@ class AssemblerTests extends TestHelpers {
 
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     linked.load(mem)
-    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000 }
     cpu.reset()
     cpu.run()
     cpu.r(2).read shouldBe 42

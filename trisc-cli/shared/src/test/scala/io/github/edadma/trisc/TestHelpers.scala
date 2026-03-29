@@ -26,7 +26,7 @@ trait TestHelpers extends AnyFreeSpec with Matchers {
     val mem = new Memory("Memory", new RAM(0, memSize - 8), stdout)
     val tof = assemble(program, addresses = addresses)
     tof.load(mem)
-    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000 }
     cpu.reset()
     (cpu, output)
 
@@ -39,7 +39,7 @@ trait TestHelpers extends AnyFreeSpec with Matchers {
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     val tof = assemble(program, orgs = orgs)
     tof.load(mem)
-    val cpu = new CPU(mem, Nil) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000 }
     cpu.reset()
     cpu.run()
     cpu

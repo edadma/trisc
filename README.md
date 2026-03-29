@@ -203,7 +203,7 @@ val tof = assemble("""
 val mem = new Memory("mem", new RAM(0, 0x1000), new Stdout(0xFF8))
 tof.load(mem)
 
-val cpu = new CPU(mem, Nil)
+val cpu = new CPU(mem)
 cpu.reset()
 cpu.run()
 
