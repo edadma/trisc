@@ -723,24 +723,30 @@ class SyslTriscCodegen(addresses: Int = 4):
         // r4 is reserved for the call address (movi r4, name)
         val nRegArgs = args.length.min(3)
         val stackArgs = args.drop(3)
+        // Track stack before arg evaluation (genExpr may allocate temps)
+        val savedOffset = stackOffset
         // Push stack args (3+) right-to-left
         for arg <- stackArgs.reverse do
           genExpr(arg)
           emit("  pshd r1")
+          stackOffset -= 8
         // Evaluate register args in reverse, push as temporaries
         for arg <- args.take(nRegArgs).reverse do
           genExpr(arg)
           emit("  pshd r1")
+          stackOffset -= 8
         // Pop into r1-rN
         for i <- 0 until nRegArgs do
           emit(s"  popd r${i + 1}")
+          stackOffset += 8
         // Call
         emit(s"  movi r4, $name")
         emit("  jalr r6, r4")
-        // Clean up stack args
-        if stackArgs.nonEmpty then
-          val stackArgBytes = stackArgs.length * 8
-          emitAddImm(7, 7, stackArgBytes)
+        // Clean up everything allocated for this call (stack args + any temps from genExpr)
+        val totalAllocated = savedOffset - stackOffset
+        if totalAllocated != 0 then
+          emitAddImm(7, 7, totalAllocated)
+          stackOffset = savedOffset
 
       case TIndirectCall(callee, args, _) =>
         // ABI: args 0-2 in r1-r3, args 3+ on stack
