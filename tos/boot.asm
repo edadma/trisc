@@ -23,7 +23,7 @@ segment vectors
 
   dl 0x0FFFF8              ; Slot 0:  Initial SSP (kernel stack top, below devices)
   dl boot                  ; Slot 1:  Initial PC
-  dl timer_isr             ; Slot 2:  Interrupt (use timer_isr until IRQ dispatch is debugged)
+  dl timer_isr             ; Slot 2:  Interrupt
   dl default_isr           ; Slot 3:  InstructionAccess
   dl default_isr           ; Slot 4:  DataAccess
   dl default_isr           ; Slot 5:  MisalignedAccess
@@ -118,10 +118,10 @@ restore_thread
 
 
 ; ============================================================================
-; timer_isr — Direct timer ISR (used until IRQ dispatch is fully debugged)
+; irq_handler — Generic Interrupt Dispatcher
 ; ============================================================================
 
-TIMER_STATUS = 0x100025
+INTC_CLAIM = 0x100028    ; INTC base (0x100026) + offset 2
 
 global timer_isr, func
 
@@ -131,10 +131,11 @@ timer_isr
 
 
 ; ============================================================================
-; irq_handler — Generic Interrupt Dispatcher (WIP — not yet wired to vector)
+; irq_handler — Generic Interrupt Dispatcher
+; NOT YET WIRED — dispatcher assembly causes fault, needs instruction-level debug
 ; ============================================================================
 
-INTC_CLAIM = 0x100028    ; INTC base (0x100026) + offset 2
+INTC_CLAIM = 0x100028
 
 extern irq_handlers
 
@@ -160,8 +161,8 @@ irq_handler
 
   ; Look up handler: irq_handlers[r1] (array of 8-byte pointers)
   movi r2, irq_handlers
-  ldi  r3, 8
-  mul  r3, r1, r3
+  ldi  r3, 3
+  lsl  r3, r1, r3         ; r3 = r1 << 3 = r1 * 8
   add  r2, r2, r3
   ldd  r2, r2, r0         ; r2 = handler function pointer
 

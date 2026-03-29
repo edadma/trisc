@@ -143,7 +143,7 @@ class TOSThreadTests extends TOSTestHelpers {
   }
 
   "TOS: uptime increases after sleep" in {
-    val (_, output) = runTOS(Map(
+    val (cpu, output) = runTOS(Map(
       "app" ->
         """import "kernel"
           |import "services"
@@ -165,6 +165,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |""".stripMargin
     ))
 
+    println(s"DEBUG: state=${cpu.state} pc=${cpu.pc}")
     output should include("Y")
   }
 
