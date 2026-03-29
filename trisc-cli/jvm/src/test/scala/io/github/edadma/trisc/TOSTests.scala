@@ -1391,6 +1391,34 @@ class TOSTests extends AnyFreeSpec with Matchers {
     output shouldBe "3"
   }
 
+  "RBTree: count via rb_insert" in {
+    val (cpu, output) = runRBTest(
+      """import "rbtree"
+        |
+        |var pool: [16]RBNode
+        |var tree: Tree
+        |
+        |inc(t: *Tree)
+        |    t.count += 1
+        |
+        |main() -> int
+        |    tree_init(&tree, &pool[0], 16)
+        |    putchar(48 + tree.count)
+        |    inc(&tree)
+        |    putchar(48 + tree.count)
+        |    inc(&tree)
+        |    putchar(48 + tree.count)
+        |    // Now try actual insert
+        |    rb_insert(&tree, 10, 1)
+        |    putchar(48 + rb_count(&tree))
+        |    rb_insert(&tree, 20, 2)
+        |    putchar(48 + rb_count(&tree))
+        |    0
+        |""".stripMargin)
+    info(s"output: '$output' state: ${cpu.state}")
+    output shouldBe "01234"
+  }
+
   "RBTree: insert and find_min" in {
     val (_, output) = runRBTest(
       """import "rbtree"

@@ -1733,4 +1733,75 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
         |    sum3(a)
         |""".stripMargin) shouldBe 600
   }
+
+  // ===== Struct array element field access =====
+
+  "index into struct array via pointer: read field" in {
+    compileAndRun(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |var pts: [4]Point
+        |
+        |main() -> int
+        |    var p: *Point = &pts[0]
+        |    p[0].x = 10
+        |    p[0].y = 20
+        |    p[1].x = 30
+        |    p[1].y = 40
+        |    p[0].x + p[1].y
+        |""".stripMargin) shouldBe 50
+  }
+
+  "index into struct array via struct pointer field: read and write" in {
+    compileAndRun(
+      """struct Node
+        |    key: int
+        |    value: int
+        |
+        |struct Container
+        |    items: *Node
+        |    count: int
+        |
+        |var nodes: [4]Node
+        |var c: Container
+        |
+        |main() -> int
+        |    c.items = &nodes[0]
+        |    c.count = 0
+        |    c.items[0].key = 100
+        |    c.items[0].value = 1
+        |    c.count += 1
+        |    c.items[1].key = 200
+        |    c.items[1].value = 2
+        |    c.count += 1
+        |    c.items[0].key + c.items[1].value + c.count
+        |""".stripMargin) shouldBe 104
+  }
+
+  "chained struct pointer field index: compound assign" in {
+    compileAndRun(
+      """struct Node
+        |    value: int
+        |
+        |struct Tree
+        |    pool: *Node
+        |    count: int
+        |
+        |var nodes: [4]Node
+        |var tree: Tree
+        |
+        |main() -> int
+        |    tree.pool = &nodes[0]
+        |    tree.count = 0
+        |    tree.pool[0].value = 10
+        |    tree.pool[1].value = 20
+        |    tree.pool[2].value = 30
+        |    tree.count += 1
+        |    tree.count += 1
+        |    tree.count += 1
+        |    tree.pool[0].value + tree.pool[1].value + tree.pool[2].value + tree.count
+        |""".stripMargin) shouldBe 63
+  }
 }

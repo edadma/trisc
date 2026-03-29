@@ -804,7 +804,9 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit(s"  ldi r3, $elemSize")
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = element address
-        emitLoad(1, 1, elemType) // load with proper width
+        elemType match
+          case _: SyslType.StructType | _: SyslType.ArrayType => () // address is the value for aggregates
+          case _ => emitLoad(1, 1, elemType) // load scalar with proper width
 
       case TArrayDecl(size, elemTypStr, typ) =>
         // Allocate array on stack with proper element size, rounded up to 8
