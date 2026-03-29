@@ -40,12 +40,13 @@ object Linker:
         symbols: Seq[TOFSymbol],
         externs: Seq[String],
         relocs: Seq[TOFReloc],
+        explicitOrg: Boolean,
     )
 
     val inputSegments = new ArrayBuffer[InputSegment]
     for tof <- tofs do
       for seg <- tof.segments do
-        inputSegments += InputSegment(seg.name, seg.org, flattenChunks(seg.chunks), seg.symbols, seg.externs, seg.relocs)
+        inputSegments += InputSegment(seg.name, seg.org, flattenChunks(seg.chunks), seg.symbols, seg.externs, seg.relocs, seg.explicitOrg)
 
     // Phase 2: place segments using linker script or sequential placement
     val sectionDefs = script.sections.map(s => s.name -> s).toMap
@@ -70,7 +71,7 @@ object Linker:
             case Some(prev) => prev.org + prev.data.length
             case None => throw LinkerError(s"section '${seg.name}' placed AFTER '$ref', but '$ref' has not been placed yet")
         case None =>
-          if seg.originalOrg != 0 then seg.originalOrg
+          if seg.explicitOrg then seg.originalOrg
           else nextAddr
 
     // Place segments that have script definitions first (in script order)
@@ -217,32 +218,51 @@ object Linker:
     // Phase 6: merge same-named segments into single contiguous segments.
     // This is required because TOF serialize/deserialize uses segment name as key,
     // so multiple segments with the same name would lose their distinct origins.
-    val mergedSegments = new mutable.LinkedHashMap[String, (Long, ArrayBuffer[Byte], ArrayBuffer[TOFSymbol], ArrayBuffer[TOFReloc], ArrayBuffer[String])]
+    // Gaps between same-named segments use ResChunk so interleaved segments aren't overwritten on load.
+    case class MergedSegment(
+        org: Long,
+        chunks: ArrayBuffer[TOF.Chunk],
+        totalLength: Long,
+        symbols: ArrayBuffer[TOFSymbol],
+        relocs: ArrayBuffer[TOFReloc],
+        externs: ArrayBuffer[String],
+    )
+    val mergedSegments = new mutable.LinkedHashMap[String, MergedSegment]
     for (seg, idx) <- placed.zipWithIndex do
       val segRelocs = outputRelocs(idx)
       val segExterns = outputExterns(idx)
       mergedSegments.get(seg.name) match
         case None =>
-          mergedSegments(seg.name) = (seg.org, ArrayBuffer.from(seg.data), ArrayBuffer.from(seg.symbols), ArrayBuffer.from(segRelocs), ArrayBuffer.from(segExterns))
-        case Some((baseOrg, mergedData, mergedSyms, mergedRelocs, mergedExterns)) =>
-          val dataOffset = (seg.org - baseOrg).toInt
-          // Pad if there's a gap between segments
-          while mergedData.length < dataOffset do mergedData += 0.toByte
-          mergedData ++= seg.data
+          mergedSegments(seg.name) = MergedSegment(
+            seg.org,
+            ArrayBuffer(TOF.DataChunk(seg.data.toSeq)),
+            seg.data.length.toLong,
+            ArrayBuffer.from(seg.symbols),
+            ArrayBuffer.from(segRelocs),
+            ArrayBuffer.from(segExterns),
+          )
+        case Some(ms) =>
+          val dataOffset = (seg.org - ms.org).toInt
+          // Insert a ResChunk for the gap (preserves interleaved segments' data on load)
+          val gap = dataOffset - ms.totalLength.toInt
+          if gap > 0 then ms.chunks += TOF.ResChunk(gap)
+          ms.chunks += TOF.DataChunk(seg.data.toSeq)
+          val newTotalLength = dataOffset.toLong + seg.data.length
           // Adjust symbol offsets relative to merged segment start
           for sym <- seg.symbols do
-            mergedSyms += sym.copy(offset = sym.offset + dataOffset)
+            ms.symbols += sym.copy(offset = sym.offset + dataOffset)
           // Adjust reloc offsets relative to merged segment start
           for reloc <- segRelocs do
-            mergedRelocs += reloc.copy(offset = reloc.offset + dataOffset)
+            ms.relocs += reloc.copy(offset = reloc.offset + dataOffset)
           // Merge unresolved externs (deduplicate)
           for ext <- segExterns do
-            if !mergedExterns.contains(ext) then mergedExterns += ext
+            if !ms.externs.contains(ext) then ms.externs += ext
+          mergedSegments(seg.name) = ms.copy(totalLength = newTotalLength)
 
     val outType = if relocatable then TOFType.Relocatable else TOFType.Executable
 
-    val outSegments = mergedSegments.map { case (name, (segOrg, data, syms, relocs, externs)) =>
-      TOF.Segment(name, segOrg, Seq(TOF.DataChunk(data.toSeq)), syms.toSeq, externs = externs.toSeq, relocs = relocs.toSeq)
+    val outSegments = mergedSegments.map { case (name, ms) =>
+      TOF.Segment(name, ms.org, ms.chunks.toSeq, ms.symbols.toSeq, externs = ms.externs.toSeq, relocs = ms.relocs.toSeq)
     }.toSeq
 
     TOF(entry, outSegments, outType)

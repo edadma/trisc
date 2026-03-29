@@ -337,7 +337,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case other             => problem(operand, s"unexpected branch target")
     addInstruction(3 -> 6, 3 -> 0, 3 -> 4, 2 -> 0, 5 -> 0) // jalr r0, r4
 
-  builder.segment("_default_", segments("_default_").org)
+  builder.segment("_default_", segments("_default_").org, explicitOrg = orgs.contains("_default_"))
 
   // Emit symbols for a segment: globals, relocatable auto-exports, and entry point
   val emittedSymbols = new mutable.LinkedHashSet[String]
@@ -381,7 +381,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
   var branchIndex = 0
   lines foreach {
     case SegmentLineAST(name) =>
-      builder.segment(name, segments(name).org)
+      builder.segment(name, segments(name).org, explicitOrg = orgs.contains(name))
       emitSymbolsForSegment(name)
     case LabelLineAST(_)         => // labels don't emit bytes; alignment handled by instructions
     case LocalLineAST(_)         =>

@@ -161,10 +161,12 @@ class LinkerTests extends TestHelpers {
     val b = assemble("ldi r2, 2\nhalt\n", relocatable = true)
 
     val linked = Linker.link(Seq(a, b), baseAddress = 0x100)
-    // Same-named segments get merged with 8-byte alignment padding between units
+    // Same-named segments get merged: data + ResChunk gap + data
     linked.segments(0).org shouldBe 0x100
-    val data = linked.segments(0).chunks.head.asInstanceOf[TOF.DataChunk].data
-    data.length shouldBe 12 // 4 bytes from a + 4 padding (align 8) + 4 bytes from b
+    val chunks = linked.segments(0).chunks
+    chunks(0).asInstanceOf[TOF.DataChunk].data.length shouldBe 4  // from a
+    chunks(1).asInstanceOf[TOF.ResChunk].size shouldBe 4           // alignment gap
+    chunks(2).asInstanceOf[TOF.DataChunk].data.length shouldBe 4  // from b
   }
 
   "segment with explicit org keeps its origin" in {
