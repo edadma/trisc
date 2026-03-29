@@ -76,7 +76,7 @@ object TOSTestData {
 }
 
 trait TOSTestHelpers extends AnyFreeSpec with Matchers {
-  import TOSTestData.*
+  export TOSTestData.*
 
   def compileSysl(source: String): TOF =
     val driver = new SyslDriver
