@@ -182,6 +182,18 @@ trap_handler
   beq r1, r3, .sys_tls_set     ; 19 = tls_set(packed)
   ldi r3, 20
   beq r1, r3, .sys_tls_get     ; 20 = tls_get(slot)
+  ldi r3, 21
+  beq r1, r3, .sys_notify_send ; 21 = notify_send(packed)
+  ldi r3, 22
+  beq r1, r3, .sys_notify_wait ; 22 = notify_wait
+  ldi r3, 23
+  beq r1, r3, .sys_notify_read ; 23 = notify_read
+  ldi r3, 24
+  beq r1, r3, .sys_event_wait  ; 24 = event_wait(packed)
+  ldi r3, 25
+  beq r1, r3, .sys_event_set   ; 25 = event_set(packed)
+  ldi r3, 26
+  beq r1, r3, .sys_event_clear ; 26 = event_clear(packed)
 
   ; Slow path: save full context for syscalls that context-switch
   pshr r6                       ; save user's r1-r6
@@ -484,6 +496,134 @@ extern kernel_tls_get
   pshd r6
   mov  r1, r2
   movi r4, kernel_tls_get
+  jalr r6, r4
+  popd r6
+  popd r5
+  popd r4
+  popd r2
+  sti
+  rte
+
+; notify_send(packed): send notification — fast path, may wake target
+extern notify_send
+
+.sys_notify_send
+  pshd r2
+  pshd r4
+  pshd r5
+  pshd r6
+  ; Unpack: r2 = (id << 24) | value
+  mov  r1, r2
+  ldi  r3, 24
+  asr  r1, r1, r3            ; r1 = high 8 bits
+  ldi  r3, 0xFF
+  sli  r3, 0xFF
+  sli  r3, 0xFF
+  and  r2, r2, r3            ; r2 = value (low 24 bits)
+  movi r4, notify_send
+  jalr r6, r4
+  popd r6
+  popd r5
+  popd r4
+  popd r2
+  sti
+  rte
+
+; notify_wait: block until notification — needs context switch
+extern notify_wait_current
+
+.sys_notify_wait
+  pshr r6
+  gusp r1
+  pshd r1
+  movi r4, notify_wait_current
+  jalr r6, r4
+  bra do_schedule
+
+; notify_read: read and clear own notification — fast path
+extern notify_read
+
+.sys_notify_read
+  pshd r4
+  pshd r5
+  pshd r6
+  movi r2, current_thread
+  ldw  r1, r2, r0
+  movi r4, notify_read
+  jalr r6, r4
+  popd r6
+  popd r5
+  popd r4
+  sti
+  rte
+
+; event_wait(packed): block until bits match — needs context switch
+extern event_wait_current
+
+.sys_event_wait
+  pshr r6
+  gusp r1
+  pshd r1
+  ; Reload saved r2 from stack
+  addi r3, r7, 40
+  ldd  r2, r3, r0            ; r2 = packed arg
+  ; Unpack: wait_all = high 8 bits, mask = low 24 bits
+  mov  r1, r2
+  ldi  r3, 24
+  asr  r1, r1, r3            ; r1 = wait_all
+  ldi  r3, 0xFF
+  sli  r3, 0xFF
+  sli  r3, 0xFF
+  and  r2, r2, r3            ; r2 = mask (low 24 bits)
+  ; Call event_wait_current(mask, wait_all)
+  ; But this is a 2-arg kernel function — r1=mask, r2=wait_all
+  mov  r3, r1                ; r3 = wait_all
+  mov  r1, r2                ; r1 = mask
+  mov  r2, r3                ; r2 = wait_all
+  movi r4, event_wait_current
+  jalr r6, r4
+  bra do_schedule
+
+; event_set(packed): set bits on target — fast path
+extern event_set_bits
+
+.sys_event_set
+  pshd r2
+  pshd r4
+  pshd r5
+  pshd r6
+  mov  r1, r2
+  ldi  r3, 24
+  asr  r1, r1, r3            ; r1 = target id
+  ldi  r3, 0xFF
+  sli  r3, 0xFF
+  sli  r3, 0xFF
+  and  r2, r2, r3            ; r2 = bits
+  movi r4, event_set_bits
+  jalr r6, r4
+  popd r6
+  popd r5
+  popd r4
+  popd r2
+  sti
+  rte
+
+; event_clear(packed): clear bits on target — fast path
+extern event_clear_bits
+
+.sys_event_clear
+  pshd r2
+  pshd r4
+  pshd r5
+  pshd r6
+  mov  r1, r2
+  ldi  r3, 24
+  asr  r1, r1, r3            ; r1 = target id
+  ldi  r3, 0xFF
+  sli  r3, 0xFF
+  sli  r3, 0xFF
+  and  r2, r2, r3            ; r2 = bits
+  movi r4, event_clear_bits
   jalr r6, r4
   popd r6
   popd r5

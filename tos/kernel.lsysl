@@ -63,6 +63,8 @@ Statistics fields track per-thread performance:
       ctx_switches: int
       cpu_ticks: int
       consec_quanta: int
+      notify_value: int
+      notify_pending: int
 
 @tech
 Run queues: one FIFO queue per priority level. Each queue
@@ -92,6 +94,17 @@ the watchdog terminates it. Set to 0 to disable.
 
   var watchdog_limit = 0
   var total_ctx_switches = 0
+
+@tech
+Idle and tick hooks. Function pointers called by the scheduler.
+idle_hook is called when no threads are ready (once per idle entry).
+tick_hook is called on every timer tick. Set to 0 to disable.
+@
+
+  var idle_hook = 0
+  var tick_hook = 0
+
+  val STATE_NOTIFY_WAIT = 6
 
 @tech
 Thread-local storage. A flat 2D array indexed by [thread_id][slot].
@@ -222,6 +235,8 @@ Lower priority number = higher priority. Priority 0 runs first.
       tasks[idx].ctx_switches = 0
       tasks[idx].cpu_ticks = 0
       tasks[idx].consec_quanta = 0
+      tasks[idx].notify_value = 0
+      tasks[idx].notify_pending = 0
       // Write stack canary at bottom of user stack
       var canary_addr: *int = usp
       *canary_addr = STACK_CANARY
@@ -496,3 +511,87 @@ stack or context — it can be resumed exactly where it left off.
 
   kernel_tls_get(slot: int) -> int
       tls[current_thread * TLS_SLOTS + slot]
+
+@api kernel_set_idle_hook(hook) — Set the idle hook function pointer.
+
+  kernel_set_idle_hook(hook: int)
+      idle_hook = hook
+
+@api kernel_set_tick_hook(hook) — Set the tick hook function pointer.
+
+  kernel_set_tick_hook(hook: int)
+      tick_hook = hook
+
+@api notify_send(target_id, value) — Send a notification to a thread.
+
+@tech
+Sets the target thread's notify_value and marks it as pending.
+If the target is waiting for a notification (STATE_NOTIFY_WAIT),
+it is woken and re-enqueued.
+@
+
+  notify_send(target_id: int, value: int)
+      tasks[target_id].notify_value = value
+      tasks[target_id].notify_pending = 1
+      if tasks[target_id].state == STATE_NOTIFY_WAIT
+          tasks[target_id].state = STATE_READY
+          tasks[target_id].quantum = DEFAULT_QUANTUM
+          enqueue(tasks[target_id].priority, target_id)
+
+@api notify_wait_current() — Block current thread until a notification arrives.
+
+@tech
+If a notification is already pending, returns immediately.
+Otherwise sets state to STATE_NOTIFY_WAIT and the scheduler
+will skip this thread until notify_send wakes it.
+@
+
+  notify_wait_current()
+      if tasks[current_thread].notify_pending == 1
+          return
+      tasks[current_thread].state = STATE_NOTIFY_WAIT
+      tasks[current_thread].consec_quanta = 0
+
+@api notify_read(id) -> int — Read and clear a thread's notification value.
+
+  notify_read(id: int) -> int
+      val v = tasks[id].notify_value
+      tasks[id].notify_pending = 0
+      tasks[id].notify_value = 0
+      v
+
+@api event_group_wait(mask, wait_all) — Block current thread until event bits match.
+
+@tech
+Uses notify_value as the event bits. wait_all=1 means all bits
+in mask must be set. wait_all=0 means any bit in mask suffices.
+The caller should check the bits after waking (Mesa semantics).
+
+Event groups are per-thread — each thread's notify_value doubles
+as its event bits. Other threads set bits via notify_send.
+@
+
+  event_wait_current(mask: int, wait_all: int)
+      if wait_all != 0
+          if (tasks[current_thread].notify_value & mask) == mask
+              return
+      else
+          if (tasks[current_thread].notify_value & mask) != 0
+              return
+      tasks[current_thread].state = STATE_NOTIFY_WAIT
+      tasks[current_thread].consec_quanta = 0
+
+@api event_set_bits(target_id, bits) — Set event bits on a thread and wake if waiting.
+
+  event_set_bits(target_id: int, bits: int)
+      tasks[target_id].notify_value = tasks[target_id].notify_value | bits
+      tasks[target_id].notify_pending = 1
+      if tasks[target_id].state == STATE_NOTIFY_WAIT
+          tasks[target_id].state = STATE_READY
+          tasks[target_id].quantum = DEFAULT_QUANTUM
+          enqueue(tasks[target_id].priority, target_id)
+
+@api event_clear_bits(target_id, bits) — Clear event bits on a thread.
+
+  event_clear_bits(target_id: int, bits: int)
+      tasks[target_id].notify_value = tasks[target_id].notify_value & ~bits

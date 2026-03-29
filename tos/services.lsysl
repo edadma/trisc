@@ -44,6 +44,12 @@ Syscall numbers:
   val SYS_RESUME         = 18
   val SYS_TLS_SET        = 19
   val SYS_TLS_GET        = 20
+  val SYS_NOTIFY_SEND    = 21
+  val SYS_NOTIFY_WAIT    = 22
+  val SYS_NOTIFY_READ    = 23
+  val SYS_EVENT_WAIT     = 24
+  val SYS_EVENT_SET      = 25
+  val SYS_EVENT_CLEAR    = 26
 
 @api sleep(ticks) — Block the calling thread for N timer ticks.
 
@@ -147,6 +153,36 @@ Syscall numbers:
       while s[i] != 0
           putc(s[i])
           i += 1
+
+@api notify_send_to(id, value) — Send a notification value to a thread.
+
+  notify_send_to(id: int, value: int)
+      syscall(SYS_NOTIFY_SEND, (id << 24) | (value & 0xFFFFFF))
+
+@api notify_wait() — Block until a notification arrives.
+
+  notify_wait()
+      syscall(SYS_NOTIFY_WAIT, 0)
+
+@api notify_read_self() -> int — Read and clear own notification value.
+
+  notify_read_self() -> int
+      syscall(SYS_NOTIFY_READ, 0)
+
+@api event_wait(mask, wait_all) — Block until event bits match mask.
+
+  event_wait(mask: int, wait_all: int)
+      syscall(SYS_EVENT_WAIT, (wait_all << 24) | (mask & 0xFFFFFF))
+
+@api event_set(id, bits) — Set event bits on a thread.
+
+  event_set(id: int, bits: int)
+      syscall(SYS_EVENT_SET, (id << 24) | (bits & 0xFFFFFF))
+
+@api event_clear(id, bits) — Clear event bits on a thread.
+
+  event_clear(id: int, bits: int)
+      syscall(SYS_EVENT_CLEAR, (id << 24) | (bits & 0xFFFFFF))
 
 @api tls_set(slot, value) — Set thread-local storage value (value must fit in 24 bits).
 

@@ -1,0 +1,79 @@
+@main
+TOS Recursive Mutex
+
+A mutex that can be locked multiple times by the same thread.
+The thread must unlock the same number of times before the
+mutex becomes available to other threads.
+
+A recursive mutex is a struct with an owner, lock count, and
+a semaphore for cross-thread contention.
+@
+
+  import "services"
+  import "semaphore"
+
+  struct RMutex
+      owner: int
+      count: int
+      sem: i64
+
+@tech
+rmutex_sem — Helper to get the semaphore field address.
+@
+
+  rmutex_sem(m: int) -> *i64
+      m + 8
+
+@api rmutex_init(m) — Initialize a recursive mutex.
+
+  rmutex_init(m: *RMutex)
+      m.owner = -1
+      m.count = 0
+      val addr: int = m
+      sem_init(rmutex_sem(addr), 1)
+
+@api rmutex_lock(m) — Lock the recursive mutex.
+
+@tech
+If the current thread already owns the mutex, increments the
+count. Otherwise, waits on the semaphore and takes ownership.
+@
+
+  rmutex_lock(m: *RMutex)
+      val me = thread_id()
+      if m.owner == me
+          m.count += 1
+      else
+          val addr: int = m
+          sem_wait(rmutex_sem(addr))
+          m.owner = me
+          m.count = 1
+
+@api rmutex_unlock(m) — Unlock the recursive mutex.
+
+@tech
+Decrements the count. When count reaches 0, releases ownership
+and posts the semaphore so another thread can acquire.
+@
+
+  rmutex_unlock(m: *RMutex)
+      m.count -= 1
+      if m.count == 0
+          m.owner = -1
+          val addr: int = m
+          sem_post(rmutex_sem(addr))
+
+@api rmutex_trylock(m) -> int — Non-blocking lock. Returns 1 on success.
+
+  rmutex_trylock(m: *RMutex) -> int
+      val me = thread_id()
+      if m.owner == me
+          m.count += 1
+          return 1
+      val addr: int = m
+      val got = sem_trywait(rmutex_sem(addr))
+      if got != 0
+          m.owner = me
+          m.count = 1
+          return 1
+      0
