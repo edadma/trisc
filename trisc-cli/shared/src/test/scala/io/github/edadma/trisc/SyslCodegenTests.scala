@@ -1804,4 +1804,282 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
         |    tree.pool[0].value + tree.pool[1].value + tree.pool[2].value + tree.count
         |""".stripMargin) shouldBe 63
   }
+
+  // ===== Cross-module 5-arg function call bug =====
+
+  "5-arg extern function called 3 times from same function" in {
+    compileMultiAndRun(Map(
+      "lib" ->
+        """var total = 0
+          |
+          |add5(a: int, b: int, c: int, d: int, e: int)
+          |    total = total + a + b + c + d + e
+          |
+          |get_total() -> int = total
+          |""".stripMargin,
+      "main" ->
+        """import "lib"
+          |
+          |main() -> int
+          |    add5(1, 2, 3, 4, 5)
+          |    add5(10, 20, 30, 40, 50)
+          |    add5(100, 200, 300, 400, 500)
+          |    get_total()
+          |""".stripMargin
+    )) shouldBe 1665
+  }
+
+  "5-arg function with pointer arg called 3 times" in {
+    compileMultiAndRun(Map(
+      "lib" ->
+        """struct Item
+          |    value: int
+          |    name: *byte
+          |    pri: int
+          |
+          |var items: [8]Item
+          |var count = 0
+          |
+          |add_item(entry: int, usp: int, ssp: int, name: *byte, pri: int)
+          |    items[count].value = entry
+          |    items[count].name = name
+          |    items[count].pri = pri
+          |    count = count + 1
+          |
+          |get_count() -> int = count
+          |""".stripMargin,
+      "main" ->
+        """import "lib"
+          |
+          |main() -> int
+          |    add_item(100, 0x6000, 0x5000, "a", 0)
+          |    add_item(200, 0x8000, 0x7000, "b", 1)
+          |    add_item(300, 0xA000, 0x9000, "c", 2)
+          |    get_count()
+          |""".stripMargin
+    )) shouldBe 3
+  }
+
+  // ===== Calling convention: r1-r3 for first 3 args, stack for 4+ =====
+
+  "calling convention: 1 arg in r1" in {
+    compileAndRun(
+      """identity(x: int) -> int = x
+        |main() -> int = identity(42)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "calling convention: 2 args in r1-r2" in {
+    compileAndRun(
+      """sub(a: int, b: int) -> int = a - b
+        |main() -> int = sub(50, 8)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "calling convention: 3 args in r1-r3" in {
+    compileAndRun(
+      """sum3(a: int, b: int, c: int) -> int = a + b + c
+        |main() -> int = sum3(10, 20, 12)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "calling convention: 4 args (3 regs + 1 stack)" in {
+    compileAndRun(
+      """sum4(a: int, b: int, c: int, d: int) -> int = a + b + c + d
+        |main() -> int = sum4(10, 11, 12, 9)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "calling convention: 5 args (3 regs + 2 stack)" in {
+    compileAndRun(
+      """sum5(a: int, b: int, c: int, d: int, e: int) -> int = a + b + c + d + e
+        |main() -> int = sum5(5, 6, 7, 8, 16)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "calling convention: 6 args (3 regs + 3 stack)" in {
+    compileAndRun(
+      """sum6(a: int, b: int, c: int, d: int, e: int, f: int) -> int = a + b + c + d + e + f
+        |main() -> int = sum6(1, 2, 3, 4, 5, 27)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "calling convention: cross-module 2 args" in {
+    compileMultiAndRun(Map(
+      "lib" ->
+        """sub(a: int, b: int) -> int = a - b
+          |""".stripMargin,
+      "main" ->
+        """import "lib"
+          |main() -> int = sub(50, 8)
+          |""".stripMargin
+    )) shouldBe 42
+  }
+
+  "calling convention: cross-module 5 args" in {
+    compileMultiAndRun(Map(
+      "lib" ->
+        """sum5(a: int, b: int, c: int, d: int, e: int) -> int = a + b + c + d + e
+          |""".stripMargin,
+      "main" ->
+        """import "lib"
+          |main() -> int = sum5(5, 6, 7, 8, 16)
+          |""".stripMargin
+    )) shouldBe 42
+  }
+
+  "calling convention: multiple calls preserve correctness" in {
+    compileAndRun(
+      """add(a: int, b: int) -> int = a + b
+        |main() -> int
+        |    val x = add(10, 20)
+        |    val y = add(5, 7)
+        |    x + y
+        |""".stripMargin) shouldBe 42
+  }
+
+  "queue enqueue at multiple priorities" in {
+    compileAndRun(
+      """val EMPTY = -1
+        |
+        |var head: [4]int
+        |var tail: [4]int
+        |
+        |init()
+        |    var i = 0
+        |    while i < 4
+        |        head[i] = EMPTY
+        |        tail[i] = EMPTY
+        |        i += 1
+        |
+        |enqueue(pri: int, idx: int)
+        |    if head[pri] == EMPTY
+        |        head[pri] = idx
+        |        tail[pri] = idx
+        |    else
+        |        tail[pri] = idx
+        |
+        |main() -> int
+        |    init()
+        |    enqueue(0, 10)
+        |    enqueue(1, 20)
+        |    enqueue(2, 30)
+        |    head[0] + head[1] + head[2]
+        |""".stripMargin) shouldBe 60
+  }
+
+  "calling convention: left shift by variable" in {
+    compileAndRun(
+      """main() -> int
+        |    val x = 2
+        |    1 << x
+        |""".stripMargin) shouldBe 4
+  }
+
+  "calling convention: bitwise OR with shift" in {
+    compileAndRun(
+      """var mask = 0
+        |
+        |set_bit(n: int)
+        |    mask = mask | (1 << n)
+        |
+        |main() -> int
+        |    set_bit(0)
+        |    set_bit(2)
+        |    mask
+        |""".stripMargin) shouldBe 5
+  }
+
+  "single-module array write at index" in {
+    compileAndRun(
+      """var arr: [4]int
+        |
+        |set_arr(idx: int, val_: int)
+        |    arr[idx] = val_
+        |
+        |main() -> int
+        |    set_arr(0, 10)
+        |    set_arr(1, 20)
+        |    set_arr(2, 30)
+        |    arr[0] + arr[1] + arr[2]
+        |""".stripMargin) shouldBe 60
+  }
+
+  "cross-module array write at index" in {
+    compileMultiAndRun(Map(
+      "lib" ->
+        """var arr: [4]int
+          |
+          |set_arr(idx: int, val_: int)
+          |    arr[idx] = val_
+          |
+          |get_arr(idx: int) -> int = arr[idx]
+          |""".stripMargin,
+      "main" ->
+        """import "lib"
+          |
+          |main() -> int
+          |    set_arr(0, 10)
+          |    set_arr(1, 20)
+          |    set_arr(2, 30)
+          |    get_arr(0) + get_arr(1) + get_arr(2)
+          |""".stripMargin
+    )) shouldBe 60
+  }
+
+  "cross-module queue enqueue at multiple priorities" in {
+    compileMultiAndRun(Map(
+      "queue" ->
+        """var head: [4]int
+          |var tail: [4]int
+          |
+          |init_q()
+          |    var i = 0
+          |    while i < 4
+          |        head[i] = -1
+          |        tail[i] = -1
+          |        i += 1
+          |
+          |enqueue(pri: int, idx: int)
+          |    if head[pri] == -1
+          |        head[pri] = idx
+          |        tail[pri] = idx
+          |    else
+          |        tail[pri] = idx
+          |
+          |get_head(pri: int) -> int = head[pri]
+          |""".stripMargin,
+      "main" ->
+        """import "queue"
+          |
+          |main() -> int
+          |    init_q()
+          |    enqueue(0, 10)
+          |    enqueue(1, 20)
+          |    enqueue(2, 30)
+          |    get_head(0) + get_head(1) + get_head(2)
+          |""".stripMargin
+    )) shouldBe 60
+  }
+
+  "5-arg extern function called 2 times works" in {
+    compileMultiAndRun(Map(
+      "lib" ->
+        """var total = 0
+          |
+          |add5(a: int, b: int, c: int, d: int, e: int)
+          |    total = total + a + b + c + d + e
+          |
+          |get_total() -> int = total
+          |""".stripMargin,
+      "main" ->
+        """import "lib"
+          |
+          |main() -> int
+          |    add5(1, 2, 3, 4, 5)
+          |    add5(10, 20, 30, 40, 50)
+          |    get_total()
+          |""".stripMargin
+    )) shouldBe 165
+  }
 }

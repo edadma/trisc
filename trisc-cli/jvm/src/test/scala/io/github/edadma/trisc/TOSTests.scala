@@ -1809,23 +1809,14 @@ class TOSTests extends AnyFreeSpec with Matchers {
           |import "services"
           |
           |kernel_main() -> int
-          |    make_high()
-          |    make_med()
-          |    make_low()
+          |    create_thread_pri(high, 0x20000, 0x1F000, "high", 0)
+          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
+          |    create_thread_pri(low, 0x24000, 0x23000, "low", 2)
           |    val period: *i32 = 0x100020
           |    *period = 10
           |    val control: *i8 = 0x100024
           |    *control = 1
           |    first_thread_ssp()
-          |
-          |make_high()
-          |    create_thread(high, 0x20000, 0x1F000, "high")
-          |
-          |make_med()
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |
-          |make_low()
-          |    create_thread_pri(low, 0x24000, 0x23000, "low", 2)
           |
           |high()
           |    putc(72)
@@ -1888,19 +1879,13 @@ class TOSTests extends AnyFreeSpec with Matchers {
           |import "services"
           |
           |kernel_main() -> int
-          |    make_high()
-          |    make_low()
+          |    create_thread(high, 0x20000, 0x1F000, "high")
+          |    create_thread_pri(low, 0x22000, 0x21000, "low", 2)
           |    val period: *i32 = 0x100020
           |    *period = 10
           |    val control: *i8 = 0x100024
           |    *control = 1
           |    first_thread_ssp()
-          |
-          |make_high()
-          |    create_thread(high, 0x20000, 0x1F000, "high")
-          |
-          |make_low()
-          |    create_thread_pri(low, 0x22000, 0x21000, "low", 2)
           |
           |high()
           |    putc(49)

@@ -8,7 +8,7 @@
 | r1 | a1/rv | Argument 1 / return value | Caller |
 | r2 | a2 | Argument 2 | Caller |
 | r3 | a3 | Argument 3 | Caller |
-| r4 | a4 | Argument 4 | Caller |
+| r4 | t1 | Call target / temporary | Caller |
 | r5 | fp | Frame pointer | Callee |
 | r6 | lr | Link register | Callee |
 | r7 | sp | Stack pointer | Callee |
@@ -17,8 +17,9 @@
 
 ### Arguments
 
-- First 4 arguments are passed in r1–r4
-- Additional arguments are pushed onto the stack right-to-left (C order) before the call
+- First 3 arguments are passed in r1–r3
+- Arguments 4+ are pushed onto the stack right-to-left (C order) before the call
+- r4 is reserved for the call target address (`movi r4, func; jalr r6, r4`)
 - The caller is responsible for cleaning up stack arguments after the call returns
 
 ### Return Value
@@ -37,6 +38,10 @@
 Standard prologue:
 
 ```asm
+; save register arguments (before frame setup)
+pshd r1           ; save arg 1 (if present)
+pshd r2           ; save arg 2 (if present)
+pshd r3           ; save arg 3 (if present)
 ; save callee-saved registers
 pshd r6           ; save link register
 pshd r5           ; save frame pointer
@@ -58,8 +63,12 @@ jalr r0, r6       ; return
 ```
 Higher addresses
   +-----------------+
-  | arg 6           |  [fp + 24]   (if > 4 args)
-  | arg 5           |  [fp + 16]   (if > 4 args)
+  | arg 5           |  [fp + 16 + N*8]  (if > 3 args; N = number of register args)
+  | arg 4           |  [fp + 16 + N*8]  (if > 3 args)
+  +-----------------+
+  | saved r1 (arg1) |  [fp + 16 + (N-1)*8]  (register args, pushed before prologue)
+  | saved r2 (arg2) |  [fp + 16 + (N-2)*8]
+  | saved r3 (arg3) |  [fp + 16]
   +-----------------+
   | saved lr (r6)   |  [fp + 8]
   | saved fp (r5)   |  [fp + 0]    ← fp points here after prologue
@@ -71,9 +80,13 @@ Higher addresses
 Lower addresses
 ```
 
+N = min(param_count, 3). Register args are pushed in order (r1 first, then r2, r3)
+before the prologue saves lr and fp. Stack args (params 4+) are pushed by the
+caller right-to-left and sit above the register args.
+
 ### Register Preservation
 
-- **Caller-saved (volatile):** r1–r4 — may be destroyed by any call. The caller must save them if needed after the call.
+- **Caller-saved (volatile):** r1–r4 — may be destroyed by any call. The caller must save them if needed after the call. r4 is used as the call target register.
 - **Callee-saved (non-volatile):** r5–r7 — a called function must preserve these. If it uses them, it must save and restore them.
 - **r0:** Always zero. Writes are ignored.
 
@@ -83,7 +96,7 @@ Functions that don't call other functions (leaf functions) may skip saving lr (r
 
 ### System Calls
 
-Trap instructions (`trap 0`–`trap 4`) are used for system calls. The trap number selects the handler via the exception vector table. Arguments follow the same r1–r4 convention.
+Trap instructions (`trap 0`–`trap 7`) are used for system calls. The trap number selects the handler via the exception vector table. Arguments follow the same r1–r3 convention.
 
 ## Data Types
 

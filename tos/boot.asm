@@ -316,7 +316,7 @@ extern sleep_until_current
 ;
 ; Generic syscall bridge. Sysl calling convention:
 ;   r1 = first arg (syscall number)
-;   second arg pushed on stack by caller
+;   r2 = second arg
 ;
 ; Trap convention: r1 = number, r2 = arg
 ;
@@ -325,7 +325,6 @@ extern sleep_until_current
 global syscall, func
 
 syscall
-  ldd  r2, r7, r0      ; r2 = arg (on stack, pushed by caller)
   trap 0                ; r1 = number, r2 = arg
   jalr r0, r6           ; return (r1 = return value from trap handler)
 

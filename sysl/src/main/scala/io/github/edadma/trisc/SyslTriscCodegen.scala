@@ -178,31 +178,36 @@ class SyslTriscCodegen(addresses: Int = 4):
     emit(s"# function: ${fun.name}")
     emit(s"${fun.name}:")
 
+    // ABI: params 0-2 in r1-r3, params 3+ on caller's stack
+    // Save register params BEFORE prologue so they have known offsets from fp
+    val nRegParams = fun.params.length.min(3)
+    for i <- 0 until nRegParams do
+      emit(s"  pshd r${i + 1}")   // push r1, r2, r3 in order
+
     // Prologue: save lr, fp, set up frame
     emit("  pshd r6")       // save link register
     emit("  pshd r5")       // save frame pointer
     emit("  mov r5, r7")    // frame pointer = stack pointer
 
-    // First param comes in r1, push to local frame with proper width
-    // Remaining params were pushed by caller above our frame
-    if fun.params.nonEmpty then
-      val p = fun.params.head
-      val local = allocLocal(p.name, p.typ)
-      emitAddImm(2, 5, local.offset)
-      emitStore(1, 2, p.typ)
-    // Stack args (params 1+) are above saved lr/fp in 64-bit slots
-    for (param, i) <- fun.params.zipWithIndex.drop(1) do
-      val callerOffset = 16 + (i - 1) * 8 // 8-byte slots above saved lr(+8) and fp(+8)
+    // Register params are above saved lr/fp on the stack:
+    //   [r5+0] = saved r5, [r5+8] = saved r6/lr
+    //   [r5+16] = last pushed param, ... [r5+16+(nRegParams-1)*8] = first pushed param
+    // For 1 param:  [r5+16] = r1
+    // For 2 params: [r5+16] = r2, [r5+24] = r1
+    // For 3 params: [r5+16] = r3, [r5+24] = r2, [r5+32] = r1
+    for (param, i) <- fun.params.take(nRegParams).zipWithIndex do
+      val callerOffset = 16 + (nRegParams - 1 - i) * 8
+      locals(param.name) = LocalVar(param.name, callerOffset, SyslType.I64)
+    // Stack params (3+) are above the saved register params
+    for (param, i) <- fun.params.zipWithIndex.drop(3) do
+      val callerOffset = 16 + nRegParams * 8 + (i - 3) * 8
       locals(param.name) = LocalVar(param.name, callerOffset, SyslType.I64)
 
     // Generate body
     fun.body match
       case TExprBody(expr) =>
         genExpr(expr) // result in r1
-        emit("  mov r7, r5")    // restore stack
-        emit("  popd r5")       // restore frame pointer
-        emit("  popd r6")       // restore link register
-        emit("  jalr r0, r6") // return
+        emitEpilogue()
       case TBlockBody(stmts) =>
         genBlock(stmts)
 
@@ -243,6 +248,10 @@ class SyslTriscCodegen(addresses: Int = 4):
     emit("  mov r7, r5")
     emit("  popd r5")
     emit("  popd r6")
+    // Skip past pre-prologue pushed register params
+    val nRegParams = if currentFunction != null then currentFunction.params.length.min(3) else 0
+    if nRegParams > 0 then
+      emitAddImm(7, 7, nRegParams * 8)
     emit("  jalr r0, r6")
 
   // Break/continue label stacks
@@ -710,36 +719,51 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit(s"  movi r1, $name") // r1 = address of function
 
       case TCall(name, args, _) =>
-        // Push stack args (args 1+) right-to-left so arg[1] is at lowest addr
-        for arg <- args.drop(1).reverse do
+        // ABI: args 0-2 in r1-r3, args 3+ on stack (right-to-left)
+        // r4 is reserved for the call address (movi r4, name)
+        val nRegArgs = args.length.min(3)
+        val stackArgs = args.drop(3)
+        // Push stack args (3+) right-to-left
+        for arg <- stackArgs.reverse do
           genExpr(arg)
           emit("  pshd r1")
-        // First arg (if any) goes in r1
-        if args.nonEmpty then genExpr(args.head)
+        // Evaluate register args in reverse, push as temporaries
+        for arg <- args.take(nRegArgs).reverse do
+          genExpr(arg)
+          emit("  pshd r1")
+        // Pop into r1-rN
+        for i <- 0 until nRegArgs do
+          emit(s"  popd r${i + 1}")
         // Call
         emit(s"  movi r4, $name")
         emit("  jalr r6, r4")
         // Clean up stack args
-        if args.length > 1 then
-          val stackArgBytes = (args.length - 1) * 8
+        if stackArgs.nonEmpty then
+          val stackArgBytes = stackArgs.length * 8
           emitAddImm(7, 7, stackArgBytes)
 
       case TIndirectCall(callee, args, _) =>
-        // Push stack args (args 1+) right-to-left
-        for arg <- args.drop(1).reverse do
+        // ABI: args 0-2 in r1-r3, args 3+ on stack
+        val nRegArgs = args.length.min(3)
+        val stackArgs = args.drop(3)
+        for arg <- stackArgs.reverse do
           genExpr(arg)
           emit("  pshd r1")
-        // First arg (if any) goes in r1
-        if args.nonEmpty then genExpr(args.head)
-        // Save r1 (first arg), load function pointer into r4, restore r1
-        if args.nonEmpty then emit("  pshd r1")
-        genExpr(callee)          // r1 = function pointer
-        emit("  mov r4, r1")     // r4 = function address
-        if args.nonEmpty then emit("  popd r1")
+        // Evaluate register args in reverse, push as temporaries
+        for arg <- args.take(nRegArgs).reverse do
+          genExpr(arg)
+          emit("  pshd r1")
+        // Evaluate callee (function pointer) — push to save
+        genExpr(callee)
+        emit("  pshd r1")
+        // Pop callee into r4, then pop register args into r1-rN
+        emit("  popd r4")
+        for i <- 0 until nRegArgs do
+          emit(s"  popd r${i + 1}")
         emit("  jalr r6, r4")
         // Clean up stack args
-        if args.length > 1 then
-          val stackArgBytes = (args.length - 1) * 8
+        if stackArgs.nonEmpty then
+          val stackArgBytes = stackArgs.length * 8
           emitAddImm(7, 7, stackArgBytes)
 
       case TAddrOf(name, _) =>
