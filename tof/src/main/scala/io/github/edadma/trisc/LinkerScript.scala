@@ -5,11 +5,7 @@ import scala.util.parsing.combinator.RegexParsers
 
 case class MemoryRegion(name: String, base: Long, size: Long)
 
-enum SectionPlacement:
-  case At(address: Long)
-  case After(sectionName: String)
-
-case class SectionDef(name: String, placement: SectionPlacement)
+case class SectionDef(name: String, address: Option[Long] = None)
 
 enum SymbolValue:
   case Absolute(address: Long)
@@ -53,13 +49,9 @@ object LinkerScriptParser extends RegexParsers:
   private def memoryBlock: Parser[Seq[MemoryRegion]] =
     ws ~> "MEMORY" ~> nl ~> rep(memoryRegion)
 
-  private def sectionPlacement: Parser[SectionPlacement] =
-    "AFTER" ~> ws1 ~> ident ^^ SectionPlacement.After.apply |
-      num ^^ SectionPlacement.At.apply
-
   private def sectionDef: Parser[SectionDef] =
-    ws1 ~> ident ~ (ws ~> ":" ~> ws ~> sectionPlacement) <~ (comment | nl) ^^ {
-      case name ~ placement => SectionDef(name, placement)
+    ws1 ~> ident ~ opt(ws ~> ":" ~> ws ~> num) <~ (comment | nl) ^^ {
+      case name ~ addr => SectionDef(name, addr)
     }
 
   private def sectionsBlock: Parser[Seq[SectionDef]] =

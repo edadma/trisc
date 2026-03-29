@@ -49,49 +49,37 @@ object Linker:
         inputSegments += InputSegment(seg.name, seg.org, flattenChunks(seg.chunks), seg.symbols, seg.externs, seg.relocs, seg.explicitOrg)
 
     // Phase 2: place segments using linker script or sequential placement
-    val sectionDefs = script.sections.map(s => s.name -> s).toMap
     val placed = new ArrayBuffer[PlacedSegment]
     val placedByName = new mutable.LinkedHashMap[String, PlacedSegment]
     var nextAddr = baseAddress
 
-    // If the script defines sections, place them in script order first,
-    // then place any remaining segments sequentially
     val scriptSectionNames = script.sections.map(_.name).toSet
 
-    // Track which script sections have had their first segment placed
-    val sectionPlaced = new mutable.HashSet[String]
-
-    // Resolve placement for a section
-    def resolveOrg(seg: InputSegment): Long =
-      sectionDefs.get(seg.name) match
-        case Some(SectionDef(_, SectionPlacement.At(addr))) if !sectionPlaced.contains(seg.name) => addr
-        case Some(SectionDef(_, SectionPlacement.At(_))) => nextAddr
-        case Some(SectionDef(_, SectionPlacement.After(ref))) =>
-          placedByName.get(ref) match
-            case Some(prev) => prev.org + prev.data.length
-            case None => throw LinkerError(s"section '${seg.name}' placed AFTER '$ref', but '$ref' has not been placed yet")
-        case None =>
-          if seg.explicitOrg then seg.originalOrg
-          else nextAddr
-
-    // Place segments that have script definitions first (in script order)
+    // Place segments in script order. All script sections exist (even if empty).
     for secDef <- script.sections do
+      // Set base address for this section
+      val sectionBase = secDef.address.getOrElse(nextAddr)
+      nextAddr = sectionBase
+
+      // Find all input segments matching this section name
       val matching = inputSegments.filter(_.name == secDef.name)
       for seg <- matching do
-        val org = resolveOrg(seg)
-        sectionPlaced += seg.name
-        val ps = PlacedSegment(seg.name, org, seg.data, seg.symbols, seg.externs, seg.relocs)
+        val ps = PlacedSegment(seg.name, nextAddr, seg.data, seg.symbols, seg.externs, seg.relocs)
         placed += ps
         placedByName(seg.name) = ps
-        nextAddr = (org + seg.data.length + 7) & ~7L // 8-byte align for next segment
+        nextAddr = (nextAddr + seg.data.length + 7) & ~7L
+
+      // Ensure the section exists in placedByName even if empty
+      if !placedByName.contains(secDef.name) then
+        placedByName(secDef.name) = PlacedSegment(secDef.name, sectionBase, ArrayBuffer.empty, Nil, Nil, Nil)
 
     // Place remaining segments not in the script
     for seg <- inputSegments if !scriptSectionNames.contains(seg.name) do
-      val org = resolveOrg(seg)
+      val org = if seg.explicitOrg then seg.originalOrg else nextAddr
       val ps = PlacedSegment(seg.name, org, seg.data, seg.symbols, seg.externs, seg.relocs)
       placed += ps
       placedByName(seg.name) = ps
-      nextAddr = (org + seg.data.length + 7) & ~7L // 8-byte align for next segment
+      nextAddr = (org + seg.data.length + 7) & ~7L
 
     // Phase 3: build global symbol table
     val globalSymbols = new mutable.LinkedHashMap[String, (Long, TOFSymbol)]

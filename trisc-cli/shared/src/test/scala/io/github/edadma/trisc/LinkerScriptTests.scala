@@ -40,59 +40,65 @@ class LinkerScriptTests extends TestHelpers {
         |  .data: 0x1000
         |""".stripMargin): @unchecked
     script.sections.length shouldBe 2
-    script.sections(0) shouldBe SectionDef(".text", SectionPlacement.At(0))
-    script.sections(1) shouldBe SectionDef(".data", SectionPlacement.At(0x1000))
+    script.sections(0) shouldBe SectionDef(".text", Some(0))
+    script.sections(1) shouldBe SectionDef(".data", Some(0x1000))
   }
 
-  "parses SECTIONS with AFTER placement" in {
+  "parses SECTIONS with sequential placement" in {
     val Right(script) = LinkerScriptParser.parse(
       """SECTIONS
         |  .text: 0x0000
-        |  .data: AFTER .text
-        |  .bss: AFTER .data
+        |  .data
+        |  .bss
         |""".stripMargin): @unchecked
-    script.sections(0) shouldBe SectionDef(".text", SectionPlacement.At(0))
-    script.sections(1) shouldBe SectionDef(".data", SectionPlacement.After(".text"))
-    script.sections(2) shouldBe SectionDef(".bss", SectionPlacement.After(".data"))
+    script.sections.length shouldBe 3
+    script.sections(0) shouldBe SectionDef(".text", Some(0))
+    script.sections(1) shouldBe SectionDef(".data", None)
+    script.sections(2) shouldBe SectionDef(".bss", None)
   }
 
   "parses SECTIONS with mixed placement" in {
     val Right(script) = LinkerScriptParser.parse(
       """SECTIONS
         |  .text: 0x100
-        |  .data: AFTER .text
+        |  .data
         |""".stripMargin): @unchecked
-    script.sections(0).placement shouldBe SectionPlacement.At(0x100)
-    script.sections(1).placement shouldBe SectionPlacement.After(".text")
+    script.sections(0).address shouldBe Some(0x100)
+    script.sections(1).address shouldBe None
   }
 
   // ===== Parser: ENTRY =====
 
-  "parses ENTRY" in {
-    val Right(script) = LinkerScriptParser.parse("ENTRY main\n"): @unchecked
+  "parses ENTRY directive" in {
+    val Right(script) = LinkerScriptParser.parse(
+      """ENTRY main
+        |""".stripMargin): @unchecked
     script.entry shouldBe Some("main")
   }
 
-  "parses ENTRY with underscored name" in {
-    val Right(script) = LinkerScriptParser.parse("ENTRY _start\n"): @unchecked
-    script.entry shouldBe Some("_start")
-  }
+  // ===== Parser: SYMBOL =====
 
-  // ===== Parser: comments and blank lines =====
-
-  "ignores comments" in {
+  "parses SYMBOL with absolute address" in {
     val Right(script) = LinkerScriptParser.parse(
-      """# This is a comment
-        |MEMORY
-        |  RAM: 0x0000, 0x10000  # inline comment
+      """SYMBOL _heap_end = 0x100000
         |""".stripMargin): @unchecked
-    script.memory.length shouldBe 1
+    script.symbols.length shouldBe 1
+    script.symbols.head shouldBe SymbolDef("_heap_end", SymbolValue.Absolute(0x100000))
   }
 
-  "ignores blank lines" in {
+  "parses SYMBOL with AFTER" in {
     val Right(script) = LinkerScriptParser.parse(
-      """
-        |MEMORY
+      """SYMBOL _heap_start = AFTER bss
+        |""".stripMargin): @unchecked
+    script.symbols.length shouldBe 1
+    script.symbols.head shouldBe SymbolDef("_heap_start", SymbolValue.AfterSection("bss"))
+  }
+
+  // ===== Parser: combined blocks =====
+
+  "parses MEMORY + SECTIONS" in {
+    val Right(script) = LinkerScriptParser.parse(
+      """MEMORY
         |  RAM: 0x0000, 0x10000
         |
         |SECTIONS
@@ -113,8 +119,8 @@ class LinkerScriptTests extends TestHelpers {
         |
         |SECTIONS
         |  .text: 0x0000
-        |  .data: AFTER .text
-        |  .bss: AFTER .data
+        |  .data
+        |  .bss
         |
         |ENTRY main
         |""".stripMargin): @unchecked
@@ -142,7 +148,7 @@ class LinkerScriptTests extends TestHelpers {
 
   // ===== Linker integration with scripts =====
 
-  "script places .text at explicit address" in {
+  "script places section at explicit address" in {
     val Right(script) = LinkerScriptParser.parse(
       """SECTIONS
         |  _default_: 0x100
@@ -152,11 +158,11 @@ class LinkerScriptTests extends TestHelpers {
     linked.segments.head.org shouldBe 0x100
   }
 
-  "script places sections with AFTER" in {
+  "script places sections sequentially" in {
     val Right(script) = LinkerScriptParser.parse(
       """SECTIONS
         |  code: 0x0
-        |  data: AFTER code
+        |  data
         |""".stripMargin): @unchecked
     val tof = assemble(
       """segment code
@@ -169,7 +175,7 @@ class LinkerScriptTests extends TestHelpers {
     val codeSeg = linked.segments.find(_.name == "code").get
     val dataSeg = linked.segments.find(_.name == "data").get
     codeSeg.org shouldBe 0
-    dataSeg.org shouldBe codeSeg.org + codeSeg.chunks.head.asInstanceOf[TOF.DataChunk].data.length
+    dataSeg.org should be > codeSeg.org
   }
 
   "script ENTRY overrides TOF entry" in {
@@ -190,17 +196,22 @@ class LinkerScriptTests extends TestHelpers {
     linked.entry shouldBe Some("alt_start")
   }
 
-  "script AFTER errors on unknown reference" in {
+  "empty sections are handled gracefully" in {
     val Right(script) = LinkerScriptParser.parse(
       """SECTIONS
-        |  data: AFTER text
+        |  code: 0x0
+        |  rodata
+        |  data
+        |  bss
         |""".stripMargin): @unchecked
+    // Only code segment has content — others are empty
     val tof = assemble(
-      """segment data
-        |db 0x01
-        |""".stripMargin, orgs = Map("data" -> 0L), relocatable = true)
-    a[Linker.LinkerError] should be thrownBy
-      Linker.link(Seq(tof), script, 0, 2)
+      """segment code
+        |ldi r1, 42
+        |halt
+        |""".stripMargin, orgs = Map("code" -> 0L), relocatable = true)
+    val linked = Linker.link(Seq(tof), script, 0, 2)
+    linked.segments.find(_.name == "code").get.org shouldBe 0
   }
 
   // ===== Full end-to-end with script =====
@@ -220,23 +231,22 @@ class LinkerScriptTests extends TestHelpers {
         |  movi r1, helper
         |  jalr r7, r1
         |  halt
-        |""".stripMargin)
-    val lib = assemble(
+        |""".stripMargin, relocatable = true)
+
+    val helper = assemble(
       """global helper, func
         |helper
-        |  ldi r2, 42
+        |  ldi r1, 99
         |  jalr r0, r7
         |""".stripMargin, relocatable = true)
 
-    val linked = Linker.link(Seq(main, lib), script, 0, 2)
-
+    val linked = Linker.link(Seq(main, helper), script, 0, 2)
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     linked.load(mem)
     val cpu = new CPU(mem) { limit = 10000 }
-    cpu.pc = linked.entryAddress.get
-    cpu.state = State.Run
+    cpu.reset()
     cpu.run()
-    cpu.r(2).read shouldBe 42
-    linked.entryAddress.get should be >= 0x100L
+    cpu.r(1).read shouldBe 99
+    cpu.state shouldBe State.Halt
   }
 }

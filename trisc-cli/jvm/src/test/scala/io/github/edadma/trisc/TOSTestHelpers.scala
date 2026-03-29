@@ -22,6 +22,10 @@ object TOSTestData {
   lazy val mailboxSysl: String = readLsysl("tos/mailbox.lsysl")
   lazy val rbtreeSysl: String = readLsysl("tos/rbtree.lsysl")
   lazy val timerSysl: String = readLsysl("tos/timer.lsysl")
+  lazy val linkerScript: LinkerScript =
+    LinkerScriptParser.parse(scala.io.Source.fromFile("tos/linker.ld").mkString) match
+      case Right(s) => s
+      case Left(e) => throw new RuntimeException(s"Failed to parse linker script: $e")
   lazy val tasksSysl: String = readLsysl("examples/tos-demo/tasks.lsysl")
   lazy val mainSysl: String = readLsysl("examples/tos-demo/main.lsysl")
 
