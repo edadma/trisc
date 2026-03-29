@@ -115,6 +115,7 @@ object EmulatorGui:
       runBtn.addActionListener(_ => {
         runBtn.setEnabled(false)
         stepBtn.setEnabled(false)
+        frame.requestFocusInWindow()
         new Thread(() => {
           cpu.run()
           SwingUtilities.invokeLater(() => {

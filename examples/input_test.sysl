@@ -12,25 +12,25 @@ main()
     putstr("Input test - press keys, move mouse\n")
 
     while true
-        if *KB_STATUS & 1
+        if (*KB_STATUS & 1) != 0
             val sc = *KB_SCANCODE
             val flags = *KB_FLAGS
             val mods = *KB_MODIFIERS
             putstr("KB: sc=")
             puthex(sc)
-            if flags & 1
+            if (flags & 1) != 0
                 putstr(" DN")
             else
                 putstr(" UP")
-            if mods & 1
+            if (mods & 1) != 0
                 putstr(" SH")
-            if mods & 2
+            if (mods & 2) != 0
                 putstr(" CT")
-            if mods & 4
+            if (mods & 4) != 0
                 putstr(" AL")
             putchar(10)
 
-        if *MS_STATUS & 1
+        if (*MS_STATUS & 1) != 0
             val buttons = *MS_BUTTONS
             val x = *MS_X
             val y = *MS_Y
@@ -43,7 +43,7 @@ main()
             putchar(10)
 
 putstr(s: *i8)
-    while *s
+    while *s != 0
         putchar(*s)
         s = s + 1
 

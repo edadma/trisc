@@ -6,7 +6,7 @@ object Runtime:
   val stdoutAddress = 0x100000L // 1MB — devices start here, RAM below
   val keyboardAddress = 0x100004L
   val displayCtrlAddress = 0x100008L
-  val blitterAddress = 0x10000CL
+  val blitterAddress = 0x10000EL
   val timerAddress = 0x100020L
   val intcAddress = 0x100026L
   val mouseAddress = 0x10002AL
