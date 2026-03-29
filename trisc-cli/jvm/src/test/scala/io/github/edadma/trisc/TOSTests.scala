@@ -14,6 +14,12 @@ class TOSTests extends AnyFreeSpec with Matchers {
   val kernelSysl = readLsysl("tos/kernel.lsysl")
   val servicesSysl = readLsysl("tos/services.lsysl")
   val semaphoreSysl = readLsysl("tos/semaphore.lsysl")
+  val mutexSysl = readLsysl("tos/mutex.lsysl")
+  val condvarSysl = readLsysl("tos/condvar.lsysl")
+  val barrierSysl = readLsysl("tos/barrier.lsysl")
+  val rwlockSysl = readLsysl("tos/rwlock.lsysl")
+  val channelSysl = readLsysl("tos/channel.lsysl")
+  val mailboxSysl = readLsysl("tos/mailbox.lsysl")
   val tasksSysl = readLsysl("examples/tos-demo/tasks.lsysl")
   val mainSysl = readLsysl("examples/tos-demo/main.lsysl")
 
@@ -190,12 +196,19 @@ class TOSTests extends AnyFreeSpec with Matchers {
     val bootTof = assemble(bootAsm, relocatable = true)
 
     // Compile kernel + user sources together
-    val allSources = Map("kernel" -> kernelSysl, "services" -> servicesSysl, "semaphore" -> semaphoreSysl) ++ userSources
+    val allSources = Map(
+      "kernel" -> kernelSysl, "services" -> servicesSysl, "semaphore" -> semaphoreSysl,
+      "mutex" -> mutexSysl, "condvar" -> condvarSysl, "barrier" -> barrierSysl,
+      "rwlock" -> rwlockSysl, "channel" -> channelSysl, "mailbox" -> mailboxSysl,
+    ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
     val codegen = new SyslTriscCodegen
     val tofs = for unit <- result.units yield
       val asm = codegen.generate(unit.typed)
+      if unit.name == "kernel" then
+        val lines = asm.split('\n').take(50)
+        info(s"Kernel asm first 50 lines:\n${lines.mkString("\n")}")
       assemble(asm, relocatable = true)
     val syslTof = Linker.link(tofs, relocatable = true)
 
@@ -220,7 +233,7 @@ class TOSTests extends AnyFreeSpec with Matchers {
     (cpu, output.toString)
 
   "TOS: putc syscall prints character" in {
-    val (_, output) = runTOS(Map(
+    val (cpu, output) = runTOS(Map(
       "app" ->
         """import "kernel"
           |import "services"
@@ -535,5 +548,591 @@ class TOSTests extends AnyFreeSpec with Matchers {
     val pIdx = output.indexOf('P')
     val gIdx = output.indexOf('G')
     pIdx should be < gIdx
+  }
+
+  // ===== Mutex tests =====
+
+  "TOS: mutex basic lock/unlock" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "mutex"
+          |
+          |var mtx: i64 = 0
+          |
+          |kernel_main() -> int
+          |    mutex_init(&mtx)
+          |    create_thread(task, 0x6000, 0x5000, "task")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task()
+          |    mutex_lock(&mtx)
+          |    putc(65)
+          |    mutex_unlock(&mtx)
+          |    putc(66)
+          |""".stripMargin
+    ), maxCycles = 200000)
+
+    output should include("A")
+    output should include("B")
+  }
+
+  "TOS: mutex_trylock fails when locked" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "mutex"
+          |
+          |var mtx: i64 = 0
+          |
+          |kernel_main() -> int
+          |    mutex_init(&mtx)
+          |    create_thread(holder, 0x6000, 0x5000, "holder")
+          |    create_thread(trier, 0x8000, 0x7000, "trier")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |holder()
+          |    mutex_lock(&mtx)
+          |    putc(72)
+          |    sleep(50)
+          |    mutex_unlock(&mtx)
+          |
+          |trier()
+          |    sleep(10)
+          |    val got = mutex_trylock(&mtx)
+          |    if got == 0
+          |        putc(78)
+          |    else
+          |        putc(89)
+          |""".stripMargin
+    ))
+
+    output should include("H")
+    output should include("N")
+  }
+
+  // ===== Condition variable tests =====
+
+  "TOS: condvar signal wakes one waiter" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "mutex"
+          |import "condvar"
+          |
+          |var mtx: i64 = 0
+          |var cv: Condvar
+          |var ready = 0
+          |
+          |kernel_main() -> int
+          |    mutex_init(&mtx)
+          |    cond_init(&cv)
+          |    create_thread(waiter, 0x6000, 0x5000, "waiter")
+          |    create_thread(signaler, 0x8000, 0x7000, "signaler")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |waiter()
+          |    mutex_lock(&mtx)
+          |    while ready == 0
+          |        cond_wait(&cv, &mtx)
+          |    mutex_unlock(&mtx)
+          |    putc(87)
+          |
+          |signaler()
+          |    sleep(30)
+          |    mutex_lock(&mtx)
+          |    ready = 1
+          |    cond_signal(&cv)
+          |    mutex_unlock(&mtx)
+          |    putc(83)
+          |""".stripMargin
+    ))
+
+    output should include("S")
+    output should include("W")
+  }
+
+  "TOS: condvar broadcast wakes all waiters" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "mutex"
+          |import "condvar"
+          |
+          |var mtx: i64 = 0
+          |var cv: Condvar
+          |var go = 0
+          |
+          |kernel_main() -> int
+          |    mutex_init(&mtx)
+          |    cond_init(&cv)
+          |    create_thread(waiter_a, 0x6000, 0x5000, "a")
+          |    create_thread(waiter_b, 0x8000, 0x7000, "b")
+          |    create_thread(broadcaster, 0xA000, 0x9000, "bc")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |waiter_a()
+          |    mutex_lock(&mtx)
+          |    while go == 0
+          |        cond_wait(&cv, &mtx)
+          |    mutex_unlock(&mtx)
+          |    putc(65)
+          |
+          |waiter_b()
+          |    mutex_lock(&mtx)
+          |    while go == 0
+          |        cond_wait(&cv, &mtx)
+          |    mutex_unlock(&mtx)
+          |    putc(66)
+          |
+          |broadcaster()
+          |    sleep(30)
+          |    mutex_lock(&mtx)
+          |    go = 1
+          |    cond_broadcast(&cv)
+          |    mutex_unlock(&mtx)
+          |""".stripMargin
+    ))
+
+    output should include("A")
+    output should include("B")
+  }
+
+  // ===== Barrier tests =====
+
+  "TOS: barrier synchronizes three threads" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "barrier"
+          |
+          |var bar: Barrier
+          |
+          |kernel_main() -> int
+          |    barrier_init(&bar, 3)
+          |    create_thread(task_a, 0x6000, 0x5000, "a")
+          |    create_thread(task_b, 0x8000, 0x7000, "b")
+          |    create_thread(task_c, 0xA000, 0x9000, "c")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task_a()
+          |    putc(49)
+          |    barrier_wait(&bar)
+          |    putc(65)
+          |
+          |task_b()
+          |    sleep(20)
+          |    putc(50)
+          |    barrier_wait(&bar)
+          |    putc(66)
+          |
+          |task_c()
+          |    sleep(40)
+          |    putc(51)
+          |    barrier_wait(&bar)
+          |    putc(67)
+          |""".stripMargin
+    ))
+
+    // All three must print their number before any prints their letter
+    // 1, 2, 3 all appear before A, B, C
+    val numbers = "123".map(c => output.indexOf(c))
+    val letters = "ABC".map(c => output.indexOf(c))
+    numbers.max should be < letters.min
+  }
+
+  // ===== Reader-writer lock tests =====
+
+  "TOS: rwlock allows concurrent readers" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "rwlock"
+          |
+          |var rw: RWLock
+          |
+          |kernel_main() -> int
+          |    rwlock_init(&rw)
+          |    create_thread(reader1, 0x6000, 0x5000, "r1")
+          |    create_thread(reader2, 0x8000, 0x7000, "r2")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |reader1()
+          |    read_lock(&rw)
+          |    putc(65)
+          |    sleep(20)
+          |    read_unlock(&rw)
+          |    putc(88)
+          |
+          |reader2()
+          |    read_lock(&rw)
+          |    putc(66)
+          |    sleep(20)
+          |    read_unlock(&rw)
+          |    putc(89)
+          |""".stripMargin
+    ))
+
+    // Both readers should acquire the lock (A and B both appear)
+    output should include("A")
+    output should include("B")
+    output should include("X")
+    output should include("Y")
+  }
+
+  "TOS: rwlock writer excludes readers" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "rwlock"
+          |
+          |var rw: RWLock
+          |
+          |kernel_main() -> int
+          |    rwlock_init(&rw)
+          |    create_thread(writer, 0x6000, 0x5000, "w")
+          |    create_thread(reader, 0x8000, 0x7000, "r")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |writer()
+          |    write_lock(&rw)
+          |    putc(91)
+          |    sleep(30)
+          |    putc(93)
+          |    write_unlock(&rw)
+          |
+          |reader()
+          |    sleep(10)
+          |    read_lock(&rw)
+          |    putc(82)
+          |    read_unlock(&rw)
+          |""".stripMargin
+    ))
+
+    // Writer prints [ and ], reader prints R
+    // R must appear after ] (writer holds lock during sleep)
+    output should include("[")
+    output should include("]")
+    output should include("R")
+    output.indexOf('R') should be > output.indexOf(']')
+  }
+
+  // ===== Channel tests =====
+
+  "TOS: channel send and receive" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "channel"
+          |
+          |var ch: Channel
+          |var buf: [4]i64
+          |
+          |kernel_main() -> int
+          |    chan_init(&ch, &buf[0], 4)
+          |    create_thread(sender, 0x6000, 0x5000, "s")
+          |    create_thread(receiver, 0x8000, 0x7000, "r")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |sender()
+          |    chan_send(&ch, 72)
+          |    chan_send(&ch, 105)
+          |    chan_send(&ch, 10)
+          |
+          |receiver()
+          |    putc(chan_recv(&ch))
+          |    putc(chan_recv(&ch))
+          |    putc(chan_recv(&ch))
+          |""".stripMargin
+    ))
+
+    output should startWith("Hi\n")
+  }
+
+  "TOS: channel blocks sender when full" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "channel"
+          |
+          |var ch: Channel
+          |var buf: [2]i64
+          |
+          |kernel_main() -> int
+          |    chan_init(&ch, &buf[0], 2)
+          |    create_thread(sender, 0x6000, 0x5000, "s")
+          |    create_thread(receiver, 0x8000, 0x7000, "r")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |sender()
+          |    chan_send(&ch, 65)
+          |    chan_send(&ch, 66)
+          |    chan_send(&ch, 67)
+          |    putc(83)
+          |
+          |receiver()
+          |    sleep(30)
+          |    putc(chan_recv(&ch))
+          |    putc(chan_recv(&ch))
+          |    putc(chan_recv(&ch))
+          |""".stripMargin
+    ))
+
+    // Sender blocks on 3rd send until receiver drains — all values arrive
+    output should include("A")
+    output should include("B")
+    output should include("C")
+    output should include("S")
+  }
+
+  // ===== Mailbox tests =====
+
+  "TOS: mailbox send and receive" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "mailbox"
+          |
+          |var mb: Mailbox
+          |
+          |kernel_main() -> int
+          |    mbox_init(&mb)
+          |    create_thread(sender, 0x6000, 0x5000, "s")
+          |    create_thread(receiver, 0x8000, 0x7000, "r")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |sender()
+          |    mbox_send(&mb, 72)
+          |    mbox_send(&mb, 105)
+          |
+          |receiver()
+          |    putc(mbox_recv(&mb))
+          |    putc(mbox_recv(&mb))
+          |    putc(10)
+          |""".stripMargin
+    ))
+
+    output should startWith("Hi\n")
+  }
+
+  "TOS: mailbox blocks sender until receiver drains" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "mailbox"
+          |
+          |var mb: Mailbox
+          |
+          |kernel_main() -> int
+          |    mbox_init(&mb)
+          |    create_thread(sender, 0x6000, 0x5000, "s")
+          |    create_thread(receiver, 0x8000, 0x7000, "r")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |sender()
+          |    mbox_send(&mb, 49)
+          |    putc(65)
+          |    mbox_send(&mb, 50)
+          |    putc(66)
+          |
+          |receiver()
+          |    sleep(20)
+          |    putc(mbox_recv(&mb))
+          |    putc(mbox_recv(&mb))
+          |""".stripMargin
+    ))
+
+    // Sender sends 1, prints A, sends 2 (blocks until recv), prints B
+    // Receiver wakes, receives 1, receives 2
+    output should include("A")
+    output should include("B")
+    output should include("1")
+    output should include("2")
+  }
+
+  // ===== Thread join tests =====
+
+  "TOS: thread join waits for completion" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(worker, 0x6000, 0x5000, "worker")
+          |    create_thread(joiner, 0x8000, 0x7000, "joiner")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |worker()
+          |    sleep(30)
+          |    putc(87)
+          |
+          |joiner()
+          |    join(0)
+          |    putc(74)
+          |""".stripMargin
+    ))
+
+    // W = worker done, J = joiner proceeds after join
+    // W must appear before J
+    output should include("W")
+    output should include("J")
+    output.indexOf('W') should be < output.indexOf('J')
+  }
+
+  "TOS: join on already-terminated thread returns immediately" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(fast, 0x6000, 0x5000, "fast")
+          |    create_thread(slow, 0x8000, 0x7000, "slow")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |fast()
+          |    putc(70)
+          |
+          |slow()
+          |    sleep(50)
+          |    join(0)
+          |    putc(83)
+          |""".stripMargin
+    ))
+
+    // F prints immediately, S prints after join (which should return immediately since fast is done)
+    output should include("F")
+    output should include("S")
+  }
+
+  // ===== Priority scheduling tests =====
+
+  "TOS: higher priority thread runs first" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread_pri(low_task, 0x6000, 0x5000, "low", 1)
+          |    create_thread_pri(high_task, 0x8000, 0x7000, "high", 10)
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |low_task()
+          |    putc(76)
+          |
+          |high_task()
+          |    putc(72)
+          |""".stripMargin
+    ))
+
+    // H (high priority) should print before L (low priority)
+    output should include("H")
+    output should include("L")
+    output.indexOf('H') should be < output.indexOf('L')
+  }
+
+  "TOS: equal priority threads round-robin" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread_pri(task_a, 0x6000, 0x5000, "a", 5)
+          |    create_thread_pri(task_b, 0x8000, 0x7000, "b", 5)
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task_a()
+          |    var i = 0
+          |    while i < 3
+          |        putc(65)
+          |        sleep(10)
+          |        i += 1
+          |
+          |task_b()
+          |    var i = 0
+          |    while i < 3
+          |        putc(66)
+          |        sleep(10)
+          |        i += 1
+          |""".stripMargin
+    ))
+
+    // Both should run and interleave
+    output.count(_ == 'A') shouldBe 3
+    output.count(_ == 'B') shouldBe 3
   }
 }

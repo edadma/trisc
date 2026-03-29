@@ -40,7 +40,27 @@ enum SyslType:
     case DoubleType => 8
     case StringType => 12        // ptr(8) + len(4)
     case SliceType(_) => 16      // ptr(8) + len(4) + cap(4)
-    case StructType(_, fields) => fields.map(_._2.sizeOf).sum
+    case st @ StructType(_, fields) =>
+      var offset = 0L
+      for (_, typ) <- fields do
+        val align = typ.alignOf
+        offset = ((offset + align - 1) / align) * align
+        offset += typ.sizeOf
+      // Pad to struct alignment for array stride
+      val structAlign = st.alignOf
+      ((offset + structAlign - 1) / structAlign) * structAlign
+
+  def alignOf: Long = this match
+    case IntType(w) => (w / 8).toLong.min(8)
+    case BoolType => 1
+    case VoidType => 1
+    case PtrType(_) => 8
+    case FuncType(_, _) => 8
+    case ArrayType(elem, _) => elem.alignOf
+    case DoubleType => 8
+    case StringType => 8
+    case SliceType(_) => 8
+    case StructType(_, fields) => if fields.isEmpty then 1 else fields.map(_._2.alignOf).max
 
   // Width in bits (for integer types)
   def bitWidth: Int = this match

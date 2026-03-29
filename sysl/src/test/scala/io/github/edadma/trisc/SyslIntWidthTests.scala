@@ -167,7 +167,7 @@ class SyslIntWidthTests extends SyslTestHelpers {
         |    d: i64
         |
         |main() -> int = sizeof(Mixed)
-        |""".stripMargin) shouldBe 15  // 1 + 2 + 4 + 8
+        |""".stripMargin) shouldBe 16  // 1 + (1 pad) + 2 + 4 + 8, aligned to 8
   }
 
   "sizeof struct all i8" in {

@@ -23,7 +23,6 @@ class SyslTriscCodegen(addresses: Int = 4):
     out ++= meta.toAsmGlobals
 
     // Emit ALL globals first (with alignment), then ALL functions
-    var emittedGlobalAlign = false
     // Pass 1: emit globals
     for decl <- program.decls do
       decl match
@@ -32,9 +31,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         case _: TStructDecl => // type-only, no code to emit
         case _: TFunDecl => // skip — emitted in Pass 2
         case TVarDecl(name, typ, init, _) =>
-          if !emittedGlobalAlign then
-            emit("  align 8")
-            emittedGlobalAlign = true
+          val align = stackAlign(typ)
+          if align > 1 then emit(s"  align $align")
           globals(name) = typ
           emit(s"# global: $name")
           emit(s"$name")
@@ -868,7 +866,16 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   // Compute byte offset of field at given index within a struct type
   private def fieldOffset(structType: SyslType.StructType, fieldIndex: Int): Int =
-    structType.fields.take(fieldIndex).map(_._2.sizeOf.toInt).sum
+    var offset = 0
+    for (_, typ) <- structType.fields.take(fieldIndex) do
+      val align = stackAlign(typ)
+      offset = ((offset + align - 1) / align) * align
+      offset += typ.sizeOf.toInt
+    // Align the target field itself
+    if fieldIndex < structType.fields.length then
+      val align = stackAlign(structType.fields(fieldIndex)._2)
+      offset = ((offset + align - 1) / align) * align
+    offset
 
   // Emit code to compute the address of a struct from a TFieldAccess obj expression.
   // The analyzer wraps pointer-to-struct access in TDeref, so we unwrap it to get the address.

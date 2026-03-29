@@ -1,0 +1,45 @@
+@main
+TOS Mailboxes
+
+Single-slot message passing between threads.
+Sending blocks until the mailbox is empty; receiving blocks
+until a message is available.
+@
+
+  import "semaphore"
+
+  struct Mailbox
+      value: i64
+      full: i64
+      empty: i64
+
+  mbox_full(m: int) -> *i64
+      m + 8
+
+  mbox_empty(m: int) -> *i64
+      m + 16
+
+@api mbox_init(m) — Initialize an empty mailbox.
+
+  mbox_init(m: *Mailbox)
+      m.value = 0
+      val addr: int = m
+      sem_init(mbox_full(addr), 0)
+      sem_init(mbox_empty(addr), 1)
+
+@api mbox_send(m, value) — Send a value, blocking if the mailbox is full.
+
+  mbox_send(m: *Mailbox, value: i64)
+      val addr: int = m
+      sem_wait(mbox_empty(addr))
+      m.value = value
+      sem_post(mbox_full(addr))
+
+@api mbox_recv(m) -> i64 — Receive a value, blocking if the mailbox is empty.
+
+  mbox_recv(m: *Mailbox) -> i64
+      val addr: int = m
+      sem_wait(mbox_full(addr))
+      val v = m.value
+      sem_post(mbox_empty(addr))
+      v

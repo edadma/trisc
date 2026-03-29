@@ -168,6 +168,10 @@ trap_handler
   beq r1, r3, .sys_yield       ; 2 = yield
   ldi r3, 3
   beq r1, r3, .sys_exit        ; 3 = exit
+  ldi r3, 4
+  beq r1, r3, .sys_join        ; 4 = join
+  ldi r3, 5
+  beq r1, r3, .sys_thread_id   ; 5 = thread_id
 
   ; Unknown syscall — halt (indicates a bug)
   halt
@@ -199,6 +203,32 @@ extern terminate_current
   movi r4, terminate_current
   jalr r6, r4                   ; marks current thread TERMINATED
   bra do_schedule
+
+; --- join: wait for thread r2 to terminate ---
+extern join_current
+
+.sys_join
+  mov  r1, r2                   ; r1 = target thread id
+  movi r4, join_current
+  jalr r6, r4                   ; marks current thread JOINING
+  bra do_schedule
+
+; --- thread_id: return current thread index ---
+; (current_thread already declared extern above)
+
+.sys_thread_id
+  ; Return current_thread in r1 via saved context
+  ; Stack: [USP(+0), r6(+8), r5(+16), r4(+24), r3(+32), r2(+40), r1(+48)]
+  movi r3, current_thread
+  ldw  r1, r3, r0               ; r1 = current_thread
+  addi r3, r7, 48
+  std  r1, r3, r0               ; overwrite saved r1 with thread id
+  ; Restore context and return (no context switch needed)
+  popd r1
+  susp r1                       ; restore USP
+  popr r6                       ; restore r1-r6 (r1 now has thread id)
+  sti
+  rte
 
 
 ; ============================================================================

@@ -2,11 +2,12 @@
 TOS (Tiny OS) — Kernel
 
 OS primitives:
-  - Thread data structures (TCB)
+  - Thread data structures (TCB) with priority
   - Thread creation (building initial stack frames)
-  - Scheduler (round-robin with sleep support)
+  - Priority-based scheduler (highest priority first, round-robin within same priority)
   - sleep_current() — blocks current thread until wake time
   - terminate_current() — marks current thread as terminated
+  - thread_join() — wait for a thread to terminate
 
 All kernel services are accessed through trap 0 (syscall).
 The trap handler in boot.asm dispatches based on r1:
@@ -26,12 +27,21 @@ wakes a sleeping thread.
   val STATE_BLOCKED    = 2
   val STATE_TERMINATED = 3
 
+  val STATE_JOINING    = 4
+
+@tech
+Task struct field order matters: ssp must remain at offset 0
+because boot.asm accesses it directly when saving/restoring
+context. New fields are appended at the end.
+@
 
   struct Task
       ssp: int
       state: int
       wake_tick: int
       name: *byte
+      priority: int
+      join_target: int
 
 
   var tasks: [8]Task
@@ -41,7 +51,7 @@ wakes a sleeping thread.
 
   extern thread_exit()
 
-@api create_thread(entry_point, usp, ssp, name) — Register a new thread.
+@api create_thread(entry_point, usp, ssp, name) — Register a new thread with default priority (0).
 
 @tech
 Build an initial stack frame so the scheduler can context-switch
@@ -78,6 +88,47 @@ The frame must match the layout that boot.asm expects:
       t.state = STATE_READY
       t.wake_tick = 0
       t.name = name
+      t.priority = 0
+      t.join_target = -1
+      thread_count += 1
+
+@api create_thread_pri(entry_point, usp, ssp, name, priority) — Register a new thread with given priority.
+
+@tech
+Higher priority values run first. Threads with equal priority
+are scheduled round-robin.
+@
+
+  create_thread_pri(entry_point: int, usp: int, ssp: int, name: *byte, priority: int)
+      var sp = ssp
+
+      sp -= 8
+      *sp = 0                 // PSR
+      sp -= 8
+      *sp = entry_point       // PC
+      sp -= 8
+      *sp = 0                 // r1
+      sp -= 8
+      *sp = 0                 // r2
+      sp -= 8
+      *sp = 0                 // r3
+      sp -= 8
+      *sp = 0                 // r4
+      sp -= 8
+      *sp = 0                 // r5
+      sp -= 8
+      *sp = thread_exit       // r6 = return address (exit trampoline)
+      sp -= 8
+      *sp = usp               // USP
+
+      val idx = thread_count
+      var t: *Task = &tasks[idx]
+      t.ssp = sp
+      t.state = STATE_READY
+      t.wake_tick = 0
+      t.name = name
+      t.priority = priority
+      t.join_target = -1
       thread_count += 1
 
 @api sleep_current(nticks) — Block the current thread for N ticks.
@@ -89,11 +140,40 @@ The frame must match the layout that boot.asm expects:
 
 @api terminate_current() — Mark the current thread as terminated.
 
+@tech
+Also wakes any threads that are joining on this thread.
+@
+
   terminate_current()
       var cur: *Task = &tasks[current_thread]
       cur.state = STATE_TERMINATED
 
-@api schedule(current_ssp) -> int — Round-robin scheduler.
+      // Wake threads waiting to join on this thread
+      var i = 0
+      while i < thread_count
+          var t: *Task = &tasks[i]
+          if t.state == STATE_JOINING
+              if t.join_target == current_thread
+                  t.state = STATE_READY
+          i += 1
+
+@api join_current(target_id) — Block current thread until target thread terminates.
+
+@tech
+If the target is already terminated, returns immediately without
+blocking. Otherwise sets state to STATE_JOINING and records the
+target thread ID so terminate_current can wake us.
+@
+
+  join_current(target_id: int)
+      var target: *Task = &tasks[target_id]
+      if target.state == STATE_TERMINATED
+          return
+      var cur: *Task = &tasks[current_thread]
+      cur.state = STATE_JOINING
+      cur.join_target = target_id
+
+@api schedule(current_ssp) -> int — Priority-based scheduler.
 
 @tech
 Returns next thread's SSP, or 0 if no threads are READY.
@@ -103,7 +183,8 @@ Steps:
   1. Increment tick counter
   2. Save current thread's SSP (skip when idle)
   3. Wake any blocked threads whose sleep time has expired
-  4. Round-robin scan for next READY thread
+  4. Scan all threads, pick the highest-priority READY thread
+     (round-robin among equal priorities starting after current)
   5. Return its SSP, or 0 if all threads are blocked/terminated
 @
 
@@ -126,7 +207,9 @@ Steps:
                   t.state = STATE_READY
           i += 1
 
-      // Find next READY thread (round-robin)
+      // Find next READY thread (round-robin, preferring higher priority)
+      var best = -1
+      var best_pri = -1
       var next = current_thread + 1
       if next >= thread_count
           next = 0
@@ -134,13 +217,23 @@ Steps:
       while checked < thread_count
           var t: *Task = &tasks[next]
           if t.state == STATE_READY
-              current_thread = next
-              t.state = STATE_RUNNING
-              return t.ssp
+              if best == -1
+                  best = next
+                  best_pri = t.priority
+              else
+                  if t.priority > best_pri
+                      best = next
+                      best_pri = t.priority
           next += 1
           if next >= thread_count
               next = 0
           checked += 1
+
+      if best >= 0
+          var winner: *Task = &tasks[best]
+          current_thread = best
+          winner.state = STATE_RUNNING
+          return winner.ssp
 
       // No ready threads — return 0 to signal idle
       0

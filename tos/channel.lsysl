@@ -1,0 +1,81 @@
+@main
+TOS Channels
+
+Bounded FIFO channels for inter-thread communication.
+Sending blocks when the channel is full; receiving blocks
+when empty. Thread-safe via internal mutex and semaphores.
+@
+
+  import "mutex"
+  import "semaphore"
+
+@tech
+A channel wraps a caller-provided ring buffer with two
+counting semaphores (slots and items) for flow control and
+a mutex for head/tail pointer protection.
+  - slots: counts free buffer positions (init = capacity)
+  - items: counts available messages (init = 0)
+  - send: wait for a slot, lock, write, unlock, post an item
+  - recv: wait for an item, lock, read, unlock, post a slot
+
+The struct fields are all i64 (8 bytes each) to keep ll/sc
+alignment. Field offset helpers use integer arithmetic since
+Sysl does not support address-of on struct fields.
+@
+
+  struct Channel
+      buf: *i64
+      capacity: i64
+      head: i64
+      tail: i64
+      slots: i64
+      items: i64
+      lock: i64
+
+  chan_slots(c: int) -> *i64
+      c + 32
+
+  chan_items(c: int) -> *i64
+      c + 40
+
+  chan_lock(c: int) -> *i64
+      c + 48
+
+@api chan_init(c, buf, capacity) — Initialize a channel with a caller-provided buffer.
+
+  chan_init(c: *Channel, buf: *i64, capacity: i64)
+      c.buf = buf
+      c.capacity = capacity
+      c.head = 0
+      c.tail = 0
+      val addr: int = c
+      sem_init(chan_slots(addr), capacity)
+      sem_init(chan_items(addr), 0)
+      mutex_init(chan_lock(addr))
+
+@api chan_send(c, value) — Send a value, blocking if the channel is full.
+
+  chan_send(c: *Channel, value: i64)
+      val addr: int = c
+      sem_wait(chan_slots(addr))
+      mutex_lock(chan_lock(addr))
+      val idx = c.tail
+      var p: *i64 = c.buf + idx * 8
+      *p = value
+      c.tail = (idx + 1) % c.capacity
+      mutex_unlock(chan_lock(addr))
+      sem_post(chan_items(addr))
+
+@api chan_recv(c) -> i64 — Receive a value, blocking if the channel is empty.
+
+  chan_recv(c: *Channel) -> i64
+      val addr: int = c
+      sem_wait(chan_items(addr))
+      mutex_lock(chan_lock(addr))
+      val idx = c.head
+      var p: *i64 = c.buf + idx * 8
+      val value = *p
+      c.head = (idx + 1) % c.capacity
+      mutex_unlock(chan_lock(addr))
+      sem_post(chan_slots(addr))
+      value

@@ -2,21 +2,25 @@
 TOS System Services
 
 User-facing API for TOS kernel services.
-Import this module to use sleep, putc, yield, exit.
+Import this module to use sleep, putc, yield, exit, join, thread_id.
 
 Syscall numbers:
   0 = sleep    — block for N timer ticks
   1 = putc     — write character to stdout
   2 = yield    — voluntary context switch
   3 = exit     — terminate current thread
+  4 = join     — wait for another thread to terminate
+  5 = thread_id — get current thread index
 @
 
   extern syscall(number: int, arg: int) -> int
 
-  val SYS_SLEEP = 0
-  val SYS_PUTC  = 1
-  val SYS_YIELD = 2
-  val SYS_EXIT  = 3
+  val SYS_SLEEP     = 0
+  val SYS_PUTC      = 1
+  val SYS_YIELD     = 2
+  val SYS_EXIT      = 3
+  val SYS_JOIN      = 4
+  val SYS_THREAD_ID = 5
 
 @api sleep(ticks) — Block the calling thread for N timer ticks.
 
@@ -37,3 +41,13 @@ Syscall numbers:
 
   exit()
       syscall(SYS_EXIT, 0)
+
+@api join(thread_id) — Wait for the specified thread to terminate.
+
+  join(id: int)
+      syscall(SYS_JOIN, id)
+
+@api thread_id() -> int — Return the current thread's index.
+
+  thread_id() -> int
+      syscall(SYS_THREAD_ID, 0)
