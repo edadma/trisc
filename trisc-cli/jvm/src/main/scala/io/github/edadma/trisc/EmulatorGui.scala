@@ -12,10 +12,9 @@ object EmulatorGui:
       val frame = new JFrame("TRISC Emulator")
       frame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE)
 
-      val terminal = new TerminalWidget()
+      val terminal = new TerminalEmulator()
       val parser = new ANSIParser(terminal)
       val framebuffer = new FramebufferWidget()
-      val keyboard = new KeyboardDevice(Runtime.keyboardAddress, terminal)
       val fbMemory = new RAM(Runtime.framebufferAddress, Runtime.framebufferMaxSize)
 
       // Display panel with CardLayout for switching terminal/framebuffer
@@ -68,12 +67,42 @@ object EmulatorGui:
         () => displayCtrl.currentFBWidth, () => displayCtrl.currentFBHeight,
       )
 
-      val guiDevices = Seq(keyboard, displayCtrl, fbMemory, blitter)
+      // Interrupt controller — shared across setupCpu calls (reset recreates timer internally)
+      val intc = new InterruptController(Runtime.intcAddress)
+      val keyboard = new KeyboardDevice(Runtime.keyboardAddress, intc, irq = 1)
+      val mouse = new MouseDevice(Runtime.mouseAddress, intc, irq = 2)
 
-      var cpuState: (CPU, Memory) = TriscCli.setupCpu(linked, outputFn, guiDevices)
-      memRef = cpuState._2 // wire up the memory proxy
+      val guiDevices = Seq(keyboard, mouse, displayCtrl, fbMemory, blitter)
+
+      var cpuState: (CPU, Memory) = TriscCli.setupCpu(linked, outputFn, guiDevices, intc)
+      memRef = cpuState._2
       var cpu = cpuState._1
       if cmd.limit > 0 then cpu.limit = cmd.limit
+
+      // Keyboard input — on the frame, independent of display mode
+      frame.addKeyListener(new KeyListener {
+        override def keyPressed(e: KeyEvent): Unit =
+          keyboard.enqueue(e.getKeyCode, press = true, e.isShiftDown, e.isControlDown, e.isAltDown, e.isMetaDown)
+        override def keyReleased(e: KeyEvent): Unit =
+          keyboard.enqueue(e.getKeyCode, press = false, e.isShiftDown, e.isControlDown, e.isAltDown, e.isMetaDown)
+        override def keyTyped(e: KeyEvent): Unit = ()
+      })
+
+      // Mouse input — on the framebuffer widget
+      framebuffer.addMouseListener(new MouseAdapter {
+        override def mousePressed(e: java.awt.event.MouseEvent): Unit = updateMouse(e)
+        override def mouseReleased(e: java.awt.event.MouseEvent): Unit = updateMouse(e)
+      })
+      framebuffer.addMouseMotionListener(new MouseMotionAdapter {
+        override def mouseMoved(e: java.awt.event.MouseEvent): Unit = updateMouse(e)
+        override def mouseDragged(e: java.awt.event.MouseEvent): Unit = updateMouse(e)
+      })
+
+      def updateMouse(e: java.awt.event.MouseEvent): Unit =
+        val buttons = (if SwingUtilities.isLeftMouseButton(e) then 1 else 0) |
+          (if SwingUtilities.isRightMouseButton(e) then 2 else 0) |
+          (if SwingUtilities.isMiddleMouseButton(e) then 4 else 0)
+        mouse.update(e.getX, e.getY, buttons)
 
       def updateStatus(): Unit =
         val pc = f"${cpu.pc}%04X"
@@ -86,6 +115,7 @@ object EmulatorGui:
       runBtn.addActionListener(_ => {
         runBtn.setEnabled(false)
         stepBtn.setEnabled(false)
+        frame.requestFocusInWindow()
         new Thread(() => {
           cpu.run()
           SwingUtilities.invokeLater(() => {
@@ -109,7 +139,7 @@ object EmulatorGui:
         parser.reset()
         val layout = displayPanel.getLayout.asInstanceOf[CardLayout]
         layout.show(displayPanel, "terminal")
-        cpuState = TriscCli.setupCpu(linked, outputFn, guiDevices)
+        cpuState = TriscCli.setupCpu(linked, outputFn, guiDevices, intc)
         cpu = cpuState._1
         memRef = cpuState._2
         if cmd.limit > 0 then cpu.limit = cmd.limit
@@ -125,7 +155,7 @@ object EmulatorGui:
       frame.pack()
       frame.setLocationRelativeTo(null)
       frame.setVisible(true)
-      terminal.requestFocusInWindow()
+      frame.requestFocusInWindow()
     })
 
     latch.await()

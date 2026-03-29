@@ -19,6 +19,10 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
 
   def addTickable(tick: () => Unit): Unit = tickables = tick :: tickables
 
+  def clearTickables(): Unit =
+    tickables = Nil
+    pending = 0
+
   def readByte(addr: Long): Int =
     (addr - base).toInt match
       case PENDING => pending & 0xff

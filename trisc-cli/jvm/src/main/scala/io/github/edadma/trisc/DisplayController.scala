@@ -5,7 +5,7 @@ import java.awt.*
 
 class DisplayController(
     val base: Long,
-    terminal: TerminalWidget,
+    terminal: TerminalEmulator,
     framebuffer: FramebufferWidget,
     fbMemory: RAM,
     displayPanel: JPanel,

@@ -2,10 +2,7 @@ package io.github.edadma.trisc
 
 import javax.swing.*
 import java.awt.*
-import java.awt.event.*
-import java.util.concurrent.ConcurrentLinkedQueue
-
-class TerminalWidget(initCols: Int = 80, initRows: Int = 24) extends JComponent with KeyListener:
+class TerminalEmulator(initCols: Int = 80, initRows: Int = 24) extends JComponent:
   var cols: Int = initCols
   var rows: Int = initRows
   private var cells = Array.fill(rows * cols)(' ')
@@ -27,10 +24,7 @@ class TerminalWidget(initCols: Int = 80, initRows: Int = 24) extends JComponent 
   private var charHeight: Int = 0
   private var ascent: Int = 0
 
-  private val keyQueue = new ConcurrentLinkedQueue[Int]
-
   setFocusable(true)
-  addKeyListener(this)
   setBackground(Color.BLACK)
 
   private val blinkTimer = new Timer(500, _ => {
@@ -188,12 +182,6 @@ class TerminalWidget(initCols: Int = 80, initRows: Int = 24) extends JComponent 
       attrs(i) = 0
     repaint()
 
-  def hasKey: Boolean = !keyQueue.isEmpty
-
-  def readKey(): Option[Int] = Option(keyQueue.poll())
-
-  def enqueueKey(byte: Int): Unit = keyQueue.add(byte)
-
   override def paintComponent(g: Graphics): Unit =
     val g2 = g.asInstanceOf[Graphics2D]
     g2.setFont(monoFont)
@@ -231,38 +219,3 @@ class TerminalWidget(initCols: Int = 80, initRows: Int = 24) extends JComponent 
       g2.setColor(Color.GREEN)
       g2.fillRect(cursorCol * charWidth, cursorRow * charHeight + ascent + 1, charWidth, 2)
 
-  // KeyListener
-  override def keyTyped(e: KeyEvent): Unit =
-    val ch = e.getKeyChar
-    if ch != KeyEvent.CHAR_UNDEFINED then keyQueue.add(ch.toInt)
-
-  override def keyPressed(e: KeyEvent): Unit =
-    e.getKeyCode match
-      case KeyEvent.VK_UP =>
-        keyQueue.add(0x1b); keyQueue.add('['.toInt); keyQueue.add('A'.toInt)
-      case KeyEvent.VK_DOWN =>
-        keyQueue.add(0x1b); keyQueue.add('['.toInt); keyQueue.add('B'.toInt)
-      case KeyEvent.VK_RIGHT =>
-        keyQueue.add(0x1b); keyQueue.add('['.toInt); keyQueue.add('C'.toInt)
-      case KeyEvent.VK_LEFT =>
-        keyQueue.add(0x1b); keyQueue.add('['.toInt); keyQueue.add('D'.toInt)
-      case KeyEvent.VK_HOME =>
-        keyQueue.add(0x1b); keyQueue.add('['.toInt); keyQueue.add('H'.toInt)
-      case KeyEvent.VK_END =>
-        keyQueue.add(0x1b); keyQueue.add('['.toInt); keyQueue.add('F'.toInt)
-      case KeyEvent.VK_INSERT =>
-        keyQueue.add(0x1b); keyQueue.add('['.toInt); keyQueue.add('2'.toInt); keyQueue.add('~'.toInt)
-      case KeyEvent.VK_DELETE =>
-        keyQueue.add(0x1b); keyQueue.add('['.toInt); keyQueue.add('3'.toInt); keyQueue.add('~'.toInt)
-      case KeyEvent.VK_PAGE_UP =>
-        keyQueue.add(0x1b); keyQueue.add('['.toInt); keyQueue.add('5'.toInt); keyQueue.add('~'.toInt)
-      case KeyEvent.VK_PAGE_DOWN =>
-        keyQueue.add(0x1b); keyQueue.add('['.toInt); keyQueue.add('6'.toInt); keyQueue.add('~'.toInt)
-      case kc if kc >= KeyEvent.VK_F1 && kc <= KeyEvent.VK_F12 =>
-        val fn = kc - KeyEvent.VK_F1
-        val fnCodes = Array("OP", "OQ", "OR", "OS", "[15~", "[17~", "[18~", "[19~", "[20~", "[21~", "[23~", "[24~")
-        keyQueue.add(0x1b)
-        for ch <- fnCodes(fn) do keyQueue.add(ch.toInt)
-      case _ =>
-
-  override def keyReleased(e: KeyEvent): Unit = ()

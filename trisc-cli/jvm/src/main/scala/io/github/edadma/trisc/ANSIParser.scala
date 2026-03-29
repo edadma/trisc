@@ -2,7 +2,7 @@ package io.github.edadma.trisc
 
 import java.awt.Color
 
-class ANSIParser(terminal: TerminalWidget):
+class ANSIParser(terminal: TerminalEmulator):
   private enum ParserState:
     case Normal, Escape, CSI, OSC
 
@@ -286,14 +286,8 @@ class ANSIParser(terminal: TerminalWidget):
         scrollBottom = math.min(terminal.rows - 1, param(ps, 1, terminal.rows) - 1)
         terminal.cursorRow = 0
         terminal.cursorCol = 0
-      case 'n' => // Device Status Report
-        if param(ps, 0, 0) == 6 then
-          // Report cursor position — enqueue response as keyboard input
-          val response = s"\u001b[${terminal.cursorRow + 1};${terminal.cursorCol + 1}R"
-          for ch <- response do terminal.enqueueKey(ch.toInt)
-      case 'c' => // Device Attributes — report as VT100
-        val response = "\u001b[?1;0c"
-        for ch <- response do terminal.enqueueKey(ch.toInt)
+      case 'n' => // Device Status Report — no-op (keyboard decoupled from terminal)
+      case 'c' => // Device Attributes — no-op (keyboard decoupled from terminal)
       case _ => // ignore unknown CSI
 
   private def processSGR(ps: List[Int]): Unit =
