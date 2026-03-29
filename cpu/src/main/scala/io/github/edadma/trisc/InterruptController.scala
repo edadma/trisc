@@ -1,5 +1,7 @@
 package io.github.edadma.trisc
 
+import io.github.edadma.logger._
+
 class InterruptController(val base: Long) extends Device with (CPU => Unit):
   val name = "InterruptController"
   val size = 4
@@ -13,12 +15,20 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
   private var enabled: Int = 0xff // all sources enabled by default
   private var delivered: Int = 0 // IRQs signaled to CPU but not yet claimed
   private var tickables: List[() => Unit] = Nil
+  val log: Logger = {
+    val l = new Logger(new ConsoleHandler, new DefaultLogFormatter(includeTimestamp = false))
+    l.setLogLevel(LogLevel.OFF)
+    l
+  }
 
   def raise(irq: Int): Unit =
     pending |= (1 << irq)
-    delivered &= ~(1 << irq) // new event clears delivered so it can fire again
+    delivered &= ~(1 << irq)
+    log.trace(f"raise IRQ $irq — pending=$pending%02x delivered=$delivered%02x", category = "INTC")
 
-  def lower(irq: Int): Unit = pending &= ~(1 << irq)
+  def lower(irq: Int): Unit =
+    pending &= ~(1 << irq)
+    log.trace(f"lower IRQ $irq — pending=$pending%02x", category = "INTC")
 
   def addTickable(tick: () => Unit): Unit = tickables = tick :: tickables
 

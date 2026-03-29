@@ -2,6 +2,7 @@ package io.github.edadma.trisc
 
 import org.scalatest.freespec.AnyFreeSpec
 import org.scalatest.matchers.should.Matchers
+import io.github.edadma.logger._
 
 object TOSTestData {
   private def readLsysl(path: String): String =
@@ -147,6 +148,9 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
     val mem = new Memory("Memory", new RAM(0, 0x100000), stdout, intc, timer)
     linked.load(mem)
     val cpu = new CPU(mem, intc) { this.limit = maxCycles }
+    if maxCycles == 1000 then
+      cpu.log.setLogLevel(LogLevel.TRACE)
+      cpu.log.setHandler(new FileHandler("/tmp/trisc_debug.log"))
     cpu.reset()
     cpu.run()
     (cpu, output.toString)

@@ -117,12 +117,6 @@ restore_thread
   rte                   ; return to next thread
 
 
-; ============================================================================
-; irq_handler — Generic Interrupt Dispatcher
-; ============================================================================
-
-INTC_CLAIM = 0x100028    ; INTC base (0x100026) + offset 2
-
 global timer_isr, func
 
 timer_isr
@@ -132,10 +126,9 @@ timer_isr
 
 ; ============================================================================
 ; irq_handler — Generic Interrupt Dispatcher
-; NOT YET WIRED — dispatcher assembly causes fault, needs instruction-level debug
 ; ============================================================================
 
-INTC_CLAIM = 0x100028
+INTC_CLAIM = 0x100028    ; INTC base (0x100026) + offset 2
 
 extern irq_handlers
 

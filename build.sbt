@@ -123,7 +123,10 @@ lazy val cpu = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .crossType(CrossType.Pure)
   .in(file("cpu"))
   .settings(commonSettings)
-  .settings(name := "trisc-cpu")
+  .settings(
+    name := "trisc-cpu",
+    libraryDependencies += "io.github.edadma" %%% "logger" % "0.0.9",
+  )
   .dependsOn(mem)
   .jsSettings(jsSettings)
   .jvmSettings(jvmNativeStubs)
