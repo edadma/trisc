@@ -14,10 +14,10 @@ class SyslLexical extends IndentationLexical(
 ) {
   reserved ++= List(
     "if", "then", "elif", "else", "while", "do", "for", "break", "continue", "return",
-    "import", "private", "var", "val", "struct", "sizeof", "asm", "extern",
+    "import", "private", "var", "val", "struct", "enum", "type", "sizeof", "asm", "extern",
     "func",
     "int", "char", "byte", "bool", "void", "string",
-    "i8", "i16", "i32", "i64", "double", "f64",
+    "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "double", "f64",
     "true", "false",
     "end",
   )
@@ -43,6 +43,12 @@ class SyslLexical extends IndentationLexical(
       case e ~ sign ~ digits => e :: sign.toList ::: digits
     }
 
+  // Integer type suffix: i8, i16, i32, i64, u8, u16, u32, u64
+  private def typeSuffix: Parser[String] =
+    (elem('i') | elem('u')) ~ rep1(digit) ^^ {
+      case sign ~ digits => (sign :: digits).mkString
+    }
+
   override def token: Parser[Token] =
     // Float literal: digits.digits[e[+-]digits] or digits e[+-]digits
     rep1(digit) ~ '.' ~ rep1(digit) ~ opt(exponent) ^^ {
@@ -52,7 +58,20 @@ class SyslLexical extends IndentationLexical(
     rep1(digit) ~ exponent ^^ {
       case intPart ~ exp => NumericLit((intPart ::: exp).mkString)
     } |
-    '0' ~> (elem('x') | elem('X')) ~> rep1(hexDigit) ^^ { digits =>
-      NumericLit(java.lang.Long.parseLong(digits.mkString, 16).toString)
+    // Hex literal with optional type suffix: 0xFF, 0xFFu8
+    '0' ~> (elem('x') | elem('X')) ~> rep1(hexDigit) ~ opt(typeSuffix) ^^ {
+      case digits ~ suffix =>
+        val value = java.lang.Long.parseLong(digits.mkString, 16).toString
+        suffix match
+          case Some(s) => NumericLit(s"$value:$s")
+          case None => NumericLit(value)
+    } |
+    // Decimal literal with optional type suffix: 100, 100u32
+    rep1(digit) ~ opt(typeSuffix) ^^ {
+      case digits ~ suffix =>
+        val value = digits.mkString
+        suffix match
+          case Some(s) => NumericLit(s"$value:$s")
+          case None => NumericLit(value)
     } | super.token
 }

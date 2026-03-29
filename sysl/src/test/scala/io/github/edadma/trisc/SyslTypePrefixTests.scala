@@ -37,7 +37,7 @@ class SyslTypePrefixTests extends AnyFreeSpec with Matchers {
   // ===== fromPrefix =====
 
   "int fromPrefix" in { SyslType.fromPrefix("int") shouldBe I32 }
-  "char fromPrefix" in { SyslType.fromPrefix("char") shouldBe I32 }
+  "char fromPrefix" in { SyslType.fromPrefix("char") shouldBe U32 }
   "byte fromPrefix" in { SyslType.fromPrefix("byte") shouldBe I8 }
   "bool fromPrefix" in { SyslType.fromPrefix("bool") shouldBe BoolType }
   "void fromPrefix" in { SyslType.fromPrefix("void") shouldBe VoidType }
@@ -55,7 +55,7 @@ class SyslTypePrefixTests extends AnyFreeSpec with Matchers {
   }
 
   "arr 10 ptr char fromPrefix" in {
-    SyslType.fromPrefix("arr 10 ptr char") shouldBe ArrayType(PtrType(I32), 10)
+    SyslType.fromPrefix("arr 10 ptr char") shouldBe ArrayType(PtrType(U32), 10)
   }
 
   "ptr arr 3 byte fromPrefix" in {

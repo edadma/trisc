@@ -10,6 +10,8 @@ case class TExternFuncDecl(name: String, params: List[SyslType], returnType: Sys
 case class TFunDecl(name: String, params: List[TParam], returnType: SyslType, body: TFunBody, isPrivate: Boolean = false) extends TDecl
 case class TVarDecl(name: String, typ: SyslType, init: TExpr, isPrivate: Boolean = false) extends TDecl
 case class TStructDecl(name: String, fields: List[(String, SyslType)]) extends TDecl
+case class TEnumDecl(name: String, members: List[(String, Long)]) extends TDecl
+case class TTypeAliasDecl(name: String, target: SyslType) extends TDecl
 
 case class TParam(name: String, typ: SyslType)
 
@@ -49,6 +51,7 @@ case class TArrayLit(elements: List[TExpr], typ: SyslType) extends TExpr
 case class TVarRef(name: String, typ: SyslType) extends TExpr
 case class TAddrOf(name: String, typ: SyslType) extends TExpr
 case class TAddrOfIndex(array: TExpr, index: TExpr, typ: SyslType) extends TExpr
+case class TAddrOfField(obj: TExpr, fieldIndex: Int, typ: SyslType) extends TExpr
 case class TDeref(expr: TExpr, typ: SyslType) extends TExpr
 case class TIndex(expr: TExpr, index: TExpr, typ: SyslType) extends TExpr
 case class TFieldAccess(obj: TExpr, fieldIndex: Int, typ: SyslType) extends TExpr

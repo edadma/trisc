@@ -25,7 +25,7 @@ class SyslParser extends StandardTokenParsers {
   // --- Declarations ---
 
   lazy val decl: Parser[DeclAST] =
-    importDecl | externFuncDecl | structDecl | "private" ~> declBody(true) | declBody(false)
+    importDecl | externFuncDecl | structDecl | enumDecl | typeAliasDecl | "private" ~> declBody(true) | declBody(false)
 
   lazy val structDecl: Parser[StructDeclAST] =
     "struct" ~> ident ~ (Newline ~> Indent ~> rep1sep(structField, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
@@ -34,6 +34,18 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val structField: Parser[(String, String)] =
     ident ~ (":" ~> typeRef) ^^ { case name ~ typ => (name, typ) }
+
+  lazy val enumDecl: Parser[EnumDeclAST] =
+    "enum" ~> ident ~ (Newline ~> Indent ~> rep1sep(enumMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
+      case name ~ members => EnumDeclAST(name, members)
+    }
+
+  lazy val enumMember: Parser[(String, Option[Long])] =
+    ident ~ ("=" ~> numericLit) ^^ { case name ~ value => (name, Some(value.toLong)) } |
+      ident ^^ (name => (name, None))
+
+  lazy val typeAliasDecl: Parser[TypeAliasDeclAST] =
+    "type" ~> ident ~ ("=" ~> typeRef) ^^ { case name ~ target => TypeAliasDeclAST(name, target) }
 
   lazy val importDecl: Parser[ImportDeclAST] =
     "import" ~> stringLit ^^ ImportDeclAST.apply
@@ -57,7 +69,7 @@ class SyslParser extends StandardTokenParsers {
         case mut ~ name ~ t => VarDeclAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t), priv, mut.getOrElse(true))
       } |
       opt(mutability) ~ ident ~ (":" ~> ident) ~ not("=") ^^ {
-        case mut ~ name ~ t ~ _ => VarDeclAST(name, Some(t), StructInitAST(t), priv, mut.getOrElse(true))
+        case mut ~ name ~ t ~ _ => VarDeclAST(name, Some(t), UninitDeclAST(t), priv, mut.getOrElse(true))
       } |
       opt(mutability) ~ ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ {
         case mut ~ name ~ t ~ e => VarDeclAST(name, Some(t), e, priv, mut.getOrElse(true))
@@ -80,7 +92,7 @@ class SyslParser extends StandardTokenParsers {
     ident ~ (":" ~> typeRef) ^^ { case name ~ t => ParamAST(name, t) }
 
   lazy val typeName: Parser[String] =
-    "int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "double" | "f64" | "bool" | "void" | "string" | ident
+    "int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool" | "void" | "string" | ident
 
   // Full type reference: *int, **int, [5]int, []int (slice), func(int)->int, string, int, etc.
   lazy val typeRef: Parser[String] =
@@ -127,6 +139,42 @@ class SyslParser extends StandardTokenParsers {
   lazy val compoundOp: Parser[String] =
     "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^="
 
+  // Parse a chain of .field and [index] postfixes after an identifier
+  private type LvalueOp = Either[ExpressionAST, String] // Left = index, Right = field
+  lazy val lvalueChain: Parser[List[LvalueOp]] =
+    rep(("[" ~> expr <~ "]") ^^ (idx => Left(idx)) | ("." ~> ident) ^^ (f => Right(f)))
+
+  // Build an assignment statement from a base identifier + chain of postfix ops + value
+  private def buildAssign(name: String, chain: List[LvalueOp], value: ExpressionAST): StmtAST =
+    chain match
+      case Nil => AssignStmtAST(name, value)
+      case _ =>
+        val (initOps, lastOp) = (chain.init, chain.last)
+        val base: ExpressionAST = initOps.foldLeft[ExpressionAST](VarRefAST(name)) {
+          case (e, Left(idx)) => IndexAST(e, idx)
+          case (e, Right(field)) => FieldAccessAST(e, field)
+        }
+        lastOp match
+          case Right(field) => FieldAssignStmtAST(base, field, value)
+          case Left(idx) => IndexAssignStmtAST(base, idx, value)
+
+  // Build a compound assignment (+=, -=, etc.) from base + chain + op + value
+  private def buildCompoundAssign(name: String, chain: List[LvalueOp], op: String, value: ExpressionAST): StmtAST =
+    chain match
+      case Nil => CompoundAssignStmtAST(name, op, value)
+      case _ =>
+        val (initOps, lastOp) = (chain.init, chain.last)
+        val base: ExpressionAST = initOps.foldLeft[ExpressionAST](VarRefAST(name)) {
+          case (e, Left(idx)) => IndexAST(e, idx)
+          case (e, Right(field)) => FieldAccessAST(e, field)
+        }
+        lastOp match
+          case Right(field) => FieldCompoundAssignStmtAST(base, field, op, value)
+          case Left(idx) =>
+            // No IndexCompoundAssignStmt, desugar: a[i] += v → a[i] = a[i] + v
+            val fullLvalue = IndexAST(base, idx)
+            IndexAssignStmtAST(base, idx, BinaryAST(fullLvalue, op, value))
+
   lazy val identStmt: Parser[StmtAST] =
     mutability ~ ident ~ (":" ~> typeExpr) ~ ("=" ~> expr) ^^ { case mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut) } |
       mutability ~ ident ~ (":" ~> typeExpr) ^^ { case mut ~ name ~ t => VarStmtAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t), mut) } |
@@ -134,19 +182,14 @@ class SyslParser extends StandardTokenParsers {
       mutability ~ ident ~ ("=" ~> expr) ^^ { case mut ~ name ~ e => VarStmtAST(name, None, e, mut) } |
       ident ~ (":" ~> typeExpr) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ (":" ~> typeExpr) ^^ { case name ~ t => VarStmtAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t)) } |
-      ident ~ (":" ~> ident) ~ not("=") ^^ { case name ~ t ~ _ => VarStmtAST(name, Some(t), StructInitAST(t)) } |
+      ident ~ (":" ~> ident) ~ not("=") ^^ { case name ~ t ~ _ => VarStmtAST(name, Some(t), UninitDeclAST(t)) } |
       ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
-      ident ~ ("[" ~> expr <~ "]") ~ ("=" ~> expr) ^^ { case name ~ idx ~ value =>
-        IndexAssignStmtAST(VarRefAST(name), idx, value)
+      ident ~ lvalueChain ~ compoundOp ~ expr ^^ { case name ~ chain ~ op ~ value =>
+        buildCompoundAssign(name, chain, op.init, value)
       } |
-      ident ~ ("." ~> ident) ~ compoundOp ~ expr ^^ { case obj ~ field ~ op ~ value =>
-        FieldCompoundAssignStmtAST(VarRefAST(obj), field, op.init, value)
-      } |
-      ident ~ ("." ~> ident) ~ ("=" ~> expr) ^^ { case obj ~ field ~ value =>
-        FieldAssignStmtAST(VarRefAST(obj), field, value)
-      } |
-      ident ~ compoundOp ~ expr ^^ { case name ~ op ~ e => CompoundAssignStmtAST(name, op.init, e) } |
-      ident ~ ("=" ~> expr) ^^ { case name ~ e => AssignStmtAST(name, e) }
+      ident ~ lvalueChain ~ ("=" ~> expr) ^^ { case name ~ chain ~ value =>
+        buildAssign(name, chain, value)
+      }
 
   lazy val derefAssignStmt: Parser[StmtAST] =
     "*" ~> unary ~ ("=" ~> expr) ^^ { case ptr ~ value => DerefAssignStmtAST(ptr, value) }
@@ -209,11 +252,12 @@ class SyslParser extends StandardTokenParsers {
   lazy val inlineStmt: Parser[StmtAST] =
     breakStmt | continueStmt | returnStmt |
       "*" ~> unary ~ ("=" ~> expr) ^^ { case ptr ~ value => DerefAssignStmtAST(ptr, value) } |
-      ident ~ ("[" ~> expr <~ "]") ~ ("=" ~> expr) ^^ { case name ~ idx ~ value =>
-        IndexAssignStmtAST(VarRefAST(name), idx, value)
+      ident ~ lvalueChain ~ compoundOp ~ expr ^^ { case name ~ chain ~ op ~ value =>
+        buildCompoundAssign(name, chain, op.init, value)
       } |
-      ident ~ compoundOp ~ expr ^^ { case name ~ op ~ e => CompoundAssignStmtAST(name, op.init, e) } |
-      ident ~ ("=" ~> expr) ^^ { case name ~ e => AssignStmtAST(name, e) } |
+      ident ~ lvalueChain ~ ("=" ~> expr) ^^ { case name ~ chain ~ value =>
+        buildAssign(name, chain, value)
+      } |
       expr ^^ ExprStmtAST.apply
 
   // --- Precedence climbing ---
@@ -281,6 +325,11 @@ class SyslParser extends StandardTokenParsers {
       "!" ~> unary ^^ (e => UnaryAST("!", e)) |
       "~" ~> unary ^^ (e => UnaryAST("~", e)) |
       "*" ~> unary ^^ DerefAST.apply |
+      "&" ~> ident ~ rep1("." ~> ident) ^^ { case name ~ fields =>
+        val base: ExpressionAST = VarRefAST(name)
+        val chain = fields.init.foldLeft(base)((e, f) => FieldAccessAST(e, f))
+        AddrOfFieldAST(chain, fields.last)
+      } |
       "&" ~> ident ~ ("[" ~> expr <~ "]") ^^ { case name ~ idx => AddrOfIndexAST(VarRefAST(name), idx) } |
       "&" ~> ident ^^ AddrOfAST.apply |
       postfix
@@ -319,17 +368,23 @@ class SyslParser extends StandardTokenParsers {
       "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => SizeofTypeAST(s"[$n]$t") } |
       funcTypeRef ^^ SizeofTypeAST.apply |
       "[" ~> "]" ~> typeRef ^^ (t => SizeofTypeAST(s"[]$t")) |
-      ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "double" | "f64" | "bool" | "void" | "string") ^^ SizeofTypeAST.apply |
+      ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool" | "void" | "string") ^^ SizeofTypeAST.apply |
       expr ^^ SizeofExprAST.apply
 
   lazy val castType: Parser[String] =
-    "int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "double" | "f64" | "bool"
+    "int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool"
 
   lazy val cast: Parser[CastAST] =
     castType ~ ("(" ~> expr <~ ")") ^^ { case t ~ e => CastAST(t, e) }
 
   lazy val primary: Parser[ExpressionAST] =
-    numericLit ^^ (n => if n.contains('.') || n.contains('e') || n.contains('E') then FloatLitAST(n.toDouble) else IntLitAST(n.toLong)) |
+    numericLit ^^ { n =>
+      if n.contains(':') then
+        val Array(value, suffix) = n.split(':')
+        TypedIntLitAST(value.toLong, suffix)
+      else if n.contains('.') || n.contains('e') || n.contains('E') then FloatLitAST(n.toDouble)
+      else IntLitAST(n.toLong)
+    } |
       charLit |
       stringLit ^^ StringLitExprAST.apply |
       "true" ^^^ BoolLitAST(true) |

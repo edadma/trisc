@@ -61,6 +61,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TImportDecl => // not handled in interpreter
         case _: TExternFuncDecl => // not handled in interpreter
         case _: TStructDecl => // type only, no runtime effect
+        case _: TEnumDecl => // type only, no runtime effect
+        case _: TTypeAliasDecl => // type only, no runtime effect
         case f: TFunDecl => functions(f.name) = f
         case TVarDecl(name, _, init, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
@@ -236,8 +238,17 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TStringLit(s, _) =>
         StrVal(s)
 
-      case TArrayDecl(size, _, _) =>
-        val cells = Array.fill(size)(new Cell(IntVal(0)))
+      case TArrayDecl(size, _, typ) =>
+        def initElem(t: SyslType): Value = t match
+          case SyslType.ArrayType(elem, sz) =>
+            val cells = Array.fill(sz)(new Cell(initElem(elem)))
+            ArrVal(cells, 0)
+          case st: SyslType.StructType => evalAny(TStructLit(st), env)
+          case _ => IntVal(0)
+        val elemType = typ match
+          case SyslType.ArrayType(e, _) => e
+          case _ => SyslType.I64
+        val cells = Array.fill(size)(new Cell(initElem(elemType)))
         ArrVal(cells, 0)
 
       case TArrayLit(elements, _) =>
@@ -247,6 +258,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TVarRef(name, _) => lookupCell(name, env).value
 
       case TAddrOf(name, _) => PtrVal(lookupCell(name, env))
+
+      case TAddrOfField(obj, fieldIndex, _) =>
+        val ArrVal(cells, off) = evalAny(obj, env): @unchecked
+        PtrVal(cells(off + fieldIndex))
 
       case TAddrOfIndex(array, index, _) =>
         val arrVal = evalAny(array, env)
@@ -370,23 +385,30 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         // Integer path
         val l = toLong(lv)
         val r = toLong(rv)
+        val unsigned = left.typ.isUnsigned
         IntVal(op match
           case "+"  => l + r
           case "-"  => l - r
           case "*"  => l * r
-          case "/"  => if r == 0 then throw RuntimeError("division by zero") else l / r
-          case "%"  => if r == 0 then throw RuntimeError("modulo by zero") else l % r
+          case "/"  =>
+            if r == 0 then throw RuntimeError("division by zero")
+            else if unsigned then java.lang.Long.divideUnsigned(l, r)
+            else l / r
+          case "%"  =>
+            if r == 0 then throw RuntimeError("modulo by zero")
+            else if unsigned then java.lang.Long.remainderUnsigned(l, r)
+            else l % r
           case "==" => if l == r then 1L else 0L
           case "!=" => if l != r then 1L else 0L
-          case "<"  => if l < r then 1L else 0L
-          case ">"  => if l > r then 1L else 0L
-          case "<=" => if l <= r then 1L else 0L
-          case ">=" => if l >= r then 1L else 0L
+          case "<"  => if (if unsigned then java.lang.Long.compareUnsigned(l, r) < 0 else l < r) then 1L else 0L
+          case ">"  => if (if unsigned then java.lang.Long.compareUnsigned(l, r) > 0 else l > r) then 1L else 0L
+          case "<=" => if (if unsigned then java.lang.Long.compareUnsigned(l, r) <= 0 else l <= r) then 1L else 0L
+          case ">=" => if (if unsigned then java.lang.Long.compareUnsigned(l, r) >= 0 else l >= r) then 1L else 0L
           case "&"  => l & r
           case "|"  => l | r
           case "^"  => l ^ r
           case "<<" => l << r.toInt
-          case ">>" => l >> r.toInt
+          case ">>" => if unsigned then l >>> r.toInt else l >> r.toInt
           case _    => throw RuntimeError(s"unknown operator: $op")
         )
 
@@ -412,11 +434,16 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         target match
           case DoubleType  => FloatVal(toDouble(v))
           case BoolType => IntVal(if toLong(v) != 0 then 1L else 0L)
-          case IntType(64) => IntVal(toLong(v))
-          case IntType(32) => IntVal(toLong(v) & 0xFFFFFFFFL)
-          case IntType(16) => IntVal(toLong(v) & 0xFFFFL)
-          case IntType(8)  => IntVal(toLong(v) & 0xFFL)
-          case _: IntType  => IntVal(toLong(v))
+          case IntType(64)  => IntVal(toLong(v))
+          case IntType(32)  => IntVal((toLong(v) << 32) >> 32)  // sign-extend from 32 bits
+          case IntType(16)  => IntVal((toLong(v) << 48) >> 48)  // sign-extend from 16 bits
+          case IntType(8)   => IntVal((toLong(v) << 56) >> 56)  // sign-extend from 8 bits
+          case _: IntType   => IntVal(toLong(v))
+          case UIntType(64) => IntVal(toLong(v))
+          case UIntType(32) => IntVal(toLong(v) & 0xFFFFFFFFL)
+          case UIntType(16) => IntVal(toLong(v) & 0xFFFFL)
+          case UIntType(8)  => IntVal(toLong(v) & 0xFFL)
+          case _: UIntType  => IntVal(toLong(v))
           case _ => v
 
       case TSizeof(size, _) => IntVal(size)
@@ -463,7 +490,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         IntVal(old)
 
       case TStructLit(SyslType.StructType(_, fields)) =>
-        val cells = Array.fill(fields.size)(new Cell(IntVal(0)))
+        def initField(typ: SyslType): Value = typ match
+          case st: SyslType.StructType => evalAny(TStructLit(st), env)
+          case SyslType.ArrayType(elem, size) =>
+            val cells = Array.fill(size)(new Cell(initField(elem)))
+            ArrVal(cells, 0)
+          case _ => IntVal(0)
+        val cells = fields.map((_, typ) => new Cell(initField(typ))).toArray
         ArrVal(cells, 0)
 
       case TFieldAccess(obj, fieldIndex, _) =>

@@ -58,12 +58,12 @@ class SyslIntWidthTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 42
   }
 
-  "char is alias for i32" in {
+  "char is alias for u32" in {
     eval(
       """main() -> int
         |    var x: char = 65
-        |    var y: i32 = x
-        |    y
+        |    var y: u32 = x
+        |    int(y)
         |""".stripMargin) shouldBe 65
   }
 
@@ -189,7 +189,7 @@ class SyslIntWidthTests extends SyslTestHelpers {
   }
 
   "i8 cast preserves low bits" in {
-    eval("main() -> int = i8(0xFF)\n") shouldBe 255
+    eval("main() -> int = i8(0xFF)\n") shouldBe -1  // i8 is signed: 0xFF → -1
   }
 
   "i16 cast" in {
@@ -197,7 +197,7 @@ class SyslIntWidthTests extends SyslTestHelpers {
   }
 
   "i16 cast preserves low bits" in {
-    eval("main() -> int = i16(0xFFFF)\n") shouldBe 65535
+    eval("main() -> int = i16(0xFFFF)\n") shouldBe -1  // i16 is signed: 0xFFFF → -1
   }
 
   "i32 cast" in {
@@ -280,7 +280,7 @@ class SyslIntWidthTests extends SyslTestHelpers {
   "legacy prefix names still parse" in {
     SyslType.fromPrefix("int") shouldBe IntType(32)
     SyslType.fromPrefix("byte") shouldBe IntType(8)
-    SyslType.fromPrefix("char") shouldBe IntType(32)
+    SyslType.fromPrefix("char") shouldBe UIntType(32)
   }
 
   // ===== i16 toPrefix =====

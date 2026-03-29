@@ -35,6 +35,8 @@ class SyslLLVMCodegen:
         case _: TImportDecl => // skip
         case _: TExternFuncDecl => // skip
         case _: TStructDecl => // type only
+        case _: TEnumDecl => // type only
+        case _: TTypeAliasDecl => // type only
         case f: TFunDecl => genFunction(f)
         case TVarDecl(name, typ, _, _) =>
           emit(s"@$name = global ${llvmType(typ)} 0")
@@ -361,6 +363,7 @@ class SyslLLVMCodegen:
 
   private def llvmType(t: SyslType): String = t match
     case SyslType.IntType(w) => s"i$w"
+    case SyslType.UIntType(w) => s"i$w"  // LLVM uses same integer type for signed/unsigned
     case SyslType.BoolType => "i8"
     case SyslType.VoidType => "void"
     case SyslType.PtrType(_) => "i64"

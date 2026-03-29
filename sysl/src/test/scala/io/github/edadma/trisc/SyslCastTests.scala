@@ -25,7 +25,7 @@ class SyslCastTests extends SyslTestHelpers {
   }
 
   "int from byte" in {
-    eval("main() -> int = int(byte(200))\n") shouldBe 200
+    eval("main() -> int = int(byte(200))\n") shouldBe -56  // byte is signed i8: 200 = 0xC8 → -56
   }
 
   // ===== char() cast =====
@@ -41,7 +41,7 @@ class SyslCastTests extends SyslTestHelpers {
   // ===== byte() cast =====
 
   "byte from int" in {
-    eval("main() -> int = byte(0x1FF)\n") shouldBe 0xFF
+    eval("main() -> int = byte(0x1FF)\n") shouldBe -1  // byte is signed i8: 0xFF → -1
   }
 
   "byte truncates to 8 bits" in {

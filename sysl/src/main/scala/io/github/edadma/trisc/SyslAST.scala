@@ -12,6 +12,8 @@ case class ExternFuncDeclAST(name: String, params: List[ParamAST], returnType: O
 case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[String], body: FunBodyAST, isPrivate: Boolean = false) extends DeclAST
 case class VarDeclAST(name: String, typ: Option[String], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true) extends DeclAST
 case class StructDeclAST(name: String, fields: List[(String, String)]) extends DeclAST
+case class EnumDeclAST(name: String, members: List[(String, Option[Long])]) extends DeclAST
+case class TypeAliasDeclAST(name: String, target: String) extends DeclAST
 
 case class ParamAST(name: String, typ: String) extends Positional
 
@@ -41,6 +43,7 @@ case class ExprStmtAST(expr: ExpressionAST) extends StmtAST
 // Expressions
 trait ExpressionAST extends Positional
 case class IntLitAST(value: Long) extends ExpressionAST
+case class TypedIntLitAST(value: Long, typeName: String) extends ExpressionAST  // e.g., 100u32
 case class FloatLitAST(value: Double) extends ExpressionAST
 case class CharLitAST(value: Char) extends ExpressionAST
 case class StringLitAST(value: String) extends ExpressionAST
@@ -57,6 +60,7 @@ case class CastAST(targetType: String, expr: ExpressionAST) extends ExpressionAS
 case class IfExprAST(cond: ExpressionAST, thenBody: List[StmtAST], elseBody: Option[List[StmtAST]]) extends ExpressionAST
 case class AddrOfAST(name: String) extends ExpressionAST
 case class AddrOfIndexAST(array: ExpressionAST, index: ExpressionAST) extends ExpressionAST
+case class AddrOfFieldAST(obj: ExpressionAST, field: String) extends ExpressionAST
 case class DerefAST(expr: ExpressionAST) extends ExpressionAST
 case class IndexAST(expr: ExpressionAST, index: ExpressionAST) extends ExpressionAST
 case class FieldAccessAST(obj: ExpressionAST, field: String) extends ExpressionAST
@@ -67,6 +71,7 @@ case class FieldPostDecAST(obj: ExpressionAST, field: String) extends Expression
 case class ArrayDeclAST(size: Int, elemType: String) extends ExpressionAST
 case class ArrayLitAST(elements: List[ExpressionAST]) extends ExpressionAST
 case class StructInitAST(typeName: String) extends ExpressionAST
+case class UninitDeclAST(typeName: String) extends ExpressionAST
 case class SizeofTypeAST(typeName: String) extends ExpressionAST
 case class SizeofExprAST(expr: ExpressionAST) extends ExpressionAST
 case class StringLitExprAST(value: String) extends ExpressionAST
