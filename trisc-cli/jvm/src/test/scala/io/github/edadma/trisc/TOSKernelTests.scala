@@ -1,0 +1,122 @@
+package io.github.edadma.trisc
+
+class TOSKernelTests extends TOSTestHelpers {
+
+  "TOS: putc syscall prints character" in {
+    val (cpu, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(task, 0x6000, 0x5000, "task")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task()
+          |    putc(72)
+          |    putc(105)
+          |    putc(10)
+          |""".stripMargin
+    ), maxCycles = 100000)
+
+    output should startWith("Hi\n")
+  }
+
+  "TOS: thread exit works cleanly" in {
+    val (cpu, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(task1, 0x6000, 0x5000, "t1")
+          |    create_thread(task2, 0x8000, 0x7000, "t2")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task1()
+          |    putc(65)
+          |
+          |task2()
+          |    putc(66)
+          |""".stripMargin
+    ), maxCycles = 100000)
+
+    // Both tasks print and exit — output should contain both A and B
+    output should include("A")
+    output should include("B")
+  }
+
+  "TOS: sleep syscall delays output" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(task, 0x6000, 0x5000, "task")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task()
+          |    putc(65)
+          |    sleep(5)
+          |    putc(66)
+          |    sleep(5)
+          |    putc(67)
+          |""".stripMargin
+    ))
+
+    output should startWith("ABC")
+  }
+
+  "TOS: two tasks interleave with sleep" in {
+    val (_, output) = runTOS(Map(
+      "tasks" ->
+        """import "services"
+          |
+          |task_a()
+          |    var i = 0
+          |    while i < 3
+          |        putc(65)
+          |        sleep(10)
+          |        i += 1
+          |
+          |task_b()
+          |    var i = 0
+          |    while i < 3
+          |        putc(66)
+          |        sleep(20)
+          |        i += 1
+          |""".stripMargin,
+      "app" ->
+        """import "kernel"
+          |import "tasks"
+          |
+          |kernel_main() -> int
+          |    create_thread(task_a, 0x6000, 0x5000, "a")
+          |    create_thread(task_b, 0x8000, 0x7000, "b")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |""".stripMargin
+    ))
+
+    // A prints at ticks 0,10,20 — B prints at ticks 0,20,40
+    // Expected pattern: AB A AB A B (roughly 2:1)
+    output.count(_ == 'A') shouldBe 3
+    output.count(_ == 'B') shouldBe 3
+  }
+}
