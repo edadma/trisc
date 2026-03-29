@@ -99,6 +99,7 @@ class SyslTriscCodegen(addresses: Int = 4):
   // Natural alignment for a type
   private def stackAlign(typ: SyslType): Int = typ match
     case SyslType.IntType(w) => (w / 8).min(8)
+    case SyslType.UIntType(w) => (w / 8).min(8)
     case SyslType.BoolType => 1
     case SyslType.PtrType(_) => 8
     case SyslType.FuncType(_, _) => 8
@@ -110,7 +111,8 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   // Emit load from [rBase + 0] into rDest, using width-appropriate instruction.
   // The CPU's ldb/lds/ldw already sign-extend via Int→Long in Register.write,
-  // so no explicit sext is needed.
+  // so no explicit sext is needed for signed types.
+  // For unsigned types, load + zero-extend to clear sign-extended bits.
   private def emitLoad(destReg: Int, addrReg: Int, typ: SyslType): Unit =
     typ match
       case SyslType.IntType(8) | SyslType.BoolType =>
@@ -119,17 +121,26 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit(s"  lds r$destReg, r$addrReg, r0")
       case SyslType.IntType(32) =>
         emit(s"  ldw r$destReg, r$addrReg, r0")
+      case SyslType.UIntType(8) =>
+        emit(s"  ldb r$destReg, r$addrReg, r0")
+        emit(s"  zeb r$destReg, r$destReg")
+      case SyslType.UIntType(16) =>
+        emit(s"  lds r$destReg, r$addrReg, r0")
+        emit(s"  zes r$destReg, r$destReg")
+      case SyslType.UIntType(32) =>
+        emit(s"  ldw r$destReg, r$addrReg, r0")
+        emit(s"  zew r$destReg, r$destReg")
       case _ =>
         emit(s"  ldd r$destReg, r$addrReg, r0")
 
   // Emit store from rSrc to [rBase + 0], using width-appropriate instruction
   private def emitStore(srcReg: Int, addrReg: Int, typ: SyslType): Unit =
     typ match
-      case SyslType.IntType(8) | SyslType.BoolType =>
+      case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType =>
         emit(s"  stb r$srcReg, r$addrReg, r0")
-      case SyslType.IntType(16) =>
+      case SyslType.IntType(16) | SyslType.UIntType(16) =>
         emit(s"  sts r$srcReg, r$addrReg, r0")
-      case SyslType.IntType(32) =>
+      case SyslType.IntType(32) | SyslType.UIntType(32) =>
         emit(s"  stw r$srcReg, r$addrReg, r0")
       case _ =>
         emit(s"  std r$srcReg, r$addrReg, r0")
@@ -517,17 +528,18 @@ class SyslTriscCodegen(addresses: Int = 4):
         genExpr(right)       // r1 = right
         emit("  mov r2, r1") // r2 = right
         emit("  popd r1")   // r1 = left
+        val unsigned = left.typ.isUnsigned
         op match
           case "+"  => emit("  add r1, r1, r2")
           case "-"  => emit("  sub r1, r1, r2")
-          case "*"  => emit("  mul r1, r1, r2")
-          case "/"  => emit("  div r1, r1, r2")
-          case "%"  => emit("  rem r1, r1, r2")
+          case "*"  => emit(if unsigned then "  mulu r1, r1, r2" else "  mul r1, r1, r2")
+          case "/"  => emit(if unsigned then "  divu r1, r1, r2" else "  div r1, r1, r2")
+          case "%"  => emit(if unsigned then "  remu r1, r1, r2" else "  rem r1, r1, r2")
           case "&"  => emit("  and r1, r1, r2")
           case "|"  => emit("  or r1, r1, r2")
           case "^"  => emit("  xor r1, r1, r2")
           case "<<" => emit("  lsl r1, r1, r2")
-          case ">>" => emit("  asr r1, r1, r2")
+          case ">>" => emit(if unsigned then "  lsr r1, r1, r2" else "  asr r1, r1, r2")
           case "==" =>
             val eq = newLabel("eq")
             val end = newLabel("end")
@@ -547,17 +559,15 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  ldi r1, 0")
             emit(s"$end")
           case "<" =>
-            emit("  slt r1, r1, r2") // r1 = (r1 < r2) ? 1 : 0
+            emit(if unsigned then "  sltu r1, r1, r2" else "  slt r1, r1, r2")
           case ">" =>
-            emit("  slt r1, r2, r1") // r1 = (r2 < r1) ? 1 : 0
+            emit(if unsigned then "  sltu r1, r2, r1" else "  slt r1, r2, r1")
           case "<=" =>
-            // r1 <= r2 iff !(r2 < r1)
-            emit("  slt r1, r2, r1") // r1 = (r2 < r1)
+            emit(if unsigned then "  sltu r1, r2, r1" else "  slt r1, r2, r1")
             emit("  ldi r3, 1")
             emit("  xor r1, r1, r3") // flip: 0→1, 1→0
           case ">=" =>
-            // r1 >= r2 iff !(r1 < r2)
-            emit("  slt r1, r1, r2") // r1 = (r1 < r2)
+            emit(if unsigned then "  sltu r1, r1, r2" else "  slt r1, r1, r2")
             emit("  ldi r3, 1")
             emit("  xor r1, r1, r3") // flip
 
@@ -622,15 +632,21 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  ldi r1, 0")
             emit(s"$end")
           case IntType(8) =>
-            emit("  zeb r1, r1")   // zero-extend byte: mask to 8 bits
+            emit("  seb r1, r1")   // sign-extend byte
           case IntType(16) =>
-            emit("  zes r1, r1")   // zero-extend short: mask to 16 bits
+            emit("  ses r1, r1")   // sign-extend short
           case IntType(32) =>
-            emit("  zew r1, r1")   // zero-extend word: mask to 32 bits
-          case IntType(64) =>
+            emit("  sew r1, r1")   // sign-extend word
+          case IntType(64) | _: IntType =>
             // no-op — already 64-bit
-          case _: IntType =>
-            // other widths: no-op
+          case UIntType(8) =>
+            emit("  zeb r1, r1")   // zero-extend byte
+          case UIntType(16) =>
+            emit("  zes r1, r1")   // zero-extend short
+          case UIntType(32) =>
+            emit("  zew r1, r1")   // zero-extend word
+          case UIntType(64) | _: UIntType =>
+            // no-op — already 64-bit
           case _ =>
 
       case TUnary("-", operand, _) =>
@@ -879,9 +895,9 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   // Data directive for a type: db (1 byte), ds (2), dw (4), dl (8)
   private def emitDataDirective(typ: SyslType): String = typ match
-    case SyslType.IntType(8) | SyslType.BoolType => "db"
-    case SyslType.IntType(16) => "ds"
-    case SyslType.IntType(32) => "dw"
+    case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType => "db"
+    case SyslType.IntType(16) | SyslType.UIntType(16) => "ds"
+    case SyslType.IntType(32) | SyslType.UIntType(32) => "dw"
     case _ => "dl"
 
   // Emit address of local variable into target register

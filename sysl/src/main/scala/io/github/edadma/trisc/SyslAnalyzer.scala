@@ -17,7 +17,7 @@ class SyslAnalyzer:
   private var loopDepth: Int = 0
 
   private val builtinFunctions = Map(
-    "putchar" -> FunInfo("putchar", List("c" -> I32), I32),
+    "putchar" -> FunInfo("putchar", List("c" -> U32), U32),
     "print" -> FunInfo("print", List("n" -> I32), VoidType),
     "println" -> FunInfo("println", List("n" -> I32), VoidType),
     "puts" -> FunInfo("puts", List("s" -> StringType), VoidType),
@@ -100,19 +100,24 @@ class SyslAnalyzer:
 
       case VarDeclAST(name, typOpt, init, isPrivate, isMutable) =>
         localScope = new mutable.LinkedHashMap
-        val tInit = analyzeExpr(init)
-        val declType = typOpt.map(resolveTypeName).getOrElse(tInit.typ)
+        val tInit0 = analyzeExpr(init)
+        val declType = typOpt.map(resolveTypeName).getOrElse(tInit0.typ)
+        val tInit = coerceLiteral(tInit0, declType)
         globalScope(name) = SymInfo(name, declType, isMutable)
         localScope = null
         TVarDecl(name, declType, tInit, isPrivate)
 
   private def resolveTypeName(name: String): SyslType = name match
     case "int" | "i32" => I32
-    case "char" => I32
+    case "char" => U32
     case "i64" => I64
     case "double" | "f64" => DoubleType
     case "byte" | "i8"  => I8
     case "i16"  => I16
+    case "u8"   => U8
+    case "u16"  => U16
+    case "u32"  => U32
+    case "u64"  => U64
     case "bool" => BoolType
     case "void" => VoidType
     case "string" => StringType
@@ -157,18 +162,35 @@ class SyslAnalyzer:
   private def compatible(from: SyslType, to: SyslType): Boolean =
     (from, to) match
       case (a, b) if a == b => true
-      case (_: IntType, _: IntType) => true  // all integer types are compatible
+      case (_: IntType, _: IntType) => true    // signed ↔ signed (width promotion)
+      case (_: UIntType, _: UIntType) => true  // unsigned ↔ unsigned (width promotion)
+      // signed ↔ unsigned: NOT compatible — use explicit casts
       case (DoubleType, DoubleType) => true
-      case (_: IntType, DoubleType) => true  // implicit int→float promotion
-      case (DoubleType, _: IntType) => true  // float→int (truncation)
+      case (_: IntType, DoubleType) => true    // signed int → float promotion
+      case (_: UIntType, DoubleType) => true   // unsigned int → float promotion
+      case (DoubleType, _: IntType) => true    // float → signed int (truncation)
+      case (DoubleType, _: UIntType) => true   // float → unsigned int (truncation)
       // bool and int are NOT compatible — use explicit casts
-      case (_: IntType, PtrType(_)) => true    // int to pointer (e.g., memory-mapped I/O addresses)
-      case (PtrType(_), _: IntType) => true    // pointer to int
+      case (t, PtrType(_)) if t.isIntegral => true   // int to pointer (e.g., memory-mapped I/O addresses)
+      case (PtrType(_), t) if t.isIntegral => true   // pointer to int
       case (ArrayType(e1, _), PtrType(e2)) if e1 == e2 => true
       case (ArrayType(e1, _), ArrayType(e2, _)) if e1 == e2 => true
       case (ArrayType(e1, _), SliceType(e2)) if e1 == e2 => true  // fixed array → slice
       case (SliceType(e1), SliceType(e2)) if e1 == e2 => true
       case _ => false
+
+  // Coerce integer literals to the target type (like Rust's untyped integer literals)
+  private def coerceLiteral(expr: TExpr, target: SyslType): TExpr =
+    expr match
+      case TIntLit(value, _) if target.isIntegral => TIntLit(value, target)
+      case _ => expr
+
+  // Coerce integer literals to match the target's signedness only (preserving original width)
+  private def coerceSignedness(expr: TExpr, target: SyslType): TExpr =
+    (expr, target) match
+      case (TIntLit(value, IntType(w)), _: UIntType) => TIntLit(value, UIntType(w))
+      case (TIntLit(value, UIntType(w)), _: IntType) => TIntLit(value, IntType(w))
+      case _ => expr
 
   private def lookup(name: String): SymInfo =
     if localScope != null && localScope.contains(name) then localScope(name)
@@ -195,8 +217,9 @@ class SyslAnalyzer:
   private def analyzeStmt(stmt: StmtAST): TStmt =
     stmt match
       case VarStmtAST(name, typOpt, init, isMutable) =>
-        val tInit = analyzeExpr(init)
-        val declType = typOpt.map(resolveTypeName).getOrElse(tInit.typ)
+        val tInit0 = analyzeExpr(init)
+        val declType = typOpt.map(resolveTypeName).getOrElse(tInit0.typ)
+        val tInit = coerceLiteral(tInit0, declType)
         if typOpt.isDefined && !compatible(tInit.typ, declType) then
           throw AnalysisError(s"cannot assign ${tInit.typ} to $declType variable '$name'")
         if localScope != null then
@@ -295,7 +318,7 @@ class SyslAnalyzer:
     expr match
       case IntLitAST(n) => TIntLit(n, I32)
       case FloatLitAST(d) => TFloatLit(d, DoubleType)
-      case CharLitAST(c) => TIntLit(c.toLong, I32)
+      case CharLitAST(c) => TIntLit(c.toLong, U32)
       case BoolLitAST(b) => TBoolLit(b, BoolType)
       case StringLitAST(s) => TStringLit(s, StringType)
       case StringLitExprAST(s) => TStringLit(s, StringType)
@@ -441,8 +464,11 @@ class SyslAnalyzer:
         TUnary(op, tOperand, resultType)
 
       case BinaryAST(left, op, right) =>
-        val tLeft = analyzeExpr(left)
-        val tRight = analyzeExpr(right)
+        val tLeft0 = analyzeExpr(left)
+        val tRight0 = analyzeExpr(right)
+        // Coerce integer literal signedness to match the other operand (preserve width)
+        val tLeft = if tRight0.typ.isIntegral then coerceSignedness(tLeft0, tRight0.typ) else tLeft0
+        val tRight = if tLeft.typ.isIntegral then coerceSignedness(tRight0, tLeft.typ) else tRight0
         val resultType = op match
           case "+" | "-" if tLeft.typ == StringType && tRight.typ.isNumeric =>
             throw AnalysisError("pointer arithmetic not allowed on string")
@@ -450,18 +476,30 @@ class SyslAnalyzer:
           case "+" | "-" | "*" | "/" =>
             if !tLeft.typ.isNumeric || !tRight.typ.isNumeric then
               throw AnalysisError(s"operator $op requires numeric types, got ${tLeft.typ} $op ${tRight.typ}")
-            // Promote to wider type; float wins over int
+            // Promote to wider type; float wins over int; no mixed signed/unsigned
             (tLeft.typ, tRight.typ) match
               case (DoubleType, _) | (_, DoubleType) => DoubleType
               case (IntType(a), IntType(b)) => IntType(a max b)
+              case (UIntType(a), UIntType(b)) => UIntType(a max b)
+              case (l, r) if l.isIntegral && r.isIntegral =>
+                throw AnalysisError(s"cannot mix signed and unsigned in $op: ${tLeft.typ} $op ${tRight.typ}")
               case _ => tLeft.typ
           case "%" | "&" | "|" | "^" | "<<" | ">>" =>
             if !tLeft.typ.isIntegral || !tRight.typ.isIntegral then
               throw AnalysisError(s"operator $op requires integral types, got ${tLeft.typ} $op ${tRight.typ}")
             (tLeft.typ, tRight.typ) match
               case (IntType(a), IntType(b)) => IntType(a max b)
-              case _ => tLeft.typ
-          case "==" | "!=" | "<" | ">" | "<=" | ">=" => BoolType
+              case (UIntType(a), UIntType(b)) => UIntType(a max b)
+              case _ =>
+                throw AnalysisError(s"cannot mix signed and unsigned in $op: ${tLeft.typ} $op ${tRight.typ}")
+          case "==" | "!=" | "<" | ">" | "<=" | ">=" =>
+            // Disallow mixed signed/unsigned comparisons
+            if tLeft.typ.isIntegral && tRight.typ.isIntegral then
+              (tLeft.typ, tRight.typ) match
+                case (_: IntType, _: UIntType) | (_: UIntType, _: IntType) =>
+                  throw AnalysisError(s"cannot compare signed and unsigned: ${tLeft.typ} $op ${tRight.typ}")
+                case _ => // ok
+            BoolType
           case "&&" | "||" =>
             if tLeft.typ != BoolType then throw AnalysisError(s"$op requires bool operands, got ${tLeft.typ}")
             if tRight.typ != BoolType then throw AnalysisError(s"$op requires bool operands, got ${tRight.typ}")
@@ -480,9 +518,9 @@ class SyslAnalyzer:
           case (from, to) if from == to => // no-op cast
           case (from, BoolType) if from.isNumeric => // numeric to bool: != 0
           case (BoolType, to) if to.isNumeric => // bool to numeric: true=1, false=0
-          case (_: IntType, DoubleType) => // int to float (cvt)
-          case (DoubleType, _: IntType) => // float to int (fint)
-          case (from, to) if from.isIntegral && to.isIntegral => // integer to integer
+          case (from, DoubleType) if from.isIntegral => // int to float (cvt)
+          case (DoubleType, to) if to.isIntegral => // float to int (fint)
+          case (from, to) if from.isIntegral && to.isIntegral => // integer to integer (including signed↔unsigned)
           case (_: PtrType, to) if to.isIntegral => // pointer to integer
           case (from, _: PtrType) if from.isIntegral => // integer to pointer
           case (from, to) => throw AnalysisError(s"cannot cast $from to $to")

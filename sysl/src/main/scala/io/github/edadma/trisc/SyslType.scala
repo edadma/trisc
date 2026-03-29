@@ -2,6 +2,7 @@ package io.github.edadma.trisc
 
 enum SyslType:
   case IntType(width: Int)   // i8, i16, i32, i64
+  case UIntType(width: Int)  // u8, u16, u32, u64
   case BoolType
   case VoidType
   case PtrType(pointee: SyslType)
@@ -13,16 +14,24 @@ enum SyslType:
   case SliceType(elem: SyslType)
 
   def isNumeric: Boolean = this match
-    case _: IntType => true
+    case _: IntType | _: UIntType => true
     case DoubleType => true
     case _ => false
 
   def isIntegral: Boolean = this match
+    case _: IntType | _: UIntType => true
+    case _ => false
+
+  def isSigned: Boolean = this match
     case _: IntType => true
     case _ => false
 
+  def isUnsigned: Boolean = this match
+    case _: UIntType => true
+    case _ => false
+
   def isBoolOrNumeric: Boolean = this match
-    case _: IntType | BoolType | DoubleType => true
+    case _: IntType | _: UIntType | BoolType | DoubleType => true
     case _ => false
 
   def isPointerLike: Boolean = this match
@@ -32,6 +41,7 @@ enum SyslType:
   // Size in bytes
   def sizeOf: Long = this match
     case IntType(w) => w / 8
+    case UIntType(w) => w / 8
     case BoolType => 1
     case VoidType => 0
     case PtrType(_) => 8
@@ -45,6 +55,7 @@ enum SyslType:
   // Width in bits (for integer types)
   def bitWidth: Int = this match
     case IntType(w) => w
+    case UIntType(w) => w
     case DoubleType => 64
     case BoolType => 8
     case PtrType(_) => 64
@@ -56,6 +67,11 @@ enum SyslType:
     case IntType(32) => "int"
     case IntType(64) => "i64"
     case IntType(w) => s"i$w"
+    case UIntType(8) => "u8"
+    case UIntType(16) => "u16"
+    case UIntType(32) => "u32"
+    case UIntType(64) => "u64"
+    case UIntType(w) => s"u$w"
     case DoubleType => "f64"
     case BoolType => "bool"
     case VoidType => "void"
@@ -68,6 +84,7 @@ enum SyslType:
 
   def toPrefix: String = this match
     case IntType(w) => s"i$w"
+    case UIntType(w) => s"u$w"
     case DoubleType => "f64"
     case BoolType => "bool"
     case VoidType => "void"
@@ -79,15 +96,21 @@ enum SyslType:
     case StructType(name, fields) => s"struct $name ${fields.size} ${fields.map((n, t) => s"$n ${t.toPrefix}").mkString(" ")}"
 
 object SyslType:
-  // Canonical type aliases
+  // Canonical type aliases — signed
   val I8: IntType = IntType(8)
   val I16: IntType = IntType(16)
   val I32: IntType = IntType(32)
   val I64: IntType = IntType(64)
 
+  // Canonical type aliases — unsigned
+  val U8: UIntType = UIntType(8)
+  val U16: UIntType = UIntType(16)
+  val U32: UIntType = UIntType(32)
+  val U64: UIntType = UIntType(64)
+
   // Source-level aliases
   val Byte: IntType = I8
-  val Char: IntType = I32
+  val Char: UIntType = U32
   val Int: IntType = I32
   val Double: DoubleType.type = DoubleType
 
@@ -99,12 +122,14 @@ object SyslType:
     tokens.next() match
       case "bool" => BoolType
       case "void" => VoidType
+      case s if s.startsWith("u") && s.drop(1).forall(_.isDigit) =>
+        UIntType(s.drop(1).toInt)
       case s if s.startsWith("i") && s.drop(1).forall(_.isDigit) =>
         IntType(s.drop(1).toInt)
       case "f64" | "double" => DoubleType
       // Legacy prefix names for backward compatibility
       case "int"  => I32
-      case "char" => I32
+      case "char" => U32
       case "byte" => I8
       case "string" => StringType
       case "ptr"  => PtrType(parseType(tokens))

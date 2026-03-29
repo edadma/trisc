@@ -494,7 +494,7 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
   }
 
   "byte cast preserves low bits" in {
-    compileAndRun("main() -> int = byte(0xff)\n") shouldBe 255
+    compileAndRun("main() -> int = byte(0xff)\n") shouldBe -1  // byte is signed i8: 0xFF → -1
   }
 
   // ===== Arrays =====

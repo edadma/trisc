@@ -361,6 +361,7 @@ class SyslLLVMCodegen:
 
   private def llvmType(t: SyslType): String = t match
     case SyslType.IntType(w) => s"i$w"
+    case SyslType.UIntType(w) => s"i$w"  // LLVM uses same integer type for signed/unsigned
     case SyslType.BoolType => "i8"
     case SyslType.VoidType => "void"
     case SyslType.PtrType(_) => "i64"

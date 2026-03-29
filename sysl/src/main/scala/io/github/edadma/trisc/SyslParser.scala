@@ -80,7 +80,7 @@ class SyslParser extends StandardTokenParsers {
     ident ~ (":" ~> typeRef) ^^ { case name ~ t => ParamAST(name, t) }
 
   lazy val typeName: Parser[String] =
-    "int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "double" | "f64" | "bool" | "void" | "string" | ident
+    "int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool" | "void" | "string" | ident
 
   // Full type reference: *int, **int, [5]int, []int (slice), func(int)->int, string, int, etc.
   lazy val typeRef: Parser[String] =
@@ -319,11 +319,11 @@ class SyslParser extends StandardTokenParsers {
       "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => SizeofTypeAST(s"[$n]$t") } |
       funcTypeRef ^^ SizeofTypeAST.apply |
       "[" ~> "]" ~> typeRef ^^ (t => SizeofTypeAST(s"[]$t")) |
-      ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "double" | "f64" | "bool" | "void" | "string") ^^ SizeofTypeAST.apply |
+      ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool" | "void" | "string") ^^ SizeofTypeAST.apply |
       expr ^^ SizeofExprAST.apply
 
   lazy val castType: Parser[String] =
-    "int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "double" | "f64" | "bool"
+    "int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool"
 
   lazy val cast: Parser[CastAST] =
     castType ~ ("(" ~> expr <~ ")") ^^ { case t ~ e => CastAST(t, e) }
