@@ -894,20 +894,12 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitAddImm(1, 5, baseOffset)
 
       case TStringLit(value, _) =>
-        // String struct: ptr(8 bytes) + len(4 bytes) = 16 bytes (aligned)
+        // Emit pointer to static string data (null-terminated)
         val bytes = value.getBytes("UTF-8")
         labelCounter += 1
         val strLabel = s"__str_$labelCounter"
         stringLiterals += ((strLabel, value))
-        // Allocate 16 bytes on stack for string struct
-        emitAddImm(7, 7, -16)
-        emit("  mov r1, r7")         // r1 = struct address
-        emit(s"  movi r2, $strLabel") // r2 = ptr to static data
-        emit("  std r2, r1, r0")      // store ptr at offset 0
-        emit(s"  ldi r2, ${bytes.length}")
-        emit("  addi r3, r1, 8")
-        emit("  stw r2, r3, r0")      // store len at offset 8
-        stackOffset -= 16
+        emit(s"  movi r1, $strLabel") // r1 = ptr to static string data
 
       case TIfExpr(cond, thenBody, elseBody, _) =>
         val elseLabel = newLabel("else")

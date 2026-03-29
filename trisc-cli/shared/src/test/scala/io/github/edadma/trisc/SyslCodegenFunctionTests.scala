@@ -577,4 +577,48 @@ class SyslCodegenFunctionTests extends SyslCodegenHelpers {
         |main() -> int = mySum4(10, 11, 12, 9)
         |""".stripMargin) shouldBe 42
   }
+
+  // ===== String literal as *byte arg =====
+
+  "string literal passed as *byte does not corrupt stack" in {
+    compileMultiAndRun(Map(
+      "lib" ->
+        """var count = 0
+          |
+          |do_thing(a: int, b: int, c: int, name: *byte, pri: int)
+          |    count = count + pri + 1
+          |
+          |get_count() -> int = count
+          |""".stripMargin,
+      "main" ->
+        """import "lib"
+          |
+          |main() -> int
+          |    do_thing(1, 2, 3, "hello", 10)
+          |    do_thing(4, 5, 6, "world", 20)
+          |    do_thing(7, 8, 9, "test", 30)
+          |    get_count()
+          |""".stripMargin
+    )) shouldBe 63  // (10+1) + (20+1) + (30+1)
+  }
+
+  "string literal as 4th arg with different lengths" in {
+    compileMultiAndRun(Map(
+      "lib" ->
+        """var last_pri = -1
+          |
+          |register(a: int, b: int, c: int, name: *byte, pri: int)
+          |    last_pri = pri
+          |
+          |get_last_pri() -> int = last_pri
+          |""".stripMargin,
+      "main" ->
+        """import "lib"
+          |
+          |main() -> int
+          |    register(1, 2, 3, "a very long name", 42)
+          |    get_last_pri()
+          |""".stripMargin
+    )) shouldBe 42
+  }
 }
