@@ -238,13 +238,27 @@ Steps:
       // No ready threads — return 0 to signal idle
       0
 
-@api first_thread_ssp() -> int — Return the SSP of thread 0.
+@api first_thread_ssp() -> int — Return the SSP of the highest-priority ready thread.
 
 @tech
 Called by boot.asm after kernel_main() returns, so boot can
-context-switch into the first thread.
+context-switch into the first thread. Picks the highest-priority
+READY thread (first one wins on ties), marks it RUNNING, and
+sets current_thread.
 @
 
   first_thread_ssp() -> int
-      var first: *Task = &tasks[0]
-      first.ssp
+      var best = 0
+      var best_pri = -1
+      var i = 0
+      while i < thread_count
+          var t: *Task = &tasks[i]
+          if t.state == STATE_READY
+              if t.priority > best_pri
+                  best = i
+                  best_pri = t.priority
+          i += 1
+      current_thread = best
+      var t: *Task = &tasks[best]
+      t.state = STATE_RUNNING
+      t.ssp
