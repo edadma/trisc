@@ -1,6 +1,7 @@
 package io.github.edadma.trisc
 
-class Timer(val base: Long, clock: () => Long = () => System.currentTimeMillis()) extends Device with (CPU => Unit):
+class Timer(val base: Long, intc: InterruptController, irq: Int, clock: () => Long = () => System.currentTimeMillis())
+    extends Device:
   val name = "timer"
   val size = 6
 
@@ -31,10 +32,11 @@ class Timer(val base: Long, clock: () => Long = () => System.currentTimeMillis()
           fired = false
       case STATUS =>
         fired = false // acknowledge
+        intc.lower(irq)
       case _ =>
 
-  def apply(cpu: CPU): Unit =
+  def tick(): Unit =
     if running && clock() - last >= period then
       last += period
       fired = true
-      cpu.interrupt()
+      intc.raise(irq)
