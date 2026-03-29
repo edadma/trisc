@@ -71,6 +71,47 @@ class SyslTypeAliasTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 99
   }
 
+  // ===== Uninitialized declarations via type alias =====
+
+  "type alias for array — uninitialized" in {
+    eval(
+      """type Vec3 = [3]int
+        |
+        |main() -> int
+        |    v: Vec3
+        |    v[0] = 10
+        |    v[1] = 20
+        |    v[2] = 30
+        |    v[0] + v[1] + v[2]
+        |""".stripMargin) shouldBe 60
+  }
+
+  "type alias for struct — uninitialized" in {
+    eval(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |type Pos = Point
+        |
+        |main() -> int
+        |    p: Pos
+        |    p.x = 10
+        |    p.y = 20
+        |    p.x + p.y
+        |""".stripMargin) shouldBe 30
+  }
+
+  "type alias for scalar — uninitialized" in {
+    eval(
+      """type Count = i32
+        |
+        |main() -> int
+        |    c: Count
+        |    c
+        |""".stripMargin) shouldBe 0
+  }
+
   // ===== Error cases =====
 
   "duplicate type alias is error" in {

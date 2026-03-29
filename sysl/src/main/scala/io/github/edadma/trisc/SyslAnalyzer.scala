@@ -412,6 +412,13 @@ class SyslAnalyzer:
           case st: StructType => TStructLit(st)
           case _ => throw AnalysisError(s"'$typeName' is not a struct type")
 
+      case UninitDeclAST(typeName) =>
+        val t = resolveTypeName(typeName)
+        t match
+          case st: StructType => TStructLit(st)
+          case ArrayType(elem, size) => TArrayDecl(size, typeName, t)
+          case _ => TIntLit(0, t)  // zero-initialize scalars and pointers
+
       case VarRefAST(name) =>
         // Check if name is a function (used as a value = function pointer)
         if functions.contains(name) then

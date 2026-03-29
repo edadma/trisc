@@ -69,7 +69,7 @@ class SyslParser extends StandardTokenParsers {
         case mut ~ name ~ t => VarDeclAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t), priv, mut.getOrElse(true))
       } |
       opt(mutability) ~ ident ~ (":" ~> ident) ~ not("=") ^^ {
-        case mut ~ name ~ t ~ _ => VarDeclAST(name, Some(t), StructInitAST(t), priv, mut.getOrElse(true))
+        case mut ~ name ~ t ~ _ => VarDeclAST(name, Some(t), UninitDeclAST(t), priv, mut.getOrElse(true))
       } |
       opt(mutability) ~ ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ {
         case mut ~ name ~ t ~ e => VarDeclAST(name, Some(t), e, priv, mut.getOrElse(true))
@@ -146,7 +146,7 @@ class SyslParser extends StandardTokenParsers {
       mutability ~ ident ~ ("=" ~> expr) ^^ { case mut ~ name ~ e => VarStmtAST(name, None, e, mut) } |
       ident ~ (":" ~> typeExpr) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ (":" ~> typeExpr) ^^ { case name ~ t => VarStmtAST(name, Some(t), ArrayDeclAST(t.drop(1).takeWhile(_.isDigit).toInt, t)) } |
-      ident ~ (":" ~> ident) ~ not("=") ^^ { case name ~ t ~ _ => VarStmtAST(name, Some(t), StructInitAST(t)) } |
+      ident ~ (":" ~> ident) ~ not("=") ^^ { case name ~ t ~ _ => VarStmtAST(name, Some(t), UninitDeclAST(t)) } |
       ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ ("[" ~> expr <~ "]") ~ ("=" ~> expr) ^^ { case name ~ idx ~ value =>
         IndexAssignStmtAST(VarRefAST(name), idx, value)

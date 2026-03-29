@@ -39,7 +39,7 @@ class SyslTriscCodegen(addresses: Int = 4):
             emittedGlobalAlign = true
           globals(name) = typ
           emit(s"# global: $name")
-          emit(s"$name")
+          emit(s"$name:")
           init match
             case TArrayLit(elements, _) =>
               val declElemType = typ match
@@ -79,7 +79,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       emit("  align 8")
       for (label, value) <- stringLiterals do
         val bytes = value.getBytes("UTF-8")
-        emit(s"$label")
+        emit(s"$label:")
         for b <- bytes do emit(s"  db ${b & 0xff}")
         emit("  db 0") // null terminator for C interop
 
@@ -168,7 +168,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     stackOffset = 0
 
     emit(s"# function: ${fun.name}")
-    emit(s"${fun.name}")
+    emit(s"${fun.name}:")
 
     // Prologue: save lr, fp, set up frame
     emit("  pshd r6")       // save link register

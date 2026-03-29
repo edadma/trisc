@@ -83,4 +83,27 @@ class SyslEnumCodegenTests extends AnyFreeSpec with Matchers {
         |    int(x)
         |""".stripMargin) shouldBe 200
   }
+
+  // ===== Function named after instruction mnemonic =====
+
+  "function named add" in {
+    compileAndRun(
+      """add(a: int, b: int) -> int = a + b
+        |main() -> int = add(20, 22)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "function named sub" in {
+    compileAndRun(
+      """sub(a: int, b: int) -> int = a - b
+        |main() -> int = sub(50, 8)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "function named div" in {
+    compileAndRun(
+      """div(a: int, b: int) -> int = a / b
+        |main() -> int = div(84, 2)
+        |""".stripMargin) shouldBe 42
+  }
 }
