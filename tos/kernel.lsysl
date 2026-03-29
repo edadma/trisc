@@ -94,6 +94,15 @@ the watchdog terminates it. Set to 0 to disable.
   var total_ctx_switches = 0
 
 @tech
+Thread-local storage. A flat 2D array indexed by [thread_id][slot].
+Each thread gets TLS_SLOTS slots of int-sized values. Access is
+O(1) via tls_set/tls_get kernel functions.
+@
+
+  val TLS_SLOTS = 4
+  var tls: [32]int
+
+@tech
 Software timers. A fixed pool of one-shot timers that fire a
 callback function after a specified number of ticks. The timer
 queue is scanned each tick in schedule().
@@ -475,3 +484,15 @@ stack or context — it can be resumed exactly where it left off.
           tasks[id].state = STATE_READY
           tasks[id].quantum = DEFAULT_QUANTUM
           enqueue(tasks[id].priority, id)
+
+@api kernel_tls_set(slot, value) — Set TLS value for the current thread.
+
+  kernel_tls_set(packed: int)
+      val slot = (packed >> 24) & 0xFF
+      val value = packed & 0xFFFFFF
+      tls[current_thread * TLS_SLOTS + slot] = value
+
+@api kernel_tls_get(slot) -> int — Get TLS value for the current thread.
+
+  kernel_tls_get(slot: int) -> int
+      tls[current_thread * TLS_SLOTS + slot]

@@ -178,6 +178,10 @@ trap_handler
   beq r1, r3, .sys_suspend     ; 17 = suspend(id)
   ldi r3, 18
   beq r1, r3, .sys_resume      ; 18 = resume(id)
+  ldi r3, 19
+  beq r1, r3, .sys_tls_set     ; 19 = tls_set(packed)
+  ldi r3, 20
+  beq r1, r3, .sys_tls_get     ; 20 = tls_get(slot)
 
   ; Slow path: save full context for syscalls that context-switch
   pshr r6                       ; save user's r1-r6
@@ -444,6 +448,42 @@ extern resume_thread
   pshd r6
   mov  r1, r2
   movi r4, resume_thread
+  jalr r6, r4
+  popd r6
+  popd r5
+  popd r4
+  popd r2
+  sti
+  rte
+
+; tls_set(packed): set TLS value — packed = (slot << 24) | value
+extern kernel_tls_set
+
+.sys_tls_set
+  pshd r2
+  pshd r4
+  pshd r5
+  pshd r6
+  mov  r1, r2
+  movi r4, kernel_tls_set
+  jalr r6, r4
+  popd r6
+  popd r5
+  popd r4
+  popd r2
+  sti
+  rte
+
+; tls_get(slot): get TLS value for current thread
+extern kernel_tls_get
+
+.sys_tls_get
+  pshd r2
+  pshd r4
+  pshd r5
+  pshd r6
+  mov  r1, r2
+  movi r4, kernel_tls_get
   jalr r6, r4
   popd r6
   popd r5

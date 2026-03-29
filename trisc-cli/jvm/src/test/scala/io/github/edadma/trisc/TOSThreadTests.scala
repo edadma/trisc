@@ -621,4 +621,77 @@ class TOSThreadTests extends TOSTestHelpers {
     output should not include("B")
     cpu.state shouldBe State.Wfi
   }
+
+  // ===== Thread-local storage =====
+
+  "TOS: tls_set and tls_get basic" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(task, 0x6000, 0x5000, "t")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task()
+          |    tls_set(0, 42)
+          |    tls_set(1, 99)
+          |    val a = tls_get(0)
+          |    val b = tls_get(1)
+          |    if a == 42
+          |        putc(65)
+          |    if b == 99
+          |        putc(66)
+          |""".stripMargin
+    ))
+
+    output should include("A")
+    output should include("B")
+  }
+
+  "TOS: tls is per-thread" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(task_a, 0x6000, 0x5000, "a")
+          |    create_thread(task_b, 0x8000, 0x7000, "b")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task_a()
+          |    tls_set(0, 10)
+          |    sleep(20)
+          |    val v = tls_get(0)
+          |    if v == 10
+          |        putc(65)
+          |    else
+          |        putc(78)
+          |
+          |task_b()
+          |    tls_set(0, 20)
+          |    sleep(20)
+          |    val v = tls_get(0)
+          |    if v == 20
+          |        putc(66)
+          |    else
+          |        putc(78)
+          |""".stripMargin
+    ))
+
+    // Each thread sees its own TLS value, not the other's
+    output should include("A")
+    output should include("B")
+    output should not include("N")
+  }
 }

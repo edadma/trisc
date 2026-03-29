@@ -42,6 +42,8 @@ Syscall numbers:
   val SYS_CHECK_STACK    = 16
   val SYS_SUSPEND        = 17
   val SYS_RESUME         = 18
+  val SYS_TLS_SET        = 19
+  val SYS_TLS_GET        = 20
 
 @api sleep(ticks) — Block the calling thread for N timer ticks.
 
@@ -145,3 +147,18 @@ Syscall numbers:
       while s[i] != 0
           putc(s[i])
           i += 1
+
+@api tls_set(slot, value) — Set thread-local storage value (value must fit in 24 bits).
+
+@tech
+Packs slot (8 bits) and value (24 bits) into one syscall arg.
+Slot range: 0-3. Value range: 0 to 16777215.
+@
+
+  tls_set(slot: int, value: int)
+      syscall(SYS_TLS_SET, (slot << 24) | (value & 0xFFFFFF))
+
+@api tls_get(slot) -> int — Get thread-local storage value for the current thread.
+
+  tls_get(slot: int) -> int
+      syscall(SYS_TLS_GET, slot)
