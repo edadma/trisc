@@ -167,9 +167,14 @@ object TriscCli:
     val tof = TOF.deserialize(tofStr)
     if tof.tofType == TOFType.Executable then tof else Linker.link(Seq(Runtime.bootTof, tof, Runtime.ioTof))
 
-  def setupCpu(linked: TOF, outputFn: String => Unit = s => { print(s); System.out.flush() }, extraDevices: Seq[Addressable] = Nil): (CPU, Memory) =
+  def setupCpu(
+      linked: TOF,
+      outputFn: String => Unit = s => { print(s); System.out.flush() },
+      extraDevices: Seq[Addressable] = Nil,
+      intc: InterruptController = new InterruptController(Runtime.intcAddress),
+  ): (CPU, Memory) =
     val stdout = new Stdout(Runtime.stdoutAddress, outputFn)
-    val intc = new InterruptController(Runtime.intcAddress)
+    intc.clearTickables()
     val timer = new Timer(Runtime.timerAddress, intc, irq = 0)
     intc.addTickable(() => timer.tick())
     val ramSize = Runtime.stdoutAddress.toInt

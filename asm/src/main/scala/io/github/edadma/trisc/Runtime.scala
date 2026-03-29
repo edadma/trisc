@@ -5,10 +5,11 @@ package io.github.edadma.trisc
 object Runtime:
   val stdoutAddress = 0x100000L // 1MB — devices start here, RAM below
   val keyboardAddress = 0x100004L
-  val displayCtrlAddress = 0x100006L
+  val displayCtrlAddress = 0x100008L
   val blitterAddress = 0x10000CL
   val timerAddress = 0x100020L
   val intcAddress = 0x100026L
+  val mouseAddress = 0x10002AL
   val framebufferAddress = 0x200000L // 2MB — framebuffer pixel data
   val framebufferMaxSize: Long = 1920 * 1080 * 4
   val initialSSP: Long = stdoutAddress - 8 // stack grows down, below devices
@@ -78,12 +79,12 @@ object Runtime:
        |  ldb r1, r2, r0
        |  jalr r0, r6
        |
-       |; getchar: block until keyboard has data, return byte in r1
-       |getchar
+       |; getkey: block until keyboard has data, return USB HID scancode in r1
+       |getkey
        |  movi r2, ${keyboardAddress}
-       |_getchar_wait
+       |_getkey_wait
        |  ldb r1, r2, r0
-       |  beq r1, r0, _getchar_wait
+       |  beq r1, r0, _getkey_wait
        |  addi r2, r2, 1
        |  ldb r1, r2, r0
        |  jalr r0, r6
