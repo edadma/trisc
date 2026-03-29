@@ -282,18 +282,21 @@ import pprint.pprintln
 
 //  val chunks = segs flatMap (_.chunks)
 //  val code = chunks flatMap { case DataChunk(data) => data } to IndexedSeq
-  val timer = new Timer(0xfffa)
+  val intc = new InterruptController(0xfff4)
+  val timer = new Timer(0xfffa, intc, irq = 0)
+  intc.addTickable(() => timer.tick())
   val mem = new Memory(
     "Memory",
     new ROM(0, 0x1000),
     new RAM(0x1000, 0x1000),
     new Stdout(0xfff8),
+    intc,
     timer,
   )
 
   tof.load(mem)
 
-  val cpu = new CPU(mem, timer) {
+  val cpu = new CPU(mem, intc) {
     //    trace = true
     //    clump = 1
     limit = 30000
