@@ -152,7 +152,7 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
     val mem = new Memory("Memory", new RAM(0, 0x100000), stdout, intc, timer)
     linked.load(mem)
     val cpu = new CPU(mem, intc) { this.limit = maxCycles }
-    if maxCycles == 1000 then
+    if maxCycles <= 1000 then
       cpu.log.setLogLevel(LogLevel.TRACE)
       cpu.log.setHandler(new FileHandler("/tmp/trisc_debug.log"))
     cpu.reset()
