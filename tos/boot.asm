@@ -23,7 +23,7 @@ segment vectors
 
   dl 0x0FFFF8              ; Slot 0:  Initial SSP (kernel stack top, below devices)
   dl boot                  ; Slot 1:  Initial PC
-  dl timer_isr             ; Slot 2:  Interrupt
+  dl irq_handler           ; Slot 2:  Interrupt
   dl default_isr           ; Slot 3:  InstructionAccess
   dl default_isr           ; Slot 4:  DataAccess
   dl default_isr           ; Slot 5:  MisalignedAccess
@@ -201,55 +201,57 @@ trap_handler
   cli
 
   ; Fast path: syscalls that don't context-switch.
-  ; Only r3 is clobbered, which is fine since we RTE directly
-  ; (hardware restores PC+PSR, user r1-r6 are untouched on stack).
-  ; Return values go in r1.
+  ; Return values go in r1. Only r3 clobbered.
   addi r3, r1, -1
-  beq r3, r0, .sys_putc        ; 1 = putc
+  beq r3, r0, .sys_putc         ; 1 = putc
   ldi r3, 5
-  beq r1, r3, .sys_thread_id   ; 5 = thread_id
+  beq r1, r3, .sys_thread_id    ; 5 = thread_id
   ldi r3, 6
-  beq r1, r3, .sys_uptime      ; 6 = uptime
+  beq r1, r3, .sys_uptime       ; 6 = uptime
   ldi r3, 7
   beq r1, r3, .sys_thread_count ; 7 = thread_count
   ldi r3, 8
   beq r1, r3, .sys_thread_state ; 8 = thread_state(id)
   ldi r3, 9
-  beq r1, r3, .sys_thread_name ; 9 = thread_name(id)
+  beq r1, r3, .sys_thread_name  ; 9 = thread_name(id)
   ldi r3, 10
-  beq r1, r3, .sys_sleep_until ; 10 = sleep_until(tick)
+  beq r1, r3, .sys_sleep_until  ; 10 = sleep_until(tick)
   ldi r3, 11
-  beq r1, r3, .sys_ctx_switches ; 11 = ctx_switches(id)
+  beq r1, r3, .sys_kbhit        ; 11 = kbhit
   ldi r3, 12
-  beq r1, r3, .sys_cpu_ticks   ; 12 = cpu_ticks(id)
+  beq r1, r3, .sys_getkey       ; 12 = getkey
   ldi r3, 13
-  beq r1, r3, .sys_total_switches ; 13 = total_switches
+  beq r1, r3, .sys_ctx_switches ; 13 = ctx_switches(id)
   ldi r3, 14
-  beq r1, r3, .sys_set_watchdog ; 14 = set_watchdog(limit)
+  beq r1, r3, .sys_cpu_ticks    ; 14 = cpu_ticks(id)
   ldi r3, 15
-  beq r1, r3, .sys_panic       ; 15 = panic
+  beq r1, r3, .sys_total_switches ; 15 = total_switches
   ldi r3, 16
-  beq r1, r3, .sys_check_stack ; 16 = check_stack(addr)
+  beq r1, r3, .sys_set_watchdog ; 16 = set_watchdog(limit)
   ldi r3, 17
-  beq r1, r3, .sys_suspend     ; 17 = suspend(id)
+  beq r1, r3, .sys_panic        ; 17 = panic
   ldi r3, 18
-  beq r1, r3, .sys_resume      ; 18 = resume(id)
+  beq r1, r3, .sys_check_stack  ; 18 = check_stack(addr)
   ldi r3, 19
-  beq r1, r3, .sys_tls_set     ; 19 = tls_set(packed)
+  beq r1, r3, .sys_suspend      ; 19 = suspend(id)
   ldi r3, 20
-  beq r1, r3, .sys_tls_get     ; 20 = tls_get(slot)
+  beq r1, r3, .sys_resume       ; 20 = resume(id)
   ldi r3, 21
-  beq r1, r3, .sys_notify_send ; 21 = notify_send(packed)
+  beq r1, r3, .sys_tls_set      ; 21 = tls_set(packed)
   ldi r3, 22
-  beq r1, r3, .sys_notify_wait ; 22 = notify_wait
+  beq r1, r3, .sys_tls_get      ; 22 = tls_get(slot)
   ldi r3, 23
-  beq r1, r3, .sys_notify_read ; 23 = notify_read
+  beq r1, r3, .sys_notify_send  ; 23 = notify_send(packed)
   ldi r3, 24
-  beq r1, r3, .sys_event_wait  ; 24 = event_wait(packed)
+  beq r1, r3, .sys_notify_wait  ; 24 = notify_wait
   ldi r3, 25
-  beq r1, r3, .sys_event_set   ; 25 = event_set(packed)
+  beq r1, r3, .sys_notify_read  ; 25 = notify_read
   ldi r3, 26
-  beq r1, r3, .sys_event_clear ; 26 = event_clear(packed)
+  beq r1, r3, .sys_event_wait   ; 26 = event_wait(packed)
+  ldi r3, 27
+  beq r1, r3, .sys_event_set    ; 27 = event_set(packed)
+  ldi r3, 28
+  beq r1, r3, .sys_event_clear  ; 28 = event_clear(packed)
 
   ; Slow path: save full context for syscalls that context-switch
   pshr r6                       ; save user's r1-r6
@@ -376,6 +378,18 @@ extern query_thread_name
   popd r5
   popd r4
   popd r2
+  sti
+  rte
+
+; kbhit: return 1 if keyboard event buffered (stub — returns 0)
+.sys_kbhit
+  ldi  r1, 0
+  sti
+  rte
+
+; getkey: return next keyboard event (stub — returns 0)
+.sys_getkey
+  ldi  r1, 0
   sti
   rte
 
