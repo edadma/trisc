@@ -3,29 +3,26 @@ package io.github.edadma.trisc
 import org.scalatest.freespec.AnyFreeSpec
 import org.scalatest.matchers.should.Matchers
 
-trait TOSTestHelpers extends AnyFreeSpec with Matchers {
-
+object TOSTestData {
   private def readLsysl(path: String): String =
     val raw = scala.io.Source.fromFile(path).mkString
     val doc = new LiterateParser().parse(raw)
     LiterateRenderer.tangle(doc)
 
-  val bootAsm = scala.io.Source.fromFile("tos/boot.asm").mkString
-  val kernelSysl = readLsysl("tos/kernel.lsysl")
-  val servicesSysl = readLsysl("tos/services.lsysl")
-  val semaphoreSysl = readLsysl("tos/semaphore.lsysl")
-  val mutexSysl = readLsysl("tos/mutex.lsysl")
-  val condvarSysl = readLsysl("tos/condvar.lsysl")
-  val barrierSysl = readLsysl("tos/barrier.lsysl")
-  val rwlockSysl = readLsysl("tos/rwlock.lsysl")
-  val channelSysl = readLsysl("tos/channel.lsysl")
-  val mailboxSysl = readLsysl("tos/mailbox.lsysl")
-  val rbtreeSysl = readLsysl("tos/rbtree.lsysl")
-  val tasksSysl = readLsysl("examples/tos-demo/tasks.lsysl")
-  val mainSysl = readLsysl("examples/tos-demo/main.lsysl")
+  lazy val bootAsm: String = scala.io.Source.fromFile("tos/boot.asm").mkString
+  lazy val kernelSysl: String = readLsysl("tos/kernel.lsysl")
+  lazy val servicesSysl: String = readLsysl("tos/services.lsysl")
+  lazy val semaphoreSysl: String = readLsysl("tos/semaphore.lsysl")
+  lazy val mutexSysl: String = readLsysl("tos/mutex.lsysl")
+  lazy val condvarSysl: String = readLsysl("tos/condvar.lsysl")
+  lazy val barrierSysl: String = readLsysl("tos/barrier.lsysl")
+  lazy val rwlockSysl: String = readLsysl("tos/rwlock.lsysl")
+  lazy val channelSysl: String = readLsysl("tos/channel.lsysl")
+  lazy val mailboxSysl: String = readLsysl("tos/mailbox.lsysl")
+  lazy val rbtreeSysl: String = readLsysl("tos/rbtree.lsysl")
+  lazy val tasksSysl: String = readLsysl("examples/tos-demo/tasks.lsysl")
+  lazy val mainSysl: String = readLsysl("examples/tos-demo/main.lsysl")
 
-  // Minimal boot stub for end-to-end tests.
-  // Uses test memory layout (64KB RAM, stdout at 0x10000).
   val minimalBoot: String =
     """STDOUT = 0x10000
       |
@@ -76,6 +73,10 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
       |default_isr
       |  halt
       |""".stripMargin
+}
+
+trait TOSTestHelpers extends AnyFreeSpec with Matchers {
+  import TOSTestData.*
 
   def compileSysl(source: String): TOF =
     val driver = new SyslDriver
@@ -113,12 +114,9 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
     cpu.run()
     (cpu, output.toString)
 
-  /** Compile TOS kernel + user tasks, link with boot.asm, run on CPU with timer. */
   def runTOS(userSources: Map[String, String], maxCycles: Int = 500000000): (CPU, String) =
-    // Assemble boot.asm
     val bootTof = assemble(bootAsm, relocatable = true)
 
-    // Compile kernel + user sources together
     val allSources = Map(
       "kernel" -> kernelSysl, "services" -> servicesSysl, "semaphore" -> semaphoreSysl,
       "mutex" -> mutexSysl, "condvar" -> condvarSysl, "barrier" -> barrierSysl,
@@ -132,10 +130,8 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
       assemble(asm, relocatable = true)
     val syslTof = Linker.link(tofs, relocatable = true)
 
-    // Link all
     val linked = Linker.link(Seq(bootTof, syslTof))
 
-    // Set up CPU with stdout + timer
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
       val name = "stdout"
