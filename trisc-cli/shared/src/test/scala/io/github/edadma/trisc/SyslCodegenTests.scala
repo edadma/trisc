@@ -2182,6 +2182,27 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
     )) shouldBe 60
   }
 
+  "5-arg with ptr arg called twice from same function" in {
+    compileMultiAndRun(Map(
+      "lib" ->
+        """var count = 0
+          |
+          |do_thing(a: int, b: int, c: int, name: *byte, pri: int)
+          |    count = count + pri + 1
+          |
+          |get_count() -> int = count
+          |""".stripMargin,
+      "main" ->
+        """import "lib"
+          |
+          |main() -> int
+          |    do_thing(1, 2, 3, 99, 10)
+          |    do_thing(4, 5, 6, 88, 20)
+          |    get_count()
+          |""".stripMargin
+    )) shouldBe 32
+  }
+
   "5-arg extern function called 2 times works" in {
     compileMultiAndRun(Map(
       "lib" ->

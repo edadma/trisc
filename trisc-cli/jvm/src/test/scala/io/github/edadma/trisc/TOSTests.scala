@@ -213,9 +213,6 @@ class TOSTests extends AnyFreeSpec with Matchers {
     val codegen = new SyslTriscCodegen
     val tofs = for unit <- result.units yield
       val asm = codegen.generate(unit.typed)
-      if unit.name == "kernel" then
-        val lines = asm.split('\n').take(50)
-        info(s"Kernel asm first 50 lines:\n${lines.mkString("\n")}")
       assemble(asm, relocatable = true)
     val syslTof = Linker.link(tofs, relocatable = true)
 
@@ -1798,6 +1795,84 @@ class TOSTests extends AnyFreeSpec with Matchers {
     // Blocker prints B again after wake.
     output.count(_ == 'B') shouldBe 2
     output.count(_ == 'R') shouldBe 2
+  }
+
+  "Linker diagnostic: ready_mask address resolves correctly" in {
+    val bootTof = assemble(bootAsm, relocatable = true)
+    val allSources = Map("kernel" -> kernelSysl, "services" -> servicesSysl,
+      "app" -> """import "kernel"
+        |import "services"
+        |kernel_main() -> int
+        |    create_thread(task1, 0x20000, 0x1F000, "t1")
+        |    create_thread(task2, 0x22000, 0x21000, "t2")
+        |    first_thread_ssp()
+        |task1()
+        |    putc(65)
+        |task2()
+        |    putc(66)
+        |""".stripMargin)
+    val driver = new SyslDriver
+    val result = driver.compile(allSources)
+    val codegen = new SyslTriscCodegen
+    val tofs = for unit <- result.units yield
+      val asm = codegen.generate(unit.typed)
+      assemble(asm, relocatable = true)
+    val syslTof = Linker.link(tofs, relocatable = true)
+    val linked = Linker.link(Seq(bootTof, syslTof))
+
+    // Find ready_mask symbol address
+    val allSyms = linked.segments.flatMap(s => s.symbols.map(sym => (sym.name, s.org + sym.offset)))
+    val symMap = allSyms.toMap
+    info(s"Segment layout: ${linked.segments.map(s => s"${s.name}@${s.org}").mkString(", ")}")
+    info(s"ready_mask@${symMap.get("ready_mask").map(a => f"0x$a%x")}")
+    info(s"queue_head@${symMap.get("queue_head").map(a => f"0x$a%x")}")
+    info(s"tasks@${symMap.get("tasks").map(a => f"0x$a%x")}")
+    info(s"enqueue@${symMap.get("enqueue").map(a => f"0x$a%x")}")
+    info(s"thread_count@${symMap.get("thread_count").map(a => f"0x$a%x")}")
+
+    // Load into memory and check the ready_mask value after running create_thread_pri
+    val stdoutBuf = new StringBuilder
+    val stdout = new Device with WriteOnlyAddressable {
+      val name = "stdout"
+      val base: Long = 0x100000
+      val size: Long = 1
+      def writeByte(addr: Long, data: Long): Unit = stdoutBuf += data.toChar
+      override def loadByte(addr: Long, data: Long): Unit = ()
+    }
+    val timer = new Timer(0x100020L)
+    val mem = new Memory("Memory", new RAM(0, 0x100000), stdout, timer)
+    linked.load(mem)
+    val cpu = new CPU(mem, timer) { limit = 500000 }
+    cpu.reset()
+    cpu.run()
+
+    // Read ready_mask from memory
+    val maskAddr = symMap("ready_mask")
+    val maskVal = mem.readInt(maskAddr)
+    info(s"ready_mask value at 0x${maskAddr.toHexString}: $maskVal (may be 0 after thread completes)")
+    // Check queue heads
+    val qhAddr = symMap("queue_head")
+    for i <- 0 until 4 do
+      val v = mem.readInt(qhAddr + i * 4)
+      info(s"  queue_head[$i] at 0x${(qhAddr + i*4).toHexString}: $v")
+    // Check thread_count
+    val tcAddr = symMap("thread_count")
+    info(s"thread_count at 0x${tcAddr.toHexString}: ${mem.readInt(tcAddr)}")
+    // Check CPU state
+    info(s"CPU state: ${cpu.state}, pc: 0x${cpu.pc.toHexString}, output: '${stdoutBuf.toString}'")
+    // With priority 2, thread should still run and print H
+    info(s"Output with pri=2: '${stdoutBuf.toString}'")
+    stdoutBuf.toString should include("H")
+    // Check if enqueue wrote to a different address
+    // Scan memory around _default_ segment for non-zero/non-FF values
+    val segStart = 648L // _default_ base
+    val interesting = (0 until 100).map { i =>
+      val addr = segStart + i * 4
+      val v = mem.readInt(addr)
+      if v != 0 && v != -1 then s"[+${i*4}]=0x${v.toHexString}" else ""
+    }.filter(_.nonEmpty)
+    info(s"Non-zero values in _default_: ${interesting.mkString(", ")}")
+    // maskVal may be 0 after thread dequeued and completed
   }
 
   "Scheduler: three priority levels strict ordering" in {
