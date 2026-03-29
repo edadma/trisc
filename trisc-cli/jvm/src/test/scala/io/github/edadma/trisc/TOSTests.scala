@@ -206,9 +206,7 @@ class TOSTests extends AnyFreeSpec with Matchers {
 
     // Compile kernel + user sources together
     val allSources = Map(
-      "kernel" -> kernelSysl, "services" -> servicesSysl, "semaphore" -> semaphoreSysl,
-      "mutex" -> mutexSysl, "condvar" -> condvarSysl, "barrier" -> barrierSysl,
-      "rwlock" -> rwlockSysl, "channel" -> channelSysl, "mailbox" -> mailboxSysl,
+      "kernel" -> kernelSysl, "services" -> servicesSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)

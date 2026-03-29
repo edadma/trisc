@@ -1990,6 +1990,126 @@ class SyslTriscCodegenTests extends AnyFreeSpec with Matchers {
         |""".stripMargin) shouldBe 5
   }
 
+  "array write at index 2+ via function call" in {
+    compileAndRun(
+      """val EMPTY = -1
+        |var head: [4]int
+        |var mask = 0
+        |
+        |init()
+        |    var i = 0
+        |    while i < 4
+        |        head[i] = EMPTY
+        |        i += 1
+        |
+        |enqueue(pri: int, idx: int)
+        |    head[pri] = idx
+        |    mask = mask | (1 << pri)
+        |
+        |main() -> int
+        |    init()
+        |    enqueue(0, 10)
+        |    enqueue(1, 20)
+        |    enqueue(2, 30)
+        |    head[0] + head[1] + head[2]
+        |""".stripMargin) shouldBe 60
+  }
+
+  "cross-module array write at index 2+ with 5-arg creator" in {
+    compileMultiAndRun(Map(
+      "kernel" ->
+        """val EMPTY = -1
+          |var head: [4]int
+          |var mask = 0
+          |var count = 0
+          |
+          |init()
+          |    var i = 0
+          |    while i < 4
+          |        head[i] = EMPTY
+          |        i += 1
+          |
+          |enqueue(pri: int, idx: int)
+          |    head[pri] = idx
+          |    mask = mask | (1 << pri)
+          |
+          |create(a: int, b: int, c: int, name: *byte, pri: int)
+          |    val idx = count
+          |    count = count + 1
+          |    enqueue(pri, idx)
+          |
+          |get_head(pri: int) -> int = head[pri]
+          |get_mask() -> int = mask
+          |""".stripMargin,
+      "main" ->
+        """import "kernel"
+          |
+          |main() -> int
+          |    init()
+          |    create(1, 2, 3, "a", 0)
+          |    create(4, 5, 6, "b", 1)
+          |    create(7, 8, 9, "c", 2)
+          |    get_head(0) * 100 + get_head(1) * 10 + get_head(2)
+          |""".stripMargin
+    )) shouldBe 12  // head[0]=0, head[1]=1, head[2]=2
+  }
+
+  "cross-module full enqueue pattern at priority 2" in {
+    compileMultiAndRun(Map(
+      "kernel" ->
+        """val EMPTY = -1
+          |var head: [4]int
+          |var tail: [4]int
+          |var mask = 0
+          |var count = 0
+          |
+          |struct Task
+          |    pri: int
+          |    next: int
+          |
+          |var tasks: [8]Task
+          |
+          |init()
+          |    var i = 0
+          |    while i < 4
+          |        head[i] = EMPTY
+          |        tail[i] = EMPTY
+          |        i += 1
+          |    mask = 0
+          |
+          |enqueue(pri: int, idx: int)
+          |    tasks[idx].next = EMPTY
+          |    if head[pri] == EMPTY
+          |        head[pri] = idx
+          |        tail[pri] = idx
+          |    else
+          |        tasks[tail[pri]].next = idx
+          |        tail[pri] = idx
+          |    mask = mask | (1 << pri)
+          |
+          |create(a: int, b: int, c: int, name: *byte, pri: int)
+          |    val idx = count
+          |    tasks[idx].pri = pri
+          |    tasks[idx].next = EMPTY
+          |    count = count + 1
+          |    enqueue(pri, idx)
+          |
+          |get_head(pri: int) -> int = head[pri]
+          |get_mask() -> int = mask
+          |""".stripMargin,
+      "main" ->
+        """import "kernel"
+          |
+          |main() -> int
+          |    init()
+          |    create(1, 2, 3, "a", 0)
+          |    create(4, 5, 6, "b", 1)
+          |    create(7, 8, 9, "c", 2)
+          |    get_mask()
+          |""".stripMargin
+    )) shouldBe 7  // bits 0,1,2 set
+  }
+
   "single-module array write at index" in {
     compileAndRun(
       """var arr: [4]int
