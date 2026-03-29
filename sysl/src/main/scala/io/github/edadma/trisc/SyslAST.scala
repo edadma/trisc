@@ -60,6 +60,7 @@ case class CastAST(targetType: String, expr: ExpressionAST) extends ExpressionAS
 case class IfExprAST(cond: ExpressionAST, thenBody: List[StmtAST], elseBody: Option[List[StmtAST]]) extends ExpressionAST
 case class AddrOfAST(name: String) extends ExpressionAST
 case class AddrOfIndexAST(array: ExpressionAST, index: ExpressionAST) extends ExpressionAST
+case class AddrOfFieldAST(obj: ExpressionAST, field: String) extends ExpressionAST
 case class DerefAST(expr: ExpressionAST) extends ExpressionAST
 case class IndexAST(expr: ExpressionAST, index: ExpressionAST) extends ExpressionAST
 case class FieldAccessAST(obj: ExpressionAST, field: String) extends ExpressionAST

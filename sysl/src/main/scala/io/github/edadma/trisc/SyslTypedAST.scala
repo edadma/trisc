@@ -51,6 +51,7 @@ case class TArrayLit(elements: List[TExpr], typ: SyslType) extends TExpr
 case class TVarRef(name: String, typ: SyslType) extends TExpr
 case class TAddrOf(name: String, typ: SyslType) extends TExpr
 case class TAddrOfIndex(array: TExpr, index: TExpr, typ: SyslType) extends TExpr
+case class TAddrOfField(obj: TExpr, fieldIndex: Int, typ: SyslType) extends TExpr
 case class TDeref(expr: TExpr, typ: SyslType) extends TExpr
 case class TIndex(expr: TExpr, index: TExpr, typ: SyslType) extends TExpr
 case class TFieldAccess(obj: TExpr, fieldIndex: Int, typ: SyslType) extends TExpr

@@ -722,6 +722,13 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = base + offset
 
+      case TAddrOfField(obj, fieldIndex, _) =>
+        val st = obj.typ.asInstanceOf[SyslType.StructType]
+        val off = fieldOffset(st, fieldIndex)
+        emitStructAddr(obj)        // r1 = struct address
+        if off != 0 then emitAddImm(1, 1, off)
+        // r1 = address of field (don't load — just the address)
+
       case TFieldAccess(obj, fieldIndex, fieldType) =>
         val st = obj.typ.asInstanceOf[SyslType.StructType]
         val off = fieldOffset(st, fieldIndex)

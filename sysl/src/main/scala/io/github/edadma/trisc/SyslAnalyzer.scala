@@ -195,7 +195,8 @@ class SyslAnalyzer:
       // bool and int are NOT compatible — use explicit casts
       case (t, PtrType(_)) if t.isIntegral => true   // int to pointer (e.g., memory-mapped I/O addresses)
       case (PtrType(_), t) if t.isIntegral => true   // pointer to int
-      case (ArrayType(e1, _), PtrType(e2)) if e1 == e2 => true
+      case (PtrType(_), PtrType(_)) => true           // any pointer ↔ any pointer (like C's void*)
+      case (ArrayType(_, _), PtrType(_)) => true          // array decays to any pointer
       case (ArrayType(e1, _), ArrayType(e2, _)) if e1 == e2 => true
       case (ArrayType(e1, _), SliceType(e2)) if e1 == e2 => true  // fixed array → slice
       case (SliceType(e1), SliceType(e2)) if e1 == e2 => true
@@ -434,6 +435,16 @@ class SyslAnalyzer:
       case AddrOfAST(name) =>
         val sym = lookup(name)
         TAddrOf(name, PtrType(sym.typ))
+
+      case AddrOfFieldAST(obj, field) =>
+        val tObj = analyzeExpr(obj)
+        val (resolvedObj, structType) = tObj.typ match
+          case st: StructType => (tObj, st)
+          case PtrType(st: StructType) => (TDeref(tObj, st), st)
+          case other => throw AnalysisError(s"cannot take address of field '$field' on $other")
+        val idx = structType.fields.indexWhere(_._1 == field)
+        if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
+        TAddrOfField(resolvedObj, idx, PtrType(structType.fields(idx)._2))
 
       case AddrOfIndexAST(array, index) =>
         val tArray = analyzeExpr(array)

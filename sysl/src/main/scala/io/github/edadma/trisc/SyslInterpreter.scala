@@ -238,8 +238,17 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TStringLit(s, _) =>
         StrVal(s)
 
-      case TArrayDecl(size, _, _) =>
-        val cells = Array.fill(size)(new Cell(IntVal(0)))
+      case TArrayDecl(size, _, typ) =>
+        def initElem(t: SyslType): Value = t match
+          case SyslType.ArrayType(elem, sz) =>
+            val cells = Array.fill(sz)(new Cell(initElem(elem)))
+            ArrVal(cells, 0)
+          case st: SyslType.StructType => evalAny(TStructLit(st), env)
+          case _ => IntVal(0)
+        val elemType = typ match
+          case SyslType.ArrayType(e, _) => e
+          case _ => SyslType.I64
+        val cells = Array.fill(size)(new Cell(initElem(elemType)))
         ArrVal(cells, 0)
 
       case TArrayLit(elements, _) =>
@@ -249,6 +258,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TVarRef(name, _) => lookupCell(name, env).value
 
       case TAddrOf(name, _) => PtrVal(lookupCell(name, env))
+
+      case TAddrOfField(obj, fieldIndex, _) =>
+        val ArrVal(cells, off) = evalAny(obj, env): @unchecked
+        PtrVal(cells(off + fieldIndex))
 
       case TAddrOfIndex(array, index, _) =>
         val arrVal = evalAny(array, env)
@@ -477,7 +490,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         IntVal(old)
 
       case TStructLit(SyslType.StructType(_, fields)) =>
-        val cells = Array.fill(fields.size)(new Cell(IntVal(0)))
+        def initField(typ: SyslType): Value = typ match
+          case st: SyslType.StructType => evalAny(TStructLit(st), env)
+          case SyslType.ArrayType(elem, size) =>
+            val cells = Array.fill(size)(new Cell(initField(elem)))
+            ArrVal(cells, 0)
+          case _ => IntVal(0)
+        val cells = fields.map((_, typ) => new Cell(initField(typ))).toArray
         ArrVal(cells, 0)
 
       case TFieldAccess(obj, fieldIndex, _) =>
