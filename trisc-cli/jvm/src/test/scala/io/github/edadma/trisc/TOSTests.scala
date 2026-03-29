@@ -1071,7 +1071,7 @@ class TOSTests extends AnyFreeSpec with Matchers {
 
   // ===== Priority scheduling tests =====
 
-  "TOS: higher priority thread runs first" in {
+  "TOS: higher priority thread scheduled first" in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import "kernel"
@@ -1080,21 +1080,31 @@ class TOSTests extends AnyFreeSpec with Matchers {
           |kernel_main() -> int
           |    create_thread_pri(low_task, 0x6000, 0x5000, "low", 1)
           |    create_thread_pri(high_task, 0x8000, 0x7000, "high", 10)
+          |    create_thread_pri(starter, 0xA000, 0x9000, "start", 0)
           |    val period: *i32 = 0x100020
           |    *period = 10
           |    val control: *i8 = 0x100024
           |    *control = 1
           |    first_thread_ssp()
           |
+          |starter()
+          |    sleep(5)
+          |
           |low_task()
+          |    sleep(5)
+          |    yield()
           |    putc(76)
           |
           |high_task()
+          |    sleep(5)
+          |    yield()
           |    putc(72)
           |""".stripMargin
     ))
 
-    // H (high priority) should print before L (low priority)
+    // All three sleep for 5 ticks, wake together. Starter runs first (thread 0).
+    // After starter exits, scheduler picks between low(pri=1) and high(pri=10).
+    // High should print before low.
     output should include("H")
     output should include("L")
     output.indexOf('H') should be < output.indexOf('L')

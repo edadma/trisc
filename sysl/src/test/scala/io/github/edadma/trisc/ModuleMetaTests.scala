@@ -163,6 +163,6 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
   }
 
   "fromSmeta rejects unknown kind" in {
-    an[IllegalArgumentException] should be thrownBy ModuleMeta.fromSmeta("SMETA v1\nSTRUCT foo\n")
+    an[IllegalArgumentException] should be thrownBy ModuleMeta.fromSmeta("SMETA v1\nBLOB foo\n")
   }
 }

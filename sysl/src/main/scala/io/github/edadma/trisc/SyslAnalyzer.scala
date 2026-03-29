@@ -38,6 +38,8 @@ class SyslAnalyzer:
             throw AnalysisError(s"imported symbol '${sym.name}' conflicts with existing global")
           globalScope(sym.name) = SymInfo(sym.name, dataType, mutable = false)
           externalSymbols += sym.name
+        case SymbolMeta.Kind.Struct(st) =>
+          structTypes(sym.name) = st
 
   def isExternal(name: String): Boolean = externalSymbols.contains(name)
   def externals: Set[String] = externalSymbols.toSet

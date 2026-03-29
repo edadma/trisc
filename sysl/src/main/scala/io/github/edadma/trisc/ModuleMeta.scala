@@ -8,6 +8,7 @@ object SymbolMeta:
   enum Kind:
     case Func(params: List[SyslType], returnType: SyslType)
     case Data(dataType: SyslType)
+    case Struct(structType: SyslType.StructType)
 
 class ModuleMeta(val symbols: List[SymbolMeta]):
 
@@ -21,6 +22,8 @@ class ModuleMeta(val symbols: List[SymbolMeta]):
           buf ++= s"${vis}FUNC ${sym.name} ${SyslType.funcSigToPrefix(params, ret)}\n"
         case SymbolMeta.Kind.Data(dataType) =>
           buf ++= s"${vis}DATA ${sym.name} ${dataType.toPrefix}\n"
+        case SymbolMeta.Kind.Struct(st) =>
+          buf ++= s"${vis}STRUCT ${sym.name} ${st.toPrefix}\n"
     buf.toString
 
   def toAsmGlobals: String =
@@ -31,6 +34,7 @@ class ModuleMeta(val symbols: List[SymbolMeta]):
           buf ++= s"global ${sym.name}, func, ${SyslType.funcSigToPrefix(params, ret)}\n"
         case SymbolMeta.Kind.Data(dataType) =>
           buf ++= s"global ${sym.name}, data, ${dataType.toPrefix}\n"
+        case SymbolMeta.Kind.Struct(_) => // type-only, no asm global
     buf.toString
 
   def publicSymbols: List[SymbolMeta] = symbols.filter(!_.isPrivate)
@@ -39,6 +43,8 @@ object ModuleMeta:
 
   def fromProgram(program: TProgram): ModuleMeta =
     val syms = program.decls.collect {
+      case TStructDecl(name, fields) =>
+        SymbolMeta(name, SymbolMeta.Kind.Struct(SyslType.StructType(name, fields)), isPrivate = false)
       case TFunDecl(name, params, returnType, _, isPrivate) =>
         SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType), isPrivate)
       case TVarDecl(name, typ, _, isPrivate) =>
@@ -72,6 +78,9 @@ object ModuleMeta:
             case "DATA" =>
               val dataType = SyslType.parseType(tokens)
               syms += SymbolMeta(name, SymbolMeta.Kind.Data(dataType), isPrivate)
+            case "STRUCT" =>
+              val st = SyslType.parseType(tokens).asInstanceOf[SyslType.StructType]
+              syms += SymbolMeta(name, SymbolMeta.Kind.Struct(st), isPrivate)
             case other =>
               throw IllegalArgumentException(s"line $lineNum: unknown symbol kind '$other'")
 
