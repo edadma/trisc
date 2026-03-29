@@ -1081,25 +1081,25 @@ class TOSTests extends AnyFreeSpec with Matchers {
   // ===== Priority scheduling tests =====
 
   "TOS: higher priority thread runs first" in {
-    val (_, output) = runTOS(Map(
+    val (cpu, output) = runTOS(Map(
       "app" ->
         """import "kernel"
           |import "services"
           |
           |kernel_main() -> int
-          |    create_thread_pri(low_task, 0x6000, 0x5000, "low", 1)
-          |    create_thread_pri(high_task, 0x8000, 0x7000, "high", 10)
+          |    create_thread_pri(task_b, 0x8000, 0x7000, "b", 1)
+          |    create_thread_pri(task_a, 0x6000, 0x5000, "a", 0)
           |    val period: *i32 = 0x100020
           |    *period = 10
           |    val control: *i8 = 0x100024
           |    *control = 1
           |    first_thread_ssp()
           |
-          |low_task()
-          |    putc(76)
-          |
-          |high_task()
+          |task_a()
           |    putc(72)
+          |
+          |task_b()
+          |    putc(76)
           |""".stripMargin
     ))
 
@@ -1116,8 +1116,8 @@ class TOSTests extends AnyFreeSpec with Matchers {
           |import "services"
           |
           |kernel_main() -> int
-          |    create_thread_pri(task_a, 0x6000, 0x5000, "a", 5)
-          |    create_thread_pri(task_b, 0x8000, 0x7000, "b", 5)
+          |    create_thread_pri(task_a, 0x6000, 0x5000, "a", 1)
+          |    create_thread_pri(task_b, 0x8000, 0x7000, "b", 1)
           |    val period: *i32 = 0x100020
           |    *period = 10
           |    val control: *i8 = 0x100024
@@ -1630,5 +1630,300 @@ class TOSTests extends AnyFreeSpec with Matchers {
         |""".stripMargin)
     // F=full, R=reuse succeeded, 0=min value
     output shouldBe "FR0"
+  }
+
+  // ===== MINIX-style scheduler tests =====
+
+  "Scheduler: three threads same priority" in {
+    val (cpu, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(task_a, 0x6000, 0x5000, "a")
+          |    create_thread(task_b, 0x8000, 0x7000, "b")
+          |    create_thread(task_c, 0xA000, 0x9000, "c")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task_a()
+          |    putc(65)
+          |
+          |task_b()
+          |    putc(66)
+          |
+          |task_c()
+          |    putc(67)
+          |""".stripMargin
+    ))
+
+    info(s"output: '$output' state: ${cpu.state}")
+    output should include("A")
+    output should include("B")
+    output should include("C")
+  }
+
+  "Scheduler: basic two-priority smoke test" in {
+    val (cpu, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread_pri(task_b, 0x8000, 0x7000, "b", 1)
+          |    create_thread_pri(task_a, 0x6000, 0x5000, "a", 0)
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task_a()
+          |    putc(65)
+          |
+          |task_b()
+          |    putc(66)
+          |""".stripMargin
+    ))
+
+    info(s"output: '$output' state: ${cpu.state}")
+    output should include("A")
+    output should include("B")
+    // A (pri=0, higher) should run before B (pri=1, lower)
+    // But verify they both actually printed
+    info(s"smoke output: '$output'")
+    output.indexOf('A') should be < output.indexOf('B')
+  }
+
+  "Scheduler: quantum expiry causes round-robin rotation" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(task_a, 0x6000, 0x5000, "a")
+          |    create_thread(task_b, 0x8000, 0x7000, "b")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task_a()
+          |    var i = 0
+          |    while i < 4
+          |        putc(65)
+          |        sleep(10)
+          |        i += 1
+          |
+          |task_b()
+          |    var i = 0
+          |    while i < 4
+          |        putc(66)
+          |        sleep(10)
+          |        i += 1
+          |""".stripMargin
+    ))
+
+    // Both should get equal time at same priority
+    output.count(_ == 'A') shouldBe 4
+    output.count(_ == 'B') shouldBe 4
+  }
+
+  "Scheduler: high priority preempts low priority" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(high, 0x20000, 0x1F000, "high")
+          |    create_thread_pri(low, 0x22000, 0x21000, "low", 2)
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |high()
+          |    putc(72)
+          |    sleep(20)
+          |    putc(72)
+          |
+          |low()
+          |    putc(76)
+          |    sleep(20)
+          |    putc(76)
+          |""".stripMargin
+    ))
+
+    // High (pri=0) runs first, then low runs while high sleeps
+    output should include("H")
+    output should include("L")
+    output.indexOf('H') should be < output.indexOf('L')
+  }
+
+  "Scheduler: blocked thread removed from queue" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(blocker, 0x6000, 0x5000, "blocker")
+          |    create_thread(runner, 0x8000, 0x7000, "runner")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |blocker()
+          |    putc(66)
+          |    sleep(50)
+          |    putc(66)
+          |
+          |runner()
+          |    sleep(10)
+          |    putc(82)
+          |    sleep(10)
+          |    putc(82)
+          |""".stripMargin
+    ))
+
+    // Blocker prints B, sleeps. Runner prints R twice while blocker sleeps.
+    // Blocker prints B again after wake.
+    output.count(_ == 'B') shouldBe 2
+    output.count(_ == 'R') shouldBe 2
+  }
+
+  "Scheduler: three priority levels strict ordering" in {
+    val (cpu, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    make_high()
+          |    make_med()
+          |    make_low()
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |make_high()
+          |    create_thread(high, 0x20000, 0x1F000, "high")
+          |
+          |make_med()
+          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
+          |
+          |make_low()
+          |    create_thread_pri(low, 0x24000, 0x23000, "low", 2)
+          |
+          |high()
+          |    putc(72)
+          |
+          |med()
+          |    putc(77)
+          |
+          |low()
+          |    putc(76)
+          |""".stripMargin
+    ))
+
+    info(s"output: '$output' state: ${cpu.state} pc: ${cpu.pc}")
+    // Strict priority: H before M before L
+    output should include("H")
+    output should include("M")
+    output should include("L")
+    val h = output.indexOf('H')
+    val m = output.indexOf('M')
+    val l = output.indexOf('L')
+    h should be < m
+    m should be < l
+  }
+
+  "Scheduler: yield moves to back of queue" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    create_thread(task_a, 0x6000, 0x5000, "a")
+          |    create_thread(task_b, 0x8000, 0x7000, "b")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task_a()
+          |    putc(65)
+          |    yield()
+          |    putc(65)
+          |
+          |task_b()
+          |    putc(66)
+          |    yield()
+          |    putc(66)
+          |""".stripMargin
+    ))
+
+    // A prints, yields → B prints, yields → A prints → B prints: ABAB
+    output shouldBe "ABAB"
+  }
+
+  "Scheduler: unblock higher priority preempts current" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |
+          |kernel_main() -> int
+          |    make_high()
+          |    make_low()
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |make_high()
+          |    create_thread(high, 0x20000, 0x1F000, "high")
+          |
+          |make_low()
+          |    create_thread_pri(low, 0x22000, 0x21000, "low", 2)
+          |
+          |high()
+          |    putc(49)
+          |    sleep(20)
+          |    putc(50)
+          |
+          |low()
+          |    var i = 0
+          |    while i < 5
+          |        putc(76)
+          |        sleep(10)
+          |        i += 1
+          |""".stripMargin
+    ))
+
+    // High prints 1, sleeps. Low prints L. High wakes, preempts, prints 2.
+    // Then low continues.
+    output should include("1")
+    output should include("2")
+    output should include("L")
+    // 2 must come before the last L's
+    val idx2 = output.indexOf('2')
+    val lastL = output.lastIndexOf('L')
+    idx2 should be < lastL
   }
 }
