@@ -4,32 +4,40 @@ TOS System Services
 User-facing API for TOS kernel services.
 
 Syscall numbers:
-  0 = sleep         — block for N timer ticks
-  1 = putc          — write character to stdout
-  2 = yield         — voluntary context switch
-  3 = exit          — terminate current thread
-  4 = join          — wait for another thread to terminate
-  5 = thread_id     — get current thread index
-  6 = uptime        — get tick counter
-  7 = thread_count  — get number of created threads
-  8 = thread_state  — get state of a thread
-  9 = thread_name   — get name pointer of a thread
-  10 = sleep_until  — block until absolute tick
+  0 = sleep           — block for N timer ticks
+  1 = putc            — write character to stdout
+  2 = yield           — voluntary context switch
+  3 = exit            — terminate current thread
+  4 = join            — wait for another thread to terminate
+  5 = thread_id       — get current thread index
+  6 = uptime          — get tick counter
+  7 = thread_count    — get number of created threads
+  8 = thread_state    — get state of a thread
+  9 = thread_name     — get name pointer of a thread
+  10 = sleep_until    — block until absolute tick
+  11 = ctx_switches   — get context switch count for a thread
+  12 = cpu_ticks      — get CPU ticks for a thread
+  13 = total_switches — get global context switch count
+  14 = set_watchdog   — set watchdog quanta limit (0 = disable)
 @
 
   extern syscall(number: int, arg: int) -> int
 
-  val SYS_SLEEP        = 0
-  val SYS_PUTC         = 1
-  val SYS_YIELD        = 2
-  val SYS_EXIT         = 3
-  val SYS_JOIN         = 4
-  val SYS_THREAD_ID    = 5
-  val SYS_UPTIME       = 6
-  val SYS_THREAD_COUNT = 7
-  val SYS_THREAD_STATE = 8
-  val SYS_THREAD_NAME  = 9
-  val SYS_SLEEP_UNTIL  = 10
+  val SYS_SLEEP          = 0
+  val SYS_PUTC           = 1
+  val SYS_YIELD          = 2
+  val SYS_EXIT           = 3
+  val SYS_JOIN           = 4
+  val SYS_THREAD_ID      = 5
+  val SYS_UPTIME         = 6
+  val SYS_THREAD_COUNT   = 7
+  val SYS_THREAD_STATE   = 8
+  val SYS_THREAD_NAME    = 9
+  val SYS_SLEEP_UNTIL    = 10
+  val SYS_CTX_SWITCHES   = 11
+  val SYS_CPU_TICKS      = 12
+  val SYS_TOTAL_SWITCHES = 13
+  val SYS_SET_WATCHDOG   = 14
 
 @api sleep(ticks) — Block the calling thread for N timer ticks.
 
@@ -41,7 +49,7 @@ Syscall numbers:
   putc(ch: int)
       syscall(SYS_PUTC, ch)
 
-@api yield() — Voluntary context switch.
+@api yield() — Voluntary context switch. Resets watchdog counter.
 
   yield()
       syscall(SYS_YIELD, 0)
@@ -71,7 +79,7 @@ Syscall numbers:
   get_thread_count() -> int
       syscall(SYS_THREAD_COUNT, 0)
 
-@api get_thread_state(id) -> int — Return the state of a thread (0=ready, 1=running, 2=blocked, 3=terminated, 4=joining).
+@api get_thread_state(id) -> int — Return the state of a thread.
 
   get_thread_state(id: int) -> int
       syscall(SYS_THREAD_STATE, id)
@@ -85,3 +93,23 @@ Syscall numbers:
 
   sleep_until(tick: int)
       syscall(SYS_SLEEP_UNTIL, tick)
+
+@api get_ctx_switches(id) -> int — Return context switch count for a thread.
+
+  get_ctx_switches(id: int) -> int
+      syscall(SYS_CTX_SWITCHES, id)
+
+@api get_cpu_ticks(id) -> int — Return total CPU ticks for a thread.
+
+  get_cpu_ticks(id: int) -> int
+      syscall(SYS_CPU_TICKS, id)
+
+@api get_total_switches() -> int — Return global context switch count.
+
+  get_total_switches() -> int
+      syscall(SYS_TOTAL_SWITCHES, 0)
+
+@api set_watchdog(limit) — Set watchdog quanta limit. 0 disables.
+
+  set_watchdog(limit: int)
+      syscall(SYS_SET_WATCHDOG, limit)

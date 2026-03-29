@@ -114,7 +114,7 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
     cpu.run()
     (cpu, output.toString)
 
-  def runTOS(userSources: Map[String, String], maxCycles: Int = 500000000): (CPU, String) =
+  def runTOS(userSources: Map[String, String], maxCycles: Int = 50000000): (CPU, String) =
     val bootTof = assemble(bootAsm, relocatable = true)
 
     val allSources = Map(

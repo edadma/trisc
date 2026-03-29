@@ -9,6 +9,13 @@ using FIFO queues with time quantum expiry.
 
 Priority convention: lower number = higher priority (0 is highest).
 
+Features:
+  - Per-priority FIFO run queues with ready mask
+  - Time quantum with round-robin rotation
+  - Thread statistics (context switches, CPU ticks)
+  - Watchdog (kills threads exceeding max consecutive quanta)
+  - Software timers (one-shot callbacks after N ticks)
+
 All kernel services are accessed through trap 0 (syscall).
 The trap handler in boot.asm dispatches based on r1:
   0 = sleep(ticks)    — block for N timer ticks
@@ -16,7 +23,7 @@ The trap handler in boot.asm dispatches based on r1:
   2 = yield()         — voluntary context switch
 @
 
-  val MAX_THREADS   = 8
+  val MAX_THREADS    = 8
   val NUM_PRIORITIES = 4
   val DEFAULT_QUANTUM = 5
 
@@ -35,6 +42,11 @@ context.
 
 The next field links threads in the same priority run queue.
 QUEUE_EMPTY (-1) marks the end of a queue.
+
+Statistics fields track per-thread performance:
+  - ctx_switches: number of times this thread was scheduled in
+  - cpu_ticks: total ticks spent running
+  - consec_quanta: consecutive full quanta without voluntary yield/sleep
 @
 
   struct Task
@@ -46,6 +58,9 @@ QUEUE_EMPTY (-1) marks the end of a queue.
       join_target: int
       quantum: int
       next: int
+      ctx_switches: int
+      cpu_ticks: int
+      consec_quanta: int
 
 @tech
 Run queues: one FIFO queue per priority level. Each queue
@@ -66,6 +81,35 @@ from bit 0.
   var current_thread = -1
   var thread_count = 0
   var ticks = 0
+
+@tech
+Watchdog configuration. When a thread uses max_consec_quanta
+consecutive full quanta without voluntarily yielding or sleeping,
+the watchdog terminates it. Set to 0 to disable.
+@
+
+  var watchdog_limit = 0
+  var total_ctx_switches = 0
+
+@tech
+Software timers. A fixed pool of one-shot timers that fire a
+callback function after a specified number of ticks. The timer
+queue is scanned each tick in schedule().
+
+Each timer has:
+  - active: 1 if armed, 0 if free
+  - fire_tick: absolute tick when the timer fires
+  - callback: function pointer to call (void -> void)
+@
+
+  val MAX_TIMERS = 8
+
+  struct SoftTimer
+      active: int
+      fire_tick: int
+      callback: int
+
+  var timers: [8]SoftTimer
 
   extern thread_exit()
 
@@ -104,10 +148,6 @@ These maintain the ready_mask invariant.
           ready_mask = ready_mask & ~(1 << pri)
       tasks[idx].next = QUEUE_EMPTY
       idx
-
-@tech
-init_queues — Initialize all run queues to empty.
-@
 
   init_queues()
       var i = 0
@@ -159,25 +199,7 @@ Lower priority number = higher priority. Priority 0 runs first.
   create_thread_pri(entry_point: int, usp: int, ssp: int, name: *byte, priority: int)
       ensure_queues_init()
       val idx = thread_count
-      var sp = ssp
-      sp -= 8
-      *sp = 0                 // PSR
-      sp -= 8
-      *sp = entry_point       // PC
-      sp -= 8
-      *sp = 0                 // r1
-      sp -= 8
-      *sp = 0                 // r2
-      sp -= 8
-      *sp = 0                 // r3
-      sp -= 8
-      *sp = 0                 // r4
-      sp -= 8
-      *sp = 0                 // r5
-      sp -= 8
-      *sp = thread_exit       // r6 = return address (exit trampoline)
-      sp -= 8
-      *sp = usp               // USP
+      val sp = build_stack_frame(entry_point, usp, ssp)
       tasks[idx].ssp = sp
       tasks[idx].state = STATE_READY
       tasks[idx].wake_tick = 0
@@ -186,6 +208,9 @@ Lower priority number = higher priority. Priority 0 runs first.
       tasks[idx].join_target = -1
       tasks[idx].quantum = DEFAULT_QUANTUM
       tasks[idx].next = QUEUE_EMPTY
+      tasks[idx].ctx_switches = 0
+      tasks[idx].cpu_ticks = 0
+      tasks[idx].consec_quanta = 0
       thread_count += 1
       enqueue(priority, idx)
 
@@ -194,12 +219,14 @@ Lower priority number = higher priority. Priority 0 runs first.
   sleep_current(nticks: int)
       tasks[current_thread].state = STATE_BLOCKED
       tasks[current_thread].wake_tick = ticks + nticks
+      tasks[current_thread].consec_quanta = 0
 
 @api sleep_until_current(target_tick) — Block the current thread until an absolute tick.
 
   sleep_until_current(target_tick: int)
       tasks[current_thread].state = STATE_BLOCKED
       tasks[current_thread].wake_tick = target_tick
+      tasks[current_thread].consec_quanta = 0
 
 @api query_thread_state(id) -> int — Return the state of a thread.
 
@@ -210,6 +237,26 @@ Lower priority number = higher priority. Priority 0 runs first.
 
   query_thread_name(id: int) -> *byte
       tasks[id].name
+
+@api query_thread_ctx_switches(id) -> int — Return the context switch count for a thread.
+
+  query_thread_ctx_switches(id: int) -> int
+      tasks[id].ctx_switches
+
+@api query_thread_cpu_ticks(id) -> int — Return the total CPU ticks for a thread.
+
+  query_thread_cpu_ticks(id: int) -> int
+      tasks[id].cpu_ticks
+
+@api query_total_ctx_switches() -> int — Return the global context switch count.
+
+  query_total_ctx_switches() -> int
+      total_ctx_switches
+
+@api kernel_set_watchdog(limit) — Set the watchdog quanta limit. 0 disables.
+
+  kernel_set_watchdog(limit: int)
+      watchdog_limit = limit
 
 @api terminate_current() — Mark the current thread as terminated.
 
@@ -244,6 +291,7 @@ target thread ID so terminate_current can wake us.
           return
       tasks[current_thread].state = STATE_JOINING
       tasks[current_thread].join_target = target_id
+      tasks[current_thread].consec_quanta = 0
 
 @api schedule(current_ssp) -> int — MINIX-style priority scheduler.
 
@@ -253,11 +301,13 @@ When 0 is returned, the assembly caller does wfi + retries.
 
 Steps:
   1. Increment tick counter
-  2. Save current thread's SSP
+  2. Save current thread's SSP and accumulate CPU tick
   3. Handle quantum expiry (move to back of queue if expired)
-  4. Wake any blocked threads whose sleep time has expired
-  5. Pick the highest-priority non-empty queue and dequeue its front
-  6. Return its SSP, or 0 if all queues are empty
+  4. Check watchdog (terminate thread if over limit)
+  5. Fire any expired software timers
+  6. Wake any blocked threads whose sleep time has expired
+  7. Pick the highest-priority non-empty queue and dequeue its front
+  8. Return its SSP, or 0 if all queues are empty
 @
 
   schedule(current_ssp: int) -> int
@@ -266,14 +316,25 @@ Steps:
       // Save current thread (skip when idle, current_thread == -1)
       if current_thread >= 0
           tasks[current_thread].ssp = current_ssp
+          tasks[current_thread].cpu_ticks += 1
           if tasks[current_thread].state == STATE_RUNNING
               // Decrement quantum and handle expiry
               tasks[current_thread].quantum -= 1
               tasks[current_thread].state = STATE_READY
               if tasks[current_thread].quantum <= 0
+                  // Full quantum consumed without voluntary yield
                   tasks[current_thread].quantum = DEFAULT_QUANTUM
-              // Re-enqueue at back of its priority queue
-              enqueue(tasks[current_thread].priority, current_thread)
+                  tasks[current_thread].consec_quanta += 1
+                  // Watchdog check
+                  if watchdog_limit > 0
+                      if tasks[current_thread].consec_quanta >= watchdog_limit
+                          tasks[current_thread].state = STATE_TERMINATED
+              else
+                  // Yielded or preempted before quantum expired — reset watchdog
+                  tasks[current_thread].consec_quanta = 0
+              // Re-enqueue if still ready (watchdog may have terminated)
+              if tasks[current_thread].state == STATE_READY
+                  enqueue(tasks[current_thread].priority, current_thread)
 
       // Wake threads whose sleep time has expired
       var i = 0
@@ -293,6 +354,8 @@ Steps:
               if next != QUEUE_EMPTY
                   current_thread = next
                   tasks[next].state = STATE_RUNNING
+                  tasks[next].ctx_switches += 1
+                  total_ctx_switches += 1
                   return tasks[next].ssp
           pri += 1
 
@@ -317,6 +380,33 @@ highest-priority non-empty queue.
               if next != QUEUE_EMPTY
                   current_thread = next
                   tasks[next].state = STATE_RUNNING
+                  tasks[next].ctx_switches += 1
+                  total_ctx_switches += 1
                   return tasks[next].ssp
           pri += 1
       0
+
+@api timer_arm(delay, callback) -> int — Arm a software timer. Returns timer index or -1 if full.
+
+@tech
+The callback is a function pointer (int) that will be called
+after delay ticks. One-shot: fires once then deactivates.
+@
+
+  timer_arm(delay: int, callback: int) -> int
+      var i = 0
+      while i < MAX_TIMERS
+          if timers[i].active == 0
+              timers[i].active = 1
+              timers[i].fire_tick = ticks + delay
+              timers[i].callback = callback
+              return i
+          i += 1
+      -1
+
+@api timer_cancel(id) — Cancel a software timer.
+
+  timer_cancel(id: int)
+      if id >= 0
+          if id < MAX_TIMERS
+              timers[id].active = 0

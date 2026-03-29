@@ -162,6 +162,14 @@ trap_handler
   beq r1, r3, .sys_thread_name ; 9 = thread_name(id)
   ldi r3, 10
   beq r1, r3, .sys_sleep_until ; 10 = sleep_until(tick)
+  ldi r3, 11
+  beq r1, r3, .sys_ctx_switches ; 11 = ctx_switches(id)
+  ldi r3, 12
+  beq r1, r3, .sys_cpu_ticks   ; 12 = cpu_ticks(id)
+  ldi r3, 13
+  beq r1, r3, .sys_total_switches ; 13 = total_switches
+  ldi r3, 14
+  beq r1, r3, .sys_set_watchdog ; 14 = set_watchdog(limit)
 
   ; Slow path: save full context for syscalls that context-switch
   pshr r6                       ; save user's r1-r6
@@ -306,6 +314,75 @@ extern sleep_until_current
   movi r4, sleep_until_current
   jalr r6, r4
   bra do_schedule
+
+; ctx_switches(id): return context switch count for thread r2
+extern query_thread_ctx_switches
+
+.sys_ctx_switches
+  pshd r2
+  pshd r4
+  pshd r5
+  pshd r6
+  mov  r1, r2
+  movi r4, query_thread_ctx_switches
+  jalr r6, r4
+  popd r6
+  popd r5
+  popd r4
+  popd r2
+  sti
+  rte
+
+; cpu_ticks(id): return CPU ticks for thread r2
+extern query_thread_cpu_ticks
+
+.sys_cpu_ticks
+  pshd r2
+  pshd r4
+  pshd r5
+  pshd r6
+  mov  r1, r2
+  movi r4, query_thread_cpu_ticks
+  jalr r6, r4
+  popd r6
+  popd r5
+  popd r4
+  popd r2
+  sti
+  rte
+
+; total_switches: return global context switch count
+extern query_total_ctx_switches
+
+.sys_total_switches
+  pshd r4
+  pshd r5
+  pshd r6
+  movi r4, query_total_ctx_switches
+  jalr r6, r4
+  popd r6
+  popd r5
+  popd r4
+  sti
+  rte
+
+; set_watchdog(limit): set watchdog quanta limit
+extern kernel_set_watchdog
+
+.sys_set_watchdog
+  pshd r2
+  pshd r4
+  pshd r5
+  pshd r6
+  mov  r1, r2
+  movi r4, kernel_set_watchdog
+  jalr r6, r4
+  popd r6
+  popd r5
+  popd r4
+  popd r2
+  sti
+  rte
 
 
 ; ============================================================================
