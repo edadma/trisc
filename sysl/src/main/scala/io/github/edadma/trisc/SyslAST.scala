@@ -56,6 +56,7 @@ case class PreDecAST(name: String) extends ExpressionAST
 case class PostIncAST(name: String) extends ExpressionAST
 case class PostDecAST(name: String) extends ExpressionAST
 case class CallAST(name: String, args: List[ExpressionAST]) extends ExpressionAST
+case class MethodCallAST(obj: ExpressionAST, method: String, args: List[ExpressionAST]) extends ExpressionAST
 case class CastAST(targetType: String, expr: ExpressionAST) extends ExpressionAST
 case class IfExprAST(cond: ExpressionAST, thenBody: List[StmtAST], elseBody: Option[List[StmtAST]]) extends ExpressionAST
 case class AddrOfAST(name: String) extends ExpressionAST

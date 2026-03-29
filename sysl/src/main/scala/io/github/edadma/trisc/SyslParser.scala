@@ -59,6 +59,12 @@ class SyslParser extends StandardTokenParsers {
     "var" ^^^ true | "val" ^^^ false
 
   def declBody(priv: Boolean): Parser[DeclAST] =
+    ident ~ ("." ~> ident) ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
+      case typeName ~ methodName ~ params ~ ((rt, body)) =>
+        // Sem.wait(params) -> ret { body } desugars to Sem_wait(self: *Sem, params) -> ret { body }
+        val selfParam = ParamAST("self", s"*$typeName")
+        FunDeclAST(s"${typeName}_$methodName", selfParam :: params, rt, body, priv)
+    } |
     ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
       case name ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body, priv)
     } |
@@ -339,10 +345,22 @@ class SyslParser extends StandardTokenParsers {
       ident ~ ("." ~> ident) <~ "--" ^^ { case obj ~ field => FieldPostDecAST(VarRefAST(obj), field) } |
       ident <~ "++" ^^ PostIncAST.apply |
       ident <~ "--" ^^ PostDecAST.apply |
-      primary ~ rep(("[" ~> expr <~ "]") ^^ (idx => Left(idx)) | ("." ~> ident) ^^ (f => Right(f))) ^^ {
+      primary ~ rep(
+        ("[" ~> expr <~ "]") ^^ (idx => (0, idx, "", Nil: List[ExpressionAST])) |
+        ("." ~> ident) ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case m ~ args => (2, null, m, args) } |
+        ("." ~> ident) ^^ (f => (1, null, f, Nil)) |
+        ("(" ~> repsep(expr, ",") <~ ")") ^^ (args => (3, null, "", args))
+      ) ^^ {
         case base ~ ops => ops.foldLeft(base) {
-          case (e, Left(idx)) => IndexAST(e, idx)
-          case (e, Right(field)) => FieldAccessAST(e, field)
+          case (e, (0, idx, _, _)) => IndexAST(e, idx)
+          case (e, (1, _, field, _)) => FieldAccessAST(e, field)
+          case (e, (2, _, method, args)) => MethodCallAST(e, method, args)
+          case (e, (3, _, _, args)) =>
+            // Indirect call: expr(args) — e is a function pointer
+            e match
+              case VarRefAST(name) => CallAST(name, args)
+              case _ => MethodCallAST(e, "", args) // TODO: indirect call on arbitrary expression
+          case (e, _) => e // shouldn't happen
         }
       }
 
