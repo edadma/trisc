@@ -235,6 +235,46 @@ thread_exit
 
 
 ; ============================================================================
+; Atomic operations — ll/sc wrappers for Sysl code
+; ============================================================================
+
+; atomic_load(addr: *int) -> int
+; Atomically read a 64-bit value.
+global atomic_load, func
+
+atomic_load
+  ldd  r1, r1, r0
+  jalr r0, r6
+
+; atomic_dec_if_positive(addr: *int) -> int
+; If *addr > 0, atomically decrement and return 1. Else return 0.
+global atomic_dec_if_positive, func
+
+atomic_dec_if_positive
+  ll   r2, r1              ; r2 = *addr (load-linked)
+  beq  r2, r0, .adip_fail  ; if zero, can't decrement
+  addi r2, r2, -1          ; r2 = value - 1
+  sc   r2, r1              ; try store-conditional
+  beq  r2, r0, atomic_dec_if_positive  ; sc failed (r2=0), retry
+  ldi  r1, 1               ; success
+  jalr r0, r6
+.adip_fail
+  ldi  r1, 0               ; value was zero
+  jalr r0, r6
+
+; atomic_inc(addr: *int)
+; Atomically increment *addr.
+global atomic_inc, func
+
+atomic_inc
+  ll   r2, r1              ; r2 = *addr (load-linked)
+  addi r2, r2, 1           ; r2 = value + 1
+  sc   r2, r1              ; try store-conditional
+  beq  r2, r0, atomic_inc  ; sc failed (r2=0), retry
+  jalr r0, r6
+
+
+; ============================================================================
 ; default_isr — Unhandled Exception Handler
 ; ============================================================================
 

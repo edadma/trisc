@@ -13,6 +13,7 @@ class TOSTests extends AnyFreeSpec with Matchers {
   val bootAsm = scala.io.Source.fromFile("tos/boot.asm").mkString
   val kernelSysl = readLsysl("tos/kernel.lsysl")
   val servicesSysl = readLsysl("tos/services.lsysl")
+  val semaphoreSysl = readLsysl("tos/semaphore.lsysl")
   val tasksSysl = readLsysl("examples/tos-demo/tasks.lsysl")
   val mainSysl = readLsysl("examples/tos-demo/main.lsysl")
 
@@ -189,7 +190,7 @@ class TOSTests extends AnyFreeSpec with Matchers {
     val bootTof = assemble(bootAsm, relocatable = true)
 
     // Compile kernel + user sources together
-    val allSources = Map("kernel" -> kernelSysl, "services" -> servicesSysl) ++ userSources
+    val allSources = Map("kernel" -> kernelSysl, "services" -> servicesSysl, "semaphore" -> semaphoreSysl) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
     val codegen = new SyslTriscCodegen
@@ -334,5 +335,205 @@ class TOSTests extends AnyFreeSpec with Matchers {
     // Expected pattern: AB A AB A B (roughly 2:1)
     output.count(_ == 'A') shouldBe 3
     output.count(_ == 'B') shouldBe 3
+  }
+
+  // ===== Semaphore tests =====
+
+  "TOS: sem_init and sem_wait/sem_post basic" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "semaphore"
+          |
+          |var sem: i64 = 0
+          |
+          |kernel_main() -> int
+          |    sem_init(&sem, 1)
+          |    create_thread(task, 0x6000, 0x5000, "task")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task()
+          |    sem_wait(&sem)
+          |    putc(65)
+          |    sem_post(&sem)
+          |    putc(66)
+          |""".stripMargin
+    ), maxCycles = 200000)
+
+    output should include("A")
+    output should include("B")
+  }
+
+  "TOS: semaphore enforces mutual exclusion between two tasks" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "semaphore"
+          |
+          |var mutex: i64 = 0
+          |
+          |kernel_main() -> int
+          |    sem_init(&mutex, 1)
+          |    create_thread(task_a, 0x6000, 0x5000, "a")
+          |    create_thread(task_b, 0x8000, 0x7000, "b")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task_a()
+          |    var i = 0
+          |    while i < 3
+          |        sem_wait(&mutex)
+          |        putc(91)
+          |        putc(65)
+          |        putc(93)
+          |        sem_post(&mutex)
+          |        sleep(10)
+          |        i += 1
+          |
+          |task_b()
+          |    var i = 0
+          |    while i < 3
+          |        sem_wait(&mutex)
+          |        putc(91)
+          |        putc(66)
+          |        putc(93)
+          |        sem_post(&mutex)
+          |        sleep(10)
+          |        i += 1
+          |""".stripMargin
+    ))
+
+    // Each critical section prints [X] atomically — no interleaving like [A[B]
+    // So output must be a sequence of [A] and [B] groups
+    val groups = output.sliding(3).count(s => s == "[A]" || s == "[B]")
+    groups shouldBe 6
+  }
+
+  "TOS: sem_trywait returns 0 when semaphore is zero" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "semaphore"
+          |
+          |var sem: i64 = 0
+          |
+          |kernel_main() -> int
+          |    sem_init(&sem, 0)
+          |    create_thread(task, 0x6000, 0x5000, "task")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task()
+          |    val got = sem_trywait(&sem)
+          |    if got == 0
+          |        putc(78)
+          |    else
+          |        putc(89)
+          |""".stripMargin
+    ), maxCycles = 200000)
+
+    output should include("N")
+  }
+
+  "TOS: counting semaphore allows N concurrent permits" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "semaphore"
+          |
+          |var sem: i64 = 0
+          |var done_count: i64 = 0
+          |
+          |kernel_main() -> int
+          |    sem_init(&sem, 2)
+          |    done_count = 0
+          |    create_thread(task_a, 0x6000, 0x5000, "a")
+          |    create_thread(task_b, 0x8000, 0x7000, "b")
+          |    create_thread(task_c, 0xA000, 0x9000, "c")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |task_a()
+          |    sem_wait(&sem)
+          |    putc(65)
+          |    sleep(20)
+          |    sem_post(&sem)
+          |
+          |task_b()
+          |    sem_wait(&sem)
+          |    putc(66)
+          |    sleep(20)
+          |    sem_post(&sem)
+          |
+          |task_c()
+          |    sem_wait(&sem)
+          |    putc(67)
+          |    sleep(20)
+          |    sem_post(&sem)
+          |""".stripMargin
+    ))
+
+    // All three tasks should eventually acquire and print
+    output should include("A")
+    output should include("B")
+    output should include("C")
+  }
+
+  "TOS: sem_wait blocks until sem_post from another thread" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import "kernel"
+          |import "services"
+          |import "semaphore"
+          |
+          |var sem: i64 = 0
+          |
+          |kernel_main() -> int
+          |    sem_init(&sem, 0)
+          |    create_thread(waiter, 0x6000, 0x5000, "waiter")
+          |    create_thread(poster, 0x8000, 0x7000, "poster")
+          |    val period: *i32 = 0x100020
+          |    *period = 10
+          |    val control: *i8 = 0x100024
+          |    *control = 1
+          |    first_thread_ssp()
+          |
+          |waiter()
+          |    putc(87)
+          |    sem_wait(&sem)
+          |    putc(71)
+          |
+          |poster()
+          |    sleep(30)
+          |    putc(80)
+          |    sem_post(&sem)
+          |""".stripMargin
+    ))
+
+    // W = waiter starts, P = poster posts, G = waiter got it
+    // P must appear before G (poster unblocks waiter)
+    output should include("W")
+    output should include("P")
+    output should include("G")
+    val pIdx = output.indexOf('P')
+    val gIdx = output.indexOf('G')
+    pIdx should be < gIdx
   }
 }
