@@ -43,10 +43,27 @@ object Linker:
         explicitOrg: Boolean,
     )
 
-    val inputSegments = new ArrayBuffer[InputSegment]
+    // Group input segments by source TOF, tracking which TOFs need unit placement.
+    // A relocatable TOF with base-relative relocs must have all its segments placed
+    // as a unit (same delta) so cross-segment references remain valid.
+    case class TofGroup(segments: Seq[InputSegment], placeAsUnit: Boolean)
+
+    val tofGroups = new ArrayBuffer[TofGroup]
     for tof <- tofs do
-      for seg <- tof.segments do
-        inputSegments += InputSegment(seg.name, seg.org, flattenChunks(seg.chunks), seg.symbols, seg.externs, seg.relocs, seg.explicitOrg)
+      val segs = for seg <- tof.segments yield
+        InputSegment(seg.name, seg.org, flattenChunks(seg.chunks), seg.symbols, seg.externs, seg.relocs, seg.explicitOrg)
+      val hasBaseRelRelocs = segs.exists(_.relocs.exists(_.symbol.isEmpty))
+      tofGroups += TofGroup(segs, hasBaseRelRelocs)
+
+    // Index all input segments with a global index for identity tracking.
+    // (InputSegment is a case class, so structural equality can't distinguish
+    // two segments with identical content from different TOFs.)
+    case class IndexedSegment(idx: Int, seg: InputSegment, groupIdx: Int)
+
+    val indexedSegments = new ArrayBuffer[IndexedSegment]
+    for (group, gi) <- tofGroups.zipWithIndex do
+      for seg <- group.segments do
+        indexedSegments += IndexedSegment(indexedSegments.length, seg, gi)
 
     // Phase 2: place segments using linker script or sequential placement
     val placed = new ArrayBuffer[PlacedSegment]
@@ -55,31 +72,70 @@ object Linker:
 
     val scriptSectionNames = script.sections.map(_.name).toSet
 
+    // Track which indexed segments have been placed
+    val placedIndices = new mutable.HashSet[Int]
+
+    def placeSeg(is: IndexedSegment, org: Long): Unit =
+      val ps = PlacedSegment(is.seg.name, org, is.seg.data, is.seg.symbols, is.seg.externs, is.seg.relocs)
+      placed += ps
+      placedByName(is.seg.name) = ps
+      placedIndices += is.idx
+
     // Place segments in script order. All script sections exist (even if empty).
     for secDef <- script.sections do
-      // Set base address for this section
       val sectionBase = secDef.address.getOrElse(nextAddr)
       nextAddr = sectionBase
 
-      // Find all input segments matching this section name
-      val matching = inputSegments.filter(_.name == secDef.name)
-      for seg <- matching do
-        val ps = PlacedSegment(seg.name, nextAddr, seg.data, seg.symbols, seg.externs, seg.relocs)
-        placed += ps
-        placedByName(seg.name) = ps
-        nextAddr = (nextAddr + seg.data.length + 7) & ~7L
+      val matching = indexedSegments.filter(is => is.seg.name == secDef.name && !placedIndices.contains(is.idx))
+      for is <- matching do
+        placeSeg(is, nextAddr)
+        nextAddr = (nextAddr + is.seg.data.length + 7) & ~7L
 
-      // Ensure the section exists in placedByName even if empty
       if !placedByName.contains(secDef.name) then
         placedByName(secDef.name) = PlacedSegment(secDef.name, sectionBase, ArrayBuffer.empty, Nil, Nil, Nil)
 
-    // Place remaining segments not in the script
-    for seg <- inputSegments if !scriptSectionNames.contains(seg.name) do
-      val org = if seg.explicitOrg then seg.originalOrg else nextAddr
-      val ps = PlacedSegment(seg.name, org, seg.data, seg.symbols, seg.externs, seg.relocs)
-      placed += ps
-      placedByName(seg.name) = ps
-      nextAddr = (org + seg.data.length + 7) & ~7L
+    // Place remaining segments not in the script, grouped by name.
+    // All segments with the same name are placed contiguously so the Phase 6
+    // merge doesn't produce overlapping ranges with other segment types.
+    // For relocatable TOFs with base-relative relocs, all segments from
+    // that TOF are placed as a unit (same delta) so cross-segment references stay valid.
+    val remaining = indexedSegments.filter(is => !scriptSectionNames.contains(is.seg.name) && !placedIndices.contains(is.idx))
+
+    // Check if any TOF group needs unit placement
+    val unitGroupIndices = tofGroups.zipWithIndex.collect {
+      case (g, gi) if g.placeAsUnit && remaining.exists(_.groupIdx == gi) => gi
+    }.toSet
+
+    if unitGroupIndices.nonEmpty then
+      // Unit placement: place all segments from each group together,
+      // preserving relative positions within unit groups
+      for (group, gi) <- tofGroups.zipWithIndex do
+        val groupRemaining = remaining.filter(is => is.groupIdx == gi && !placedIndices.contains(is.idx))
+        if groupRemaining.isEmpty then ()
+        else if unitGroupIndices.contains(gi) && groupRemaining.length > 1 then
+          val firstSeg = groupRemaining.head.seg
+          val baseDelta = nextAddr - firstSeg.originalOrg
+          var maxEnd = 0L
+          for is <- groupRemaining do
+            val org = is.seg.originalOrg + baseDelta
+            placeSeg(is, org)
+            val segEnd = org + is.seg.data.length
+            if segEnd > maxEnd then maxEnd = segEnd
+          nextAddr = (maxEnd + 7) & ~7L
+        else
+          for is <- groupRemaining do
+            val org = if is.seg.explicitOrg then is.seg.originalOrg else nextAddr
+            placeSeg(is, org)
+            nextAddr = (org + is.seg.data.length + 7) & ~7L
+    else
+      // No unit groups: group segments by name so same-named segments are contiguous.
+      // This prevents merged segments from overlapping other segment types.
+      val segmentNameOrder = remaining.map(_.seg.name).distinct
+      for name <- segmentNameOrder do
+        for is <- remaining.filter(_.seg.name == name) if !placedIndices.contains(is.idx) do
+          val org = if is.seg.explicitOrg then is.seg.originalOrg else nextAddr
+          placeSeg(is, org)
+          nextAddr = (org + is.seg.data.length + 7) & ~7L
 
     // Phase 3: build global symbol table
     val globalSymbols = new mutable.LinkedHashMap[String, (Long, TOFSymbol)]

@@ -37,10 +37,6 @@ class LinkerSegmentTests extends AnyFreeSpec with Matchers {
     val bssOrg = linked.segments.find(_.name == "bss").get.org
     bssOrg should be > codeOrg
 
-    // merged _default_ should use ResChunk for gaps, not zero-fill
-    val defaultSeg = linked.segments.find(_.name == "_default_").get
-    defaultSeg.chunks.exists(_.isInstanceOf[TOF.ResChunk]) shouldBe true
-
     // execution should produce correct result
     val stdout = new Stdout(Runtime.stdoutAddress)
     val ram = new RAM(0, Runtime.stdoutAddress.toInt)
