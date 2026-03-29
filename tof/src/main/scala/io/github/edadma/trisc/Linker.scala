@@ -6,13 +6,13 @@ import scala.collection.mutable.ArrayBuffer
 object Linker:
   case class LinkerError(msg: String) extends RuntimeException(msg)
 
-  def link(tofs: Seq[TOF], baseAddress: Long = 0, addresses: Int = 2, relocatable: Boolean = false): TOF =
-    link(tofs, LinkerScript(), baseAddress, addresses, relocatable)
+  def link(tofs: Seq[TOF], baseAddress: Long = 0, relocatable: Boolean = false): TOF =
+    link(tofs, LinkerScript(), baseAddress, relocatable)
 
-  def link(tofs: Seq[TOF], script: LinkerScript, baseAddress: Long, addresses: Int): TOF =
-    link(tofs, script, baseAddress, addresses, false)
+  def link(tofs: Seq[TOF], script: LinkerScript, baseAddress: Long): TOF =
+    link(tofs, script, baseAddress, false)
 
-  def link(tofs: Seq[TOF], script: LinkerScript, baseAddress: Long, addresses: Int, relocatable: Boolean): TOF =
+  def link(tofs: Seq[TOF], script: LinkerScript, baseAddress: Long, relocatable: Boolean): TOF =
     case class PlacedSegment(
         name: String,
         org: Long,

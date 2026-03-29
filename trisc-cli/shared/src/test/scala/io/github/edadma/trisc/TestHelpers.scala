@@ -14,7 +14,7 @@ trait TestHelpers extends AnyFreeSpec with Matchers {
       |resb 144
       |""".stripMargin
 
-  def mkCPU(program: String, memSize: Int = 0x1000, addresses: Int = 2): (CPU, StringBuilder) =
+  def mkCPU(program: String, memSize: Int = 0x1000, addresses: Int = 4): (CPU, StringBuilder) =
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
       val name = "stdout"
@@ -30,7 +30,7 @@ trait TestHelpers extends AnyFreeSpec with Matchers {
     cpu.reset()
     (cpu, output)
 
-  def runCPU(program: String, memSize: Int = 0x1000, addresses: Int = 2): CPU =
+  def runCPU(program: String, memSize: Int = 0x1000, addresses: Int = 4): CPU =
     val (cpu, _) = mkCPU(program, memSize, addresses)
     cpu.run()
     cpu
@@ -44,7 +44,7 @@ trait TestHelpers extends AnyFreeSpec with Matchers {
     cpu.run()
     cpu
 
-  def runProgram(program: String, memSize: Int = 0x1000, addresses: Int = 2): String =
+  def runProgram(program: String, memSize: Int = 0x1000, addresses: Int = 4): String =
     val (cpu, output) = mkCPU(program, memSize, addresses)
     cpu.run()
     output.toString

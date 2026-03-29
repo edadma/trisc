@@ -23,7 +23,7 @@ segment vectors
 
   dl 0x0FFFF8              ; Slot 0:  Initial SSP (kernel stack top, below devices)
   dl boot                  ; Slot 1:  Initial PC
-  dl timer_isr             ; Slot 2:  Interrupt
+  dl irq_handler           ; Slot 2:  Interrupt
   dl default_isr           ; Slot 3:  InstructionAccess
   dl default_isr           ; Slot 4:  DataAccess
   dl default_isr           ; Slot 5:  MisalignedAccess

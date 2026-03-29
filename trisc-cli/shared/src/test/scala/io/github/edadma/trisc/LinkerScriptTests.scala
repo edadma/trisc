@@ -154,7 +154,7 @@ class LinkerScriptTests extends TestHelpers {
         |  _default_: 0x100
         |""".stripMargin): @unchecked
     val tof = assemble("ldi r1, 42\nhalt\n", relocatable = true)
-    val linked = Linker.link(Seq(tof), script, 0, 2)
+    val linked = Linker.link(Seq(tof), script, 0)
     linked.segments.head.org shouldBe 0x100
   }
 
@@ -171,7 +171,7 @@ class LinkerScriptTests extends TestHelpers {
         |segment data
         |db 0x01, 0x02
         |""".stripMargin, orgs = Map("code" -> 0L, "data" -> 0L), relocatable = true)
-    val linked = Linker.link(Seq(tof), script, 0, 2)
+    val linked = Linker.link(Seq(tof), script, 0)
     val codeSeg = linked.segments.find(_.name == "code").get
     val dataSeg = linked.segments.find(_.name == "data").get
     codeSeg.org shouldBe 0
@@ -192,7 +192,7 @@ class LinkerScriptTests extends TestHelpers {
         |  ldi r1, 99
         |  halt
         |""".stripMargin, relocatable = true)
-    val linked = Linker.link(Seq(tof), script, 0, 2)
+    val linked = Linker.link(Seq(tof), script, 0)
     linked.entry shouldBe Some("alt_start")
   }
 
@@ -210,7 +210,7 @@ class LinkerScriptTests extends TestHelpers {
         |ldi r1, 42
         |halt
         |""".stripMargin, orgs = Map("code" -> 0L), relocatable = true)
-    val linked = Linker.link(Seq(tof), script, 0, 2)
+    val linked = Linker.link(Seq(tof), script, 0)
     linked.segments.find(_.name == "code").get.org shouldBe 0
   }
 
@@ -240,7 +240,7 @@ class LinkerScriptTests extends TestHelpers {
         |  jalr r0, r7
         |""".stripMargin, relocatable = true)
 
-    val linked = Linker.link(Seq(main, helper), script, 0, 2)
+    val linked = Linker.link(Seq(main, helper), script, 0)
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     linked.load(mem)
     val cpu = new CPU(mem) { limit = 10000 }
