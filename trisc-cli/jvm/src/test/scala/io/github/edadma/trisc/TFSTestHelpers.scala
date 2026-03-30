@@ -109,11 +109,12 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
     val ramdisk = new Ramdisk(
       Runtime.ramdiskAddress,
       ram,
-      sectors = 2048,
+      sectors = 64,
       sectorSize = 512,
       intc,
       irq = 3,
       prefill = prefill,
+      maxInodes = 32,
     )
     val mem = new Memory("Memory", ram, stdout, intc, timer, ramdisk)
     linked.load(mem)
