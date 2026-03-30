@@ -1,6 +1,6 @@
 package io.github.edadma.trisc
 
-class TFSSyslTests extends TFSTestHelpers {
+class TFSIntegrationTests extends TFSTestHelpers {
 
   val defaultPrefill: String =
     """/dev/tty0 char 0 0
