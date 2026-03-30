@@ -59,10 +59,10 @@ On-disk layout (block 0 = boot, block 1 = superblock):
   var sb_free_blocks  = 0
   var sb_free_inodes  = 0
 
-  // === Block buffer (one block, allocated in .bss) ===
+  // === Block buffers ===
 
-  var blkbuf: [512]i8
-  var blkbuf2: [512]i8
+  var blkbuf: [512]i8       // general purpose (file data, superblock, dir blocks, inodes)
+  var blkbuf2: [512]i8      // secondary (bitmaps, indirect blocks)
 
   // === Ramdisk I/O ===
 
@@ -253,7 +253,7 @@ indirect block (6+).
   get_file_block(ibuf: int, idx: int) -> int
       if idx < NUM_DIRECT
           return ino_direct(ibuf, idx)
-      // Read indirect block
+      // Read indirect block into blkbuf2 (blkbuf used by callers for data)
       val ind_blk = ino_indirect(ibuf)
       if ind_blk == 0
           return 0
@@ -528,6 +528,8 @@ Allocates new blocks as needed. Returns bytes written.
           slot = entries
           ino_set_size(&ibuf, (entries + 1) * DIR_ENTRY_SIZE)
           tfs_write_inode(dir_ino, &ibuf)
+          // Re-read dir data since tfs_write_inode clobbered blkbuf
+          rd_read(data_blk, &blkbuf)
       val off: int = &blkbuf + slot * DIR_ENTRY_SIZE
       write_i16(off, child_ino)
       // Write name

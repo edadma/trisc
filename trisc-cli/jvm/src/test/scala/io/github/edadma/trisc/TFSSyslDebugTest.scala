@@ -169,6 +169,113 @@ class TFSSyslDebugTest extends TFSTestHelpers {
     output shouldBe "40"
   }
 
+  "tfs_write_inode works" in {
+    val (_, output) = runTFS(
+      """import "tfs"
+        |
+        |main() -> int
+        |    tfs_init()
+        |    var ibuf: [32]i8
+        |    tfs_read_inode(1, &ibuf)
+        |    tfs_write_inode(1, &ibuf)
+        |    putchar(89)
+        |    0
+        |""".stripMargin,
+      prefill = "/dev/tty0 char 0 0",
+    )
+    output shouldBe "Y"
+  }
+
+  "tfs_read_inode + ino_size" in {
+    val (_, output) = runTFS(
+      """import "tfs"
+        |
+        |main() -> int
+        |    tfs_init()
+        |    var ibuf: [32]i8
+        |    tfs_read_inode(1, &ibuf)
+        |    val sz = ino_size(&ibuf)
+        |    // root dir size should be 80 (5 entries * 16 bytes)
+        |    if sz == 80
+        |        putchar(89)
+        |    else
+        |        putchar(78)
+        |        // print raw size
+        |        putchar(48 + (sz / 100) % 10)
+        |        putchar(48 + (sz / 10) % 10)
+        |        putchar(48 + sz % 10)
+        |    0
+        |""".stripMargin,
+      prefill = "/dev/tty0 char 0 0",
+    )
+    output shouldBe "Y"
+  }
+
+  "dir_add_entry reads dir correctly" in {
+    val (_, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |    // Manually do what dir_add_entry does, step by step
+         |    var ibuf: [32]i8
+         |    tfs_read_inode(1, &ibuf)
+         |    val data_blk = ino_direct(&ibuf, 0)
+         |    val entries = ino_size(&ibuf) / 16
+         |    // Print entries count
+         |    putchar(48 + entries)
+         |    // Read dir data
+         |    rd_read(data_blk, &dirbuf)
+         |    // Check first entry is . (inode 1)
+         |    val e0 = read_i16(&dirbuf)
+         |    if e0 == 1
+         |        putchar(68)
+         |    putchar(10)
+         |    0
+         |""".stripMargin,
+      prefill = "/dev/tty0 char 0 0",
+    )
+    // 5 entries (., .., dev, etc, tmp) + 'D' for dot entry
+    output shouldBe "5D\n"
+  }
+
+  "tfs_create file only" in {
+    val (_, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |${syslBytes("name", "test")}
+         |    val ino = tfs_create(1, &name, 1, 0x1A4)
+         |    if ino > 0
+         |        putchar(89)
+         |    else
+         |        putchar(78)
+         |    0
+         |""".stripMargin,
+      prefill = "/dev/tty0 char 0 0",
+    )
+    output shouldBe "Y"
+  }
+
+  "alloc_inode works" in {
+    val (_, output) = runTFS(
+      """import "tfs"
+        |
+        |main() -> int
+        |    tfs_init()
+        |    val ino = alloc_inode()
+        |    if ino > 0
+        |        putchar(89)
+        |    else
+        |        putchar(78)
+        |    0
+        |""".stripMargin,
+      prefill = "/dev/tty0 char 0 0",
+    )
+    output shouldBe "Y"
+  }
+
   "tfs rd_read into blkbuf works" in {
     val (_, output) = runTFS(
       """import "tfs"
