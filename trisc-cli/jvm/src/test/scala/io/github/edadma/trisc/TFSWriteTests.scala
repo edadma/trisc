@@ -21,7 +21,7 @@ class TFSWriteTests extends TFSTestHelpers {
     output shouldBe "Y"
   }
 
-  "tfs_write 5 bytes" in {
+  "tfs_write 2 bytes" in withTrace("tfs_write 2 bytes") {
     val (cpu, output) = runTFS(
       s"""import "tfs"
          |
@@ -30,7 +30,7 @@ class TFSWriteTests extends TFSTestHelpers {
          |${syslBytes("name", "f")}
          |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
          |    putchar(49)
-         |    var data: [6]i8
+         |    var data: [4]i8
          |    data[0] = 72
          |    data[1] = 105
          |    tfs_write(ino, &data[0], 0, 2)
@@ -38,7 +38,7 @@ class TFSWriteTests extends TFSTestHelpers {
          |    0
          |""".stripMargin,
       prefill = "/dev/tty0 char 0 0",
-      maxCycles = 500000,
+      maxCycles = 20000,
     )
     output shouldBe "12"
   }

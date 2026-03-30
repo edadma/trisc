@@ -76,7 +76,6 @@ class CPU(mem: Addressable, irq: CPU => Unit = _ => ()) extends Addressable:
   private var inException: Boolean = false
 
   var limit: Int = -1
-  var clump: Int = 1000
   var trace: Boolean = false
 
   // Logging — OFF by default, enable with cpu.log.setLogLevel(LogLevel.DEBUG)
@@ -219,11 +218,8 @@ class CPU(mem: Addressable, irq: CPU => Unit = _ => ()) extends Addressable:
 
   @tailrec
   final def run(): Unit =
-    var count = 0
-
-    while state != State.Halt && state != State.Wfi && state != State.DoubleFault && count < clump do
+    if state != State.Halt && state != State.Wfi && state != State.DoubleFault then
       execute()
-      count += 1
 
     if limit > 0 then limit -= 1
 

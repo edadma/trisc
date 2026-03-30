@@ -62,6 +62,14 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
        |  align 8
        |""".stripMargin
 
+  private var _tracing = false
+
+  /** Wrap a test body to enable CPU instruction tracing to /tmp/trisc_tfs_debug.log */
+  def withTrace(testName: String)(body: => Unit): Unit =
+    _tracing = true
+    try body
+    finally _tracing = false
+
   def runTFS(
       mainSource: String,
       prefill: String = "",
@@ -110,9 +118,11 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
     val mem = new Memory("Memory", ram, stdout, intc, timer, ramdisk)
     linked.load(mem)
     val cpu = new CPU(mem, intc) { this.limit = maxCycles }
-    if maxCycles <= 5000 then
+    if _tracing then
       cpu.log.setLogLevel(io.github.edadma.logger.LogLevel.TRACE)
       cpu.log.setHandler(new io.github.edadma.logger.FileHandler("/tmp/trisc_tfs_debug.log"))
+    else
+      cpu.log.setLogLevel(io.github.edadma.logger.LogLevel.OFF)
     cpu.reset()
     cpu.run()
     (cpu, output.toString)
