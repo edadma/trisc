@@ -484,7 +484,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  pshd r1")
         genExpr(array)           // r1 = array base address
         emit("  popd r2")        // r2 = index
-        emit(s"  ldi r3, $elemSize")
+        emitLoadImm(3, elemSize)
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = base + offset
         emit("  popd r2")        // r2 = value
@@ -598,7 +598,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         genExpr(left)        // r1 = pointer
         emit("  pshd r1")
         genExpr(right)       // r1 = integer offset
-        emit(s"  ldi r3, $elemSize")
+        emitLoadImm(3, elemSize)
         emit("  mul r1, r1, r3") // scale by element size
         emit("  popd r2")   // r2 = pointer
         if op == "+" then emit("  add r1, r2, r1")
@@ -819,7 +819,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  pshd r1")
         genExpr(array)           // r1 = array base address
         emit("  popd r2")        // r2 = index
-        emit(s"  ldi r3, $elemSize")
+        emitLoadImm(3, elemSize)
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = base + offset
 
@@ -883,7 +883,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit(s"$boundsOk")
         // Load element at ptr + index * elemSize
         emit("  ldd r1, r1, r0") // r1 = ptr
-        emit(s"  ldi r3, $elemSize")
+        emitLoadImm(3, elemSize)
         emit("  mul r2, r2, r3")
         emit("  add r1, r1, r2")
         emitLoad(1, 1, elemType)
@@ -894,7 +894,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  pshd r1")
         genExpr(array)           // r1 = array base address
         emit("  popd r2")        // r2 = index
-        emit(s"  ldi r3, $elemSize")
+        emitLoadImm(3, elemSize)
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = element address
         elemType match
@@ -954,7 +954,7 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  addi r1, r1, 8")
             emit("  ldw r1, r1, r0") // len at offset 8
           case SyslType.ArrayType(_, size) =>
-            emit(s"  ldi r1, $size") // compile-time constant
+            emitLoadImm(1, size) // compile-time constant
           case _ =>
             emit("  # TODO: len on unsupported type")
 
@@ -965,7 +965,7 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  addi r1, r1, 12")
             emit("  ldw r1, r1, r0") // cap at offset 12
           case SyslType.ArrayType(_, size) =>
-            emit(s"  ldi r1, $size") // cap == size for fixed arrays
+            emitLoadImm(1, size) // cap == size for fixed arrays
           case _ =>
             emit("  # TODO: cap on unsupported type")
 
@@ -974,10 +974,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit(s"  movi r1, $bits  # float $d")
 
       case TSizeof(size, _) =>
-        if size >= 0 && size <= 255 then
-          emit(s"  ldi r1, $size")
-        else
-          emit(s"  movi r1, $size")
+        emitLoadImm(1, size.toInt)
 
       case TStructLit(st @ SyslType.StructType(_, fields)) =>
         val totalSize = stackSize(st)
@@ -1056,6 +1053,11 @@ class SyslTriscCodegen(addresses: Int = 4):
       else
         emit(s"  movi r$tmp, ${-offset}")
         emit(s"  sub r$destReg, r$baseReg, r$tmp")
+
+  // Emit reg = immediate value, choosing ldi (byte range) or movi (larger)
+  private def emitLoadImm(reg: Int, value: Int): Unit =
+    if value >= 0 && value <= 255 then emit(s"  ldi r$reg, $value")
+    else emit(s"  movi r$reg, $value")
 
   // Compute byte offset of field at given index within a struct type
   private def fieldOffset(structType: SyslType.StructType, fieldIndex: Int): Int =
