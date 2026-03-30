@@ -75,6 +75,83 @@ class TFSWriteTests extends TFSTestHelpers {
     output shouldBe "12XYllo TOS"
   }
 
+  "tfs_write simplified alloc" in {
+    val (cpu, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |${syslBytes("name", "f")}
+         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    var data: [4]i8
+         |    data[0] = 72
+         |    data[1] = 105
+         |    tfs_write(ino, &data[0], 0, 2)
+         |    // Read back
+         |    var buf: [8]i8
+         |    val n = tfs_read(ino, &buf[0], 0, 2)
+         |    val bp: *i8 = &buf[0]
+         |    putchar(bp[0])
+         |    putchar(bp[1])
+         |    0
+         |""".stripMargin,
+      prefill = "/dev/tty0 char 0 0",
+      maxCycles = 500000,
+    )
+    output shouldBe "Hi"
+  }
+
+  "sb_block_size after create" in {
+    val (cpu, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |${syslBytes("name", "f")}
+         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    if sb_block_size == 512
+         |        putchar(89)
+         |    else if sb_block_size == 0
+         |        putchar(90)
+         |    else
+         |        putchar(78)
+         |    0
+         |""".stripMargin,
+      prefill = "/dev/tty0 char 0 0",
+      maxCycles = 500000,
+    )
+    output shouldBe "Y"
+  }
+
+  "tfs_write to new file (pre-alloc block)" in {
+    // Manually allocate a block and set direct[0] before calling tfs_write
+    val (cpu, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |${syslBytes("name", "f")}
+         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    // Pre-allocate block so tfs_write doesn't need to
+         |    var ibuf: [32]i8
+         |    tfs_read_inode(ino, &ibuf[0])
+         |    val blk = alloc_block()
+         |    ino_set_direct(&ibuf[0], 0, blk)
+         |    tfs_write_inode(ino, &ibuf[0])
+         |    // Now write — block already exists
+         |    var data: [4]i8
+         |    data[0] = 72
+         |    data[1] = 105
+         |    tfs_write(ino, &data[0], 0, 2)
+         |    putchar(89)
+         |    0
+         |""".stripMargin,
+      prefill = "/dev/tty0 char 0 0",
+      maxCycles = 500000,
+    )
+    output shouldBe "Y"
+  }
+
   "tfs_write to new file - debug" in {
     val (cpu, output) = runTFS(
       s"""import "tfs"
