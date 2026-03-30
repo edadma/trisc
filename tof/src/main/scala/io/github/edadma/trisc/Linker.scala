@@ -270,8 +270,6 @@ object Linker:
                 patchMovi(seg.data, reloc.offset.toInt, addr, 3)
 
               case RelocType.MOVI4 =>
-                if reloc.symbol == "kernel_main" then
-                  System.err.println(f"[LINKER] Patching kernel_main: seg=${seg.name}@0x${seg.org}%x offset=0x${reloc.offset}%x addr=0x$addr%x")
                 patchMovi(seg.data, reloc.offset.toInt, addr, 4)
 
             // Preserve reloc as base-relative (resolved symbol)

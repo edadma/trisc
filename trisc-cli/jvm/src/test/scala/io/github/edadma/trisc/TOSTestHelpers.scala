@@ -140,10 +140,6 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
     val syslTof = Linker.link(tofs, relocatable = true)
 
     val linked = Linker.link(Seq(bootTof, syslTof), linkerScript, 0)
-    for s <- linked.segments do
-      val dataSize = s.chunks.collect { case TOF.DataChunk(d) => d.length }.sum
-      System.err.println(s"[TOS] ${s.name}@0x${s.org.toHexString}: ${dataSize} bytes, ${s.symbols.size} syms, ${s.relocs.size} relocs")
-    System.err.println(s"[TOS] Entry: ${linked.entryAddress}")
 
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
@@ -159,24 +155,11 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
     val mem = new Memory("Memory", new RAM(0, 0x100000), stdout, intc, timer)
     linked.load(mem)
     val cpu = new CPU(mem, intc) { this.limit = maxCycles }
-    cpu.log.setLogLevel(LogLevel.TRACE)
-    cpu.log.setHandler(new FileHandler("/tmp/trisc_debug.log"))
+    if maxCycles <= 1000 then
+      cpu.log.setLogLevel(LogLevel.TRACE)
+      cpu.log.setHandler(new FileHandler("/tmp/trisc_debug.log"))
     cpu.reset()
-    System.err.println(f"[TOS] After reset — inst@0xa4=0x${mem.readShortUnsigned(0xa4)}%04x (expect 0xF233)")
-    System.err.println(f"[TOS] After load — Vector0(SSP): 0x${mem.readLong(0)}%x, Vector1(PC): 0x${mem.readLong(8)}%x, Vector2(IRQ): 0x${mem.readLong(16)}%x")
-    // Read first 8 bytes of code (movi r4, kernel_main should be 4 instructions)
-    val bootBytes = (0 until 8).map(i => f"${mem.readByte(0xa0 + i) & 0xff}%02x").mkString(" ")
-    System.err.println(s"[TOS] boot@0xa0: $bootBytes")
     cpu.run()
-    System.err.println(f"[TOS] CPU: state=${cpu.state} pc=0x${cpu.pc}%x limit=${cpu.limit}")
-    val syms = linked.segments.flatMap(s => s.symbols.map(sym => (sym.name, s.org + sym.offset)))
-    val symMap = syms.toMap
-    System.err.println(f"[TOS] kernel_main=0x${symMap.getOrElse("kernel_main", -1L)}%x boot=0x${symMap.getOrElse("boot", -1L)}%x default_isr=0x${symMap.getOrElse("default_isr", -1L)}%x")
-    // Check boot TOF reloc types
-    System.err.println(s"[TOS] bootTof relocs (${bootTof.segments.flatMap(_.relocs).size} total): ${bootTof.segments.flatMap(_.relocs).map(r => s"${r.typ}@${r.offset.toHexString}:${r.symbol}").mkString(", ")}")
-    val syslSyms = syslTof.segments.flatMap(s => s.symbols.map(sym => s"${sym.name}@${s.name}+0x${sym.offset.toHexString}"))
-    System.err.println(s"[TOS] syslTof kernel_main: ${syslSyms.find(_.startsWith("kernel_main@"))}")
-    System.err.println(s"[TOS] syslTof segments: ${syslTof.segments.map(s => s"${s.name}@0x${s.org.toHexString}").mkString(", ")}")
     (cpu, output.toString)
 
   def runRBTest(appSource: String): (CPU, String) =
