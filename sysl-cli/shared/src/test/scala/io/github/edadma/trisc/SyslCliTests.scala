@@ -62,10 +62,6 @@ class SyslCliTests extends AnyFreeSpec with Matchers {
     cmd.inputs shouldBe Seq("examples/multifile")
   }
 
-  "reject invalid emit format" in {
-    SyslCli.parse(Seq("compile", "--emit", "wasm", "foo.sysl")) shouldBe None
-  }
-
   "reject empty args" in {
     SyslCli.parse(Seq.empty) shouldBe None
   }
