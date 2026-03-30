@@ -210,6 +210,8 @@ object Linker:
                 // Read current address from movi instruction bytes
                 var old = 0L
                 for i <- 0 until n do old = (old << 8) | (seg.data(off + i * 2 + 1) & 0xff)
+                if off == 0 then
+                  System.err.println(f"[LINKER] base-reloc at off=0: seg=${seg.name}@0x${seg.org}%x old=0x$old%x delta=0x$delta%x new=0x${old+delta}%x")
                 patchMovi(seg.data, off, old + delta, n)
           if relocatable then segRelocs += reloc
         else globalSymbols.get(reloc.symbol) match
@@ -240,6 +242,8 @@ object Linker:
                 patchMovi(seg.data, reloc.offset.toInt, addr, 3)
 
               case RelocType.MOVI4 =>
+                if reloc.symbol == "kernel_main" then
+                  System.err.println(f"[LINKER] Patching kernel_main: seg=${seg.name}@0x${seg.org}%x offset=0x${reloc.offset}%x addr=0x$addr%x")
                 patchMovi(seg.data, reloc.offset.toInt, addr, 4)
 
             // Preserve reloc as base-relative (resolved symbol)
