@@ -444,7 +444,10 @@ class SyslAnalyzer:
 
       case AddrOfAST(name) =>
         val sym = lookup(name)
-        TAddrOf(name, PtrType(sym.typ))
+        val ptrType = sym.typ match
+          case ArrayType(elem, _) => PtrType(elem) // &array decays to pointer to first element
+          case t => PtrType(t)
+        TAddrOf(name, ptrType)
 
       case AddrOfFieldAST(obj, field) =>
         val tObj = analyzeExpr(obj)

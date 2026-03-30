@@ -110,6 +110,9 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
     val mem = new Memory("Memory", ram, stdout, intc, timer, ramdisk)
     linked.load(mem)
     val cpu = new CPU(mem, intc) { this.limit = maxCycles }
+    if maxCycles <= 5000 then
+      cpu.log.setLogLevel(io.github.edadma.logger.LogLevel.TRACE)
+      cpu.log.setHandler(new io.github.edadma.logger.FileHandler("/tmp/trisc_tfs_debug.log"))
     cpu.reset()
     cpu.run()
     (cpu, output.toString)

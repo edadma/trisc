@@ -207,6 +207,9 @@ class CPU(mem: Addressable, irq: CPU => Unit = _ => ()) extends Addressable:
           log.warn(f"DataAccess fault at pc=${pc - 2}%04x", category = "CPU")
           state = State.DataAccess
 
+    val regs = (1 to 7).map(i => f"r$i=${r(i).read}%x").mkString(" ")
+    log.trace(f"  $regs", category = "CPU")
+
     // Trace exception: fires after instruction completes if T was set BEFORE it executed
     if state == State.Run && traceEnabled then state = State.Trace
 

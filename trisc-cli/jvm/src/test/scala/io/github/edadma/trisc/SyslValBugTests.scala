@@ -189,7 +189,7 @@ class SyslValBugTests extends TFSTestHelpers {
         |    else
         |        putchar(78)
         |    0
-        |""".stripMargin, prefill = "/dev/tty0 char 0 0")
+        |""".stripMargin, prefill = "/dev/tty0 char 0 0", maxCycles = 5000)
     output shouldBe "Y"
   }
 
