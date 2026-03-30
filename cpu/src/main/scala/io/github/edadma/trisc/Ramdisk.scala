@@ -8,12 +8,13 @@ class Ramdisk(
     intc: InterruptController,
     irq: Int,
     prefill: String = "",
+    maxInodes: Int = 128,
 ) extends Device:
   val name = "Ramdisk"
   val size = 16
 
   private val disk: Array[Byte] =
-    if prefill.nonEmpty then NFS.format(sectorSize, sectors, prefill)
+    if prefill.nonEmpty then TFS.format(sectorSize, sectors, maxInodes, prefill)
     else new Array[Byte](sectors * sectorSize)
 
   // Register offsets

@@ -209,20 +209,20 @@ class RamdiskTests extends AnyFreeSpec with Matchers {
 
   // ===== Prefill / NFS integration =====
 
-  "prefill formats disk with NFS" in {
+  "prefill formats disk with TFS" in {
     val (rd, ram, _) = mkRamdisk(prefill = "/dev/tty0 char 0 0")
 
-    // Read sector 0 (superblock) into RAM
-    rd.writeByte(BASE + 5, 0)
+    // Read sector 1 (TFS superblock) into RAM
+    rd.writeByte(BASE + 5, 1) // LBA = 1
     rd.writeByte(BASE + 8, 0x00)
     rd.writeByte(BASE + 9, 0x00)
     rd.writeByte(BASE + 11, 1)
     rd.writeByte(BASE + 1, 0x01)
 
-    // Check NFS magic at RAM address 0
+    // Check TFS magic at RAM address 0
     val magic = (ram.readByteUnsigned(0) << 24) | (ram.readByteUnsigned(1) << 16) |
       (ram.readByteUnsigned(2) << 8) | ram.readByteUnsigned(3)
-    magic shouldBe 0x4e465300
+    magic shouldBe 0x54465300
   }
 
   "empty prefill creates blank disk" in {
@@ -235,7 +235,7 @@ class RamdiskTests extends AnyFreeSpec with Matchers {
     rd.writeByte(BASE + 11, 1)
     rd.writeByte(BASE + 1, 0x01)
 
-    // Should be all zeros (no NFS magic)
+    // Should be all zeros (no TFS)
     val magic = (ram.readByteUnsigned(0) << 24) | (ram.readByteUnsigned(1) << 16) |
       (ram.readByteUnsigned(2) << 8) | ram.readByteUnsigned(3)
     magic shouldBe 0
