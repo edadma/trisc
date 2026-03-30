@@ -460,6 +460,9 @@ Allocates new blocks as needed. Returns bytes written.
       var blk_idx = 0
       var blk_off = 0
       var chunk = 0
+      var ind_blk = 0
+      var i = 0
+      var dst: *i8 = buf
       while remaining > 0
           blk_idx = (offset + buf_pos) / sb_block_size
           blk_off = (offset + buf_pos) % sb_block_size
@@ -468,13 +471,24 @@ Allocates new blocks as needed. Returns bytes written.
               disk_blk = alloc_block()
               if disk_blk == -1
                   break
-              ino_set_direct(&ibuf[0], blk_idx, disk_blk)
+              if blk_idx < NUM_DIRECT
+                  ino_set_direct(&ibuf[0], blk_idx, disk_blk)
+              else
+                  ind_blk = ino_indirect(&ibuf[0])
+                  if ind_blk == 0
+                      ind_blk = alloc_block()
+                      if ind_blk == -1
+                          break
+                      ino_set_indirect(&ibuf[0], ind_blk)
+                  rd_read(ind_blk, &blkbuf2[0])
+                  write_i16(&blkbuf2[0] + (blk_idx - NUM_DIRECT) * 2, disk_blk)
+                  rd_write(ind_blk, &blkbuf2[0])
           rd_read(disk_blk, &blkbuf[0])
           chunk = sb_block_size - blk_off
           if chunk > remaining
               chunk = remaining
-          val dst: *i8 = &blkbuf[0] + blk_off
-          var i = 0
+          dst = &blkbuf[0] + blk_off
+          i = 0
           while i < chunk
               dst[i] = src[buf_pos]
               buf_pos += 1

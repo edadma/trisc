@@ -281,7 +281,7 @@ class TFSSyslTests extends TFSTestHelpers {
 
   // ===== Create & Write =====
 
-  "tfs_create and tfs_write" ignore {
+  "tfs_create and tfs_write" in {
     val (_, output) = runTFS(
       s"""import "tfs"
          |
@@ -313,7 +313,7 @@ class TFSSyslTests extends TFSTestHelpers {
     output shouldBe "Hello"
   }
 
-  "created file findable via lookup" ignore {
+  "created file findable via lookup" in {
     val (_, output) = runTFS(
       s"""import "tfs"
          |
@@ -336,7 +336,7 @@ class TFSSyslTests extends TFSTestHelpers {
 
   // ===== Mkdir =====
 
-  "tfs_create directory has . and .." ignore {
+  "tfs_create directory has . and .." in {
     val (_, output) = runTFS(
       s"""import "tfs"
          |
@@ -362,7 +362,7 @@ class TFSSyslTests extends TFSTestHelpers {
     output shouldBe "DP"
   }
 
-  "create file inside new directory" ignore {
+  "create file inside new directory" in {
     val (_, output) = runTFS(
       s"""import "tfs"
          |
@@ -396,7 +396,7 @@ class TFSSyslTests extends TFSTestHelpers {
 
   // ===== Unlink =====
 
-  "tfs_unlink removes file" ignore {
+  "tfs_unlink removes file" in {
     val (_, output) = runTFS(
       s"""import "tfs"
          |
@@ -422,7 +422,7 @@ class TFSSyslTests extends TFSTestHelpers {
     output shouldBe "BUG"
   }
 
-  "tfs_unlink nonexistent returns -1" ignore {
+  "tfs_unlink nonexistent returns -1" in {
     val (_, output) = runTFS(
       s"""import "tfs"
          |
@@ -443,7 +443,7 @@ class TFSSyslTests extends TFSTestHelpers {
 
   // ===== Write =====
 
-  "write updates file size" ignore {
+  "write updates file size" in {
     val (_, output) = runTFS(
       s"""import "tfs"
          |
@@ -469,7 +469,7 @@ class TFSSyslTests extends TFSTestHelpers {
     output shouldBe "Y"
   }
 
-  "write at offset extends file" ignore {
+  "write at offset extends file" in {
     val (_, output) = runTFS(
       s"""import "tfs"
          |
@@ -498,7 +498,7 @@ class TFSSyslTests extends TFSTestHelpers {
     output shouldBe "ABCD"
   }
 
-  "overwrite part of file" ignore {
+  "overwrite part of file" in {
     val (_, output) = runTFS(
       s"""import "tfs"
          |
@@ -533,7 +533,7 @@ class TFSSyslTests extends TFSTestHelpers {
 
   // ===== Device nodes =====
 
-  "tfs_mknod creates device node" ignore {
+  "tfs_mknod creates device node" in {
     val (_, output) = runTFS(
       s"""import "tfs"
          |
