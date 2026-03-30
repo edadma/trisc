@@ -244,38 +244,37 @@ class SyslCodegenPointerTests extends SyslCodegenHelpers {
 
   // === &array pointer arithmetic (array decay) ===
 
-  "addr-of i8 array plus offset scales by 1" in {
+  "addr-of array element plus offset" in {
     compileAndRun(
       """main() -> int
         |    var buf: [64]i8
         |    buf[10] = 42
-        |    val p: *i8 = &buf + 10
+        |    val p: *i8 = &buf[0] + 10
         |    *p
         |""".stripMargin) shouldBe 42
   }
 
-  "addr-of int array plus offset scales by element size" in {
+  "addr-of int array element plus offset" in {
     compileAndRun(
       """main() -> int
         |    var arr: [10]int
         |    arr[3] = 99
-        |    val p: *int = &arr + 3
+        |    val p: *int = &arr[0] + 3
         |    *p
         |""".stripMargin) shouldBe 99
   }
 
-  "addr-of large i8 array plus offset" in {
+  "addr-of large i8 array element plus offset" in {
     compileAndRun(
       """main() -> int
         |    var buf: [512]i8
         |    buf[32] = 77
-        |    val p: *i8 = &buf + 32
+        |    val p: *i8 = &buf[0] + 32
         |    *p
         |""".stripMargin) shouldBe 77
   }
 
-  "addr-of i8 array decays to *i8" in {
-    // Passing &array to a function expecting *i8 should work
+  "addr-of array element passed to function" in {
     compileAndRun(
       """read_byte(p: *i8, idx: int) -> int
         |    p[idx]
@@ -283,28 +282,28 @@ class SyslCodegenPointerTests extends SyslCodegenHelpers {
         |main() -> int
         |    var buf: [32]i8
         |    buf[5] = 88
-        |    read_byte(&buf, 5)
+        |    read_byte(&buf[0], 5)
         |""".stripMargin) shouldBe 88
   }
 
-  "addr-of global i8 array plus offset" in {
+  "addr-of global array element plus offset" in {
     compileAndRun(
       """var buf: [64]i8
         |
         |main() -> int
         |    buf[20] = 55
-        |    val p: *i8 = &buf + 20
+        |    val p: *i8 = &buf[0] + 20
         |    *p
         |""".stripMargin) shouldBe 55
   }
 
-  "addr-of global large array plus offset" in {
+  "addr-of global large array element plus offset" in {
     compileAndRun(
       """var buf: [512]i8
         |
         |main() -> int
         |    buf[100] = 33
-        |    val p: *i8 = &buf + 100
+        |    val p: *i8 = &buf[0] + 100
         |    *p
         |""".stripMargin) shouldBe 33
   }

@@ -126,7 +126,7 @@ rd_read(lba, addr) — Read one block from ramdisk into RAM at addr.
 @
 
   tfs_init()
-      val buf: int = &blkbuf
+      val buf: int = &blkbuf[0]
       rd_read(1, buf)
       val magic = read_i32(buf + 0)
       if magic != TFS_MAGIC
@@ -155,14 +155,14 @@ for the given inode number.
       (ino * INODE_SIZE) % sb_block_size
 
 @api tfs_read_inode(ino, buf) — Read inode into buf (32 bytes).
-Reads the block containing the inode into blkbuf, then copies 32 bytes.
+Reads the block containing the inode into &blkbuf[0], then copies 32 bytes.
 @
 
   tfs_read_inode(ino: int, buf: int)
       val blk = inode_block(ino)
-      rd_read(blk, &blkbuf)
+      rd_read(blk, &blkbuf[0])
       val off = inode_off(ino)
-      val src: *i8 = &blkbuf + off
+      val src: *i8 = &blkbuf[0] + off
       val dst: *i8 = buf
       var i = 0
       while i < INODE_SIZE
@@ -232,15 +232,15 @@ Layout: mode(2) nlinks(1) uid(1) gid(1) pad(1) size(4) mtime(4) ctime(4)
 
   tfs_write_inode(ino: int, buf: int)
       val blk = inode_block(ino)
-      rd_read(blk, &blkbuf)
+      rd_read(blk, &blkbuf[0])
       val off = inode_off(ino)
-      val dst: *i8 = &blkbuf + off
+      val dst: *i8 = &blkbuf[0] + off
       val src: *i8 = buf
       var i = 0
       while i < INODE_SIZE
           dst[i] = src[i]
           i += 1
-      rd_write(blk, &blkbuf)
+      rd_write(blk, &blkbuf[0])
 
   // === Block data I/O ===
 
@@ -253,42 +253,42 @@ indirect block (6+).
   get_file_block(ibuf: int, idx: int) -> int
       if idx < NUM_DIRECT
           return ino_direct(ibuf, idx)
-      // Read indirect block into blkbuf2 (blkbuf used by callers for data)
+      // Read indirect block into &blkbuf2[0] (&blkbuf[0] used by callers for data)
       val ind_blk = ino_indirect(ibuf)
       if ind_blk == 0
           return 0
-      rd_read(ind_blk, &blkbuf2)
-      read_i16(&blkbuf2 + (idx - NUM_DIRECT) * 2)
+      rd_read(ind_blk, &blkbuf2[0])
+      read_i16(&blkbuf2[0] + (idx - NUM_DIRECT) * 2)
 
   // === Bitmap operations ===
 
   bitmap_test(bitmap_start: int, idx: int) -> int
       val blk = bitmap_start + idx / (sb_block_size * 8)
-      rd_read(blk, &blkbuf2)
+      rd_read(blk, &blkbuf2[0])
       val byte_off = (idx % (sb_block_size * 8)) / 8
       val bit = idx % 8
-      val p: *i8 = &blkbuf2 + byte_off
+      val p: *i8 = &blkbuf2[0] + byte_off
       if (*p & (1 << bit)) != 0
           return 1
       0
 
   bitmap_set(bitmap_start: int, idx: int)
       val blk = bitmap_start + idx / (sb_block_size * 8)
-      rd_read(blk, &blkbuf2)
+      rd_read(blk, &blkbuf2[0])
       val byte_off = (idx % (sb_block_size * 8)) / 8
       val bit = idx % 8
-      val p: *i8 = &blkbuf2 + byte_off
+      val p: *i8 = &blkbuf2[0] + byte_off
       *p = *p | (1 << bit)
-      rd_write(blk, &blkbuf2)
+      rd_write(blk, &blkbuf2[0])
 
   bitmap_clear(bitmap_start: int, idx: int)
       val blk = bitmap_start + idx / (sb_block_size * 8)
-      rd_read(blk, &blkbuf2)
+      rd_read(blk, &blkbuf2[0])
       val byte_off = (idx % (sb_block_size * 8)) / 8
       val bit = idx % 8
-      val p: *i8 = &blkbuf2 + byte_off
+      val p: *i8 = &blkbuf2[0] + byte_off
       *p = *p & ~(1 << bit)
-      rd_write(blk, &blkbuf2)
+      rd_write(blk, &blkbuf2[0])
 
 @tech
 alloc_inode() — Find and allocate a free inode. Returns inode number or -1.
@@ -325,10 +325,10 @@ alloc_inode() — Find and allocate a free inode. Returns inode number or -1.
   // === Superblock sync ===
 
   sync_superblock()
-      rd_read(1, &blkbuf)
-      write_i16(&blkbuf + 20, sb_free_blocks)
-      write_i16(&blkbuf + 22, sb_free_inodes)
-      rd_write(1, &blkbuf)
+      rd_read(1, &blkbuf[0])
+      write_i16(&blkbuf[0] + 20, sb_free_blocks)
+      write_i16(&blkbuf[0] + 22, sb_free_inodes)
+      rd_write(1, &blkbuf[0])
 
   // === String helpers ===
 
@@ -362,10 +362,10 @@ Find a name in a directory. Returns the inode number or -1 if not found.
       tfs_read_inode(dir_ino, &ibuf)
       val entries = ino_size(&ibuf) / DIR_ENTRY_SIZE
       val data_blk = ino_direct(&ibuf, 0)
-      rd_read(data_blk, &blkbuf)
+      rd_read(data_blk, &blkbuf[0])
       var i = 0
       while i < entries
-          val off: int = &blkbuf + i * DIR_ENTRY_SIZE
+          val off: int = &blkbuf[0] + i * DIR_ENTRY_SIZE
           val entry_ino = read_i16(off)
           if entry_ino != 0
               val entry_name: *i8 = off + 2
@@ -430,11 +430,11 @@ Returns bytes read.
           val disk_blk = get_file_block(&ibuf, blk_idx)
           if disk_blk == 0
               break
-          rd_read(disk_blk, &blkbuf)
+          rd_read(disk_blk, &blkbuf[0])
           var chunk = sb_block_size - blk_off
           if chunk > remaining
               chunk = remaining
-          val src: *i8 = &blkbuf + blk_off
+          val src: *i8 = &blkbuf[0] + blk_off
           var i = 0
           while i < chunk
               dst[buf_pos] = src[i]
@@ -474,28 +474,28 @@ Allocates new blocks as needed. Returns bytes written.
                       if ind_blk == -1
                           break
                       ino_set_indirect(&ibuf, ind_blk)
-                  rd_read(ind_blk, &blkbuf2)
-                  write_i16(&blkbuf2 + (blk_idx - NUM_DIRECT) * 2, disk_blk)
-                  rd_write(ind_blk, &blkbuf2)
+                  rd_read(ind_blk, &blkbuf2[0])
+                  write_i16(&blkbuf2[0] + (blk_idx - NUM_DIRECT) * 2, disk_blk)
+                  rd_write(ind_blk, &blkbuf2[0])
               // Zero new block
-              rd_read(disk_blk, &blkbuf)
-              val zp: *i8 = &blkbuf
+              rd_read(disk_blk, &blkbuf[0])
+              val zp: *i8 = &blkbuf[0]
               var zi = 0
               while zi < sb_block_size
                   zp[zi] = 0
                   zi += 1
           else
-              rd_read(disk_blk, &blkbuf)
+              rd_read(disk_blk, &blkbuf[0])
           var chunk = sb_block_size - blk_off
           if chunk > remaining
               chunk = remaining
-          val dst: *i8 = &blkbuf + blk_off
+          val dst: *i8 = &blkbuf[0] + blk_off
           var i = 0
           while i < chunk
               dst[i] = src[buf_pos]
               buf_pos += 1
               i += 1
-          rd_write(disk_blk, &blkbuf)
+          rd_write(disk_blk, &blkbuf[0])
           remaining -= chunk
       // Update size if we wrote past end
       val new_end = offset + buf_pos
@@ -510,14 +510,14 @@ Allocates new blocks as needed. Returns bytes written.
       var ibuf: [32]i8
       tfs_read_inode(dir_ino, &ibuf)
       val data_blk = ino_direct(&ibuf, 0)
-      rd_read(data_blk, &blkbuf)
+      rd_read(data_blk, &blkbuf[0])
       val entries = ino_size(&ibuf) / DIR_ENTRY_SIZE
       val max_entries = sb_block_size / DIR_ENTRY_SIZE
       // Look for a free slot (inode == 0) first
       var slot = -1
       var i = 0
       while i < entries
-          val off: int = &blkbuf + i * DIR_ENTRY_SIZE
+          val off: int = &blkbuf[0] + i * DIR_ENTRY_SIZE
           if read_i16(off) == 0
               slot = i
               break
@@ -528,9 +528,9 @@ Allocates new blocks as needed. Returns bytes written.
           slot = entries
           ino_set_size(&ibuf, (entries + 1) * DIR_ENTRY_SIZE)
           tfs_write_inode(dir_ino, &ibuf)
-          // Re-read dir data since tfs_write_inode clobbered blkbuf
-          rd_read(data_blk, &blkbuf)
-      val off: int = &blkbuf + slot * DIR_ENTRY_SIZE
+          // Re-read dir data since tfs_write_inode clobbered &blkbuf[0]
+          rd_read(data_blk, &blkbuf[0])
+      val off: int = &blkbuf[0] + slot * DIR_ENTRY_SIZE
       write_i16(off, child_ino)
       // Write name
       val np: *i8 = name
@@ -545,18 +545,18 @@ Allocates new blocks as needed. Returns bytes written.
       while j < DIR_NAME_LEN
           dp[j] = 0
           j += 1
-      rd_write(data_blk, &blkbuf)
+      rd_write(data_blk, &blkbuf[0])
       0
 
   dir_remove_entry(dir_ino: int, name: *i8) -> int
       var ibuf: [32]i8
       tfs_read_inode(dir_ino, &ibuf)
       val data_blk = ino_direct(&ibuf, 0)
-      rd_read(data_blk, &blkbuf)
+      rd_read(data_blk, &blkbuf[0])
       val entries = ino_size(&ibuf) / DIR_ENTRY_SIZE
       var i = 0
       while i < entries
-          val off: int = &blkbuf + i * DIR_ENTRY_SIZE
+          val off: int = &blkbuf[0] + i * DIR_ENTRY_SIZE
           val entry_ino = read_i16(off)
           if entry_ino != 0
               val en: *i8 = off + 2
@@ -568,7 +568,7 @@ Allocates new blocks as needed. Returns bytes written.
                   while j < DIR_NAME_LEN
                       dp[j] = 0
                       j += 1
-                  rd_write(data_blk, &blkbuf)
+                  rd_write(data_blk, &blkbuf[0])
                   return entry_ino
           i += 1
       -1
@@ -603,20 +603,20 @@ type: 1=regular, 2=directory, 3=chardev, 4=blockdev
           ino_set_nlinks(&ibuf, 2)
           tfs_write_inode(ino, &ibuf)
           // Write . and ..
-          rd_read(blk, &blkbuf)
-          val bp: *i8 = &blkbuf
+          rd_read(blk, &blkbuf[0])
+          val bp: *i8 = &blkbuf[0]
           var zi = 0
           while zi < sb_block_size
               bp[zi] = 0
               zi += 1
-          write_i16(&blkbuf, ino)
-          val d1: *i8 = &blkbuf + 2
+          write_i16(&blkbuf[0], ino)
+          val d1: *i8 = &blkbuf[0] + 2
           d1[0] = 46
-          write_i16(&blkbuf + DIR_ENTRY_SIZE, parent_ino)
-          val d2: *i8 = &blkbuf + DIR_ENTRY_SIZE + 2
+          write_i16(&blkbuf[0] + DIR_ENTRY_SIZE, parent_ino)
+          val d2: *i8 = &blkbuf[0] + DIR_ENTRY_SIZE + 2
           d2[0] = 46
           d2[1] = 46
-          rd_write(blk, &blkbuf)
+          rd_write(blk, &blkbuf[0])
           // Increment parent nlinks
           var pbuf: [32]i8
           tfs_read_inode(parent_ino, &pbuf)
@@ -677,10 +677,10 @@ Returns 0 on success, -1 on error.
           val ind = ino_indirect(&ibuf)
           if ind != 0
               // Free indirect entries
-              rd_read(ind, &blkbuf2)
+              rd_read(ind, &blkbuf2[0])
               var j = 0
               while j < sb_block_size / 2
-                  val b = read_i16(&blkbuf2 + j * 2)
+                  val b = read_i16(&blkbuf2[0] + j * 2)
                   if b != 0
                       free_block(b)
                   j += 1
