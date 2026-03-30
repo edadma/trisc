@@ -9,14 +9,12 @@ class TOSNotifyTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread(waiter, 0x6000, 0x5000, "w")
           |    create_thread(sender, 0x8000, 0x7000, "s")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |waiter()
@@ -41,14 +39,12 @@ class TOSNotifyTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "t")
           |    create_thread(sender, 0x8000, 0x7000, "s")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |task()
@@ -74,14 +70,12 @@ class TOSNotifyTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread(waiter, 0x6000, 0x5000, "w")
           |    create_thread(setter, 0x8000, 0x7000, "s")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |waiter()
@@ -103,14 +97,12 @@ class TOSNotifyTests extends TOSTestHelpers {
       "app" ->
         """import "kernel"
           |import "services"
+          |import "timer"
           |
           |kernel_main() -> int
           |    create_thread(waiter, 0x6000, 0x5000, "w")
           |    create_thread(setter, 0x8000, 0x7000, "s")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |waiter()
@@ -138,16 +130,14 @@ class TOSNotifyTests extends TOSTestHelpers {
         """import "kernel"
           |import "services"
           |import "rmutex"
+          |import "timer"
           |
           |var rm: RMutex
           |
           |kernel_main() -> int
           |    rmutex_init(&rm)
           |    create_thread(task, 0x6000, 0x5000, "t")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |task()
@@ -174,6 +164,7 @@ class TOSNotifyTests extends TOSTestHelpers {
         """import "kernel"
           |import "services"
           |import "rmutex"
+          |import "timer"
           |
           |var rm: RMutex
           |
@@ -181,10 +172,7 @@ class TOSNotifyTests extends TOSTestHelpers {
           |    rmutex_init(&rm)
           |    create_thread(holder, 0x6000, 0x5000, "h")
           |    create_thread(waiter, 0x8000, 0x7000, "w")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |holder()
@@ -218,6 +206,7 @@ class TOSNotifyTests extends TOSTestHelpers {
         """import "kernel"
           |import "services"
           |import "qset"
+          |import "timer"
           |
           |var qs: QueueSet
           |
@@ -227,10 +216,7 @@ class TOSNotifyTests extends TOSTestHelpers {
           |    qset_add(&qs, sid, 20)
           |    create_thread(waiter, 0x6000, 0x5000, "w")
           |    create_thread(poster, 0x8000, 0x7000, "p")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |waiter()
@@ -256,6 +242,7 @@ class TOSNotifyTests extends TOSTestHelpers {
         """import "kernel"
           |import "services"
           |import "qset"
+          |import "timer"
           |
           |var qs: QueueSet
           |
@@ -266,10 +253,7 @@ class TOSNotifyTests extends TOSTestHelpers {
           |    qset_add(&qs, sid, 30)
           |    create_thread(waiter, 0x6000, 0x5000, "w")
           |    create_thread(poster, 0x8000, 0x7000, "p")
-          |    val period: *i32 = 0x100020
-          |    *period = 10
-          |    val control: *i8 = 0x100024
-          |    *control = 1
+          |    timer_init(10)
           |    first_thread_ssp()
           |
           |waiter()
