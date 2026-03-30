@@ -193,6 +193,62 @@ class SyslValBugTests extends TFSTestHelpers {
     output shouldBe "Y"
   }
 
+  "tfs_create and tfs_write round-trip" in {
+    val (_, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |${syslBytes("name", "hello")}
+         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    if ino == -1
+         |        putchar(69)
+         |        return 1
+         |    var data: [6]i8
+         |    data[0] = 72
+         |    data[1] = 101
+         |    data[2] = 108
+         |    data[3] = 108
+         |    data[4] = 111
+         |    tfs_write(ino, &data[0], 0, 5)
+         |    var buf: [32]i8
+         |    val n = tfs_read(ino, &buf[0], 0, 5)
+         |    val bp: *i8 = &buf[0]
+         |    var i = 0
+         |    while i < n
+         |        putchar(bp[i])
+         |        i += 1
+         |    0
+         |""".stripMargin,
+      prefill = "/dev/tty0 char 0 0",
+      maxCycles = 50000,
+    )
+    output shouldBe "Hello"
+  }
+
+  "tfs_create minimal with trace" in {
+    val (cpu, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |    putchar(49)
+         |${syslBytes("name", "x")}
+         |    putchar(50)
+         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    putchar(51)
+         |    if ino > 0
+         |        putchar(89)
+         |    else
+         |        putchar(78)
+         |    0
+         |""".stripMargin,
+      prefill = "/dev/tty0 char 0 0",
+      maxCycles = 5000,
+    )
+    output shouldBe "123Y"
+  }
+
   "sb_inode_table value" in {
     val (_, output) = runTFS(
       """import "tfs"
