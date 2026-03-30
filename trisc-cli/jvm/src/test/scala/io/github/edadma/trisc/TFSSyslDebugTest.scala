@@ -126,6 +126,49 @@ class TFSSyslDebugTest extends TFSTestHelpers {
     output shouldBe "Y"
   }
 
+  "tfs_lookup root with byte array" in {
+    val (_, output) = runTFS(
+      """import "tfs"
+        |
+        |main() -> int
+        |    tfs_init()
+        |    var path: [2]i8
+        |    path[0] = 47
+        |    path[1] = 0
+        |    val ino = tfs_lookup(&path)
+        |    if ino == -1
+        |        putchar(77)
+        |    else if ino == 0
+        |        putchar(48)
+        |    else if ino == 1
+        |        putchar(49)
+        |    else
+        |        putchar(63)
+        |    0
+        |""".stripMargin,
+      prefill = "/dev/tty0 char 0 0",
+    )
+    output shouldBe "1"
+  }
+
+  "tfs_lookup root does not enter loop" in {
+    val (_, output) = runTFS(
+      """import "tfs"
+        |
+        |main() -> int
+        |    val path = "/"
+        |    val p: *i8 = path
+        |    putchar(48 + (p[0] & 0xFF) / 10)
+        |    putchar(48 + (p[1] & 0xFF))
+        |    // p[0] should be 47, p[1] should be 0
+        |    0
+        |""".stripMargin,
+      prefill = "/dev/tty0 char 0 0",
+    )
+    // 47 = '4','7' and 0 = '0'
+    output shouldBe "40"
+  }
+
   "tfs rd_read into blkbuf works" in {
     val (_, output) = runTFS(
       """import "tfs"

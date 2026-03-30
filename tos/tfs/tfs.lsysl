@@ -332,7 +332,7 @@ alloc_inode() — Find and allocate a free inode. Returns inode number or -1.
 
   // === String helpers ===
 
-  streq_n(a: int, b: int, n: int) -> int
+  streq_n(a: *i8, b: *i8, n: int) -> int
       val pa: *i8 = a
       val pb: *i8 = b
       var i = 0
@@ -344,7 +344,7 @@ alloc_inode() — Find and allocate a free inode. Returns inode number or -1.
           i += 1
       1
 
-  strlen(s: int) -> int
+  strlen(s: *i8) -> int
       val p: *i8 = s
       var i = 0
       while p[i] != 0
@@ -357,7 +357,7 @@ alloc_inode() — Find and allocate a free inode. Returns inode number or -1.
 Find a name in a directory. Returns the inode number or -1 if not found.
 @
 
-  tfs_dir_lookup(dir_ino: int, name: int) -> int
+  tfs_dir_lookup(dir_ino: int, name: *i8) -> int
       var ibuf: [32]i8
       tfs_read_inode(dir_ino, &ibuf)
       val entries = ino_size(&ibuf) / DIR_ENTRY_SIZE
@@ -368,7 +368,8 @@ Find a name in a directory. Returns the inode number or -1 if not found.
           val off: int = &blkbuf + i * DIR_ENTRY_SIZE
           val entry_ino = read_i16(off)
           if entry_ino != 0
-              if streq_n(off + 2, name, DIR_NAME_LEN) == 1
+              val entry_name: *i8 = off + 2
+              if streq_n(entry_name, name, DIR_NAME_LEN) == 1
                   return entry_ino
           i += 1
       -1
@@ -378,7 +379,7 @@ Resolve a full path (e.g. "/dev/tty0") to an inode number.
 Returns -1 if not found.
 @
 
-  tfs_lookup(path: int) -> int
+  tfs_lookup(path: *i8) -> int
       val p: *i8 = path
       if p[0] != 47
           return -1
@@ -505,7 +506,7 @@ Allocates new blocks as needed. Returns bytes written.
 
   // === Directory entry add/remove ===
 
-  dir_add_entry(dir_ino: int, name: int, child_ino: int) -> int
+  dir_add_entry(dir_ino: int, name: *i8, child_ino: int) -> int
       var ibuf: [32]i8
       tfs_read_inode(dir_ino, &ibuf)
       val data_blk = ino_direct(&ibuf, 0)
@@ -545,7 +546,7 @@ Allocates new blocks as needed. Returns bytes written.
       rd_write(data_blk, &blkbuf)
       0
 
-  dir_remove_entry(dir_ino: int, name: int) -> int
+  dir_remove_entry(dir_ino: int, name: *i8) -> int
       var ibuf: [32]i8
       tfs_read_inode(dir_ino, &ibuf)
       val data_blk = ino_direct(&ibuf, 0)
@@ -556,7 +557,8 @@ Allocates new blocks as needed. Returns bytes written.
           val off: int = &blkbuf + i * DIR_ENTRY_SIZE
           val entry_ino = read_i16(off)
           if entry_ino != 0
-              if streq_n(off + 2, name, DIR_NAME_LEN) == 1
+              val en: *i8 = off + 2
+              if streq_n(en, name, DIR_NAME_LEN) == 1
                   // Clear the entry
                   write_i16(off, 0)
                   val dp: *i8 = off + 2
@@ -576,7 +578,7 @@ Create a new file or directory. Returns inode number or -1 on error.
 type: 1=regular, 2=directory, 3=chardev, 4=blockdev
 @
 
-  tfs_create(parent_ino: int, name: int, ftype: int, perm: int) -> int
+  tfs_create(parent_ino: int, name: *i8, ftype: int, perm: int) -> int
       val ino = alloc_inode()
       if ino == -1
           return -1
@@ -629,7 +631,7 @@ type: 1=regular, 2=directory, 3=chardev, 4=blockdev
 Create a device node. Returns inode number or -1.
 @
 
-  tfs_mknod(parent_ino: int, name: int, ftype: int, major: int, minor: int) -> int
+  tfs_mknod(parent_ino: int, name: *i8, ftype: int, major: int, minor: int) -> int
       val ino = alloc_inode()
       if ino == -1
           return -1
@@ -654,7 +656,7 @@ Remove a directory entry and free the inode if nlinks reaches 0.
 Returns 0 on success, -1 on error.
 @
 
-  tfs_unlink(parent_ino: int, name: int) -> int
+  tfs_unlink(parent_ino: int, name: *i8) -> int
       val ino = dir_remove_entry(parent_ino, name)
       if ino == -1
           return -1

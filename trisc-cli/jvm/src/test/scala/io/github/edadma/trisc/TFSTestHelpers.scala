@@ -113,4 +113,18 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
     cpu.reset()
     cpu.run()
     (cpu, output.toString)
+
+  /** Generate SYSL code to declare a null-terminated byte array from a string.
+    * Usage: `syslBytes("path", "/dev/tty0")` produces:
+    *   var path: [11]i8
+    *   path[0] = 47
+    *   path[1] = 100
+    *   ...
+    *   path[10] = 0
+    */
+  def syslBytes(name: String, s: String): String =
+    val bytes = s.getBytes("UTF-8") :+ 0.toByte
+    val decl = s"    var $name: [${bytes.length}]i8"
+    val assigns = bytes.zipWithIndex.map { (b, i) => s"    $name[$i] = ${b & 0xff}" }.mkString("\n")
+    s"$decl\n$assigns"
 }
