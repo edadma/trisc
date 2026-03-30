@@ -159,9 +159,8 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
     val mem = new Memory("Memory", new RAM(0, 0x100000), stdout, intc, timer)
     linked.load(mem)
     val cpu = new CPU(mem, intc) { this.limit = maxCycles }
-    if maxCycles <= 1000 then
-      cpu.log.setLogLevel(LogLevel.TRACE)
-      cpu.log.setHandler(new FileHandler("/tmp/trisc_debug.log"))
+    cpu.log.setLogLevel(LogLevel.TRACE)
+    cpu.log.setHandler(new FileHandler("/tmp/trisc_debug.log"))
     cpu.reset()
     System.err.println(f"[TOS] After load — Vector0(SSP): 0x${mem.readLong(0)}%x, Vector1(PC): 0x${mem.readLong(8)}%x, Vector2(IRQ): 0x${mem.readLong(16)}%x")
     // Read first 8 bytes of code (movi r4, kernel_main should be 4 instructions)
@@ -174,7 +173,9 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
     System.err.println(f"[TOS] kernel_main=0x${symMap.getOrElse("kernel_main", -1L)}%x boot=0x${symMap.getOrElse("boot", -1L)}%x default_isr=0x${symMap.getOrElse("default_isr", -1L)}%x")
     // Check boot TOF reloc types
     System.err.println(s"[TOS] bootTof relocs (${bootTof.segments.flatMap(_.relocs).size} total): ${bootTof.segments.flatMap(_.relocs).map(r => s"${r.typ}@${r.offset.toHexString}:${r.symbol}").mkString(", ")}")
-    System.err.println(s"[TOS] syslTof relocs: ${syslTof.segments.flatMap(_.relocs).map(r => s"${r.typ}@${r.offset.toHexString}:${r.symbol}").take(5).mkString(", ")}")
+    val syslSyms = syslTof.segments.flatMap(s => s.symbols.map(sym => s"${sym.name}@${s.name}+0x${sym.offset.toHexString}"))
+    System.err.println(s"[TOS] syslTof kernel_main: ${syslSyms.find(_.startsWith("kernel_main@"))}")
+    System.err.println(s"[TOS] syslTof segments: ${syslTof.segments.map(s => s"${s.name}@0x${s.org.toHexString}").mkString(", ")}")
     (cpu, output.toString)
 
   def runRBTest(appSource: String): (CPU, String) =
