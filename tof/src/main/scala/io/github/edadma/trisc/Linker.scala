@@ -20,6 +20,7 @@ object Linker:
         symbols: Seq[TOFSymbol],
         externs: Seq[String],
         relocs: Seq[TOFReloc],
+        groupIdx: Int = -1, // index into tofGroups, -1 if none
     )
 
     // Phase 1: flatten each segment's chunks into a contiguous byte array
@@ -76,7 +77,7 @@ object Linker:
     val placedIndices = new mutable.HashSet[Int]
 
     def placeSeg(is: IndexedSegment, org: Long): Unit =
-      val ps = PlacedSegment(is.seg.name, org, is.seg.data, is.seg.symbols, is.seg.externs, is.seg.relocs)
+      val ps = PlacedSegment(is.seg.name, org, is.seg.data, is.seg.symbols, is.seg.externs, is.seg.relocs, is.groupIdx)
       placed += ps
       placedByName(is.seg.name) = ps
       placedIndices += is.idx
@@ -159,6 +160,29 @@ object Linker:
         throw LinkerError(s"linker symbol '${symDef.name}' conflicts with an existing symbol")
       globalSymbols(symDef.name) = (addr, TOFSymbol(symDef.name, 0, SymbolType.Data, Some(8)))
 
+    // Phase 3c: build address remap for unit groups.
+    // For relocatable TOFs with base-relative relocs, the first-stage link encoded
+    // absolute addresses using the original segment layout. If the second-stage link
+    // (e.g. via linker script) reorders segments, we need a per-address remap rather
+    // than a single delta. For each unit group, map original address ranges to new orgs.
+    case class SegmentRange(originalOrg: Long, size: Long, newOrg: Long)
+    val groupRemaps = new mutable.HashMap[Int, Seq[SegmentRange]]
+
+    for (group, gi) <- tofGroups.zipWithIndex if group.placeAsUnit do
+      val ranges = for seg <- group.segments yield
+        val newOrg = placed.find(ps => ps.groupIdx == gi && ps.name == seg.name).map(_.org).getOrElse(seg.originalOrg)
+        SegmentRange(seg.originalOrg, seg.data.length.toLong, newOrg)
+      groupRemaps(gi) = ranges.sortBy(_.originalOrg)
+
+    def remapAddress(groupIdx: Int, oldAddr: Long): Long =
+      groupRemaps.get(groupIdx) match
+        case Some(ranges) =>
+          // Find which original segment this address falls in
+          ranges.findLast(r => oldAddr >= r.originalOrg) match
+            case Some(r) => r.newOrg + (oldAddr - r.originalOrg)
+            case None => oldAddr // before any segment, shouldn't happen
+        case None => oldAddr // no remap for this group
+
     // Phase 4: resolve relocations
     // When producing a relocatable output, unresolved externs are preserved
     val outputRelocs = new ArrayBuffer[ArrayBuffer[TOFReloc]]
@@ -183,36 +207,40 @@ object Linker:
 
       for reloc <- seg.relocs do
         if reloc.symbol.isEmpty then
-          // Already resolved (base-relative) — adjust for new segment placement
+          // Already resolved (base-relative) — adjust for new segment placement.
+          // For unit groups (relocatable TOFs with base-relative relocs), use per-address
+          // remapping to handle segment reordering (e.g. by linker script).
+          // For non-unit groups, use simple delta (seg.org).
           val off = reloc.offset.toInt
-          val delta = seg.org
-          if delta != 0 then
-            reloc.typ match
-              case RelocType.ABS32 =>
-                val old = ((seg.data(off) & 0xff) << 24) | ((seg.data(off + 1) & 0xff) << 16) |
-                  ((seg.data(off + 2) & 0xff) << 8) | (seg.data(off + 3) & 0xff)
-                val addr = old.toLong + delta
-                seg.data(off) = ((addr >> 24) & 0xff).toByte
-                seg.data(off + 1) = ((addr >> 16) & 0xff).toByte
-                seg.data(off + 2) = ((addr >> 8) & 0xff).toByte
-                seg.data(off + 3) = (addr & 0xff).toByte
-              case RelocType.ABS64 =>
-                var old = 0L
-                for i <- 0 until 8 do old = (old << 8) | (seg.data(off + i) & 0xff)
-                val addr = old + delta
-                for i <- 0 until 8 do seg.data(off + i) = ((addr >> ((7 - i) * 8)) & 0xff).toByte
-              case RelocType.MOVI2 | RelocType.MOVI3 | RelocType.MOVI4 =>
-                val n = reloc.typ match
-                  case RelocType.MOVI2 => 2
-                  case RelocType.MOVI3 => 3
-                  case RelocType.MOVI4 => 4
-                  case _               => throw LinkerError(s"unexpected reloc type in MOVI branch: ${reloc.typ}")
-                // Read current address from movi instruction bytes
-                var old = 0L
-                for i <- 0 until n do old = (old << 8) | (seg.data(off + i * 2 + 1) & 0xff)
-                if off == 0 then
-                  System.err.println(f"[LINKER] base-reloc at off=0: seg=${seg.name}@0x${seg.org}%x old=0x$old%x delta=0x$delta%x new=0x${old+delta}%x")
-                patchMovi(seg.data, off, old + delta, n)
+          val useRemap = seg.groupIdx >= 0 && groupRemaps.contains(seg.groupIdx)
+
+          def adjustAddr(old: Long): Long =
+            if useRemap then remapAddress(seg.groupIdx, old)
+            else old + seg.org
+
+          reloc.typ match
+            case RelocType.ABS32 =>
+              val old = ((seg.data(off) & 0xff) << 24) | ((seg.data(off + 1) & 0xff) << 16) |
+                ((seg.data(off + 2) & 0xff) << 8) | (seg.data(off + 3) & 0xff)
+              val addr = adjustAddr(old.toLong)
+              seg.data(off) = ((addr >> 24) & 0xff).toByte
+              seg.data(off + 1) = ((addr >> 16) & 0xff).toByte
+              seg.data(off + 2) = ((addr >> 8) & 0xff).toByte
+              seg.data(off + 3) = (addr & 0xff).toByte
+            case RelocType.ABS64 =>
+              var old = 0L
+              for i <- 0 until 8 do old = (old << 8) | (seg.data(off + i) & 0xff)
+              val addr = adjustAddr(old)
+              for i <- 0 until 8 do seg.data(off + i) = ((addr >> ((7 - i) * 8)) & 0xff).toByte
+            case RelocType.MOVI2 | RelocType.MOVI3 | RelocType.MOVI4 =>
+              val n = reloc.typ match
+                case RelocType.MOVI2 => 2
+                case RelocType.MOVI3 => 3
+                case RelocType.MOVI4 => 4
+                case _               => throw LinkerError(s"unexpected reloc type in MOVI branch: ${reloc.typ}")
+              var old = 0L
+              for i <- 0 until n do old = (old << 8) | (seg.data(off + i * 2 + 1) & 0xff)
+              patchMovi(seg.data, off, adjustAddr(old), n)
           if relocatable then segRelocs += reloc
         else globalSymbols.get(reloc.symbol) match
           case Some((addr, _)) =>
