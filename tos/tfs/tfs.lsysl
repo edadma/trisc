@@ -707,6 +707,48 @@ out[4]=size, out[5]=mtime, out[6]=ctime. Returns 0 on success.
       out[6] = ino_ctime(&ibuf[0])
       0
 
+  // === Permissions and ownership ===
+
+@api tfs_chmod(ino, perm) -> int
+Change permission bits (lower 9 bits of mode). Preserves file type.
+Returns 0 on success.
+@
+
+  tfs_chmod(ino: int, perm: int) -> int
+      var ibuf: [32]i8
+      tfs_read_inode(ino, &ibuf[0])
+      val ftype = ino_mode(&ibuf[0]) & 0xF000
+      ino_set_mode(&ibuf[0], ftype | (perm & 0x1FF))
+      tfs_write_inode(ino, &ibuf[0])
+      0
+
+@api tfs_chown(ino, uid, gid) -> int
+Change owner and group. Returns 0 on success.
+@
+
+  tfs_chown(ino: int, uid: int, gid: int) -> int
+      var ibuf: [32]i8
+      tfs_read_inode(ino, &ibuf[0])
+      val p: *i8 = &ibuf[0]
+      p[3] = uid & 0xFF
+      p[4] = gid & 0xFF
+      tfs_write_inode(ino, &ibuf[0])
+      0
+
+  // === Filesystem info ===
+
+@api tfs_freeblocks() -> int — Return number of free data blocks.
+@
+
+  tfs_freeblocks() -> int
+      sb_free_blocks
+
+@api tfs_freeinodes() -> int — Return number of free inodes.
+@
+
+  tfs_freeinodes() -> int
+      sb_free_inodes
+
   // === Truncate ===
 
 @api tfs_truncate(ino, new_size) -> int

@@ -795,4 +795,120 @@ class TFSIntegrationTests extends TFSTestHelpers {
     )
     output shouldBe "Y"
   }
+
+  // ===== Chmod =====
+
+  "tfs_chmod changes permissions" in {
+    val (_, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |${syslBytes("name", "script")}
+         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    // Initially 0644 (rw-r--r--)
+         |    var stat: [7]int
+         |    tfs_stat(ino, &stat[0])
+         |    if (stat[0] & 0x1FF) == 0x1A4
+         |        putchar(65)
+         |    // chmod to 0755 (rwxr-xr-x)
+         |    tfs_chmod(ino, 0x1ED)
+         |    tfs_stat(ino, &stat[0])
+         |    if (stat[0] & 0x1FF) == 0x1ED
+         |        putchar(66)
+         |    // Type bits preserved
+         |    if (stat[0] >> 12) == 1
+         |        putchar(67)
+         |    0
+         |""".stripMargin,
+      prefill = defaultPrefill,
+    )
+    output shouldBe "ABC"
+  }
+
+  "tfs_chmod preserves file type" in {
+    val (_, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |${syslBytes("name", "d")}
+         |    val ino = tfs_create(1, &name[0], 2, 0x1ED)
+         |    tfs_chmod(ino, 0x1FF)
+         |    var stat: [7]int
+         |    tfs_stat(ino, &stat[0])
+         |    // Still a directory
+         |    if (stat[0] >> 12) == 2
+         |        putchar(68)
+         |    // Permissions now 0777
+         |    if (stat[0] & 0x1FF) == 0x1FF
+         |        putchar(80)
+         |    0
+         |""".stripMargin,
+      prefill = defaultPrefill,
+    )
+    output shouldBe "DP"
+  }
+
+  // ===== Chown =====
+
+  "tfs_chown changes owner and group" in {
+    val (_, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |${syslBytes("name", "owned")}
+         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    // Initially uid=0 gid=0
+         |    var stat: [7]int
+         |    tfs_stat(ino, &stat[0])
+         |    if stat[2] == 0
+         |        putchar(65)
+         |    // Change to uid=5 gid=10
+         |    tfs_chown(ino, 5, 10)
+         |    tfs_stat(ino, &stat[0])
+         |    if stat[2] == 5
+         |        putchar(66)
+         |    if stat[3] == 10
+         |        putchar(67)
+         |    0
+         |""".stripMargin,
+      prefill = defaultPrefill,
+    )
+    output shouldBe "ABC"
+  }
+
+  // ===== Filesystem info =====
+
+  "tfs_freeblocks and tfs_freeinodes" in {
+    val (_, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |    val fb1 = tfs_freeblocks()
+         |    val fi1 = tfs_freeinodes()
+         |    if fb1 > 0
+         |        putchar(66)
+         |    if fi1 > 0
+         |        putchar(73)
+         |    // Create a file with data — should use 1 inode + 1 block
+         |${syslBytes("name", "f")}
+         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    var data: [4]i8
+         |    data[0] = 65
+         |    tfs_write(ino, &data[0], 0, 1)
+         |    val fb2 = tfs_freeblocks()
+         |    val fi2 = tfs_freeinodes()
+         |    if fb2 == fb1 - 1
+         |        putchar(98)
+         |    if fi2 == fi1 - 1
+         |        putchar(105)
+         |    0
+         |""".stripMargin,
+      prefill = defaultPrefill,
+    )
+    output shouldBe "BIbi"
+  }
 }
