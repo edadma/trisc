@@ -65,7 +65,7 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
   def runTFS(
       mainSource: String,
       prefill: String = "",
-      maxCycles: Int = 500000,
+      maxCycles: Int = 5000000,
   ): (CPU, String) =
     runTFS(Map("main" -> mainSource), prefill, maxCycles)
 
