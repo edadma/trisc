@@ -62,6 +62,7 @@ enum SyslType:
 
   def alignOf: Long = this match
     case IntType(w) => (w / 8).toLong.min(8)
+    case UIntType(w) => (w / 8).toLong.min(8)
     case BoolType => 1
     case VoidType => 1
     case PtrType(_) => 8

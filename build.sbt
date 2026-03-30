@@ -50,6 +50,7 @@ lazy val commonScalacOptions = Seq(
 lazy val commonSettings = Seq(
   scalacOptions ++= commonScalacOptions,
   libraryDependencies += "org.scalatest" %%% "scalatest" % "3.2.19" % "test",
+  Test / testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-oD", "-W", "30", "30", "-P18"),
   publishMavenStyle      := true,
   Test / publishArtifact := false,
 )
