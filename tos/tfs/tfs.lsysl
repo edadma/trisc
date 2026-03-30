@@ -706,3 +706,182 @@ out[4]=size, out[5]=mtime, out[6]=ctime. Returns 0 on success.
       out[5] = ino_mtime(&ibuf[0])
       out[6] = ino_ctime(&ibuf[0])
       0
+
+  // === Truncate ===
+
+@api tfs_truncate(ino, new_size) -> int
+Shrink a file to new_size bytes. Frees blocks beyond the new size.
+Returns 0 on success, -1 on error.
+@
+
+  tfs_truncate(ino: int, new_size: int) -> int
+      var ibuf: [32]i8
+      tfs_read_inode(ino, &ibuf[0])
+      val old_size = ino_size(&ibuf[0])
+      if new_size >= old_size
+          return 0
+      // Calculate which blocks to keep
+      var keep_blocks = new_size / sb_block_size
+      if (new_size % sb_block_size) != 0
+          keep_blocks += 1
+      // Free direct blocks beyond keep_blocks
+      var i = keep_blocks
+      while i < NUM_DIRECT
+          val blk = ino_direct(&ibuf[0], i)
+          if blk != 0
+              free_block(blk)
+              ino_set_direct(&ibuf[0], i, 0)
+          i += 1
+      // Free indirect blocks beyond keep_blocks
+      val ind = ino_indirect(&ibuf[0])
+      if ind != 0
+          rd_read(ind, &blkbuf2[0])
+          var j = 0
+          var freed_all = 1
+          if keep_blocks < NUM_DIRECT
+              j = 0
+          else
+              j = keep_blocks - NUM_DIRECT
+          while j < sb_block_size / 2
+              val b = read_i16(&blkbuf2[0] + j * 2)
+              if b != 0
+                  free_block(b)
+                  write_i16(&blkbuf2[0] + j * 2, 0)
+              j += 1
+          // Check if any indirect entries remain
+          j = 0
+          freed_all = 1
+          while j < sb_block_size / 2
+              if read_i16(&blkbuf2[0] + j * 2) != 0
+                  freed_all = 0
+                  break
+              j += 1
+          if freed_all == 1
+              free_block(ind)
+              ino_set_indirect(&ibuf[0], 0)
+          else
+              rd_write(ind, &blkbuf2[0])
+      ino_set_size(&ibuf[0], new_size)
+      tfs_write_inode(ino, &ibuf[0])
+      0
+
+  // === Remove directory ===
+
+@api tfs_rmdir(parent_ino, name) -> int
+Remove an empty directory. Returns 0 on success, -1 if not empty or not found.
+@
+
+  tfs_rmdir(parent_ino: int, name: *i8) -> int
+      val ino = tfs_dir_lookup(parent_ino, name)
+      if ino == -1
+          return -1
+      var ibuf: [32]i8
+      tfs_read_inode(ino, &ibuf[0])
+      // Must be a directory
+      if ino_type(&ibuf[0]) != S_IFDIR
+          return -1
+      // Must be empty (only . and ..)
+      val entries = ino_size(&ibuf[0]) / DIR_ENTRY_SIZE
+      val data_blk = ino_direct(&ibuf[0], 0)
+      rd_read(data_blk, &blkbuf[0])
+      var count = 0
+      var i = 0
+      while i < entries
+          val off: int = &blkbuf[0] + i * DIR_ENTRY_SIZE
+          if read_i16(off) != 0
+              count += 1
+          i += 1
+      // . and .. = 2 entries
+      if count > 2
+          return -1
+      // Free the data block
+      free_block(data_blk)
+      free_inode(ino)
+      // Remove from parent
+      dir_remove_entry(parent_ino, name)
+      // Decrement parent nlinks (child's .. no longer points to parent)
+      var pbuf: [32]i8
+      tfs_read_inode(parent_ino, &pbuf[0])
+      ino_set_nlinks(&pbuf[0], ino_nlinks(&pbuf[0]) - 1)
+      tfs_write_inode(parent_ino, &pbuf[0])
+      0
+
+  // === Rename ===
+
+@api tfs_rename(old_parent, old_name, new_parent, new_name) -> int
+Move/rename a file or directory. Returns 0 on success, -1 on error.
+@
+
+  tfs_rename(old_parent: int, old_name: *i8, new_parent: int, new_name: *i8) -> int
+      val ino = dir_remove_entry(old_parent, old_name)
+      if ino == -1
+          return -1
+      dir_add_entry(new_parent, new_name, ino)
+      // If moving a directory, update its .. entry
+      var ibuf: [32]i8
+      tfs_read_inode(ino, &ibuf[0])
+      if ino_type(&ibuf[0]) == S_IFDIR
+          val data_blk = ino_direct(&ibuf[0], 0)
+          rd_read(data_blk, &blkbuf[0])
+          // .. is the second entry (offset 16)
+          write_i16(&blkbuf[0] + DIR_ENTRY_SIZE, new_parent)
+          rd_write(data_blk, &blkbuf[0])
+          // Update nlinks: old parent loses one, new parent gains one
+          var pbuf: [32]i8
+          tfs_read_inode(old_parent, &pbuf[0])
+          ino_set_nlinks(&pbuf[0], ino_nlinks(&pbuf[0]) - 1)
+          tfs_write_inode(old_parent, &pbuf[0])
+          tfs_read_inode(new_parent, &pbuf[0])
+          ino_set_nlinks(&pbuf[0], ino_nlinks(&pbuf[0]) + 1)
+          tfs_write_inode(new_parent, &pbuf[0])
+      0
+
+  // === Read directory entry ===
+
+@api tfs_readdir(dir_ino, index, out_ino, out_name) -> int
+Read the nth active directory entry. Skips free slots.
+Sets out_ino and copies name to out_name (14 bytes max).
+Returns 0 on success, -1 if index is past the last entry.
+@
+
+  tfs_readdir(dir_ino: int, index: int, out_ino: *int, out_name: *i8) -> int
+      var ibuf: [32]i8
+      tfs_read_inode(dir_ino, &ibuf[0])
+      val entries = ino_size(&ibuf[0]) / DIR_ENTRY_SIZE
+      val data_blk = ino_direct(&ibuf[0], 0)
+      rd_read(data_blk, &blkbuf[0])
+      var count = 0
+      var i = 0
+      while i < entries
+          val off: int = &blkbuf[0] + i * DIR_ENTRY_SIZE
+          val entry_ino = read_i16(off)
+          if entry_ino != 0
+              if count == index
+                  *out_ino = entry_ino
+                  val src: *i8 = off + 2
+                  var j = 0
+                  while j < DIR_NAME_LEN
+                      out_name[j] = src[j]
+                      j += 1
+                  return 0
+              count += 1
+          i += 1
+      -1
+
+  // === Hard link ===
+
+@api tfs_link(parent_ino, name, target_ino) -> int
+Create a hard link. Adds a directory entry and increments nlinks.
+Returns 0 on success, -1 on error.
+@
+
+  tfs_link(parent_ino: int, name: *i8, target_ino: int) -> int
+      var ibuf: [32]i8
+      tfs_read_inode(target_ino, &ibuf[0])
+      // Can't hard-link directories
+      if ino_type(&ibuf[0]) == S_IFDIR
+          return -1
+      ino_set_nlinks(&ibuf[0], ino_nlinks(&ibuf[0]) + 1)
+      tfs_write_inode(target_ino, &ibuf[0])
+      dir_add_entry(parent_ino, name, target_ino)
+      0

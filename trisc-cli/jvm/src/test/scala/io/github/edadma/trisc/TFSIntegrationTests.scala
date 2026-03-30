@@ -559,4 +559,240 @@ class TFSIntegrationTests extends TFSTestHelpers {
     )
     output shouldBe "CTL"
   }
+
+  // ===== Truncate =====
+
+  "tfs_truncate shrinks file" in {
+    val (_, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |${syslBytes("name", "big")}
+         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    var data: [8]i8
+         |    data[0] = 65
+         |    data[1] = 66
+         |    data[2] = 67
+         |    data[3] = 68
+         |    data[4] = 69
+         |    tfs_write(ino, &data[0], 0, 5)
+         |    tfs_truncate(ino, 3)
+         |    var stat: [7]int
+         |    tfs_stat(ino, &stat[0])
+         |    if stat[4] == 3
+         |        putchar(83)
+         |    // Read back — should only get 3 bytes
+         |    var buf: [8]i8
+         |    val n = tfs_read(ino, &buf[0], 0, 10)
+         |    val bp: *i8 = &buf[0]
+         |    var i = 0
+         |    while i < n
+         |        putchar(bp[i])
+         |        i += 1
+         |    0
+         |""".stripMargin,
+      prefill = defaultPrefill,
+    )
+    output shouldBe "SABC"
+  }
+
+  "tfs_truncate to zero" in {
+    val (_, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |${syslBytes("name", "f")}
+         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    var data: [4]i8
+         |    data[0] = 65
+         |    tfs_write(ino, &data[0], 0, 1)
+         |    tfs_truncate(ino, 0)
+         |    var stat: [7]int
+         |    tfs_stat(ino, &stat[0])
+         |    if stat[4] == 0
+         |        putchar(89)
+         |    else
+         |        putchar(78)
+         |    0
+         |""".stripMargin,
+      prefill = defaultPrefill,
+    )
+    output shouldBe "Y"
+  }
+
+  // ===== Rmdir =====
+
+  "tfs_rmdir removes empty directory" in {
+    val (_, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |${syslBytes("name", "empty")}
+         |    tfs_create(1, &name[0], 2, 0x1ED)
+         |    val r = tfs_rmdir(1, &name[0])
+         |    if r == 0
+         |        putchar(82)
+         |${syslBytes("path", "/empty")}
+         |    val ino = tfs_lookup(&path[0])
+         |    if ino == -1
+         |        putchar(71)
+         |    0
+         |""".stripMargin,
+      prefill = defaultPrefill,
+    )
+    output shouldBe "RG"
+  }
+
+  "tfs_rmdir rejects non-empty directory" in {
+    val (_, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |${syslBytes("dirname", "stuff")}
+         |    val dir = tfs_create(1, &dirname[0], 2, 0x1ED)
+         |${syslBytes("fname", "f")}
+         |    tfs_create(dir, &fname[0], 1, 0x1A4)
+         |    val r = tfs_rmdir(1, &dirname[0])
+         |    if r == -1
+         |        putchar(89)
+         |    else
+         |        putchar(78)
+         |    0
+         |""".stripMargin,
+      prefill = defaultPrefill,
+    )
+    output shouldBe "Y"
+  }
+
+  // ===== Rename =====
+
+  "tfs_rename moves file" in {
+    val (_, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |${syslBytes("name", "old")}
+         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    var data: [4]i8
+         |    data[0] = 88
+         |    tfs_write(ino, &data[0], 0, 1)
+         |${syslBytes("newname", "new")}
+         |    tfs_rename(1, &name[0], 1, &newname[0])
+         |    // Old name gone
+         |${syslBytes("oldpath", "/old")}
+         |    if tfs_lookup(&oldpath[0]) == -1
+         |        putchar(71)
+         |    // New name works
+         |${syslBytes("newpath", "/new")}
+         |    val found = tfs_lookup(&newpath[0])
+         |    if found == ino
+         |        putchar(70)
+         |    // Content preserved
+         |    var buf: [4]i8
+         |    tfs_read(found, &buf[0], 0, 1)
+         |    val bp: *i8 = &buf[0]
+         |    putchar(bp[0])
+         |    0
+         |""".stripMargin,
+      prefill = defaultPrefill,
+    )
+    output shouldBe "GFX"
+  }
+
+  // ===== Readdir =====
+
+  "tfs_readdir lists directory entries" in {
+    val (_, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |    // Root has: . .. dev etc tmp (from prefill)
+         |    var ino = 0
+         |    var name: [15]i8
+         |    // Entry 0 should be .
+         |    tfs_readdir(1, 0, &ino, &name[0])
+         |    putchar(name[0])
+         |    // Entry 1 should be ..
+         |    tfs_readdir(1, 1, &ino, &name[0])
+         |    putchar(name[0])
+         |    putchar(name[1])
+         |    // Entry 2 should be dev
+         |    tfs_readdir(1, 2, &ino, &name[0])
+         |    putchar(name[0])
+         |    // Past end returns -1
+         |    val r = tfs_readdir(1, 99, &ino, &name[0])
+         |    if r == -1
+         |        putchar(69)
+         |    0
+         |""".stripMargin,
+      prefill = defaultPrefill,
+    )
+    output shouldBe "...dE"
+  }
+
+  // ===== Hard link =====
+
+  "tfs_link creates hard link" in {
+    val (_, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |${syslBytes("name", "orig")}
+         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    var data: [4]i8
+         |    data[0] = 90
+         |    tfs_write(ino, &data[0], 0, 1)
+         |${syslBytes("link", "alias")}
+         |    tfs_link(1, &link[0], ino)
+         |    // Both names resolve to same inode
+         |${syslBytes("p1", "/orig")}
+         |${syslBytes("p2", "/alias")}
+         |    val i1 = tfs_lookup(&p1[0])
+         |    val i2 = tfs_lookup(&p2[0])
+         |    if i1 == i2
+         |        putchar(69)
+         |    // nlinks should be 2
+         |    var stat: [7]int
+         |    tfs_stat(ino, &stat[0])
+         |    if stat[1] == 2
+         |        putchar(76)
+         |    // Content accessible via link
+         |    var buf: [4]i8
+         |    tfs_read(i2, &buf[0], 0, 1)
+         |    val bp: *i8 = &buf[0]
+         |    putchar(bp[0])
+         |    0
+         |""".stripMargin,
+      prefill = defaultPrefill,
+    )
+    output shouldBe "ELZ"
+  }
+
+  "tfs_link rejects directory" in {
+    val (_, output) = runTFS(
+      s"""import "tfs"
+         |
+         |main() -> int
+         |    tfs_init()
+         |${syslBytes("path", "/dev")}
+         |    val dev_ino = tfs_lookup(&path[0])
+         |${syslBytes("name", "devlink")}
+         |    val r = tfs_link(1, &name[0], dev_ino)
+         |    if r == -1
+         |        putchar(89)
+         |    else
+         |        putchar(78)
+         |    0
+         |""".stripMargin,
+      prefill = defaultPrefill,
+    )
+    output shouldBe "Y"
+  }
 }
