@@ -315,6 +315,72 @@ class TOF(val entry: Option[String], val segments: Seq[TOF.Segment], val tofType
       }.sum
     }.sum
 
+  /** Produce a detailed report of all segment addresses, symbols, relocations, and overlap checks. */
+  def dumpLayout: String =
+    val sb = new StringBuilder
+
+    // Entry point
+    sb ++= s"Entry: ${entry.map(n => f"$n (0x${entryAddress.getOrElse(0L)}%x)").getOrElse("none")}\n"
+    sb ++= s"Type: $tofType\n\n"
+
+    // Segment layout
+    sb ++= "=== Segments ===\n"
+    case class SegRange(name: String, org: Long, end: Long)
+    val ranges = new ArrayBuffer[SegRange]
+
+    for seg <- segments do
+      val size = seg.chunks.map {
+        case TOF.DataChunk(d) => d.length.toLong
+        case TOF.ResChunk(s)  => s
+        case _                => 0L
+      }.sum
+      val end = seg.org + size
+      ranges += SegRange(seg.name, seg.org, end)
+      sb ++= f"  ${seg.name}%-12s org=0x${seg.org}%06x  end=0x$end%06x  size=$size%d"
+      if seg.explicitOrg then sb ++= "  [explicit]"
+      sb ++= s"  (${seg.symbols.length} syms, ${seg.relocs.length} relocs, ${seg.externs.length} externs)\n"
+
+    // Overlap check
+    sb ++= "\n=== Overlap Check ===\n"
+    var hasOverlap = false
+    for i <- ranges.indices; j <- (i + 1) until ranges.length do
+      val a = ranges(i); val b = ranges(j)
+      if a.org < b.end && b.org < a.end then
+        sb ++= f"  OVERLAP: ${a.name} [0x${a.org}%06x-0x${a.end}%06x) vs ${b.name} [0x${b.org}%06x-0x${b.end}%06x)\n"
+        hasOverlap = true
+    if !hasOverlap then sb ++= "  No overlaps\n"
+
+    // Symbols by segment
+    sb ++= "\n=== Symbols ===\n"
+    for seg <- segments if seg.symbols.nonEmpty do
+      sb ++= s"  ${seg.name}:\n"
+      for sym <- seg.symbols.sortBy(_.offset) do
+        val abs = seg.org + sym.offset
+        sb ++= f"    ${sym.name}%-40s offset=0x${sym.offset}%04x  abs=0x$abs%06x  ${sym.typ}${sym.size.map(s => s"  size=$s").getOrElse("")}\n"
+
+    // Unresolved externs
+    val allExts = segments.flatMap(_.externs).distinct
+    if allExts.nonEmpty then
+      sb ++= "\n=== Unresolved Externs ===\n"
+      for seg <- segments if seg.externs.nonEmpty do
+        sb ++= s"  ${seg.name}: ${seg.externs.mkString(", ")}\n"
+
+    // Relocations
+    val totalRelocs = segments.map(_.relocs.length).sum
+    if totalRelocs > 0 then
+      sb ++= s"\n=== Relocations ($totalRelocs total) ===\n"
+      for seg <- segments if seg.relocs.nonEmpty do
+        val baseRel = seg.relocs.count(_.symbol.isEmpty)
+        val named = seg.relocs.count(_.symbol.nonEmpty)
+        sb ++= s"  ${seg.name}: $baseRel base-relative, $named named\n"
+        for reloc <- seg.relocs.take(20) do
+          val sym = if reloc.symbol.isEmpty then "(base-rel)" else reloc.symbol
+          sb ++= f"    ${reloc.typ}%-8s offset=0x${reloc.offset}%04x  $sym\n"
+        if seg.relocs.length > 20 then
+          sb ++= s"    ... and ${seg.relocs.length - 20} more\n"
+
+    sb.toString
+
   // --- Serialization ---
 
   def serialize: String =
