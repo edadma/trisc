@@ -107,6 +107,19 @@ class SyslTriscCodegen(addresses: Int = 4):
   private val globals = new mutable.LinkedHashMap[String, SyslType]
   private var locals: mutable.LinkedHashMap[String, LocalVar] = null
   private var stackOffset: Int = 0
+  private val savedScopes = new mutable.Stack[(Map[String, LocalVar], Int)]
+  private val loopScopeOffsets = new mutable.Stack[Int]
+
+  private def enterScope(): Unit =
+    savedScopes.push((locals.toMap, stackOffset))
+
+  private def leaveScope(): Unit =
+    val (savedLocals, savedOffset) = savedScopes.pop()
+    locals.clear()
+    locals ++= savedLocals
+    if stackOffset != savedOffset then
+      emitAddImm(7, 7, savedOffset - stackOffset)
+      stackOffset = savedOffset
   private var currentFunction: TFunDecl = null
 
   // Determine if a global variable should go in bss (zero-initialized) vs data
@@ -411,12 +424,16 @@ class SyslTriscCodegen(addresses: Int = 4):
         val endLabel = newLabel("endwhile")
         breakLabels.push(endLabel)
         continueLabels.push(loopLabel)
+        loopScopeOffsets.push(stackOffset)
         emit(s"$loopLabel")
         genExpr(cond)
         emit(s"  beq r1, r0, $endLabel")
+        enterScope()
         for stmt <- body do genStmt(stmt)
+        leaveScope()
         emit(s"  bra $loopLabel")
         emit(s"$endLabel")
+        loopScopeOffsets.pop()
         breakLabels.pop()
         continueLabels.pop()
 
@@ -424,37 +441,53 @@ class SyslTriscCodegen(addresses: Int = 4):
         val loopLabel = newLabel("for")
         val updateLabel = newLabel("forupdate")
         val endLabel = newLabel("endfor")
+        enterScope()
         genStmt(init)
         breakLabels.push(endLabel)
         continueLabels.push(updateLabel)
+        loopScopeOffsets.push(stackOffset)
         emit(s"$loopLabel")
         genExpr(cond)
         emit(s"  beq r1, r0, $endLabel")
+        enterScope()
         for stmt <- body do genStmt(stmt)
+        leaveScope()
         emit(s"$updateLabel")
         genStmt(update)
         emit(s"  bra $loopLabel")
         emit(s"$endLabel")
+        loopScopeOffsets.pop()
         breakLabels.pop()
         continueLabels.pop()
+        leaveScope()
 
       case TDoWhileStmt(cond, body) =>
         val loopLabel = newLabel("dowhile")
         val endLabel = newLabel("enddowhile")
         breakLabels.push(endLabel)
         continueLabels.push(loopLabel)
+        loopScopeOffsets.push(stackOffset)
         emit(s"$loopLabel")
+        enterScope()
         for stmt <- body do genStmt(stmt)
+        leaveScope()
         genExpr(cond)
         emit(s"  bne r1, r0, $loopLabel")
         emit(s"$endLabel")
+        loopScopeOffsets.pop()
         breakLabels.pop()
         continueLabels.pop()
 
       case TBreakStmt =>
+        val loopOffset = loopScopeOffsets.top
+        if stackOffset != loopOffset then
+          emitAddImm(7, 7, loopOffset - stackOffset)
         emit(s"  bra ${breakLabels.top}")
 
       case TContinueStmt =>
+        val loopOffset = loopScopeOffsets.top
+        if stackOffset != loopOffset then
+          emitAddImm(7, 7, loopOffset - stackOffset)
         emit(s"  bra ${continueLabels.top}")
 
       case TAsmStmt(code) =>
@@ -941,10 +974,16 @@ class SyslTriscCodegen(addresses: Int = 4):
         val endLabel = newLabel("endif")
         genExpr(cond)
         emit(s"  beq r1, r0, $elseLabel")
+        enterScope()
         for stmt <- thenBody do genStmt(stmt)
+        leaveScope()
         emit(s"  bra $endLabel")
         emit(s"$elseLabel")
-        elseBody.foreach(stmts => for stmt <- stmts do genStmt(stmt))
+        elseBody.foreach { stmts =>
+          enterScope()
+          for stmt <- stmts do genStmt(stmt)
+          leaveScope()
+        }
         emit(s"$endLabel")
 
       case TLen(inner, _) =>
