@@ -12,7 +12,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(worker, 0x6000, 0x5000, "worker")
           |    create_thread(joiner, 0x8000, 0x7000, "joiner")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |worker()
@@ -42,7 +42,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(fast, 0x6000, 0x5000, "fast")
           |    create_thread(slow, 0x8000, 0x7000, "slow")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |fast()
@@ -70,7 +70,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread_pri(task_b, 0x8000, 0x7000, "b", 1)
           |    create_thread_pri(task_a, 0x6000, 0x5000, "a", 0)
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task_a()
@@ -97,7 +97,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread_pri(task_a, 0x6000, 0x5000, "a", 1)
           |    create_thread_pri(task_b, 0x8000, 0x7000, "b", 1)
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task_a()
@@ -130,7 +130,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
@@ -151,7 +151,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
@@ -178,7 +178,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(task0, 0x6000, 0x5000, "t0")
           |    create_thread(task1, 0x8000, 0x7000, "t1")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task0()
@@ -205,7 +205,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |    create_thread(task, 0x6000, 0x5000, "task")
           |    create_thread(task2, 0x8000, 0x7000, "task2")
           |    create_thread(task3, 0xA000, 0x9000, "task3")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
@@ -233,7 +233,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(checker, 0x6000, 0x5000, "checker")
           |    create_thread(sleeper, 0x8000, 0x7000, "sleeper")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |checker()
@@ -260,7 +260,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
@@ -288,7 +288,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "t")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
@@ -315,7 +315,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "t")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
@@ -341,7 +341,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(task_a, 0x6000, 0x5000, "a")
           |    create_thread(task_b, 0x8000, 0x7000, "b")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task_a()
@@ -379,7 +379,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |    set_watchdog(3)
           |    create_thread(spinner, 0x6000, 0x5000, "spin")
           |    create_thread(checker, 0x8000, 0x7000, "check")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |spinner()
@@ -414,7 +414,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |    set_watchdog(3)
           |    create_thread(yielder, 0x6000, 0x5000, "yield")
           |    create_thread(checker, 0x8000, 0x7000, "check")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |yielder()
@@ -446,7 +446,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "t")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
@@ -469,7 +469,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "t")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
@@ -496,7 +496,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(worker, 0x6000, 0x5000, "w")
           |    create_thread(controller, 0x8000, 0x7000, "c")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |worker()
@@ -533,7 +533,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(target, 0x6000, 0x5000, "t")
           |    create_thread(checker, 0x8000, 0x7000, "c")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |target()
@@ -566,7 +566,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "t")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
@@ -593,7 +593,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "t")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
@@ -622,7 +622,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(task_a, 0x6000, 0x5000, "a")
           |    create_thread(task_b, 0x8000, 0x7000, "b")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task_a()

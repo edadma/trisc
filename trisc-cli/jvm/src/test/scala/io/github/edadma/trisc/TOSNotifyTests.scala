@@ -14,7 +14,7 @@ class TOSNotifyTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(waiter, 0x6000, 0x5000, "w")
           |    create_thread(sender, 0x8000, 0x7000, "s")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |waiter()
@@ -44,7 +44,7 @@ class TOSNotifyTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "t")
           |    create_thread(sender, 0x8000, 0x7000, "s")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
@@ -75,7 +75,7 @@ class TOSNotifyTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(waiter, 0x6000, 0x5000, "w")
           |    create_thread(setter, 0x8000, 0x7000, "s")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |waiter()
@@ -102,7 +102,7 @@ class TOSNotifyTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(waiter, 0x6000, 0x5000, "w")
           |    create_thread(setter, 0x8000, 0x7000, "s")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |waiter()
@@ -137,7 +137,7 @@ class TOSNotifyTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    rmutex_init(&rm)
           |    create_thread(task, 0x6000, 0x5000, "t")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
@@ -172,7 +172,7 @@ class TOSNotifyTests extends TOSTestHelpers {
           |    rmutex_init(&rm)
           |    create_thread(holder, 0x6000, 0x5000, "h")
           |    create_thread(waiter, 0x8000, 0x7000, "w")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |holder()
@@ -216,7 +216,7 @@ class TOSNotifyTests extends TOSTestHelpers {
           |    qset_add(&qs, sid, 20)
           |    create_thread(waiter, 0x6000, 0x5000, "w")
           |    create_thread(poster, 0x8000, 0x7000, "p")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |waiter()
@@ -253,7 +253,7 @@ class TOSNotifyTests extends TOSTestHelpers {
           |    qset_add(&qs, sid, 30)
           |    create_thread(waiter, 0x6000, 0x5000, "w")
           |    create_thread(poster, 0x8000, 0x7000, "p")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |waiter()

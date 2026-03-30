@@ -11,7 +11,7 @@ class TOSKernelTests extends TOSTestHelpers {
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
@@ -34,7 +34,7 @@ class TOSKernelTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(task1, 0x6000, 0x5000, "t1")
           |    create_thread(task2, 0x8000, 0x7000, "t2")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task1()
@@ -59,7 +59,7 @@ class TOSKernelTests extends TOSTestHelpers {
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
@@ -101,7 +101,7 @@ class TOSKernelTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(task_a, 0x6000, 0x5000, "a")
           |    create_thread(task_b, 0x8000, 0x7000, "b")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin
     ))
@@ -124,7 +124,7 @@ class TOSKernelTests extends TOSTestHelpers {
         |import "timer"
         |kernel_main() -> int
         |    create_thread(task, 0x6000, 0x5000, "t")
-        |    timer_init(10)
+        |    timer_init(1000)
         |    first_thread_ssp()
         |task()
         |    putc(65)

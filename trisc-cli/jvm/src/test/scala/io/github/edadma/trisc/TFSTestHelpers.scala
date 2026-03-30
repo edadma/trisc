@@ -103,7 +103,6 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
     }
     val intc = new InterruptController(Runtime.intcAddress)
     val timer = new Timer(Runtime.timerAddress, intc, irq = 0)
-    intc.addTickable(() => timer.tick())
     val ramSize = Runtime.stdoutAddress.toInt
     val ram = new RAM(0, ramSize)
     val ramdisk = new Ramdisk(
@@ -118,7 +117,7 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
     )
     val mem = new Memory("Memory", ram, stdout, intc, timer, ramdisk)
     linked.load(mem)
-    val cpu = new CPU(mem, intc) { this.limit = maxCycles }
+    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles }
     if _tracing then
       cpu.log.setLogLevel(io.github.edadma.logger.LogLevel.TRACE)
       cpu.log.setHandler(new io.github.edadma.logger.FileHandler("/tmp/trisc_tfs_debug.log"))

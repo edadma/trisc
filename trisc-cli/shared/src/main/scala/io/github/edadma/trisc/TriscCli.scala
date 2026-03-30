@@ -174,9 +174,7 @@ object TriscCli:
       intc: InterruptController = new InterruptController(Runtime.intcAddress),
   ): (CPU, Memory) =
     val stdout = new Stdout(Runtime.stdoutAddress, outputFn)
-    intc.clearTickables()
     val timer = new Timer(Runtime.timerAddress, intc, irq = 0)
-    intc.addTickable(() => timer.tick())
     val ramSize = Runtime.stdoutAddress.toInt
     val ram = new RAM(0, ramSize)
     val ramdisk = new Ramdisk(
@@ -194,7 +192,7 @@ object TriscCli:
     )
     val mem = new Memory("Memory", (Seq(ram, stdout, intc, timer, ramdisk) ++ extraDevices)*)
     linked.load(mem)
-    val cpu = new CPU(mem, intc)
+    val cpu = new CPU(mem, Seq(timer, intc))
     cpu.reset() // like 68000: reads SSP from vector[0], PC from vector[1], enters supervisor mode
     (cpu, mem)
 

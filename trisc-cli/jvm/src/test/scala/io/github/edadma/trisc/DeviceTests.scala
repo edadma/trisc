@@ -174,140 +174,118 @@ class DeviceTests extends TestHelpers {
     timer.writeByte(0x101, 0x01) // period byte 1
     timer.writeByte(0x102, 0x00) // period byte 2
     timer.writeByte(0x103, 0x00) // period byte 3 (LSB)
-    timer.period shouldBe 0x00010000L // 65536ms
+    timer.period shouldBe 0x00010000L // 65536 cycles
   }
 
   "timer period small value" in {
-    var t = 0L
     val intc = new InterruptController(0x200)
-    val timer = new Timer(0x100, intc, irq = 0, () => t)
+    val timer = new Timer(0x100, intc, irq = 0)
     timer.writeByte(0x100, 0x00)
     timer.writeByte(0x101, 0x00)
     timer.writeByte(0x102, 0x00)
-    timer.writeByte(0x103, 0x0A) // 10ms
+    timer.writeByte(0x103, 0x0A) // 10 cycles
     timer.period shouldBe 10
   }
 
   "timer does not fire before started" in {
-    var t = 0L
     val intc = new InterruptController(0x200)
-    val timer = new Timer(0x100, intc, irq = 0, () => t)
+    val timer = new Timer(0x100, intc, irq = 0)
     timer.writeByte(0x103, 0x0A) // period = 10
-    t = 100
-    timer.tick()
+    for _ <- 1 to 100 do timer.tick()
     timer.fired shouldBe false
   }
 
   "timer fires after period elapses" in {
-    var t = 0L
     val intc = new InterruptController(0x200)
-    val timer = new Timer(0x100, intc, irq = 0, () => t)
+    val timer = new Timer(0x100, intc, irq = 0)
     timer.writeByte(0x103, 0x0A) // period = 10
     timer.writeByte(0x104, 0x01) // start
-    t = 10
-    timer.tick()
+    for _ <- 1 to 10 do timer.tick()
     timer.fired shouldBe true
   }
 
   "timer does not fire before period elapses" in {
-    var t = 0L
     val intc = new InterruptController(0x200)
-    val timer = new Timer(0x100, intc, irq = 0, () => t)
+    val timer = new Timer(0x100, intc, irq = 0)
     timer.writeByte(0x103, 0x0A) // period = 10
     timer.writeByte(0x104, 0x01) // start
-    t = 5
-    timer.tick()
+    for _ <- 1 to 5 do timer.tick()
     timer.fired shouldBe false
   }
 
   "timer auto-reloads for periodic interrupts" in {
-    var t = 0L
     val intc = new InterruptController(0x200)
-    val timer = new Timer(0x100, intc, irq = 0, () => t)
+    val timer = new Timer(0x100, intc, irq = 0)
     timer.writeByte(0x103, 0x0A) // period = 10
     timer.writeByte(0x104, 0x01) // start
 
-    t = 10
-    timer.tick()
+    for _ <- 1 to 10 do timer.tick()
     timer.fired shouldBe true
     timer.writeByte(0x105, 0x00) // acknowledge
 
-    t = 20
-    timer.tick()
+    for _ <- 1 to 10 do timer.tick()
     timer.fired shouldBe true // fired again
   }
 
   "timer status reads fired flag" in {
-    var t = 0L
     val intc = new InterruptController(0x200)
-    val timer = new Timer(0x100, intc, irq = 0, () => t)
+    val timer = new Timer(0x100, intc, irq = 0)
     timer.readByte(0x105) shouldBe 0 // not fired
     timer.writeByte(0x103, 0x0A)
     timer.writeByte(0x104, 0x01)
-    t = 10
-    timer.tick()
+    for _ <- 1 to 10 do timer.tick()
     timer.readByte(0x105) shouldBe 1 // fired
   }
 
   "timer acknowledge clears fired flag" in {
-    var t = 0L
     val intc = new InterruptController(0x200)
-    val timer = new Timer(0x100, intc, irq = 0, () => t)
+    val timer = new Timer(0x100, intc, irq = 0)
     timer.writeByte(0x103, 0x0A)
     timer.writeByte(0x104, 0x01)
-    t = 10
-    timer.tick()
+    for _ <- 1 to 10 do timer.tick()
     timer.readByte(0x105) shouldBe 1
     timer.writeByte(0x105, 0x00) // acknowledge
     timer.readByte(0x105) shouldBe 0
   }
 
   "timer stop halts firing" in {
-    var t = 0L
     val intc = new InterruptController(0x200)
-    val timer = new Timer(0x100, intc, irq = 0, () => t)
+    val timer = new Timer(0x100, intc, irq = 0)
     timer.writeByte(0x103, 0x0A)
     timer.writeByte(0x104, 0x01) // start
     timer.writeByte(0x104, 0x00) // stop
-    t = 100
-    timer.tick()
+    for _ <- 1 to 100 do timer.tick()
     timer.fired shouldBe false
   }
 
-  "timer does not drift when checked late" in {
-    var t = 0L
+  "timer counter resets each period" in {
     val intc = new InterruptController(0x200)
-    val timer = new Timer(0x100, intc, irq = 0, () => t)
+    val timer = new Timer(0x100, intc, irq = 0)
     timer.writeByte(0x103, 0x0A) // period = 10
-    timer.writeByte(0x104, 0x01) // start at t=0
+    timer.writeByte(0x104, 0x01) // start
 
-    // First fire checked late at t=13 (3ms late)
-    t = 13
-    timer.tick()
+    // First fire at tick 10
+    for _ <- 1 to 10 do timer.tick()
     timer.fired shouldBe true
     timer.writeByte(0x105, 0x00) // acknowledge
 
-    // Next fire should be at t=20, not t=23
-    t = 19
-    timer.tick()
-    timer.fired shouldBe false // not yet
+    // Should not fire after 9 more ticks
+    for _ <- 1 to 9 do timer.tick()
+    timer.fired shouldBe false
 
-    t = 20
+    // Fires on the 10th tick
     timer.tick()
-    timer.fired shouldBe true // fires at 20, not 23
+    timer.fired shouldBe true
   }
 
-  "timer start resets clock and clears fired" in {
-    var t = 0L
+  "timer start resets counter and clears fired" in {
     val intc = new InterruptController(0x200)
-    val timer = new Timer(0x100, intc, irq = 0, () => t)
+    val timer = new Timer(0x100, intc, irq = 0)
     timer.writeByte(0x103, 0x0A)
-    timer.writeByte(0x104, 0x01) // start at t=0
-    t = 10
-    timer.tick() // fires
+    timer.writeByte(0x104, 0x01) // start
+    for _ <- 1 to 10 do timer.tick() // fires
     timer.fired shouldBe true
-    t = 15
-    timer.writeByte(0x104, 0x01) // restart at t=15
+    timer.writeByte(0x104, 0x01) // restart — resets counter
     timer.fired shouldBe false // cleared by restart
     timer.running shouldBe true
   }

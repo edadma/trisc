@@ -21,7 +21,7 @@ enum State:
     Trace, Overflow, BoundsCheck,
     Halt, Run, Wfi, DoubleFault
 
-class CPU(mem: Addressable, irq: CPU => Unit = _ => ()) extends Addressable:
+class CPU(mem: Addressable, tick: Seq[CPU => Unit] = Nil) extends Addressable:
   val name: String = mem.name
   val base: Long = mem.base
   val size: Long = mem.size
@@ -223,7 +223,7 @@ class CPU(mem: Addressable, irq: CPU => Unit = _ => ()) extends Addressable:
 
     if limit > 0 then limit -= 1
 
-    irq(this)
+    tick.foreach(_(this))
 
     if state == State.Wfi && limit < 0 then Thread.sleep(1)
 

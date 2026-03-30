@@ -13,7 +13,7 @@ class TOSSchedulerTests extends TOSTestHelpers {
           |    create_thread(task_a, 0x6000, 0x5000, "a")
           |    create_thread(task_b, 0x8000, 0x7000, "b")
           |    create_thread(task_c, 0xA000, 0x9000, "c")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task_a()
@@ -43,7 +43,7 @@ class TOSSchedulerTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread_pri(task_b, 0x8000, 0x7000, "b", 1)
           |    create_thread_pri(task_a, 0x6000, 0x5000, "a", 0)
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task_a()
@@ -73,7 +73,7 @@ class TOSSchedulerTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(task_a, 0x6000, 0x5000, "a")
           |    create_thread(task_b, 0x8000, 0x7000, "b")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task_a()
@@ -107,7 +107,7 @@ class TOSSchedulerTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(high, 0x20000, 0x1F000, "high")
           |    create_thread_pri(low, 0x22000, 0x21000, "low", 2)
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |high()
@@ -138,7 +138,7 @@ class TOSSchedulerTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(blocker, 0x6000, 0x5000, "blocker")
           |    create_thread(runner, 0x8000, 0x7000, "runner")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |blocker()
@@ -171,7 +171,7 @@ class TOSSchedulerTests extends TOSTestHelpers {
           |    create_thread_pri(high, 0x20000, 0x1F000, "high", 0)
           |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
           |    create_thread_pri(low, 0x24000, 0x23000, "low", 2)
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |high()
@@ -207,7 +207,7 @@ class TOSSchedulerTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(task_a, 0x6000, 0x5000, "a")
           |    create_thread(task_b, 0x8000, 0x7000, "b")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task_a()
@@ -236,7 +236,7 @@ class TOSSchedulerTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    create_thread(high, 0x20000, 0x1F000, "high")
           |    create_thread_pri(low, 0x22000, 0x21000, "low", 2)
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |high()
