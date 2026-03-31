@@ -1,0 +1,35 @@
+@main
+TOS Priority-Inheritance Mutex
+
+A kernel-managed mutex that prevents priority inversion.
+
+When a high-priority thread blocks on a PI mutex held by a
+low-priority thread, the holder is temporarily boosted to
+the blocker's priority. This prevents medium-priority threads
+from starving the high-priority thread (the classic priority
+inversion bug that caused the Mars Pathfinder reset storm).
+
+Unlike the basic mutex (which uses userspace atomics and
+spin+yield), the PI mutex is fully managed by the kernel
+so it can manipulate thread priorities and wait queues.
+@
+
+  import "kernel"
+  import "services"
+
+@api pimutex_init(m) — Initialize a PI mutex to unlocked state.
+
+  pimutex_init(m: *PIMutex)
+      pimutex_init_kernel(m)
+
+@api pimutex_lock(m) — Acquire the PI mutex, blocking with priority inheritance if held.
+
+  pimutex_lock(m: *PIMutex)
+      val addr: int = m
+      pimutex_lock_sys(addr)
+
+@api pimutex_unlock(m) — Release the PI mutex, restoring priority and waking next waiter.
+
+  pimutex_unlock(m: *PIMutex)
+      val addr: int = m
+      pimutex_unlock_sys(addr)

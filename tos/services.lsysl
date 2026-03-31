@@ -210,3 +210,16 @@ Slot range: 0-3. Value range: 0 to 16777215.
 
   tls_get(slot: int) -> int
       syscall(SYS_TLS_GET, slot)
+
+  val SYS_PIMUTEX_LOCK   = 29
+  val SYS_PIMUTEX_UNLOCK = 30
+
+@api pimutex_lock_sys(addr) — Lock a PI mutex (may block with priority inheritance).
+
+  pimutex_lock_sys(addr: int)
+      syscall(SYS_PIMUTEX_LOCK, addr)
+
+@api pimutex_unlock_sys(addr) — Unlock a PI mutex (restores priority, wakes waiter).
+
+  pimutex_unlock_sys(addr: int)
+      syscall(SYS_PIMUTEX_UNLOCK, addr)

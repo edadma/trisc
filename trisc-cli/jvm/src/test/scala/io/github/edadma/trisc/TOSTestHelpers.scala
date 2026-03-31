@@ -24,6 +24,7 @@ object TOSTestData {
   lazy val rmutexSysl: String = readLsysl("tos/rmutex.lsysl")
   lazy val qsetSysl: String = readLsysl("tos/qset.lsysl")
   lazy val timerSysl: String = readLsysl("tos/timer.lsysl")
+  lazy val pimutexSysl: String = readLsysl("tos/pimutex.lsysl")
   lazy val linkerScript: LinkerScript =
     LinkerScriptParser.parse(scala.io.Source.fromFile("tos/linker.ld").mkString) match
       case Right(s) => s
@@ -129,7 +130,7 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
       "kernel" -> kernelSysl, "services" -> servicesSysl, "timer" -> timerSysl, "semaphore" -> semaphoreSysl,
       "mutex" -> mutexSysl, "condvar" -> condvarSysl, "barrier" -> barrierSysl,
       "rwlock" -> rwlockSysl, "channel" -> channelSysl, "mailbox" -> mailboxSysl,
-      "rmutex" -> rmutexSysl, "qset" -> qsetSysl,
+      "rmutex" -> rmutexSysl, "qset" -> qsetSysl, "pimutex" -> pimutexSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)

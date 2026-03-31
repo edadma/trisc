@@ -273,6 +273,10 @@ trap_handler
   beq r1, r3, .sys_exit        ; 3 = exit
   ldi r3, 4
   beq r1, r3, .sys_join        ; 4 = join
+  ldi r3, 29
+  beq r1, r3, .sys_pimutex_lock   ; 29 = pimutex_lock(addr)
+  ldi r3, 30
+  beq r1, r3, .sys_pimutex_unlock ; 30 = pimutex_unlock(addr)
 
   ; Unknown syscall — halt (indicates a bug)
   halt
@@ -705,6 +709,25 @@ extern event_clear_bits
   popd r2
   sti
   rte
+
+
+; pimutex_lock(addr): kernel PI mutex lock — may block, needs context switch
+extern pimutex_lock_kernel
+
+.sys_pimutex_lock
+  mov  r1, r2                   ; r1 = PIMutex address
+  movi r4, pimutex_lock_kernel
+  jalr r6, r4
+  bra do_schedule
+
+; pimutex_unlock(addr): kernel PI mutex unlock — may wake higher-priority waiter
+extern pimutex_unlock_kernel
+
+.sys_pimutex_unlock
+  mov  r1, r2                   ; r1 = PIMutex address
+  movi r4, pimutex_unlock_kernel
+  jalr r6, r4
+  bra do_schedule
 
 
 ; ============================================================================
