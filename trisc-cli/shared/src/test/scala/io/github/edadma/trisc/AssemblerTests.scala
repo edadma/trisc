@@ -193,6 +193,7 @@ class AssemblerTests extends TestHelpers {
   "extern works without relocatable mode for movi" in {
     val tof = assemble(
       """extern printf
+        |global main, func
         |main
         |  movi r1, printf
         |  halt

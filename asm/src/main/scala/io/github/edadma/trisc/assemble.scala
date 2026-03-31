@@ -868,7 +868,8 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
   // Warnings and validation
   if !relocatable then
     symbols.values foreach {
-      case LabelSymbol(name, _, sym, false) => warning(sym, s"Warning: label '$name' never referenced")
+      case LabelSymbol(name, _, sym, false) if !globals.contains(name) && !entryPoint.contains(name) =>
+        warning(sym, s"Warning: label '$name' never referenced")
       case _                                =>
     }
 

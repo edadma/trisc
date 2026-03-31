@@ -14,7 +14,7 @@ class EntryTests extends TestHelpers {
   }
 
   "entry directive absent means no entry" in {
-    val tof = assemble("main\n  halt\n")
+    val tof = assemble("global main, func\nmain\n  halt\n")
     tof.entry shouldBe None
   }
 
@@ -33,7 +33,7 @@ class EntryTests extends TestHelpers {
   }
 
   "no entry means no ENTRY line" in {
-    val tof = assemble("main\n  halt\n")
+    val tof = assemble("global main, func\nmain\n  halt\n")
     val s = tof.serialize
     s should not include "ENTRY:"
   }
@@ -83,7 +83,7 @@ class EntryTests extends TestHelpers {
   }
 
   "entryAddress returns None when no entry" in {
-    val tof = assemble("main\n  halt\n")
+    val tof = assemble("global main, func\nmain\n  halt\n")
     tof.entryAddress shouldBe None
   }
 
