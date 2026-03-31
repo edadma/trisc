@@ -21,10 +21,15 @@ enum State:
     Trace, Overflow, BoundsCheck,
     Halt, Run, Wfi, DoubleFault
 
-class CPU(mem: Addressable, tick: Seq[CPU => Unit] = Nil, mpu: Option[MPU] = None, mpuBase: Long = 0) extends Addressable:
+class CPU(mem: Addressable, tick: Seq[CPU => Unit] = Nil, mpu: Option[MPU] = None, mpuBase: Long = 0, val mmu: Option[MMU] = None) extends Addressable:
   val name: String = mem.name
   val base: Long = mem.base
   val size: Long = mem.size
+
+  /** Faulting virtual address, saved on page fault for the exception handler. */
+  var faultAddr: Long = 0
+  /** Cause of the last MMU fault. */
+  var faultCause: FaultCause = FaultCause.None
 
   private val mpuEnd: Long = mpuBase + mpu.map(_.registerSize).getOrElse(0)
 
@@ -40,6 +45,19 @@ class CPU(mem: Addressable, tick: Seq[CPU => Unit] = Nil, mpu: Option[MPU] = Non
       true
     else false
 
+  /** Translate virtual address through MMU. Returns physical address, or -1 on fault. */
+  private def xlate(vaddr: Long, access: Access): Long =
+    mmu match
+      case None => vaddr
+      case Some(m) =>
+        m.translate(vaddr, access, test(Status.Mode)) match
+          case Right(paddr) => paddr
+          case Left(cause) =>
+            faultAddr = vaddr
+            faultCause = cause
+            state = State.DataAccess
+            -1L
+
   private def isMpuAddr(addr: Long): Boolean =
     mpu.isDefined && addr >= mpuBase && addr < mpuEnd
 
@@ -47,14 +65,19 @@ class CPU(mem: Addressable, tick: Seq[CPU => Unit] = Nil, mpu: Option[MPU] = Non
     if isMpuAddr(addr) then
       if !test(Status.Mode) then { state = State.PrivilegeViolation; return 0 }
       mpu.get.readRegister((addr - mpuBase).toInt)
-    else if checkMPU(addr, Access.Read) then 0
-    else mem.readByte(addr)
+    else
+      val paddr = xlate(addr, Access.Read)
+      if paddr == -1L then 0
+      else if checkMPU(paddr, Access.Read) then 0
+      else mem.readByte(paddr)
 
   def writeByte(addr: Long, data: Long): Unit =
     if isMpuAddr(addr) then
       if !test(Status.Mode) then { state = State.PrivilegeViolation; return }
       mpu.get.writeRegister((addr - mpuBase).toInt, data.toInt)
-    else if !checkMPU(addr, Access.Write) then mem.writeByte(addr, data)
+    else
+      val paddr = xlate(addr, Access.Write)
+      if paddr != -1L && !checkMPU(paddr, Access.Write) then mem.writeByte(paddr, data)
 
   def loadByte(addr: Long, data: Long): Unit = mem.loadByte(addr, data)
 
@@ -66,27 +89,42 @@ class CPU(mem: Addressable, tick: Seq[CPU => Unit] = Nil, mpu: Option[MPU] = Non
 
   override def readShort(addr: Long): Int =
     if checkAlign(addr, 2) then 0
-    else if checkMPU(addr, Access.Read) then 0
-    else mem.readShort(addr)
+    else
+      val paddr = xlate(addr, Access.Read)
+      if paddr == -1L then 0
+      else if checkMPU(paddr, Access.Read) then 0
+      else mem.readShort(paddr)
 
   override def readInt(addr: Long): Int =
     if checkAlign(addr, 4) then 0
-    else if checkMPU(addr, Access.Read) then 0
-    else mem.readInt(addr)
+    else
+      val paddr = xlate(addr, Access.Read)
+      if paddr == -1L then 0
+      else if checkMPU(paddr, Access.Read) then 0
+      else mem.readInt(paddr)
 
   override def readLong(addr: Long): Long =
     if checkAlign(addr, 8) then 0
-    else if checkMPU(addr, Access.Read) then 0
-    else mem.readLong(addr)
+    else
+      val paddr = xlate(addr, Access.Read)
+      if paddr == -1L then 0
+      else if checkMPU(paddr, Access.Read) then 0
+      else mem.readLong(paddr)
 
   override def writeShort(addr: Long, data: Long): Unit =
-    if !checkAlign(addr, 2) && !checkMPU(addr, Access.Write) then mem.writeShort(addr, data)
+    if !checkAlign(addr, 2) then
+      val paddr = xlate(addr, Access.Write)
+      if paddr != -1L && !checkMPU(paddr, Access.Write) then mem.writeShort(paddr, data)
 
   override def writeInt(addr: Long, data: Long): Unit =
-    if !checkAlign(addr, 4) && !checkMPU(addr, Access.Write) then mem.writeInt(addr, data)
+    if !checkAlign(addr, 4) then
+      val paddr = xlate(addr, Access.Write)
+      if paddr != -1L && !checkMPU(paddr, Access.Write) then mem.writeInt(paddr, data)
 
   override def writeLong(addr: Long, data: Long): Unit =
-    if !checkAlign(addr, 8) && !checkMPU(addr, Access.Write) then mem.writeLong(addr, data)
+    if !checkAlign(addr, 8) then
+      val paddr = xlate(addr, Access.Write)
+      if paddr != -1L && !checkMPU(paddr, Access.Write) then mem.writeLong(paddr, data)
 
   val r = immutable.ArraySeq(
     new Reg0,
@@ -211,12 +249,24 @@ class CPU(mem: Addressable, tick: Seq[CPU => Unit] = Nil, mpu: Option[MPU] = Non
       state = State.Halt
       return
 
-    if mpuDenied(pc, Access.Execute) then
+    // Translate PC through MMU
+    val fetchAddr = mmu match
+      case Some(m) =>
+        m.translate(pc, Access.Execute, test(Status.Mode)) match
+          case Right(paddr) => paddr
+          case Left(cause) =>
+            faultAddr = pc
+            faultCause = cause
+            state = State.InstructionAccess
+            return
+      case None => pc
+
+    if mpuDenied(fetchAddr, Access.Execute) then
       state = State.InstructionAccess
       return
 
     val inst =
-      try readShortUnsigned(pc)
+      try mem.readShortUnsigned(fetchAddr)
       catch
         case _: RuntimeException =>
           log.warn(f"InstructionAccess fault at pc=$pc%04x", category = "CPU")
@@ -347,6 +397,15 @@ object Decode:
         "110 aaa bbb 00 11111" -> ((args: Map[Char, Int]) => new EXG(args('a'), args('b'))),
         // RR 01 sub-format: two-register destructive operations
         "110 aaa bbb 01 00000" -> ((args: Map[Char, Int]) => new FPOW(args('a'), args('b'))),
+        // MMU instructions
+        "110 aaa bbb 01 00001" -> ((args: Map[Char, Int]) => new TLBI(args('a'), args('b'))),
+        "110 aaa bbb 01 00010" -> ((args: Map[Char, Int]) => new TLBIA(args('a'), args('b'))),
+        "110 aaa bbb 01 00011" -> ((args: Map[Char, Int]) => new SPTBR(args('a'), args('b'))),
+        "110 aaa bbb 01 00100" -> ((args: Map[Char, Int]) => new GPTBR(args('a'), args('b'))),
+        "110 aaa bbb 01 00101" -> ((args: Map[Char, Int]) => new GFAULT(args('a'), args('b'))),
+        "110 aaa bbb 01 00110" -> ((args: Map[Char, Int]) => new SASID(args('a'), args('b'))),
+        "110 aaa bbb 01 00111" -> ((args: Map[Char, Int]) => new GASID(args('a'), args('b'))),
+        "110 aaa bbb 01 01000" -> ((args: Map[Char, Int]) => new GFCAUSE(args('a'), args('b'))),
         "110 aaa bbb 10 iiiii" -> ((args: Map[Char, Int]) => new LD(args('a'), args('b'), args('i'))),
         "110 aaa bbb 11 iiiii" -> ((args: Map[Char, Int]) => new ST(args('a'), args('b'), args('i'))),
         "111 000 rrr 0000000" -> ((operands: Map[Char, Int]) => new PSHB(operands('r'))),
@@ -385,7 +444,7 @@ object Decode:
         "001 ddd aaa bbb 0110" -> ((args: Map[Char, Int]) => new SBC(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 0111" -> ((args: Map[Char, Int]) => new MULU(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 1000" -> ((args: Map[Char, Int]) => new DIVU(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 1001" -> ((args: Map[Char, Int]) => new REMU(args('d'), args('a'), args('b'))),
+        // 001 ... 1001 — freed from REMU (remainder now in DIV/DIVU register pair)
         "001 ddd aaa bbb 1010" -> ((args: Map[Char, Int]) => new FSLT(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 1011" -> ((args: Map[Char, Int]) => new FADD(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 1100" -> ((args: Map[Char, Int]) => new FSUB(args('d'), args('a'), args('b'))),
@@ -405,7 +464,7 @@ object Decode:
         "000 ddd aaa bbb 1001" -> ((args: Map[Char, Int]) => new SUB(args('d'), args('a'), args('b'))),
         "000 ddd aaa bbb 1010" -> ((args: Map[Char, Int]) => new MUL(args('d'), args('a'), args('b'))),
         "000 ddd aaa bbb 1011" -> ((args: Map[Char, Int]) => new DIV(args('d'), args('a'), args('b'))),
-        "000 ddd aaa bbb 1100" -> ((args: Map[Char, Int]) => new REM(args('d'), args('a'), args('b'))),
+        "000 ddd aaa bbb 1100" -> ((args: Map[Char, Int]) => new CAS(args('d'), args('a'), args('b'))),
         "000 ddd aaa bbb 1101" -> ((args: Map[Char, Int]) => new AND(args('d'), args('a'), args('b'))),
         "000 ddd aaa bbb 1110" -> ((args: Map[Char, Int]) => new OR(args('d'), args('a'), args('b'))),
         "000 ddd aaa bbb 1111" -> ((args: Map[Char, Int]) => new XOR(args('d'), args('a'), args('b'))),

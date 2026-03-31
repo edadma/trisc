@@ -75,21 +75,24 @@ class ArithmeticTests extends TestHelpers {
     cpu.r(1).read shouldBe 0
   }
 
-  // ===== REM =====
+  // ===== DIV remainder (register pair) =====
 
-  "rem basic" in {
-    val cpu = runCPU(VECTORS + "ldi r1, 17\nldi r2, 5\nrem r3, r1, r2\nhalt\n")
-    cpu.r(3).read shouldBe 2
+  "div remainder basic" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 17\nldi r2, 5\ndiv r3, r1, r2\nhalt\n")
+    cpu.r(3).read shouldBe 3   // quotient
+    cpu.r(4).read shouldBe 2   // remainder
   }
 
-  "rem with no remainder" in {
-    val cpu = runCPU(VECTORS + "ldi r1, 10\nldi r2, 5\nrem r3, r1, r2\nhalt\n")
-    cpu.r(3).read shouldBe 0
+  "div remainder with no remainder" in {
+    val cpu = runCPU(VECTORS + "ldi r1, 10\nldi r2, 5\ndiv r3, r1, r2\nhalt\n")
+    cpu.r(3).read shouldBe 2   // quotient
+    cpu.r(4).read shouldBe 0   // remainder
   }
 
-  "rem zero by nonzero" in {
-    val cpu = runCPU(VECTORS + "ldi r2, 7\nrem r1, r0, r2\nhalt\n")
-    cpu.r(1).read shouldBe 0
+  "div remainder zero by nonzero" in {
+    val cpu = runCPU(VECTORS + "ldi r2, 7\ndiv r1, r0, r2\nhalt\n")
+    cpu.r(1).read shouldBe 0   // quotient
+    cpu.r(2).read shouldBe 0   // remainder
   }
 
   // ===== SLT =====

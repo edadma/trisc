@@ -2,7 +2,7 @@ package io.github.edadma.trisc
 
 import scala.util.parsing.combinator.RegexParsers
 
-object AssemblyParser extends RegexParsers:
+object AssemblerParser extends RegexParsers:
   // Skip spaces, tabs, and ; comments, but NOT newlines (they delimit lines)
   override val whiteSpace = "([ \t]|;[^\n]*)+".r
 
@@ -87,7 +87,7 @@ object AssemblyParser extends RegexParsers:
     "div", "divu",
     "exg",
     "fabs", "fadd", "fdiv", "fence", "fint", "finv", "fmul", "fneg", "fpow", "fseq", "fslt", "fsqrt", "fsub",
-    "gpsr", "gusp",
+    "gasid", "gfault", "gfcause", "gpsr", "gptbr", "gusp",
     "halt",
     "jalr",
     "ld", "ldb", "ldd", "ldi", "lds", "ldw", "ll", "lsl", "lsr",
@@ -95,10 +95,10 @@ object AssemblyParser extends RegexParsers:
     "neg", "nop", "not",
     "or",
     "popb", "popd", "popr", "pops", "popw", "pshb", "pshd", "pshr", "pshs", "pshw",
-    "rem", "remu", "ret", "rev", "rol", "ror", "rte",
-    "sbc", "sc", "seb", "ses", "sew", "sext", "sli", "slt", "sltu", "spsr",
+    "cas", "ret", "rev", "rol", "ror", "rte",
+    "sasid", "sbc", "sc", "seb", "ses", "sew", "sext", "sli", "slt", "sltu", "spsr", "sptbr",
     "st", "stb", "std", "sti", "sts", "stw", "sub", "susp", "swsp",
-    "trap", "trapv", "tsr",
+    "tlbi", "tlbia", "trap", "trapv", "tsr",
     "wfi",
     "xor",
     "zeb", "zes", "zew",

@@ -24,7 +24,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
   case class LabelSymbol(name: String, var value: Long, sym: Positional, var referenced: Boolean = false) extends Symbol
   case class ExternSymbol(name: String) extends Symbol
 
-  val lines = AssemblyParser.parseAssembly(src)
+  val lines = AssemblerParser.parseAssembly(src)
   val symbols = new mutable.LinkedHashMap[String, Symbol]
   val segments = new mutable.LinkedHashMap[String, Pass1]
   var segment = Pass1("_default_")
@@ -133,16 +133,29 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case CommentLineAST(_) => // pass 1: skip comments
     case AlignLineAST(alignment) =>
       val pad = ((alignment - (segment.size % alignment)) % alignment).toInt
-      segment.size += pad
+      if pad > 0 then
+        for name <- segment.symbols if symbols(name).isInstanceOf[LabelSymbol] && symbols(name).asInstanceOf[LabelSymbol].value == segment.size do
+          symbols(name).asInstanceOf[LabelSymbol].value += pad
+        segment.size += pad
     case DataLineAST(width, Nil) =>
-      if width >= 2 then
-        val align = width.min(8)
-        segment.size += ((align - (segment.size % align)) % align).toInt
-      segment.size += (if width == 0 then 8 else width)
+      val effectiveWidth = if width == 0 then 8 else width
+      if effectiveWidth >= 2 then
+        val align = effectiveWidth.min(8)
+        val pad = ((align - (segment.size % align)) % align).toInt
+        if pad > 0 then
+          for name <- segment.symbols if symbols(name).isInstanceOf[LabelSymbol] && symbols(name).asInstanceOf[LabelSymbol].value == segment.size do
+            symbols(name).asInstanceOf[LabelSymbol].value += pad
+          segment.size += pad
+      segment.size += effectiveWidth
     case DataLineAST(width, data) =>
-      if width >= 2 then
-        val align = width.min(8)
-        segment.size += ((align - (segment.size % align)) % align).toInt
+      val effectiveWidth = if width == 0 then 8 else width
+      if effectiveWidth >= 2 then
+        val align = effectiveWidth.min(8)
+        val pad = ((align - (segment.size % align)) % align).toInt
+        if pad > 0 then
+          for name <- segment.symbols if symbols(name).isInstanceOf[LabelSymbol] && symbols(name).asInstanceOf[LabelSymbol].value == segment.size do
+            symbols(name).asInstanceOf[LabelSymbol].value += pad
+          segment.size += pad
 
       for d <- data do
         locals(d)
@@ -394,10 +407,12 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
       val pad = ((alignment - (builder.length % alignment)) % alignment).toInt
       for _ <- 0 until pad do builder += 0.toByte
     case DataLineAST(width, Nil) =>
-      if width >= 2 then autoAlign(width.min(8))
-      builder ++= (if width == 0 then Seq.fill(8)(0) else Seq.fill(width)(0))
+      val ew = if width == 0 then 8 else width
+      if ew >= 2 then autoAlign(ew.min(8))
+      builder ++= Seq.fill(ew)(0)
     case DataLineAST(width, data) =>
-      if width >= 2 then autoAlign(width.min(8))
+      val ew = if width == 0 then 8 else width
+      if ew >= 2 then autoAlign(ew.min(8))
       val startingLength = builder.length
 
       for d <- data do
@@ -568,8 +583,8 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm / 2)
     case InstructionLineAST(
           mnemonic @ ("ldb" | "stb" | "lds" | "sts" | "ldw" | "stw" | "ldd" | "std" | "add" | "sub" | "mul" | "div" |
-          "rem" | "and" | "or" | "xor" | "asr" | "lsr" | "lsl" | "slt" | "sltu" | "adc" | "sbc" | "mulu" | "divu" |
-          "remu" | "fslt" | "fadd" | "fsub" | "fmul" | "fdiv" | "fseq"),
+          "cas" | "and" | "or" | "xor" | "asr" | "lsr" | "lsl" | "slt" | "sltu" | "adc" | "sbc" | "mulu" | "divu" |
+          "fslt" | "fadd" | "fsub" | "fmul" | "fdiv" | "fseq"),
           Seq(o1, o2, o3),
         ) =>
       val (prefix, opcode) =
@@ -586,7 +601,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case "sub"  => (0, 9)
           case "mul"  => (0, 10)
           case "div"  => (0, 11)
-          case "rem"  => (0, 12)
+          case "cas"  => (0, 12)
           case "and"  => (0, 13)
           case "or"   => (0, 14)
           case "xor"  => (0, 15)
@@ -599,7 +614,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case "sbc"  => (1, 6)
           case "mulu" => (1, 7)
           case "divu" => (1, 8)
-          case "remu" => (1, 9)
+          // remu slot (1, 9) freed — remainder now in DIVU register pair
           case "fslt" => (1, 10)
           case "fadd" => (1, 11)
           case "fsub" => (1, 12)
@@ -724,10 +739,18 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o2, "expected register as second operand")
 
       addInstruction(3 -> 6, 3 -> reg1, 3 -> reg2, 2 -> 0, 5 -> opcode)
-    case InstructionLineAST(mnemonic @ ("fpow"), Seq(o1, o2)) =>
+    case InstructionLineAST(mnemonic @ ("fpow" | "tlbi" | "tlbia" | "sptbr" | "gptbr" | "gfault" | "sasid" | "gasid" | "gfcause"), Seq(o1, o2)) =>
       val opcode =
         mnemonic match
-          case "fpow" => 0
+          case "fpow"    => 0
+          case "tlbi"    => 1
+          case "tlbia"   => 2
+          case "sptbr"   => 3
+          case "gptbr"   => 4
+          case "gfault"  => 5
+          case "sasid"   => 6
+          case "gasid"   => 7
+          case "gfcause" => 8
       val reg1 =
         fold(o1) match
           case RegisterExprAST(reg) => reg

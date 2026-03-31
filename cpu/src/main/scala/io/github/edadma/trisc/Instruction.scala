@@ -153,14 +153,20 @@ class DIV(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
 
   def apply(cpu: CPU): Unit =
     if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
-    else cpu.r(d).write(cpu.r(a).read / cpu.r(b).read)
+    else
+      val va = cpu.r(a).read
+      val vb = cpu.r(b).read
+      cpu.r(d).write(va / vb)
+      cpu.r((d + 1) & 7).write(va % vb)
 
-class REM(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
-  val mnemonic = "rem"
+class CAS(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "cas"
 
   def apply(cpu: CPU): Unit =
-    if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
-    else cpu.r(d).write(cpu.r(a).read % cpu.r(b).read)
+    val addr = cpu.r(a).read
+    val old = cpu.readLong(addr)
+    if old == cpu.r(d).read then cpu.writeLong(addr, cpu.r(b).read)
+    cpu.r(d).write(old)
 
 class AND(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "and"
@@ -243,14 +249,11 @@ class DIVU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
 
   def apply(cpu: CPU): Unit =
     if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
-    else cpu.r(d).write(java.lang.Long.divideUnsigned(cpu.r(a).read, cpu.r(b).read))
-
-class REMU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
-  val mnemonic = "remu"
-
-  def apply(cpu: CPU): Unit =
-    if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
-    else cpu.r(d).write(java.lang.Long.remainderUnsigned(cpu.r(a).read, cpu.r(b).read))
+    else
+      val va = cpu.r(a).read
+      val vb = cpu.r(b).read
+      cpu.r(d).write(java.lang.Long.divideUnsigned(va, vb))
+      cpu.r((d + 1) & 7).write(java.lang.Long.remainderUnsigned(va, vb))
 
 // Float comparison (RRR 001 block)
 
@@ -451,6 +454,76 @@ class FPOW(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "fpow"
 
   def apply(cpu: CPU): Unit = cpu.r(a).write(math.pow(cpu.r(a).readf, cpu.r(b).readf))
+
+// MMU instructions (RR 01 sub-format, supervisor only)
+
+class TLBI(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "tlbi"
+
+  def apply(cpu: CPU): Unit =
+    if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
+    else cpu.mmu match
+      case Some(m) => m.tlbInvalidate(cpu.r(a).read)
+      case None    => cpu.state = State.UnimplementedOpcode
+
+class TLBIA(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "tlbia"
+
+  def apply(cpu: CPU): Unit =
+    if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
+    else cpu.mmu match
+      case Some(m) => m.tlbInvalidateAll()
+      case None    => cpu.state = State.UnimplementedOpcode
+
+class SPTBR(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "sptbr"
+
+  def apply(cpu: CPU): Unit =
+    if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
+    else cpu.mmu match
+      case Some(m) => m.setPtbr(cpu.r(a).read)
+      case None    => cpu.state = State.UnimplementedOpcode
+
+class GPTBR(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "gptbr"
+
+  def apply(cpu: CPU): Unit =
+    if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
+    else cpu.mmu match
+      case Some(m) => cpu.r(a).write(m.ptbr)
+      case None    => cpu.state = State.UnimplementedOpcode
+
+class GFAULT(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "gfault"
+
+  def apply(cpu: CPU): Unit =
+    if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
+    else cpu.r(a).write(cpu.faultAddr)
+
+class SASID(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "sasid"
+
+  def apply(cpu: CPU): Unit =
+    if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
+    else cpu.mmu match
+      case Some(m: SimpleMMU) => m.setAsid(cpu.r(a).read.toInt)
+      case _                  => cpu.state = State.UnimplementedOpcode
+
+class GASID(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "gasid"
+
+  def apply(cpu: CPU): Unit =
+    if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
+    else cpu.mmu match
+      case Some(m: SimpleMMU) => cpu.r(a).write(m.asid)
+      case _                  => cpu.state = State.UnimplementedOpcode
+
+class GFCAUSE(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "gfcause"
+
+  def apply(cpu: CPU): Unit =
+    if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
+    else cpu.r(a).write(cpu.faultCause.ordinal)
 
 // Atomics (RR 110 block)
 

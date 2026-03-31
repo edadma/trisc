@@ -167,10 +167,11 @@ import pprint.pprintln
       |  addi r4, r4, 19
       |.digit
       |  addi r4, r4, -1
-      |  rem r5, r2, r3
-      |  addi r5, r5, '0'
-      |  stb r5, r4, r0
-      |  div r2, r2, r3
+      |  div r5, r2, r3
+      |  ; r5 = quotient, r6 = remainder
+      |  addi r6, r6, '0'
+      |  stb r6, r4, r0
+      |  mov r2, r5
       |  beq r2, r0, .done
       |  bra .digit
       |.done
