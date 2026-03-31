@@ -188,7 +188,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         segment.size += 1
       operands foreach locals
       mnemonic match
-        case "bra" | "beq" | "blu" | "bls" | "bgt" | "bgu" | "bne" | "bge" | "bgeu" | "ble" | "bleu" =>
+        case "bra" | "beq" | "blu" | "bls" | "bgs" | "bgu" | "bne" | "bge" | "bgeu" | "ble" | "bleu" =>
           val targetOp = if mnemonic == "bra" then operands.head else operands(2)
           val targetSym = targetOp match
             case ReferenceExprAST(name)            => Some(name)
@@ -196,7 +196,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
             case _                                 => None
           val (short, long) = mnemonic match
             case "bra"                                          => (2, addresses * 2 + 2)
-            case "beq" | "blu" | "bls" | "bgt" | "bgu"         => (2, addresses * 2 + 6)
+            case "beq" | "blu" | "bls" | "bgs" | "bgu"         => (2, addresses * 2 + 6)
             case _                                              => (4, addresses * 2 + 4) // bne, bge, bgeu, ble, bleu
           branchRecords += BranchRecord(segment.name, segment.size, targetSym, short, long)
           segment.size += short
@@ -841,11 +841,11 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case InstructionLineAST("nop", Nil) => addInstruction(3 -> 5, 3 -> 0, 3 -> 0, 7 -> 0) // addi r0, r0, 0
     case InstructionLineAST("ret", Nil) =>
       addInstruction(3 -> 6, 3 -> 0, 3 -> 7, 2 -> 0, 5 -> 0) // jalr r0, r7
-    case InstructionLineAST(mnemonic @ ("bgt" | "bgu"), Seq(o1, o2, o3)) =>
+    case InstructionLineAST(mnemonic @ ("bgs" | "bgu"), Seq(o1, o2, o3)) =>
       val br = branchRecords(branchIndex)
       branchIndex += 1
       val baseOpcode = mnemonic match
-        case "bgt" => 4
+        case "bgs" => 4
         case "bgu" => 3
       val reg1 =
         fold(o1) match

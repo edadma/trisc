@@ -82,7 +82,7 @@ object AssemblerParser extends RegexParsers:
 
   private val mnemonicSet = Set(
     "adc", "add", "addi", "and", "asr", "auipc",
-    "bclr", "beq", "bge", "bgeu", "bgt", "bgu", "ble", "bleu", "bls", "blu", "bne", "bra", "bset", "btst",
+    "bclr", "beq", "bge", "bgeu", "bgs", "bgu", "ble", "bleu", "bls", "blu", "bne", "bra", "bset", "btst",
     "chk", "cli", "clz", "cnt", "ctz", "cvt",
     "div", "divu",
     "exg",

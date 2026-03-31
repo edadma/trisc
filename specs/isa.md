@@ -1,136 +1,120 @@
-RRR
----
+# TRISC Instruction Set Architecture
 
-    000 ddd aaa bbb oooo
+TRISC is a 64-bit RISC teaching ISA with fixed-width 16-bit instructions, 8 general-purpose registers, and a clean supervisor/user mode split.
 
-    ldb 0000
-    stb 0001
-    lds 0010
-    sts 0011
-    ldw 0100
-    stw 0101
-    ldd 0110
-    std 0111
-    add 1000    (sets carry)
-    sub 1001    (sets carry/borrow)
-    mul 1010    (low → rd, high → rd+1)
-    div 1011
-    rem 1100
-    and 1101
-    or  1110
-    xor 1111
+## Registers
 
-    001 ddd aaa bbb oooo
+| Register | Name | Purpose |
+|----------|------|---------|
+| r0 | zero | Hardwired to 0 |
+| r1-r6 | | General purpose |
+| r7 / sp | | Stack pointer |
 
-    asr  0000
-    lsr  0001
-    lsl  0010
-    slt  0011
-    sltu 0100
-    adc  0101    (add with carry, sets carry)
-    sbc  0110    (subtract with borrow, sets carry)
-    mulu 0111    (unsigned, low → rd, high → rd+1)
-    divu 1000
-    remu 1001
-    fslt 1010
-    fadd 1011
-    fsub 1100
-    fmul 1101
-    fdiv 1110
-    fseq 1111
+All registers are 64 bits wide. r0 always reads as zero; writes to r0 are discarded.
 
-RRI
----
+## Instruction Formats
 
-    010 aaa bbb iiiiiii     beq
-    011 aaa bbb iiiiiii     blu
-    100 aaa bbb iiiiiii     bls
-    101 aaa bbb iiiiiii     addi
+All instructions are 16 bits (2 bytes), always halfword-aligned.
 
-RR
---
+### RRR — Three-register (two blocks)
 
-    110 aaa bbb 00 ooooo    32 RR instructions
-        jalr    00000
-        zeb     00001
-        zes     00010
-        zew     00011
-        seb     00100
-        ses     00101
-        sew     00110
-        neg     00111
-        not     01000
-        cvt     01001
-        fneg    01010
-        finv    01011
-        fint    01100
-        fsqrt   01101
-        fabs    01110
-        ll      01111    (load-linked, sets reservation)
-        sc      10000    (store-conditional, clears reservation)
-        clz     10001
-        ctz     10010
-        chk     10011    (traps if ra < 0 or ra > rb)
-        btst    10100    (ra = (ra >> rb) & 1)
-        bset    10101    (ra = ra | (1 << rb))
-        bclr    10110    (ra = ra & ~(1 << rb))
-        rol     10111    (ra = ra rotate left by rb)
-        ror     11000    (ra = ra rotate right by rb)
-        cnt     11001    (ra = popcount of rb)
-        rev     11010    (ra = byte-reverse of rb)
-        sext    11011    (sign-extend ra from bit width rb)
-        mov     11100    (ra = rb)
-        min     11101    (ra = min(ra, rb) signed)
-        max     11110    (ra = max(ra, rb) signed)
-        exg     11111    (swap ra and rb)
+    [ooo] [ddd] [aaa] [bbb] [oooo]
+     3      3     3     3     4     = 16 bits
 
-    110 aaa bbb 01 ooooo    31 RR01 instructions
-        fpow    00000    (ra = pow(ra, rb), destructive)
-    110 aaa bbb 10 iiiii    ld
-    110 aaa bbb 11 iiiii    st
+- `000 ddd aaa bbb oooo` — Load/store, arithmetic, logic (16 ops)
+- `001 ddd aaa bbb oooo` — Shifts, comparisons, carry, unsigned, float (16 ops)
 
-RI
---
+### RRI — Register-register-immediate
 
-    111 rrr oo iiiiiiii (r != 0)
+    [ooo] [aaa] [bbb] [iiiiiii]
+     3      3     3      7       = 16 bits
 
-    ldi     00
-    auipc   01
-    sli     10
-    sti     11
+- `010` — beq (branch if equal)
+- `011` — blu (branch if less-than, unsigned)
+- `100` — bls (branch if less-than, signed)
+- `101` — addi (add immediate)
 
-R
--
+The 7-bit immediate is sign-extended. Branch offsets are in halfwords.
 
-    111 000 rrr ooooooo
+### RR — Two-register with sub-opcode
 
-    pshb  0000000
-    popb  0000001
-    pshs  0000010
-    pops  0000011
-    pshw  0000100
-    popw  0000101
-    pshd  0000110
-    popd  0000111
-    spsr  0001000    (supervisor only)
-    gpsr  0001001
-    rte   0001010    (supervisor only)
-    fence 0001011
-    wfi   0001100    (supervisor only)
-    gusp  0001101    (supervisor only)
-    susp  0001110    (supervisor only)
-    trapv   0001111    (traps if V flag set)
-    pshr    0010000    (push r1-rN onto stack)
-    popr    0010001    (pop rN-r1 from stack)
-    cli     0010010    (disable interrupts, supervisor only)
-    sti     0010011    (enable interrupts, supervisor only)
-    swsp    0010100    (swap r7 and usp, supervisor only)
-    tsr     0010101    (read cycle counter into rN)
-    trap0   0011000    (system call 0)
-    trap1   0011001    (system call 1)
-    trap2   0011010    (system call 2)
-    trap3   0011011    (system call 3)
-    trap4   0011100    (system call 4)
-    trap5   0011101    (system call 5)
-    trap6   0011110    (system call 6)
-    trap7   0011111    (system call 7)
+    [110] [aaa] [bbb] [oo] [ooooo]
+      3     3     3    2      5     = 16 bits
+
+- `110 aaa bbb 00 ooooo` — 32 unary/binary register ops (jalr, extensions, bit ops, etc.)
+- `110 aaa bbb 01 ooooo` — Extended ops (fpow, MMU instructions)
+- `110 aaa bbb 10 iiiii` — ld (load with 5-bit offset)
+- `110 aaa bbb 11 iiiii` — st (store with 5-bit offset)
+
+### RI — Register-immediate (r != 0)
+
+    [111] [rrr] [oo] [iiiiiiii]
+      3     3    2      8        = 16 bits
+
+- `00` — ldi (load immediate)
+- `01` — auipc (add upper immediate to PC)
+- `10` — sli (shift left and insert)
+- `11` — sti (store immediate to address in register)
+
+### R — Single-register / no-register
+
+    [111] [000] [rrr] [ooooooo]
+      3     3     3      7       = 16 bits
+
+Push/pop, system control, traps.
+
+## Addressing Modes
+
+- **Register**: `add rd, ra, rb`
+- **Immediate**: `addi rd, ra, imm7` (signed 7-bit)
+- **Register+offset**: `ld ra, rb, imm5` / `st ra, rb, imm5`
+- **Register+register**: `ldw rd, ra, rb` (for sized loads/stores)
+- **PC-relative**: branch instructions, `auipc`
+
+## Branch Pseudos
+
+The assembler provides pseudo-instructions built from native branches:
+
+| Pseudo | Meaning | Implementation |
+|--------|---------|----------------|
+| bgs ra, rb, target | branch if ra > rb (signed) | bls rb, ra (swap operands) |
+| bgu ra, rb, target | branch if ra > rb (unsigned) | blu rb, ra (swap operands) |
+| bne ra, rb, target | branch if ra != rb | skip on beq, then branch |
+| bge ra, rb, target | branch if ra >= rb (signed) | skip on bls, then branch |
+| bgeu ra, rb, target | branch if ra >= rb (unsigned) | skip on blu, then branch |
+| ble ra, rb, target | branch if ra <= rb (signed) | skip on bls rb,ra, then branch |
+| bleu ra, rb, target | branch if ra <= rb (unsigned) | skip on blu rb,ra, then branch |
+| bra target | unconditional branch | beq r0, r0, target |
+| nop | no operation | addi r0, r0, 0 |
+| ret | return | jalr r0, r7 |
+
+## Data Types
+
+| Type | Size | Load/Store |
+|------|------|------------|
+| byte | 8-bit | ldb/stb |
+| short | 16-bit | lds/sts |
+| word | 32-bit | ldw/stw |
+| double | 64-bit | ldd/std |
+| float | 64-bit IEEE 754 | ldd/std (shared with double) |
+
+## Supervisor Mode
+
+Supervisor mode is entered via exceptions/traps and exited via `rte`. Supervisor-only instructions: `spsr`, `rte`, `wfi`, `gusp`, `susp`, `cli`, `sti`, `swsp`, and MMU instructions.
+
+## Vector Table
+
+20 slots x 8 bytes = 160 bytes at address 0:
+
+| Slot | Purpose |
+|------|---------|
+| 0 | Initial SSP |
+| 1 | Initial PC |
+| 2-19 | Exception/trap handlers |
+
+## Memory Model
+
+- Big-endian byte ordering
+- Misaligned accesses trigger a data access exception
+- `fence` instruction for memory ordering
+- `ll`/`sc` for atomic read-modify-write sequences

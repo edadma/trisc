@@ -44,11 +44,11 @@ class PseudoTests extends TestHelpers {
 
   // ===== BGT =====
 
-  "bgt taken when greater" in {
+  "bgs taken when greater" in {
     val cpu = runCPU(VECTORS +
       """ldi r1, 7
         |ldi r2, 3
-        |bgt r1, r2, skip
+        |bgs r1, r2, skip
         |ldi r3, 1
         |skip
         |halt
@@ -56,11 +56,11 @@ class PseudoTests extends TestHelpers {
     cpu.r(3).read shouldBe 0
   }
 
-  "bgt not taken when equal" in {
+  "bgs not taken when equal" in {
     val cpu = runCPU(VECTORS +
       """ldi r1, 5
         |ldi r2, 5
-        |bgt r1, r2, skip
+        |bgs r1, r2, skip
         |ldi r3, 1
         |skip
         |halt
@@ -68,11 +68,11 @@ class PseudoTests extends TestHelpers {
     cpu.r(3).read shouldBe 1
   }
 
-  "bgt not taken when less" in {
+  "bgs not taken when less" in {
     val cpu = runCPU(VECTORS +
       """ldi r1, 3
         |ldi r2, 7
-        |bgt r1, r2, skip
+        |bgs r1, r2, skip
         |ldi r3, 1
         |skip
         |halt
