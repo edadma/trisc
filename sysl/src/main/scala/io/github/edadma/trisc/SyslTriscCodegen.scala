@@ -107,6 +107,19 @@ class SyslTriscCodegen(addresses: Int = 4):
   private val globals = new mutable.LinkedHashMap[String, SyslType]
   private var locals: mutable.LinkedHashMap[String, LocalVar] = null
   private var stackOffset: Int = 0
+  private val savedScopes = new mutable.Stack[(Map[String, LocalVar], Int)]
+  private val loopScopeOffsets = new mutable.Stack[Int]
+
+  private def enterScope(): Unit =
+    savedScopes.push((locals.toMap, stackOffset))
+
+  private def leaveScope(): Unit =
+    val (savedLocals, savedOffset) = savedScopes.pop()
+    locals.clear()
+    locals ++= savedLocals
+    if stackOffset != savedOffset then
+      emitAddImm(7, 7, savedOffset - stackOffset)
+      stackOffset = savedOffset
   private var currentFunction: TFunDecl = null
 
   // Determine if a global variable should go in bss (zero-initialized) vs data
@@ -411,12 +424,16 @@ class SyslTriscCodegen(addresses: Int = 4):
         val endLabel = newLabel("endwhile")
         breakLabels.push(endLabel)
         continueLabels.push(loopLabel)
+        loopScopeOffsets.push(stackOffset)
         emit(s"$loopLabel")
         genExpr(cond)
         emit(s"  beq r1, r0, $endLabel")
+        enterScope()
         for stmt <- body do genStmt(stmt)
+        leaveScope()
         emit(s"  bra $loopLabel")
         emit(s"$endLabel")
+        loopScopeOffsets.pop()
         breakLabels.pop()
         continueLabels.pop()
 
@@ -424,37 +441,53 @@ class SyslTriscCodegen(addresses: Int = 4):
         val loopLabel = newLabel("for")
         val updateLabel = newLabel("forupdate")
         val endLabel = newLabel("endfor")
+        enterScope()
         genStmt(init)
         breakLabels.push(endLabel)
         continueLabels.push(updateLabel)
+        loopScopeOffsets.push(stackOffset)
         emit(s"$loopLabel")
         genExpr(cond)
         emit(s"  beq r1, r0, $endLabel")
+        enterScope()
         for stmt <- body do genStmt(stmt)
+        leaveScope()
         emit(s"$updateLabel")
         genStmt(update)
         emit(s"  bra $loopLabel")
         emit(s"$endLabel")
+        loopScopeOffsets.pop()
         breakLabels.pop()
         continueLabels.pop()
+        leaveScope()
 
       case TDoWhileStmt(cond, body) =>
         val loopLabel = newLabel("dowhile")
         val endLabel = newLabel("enddowhile")
         breakLabels.push(endLabel)
         continueLabels.push(loopLabel)
+        loopScopeOffsets.push(stackOffset)
         emit(s"$loopLabel")
+        enterScope()
         for stmt <- body do genStmt(stmt)
+        leaveScope()
         genExpr(cond)
         emit(s"  bne r1, r0, $loopLabel")
         emit(s"$endLabel")
+        loopScopeOffsets.pop()
         breakLabels.pop()
         continueLabels.pop()
 
       case TBreakStmt =>
+        val loopOffset = loopScopeOffsets.top
+        if stackOffset != loopOffset then
+          emitAddImm(7, 7, loopOffset - stackOffset)
         emit(s"  bra ${breakLabels.top}")
 
       case TContinueStmt =>
+        val loopOffset = loopScopeOffsets.top
+        if stackOffset != loopOffset then
+          emitAddImm(7, 7, loopOffset - stackOffset)
         emit(s"  bra ${continueLabels.top}")
 
       case TAsmStmt(code) =>
@@ -484,7 +517,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  pshd r1")
         genExpr(array)           // r1 = array base address
         emit("  popd r2")        // r2 = index
-        emit(s"  ldi r3, $elemSize")
+        emitLoadImm(3, elemSize)
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = base + offset
         emit("  popd r2")        // r2 = value
@@ -598,7 +631,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         genExpr(left)        // r1 = pointer
         emit("  pshd r1")
         genExpr(right)       // r1 = integer offset
-        emit(s"  ldi r3, $elemSize")
+        emitLoadImm(3, elemSize)
         emit("  mul r1, r1, r3") // scale by element size
         emit("  popd r2")   // r2 = pointer
         if op == "+" then emit("  add r1, r2, r1")
@@ -819,7 +852,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  pshd r1")
         genExpr(array)           // r1 = array base address
         emit("  popd r2")        // r2 = index
-        emit(s"  ldi r3, $elemSize")
+        emitLoadImm(3, elemSize)
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = base + offset
 
@@ -883,7 +916,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit(s"$boundsOk")
         // Load element at ptr + index * elemSize
         emit("  ldd r1, r1, r0") // r1 = ptr
-        emit(s"  ldi r3, $elemSize")
+        emitLoadImm(3, elemSize)
         emit("  mul r2, r2, r3")
         emit("  add r1, r1, r2")
         emitLoad(1, 1, elemType)
@@ -894,7 +927,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  pshd r1")
         genExpr(array)           // r1 = array base address
         emit("  popd r2")        // r2 = index
-        emit(s"  ldi r3, $elemSize")
+        emitLoadImm(3, elemSize)
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = element address
         elemType match
@@ -941,10 +974,16 @@ class SyslTriscCodegen(addresses: Int = 4):
         val endLabel = newLabel("endif")
         genExpr(cond)
         emit(s"  beq r1, r0, $elseLabel")
+        enterScope()
         for stmt <- thenBody do genStmt(stmt)
+        leaveScope()
         emit(s"  bra $endLabel")
         emit(s"$elseLabel")
-        elseBody.foreach(stmts => for stmt <- stmts do genStmt(stmt))
+        elseBody.foreach { stmts =>
+          enterScope()
+          for stmt <- stmts do genStmt(stmt)
+          leaveScope()
+        }
         emit(s"$endLabel")
 
       case TLen(inner, _) =>
@@ -954,7 +993,7 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  addi r1, r1, 8")
             emit("  ldw r1, r1, r0") // len at offset 8
           case SyslType.ArrayType(_, size) =>
-            emit(s"  ldi r1, $size") // compile-time constant
+            emitLoadImm(1, size) // compile-time constant
           case _ =>
             emit("  # TODO: len on unsupported type")
 
@@ -965,7 +1004,7 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  addi r1, r1, 12")
             emit("  ldw r1, r1, r0") // cap at offset 12
           case SyslType.ArrayType(_, size) =>
-            emit(s"  ldi r1, $size") // cap == size for fixed arrays
+            emitLoadImm(1, size) // cap == size for fixed arrays
           case _ =>
             emit("  # TODO: cap on unsupported type")
 
@@ -974,10 +1013,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit(s"  movi r1, $bits  # float $d")
 
       case TSizeof(size, _) =>
-        if size >= 0 && size <= 255 then
-          emit(s"  ldi r1, $size")
-        else
-          emit(s"  movi r1, $size")
+        emitLoadImm(1, size.toInt)
 
       case TStructLit(st @ SyslType.StructType(_, fields)) =>
         val totalSize = stackSize(st)
@@ -1056,6 +1092,11 @@ class SyslTriscCodegen(addresses: Int = 4):
       else
         emit(s"  movi r$tmp, ${-offset}")
         emit(s"  sub r$destReg, r$baseReg, r$tmp")
+
+  // Emit reg = immediate value, choosing ldi (byte range) or movi (larger)
+  private def emitLoadImm(reg: Int, value: Int): Unit =
+    if value >= 0 && value <= 255 then emit(s"  ldi r$reg, $value")
+    else emit(s"  movi r$reg, $value")
 
   // Compute byte offset of field at given index within a struct type
   private def fieldOffset(structType: SyslType.StructType, fieldIndex: Int): Int =

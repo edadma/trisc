@@ -10,6 +10,7 @@ object Runtime:
   val timerAddress = 0x100020L
   val intcAddress = 0x100026L
   val mouseAddress = 0x10002AL
+  val ramdiskAddress = 0x100030L
   val framebufferAddress = 0x200000L // 2MB — framebuffer pixel data
   val framebufferMaxSize: Long = 1920 * 1080 * 4
   val initialSSP: Long = stdoutAddress - 8 // stack grows down, below devices

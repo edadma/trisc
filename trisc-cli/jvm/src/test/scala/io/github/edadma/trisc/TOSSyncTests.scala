@@ -17,7 +17,7 @@ class TOSSyncTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    sem_init(&sem, 1)
           |    create_thread(task, 0x6000, 0x5000, "task")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
@@ -46,7 +46,7 @@ class TOSSyncTests extends TOSTestHelpers {
           |    sem_init(&mutex, 1)
           |    create_thread(task_a, 0x6000, 0x5000, "a")
           |    create_thread(task_b, 0x8000, 0x7000, "b")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task_a()
@@ -92,7 +92,7 @@ class TOSSyncTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    sem_init(&sem, 0)
           |    create_thread(task, 0x6000, 0x5000, "task")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
@@ -124,7 +124,7 @@ class TOSSyncTests extends TOSTestHelpers {
           |    create_thread(task_a, 0x6000, 0x5000, "a")
           |    create_thread(task_b, 0x8000, 0x7000, "b")
           |    create_thread(task_c, 0xA000, 0x9000, "c")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task_a()
@@ -167,7 +167,7 @@ class TOSSyncTests extends TOSTestHelpers {
           |    sem_init(&sem, 0)
           |    create_thread(waiter, 0x6000, 0x5000, "waiter")
           |    create_thread(poster, 0x8000, 0x7000, "poster")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |waiter()
@@ -207,7 +207,7 @@ class TOSSyncTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    mutex_init(&mtx)
           |    create_thread(task, 0x6000, 0x5000, "task")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
@@ -236,7 +236,7 @@ class TOSSyncTests extends TOSTestHelpers {
           |    mutex_init(&mtx)
           |    create_thread(holder, 0x6000, 0x5000, "holder")
           |    create_thread(trier, 0x8000, 0x7000, "trier")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |holder()
@@ -279,7 +279,7 @@ class TOSSyncTests extends TOSTestHelpers {
           |    cond_init(&cv)
           |    create_thread(waiter, 0x6000, 0x5000, "waiter")
           |    create_thread(signaler, 0x8000, 0x7000, "signaler")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |waiter()
@@ -322,7 +322,7 @@ class TOSSyncTests extends TOSTestHelpers {
           |    create_thread(waiter_a, 0x6000, 0x5000, "a")
           |    create_thread(waiter_b, 0x8000, 0x7000, "b")
           |    create_thread(broadcaster, 0xA000, 0x9000, "bc")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |waiter_a()
@@ -369,7 +369,7 @@ class TOSSyncTests extends TOSTestHelpers {
           |    create_thread(task_a, 0x6000, 0x5000, "a")
           |    create_thread(task_b, 0x8000, 0x7000, "b")
           |    create_thread(task_c, 0xA000, 0x9000, "c")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task_a()
@@ -414,7 +414,7 @@ class TOSSyncTests extends TOSTestHelpers {
           |    rwlock_init(&rw)
           |    create_thread(reader1, 0x6000, 0x5000, "r1")
           |    create_thread(reader2, 0x8000, 0x7000, "r2")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |reader1()
@@ -454,7 +454,7 @@ class TOSSyncTests extends TOSTestHelpers {
           |    rwlock_init(&rw)
           |    create_thread(writer, 0x6000, 0x5000, "w")
           |    create_thread(reader, 0x8000, 0x7000, "r")
-          |    timer_init(10)
+          |    timer_init(1000)
           |    first_thread_ssp()
           |
           |writer()

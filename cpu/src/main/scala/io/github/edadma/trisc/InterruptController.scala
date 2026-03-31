@@ -14,7 +14,6 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
   private var pending: Int = 0
   private var enabled: Int = 0xff // all sources enabled by default
   private var delivered: Int = 0 // IRQs signaled to CPU but not yet claimed
-  private var tickables: List[() => Unit] = Nil
   val log: Logger = {
     val l = new Logger(new ConsoleHandler, new DefaultLogFormatter(includeTimestamp = false))
     l.setLogLevel(LogLevel.OFF)
@@ -29,13 +28,6 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
   def lower(irq: Int): Unit =
     pending &= ~(1 << irq)
     log.trace(f"lower IRQ $irq — pending=$pending%02x", category = "INTC")
-
-  def addTickable(tick: () => Unit): Unit = tickables = tick :: tickables
-
-  def clearTickables(): Unit =
-    tickables = Nil
-    pending = 0
-    delivered = 0
 
   def readByte(addr: Long): Int =
     (addr - base).toInt match
@@ -61,7 +53,6 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
       case _ =>
 
   def apply(cpu: CPU): Unit =
-    tickables.foreach(_())
     val active = (pending & enabled) & ~delivered
     if active != 0 then
       delivered |= active

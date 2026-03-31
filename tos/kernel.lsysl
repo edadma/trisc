@@ -263,6 +263,12 @@ Lower priority number = higher priority. Priority 0 runs first.
       tasks[current_thread].wake_tick = target_tick
       tasks[current_thread].consec_quanta = 0
 
+@api yield_current() — Reset watchdog counter on voluntary yield.
+
+  yield_current()
+      tasks[current_thread].consec_quanta = 0
+      tasks[current_thread].quantum = DEFAULT_QUANTUM
+
 @api query_thread_state(id) -> int — Return the state of a thread.
 
   query_thread_state(id: int) -> int
@@ -364,9 +370,6 @@ Steps:
                   if watchdog_limit > 0
                       if tasks[current_thread].consec_quanta >= watchdog_limit
                           tasks[current_thread].state = STATE_TERMINATED
-              else
-                  // Yielded or preempted before quantum expired — reset watchdog
-                  tasks[current_thread].consec_quanta = 0
               // Re-enqueue if still ready (watchdog may have terminated)
               if tasks[current_thread].state == STATE_READY
                   enqueue(tasks[current_thread].priority, current_thread)

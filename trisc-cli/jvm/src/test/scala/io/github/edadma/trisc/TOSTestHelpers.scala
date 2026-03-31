@@ -122,7 +122,7 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
     cpu.run()
     (cpu, output.toString)
 
-  def runTOS(userSources: Map[String, String], maxCycles: Int = 500000000): (CPU, String) =
+  def runTOS(userSources: Map[String, String], maxCycles: Int = 2000000): (CPU, String) =
     val bootTof = assemble(bootAsm, relocatable = true)
 
     val allSources = Map(
@@ -151,10 +151,9 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
     }
     val intc = new InterruptController(0x100026L)
     val timer = new Timer(0x100020L, intc, irq = 0)
-    intc.addTickable(() => timer.tick())
     val mem = new Memory("Memory", new RAM(0, 0x100000), stdout, intc, timer)
     linked.load(mem)
-    val cpu = new CPU(mem, intc) { this.limit = maxCycles }
+    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles }
     if maxCycles <= 1000 then
       cpu.log.setLogLevel(LogLevel.TRACE)
       cpu.log.setHandler(new FileHandler("/tmp/trisc_debug.log"))

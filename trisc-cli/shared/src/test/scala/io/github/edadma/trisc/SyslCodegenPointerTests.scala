@@ -242,6 +242,72 @@ class SyslCodegenPointerTests extends SyslCodegenHelpers {
         |""".stripMargin) shouldBe 45
   }
 
+  // === &array pointer arithmetic (array decay) ===
+
+  "addr-of array element plus offset" in {
+    compileAndRun(
+      """main() -> int
+        |    var buf: [64]i8
+        |    buf[10] = 42
+        |    val p: *i8 = &buf[0] + 10
+        |    *p
+        |""".stripMargin) shouldBe 42
+  }
+
+  "addr-of int array element plus offset" in {
+    compileAndRun(
+      """main() -> int
+        |    var arr: [10]int
+        |    arr[3] = 99
+        |    val p: *int = &arr[0] + 3
+        |    *p
+        |""".stripMargin) shouldBe 99
+  }
+
+  "addr-of large i8 array element plus offset" in {
+    compileAndRun(
+      """main() -> int
+        |    var buf: [512]i8
+        |    buf[32] = 77
+        |    val p: *i8 = &buf[0] + 32
+        |    *p
+        |""".stripMargin) shouldBe 77
+  }
+
+  "addr-of array element passed to function" in {
+    compileAndRun(
+      """read_byte(p: *i8, idx: int) -> int
+        |    p[idx]
+        |
+        |main() -> int
+        |    var buf: [32]i8
+        |    buf[5] = 88
+        |    read_byte(&buf[0], 5)
+        |""".stripMargin) shouldBe 88
+  }
+
+  "addr-of global array element plus offset" in {
+    compileAndRun(
+      """var buf: [64]i8
+        |
+        |main() -> int
+        |    buf[20] = 55
+        |    val p: *i8 = &buf[0] + 20
+        |    *p
+        |""".stripMargin) shouldBe 55
+  }
+
+  "addr-of global large array element plus offset" in {
+    compileAndRun(
+      """var buf: [512]i8
+        |
+        |main() -> int
+        |    buf[100] = 33
+        |    val p: *i8 = &buf[0] + 100
+        |    *p
+        |""".stripMargin) shouldBe 33
+  }
+
   "addr-of global scalar" in {
     compileAndRun(
       """var x = 42

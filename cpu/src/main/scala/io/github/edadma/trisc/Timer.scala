@@ -1,7 +1,7 @@
 package io.github.edadma.trisc
 
-class Timer(val base: Long, intc: InterruptController, irq: Int, clock: () => Long = () => System.currentTimeMillis())
-    extends Device:
+class Timer(val base: Long, intc: InterruptController, irq: Int)
+    extends Device with (CPU => Unit):
   val name = "timer"
   val size = 6
 
@@ -12,7 +12,7 @@ class Timer(val base: Long, intc: InterruptController, irq: Int, clock: () => Lo
   var period: Long = 0
   var running: Boolean = false
   var fired: Boolean = false
-  private var last: Long = 0
+  private var counter: Long = 0
 
   def readByte(addr: Long): Int =
     addr - base match
@@ -28,7 +28,7 @@ class Timer(val base: Long, intc: InterruptController, irq: Int, clock: () => Lo
       case CONTROL =>
         running = data != 0
         if running then
-          last = clock()
+          counter = 0
           fired = false
       case STATUS =>
         fired = false // acknowledge
@@ -36,7 +36,11 @@ class Timer(val base: Long, intc: InterruptController, irq: Int, clock: () => Lo
       case _ =>
 
   def tick(): Unit =
-    if running && clock() - last >= period then
-      last += period
-      fired = true
-      intc.raise(irq)
+    if running && period > 0 then
+      counter += 1
+      if counter >= period then
+        counter = 0
+        fired = true
+        intc.raise(irq)
+
+  def apply(cpu: CPU): Unit = tick()

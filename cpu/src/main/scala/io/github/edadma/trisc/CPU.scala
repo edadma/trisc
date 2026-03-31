@@ -21,7 +21,7 @@ enum State:
     Trace, Overflow, BoundsCheck,
     Halt, Run, Wfi, DoubleFault
 
-class CPU(mem: Addressable, irq: CPU => Unit = _ => ()) extends Addressable:
+class CPU(mem: Addressable, tick: Seq[CPU => Unit] = Nil) extends Addressable:
   val name: String = mem.name
   val base: Long = mem.base
   val size: Long = mem.size
@@ -76,7 +76,6 @@ class CPU(mem: Addressable, irq: CPU => Unit = _ => ()) extends Addressable:
   private var inException: Boolean = false
 
   var limit: Int = -1
-  var clump: Int = 1000
   var trace: Boolean = false
 
   // Logging — OFF by default, enable with cpu.log.setLogLevel(LogLevel.DEBUG)
@@ -207,6 +206,9 @@ class CPU(mem: Addressable, irq: CPU => Unit = _ => ()) extends Addressable:
           log.warn(f"DataAccess fault at pc=${pc - 2}%04x", category = "CPU")
           state = State.DataAccess
 
+    val regs = (1 to 7).map(i => f"r$i=${r(i).read}%x").mkString(" ")
+    log.trace(f"  $regs", category = "CPU")
+
     // Trace exception: fires after instruction completes if T was set BEFORE it executed
     if state == State.Run && traceEnabled then state = State.Trace
 
@@ -216,15 +218,12 @@ class CPU(mem: Addressable, irq: CPU => Unit = _ => ()) extends Addressable:
 
   @tailrec
   final def run(): Unit =
-    var count = 0
-
-    while state != State.Halt && state != State.Wfi && state != State.DoubleFault && count < clump do
+    if state != State.Halt && state != State.Wfi && state != State.DoubleFault then
       execute()
-      count += 1
 
     if limit > 0 then limit -= 1
 
-    irq(this)
+    tick.foreach(_(this))
 
     if state == State.Wfi && limit < 0 then Thread.sleep(1)
 

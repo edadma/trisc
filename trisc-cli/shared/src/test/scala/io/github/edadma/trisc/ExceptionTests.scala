@@ -195,7 +195,7 @@ class ExceptionTests extends TestHelpers {
         |  halt
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, interruptSource) { limit = 10000 }
+    val cpu = new CPU(mem, Seq(interruptSource)) { limit = 10000 }
     cpu.reset()
     cpu.run()
     output.toString shouldBe "I"
@@ -206,7 +206,7 @@ class ExceptionTests extends TestHelpers {
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     val tof = assemble(VECTORS + "ldi r1, 3\nspsr r1\nldi r1, 42\nhalt\n")
     tof.load(mem)
-    val cpu = new CPU(mem, interruptSource) { limit = 100 }
+    val cpu = new CPU(mem, Seq(interruptSource)) { limit = 100 }
     cpu.reset()
     cpu.run()
     cpu.r(1).read shouldBe 42

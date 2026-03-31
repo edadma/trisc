@@ -16,8 +16,17 @@ class SyslAnalyzer:
   private val typeAliases = new mutable.LinkedHashMap[String, String]  // alias name → target type string
   private val methods = new mutable.LinkedHashMap[String, mutable.Set[String]]  // struct name → set of method names
   private val externalSymbols = new mutable.LinkedHashSet[String]
-  private var localScope: mutable.LinkedHashMap[String, SymInfo] = null
+  private var scopeStack: mutable.ArrayBuffer[mutable.LinkedHashMap[String, SymInfo]] = null
   private var loopDepth: Int = 0
+
+  private def pushScope(): Unit =
+    scopeStack += new mutable.LinkedHashMap[String, SymInfo]
+
+  private def popScope(): Unit =
+    scopeStack.remove(scopeStack.length - 1)
+
+  private def currentScope: mutable.LinkedHashMap[String, SymInfo] =
+    scopeStack.last
 
   private val builtinFunctions = Map(
     "putchar" -> FunInfo("putchar", List("c" -> U32), U32),
@@ -118,24 +127,26 @@ class SyslAnalyzer:
         TTypeAliasDecl(name, resolveTypeName(target))
 
       case FunDeclAST(name, params, _, body, isPrivate) =>
-        localScope = new mutable.LinkedHashMap
+        scopeStack = new mutable.ArrayBuffer
+        pushScope()
         val funInfo = functions(name)
         for (paramName, paramType) <- funInfo.params do
-          localScope(paramName) = SymInfo(paramName, paramType, true)
+          currentScope(paramName) = SymInfo(paramName, paramType, true)
         val tBody = body match
           case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
           case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
         val tParams = funInfo.params.map((n, t) => TParam(n, t))
-        localScope = null
+        scopeStack = null
         TFunDecl(name, tParams, funInfo.returnType, tBody, isPrivate)
 
       case VarDeclAST(name, typOpt, init, isPrivate, isMutable) =>
-        localScope = new mutable.LinkedHashMap
+        scopeStack = new mutable.ArrayBuffer
+        pushScope()
         val tInit0 = analyzeExpr(init)
         val declType = typOpt.map(resolveTypeName).getOrElse(tInit0.typ)
         val tInit = coerceLiteral(tInit0, declType)
         globalScope(name) = SymInfo(name, declType, isMutable)
-        localScope = null
+        scopeStack = null
         TVarDecl(name, declType, tInit, isPrivate)
 
   private def resolveTypeName(name: String): SyslType = name match
@@ -226,16 +237,24 @@ class SyslAnalyzer:
       case _ => expr
 
   private def lookup(name: String): SymInfo =
-    if localScope != null && localScope.contains(name) then localScope(name)
-    else if globalScope.contains(name) then globalScope(name)
+    if scopeStack != null then
+      var i = scopeStack.length - 1
+      while i >= 0 do
+        if scopeStack(i).contains(name) then return scopeStack(i)(name)
+        i -= 1
+    if globalScope.contains(name) then globalScope(name)
     else throw AnalysisError(s"undefined variable: '$name'")
 
   private def lookupOrCreate(name: String, typ: SyslType): SymInfo =
-    if localScope != null && localScope.contains(name) then localScope(name)
-    else if globalScope.contains(name) then globalScope(name)
+    if scopeStack != null then
+      var i = scopeStack.length - 1
+      while i >= 0 do
+        if scopeStack(i).contains(name) then return scopeStack(i)(name)
+        i -= 1
+    if globalScope.contains(name) then globalScope(name)
     else
       val info = SymInfo(name, typ, true)
-      if localScope != null then localScope(name) = info
+      if scopeStack != null then currentScope(name) = info
       else globalScope(name) = info
       info
 
@@ -255,8 +274,8 @@ class SyslAnalyzer:
         val tInit = coerceLiteral(tInit0, declType)
         if typOpt.isDefined && !compatible(tInit.typ, declType) then
           throw AnalysisError(s"cannot assign ${tInit.typ} to $declType variable '$name'")
-        if localScope != null then
-          localScope(name) = SymInfo(name, declType, isMutable)
+        if scopeStack != null then
+          currentScope(name) = SymInfo(name, declType, isMutable)
         TVarStmt(name, declType, tInit)
 
       case AssignStmtAST(target, value) =>
@@ -308,20 +327,26 @@ class SyslAnalyzer:
         TReturnStmt(value.map(analyzeExpr))
 
       case ForStmtAST(init, cond, update, body) =>
+        pushScope()
         val tInit = analyzeStmt(init)
         val tCond = analyzeExpr(cond)
         if tCond.typ != BoolType then throw AnalysisError(s"for condition must be bool, got ${tCond.typ}")
         loopDepth += 1
+        pushScope()
         val tBody = analyzeBlock(body)
+        popScope()
         val tUpdate = analyzeStmt(update)
         loopDepth -= 1
+        popScope()
         TForStmt(tInit, tCond, tUpdate, tBody)
 
       case WhileStmtAST(cond, body) =>
         val tCond = analyzeExpr(cond)
         if tCond.typ != BoolType then throw AnalysisError(s"while condition must be bool, got ${tCond.typ}")
         loopDepth += 1
+        pushScope()
         val tBody = analyzeBlock(body)
+        popScope()
         loopDepth -= 1
         TWhileStmt(tCond, tBody)
 
@@ -329,7 +354,9 @@ class SyslAnalyzer:
         val tCond = analyzeExpr(cond)
         if tCond.typ != BoolType then throw AnalysisError(s"do/while condition must be bool, got ${tCond.typ}")
         loopDepth += 1
+        pushScope()
         val tBody = analyzeBlock(body)
+        popScope()
         loopDepth -= 1
         TDoWhileStmt(tCond, tBody)
 
@@ -636,8 +663,10 @@ class SyslAnalyzer:
       case IfExprAST(cond, thenBody, elseBody) =>
         val tCond = analyzeExpr(cond)
         if tCond.typ != BoolType then throw AnalysisError(s"if condition must be bool, got ${tCond.typ}")
+        pushScope()
         val tThen = analyzeBlock(thenBody)
-        val tElse = elseBody.map(analyzeBlock)
+        popScope()
+        val tElse = elseBody.map { stmts => pushScope(); val r = analyzeBlock(stmts); popScope(); r }
         val resultType = tThen.lastOption match
           case Some(TExprStmt(e)) => e.typ
           case _ => VoidType
