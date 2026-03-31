@@ -11,69 +11,6 @@ package io.github.edadma.trisc
 
 class TOSExitBugTests extends TOSTestHelpers {
 
-  // === Dump generated assembly for the failing function shape ===
-
-  "Exit: DUMP ASM for sleep+putc function" in {
-    val source = """import "services"
-                   |
-                   |med()
-                   |    sleep(15)
-                   |    putc(77)
-                   |""".stripMargin
-    val driver = new SyslDriver
-    val result = driver.compile(Map("services" -> servicesSysl, "main" -> source))
-    val codegen = new SyslTriscCodegen()
-    // Find the "main" unit and generate its assembly
-    val mainUnit = result.units.find(_.name == "main").get
-    val asm = codegen.generate(mainUnit.typed)
-    info(s"Generated assembly:\n$asm")
-    // Also dump for comparison: putc only
-    val source2 = """import "services"
-                    |
-                    |med2()
-                    |    putc(77)
-                    |""".stripMargin
-    val result2 = driver.compile(Map("services" -> servicesSysl, "main2" -> source2))
-    val mainUnit2 = result2.units.find(_.name == "main2").get
-    val asm2 = codegen.generate(mainUnit2.typed)
-    info(s"Generated assembly (putc only):\n$asm2")
-    succeed
-  }
-
-  // === TRACE: minimal reproducer with full CPU trace ===
-
-  "Exit: TRACE minimal reproducer" in {
-    val (cpu, output) = runTOS(Map(
-      "app" ->
-        """import "kernel"
-          |import "services"
-          |import "timer"
-          |
-          |kernel_main() -> int
-          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0)
-          |    timer_init(1000)
-          |    first_thread_ssp()
-          |
-          |low()
-          |    sleep(30)
-          |    putc(76)
-          |
-          |med()
-          |    sleep(15)
-          |    putc(77)
-          |
-          |high()
-          |    sleep(10)
-          |    putc(72)
-          |""".stripMargin
-    ), maxCycles = 999999)
-
-    info(s"output: '$output' state: ${cpu.state}")
-    succeed // just want the trace
-  }
-
   // === Baseline: single thread, implicit return ===
 
   "Exit: single thread, no calls, implicit return" in {

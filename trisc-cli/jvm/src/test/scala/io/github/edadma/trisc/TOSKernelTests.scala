@@ -112,35 +112,4 @@ class TOSKernelTests extends TOSTestHelpers {
     output.count(_ == 'B') shouldBe 3
   }
 
-  "DEBUG: dump linked layout" ignore {
-    val bootTof = assemble(bootAsm, relocatable = true)
-    val allSources = Map(
-      "kernel" -> kernelSysl, "services" -> servicesSysl, "timer" -> timerSysl, "semaphore" -> semaphoreSysl,
-      "mutex" -> mutexSysl, "condvar" -> condvarSysl, "barrier" -> barrierSysl,
-      "rwlock" -> rwlockSysl, "channel" -> channelSysl, "mailbox" -> mailboxSysl,
-      "rmutex" -> rmutexSysl, "qset" -> qsetSysl,
-      "app" -> """import "kernel"
-        |import "services"
-        |import "timer"
-        |kernel_main() -> int
-        |    create_thread(task, 0x6000, 0x5000, "t")
-        |    timer_init(1000)
-        |    first_thread_ssp()
-        |task()
-        |    putc(65)
-        |    sleep(5)
-        |    putc(66)
-        |""".stripMargin)
-    val driver = new SyslDriver
-    val result = driver.compile(allSources)
-    val codegen = new SyslTriscCodegen
-    val tofs = for unit <- result.units yield
-      val asm = codegen.generate(unit.typed)
-      assemble(asm, relocatable = true)
-    val syslTof = Linker.link(tofs, relocatable = true)
-    val linked = Linker.link(Seq(bootTof, syslTof), linkerScript, 0)
-
-    info(linked.dumpLayout)
-    linked.segments.size should be > 0
-  }
 }
