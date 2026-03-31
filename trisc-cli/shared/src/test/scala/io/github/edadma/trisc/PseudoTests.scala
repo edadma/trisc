@@ -42,7 +42,7 @@ class PseudoTests extends TestHelpers {
     cpu.r(3).read shouldBe 1
   }
 
-  // ===== BGT =====
+  // ===== BGS =====
 
   "bgs taken when greater" in {
     val cpu = runCPU(VECTORS +
