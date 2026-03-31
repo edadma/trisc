@@ -368,7 +368,7 @@ class TOSThreadTests extends TOSTestHelpers {
   // verifying consec_quanta increments and the termination path in
   // the scheduler. Re-enable when the emulator supports cycle skipping.
 
-  "TOS: watchdog terminates runaway thread" ignore {
+  "TOS: watchdog terminates runaway thread" in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import "kernel"
@@ -403,7 +403,7 @@ class TOSThreadTests extends TOSTestHelpers {
     output should include("K")
   }
 
-  "TOS: watchdog does not kill yielding thread" ignore {
+  "TOS: watchdog does not kill yielding thread" in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import "kernel"

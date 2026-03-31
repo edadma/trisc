@@ -285,8 +285,12 @@ trap_handler
   rte
 
 ; --- yield: voluntary context switch (context already saved) ---
+extern yield_current
+
 .sys_yield
   ; Context already saved by pshr/pshd above.
+  movi r4, yield_current
+  jalr r6, r4                   ; reset watchdog counter
   ; Jump to the schedule+dispatch part of context_switch.
   bra do_schedule
 
