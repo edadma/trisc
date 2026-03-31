@@ -267,6 +267,7 @@ class TOSNotifyTests extends TOSTestHelpers {
           |poster()
           |    sleep(5)
           |    qset_notify(&qs, 0)
+          |    yield()
           |    qset_notify(&qs, 2)
           |""".stripMargin
     ))

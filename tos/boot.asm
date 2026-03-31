@@ -128,7 +128,7 @@ timer_isr
 ; irq_handler — Generic Interrupt Dispatcher
 ; ============================================================================
 
-INTC_CLAIM = 0x100028    ; INTC base (0x100026) + offset 2
+INTC_CLAIM = 0x100082    ; INTC base (0x100080) + offset 2
 
 extern irq_handlers
 
