@@ -21,14 +21,40 @@ enum State:
     Trace, Overflow, BoundsCheck,
     Halt, Run, Wfi, DoubleFault
 
-class CPU(mem: Addressable, tick: Seq[CPU => Unit] = Nil) extends Addressable:
+class CPU(mem: Addressable, tick: Seq[CPU => Unit] = Nil, mpu: Option[MPU] = None, mpuBase: Long = 0) extends Addressable:
   val name: String = mem.name
   val base: Long = mem.base
   val size: Long = mem.size
 
-  def readByte(addr: Long): Int = mem.readByte(addr)
+  private val mpuEnd: Long = mpuBase + mpu.map(_.registerSize).getOrElse(0)
 
-  def writeByte(addr: Long, data: Long): Unit = mem.writeByte(addr, data)
+  /** Returns true if access is denied by the MPU. */
+  private def mpuDenied(addr: Long, access: Access): Boolean =
+    mpu match
+      case Some(m) => !m.check(addr, access, test(Status.Mode))
+      case None    => false
+
+  private def checkMPU(addr: Long, access: Access): Boolean =
+    if mpuDenied(addr, access) then
+      state = State.DataAccess
+      true
+    else false
+
+  private def isMpuAddr(addr: Long): Boolean =
+    mpu.isDefined && addr >= mpuBase && addr < mpuEnd
+
+  def readByte(addr: Long): Int =
+    if isMpuAddr(addr) then
+      if !test(Status.Mode) then { state = State.PrivilegeViolation; return 0 }
+      mpu.get.readRegister((addr - mpuBase).toInt)
+    else if checkMPU(addr, Access.Read) then 0
+    else mem.readByte(addr)
+
+  def writeByte(addr: Long, data: Long): Unit =
+    if isMpuAddr(addr) then
+      if !test(Status.Mode) then { state = State.PrivilegeViolation; return }
+      mpu.get.writeRegister((addr - mpuBase).toInt, data.toInt)
+    else if !checkMPU(addr, Access.Write) then mem.writeByte(addr, data)
 
   def loadByte(addr: Long, data: Long): Unit = mem.loadByte(addr, data)
 
@@ -39,22 +65,28 @@ class CPU(mem: Addressable, tick: Seq[CPU => Unit] = Nil) extends Addressable:
     else false
 
   override def readShort(addr: Long): Int =
-    if checkAlign(addr, 2) then 0 else mem.readShort(addr)
+    if checkAlign(addr, 2) then 0
+    else if checkMPU(addr, Access.Read) then 0
+    else mem.readShort(addr)
 
   override def readInt(addr: Long): Int =
-    if checkAlign(addr, 4) then 0 else mem.readInt(addr)
+    if checkAlign(addr, 4) then 0
+    else if checkMPU(addr, Access.Read) then 0
+    else mem.readInt(addr)
 
   override def readLong(addr: Long): Long =
-    if checkAlign(addr, 8) then 0 else mem.readLong(addr)
+    if checkAlign(addr, 8) then 0
+    else if checkMPU(addr, Access.Read) then 0
+    else mem.readLong(addr)
 
   override def writeShort(addr: Long, data: Long): Unit =
-    if !checkAlign(addr, 2) then mem.writeShort(addr, data)
+    if !checkAlign(addr, 2) && !checkMPU(addr, Access.Write) then mem.writeShort(addr, data)
 
   override def writeInt(addr: Long, data: Long): Unit =
-    if !checkAlign(addr, 4) then mem.writeInt(addr, data)
+    if !checkAlign(addr, 4) && !checkMPU(addr, Access.Write) then mem.writeInt(addr, data)
 
   override def writeLong(addr: Long, data: Long): Unit =
-    if !checkAlign(addr, 8) then mem.writeLong(addr, data)
+    if !checkAlign(addr, 8) && !checkMPU(addr, Access.Write) then mem.writeLong(addr, data)
 
   val r = immutable.ArraySeq(
     new Reg0,
@@ -177,6 +209,10 @@ class CPU(mem: Addressable, tick: Seq[CPU => Unit] = Nil) extends Addressable:
       logRegisters()
       breakpointHit = true
       state = State.Halt
+      return
+
+    if mpuDenied(pc, Access.Execute) then
+      state = State.InstructionAccess
       return
 
     val inst =
