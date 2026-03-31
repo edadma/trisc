@@ -149,8 +149,8 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
       def writeByte(addr: Long, data: Long): Unit = output += data.toChar
       override def loadByte(addr: Long, data: Long): Unit = ()
     }
-    val intc = new InterruptController(0x100026L)
-    val timer = new Timer(0x100020L, intc, irq = 0)
+    val intc = new InterruptController(Runtime.intcAddress)
+    val timer = new Timer(Runtime.timerAddress, intc, irq = 0)
     val mem = new Memory("Memory", new RAM(0, 0x100000), stdout, intc, timer)
     linked.load(mem)
     val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles }

@@ -6,16 +6,21 @@ fire again. The tick counting and thread wake logic lives in
 the kernel's schedule() function, which runs after every
 context switch.
 
-Device registers:
-  0x100020 + 0-3 = PERIOD (4 bytes, write)
-  0x100020 + 4   = CONTROL (1 byte, write: nonzero = start)
-  0x100020 + 5   = STATUS (1 byte, R/W: write to ack)
+Device registers (MCU-style timer):
+  0x100040 + 0-1  = PSC (prescaler, 16-bit)
+  0x100040 + 2-5  = ARR (auto-reload/period, 32-bit)
+  0x100040 + 6-9  = CNT (counter, 32-bit)
+  0x100040 + 10   = CR  (control: bit 0 = enable)
+  0x100040 + 11   = SR  (status: bit 0 = overflow, write-1-to-clear)
+  0x100040 + 12   = IER (interrupt enable: bit 0 = overflow)
 @
 
-  val TIMER_BASE    = 0x100020
-  val TIMER_STATUS  = 0x100025
-  val TIMER_CONTROL = 0x100024
-  val TIMER_IRQ     = 0
+  val TIMER_BASE = 0x100040
+  val TIMER_ARR  = 0x100042
+  val TIMER_CR   = 0x10004A
+  val TIMER_SR   = 0x10004B
+  val TIMER_IER  = 0x10004C
+  val TIMER_IRQ  = 0
 
   extern register_irq(irq: int, handler: int)
 
@@ -24,16 +29,18 @@ Device registers:
   timer_init(period: int)
       register_irq(TIMER_IRQ, timer_handler)
 
-      // Write period (big-endian 32-bit)
-      val period_base: *i8 = TIMER_BASE
-      *(period_base + 0) = (period >> 24) & 0xFF
-      *(period_base + 1) = (period >> 16) & 0xFF
-      *(period_base + 2) = (period >> 8) & 0xFF
-      *(period_base + 3) = period & 0xFF
+      // Write ARR period (big-endian 32-bit)
+      val arr: *i8 = TIMER_ARR
+      *(arr + 0) = (period >> 24) & 0xFF
+      *(arr + 1) = (period >> 16) & 0xFF
+      *(arr + 2) = (period >> 8) & 0xFF
+      *(arr + 3) = period & 0xFF
 
-      // Start timer
-      val control: *i8 = TIMER_CONTROL
-      *control = 1
+      // Enable overflow interrupt and start timer
+      val ier: *i8 = TIMER_IER
+      *ier = 1
+      val cr: *i8 = TIMER_CR
+      *cr = 1
 
 @tech
 timer_handler — Called by the generic IRQ dispatcher in boot.asm.
@@ -42,5 +49,5 @@ context switch, and schedule() handles tick counting and waking.
 @
 
   timer_handler()
-      val status: *i8 = TIMER_STATUS
-      *status = 0
+      val sr: *i8 = TIMER_SR
+      *sr = 1

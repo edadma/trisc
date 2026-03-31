@@ -5,7 +5,7 @@ Operates on a TFS-formatted ramdisk via memory-mapped registers.
 Provides inode-level file operations: lookup, read, write, create,
 unlink, mkdir, and stat.
 
-Ramdisk device registers at 0x100030:
+Ramdisk device registers at 0x1000A0:
   +0  STATUS   (R)   — bit 0: ready, bit 1: error
   +1  COMMAND  (W)   — 0x01 = read, 0x02 = write
   +2  LBA      (R/W) — 4 bytes, big-endian sector number
@@ -23,7 +23,7 @@ On-disk layout (block 0 = boot, block 1 = superblock):
 
   // === Ramdisk device registers (offsets from RD_BASE) ===
 
-  val RD_BASE = 0x100030
+  val RD_BASE = 0x1000A0
   val RD_STATUS_OFF  = 0
   val RD_COMMAND_OFF = 1
   val RD_LBA_OFF     = 2

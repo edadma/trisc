@@ -6,11 +6,11 @@ object Runtime:
   val stdoutAddress = 0x100000L // 1MB — devices start here, RAM below
   val keyboardAddress = 0x100004L
   val displayCtrlAddress = 0x100008L
-  val blitterAddress = 0x10000EL
-  val timerAddress = 0x100020L
-  val intcAddress = 0x100026L
-  val mouseAddress = 0x10002AL
-  val ramdiskAddress = 0x100030L
+  val blitterAddress = 0x100010L
+  val timerAddress = 0x100040L   // 33 bytes (MCU-style timer with channels)
+  val intcAddress = 0x100080L
+  val mouseAddress = 0x100090L
+  val ramdiskAddress = 0x1000A0L
   val framebufferAddress = 0x200000L // 2MB — framebuffer pixel data
   val framebufferMaxSize: Long = 1920 * 1080 * 4
   val initialSSP: Long = stdoutAddress - 8 // stack grows down, below devices

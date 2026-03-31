@@ -160,37 +160,44 @@ class DeviceTests extends TestHelpers {
   }
 
   // ===== Timer =====
+  // New register map: PSC(0-1), ARR(2-5), CNT(6-9), CR(10), SR(11), IER(12), channels(13+)
+
+  /** Helper: set ARR (period) as 32-bit big-endian at offset 2-5 */
+  def setARR(timer: Timer, base: Long, value: Int): Unit =
+    timer.writeByte(base + 2, (value >> 24) & 0xFF)
+    timer.writeByte(base + 3, (value >> 16) & 0xFF)
+    timer.writeByte(base + 4, (value >> 8) & 0xFF)
+    timer.writeByte(base + 5, value & 0xFF)
+
+  /** Helper: enable timer with overflow interrupt */
+  def startTimer(timer: Timer, base: Long): Unit =
+    timer.writeByte(base + 12, 0x01) // IER: overflow interrupt enable
+    timer.writeByte(base + 10, 0x01) // CR: enable
 
   "timer has correct size" in {
     val intc = new InterruptController(0x200)
     val timer = new Timer(0x100, intc, irq = 0)
-    timer.size shouldBe 6
+    timer.size shouldBe 33
   }
 
-  "timer period registers accept 32-bit write" in {
+  "timer ARR registers accept 32-bit write" in {
     val intc = new InterruptController(0x200)
     val timer = new Timer(0x100, intc, irq = 0)
-    timer.writeByte(0x100, 0x00) // period byte 0 (MSB)
-    timer.writeByte(0x101, 0x01) // period byte 1
-    timer.writeByte(0x102, 0x00) // period byte 2
-    timer.writeByte(0x103, 0x00) // period byte 3 (LSB)
-    timer.period shouldBe 0x00010000L // 65536 cycles
+    setARR(timer, 0x100, 0x00010000)
+    timer.period shouldBe 0x00010000L
   }
 
-  "timer period small value" in {
+  "timer ARR small value" in {
     val intc = new InterruptController(0x200)
     val timer = new Timer(0x100, intc, irq = 0)
-    timer.writeByte(0x100, 0x00)
-    timer.writeByte(0x101, 0x00)
-    timer.writeByte(0x102, 0x00)
-    timer.writeByte(0x103, 0x0A) // 10 cycles
+    setARR(timer, 0x100, 10)
     timer.period shouldBe 10
   }
 
   "timer does not fire before started" in {
     val intc = new InterruptController(0x200)
     val timer = new Timer(0x100, intc, irq = 0)
-    timer.writeByte(0x103, 0x0A) // period = 10
+    setARR(timer, 0x100, 10)
     for _ <- 1 to 100 do timer.tick()
     timer.fired shouldBe false
   }
@@ -198,8 +205,8 @@ class DeviceTests extends TestHelpers {
   "timer fires after period elapses" in {
     val intc = new InterruptController(0x200)
     val timer = new Timer(0x100, intc, irq = 0)
-    timer.writeByte(0x103, 0x0A) // period = 10
-    timer.writeByte(0x104, 0x01) // start
+    setARR(timer, 0x100, 10)
+    startTimer(timer, 0x100)
     for _ <- 1 to 10 do timer.tick()
     timer.fired shouldBe true
   }
@@ -207,8 +214,8 @@ class DeviceTests extends TestHelpers {
   "timer does not fire before period elapses" in {
     val intc = new InterruptController(0x200)
     val timer = new Timer(0x100, intc, irq = 0)
-    timer.writeByte(0x103, 0x0A) // period = 10
-    timer.writeByte(0x104, 0x01) // start
+    setARR(timer, 0x100, 10)
+    startTimer(timer, 0x100)
     for _ <- 1 to 5 do timer.tick()
     timer.fired shouldBe false
   }
@@ -216,44 +223,44 @@ class DeviceTests extends TestHelpers {
   "timer auto-reloads for periodic interrupts" in {
     val intc = new InterruptController(0x200)
     val timer = new Timer(0x100, intc, irq = 0)
-    timer.writeByte(0x103, 0x0A) // period = 10
-    timer.writeByte(0x104, 0x01) // start
+    setARR(timer, 0x100, 10)
+    startTimer(timer, 0x100)
 
     for _ <- 1 to 10 do timer.tick()
     timer.fired shouldBe true
-    timer.writeByte(0x105, 0x00) // acknowledge
+    timer.writeByte(0x10B, 0x01) // SR: write-1-to-clear overflow
 
     for _ <- 1 to 10 do timer.tick()
-    timer.fired shouldBe true // fired again
+    timer.fired shouldBe true
   }
 
-  "timer status reads fired flag" in {
+  "timer status reads overflow flag" in {
     val intc = new InterruptController(0x200)
     val timer = new Timer(0x100, intc, irq = 0)
-    timer.readByte(0x105) shouldBe 0 // not fired
-    timer.writeByte(0x103, 0x0A)
-    timer.writeByte(0x104, 0x01)
+    timer.readByte(0x10B) shouldBe 0 // SR: no flags
+    setARR(timer, 0x100, 10)
+    startTimer(timer, 0x100)
     for _ <- 1 to 10 do timer.tick()
-    timer.readByte(0x105) shouldBe 1 // fired
+    (timer.readByte(0x10B) & 0x01) shouldBe 1 // overflow flag
   }
 
-  "timer acknowledge clears fired flag" in {
+  "timer acknowledge clears overflow flag" in {
     val intc = new InterruptController(0x200)
     val timer = new Timer(0x100, intc, irq = 0)
-    timer.writeByte(0x103, 0x0A)
-    timer.writeByte(0x104, 0x01)
+    setARR(timer, 0x100, 10)
+    startTimer(timer, 0x100)
     for _ <- 1 to 10 do timer.tick()
-    timer.readByte(0x105) shouldBe 1
-    timer.writeByte(0x105, 0x00) // acknowledge
-    timer.readByte(0x105) shouldBe 0
+    (timer.readByte(0x10B) & 0x01) shouldBe 1
+    timer.writeByte(0x10B, 0x01) // write-1-to-clear
+    (timer.readByte(0x10B) & 0x01) shouldBe 0
   }
 
   "timer stop halts firing" in {
     val intc = new InterruptController(0x200)
     val timer = new Timer(0x100, intc, irq = 0)
-    timer.writeByte(0x103, 0x0A)
-    timer.writeByte(0x104, 0x01) // start
-    timer.writeByte(0x104, 0x00) // stop
+    setARR(timer, 0x100, 10)
+    startTimer(timer, 0x100)
+    timer.writeByte(0x10A, 0x00) // CR: disable
     for _ <- 1 to 100 do timer.tick()
     timer.fired shouldBe false
   }
@@ -261,19 +268,16 @@ class DeviceTests extends TestHelpers {
   "timer counter resets each period" in {
     val intc = new InterruptController(0x200)
     val timer = new Timer(0x100, intc, irq = 0)
-    timer.writeByte(0x103, 0x0A) // period = 10
-    timer.writeByte(0x104, 0x01) // start
+    setARR(timer, 0x100, 10)
+    startTimer(timer, 0x100)
 
-    // First fire at tick 10
     for _ <- 1 to 10 do timer.tick()
     timer.fired shouldBe true
-    timer.writeByte(0x105, 0x00) // acknowledge
+    timer.writeByte(0x10B, 0x01) // acknowledge
 
-    // Should not fire after 9 more ticks
     for _ <- 1 to 9 do timer.tick()
     timer.fired shouldBe false
 
-    // Fires on the 10th tick
     timer.tick()
     timer.fired shouldBe true
   }
@@ -281,12 +285,12 @@ class DeviceTests extends TestHelpers {
   "timer start resets counter and clears fired" in {
     val intc = new InterruptController(0x200)
     val timer = new Timer(0x100, intc, irq = 0)
-    timer.writeByte(0x103, 0x0A)
-    timer.writeByte(0x104, 0x01) // start
-    for _ <- 1 to 10 do timer.tick() // fires
+    setARR(timer, 0x100, 10)
+    startTimer(timer, 0x100)
+    for _ <- 1 to 10 do timer.tick()
     timer.fired shouldBe true
-    timer.writeByte(0x104, 0x01) // restart — resets counter
-    timer.fired shouldBe false // cleared by restart
+    timer.writeByte(0x10A, 0x01) // CR: re-enable (resets counter)
+    timer.fired shouldBe false
     timer.running shouldBe true
   }
 
