@@ -444,7 +444,7 @@ object Decode:
         "001 ddd aaa bbb 0110" -> ((args: Map[Char, Int]) => new SBC(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 0111" -> ((args: Map[Char, Int]) => new MULU(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 1000" -> ((args: Map[Char, Int]) => new DIVU(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 1001" -> ((args: Map[Char, Int]) => new REMU(args('d'), args('a'), args('b'))),
+        // 001 ... 1001 — freed from REMU (remainder now in DIV/DIVU register pair)
         "001 ddd aaa bbb 1010" -> ((args: Map[Char, Int]) => new FSLT(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 1011" -> ((args: Map[Char, Int]) => new FADD(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 1100" -> ((args: Map[Char, Int]) => new FSUB(args('d'), args('a'), args('b'))),
@@ -464,7 +464,7 @@ object Decode:
         "000 ddd aaa bbb 1001" -> ((args: Map[Char, Int]) => new SUB(args('d'), args('a'), args('b'))),
         "000 ddd aaa bbb 1010" -> ((args: Map[Char, Int]) => new MUL(args('d'), args('a'), args('b'))),
         "000 ddd aaa bbb 1011" -> ((args: Map[Char, Int]) => new DIV(args('d'), args('a'), args('b'))),
-        "000 ddd aaa bbb 1100" -> ((args: Map[Char, Int]) => new REM(args('d'), args('a'), args('b'))),
+        "000 ddd aaa bbb 1100" -> ((args: Map[Char, Int]) => new CAS(args('d'), args('a'), args('b'))),
         "000 ddd aaa bbb 1101" -> ((args: Map[Char, Int]) => new AND(args('d'), args('a'), args('b'))),
         "000 ddd aaa bbb 1110" -> ((args: Map[Char, Int]) => new OR(args('d'), args('a'), args('b'))),
         "000 ddd aaa bbb 1111" -> ((args: Map[Char, Int]) => new XOR(args('d'), args('a'), args('b'))),

@@ -568,8 +568,8 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm / 2)
     case InstructionLineAST(
           mnemonic @ ("ldb" | "stb" | "lds" | "sts" | "ldw" | "stw" | "ldd" | "std" | "add" | "sub" | "mul" | "div" |
-          "rem" | "and" | "or" | "xor" | "asr" | "lsr" | "lsl" | "slt" | "sltu" | "adc" | "sbc" | "mulu" | "divu" |
-          "remu" | "fslt" | "fadd" | "fsub" | "fmul" | "fdiv" | "fseq"),
+          "cas" | "and" | "or" | "xor" | "asr" | "lsr" | "lsl" | "slt" | "sltu" | "adc" | "sbc" | "mulu" | "divu" |
+          "fslt" | "fadd" | "fsub" | "fmul" | "fdiv" | "fseq"),
           Seq(o1, o2, o3),
         ) =>
       val (prefix, opcode) =
@@ -586,7 +586,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case "sub"  => (0, 9)
           case "mul"  => (0, 10)
           case "div"  => (0, 11)
-          case "rem"  => (0, 12)
+          case "cas"  => (0, 12)
           case "and"  => (0, 13)
           case "or"   => (0, 14)
           case "xor"  => (0, 15)
@@ -599,7 +599,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case "sbc"  => (1, 6)
           case "mulu" => (1, 7)
           case "divu" => (1, 8)
-          case "remu" => (1, 9)
+          // remu slot (1, 9) freed — remainder now in DIVU register pair
           case "fslt" => (1, 10)
           case "fadd" => (1, 11)
           case "fsub" => (1, 12)

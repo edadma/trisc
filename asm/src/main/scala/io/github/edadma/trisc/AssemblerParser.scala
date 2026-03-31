@@ -95,7 +95,7 @@ object AssemblerParser extends RegexParsers:
     "neg", "nop", "not",
     "or",
     "popb", "popd", "popr", "pops", "popw", "pshb", "pshd", "pshr", "pshs", "pshw",
-    "rem", "remu", "ret", "rev", "rol", "ror", "rte",
+    "cas", "ret", "rev", "rol", "ror", "rte",
     "sasid", "sbc", "sc", "seb", "ses", "sew", "sext", "sli", "slt", "sltu", "spsr", "sptbr",
     "st", "stb", "std", "sti", "sts", "stw", "sub", "susp", "swsp",
     "tlbi", "tlbia", "trap", "trapv", "tsr",

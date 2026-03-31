@@ -153,14 +153,20 @@ class DIV(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
 
   def apply(cpu: CPU): Unit =
     if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
-    else cpu.r(d).write(cpu.r(a).read / cpu.r(b).read)
+    else
+      val va = cpu.r(a).read
+      val vb = cpu.r(b).read
+      cpu.r(d).write(va / vb)
+      cpu.r((d + 1) & 7).write(va % vb)
 
-class REM(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
-  val mnemonic = "rem"
+class CAS(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
+  val mnemonic = "cas"
 
   def apply(cpu: CPU): Unit =
-    if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
-    else cpu.r(d).write(cpu.r(a).read % cpu.r(b).read)
+    val addr = cpu.r(a).read
+    val old = cpu.readLong(addr)
+    if old == cpu.r(d).read then cpu.writeLong(addr, cpu.r(b).read)
+    cpu.r(d).write(old)
 
 class AND(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "and"
@@ -243,14 +249,11 @@ class DIVU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
 
   def apply(cpu: CPU): Unit =
     if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
-    else cpu.r(d).write(java.lang.Long.divideUnsigned(cpu.r(a).read, cpu.r(b).read))
-
-class REMU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
-  val mnemonic = "remu"
-
-  def apply(cpu: CPU): Unit =
-    if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
-    else cpu.r(d).write(java.lang.Long.remainderUnsigned(cpu.r(a).read, cpu.r(b).read))
+    else
+      val va = cpu.r(a).read
+      val vb = cpu.r(b).read
+      cpu.r(d).write(java.lang.Long.divideUnsigned(va, vb))
+      cpu.r((d + 1) & 7).write(java.lang.Long.remainderUnsigned(va, vb))
 
 // Float comparison (RRR 001 block)
 

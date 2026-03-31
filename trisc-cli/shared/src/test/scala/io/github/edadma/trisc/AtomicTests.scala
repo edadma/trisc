@@ -136,4 +136,70 @@ class AtomicTests extends TestHelpers {
     cpu.r(1).read shouldBe 1
     cpu.r(4).read shouldBe 55
   }
+
+  // ===== CAS (Compare-And-Swap) =====
+
+  "cas succeeds when expected matches" in {
+    val cpu = runCPU(VECTORS +
+      """movi r3, data
+        |ldi r1, 42       ; expected
+        |ldi r2, 99       ; new value
+        |cas r1, r3, r2
+        |ldd r4, r3, r0   ; read back
+        |halt
+        |align 8
+        |data dl 42
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 42  // old value returned
+    cpu.r(4).read shouldBe 99  // memory updated
+  }
+
+  "cas fails when expected does not match" in {
+    val cpu = runCPU(VECTORS +
+      """movi r3, data
+        |ldi r1, 10       ; expected (wrong)
+        |ldi r2, 99       ; new value
+        |cas r1, r3, r2
+        |ldd r4, r3, r0   ; read back
+        |halt
+        |align 8
+        |data dl 42
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 42  // old value returned (not 10)
+    cpu.r(4).read shouldBe 42  // memory unchanged
+  }
+
+  "cas returns old value regardless of success" in {
+    val cpu = runCPU(VECTORS +
+      """movi r3, data
+        |ldi r1, 7        ; expected (wrong)
+        |ldi r2, 100
+        |cas r1, r3, r2
+        |halt
+        |align 8
+        |data dl 55
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 55  // always gets old value
+  }
+
+  "cas can be used in retry loop" in {
+    // Atomically increment data from 10 to 11
+    val cpu = runCPU(VECTORS +
+      """movi r3, data
+        |retry
+        |  ldd r1, r3, r0   ; load current value
+        |  addi r2, r1, 1   ; new = current + 1
+        |  cas r1, r3, r2   ; try swap
+        |  ; if r1 == r2 - 1, the swap succeeded (old value matches what we loaded)
+        |  addi r4, r1, 1
+        |  beq r4, r2, done
+        |  bra retry
+        |done
+        |  ldd r5, r3, r0
+        |  halt
+        |align 8
+        |data dl 10
+        |""".stripMargin)
+    cpu.r(5).read shouldBe 11
+  }
 }

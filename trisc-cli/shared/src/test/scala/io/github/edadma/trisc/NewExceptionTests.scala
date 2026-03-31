@@ -59,30 +59,6 @@ class NewExceptionTests extends TestHelpers {
     cpu.r(3).read shouldBe 77
   }
 
-  "rem by zero triggers illegal divide exception" in {
-    val cpu = runCPU(
-      """dd 0xFF0
-        |dd reset
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd handler
-        |resb 88
-        |reset
-        |  ldi r1, 42
-        |  rem r2, r1, r0
-        |  ldi r3, 99
-        |  halt
-        |handler
-        |  ldi r3, 77
-        |  halt
-        |""".stripMargin)
-    cpu.r(3).read shouldBe 77
-  }
-
   "divu by zero triggers illegal divide exception" in {
     val cpu = runCPU(
       """dd 0xFF0
@@ -98,30 +74,6 @@ class NewExceptionTests extends TestHelpers {
         |reset
         |  ldi r1, 42
         |  divu r2, r1, r0
-        |  ldi r3, 99
-        |  halt
-        |handler
-        |  ldi r3, 77
-        |  halt
-        |""".stripMargin)
-    cpu.r(3).read shouldBe 77
-  }
-
-  "remu by zero triggers illegal divide exception" in {
-    val cpu = runCPU(
-      """dd 0xFF0
-        |dd reset
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd 0
-        |dd handler
-        |resb 88
-        |reset
-        |  ldi r1, 42
-        |  remu r2, r1, r0
         |  ldi r3, 99
         |  halt
         |handler
