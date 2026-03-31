@@ -24,7 +24,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
   case class LabelSymbol(name: String, var value: Long, sym: Positional, var referenced: Boolean = false) extends Symbol
   case class ExternSymbol(name: String) extends Symbol
 
-  val lines = AssemblyParser.parseAssembly(src)
+  val lines = AssemblerParser.parseAssembly(src)
   val symbols = new mutable.LinkedHashMap[String, Symbol]
   val segments = new mutable.LinkedHashMap[String, Pass1]
   var segment = Pass1("_default_")
@@ -724,10 +724,18 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o2, "expected register as second operand")
 
       addInstruction(3 -> 6, 3 -> reg1, 3 -> reg2, 2 -> 0, 5 -> opcode)
-    case InstructionLineAST(mnemonic @ ("fpow"), Seq(o1, o2)) =>
+    case InstructionLineAST(mnemonic @ ("fpow" | "tlbi" | "tlbia" | "sptbr" | "gptbr" | "gfault" | "sasid" | "gasid" | "gfcause"), Seq(o1, o2)) =>
       val opcode =
         mnemonic match
-          case "fpow" => 0
+          case "fpow"    => 0
+          case "tlbi"    => 1
+          case "tlbia"   => 2
+          case "sptbr"   => 3
+          case "gptbr"   => 4
+          case "gfault"  => 5
+          case "sasid"   => 6
+          case "gasid"   => 7
+          case "gfcause" => 8
       val reg1 =
         fold(o1) match
           case RegisterExprAST(reg) => reg

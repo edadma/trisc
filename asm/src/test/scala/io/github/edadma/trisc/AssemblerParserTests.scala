@@ -3,10 +3,10 @@ package io.github.edadma.trisc
 import org.scalatest.freespec.AnyFreeSpec
 import org.scalatest.matchers.should.Matchers
 
-class AssemblyParserTests extends AnyFreeSpec with Matchers {
+class AssemblerParserTests extends AnyFreeSpec with Matchers {
 
-  def parse(s: String): Seq[LineAST] = AssemblyParser.parseAssembly(s)
-  def parseExpr(s: String): ExprAST = AssemblyParser.parseExpression(s)
+  def parse(s: String): Seq[LineAST] = AssemblerParser.parseAssembly(s)
+  def parseExpr(s: String): ExprAST = AssemblerParser.parseExpression(s)
 
   // ===== Word boundaries =====
 
