@@ -111,7 +111,7 @@ object AssemblerParser extends RegexParsers:
 
   // --- Directives ---
 
-  private val directiveSet = Set("align", "db", "dd", "dl", "ds", "dw", "entry", "equ", "extern", "global", "include", "resb", "resd", "resl", "ress", "resw", "segment")
+  private val directiveSet = Set("align", "db", "dd", "dl", "ds", "dw", "entry", "equ", "extern", "global", "include", "rb", "rd", "rl", "rs", "rw", "segment")
 
   private val segment: Parser[SegmentLineAST] = kw("segment") ~> ident ^^ SegmentLineAST.apply
 
@@ -170,12 +170,12 @@ object AssemblerParser extends RegexParsers:
     }
 
   private val reserve: Parser[ReserveLineAST] =
-    (kw("resb") | kw("ress") | kw("resw") | kw("resl") | kw("resd")) ~ expression ^^ {
-      case "resb" ~ n => ReserveLineAST(1, n)
-      case "ress" ~ n => ReserveLineAST(2, n)
-      case "resw" ~ n => ReserveLineAST(4, n)
-      case "resl" ~ n => ReserveLineAST(8, n)
-      case "resd" ~ n => ReserveLineAST(0, n)
+    (kw("rb") | kw("rs") | kw("rw") | kw("rl") | kw("rd")) ~ expression ^^ {
+      case "rb" ~ n => ReserveLineAST(1, n)
+      case "rs" ~ n => ReserveLineAST(2, n)
+      case "rw" ~ n => ReserveLineAST(4, n)
+      case "rl" ~ n => ReserveLineAST(8, n)
+      case "rd" ~ n => ReserveLineAST(0, n)
       case other ~ _ => sys.error(s"unexpected reserve directive: $other")
     }
 

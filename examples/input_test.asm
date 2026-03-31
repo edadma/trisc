@@ -12,7 +12,7 @@ MOUSE    = 0x10002A
   dl 0x0FFF8           ; initial SSP
   dl _start            ; initial PC
   dl _fault            ; interrupt
-  resb 136             ; remaining vectors
+  rb 136             ; remaining vectors
 
 _start
   ; Print banner

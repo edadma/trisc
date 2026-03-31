@@ -166,9 +166,17 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           )
 
     case ReserveLineAST(width, n) =>
+      val effectiveWidth = if width == 0 then 8 else width
+      if effectiveWidth >= 2 then
+        val align = effectiveWidth.min(8)
+        val pad = ((align - (segment.size % align)) % align).toInt
+        if pad > 0 then
+          for name <- segment.symbols if symbols(name).isInstanceOf[LabelSymbol] && symbols(name).asInstanceOf[LabelSymbol].value == segment.size do
+            symbols(name).asInstanceOf[LabelSymbol].value += pad
+          segment.size += pad
       fold(n, absolute = true) match
         case LongExprAST(count) if 0 < count && count <= 10 * 1024 * 1024 =>
-          segment.size += count.toInt * (if width == 0 then 8 else width)
+          segment.size += count.toInt * effectiveWidth
         case _ => problem(n, s"must be a positive integer up to 10 meg")
 
     case InstructionLineAST(mnemonic, operands) =>
@@ -493,10 +501,11 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
 
       // No automatic padding — use explicit 'align' directives when needed
     case ReserveLineAST(width, n) =>
+      val ew = if width == 0 then 8 else width
+      if ew >= 2 then autoAlign(ew.min(8))
       fold(n, absolute = true) match
         case LongExprAST(count) if 0 < count && count <= 10 * 1024 * 1024 =>
-          val size = count * (if width == 0 then 8 else width)
-          builder.addRes(size.toInt)
+          builder.addRes((count * ew).toInt)
         case _ => problem(n, s"must be a positive integer up to 10 meg")
     case InstructionLineAST(mnemonic @ ("auipc"), Seq(o1, o2)) =>
       val reg =

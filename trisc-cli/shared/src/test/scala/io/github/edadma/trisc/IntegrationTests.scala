@@ -7,7 +7,7 @@ class IntegrationTests extends TestHelpers {
       """STDOUT = 0xFF8
         |dd 0xFF0
         |dd 160
-        |resb 144
+        |rb 144
         |ldi r1, 1
         |movi r3, STDOUT
         |loop
@@ -54,7 +54,7 @@ class IntegrationTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd trap0
-        |resb 80
+        |rb 80
         |reset
         |  ldi r1, 2
         |  spsr r1
@@ -86,7 +86,7 @@ class IntegrationTests extends TestHelpers {
         |  rte
         |
         |segment bss
-        |buf resb 20
+        |buf rb 20
         |""".stripMargin,
       memSize = 0x2000)
     output shouldBe "123"

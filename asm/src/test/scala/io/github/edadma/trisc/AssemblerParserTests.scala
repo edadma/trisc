@@ -384,8 +384,8 @@ class AssemblerParserTests extends AnyFreeSpec with Matchers {
     data.data.head.asInstanceOf[DoubleExprAST].n shouldBe 3.14
   }
 
-  "resb directive" in {
-    val result = parse("resb 100\n")
+  "rb directive" in {
+    val result = parse("rb 100\n")
     val res = result.head.asInstanceOf[ReserveLineAST]
     res.width shouldBe 1
     res.n.asInstanceOf[LongExprAST].n shouldBe 100
@@ -461,7 +461,7 @@ class AssemblerParserTests extends AnyFreeSpec with Matchers {
     val result = parse(
       """dd 0xFF0
         |dd 160
-        |resb 144
+        |rb 144
         |ldi r1, 42
         |halt
         |""".stripMargin)

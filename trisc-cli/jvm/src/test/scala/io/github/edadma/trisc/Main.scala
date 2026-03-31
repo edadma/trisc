@@ -180,7 +180,7 @@ import pprint.pprintln
       |trap0error db "unknown operation",0
       |
       |segment bss
-      |buf resb 20
+      |buf rb 20
       |  """.stripMargin,
     orgs = Map("bss" -> 0x1000),
   )
@@ -272,7 +272,7 @@ import pprint.pprintln
 //      |trap0error db "unknown operation",0
 //      |
 //      |segment bss
-//      |buf resb 20
+//      |buf rb 20
 //      |  """.stripMargin,
 //    orgs = Map("bss" -> 0x1000),
 //  )

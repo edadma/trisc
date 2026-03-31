@@ -62,7 +62,7 @@ class ImmediateTests extends TestHelpers {
       """STDOUT = 0xFF8
         |dd 0xFF0
         |dd 160
-        |resb 144
+        |rb 144
         |movi r1, STDOUT
         |sti r1, 'A'
         |halt
@@ -75,7 +75,7 @@ class ImmediateTests extends TestHelpers {
       """STDOUT = 0xFF8
         |dd 0xFF0
         |dd 160
-        |resb 144
+        |rb 144
         |movi r1, STDOUT
         |sti r1, 'H'
         |sti r1, 'i'

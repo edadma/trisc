@@ -93,11 +93,11 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit(s"$name:")
             typ match
               case SyslType.ArrayType(elem, count) =>
-                emit(s"  resb ${stackSize(elem) * count}")
+                emit(s"  rb ${stackSize(elem) * count}")
               case _: SyslType.StructType =>
-                emit(s"  resb ${stackSize(typ)}")
+                emit(s"  rb ${stackSize(typ)}")
               case _ =>
-                emit(s"  resb ${stackSize(typ)}")
+                emit(s"  rb ${stackSize(typ)}")
           case _ =>
 
     out.toString

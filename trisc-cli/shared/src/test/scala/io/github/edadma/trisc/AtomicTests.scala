@@ -80,7 +80,7 @@ class AtomicTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd handler
-        |resb 80
+        |rb 80
         |reset
         |  ldi r1, 2
         |  spsr r1

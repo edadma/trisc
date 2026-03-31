@@ -11,7 +11,7 @@ trait TestHelpers extends AnyFreeSpec with Matchers {
     """
       |dd 0xFF0
       |dd 160
-      |resb 144
+      |rb 144
       |""".stripMargin
 
   def mkCPU(program: String, memSize: Int = 0x1000, addresses: Int = 4): (CPU, StringBuilder) =

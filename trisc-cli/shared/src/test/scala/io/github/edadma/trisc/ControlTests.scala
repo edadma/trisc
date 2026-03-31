@@ -63,7 +63,7 @@ class ControlTests extends TestHelpers {
       """STDOUT = 0xFF8
         |dd 0xFF0
         |dd 160
-        |resb 144
+        |rb 144
         |ldi r2, 'A'
         |movi r1, printChar
         |jalr r7, r1

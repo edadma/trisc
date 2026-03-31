@@ -249,7 +249,7 @@ class AssemblerTests extends TestHelpers {
   "global exports label with data type" in {
     val tof = assemble(
       """global buf, data
-        |buf resb 16
+        |buf rb 16
         |""".stripMargin, relocatable = true)
     val sym = tof.symbolByName("buf").get
     sym.typ shouldBe SymbolType.Data
@@ -258,7 +258,7 @@ class AssemblerTests extends TestHelpers {
   "global exports label with data type and size" in {
     val tof = assemble(
       """global buf, data, 256
-        |buf resb 256
+        |buf rb 256
         |""".stripMargin, relocatable = true)
     val sym = tof.symbolByName("buf").get
     sym.typ shouldBe SymbolType.Data
@@ -282,7 +282,7 @@ class AssemblerTests extends TestHelpers {
   "global with hex size" in {
     val tof = assemble(
       """global buf, data, 0x100
-        |buf resb 256
+        |buf rb 256
         |""".stripMargin, relocatable = true)
     val sym = tof.symbolByName("buf").get
     sym.size shouldBe Some(256)

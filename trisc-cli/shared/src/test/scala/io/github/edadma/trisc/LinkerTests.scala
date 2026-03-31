@@ -15,7 +15,7 @@ class LinkerTests extends TestHelpers {
     val main = assemble(
       """dd 0xFF0
         |dd start
-        |resb 144
+        |rb 144
         |start
         |  movi r1, helper
         |  jalr r7, r1
@@ -118,7 +118,7 @@ class LinkerTests extends TestHelpers {
     val main = assemble(
       """dd 0xFF0
         |dl start
-        |resb 144
+        |rb 144
         |nop
         |""".stripMargin, relocatable = true)
     val code = assemble(
@@ -203,7 +203,7 @@ class LinkerTests extends TestHelpers {
       """STDOUT = 0xFF8
         |dd 0xFF0
         |dd start
-        |resb 144
+        |rb 144
         |start
         |  movi r7, 0xF00
         |  movi r1, printA
@@ -409,7 +409,7 @@ class LinkerTests extends TestHelpers {
     val boot = assemble(
       """dd 0xFF0
         |dd main
-        |resb 144
+        |rb 144
         |""".stripMargin, relocatable = true)
     val prog = assemble(
       """global main, func
@@ -586,7 +586,7 @@ class LinkerTests extends TestHelpers {
       """extern main
         |dd 0x1F00
         |dd _start
-        |resb 144
+        |rb 144
         |global _start, func
         |entry _start
         |_start

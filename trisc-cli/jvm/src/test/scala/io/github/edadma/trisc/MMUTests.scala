@@ -300,7 +300,7 @@ class MMUTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
-        |resb 88
+        |rb 88
         |reset
         |  movi r3, 0x2000
         |  ldb r1, r3, r0
@@ -376,7 +376,7 @@ class MMUTests extends TestHelpers {
         |dd 0
         |dd privhandler
         |dd 0
-        |resb 88
+        |rb 88
         |reset
         |  movi r1, 0xE00
         |  susp r1

@@ -50,7 +50,7 @@ class AlignmentTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
-        |resb 88
+        |rb 88
         |reset
         |  ldi r1, 2
         |  spsr r1
@@ -61,7 +61,7 @@ class AlignmentTests extends TestHelpers {
         |  halt
         |handler
         |  rte
-        |buf resb 8
+        |buf rb 8
         |""".stripMargin)
     // lds faults, handler rte returns to instruction after lds, r1 gets set to 42
     cpu.r(1).read shouldBe 42
@@ -80,7 +80,7 @@ class AlignmentTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
-        |resb 88
+        |rb 88
         |reset
         |  ldi r1, 2
         |  spsr r1
@@ -92,7 +92,7 @@ class AlignmentTests extends TestHelpers {
         |handler
         |  rte
         |align 4
-        |buf resb 8
+        |buf rb 8
         |""".stripMargin)
     cpu.r(1).read shouldBe 42
     cpu.r(3).read shouldBe 0
@@ -109,7 +109,7 @@ class AlignmentTests extends TestHelpers {
         |dd 0
         |dd 0
         |dd 0
-        |resb 88
+        |rb 88
         |reset
         |  ldi r1, 2
         |  spsr r1
@@ -121,7 +121,7 @@ class AlignmentTests extends TestHelpers {
         |handler
         |  rte
         |align 8
-        |buf resb 16
+        |buf rb 16
         |""".stripMargin)
     cpu.r(1).read shouldBe 42
     cpu.r(3).read shouldBe 0
@@ -134,7 +134,7 @@ class AlignmentTests extends TestHelpers {
         |stb r2, r1, r0
         |ldb r3, r1, r0
         |halt
-        |buf resb 4
+        |buf rb 4
         |""".stripMargin)
     cpu.r(3).read shouldBe 0x42
     cpu.state shouldBe State.Halt // no exception
@@ -148,7 +148,7 @@ class AlignmentTests extends TestHelpers {
         |ldw r3, r1, r0
         |halt
         |align 4
-        |buf resb 4
+        |buf rb 4
         |""".stripMargin)
     cpu.r(3).read shouldBe 42
     cpu.state shouldBe State.Halt
@@ -162,7 +162,86 @@ class AlignmentTests extends TestHelpers {
         |ldd r3, r1, r0
         |halt
         |align 8
-        |buf resb 8
+        |buf rb 8
+        |""".stripMargin)
+    cpu.r(3).read shouldBe 42
+    cpu.state shouldBe State.Halt
+  }
+
+  // ===== Reserve directive auto-alignment =====
+
+  "rs auto-aligns to 2-byte boundary" in {
+    val tof = assemble("db 0x01\nrs 1\ndb 0x42\n")
+    val ram = new RAM(0, 256)
+    tof.load(ram)
+    ram.readByteUnsigned(0) shouldBe 0x01
+    // db at 0, pad byte at 1, rs 1 = 2 bytes at 2-3, db at 4
+    ram.readByteUnsigned(4) shouldBe 0x42
+  }
+
+  "rw auto-aligns to 4-byte boundary" in {
+    val tof = assemble("db 0x01\nrw 1\ndb 0x42\n")
+    val ram = new RAM(0, 256)
+    tof.load(ram)
+    ram.readByteUnsigned(0) shouldBe 0x01
+    // db at 0, pad 3 bytes, rw 1 = 4 bytes at 4-7, db at 8
+    ram.readByteUnsigned(8) shouldBe 0x42
+  }
+
+  "rl auto-aligns to 8-byte boundary" in {
+    val tof = assemble("db 0x01\nrl 1\ndb 0x42\n")
+    val ram = new RAM(0, 256)
+    tof.load(ram)
+    ram.readByteUnsigned(0) shouldBe 0x01
+    // db at 0, pad 7 bytes, rl 1 = 8 bytes at 8-15, db at 16
+    ram.readByteUnsigned(16) shouldBe 0x42
+  }
+
+  "rb does not auto-align" in {
+    val tof = assemble("db 0x01\nrb 2\ndb 0x42\n")
+    val ram = new RAM(0, 256)
+    tof.load(ram)
+    ram.readByteUnsigned(0) shouldBe 0x01
+    // db at 0, rb 2 at 1-2, db at 3
+    ram.readByteUnsigned(3) shouldBe 0x42
+  }
+
+  "rw when already aligned adds no padding" in {
+    val tof = assemble("dw 0\nrw 1\ndb 0x42\n")
+    val ram = new RAM(0, 256)
+    tof.load(ram)
+    // dw at 0-3, rw 1 at 4-7 (already aligned), db at 8
+    ram.readByteUnsigned(8) shouldBe 0x42
+  }
+
+  "rw auto-align updates preceding label" in {
+    val tof = assemble("db 0x01\nbuf rw 1\ndb 0x42\n", relocatable = true)
+    val sym = tof.symbolByName("buf").get
+    // db at 0, pad to 4, buf label at 4
+    sym.offset shouldBe 4
+  }
+
+  "rw usable for aligned word buffer" in {
+    val cpu = runCPU(VECTORS +
+      """movi r1, buf
+        |ldi r2, 42
+        |stw r2, r1, r0
+        |ldw r3, r1, r0
+        |halt
+        |buf rw 1
+        |""".stripMargin)
+    cpu.r(3).read shouldBe 42
+    cpu.state shouldBe State.Halt
+  }
+
+  "rl usable for aligned double buffer" in {
+    val cpu = runCPU(VECTORS +
+      """movi r1, buf
+        |ldi r2, 42
+        |std r2, r1, r0
+        |ldd r3, r1, r0
+        |halt
+        |buf rl 1
         |""".stripMargin)
     cpu.r(3).read shouldBe 42
     cpu.state shouldBe State.Halt
