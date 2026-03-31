@@ -133,16 +133,29 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
     case CommentLineAST(_) => // pass 1: skip comments
     case AlignLineAST(alignment) =>
       val pad = ((alignment - (segment.size % alignment)) % alignment).toInt
-      segment.size += pad
+      if pad > 0 then
+        for name <- segment.symbols if symbols(name).isInstanceOf[LabelSymbol] && symbols(name).asInstanceOf[LabelSymbol].value == segment.size do
+          symbols(name).asInstanceOf[LabelSymbol].value += pad
+        segment.size += pad
     case DataLineAST(width, Nil) =>
-      if width >= 2 then
-        val align = width.min(8)
-        segment.size += ((align - (segment.size % align)) % align).toInt
-      segment.size += (if width == 0 then 8 else width)
+      val effectiveWidth = if width == 0 then 8 else width
+      if effectiveWidth >= 2 then
+        val align = effectiveWidth.min(8)
+        val pad = ((align - (segment.size % align)) % align).toInt
+        if pad > 0 then
+          for name <- segment.symbols if symbols(name).isInstanceOf[LabelSymbol] && symbols(name).asInstanceOf[LabelSymbol].value == segment.size do
+            symbols(name).asInstanceOf[LabelSymbol].value += pad
+          segment.size += pad
+      segment.size += effectiveWidth
     case DataLineAST(width, data) =>
-      if width >= 2 then
-        val align = width.min(8)
-        segment.size += ((align - (segment.size % align)) % align).toInt
+      val effectiveWidth = if width == 0 then 8 else width
+      if effectiveWidth >= 2 then
+        val align = effectiveWidth.min(8)
+        val pad = ((align - (segment.size % align)) % align).toInt
+        if pad > 0 then
+          for name <- segment.symbols if symbols(name).isInstanceOf[LabelSymbol] && symbols(name).asInstanceOf[LabelSymbol].value == segment.size do
+            symbols(name).asInstanceOf[LabelSymbol].value += pad
+          segment.size += pad
 
       for d <- data do
         locals(d)
@@ -394,10 +407,12 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
       val pad = ((alignment - (builder.length % alignment)) % alignment).toInt
       for _ <- 0 until pad do builder += 0.toByte
     case DataLineAST(width, Nil) =>
-      if width >= 2 then autoAlign(width.min(8))
-      builder ++= (if width == 0 then Seq.fill(8)(0) else Seq.fill(width)(0))
+      val ew = if width == 0 then 8 else width
+      if ew >= 2 then autoAlign(ew.min(8))
+      builder ++= Seq.fill(ew)(0)
     case DataLineAST(width, data) =>
-      if width >= 2 then autoAlign(width.min(8))
+      val ew = if width == 0 then 8 else width
+      if ew >= 2 then autoAlign(ew.min(8))
       val startingLength = builder.length
 
       for d <- data do

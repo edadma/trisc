@@ -9,7 +9,6 @@ class AtomicTests extends TestHelpers {
       """movi r3, data
         |ll r1, r3
         |halt
-        |align 8
         |data dd 42
         |""".stripMargin)
     cpu.r(1).read shouldBe 42
@@ -21,7 +20,6 @@ class AtomicTests extends TestHelpers {
         |ll r1, r3
         |sc r1, r3
         |halt
-        |align 8
         |data dd 42
         |""".stripMargin)
     cpu.r(1).read shouldBe 1
@@ -37,7 +35,6 @@ class AtomicTests extends TestHelpers {
         |sc r1, r3
         |ldd r4, r3, r0
         |halt
-        |align 8
         |data dd 42
         |""".stripMargin)
     cpu.r(1).read shouldBe 1
@@ -50,7 +47,6 @@ class AtomicTests extends TestHelpers {
         |ldi r1, 99
         |sc r1, r3
         |halt
-        |align 8
         |data dd 42
         |""".stripMargin)
     cpu.r(1).read shouldBe 0
@@ -66,7 +62,6 @@ class AtomicTests extends TestHelpers {
         |ldi r1, 55
         |sc r1, r3
         |halt
-        |align 8
         |data dd 42
         |""".stripMargin)
     cpu.r(2).read shouldBe 1
@@ -97,7 +92,6 @@ class AtomicTests extends TestHelpers {
         |  halt
         |handler
         |  rte
-        |align 8
         |data dd 42
         |""".stripMargin)
     cpu.r(1).read shouldBe 0
@@ -113,7 +107,6 @@ class AtomicTests extends TestHelpers {
         |sc r1, r3
         |ldd r4, r3, r0
         |halt
-        |align 8
         |data dd 7
         |""".stripMargin)
     cpu.r(1).read shouldBe 1
@@ -130,7 +123,6 @@ class AtomicTests extends TestHelpers {
         |  beq r1, r0, retry
         |ldd r4, r3, r0
         |halt
-        |align 8
         |data dd 10
         |""".stripMargin)
     cpu.r(1).read shouldBe 1
@@ -147,7 +139,6 @@ class AtomicTests extends TestHelpers {
         |cas r1, r3, r2
         |ldd r4, r3, r0   ; read back
         |halt
-        |align 8
         |data dl 42
         |""".stripMargin)
     cpu.r(1).read shouldBe 42  // old value returned
@@ -162,7 +153,6 @@ class AtomicTests extends TestHelpers {
         |cas r1, r3, r2
         |ldd r4, r3, r0   ; read back
         |halt
-        |align 8
         |data dl 42
         |""".stripMargin)
     cpu.r(1).read shouldBe 42  // old value returned (not 10)
@@ -176,7 +166,6 @@ class AtomicTests extends TestHelpers {
         |ldi r2, 100
         |cas r1, r3, r2
         |halt
-        |align 8
         |data dl 55
         |""".stripMargin)
     cpu.r(1).read shouldBe 55  // always gets old value
@@ -197,7 +186,6 @@ class AtomicTests extends TestHelpers {
         |done
         |  ldd r5, r3, r0
         |  halt
-        |align 8
         |data dl 10
         |""".stripMargin)
     cpu.r(5).read shouldBe 11

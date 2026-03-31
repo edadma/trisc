@@ -7,7 +7,7 @@ class FloatTests extends TestHelpers {
     s"movi $reg, $label\nldd $reg, $reg, r0\n"
 
   private def floatProg(body: String, consts: String): String =
-    VECTORS + body + "halt\nalign 8\n" + consts
+    VECTORS + body + "halt\n" + consts
 
   // ===== FADD =====
 
