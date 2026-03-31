@@ -182,7 +182,8 @@ class CPU(mem: Addressable, tick: Seq[CPU => Unit] = Nil, mpu: Option[MPU] = Non
     set(Status.V, false)
 
   def interrupt(): Unit =
-    if !test(Status.Ind) then state = State.Interrupt
+    if !test(Status.Ind) && (state == State.Run || state == State.Wfi) then
+      state = State.Interrupt
 
   private def enterException(): Unit =
     if inException then

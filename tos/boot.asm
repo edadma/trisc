@@ -24,12 +24,12 @@ segment vectors
   dl 0x0FFFF8              ; Slot 0:  Initial SSP (kernel stack top, below devices)
   dl boot                  ; Slot 1:  Initial PC
   dl irq_handler           ; Slot 2:  Interrupt
-  dl default_isr           ; Slot 3:  InstructionAccess
-  dl default_isr           ; Slot 4:  DataAccess
-  dl default_isr           ; Slot 5:  MisalignedAccess
-  dl default_isr           ; Slot 6:  UnimplementedOpcode
-  dl default_isr           ; Slot 7:  PrivilegeViolation
-  dl default_isr           ; Slot 8:  IllegalDivide
+  dl isr_insn_access       ; Slot 3:  InstructionAccess
+  dl isr_data_access       ; Slot 4:  DataAccess
+  dl isr_misaligned        ; Slot 5:  MisalignedAccess
+  dl isr_unimpl            ; Slot 6:  UnimplementedOpcode
+  dl isr_priv              ; Slot 7:  PrivilegeViolation
+  dl isr_divzero           ; Slot 8:  IllegalDivide
   dl trap_handler          ; Slot 9:  Trap0
   dl trap_handler          ; Slot 10: Trap1
   dl trap_handler          ; Slot 11: Trap2
@@ -806,7 +806,54 @@ atomic_inc
 ; default_isr — Unhandled Exception Handler
 ; ============================================================================
 
-global default_isr, func
+; --- Per-exception-type ISR handlers ---
+; Each prints a unique marker to STDOUT so we know which exception fired.
 
+global isr_insn_access, func
+isr_insn_access
+  movi r2, STDOUT
+  ldi  r1, 73            ; 'I' = InstructionAccess
+  stb  r1, r2, r0
+  halt
+
+global isr_data_access, func
+isr_data_access
+  movi r2, STDOUT
+  ldi  r1, 68            ; 'D' = DataAccess
+  stb  r1, r2, r0
+  halt
+
+global isr_misaligned, func
+isr_misaligned
+  movi r2, STDOUT
+  ldi  r1, 65            ; 'A' = MisalignedAccess
+  stb  r1, r2, r0
+  halt
+
+global isr_unimpl, func
+isr_unimpl
+  movi r2, STDOUT
+  ldi  r1, 85            ; 'U' = UnimplementedOpcode
+  stb  r1, r2, r0
+  halt
+
+global isr_priv, func
+isr_priv
+  movi r2, STDOUT
+  ldi  r1, 80            ; 'P' = PrivilegeViolation
+  stb  r1, r2, r0
+  halt
+
+global isr_divzero, func
+isr_divzero
+  movi r2, STDOUT
+  ldi  r1, 90            ; 'Z' = IllegalDivide
+  stb  r1, r2, r0
+  halt
+
+global default_isr, func
 default_isr
+  movi r2, STDOUT
+  ldi  r1, 63            ; '?' = Unknown exception
+  stb  r1, r2, r0
   halt
