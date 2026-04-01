@@ -134,13 +134,16 @@ class SyslParser extends StandardTokenParsers {
     "asm" ~> "(" ~> stringLit <~ ")" ^^ AsmStmtAST.apply
 
   lazy val stmt: Parser[StmtAST] =
-    asmStmt | forStmt | doWhileStmt | whileStmt | returnStmt | breakStmt | continueStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+    asmStmt | forStmt | doWhileStmt | whileStmt | returnStmt | breakStmt | continueStmt | deferStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
 
   lazy val breakStmt: Parser[BreakStmtAST] =
     "break" ^^^ BreakStmtAST()
 
   lazy val continueStmt: Parser[ContinueStmtAST] =
     "continue" ^^^ ContinueStmtAST()
+
+  lazy val deferStmt: Parser[DeferStmtAST] =
+    "defer" ~> (derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply) ^^ DeferStmtAST.apply
 
   lazy val compoundOp: Parser[String] =
     "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^="

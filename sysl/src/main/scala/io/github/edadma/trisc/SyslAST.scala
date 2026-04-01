@@ -37,6 +37,7 @@ case class ForStmtAST(init: StmtAST, cond: ExpressionAST, update: StmtAST, body:
 case class DoWhileStmtAST(cond: ExpressionAST, body: List[StmtAST]) extends StmtAST
 case class BreakStmtAST() extends StmtAST
 case class ContinueStmtAST() extends StmtAST
+case class DeferStmtAST(body: StmtAST) extends StmtAST
 case class AsmStmtAST(code: String) extends StmtAST
 case class ExprStmtAST(expr: ExpressionAST) extends StmtAST
 

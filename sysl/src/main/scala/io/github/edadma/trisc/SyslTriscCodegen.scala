@@ -223,6 +223,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     currentFunction = fun
     locals = new mutable.LinkedHashMap
     stackOffset = 0
+    deferStack.clear()
 
     emit(s"# function: ${fun.name}")
     emit(s"${fun.name}:")
@@ -256,6 +257,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     fun.body match
       case TExprBody(expr) =>
         genExpr(expr) // result in r1
+        emitDefers()
         emitEpilogue()
       case TBlockBody(stmts) =>
         genBlock(stmts)
@@ -269,14 +271,17 @@ class SyslTriscCodegen(addresses: Int = 4):
       stmts.last match
         case TExprStmt(expr) =>
           genExpr(expr) // result in r1
+          emitDefers()
           emitEpilogue()
         case other =>
           genStmt(other)
           // If no explicit return, return 0
           emit("  ldi r1, 0")
+          emitDefers()
           emitEpilogue()
     else
       emit("  ldi r1, 0")
+      emitDefers()
       emitEpilogue()
 
   // Emit binary operation: r1 = r1 op r3
@@ -293,6 +298,13 @@ class SyslTriscCodegen(addresses: Int = 4):
       case "<<" => emit("  lsl r1, r1, r3")
       case ">>" => emit("  asr r1, r1, r3")
 
+  private def emitDefers(): Unit =
+    if deferStack.nonEmpty then
+      emit("  pshd r1") // save return value
+      for stmt <- deferStack.reverseIterator do
+        genStmt(stmt)
+      emit("  popd r1") // restore return value
+
   private def emitEpilogue(): Unit =
     emit("  mov r7, r5")
     emit("  popd r5")
@@ -306,6 +318,9 @@ class SyslTriscCodegen(addresses: Int = 4):
   // Break/continue label stacks
   private val breakLabels = new mutable.Stack[String]
   private val continueLabels = new mutable.Stack[String]
+
+  // Defer stack — deferred statements executed in LIFO order before return/epilogue
+  private val deferStack = new mutable.ArrayBuffer[TStmt]
 
   private def genStmt(stmt: TStmt): Unit =
     stmt match
@@ -411,11 +426,16 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TReturnStmt(Some(value)) =>
         genExpr(value) // result in r1
+        emitDefers()
         emitEpilogue()
 
       case TReturnStmt(None) =>
         emit("  ldi r1, 0")
+        emitDefers()
         emitEpilogue()
+
+      case TDeferStmt(body) =>
+        deferStack += body
 
       case TExprStmt(expr) =>
         genExpr(expr) // result in r1, discarded

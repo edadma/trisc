@@ -22,6 +22,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   case class RuntimeError(msg: String) extends RuntimeException(msg)
 
   private type Env = mutable.LinkedHashMap[String, Cell]
+  private val deferStack = new mutable.ArrayBuffer[(TStmt, Env)]
 
   private def toLong(v: Value): Long = v match
     case IntVal(n)    => n
@@ -71,19 +72,36 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case Some(main) => toLong(call(main, Nil))
       case None => throw RuntimeError("no main function")
 
+  private def runDefers(savedDefers: mutable.ArrayBuffer[(TStmt, Env)]): Unit =
+    for (stmt, env) <- savedDefers.reverseIterator do
+      exec(stmt, env)
+
   private def call(fun: TFunDecl, args: List[Value]): Value =
     val env: Env = new mutable.LinkedHashMap
+    val savedSize = deferStack.size
 
     for (param, arg) <- fun.params.zip(args) do
       env(param.name) = new Cell(arg)
 
-    fun.body match
-      case TExprBody(expr) => evalAny(expr, env)
-      case TBlockBody(stmts) =>
-        try
-          evalBlock(stmts, env)
-        catch
-          case ReturnException(v) => v
+    try
+      val result = fun.body match
+        case TExprBody(expr) => evalAny(expr, env)
+        case TBlockBody(stmts) =>
+          try
+            evalBlock(stmts, env)
+          catch
+            case ReturnException(v) => v
+      val defers = deferStack.slice(savedSize, deferStack.size)
+      runDefers(defers)
+      deferStack.trimEnd(deferStack.size - savedSize)
+      result
+    catch
+      case e: ReturnException => throw e // should not happen — caught above
+      case e: Throwable =>
+        val defers = deferStack.slice(savedSize, deferStack.size)
+        runDefers(defers)
+        deferStack.trimEnd(deferStack.size - savedSize)
+        throw e
 
   private def evalBlock(stmts: List[TStmt], env: Env): Value =
     if stmts.nonEmpty then
@@ -190,6 +208,9 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TReturnStmt(value) =>
         throw ReturnException(value.map(evalAny(_, env)).getOrElse(IntVal(0)))
+
+      case TDeferStmt(body) =>
+        deferStack += ((body, env))
 
       case TForStmt(init, cond, update, body) =>
         exec(init, env)
