@@ -517,6 +517,196 @@ class SyslCodegenStructTests extends SyslCodegenHelpers {
         |""".stripMargin) shouldBe 42
   }
 
+  // ===== Alignment / padding tests =====
+
+  "mixed width fields: i8 then i32" in {
+    compileAndRun(
+      """struct S
+        |    a: i8
+        |    b: i32
+        |
+        |var s: S
+        |
+        |main() -> int
+        |    var p: *S = &s
+        |    p.a = 1
+        |    p.b = 100
+        |    p.a + p.b
+        |""".stripMargin) shouldBe 101
+  }
+
+  "mixed width fields: i8 i16 i32 i64" in {
+    compileAndRun(
+      """struct Mixed
+        |    a: i8
+        |    b: i16
+        |    c: i32
+        |    d: i64
+        |
+        |var m: Mixed
+        |
+        |main() -> int
+        |    var p: *Mixed = &m
+        |    p.a = 1
+        |    p.b = 2
+        |    p.c = 3
+        |    p.d = 4
+        |    int(p.a + p.b + p.c + p.d)
+        |""".stripMargin) shouldBe 10
+  }
+
+  "mixed width: i32 then i8 then i32" in {
+    compileAndRun(
+      """struct S
+        |    x: i32
+        |    flag: i8
+        |    y: i32
+        |
+        |var s: S
+        |
+        |main() -> int
+        |    var p: *S = &s
+        |    p.x = 10
+        |    p.flag = 1
+        |    p.y = 31
+        |    p.x + p.flag + p.y
+        |""".stripMargin) shouldBe 42
+  }
+
+  "i64 then i8 then i64 alignment" in {
+    compileAndRun(
+      """struct S
+        |    big1: i64
+        |    small: i8
+        |    big2: i64
+        |
+        |var s: S
+        |
+        |main() -> int
+        |    var p: *S = &s
+        |    p.big1 = 100
+        |    p.small = 5
+        |    p.big2 = 200
+        |    int(p.big1 + p.small + p.big2)
+        |""".stripMargin) shouldBe 305
+  }
+
+  "bool field alignment" in {
+    compileAndRun(
+      """struct S
+        |    flag: bool
+        |    value: int
+        |
+        |var s: S
+        |
+        |main() -> int
+        |    var p: *S = &s
+        |    p.flag = true
+        |    p.value = 41
+        |    int(p.flag) + p.value
+        |""".stripMargin) shouldBe 42
+  }
+
+  "multiple i8 fields before i32" in {
+    compileAndRun(
+      """struct S
+        |    a: i8
+        |    b: i8
+        |    c: i8
+        |    d: i32
+        |
+        |var s: S
+        |
+        |main() -> int
+        |    var p: *S = &s
+        |    p.a = 1
+        |    p.b = 2
+        |    p.c = 3
+        |    p.d = 100
+        |    p.a + p.b + p.c + p.d
+        |""".stripMargin) shouldBe 106
+  }
+
+  "u8 u16 u32 unsigned field alignment" in {
+    compileAndRun(
+      """struct S
+        |    a: u8
+        |    b: u16
+        |    c: u32
+        |
+        |var s: S
+        |
+        |main() -> int
+        |    var p: *S = &s
+        |    p.a = 10
+        |    p.b = 20
+        |    p.c = 12
+        |    int(p.a) + int(p.b) + int(p.c)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "sizeof matches expected layout" in {
+    compileAndRun(
+      """struct Mixed
+        |    a: i8
+        |    b: i16
+        |    c: i32
+        |    d: i64
+        |
+        |main() -> int = sizeof(Mixed)
+        |""".stripMargin) shouldBe 16
+  }
+
+  "sizeof with trailing padding" in {
+    compileAndRun(
+      """struct S
+        |    big: i64
+        |    small: i8
+        |
+        |main() -> int = sizeof(S)
+        |""".stripMargin) shouldBe 16  // 8 + 1 + 7 pad to align to 8
+  }
+
+  "array of padded structs: second element aligned" in {
+    compileAndRun(
+      """struct S
+        |    big: i64
+        |    small: i8
+        |
+        |var arr: [2]S
+        |
+        |main() -> int
+        |    arr[0].big = 100
+        |    arr[0].small = 1
+        |    arr[1].big = 200
+        |    arr[1].small = 2
+        |    int(arr[0].big + arr[1].big) + arr[0].small + arr[1].small
+        |""".stripMargin) shouldBe 303
+  }
+
+  "array of mixed-width structs" in {
+    compileAndRun(
+      """struct Entry
+        |    flag: i8
+        |    value: i32
+        |    id: i64
+        |
+        |var entries: [3]Entry
+        |
+        |main() -> int
+        |    entries[0].flag = 1
+        |    entries[0].value = 10
+        |    entries[0].id = 100
+        |    entries[1].flag = 2
+        |    entries[1].value = 20
+        |    entries[1].id = 200
+        |    entries[2].flag = 3
+        |    entries[2].value = 30
+        |    entries[2].id = 300
+        |    entries[0].flag + entries[1].value + int(entries[2].id)
+        |""".stripMargin) shouldBe 321
+  }
+
   "struct with embedded struct and i8 fields" in {
     compileAndRun(
       """struct Flags
