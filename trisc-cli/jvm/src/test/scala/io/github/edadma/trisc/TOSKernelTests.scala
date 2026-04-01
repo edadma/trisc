@@ -15,9 +15,9 @@ class TOSKernelTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |task()
-          |    putc(72)
-          |    putc(105)
-          |    putc(10)
+          |    putc('H')
+          |    putc('i')
+          |    putc('\n')
           |""".stripMargin
     ), maxCycles = 100000)
 
@@ -38,10 +38,10 @@ class TOSKernelTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |task1()
-          |    putc(65)
+          |    putc('A')
           |
           |task2()
-          |    putc(66)
+          |    putc('B')
           |""".stripMargin
     ), maxCycles = 100000)
 
@@ -63,11 +63,11 @@ class TOSKernelTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |task()
-          |    putc(65)
+          |    putc('A')
           |    sleep(5)
-          |    putc(66)
+          |    putc('B')
           |    sleep(5)
-          |    putc(67)
+          |    putc('C')
           |""".stripMargin
     ))
 
@@ -82,14 +82,14 @@ class TOSKernelTests extends TOSTestHelpers {
           |task_a()
           |    var i = 0
           |    while i < 3
-          |        putc(65)
+          |        putc('A')
           |        sleep(10)
           |        i += 1
           |
           |task_b()
           |    var i = 0
           |    while i < 3
-          |        putc(66)
+          |        putc('B')
           |        sleep(20)
           |        i += 1
           |""".stripMargin,
@@ -112,35 +112,4 @@ class TOSKernelTests extends TOSTestHelpers {
     output.count(_ == 'B') shouldBe 3
   }
 
-  "DEBUG: dump linked layout" ignore {
-    val bootTof = assemble(bootAsm, relocatable = true)
-    val allSources = Map(
-      "kernel" -> kernelSysl, "services" -> servicesSysl, "timer" -> timerSysl, "semaphore" -> semaphoreSysl,
-      "mutex" -> mutexSysl, "condvar" -> condvarSysl, "barrier" -> barrierSysl,
-      "rwlock" -> rwlockSysl, "channel" -> channelSysl, "mailbox" -> mailboxSysl,
-      "rmutex" -> rmutexSysl, "qset" -> qsetSysl,
-      "app" -> """import "kernel"
-        |import "services"
-        |import "timer"
-        |kernel_main() -> int
-        |    create_thread(task, 0x6000, 0x5000, "t")
-        |    timer_init(1000)
-        |    first_thread_ssp()
-        |task()
-        |    putc(65)
-        |    sleep(5)
-        |    putc(66)
-        |""".stripMargin)
-    val driver = new SyslDriver
-    val result = driver.compile(allSources)
-    val codegen = new SyslTriscCodegen
-    val tofs = for unit <- result.units yield
-      val asm = codegen.generate(unit.typed)
-      assemble(asm, relocatable = true)
-    val syslTof = Linker.link(tofs, relocatable = true)
-    val linked = Linker.link(Seq(bootTof, syslTof), linkerScript, 0)
-
-    info(linked.dumpLayout)
-    linked.segments.size should be > 0
-  }
 }

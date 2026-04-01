@@ -28,9 +28,9 @@ class TOSCommTests extends TOSTestHelpers {
           |    chan_send(&ch, 10)
           |
           |receiver()
-          |    putc(chan_recv(&ch))
-          |    putc(chan_recv(&ch))
-          |    putc(chan_recv(&ch))
+          |    putc(int(chan_recv(&ch)))
+          |    putc(int(chan_recv(&ch)))
+          |    putc(int(chan_recv(&ch)))
           |""".stripMargin
     ))
 
@@ -59,13 +59,13 @@ class TOSCommTests extends TOSTestHelpers {
           |    chan_send(&ch, 65)
           |    chan_send(&ch, 66)
           |    chan_send(&ch, 67)
-          |    putc(83)
+          |    putc('S')
           |
           |receiver()
           |    sleep(30)
-          |    putc(chan_recv(&ch))
-          |    putc(chan_recv(&ch))
-          |    putc(chan_recv(&ch))
+          |    putc(int(chan_recv(&ch)))
+          |    putc(int(chan_recv(&ch)))
+          |    putc(int(chan_recv(&ch)))
           |""".stripMargin
     ))
 
@@ -100,9 +100,9 @@ class TOSCommTests extends TOSTestHelpers {
           |    mbox_send(&mb, 105)
           |
           |receiver()
-          |    putc(mbox_recv(&mb))
-          |    putc(mbox_recv(&mb))
-          |    putc(10)
+          |    putc(int(mbox_recv(&mb)))
+          |    putc(int(mbox_recv(&mb)))
+          |    putc('\n')
           |""".stripMargin
     ))
 
@@ -128,14 +128,14 @@ class TOSCommTests extends TOSTestHelpers {
           |
           |sender()
           |    mbox_send(&mb, 49)
-          |    putc(65)
+          |    putc('A')
           |    mbox_send(&mb, 50)
-          |    putc(66)
+          |    putc('B')
           |
           |receiver()
           |    sleep(20)
-          |    putc(mbox_recv(&mb))
-          |    putc(mbox_recv(&mb))
+          |    putc(int(mbox_recv(&mb)))
+          |    putc(int(mbox_recv(&mb)))
           |""".stripMargin
     ))
 

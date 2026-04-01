@@ -240,11 +240,21 @@ class SyslIntWidthTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 1000
   }
 
-  "assign i64 to i8 variable" in {
-    eval(
+  "assign i64 to i8 variable is rejected (narrowing)" in {
+    val Right(ast) = (new SyslParser).parseProgram(
       """main() -> int
         |    var x: i64 = 42
         |    var y: i8 = x
+        |    y
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "assign i64 to i8 with explicit cast works" in {
+    eval(
+      """main() -> int
+        |    var x: i64 = 42
+        |    var y: i8 = i8(x)
         |    y
         |""".stripMargin) shouldBe 42
   }

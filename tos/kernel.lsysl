@@ -52,7 +52,7 @@ Statistics fields track per-thread performance:
 @
 
   struct Task
-      ssp: int
+      ssp: i64
       state: int
       wake_tick: int
       name: *byte
@@ -66,7 +66,7 @@ Statistics fields track per-thread performance:
       notify_value: int
       notify_pending: int
       base_priority: int
-      blocked_on: int
+      blocked_on: i64
 
 @tech
 Run queues: one FIFO queue per priority level. Each queue
@@ -134,7 +134,7 @@ Each timer has:
   struct SoftTimer
       active: int
       fire_tick: int
-      callback: int
+      callback: i64
 
   var timers: [8]SoftTimer
 
@@ -143,7 +143,7 @@ Each timer has:
 
   extern thread_exit()
 
-  register_irq(irq: int, handler: int)
+  register_irq(irq: int, handler: i64)
       irq_handlers[irq] = handler
 
 @tech
@@ -196,31 +196,31 @@ The frame must match the layout that boot.asm expects:
   PSR, PC, r1-r6, USP  (9 x 8 bytes, top to bottom)
 @
 
-  build_stack_frame(entry_point: int, usp: int, ssp: int) -> int
+  build_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64
       var sp = ssp
       sp -= 8
-      *sp = 0                 // PSR
+      *(*i64(sp)) = 0                 // PSR
       sp -= 8
-      *sp = entry_point       // PC
+      *(*i64(sp)) = entry_point       // PC
       sp -= 8
-      *sp = 0                 // r1
+      *(*i64(sp)) = 0                 // r1
       sp -= 8
-      *sp = 0                 // r2
+      *(*i64(sp)) = 0                 // r2
       sp -= 8
-      *sp = 0                 // r3
+      *(*i64(sp)) = 0                 // r3
       sp -= 8
-      *sp = 0                 // r4
+      *(*i64(sp)) = 0                 // r4
       sp -= 8
-      *sp = 0                 // r5
+      *(*i64(sp)) = 0                 // r5
       sp -= 8
-      *sp = thread_exit       // r6 = return address (exit trampoline)
+      *(*i64(sp)) = thread_exit       // r6 = return address (exit trampoline)
       sp -= 8
-      *sp = usp               // USP
+      *(*i64(sp)) = usp               // USP
       sp
 
 @api create_thread(entry_point, usp, ssp, name) — Create thread at default priority (0 = highest).
 
-  create_thread(entry_point: int, usp: int, ssp: int, name: *byte)
+  create_thread(entry_point: i64, usp: i64, ssp: i64, name: *byte)
       create_thread_pri(entry_point, usp, ssp, name, 0)
 
 @api create_thread_pri(entry_point, usp, ssp, name, priority) — Create thread at given priority.
@@ -229,7 +229,7 @@ The frame must match the layout that boot.asm expects:
 Lower priority number = higher priority. Priority 0 runs first.
 @
 
-  create_thread_pri(entry_point: int, usp: int, ssp: int, name: *byte, priority: int)
+  create_thread_pri(entry_point: i64, usp: i64, ssp: i64, name: *byte, priority: int)
       ensure_queues_init()
       val idx = thread_count
       val sp = build_stack_frame(entry_point, usp, ssp)
@@ -249,7 +249,7 @@ Lower priority number = higher priority. Priority 0 runs first.
       tasks[idx].base_priority = priority
       tasks[idx].blocked_on = 0
       // Write stack canary at bottom of user stack
-      var canary_addr: *int = usp
+      var canary_addr: *int = *int(usp)
       *canary_addr = STACK_CANARY
       thread_count += 1
       enqueue(priority, idx)
@@ -356,7 +356,7 @@ Steps:
   8. Return its SSP, or 0 if all queues are empty
 @
 
-  schedule(current_ssp: int) -> int
+  schedule(current_ssp: i64) -> i64
       ticks += 1
 
       // Save current thread (skip when idle, current_thread == -1)
@@ -414,7 +414,7 @@ context-switch into the first thread. Dequeues from the
 highest-priority non-empty queue.
 @
 
-  first_thread_ssp() -> int
+  first_thread_ssp() -> i64
       // Dequeue the highest-priority thread
       var pri = 0
       while pri < NUM_PRIORITIES
@@ -436,7 +436,7 @@ The callback is a function pointer (int) that will be called
 after delay ticks. One-shot: fires once then deactivates.
 @
 
-  timer_arm(delay: int, callback: int) -> int
+  timer_arm(delay: int, callback: i64) -> int
       var i = 0
       while i < MAX_TIMERS
           if timers[i].active == 0
@@ -487,8 +487,8 @@ STACK_CANARY, the stack has not overflowed.
 
 @api check_stack_at(addr) -> int — Check if canary at addr is intact. Returns 1 if ok.
 
-  check_stack_at(addr: int) -> int
-      var p: *int = addr
+  check_stack_at(addr: i64) -> int
+      var p: *int = *int(addr)
       if *p == STACK_CANARY
           return 1
       0
@@ -528,12 +528,12 @@ stack or context — it can be resumed exactly where it left off.
 
 @api kernel_set_idle_hook(hook) — Set the idle hook function pointer.
 
-  kernel_set_idle_hook(hook: int)
+  kernel_set_idle_hook(hook: i64)
       idle_hook = hook
 
 @api kernel_set_tick_hook(hook) — Set the tick hook function pointer.
 
-  kernel_set_tick_hook(hook: int)
+  kernel_set_tick_hook(hook: i64)
       tick_hook = hook
 
 @api notify_send(target_id, value) — Send a notification to a thread.
@@ -679,7 +679,7 @@ Handles the thread regardless of state:
           enqueue(new_pri, id)
       else if tasks[id].state == STATE_MUTEX_WAIT
           if tasks[id].blocked_on != 0
-              var bm: *PIMutex = tasks[id].blocked_on
+              var bm: *PIMutex = *int(tasks[id].blocked_on)
               if bm.owner >= 0
                   boost_thread_priority(bm.owner, new_pri)
 
@@ -707,7 +707,7 @@ us until pimutex_unlock_kernel wakes us.
           tasks[m.wait_tail].next = current_thread
           m.wait_tail = current_thread
       tasks[current_thread].state = STATE_MUTEX_WAIT
-      tasks[current_thread].blocked_on = m
+      tasks[current_thread].blocked_on = i64(m)
       tasks[current_thread].consec_quanta = 0
 
 @api pimutex_unlock_kernel(m) — Kernel-level PI mutex unlock. Restores priority, wakes waiter.

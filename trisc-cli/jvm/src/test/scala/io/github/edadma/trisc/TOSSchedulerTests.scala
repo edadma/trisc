@@ -17,13 +17,13 @@ class TOSSchedulerTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |task_a()
-          |    putc(65)
+          |    putc('A')
           |
           |task_b()
-          |    putc(66)
+          |    putc('B')
           |
           |task_c()
-          |    putc(67)
+          |    putc('C')
           |""".stripMargin
     ))
 
@@ -47,10 +47,10 @@ class TOSSchedulerTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |task_a()
-          |    putc(65)
+          |    putc('A')
           |
           |task_b()
-          |    putc(66)
+          |    putc('B')
           |""".stripMargin
     ))
 
@@ -79,14 +79,14 @@ class TOSSchedulerTests extends TOSTestHelpers {
           |task_a()
           |    var i = 0
           |    while i < 4
-          |        putc(65)
+          |        putc('A')
           |        sleep(10)
           |        i += 1
           |
           |task_b()
           |    var i = 0
           |    while i < 4
-          |        putc(66)
+          |        putc('B')
           |        sleep(10)
           |        i += 1
           |""".stripMargin
@@ -111,14 +111,14 @@ class TOSSchedulerTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |high()
-          |    putc(72)
+          |    putc('H')
           |    sleep(20)
-          |    putc(72)
+          |    putc('H')
           |
           |low()
-          |    putc(76)
+          |    putc('L')
           |    sleep(20)
-          |    putc(76)
+          |    putc('L')
           |""".stripMargin
     ))
 
@@ -142,15 +142,15 @@ class TOSSchedulerTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |blocker()
-          |    putc(66)
+          |    putc('B')
           |    sleep(50)
-          |    putc(66)
+          |    putc('B')
           |
           |runner()
           |    sleep(10)
-          |    putc(82)
+          |    putc('R')
           |    sleep(10)
-          |    putc(82)
+          |    putc('R')
           |""".stripMargin
     ))
 
@@ -175,13 +175,13 @@ class TOSSchedulerTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |high()
-          |    putc(72)
+          |    putc('H')
           |
           |med()
-          |    putc(77)
+          |    putc('M')
           |
           |low()
-          |    putc(76)
+          |    putc('L')
           |""".stripMargin
     ))
 
@@ -211,14 +211,14 @@ class TOSSchedulerTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |task_a()
-          |    putc(65)
+          |    putc('A')
           |    yield()
-          |    putc(65)
+          |    putc('A')
           |
           |task_b()
-          |    putc(66)
+          |    putc('B')
           |    yield()
-          |    putc(66)
+          |    putc('B')
           |""".stripMargin
     ))
 
@@ -240,14 +240,14 @@ class TOSSchedulerTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |high()
-          |    putc(49)
+          |    putc('1')
           |    sleep(20)
-          |    putc(50)
+          |    putc('2')
           |
           |low()
           |    var i = 0
           |    while i < 5
-          |        putc(76)
+          |        putc('L')
           |        sleep(10)
           |        i += 1
           |""".stripMargin

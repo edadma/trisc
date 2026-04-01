@@ -195,7 +195,7 @@ class SyslFloatTests extends SyslTestHelpers {
       """main() -> int
         |    x: double = -3.7
         |    y: i64 = i64(x)
-        |    println(y)
+        |    println(int(y))
         |    return 0
         |""".stripMargin) shouldBe "-3\n"
   }

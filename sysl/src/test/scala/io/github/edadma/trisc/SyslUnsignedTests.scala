@@ -360,24 +360,22 @@ class SyslUnsignedTests extends SyslTestHelpers {
     an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
   }
 
-  "assigning signed var to unsigned var is error" in {
-    val Right(ast) = (new SyslParser).parseProgram(
+  "assigning signed var to unsigned var is allowed" in {
+    eval(
       """main() -> int
         |    var a: int = 5
         |    var b: u32 = a
         |    int(b)
-        |""".stripMargin): @unchecked
-    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+        |""".stripMargin) shouldBe 5
   }
 
-  "assigning unsigned var to signed var is error" in {
-    val Right(ast) = (new SyslParser).parseProgram(
+  "assigning unsigned var to signed var is allowed" in {
+    eval(
       """main() -> int
         |    var a: u32 = 5
         |    var b: int = a
         |    b
-        |""".stripMargin): @unchecked
-    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+        |""".stripMargin) shouldBe 5
   }
 
   // ===== Integer literal coercion =====

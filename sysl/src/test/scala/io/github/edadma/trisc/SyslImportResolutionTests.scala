@@ -38,15 +38,14 @@ class SyslImportResolutionTests extends AnyFreeSpec with Matchers {
     typed.decls.length shouldBe 1
   }
 
-  "imported function type-checks arguments" in {
+  "imported function rejects wrong argument type" in {
     val Right(ast) = (new SyslParser).parseProgram(
       """main() -> int = add(true, 2)
         |""".stripMargin): @unchecked
     val analyzer = new SyslAnalyzer
     analyzer.registerImport(ModuleMeta.fromSmeta(mathSmeta))
-    // add expects (int, int), passing bool should... actually the call doesn't check param types yet
-    // Just verify it doesn't crash
-    analyzer.analyze(ast)
+    // add expects (int, int), passing bool should be rejected
+    a [RuntimeException] should be thrownBy analyzer.analyze(ast)
   }
 
   "imported function return type is correct" in {

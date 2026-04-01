@@ -330,6 +330,7 @@ class SyslParser extends StandardTokenParsers {
       "-" ~> unary ^^ (e => UnaryAST("-", e)) |
       "!" ~> unary ^^ (e => UnaryAST("!", e)) |
       "~" ~> unary ^^ (e => UnaryAST("~", e)) |
+      "*" ~> scalarCastType ~ ("(" ~> expr <~ ")") ^^ { case t ~ e => CastAST(s"*$t", e) } |
       "*" ~> unary ^^ DerefAST.apply |
       "&" ~> ident ~ rep1("." ~> ident) ^^ { case name ~ fields =>
         val base: ExpressionAST = VarRefAST(name)
@@ -364,20 +365,8 @@ class SyslParser extends StandardTokenParsers {
         }
       }
 
-  lazy val charLit: Parser[ExpressionAST] =
-    stringLit ^? ({
-      case s if s.length == 1 => IntLitAST(s.charAt(0).toLong)
-      case s if s.length == 2 && s.charAt(0) == '\\' => IntLitAST(s.charAt(1) match
-        case 'n' => '\n'.toLong
-        case 't' => '\t'.toLong
-        case 'r' => '\r'.toLong
-        case '0' => 0L
-        case '\\' => '\\'.toLong
-        case '\'' => '\''.toLong
-        case '"' => '"'.toLong
-        case c => c.toLong
-      )
-    }, s => s"invalid char literal: '$s'")
+  // charLit is no longer needed — char literals are handled in the lexer
+  // as NumericLit with :char suffix, parsed in the numericLit branch of primary
 
   // sizeof argument: try pointer/array/func types first, then bare name
   // A bare name could be a type (struct) or a variable — analyzer decides
@@ -389,8 +378,11 @@ class SyslParser extends StandardTokenParsers {
       ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool" | "void" | "string") ^^ SizeofTypeAST.apply |
       expr ^^ SizeofExprAST.apply
 
-  lazy val castType: Parser[String] =
+  lazy val scalarCastType: Parser[String] =
     "int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool"
+
+  lazy val castType: Parser[String] =
+    scalarCastType
 
   lazy val cast: Parser[CastAST] =
     castType ~ ("(" ~> expr <~ ")") ^^ { case t ~ e => CastAST(t, e) }
@@ -403,7 +395,6 @@ class SyslParser extends StandardTokenParsers {
       else if n.contains('.') || n.contains('e') || n.contains('E') then FloatLitAST(n.toDouble)
       else IntLitAST(n.toLong)
     } |
-      charLit |
       stringLit ^^ StringLitExprAST.apply |
       "true" ^^^ BoolLitAST(true) |
       "false" ^^^ BoolLitAST(false) |

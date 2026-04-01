@@ -328,4 +328,117 @@ class SyslCodegenPointerTests extends SyslCodegenHelpers {
         |    x
         |""".stripMargin) shouldBe 42
   }
+
+  // ===== Pointer cast codegen =====
+
+  "int-to-pointer cast and dereference" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: i64 = 42
+        |    val addr = int(&x)
+        |    var p: *i64 = *i64(addr)
+        |    *p
+        |""".stripMargin) shouldBe 42
+  }
+
+  "int-to-pointer cast and store" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: i64 = 0
+        |    val addr = int(&x)
+        |    var p: *i64 = *i64(addr)
+        |    *p = 99
+        |    x
+        |""".stripMargin) shouldBe 99
+  }
+
+  "store through inline pointer cast" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: i64 = 0
+        |    val addr = int(&x)
+        |    *(*i64(addr)) = 77
+        |    x
+        |""".stripMargin) shouldBe 77
+  }
+
+  "store through inline pointer cast i8" in {
+    compileAndRun(
+      """main() -> int
+        |    var buf: [8]i8
+        |    buf[0] = 0
+        |    val addr = int(&buf)
+        |    *(*i8(addr)) = 42
+        |    buf[0]
+        |""".stripMargin) shouldBe 42
+  }
+
+  "pointer cast round-trip preserves address" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: i64 = 123
+        |    val addr1 = int(&x)
+        |    var p: *i64 = *i64(addr1)
+        |    val addr2 = int(p)
+        |    if addr1 == addr2 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "function ref as i64 argument" in {
+    compileAndRun(
+      """target() -> int = 42
+        |take_addr(addr: i64) -> int
+        |    if addr != 0 then 1 else 0
+        |main() -> int = take_addr(target)
+        |""".stripMargin) shouldBe 1
+  }
+
+  "null pointer literal 0 as pointer arg" in {
+    compileAndRun(
+      """check(p: *int) -> int
+        |    if int(p) == 0
+        |        return 99
+        |    0
+        |main() -> int = check(0)
+        |""".stripMargin) shouldBe 99
+  }
+
+  "string as *i8 argument" in {
+    compileAndRun(
+      """first(s: *i8) -> int = s[0]
+        |main() -> int = first("Hello")
+        |""".stripMargin) shouldBe 72
+  }
+
+  "build stack frame pattern: store through cast" in {
+    compileAndRun(
+      """main() -> int
+        |    var buf: [4]i64
+        |    var sp = int(&buf) + 32
+        |    sp -= 8
+        |    *(*i64(sp)) = 10
+        |    sp -= 8
+        |    *(*i64(sp)) = 20
+        |    sp -= 8
+        |    *(*i64(sp)) = 30
+        |    sp -= 8
+        |    *(*i64(sp)) = 40
+        |    buf[0] + buf[1] + buf[2] + buf[3]
+        |""".stripMargin) shouldBe 100
+  }
+
+  "single-char double-quoted string as *i8 arg" in {
+    compileAndRun(
+      """first(s: *i8) -> int = s[0]
+        |main() -> int = first("A")
+        |""".stripMargin) shouldBe 65
+  }
+
+  "char literal vs string literal distinction" in {
+    compileAndRun(
+      """main() -> int
+        |    val c = 'A'
+        |    c
+        |""".stripMargin) shouldBe 65
+  }
 }

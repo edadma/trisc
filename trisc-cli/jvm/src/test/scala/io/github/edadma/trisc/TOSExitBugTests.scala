@@ -11,69 +11,6 @@ package io.github.edadma.trisc
 
 class TOSExitBugTests extends TOSTestHelpers {
 
-  // === Dump generated assembly for the failing function shape ===
-
-  "Exit: DUMP ASM for sleep+putc function" in {
-    val source = """import "services"
-                   |
-                   |med()
-                   |    sleep(15)
-                   |    putc(77)
-                   |""".stripMargin
-    val driver = new SyslDriver
-    val result = driver.compile(Map("services" -> servicesSysl, "main" -> source))
-    val codegen = new SyslTriscCodegen()
-    // Find the "main" unit and generate its assembly
-    val mainUnit = result.units.find(_.name == "main").get
-    val asm = codegen.generate(mainUnit.typed)
-    info(s"Generated assembly:\n$asm")
-    // Also dump for comparison: putc only
-    val source2 = """import "services"
-                    |
-                    |med2()
-                    |    putc(77)
-                    |""".stripMargin
-    val result2 = driver.compile(Map("services" -> servicesSysl, "main2" -> source2))
-    val mainUnit2 = result2.units.find(_.name == "main2").get
-    val asm2 = codegen.generate(mainUnit2.typed)
-    info(s"Generated assembly (putc only):\n$asm2")
-    succeed
-  }
-
-  // === TRACE: minimal reproducer with full CPU trace ===
-
-  "Exit: TRACE minimal reproducer" in {
-    val (cpu, output) = runTOS(Map(
-      "app" ->
-        """import "kernel"
-          |import "services"
-          |import "timer"
-          |
-          |kernel_main() -> int
-          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0)
-          |    timer_init(1000)
-          |    first_thread_ssp()
-          |
-          |low()
-          |    sleep(30)
-          |    putc(76)
-          |
-          |med()
-          |    sleep(15)
-          |    putc(77)
-          |
-          |high()
-          |    sleep(10)
-          |    putc(72)
-          |""".stripMargin
-    ), maxCycles = 999999)
-
-    info(s"output: '$output' state: ${cpu.state}")
-    succeed // just want the trace
-  }
-
   // === Baseline: single thread, implicit return ===
 
   "Exit: single thread, no calls, implicit return" in {
@@ -89,7 +26,7 @@ class TOSExitBugTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |task()
-          |    putc(65)
+          |    putc('A')
           |""".stripMargin
     ), maxCycles = 200000)
 
@@ -111,7 +48,7 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |task()
           |    sleep(10)
-          |    putc(65)
+          |    putc('A')
           |""".stripMargin
     ), maxCycles = 500000)
 
@@ -136,11 +73,11 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |task_a()
           |    sleep(10)
-          |    putc(65)
+          |    putc('A')
           |
           |task_b()
           |    sleep(20)
-          |    putc(66)
+          |    putc('B')
           |""".stripMargin
     ), maxCycles = 500000)
 
@@ -167,15 +104,15 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |task_a()
           |    sleep(10)
-          |    putc(65)
+          |    putc('A')
           |
           |task_b()
           |    sleep(20)
-          |    putc(66)
+          |    putc('B')
           |
           |task_c()
           |    sleep(30)
-          |    putc(67)
+          |    putc('C')
           |""".stripMargin
     ), maxCycles = 500000)
 
@@ -203,15 +140,15 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |low()
           |    sleep(30)
-          |    putc(76)
+          |    putc('L')
           |
           |med()
           |    sleep(15)
-          |    putc(77)
+          |    putc('M')
           |
           |high()
           |    sleep(10)
-          |    putc(72)
+          |    putc('H')
           |""".stripMargin
     ), maxCycles = 500000)
 
@@ -240,15 +177,15 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |low()
           |    sleep(30)
-          |    putc(76)
+          |    putc('L')
           |
           |med()
           |    sleep(15)
-          |    putc(77)
+          |    putc('M')
           |
           |high()
           |    sleep(10)
-          |    putc(72)
+          |    putc('H')
           |""".stripMargin
     ), maxCycles = 500000)
 
@@ -280,15 +217,15 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |low()
           |    sleep(30)
-          |    putc(76)
+          |    putc('L')
           |
           |med()
           |    sleep(15)
-          |    putc(77)
+          |    putc('M')
           |
           |high()
           |    sleep(10)
-          |    putc(72)
+          |    putc('H')
           |""".stripMargin
     ), maxCycles = 500000)
 
@@ -320,20 +257,20 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |low()
           |    pimutex_lock(&mtx)
-          |    putc(76)
+          |    putc('L')
           |    sleep(30)
-          |    putc(108)
+          |    putc('l')
           |    pimutex_unlock(&mtx)
           |
           |med()
           |    sleep(15)
-          |    putc(77)
+          |    putc('M')
           |
           |high()
           |    sleep(10)
-          |    putc(72)
+          |    putc('H')
           |    pimutex_lock(&mtx)
-          |    putc(104)
+          |    putc('h')
           |    pimutex_unlock(&mtx)
           |""".stripMargin
     ), maxCycles = 5000000)
@@ -365,19 +302,19 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |low()
           |    pimutex_lock(&mtx)
-          |    putc(76)
+          |    putc('L')
           |    sleep(30)
-          |    putc(108)
+          |    putc('l')
           |    pimutex_unlock(&mtx)
           |
           |med()
-          |    putc(77)
+          |    putc('M')
           |
           |high()
           |    sleep(10)
-          |    putc(72)
+          |    putc('H')
           |    pimutex_lock(&mtx)
-          |    putc(104)
+          |    putc('h')
           |    pimutex_unlock(&mtx)
           |""".stripMargin
     ), maxCycles = 5000000)
@@ -407,20 +344,20 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |low()
           |    pimutex_lock(&mtx)
-          |    putc(76)
+          |    putc('L')
           |    sleep(30)
-          |    putc(108)
+          |    putc('l')
           |    pimutex_unlock(&mtx)
           |
           |med()
-          |    putc(77)
-          |    putc(46)
+          |    putc('M')
+          |    putc('.')
           |
           |high()
           |    sleep(10)
-          |    putc(72)
+          |    putc('H')
           |    pimutex_lock(&mtx)
-          |    putc(104)
+          |    putc('h')
           |    pimutex_unlock(&mtx)
           |""".stripMargin
     ), maxCycles = 5000000)
@@ -450,9 +387,9 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |low()
           |    pimutex_lock(&mtx)
-          |    putc(76)
+          |    putc('L')
           |    sleep(30)
-          |    putc(108)
+          |    putc('l')
           |    pimutex_unlock(&mtx)
           |
           |med()
@@ -460,9 +397,9 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |high()
           |    sleep(10)
-          |    putc(72)
+          |    putc('H')
           |    pimutex_lock(&mtx)
-          |    putc(104)
+          |    putc('h')
           |    pimutex_unlock(&mtx)
           |""".stripMargin
     ), maxCycles = 5000000)
@@ -492,20 +429,20 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |low()
           |    pimutex_lock(&mtx)
-          |    putc(76)
+          |    putc('L')
           |    sleep(30)
-          |    putc(108)
+          |    putc('l')
           |    pimutex_unlock(&mtx)
           |
           |med()
           |    yield()
-          |    putc(77)
+          |    putc('M')
           |
           |high()
           |    sleep(10)
-          |    putc(72)
+          |    putc('H')
           |    pimutex_lock(&mtx)
-          |    putc(104)
+          |    putc('h')
           |    pimutex_unlock(&mtx)
           |""".stripMargin
     ), maxCycles = 5000000)
@@ -537,9 +474,9 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |low()
           |    pimutex_lock(&mtx)
-          |    putc(76)
+          |    putc('L')
           |    sleep(30)
-          |    putc(108)
+          |    putc('l')
           |    pimutex_unlock(&mtx)
           |
           |med()
@@ -548,9 +485,9 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |high()
           |    sleep(10)
-          |    putc(72)
+          |    putc('H')
           |    pimutex_lock(&mtx)
-          |    putc(104)
+          |    putc('h')
           |    pimutex_unlock(&mtx)
           |""".stripMargin
     ), maxCycles = 5000000)
@@ -579,9 +516,9 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |low()
           |    pimutex_lock(&mtx)
-          |    putc(76)
+          |    putc('L')
           |    sleep(30)
-          |    putc(108)
+          |    putc('l')
           |    pimutex_unlock(&mtx)
           |
           |med()
@@ -590,9 +527,9 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |high()
           |    sleep(10)
-          |    putc(72)
+          |    putc('H')
           |    pimutex_lock(&mtx)
-          |    putc(104)
+          |    putc('h')
           |    pimutex_unlock(&mtx)
           |""".stripMargin
     ), maxCycles = 5000000)
@@ -619,19 +556,19 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |low()
           |    sleep(30)
-          |    putc(76)
+          |    putc('L')
           |    sleep(30)
-          |    putc(108)
+          |    putc('l')
           |
           |med()
           |    sleep(15)
-          |    putc(77)
+          |    putc('M')
           |
           |high()
           |    sleep(10)
-          |    putc(72)
+          |    putc('H')
           |    sleep(30)
-          |    putc(104)
+          |    putc('h')
           |""".stripMargin
     ), maxCycles = 5000000)
 
@@ -665,21 +602,21 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |low()
           |    pimutex_lock(&mtx)
-          |    putc(76)
+          |    putc('L')
           |    sleep(30)
-          |    putc(108)
+          |    putc('l')
           |    pimutex_unlock(&mtx)
           |
           |med()
           |    sleep(15)
-          |    putc(77)
+          |    putc('M')
           |    exit()
           |
           |high()
           |    sleep(10)
-          |    putc(72)
+          |    putc('H')
           |    pimutex_lock(&mtx)
-          |    putc(104)
+          |    putc('h')
           |    pimutex_unlock(&mtx)
           |    exit()
           |""".stripMargin
@@ -710,22 +647,22 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |low()
           |    pimutex_lock(&mtx)
-          |    putc(76)
+          |    putc('L')
           |    sleep(30)
-          |    putc(108)
+          |    putc('l')
           |    pimutex_unlock(&mtx)
           |    exit()
           |
           |med()
           |    sleep(15)
-          |    putc(77)
+          |    putc('M')
           |    exit()
           |
           |high()
           |    sleep(10)
-          |    putc(72)
+          |    putc('H')
           |    pimutex_lock(&mtx)
-          |    putc(104)
+          |    putc('h')
           |    pimutex_unlock(&mtx)
           |""".stripMargin
     ), maxCycles = 5000000)
@@ -757,20 +694,20 @@ class TOSExitBugTests extends TOSTestHelpers {
           |
           |low()
           |    pimutex_lock(&mtx)
-          |    putc(76)
+          |    putc('L')
           |    sleep(30)
-          |    putc(108)
+          |    putc('l')
           |    pimutex_unlock(&mtx)
           |
           |med()
           |    sleep(15)
-          |    putc(77)
+          |    putc('M')
           |
           |high()
           |    sleep(10)
-          |    putc(72)
+          |    putc('H')
           |    pimutex_lock(&mtx)
-          |    putc(104)
+          |    putc('h')
           |    pimutex_unlock(&mtx)
           |""".stripMargin
     ), maxCycles = 5000000)

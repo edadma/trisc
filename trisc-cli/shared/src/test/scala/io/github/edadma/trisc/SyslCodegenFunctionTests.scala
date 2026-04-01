@@ -296,7 +296,7 @@ class SyslCodegenFunctionTests extends SyslCodegenHelpers {
       "lib" ->
         """var count = 0
           |
-          |do_thing(a: int, b: int, c: int, name: *byte, pri: int)
+          |do_thing(a: int, b: int, c: int, d: int, pri: int)
           |    count = count + pri + 1
           |
           |get_count() -> int = count

@@ -20,9 +20,9 @@ class TOSPIMutexTests extends TOSTestHelpers {
           |
           |task()
           |    pimutex_lock(&mtx)
-          |    putc(65)
+          |    putc('A')
           |    pimutex_unlock(&mtx)
-          |    putc(66)
+          |    putc('B')
           |""".stripMargin
     ), maxCycles = 200000)
 
@@ -51,9 +51,9 @@ class TOSPIMutexTests extends TOSTestHelpers {
           |    var i = 0
           |    while i < 3
           |        pimutex_lock(&mtx)
-          |        putc(91)
-          |        putc(65)
-          |        putc(93)
+          |        putc('[')
+          |        putc('A')
+          |        putc(']')
           |        pimutex_unlock(&mtx)
           |        sleep(10)
           |        i += 1
@@ -62,9 +62,9 @@ class TOSPIMutexTests extends TOSTestHelpers {
           |    var i = 0
           |    while i < 3
           |        pimutex_lock(&mtx)
-          |        putc(91)
-          |        putc(66)
-          |        putc(93)
+          |        putc('[')
+          |        putc('B')
+          |        putc(']')
           |        pimutex_unlock(&mtx)
           |        sleep(10)
           |        i += 1
@@ -94,18 +94,18 @@ class TOSPIMutexTests extends TOSTestHelpers {
           |
           |holder()
           |    pimutex_lock(&mtx)
-          |    putc(72)
+          |    putc('H')
           |    sleep(30)
-          |    putc(104)
+          |    putc('h')
           |    pimutex_unlock(&mtx)
-          |    putc(33)
+          |    putc('!')
           |    exit()
           |
           |waiter()
           |    sleep(10)
-          |    putc(87)
+          |    putc('W')
           |    pimutex_lock(&mtx)
-          |    putc(119)
+          |    putc('w')
           |    pimutex_unlock(&mtx)
           |    exit()
           |""".stripMargin
@@ -138,18 +138,18 @@ class TOSPIMutexTests extends TOSTestHelpers {
           |
           |low()
           |    pimutex_lock(&mtx)
-          |    putc(76)
+          |    putc('L')
           |    sleep(30)
-          |    putc(108)
+          |    putc('l')
           |    pimutex_unlock(&mtx)
-          |    putc(33)
+          |    putc('!')
           |    exit()
           |
           |high()
           |    sleep(10)
-          |    putc(72)
+          |    putc('H')
           |    pimutex_lock(&mtx)
-          |    putc(104)
+          |    putc('h')
           |    pimutex_unlock(&mtx)
           |    exit()
           |""".stripMargin
@@ -195,7 +195,7 @@ class TOSPIMutexTests extends TOSTestHelpers {
           |
           |low()
           |    pimutex_lock(&mtx)
-          |    putc(76)
+          |    putc('L')
           |    // Active work: yield loop. Each yield is one context switch.
           |    // High wakes at tick ~3, med wakes at tick ~8.
           |    // With PI, low stays at pri 0 through all of this.
@@ -203,20 +203,20 @@ class TOSPIMutexTests extends TOSTestHelpers {
           |    while i < 20
           |        yield()
           |        i += 1
-          |    putc(108)
+          |    putc('l')
           |    pimutex_unlock(&mtx)
           |    exit()
           |
           |med()
           |    sleep(8)
-          |    putc(77)
+          |    putc('M')
           |    exit()
           |
           |high()
           |    sleep(3)
-          |    putc(72)
+          |    putc('H')
           |    pimutex_lock(&mtx)
-          |    putc(104)
+          |    putc('h')
           |    pimutex_unlock(&mtx)
           |    exit()
           |""".stripMargin
@@ -264,19 +264,19 @@ class TOSPIMutexTests extends TOSTestHelpers {
           |        i += 1
           |    pimutex_unlock(&mtx)
           |    // After unlock, low is back to priority 2.
-          |    putc(76)
+          |    putc('L')
           |    exit()
           |
           |med()
           |    sleep(8)
-          |    putc(77)
+          |    putc('M')
           |    exit()
           |
           |high()
           |    sleep(3)
           |    pimutex_lock(&mtx)
           |    pimutex_unlock(&mtx)
-          |    putc(72)
+          |    putc('H')
           |    exit()
           |""".stripMargin
     ))
@@ -316,13 +316,13 @@ class TOSPIMutexTests extends TOSTestHelpers {
           |
           |low()
           |    pimutex_lock(&mtx_a)
-          |    putc(76)
+          |    putc('L')
           |    // Active work so PI can be observed
           |    var i = 0
           |    while i < 30
           |        yield()
           |        i += 1
-          |    putc(108)
+          |    putc('l')
           |    pimutex_unlock(&mtx_a)
           |    exit()
           |
@@ -331,7 +331,7 @@ class TOSPIMutexTests extends TOSTestHelpers {
           |    pimutex_lock(&mtx_b)
           |    sleep(5)
           |    pimutex_lock(&mtx_a)
-          |    putc(109)
+          |    putc('m')
           |    pimutex_unlock(&mtx_a)
           |    pimutex_unlock(&mtx_b)
           |    exit()
@@ -339,13 +339,13 @@ class TOSPIMutexTests extends TOSTestHelpers {
           |high()
           |    sleep(12)
           |    pimutex_lock(&mtx_b)
-          |    putc(104)
+          |    putc('h')
           |    pimutex_unlock(&mtx_b)
           |    exit()
           |
           |bg()
           |    sleep(15)
-          |    putc(66)
+          |    putc('B')
           |    exit()
           |""".stripMargin
     ))

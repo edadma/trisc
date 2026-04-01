@@ -22,7 +22,7 @@ Device registers (MCU-style timer):
   val TIMER_IER  = 0x10004C
   val TIMER_IRQ  = 0
 
-  extern register_irq(irq: int, handler: int)
+  extern register_irq(irq: int, handler: i64)
 
 @api timer_init(period) — Initialize and start the timer, register IRQ handler.
 
@@ -30,16 +30,16 @@ Device registers (MCU-style timer):
       register_irq(TIMER_IRQ, timer_handler)
 
       // Write ARR period (big-endian 32-bit)
-      val arr: *i8 = TIMER_ARR
+      val arr: *i8 = *i8(TIMER_ARR)
       *(arr + 0) = (period >> 24) & 0xFF
       *(arr + 1) = (period >> 16) & 0xFF
       *(arr + 2) = (period >> 8) & 0xFF
       *(arr + 3) = period & 0xFF
 
       // Enable overflow interrupt and start timer
-      val ier: *i8 = TIMER_IER
+      val ier: *i8 = *i8(TIMER_IER)
       *ier = 1
-      val cr: *i8 = TIMER_CR
+      val cr: *i8 = *i8(TIMER_CR)
       *cr = 1
 
 @tech
@@ -49,5 +49,5 @@ context switch, and schedule() handles tick counting and waking.
 @
 
   timer_handler()
-      val sr: *i8 = TIMER_SR
+      val sr: *i8 = *i8(TIMER_SR)
       *sr = 1

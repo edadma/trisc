@@ -27,14 +27,14 @@ semaphore so the subsequent sem_wait succeeds immediately.
       waiters: i64
       sem: i64
 
-  condvar_sem(c: int) -> *i64
-      c + 8
+  condvar_sem(c: i64) -> *i64
+      *i64(c + 8)
 
 @api cond_init(c) — Initialize a condition variable.
 
   cond_init(c: *Condvar)
       c.waiters = 0
-      val addr: int = c
+      val addr: i64 = i64(c)
       sem_init(condvar_sem(addr), 0)
 
 @api cond_wait(c, m) — Release mutex, block until signaled, re-acquire mutex.
@@ -42,7 +42,7 @@ semaphore so the subsequent sem_wait succeeds immediately.
   cond_wait(c: *Condvar, m: *i64)
       c.waiters += 1
       mutex_unlock(m)
-      val addr: int = c
+      val addr: i64 = i64(c)
       sem_wait(condvar_sem(addr))
       mutex_lock(m)
 
@@ -51,13 +51,13 @@ semaphore so the subsequent sem_wait succeeds immediately.
   cond_signal(c: *Condvar)
       if c.waiters > 0
           c.waiters -= 1
-          val addr: int = c
+          val addr: i64 = i64(c)
           sem_post(condvar_sem(addr))
 
 @api cond_broadcast(c) — Wake all waiting threads.
 
   cond_broadcast(c: *Condvar)
-      val addr: int = c
+      val addr: i64 = i64(c)
       while c.waiters > 0
           c.waiters -= 1
           sem_post(condvar_sem(addr))

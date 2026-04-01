@@ -22,9 +22,9 @@ class TOSSyncTests extends TOSTestHelpers {
           |
           |task()
           |    sem_wait(&sem)
-          |    putc(65)
+          |    putc('A')
           |    sem_post(&sem)
-          |    putc(66)
+          |    putc('B')
           |""".stripMargin
     ), maxCycles = 200000)
 
@@ -53,9 +53,9 @@ class TOSSyncTests extends TOSTestHelpers {
           |    var i = 0
           |    while i < 3
           |        sem_wait(&mutex)
-          |        putc(91)
-          |        putc(65)
-          |        putc(93)
+          |        putc('[')
+          |        putc('A')
+          |        putc(']')
           |        sem_post(&mutex)
           |        sleep(10)
           |        i += 1
@@ -64,9 +64,9 @@ class TOSSyncTests extends TOSTestHelpers {
           |    var i = 0
           |    while i < 3
           |        sem_wait(&mutex)
-          |        putc(91)
-          |        putc(66)
-          |        putc(93)
+          |        putc('[')
+          |        putc('B')
+          |        putc(']')
           |        sem_post(&mutex)
           |        sleep(10)
           |        i += 1
@@ -98,9 +98,9 @@ class TOSSyncTests extends TOSTestHelpers {
           |task()
           |    val got = sem_trywait(&sem)
           |    if got == 0
-          |        putc(78)
+          |        putc('N')
           |    else
-          |        putc(89)
+          |        putc('Y')
           |""".stripMargin
     ), maxCycles = 200000)
 
@@ -129,19 +129,19 @@ class TOSSyncTests extends TOSTestHelpers {
           |
           |task_a()
           |    sem_wait(&sem)
-          |    putc(65)
+          |    putc('A')
           |    sleep(20)
           |    sem_post(&sem)
           |
           |task_b()
           |    sem_wait(&sem)
-          |    putc(66)
+          |    putc('B')
           |    sleep(20)
           |    sem_post(&sem)
           |
           |task_c()
           |    sem_wait(&sem)
-          |    putc(67)
+          |    putc('C')
           |    sleep(20)
           |    sem_post(&sem)
           |""".stripMargin
@@ -171,13 +171,13 @@ class TOSSyncTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |waiter()
-          |    putc(87)
+          |    putc('W')
           |    sem_wait(&sem)
-          |    putc(71)
+          |    putc('G')
           |
           |poster()
           |    sleep(30)
-          |    putc(80)
+          |    putc('P')
           |    sem_post(&sem)
           |""".stripMargin
     ))
@@ -212,9 +212,9 @@ class TOSSyncTests extends TOSTestHelpers {
           |
           |task()
           |    mutex_lock(&mtx)
-          |    putc(65)
+          |    putc('A')
           |    mutex_unlock(&mtx)
-          |    putc(66)
+          |    putc('B')
           |""".stripMargin
     ), maxCycles = 200000)
 
@@ -241,7 +241,7 @@ class TOSSyncTests extends TOSTestHelpers {
           |
           |holder()
           |    mutex_lock(&mtx)
-          |    putc(72)
+          |    putc('H')
           |    sleep(50)
           |    mutex_unlock(&mtx)
           |
@@ -249,9 +249,9 @@ class TOSSyncTests extends TOSTestHelpers {
           |    sleep(10)
           |    val got = mutex_trylock(&mtx)
           |    if got == 0
-          |        putc(78)
+          |        putc('N')
           |    else
-          |        putc(89)
+          |        putc('Y')
           |""".stripMargin
     ))
 
@@ -287,7 +287,7 @@ class TOSSyncTests extends TOSTestHelpers {
           |    while ready == 0
           |        cond_wait(&cv, &mtx)
           |    mutex_unlock(&mtx)
-          |    putc(87)
+          |    putc('W')
           |
           |signaler()
           |    sleep(30)
@@ -295,7 +295,7 @@ class TOSSyncTests extends TOSTestHelpers {
           |    ready = 1
           |    cond_signal(&cv)
           |    mutex_unlock(&mtx)
-          |    putc(83)
+          |    putc('S')
           |""".stripMargin
     ))
 
@@ -330,14 +330,14 @@ class TOSSyncTests extends TOSTestHelpers {
           |    while go == 0
           |        cond_wait(&cv, &mtx)
           |    mutex_unlock(&mtx)
-          |    putc(65)
+          |    putc('A')
           |
           |waiter_b()
           |    mutex_lock(&mtx)
           |    while go == 0
           |        cond_wait(&cv, &mtx)
           |    mutex_unlock(&mtx)
-          |    putc(66)
+          |    putc('B')
           |
           |broadcaster()
           |    sleep(30)
@@ -373,21 +373,21 @@ class TOSSyncTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |task_a()
-          |    putc(49)
+          |    putc('1')
           |    barrier_wait(&bar)
-          |    putc(65)
+          |    putc('A')
           |
           |task_b()
           |    sleep(20)
-          |    putc(50)
+          |    putc('2')
           |    barrier_wait(&bar)
-          |    putc(66)
+          |    putc('B')
           |
           |task_c()
           |    sleep(40)
-          |    putc(51)
+          |    putc('3')
           |    barrier_wait(&bar)
-          |    putc(67)
+          |    putc('C')
           |""".stripMargin
     ))
 
@@ -419,17 +419,17 @@ class TOSSyncTests extends TOSTestHelpers {
           |
           |reader1()
           |    read_lock(&rw)
-          |    putc(65)
+          |    putc('A')
           |    sleep(20)
           |    read_unlock(&rw)
-          |    putc(88)
+          |    putc('X')
           |
           |reader2()
           |    read_lock(&rw)
-          |    putc(66)
+          |    putc('B')
           |    sleep(20)
           |    read_unlock(&rw)
-          |    putc(89)
+          |    putc('Y')
           |""".stripMargin
     ))
 
@@ -459,15 +459,15 @@ class TOSSyncTests extends TOSTestHelpers {
           |
           |writer()
           |    write_lock(&rw)
-          |    putc(91)
+          |    putc('[')
           |    sleep(30)
-          |    putc(93)
+          |    putc(']')
           |    write_unlock(&rw)
           |
           |reader()
           |    sleep(10)
           |    read_lock(&rw)
-          |    putc(82)
+          |    putc('R')
           |    read_unlock(&rw)
           |""".stripMargin
     ))
