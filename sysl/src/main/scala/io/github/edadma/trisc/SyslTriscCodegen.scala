@@ -204,14 +204,15 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit(s"  std r$srcReg, r$addrReg, r0")
 
   // Allocate a local variable on the stack, return its offset from fp.
-  // SP must stay 8-byte aligned (pshd/popd require it), so the growth
-  // is always rounded up to a multiple of 8.  The variable still uses
-  // width-aware loads/stores via its typ.
+  // The variable is aligned to the greater of its natural alignment and 8
+  // (pshd/popd require SP to stay 8-byte aligned).
   private def allocLocal(name: String, typ: SyslType): LocalVar =
     val size = stackSize(typ)
+    val align = stackAlign(typ).max(8) // type alignment, but at least 8 for SP
+    val mask = ~(align - 1)
     val oldOffset = stackOffset
     stackOffset -= size
-    stackOffset = stackOffset & ~7 // keep 8-byte aligned
+    stackOffset = stackOffset & mask
     val growth = oldOffset - stackOffset
     emitAddImm(7, 7, -growth)
     val local = LocalVar(name, stackOffset, typ)
