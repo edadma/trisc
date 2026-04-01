@@ -1116,6 +1116,12 @@ class SyslTriscCodegen(addresses: Int = 4):
   private def emitStructAddr(obj: TExpr): Unit =
     obj match
       case TDeref(ptr, _) => genExpr(ptr) // pointer to struct — address is the pointer value
+      case TFieldAccess(innerObj, fieldIndex, _) =>
+        // Embedded struct — compute address of the field without loading
+        val st = innerObj.typ.asInstanceOf[SyslType.StructType]
+        val off = fieldOffset(st, fieldIndex)
+        emitStructAddr(innerObj)  // r1 = parent struct address
+        if off != 0 then emitAddImm(1, 1, off)
       case _ => genExpr(obj) // struct value (local/global) — genExpr produces address for struct types
 
   // Data directive for a type: db (1 byte), ds (2), dw (4), dl (8)

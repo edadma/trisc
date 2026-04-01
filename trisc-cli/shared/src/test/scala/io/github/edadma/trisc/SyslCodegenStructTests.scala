@@ -362,4 +362,179 @@ class SyslCodegenStructTests extends SyslCodegenHelpers {
         |    tree.pool[0].value + tree.pool[1].value + tree.pool[2].value + tree.count
         |""".stripMargin) shouldBe 63
   }
+
+  // ===== Embedded (nested) struct tests =====
+
+  "nested struct read and write" in {
+    compileAndRun(
+      """struct Inner
+        |    value: int
+        |
+        |struct Outer
+        |    inner: Inner
+        |    extra: int
+        |
+        |var o: Outer
+        |
+        |main() -> int
+        |    var p: *Outer = &o
+        |    p.inner.value = 42
+        |    p.extra = 10
+        |    p.inner.value + p.extra
+        |""".stripMargin) shouldBe 52
+  }
+
+  "nested struct field offset correct" in {
+    compileAndRun(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |struct Line
+        |    start: Point
+        |    end_: Point
+        |
+        |var line: Line
+        |
+        |main() -> int
+        |    var p: *Line = &line
+        |    p.start.x = 1
+        |    p.start.y = 2
+        |    p.end_.x = 3
+        |    p.end_.y = 4
+        |    p.start.x + p.start.y + p.end_.x + p.end_.y
+        |""".stripMargin) shouldBe 10
+  }
+
+  "triple nested struct" in {
+    compileAndRun(
+      """struct A
+        |    num: int
+        |
+        |struct B
+        |    a: A
+        |
+        |struct C
+        |    b: B
+        |    extra: int
+        |
+        |var c: C
+        |
+        |main() -> int
+        |    var p: *C = &c
+        |    p.b.a.num = 99
+        |    p.extra = 1
+        |    p.b.a.num + p.extra
+        |""".stripMargin) shouldBe 100
+  }
+
+  "nested struct with array field" in {
+    compileAndRun(
+      """struct Header
+        |    tag: int
+        |    size: int
+        |
+        |struct Packet
+        |    hdr: Header
+        |    data: [4]int
+        |
+        |var pkt: Packet
+        |
+        |main() -> int
+        |    var p: *Packet = &pkt
+        |    p.hdr.tag = 1
+        |    p.hdr.size = 4
+        |    p.data[0] = 10
+        |    p.data[1] = 20
+        |    p.data[2] = 30
+        |    p.data[3] = 40
+        |    p.hdr.tag + p.hdr.size + p.data[0] + p.data[3]
+        |""".stripMargin) shouldBe 55
+  }
+
+  "array of nested structs" in {
+    compileAndRun(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |struct Rect
+        |    origin: Point
+        |    size: Point
+        |
+        |var rects: [2]Rect
+        |
+        |main() -> int
+        |    rects[0].origin.x = 1
+        |    rects[0].origin.y = 2
+        |    rects[0].size.x = 10
+        |    rects[0].size.y = 20
+        |    rects[1].origin.x = 3
+        |    rects[1].origin.y = 4
+        |    rects[1].size.x = 30
+        |    rects[1].size.y = 40
+        |    rects[0].origin.x + rects[1].size.y
+        |""".stripMargin) shouldBe 41
+  }
+
+  "nested struct passed to function via pointer" in {
+    compileAndRun(
+      """struct Inner
+        |    value: int
+        |
+        |struct Outer
+        |    inner: Inner
+        |    count: int
+        |
+        |get_inner_value(o: *Outer) -> int = o.inner.value
+        |
+        |var obj: Outer
+        |
+        |main() -> int
+        |    var p: *Outer = &obj
+        |    p.inner.value = 77
+        |    p.count = 3
+        |    get_inner_value(p)
+        |""".stripMargin) shouldBe 77
+  }
+
+  "nested struct local variable" in {
+    compileAndRun(
+      """struct Inner
+        |    x: int
+        |    y: int
+        |
+        |struct Outer
+        |    inner: Inner
+        |    z: int
+        |
+        |main() -> int
+        |    o: Outer
+        |    o.inner.x = 10
+        |    o.inner.y = 20
+        |    o.z = 12
+        |    o.inner.x + o.inner.y + o.z
+        |""".stripMargin) shouldBe 42
+  }
+
+  "struct with embedded struct and i8 fields" in {
+    compileAndRun(
+      """struct Flags
+        |    a: i8
+        |    b: i8
+        |
+        |struct Config
+        |    flags: Flags
+        |    count: int
+        |
+        |var cfg: Config
+        |
+        |main() -> int
+        |    var p: *Config = &cfg
+        |    p.flags.a = 1
+        |    p.flags.b = 2
+        |    p.count = 39
+        |    p.flags.a + p.flags.b + p.count
+        |""".stripMargin) shouldBe 42
+  }
 }
