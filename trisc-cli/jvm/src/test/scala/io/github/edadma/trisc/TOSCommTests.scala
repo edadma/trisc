@@ -59,7 +59,7 @@ class TOSCommTests extends TOSTestHelpers {
           |    chan_send(&ch, 65)
           |    chan_send(&ch, 66)
           |    chan_send(&ch, 67)
-          |    putc(83)
+          |    putc('S')
           |
           |receiver()
           |    sleep(30)
@@ -102,7 +102,7 @@ class TOSCommTests extends TOSTestHelpers {
           |receiver()
           |    putc(int(mbox_recv(&mb)))
           |    putc(int(mbox_recv(&mb)))
-          |    putc(10)
+          |    putc('\n')
           |""".stripMargin
     ))
 
@@ -128,9 +128,9 @@ class TOSCommTests extends TOSTestHelpers {
           |
           |sender()
           |    mbox_send(&mb, 49)
-          |    putc(65)
+          |    putc('A')
           |    mbox_send(&mb, 50)
-          |    putc(66)
+          |    putc('B')
           |
           |receiver()
           |    sleep(20)

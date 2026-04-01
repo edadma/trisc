@@ -60,7 +60,7 @@ Syscall numbers:
 
 @api putc(ch) — Write a character to stdout.
 
-  putc(ch: int)
+  putc(ch: char)
       syscall(SYS_PUTC, ch)
 
 @api yield() — Voluntary context switch. Resets watchdog counter.

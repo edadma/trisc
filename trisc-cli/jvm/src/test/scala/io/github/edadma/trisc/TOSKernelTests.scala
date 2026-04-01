@@ -15,9 +15,9 @@ class TOSKernelTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |task()
-          |    putc(72)
-          |    putc(105)
-          |    putc(10)
+          |    putc('H')
+          |    putc('i')
+          |    putc('\n')
           |""".stripMargin
     ), maxCycles = 100000)
 
@@ -38,10 +38,10 @@ class TOSKernelTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |task1()
-          |    putc(65)
+          |    putc('A')
           |
           |task2()
-          |    putc(66)
+          |    putc('B')
           |""".stripMargin
     ), maxCycles = 100000)
 
@@ -63,11 +63,11 @@ class TOSKernelTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |task()
-          |    putc(65)
+          |    putc('A')
           |    sleep(5)
-          |    putc(66)
+          |    putc('B')
           |    sleep(5)
-          |    putc(67)
+          |    putc('C')
           |""".stripMargin
     ))
 
@@ -82,14 +82,14 @@ class TOSKernelTests extends TOSTestHelpers {
           |task_a()
           |    var i = 0
           |    while i < 3
-          |        putc(65)
+          |        putc('A')
           |        sleep(10)
           |        i += 1
           |
           |task_b()
           |    var i = 0
           |    while i < 3
-          |        putc(66)
+          |        putc('B')
           |        sleep(20)
           |        i += 1
           |""".stripMargin,

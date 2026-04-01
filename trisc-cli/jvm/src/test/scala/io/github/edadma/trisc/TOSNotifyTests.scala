@@ -21,9 +21,9 @@ class TOSNotifyTests extends TOSTestHelpers {
           |    notify_wait()
           |    val v = notify_read_self()
           |    if v == 42
-          |        putc(89)
+          |        putc('Y')
           |    else
-          |        putc(78)
+          |        putc('N')
           |
           |sender()
           |    sleep(10)
@@ -50,7 +50,7 @@ class TOSNotifyTests extends TOSTestHelpers {
           |task()
           |    sleep(20)
           |    notify_wait()
-          |    putc(65)
+          |    putc('A')
           |
           |sender()
           |    sleep(5)
@@ -80,7 +80,7 @@ class TOSNotifyTests extends TOSTestHelpers {
           |
           |waiter()
           |    event_wait(3, 0)
-          |    putc(87)
+          |    putc('W')
           |
           |setter()
           |    sleep(10)
@@ -107,7 +107,7 @@ class TOSNotifyTests extends TOSTestHelpers {
           |
           |waiter()
           |    event_wait(3, 1)
-          |    putc(87)
+          |    putc('W')
           |
           |setter()
           |    sleep(10)
@@ -144,11 +144,11 @@ class TOSNotifyTests extends TOSTestHelpers {
           |    rmutex_lock(&rm)
           |    rmutex_lock(&rm)
           |    rmutex_lock(&rm)
-          |    putc(65)
+          |    putc('A')
           |    rmutex_unlock(&rm)
           |    rmutex_unlock(&rm)
           |    rmutex_unlock(&rm)
-          |    putc(66)
+          |    putc('B')
           |""".stripMargin
     ))
 
@@ -177,15 +177,15 @@ class TOSNotifyTests extends TOSTestHelpers {
           |
           |holder()
           |    rmutex_lock(&rm)
-          |    putc(72)
+          |    putc('H')
           |    sleep(30)
           |    rmutex_unlock(&rm)
-          |    putc(85)
+          |    putc('U')
           |
           |waiter()
           |    sleep(5)
           |    rmutex_lock(&rm)
-          |    putc(87)
+          |    putc('W')
           |    rmutex_unlock(&rm)
           |""".stripMargin
     ))
@@ -222,9 +222,9 @@ class TOSNotifyTests extends TOSTestHelpers {
           |waiter()
           |    val id = qset_wait(&qs, 0)
           |    if id == 20
-          |        putc(89)
+          |        putc('Y')
           |    else
-          |        putc(78)
+          |        putc('N')
           |
           |poster()
           |    sleep(10)
@@ -260,9 +260,9 @@ class TOSNotifyTests extends TOSTestHelpers {
           |    val id1 = qset_wait(&qs, 0)
           |    val id2 = qset_wait(&qs, 0)
           |    if id1 == 10
-          |        putc(65)
+          |        putc('A')
           |    if id2 == 30
-          |        putc(66)
+          |        putc('B')
           |
           |poster()
           |    sleep(5)

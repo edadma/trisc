@@ -17,11 +17,11 @@ class TOSThreadTests extends TOSTestHelpers {
           |
           |worker()
           |    sleep(30)
-          |    putc(87)
+          |    putc('W')
           |
           |joiner()
           |    join(0)
-          |    putc(74)
+          |    putc('J')
           |""".stripMargin
     ))
 
@@ -46,12 +46,12 @@ class TOSThreadTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |fast()
-          |    putc(70)
+          |    putc('F')
           |
           |slow()
           |    sleep(50)
           |    join(0)
-          |    putc(83)
+          |    putc('S')
           |""".stripMargin
     ))
 
@@ -74,10 +74,10 @@ class TOSThreadTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |task_a()
-          |    putc(72)
+          |    putc('H')
           |
           |task_b()
-          |    putc(76)
+          |    putc('L')
           |""".stripMargin
     ))
 
@@ -103,14 +103,14 @@ class TOSThreadTests extends TOSTestHelpers {
           |task_a()
           |    var i = 0
           |    while i < 3
-          |        putc(65)
+          |        putc('A')
           |        sleep(10)
           |        i += 1
           |
           |task_b()
           |    var i = 0
           |    while i < 3
-          |        putc(66)
+          |        putc('B')
           |        sleep(10)
           |        i += 1
           |""".stripMargin
@@ -135,7 +135,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |
           |task()
           |    val t = uptime()
-          |    putc(89)
+          |    putc('Y')
           |""".stripMargin
     ))
 
@@ -159,9 +159,9 @@ class TOSThreadTests extends TOSTestHelpers {
           |    sleep(10)
           |    val t2 = uptime()
           |    if t2 > t1
-          |        putc(89)
+          |        putc('Y')
           |    else
-          |        putc(78)
+          |        putc('N')
           |""".stripMargin
     ))
 
@@ -268,9 +268,9 @@ class TOSThreadTests extends TOSTestHelpers {
           |    sleep_until(target)
           |    val now = uptime()
           |    if now >= target
-          |        putc(89)
+          |        putc('Y')
           |    else
-          |        putc(78)
+          |        putc('N')
           |""".stripMargin
     ))
 
@@ -296,9 +296,9 @@ class TOSThreadTests extends TOSTestHelpers {
           |    sleep(10)
           |    val sw = get_ctx_switches(0)
           |    if sw > 1
-          |        putc(89)
+          |        putc('Y')
           |    else
-          |        putc(78)
+          |        putc('N')
           |""".stripMargin
     ))
 
@@ -322,9 +322,9 @@ class TOSThreadTests extends TOSTestHelpers {
           |    sleep(20)
           |    val t = get_cpu_ticks(0)
           |    if t > 0
-          |        putc(89)
+          |        putc('Y')
           |    else
-          |        putc(78)
+          |        putc('N')
           |""".stripMargin
     ))
 
@@ -351,9 +351,9 @@ class TOSThreadTests extends TOSTestHelpers {
           |    sleep(20)
           |    val total = get_total_switches()
           |    if total >= 4
-          |        putc(89)
+          |        putc('Y')
           |    else
-          |        putc(78)
+          |        putc('N')
           |""".stripMargin
     ))
 
@@ -393,9 +393,9 @@ class TOSThreadTests extends TOSTestHelpers {
           |    sleep(100)
           |    val state = get_thread_state(0)
           |    if state == 3
-          |        putc(75)
+          |        putc('K')
           |    else
-          |        putc(82)
+          |        putc('R')
           |""".stripMargin
     ))
 
@@ -422,11 +422,11 @@ class TOSThreadTests extends TOSTestHelpers {
           |    while i < 20
           |        yield()
           |        i += 1
-          |    putc(65)
+          |    putc('A')
           |
           |checker()
           |    sleep(100)
-          |    putc(67)
+          |    putc('C')
           |""".stripMargin
     ))
 
@@ -451,7 +451,7 @@ class TOSThreadTests extends TOSTestHelpers {
           |
           |task()
           |    putstr("Hi")
-          |    putc(10)
+          |    putc('\n')
           |""".stripMargin
     ))
 
@@ -475,9 +475,9 @@ class TOSThreadTests extends TOSTestHelpers {
           |task()
           |    val ok = check_stack(0x6000)
           |    if ok == 1
-          |        putc(89)
+          |        putc('Y')
           |    else
-          |        putc(78)
+          |        putc('N')
           |""".stripMargin
     ))
 
@@ -509,10 +509,10 @@ class TOSThreadTests extends TOSTestHelpers {
           |controller()
           |    sleep(10)
           |    suspend(0)
-          |    putc(83)
+          |    putc('S')
           |    sleep(30)
           |    resume(0)
-          |    putc(82)
+          |    putc('R')
           |""".stripMargin
     ))
 
@@ -545,9 +545,9 @@ class TOSThreadTests extends TOSTestHelpers {
           |    sleep(5)
           |    val s = get_thread_state(0)
           |    if s == 5
-          |        putc(89)
+          |        putc('Y')
           |    else
-          |        putc(78)
+          |        putc('N')
           |""".stripMargin
     ))
 
@@ -570,9 +570,9 @@ class TOSThreadTests extends TOSTestHelpers {
           |    first_thread_ssp()
           |
           |task()
-          |    putc(65)
+          |    putc('A')
           |    panic()
-          |    putc(66)
+          |    putc('B')
           |""".stripMargin
     ))
 
@@ -602,9 +602,9 @@ class TOSThreadTests extends TOSTestHelpers {
           |    val a = tls_get(0)
           |    val b = tls_get(1)
           |    if a == 42
-          |        putc(65)
+          |        putc('A')
           |    if b == 99
-          |        putc(66)
+          |        putc('B')
           |""".stripMargin
     ))
 
@@ -630,18 +630,18 @@ class TOSThreadTests extends TOSTestHelpers {
           |    sleep(20)
           |    val v = tls_get(0)
           |    if v == 10
-          |        putc(65)
+          |        putc('A')
           |    else
-          |        putc(78)
+          |        putc('N')
           |
           |task_b()
           |    tls_set(0, 20)
           |    sleep(20)
           |    val v = tls_get(0)
           |    if v == 20
-          |        putc(66)
+          |        putc('B')
           |    else
-          |        putc(78)
+          |        putc('N')
           |""".stripMargin
     ))
 
