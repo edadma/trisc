@@ -18,7 +18,7 @@ Device registers:
   val KB_MODS:     *i8 = *i8(0x100007)
   val KB_IRQ = 1
 
-  extern register_irq(irq: int, handler: int)
+  extern register_irq(irq: int, handler: i64)
 
 @tech
 Ring buffer for keyboard events. Each event is stored as a packed

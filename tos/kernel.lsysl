@@ -52,7 +52,7 @@ Statistics fields track per-thread performance:
 @
 
   struct Task
-      ssp: int
+      ssp: i64
       state: int
       wake_tick: int
       name: *byte
@@ -134,7 +134,7 @@ Each timer has:
   struct SoftTimer
       active: int
       fire_tick: int
-      callback: int
+      callback: i64
 
   var timers: [8]SoftTimer
 
@@ -143,7 +143,7 @@ Each timer has:
 
   extern thread_exit()
 
-  register_irq(irq: int, handler: int)
+  register_irq(irq: int, handler: i64)
       irq_handlers[irq] = handler
 
 @tech
@@ -196,7 +196,7 @@ The frame must match the layout that boot.asm expects:
   PSR, PC, r1-r6, USP  (9 x 8 bytes, top to bottom)
 @
 
-  build_stack_frame(entry_point: int, usp: int, ssp: int) -> int
+  build_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64
       var sp = ssp
       sp -= 8
       *(*i64(sp)) = 0                 // PSR
@@ -220,7 +220,7 @@ The frame must match the layout that boot.asm expects:
 
 @api create_thread(entry_point, usp, ssp, name) — Create thread at default priority (0 = highest).
 
-  create_thread(entry_point: int, usp: int, ssp: int, name: *byte)
+  create_thread(entry_point: i64, usp: i64, ssp: i64, name: *byte)
       create_thread_pri(entry_point, usp, ssp, name, 0)
 
 @api create_thread_pri(entry_point, usp, ssp, name, priority) — Create thread at given priority.
@@ -229,7 +229,7 @@ The frame must match the layout that boot.asm expects:
 Lower priority number = higher priority. Priority 0 runs first.
 @
 
-  create_thread_pri(entry_point: int, usp: int, ssp: int, name: *byte, priority: int)
+  create_thread_pri(entry_point: i64, usp: i64, ssp: i64, name: *byte, priority: int)
       ensure_queues_init()
       val idx = thread_count
       val sp = build_stack_frame(entry_point, usp, ssp)
@@ -356,7 +356,7 @@ Steps:
   8. Return its SSP, or 0 if all queues are empty
 @
 
-  schedule(current_ssp: int) -> int
+  schedule(current_ssp: i64) -> i64
       ticks += 1
 
       // Save current thread (skip when idle, current_thread == -1)
@@ -414,7 +414,7 @@ context-switch into the first thread. Dequeues from the
 highest-priority non-empty queue.
 @
 
-  first_thread_ssp() -> int
+  first_thread_ssp() -> i64
       // Dequeue the highest-priority thread
       var pri = 0
       while pri < NUM_PRIORITIES
@@ -436,7 +436,7 @@ The callback is a function pointer (int) that will be called
 after delay ticks. One-shot: fires once then deactivates.
 @
 
-  timer_arm(delay: int, callback: int) -> int
+  timer_arm(delay: int, callback: i64) -> int
       var i = 0
       while i < MAX_TIMERS
           if timers[i].active == 0
@@ -487,7 +487,7 @@ STACK_CANARY, the stack has not overflowed.
 
 @api check_stack_at(addr) -> int — Check if canary at addr is intact. Returns 1 if ok.
 
-  check_stack_at(addr: int) -> int
+  check_stack_at(addr: i64) -> int
       var p: *int = *int(addr)
       if *p == STACK_CANARY
           return 1
@@ -528,12 +528,12 @@ stack or context — it can be resumed exactly where it left off.
 
 @api kernel_set_idle_hook(hook) — Set the idle hook function pointer.
 
-  kernel_set_idle_hook(hook: int)
+  kernel_set_idle_hook(hook: i64)
       idle_hook = hook
 
 @api kernel_set_tick_hook(hook) — Set the tick hook function pointer.
 
-  kernel_set_tick_hook(hook: int)
+  kernel_set_tick_hook(hook: i64)
       tick_hook = hook
 
 @api notify_send(target_id, value) — Send a notification to a thread.

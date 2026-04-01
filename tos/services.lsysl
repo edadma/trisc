@@ -21,7 +21,7 @@ Syscall numbers:
   14 = set_watchdog   — set watchdog quanta limit (0 = disable)
 @
 
-  extern syscall(number: int, arg: int) -> int
+  extern syscall(number: int, arg: i64) -> i64
 
   val SYS_SLEEP          = 0
   val SYS_PUTC           = 1
@@ -98,9 +98,9 @@ Syscall numbers:
   get_thread_state(id: int) -> int
       syscall(SYS_THREAD_STATE, id)
 
-@api get_thread_name(id) -> int — Return the name pointer of a thread.
+@api get_thread_name(id) -> *byte — Return the name pointer of a thread.
 
-  get_thread_name(id: int) -> int
+  get_thread_name(id: int) -> *byte
       syscall(SYS_THREAD_NAME, id)
 
 @api sleep_until(tick) — Block until the tick counter reaches the given value.
@@ -145,7 +145,7 @@ Syscall numbers:
 
 @api check_stack(addr) -> int — Check stack canary at addr. Returns 1 if intact.
 
-  check_stack(addr: int) -> int
+  check_stack(addr: i64) -> int
       syscall(SYS_CHECK_STACK, addr)
 
 @api suspend(id) — Suspend a thread without terminating it.

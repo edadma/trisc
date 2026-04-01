@@ -136,13 +136,22 @@ class SyslTypeCheckTests extends SyslTestHelpers {
 
   // ===== FuncType → int compatibility =====
 
-  "function ref accepted where int expected in analysis" in {
+  "function ref accepted where i64 expected in analysis" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """target() -> int = 42
+        |take_addr(addr: i64) -> int = 0
+        |main() -> int = take_addr(target)
+        |""".stripMargin): @unchecked
+    (new SyslAnalyzer).analyze(ast) // should not throw
+  }
+
+  "function ref rejected where int (32-bit) expected" in {
     val Right(ast) = (new SyslParser).parseProgram(
       """target() -> int = 42
         |take_addr(addr: int) -> int = addr
         |main() -> int = take_addr(target)
         |""".stripMargin): @unchecked
-    (new SyslAnalyzer).analyze(ast) // should not throw
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
   }
 
   "function ref rejected where bool expected" in {

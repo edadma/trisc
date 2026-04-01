@@ -384,10 +384,10 @@ class SyslCodegenPointerTests extends SyslCodegenHelpers {
         |""".stripMargin) shouldBe 1
   }
 
-  "function ref as int argument" in {
+  "function ref as i64 argument" in {
     compileAndRun(
       """target() -> int = 42
-        |take_addr(addr: int) -> int
+        |take_addr(addr: i64) -> int
         |    if addr != 0 then 1 else 0
         |main() -> int = take_addr(target)
         |""".stripMargin) shouldBe 1

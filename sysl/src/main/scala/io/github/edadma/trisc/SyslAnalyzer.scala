@@ -205,10 +205,10 @@ class SyslAnalyzer:
   private def compatible(from: SyslType, to: SyslType): Boolean =
     (from, to) match
       case (a, b) if a == b => true
-      case (_: IntType, _: IntType) => true    // signed ↔ signed (width promotion)
-      case (_: UIntType, _: UIntType) => true  // unsigned ↔ unsigned (width promotion)
-      case (_: IntType, _: UIntType) => true   // signed → unsigned (same bit representation)
-      case (_: UIntType, _: IntType) => true   // unsigned → signed (same bit representation)
+      case (IntType(a), IntType(b)) if a <= b => true    // signed widening
+      case (UIntType(a), UIntType(b)) if a <= b => true  // unsigned widening
+      case (IntType(a), UIntType(b)) if a <= b => true   // signed → unsigned widening
+      case (UIntType(a), IntType(b)) if a <= b => true   // unsigned → signed widening
       case (DoubleType, DoubleType) => true
       case (_: IntType, DoubleType) => true    // signed int → float promotion
       case (_: UIntType, DoubleType) => true   // unsigned int → float promotion
@@ -216,7 +216,7 @@ class SyslAnalyzer:
       case (DoubleType, _: UIntType) => true   // float → unsigned int (truncation)
       // bool and int are NOT compatible — use explicit casts
       // int ↔ pointer: NOT compatible — use explicit casts: int(ptr), *i8(addr)
-      case (_: FuncType, t) if t.isIntegral => true   // function pointer → int (entry point address)
+      case (_: FuncType, IntType(64) | UIntType(64)) => true // function pointer → i64 (entry point address)
       case (PtrType(_), PtrType(_)) => true           // any pointer ↔ any pointer (like C's void*)
       case (ArrayType(_, _), PtrType(_)) => true          // array decays to any pointer
       case (StringType, PtrType(I8 | U8)) => true          // string decays to *i8 / *byte
