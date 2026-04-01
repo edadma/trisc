@@ -216,10 +216,10 @@ Slot range: 0-3. Value range: 0 to 16777215.
 
 @api pimutex_lock_sys(addr) — Lock a PI mutex (may block with priority inheritance).
 
-  pimutex_lock_sys(addr: int)
+  pimutex_lock_sys(addr: i64)
       syscall(SYS_PIMUTEX_LOCK, addr)
 
 @api pimutex_unlock_sys(addr) — Unlock a PI mutex (restores priority, wakes waiter).
 
-  pimutex_unlock_sys(addr: int)
+  pimutex_unlock_sys(addr: i64)
       syscall(SYS_PIMUTEX_UNLOCK, addr)

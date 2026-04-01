@@ -66,7 +66,7 @@ Statistics fields track per-thread performance:
       notify_value: int
       notify_pending: int
       base_priority: int
-      blocked_on: int
+      blocked_on: i64
 
 @tech
 Run queues: one FIFO queue per priority level. Each queue
@@ -707,7 +707,7 @@ us until pimutex_unlock_kernel wakes us.
           tasks[m.wait_tail].next = current_thread
           m.wait_tail = current_thread
       tasks[current_thread].state = STATE_MUTEX_WAIT
-      tasks[current_thread].blocked_on = int(m)
+      tasks[current_thread].blocked_on = i64(m)
       tasks[current_thread].consec_quanta = 0
 
 @api pimutex_unlock_kernel(m) — Kernel-level PI mutex unlock. Restores priority, wakes waiter.
