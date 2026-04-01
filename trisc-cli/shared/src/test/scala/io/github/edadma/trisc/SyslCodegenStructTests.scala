@@ -727,4 +727,122 @@ class SyslCodegenStructTests extends SyslCodegenHelpers {
         |    p.flags.a + p.flags.b + p.count
         |""".stripMargin) shouldBe 42
   }
+
+  // ===== Alignment inheritance tests =====
+
+  "large inner struct aligns to widest field not total size" in {
+    // Inner is 32 bytes (8 x i32) but alignment is 4, not 32
+    // Outer should not waste space aligning to 32
+    compileAndRun(
+      """struct Big
+        |    a: i32
+        |    b: i32
+        |    c: i32
+        |    d: i32
+        |    e: i32
+        |    f: i32
+        |    g: i32
+        |    h: i32
+        |
+        |struct Wrapper
+        |    x: i8
+        |    inner: Big
+        |    y: i8
+        |
+        |main() -> int
+        |    // Big has align 4: sizeof = 32
+        |    // Wrapper: x(1) + 3pad + Big(32) + y(1) + 3pad = 40
+        |    sizeof(Wrapper)
+        |""".stripMargin) shouldBe 40
+  }
+
+  "large inner struct read/write through outer" in {
+    compileAndRun(
+      """struct Big
+        |    a: i32
+        |    b: i32
+        |    c: i32
+        |    d: i32
+        |    e: i32
+        |    f: i32
+        |    g: i32
+        |    h: i32
+        |
+        |struct Wrapper
+        |    x: i8
+        |    inner: Big
+        |    y: i8
+        |
+        |var w: Wrapper
+        |
+        |main() -> int
+        |    var p: *Wrapper = &w
+        |    p.x = 1
+        |    p.inner.a = 10
+        |    p.inner.h = 80
+        |    p.y = 2
+        |    p.x + p.inner.a + p.inner.h + p.y
+        |""".stripMargin) shouldBe 93
+  }
+
+  "inner struct with i64 field forces outer alignment to 8" in {
+    compileAndRun(
+      """struct Inner
+        |    small: i8
+        |    big: i64
+        |
+        |struct Outer
+        |    flag: i8
+        |    inner: Inner
+        |
+        |main() -> int
+        |    // Inner: i8(1) + 7pad + i64(8) = 16, align 8
+        |    // Outer: i8(1) + 7pad + Inner(16) = 24, align 8
+        |    sizeof(Outer)
+        |""".stripMargin) shouldBe 24
+  }
+
+  "all-i8 inner struct has alignment 1" in {
+    compileAndRun(
+      """struct Tiny
+        |    a: i8
+        |    b: i8
+        |    c: i8
+        |    d: i8
+        |
+        |struct Container
+        |    tiny: Tiny
+        |    value: i8
+        |
+        |main() -> int
+        |    // Tiny: 4 bytes, align 1
+        |    // Container: Tiny(4) + i8(1) = 5, align 1
+        |    sizeof(Container)
+        |""".stripMargin) shouldBe 5
+  }
+
+  "array of outer structs with large inner" in {
+    compileAndRun(
+      """struct Big
+        |    a: i32
+        |    b: i32
+        |    c: i32
+        |    d: i32
+        |
+        |struct Wrapper
+        |    tag: i8
+        |    data: Big
+        |
+        |var arr: [2]Wrapper
+        |
+        |main() -> int
+        |    arr[0].tag = 1
+        |    arr[0].data.a = 10
+        |    arr[0].data.d = 40
+        |    arr[1].tag = 2
+        |    arr[1].data.a = 100
+        |    arr[1].data.d = 400
+        |    arr[0].tag + arr[0].data.a + arr[1].data.d
+        |""".stripMargin) shouldBe 411
+  }
 }
