@@ -199,23 +199,23 @@ The frame must match the layout that boot.asm expects:
   build_stack_frame(entry_point: int, usp: int, ssp: int) -> int
       var sp = ssp
       sp -= 8
-      *(*int(sp)) = 0                 // PSR
+      *(*i64(sp)) = 0                 // PSR
       sp -= 8
-      *(*int(sp)) = entry_point       // PC
+      *(*i64(sp)) = entry_point       // PC
       sp -= 8
-      *(*int(sp)) = 0                 // r1
+      *(*i64(sp)) = 0                 // r1
       sp -= 8
-      *(*int(sp)) = 0                 // r2
+      *(*i64(sp)) = 0                 // r2
       sp -= 8
-      *(*int(sp)) = 0                 // r3
+      *(*i64(sp)) = 0                 // r3
       sp -= 8
-      *(*int(sp)) = 0                 // r4
+      *(*i64(sp)) = 0                 // r4
       sp -= 8
-      *(*int(sp)) = 0                 // r5
+      *(*i64(sp)) = 0                 // r5
       sp -= 8
-      *(*int(sp)) = thread_exit       // r6 = return address (exit trampoline)
+      *(*i64(sp)) = thread_exit       // r6 = return address (exit trampoline)
       sp -= 8
-      *(*int(sp)) = usp               // USP
+      *(*i64(sp)) = usp               // USP
       sp
 
 @api create_thread(entry_point, usp, ssp, name) — Create thread at default priority (0 = highest).

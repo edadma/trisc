@@ -365,20 +365,8 @@ class SyslParser extends StandardTokenParsers {
         }
       }
 
-  lazy val charLit: Parser[ExpressionAST] =
-    stringLit ^? ({
-      case s if s.length == 1 => IntLitAST(s.charAt(0).toLong)
-      case s if s.length == 2 && s.charAt(0) == '\\' => IntLitAST(s.charAt(1) match
-        case 'n' => '\n'.toLong
-        case 't' => '\t'.toLong
-        case 'r' => '\r'.toLong
-        case '0' => 0L
-        case '\\' => '\\'.toLong
-        case '\'' => '\''.toLong
-        case '"' => '"'.toLong
-        case c => c.toLong
-      )
-    }, s => s"invalid char literal: '$s'")
+  // charLit is no longer needed — char literals are handled in the lexer
+  // as NumericLit with :char suffix, parsed in the numericLit branch of primary
 
   // sizeof argument: try pointer/array/func types first, then bare name
   // A bare name could be a type (struct) or a variable — analyzer decides
@@ -407,7 +395,6 @@ class SyslParser extends StandardTokenParsers {
       else if n.contains('.') || n.contains('e') || n.contains('E') then FloatLitAST(n.toDouble)
       else IntLitAST(n.toLong)
     } |
-      charLit |
       stringLit ^^ StringLitExprAST.apply |
       "true" ^^^ BoolLitAST(true) |
       "false" ^^^ BoolLitAST(false) |

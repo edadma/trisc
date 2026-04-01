@@ -49,7 +49,21 @@ class SyslLexical extends IndentationLexical(
       case sign ~ digits => (sign :: digits).mkString
     }
 
+  private def escapeChar: Parser[Char] =
+    '\\' ~> (
+      elem('n') ^^^ '\n' |
+      elem('t') ^^^ '\t' |
+      elem('r') ^^^ '\r' |
+      elem('0') ^^^ '\u0000' |
+      elem('\\') ^^^ '\\' |
+      elem('\'') ^^^ '\''
+    )
+
   override def token: Parser[Token] =
+    // Character literal: 'x' or '\n' — emitted as NumericLit with :char suffix
+    '\'' ~> (escapeChar | chrExcept('\'', '\n', EofCh)) <~ '\'' ^^ { c =>
+      NumericLit(s"${c.toLong}:char")
+    } |
     // Float literal: digits.digits[e[+-]digits] or digits e[+-]digits
     rep1(digit) ~ '.' ~ rep1(digit) ~ opt(exponent) ^^ {
       case intPart ~ dot ~ fracPart ~ exp =>
