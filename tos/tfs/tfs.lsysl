@@ -72,7 +72,7 @@ rd_read(lba, addr) — Read one block from ramdisk into RAM at addr.
 
   rd_read(lba: int, addr: *i8)
       val a: int = int(addr)
-      val p: *i8 = RD_BASE
+      val p: *i8 = *i8(RD_BASE)
       p[RD_LBA_OFF + 0] = (lba >> 24) & 0xFF
       p[RD_LBA_OFF + 1] = (lba >> 16) & 0xFF
       p[RD_LBA_OFF + 2] = (lba >> 8) & 0xFF
@@ -87,7 +87,7 @@ rd_read(lba, addr) — Read one block from ramdisk into RAM at addr.
 
   rd_write(lba: int, addr: *i8)
       val a: int = int(addr)
-      val p: *i8 = RD_BASE
+      val p: *i8 = *i8(RD_BASE)
       p[RD_LBA_OFF + 0] = (lba >> 24) & 0xFF
       p[RD_LBA_OFF + 1] = (lba >> 16) & 0xFF
       p[RD_LBA_OFF + 2] = (lba >> 8) & 0xFF

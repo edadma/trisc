@@ -23,15 +23,15 @@ Writers acquire write_lock directly, blocking until all readers finish.
       reader_count: i64
 
   rwlock_lock_ptr(rw: int) -> *i64
-      rw
+      *i64(rw)
 
   rwlock_write_lock_ptr(rw: int) -> *i64
-      rw + 8
+      *i64(rw + 8)
 
 @api rwlock_init(rw) — Initialize a reader-writer lock.
 
   rwlock_init(rw: *RWLock)
-      val addr: int = rw
+      val addr: int = int(rw)
       mutex_init(rwlock_lock_ptr(addr))
       mutex_init(rwlock_write_lock_ptr(addr))
       rw.reader_count = 0
@@ -39,7 +39,7 @@ Writers acquire write_lock directly, blocking until all readers finish.
 @api read_lock(rw) — Acquire shared read access.
 
   read_lock(rw: *RWLock)
-      val addr: int = rw
+      val addr: int = int(rw)
       mutex_lock(rwlock_lock_ptr(addr))
       rw.reader_count += 1
       if rw.reader_count == 1
@@ -49,7 +49,7 @@ Writers acquire write_lock directly, blocking until all readers finish.
 @api read_unlock(rw) — Release shared read access.
 
   read_unlock(rw: *RWLock)
-      val addr: int = rw
+      val addr: int = int(rw)
       mutex_lock(rwlock_lock_ptr(addr))
       rw.reader_count -= 1
       if rw.reader_count == 0
@@ -59,11 +59,11 @@ Writers acquire write_lock directly, blocking until all readers finish.
 @api write_lock(rw) — Acquire exclusive write access.
 
   write_lock(rw: *RWLock)
-      val addr: int = rw
+      val addr: int = int(rw)
       mutex_lock(rwlock_write_lock_ptr(addr))
 
 @api write_unlock(rw) — Release exclusive write access.
 
   write_unlock(rw: *RWLock)
-      val addr: int = rw
+      val addr: int = int(rw)
       mutex_unlock(rwlock_write_lock_ptr(addr))

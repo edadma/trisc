@@ -1,12 +1,12 @@
-val KB_STATUS: *i8 = 0x100004
-val KB_SCANCODE: *i8 = 0x100005
-val KB_FLAGS: *i8 = 0x100006
-val KB_MODIFIERS: *i8 = 0x100007
+val KB_STATUS: *i8 = *i8(0x100004)
+val KB_SCANCODE: *i8 = *i8(0x100005)
+val KB_FLAGS: *i8 = *i8(0x100006)
+val KB_MODIFIERS: *i8 = *i8(0x100007)
 
-val MS_STATUS: *i8 = 0x10002A
-val MS_BUTTONS: *i8 = 0x10002B
-val MS_X: *i16 = 0x10002C
-val MS_Y: *i16 = 0x10002E
+val MS_STATUS: *i8 = *i8(0x10002A)
+val MS_BUTTONS: *i8 = *i8(0x10002B)
+val MS_X: *i16 = *i16(0x10002C)
+val MS_Y: *i16 = *i16(0x10002E)
 
 main()
     putstr("Input test - press keys, move mouse\n")

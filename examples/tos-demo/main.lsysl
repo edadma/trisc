@@ -18,9 +18,9 @@ kernel_main() is called by boot.asm. It must:
       create_thread(task_b, 0x8000, 0x7000, "task_b")
 
       // Start timer: 10ms per tick (100 ticks = 1 second)
-      val period: *i32 = TIMER_DEVICE
+      val period: *i32 = *i32(TIMER_DEVICE)
       *period = TICK_MS
-      val control: *i8 = TIMER_DEVICE + 4
+      val control: *i8 = *i8(TIMER_DEVICE + 4)
       *control = 1
 
       first_thread_ssp()

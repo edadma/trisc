@@ -1025,7 +1025,7 @@ font_data: [16150]byte = [
 ]
 
 dc_write(offset: int, v: int)
-    p: *i8 = DISPLAY_CTRL + offset
+    p: *i8 = *i8(DISPLAY_CTRL + offset)
     *p = byte(v)
 
 init_fb()
@@ -1037,15 +1037,15 @@ init_fb()
     dc_write(1, 1)
 
 blit_write(offset: int, v: int)
-    p: *i8 = 0x10000C + offset
+    p: *i8 = *i8(0x10000C + offset)
     *p = byte(v)
 
 blit_write32(offset: int, v: int)
-    p: *i32 = 0x10000C + offset
+    p: *i32 = *i32(0x10000C + offset)
     *p = v
 
 blit_write16(offset: int, v: int)
-    p: *i16 = 0x10000C + offset
+    p: *i16 = *i16(0x10000C + offset)
     *p = i16(v)
 
 draw_char(x: int, y: int, ch: int, r: int, g: int, b: int)

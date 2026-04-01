@@ -330,6 +330,7 @@ class SyslParser extends StandardTokenParsers {
       "-" ~> unary ^^ (e => UnaryAST("-", e)) |
       "!" ~> unary ^^ (e => UnaryAST("!", e)) |
       "~" ~> unary ^^ (e => UnaryAST("~", e)) |
+      "*" ~> scalarCastType ~ ("(" ~> expr <~ ")") ^^ { case t ~ e => CastAST(s"*$t", e) } |
       "*" ~> unary ^^ DerefAST.apply |
       "&" ~> ident ~ rep1("." ~> ident) ^^ { case name ~ fields =>
         val base: ExpressionAST = VarRefAST(name)
@@ -389,8 +390,11 @@ class SyslParser extends StandardTokenParsers {
       ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool" | "void" | "string") ^^ SizeofTypeAST.apply |
       expr ^^ SizeofExprAST.apply
 
-  lazy val castType: Parser[String] =
+  lazy val scalarCastType: Parser[String] =
     "int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool"
+
+  lazy val castType: Parser[String] =
+    scalarCastType
 
   lazy val cast: Parser[CastAST] =
     castType ~ ("(" ~> expr <~ ")") ^^ { case t ~ e => CastAST(t, e) }

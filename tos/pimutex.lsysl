@@ -25,11 +25,11 @@ so it can manipulate thread priorities and wait queues.
 @api pimutex_lock(m) — Acquire the PI mutex, blocking with priority inheritance if held.
 
   pimutex_lock(m: *PIMutex)
-      val addr: int = m
+      val addr: int = int(m)
       pimutex_lock_sys(addr)
 
 @api pimutex_unlock(m) — Release the PI mutex, restoring priority and waking next waiter.
 
   pimutex_unlock(m: *PIMutex)
-      val addr: int = m
+      val addr: int = int(m)
       pimutex_unlock_sys(addr)

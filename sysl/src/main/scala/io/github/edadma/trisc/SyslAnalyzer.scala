@@ -207,17 +207,19 @@ class SyslAnalyzer:
       case (a, b) if a == b => true
       case (_: IntType, _: IntType) => true    // signed ↔ signed (width promotion)
       case (_: UIntType, _: UIntType) => true  // unsigned ↔ unsigned (width promotion)
-      // signed ↔ unsigned: NOT compatible — use explicit casts
+      case (_: IntType, _: UIntType) => true   // signed → unsigned (same bit representation)
+      case (_: UIntType, _: IntType) => true   // unsigned → signed (same bit representation)
       case (DoubleType, DoubleType) => true
       case (_: IntType, DoubleType) => true    // signed int → float promotion
       case (_: UIntType, DoubleType) => true   // unsigned int → float promotion
       case (DoubleType, _: IntType) => true    // float → signed int (truncation)
       case (DoubleType, _: UIntType) => true   // float → unsigned int (truncation)
       // bool and int are NOT compatible — use explicit casts
-      case (t, PtrType(_)) if t.isIntegral => true   // int to pointer (e.g., memory-mapped I/O addresses)
-      case (PtrType(_), t) if t.isIntegral => true   // pointer to int
+      // int ↔ pointer: NOT compatible — use explicit casts: int(ptr), *i8(addr)
+      case (_: FuncType, t) if t.isIntegral => true   // function pointer → int (entry point address)
       case (PtrType(_), PtrType(_)) => true           // any pointer ↔ any pointer (like C's void*)
       case (ArrayType(_, _), PtrType(_)) => true          // array decays to any pointer
+      case (StringType, PtrType(I8 | U8)) => true          // string decays to *i8 / *byte
       case (ArrayType(e1, _), ArrayType(e2, _)) if e1 == e2 => true
       case (ArrayType(e1, _), SliceType(e2)) if e1 == e2 => true  // fixed array → slice
       case (SliceType(e1), SliceType(e2)) if e1 == e2 => true
@@ -227,6 +229,7 @@ class SyslAnalyzer:
   private def coerceLiteral(expr: TExpr, target: SyslType): TExpr =
     expr match
       case TIntLit(value, _) if target.isIntegral => TIntLit(value, target)
+      case TIntLit(0, _) if target.isInstanceOf[PtrType] => TIntLit(0, target) // null pointer
       case _ => expr
 
   // Coerce integer literals to match the target's signedness only (preserving original width)
@@ -262,6 +265,16 @@ class SyslAnalyzer:
     builtinFunctions.getOrElse(name,
       functions.getOrElse(name,
         throw AnalysisError(s"undefined function: '$name'")))
+
+  private def checkArgs(name: String, params: List[(String, SyslType)], args: List[TExpr]): List[TExpr] =
+    if args.length != params.length then
+      throw AnalysisError(s"function '$name' expects ${params.length} argument(s), got ${args.length}")
+    args.zip(params).map { case (arg, (pName, pType)) =>
+      val coerced = coerceLiteral(arg, pType)
+      if !compatible(coerced.typ, pType) then
+        throw AnalysisError(s"argument '$pName' of '$name' expects $pType, got ${coerced.typ}")
+      coerced
+    }
 
   private def analyzeBlock(stmts: List[StmtAST]): List[TStmt] =
     stmts.map(analyzeStmt)
@@ -643,20 +656,24 @@ class SyslAnalyzer:
         if !functions.contains(funcName) then
           throw AnalysisError(s"struct $structName has no method '$method'")
         val funInfo = functions(funcName)
-        TCall(funcName, selfArg :: tArgs, funInfo.returnType)
+        val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs) // .tail skips self param
+        TCall(funcName, selfArg :: checkedArgs, funInfo.returnType)
 
       case CallAST(name, args) =>
         val tArgs = args.map(analyzeExpr)
         // Check if it's a direct function call or an indirect call through a variable
         if functions.contains(name) || builtinFunctions.contains(name) then
           val funInfo = lookupFun(name)
-          TCall(name, tArgs, funInfo.returnType)
+          val checkedArgs = checkArgs(name, funInfo.params, tArgs)
+          TCall(name, checkedArgs, funInfo.returnType)
         else
           // Try as a variable of FuncType
           val sym = lookup(name)
           sym.typ match
-            case FuncType(params, returnType) =>
-              TIndirectCall(TVarRef(name, sym.typ), tArgs, returnType)
+            case FuncType(paramTypes, returnType) =>
+              val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
+              val checkedArgs = checkArgs(name, params, tArgs)
+              TIndirectCall(TVarRef(name, sym.typ), checkedArgs, returnType)
             case other =>
               throw AnalysisError(s"'$name' is not a function (type: $other)")
 

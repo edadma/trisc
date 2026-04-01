@@ -33,13 +33,13 @@ Sysl does not support address-of on struct fields.
       lock: i64
 
   chan_slots(c: int) -> *i64
-      c + 32
+      *i64(c + 32)
 
   chan_items(c: int) -> *i64
-      c + 40
+      *i64(c + 40)
 
   chan_lock(c: int) -> *i64
-      c + 48
+      *i64(c + 48)
 
 @api chan_init(c, buf, capacity) — Initialize a channel with a caller-provided buffer.
 
@@ -48,7 +48,7 @@ Sysl does not support address-of on struct fields.
       c.capacity = capacity
       c.head = 0
       c.tail = 0
-      val addr: int = c
+      val addr: int = int(c)
       sem_init(chan_slots(addr), capacity)
       sem_init(chan_items(addr), 0)
       mutex_init(chan_lock(addr))
@@ -56,7 +56,7 @@ Sysl does not support address-of on struct fields.
 @api chan_send(c, value) — Send a value, blocking if the channel is full.
 
   chan_send(c: *Channel, value: i64)
-      val addr: int = c
+      val addr: int = int(c)
       sem_wait(chan_slots(addr))
       mutex_lock(chan_lock(addr))
       val idx = c.tail
@@ -69,7 +69,7 @@ Sysl does not support address-of on struct fields.
 @api chan_recv(c) -> i64 — Receive a value, blocking if the channel is empty.
 
   chan_recv(c: *Channel) -> i64
-      val addr: int = c
+      val addr: int = int(c)
       sem_wait(chan_items(addr))
       mutex_lock(chan_lock(addr))
       val idx = c.head

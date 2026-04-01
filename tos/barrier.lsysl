@@ -24,7 +24,7 @@ until released.
       sem: i64
 
   barrier_sem(b: int) -> *i64
-      b + 24
+      *i64(b + 24)
 
 @api barrier_init(b, n) — Initialize a barrier for n threads.
 
@@ -32,13 +32,13 @@ until released.
       b.target = n
       b.count = 0
       b.generation = 0
-      val addr: int = b
+      val addr: int = int(b)
       sem_init(barrier_sem(addr), 0)
 
 @api barrier_wait(b) — Block until all threads have arrived.
 
   barrier_wait(b: *Barrier)
-      val addr: int = b
+      val addr: int = int(b)
       val gen = b.generation
       b.count += 1
       if b.count == b.target
