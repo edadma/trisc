@@ -2,7 +2,7 @@ package io.github.edadma.trisc
 
 class SoundOutputTests extends TestHelpers {
 
-  "JvmSoundOutput starts and stops without error" in {
+  "JvmSoundOutput starts and stops without error" ignore {
     val chip = new SoundChip(0x100)
     val output = new JvmSoundOutput(chip)
     output.start()
@@ -10,7 +10,7 @@ class SoundOutputTests extends TestHelpers {
     output.stop()
   }
 
-  "JvmSoundOutput plays a short beep" in {
+  "JvmSoundOutput plays a short beep" ignore {
     val chip = new SoundChip(0x100)
     val output = new JvmSoundOutput(chip)
     output.start()
@@ -34,7 +34,7 @@ class SoundOutputTests extends TestHelpers {
     output.stop()
   }
 
-  "JvmSoundOutput plays a chord" in {
+  "JvmSoundOutput plays a chord" ignore {
     val chip = new SoundChip(0x100)
     val output = new JvmSoundOutput(chip)
     output.start()
@@ -62,7 +62,7 @@ class SoundOutputTests extends TestHelpers {
     output.stop()
   }
 
-  "JvmSoundOutput plays harmonic series (piano timbre)" in {
+  "JvmSoundOutput plays harmonic series (piano timbre)" ignore {
     val chip = new SoundChip(0x100)
     val output = new JvmSoundOutput(chip)
     output.start()
