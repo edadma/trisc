@@ -1,0 +1,247 @@
+// Segregated free-list memory allocator
+//
+// Size classes: 24, 32, 64, 128, 256, 512, 1024, 2048
+// Larger allocations use a general free list (first fit).
+//
+// Block layout (all sizes 8-byte aligned):
+//   [header: i64] [payload ...] [footer: i64]
+//   header = size | allocated_flag  (low bit = 1 means allocated)
+//   footer = size (for backward coalescing)
+//   Minimum block = 24 bytes: header(8) + next_ptr(8) + footer(8)
+//
+// Free block payload reuses first 8 bytes as a next pointer.
+
+val ALLOC_FLAG: i64 = 1
+val HEADER_SIZE: i64 = 8
+val FOOTER_SIZE: i64 = 8
+val MIN_BLOCK: i64 = 24
+val NUM_CLASSES = 8
+
+// Free lists for each size class, stored as block pointers
+var free_lists: [8]*i8
+
+// General free list for blocks > 2048
+var large_free: *i8 = *i8(0)
+
+// Heap bounds
+var heap_base: *i8 = *i8(0)
+var heap_top: *i8 = *i8(0)
+var heap_limit: *i8 = *i8(0)
+
+// --- Block accessors ---
+// A block pointer points to the header. Payload starts at block + 8.
+
+_get_header(block: *i8) -> i64
+    val p: *i64 = *i64(i64(block))
+    *p
+
+_set_header(block: *i8, value: i64)
+    val p: *i64 = *i64(i64(block))
+    *p = value
+
+_set_footer(block: *i8, size: i64)
+    val p: *i64 = *i64(i64(block) + size - FOOTER_SIZE)
+    *p = size
+
+_prev_footer(block: *i8) -> i64
+    val p: *i64 = *i64(i64(block) - FOOTER_SIZE)
+    *p
+
+_block_size(header: i64) -> i64 = header & ~ALLOC_FLAG
+
+_is_alloc(header: i64) -> i64 = header & ALLOC_FLAG
+
+_get_next(block: *i8) -> *i8
+    val p: *i64 = *i64(i64(block) + HEADER_SIZE)
+    *i8(*p)
+
+_set_next(block: *i8, next: *i8)
+    val p: *i64 = *i64(i64(block) + HEADER_SIZE)
+    *p = i64(next)
+
+// --- Size class helpers ---
+
+_size_class(size: i64) -> int
+    if size <= 24 then return 0
+    if size <= 32 then return 1
+    if size <= 64 then return 2
+    if size <= 128 then return 3
+    if size <= 256 then return 4
+    if size <= 512 then return 5
+    if size <= 1024 then return 6
+    if size <= 2048 then return 7
+    return -1
+
+// --- Free list operations ---
+
+_add_to_free(block: *i8, size: i64)
+    _set_header(block, size)
+    _set_footer(block, size)
+    val cls = _size_class(size)
+    if cls >= 0
+        _set_next(block, free_lists[cls])
+        free_lists[cls] = block
+    else
+        _set_next(block, large_free)
+        large_free = block
+
+_remove_from_free(block: *i8, size: i64)
+    val cls = _size_class(size)
+    if cls >= 0
+        if free_lists[cls] == block
+            free_lists[cls] = _get_next(block)
+            return
+        var cur = free_lists[cls]
+        while i64(cur) != 0
+            if _get_next(cur) == block
+                _set_next(cur, _get_next(block))
+                return
+            cur = _get_next(cur)
+    else
+        if large_free == block
+            large_free = _get_next(block)
+            return
+        var cur = large_free
+        while i64(cur) != 0
+            if _get_next(cur) == block
+                _set_next(cur, _get_next(block))
+                return
+            cur = _get_next(cur)
+
+// --- Core allocator ---
+
+_sysl_alloc_init(start: *i8, end_: *i8)
+    heap_base = start
+    heap_top = start
+    heap_limit = end_
+    large_free = *i8(0)
+    var i = 0
+    while i < NUM_CLASSES
+        free_lists[i] = *i8(0)
+        i += 1
+
+_sysl_alloc(request: i64) -> *i8
+    // Compute total block size
+    var size = request + HEADER_SIZE + FOOTER_SIZE
+    if size < MIN_BLOCK
+        size = MIN_BLOCK
+    size = (size + 7) & ~7
+
+    // Try segregated free lists
+    val cls = _size_class(size)
+    if cls >= 0
+        var try_cls = cls
+        while try_cls < NUM_CLASSES
+            if i64(free_lists[try_cls]) != 0
+                val block = free_lists[try_cls]
+                free_lists[try_cls] = _get_next(block)
+                val bsize = _block_size(_get_header(block))
+                val rem = bsize - size
+                if rem >= MIN_BLOCK
+                    _set_header(block, size | ALLOC_FLAG)
+                    _set_footer(block, size)
+                    _add_to_free(block + size, rem)
+                else
+                    _set_header(block, bsize | ALLOC_FLAG)
+                    _set_footer(block, bsize)
+                return block + HEADER_SIZE
+            try_cls += 1
+
+    // Try large free list (first fit)
+    if cls < 0
+        var prev: *i8 = *i8(0)
+        var cur = large_free
+        while i64(cur) != 0
+            val bsize = _block_size(_get_header(cur))
+            if bsize >= size
+                if i64(prev) == 0
+                    large_free = _get_next(cur)
+                else
+                    _set_next(prev, _get_next(cur))
+                val rem = bsize - size
+                if rem >= MIN_BLOCK
+                    _set_header(cur, size | ALLOC_FLAG)
+                    _set_footer(cur, size)
+                    _add_to_free(cur + size, rem)
+                else
+                    _set_header(cur, bsize | ALLOC_FLAG)
+                    _set_footer(cur, bsize)
+                return cur + HEADER_SIZE
+            prev = cur
+            cur = _get_next(cur)
+
+    // Extend heap
+    if i64(heap_top) + size > i64(heap_limit)
+        return *i8(0)
+    val block = heap_top
+    heap_top = heap_top + size
+    _set_header(block, size | ALLOC_FLAG)
+    _set_footer(block, size)
+    return block + HEADER_SIZE
+
+_sysl_free(ptr: *i8)
+    if i64(ptr) == 0
+        return
+
+    var block = ptr - HEADER_SIZE
+    var size = _block_size(_get_header(block))
+
+    // Coalesce with next physical block
+    val next_block = block + size
+    if i64(next_block) < i64(heap_top)
+        val nh = _get_header(next_block)
+        if _is_alloc(nh) == 0
+            val ns = _block_size(nh)
+            _remove_from_free(next_block, ns)
+            size += ns
+
+    // Coalesce with previous physical block
+    if i64(block) > i64(heap_base)
+        val ps = _prev_footer(block)
+        val prev_block = block - ps
+        val ph = _get_header(prev_block)
+        if _is_alloc(ph) == 0
+            _remove_from_free(prev_block, ps)
+            block = prev_block
+            size += ps
+
+    _add_to_free(block, size)
+
+_sysl_realloc(ptr: *i8, new_request: i64) -> *i8
+    if i64(ptr) == 0
+        return _sysl_alloc(new_request)
+    if new_request == 0
+        _sysl_free(ptr)
+        return *i8(0)
+
+    val block = ptr - HEADER_SIZE
+    val old_size = _block_size(_get_header(block))
+    val old_payload = old_size - HEADER_SIZE - FOOTER_SIZE
+
+    var new_size = new_request + HEADER_SIZE + FOOTER_SIZE
+    if new_size < MIN_BLOCK
+        new_size = MIN_BLOCK
+    new_size = (new_size + 7) & ~7
+
+    // Current block is big enough — maybe split
+    if old_size >= new_size
+        val rem = old_size - new_size
+        if rem >= MIN_BLOCK
+            _set_header(block, new_size | ALLOC_FLAG)
+            _set_footer(block, new_size)
+            _add_to_free(block + new_size, rem)
+        return ptr
+
+    // Need bigger block: alloc, copy, free
+    val new_ptr = _sysl_alloc(new_request)
+    if i64(new_ptr) == 0
+        return *i8(0)
+    // Copy old payload (8 bytes at a time)
+    var i: i64 = 0
+    while i < old_payload
+        val src: *i64 = *i64(i64(ptr) + i)
+        val dst: *i64 = *i64(i64(new_ptr) + i)
+        *dst = *src
+        i += 8
+    _sysl_free(ptr)
+    return new_ptr
