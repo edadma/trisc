@@ -50,177 +50,177 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
   // ===== std/string =====
 
   "std/string" - {
-    "str_concat" in {
+    "concat" in {
       output(
         """import "std/string"
           |main() -> int
-          |    puts(str_concat("hello", " world"))
+          |    puts(concat("hello", " world"))
           |    0
           |""".stripMargin
       ) shouldBe "hello world"
     }
 
-    "str_concat empty strings" in {
+    "concat empty strings" in {
       output(
         """import "std/string"
           |main() -> int
-          |    puts(str_concat("", "abc"))
+          |    puts(concat("", "abc"))
           |    0
           |""".stripMargin
       ) shouldBe "abc"
     }
 
-    "str_concat both empty" in {
+    "concat both empty" in {
       eval(
         """import "std/string"
-          |main() -> int = str_len(str_concat("", ""))
+          |main() -> int = length(concat("", ""))
           |""".stripMargin
       ) shouldBe 0
     }
 
-    "str_len" in {
+    "length" in {
       eval(
         """import "std/string"
-          |main() -> int = str_len("hello")
+          |main() -> int = length("hello")
           |""".stripMargin
       ) shouldBe 5
     }
 
-    "str_len empty" in {
+    "length empty" in {
       eval(
         """import "std/string"
-          |main() -> int = str_len("")
+          |main() -> int = length("")
           |""".stripMargin
       ) shouldBe 0
     }
 
-    "str_substr" in {
+    "substr" in {
       output(
         """import "std/string"
           |main() -> int
-          |    puts(str_substr("hello world", 6, 5))
+          |    puts(substr("hello world", 6, 5))
           |    0
           |""".stripMargin
       ) shouldBe "world"
     }
 
-    "str_substr from start" in {
+    "substr from start" in {
       output(
         """import "std/string"
           |main() -> int
-          |    puts(str_substr("hello", 0, 3))
+          |    puts(substr("hello", 0, 3))
           |    0
           |""".stripMargin
       ) shouldBe "hel"
     }
 
-    "str_substr length exceeds string" in {
+    "substr length exceeds string" in {
       output(
         """import "std/string"
           |main() -> int
-          |    puts(str_substr("hi", 0, 100))
+          |    puts(substr("hi", 0, 100))
           |    0
           |""".stripMargin
       ) shouldBe "hi"
     }
 
-    "str_index_of" in {
+    "index_of" in {
       eval(
         """import "std/string"
-          |main() -> int = str_index_of("hello world", "world")
+          |main() -> int = index_of("hello world", "world")
           |""".stripMargin
       ) shouldBe 6
     }
 
-    "str_index_of at start" in {
+    "index_of at start" in {
       eval(
         """import "std/string"
-          |main() -> int = str_index_of("hello", "hel")
+          |main() -> int = index_of("hello", "hel")
           |""".stripMargin
       ) shouldBe 0
     }
 
-    "str_index_of not found" in {
+    "index_of not found" in {
       eval(
         """import "std/string"
-          |main() -> int = str_index_of("hello", "xyz")
+          |main() -> int = index_of("hello", "xyz")
           |""".stripMargin
       ) shouldBe -1
     }
 
-    "str_starts_with true" in {
+    "starts_with true" in {
       eval(
         """import "std/string"
-          |main() -> int = int(str_starts_with("hello world", "hello"))
+          |main() -> int = int(starts_with("hello world", "hello"))
           |""".stripMargin
       ) shouldBe 1
     }
 
-    "str_starts_with false" in {
+    "starts_with false" in {
       eval(
         """import "std/string"
-          |main() -> int = int(str_starts_with("hello world", "world"))
+          |main() -> int = int(starts_with("hello world", "world"))
           |""".stripMargin
       ) shouldBe 0
     }
 
-    "str_starts_with empty prefix" in {
+    "starts_with empty prefix" in {
       eval(
         """import "std/string"
-          |main() -> int = int(str_starts_with("hello", ""))
+          |main() -> int = int(starts_with("hello", ""))
           |""".stripMargin
       ) shouldBe 1
     }
 
-    "str_ends_with true" in {
+    "ends_with true" in {
       eval(
         """import "std/string"
-          |main() -> int = int(str_ends_with("hello world", "world"))
+          |main() -> int = int(ends_with("hello world", "world"))
           |""".stripMargin
       ) shouldBe 1
     }
 
-    "str_ends_with false" in {
+    "ends_with false" in {
       eval(
         """import "std/string"
-          |main() -> int = int(str_ends_with("hello world", "hello"))
+          |main() -> int = int(ends_with("hello world", "hello"))
           |""".stripMargin
       ) shouldBe 0
     }
 
-    "str_trim" in {
+    "trim" in {
       output(
         """import "std/string"
           |main() -> int
-          |    puts(str_trim("  hello  "))
+          |    puts(trim("  hello  "))
           |    0
           |""".stripMargin
       ) shouldBe "hello"
     }
 
-    "str_trim no whitespace" in {
+    "trim no whitespace" in {
       output(
         """import "std/string"
           |main() -> int
-          |    puts(str_trim("hello"))
+          |    puts(trim("hello"))
           |    0
           |""".stripMargin
       ) shouldBe "hello"
     }
 
-    "str_trim all whitespace" in {
+    "trim all whitespace" in {
       eval(
         """import "std/string"
-          |main() -> int = str_len(str_trim("   "))
+          |main() -> int = length(trim("   "))
           |""".stripMargin
       ) shouldBe 0
     }
 
-    "str_split" in {
+    "split" in {
       output(
         """import "std/string"
           |main() -> int
-          |    parts = str_split("a,b,c", ",")
+          |    parts = split("a,b,c", ",")
           |    for i = 0; i < len(parts); i++
           |        puts(parts[i])
           |        putchar(32)
@@ -229,147 +229,147 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
       ) shouldBe "a b c "
     }
 
-    "str_split no delimiter found" in {
+    "split no delimiter found" in {
       output(
         """import "std/string"
           |main() -> int
-          |    parts = str_split("hello", ",")
+          |    parts = split("hello", ",")
           |    puts(parts[0])
           |    0
           |""".stripMargin
       ) shouldBe "hello"
     }
 
-    "str_split empty string" in {
+    "split empty string" in {
       eval(
         """import "std/string"
-          |main() -> int = len(str_split("", ","))
+          |main() -> int = len(split("", ","))
           |""".stripMargin
       ) shouldBe 0 // empty string returns empty slice
     }
 
-    "str_to_int" in {
+    "to_int" in {
       eval(
         """import "std/string"
-          |main() -> i64 = str_to_int("42")
+          |main() -> i64 = to_int("42")
           |""".stripMargin
       ) shouldBe 42
     }
 
-    "str_to_int negative" in {
+    "to_int negative" in {
       eval(
         """import "std/string"
-          |main() -> i64 = str_to_int("-100")
+          |main() -> i64 = to_int("-100")
           |""".stripMargin
       ) shouldBe -100
     }
 
-    "str_to_int invalid returns 0" in {
+    "to_int invalid returns 0" in {
       eval(
         """import "std/string"
-          |main() -> i64 = str_to_int("abc")
+          |main() -> i64 = to_int("abc")
           |""".stripMargin
       ) shouldBe 0
     }
 
-    "str_from_int" in {
+    "from_int" in {
       output(
         """import "std/string"
           |main() -> int
-          |    puts(str_from_int(123))
+          |    puts(from_int(123))
           |    0
           |""".stripMargin
       ) shouldBe "123"
     }
 
-    "str_from_int negative" in {
+    "from_int negative" in {
       output(
         """import "std/string"
           |main() -> int
-          |    puts(str_from_int(-42))
+          |    puts(from_int(-42))
           |    0
           |""".stripMargin
       ) shouldBe "-42"
     }
 
-    "str_from_int zero" in {
+    "from_int zero" in {
       output(
         """import "std/string"
           |main() -> int
-          |    puts(str_from_int(0))
+          |    puts(from_int(0))
           |    0
           |""".stripMargin
       ) shouldBe "0"
     }
 
-    "str_equal true" in {
+    "equal true" in {
       eval(
         """import "std/string"
-          |main() -> int = int(str_equal("abc", "abc"))
+          |main() -> int = int(equal("abc", "abc"))
           |""".stripMargin
       ) shouldBe 1
     }
 
-    "str_equal false" in {
+    "equal false" in {
       eval(
         """import "std/string"
-          |main() -> int = int(str_equal("abc", "def"))
+          |main() -> int = int(equal("abc", "def"))
           |""".stripMargin
       ) shouldBe 0
     }
 
-    "str_equal empty strings" in {
+    "equal empty strings" in {
       eval(
         """import "std/string"
-          |main() -> int = int(str_equal("", ""))
+          |main() -> int = int(equal("", ""))
           |""".stripMargin
       ) shouldBe 1
     }
 
-    "str_contains true" in {
+    "contains true" in {
       eval(
         """import "std/string"
-          |main() -> int = int(str_contains("hello world", "lo wo"))
+          |main() -> int = int(contains("hello world", "lo wo"))
           |""".stripMargin
       ) shouldBe 1
     }
 
-    "str_contains false" in {
+    "contains false" in {
       eval(
         """import "std/string"
-          |main() -> int = int(str_contains("hello", "xyz"))
+          |main() -> int = int(contains("hello", "xyz"))
           |""".stripMargin
       ) shouldBe 0
     }
 
-    "str_contains empty needle" in {
+    "contains empty needle" in {
       eval(
         """import "std/string"
-          |main() -> int = int(str_contains("hello", ""))
+          |main() -> int = int(contains("hello", ""))
           |""".stripMargin
       ) shouldBe 1
     }
 
-    "str_char_at" in {
+    "char_at" in {
       eval(
         """import "std/string"
-          |main() -> int = str_char_at("ABC", 1)
+          |main() -> int = char_at("ABC", 1)
           |""".stripMargin
       ) shouldBe 66 // 'B'
     }
 
-    "str_char_at first" in {
+    "char_at first" in {
       eval(
         """import "std/string"
-          |main() -> int = str_char_at("ABC", 0)
+          |main() -> int = char_at("ABC", 0)
           |""".stripMargin
       ) shouldBe 65 // 'A'
     }
 
-    "str_char_at out of bounds" in {
+    "char_at out of bounds" in {
       eval(
         """import "std/string"
-          |main() -> int = str_char_at("ABC", 10)
+          |main() -> int = char_at("ABC", 10)
           |""".stripMargin
       ) shouldBe -1
     }
@@ -378,158 +378,158 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
   // ===== std/io =====
 
   "std/io" - {
-    "io_write_string to STDOUT" in {
+    "write_string to STDOUT" in {
       output(
         """import "std/io"
           |main() -> int
-          |    io_write_string(STDOUT, "hello io")
+          |    write_string(STDOUT, "hello io")
           |    0
           |""".stripMargin
       ) shouldBe "hello io"
     }
 
-    "io_write_string returns byte count" in {
+    "write_string returns byte count" in {
       eval(
         """import "std/io"
-          |main() -> int = io_write_string(STDOUT, "hello")
+          |main() -> int = write_string(STDOUT, "hello")
           |""".stripMargin
       ) shouldBe 5
     }
 
-    "io_write_string to STDERR" in {
+    "write_string to STDERR" in {
       output(
         """import "std/io"
           |main() -> int
-          |    io_write_string(STDERR, "err msg")
+          |    write_string(STDERR, "err msg")
           |    0
           |""".stripMargin
       ) shouldBe "err msg"
     }
 
-    "io_open, io_write_string, io_close, io_read round-trip" in {
+    "open, write_string, close, read round-trip" in {
       // Write a temp file, read it back
       output(
         """import "std/io"
           |import "std/fs"
           |main() -> int
           |    path = "/tmp/_sysl_test_io_roundtrip.txt"
-          |    fd = io_open(path, O_CREATE + O_WRONLY + O_TRUNC)
+          |    fd = open(path, O_CREATE + O_WRONLY + O_TRUNC)
           |    if fd < 0
           |        return 1
-          |    io_write_string(fd, "hello from sysl")
-          |    io_close(fd)
-          |    content = fs_read_file(path)
+          |    write_string(fd, "hello from sysl")
+          |    close(fd)
+          |    content = read_file(path)
           |    puts(content)
-          |    fs_remove(path)
+          |    remove(path)
           |    0
           |""".stripMargin
       ) shouldBe "hello from sysl"
     }
 
-    "io_open read mode" in {
-      // Write with fs, then read with io_open + io_read_line
+    "open read mode" in {
+      // Write with fs, then read with open + read_line
       output(
         """import "std/io"
           |import "std/fs"
           |main() -> int
-          |    path = "/tmp/_sysl_test_io_read.txt"
-          |    fs_write_file(path, "test line")
-          |    fd = io_open(path, O_RDONLY)
+          |    path = "/tmp/_sysl_test_read.txt"
+          |    write_file(path, "test line")
+          |    fd = open(path, O_RDONLY)
           |    if fd < 0
           |        return 1
-          |    line = io_read_line(fd)
-          |    io_close(fd)
+          |    line = read_line(fd)
+          |    close(fd)
           |    puts(line)
-          |    fs_remove(path)
+          |    remove(path)
           |    0
           |""".stripMargin
       ) shouldBe "test line"
     }
 
-    "io_open nonexistent file returns -1" in {
+    "open nonexistent file returns -1" in {
       eval(
         """import "std/io"
-          |main() -> int = io_open("/tmp/_sysl_nonexistent_12345.txt", O_RDONLY)
+          |main() -> int = open("/tmp/_sysl_nonexistent_12345.txt", O_RDONLY)
           |""".stripMargin
       ) shouldBe -1
     }
 
-    "io_close invalid fd returns -1" in {
+    "close invalid fd returns -1" in {
       eval(
         """import "std/io"
-          |main() -> int = io_close(999)
+          |main() -> int = close(999)
           |""".stripMargin
       ) shouldBe -1
     }
 
-    "io_read into buffer" in {
+    "read into buffer" in {
       output(
         """import "std/io"
           |import "std/fs"
           |main() -> int
-          |    path = "/tmp/_sysl_test_io_readbuf.txt"
-          |    fs_write_file(path, "ABCDE")
-          |    fd = io_open(path, O_RDONLY)
+          |    path = "/tmp/_sysl_test_readbuf.txt"
+          |    write_file(path, "ABCDE")
+          |    fd = open(path, O_RDONLY)
           |    var buf: [10]u8
-          |    n = io_read(fd, &buf[0], 5)
-          |    io_close(fd)
+          |    n = read(fd, &buf[0], 5)
+          |    close(fd)
           |    for i = 0; i < n; i++
           |        putchar(int(buf[i]))
-          |    fs_remove(path)
+          |    remove(path)
           |    0
           |""".stripMargin
       ) shouldBe "ABCDE"
     }
 
-    "io_write from buffer" in {
+    "write from buffer" in {
       output(
         """import "std/io"
           |import "std/fs"
           |main() -> int
-          |    path = "/tmp/_sysl_test_io_writebuf.txt"
-          |    fd = io_open(path, O_CREATE + O_WRONLY + O_TRUNC)
+          |    path = "/tmp/_sysl_test_writebuf.txt"
+          |    fd = open(path, O_CREATE + O_WRONLY + O_TRUNC)
           |    var buf: [3]u8
           |    buf[0] = 88u8
           |    buf[1] = 89u8
           |    buf[2] = 90u8
-          |    io_write(fd, &buf[0], 3)
-          |    io_close(fd)
-          |    puts(fs_read_file(path))
-          |    fs_remove(path)
+          |    write(fd, &buf[0], 3)
+          |    close(fd)
+          |    puts(read_file(path))
+          |    remove(path)
           |    0
           |""".stripMargin
       ) shouldBe "XYZ"
     }
 
-    "io_seek and read" in {
+    "seek and read" in {
       output(
         """import "std/io"
           |import "std/fs"
           |main() -> int
-          |    path = "/tmp/_sysl_test_io_seek.txt"
-          |    fs_write_file(path, "ABCDEFGH")
-          |    fd = io_open(path, O_RDONLY)
-          |    io_seek(fd, 4i64, SEEK_SET)
-          |    line = io_read_line(fd)
-          |    io_close(fd)
+          |    path = "/tmp/_sysl_test_seek.txt"
+          |    write_file(path, "ABCDEFGH")
+          |    fd = open(path, O_RDONLY)
+          |    seek(fd, 4i64, SEEK_SET)
+          |    line = read_line(fd)
+          |    close(fd)
           |    puts(line)
-          |    fs_remove(path)
+          |    remove(path)
           |    0
           |""".stripMargin
       ) shouldBe "EFGH"
     }
 
-    "io_seek returns new position" in {
+    "seek returns new position" in {
       eval(
         """import "std/io"
           |import "std/fs"
           |main() -> i64
-          |    path = "/tmp/_sysl_test_io_seekpos.txt"
-          |    fs_write_file(path, "ABCDEFGH")
-          |    fd = io_open(path, O_RDONLY)
-          |    pos = io_seek(fd, 5i64, SEEK_SET)
-          |    io_close(fd)
-          |    fs_remove(path)
+          |    path = "/tmp/_sysl_test_seekpos.txt"
+          |    write_file(path, "ABCDEFGH")
+          |    fd = open(path, O_RDONLY)
+          |    pos = seek(fd, 5i64, SEEK_SET)
+          |    close(fd)
+          |    remove(path)
           |    pos
           |""".stripMargin
       ) shouldBe 5
@@ -585,56 +585,56 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
   // ===== std/fs =====
 
   "std/fs" - {
-    "fs_exists on existing path" in {
+    "exists on existing path" in {
       eval(
         """import "std/fs"
-          |main() -> int = int(fs_exists("."))
+          |main() -> int = int(exists("."))
           |""".stripMargin
       ) shouldBe 1
     }
 
-    "fs_exists on nonexistent path" in {
+    "exists on nonexistent path" in {
       eval(
         """import "std/fs"
-          |main() -> int = int(fs_exists("nonexistent_path_xyz_987"))
+          |main() -> int = int(exists("nonexistent_path_xyz_987"))
           |""".stripMargin
       ) shouldBe 0
     }
 
-    "fs_is_dir on directory" in {
+    "is_dir on directory" in {
       eval(
         """import "std/fs"
-          |main() -> int = int(fs_is_dir("."))
+          |main() -> int = int(is_dir("."))
           |""".stripMargin
       ) shouldBe 1
     }
 
-    "fs_is_dir on file" in {
+    "is_dir on file" in {
       eval(
         """import "std/fs"
-          |main() -> int = int(fs_is_dir("build.sbt"))
+          |main() -> int = int(is_dir("build.sbt"))
           |""".stripMargin
       ) shouldBe 0
     }
 
-    "fs_getcwd returns non-empty string" in {
+    "getcwd returns non-empty string" in {
       eval(
         """import "std/fs"
           |import "std/string"
           |main() -> int
-          |    cwd = fs_getcwd()
-          |    if str_len(cwd) > 0
+          |    cwd = getcwd()
+          |    if length(cwd) > 0
           |        return 1
           |    0
           |""".stripMargin
       ) shouldBe 1
     }
 
-    "fs_readdir returns entries" in {
+    "readdir returns entries" in {
       eval(
         """import "std/fs"
           |main() -> int
-          |    entries = fs_readdir(".")
+          |    entries = readdir(".")
           |    if len(entries) > 0
           |        return 1
           |    0
@@ -642,32 +642,32 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
       ) shouldBe 1
     }
 
-    "fs_readdir entry has name field" in {
+    "readdir entry has name field" in {
       eval(
         """import "std/fs"
           |import "std/string"
           |main() -> int
-          |    entries = fs_readdir(".")
-          |    if str_len(entries[0].name) > 0
+          |    entries = readdir(".")
+          |    if length(entries[0].name) > 0
           |        return 1
           |    0
           |""".stripMargin
       ) shouldBe 1
     }
 
-    "fs_readdir on nonexistent dir returns empty" in {
+    "readdir on nonexistent dir returns empty" in {
       eval(
         """import "std/fs"
-          |main() -> int = len(fs_readdir("/nonexistent_dir_xyz_987"))
+          |main() -> int = len(readdir("/nonexistent_dir_xyz_987"))
           |""".stripMargin
       ) shouldBe 0
     }
 
-    "fs_stat returns size" in {
+    "stat returns size" in {
       eval(
         """import "std/fs"
           |main() -> int
-          |    info = fs_stat("build.sbt")
+          |    info = stat("build.sbt")
           |    if info.size > 0
           |        return 1
           |    0
@@ -675,31 +675,31 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
       ) shouldBe 1
     }
 
-    "fs_stat is_file on file" in {
+    "stat is_file on file" in {
       eval(
         """import "std/fs"
           |main() -> int
-          |    info = fs_stat("build.sbt")
+          |    info = stat("build.sbt")
           |    int(info.is_file)
           |""".stripMargin
       ) shouldBe 1
     }
 
-    "fs_stat is_dir on directory" in {
+    "stat is_dir on directory" in {
       eval(
         """import "std/fs"
           |main() -> int
-          |    info = fs_stat(".")
+          |    info = stat(".")
           |    int(info.is_dir)
           |""".stripMargin
       ) shouldBe 1
     }
 
-    "fs_stat mtime is positive" in {
+    "stat mtime is positive" in {
       eval(
         """import "std/fs"
           |main() -> int
-          |    info = fs_stat("build.sbt")
+          |    info = stat("build.sbt")
           |    if info.mtime > 0
           |        return 1
           |    0
@@ -707,106 +707,106 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
       ) shouldBe 1
     }
 
-    "fs_stat on nonexistent file returns zeroed struct" in {
+    "stat on nonexistent file returns zeroed struct" in {
       eval(
         """import "std/fs"
           |main() -> i64
-          |    info = fs_stat("/nonexistent_xyz_987")
+          |    info = stat("/nonexistent_xyz_987")
           |    info.size
           |""".stripMargin
       ) shouldBe 0
     }
 
-    "fs_read_file" in {
+    "read_file" in {
       output(
         """import "std/fs"
           |main() -> int
-          |    fs_write_file("/tmp/_sysl_test_readfile.txt", "hello file")
-          |    puts(fs_read_file("/tmp/_sysl_test_readfile.txt"))
-          |    fs_remove("/tmp/_sysl_test_readfile.txt")
+          |    write_file("/tmp/_sysl_test_readfile.txt", "hello file")
+          |    puts(read_file("/tmp/_sysl_test_readfile.txt"))
+          |    remove("/tmp/_sysl_test_readfile.txt")
           |    0
           |""".stripMargin
       ) shouldBe "hello file"
     }
 
-    "fs_read_file nonexistent returns empty" in {
+    "read_file nonexistent returns empty" in {
       eval(
         """import "std/fs"
           |import "std/string"
-          |main() -> int = str_len(fs_read_file("/nonexistent_xyz_987"))
+          |main() -> int = length(read_file("/nonexistent_xyz_987"))
           |""".stripMargin
       ) shouldBe 0
     }
 
-    "fs_write_file and read back" in {
+    "write_file and read back" in {
       output(
         """import "std/fs"
           |main() -> int
           |    path = "/tmp/_sysl_test_writefile.txt"
-          |    fs_write_file(path, "written by sysl")
-          |    puts(fs_read_file(path))
-          |    fs_remove(path)
+          |    write_file(path, "written by sysl")
+          |    puts(read_file(path))
+          |    remove(path)
           |    0
           |""".stripMargin
       ) shouldBe "written by sysl"
     }
 
-    "fs_write_file returns 0 on success" in {
+    "write_file returns 0 on success" in {
       eval(
         """import "std/fs"
           |main() -> int
           |    path = "/tmp/_sysl_test_writeret.txt"
-          |    result = fs_write_file(path, "test")
-          |    fs_remove(path)
+          |    result = write_file(path, "test")
+          |    remove(path)
           |    result
           |""".stripMargin
       ) shouldBe 0
     }
 
-    "fs_mkdir and fs_remove" in {
+    "mkdir and remove" in {
       eval(
         """import "std/fs"
           |main() -> int
           |    path = "/tmp/_sysl_test_mkdir"
-          |    r1 = fs_mkdir(path)
-          |    exists = int(fs_is_dir(path))
-          |    r2 = fs_remove(path)
-          |    gone = int(fs_exists(path))
-          |    if r1 == 0 && exists == 1 && r2 == 0 && gone == 0
+          |    r1 = mkdir(path)
+          |    did_exist = int(is_dir(path))
+          |    r2 = remove(path)
+          |    gone = int(exists(path))
+          |    if r1 == 0 && did_exist == 1 && r2 == 0 && gone == 0
           |        return 1
           |    0
           |""".stripMargin
       ) shouldBe 1
     }
 
-    "fs_mkdirs nested" in {
+    "mkdirs nested" in {
       eval(
         """import "std/fs"
           |main() -> int
           |    path = "/tmp/_sysl_test_mkdirs/sub/dir"
-          |    r = fs_mkdirs(path)
-          |    exists = int(fs_is_dir(path))
-          |    fs_remove("/tmp/_sysl_test_mkdirs/sub/dir")
-          |    fs_remove("/tmp/_sysl_test_mkdirs/sub")
-          |    fs_remove("/tmp/_sysl_test_mkdirs")
-          |    if r == 0 && exists == 1
+          |    r = mkdirs(path)
+          |    did_exist = int(is_dir(path))
+          |    remove("/tmp/_sysl_test_mkdirs/sub/dir")
+          |    remove("/tmp/_sysl_test_mkdirs/sub")
+          |    remove("/tmp/_sysl_test_mkdirs")
+          |    if r == 0 && did_exist == 1
           |        return 1
           |    0
           |""".stripMargin
       ) shouldBe 1
     }
 
-    "fs_rename" in {
+    "rename" in {
       eval(
         """import "std/fs"
           |main() -> int
           |    old = "/tmp/_sysl_test_rename_old.txt"
           |    new_path = "/tmp/_sysl_test_rename_new.txt"
-          |    fs_write_file(old, "data")
-          |    r = fs_rename(old, new_path)
-          |    old_gone = int(fs_exists(old))
-          |    new_exists = int(fs_exists(new_path))
-          |    fs_remove(new_path)
+          |    write_file(old, "data")
+          |    r = rename(old, new_path)
+          |    old_gone = int(exists(old))
+          |    new_exists = int(exists(new_path))
+          |    remove(new_path)
           |    if r == 0 && old_gone == 0 && new_exists == 1
           |        return 1
           |    0
@@ -814,10 +814,10 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
       ) shouldBe 1
     }
 
-    "fs_remove returns -1 on nonexistent" in {
+    "remove returns -1 on nonexistent" in {
       eval(
         """import "std/fs"
-          |main() -> int = fs_remove("/nonexistent_xyz_987")
+          |main() -> int = remove("/nonexistent_xyz_987")
           |""".stripMargin
       ) shouldBe -1
     }
@@ -826,51 +826,51 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
   // ===== std/process =====
 
   "std/process" - {
-    "proc_argc returns 0 with no args" in {
+    "argc returns 0 with no args" in {
       eval(
         """import "std/process"
-          |main() -> int = proc_argc()
+          |main() -> int = argc()
           |""".stripMargin
       ) shouldBe 0
     }
 
-    "proc_argv out of bounds returns empty" in {
-      eval(
-        """import "std/process"
-          |import "std/string"
-          |main() -> int = str_len(proc_argv(0))
-          |""".stripMargin
-      ) shouldBe 0
-    }
-
-    "proc_getenv returns empty for nonexistent var" in {
+    "argv out of bounds returns empty" in {
       eval(
         """import "std/process"
           |import "std/string"
-          |main() -> int = str_len(proc_getenv("NONEXISTENT_VAR_XYZ_123"))
+          |main() -> int = length(argv(0))
           |""".stripMargin
       ) shouldBe 0
     }
 
-    "proc_getenv returns value for PATH" in {
+    "getenv returns empty for nonexistent var" in {
+      eval(
+        """import "std/process"
+          |import "std/string"
+          |main() -> int = length(getenv("NONEXISTENT_VAR_XYZ_123"))
+          |""".stripMargin
+      ) shouldBe 0
+    }
+
+    "getenv returns value for PATH" in {
       // PATH should always be set
       eval(
         """import "std/process"
           |import "std/string"
           |main() -> int
-          |    path = proc_getenv("PATH")
-          |    if str_len(path) > 0
+          |    path = getenv("PATH")
+          |    if length(path) > 0
           |        return 1
           |    0
           |""".stripMargin
       ) shouldBe 1
     }
 
-    "proc_exit throws" in {
+    "exit throws" in {
       an[Exception] should be thrownBy eval(
         """import "std/process"
           |main() -> int
-          |    proc_exit(42)
+          |    exit(42)
           |    0
           |""".stripMargin
       )
@@ -890,7 +890,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
           """import "util"
             |import "std/string"
             |main() -> int
-            |    greet(str_concat("hi ", "there"))
+            |    greet(concat("hi ", "there"))
             |    0
             |""".stripMargin,
       ))
@@ -903,9 +903,9 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
           |import "std/string"
           |import "std/fs"
           |main() -> int
-          |    exists = int(fs_exists("."))
-          |    msg = str_concat("exists=", str_from_int(i64(exists)))
-          |    io_write_string(STDOUT, msg)
+          |    found = int(exists("."))
+          |    msg = concat("exists=", from_int(i64(found)))
+          |    write_string(STDOUT, msg)
           |    0
           |""".stripMargin
       ) shouldBe "exists=1"

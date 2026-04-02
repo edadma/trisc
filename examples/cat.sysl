@@ -3,11 +3,11 @@ import "std/io"
 import "std/process"
 
 main() -> int
-    if proc_argc() < 1
-        io_write_string(STDERR, "usage: cat <file>...")
+    if argc() < 1
+        write_string(STDERR, "usage: cat <file>...")
         putchar('\n')
         return 1
-    for i = 0; i < proc_argc(); i++
-        content = fs_read_file(proc_argv(i))
-        io_write_string(STDOUT, content)
+    for i = 0; i < argc(); i++
+        content = read_file(argv(i))
+        write_string(STDOUT, content)
     0

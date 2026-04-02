@@ -78,18 +78,18 @@ object SyslStdlib:
       SymbolMeta("SEEK_CUR", SymbolMeta.Kind.Data(I32), isPrivate = false),
       SymbolMeta("SEEK_END", SymbolMeta.Kind.Data(I32), isPrivate = false),
       // Functions
-      SymbolMeta("io_open", SymbolMeta.Kind.Func(List(StringType, I32), I32), isPrivate = false),
-      SymbolMeta("io_close", SymbolMeta.Kind.Func(List(I32), I32), isPrivate = false),
-      SymbolMeta("io_read", SymbolMeta.Kind.Func(List(I32, PtrType(U8), I32), I32), isPrivate = false),
-      SymbolMeta("io_write", SymbolMeta.Kind.Func(List(I32, PtrType(U8), I32), I32), isPrivate = false),
-      SymbolMeta("io_write_string", SymbolMeta.Kind.Func(List(I32, StringType), I32), isPrivate = false),
-      SymbolMeta("io_read_line", SymbolMeta.Kind.Func(List(I32), StringType), isPrivate = false),
-      SymbolMeta("io_seek", SymbolMeta.Kind.Func(List(I32, I64, I32), I64), isPrivate = false),
+      SymbolMeta("open", SymbolMeta.Kind.Func(List(StringType, I32), I32), isPrivate = false),
+      SymbolMeta("close", SymbolMeta.Kind.Func(List(I32), I32), isPrivate = false),
+      SymbolMeta("read", SymbolMeta.Kind.Func(List(I32, PtrType(U8), I32), I32), isPrivate = false),
+      SymbolMeta("write", SymbolMeta.Kind.Func(List(I32, PtrType(U8), I32), I32), isPrivate = false),
+      SymbolMeta("write_string", SymbolMeta.Kind.Func(List(I32, StringType), I32), isPrivate = false),
+      SymbolMeta("read_line", SymbolMeta.Kind.Func(List(I32), StringType), isPrivate = false),
+      SymbolMeta("seek", SymbolMeta.Kind.Func(List(I32, I64, I32), I64), isPrivate = false),
     ))
 
   private def ioBuiltins(ctx: StdlibContext): Map[String, List[Value] => Value] = Map(
     // Constants as "functions" that return their value — will be registered as globals
-    "io_open" -> (args => {
+    "open" -> (args => {
       val path = args.head.asInstanceOf[StrVal].s
       val flags = args(1).asInstanceOf[IntVal].n.toInt
       try
@@ -105,11 +105,11 @@ object SyslStdlib:
         IntVal(ctx.allocFd(raf))
       catch case _: Exception => IntVal(-1)
     }),
-    "io_close" -> (args => {
+    "close" -> (args => {
       val fd = args.head.asInstanceOf[IntVal].n.toInt
       IntVal(if ctx.closeFile(fd) then 0 else -1)
     }),
-    "io_read" -> (args => {
+    "read" -> (args => {
       val fd = args.head.asInstanceOf[IntVal].n.toInt
       val buf = args(1) // ArrVal or PtrVal
       val count = args(2).asInstanceOf[IntVal].n.toInt
@@ -141,7 +141,7 @@ object SyslStdlib:
             catch case _: Exception => IntVal(-1)
           case None => IntVal(-1)
     }),
-    "io_write" -> (args => {
+    "write" -> (args => {
       val fd = args.head.asInstanceOf[IntVal].n.toInt
       val buf = args(1).asInstanceOf[ArrVal]
       val count = args(2).asInstanceOf[IntVal].n.toInt
@@ -160,7 +160,7 @@ object SyslStdlib:
             catch case _: Exception => IntVal(-1)
           case None => IntVal(-1)
     }),
-    "io_write_string" -> (args => {
+    "write_string" -> (args => {
       val fd = args.head.asInstanceOf[IntVal].n.toInt
       val s = args(1).asInstanceOf[StrVal].s
       if fd == 1 || fd == 2 then
@@ -176,7 +176,7 @@ object SyslStdlib:
             catch case _: Exception => IntVal(-1)
           case None => IntVal(-1)
     }),
-    "io_read_line" -> (args => {
+    "read_line" -> (args => {
       val fd = args.head.asInstanceOf[IntVal].n.toInt
       if fd == 0 then
         // stdin — read until newline
@@ -196,7 +196,7 @@ object SyslStdlib:
             catch case _: Exception => StrVal("")
           case None => StrVal("")
     }),
-    "io_seek" -> (args => {
+    "seek" -> (args => {
       val fd = args.head.asInstanceOf[IntVal].n.toInt
       val offset = args(1).asInstanceOf[IntVal].n
       val whence = args(2).asInstanceOf[IntVal].n.toInt
@@ -252,17 +252,17 @@ object SyslStdlib:
     new ModuleMeta(List(
       SymbolMeta("FileStat", SymbolMeta.Kind.Struct(fileStatType), isPrivate = false),
       SymbolMeta("DirEntry", SymbolMeta.Kind.Struct(dirEntryType), isPrivate = false),
-      SymbolMeta("fs_stat", SymbolMeta.Kind.Func(List(StringType), fileStatType), isPrivate = false),
-      SymbolMeta("fs_readdir", SymbolMeta.Kind.Func(List(StringType), SliceType(dirEntryType)), isPrivate = false),
-      SymbolMeta("fs_exists", SymbolMeta.Kind.Func(List(StringType), BoolType), isPrivate = false),
-      SymbolMeta("fs_is_dir", SymbolMeta.Kind.Func(List(StringType), BoolType), isPrivate = false),
-      SymbolMeta("fs_mkdir", SymbolMeta.Kind.Func(List(StringType), I32), isPrivate = false),
-      SymbolMeta("fs_mkdirs", SymbolMeta.Kind.Func(List(StringType), I32), isPrivate = false),
-      SymbolMeta("fs_remove", SymbolMeta.Kind.Func(List(StringType), I32), isPrivate = false),
-      SymbolMeta("fs_rename", SymbolMeta.Kind.Func(List(StringType, StringType), I32), isPrivate = false),
-      SymbolMeta("fs_getcwd", SymbolMeta.Kind.Func(List(), StringType), isPrivate = false),
-      SymbolMeta("fs_read_file", SymbolMeta.Kind.Func(List(StringType), StringType), isPrivate = false),
-      SymbolMeta("fs_write_file", SymbolMeta.Kind.Func(List(StringType, StringType), I32), isPrivate = false),
+      SymbolMeta("stat", SymbolMeta.Kind.Func(List(StringType), fileStatType), isPrivate = false),
+      SymbolMeta("readdir", SymbolMeta.Kind.Func(List(StringType), SliceType(dirEntryType)), isPrivate = false),
+      SymbolMeta("exists", SymbolMeta.Kind.Func(List(StringType), BoolType), isPrivate = false),
+      SymbolMeta("is_dir", SymbolMeta.Kind.Func(List(StringType), BoolType), isPrivate = false),
+      SymbolMeta("mkdir", SymbolMeta.Kind.Func(List(StringType), I32), isPrivate = false),
+      SymbolMeta("mkdirs", SymbolMeta.Kind.Func(List(StringType), I32), isPrivate = false),
+      SymbolMeta("remove", SymbolMeta.Kind.Func(List(StringType), I32), isPrivate = false),
+      SymbolMeta("rename", SymbolMeta.Kind.Func(List(StringType, StringType), I32), isPrivate = false),
+      SymbolMeta("getcwd", SymbolMeta.Kind.Func(List(), StringType), isPrivate = false),
+      SymbolMeta("read_file", SymbolMeta.Kind.Func(List(StringType), StringType), isPrivate = false),
+      SymbolMeta("write_file", SymbolMeta.Kind.Func(List(StringType, StringType), I32), isPrivate = false),
     ))
 
   private def mkFileStat(file: java.io.File): ArrVal =
@@ -283,7 +283,7 @@ object SyslStdlib:
     ArrVal(cells, 0)
 
   private def fsBuiltins(ctx: StdlibContext): Map[String, List[Value] => Value] = Map(
-    "fs_stat" -> (args => {
+    "stat" -> (args => {
       val path = args.head.asInstanceOf[StrVal].s
       val file = new java.io.File(path)
       if file.exists() then mkFileStat(file)
@@ -291,7 +291,7 @@ object SyslStdlib:
         // Return zeroed struct on error
         ArrVal(Array.fill(5)(new Cell(IntVal(0))), 0)
     }),
-    "fs_readdir" -> (args => {
+    "readdir" -> (args => {
       val path = args.head.asInstanceOf[StrVal].s
       val dir = new java.io.File(path)
       if dir.isDirectory then
@@ -302,40 +302,40 @@ object SyslStdlib:
           SliceVal(entries, 0, entries.length, entries.length)
       else SliceVal(Array.empty, 0, 0, 0)
     }),
-    "fs_exists" -> (args => {
+    "exists" -> (args => {
       val path = args.head.asInstanceOf[StrVal].s
       IntVal(if new java.io.File(path).exists() then 1L else 0L)
     }),
-    "fs_is_dir" -> (args => {
+    "is_dir" -> (args => {
       val path = args.head.asInstanceOf[StrVal].s
       IntVal(if new java.io.File(path).isDirectory then 1L else 0L)
     }),
-    "fs_mkdir" -> (args => {
+    "mkdir" -> (args => {
       val path = args.head.asInstanceOf[StrVal].s
       IntVal(if new java.io.File(path).mkdir() then 0 else -1)
     }),
-    "fs_mkdirs" -> (args => {
+    "mkdirs" -> (args => {
       val path = args.head.asInstanceOf[StrVal].s
       IntVal(if new java.io.File(path).mkdirs() then 0 else -1)
     }),
-    "fs_remove" -> (args => {
+    "remove" -> (args => {
       val path = args.head.asInstanceOf[StrVal].s
       IntVal(if new java.io.File(path).delete() then 0 else -1)
     }),
-    "fs_rename" -> (args => {
+    "rename" -> (args => {
       val old = args.head.asInstanceOf[StrVal].s
       val newName = args(1).asInstanceOf[StrVal].s
       IntVal(if new java.io.File(old).renameTo(new java.io.File(newName)) then 0 else -1)
     }),
-    "fs_getcwd" -> (_ => StrVal(System.getProperty("user.dir"))),
-    "fs_read_file" -> (args => {
+    "getcwd" -> (_ => StrVal(System.getProperty("user.dir"))),
+    "read_file" -> (args => {
       val path = args.head.asInstanceOf[StrVal].s
       try
         val bytes = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(path))
         StrVal(new String(bytes, "UTF-8"))
       catch case _: Exception => StrVal("")
     }),
-    "fs_write_file" -> (args => {
+    "write_file" -> (args => {
       val path = args.head.asInstanceOf[StrVal].s
       val data = args(1).asInstanceOf[StrVal].s
       try
@@ -349,26 +349,26 @@ object SyslStdlib:
 
   private lazy val processMeta: ModuleMeta =
     new ModuleMeta(List(
-      SymbolMeta("proc_exit", SymbolMeta.Kind.Func(List(I32), VoidType), isPrivate = false),
-      SymbolMeta("proc_getenv", SymbolMeta.Kind.Func(List(StringType), StringType), isPrivate = false),
-      SymbolMeta("proc_argc", SymbolMeta.Kind.Func(List(), I32), isPrivate = false),
-      SymbolMeta("proc_argv", SymbolMeta.Kind.Func(List(I32), StringType), isPrivate = false),
+      SymbolMeta("exit", SymbolMeta.Kind.Func(List(I32), VoidType), isPrivate = false),
+      SymbolMeta("getenv", SymbolMeta.Kind.Func(List(StringType), StringType), isPrivate = false),
+      SymbolMeta("argc", SymbolMeta.Kind.Func(List(), I32), isPrivate = false),
+      SymbolMeta("argv", SymbolMeta.Kind.Func(List(I32), StringType), isPrivate = false),
     ))
 
   private class ExitException(val code: Int) extends RuntimeException(s"exit($code)")
 
   private def processBuiltins(ctx: StdlibContext): Map[String, List[Value] => Value] = Map(
-    "proc_exit" -> (args => {
+    "exit" -> (args => {
       val code = args.head.asInstanceOf[IntVal].n.toInt
       throw new ExitException(code)
     }),
-    "proc_getenv" -> (args => {
+    "getenv" -> (args => {
       val name = args.head.asInstanceOf[StrVal].s
       val v = System.getenv(name)
       StrVal(if v == null then "" else v)
     }),
-    "proc_argc" -> (_ => IntVal(ctx.argv.length)),
-    "proc_argv" -> (args => {
+    "argc" -> (_ => IntVal(ctx.argv.length)),
+    "argv" -> (args => {
       val i = args.head.asInstanceOf[IntVal].n.toInt
       if i >= 0 && i < ctx.argv.length then StrVal(ctx.argv(i))
       else StrVal("")
@@ -379,58 +379,58 @@ object SyslStdlib:
 
   private lazy val stringMeta: ModuleMeta =
     new ModuleMeta(List(
-      SymbolMeta("str_len", SymbolMeta.Kind.Func(List(StringType), I32), isPrivate = false),
-      SymbolMeta("str_concat", SymbolMeta.Kind.Func(List(StringType, StringType), StringType), isPrivate = false),
-      SymbolMeta("str_substr", SymbolMeta.Kind.Func(List(StringType, I32, I32), StringType), isPrivate = false),
-      SymbolMeta("str_index_of", SymbolMeta.Kind.Func(List(StringType, StringType), I32), isPrivate = false),
-      SymbolMeta("str_starts_with", SymbolMeta.Kind.Func(List(StringType, StringType), BoolType), isPrivate = false),
-      SymbolMeta("str_ends_with", SymbolMeta.Kind.Func(List(StringType, StringType), BoolType), isPrivate = false),
-      SymbolMeta("str_trim", SymbolMeta.Kind.Func(List(StringType), StringType), isPrivate = false),
-      SymbolMeta("str_split", SymbolMeta.Kind.Func(List(StringType, StringType), SliceType(StringType)), isPrivate = false),
-      SymbolMeta("str_to_int", SymbolMeta.Kind.Func(List(StringType), I64), isPrivate = false),
-      SymbolMeta("str_from_int", SymbolMeta.Kind.Func(List(I64), StringType), isPrivate = false),
-      SymbolMeta("str_char_at", SymbolMeta.Kind.Func(List(StringType, I32), I32), isPrivate = false),
-      SymbolMeta("str_equal", SymbolMeta.Kind.Func(List(StringType, StringType), BoolType), isPrivate = false),
-      SymbolMeta("str_contains", SymbolMeta.Kind.Func(List(StringType, StringType), BoolType), isPrivate = false),
+      SymbolMeta("length", SymbolMeta.Kind.Func(List(StringType), I32), isPrivate = false),
+      SymbolMeta("concat", SymbolMeta.Kind.Func(List(StringType, StringType), StringType), isPrivate = false),
+      SymbolMeta("substr", SymbolMeta.Kind.Func(List(StringType, I32, I32), StringType), isPrivate = false),
+      SymbolMeta("index_of", SymbolMeta.Kind.Func(List(StringType, StringType), I32), isPrivate = false),
+      SymbolMeta("starts_with", SymbolMeta.Kind.Func(List(StringType, StringType), BoolType), isPrivate = false),
+      SymbolMeta("ends_with", SymbolMeta.Kind.Func(List(StringType, StringType), BoolType), isPrivate = false),
+      SymbolMeta("trim", SymbolMeta.Kind.Func(List(StringType), StringType), isPrivate = false),
+      SymbolMeta("split", SymbolMeta.Kind.Func(List(StringType, StringType), SliceType(StringType)), isPrivate = false),
+      SymbolMeta("to_int", SymbolMeta.Kind.Func(List(StringType), I64), isPrivate = false),
+      SymbolMeta("from_int", SymbolMeta.Kind.Func(List(I64), StringType), isPrivate = false),
+      SymbolMeta("char_at", SymbolMeta.Kind.Func(List(StringType, I32), I32), isPrivate = false),
+      SymbolMeta("equal", SymbolMeta.Kind.Func(List(StringType, StringType), BoolType), isPrivate = false),
+      SymbolMeta("contains", SymbolMeta.Kind.Func(List(StringType, StringType), BoolType), isPrivate = false),
     ))
 
   private def stringBuiltins(ctx: StdlibContext): Map[String, List[Value] => Value] = Map(
-    "str_len" -> (args => {
+    "length" -> (args => {
       val s = args.head.asInstanceOf[StrVal].s
       IntVal(s.length) // character count, not byte count
     }),
-    "str_concat" -> (args => {
+    "concat" -> (args => {
       val a = args.head.asInstanceOf[StrVal].s
       val b = args(1).asInstanceOf[StrVal].s
       StrVal(a + b)
     }),
-    "str_substr" -> (args => {
+    "substr" -> (args => {
       val s = args.head.asInstanceOf[StrVal].s
       val start = args(1).asInstanceOf[IntVal].n.toInt
       val length = args(2).asInstanceOf[IntVal].n.toInt
       try StrVal(s.substring(start, (start + length).min(s.length)))
       catch case _: Exception => StrVal("")
     }),
-    "str_index_of" -> (args => {
+    "index_of" -> (args => {
       val s = args.head.asInstanceOf[StrVal].s
       val sub = args(1).asInstanceOf[StrVal].s
       IntVal(s.indexOf(sub))
     }),
-    "str_starts_with" -> (args => {
+    "starts_with" -> (args => {
       val s = args.head.asInstanceOf[StrVal].s
       val prefix = args(1).asInstanceOf[StrVal].s
       IntVal(if s.startsWith(prefix) then 1L else 0L)
     }),
-    "str_ends_with" -> (args => {
+    "ends_with" -> (args => {
       val s = args.head.asInstanceOf[StrVal].s
       val suffix = args(1).asInstanceOf[StrVal].s
       IntVal(if s.endsWith(suffix) then 1L else 0L)
     }),
-    "str_trim" -> (args => {
+    "trim" -> (args => {
       val s = args.head.asInstanceOf[StrVal].s
       StrVal(s.trim)
     }),
-    "str_split" -> (args => {
+    "split" -> (args => {
       val s = args.head.asInstanceOf[StrVal].s
       val delim = args(1).asInstanceOf[StrVal].s
       val parts = if s.isEmpty then Array.empty[String]
@@ -438,27 +438,27 @@ object SyslStdlib:
       val cells = parts.map(p => new Cell(StrVal(p)))
       SliceVal(cells, 0, cells.length, cells.length)
     }),
-    "str_to_int" -> (args => {
+    "to_int" -> (args => {
       val s = args.head.asInstanceOf[StrVal].s
       try IntVal(s.trim.toLong)
       catch case _: Exception => IntVal(0)
     }),
-    "str_from_int" -> (args => {
+    "from_int" -> (args => {
       val n = args.head.asInstanceOf[IntVal].n
       StrVal(n.toString)
     }),
-    "str_char_at" -> (args => {
+    "char_at" -> (args => {
       val s = args.head.asInstanceOf[StrVal].s
       val i = args(1).asInstanceOf[IntVal].n.toInt
       if i >= 0 && i < s.length then IntVal(s.charAt(i).toLong)
       else IntVal(-1)
     }),
-    "str_equal" -> (args => {
+    "equal" -> (args => {
       val a = args.head.asInstanceOf[StrVal].s
       val b = args(1).asInstanceOf[StrVal].s
       IntVal(if a == b then 1L else 0L)
     }),
-    "str_contains" -> (args => {
+    "contains" -> (args => {
       val s = args.head.asInstanceOf[StrVal].s
       val sub = args(1).asInstanceOf[StrVal].s
       IntVal(if s.contains(sub) then 1L else 0L)
