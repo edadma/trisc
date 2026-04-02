@@ -41,10 +41,12 @@ class LiterateRendererTests extends AnyFreeSpec with Matchers:
       html should include("print")
     }
 
-    "indented code blocks get sysl highlighting" in {
+    "indented code blocks get sysl highlighting with spans" in {
       val html = LiterateRenderer.renderHTML("Some text.\n\n    val x = 42\n")
-      html should include("<code")
+      html should include("<span")
       html should include("val")
+      // 'val' is a keyword, should be wrapped in a span
+      html should include regex "<span[^>]*>val</span>"
     }
 
     "prose renders as html" in {

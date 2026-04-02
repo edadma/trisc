@@ -1,93 +1,93 @@
 Hello World — a bare-metal program linked against a boot stub.
 Prints "Hello World!" with ANSI colors, bold, underline, blink, and inverse.
 
-  // emit ESC[
-  esc()
-      putchar(27)
-      putchar(91)
+    // emit ESC[
+    esc()
+        putchar(27)
+        putchar(91)
 
-  // emit a single decimal digit (0-9)
-  digit(n: int)
-      putchar(n + 48)
+    // emit a single decimal digit (0-9)
+    digit(n: int)
+        putchar(n + 48)
 
-  // emit a 1- or 2-digit number as decimal, then 'm'
-  sgr1(n: int)
-      esc()
-      if n >= 10
-          digit(n / 10)
-      digit(n % 10)
-      putchar(109)
+    // emit a 1- or 2-digit number as decimal, then 'm'
+    sgr1(n: int)
+        esc()
+        if n >= 10
+            digit(n / 10)
+        digit(n % 10)
+        putchar(109)
 
-  // emit ESC[a;bm for two SGR params
-  sgr2(a: int, b: int)
-      esc()
-      if a >= 10
-          digit(a / 10)
-      digit(a % 10)
-      putchar(59)
-      if b >= 10
-          digit(b / 10)
-      digit(b % 10)
-      putchar(109)
+    // emit ESC[a;bm for two SGR params
+    sgr2(a: int, b: int)
+        esc()
+        if a >= 10
+            digit(a / 10)
+        digit(a % 10)
+        putchar(59)
+        if b >= 10
+            digit(b / 10)
+        digit(b % 10)
+        putchar(109)
 
-  prints(a: int, b: int, c: int, d: int, e: int)
-      putchar(a)
-      putchar(b)
-      putchar(c)
-      putchar(d)
-      putchar(e)
+    prints(a: int, b: int, c: int, d: int, e: int)
+        putchar(a)
+        putchar(b)
+        putchar(c)
+        putchar(d)
+        putchar(e)
 
-  main() -> int
-      // "H" — bold red
-      sgr2(1, 31)
-      putchar(72)
+    main() -> int
+        // "H" — bold red
+        sgr2(1, 31)
+        putchar(72)
 
-      // "e" — green underline
-      sgr2(4, 32)
-      putchar(101)
+        // "e" — green underline
+        sgr2(4, 32)
+        putchar(101)
 
-      // "l" — yellow
-      sgr1(33)
-      putchar(108)
+        // "l" — yellow
+        sgr1(33)
+        putchar(108)
 
-      // "l" — bold blue
-      sgr2(1, 34)
-      putchar(108)
+        // "l" — bold blue
+        sgr2(1, 34)
+        putchar(108)
 
-      // "o" — magenta blink
-      sgr2(5, 35)
-      putchar(111)
+        // "o" — magenta blink
+        sgr2(5, 35)
+        putchar(111)
 
-      // " " — reset
-      sgr1(0)
-      putchar(32)
+        // " " — reset
+        sgr1(0)
+        putchar(32)
 
-      // "W" — bold cyan
-      sgr2(1, 36)
-      putchar(87)
+        // "W" — bold cyan
+        sgr2(1, 36)
+        putchar(87)
 
-      // "o" — inverse white
-      sgr2(7, 37)
-      putchar(111)
+        // "o" — inverse white
+        sgr2(7, 37)
+        putchar(111)
 
-      // "r" — bright red
-      sgr1(91)
-      putchar(114)
+        // "r" — bright red
+        sgr1(91)
+        putchar(114)
 
-      // "l" — bright green underline
-      sgr2(4, 92)
-      putchar(108)
+        // "l" — bright green underline
+        sgr2(4, 92)
+        putchar(108)
 
-      // "d" — bold bright yellow
-      sgr2(1, 93)
-      putchar(100)
+        // "d" — bold bright yellow
+        sgr2(1, 93)
+        putchar(100)
 
-      // "!" — bright magenta blink
-      sgr2(5, 95)
-      putchar(33)
+        // "!" — bright magenta blink
+        sgr2(5, 95)
+        putchar(33)
 
-      // reset and newline
-      sgr1(0)
-      putchar(10)
+        // reset and newline
+        sgr1(0)
+        putchar(10)
 
-      0
+        0

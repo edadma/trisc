@@ -1,41 +1,31 @@
-@main
 Memory Utilities
 
 Core memory operations for the Sysl standard library.
 No OS dependency — usable in bare-metal programs.
-@
 
-@api memset(dst, v, n) — Fill n bytes at dst with v.
+      memset(dst: *byte, v: int, n: int)
+          var i = 0
+          while i < n
+              dst[i] = v
+              i += 1
 
-  memset(dst: *byte, v: int, n: int)
-      var i = 0
-      while i < n
-          dst[i] = v
-          i += 1
+      memcpy(dst: *byte, src: *byte, n: int)
+          var i = 0
+          while i < n
+              dst[i] = src[i]
+              i += 1
 
-@api memcpy(dst, src, n) — Copy n bytes from src to dst. Regions must not overlap.
+      memcmp(a: *byte, b: *byte, n: int) -> int
+          var i = 0
+          while i < n
+              val d = a[i] - b[i]
+              if d != 0
+                  return d
+              i += 1
+          0
 
-  memcpy(dst: *byte, src: *byte, n: int)
-      var i = 0
-      while i < n
-          dst[i] = src[i]
-          i += 1
-
-@api memcmp(a, b, n) -> int — Compare n bytes. Returns 0 if equal, <0 if a<b, >0 if a>b.
-
-  memcmp(a: *byte, b: *byte, n: int) -> int
-      var i = 0
-      while i < n
-          val d = a[i] - b[i]
-          if d != 0
-              return d
-          i += 1
-      0
-
-@api strlen(s) -> int — Return the length of a null-terminated string.
-
-  strlen(s: *byte) -> int
-      var i = 0
-      while s[i] != 0
-          i += 1
-      i
+      strlen(s: *byte) -> int
+          var i = 0
+          while s[i] != 0
+              i += 1
+          i

@@ -1,4 +1,3 @@
-@main
 TOS Semaphores
 
 Counting semaphores built on ll/sc atomic instructions.
@@ -6,40 +5,29 @@ Threads that cannot acquire a semaphore yield and retry,
 spinning through the scheduler rather than busy-waiting.
 
 A semaphore is a single i64 in memory (ll/sc operate on 64-bit values):
-  value > 0 — available (value = number of permits)
-  value == 0 — all permits taken, waiters must yield and retry
-@
+- value > 0 -- available (value = number of permits)
+- value == 0 -- all permits taken, waiters must yield and retry
 
-  import services.*
+    import services.*
 
-  extern atomic_load(addr: *i64) -> i64
-  extern atomic_dec_if_positive(addr: *i64) -> i64
-  extern atomic_inc(addr: *i64)
+    extern atomic_load(addr: *i64) -> i64
+    extern atomic_dec_if_positive(addr: *i64) -> i64
+    extern atomic_inc(addr: *i64)
 
-@api sem_init(sem, value) — Initialize a semaphore with the given count.
+    sem_init(sem: *i64, value: i64)
+        *sem = value
 
-  sem_init(sem: *i64, value: i64)
-      *sem = value
-
-@api sem_wait(sem) — Acquire a permit, yielding until one is available.
-
-@tech
 Uses atomic_dec_if_positive which atomically reads the value,
 and if positive, decrements it and returns 1. If zero, returns 0
 without modifying memory. On failure, the thread yields its
 timeslice and retries after being rescheduled.
-@
 
-  sem_wait(sem: *i64)
-      while atomic_dec_if_positive(sem) == 0
-          yield()
+    sem_wait(sem: *i64)
+        while atomic_dec_if_positive(sem) == 0
+            yield()
 
-@api sem_post(sem) — Release a permit (atomically increment the count).
+    sem_post(sem: *i64)
+        atomic_inc(sem)
 
-  sem_post(sem: *i64)
-      atomic_inc(sem)
-
-@api sem_trywait(sem) -> i64 — Non-blocking acquire. Returns 1 on success, 0 on failure.
-
-  sem_trywait(sem: *i64) -> i64
-      atomic_dec_if_positive(sem)
+    sem_trywait(sem: *i64) -> i64
+        atomic_dec_if_positive(sem)
