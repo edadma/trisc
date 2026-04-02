@@ -105,6 +105,7 @@ class SyslParser extends StandardTokenParsers {
     "*" ~> typeRef ^^ (t => s"*$t") |
       "[" ~> "]" ~> typeRef ^^ (t => s"[]$t") |
       "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => s"[$n]$t" } |
+      "(" ~> rep1sep(typeRef, ",") <~ ")" ^^ (ts => s"(${ts.mkString(",")})") |
       funcTypeRef |
       typeName
 

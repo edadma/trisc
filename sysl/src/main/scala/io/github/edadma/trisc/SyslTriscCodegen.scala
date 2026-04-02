@@ -136,6 +136,9 @@ class SyslTriscCodegen(addresses: Int = 4):
               case None => true // no initializer → bss
               case _ => false // nonzero constant → data
 
+  // Does this return type require a caller-allocated return slot?
+  private def returnsViaPointer(typ: SyslType): Boolean = typ.isInstanceOf[SyslType.StructType]
+
   // Size of a type on the stack in bytes, rounded up to alignment
   private def stackSize(typ: SyslType): Int =
     val raw = typ.sizeOf.toInt
@@ -200,6 +203,14 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit(s"  sts r$srcReg, r$addrReg, r0")
       case SyslType.IntType(32) | SyslType.UIntType(32) =>
         emit(s"  stw r$srcReg, r$addrReg, r0")
+      case st: SyslType.StructType =>
+        // Struct copy: srcReg = source address, addrReg = dest address
+        val size = stackSize(st)
+        for i <- 0 until size by 8 do
+          emitAddImm(4, srcReg, i)
+          emit("  ldd r4, r4, r0")
+          emitAddImm(3, addrReg, i)
+          emit("  std r4, r3, r0")
       case _ =>
         emit(s"  std r$srcReg, r$addrReg, r0")
 
@@ -225,13 +236,18 @@ class SyslTriscCodegen(addresses: Int = 4):
     stackOffset = 0
     deferStack.clear()
 
+    val structReturn = returnsViaPointer(fun.returnType)
+
     emit(s"# function: ${fun.name}")
     emit(s"${fun.name}:")
 
     // ABI: params 0-2 in r1-r3, params 3+ on caller's stack
+    // If the function returns a struct, r1 = hidden return pointer (before user params).
+    // User params shift: param 0 in r2, param 1 in r3, param 2+ on stack.
+    val allRegSlots = if structReturn then 1 + fun.params.length else fun.params.length
+    val nRegPushed = allRegSlots.min(3)
     // Save register params BEFORE prologue so they have known offsets from fp
-    val nRegParams = fun.params.length.min(3)
-    for i <- 0 until nRegParams do
+    for i <- 0 until nRegPushed do
       emit(s"  pshd r${i + 1}")   // push r1, r2, r3 in order
 
     // Prologue: save lr, fp, set up frame
@@ -241,22 +257,32 @@ class SyslTriscCodegen(addresses: Int = 4):
 
     // Register params are above saved lr/fp on the stack:
     //   [r5+0] = saved r5, [r5+8] = saved r6/lr
-    //   [r5+16] = last pushed param, ... [r5+16+(nRegParams-1)*8] = first pushed param
-    // For 1 param:  [r5+16] = r1
-    // For 2 params: [r5+16] = r2, [r5+24] = r1
-    // For 3 params: [r5+16] = r3, [r5+24] = r2, [r5+32] = r1
-    for (param, i) <- fun.params.take(nRegParams).zipWithIndex do
-      val callerOffset = 16 + (nRegParams - 1 - i) * 8
+    //   [r5+16] = last pushed param, ... [r5+16+(nRegPushed-1)*8] = first pushed param
+    val retPtrOffset = if structReturn then
+      // Hidden return pointer was in r1, pushed first among register args
+      val off = 16 + (nRegPushed - 1) * 8  // r1 was pushed first, so it's at the highest offset
+      locals("_ret_ptr") = LocalVar("_ret_ptr", off, SyslType.PtrType(fun.returnType))
+      off
+    else -1
+
+    // Map user params to their stack locations
+    val userParamRegStart = if structReturn then 1 else 0  // user params start at r2 if struct return
+    val userRegParams = fun.params.length.min(3 - userParamRegStart)
+    for (param, i) <- fun.params.take(userRegParams).zipWithIndex do
+      val regIndex = userParamRegStart + i  // which register slot (0-based from r1)
+      val callerOffset = 16 + (nRegPushed - 1 - regIndex) * 8
       locals(param.name) = LocalVar(param.name, callerOffset, SyslType.I64)
-    // Stack params (3+) are above the saved register params
-    for (param, i) <- fun.params.zipWithIndex.drop(3) do
-      val callerOffset = 16 + nRegParams * 8 + (i - 3) * 8
+    // Stack params: those beyond register capacity
+    val nUserStackStart = 3 - userParamRegStart  // how many user params fit in registers
+    for (param, i) <- fun.params.zipWithIndex.drop(nUserStackStart) do
+      val callerOffset = 16 + nRegPushed * 8 + (i - nUserStackStart) * 8
       locals(param.name) = LocalVar(param.name, callerOffset, SyslType.I64)
 
     // Generate body
     fun.body match
       case TExprBody(expr) =>
         genExpr(expr) // result in r1
+        if structReturn then emitStructReturn()
         emitDefers()
         emitEpilogue()
       case TBlockBody(stmts) =>
@@ -266,11 +292,13 @@ class SyslTriscCodegen(addresses: Int = 4):
     currentFunction = null
 
   private def genBlock(stmts: List[TStmt]): Unit =
+    val sr = currentFunction != null && returnsViaPointer(currentFunction.returnType)
     if stmts.nonEmpty then
       for stmt <- stmts.init do genStmt(stmt)
       stmts.last match
         case TExprStmt(expr) =>
           genExpr(expr) // result in r1
+          if sr then emitStructReturn()
           emitDefers()
           emitEpilogue()
         case other =>
@@ -298,6 +326,25 @@ class SyslTriscCodegen(addresses: Int = 4):
       case "<<" => emit("  lsl r1, r1, r3")
       case ">>" => emit("  asr r1, r1, r3")
 
+  // Copy struct from src address (r1) to _ret_ptr, then set r1 = _ret_ptr
+  private def emitStructReturn(): Unit =
+    val st = currentFunction.returnType.asInstanceOf[SyslType.StructType]
+    val size = stackSize(st)
+    val retLocal = locals("_ret_ptr")
+    // r1 = source struct address; load _ret_ptr into r2
+    emit("  pshd r1")                       // save source
+    emitAddImm(2, 5, retLocal.offset)
+    emit("  ldd r2, r2, r0")               // r2 = _ret_ptr (destination)
+    emit("  popd r3")                       // r3 = source
+    // Copy size bytes from r3 to r2
+    for i <- 0 until size by 8 do
+      emitAddImm(4, 3, i)
+      emit("  ldd r4, r4, r0")
+      emitAddImm(1, 2, i)
+      emit("  std r4, r1, r0")
+    // r1 = _ret_ptr (for the caller)
+    emit("  mov r1, r2")
+
   private def emitDefers(): Unit =
     if deferStack.nonEmpty then
       emit("  pshd r1") // save return value
@@ -309,10 +356,14 @@ class SyslTriscCodegen(addresses: Int = 4):
     emit("  mov r7, r5")
     emit("  popd r5")
     emit("  popd r6")
-    // Skip past pre-prologue pushed register params
-    val nRegParams = if currentFunction != null then currentFunction.params.length.min(3) else 0
-    if nRegParams > 0 then
-      emitAddImm(7, 7, nRegParams * 8)
+    // Skip past pre-prologue pushed register params (including hidden return ptr if any)
+    val nRegPushed = if currentFunction != null then
+      val sr = returnsViaPointer(currentFunction.returnType)
+      val allSlots = (if sr then 1 else 0) + currentFunction.params.length
+      allSlots.min(3)
+    else 0
+    if nRegPushed > 0 then
+      emitAddImm(7, 7, nRegPushed * 8)
     emit("  jalr r0, r6")
 
   // Break/continue label stacks
@@ -373,6 +424,14 @@ class SyslTriscCodegen(addresses: Int = 4):
               genExpr(arg)                              // r1 = field value
               emitAddImm(2, 5, local.offset + off)     // r2 = field address (via fp)
               emitStore(1, 2, fieldType)
+          case call @ TCall(_, _, retType) if returnsViaPointer(retType) =>
+            // Function returns struct via caller-allocated slot.
+            // genExpr allocates the return slot and returns its address in r1.
+            // The slot is already on our stack at the current stackOffset after genExpr.
+            genExpr(call)
+            // r1 = address of return slot. Register the local at the slot's stack position.
+            // The return slot was the last thing allocated, so it's at stackOffset.
+            locals(name) = LocalVar(name, stackOffset, typ)
           case _ =>
             genExpr(init) // result in r1
             val local = allocLocal(name, typ)
@@ -465,6 +524,8 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TReturnStmt(Some(value)) =>
         genExpr(value) // result in r1
+        if currentFunction != null && returnsViaPointer(currentFunction.returnType) then
+          emitStructReturn()
         emitDefers()
         emitEpilogue()
 
@@ -846,21 +907,48 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TFuncRef(name, _) =>
         emit(s"  movi r1, $name") // r1 = address of function
 
-      case TCall(name, args, _) =>
+      case TCall(name, args, retType) =>
+        val callStructReturn = returnsViaPointer(retType)
+        // If struct return, allocate space on caller's stack for the return value
+        // and prepend hidden pointer as first arg
+        val retSlotOffset = if callStructReturn then
+          val st = retType.asInstanceOf[SyslType.StructType]
+          val size = stackSize(st)
+          val aligned = (size + 7) & ~7
+          emitAddImm(7, 7, -aligned)
+          stackOffset -= aligned
+          // Zero-initialize the return slot
+          emit("  mov r1, r7")
+          for i <- 0 until aligned by 8 do
+            emitAddImm(2, 1, i)
+            emit("  std r0, r2, r0")
+          stackOffset  // remember where the return slot is
+        else 0
+
+        // Build full arg list (with hidden pointer prepended for struct return)
+        val allArgs = if callStructReturn then
+          // The hidden arg is the address of the return slot (current r7)
+          TAddrLit(retSlotOffset) :: args
+        else args
+
         // ABI: args 0-2 in r1-r3, args 3+ on stack (right-to-left)
         // r4 is reserved for the call address (movi r4, name)
-        val nRegArgs = args.length.min(3)
-        val stackArgs = args.drop(3)
+        val nRegArgs = allArgs.length.min(3)
+        val stackArgs = allArgs.drop(3)
         // Track stack before arg evaluation (genExpr may allocate temps)
         val savedOffset = stackOffset
         // Push stack args (3+) right-to-left
         for arg <- stackArgs.reverse do
-          genExpr(arg)
+          arg match
+            case TAddrLit(off) => emitAddImm(1, 5, off)
+            case _ => genExpr(arg)
           emit("  pshd r1")
           stackOffset -= 8
         // Evaluate register args in reverse, push as temporaries
-        for arg <- args.take(nRegArgs).reverse do
-          genExpr(arg)
+        for arg <- allArgs.take(nRegArgs).reverse do
+          arg match
+            case TAddrLit(off) => emitAddImm(1, 5, off)
+            case _ => genExpr(arg)
           emit("  pshd r1")
           stackOffset -= 8
         // Pop into r1-rN
@@ -870,11 +958,12 @@ class SyslTriscCodegen(addresses: Int = 4):
         // Call
         emit(s"  movi r4, $name")
         emit("  jalr r6, r4")
-        // Clean up everything allocated for this call (stack args + any temps from genExpr)
-        val totalAllocated = savedOffset - stackOffset
-        if totalAllocated != 0 then
-          emitAddImm(7, 7, totalAllocated)
+        // Clean up stack args (NOT the return slot — caller needs it)
+        val argsAllocated = savedOffset - stackOffset
+        if argsAllocated != 0 then
+          emitAddImm(7, 7, argsAllocated)
           stackOffset = savedOffset
+        // For struct return, r1 = pointer to return slot (which is on our stack)
 
       case TIndirectCall(callee, args, _) =>
         // ABI: args 0-2 in r1-r3, args 3+ on stack
@@ -1092,21 +1181,21 @@ class SyslTriscCodegen(addresses: Int = 4):
         val aligned = (totalSize + 7) & ~7
         emitAddImm(7, 7, -aligned)
         stackOffset -= aligned
+        val structBaseOffset = stackOffset  // fp-relative offset of the struct
         emit("  mov r1, r7")
         for i <- 0 until aligned by 8 do
           emitAddImm(2, 1, i)
           emit("  std r0, r2, r0")
         // Evaluate each arg and store into the corresponding field.
-        // The struct base is at r7 (current SP). genExpr may push/pop
-        // but SP returns to the same point, so r7 stays valid as base.
+        // Use fp-relative addressing since genExpr(arg) may move SP.
         for (arg, i) <- args.zipWithIndex do
           val (_, fieldType) = st.fields(i)
           val off = fieldOffset(st, i)
-          genExpr(arg)                       // r1 = field value
-          emitAddImm(2, 7, off)             // r2 = field address
+          genExpr(arg)                                    // r1 = field value
+          emitAddImm(2, 5, structBaseOffset + off)       // r2 = field address (fp-relative)
           emitStore(1, 2, fieldType)
-        // r1 = struct base address (for use as expression result)
-        emit("  mov r1, r7")
+        // r1 = struct base address (fp-relative, stable)
+        emitAddImm(1, 5, structBaseOffset)
 
       case TFieldPreInc(obj, fieldIndex, _) =>
         val st = obj.typ.asInstanceOf[SyslType.StructType]

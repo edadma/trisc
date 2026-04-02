@@ -64,6 +64,8 @@ case class TFieldPostDec(obj: TExpr, fieldIndex: Int, typ: SyslType) extends TEx
 case class TStructLit(typ: SyslType) extends TExpr
 case class TStructConstruct(structType: SyslType.StructType, args: List[TExpr]) extends TExpr { def typ: SyslType = structType }
 case class TSizeof(size: Long, typ: SyslType.IntType) extends TExpr
+// Internal: address relative to frame pointer (for hidden return slot args)
+case class TAddrLit(fpOffset: Int) extends TExpr { def typ: SyslType = SyslType.PtrType(SyslType.VoidType) }
 case class TPreInc(name: String, typ: SyslType) extends TExpr
 case class TPreDec(name: String, typ: SyslType) extends TExpr
 case class TPostInc(name: String, typ: SyslType) extends TExpr

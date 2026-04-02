@@ -173,6 +173,11 @@ class SyslAnalyzer:
       ArrayType(resolveTypeName(elem), size)
     case name if typeAliases.contains(name) => resolveTypeName(typeAliases(name))
     case name if structTypes.contains(name) => structTypes(name)
+    case s if s.startsWith("(") =>
+      // Tuple type: (int,int)
+      val inner = s.drop(1).dropRight(1) // strip parens
+      val elemStrs = parseTupleTypeElems(inner)
+      SyslType.tupleType(elemStrs.map(resolveTypeName))
     case s if s.startsWith("func(") =>
       val inner = s.drop(5) // after "func("
       val (paramStrs, rest) = parseFuncTypeParams(inner)
@@ -201,6 +206,24 @@ class SyslAnalyzer:
           start = i
         case _ => i += 1
     (params.toList, "")
+
+  // Parse comma-separated type elements from tuple type string, respecting nested parens
+  private def parseTupleTypeElems(s: String): List[String] =
+    var depth = 0
+    var i = 0
+    val elems = new mutable.ListBuffer[String]
+    var start = 0
+    while i < s.length do
+      s(i) match
+        case '(' | '[' => depth += 1; i += 1
+        case ')' | ']' => depth -= 1; i += 1
+        case ',' if depth == 0 =>
+          elems += s.substring(start, i)
+          i += 1
+          start = i
+        case _ => i += 1
+    if start < s.length then elems += s.substring(start)
+    elems.toList
 
   private def compatible(from: SyslType, to: SyslType): Boolean =
     (from, to) match
