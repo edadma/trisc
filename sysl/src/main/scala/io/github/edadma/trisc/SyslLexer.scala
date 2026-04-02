@@ -56,7 +56,8 @@ class SyslLexical extends IndentationLexical(
       elem('r') ^^^ '\r' |
       elem('0') ^^^ '\u0000' |
       elem('\\') ^^^ '\\' |
-      elem('\'') ^^^ '\''
+      elem('\'') ^^^ '\'' |
+      elem('"') ^^^ '"'
     )
 
   override def token: Parser[Token] =
@@ -87,5 +88,9 @@ class SyslLexical extends IndentationLexical(
         suffix match
           case Some(s) => NumericLit(s"$value:$s")
           case None => NumericLit(value)
+    } |
+    // String literal with escape processing: "hello\nworld"
+    '"' ~> rep(escapeChar | chrExcept('"', '\n', EofCh)) <~ '"' ^^ { chars =>
+      StringLit(chars.mkString)
     } | super.token
 }

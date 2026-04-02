@@ -233,4 +233,54 @@ class SyslStringTests extends SyslTestHelpers {
         |    if eq == 0 && lt < 0 then 1 else 0
         |""".stripMargin) shouldBe 1
   }
+
+  // ===== String escape sequences =====
+
+  "string with newline escape" in {
+    output(
+      """main() -> int
+        |    puts("hi\n")
+        |    0
+        |""".stripMargin) shouldBe "hi\n"
+  }
+
+  "string with tab escape" in {
+    output(
+      """main() -> int
+        |    puts("a\tb")
+        |    0
+        |""".stripMargin) shouldBe "a\tb"
+  }
+
+  "string with backslash escape" in {
+    output(
+      """main() -> int
+        |    puts("a\\b")
+        |    0
+        |""".stripMargin) shouldBe "a\\b"
+  }
+
+  "string with null escape byte value" in {
+    eval(
+      """main() -> int
+        |    val s = "ab\0cd"
+        |    s[2]
+        |""".stripMargin) shouldBe 0  // \0 = 0
+  }
+
+  "string with embedded quote escape" in {
+    output(
+      """main() -> int
+        |    puts("say \"hi\"")
+        |    0
+        |""".stripMargin) shouldBe "say \"hi\""
+  }
+
+  "string escape in indexing" in {
+    eval(
+      """main() -> int
+        |    val s = "a\nb"
+        |    s[1]
+        |""".stripMargin) shouldBe 10  // \n = 10
+  }
 }
