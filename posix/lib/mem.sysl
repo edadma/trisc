@@ -1,0 +1,30 @@
+/*
+ * mem.sysl — Memory operations
+ *
+ * No OS dependency — usable in bare-metal programs.
+ */
+
+/* Fill n bytes of dst with value v. */
+memset(dst: *byte, v: int, n: int)
+    for var i = 0; i < n; i++ do dst[i] = v
+
+/* Copy n bytes from src to dst. */
+memcpy(dst: *byte, src: *byte, n: int)
+    for var i = 0; i < n; i++ do dst[i] = src[i]
+
+/* Compare n bytes of a and b. Returns <0, 0, or >0. */
+memcmp(a: *byte, b: *byte, n: int) -> int
+    for var i = 0; i < n; i++
+        val d = a[i] - b[i]
+
+        if d != 0
+            return d
+    0
+
+/* Return the length of null-terminated string s. */
+strlen(s: *byte) -> int
+    var i = 0
+
+    while s[i] != 0 do i++
+
+    i

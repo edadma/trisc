@@ -1,0 +1,54 @@
+/*
+ * math.sysl — Integer math operations
+ *
+ * No OS dependency — usable in bare-metal programs.
+ */
+
+/* Return the absolute value of x. */
+abs(x: int) -> int = if x < 0 then -x else x
+
+/* Return the smaller of a and b. */
+min(a: int, b: int) -> int = if a < b then a else b
+
+/* Return the larger of a and b. */
+max(a: int, b: int) -> int = if a > b then a else b
+
+/* Clamp x to the range [lo, hi]. */
+clamp(x: int, lo: int, hi: int) -> int
+    if x < lo then lo
+    else if x > hi then hi
+    else x
+
+/* Return -1, 0, or 1 depending on the sign of x. */
+sign(x: int) -> int
+    if x < 0 then -1
+    else if x > 0 then 1
+    else 0
+
+/* Return the greatest common divisor of a and b. */
+gcd(a: int, b: int) -> int
+    var x = abs(a)
+    var y = abs(b)
+
+    while y != 0
+        val t = y
+
+        y = x % y
+        x = t
+
+    x
+
+/* Return base raised to the power exp (integer exponentiation). */
+pow(base: int, exp: int) -> int
+    var result = 1
+    var b = base
+    var e = exp
+
+    while e > 0
+        if e & 1 == 1
+            result *= b
+
+        b *= b
+        e = e >> 1
+
+    result

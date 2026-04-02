@@ -1,0 +1,77 @@
+/*
+ * string.sysl — String operations
+ *
+ * Null-terminated byte string functions.
+ * No OS dependency — usable in bare-metal programs.
+ */
+
+/* Compare two strings. Returns <0, 0, or >0. */
+strcmp(a: *byte, b: *byte) -> int
+    while *a != 0 && *b != 0
+        val d = *a - *b
+
+        if d != 0
+            return d
+
+        a++
+        b++
+
+    *a - *b
+
+/* Compare at most n bytes of two strings. */
+strncmp(a: *byte, b: *byte, n: int) -> int
+    for var i = 0; i < n && *a != 0 && *b != 0; i++
+        val d = *a - *b
+
+        if d != 0
+            return d
+
+        a++
+        b++
+
+    if i == n then 0
+    else *a - *b
+
+/* Copy src to dst, including the null terminator. */
+strcpy(dst: *byte, src: *byte)
+    for var p = src; *p != 0; p++ do *dst++ = *p
+
+    *dst = 0
+
+/* Copy at most n bytes from src to dst, padding with nulls. */
+strncpy(dst: *byte, src: *byte, n: int)
+    var i = 0
+
+    while i < n && *src != 0
+        *dst++ = *src++
+        i++
+
+    while i < n
+        *dst++ = 0
+        i++
+
+/* Append src to the end of dst. */
+strcat(dst: *byte, src: *byte)
+    while *dst != 0 do dst++
+
+    for var p = src; *p != 0; p++ do *dst++ = *p
+
+    *dst = 0
+
+/* Return index of first occurrence of c in s, or -1. */
+strchr(s: *byte, c: int) -> int
+    for var i = 0; s[i] != 0; i++
+        if s[i] == c
+            return i
+
+    -1
+
+/* Return index of last occurrence of c in s, or -1. */
+strrchr(s: *byte, c: int) -> int
+    var result = -1
+
+    for var i = 0; s[i] != 0; i++
+        if s[i] == c
+            result = i
+
+    result
