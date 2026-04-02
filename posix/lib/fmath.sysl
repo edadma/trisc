@@ -1,0 +1,90 @@
+/*
+ * fmath.sysl — Floating-point math operations
+ *
+ * Hardware-backed where possible via TRISC float instructions.
+ * No OS dependency — usable in bare-metal programs.
+ *
+ * Missing (need hardware trig/exp instructions):
+ *   sin, cos, tan, asin, acos, atan, atan2
+ *   sinh, cosh, tanh
+ *   exp, exp2, log, log2, log10
+ *   frexp, ldexp, modf
+ */
+
+/* Return the absolute value of x. */
+fabs(x: double) -> double = if x < 0.0 then -x else x
+
+/* Return the smaller of a and b. */
+fmin(a: double, b: double) -> double = if a < b then a else b
+
+/* Return the larger of a and b. */
+fmax(a: double, b: double) -> double = if a > b then a else b
+
+/* Return the square root of x. */
+sqrt(x: double) -> double
+    // TODO: maps to fsqrt instruction; needs inline asm or compiler intrinsic
+    var guess = x / 2.0
+
+    if x <= 0.0 then return 0.0
+
+    // Newton's method (temporary until inline asm available)
+    for var i = 0; i < 50; i++
+        guess = (guess + x / guess) / 2.0
+
+    guess
+
+/* Truncate x toward zero. */
+trunc(x: double) -> double = double(int(x))
+
+/* Round x toward negative infinity. */
+floor(x: double) -> double
+    val t = trunc(x)
+
+    if x < 0.0 && t != x then t - 1.0
+    else t
+
+/* Round x toward positive infinity. */
+ceil(x: double) -> double
+    val t = trunc(x)
+
+    if x > 0.0 && t != x then t + 1.0
+    else t
+
+/* Round x to the nearest integer, halfway cases away from zero. */
+round(x: double) -> double
+    if x >= 0.0 then floor(x + 0.5)
+    else ceil(x - 0.5)
+
+/* Return the floating-point remainder of x / y. */
+fmod(x: double, y: double) -> double = x - trunc(x / y) * y
+
+/* Copy the sign of y onto the magnitude of x. */
+copysign(x: double, y: double) -> double
+    val mag = fabs(x)
+
+    if y < 0.0 then -mag
+    else mag
+
+/* Return x raised to the power y. */
+fpow(x: double, y: double) -> double
+    // TODO: maps to fpow instruction; needs inline asm or compiler intrinsic
+    // Integer exponent fallback
+    if y == trunc(y) && y >= 0.0
+        var result = 1.0
+        var base = x
+        var e = int(y)
+
+        while e > 0
+            if e & 1 == 1 then result *= base
+
+            base *= base
+            e = e >> 1
+
+        return result
+
+    // Negative integer exponent
+    if y == trunc(y)
+        return 1.0 / fpow(x, -y)
+
+    // Non-integer exponents need exp/log — not yet available
+    0.0

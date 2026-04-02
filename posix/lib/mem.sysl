@@ -1,0 +1,54 @@
+/*
+ * mem.sysl — Memory operations
+ *
+ * No OS dependency — usable in bare-metal programs.
+ */
+
+/* Fill n bytes of dst with value v. */
+memset(dst: *byte, v: int, n: int) -> *byte
+    for var i = 0; i < n; i++ do dst[i] = v
+
+    dst
+
+/* Copy n bytes from src to dst (must not overlap). */
+memcpy(dst: *byte, src: *byte, n: int) -> *byte
+    for var i = 0; i < n; i++ do dst[i] = src[i]
+
+    dst
+
+/* Copy n bytes from src to dst (handles overlapping regions). */
+memmove(dst: *byte, src: *byte, n: int) -> *byte
+    if dst < src
+        for var i = 0; i < n; i++ do dst[i] = src[i]
+    else if dst > src
+        var i = n
+
+        while i > 0
+            i--
+            dst[i] = src[i]
+
+    dst
+
+/* Compare n bytes of a and b. Returns <0, 0, or >0. */
+memcmp(a: *byte, b: *byte, n: int) -> int
+    for var i = 0; i < n; i++
+        val d = a[i] - b[i]
+
+        if d != 0 then return d
+
+    0
+
+/* Find first occurrence of c in the first n bytes of s. Returns pointer or null. */
+memchr(s: *byte, c: int, n: int) -> *byte
+    for var i = 0; i < n; i++
+        if s[i] == c then return s + i
+
+    *byte(0)
+
+/* Return the length of null-terminated string s. */
+strlen(s: *byte) -> int
+    var i = 0
+
+    while s[i] != 0 do i++
+
+    i
