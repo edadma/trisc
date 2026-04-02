@@ -17,8 +17,8 @@ memcmp(a: *byte, b: *byte, n: int) -> int
     for var i = 0; i < n; i++
         val d = a[i] - b[i]
 
-        if d != 0
-            return d
+        if d != 0 then return d
+
     0
 
 /* Return the length of null-terminated string s. */

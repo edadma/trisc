@@ -45,8 +45,7 @@ pow(base: int, exp: int) -> int
     var e = exp
 
     while e > 0
-        if e & 1 == 1
-            result *= b
+        if e & 1 == 1 then result *= b
 
         b *= b
         e = e >> 1
