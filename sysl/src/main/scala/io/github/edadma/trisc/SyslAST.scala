@@ -12,6 +12,7 @@ case class NamedImport(name: String, rename: Option[String] = None) extends Impo
 
 // Declarations
 trait DeclAST extends Positional
+case class ModuleDeclAST(path: List[String]) extends DeclAST
 case class ImportDeclAST(modulePath: String, selectors: List[ImportSelector]) extends DeclAST
 case class ExternFuncDeclAST(name: String, params: List[ParamAST], returnType: Option[String]) extends DeclAST
 case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[String], body: FunBodyAST, isPrivate: Boolean = false) extends DeclAST

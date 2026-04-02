@@ -10,6 +10,44 @@ class SyslModuleSyntaxTests extends AnyFreeSpec with Matchers {
       case Right(ast) => ast
       case Left(err) => fail(s"parse error: $err")
 
+  // ===== module =====
+
+  "module declaration" in {
+    val ast = parse(
+      """module posix.lib.string
+        |strlen(s: *char) -> int = 0
+        |""".stripMargin)
+    ast.decls.head shouldBe a[ModuleDeclAST]
+    ast.decls.head.asInstanceOf[ModuleDeclAST].path shouldBe List("posix", "lib", "string")
+  }
+
+  "module declaration with single segment" in {
+    val ast = parse(
+      """module math
+        |add(a: int, b: int) -> int = a + b
+        |""".stripMargin)
+    ast.decls.head.asInstanceOf[ModuleDeclAST].path shouldBe List("math")
+  }
+
+  "no module declaration" in {
+    val ast = parse(
+      """main() -> int = 0
+        |""".stripMargin)
+    ast.decls.head shouldBe a[FunDeclAST]
+    ast.decls.exists(_.isInstanceOf[ModuleDeclAST]) shouldBe false
+  }
+
+  "module with imports and functions" in {
+    val ast = parse(
+      """module posix.lib.string
+        |import posix.lib.ctype.*
+        |strlen(s: *char) -> int = 0
+        |""".stripMargin)
+    ast.decls(0) shouldBe a[ModuleDeclAST]
+    ast.decls(1) shouldBe a[ImportDeclAST]
+    ast.decls(2) shouldBe a[FunDeclAST]
+  }
+
   // ===== import =====
 
   "import declaration" in {

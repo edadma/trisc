@@ -20,7 +20,12 @@ class SyslParser extends StandardTokenParsers {
   // --- Program ---
 
   lazy val program: Parser[ProgramAST] =
-    repsep(decl, rep1(Newline)) <~ opt(rep(Newline)) ^^ ProgramAST.apply
+    opt(moduleDecl <~ rep1(Newline)) ~ repsep(decl, rep1(Newline)) <~ opt(rep(Newline)) ^^ {
+      case mod ~ decls => ProgramAST(mod.toList ::: decls)
+    }
+
+  lazy val moduleDecl: Parser[ModuleDeclAST] =
+    "module" ~> rep1sep(importIdent, ".") ^^ ModuleDeclAST.apply
 
   // --- Declarations ---
 

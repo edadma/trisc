@@ -65,6 +65,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   def run(program: TProgram): Long =
     for decl <- program.decls do
       decl match
+        case _: TModuleDecl => // metadata only
         case _: TImportDecl => // not handled in interpreter
         case _: TExternFuncDecl => // not handled in interpreter
         case _: TStructDecl => // type only, no runtime effect

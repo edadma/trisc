@@ -143,9 +143,20 @@ object SyslCli:
 
   private def executeCompile(cmd: CompileCommand): Unit =
     val sources = resolveSources(cmd.inputs)
+    val baseDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList match
+      case Nil => List(".")
+      case dirs => dirs
 
-    val driver = new SyslDriver
+    val driver = new SyslDriver(Some(io), baseDirs)
     val result = driver.compile(sources)
+
+    // Write .smeta files for package modules
+    for (path, meta) <- result.packageMetas do
+      val parts = path.split("/")
+      for base <- baseDirs do
+        val dirPath = io.joinPath(base, path)
+        if io.exists(dirPath) && io.isDirectory(dirPath) then
+          io.writeFile(io.joinPath(dirPath, ".smeta"), meta.toSmeta)
 
     cmd.emit match
       case "asm" =>
@@ -202,7 +213,10 @@ object SyslCli:
           if result != 0 then println(result)
     else
       // Multi-file: use driver, merge typed ASTs, then interpret
-      val driver = new SyslDriver
+      val baseDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList match
+        case Nil => List(".")
+        case dirs => dirs
+      val driver = new SyslDriver(Some(io), baseDirs)
       val result = driver.compile(sources)
       val stdlibImports = driver.collectStdlibImports(result.units)
       val merged = TProgram(result.units.flatMap(_.typed.decls))

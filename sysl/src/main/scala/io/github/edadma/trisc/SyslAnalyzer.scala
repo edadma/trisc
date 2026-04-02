@@ -69,6 +69,7 @@ class SyslAnalyzer:
     // First pass: register all functions and globals
     for decl <- program.decls do
       decl match
+        case _: ModuleDeclAST => // metadata only
         case _: ImportDeclAST => // handled later
         case ExternFuncDeclAST(name, params, returnType) =>
           val paramTypes = params.map(p => (p.name, resolveTypeName(p.typ)))
@@ -116,6 +117,9 @@ class SyslAnalyzer:
 
   private def analyzeDecl(decl: DeclAST): TDecl =
     decl match
+      case ModuleDeclAST(path) =>
+        TModuleDecl(path)
+
       case ImportDeclAST(modulePath, _) =>
         TImportDecl(modulePath)
 
