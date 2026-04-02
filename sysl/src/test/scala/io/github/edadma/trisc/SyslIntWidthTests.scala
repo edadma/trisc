@@ -350,4 +350,65 @@ class SyslIntWidthTests extends SyslTestHelpers {
         |""".stripMargin): @unchecked
     ast.decls.length shouldBe 1
   }
+
+  // ===== Narrowing rejection tests =====
+
+  "i32 to i16 narrowing is rejected" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """main() -> int
+        |    var x: i32 = 42
+        |    var y: i16 = x
+        |    y
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "i16 to i8 narrowing is rejected" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """main() -> int
+        |    var x: i16 = 42
+        |    var y: i8 = x
+        |    y
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "u64 to u32 narrowing is rejected" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """main() -> int
+        |    var x: u64 = 42
+        |    var y: u32 = x
+        |    int(y)
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "i64 to u32 narrowing across sign is rejected" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """main() -> int
+        |    var x: i64 = 42
+        |    var y: u32 = x
+        |    int(y)
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "i8 to u64 widening across sign is allowed" in {
+    eval(
+      """main() -> int
+        |    var x: i8 = 5
+        |    var y: u64 = x
+        |    int(y)
+        |""".stripMargin) shouldBe 5
+  }
+
+  "narrowing in function arg is rejected" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """f(x: i8) -> int = x
+        |main() -> int
+        |    var a: i32 = 42
+        |    f(a)
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
 }

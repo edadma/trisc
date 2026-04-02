@@ -108,4 +108,33 @@ class SyslConstructorTests extends SyslTestHelpers {
         |    get_sum(&p)
         |""".stripMargin) shouldBe 42
   }
+
+  "constructor with nested struct" in {
+    eval(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |struct Line
+        |    start: Point
+        |    end_: Point
+        |
+        |main() -> int
+        |    val l = Line(Point(1, 2), Point(3, 4))
+        |    l.start.x + l.end_.y
+        |""".stripMargin) shouldBe 5
+  }
+
+  "constructor assigned to var then field modified" in {
+    eval(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |main() -> int
+        |    var p = Point(1, 2)
+        |    p.x = 10
+        |    p.x + p.y
+        |""".stripMargin) shouldBe 12
+  }
 }

@@ -224,4 +224,24 @@ class SyslTypeCheckTests extends SyslTestHelpers {
         |""".stripMargin): @unchecked
     (new SyslAnalyzer).analyze(ast) // should not throw
   }
+
+  // ===== Builtin argument checking =====
+
+  "builtin print rejects string arg" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """main() -> int
+        |    print("hello")
+        |    0
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "builtin putchar accepts char literal" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """main() -> int
+        |    putchar('A')
+        |    0
+        |""".stripMargin): @unchecked
+    (new SyslAnalyzer).analyze(ast) // should not throw
+  }
 }

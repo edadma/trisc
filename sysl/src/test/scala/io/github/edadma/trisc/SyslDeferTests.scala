@@ -102,4 +102,45 @@ class SyslDeferTests extends SyslTestHelpers {
         |    x
         |""".stripMargin) shouldBe 15
   }
+
+  "defer is only statement in function" in {
+    eval(
+      """var x = 0
+        |
+        |inc()
+        |    x += 1
+        |
+        |f()
+        |    defer inc()
+        |
+        |main() -> int
+        |    f()
+        |    x
+        |""".stripMargin) shouldBe 1
+  }
+
+  "multiple calls each with own defers" in {
+    eval(
+      """var x = 0
+        |
+        |add_ten()
+        |    x += 10
+        |
+        |add_one()
+        |    x += 1
+        |
+        |f()
+        |    defer add_ten()
+        |    x += 100
+        |
+        |g()
+        |    defer add_one()
+        |    x += 200
+        |
+        |main() -> int
+        |    f()
+        |    g()
+        |    x
+        |""".stripMargin) shouldBe 311  // 100 + 10 (f's defer) + 200 + 1 (g's defer)
+  }
 }

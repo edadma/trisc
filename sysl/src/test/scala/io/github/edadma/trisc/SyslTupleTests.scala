@@ -65,4 +65,22 @@ class SyslTupleTests extends SyslTestHelpers {
         |""".stripMargin): @unchecked
     an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
   }
+
+  "nested tuple" in {
+    eval(
+      """main() -> int
+        |    val t = ((1, 2), 3)
+        |    val inner = t.0
+        |    inner.0 + inner.1 + t.1
+        |""".stripMargin) shouldBe 6
+  }
+
+  "destructuring with var (mutable)" in {
+    eval(
+      """main() -> int
+        |    var (a, b) = (1, 2)
+        |    a = 10
+        |    a + b
+        |""".stripMargin) shouldBe 12
+  }
 }
