@@ -99,14 +99,14 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             case ReturnException(v) => v
       val defers = deferStack.slice(savedSize, deferStack.size)
       runDefers(defers)
-      deferStack.trimEnd(deferStack.size - savedSize)
+      deferStack.dropRightInPlace(deferStack.size - savedSize)
       result
     catch
       case e: ReturnException => throw e // should not happen — caught above
       case e: Throwable =>
         val defers = deferStack.slice(savedSize, deferStack.size)
         runDefers(defers)
-        deferStack.trimEnd(deferStack.size - savedSize)
+        deferStack.dropRightInPlace(deferStack.size - savedSize)
         throw e
 
   private def evalBlock(stmts: List[TStmt], env: Env): Value =
