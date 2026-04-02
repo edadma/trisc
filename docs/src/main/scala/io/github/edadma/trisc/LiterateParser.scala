@@ -10,7 +10,8 @@ class LiterateParser:
     if source.contains('\t') then
       throw ParseError("tabs are not allowed in literate source files")
 
-    val doc = parseDocumentContent(source)
+    val config = MarkdownConfig(indentedCodeBreaksList = true)
+    val doc = parseDocumentContent(source, config)
     val codeBlocks = doc.children.collect {
       case Code(content, _, true) => content
     }

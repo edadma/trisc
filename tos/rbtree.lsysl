@@ -13,7 +13,6 @@ Red-black invariants maintained by this implementation:
 3. No red node has a red child
 4. Every path from root to nil has the same black depth
 
-<!-- -->
 
     val RB_BLACK = 0
     val RB_RED   = 1

@@ -21,7 +21,6 @@ The trap handler in boot.asm dispatches based on r1:
 - 1 = putc(char) -- write character to stdout
 - 2 = yield() -- voluntary context switch
 
-<!-- -->
 
     val MAX_THREADS    = 8
     val NUM_PRIORITIES = 4
@@ -49,7 +48,6 @@ Statistics fields track per-thread performance:
 - cpu_ticks: total ticks spent running
 - consec_quanta: consecutive full quanta without voluntary yield/sleep
 
-<!-- -->
 
     struct Task
         ssp: i64
@@ -119,7 +117,6 @@ Each timer has:
 - fire_tick: absolute tick when the timer fires
 - callback: function pointer to call (void -> void)
 
-<!-- -->
 
     val MAX_TIMERS = 8
 
@@ -306,7 +303,6 @@ Steps:
 7. Pick the highest-priority non-empty queue and dequeue its front
 8. Return its SSP, or 0 if all queues are empty
 
-<!-- -->
 
     schedule(current_ssp: i64) -> i64
         ticks += 1
@@ -520,7 +516,6 @@ PIMutex struct layout (3 fields, each int-sized):
 - offset 8: wait_head -- first waiting thread index (QUEUE_EMPTY = none)
 - offset 16: wait_tail -- last waiting thread index
 
-<!-- -->
 
     struct PIMutex
         owner: int
@@ -563,7 +558,6 @@ Handles the thread regardless of state:
 - MUTEX_WAIT: change priority and propagate to the mutex owner
     (transitive inheritance)
 
-<!-- -->
 
     boost_thread_priority(id: int, new_pri: int)
         if new_pri >= tasks[id].priority

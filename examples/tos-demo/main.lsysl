@@ -5,7 +5,6 @@ kernel_main() is called by boot.asm. It must:
 2. Start the timer
 3. Return the first thread's SSP
 
-<!-- -->
 
     import kernel.*
     import tasks.*

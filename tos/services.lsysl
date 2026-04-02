@@ -19,8 +19,6 @@ Syscall numbers:
 - 13 = total_switches -- get global context switch count
 - 14 = set_watchdog -- set watchdog quanta limit (0 = disable)
 
-<!-- -->
-
     extern syscall(number: int, arg: i64) -> i64
 
     val SYS_SLEEP          = 0

@@ -143,7 +143,7 @@ lazy val docs = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .settings(
     name := "trisc-docs",
     libraryDependencies ++= Seq(
-      "io.github.edadma" %%% "markdown" % "0.2.0",
+      "io.github.edadma" %%% "markdown" % "0.2.1",
       "io.github.edadma" %%% "highlighter" % "0.0.1",
     ),
   )

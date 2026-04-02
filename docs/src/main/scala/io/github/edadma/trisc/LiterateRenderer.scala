@@ -20,6 +20,7 @@ object LiterateRenderer:
   private val htmlConfig = MarkdownConfig.all.copy(
     codeHighlighter = Some(codeHighlighter),
     indentedCodeLanguage = Some("sysl"),
+    indentedCodeBreaksList = true,
   )
 
   def renderHTML(source: String): String =

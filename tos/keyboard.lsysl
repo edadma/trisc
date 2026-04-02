@@ -10,7 +10,6 @@ Device registers:
 - 0x100004 + 2 = FLAGS (bit 0 = press/release)
 - 0x100004 + 3 = MODIFIERS (shift/ctrl/alt/meta bitmask)
 
-<!-- -->
 
     val KB_STATUS:   *i8 = *i8(0x100004)
     val KB_SCANCODE: *i8 = *i8(0x100005)

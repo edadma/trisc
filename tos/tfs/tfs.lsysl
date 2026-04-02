@@ -19,7 +19,6 @@ On-disk layout (block 0 = boot, block 1 = superblock):
     6 direct block ptrs, 1 indirect block ptr)
 - Dir entries: 16 bytes each (inode number + 14-char name)
 
-<!-- -->
 
     // === Ramdisk device registers (offsets from RD_BASE) ===
 

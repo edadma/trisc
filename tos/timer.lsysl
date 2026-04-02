@@ -13,7 +13,6 @@ Device registers (MCU-style timer):
 - 0x100040 + 11 = SR (status: bit 0 = overflow, write-1-to-clear)
 - 0x100040 + 12 = IER (interrupt enable: bit 0 = overflow)
 
-<!-- -->
 
     val TIMER_BASE = 0x100040
     val TIMER_ARR  = 0x100042
