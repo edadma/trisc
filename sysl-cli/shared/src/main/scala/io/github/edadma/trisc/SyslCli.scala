@@ -173,19 +173,38 @@ object SyslCli:
         case Left(err) =>
           fail(s"parse error: $err")
         case Right(ast) =>
+          // Check for stdlib imports and register them with the analyzer
+          val stdlibImports = ast.decls.collect {
+            case ImportDeclAST(path) if SyslStdlib.modules.contains(path) => path
+          }.toSet
           val analyzer = new SyslAnalyzer
+          for mod <- stdlibImports do
+            analyzer.registerImport(SyslStdlib.meta(mod))
           val typed = analyzer.analyze(ast)
           val interpreter = new SyslInterpreter()
+          wireStdlib(interpreter, stdlibImports)
           val result = interpreter.run(typed)
           if result != 0 then println(result)
     else
       // Multi-file: use driver, merge typed ASTs, then interpret
       val driver = new SyslDriver
       val result = driver.compile(sources)
+      val stdlibImports = driver.collectStdlibImports(result.units)
       val merged = TProgram(result.units.flatMap(_.typed.decls))
       val interpreter = new SyslInterpreter()
+      wireStdlib(interpreter, stdlibImports)
       val value = interpreter.run(merged)
       if value != 0 then println(value)
+
+  private def wireStdlib(interpreter: SyslInterpreter, imports: Set[String]): Unit =
+    if imports.nonEmpty then
+      val ctx = new SyslStdlib.StdlibContext()
+      for mod <- imports do
+        interpreter.registerBuiltins(SyslStdlib.builtins(mod, ctx))
+      // Register constants (e.g., O_RDONLY, STDIN, etc.)
+      if imports.contains("std/io") then
+        for (name, value) <- SyslStdlib.ioConstants do
+          interpreter.registerGlobal(name, value)
 
   private def io: FileOps = FileOps.instance
 

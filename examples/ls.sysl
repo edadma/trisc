@@ -1,0 +1,12 @@
+import "std/fs"
+import "std/process"
+
+main() -> int
+    dir = "."
+    if proc_argc() > 0
+        dir = proc_argv(0)
+    entries = fs_readdir(dir)
+    for i = 0; i < len(entries); i++
+        puts(entries[i].name)
+        putchar('\n')
+    0
