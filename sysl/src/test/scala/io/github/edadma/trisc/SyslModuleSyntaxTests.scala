@@ -14,29 +14,83 @@ class SyslModuleSyntaxTests extends AnyFreeSpec with Matchers {
 
   "import declaration" in {
     val ast = parse(
-      """import "math"
+      """import math.*
         |main() -> int = 0
         |""".stripMargin)
     ast.decls.head shouldBe a[ImportDeclAST]
-    ast.decls.head.asInstanceOf[ImportDeclAST].path shouldBe "math"
+    ast.decls.head.asInstanceOf[ImportDeclAST].modulePath shouldBe "math"
+    ast.decls.head.asInstanceOf[ImportDeclAST].selectors shouldBe List(WildcardImport)
   }
 
   "import with path" in {
     val ast = parse(
-      """import "std/io"
+      """import std.io.*
         |main() -> int = 0
         |""".stripMargin)
-    ast.decls.head.asInstanceOf[ImportDeclAST].path shouldBe "std/io"
+    ast.decls.head.asInstanceOf[ImportDeclAST].modulePath shouldBe "std/io"
+    ast.decls.head.asInstanceOf[ImportDeclAST].selectors shouldBe List(WildcardImport)
   }
 
   "multiple imports" in {
     val ast = parse(
-      """import "math"
-        |import "io"
+      """import math.*
+        |import io.*
         |main() -> int = 0
         |""".stripMargin)
-    ast.decls(0).asInstanceOf[ImportDeclAST].path shouldBe "math"
-    ast.decls(1).asInstanceOf[ImportDeclAST].path shouldBe "io"
+    ast.decls(0).asInstanceOf[ImportDeclAST].modulePath shouldBe "math"
+    ast.decls(1).asInstanceOf[ImportDeclAST].modulePath shouldBe "io"
+  }
+
+  // ===== selective imports =====
+
+  "import single name" in {
+    val ast = parse(
+      """import math.add
+        |main() -> int = 0
+        |""".stripMargin)
+    val imp = ast.decls.head.asInstanceOf[ImportDeclAST]
+    imp.modulePath shouldBe "math"
+    imp.selectors shouldBe List(NamedImport("add"))
+  }
+
+  "import named list" in {
+    val ast = parse(
+      """import math.{add, mul}
+        |main() -> int = 0
+        |""".stripMargin)
+    val imp = ast.decls.head.asInstanceOf[ImportDeclAST]
+    imp.modulePath shouldBe "math"
+    imp.selectors shouldBe List(NamedImport("add"), NamedImport("mul"))
+  }
+
+  "import with rename" in {
+    val ast = parse(
+      """import math.{add => plus, mul}
+        |main() -> int = 0
+        |""".stripMargin)
+    val imp = ast.decls.head.asInstanceOf[ImportDeclAST]
+    imp.modulePath shouldBe "math"
+    imp.selectors shouldBe List(NamedImport("add", Some("plus")), NamedImport("mul"))
+  }
+
+  "import path single name" in {
+    val ast = parse(
+      """import std.io.println
+        |main() -> int = 0
+        |""".stripMargin)
+    val imp = ast.decls.head.asInstanceOf[ImportDeclAST]
+    imp.modulePath shouldBe "std/io"
+    imp.selectors shouldBe List(NamedImport("println"))
+  }
+
+  "import path with braces" in {
+    val ast = parse(
+      """import std.io.{read, write}
+        |main() -> int = 0
+        |""".stripMargin)
+    val imp = ast.decls.head.asInstanceOf[ImportDeclAST]
+    imp.modulePath shouldBe "std/io"
+    imp.selectors shouldBe List(NamedImport("read"), NamedImport("write"))
   }
 
   // ===== private =====
@@ -101,7 +155,7 @@ class SyslModuleSyntaxTests extends AnyFreeSpec with Matchers {
 
   "import and private declarations" in {
     val ast = parse(
-      """import "math"
+      """import math.*
         |private helper(x: int) -> int = x * 2
         |main() -> int = helper(3)
         |""".stripMargin)

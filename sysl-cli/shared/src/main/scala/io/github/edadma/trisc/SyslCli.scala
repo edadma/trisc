@@ -190,7 +190,7 @@ object SyslCli:
         case Right(ast) =>
           // Check for stdlib imports and register them with the analyzer
           val stdlibImports = ast.decls.collect {
-            case ImportDeclAST(path) if SyslStdlib.modules.contains(path) => path
+            case ImportDeclAST(path, _) if SyslStdlib.modules.contains(path) => path
           }.toSet
           val analyzer = new SyslAnalyzer
           for mod <- stdlibImports do

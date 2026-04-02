@@ -11,7 +11,7 @@ class TFSMetadataTests extends TFSTestHelpers {
 
   "tfs_mknod char device" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "c")}
@@ -39,7 +39,7 @@ class TFSMetadataTests extends TFSTestHelpers {
 
   "tfs_chmod changes permission bits" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}
@@ -60,7 +60,7 @@ class TFSMetadataTests extends TFSTestHelpers {
 
   "tfs_chown sets uid and gid" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}
@@ -81,7 +81,7 @@ class TFSMetadataTests extends TFSTestHelpers {
 
   "tfs_link increments nlinks" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}
@@ -104,7 +104,7 @@ class TFSMetadataTests extends TFSTestHelpers {
 
   "tfs_rmdir rejects non-directory" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}
@@ -123,7 +123,7 @@ class TFSMetadataTests extends TFSTestHelpers {
 
   "tfs_rename nonexistent returns -1" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("old", "nope")}
@@ -140,7 +140,7 @@ class TFSMetadataTests extends TFSTestHelpers {
 
   "tfs_rename success" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "a")}
@@ -162,7 +162,7 @@ class TFSMetadataTests extends TFSTestHelpers {
 
   "tfs_rmdir success on empty dir" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "d")}
@@ -179,7 +179,7 @@ class TFSMetadataTests extends TFSTestHelpers {
 
   "tfs_link rejects directory" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "d")}

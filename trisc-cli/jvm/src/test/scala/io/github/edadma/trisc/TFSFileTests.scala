@@ -11,7 +11,7 @@ class TFSFileTests extends TFSTestHelpers {
 
   "tfs_stat on root inode" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    var stat: [7]int
@@ -31,7 +31,7 @@ class TFSFileTests extends TFSTestHelpers {
 
   "tfs_read file content" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/etc/motd")}
@@ -50,7 +50,7 @@ class TFSFileTests extends TFSTestHelpers {
 
   "tfs_read offset into file" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/etc/motd")}
@@ -69,7 +69,7 @@ class TFSFileTests extends TFSTestHelpers {
 
   "tfs_read past EOF returns 0" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/etc/motd")}
@@ -87,7 +87,7 @@ class TFSFileTests extends TFSTestHelpers {
 
   "tfs_read clamps to file size" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/etc/motd")}
@@ -107,7 +107,7 @@ class TFSFileTests extends TFSTestHelpers {
 
   "tfs_write to new file allocates block" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}
@@ -128,7 +128,7 @@ class TFSFileTests extends TFSTestHelpers {
 
   "tfs_write updates size" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}
@@ -149,7 +149,7 @@ class TFSFileTests extends TFSTestHelpers {
 
   "tfs_write to existing file (has block)" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |
          |main() -> int
          |    tfs_init()
@@ -176,7 +176,7 @@ class TFSFileTests extends TFSTestHelpers {
 
   "tfs_write to pre-allocated block" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |
          |main() -> int
          |    tfs_init()
@@ -210,7 +210,7 @@ class TFSFileTests extends TFSTestHelpers {
 
   "tfs_create regular file" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "x")}
@@ -232,7 +232,7 @@ class TFSFileTests extends TFSTestHelpers {
 
   "tfs_create directory" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "d")}
@@ -254,7 +254,7 @@ class TFSFileTests extends TFSTestHelpers {
 
   "tfs_truncate no-op when new_size >= old_size" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}
@@ -278,7 +278,7 @@ class TFSFileTests extends TFSTestHelpers {
 
   "tfs_unlink frees inode and blocks" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |    val fb1 = tfs_freeblocks()
@@ -303,7 +303,7 @@ class TFSFileTests extends TFSTestHelpers {
 
   "tfs_truncate shrinks file size" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}

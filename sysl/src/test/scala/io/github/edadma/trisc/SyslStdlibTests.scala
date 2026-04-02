@@ -11,7 +11,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
     val parser = new SyslParser
     val Right(ast) = parser.parseProgram(source): @unchecked
     val stdlibImports = ast.decls.collect {
-      case ImportDeclAST(path) if SyslStdlib.modules.contains(path) => path
+      case ImportDeclAST(path, _) if SyslStdlib.modules.contains(path) => path
     }.toSet
     val analyzer = new SyslAnalyzer
     for mod <- stdlibImports do
@@ -52,7 +52,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
   "std/string" - {
     "concat" in {
       output(
-        """import "std/string"
+        """import std.string.*
           |main() -> int
           |    puts(concat("hello", " world"))
           |    0
@@ -62,7 +62,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "concat empty strings" in {
       output(
-        """import "std/string"
+        """import std.string.*
           |main() -> int
           |    puts(concat("", "abc"))
           |    0
@@ -72,7 +72,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "concat both empty" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = length(concat("", ""))
           |""".stripMargin
       ) shouldBe 0
@@ -80,7 +80,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "length" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = length("hello")
           |""".stripMargin
       ) shouldBe 5
@@ -88,7 +88,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "length empty" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = length("")
           |""".stripMargin
       ) shouldBe 0
@@ -96,7 +96,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "substr" in {
       output(
-        """import "std/string"
+        """import std.string.*
           |main() -> int
           |    puts(substr("hello world", 6, 5))
           |    0
@@ -106,7 +106,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "substr from start" in {
       output(
-        """import "std/string"
+        """import std.string.*
           |main() -> int
           |    puts(substr("hello", 0, 3))
           |    0
@@ -116,7 +116,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "substr length exceeds string" in {
       output(
-        """import "std/string"
+        """import std.string.*
           |main() -> int
           |    puts(substr("hi", 0, 100))
           |    0
@@ -126,7 +126,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "index_of" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = index_of("hello world", "world")
           |""".stripMargin
       ) shouldBe 6
@@ -134,7 +134,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "index_of at start" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = index_of("hello", "hel")
           |""".stripMargin
       ) shouldBe 0
@@ -142,7 +142,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "index_of not found" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = index_of("hello", "xyz")
           |""".stripMargin
       ) shouldBe -1
@@ -150,7 +150,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "starts_with true" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = int(starts_with("hello world", "hello"))
           |""".stripMargin
       ) shouldBe 1
@@ -158,7 +158,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "starts_with false" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = int(starts_with("hello world", "world"))
           |""".stripMargin
       ) shouldBe 0
@@ -166,7 +166,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "starts_with empty prefix" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = int(starts_with("hello", ""))
           |""".stripMargin
       ) shouldBe 1
@@ -174,7 +174,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "ends_with true" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = int(ends_with("hello world", "world"))
           |""".stripMargin
       ) shouldBe 1
@@ -182,7 +182,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "ends_with false" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = int(ends_with("hello world", "hello"))
           |""".stripMargin
       ) shouldBe 0
@@ -190,7 +190,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "trim" in {
       output(
-        """import "std/string"
+        """import std.string.*
           |main() -> int
           |    puts(trim("  hello  "))
           |    0
@@ -200,7 +200,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "trim no whitespace" in {
       output(
-        """import "std/string"
+        """import std.string.*
           |main() -> int
           |    puts(trim("hello"))
           |    0
@@ -210,7 +210,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "trim all whitespace" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = length(trim("   "))
           |""".stripMargin
       ) shouldBe 0
@@ -218,7 +218,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "split" in {
       output(
-        """import "std/string"
+        """import std.string.*
           |main() -> int
           |    parts = split("a,b,c", ",")
           |    for i = 0; i < len(parts); i++
@@ -231,7 +231,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "split no delimiter found" in {
       output(
-        """import "std/string"
+        """import std.string.*
           |main() -> int
           |    parts = split("hello", ",")
           |    puts(parts[0])
@@ -242,7 +242,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "split empty string" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = len(split("", ","))
           |""".stripMargin
       ) shouldBe 0 // empty string returns empty slice
@@ -250,7 +250,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "to_int" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> i64 = to_int("42")
           |""".stripMargin
       ) shouldBe 42
@@ -258,7 +258,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "to_int negative" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> i64 = to_int("-100")
           |""".stripMargin
       ) shouldBe -100
@@ -266,7 +266,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "to_int invalid returns 0" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> i64 = to_int("abc")
           |""".stripMargin
       ) shouldBe 0
@@ -274,7 +274,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "from_int" in {
       output(
-        """import "std/string"
+        """import std.string.*
           |main() -> int
           |    puts(from_int(123))
           |    0
@@ -284,7 +284,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "from_int negative" in {
       output(
-        """import "std/string"
+        """import std.string.*
           |main() -> int
           |    puts(from_int(-42))
           |    0
@@ -294,7 +294,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "from_int zero" in {
       output(
-        """import "std/string"
+        """import std.string.*
           |main() -> int
           |    puts(from_int(0))
           |    0
@@ -304,7 +304,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "equal true" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = int(equal("abc", "abc"))
           |""".stripMargin
       ) shouldBe 1
@@ -312,7 +312,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "equal false" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = int(equal("abc", "def"))
           |""".stripMargin
       ) shouldBe 0
@@ -320,7 +320,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "equal empty strings" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = int(equal("", ""))
           |""".stripMargin
       ) shouldBe 1
@@ -328,7 +328,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "contains true" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = int(contains("hello world", "lo wo"))
           |""".stripMargin
       ) shouldBe 1
@@ -336,7 +336,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "contains false" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = int(contains("hello", "xyz"))
           |""".stripMargin
       ) shouldBe 0
@@ -344,7 +344,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "contains empty needle" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = int(contains("hello", ""))
           |""".stripMargin
       ) shouldBe 1
@@ -352,7 +352,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "char_at" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = char_at("ABC", 1)
           |""".stripMargin
       ) shouldBe 66 // 'B'
@@ -360,7 +360,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "char_at first" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = char_at("ABC", 0)
           |""".stripMargin
       ) shouldBe 65 // 'A'
@@ -368,7 +368,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "char_at out of bounds" in {
       eval(
-        """import "std/string"
+        """import std.string.*
           |main() -> int = char_at("ABC", 10)
           |""".stripMargin
       ) shouldBe -1
@@ -380,7 +380,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
   "std/io" - {
     "write_string to STDOUT" in {
       output(
-        """import "std/io"
+        """import std.io.*
           |main() -> int
           |    write_string(STDOUT, "hello io")
           |    0
@@ -390,7 +390,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "write_string returns byte count" in {
       eval(
-        """import "std/io"
+        """import std.io.*
           |main() -> int = write_string(STDOUT, "hello")
           |""".stripMargin
       ) shouldBe 5
@@ -398,7 +398,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "write_string to STDERR" in {
       output(
-        """import "std/io"
+        """import std.io.*
           |main() -> int
           |    write_string(STDERR, "err msg")
           |    0
@@ -409,8 +409,8 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
     "open, write_string, close, read round-trip" in {
       // Write a temp file, read it back
       output(
-        """import "std/io"
-          |import "std/fs"
+        """import std.io.*
+          |import std.fs.*
           |main() -> int
           |    path = "/tmp/_sysl_test_io_roundtrip.txt"
           |    fd = open(path, O_CREATE + O_WRONLY + O_TRUNC)
@@ -429,8 +429,8 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
     "open read mode" in {
       // Write with fs, then read with open + read_line
       output(
-        """import "std/io"
-          |import "std/fs"
+        """import std.io.*
+          |import std.fs.*
           |main() -> int
           |    path = "/tmp/_sysl_test_read.txt"
           |    write_file(path, "test line")
@@ -448,7 +448,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "open nonexistent file returns -1" in {
       eval(
-        """import "std/io"
+        """import std.io.*
           |main() -> int = open("/tmp/_sysl_nonexistent_12345.txt", O_RDONLY)
           |""".stripMargin
       ) shouldBe -1
@@ -456,7 +456,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "close invalid fd returns -1" in {
       eval(
-        """import "std/io"
+        """import std.io.*
           |main() -> int = close(999)
           |""".stripMargin
       ) shouldBe -1
@@ -464,8 +464,8 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "read into buffer" in {
       output(
-        """import "std/io"
-          |import "std/fs"
+        """import std.io.*
+          |import std.fs.*
           |main() -> int
           |    path = "/tmp/_sysl_test_readbuf.txt"
           |    write_file(path, "ABCDE")
@@ -483,8 +483,8 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "write from buffer" in {
       output(
-        """import "std/io"
-          |import "std/fs"
+        """import std.io.*
+          |import std.fs.*
           |main() -> int
           |    path = "/tmp/_sysl_test_writebuf.txt"
           |    fd = open(path, O_CREATE + O_WRONLY + O_TRUNC)
@@ -503,8 +503,8 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "seek and read" in {
       output(
-        """import "std/io"
-          |import "std/fs"
+        """import std.io.*
+          |import std.fs.*
           |main() -> int
           |    path = "/tmp/_sysl_test_seek.txt"
           |    write_file(path, "ABCDEFGH")
@@ -521,8 +521,8 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "seek returns new position" in {
       eval(
-        """import "std/io"
-          |import "std/fs"
+        """import std.io.*
+          |import std.fs.*
           |main() -> i64
           |    path = "/tmp/_sysl_test_seekpos.txt"
           |    write_file(path, "ABCDEFGH")
@@ -537,7 +537,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "STDOUT constant is 1" in {
       eval(
-        """import "std/io"
+        """import std.io.*
           |main() -> int = STDOUT
           |""".stripMargin
       ) shouldBe 1
@@ -545,7 +545,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "STDIN constant is 0" in {
       eval(
-        """import "std/io"
+        """import std.io.*
           |main() -> int = STDIN
           |""".stripMargin
       ) shouldBe 0
@@ -553,7 +553,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "STDERR constant is 2" in {
       eval(
-        """import "std/io"
+        """import std.io.*
           |main() -> int = STDERR
           |""".stripMargin
       ) shouldBe 2
@@ -561,7 +561,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "O_RDONLY constant is 0" in {
       eval(
-        """import "std/io"
+        """import std.io.*
           |main() -> int = O_RDONLY
           |""".stripMargin
       ) shouldBe 0
@@ -569,7 +569,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "all flag constants accessible" in {
       eval(
-        """import "std/io"
+        """import std.io.*
           |main() -> int
           |    // Just verify they all type-check and are accessible
           |    sum = O_RDONLY + O_WRONLY + O_RDWR + O_CREATE + O_TRUNC + O_APPEND
@@ -587,7 +587,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
   "std/fs" - {
     "exists on existing path" in {
       eval(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> int = int(exists("."))
           |""".stripMargin
       ) shouldBe 1
@@ -595,7 +595,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "exists on nonexistent path" in {
       eval(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> int = int(exists("nonexistent_path_xyz_987"))
           |""".stripMargin
       ) shouldBe 0
@@ -603,7 +603,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "is_dir on directory" in {
       eval(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> int = int(is_dir("."))
           |""".stripMargin
       ) shouldBe 1
@@ -611,7 +611,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "is_dir on file" in {
       eval(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> int = int(is_dir("build.sbt"))
           |""".stripMargin
       ) shouldBe 0
@@ -619,8 +619,8 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "getcwd returns non-empty string" in {
       eval(
-        """import "std/fs"
-          |import "std/string"
+        """import std.fs.*
+          |import std.string.*
           |main() -> int
           |    cwd = getcwd()
           |    if length(cwd) > 0
@@ -632,7 +632,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "readdir returns entries" in {
       eval(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> int
           |    entries = readdir(".")
           |    if len(entries) > 0
@@ -644,8 +644,8 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "readdir entry has name field" in {
       eval(
-        """import "std/fs"
-          |import "std/string"
+        """import std.fs.*
+          |import std.string.*
           |main() -> int
           |    entries = readdir(".")
           |    if length(entries[0].name) > 0
@@ -657,7 +657,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "readdir on nonexistent dir returns empty" in {
       eval(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> int = len(readdir("/nonexistent_dir_xyz_987"))
           |""".stripMargin
       ) shouldBe 0
@@ -665,7 +665,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "stat returns size" in {
       eval(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> int
           |    info = stat("build.sbt")
           |    if info.size > 0
@@ -677,7 +677,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "stat is_file on file" in {
       eval(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> int
           |    info = stat("build.sbt")
           |    int(info.is_file)
@@ -687,7 +687,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "stat is_dir on directory" in {
       eval(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> int
           |    info = stat(".")
           |    int(info.is_dir)
@@ -697,7 +697,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "stat mtime is positive" in {
       eval(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> int
           |    info = stat("build.sbt")
           |    if info.mtime > 0
@@ -709,7 +709,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "stat on nonexistent file returns zeroed struct" in {
       eval(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> i64
           |    info = stat("/nonexistent_xyz_987")
           |    info.size
@@ -719,7 +719,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "read_file" in {
       output(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> int
           |    write_file("/tmp/_sysl_test_readfile.txt", "hello file")
           |    puts(read_file("/tmp/_sysl_test_readfile.txt"))
@@ -731,8 +731,8 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "read_file nonexistent returns empty" in {
       eval(
-        """import "std/fs"
-          |import "std/string"
+        """import std.fs.*
+          |import std.string.*
           |main() -> int = length(read_file("/nonexistent_xyz_987"))
           |""".stripMargin
       ) shouldBe 0
@@ -740,7 +740,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "write_file and read back" in {
       output(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> int
           |    path = "/tmp/_sysl_test_writefile.txt"
           |    write_file(path, "written by sysl")
@@ -753,7 +753,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "write_file returns 0 on success" in {
       eval(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> int
           |    path = "/tmp/_sysl_test_writeret.txt"
           |    result = write_file(path, "test")
@@ -765,7 +765,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "mkdir and remove" in {
       eval(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> int
           |    path = "/tmp/_sysl_test_mkdir"
           |    r1 = mkdir(path)
@@ -781,7 +781,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "mkdirs nested" in {
       eval(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> int
           |    path = "/tmp/_sysl_test_mkdirs/sub/dir"
           |    r = mkdirs(path)
@@ -798,7 +798,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "rename" in {
       eval(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> int
           |    old = "/tmp/_sysl_test_rename_old.txt"
           |    new_path = "/tmp/_sysl_test_rename_new.txt"
@@ -816,7 +816,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "remove returns -1 on nonexistent" in {
       eval(
-        """import "std/fs"
+        """import std.fs.*
           |main() -> int = remove("/nonexistent_xyz_987")
           |""".stripMargin
       ) shouldBe -1
@@ -828,7 +828,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
   "std/process" - {
     "argc returns 0 with no args" in {
       eval(
-        """import "std/process"
+        """import std.process.*
           |main() -> int = argc()
           |""".stripMargin
       ) shouldBe 0
@@ -836,8 +836,8 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "argv out of bounds returns empty" in {
       eval(
-        """import "std/process"
-          |import "std/string"
+        """import std.process.*
+          |import std.string.*
           |main() -> int = length(argv(0))
           |""".stripMargin
       ) shouldBe 0
@@ -845,8 +845,8 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "getenv returns empty for nonexistent var" in {
       eval(
-        """import "std/process"
-          |import "std/string"
+        """import std.process.*
+          |import std.string.*
           |main() -> int = length(getenv("NONEXISTENT_VAR_XYZ_123"))
           |""".stripMargin
       ) shouldBe 0
@@ -855,8 +855,8 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
     "getenv returns value for PATH" in {
       // PATH should always be set
       eval(
-        """import "std/process"
-          |import "std/string"
+        """import std.process.*
+          |import std.string.*
           |main() -> int
           |    path = getenv("PATH")
           |    if length(path) > 0
@@ -868,7 +868,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "exit throws" in {
       an[Exception] should be thrownBy eval(
-        """import "std/process"
+        """import std.process.*
           |main() -> int
           |    exit(42)
           |    0
@@ -887,8 +887,8 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
             |    puts(name)
             |""".stripMargin,
         "main" ->
-          """import "util"
-            |import "std/string"
+          """import util.*
+            |import std.string.*
             |main() -> int
             |    greet(concat("hi ", "there"))
             |    0
@@ -899,9 +899,9 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
     "multiple stdlib imports in one file" in {
       output(
-        """import "std/io"
-          |import "std/string"
-          |import "std/fs"
+        """import std.io.*
+          |import std.string.*
+          |import std.fs.*
           |main() -> int
           |    found = int(exists("."))
           |    msg = concat("exists=", from_int(i64(found)))

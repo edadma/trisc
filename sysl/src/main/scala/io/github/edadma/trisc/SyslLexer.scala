@@ -6,8 +6,8 @@ import scala.util.parsing.input.CharSequenceReader.EofCh
 class SyslLexical extends IndentationLexical(
   newlineBeforeIndent = true,
   newlineAfterDedent = true,
-  startLineJoining = List("(", "["),
-  endLineJoining = List(")", "]"),
+  startLineJoining = List("(", "[", "{"),
+  endLineJoining = List(")", "]", "}"),
   lineComment = "//",
   blockCommentStart = "/*",
   blockCommentEnd = "*/",
@@ -23,7 +23,7 @@ class SyslLexical extends IndentationLexical(
   )
 
   delimiters ++= List(
-    "(", ")", "[", "]",
+    "(", ")", "[", "]", "{", "}",
     "++", "--",
     "+", "-", "*", "/", "%",
     "<<", ">>",
@@ -32,7 +32,7 @@ class SyslLexical extends IndentationLexical(
     "&", "|", "^", "~",
     "=", "+=", "-=", "*=", "/=", "%=",
     "&=", "|=", "^=", "<<=", ">>=",
-    "->",
+    "->", "=>",
     ",", ":", ";", ".",
   )
 

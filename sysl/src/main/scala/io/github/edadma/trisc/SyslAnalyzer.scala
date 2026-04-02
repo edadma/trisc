@@ -36,8 +36,17 @@ class SyslAnalyzer:
     "puti" -> FunInfo("puti", List("n" -> I32), VoidType),
   )
 
-  def registerImport(meta: ModuleMeta): Unit =
-    for sym <- meta.publicSymbols do
+  def registerImport(meta: ModuleMeta, selectors: List[ImportSelector] = List(WildcardImport)): Unit =
+    val selectedSymbols = selectors match
+      case List(WildcardImport) => meta.publicSymbols
+      case named =>
+        val nameMap = named.collect { case NamedImport(n, r) => (n, r) }.toMap
+        meta.publicSymbols.filter(sym => nameMap.contains(sym.name)).map { sym =>
+          nameMap(sym.name) match
+            case Some(alias) => sym.copy(name = alias)
+            case None => sym
+        }
+    for sym <- selectedSymbols do
       sym.typ match
         case SymbolMeta.Kind.Func(params, returnType) =>
           val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
@@ -60,7 +69,7 @@ class SyslAnalyzer:
     // First pass: register all functions and globals
     for decl <- program.decls do
       decl match
-        case ImportDeclAST(_) => // handled later
+        case _: ImportDeclAST => // handled later
         case ExternFuncDeclAST(name, params, returnType) =>
           val paramTypes = params.map(p => (p.name, resolveTypeName(p.typ)))
           val retType = returnType.map(resolveTypeName).getOrElse(VoidType)
@@ -107,8 +116,8 @@ class SyslAnalyzer:
 
   private def analyzeDecl(decl: DeclAST): TDecl =
     decl match
-      case ImportDeclAST(path) =>
-        TImportDecl(path)
+      case ImportDeclAST(modulePath, _) =>
+        TImportDecl(modulePath)
 
       case ExternFuncDeclAST(name, params, returnType) =>
         val paramTypes = params.map(p => resolveTypeName(p.typ))

@@ -15,7 +15,7 @@ Usage:
   6. Posters call qset_notify(qs, slot_index) after posting
 @
 
-  import "services"
+  import services.*
 
   val QSET_MAX_SLOTS = 8
 

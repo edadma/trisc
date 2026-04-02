@@ -41,12 +41,12 @@ class SyslDriver:
 
       // Register imports from previously compiled modules (or stdlib)
       for imp <- imports(name) do
-        if SyslStdlib.modules.contains(imp) then
-          analyzer.registerImport(SyslStdlib.meta(imp))
+        if SyslStdlib.modules.contains(imp.modulePath) then
+          analyzer.registerImport(SyslStdlib.meta(imp.modulePath), imp.selectors)
         else
-          smetaCache.get(imp) match
-            case Some(smeta) => analyzer.registerImport(ModuleMeta.fromSmeta(smeta))
-            case None => throw DriverError(s"$name: import '$imp' not found (not in source set)")
+          smetaCache.get(imp.modulePath) match
+            case Some(smeta) => analyzer.registerImport(ModuleMeta.fromSmeta(smeta), imp.selectors)
+            case None => throw DriverError(s"$name: import '${imp.modulePath}' not found (not in source set)")
 
       val typed = analyzer.analyze(ast)
       val meta = ModuleMeta.fromProgram(typed)
@@ -65,13 +65,13 @@ class SyslDriver:
         case Left(err) => throw DriverError(s"$name: parse error: $err")
     }
 
-  def extractImports(asts: Map[String, ProgramAST]): Map[String, List[String]] =
+  def extractImports(asts: Map[String, ProgramAST]): Map[String, List[ImportDeclAST]] =
     asts.map { (name, ast) =>
-      val imports = ast.decls.collect { case ImportDeclAST(path) => path }
+      val imports = ast.decls.collect { case imp: ImportDeclAST => imp }
       (name, imports)
     }
 
-  def topologicalSort(imports: Map[String, List[String]], allNames: Set[String]): List[String] =
+  def topologicalSort(imports: Map[String, List[ImportDeclAST]], allNames: Set[String]): List[String] =
     val visited = new mutable.LinkedHashSet[String]
     val visiting = new mutable.LinkedHashSet[String]
     val result = new mutable.ListBuffer[String]
@@ -81,7 +81,7 @@ class SyslDriver:
         throw DriverError(s"circular dependency involving '$name'")
       if !visited.contains(name) then
         visiting += name
-        for dep <- imports.getOrElse(name, Nil) if allNames.contains(dep) do
+        for dep <- imports.getOrElse(name, Nil).map(_.modulePath).distinct if allNames.contains(dep) do
           visit(dep)
         visiting -= name
         visited += name

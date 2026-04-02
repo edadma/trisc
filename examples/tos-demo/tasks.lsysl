@@ -15,7 +15,7 @@ Expected output:
   ...
 @
 
-  import "services"
+  import services.*
 
 @api task_a() — Prints 'A' every ~1 second.
 

@@ -348,7 +348,7 @@ class SyslCodegenVariableTests extends SyslCodegenHelpers {
         """helper() -> int = 42
           |""".stripMargin,
       "app" ->
-        """import "lib"
+        """import lib.*
           |
           |val MAGIC = 12345
           |

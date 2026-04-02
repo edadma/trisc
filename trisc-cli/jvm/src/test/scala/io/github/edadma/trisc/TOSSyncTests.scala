@@ -7,10 +7,10 @@ class TOSSyncTests extends TOSTestHelpers {
   "TOS: sem_init and sem_wait/sem_post basic" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import "kernel"
-          |import "services"
-          |import "timer"
-          |import "semaphore"
+        """import kernel.*
+          |import services.*
+          |import timer.*
+          |import semaphore.*
           |
           |var sem: i64 = 0
           |
@@ -35,10 +35,10 @@ class TOSSyncTests extends TOSTestHelpers {
   "TOS: semaphore enforces mutual exclusion between two tasks" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import "kernel"
-          |import "services"
-          |import "timer"
-          |import "semaphore"
+        """import kernel.*
+          |import services.*
+          |import timer.*
+          |import semaphore.*
           |
           |var mutex: i64 = 0
           |
@@ -82,10 +82,10 @@ class TOSSyncTests extends TOSTestHelpers {
   "TOS: sem_trywait returns 0 when semaphore is zero" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import "kernel"
-          |import "services"
-          |import "timer"
-          |import "semaphore"
+        """import kernel.*
+          |import services.*
+          |import timer.*
+          |import semaphore.*
           |
           |var sem: i64 = 0
           |
@@ -110,10 +110,10 @@ class TOSSyncTests extends TOSTestHelpers {
   "TOS: counting semaphore allows N concurrent permits" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import "kernel"
-          |import "services"
-          |import "timer"
-          |import "semaphore"
+        """import kernel.*
+          |import services.*
+          |import timer.*
+          |import semaphore.*
           |
           |var sem: i64 = 0
           |var done_count: i64 = 0
@@ -156,10 +156,10 @@ class TOSSyncTests extends TOSTestHelpers {
   "TOS: sem_wait blocks until sem_post from another thread" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import "kernel"
-          |import "services"
-          |import "timer"
-          |import "semaphore"
+        """import kernel.*
+          |import services.*
+          |import timer.*
+          |import semaphore.*
           |
           |var sem: i64 = 0
           |
@@ -197,10 +197,10 @@ class TOSSyncTests extends TOSTestHelpers {
   "TOS: mutex basic lock/unlock" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import "kernel"
-          |import "services"
-          |import "timer"
-          |import "mutex"
+        """import kernel.*
+          |import services.*
+          |import timer.*
+          |import mutex.*
           |
           |var mtx: i64 = 0
           |
@@ -225,10 +225,10 @@ class TOSSyncTests extends TOSTestHelpers {
   "TOS: mutex_trylock fails when locked" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import "kernel"
-          |import "services"
-          |import "timer"
-          |import "mutex"
+        """import kernel.*
+          |import services.*
+          |import timer.*
+          |import mutex.*
           |
           |var mtx: i64 = 0
           |
@@ -264,11 +264,11 @@ class TOSSyncTests extends TOSTestHelpers {
   "TOS: condvar signal wakes one waiter" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import "kernel"
-          |import "services"
-          |import "timer"
-          |import "mutex"
-          |import "condvar"
+        """import kernel.*
+          |import services.*
+          |import timer.*
+          |import mutex.*
+          |import condvar.*
           |
           |var mtx: i64 = 0
           |var cv: Condvar
@@ -306,11 +306,11 @@ class TOSSyncTests extends TOSTestHelpers {
   "TOS: condvar broadcast wakes all waiters" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import "kernel"
-          |import "services"
-          |import "timer"
-          |import "mutex"
-          |import "condvar"
+        """import kernel.*
+          |import services.*
+          |import timer.*
+          |import mutex.*
+          |import condvar.*
           |
           |var mtx: i64 = 0
           |var cv: Condvar
@@ -357,10 +357,10 @@ class TOSSyncTests extends TOSTestHelpers {
   "TOS: barrier synchronizes three threads" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import "kernel"
-          |import "services"
-          |import "timer"
-          |import "barrier"
+        """import kernel.*
+          |import services.*
+          |import timer.*
+          |import barrier.*
           |
           |var bar: Barrier
           |
@@ -403,10 +403,10 @@ class TOSSyncTests extends TOSTestHelpers {
   "TOS: rwlock allows concurrent readers" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import "kernel"
-          |import "services"
-          |import "timer"
-          |import "rwlock"
+        """import kernel.*
+          |import services.*
+          |import timer.*
+          |import rwlock.*
           |
           |var rw: RWLock
           |
@@ -443,10 +443,10 @@ class TOSSyncTests extends TOSTestHelpers {
   "TOS: rwlock writer excludes readers" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import "kernel"
-          |import "services"
-          |import "timer"
-          |import "rwlock"
+        """import kernel.*
+          |import services.*
+          |import timer.*
+          |import rwlock.*
           |
           |var rw: RWLock
           |

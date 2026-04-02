@@ -5,9 +5,14 @@ import scala.util.parsing.input.Positional
 // Top-level
 case class ProgramAST(decls: List[DeclAST])
 
+// Import selectors
+sealed trait ImportSelector
+case object WildcardImport extends ImportSelector
+case class NamedImport(name: String, rename: Option[String] = None) extends ImportSelector
+
 // Declarations
 trait DeclAST extends Positional
-case class ImportDeclAST(path: String) extends DeclAST
+case class ImportDeclAST(modulePath: String, selectors: List[ImportSelector]) extends DeclAST
 case class ExternFuncDeclAST(name: String, params: List[ParamAST], returnType: Option[String]) extends DeclAST
 case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[String], body: FunBodyAST, isPrivate: Boolean = false) extends DeclAST
 case class VarDeclAST(name: String, typ: Option[String], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true) extends DeclAST

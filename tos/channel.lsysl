@@ -6,8 +6,8 @@ Sending blocks when the channel is full; receiving blocks
 when empty. Thread-safe via internal mutex and semaphores.
 @
 
-  import "mutex"
-  import "semaphore"
+  import mutex.*
+  import semaphore.*
 
 @tech
 A channel wraps a caller-provided ring buffer with two
