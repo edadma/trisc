@@ -140,7 +140,13 @@ lazy val docs = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .crossType(CrossType.Pure)
   .in(file("docs"))
   .settings(commonSettings)
-  .settings(name := "trisc-docs")
+  .settings(
+    name := "trisc-docs",
+    libraryDependencies ++= Seq(
+      "io.github.edadma" %%% "markdown" % "0.2.0",
+      "io.github.edadma" %%% "highlighter" % "0.0.1",
+    ),
+  )
   .jsSettings(jsSettings)
   .jvmSettings(jvmNativeStubs)
   .nativeSettings(jvmNativeStubs)

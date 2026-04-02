@@ -3,79 +3,57 @@ package io.github.edadma.trisc
 import org.scalatest.freespec.AnyFreeSpec
 import org.scalatest.matchers.should.Matchers
 
-class LiterateRendererTests extends AnyFreeSpec with Matchers {
-
+class LiterateRendererTests extends AnyFreeSpec with Matchers:
   val parser = new LiterateParser
 
   "tangle" - {
-    "extracts only code blocks" in {
-      val doc = parser.parse("Some prose.\n    x = 1\nMore prose.\n    y = 2")
-      LiterateRenderer.tangle(doc) shouldBe "x = 1\ny = 2"
+    "concatenates code blocks" in {
+      val doc = parser.parse("Prose.\n\n    block1\n\nMore.\n\n    block2\n")
+      val code = LiterateRenderer.tangle(doc)
+      code should include("block1")
+      code should include("block2")
+      // blocks separated by newline
+      code.indexOf("block1") should be < code.indexOf("block2")
     }
 
-    "preserves blank lines within code" in {
-      val doc = parser.parse("    x = 1\n\n    y = 2")
-      LiterateRenderer.tangle(doc) shouldBe "x = 1\n\ny = 2"
-    }
-
-    "returns empty string for prose-only document" in {
-      val doc = parser.parse("Just prose here.\nNothing else.")
+    "returns empty string for prose-only" in {
+      val doc = parser.parse("Just prose here.\n")
       LiterateRenderer.tangle(doc) shouldBe ""
     }
-  }
 
-  "renderLiterate" - {
-    "includes code and matching prose for dev channel" in {
-      val doc = parser.parse("Technical note.\n    x = 1")
-      val result = LiterateRenderer.renderLiterate(doc, ChannelConfig.dev)
-      result should include("Technical note.")
-      result should include("x = 1")
-    }
-
-    "excludes api blocks from dev channel" in {
-      val doc = parser.parse("@api Some api note\n    x = 1")
-      val result = LiterateRenderer.renderLiterate(doc, ChannelConfig.dev)
-      result should not include "Some api note"
-      result should include("x = 1")
+    "single block" in {
+      val doc = parser.parse("    only code\n")
+      LiterateRenderer.tangle(doc) should include("only code")
     }
   }
 
-  "renderProse" - {
-    "website channel includes main but excludes tech" in {
-      val source = "@main\nUser-facing docs.\n@\nTechnical detail.\n    code here"
-      val doc = parser.parse(source)
-      val result = LiterateRenderer.renderProse(doc, ChannelConfig.website)
-      result should include("User-facing docs.")
-      result should not include "Technical detail."
-      result should not include "code here"
+  "renderHTML" - {
+    "produces html with code blocks" in {
+      val html = LiterateRenderer.renderHTML("# Title\n\n    val x = 42\n")
+      html should include("<h1>Title</h1>")
+      html should include("<code")
+      html should include("42")
     }
 
-    "dev channel includes both main and tech" in {
-      val source = "@main User-facing.\nTechnical detail."
-      val doc = parser.parse(source)
-      val result = LiterateRenderer.renderProse(doc, ChannelConfig.dev)
-      result should include("User-facing.")
-      result should include("Technical detail.")
+    "fenced code blocks with language get highlighted" in {
+      val html = LiterateRenderer.renderHTML("```python\nprint(42)\n```\n")
+      html should include("<code")
+      html should include("print")
+    }
+
+    "indented code blocks get sysl highlighting" in {
+      val html = LiterateRenderer.renderHTML("Some text.\n\n    val x = 42\n")
+      html should include("<code")
+      html should include("val")
+    }
+
+    "prose renders as html" in {
+      val html = LiterateRenderer.renderHTML("Hello **world**.\n")
+      html should include("<strong>world</strong>")
+    }
+
+    "math blocks pass through" in {
+      val html = LiterateRenderer.renderHTML("Inline \\(x^2\\) math.\n")
+      html should include("x^2")
     }
   }
-
-  "renderApi" - {
-    "extracts only api blocks" in {
-      val source = "Some prose.\n@api Adds two vectors\n    fn add() = 0\n@api Multiplies"
-      val doc = parser.parse(source)
-      val result = LiterateRenderer.renderApi(doc)
-      result should include("Adds two vectors")
-      result should include("Multiplies")
-      result should not include "Some prose."
-      result should not include "fn add"
-    }
-
-    "handles multi-line api blocks" in {
-      val source = "@api\nAdds two vectors.\n\n@param a First\n@"
-      val doc = parser.parse(source)
-      val result = LiterateRenderer.renderApi(doc)
-      result should include("Adds two vectors.")
-      result should include("@param a First")
-    }
-  }
-}

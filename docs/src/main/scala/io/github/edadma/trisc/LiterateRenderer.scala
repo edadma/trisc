@@ -1,28 +1,26 @@
 package io.github.edadma.trisc
 
+import io.github.edadma.markdown.*
+import io.github.edadma.highlighter.*
+
 object LiterateRenderer:
 
   def tangle(doc: LiterateDocument): String =
-    doc.blocks.collect { case CodeBlock(content, _) => content }.mkString("\n")
+    doc.codeBlocks.mkString("\n")
 
-  def renderLiterate(doc: LiterateDocument, channel: ChannelConfig): String =
-    val parts = doc.blocks.flatMap {
-      case CodeBlock(content, _) if channel.includeTags.contains("code") =>
-        Some(content)
-      case ProseBlock(tag, _, content, _) if channel.includeTags.contains(tag) =>
-        Some(content)
-      case _ => None
+  private lazy val highlighterCache: Map[String, Highlighter] =
+    Grammars.grammars.flatMap { case (lang, json) =>
+      Highlighter.fromJson(json, InlineMode(Theme.OneDark)).toOption.map(lang -> _)
     }
-    parts.mkString("\n\n")
 
-  def renderProse(doc: LiterateDocument, channel: ChannelConfig): String =
-    val parts = doc.blocks.collect {
-      case ProseBlock(tag, _, content, _) if channel.includeTags.contains(tag) => content
-    }
-    parts.mkString("\n\n")
+  private val codeHighlighter: (String, String) => Option[String] = (code, lang) =>
+    val resolved = Grammars.aliases.getOrElse(lang, lang)
+    highlighterCache.get(resolved).map(_.highlight(code))
 
-  def renderApi(doc: LiterateDocument): String =
-    val parts = doc.blocks.collect {
-      case ApiBlock(content, _) => content
-    }
-    parts.mkString("\n\n")
+  private val htmlConfig = MarkdownConfig.all.copy(
+    codeHighlighter = Some(codeHighlighter),
+    indentedCodeLanguage = Some("sysl"),
+  )
+
+  def renderHTML(source: String): String =
+    renderToHTML(source, htmlConfig)
