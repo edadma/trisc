@@ -3,29 +3,29 @@ Memory Utilities
 Core memory operations for the Sysl standard library.
 No OS dependency — usable in bare-metal programs.
 
-      memset(dst: *byte, v: int, n: int)
-          var i = 0
-          while i < n
-              dst[i] = v
-              i += 1
+    memset(dst: *byte, v: int, n: int)
+        var i = 0
+        while i < n
+            dst[i] = v
+            i += 1
 
-      memcpy(dst: *byte, src: *byte, n: int)
-          var i = 0
-          while i < n
-              dst[i] = src[i]
-              i += 1
+    memcpy(dst: *byte, src: *byte, n: int)
+        var i = 0
+        while i < n
+            dst[i] = src[i]
+            i += 1
 
-      memcmp(a: *byte, b: *byte, n: int) -> int
-          var i = 0
-          while i < n
-              val d = a[i] - b[i]
-              if d != 0
-                  return d
-              i += 1
-          0
+    memcmp(a: *byte, b: *byte, n: int) -> int
+        var i = 0
+        while i < n
+            val d = a[i] - b[i]
+            if d != 0
+                return d
+            i += 1
+        0
 
-      strlen(s: *byte) -> int
-          var i = 0
-          while s[i] != 0
-              i += 1
-          i
+    strlen(s: *byte) -> int
+        var i = 0
+        while s[i] != 0
+            i += 1
+        i
