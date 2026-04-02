@@ -4,8 +4,8 @@ TOS Reader-Writer Locks
 Allows multiple concurrent readers or a single exclusive writer.
 @
 
-  import "services"
-  import "mutex"
+  import services.*
+  import mutex.*
 
 @tech
 Implementation uses two mutexes and a reader count:

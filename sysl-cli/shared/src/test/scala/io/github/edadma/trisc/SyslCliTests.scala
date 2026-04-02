@@ -190,7 +190,7 @@ class SyslCliTests extends AnyFreeSpec with Matchers {
           |    if x < 0 then -x else x
           |""".stripMargin,
       "main" ->
-        """import "math"
+        """import math.*
           |main() -> int = abs_val(-42)
           |""".stripMargin,
     ))
@@ -203,11 +203,11 @@ class SyslCliTests extends AnyFreeSpec with Matchers {
         """add_one(x: int) -> int = x + 1
           |""".stripMargin,
       "util" ->
-        """import "math"
+        """import math.*
           |add_two(x: int) -> int = add_one(add_one(x))
           |""".stripMargin,
       "main" ->
-        """import "util"
+        """import util.*
           |main() -> int = add_two(40)
           |""".stripMargin,
     ))
@@ -223,7 +223,7 @@ class SyslCliTests extends AnyFreeSpec with Matchers {
           |    0
           |""".stripMargin,
       "main" ->
-        """import "io"
+        """import io.*
           |main() -> int
           |    greet()
           |    0

@@ -14,8 +14,8 @@ spin+yield), the PI mutex is fully managed by the kernel
 so it can manipulate thread priorities and wait queues.
 @
 
-  import "kernel"
-  import "services"
+  import kernel.*
+  import services.*
 
 @api pimutex_init(m) — Initialize a PI mutex to unlocked state.
 

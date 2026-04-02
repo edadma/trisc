@@ -1,5 +1,5 @@
 // Multi-file demo — uses math module
-import "math"
+import math.*
 
 main() -> int
     a = abs_val(-42)           // 42

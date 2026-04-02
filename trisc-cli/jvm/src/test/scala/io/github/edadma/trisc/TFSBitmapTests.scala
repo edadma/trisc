@@ -11,7 +11,7 @@ class TFSBitmapTests extends TFSTestHelpers {
 
   "bitmap_test returns 1 for allocated inode" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    // Inode 0 (reserved) and 1 (root) should be allocated
@@ -26,7 +26,7 @@ class TFSBitmapTests extends TFSTestHelpers {
 
   "bitmap_test returns 0 for free inode" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    // High inode numbers should be free
@@ -43,7 +43,7 @@ class TFSBitmapTests extends TFSTestHelpers {
 
   "bitmap_set then test" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    // Verify bit 50 is free, set it, verify it's set
@@ -59,7 +59,7 @@ class TFSBitmapTests extends TFSTestHelpers {
 
   "bitmap_clear then test" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    bitmap_set(sb_inode_bitmap, 50)
@@ -77,7 +77,7 @@ class TFSBitmapTests extends TFSTestHelpers {
 
   "alloc_inode returns valid inode" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    val ino = alloc_inode()
@@ -92,7 +92,7 @@ class TFSBitmapTests extends TFSTestHelpers {
 
   "alloc_inode marks bit in bitmap" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    val ino = alloc_inode()
@@ -107,7 +107,7 @@ class TFSBitmapTests extends TFSTestHelpers {
 
   "alloc_inode twice returns different inodes" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    val a = alloc_inode()
@@ -125,7 +125,7 @@ class TFSBitmapTests extends TFSTestHelpers {
 
   "alloc_block returns valid block" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    val blk = alloc_block()
@@ -142,7 +142,7 @@ class TFSBitmapTests extends TFSTestHelpers {
 
   "free_inode makes inode reusable" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    val ino = alloc_inode()
@@ -162,7 +162,7 @@ class TFSBitmapTests extends TFSTestHelpers {
 
   "free_block makes block reusable" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    val blk = alloc_block()
@@ -183,7 +183,7 @@ class TFSBitmapTests extends TFSTestHelpers {
 
   "tfs_freeblocks positive after init" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    if tfs_freeblocks() > 0
@@ -197,7 +197,7 @@ class TFSBitmapTests extends TFSTestHelpers {
 
   "tfs_freeinodes positive after init" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    if tfs_freeinodes() > 0

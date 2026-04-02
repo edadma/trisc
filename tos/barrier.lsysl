@@ -6,8 +6,8 @@ All threads call barrier_wait; none proceeds until all N
 have arrived. The barrier then resets for reuse.
 @
 
-  import "services"
-  import "semaphore"
+  import services.*
+  import semaphore.*
 
 @tech
 Uses a generation counter to allow reuse. Each call to

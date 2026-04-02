@@ -47,7 +47,7 @@ class SyslCodegenFunctionTests extends SyslCodegenHelpers {
           |    if x < 0 then -x else x
           |""".stripMargin,
       "main" ->
-        """import "math"
+        """import math.*
           |
           |main() -> int = abs_val(-42)
           |""".stripMargin,
@@ -76,7 +76,7 @@ class SyslCodegenFunctionTests extends SyslCodegenHelpers {
           |    if x < 0 then -x else x
           |""".stripMargin,
       "main" ->
-        """import "math"
+        """import math.*
           |
           |main() -> int = abs_val(-42)
           |""".stripMargin,
@@ -208,7 +208,7 @@ class SyslCodegenFunctionTests extends SyslCodegenHelpers {
         """sub(a: int, b: int) -> int = a - b
           |""".stripMargin,
       "main" ->
-        """import "lib"
+        """import lib.*
           |main() -> int = sub(50, 8)
           |""".stripMargin
     )) shouldBe 42
@@ -220,7 +220,7 @@ class SyslCodegenFunctionTests extends SyslCodegenHelpers {
         """sum5(a: int, b: int, c: int, d: int, e: int) -> int = a + b + c + d + e
           |""".stripMargin,
       "main" ->
-        """import "lib"
+        """import lib.*
           |main() -> int = sum5(5, 6, 7, 8, 16)
           |""".stripMargin
     )) shouldBe 42
@@ -249,7 +249,7 @@ class SyslCodegenFunctionTests extends SyslCodegenHelpers {
           |get_total() -> int = total
           |""".stripMargin,
       "main" ->
-        """import "lib"
+        """import lib.*
           |
           |main() -> int
           |    add5(1, 2, 3, 4, 5)
@@ -280,7 +280,7 @@ class SyslCodegenFunctionTests extends SyslCodegenHelpers {
           |get_count() -> int = count
           |""".stripMargin,
       "main" ->
-        """import "lib"
+        """import lib.*
           |
           |main() -> int
           |    add_item(100, 0x6000, 0x5000, "a", 0)
@@ -302,7 +302,7 @@ class SyslCodegenFunctionTests extends SyslCodegenHelpers {
           |get_count() -> int = count
           |""".stripMargin,
       "main" ->
-        """import "lib"
+        """import lib.*
           |
           |main() -> int
           |    do_thing(1, 2, 3, 99, 10)
@@ -323,7 +323,7 @@ class SyslCodegenFunctionTests extends SyslCodegenHelpers {
           |get_total() -> int = total
           |""".stripMargin,
       "main" ->
-        """import "lib"
+        """import lib.*
           |
           |main() -> int
           |    add5(1, 2, 3, 4, 5)
@@ -415,7 +415,7 @@ class SyslCodegenFunctionTests extends SyslCodegenHelpers {
           |get_mask() -> int = mask
           |""".stripMargin,
       "main" ->
-        """import "kernel"
+        """import kernel.*
           |
           |main() -> int
           |    init()
@@ -438,7 +438,7 @@ class SyslCodegenFunctionTests extends SyslCodegenHelpers {
           |get_arr(idx: int) -> int = arr[idx]
           |""".stripMargin,
       "main" ->
-        """import "lib"
+        """import lib.*
           |
           |main() -> int
           |    set_arr(0, 10)
@@ -472,7 +472,7 @@ class SyslCodegenFunctionTests extends SyslCodegenHelpers {
           |get_head(pri: int) -> int = head[pri]
           |""".stripMargin,
       "main" ->
-        """import "queue"
+        """import queue.*
           |
           |main() -> int
           |    init_q()
@@ -528,7 +528,7 @@ class SyslCodegenFunctionTests extends SyslCodegenHelpers {
           |get_mask() -> int = mask
           |""".stripMargin,
       "main" ->
-        """import "kernel"
+        """import kernel.*
           |
           |main() -> int
           |    init()
@@ -591,7 +591,7 @@ class SyslCodegenFunctionTests extends SyslCodegenHelpers {
           |get_count() -> int = count
           |""".stripMargin,
       "main" ->
-        """import "lib"
+        """import lib.*
           |
           |main() -> int
           |    do_thing(1, 2, 3, "hello", 10)
@@ -613,7 +613,7 @@ class SyslCodegenFunctionTests extends SyslCodegenHelpers {
           |get_last_pri() -> int = last_pri
           |""".stripMargin,
       "main" ->
-        """import "lib"
+        """import lib.*
           |
           |main() -> int
           |    register(1, 2, 3, "a very long name", 42)

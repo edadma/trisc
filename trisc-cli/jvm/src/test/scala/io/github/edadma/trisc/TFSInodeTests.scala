@@ -11,7 +11,7 @@ class TFSInodeTests extends TFSTestHelpers {
 
   "ino_mode / ino_type / ino_perm on zeroed buffer" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    var ibuf: [32]i8
         |    var i = 0
@@ -33,7 +33,7 @@ class TFSInodeTests extends TFSTestHelpers {
 
   "ino_set_size / ino_size round-trip" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    var ibuf: [32]i8
         |    var i = 0
@@ -54,7 +54,7 @@ class TFSInodeTests extends TFSTestHelpers {
 
   "ino_set_nlinks / ino_nlinks round-trip" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    var ibuf: [32]i8
         |    var i = 0
@@ -74,7 +74,7 @@ class TFSInodeTests extends TFSTestHelpers {
 
   "ino_set_direct / ino_direct round-trip" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    var ibuf: [32]i8
         |    var i = 0
@@ -97,7 +97,7 @@ class TFSInodeTests extends TFSTestHelpers {
 
   "ino_uid / ino_gid on buffer" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    var ibuf: [32]i8
         |    val p: *i8 = &ibuf[0]
@@ -118,7 +118,7 @@ class TFSInodeTests extends TFSTestHelpers {
 
   "ino_mtime / ino_ctime from disk" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    var ibuf: [32]i8
@@ -135,7 +135,7 @@ class TFSInodeTests extends TFSTestHelpers {
 
   "ino_set_mode / ino_mode round-trip" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    var ibuf: [32]i8
         |    val p: *i8 = &ibuf[0]
@@ -155,7 +155,7 @@ class TFSInodeTests extends TFSTestHelpers {
 
   "ino_set_indirect / ino_indirect round-trip" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    var ibuf: [32]i8
         |    val p: *i8 = &ibuf[0]
@@ -177,7 +177,7 @@ class TFSInodeTests extends TFSTestHelpers {
 
   "tfs_read_inode reads root inode correctly" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    var ibuf: [32]i8
@@ -201,7 +201,7 @@ class TFSInodeTests extends TFSTestHelpers {
 
   "tfs_read_inode reads device node" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    // inode 3 should be tty0 (root=1, dev=2, tty0=3)
@@ -223,7 +223,7 @@ class TFSInodeTests extends TFSTestHelpers {
 
   "tfs_write_inode preserves data" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    var ibuf: [32]i8
@@ -247,7 +247,7 @@ class TFSInodeTests extends TFSTestHelpers {
 
   "get_file_block returns direct pointer" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    tfs_init()
         |    var ibuf: [32]i8
@@ -264,7 +264,7 @@ class TFSInodeTests extends TFSTestHelpers {
 
   "get_file_block returns 0 for unallocated" in {
     val (_, output) = runTFS(
-      """import "tfs"
+      """import tfs.*
         |main() -> int
         |    var ibuf: [32]i8
         |    val p: *i8 = &ibuf[0]

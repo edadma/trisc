@@ -13,7 +13,7 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
 
   "tfs_create and tfs_write" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |
          |main() -> int
          |    tfs_init()
@@ -45,7 +45,7 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
 
   "created file findable via lookup" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |
          |main() -> int
          |    tfs_init()
@@ -68,7 +68,7 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
 
   "tfs_create directory has . and .." in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |
          |main() -> int
          |    tfs_init()
@@ -94,7 +94,7 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
 
   "create file inside new directory" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |
          |main() -> int
          |    tfs_init()
@@ -128,7 +128,7 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
 
   "write updates file size" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |
          |main() -> int
          |    tfs_init()
@@ -154,7 +154,7 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
 
   "write at offset extends file" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |
          |main() -> int
          |    tfs_init()
@@ -183,7 +183,7 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
 
   "overwrite part of file" in {
     val (_, output) = runTFS(
-      s"""import "tfs"
+      s"""import tfs.*
          |
          |main() -> int
          |    tfs_init()

@@ -9,8 +9,8 @@ A recursive mutex is a struct with an owner, lock count, and
 a semaphore for cross-thread contention.
 @
 
-  import "services"
-  import "semaphore"
+  import services.*
+  import semaphore.*
 
   struct RMutex
       owner: int

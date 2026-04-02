@@ -48,7 +48,20 @@ class SyslParser extends StandardTokenParsers {
     "type" ~> ident ~ ("=" ~> typeRef) ^^ { case name ~ target => TypeAliasDeclAST(name, target) }
 
   lazy val importDecl: Parser[ImportDeclAST] =
-    "import" ~> stringLit ^^ ImportDeclAST.apply
+    "import" ~> rep1sep(ident, ".") ~ opt("." ~> importTail) ^^ {
+      case path ~ Some(selectors) => ImportDeclAST(path.mkString("/"), selectors)
+      case path ~ None =>
+        if path.length < 2 then sys.error(s"import requires selector: use 'import ${path.head}.*' or 'import ${path.head}.name'")
+        ImportDeclAST(path.init.mkString("/"), List(NamedImport(path.last)))
+    }
+
+  lazy val importTail: Parser[List[ImportSelector]] =
+    "*" ^^^ List(WildcardImport) |
+      "{" ~> rep1sep(importItem, ",") <~ "}"
+
+  lazy val importItem: Parser[NamedImport] =
+    ident ~ ("=>" ~> ident) ^^ { case name ~ alias => NamedImport(name, Some(alias)) } |
+      ident ^^ (name => NamedImport(name))
 
   lazy val externFuncDecl: Parser[ExternFuncDeclAST] =
     "extern" ~> ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ opt("->" ~> typeRef) ^^ {

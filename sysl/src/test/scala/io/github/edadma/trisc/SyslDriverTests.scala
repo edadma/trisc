@@ -46,7 +46,7 @@ class SyslDriverTests extends AnyFreeSpec with Matchers {
         """add(a: int, b: int) -> int = a + b
           |""".stripMargin,
       "main" ->
-        """import "math"
+        """import math.*
           |main() -> int = add(1, 2)
           |""".stripMargin
     ))
@@ -56,7 +56,7 @@ class SyslDriverTests extends AnyFreeSpec with Matchers {
   "dependency compiled before dependent" in {
     val result = driver.compile(Map(
       "main" ->
-        """import "math"
+        """import math.*
           |main() -> int = add(1, 2)
           |""".stripMargin,
       "math" ->
@@ -72,7 +72,7 @@ class SyslDriverTests extends AnyFreeSpec with Matchers {
         """add(a: int, b: int) -> int = a + b
           |""".stripMargin,
       "main" ->
-        """import "math"
+        """import math.*
           |main() -> int = add(1, 2)
           |""".stripMargin
     ))
@@ -86,7 +86,7 @@ class SyslDriverTests extends AnyFreeSpec with Matchers {
         """square(x: int) -> int = x * x
           |""".stripMargin,
       "main" ->
-        """import "math"
+        """import math.*
           |main() -> int = square(5)
           |""".stripMargin
     ))
@@ -102,11 +102,11 @@ class SyslDriverTests extends AnyFreeSpec with Matchers {
         """base() -> int = 1
           |""".stripMargin,
       "b" ->
-        """import "c"
+        """import c.*
           |middle() -> int = base() + 1
           |""".stripMargin,
       "a" ->
-        """import "b"
+        """import b.*
           |main() -> int = middle() + 1
           |""".stripMargin
     ))
@@ -126,8 +126,8 @@ class SyslDriverTests extends AnyFreeSpec with Matchers {
           |    putchar(x)
           |""".stripMargin,
       "main" ->
-        """import "math"
-          |import "io"
+        """import math.*
+          |import io.*
           |main() -> int
           |    write(add(48, 1))
           |    0
@@ -146,7 +146,7 @@ class SyslDriverTests extends AnyFreeSpec with Matchers {
           |public_fn(x: int) -> int = helper(x)
           |""".stripMargin,
       "main" ->
-        """import "lib"
+        """import lib.*
           |main() -> int = public_fn(5)
           |""".stripMargin
     ))
@@ -161,7 +161,7 @@ class SyslDriverTests extends AnyFreeSpec with Matchers {
         """private secret() -> int = 42
           |""".stripMargin,
       "main" ->
-        """import "lib"
+        """import lib.*
           |main() -> int = secret()
           |""".stripMargin
     ))
@@ -190,11 +190,11 @@ class SyslDriverTests extends AnyFreeSpec with Matchers {
   "circular dependency detected" in {
     an[Exception] should be thrownBy driver.compile(Map(
       "a" ->
-        """import "b"
+        """import b.*
           |fa() -> int = 1
           |""".stripMargin,
       "b" ->
-        """import "a"
+        """import a.*
           |fb() -> int = 2
           |""".stripMargin
     ))
@@ -203,7 +203,7 @@ class SyslDriverTests extends AnyFreeSpec with Matchers {
   "missing import detected" in {
     an[Exception] should be thrownBy driver.compile(Map(
       "main" ->
-        """import "nonexistent"
+        """import nonexistent.*
           |main() -> int = 0
           |""".stripMargin
     ))
@@ -226,7 +226,7 @@ class SyslDriverTests extends AnyFreeSpec with Matchers {
           |mul(a: int, b: int) -> int = a * b
           |""".stripMargin,
       "main" ->
-        """import "math"
+        """import math.*
           |main() -> int = add(1, mul(2, 3))
           |""".stripMargin
     ))
@@ -245,7 +245,7 @@ class SyslDriverTests extends AnyFreeSpec with Matchers {
         """add(a: int, b: int) -> int = a + b
           |""".stripMargin,
       "main" ->
-        """import "math"
+        """import math.*
           |main() -> int = add(1, 2)
           |""".stripMargin
     ))
@@ -254,5 +254,81 @@ class SyslDriverTests extends AnyFreeSpec with Matchers {
     meta.publicSymbols.length shouldBe 1
     meta.publicSymbols.head.name shouldBe "add"
     meta.publicSymbols.head.typ shouldBe SymbolMeta.Kind.Func(List(I32, I32), I32)
+  }
+
+  // ===== Selective imports =====
+
+  "selective import: single name" in {
+    val result = driver.compile(Map(
+      "math" ->
+        """add(a: int, b: int) -> int = a + b
+          |mul(a: int, b: int) -> int = a * b
+          |""".stripMargin,
+      "main" ->
+        """import math.add
+          |main() -> int = add(1, 2)
+          |""".stripMargin
+    ))
+    val mainUnit = result.units.find(_.name == "main").get
+    mainUnit.externals should contain("add")
+    mainUnit.externals should not contain "mul"
+  }
+
+  "selective import: unimported name is error" in {
+    an[Exception] should be thrownBy driver.compile(Map(
+      "math" ->
+        """add(a: int, b: int) -> int = a + b
+          |mul(a: int, b: int) -> int = a * b
+          |""".stripMargin,
+      "main" ->
+        """import math.add
+          |main() -> int = mul(2, 3)
+          |""".stripMargin
+    ))
+  }
+
+  "selective import: braced list" in {
+    val result = driver.compile(Map(
+      "math" ->
+        """add(a: int, b: int) -> int = a + b
+          |mul(a: int, b: int) -> int = a * b
+          |sub(a: int, b: int) -> int = a - b
+          |""".stripMargin,
+      "main" ->
+        """import math.{add, mul}
+          |main() -> int = add(1, mul(2, 3))
+          |""".stripMargin
+    ))
+    val mainUnit = result.units.find(_.name == "main").get
+    mainUnit.externals should contain("add")
+    mainUnit.externals should contain("mul")
+    mainUnit.externals should not contain "sub"
+  }
+
+  "selective import: rename" in {
+    val result = driver.compile(Map(
+      "math" ->
+        """add(a: int, b: int) -> int = a + b
+          |""".stripMargin,
+      "main" ->
+        """import math.{add => plus}
+          |main() -> int = plus(1, 2)
+          |""".stripMargin
+    ))
+    val mainUnit = result.units.find(_.name == "main").get
+    mainUnit.externals should contain("plus")
+    mainUnit.externals should not contain "add"
+  }
+
+  "selective import: renamed name is error under original name" in {
+    an[Exception] should be thrownBy driver.compile(Map(
+      "math" ->
+        """add(a: int, b: int) -> int = a + b
+          |""".stripMargin,
+      "main" ->
+        """import math.{add => plus}
+          |main() -> int = add(1, 2)
+          |""".stripMargin
+    ))
   }
 }
