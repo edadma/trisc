@@ -48,13 +48,19 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       l.toString
     else d.toString
 
-  private val builtins: Map[String, List[Value] => Value] = Map(
+  private val builtins: mutable.Map[String, List[Value] => Value] = mutable.Map(
     "putchar" -> (args => { output(toLong(args.head).toChar.toString); args.head }),
     "print" -> (args => { args.foreach { case FloatVal(d) => output(formatDouble(d)); case a => output(toLong(a).toString) }; IntVal(0) }),
     "println" -> (args => { args.foreach { case FloatVal(d) => output(formatDouble(d)); case a => output(toLong(a).toString) }; output("\n"); IntVal(0) }),
     "puts" -> (args => { args.head match { case StrVal(s) => output(s); case _ => throw RuntimeError("puts: expected string") }; IntVal(0) }),
     "puti" -> (args => { output(toLong(args.head).toString); IntVal(0) }),
   )
+
+  def registerBuiltins(extra: Map[String, List[Value] => Value]): Unit =
+    builtins ++= extra
+
+  def registerGlobal(name: String, value: Value): Unit =
+    globals(name) = new Cell(value)
 
   def run(program: TProgram): Long =
     for decl <- program.decls do
@@ -93,14 +99,14 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             case ReturnException(v) => v
       val defers = deferStack.slice(savedSize, deferStack.size)
       runDefers(defers)
-      deferStack.trimEnd(deferStack.size - savedSize)
+      deferStack.dropRightInPlace(deferStack.size - savedSize)
       result
     catch
       case e: ReturnException => throw e // should not happen — caught above
       case e: Throwable =>
         val defers = deferStack.slice(savedSize, deferStack.size)
         runDefers(defers)
-        deferStack.trimEnd(deferStack.size - savedSize)
+        deferStack.dropRightInPlace(deferStack.size - savedSize)
         throw e
 
   private def evalBlock(stmts: List[TStmt], env: Env): Value =

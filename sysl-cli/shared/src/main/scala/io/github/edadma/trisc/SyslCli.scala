@@ -10,6 +10,7 @@ case class CompileCommand(
 ) extends SyslCommand
 case class RunCommand(
     inputs: Seq[String] = Seq.empty,
+    programArgs: Seq[String] = Seq.empty,
 ) extends SyslCommand
 
 case class SyslConfig(
@@ -105,14 +106,27 @@ object SyslCli:
         c.command match
           case CompileCommand(inputs, _, _) if inputs.isEmpty =>
             failure("No input files specified")
-          case RunCommand(inputs) if inputs.isEmpty =>
+          case RunCommand(inputs, _) if inputs.isEmpty =>
             failure("No input files specified for run")
           case _ => success
       ),
     )
 
   def parse(args: Seq[String]): Option[SyslConfig] =
-    OParser.parse(parser, args, SyslConfig())
+    // Split at "--": everything before goes to scopt, everything after becomes program args
+    val dashIdx = args.indexOf("--")
+    val (cliArgs, progArgs) = if dashIdx >= 0 then
+      (args.take(dashIdx), args.drop(dashIdx + 1))
+    else (args, Seq.empty)
+
+    OParser.parse(parser, cliArgs, SyslConfig()).map { config =>
+      if progArgs.nonEmpty then
+        config.copy(command = config.command match
+          case rc: RunCommand => rc.copy(programArgs = progArgs)
+          case other          => other
+        )
+      else config
+    }
 
   private case class CliError(msg: String) extends RuntimeException(msg)
 
@@ -164,6 +178,7 @@ object SyslCli:
 
   private def executeRun(cmd: RunCommand): Unit =
     val sources = resolveSources(cmd.inputs)
+    val argv = cmd.programArgs.toArray
 
     if sources.size == 1 then
       // Single file: parse → analyze → interpret directly
@@ -173,19 +188,38 @@ object SyslCli:
         case Left(err) =>
           fail(s"parse error: $err")
         case Right(ast) =>
+          // Check for stdlib imports and register them with the analyzer
+          val stdlibImports = ast.decls.collect {
+            case ImportDeclAST(path, _) if SyslStdlib.modules.contains(path) => path
+          }.toSet
           val analyzer = new SyslAnalyzer
+          for mod <- stdlibImports do
+            analyzer.registerImport(SyslStdlib.meta(mod))
           val typed = analyzer.analyze(ast)
           val interpreter = new SyslInterpreter()
+          wireStdlib(interpreter, stdlibImports, argv)
           val result = interpreter.run(typed)
           if result != 0 then println(result)
     else
       // Multi-file: use driver, merge typed ASTs, then interpret
       val driver = new SyslDriver
       val result = driver.compile(sources)
+      val stdlibImports = driver.collectStdlibImports(result.units)
       val merged = TProgram(result.units.flatMap(_.typed.decls))
       val interpreter = new SyslInterpreter()
+      wireStdlib(interpreter, stdlibImports, argv)
       val value = interpreter.run(merged)
       if value != 0 then println(value)
+
+  private def wireStdlib(interpreter: SyslInterpreter, imports: Set[String], argv: Array[String] = Array.empty): Unit =
+    if imports.nonEmpty then
+      val ctx = new SyslStdlib.StdlibContext(argv = argv)
+      for mod <- imports do
+        interpreter.registerBuiltins(SyslStdlib.builtins(mod, ctx))
+      // Register constants (e.g., O_RDONLY, STDIN, etc.)
+      if imports.contains("std/io") then
+        for (name, value) <- SyslStdlib.ioConstants do
+          interpreter.registerGlobal(name, value)
 
   private def io: FileOps = FileOps.instance
 

@@ -39,11 +39,14 @@ class SyslDriver:
       val ast = asts(name)
       val analyzer = new SyslAnalyzer
 
-      // Register imports from previously compiled modules
+      // Register imports from previously compiled modules (or stdlib)
       for imp <- imports(name) do
-        smetaCache.get(imp.modulePath) match
-          case Some(smeta) => analyzer.registerImport(ModuleMeta.fromSmeta(smeta), imp.selectors)
-          case None => throw DriverError(s"$name: import '${imp.modulePath}' not found (not in source set)")
+        if SyslStdlib.modules.contains(imp.modulePath) then
+          analyzer.registerImport(SyslStdlib.meta(imp.modulePath), imp.selectors)
+        else
+          smetaCache.get(imp.modulePath) match
+            case Some(smeta) => analyzer.registerImport(ModuleMeta.fromSmeta(smeta), imp.selectors)
+            case None => throw DriverError(s"$name: import '${imp.modulePath}' not found (not in source set)")
 
       val typed = analyzer.analyze(ast)
       val meta = ModuleMeta.fromProgram(typed)
@@ -86,3 +89,8 @@ class SyslDriver:
 
     for name <- allNames do visit(name)
     result.toList
+
+  def collectStdlibImports(units: List[CompilationUnit]): Set[String] =
+    units.flatMap(_.typed.decls).collect {
+      case TImportDecl(path) if SyslStdlib.modules.contains(path) => path
+    }.toSet
