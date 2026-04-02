@@ -2,14 +2,12 @@ package io.github.edadma.trisc
 
 class SyslLibMemTests extends SyslTestHelpers {
 
-  private def readLsysl(path: String): String =
-    val raw = scala.io.Source.fromFile(path).mkString
-    val doc = new LiterateParser().parse(raw)
-    LiterateRenderer.tangle(doc)
+  val libs: Map[String, String] = Map("mem" -> readSysl("posix/lib/mem.sysl"))
 
-  val memLib: String = readLsysl("lib/mem.lsysl")
-
-  private def evalWith(main: String): Long = eval(memLib + "\n" + main)
+  private def evalWith(main: String): Long = evalWithLibs(libs,
+    s"""import mem.*
+       |$main
+       |""".stripMargin)
 
   // ===== memset =====
 

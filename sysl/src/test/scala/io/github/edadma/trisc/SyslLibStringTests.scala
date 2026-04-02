@@ -2,14 +2,12 @@ package io.github.edadma.trisc
 
 class SyslLibStringTests extends SyslTestHelpers {
 
-  private def readLsysl(path: String): String =
-    val raw = scala.io.Source.fromFile(path).mkString
-    val doc = new LiterateParser().parse(raw)
-    LiterateRenderer.tangle(doc)
+  val libs: Map[String, String] = Map("string" -> readSysl("posix/lib/string.sysl"))
 
-  val stringLib: String = readLsysl("lib/string.lsysl")
-
-  private def evalWith(main: String): Long = eval(stringLib + "\n" + main)
+  private def evalWith(main: String): Long = evalWithLibs(libs,
+    s"""import string.*
+       |$main
+       |""".stripMargin)
 
   // ===== strcmp =====
 

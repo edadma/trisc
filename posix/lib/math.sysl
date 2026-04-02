@@ -58,4 +58,4 @@ pow(base: int, exp: int) -> int
 
 /* Compute quotient and remainder of numer / denom. */
 div(numer: int, denom: int) -> div_t
-    div_t { quot: numer / denom, rem: numer % denom }
+    div_t(numer / denom, numer % denom)

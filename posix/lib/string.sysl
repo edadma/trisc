@@ -19,13 +19,16 @@ strcmp(a: *byte, b: *byte) -> int
 
 /* Compare at most n bytes of two strings. */
 strncmp(a: *byte, b: *byte, n: int) -> int
-    for var i = 0; i < n && *a != 0 && *b != 0; i++
+    var i = 0
+
+    while i < n && *a != 0 && *b != 0
         val d = *a - *b
 
         if d != 0 then return d
 
         a++
         b++
+        i++
 
     if i == n then 0
     else *a - *b
@@ -116,7 +119,9 @@ strstr(haystack: *byte, needle: *byte) -> *byte
 
 /* Return length of initial segment of s containing only bytes in accept. */
 strspn(s: *byte, accept: *byte) -> int
-    for var i = 0; s[i] != 0; i++
+    var i = 0
+
+    while s[i] != 0
         var found = false
 
         for var p = accept; *p != 0; p++
@@ -126,13 +131,19 @@ strspn(s: *byte, accept: *byte) -> int
 
         if !found then return i
 
+        i++
+
     i
 
 /* Return length of initial segment of s containing no bytes in reject. */
 strcspn(s: *byte, reject: *byte) -> int
-    for var i = 0; s[i] != 0; i++
+    var i = 0
+
+    while s[i] != 0
         for var p = reject; *p != 0; p++
             if s[i] == *p then return i
+
+        i++
 
     i
 
