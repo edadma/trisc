@@ -139,3 +139,22 @@ class LiterateParserTests extends AnyFreeSpec with Matchers:
     doc.codeBlocks.head should include("x = 1")
     doc.codeBlocks.head should include("y = 2")
   }
+
+  "list then blank then indented code — diagnostic" in {
+    val input = "- item 1\n- item 2\n\n    code here\n"
+    val doc = parser.parse(input)
+    info(s"codeBlocks count: ${doc.codeBlocks.size}")
+    doc.codeBlocks.foreach(b => info(s"block: [$b]"))
+    // This test documents CommonMark behavior — list may consume the code
+  }
+
+  "services.lsysl round-trip" in {
+    val source = scala.io.Source.fromFile("tos/services.lsysl").mkString
+    val doc = parser.parse(source)
+    val tangled = LiterateRenderer.tangle(doc)
+    info(s"codeBlocks: ${doc.codeBlocks.size}")
+    info(s"tangled length: ${tangled.length}")
+    tangled should include("SYS_TLS_SET")
+    tangled should include("extern syscall")
+    tangled should include("pimutex_unlock_sys")
+  }

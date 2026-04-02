@@ -8,6 +8,8 @@ A semaphore is a single i64 in memory (ll/sc operate on 64-bit values):
 - value > 0 -- available (value = number of permits)
 - value == 0 -- all permits taken, waiters must yield and retry
 
+<!-- -->
+
     import services.*
 
     extern atomic_load(addr: *i64) -> i64

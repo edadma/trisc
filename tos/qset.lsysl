@@ -13,6 +13,8 @@ Usage:
 5. Service that object (sem_wait, chan_recv, etc.)
 6. Posters call qset_notify(qs, slot_index) after posting
 
+<!-- -->
+
     import services.*
 
     val QSET_MAX_SLOTS = 8

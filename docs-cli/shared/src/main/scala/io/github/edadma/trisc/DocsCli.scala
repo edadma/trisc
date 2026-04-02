@@ -10,8 +10,6 @@ case class TangleCommand(
 case class WeaveCommand(
     inputs: Seq[String] = Seq.empty,
     output: Option[String] = None,
-    channel: String = "dev",
-    mode: String = "literate", // literate, prose, api
 ) extends DocsCommand
 
 case class DocsConfig(
@@ -49,7 +47,7 @@ object DocsCli:
             ),
         ),
       cmd("weave")
-        .text("Generate documentation from .lsysl files")
+        .text("Generate highlighted HTML from .lsysl files")
         .action((_, c) => c.copy(command = WeaveCommand()))
         .children(
           opt[String]('o', "output")
@@ -57,26 +55,6 @@ object DocsCli:
             .action((v, c) =>
               c.copy(command = c.command match
                 case wc: WeaveCommand => wc.copy(output = Some(v))
-                case other            => other
-              )
-            ),
-          opt[String]("channel")
-            .text("Channel: code, dev (default), website, api, reference")
-            .action((v, c) =>
-              c.copy(command = c.command match
-                case wc: WeaveCommand => wc.copy(channel = v)
-                case other            => other
-              )
-            ),
-          opt[String]("mode")
-            .text("Output mode: literate (default), prose, api")
-            .validate(v =>
-              if Seq("literate", "prose", "api").contains(v) then builder.success
-              else builder.failure(s"Unknown mode: $v (expected literate, prose, api)")
-            )
-            .action((v, c) =>
-              c.copy(command = c.command match
-                case wc: WeaveCommand => wc.copy(mode = v)
                 case other            => other
               )
             ),
@@ -94,7 +72,7 @@ object DocsCli:
         c.command match
           case TangleCommand(inputs, _) if inputs.isEmpty =>
             builder.failure("No input files specified")
-          case WeaveCommand(inputs, _, _, _) if inputs.isEmpty =>
+          case WeaveCommand(inputs, _) if inputs.isEmpty =>
             builder.failure("No input files specified")
           case _ => builder.success
       ),
@@ -129,23 +107,11 @@ object DocsCli:
 
   private def executeWeave(cmd: WeaveCommand): Unit =
     val sources = resolveSources(cmd.inputs)
-    val parser = new LiterateParser
-    val channel = ChannelConfig.defaults.getOrElse(cmd.channel, ChannelConfig(cmd.channel, Set(cmd.channel)))
 
     for (name, source) <- sources do
-      val doc = parser.parse(source)
-      val rendered = cmd.mode match
-        case "literate" => LiterateRenderer.renderLiterate(doc, channel)
-        case "prose"    => LiterateRenderer.renderProse(doc, channel)
-        case "api"      => LiterateRenderer.renderApi(doc)
-        case _          => fail(s"Unknown mode: ${cmd.mode}")
-
-      val ext = cmd.mode match
-        case "api" => ".api.md"
-        case _     => ".md"
-
-      val outFile = outputPath(cmd.output, name, ext, sources.size)
-      io.writeFile(outFile, rendered)
+      val html = LiterateRenderer.renderHTML(source)
+      val outFile = outputPath(cmd.output, name, ".html", sources.size)
+      io.writeFile(outFile, html)
       System.err.println(s"  $name -> $outFile")
 
   private def io: FileOps = FileOps.instance
