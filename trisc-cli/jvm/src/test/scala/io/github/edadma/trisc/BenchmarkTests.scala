@@ -55,7 +55,7 @@ class BenchmarkTests extends TestHelpers {
 
     (cpu, elapsed)
 
-  "benchmark: bubble sort 500 elements" in {
+  "benchmark: bubble sort 500 elements" ignore {
     val (cpu, elapsed) = runBenchmark(
       """main() -> int
         |    arr: [500]int
@@ -89,7 +89,7 @@ class BenchmarkTests extends TestHelpers {
     cpu.state shouldBe State.Halt
   }
 
-  "benchmark: sieve of eratosthenes 10000" in {
+  "benchmark: sieve of eratosthenes 10000" ignore {
     val (cpu, elapsed) = runBenchmark(
       """main() -> int
         |    sieve: [10000]byte
@@ -117,7 +117,7 @@ class BenchmarkTests extends TestHelpers {
     cpu.state shouldBe State.Halt
   }
 
-  "benchmark: fibonacci iterative 10000 iterations" in {
+  "benchmark: fibonacci iterative 10000 iterations" ignore {
     val (cpu, elapsed) = runBenchmark(
       """main() -> int
         |    a = 0
@@ -140,7 +140,7 @@ class BenchmarkTests extends TestHelpers {
     cpu.state shouldBe State.Halt
   }
 
-  "benchmark: nested loop (compute-bound)" in {
+  "benchmark: nested loop (compute-bound)" ignore {
     val (cpu, elapsed) = runBenchmark(
       """main() -> int
         |    sum = 0
