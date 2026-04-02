@@ -353,6 +353,26 @@ class SyslTriscCodegen(addresses: Int = 4):
             for i <- 0 until aligned by 8 do
               emitAddImm(2, 1, i)
               emit("  std r0, r2, r0")
+          case TStructConstruct(st, args) =>
+            // Allocate struct on stack, zero-initialize, then set fields from args
+            val totalSize = stackSize(st)
+            val aligned = (totalSize + 7) & ~7
+            emitAddImm(7, 7, -aligned)
+            stackOffset -= aligned
+            val local = LocalVar(name, stackOffset, typ)
+            locals(name) = local
+            // Zero-fill
+            emitAddImm(1, 5, local.offset)
+            for i <- 0 until aligned by 8 do
+              emitAddImm(2, 1, i)
+              emit("  std r0, r2, r0")
+            // Initialize fields from constructor args
+            for (arg, i) <- args.zipWithIndex do
+              val (_, fieldType) = st.fields(i)
+              val off = fieldOffset(st, i)
+              genExpr(arg)                              // r1 = field value
+              emitAddImm(2, 5, local.offset + off)     // r2 = field address (via fp)
+              emitStore(1, 2, fieldType)
           case _ =>
             genExpr(init) // result in r1
             val local = allocLocal(name, typ)
@@ -1046,6 +1066,28 @@ class SyslTriscCodegen(addresses: Int = 4):
         for i <- 0 until aligned by 8 do
           emitAddImm(2, 1, i)
           emit("  std r0, r2, r0")
+
+      case TStructConstruct(st, args) =>
+        // Allocate struct on stack and zero-initialize
+        val totalSize = stackSize(st)
+        val aligned = (totalSize + 7) & ~7
+        emitAddImm(7, 7, -aligned)
+        stackOffset -= aligned
+        emit("  mov r1, r7")
+        for i <- 0 until aligned by 8 do
+          emitAddImm(2, 1, i)
+          emit("  std r0, r2, r0")
+        // Evaluate each arg and store into the corresponding field.
+        // The struct base is at r7 (current SP). genExpr may push/pop
+        // but SP returns to the same point, so r7 stays valid as base.
+        for (arg, i) <- args.zipWithIndex do
+          val (_, fieldType) = st.fields(i)
+          val off = fieldOffset(st, i)
+          genExpr(arg)                       // r1 = field value
+          emitAddImm(2, 7, off)             // r2 = field address
+          emitStore(1, 2, fieldType)
+        // r1 = struct base address (for use as expression result)
+        emit("  mov r1, r7")
 
       case TFieldPreInc(obj, fieldIndex, _) =>
         val st = obj.typ.asInstanceOf[SyslType.StructType]

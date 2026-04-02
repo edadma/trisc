@@ -669,6 +669,18 @@ class SyslAnalyzer:
           val funInfo = lookupFun(name)
           val checkedArgs = checkArgs(name, funInfo.params, tArgs)
           TCall(name, checkedArgs, funInfo.returnType)
+        else if structTypes.contains(name) then
+          // Struct constructor: Point(10, 20)
+          val st = structTypes(name)
+          if tArgs.length != st.fields.length then
+            throw AnalysisError(s"struct '${st.name}' has ${st.fields.length} field(s), got ${tArgs.length} argument(s)")
+          val checkedArgs = tArgs.zip(st.fields).map { case (arg, (fieldName, fieldType)) =>
+            val coerced = coerceLiteral(arg, fieldType)
+            if !compatible(coerced.typ, fieldType) then
+              throw AnalysisError(s"field '$fieldName' of '${st.name}' expects $fieldType, got ${coerced.typ}")
+            coerced
+          }
+          TStructConstruct(st, checkedArgs)
         else
           // Try as a variable of FuncType
           val sym = lookup(name)

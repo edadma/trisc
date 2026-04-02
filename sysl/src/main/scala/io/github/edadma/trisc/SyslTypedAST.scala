@@ -61,6 +61,7 @@ case class TFieldPreDec(obj: TExpr, fieldIndex: Int, typ: SyslType) extends TExp
 case class TFieldPostInc(obj: TExpr, fieldIndex: Int, typ: SyslType) extends TExpr
 case class TFieldPostDec(obj: TExpr, fieldIndex: Int, typ: SyslType) extends TExpr
 case class TStructLit(typ: SyslType) extends TExpr
+case class TStructConstruct(structType: SyslType.StructType, args: List[TExpr]) extends TExpr { def typ: SyslType = structType }
 case class TSizeof(size: Long, typ: SyslType.IntType) extends TExpr
 case class TPreInc(name: String, typ: SyslType) extends TExpr
 case class TPreDec(name: String, typ: SyslType) extends TExpr

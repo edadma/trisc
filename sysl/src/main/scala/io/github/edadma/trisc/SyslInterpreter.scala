@@ -520,6 +520,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val cells = fields.map((_, typ) => new Cell(initField(typ))).toArray
         ArrVal(cells, 0)
 
+      case TStructConstruct(SyslType.StructType(_, fields), args) =>
+        val cells = fields.zip(args).map { case ((_, typ), arg) =>
+          val value = evalAny(arg, env)
+          new Cell(value)
+        }.toArray
+        ArrVal(cells, 0)
+
       case TFieldAccess(obj, fieldIndex, _) =>
         val ArrVal(cells, off) = evalAny(obj, env): @unchecked
         cells(off + fieldIndex).value
