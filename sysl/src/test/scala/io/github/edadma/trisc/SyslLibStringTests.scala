@@ -2,10 +2,14 @@ package io.github.edadma.trisc
 
 class SyslLibStringTests extends SyslTestHelpers {
 
-  val libs: Map[String, String] = Map("string" -> readSysl("posix/lib/string.sysl"))
+  val libs: Map[String, String] = Map(
+    "string" -> readSysl("posix/lib/string.sysl"),
+    "math" -> readSysl("posix/lib/math.sysl"),
+  )
 
   private def evalWith(main: String): Long = evalWithLibs(libs,
     s"""import string.*
+       |import math.*
        |$main
        |""".stripMargin)
 
@@ -30,14 +34,7 @@ class SyslLibStringTests extends SyslTestHelpers {
 
   "strcmp a less" in {
     evalWith(
-      """sign(x: int) -> int
-        |    if x < 0
-        |        return -1
-        |    if x > 0
-        |        return 1
-        |    0
-        |
-        |main() -> int
+      """main() -> int
         |    a: [4]byte
         |    b: [4]byte
         |    a[0] = 'a'
@@ -54,14 +51,7 @@ class SyslLibStringTests extends SyslTestHelpers {
 
   "strcmp a greater" in {
     evalWith(
-      """sign(x: int) -> int
-        |    if x < 0
-        |        return -1
-        |    if x > 0
-        |        return 1
-        |    0
-        |
-        |main() -> int
+      """main() -> int
         |    a: [4]byte
         |    b: [4]byte
         |    a[0] = 'z'
@@ -78,14 +68,7 @@ class SyslLibStringTests extends SyslTestHelpers {
 
   "strcmp different lengths" in {
     evalWith(
-      """sign(x: int) -> int
-        |    if x < 0
-        |        return -1
-        |    if x > 0
-        |        return 1
-        |    0
-        |
-        |main() -> int
+      """main() -> int
         |    a: [3]byte
         |    b: [4]byte
         |    a[0] = 'a'
@@ -120,14 +103,7 @@ class SyslLibStringTests extends SyslTestHelpers {
 
   "strncmp different within n" in {
     evalWith(
-      """sign(x: int) -> int
-        |    if x < 0
-        |        return -1
-        |    if x > 0
-        |        return 1
-        |    0
-        |
-        |main() -> int
+      """main() -> int
         |    a: [4]byte
         |    b: [4]byte
         |    a[0] = 'a'

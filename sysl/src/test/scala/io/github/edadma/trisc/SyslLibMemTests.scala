@@ -2,10 +2,14 @@ package io.github.edadma.trisc
 
 class SyslLibMemTests extends SyslTestHelpers {
 
-  val libs: Map[String, String] = Map("mem" -> readSysl("posix/lib/mem.sysl"))
+  val libs: Map[String, String] = Map(
+    "mem" -> readSysl("posix/lib/mem.sysl"),
+    "math" -> readSysl("posix/lib/math.sysl"),
+  )
 
   private def evalWith(main: String): Long = evalWithLibs(libs,
     s"""import mem.*
+       |import math.*
        |$main
        |""".stripMargin)
 
@@ -79,14 +83,7 @@ class SyslLibMemTests extends SyslTestHelpers {
 
   "memcmp a less than b" in {
     evalWith(
-      """sign(x: int) -> int
-        |    if x < 0
-        |        return -1
-        |    if x > 0
-        |        return 1
-        |    0
-        |
-        |main() -> int
+      """main() -> int
         |    a: [3]byte
         |    b: [3]byte
         |    a[0] = 1
@@ -101,14 +98,7 @@ class SyslLibMemTests extends SyslTestHelpers {
 
   "memcmp a greater than b" in {
     evalWith(
-      """sign(x: int) -> int
-        |    if x < 0
-        |        return -1
-        |    if x > 0
-        |        return 1
-        |    0
-        |
-        |main() -> int
+      """main() -> int
         |    a: [3]byte
         |    b: [3]byte
         |    a[0] = 9
