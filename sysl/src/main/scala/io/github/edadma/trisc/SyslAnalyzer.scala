@@ -291,6 +291,19 @@ class SyslAnalyzer:
           currentScope(name) = SymInfo(name, declType, isMutable)
         TVarStmt(name, declType, tInit)
 
+      case DestructureStmtAST(names, init, isMutable) =>
+        val tInit = analyzeExpr(init)
+        tInit.typ match
+          case st: StructType if st.isTuple =>
+            if names.length != st.fields.length then
+              throw AnalysisError(s"destructuring expects ${st.fields.length} names, got ${names.length}")
+            for (name, (_, fieldType)) <- names.zip(st.fields) do
+              if scopeStack != null then
+                currentScope(name) = SymInfo(name, fieldType, isMutable)
+            TDestructureStmt(names, st.fields.map(_._2), tInit)
+          case other =>
+            throw AnalysisError(s"cannot destructure non-tuple type $other")
+
       case AssignStmtAST(target, value) =>
         val tValue = analyzeExpr(value)
         val sym = lookupOrCreate(target, tValue.typ)
@@ -399,6 +412,10 @@ class SyslAnalyzer:
       case BoolLitAST(b) => TBoolLit(b, BoolType)
       case StringLitAST(s) => TStringLit(s, StringType)
       case StringLitExprAST(s) => TStringLit(s, StringType)
+      case TupleLitAST(elements) =>
+        val tElems = elements.map(analyzeExpr)
+        val tupleType = SyslType.tupleType(tElems.map(_.typ))
+        TStructConstruct(tupleType, tElems)
       case ArrayDeclAST(size, typStr) =>
         val t = resolveTypeName(typStr)
         TArrayDecl(size, typStr, t)

@@ -137,6 +137,11 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TVarStmt(name, _, init) =>
         env(name) = new Cell(evalAny(init, env))
 
+      case TDestructureStmt(names, _, init) =>
+        val ArrVal(cells, off) = evalAny(init, env): @unchecked
+        for (name, i) <- names.zipWithIndex do
+          env(name) = new Cell(cells(off + i).value)
+
       case TAssignStmt(target, value) =>
         val v = evalAny(value, env)
         if env.contains(target) then env(target).value = v

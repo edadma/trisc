@@ -379,6 +379,25 @@ class SyslTriscCodegen(addresses: Int = 4):
             emitAddImm(2, 5, local.offset)
             emitStore(1, 2, typ)
 
+      case TDestructureStmt(names, types, init) =>
+        // Evaluate the tuple (struct) — result is struct base address in r1
+        genExpr(init)
+        // Save tuple base address as a hidden local (stable across further allocations)
+        val tmpLocal = allocLocal(s"_tup$$${newLabel("t")}", SyslType.PtrType(init.typ))
+        emitAddImm(2, 5, tmpLocal.offset)
+        emit("  std r1, r2, r0")
+        val st = init.typ.asInstanceOf[SyslType.StructType]
+        // Extract each field into a new local
+        for ((name, fieldType), i) <- names.zip(types).zipWithIndex do
+          val off = fieldOffset(st, i)
+          emitAddImm(1, 5, tmpLocal.offset)
+          emit("  ldd r1, r1, r0")  // r1 = tuple address
+          if off != 0 then emitAddImm(1, 1, off)
+          emitLoad(1, 1, fieldType)  // r1 = field value
+          val local = allocLocal(name, fieldType)
+          emitAddImm(2, 5, local.offset)
+          emitStore(1, 2, fieldType)
+
       case TAssignStmt(target, value) =>
         if locals != null && locals.contains(target) then
           genExpr(value)

@@ -23,6 +23,7 @@ case class TBlockBody(stmts: List[TStmt]) extends TFunBody
 // Statements
 trait TStmt
 case class TVarStmt(name: String, typ: SyslType, init: TExpr) extends TStmt
+case class TDestructureStmt(names: List[String], types: List[SyslType], init: TExpr) extends TStmt
 case class TAssignStmt(target: String, value: TExpr) extends TStmt
 case class TCompoundAssignStmt(target: String, op: String, value: TExpr) extends TStmt
 case class TDerefAssignStmt(pointer: TExpr, value: TExpr) extends TStmt

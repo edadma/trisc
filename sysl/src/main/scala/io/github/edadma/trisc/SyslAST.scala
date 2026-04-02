@@ -25,6 +25,7 @@ case class BlockBodyAST(stmts: List[StmtAST]) extends FunBodyAST
 // Statements
 trait StmtAST extends Positional
 case class VarStmtAST(name: String, typ: Option[String], init: ExpressionAST, isMutable: Boolean = true) extends StmtAST
+case class DestructureStmtAST(names: List[String], init: ExpressionAST, isMutable: Boolean = false) extends StmtAST
 case class AssignStmtAST(target: String, value: ExpressionAST) extends StmtAST
 case class CompoundAssignStmtAST(target: String, op: String, value: ExpressionAST) extends StmtAST
 case class DerefAssignStmtAST(pointer: ExpressionAST, value: ExpressionAST) extends StmtAST
@@ -72,6 +73,7 @@ case class FieldPostIncAST(obj: ExpressionAST, field: String) extends Expression
 case class FieldPostDecAST(obj: ExpressionAST, field: String) extends ExpressionAST
 case class ArrayDeclAST(size: Int, elemType: String) extends ExpressionAST
 case class ArrayLitAST(elements: List[ExpressionAST]) extends ExpressionAST
+case class TupleLitAST(elements: List[ExpressionAST]) extends ExpressionAST
 case class StructInitAST(typeName: String) extends ExpressionAST
 case class UninitDeclAST(typeName: String) extends ExpressionAST
 case class SizeofTypeAST(typeName: String) extends ExpressionAST

@@ -116,7 +116,14 @@ enum SyslType:
     case SliceType(t) => s"slice ${t.toPrefix}"
     case StructType(name, fields) => s"struct $name ${fields.size} ${fields.map((n, t) => s"$n ${t.toPrefix}").mkString(" ")}"
 
+  def isTuple: Boolean = this match
+    case StructType(name, _) => name.startsWith("_Tuple")
+    case _ => false
+
 object SyslType:
+  def tupleType(elemTypes: List[SyslType]): StructType =
+    StructType(s"_Tuple${elemTypes.length}", elemTypes.zipWithIndex.map((t, i) => (s"_$i", t)))
+
   // Canonical type aliases — signed
   val I8: IntType = IntType(8)
   val I16: IntType = IntType(16)

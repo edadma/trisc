@@ -134,7 +134,11 @@ class SyslParser extends StandardTokenParsers {
     "asm" ~> "(" ~> stringLit <~ ")" ^^ AsmStmtAST.apply
 
   lazy val stmt: Parser[StmtAST] =
-    asmStmt | forStmt | doWhileStmt | whileStmt | returnStmt | breakStmt | continueStmt | deferStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+    asmStmt | forStmt | doWhileStmt | whileStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+
+  lazy val destructureStmt: Parser[DestructureStmtAST] =
+    mutability ~ ("(" ~> rep1sep(ident, ",") <~ ")") ~ ("=" ~> expr) ^^ { case mut ~ names ~ init => DestructureStmtAST(names, init, mut) } |
+      ("(" ~> rep1sep(ident, ",") <~ ")") ~ ("=" ~> expr) ^^ { case names ~ init => DestructureStmtAST(names, init) }
 
   lazy val breakStmt: Parser[BreakStmtAST] =
     "break" ^^^ BreakStmtAST()
@@ -352,6 +356,7 @@ class SyslParser extends StandardTokenParsers {
       primary ~ rep(
         ("[" ~> expr <~ "]") ^^ (idx => (0, idx, "", Nil: List[ExpressionAST])) |
         ("." ~> ident) ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case m ~ args => (2, null, m, args) } |
+        ("." ~> numericLit) ^^ (n => (1, null, s"_${n.toInt}", Nil)) |
         ("." ~> ident) ^^ (f => (1, null, f, Nil)) |
         ("(" ~> repsep(expr, ",") <~ ")") ^^ (args => (3, null, "", args))
       ) ^^ {
@@ -406,5 +411,8 @@ class SyslParser extends StandardTokenParsers {
       cast |
       ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |
       ident ^^ VarRefAST.apply |
-      "(" ~> expr <~ ")"
+      "(" ~> expr ~ rep("," ~> expr) <~ ")" ^^ {
+        case first ~ Nil => first  // (expr) — parenthesized expression
+        case first ~ rest => TupleLitAST(first :: rest)  // (expr, expr, ...) — tuple
+      }
 }
