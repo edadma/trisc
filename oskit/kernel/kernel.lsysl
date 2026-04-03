@@ -103,6 +103,31 @@ tick_hook is called on every timer tick. Set to 0 to disable.
     val STATE_NOTIFY_WAIT = 6
     val STATE_MUTEX_WAIT = 7
 
+Syscall dispatch table. Each slot holds a function pointer
+(i64) for a slow-path syscall handler. Handlers receive one
+arg (int) and are called with context already saved. After
+the handler returns, the scheduler runs.
+
+Modules register handlers via register_syscall(). Fast-path
+syscalls (putc, queries) remain hardcoded in boot.asm.
+
+    val MAX_SYSCALLS = 32
+    var syscall_table: [32]i64
+
+    register_syscall(num: int, handler: i64)
+        if num >= 0
+            if num < MAX_SYSCALLS
+                syscall_table[num] = handler
+
+    kernel_init()
+        register_syscall(0, sleep_current)
+        register_syscall(2, yield_current)
+        register_syscall(3, terminate_current)
+        register_syscall(4, join_current)
+        register_syscall(10, sleep_until_current)
+        register_syscall(29, pimutex_lock_kernel)
+        register_syscall(30, pimutex_unlock_kernel)
+
 Thread-local storage. A flat 2D array indexed by [thread_id][slot].
 Each thread gets TLS_SLOTS slots of int-sized values. Access is
 O(1) via tls_set/tls_get kernel functions.

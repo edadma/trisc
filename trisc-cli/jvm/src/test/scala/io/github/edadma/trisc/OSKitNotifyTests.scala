@@ -10,8 +10,8 @@ class OSKitNotifyTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(waiter, 0x6000, 0x5000, "w")
-          |    create_thread(sender, 0x8000, 0x7000, "s")
+          |    create_thread(waiter, 0x10000, 0xF000, "w")
+          |    create_thread(sender, 0x14000, 0x13000, "s")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -38,8 +38,8 @@ class OSKitNotifyTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(task, 0x6000, 0x5000, "t")
-          |    create_thread(sender, 0x8000, 0x7000, "s")
+          |    create_thread(task, 0x10000, 0xF000, "t")
+          |    create_thread(sender, 0x14000, 0x13000, "s")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -67,8 +67,8 @@ class OSKitNotifyTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(waiter, 0x6000, 0x5000, "w")
-          |    create_thread(setter, 0x8000, 0x7000, "s")
+          |    create_thread(waiter, 0x10000, 0xF000, "w")
+          |    create_thread(setter, 0x14000, 0x13000, "s")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -92,8 +92,8 @@ class OSKitNotifyTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(waiter, 0x6000, 0x5000, "w")
-          |    create_thread(setter, 0x8000, 0x7000, "s")
+          |    create_thread(waiter, 0x10000, 0xF000, "w")
+          |    create_thread(setter, 0x14000, 0x13000, "s")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -125,7 +125,7 @@ class OSKitNotifyTests extends OSKitTestHelpers {
           |
           |kernel_main() -> int
           |    rmutex_init(&rm)
-          |    create_thread(task, 0x6000, 0x5000, "t")
+          |    create_thread(task, 0x10000, 0xF000, "t")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -156,8 +156,8 @@ class OSKitNotifyTests extends OSKitTestHelpers {
           |
           |kernel_main() -> int
           |    rmutex_init(&rm)
-          |    create_thread(holder, 0x6000, 0x5000, "h")
-          |    create_thread(waiter, 0x8000, 0x7000, "w")
+          |    create_thread(holder, 0x10000, 0xF000, "h")
+          |    create_thread(waiter, 0x14000, 0x13000, "w")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -197,8 +197,8 @@ class OSKitNotifyTests extends OSKitTestHelpers {
           |    val sid = qset_init(&qs)
           |    qset_add(&qs, sid, 10)
           |    qset_add(&qs, sid, 20)
-          |    create_thread(waiter, 0x6000, 0x5000, "w")
-          |    create_thread(poster, 0x8000, 0x7000, "p")
+          |    create_thread(waiter, 0x10000, 0xF000, "w")
+          |    create_thread(poster, 0x14000, 0x13000, "p")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -231,8 +231,8 @@ class OSKitNotifyTests extends OSKitTestHelpers {
           |    qset_add(&qs, sid, 10)
           |    qset_add(&qs, sid, 20)
           |    qset_add(&qs, sid, 30)
-          |    create_thread(waiter, 0x6000, 0x5000, "w")
-          |    create_thread(poster, 0x8000, 0x7000, "p")
+          |    create_thread(waiter, 0x10000, 0xF000, "w")
+          |    create_thread(poster, 0x14000, 0x13000, "p")
           |    timer_init(1000)
           |    first_thread_ssp()
           |

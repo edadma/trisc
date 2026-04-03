@@ -49,12 +49,15 @@ segment code
 ; boot — Reset vector handler
 ; ============================================================================
 
+extern kernel_init
 extern kernel_main
 
 global boot, func
 entry boot
 
 boot
+  movi r4, kernel_init
+  jalr r6, r4
   movi r4, kernel_main
   jalr r6, r4
   ; r1 = first thread's SSP — fall through to start_first_thread
@@ -85,6 +88,7 @@ start_first_thread
 
 extern schedule
 extern current_thread
+extern syscall_table
 
 context_switch
   pshr r6               ; save r1-r6
@@ -193,8 +197,6 @@ irq_handler
 ;
 ; ============================================================================
 
-extern sleep_current
-
 global trap_handler, func
 
 trap_handler
@@ -263,22 +265,36 @@ trap_handler
   addi r3, r7, 48
   ldd r1, r3, r0               ; r1 = saved r1 (syscall number)
   addi r3, r7, 40
-  ldd r2, r3, r0               ; r2 = saved r2 (arg)
+  ldd r2, r3, r0               ; r2 = saved r2 (arg1)
+  addi r3, r7, 32
+  ldd r3, r3, r0               ; r3 = saved r3 (arg2, for multi-arg syscalls)
 
-  ; Dispatch
-  beq r1, r0, .sys_sleep       ; 0 = sleep
-  ldi r3, 2
-  beq r1, r3, .sys_yield       ; 2 = yield
-  ldi r3, 3
-  beq r1, r3, .sys_exit        ; 3 = exit
-  ldi r3, 4
-  beq r1, r3, .sys_join        ; 4 = join
-  ldi r3, 29
-  beq r1, r3, .sys_pimutex_lock   ; 29 = pimutex_lock(addr)
-  ldi r3, 30
-  beq r1, r3, .sys_pimutex_unlock ; 30 = pimutex_unlock(addr)
+  ; Table dispatch: handler = syscall_table[r1]
+  ; Bounds check
+  ldi r4, 32
+  slt r4, r1, r4
+  beq r4, r0, .bad_syscall     ; syscall >= 64
+  slt r4, r1, r0
+  bne r4, r0, .bad_syscall     ; syscall < 0
 
-  ; Unknown syscall — halt (indicates a bug)
+  ; Load handler from table
+  movi r4, syscall_table
+  pshd r1                       ; save syscall number
+  ldi r5, 3
+  lsl r1, r1, r5               ; r1 = syscall_num * 8
+  add r4, r4, r1               ; r4 = &syscall_table[num]
+  ldd r4, r4, r0               ; r4 = handler address
+  popd r1                       ; restore syscall number
+
+  beq r4, r0, .bad_syscall     ; null handler
+
+  ; Call handler: r1 = arg1 (from saved r2), r2 = arg2 (from saved r3)
+  mov r1, r2                   ; shift: r1 = first arg
+  mov r2, r3                   ; r2 = second arg (if any)
+  jalr r6, r4                  ; call handler
+  bra do_schedule
+
+.bad_syscall
   halt
 
 ; --- putc: fast path, no context save ---
@@ -287,40 +303,6 @@ trap_handler
   stb  r2, r3, r0
   sti
   rte
-
-; --- yield: voluntary context switch (context already saved) ---
-extern yield_current
-
-.sys_yield
-  ; Context already saved by pshr/pshd above.
-  movi r4, yield_current
-  jalr r6, r4                   ; reset watchdog counter
-  ; Jump to the schedule+dispatch part of context_switch.
-  bra do_schedule
-
-; --- sleep: block current thread, then context switch ---
-.sys_sleep
-  mov  r1, r2                   ; r1 = ticks arg for sleep_current
-  movi r4, sleep_current
-  jalr r6, r4                   ; marks current thread BLOCKED
-  bra do_schedule
-
-; --- exit: terminate current thread, context switch away ---
-extern terminate_current
-
-.sys_exit
-  movi r4, terminate_current
-  jalr r6, r4                   ; marks current thread TERMINATED
-  bra do_schedule
-
-; --- join: wait for thread r2 to terminate ---
-extern join_current
-
-.sys_join
-  mov  r1, r2                   ; r1 = target thread id
-  movi r4, join_current
-  jalr r6, r4                   ; marks current thread JOINING
-  bra do_schedule
 
 ; --- Fast-path query syscalls ---
 ; These don't context-switch. Result returned in r1, then sti + rte.
@@ -709,25 +691,6 @@ extern event_clear_bits
   popd r2
   sti
   rte
-
-
-; pimutex_lock(addr): kernel PI mutex lock — may block, needs context switch
-extern pimutex_lock_kernel
-
-.sys_pimutex_lock
-  mov  r1, r2                   ; r1 = PIMutex address
-  movi r4, pimutex_lock_kernel
-  jalr r6, r4
-  bra do_schedule
-
-; pimutex_unlock(addr): kernel PI mutex unlock — may wake higher-priority waiter
-extern pimutex_unlock_kernel
-
-.sys_pimutex_unlock
-  mov  r1, r2                   ; r1 = PIMutex address
-  movi r4, pimutex_unlock_kernel
-  jalr r6, r4
-  bra do_schedule
 
 
 ; ============================================================================

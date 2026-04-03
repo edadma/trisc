@@ -13,7 +13,7 @@ class OSKitSyncTests extends OSKitTestHelpers {
           |
           |kernel_main() -> int
           |    sem_init(&sem, 1)
-          |    create_thread(task, 0x6000, 0x5000, "task")
+          |    create_thread(task, 0x10000, 0xF000, "task")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -38,8 +38,8 @@ class OSKitSyncTests extends OSKitTestHelpers {
           |
           |kernel_main() -> int
           |    sem_init(&mutex, 1)
-          |    create_thread(task_a, 0x6000, 0x5000, "a")
-          |    create_thread(task_b, 0x8000, 0x7000, "b")
+          |    create_thread(task_a, 0x10000, 0xF000, "a")
+          |    create_thread(task_b, 0x14000, 0x13000, "b")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -82,7 +82,7 @@ class OSKitSyncTests extends OSKitTestHelpers {
           |
           |kernel_main() -> int
           |    sem_init(&sem, 0)
-          |    create_thread(task, 0x6000, 0x5000, "task")
+          |    create_thread(task, 0x10000, 0xF000, "task")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -109,9 +109,9 @@ class OSKitSyncTests extends OSKitTestHelpers {
           |kernel_main() -> int
           |    sem_init(&sem, 2)
           |    done_count = 0
-          |    create_thread(task_a, 0x6000, 0x5000, "a")
-          |    create_thread(task_b, 0x8000, 0x7000, "b")
-          |    create_thread(task_c, 0xA000, 0x9000, "c")
+          |    create_thread(task_a, 0x10000, 0xF000, "a")
+          |    create_thread(task_b, 0x14000, 0x13000, "b")
+          |    create_thread(task_c, 0x18000, 0x17000, "c")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -150,8 +150,8 @@ class OSKitSyncTests extends OSKitTestHelpers {
           |
           |kernel_main() -> int
           |    sem_init(&sem, 0)
-          |    create_thread(waiter, 0x6000, 0x5000, "waiter")
-          |    create_thread(poster, 0x8000, 0x7000, "poster")
+          |    create_thread(waiter, 0x10000, 0xF000, "waiter")
+          |    create_thread(poster, 0x14000, 0x13000, "poster")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -188,7 +188,7 @@ class OSKitSyncTests extends OSKitTestHelpers {
           |
           |kernel_main() -> int
           |    mutex_init(&mtx)
-          |    create_thread(task, 0x6000, 0x5000, "task")
+          |    create_thread(task, 0x10000, 0xF000, "task")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -213,8 +213,8 @@ class OSKitSyncTests extends OSKitTestHelpers {
           |
           |kernel_main() -> int
           |    mutex_init(&mtx)
-          |    create_thread(holder, 0x6000, 0x5000, "holder")
-          |    create_thread(trier, 0x8000, 0x7000, "trier")
+          |    create_thread(holder, 0x10000, 0xF000, "holder")
+          |    create_thread(trier, 0x14000, 0x13000, "trier")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -252,8 +252,8 @@ class OSKitSyncTests extends OSKitTestHelpers {
           |kernel_main() -> int
           |    mutex_init(&mtx)
           |    cond_init(&cv)
-          |    create_thread(waiter, 0x6000, 0x5000, "waiter")
-          |    create_thread(signaler, 0x8000, 0x7000, "signaler")
+          |    create_thread(waiter, 0x10000, 0xF000, "waiter")
+          |    create_thread(signaler, 0x14000, 0x13000, "signaler")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -334,9 +334,9 @@ class OSKitSyncTests extends OSKitTestHelpers {
           |
           |kernel_main() -> int
           |    barrier_init(&bar, 3)
-          |    create_thread(task_a, 0x6000, 0x5000, "a")
-          |    create_thread(task_b, 0x8000, 0x7000, "b")
-          |    create_thread(task_c, 0xA000, 0x9000, "c")
+          |    create_thread(task_a, 0x10000, 0xF000, "a")
+          |    create_thread(task_b, 0x14000, 0x13000, "b")
+          |    create_thread(task_c, 0x18000, 0x17000, "c")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -377,8 +377,8 @@ class OSKitSyncTests extends OSKitTestHelpers {
           |
           |kernel_main() -> int
           |    rwlock_init(&rw)
-          |    create_thread(reader1, 0x6000, 0x5000, "r1")
-          |    create_thread(reader2, 0x8000, 0x7000, "r2")
+          |    create_thread(reader1, 0x10000, 0xF000, "r1")
+          |    create_thread(reader2, 0x14000, 0x13000, "r2")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -414,8 +414,8 @@ class OSKitSyncTests extends OSKitTestHelpers {
           |
           |kernel_main() -> int
           |    rwlock_init(&rw)
-          |    create_thread(writer, 0x6000, 0x5000, "w")
-          |    create_thread(reader, 0x8000, 0x7000, "r")
+          |    create_thread(writer, 0x10000, 0xF000, "w")
+          |    create_thread(reader, 0x14000, 0x13000, "r")
           |    timer_init(1000)
           |    first_thread_ssp()
           |

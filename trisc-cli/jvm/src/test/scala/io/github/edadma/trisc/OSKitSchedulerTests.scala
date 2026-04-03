@@ -8,9 +8,9 @@ class OSKitSchedulerTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(task_a, 0x6000, 0x5000, "a")
-          |    create_thread(task_b, 0x8000, 0x7000, "b")
-          |    create_thread(task_c, 0xA000, 0x9000, "c")
+          |    create_thread(task_a, 0x10000, 0xF000, "a")
+          |    create_thread(task_b, 0x14000, 0x13000, "b")
+          |    create_thread(task_c, 0x18000, 0x17000, "c")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -37,8 +37,8 @@ class OSKitSchedulerTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread_pri(task_b, 0x8000, 0x7000, "b", 1)
-          |    create_thread_pri(task_a, 0x6000, 0x5000, "a", 0)
+          |    create_thread_pri(task_b, 0x14000, 0x13000, "b", 1)
+          |    create_thread_pri(task_a, 0x10000, 0xF000, "a", 0)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -65,8 +65,8 @@ class OSKitSchedulerTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(task_a, 0x6000, 0x5000, "a")
-          |    create_thread(task_b, 0x8000, 0x7000, "b")
+          |    create_thread(task_a, 0x10000, 0xF000, "a")
+          |    create_thread(task_b, 0x14000, 0x13000, "b")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -126,8 +126,8 @@ class OSKitSchedulerTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(blocker, 0x6000, 0x5000, "blocker")
-          |    create_thread(runner, 0x8000, 0x7000, "runner")
+          |    create_thread(blocker, 0x10000, 0xF000, "blocker")
+          |    create_thread(runner, 0x14000, 0x13000, "runner")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -191,8 +191,8 @@ class OSKitSchedulerTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(task_a, 0x6000, 0x5000, "a")
-          |    create_thread(task_b, 0x8000, 0x7000, "b")
+          |    create_thread(task_a, 0x10000, 0xF000, "a")
+          |    create_thread(task_b, 0x14000, 0x13000, "b")
           |    timer_init(1000)
           |    first_thread_ssp()
           |

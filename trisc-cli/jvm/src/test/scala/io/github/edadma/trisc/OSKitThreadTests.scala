@@ -8,8 +8,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(worker, 0x6000, 0x5000, "worker")
-          |    create_thread(joiner, 0x8000, 0x7000, "joiner")
+          |    create_thread(worker, 0x10000, 0xF000, "worker")
+          |    create_thread(joiner, 0x14000, 0x13000, "joiner")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -36,8 +36,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(fast, 0x6000, 0x5000, "fast")
-          |    create_thread(slow, 0x8000, 0x7000, "slow")
+          |    create_thread(fast, 0x10000, 0xF000, "fast")
+          |    create_thread(slow, 0x14000, 0x13000, "slow")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -62,8 +62,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread_pri(task_b, 0x8000, 0x7000, "b", 1)
-          |    create_thread_pri(task_a, 0x6000, 0x5000, "a", 0)
+          |    create_thread_pri(task_b, 0x14000, 0x13000, "b", 1)
+          |    create_thread_pri(task_a, 0x10000, 0xF000, "a", 0)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -87,8 +87,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread_pri(task_a, 0x6000, 0x5000, "a", 1)
-          |    create_thread_pri(task_b, 0x8000, 0x7000, "b", 1)
+          |    create_thread_pri(task_a, 0x10000, 0xF000, "a", 1)
+          |    create_thread_pri(task_b, 0x14000, 0x13000, "b", 1)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -119,7 +119,7 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(task, 0x6000, 0x5000, "task")
+          |    create_thread(task, 0x10000, 0xF000, "task")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -138,7 +138,7 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(task, 0x6000, 0x5000, "task")
+          |    create_thread(task, 0x10000, 0xF000, "task")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -162,8 +162,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(task0, 0x6000, 0x5000, "t0")
-          |    create_thread(task1, 0x8000, 0x7000, "t1")
+          |    create_thread(task0, 0x10000, 0xF000, "t0")
+          |    create_thread(task1, 0x14000, 0x13000, "t1")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -186,9 +186,9 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(task, 0x6000, 0x5000, "task")
-          |    create_thread(task2, 0x8000, 0x7000, "task2")
-          |    create_thread(task3, 0xA000, 0x9000, "task3")
+          |    create_thread(task, 0x10000, 0xF000, "task")
+          |    create_thread(task2, 0x14000, 0x13000, "task2")
+          |    create_thread(task3, 0x18000, 0x17000, "task3")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -213,8 +213,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(checker, 0x6000, 0x5000, "checker")
-          |    create_thread(sleeper, 0x8000, 0x7000, "sleeper")
+          |    create_thread(checker, 0x10000, 0xF000, "checker")
+          |    create_thread(sleeper, 0x14000, 0x13000, "sleeper")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -239,7 +239,7 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(task, 0x6000, 0x5000, "task")
+          |    create_thread(task, 0x10000, 0xF000, "task")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -265,7 +265,7 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(task, 0x6000, 0x5000, "t")
+          |    create_thread(task, 0x10000, 0xF000, "t")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -290,7 +290,7 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(task, 0x6000, 0x5000, "t")
+          |    create_thread(task, 0x10000, 0xF000, "t")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -313,8 +313,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(task_a, 0x6000, 0x5000, "a")
-          |    create_thread(task_b, 0x8000, 0x7000, "b")
+          |    create_thread(task_a, 0x10000, 0xF000, "a")
+          |    create_thread(task_b, 0x14000, 0x13000, "b")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -349,8 +349,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
           |
           |kernel_main() -> int
           |    set_watchdog(3)
-          |    create_thread(spinner, 0x6000, 0x5000, "spin")
-          |    create_thread(checker, 0x8000, 0x7000, "check")
+          |    create_thread(spinner, 0x10000, 0xF000, "spin")
+          |    create_thread(checker, 0x14000, 0x13000, "check")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -382,8 +382,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
           |
           |kernel_main() -> int
           |    set_watchdog(3)
-          |    create_thread(yielder, 0x6000, 0x5000, "yield")
-          |    create_thread(checker, 0x8000, 0x7000, "check")
+          |    create_thread(yielder, 0x10000, 0xF000, "yield")
+          |    create_thread(checker, 0x14000, 0x13000, "check")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -413,7 +413,7 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(task, 0x6000, 0x5000, "t")
+          |    create_thread(task, 0x10000, 0xF000, "t")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -434,12 +434,12 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(task, 0x6000, 0x5000, "t")
+          |    create_thread(task, 0x10000, 0xF000, "t")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
           |task()
-          |    val ok = check_stack(0x6000)
+          |    val ok = check_stack(0x10000)
           |    if ok == 1
           |        putc('Y')
           |    else
@@ -458,8 +458,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(worker, 0x6000, 0x5000, "w")
-          |    create_thread(controller, 0x8000, 0x7000, "c")
+          |    create_thread(worker, 0x10000, 0xF000, "w")
+          |    create_thread(controller, 0x14000, 0x13000, "c")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -493,8 +493,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(target, 0x6000, 0x5000, "t")
-          |    create_thread(checker, 0x8000, 0x7000, "c")
+          |    create_thread(target, 0x10000, 0xF000, "t")
+          |    create_thread(checker, 0x14000, 0x13000, "c")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -525,7 +525,7 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(task, 0x6000, 0x5000, "t")
+          |    create_thread(task, 0x10000, 0xF000, "t")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -550,7 +550,7 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(task, 0x6000, 0x5000, "t")
+          |    create_thread(task, 0x10000, 0xF000, "t")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -576,8 +576,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
         """import oskit.*
           |
           |kernel_main() -> int
-          |    create_thread(task_a, 0x6000, 0x5000, "a")
-          |    create_thread(task_b, 0x8000, 0x7000, "b")
+          |    create_thread(task_a, 0x10000, 0xF000, "a")
+          |    create_thread(task_b, 0x14000, 0x13000, "b")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
