@@ -441,4 +441,112 @@ class SyslCodegenPointerTests extends SyslCodegenHelpers {
         |    c
         |""".stripMargin) shouldBe 65
   }
+
+  // ===== *p++ and *++p semantics =====
+
+  "*p++ dereferences then advances" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    var p = &arr[0]
+        |    val a = *p++
+        |    val b = *p
+        |    a * 100 + b
+        |""".stripMargin) shouldBe 1020
+  }
+
+  "*++p advances then dereferences" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    var p = &arr[0]
+        |    val a = *++p
+        |    val b = *p
+        |    a * 100 + b
+        |""".stripMargin) shouldBe 2020
+  }
+
+  "*p-- dereferences then retreats" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    var p = &arr[2]
+        |    val a = *p--
+        |    val b = *p
+        |    a * 100 + b
+        |""".stripMargin) shouldBe 3020
+  }
+
+  "*--p retreats then dereferences" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    var p = &arr[2]
+        |    val a = *--p
+        |    val b = *p
+        |    a * 100 + b
+        |""".stripMargin) shouldBe 2020
+  }
+
+  "*dst++ = *src++ copies and advances both" in {
+    compileAndRun(
+      """main() -> int
+        |    src: [3]int
+        |    dst: [3]int
+        |    src[0] = 10
+        |    src[1] = 20
+        |    src[2] = 30
+        |    var s = &src[0]
+        |    var d = &dst[0]
+        |    *d++ = *s++
+        |    *d++ = *s++
+        |    *d++ = *s++
+        |    dst[0] * 10000 + dst[1] * 100 + dst[2]
+        |""".stripMargin) shouldBe 102030
+  }
+
+  "*p++ on byte array" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [3]byte
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    var p = &arr[0]
+        |    val a = *p++
+        |    val b = *p++
+        |    val c = *p
+        |    a + b + c
+        |""".stripMargin) shouldBe 60
+  }
+
+  "pointer walk with *p++ in loop" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [4]int
+        |    arr[0] = 1
+        |    arr[1] = 2
+        |    arr[2] = 3
+        |    arr[3] = 4
+        |    var p = &arr[0]
+        |    var sum = 0
+        |    var i = 0
+        |    while i < 4
+        |        sum += *p++
+        |        i++
+        |    sum
+        |""".stripMargin) shouldBe 10
+  }
 }

@@ -111,19 +111,22 @@ object SyslStdlib:
     }),
     "read" -> (args => {
       val fd = args.head.asInstanceOf[IntVal].n.toInt
-      val buf = args(1) // ArrVal or PtrVal
+      val buf = args(1)
       val count = args(2).asInstanceOf[IntVal].n.toInt
+      val (cells, off) = buf match
+        case ArrVal(c, o) => (c, o)
+        case PtrVal(ArrayPtr(c, o)) => (c, o)
+        case _ => throw RuntimeException("read: expected array or array pointer for buffer")
       if fd == 0 then
         // stdin
         var bytesRead = 0
-        val arr = buf.asInstanceOf[ArrVal]
         var i = 0
         while i < count do
           val b = ctx.input()
           if b == -1 then
             i = count // break
           else
-            arr.cells(arr.offset + bytesRead).value = IntVal(b.toLong)
+            cells(off + bytesRead).value = IntVal(b.toLong)
             bytesRead += 1
             i += 1
         IntVal(bytesRead)
@@ -134,20 +137,23 @@ object SyslStdlib:
               val bytes = new Array[Byte](count)
               val n = raf.read(bytes)
               if n > 0 then
-                val arr = buf.asInstanceOf[ArrVal]
                 for i <- 0 until n do
-                  arr.cells(arr.offset + i).value = IntVal(bytes(i) & 0xff)
+                  cells(off + i).value = IntVal(bytes(i) & 0xff)
               IntVal(n)
             catch case _: Exception => IntVal(-1)
           case None => IntVal(-1)
     }),
     "write" -> (args => {
       val fd = args.head.asInstanceOf[IntVal].n.toInt
-      val buf = args(1).asInstanceOf[ArrVal]
+      val buf = args(1)
       val count = args(2).asInstanceOf[IntVal].n.toInt
+      val (cells, off) = buf match
+        case ArrVal(c, o) => (c, o)
+        case PtrVal(ArrayPtr(c, o)) => (c, o)
+        case _ => throw RuntimeException("write: expected array or array pointer for buffer")
       val bytes = new Array[Byte](count)
       for i <- 0 until count do
-        bytes(i) = buf.cells(buf.offset + i).value.asInstanceOf[IntVal].n.toByte
+        bytes(i) = cells(off + i).value.asInstanceOf[IntVal].n.toByte
       if fd == 1 || fd == 2 then
         ctx.output(new String(bytes, "UTF-8"))
         IntVal(count)

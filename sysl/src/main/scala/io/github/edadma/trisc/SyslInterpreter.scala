@@ -2,10 +2,35 @@ package io.github.edadma.trisc
 
 import scala.collection.mutable
 
+sealed trait Pointer:
+  def deref: Cell
+  def index(i: Int): Cell
+  def add(n: Int): Pointer
+  def sub(n: Int): Pointer
+
+case class CellPtr(cell: Cell) extends Pointer:
+  def deref: Cell = cell
+  def index(i: Int): Cell =
+    if i == 0 then cell
+    else throw RuntimeException(s"cannot index a cell pointer with offset $i")
+  def add(n: Int): Pointer =
+    throw RuntimeException("cannot do arithmetic on a cell pointer")
+  def sub(n: Int): Pointer =
+    throw RuntimeException("cannot do arithmetic on a cell pointer")
+
+case class ArrayPtr(cells: Array[Cell], offset: Int) extends Pointer:
+  def deref: Cell = cells(offset)
+  def index(i: Int): Cell =
+    val idx = offset + i
+    if idx < 0 || idx >= cells.length then throw RuntimeException(s"array index out of bounds: $idx")
+    cells(idx)
+  def add(n: Int): Pointer = ArrayPtr(cells, offset + n)
+  def sub(n: Int): Pointer = ArrayPtr(cells, offset - n)
+
 enum Value:
   case IntVal(n: Long)
   case FloatVal(d: Double)
-  case PtrVal(cell: Cell)
+  case PtrVal(ptr: Pointer)
   case ArrVal(cells: Array[Cell], offset: Int)
   case FuncVal(name: String)
   case StrVal(s: String)
@@ -125,7 +150,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     env.getOrElse(name, globals.getOrElse(name, throw RuntimeError(s"undefined variable: $name")))
 
   private def derefCell(v: Value): Cell = v match
-    case PtrVal(c)          => c
+    case PtrVal(ptr)        => ptr.deref
     case ArrVal(cells, off) => cells(off)
     case _                  => throw RuntimeError("cannot dereference non-pointer")
 
@@ -134,9 +159,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       val i = off + idx
       if i < 0 || i >= cells.length then throw RuntimeError(s"array index out of bounds: $i")
       cells(i)
-    case PtrVal(c) =>
-      if idx == 0 then c
-      else throw RuntimeError("cannot index a non-array pointer with offset != 0")
+    case PtrVal(ptr) => ptr.index(idx)
     case _ => throw RuntimeError("cannot index non-array")
 
   private def exec(stmt: TStmt, env: Env): Unit =
@@ -290,22 +313,27 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TVarRef(name, _) => lookupCell(name, env).value
 
-      case TAddrOf(name, _) => PtrVal(lookupCell(name, env))
+      case TAddrOf(name, _) => PtrVal(CellPtr(lookupCell(name, env)))
 
       case TAddrOfField(obj, fieldIndex, _) =>
         val ArrVal(cells, off) = evalAny(obj, env): @unchecked
-        PtrVal(cells(off + fieldIndex))
+        PtrVal(ArrayPtr(cells, off + fieldIndex))
 
       case TAddrOfIndex(array, index, _) =>
         val arrVal = evalAny(array, env)
         val idx = toLong(evalAny(index, env)).toInt
         arrVal match
-          case ArrVal(cells, off) => ArrVal(cells, off + idx)
-          case _ => PtrVal(indexCell(arrVal, idx))
+          case ArrVal(cells, off) => PtrVal(ArrayPtr(cells, off + idx))
+          case PtrVal(ptr) => PtrVal(ptr.add(idx))
+          case _ => PtrVal(CellPtr(indexCell(arrVal, idx)))
 
       case TPreInc(name, typ) =>
         val cell = lookupCell(name, env)
         cell.value match
+          case PtrVal(ptr) =>
+            val nv = PtrVal(ptr.add(1))
+            cell.value = nv
+            nv
           case ArrVal(cells, off) =>
             val nv = ArrVal(cells, off + 1)
             cell.value = nv
@@ -318,6 +346,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TPreDec(name, typ) =>
         val cell = lookupCell(name, env)
         cell.value match
+          case PtrVal(ptr) =>
+            val nv = PtrVal(ptr.sub(1))
+            cell.value = nv
+            nv
           case ArrVal(cells, off) =>
             val nv = ArrVal(cells, off - 1)
             cell.value = nv
@@ -330,6 +362,9 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TPostInc(name, typ) =>
         val cell = lookupCell(name, env)
         cell.value match
+          case old @ PtrVal(ptr) =>
+            cell.value = PtrVal(ptr.add(1))
+            old
           case old @ ArrVal(cells, off) =>
             cell.value = ArrVal(cells, off + 1)
             old
@@ -341,6 +376,9 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TPostDec(name, typ) =>
         val cell = lookupCell(name, env)
         cell.value match
+          case old @ PtrVal(ptr) =>
+            cell.value = PtrVal(ptr.sub(1))
+            old
           case old @ ArrVal(cells, off) =>
             cell.value = ArrVal(cells, off - 1)
             old
@@ -376,6 +414,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TBinary(left, op, right, _) =>
         val lv = evalAny(left, env)
         (lv, op) match
+          case (PtrVal(ptr), "+") =>
+            return PtrVal(ptr.add(toLong(evalAny(right, env)).toInt))
+          case (PtrVal(ptr), "-") =>
+            return PtrVal(ptr.sub(toLong(evalAny(right, env)).toInt))
           case (ArrVal(cells, off), "+") =>
             return ArrVal(cells, off + toLong(evalAny(right, env)).toInt)
           case (ArrVal(cells, off), "-") =>
