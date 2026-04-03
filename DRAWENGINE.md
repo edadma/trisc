@@ -29,9 +29,9 @@
 
 ## Missing — Nice to Have
 
-- [ ] **Wallpaper** — command to set a background image that persists across composites
+- [x] **Wallpaper** — SET_WALLPAPER_COLOR, SET_WALLPAPER_GRADIENT, SET_WALLPAPER_IMAGE; drawn before windows
 - [ ] **Window animations** — fade in/out, minimize effect
 - [ ] **Drop shadows** — Gaussian blur shadow instead of solid offset
-- [ ] **Gradient fills** — linear and radial gradients
+- [x] **Gradient fills** — SET_LINEAR_GRADIENT, SET_RADIAL_GRADIENT, CLEAR_PAINT; affects subsequent fills
 - [ ] **Icon support** — per-window icon for title bar and taskbar
 - [ ] **Multi-monitor** — multiple framebuffer outputs

@@ -1,7 +1,7 @@
 package io.github.edadma.trisc
 
-import java.awt.{BasicStroke, Color, Font, Graphics2D, RenderingHints}
-import java.awt.geom.{AffineTransform, GeneralPath}
+import java.awt.{BasicStroke, Color, Font, GradientPaint, LinearGradientPaint, RadialGradientPaint, Graphics2D, MultipleGradientPaint, RenderingHints}
+import java.awt.geom.{AffineTransform, GeneralPath, Point2D}
 import java.awt.image.BufferedImage
 import javax.imageio.ImageIO
 import java.io.File
@@ -45,6 +45,9 @@ import java.io.File
  *   0x16 SET_FONT — set current font to name in FONT_BUF (e.g. "Monospaced", "SansSerif")
  *   0x17 LOAD_FONT — load TTF/OTF from RAM at TEXT_ADDR, length (X2<<8|Y2 bytes),
  *                      register under name in FONT_BUF
+ *   0x18 SET_LINEAR_GRADIENT — gradient from (X1,Y1) to (X2,Y2); color1=RGBA, color2=TEXT_BUF[0-3]
+ *   0x19 SET_RADIAL_GRADIENT — center (X1,Y1), radius=X2; color1=RGBA (center), color2=TEXT_BUF[0-3]
+ *   0x1A CLEAR_PAINT — revert to solid color (clears gradient)
  *
  * Surface commands (0x20-0x2F):
  *   0x20 CREATE_SURFACE — create surface with size (X2, Y2), result in RESULT
@@ -79,6 +82,9 @@ import java.io.File
  *   0x41 PROCESS_MOUSE — feed mouse pos (X1,Y1), button state (WIN_FLAGS bit 4=left).
  *                          Handles title bar drag, click-to-focus. RESULT=window under cursor.
  *   0x42 Z_ORDER_QUERY — write visible window IDs into TEXT_BUF, back-to-front, null-terminated
+ *   0x43 SET_WALLPAPER_COLOR — solid color wallpaper from RGBA
+ *   0x44 SET_WALLPAPER_GRADIENT — vertical gradient, top=RGBA, bottom=TEXT_BUF[0-3]
+ *   0x45 SET_WALLPAPER_IMAGE — image from path (TEXT_ADDR/TEXT_BUF string), scaled to fill
  */
 class DrawEngine(
     val base: Long,
@@ -202,6 +208,15 @@ class DrawEngine(
   private var dragOffsetY = 0
   private var prevMouseButton = false
 
+  // Gradient paint state (null = use solid color)
+  private var gradientPaint: java.awt.Paint = null
+
+  // Wallpaper state
+  private var wallpaperMode = 0 // 0=none, 1=solid, 2=gradient, 3=image
+  private var wallpaperColor: Color = null
+  private var wallpaperColor2: Color = null
+  private var wallpaperImage: BufferedImage = null
+
   // Path state
   private var path = new GeneralPath()
 
@@ -212,6 +227,10 @@ class DrawEngine(
 
   private def currentColor: Color =
     new Color(regs(RED) & 0xFF, regs(GREEN) & 0xFF, regs(BLUE) & 0xFF, regs(ALPHA) & 0xFF)
+
+  /** Read second color from TEXT_BUF[0-3] as R,G,B,A */
+  private def secondColor: Color =
+    new Color(regs(TEXT_BUF) & 0xFF, regs(TEXT_BUF + 1) & 0xFF, regs(TEXT_BUF + 2) & 0xFF, regs(TEXT_BUF + 3) & 0xFF)
 
   private def applyStroke(g: Graphics2D): Unit =
     val lw = reg16(LINE_W) / 16.0f
@@ -294,11 +313,15 @@ class DrawEngine(
       case 0x40 => composite()
       case 0x41 => processMouse()
       case 0x42 => zOrderQuery()
+      case 0x43 => setWallpaperColor()
+      case 0x44 => setWallpaperGradient()
+      case 0x45 => setWallpaperImage()
       case _ =>
 
   private def executeDraw(cmd: Int): Unit =
     val g = targetG2D
     g.setColor(currentColor)
+    if gradientPaint != null then g.setPaint(gradientPaint)
     applyStroke(g)
 
     cmd match
@@ -365,6 +388,20 @@ class DrawEngine(
         currentFontFamily = readBuf(FONT_BUF, 32)
       case 0x17 => // LOAD_FONT
         loadFont()
+      case 0x18 => // SET_LINEAR_GRADIENT — from (X1,Y1) to (X2,Y2), color1=RGBA, color2=TEXT_BUF[0-3]
+        gradientPaint = new GradientPaint(
+          reg16(X1).toFloat, reg16(Y1).toFloat, currentColor,
+          reg16(X2).toFloat, reg16(Y2).toFloat, secondColor)
+      case 0x19 => // SET_RADIAL_GRADIENT — center (X1,Y1), radius=X2, color1=RGBA (center), color2=TEXT_BUF[0-3] (edge)
+        val cx = reg16(X1).toFloat; val cy = reg16(Y1).toFloat
+        val radius = reg16(X2).toFloat
+        if radius > 0 then
+          gradientPaint = new RadialGradientPaint(
+            cx, cy, radius,
+            Array(0.0f, 1.0f),
+            Array(currentColor, secondColor))
+      case 0x1A => // CLEAR_PAINT — revert to solid color
+        gradientPaint = null
       case _ =>
 
   // === Font commands ===
@@ -650,12 +687,52 @@ class DrawEngine(
         i += 1
     regs(TEXT_BUF + i) = 0 // null terminator
 
+  // === Wallpaper commands ===
+
+  private def setWallpaperColor(): Unit =
+    wallpaperMode = 1
+    wallpaperColor = currentColor
+    wallpaperImage = null
+
+  private def setWallpaperGradient(): Unit =
+    wallpaperMode = 2
+    wallpaperColor = currentColor
+    wallpaperColor2 = secondColor
+    wallpaperImage = null
+
+  private def setWallpaperImage(): Unit =
+    val imgPath = readTextString
+    try
+      val file = new File(imgPath)
+      if file.exists then
+        val loaded = ImageIO.read(file)
+        if loaded != null then
+          wallpaperMode = 3
+          wallpaperImage = loaded
+    catch case _: Exception => ()
+
   // === Compositor ===
 
   private def composite(): Unit =
     val g = fb.g2d
     val fw = fbWidth()
     val fh = fbHeight()
+
+    // Draw wallpaper
+    wallpaperMode match
+      case 1 => // Solid color
+        g.setColor(wallpaperColor)
+        g.fillRect(0, 0, fw, fh)
+      case 2 => // Vertical gradient
+        g.setPaint(new GradientPaint(0, 0, wallpaperColor, 0, fh.toFloat, wallpaperColor2))
+        g.fillRect(0, 0, fw, fh)
+        g.setPaint(null)
+      case 3 => // Image (scaled to fill)
+        if wallpaperImage != null then
+          g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC)
+          g.drawImage(wallpaperImage, 0, 0, fw, fh, null)
+          g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+      case _ => // No wallpaper — whatever was on surface 0 stays
 
     // Find the focused window (topmost visible decorated window)
     val focusedWid = windowOrder.reverseIterator.find(wid =>
