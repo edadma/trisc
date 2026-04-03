@@ -3,6 +3,7 @@
 
 DISPLAY_CTRL = 0x100008
 DRAW_ENGINE  = 0x1000A0
+MOUSE_DEV    = 0x100090
 FB_WIDTH  = 1440
 FB_HEIGHT = 900
 
@@ -183,10 +184,8 @@ create_window(x: int, y: int, w: int, h: int, title: *int, tlen: int) -> int
     de_exec(CMD_CREATE_WINDOW)
     de_read8(DE_RESULT)
 
-// Draw into the screen (surface 0)
+// Draw desktop content into whatever is the current TARGET surface
 draw_desktop()
-    de_target(0)
-
     // Dark background
     de_color(10, 10, 18, 255)
     de_exec(CMD_CLEAR)
@@ -384,10 +383,38 @@ draw_terminal(win: int)
     // Reset to default font
     de_set_font(s_sans, 9)
 
+// Mouse device helpers
+mouse_read8(offset: int) -> int
+    p: *i8 = *i8(MOUSE_DEV + offset)
+    int(*p) & 0xFF
+
+mouse_ready() -> int
+    mouse_read8(0)
+
+mouse_x() -> int
+    (mouse_read8(2) << 8) | mouse_read8(3)
+
+mouse_y() -> int
+    (mouse_read8(4) << 8) | mouse_read8(5)
+
+mouse_buttons() -> int
+    mouse_read8(1)
+
+// Create an undecorated, full-screen window for the desktop background
+create_desktop_window() -> int
+    de_title(s_S, 0)  // empty title
+    de_pos(0, 0)
+    de_size(FB_WIDTH, FB_HEIGHT)
+    de_write8(DE_WIN_FLAGS, 1) // visible, NOT decorated
+    de_exec(CMD_CREATE_WINDOW)
+    de_read8(DE_RESULT)
+
 main() -> int
     init_fb()
 
-    // Draw the desktop background and taskbar
+    // Desktop as bottom-layer undecorated window (survives composite clearing surface 0)
+    val desktop_win = create_desktop_window()
+    // TARGET is now set to the desktop surface — draw into it
     draw_desktop()
 
     // Create three windows arranged around the edges, leaving center for logo
@@ -400,8 +427,25 @@ main() -> int
     val win3 = create_window(880, 30, 530, 220, s_terminal, 8)
     draw_terminal(win3)
 
-    // Set cursor position and composite
+    // Initial composite
     de_pos(700, 450)
     de_exec(0x38)  // SET_CURSOR_POS
     de_exec(CMD_COMPOSITE)
+
+    // Mouse tracking loop
+    var prev_x = 0
+    var prev_y = 0
+    while true
+        val ready = mouse_ready()
+        if ready != 0
+            val mx = mouse_x()
+            val my = mouse_y()
+            val btn = mouse_buttons()
+            if mx != prev_x || my != prev_y
+                de_pos(mx, my)
+                de_exec(0x38)  // SET_CURSOR_POS
+                de_exec(CMD_COMPOSITE)
+                prev_x = mx
+                prev_y = my
+
     0

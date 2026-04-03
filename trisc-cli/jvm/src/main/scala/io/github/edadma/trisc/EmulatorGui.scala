@@ -34,14 +34,33 @@ object EmulatorGui:
       frame.getContentPane.add(statusBar, BorderLayout.SOUTH)
 
       // Toolbar
+      // Mouse capture state (before toolbar so handlers can reference)
+      var mouseCaptured = false
+      val invisibleCursor = Toolkit.getDefaultToolkit.createCustomCursor(
+        new java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_ARGB),
+        new Point(0, 0), "invisible")
+
       val toolbar = new JPanel(new FlowLayout(FlowLayout.LEFT))
       val runBtn = new JButton("Run")
       val stepBtn = new JButton("Step")
       val resetBtn = new JButton("Reset")
+      val mouseBtn = new JButton("Show Host Mouse")
       toolbar.add(runBtn)
       toolbar.add(stepBtn)
       toolbar.add(resetBtn)
+      toolbar.add(mouseBtn)
       frame.getContentPane.add(toolbar, BorderLayout.NORTH)
+
+      mouseBtn.addActionListener(_ => {
+        mouseCaptured = !mouseCaptured
+        if mouseCaptured then
+          mouseBtn.setText("Hide Host Mouse")
+          framebufferWidget.setCursor(invisibleCursor)
+        else
+          mouseBtn.setText("Show Host Mouse")
+          framebufferWidget.setCursor(Cursor.getDefaultCursor)
+        frame.requestFocusInWindow()
+      })
 
       // CPU setup — output feeds the ANSI parser on the EDT
       val outputFn: String => Unit = s =>
@@ -92,7 +111,7 @@ object EmulatorGui:
         override def keyTyped(e: KeyEvent): Unit = ()
       })
 
-      // Mouse input — on the framebuffer widget
+      // Mouse input — on the framebuffer widget (always forwarded)
       framebufferWidget.addMouseListener(new MouseAdapter {
         override def mousePressed(e: java.awt.event.MouseEvent): Unit = updateMouse(e)
         override def mouseReleased(e: java.awt.event.MouseEvent): Unit = updateMouse(e)
@@ -103,10 +122,17 @@ object EmulatorGui:
       })
 
       def updateMouse(e: java.awt.event.MouseEvent): Unit =
+        // Scale widget coords to framebuffer coords
+        val widgetW = framebufferWidget.getWidth
+        val widgetH = framebufferWidget.getHeight
+        val fbW = displayCtrl.currentFBWidth
+        val fbH = displayCtrl.currentFBHeight
+        val mx = if widgetW > 0 then e.getX * fbW / widgetW else e.getX
+        val my = if widgetH > 0 then e.getY * fbH / widgetH else e.getY
         val buttons = (if SwingUtilities.isLeftMouseButton(e) then 1 else 0) |
           (if SwingUtilities.isRightMouseButton(e) then 2 else 0) |
           (if SwingUtilities.isMiddleMouseButton(e) then 4 else 0)
-        mouse.update(e.getX, e.getY, buttons)
+        mouse.update(mx, my, buttons)
 
       def updateStatus(): Unit =
         val pc = f"${cpu.pc}%04X"

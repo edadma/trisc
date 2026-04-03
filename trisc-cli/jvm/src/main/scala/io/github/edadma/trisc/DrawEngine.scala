@@ -219,6 +219,19 @@ class DrawEngine(
   private var wallpaperColor2: Color = null
   private var wallpaperImage: BufferedImage = null
 
+  // Double buffer for flicker-free compositing
+  private var backBuffer: BufferedImage = null
+  private var backG2D: Graphics2D = null
+
+  private def ensureBackBuffer(w: Int, h: Int): Graphics2D =
+    if backBuffer == null || backBuffer.getWidth != w || backBuffer.getHeight != h then
+      if backG2D != null then backG2D.dispose()
+      backBuffer = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB)
+      backG2D = backBuffer.createGraphics()
+      backG2D.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+      backG2D.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
+    backG2D
+
   // Path state
   private var path = new GeneralPath()
 
@@ -721,9 +734,9 @@ class DrawEngine(
   // === Compositor ===
 
   private def composite(): Unit =
-    val g = fb.g2d
     val fw = fbWidth()
     val fh = fbHeight()
+    val g = ensureBackBuffer(fw, fh)
 
     // Draw wallpaper
     wallpaperMode match
@@ -739,7 +752,9 @@ class DrawEngine(
           g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC)
           g.drawImage(wallpaperImage, 0, 0, fw, fh, null)
           g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
-      case _ => // No wallpaper — whatever was on surface 0 stays
+      case _ => // No wallpaper — clear to black
+        g.setColor(Color.BLACK)
+        g.fillRect(0, 0, fw, fh)
 
     // Find the focused window (topmost visible decorated window)
     val focusedWid = windowOrder.reverseIterator.find(wid =>
@@ -814,6 +829,9 @@ class DrawEngine(
 
     // Draw cursor last (always on top)
     if cursorVisible then drawCursor(g)
+
+    // Blit complete frame to display in one operation
+    fb.g2d.drawImage(backBuffer, 0, 0, null)
 
   private def drawCursor(g: Graphics2D): Unit =
     // Custom cursor surface
