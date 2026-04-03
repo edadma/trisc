@@ -14,17 +14,17 @@ object EmulatorGui:
 
       val terminal = new TerminalEmulator()
       val parser = new ANSIParser(terminal)
-      val framebuffer = new FramebufferWidget()
-      val fbMemory = new RAM(Runtime.framebufferAddress, Runtime.framebufferMaxSize)
+      val framebufferWidget = new FramebufferWidget()
+      val fb = new FramebufferImage(Runtime.framebufferAddress, Runtime.framebufferMaxSize)
 
       // Display panel with CardLayout for switching terminal/framebuffer
       val displayPanel = new JPanel(new CardLayout())
       displayPanel.add(terminal, "terminal")
-      displayPanel.add(framebuffer, "framebuffer")
+      displayPanel.add(framebufferWidget, "framebuffer")
       frame.getContentPane.add(displayPanel, BorderLayout.CENTER)
 
       val displayCtrl = new DisplayController(
-        Runtime.displayCtrlAddress, terminal, framebuffer, fbMemory, displayPanel, frame,
+        Runtime.displayCtrlAddress, terminal, framebufferWidget, fb, displayPanel, frame,
       )
 
       // Status bar
@@ -52,7 +52,7 @@ object EmulatorGui:
         if SwingUtilities.isEventDispatchThread then update.run()
         else SwingUtilities.invokeAndWait(update)
 
-      // Blitter needs memory access for reading source data — use a proxy
+      // Blitter and DrawEngine need memory access for reading source data — use a proxy
       // that gets wired to the real Memory after setupCpu creates it
       var memRef: Addressable = null
       val memProxy: Addressable = new Addressable {
@@ -63,7 +63,11 @@ object EmulatorGui:
         override def readInt(addr: Long): Int = memRef.readInt(addr)
       }
       val blitter = new Blitter(
-        Runtime.blitterAddress, memProxy, fbMemory,
+        Runtime.blitterAddress, memProxy, fb,
+        () => displayCtrl.currentFBWidth, () => displayCtrl.currentFBHeight,
+      )
+      val drawEngine = new DrawEngine(
+        Runtime.drawEngineAddress, memProxy, fb,
         () => displayCtrl.currentFBWidth, () => displayCtrl.currentFBHeight,
       )
 
@@ -72,7 +76,7 @@ object EmulatorGui:
       val keyboard = new KeyboardDevice(Runtime.keyboardAddress, intc, irq = 1)
       val mouse = new MouseDevice(Runtime.mouseAddress, intc, irq = 2)
 
-      val guiDevices = Seq(keyboard, mouse, displayCtrl, fbMemory, blitter)
+      val guiDevices = Seq(keyboard, mouse, displayCtrl, fb, blitter, drawEngine)
 
       var cpuState: (CPU, Memory) = TriscCli.setupCpu(linked, outputFn, guiDevices, intc)
       memRef = cpuState._2
@@ -89,11 +93,11 @@ object EmulatorGui:
       })
 
       // Mouse input — on the framebuffer widget
-      framebuffer.addMouseListener(new MouseAdapter {
+      framebufferWidget.addMouseListener(new MouseAdapter {
         override def mousePressed(e: java.awt.event.MouseEvent): Unit = updateMouse(e)
         override def mouseReleased(e: java.awt.event.MouseEvent): Unit = updateMouse(e)
       })
-      framebuffer.addMouseMotionListener(new MouseMotionAdapter {
+      framebufferWidget.addMouseMotionListener(new MouseMotionAdapter {
         override def mouseMoved(e: java.awt.event.MouseEvent): Unit = updateMouse(e)
         override def mouseDragged(e: java.awt.event.MouseEvent): Unit = updateMouse(e)
       })
