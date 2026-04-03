@@ -56,6 +56,7 @@ import java.io.File
  *   0x33 SET_WINDOW_TITLE — set window WIN_ID title from TITLE_BUF
  *   0x34 SET_WINDOW_FLAGS — set window WIN_ID flags from WIN_FLAGS
  *   0x35 RAISE_WINDOW — bring window WIN_ID to front
+ *   0x36 RESIZE_WINDOW — resize window WIN_ID to (X2, Y2), preserves content
  *
  * Compositor commands (0x40-0x4F):
  *   0x40 COMPOSITE — composite all visible windows onto surface 0 (the screen)
@@ -96,13 +97,25 @@ class DrawEngine(
   private val TITLE_BUF = 64
 
   // Surface table — slot 0 is the screen framebuffer
-  private class Surface(val width: Int, val height: Int):
-    val image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
-    val g2d: Graphics2D =
+  private class Surface(var width: Int, var height: Int):
+    var image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+    var g2d: Graphics2D = initG2D()
+
+    private def initG2D(): Graphics2D =
       val g = image.createGraphics()
       g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
       g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
       g
+
+    def resize(newW: Int, newH: Int): Unit =
+      val oldImage = image
+      g2d.dispose()
+      width = newW
+      height = newH
+      image = new BufferedImage(newW, newH, BufferedImage.TYPE_INT_ARGB)
+      g2d = initG2D()
+      // Preserve existing content (top-left aligned)
+      g2d.drawImage(oldImage, 0, 0, null)
 
   private val MaxSurfaces = 64
   private val surfaces = new Array[Surface](MaxSurfaces)
@@ -210,6 +223,7 @@ class DrawEngine(
       case 0x33 => setWindowTitle()
       case 0x34 => setWindowFlags()
       case 0x35 => raiseWindow()
+      case 0x36 => resizeWindow()
       // Compositor
       case 0x40 => composite()
       case _ =>
@@ -361,6 +375,15 @@ class DrawEngine(
     if windowOrder.contains(wid) then
       windowOrder -= wid
       windowOrder += wid
+
+  private def resizeWindow(): Unit =
+    val wid = regs(WIN_ID) & 0xFF
+    val newW = reg16(X2)
+    val newH = reg16(Y2)
+    if wid > 0 && wid < MaxWindows && windows(wid) != null then
+      val sid = windows(wid).surfaceId
+      if sid > 0 && sid < MaxSurfaces && surfaces(sid) != null then
+        surfaces(sid).resize(newW, newH)
 
   // === Compositor ===
 
