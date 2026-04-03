@@ -51,7 +51,7 @@ Sysl does not support address-of on struct fields.
         sem_wait(chan_slots(addr))
         mutex_lock(chan_lock(addr))
         val idx = c.tail
-        var p: *i64 = c.buf + idx * 8
+        var p: *i64 = c.buf + idx
         *p = value
         c.tail = (idx + 1) % c.capacity
         mutex_unlock(chan_lock(addr))
@@ -62,7 +62,7 @@ Sysl does not support address-of on struct fields.
         sem_wait(chan_items(addr))
         mutex_lock(chan_lock(addr))
         val idx = c.head
-        var p: *i64 = c.buf + idx * 8
+        var p: *i64 = c.buf + idx
         val value = *p
         c.head = (idx + 1) % c.capacity
         mutex_unlock(chan_lock(addr))

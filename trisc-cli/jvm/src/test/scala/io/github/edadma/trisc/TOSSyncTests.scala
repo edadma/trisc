@@ -290,9 +290,9 @@ class TOSSyncTests extends TOSTestHelpers {
           |kernel_main() -> int
           |    mutex_init(&mtx)
           |    cond_init(&cv)
-          |    create_thread(waiter_a, 0x6000, 0x5000, "a")
-          |    create_thread(waiter_b, 0x8000, 0x7000, "b")
-          |    create_thread(broadcaster, 0xA000, 0x9000, "bc")
+          |    create_thread(waiter_a, 0x10000, 0xF000, "a")
+          |    create_thread(waiter_b, 0x20000, 0x1F000, "b")
+          |    create_thread(broadcaster, 0x30000, 0x2F000, "bc")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
