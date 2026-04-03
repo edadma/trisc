@@ -1,0 +1,103 @@
+// DrawEngine image demo — displays a PNG image
+
+DISPLAY_CTRL = 0x100008
+DRAW_ENGINE  = 0x1000A0
+FB_WIDTH  = 1440
+FB_HEIGHT = 900
+
+CMD_CLEAR      = 0x01
+CMD_DRAW_TEXT  = 0x09
+CMD_FLUSH      = 0x0A
+CMD_FILL_RECT  = 0x10
+CMD_DRAW_IMAGE = 0x12
+
+DE_EXEC       = 0
+DE_X1         = 2
+DE_Y1         = 4
+DE_X2         = 6
+DE_Y2         = 8
+DE_R          = 10
+DE_G          = 11
+DE_B          = 12
+DE_A          = 13
+DE_FONT_SIZE  = 20
+DE_FONT_STYLE = 22
+DE_TEXT_BUF   = 32
+
+dc_write(offset: int, v: int)
+    p: *i8 = *i8(DISPLAY_CTRL + offset)
+    *p = byte(v)
+
+init_fb()
+    dc_write(0, 1)
+    dc_write(2, FB_WIDTH >> 8)
+    dc_write(3, FB_WIDTH & 0xFF)
+    dc_write(4, FB_HEIGHT >> 8)
+    dc_write(5, FB_HEIGHT & 0xFF)
+    dc_write(1, 1)
+
+de_write8(offset: int, v: int)
+    p: *i8 = *i8(DRAW_ENGINE + offset)
+    *p = byte(v)
+
+de_write16(offset: int, v: int)
+    p: *i16 = *i16(DRAW_ENGINE + offset)
+    *p = i16(v)
+
+de_exec(cmd: int)
+    de_write8(DE_EXEC, cmd)
+
+de_color(r: int, g: int, b: int, a: int)
+    de_write8(DE_R, r)
+    de_write8(DE_G, g)
+    de_write8(DE_B, b)
+    de_write8(DE_A, a)
+
+de_pos(x: int, y: int)
+    de_write16(DE_X1, x)
+    de_write16(DE_Y1, y)
+
+de_size(w: int, h: int)
+    de_write16(DE_X2, w)
+    de_write16(DE_Y2, h)
+
+de_font(size: int, style: int)
+    de_write16(DE_FONT_SIZE, size)
+    de_write8(DE_FONT_STYLE, style)
+
+de_text(s: *int, len: int)
+    var i = 0
+    while i < len
+        if i >= 31 then break
+        de_write8(DE_TEXT_BUF + i, s[i])
+        i += 1
+    de_write8(DE_TEXT_BUF + i, 0)
+
+draw_text(x: int, y: int, s: *int, len: int, r: int, g: int, b: int)
+    de_color(r, g, b, 255)
+    de_pos(x, y)
+    de_text(s, len)
+    de_exec(CMD_DRAW_TEXT)
+
+main() -> int
+    init_fb()
+
+    // Dark background
+    de_color(20, 22, 30, 255)
+    de_exec(CMD_CLEAR)
+
+    // Draw the SLIX logo centered, scaled to fit
+    // "examples/draw-hello/slix.png" = 29 chars, fits in 32-byte buffer
+    imgpath = [101, 120, 97, 109, 112, 108, 101, 115, 47, 100, 114, 97, 119, 45, 104, 101, 108, 108, 111, 47, 115, 108, 105, 120, 46, 112, 110, 103]
+    de_text(imgpath, 28)
+    de_pos(370, 25)
+    de_size(700, 700)
+    de_exec(CMD_DRAW_IMAGE)
+
+    // Tagline below
+    de_font(24, 0)
+    tag = [80, 111, 119, 101, 114, 101, 100, 32, 98, 121, 32, 84, 82, 73, 83, 67]
+    draw_text(570, 780, tag, 16, 120, 140, 160)
+
+    de_exec(CMD_FLUSH)
+    0

@@ -3,6 +3,8 @@ package io.github.edadma.trisc
 import java.awt.{BasicStroke, Color, Font, Graphics2D, RenderingHints}
 import java.awt.geom.{AffineTransform, GeneralPath}
 import java.awt.image.{BufferedImage, DataBufferByte}
+import javax.imageio.ImageIO
+import java.io.File
 
 /**
  * 2D vector drawing device backed by Java Graphics2D.
@@ -27,7 +29,8 @@ import java.awt.image.{BufferedImage, DataBufferByte}
  *   16-19:  TEXT_ADDR (R/W) — RAM address of null-terminated text string
  *   20-21:  FONT_SIZE (R/W) — font size in pixels
  *   22:     FONT_STYLE (R/W) — 0=plain, 1=bold, 2=italic, 3=bold+italic
- *   23-31:  reserved
+ *   23:     CORNER_R   (R/W) — corner radius for rounded rectangles
+ *   24-31:  reserved
  *   32-63:  TEXT_BUF  (R/W) — 32-byte inline text buffer (alternative to TEXT_ADDR)
  *
  * Commands (write to EXEC):
@@ -49,6 +52,11 @@ import java.awt.image.{BufferedImage, DataBufferByte}
  *   0x0F ARC        — arc centered at (X1,Y1), radius X2, angles in Y2 (packed)
  *   0x10 FILL_RECT  — fill rectangle at (X1,Y1) size (X2,Y2) (no path needed)
  *   0x11 DRAW_LINE  — draw line from (X1,Y1) to (X2,Y2) (no path needed)
+ *   0x12 DRAW_IMAGE — load image file (path from TEXT_BUF/TEXT_ADDR), draw at (X1,Y1)
+ *                      if X2,Y2 > 0, scale to that size; otherwise draw at native size
+ *   0x13 ROUND_RECT — add rounded rect at (X1,Y1) size (X2,Y2) corner radius CORNER_R
+ *   0x14 FILL_ROUND_RECT — fill rounded rect (no path needed)
+ *   0x15 STROKE_ROUND_RECT — stroke rounded rect (no path needed)
  *
  * @param base     Base address in memory map
  * @param mem      Main memory (for reading text strings)
@@ -83,6 +91,7 @@ class DrawEngine(
   private val TEXT_ADDR = 16
   private val FONT_SIZE = 20
   private val FONT_STYLE = 22
+  private val CORNER_R = 23
   private val TEXT_BUF = 32
 
   // Rendering state
@@ -201,6 +210,36 @@ class DrawEngine(
         g.fillRect(reg16(X1), reg16(Y1), reg16(X2), reg16(Y2))
       case 0x11 => // DRAW_LINE (convenience, no path)
         g.drawLine(reg16(X1), reg16(Y1), reg16(X2), reg16(Y2))
+      case 0x12 => // DRAW_IMAGE — load image from file path, draw at (X1, Y1)
+        val imgPath = readTextString
+        try
+          val file = new File(imgPath)
+          if file.exists then
+            val loaded = ImageIO.read(file)
+            if loaded != null then
+              val dx = reg16(X1)
+              val dy = reg16(Y1)
+              val dw = reg16(X2)
+              val dh = reg16(Y2)
+              g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC)
+              if dw > 0 && dh > 0 then
+                g.drawImage(loaded, dx, dy, dw, dh, null)
+              else
+                g.drawImage(loaded, dx, dy, null)
+              g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+        catch case _: Exception => ()
+      case 0x13 => // ROUND_RECT — add to path
+        val cr = (regs(CORNER_R) & 0xFF) * 2
+        path.append(new java.awt.geom.RoundRectangle2D.Float(
+          reg16(X1).toFloat, reg16(Y1).toFloat,
+          reg16(X2).toFloat, reg16(Y2).toFloat,
+          cr.toFloat, cr.toFloat), false)
+      case 0x14 => // FILL_ROUND_RECT
+        val cr = (regs(CORNER_R) & 0xFF) * 2
+        g.fillRoundRect(reg16(X1), reg16(Y1), reg16(X2), reg16(Y2), cr, cr)
+      case 0x15 => // STROKE_ROUND_RECT
+        val cr = (regs(CORNER_R) & 0xFF) * 2
+        g.drawRoundRect(reg16(X1), reg16(Y1), reg16(X2), reg16(Y2), cr, cr)
       case _ =>
 
   private def flush(): Unit =
