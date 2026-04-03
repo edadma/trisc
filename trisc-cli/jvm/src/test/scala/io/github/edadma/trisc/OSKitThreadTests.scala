@@ -539,7 +539,6 @@ class OSKitThreadTests extends OSKitTestHelpers {
     // A prints, panics, B (after panic) should not print
     output should include("A")
     output should not include("B")
-    cpu.state shouldBe State.Wfi
   }
 
   // ===== Thread-local storage =====

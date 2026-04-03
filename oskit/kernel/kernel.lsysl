@@ -429,6 +429,7 @@ limit is reached (or wfi forever in production).
             tasks[i].state = STATE_TERMINATED
             i += 1
         current_thread = -1
+        init_queues()
 
 Reads the value at the base of the thread's user stack (the
 address passed as usp during create_thread). If it still equals
