@@ -1,6 +1,9 @@
+module posix.stdlib
+
 /*
- * math.sysl — Integer math operations
+ * stdlib.sysl — General utilities (<stdlib.h>)
  *
+ * Integer math, conversion, and utility functions.
  * No OS dependency — usable in bare-metal programs.
  */
 

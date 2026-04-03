@@ -1,5 +1,7 @@
+module posix.math
+
 /*
- * fmath.sysl — Floating-point math operations
+ * math.sysl — Floating-point math operations (<math.h>)
  *
  * Hardware-backed where possible via TRISC float instructions.
  * No OS dependency — usable in bare-metal programs.

@@ -2,10 +2,10 @@ package io.github.edadma.trisc
 
 class SyslLibMathTests extends SyslTestHelpers {
 
-  val libs: Map[String, String] = Map("math" -> readSysl("posix/lib/math.sysl"))
+  val libs: Map[String, String] = Map("posix/stdlib/stdlib" -> readSysl("posix/stdlib/stdlib.sysl"))
 
   private def evalWith(main: String): Long = evalWithLibs(libs,
-    s"""import math.*
+    s"""import posix.stdlib.*
        |$main
        |""".stripMargin)
 

@@ -19,22 +19,39 @@ case class CompilationResult(
     packageMetas: Map[String, ModuleMeta] = Map.empty,
 )
 
-class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil):
+class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, config: Map[String, String] = Map.empty):
 
   case class DriverError(msg: String) extends RuntimeException(msg)
 
   def compile(sources: Map[String, String]): CompilationResult =
     // Step 1: Parse all sources
-    val asts = parseSources(sources)
+    val parsedAsts = parseSources(sources)
 
-    // Step 2: Extract imports and module declarations
+    // Step 2: Resolve conditional compilation
+    val asts = parsedAsts.map((name, ast) => (name, resolveCondDecls(ast)))
+
+    // Step 3: Extract imports and module declarations
     val imports = extractImports(asts)
     val modules = extractModules(asts)
 
-    // Step 3: Topological sort
+    // Step 3b: Validate module declarations match file paths
+    for (name, modPath) <- modules do
+      val dirPath = name.lastIndexOf('/') match
+        case -1 => ""
+        case i => name.substring(0, i)
+      val expectedModPath = dirPath.replace('/', '.')
+      val actualModPath = modPath.replace("/", ".")
+      if actualModPath != expectedModPath then
+        throw DriverError(
+          s"$name: module declaration 'module $actualModPath' does not match directory path" +
+            (if expectedModPath.isEmpty then " (expected no module declaration for top-level file)"
+            else s" (expected 'module $expectedModPath')")
+        )
+
+    // Step 4: Topological sort
     val order = topologicalSort(imports, sources.keySet)
 
-    // Step 4: Compile in order
+    // Step 5: Compile in order
     val smetaCache = new mutable.LinkedHashMap[String, String]
     val packageMetaCache = new mutable.LinkedHashMap[String, ModuleMeta]
     val units = new mutable.ListBuffer[CompilationUnit]
@@ -62,7 +79,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil):
 
       val typed = analyzer.analyze(ast)
       val modPath = modules.get(name)
-      val meta = ModuleMeta.fromProgram(typed, modPath.map(_ => s"$name.sysl"))
+      val meta = ModuleMeta.fromProgram(typed, if modPath.isDefined then Some(s"$name.sysl") else None)
       val smeta = meta.toSmeta
 
       modPath match
@@ -123,6 +140,30 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil):
     units.flatMap(_.typed.decls).collect {
       case TImportDecl(path) if SyslStdlib.modules.contains(path) => path
     }.toSet
+
+  /** Resolve conditional compilation directives in a parsed AST. */
+  private def resolveCondDecls(program: ProgramAST): ProgramAST =
+    ProgramAST(program.decls.flatMap(resolveDecl))
+
+  private def resolveDecl(decl: DeclAST): List[DeclAST] =
+    decl match
+      case CondDeclAST(cond, thenDecls, elseDecls) =>
+        val active = if evalCond(cond) then thenDecls else elseDecls.getOrElse(Nil)
+        active.flatMap(resolveDecl)
+      case other => List(other)
+
+  private def evalCond(expr: CondExpr): Boolean =
+    expr match
+      case CondSymbol(name) =>
+        config.get(name) match
+          case None => false
+          case Some("false") => false
+          case Some("0") => false
+          case Some("") => false
+          case Some(_) => true
+      case CondNot(inner) => !evalCond(inner)
+      case CondEq(name, value) => config.get(name).contains(value)
+      case CondNeq(name, value) => !config.get(name).contains(value)
 
   /** Try to resolve an import path from the file system by looking for a .smeta file. */
   private def resolveExternalMeta(modulePath: String): Option[ModuleMeta] =

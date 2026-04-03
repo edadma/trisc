@@ -3,13 +3,13 @@ package io.github.edadma.trisc
 class SyslLibStringTests extends SyslTestHelpers {
 
   val libs: Map[String, String] = Map(
-    "string" -> readSysl("posix/lib/string.sysl"),
-    "math" -> readSysl("posix/lib/math.sysl"),
+    "posix/string/string" -> readSysl("posix/string/string.sysl"),
+    "posix/stdlib/stdlib" -> readSysl("posix/stdlib/stdlib.sysl"),
   )
 
   private def evalWith(main: String): Long = evalWithLibs(libs,
-    s"""import string.*
-       |import math.*
+    s"""import posix.string.*
+       |import posix.stdlib.*
        |$main
        |""".stripMargin)
 

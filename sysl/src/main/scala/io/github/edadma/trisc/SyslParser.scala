@@ -30,7 +30,28 @@ class SyslParser extends StandardTokenParsers {
   // --- Declarations ---
 
   lazy val decl: Parser[DeclAST] =
-    importDecl | externFuncDecl | structDecl | enumDecl | typeAliasDecl | "private" ~> declBody(true) | declBody(false)
+    condDecl | importDecl | externFuncDecl | structDecl | enumDecl | typeAliasDecl | "private" ~> declBody(true) | declBody(false)
+
+  // --- Conditional compilation ---
+
+  lazy val condDecl: Parser[CondDeclAST] =
+    "#" ~> "if" ~> condExpr ~ (rep1(Newline) ~> rep1sep(decl, rep1(Newline))) ~
+      opt(rep1(Newline) ~> "#" ~> "else" ~> rep1(Newline) ~> rep1sep(decl, rep1(Newline))) <~
+      rep1(Newline) <~ "#" <~ "endif" ^^ {
+      case cond ~ thenDecls ~ elseDecls => CondDeclAST(cond, thenDecls, elseDecls)
+    }
+
+  lazy val condExpr: Parser[CondExpr] =
+    "!" ~> ident ^^ (name => CondNot(CondSymbol(name))) |
+      ident ~ ("==" ~> condValue) ^^ { case name ~ value => CondEq(name, value) } |
+      ident ~ ("!=" ~> condValue) ^^ { case name ~ value => CondNeq(name, value) } |
+      ident ^^ CondSymbol.apply
+
+  lazy val condValue: Parser[String] =
+    stringLit |
+      numericLit |
+      "true" ^^^ "true" |
+      "false" ^^^ "false"
 
   lazy val structDecl: Parser[StructDeclAST] =
     "struct" ~> ident ~ (Newline ~> Indent ~> rep1sep(structField, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {

@@ -20,6 +20,14 @@ case class VarDeclAST(name: String, typ: Option[String], init: ExpressionAST, is
 case class StructDeclAST(name: String, fields: List[(String, String)]) extends DeclAST
 case class EnumDeclAST(name: String, members: List[(String, Option[Long])]) extends DeclAST
 case class TypeAliasDeclAST(name: String, target: String) extends DeclAST
+case class CondDeclAST(cond: CondExpr, thenDecls: List[DeclAST], elseDecls: Option[List[DeclAST]]) extends DeclAST
+
+// Conditional compilation expressions
+sealed trait CondExpr
+case class CondSymbol(name: String) extends CondExpr
+case class CondNot(expr: CondExpr) extends CondExpr
+case class CondEq(name: String, value: String) extends CondExpr
+case class CondNeq(name: String, value: String) extends CondExpr
 
 case class ParamAST(name: String, typ: String) extends Positional
 

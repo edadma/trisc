@@ -35,8 +35,7 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
       SymbolMeta("f3", SymbolMeta.Kind.Func(Nil, SyslType.VoidType), isPrivate = false, Some("b.sysl")),
     ))
     val smeta = meta.toSmeta
-    // Should only emit SOURCE a.sysl once, not twice
-    smeta.split("SOURCE a.sysl").length shouldBe 2 // 1 occurrence = split into 2 parts
+    smeta.split("SOURCE a.sysl").length shouldBe 2
     smeta should include("SOURCE b.sysl")
   }
 
@@ -91,12 +90,10 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
     ))
     val merged = existing.merge(updated)
     merged.symbols.length shouldBe 2
-    // strlen should be the updated version
     val strlen = merged.symbols.find(_.name == "strlen").get
     strlen.typ match
       case SymbolMeta.Kind.Func(params, _) => params.length shouldBe 1
       case _ => fail("expected Func")
-    // strcpy should be preserved
     merged.symbols.exists(_.name == "strcpy") shouldBe true
   }
 
@@ -147,24 +144,24 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
 
   "driver extracts module declarations" in {
     val sources = Map(
-      "strlen" -> "module posix.lib.string\nstrlen(s: *i8) -> int = 0",
+      "posix/lib/string/strlen" -> "module posix.lib.string\nstrlen(s: *i8) -> int = 0",
       "main" -> "main() -> int = 0",
     )
     val driver = new SyslDriver
     val asts = driver.parseSources(sources)
     val modules = driver.extractModules(asts)
-    modules shouldBe Map("strlen" -> "posix/lib/string")
+    modules shouldBe Map("posix/lib/string/strlen" -> "posix/lib/string")
   }
 
   // ===== Driver: compile with module declarations =====
 
   "driver compiles files with module declarations" in {
     val sources = Map(
-      "math_add" ->
+      "mymath/add" ->
         """module mymath
           |add(a: int, b: int) -> int = a + b
           |""".stripMargin,
-      "math_mul" ->
+      "mymath/mul" ->
         """module mymath
           |mul(a: int, b: int) -> int = a * b
           |""".stripMargin,
@@ -173,10 +170,8 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
     val result = driver.compile(sources)
     result.units.length shouldBe 2
 
-    // Both files should be assigned to the same module
     result.units.foreach(_.modulePath shouldBe Some("mymath"))
 
-    // Package meta should contain symbols from both files
     result.packageMetas.contains("mymath") shouldBe true
     val pkgMeta = result.packageMetas("mymath")
     val names = pkgMeta.publicSymbols.map(_.name).toSet
@@ -201,11 +196,11 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
 
   "driver package meta has source file attribution" in {
     val sources = Map(
-      "strlen" ->
+      "stringlib/strlen" ->
         """module stringlib
           |strlen(s: *i8) -> int = 0
           |""".stripMargin,
-      "strcpy" ->
+      "stringlib/strcpy" ->
         """module stringlib
           |strcpy(dst: *i8, src: *i8) -> *i8
           |    dst
@@ -215,9 +210,9 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
     val result = driver.compile(sources)
     val pkgMeta = result.packageMetas("stringlib")
     val strlenSym = pkgMeta.symbols.find(_.name == "strlen").get
-    strlenSym.sourceFile shouldBe Some("strlen.sysl")
+    strlenSym.sourceFile shouldBe Some("stringlib/strlen.sysl")
     val strcpySym = pkgMeta.symbols.find(_.name == "strcpy").get
-    strcpySym.sourceFile shouldBe Some("strcpy.sysl")
+    strcpySym.sourceFile shouldBe Some("stringlib/strcpy.sysl")
   }
 
   "standalone file has no module path" in {
@@ -239,10 +234,50 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
       "utils" ->
         """twice(x: int) -> int = x * 2
           |""".stripMargin,
-      "mymod" ->
+      "mymod/quad" ->
         """module mymod
           |import utils.*
           |quad(x: int) -> int = twice(twice(x))
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    val result = driver.compile(sources)
+    result.units.length shouldBe 2
+  }
+
+  // ===== Driver: validation =====
+
+  "driver rejects module declaration that doesn't match path" in {
+    val sources = Map(
+      "wrong/path/file" ->
+        """module some.other.place
+          |f() -> int = 0
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    an[driver.DriverError] should be thrownBy driver.compile(sources)
+  }
+
+  "driver rejects module declaration on top-level file" in {
+    val sources = Map(
+      "myfile" ->
+        """module some.package
+          |f() -> int = 0
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    an[driver.DriverError] should be thrownBy driver.compile(sources)
+  }
+
+  "driver accepts file without module in subdirectory" in {
+    // A file in a subdirectory without a module statement is a standalone module
+    val sources = Map(
+      "utils/helper" ->
+        """twice(x: int) -> int = x * 2
+          |""".stripMargin,
+      "app" ->
+        """import utils.helper.*
+          |main() -> int = twice(21)
           |""".stripMargin,
     )
     val driver = new SyslDriver
@@ -265,7 +300,7 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
 
   "interpreter runs multi-file module via driver" in {
     val sources = Map(
-      "mathlib" ->
+      "mathlib/add" ->
         """module mathlib
           |add(a: int, b: int) -> int = a + b
           |""".stripMargin,
@@ -283,7 +318,7 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
 
   "interpreter runs module with private functions" in {
     val sources = Map(
-      "mathlib" ->
+      "mathlib/inc" ->
         """module mathlib
           |private helper(x: int) -> int = x + 1
           |inc(x: int) -> int = helper(x)
