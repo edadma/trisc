@@ -6,11 +6,11 @@ module posix.stdlib
  * Segregated free-list allocator with coalescing.
  * Provides malloc, free, realloc, calloc.
  *
- * The heap region must be initialized with _alloc_init before use.
- * The platform (TOS, bare metal) calls _alloc_init with the heap bounds.
+ * Only requires sbrk() from the platform.
  */
 
 import posix.string.memset
+import posix.unistd.sbrk
 
 // --- Constants ---
 
@@ -19,6 +19,7 @@ private val HEADER_SIZE: i64 = 8
 private val FOOTER_SIZE: i64 = 8
 private val MIN_BLOCK: i64 = 24
 private val NUM_CLASSES = 8
+private val SBRK_FAIL: i64 = -1
 
 // --- State ---
 
@@ -26,7 +27,7 @@ private var free_lists: [8]*i8
 private var large_free: *i8 = *i8(0)
 private var heap_base: *i8 = *i8(0)
 private var heap_top: *i8 = *i8(0)
-private var heap_limit: *i8 = *i8(0)
+private var initialized = false
 
 // --- Block accessors ---
 
@@ -123,22 +124,30 @@ private _remove_from_free(block: *i8, size: i64)
 
             cur = _get_next(cur)
 
-// --- Initialization ---
+// --- Lazy initialization ---
 
-/* Initialize the heap. Must be called before any allocation. */
-_alloc_init(start: *i8, end_: *i8)
-    heap_base = start
-    heap_top = start
-    heap_limit = end_
-    large_free = *i8(0)
+private _ensure_init()
+    if !initialized
+        val brk = sbrk(0)
 
-    for var i = 0; i < NUM_CLASSES; i++
-        free_lists[i] = *i8(0)
+        if i64(brk) != SBRK_FAIL
+            heap_base = brk
+            heap_top = brk
+            large_free = *i8(0)
+
+            for var i = 0; i < NUM_CLASSES; i++
+                free_lists[i] = *i8(0)
+
+            initialized = true
 
 // --- POSIX API ---
 
 /* Allocate size bytes of memory. Returns pointer to allocated memory, or null. */
 malloc(size: i64) -> *i8
+    _ensure_init()
+
+    if !initialized then return *i8(0)
+
     var total = size + HEADER_SIZE + FOOTER_SIZE
 
     if total < MIN_BLOCK then total = MIN_BLOCK
@@ -201,12 +210,14 @@ malloc(size: i64) -> *i8
             prev = cur
             cur = _get_next(cur)
 
-    // Extend heap
-    if i64(heap_top) + total > i64(heap_limit) then return *i8(0)
+    // Extend heap via sbrk
+    val brk = sbrk(int(total))
 
-    val block = heap_top
+    if i64(brk) == SBRK_FAIL then return *i8(0)
 
-    heap_top = heap_top + total
+    val block = brk
+
+    heap_top = brk + total
     _set_header(block, total | ALLOC_FLAG)
     _set_footer(block, total)
 
