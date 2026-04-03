@@ -4,9 +4,7 @@ Condition variables allow threads to block until a condition
 becomes true, signaled by another thread. Always use with a
 mutex and check the condition in a loop (Mesa semantics).
 
-    import services.*
-    import semaphore.*
-    import mutex.*
+    module tos
 
 A Condvar holds a waiter count and an internal semaphore.
 - cond_wait: increments waiters, releases mutex, blocks on

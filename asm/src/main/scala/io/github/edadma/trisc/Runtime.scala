@@ -10,8 +10,8 @@ object Runtime:
   val timerAddress = 0x100040L   // 33 bytes (MCU-style timer with channels)
   val intcAddress = 0x100080L
   val mouseAddress = 0x100090L
-  val ramdiskAddress = 0x1000A0L
-  val drawEngineAddress = 0x100100L  // 64 bytes — 2D vector drawing
+  val drawEngineAddress = 0x1000A0L
+  val ramdiskAddress = 0x100100L
   val framebufferAddress = 0x200000L // 2MB — framebuffer pixel data
   val framebufferMaxSize: Long = 1920 * 1080 * 4
   val initialSSP: Long = stdoutAddress - 8 // stack grows down, below devices

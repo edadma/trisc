@@ -26,8 +26,8 @@ class TOSBootTests extends TOSTestHelpers {
     // Step 2: Compile Sysl files together (kernel + demo)
     val driver = new SyslDriver
     val result = driver.compile(Map(
-      "kernel" -> kernelSysl,
-      "services" -> servicesSysl,
+      "tos/kernel" -> kernelSysl,
+      "tos/services" -> servicesSysl,
       "tasks" -> tasksSysl,
       "main" -> mainSysl,
     ))

@@ -2,7 +2,7 @@ package io.github.edadma.trisc
 
 import SyslType.*
 
-case class SymbolMeta(name: String, typ: SymbolMeta.Kind, isPrivate: Boolean, sourceFile: Option[String] = None)
+case class SymbolMeta(name: String, typ: SymbolMeta.Kind, isPrivate: Boolean, isExtern: Boolean = false, sourceFile: Option[String] = None)
 
 object SymbolMeta:
   enum Kind:
@@ -32,8 +32,10 @@ class ModuleMeta(val symbols: List[SymbolMeta]):
 
   def toAsmGlobals: String =
     val buf = new StringBuilder
-    for sym <- symbols if !sym.isPrivate do
-      sym.typ match
+    for sym <- symbols do
+      if sym.isExtern then
+        buf ++= s"extern ${sym.name}\n"
+      else sym.typ match
         case SymbolMeta.Kind.Func(params, ret) =>
           buf ++= s"global ${sym.name}, func, ${SyslType.funcSigToPrefix(params, ret)}\n"
         case SymbolMeta.Kind.Data(dataType) =>
@@ -41,7 +43,14 @@ class ModuleMeta(val symbols: List[SymbolMeta]):
         case SymbolMeta.Kind.Struct(_) => // type-only, no asm global
     buf.toString
 
-  def publicSymbols: List[SymbolMeta] = symbols.filter(!_.isPrivate)
+  def publicSymbols: List[SymbolMeta] =
+    // Deduplicate: if both an extern and a real definition exist for the same name,
+    // keep only the real definition
+    val byName = symbols.filter(!_.isPrivate).groupBy(_.name)
+    byName.values.map { syms =>
+      if syms.size > 1 then syms.find(!_.isExtern).getOrElse(syms.head)
+      else syms.head
+    }.toList
 
   /** Merge another ModuleMeta into this one, replacing symbols from the same source file. */
   def merge(other: ModuleMeta): ModuleMeta =
@@ -62,15 +71,15 @@ object ModuleMeta:
   def fromProgram(program: TProgram, sourceFile: Option[String] = None): ModuleMeta =
     val syms = program.decls.collect {
       case TStructDecl(name, fields) =>
-        SymbolMeta(name, SymbolMeta.Kind.Struct(SyslType.StructType(name, fields)), isPrivate = false, sourceFile)
+        SymbolMeta(name, SymbolMeta.Kind.Struct(SyslType.StructType(name, fields)), isPrivate = false, sourceFile = sourceFile)
       case TExternFuncDecl(name, params, returnType) =>
-        SymbolMeta(name, SymbolMeta.Kind.Func(params, returnType), isPrivate = false, sourceFile)
+        SymbolMeta(name, SymbolMeta.Kind.Func(params, returnType), isPrivate = false, isExtern = true, sourceFile = sourceFile)
       case TExternVarDecl(name, typ) =>
-        SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate = false, sourceFile)
+        SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate = false, isExtern = true, sourceFile = sourceFile)
       case TFunDecl(name, params, returnType, _, isPrivate) =>
-        SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType), isPrivate, sourceFile)
+        SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType), isPrivate, sourceFile = sourceFile)
       case TVarDecl(name, typ, _, isPrivate) =>
-        SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate, sourceFile)
+        SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate, sourceFile = sourceFile)
     }
     new ModuleMeta(syms)
 
@@ -99,13 +108,13 @@ object ModuleMeta:
               val nparams = tokens.next().toInt
               val params = (1 to nparams).map(_ => SyslType.parseType(tokens)).toList
               val ret = SyslType.parseType(tokens)
-              syms += SymbolMeta(name, SymbolMeta.Kind.Func(params, ret), isPrivate, currentSource)
+              syms += SymbolMeta(name, SymbolMeta.Kind.Func(params, ret), isPrivate, sourceFile = currentSource)
             case "DATA" =>
               val dataType = SyslType.parseType(tokens)
-              syms += SymbolMeta(name, SymbolMeta.Kind.Data(dataType), isPrivate, currentSource)
+              syms += SymbolMeta(name, SymbolMeta.Kind.Data(dataType), isPrivate, sourceFile = currentSource)
             case "STRUCT" =>
               val st = SyslType.parseType(tokens).asInstanceOf[SyslType.StructType]
-              syms += SymbolMeta(name, SymbolMeta.Kind.Struct(st), isPrivate, currentSource)
+              syms += SymbolMeta(name, SymbolMeta.Kind.Struct(st), isPrivate, sourceFile = currentSource)
             case other =>
               throw IllegalArgumentException(s"line $lineNum: unknown symbol kind '$other'")
 

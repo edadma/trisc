@@ -4,7 +4,7 @@ Single-slot message passing between threads.
 Sending blocks until the mailbox is empty; receiving blocks
 until a message is available.
 
-    import semaphore.*
+    module tos
 
     struct Mailbox
         value: i64

@@ -5,9 +5,7 @@ class TOSKernelTests extends TOSTestHelpers {
   "TOS: putc syscall prints character" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
@@ -27,9 +25,7 @@ class TOSKernelTests extends TOSTestHelpers {
   "TOS: thread exit works cleanly" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(task1, 0x6000, 0x5000, "t1")
@@ -53,9 +49,7 @@ class TOSKernelTests extends TOSTestHelpers {
   "TOS: sleep syscall delays output" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
@@ -77,7 +71,7 @@ class TOSKernelTests extends TOSTestHelpers {
   "TOS: two tasks interleave with sleep" in {
     val (_, output) = runTOS(Map(
       "tasks" ->
-        """import services.*
+        """import tos.*
           |
           |task_a()
           |    var i = 0
@@ -94,9 +88,8 @@ class TOSKernelTests extends TOSTestHelpers {
           |        i += 1
           |""".stripMargin,
       "app" ->
-        """import kernel.*
+        """import tos.*
           |import tasks.*
-          |import timer.*
           |
           |kernel_main() -> int
           |    create_thread(task_a, 0x6000, 0x5000, "a")

@@ -5,9 +5,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: thread join waits for completion" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(worker, 0x6000, 0x5000, "worker")
@@ -35,9 +33,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: join on already-terminated thread returns immediately" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(fast, 0x6000, 0x5000, "fast")
@@ -63,9 +59,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: higher priority thread runs first" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread_pri(task_b, 0x8000, 0x7000, "b", 1)
@@ -90,9 +84,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: equal priority threads round-robin" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread_pri(task_a, 0x6000, 0x5000, "a", 1)
@@ -124,9 +116,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: uptime returns a value" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
@@ -145,9 +135,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: uptime increases after sleep" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
@@ -171,9 +159,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: thread_id returns current thread index" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(task0, 0x6000, 0x5000, "t0")
@@ -197,9 +183,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: get_thread_count returns number of threads" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
@@ -226,9 +210,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: get_thread_state returns correct states" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(checker, 0x6000, 0x5000, "checker")
@@ -254,9 +236,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: sleep_until blocks until absolute tick" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
@@ -282,9 +262,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: context switch count increments" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "t")
@@ -309,9 +287,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: cpu ticks accumulate" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "t")
@@ -334,9 +310,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: total context switches tracks all threads" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(task_a, 0x6000, 0x5000, "a")
@@ -371,9 +345,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: watchdog terminates runaway thread" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    set_watchdog(3)
@@ -406,9 +378,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: watchdog does not kill yielding thread" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    set_watchdog(3)
@@ -440,9 +410,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: putstr prints string" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "t")
@@ -463,9 +431,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: stack canary intact after normal execution" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "t")
@@ -489,9 +455,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: suspend and resume thread" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(worker, 0x6000, 0x5000, "w")
@@ -526,9 +490,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: suspended thread state is queryable" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(target, 0x6000, 0x5000, "t")
@@ -560,9 +522,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: panic terminates all threads" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "t")
@@ -587,9 +547,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: tls_set and tls_get basic" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "t")
@@ -615,9 +573,7 @@ class TOSThreadTests extends TOSTestHelpers {
   "TOS: tls is per-thread" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(task_a, 0x6000, 0x5000, "a")

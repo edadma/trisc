@@ -1,8 +1,8 @@
-DISPLAY_CTRL = 0x100006
+DISPLAY_CTRL = 0x100008
 FB_BASE = 0x200000
 FB_WIDTH = 640
 FB_HEIGHT = 480
-// BLITTER address is 0x10000C, used directly in functions
+// BLITTER address is 0x100010, used directly in functions
 
 // Font data: Monaco.ttf, 16px, 10x17 cells, 95 glyphs
 FONT_CELL_W = 10
@@ -1037,15 +1037,15 @@ init_fb()
     dc_write(1, 1)
 
 blit_write(offset: int, v: int)
-    p: *i8 = *i8(0x10000C + offset)
+    p: *i8 = *i8(0x100010 + offset)
     *p = byte(v)
 
 blit_write32(offset: int, v: int)
-    p: *i32 = *i32(0x10000C + offset)
+    p: *i32 = *i32(0x100010 + offset)
     *p = v
 
 blit_write16(offset: int, v: int)
-    p: *i16 = *i16(0x10000C + offset)
+    p: *i16 = *i16(0x100010 + offset)
     *p = i16(v)
 
 draw_char(x: int, y: int, ch: int, r: int, g: int, b: int)

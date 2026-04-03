@@ -4,7 +4,7 @@ class TOSRBTreeTests extends TOSTestHelpers {
 
   "RBTree: basic struct field access" in {
     val (_, output) = runRBTest(
-      """import rbtree.*
+      """import tos.*
         |
         |var pool: [4]RBNode
         |var tree: Tree
@@ -32,7 +32,7 @@ class TOSRBTreeTests extends TOSTestHelpers {
 
   "RBTree: tree_init sets root to NIL" in {
     val (_, output) = runRBTest(
-      """import rbtree.*
+      """import tos.*
         |
         |var pool: [4]RBNode
         |var tree: Tree
@@ -75,7 +75,7 @@ class TOSRBTreeTests extends TOSTestHelpers {
 
   "RBTree: count via rb_insert" in {
     val (cpu, output) = runRBTest(
-      """import rbtree.*
+      """import tos.*
         |
         |var pool: [16]RBNode
         |var tree: Tree
@@ -103,7 +103,7 @@ class TOSRBTreeTests extends TOSTestHelpers {
 
   "RBTree: insert and find_min" in {
     val (_, output) = runRBTest(
-      """import rbtree.*
+      """import tos.*
         |
         |var pool: [16]RBNode
         |var tree: Tree
@@ -122,7 +122,7 @@ class TOSRBTreeTests extends TOSTestHelpers {
 
   "RBTree: count tracks insertions" in {
     val (_, output) = runRBTest(
-      """import rbtree.*
+      """import tos.*
         |
         |var pool: [16]RBNode
         |var tree: Tree
@@ -142,7 +142,7 @@ class TOSRBTreeTests extends TOSTestHelpers {
 
   "RBTree: empty tree returns NIL for find_min" in {
     val (_, output) = runRBTest(
-      """import rbtree.*
+      """import tos.*
         |
         |var pool: [16]RBNode
         |var tree: Tree
@@ -161,7 +161,7 @@ class TOSRBTreeTests extends TOSTestHelpers {
 
   "RBTree: remove min and find new min" in {
     val (_, output) = runRBTest(
-      """import rbtree.*
+      """import tos.*
         |
         |var pool: [16]RBNode
         |var tree: Tree
@@ -186,7 +186,7 @@ class TOSRBTreeTests extends TOSTestHelpers {
 
   "RBTree: insert ascending sequence maintains balance" in {
     val (_, output) = runRBTest(
-      """import rbtree.*
+      """import tos.*
         |
         |var pool: [16]RBNode
         |var tree: Tree
@@ -210,7 +210,7 @@ class TOSRBTreeTests extends TOSTestHelpers {
 
   "RBTree: remove all nodes leaves empty tree" in {
     val (_, output) = runRBTest(
-      """import rbtree.*
+      """import tos.*
         |
         |var pool: [16]RBNode
         |var tree: Tree
@@ -236,7 +236,7 @@ class TOSRBTreeTests extends TOSTestHelpers {
 
   "RBTree: insert descending sequence" in {
     val (_, output) = runRBTest(
-      """import rbtree.*
+      """import tos.*
         |
         |var pool: [16]RBNode
         |var tree: Tree
@@ -257,7 +257,7 @@ class TOSRBTreeTests extends TOSTestHelpers {
 
   "RBTree: remove middle nodes preserves structure" in {
     val (_, output) = runRBTest(
-      """import rbtree.*
+      """import tos.*
         |
         |var pool: [16]RBNode
         |var tree: Tree
@@ -285,7 +285,7 @@ class TOSRBTreeTests extends TOSTestHelpers {
 
   "RBTree: node reuse after remove" in {
     val (_, output) = runRBTest(
-      """import rbtree.*
+      """import tos.*
         |
         |var pool: [4]RBNode
         |var tree: Tree
