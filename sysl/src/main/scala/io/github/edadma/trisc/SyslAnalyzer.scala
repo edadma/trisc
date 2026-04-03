@@ -488,6 +488,11 @@ class SyslAnalyzer:
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
         TFieldPostDec(resolvedObj, idx, structType.fields(idx)._2)
 
+      case NewArrayAST(size, elemTypeAST) =>
+        val tSize = analyzeExpr(size)
+        val elemType = resolveType(elemTypeAST)
+        TNewArray(elemType, tSize)
+
       case NewExprAST(typeName, args) =>
         val t = resolveType(NamedTypeAST(typeName))
         t match
@@ -569,6 +574,7 @@ class SyslAnalyzer:
           case ArrayType(elem, _) => elem
           case PtrType(elem) => elem
           case SliceType(elem) => elem
+          case RefType(SliceType(elem)) => elem
           case StringType => I8
           case t => throw AnalysisError(s"cannot index $t")
         TIndex(tArr, tIndex, elemType)
@@ -674,7 +680,7 @@ class SyslAnalyzer:
         if args.size != 1 then throw AnalysisError("len() takes exactly 1 argument")
         val tArg = analyzeExpr(args.head)
         tArg.typ match
-          case StringType | SliceType(_) | ArrayType(_, _) => TLen(tArg, I32)
+          case StringType | SliceType(_) | ArrayType(_, _) | RefType(SliceType(_)) => TLen(tArg, I32)
           case t => throw AnalysisError(s"len() not supported on $t")
 
       case CallAST("cap", args) =>

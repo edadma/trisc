@@ -80,5 +80,6 @@ case class TFuncRef(name: String, typ: SyslType) extends TExpr
 case class TCast(expr: TExpr, typ: SyslType) extends TExpr
 case class TIfExpr(cond: TExpr, thenBody: List[TStmt], elseBody: Option[List[TStmt]], typ: SyslType) extends TExpr
 case class TNew(structType: SyslType.StructType, args: List[TExpr]) extends TExpr { def typ: SyslType = SyslType.RefType(structType) }
+case class TNewArray(elemType: SyslType, size: TExpr) extends TExpr { def typ: SyslType = SyslType.RefType(SyslType.SliceType(elemType)) }
 case class TLen(expr: TExpr, typ: SyslType) extends TExpr
 case class TCap(expr: TExpr, typ: SyslType) extends TExpr

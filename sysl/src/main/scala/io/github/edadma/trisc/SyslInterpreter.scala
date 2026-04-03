@@ -36,6 +36,7 @@ enum Value:
   case StrVal(s: String)
   case SliceVal(cells: Array[Cell], offset: Int, length: Int, capacity: Int)
   case RefVal(cells: Array[Cell], refCount: java.util.concurrent.atomic.AtomicInteger)
+  case RefSliceVal(cells: Array[Cell], length: Int, refCount: java.util.concurrent.atomic.AtomicInteger)
 
 class Cell(var value: Value)
 
@@ -56,6 +57,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case PtrVal(ptr)  => pointerToLong(ptr)
     case ArrVal(cells, off) => pointerToLong(ArrayPtr(cells, off))
     case RefVal(cells, _)   => pointerToLong(ArrayPtr(cells, 0))
+    case RefSliceVal(cells, _, _) => pointerToLong(ArrayPtr(cells, 0))
     case FuncVal(_)         => throw RuntimeError("expected integer, got function")
     case StrVal(_)          => throw RuntimeError("expected integer, got string")
     case SliceVal(_, _, _, _) => throw RuntimeError("expected integer, got slice")
@@ -246,12 +248,16 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
   private def refIncr(v: Value): Unit = v match
     case RefVal(_, rc) => rc.incrementAndGet()
+    case RefSliceVal(_, _, rc) => rc.incrementAndGet()
     case _ =>
 
   private def refDecr(v: Value): Unit = v match
     case RefVal(_, rc) =>
       if rc.decrementAndGet() <= 0 then
         () // freed — JVM GC handles actual memory
+    case RefSliceVal(_, _, rc) =>
+      if rc.decrementAndGet() <= 0 then
+        ()
     case _ =>
 
   private def derefCell(v: Value): Cell = v match
@@ -268,6 +274,9 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case PtrVal(ptr) => ptr.index(idx)
     case RefVal(cells, _) =>
       if idx < 0 || idx >= cells.length then throw RuntimeError(s"ref field index out of bounds: $idx")
+      cells(idx)
+    case RefSliceVal(cells, length, _) =>
+      if idx < 0 || idx >= length then throw RuntimeError(s"array index out of bounds: $idx (length $length)")
       cells(idx)
     case _ => throw RuntimeError("cannot index non-array")
 
@@ -653,6 +662,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case StrVal(s) => IntVal(s.getBytes("UTF-8").length.toLong)
           case SliceVal(_, _, len, _) => IntVal(len.toLong)
           case ArrVal(cells, _) => IntVal(cells.length.toLong)
+          case RefSliceVal(_, length, _) => IntVal(length.toLong)
           case _ => throw RuntimeError("len: unsupported type")
 
       case TCap(inner, _) =>
@@ -704,6 +714,11 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           new Cell(evalAny(arg, env))
         }.toArray
         RefVal(cells, new java.util.concurrent.atomic.AtomicInteger(1))
+
+      case TNewArray(elemType, sizeExpr) =>
+        val n = toLong(evalAny(sizeExpr, env)).toInt
+        val cells = Array.fill(n)(new Cell(IntVal(0)))
+        RefSliceVal(cells, n, new java.util.concurrent.atomic.AtomicInteger(1))
 
       case TStructConstruct(SyslType.StructType(_, fields), args) =>
         val cells = fields.zip(args).map { case ((_, typ), arg) =>

@@ -104,4 +104,5 @@ case class UninitDeclAST(typeName: TypeAST) extends ExpressionAST
 case class SizeofTypeAST(typeName: TypeAST) extends ExpressionAST
 case class SizeofExprAST(expr: ExpressionAST) extends ExpressionAST
 case class NewExprAST(typeName: String, args: List[ExpressionAST]) extends ExpressionAST
+case class NewArrayAST(size: ExpressionAST, elemType: TypeAST) extends ExpressionAST
 case class StringLitExprAST(value: String) extends ExpressionAST
