@@ -57,6 +57,8 @@ import java.io.File
  *   0x34 SET_WINDOW_FLAGS — set window WIN_ID flags from WIN_FLAGS
  *   0x35 RAISE_WINDOW — bring window WIN_ID to front
  *   0x36 RESIZE_WINDOW — resize window WIN_ID to (X2, Y2), preserves content
+ *   0x37 HIT_TEST — given screen coords (X1, Y1), put window ID in RESULT (0=desktop)
+ *                     also sets WIN_FLAGS bit 2 if hit was on title bar
  *
  * Compositor commands (0x40-0x4F):
  *   0x40 COMPOSITE — composite all visible windows onto surface 0 (the screen)
@@ -224,6 +226,7 @@ class DrawEngine(
       case 0x34 => setWindowFlags()
       case 0x35 => raiseWindow()
       case 0x36 => resizeWindow()
+      case 0x37 => hitTest()
       // Compositor
       case 0x40 => composite()
       case _ =>
@@ -375,6 +378,34 @@ class DrawEngine(
     if windowOrder.contains(wid) then
       windowOrder -= wid
       windowOrder += wid
+
+  private def hitTest(): Unit =
+    val mx = reg16(X1)
+    val my = reg16(Y1)
+    // Walk z-order back to front (last = top), check top-most first
+    var found = 0
+    var onTitleBar = false
+    var i = windowOrder.length - 1
+    while i >= 0 && found == 0 do
+      val wid = windowOrder(i)
+      val win = windows(wid)
+      if win != null && win.visible then
+        val sid = win.surfaceId
+        if sid > 0 && sid < MaxSurfaces && surfaces(sid) != null then
+          val surf = surfaces(sid)
+          val wx = win.x
+          val wy = win.y
+          val ww = surf.width
+          val totalH = if win.decorated then surf.height + TitleBarHeight else surf.height
+          if mx >= wx && mx < wx + ww && my >= wy && my < wy + totalH then
+            found = wid
+            onTitleBar = win.decorated && my < wy + TitleBarHeight
+      i -= 1
+    regs(RESULT) = found.toByte
+    // Set bit 2 of WIN_FLAGS to indicate title bar hit
+    val flags = regs(WIN_FLAGS) & 0xFF
+    if onTitleBar then regs(WIN_FLAGS) = ((flags | 4) & 0xFF).toByte
+    else regs(WIN_FLAGS) = ((flags & ~4) & 0xFF).toByte
 
   private def resizeWindow(): Unit =
     val wid = regs(WIN_ID) & 0xFF

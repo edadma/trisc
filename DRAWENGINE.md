@@ -12,7 +12,7 @@
 
 ## Missing — Critical for Desktop OS
 
-- [ ] **Hit testing** — command to query "which window is at (x,y)?" for input routing
+- [x] **Hit testing** — HIT_TEST returns window ID at (x,y) in RESULT, flags title bar hit
 - [x] **Window resize** — RESIZE_WINDOW recreates surface, preserves content
 - [ ] **Mouse cursor** — render a cursor sprite at a given position during composite
 - [ ] **Focus indicator** — visually distinguish the focused window (brighter title bar, accent border)
