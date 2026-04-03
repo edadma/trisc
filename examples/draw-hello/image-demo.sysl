@@ -90,14 +90,15 @@ main() -> int
     // "examples/draw-hello/slix.png" = 29 chars, fits in 32-byte buffer
     imgpath = [101, 120, 97, 109, 112, 108, 101, 115, 47, 100, 114, 97, 119, 45, 104, 101, 108, 108, 111, 47, 115, 108, 105, 120, 46, 112, 110, 103]
     de_text(imgpath, 28)
-    de_pos(370, 25)
+    // Subtle gradient background
+    fill_rect(0, 0, FB_WIDTH, 300, 25, 30, 50)
+    fill_rect(0, 300, FB_WIDTH, 300, 20, 25, 45)
+    fill_rect(0, 600, FB_WIDTH, 300, 15, 20, 40)
+
+    // Center the logo: 700x700 on 1440x900
+    de_pos(370, 100)
     de_size(700, 700)
     de_exec(CMD_DRAW_IMAGE)
-
-    // Tagline below
-    de_font(24, 0)
-    tag = [80, 111, 119, 101, 114, 101, 100, 32, 98, 121, 32, 84, 82, 73, 83, 67]
-    draw_text(570, 780, tag, 16, 120, 140, 160)
 
     de_exec(CMD_FLUSH)
     0
