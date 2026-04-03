@@ -78,6 +78,12 @@ class SyslAnalyzer:
             throw AnalysisError(s"duplicate function: '$name'", decl)
           functions(name) = FunInfo(name, paramTypes, retType)
           externalSymbols += name
+        case ExternVarDeclAST(name, typ) =>
+          val resolved = resolveTypeName(typ)
+          if globalScope.contains(name) then
+            throw AnalysisError(s"duplicate global: '$name'", decl)
+          globalScope(name) = SymInfo(name, resolved, mutable = false)
+          externalSymbols += name
         case StructDeclAST(name, fields) =>
           if structTypes.contains(name) then throw AnalysisError(s"duplicate struct: '$name'", decl)
           val resolvedFields = fields.map((n, t) => (n, resolveTypeName(t)))
@@ -127,6 +133,9 @@ class SyslAnalyzer:
         val paramTypes = params.map(p => resolveTypeName(p.typ))
         val retType = returnType.map(resolveTypeName).getOrElse(VoidType)
         TExternFuncDecl(name, paramTypes, retType)
+
+      case ExternVarDeclAST(name, typ) =>
+        TExternVarDecl(name, resolveTypeName(typ))
 
       case StructDeclAST(name, _) =>
         val st = structTypes(name)

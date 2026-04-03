@@ -30,7 +30,7 @@ class SyslParser extends StandardTokenParsers {
   // --- Declarations ---
 
   lazy val decl: Parser[DeclAST] =
-    condDecl | importDecl | externFuncDecl | structDecl | enumDecl | typeAliasDecl | "private" ~> declBody(true) | declBody(false)
+    condDecl | importDecl | externDecl | structDecl | enumDecl | typeAliasDecl | "private" ~> declBody(true) | declBody(false)
 
   // --- Conditional compilation ---
 
@@ -94,10 +94,13 @@ class SyslParser extends StandardTokenParsers {
     importIdent ~ ("=>" ~> importIdent) ^^ { case name ~ alias => NamedImport(name, Some(alias)) } |
       importIdent ^^ (name => NamedImport(name))
 
-  lazy val externFuncDecl: Parser[ExternFuncDeclAST] =
+  lazy val externDecl: Parser[DeclAST] =
     "extern" ~> ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ opt("->" ~> typeRef) ^^ {
       case name ~ params ~ rt => ExternFuncDeclAST(name, params, rt)
-    }
+    } |
+      "extern" ~> ident ~ (":" ~> typeRef) ^^ {
+        case name ~ t => ExternVarDeclAST(name, t)
+      }
 
   private def mutability: Parser[Boolean] =
     "var" ^^^ true | "val" ^^^ false

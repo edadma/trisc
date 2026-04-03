@@ -68,6 +68,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TModuleDecl => // metadata only
         case _: TImportDecl => // not handled in interpreter
         case _: TExternFuncDecl => // not handled in interpreter
+        case _: TExternVarDecl => // not handled in interpreter
         case _: TStructDecl => // type only, no runtime effect
         case _: TEnumDecl => // type only, no runtime effect
         case _: TTypeAliasDecl => // type only, no runtime effect
