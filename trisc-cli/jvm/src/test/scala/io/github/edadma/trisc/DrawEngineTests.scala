@@ -38,7 +38,7 @@ class DrawEngineTests extends TestHelpers {
 
   "DrawEngine has correct size" in {
     val (draw, _) = mkDraw()
-    draw.size shouldBe 64
+    draw.size shouldBe 128
   }
 
   "clear fills framebuffer" in {

@@ -1,0 +1,389 @@
+// Windowed desktop demo — uses DrawEngine surface/window/compositor
+// Each window is a real surface. The compositor handles decorations.
+
+DISPLAY_CTRL = 0x100008
+DRAW_ENGINE  = 0x1000A0
+FB_WIDTH  = 1440
+FB_HEIGHT = 900
+
+// DrawEngine register offsets
+DE_EXEC       = 0
+DE_X1         = 2
+DE_Y1         = 4
+DE_X2         = 6
+DE_Y2         = 8
+DE_R          = 10
+DE_G          = 11
+DE_B          = 12
+DE_A          = 13
+DE_LINE_W     = 14
+DE_TEXT_ADDR   = 16
+DE_FONT_SIZE  = 20
+DE_FONT_STYLE = 22
+DE_CORNER_R   = 23
+DE_TARGET     = 24
+DE_RESULT     = 25
+DE_WIN_ID     = 26
+DE_WIN_FLAGS  = 27
+DE_TEXT_BUF   = 32
+DE_TITLE_BUF  = 64
+
+// Commands
+CMD_CLEAR          = 0x01
+CMD_DRAW_TEXT      = 0x09
+CMD_FILL_RECT      = 0x10
+CMD_DRAW_LINE      = 0x11
+CMD_FILL_RRECT     = 0x14
+CMD_STROKE_RRECT   = 0x15
+CMD_CREATE_SURFACE = 0x20
+CMD_CREATE_WINDOW  = 0x30
+CMD_COMPOSITE      = 0x40
+
+// String data
+s_mon: [14]int = [83, 121, 115, 116, 101, 109, 32, 77, 111, 110, 105, 116, 111, 114]
+s_editor: [9]int = [99, 111, 100, 101, 46, 115, 121, 115, 108]
+s_terminal: [8]int = [84, 101, 114, 109, 105, 110, 97, 108]
+s_cpu_u: [9]int = [67, 80, 85, 32, 85, 115, 97, 103, 101]
+s_cpu: [8]int = [67, 80, 85, 58, 32, 52, 50, 37]
+s_mem: [11]int = [77, 101, 109, 58, 32, 50, 53, 54, 32, 77, 66]
+s_thr: [11]int = [84, 104, 114, 101, 97, 100, 115, 58, 32, 49, 50]
+s_up: [13]int = [85, 112, 116, 105, 109, 101, 58, 32, 48, 48, 58, 52, 50]
+s_import: [6]int = [105, 109, 112, 111, 114, 116]
+s_tos: [5]int = [116, 111, 115, 46, 42]
+s_kmain: [11]int = [107, 101, 114, 110, 101, 108, 95, 109, 97, 105, 110]
+s_arrow: [6]int = [40, 41, 32, 45, 62, 32]
+s_int: [3]int = [105, 110, 116]
+s_create: [13]int = [99, 114, 101, 97, 116, 101, 95, 116, 104, 114, 101, 97, 100]
+s_worker: [8]int = [40, 119, 111, 114, 107, 101, 114, 41]
+s_timer: [10]int = [116, 105, 109, 101, 114, 95, 105, 110, 105, 116]
+s_1000: [4]int = [49, 48, 48, 48]
+s_sleep: [5]int = [115, 108, 101, 101, 112]
+s_putc: [4]int = [112, 117, 116, 99]
+s_charH: [3]int = [39, 72, 39]
+s_banner1: [12]int = [83, 76, 73, 88, 32, 79, 83, 32, 118, 48, 46, 49]
+s_banner2: [18]int = [84, 82, 73, 83, 67, 32, 67, 80, 85, 32, 64, 32, 49, 48, 48, 77, 72, 122]
+s_user: [9]int = [114, 111, 111, 116, 64, 115, 108, 105, 120]
+s_sep: [4]int = [58, 126, 35, 32]
+s_neofetch: [8]int = [110, 101, 111, 102, 101, 116, 99, 104]
+s_os: [3]int = [79, 83, 58]
+s_slix: [8]int = [83, 76, 73, 88, 32, 48, 46, 49]
+s_cpul: [4]int = [67, 80, 85, 58]
+s_trisc16: [12]int = [84, 82, 73, 83, 67, 32, 49, 54, 45, 98, 105, 116]
+s_meml: [4]int = [77, 101, 109, 58]
+s_memv: [11]int = [49, 32, 77, 66, 32, 47, 32, 52, 32, 77, 66]
+s_shell: [6]int = [83, 104, 101, 108, 108, 58]
+s_sh: [2]int = [115, 104]
+s_S: [1]int = [83]
+// "slix.png"
+s_slix_path: [9]int = [115, 108, 105, 120, 46, 112, 110, 103, 0]
+s_wifi: [4]int = [87, 105, 70, 105]
+s_bat: [4]int = [49, 48, 48, 37]
+s_clock: [5]int = [50, 51, 58, 52, 50]
+
+// Line numbers for editor
+s_1: [1]int = [49]
+s_2: [1]int = [50]
+s_3: [1]int = [51]
+s_4: [1]int = [52]
+s_5: [1]int = [53]
+s_6: [1]int = [54]
+s_7: [1]int = [55]
+s_8: [1]int = [56]
+s_9: [1]int = [57]
+
+// Helpers
+dc_write(offset: int, v: int)
+    p: *i8 = *i8(DISPLAY_CTRL + offset)
+    *p = byte(v)
+
+init_fb()
+    dc_write(0, 1)
+    dc_write(2, FB_WIDTH >> 8)
+    dc_write(3, FB_WIDTH & 0xFF)
+    dc_write(4, FB_HEIGHT >> 8)
+    dc_write(5, FB_HEIGHT & 0xFF)
+    dc_write(1, 1)
+
+de_write8(offset: int, v: int)
+    p: *i8 = *i8(DRAW_ENGINE + offset)
+    *p = byte(v)
+
+de_write16(offset: int, v: int)
+    p: *i16 = *i16(DRAW_ENGINE + offset)
+    *p = i16(v)
+
+de_read8(offset: int) -> int
+    p: *i8 = *i8(DRAW_ENGINE + offset)
+    int(*p) & 0xFF
+
+de_exec(cmd: int)
+    de_write8(DE_EXEC, cmd)
+
+de_color(r: int, g: int, b: int, a: int)
+    de_write8(DE_R, r)
+    de_write8(DE_G, g)
+    de_write8(DE_B, b)
+    de_write8(DE_A, a)
+
+de_pos(x: int, y: int)
+    de_write16(DE_X1, x)
+    de_write16(DE_Y1, y)
+
+de_size(w: int, h: int)
+    de_write16(DE_X2, w)
+    de_write16(DE_Y2, h)
+
+de_font(size: int, style: int)
+    de_write16(DE_FONT_SIZE, size)
+    de_write8(DE_FONT_STYLE, style)
+
+de_target(surface: int)
+    de_write8(DE_TARGET, surface)
+
+de_text(s: *int, len: int)
+    var i = 0
+    while i < len
+        if i >= 31 then break
+        de_write8(DE_TEXT_BUF + i, s[i])
+        i += 1
+    de_write8(DE_TEXT_BUF + i, 0)
+
+de_title(s: *int, len: int)
+    var i = 0
+    while i < len
+        if i >= 31 then break
+        de_write8(DE_TITLE_BUF + i, s[i])
+        i += 1
+    de_write8(DE_TITLE_BUF + i, 0)
+
+draw_text(x: int, y: int, s: *int, len: int, r: int, g: int, b: int)
+    de_color(r, g, b, 255)
+    de_pos(x, y)
+    de_text(s, len)
+    de_exec(CMD_DRAW_TEXT)
+
+fill_rect(x: int, y: int, w: int, h: int, r: int, g: int, b: int)
+    de_color(r, g, b, 255)
+    de_pos(x, y)
+    de_size(w, h)
+    de_exec(CMD_FILL_RECT)
+
+fill_rect_a(x: int, y: int, w: int, h: int, r: int, g: int, b: int, a: int)
+    de_color(r, g, b, a)
+    de_pos(x, y)
+    de_size(w, h)
+    de_exec(CMD_FILL_RECT)
+
+// Create a decorated window, return window ID. TARGET is set to its surface.
+create_window(x: int, y: int, w: int, h: int, title: *int, tlen: int) -> int
+    de_title(title, tlen)
+    de_pos(x, y)
+    de_size(w, h)
+    de_write8(DE_WIN_FLAGS, 3) // visible + decorated
+    de_exec(CMD_CREATE_WINDOW)
+    de_read8(DE_RESULT)
+
+// Draw into the screen (surface 0)
+draw_desktop()
+    de_target(0)
+
+    // Dark background
+    de_color(10, 10, 18, 255)
+    de_exec(CMD_CLEAR)
+
+    // Ambient glow
+    de_color(0, 255, 255, 8)
+    de_write8(DE_CORNER_R, 100)
+    de_pos(100, 200)
+    de_size(400, 400)
+    de_exec(CMD_FILL_RRECT)
+
+    de_color(255, 0, 200, 6)
+    de_pos(900, 100)
+    de_size(500, 300)
+    de_exec(CMD_FILL_RRECT)
+
+    de_color(100, 0, 255, 5)
+    de_pos(600, 500)
+    de_size(600, 400)
+    de_exec(CMD_FILL_RRECT)
+
+    // Centered SLIX logo (slix.png)
+    de_text(s_slix_path, 8)
+    de_pos(420, 200)
+    de_size(600, 600)
+    de_exec(0x12)
+
+    // Taskbar
+    fill_rect_a(0, 860, FB_WIDTH, 40, 15, 15, 25, 230)
+    de_color(0, 200, 255, 255)
+    de_write16(DE_LINE_W, 16)
+    de_pos(0, 860)
+    de_size(FB_WIDTH, 860)
+    de_exec(CMD_DRAW_LINE)
+
+    // Taskbar start button
+    de_color(0, 255, 255, 255)
+    de_write8(DE_CORNER_R, 7)
+    de_write16(DE_LINE_W, 20)
+    de_pos(16, 866)
+    de_size(28, 28)
+    de_exec(CMD_STROKE_RRECT)
+    de_font(12, 1)
+    draw_text(22, 885, s_S, 1, 0, 255, 255)
+
+    // Taskbar items
+    de_font(11, 0)
+    draw_text(75, 884, s_mon, 14, 0, 220, 255)
+    draw_text(215, 884, s_editor, 9, 220, 80, 255)
+    draw_text(325, 884, s_terminal, 8, 50, 255, 120)
+
+    // Clock area
+    draw_text(1280, 884, s_wifi, 4, 50, 255, 120)
+    draw_text(1330, 884, s_bat, 4, 0, 220, 255)
+    de_font(14, 1)
+    draw_text(1385, 884, s_clock, 5, 0, 255, 255)
+
+// Draw system monitor content into its surface
+draw_monitor(win: int)
+    // Background
+    de_color(18, 18, 28, 255)
+    de_exec(CMD_CLEAR)
+
+    // CPU graph area
+    fill_rect(15, 10, 390, 110, 12, 12, 20)
+    de_font(10, 0)
+    draw_text(20, 25, s_cpu_u, 9, 0, 200, 230)
+
+    // Graph lines
+    de_color(0, 255, 220, 255)
+    de_write16(DE_LINE_W, 24)
+    de_pos(20, 105)
+    de_size(70, 80)
+    de_exec(CMD_DRAW_LINE)
+    de_pos(70, 80)
+    de_size(120, 95)
+    de_exec(CMD_DRAW_LINE)
+    de_pos(120, 95)
+    de_size(170, 50)
+    de_exec(CMD_DRAW_LINE)
+    de_pos(170, 50)
+    de_size(220, 70)
+    de_exec(CMD_DRAW_LINE)
+    de_pos(220, 70)
+    de_size(270, 40)
+    de_exec(CMD_DRAW_LINE)
+    de_pos(270, 40)
+    de_size(320, 60)
+    de_exec(CMD_DRAW_LINE)
+    de_pos(320, 60)
+    de_size(370, 35)
+    de_exec(CMD_DRAW_LINE)
+    de_pos(370, 35)
+    de_size(395, 55)
+    de_exec(CMD_DRAW_LINE)
+
+    // Stats
+    de_font(13, 0)
+    draw_text(20, 145, s_cpu, 8, 0, 230, 255)
+    draw_text(20, 167, s_mem, 11, 0, 230, 255)
+    draw_text(20, 189, s_thr, 11, 0, 230, 255)
+    draw_text(20, 211, s_up, 13, 0, 230, 255)
+
+    // Progress bars
+    fill_rect(200, 155, 150, 12, 20, 20, 35)
+    fill_rect(200, 155, 95, 12, 0, 200, 230)
+    fill_rect(200, 177, 150, 12, 20, 20, 35)
+    fill_rect(200, 177, 60, 12, 0, 200, 230)
+
+// Draw editor content into its surface
+draw_editor(win: int)
+    de_color(18, 18, 28, 255)
+    de_exec(CMD_CLEAR)
+
+    fill_rect(0, 0, 580, 320, 15, 15, 22)
+    de_font(12, 0)
+
+    // Line numbers
+    draw_text(7, 20, s_1, 1, 60, 60, 80)
+    draw_text(7, 40, s_2, 1, 60, 60, 80)
+    draw_text(7, 60, s_3, 1, 60, 60, 80)
+    draw_text(7, 80, s_4, 1, 60, 60, 80)
+    draw_text(7, 100, s_5, 1, 60, 60, 80)
+    draw_text(7, 120, s_6, 1, 60, 60, 80)
+    draw_text(7, 140, s_7, 1, 60, 60, 80)
+    draw_text(7, 160, s_8, 1, 60, 60, 80)
+    draw_text(7, 180, s_9, 1, 60, 60, 80)
+
+    // Code
+    draw_text(35, 20, s_import, 6, 220, 80, 255)
+    draw_text(87, 20, s_tos, 5, 200, 200, 220)
+    draw_text(35, 60, s_kmain, 11, 0, 220, 255)
+    draw_text(131, 60, s_arrow, 6, 150, 150, 170)
+    draw_text(179, 60, s_int, 3, 255, 160, 50)
+    draw_text(55, 80, s_create, 13, 0, 220, 255)
+    draw_text(167, 80, s_worker, 8, 200, 200, 220)
+    draw_text(55, 100, s_timer, 10, 0, 220, 255)
+    draw_text(142, 100, s_1000, 4, 255, 180, 80)
+    draw_text(55, 120, s_sleep, 5, 0, 220, 255)
+    draw_text(98, 120, s_1000, 4, 255, 180, 80)
+    draw_text(35, 160, s_putc, 4, 0, 220, 255)
+    draw_text(69, 160, s_charH, 3, 50, 255, 120)
+
+    // Cursor
+    fill_rect(35, 175, 7, 14, 220, 80, 255)
+
+// Draw terminal content into its surface
+draw_terminal(win: int)
+    de_color(8, 8, 14, 255)
+    de_exec(CMD_CLEAR)
+
+    de_font(12, 0)
+    draw_text(15, 20, s_banner1, 12, 50, 255, 120)
+    draw_text(15, 40, s_banner2, 18, 50, 255, 120)
+    draw_text(15, 70, s_user, 9, 0, 220, 255)
+    draw_text(87, 70, s_sep, 4, 120, 120, 140)
+    draw_text(117, 70, s_neofetch, 8, 220, 220, 240)
+    draw_text(15, 95, s_os, 3, 80, 80, 100)
+    draw_text(55, 95, s_slix, 8, 50, 255, 120)
+    draw_text(15, 113, s_cpul, 4, 80, 80, 100)
+    draw_text(55, 113, s_trisc16, 12, 220, 220, 240)
+    draw_text(15, 131, s_meml, 4, 80, 80, 100)
+    draw_text(55, 131, s_memv, 11, 220, 220, 240)
+    draw_text(15, 149, s_shell, 6, 80, 80, 100)
+    draw_text(65, 149, s_sh, 2, 220, 220, 240)
+
+    // Color blocks
+    fill_rect(15, 170, 16, 12, 40, 40, 40)
+    fill_rect(35, 170, 16, 12, 200, 60, 60)
+    fill_rect(55, 170, 16, 12, 60, 200, 60)
+    fill_rect(75, 170, 16, 12, 200, 200, 60)
+    fill_rect(95, 170, 16, 12, 60, 60, 200)
+    fill_rect(115, 170, 16, 12, 200, 60, 200)
+    fill_rect(135, 170, 16, 12, 60, 200, 200)
+    fill_rect(155, 170, 16, 12, 200, 200, 200)
+
+    // Second prompt
+    draw_text(15, 200, s_user, 9, 0, 220, 255)
+    draw_text(87, 200, s_sep, 4, 120, 120, 140)
+    fill_rect(120, 190, 8, 14, 50, 255, 120)
+
+main() -> int
+    init_fb()
+
+    // Draw the desktop background and taskbar
+    draw_desktop()
+
+    // Create three windows arranged around the edges, leaving center for logo
+    val win1 = create_window(20, 30, 420, 240, s_mon, 14)
+    draw_monitor(win1)
+
+    val win2 = create_window(20, 520, 500, 200, s_editor, 9)
+    draw_editor(win2)
+
+    val win3 = create_window(880, 30, 530, 220, s_terminal, 8)
+    draw_terminal(win3)
+
+    // Composite everything — windows are drawn on top of desktop with decorations
+    de_exec(CMD_COMPOSITE)
+    0
