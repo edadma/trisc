@@ -106,6 +106,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   private val globals = new mutable.LinkedHashMap[String, SyslType]
   private var locals: mutable.LinkedHashMap[String, LocalVar] = null
+  private var refParams: mutable.LinkedHashMap[String, SyslType.RefType] = null // ref-typed params for cleanup
   private var stackOffset: Int = 0
   private val savedScopes = new mutable.Stack[(Map[String, LocalVar], Int)]
   private val loopScopeOffsets = new mutable.Stack[Int]
@@ -262,19 +263,28 @@ class SyslTriscCodegen(addresses: Int = 4):
     emit(s"$noFree")
     emit(s"$skip")
 
-  // Decrement refcounts for all ref-typed locals in the current scope
-  // Skip params (positive offsets from fp) — they are borrowed, not owned
+  // Decrement refcounts for all ref-typed locals and params
   private def emitRefCleanup(): Unit =
+    // Decrement owned locals (negative fp offsets)
     for (_, local) <- locals if local.offset < 0 do
       local.typ match
         case rt: SyslType.RefType =>
           val hoff = refHeaderOffset(rt)
-          emit("  pshd r1")         // save r1 (may hold return value)
+          emit("  pshd r1")
           emitAddImm(1, 5, local.offset)
-          emit("  ldd r1, r1, r0")  // r1 = ref pointer
+          emit("  ldd r1, r1, r0")
           emitRefDecr(1, hoff)
-          emit("  popd r1")         // restore r1
+          emit("  popd r1")
         case _ =>
+    // Decrement ref params (caller transferred ownership)
+    for (name, rt) <- refParams do
+      val local = locals(name)
+      val hoff = refHeaderOffset(rt)
+      emit("  pshd r1")
+      emitAddImm(1, 5, local.offset)
+      emit("  ldd r1, r1, r0")
+      emitRefDecr(1, hoff)
+      emit("  popd r1")
 
   // Allocate a local variable on the stack, return its offset from fp.
   // The variable is aligned to the greater of its natural alignment and 8
@@ -295,6 +305,7 @@ class SyslTriscCodegen(addresses: Int = 4):
   private def genFunction(fun: TFunDecl): Unit =
     currentFunction = fun
     locals = new mutable.LinkedHashMap
+    refParams = new mutable.LinkedHashMap
     stackOffset = 0
     deferStack.clear()
 
@@ -339,6 +350,12 @@ class SyslTriscCodegen(addresses: Int = 4):
     for (param, i) <- fun.params.zipWithIndex.drop(nUserStackStart) do
       val callerOffset = 16 + nRegPushed * 8 + (i - nUserStackStart) * 8
       locals(param.name) = LocalVar(param.name, callerOffset, SyslType.I64)
+
+    // Track ref-typed params for cleanup on function exit
+    for param <- fun.params do
+      param.typ match
+        case rt: SyslType.RefType => refParams(param.name) = rt
+        case _ =>
 
     // Generate body
     fun.body match
@@ -1048,6 +1065,12 @@ class SyslTriscCodegen(addresses: Int = 4):
           arg match
             case TAddrLit(off) => emitAddImm(1, 5, off)
             case _ => genExpr(arg)
+          // Retain ref args for ownership transfer (skip new — already +1)
+          arg.typ match
+            case rt: SyslType.RefType => arg match
+              case _: TNew | _: TNewArray =>
+              case _ => emitRefIncr(1, refHeaderOffset(rt))
+            case _ =>
           emit("  pshd r1")
           stackOffset -= 8
         // Evaluate register args in reverse, push as temporaries
@@ -1055,6 +1078,12 @@ class SyslTriscCodegen(addresses: Int = 4):
           arg match
             case TAddrLit(off) => emitAddImm(1, 5, off)
             case _ => genExpr(arg)
+          // Retain ref args for ownership transfer (skip new — already +1)
+          arg.typ match
+            case rt: SyslType.RefType => arg match
+              case _: TNew | _: TNewArray =>
+              case _ => emitRefIncr(1, refHeaderOffset(rt))
+            case _ =>
           emit("  pshd r1")
           stackOffset -= 8
         // Pop into r1-rN

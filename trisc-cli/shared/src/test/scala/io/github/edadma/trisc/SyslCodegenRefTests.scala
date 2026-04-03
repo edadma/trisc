@@ -357,6 +357,25 @@ class SyslCodegenRefTests extends SyslCodegenHelpers {
         |""".stripMargin, 4096)) shouldBe 1225
   }
 
+  "new passed directly as arg — freed by callee" in {
+    compileMultiAndRun(refSources(
+      """import posix.stdlib.{malloc, free}
+        |
+        |struct Box
+        |    value: int
+        |
+        |get(b: &Box) -> int = b.value
+        |
+        |main() -> int
+        |    var sum = 0
+        |    var i = 0
+        |    while i < 100
+        |        sum += get(new Box(i))
+        |        i++
+        |    sum
+        |""".stripMargin, 4096)) shouldBe 4950
+  }
+
   "shared ref sees mutation" in {
     compileMultiAndRun(refSources(
       """import posix.stdlib.malloc
