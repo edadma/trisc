@@ -333,8 +333,21 @@ draw_editor(win: int)
     // Cursor
     fill_rect(35, 175, 7, 14, 220, 80, 255)
 
+de_set_font(name: *int, len: int)
+    var i = 0
+    while i < len
+        if i >= 31 then break
+        de_write8(96 + i, name[i])  // FONT_BUF at offset 96
+        i += 1
+    de_write8(96 + i, 0)
+    de_exec(0x16)  // SET_FONT
+
+s_mono: [10]int = [77, 111, 110, 111, 115, 112, 97, 99, 101, 100]
+s_sans: [10]int = [83, 97, 110, 115, 83, 101, 114, 105, 102]
+
 // Draw terminal content into its surface
 draw_terminal(win: int)
+    de_set_font(s_mono, 10)
     de_color(8, 8, 14, 255)
     de_exec(CMD_CLEAR)
 
@@ -367,6 +380,9 @@ draw_terminal(win: int)
     draw_text(15, 200, s_user, 9, 0, 220, 255)
     draw_text(87, 200, s_sep, 4, 120, 120, 140)
     fill_rect(120, 190, 8, 14, 50, 255, 120)
+
+    // Reset to default font
+    de_set_font(s_sans, 9)
 
 main() -> int
     init_fb()

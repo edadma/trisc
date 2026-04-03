@@ -15,14 +15,14 @@
 - [x] **Hit testing** — HIT_TEST returns window ID at (x,y) in RESULT, flags title bar hit
 - [x] **Window resize** — RESIZE_WINDOW recreates surface, preserves content
 - [x] **Mouse cursor** — SET_CURSOR_POS, SET_CURSOR_VISIBLE, SET_CURSOR_SURFACE (custom or default arrow)
-- [ ] **Focus indicator** — visually distinguish the focused window (brighter title bar, accent border)
+- [x] **Focus indicator** — topmost window gets brighter title bar, accent border, vivid buttons
 
 ## Missing — Important
 
 - [ ] **Dirty tracking** — COMPOSITE redraws everything; should track changed regions
 - [ ] **Window minimize/maximize** — flags exist but no behavior
 - [ ] **Alpha compositing** — windows are opaque blits; support per-window opacity
-- [ ] **Font family selection** — register to choose Sans Serif, Monospaced, Serif
+- [x] **Font family selection** — SET_FONT by name, LOAD_FONT from RAM binary data
 - [ ] **Scrolling** — viewport offset per surface for apps with content larger than their window
 - [ ] **Window move by drag** — host-side: detect title bar drag, update window position
 - [ ] **Z-order query** — command to read current window order

@@ -34,7 +34,7 @@ import java.io.File
  *   28-31:  reserved
  *   32-63:  TEXT_BUF    (R/W) — 32-byte inline text buffer
  *   64-95:  TITLE_BUF   (R/W) — 32-byte window title buffer
- *   96-127: reserved
+ *   96-127: FONT_BUF   (R/W) — 32-byte font name buffer
  *
  * Drawing commands (0x01-0x1F) — draw into TARGET surface:
  *   0x01 CLEAR, 0x02 MOVE_TO, 0x03 LINE_TO, 0x04 STROKE, 0x05 FILL,
@@ -42,6 +42,9 @@ import java.io.File
  *   0x0B SET_CLIP, 0x0C CLEAR_CLIP, 0x0D CLOSE_PATH, 0x0E CURVE_TO,
  *   0x10 FILL_RECT, 0x11 DRAW_LINE, 0x12 DRAW_IMAGE,
  *   0x13 ROUND_RECT, 0x14 FILL_ROUND_RECT, 0x15 STROKE_ROUND_RECT
+ *   0x16 SET_FONT — set current font to name in FONT_BUF (e.g. "Monospaced", "SansSerif")
+ *   0x17 LOAD_FONT — load TTF/OTF from RAM at TEXT_ADDR, length (X2<<8|Y2 bytes),
+ *                      register under name in FONT_BUF
  *
  * Surface commands (0x20-0x2F):
  *   0x20 CREATE_SURFACE — create surface with size (X2, Y2), result in RESULT
@@ -102,6 +105,7 @@ class DrawEngine(
   private val WIN_FLAGS = 27
   private val TEXT_BUF = 32
   private val TITLE_BUF = 64
+  private val FONT_BUF = 96
 
   // Surface table — slot 0 is the screen framebuffer
   private class Surface(var width: Int, var height: Int):
@@ -144,14 +148,24 @@ class DrawEngine(
 
   // Decoration constants
   private val TitleBarHeight = 32
-  private val TitleBarColor = new Color(40, 40, 55, 240)
-  private val TitleTextColor = new Color(200, 200, 220)
-  private val BorderColor = new Color(60, 60, 80)
+  private val TitleBarColorFocused = new Color(50, 50, 70, 245)
+  private val TitleBarColorUnfocused = new Color(35, 35, 48, 220)
+  private val TitleTextColorFocused = new Color(220, 220, 240)
+  private val TitleTextColorUnfocused = new Color(140, 140, 160)
+  private val BorderColorFocused = new Color(80, 140, 255, 180)
+  private val BorderColorUnfocused = new Color(50, 50, 65)
   private val ShadowColor = new Color(0, 0, 0, 80)
   private val CloseColor = new Color(255, 60, 90)
+  private val CloseColorDim = new Color(100, 40, 50)
   private val MinimizeColor = new Color(255, 200, 50)
+  private val MinimizeColorDim = new Color(100, 80, 30)
   private val MaximizeColor = new Color(50, 255, 120)
+  private val MaximizeColorDim = new Color(30, 100, 50)
   private val CornerRadius = 12
+
+  // Font state
+  private var currentFontFamily = Font.SANS_SERIF
+  private val loadedFonts = scala.collection.mutable.Map[String, Font]()
 
   // Cursor state
   private var cursorX = 0
@@ -271,7 +285,10 @@ class DrawEngine(
       case 0x09 =>
         val fontSize = reg16(FONT_SIZE)
         val style = regs(FONT_STYLE) & 0xFF
-        g.setFont(new Font(Font.SANS_SERIF, style, if fontSize > 0 then fontSize else 12))
+        val baseFont = loadedFonts.get(currentFontFamily) match
+          case Some(f) => f.deriveFont(style, fontSize.toFloat)
+          case None    => new Font(currentFontFamily, style, if fontSize > 0 then fontSize else 12)
+        g.setFont(baseFont)
         g.drawString(readTextString, reg16(X1), reg16(Y1))
       case 0x0A => () // no-op
       case 0x0B => g.setClip(reg16(X1), reg16(Y1), reg16(X2), reg16(Y2))
@@ -308,7 +325,28 @@ class DrawEngine(
       case 0x15 =>
         val cr = (regs(CORNER_R) & 0xFF) * 2
         g.drawRoundRect(reg16(X1), reg16(Y1), reg16(X2), reg16(Y2), cr, cr)
+      case 0x16 => // SET_FONT
+        currentFontFamily = readBuf(FONT_BUF, 32)
+      case 0x17 => // LOAD_FONT
+        loadFont()
       case _ =>
+
+  // === Font commands ===
+
+  private def loadFont(): Unit =
+    val addr = reg32(TEXT_ADDR)
+    val len = (reg16(X2) << 16) | reg16(Y2)
+    val name = readBuf(FONT_BUF, 32)
+    if addr == 0 || len <= 0 || name.isEmpty then return
+    try
+      val data = new Array[Byte](len)
+      var i = 0
+      while i < len do
+        data(i) = mem.readByte(addr.toLong + i).toByte
+        i += 1
+      val font = Font.createFont(Font.TRUETYPE_FONT, new java.io.ByteArrayInputStream(data))
+      loadedFonts(name) = font
+    catch case _: Exception => ()
 
   // === Surface commands ===
 
@@ -438,6 +476,11 @@ class DrawEngine(
     val fw = fbWidth()
     val fh = fbHeight()
 
+    // Find the focused window (topmost visible decorated window)
+    val focusedWid = windowOrder.reverseIterator.find(wid =>
+      windows(wid) != null && windows(wid).visible
+    ).getOrElse(0)
+
     // Draw each window in z-order (windowOrder front = last = top)
     for wid <- windowOrder do
       val win = windows(wid)
@@ -449,32 +492,36 @@ class DrawEngine(
           val wy = win.y
           val ww = surf.width
           val wh = surf.height
+          val focused = wid == focusedWid
 
           if win.decorated then
-            // Shadow
+            // Shadow (larger for focused window)
             g.setColor(ShadowColor)
-            g.fillRoundRect(wx + 4, wy + 4, ww, wh + TitleBarHeight, CornerRadius, CornerRadius)
+            if focused then
+              g.fillRoundRect(wx + 6, wy + 6, ww, wh + TitleBarHeight, CornerRadius, CornerRadius)
+            else
+              g.fillRoundRect(wx + 3, wy + 3, ww, wh + TitleBarHeight, CornerRadius, CornerRadius)
 
-            // Window frame (title bar + content area)
-            g.setColor(TitleBarColor)
+            // Window frame
+            g.setColor(if focused then TitleBarColorFocused else TitleBarColorUnfocused)
             g.fillRoundRect(wx, wy, ww, wh + TitleBarHeight, CornerRadius, CornerRadius)
 
             // Border
-            g.setColor(BorderColor)
-            g.setStroke(new BasicStroke(1.0f))
+            g.setColor(if focused then BorderColorFocused else BorderColorUnfocused)
+            g.setStroke(new BasicStroke(if focused then 1.5f else 1.0f))
             g.drawRoundRect(wx, wy, ww, wh + TitleBarHeight, CornerRadius, CornerRadius)
 
             // Title text
-            g.setColor(TitleTextColor)
+            g.setColor(if focused then TitleTextColorFocused else TitleTextColorUnfocused)
             g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12))
             g.drawString(win.title, wx + 68, wy + 21)
 
-            // Window buttons (close, minimize, maximize — grouped left, macOS style)
-            g.setColor(CloseColor)
+            // Window buttons — vivid when focused, dimmed when not
+            g.setColor(if focused then CloseColor else CloseColorDim)
             g.fillOval(wx + 12, wy + 10, 12, 12)
-            g.setColor(MinimizeColor)
+            g.setColor(if focused then MinimizeColor else MinimizeColorDim)
             g.fillOval(wx + 30, wy + 10, 12, 12)
-            g.setColor(MaximizeColor)
+            g.setColor(if focused then MaximizeColor else MaximizeColorDim)
             g.fillOval(wx + 48, wy + 10, 12, 12)
 
             // Content area — blit the surface below the title bar
