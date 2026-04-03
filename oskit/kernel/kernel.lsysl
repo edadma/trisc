@@ -28,12 +28,14 @@ The trap handler in boot.asm dispatches based on r1:
     val NUM_PRIORITIES = 4
     val DEFAULT_QUANTUM = 5
 
-    val STATE_READY      = 0
-    val STATE_RUNNING    = 1
-    val STATE_BLOCKED    = 2
-    val STATE_TERMINATED = 3
-    val STATE_JOINING    = 4
-    val STATE_SUSPENDED  = 5
+    val STATE_READY        = 0
+    val STATE_RUNNING      = 1
+    val STATE_BLOCKED      = 2
+    val STATE_TERMINATED   = 3
+    val STATE_JOINING      = 4
+    val STATE_SUSPENDED    = 5
+    val STATE_SEND_BLOCKED = 11
+    val STATE_RECV_BLOCKED = 12
 
     val QUEUE_EMPTY = -1
     val STACK_CANARY = 0xDEAD
@@ -121,6 +123,13 @@ context restore.
 
     syscall_return(value: i64)
         var p: *i64 = *i64(syscall_ssp + 48)
+        *p = value
+
+Write a return value into a specific thread's saved context.
+Used by the scheduler for generic timeout wakeups.
+
+    syscall_return_for(tid: int, value: i64)
+        var p: *i64 = *i64(tasks[tid].ssp + 48)
         *p = value
 
     register_syscall(num: int, handler: i64)
@@ -363,7 +372,7 @@ Steps:
                 if tasks[current_thread].state == STATE_READY
                     enqueue(tasks[current_thread].priority, current_thread)
 
-        // Wake threads whose sleep time has expired
+        // Wake threads whose sleep/timeout has expired
         var i = 0
         while i < thread_count
             if tasks[i].state == STATE_BLOCKED
@@ -371,6 +380,16 @@ Steps:
                     tasks[i].state = STATE_READY
                     tasks[i].quantum = DEFAULT_QUANTUM
                     enqueue(tasks[i].priority, i)
+            // IPC send timeout: wake_tick > 0 means a deadline was set
+            if tasks[i].state == STATE_SEND_BLOCKED
+                if tasks[i].wake_tick > 0
+                    if ticks >= tasks[i].wake_tick
+                        // Timeout expired — wake with -2 in saved r1
+                        syscall_return_for(i, -2)
+                        tasks[i].state = STATE_READY
+                        tasks[i].quantum = DEFAULT_QUANTUM
+                        tasks[i].wake_tick = 0
+                        enqueue(tasks[i].priority, i)
             i += 1
 
         // Find highest-priority non-empty queue (lowest number)

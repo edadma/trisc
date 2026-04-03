@@ -814,6 +814,118 @@ class OSKitIPCTests extends OSKitTestHelpers {
     output should include("D")
   }
 
+  "IPC: send_timeout returns -2 when server never recvs" in {
+    val (_, output) = runIPC(Map(
+      "app" ->
+        """import oskit.*
+          |
+          |kernel_main() -> int
+          |    ipc_init()
+          |    create_thread(server, 0x10000, 0xF000, "srv")
+          |    create_thread(client, 0x14000, 0x13000, "cli")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |
+          |server()
+          |    val port = port_create()
+          |    // Server creates port but never calls recv
+          |    sleep(200)
+          |
+          |client()
+          |    sleep(5)
+          |    var msg: [1]i8
+          |    msg[0] = 1
+          |    var reply: [1]i8
+          |    val r = ipc_send_timeout(0, &msg[0], 1, &reply[0], 1, 30)
+          |    if r == -2
+          |        putc('T')
+          |    else
+          |        putc('N')
+          |""".stripMargin
+    ))
+
+    output should include("T")
+  }
+
+  "IPC: send_timeout succeeds when server replies in time" in {
+    val (_, output) = runIPC(Map(
+      "app" ->
+        """import oskit.*
+          |
+          |kernel_main() -> int
+          |    ipc_init()
+          |    create_thread(server, 0x10000, 0xF000, "srv")
+          |    create_thread(client, 0x14000, 0x13000, "cli")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |
+          |server()
+          |    val port = port_create()
+          |    var buf: [64]i8
+          |    val sender = ipc_recv(port, &buf[0], 64)
+          |    putc(buf[0])
+          |    var reply: [1]i8
+          |    reply[0] = 1
+          |    ipc_reply(sender, &reply[0], 1)
+          |
+          |client()
+          |    sleep(5)
+          |    var msg: [1]i8
+          |    msg[0] = 72
+          |    var reply: [1]i8
+          |    val r = ipc_send_timeout(0, &msg[0], 1, &reply[0], 1, 100)
+          |    if r == 0
+          |        putc('S')
+          |    else
+          |        putc('F')
+          |""".stripMargin
+    ))
+
+    // H = server got message, S = client send succeeded
+    output should include("H")
+    output should include("S")
+  }
+
+  "IPC: send_timeout with server delayed but replies before deadline" in {
+    val (_, output) = runIPC(Map(
+      "app" ->
+        """import oskit.*
+          |
+          |kernel_main() -> int
+          |    ipc_init()
+          |    create_thread(server, 0x10000, 0xF000, "srv")
+          |    create_thread(client, 0x14000, 0x13000, "cli")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |
+          |server()
+          |    val port = port_create()
+          |    sleep(20)
+          |    var buf: [64]i8
+          |    val sender = ipc_recv(port, &buf[0], 64)
+          |    var reply: [1]i8
+          |    reply[0] = 1
+          |    ipc_reply(sender, &reply[0], 1)
+          |    putc('D')
+          |
+          |client()
+          |    sleep(5)
+          |    var msg: [1]i8
+          |    msg[0] = 1
+          |    var reply: [1]i8
+          |    val r = ipc_send_timeout(0, &msg[0], 1, &reply[0], 1, 100)
+          |    if r == 0
+          |        putc('S')
+          |    else
+          |        putc('F')
+          |""".stripMargin
+    ))
+
+    // D = server done, S = client succeeded
+    output should include("D")
+    output should include("S")
+  }
+
   "IPC: re-register changes port name" in {
     val (_, output) = runIPC(Map(
       "app" ->
