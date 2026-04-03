@@ -66,13 +66,17 @@ object EmulatorGui:
         Runtime.blitterAddress, memProxy, fbMemory,
         () => displayCtrl.currentFBWidth, () => displayCtrl.currentFBHeight,
       )
+      val drawEngine = new DrawEngine(
+        Runtime.drawEngineAddress, memProxy, fbMemory,
+        () => displayCtrl.currentFBWidth, () => displayCtrl.currentFBHeight,
+      )
 
       // Interrupt controller — shared across setupCpu calls (reset recreates timer internally)
       val intc = new InterruptController(Runtime.intcAddress)
       val keyboard = new KeyboardDevice(Runtime.keyboardAddress, intc, irq = 1)
       val mouse = new MouseDevice(Runtime.mouseAddress, intc, irq = 2)
 
-      val guiDevices = Seq(keyboard, mouse, displayCtrl, fbMemory, blitter)
+      val guiDevices = Seq(keyboard, mouse, displayCtrl, fbMemory, blitter, drawEngine)
 
       var cpuState: (CPU, Memory) = TriscCli.setupCpu(linked, outputFn, guiDevices, intc)
       memRef = cpuState._2

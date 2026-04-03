@@ -9,7 +9,8 @@ class FramebufferWidget extends JComponent:
   private var fbWidth: Int = 320
   private var fbHeight: Int = 200
   private var image: BufferedImage = new BufferedImage(fbWidth, fbHeight, BufferedImage.TYPE_INT_ARGB)
-  private var scale: Int = 2
+  private var displayWidth: Int = 640
+  private var displayHeight: Int = 400
 
   var fbData: mutable.ArraySeq[Byte] = null // points to RAM backing array
 
@@ -20,13 +21,26 @@ class FramebufferWidget extends JComponent:
     fbWidth = math.max(1, math.min(w, 1920))
     fbHeight = math.max(1, math.min(h, 1080))
     image = new BufferedImage(fbWidth, fbHeight, BufferedImage.TYPE_INT_ARGB)
-    // Scale up small resolutions to fill ~960x720, 1:1 for anything larger
-    scale = if fbWidth >= 960 || fbHeight >= 720 then 1
-            else math.max(1, math.min(960 / fbWidth, 720 / fbHeight))
+    // Fit to screen: scale up small resolutions, scale down large ones
+    val screen = Toolkit.getDefaultToolkit.getScreenSize
+    val maxW = (screen.width * 0.85).toInt
+    val maxH = (screen.height * 0.80).toInt
+    if fbWidth <= maxW && fbHeight <= maxH then
+      // Fits on screen — scale up small resolutions
+      val s = math.max(1, math.min(maxW / fbWidth, maxH / fbHeight))
+      displayWidth = fbWidth * s
+      displayHeight = fbHeight * s
+    else
+      // Too large — scale down to fit, preserving aspect ratio
+      val sx = maxW.toDouble / fbWidth
+      val sy = maxH.toDouble / fbHeight
+      val s = math.min(sx, sy)
+      displayWidth = (fbWidth * s).toInt
+      displayHeight = (fbHeight * s).toInt
     revalidate()
 
   override def getPreferredSize: Dimension =
-    new Dimension(fbWidth * scale, fbHeight * scale)
+    new Dimension(displayWidth, displayHeight)
 
   override def paintComponent(g: Graphics): Unit =
     val g2 = g.asInstanceOf[Graphics2D]
@@ -46,5 +60,7 @@ class FramebufferWidget extends JComponent:
       image.setRGB(i % fbWidth, i / fbWidth, (a << 24) | (r << 16) | (ga << 8) | b)
       i += 1
 
-    g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR)
-    g2.drawImage(image, 0, 0, fbWidth * scale, fbHeight * scale, null)
+    val interp = if displayWidth < fbWidth then RenderingHints.VALUE_INTERPOLATION_BILINEAR
+                 else RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR
+    g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, interp)
+    g2.drawImage(image, 0, 0, displayWidth, displayHeight, null)
