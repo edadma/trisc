@@ -544,4 +544,321 @@ class OSKitIPCTests extends OSKitTestHelpers {
     output should include("b")
     output should include("X")
   }
+
+  "IPC: port register and lookup by name" in {
+    val (_, output) = runIPC(Map(
+      "app" ->
+        """import oskit.*
+          |
+          |var tty_name: [5]i8
+          |
+          |kernel_main() -> int
+          |    tty_name[0] = 116
+          |    tty_name[1] = 116
+          |    tty_name[2] = 121
+          |    tty_name[3] = 48
+          |    tty_name[4] = 0
+          |    ipc_init()
+          |    create_thread(server, 0x10000, 0xF000, "srv")
+          |    create_thread(client, 0x14000, 0x13000, "cli")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |
+          |server()
+          |    val port = port_create()
+          |    val r = port_register(port, &tty_name[0])
+          |    if r == 0
+          |        putc('R')
+          |    var buf: [64]i8
+          |    val sender = ipc_recv(port, &buf[0], 64)
+          |    putc(buf[0])
+          |    var reply: [1]i8
+          |    reply[0] = 1
+          |    ipc_reply(sender, &reply[0], 1)
+          |
+          |client()
+          |    sleep(10)
+          |    // Look up "tty0" by name
+          |    val port = port_lookup(&tty_name[0])
+          |    if port >= 0
+          |        putc('L')
+          |    var msg: [1]i8
+          |    msg[0] = 72
+          |    var reply: [1]i8
+          |    ipc_send(port, &msg[0], 1, &reply[0], 1)
+          |    putc('!')
+          |""".stripMargin
+    ))
+
+    // R = registered, L = looked up, H = server got message, ! = client done
+    output should include("R")
+    output should include("L")
+    output should include("H")
+    output should include("!")
+  }
+
+  "IPC: lookup nonexistent name returns -1" in {
+    val (_, output) = runIPC(Map(
+      "app" ->
+        """import oskit.*
+          |
+          |var bad_name: [4]i8
+          |
+          |kernel_main() -> int
+          |    bad_name[0] = 120
+          |    bad_name[1] = 121
+          |    bad_name[2] = 122
+          |    bad_name[3] = 0
+          |    ipc_init()
+          |    create_thread(task, 0x10000, 0xF000, "t")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |
+          |task()
+          |    val r = port_lookup(&bad_name[0])
+          |    if r == -1
+          |        putc('N')
+          |    else
+          |        putc('F')
+          |""".stripMargin
+    ))
+
+    output should include("N")
+  }
+
+  "IPC: server loop handles multiple requests" in {
+    val (_, output) = runIPC(Map(
+      "app" ->
+        """import oskit.*
+          |
+          |kernel_main() -> int
+          |    ipc_init()
+          |    create_thread(server, 0x10000, 0xF000, "srv")
+          |    create_thread(client, 0x14000, 0x13000, "cli")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |
+          |server()
+          |    val port = port_create()
+          |    // Server loop: handle requests until told to stop
+          |    var running = 1
+          |    while running == 1
+          |        var buf: [64]i8
+          |        val sender = ipc_recv(port, &buf[0], 64)
+          |        if buf[0] == 0
+          |            // Stop command
+          |            running = 0
+          |            var reply: [1]i8
+          |            reply[0] = 0
+          |            ipc_reply(sender, &reply[0], 1)
+          |        else
+          |            // Echo command: reply with same byte + 32
+          |            putc(buf[0])
+          |            var reply: [1]i8
+          |            reply[0] = buf[0] + 32
+          |            ipc_reply(sender, &reply[0], 1)
+          |    putc('Q')
+          |
+          |client()
+          |    sleep(5)
+          |    // Send 3 requests then stop
+          |    var msg: [1]i8
+          |    var reply: [1]i8
+          |
+          |    msg[0] = 65
+          |    ipc_send(0, &msg[0], 1, &reply[0], 1)
+          |    if reply[0] == 97
+          |        putc('1')
+          |
+          |    msg[0] = 66
+          |    ipc_send(0, &msg[0], 1, &reply[0], 1)
+          |    if reply[0] == 98
+          |        putc('2')
+          |
+          |    msg[0] = 67
+          |    ipc_send(0, &msg[0], 1, &reply[0], 1)
+          |    if reply[0] == 99
+          |        putc('3')
+          |
+          |    // Send stop
+          |    msg[0] = 0
+          |    ipc_send(0, &msg[0], 1, &reply[0], 1)
+          |""".stripMargin
+    ))
+
+    // Server echoes A, B, C then quits
+    // Client confirms replies: 1, 2, 3
+    output should include("A")
+    output should include("B")
+    output should include("C")
+    output should include("1")
+    output should include("2")
+    output should include("3")
+    output should include("Q")
+  }
+
+  "IPC: register on unowned port returns -1" in {
+    val (_, output) = runIPC(Map(
+      "app" ->
+        """import oskit.*
+          |
+          |var name: [4]i8
+          |
+          |kernel_main() -> int
+          |    name[0] = 97
+          |    name[1] = 98
+          |    name[2] = 99
+          |    name[3] = 0
+          |    ipc_init()
+          |    create_thread(owner, 0x10000, 0xF000, "own")
+          |    create_thread(thief, 0x14000, 0x13000, "thf")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |
+          |owner()
+          |    port_create()
+          |    sleep(100)
+          |
+          |thief()
+          |    sleep(5)
+          |    // Try to register name on port 0 (owned by other thread)
+          |    val r = port_register(0, &name[0])
+          |    if r == -1
+          |        putc('E')
+          |    else
+          |        putc('N')
+          |""".stripMargin
+    ))
+
+    output should include("E")
+  }
+
+  "IPC: lookup after port closed returns -1" in {
+    val (_, output) = runIPC(Map(
+      "app" ->
+        """import oskit.*
+          |
+          |var name: [4]i8
+          |
+          |kernel_main() -> int
+          |    name[0] = 97
+          |    name[1] = 98
+          |    name[2] = 99
+          |    name[3] = 0
+          |    ipc_init()
+          |    create_thread(task, 0x10000, 0xF000, "t")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |
+          |task()
+          |    val port = port_create()
+          |    port_register(port, &name[0])
+          |    // Verify it's found
+          |    val r1 = port_lookup(&name[0])
+          |    if r1 == 0
+          |        putc('F')
+          |    // Close and verify gone
+          |    port_close(port)
+          |    val r2 = port_lookup(&name[0])
+          |    if r2 == -1
+          |        putc('G')
+          |""".stripMargin
+    ))
+
+    // F = found before close, G = gone after close
+    output should include("F")
+    output should include("G")
+  }
+
+  "IPC: multiple named ports lookup correctly" in {
+    val (_, output) = runIPC(Map(
+      "app" ->
+        """import oskit.*
+          |
+          |var n_tty: [5]i8
+          |var n_dsk: [5]i8
+          |
+          |kernel_main() -> int
+          |    n_tty[0] = 116
+          |    n_tty[1] = 116
+          |    n_tty[2] = 121
+          |    n_tty[3] = 48
+          |    n_tty[4] = 0
+          |    n_dsk[0] = 100
+          |    n_dsk[1] = 115
+          |    n_dsk[2] = 107
+          |    n_dsk[3] = 48
+          |    n_dsk[4] = 0
+          |    ipc_init()
+          |    create_thread(task, 0x10000, 0xF000, "t")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |
+          |task()
+          |    val p0 = port_create()
+          |    val p1 = port_create()
+          |    port_register(p0, &n_tty[0])
+          |    port_register(p1, &n_dsk[0])
+          |    // Look up each
+          |    val r0 = port_lookup(&n_tty[0])
+          |    val r1 = port_lookup(&n_dsk[0])
+          |    if r0 == 0
+          |        putc('T')
+          |    if r1 == 1
+          |        putc('D')
+          |""".stripMargin
+    ))
+
+    // T = tty0 found at port 0, D = dsk0 found at port 1
+    output should include("T")
+    output should include("D")
+  }
+
+  "IPC: re-register changes port name" in {
+    val (_, output) = runIPC(Map(
+      "app" ->
+        """import oskit.*
+          |
+          |var name1: [4]i8
+          |var name2: [4]i8
+          |
+          |kernel_main() -> int
+          |    name1[0] = 97
+          |    name1[1] = 98
+          |    name1[2] = 99
+          |    name1[3] = 0
+          |    name2[0] = 120
+          |    name2[1] = 121
+          |    name2[2] = 122
+          |    name2[3] = 0
+          |    ipc_init()
+          |    create_thread(task, 0x10000, 0xF000, "t")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |
+          |task()
+          |    val port = port_create()
+          |    port_register(port, &name1[0])
+          |    // Verify "abc" found
+          |    val r1 = port_lookup(&name1[0])
+          |    if r1 == 0
+          |        putc('A')
+          |    // Re-register as "xyz"
+          |    port_register(port, &name2[0])
+          |    // Old name gone
+          |    val r2 = port_lookup(&name1[0])
+          |    if r2 == -1
+          |        putc('B')
+          |    // New name works
+          |    val r3 = port_lookup(&name2[0])
+          |    if r3 == 0
+          |        putc('C')
+          |""".stripMargin
+    ))
+
+    // A = found under old name, B = old name gone, C = found under new name
+    output should include("A")
+    output should include("B")
+    output should include("C")
+  }
 }

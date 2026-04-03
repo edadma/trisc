@@ -46,15 +46,18 @@ queues of blocked senders.
     var port_owner: [8]int
     var port_wait_head: [8]int
     var port_wait_tail: [8]int
+    var port_name: [8]i64
     var port_count = 0
 
-Syscall numbers for IPC (31-35).
+Syscall numbers for IPC (31-37).
 
-    val SYS_PORT_CREATE  = 31
-    val SYS_IPC_SEND     = 32
-    val SYS_IPC_RECV     = 33
-    val SYS_IPC_REPLY    = 34
-    val SYS_PORT_CLOSE   = 35
+    val SYS_PORT_CREATE   = 31
+    val SYS_IPC_SEND      = 32
+    val SYS_IPC_RECV      = 33
+    val SYS_IPC_REPLY     = 34
+    val SYS_PORT_CLOSE    = 35
+    val SYS_PORT_REGISTER = 36
+    val SYS_PORT_LOOKUP   = 37
 
     extern syscall(num: int, arg: i64) -> int
 
@@ -67,6 +70,18 @@ Simple byte copy between memory addresses.
         while i < len
             d[i] = s[i]
             i += 1
+
+Compare two null-terminated strings. Returns 0 if equal.
+
+    ipc_strcmp(a: *i8, b: *i8) -> int
+        var i = 0
+        while a[i] != 0
+            if a[i] != b[i]
+                return 1
+            i += 1
+        if b[i] != 0
+            return 1
+        0
 
 Per-port FIFO queue operations for blocked senders.
 
@@ -105,12 +120,15 @@ syscall handlers. Call from kernel_main before creating threads.
             port_owner[i] = IPC_PORT_FREE
             port_wait_head[i] = IPC_QUEUE_EMPTY
             port_wait_tail[i] = IPC_QUEUE_EMPTY
+            port_name[i] = 0
             i += 1
         register_syscall(SYS_PORT_CREATE, ipc_port_create_handler)
         register_syscall(SYS_IPC_SEND, ipc_send_handler)
         register_syscall(SYS_IPC_RECV, ipc_recv_handler)
         register_syscall(SYS_IPC_REPLY, ipc_reply_handler)
         register_syscall(SYS_PORT_CLOSE, ipc_port_close_handler)
+        register_syscall(SYS_PORT_REGISTER, ipc_port_register_handler)
+        register_syscall(SYS_PORT_LOOKUP, ipc_port_lookup_handler)
 
 Create a new port owned by the current thread.
 Returns the port ID, or -1 if no ports available.
@@ -329,6 +347,51 @@ Only the port owner can close it.
         syscall_return(0)
         ipc_continue_current()
 
+Register a name for a port. The arg is a pointer to a packed
+argument block: [port, name_ptr]. Only the port owner can
+register a name. Returns 0 on success, -1 on error.
+
+    ipc_port_register_handler(arg: int)
+        var args: *i64 = *i64(i64(arg))
+        val port = int(args[0])
+        val name_ptr = args[1]
+        val me = current_thread
+
+        if port < 0
+            syscall_return(-1)
+            ipc_continue_current()
+            return
+        if port >= port_count
+            syscall_return(-1)
+            ipc_continue_current()
+            return
+        if port_owner[port] != me
+            syscall_return(-1)
+            ipc_continue_current()
+            return
+
+        port_name[port] = name_ptr
+        syscall_return(0)
+        ipc_continue_current()
+
+Look up a port by name. The arg is a pointer to a
+null-terminated name string. Returns port ID, or -1 if
+not found.
+
+    ipc_port_lookup_handler(arg: int)
+        var name: *i8 = *i8(i64(arg))
+        var i = 0
+        while i < port_count
+            if port_owner[i] != IPC_PORT_FREE
+                if port_name[i] != 0
+                    if ipc_strcmp(name, *i8(port_name[i])) == 0
+                        syscall_return(i)
+                        ipc_continue_current()
+                        return
+            i += 1
+        syscall_return(-1)
+        ipc_continue_current()
+
 Userspace wrappers. These pack arguments and invoke syscalls.
 
     port_create() -> int
@@ -336,6 +399,15 @@ Userspace wrappers. These pack arguments and invoke syscalls.
 
     port_close(port: int) -> int
         syscall(SYS_PORT_CLOSE, port)
+
+    port_register(port: int, name: *i8) -> int
+        var args: [2]i64
+        args[0] = port
+        args[1] = i64(name)
+        syscall(SYS_PORT_REGISTER, i64(&args[0]))
+
+    port_lookup(name: *i8) -> int
+        syscall(SYS_PORT_LOOKUP, i64(name))
 
     ipc_send(port: int, msg: *i8, msg_len: int, reply: *i8, reply_len: int) -> int
         var args: [5]i64
