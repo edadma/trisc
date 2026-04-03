@@ -34,8 +34,9 @@ The trap handler in boot.asm dispatches based on r1:
     val STATE_TERMINATED   = 3
     val STATE_JOINING      = 4
     val STATE_SUSPENDED    = 5
-    val STATE_SEND_BLOCKED = 11
-    val STATE_RECV_BLOCKED = 12
+    val STATE_SEND_BLOCKED        = 20
+    val STATE_RECV_BLOCKED        = 21
+    val STATE_RECV_NOTIFY_BLOCKED = 22
 
     val QUEUE_EMPTY = -1
     val STACK_CANARY = 0xDEAD
@@ -102,8 +103,8 @@ tick_hook is called on every timer tick. Set to 0 to disable.
     var idle_hook = 0
     var tick_hook = 0
 
-    val STATE_NOTIFY_WAIT = 6
-    val STATE_MUTEX_WAIT = 7
+    val STATE_NOTIFY_WAIT = 10
+    val STATE_MUTEX_WAIT = 11
 
 Syscall dispatch table. Each slot holds a function pointer
 (i64) for a slow-path syscall handler. Handlers receive one
@@ -514,6 +515,12 @@ it is woken and re-enqueued.
         tasks[target_id].notify_value = value
         tasks[target_id].notify_pending = 1
         if tasks[target_id].state == STATE_NOTIFY_WAIT
+            tasks[target_id].state = STATE_READY
+            tasks[target_id].quantum = DEFAULT_QUANTUM
+            enqueue(tasks[target_id].priority, target_id)
+        if tasks[target_id].state == STATE_RECV_NOTIFY_BLOCKED
+            // Wake with -2 to indicate notification (not IPC message)
+            syscall_return_for(target_id, -2)
             tasks[target_id].state = STATE_READY
             tasks[target_id].quantum = DEFAULT_QUANTUM
             enqueue(tasks[target_id].priority, target_id)

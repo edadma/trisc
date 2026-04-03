@@ -58,7 +58,8 @@ Syscall numbers for IPC (31-37).
     val SYS_PORT_CLOSE     = 35
     val SYS_PORT_REGISTER  = 36
     val SYS_PORT_LOOKUP    = 37
-    val SYS_IPC_SEND_TIMED = 38
+    val SYS_IPC_SEND_TIMED    = 38
+    val SYS_IPC_RECV_NOTIFY   = 39
 
     extern syscall(num: int, arg: i64) -> int
 
@@ -154,6 +155,7 @@ syscall handlers. Call from kernel_main before creating threads.
         register_syscall(SYS_PORT_REGISTER, ipc_port_register_handler)
         register_syscall(SYS_PORT_LOOKUP, ipc_port_lookup_handler)
         register_syscall(SYS_IPC_SEND_TIMED, ipc_send_timed_handler)
+        register_syscall(SYS_IPC_RECV_NOTIFY, ipc_recv_notify_handler)
 
 Create a new port owned by the current thread.
 Returns the port ID, or -1 if no ports available.
@@ -206,24 +208,11 @@ Returns 0 on success, -1 on error (invalid port, port closed).
 
         // Check if the server is already waiting for a message
         val owner = port_owner[port]
-        if tasks[owner].state == STATE_RECV_BLOCKED
-            if ipc_ctx[owner].port == port
-                // Server is waiting — deliver the message now
-                ipc_deliver(owner, me, msg_ptr, msg_len)
-
-                // Write sender ID as server's return value (saved r1 at SSP+48)
-                var ssp_r1: *i64 = *i64(tasks[owner].ssp + 48)
-                *ssp_r1 = me
-
-                // Wake the server
-                tasks[owner].state = STATE_READY
-                tasks[owner].quantum = DEFAULT_QUANTUM
-                enqueue(tasks[owner].priority, owner)
-
-                // Block the sender (waits for reply, no timeout)
-                tasks[me].state = STATE_SEND_BLOCKED
-                tasks[me].wake_tick = 0
-                return
+        if ipc_server_waiting(owner, port) == 1
+            ipc_deliver_and_wake(owner, me, msg_ptr, msg_len)
+            tasks[me].state = STATE_SEND_BLOCKED
+            tasks[me].wake_tick = 0
+            return
 
         // Server not waiting — enqueue sender in port's FIFO
         ipc_queue_push(port, me)
@@ -231,6 +220,29 @@ Returns 0 on success, -1 on error (invalid port, port closed).
         // Block the sender (waits for reply, no timeout)
         tasks[me].state = STATE_SEND_BLOCKED
         tasks[me].wake_tick = 0
+
+Check if a server is waiting for a message on a given port.
+Returns 1 if waiting (RECV_BLOCKED or RECV_NOTIFY_BLOCKED), 0 otherwise.
+
+    ipc_server_waiting(owner: int, port: int) -> int
+        if tasks[owner].state == STATE_RECV_BLOCKED
+            if ipc_ctx[owner].port == port
+                return 1
+        if tasks[owner].state == STATE_RECV_NOTIFY_BLOCKED
+            if ipc_ctx[owner].port == port
+                return 1
+        0
+
+Deliver a message from sender to server and wake the server.
+Used by send handlers when the server is already waiting.
+
+    ipc_deliver_and_wake(owner: int, sender: int, msg_ptr: i64, msg_len: int)
+        ipc_deliver(owner, sender, msg_ptr, msg_len)
+        var ssp_r1: *i64 = *i64(tasks[owner].ssp + 48)
+        *ssp_r1 = sender
+        tasks[owner].state = STATE_READY
+        tasks[owner].quantum = DEFAULT_QUANTUM
+        enqueue(tasks[owner].priority, owner)
 
 Copy message from sender to receiver's buffer, handling
 truncation. Sets actual_len on the receiver's IPC context.
@@ -462,23 +474,69 @@ Returns 0 on success, -1 on error, -2 on timeout.
 
         // Check if the server is already waiting
         val owner = port_owner[port]
-        if tasks[owner].state == STATE_RECV_BLOCKED
-            if ipc_ctx[owner].port == port
-                ipc_deliver(owner, me, msg_ptr, msg_len)
-                var ssp_r1: *i64 = *i64(tasks[owner].ssp + 48)
-                *ssp_r1 = me
-                tasks[owner].state = STATE_READY
-                tasks[owner].quantum = DEFAULT_QUANTUM
-                enqueue(tasks[owner].priority, owner)
-                // Block sender with timeout (waiting for reply)
-                tasks[me].state = STATE_SEND_BLOCKED
-                tasks[me].wake_tick = ticks + timeout
-                return
+        if ipc_server_waiting(owner, port) == 1
+            ipc_deliver_and_wake(owner, me, msg_ptr, msg_len)
+            // Block sender with timeout (waiting for reply)
+            tasks[me].state = STATE_SEND_BLOCKED
+            tasks[me].wake_tick = ticks + timeout
+            return
 
         // Server not waiting — enqueue with timeout
         ipc_queue_push(port, me)
         tasks[me].state = STATE_SEND_BLOCKED
         tasks[me].wake_tick = ticks + timeout
+
+Receive a message OR notification. Like ipc_recv but also
+wakes when a notification is sent to this thread.
+Returns sender ID for IPC messages, -2 for notifications.
+On notification, call notify_read() to get the value.
+
+    ipc_recv_notify_handler(arg: int)
+        var args: *i64 = *i64(i64(arg))
+        val port = int(args[0])
+        val buf_ptr = args[1]
+        val buf_len = int(args[2])
+        val me = current_thread
+
+        // Validate: must own the port
+        if port < 0
+            syscall_return(-1)
+            ipc_continue_current()
+            return
+        if port >= port_count
+            syscall_return(-1)
+            ipc_continue_current()
+            return
+        if port_owner[port] != me
+            syscall_return(-1)
+            ipc_continue_current()
+            return
+
+        // Store receiver's IPC context
+        ipc_ctx[me].buf = buf_ptr
+        ipc_ctx[me].len = buf_len
+        ipc_ctx[me].port = port
+
+        // Check for pending notification first
+        if tasks[me].notify_pending == 1
+            syscall_return(-2)
+            ipc_continue_current()
+            return
+
+        // Check the port's wait queue for a blocked sender
+        var sender = ipc_queue_pop(port)
+        while sender != IPC_QUEUE_EMPTY
+            if tasks[sender].state == STATE_SEND_BLOCKED
+                ipc_deliver(me, sender, ipc_ctx[sender].buf, ipc_ctx[sender].len)
+                syscall_return(sender)
+                tasks[me].state = STATE_READY
+                tasks[me].quantum = DEFAULT_QUANTUM
+                enqueue(tasks[me].priority, me)
+                return
+            sender = ipc_queue_pop(port)
+
+        // No sender, no notification — block waiting for either
+        tasks[me].state = STATE_RECV_NOTIFY_BLOCKED
 
 Userspace wrappers. These pack arguments and invoke syscalls.
 
@@ -519,6 +577,13 @@ Userspace wrappers. These pack arguments and invoke syscalls.
         args[1] = i64(msg)
         args[2] = msg_len
         syscall(SYS_IPC_REPLY, i64(&args[0]))
+
+    ipc_recv_notify(port: int, buf: *i8, buf_len: int) -> int
+        var args: [3]i64
+        args[0] = port
+        args[1] = i64(buf)
+        args[2] = buf_len
+        syscall(SYS_IPC_RECV_NOTIFY, i64(&args[0]))
 
     ipc_send_timeout(port: int, msg: *i8, msg_len: int, reply: *i8, reply_len: int, timeout: int) -> int
         var args: [6]i64

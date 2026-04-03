@@ -211,18 +211,24 @@ delivers to the active console.
                     else
                         ch = sc_to_ascii[sc]
                     if ch != 0
-                        val con = active_console
-                        // If a reader is pending, deliver directly
-                        if consoles[con].pending_reader >= 0
-                            val reader = consoles[con].pending_reader
-                            var reply_data: *i8 = *i8(consoles[con].pending_buf)
-                            reply_data[0] = 0
-                            reply_data[1] = ch
-                            ipc_reply(reader, reply_data, 2)
-                            consoles[con].pending_reader = -1
-                        else
-                            // Buffer it
-                            tty_console_push(con, ch)
+                        tty_console_push(active_console, ch)
+
+Deliver buffered input to any pending readers across
+all consoles.
+
+    tty_deliver_pending()
+        var con = 0
+        while con < MAX_CONSOLES
+            if consoles[con].pending_reader >= 0
+                val ch = tty_console_pop(con)
+                if ch >= 0
+                    val reader = consoles[con].pending_reader
+                    var reply: [2]i8
+                    reply[0] = 0
+                    reply[1] = i8(ch)
+                    ipc_reply(reader, &reply[0], 2)
+                    consoles[con].pending_reader = -1
+            con += 1
 
 Handle a WRITE command: output a character.
 
@@ -257,15 +263,10 @@ when keyboard input arrives).
             reply[1] = i8(ch)
             ipc_reply(sender, &reply[0], 2)
         else
-            // No input — save pending request
+            // No input — save pending request.
+            // The server will reply when keyboard input arrives
+            // (via tty_deliver_pending after notification).
             consoles[console].pending_reader = sender
-            // We need a buffer for the deferred reply.
-            // Use the console's in_buf area temporarily
-            // (it's empty since we just checked).
-            // Actually, reply directly from tty_process_keyboard.
-            // Just save the sender's reply buffer info.
-            consoles[console].pending_buf = ipc_ctx[sender].reply_buf
-            consoles[console].pending_len = ipc_ctx[sender].reply_len
 
 Handle a SWITCH command: change active console.
 
@@ -303,30 +304,41 @@ initializes keyboard, then loops handling messages.
         tty_port = port_create()
         port_register(tty_port, &tty_name[0])
         tty_tid = thread_id()
+        keyboard_set_notify(tty_tid)
 
-        // Server loop
+        // Server loop — waits for IPC messages OR keyboard notifications
         var buf: [128]i8
         while 1 == 1
             // Check for keyboard input before blocking
             tty_process_keyboard()
+            tty_deliver_pending()
 
-            val sender = ipc_recv(tty_port, &buf[0], 128)
-            val cmd = int(buf[0])
-            val console = int(buf[1])
+            val result = ipc_recv_notify(tty_port, &buf[0], 128)
 
-            if cmd == TTY_CMD_WRITE
-                tty_handle_write(sender, console, buf[2])
-            else if cmd == TTY_CMD_PUTS
-                tty_handle_puts(sender, console, &buf[0])
-            else if cmd == TTY_CMD_READ
-                tty_handle_read(sender, console)
-            else if cmd == TTY_CMD_SWITCH
-                tty_handle_switch(sender, console)
-            else
-                // Unknown command — reply with error
-                var reply: [1]i8
-                reply[0] = -1
-                ipc_reply(sender, &reply[0], 1)
+            if result == -2
+                // Notification: keyboard input arrived
+                notify_read(tty_tid)
+                tty_process_keyboard()
+                tty_deliver_pending()
+            else if result >= 0
+                // IPC message from client
+                val sender = result
+                val cmd = int(buf[0])
+                val console = int(buf[1])
+
+                if cmd == TTY_CMD_WRITE
+                    tty_handle_write(sender, console, buf[2])
+                else if cmd == TTY_CMD_PUTS
+                    tty_handle_puts(sender, console, &buf[0])
+                else if cmd == TTY_CMD_READ
+                    tty_handle_read(sender, console)
+                else if cmd == TTY_CMD_SWITCH
+                    tty_handle_switch(sender, console)
+                else
+                    // Unknown command — reply with error
+                    var reply: [1]i8
+                    reply[0] = -1
+                    ipc_reply(sender, &reply[0], 1)
 
 Userspace wrappers. These build IPC messages and send
 them to the TTY port.
