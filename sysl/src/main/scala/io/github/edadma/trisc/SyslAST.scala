@@ -13,6 +13,7 @@ case class ArrayTypeAST(size: Int, elem: TypeAST) extends TypeAST
 case class SliceTypeAST(elem: TypeAST) extends TypeAST
 case class FuncTypeAST(params: List[TypeAST], ret: TypeAST) extends TypeAST
 case class TupleTypeAST(elems: List[TypeAST]) extends TypeAST
+case class RefTypeAST(inner: TypeAST) extends TypeAST
 
 // Import selectors
 sealed trait ImportSelector
@@ -102,4 +103,5 @@ case class StructInitAST(typeName: String) extends ExpressionAST
 case class UninitDeclAST(typeName: TypeAST) extends ExpressionAST
 case class SizeofTypeAST(typeName: TypeAST) extends ExpressionAST
 case class SizeofExprAST(expr: ExpressionAST) extends ExpressionAST
+case class NewExprAST(typeName: String, args: List[ExpressionAST]) extends ExpressionAST
 case class StringLitExprAST(value: String) extends ExpressionAST

@@ -1175,6 +1175,49 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitAddImm(2, 1, i)
           emit("  std r0, r2, r0")
 
+      case TNew(st, args) =>
+        // Heap-allocate ref-counted struct: [refcount_i64 | fields...]
+        val dataSize = stackSize(st)
+        val totalAlloc = dataSize + 8 // 8 bytes for refcount header
+        // Call malloc(totalAlloc) — result in r1
+        emitLoadImm(1, totalAlloc)
+        emit("  pshd r1")
+        stackOffset -= 8
+        // Convert to i64 arg
+        emit("  popd r1")
+        stackOffset += 8
+        emit("  movi r4, malloc")
+        emit("  jalr r6, r4")
+        // r1 = allocated pointer. Save it as a temp on stack.
+        emit("  pshd r1")
+        stackOffset -= 8
+        val ptrOffset = stackOffset
+        // Initialize refcount = 1
+        emitLoadImm(2, 1)
+        emit("  std r2, r1, r0") // store refcount at [ptr+0]
+        // Zero-fill data area
+        emitAddImm(1, 1, 8) // r1 = data start
+        for i <- 0 until ((dataSize + 7) & ~7) by 8 do
+          emitAddImm(2, 1, i)
+          emit("  std r0, r2, r0")
+        // Store each field
+        for (arg, i) <- args.zipWithIndex do
+          val (_, fieldType) = st.fields(i)
+          val off = fieldOffset(st, i)
+          genExpr(arg) // r1 = value
+          // Reload base pointer from stack
+          emitAddImm(3, 5, ptrOffset)
+          emit("  ldd r3, r3, r0") // r3 = malloc result
+          emitAddImm(2, 3, 8 + off) // r2 = field address (past header)
+          emitStore(1, 2, fieldType)
+        // r1 = data pointer (past refcount header)
+        emitAddImm(1, 5, ptrOffset)
+        emit("  ldd r1, r1, r0")
+        emitAddImm(1, 1, 8)
+        // Clean up temp
+        emitAddImm(7, 7, 8)
+        stackOffset += 8
+
       case TStructConstruct(st, args) =>
         // Allocate struct on stack and zero-initialize
         val totalSize = stackSize(st)

@@ -34,6 +34,11 @@ class SyslAnalyzer:
     "println" -> FunInfo("println", List("n" -> I32), VoidType),
     "puts" -> FunInfo("puts", List("s" -> StringType), VoidType),
     "puti" -> FunInfo("puti", List("n" -> I32), VoidType),
+    "malloc" -> FunInfo("malloc", List("size" -> I64), PtrType(I8)),
+    "free" -> FunInfo("free", List("ptr" -> PtrType(I8)), VoidType),
+    "calloc" -> FunInfo("calloc", List("count" -> I64, "size" -> I64), PtrType(I8)),
+    "realloc" -> FunInfo("realloc", List("ptr" -> PtrType(I8), "size" -> I64), PtrType(I8)),
+    "sbrk" -> FunInfo("sbrk", List("increment" -> I32), PtrType(I8)),
   )
 
   def registerImport(meta: ModuleMeta, selectors: List[ImportSelector] = List(WildcardImport)): Unit =
@@ -50,7 +55,7 @@ class SyslAnalyzer:
       sym.typ match
         case SymbolMeta.Kind.Func(params, returnType) =>
           val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
-          if functions.contains(sym.name) || builtinFunctions.contains(sym.name) then
+          if functions.contains(sym.name) then
             if !sym.isExtern then
               throw AnalysisError(s"imported symbol '${sym.name}' conflicts with existing function")
           else
@@ -95,7 +100,7 @@ class SyslAnalyzer:
         case FunDeclAST(name, params, returnType, _, _) =>
           val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
           val retType = returnType.map(resolveType).getOrElse(VoidType)
-          if functions.contains(name) || builtinFunctions.contains(name) then
+          if functions.contains(name) then
             throw AnalysisError(s"duplicate function: '$name'", decl)
           functions(name) = FunInfo(name, paramTypes, retType)
           // Register as method if name matches StructName_methodName pattern
@@ -198,6 +203,7 @@ class SyslAnalyzer:
     case SliceTypeAST(elem) => SliceType(resolveType(elem))
     case TupleTypeAST(elems) => SyslType.tupleType(elems.map(resolveType))
     case FuncTypeAST(params, ret) => FuncType(params.map(resolveType), resolveType(ret))
+    case RefTypeAST(inner) => RefType(resolveType(inner))
 
   private def compatible(from: SyslType, to: SyslType): Boolean =
     (from, to) match
@@ -220,6 +226,8 @@ class SyslAnalyzer:
       case (ArrayType(e1, _), ArrayType(e2, _)) if e1 == e2 => true
       case (ArrayType(e1, _), SliceType(e2)) if e1 == e2 => true  // fixed array → slice
       case (SliceType(e1), SliceType(e2)) if e1 == e2 => true
+      case (RefType(a), RefType(b)) if a == b => true      // same ref type
+      case (RefType(inner), PtrType(_)) => true             // &T → *U (ref decays to pointer)
       case _ => false
 
   // Coerce integer literals to the target type (like Rust's untyped integer literals)
@@ -330,6 +338,7 @@ class SyslAnalyzer:
         val (resolvedObj, structType) = tObj.typ match
           case st: StructType => (tObj, st)
           case PtrType(st: StructType) => (TDeref(tObj, st), st)
+          case RefType(st: StructType) => (TDeref(tObj, st), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
@@ -341,6 +350,7 @@ class SyslAnalyzer:
         val (resolvedObj, structType) = tObj.typ match
           case st: StructType => (tObj, st)
           case PtrType(st: StructType) => (TDeref(tObj, st), st)
+          case RefType(st: StructType) => (TDeref(tObj, st), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
@@ -439,6 +449,7 @@ class SyslAnalyzer:
         val (resolvedObj, structType) = tObj.typ match
           case st: StructType => (tObj, st)
           case PtrType(st: StructType) => (TDeref(tObj, st), st)
+          case RefType(st: StructType) => (TDeref(tObj, st), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
@@ -449,6 +460,7 @@ class SyslAnalyzer:
         val (resolvedObj, structType) = tObj.typ match
           case st: StructType => (tObj, st)
           case PtrType(st: StructType) => (TDeref(tObj, st), st)
+          case RefType(st: StructType) => (TDeref(tObj, st), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
@@ -459,6 +471,7 @@ class SyslAnalyzer:
         val (resolvedObj, structType) = tObj.typ match
           case st: StructType => (tObj, st)
           case PtrType(st: StructType) => (TDeref(tObj, st), st)
+          case RefType(st: StructType) => (TDeref(tObj, st), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
@@ -469,10 +482,27 @@ class SyslAnalyzer:
         val (resolvedObj, structType) = tObj.typ match
           case st: StructType => (tObj, st)
           case PtrType(st: StructType) => (TDeref(tObj, st), st)
+          case RefType(st: StructType) => (TDeref(tObj, st), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
         TFieldPostDec(resolvedObj, idx, structType.fields(idx)._2)
+
+      case NewExprAST(typeName, args) =>
+        val t = resolveType(NamedTypeAST(typeName))
+        t match
+          case st: StructType =>
+            val tArgs = args.map(analyzeExpr)
+            if tArgs.length != st.fields.length then
+              throw AnalysisError(s"new '${st.name}' expects ${st.fields.length} field(s), got ${tArgs.length}")
+            val checkedArgs = tArgs.zip(st.fields).map { case (arg, (fieldName, fieldType)) =>
+              val coerced = coerceLiteral(arg, fieldType)
+              if !compatible(coerced.typ, fieldType) then
+                throw AnalysisError(s"field '$fieldName' of '${st.name}' expects $fieldType, got ${coerced.typ}")
+              coerced
+            }
+            TNew(st, checkedArgs)
+          case _ => throw AnalysisError(s"'new' requires a struct type, got $t")
 
       case StructInitAST(typeName) =>
         val t = resolveType(NamedTypeAST(typeName))
@@ -554,6 +584,7 @@ class SyslAnalyzer:
         val (resolvedObj, structType) = tObj.typ match
           case st: StructType => (tObj, st)
           case PtrType(st: StructType) => (TDeref(tObj, st), st)
+          case RefType(st: StructType) => (TDeref(tObj, st), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
@@ -667,6 +698,7 @@ class SyslAnalyzer:
               case _ => throw AnalysisError(s"cannot call method on this struct expression")
             (name, addr)
           case PtrType(StructType(name, _)) => (name, tObj) // already a pointer
+          case RefType(StructType(name, _)) => (name, tObj) // already a ref
           case other => throw AnalysisError(s"cannot call method '$method' on $other")
         // Look up the method
         val funcName = s"${structName}_$method"
