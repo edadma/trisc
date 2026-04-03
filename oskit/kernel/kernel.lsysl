@@ -113,6 +113,15 @@ syscalls (putc, queries) remain hardcoded in boot.asm.
 
     val MAX_SYSCALLS = 32
     var syscall_table: [32]i64
+    var syscall_ssp: i64 = 0
+
+Set the return value for the current syscall. Writes into
+the saved r1 slot on the SSP so the caller sees it after
+context restore.
+
+    syscall_return(value: i64)
+        var p: *i64 = *i64(syscall_ssp + 48)
+        *p = value
 
     register_syscall(num: int, handler: i64)
         if num >= 0

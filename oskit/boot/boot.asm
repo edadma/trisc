@@ -89,6 +89,7 @@ start_first_thread
 extern schedule
 extern current_thread
 extern syscall_table
+extern syscall_ssp
 
 context_switch
   pshr r6               ; save r1-r6
@@ -287,6 +288,10 @@ trap_handler
   popd r1                       ; restore syscall number
 
   beq r4, r0, .bad_syscall     ; null handler
+
+  ; Save SSP so handlers can write return values to saved context
+  movi r5, syscall_ssp
+  std r7, r5, r0               ; syscall_ssp = current SSP
 
   ; Call handler: r1 = arg1 (from saved r2), r2 = arg2 (from saved r3)
   mov r1, r2                   ; shift: r1 = first arg
