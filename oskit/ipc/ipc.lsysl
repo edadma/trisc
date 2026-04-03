@@ -132,6 +132,10 @@ Blocks the sender until the server calls reply().
                     ipc_ctx[owner].actual_len = copy_len
                 ipc_ctx[owner].sender = me
 
+                // Write sender ID as server's return value (saved r1 at SSP+48)
+                var ssp_r1: *i64 = *i64(tasks[owner].ssp + 48)
+                *ssp_r1 = me
+
                 // Wake the server
                 tasks[owner].state = STATE_READY
                 tasks[owner].quantum = DEFAULT_QUANTUM

@@ -111,9 +111,9 @@ the handler returns, the scheduler runs.
 Modules register handlers via register_syscall(). Fast-path
 syscalls (putc, queries) remain hardcoded in boot.asm.
 
-    val MAX_SYSCALLS = 32
-    var syscall_table: [32]i64
-    var syscall_ssp: i64 = 0
+    val MAX_SYSCALLS = 48
+    var syscall_table: [48]i64
+    var syscall_ssp: i64
 
 Set the return value for the current syscall. Writes into
 the saved r1 slot on the SSP so the caller sees it after
