@@ -74,8 +74,11 @@ import java.io.File
  *   0x39 SET_CURSOR_VISIBLE — show cursor if WIN_FLAGS bit 3 set, hide otherwise
  *   0x3A SET_CURSOR_SURFACE — use TARGET surface as cursor image (0=default arrow)
  *
- * Compositor commands (0x40-0x4F):
+ * Compositor / input commands (0x40-0x4F):
  *   0x40 COMPOSITE — composite all visible windows onto surface 0, then draw cursor
+ *   0x41 PROCESS_MOUSE — feed mouse pos (X1,Y1), button state (WIN_FLAGS bit 4=left).
+ *                          Handles title bar drag, click-to-focus. RESULT=window under cursor.
+ *   0x42 Z_ORDER_QUERY — write visible window IDs into TEXT_BUF, back-to-front, null-terminated
  */
 class DrawEngine(
     val base: Long,
@@ -192,6 +195,13 @@ class DrawEngine(
   private var cursorVisible = true
   private var cursorSurfaceId = 0 // 0 = default arrow
 
+  // Drag state
+  private var dragging = false
+  private var dragWindowId = 0
+  private var dragOffsetX = 0
+  private var dragOffsetY = 0
+  private var prevMouseButton = false
+
   // Path state
   private var path = new GeneralPath()
 
@@ -282,6 +292,8 @@ class DrawEngine(
       case 0x3A => cursorSurfaceId = regs(TARGET) & 0xFF
       // Compositor
       case 0x40 => composite()
+      case 0x41 => processMouse()
+      case 0x42 => zOrderQuery()
       case _ =>
 
   private def executeDraw(cmd: Int): Unit =
@@ -458,30 +470,8 @@ class DrawEngine(
       windowOrder += wid
 
   private def hitTest(): Unit =
-    val mx = reg16(X1)
-    val my = reg16(Y1)
-    // Walk z-order back to front (last = top), check top-most first
-    var found = 0
-    var onTitleBar = false
-    var i = windowOrder.length - 1
-    while i >= 0 && found == 0 do
-      val wid = windowOrder(i)
-      val win = windows(wid)
-      if win != null && win.visible then
-        val sid = win.surfaceId
-        if sid > 0 && sid < MaxSurfaces && surfaces(sid) != null then
-          val surf = surfaces(sid)
-          val wx = win.x
-          val wy = win.y
-          val vw = if win.viewW > 0 then win.viewW else surf.width
-          val vh = if win.viewH > 0 then win.viewH else surf.height
-          val totalH = if win.decorated then vh + TitleBarHeight else vh
-          if mx >= wx && mx < wx + vw && my >= wy && my < wy + totalH then
-            found = wid
-            onTitleBar = win.decorated && my < wy + TitleBarHeight
-      i -= 1
+    val (found, onTitleBar) = hitTestAt(reg16(X1), reg16(Y1))
     regs(RESULT) = found.toByte
-    // Set bit 2 of WIN_FLAGS to indicate title bar hit
     val flags = regs(WIN_FLAGS) & 0xFF
     if onTitleBar then regs(WIN_FLAGS) = ((flags | 4) & 0xFF).toByte
     else regs(WIN_FLAGS) = ((flags & ~4) & 0xFF).toByte
@@ -579,6 +569,86 @@ class DrawEngine(
         val vh = if win.viewH > 0 then win.viewH else surf.height
         win.scrollX = math.max(0, math.min(win.scrollX, surf.width - vw))
         win.scrollY = math.max(0, math.min(win.scrollY, surf.height - vh))
+
+  // === Mouse input / Drag ===
+
+  private def processMouse(): Unit =
+    val mx = reg16(X1)
+    val my = reg16(Y1)
+    val leftDown = (regs(WIN_FLAGS) & 16) != 0 // bit 4
+    val justPressed = leftDown && !prevMouseButton
+    val justReleased = !leftDown && prevMouseButton
+    prevMouseButton = leftDown
+
+    if justReleased && dragging then
+      dragging = false
+      dragWindowId = 0
+
+    if dragging && leftDown then
+      // Move window by tracking mouse
+      val win = windows(dragWindowId)
+      if win != null then
+        win.x = mx - dragOffsetX
+        win.y = my - dragOffsetY
+
+    if justPressed then
+      // Hit test to find window under cursor
+      val (hitWid, onTitleBar) = hitTestAt(mx, my)
+      regs(RESULT) = hitWid.toByte
+      if hitWid > 0 then
+        // Raise (focus) the clicked window
+        if windowOrder.contains(hitWid) then
+          windowOrder -= hitWid
+          windowOrder += hitWid
+        if onTitleBar then
+          // Begin drag
+          val win = windows(hitWid)
+          dragging = true
+          dragWindowId = hitWid
+          dragOffsetX = mx - win.x
+          dragOffsetY = my - win.y
+      // Set title bar flag
+      val flags = regs(WIN_FLAGS) & 0xFF
+      if onTitleBar then regs(WIN_FLAGS) = ((flags | 4) & 0xFF).toByte
+      else regs(WIN_FLAGS) = ((flags & ~4) & 0xFF).toByte
+    else
+      // Just report what's under cursor
+      val (hitWid, onTitleBar) = hitTestAt(mx, my)
+      regs(RESULT) = hitWid.toByte
+      val flags = regs(WIN_FLAGS) & 0xFF
+      if onTitleBar then regs(WIN_FLAGS) = ((flags | 4) & 0xFF).toByte
+      else regs(WIN_FLAGS) = ((flags & ~4) & 0xFF).toByte
+
+  /** Hit test helper — returns (windowId, onTitleBar) */
+  private def hitTestAt(mx: Int, my: Int): (Int, Boolean) =
+    var i = windowOrder.length - 1
+    while i >= 0 do
+      val wid = windowOrder(i)
+      val win = windows(wid)
+      if win != null && win.visible then
+        val sid = win.surfaceId
+        if sid > 0 && sid < MaxSurfaces && surfaces(sid) != null then
+          val surf = surfaces(sid)
+          val wx = win.x
+          val wy = win.y
+          val vw = if win.viewW > 0 then win.viewW else surf.width
+          val vh = if win.viewH > 0 then win.viewH else surf.height
+          val totalH = if win.decorated then vh + TitleBarHeight else vh
+          if mx >= wx && mx < wx + vw && my >= wy && my < wy + totalH then
+            return (wid, win.decorated && my < wy + TitleBarHeight)
+      i -= 1
+    (0, false)
+
+  // === Z-order query ===
+
+  private def zOrderQuery(): Unit =
+    // Write window IDs into TEXT_BUF in back-to-front order, null-terminated
+    var i = 0
+    for wid <- windowOrder if i < 31 do
+      if windows(wid) != null && windows(wid).visible then
+        regs(TEXT_BUF + i) = wid.toByte
+        i += 1
+    regs(TEXT_BUF + i) = 0 // null terminator
 
   // === Compositor ===
 

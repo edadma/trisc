@@ -24,15 +24,14 @@
 - [ ] **Alpha compositing** — windows are opaque blits; support per-window opacity
 - [x] **Font family selection** — SET_FONT by name, LOAD_FONT from RAM binary data
 - [x] **Scrolling** — SET_SCROLL (scroll offset) + SET_VIEWPORT (visible area size); compositor blits only visible portion
-- [ ] **Window move by drag** — host-side: detect title bar drag, update window position
-- [ ] **Z-order query** — command to read current window order
+- [x] **Window move by drag** — PROCESS_MOUSE handles title bar drag + click-to-focus
+- [x] **Z-order query** — Z_ORDER_QUERY writes visible window IDs into TEXT_BUF
 
 ## Missing — Nice to Have
 
 - [ ] **Wallpaper** — command to set a background image that persists across composites
 - [ ] **Window animations** — fade in/out, minimize effect
 - [ ] **Drop shadows** — Gaussian blur shadow instead of solid offset
-- [ ] **Subpixel text rendering** — LCD-optimized text
 - [ ] **Gradient fills** — linear and radial gradients
 - [ ] **Icon support** — per-window icon for title bar and taskbar
 - [ ] **Multi-monitor** — multiple framebuffer outputs
