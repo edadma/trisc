@@ -116,7 +116,8 @@ class SyslTriscCodegen(addresses: Int = 4):
   private def leaveScope(): Unit =
     val (savedLocals, savedOffset) = savedScopes.pop()
     // Decrement refcounts for ref-typed locals leaving scope
-    for (name, local) <- locals if !savedLocals.contains(name) do
+    // Skip params (positive offsets) — they are borrowed, not owned
+    for (name, local) <- locals if !savedLocals.contains(name) && local.offset < 0 do
       local.typ match
         case rt: SyslType.RefType =>
           val hoff = refHeaderOffset(rt)
@@ -262,8 +263,9 @@ class SyslTriscCodegen(addresses: Int = 4):
     emit(s"$skip")
 
   // Decrement refcounts for all ref-typed locals in the current scope
+  // Skip params (positive offsets from fp) — they are borrowed, not owned
   private def emitRefCleanup(): Unit =
-    for (_, local) <- locals do
+    for (_, local) <- locals if local.offset < 0 do
       local.typ match
         case rt: SyslType.RefType =>
           val hoff = refHeaderOffset(rt)
@@ -498,8 +500,10 @@ class SyslTriscCodegen(addresses: Int = 4):
             locals(name) = LocalVar(name, stackOffset, typ)
           case _ =>
             genExpr(init) // result in r1
-            typ match
-              case rt: SyslType.RefType => emitRefIncr(1, refHeaderOffset(rt))
+            // Increment refcount for copies (not for new — TNew already sets refcount=1)
+            (typ, init) match
+              case (rt: SyslType.RefType, _: TNew | _: TNewArray) => // owned, no incr needed
+              case (rt: SyslType.RefType, _) => emitRefIncr(1, refHeaderOffset(rt))
               case _ =>
             val local = allocLocal(name, typ)
             emitAddImm(2, 5, local.offset)
@@ -535,7 +539,10 @@ class SyslTriscCodegen(addresses: Int = 4):
               emit("  ldd r1, r1, r0")
               emitRefDecr(1, hoff)
               genExpr(value)
-              emitRefIncr(1, hoff) // increment new ref
+              // Increment only for copies, not new allocations
+              value match
+                case _: TNew | _: TNewArray => // owned, no incr needed
+                case _ => emitRefIncr(1, hoff)
               emitAddImm(2, 5, local.offset)
               emitStore(1, 2, local.typ)
             case _ =>
@@ -552,7 +559,9 @@ class SyslTriscCodegen(addresses: Int = 4):
               emit("  ldd r1, r1, r0")
               emitRefDecr(1, hoff)
               genExpr(value)
-              emitRefIncr(1, hoff)
+              value match
+                case _: TNew | _: TNewArray =>
+                case _ => emitRefIncr(1, hoff)
               emit("  pshd r1")
               emit(s"  movi r1, $target")
               emit("  popd r2")

@@ -284,7 +284,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     stmt match
       case TVarStmt(name, _, init) =>
         val v = evalAny(init, env)
-        refIncr(v)
+        // Increment refcount for copies only — TNew/TNewArray already set refcount=1
+        init match
+          case _: TNew | _: TNewArray => // owned, no incr
+          case _ => refIncr(v)
         env(name) = new Cell(v)
 
       case TDestructureStmt(names, _, init) =>
@@ -294,7 +297,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TAssignStmt(target, value) =>
         val v = evalAny(value, env)
-        refIncr(v)
+        // Increment refcount for copies only
+        value match
+          case _: TNew | _: TNewArray => // owned, no incr
+          case _ => refIncr(v)
         if env.contains(target) then
           refDecr(env(target).value)
           env(target).value = v

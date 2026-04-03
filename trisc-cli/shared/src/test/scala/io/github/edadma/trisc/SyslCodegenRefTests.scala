@@ -300,6 +300,63 @@ class SyslCodegenRefTests extends SyslCodegenHelpers {
         |""".stripMargin)) shouldBe 99
   }
 
+  // ===== Refcount reaches zero — memory reuse =====
+
+  "tight loop allocation with small heap — free works" in {
+    compileMultiAndRun(refSources(
+      """import posix.stdlib.{malloc, free}
+        |
+        |struct Box
+        |    value: int
+        |
+        |main() -> int
+        |    var sum = 0
+        |    var i = 0
+        |    while i < 100
+        |        val b = new Box(i)
+        |        sum += b.value
+        |        i++
+        |    sum
+        |""".stripMargin, 4096)) shouldBe 4950
+  }
+
+  "reassign in loop — old refs freed" in {
+    compileMultiAndRun(refSources(
+      """import posix.stdlib.{malloc, free}
+        |
+        |struct Box
+        |    value: int
+        |
+        |main() -> int
+        |    var b = new Box(0)
+        |    var i = 0
+        |    while i < 50
+        |        b = new Box(i)
+        |        i++
+        |    b.value
+        |""".stripMargin, 4096)) shouldBe 49
+  }
+
+  "function creates and returns — caller-side ref freed after use" in {
+    compileMultiAndRun(refSources(
+      """import posix.stdlib.{malloc, free}
+        |
+        |struct Box
+        |    value: int
+        |
+        |make(v: int) -> &Box = new Box(v)
+        |
+        |main() -> int
+        |    var sum = 0
+        |    var i = 0
+        |    while i < 50
+        |        val b = make(i)
+        |        sum += b.value
+        |        i++
+        |    sum
+        |""".stripMargin, 4096)) shouldBe 1225
+  }
+
   "shared ref sees mutation" in {
     compileMultiAndRun(refSources(
       """import posix.stdlib.malloc

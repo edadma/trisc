@@ -160,6 +160,39 @@ class SyslCodegenDynArrayTests extends SyslCodegenHelpers {
         |""".stripMargin)) shouldBe 30
   }
 
+  // ===== Refcount reaches zero — memory reuse =====
+
+  "tight loop array allocation with small heap" in {
+    compileMultiAndRun(arraySources(
+      """import posix.stdlib.{malloc, free}
+        |
+        |main() -> int
+        |    var sum = 0
+        |    var i = 0
+        |    while i < 50
+        |        val a = new [4]int
+        |        a[0] = i
+        |        sum += a[0]
+        |        i++
+        |    sum
+        |""".stripMargin)) shouldBe 1225
+  }
+
+  "reassign array in loop — old freed" in {
+    compileMultiAndRun(arraySources(
+      """import posix.stdlib.{malloc, free}
+        |
+        |main() -> int
+        |    var a = new [2]int
+        |    var i = 0
+        |    while i < 50
+        |        a = new [2]int
+        |        a[0] = i
+        |        i++
+        |    a[0]
+        |""".stripMargin)) shouldBe 49
+  }
+
   "array in loop" in {
     compileMultiAndRun(arraySources(
       """import posix.stdlib.{malloc, free}
