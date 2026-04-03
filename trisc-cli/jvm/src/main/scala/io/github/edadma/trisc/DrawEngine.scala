@@ -60,8 +60,13 @@ import java.io.File
  *   0x37 HIT_TEST — given screen coords (X1, Y1), put window ID in RESULT (0=desktop)
  *                     also sets WIN_FLAGS bit 2 if hit was on title bar
  *
+ * Cursor commands (0x38-0x3F):
+ *   0x38 SET_CURSOR_POS — set cursor position to (X1, Y1)
+ *   0x39 SET_CURSOR_VISIBLE — show cursor if WIN_FLAGS bit 3 set, hide otherwise
+ *   0x3A SET_CURSOR_SURFACE — use TARGET surface as cursor image (0=default arrow)
+ *
  * Compositor commands (0x40-0x4F):
- *   0x40 COMPOSITE — composite all visible windows onto surface 0 (the screen)
+ *   0x40 COMPOSITE — composite all visible windows onto surface 0, then draw cursor
  */
 class DrawEngine(
     val base: Long,
@@ -148,6 +153,12 @@ class DrawEngine(
   private val MaximizeColor = new Color(50, 255, 120)
   private val CornerRadius = 12
 
+  // Cursor state
+  private var cursorX = 0
+  private var cursorY = 0
+  private var cursorVisible = true
+  private var cursorSurfaceId = 0 // 0 = default arrow
+
   // Path state
   private var path = new GeneralPath()
 
@@ -227,6 +238,10 @@ class DrawEngine(
       case 0x35 => raiseWindow()
       case 0x36 => resizeWindow()
       case 0x37 => hitTest()
+      // Cursor commands
+      case 0x38 => cursorX = reg16(X1); cursorY = reg16(Y1)
+      case 0x39 => cursorVisible = (regs(WIN_FLAGS) & 8) != 0
+      case 0x3A => cursorSurfaceId = regs(TARGET) & 0xFF
       // Compositor
       case 0x40 => composite()
       case _ =>
@@ -467,3 +482,25 @@ class DrawEngine(
           else
             // Undecorated — just blit
             g.drawImage(surf.image, wx, wy, null)
+
+    // Draw cursor last (always on top)
+    if cursorVisible then drawCursor(g)
+
+  private def drawCursor(g: Graphics2D): Unit =
+    // Custom cursor surface
+    if cursorSurfaceId > 0 && cursorSurfaceId < MaxSurfaces && surfaces(cursorSurfaceId) != null then
+      g.drawImage(surfaces(cursorSurfaceId).image, cursorX, cursorY, null)
+      return
+
+    // Default arrow pointer
+    val x = cursorX
+    val y = cursorY
+    val xpts = Array(x, x, x + 4, x + 6, x + 9, x + 7, x + 12)
+    val ypts = Array(y, y + 16, y + 12, y + 18, y + 17, y + 11, y + 11)
+    g.setColor(new Color(0, 0, 0, 120))
+    g.fillPolygon(xpts.map(_ + 1), ypts.map(_ + 1), 7)
+    g.setColor(Color.WHITE)
+    g.fillPolygon(xpts, ypts, 7)
+    g.setColor(Color.BLACK)
+    g.setStroke(new BasicStroke(1.0f))
+    g.drawPolygon(xpts, ypts, 7)

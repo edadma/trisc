@@ -384,6 +384,8 @@ main() -> int
     val win3 = create_window(880, 30, 530, 220, s_terminal, 8)
     draw_terminal(win3)
 
-    // Composite everything — windows are drawn on top of desktop with decorations
+    // Set cursor position and composite
+    de_pos(700, 450)
+    de_exec(0x38)  // SET_CURSOR_POS
     de_exec(CMD_COMPOSITE)
     0

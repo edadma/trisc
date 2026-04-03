@@ -14,7 +14,7 @@
 
 - [x] **Hit testing** — HIT_TEST returns window ID at (x,y) in RESULT, flags title bar hit
 - [x] **Window resize** — RESIZE_WINDOW recreates surface, preserves content
-- [ ] **Mouse cursor** — render a cursor sprite at a given position during composite
+- [x] **Mouse cursor** — SET_CURSOR_POS, SET_CURSOR_VISIBLE, SET_CURSOR_SURFACE (custom or default arrow)
 - [ ] **Focus indicator** — visually distinguish the focused window (brighter title bar, accent border)
 
 ## Missing — Important
