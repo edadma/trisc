@@ -115,6 +115,16 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   private def leaveScope(): Unit =
     val (savedLocals, savedOffset) = savedScopes.pop()
+    // Decrement refcounts for ref-typed locals leaving scope
+    for (name, local) <- locals if !savedLocals.contains(name) do
+      local.typ match
+        case _: SyslType.RefType =>
+          emit("  pshd r1")
+          emitAddImm(1, 5, local.offset)
+          emit("  ldd r1, r1, r0")
+          emitRefDecr(1)
+          emit("  popd r1")
+        case _ =>
     locals.clear()
     locals ++= savedLocals
     if stackOffset != savedOffset then
@@ -214,6 +224,49 @@ class SyslTriscCodegen(addresses: Int = 4):
       case _ =>
         emit(s"  std r$srcReg, r$addrReg, r0")
 
+  // Emit refcount increment: ptr in rPtr, refcount is at [rPtr - 8]
+  // Clobbers r3, r4. Skips if rPtr == 0 (null).
+  private def emitRefIncr(ptrReg: Int): Unit =
+    val skip = newLabel("skip_incr")
+    emit(s"  beq r$ptrReg, r0, $skip")
+    emitAddImm(3, ptrReg, -8)       // r3 = &refcount
+    emit("  ldd r4, r3, r0")        // r4 = refcount
+    emit("  addi r4, r4, 1")        // r4++
+    emit("  std r4, r3, r0")        // store back
+    emit(s"$skip")
+
+  // Emit refcount decrement + free-at-zero: ptr in rPtr, refcount at [rPtr - 8]
+  // Clobbers r3, r4. Skips if rPtr == 0 (null). Calls free(rPtr - 8) when refcount hits 0.
+  private def emitRefDecr(ptrReg: Int): Unit =
+    val skip = newLabel("skip_decr")
+    val noFree = newLabel("no_free")
+    emit(s"  beq r$ptrReg, r0, $skip")
+    emitAddImm(3, ptrReg, -8)       // r3 = &refcount (also base for free)
+    emit("  ldd r4, r3, r0")        // r4 = refcount
+    emit("  addi r4, r4, -1")       // r4--
+    emit("  std r4, r3, r0")        // store back
+    emit(s"  bne r4, r0, $noFree")
+    // refcount == 0 → free(ptr - 8)
+    emit("  pshd r1")               // save r1
+    emit("  mov r1, r3")            // r1 = base pointer (ptr - 8)
+    emit("  movi r4, free")
+    emit("  jalr r6, r4")
+    emit("  popd r1")               // restore r1
+    emit(s"$noFree")
+    emit(s"$skip")
+
+  // Decrement refcounts for all ref-typed locals in the current scope
+  private def emitRefCleanup(): Unit =
+    for (_, local) <- locals do
+      local.typ match
+        case _: SyslType.RefType =>
+          emit("  pshd r1")         // save r1 (may hold return value)
+          emitAddImm(1, 5, local.offset)
+          emit("  ldd r1, r1, r0")  // r1 = ref pointer
+          emitRefDecr(1)
+          emit("  popd r1")         // restore r1
+        case _ =>
+
   // Allocate a local variable on the stack, return its offset from fp.
   // The variable is aligned to the greater of its natural alignment and 8
   // (pshd/popd require SP to stay 8-byte aligned).
@@ -284,6 +337,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         genExpr(expr) // result in r1
         if structReturn then emitStructReturn()
         emitDefers()
+        emitRefCleanup()
         emitEpilogue()
       case TBlockBody(stmts) =>
         genBlock(stmts)
@@ -300,16 +354,19 @@ class SyslTriscCodegen(addresses: Int = 4):
           genExpr(expr) // result in r1
           if sr then emitStructReturn()
           emitDefers()
+          emitRefCleanup()
           emitEpilogue()
         case other =>
           genStmt(other)
           // If no explicit return, return 0
           emit("  ldi r1, 0")
           emitDefers()
+          emitRefCleanup()
           emitEpilogue()
     else
       emit("  ldi r1, 0")
       emitDefers()
+      emitRefCleanup()
       emitEpilogue()
 
   // Emit binary operation: r1 = r1 op r3
@@ -434,6 +491,9 @@ class SyslTriscCodegen(addresses: Int = 4):
             locals(name) = LocalVar(name, stackOffset, typ)
           case _ =>
             genExpr(init) // result in r1
+            typ match
+              case _: SyslType.RefType => emitRefIncr(1) // increment refcount for new local
+              case _ =>
             val local = allocLocal(name, typ)
             emitAddImm(2, 5, local.offset)
             emitStore(1, 2, typ)
@@ -459,16 +519,41 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TAssignStmt(target, value) =>
         if locals != null && locals.contains(target) then
-          genExpr(value)
           val local = locals(target)
-          emitAddImm(2, 5, local.offset)
-          emitStore(1, 2, local.typ)
+          local.typ match
+            case _: SyslType.RefType =>
+              // Decrement old ref before overwrite
+              emitAddImm(1, 5, local.offset)
+              emit("  ldd r1, r1, r0")
+              emitRefDecr(1)
+              genExpr(value)
+              emitRefIncr(1) // increment new ref
+              emitAddImm(2, 5, local.offset)
+              emitStore(1, 2, local.typ)
+            case _ =>
+              genExpr(value)
+              emitAddImm(2, 5, local.offset)
+              emitStore(1, 2, local.typ)
         else if globals.contains(target) then
-          genExpr(value)
-          emit(s"  pshd r1")
-          emit(s"  movi r1, $target")
-          emit(s"  popd r2")
-          emitStore(2, 1, globals(target))
+          val gtyp = globals(target)
+          gtyp match
+            case _: SyslType.RefType =>
+              // Decrement old global ref
+              emit(s"  movi r1, $target")
+              emit("  ldd r1, r1, r0")
+              emitRefDecr(1)
+              genExpr(value)
+              emitRefIncr(1)
+              emit("  pshd r1")
+              emit(s"  movi r1, $target")
+              emit("  popd r2")
+              emitStore(2, 1, gtyp)
+            case _ =>
+              genExpr(value)
+              emit(s"  pshd r1")
+              emit(s"  movi r1, $target")
+              emit(s"  popd r2")
+              emitStore(2, 1, gtyp)
         else
           // New local variable (first assignment = declaration, infer type)
           value match
@@ -527,11 +612,13 @@ class SyslTriscCodegen(addresses: Int = 4):
         if currentFunction != null && returnsViaPointer(currentFunction.returnType) then
           emitStructReturn()
         emitDefers()
+        emitRefCleanup()
         emitEpilogue()
 
       case TReturnStmt(None) =>
         emit("  ldi r1, 0")
         emitDefers()
+        emitRefCleanup()
         emitEpilogue()
 
       case TDeferStmt(body) =>

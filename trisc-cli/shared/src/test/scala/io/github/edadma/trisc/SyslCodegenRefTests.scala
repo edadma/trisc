@@ -170,6 +170,136 @@ class SyslCodegenRefTests extends SyslCodegenHelpers {
         |""".stripMargin)) shouldBe 42
   }
 
+  "reassign ref — old value preserved through other ref" in {
+    compileMultiAndRun(refSources(
+      """import posix.stdlib.malloc
+        |import posix.stdlib.free
+        |
+        |struct Box
+        |    value: int
+        |
+        |main() -> int
+        |    var a = new Box(10)
+        |    val b = a
+        |    a = new Box(20)
+        |    b.value
+        |""".stripMargin)) shouldBe 10
+  }
+
+  "reassign ref — new value accessible" in {
+    compileMultiAndRun(refSources(
+      """import posix.stdlib.malloc
+        |import posix.stdlib.free
+        |
+        |struct Box
+        |    value: int
+        |
+        |main() -> int
+        |    var a = new Box(10)
+        |    a = new Box(20)
+        |    a.value
+        |""".stripMargin)) shouldBe 20
+  }
+
+  "three refs to same object" in {
+    compileMultiAndRun(refSources(
+      """import posix.stdlib.malloc
+        |import posix.stdlib.free
+        |
+        |struct Box
+        |    value: int
+        |
+        |main() -> int
+        |    val a = new Box(10)
+        |    val b = a
+        |    val c = b
+        |    c.value = 77
+        |    a.value
+        |""".stripMargin)) shouldBe 77
+  }
+
+  "ref passed through multiple functions" in {
+    compileMultiAndRun(refSources(
+      """import posix.stdlib.malloc
+        |import posix.stdlib.free
+        |
+        |struct Box
+        |    value: int
+        |
+        |add(b: &Box, n: int)
+        |    b.value = b.value + n
+        |
+        |double_add(b: &Box, n: int)
+        |    add(b, n)
+        |    add(b, n)
+        |
+        |main() -> int
+        |    val b = new Box(0)
+        |    double_add(b, 5)
+        |    b.value
+        |""".stripMargin)) shouldBe 10
+  }
+
+  "ref created in function, modified, returned" in {
+    compileMultiAndRun(refSources(
+      """import posix.stdlib.malloc
+        |import posix.stdlib.free
+        |
+        |struct Point
+        |    x: int
+        |    y: int
+        |
+        |make_point(x: int, y: int) -> &Point
+        |    val p = new Point(x, y)
+        |    p.x = p.x * 2
+        |    p.y = p.y * 2
+        |    p
+        |
+        |main() -> int
+        |    val p = make_point(3, 4)
+        |    p.x + p.y
+        |""".stripMargin)) shouldBe 14
+  }
+
+  "ref with method call" in {
+    compileMultiAndRun(refSources(
+      """import posix.stdlib.malloc
+        |import posix.stdlib.free
+        |
+        |struct Counter
+        |    n: int
+        |
+        |Counter.inc()
+        |    self.n = self.n + 1
+        |
+        |Counter.get() -> int = self.n
+        |
+        |main() -> int
+        |    val c = new Counter(0)
+        |    c.inc()
+        |    c.inc()
+        |    c.inc()
+        |    c.get()
+        |""".stripMargin)) shouldBe 3
+  }
+
+  "ref decays to raw pointer" in {
+    compileMultiAndRun(refSources(
+      """import posix.stdlib.malloc
+        |import posix.stdlib.free
+        |
+        |struct Point
+        |    x: int
+        |    y: int
+        |
+        |read_x(p: *Point) -> int = p.x
+        |
+        |main() -> int
+        |    val pt = new Point(99, 0)
+        |    read_x(pt)
+        |""".stripMargin)) shouldBe 99
+  }
+
   "shared ref sees mutation" in {
     compileMultiAndRun(refSources(
       """import posix.stdlib.malloc
