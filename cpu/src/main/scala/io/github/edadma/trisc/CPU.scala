@@ -398,6 +398,16 @@ object Decode:
         "110 aaa bbb 00 11111" -> ((args: Map[Char, Int]) => new EXG(args('a'), args('b'))),
         // RR 01 sub-format: two-register destructive operations
         "110 aaa bbb 01 00000" -> ((args: Map[Char, Int]) => new FPOW(args('a'), args('b'))),
+        // Trig instructions
+        "110 aaa bbb 01 01001" -> ((args: Map[Char, Int]) => new FSIN(args('a'), args('b'))),
+        "110 aaa bbb 01 01010" -> ((args: Map[Char, Int]) => new FCOS(args('a'), args('b'))),
+        "110 aaa bbb 01 01011" -> ((args: Map[Char, Int]) => new FTAN(args('a'), args('b'))),
+        "110 aaa bbb 01 01100" -> ((args: Map[Char, Int]) => new FASIN(args('a'), args('b'))),
+        "110 aaa bbb 01 01101" -> ((args: Map[Char, Int]) => new FACOS(args('a'), args('b'))),
+        "110 aaa bbb 01 01110" -> ((args: Map[Char, Int]) => new FATAN(args('a'), args('b'))),
+        "110 aaa bbb 01 01111" -> ((args: Map[Char, Int]) => new FATAN2(args('a'), args('b'))),
+        "110 aaa bbb 01 10000" -> ((args: Map[Char, Int]) => new FEXP(args('a'), args('b'))),
+        "110 aaa bbb 01 10001" -> ((args: Map[Char, Int]) => new FLOG(args('a'), args('b'))),
         // MMU instructions
         "110 aaa bbb 01 00001" -> ((args: Map[Char, Int]) => new TLBI(args('a'), args('b'))),
         "110 aaa bbb 01 00010" -> ((args: Map[Char, Int]) => new TLBIA(args('a'), args('b'))),

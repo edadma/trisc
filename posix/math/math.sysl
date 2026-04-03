@@ -6,12 +6,11 @@ module posix.math
  * Hardware-backed where possible via TRISC float instructions.
  * No OS dependency — usable in bare-metal programs.
  *
- * Missing (need hardware trig/exp instructions):
- *   sin, cos, tan, asin, acos, atan, atan2
- *   sinh, cosh, tanh
- *   exp, exp2, log, log2, log10
- *   frexp, ldexp, modf
  */
+
+val PI = 3.14159265358979323846
+val LN2 = 0.69314718055994530942
+val LN10 = 2.30258509299404568402
 
 /* Return the absolute value of x. */
 fabs(x: double) -> double = if x < 0.0 then -x else x
@@ -88,5 +87,228 @@ fpow(x: double, y: double) -> double
     if y == trunc(y)
         return 1.0 / fpow(x, -y)
 
-    // Non-integer exponents need exp/log — not yet available
-    0.0
+    // Non-integer exponents: x^y = exp(y * log(x))
+    if x > 0.0 then return exp(y * log(x))
+
+    0.0  // negative base with fractional exponent is undefined
+
+/* Return the sine of x (radians). */
+sin(x: double) -> double
+    // TODO: maps to fsin instruction; needs inline asm or compiler intrinsic
+    // Taylor series with range reduction (temporary until inline asm available)
+    // Reduce x to [-pi, pi]
+    var a = fmod(x, 2.0 * PI)
+
+    if a > PI then a -= 2.0 * PI
+    if a < -PI then a += 2.0 * PI
+
+    var term = a
+    var sum = a
+
+    for var i = 1; i < 20; i++
+        term = -term * a * a / double((2 * i) * (2 * i + 1))
+        sum += term
+
+    sum
+
+/* Return the cosine of x (radians). */
+cos(x: double) -> double
+    // TODO: maps to fcos instruction; needs inline asm or compiler intrinsic
+    // Taylor series with range reduction (temporary until inline asm available)
+    var a = fmod(x, 2.0 * PI)
+
+    if a > PI then a -= 2.0 * PI
+    if a < -PI then a += 2.0 * PI
+
+    var term = 1.0
+    var sum = 1.0
+
+    for var i = 1; i < 20; i++
+        term = -term * a * a / double((2 * i - 1) * (2 * i))
+        sum += term
+
+    sum
+
+/* Return the tangent of x (radians). */
+tan(x: double) -> double
+    // TODO: maps to ftan instruction; needs inline asm or compiler intrinsic
+    cos(x) |> val c
+
+    if c == 0.0 then return 0.0  // degenerate — hardware would return ±inf
+
+    sin(x) / c
+
+/* Return the arc sine of x. Result in [-pi/2, pi/2]. */
+asin(x: double) -> double
+    // TODO: maps to fasin instruction; needs inline asm or compiler intrinsic
+    // Identity: asin(x) = atan2(x, sqrt(1 - x*x))
+    if x >= 1.0 then return PI / 2.0
+    if x <= -1.0 then return -PI / 2.0
+
+    atan2(x, sqrt(1.0 - x * x))
+
+/* Return the arc cosine of x. Result in [0, pi]. */
+acos(x: double) -> double
+    // TODO: maps to facos instruction; needs inline asm or compiler intrinsic
+    // Identity: acos(x) = pi/2 - asin(x)
+    PI / 2.0 - asin(x)
+
+/* Return the arc tangent of x. Result in [-pi/2, pi/2]. */
+atan(x: double) -> double
+    // TODO: maps to fatan instruction; needs inline asm or compiler intrinsic
+    // Convergent series with range reduction
+    // For |x| > 1: atan(x) = pi/2 - atan(1/x)
+    if x > 1.0 then return PI / 2.0 - atan(1.0 / x)
+    if x < -1.0 then return -PI / 2.0 - atan(1.0 / x)
+
+    // Taylor series for |x| <= 1: x - x³/3 + x⁵/5 - x⁷/7 + ...
+    var term = x
+    var sum = x
+    val x2 = x * x
+
+    for var i = 1; i < 40; i++
+        term = -term * x2
+        sum += term / double(2 * i + 1)
+
+    sum
+
+/* Return the arc tangent of y/x, using signs to determine quadrant. Result in [-pi, pi]. */
+atan2(y: double, x: double) -> double
+    // TODO: maps to fatan2 instruction; needs inline asm or compiler intrinsic
+    if x > 0.0 then return atan(y / x)
+    if x < 0.0
+        if y >= 0.0 then return atan(y / x) + PI
+        else return atan(y / x) - PI
+    // x == 0
+    if y > 0.0 then return PI / 2.0
+    if y < 0.0 then return -PI / 2.0
+
+    0.0  // atan2(0, 0) = 0
+
+/* Return e raised to the power x. */
+exp(x: double) -> double
+    // TODO: maps to fexp instruction; needs inline asm or compiler intrinsic
+    // Taylor series: e^x = 1 + x + x²/2! + x³/3! + ...
+    // Range reduction: e^x = 2^k * e^r where r = x - k*ln2, |r| <= ln2/2
+    val k = int(x / LN2 + (if x >= 0.0 then 0.5 else -0.5))
+    val r = x - double(k) * LN2
+    var term = 1.0
+    var sum = 1.0
+
+    for var i = 1; i < 30; i++
+        term = term * r / double(i)
+        sum += term
+
+    // Multiply by 2^k via repeated doubling/halving
+    if k >= 0
+        for var i = 0; i < k; i++
+            sum *= 2.0
+    else
+        for var i = 0; i < -k; i++
+            sum /= 2.0
+
+    sum
+
+/* Return the natural logarithm of x. */
+log(x: double) -> double
+    // TODO: maps to flog instruction; needs inline asm or compiler intrinsic
+    if x <= 0.0 then return 0.0  // undefined — hardware would return NaN/-inf
+
+    // Range reduction: x = m * 2^e where 0.5 <= m < 1
+    // log(x) = log(m) + e * ln2
+    var m = x
+    var e = 0
+
+    while m >= 2.0
+        m /= 2.0
+        e++
+
+    while m < 0.5
+        m *= 2.0
+        e--
+
+    // log(m) via series: log((1+t)/(1-t)) = 2*(t + t³/3 + t⁵/5 + ...)
+    // where t = (m-1)/(m+1)
+    val t = (m - 1.0) / (m + 1.0)
+    val t2 = t * t
+    var term = t
+    var sum = t
+
+    for var i = 1; i < 30; i++
+        term *= t2
+        sum += term / double(2 * i + 1)
+
+    2.0 * sum + double(e) * LN2
+
+/* Return 2 raised to the power x. */
+exp2(x: double) -> double = exp(x * LN2)
+
+/* Return the base-2 logarithm of x. */
+log2(x: double) -> double = log(x) / LN2
+
+/* Return the base-10 logarithm of x. */
+log10(x: double) -> double = log(x) / LN10
+
+/* Return the hyperbolic sine of x. */
+sinh(x: double) -> double
+    val ex = exp(x)
+
+    (ex - 1.0 / ex) / 2.0
+
+/* Return the hyperbolic cosine of x. */
+cosh(x: double) -> double
+    val ex = exp(x)
+
+    (ex + 1.0 / ex) / 2.0
+
+/* Return the hyperbolic tangent of x. */
+tanh(x: double) -> double
+    val ex = exp(x)
+    val emx = 1.0 / ex
+
+    (ex - emx) / (ex + emx)
+
+/* Split x into normalized fraction and exponent.
+ * Returns the fraction f where 0.5 <= |f| < 1.0.
+ * Stores the exponent in *exp such that x = f * 2^exp. */
+frexp(x: double, e: *int) -> double
+    if x == 0.0
+        *e = 0
+        return 0.0
+
+    var m = fabs(x)
+    var n = 0
+
+    while m >= 1.0
+        m /= 2.0
+        n++
+
+    while m < 0.5
+        m *= 2.0
+        n--
+
+    *e = n
+
+    if x < 0.0 then -m
+    else m
+
+/* Return x * 2^n. */
+ldexp(x: double, n: int) -> double
+    var result = x
+
+    if n >= 0
+        for var i = 0; i < n; i++
+            result *= 2.0
+    else
+        for var i = 0; i < -n; i++
+            result /= 2.0
+
+    result
+
+/* Split x into integer and fractional parts.
+ * Returns the fractional part. Stores the integer part in *iptr. */
+modf(x: double, iptr: *double) -> double
+    val t = trunc(x)
+
+    *iptr = t
+    x - t
