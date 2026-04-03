@@ -124,10 +124,9 @@ class SyslParser extends StandardTokenParsers {
           val size = t match { case ArrayTypeAST(s, _) => s; case _ => 0 }
           VarDeclAST(name, Some(t), ArrayDeclAST(size, t), priv, mut.getOrElse(true))
       } |
-      opt(mutability) ~ ident ~ (":" ~> ident) ~ not("=") ^^ {
+      opt(mutability) ~ ident ~ (":" ~> typeRef) ~ not("=") ^^ {
         case mut ~ name ~ t ~ _ =>
-          val ta = NamedTypeAST(t)
-          VarDeclAST(name, Some(ta), UninitDeclAST(ta), priv, mut.getOrElse(true))
+          VarDeclAST(name, Some(t), UninitDeclAST(t), priv, mut.getOrElse(true))
       } |
       opt(mutability) ~ ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ {
         case mut ~ name ~ t ~ e => VarDeclAST(name, Some(t), e, priv, mut.getOrElse(true))
@@ -255,9 +254,8 @@ class SyslParser extends StandardTokenParsers {
         val size = t match { case ArrayTypeAST(s, _) => s; case _ => 0 }
         VarStmtAST(name, Some(t), ArrayDeclAST(size, t))
       } |
-      ident ~ (":" ~> ident) ~ not("=") ^^ { case name ~ t ~ _ =>
-        val ta = NamedTypeAST(t)
-        VarStmtAST(name, Some(ta), UninitDeclAST(ta))
+      ident ~ (":" ~> typeRef) ~ not("=") ^^ { case name ~ t ~ _ =>
+        VarStmtAST(name, Some(t), UninitDeclAST(t))
       } |
       ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ lvalueChain ~ compoundOp ~ expr ^^ { case name ~ chain ~ op ~ value =>
