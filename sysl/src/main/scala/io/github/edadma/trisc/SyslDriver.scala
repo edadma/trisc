@@ -49,7 +49,9 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         )
 
     // Step 4: Topological sort
-    val order = topologicalSort(imports, sources.keySet)
+    // Build reverse map: module path → set of source names that belong to it
+    val moduleToSources = modules.groupMap(_._2)(_._1).map((k, v) => (k, v.toSet))
+    val order = topologicalSort(imports, sources.keySet, moduleToSources)
 
     // Step 5: Compile in order
     val smetaCache = new mutable.LinkedHashMap[String, String]
@@ -117,7 +119,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
       ast.decls.collectFirst { case ModuleDeclAST(path) => (name, path.mkString("/")) }
     }
 
-  def topologicalSort(imports: Map[String, List[ImportDeclAST]], allNames: Set[String]): List[String] =
+  def topologicalSort(imports: Map[String, List[ImportDeclAST]], allNames: Set[String], moduleToSources: Map[String, Set[String]] = Map.empty): List[String] =
     val visited = new mutable.LinkedHashSet[String]
     val visiting = new mutable.LinkedHashSet[String]
     val result = new mutable.ListBuffer[String]
@@ -127,8 +129,13 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         throw DriverError(s"circular dependency involving '$name'")
       if !visited.contains(name) then
         visiting += name
-        for dep <- imports.getOrElse(name, Nil).map(_.modulePath).distinct if allNames.contains(dep) do
-          visit(dep)
+        for dep <- imports.getOrElse(name, Nil).map(_.modulePath).distinct do
+          if allNames.contains(dep) then
+            visit(dep)
+          else
+            // Check if the import resolves to a module (folder-based)
+            for src <- moduleToSources.getOrElse(dep, Set.empty) do
+              visit(src)
         visiting -= name
         visited += name
         result += name
