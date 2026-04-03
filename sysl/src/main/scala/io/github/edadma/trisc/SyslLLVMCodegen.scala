@@ -35,6 +35,7 @@ class SyslLLVMCodegen:
         case _: TModuleDecl => // skip
         case _: TImportDecl => // skip
         case _: TExternFuncDecl => // skip
+        case _: TExternVarDecl => // skip
         case _: TStructDecl => // type only
         case _: TEnumDecl => // type only
         case _: TTypeAliasDecl => // type only

@@ -5,6 +5,15 @@ import scala.util.parsing.input.Positional
 // Top-level
 case class ProgramAST(decls: List[DeclAST])
 
+// Type syntax AST — structured representation of type references
+sealed trait TypeAST
+case class NamedTypeAST(name: String) extends TypeAST
+case class PtrTypeAST(inner: TypeAST) extends TypeAST
+case class ArrayTypeAST(size: Int, elem: TypeAST) extends TypeAST
+case class SliceTypeAST(elem: TypeAST) extends TypeAST
+case class FuncTypeAST(params: List[TypeAST], ret: TypeAST) extends TypeAST
+case class TupleTypeAST(elems: List[TypeAST]) extends TypeAST
+
 // Import selectors
 sealed trait ImportSelector
 case object WildcardImport extends ImportSelector
@@ -14,12 +23,13 @@ case class NamedImport(name: String, rename: Option[String] = None) extends Impo
 trait DeclAST extends Positional
 case class ModuleDeclAST(path: List[String]) extends DeclAST
 case class ImportDeclAST(modulePath: String, selectors: List[ImportSelector]) extends DeclAST
-case class ExternFuncDeclAST(name: String, params: List[ParamAST], returnType: Option[String]) extends DeclAST
-case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[String], body: FunBodyAST, isPrivate: Boolean = false) extends DeclAST
-case class VarDeclAST(name: String, typ: Option[String], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true) extends DeclAST
-case class StructDeclAST(name: String, fields: List[(String, String)]) extends DeclAST
+case class ExternFuncDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST]) extends DeclAST
+case class ExternVarDeclAST(name: String, typ: TypeAST) extends DeclAST
+case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST], body: FunBodyAST, isPrivate: Boolean = false) extends DeclAST
+case class VarDeclAST(name: String, typ: Option[TypeAST], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true) extends DeclAST
+case class StructDeclAST(name: String, fields: List[(String, TypeAST)]) extends DeclAST
 case class EnumDeclAST(name: String, members: List[(String, Option[Long])]) extends DeclAST
-case class TypeAliasDeclAST(name: String, target: String) extends DeclAST
+case class TypeAliasDeclAST(name: String, target: TypeAST) extends DeclAST
 case class CondDeclAST(cond: CondExpr, thenDecls: List[DeclAST], elseDecls: Option[List[DeclAST]]) extends DeclAST
 
 // Conditional compilation expressions
@@ -29,7 +39,7 @@ case class CondNot(expr: CondExpr) extends CondExpr
 case class CondEq(name: String, value: String) extends CondExpr
 case class CondNeq(name: String, value: String) extends CondExpr
 
-case class ParamAST(name: String, typ: String) extends Positional
+case class ParamAST(name: String, typ: TypeAST) extends Positional
 
 // Function body
 trait FunBodyAST
@@ -38,7 +48,7 @@ case class BlockBodyAST(stmts: List[StmtAST]) extends FunBodyAST
 
 // Statements
 trait StmtAST extends Positional
-case class VarStmtAST(name: String, typ: Option[String], init: ExpressionAST, isMutable: Boolean = true) extends StmtAST
+case class VarStmtAST(name: String, typ: Option[TypeAST], init: ExpressionAST, isMutable: Boolean = true) extends StmtAST
 case class DestructureStmtAST(names: List[String], init: ExpressionAST, isMutable: Boolean = false) extends StmtAST
 case class AssignStmtAST(target: String, value: ExpressionAST) extends StmtAST
 case class CompoundAssignStmtAST(target: String, op: String, value: ExpressionAST) extends StmtAST
@@ -73,7 +83,7 @@ case class PostIncAST(name: String) extends ExpressionAST
 case class PostDecAST(name: String) extends ExpressionAST
 case class CallAST(name: String, args: List[ExpressionAST]) extends ExpressionAST
 case class MethodCallAST(obj: ExpressionAST, method: String, args: List[ExpressionAST]) extends ExpressionAST
-case class CastAST(targetType: String, expr: ExpressionAST) extends ExpressionAST
+case class CastAST(targetType: TypeAST, expr: ExpressionAST) extends ExpressionAST
 case class IfExprAST(cond: ExpressionAST, thenBody: List[StmtAST], elseBody: Option[List[StmtAST]]) extends ExpressionAST
 case class AddrOfAST(name: String) extends ExpressionAST
 case class AddrOfIndexAST(array: ExpressionAST, index: ExpressionAST) extends ExpressionAST
@@ -85,11 +95,11 @@ case class FieldPreIncAST(obj: ExpressionAST, field: String) extends ExpressionA
 case class FieldPreDecAST(obj: ExpressionAST, field: String) extends ExpressionAST
 case class FieldPostIncAST(obj: ExpressionAST, field: String) extends ExpressionAST
 case class FieldPostDecAST(obj: ExpressionAST, field: String) extends ExpressionAST
-case class ArrayDeclAST(size: Int, elemType: String) extends ExpressionAST
+case class ArrayDeclAST(size: Int, elemType: TypeAST) extends ExpressionAST
 case class ArrayLitAST(elements: List[ExpressionAST]) extends ExpressionAST
 case class TupleLitAST(elements: List[ExpressionAST]) extends ExpressionAST
 case class StructInitAST(typeName: String) extends ExpressionAST
-case class UninitDeclAST(typeName: String) extends ExpressionAST
-case class SizeofTypeAST(typeName: String) extends ExpressionAST
+case class UninitDeclAST(typeName: TypeAST) extends ExpressionAST
+case class SizeofTypeAST(typeName: TypeAST) extends ExpressionAST
 case class SizeofExprAST(expr: ExpressionAST) extends ExpressionAST
 case class StringLitExprAST(value: String) extends ExpressionAST

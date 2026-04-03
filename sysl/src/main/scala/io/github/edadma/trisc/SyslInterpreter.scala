@@ -93,6 +93,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TModuleDecl => // metadata only
         case _: TImportDecl => // not handled in interpreter
         case _: TExternFuncDecl => // not handled in interpreter
+        case _: TExternVarDecl => // not handled in interpreter
         case _: TStructDecl => // type only, no runtime effect
         case _: TEnumDecl => // type only, no runtime effect
         case _: TTypeAliasDecl => // type only, no runtime effect
@@ -294,7 +295,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TStringLit(s, _) =>
         StrVal(s)
 
-      case TArrayDecl(size, _, typ) =>
+      case TArrayDecl(size, typ) =>
         def initElem(t: SyslType): Value = t match
           case SyslType.ArrayType(elem, sz) =>
             val cells = Array.fill(sz)(new Cell(initElem(elem)))
