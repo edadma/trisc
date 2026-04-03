@@ -1,0 +1,91 @@
+module posix.unistd
+
+import posix.stdio.*
+import posix.string.*
+
+/*
+ * getopt.sysl — POSIX command-line option parsing
+ *
+ * int getopt(int argc, char * const argv[], const char *optstring)
+ *
+ * Scans argv for options described by optstring. Returns option character,
+ * '?' on error, or -1 when all options have been processed.
+ */
+
+var optarg: *byte = *byte(0)
+var optind: int = 1
+var opterr: int = 1
+var optopt: int = 0
+
+var _optpos: int = 0
+
+getopt(argc: int, argv: **byte, optstring: *byte) -> int
+    optarg = *byte(0)
+
+    if optind >= argc then return -1
+
+    val arg = argv[optind]
+
+    // Not an option: doesn't start with '-' or is just "-"
+    if arg[0] != '-' || arg[1] == 0 then return -1
+
+    // "--" terminates option scanning
+    if arg[1] == '-' && arg[2] == 0
+        optind++
+        return -1
+
+    // Advance past '-' on first visit to this arg
+    if _optpos == 0 then _optpos = 1
+
+    val c = int(arg[_optpos])
+    _optpos++
+    optopt = c
+
+    // Find c in optstring
+    val idx = strchr(optstring, c)
+
+    if idx < 0
+        if opterr != 0
+            fputs(argv[0], STDERR_FILENO)
+            fputs(": illegal option -- ", STDERR_FILENO)
+            fputc(c, STDERR_FILENO)
+            fputc(10, STDERR_FILENO)
+
+        // Advance if we've consumed all chars in this arg
+        if arg[_optpos] == 0
+            optind++
+            _optpos = 0
+
+        return int('?')
+
+    // Check if option takes an argument (followed by ':' in optstring)
+    if optstring[idx + 1] == int(':')
+        // Rest of current arg is the argument
+        if arg[_optpos] != 0
+            optarg = arg + _optpos
+            optind++
+            _optpos = 0
+        // Otherwise next argv element is the argument
+        else
+            optind++
+            _optpos = 0
+
+            if optind >= argc
+                if opterr != 0
+                    fputs(argv[0], STDERR_FILENO)
+                    fputs(": option requires an argument -- ", STDERR_FILENO)
+                    fputc(c, STDERR_FILENO)
+                    fputc(10, STDERR_FILENO)
+
+                if optstring[0] == int(':') then return int(':')
+                else return int('?')
+
+            optarg = argv[optind]
+            optind++
+    else
+        // No argument — advance if we've consumed this arg
+        if arg[_optpos] == 0
+            optind++
+            _optpos = 0
+
+    c
