@@ -66,6 +66,8 @@ import java.io.File
  *   0x3B MINIMIZE_WINDOW — hide window WIN_ID, remember geometry
  *   0x3C MAXIMIZE_WINDOW — fill screen, remember previous geometry
  *   0x3D RESTORE_WINDOW — return window WIN_ID to normal size/position
+ *   0x3E SET_SCROLL — set window WIN_ID scroll offset to (X1, Y1), clamped to valid range
+ *   0x3F SET_VIEWPORT — set window WIN_ID visible area to (X2, Y2); 0,0 = use full surface
  *
  * Cursor commands (0x38-0x3F):
  *   0x38 SET_CURSOR_POS — set cursor position to (X1, Y1)
@@ -153,6 +155,10 @@ class DrawEngine(
     var normalY: Int = 0,
     var normalW: Int = 0,
     var normalH: Int = 0,
+    var scrollX: Int = 0,
+    var scrollY: Int = 0,
+    var viewW: Int = 0, // 0 = use full surface width
+    var viewH: Int = 0, // 0 = use full surface height
   )
 
   private val MaxWindows = 32
@@ -271,6 +277,8 @@ class DrawEngine(
       case 0x3B => minimizeWindow()
       case 0x3C => maximizeWindow()
       case 0x3D => restoreWindow()
+      case 0x3E => setScroll()
+      case 0x3F => setViewport()
       case 0x3A => cursorSurfaceId = regs(TARGET) & 0xFF
       // Compositor
       case 0x40 => composite()
@@ -465,9 +473,10 @@ class DrawEngine(
           val surf = surfaces(sid)
           val wx = win.x
           val wy = win.y
-          val ww = surf.width
-          val totalH = if win.decorated then surf.height + TitleBarHeight else surf.height
-          if mx >= wx && mx < wx + ww && my >= wy && my < wy + totalH then
+          val vw = if win.viewW > 0 then win.viewW else surf.width
+          val vh = if win.viewH > 0 then win.viewH else surf.height
+          val totalH = if win.decorated then vh + TitleBarHeight else vh
+          if mx >= wx && mx < wx + vw && my >= wy && my < wy + totalH then
             found = wid
             onTitleBar = win.decorated && my < wy + TitleBarHeight
       i -= 1
@@ -523,6 +532,10 @@ class DrawEngine(
         win.y = 0
         win.visible = true
         win.state = WinState.Maximized
+        win.scrollX = 0
+        win.scrollY = 0
+        win.viewW = 0 // use full surface
+        win.viewH = 0
         surfaces(sid).resize(fw, contentH)
 
   private def restoreWindow(): Unit =
@@ -536,6 +549,36 @@ class DrawEngine(
         win.visible = true
         win.state = WinState.Normal
         surfaces(sid).resize(win.normalW, win.normalH)
+
+  // === Scroll/Viewport commands ===
+
+  private def setScroll(): Unit =
+    val wid = regs(WIN_ID) & 0xFF
+    if wid > 0 && wid < MaxWindows && windows(wid) != null then
+      val win = windows(wid)
+      val sid = win.surfaceId
+      if sid > 0 && sid < MaxSurfaces && surfaces(sid) != null then
+        val surf = surfaces(sid)
+        val vw = if win.viewW > 0 then win.viewW else surf.width
+        val vh = if win.viewH > 0 then win.viewH else surf.height
+        // Clamp scroll to valid range
+        win.scrollX = math.max(0, math.min(reg16(X1), surf.width - vw))
+        win.scrollY = math.max(0, math.min(reg16(Y1), surf.height - vh))
+
+  private def setViewport(): Unit =
+    val wid = regs(WIN_ID) & 0xFF
+    if wid > 0 && wid < MaxWindows && windows(wid) != null then
+      val win = windows(wid)
+      win.viewW = reg16(X2)
+      win.viewH = reg16(Y2)
+      // Clamp scroll if viewport grew
+      val sid = win.surfaceId
+      if sid > 0 && sid < MaxSurfaces && surfaces(sid) != null then
+        val surf = surfaces(sid)
+        val vw = if win.viewW > 0 then win.viewW else surf.width
+        val vh = if win.viewH > 0 then win.viewH else surf.height
+        win.scrollX = math.max(0, math.min(win.scrollX, surf.width - vw))
+        win.scrollY = math.max(0, math.min(win.scrollY, surf.height - vh))
 
   // === Compositor ===
 
@@ -562,22 +605,28 @@ class DrawEngine(
           val wh = surf.height
           val focused = wid == focusedWid
 
+          // Viewport dimensions (0 = use full surface)
+          val vw = if win.viewW > 0 then win.viewW else ww
+          val vh = if win.viewH > 0 then win.viewH else wh
+          val sx = win.scrollX
+          val sy = win.scrollY
+
           if win.decorated then
             // Shadow (larger for focused window)
             g.setColor(ShadowColor)
             if focused then
-              g.fillRoundRect(wx + 6, wy + 6, ww, wh + TitleBarHeight, CornerRadius, CornerRadius)
+              g.fillRoundRect(wx + 6, wy + 6, vw, vh + TitleBarHeight, CornerRadius, CornerRadius)
             else
-              g.fillRoundRect(wx + 3, wy + 3, ww, wh + TitleBarHeight, CornerRadius, CornerRadius)
+              g.fillRoundRect(wx + 3, wy + 3, vw, vh + TitleBarHeight, CornerRadius, CornerRadius)
 
             // Window frame
             g.setColor(if focused then TitleBarColorFocused else TitleBarColorUnfocused)
-            g.fillRoundRect(wx, wy, ww, wh + TitleBarHeight, CornerRadius, CornerRadius)
+            g.fillRoundRect(wx, wy, vw, vh + TitleBarHeight, CornerRadius, CornerRadius)
 
             // Border
             g.setColor(if focused then BorderColorFocused else BorderColorUnfocused)
             g.setStroke(new BasicStroke(if focused then 1.5f else 1.0f))
-            g.drawRoundRect(wx, wy, ww, wh + TitleBarHeight, CornerRadius, CornerRadius)
+            g.drawRoundRect(wx, wy, vw, vh + TitleBarHeight, CornerRadius, CornerRadius)
 
             // Title text
             g.setColor(if focused then TitleTextColorFocused else TitleTextColorUnfocused)
@@ -592,11 +641,14 @@ class DrawEngine(
             g.setColor(if focused then MaximizeColor else MaximizeColorDim)
             g.fillOval(wx + 48, wy + 10, 12, 12)
 
-            // Content area — blit the surface below the title bar
-            g.drawImage(surf.image, wx, wy + TitleBarHeight, null)
+            // Content area — blit visible viewport from surface
+            val cy = wy + TitleBarHeight
+            g.drawImage(surf.image, wx, cy, wx + vw, cy + vh,
+                        sx, sy, sx + vw, sy + vh, null)
           else
-            // Undecorated — just blit
-            g.drawImage(surf.image, wx, wy, null)
+            // Undecorated — blit visible viewport
+            g.drawImage(surf.image, wx, wy, wx + vw, wy + vh,
+                        sx, sy, sx + vw, sy + vh, null)
 
     // Draw cursor last (always on top)
     if cursorVisible then drawCursor(g)

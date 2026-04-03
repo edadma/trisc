@@ -23,7 +23,7 @@
 - [x] **Window minimize/maximize** — MINIMIZE, MAXIMIZE, RESTORE with saved normal geometry
 - [ ] **Alpha compositing** — windows are opaque blits; support per-window opacity
 - [x] **Font family selection** — SET_FONT by name, LOAD_FONT from RAM binary data
-- [ ] **Scrolling** — viewport offset per surface for apps with content larger than their window
+- [x] **Scrolling** — SET_SCROLL (scroll offset) + SET_VIEWPORT (visible area size); compositor blits only visible portion
 - [ ] **Window move by drag** — host-side: detect title bar drag, update window position
 - [ ] **Z-order query** — command to read current window order
 
