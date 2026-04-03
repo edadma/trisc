@@ -4,8 +4,7 @@ Bounded FIFO channels for inter-thread communication.
 Sending blocks when the channel is full; receiving blocks
 when empty. Thread-safe via internal mutex and semaphores.
 
-    import mutex.*
-    import semaphore.*
+    module tos
 
 A channel wraps a caller-provided ring buffer with two
 counting semaphores (slots and items) for flow control and

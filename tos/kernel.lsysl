@@ -22,6 +22,8 @@ The trap handler in boot.asm dispatches based on r1:
 - 2 = yield() -- voluntary context switch
 
 
+    module tos
+
     val MAX_THREADS    = 8
     val NUM_PRIORITIES = 4
     val DEFAULT_QUANTUM = 5

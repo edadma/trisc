@@ -127,10 +127,10 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
     val bootTof = assemble(bootAsm, relocatable = true)
 
     val allSources = Map(
-      "kernel" -> kernelSysl, "services" -> servicesSysl, "timer" -> timerSysl, "semaphore" -> semaphoreSysl,
-      "mutex" -> mutexSysl, "condvar" -> condvarSysl, "barrier" -> barrierSysl,
-      "rwlock" -> rwlockSysl, "channel" -> channelSysl, "mailbox" -> mailboxSysl,
-      "rmutex" -> rmutexSysl, "qset" -> qsetSysl, "pimutex" -> pimutexSysl,
+      "tos/kernel" -> kernelSysl, "tos/services" -> servicesSysl, "tos/timer" -> timerSysl, "tos/semaphore" -> semaphoreSysl,
+      "tos/mutex" -> mutexSysl, "tos/condvar" -> condvarSysl, "tos/barrier" -> barrierSysl,
+      "tos/rwlock" -> rwlockSysl, "tos/channel" -> channelSysl, "tos/mailbox" -> mailboxSysl,
+      "tos/rmutex" -> rmutexSysl, "tos/qset" -> qsetSysl, "tos/pimutex" -> pimutexSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -163,5 +163,5 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
     (cpu, output.toString)
 
   def runRBTest(appSource: String): (CPU, String) =
-    runWithBoot(Map("rbtree" -> rbtreeSysl, "main" -> appSource))
+    runWithBoot(Map("tos/rbtree" -> rbtreeSysl, "main" -> appSource))
 }

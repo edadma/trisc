@@ -11,6 +11,8 @@ Device registers:
 - 0x100004 + 3 = MODIFIERS (shift/ctrl/alt/meta bitmask)
 
 
+    module tos
+
     val KB_STATUS:   *i8 = *i8(0x100004)
     val KB_SCANCODE: *i8 = *i8(0x100005)
     val KB_FLAGS:    *i8 = *i8(0x100006)

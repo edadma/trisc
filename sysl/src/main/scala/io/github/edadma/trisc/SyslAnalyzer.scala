@@ -51,14 +51,18 @@ class SyslAnalyzer:
         case SymbolMeta.Kind.Func(params, returnType) =>
           val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
           if functions.contains(sym.name) || builtinFunctions.contains(sym.name) then
-            throw AnalysisError(s"imported symbol '${sym.name}' conflicts with existing function")
-          functions(sym.name) = FunInfo(sym.name, paramPairs, returnType)
-          externalSymbols += sym.name
+            if !sym.isExtern then
+              throw AnalysisError(s"imported symbol '${sym.name}' conflicts with existing function")
+          else
+            functions(sym.name) = FunInfo(sym.name, paramPairs, returnType)
+            externalSymbols += sym.name
         case SymbolMeta.Kind.Data(dataType) =>
           if globalScope.contains(sym.name) then
-            throw AnalysisError(s"imported symbol '${sym.name}' conflicts with existing global")
-          globalScope(sym.name) = SymInfo(sym.name, dataType, mutable = false)
-          externalSymbols += sym.name
+            if !sym.isExtern then
+              throw AnalysisError(s"imported symbol '${sym.name}' conflicts with existing global")
+          else
+            globalScope(sym.name) = SymInfo(sym.name, dataType, mutable = false)
+            externalSymbols += sym.name
         case SymbolMeta.Kind.Struct(st) =>
           structTypes(sym.name) = st
 
@@ -72,18 +76,18 @@ class SyslAnalyzer:
         case _: ModuleDeclAST => // metadata only
         case _: ImportDeclAST => // handled later
         case ExternFuncDeclAST(name, params, returnType) =>
-          val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
-          val retType = returnType.map(resolveType).getOrElse(VoidType)
-          if functions.contains(name) || builtinFunctions.contains(name) then
-            throw AnalysisError(s"duplicate function: '$name'", decl)
-          functions(name) = FunInfo(name, paramTypes, retType)
-          externalSymbols += name
+          if !functions.contains(name) && !builtinFunctions.contains(name) then
+            val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
+            val retType = returnType.map(resolveType).getOrElse(VoidType)
+            functions(name) = FunInfo(name, paramTypes, retType)
+            externalSymbols += name
+          // else: already registered from same-module sibling or import — skip
         case ExternVarDeclAST(name, typ) =>
-          val resolved = resolveType(typ)
-          if globalScope.contains(name) then
-            throw AnalysisError(s"duplicate global: '$name'", decl)
-          globalScope(name) = SymInfo(name, resolved, mutable = false)
-          externalSymbols += name
+          if !globalScope.contains(name) then
+            val resolved = resolveType(typ)
+            globalScope(name) = SymInfo(name, resolved, mutable = false)
+            externalSymbols += name
+          // else: already registered from same-module sibling or import — skip
         case StructDeclAST(name, fields) =>
           if structTypes.contains(name) then throw AnalysisError(s"duplicate struct: '$name'", decl)
           val resolvedFields = fields.map((n, t) => (n, resolveType(t)))

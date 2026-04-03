@@ -4,8 +4,7 @@ A barrier synchronizes N threads at a rendezvous point.
 All threads call barrier_wait; none proceeds until all N
 have arrived. The barrier then resets for reuse.
 
-    import services.*
-    import semaphore.*
+    module tos
 
 Uses a generation counter to allow reuse. Each call to
 barrier_wait increments the arrival count. The last thread

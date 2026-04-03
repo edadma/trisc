@@ -13,7 +13,7 @@ A
 B
 ...
 
-    import services.*
+    import tos.*
 
     task_a()
         while true

@@ -12,8 +12,7 @@ Unlike the basic mutex (which uses userspace atomics and
 spin+yield), the PI mutex is fully managed by the kernel
 so it can manipulate thread priorities and wait queues.
 
-    import kernel.*
-    import services.*
+    module tos
 
     pimutex_init(m: *PIMutex)
         pimutex_init_kernel(m)

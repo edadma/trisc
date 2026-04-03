@@ -7,9 +7,7 @@ class TOSNotifyTests extends TOSTestHelpers {
   "TOS: notify_send wakes waiting thread" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(waiter, 0x6000, 0x5000, "w")
@@ -37,9 +35,7 @@ class TOSNotifyTests extends TOSTestHelpers {
   "TOS: notification already pending skips wait" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "t")
@@ -68,9 +64,7 @@ class TOSNotifyTests extends TOSTestHelpers {
   "TOS: event_set wakes waiting thread" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(waiter, 0x6000, 0x5000, "w")
@@ -95,9 +89,7 @@ class TOSNotifyTests extends TOSTestHelpers {
   "TOS: event_wait all bits" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
+        """import tos.*
           |
           |kernel_main() -> int
           |    create_thread(waiter, 0x6000, 0x5000, "w")
@@ -125,12 +117,9 @@ class TOSNotifyTests extends TOSTestHelpers {
 
   "TOS: recursive mutex allows same-thread relock" in {
     val (_, output) = runTOS(Map(
-      "rmutex" -> rmutexSysl,
+      "tos/rmutex" -> rmutexSysl,
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import rmutex.*
-          |import timer.*
+        """import tos.*
           |
           |var rm: RMutex
           |
@@ -159,12 +148,9 @@ class TOSNotifyTests extends TOSTestHelpers {
 
   "TOS: recursive mutex blocks other thread" in {
     val (_, output) = runTOS(Map(
-      "rmutex" -> rmutexSysl,
+      "tos/rmutex" -> rmutexSysl,
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import rmutex.*
-          |import timer.*
+        """import tos.*
           |
           |var rm: RMutex
           |
@@ -203,10 +189,7 @@ class TOSNotifyTests extends TOSTestHelpers {
   "TOS: qset_wait returns ready slot" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import qset.*
-          |import timer.*
+        """import tos.*
           |
           |var qs: QueueSet
           |
@@ -239,10 +222,7 @@ class TOSNotifyTests extends TOSTestHelpers {
   "TOS: qset_wait returns first ready of multiple" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import qset.*
-          |import timer.*
+        """import tos.*
           |
           |var qs: QueueSet
           |

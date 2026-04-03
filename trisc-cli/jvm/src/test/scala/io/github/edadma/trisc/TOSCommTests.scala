@@ -7,10 +7,7 @@ class TOSCommTests extends TOSTestHelpers {
   "TOS: channel send and receive" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
-          |import channel.*
+        """import tos.*
           |
           |var ch: Channel
           |var buf: [4]i64
@@ -40,10 +37,7 @@ class TOSCommTests extends TOSTestHelpers {
   "TOS: channel blocks sender when full" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
-          |import channel.*
+        """import tos.*
           |
           |var ch: Channel
           |var buf: [2]i64
@@ -81,10 +75,7 @@ class TOSCommTests extends TOSTestHelpers {
   "TOS: mailbox send and receive" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
-          |import mailbox.*
+        """import tos.*
           |
           |var mb: Mailbox
           |
@@ -112,10 +103,7 @@ class TOSCommTests extends TOSTestHelpers {
   "TOS: mailbox blocks sender until receiver drains" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import kernel.*
-          |import services.*
-          |import timer.*
-          |import mailbox.*
+        """import tos.*
           |
           |var mb: Mailbox
           |

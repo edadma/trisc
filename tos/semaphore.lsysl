@@ -9,7 +9,7 @@ A semaphore is a single i64 in memory (ll/sc operate on 64-bit values):
 - value == 0 -- all permits taken, waiters must yield and retry
 
 
-    import services.*
+    module tos
 
     extern atomic_dec_if_positive(addr: *i64) -> i64
     extern atomic_inc(addr: *i64)

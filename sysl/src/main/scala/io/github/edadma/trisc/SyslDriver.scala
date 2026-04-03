@@ -53,14 +53,51 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
     val moduleToSources = modules.groupMap(_._2)(_._1).map((k, v) => (k, v.toSet))
     val order = topologicalSort(imports, sources.keySet, moduleToSources)
 
+    // Step 4b: Pre-collect declarations for intra-module visibility
+    // Iteratively analyze module files to extract declarations. Each round
+    // makes previously collected symbols available to unresolved files.
+    // Converges when no new files succeed or all are resolved.
+    val packageMetaCache = new mutable.LinkedHashMap[String, ModuleMeta]
+    for (modPath, sourceNames) <- moduleToSources do
+      var meta = new ModuleMeta(Nil)
+      var remaining = sourceNames.toList
+      var changed = true
+      while changed && remaining.nonEmpty do
+        changed = false
+        val stillFailing = new mutable.ListBuffer[String]
+        for name <- remaining do
+          scala.util.Try {
+            val ast = asts(name)
+            val analyzer = new SyslAnalyzer
+            // Register already-collected sibling symbols, excluding externs
+            val siblings = new ModuleMeta(meta.symbols.filter(s => !s.isExtern))
+            analyzer.registerImport(siblings)
+            val typed = analyzer.analyze(ast)
+            ModuleMeta.fromProgram(typed, Some(s"$name.sysl"))
+          } match
+            case scala.util.Success(fileMeta) =>
+              meta = meta.merge(fileMeta)
+              changed = true
+            case scala.util.Failure(_) =>
+              stillFailing += name
+        remaining = stillFailing.toList
+      packageMetaCache(modPath) = meta
+
     // Step 5: Compile in order
     val smetaCache = new mutable.LinkedHashMap[String, String]
-    val packageMetaCache = new mutable.LinkedHashMap[String, ModuleMeta]
     val units = new mutable.ListBuffer[CompilationUnit]
 
     for name <- order do
       val ast = asts(name)
       val analyzer = new SyslAnalyzer
+
+      // Register same-module siblings (intra-module visibility),
+      // excluding own symbols and externs (which are private to each file)
+      for modPath <- modules.get(name) do
+        packageMetaCache.get(modPath).foreach { meta =>
+          val siblings = new ModuleMeta(meta.symbols.filter(s => s.sourceFile != Some(s"$name.sysl") && !s.isExtern))
+          analyzer.registerImport(siblings)
+        }
 
       // Register imports from previously compiled modules (or stdlib)
       for imp <- imports(name) do

@@ -14,6 +14,8 @@ Device registers (MCU-style timer):
 - 0x100040 + 12 = IER (interrupt enable: bit 0 = overflow)
 
 
+    module tos
+
     val TIMER_BASE = 0x100040
     val TIMER_ARR  = 0x100042
     val TIMER_CR   = 0x10004A
