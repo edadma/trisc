@@ -1,0 +1,54 @@
+TOS Reader-Writer Locks
+
+Allows multiple concurrent readers or a single exclusive writer.
+
+    module oskit
+
+Implementation uses two mutexes and a reader count:
+- lock: protects the reader_count field
+- write_lock: held by a writer or by the first reader
+- reader_count: number of active readers
+
+The first reader acquires write_lock; the last reader releases it.
+Writers acquire write_lock directly, blocking until all readers finish.
+
+    struct RWLock
+        lock: i64
+        write_lock: i64
+        reader_count: i64
+
+    rwlock_lock_ptr(rw: i64) -> *i64
+        *i64(rw)
+
+    rwlock_write_lock_ptr(rw: i64) -> *i64
+        *i64(rw + 8)
+
+    rwlock_init(rw: *RWLock)
+        val addr: i64 = i64(rw)
+        mutex_init(rwlock_lock_ptr(addr))
+        mutex_init(rwlock_write_lock_ptr(addr))
+        rw.reader_count = 0
+
+    read_lock(rw: *RWLock)
+        val addr: i64 = i64(rw)
+        mutex_lock(rwlock_lock_ptr(addr))
+        rw.reader_count += 1
+        if rw.reader_count == 1
+            mutex_lock(rwlock_write_lock_ptr(addr))
+        mutex_unlock(rwlock_lock_ptr(addr))
+
+    read_unlock(rw: *RWLock)
+        val addr: i64 = i64(rw)
+        mutex_lock(rwlock_lock_ptr(addr))
+        rw.reader_count -= 1
+        if rw.reader_count == 0
+            mutex_unlock(rwlock_write_lock_ptr(addr))
+        mutex_unlock(rwlock_lock_ptr(addr))
+
+    write_lock(rw: *RWLock)
+        val addr: i64 = i64(rw)
+        mutex_lock(rwlock_write_lock_ptr(addr))
+
+    write_unlock(rw: *RWLock)
+        val addr: i64 = i64(rw)
+        mutex_unlock(rwlock_write_lock_ptr(addr))

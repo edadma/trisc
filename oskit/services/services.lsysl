@@ -1,0 +1,159 @@
+TOS System Services
+
+User-facing API for TOS kernel services.
+
+Syscall numbers:
+- 0 = sleep -- block for N timer ticks
+- 1 = putc -- write character to stdout
+- 2 = yield -- voluntary context switch
+- 3 = exit -- terminate current thread
+- 4 = join -- wait for another thread to terminate
+- 5 = thread_id -- get current thread index
+- 6 = uptime -- get tick counter
+- 7 = thread_count -- get number of created threads
+- 8 = thread_state -- get state of a thread
+- 9 = thread_name -- get name pointer of a thread
+- 10 = sleep_until -- block until absolute tick
+- 11 = ctx_switches -- get context switch count for a thread
+- 12 = cpu_ticks -- get CPU ticks for a thread
+- 13 = total_switches -- get global context switch count
+- 14 = set_watchdog -- set watchdog quanta limit (0 = disable)
+
+    module oskit
+
+    extern syscall(number: int, arg: i64) -> i64
+
+    val SYS_SLEEP          = 0
+    val SYS_PUTC           = 1
+    val SYS_YIELD          = 2
+    val SYS_EXIT           = 3
+    val SYS_JOIN           = 4
+    val SYS_THREAD_ID      = 5
+    val SYS_UPTIME         = 6
+    val SYS_THREAD_COUNT   = 7
+    val SYS_THREAD_STATE   = 8
+    val SYS_THREAD_NAME    = 9
+    val SYS_SLEEP_UNTIL    = 10
+    val SYS_KBHIT          = 11
+    val SYS_GETKEY         = 12
+    val SYS_CTX_SWITCHES   = 13
+    val SYS_CPU_TICKS      = 14
+    val SYS_TOTAL_SWITCHES = 15
+    val SYS_SET_WATCHDOG   = 16
+    val SYS_PANIC          = 17
+    val SYS_CHECK_STACK    = 18
+    val SYS_SUSPEND        = 19
+    val SYS_RESUME         = 20
+    val SYS_TLS_SET        = 21
+    val SYS_TLS_GET        = 22
+    val SYS_NOTIFY_SEND    = 23
+    val SYS_NOTIFY_WAIT    = 24
+    val SYS_NOTIFY_READ    = 25
+    val SYS_EVENT_WAIT     = 26
+    val SYS_EVENT_SET      = 27
+    val SYS_EVENT_CLEAR    = 28
+
+    sleep(ticks: int)
+        syscall(SYS_SLEEP, ticks)
+
+    putc(ch: char)
+        syscall(SYS_PUTC, ch)
+
+    yield()
+        syscall(SYS_YIELD, 0)
+
+    exit()
+        syscall(SYS_EXIT, 0)
+
+    join(id: int)
+        syscall(SYS_JOIN, id)
+
+    thread_id() -> int
+        syscall(SYS_THREAD_ID, 0)
+
+    uptime() -> int
+        syscall(SYS_UPTIME, 0)
+
+    get_thread_count() -> int
+        syscall(SYS_THREAD_COUNT, 0)
+
+    get_thread_state(id: int) -> int
+        syscall(SYS_THREAD_STATE, id)
+
+    get_thread_name(id: int) -> *byte
+        syscall(SYS_THREAD_NAME, id)
+
+    sleep_until(tick: int)
+        syscall(SYS_SLEEP_UNTIL, tick)
+
+    kbhit() -> int
+        syscall(SYS_KBHIT, 0)
+
+    getkey() -> int
+        syscall(SYS_GETKEY, 0)
+
+    get_ctx_switches(id: int) -> int
+        syscall(SYS_CTX_SWITCHES, id)
+
+    get_cpu_ticks(id: int) -> int
+        syscall(SYS_CPU_TICKS, id)
+
+    get_total_switches() -> int
+        syscall(SYS_TOTAL_SWITCHES, 0)
+
+    set_watchdog(limit: int)
+        syscall(SYS_SET_WATCHDOG, limit)
+
+    panic()
+        syscall(SYS_PANIC, 0)
+
+    check_stack(addr: i64) -> int
+        syscall(SYS_CHECK_STACK, addr)
+
+    suspend(id: int)
+        syscall(SYS_SUSPEND, id)
+
+    resume(id: int)
+        syscall(SYS_RESUME, id)
+
+    putstr(s: *byte)
+        var i = 0
+        while s[i] != 0
+            putc(s[i])
+            i += 1
+
+    notify_send_to(id: int, value: int)
+        syscall(SYS_NOTIFY_SEND, (id << 24) | (value & 0xFFFFFF))
+
+    notify_wait()
+        syscall(SYS_NOTIFY_WAIT, 0)
+
+    notify_read_self() -> int
+        syscall(SYS_NOTIFY_READ, 0)
+
+    event_wait(mask: int, wait_all: int)
+        syscall(SYS_EVENT_WAIT, (wait_all << 24) | (mask & 0xFFFFFF))
+
+    event_set(id: int, bits: int)
+        syscall(SYS_EVENT_SET, (id << 24) | (bits & 0xFFFFFF))
+
+    event_clear(id: int, bits: int)
+        syscall(SYS_EVENT_CLEAR, (id << 24) | (bits & 0xFFFFFF))
+
+Packs slot (8 bits) and value (24 bits) into one syscall arg.
+Slot range: 0-3. Value range: 0 to 16777215.
+
+    tls_set(slot: int, value: int)
+        syscall(SYS_TLS_SET, (slot << 24) | (value & 0xFFFFFF))
+
+    tls_get(slot: int) -> int
+        syscall(SYS_TLS_GET, slot)
+
+    val SYS_PIMUTEX_LOCK   = 29
+    val SYS_PIMUTEX_UNLOCK = 30
+
+    pimutex_lock_sys(addr: i64)
+        syscall(SYS_PIMUTEX_LOCK, addr)
+
+    pimutex_unlock_sys(addr: i64)
+        syscall(SYS_PIMUTEX_UNLOCK, addr)

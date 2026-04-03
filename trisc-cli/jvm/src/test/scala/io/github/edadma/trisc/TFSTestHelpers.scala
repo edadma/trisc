@@ -6,7 +6,7 @@ import org.scalatest.matchers.should.Matchers
 trait TFSTestHelpers extends AnyFreeSpec with Matchers {
 
   private lazy val tfsSource: String =
-    val raw = scala.io.Source.fromFile("tos/tfs/tfs.lsysl").mkString
+    val raw = scala.io.Source.fromFile("oskit/drivers/disk/tfs.lsysl").mkString
     val doc = new LiterateParser().parse(raw)
     LiterateRenderer.tangle(doc)
 
