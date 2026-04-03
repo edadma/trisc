@@ -1,0 +1,42 @@
+/* head — display first lines of a file */
+import std/process.*
+import std/io.*
+import std/fs.*
+import std/string.*
+
+main() -> int
+    var n = 10
+    var file_start = 1
+
+    // Parse -n option
+    if argc() > 2 && equal(argv(1), "-n")
+        n = int(to_int(argv(2)))
+        file_start = 3
+
+    if argc() <= file_start
+        puts("usage: head [-n count] file ...\n")
+        return 1
+
+    for var i = file_start; i < argc(); i++
+        val content = read_file(argv(i))
+
+        if length(content) == 0 && !exists(argv(i))
+            puts(concat("head: ", concat(argv(i), ": No such file or directory\n")))
+            return 1
+
+        if argc() - file_start > 1
+            puts(concat("==> ", concat(argv(i), " <==\n")))
+
+        var lines = 0
+        var j = 0
+
+        while j < length(content) && lines < n
+            val c = char_at(content, j)
+
+            putc(c)
+
+            if c == '\n' then lines++
+
+            j++
+
+    0

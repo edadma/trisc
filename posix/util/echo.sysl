@@ -1,0 +1,15 @@
+/* echo — write arguments to standard output */
+import std/process.*
+
+main() -> int
+    val n = argc()
+    var first = true
+
+    for var i = 1; i < n; i++
+        if !first then putc(' ')
+
+        puts(argv(i))
+        first = false
+
+    putc('\n')
+    0

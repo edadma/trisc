@@ -1,0 +1,59 @@
+/* wc — word, line, and byte count */
+import std/process.*
+import std/fs.*
+import std/string.*
+
+main() -> int
+    if argc() < 2
+        puts("usage: wc file ...\n")
+        return 1
+
+    var total_lines = 0
+    var total_words = 0
+    var total_bytes = 0
+
+    for var i = 1; i < argc(); i++
+        val content = read_file(argv(i))
+
+        if length(content) == 0 && !exists(argv(i))
+            puts(concat("wc: ", concat(argv(i), ": No such file or directory\n")))
+            return 1
+
+        var lines = 0
+        var words = 0
+        val bytes = length(content)
+        var in_word = false
+
+        for var j = 0; j < bytes; j++
+            val c = char_at(content, j)
+
+            if c == '\n' then lines++
+
+            if c == ' ' || c == '\t' || c == '\n' || c == '\r'
+                in_word = false
+            else if !in_word
+                in_word = true
+                words++
+
+        puti(lines)
+        putc(' ')
+        puti(words)
+        putc(' ')
+        puti(bytes)
+        putc(' ')
+        puts(argv(i))
+        putc('\n')
+
+        total_lines += lines
+        total_words += words
+        total_bytes += bytes
+
+    if argc() > 2
+        puti(total_lines)
+        putc(' ')
+        puti(total_words)
+        putc(' ')
+        puti(total_bytes)
+        puts(" total\n")
+
+    0

@@ -1,0 +1,27 @@
+/* cat — concatenate and print files */
+import std/process.*
+import std/io.*
+import std/fs.*
+
+main() -> int
+    if argc() < 2
+        // Read from stdin
+        var buf: [1024]u8
+        var n = read(STDIN, buf, 1024)
+
+        while n > 0
+            write(STDOUT, buf, n)
+            n = read(STDIN, buf, 1024)
+
+        return 0
+
+    for var i = 1; i < argc(); i++
+        val content = read_file(argv(i))
+
+        if length(content) == 0
+            write_string(STDERR, concat("cat: ", concat(argv(i), ": No such file or directory\n")))
+            return 1
+
+        puts(content)
+
+    0

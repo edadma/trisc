@@ -1,0 +1,35 @@
+/* dirname — return the directory portion of a pathname */
+import std/process.*
+import std/string.*
+
+main() -> int
+    if argc() < 2
+        puts("usage: dirname path\n")
+        return 1
+
+    var s = argv(1)
+    val slen = length(s)
+
+    // Strip trailing slashes
+    var end = slen
+
+    while end > 1 && char_at(s, end - 1) == '/'
+        end--
+
+    // Find last slash
+    var pos = end - 1
+
+    while pos > 0 && char_at(s, pos - 1) != '/'
+        pos--
+
+    if pos == 0
+        puts(".\n")
+        return 0
+
+    // Strip trailing slashes from directory
+    while pos > 1 && char_at(s, pos - 1) == '/'
+        pos--
+
+    puts(substr(s, 0, pos))
+    putc('\n')
+    0
