@@ -13,10 +13,7 @@ Device registers:
 
     module oskit
 
-    val KB_STATUS:   *i8 = *i8(0x100004)
-    val KB_SCANCODE: *i8 = *i8(0x100005)
-    val KB_FLAGS:    *i8 = *i8(0x100006)
-    val KB_MODS:     *i8 = *i8(0x100007)
+    val KB_BASE = 0x100004
     val KB_IRQ = 1
 
     extern register_irq(irq: int, handler: i64)
@@ -32,6 +29,8 @@ Ring buffer for keyboard events. Each event is stored as a packed
 
     keyboard_init()
         register_irq(KB_IRQ, keyboard_handler)
+        // Drain any events that arrived before handler was registered
+        keyboard_handler()
 
 keyboard_handler -- Called by the generic IRQ dispatcher.
 
@@ -39,12 +38,16 @@ Reads all pending events from the device and buffers them.
 Does NOT context-switch -- returns to the interrupted thread.
 
     keyboard_handler()
-        while (*KB_STATUS & 1) != 0
-            val sc = *KB_SCANCODE
-            val flags = *KB_FLAGS
-            val mods = *KB_MODS
+        var status: *i8 = *i8(KB_BASE)
+        var scancode: *i8 = *i8(KB_BASE + 1)
+        var flags: *i8 = *i8(KB_BASE + 2)
+        var mods: *i8 = *i8(KB_BASE + 3)
+        while (*status & 1) != 0
+            val sc = *scancode
+            val fl = *flags
+            val md = *mods
             if kb_count < KB_BUF_SIZE
-                kb_buf[kb_tail] = (sc << 24) | (flags << 16) | (mods << 8)
+                kb_buf[kb_tail] = (sc << 24) | (fl << 16) | (md << 8)
                 kb_tail = (kb_tail + 1) % KB_BUF_SIZE
                 kb_count += 1
 
