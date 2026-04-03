@@ -1,6 +1,6 @@
 package io.github.edadma.trisc
 
-import java.awt.{BasicStroke, Color, Font, GradientPaint, LinearGradientPaint, RadialGradientPaint, Graphics2D, MultipleGradientPaint, RenderingHints}
+import java.awt.{AlphaComposite, BasicStroke, Color, Font, GradientPaint, LinearGradientPaint, RadialGradientPaint, Graphics2D, MultipleGradientPaint, RenderingHints}
 import java.awt.geom.{AffineTransform, GeneralPath, Point2D}
 import java.awt.image.BufferedImage
 import javax.imageio.ImageIO
@@ -85,6 +85,7 @@ import java.io.File
  *   0x43 SET_WALLPAPER_COLOR — solid color wallpaper from RGBA
  *   0x44 SET_WALLPAPER_GRADIENT — vertical gradient, top=RGBA, bottom=TEXT_BUF[0-3]
  *   0x45 SET_WALLPAPER_IMAGE — image from path (TEXT_ADDR/TEXT_BUF string), scaled to fill
+ *   0x46 SET_WINDOW_OPACITY — set window WIN_ID opacity from ALPHA register (0=transparent, 255=opaque)
  */
 class DrawEngine(
     val base: Long,
@@ -168,6 +169,7 @@ class DrawEngine(
     var scrollY: Int = 0,
     var viewW: Int = 0, // 0 = use full surface width
     var viewH: Int = 0, // 0 = use full surface height
+    var opacity: Int = 255, // 0=transparent, 255=opaque
   )
 
   private val MaxWindows = 32
@@ -308,6 +310,11 @@ class DrawEngine(
       case 0x3D => restoreWindow()
       case 0x3E => setScroll()
       case 0x3F => setViewport()
+      // Window opacity
+      case 0x46 =>
+        val wid = regs(WIN_ID) & 0xFF
+        if wid > 0 && wid < MaxWindows && windows(wid) != null then
+          windows(wid).opacity = regs(ALPHA) & 0xFF
       case 0x3A => cursorSurfaceId = regs(TARGET) & 0xFF
       // Compositor
       case 0x40 => composite()
@@ -758,6 +765,10 @@ class DrawEngine(
           val sx = win.scrollX
           val sy = win.scrollY
 
+          // Apply per-window opacity
+          if win.opacity < 255 then
+            g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, win.opacity / 255.0f))
+
           if win.decorated then
             // Shadow (larger for focused window)
             g.setColor(ShadowColor)
@@ -796,6 +807,10 @@ class DrawEngine(
             // Undecorated — blit visible viewport
             g.drawImage(surf.image, wx, wy, wx + vw, wy + vh,
                         sx, sy, sx + vw, sy + vh, null)
+
+          // Reset opacity
+          if win.opacity < 255 then
+            g.setComposite(AlphaComposite.SrcOver)
 
     // Draw cursor last (always on top)
     if cursorVisible then drawCursor(g)

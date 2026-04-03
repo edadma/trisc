@@ -21,7 +21,7 @@
 
 - [ ] **Dirty tracking** — COMPOSITE redraws everything; should track changed regions
 - [x] **Window minimize/maximize** — MINIMIZE, MAXIMIZE, RESTORE with saved normal geometry
-- [ ] **Alpha compositing** — windows are opaque blits; support per-window opacity
+- [x] **Alpha compositing** — SET_WINDOW_OPACITY sets per-window opacity (0-255) via AlphaComposite
 - [x] **Font family selection** — SET_FONT by name, LOAD_FONT from RAM binary data
 - [x] **Scrolling** — SET_SCROLL (scroll offset) + SET_VIEWPORT (visible area size); compositor blits only visible portion
 - [x] **Window move by drag** — PROCESS_MOUSE handles title bar drag + click-to-focus
