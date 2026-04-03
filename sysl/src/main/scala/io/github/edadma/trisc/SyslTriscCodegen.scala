@@ -22,6 +22,13 @@ class SyslTriscCodegen(addresses: Int = 4):
     if hasMain then emit("entry main")
     out ++= meta.toAsmGlobals
 
+    // Emit extern directives for extern declarations
+    for decl <- program.decls do
+      decl match
+        case TExternFuncDecl(name, _, _) => emit(s"extern $name")
+        case TExternVarDecl(name, _) => emit(s"extern $name")
+        case _ =>
+
     // Collect globals into data (initialized) and bss (zero-initialized) lists
     val dataGlobals = new mutable.ListBuffer[TDecl]
     val bssGlobals = new mutable.ListBuffer[TDecl]

@@ -63,10 +63,6 @@ object ModuleMeta:
     val syms = program.decls.collect {
       case TStructDecl(name, fields) =>
         SymbolMeta(name, SymbolMeta.Kind.Struct(SyslType.StructType(name, fields)), isPrivate = false, sourceFile)
-      case TExternFuncDecl(name, params, returnType) =>
-        SymbolMeta(name, SymbolMeta.Kind.Func(params, returnType), isPrivate = false, sourceFile)
-      case TExternVarDecl(name, typ) =>
-        SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate = false, sourceFile)
       case TFunDecl(name, params, returnType, _, isPrivate) =>
         SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType), isPrivate, sourceFile)
       case TVarDecl(name, typ, _, isPrivate) =>
