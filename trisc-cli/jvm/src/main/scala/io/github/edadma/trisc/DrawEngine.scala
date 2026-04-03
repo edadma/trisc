@@ -63,6 +63,10 @@ import java.io.File
  *   0x37 HIT_TEST — given screen coords (X1, Y1), put window ID in RESULT (0=desktop)
  *                     also sets WIN_FLAGS bit 2 if hit was on title bar
  *
+ *   0x3B MINIMIZE_WINDOW — hide window WIN_ID, remember geometry
+ *   0x3C MAXIMIZE_WINDOW — fill screen, remember previous geometry
+ *   0x3D RESTORE_WINDOW — return window WIN_ID to normal size/position
+ *
  * Cursor commands (0x38-0x3F):
  *   0x38 SET_CURSOR_POS — set cursor position to (X1, Y1)
  *   0x39 SET_CURSOR_VISIBLE — show cursor if WIN_FLAGS bit 3 set, hide otherwise
@@ -132,6 +136,10 @@ class DrawEngine(
   private val surfaces = new Array[Surface](MaxSurfaces)
   // Surface 0 is a proxy for the screen framebuffer (handled specially)
 
+  // Window state
+  private object WinState extends Enumeration:
+    val Normal, Minimized, Maximized = Value
+
   // Window table
   private class Window(
     var surfaceId: Int,
@@ -140,6 +148,11 @@ class DrawEngine(
     var title: String,
     var visible: Boolean,
     var decorated: Boolean,
+    var state: WinState.Value = WinState.Normal,
+    var normalX: Int = 0,
+    var normalY: Int = 0,
+    var normalW: Int = 0,
+    var normalH: Int = 0,
   )
 
   private val MaxWindows = 32
@@ -255,6 +268,9 @@ class DrawEngine(
       // Cursor commands
       case 0x38 => cursorX = reg16(X1); cursorY = reg16(Y1)
       case 0x39 => cursorVisible = (regs(WIN_FLAGS) & 8) != 0
+      case 0x3B => minimizeWindow()
+      case 0x3C => maximizeWindow()
+      case 0x3D => restoreWindow()
       case 0x3A => cursorSurfaceId = regs(TARGET) & 0xFF
       // Compositor
       case 0x40 => composite()
@@ -392,6 +408,7 @@ class DrawEngine(
       title = title,
       visible = (flags & 1) != 0,
       decorated = (flags & 2) != 0,
+      normalX = x, normalY = y, normalW = w, normalH = h,
     )
     windowOrder += wid
     regs(RESULT) = wid.toByte
@@ -465,9 +482,60 @@ class DrawEngine(
     val newW = reg16(X2)
     val newH = reg16(Y2)
     if wid > 0 && wid < MaxWindows && windows(wid) != null then
-      val sid = windows(wid).surfaceId
+      val win = windows(wid)
+      val sid = win.surfaceId
       if sid > 0 && sid < MaxSurfaces && surfaces(sid) != null then
         surfaces(sid).resize(newW, newH)
+        // Update normal geometry if in normal state
+        if win.state == WinState.Normal then
+          win.normalW = newW
+          win.normalH = newH
+
+  private def minimizeWindow(): Unit =
+    val wid = regs(WIN_ID) & 0xFF
+    if wid > 0 && wid < MaxWindows && windows(wid) != null then
+      val win = windows(wid)
+      if win.state == WinState.Normal then
+        win.normalX = win.x
+        win.normalY = win.y
+        win.normalW = surfaces(win.surfaceId).width
+        win.normalH = surfaces(win.surfaceId).height
+      win.visible = false
+      win.state = WinState.Minimized
+
+  private def maximizeWindow(): Unit =
+    val wid = regs(WIN_ID) & 0xFF
+    if wid > 0 && wid < MaxWindows && windows(wid) != null then
+      val win = windows(wid)
+      val sid = win.surfaceId
+      if sid > 0 && sid < MaxSurfaces && surfaces(sid) != null then
+        // Save normal geometry if coming from normal state
+        if win.state == WinState.Normal then
+          win.normalX = win.x
+          win.normalY = win.y
+          win.normalW = surfaces(sid).width
+          win.normalH = surfaces(sid).height
+        // Fill screen (leave room for taskbar at bottom)
+        val fw = fbWidth()
+        val fh = fbHeight() - 40 // taskbar height
+        val contentH = if win.decorated then fh - TitleBarHeight else fh
+        win.x = 0
+        win.y = 0
+        win.visible = true
+        win.state = WinState.Maximized
+        surfaces(sid).resize(fw, contentH)
+
+  private def restoreWindow(): Unit =
+    val wid = regs(WIN_ID) & 0xFF
+    if wid > 0 && wid < MaxWindows && windows(wid) != null then
+      val win = windows(wid)
+      val sid = win.surfaceId
+      if sid > 0 && sid < MaxSurfaces && surfaces(sid) != null then
+        win.x = win.normalX
+        win.y = win.normalY
+        win.visible = true
+        win.state = WinState.Normal
+        surfaces(sid).resize(win.normalW, win.normalH)
 
   // === Compositor ===
 

@@ -20,7 +20,7 @@
 ## Missing — Important
 
 - [ ] **Dirty tracking** — COMPOSITE redraws everything; should track changed regions
-- [ ] **Window minimize/maximize** — flags exist but no behavior
+- [x] **Window minimize/maximize** — MINIMIZE, MAXIMIZE, RESTORE with saved normal geometry
 - [ ] **Alpha compositing** — windows are opaque blits; support per-window opacity
 - [x] **Font family selection** — SET_FONT by name, LOAD_FONT from RAM binary data
 - [ ] **Scrolling** — viewport offset per surface for apps with content larger than their window
