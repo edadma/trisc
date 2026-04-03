@@ -2,7 +2,7 @@ TOS Reader-Writer Locks
 
 Allows multiple concurrent readers or a single exclusive writer.
 
-    module tos
+    module oskit
 
 Implementation uses two mutexes and a reader count:
 - lock: protects the reader_count field

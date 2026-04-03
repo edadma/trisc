@@ -7,7 +7,7 @@ mutex becomes available to other threads.
 A recursive mutex is a struct with an owner, lock count, and
 a semaphore for cross-thread contention.
 
-    module tos
+    module oskit
 
     struct RMutex
         owner: int
