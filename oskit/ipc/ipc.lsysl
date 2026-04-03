@@ -13,6 +13,9 @@ Flow:
 6. Server calls reply(client_tid, response, len) → unblocks client
 7. Kernel copies response to client's reply_buf
 
+Multiple clients sending to the same port are queued FIFO
+per-port. recv always dequeues the oldest waiting sender.
+
 States 11-12 are reserved for IPC (oskit kernel states 0-10).
 
     module oskit
@@ -22,9 +25,12 @@ States 11-12 are reserved for IPC (oskit kernel states 0-10).
 
     val MAX_PORTS = 8
     val IPC_PORT_FREE = -1
+    val IPC_QUEUE_EMPTY = -1
 
 Per-thread IPC state, parallel to the tasks[] array. Each
 thread has its own IPC context used during send/recv/reply.
+wait_next forms an intrusive linked list for per-port FIFO
+queues of blocked senders.
 
     struct IPCContext
         buf: i64
@@ -34,17 +40,21 @@ thread has its own IPC context used during send/recv/reply.
         port: int
         sender: int
         actual_len: int
+        wait_next: int
 
     var ipc_ctx: [8]IPCContext
     var port_owner: [8]int
+    var port_wait_head: [8]int
+    var port_wait_tail: [8]int
     var port_count = 0
 
-Syscall numbers for IPC (31-34).
+Syscall numbers for IPC (31-35).
 
     val SYS_PORT_CREATE  = 31
     val SYS_IPC_SEND     = 32
     val SYS_IPC_RECV     = 33
     val SYS_IPC_REPLY    = 34
+    val SYS_PORT_CLOSE   = 35
 
     extern syscall(num: int, arg: i64) -> int
 
@@ -58,6 +68,34 @@ Simple byte copy between memory addresses.
             d[i] = s[i]
             i += 1
 
+Per-port FIFO queue operations for blocked senders.
+
+    ipc_queue_push(port: int, tid: int)
+        ipc_ctx[tid].wait_next = IPC_QUEUE_EMPTY
+        if port_wait_tail[port] == IPC_QUEUE_EMPTY
+            port_wait_head[port] = tid
+            port_wait_tail[port] = tid
+        else
+            ipc_ctx[port_wait_tail[port]].wait_next = tid
+            port_wait_tail[port] = tid
+
+    ipc_queue_pop(port: int) -> int
+        val tid = port_wait_head[port]
+        if tid == IPC_QUEUE_EMPTY
+            return IPC_QUEUE_EMPTY
+        port_wait_head[port] = ipc_ctx[tid].wait_next
+        if port_wait_head[port] == IPC_QUEUE_EMPTY
+            port_wait_tail[port] = IPC_QUEUE_EMPTY
+        ipc_ctx[tid].wait_next = IPC_QUEUE_EMPTY
+        tid
+
+Helper to re-enqueue the current thread so it keeps running
+after do_schedule. Used by handlers that don't block.
+
+    ipc_continue_current()
+        tasks[current_thread].state = STATE_READY
+        enqueue(tasks[current_thread].priority, current_thread)
+
 Initialize the IPC subsystem. Clears all ports and registers
 syscall handlers. Call from kernel_main before creating threads.
 
@@ -65,34 +103,33 @@ syscall handlers. Call from kernel_main before creating threads.
         var i = 0
         while i < MAX_PORTS
             port_owner[i] = IPC_PORT_FREE
+            port_wait_head[i] = IPC_QUEUE_EMPTY
+            port_wait_tail[i] = IPC_QUEUE_EMPTY
             i += 1
         register_syscall(SYS_PORT_CREATE, ipc_port_create_handler)
         register_syscall(SYS_IPC_SEND, ipc_send_handler)
         register_syscall(SYS_IPC_RECV, ipc_recv_handler)
         register_syscall(SYS_IPC_REPLY, ipc_reply_handler)
+        register_syscall(SYS_PORT_CLOSE, ipc_port_close_handler)
 
 Create a new port owned by the current thread.
-Returns the port ID in the saved r1 slot on the SSP so the
-syscall return value is visible to the caller.
+Returns the port ID, or -1 if no ports available.
 
     ipc_port_create_handler(arg: int)
         if port_count >= MAX_PORTS
             syscall_return(-1)
-            // Re-enqueue so thread keeps running after do_schedule
-            tasks[current_thread].state = STATE_READY
-            enqueue(tasks[current_thread].priority, current_thread)
+            ipc_continue_current()
             return
         val id = port_count
         port_owner[id] = current_thread
         port_count += 1
         syscall_return(id)
-        // Re-enqueue so thread keeps running after do_schedule
-        tasks[current_thread].state = STATE_READY
-        enqueue(tasks[current_thread].priority, current_thread)
+        ipc_continue_current()
 
 Send a message and wait for reply. The arg is a pointer to
 a packed argument block: [port, msg_ptr, msg_len, reply_ptr, reply_len].
 Blocks the sender until the server calls reply().
+Returns 0 on success, -1 on error (invalid port, port closed).
 
     ipc_send_handler(arg: int)
         var args: *i64 = *i64(i64(arg))
@@ -105,8 +142,16 @@ Blocks the sender until the server calls reply().
 
         // Validate port
         if port < 0
+            syscall_return(-1)
+            ipc_continue_current()
             return
         if port >= port_count
+            syscall_return(-1)
+            ipc_continue_current()
+            return
+        if port_owner[port] == IPC_PORT_FREE
+            syscall_return(-1)
+            ipc_continue_current()
             return
 
         // Store sender's IPC context
@@ -121,16 +166,7 @@ Blocks the sender until the server calls reply().
         if tasks[owner].state == STATE_RECV_BLOCKED
             if ipc_ctx[owner].port == port
                 // Server is waiting — deliver the message now
-                val copy_len = msg_len
-                if copy_len > ipc_ctx[owner].len
-                    // Message too big: truncate (could return error)
-                    // For now, copy what fits
-                    ipc_memcpy(ipc_ctx[owner].buf, msg_ptr, ipc_ctx[owner].len)
-                    ipc_ctx[owner].actual_len = ipc_ctx[owner].len
-                else
-                    ipc_memcpy(ipc_ctx[owner].buf, msg_ptr, copy_len)
-                    ipc_ctx[owner].actual_len = copy_len
-                ipc_ctx[owner].sender = me
+                ipc_deliver(owner, me, msg_ptr, msg_len)
 
                 // Write sender ID as server's return value (saved r1 at SSP+48)
                 var ssp_r1: *i64 = *i64(tasks[owner].ssp + 48)
@@ -141,11 +177,33 @@ Blocks the sender until the server calls reply().
                 tasks[owner].quantum = DEFAULT_QUANTUM
                 enqueue(tasks[owner].priority, owner)
 
+                // Block the sender (waits for reply)
+                tasks[me].state = STATE_SEND_BLOCKED
+                return
+
+        // Server not waiting — enqueue sender in port's FIFO
+        ipc_queue_push(port, me)
+
         // Block the sender (waits for reply)
         tasks[me].state = STATE_SEND_BLOCKED
 
+Copy message from sender to receiver's buffer, handling
+truncation. Sets actual_len on the receiver's IPC context.
+
+    ipc_deliver(receiver: int, sender: int, msg_ptr: i64, msg_len: int)
+        val buf_ptr = ipc_ctx[receiver].buf
+        val buf_len = ipc_ctx[receiver].len
+        if msg_len > buf_len
+            ipc_memcpy(buf_ptr, msg_ptr, buf_len)
+            ipc_ctx[receiver].actual_len = buf_len
+        else
+            ipc_memcpy(buf_ptr, msg_ptr, msg_len)
+            ipc_ctx[receiver].actual_len = msg_len
+        ipc_ctx[receiver].sender = sender
+
 Receive a message on a port. The arg is a pointer to a packed
 argument block: [port, buf_ptr, buf_len].
+Returns sender's thread ID, or -1 on error.
 Blocks until a client sends a message.
 
     ipc_recv_handler(arg: int)
@@ -157,10 +215,16 @@ Blocks until a client sends a message.
 
         // Validate: must own the port
         if port < 0
+            syscall_return(-1)
+            ipc_continue_current()
             return
         if port >= port_count
+            syscall_return(-1)
+            ipc_continue_current()
             return
         if port_owner[port] != me
+            syscall_return(-1)
+            ipc_continue_current()
             return
 
         // Store receiver's IPC context
@@ -168,30 +232,20 @@ Blocks until a client sends a message.
         ipc_ctx[me].len = buf_len
         ipc_ctx[me].port = port
 
-        // Check if any thread is send-blocked on this port
-        var i = 0
-        while i < thread_count
-            if tasks[i].state == STATE_SEND_BLOCKED
-                if ipc_ctx[i].port == port
-                    // Found a waiting sender — deliver their message
-                    val msg_len = ipc_ctx[i].len
-                    if msg_len > buf_len
-                        ipc_memcpy(buf_ptr, ipc_ctx[i].buf, buf_len)
-                        ipc_ctx[me].actual_len = buf_len
-                    else
-                        ipc_memcpy(buf_ptr, ipc_ctx[i].buf, msg_len)
-                        ipc_ctx[me].actual_len = msg_len
-                    ipc_ctx[me].sender = i
+        // Check the port's wait queue for a blocked sender
+        val sender = ipc_queue_pop(port)
+        if sender != IPC_QUEUE_EMPTY
+            // Deliver the sender's message
+            ipc_deliver(me, sender, ipc_ctx[sender].buf, ipc_ctx[sender].len)
 
-                    // Return sender ID to the server
-                    syscall_return(i)
+            // Return sender ID to the server
+            syscall_return(sender)
 
-                    // Server stays runnable (re-enqueue)
-                    tasks[me].state = STATE_READY
-                    tasks[me].quantum = DEFAULT_QUANTUM
-                    enqueue(tasks[me].priority, me)
-                    return
-            i += 1
+            // Server stays runnable (re-enqueue)
+            tasks[me].state = STATE_READY
+            tasks[me].quantum = DEFAULT_QUANTUM
+            enqueue(tasks[me].priority, me)
+            return
 
         // No sender waiting — block the receiver
         tasks[me].state = STATE_RECV_BLOCKED
@@ -210,10 +264,16 @@ The server continues running (no block).
 
         // Validate caller
         if caller < 0
+            syscall_return(-1)
+            ipc_continue_current()
             return
         if caller >= thread_count
+            syscall_return(-1)
+            ipc_continue_current()
             return
         if tasks[caller].state != STATE_SEND_BLOCKED
+            syscall_return(-1)
+            ipc_continue_current()
             return
 
         // Copy reply to caller's reply buffer
@@ -223,20 +283,59 @@ The server continues running (no block).
         else
             ipc_memcpy(ipc_ctx[caller].reply_buf, msg_ptr, msg_len)
 
-        // Unblock the caller
+        // Unblock the caller (return 0 = success)
+        var caller_r1: *i64 = *i64(tasks[caller].ssp + 48)
+        *caller_r1 = 0
         tasks[caller].state = STATE_READY
         tasks[caller].quantum = DEFAULT_QUANTUM
         enqueue(tasks[caller].priority, caller)
 
         // Server re-enqueues itself
-        tasks[me].state = STATE_READY
-        tasks[me].quantum = DEFAULT_QUANTUM
-        enqueue(tasks[me].priority, me)
+        ipc_continue_current()
+
+Close a port. Wakes all blocked senders with error (-1).
+Only the port owner can close it.
+
+    ipc_port_close_handler(arg: int)
+        val port = int(i64(arg))
+        val me = current_thread
+
+        // Validate
+        if port < 0
+            syscall_return(-1)
+            ipc_continue_current()
+            return
+        if port >= port_count
+            syscall_return(-1)
+            ipc_continue_current()
+            return
+        if port_owner[port] != me
+            syscall_return(-1)
+            ipc_continue_current()
+            return
+
+        // Wake all blocked senders with error
+        var tid = ipc_queue_pop(port)
+        while tid != IPC_QUEUE_EMPTY
+            var caller_r1: *i64 = *i64(tasks[tid].ssp + 48)
+            *caller_r1 = -1
+            tasks[tid].state = STATE_READY
+            tasks[tid].quantum = DEFAULT_QUANTUM
+            enqueue(tasks[tid].priority, tid)
+            tid = ipc_queue_pop(port)
+
+        // Free the port
+        port_owner[port] = IPC_PORT_FREE
+        syscall_return(0)
+        ipc_continue_current()
 
 Userspace wrappers. These pack arguments and invoke syscalls.
 
     port_create() -> int
         syscall(SYS_PORT_CREATE, 0)
+
+    port_close(port: int) -> int
+        syscall(SYS_PORT_CLOSE, port)
 
     ipc_send(port: int, msg: *i8, msg_len: int, reply: *i8, reply_len: int) -> int
         var args: [5]i64
