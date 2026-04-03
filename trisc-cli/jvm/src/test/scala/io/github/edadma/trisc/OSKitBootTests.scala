@@ -1,6 +1,6 @@
 package io.github.edadma.trisc
 
-class TOSBootTests extends TOSTestHelpers {
+class OSKitBootTests extends OSKitTestHelpers {
 
   "boot.asm assembles" in {
     val tof = assemble(bootAsm, relocatable = true)
@@ -26,8 +26,8 @@ class TOSBootTests extends TOSTestHelpers {
     // Step 2: Compile Sysl files together (kernel + demo)
     val driver = new SyslDriver
     val result = driver.compile(Map(
-      "tos/kernel" -> kernelSysl,
-      "tos/services" -> servicesSysl,
+      "oskit/kernel" -> kernelSysl,
+      "oskit/services" -> servicesSysl,
       "tasks" -> tasksSysl,
       "main" -> mainSysl,
     ))

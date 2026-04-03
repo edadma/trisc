@@ -1,11 +1,11 @@
 package io.github.edadma.trisc
 
-class TOSSchedulerTests extends TOSTestHelpers {
+class OSKitSchedulerTests extends OSKitTestHelpers {
 
   "Scheduler: three threads same priority" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |kernel_main() -> int
           |    create_thread(task_a, 0x6000, 0x5000, "a")
@@ -34,7 +34,7 @@ class TOSSchedulerTests extends TOSTestHelpers {
   "Scheduler: basic two-priority smoke test" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |kernel_main() -> int
           |    create_thread_pri(task_b, 0x8000, 0x7000, "b", 1)
@@ -62,7 +62,7 @@ class TOSSchedulerTests extends TOSTestHelpers {
   "Scheduler: quantum expiry causes round-robin rotation" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |kernel_main() -> int
           |    create_thread(task_a, 0x6000, 0x5000, "a")
@@ -94,7 +94,7 @@ class TOSSchedulerTests extends TOSTestHelpers {
   "Scheduler: high priority preempts low priority" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |kernel_main() -> int
           |    create_thread(high, 0x20000, 0x1F000, "high")
@@ -123,7 +123,7 @@ class TOSSchedulerTests extends TOSTestHelpers {
   "Scheduler: blocked thread removed from queue" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |kernel_main() -> int
           |    create_thread(blocker, 0x6000, 0x5000, "blocker")
@@ -153,7 +153,7 @@ class TOSSchedulerTests extends TOSTestHelpers {
   "Scheduler: three priority levels strict ordering" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |kernel_main() -> int
           |    create_thread_pri(high, 0x20000, 0x1F000, "high", 0)
@@ -188,7 +188,7 @@ class TOSSchedulerTests extends TOSTestHelpers {
   "Scheduler: yield moves to back of queue" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |kernel_main() -> int
           |    create_thread(task_a, 0x6000, 0x5000, "a")
@@ -215,7 +215,7 @@ class TOSSchedulerTests extends TOSTestHelpers {
   "Scheduler: unblock higher priority preempts current" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |kernel_main() -> int
           |    create_thread(high, 0x20000, 0x1F000, "high")

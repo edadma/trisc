@@ -1,11 +1,11 @@
 package io.github.edadma.trisc
 
-class TOSPIMutexTests extends TOSTestHelpers {
+class OSKitPIMutexTests extends OSKitTestHelpers {
 
   "PIMutex: basic lock/unlock" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |var mtx: PIMutex
           |
@@ -30,7 +30,7 @@ class TOSPIMutexTests extends TOSTestHelpers {
   "PIMutex: mutual exclusion between two tasks" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |var mtx: PIMutex
           |
@@ -72,7 +72,7 @@ class TOSPIMutexTests extends TOSTestHelpers {
   "PIMutex: contended lock blocks and wakes" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |var mtx: PIMutex
           |
@@ -113,7 +113,7 @@ class TOSPIMutexTests extends TOSTestHelpers {
   "PIMutex: contended lock with different priorities" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |var mtx: PIMutex
           |
@@ -166,7 +166,7 @@ class TOSPIMutexTests extends TOSTestHelpers {
     // Key: low prints 'l' (end of critical section) before med prints 'M'.
     val (_, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |var mtx: PIMutex
           |
@@ -226,7 +226,7 @@ class TOSPIMutexTests extends TOSTestHelpers {
     // After unlock: high (pri 0) runs, then med (pri 1), then low (pri 2).
     val (_, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |var mtx: PIMutex
           |
@@ -278,7 +278,7 @@ class TOSPIMutexTests extends TOSTestHelpers {
     // bg (priority 1) wakes but can't preempt boosted low.
     val (_, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |var mtx_a: PIMutex
           |var mtx_b: PIMutex

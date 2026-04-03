@@ -6,7 +6,7 @@ kernel_main() is called by boot.asm. It must:
 3. Return the first thread's SSP
 
 
-    import tos.*
+    import oskit.*
     import tasks.*
 
     val TIMER_DEVICE = 0x100020

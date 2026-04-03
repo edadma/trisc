@@ -4,27 +4,27 @@ import org.scalatest.freespec.AnyFreeSpec
 import org.scalatest.matchers.should.Matchers
 import io.github.edadma.logger._
 
-object TOSTestData {
+object OSKitTestData {
   private def readLsysl(path: String): String =
     val raw = scala.io.Source.fromFile(path).mkString
     val doc = new LiterateParser().parse(raw)
     LiterateRenderer.tangle(doc)
 
-  lazy val bootAsm: String = scala.io.Source.fromFile("tos/boot.asm").mkString
-  lazy val kernelSysl: String = readLsysl("tos/kernel.lsysl")
-  lazy val servicesSysl: String = readLsysl("tos/services.lsysl")
-  lazy val semaphoreSysl: String = readLsysl("tos/semaphore.lsysl")
-  lazy val mutexSysl: String = readLsysl("tos/mutex.lsysl")
-  lazy val condvarSysl: String = readLsysl("tos/condvar.lsysl")
-  lazy val barrierSysl: String = readLsysl("tos/barrier.lsysl")
-  lazy val rwlockSysl: String = readLsysl("tos/rwlock.lsysl")
-  lazy val channelSysl: String = readLsysl("tos/channel.lsysl")
-  lazy val mailboxSysl: String = readLsysl("tos/mailbox.lsysl")
-  lazy val rbtreeSysl: String = readLsysl("tos/rbtree.lsysl")
-  lazy val rmutexSysl: String = readLsysl("tos/rmutex.lsysl")
-  lazy val qsetSysl: String = readLsysl("tos/qset.lsysl")
-  lazy val timerSysl: String = readLsysl("tos/timer.lsysl")
-  lazy val pimutexSysl: String = readLsysl("tos/pimutex.lsysl")
+  lazy val bootAsm: String = scala.io.Source.fromFile("oskit/boot/boot.asm").mkString
+  lazy val kernelSysl: String = readLsysl("oskit/kernel/kernel.lsysl")
+  lazy val servicesSysl: String = readLsysl("oskit/services/services.lsysl")
+  lazy val semaphoreSysl: String = readLsysl("oskit/sync/semaphore.lsysl")
+  lazy val mutexSysl: String = readLsysl("oskit/sync/mutex.lsysl")
+  lazy val condvarSysl: String = readLsysl("oskit/sync/condvar.lsysl")
+  lazy val barrierSysl: String = readLsysl("oskit/sync/barrier.lsysl")
+  lazy val rwlockSysl: String = readLsysl("oskit/sync/rwlock.lsysl")
+  lazy val channelSysl: String = readLsysl("oskit/sync/channel.lsysl")
+  lazy val mailboxSysl: String = readLsysl("oskit/sync/mailbox.lsysl")
+  lazy val rbtreeSysl: String = readLsysl("oskit/kernel/rbtree.lsysl")
+  lazy val rmutexSysl: String = readLsysl("oskit/sync/rmutex.lsysl")
+  lazy val qsetSysl: String = readLsysl("oskit/sync/qset.lsysl")
+  lazy val timerSysl: String = readLsysl("oskit/kernel/timer.lsysl")
+  lazy val pimutexSysl: String = readLsysl("oskit/sync/pimutex.lsysl")
   lazy val linkerScript: LinkerScript =
     LinkerScriptParser.parse(scala.io.Source.fromFile("tos/linker.ld").mkString) match
       case Right(s) => s
@@ -84,8 +84,8 @@ object TOSTestData {
       |""".stripMargin
 }
 
-trait TOSTestHelpers extends AnyFreeSpec with Matchers {
-  export TOSTestData.*
+trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
+  export OSKitTestData.*
 
   def compileSysl(source: String): TOF =
     val driver = new SyslDriver
@@ -127,10 +127,10 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
     val bootTof = assemble(bootAsm, relocatable = true)
 
     val allSources = Map(
-      "tos/kernel" -> kernelSysl, "tos/services" -> servicesSysl, "tos/timer" -> timerSysl, "tos/semaphore" -> semaphoreSysl,
-      "tos/mutex" -> mutexSysl, "tos/condvar" -> condvarSysl, "tos/barrier" -> barrierSysl,
-      "tos/rwlock" -> rwlockSysl, "tos/channel" -> channelSysl, "tos/mailbox" -> mailboxSysl,
-      "tos/rmutex" -> rmutexSysl, "tos/qset" -> qsetSysl, "tos/pimutex" -> pimutexSysl,
+      "oskit/kernel" -> kernelSysl, "oskit/services" -> servicesSysl, "oskit/timer" -> timerSysl, "oskit/semaphore" -> semaphoreSysl,
+      "oskit/mutex" -> mutexSysl, "oskit/condvar" -> condvarSysl, "oskit/barrier" -> barrierSysl,
+      "oskit/rwlock" -> rwlockSysl, "oskit/channel" -> channelSysl, "oskit/mailbox" -> mailboxSysl,
+      "oskit/rmutex" -> rmutexSysl, "oskit/qset" -> qsetSysl, "oskit/pimutex" -> pimutexSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -163,5 +163,5 @@ trait TOSTestHelpers extends AnyFreeSpec with Matchers {
     (cpu, output.toString)
 
   def runRBTest(appSource: String): (CPU, String) =
-    runWithBoot(Map("tos/rbtree" -> rbtreeSysl, "main" -> appSource))
+    runWithBoot(Map("oskit/rbtree" -> rbtreeSysl, "main" -> appSource))
 }

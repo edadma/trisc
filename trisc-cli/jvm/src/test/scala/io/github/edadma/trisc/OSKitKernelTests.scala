@@ -1,11 +1,11 @@
 package io.github.edadma.trisc
 
-class TOSKernelTests extends TOSTestHelpers {
+class OSKitKernelTests extends OSKitTestHelpers {
 
   "TOS: putc syscall prints character" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
@@ -25,7 +25,7 @@ class TOSKernelTests extends TOSTestHelpers {
   "TOS: thread exit works cleanly" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |kernel_main() -> int
           |    create_thread(task1, 0x6000, 0x5000, "t1")
@@ -49,7 +49,7 @@ class TOSKernelTests extends TOSTestHelpers {
   "TOS: sleep syscall delays output" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import tos.*
+        """import oskit.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x6000, 0x5000, "task")
@@ -71,7 +71,7 @@ class TOSKernelTests extends TOSTestHelpers {
   "TOS: two tasks interleave with sleep" in {
     val (_, output) = runTOS(Map(
       "tasks" ->
-        """import tos.*
+        """import oskit.*
           |
           |task_a()
           |    var i = 0
@@ -88,7 +88,7 @@ class TOSKernelTests extends TOSTestHelpers {
           |        i += 1
           |""".stripMargin,
       "app" ->
-        """import tos.*
+        """import oskit.*
           |import tasks.*
           |
           |kernel_main() -> int
