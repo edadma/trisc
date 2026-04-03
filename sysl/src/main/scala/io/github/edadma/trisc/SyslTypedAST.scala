@@ -50,7 +50,7 @@ case class TIntLit(value: Long, typ: SyslType) extends TExpr
 case class TFloatLit(value: Double, typ: SyslType) extends TExpr
 case class TBoolLit(value: Boolean, typ: SyslType) extends TExpr
 case class TStringLit(value: String, typ: SyslType) extends TExpr
-case class TArrayDecl(size: Int, elemType: String, typ: SyslType) extends TExpr
+case class TArrayDecl(size: Int, typ: SyslType) extends TExpr
 case class TArrayLit(elements: List[TExpr], typ: SyslType) extends TExpr
 case class TVarRef(name: String, typ: SyslType) extends TExpr
 case class TAddrOf(name: String, typ: SyslType) extends TExpr

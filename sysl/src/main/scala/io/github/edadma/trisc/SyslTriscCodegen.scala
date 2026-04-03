@@ -1083,7 +1083,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           case _: SyslType.StructType | _: SyslType.ArrayType => () // address is the value for aggregates
           case _ => emitLoad(1, 1, elemType) // load scalar with proper width
 
-      case TArrayDecl(size, elemTypStr, typ) =>
+      case TArrayDecl(size, typ) =>
         // Allocate array on stack with proper element size, rounded up to 8
         val elemType = typ match
           case SyslType.ArrayType(e, _) => e

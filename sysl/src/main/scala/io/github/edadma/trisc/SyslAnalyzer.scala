@@ -13,7 +13,7 @@ class SyslAnalyzer:
   private val functions = new mutable.LinkedHashMap[String, FunInfo]
   private val structTypes = new mutable.LinkedHashMap[String, SyslType.StructType]
   private val enumTypes = new mutable.LinkedHashMap[String, Map[String, Long]]  // enum name → (member name → value)
-  private val typeAliases = new mutable.LinkedHashMap[String, String]  // alias name → target type string
+  private val typeAliases = new mutable.LinkedHashMap[String, TypeAST]  // alias name → target type AST
   private val methods = new mutable.LinkedHashMap[String, mutable.Set[String]]  // struct name → set of method names
   private val externalSymbols = new mutable.LinkedHashSet[String]
   private var scopeStack: mutable.ArrayBuffer[mutable.LinkedHashMap[String, SymInfo]] = null
@@ -72,25 +72,25 @@ class SyslAnalyzer:
         case _: ModuleDeclAST => // metadata only
         case _: ImportDeclAST => // handled later
         case ExternFuncDeclAST(name, params, returnType) =>
-          val paramTypes = params.map(p => (p.name, resolveTypeName(p.typ)))
-          val retType = returnType.map(resolveTypeName).getOrElse(VoidType)
+          val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
+          val retType = returnType.map(resolveType).getOrElse(VoidType)
           if functions.contains(name) || builtinFunctions.contains(name) then
             throw AnalysisError(s"duplicate function: '$name'", decl)
           functions(name) = FunInfo(name, paramTypes, retType)
           externalSymbols += name
         case ExternVarDeclAST(name, typ) =>
-          val resolved = resolveTypeName(typ)
+          val resolved = resolveType(typ)
           if globalScope.contains(name) then
             throw AnalysisError(s"duplicate global: '$name'", decl)
           globalScope(name) = SymInfo(name, resolved, mutable = false)
           externalSymbols += name
         case StructDeclAST(name, fields) =>
           if structTypes.contains(name) then throw AnalysisError(s"duplicate struct: '$name'", decl)
-          val resolvedFields = fields.map((n, t) => (n, resolveTypeName(t)))
+          val resolvedFields = fields.map((n, t) => (n, resolveType(t)))
           structTypes(name) = SyslType.StructType(name, resolvedFields)
         case FunDeclAST(name, params, returnType, _, _) =>
-          val paramTypes = params.map(p => (p.name, resolveTypeName(p.typ)))
-          val retType = returnType.map(resolveTypeName).getOrElse(VoidType)
+          val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
+          val retType = returnType.map(resolveType).getOrElse(VoidType)
           if functions.contains(name) || builtinFunctions.contains(name) then
             throw AnalysisError(s"duplicate function: '$name'", decl)
           functions(name) = FunInfo(name, paramTypes, retType)
@@ -130,12 +130,12 @@ class SyslAnalyzer:
         TImportDecl(modulePath)
 
       case ExternFuncDeclAST(name, params, returnType) =>
-        val paramTypes = params.map(p => resolveTypeName(p.typ))
-        val retType = returnType.map(resolveTypeName).getOrElse(VoidType)
+        val paramTypes = params.map(p => resolveType(p.typ))
+        val retType = returnType.map(resolveType).getOrElse(VoidType)
         TExternFuncDecl(name, paramTypes, retType)
 
       case ExternVarDeclAST(name, typ) =>
-        TExternVarDecl(name, resolveTypeName(typ))
+        TExternVarDecl(name, resolveType(typ))
 
       case StructDeclAST(name, _) =>
         val st = structTypes(name)
@@ -146,7 +146,7 @@ class SyslAnalyzer:
         TEnumDecl(name, members)
 
       case TypeAliasDeclAST(name, target) =>
-        TTypeAliasDecl(name, resolveTypeName(target))
+        TTypeAliasDecl(name, resolveType(target))
 
       case FunDeclAST(name, params, _, body, isPrivate) =>
         scopeStack = new mutable.ArrayBuffer
@@ -165,87 +165,35 @@ class SyslAnalyzer:
         scopeStack = new mutable.ArrayBuffer
         pushScope()
         val tInit0 = analyzeExpr(init)
-        val declType = typOpt.map(resolveTypeName).getOrElse(tInit0.typ)
+        val declType = typOpt.map(resolveType).getOrElse(tInit0.typ)
         val tInit = coerceLiteral(tInit0, declType)
         globalScope(name) = SymInfo(name, declType, isMutable)
         scopeStack = null
         TVarDecl(name, declType, tInit, isPrivate)
 
-  private def resolveTypeName(name: String): SyslType = name match
-    case "int" | "i32" => I32
-    case "char" => U32
-    case "i64" => I64
-    case "double" | "f64" => DoubleType
-    case "byte" | "i8"  => I8
-    case "i16"  => I16
-    case "u8"   => U8
-    case "u16"  => U16
-    case "u32"  => U32
-    case "u64"  => U64
-    case "bool" => BoolType
-    case "void" => VoidType
-    case "string" => StringType
-    case s if s.startsWith("[]") =>
-      SliceType(resolveTypeName(s.drop(2)))
-    case s if s.startsWith("*") =>
-      PtrType(resolveTypeName(s.drop(1)))
-    case s if s.startsWith("[") =>
-      val size = s.drop(1).takeWhile(_.isDigit).toInt
-      val elem = s.dropWhile(_ != ']').drop(1)
-      ArrayType(resolveTypeName(elem), size)
-    case name if typeAliases.contains(name) => resolveTypeName(typeAliases(name))
-    case name if structTypes.contains(name) => structTypes(name)
-    case s if s.startsWith("(") =>
-      // Tuple type: (int,int)
-      val inner = s.drop(1).dropRight(1) // strip parens
-      val elemStrs = parseTupleTypeElems(inner)
-      SyslType.tupleType(elemStrs.map(resolveTypeName))
-    case s if s.startsWith("func(") =>
-      val inner = s.drop(5) // after "func("
-      val (paramStrs, rest) = parseFuncTypeParams(inner)
-      val params = paramStrs.map(resolveTypeName)
-      val ret = if rest.startsWith("->") then resolveTypeName(rest.drop(2)) else VoidType
-      FuncType(params, ret)
-    case other => throw AnalysisError(s"unknown type: '$other'")
-
-  // Parse comma-separated params from "int,int)->int" returning (List("int","int"), "->int")
-  private def parseFuncTypeParams(s: String): (List[String], String) =
-    var depth = 0
-    var i = 0
-    val params = new mutable.ListBuffer[String]
-    var start = 0
-    while i < s.length do
-      s(i) match
-        case '(' => depth += 1; i += 1
-        case ')' =>
-          if depth == 0 then
-            if i > start then params += s.substring(start, i)
-            return (params.toList, s.drop(i + 1))
-          depth -= 1; i += 1
-        case ',' if depth == 0 =>
-          params += s.substring(start, i)
-          i += 1
-          start = i
-        case _ => i += 1
-    (params.toList, "")
-
-  // Parse comma-separated type elements from tuple type string, respecting nested parens
-  private def parseTupleTypeElems(s: String): List[String] =
-    var depth = 0
-    var i = 0
-    val elems = new mutable.ListBuffer[String]
-    var start = 0
-    while i < s.length do
-      s(i) match
-        case '(' | '[' => depth += 1; i += 1
-        case ')' | ']' => depth -= 1; i += 1
-        case ',' if depth == 0 =>
-          elems += s.substring(start, i)
-          i += 1
-          start = i
-        case _ => i += 1
-    if start < s.length then elems += s.substring(start)
-    elems.toList
+  private def resolveType(t: TypeAST): SyslType = t match
+    case NamedTypeAST(name) => name match
+      case "int" | "i32" => I32
+      case "char" => U32
+      case "i64" => I64
+      case "double" | "f64" => DoubleType
+      case "byte" | "i8"  => I8
+      case "i16"  => I16
+      case "u8"   => U8
+      case "u16"  => U16
+      case "u32"  => U32
+      case "u64"  => U64
+      case "bool" => BoolType
+      case "void" => VoidType
+      case "string" => StringType
+      case name if typeAliases.contains(name) => resolveType(typeAliases(name))
+      case name if structTypes.contains(name) => structTypes(name)
+      case other => throw AnalysisError(s"unknown type: '$other'")
+    case PtrTypeAST(inner) => PtrType(resolveType(inner))
+    case ArrayTypeAST(size, elem) => ArrayType(resolveType(elem), size)
+    case SliceTypeAST(elem) => SliceType(resolveType(elem))
+    case TupleTypeAST(elems) => SyslType.tupleType(elems.map(resolveType))
+    case FuncTypeAST(params, ret) => FuncType(params.map(resolveType), resolveType(ret))
 
   private def compatible(from: SyslType, to: SyslType): Boolean =
     (from, to) match
@@ -328,7 +276,7 @@ class SyslAnalyzer:
     stmt match
       case VarStmtAST(name, typOpt, init, isMutable) =>
         val tInit0 = analyzeExpr(init)
-        val declType = typOpt.map(resolveTypeName).getOrElse(tInit0.typ)
+        val declType = typOpt.map(resolveType).getOrElse(tInit0.typ)
         val tInit = coerceLiteral(tInit0, declType)
         if typOpt.isDefined && !compatible(tInit.typ, declType) then
           throw AnalysisError(s"cannot assign ${tInit.typ} to $declType variable '$name'")
@@ -451,7 +399,7 @@ class SyslAnalyzer:
   private def analyzeExpr(expr: ExpressionAST): TExpr =
     expr match
       case IntLitAST(n) => TIntLit(n, I32)
-      case TypedIntLitAST(n, typeName) => TIntLit(n, resolveTypeName(typeName))
+      case TypedIntLitAST(n, typeName) => TIntLit(n, resolveType(NamedTypeAST(typeName)))
       case FloatLitAST(d) => TFloatLit(d, DoubleType)
       case CharLitAST(c) => TIntLit(c.toLong, U32)
       case BoolLitAST(b) => TBoolLit(b, BoolType)
@@ -461,17 +409,17 @@ class SyslAnalyzer:
         val tElems = elements.map(analyzeExpr)
         val tupleType = SyslType.tupleType(tElems.map(_.typ))
         TStructConstruct(tupleType, tElems)
-      case ArrayDeclAST(size, typStr) =>
-        val t = resolveTypeName(typStr)
-        TArrayDecl(size, typStr, t)
+      case ArrayDeclAST(size, typAST) =>
+        val t = resolveType(typAST)
+        TArrayDecl(size, t)
 
       case ArrayLitAST(elements) =>
         val tElems = elements.map(analyzeExpr)
         val elemType = tElems.head.typ
         TArrayLit(tElems, SyslType.ArrayType(elemType, tElems.length))
 
-      case SizeofTypeAST(typeName) =>
-        val t = resolveTypeName(typeName)
+      case SizeofTypeAST(typAST) =>
+        val t = resolveType(typAST)
         TSizeof(t.sizeOf, I32)
 
       case SizeofExprAST(VarRefAST(name)) if structTypes.contains(name) =>
@@ -523,16 +471,16 @@ class SyslAnalyzer:
         TFieldPostDec(resolvedObj, idx, structType.fields(idx)._2)
 
       case StructInitAST(typeName) =>
-        val t = resolveTypeName(typeName)
+        val t = resolveType(NamedTypeAST(typeName))
         t match
           case st: StructType => TStructLit(st)
           case _ => throw AnalysisError(s"'$typeName' is not a struct type")
 
-      case UninitDeclAST(typeName) =>
-        val t = resolveTypeName(typeName)
+      case UninitDeclAST(typAST) =>
+        val t = resolveType(typAST)
         t match
           case st: StructType => TStructLit(st)
-          case ArrayType(elem, size) => TArrayDecl(size, typeName, t)
+          case ArrayType(elem, size) => TArrayDecl(size, t)
           case _ => TIntLit(0, t)  // zero-initialize scalars and pointers
 
       case VarRefAST(name) =>
@@ -671,9 +619,9 @@ class SyslAnalyzer:
         val promotedRight = if resultType == DoubleType && tRight.typ.isIntegral then TCast(tRight, DoubleType) else tRight
         TBinary(promotedLeft, op, promotedRight, resultType)
 
-      case CastAST(targetType, inner) =>
+      case CastAST(targetTypeAST, inner) =>
         val tInner = analyzeExpr(inner)
-        val target = resolveTypeName(targetType)
+        val target = resolveType(targetTypeAST)
         // Validate cast is possible
         (tInner.typ, target) match
           case (from, to) if from == to => // no-op cast

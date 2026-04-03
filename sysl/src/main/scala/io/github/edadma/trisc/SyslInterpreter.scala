@@ -272,7 +272,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TStringLit(s, _) =>
         StrVal(s)
 
-      case TArrayDecl(size, _, typ) =>
+      case TArrayDecl(size, typ) =>
         def initElem(t: SyslType): Value = t match
           case SyslType.ArrayType(elem, sz) =>
             val cells = Array.fill(sz)(new Cell(initElem(elem)))
