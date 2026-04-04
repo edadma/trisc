@@ -109,7 +109,7 @@ class OSKitDisplayTests extends OSKitTestHelpers {
     cpu.run()
     (cpu, output.toString)
 
-  "Display server: OS desktop from TOF file" ignore {
+  "Display server: OS desktop from TOF file" in {
     // Load the TOF file that the GUI would use
     val tofStr = scala.io.Source.fromFile("/tmp/os-desktop.tof").mkString
     val linked = TOF.deserialize(tofStr)
@@ -151,7 +151,7 @@ class OSKitDisplayTests extends OSKitTestHelpers {
     output.toString should include("!")
   }
 
-  "Display server: OS desktop demo" ignore {
+  "Display server: OS desktop demo" in {
     val appSysl = scala.io.Source.fromFile("examples/draw-hello/os-desktop.sysl").mkString
     val (cpu, output) = runDisplay(Map("app" -> appSysl), maxCycles = 20000000)
     println(s"Output: '$output'")
@@ -161,7 +161,7 @@ class OSKitDisplayTests extends OSKitTestHelpers {
     output should include("!")  // completed
   }
 
-  "Display server: client creates a window" ignore {
+  "Display server: client creates a window" in {
     val (cpu, output) = runDisplay(Map(
       "app" ->
         """import oskit.*
