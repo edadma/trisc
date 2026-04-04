@@ -72,6 +72,77 @@ class SyslCliTests extends AnyFreeSpec with Matchers {
     config.command.asInstanceOf[CompileCommand].output shouldBe None
   }
 
+  // --- Doc command parsing ---
+
+  "parse doc command single file" in {
+    val Some(config) = SyslCli.parse(Seq("doc", "foo.lsysl")): @unchecked
+    val cmd = config.command.asInstanceOf[DocCommand]
+    cmd.inputs shouldBe Seq("foo.lsysl")
+    cmd.output shouldBe None
+  }
+
+  "parse doc command with output" in {
+    val Some(config) = SyslCli.parse(Seq("doc", "-o", "out.html", "foo.lsysl")): @unchecked
+    val cmd = config.command.asInstanceOf[DocCommand]
+    cmd.output shouldBe Some("out.html")
+    cmd.inputs shouldBe Seq("foo.lsysl")
+  }
+
+  "parse doc command multiple files" in {
+    val Some(config) = SyslCli.parse(Seq("doc", "a.lsysl", "b.lsysl")): @unchecked
+    val cmd = config.command.asInstanceOf[DocCommand]
+    cmd.inputs shouldBe Seq("a.lsysl", "b.lsysl")
+  }
+
+  "parse doc command with output directory" in {
+    val Some(config) = SyslCli.parse(Seq("doc", "-o", "outdir", "a.lsysl", "b.lsysl")): @unchecked
+    val cmd = config.command.asInstanceOf[DocCommand]
+    cmd.output shouldBe Some("outdir")
+  }
+
+  "doc command requires input files" in {
+    SyslCli.parse(Seq("doc")) shouldBe None
+  }
+
+  // --- Doc rendering ---
+
+  "renderHTML produces highlighted code" in {
+    val html = LiterateRenderer.renderHTML(
+      """Some prose.
+        |
+        |    main() -> int
+        |        42
+        |""".stripMargin)
+    html should include("<pre>")
+    html should include("style=\"color:")
+  }
+
+  "renderPage produces full HTML document" in {
+    val html = LiterateRenderer.renderPage(
+      """# Hello
+        |
+        |    main() -> int
+        |        0
+        |""".stripMargin, "hello")
+    html should include("<!DOCTYPE html>")
+    html should include("<title>hello</title>")
+    html should include("katex")
+    html should include("<pre>")
+  }
+
+  "renderPage with back link includes nav" in {
+    val html = LiterateRenderer.renderPage("Some text.\n\n    x = 1\n", "test", Some("index.html"))
+    html should include("""<a href="index.html">""")
+  }
+
+  "renderIndex produces file list" in {
+    val html = LiterateRenderer.renderIndex("mymod", Seq(("demo", "demo.html"), ("math", "math.html")))
+    html should include("<!DOCTYPE html>")
+    html should include("<title>mymod</title>")
+    html should include("""<a href="demo.html">demo</a>""")
+    html should include("""<a href="math.html">math</a>""")
+  }
+
   // --- Interpreter execution (single file) ---
 
   private def interpret(source: String): (Long, String) =
