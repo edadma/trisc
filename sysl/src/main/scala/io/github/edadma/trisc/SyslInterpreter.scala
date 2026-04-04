@@ -168,6 +168,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           heapBreak = newBreak
           PtrVal(ArrayPtr(heapCells, oldBreak))
     }),
+    "abort" -> (_ => throw RuntimeError("abort")),
   )
 
   def registerBuiltins(extra: Map[String, List[Value] => Value]): Unit =

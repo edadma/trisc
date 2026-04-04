@@ -1033,6 +1033,12 @@ class SyslTriscCodegen(addresses: Int = 4):
         needsAllocExtern = true
         emit("  popd r3")                 // clean malloc arg
         stackOffset += 8
+        // Null check: trap if malloc returned 0
+        val allocOk = newLabel("alloc_ok")
+        emit(s"  bne r1, r0, $allocOk")
+        emit("  ldi r1, 2")         // error code: 2 = null pointer
+        emit("  trap 1")
+        emit(s"$allocOk")
         // r1 = base of allocated block
         emit("  pshd r1")                 // save base
         stackOffset -= 8
@@ -1338,6 +1344,10 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TFuncRef(name, _) =>
         emit(s"  movi r1, $name") // r1 = address of function
+
+      case TCall("abort", _, _) =>
+        emit("  ldi r1, 3")           // error code: 3 = abort
+        emit("  trap 1")
 
       case TCall(name, args, retType) =>
         val callStructReturn = returnsViaPointer(retType)
@@ -1947,6 +1957,12 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  mul r1, r1, r2")     // r1 = new_cap * elemSize
         emit("  movi r4, malloc")
         emit("  jalr r6, r4")          // r1 = new_ptr
+        // Null check: trap if malloc returned 0
+        val allocOk2 = newLabel("alloc_ok")
+        emit(s"  bne r1, r0, $allocOk2")
+        emit("  ldi r1, 2")           // error code: 2 = null pointer
+        emit("  trap 1")
+        emit(s"$allocOk2")
         emit("  pshd r1")              // save new_ptr
         // Stack: [new_ptr] [new_cap] [len] [old_ptr] [elem]
         // Copy len * elemSize bytes from old_ptr to new_ptr
@@ -2048,6 +2064,12 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  movi r4, malloc")
         emit("  jalr r6, r4")
         needsAllocExtern = true
+        // Null check: trap if malloc returned 0
+        val allocOk = newLabel("alloc_ok")
+        emit(s"  bne r1, r0, $allocOk")
+        emit("  ldi r1, 2")         // error code: 2 = null pointer
+        emit("  trap 1")
+        emit(s"$allocOk")
         // r1 = allocated pointer. Save it.
         emit("  pshd r1")
         stackOffset -= 8
@@ -2102,6 +2124,12 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  movi r4, malloc")
         emit("  jalr r6, r4")
         needsAllocExtern = true
+        // Null check: trap if malloc returned 0
+        val allocOk = newLabel("alloc_ok")
+        emit(s"  bne r1, r0, $allocOk")
+        emit("  ldi r1, 2")         // error code: 2 = null pointer
+        emit("  trap 1")
+        emit(s"$allocOk")
         // r1 = allocated pointer. Save it as a temp on stack.
         emit("  pshd r1")
         stackOffset -= 8
