@@ -1,18 +1,19 @@
 package io.github.edadma.trisc
 
-class Blitter(val base: Long, mem: Addressable, fbMemory: RAM, fbWidth: () => Int, fbHeight: () => Int) extends Device:
+class Blitter(val base: Long, mem: Addressable, fb: FramebufferImage, fbWidth: () => Int, fbHeight: () => Int)
+    extends Device:
   val name = "Blitter"
   val size = 18
 
   // Register offsets
-  private val SRC = 0     // 4 bytes: source address in RAM
-  private val DST_X = 4   // 2 bytes: destination X
-  private val DST_Y = 6   // 2 bytes: destination Y
-  private val W = 8        // 2 bytes: width in pixels
-  private val H = 10       // 2 bytes: height in pixels
-  private val COLOR = 12   // 4 bytes: RGBA color
-  private val OP = 16      // 1 byte: operation (0=alpha blit, 1=solid fill, 2=copy)
-  private val GO = 17      // 1 byte: write to execute
+  private val SRC = 0   // 4 bytes: source address in RAM
+  private val DST_X = 4 // 2 bytes: destination X
+  private val DST_Y = 6 // 2 bytes: destination Y
+  private val W = 8     // 2 bytes: width in pixels
+  private val H = 10    // 2 bytes: height in pixels
+  private val COLOR = 12 // 4 bytes: RGBA color
+  private val OP = 16   // 1 byte: operation (0=alpha blit byte, 1=solid fill, 2=alpha blit int)
+  private val GO = 17   // 1 byte: write to execute
 
   // Register storage
   private val regs = new Array[Byte](18)
@@ -29,7 +30,6 @@ class Blitter(val base: Long, mem: Addressable, fbMemory: RAM, fbWidth: () => In
     regs(off) = data.toByte
     if off == GO then execute()
 
-  // Override writeInt for efficient 4-byte register writes from CPU
   override def writeInt(addr: Long, data: Long): Unit =
     val off = (addr - base).toInt
     regs(off) = (data >> 24).toByte
@@ -38,12 +38,13 @@ class Blitter(val base: Long, mem: Addressable, fbMemory: RAM, fbWidth: () => In
     regs(off + 3) = data.toByte
     if off <= GO && off + 4 > GO then execute()
 
-  // Override writeShort for efficient 2-byte register writes
   override def writeShort(addr: Long, data: Long): Unit =
     val off = (addr - base).toInt
     regs(off) = (data >> 8).toByte
     regs(off + 1) = data.toByte
     if off <= GO && off + 2 > GO then execute()
+
+  private inline def argb(r: Int, g: Int, b: Int, a: Int): Int = (a << 24) | (r << 16) | (g << 8) | b
 
   private def execute(): Unit =
     val op = regs(OP) & 0xff
@@ -60,17 +61,17 @@ class Blitter(val base: Long, mem: Addressable, fbMemory: RAM, fbWidth: () => In
 
     val fw = fbWidth()
     val fh = fbHeight()
-    val fb = fbMemory.bytes
+    val pixels = fb.pixels
 
     op match
-      case 0 => alphaBlitByte(srcAddr, dstX, dstY, w, h, cr, cg, cb, fw, fh, fb)
-      case 1 => solidFill(dstX, dstY, w, h, cr, cg, cb, ca, fw, fh, fb)
-      case 2 => alphaBlitInt(srcAddr, dstX, dstY, w, h, cr, cg, cb, fw, fh, fb)
+      case 0 => alphaBlitByte(srcAddr, dstX, dstY, w, h, cr, cg, cb, fw, fh, pixels)
+      case 1 => solidFill(dstX, dstY, w, h, cr, cg, cb, ca, fw, fh, pixels)
+      case 2 => alphaBlitInt(srcAddr, dstX, dstY, w, h, cr, cg, cb, fw, fh, pixels)
       case _ => ()
 
   // Op 0: Alpha blit from byte source (font data as bytes)
   private def alphaBlitByte(src: Long, dx: Int, dy: Int, w: Int, h: Int,
-      cr: Int, cg: Int, cb: Int, fw: Int, fh: Int, fb: scala.collection.mutable.ArraySeq[Byte]): Unit =
+      cr: Int, cg: Int, cb: Int, fw: Int, fh: Int, pixels: Array[Int]): Unit =
     for row <- 0 until h do
       val py = dy + row
       if py >= 0 && py < fh then
@@ -79,41 +80,37 @@ class Blitter(val base: Long, mem: Addressable, fbMemory: RAM, fbWidth: () => In
           if px >= 0 && px < fw then
             val alpha = mem.readByte(src + row * w + col) & 0xff
             if alpha > 0 then
-              val fbOff = (py * fw + px) * 4
+              val idx = py * fw + px
               if alpha >= 255 then
-                fb(fbOff) = cr.toByte
-                fb(fbOff + 1) = cg.toByte
-                fb(fbOff + 2) = cb.toByte
-                fb(fbOff + 3) = 0xff.toByte
+                pixels(idx) = argb(cr, cg, cb, 255)
               else
-                // Alpha blend against existing pixel
-                val er = fb(fbOff) & 0xff
-                val eg = fb(fbOff + 1) & 0xff
-                val eb = fb(fbOff + 2) & 0xff
+                val existing = pixels(idx)
+                val er = (existing >> 16) & 0xff
+                val eg = (existing >> 8) & 0xff
+                val eb = existing & 0xff
                 val inv = 255 - alpha
-                fb(fbOff) = ((er * inv + cr * alpha) / 255).toByte
-                fb(fbOff + 1) = ((eg * inv + cg * alpha) / 255).toByte
-                fb(fbOff + 2) = ((eb * inv + cb * alpha) / 255).toByte
-                fb(fbOff + 3) = 0xff.toByte
+                pixels(idx) = argb(
+                  (er * inv + cr * alpha) / 255,
+                  (eg * inv + cg * alpha) / 255,
+                  (eb * inv + cb * alpha) / 255,
+                  255,
+                )
 
   // Op 1: Solid fill rectangle
   private def solidFill(dx: Int, dy: Int, w: Int, h: Int,
-      cr: Int, cg: Int, cb: Int, ca: Int, fw: Int, fh: Int, fb: scala.collection.mutable.ArraySeq[Byte]): Unit =
+      cr: Int, cg: Int, cb: Int, ca: Int, fw: Int, fh: Int, pixels: Array[Int]): Unit =
+    val color = argb(cr, cg, cb, ca)
     for row <- 0 until h do
       val py = dy + row
       if py >= 0 && py < fh then
         for col <- 0 until w do
           val px = dx + col
           if px >= 0 && px < fw then
-            val fbOff = (py * fw + px) * 4
-            fb(fbOff) = cr.toByte
-            fb(fbOff + 1) = cg.toByte
-            fb(fbOff + 2) = cb.toByte
-            fb(fbOff + 3) = ca.toByte
+            pixels(py * fw + px) = color
 
   // Op 2: Alpha blit from int source (font data as ints, 4 bytes per alpha value)
   private def alphaBlitInt(src: Long, dx: Int, dy: Int, w: Int, h: Int,
-      cr: Int, cg: Int, cb: Int, fw: Int, fh: Int, fb: scala.collection.mutable.ArraySeq[Byte]): Unit =
+      cr: Int, cg: Int, cb: Int, fw: Int, fh: Int, pixels: Array[Int]): Unit =
     for row <- 0 until h do
       val py = dy + row
       if py >= 0 && py < fh then
@@ -122,18 +119,18 @@ class Blitter(val base: Long, mem: Addressable, fbMemory: RAM, fbWidth: () => In
           if px >= 0 && px < fw then
             val alpha = mem.readInt(src + (row * w + col) * 4)
             if alpha > 0 then
-              val fbOff = (py * fw + px) * 4
+              val idx = py * fw + px
               if alpha >= 255 then
-                fb(fbOff) = cr.toByte
-                fb(fbOff + 1) = cg.toByte
-                fb(fbOff + 2) = cb.toByte
-                fb(fbOff + 3) = 0xff.toByte
+                pixels(idx) = argb(cr, cg, cb, 255)
               else
-                val er = fb(fbOff) & 0xff
-                val eg = fb(fbOff + 1) & 0xff
-                val eb = fb(fbOff + 2) & 0xff
+                val existing = pixels(idx)
+                val er = (existing >> 16) & 0xff
+                val eg = (existing >> 8) & 0xff
+                val eb = existing & 0xff
                 val inv = 255 - alpha
-                fb(fbOff) = ((er * inv + cr * alpha) / 255).toByte
-                fb(fbOff + 1) = ((eg * inv + cg * alpha) / 255).toByte
-                fb(fbOff + 2) = ((eb * inv + cb * alpha) / 255).toByte
-                fb(fbOff + 3) = 0xff.toByte
+                pixels(idx) = argb(
+                  (er * inv + cr * alpha) / 255,
+                  (eg * inv + cg * alpha) / 255,
+                  (eb * inv + cb * alpha) / 255,
+                  255,
+                )
