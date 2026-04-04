@@ -1,0 +1,440 @@
+OSKit Display Server — IPC-Based Window Server
+
+Wraps the DrawEngine hardware in an IPC service. Clients send
+messages to create windows, draw content, and manage the desktop.
+The server handles mouse input via notifications from the mouse
+ISR, updating the cursor and routing drag/focus events.
+
+Architecture follows macOS WindowServer: the display server owns
+all rendering. Clients never touch pixels directly — they send
+high-level commands over IPC.
+
+    module oskit
+
+    val DISPLAY_CTRL = 0x100008
+    val DRAW_ENGINE  = 0x1000A0
+
+DrawEngine register offsets.
+
+    val DE_EXEC       = 0
+    val DE_X1         = 2
+    val DE_Y1         = 4
+    val DE_X2         = 6
+    val DE_Y2         = 8
+    val DE_R          = 10
+    val DE_G          = 11
+    val DE_B          = 12
+    val DE_A          = 13
+    val DE_LINE_W     = 14
+    val DE_TEXT_ADDR  = 16
+    val DE_FONT_SIZE  = 20
+    val DE_FONT_STYLE = 22
+    val DE_CORNER_R   = 23
+    val DE_TARGET     = 24
+    val DE_RESULT     = 25
+    val DE_WIN_ID     = 26
+    val DE_WIN_FLAGS  = 27
+    val DE_TEXT_BUF   = 32
+    val DE_TITLE_BUF  = 64
+
+DrawEngine commands.
+
+    val CMD_CLEAR          = 0x01
+    val CMD_DRAW_TEXT      = 0x09
+    val CMD_FILL_RECT      = 0x10
+    val CMD_DRAW_LINE      = 0x11
+    val CMD_FILL_RRECT     = 0x14
+    val CMD_STROKE_RRECT   = 0x15
+    val CMD_SET_FONT       = 0x16
+    val CMD_SET_LIN_GRAD   = 0x18
+    val CMD_SET_RAD_GRAD   = 0x19
+    val CMD_CLEAR_PAINT    = 0x1A
+    val CMD_CREATE_WINDOW  = 0x30
+    val CMD_DESTROY_WINDOW = 0x31
+    val CMD_SET_WIN_POS    = 0x32
+    val CMD_SET_WIN_TITLE  = 0x33
+    val CMD_SET_WIN_FLAGS  = 0x34
+    val CMD_RAISE_WINDOW   = 0x35
+    val CMD_RESIZE_WINDOW  = 0x36
+    val CMD_SET_CURSOR_POS = 0x38
+    val CMD_PROCESS_MOUSE  = 0x41
+    val CMD_COMPOSITE      = 0x40
+    val CMD_SET_WALLPAPER  = 0x43
+
+IPC protocol: command bytes sent in message buffer.
+
+Client → Server message format:
+- byte 0: command ID
+- remaining bytes: command-specific arguments
+
+Server → Client reply format:
+- byte 0: status (0 = ok, -1 = error)
+- remaining bytes: command-specific results
+
+    val DS_CREATE_WINDOW = 1
+    val DS_DESTROY_WINDOW = 2
+    val DS_FILL_RECT = 3
+    val DS_DRAW_TEXT = 4
+    val DS_CLEAR = 5
+    val DS_RAISE_WINDOW = 6
+    val DS_SET_COLOR = 7
+    val DS_DRAW_LINE = 8
+    val DS_FILL_RRECT = 9
+    val DS_SET_FONT = 10
+    val DS_COMPOSITE = 11
+
+Server state.
+
+    var ds_port = -1
+    var ds_tid = -1
+    var ds_fb_width = 0
+    var ds_fb_height = 0
+
+Low-level DrawEngine register access.
+
+    ds_write8(offset: int, v: int)
+        p: *i8 = *i8(DRAW_ENGINE + offset)
+        *p = byte(v)
+
+    ds_write16(offset: int, v: int)
+        p: *i16 = *i16(DRAW_ENGINE + offset)
+        *p = i16(v)
+
+    ds_read8(offset: int) -> int
+        p: *i8 = *i8(DRAW_ENGINE + offset)
+        int(*p) & 0xFF
+
+    ds_exec(cmd: int)
+        ds_write8(DE_EXEC, cmd)
+
+    ds_color(r: int, g: int, b: int, a: int)
+        ds_write8(DE_R, r)
+        ds_write8(DE_G, g)
+        ds_write8(DE_B, b)
+        ds_write8(DE_A, a)
+
+    ds_pos(x: int, y: int)
+        ds_write16(DE_X1, x)
+        ds_write16(DE_Y1, y)
+
+    ds_size(w: int, h: int)
+        ds_write16(DE_X2, w)
+        ds_write16(DE_Y2, h)
+
+    ds_target(surface: int)
+        ds_write8(DE_TARGET, surface)
+
+    ds_set_title_buf(buf: *i8, len: int)
+        var i = 0
+        while i < len
+            if i >= 31 then break
+            ds_write8(DE_TITLE_BUF + i, int(buf[i]) & 0xFF)
+            i += 1
+        ds_write8(DE_TITLE_BUF + i, 0)
+
+    ds_set_text_buf(buf: *i8, len: int)
+        var i = 0
+        while i < len
+            if i >= 31 then break
+            ds_write8(DE_TEXT_BUF + i, int(buf[i]) & 0xFF)
+            i += 1
+        ds_write8(DE_TEXT_BUF + i, 0)
+
+Initialize the framebuffer via the display controller.
+
+    ds_init_fb(width: int, height: int)
+        ds_fb_width = width
+        ds_fb_height = height
+        var dc: *i8 = *i8(DISPLAY_CTRL)
+        dc[0] = byte(1)
+        dc[2] = byte(width >> 8)
+        dc[3] = byte(width & 0xFF)
+        dc[4] = byte(height >> 8)
+        dc[5] = byte(height & 0xFF)
+        dc[1] = byte(1)
+
+Handle mouse notification: read mouse state from driver globals,
+update DrawEngine cursor, run PROCESS_MOUSE for drag/focus, then
+composite.
+
+    extern mouse_x: int
+    extern mouse_y: int
+    extern mouse_buttons: int
+
+    ds_handle_mouse()
+        val mx = mouse_x
+        val my = mouse_y
+        val btn = mouse_buttons
+        // Update cursor position
+        ds_pos(mx, my)
+        ds_exec(CMD_SET_CURSOR_POS)
+        // Feed to PROCESS_MOUSE for drag/focus
+        val flags = ds_read8(DE_WIN_FLAGS) & 0x0F
+        if (btn & 1) != 0
+            ds_write8(DE_WIN_FLAGS, flags | 16)
+        else
+            ds_write8(DE_WIN_FLAGS, flags & 0x0F)
+        ds_exec(CMD_PROCESS_MOUSE)
+        // Recomposite
+        ds_exec(CMD_COMPOSITE)
+
+Handle IPC messages from clients. Each command is parsed from
+the message buffer and translated to DrawEngine operations.
+
+    ds_handle_message(sender: int, buf: *i8, len: int)
+        var reply: [4]i8
+        reply[0] = 0  // status ok
+        val cmd = int(buf[0]) & 0xFF
+
+        if cmd == DS_CREATE_WINDOW
+            // buf: [cmd, x_hi, x_lo, y_hi, y_lo, w_hi, w_lo, h_hi, h_lo, flags, title...]
+            val x = ((int(buf[1]) & 0xFF) << 8) | (int(buf[2]) & 0xFF)
+            val y = ((int(buf[3]) & 0xFF) << 8) | (int(buf[4]) & 0xFF)
+            val w = ((int(buf[5]) & 0xFF) << 8) | (int(buf[6]) & 0xFF)
+            val h = ((int(buf[7]) & 0xFF) << 8) | (int(buf[8]) & 0xFF)
+            val flags = int(buf[9]) & 0xFF
+            val title_len = len - 10
+            if title_len > 0
+                ds_set_title_buf(&buf[10], title_len)
+            else
+                ds_write8(DE_TITLE_BUF, 0)
+            ds_pos(x, y)
+            ds_size(w, h)
+            ds_write8(DE_WIN_FLAGS, flags)
+            ds_exec(CMD_CREATE_WINDOW)
+            val win_id = ds_read8(DE_RESULT)
+            val surf_id = ds_read8(DE_TARGET)
+            reply[1] = byte(win_id)
+            reply[2] = byte(surf_id)
+            ipc_reply(sender, &reply[0], 3)
+            ds_exec(CMD_COMPOSITE)
+            return
+
+        if cmd == DS_DESTROY_WINDOW
+            ds_write8(DE_WIN_ID, int(buf[1]) & 0xFF)
+            ds_exec(CMD_DESTROY_WINDOW)
+            ipc_reply(sender, &reply[0], 1)
+            ds_exec(CMD_COMPOSITE)
+            return
+
+        if cmd == DS_SET_COLOR
+            // buf: [cmd, r, g, b, a]
+            ds_color(int(buf[1]) & 0xFF, int(buf[2]) & 0xFF,
+                     int(buf[3]) & 0xFF, int(buf[4]) & 0xFF)
+            ipc_reply(sender, &reply[0], 1)
+            return
+
+        if cmd == DS_FILL_RECT
+            // buf: [cmd, surf_id, x_hi, x_lo, y_hi, y_lo, w_hi, w_lo, h_hi, h_lo]
+            ds_write8(DE_TARGET, int(buf[1]) & 0xFF)
+            val x = ((int(buf[2]) & 0xFF) << 8) | (int(buf[3]) & 0xFF)
+            val y = ((int(buf[4]) & 0xFF) << 8) | (int(buf[5]) & 0xFF)
+            val w = ((int(buf[6]) & 0xFF) << 8) | (int(buf[7]) & 0xFF)
+            val h = ((int(buf[8]) & 0xFF) << 8) | (int(buf[9]) & 0xFF)
+            ds_pos(x, y)
+            ds_size(w, h)
+            ds_exec(CMD_FILL_RECT)
+            ipc_reply(sender, &reply[0], 1)
+            return
+
+        if cmd == DS_DRAW_TEXT
+            // buf: [cmd, surf_id, x_hi, x_lo, y_hi, y_lo, size_hi, size_lo, style, text...]
+            ds_write8(DE_TARGET, int(buf[1]) & 0xFF)
+            val x = ((int(buf[2]) & 0xFF) << 8) | (int(buf[3]) & 0xFF)
+            val y = ((int(buf[4]) & 0xFF) << 8) | (int(buf[5]) & 0xFF)
+            val sz = ((int(buf[6]) & 0xFF) << 8) | (int(buf[7]) & 0xFF)
+            val style = int(buf[8]) & 0xFF
+            ds_write16(DE_FONT_SIZE, sz)
+            ds_write8(DE_FONT_STYLE, style)
+            val text_len = len - 9
+            if text_len > 0
+                ds_set_text_buf(&buf[9], text_len)
+            ds_pos(x, y)
+            ds_exec(CMD_DRAW_TEXT)
+            ipc_reply(sender, &reply[0], 1)
+            return
+
+        if cmd == DS_CLEAR
+            // buf: [cmd, surf_id]
+            ds_write8(DE_TARGET, int(buf[1]) & 0xFF)
+            ds_exec(CMD_CLEAR)
+            ipc_reply(sender, &reply[0], 1)
+            return
+
+        if cmd == DS_RAISE_WINDOW
+            ds_write8(DE_WIN_ID, int(buf[1]) & 0xFF)
+            ds_exec(CMD_RAISE_WINDOW)
+            ipc_reply(sender, &reply[0], 1)
+            ds_exec(CMD_COMPOSITE)
+            return
+
+        if cmd == DS_DRAW_LINE
+            // buf: [cmd, surf_id, x1_hi, x1_lo, y1_hi, y1_lo, x2_hi, x2_lo, y2_hi, y2_lo]
+            ds_write8(DE_TARGET, int(buf[1]) & 0xFF)
+            val x1 = ((int(buf[2]) & 0xFF) << 8) | (int(buf[3]) & 0xFF)
+            val y1 = ((int(buf[4]) & 0xFF) << 8) | (int(buf[5]) & 0xFF)
+            val x2 = ((int(buf[6]) & 0xFF) << 8) | (int(buf[7]) & 0xFF)
+            val y2 = ((int(buf[8]) & 0xFF) << 8) | (int(buf[9]) & 0xFF)
+            ds_pos(x1, y1)
+            ds_size(x2, y2)
+            ds_exec(CMD_DRAW_LINE)
+            ipc_reply(sender, &reply[0], 1)
+            return
+
+        if cmd == DS_FILL_RRECT
+            // buf: [cmd, surf_id, x_hi, x_lo, y_hi, y_lo, w_hi, w_lo, h_hi, h_lo, corner_r]
+            ds_write8(DE_TARGET, int(buf[1]) & 0xFF)
+            val x = ((int(buf[2]) & 0xFF) << 8) | (int(buf[3]) & 0xFF)
+            val y = ((int(buf[4]) & 0xFF) << 8) | (int(buf[5]) & 0xFF)
+            val w = ((int(buf[6]) & 0xFF) << 8) | (int(buf[7]) & 0xFF)
+            val h = ((int(buf[8]) & 0xFF) << 8) | (int(buf[9]) & 0xFF)
+            ds_write8(DE_CORNER_R, int(buf[10]) & 0xFF)
+            ds_pos(x, y)
+            ds_size(w, h)
+            ds_exec(CMD_FILL_RRECT)
+            ipc_reply(sender, &reply[0], 1)
+            return
+
+        if cmd == DS_COMPOSITE
+            ds_exec(CMD_COMPOSITE)
+            ipc_reply(sender, &reply[0], 1)
+            return
+
+        // Unknown command
+        reply[0] = byte(-1)
+        ipc_reply(sender, &reply[0], 1)
+
+The main display server entry point. Call this from a dedicated
+thread. Initializes the framebuffer, creates the IPC port, sets
+up the wallpaper, and enters the event loop.
+
+    display_server(width: int, height: int)
+        ds_tid = thread_id()
+
+        // Initialize framebuffer
+        ds_init_fb(width, height)
+
+        // Set dark wallpaper
+        ds_color(10, 10, 18, 255)
+        ds_exec(CMD_SET_WALLPAPER)
+
+        // Initial composite (empty desktop with wallpaper)
+        ds_exec(CMD_COMPOSITE)
+
+        // Create IPC port
+        ds_port = port_create()
+        port_register(ds_port, "display")
+
+        // Register for mouse notifications
+        mouse_set_notify(ds_tid)
+
+        // Event loop
+        var buf: [128]i8
+        while true
+            val result = ipc_recv_notify(ds_port, &buf[0], 128)
+            if result == -2
+                // Notification — mouse event
+                ds_handle_mouse()
+            elif result >= 0
+                // IPC message from client
+                ds_handle_message(result, &buf[0], 128)
+
+Userspace client library. Apps call these to interact with the
+display server without knowing the IPC protocol details.
+
+    var ds_client_port = -1
+
+    ds_connect() -> int
+        if ds_client_port < 0
+            ds_client_port = port_lookup("display")
+        ds_client_port
+
+    ds_create_window(x: int, y: int, w: int, h: int, flags: int, title: *i8, title_len: int) -> int
+        val port = ds_connect()
+        if port < 0 then return -1
+        var msg: [64]i8
+        msg[0] = byte(DS_CREATE_WINDOW)
+        msg[1] = byte(x >> 8)
+        msg[2] = byte(x & 0xFF)
+        msg[3] = byte(y >> 8)
+        msg[4] = byte(y & 0xFF)
+        msg[5] = byte(w >> 8)
+        msg[6] = byte(w & 0xFF)
+        msg[7] = byte(h >> 8)
+        msg[8] = byte(h & 0xFF)
+        msg[9] = byte(flags)
+        var i = 0
+        while i < title_len
+            if i >= 53 then break
+            msg[10 + i] = title[i]
+            i += 1
+        var reply: [4]i8
+        ipc_send(port, &msg[0], 10 + i, &reply[0], 4)
+        int(reply[1]) & 0xFF  // win_id
+
+    ds_set_color(r: int, g: int, b: int, a: int)
+        val port = ds_connect()
+        if port < 0 then return
+        var msg: [8]i8
+        msg[0] = byte(DS_SET_COLOR)
+        msg[1] = byte(r)
+        msg[2] = byte(g)
+        msg[3] = byte(b)
+        msg[4] = byte(a)
+        var reply: [2]i8
+        ipc_send(port, &msg[0], 5, &reply[0], 2)
+
+    ds_fill_rect(surf: int, x: int, y: int, w: int, h: int)
+        val port = ds_connect()
+        if port < 0 then return
+        var msg: [16]i8
+        msg[0] = byte(DS_FILL_RECT)
+        msg[1] = byte(surf)
+        msg[2] = byte(x >> 8)
+        msg[3] = byte(x & 0xFF)
+        msg[4] = byte(y >> 8)
+        msg[5] = byte(y & 0xFF)
+        msg[6] = byte(w >> 8)
+        msg[7] = byte(w & 0xFF)
+        msg[8] = byte(h >> 8)
+        msg[9] = byte(h & 0xFF)
+        var reply: [2]i8
+        ipc_send(port, &msg[0], 10, &reply[0], 2)
+
+    ds_draw_text(surf: int, x: int, y: int, size: int, style: int, text: *i8, text_len: int)
+        val port = ds_connect()
+        if port < 0 then return
+        var msg: [64]i8
+        msg[0] = byte(DS_DRAW_TEXT)
+        msg[1] = byte(surf)
+        msg[2] = byte(x >> 8)
+        msg[3] = byte(x & 0xFF)
+        msg[4] = byte(y >> 8)
+        msg[5] = byte(y & 0xFF)
+        msg[6] = byte(size >> 8)
+        msg[7] = byte(size & 0xFF)
+        msg[8] = byte(style)
+        var i = 0
+        while i < text_len
+            if i >= 54 then break
+            msg[9 + i] = text[i]
+            i += 1
+        var reply: [2]i8
+        ipc_send(port, &msg[0], 9 + i, &reply[0], 2)
+
+    ds_clear(surf: int)
+        val port = ds_connect()
+        if port < 0 then return
+        var msg: [4]i8
+        msg[0] = byte(DS_CLEAR)
+        msg[1] = byte(surf)
+        var reply: [2]i8
+        ipc_send(port, &msg[0], 2, &reply[0], 2)
+
+    ds_composite()
+        val port = ds_connect()
+        if port < 0 then return
+        var msg: [2]i8
+        msg[0] = byte(DS_COMPOSITE)
+        var reply: [2]i8
+        ipc_send(port, &msg[0], 1, &reply[0], 2)
