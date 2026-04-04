@@ -24,7 +24,7 @@ object Runtime:
        |; vector table (20 slots x 8 bytes = 160 bytes)
        |  dl $initialSSP
        |  dl _start
-       |  dl _fault
+       |  dl _irq_ignore
        |  dl _fault
        |  dl _fault
        |  dl _fault
@@ -47,6 +47,8 @@ object Runtime:
        |  movi r4, main
        |  jalr r6, r4
        |  halt
+       |_irq_ignore
+       |  rte
        |_fault
        |  halt
        |  align 8

@@ -1,0 +1,204 @@
+package io.github.edadma.trisc
+
+/** Headless display controller for testing — no Swing dependencies */
+class HeadlessDisplayController(val base: Long, fb: FramebufferImage) extends Device:
+  val name = "DisplayController"
+  val size = 6
+  private var mode = 0
+  private var widthHi = 0
+  private var widthLo = 80
+  private var heightHi = 0
+  private var heightLo = 24
+  var currentFBWidth = 640
+  var currentFBHeight = 480
+
+  def readByte(addr: Long): Int =
+    (addr - base).toInt match
+      case 0 => mode
+      case 2 => widthHi
+      case 3 => widthLo
+      case 4 => heightHi
+      case 5 => heightLo
+      case _ => 0
+
+  def writeByte(addr: Long, data: Long): Unit =
+    val v = (data & 0xff).toInt
+    (addr - base).toInt match
+      case 0 => mode = v & 1
+      case 1 => // commit
+        if mode == 1 then
+          val w = (widthHi << 8) | widthLo
+          val h = (heightHi << 8) | heightLo
+          fb.setResolution(w, h)
+          fb.clear()
+          currentFBWidth = fb.width
+          currentFBHeight = fb.height
+      case 2 => widthHi = v
+      case 3 => widthLo = v
+      case 4 => heightHi = v
+      case 5 => heightLo = v
+      case _ =>
+
+  def currentMode: Int = mode
+
+class OSKitDisplayTests extends OSKitTestHelpers {
+
+  private def readLsysl(path: String): String =
+    val raw = scala.io.Source.fromFile(path).mkString
+    val doc = new LiterateParser().parse(raw)
+    LiterateRenderer.tangle(doc)
+
+  private lazy val ipcSysl: String = readLsysl("oskit/ipc/ipc.lsysl")
+  private lazy val kbdSysl: String = readLsysl("oskit/drivers/kbd/keyboard.lsysl")
+  private lazy val mouseSysl: String = readLsysl("oskit/drivers/mouse/mouse.lsysl")
+  private lazy val displaySysl: String = readLsysl("oskit/drivers/display/display.lsysl")
+
+  def runDisplay(userSources: Map[String, String], maxCycles: Int = 10000000): (CPU, String) =
+    val bootTof = assemble(bootAsm, relocatable = true)
+    val allSources = Map(
+      "oskit/kernel" -> kernelSysl, "oskit/services" -> servicesSysl, "oskit/timer" -> timerSysl,
+      "oskit/semaphore" -> semaphoreSysl, "oskit/mutex" -> mutexSysl,
+      "oskit/ipc" -> ipcSysl, "oskit/kbd" -> kbdSysl,
+      "oskit/mouse" -> mouseSysl, "oskit/display" -> displaySysl,
+    ) ++ userSources
+    val driver = new SyslDriver
+    val result = driver.compile(allSources)
+    val codegen = new SyslTriscCodegen
+    val tofs = for unit <- result.units yield
+      val asm = codegen.generate(unit.typed)
+      assemble(asm, relocatable = true)
+    val syslTof = Linker.link(tofs, relocatable = true)
+    val linked = Linker.link(Seq(bootTof, syslTof), linkerScript, 0)
+
+    val output = new StringBuilder
+    val stdout = new Device with WriteOnlyAddressable {
+      val name = "stdout"
+      val base: Long = 0x100000
+      val size: Long = 1
+      def writeByte(addr: Long, data: Long): Unit = output += data.toChar
+      override def loadByte(addr: Long, data: Long): Unit = ()
+    }
+    val intc = new InterruptController(Runtime.intcAddress)
+    val timer = new Timer(Runtime.timerAddress, intc, irq = 0)
+    val kbd = new KeyboardDevice(Runtime.keyboardAddress, intc, irq = 1)
+    val mouse = new MouseDevice(Runtime.mouseAddress, intc, irq = 2)
+    val fb = new FramebufferImage(Runtime.framebufferAddress, Runtime.framebufferMaxSize)
+    // Headless display controller — just tracks resolution, no Swing
+    val displayCtrl = new HeadlessDisplayController(Runtime.displayCtrlAddress, fb)
+    // memProxy for DrawEngine (needs to read RAM for text strings)
+    var memRef: Addressable = null
+    val memProxy: Addressable = new Addressable {
+      val name = "memProxy"; val base = 0L; val size = 0L
+      def readByte(addr: Long): Int = memRef.readByte(addr)
+      def writeByte(addr: Long, data: Long): Unit = ()
+      def loadByte(addr: Long, data: Long): Unit = ()
+      override def readInt(addr: Long): Int = memRef.readInt(addr)
+    }
+    val drawEngine = new DrawEngine(
+      Runtime.drawEngineAddress, memProxy, fb,
+      () => displayCtrl.currentFBWidth, () => displayCtrl.currentFBHeight,
+    )
+
+    val mem = new Memory("Memory",
+      new RAM(0, 0x100000), stdout, intc, timer, kbd, mouse,
+      displayCtrl, fb, drawEngine)
+    memRef = mem
+    linked.load(mem)
+    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles }
+    cpu.reset()
+    cpu.run()
+    (cpu, output.toString)
+
+  "Display server: OS desktop from TOF file" in {
+    // Load the TOF file that the GUI would use
+    val tofStr = scala.io.Source.fromFile("/tmp/os-desktop.tof").mkString
+    val linked = TOF.deserialize(tofStr)
+    linked.tofType shouldBe TOFType.Executable
+
+    val output = new StringBuilder
+    val stdout = new Stdout(0x100000, s => output ++= s)
+    val intc = new InterruptController(Runtime.intcAddress)
+    val timer = new Timer(Runtime.timerAddress, intc, irq = 0)
+    val kbd = new KeyboardDevice(Runtime.keyboardAddress, intc, irq = 1)
+    val mouse = new MouseDevice(Runtime.mouseAddress, intc, irq = 2)
+    val fb = new FramebufferImage(Runtime.framebufferAddress, Runtime.framebufferMaxSize)
+    val displayCtrl = new HeadlessDisplayController(Runtime.displayCtrlAddress, fb)
+    var memRef: Addressable = null
+    val memProxy: Addressable = new Addressable {
+      val name = "memProxy"; val base = 0L; val size = 0L
+      def readByte(addr: Long): Int = memRef.readByte(addr)
+      def writeByte(addr: Long, data: Long): Unit = ()
+      def loadByte(addr: Long, data: Long): Unit = ()
+      override def readInt(addr: Long): Int = memRef.readInt(addr)
+    }
+    val drawEngine = new DrawEngine(
+      Runtime.drawEngineAddress, memProxy, fb,
+      () => displayCtrl.currentFBWidth, () => displayCtrl.currentFBHeight,
+    )
+    // Include ramdisk like the GUI does
+    val ram = new RAM(0, 0x100000)
+    val ramdisk = new Ramdisk(Runtime.ramdiskAddress, ram, sectors = 2048, sectorSize = 512, intc, irq = 3,
+      prefill = "/dev/tty0 char 0 0\n/dev/disk0 block 1 0\n/dev/null char 0 1\n")
+    val blitter = new Blitter(Runtime.blitterAddress, memProxy, fb,
+      () => displayCtrl.currentFBWidth, () => displayCtrl.currentFBHeight)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, mouse, displayCtrl, fb, drawEngine, ramdisk, blitter)
+    memRef = mem
+    linked.load(mem)
+    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = 20000000 }
+    cpu.reset()
+    cpu.run()
+    println(s"TOF file output: '$output' state=${cpu.state}")
+    output.toString should include("!")
+  }
+
+  "Display server: OS desktop demo" in {
+    val appSysl = scala.io.Source.fromFile("examples/draw-hello/os-desktop.sysl").mkString
+    val (cpu, output) = runDisplay(Map("app" -> appSysl), maxCycles = 20000000)
+    println(s"Output: '$output'")
+    output should include("S")  // server started
+    output should include("A")  // app started
+    output should include("P")  // port found
+    output should include("!")  // completed
+  }
+
+  "Display server: client creates a window" in {
+    val (cpu, output) = runDisplay(Map(
+      "app" ->
+        """import oskit.*
+          |
+          |kernel_main() -> int
+          |    ipc_init()
+          |    keyboard_init()
+          |    mouse_init()
+          |    create_thread(server, 0x20000, 0x1F000, "disp")
+          |    create_thread(client, 0x30000, 0x2F000, "app")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |
+          |server()
+          |    display_server(640, 480)
+          |
+          |client()
+          |    sleep(20)
+          |    var title: [5]i8
+          |    title[0] = byte(72)  // H
+          |    title[1] = byte(101) // e
+          |    title[2] = byte(108) // l
+          |    title[3] = byte(108) // l
+          |    title[4] = byte(111) // o
+          |    val surf = ds_create_window(50, 50, 200, 150, 3, &title[0], 5)
+          |    if surf > 0
+          |        putc('W')
+          |    // Draw into the window
+          |    ds_set_color(0, 200, 255, 255)
+          |    ds_clear(surf)
+          |    putc('D')
+          |    ds_composite()
+          |    putc('!')
+          |""".stripMargin
+    ))
+    output should include("W")
+    output should include("D")
+    output should include("!")
+  }
+}

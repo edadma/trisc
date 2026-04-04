@@ -17,6 +17,8 @@ On-disk layout (block 0 = boot, block 1 = superblock):
 - Dir entries: 16 bytes each (inode number + 14-char name)
 
 
+    module oskit.fs
+
     // === Block I/O — provided by the environment ===
 
     extern rd_read(lba: int, addr: *i8)

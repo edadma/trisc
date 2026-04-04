@@ -1,0 +1,52 @@
+OSKit Mouse Driver — Mouse Event Server
+
+Handles mouse IRQ 2. Reads position and button state from the
+device and notifies a registered listener thread (typically the
+display server). The listener calls mouse_read() to get the
+current state.
+
+Device registers (at 0x100090):
+- +0 = STATUS (bit 0 = event ready)
+- +1 = BUTTONS (reading clears ready flag and lowers IRQ)
+- +2 = X_HI, +3 = X_LO (16-bit x position)
+- +4 = Y_HI, +5 = Y_LO (16-bit y position)
+
+    module oskit
+
+    val MOUSE_BASE = 0x100090
+    val MOUSE_IRQ = 2
+
+    extern register_irq(irq: int, handler: i64)
+
+Current mouse state, updated by the ISR. The display server
+reads these directly after being notified.
+
+    var mouse_x = 0
+    var mouse_y = 0
+    var mouse_buttons = 0
+    var mouse_notify_tid = -1
+
+    mouse_set_notify(tid: int)
+        mouse_notify_tid = tid
+
+    mouse_init()
+        register_irq(MOUSE_IRQ, mouse_handler)
+
+mouse_handler -- Called by the generic IRQ dispatcher.
+
+Reads the device registers and stores current state. Notifies
+the registered listener thread so it can update the cursor.
+
+    mouse_handler()
+        var status: *i8 = *i8(MOUSE_BASE)
+        if (*status & 1) != 0
+            var xhi: *i8 = *i8(MOUSE_BASE + 2)
+            var xlo: *i8 = *i8(MOUSE_BASE + 3)
+            var yhi: *i8 = *i8(MOUSE_BASE + 4)
+            var ylo: *i8 = *i8(MOUSE_BASE + 5)
+            var btn: *i8 = *i8(MOUSE_BASE + 1)
+            mouse_x = ((int(*xhi) & 0xFF) << 8) | (int(*xlo) & 0xFF)
+            mouse_y = ((int(*yhi) & 0xFF) << 8) | (int(*ylo) & 0xFF)
+            mouse_buttons = int(*btn) & 0xFF
+            if mouse_notify_tid >= 0
+                notify_send(mouse_notify_tid, 2)
