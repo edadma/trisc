@@ -98,4 +98,27 @@ class SyslCodegenTupleTests extends SyslCodegenHelpers {
         |    a * 100 + b
         |""".stripMargin) shouldBe 1122
   }
+
+  // ===== Paren-free tuple construction =====
+
+  "return a, b (no parens)" in {
+    compileAndRun(
+      """divmod(a: int, b: int) -> (int, int)
+        |    return a / b, a % b
+        |
+        |main() -> int
+        |    q, r = divmod(17, 5)
+        |    q * 10 + r
+        |""".stripMargin) shouldBe 32
+  }
+
+  "expression function returns a, b" in {
+    compileAndRun(
+      """swap(a: int, b: int) -> (int, int) = b, a
+        |
+        |main() -> int
+        |    x, y = swap(10, 20)
+        |    x * 100 + y
+        |""".stripMargin) shouldBe 2010
+  }
 }
