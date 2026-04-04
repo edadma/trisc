@@ -49,7 +49,7 @@ enum SyslType:
     case FuncType(_, _) => 8
     case ArrayType(elem, size) => elem.sizeOf * size
     case DoubleType => 8
-    case StringType => 12        // ptr(8) + len(4)
+    case StringType => 16        // ptr(8) + len(8) — Go-style fat pointer
     case SliceType(_) => 16      // ptr(8) + len(4) + cap(4)
     case RefType(_) => 8         // pointer to heap object (refcount header + data)
     case st @ StructType(_, fields) =>
