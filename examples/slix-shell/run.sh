@@ -26,7 +26,7 @@ echo "=== Assembling boot.asm ==="
 sbt -error "triscCliJVM/run asm oskit/boot/boot.asm"
 
 echo "=== Linking ==="
-sbt -error "triscCliJVM/run link -o /tmp/slix-shell.tof oskit/boot/boot.tof /tmp/slix-shell-sysl.tof"
+sbt -error "triscCliJVM/run link -s tos/linker.ld -o /tmp/slix-shell.tof oskit/boot/boot.tof /tmp/slix-shell-sysl.tof"
 
 echo "=== Running SLIX shell ==="
 sbt "triscCliJVM/run run --gui /tmp/slix-shell.tof"
