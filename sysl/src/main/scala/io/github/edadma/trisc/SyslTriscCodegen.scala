@@ -1529,7 +1529,11 @@ class SyslTriscCodegen(addresses: Int = 4):
         val off = fieldOffset(st, fieldIndex)
         emitStructAddr(obj)        // r1 = struct address
         if off != 0 then emitAddImm(1, 1, off)
-        emitLoad(1, 1, fieldType)  // r1 = field value
+        fieldType match
+          case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType =>
+            () // aggregate types: address is the value (don't dereference)
+          case _ =>
+            emitLoad(1, 1, fieldType) // scalar types: load the value
 
       case TDeref(inner, typ) =>
         genExpr(inner)           // r1 = pointer address

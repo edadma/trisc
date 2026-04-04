@@ -176,4 +176,10 @@ import oskit.apps.*
     val pwdLines = output.split('\n').filter(_.trim == "/")
     pwdLines.length should be >= 1
   }
+
+  "Shell: type 20 characters without crash" in {
+    val keys        = typeString("echo abcdefghijklmn\n", startTick = 500000, spacing = 50000)
+    val (_, output) = runShell(maxCycles = 20000000, scheduledKeys = keys)
+    output should include("abcdefghijklmn")
+  }
 }
