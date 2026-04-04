@@ -118,6 +118,20 @@ class SyslCodegenFuncPointerTests extends SyslCodegenHelpers {
         |""".stripMargin) shouldBe 42
   }
 
+  "call function-typed field on indexed struct" in {
+    compileAndRun(
+      """struct Cmd
+        |    handler: func(int) -> int
+        |dbl(x: int) -> int = x * 2
+        |triple(x: int) -> int = x * 3
+        |main() -> int
+        |    var cmds: [2]Cmd
+        |    cmds[0].handler = dbl
+        |    cmds[1].handler = triple
+        |    cmds[0].handler(10) + cmds[1].handler(10)
+        |""".stripMargin) shouldBe 50
+  }
+
   "select function pointer at runtime" in {
     compileAndRun(
       """dbl(x: int) -> int = x * 2

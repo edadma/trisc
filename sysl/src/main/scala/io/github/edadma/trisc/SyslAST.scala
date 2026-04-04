@@ -92,6 +92,7 @@ case class AddrOfIndexAST(array: ExpressionAST, index: ExpressionAST) extends Ex
 case class AddrOfFieldAST(obj: ExpressionAST, field: String) extends ExpressionAST
 case class DerefAST(expr: ExpressionAST) extends ExpressionAST
 case class IndexAST(expr: ExpressionAST, index: ExpressionAST) extends ExpressionAST
+case class SliceExprAST(array: ExpressionAST, low: Option[ExpressionAST], high: Option[ExpressionAST]) extends ExpressionAST
 case class FieldAccessAST(obj: ExpressionAST, field: String) extends ExpressionAST
 case class FieldPreIncAST(obj: ExpressionAST, field: String) extends ExpressionAST
 case class FieldPreDecAST(obj: ExpressionAST, field: String) extends ExpressionAST

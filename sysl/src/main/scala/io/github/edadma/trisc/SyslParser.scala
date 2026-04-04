@@ -419,6 +419,7 @@ class SyslParser extends StandardTokenParsers {
       ident <~ "++" ^^ PostIncAST.apply |
       ident <~ "--" ^^ PostDecAST.apply |
       primary ~ rep(
+        ("[" ~> opt(expr) ~ (":" ~> opt(expr)) <~ "]") ^^ { case lo ~ hi => (4, null, "", List(lo.orNull, hi.orNull)) } |
         ("[" ~> expr <~ "]") ^^ (idx => (0, idx, "", Nil: List[ExpressionAST])) |
         ("." ~> ident) ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case m ~ args => (2, null, m, args) } |
         ("." ~> numericLit) ^^ (n => (1, null, s"_${n.toInt}", Nil)) |
@@ -434,6 +435,8 @@ class SyslParser extends StandardTokenParsers {
             e match
               case VarRefAST(name) => CallAST(name, args)
               case _ => IndirectCallAST(e, args)
+          case (e, (4, _, _, args)) =>
+            SliceExprAST(e, Option(args(0)), Option(args(1)))
           case (e, _) => e // shouldn't happen
         }
       }

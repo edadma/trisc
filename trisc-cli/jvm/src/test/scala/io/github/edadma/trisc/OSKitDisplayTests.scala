@@ -147,14 +147,12 @@ class OSKitDisplayTests extends OSKitTestHelpers {
     val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = 20000000 }
     cpu.reset()
     cpu.run()
-    println(s"TOF file output: '$output' state=${cpu.state}")
     output.toString should include("!")
   }
 
   "Display server: OS desktop demo" in {
     val appSysl = scala.io.Source.fromFile("examples/draw-hello/os-desktop.sysl").mkString
     val (cpu, output) = runDisplay(Map("app" -> appSysl), maxCycles = 20000000)
-    println(s"Output: '$output'")
     output should include("S")  // server started
     output should include("A")  // app started
     output should include("P")  // port found

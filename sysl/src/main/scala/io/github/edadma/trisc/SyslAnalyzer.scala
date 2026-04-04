@@ -582,6 +582,17 @@ class SyslAnalyzer:
           case t => throw AnalysisError(s"cannot index $t")
         TIndex(tArr, tIndex, elemType)
 
+      case SliceExprAST(arr, low, high) =>
+        val tArr = analyzeExpr(arr)
+        val tLow = low.map(analyzeExpr)
+        val tHigh = high.map(analyzeExpr)
+        val elemType = tArr.typ match
+          case SliceType(elem) => elem
+          case RefType(SliceType(elem)) => elem
+          case ArrayType(elem, _) => elem
+          case t => throw AnalysisError(s"cannot sub-slice $t")
+        TSliceExpr(tArr, tLow, tHigh, SliceType(elemType))
+
       case FieldAccessAST(VarRefAST(enumName), member) if enumTypes.contains(enumName) =>
         val members = enumTypes(enumName)
         if !members.contains(member) then throw AnalysisError(s"enum $enumName has no member '$member'")
@@ -693,8 +704,21 @@ class SyslAnalyzer:
         val tArg = analyzeExpr(args.head)
         tArg.typ match
           case SliceType(_) => TCap(tArg, I32)
+          case RefType(SliceType(_)) => TCap(tArg, I32)
           case ArrayType(_, _) => TCap(tArg, I32)
           case t => throw AnalysisError(s"cap() not supported on $t")
+
+      case CallAST("append", args) =>
+        if args.size != 2 then throw AnalysisError("append() takes exactly 2 arguments")
+        val tSlice = analyzeExpr(args(0))
+        val tElem = analyzeExpr(args(1))
+        val elemType = tSlice.typ match
+          case SliceType(elem) => elem
+          case t => throw AnalysisError(s"append() requires []T, got $t")
+        val coerced = coerceLiteral(tElem, elemType)
+        if !compatible(coerced.typ, elemType) then
+          throw AnalysisError(s"cannot append ${coerced.typ} to []$elemType")
+        TAppend(tSlice, coerced, SliceType(elemType))
 
       case IndirectCallAST(callee, args) =>
         val tCallee = analyzeExpr(callee)
@@ -710,32 +734,30 @@ class SyslAnalyzer:
       case MethodCallAST(obj, method, args) =>
         val tObj = analyzeExpr(obj)
         val tArgs = args.map(analyzeExpr)
-        // Determine the struct type and build self argument
-        val (structName, selfArg) = tObj.typ match
-          case st @ StructType(name, _) =>
-            // Need address of struct — build &obj
-            val addr = tObj match
-              case TVarRef(n, _) => TAddrOf(n, PtrType(st))
-              case TFieldAccess(innerObj, idx, _) => TAddrOfField(innerObj, idx, PtrType(st))
-              case _ => throw AnalysisError(s"cannot call method on this struct expression")
-            (name, addr)
-          case PtrType(StructType(name, _)) => (name, tObj) // already a pointer
-          case RefType(StructType(name, _)) => (name, tObj) // already a ref
+        // Determine the struct type (defer self-arg computation until we know it's a method)
+        val structType = tObj.typ match
+          case st: StructType          => st
+          case PtrType(st: StructType) => st
+          case RefType(st: StructType) => st
           case other => throw AnalysisError(s"cannot call method '$method' on $other")
-        // Look up the method
+        val structName = structType.name
         val funcName = s"${structName}_$method"
         if functions.contains(funcName) then
+          // It's a real method — build self argument (need address for value structs)
+          val selfArg = tObj.typ match
+            case st @ StructType(_, _) =>
+              tObj match
+                case TVarRef(n, _) => TAddrOf(n, PtrType(st))
+                case TFieldAccess(innerObj, idx, _) => TAddrOfField(innerObj, idx, PtrType(st))
+                case TIndex(arr, idx, _) => TAddrOfIndex(arr, idx, PtrType(st))
+                case _ => throw AnalysisError(s"cannot take address of expression for method call")
+            case _ => tObj // PtrType or RefType — already a pointer
           val funInfo = functions(funcName)
           val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs) // .tail skips self param
           TCall(funcName, selfArg :: checkedArgs, funInfo.returnType)
         else
           // Fall back to calling a function-typed field
-          val st = tObj.typ match
-            case s: StructType        => s
-            case PtrType(s: StructType) => s
-            case RefType(s: StructType) => s
-            case _ => throw AnalysisError(s"struct $structName has no method '$method'")
-          st.fields.zipWithIndex.find(_._1._1 == method) match
+          structType.fields.zipWithIndex.find(_._1._1 == method) match
             case Some(((_, FuncType(paramTypes, returnType)), idx)) =>
               val fieldAccess = TFieldAccess(tObj, idx, FuncType(paramTypes, returnType))
               val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }

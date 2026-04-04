@@ -43,9 +43,6 @@ Unmatched statement and expression types in `genStmt`/`genExpr` silently emit `#
 ### `unowned` references
 For back-pointers and non-owning references (e.g. parent pointers in trees). ARC can't collect cycles — `unowned` is the escape hatch. Design not started.
 
-### Array decay cleanup
-Arrays should implicitly pass as `*T` without requiring `&arr[0]`. Partial support exists but the rules aren't finalized.
-
 ---
 
 ## LLVM Backend
