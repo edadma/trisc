@@ -293,6 +293,9 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case RefSliceVal(cells, length, _) =>
       if idx < 0 || idx >= length then throw RuntimeError(s"array index out of bounds: $idx (length $length)")
       cells(idx)
+    case SliceVal(cells, off, len, _) =>
+      if idx < 0 || idx >= len then throw RuntimeError(s"slice index out of bounds: $idx (length $len)")
+      cells(off + idx)
     case _ => throw RuntimeError("cannot index non-array")
 
   private def exec(stmt: TStmt, env: Env): Unit =
@@ -567,6 +570,47 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case _ =>
             indexCell(arrVal, idx).value
 
+      case TSliceExpr(arr, low, high, _) =>
+        val arrVal = evalAny(arr, env)
+        arrVal match
+          case SliceVal(cells, off, len, cap) =>
+            val lo = low.map(l => toLong(evalAny(l, env)).toInt).getOrElse(0)
+            val hi = high.map(h => toLong(evalAny(h, env)).toInt).getOrElse(len)
+            if lo < 0 || hi < lo || hi > len then
+              throw RuntimeError(s"slice bounds out of range [$lo:$hi] with length $len")
+            SliceVal(cells, off + lo, hi - lo, cap - lo)
+          case RefSliceVal(cells, length, _) =>
+            val lo = low.map(l => toLong(evalAny(l, env)).toInt).getOrElse(0)
+            val hi = high.map(h => toLong(evalAny(h, env)).toInt).getOrElse(length)
+            if lo < 0 || hi < lo || hi > length then
+              throw RuntimeError(s"slice bounds out of range [$lo:$hi] with length $length")
+            SliceVal(cells, lo, hi - lo, length - lo)
+          case ArrVal(cells, off) =>
+            val totalLen = cells.length - off
+            val lo = low.map(l => toLong(evalAny(l, env)).toInt).getOrElse(0)
+            val hi = high.map(h => toLong(evalAny(h, env)).toInt).getOrElse(totalLen)
+            if lo < 0 || hi < lo || hi > totalLen then
+              throw RuntimeError(s"slice bounds out of range [$lo:$hi] with length $totalLen")
+            SliceVal(cells, off + lo, hi - lo, totalLen - lo)
+          case _ => throw RuntimeError("cannot sub-slice non-slice value")
+
+      case TAppend(sliceExpr, elemExpr, _) =>
+        val sliceVal: SliceVal = evalAny(sliceExpr, env) match
+          case s: SliceVal => s
+          case RefSliceVal(cells, length, _) => SliceVal(cells, 0, length, length)
+          case _ => throw RuntimeError("append requires a slice")
+        val newElem = evalAny(elemExpr, env)
+        if sliceVal.length < sliceVal.capacity then
+          sliceVal.cells(sliceVal.offset + sliceVal.length).value = newElem
+          SliceVal(sliceVal.cells, sliceVal.offset, sliceVal.length + 1, sliceVal.capacity)
+        else
+          val newCap = if sliceVal.capacity == 0 then 1 else sliceVal.capacity * 2
+          val newCells = Array.fill(newCap)(new Cell(IntVal(0)))
+          for i <- 0 until sliceVal.length do
+            newCells(i).value = sliceVal.cells(sliceVal.offset + i).value
+          newCells(sliceVal.length).value = newElem
+          SliceVal(newCells, 0, sliceVal.length + 1, newCap)
+
       case TIfExpr(cond, thenBody, elseBody, _) =>
         if toLong(evalAny(cond, env)) != 0 then
           evalBlock(thenBody, env)
@@ -720,6 +764,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         evalAny(inner, env) match
           case SliceVal(_, _, _, cap) => IntVal(cap.toLong)
           case ArrVal(cells, _) => IntVal(cells.length.toLong)
+          case RefSliceVal(_, length, _) => IntVal(length.toLong)
           case _ => throw RuntimeError("cap: unsupported type")
 
       case TFieldPreInc(obj, fieldIndex, _) =>

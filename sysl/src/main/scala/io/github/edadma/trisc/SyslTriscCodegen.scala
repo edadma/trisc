@@ -175,7 +175,7 @@ class SyslTriscCodegen(addresses: Int = 4):
               case _ => false // nonzero constant → data
 
   // Does this return type require a caller-allocated return slot?
-  private def returnsViaPointer(typ: SyslType): Boolean = typ.isInstanceOf[SyslType.StructType] || typ == SyslType.StringType
+  private def returnsViaPointer(typ: SyslType): Boolean = typ.isInstanceOf[SyslType.StructType] || typ == SyslType.StringType || typ.isInstanceOf[SyslType.SliceType]
 
   // Size of a type on the stack in bytes, rounded up to alignment
   private def stackSize(typ: SyslType): Int =
@@ -241,8 +241,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit(s"  sts r$srcReg, r$addrReg, r0")
       case SyslType.IntType(32) | SyslType.UIntType(32) =>
         emit(s"  stw r$srcReg, r$addrReg, r0")
-      case SyslType.StringType =>
-        // String copy: srcReg = source address, addrReg = dest address (16 bytes)
+      case SyslType.StringType | SyslType.SliceType(_) =>
+        // 16-byte copy: srcReg = source address, addrReg = dest address
         emit(s"  ldd r4, r$srcReg, r0")
         emit(s"  std r4, r$addrReg, r0")
         emitAddImm(4, srcReg, 8)
@@ -959,8 +959,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         if locals != null && locals.contains(name) then
           val local = locals(name)
           local.typ match
-            case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType =>
-              emitAddImm(1, 5, local.offset) // arrays/structs/strings: address, not value
+            case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType | _: SyslType.SliceType =>
+              emitAddImm(1, 5, local.offset) // aggregates: address, not value
             case _ =>
               emitAddImm(2, 5, local.offset)
               emitLoad(1, 2, local.typ)
@@ -968,8 +968,8 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit(s"  movi r1, $name")
           val gt = globals.getOrElse(name, typ) // use AST type for cross-unit globals
           gt match
-            case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType =>
-              () // arrays/structs/strings: address is the value
+            case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType | _: SyslType.SliceType =>
+              () // aggregates: address is the value
             case _ =>
               emitLoad(1, 1, gt)
 
@@ -1575,11 +1575,12 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  ldw r3, r3, r0") // r3 = len
         emit("  slt r4, r2, r0")
         val boundsOk = newLabel("bounds_ok")
-        emit(s"  bne r4, r0, .bounds_error")
+        val boundsErr = newLabel("bounds_err")
+        emit(s"  bne r4, r0, $boundsErr")
         emit("  slt r4, r2, r3")
         emit(s"  bne r4, r0, $boundsOk")
-        emit(".bounds_error")
-        emit("  brk")
+        emit(s"$boundsErr")
+        emit("  halt")
         emit(s"$boundsOk")
         // Load element at ptr + index * elemSize
         emit("  ldd r1, r1, r0") // r1 = ptr
@@ -1729,15 +1730,262 @@ class SyslTriscCodegen(addresses: Int = 4):
             throw new RuntimeException(s"codegen: len() not supported on ${other}")
 
       case TCap(inner, _) =>
-        genExpr(inner)           // r1 = struct address
+        genExpr(inner)           // r1 = struct address or data pointer
         inner.typ match
           case SyslType.SliceType(_) =>
             emit("  addi r1, r1, 12")
             emit("  ldw r1, r1, r0") // cap at offset 12
+          case SyslType.RefType(SyslType.SliceType(_)) =>
+            // r1 = data pointer; length (== cap) at [r1 - 8]
+            emitAddImm(1, 1, -8)
+            emit("  ldd r1, r1, r0")
           case SyslType.ArrayType(_, size) =>
             emitLoadImm(1, size) // cap == size for fixed arrays
           case other =>
             throw new RuntimeException(s"codegen: cap() not supported on ${other}")
+
+      case TSliceExpr(array, low, high, SyslType.SliceType(elemType)) =>
+        val elemSize = stackSize(elemType)
+        // Evaluate array and push {ptr, len, cap} onto stack
+        genExpr(array)
+        array.typ match
+          case SyslType.RefType(SyslType.SliceType(_)) =>
+            // r1 = data pointer; len at [r1 - 8], cap = len
+            emitAddImm(2, 1, -8)
+            emit("  ldd r2, r2, r0")    // r2 = length
+            emit("  pshd r2")           // push cap (== len)
+            emit("  pshd r2")           // push len
+            emit("  pshd r1")           // push ptr
+            stackOffset -= 24
+          case SyslType.SliceType(_) =>
+            // r1 = address of 16-byte slice struct {ptr(8), len(4), cap(4)}
+            emit("  addi r2, r1, 12")
+            emit("  ldw r2, r2, r0")    // r2 = cap (i32)
+            emit("  pshd r2")
+            emit("  addi r2, r1, 8")
+            emit("  ldw r2, r2, r0")    // r2 = len (i32)
+            emit("  pshd r2")
+            emit("  ldd r2, r1, r0")    // r2 = ptr
+            emit("  pshd r2")
+            stackOffset -= 24
+          case SyslType.ArrayType(_, size) =>
+            // r1 = address of array
+            emitLoadImm(2, size)
+            emit("  pshd r2")           // cap
+            emit("  pshd r2")           // len
+            emit("  pshd r1")           // ptr
+            stackOffset -= 24
+          case _ => throw new RuntimeException(s"codegen: cannot sub-slice ${array.typ}")
+        // Stack (top to bottom): [ptr] [len] [cap]
+
+        // Evaluate lo (default 0)
+        low match
+          case Some(loExpr) => genExpr(loExpr) // r1 = lo
+          case None => emit("  ldi r1, 0")
+        emit("  pshd r1")              // push lo
+        stackOffset -= 8
+        // Stack: [lo] [ptr] [len] [cap]
+
+        // Evaluate hi (default len)
+        high match
+          case Some(hiExpr) => genExpr(hiExpr) // r1 = hi
+          case None =>
+            // hi = len, at sp+16
+            emitAddImm(1, 7, 16)
+            emit("  ldd r1, r1, r0")
+        emit("  pshd r1")              // push hi
+        stackOffset -= 8
+        // Stack: [hi] [lo] [ptr] [len] [cap]
+
+        // Load all values from stack into registers
+        emit("  popd r1")              // r1 = hi
+        emit("  popd r2")              // r2 = lo
+        emit("  popd r3")              // r3 = ptr
+        // len and cap still on stack
+        stackOffset += 24
+
+        // Bounds check: 0 <= lo <= hi <= len
+        val errLabel = newLabel("slice_err")
+        val okLabel = newLabel("slice_ok")
+        emit("  slt r4, r2, r0")       // lo < 0?
+        emit(s"  bne r4, r0, $errLabel")
+        emit("  slt r4, r1, r2")       // hi < lo?
+        emit(s"  bne r4, r0, $errLabel")
+        // Check hi <= len: load len from stack (now at sp+0)
+        emit("  ldd r4, r7, r0")       // r4 = len
+        emit("  slt r4, r4, r1")       // len < hi?
+        emit(s"  bne r4, r0, $errLabel")
+        emit(s"  bra $okLabel")
+        emit(s"$errLabel")
+        emit("  halt")
+        emit(s"$okLabel")
+
+        // Pop len and cap
+        emit("  popd r4")              // r4 = len (unused now, needed only for bounds)
+        stackOffset += 8
+        emit("  popd r4")              // r4 = cap
+        stackOffset += 8
+
+        // Compute result fields:
+        // new_len = hi - lo (r1 = hi, r2 = lo)
+        emit("  sub r1, r1, r2")       // r1 = new_len
+        // new_cap = cap - lo (r4 = cap, r2 = lo)
+        emit("  sub r4, r4, r2")       // r4 = new_cap
+        // new_ptr = ptr + lo * elemSize (r3 = ptr, r2 = lo)
+        if elemSize == 1 then
+          emit("  add r3, r3, r2")
+        else
+          emit("  pshd r1")            // save new_len
+          emitLoadImm(1, elemSize)
+          emit("  mul r2, r2, r1")     // r2 = lo * elemSize
+          emit("  popd r1")            // restore new_len
+          emit("  add r3, r3, r2")     // r3 = new_ptr
+
+        // Allocate 16-byte result on stack: {ptr(8), len(4), cap(4)}
+        emitAddImm(7, 7, -16)
+        stackOffset -= 16
+        emit("  std r3, r7, r0")       // result.ptr = new_ptr
+        emit("  addi r2, r7, 8")
+        emit("  stw r1, r2, r0")       // result.len = new_len (i32)
+        emit("  addi r2, r7, 12")
+        emit("  stw r4, r2, r0")       // result.cap = new_cap (i32)
+        emit("  mov r1, r7")           // r1 = address of result
+
+      case TAppend(sliceExpr, elemExpr, SyslType.SliceType(elemType)) =>
+        val elemSize = stackSize(elemType)
+        needsAllocExtern = true
+
+        // Pre-allocate 16-byte result slot
+        emitAddImm(7, 7, -16)
+        stackOffset -= 16
+        val resultOffset = stackOffset
+
+        // Evaluate slice → push ptr, len, cap onto stack
+        genExpr(sliceExpr)
+        emit("  ldd r2, r1, r0")       // ptr
+        emit("  addi r3, r1, 8")
+        emit("  ldw r3, r3, r0")       // len
+        emit("  addi r4, r1, 12")
+        emit("  ldw r4, r4, r0")       // cap
+        emit("  pshd r4")              // [cap]
+        emit("  pshd r3")              // [len] [cap]
+        emit("  pshd r2")              // [ptr] [len] [cap]
+        stackOffset -= 24
+
+        // Evaluate elem, push
+        genExpr(elemExpr)
+        emit("  pshd r1")              // [elem] [ptr] [len] [cap]
+        stackOffset -= 8
+
+        // Load all into regs: r1=elem, r2=ptr, r3=len, r4=cap
+        emit("  popd r1")
+        emit("  popd r2")
+        emit("  popd r3")
+        emit("  popd r4")
+        stackOffset += 32
+
+        val growLabel = newLabel("append_grow")
+        val doneLabel = newLabel("append_done")
+        emit(s"  beq r3, r4, $growLabel")
+
+        // === No grow: write elem at ptr[len], build result ===
+        // Push values we'll need for the result
+        emit("  pshd r4")              // save cap
+        emit("  pshd r2")              // save ptr
+        emit("  pshd r1")              // save elem
+        // Compute dest = ptr + len * elemSize
+        emit("  mov r1, r3")           // r1 = len
+        if elemSize != 1 then
+          emitLoadImm(4, elemSize)
+          emit("  mul r1, r1, r4")     // r1 = len * elemSize
+        emit("  add r1, r2, r1")       // r1 = dest addr
+        emit("  popd r2")              // r2 = elem
+        emitStore(2, 1, elemType)      // store elem at dest
+        emit("  popd r2")              // r2 = ptr
+        emit("  popd r4")              // r4 = cap
+        emit("  addi r3, r3, 1")       // new_len = len + 1
+        // Write result struct
+        emitAddImm(1, 5, resultOffset)
+        emit("  std r2, r1, r0")       // result.ptr
+        emit("  addi r2, r1, 8")
+        emit("  stw r3, r2, r0")       // result.len
+        emit("  addi r2, r1, 12")
+        emit("  stw r4, r2, r0")       // result.cap
+        emit(s"  bra $doneLabel")
+
+        // === Grow: malloc, copy, write elem ===
+        emit(s"$growLabel")
+        // r1=elem, r2=old_ptr, r3=len, r4=cap
+        emit("  pshd r1")              // save elem
+        emit("  pshd r2")              // save old_ptr
+        emit("  pshd r3")              // save len
+        // new_cap = max(1, cap * 2)
+        val capOk = newLabel("cap_ok")
+        val capSet = newLabel("cap_set")
+        emit(s"  bne r4, r0, $capOk")
+        emit("  ldi r4, 1")            // cap was 0 → new_cap = 1
+        emit(s"  bra $capSet")         // skip doubling
+        emit(s"$capOk")
+        emit("  add r4, r4, r4")       // new_cap = cap * 2
+        emit(s"$capSet")
+        emit("  pshd r4")              // save new_cap
+        // malloc(new_cap * elemSize)
+        emit("  mov r1, r4")
+        if elemSize != 1 then
+          emitLoadImm(2, elemSize)
+          emit("  mul r1, r1, r2")     // r1 = new_cap * elemSize
+        emit("  movi r4, malloc")
+        emit("  jalr r6, r4")          // r1 = new_ptr
+        emit("  pshd r1")              // save new_ptr
+        // Stack: [new_ptr] [new_cap] [len] [old_ptr] [elem]
+        // Copy len * elemSize bytes from old_ptr to new_ptr
+        emit("  mov r2, r1")           // r2 = dst (new_ptr)
+        emitAddImm(3, 7, 24)
+        emit("  ldd r3, r3, r0")       // r3 = old_ptr
+        emitAddImm(4, 7, 16)
+        emit("  ldd r4, r4, r0")       // r4 = len
+        if elemSize != 1 then
+          emitLoadImm(1, elemSize)
+          emit("  mul r4, r4, r1")     // r4 = bytes to copy
+        val copyLoop = newLabel("acopy")
+        val copyDone = newLabel("acopy_d")
+        emit(s"$copyLoop")
+        emit(s"  beq r4, r0, $copyDone")
+        emit("  ldb r1, r3, r0")
+        emit("  stb r1, r2, r0")
+        emit("  addi r2, r2, 1")
+        emit("  addi r3, r3, 1")
+        emit("  addi r4, r4, -1")
+        emit(s"  bra $copyLoop")
+        emit(s"$copyDone")
+        // Write elem at new_ptr + len * elemSize
+        emit("  popd r2")              // r2 = new_ptr
+        emit("  pshd r2")              // re-save new_ptr
+        emitAddImm(3, 7, 16)
+        emit("  ldd r3, r3, r0")       // r3 = len
+        emit("  mov r1, r3")           // r1 = len
+        if elemSize != 1 then
+          emitLoadImm(4, elemSize)
+          emit("  mul r1, r1, r4")     // r1 = len * elemSize
+        emit("  add r1, r2, r1")       // r1 = dest addr
+        emitAddImm(4, 7, 32)
+        emit("  ldd r4, r4, r0")       // r4 = elem
+        emitStore(4, 1, elemType)      // store elem
+        // Build result: new_ptr, len+1, new_cap
+        emit("  popd r2")              // r2 = new_ptr
+        emit("  popd r4")              // r4 = new_cap
+        emit("  popd r3")              // r3 = len
+        emitAddImm(7, 7, 16)           // pop old_ptr, elem
+        emit("  addi r3, r3, 1")       // new_len
+        emitAddImm(1, 5, resultOffset)
+        emit("  std r2, r1, r0")       // result.ptr
+        emit("  addi r2, r1, 8")
+        emit("  stw r3, r2, r0")       // result.len
+        emit("  addi r2, r1, 12")
+        emit("  stw r4, r2, r0")       // result.cap
+
+        emit(s"$doneLabel")
+        emitAddImm(1, 5, resultOffset) // r1 = address of result
 
       case TFloatLit(d, _) =>
         val bits = java.lang.Double.doubleToRawLongBits(d)

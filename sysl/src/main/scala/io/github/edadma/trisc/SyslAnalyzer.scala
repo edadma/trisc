@@ -582,6 +582,17 @@ class SyslAnalyzer:
           case t => throw AnalysisError(s"cannot index $t")
         TIndex(tArr, tIndex, elemType)
 
+      case SliceExprAST(arr, low, high) =>
+        val tArr = analyzeExpr(arr)
+        val tLow = low.map(analyzeExpr)
+        val tHigh = high.map(analyzeExpr)
+        val elemType = tArr.typ match
+          case SliceType(elem) => elem
+          case RefType(SliceType(elem)) => elem
+          case ArrayType(elem, _) => elem
+          case t => throw AnalysisError(s"cannot sub-slice $t")
+        TSliceExpr(tArr, tLow, tHigh, SliceType(elemType))
+
       case FieldAccessAST(VarRefAST(enumName), member) if enumTypes.contains(enumName) =>
         val members = enumTypes(enumName)
         if !members.contains(member) then throw AnalysisError(s"enum $enumName has no member '$member'")
@@ -692,8 +703,21 @@ class SyslAnalyzer:
         val tArg = analyzeExpr(args.head)
         tArg.typ match
           case SliceType(_) => TCap(tArg, I32)
+          case RefType(SliceType(_)) => TCap(tArg, I32)
           case ArrayType(_, _) => TCap(tArg, I32)
           case t => throw AnalysisError(s"cap() not supported on $t")
+
+      case CallAST("append", args) =>
+        if args.size != 2 then throw AnalysisError("append() takes exactly 2 arguments")
+        val tSlice = analyzeExpr(args(0))
+        val tElem = analyzeExpr(args(1))
+        val elemType = tSlice.typ match
+          case SliceType(elem) => elem
+          case t => throw AnalysisError(s"append() requires []T, got $t")
+        val coerced = coerceLiteral(tElem, elemType)
+        if !compatible(coerced.typ, elemType) then
+          throw AnalysisError(s"cannot append ${coerced.typ} to []$elemType")
+        TAppend(tSlice, coerced, SliceType(elemType))
 
       case IndirectCallAST(callee, args) =>
         val tCallee = analyzeExpr(callee)
