@@ -37,6 +37,7 @@ enum Value:
   case SliceVal(cells: Array[Cell], offset: Int, length: Int, capacity: Int)
   case RefVal(cells: Array[Cell], refCount: java.util.concurrent.atomic.AtomicInteger, typeName: String = "")
   case RefSliceVal(cells: Array[Cell], length: Int, refCount: java.util.concurrent.atomic.AtomicInteger)
+  case RefStringVal(bytes: Array[Byte], length: Int, refCount: java.util.concurrent.atomic.AtomicInteger)
 
 class Cell(var value: Value)
 
@@ -58,6 +59,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case ArrVal(cells, off) => pointerToLong(ArrayPtr(cells, off))
     case RefVal(cells, _, _) => pointerToLong(ArrayPtr(cells, 0))
     case RefSliceVal(cells, _, _) => pointerToLong(ArrayPtr(cells, 0))
+    case RefStringVal(bytes, _, _) => pointerToLong(ArrayPtr(bytes.map(b => new Cell(IntVal(b & 0xff))), 0))
     case FuncVal(_)         => throw RuntimeError("expected integer, got function")
     case StrVal(_)          => throw RuntimeError("expected integer, got string")
     case SliceVal(_, _, _, _) => throw RuntimeError("expected integer, got slice")
@@ -124,7 +126,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     "putchar" -> (args => { output(toLong(args.head).toChar.toString); args.head }),
     "print" -> (args => { args.foreach { case FloatVal(d) => output(formatDouble(d)); case a => output(toLong(a).toString) }; IntVal(0) }),
     "println" -> (args => { args.foreach { case FloatVal(d) => output(formatDouble(d)); case a => output(toLong(a).toString) }; output("\n"); IntVal(0) }),
-    "puts" -> (args => { args.head match { case StrVal(s) => output(s); case _ => throw RuntimeError("puts: expected string") }; IntVal(0) }),
+    "puts" -> (args => { args.head match { case RefStringVal(bytes, len, _) => output(new String(bytes, 0, len, "UTF-8")); case _ => throw RuntimeError("puts: expected string") }; IntVal(0) }),
     "puti" -> (args => { output(toLong(args.head).toString); IntVal(0) }),
     "malloc" -> (args => {
       val size = toLong(args.head).toInt
@@ -246,24 +248,31 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private def lookupCell(name: String, env: Env): Cell =
     env.getOrElse(name, globals.getOrElse(name, throw RuntimeError(s"undefined variable: $name")))
 
+  private val IMMORTAL_RC = -1
+
   private def refIncr(v: Value): Unit = v match
-    case RefVal(_, rc, _) => rc.incrementAndGet()
-    case RefSliceVal(_, _, rc) => rc.incrementAndGet()
+    case RefVal(_, rc, _) => if rc.get() != IMMORTAL_RC then rc.incrementAndGet()
+    case RefSliceVal(_, _, rc) => if rc.get() != IMMORTAL_RC then rc.incrementAndGet()
+    case RefStringVal(_, _, rc) => if rc.get() != IMMORTAL_RC then rc.incrementAndGet()
     case _ =>
 
   private def refDecr(v: Value): Unit = v match
     case RefVal(cells, rc, typeName) =>
+      if rc.get() == IMMORTAL_RC then return
       val count = rc.decrementAndGet()
       if count == 0 then
-        rc.set(-1) // sentinel: prevent re-entrant deinit from releaseRefs
+        rc.set(IMMORTAL_RC) // prevent re-entrant deinit from releaseRefs
         if typeName.nonEmpty then
           val deinitName = s"${typeName}_deinit"
           functions.get(deinitName).foreach { fun =>
             call(fun, List(v))
           }
     case RefSliceVal(_, _, rc) =>
-      if rc.decrementAndGet() <= 0 then
-        ()
+      if rc.get() != IMMORTAL_RC then
+        if rc.decrementAndGet() <= 0 then ()
+    case RefStringVal(_, _, rc) =>
+      if rc.get() != IMMORTAL_RC then
+        if rc.decrementAndGet() <= 0 then ()
     case _ =>
 
   private def derefCell(v: Value): Cell = v match
@@ -444,7 +453,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TBoolLit(b, _) => IntVal(if b then 1L else 0L)
 
       case TStringLit(s, _) =>
-        StrVal(s)
+        val bytes = s.getBytes("UTF-8")
+        RefStringVal(bytes, bytes.length, new java.util.concurrent.atomic.AtomicInteger(IMMORTAL_RC))
 
       case TArrayDecl(size, typ) =>
         def initElem(t: SyslType): Value = t match
@@ -548,9 +558,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val arrVal = evalAny(arr, env)
         val idx = toLong(evalAny(index, env)).toInt
         arrVal match
-          case StrVal(s) =>
-            val bytes = s.getBytes("UTF-8")
-            if idx < 0 || idx >= bytes.length then throw RuntimeError(s"string index out of bounds: $idx (length ${bytes.length})")
+          case RefStringVal(bytes, length, _) =>
+            if idx < 0 || idx >= length then throw RuntimeError(s"string index out of bounds: $idx (length $length)")
             IntVal(bytes(idx) & 0xff)
           case SliceVal(cells, off, len, _) =>
             if idx < 0 || idx >= len then throw RuntimeError(s"slice index out of bounds: $idx (length $len)")
@@ -590,6 +599,21 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case _ =>
 
         val rv = evalAny(right, env)
+
+        // String path: concatenation and comparison
+        (lv, rv) match
+          case (RefStringVal(lb, ll, _), RefStringVal(rb, rl, _)) =>
+            return (op match
+              case "+" =>
+                val newBytes = new Array[Byte](ll + rl)
+                System.arraycopy(lb, 0, newBytes, 0, ll)
+                System.arraycopy(rb, 0, newBytes, ll, rl)
+                RefStringVal(newBytes, newBytes.length, new java.util.concurrent.atomic.AtomicInteger(1))
+              case "==" => IntVal(if java.util.Arrays.equals(lb, 0, ll, rb, 0, rl) then 1L else 0L)
+              case "!=" => IntVal(if !java.util.Arrays.equals(lb, 0, ll, rb, 0, rl) then 1L else 0L)
+              case _ => throw RuntimeError(s"unsupported string operator: $op")
+            )
+          case _ =>
 
         // Float path: if either operand is float, use float arithmetic
         (lv, rv) match
@@ -686,7 +710,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TLen(inner, _) =>
         evalAny(inner, env) match
-          case StrVal(s) => IntVal(s.getBytes("UTF-8").length.toLong)
+          case RefStringVal(_, length, _) => IntVal(length.toLong)
           case SliceVal(_, _, len, _) => IntVal(len.toLong)
           case ArrVal(cells, _) => IntVal(cells.length.toLong)
           case RefSliceVal(_, length, _) => IntVal(length.toLong)
