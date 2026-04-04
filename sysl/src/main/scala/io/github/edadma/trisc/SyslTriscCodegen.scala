@@ -1836,8 +1836,10 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  add r3, r3, r2")
         else
           emit("  pshd r1")            // save new_len
+          emit("  pshd r3")            // save ptr (mul clobbers r(d+1)=r3)
           emitLoadImm(1, elemSize)
-          emit("  mul r2, r2, r1")     // r2 = lo * elemSize
+          emit("  mul r2, r2, r1")     // r2 = lo * elemSize (clobbers r3)
+          emit("  popd r3")            // restore ptr
           emit("  popd r1")            // restore new_len
           emit("  add r3, r3, r2")     // r3 = new_ptr
 
@@ -1893,20 +1895,26 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  pshd r4")              // save cap
         emit("  pshd r2")              // save ptr
         emit("  pshd r1")              // save elem
+        // Stack: [elem] [ptr] [cap]
         // Compute dest = ptr + len * elemSize
         emit("  mov r1, r3")           // r1 = len
         if elemSize != 1 then
           emitLoadImm(4, elemSize)
-          emit("  mul r1, r1, r4")     // r1 = len * elemSize
+          emit("  mul r1, r1, r4")     // r1 = len * elemSize (clobbers r2!)
+          // reload ptr from stack (at sp+8)
+          emitAddImm(2, 7, 8)
+          emit("  ldd r2, r2, r0")     // r2 = ptr (reloaded)
         emit("  add r1, r2, r1")       // r1 = dest addr
         emit("  popd r2")              // r2 = elem
         emitStore(2, 1, elemType)      // store elem at dest
         emit("  popd r2")              // r2 = ptr
         emit("  popd r4")              // r4 = cap
         emit("  addi r3, r3, 1")       // new_len = len + 1
-        // Write result struct
+        // Write result struct (save r3 — emitAddImm may use r3 as temp for large offsets)
+        emit("  pshd r3")              // save new_len
         emitAddImm(1, 5, resultOffset)
         emit("  std r2, r1, r0")       // result.ptr
+        emit("  popd r3")              // restore new_len
         emit("  addi r2, r1, 8")
         emit("  stw r3, r2, r0")       // result.len
         emit("  addi r2, r1, 12")
@@ -1945,8 +1953,13 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitAddImm(4, 7, 16)
         emit("  ldd r4, r4, r0")       // r4 = len
         if elemSize != 1 then
-          emitLoadImm(1, elemSize)
-          emit("  mul r4, r4, r1")     // r4 = bytes to copy
+          // mul r4 would clobber r5 (frame pointer!), so compute in r1 instead
+          emit("  pshd r2")            // save new_ptr (mul r1 clobbers r2)
+          emit("  mov r1, r4")         // r1 = len
+          emitLoadImm(4, elemSize)
+          emit("  mul r1, r1, r4")     // r1 = len * elemSize (clobbers r2)
+          emit("  mov r4, r1")         // r4 = bytes to copy
+          emit("  popd r2")            // restore new_ptr
         val copyLoop = newLabel("acopy")
         val copyDone = newLabel("acopy_d")
         emit(s"$copyLoop")
@@ -1966,7 +1979,9 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  mov r1, r3")           // r1 = len
         if elemSize != 1 then
           emitLoadImm(4, elemSize)
-          emit("  mul r1, r1, r4")     // r1 = len * elemSize
+          emit("  mul r1, r1, r4")     // r1 = len * elemSize (clobbers r2!)
+          // reload new_ptr from stack (at sp+0)
+          emit("  ldd r2, r7, r0")     // r2 = new_ptr (reloaded)
         emit("  add r1, r2, r1")       // r1 = dest addr
         emitAddImm(4, 7, 32)
         emit("  ldd r4, r4, r0")       // r4 = elem
@@ -1977,8 +1992,10 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  popd r3")              // r3 = len
         emitAddImm(7, 7, 16)           // pop old_ptr, elem
         emit("  addi r3, r3, 1")       // new_len
+        emit("  pshd r3")              // save new_len (emitAddImm may use r3 as temp)
         emitAddImm(1, 5, resultOffset)
         emit("  std r2, r1, r0")       // result.ptr
+        emit("  popd r3")              // restore new_len
         emit("  addi r2, r1, 8")
         emit("  stw r3, r2, r0")       // result.len
         emit("  addi r2, r1, 12")
@@ -2045,7 +2062,9 @@ class SyslTriscCodegen(addresses: Int = 4):
         val doneLabel = newLabel("zero_done")
         emitAddImm(3, 1, 16)         // r3 = data start
         emitLoadImm(4, elemSize)
-        emit("  mul r2, r2, r4")     // r2 = n * elemSize
+        emit("  pshd r3")            // save data start (mul r2 clobbers r3)
+        emit("  mul r2, r2, r4")     // r2 = n * elemSize (clobbers r3)
+        emit("  popd r3")            // restore data start
         // Round up to 8-byte boundary
         emit("  addi r2, r2, 7")
         emit("  movi r4, 3")
