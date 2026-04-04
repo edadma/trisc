@@ -35,6 +35,8 @@ enum Value:
   case FuncVal(name: String)
   case StrVal(s: String)
   case SliceVal(cells: Array[Cell], offset: Int, length: Int, capacity: Int)
+  case RefVal(cells: Array[Cell], refCount: java.util.concurrent.atomic.AtomicInteger, typeName: String = "")
+  case RefSliceVal(cells: Array[Cell], length: Int, refCount: java.util.concurrent.atomic.AtomicInteger)
 
 class Cell(var value: Value)
 
@@ -52,8 +54,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private def toLong(v: Value): Long = v match
     case IntVal(n)    => n
     case FloatVal(d)  => d.toLong
-    case PtrVal(_)    => throw RuntimeError("expected integer, got pointer")
-    case ArrVal(_, _)       => throw RuntimeError("expected integer, got array")
+    case PtrVal(ptr)  => pointerToLong(ptr)
+    case ArrVal(cells, off) => pointerToLong(ArrayPtr(cells, off))
+    case RefVal(cells, _, _) => pointerToLong(ArrayPtr(cells, 0))
+    case RefSliceVal(cells, _, _) => pointerToLong(ArrayPtr(cells, 0))
     case FuncVal(_)         => throw RuntimeError("expected integer, got function")
     case StrVal(_)          => throw RuntimeError("expected integer, got string")
     case SliceVal(_, _, _, _) => throw RuntimeError("expected integer, got slice")
@@ -66,6 +70,45 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private val globals: Env = new mutable.LinkedHashMap
   private val functions = new mutable.LinkedHashMap[String, TFunDecl]
 
+  // Address table for pointer ↔ integer round-tripping
+  private val ptrToAddr = new mutable.HashMap[Pointer, Long]
+  private val addrToPtr = new mutable.HashMap[Long, Pointer]
+  private var nextAddr = 0x10000L // start at a non-zero base
+
+  private def pointerToLong(ptr: Pointer): Long =
+    ptr match
+      case ArrayPtr(cells, _) if cells.isEmpty => 0L // null pointer
+      case _ =>
+        ptrToAddr.getOrElseUpdate(ptr, {
+          val addr = ptr match
+            case ArrayPtr(cells, offset) =>
+              // Use stable identity: base array identity + offset
+              val base = ptrToAddr.getOrElse(ArrayPtr(cells, 0), {
+                val a = nextAddr
+                nextAddr += cells.length.max(1)
+                ptrToAddr(ArrayPtr(cells, 0)) = a
+                addrToPtr(a) = ArrayPtr(cells, 0)
+                a
+              })
+              base + offset
+            case _ =>
+              val a = nextAddr
+              nextAddr += 1
+              a
+          addrToPtr(addr) = ptr
+          addr
+        })
+
+  private def longToPointer(addr: Long): Pointer =
+    addrToPtr.get(addr) match
+      case Some(ptr) => ptr
+      case None =>
+        // Try to find a base allocation containing this address
+        addrToPtr.collectFirst {
+          case (base, ArrayPtr(cells, 0)) if addr >= base && addr < base + cells.length =>
+            ArrayPtr(cells, (addr - base).toInt)
+        }.getOrElse(throw RuntimeError(s"invalid pointer address: 0x${addr.toHexString}"))
+
   // Format a double consistently across platforms: no trailing .0 for whole numbers
   private def formatDouble(d: Double): String =
     if d.isWhole && !d.isInfinite && !d.isNaN then
@@ -73,12 +116,56 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       l.toString
     else d.toString
 
+  // Heap for sbrk: 1MB of cells, bump pointer
+  private val heapCells = Array.fill(1024 * 1024)(new Cell(IntVal(0)))
+  private var heapBreak = 0
+
   private val builtins: mutable.Map[String, List[Value] => Value] = mutable.Map(
     "putchar" -> (args => { output(toLong(args.head).toChar.toString); args.head }),
     "print" -> (args => { args.foreach { case FloatVal(d) => output(formatDouble(d)); case a => output(toLong(a).toString) }; IntVal(0) }),
     "println" -> (args => { args.foreach { case FloatVal(d) => output(formatDouble(d)); case a => output(toLong(a).toString) }; output("\n"); IntVal(0) }),
     "puts" -> (args => { args.head match { case StrVal(s) => output(s); case _ => throw RuntimeError("puts: expected string") }; IntVal(0) }),
     "puti" -> (args => { output(toLong(args.head).toString); IntVal(0) }),
+    "malloc" -> (args => {
+      val size = toLong(args.head).toInt
+      if size <= 0 then PtrVal(ArrayPtr(Array.empty[Cell], 0))
+      else
+        val cells = Array.fill(size)(new Cell(IntVal(0)))
+        PtrVal(ArrayPtr(cells, 0))
+    }),
+    "free" -> (_ => IntVal(0)), // no-op, JVM GC handles it
+    "calloc" -> (args => {
+      val count = toLong(args.head).toInt
+      val size = toLong(args(1)).toInt
+      val total = count * size
+      if total <= 0 then PtrVal(ArrayPtr(Array.empty[Cell], 0))
+      else
+        val cells = Array.fill(total)(new Cell(IntVal(0)))
+        PtrVal(ArrayPtr(cells, 0))
+    }),
+    "realloc" -> (args => {
+      val newSize = toLong(args(1)).toInt
+      if newSize <= 0 then { IntVal(0) }
+      else
+        val newCells = Array.fill(newSize)(new Cell(IntVal(0)))
+        args.head match
+          case PtrVal(ArrayPtr(oldCells, off)) =>
+            val copyLen = math.min(oldCells.length - off, newSize)
+            for i <- 0 until copyLen do newCells(i).value = oldCells(off + i).value
+          case _ => // null or non-pointer — just return fresh allocation
+        PtrVal(ArrayPtr(newCells, 0))
+    }),
+    "sbrk" -> (args => {
+      val increment = toLong(args.head).toInt
+      if increment == 0 then PtrVal(ArrayPtr(heapCells, heapBreak))
+      else
+        val oldBreak = heapBreak
+        val newBreak = oldBreak + increment
+        if newBreak < 0 || newBreak > heapCells.length then PtrVal(ArrayPtr(Array(new Cell(IntVal(-1))), 0))
+        else
+          heapBreak = newBreak
+          PtrVal(ArrayPtr(heapCells, oldBreak))
+    }),
   )
 
   def registerBuiltins(extra: Map[String, List[Value] => Value]): Unit =
@@ -109,11 +196,15 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     for (stmt, env) <- savedDefers.reverseIterator do
       exec(stmt, env)
 
+  private def releaseRefs(env: Env): Unit =
+    for (_, cell) <- env do refDecr(cell.value)
+
   private def call(fun: TFunDecl, args: List[Value]): Value =
     val env: Env = new mutable.LinkedHashMap
     val savedSize = deferStack.size
 
     for (param, arg) <- fun.params.zip(args) do
+      refIncr(arg)
       env(param.name) = new Cell(arg)
 
     try
@@ -127,6 +218,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       val defers = deferStack.slice(savedSize, deferStack.size)
       runDefers(defers)
       deferStack.dropRightInPlace(deferStack.size - savedSize)
+      // Increment result ref before releasing locals (prevents premature free)
+      refIncr(result)
+      releaseRefs(env)
+      refDecr(result) // balance the extra increment — caller owns it now
       result
     catch
       case e: ReturnException => throw e // should not happen — caught above
@@ -134,6 +229,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val defers = deferStack.slice(savedSize, deferStack.size)
         runDefers(defers)
         deferStack.dropRightInPlace(deferStack.size - savedSize)
+        releaseRefs(env)
         throw e
 
   private def evalBlock(stmts: List[TStmt], env: Env): Value =
@@ -150,9 +246,30 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private def lookupCell(name: String, env: Env): Cell =
     env.getOrElse(name, globals.getOrElse(name, throw RuntimeError(s"undefined variable: $name")))
 
+  private def refIncr(v: Value): Unit = v match
+    case RefVal(_, rc, _) => rc.incrementAndGet()
+    case RefSliceVal(_, _, rc) => rc.incrementAndGet()
+    case _ =>
+
+  private def refDecr(v: Value): Unit = v match
+    case RefVal(cells, rc, typeName) =>
+      val count = rc.decrementAndGet()
+      if count == 0 then
+        rc.set(-1) // sentinel: prevent re-entrant deinit from releaseRefs
+        if typeName.nonEmpty then
+          val deinitName = s"${typeName}_deinit"
+          functions.get(deinitName).foreach { fun =>
+            call(fun, List(v))
+          }
+    case RefSliceVal(_, _, rc) =>
+      if rc.decrementAndGet() <= 0 then
+        ()
+    case _ =>
+
   private def derefCell(v: Value): Cell = v match
     case PtrVal(ptr)        => ptr.deref
     case ArrVal(cells, off) => cells(off)
+    case RefVal(cells, _, _) => cells(0)
     case _                  => throw RuntimeError("cannot dereference non-pointer")
 
   private def indexCell(v: Value, idx: Int): Cell = v match
@@ -161,12 +278,23 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       if i < 0 || i >= cells.length then throw RuntimeError(s"array index out of bounds: $i")
       cells(i)
     case PtrVal(ptr) => ptr.index(idx)
+    case RefVal(cells, _, _) =>
+      if idx < 0 || idx >= cells.length then throw RuntimeError(s"ref field index out of bounds: $idx")
+      cells(idx)
+    case RefSliceVal(cells, length, _) =>
+      if idx < 0 || idx >= length then throw RuntimeError(s"array index out of bounds: $idx (length $length)")
+      cells(idx)
     case _ => throw RuntimeError("cannot index non-array")
 
   private def exec(stmt: TStmt, env: Env): Unit =
     stmt match
       case TVarStmt(name, _, init) =>
-        env(name) = new Cell(evalAny(init, env))
+        val v = evalAny(init, env)
+        // Increment refcount for copies only — TNew/TNewArray already set refcount=1
+        init match
+          case _: TNew | _: TNewArray => // owned, no incr
+          case _ => refIncr(v)
+        env(name) = new Cell(v)
 
       case TDestructureStmt(names, _, init) =>
         val ArrVal(cells, off) = evalAny(init, env): @unchecked
@@ -175,8 +303,16 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TAssignStmt(target, value) =>
         val v = evalAny(value, env)
-        if env.contains(target) then env(target).value = v
-        else if globals.contains(target) then globals(target).value = v
+        // Increment refcount for copies only
+        value match
+          case _: TNew | _: TNewArray => // owned, no incr
+          case _ => refIncr(v)
+        if env.contains(target) then
+          refDecr(env(target).value)
+          env(target).value = v
+        else if globals.contains(target) then
+          refDecr(globals(target).value)
+          globals(target).value = v
         else env(target) = new Cell(v)
 
       case TCompoundAssignStmt(target, op, value) =>
@@ -252,30 +388,45 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         exec(init, env)
         var running = true
         while running && toLong(evalAny(cond, env)) != 0 do
+          val savedKeys = env.keySet.toSet
           try
             execBlock(body, env)
             exec(update, env)
           catch
             case BreakException => running = false
-            case ContinueException => exec(update, env) // continue still runs update
+            case ContinueException => exec(update, env)
+          // Release refs for variables created in this iteration
+          for key <- env.keySet.toSet -- savedKeys do
+            refDecr(env(key).value)
+            env.remove(key)
 
       case TWhileStmt(cond, body) =>
         var running = true
         while running && toLong(evalAny(cond, env)) != 0 do
+          val savedKeys = env.keySet.toSet
           try
             execBlock(body, env)
           catch
             case BreakException => running = false
-            case ContinueException => // skip rest of body, re-check condition
+            case ContinueException =>
+          // Release refs for variables created in this iteration
+          for key <- env.keySet.toSet -- savedKeys do
+            refDecr(env(key).value)
+            env.remove(key)
 
       case TDoWhileStmt(cond, body) =>
         var running = true
         while running do
+          val savedKeys = env.keySet.toSet
           try
             execBlock(body, env)
           catch
             case BreakException    => running = false
-            case ContinueException => // skip rest of body, re-check condition
+            case ContinueException =>
+          // Release refs for variables created in this iteration
+          for key <- env.keySet.toSet -- savedKeys do
+            refDecr(env(key).value)
+            env.remove(key)
           if running then running = toLong(evalAny(cond, env)) != 0
 
       case TBreakStmt => throw BreakException
@@ -388,7 +539,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             cell.value = IntVal(old - 1)
             IntVal(old)
 
-      case TDeref(inner, _) => derefCell(evalAny(inner, env)).value
+      case TDeref(inner, _) =>
+        evalAny(inner, env) match
+          case RefVal(cells, _, _) => ArrVal(cells, 0)  // deref &T → expose struct fields
+          case other => derefCell(other).value
 
       case TIndex(arr, index, _) =>
         val arrVal = evalAny(arr, env)
@@ -520,6 +674,12 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case UIntType(16) => IntVal(toLong(v) & 0xFFFFL)
           case UIntType(8)  => IntVal(toLong(v) & 0xFFL)
           case _: UIntType  => IntVal(toLong(v))
+          case _: PtrType =>
+            v match
+              case PtrVal(_) | ArrVal(_, _) => v  // already a pointer
+              case IntVal(0) => PtrVal(ArrayPtr(Array.empty[Cell], 0))  // null pointer
+              case IntVal(n) => PtrVal(longToPointer(n))  // integer to pointer
+              case _ => v
           case _ => v
 
       case TSizeof(size, _) => IntVal(size)
@@ -529,6 +689,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case StrVal(s) => IntVal(s.getBytes("UTF-8").length.toLong)
           case SliceVal(_, _, len, _) => IntVal(len.toLong)
           case ArrVal(cells, _) => IntVal(cells.length.toLong)
+          case RefSliceVal(_, length, _) => IntVal(length.toLong)
           case _ => throw RuntimeError("len: unsupported type")
 
       case TCap(inner, _) =>
@@ -575,6 +736,17 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val cells = fields.map((_, typ) => new Cell(initField(typ))).toArray
         ArrVal(cells, 0)
 
+      case TNew(SyslType.StructType(name, fields), args) =>
+        val cells = fields.zip(args).map { case ((_, _), arg) =>
+          new Cell(evalAny(arg, env))
+        }.toArray
+        RefVal(cells, new java.util.concurrent.atomic.AtomicInteger(1), name)
+
+      case TNewArray(elemType, sizeExpr) =>
+        val n = toLong(evalAny(sizeExpr, env)).toInt
+        val cells = Array.fill(n)(new Cell(IntVal(0)))
+        RefSliceVal(cells, n, new java.util.concurrent.atomic.AtomicInteger(1))
+
       case TStructConstruct(SyslType.StructType(_, fields), args) =>
         val cells = fields.zip(args).map { case ((_, typ), arg) =>
           val value = evalAny(arg, env)
@@ -590,19 +762,19 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TCall(name, args, _) =>
         val argValues = args.map(evalAny(_, env))
-        builtins.get(name) match
-          case Some(f) => f(argValues)
+        functions.get(name) match
+          case Some(fun) => call(fun, argValues)
           case None =>
-            functions.get(name) match
-              case Some(fun) => call(fun, argValues)
+            builtins.get(name) match
+              case Some(f) => f(argValues)
               case None => throw RuntimeError(s"undefined function: $name")
 
       case TIndirectCall(callee, args, _) =>
         val FuncVal(name) = evalAny(callee, env): @unchecked
         val argValues = args.map(evalAny(_, env))
-        builtins.get(name) match
-          case Some(f) => f(argValues)
+        functions.get(name) match
+          case Some(fun) => call(fun, argValues)
           case None =>
-            functions.get(name) match
-              case Some(fun) => call(fun, argValues)
+            builtins.get(name) match
+              case Some(f) => f(argValues)
               case None => throw RuntimeError(s"undefined function: $name")
