@@ -437,10 +437,7 @@ class SyslCodegenStringTests extends SyslCodegenHelpers {
 
   // ===== String function args — multiple params =====
 
-  // TODO: Two string literal register args — callee push overwrites TStringLit temps.
-  // Works fine when at least one arg is a variable (stable fp-relative address).
-  // Needs ABI fix: either pass string reg args as 16 bytes or pre-allocate temps.
-  "two string params" ignore {
+  "two string params" in {
     compileAndRun(
       """both(a: string, b: string) -> int = len(a) + len(b)
         |
@@ -591,8 +588,7 @@ class SyslCodegenStringTests extends SyslCodegenHelpers {
     out shouldBe "hello world"
   }
 
-  // TODO: Same two-string-literal-register-arg issue as "two string params"
-  "string built in function and compared" ignore {
+  "string built in function and compared" in {
     compileMultiAndRun(allocSources(
       """import posix.stdlib.*
         |
@@ -605,7 +601,7 @@ class SyslCodegenStringTests extends SyslCodegenHelpers {
         |""".stripMargin)) shouldBe 1
   }
 
-  "string from function used in puts" ignore {
+  "string from function used in puts" in {
     val (_, out) = compileMultiAndRunOutput(allocSources(
       """import posix.stdlib.*
         |
