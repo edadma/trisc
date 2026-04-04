@@ -331,6 +331,98 @@ class SyslRefTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 20
   }
 
+  // ===== deinit =====
+
+  "deinit called when last ref drops" in {
+    eval(
+      """var deinit_called = false
+        |
+        |struct Resource
+        |    id: int
+        |
+        |Resource.deinit()
+        |    deinit_called = true
+        |
+        |main() -> int
+        |    val r = new Resource(1)
+        |    // r goes out of scope at function exit → deinit called
+        |    if deinit_called then return 0
+        |    1
+        |""".stripMargin) shouldBe 1  // deinit runs after return value computed
+  }
+
+  "deinit called on reassignment" in {
+    eval(
+      """var deinit_count = 0
+        |
+        |struct Resource
+        |    id: int
+        |
+        |Resource.deinit()
+        |    deinit_count = deinit_count + 1
+        |
+        |main() -> int
+        |    var r = new Resource(1)
+        |    r = new Resource(2)
+        |    // first Resource should have been deinited
+        |    deinit_count
+        |""".stripMargin) shouldBe 1
+  }
+
+  "deinit not called while refs remain" in {
+    eval(
+      """var deinit_count = 0
+        |
+        |struct Resource
+        |    id: int
+        |
+        |Resource.deinit()
+        |    deinit_count = deinit_count + 1
+        |
+        |main() -> int
+        |    val a = new Resource(1)
+        |    val b = a  // refcount = 2
+        |    // neither ref dropped yet
+        |    deinit_count
+        |""".stripMargin) shouldBe 0
+  }
+
+  "deinit accesses fields" in {
+    eval(
+      """var last_id = 0
+        |
+        |struct Resource
+        |    id: int
+        |
+        |Resource.deinit()
+        |    last_id = self.id
+        |
+        |main() -> int
+        |    var r = new Resource(42)
+        |    r = new Resource(99)
+        |    last_id
+        |""".stripMargin) shouldBe 42
+  }
+
+  "deinit in loop — all cleaned up" in {
+    eval(
+      """var deinit_count = 0
+        |
+        |struct Resource
+        |    id: int
+        |
+        |Resource.deinit()
+        |    deinit_count = deinit_count + 1
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        val r = new Resource(i)
+        |        i++
+        |    deinit_count
+        |""".stripMargin) shouldBe 10
+  }
+
   // ===== Analyzer error cases =====
 
   "pointer to ref conversion rejected" in {

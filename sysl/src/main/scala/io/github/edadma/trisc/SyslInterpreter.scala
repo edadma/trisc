@@ -35,7 +35,7 @@ enum Value:
   case FuncVal(name: String)
   case StrVal(s: String)
   case SliceVal(cells: Array[Cell], offset: Int, length: Int, capacity: Int)
-  case RefVal(cells: Array[Cell], refCount: java.util.concurrent.atomic.AtomicInteger)
+  case RefVal(cells: Array[Cell], refCount: java.util.concurrent.atomic.AtomicInteger, typeName: String = "")
   case RefSliceVal(cells: Array[Cell], length: Int, refCount: java.util.concurrent.atomic.AtomicInteger)
 
 class Cell(var value: Value)
@@ -56,7 +56,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case FloatVal(d)  => d.toLong
     case PtrVal(ptr)  => pointerToLong(ptr)
     case ArrVal(cells, off) => pointerToLong(ArrayPtr(cells, off))
-    case RefVal(cells, _)   => pointerToLong(ArrayPtr(cells, 0))
+    case RefVal(cells, _, _) => pointerToLong(ArrayPtr(cells, 0))
     case RefSliceVal(cells, _, _) => pointerToLong(ArrayPtr(cells, 0))
     case FuncVal(_)         => throw RuntimeError("expected integer, got function")
     case StrVal(_)          => throw RuntimeError("expected integer, got string")
@@ -247,14 +247,20 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     env.getOrElse(name, globals.getOrElse(name, throw RuntimeError(s"undefined variable: $name")))
 
   private def refIncr(v: Value): Unit = v match
-    case RefVal(_, rc) => rc.incrementAndGet()
+    case RefVal(_, rc, _) => rc.incrementAndGet()
     case RefSliceVal(_, _, rc) => rc.incrementAndGet()
     case _ =>
 
   private def refDecr(v: Value): Unit = v match
-    case RefVal(_, rc) =>
-      if rc.decrementAndGet() <= 0 then
-        () // freed — JVM GC handles actual memory
+    case RefVal(cells, rc, typeName) =>
+      val count = rc.decrementAndGet()
+      if count == 0 then
+        rc.set(-1) // sentinel: prevent re-entrant deinit from releaseRefs
+        if typeName.nonEmpty then
+          val deinitName = s"${typeName}_deinit"
+          functions.get(deinitName).foreach { fun =>
+            call(fun, List(v))
+          }
     case RefSliceVal(_, _, rc) =>
       if rc.decrementAndGet() <= 0 then
         ()
@@ -263,7 +269,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private def derefCell(v: Value): Cell = v match
     case PtrVal(ptr)        => ptr.deref
     case ArrVal(cells, off) => cells(off)
-    case RefVal(cells, _)   => cells(0)
+    case RefVal(cells, _, _) => cells(0)
     case _                  => throw RuntimeError("cannot dereference non-pointer")
 
   private def indexCell(v: Value, idx: Int): Cell = v match
@@ -272,7 +278,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       if i < 0 || i >= cells.length then throw RuntimeError(s"array index out of bounds: $i")
       cells(i)
     case PtrVal(ptr) => ptr.index(idx)
-    case RefVal(cells, _) =>
+    case RefVal(cells, _, _) =>
       if idx < 0 || idx >= cells.length then throw RuntimeError(s"ref field index out of bounds: $idx")
       cells(idx)
     case RefSliceVal(cells, length, _) =>
@@ -382,30 +388,45 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         exec(init, env)
         var running = true
         while running && toLong(evalAny(cond, env)) != 0 do
+          val savedKeys = env.keySet.toSet
           try
             execBlock(body, env)
             exec(update, env)
           catch
             case BreakException => running = false
-            case ContinueException => exec(update, env) // continue still runs update
+            case ContinueException => exec(update, env)
+          // Release refs for variables created in this iteration
+          for key <- env.keySet.toSet -- savedKeys do
+            refDecr(env(key).value)
+            env.remove(key)
 
       case TWhileStmt(cond, body) =>
         var running = true
         while running && toLong(evalAny(cond, env)) != 0 do
+          val savedKeys = env.keySet.toSet
           try
             execBlock(body, env)
           catch
             case BreakException => running = false
-            case ContinueException => // skip rest of body, re-check condition
+            case ContinueException =>
+          // Release refs for variables created in this iteration
+          for key <- env.keySet.toSet -- savedKeys do
+            refDecr(env(key).value)
+            env.remove(key)
 
       case TDoWhileStmt(cond, body) =>
         var running = true
         while running do
+          val savedKeys = env.keySet.toSet
           try
             execBlock(body, env)
           catch
             case BreakException    => running = false
-            case ContinueException => // skip rest of body, re-check condition
+            case ContinueException =>
+          // Release refs for variables created in this iteration
+          for key <- env.keySet.toSet -- savedKeys do
+            refDecr(env(key).value)
+            env.remove(key)
           if running then running = toLong(evalAny(cond, env)) != 0
 
       case TBreakStmt => throw BreakException
@@ -520,7 +541,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TDeref(inner, _) =>
         evalAny(inner, env) match
-          case RefVal(cells, _) => ArrVal(cells, 0)  // deref &T → expose struct fields
+          case RefVal(cells, _, _) => ArrVal(cells, 0)  // deref &T → expose struct fields
           case other => derefCell(other).value
 
       case TIndex(arr, index, _) =>
@@ -715,11 +736,11 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val cells = fields.map((_, typ) => new Cell(initField(typ))).toArray
         ArrVal(cells, 0)
 
-      case TNew(SyslType.StructType(_, fields), args) =>
+      case TNew(SyslType.StructType(name, fields), args) =>
         val cells = fields.zip(args).map { case ((_, _), arg) =>
           new Cell(evalAny(arg, env))
         }.toArray
-        RefVal(cells, new java.util.concurrent.atomic.AtomicInteger(1))
+        RefVal(cells, new java.util.concurrent.atomic.AtomicInteger(1), name)
 
       case TNewArray(elemType, sizeExpr) =>
         val n = toLong(evalAny(sizeExpr, env)).toInt

@@ -11,10 +11,21 @@ class SyslTriscCodegen(addresses: Int = 4):
     labelCounter += 1
     s".${prefix}_$labelCounter"
 
+  // Struct types that have a deinit method (populated during generate)
+  private val deinitTypes = new mutable.HashSet[String]
+
   def generate(program: TProgram): String =
     out.clear()
     labelCounter = 0
     stringLiterals.clear()
+    deinitTypes.clear()
+
+    // Scan for deinit methods: functions named TypeName_deinit
+    for decl <- program.decls do
+      decl match
+        case TFunDecl(name, _, _, _, _) if name.endsWith("_deinit") =>
+          deinitTypes += name.dropRight(7) // remove "_deinit" suffix
+        case _ =>
 
     // Emit entry point and global directives from module metadata
     val meta = ModuleMeta.fromProgram(program)
@@ -125,7 +136,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  pshd r1")
           emitAddImm(1, 5, local.offset)
           emit("  ldd r1, r1, r0")
-          emitRefDecr(1, hoff)
+          emitRefDecr(1, hoff, deinitFor(rt))
           emit("  popd r1")
         case _ =>
     locals.clear()
@@ -232,6 +243,12 @@ class SyslTriscCodegen(addresses: Int = 4):
     case SyslType.RefType(SyslType.SliceType(_)) => 16
     case _ => 8
 
+  // Get deinit function name for a ref type, if one exists
+  private def deinitFor(typ: SyslType): Option[String] = typ match
+    case SyslType.RefType(SyslType.StructType(name, _)) if deinitTypes.contains(name) =>
+      Some(s"${name}_deinit")
+    case _ => None
+
   // Emit refcount increment: ptr in rPtr, refcount is at [rPtr - headerOffset]
   // Clobbers r3, r4. Skips if rPtr == 0 (null).
   private def emitRefIncr(ptrReg: Int, headerOff: Int = 8): Unit =
@@ -244,8 +261,8 @@ class SyslTriscCodegen(addresses: Int = 4):
     emit(s"$skip")
 
   // Emit refcount decrement + free-at-zero: ptr in rPtr, refcount at [rPtr - headerOffset]
-  // Clobbers r3, r4. Skips if rPtr == 0 (null). Calls free(base) when refcount hits 0.
-  private def emitRefDecr(ptrReg: Int, headerOff: Int = 8): Unit =
+  // Clobbers r3, r4. Skips if rPtr == 0 (null). Calls deinit then free(base) when refcount hits 0.
+  private def emitRefDecr(ptrReg: Int, headerOff: Int = 8, deinitFunc: Option[String] = None): Unit =
     val skip = newLabel("skip_decr")
     val noFree = newLabel("no_free")
     emit(s"  beq r$ptrReg, r0, $skip")
@@ -254,9 +271,15 @@ class SyslTriscCodegen(addresses: Int = 4):
     emit("  addi r4, r4, -1")         // r4--
     emit("  std r4, r3, r0")          // store back
     emit(s"  bne r4, r0, $noFree")
-    // refcount == 0 → free(base)
+    // refcount == 0 → call deinit then free(base)
     emit("  pshd r1")                 // save r1
-    emit("  mov r1, r3")              // r1 = base pointer
+    deinitFunc.foreach { name =>
+      // Call deinit(dataPtr) — dataPtr is ptrReg (past header)
+      emit(s"  mov r1, r$ptrReg")     // r1 = data pointer (self)
+      emit(s"  movi r4, $name")
+      emit("  jalr r6, r4")
+    }
+    emit("  mov r1, r3")              // r1 = base pointer (for free)
     emit("  movi r4, free")
     emit("  jalr r6, r4")
     emit("  popd r1")                 // restore r1
@@ -273,7 +296,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  pshd r1")
           emitAddImm(1, 5, local.offset)
           emit("  ldd r1, r1, r0")
-          emitRefDecr(1, hoff)
+          emitRefDecr(1, hoff, deinitFor(rt))
           emit("  popd r1")
         case _ =>
     // Decrement ref params (caller transferred ownership)
@@ -283,7 +306,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       emit("  pshd r1")
       emitAddImm(1, 5, local.offset)
       emit("  ldd r1, r1, r0")
-      emitRefDecr(1, hoff)
+      emitRefDecr(1, hoff, deinitFor(rt))
       emit("  popd r1")
 
   // Allocate a local variable on the stack, return its offset from fp.
@@ -554,7 +577,7 @@ class SyslTriscCodegen(addresses: Int = 4):
               // Decrement old ref before overwrite
               emitAddImm(1, 5, local.offset)
               emit("  ldd r1, r1, r0")
-              emitRefDecr(1, hoff)
+              emitRefDecr(1, hoff, deinitFor(rt))
               genExpr(value)
               // Increment only for copies, not new allocations
               value match
@@ -574,7 +597,7 @@ class SyslTriscCodegen(addresses: Int = 4):
               // Decrement old global ref
               emit(s"  movi r1, $target")
               emit("  ldd r1, r1, r0")
-              emitRefDecr(1, hoff)
+              emitRefDecr(1, hoff, deinitFor(rt))
               genExpr(value)
               value match
                 case _: TNew | _: TNewArray =>
