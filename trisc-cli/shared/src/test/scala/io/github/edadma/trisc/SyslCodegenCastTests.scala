@@ -10,7 +10,7 @@ class SyslCodegenCastTests extends SyslCodegenHelpers {
   "int from comparison" in { compileAndRun("main() -> int = int(3 < 5)\n") shouldBe 1 }
 
   "int from byte" in {
-    compileAndRun("main() -> int = int(byte(200))\n") shouldBe -56 // byte is signed i8: 200 = 0xC8 → -56
+    compileAndRun("main() -> int = int(byte(200))\n") shouldBe 200 // byte is unsigned u8
   }
 
   // ===== char() cast =====
@@ -19,7 +19,7 @@ class SyslCodegenCastTests extends SyslCodegenHelpers {
 
   // ===== byte() cast =====
 
-  "byte from int" in { compileAndRun("main() -> int = byte(0x1FF)\n") shouldBe -1 }
+  "byte from int" in { compileAndRun("main() -> int = byte(0x1FF)\n") shouldBe 255 }
   "byte truncates to 8 bits" in { compileAndRun("main() -> int = byte(256)\n") shouldBe 0 }
 
   // ===== bool() cast =====
