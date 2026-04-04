@@ -838,14 +838,16 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TDoWhileStmt(cond, body) =>
         val loopLabel = newLabel("dowhile")
+        val condLabel = newLabel("dowhile_cond")
         val endLabel = newLabel("enddowhile")
         breakLabels.push(endLabel)
-        continueLabels.push(loopLabel)
+        continueLabels.push(condLabel) // continue jumps to condition, not body
         loopScopeOffsets.push(stackOffset)
         emit(s"$loopLabel")
         enterScope()
         for stmt <- body do genStmt(stmt)
         leaveScope()
+        emit(s"$condLabel")
         genExpr(cond)
         emit(s"  bne r1, r0, $loopLabel")
         emit(s"$endLabel")
