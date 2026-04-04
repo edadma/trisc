@@ -940,8 +940,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  popd r1")        // r1 = field address
         emitStore(2, 1, fieldType)
 
-      case _ =>
-        emit(s"  # TODO: ${stmt.getClass.getSimpleName}")
+      case other =>
+        throw new RuntimeException(s"codegen: unhandled statement type: ${other.getClass.getSimpleName}")
 
   private def genExpr(expr: TExpr): Unit =
     // Result always in r1
@@ -1725,8 +1725,8 @@ class SyslTriscCodegen(addresses: Int = 4):
             // r1 = data pointer; length is at [r1 - 8]
             emitAddImm(1, 1, -8)
             emit("  ldd r1, r1, r0")
-          case _ =>
-            emit("  # TODO: len on unsupported type")
+          case other =>
+            throw new RuntimeException(s"codegen: len() not supported on ${other}")
 
       case TCap(inner, _) =>
         genExpr(inner)           // r1 = struct address
@@ -1736,8 +1736,8 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  ldw r1, r1, r0") // cap at offset 12
           case SyslType.ArrayType(_, size) =>
             emitLoadImm(1, size) // cap == size for fixed arrays
-          case _ =>
-            emit("  # TODO: cap on unsupported type")
+          case other =>
+            throw new RuntimeException(s"codegen: cap() not supported on ${other}")
 
       case TFloatLit(d, _) =>
         val bits = java.lang.Double.doubleToRawLongBits(d)
@@ -1934,8 +1934,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  popd r2")
         emitStore(3, 2, fieldType)
 
-      case _ =>
-        emit(s"  # TODO: ${expr.getClass.getSimpleName}")
+      case other =>
+        throw new RuntimeException(s"codegen: unhandled expression type: ${other.getClass.getSimpleName}")
 
   // Emit reg = base + offset, handling large offsets that don't fit in addi
   private def emitAddImm(destReg: Int, baseReg: Int, offset: Int): Unit =
