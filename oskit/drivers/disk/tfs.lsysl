@@ -22,7 +22,7 @@ On-disk layout (block 0 = boot, block 1 = superblock):
 
     // === Ramdisk device registers (offsets from RD_BASE) ===
 
-    val RD_BASE = 0x100100
+    val RD_BASE = 0x100140
     val RD_STATUS_OFF  = 0
     val RD_COMMAND_OFF = 1
     val RD_LBA_OFF     = 2
