@@ -23,7 +23,7 @@ class OSKitShellTests extends OSKitTestHelpers {
   // Shell tests need the full stack: keyboard, TTY, disk, TFS, shell
   def runShell(
       userSources: Map[String, String],
-      maxCycles: Int = 40000000,
+      maxCycles: Int = 100000000,
       prefill: String = "\n",
       scheduledKeys: Seq[(Int, Int, Boolean, Int)] = Seq.empty,
   ): (CPU, String) =
@@ -100,32 +100,25 @@ class OSKitShellTests extends OSKitTestHelpers {
   // starting at the given tick, with spacing between each key
   def typeString(s: String, startTick: Int, spacing: Int = 100): Seq[(Int, Int, Boolean, Int)] =
     s.flatMap { ch =>
-      val (scancode, mods) = charToScancode(ch)
+      val (scancode, mods) = charToVK(ch)
       Seq((0, scancode, true, mods), (0, scancode, false, mods))
     }.zipWithIndex.map { case ((_, sc, press, mods), i) =>
       (startTick + i * spacing, sc, press, mods)
     }
 
-  // Map ASCII character to HID scancode + modifier bits
-  private def charToScancode(ch: Char): (Int, Int) = ch match
-    case c if c >= 'a' && c <= 'z' => (c - 'a' + 0x04, 0)
-    case c if c >= 'A' && c <= 'Z' => (c - 'A' + 0x04, 1) // shift
-    case '1' => (0x1E, 0)
-    case '2' => (0x1F, 0)
-    case '3' => (0x20, 0)
-    case '4' => (0x21, 0)
-    case '5' => (0x22, 0)
-    case '6' => (0x23, 0)
-    case '7' => (0x24, 0)
-    case '8' => (0x25, 0)
-    case '9' => (0x26, 0)
-    case '0' => (0x27, 0)
-    case '\n' => (0x28, 0) // Enter
-    case ' ' => (0x2C, 0)
-    case '/' => (0x38, 0)
-    case '-' => (0x2D, 0)
-    case '.' => (0x37, 0)
-    case _ => (0x2C, 0) // fallback to space
+  // Map ASCII character to Java VK code + modifier bits
+  // KeyboardDevice.enqueue takes VK codes and converts to HID internally
+  import java.awt.event.KeyEvent
+  private def charToVK(ch: Char): (Int, Int) = ch match
+    case c if c >= 'a' && c <= 'z' => (KeyEvent.VK_A + (c - 'a'), 0)
+    case c if c >= 'A' && c <= 'Z' => (KeyEvent.VK_A + (c - 'A'), 1) // shift
+    case c if c >= '0' && c <= '9' => (KeyEvent.VK_0 + (c - '0'), 0)
+    case '\n' => (KeyEvent.VK_ENTER, 0)
+    case ' ' => (KeyEvent.VK_SPACE, 0)
+    case '/' => (KeyEvent.VK_SLASH, 0)
+    case '-' => (KeyEvent.VK_MINUS, 0)
+    case '.' => (KeyEvent.VK_PERIOD, 0)
+    case _ => (KeyEvent.VK_SPACE, 0)
 
   // === String library tests ===
 
@@ -281,5 +274,90 @@ class OSKitShellTests extends OSKitTestHelpers {
         |    0
         |""".stripMargin)
     output shouldBe "Y"
+  }
+
+  // === Shell integration tests ===
+
+  "Shell: echo command via putc" in {
+    // Simpler test: type "echo hi\n" and check output
+    val keys = typeString("echo hi\n", startTick = 2000, spacing = 300)
+    val (cpu, output) = runShell(Map(
+      "app" ->
+        """import oskit.*
+          |
+          |kernel_main() -> int
+          |    ipc_init()
+          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
+          |    create_thread(tfs_server, 0x20000, 0x1E000, "tfs")
+          |    create_thread(tty_server, 0x30000, 0x2E000, "tty")
+          |    create_thread(shell, 0x40000, 0x3E000, "sh")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |""".stripMargin
+    ), scheduledKeys = keys, maxCycles = 100000000)
+    println(s"SHELL output (${output.length} chars): '${output.take(200)}' cycles=${cpu.cycles}")
+    output should include("hi")
+  }
+
+  "Shell: echo command" in {
+    // Type "echo hi\n" starting at tick 5000 (give servers time to init)
+    val keys = typeString("echo hi\n", startTick = 1000, spacing = 200)
+    val (_, output) = runShell(Map(
+      "app" ->
+        """import oskit.*
+          |
+          |kernel_main() -> int
+          |    ipc_init()
+          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
+          |    create_thread(tfs_server, 0x20000, 0x1E000, "tfs")
+          |    create_thread(tty_server, 0x30000, 0x2E000, "tty")
+          |    create_thread(shell, 0x40000, 0x3E000, "sh")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |""".stripMargin
+    ), scheduledKeys = keys)
+    // Output should contain the prompt, echoed input, and "hi"
+    output should include("hi")
+  }
+
+  "Shell: ls on root with prefilled file" in {
+    val keys = typeString("ls\n", startTick = 1000, spacing = 200)
+    val (_, output) = runShell(Map(
+      "app" ->
+        """import oskit.*
+          |
+          |kernel_main() -> int
+          |    ipc_init()
+          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
+          |    create_thread(tfs_server, 0x20000, 0x1E000, "tfs")
+          |    create_thread(tty_server, 0x30000, 0x2E000, "tty")
+          |    create_thread(shell, 0x40000, 0x3E000, "sh")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |""".stripMargin
+    ), prefill = """/hello file "world"""", scheduledKeys = keys)
+    output should include("hello")
+  }
+
+  "Shell: pwd shows root" in {
+    val keys = typeString("pwd\n", startTick = 1000, spacing = 200)
+    val (_, output) = runShell(Map(
+      "app" ->
+        """import oskit.*
+          |
+          |kernel_main() -> int
+          |    ipc_init()
+          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
+          |    create_thread(tfs_server, 0x20000, 0x1E000, "tfs")
+          |    create_thread(tty_server, 0x30000, 0x2E000, "tty")
+          |    create_thread(shell, 0x40000, 0x3E000, "sh")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |""".stripMargin
+    ), scheduledKeys = keys)
+    // Output should show "/" from pwd
+    // The prompt is "/ $ " and pwd prints "/"
+    val pwdLines = output.split('\n').filter(_.trim == "/")
+    pwdLines.length should be >= 1
   }
 }

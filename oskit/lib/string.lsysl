@@ -63,14 +63,6 @@ Returns 1 if equal, 0 otherwise.
             return 0
         1
 
-strlen(s) — Return the length of a null-terminated string.
-
-    strlen(s: *i8) -> int
-        var i = 0
-        while s[i] != 0
-            i += 1
-        i
-
 strcpy(dst, src) — Copy a null-terminated string.
 
     strcpy(dst: *i8, src: *i8)

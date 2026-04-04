@@ -17,7 +17,8 @@ Built-in commands:
 
     module oskit
 
-    import oskit.lib.{strtok, streq, strlen, strcpy, strcat}
+    import oskit.lib.{strtok, streq, strcpy, strcat}
+    import oskit.fs.{strlen, ROOT_INODE}
 
 Extern declarations for TTY and filesystem server functions.
 These are in module oskit but may be compiled in any order.
@@ -38,7 +39,6 @@ These are in module oskit but may be compiled in any order.
 
 Shell state: current working directory as inode and path string.
 
-    val ROOT_INODE = 1
     var cwd_ino = 1
     var cwd_path: [128]i8
 
@@ -154,21 +154,21 @@ from cwd by building an absolute path.
 
 Built-in commands.
 
-    cmd_echo(argc: int, argv: *(*i8))
+    cmd_echo(argc: int, argv: *i64)
         var i = 1
         while i < argc
             if i > 1
                 sh_putc(32)
-            sh_puts(argv[i])
+            sh_puts(*i8(argv[i]))
             i += 1
         sh_newline()
 
-    cmd_ls(argc: int, argv: *(*i8))
+    cmd_ls(argc: int, argv: *i64)
         var dir_ino = cwd_ino
         if argc > 1
-            dir_ino = sh_resolve_path(argv[1])
+            dir_ino = sh_resolve_path(*i8(argv[1]))
             if dir_ino < 0
-                sh_puts(argv[1])
+                sh_puts(*i8(argv[1]))
                 var e1: [13]i8
                 e1[0] = 58   // :
                 e1[1] = 32   // space
@@ -202,7 +202,7 @@ Built-in commands.
                     sh_newline()
             idx += 1
 
-    cmd_cat(argc: int, argv: *(*i8))
+    cmd_cat(argc: int, argv: *i64)
         if argc < 2
             var u1: [15]i8
             u1[0] = 117  // u
@@ -222,9 +222,9 @@ Built-in commands.
             u1[14] = 0
             sh_puts(&u1[0])
             return
-        val ino = sh_resolve_path(argv[1])
+        val ino = sh_resolve_path(*i8(argv[1]))
         if ino < 0
-            sh_puts(argv[1])
+            sh_puts(*i8(argv[1]))
             var e1: [13]i8
             e1[0] = 58
             e1[1] = 32
@@ -253,12 +253,12 @@ Built-in commands.
             nr = fs_read(ino, &buf[0], offset, 128)
         sh_newline()
 
-    cmd_mkdir(argc: int, argv: *(*i8))
+    cmd_mkdir(argc: int, argv: *i64)
         if argc < 2
             return
-        val parent = sh_resolve_parent(argv[1])
+        val parent = sh_resolve_parent(*i8(argv[1]))
         if parent < 0
-            sh_puts(argv[1])
+            sh_puts(*i8(argv[1]))
             var e1: [13]i8
             e1[0] = 58
             e1[1] = 32
@@ -275,7 +275,7 @@ Built-in commands.
             e1[12] = 0
             sh_puts(&e1[0])
             return
-        val name = sh_basename(argv[1])
+        val name = sh_basename(*i8(argv[1]))
         val result = fs_mkdir(parent, name, 0x1FF)
         if result < 0
             var e2: [7]i8
@@ -288,13 +288,13 @@ Built-in commands.
             e2[6] = 0
             sh_puts(&e2[0])
 
-    cmd_rm(argc: int, argv: *(*i8))
+    cmd_rm(argc: int, argv: *i64)
         if argc < 2
             return
-        val parent = sh_resolve_parent(argv[1])
+        val parent = sh_resolve_parent(*i8(argv[1]))
         if parent < 0
             return
-        val name = sh_basename(argv[1])
+        val name = sh_basename(*i8(argv[1]))
         val result = fs_unlink(parent, name)
         if result < 0
             var e2: [7]i8
@@ -307,13 +307,13 @@ Built-in commands.
             e2[6] = 0
             sh_puts(&e2[0])
 
-    cmd_rmdir(argc: int, argv: *(*i8))
+    cmd_rmdir(argc: int, argv: *i64)
         if argc < 2
             return
-        val parent = sh_resolve_parent(argv[1])
+        val parent = sh_resolve_parent(*i8(argv[1]))
         if parent < 0
             return
-        val name = sh_basename(argv[1])
+        val name = sh_basename(*i8(argv[1]))
         val result = fs_rmdir(parent, name)
         if result < 0
             var e2: [7]i8
@@ -330,16 +330,16 @@ Built-in commands.
         sh_puts(&cwd_path[0])
         sh_newline()
 
-    cmd_cd(argc: int, argv: *(*i8))
+    cmd_cd(argc: int, argv: *i64)
         if argc < 2
             // cd with no args → go to root
             cwd_ino = ROOT_INODE
             cwd_path[0] = 47
             cwd_path[1] = 0
             return
-        val ino = sh_resolve_path(argv[1])
+        val ino = sh_resolve_path(*i8(argv[1]))
         if ino < 0
-            sh_puts(argv[1])
+            sh_puts(*i8(argv[1]))
             var e1: [13]i8
             e1[0] = 58
             e1[1] = 32
@@ -382,23 +382,24 @@ Built-in commands.
             return
         cwd_ino = ino
         // Update cwd_path
-        if argv[1][0] == 47
+        val arg1: *i8 = *i8(argv[1])
+        if arg1[0] == 47
             // Absolute path
-            strcpy(&cwd_path[0], argv[1])
+            strcpy(&cwd_path[0], arg1)
         else
             // Relative path
             val cwdlen = strlen(&cwd_path[0])
             if cwdlen > 1
                 cwd_path[cwdlen] = 47
                 cwd_path[cwdlen + 1] = 0
-            strcat(&cwd_path[0], argv[1])
+            strcat(&cwd_path[0], arg1)
 
-    cmd_stat(argc: int, argv: *(*i8))
+    cmd_stat(argc: int, argv: *i64)
         if argc < 2
             return
-        val ino = sh_resolve_path(argv[1])
+        val ino = sh_resolve_path(*i8(argv[1]))
         if ino < 0
-            sh_puts(argv[1])
+            sh_puts(*i8(argv[1]))
             var e1: [13]i8
             e1[0] = 58
             e1[1] = 32
@@ -538,21 +539,55 @@ Command name constants.
     var _cmd_help: [5]i8
 
     sh_init_cmds()
-        _cmd_echo[0] = 101; _cmd_echo[1] = 99; _cmd_echo[2] = 104; _cmd_echo[3] = 111; _cmd_echo[4] = 0
-        _cmd_ls[0] = 108; _cmd_ls[1] = 115; _cmd_ls[2] = 0
-        _cmd_cat[0] = 99; _cmd_cat[1] = 97; _cmd_cat[2] = 116; _cmd_cat[3] = 0
-        _cmd_mkdir[0] = 109; _cmd_mkdir[1] = 107; _cmd_mkdir[2] = 100; _cmd_mkdir[3] = 105; _cmd_mkdir[4] = 114; _cmd_mkdir[5] = 0
-        _cmd_rm[0] = 114; _cmd_rm[1] = 109; _cmd_rm[2] = 0
-        _cmd_rmdir[0] = 114; _cmd_rmdir[1] = 109; _cmd_rmdir[2] = 100; _cmd_rmdir[3] = 105; _cmd_rmdir[4] = 114; _cmd_rmdir[5] = 0
-        _cmd_pwd[0] = 112; _cmd_pwd[1] = 119; _cmd_pwd[2] = 100; _cmd_pwd[3] = 0
-        _cmd_cd[0] = 99; _cmd_cd[1] = 100; _cmd_cd[2] = 0
-        _cmd_stat[0] = 115; _cmd_stat[1] = 116; _cmd_stat[2] = 97; _cmd_stat[3] = 116; _cmd_stat[4] = 0
-        _cmd_help[0] = 104; _cmd_help[1] = 101; _cmd_help[2] = 108; _cmd_help[3] = 112; _cmd_help[4] = 0
+        _cmd_echo[0] = 101
+        _cmd_echo[1] = 99
+        _cmd_echo[2] = 104
+        _cmd_echo[3] = 111
+        _cmd_echo[4] = 0
+        _cmd_ls[0] = 108
+        _cmd_ls[1] = 115
+        _cmd_ls[2] = 0
+        _cmd_cat[0] = 99
+        _cmd_cat[1] = 97
+        _cmd_cat[2] = 116
+        _cmd_cat[3] = 0
+        _cmd_mkdir[0] = 109
+        _cmd_mkdir[1] = 107
+        _cmd_mkdir[2] = 100
+        _cmd_mkdir[3] = 105
+        _cmd_mkdir[4] = 114
+        _cmd_mkdir[5] = 0
+        _cmd_rm[0] = 114
+        _cmd_rm[1] = 109
+        _cmd_rm[2] = 0
+        _cmd_rmdir[0] = 114
+        _cmd_rmdir[1] = 109
+        _cmd_rmdir[2] = 100
+        _cmd_rmdir[3] = 105
+        _cmd_rmdir[4] = 114
+        _cmd_rmdir[5] = 0
+        _cmd_pwd[0] = 112
+        _cmd_pwd[1] = 119
+        _cmd_pwd[2] = 100
+        _cmd_pwd[3] = 0
+        _cmd_cd[0] = 99
+        _cmd_cd[1] = 100
+        _cmd_cd[2] = 0
+        _cmd_stat[0] = 115
+        _cmd_stat[1] = 116
+        _cmd_stat[2] = 97
+        _cmd_stat[3] = 116
+        _cmd_stat[4] = 0
+        _cmd_help[0] = 104
+        _cmd_help[1] = 101
+        _cmd_help[2] = 108
+        _cmd_help[3] = 112
+        _cmd_help[4] = 0
 
-    sh_dispatch(argc: int, argv: *(*i8))
+    sh_dispatch(argc: int, argv: *i64)
         if argc == 0
             return
-        val cmd = argv[0]
+        val cmd: *i8 = *i8(argv[0])
         if streq(cmd, &_cmd_echo[0]) == 1
             cmd_echo(argc, argv)
         else if streq(cmd, &_cmd_ls[0]) == 1
@@ -608,7 +643,7 @@ tokenizes it, and dispatches to the appropriate command.
         delim[0] = 32  // space
         delim[1] = 0
 
-        var argv: [16]*i8
+        var argv: [16]i64
 
         while 1 == 1
             // Print prompt: "cwd$ "
@@ -626,7 +661,7 @@ tokenizes it, and dispatches to the appropriate command.
             var tok = strtok(&line[0], &delim[0])
             while i64(tok) != 0
                 if argc < MAX_ARGS
-                    argv[argc] = tok
+                    argv[argc] = i64(tok)
                     argc += 1
                 tok = strtok(*i8(0), &delim[0])
 
