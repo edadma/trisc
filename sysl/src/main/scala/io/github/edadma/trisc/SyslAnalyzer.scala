@@ -278,7 +278,10 @@ class SyslAnalyzer:
       val coerced = coerceLiteral(arg, pType)
       if !compatible(coerced.typ, pType) then
         throw AnalysisError(s"argument '$pName' of '$name' expects $pType, got ${coerced.typ}")
-      coerced
+      // Insert explicit cast for string→*i8 decay so codegen can handle it
+      (coerced.typ, pType) match
+        case (StringType, PtrType(I8 | U8)) => TCast(coerced, pType)
+        case _ => coerced
     }
 
   private def analyzeBlock(stmts: List[StmtAST]): List[TStmt] =

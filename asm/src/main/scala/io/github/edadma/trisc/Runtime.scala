@@ -75,6 +75,24 @@ object Runtime:
        |  stb r1, r2, r0
        |  jalr r0, r6
        |
+       |; puts: write string to stdout
+       |; r1 = address of {ptr, len} string struct (16 bytes)
+       |puts
+       |  ldd r2, r1, r0
+       |  addi r1, r1, 8
+       |  ldd r3, r1, r0
+       |  movi r1, ${stdoutAddress}
+       |_puts_loop
+       |  beq r3, r0, _puts_done
+       |  ldb r4, r2, r0
+       |  stb r4, r1, r0
+       |  addi r2, r2, 1
+       |  addi r3, r3, -1
+       |  bra _puts_loop
+       |_puts_done
+       |  ldi r1, 0
+       |  jalr r0, r6
+       |
        |; kbhit: return 1 in r1 if keyboard has data, 0 otherwise
        |kbhit
        |  movi r2, ${keyboardAddress}
