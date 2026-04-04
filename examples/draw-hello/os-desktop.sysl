@@ -119,14 +119,15 @@ t_greeting: [8]i8 = [72, 101, 108, 108, 111, 44, 32, 0]  // "Hello, "
 val WIN1_X = 20
 val WIN1_Y = 30
 
+t_click: [8]i8 = [67, 108, 105, 99, 107, 32, 109, 101]  // "Click me"
+
 draw_monitor_ui(surf: int)
     ui_begin(surf, 420, 240, WIN1_X, WIN1_Y)
-    ui_label(&t_cpu_u[0])
-    ui_label(&t_cpu[0])
-    ui_label(&t_mem[0])
+    ui_label(&t_cpu_u[0], 9)
+    ui_label(&t_cpu[0], 8)
+    ui_label(&t_mem[0], 11)
     ui_input(&name_buf[0], 31, &name_len)
-    if ui_button(&t_mon[0]) != 0
-        // Button clicked — could do something
+    if ui_button(&t_click[0], 8) != 0
         putc('B')
     ui_end()
 
@@ -235,14 +236,13 @@ hid_to_ascii(sc: int, mods: int) -> int
 
 // Client app — creates windows and draws content via display server IPC
 app_main()
-    // Wait for display server to start
-    sleep(5)
     putc('A')  // app started
 
-    val port = ds_connect()
-    if port < 0
-        putc('X')  // port lookup failed
-        return
+    // Wait for display server port to become available
+    var port = ds_connect()
+    while port < 0
+        yield()
+        port = ds_connect()
     putc('P')  // port found
 
     // Create three windows via IPC — ds_create_window returns surface ID for drawing
@@ -265,7 +265,7 @@ app_main()
     ds_composite()
     putc('!')
 
-    // SUIT event loop — redraw on key events and mouse clicks only
+    // SUIT event loop — redraw on key events and mouse release only
     var prev_mb = 0
 
     while true
@@ -276,9 +276,11 @@ app_main()
                 ui_process_key(key, &name_buf[0], 31, &name_len)
             dirty = 1
         val mb = mouse_buttons & 1
-        if mb != prev_mb
-            prev_mb = mb
-            dirty = 1
+        // Only redraw on release (when click fires), not on press
+        if prev_mb != 0
+            if mb == 0
+                dirty = 1
+        prev_mb = mb
         if dirty != 0
             draw_monitor_ui(surf1)
             ds_composite()

@@ -144,8 +144,7 @@ Frame management.
 
 Label — static text.
 
-    ui_label(s: *i8)
-        val len = _suit_strlen(s)
+    ui_label(s: *i8, len: int)
         val x = SUIT_PADDING
         val y = _suit_cursor_y
         _suit_text(x, y + SUIT_FONT_SIZE, s, len, SUIT_FG_R, SUIT_FG_G, SUIT_FG_B)
@@ -153,8 +152,7 @@ Label — static text.
 
 Button — returns 1 if clicked this frame.
 
-    ui_button(s: *i8) -> int
-        val len = _suit_strlen(s)
+    ui_button(s: *i8, len: int) -> int
         val x = SUIT_PADDING
         val y = _suit_cursor_y
         val bw = len * SUIT_CHAR_WIDTH + SUIT_PADDING * 2

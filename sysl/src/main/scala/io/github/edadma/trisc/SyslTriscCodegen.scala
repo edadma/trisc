@@ -5,6 +5,7 @@ import scala.collection.mutable
 class SyslTriscCodegen(addresses: Int = 4):
   private val out = new StringBuilder
   private var labelCounter = 0
+  private var modulePrefix = "" // unique prefix for this compilation unit
   private val stringLiterals = new mutable.ListBuffer[(String, String)]() // (label, value)
   private var needsAllocExtern = false // set when codegen emits malloc/free references
 
@@ -21,6 +22,8 @@ class SyslTriscCodegen(addresses: Int = 4):
     stringLiterals.clear()
     deinitTypes.clear()
     needsAllocExtern = false
+    // Extract module prefix for unique symbol names across compilation units
+    modulePrefix = program.decls.collectFirst { case TModuleDecl(path) => path.mkString("_") }.getOrElse("")
 
     // Scan for deinit methods: functions named TypeName_deinit
     for decl <- program.decls do
@@ -1284,7 +1287,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         // String literal → *i8 decay: emit data pointer directly, no fat pointer needed
         val bytes = value.getBytes("UTF-8")
         labelCounter += 1
-        val strLabel = s"__str_$labelCounter"
+        val strLabel = if modulePrefix.isEmpty then s"__str_$labelCounter" else s"__str_${modulePrefix}_$labelCounter"
         stringLiterals += ((strLabel, value))
         emit(s"  movi r1, $strLabel")  // r1 = ptr to byte data (past refcount header)
 
@@ -1667,7 +1670,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         // Allocate 16-byte {ptr, len} fat pointer on stack
         val bytes = value.getBytes("UTF-8")
         labelCounter += 1
-        val strLabel = s"__str_$labelCounter"
+        val strLabel = if modulePrefix.isEmpty then s"__str_$labelCounter" else s"__str_${modulePrefix}_$labelCounter"
         stringLiterals += ((strLabel, value))
         // Allocate 16 bytes on stack for the string struct
         emitAddImm(7, 7, -16)

@@ -363,6 +363,36 @@ up the wallpaper, and enters the event loop.
         ds_color(10, 10, 18, 255)
         ds_exec(CMD_SET_WALLPAPER)
 
+        // Create undecorated desktop window for slix logo
+        ds_write8(DE_TEXT_BUF, 0)  // empty title
+        ds_pos(0, 0)
+        ds_size(width, height)
+        ds_write8(27, 1)  // WIN_FLAGS: visible, not decorated
+        ds_exec(0x30)  // CREATE_WINDOW — target is now set to desktop surface
+
+        // Draw dark background
+        ds_color(10, 10, 18, 255)
+        ds_exec(0x01)  // CLEAR
+
+        // Draw slix.png centered
+        // Clear TEXT_ADDR so DRAW_IMAGE reads from TEXT_BUF
+        ds_write8(16, 0)
+        ds_write8(17, 0)
+        ds_write8(18, 0)
+        ds_write8(19, 0)
+        ds_write8(DE_TEXT_BUF + 0, 115)  // s
+        ds_write8(DE_TEXT_BUF + 1, 108)  // l
+        ds_write8(DE_TEXT_BUF + 2, 105)  // i
+        ds_write8(DE_TEXT_BUF + 3, 120)  // x
+        ds_write8(DE_TEXT_BUF + 4, 46)   // .
+        ds_write8(DE_TEXT_BUF + 5, 112)  // p
+        ds_write8(DE_TEXT_BUF + 6, 110)  // n
+        ds_write8(DE_TEXT_BUF + 7, 103)  // g
+        ds_write8(DE_TEXT_BUF + 8, 0)    // null
+        ds_pos(420, 200)
+        ds_size(600, 600)
+        ds_exec(0x12)  // DRAW_IMAGE
+
         // Initial composite
         ds_exec(CMD_COMPOSITE)
 
