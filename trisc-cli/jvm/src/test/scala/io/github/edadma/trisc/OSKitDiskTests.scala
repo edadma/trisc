@@ -89,6 +89,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
       "oskit/ipc/ipc" -> ipcSysl,
       "oskit/drivers/disk/disk" -> diskSysl,
       "oskit/fs/tfs" -> tfsSysl,
+      "posix/string/string" -> posixStringSysl,
       "oskit/servers/tfs" -> tfsSrvSysl,
     ) ++ userSources
     val driver = new SyslDriver

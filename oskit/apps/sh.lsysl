@@ -17,8 +17,9 @@ Built-in commands:
 
     module oskit.apps
 
-    import oskit.lib.{strtok, streq, strcpy, strcat}
-    import oskit.fs.{strlen, ROOT_INODE}
+    import oskit.lib.streq
+    import oskit.fs.ROOT_INODE
+    import posix.string.{strlen, strtok, strcpy, strcat}
     import oskit.services.{sleep}
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
     import oskit.servers.{fs_open, fs_read, fs_write, fs_create, fs_unlink, fs_stat, fs_mkdir, fs_rmdir, fs_readdir}

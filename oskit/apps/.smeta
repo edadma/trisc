@@ -4,6 +4,7 @@ DATA cwd_ino i32
 DATA cwd_path arr 128 i8
 FUNC sh_putc 1 u32 void
 FUNC sh_puts 1 ptr i8 void
+FUNC sh_print 1 string void
 FUNC sh_newline 0 void
 FUNC sh_putint 1 i32 void
 DATA PROMPT_LEN i32
@@ -29,8 +30,8 @@ FUNC cmd_stat 2 i32 ptr i64 void
 FUNC cmd_help 2 i32 ptr i64 void
 DATA MAX_ARGS i32
 DATA NUM_CMDS i32
-STRUCT Command struct Command 2 name i64 handler func 2 i32 ptr i64 void
-DATA cmds arr 10 struct Command 2 name i64 handler func 2 i32 ptr i64 void
+STRUCT Command struct Command 2 name string handler func 2 i32 ptr i64 void
+DATA cmds arr 10 struct Command 2 name string handler func 2 i32 ptr i64 void
 FUNC sh_init_cmds 0 void
 FUNC sh_dispatch 2 i32 ptr i64 void
 FUNC shell 0 void

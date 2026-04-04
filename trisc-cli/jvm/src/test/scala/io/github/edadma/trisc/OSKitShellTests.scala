@@ -33,6 +33,9 @@ class OSKitShellTests extends OSKitTestHelpers {
       "oskit/fs/tfs"             -> tfsSysl,
       "oskit/servers/tfs"        -> tfsSrvSysl,
       "oskit/lib/string"         -> stringSysl,
+      "posix/unistd/sbrk"        -> sbrkSysl,
+      "posix/string/string"      -> posixStringSysl,
+      "posix/stdlib/alloc"       -> posixAllocSysl,
       "oskit/apps/sh"            -> shSysl,
       "oskit/apps/init"          -> initSysl,
       "app" ->

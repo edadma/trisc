@@ -19,6 +19,8 @@ On-disk layout (block 0 = boot, block 1 = superblock):
 
     module oskit.fs
 
+    import posix.string.strlen
+
     // === Block I/O — provided by the environment ===
 
     extern rd_read(lba: int, addr: *i8)
@@ -275,12 +277,6 @@ alloc_inode() — Find and allocate a free inode. Returns inode number or -1.
                 return 1
             i += 1
         1
-
-    strlen(s: *i8) -> int
-        var i = 0
-        while s[i] != 0
-            i += 1
-        i
 
     // === Directory operations ===
 
