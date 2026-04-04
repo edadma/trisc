@@ -268,32 +268,10 @@ Built-in commands.
 
     sh_not_found(name: *i8)
         sh_puts(name)
-        var e: [13]i8
-        e[0] = ':'
-        e[1] = ' '
-        e[2] = 'n'
-        e[3] = 'o'
-        e[4] = 't'
-        e[5] = ' '
-        e[6] = 'f'
-        e[7] = 'o'
-        e[8] = 'u'
-        e[9] = 'n'
-        e[10] = 'd'
-        e[11] = '\n'
-        e[12] = 0
-        sh_puts(&e[0])
+        sh_puts(*i8(": not found\n"))
 
     sh_error()
-        var e: [7]i8
-        e[0] = 'e'
-        e[1] = 'r'
-        e[2] = 'r'
-        e[3] = 'o'
-        e[4] = 'r'
-        e[5] = '\n'
-        e[6] = 0
-        sh_puts(&e[0])
+        sh_puts(*i8("error\n"))
 
     cmd_ls(argc: int, argv: *i64)
         var dir_ino = cwd_ino
@@ -321,23 +299,7 @@ Built-in commands.
 
     cmd_cat(argc: int, argv: *i64)
         if argc < 2
-            var u: [15]i8
-            u[0] = 'u'
-            u[1] = 's'
-            u[2] = 'a'
-            u[3] = 'g'
-            u[4] = 'e'
-            u[5] = ':'
-            u[6] = ' '
-            u[7] = 'c'
-            u[8] = 'a'
-            u[9] = 't'
-            u[10] = ' '
-            u[11] = '<'
-            u[12] = '>'
-            u[13] = '\n'
-            u[14] = 0
-            sh_puts(&u[0])
+            sh_puts(*i8("usage: cat <file>\n"))
             return
         val ino = sh_resolve_path(*i8(argv[1]))
         if ino < 0
@@ -409,25 +371,7 @@ Built-in commands.
         fs_stat(ino, &st[0])
         val ftype = (st[0] >> 12) & 0xF
         if ftype != 2
-            var e: [16]i8
-            e[0] = 'n'
-            e[1] = 'o'
-            e[2] = 't'
-            e[3] = ' '
-            e[4] = 'a'
-            e[5] = ' '
-            e[6] = 'd'
-            e[7] = 'i'
-            e[8] = 'r'
-            e[9] = 'e'
-            e[10] = 'c'
-            e[11] = 't'
-            e[12] = 'o'
-            e[13] = 'r'
-            e[14] = 'y'
-            e[15] = 0
-            sh_puts(&e[0])
-            sh_newline()
+            sh_puts(*i8("not a directory\n"))
             return
         cwd_ino = ino
         // Update cwd_path
@@ -454,194 +398,54 @@ Built-in commands.
         fs_stat(ino, &st[0])
         // Type
         val ftype = (st[0] >> 12) & 0xF
-        var t1: [7]i8
-        t1[0] = 't'
-        t1[1] = 'y'
-        t1[2] = 'p'
-        t1[3] = 'e'
-        t1[4] = ':'
-        t1[5] = ' '
-        t1[6] = 0
-        sh_puts(&t1[0])
+        sh_puts(*i8("type: "))
         if ftype == 1
-            var r: [5]i8
-            r[0] = 'f'
-            r[1] = 'i'
-            r[2] = 'l'
-            r[3] = 'e'
-            r[4] = 0
-            sh_puts(&r[0])
+            sh_puts(*i8("file"))
         else if ftype == 2
-            var d: [4]i8
-            d[0] = 'd'
-            d[1] = 'i'
-            d[2] = 'r'
-            d[3] = 0
-            sh_puts(&d[0])
+            sh_puts(*i8("dir"))
         else
             sh_putint(ftype)
         sh_newline()
-        // Size
-        var s1: [7]i8
-        s1[0] = 's'
-        s1[1] = 'i'
-        s1[2] = 'z'
-        s1[3] = 'e'
-        s1[4] = ':'
-        s1[5] = ' '
-        s1[6] = 0
-        sh_puts(&s1[0])
+        sh_puts(*i8("size: "))
         sh_putint(st[4])
         sh_newline()
-        // Inode
-        var i1: [5]i8
-        i1[0] = 'i'
-        i1[1] = 'n'
-        i1[2] = 'o'
-        i1[3] = ':'
-        i1[4] = 0
-        sh_puts(&i1[0])
-        sh_putc(' ')
+        sh_puts(*i8("ino: "))
         sh_putint(ino)
         sh_newline()
 
     cmd_help()
-        var h: [45]i8
-        // "echo ls cat mkdir rm rmdir pwd cd stat help\n"
-        h[0] = 'e'
-        h[1] = 'c'
-        h[2] = 'h'
-        h[3] = 'o'
-        h[4] = ' '
-        h[5] = 'l'
-        h[6] = 's'
-        h[7] = ' '
-        h[8] = 'c'
-        h[9] = 'a'
-        h[10] = 't'
-        h[11] = ' '
-        h[12] = 'm'
-        h[13] = 'k'
-        h[14] = 'd'
-        h[15] = 'i'
-        h[16] = 'r'
-        h[17] = ' '
-        h[18] = 'r'
-        h[19] = 'm'
-        h[20] = ' '
-        h[21] = 'r'
-        h[22] = 'm'
-        h[23] = 'd'
-        h[24] = 'i'
-        h[25] = 'r'
-        h[26] = ' '
-        h[27] = 'p'
-        h[28] = 'w'
-        h[29] = 'd'
-        h[30] = ' '
-        h[31] = 'c'
-        h[32] = 'd'
-        h[33] = ' '
-        h[34] = 's'
-        h[35] = 't'
-        h[36] = 'a'
-        h[37] = 't'
-        h[38] = ' '
-        h[39] = 'h'
-        h[40] = 'e'
-        h[41] = 'l'
-        h[42] = 'p'
-        h[43] = '\n'
-        h[44] = 0
-        sh_puts(&h[0])
+        sh_puts(*i8("echo ls cat mkdir rm rmdir pwd cd stat help\n"))
 
 Command dispatch table. Matches the first token against
 known commands and calls the handler.
 
     val MAX_ARGS = 16
 
-Command name constants.
-
-    var _cmd_echo: [5]i8
-    var _cmd_ls: [3]i8
-    var _cmd_cat: [4]i8
-    var _cmd_mkdir: [6]i8
-    var _cmd_rm: [3]i8
-    var _cmd_rmdir: [6]i8
-    var _cmd_pwd: [4]i8
-    var _cmd_cd: [3]i8
-    var _cmd_stat: [5]i8
-    var _cmd_help: [5]i8
-
-    sh_init_cmds()
-        _cmd_echo[0] = 'e'
-        _cmd_echo[1] = 'c'
-        _cmd_echo[2] = 'h'
-        _cmd_echo[3] = 'o'
-        _cmd_echo[4] = 0
-        _cmd_ls[0] = 'l'
-        _cmd_ls[1] = 's'
-        _cmd_ls[2] = 0
-        _cmd_cat[0] = 'c'
-        _cmd_cat[1] = 'a'
-        _cmd_cat[2] = 't'
-        _cmd_cat[3] = 0
-        _cmd_mkdir[0] = 'm'
-        _cmd_mkdir[1] = 'k'
-        _cmd_mkdir[2] = 'd'
-        _cmd_mkdir[3] = 'i'
-        _cmd_mkdir[4] = 'r'
-        _cmd_mkdir[5] = 0
-        _cmd_rm[0] = 'r'
-        _cmd_rm[1] = 'm'
-        _cmd_rm[2] = 0
-        _cmd_rmdir[0] = 'r'
-        _cmd_rmdir[1] = 'm'
-        _cmd_rmdir[2] = 'd'
-        _cmd_rmdir[3] = 'i'
-        _cmd_rmdir[4] = 'r'
-        _cmd_rmdir[5] = 0
-        _cmd_pwd[0] = 'p'
-        _cmd_pwd[1] = 'w'
-        _cmd_pwd[2] = 'd'
-        _cmd_pwd[3] = 0
-        _cmd_cd[0] = 'c'
-        _cmd_cd[1] = 'd'
-        _cmd_cd[2] = 0
-        _cmd_stat[0] = 's'
-        _cmd_stat[1] = 't'
-        _cmd_stat[2] = 'a'
-        _cmd_stat[3] = 't'
-        _cmd_stat[4] = 0
-        _cmd_help[0] = 'h'
-        _cmd_help[1] = 'e'
-        _cmd_help[2] = 'l'
-        _cmd_help[3] = 'p'
-        _cmd_help[4] = 0
+Command dispatch. Matches the first token against known commands.
 
     sh_dispatch(argc: int, argv: *i64)
         if argc == 0
             return
         val cmd: *i8 = *i8(argv[0])
-        if streq(cmd, &_cmd_echo[0]) == 1
+        if streq(cmd, *i8("echo")) == 1
             cmd_echo(argc, argv)
-        else if streq(cmd, &_cmd_ls[0]) == 1
+        else if streq(cmd, *i8("ls")) == 1
             cmd_ls(argc, argv)
-        else if streq(cmd, &_cmd_cat[0]) == 1
+        else if streq(cmd, *i8("cat")) == 1
             cmd_cat(argc, argv)
-        else if streq(cmd, &_cmd_mkdir[0]) == 1
+        else if streq(cmd, *i8("mkdir")) == 1
             cmd_mkdir(argc, argv)
-        else if streq(cmd, &_cmd_rm[0]) == 1
+        else if streq(cmd, *i8("rm")) == 1
             cmd_rm(argc, argv)
-        else if streq(cmd, &_cmd_rmdir[0]) == 1
+        else if streq(cmd, *i8("rmdir")) == 1
             cmd_rmdir(argc, argv)
-        else if streq(cmd, &_cmd_pwd[0]) == 1
+        else if streq(cmd, *i8("pwd")) == 1
             cmd_pwd()
-        else if streq(cmd, &_cmd_cd[0]) == 1
+        else if streq(cmd, *i8("cd")) == 1
             cmd_cd(argc, argv)
-        else if streq(cmd, &_cmd_stat[0]) == 1
+        else if streq(cmd, *i8("stat")) == 1
             cmd_stat(argc, argv)
-        else if streq(cmd, &_cmd_help[0]) == 1
+        else if streq(cmd, *i8("help")) == 1
             cmd_help()
         else
             sh_not_found(cmd)
@@ -653,7 +457,6 @@ tokenizes it, and dispatches to the appropriate command.
         // Initialize
         cwd_path[0] = '/'
         cwd_path[1] = 0
-        sh_init_cmds()
 
         // Wait for servers to start
         sleep(5)
