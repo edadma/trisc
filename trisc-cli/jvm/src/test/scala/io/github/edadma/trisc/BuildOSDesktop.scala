@@ -15,6 +15,7 @@ class BuildOSDesktop extends OSKitTestHelpers {
   private lazy val kbdSysl: String = readLsysl("oskit/drivers/kbd/keyboard.lsysl")
   private lazy val mouseSysl: String = readLsysl("oskit/drivers/mouse/mouse.lsysl")
   private lazy val displaySysl: String = readLsysl("oskit/drivers/display/display.lsysl")
+  private lazy val suitSysl: String = readLsysl("suit/suit.lsysl")
   private lazy val appSysl: String = scala.io.Source.fromFile("examples/draw-hello/os-desktop.sysl").mkString
 
   "build OS desktop TOF" in {
@@ -24,7 +25,7 @@ class BuildOSDesktop extends OSKitTestHelpers {
       "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
       "oskit/ipc/ipc" -> ipcSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl,
       "oskit/drivers/mouse/mouse" -> mouseSysl, "oskit/drivers/display/display" -> displaySysl,
-      "app" -> appSysl,
+      "suit/suit" -> suitSysl, "app" -> appSysl,
     )
     val driver = new SyslDriver
     val result = driver.compile(allSources)

@@ -103,9 +103,7 @@ Server state.
     var ds_key_tail = 0
     var ds_key_count = 0
 
-    extern kb_has_key() -> int
-    extern kb_read_key() -> int
-    extern keyboard_set_notify(tid: int)
+    import oskit.drivers.kbd.{kb_has_key, kb_read_key, keyboard_set_notify}
 
     ds_handle_keyboard()
         // Drain all buffered key events from the keyboard driver
@@ -365,7 +363,7 @@ up the wallpaper, and enters the event loop.
         ds_color(10, 10, 18, 255)
         ds_exec(CMD_SET_WALLPAPER)
 
-        // Initial composite (empty desktop with wallpaper)
+        // Initial composite
         ds_exec(CMD_COMPOSITE)
 
         // Create IPC port

@@ -8,6 +8,7 @@ import oskit.services.*
 import oskit.ipc.*
 import oskit.drivers.display.*
 import oskit.drivers.kbd.*
+import suit.*
 import oskit.drivers.mouse.*
 
 FB_WIDTH  = 1440
@@ -108,25 +109,26 @@ t_7: [1]i8 = [55]
 t_8: [1]i8 = [56]
 t_9: [1]i8 = [57]
 
-// Draw system monitor content (direct DrawEngine)
-draw_monitor(surf: int)
-    de_target(surf)
-    de_color(18, 18, 28, 255)
-    ds_exec(0x01)  // CLEAR
-    fill(surf, 15, 10, 390, 110, 12, 12, 20, 255)
-    text(surf, 20, 25, 10, 0, &t_cpu_u[0], 9, 0, 200, 230)
+// SUIT state for the monitor window
+var name_buf: [32]i8
+var name_len = 0
+t_greeting: [8]i8 = [72, 101, 108, 108, 111, 44, 32, 0]  // "Hello, "
 
-    // Stats
-    text(surf, 20, 145, 13, 0, &t_cpu[0], 8, 0, 230, 255)
-    text(surf, 20, 167, 13, 0, &t_mem[0], 11, 0, 230, 255)
-    text(surf, 20, 189, 13, 0, &t_thr[0], 11, 0, 230, 255)
-    text(surf, 20, 211, 13, 0, &t_up[0], 13, 0, 230, 255)
+// Draw SUIT UI in the monitor window
+// Window position for coordinate translation
+val WIN1_X = 20
+val WIN1_Y = 30
 
-    // Progress bars
-    fill(surf, 200, 155, 150, 12, 20, 20, 35, 255)
-    fill(surf, 200, 155, 95, 12, 0, 200, 230, 255)
-    fill(surf, 200, 177, 150, 12, 20, 20, 35, 255)
-    fill(surf, 200, 177, 60, 12, 0, 200, 230, 255)
+draw_monitor_ui(surf: int)
+    ui_begin(surf, 420, 240, WIN1_X, WIN1_Y)
+    ui_label(&t_cpu_u[0])
+    ui_label(&t_cpu[0])
+    ui_label(&t_mem[0])
+    ui_input(&name_buf[0], 31, &name_len)
+    if ui_button(&t_mon[0]) != 0
+        // Button clicked — could do something
+        putc('B')
+    ui_end()
 
 // Draw editor content (direct DrawEngine)
 draw_editor(surf: int)
@@ -246,7 +248,7 @@ app_main()
     // Create three windows via IPC — ds_create_window returns surface ID for drawing
     val surf1 = ds_create_window(20, 30, 420, 240, 3, &t_mon[0], 14)
     putc('1')
-    draw_monitor(surf1)
+    draw_monitor_ui(surf1)
     putc('a')
 
     val surf2 = ds_create_window(20, 520, 500, 200, 3, &t_editor[0], 9)
@@ -263,43 +265,23 @@ app_main()
     ds_composite()
     putc('!')
 
-    // Key echo loop — type into the terminal window
-    var input_buf: [64]i8
-    var input_len = 0
-    val input_y = 220  // below existing terminal content
+    // SUIT event loop — redraw on key events and mouse clicks only
+    var prev_mb = 0
 
     while true
+        var dirty = 0
         val key = ds_get_key()
         if key != 0
-            val sc = (key >> 24) & 0xFF
-            val press = (key >> 16) & 1
-            val mods = (key >> 8) & 0xFF
-            if press != 0
-                val ch = hid_to_ascii(sc, mods)
-                if ch != 0
-                    if ch == 10
-                        // Enter — clear input
-                        input_len = 0
-                    elif input_len < 63
-                        input_buf[input_len] = byte(ch)
-                        input_len += 1
-                    // Clear input line and redraw
-                    fill(surf3, 15, input_y - 12, 500, 16, 8, 8, 14, 255)
-                    // Draw prompt
-                    text(surf3, 15, input_y, 12, 0, &t_user[0], 9, 0, 220, 255)
-                    text(surf3, 87, input_y, 12, 0, &t_sep[0], 4, 120, 120, 140)
-                    // Draw typed text
-                    if input_len > 0
-                        de_target(surf3)
-                        de_color(220, 220, 240, 255)
-                        de_pos(120, input_y)
-                        ds_write16(DE_FONT_SIZE, 12)
-                        ds_write8(DE_FONT_STYLE, 0)
-                        de_text(&input_buf[0], input_len)
-                        ds_exec(0x09)  // DRAW_TEXT
-                    // Cursor after text
-                    fill(surf3, 120 + input_len * 8, input_y - 12, 8, 14, 50, 255, 120, 255)
-                    ds_composite()
+            if _suit_focus >= 0
+                ui_process_key(key, &name_buf[0], 31, &name_len)
+            dirty = 1
+        val mb = mouse_buttons & 1
+        if mb != prev_mb
+            prev_mb = mb
+            dirty = 1
+        if dirty != 0
+            draw_monitor_ui(surf1)
+            ds_composite()
         else
             yield()
 

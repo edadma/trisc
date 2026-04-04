@@ -118,26 +118,25 @@ Hit testing — is point (mx, my) inside rect (x, y, w, h)?
 
 Frame management.
 
-    ui_begin(surf: int, w: int, h: int)
+    ui_begin(surf: int, w: int, h: int, win_x: int, win_y: int)
         _suit_surf = surf
         _suit_w = w
         _suit_h = h
         _suit_cursor_y = SUIT_PADDING
         _suit_widget_id = 0
-        // Read mouse state (direct access — same module)
+        // Read mouse state, translate from screen to window-content space
+        // Window content starts at (win_x, win_y + 32) due to title bar
         _suit_prev_btn = _suit_mouse_btn
-        _suit_mouse_x = mouse_x
-        _suit_mouse_y = mouse_y
+        _suit_mouse_x = mouse_x - win_x
+        _suit_mouse_y = mouse_y - win_y - 32
         _suit_mouse_btn = mouse_buttons & 1
         // Detect click (press then release)
         _suit_clicked = 0
         if _suit_prev_btn != 0
             if _suit_mouse_btn == 0
                 _suit_clicked = 1
-        // Clear background
-        ds_write8(DE_TARGET, surf)
-        _suit_color(SUIT_BG_R, SUIT_BG_G, SUIT_BG_B, 255)
-        ds_exec(0x01)
+        // Fill background (overdraw, not clear — avoids flash if compositor runs mid-draw)
+        _suit_fill(0, 0, w, h, SUIT_BG_R, SUIT_BG_G, SUIT_BG_B)
 
     ui_end()
         // Nothing to do yet — future: flush dirty state
@@ -216,7 +215,7 @@ Text input — displays content of a buffer, handles key input when focused.
                 if _suit_focus == id
                     _suit_focus = -1
 
-        val focused = 0
+        var focused = 0
         if _suit_focus == id
             focused = 1
 
