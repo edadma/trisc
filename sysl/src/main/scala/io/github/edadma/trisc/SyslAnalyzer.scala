@@ -734,32 +734,30 @@ class SyslAnalyzer:
       case MethodCallAST(obj, method, args) =>
         val tObj = analyzeExpr(obj)
         val tArgs = args.map(analyzeExpr)
-        // Determine the struct type and build self argument
-        val (structName, selfArg) = tObj.typ match
-          case st @ StructType(name, _) =>
-            // Need address of struct — build &obj
-            val addr = tObj match
-              case TVarRef(n, _) => TAddrOf(n, PtrType(st))
-              case TFieldAccess(innerObj, idx, _) => TAddrOfField(innerObj, idx, PtrType(st))
-              case _ => throw AnalysisError(s"cannot call method on this struct expression")
-            (name, addr)
-          case PtrType(StructType(name, _)) => (name, tObj) // already a pointer
-          case RefType(StructType(name, _)) => (name, tObj) // already a ref
+        // Determine the struct type (defer self-arg computation until we know it's a method)
+        val structType = tObj.typ match
+          case st: StructType          => st
+          case PtrType(st: StructType) => st
+          case RefType(st: StructType) => st
           case other => throw AnalysisError(s"cannot call method '$method' on $other")
-        // Look up the method
+        val structName = structType.name
         val funcName = s"${structName}_$method"
         if functions.contains(funcName) then
+          // It's a real method — build self argument (need address for value structs)
+          val selfArg = tObj.typ match
+            case st @ StructType(_, _) =>
+              tObj match
+                case TVarRef(n, _) => TAddrOf(n, PtrType(st))
+                case TFieldAccess(innerObj, idx, _) => TAddrOfField(innerObj, idx, PtrType(st))
+                case TIndex(arr, idx, _) => TAddrOfIndex(arr, idx, PtrType(st))
+                case _ => throw AnalysisError(s"cannot take address of expression for method call")
+            case _ => tObj // PtrType or RefType — already a pointer
           val funInfo = functions(funcName)
           val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs) // .tail skips self param
           TCall(funcName, selfArg :: checkedArgs, funInfo.returnType)
         else
           // Fall back to calling a function-typed field
-          val st = tObj.typ match
-            case s: StructType        => s
-            case PtrType(s: StructType) => s
-            case RefType(s: StructType) => s
-            case _ => throw AnalysisError(s"struct $structName has no method '$method'")
-          st.fields.zipWithIndex.find(_._1._1 == method) match
+          structType.fields.zipWithIndex.find(_._1._1 == method) match
             case Some(((_, FuncType(paramTypes, returnType)), idx)) =>
               val fieldAccess = TFieldAccess(tObj, idx, FuncType(paramTypes, returnType))
               val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
