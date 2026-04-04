@@ -21,22 +21,24 @@ class OSKitShellTests extends OSKitTestHelpers {
   private lazy val shellLinked: TOF =
     val bootTof    = assemble(bootAsm, relocatable = true)
     val allSources = Map(
-      "oskit/kernel"     -> kernelSysl,
-      "oskit/services"   -> servicesSysl,
-      "oskit/timer"      -> timerSysl,
-      "oskit/semaphore"  -> semaphoreSysl,
-      "oskit/mutex"      -> mutexSysl,
-      "oskit/ipc"        -> ipcSysl,
-      "oskit/disk"       -> diskSysl,
-      "oskit/kbd"        -> kbdSysl,
-      "oskit/tty"        -> ttySysl,
-      "oskit/fs/tfs"     -> tfsSysl,
-      "oskit/tfs_srv"    -> tfsSrvSysl,
-      "oskit/lib/string" -> stringSysl,
-      "oskit/sh"         -> shSysl,
-      "oskit/init"       -> initSysl,
+      "oskit/kernel/kernel"      -> kernelSysl,
+      "oskit/services/services"  -> servicesSysl,
+      "oskit/kernel/timer"       -> timerSysl,
+      "oskit/sync/semaphore"     -> semaphoreSysl,
+      "oskit/sync/mutex"         -> mutexSysl,
+      "oskit/ipc/ipc"            -> ipcSysl,
+      "oskit/drivers/disk/disk"  -> diskSysl,
+      "oskit/drivers/kbd/keyboard" -> kbdSysl,
+      "oskit/drivers/tty/tty"    -> ttySysl,
+      "oskit/fs/tfs"             -> tfsSysl,
+      "oskit/servers/tfs"        -> tfsSrvSysl,
+      "oskit/lib/string"         -> stringSysl,
+      "oskit/apps/sh"            -> shSysl,
+      "oskit/apps/init"          -> initSysl,
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.ipc.*
+import oskit.apps.*
           |var _n: [2]i8
           |
           |kernel_main() -> int

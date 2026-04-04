@@ -7,7 +7,8 @@ class OSKitNotifyTests extends OSKitTestHelpers {
   "TOS: notify_send wakes waiting thread" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(waiter, 0x10000, 0xF000, "w")
@@ -35,7 +36,8 @@ class OSKitNotifyTests extends OSKitTestHelpers {
   "TOS: notification already pending skips wait" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x10000, 0xF000, "t")
@@ -64,7 +66,8 @@ class OSKitNotifyTests extends OSKitTestHelpers {
   "TOS: event_set wakes waiting thread" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(waiter, 0x10000, 0xF000, "w")
@@ -89,7 +92,8 @@ class OSKitNotifyTests extends OSKitTestHelpers {
   "TOS: event_wait all bits" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(waiter, 0x10000, 0xF000, "w")
@@ -117,9 +121,11 @@ class OSKitNotifyTests extends OSKitTestHelpers {
 
   "TOS: recursive mutex allows same-thread relock" in {
     val (_, output) = runTOS(Map(
-      "oskit/rmutex" -> rmutexSysl,
+      "oskit/sync/rmutex" -> rmutexSysl,
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var rm: RMutex
           |
@@ -148,9 +154,11 @@ class OSKitNotifyTests extends OSKitTestHelpers {
 
   "TOS: recursive mutex blocks other thread" in {
     val (_, output) = runTOS(Map(
-      "oskit/rmutex" -> rmutexSysl,
+      "oskit/sync/rmutex" -> rmutexSysl,
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var rm: RMutex
           |
@@ -189,7 +197,9 @@ class OSKitNotifyTests extends OSKitTestHelpers {
   "TOS: qset_wait returns ready slot" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var qs: QueueSet
           |
@@ -222,7 +232,9 @@ class OSKitNotifyTests extends OSKitTestHelpers {
   "TOS: qset_wait returns first ready of multiple" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var qs: QueueSet
           |

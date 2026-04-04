@@ -10,11 +10,14 @@ Boot sequence:
 3. TTY server — terminal, needs keyboard hardware
 4. Shell — interactive, needs TTY and TFS
 
-    module oskit
+    module oskit.apps
 
-    extern disk_server()
-    extern tfs_server()
-    extern tty_server()
+    import oskit.kernel.{create_thread}
+    import oskit.services.{sleep}
+    import oskit.drivers.disk.{disk_server}
+    import oskit.servers.{tfs_server}
+    import oskit.drivers.tty.{tty_server}
+
     extern shell()
 
 Stack layout — placed in upper RAM to avoid code/data segment

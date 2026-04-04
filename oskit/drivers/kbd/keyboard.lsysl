@@ -11,12 +11,12 @@ Device registers:
 - 0x100004 + 3 = MODIFIERS (shift/ctrl/alt/meta bitmask)
 
 
-    module oskit
+    module oskit.drivers.kbd
+
+    import oskit.kernel.{register_irq, notify_send}
 
     val KB_BASE = 0x100004
     val KB_IRQ = 1
-
-    extern register_irq(irq: int, handler: i64)
 
 Ring buffer for keyboard events. Each event is stored as a packed
 32-bit value: scancode(8) | flags(8) | modifiers(8) | reserved(8).

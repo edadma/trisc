@@ -11,12 +11,12 @@ Device registers (at 0x100090):
 - +2 = X_HI, +3 = X_LO (16-bit x position)
 - +4 = Y_HI, +5 = Y_LO (16-bit y position)
 
-    module oskit
+    module oskit.drivers.mouse
+
+    import oskit.kernel.{register_irq, notify_send}
 
     val MOUSE_BASE = 0x100090
     val MOUSE_IRQ = 2
-
-    extern register_irq(irq: int, handler: i64)
 
 Current mouse state, updated by the ISR. The display server
 reads these directly after being notified.

@@ -17,7 +17,9 @@ Commands: DISK_CMD_READ=1, DISK_CMD_WRITE=2, DISK_CMD_CAPACITY=3
 For DISK_CMD_CAPACITY, the reply is [status(1), capacity(4, big-endian)]
 where capacity is the number of 512-byte sectors.
 
-    module oskit
+    module oskit.drivers.disk
+
+    import oskit.ipc.*
 
     val DISK_CMD_READ     = 1
     val DISK_CMD_WRITE    = 2

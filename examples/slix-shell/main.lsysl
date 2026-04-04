@@ -3,9 +3,9 @@ SLIX Shell Demo — Boot to Interactive Shell
 Boots the SLIX microkernel with disk, filesystem, TTY, and
 shell servers. Presents an interactive command prompt.
 
-    module oskit
-
-    extern init()
+    import oskit.kernel.*
+    import oskit.ipc.{ipc_init}
+    import oskit.apps.{init}
 
     var _n: [2]i8
 

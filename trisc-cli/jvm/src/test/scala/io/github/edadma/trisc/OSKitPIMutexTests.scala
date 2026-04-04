@@ -5,7 +5,9 @@ class OSKitPIMutexTests extends OSKitTestHelpers {
   "PIMutex: basic lock/unlock" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: PIMutex
           |
@@ -30,7 +32,9 @@ class OSKitPIMutexTests extends OSKitTestHelpers {
   "PIMutex: mutual exclusion between two tasks" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: PIMutex
           |
@@ -72,7 +76,9 @@ class OSKitPIMutexTests extends OSKitTestHelpers {
   "PIMutex: contended lock blocks and wakes" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: PIMutex
           |
@@ -113,7 +119,9 @@ class OSKitPIMutexTests extends OSKitTestHelpers {
   "PIMutex: contended lock with different priorities" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: PIMutex
           |
@@ -166,7 +174,9 @@ class OSKitPIMutexTests extends OSKitTestHelpers {
     // Key: low prints 'l' (end of critical section) before med prints 'M'.
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: PIMutex
           |
@@ -226,7 +236,9 @@ class OSKitPIMutexTests extends OSKitTestHelpers {
     // After unlock: high (pri 0) runs, then med (pri 1), then low (pri 2).
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: PIMutex
           |
@@ -278,7 +290,9 @@ class OSKitPIMutexTests extends OSKitTestHelpers {
     // bg (priority 1) wakes but can't preempt boosted low.
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx_a: PIMutex
           |var mtx_b: PIMutex

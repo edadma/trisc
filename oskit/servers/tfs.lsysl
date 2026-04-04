@@ -26,9 +26,11 @@ Commands:
 - TFS_READDIR (9): [cmd, dir_ino(4), index(4)] → [status(1), ino(4), name(14)]
 - TFS_SYNC   (10): [cmd] → [status(1)]
 
-    module oskit
+    module oskit.servers
 
     import oskit.fs.{tfs_init, tfs_lookup, tfs_read, tfs_write, tfs_create, tfs_unlink, tfs_stat, tfs_readdir, tfs_rmdir, sync_superblock}
+    import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv, ipc_reply, ipc_send}
+    import oskit.drivers.disk.{disk_read, disk_write}
 
     val TFS_CMD_OPEN    = 1
     val TFS_CMD_READ    = 2

@@ -15,27 +15,13 @@ Built-in commands:
 - stat path         — show file info
 - help              — list commands
 
-    module oskit
+    module oskit.apps
 
     import oskit.lib.{strtok, streq, strcpy, strcat}
     import oskit.fs.{strlen, ROOT_INODE}
-
-Extern declarations for TTY and filesystem server functions.
-These are in module oskit but may be compiled in any order.
-
-    extern tty_putc(ch: int)
-    extern tty_puts(s: *i8, len: int)
-    extern tty_getc() -> int
-
-    extern fs_open(path: *i8) -> int
-    extern fs_read(ino: int, buf: *i8, offset: int, len: int) -> int
-    extern fs_write(ino: int, data: *i8, offset: int, len: int) -> int
-    extern fs_create(parent_ino: int, name: *i8, ftype: int, perm: int) -> int
-    extern fs_unlink(parent_ino: int, name: *i8) -> int
-    extern fs_stat(ino: int, out: *int) -> int
-    extern fs_mkdir(parent_ino: int, name: *i8, perm: int) -> int
-    extern fs_rmdir(parent_ino: int, name: *i8) -> int
-    extern fs_readdir(dir_ino: int, index: int, out_ino: *int, out_name: *i8) -> int
+    import oskit.services.{sleep}
+    import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
+    import oskit.servers.{fs_open, fs_read, fs_write, fs_create, fs_unlink, fs_stat, fs_mkdir, fs_rmdir, fs_readdir}
 
 Shell state: current working directory as inode and path string.
 

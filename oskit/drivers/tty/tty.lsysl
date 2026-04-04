@@ -6,7 +6,12 @@ characters. The keyboard ISR notifies the server when keys
 arrive; the server translates scancodes to ASCII and delivers
 to the active console's input buffer.
 
-    module oskit
+    module oskit.drivers.tty
+
+    import oskit.kernel.{notify_read}
+    import oskit.services.{thread_id, putc}
+    import oskit.ipc.*
+    import oskit.drivers.kbd.*
 
     val TTY_CMD_WRITE   = 1
     val TTY_CMD_READ    = 2

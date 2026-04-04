@@ -12,9 +12,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   def runIPC(userSources: Map[String, String], maxCycles: Int = 2000000): (CPU, String) =
     val bootTof = assemble(bootAsm, relocatable = true)
     val allSources = Map(
-      "oskit/kernel" -> kernelSysl, "oskit/services" -> servicesSysl, "oskit/timer" -> timerSysl,
-      "oskit/semaphore" -> semaphoreSysl, "oskit/mutex" -> mutexSysl,
-      "oskit/ipc" -> ipcSysl,
+      "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
+      "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
+      "oskit/ipc/ipc" -> ipcSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -45,7 +45,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: port_create returns port ID" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -68,7 +70,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: basic send and recv" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -115,7 +119,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: multi-client FIFO ordering" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -172,7 +178,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: send to invalid port returns error" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -198,7 +206,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: port_close wakes blocked senders" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -234,7 +244,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: recv on unowned port returns error" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -264,7 +276,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: client blocks until server recvs" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -310,7 +324,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: send to closed port returns error" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -343,7 +359,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: reply to non-blocked thread returns error" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -371,7 +389,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: port_create at capacity returns -1" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -400,7 +420,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: message truncation when buf too small" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -446,7 +468,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: reply truncation when reply_buf too small" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -489,7 +513,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: full lifecycle — multi-client, handle all, close" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -548,7 +574,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: port register and lookup by name" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |var tty_name: [5]i8
           |
@@ -600,7 +628,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: lookup nonexistent name returns -1" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |var bad_name: [4]i8
           |
@@ -629,7 +659,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: server loop handles multiple requests" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -700,7 +732,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: register on unowned port returns -1" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |var name: [4]i8
           |
@@ -736,7 +770,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: lookup after port closed returns -1" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |var name: [4]i8
           |
@@ -773,7 +809,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: multiple named ports lookup correctly" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |var n_tty: [5]i8
           |var n_dsk: [5]i8
@@ -817,7 +855,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: send_timeout returns -2 when server never recvs" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -850,7 +890,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: send_timeout succeeds when server replies in time" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -889,7 +931,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: send_timeout with server delayed but replies before deadline" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -929,7 +973,9 @@ class OSKitIPCTests extends OSKitTestHelpers {
   "IPC: re-register changes port name" in {
     val (_, output) = runIPC(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
           |
           |var name1: [4]i8
           |var name2: [4]i8
