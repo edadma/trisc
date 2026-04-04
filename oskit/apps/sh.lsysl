@@ -110,14 +110,12 @@ buffer and sends it with one tty_puts call.
         sh_out[p] = ' '
         p += 1
         // Copy line content (flush if approaching IPC limit)
-        var i = 0
-        while i < len
+        for var i = 0; i < len; i++
             if p >= 120
                 tty_puts(sh_out, p)
                 p = 0
             sh_out[p] = buf[i]
             p += 1
-            i += 1
         // ESC[K — clear to end of line
         p = sh_append_csi(sh_out, p, 0, i8('K'))
         // ESC[nG — cursor to column (1-based)
@@ -261,12 +259,10 @@ from cwd by building an absolute path.
 Built-in commands.
 
     cmd_echo(argc: int, argv: *i64)
-        var i = 1
-        while i < argc
+        for var i = 1; i < argc; i++
             if i > 1
                 sh_putc(' ')
             sh_puts(*i8(argv[i]))
-            i += 1
         sh_newline()
 
     sh_not_found(name: *i8)
@@ -312,10 +308,8 @@ Built-in commands.
         var offset = 0
         var nr = fs_read(ino, buf, offset, 128)
         while nr > 0
-            var i = 0
-            while i < nr
+            for var i = 0; i < nr; i++
                 sh_putc(int(buf[i]))
-                i += 1
             offset += nr
             nr = fs_read(ino, buf, offset, 128)
         sh_newline()
@@ -458,12 +452,10 @@ so they can be stored as function pointers.
         if argc == 0
             return
         val cmd: *i8 = *i8(argv[0])
-        var i = 0
-        while i < NUM_CMDS
+        for var i = 0; i < NUM_CMDS; i++
             if streq(cmd, *i8(cmds[i].name)) == 1
                 cmds[i].handler(argc, argv)
                 return
-            i += 1
         sh_not_found(cmd)
 
 The shell main loop. Prints a prompt, reads a line,

@@ -299,6 +299,48 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
     cpu.r(1).read shouldBe 256
   }
 
+  "for loop with counter" in {
+    val (cpu, _) = runWithBoot(
+      """main() -> int
+        |    var sum = 0
+        |    for var i = 0; i < 5; i++
+        |        sum += i
+        |    sum
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 10
+  }
+
+  "continue in while loop" in {
+    val (cpu, _) = runWithBoot(
+      """main() -> int
+        |    var sum = 0
+        |    var i = 0
+        |    while i < 10
+        |        i += 1
+        |        if i % 2 == 0
+        |            continue
+        |        sum += i
+        |    sum
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 25  // 1+3+5+7+9
+  }
+
+  "break in while loop" in {
+    val (cpu, _) = runWithBoot(
+      """main() -> int
+        |    var sum = 0
+        |    var i = 0
+        |    while i < 100
+        |        if i == 5
+        |            break
+        |        sum += i
+        |        i += 1
+        |    sum
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 10  // 0+1+2+3+4
+  }
+
+
   "array decay: pass array where *i8 expected" in {
     val (_, output) = runWithBoot(
       """extern putchar(ch: int)
