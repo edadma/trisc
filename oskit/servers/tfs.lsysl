@@ -28,7 +28,7 @@ Commands:
 
     module oskit
 
-    import oskit.fs.*
+    import oskit.fs.{tfs_init, tfs_lookup, tfs_read, tfs_write, tfs_create, tfs_unlink, tfs_stat, tfs_readdir, tfs_rmdir, sync_superblock}
 
     val TFS_CMD_OPEN    = 1
     val TFS_CMD_READ    = 2
@@ -43,6 +43,15 @@ Commands:
 
     var tfs_port = -1
     var tfs_srv_name: [3]i8
+
+Block I/O bridge: provides the rd_read/rd_write that the TFS
+library externs expect, forwarding to the disk server via IPC.
+
+    rd_read(lba: int, addr: *i8)
+        disk_read(lba, addr)
+
+    rd_write(lba: int, addr: *i8)
+        disk_write(lba, addr)
 
 Big-endian message helpers (local to this server).
 
