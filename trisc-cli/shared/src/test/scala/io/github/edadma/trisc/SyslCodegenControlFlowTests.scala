@@ -128,7 +128,7 @@ class SyslCodegenControlFlowTests extends SyslCodegenHelpers {
   }
 
   "byte cast preserves low bits" in {
-    compileAndRun("main() -> int = byte(0xff)\n") shouldBe -1  // byte is signed i8: 0xFF → -1
+    compileAndRun("main() -> int = byte(0xff)\n") shouldBe 255  // byte is unsigned u8
   }
 
   "char cast truncates to 32 bits" in {

@@ -187,9 +187,9 @@ class SyslAnalyzer:
       case "char" => U32
       case "i64" => I64
       case "double" | "f64" => DoubleType
-      case "byte" | "i8"  => I8
+      case "byte" | "u8"  => U8
+      case "i8"  => I8
       case "i16"  => I16
-      case "u8"   => U8
       case "u16"  => U16
       case "u32"  => U32
       case "u64"  => U64
@@ -647,6 +647,8 @@ class SyslAnalyzer:
               case (DoubleType, _) | (_, DoubleType) => DoubleType
               case (IntType(a), IntType(b)) => IntType(a max b)
               case (UIntType(a), UIntType(b)) => UIntType(a max b)
+              case (UIntType(a), IntType(b)) if a < b => IntType(b)   // unsigned fits in signed
+              case (IntType(a), UIntType(b)) if b < a => IntType(a)   // unsigned fits in signed
               case (l, r) if l.isIntegral && r.isIntegral =>
                 throw AnalysisError(s"cannot mix signed and unsigned in $op: ${tLeft.typ} $op ${tRight.typ}")
               case _ => tLeft.typ
@@ -656,15 +658,19 @@ class SyslAnalyzer:
             (tLeft.typ, tRight.typ) match
               case (IntType(a), IntType(b)) => IntType(a max b)
               case (UIntType(a), UIntType(b)) => UIntType(a max b)
+              case (UIntType(a), IntType(b)) if a < b => IntType(b)   // unsigned fits in signed
+              case (IntType(a), UIntType(b)) if b < a => IntType(a)   // unsigned fits in signed
               case _ =>
                 throw AnalysisError(s"cannot mix signed and unsigned in $op: ${tLeft.typ} $op ${tRight.typ}")
           case "==" | "!=" | "<" | ">" | "<=" | ">=" =>
-            // Disallow mixed signed/unsigned comparisons
+            // Disallow mixed signed/unsigned comparisons unless unsigned fits in signed
             if tLeft.typ.isIntegral && tRight.typ.isIntegral then
               (tLeft.typ, tRight.typ) match
-                case (_: IntType, _: UIntType) | (_: UIntType, _: IntType) =>
+                case (UIntType(a), IntType(b)) if a >= b =>
                   throw AnalysisError(s"cannot compare signed and unsigned: ${tLeft.typ} $op ${tRight.typ}")
-                case _ => // ok
+                case (IntType(a), UIntType(b)) if b >= a =>
+                  throw AnalysisError(s"cannot compare signed and unsigned: ${tLeft.typ} $op ${tRight.typ}")
+                case _ => // ok: same signedness, or unsigned fits in signed
             BoolType
           case "&&" | "||" =>
             if tLeft.typ != BoolType then throw AnalysisError(s"$op requires bool operands, got ${tLeft.typ}")
