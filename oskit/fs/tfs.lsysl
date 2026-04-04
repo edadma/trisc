@@ -1,16 +1,13 @@
-TFS — Tiny Filesystem Driver
+TFS — Tiny Filesystem Library
 
-Operates on a TFS-formatted ramdisk via memory-mapped registers.
-Provides inode-level file operations: lookup, read, write, create,
-unlink, mkdir, and stat.
+Portable filesystem implementation. Provides inode-level file
+operations: lookup, read, write, create, unlink, mkdir, and stat.
 
-Ramdisk device registers at 0x1000A0:
-- +0  STATUS   (R)   — bit 0: ready, bit 1: error
-- +1  COMMAND  (W)   — 0x01 = read, 0x02 = write
-- +2  LBA      (R/W) — 4 bytes, big-endian sector number
-- +6  ADDR     (R/W) — 4 bytes, big-endian RAM address
-- +10 COUNT    (R/W) — 2 bytes, big-endian sector count
-- +12 CAPACITY (R)   — 4 bytes, total sectors
+Block I/O is abstracted via extern functions:
+- rd_read(lba, buf) — read one 512-byte block from storage
+- rd_write(lba, buf) — write one 512-byte block to storage
+The environment must provide these (e.g., ramdisk driver, IPC to
+a block device server, etc.).
 
 On-disk layout (block 0 = boot, block 1 = superblock):
 - Superblock: magic, version, block_size, counts, layout offsets
@@ -20,16 +17,10 @@ On-disk layout (block 0 = boot, block 1 = superblock):
 - Dir entries: 16 bytes each (inode number + 14-char name)
 
 
-    // === Ramdisk device registers (offsets from RD_BASE) ===
+    // === Block I/O — provided by the environment ===
 
-    val RD_BASE = 0x100140
-    val RD_STATUS_OFF  = 0
-    val RD_COMMAND_OFF = 1
-    val RD_LBA_OFF     = 2
-    val RD_ADDR_OFF    = 6
-    val RD_COUNT_OFF   = 10
-    val CMD_READ  = 1
-    val CMD_WRITE = 2
+    extern rd_read(lba: int, addr: *i8)
+    extern rd_write(lba: int, addr: *i8)
 
     // === TFS constants ===
 
@@ -62,40 +53,6 @@ On-disk layout (block 0 = boot, block 1 = superblock):
 
     var blkbuf: [512]i8       // general purpose (file data, superblock, dir blocks, inodes)
     var blkbuf2: [512]i8      // secondary (bitmaps, indirect blocks)
-
-    // === Ramdisk I/O ===
-
-rd_read(lba, addr) — Read one block from ramdisk into RAM at addr.
-
-    rd_read(lba: int, addr: *i8)
-        val a: i64 = i64(addr)
-        val p: *i8 = *i8(RD_BASE)
-        p[RD_LBA_OFF + 0] = (lba >> 24) & 0xFF
-        p[RD_LBA_OFF + 1] = (lba >> 16) & 0xFF
-        p[RD_LBA_OFF + 2] = (lba >> 8) & 0xFF
-        p[RD_LBA_OFF + 3] = lba & 0xFF
-        p[RD_ADDR_OFF + 0] = (a >> 24) & 0xFF
-        p[RD_ADDR_OFF + 1] = (a >> 16) & 0xFF
-        p[RD_ADDR_OFF + 2] = (a >> 8) & 0xFF
-        p[RD_ADDR_OFF + 3] = a & 0xFF
-        p[RD_COUNT_OFF + 0] = 0
-        p[RD_COUNT_OFF + 1] = 1
-        p[RD_COMMAND_OFF] = CMD_READ
-
-    rd_write(lba: int, addr: *i8)
-        val a: i64 = i64(addr)
-        val p: *i8 = *i8(RD_BASE)
-        p[RD_LBA_OFF + 0] = (lba >> 24) & 0xFF
-        p[RD_LBA_OFF + 1] = (lba >> 16) & 0xFF
-        p[RD_LBA_OFF + 2] = (lba >> 8) & 0xFF
-        p[RD_LBA_OFF + 3] = lba & 0xFF
-        p[RD_ADDR_OFF + 0] = (a >> 24) & 0xFF
-        p[RD_ADDR_OFF + 1] = (a >> 16) & 0xFF
-        p[RD_ADDR_OFF + 2] = (a >> 8) & 0xFF
-        p[RD_ADDR_OFF + 3] = a & 0xFF
-        p[RD_COUNT_OFF + 0] = 0
-        p[RD_COUNT_OFF + 1] = 1
-        p[RD_COMMAND_OFF] = CMD_WRITE
 
     // === Big-endian read helpers ===
 

@@ -5,10 +5,52 @@ import org.scalatest.matchers.should.Matchers
 
 trait TFSTestHelpers extends AnyFreeSpec with Matchers {
 
-  private lazy val tfsSource: String =
-    val raw = scala.io.Source.fromFile("oskit/drivers/disk/tfs.lsysl").mkString
+  private def readLsysl(path: String): String =
+    val raw = scala.io.Source.fromFile(path).mkString
     val doc = new LiterateParser().parse(raw)
     LiterateRenderer.tangle(doc)
+
+  private lazy val tfsSource: String = readLsysl("oskit/fs/tfs.lsysl")
+
+  // Inline ramdisk block I/O for tests — provides rd_read/rd_write
+  // that the TFS library externs. Talks directly to the emulated ramdisk.
+  private val ramdiskSource: String =
+    s"""val RD_BASE = ${Runtime.ramdiskAddress}
+       |val RD_COMMAND_OFF = 1
+       |val RD_LBA_OFF = 2
+       |val RD_ADDR_OFF = 6
+       |val RD_COUNT_OFF = 10
+       |
+       |rd_read(lba: int, addr: *i8)
+       |    val a: i64 = i64(addr)
+       |    var p: *i8 = *i8(RD_BASE)
+       |    p[RD_LBA_OFF + 0] = (lba >> 24) & 0xFF
+       |    p[RD_LBA_OFF + 1] = (lba >> 16) & 0xFF
+       |    p[RD_LBA_OFF + 2] = (lba >> 8) & 0xFF
+       |    p[RD_LBA_OFF + 3] = lba & 0xFF
+       |    p[RD_ADDR_OFF + 0] = (a >> 24) & 0xFF
+       |    p[RD_ADDR_OFF + 1] = (a >> 16) & 0xFF
+       |    p[RD_ADDR_OFF + 2] = (a >> 8) & 0xFF
+       |    p[RD_ADDR_OFF + 3] = a & 0xFF
+       |    p[RD_COUNT_OFF + 0] = 0
+       |    p[RD_COUNT_OFF + 1] = 1
+       |    p[RD_COMMAND_OFF] = 1
+       |
+       |rd_write(lba: int, addr: *i8)
+       |    val a: i64 = i64(addr)
+       |    var p: *i8 = *i8(RD_BASE)
+       |    p[RD_LBA_OFF + 0] = (lba >> 24) & 0xFF
+       |    p[RD_LBA_OFF + 1] = (lba >> 16) & 0xFF
+       |    p[RD_LBA_OFF + 2] = (lba >> 8) & 0xFF
+       |    p[RD_LBA_OFF + 3] = lba & 0xFF
+       |    p[RD_ADDR_OFF + 0] = (a >> 24) & 0xFF
+       |    p[RD_ADDR_OFF + 1] = (a >> 16) & 0xFF
+       |    p[RD_ADDR_OFF + 2] = (a >> 8) & 0xFF
+       |    p[RD_ADDR_OFF + 3] = a & 0xFF
+       |    p[RD_COUNT_OFF + 0] = 0
+       |    p[RD_COUNT_OFF + 1] = 1
+       |    p[RD_COMMAND_OFF] = 2
+       |""".stripMargin
 
   private val tfsBoot: String =
     s"""STDOUT = 0x100000
@@ -83,7 +125,7 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
       maxCycles: Int,
   ): (CPU, String) =
     val bootTof = assemble(tfsBoot, relocatable = true)
-    val allSources = sources + ("tfs" -> tfsSource)
+    val allSources = sources + ("tfs" -> tfsSource) + ("ramdisk" -> ramdiskSource)
     val driver = new SyslDriver
     val result = driver.compile(allSources)
     val codegen = new SyslTriscCodegen
