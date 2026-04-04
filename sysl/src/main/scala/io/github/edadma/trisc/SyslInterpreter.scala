@@ -612,6 +612,30 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           newCells(sliceVal.length).value = newElem
           SliceVal(newCells, 0, sliceVal.length + 1, newCap)
 
+      case TStringFromPtr(ptrExpr, lenExpr, _) =>
+        val ptr = evalAny(ptrExpr, env)
+        val len = toLong(evalAny(lenExpr, env)).toInt
+        val bytes = new Array[Byte](len)
+        ptr match
+          case PtrVal(p) =>
+            for i <- 0 until len do
+              bytes(i) = toLong(p.add(i).deref.value).toByte
+          case ArrVal(cells, off) =>
+            for i <- 0 until len do
+              bytes(i) = toLong(cells(off + i).value).toByte
+          case _ => throw RuntimeError(s"string(): expected pointer, got $ptr")
+        RefStringVal(bytes, len, new java.util.concurrent.atomic.AtomicInteger(IMMORTAL_RC))
+
+      case TStringFromSlice(sliceExpr, _) =>
+        val (cells, off, slen) = evalAny(sliceExpr, env) match
+          case SliceVal(c, o, l, _) => (c, o, l)
+          case RefSliceVal(c, l, _) => (c, 0, l)
+          case other => throw RuntimeError(s"string() requires a slice, got $other")
+        val bytes = new Array[Byte](slen)
+        for i <- 0 until slen do
+          bytes(i) = toLong(cells(off + i).value).toByte
+        RefStringVal(bytes, slen, new java.util.concurrent.atomic.AtomicInteger(IMMORTAL_RC))
+
       case TIfExpr(cond, thenBody, elseBody, _) =>
         if toLong(evalAny(cond, env)) != 0 then
           evalBlock(thenBody, env)

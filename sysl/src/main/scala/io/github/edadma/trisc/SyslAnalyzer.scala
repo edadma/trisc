@@ -638,7 +638,12 @@ class SyslAnalyzer:
           case "+" if tLeft.typ == StringType && tRight.typ == StringType => StringType // string concatenation
           case "+" | "-" if tLeft.typ == StringType && tRight.typ.isNumeric =>
             throw AnalysisError("pointer arithmetic not allowed on string")
-          case "+" | "-" if tLeft.typ.isPointerLike && tRight.typ.isNumeric => tLeft.typ
+          case "+" | "-" if tLeft.typ.isPointerLike && tRight.typ.isNumeric =>
+            // Pointer arithmetic always yields a pointer (array decays)
+            tLeft.typ match
+              case PtrType(_) => tLeft.typ
+              case ArrayType(elem, _) => PtrType(elem)
+              case _ => tLeft.typ
           case "+" | "-" | "*" | "/" =>
             if !tLeft.typ.isNumeric || !tRight.typ.isNumeric then
               throw AnalysisError(s"operator $op requires numeric types, got ${tLeft.typ} $op ${tRight.typ}")
@@ -698,6 +703,26 @@ class SyslAnalyzer:
           case (StringType, PtrType(I8 | U8)) => // string to *i8/*u8 decay
           case (from, to) => throw AnalysisError(s"cannot cast $from to $to")
         TCast(tInner, target)
+
+      case CallAST("string", args) =>
+        args.size match
+          case 2 =>
+            // string(ptr, len) — construct string from *byte + length
+            val tPtr = analyzeExpr(args(0))
+            val tLen = analyzeExpr(args(1))
+            if !tPtr.typ.isInstanceOf[PtrType] then
+              throw AnalysisError(s"string() first argument must be a pointer, got ${tPtr.typ}")
+            if !tLen.typ.isIntegral then
+              throw AnalysisError(s"string() second argument must be an integer, got ${tLen.typ}")
+            TStringFromPtr(tPtr, tLen, StringType)
+          case 1 =>
+            // string(slice) — construct string from []byte slice
+            val tSlice = analyzeExpr(args(0))
+            tSlice.typ match
+              case SliceType(U8 | I8) => TStringFromSlice(tSlice, StringType)
+              case RefType(SliceType(U8 | I8)) => TStringFromSlice(tSlice, StringType)
+              case other => throw AnalysisError(s"string() from single argument requires []byte or &[]byte, got $other")
+          case n => throw AnalysisError(s"string() takes 1 or 2 arguments, got $n")
 
       case CallAST("len", args) =>
         if args.size != 1 then throw AnalysisError("len() takes exactly 1 argument")
