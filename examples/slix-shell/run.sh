@@ -1,9 +1,10 @@
 #!/bin/bash
-# Boot SLIX and present an interactive shell.
-# Uses text terminal mode — keyboard input from stdin.
-# Ctrl-C to exit.
+# Build and run the SLIX shell demo (microkernel + shell in GUI emulator)
+# Usage: bash examples/slix-shell/run.sh
 set -e
-cd "$(git rev-parse --show-toplevel)"
 
-echo "=== Booting SLIX shell ==="
-sbt 'set ThisBuild / run / fork := true' 'triscCliJVM/testOnly *RunSLIXShell*'
+echo "=== Building SLIX shell TOF ==="
+sbt -error "triscCliJVM/testOnly *BuildSLIXShell*"
+
+echo "=== Running GUI ==="
+sbt -error "triscCliJVM/run run --gui /tmp/slix-shell.tof"
