@@ -13,9 +13,11 @@ class OSKitTTYTests extends OSKitTestHelpers {
   private lazy val kbdSysl: String = readLsysl("oskit/drivers/kbd/keyboard.lsysl")
   private lazy val ttySysl: String = readLsysl("oskit/drivers/tty/tty.lsysl")
 
-  // keyEvents: (vkCode, press, modifierBits) — vkCode is java.awt.event.KeyEvent.VK_*
-  def runTTY(userSources: Map[String, String], maxCycles: Int = 2000000,
-             keyEvents: Seq[(Int, Boolean, Int)] = Seq.empty): (CPU, String) =
+  // keyEvents: (vkCode, press, modifierBits) — pre-enqueued before CPU starts
+  // scheduledKeys: (cycle, vkCode, press, modifierBits) — injected at specific cycle count
+  def runTTY(userSources: Map[String, String], maxCycles: Int = 8000000,
+             keyEvents: Seq[(Int, Boolean, Int)] = Seq.empty,
+             scheduledKeys: Seq[(Int, Int, Boolean, Int)] = Seq.empty): (CPU, String) =
     val bootTof = assemble(bootAsm, relocatable = true)
     val allSources = Map(
       "oskit/kernel" -> kernelSysl, "oskit/services" -> servicesSysl, "oskit/timer" -> timerSysl,
@@ -53,9 +55,27 @@ class OSKitTTYTests extends OSKitTestHelpers {
         altDown = (mods & 4) != 0,
         metaDown = (mods & 8) != 0)
 
-    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles }
+    // Build tick callbacks: timer, intc, plus scheduled key injector
+    // Uses tick count (not cpu.cycles) since cycles don't advance during WFI
+    val pending = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
+    var tickCount = 0L
+    var injectedCount = 0
+    val keyInjector: CPU => Unit = _ => {
+      tickCount += 1
+      while pending.nonEmpty && tickCount >= pending.head._1 do
+        val (_, vk, press, mods) = pending.dequeue()
+        kbd.enqueue(vk, press,
+          shiftDown = (mods & 1) != 0,
+          ctrlDown = (mods & 2) != 0,
+          altDown = (mods & 4) != 0,
+          metaDown = (mods & 8) != 0)
+        injectedCount += 1
+    }
+    val ticks: Seq[CPU => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
+    val cpu = new CPU(mem, ticks) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
+    if false then println(s"  [debug] ticks=$tickCount injected=$injectedCount cycles=${cpu.cycles}")
     (cpu, output.toString)
 
   "TTY: write single character via IPC" in {
@@ -124,12 +144,12 @@ class OSKitTTYTests extends OSKitTestHelpers {
           |    first_thread_ssp()
           |
           |clientA()
-          |    sleep(10)
+          |    sleep(50)
           |    tty_putc(65)
           |    tty_putc(66)
           |
           |clientB()
-          |    sleep(15)
+          |    sleep(60)
           |    tty_putc(67)
           |    tty_putc(68)
           |""".stripMargin
@@ -197,7 +217,7 @@ class OSKitTTYTests extends OSKitTestHelpers {
       )
     )
 
-    info(s"output: '$output'")
+    //info(s"output: '$output'")
     output should include("h")
   }
 
@@ -258,5 +278,204 @@ class OSKitTTYTests extends OSKitTestHelpers {
     )
 
     output should include("abc")
+  }
+
+  "TTY: ipc_recv_notify wakes on keyboard notification" in {
+    val (_, output) = runTTY(
+      Map(
+        "app" ->
+          """import oskit.*
+            |
+            |kernel_main() -> int
+            |    ipc_init()
+            |    create_thread(server, 0x10000, 0xF000, "srv")
+            |    timer_init(1000)
+            |    first_thread_ssp()
+            |
+            |server()
+            |    keyboard_init()
+            |    keyboard_set_notify(thread_id())
+            |    val port = port_create()
+            |    putc('W')
+            |    var buf: [64]i8
+            |    val result = ipc_recv_notify(port, &buf[0], 64)
+            |    if result == -2
+            |        putc('N')
+            |    else
+            |        putc('?')
+            |    putc('!')
+            |""".stripMargin
+      ),
+      maxCycles = 5000000,
+      scheduledKeys = Seq(
+        (200000, KeyEvent.VK_A, true, 0),
+      )
+    )
+
+    //info(s"output: '$output'")
+    output should include("W")
+    output should include("N")
+    output should include("!")
+  }
+
+  "TTY: recv_notify server loop with pending reader and delayed key" in {
+    val (_, output) = runTTY(
+      Map(
+        "app" ->
+          """import oskit.*
+            |
+            |kernel_main() -> int
+            |    ipc_init()
+            |    create_thread(tty_server, 0x10000, 0xF000, "tty")
+            |    create_thread(reader, 0x14000, 0x13000, "rdr")
+            |    timer_init(1000)
+            |    first_thread_ssp()
+            |
+            |reader()
+            |    sleep(50)
+            |    putc('R')
+            |    // Manual tty_getc with diagnostics
+            |    var tname: [4]i8
+            |    tname[0] = 116
+            |    tname[1] = 116
+            |    tname[2] = 121
+            |    tname[3] = 0
+            |    val port = port_lookup(&tname[0])
+            |    if port >= 0
+            |        putc('P')
+            |    else
+            |        putc('p')
+            |    var msg: [2]i8
+            |    msg[0] = 2
+            |    msg[1] = 0
+            |    var reply: [2]i8
+            |    val r = ipc_send(port, &msg[0], 2, &reply[0], 2)
+            |    putc('S')
+            |    putc(reply[1])
+            |    putc('!')
+            |""".stripMargin
+      ),
+      maxCycles = 5000000,
+      scheduledKeys = Seq(
+        (200000, KeyEvent.VK_Z, true, 0),
+      )
+    )
+
+    //info(s"output: '$output'")
+    output should include("R")
+    output should include("z")
+    output should include("!")
+  }
+
+  "TTY: keyboard ISR notifies blocked thread" in {
+    val (_, output) = runTTY(
+      Map(
+        "app" ->
+          """import oskit.*
+            |
+            |var my_tid = -1
+            |
+            |kernel_main() -> int
+            |    ipc_init()
+            |    create_thread(waiter, 0x10000, 0xF000, "w")
+            |    timer_init(1000)
+            |    first_thread_ssp()
+            |
+            |waiter()
+            |    keyboard_init()
+            |    my_tid = thread_id()
+            |    keyboard_set_notify(my_tid)
+            |    putc('W')
+            |    // Wait for notification from keyboard ISR
+            |    notify_wait()
+            |    putc('N')
+            |    // Check keyboard buffer
+            |    if kb_has_key() == 1
+            |        putc('K')
+            |    putc('!')
+            |""".stripMargin
+      ),
+      maxCycles = 5000000,
+      scheduledKeys = Seq(
+        (200000, KeyEvent.VK_A, true, 0),
+      )
+    )
+
+    //info(s"output: '$output'")
+    output should include("W")
+    output should include("N")
+    output should include("K")
+    output should include("!")
+  }
+
+  "TTY: blocking read — key arrives after client blocks" in {
+    val (_, output) = runTTY(
+      Map(
+        "app" ->
+          """import oskit.*
+            |
+            |kernel_main() -> int
+            |    ipc_init()
+            |    create_thread(tty_server, 0x10000, 0xF000, "tty")
+            |    create_thread(client, 0x14000, 0x13000, "cli")
+            |    timer_init(1000)
+            |    first_thread_ssp()
+            |
+            |client()
+            |    sleep(50)
+            |    putc('W')
+            |    val ch = tty_getc()
+            |    putc(ch)
+            |    putc('!')
+            |""".stripMargin
+      ),
+      // No pre-enqueued keys — key arrives at tick 200000 (well after client blocks)
+      maxCycles = 5000000,
+      scheduledKeys = Seq(
+        (200000, KeyEvent.VK_X, true, 0),
+      )
+    )
+
+    //info(s"output: '$output'")
+    // W = client about to block, x = got the key, ! = completed
+    output should include("W")
+    output should include("x")
+    output should include("!")
+  }
+
+  "TTY: blocking read — multiple keys arrive after client blocks" in {
+    val (_, output) = runTTY(
+      Map(
+        "app" ->
+          """import oskit.*
+            |
+            |kernel_main() -> int
+            |    ipc_init()
+            |    create_thread(tty_server, 0x10000, 0xF000, "tty")
+            |    create_thread(client, 0x14000, 0x13000, "cli")
+            |    timer_init(1000)
+            |    first_thread_ssp()
+            |
+            |client()
+            |    sleep(50)
+            |    var i = 0
+            |    while i < 3
+            |        val ch = tty_getc()
+            |        putc(ch)
+            |        i += 1
+            |    putc('!')
+            |""".stripMargin
+      ),
+      scheduledKeys = Seq(
+        (200000, KeyEvent.VK_H, true, 0),
+        (400000, KeyEvent.VK_I, true, 1),  // shift = uppercase I
+        (600000, KeyEvent.VK_1, true, 1),  // shift+1 = !
+      )
+    )
+
+    //info(s"output: '$output'")
+    output should include("h")
+    output should include("I")
+    output should include("!")
   }
 }

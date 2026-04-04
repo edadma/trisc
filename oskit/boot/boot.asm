@@ -146,16 +146,22 @@ irq_handler
   gusp r1
   pshd r1               ; save USP
 
+  ; Track whether timer (IRQ 0) was handled — if so, do_schedule at end
+  ldi  r5, 0             ; r5 = saw_timer flag
+
+.irq_claim_loop
   ; Read CLAIM — identifies source and auto-clears pending
   movi r2, INTC_CLAIM
   ldb  r1, r2, r0        ; r1 = IRQ number (0xFF if spurious)
 
-  ; Check for spurious interrupt
+  ; Check for spurious / no more pending
   ldi  r3, 0xFF
-  beq  r1, r3, .irq_restore
+  beq  r1, r3, .irq_done
 
-  ; Save IRQ number
-  pshd r1
+  ; Track if this is the timer (IRQ 0)
+  bne  r1, r0, .irq_not_timer
+  ldi  r5, 1             ; saw_timer = true
+.irq_not_timer
 
   ; Look up handler: irq_handlers[r1] (array of 8-byte pointers)
   movi r2, irq_handlers
@@ -164,23 +170,22 @@ irq_handler
   add  r2, r2, r3
   ldd  r2, r2, r0         ; r2 = handler function pointer
 
-  ; If no handler registered (null), skip
-  beq  r2, r0, .irq_pop_restore
+  ; If no handler registered (null), try next IRQ
+  beq  r2, r0, .irq_claim_loop
 
   ; Call the handler
+  pshd r5               ; save saw_timer across call
   jalr r6, r2
+  popd r5               ; restore saw_timer
 
-  ; Recover IRQ number
-  popd r1
+  ; Loop to handle any remaining pending IRQs
+  bra .irq_claim_loop
 
-  ; Timer (IRQ 0) triggers context switch for preemption
-  beq  r1, r0, do_schedule
+.irq_done
+  ; If timer was among the handled IRQs, do context switch
+  bne  r5, r0, do_schedule
 
-  ; Non-timer IRQs: restore and return
-  bra .irq_restore
-
-.irq_pop_restore
-  popd r1               ; discard saved IRQ number
+  ; No timer — just restore and return
 .irq_restore
   popd r1               ; restore USP
   susp r1

@@ -225,10 +225,11 @@ Check if a server is waiting for a message on a given port.
 Returns 1 if waiting (RECV_BLOCKED or RECV_NOTIFY_BLOCKED), 0 otherwise.
 
     ipc_server_waiting(owner: int, port: int) -> int
-        if tasks[owner].state == STATE_RECV_BLOCKED
+        val st = tasks[owner].state
+        if st == STATE_RECV_BLOCKED
             if ipc_ctx[owner].port == port
                 return 1
-        if tasks[owner].state == STATE_RECV_NOTIFY_BLOCKED
+        else if st == STATE_RECV_NOTIFY_BLOCKED
             if ipc_ctx[owner].port == port
                 return 1
         0

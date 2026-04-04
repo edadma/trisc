@@ -13,7 +13,7 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
 
   private var pending: Int = 0
   private var enabled: Int = 0xff // all sources enabled by default
-  private var delivered: Int = 0 // IRQs signaled to CPU but not yet claimed
+  private var delivered: Int = 0
   val log: Logger = {
     val l = new Logger(new ConsoleHandler, new DefaultLogFormatter(includeTimestamp = false))
     l.setLogLevel(LogLevel.OFF)

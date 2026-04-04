@@ -314,7 +314,6 @@ initializes keyboard, then loops handling messages.
             tty_deliver_pending()
 
             val result = ipc_recv_notify(tty_port, &buf[0], 128)
-
             if result == -2
                 // Notification: keyboard input arrived
                 notify_read(tty_tid)

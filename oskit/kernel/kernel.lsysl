@@ -514,11 +514,12 @@ it is woken and re-enqueued.
     notify_send(target_id: int, value: int)
         tasks[target_id].notify_value = value
         tasks[target_id].notify_pending = 1
-        if tasks[target_id].state == STATE_NOTIFY_WAIT
+        val st = tasks[target_id].state
+        if st == STATE_NOTIFY_WAIT
             tasks[target_id].state = STATE_READY
             tasks[target_id].quantum = DEFAULT_QUANTUM
             enqueue(tasks[target_id].priority, target_id)
-        if tasks[target_id].state == STATE_RECV_NOTIFY_BLOCKED
+        else if st == STATE_RECV_NOTIFY_BLOCKED
             // Wake with -2 to indicate notification (not IPC message)
             syscall_return_for(target_id, -2)
             tasks[target_id].state = STATE_READY
