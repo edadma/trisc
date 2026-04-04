@@ -343,6 +343,18 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case "%"  => l % r
               case _    => throw RuntimeError(s"unsupported float compound operator: $op")
             )
+          case (PtrVal(ptr), _) =>
+            val n = toLong(rv).toInt
+            cell.value = op match
+              case "+" => PtrVal(ptr.add(n))
+              case "-" => PtrVal(ptr.sub(n))
+              case _ => throw RuntimeError(s"unsupported pointer compound operator: $op")
+          case (ArrVal(cells, off), _) =>
+            val n = toLong(rv).toInt
+            cell.value = op match
+              case "+" => ArrVal(cells, off + n)
+              case "-" => ArrVal(cells, off - n)
+              case _ => throw RuntimeError(s"unsupported pointer compound operator: $op")
           case _ =>
             val l = toLong(cell.value)
             val r = toLong(rv)

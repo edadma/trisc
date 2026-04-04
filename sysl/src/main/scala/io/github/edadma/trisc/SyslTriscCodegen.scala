@@ -769,7 +769,17 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TCompoundAssignStmt(target, op, value) =>
         genExpr(value) // r1 = right operand
-        emit("  pshd r1") // always save as 64-bit temp
+        // For pointer types, scale the offset by element size
+        val varType = if locals != null && locals.contains(target) then locals(target).typ
+          else globals.getOrElse(target, value.typ)
+        varType match
+          case SyslType.PtrType(elem) if op == "+" || op == "-" =>
+            val elemSize = stackSize(elem)
+            if elemSize != 1 then
+              emitLoadImm(3, elemSize)
+              emit("  mul r1, r1, r3") // r1 = offset * elemSize (r2 clobbered, ok)
+          case _ =>
+        emit("  pshd r1") // save scaled operand
         if locals != null && locals.contains(target) then
           val local = locals(target)
           emitAddImm(2, 5, local.offset)
@@ -779,7 +789,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitAddImm(2, 5, local.offset)
           emitStore(1, 2, local.typ)
         else
-          val gtyp = globals.getOrElse(target, value.typ) // use value type for cross-unit globals
+          val gtyp = globals.getOrElse(target, value.typ)
           emit(s"  movi r2, $target")
           emitLoad(1, 2, gtyp)
           emit("  popd r3")
