@@ -107,4 +107,39 @@ class SyslStructReturnTests extends SyslTestHelpers {
         |    x * 10 + y
         |""".stripMargin) shouldBe 21
   }
+
+  // ===== Go-style paren-free destructuring =====
+
+  "Go-style destructure: a, b = f()" in {
+    eval(
+      """divmod(a: int, b: int) -> (int, int)
+        |    (a / b, a % b)
+        |
+        |main() -> int
+        |    q, r = divmod(17, 5)
+        |    q * 10 + r
+        |""".stripMargin) shouldBe 32
+  }
+
+  "Go-style destructure with val" in {
+    eval(
+      """swap(a: int, b: int) -> (int, int) = (b, a)
+        |
+        |main() -> int
+        |    val x, y = swap(10, 20)
+        |    x * 100 + y
+        |""".stripMargin) shouldBe 2010
+  }
+
+  "Go-style destructure with var" in {
+    eval(
+      """pair() -> (int, int) = (1, 2)
+        |
+        |main() -> int
+        |    var a, b = pair()
+        |    a += 10
+        |    b += 20
+        |    a * 100 + b
+        |""".stripMargin) shouldBe 1122
+  }
 }

@@ -192,7 +192,9 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val destructureStmt: Parser[DestructureStmtAST] =
     mutability ~ ("(" ~> rep1sep(ident, ",") <~ ")") ~ ("=" ~> expr) ^^ { case mut ~ names ~ init => DestructureStmtAST(names, init, mut) } |
-      ("(" ~> rep1sep(ident, ",") <~ ")") ~ ("=" ~> expr) ^^ { case names ~ init => DestructureStmtAST(names, init) }
+      ("(" ~> rep1sep(ident, ",") <~ ")") ~ ("=" ~> expr) ^^ { case names ~ init => DestructureStmtAST(names, init) } |
+      mutability ~ ident ~ ("," ~> rep1sep(ident, ",")) ~ ("=" ~> expr) ^^ { case mut ~ first ~ rest ~ init => DestructureStmtAST(first :: rest, init, mut) } |
+      ident ~ ("," ~> rep1sep(ident, ",")) ~ ("=" ~> expr) ^^ { case first ~ rest ~ init => DestructureStmtAST(first :: rest, init) }
 
   lazy val breakStmt: Parser[BreakStmtAST] =
     "break" ^^^ BreakStmtAST()
