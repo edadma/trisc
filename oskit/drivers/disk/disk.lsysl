@@ -1,0 +1,199 @@
+OSKit Disk Driver — Block Device Server
+
+MINIX 3-style block device server. Owns the ramdisk hardware
+and serves read/write requests via IPC. Clients (e.g. the TFS
+server) send messages with an LBA and buffer address; the disk
+server performs the actual hardware I/O and replies.
+
+This keeps all hardware access in one server — clients never
+touch device registers directly.
+
+Message format (byte layout):
+- Request:  [cmd(1), lba(4, big-endian), addr(4, big-endian)]
+- Reply:    [status(1)]  — 0 = ok, -1 = error
+
+Commands: DISK_CMD_READ=1, DISK_CMD_WRITE=2, DISK_CMD_CAPACITY=3
+
+For DISK_CMD_CAPACITY, the reply is [status(1), capacity(4, big-endian)]
+where capacity is the number of 512-byte sectors.
+
+    module oskit
+
+    val DISK_CMD_READ     = 1
+    val DISK_CMD_WRITE    = 2
+    val DISK_CMD_CAPACITY = 3
+
+Ramdisk hardware register layout. The driver talks directly
+to the memory-mapped ramdisk device.
+
+    val RD_BASE        = 0x100140
+    val RD_STATUS_OFF  = 0
+    val RD_COMMAND_OFF = 1
+    val RD_LBA_OFF     = 2
+    val RD_ADDR_OFF    = 6
+    val RD_COUNT_OFF   = 10
+    val RD_CAPACITY_OFF = 12
+
+    val RD_CMD_READ  = 1
+    val RD_CMD_WRITE = 2
+
+    var disk_port = -1
+    var disk_name: [5]i8
+
+Perform a raw block read from the ramdisk hardware.
+Reads one 512-byte sector at the given LBA into addr.
+
+    disk_hw_read(lba: int, addr: i64)
+        var p: *i8 = *i8(RD_BASE)
+        p[RD_LBA_OFF + 0] = (lba >> 24) & 0xFF
+        p[RD_LBA_OFF + 1] = (lba >> 16) & 0xFF
+        p[RD_LBA_OFF + 2] = (lba >> 8) & 0xFF
+        p[RD_LBA_OFF + 3] = lba & 0xFF
+        p[RD_ADDR_OFF + 0] = (addr >> 24) & 0xFF
+        p[RD_ADDR_OFF + 1] = (addr >> 16) & 0xFF
+        p[RD_ADDR_OFF + 2] = (addr >> 8) & 0xFF
+        p[RD_ADDR_OFF + 3] = addr & 0xFF
+        p[RD_COUNT_OFF + 0] = 0
+        p[RD_COUNT_OFF + 1] = 1
+        p[RD_COMMAND_OFF] = RD_CMD_READ
+
+Perform a raw block write to the ramdisk hardware.
+Writes one 512-byte sector from addr to the given LBA.
+
+    disk_hw_write(lba: int, addr: i64)
+        var p: *i8 = *i8(RD_BASE)
+        p[RD_LBA_OFF + 0] = (lba >> 24) & 0xFF
+        p[RD_LBA_OFF + 1] = (lba >> 16) & 0xFF
+        p[RD_LBA_OFF + 2] = (lba >> 8) & 0xFF
+        p[RD_LBA_OFF + 3] = lba & 0xFF
+        p[RD_ADDR_OFF + 0] = (addr >> 24) & 0xFF
+        p[RD_ADDR_OFF + 1] = (addr >> 16) & 0xFF
+        p[RD_ADDR_OFF + 2] = (addr >> 8) & 0xFF
+        p[RD_ADDR_OFF + 3] = addr & 0xFF
+        p[RD_COUNT_OFF + 0] = 0
+        p[RD_COUNT_OFF + 1] = 1
+        p[RD_COMMAND_OFF] = RD_CMD_WRITE
+
+Read the disk capacity (number of sectors) from hardware.
+
+    disk_hw_capacity() -> int
+        var p: *i8 = *i8(RD_BASE)
+        val b0 = p[RD_CAPACITY_OFF + 0] & 0xFF
+        val b1 = p[RD_CAPACITY_OFF + 1] & 0xFF
+        val b2 = p[RD_CAPACITY_OFF + 2] & 0xFF
+        val b3 = p[RD_CAPACITY_OFF + 3] & 0xFF
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+Parse a 4-byte big-endian integer from a message buffer.
+
+    disk_read_i32(buf: *i8, off: int) -> int
+        ((buf[off] & 0xFF) << 24) | ((buf[off + 1] & 0xFF) << 16) | ((buf[off + 2] & 0xFF) << 8) | (buf[off + 3] & 0xFF)
+
+Write a 4-byte big-endian integer into a message buffer.
+
+    disk_write_i32(buf: *i8, off: int, v: int)
+        buf[off] = (v >> 24) & 0xFF
+        buf[off + 1] = (v >> 16) & 0xFF
+        buf[off + 2] = (v >> 8) & 0xFF
+        buf[off + 3] = v & 0xFF
+
+Handle a READ request: read one block and reply.
+
+    disk_handle_read(sender: int, buf: *i8)
+        val lba = disk_read_i32(buf, 1)
+        val addr = disk_read_i32(buf, 5)
+        disk_hw_read(lba, i64(addr))
+        var reply: [1]i8
+        reply[0] = 0
+        ipc_reply(sender, &reply[0], 1)
+
+Handle a WRITE request: write one block and reply.
+
+    disk_handle_write(sender: int, buf: *i8)
+        val lba = disk_read_i32(buf, 1)
+        val addr = disk_read_i32(buf, 5)
+        disk_hw_write(lba, i64(addr))
+        var reply: [1]i8
+        reply[0] = 0
+        ipc_reply(sender, &reply[0], 1)
+
+Handle a CAPACITY request: return sector count.
+
+    disk_handle_capacity(sender: int)
+        val cap = disk_hw_capacity()
+        var reply: [5]i8
+        reply[0] = 0
+        disk_write_i32(&reply[0], 1, cap)
+        ipc_reply(sender, &reply[0], 5)
+
+The disk server loop. Creates port, registers as "disk",
+then loops handling block I/O requests.
+
+    disk_server()
+        // Set up name
+        disk_name[0] = 100  // d
+        disk_name[1] = 105  // i
+        disk_name[2] = 115  // s
+        disk_name[3] = 107  // k
+        disk_name[4] = 0
+
+        // Create and register port
+        disk_port = port_create()
+        port_register(disk_port, &disk_name[0])
+
+        // Server loop
+        var buf: [16]i8
+        while 1 == 1
+            val sender = ipc_recv(disk_port, &buf[0], 16)
+            if sender >= 0
+                val cmd = int(buf[0])
+                if cmd == DISK_CMD_READ
+                    disk_handle_read(sender, &buf[0])
+                else if cmd == DISK_CMD_WRITE
+                    disk_handle_write(sender, &buf[0])
+                else if cmd == DISK_CMD_CAPACITY
+                    disk_handle_capacity(sender)
+                else
+                    // Unknown command — reply with error
+                    var reply: [1]i8
+                    reply[0] = -1
+                    ipc_reply(sender, &reply[0], 1)
+
+Userspace wrappers. Clients use these to talk to the disk server
+without building IPC messages manually.
+
+    disk_read(lba: int, addr: *i8) -> int
+        val port = port_lookup(&disk_name[0])
+        if port < 0
+            return -1
+        var msg: [9]i8
+        msg[0] = DISK_CMD_READ
+        disk_write_i32(&msg[0], 1, lba)
+        disk_write_i32(&msg[0], 5, int(i64(addr)))
+        var reply: [1]i8
+        ipc_send(port, &msg[0], 9, &reply[0], 1)
+        int(reply[0])
+
+    disk_write(lba: int, addr: *i8) -> int
+        val port = port_lookup(&disk_name[0])
+        if port < 0
+            return -1
+        var msg: [9]i8
+        msg[0] = DISK_CMD_WRITE
+        disk_write_i32(&msg[0], 1, lba)
+        disk_write_i32(&msg[0], 5, int(i64(addr)))
+        var reply: [1]i8
+        ipc_send(port, &msg[0], 9, &reply[0], 1)
+        int(reply[0])
+
+    disk_capacity() -> int
+        val port = port_lookup(&disk_name[0])
+        if port < 0
+            return -1
+        var msg: [1]i8
+        msg[0] = DISK_CMD_CAPACITY
+        var reply: [5]i8
+        ipc_send(port, &msg[0], 1, &reply[0], 5)
+        if reply[0] != 0
+            return -1
+        disk_read_i32(&reply[0], 1)
