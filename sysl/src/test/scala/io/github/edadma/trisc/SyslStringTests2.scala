@@ -237,4 +237,33 @@ class SyslStringTests2 extends SyslTestHelpers {
         |    0
         |""".stripMargin) shouldBe "yes"
   }
+
+  // ===== String construction from pointer =====
+
+  "string from *byte and length" in {
+    eval(
+      """main() -> int
+        |    var buf: [3]byte
+        |    buf[0] = 'H'
+        |    buf[1] = 'i'
+        |    buf[2] = '!'
+        |    s = string(&buf[0], 3)
+        |    len(s)
+        |""".stripMargin) shouldBe 3
+  }
+
+  "string from *byte content" in {
+    output(
+      """main() -> int
+        |    var buf: [5]byte
+        |    buf[0] = 'h'
+        |    buf[1] = 'e'
+        |    buf[2] = 'l'
+        |    buf[3] = 'l'
+        |    buf[4] = 'o'
+        |    s = string(&buf[0], 5)
+        |    puts(s)
+        |    0
+        |""".stripMargin) shouldBe "hello"
+  }
 }

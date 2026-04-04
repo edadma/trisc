@@ -581,6 +581,19 @@ class SyslTriscCodegen(addresses: Int = 4):
               val off = local.offset + i * stackSize(elemType)
               emitAddImm(2, 5, off)
               emitStore(1, 2, elemType)
+          case TArrayDecl(size, SyslType.ArrayType(elemType, _)) =>
+            // Allocate array inline on stack and zero-initialize
+            val rawBytes = size * stackSize(elemType)
+            val totalBytes = (rawBytes + 7) & ~7
+            emitAddImm(7, 7, -totalBytes)
+            stackOffset -= totalBytes
+            val local = LocalVar(name, stackOffset, typ)
+            locals(name) = local
+            // Zero-fill
+            emitAddImm(1, 5, local.offset)
+            for i <- 0 until totalBytes by 8 do
+              emitAddImm(2, 1, i)
+              emit("  std r0, r2, r0")
           case TStructLit(st @ SyslType.StructType(_, _)) =>
             // Allocate struct on stack and zero-initialize
             val totalSize = stackSize(st)
@@ -1644,8 +1657,13 @@ class SyslTriscCodegen(addresses: Int = 4):
         val rawBytes = size * stackSize(elemType)
         val totalBytes = (rawBytes + 7) & ~7 // keep SP 8-byte aligned
         emitAddImm(7, 7, -totalBytes)
-        emit("  mov r1, r7")     // r1 = address of array start
         stackOffset -= totalBytes
+        // Zero-initialize
+        emit("  mov r1, r7")
+        for i <- 0 until totalBytes by 8 do
+          emitAddImm(2, 1, i)
+          emit("  std r0, r2, r0")
+        emit("  mov r1, r7")     // r1 = address of array start
 
       case TArrayLit(elements, SyslType.ArrayType(elemType, size)) =>
         // Allocate on stack, then store each element
@@ -2024,6 +2042,126 @@ class SyslTriscCodegen(addresses: Int = 4):
 
         emit(s"$doneLabel")
         emitAddImm(1, 5, resultOffset) // r1 = address of result
+
+      case TStringFromPtr(ptrExpr, lenExpr, _) =>
+        // string(ptr, len): allocate refcounted string, copy bytes, build {data_ptr, len}
+        needsAllocExtern = true
+        genExpr(lenExpr)          // r1 = len
+        emit("  pshd r1")        // save len
+        stackOffset -= 8
+        genExpr(ptrExpr)          // r1 = src ptr
+        emit("  pshd r1")        // save src ptr
+        stackOffset -= 8
+        // Stack: [src_ptr] [len]
+        // malloc(8 + len) for refcount header + data
+        emitAddImm(1, 7, 8)
+        emit("  ldd r1, r1, r0")  // r1 = len
+        emit("  addi r1, r1, 8")  // r1 = 8 + len
+        emit("  movi r4, malloc")
+        emit("  jalr r6, r4")     // r1 = base
+        val allocOkS = newLabel("alloc_ok")
+        emit(s"  bne r1, r0, $allocOkS")
+        emit("  ldi r1, 2")
+        emit("  trap 1")
+        emit(s"$allocOkS")
+        emit("  pshd r1")        // save base
+        stackOffset -= 8
+        // Stack: [base] [src_ptr] [len]
+        // Set refcount = 1
+        emit("  ldi r2, 1")
+        emit("  std r2, r1, r0")
+        // Copy len bytes from src_ptr to base+8
+        emit("  addi r2, r1, 8")  // r2 = dst = base+8
+        emitAddImm(3, 7, 8)
+        emit("  ldd r3, r3, r0")  // r3 = src_ptr
+        emitAddImm(4, 7, 16)
+        emit("  ldd r4, r4, r0")  // r4 = len
+        val cpLoop = newLabel("strcpy")
+        val cpDone = newLabel("strcpy_done")
+        emit(s"$cpLoop")
+        emit(s"  beq r4, r0, $cpDone")
+        emit("  ldb r1, r3, r0")
+        emit("  stb r1, r2, r0")
+        emit("  addi r2, r2, 1")
+        emit("  addi r3, r3, 1")
+        emit("  addi r4, r4, -1")
+        emit(s"  bra $cpLoop")
+        emit(s"$cpDone")
+        // Build 16-byte string struct on stack: {ptr=base+8, len}
+        emit("  popd r1")        // r1 = base
+        stackOffset += 8
+        emit("  addi r1, r1, 8")  // r1 = data ptr
+        emitAddImm(2, 7, 8)
+        emit("  ldd r2, r2, r0")  // r2 = len
+        // Clean up src_ptr and len from stack
+        emitAddImm(7, 7, 16)
+        stackOffset += 16
+        // Allocate 16-byte result for string fat pointer
+        emitAddImm(7, 7, -16)
+        stackOffset -= 16
+        emit("  std r1, r7, r0")       // result.ptr
+        emitAddImm(3, 7, 8)
+        emit("  std r2, r3, r0")       // result.len
+        emit("  mov r1, r7")           // r1 = address of result
+
+      case TStringFromSlice(sliceExpr, _) =>
+        // string(slice): extract ptr and len from slice, then same as string(ptr, len)
+        needsAllocExtern = true
+        genExpr(sliceExpr)         // r1 = address of slice struct
+        // Load ptr and len from slice
+        emit("  addi r2, r1, 8")
+        emit("  ldw r2, r2, r0")  // r2 = len (i32)
+        emit("  ldd r1, r1, r0")  // r1 = ptr
+        emit("  pshd r2")         // save len
+        stackOffset -= 8
+        emit("  pshd r1")         // save src ptr
+        stackOffset -= 8
+        // Stack: [src_ptr] [len]
+        // malloc(8 + len)
+        emit("  addi r1, r2, 8")  // r1 = 8 + len
+        emit("  movi r4, malloc")
+        emit("  jalr r6, r4")
+        val allocOkSl = newLabel("alloc_ok")
+        emit(s"  bne r1, r0, $allocOkSl")
+        emit("  ldi r1, 2")
+        emit("  trap 1")
+        emit(s"$allocOkSl")
+        emit("  pshd r1")        // save base
+        stackOffset -= 8
+        // Stack: [base] [src_ptr] [len]
+        emit("  ldi r2, 1")
+        emit("  std r2, r1, r0") // refcount = 1
+        // Copy len bytes from src_ptr to base+8
+        emit("  addi r2, r1, 8")  // r2 = dst
+        emitAddImm(3, 7, 8)
+        emit("  ldd r3, r3, r0")  // r3 = src_ptr
+        emitAddImm(4, 7, 16)
+        emit("  ldd r4, r4, r0")  // r4 = len
+        val cpLoop2 = newLabel("strcpy")
+        val cpDone2 = newLabel("strcpy_done")
+        emit(s"$cpLoop2")
+        emit(s"  beq r4, r0, $cpDone2")
+        emit("  ldb r1, r3, r0")
+        emit("  stb r1, r2, r0")
+        emit("  addi r2, r2, 1")
+        emit("  addi r3, r3, 1")
+        emit("  addi r4, r4, -1")
+        emit(s"  bra $cpLoop2")
+        emit(s"$cpDone2")
+        // Build string struct
+        emit("  popd r1")        // r1 = base
+        stackOffset += 8
+        emit("  addi r1, r1, 8")  // r1 = data ptr
+        emitAddImm(2, 7, 8)
+        emit("  ldd r2, r2, r0")  // r2 = len
+        emitAddImm(7, 7, 16)
+        stackOffset += 16
+        emitAddImm(7, 7, -16)
+        stackOffset -= 16
+        emit("  std r1, r7, r0")
+        emitAddImm(3, 7, 8)
+        emit("  std r2, r3, r0")
+        emit("  mov r1, r7")
 
       case TFloatLit(d, _) =>
         val bits = java.lang.Double.doubleToRawLongBits(d)

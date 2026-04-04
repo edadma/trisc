@@ -19,8 +19,7 @@ class SyslCodegenPointerArrayTests extends SyslCodegenHelpers {
         |""".stripMargin) shouldBe 60
   }
 
-  // TODO: codegen bug — uninitialized array reads return stack garbage
-  "array zero initialized" ignore {
+  "array zero initialized" in {
     compileAndRun("main() -> int\n    a: [3]int\n    a[0] + a[1] + a[2]\n") shouldBe 0
   }
 
@@ -178,8 +177,7 @@ class SyslCodegenPointerArrayTests extends SyslCodegenHelpers {
     compileAndRun("main() -> int\n    a: [5]int\n    p = &a[3]\n    *p = 77\n    a[3]\n") shouldBe 77
   }
 
-  // TODO: codegen bug — pointer arithmetic on local arrays returns wrong values
-  "pointer offset then index" ignore {
+  "pointer offset then index" in {
     compileAndRun(
       """main() -> int
         |    a: [5]int
@@ -190,8 +188,7 @@ class SyslCodegenPointerArrayTests extends SyslCodegenHelpers {
         |""".stripMargin) shouldBe 30
   }
 
-  // TODO: codegen bug — write through pointer arithmetic on local array
-  "write through pointer arithmetic" ignore {
+  "write through pointer arithmetic" in {
     compileAndRun("main() -> int\n    a: [5]int\n    *(a + 4) = 55\n    a[4]\n") shouldBe 55
   }
 
