@@ -267,8 +267,8 @@ class SyslAnalyzer:
       info
 
   private def lookupFun(name: String): FunInfo =
-    builtinFunctions.getOrElse(name,
-      functions.getOrElse(name,
+    functions.getOrElse(name,
+      builtinFunctions.getOrElse(name,
         throw AnalysisError(s"undefined function: '$name'")))
 
   private def checkArgs(name: String, params: List[(String, SyslType)], args: List[TExpr]): List[TExpr] =
