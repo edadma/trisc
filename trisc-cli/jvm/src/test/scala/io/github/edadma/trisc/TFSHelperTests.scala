@@ -11,7 +11,7 @@ class TFSHelperTests extends TFSTestHelpers {
 
   "INODE_SIZE is 32" in {
     val (_, output) = runTFS(
-      """import tfs.*
+      """import oskit.fs.*
         |main() -> int
         |    if INODE_SIZE == 32
         |        putchar(89)
@@ -24,7 +24,7 @@ class TFSHelperTests extends TFSTestHelpers {
 
   "DIR_ENTRY_SIZE is 16" in {
     val (_, output) = runTFS(
-      """import tfs.*
+      """import oskit.fs.*
         |main() -> int
         |    if DIR_ENTRY_SIZE == 16
         |        putchar(89)
@@ -37,7 +37,7 @@ class TFSHelperTests extends TFSTestHelpers {
 
   "NUM_DIRECT is 6" in {
     val (_, output) = runTFS(
-      """import tfs.*
+      """import oskit.fs.*
         |main() -> int
         |    if NUM_DIRECT == 6
         |        putchar(89)
@@ -52,7 +52,7 @@ class TFSHelperTests extends TFSTestHelpers {
 
   "read_i16 big-endian" in {
     val (_, output) = runTFS(
-      """import tfs.*
+      """import oskit.fs.*
         |main() -> int
         |    var buf: [4]i8
         |    buf[0] = 0x01
@@ -69,7 +69,7 @@ class TFSHelperTests extends TFSTestHelpers {
 
   "read_i32 big-endian" in {
     val (_, output) = runTFS(
-      """import tfs.*
+      """import oskit.fs.*
         |main() -> int
         |    var buf: [4]i8
         |    buf[0] = 0x54
@@ -88,7 +88,7 @@ class TFSHelperTests extends TFSTestHelpers {
 
   "write_i16 then read_i16 round-trip" in {
     val (_, output) = runTFS(
-      """import tfs.*
+      """import oskit.fs.*
         |main() -> int
         |    var buf: [4]i8
         |    write_i16(&buf, 0x1234)
@@ -104,7 +104,7 @@ class TFSHelperTests extends TFSTestHelpers {
 
   "write_i32 then read_i32 round-trip" in {
     val (_, output) = runTFS(
-      """import tfs.*
+      """import oskit.fs.*
         |main() -> int
         |    var buf: [4]i8
         |    write_i32(&buf, 0x12345678)
@@ -122,7 +122,7 @@ class TFSHelperTests extends TFSTestHelpers {
 
   "streq_n matching strings" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |main() -> int
          |${syslBytes("a", "hello")}
          |${syslBytes("b", "hello")}
@@ -137,7 +137,7 @@ class TFSHelperTests extends TFSTestHelpers {
 
   "streq_n different strings" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |main() -> int
          |${syslBytes("a", "hello")}
          |${syslBytes("b", "world")}
@@ -154,7 +154,7 @@ class TFSHelperTests extends TFSTestHelpers {
 
   "strlen empty" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |main() -> int
          |${syslBytes("s", "")}
          |    val n = strlen(&s[0])
@@ -169,7 +169,7 @@ class TFSHelperTests extends TFSTestHelpers {
 
   "strlen nonempty" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |main() -> int
          |${syslBytes("s", "hello")}
          |    val n = strlen(&s[0])
@@ -186,7 +186,7 @@ class TFSHelperTests extends TFSTestHelpers {
 
   "tfs_init populates all superblock fields" in {
     val (_, output) = runTFS(
-      """import tfs.*
+      """import oskit.fs.*
         |main() -> int
         |    tfs_init()
         |    if sb_block_size == 512

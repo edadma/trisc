@@ -125,7 +125,7 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
       maxCycles: Int,
   ): (CPU, String) =
     val bootTof = assemble(tfsBoot, relocatable = true)
-    val allSources = sources + ("tfs" -> tfsSource) + ("ramdisk" -> ramdiskSource)
+    val allSources = sources + ("oskit/fs/tfs" -> tfsSource) + ("ramdisk" -> ramdiskSource)
     val driver = new SyslDriver
     val result = driver.compile(allSources)
     val codegen = new SyslTriscCodegen
