@@ -262,4 +262,53 @@ class SyslCodegenPointerArrayTests extends SyslCodegenHelpers {
         |    a[0] * 1000 + a[1] * 100 + a[2] * 10 + a[3]
         |""".stripMargin) shouldBe 4321
   }
+
+  // ===== Pointer compound assignment (+=, -=) =====
+
+  "pointer += 2 then deref" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [5]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    arr[3] = 40
+        |    arr[4] = 50
+        |    var p = &arr[0]
+        |    p += 2
+        |    *p
+        |""".stripMargin) shouldBe 30
+  }
+
+  "pointer -= 2 then deref" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [5]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    var p = &arr[2]
+        |    p -= 2
+        |    *p
+        |""".stripMargin) shouldBe 10
+  }
+
+  "pointer += in loop" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [4]int
+        |    arr[0] = 1
+        |    arr[1] = 2
+        |    arr[2] = 3
+        |    arr[3] = 4
+        |    var p = &arr[0]
+        |    sum = 0
+        |    i = 0
+        |    while i < 4
+        |        sum += *p
+        |        p += 1
+        |        i += 1
+        |    sum
+        |""".stripMargin) shouldBe 10
+  }
 }
