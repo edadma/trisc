@@ -110,16 +110,16 @@ buffer and sends it with one tty_puts call.
         var i = 0
         while i < len
             if p >= 120
-                tty_puts(&sh_out[0], p)
+                tty_puts(sh_out, p)
                 p = 0
             sh_out[p] = buf[i]
             p += 1
             i += 1
         // ESC[K — clear to end of line
-        p = sh_append_csi(&sh_out[0], p, 0, i8('K'))
+        p = sh_append_csi(sh_out, p, 0, i8('K'))
         // ESC[nG — cursor to column (1-based)
-        p = sh_append_csi(&sh_out[0], p, PROMPT_LEN + cursor + 1, i8('G'))
-        tty_puts(&sh_out[0], p)
+        p = sh_append_csi(sh_out, p, PROMPT_LEN + cursor + 1, i8('G'))
+        tty_puts(sh_out, p)
 
     sh_readline(buf: *i8, maxlen: int) -> int
         var len = 0
@@ -243,17 +243,17 @@ from cwd by building an absolute path.
             return fs_open(path)
         // Relative path — build absolute path
         var abspath: [256]i8
-        strcpy(&abspath[0], &cwd_path[0])
+        strcpy(abspath, cwd_path)
         // Add separator if cwd is not "/"
-        val cwdlen = strlen(&cwd_path[0])
+        val cwdlen = strlen(cwd_path)
         if cwdlen > 1
             abspath[cwdlen] = '/'
             abspath[cwdlen + 1] = 0
         else if cwdlen == 1
             // cwd is "/" — don't add extra slash
             abspath[1] = 0
-        strcat(&abspath[0], path)
-        fs_open(&abspath[0])
+        strcat(abspath, path)
+        fs_open(abspath)
 
 Built-in commands.
 
@@ -283,17 +283,17 @@ Built-in commands.
         var entry_ino: int
         var entry_name: [14]i8
         var idx = 0
-        while fs_readdir(dir_ino, idx, &entry_ino, &entry_name[0]) == 0
+        while fs_readdir(dir_ino, idx, &entry_ino, entry_name) == 0
             // Skip . and ..
             if entry_name[0] != '.'
-                sh_puts(&entry_name[0])
+                sh_puts(entry_name)
                 sh_newline()
             else if entry_name[1] != 0
                 if entry_name[1] != '.'
-                    sh_puts(&entry_name[0])
+                    sh_puts(entry_name)
                     sh_newline()
                 else if entry_name[2] != 0
-                    sh_puts(&entry_name[0])
+                    sh_puts(entry_name)
                     sh_newline()
             idx += 1
 
@@ -307,14 +307,14 @@ Built-in commands.
             return
         var buf: [128]i8
         var offset = 0
-        var nr = fs_read(ino, &buf[0], offset, 128)
+        var nr = fs_read(ino, buf, offset, 128)
         while nr > 0
             var i = 0
             while i < nr
                 sh_putc(int(buf[i]))
                 i += 1
             offset += nr
-            nr = fs_read(ino, &buf[0], offset, 128)
+            nr = fs_read(ino, buf, offset, 128)
         sh_newline()
 
     cmd_mkdir(argc: int, argv: *i64)
@@ -352,7 +352,7 @@ Built-in commands.
             sh_error()
 
     cmd_pwd(argc: int, argv: *i64)
-        sh_puts(&cwd_path[0])
+        sh_puts(cwd_path)
         sh_newline()
 
     cmd_cd(argc: int, argv: *i64)
@@ -368,7 +368,7 @@ Built-in commands.
             return
         // Verify it's a directory
         var st: [7]int
-        fs_stat(ino, &st[0])
+        fs_stat(ino, st)
         val ftype = (st[0] >> 12) & 0xF
         if ftype != 2
             sh_puts(*i8("not a directory\n"))
@@ -378,14 +378,14 @@ Built-in commands.
         val arg1: *i8 = *i8(argv[1])
         if arg1[0] == '/'
             // Absolute path
-            strcpy(&cwd_path[0], arg1)
+            strcpy(cwd_path, arg1)
         else
             // Relative path
-            val cwdlen = strlen(&cwd_path[0])
+            val cwdlen = strlen(cwd_path)
             if cwdlen > 1
                 cwd_path[cwdlen] = '/'
                 cwd_path[cwdlen + 1] = 0
-            strcat(&cwd_path[0], arg1)
+            strcat(cwd_path, arg1)
 
     cmd_stat(argc: int, argv: *i64)
         if argc < 2
@@ -395,7 +395,7 @@ Built-in commands.
             sh_not_found(*i8(argv[1]))
             return
         var st: [7]int
-        fs_stat(ino, &st[0])
+        fs_stat(ino, st)
         // Type
         val ftype = (st[0] >> 12) & 0xF
         sh_puts(*i8("type: "))
@@ -488,18 +488,18 @@ tokenizes it, and dispatches to the appropriate command.
             sh_putc(' ')
 
             // Read a line
-            val len = sh_readline(&line[0], 256)
+            val len = sh_readline(line, 256)
             if len == 0
                 continue
 
             // Tokenize
             var argc = 0
-            var tok = strtok(&line[0], &delim[0])
+            var tok = strtok(line, delim)
             while i64(tok) != 0
                 if argc < MAX_ARGS
                     argv[argc] = i64(tok)
                     argc += 1
-                tok = strtok(*i8(0), &delim[0])
+                tok = strtok(*i8(0), delim)
 
             // Dispatch
-            sh_dispatch(argc, &argv[0])
+            sh_dispatch(argc, argv)

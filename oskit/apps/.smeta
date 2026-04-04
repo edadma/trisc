@@ -23,11 +23,15 @@ FUNC cmd_cat 2 i32 ptr i64 void
 FUNC cmd_mkdir 2 i32 ptr i64 void
 FUNC cmd_rm 2 i32 ptr i64 void
 FUNC cmd_rmdir 2 i32 ptr i64 void
-FUNC cmd_pwd 0 void
+FUNC cmd_pwd 2 i32 ptr i64 void
 FUNC cmd_cd 2 i32 ptr i64 void
 FUNC cmd_stat 2 i32 ptr i64 void
-FUNC cmd_help 0 void
+FUNC cmd_help 2 i32 ptr i64 void
 DATA MAX_ARGS i32
+DATA NUM_CMDS i32
+STRUCT Command struct Command 2 name i64 handler func 2 i32 ptr i64 void
+DATA cmds arr 10 struct Command 2 name i64 handler func 2 i32 ptr i64 void
+FUNC sh_init_cmds 0 void
 FUNC sh_dispatch 2 i32 ptr i64 void
 FUNC shell 0 void
 SOURCE oskit/apps/init.sysl
