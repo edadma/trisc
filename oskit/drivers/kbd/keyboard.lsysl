@@ -21,8 +21,8 @@ Device registers:
 Ring buffer for keyboard events. Each event is stored as a packed
 32-bit value: scancode(8) | flags(8) | modifiers(8) | reserved(8).
 
-    val KB_BUF_SIZE = 256
-    var kb_buf: [256]int
+    val KB_BUF_SIZE = 16
+    var kb_buf: [16]int
     var kb_head = 0
     var kb_tail = 0
     var kb_count = 0

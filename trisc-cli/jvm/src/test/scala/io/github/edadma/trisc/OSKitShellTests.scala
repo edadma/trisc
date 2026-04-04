@@ -182,4 +182,17 @@ import oskit.apps.*
     val (_, output) = runShell(maxCycles = 20000000, scheduledKeys = keys)
     output should include("abcdefghijklmn")
   }
+
+  "Shell: keyboard buffer overflow drops keys gracefully" in {
+    // With KB_BUF_SIZE=16, burst 20 keypresses at the same tick to overflow the buffer.
+    // The system must not crash — excess events are silently dropped.
+    // Then type a normal command to prove the shell is still alive.
+    val burst = typeString("abcdefghijklmnopqrst", startTick = 500000, spacing = 1)
+    val cmd   = typeString("\npwd\n", startTick = 600000, spacing = 50000)
+    val (cpu, output) = runShell(maxCycles = 20000000, scheduledKeys = burst ++ cmd)
+    // Shell must still be responsive — pwd should produce "/"
+    output should include("/")
+    // Must not crash
+    cpu.state should not be State.Halt
+  }
 }
