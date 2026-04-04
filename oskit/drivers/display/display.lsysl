@@ -370,7 +370,7 @@ display server without knowing the IPC protocol details.
             i += 1
         var reply: [4]i8
         ipc_send(port, &msg[0], 10 + i, &reply[0], 4)
-        int(reply[1]) & 0xFF  // win_id
+        int(reply[2]) & 0xFF  // surf_id (used for drawing into the window)
 
     ds_set_color(r: int, g: int, b: int, a: int)
         val port = ds_connect()

@@ -20,16 +20,18 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
     l
   }
 
-  def raise(irq: Int): Unit =
+  def raise(irq: Int): Unit = synchronized {
     pending |= (1 << irq)
     delivered &= ~(1 << irq)
     log.trace(f"raise IRQ $irq — pending=$pending%02x delivered=$delivered%02x", category = "INTC")
+  }
 
-  def lower(irq: Int): Unit =
+  def lower(irq: Int): Unit = synchronized {
     pending &= ~(1 << irq)
     log.trace(f"lower IRQ $irq — pending=$pending%02x", category = "INTC")
+  }
 
-  def readByte(addr: Long): Int =
+  def readByte(addr: Long): Int = synchronized {
     (addr - base).toInt match
       case PENDING => pending & 0xff
       case ENABLED => enabled & 0xff
@@ -42,8 +44,9 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
           delivered &= ~(1 << irq)
           irq
       case _ => 0
+  }
 
-  def writeByte(addr: Long, data: Long): Unit =
+  def writeByte(addr: Long, data: Long): Unit = synchronized {
     (addr - base).toInt match
       case ENABLED => enabled = data.toInt & 0xff
       case ACK =>
@@ -51,9 +54,11 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
         pending &= ~(1 << irq)
         delivered &= ~(1 << irq)
       case _ =>
+  }
 
-  def apply(cpu: CPU): Unit =
+  def apply(cpu: CPU): Unit = synchronized {
     val active = (pending & enabled) & ~delivered
     if active != 0 then
       delivered |= active
       cpu.interrupt()
+  }

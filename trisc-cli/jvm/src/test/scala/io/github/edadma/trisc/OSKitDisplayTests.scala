@@ -109,6 +109,58 @@ class OSKitDisplayTests extends OSKitTestHelpers {
     cpu.run()
     (cpu, output.toString)
 
+  "Display server: OS desktop from TOF file" in {
+    // Load the TOF file that the GUI would use
+    val tofStr = scala.io.Source.fromFile("/tmp/os-desktop.tof").mkString
+    val linked = TOF.deserialize(tofStr)
+    linked.tofType shouldBe TOFType.Executable
+
+    val output = new StringBuilder
+    val stdout = new Stdout(0x100000, s => output ++= s)
+    val intc = new InterruptController(Runtime.intcAddress)
+    val timer = new Timer(Runtime.timerAddress, intc, irq = 0)
+    val kbd = new KeyboardDevice(Runtime.keyboardAddress, intc, irq = 1)
+    val mouse = new MouseDevice(Runtime.mouseAddress, intc, irq = 2)
+    val fb = new FramebufferImage(Runtime.framebufferAddress, Runtime.framebufferMaxSize)
+    val displayCtrl = new HeadlessDisplayController(Runtime.displayCtrlAddress, fb)
+    var memRef: Addressable = null
+    val memProxy: Addressable = new Addressable {
+      val name = "memProxy"; val base = 0L; val size = 0L
+      def readByte(addr: Long): Int = memRef.readByte(addr)
+      def writeByte(addr: Long, data: Long): Unit = ()
+      def loadByte(addr: Long, data: Long): Unit = ()
+      override def readInt(addr: Long): Int = memRef.readInt(addr)
+    }
+    val drawEngine = new DrawEngine(
+      Runtime.drawEngineAddress, memProxy, fb,
+      () => displayCtrl.currentFBWidth, () => displayCtrl.currentFBHeight,
+    )
+    // Include ramdisk like the GUI does
+    val ram = new RAM(0, 0x100000)
+    val ramdisk = new Ramdisk(Runtime.ramdiskAddress, ram, sectors = 2048, sectorSize = 512, intc, irq = 3,
+      prefill = "/dev/tty0 char 0 0\n/dev/disk0 block 1 0\n/dev/null char 0 1\n")
+    val blitter = new Blitter(Runtime.blitterAddress, memProxy, fb,
+      () => displayCtrl.currentFBWidth, () => displayCtrl.currentFBHeight)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, mouse, displayCtrl, fb, drawEngine, ramdisk, blitter)
+    memRef = mem
+    linked.load(mem)
+    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = 20000000 }
+    cpu.reset()
+    cpu.run()
+    println(s"TOF file output: '$output' state=${cpu.state}")
+    output.toString should include("!")
+  }
+
+  "Display server: OS desktop demo" in {
+    val appSysl = scala.io.Source.fromFile("examples/draw-hello/os-desktop.sysl").mkString
+    val (cpu, output) = runDisplay(Map("app" -> appSysl), maxCycles = 20000000)
+    println(s"Output: '$output'")
+    output should include("S")  // server started
+    output should include("A")  // app started
+    output should include("P")  // port found
+    output should include("!")  // completed
+  }
+
   "Display server: client creates a window" in {
     val (cpu, output) = runDisplay(Map(
       "app" ->
@@ -134,12 +186,12 @@ class OSKitDisplayTests extends OSKitTestHelpers {
           |    title[2] = byte(108) // l
           |    title[3] = byte(108) // l
           |    title[4] = byte(111) // o
-          |    val wid = ds_create_window(50, 50, 200, 150, 3, &title[0], 5)
-          |    if wid > 0
+          |    val surf = ds_create_window(50, 50, 200, 150, 3, &title[0], 5)
+          |    if surf > 0
           |        putc('W')
           |    // Draw into the window
           |    ds_set_color(0, 200, 255, 255)
-          |    ds_clear(wid + 1)
+          |    ds_clear(surf)
           |    putc('D')
           |    ds_composite()
           |    putc('!')
