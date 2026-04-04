@@ -433,7 +433,7 @@ class SyslParser extends StandardTokenParsers {
             // Indirect call: expr(args) — e is a function pointer
             e match
               case VarRefAST(name) => CallAST(name, args)
-              case _ => MethodCallAST(e, "", args) // TODO: indirect call on arbitrary expression
+              case _ => IndirectCallAST(e, args)
           case (e, _) => e // shouldn't happen
         }
       }

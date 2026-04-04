@@ -696,6 +696,17 @@ class SyslAnalyzer:
           case ArrayType(_, _) => TCap(tArg, I32)
           case t => throw AnalysisError(s"cap() not supported on $t")
 
+      case IndirectCallAST(callee, args) =>
+        val tCallee = analyzeExpr(callee)
+        val tArgs = args.map(analyzeExpr)
+        tCallee.typ match
+          case FuncType(paramTypes, returnType) =>
+            val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
+            val checkedArgs = checkArgs("<indirect>", params, tArgs)
+            TIndirectCall(tCallee, checkedArgs, returnType)
+          case other =>
+            throw AnalysisError(s"cannot call expression of type $other as a function")
+
       case MethodCallAST(obj, method, args) =>
         val tObj = analyzeExpr(obj)
         val tArgs = args.map(analyzeExpr)
@@ -713,11 +724,27 @@ class SyslAnalyzer:
           case other => throw AnalysisError(s"cannot call method '$method' on $other")
         // Look up the method
         val funcName = s"${structName}_$method"
-        if !functions.contains(funcName) then
-          throw AnalysisError(s"struct $structName has no method '$method'")
-        val funInfo = functions(funcName)
-        val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs) // .tail skips self param
-        TCall(funcName, selfArg :: checkedArgs, funInfo.returnType)
+        if functions.contains(funcName) then
+          val funInfo = functions(funcName)
+          val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs) // .tail skips self param
+          TCall(funcName, selfArg :: checkedArgs, funInfo.returnType)
+        else
+          // Fall back to calling a function-typed field
+          val st = tObj.typ match
+            case s: StructType        => s
+            case PtrType(s: StructType) => s
+            case RefType(s: StructType) => s
+            case _ => throw AnalysisError(s"struct $structName has no method '$method'")
+          st.fields.zipWithIndex.find(_._1._1 == method) match
+            case Some(((_, FuncType(paramTypes, returnType)), idx)) =>
+              val fieldAccess = TFieldAccess(tObj, idx, FuncType(paramTypes, returnType))
+              val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
+              val checkedArgs = checkArgs(s"$structName.$method", params, tArgs)
+              TIndirectCall(fieldAccess, checkedArgs, returnType)
+            case Some(((_, other), _)) =>
+              throw AnalysisError(s"field '$method' of struct $structName is $other, not a function")
+            case None =>
+              throw AnalysisError(s"struct $structName has no method or field '$method'")
 
       case CallAST(name, args) =>
         val tArgs = args.map(analyzeExpr)
