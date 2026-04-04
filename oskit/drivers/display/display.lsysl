@@ -82,6 +82,7 @@ Server → Client reply format:
     val DS_FILL_RRECT = 9
     val DS_SET_FONT = 10
     val DS_COMPOSITE = 11
+    val DS_GET_KEY = 12
 
 Server state.
 
@@ -89,6 +90,34 @@ Server state.
     var ds_tid = -1
     var ds_fb_width = 0
     var ds_fb_height = 0
+
+    // Keyboard event buffer (server-side)
+    val DS_KEY_BUF_SIZE = 32
+    var ds_key_buf: [32]int
+    var ds_key_head = 0
+    var ds_key_tail = 0
+    var ds_key_count = 0
+
+    extern kb_has_key() -> int
+    extern kb_read_key() -> int
+    extern keyboard_set_notify(tid: int)
+
+    ds_handle_keyboard()
+        // Drain all buffered key events from the keyboard driver
+        while kb_has_key() != 0
+            val evt = kb_read_key()
+            if ds_key_count < DS_KEY_BUF_SIZE
+                ds_key_buf[ds_key_tail] = evt
+                ds_key_tail = (ds_key_tail + 1) % DS_KEY_BUF_SIZE
+                ds_key_count += 1
+
+    ds_pop_key() -> int
+        if ds_key_count == 0
+            return 0
+        val evt = ds_key_buf[ds_key_head]
+        ds_key_head = (ds_key_head + 1) % DS_KEY_BUF_SIZE
+        ds_key_count -= 1
+        evt
 
 Low-level DrawEngine register access.
 
@@ -300,6 +329,17 @@ the message buffer and translated to DrawEngine operations.
             ipc_reply(sender, &reply[0], 1)
             return
 
+        if cmd == DS_GET_KEY
+            // Return next key event: reply[0]=status, reply[1-4]=packed key event (big-endian)
+            val key = ds_pop_key()
+            reply[0] = byte(1)
+            reply[1] = byte((key >> 24) & 0xFF)
+            reply[2] = byte((key >> 16) & 0xFF)
+            reply[3] = byte((key >> 8) & 0xFF)
+            reply[4] = byte(key & 0xFF)
+            ipc_reply(sender, &reply[0], 5)
+            return
+
         if cmd == DS_COMPOSITE
             ds_exec(CMD_COMPOSITE)
             ds_mouse_composite = 1
@@ -331,17 +371,21 @@ up the wallpaper, and enters the event loop.
         ds_port = port_create()
         port_register(ds_port, "display")
 
-        // Register for mouse notifications
+        // Register for mouse and keyboard notifications
         mouse_set_notify(ds_tid)
+        keyboard_set_notify(ds_tid)
 
         // Event loop
         var buf: [128]i8
         while true
             val result = ipc_recv_notify(ds_port, &buf[0], 128)
             if result == -2
-                // Notification — mouse event; consume to clear pending flag
-                notify_read(ds_tid)
-                ds_handle_mouse()
+                // Notification — check source and handle
+                val nval = notify_read(ds_tid)
+                if nval == 1
+                    ds_handle_keyboard()
+                elif nval == 2
+                    ds_handle_mouse()
             elif result >= 0
                 // IPC message from client
                 ds_handle_message(result, &buf[0], 128)
@@ -445,3 +489,12 @@ display server without knowing the IPC protocol details.
         msg[0] = byte(DS_COMPOSITE)
         var reply: [2]i8
         ipc_send(port, &msg[0], 1, &reply[0], 2)
+
+    ds_get_key() -> int
+        val port = ds_connect()
+        if port < 0 then return 0
+        var msg: [2]i8
+        msg[0] = byte(DS_GET_KEY)
+        var reply: [8]i8
+        ipc_send(port, &msg[0], 1, &reply[0], 5)
+        ((int(reply[1]) & 0xFF) << 24) | ((int(reply[2]) & 0xFF) << 16) | ((int(reply[3]) & 0xFF) << 8) | (int(reply[4]) & 0xFF)

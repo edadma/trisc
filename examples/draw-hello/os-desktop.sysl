@@ -193,6 +193,39 @@ draw_terminal(surf: int)
     text(surf, 87, 200, 12, 0, &t_sep[0], 4, 120, 120, 140)
     fill(surf, 120, 190, 8, 14, 50, 255, 120, 255)
 
+// HID scancode to ASCII (basic printable chars)
+// HID scancodes: a-z = 0x04-0x1D, 1-9 = 0x1E-0x26, 0 = 0x27, space = 0x2C
+// Returns 0 for non-printable
+hid_to_ascii(sc: int, mods: int) -> int
+    val shift = mods & 1
+    if sc >= 0x04
+        if sc <= 0x1D
+            // a-z
+            if shift != 0
+                return sc - 0x04 + 65  // A-Z
+            return sc - 0x04 + 97  // a-z
+    if sc >= 0x1E
+        if sc <= 0x26
+            // 1-9
+            return sc - 0x1E + 49
+    if sc == 0x27
+        return 48  // 0
+    if sc == 0x2C
+        return 32  // space
+    if sc == 0x28
+        return 10  // enter
+    if sc == 0x2D
+        return 45  // -
+    if sc == 0x2E
+        return 61  // =
+    if sc == 0x36
+        return 44  // ,
+    if sc == 0x37
+        return 46  // .
+    if sc == 0x38
+        return 47  // /
+    0
+
 // Client app — creates windows and draws content via display server IPC
 app_main()
     // Wait for display server to start
@@ -224,6 +257,46 @@ app_main()
     // Final composite to show everything
     ds_composite()
     putc('!')
+
+    // Key echo loop — type into the terminal window
+    var input_buf: [64]i8
+    var input_len = 0
+    val input_y = 220  // below existing terminal content
+
+    while true
+        val key = ds_get_key()
+        if key != 0
+            val sc = (key >> 24) & 0xFF
+            val press = (key >> 16) & 1
+            val mods = (key >> 8) & 0xFF
+            if press != 0
+                val ch = hid_to_ascii(sc, mods)
+                if ch != 0
+                    if ch == 10
+                        // Enter — clear input
+                        input_len = 0
+                    elif input_len < 63
+                        input_buf[input_len] = byte(ch)
+                        input_len += 1
+                    // Clear input line and redraw
+                    fill(surf3, 15, input_y - 12, 500, 16, 8, 8, 14, 255)
+                    // Draw prompt
+                    text(surf3, 15, input_y, 12, 0, &t_user[0], 9, 0, 220, 255)
+                    text(surf3, 87, input_y, 12, 0, &t_sep[0], 4, 120, 120, 140)
+                    // Draw typed text
+                    if input_len > 0
+                        de_target(surf3)
+                        de_color(220, 220, 240, 255)
+                        de_pos(120, input_y)
+                        ds_write16(DE_FONT_SIZE, 12)
+                        ds_write8(DE_FONT_STYLE, 0)
+                        de_text(&input_buf[0], input_len)
+                        ds_exec(0x09)  // DRAW_TEXT
+                    // Cursor after text
+                    fill(surf3, 120 + input_len * 8, input_y - 12, 8, 14, 50, 255, 120, 255)
+                    ds_composite()
+        else
+            yield()
 
 // Kernel entry point — boot the OS
 kernel_main() -> int
