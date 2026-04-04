@@ -1,26 +1,61 @@
 // OS-based windowed desktop demo
 // Uses the full OS stack: kernel, IPC, display server, mouse driver
-// The display server handles mouse input and window management via IPC
-// Client app creates windows and draws content through the display server API
+// Window creation and compositing go through IPC to the display server.
+// Drawing uses direct DrawEngine register writes for performance (client-side rendering).
 
 import oskit.*
 
 FB_WIDTH  = 1440
 FB_HEIGHT = 900
 
+// Direct DrawEngine helpers for client-side rendering (no IPC overhead)
+// Uses ds_write8/ds_write16/ds_exec from the display server module
+de_color(r: int, g: int, b: int, a: int)
+    ds_write8(DE_R, r)
+    ds_write8(DE_G, g)
+    ds_write8(DE_B, b)
+    ds_write8(DE_A, a)
+
+de_pos(x: int, y: int)
+    ds_write16(DE_X1, x)
+    ds_write16(DE_Y1, y)
+
+de_sz(w: int, h: int)
+    ds_write16(DE_X2, w)
+    ds_write16(DE_Y2, h)
+
+de_target(surf: int)
+    ds_write8(DE_TARGET, surf)
+
+de_text(s: *i8, len: int)
+    var i = 0
+    while i < len
+        if i >= 31 then break
+        ds_write8(DE_TEXT_BUF + i, int(s[i]))
+        i += 1
+    ds_write8(DE_TEXT_BUF + i, 0)
+
 // The display server thread — boots up the graphical subsystem
 server_main()
     putc('S')  // server starting
     display_server(FB_WIDTH, FB_HEIGHT)
 
-// Helper: convert int array to i8 array for display server API
+// Drawing helpers using direct DrawEngine access
 fill(surf: int, x: int, y: int, w: int, h: int, r: int, g: int, b: int, a: int)
-    ds_set_color(r, g, b, a)
-    ds_fill_rect(surf, x, y, w, h)
+    de_target(surf)
+    de_color(r, g, b, a)
+    de_pos(x, y)
+    de_sz(w, h)
+    ds_exec(0x10)
 
 text(surf: int, x: int, y: int, sz: int, style: int, s: *i8, len: int, r: int, g: int, b: int)
-    ds_set_color(r, g, b, 255)
-    ds_draw_text(surf, x, y, sz, style, s, len)
+    de_target(surf)
+    de_color(r, g, b, 255)
+    de_pos(x, y)
+    ds_write16(DE_FONT_SIZE, sz)
+    ds_write8(DE_FONT_STYLE, style)
+    de_text(s, len)
+    ds_exec(0x09)
 
 // String data as i8 arrays for the display server API
 t_mon: [14]i8 = [83, 121, 115, 116, 101, 109, 32, 77, 111, 110, 105, 116, 111, 114]
@@ -68,9 +103,11 @@ t_7: [1]i8 = [55]
 t_8: [1]i8 = [56]
 t_9: [1]i8 = [57]
 
-// Draw system monitor content via display server
+// Draw system monitor content (direct DrawEngine)
 draw_monitor(surf: int)
-    fill(surf, 0, 0, 420, 240, 18, 18, 28, 255)
+    de_target(surf)
+    de_color(18, 18, 28, 255)
+    ds_exec(0x01)  // CLEAR
     fill(surf, 15, 10, 390, 110, 12, 12, 20, 255)
     text(surf, 20, 25, 10, 0, &t_cpu_u[0], 9, 0, 200, 230)
 
@@ -86,9 +123,11 @@ draw_monitor(surf: int)
     fill(surf, 200, 177, 150, 12, 20, 20, 35, 255)
     fill(surf, 200, 177, 60, 12, 0, 200, 230, 255)
 
-// Draw editor content via display server
+// Draw editor content (direct DrawEngine)
 draw_editor(surf: int)
-    fill(surf, 0, 0, 500, 200, 15, 15, 22, 255)
+    de_target(surf)
+    de_color(15, 15, 22, 255)
+    ds_exec(0x01)  // CLEAR
 
     // Line numbers
     text(surf, 7, 20, 12, 0, &t_1[0], 1, 60, 60, 80)
@@ -119,9 +158,11 @@ draw_editor(surf: int)
     // Cursor
     fill(surf, 35, 175, 7, 14, 220, 80, 255, 255)
 
-// Draw terminal content via display server
+// Draw terminal content (direct DrawEngine)
 draw_terminal(surf: int)
-    fill(surf, 0, 0, 530, 220, 8, 8, 14, 255)
+    de_target(surf)
+    de_color(8, 8, 14, 255)
+    ds_exec(0x01)  // CLEAR
 
     text(surf, 15, 20, 12, 0, &t_banner1[0], 12, 50, 255, 120)
     text(surf, 15, 40, 12, 0, &t_banner2[0], 18, 50, 255, 120)
@@ -155,7 +196,7 @@ draw_terminal(surf: int)
 // Client app — creates windows and draws content via display server IPC
 app_main()
     // Wait for display server to start
-    sleep(50)
+    sleep(5)
     putc('A')  // app started
 
     val port = ds_connect()
@@ -190,10 +231,9 @@ kernel_main() -> int
     keyboard_init()
     mouse_init()
 
-    // Display server at high priority (handles mouse input)
+    // Display server and client at same priority (round-robin scheduling)
     create_thread_pri(server_main, 0x20000, 0x1F000, "disp", 0)
-    // Client app at normal priority
-    create_thread_pri(app_main, 0x30000, 0x2F000, "app", 1)
+    create_thread_pri(app_main, 0x30000, 0x2F000, "app", 0)
 
     timer_init(1000)
     first_thread_ssp()

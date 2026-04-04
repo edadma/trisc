@@ -14,6 +14,7 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
   private var pending: Int = 0
   private var enabled: Int = 0xff // all sources enabled by default
   private var delivered: Int = 0
+  @volatile private var irqSignal: Boolean = false // fast cross-thread signal
   val log: Logger = {
     val l = new Logger(new ConsoleHandler, new DefaultLogFormatter(includeTimestamp = false))
     l.setLogLevel(LogLevel.OFF)
@@ -23,6 +24,7 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
   def raise(irq: Int): Unit = synchronized {
     pending |= (1 << irq)
     delivered &= ~(1 << irq)
+    irqSignal = true // cheap volatile write to wake fast-path check
     log.trace(f"raise IRQ $irq — pending=$pending%02x delivered=$delivered%02x", category = "INTC")
   }
 
@@ -56,9 +58,14 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
       case _ =>
   }
 
-  def apply(cpu: CPU): Unit = synchronized {
-    val active = (pending & enabled) & ~delivered
-    if active != 0 then
-      delivered |= active
-      cpu.interrupt()
-  }
+  def apply(cpu: CPU): Unit =
+    if !irqSignal then return // fast path: single volatile read, no lock
+    irqSignal = false
+    synchronized {
+      val active = (pending & enabled) & ~delivered
+      if active != 0 then
+        delivered |= active
+        cpu.interrupt()
+      // Re-arm signal if more interrupts pending
+      if (pending & enabled) != 0 then irqSignal = true
+    }

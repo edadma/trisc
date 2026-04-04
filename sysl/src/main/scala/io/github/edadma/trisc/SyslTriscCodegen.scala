@@ -514,7 +514,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitAddImm(2, 5, local.offset)
           emitStore(1, 2, local.typ)
         else
-          val gtyp = globals.getOrElse(target, SyslType.I64)
+          val gtyp = globals.getOrElse(target, value.typ) // use value type for cross-unit globals
           emit(s"  movi r2, $target")
           emitLoad(1, 2, gtyp)
           emit("  popd r3")
@@ -711,10 +711,11 @@ class SyslTriscCodegen(addresses: Int = 4):
               emitLoad(1, 2, local.typ)
         else
           emit(s"  movi r1, $name")
-          globals.getOrElse(name, SyslType.I64) match
+          val gt = globals.getOrElse(name, typ) // use AST type for cross-unit globals
+          gt match
             case _: SyslType.ArrayType | _: SyslType.StructType =>
               () // arrays/structs: address is the value
-            case gt =>
+            case _ =>
               emitLoad(1, 1, gt)
 
       case TBinary(left, "&&", right, _) =>

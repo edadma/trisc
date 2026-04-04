@@ -165,8 +165,11 @@ object EmulatorGui:
 
       // Reset
       resetBtn.addActionListener(_ => {
+        cpu.state = State.Halt // stop the old CPU thread's run() loop
         terminal.clear(Color.GREEN, Color.BLACK)
         parser.reset()
+        fb.clear() // clear framebuffer so stale content doesn't flash
+        drawEngine.reset() // clear all DrawEngine state (windows, surfaces, buffers)
         val layout = displayPanel.getLayout.asInstanceOf[CardLayout]
         layout.show(displayPanel, "terminal")
         cpuState = TriscCli.setupCpu(linked, outputFn, guiDevices, intc)

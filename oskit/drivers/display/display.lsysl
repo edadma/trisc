@@ -161,7 +161,13 @@ composite.
     extern mouse_y: int
     extern mouse_buttons: int
 
+    var ds_mouse_composite = 0
+
     ds_handle_mouse()
+        // Skip mouse processing entirely until first client composite
+        // This prevents mouse events from stealing CPU during initial window setup
+        if ds_mouse_composite == 0
+            return
         val mx = mouse_x
         val my = mouse_y
         val btn = mouse_buttons
@@ -175,7 +181,6 @@ composite.
         else
             ds_write8(DE_WIN_FLAGS, flags & 0x0F)
         ds_exec(CMD_PROCESS_MOUSE)
-        // Recomposite
         ds_exec(CMD_COMPOSITE)
 
 Handle IPC messages from clients. Each command is parsed from
@@ -297,6 +302,7 @@ the message buffer and translated to DrawEngine operations.
 
         if cmd == DS_COMPOSITE
             ds_exec(CMD_COMPOSITE)
+            ds_mouse_composite = 1
             ipc_reply(sender, &reply[0], 1)
             return
 
@@ -333,7 +339,8 @@ up the wallpaper, and enters the event loop.
         while true
             val result = ipc_recv_notify(ds_port, &buf[0], 128)
             if result == -2
-                // Notification — mouse event
+                // Notification — mouse event; consume to clear pending flag
+                notify_read(ds_tid)
                 ds_handle_mouse()
             elif result >= 0
                 // IPC message from client

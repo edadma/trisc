@@ -83,7 +83,6 @@ class CPU(mem: Addressable, tick: Seq[CPU => Unit] = Nil, mpu: Option[MPU] = Non
 
   private def checkAlign(addr: Long, align: Int): Boolean =
     if (addr & (align - 1)) != 0 then
-      System.err.println(f"[MISALIGN] addr=0x${addr}%04X align=$align pc=0x${pc}%04X r1=0x${r(1).read}%X r7=0x${r(7).read}%X")
       state = State.MisalignedAccess
       true
     else false
