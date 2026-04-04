@@ -36,6 +36,9 @@ Output helpers. These use the TTY server for all I/O.
     sh_puts(s: *i8)
         tty_puts(s, strlen(s))
 
+    sh_print(s: string)
+        tty_puts(*i8(s), len(s))
+
     sh_newline()
         sh_putc('\n')
 
@@ -268,10 +271,10 @@ Built-in commands.
 
     sh_not_found(name: *i8)
         sh_puts(name)
-        sh_puts(*i8(": not found\n"))
+        sh_print(": not found\n")
 
     sh_error()
-        sh_puts(*i8("error\n"))
+        sh_print("error\n")
 
     cmd_ls(argc: int, argv: *i64)
         var dir_ino = cwd_ino
@@ -299,7 +302,7 @@ Built-in commands.
 
     cmd_cat(argc: int, argv: *i64)
         if argc < 2
-            sh_puts(*i8("usage: cat <file>\n"))
+            sh_print("usage: cat <file>\n")
             return
         val ino = sh_resolve_path(*i8(argv[1]))
         if ino < 0
@@ -371,7 +374,7 @@ Built-in commands.
         fs_stat(ino, st)
         val ftype = (st[0] >> 12) & 0xF
         if ftype != 2
-            sh_puts(*i8("not a directory\n"))
+            sh_print("not a directory\n")
             return
         cwd_ino = ino
         // Update cwd_path
@@ -398,23 +401,23 @@ Built-in commands.
         fs_stat(ino, st)
         // Type
         val ftype = (st[0] >> 12) & 0xF
-        sh_puts(*i8("type: "))
+        sh_print("type: ")
         if ftype == 1
-            sh_puts(*i8("file"))
+            sh_print("file")
         else if ftype == 2
-            sh_puts(*i8("dir"))
+            sh_print("dir")
         else
             sh_putint(ftype)
         sh_newline()
-        sh_puts(*i8("size: "))
+        sh_print("size: ")
         sh_putint(st[4])
         sh_newline()
-        sh_puts(*i8("ino: "))
+        sh_print("ino: ")
         sh_putint(ino)
         sh_newline()
 
     cmd_help(argc: int, argv: *i64)
-        sh_puts(*i8("echo ls cat mkdir rm rmdir pwd cd stat help\n"))
+        sh_print("echo ls cat mkdir rm rmdir pwd cd stat help\n")
 
 Command dispatch table. Each entry pairs a command name with
 its handler function. All handlers have the same signature
@@ -424,31 +427,31 @@ so they can be stored as function pointers.
     val NUM_CMDS = 10
 
     struct Command
-        name: i64
+        name: string
         handler: func(int, *i64)
 
     var cmds: [10]Command
 
     sh_init_cmds()
-        cmds[0].name = i64(*i8("echo"))
+        cmds[0].name = "echo"
         cmds[0].handler = cmd_echo
-        cmds[1].name = i64(*i8("ls"))
+        cmds[1].name = "ls"
         cmds[1].handler = cmd_ls
-        cmds[2].name = i64(*i8("cat"))
+        cmds[2].name = "cat"
         cmds[2].handler = cmd_cat
-        cmds[3].name = i64(*i8("mkdir"))
+        cmds[3].name = "mkdir"
         cmds[3].handler = cmd_mkdir
-        cmds[4].name = i64(*i8("rm"))
+        cmds[4].name = "rm"
         cmds[4].handler = cmd_rm
-        cmds[5].name = i64(*i8("rmdir"))
+        cmds[5].name = "rmdir"
         cmds[5].handler = cmd_rmdir
-        cmds[6].name = i64(*i8("pwd"))
+        cmds[6].name = "pwd"
         cmds[6].handler = cmd_pwd
-        cmds[7].name = i64(*i8("cd"))
+        cmds[7].name = "cd"
         cmds[7].handler = cmd_cd
-        cmds[8].name = i64(*i8("stat"))
+        cmds[8].name = "stat"
         cmds[8].handler = cmd_stat
-        cmds[9].name = i64(*i8("help"))
+        cmds[9].name = "help"
         cmds[9].handler = cmd_help
 
     sh_dispatch(argc: int, argv: *i64)

@@ -320,4 +320,42 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
         |""".stripMargin)
     output shouldBe "Hi"
   }
+
+  "string comparison ==" in {
+    val (cpu, _) = runWithBoot(
+      """main() -> int
+        |    val s = "hello"
+        |    if s == "hello"
+        |        42
+        |    else
+        |        0
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 42
+  }
+
+  "string len()" in {
+    val (cpu, _) = runWithBoot(
+      """main() -> int
+        |    val s = "hello"
+        |    len(s)
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 5
+  }
+
+  "string as function parameter" in {
+    val (_, output) = runWithBoot(
+      """extern putchar(ch: int)
+        |
+        |emit_str(s: string)
+        |    var i = 0
+        |    while i < len(s)
+        |        putchar(s[i])
+        |        i += 1
+        |
+        |main() -> int
+        |    emit_str("OK")
+        |    0
+        |""".stripMargin)
+    output shouldBe "OK"
+  }
 }
