@@ -376,6 +376,111 @@ class SyslCodegenRefTests extends SyslCodegenHelpers {
         |""".stripMargin, 4096)) shouldBe 4950
   }
 
+  // ===== deinit =====
+
+  "deinit called on reassignment" in {
+    compileMultiAndRun(refSources(
+      """import posix.stdlib.{malloc, free}
+        |
+        |var deinit_count = 0
+        |
+        |struct Resource
+        |    id: int
+        |
+        |Resource.deinit()
+        |    deinit_count = deinit_count + 1
+        |
+        |main() -> int
+        |    var r = new Resource(1)
+        |    r = new Resource(2)
+        |    deinit_count
+        |""".stripMargin)) shouldBe 1
+  }
+
+  "deinit accesses fields" in {
+    compileMultiAndRun(refSources(
+      """import posix.stdlib.{malloc, free}
+        |
+        |var last_id = 0
+        |
+        |struct Resource
+        |    id: int
+        |
+        |Resource.deinit()
+        |    last_id = self.id
+        |
+        |main() -> int
+        |    var r = new Resource(42)
+        |    r = new Resource(99)
+        |    last_id
+        |""".stripMargin)) shouldBe 42
+  }
+
+  "deinit not called while refs remain" in {
+    compileMultiAndRun(refSources(
+      """import posix.stdlib.{malloc, free}
+        |
+        |var deinit_count = 0
+        |
+        |struct Resource
+        |    id: int
+        |
+        |Resource.deinit()
+        |    deinit_count = deinit_count + 1
+        |
+        |main() -> int
+        |    val a = new Resource(1)
+        |    val b = a
+        |    deinit_count
+        |""".stripMargin)) shouldBe 0
+  }
+
+  "deinit in loop with small heap" in {
+    compileMultiAndRun(refSources(
+      """import posix.stdlib.{malloc, free}
+        |
+        |var deinit_count = 0
+        |
+        |struct Resource
+        |    id: int
+        |
+        |Resource.deinit()
+        |    deinit_count = deinit_count + 1
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 50
+        |        val r = new Resource(i)
+        |        i++
+        |    deinit_count
+        |""".stripMargin, 4096)) shouldBe 50
+  }
+
+  "deinit on direct new-as-arg" in {
+    compileMultiAndRun(refSources(
+      """import posix.stdlib.{malloc, free}
+        |
+        |var deinit_count = 0
+        |
+        |struct Box
+        |    value: int
+        |
+        |Box.deinit()
+        |    deinit_count = deinit_count + 1
+        |
+        |get(b: &Box) -> int = b.value
+        |
+        |main() -> int
+        |    var sum = 0
+        |    var i = 0
+        |    while i < 20
+        |        sum += get(new Box(i))
+        |        i++
+        |    if deinit_count == 20 then return sum
+        |    -1
+        |""".stripMargin, 4096)) shouldBe 190
+  }
+
   "shared ref sees mutation" in {
     compileMultiAndRun(refSources(
       """import posix.stdlib.malloc
