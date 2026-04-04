@@ -1,0 +1,299 @@
+SUIT — Sysl UI Toolkit (v0.1)
+
+Immediate mode UI toolkit for SLIX. Widgets are rendered by
+calling functions in a frame loop. Layout is vertical stacking.
+Hit testing uses mouse state from the display server.
+
+    module suit
+
+    import oskit.drivers.display.*
+    import oskit.drivers.mouse.{mouse_x, mouse_y, mouse_buttons}
+    import oskit.drivers.kbd.{kb_scancode, kb_is_press, kb_modifiers}
+
+Theme colors.
+
+    val SUIT_BG_R = 22
+    val SUIT_BG_G = 22
+    val SUIT_BG_B = 32
+
+    val SUIT_FG_R = 220
+    val SUIT_FG_G = 220
+    val SUIT_FG_B = 240
+
+    val SUIT_ACCENT_R = 60
+    val SUIT_ACCENT_G = 130
+    val SUIT_ACCENT_B = 255
+
+    val SUIT_BTN_R = 40
+    val SUIT_BTN_G = 40
+    val SUIT_BTN_B = 55
+
+    val SUIT_BTN_HOVER_R = 55
+    val SUIT_BTN_HOVER_G = 55
+    val SUIT_BTN_HOVER_B = 75
+
+    val SUIT_INPUT_BG_R = 15
+    val SUIT_INPUT_BG_G = 15
+    val SUIT_INPUT_BG_B = 22
+
+    val SUIT_BORDER_R = 60
+    val SUIT_BORDER_G = 60
+    val SUIT_BORDER_B = 80
+
+    val SUIT_FONT_SIZE = 13
+    val SUIT_PADDING = 8
+    val SUIT_SPACING = 6
+    val SUIT_BTN_HEIGHT = 28
+    val SUIT_INPUT_HEIGHT = 26
+    val SUIT_CHAR_WIDTH = 8
+
+Frame state — set by ui_begin, used by all widgets.
+
+    var _suit_surf = 0
+    var _suit_x = 0
+    var _suit_y = 0
+    var _suit_w = 0
+    var _suit_h = 0
+    var _suit_cursor_y = 0
+    var _suit_mouse_x = 0
+    var _suit_mouse_y = 0
+    var _suit_mouse_btn = 0
+    var _suit_prev_btn = 0
+    var _suit_clicked = 0
+    var _suit_focus = -1
+    var _suit_widget_id = 0
+
+Low-level DrawEngine helpers.
+
+    _suit_color(r: int, g: int, b: int, a: int)
+        ds_write8(DE_R, r)
+        ds_write8(DE_G, g)
+        ds_write8(DE_B, b)
+        ds_write8(DE_A, a)
+
+    _suit_pos(x: int, y: int)
+        ds_write16(DE_X1, x)
+        ds_write16(DE_Y1, y)
+
+    _suit_size(w: int, h: int)
+        ds_write16(DE_X2, w)
+        ds_write16(DE_Y2, h)
+
+    _suit_fill(x: int, y: int, w: int, h: int, r: int, g: int, b: int)
+        ds_write8(DE_TARGET, _suit_surf)
+        _suit_color(r, g, b, 255)
+        _suit_pos(x, y)
+        _suit_size(w, h)
+        ds_exec(0x10)
+
+    _suit_text(x: int, y: int, s: *i8, len: int, r: int, g: int, b: int)
+        ds_write8(DE_TARGET, _suit_surf)
+        _suit_color(r, g, b, 255)
+        _suit_pos(x, y)
+        ds_write16(DE_FONT_SIZE, SUIT_FONT_SIZE)
+        ds_write8(DE_FONT_STYLE, 0)
+        var i = 0
+        while i < len
+            if i >= 31 then break
+            ds_write8(DE_TEXT_BUF + i, int(s[i]))
+            i += 1
+        ds_write8(DE_TEXT_BUF + i, 0)
+        ds_exec(0x09)
+
+    _suit_strlen(s: *i8) -> int
+        var i = 0
+        while s[i] != 0
+            i += 1
+        i
+
+Hit testing — is point (mx, my) inside rect (x, y, w, h)?
+
+    _suit_hit(x: int, y: int, w: int, h: int) -> int
+        if _suit_mouse_x >= x
+            if _suit_mouse_x < x + w
+                if _suit_mouse_y >= y
+                    if _suit_mouse_y < y + h
+                        return 1
+        0
+
+Frame management.
+
+    ui_begin(surf: int, w: int, h: int)
+        _suit_surf = surf
+        _suit_w = w
+        _suit_h = h
+        _suit_cursor_y = SUIT_PADDING
+        _suit_widget_id = 0
+        // Read mouse state (direct access — same module)
+        _suit_prev_btn = _suit_mouse_btn
+        _suit_mouse_x = mouse_x
+        _suit_mouse_y = mouse_y
+        _suit_mouse_btn = mouse_buttons & 1
+        // Detect click (press then release)
+        _suit_clicked = 0
+        if _suit_prev_btn != 0
+            if _suit_mouse_btn == 0
+                _suit_clicked = 1
+        // Clear background
+        ds_write8(DE_TARGET, surf)
+        _suit_color(SUIT_BG_R, SUIT_BG_G, SUIT_BG_B, 255)
+        ds_exec(0x01)
+
+    ui_end()
+        // Nothing to do yet — future: flush dirty state
+        0
+
+Label — static text.
+
+    ui_label(s: *i8)
+        val len = _suit_strlen(s)
+        val x = SUIT_PADDING
+        val y = _suit_cursor_y
+        _suit_text(x, y + SUIT_FONT_SIZE, s, len, SUIT_FG_R, SUIT_FG_G, SUIT_FG_B)
+        _suit_cursor_y = y + SUIT_FONT_SIZE + SUIT_SPACING + 2
+
+Button — returns 1 if clicked this frame.
+
+    ui_button(s: *i8) -> int
+        val len = _suit_strlen(s)
+        val x = SUIT_PADDING
+        val y = _suit_cursor_y
+        val bw = len * SUIT_CHAR_WIDTH + SUIT_PADDING * 2
+        val bh = SUIT_BTN_HEIGHT
+        val id = _suit_widget_id
+        _suit_widget_id += 1
+
+        // Hover detection
+        val hover = _suit_hit(x, y, bw, bh)
+
+        // Draw button background
+        if hover != 0
+            _suit_fill(x, y, bw, bh, SUIT_BTN_HOVER_R, SUIT_BTN_HOVER_G, SUIT_BTN_HOVER_B)
+        else
+            _suit_fill(x, y, bw, bh, SUIT_BTN_R, SUIT_BTN_G, SUIT_BTN_B)
+
+        // Border
+        ds_write8(DE_TARGET, _suit_surf)
+        if hover != 0
+            _suit_color(SUIT_ACCENT_R, SUIT_ACCENT_G, SUIT_ACCENT_B, 255)
+        else
+            _suit_color(SUIT_BORDER_R, SUIT_BORDER_G, SUIT_BORDER_B, 255)
+        _suit_pos(x, y)
+        _suit_size(x + bw, y + bh)
+        ds_write16(14, 16)  // LINE_W = 1 pixel
+        ds_exec(0x15)  // STROKE_ROUND_RECT
+        ds_write8(23, 4)  // CORNER_R
+
+        // Text centered in button
+        val tx = x + SUIT_PADDING
+        val ty = y + (bh + SUIT_FONT_SIZE) / 2 - 2
+        _suit_text(tx, ty, s, len, SUIT_FG_R, SUIT_FG_G, SUIT_FG_B)
+
+        _suit_cursor_y = y + bh + SUIT_SPACING
+
+        // Return 1 if clicked on this button
+        if _suit_clicked != 0
+            if hover != 0
+                return 1
+        0
+
+Text input — displays content of a buffer, handles key input when focused.
+
+    ui_input(buf: *i8, buf_size: int, buf_len: *int) -> int
+        val x = SUIT_PADDING
+        val y = _suit_cursor_y
+        val iw = _suit_w - SUIT_PADDING * 2
+        val ih = SUIT_INPUT_HEIGHT
+        val id = _suit_widget_id
+        _suit_widget_id += 1
+
+        // Click to focus
+        if _suit_clicked != 0
+            if _suit_hit(x, y, iw, ih) != 0
+                _suit_focus = id
+            else
+                // Clicked elsewhere — unfocus if we had focus
+                if _suit_focus == id
+                    _suit_focus = -1
+
+        val focused = 0
+        if _suit_focus == id
+            focused = 1
+
+        // Draw input background
+        _suit_fill(x, y, iw, ih, SUIT_INPUT_BG_R, SUIT_INPUT_BG_G, SUIT_INPUT_BG_B)
+
+        // Border — accent if focused
+        ds_write8(DE_TARGET, _suit_surf)
+        if focused != 0
+            _suit_color(SUIT_ACCENT_R, SUIT_ACCENT_G, SUIT_ACCENT_B, 255)
+        else
+            _suit_color(SUIT_BORDER_R, SUIT_BORDER_G, SUIT_BORDER_B, 255)
+        _suit_pos(x, y)
+        _suit_size(x + iw, y + ih)
+        ds_write16(14, 16)  // LINE_W
+        ds_write8(23, 3)  // CORNER_R
+        ds_exec(0x15)  // STROKE_ROUND_RECT
+
+        // Draw text content
+        val cur_len = *buf_len
+        if cur_len > 0
+            _suit_text(x + 6, y + (ih + SUIT_FONT_SIZE) / 2 - 2, buf, cur_len,
+                       SUIT_FG_R, SUIT_FG_G, SUIT_FG_B)
+
+        // Draw cursor if focused
+        if focused != 0
+            val cx = x + 6 + cur_len * SUIT_CHAR_WIDTH
+            _suit_fill(cx, y + 4, 2, ih - 8, SUIT_ACCENT_R, SUIT_ACCENT_G, SUIT_ACCENT_B)
+
+        _suit_cursor_y = y + ih + SUIT_SPACING
+
+        // Return 1 if this input has focus (caller can check for key events)
+        focused
+
+HID scancode to ASCII — basic printable characters.
+
+    suit_hid_to_ascii(sc: int, mods: int) -> int
+        val shift = mods & 1
+        if sc >= 0x04
+            if sc <= 0x1D
+                if shift != 0
+                    return sc - 0x04 + 65
+                return sc - 0x04 + 97
+        if sc >= 0x1E
+            if sc <= 0x26
+                return sc - 0x1E + 49
+        if sc == 0x27 then return 48
+        if sc == 0x2C then return 32
+        if sc == 0x28 then return 10
+        if sc == 0x2D then return 45
+        if sc == 0x2E then return 61
+        if sc == 0x36 then return 44
+        if sc == 0x37 then return 46
+        if sc == 0x38 then return 47
+        0
+
+Process a key event for the focused input widget.
+Call this with the raw key event from ds_get_key.
+Returns the ASCII character if it was a printable key press, 0 otherwise.
+
+    ui_process_key(key: int, buf: *i8, buf_size: int, buf_len: *int) -> int
+        if key == 0 then return 0
+        val sc = (key >> 24) & 0xFF
+        val press = (key >> 16) & 1
+        val mods = (key >> 8) & 0xFF
+        if press == 0 then return 0
+        // Backspace
+        if sc == 0x2A
+            if *buf_len > 0
+                *buf_len = *buf_len - 1
+                buf[*buf_len] = 0
+            return 0
+        val ch = suit_hid_to_ascii(sc, mods)
+        if ch != 0
+            if ch != 10  // not enter
+                if *buf_len < buf_size - 1
+                    buf[*buf_len] = byte(ch)
+                    *buf_len = *buf_len + 1
+                    buf[*buf_len] = 0
+        ch
