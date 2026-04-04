@@ -28,17 +28,6 @@ FUNC cmd_cd 2 i32 ptr i64 void
 FUNC cmd_stat 2 i32 ptr i64 void
 FUNC cmd_help 0 void
 DATA MAX_ARGS i32
-DATA _cmd_echo arr 5 i8
-DATA _cmd_ls arr 3 i8
-DATA _cmd_cat arr 4 i8
-DATA _cmd_mkdir arr 6 i8
-DATA _cmd_rm arr 3 i8
-DATA _cmd_rmdir arr 6 i8
-DATA _cmd_pwd arr 4 i8
-DATA _cmd_cd arr 3 i8
-DATA _cmd_stat arr 5 i8
-DATA _cmd_help arr 5 i8
-FUNC sh_init_cmds 0 void
 FUNC sh_dispatch 2 i32 ptr i64 void
 FUNC shell 0 void
 SOURCE oskit/apps/init.sysl
