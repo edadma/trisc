@@ -1555,7 +1555,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  slt r4, r2, r3") // r4 = (index < len)
         emit(s"  bne r4, r0, $boundsOk")
         emit(s"$boundsErr")
-        emit("  halt")           // trap on out of bounds
+        emit("  ldi r1, 1")     // error code: 1 = out-of-bounds
+        emit("  trap 1")
         emit(s"$boundsOk")
         // Load byte at ptr + index
         emit("  ldd r1, r1, r0") // r1 = ptr (from struct offset 0)
@@ -1580,7 +1581,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  slt r4, r2, r3")
         emit(s"  bne r4, r0, $boundsOk")
         emit(s"$boundsErr")
-        emit("  halt")
+        emit("  ldi r1, 1")     // error code: 1 = out-of-bounds
+        emit("  trap 1")
         emit(s"$boundsOk")
         // Load element at ptr + index * elemSize
         emit("  ldd r1, r1, r0") // r1 = ptr
@@ -1817,7 +1819,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit(s"  bne r4, r0, $errLabel")
         emit(s"  bra $okLabel")
         emit(s"$errLabel")
-        emit("  halt")
+        emit("  ldi r1, 1")           // error code: 1 = out-of-bounds
+        emit("  trap 1")
         emit(s"$okLabel")
 
         // Pop len and cap
