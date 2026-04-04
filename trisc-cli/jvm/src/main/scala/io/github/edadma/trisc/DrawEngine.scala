@@ -222,15 +222,26 @@ class DrawEngine(
   // Double buffer for flicker-free compositing
   private var backBuffer: BufferedImage = null
   private var backG2D: Graphics2D = null
+  // Scene buffer — back buffer WITHOUT cursor, for fast cursor-only redraws
+  private var sceneBuffer: BufferedImage = null
+  private var sceneG2D: Graphics2D = null
+  private var sceneDirty = true // true = need full recomposite
+  private var lastCursorX = -1
+  private var lastCursorY = -1
 
-  private def ensureBackBuffer(w: Int, h: Int): Graphics2D =
+  private def ensureBuffers(w: Int, h: Int): Unit =
     if backBuffer == null || backBuffer.getWidth != w || backBuffer.getHeight != h then
       if backG2D != null then backG2D.dispose()
+      if sceneG2D != null then sceneG2D.dispose()
       backBuffer = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB)
       backG2D = backBuffer.createGraphics()
       backG2D.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
       backG2D.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
-    backG2D
+      sceneBuffer = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB)
+      sceneG2D = sceneBuffer.createGraphics()
+      sceneG2D.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+      sceneG2D.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
+      sceneDirty = true
 
   // Path state
   private var path = new GeneralPath()
@@ -302,18 +313,18 @@ class DrawEngine(
   private def execute(cmd: Int): Unit =
     cmd match
       // Drawing commands — target the current surface
-      case c if c >= 0x01 && c <= 0x1F => executeDraw(c)
+      case c if c >= 0x01 && c <= 0x1F => executeDraw(c); sceneDirty = true
       // Surface commands
-      case 0x20 => createSurface()
-      case 0x21 => destroySurface()
+      case 0x20 => createSurface(); sceneDirty = true
+      case 0x21 => destroySurface(); sceneDirty = true
       // Window commands
-      case 0x30 => createWindow()
-      case 0x31 => destroyWindow()
-      case 0x32 => setWindowPos()
-      case 0x33 => setWindowTitle()
-      case 0x34 => setWindowFlags()
-      case 0x35 => raiseWindow()
-      case 0x36 => resizeWindow()
+      case 0x30 => createWindow(); sceneDirty = true
+      case 0x31 => destroyWindow(); sceneDirty = true
+      case 0x32 => setWindowPos(); sceneDirty = true
+      case 0x33 => setWindowTitle(); sceneDirty = true
+      case 0x34 => setWindowFlags(); sceneDirty = true
+      case 0x35 => raiseWindow(); sceneDirty = true
+      case 0x36 => resizeWindow(); sceneDirty = true
       case 0x37 => hitTest()
       // Cursor commands
       case 0x38 => cursorX = reg16(X1); cursorY = reg16(Y1)
@@ -321,21 +332,22 @@ class DrawEngine(
       case 0x3B => minimizeWindow()
       case 0x3C => maximizeWindow()
       case 0x3D => restoreWindow()
-      case 0x3E => setScroll()
-      case 0x3F => setViewport()
+      case 0x3E => setScroll(); sceneDirty = true
+      case 0x3F => setViewport(); sceneDirty = true
       // Window opacity
       case 0x46 =>
         val wid = regs(WIN_ID) & 0xFF
         if wid > 0 && wid < MaxWindows && windows(wid) != null then
           windows(wid).opacity = regs(ALPHA) & 0xFF
+          sceneDirty = true
       case 0x3A => cursorSurfaceId = regs(TARGET) & 0xFF
       // Compositor
       case 0x40 => composite()
       case 0x41 => processMouse()
       case 0x42 => zOrderQuery()
-      case 0x43 => setWallpaperColor()
-      case 0x44 => setWallpaperGradient()
-      case 0x45 => setWallpaperImage()
+      case 0x43 => setWallpaperColor(); sceneDirty = true
+      case 0x44 => setWallpaperGradient(); sceneDirty = true
+      case 0x45 => setWallpaperImage(); sceneDirty = true
       case _ =>
 
   private def executeDraw(cmd: Int): Unit =
@@ -647,6 +659,7 @@ class DrawEngine(
       if win != null then
         win.x = mx - dragOffsetX
         win.y = my - dragOffsetY
+        sceneDirty = true
 
     if justPressed then
       // Hit test to find window under cursor
@@ -657,6 +670,7 @@ class DrawEngine(
         if windowOrder.contains(hitWid) then
           windowOrder -= hitWid
           windowOrder += hitWid
+          sceneDirty = true
         if onTitleBar then
           // Begin drag
           val win = windows(hitWid)
@@ -733,11 +747,32 @@ class DrawEngine(
 
   // === Compositor ===
 
+  private val CursorSize = 20 // bounding box for cursor region
+
   private def composite(): Unit =
     val fw = fbWidth()
     val fh = fbHeight()
-    val g = ensureBackBuffer(fw, fh)
+    ensureBuffers(fw, fh)
 
+    if sceneDirty then
+      // Full recomposite — render all windows into scene buffer
+      compositeScene(sceneG2D, fw, fh)
+      sceneDirty = false
+
+    // Copy scene to back buffer
+    backG2D.drawImage(sceneBuffer, 0, 0, null)
+
+    // Draw cursor on back buffer
+    if cursorVisible then drawCursor(backG2D)
+
+    // Blit complete frame to display in one operation
+    fb.g2d.drawImage(backBuffer, 0, 0, null)
+
+    lastCursorX = cursorX
+    lastCursorY = cursorY
+
+  /** Render all windows (without cursor) into the given graphics context */
+  private def compositeScene(g: Graphics2D, fw: Int, fh: Int): Unit =
     // Draw wallpaper
     wallpaperMode match
       case 1 => // Solid color
@@ -826,12 +861,6 @@ class DrawEngine(
           // Reset opacity
           if win.opacity < 255 then
             g.setComposite(AlphaComposite.SrcOver)
-
-    // Draw cursor last (always on top)
-    if cursorVisible then drawCursor(g)
-
-    // Blit complete frame to display in one operation
-    fb.g2d.drawImage(backBuffer, 0, 0, null)
 
   private def drawCursor(g: Graphics2D): Unit =
     // Custom cursor surface
