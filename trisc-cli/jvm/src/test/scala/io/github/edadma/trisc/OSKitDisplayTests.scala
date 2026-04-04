@@ -56,10 +56,10 @@ class OSKitDisplayTests extends OSKitTestHelpers {
   def runDisplay(userSources: Map[String, String], maxCycles: Int = 10000000): (CPU, String) =
     val bootTof = assemble(bootAsm, relocatable = true)
     val allSources = Map(
-      "oskit/kernel" -> kernelSysl, "oskit/services" -> servicesSysl, "oskit/timer" -> timerSysl,
-      "oskit/semaphore" -> semaphoreSysl, "oskit/mutex" -> mutexSysl,
-      "oskit/ipc" -> ipcSysl, "oskit/kbd" -> kbdSysl,
-      "oskit/mouse" -> mouseSysl, "oskit/display" -> displaySysl,
+      "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
+      "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
+      "oskit/ipc/ipc" -> ipcSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl,
+      "oskit/drivers/mouse/mouse" -> mouseSysl, "oskit/drivers/display/display" -> displaySysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -164,7 +164,12 @@ class OSKitDisplayTests extends OSKitTestHelpers {
   "Display server: client creates a window" in {
     val (cpu, output) = runDisplay(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.display.*
+import oskit.drivers.kbd.*
+import oskit.drivers.mouse.*
           |
           |kernel_main() -> int
           |    ipc_init()

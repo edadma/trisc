@@ -1,0 +1,18 @@
+SMETA v1
+SOURCE oskit/drivers/kbd/keyboard.sysl
+DATA KB_BASE i32
+DATA KB_IRQ i32
+DATA KB_BUF_SIZE i32
+DATA kb_buf arr 256 i32
+DATA kb_head i32
+DATA kb_tail i32
+DATA kb_count i32
+DATA kb_notify_tid i32
+FUNC keyboard_set_notify 1 i32 void
+FUNC keyboard_init 0 void
+FUNC keyboard_handler 0 void
+FUNC kb_has_key 0 i32
+FUNC kb_read_key 0 i32
+FUNC kb_scancode 1 i32 i32
+FUNC kb_is_press 1 i32 i32
+FUNC kb_modifiers 1 i32 i32

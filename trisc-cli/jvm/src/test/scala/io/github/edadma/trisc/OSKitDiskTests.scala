@@ -28,13 +28,13 @@ class OSKitDiskTests extends OSKitTestHelpers {
   ): (CPU, String) =
     val bootTof = assemble(bootAsm, relocatable = true)
     val allSources = Map(
-      "oskit/kernel" -> kernelSysl,
-      "oskit/services" -> servicesSysl,
-      "oskit/timer" -> timerSysl,
-      "oskit/semaphore" -> semaphoreSysl,
-      "oskit/mutex" -> mutexSysl,
-      "oskit/ipc" -> ipcSysl,
-      "oskit/disk" -> diskSysl,
+      "oskit/kernel/kernel" -> kernelSysl,
+      "oskit/services/services" -> servicesSysl,
+      "oskit/kernel/timer" -> timerSysl,
+      "oskit/sync/semaphore" -> semaphoreSysl,
+      "oskit/sync/mutex" -> mutexSysl,
+      "oskit/ipc/ipc" -> ipcSysl,
+      "oskit/drivers/disk/disk" -> diskSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -81,15 +81,15 @@ class OSKitDiskTests extends OSKitTestHelpers {
   ): (CPU, String) =
     val bootTof = assemble(bootAsm, relocatable = true)
     val allSources = Map(
-      "oskit/kernel" -> kernelSysl,
-      "oskit/services" -> servicesSysl,
-      "oskit/timer" -> timerSysl,
-      "oskit/semaphore" -> semaphoreSysl,
-      "oskit/mutex" -> mutexSysl,
-      "oskit/ipc" -> ipcSysl,
-      "oskit/disk" -> diskSysl,
+      "oskit/kernel/kernel" -> kernelSysl,
+      "oskit/services/services" -> servicesSysl,
+      "oskit/kernel/timer" -> timerSysl,
+      "oskit/sync/semaphore" -> semaphoreSysl,
+      "oskit/sync/mutex" -> mutexSysl,
+      "oskit/ipc/ipc" -> ipcSysl,
+      "oskit/drivers/disk/disk" -> diskSysl,
       "oskit/fs/tfs" -> tfsSysl,
-      "oskit/tfs_srv" -> tfsSrvSysl,
+      "oskit/servers/tfs" -> tfsSrvSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -134,12 +134,15 @@ class OSKitDiskTests extends OSKitTestHelpers {
   "Disk: server registers and client discovers port" in {
     val (_, output) = runDisk(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.disk.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
-          |    create_thread(client, 0x20000, 0x1E000, "cli")
+          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
+          |    create_thread(client, 0x84000, 0x82000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -164,12 +167,15 @@ class OSKitDiskTests extends OSKitTestHelpers {
   "Disk: read block written by hardware" in {
     val (_, output) = runDisk(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.disk.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
-          |    create_thread(client, 0x20000, 0x1E000, "cli")
+          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
+          |    create_thread(client, 0x84000, 0x82000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -199,12 +205,15 @@ class OSKitDiskTests extends OSKitTestHelpers {
   "Disk: capacity returns sector count" in {
     val (_, output) = runDisk(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.disk.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
-          |    create_thread(client, 0x20000, 0x1E000, "cli")
+          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
+          |    create_thread(client, 0x84000, 0x82000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -223,12 +232,15 @@ class OSKitDiskTests extends OSKitTestHelpers {
   "Disk: multiple block read/write" in {
     val (_, output) = runDisk(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.disk.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
-          |    create_thread(client, 0x20000, 0x1E000, "cli")
+          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
+          |    create_thread(client, 0x84000, 0x82000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -258,13 +270,17 @@ class OSKitDiskTests extends OSKitTestHelpers {
   "FS: open root directory" in {
     val (_, output) = runFS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.disk.*
+import oskit.servers.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
-          |    create_thread(tfs_server, 0x20000, 0x1E000, "tfs")
-          |    create_thread(client, 0x30000, 0x2E000, "cli")
+          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
+          |    create_thread(tfs_server, 0x84000, 0x82000, "tfs")
+          |    create_thread(client, 0x88000, 0x86000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -286,13 +302,17 @@ class OSKitDiskTests extends OSKitTestHelpers {
   "FS: create and open a file" in {
     val (_, output) = runFS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.disk.*
+import oskit.servers.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
-          |    create_thread(tfs_server, 0x20000, 0x1E000, "tfs")
-          |    create_thread(client, 0x30000, 0x2E000, "cli")
+          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
+          |    create_thread(tfs_server, 0x84000, 0x82000, "tfs")
+          |    create_thread(client, 0x88000, 0x86000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -321,13 +341,17 @@ class OSKitDiskTests extends OSKitTestHelpers {
   "FS: write and read file data" in {
     val (_, output) = runFS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.disk.*
+import oskit.servers.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
-          |    create_thread(tfs_server, 0x20000, 0x1E000, "tfs")
-          |    create_thread(client, 0x30000, 0x2E000, "cli")
+          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
+          |    create_thread(tfs_server, 0x84000, 0x82000, "tfs")
+          |    create_thread(client, 0x88000, 0x86000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -363,13 +387,17 @@ class OSKitDiskTests extends OSKitTestHelpers {
   "FS: stat returns file size after write" in {
     val (_, output) = runFS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.disk.*
+import oskit.servers.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
-          |    create_thread(tfs_server, 0x20000, 0x1E000, "tfs")
-          |    create_thread(client, 0x30000, 0x2E000, "cli")
+          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
+          |    create_thread(tfs_server, 0x84000, 0x82000, "tfs")
+          |    create_thread(client, 0x88000, 0x86000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -401,13 +429,17 @@ class OSKitDiskTests extends OSKitTestHelpers {
   "FS: mkdir and readdir" in {
     val (_, output) = runFS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.disk.*
+import oskit.servers.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
-          |    create_thread(tfs_server, 0x20000, 0x1E000, "tfs")
-          |    create_thread(client, 0x30000, 0x2E000, "cli")
+          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
+          |    create_thread(tfs_server, 0x84000, 0x82000, "tfs")
+          |    create_thread(client, 0x88000, 0x86000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -442,13 +474,17 @@ class OSKitDiskTests extends OSKitTestHelpers {
   "FS: unlink removes file" in {
     val (_, output) = runFS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.disk.*
+import oskit.servers.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
-          |    create_thread(tfs_server, 0x20000, 0x1E000, "tfs")
-          |    create_thread(client, 0x30000, 0x2E000, "cli")
+          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
+          |    create_thread(tfs_server, 0x84000, 0x82000, "tfs")
+          |    create_thread(client, 0x88000, 0x86000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -478,13 +514,17 @@ class OSKitDiskTests extends OSKitTestHelpers {
   "FS: open file from prefilled filesystem" in {
     val (_, output) = runFS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.disk.*
+import oskit.servers.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
-          |    create_thread(tfs_server, 0x20000, 0x1E000, "tfs")
-          |    create_thread(client, 0x30000, 0x2E000, "cli")
+          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
+          |    create_thread(tfs_server, 0x84000, 0x82000, "tfs")
+          |    create_thread(client, 0x88000, 0x86000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -515,13 +555,17 @@ class OSKitDiskTests extends OSKitTestHelpers {
   "FS: read file from prefilled nested path" in {
     val (_, output) = runFS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.disk.*
+import oskit.servers.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
-          |    create_thread(tfs_server, 0x20000, 0x1E000, "tfs")
-          |    create_thread(client, 0x30000, 0x2E000, "cli")
+          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
+          |    create_thread(tfs_server, 0x84000, 0x82000, "tfs")
+          |    create_thread(client, 0x88000, 0x86000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |

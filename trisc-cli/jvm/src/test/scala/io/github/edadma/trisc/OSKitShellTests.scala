@@ -21,22 +21,24 @@ class OSKitShellTests extends OSKitTestHelpers {
   private lazy val shellLinked: TOF =
     val bootTof    = assemble(bootAsm, relocatable = true)
     val allSources = Map(
-      "oskit/kernel"     -> kernelSysl,
-      "oskit/services"   -> servicesSysl,
-      "oskit/timer"      -> timerSysl,
-      "oskit/semaphore"  -> semaphoreSysl,
-      "oskit/mutex"      -> mutexSysl,
-      "oskit/ipc"        -> ipcSysl,
-      "oskit/disk"       -> diskSysl,
-      "oskit/kbd"        -> kbdSysl,
-      "oskit/tty"        -> ttySysl,
-      "oskit/fs/tfs"     -> tfsSysl,
-      "oskit/tfs_srv"    -> tfsSrvSysl,
-      "oskit/lib/string" -> stringSysl,
-      "oskit/sh"         -> shSysl,
-      "oskit/init"       -> initSysl,
+      "oskit/kernel/kernel"      -> kernelSysl,
+      "oskit/services/services"  -> servicesSysl,
+      "oskit/kernel/timer"       -> timerSysl,
+      "oskit/sync/semaphore"     -> semaphoreSysl,
+      "oskit/sync/mutex"         -> mutexSysl,
+      "oskit/ipc/ipc"            -> ipcSysl,
+      "oskit/drivers/disk/disk"  -> diskSysl,
+      "oskit/drivers/kbd/keyboard" -> kbdSysl,
+      "oskit/drivers/tty/tty"    -> ttySysl,
+      "oskit/fs/tfs"             -> tfsSysl,
+      "oskit/servers/tfs"        -> tfsSrvSysl,
+      "oskit/lib/string"         -> stringSysl,
+      "oskit/apps/sh"            -> shSysl,
+      "oskit/apps/init"          -> initSysl,
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.ipc.*
+import oskit.apps.*
           |var _n: [2]i8
           |
           |kernel_main() -> int
@@ -140,25 +142,25 @@ class OSKitShellTests extends OSKitTestHelpers {
   // === Shell integration tests ===
 
   "Shell: init boots system" in {
-    val keys          = typeString("pwd\n", startTick = 4500000, spacing = 2000)
+    val keys          = typeString("pwd\n", startTick = 500000, spacing = 2000)
     val (cpu, output) = runShell(scheduledKeys = keys)
     output should include("/")
   }
 
   "Shell: echo command via putc" in {
-    val keys          = typeString("echo hi\n", startTick = 4500000, spacing = 2000)
+    val keys          = typeString("echo hi\n", startTick = 500000, spacing = 2000)
     val (cpu, output) = runShell(scheduledKeys = keys)
     output should include("hi")
   }
 
   "Shell: echo command" in {
-    val keys        = typeString("echo hi\n", startTick = 4500000, spacing = 2000)
+    val keys        = typeString("echo hi\n", startTick = 500000, spacing = 2000)
     val (_, output) = runShell(scheduledKeys = keys)
     output should include("hi")
   }
 
   "Shell: ls on root with prefilled file" in {
-    val keys        = typeString("ls\n", startTick = 4500000, spacing = 2000)
+    val keys        = typeString("ls\n", startTick = 500000, spacing = 2000)
     val (_, output) = runShell(
       prefill = """/hello file "world"""",
       scheduledKeys = keys,
@@ -167,11 +169,30 @@ class OSKitShellTests extends OSKitTestHelpers {
   }
 
   "Shell: pwd shows root" in {
-    val keys        = typeString("pwd\n", startTick = 4500000, spacing = 2000)
+    val keys        = typeString("pwd\n", startTick = 500000, spacing = 2000)
     val (_, output) = runShell(scheduledKeys = keys)
     // Output should show "/" from pwd
     // The prompt is "/ $ " and pwd prints "/"
     val pwdLines = output.split('\n').filter(_.trim == "/")
     pwdLines.length should be >= 1
+  }
+
+  "Shell: type 20 characters without crash" in {
+    val keys        = typeString("echo abcdefghijklmn\n", startTick = 500000, spacing = 50000)
+    val (_, output) = runShell(maxCycles = 20000000, scheduledKeys = keys)
+    output should include("abcdefghijklmn")
+  }
+
+  "Shell: keyboard buffer overflow drops keys gracefully" in {
+    // With KB_BUF_SIZE=16, burst 20 keypresses at the same tick to overflow the buffer.
+    // The system must not crash — excess events are silently dropped.
+    // Then type a normal command to prove the shell is still alive.
+    val burst = typeString("abcdefghijklmnopqrst", startTick = 500000, spacing = 1)
+    val cmd   = typeString("\npwd\n", startTick = 600000, spacing = 50000)
+    val (cpu, output) = runShell(maxCycles = 20000000, scheduledKeys = burst ++ cmd)
+    // Shell must still be responsive — pwd should produce "/"
+    output should include("/")
+    // Must not crash
+    cpu.state should not be State.Halt
   }
 }

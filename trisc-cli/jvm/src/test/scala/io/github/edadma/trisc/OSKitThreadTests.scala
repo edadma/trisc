@@ -5,7 +5,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: thread join waits for completion" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(worker, 0x10000, 0xF000, "worker")
@@ -33,7 +34,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: join on already-terminated thread returns immediately" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(fast, 0x10000, 0xF000, "fast")
@@ -59,7 +61,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: higher priority thread runs first" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread_pri(task_b, 0x14000, 0x13000, "b", 1)
@@ -84,7 +87,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: equal priority threads round-robin" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread_pri(task_a, 0x10000, 0xF000, "a", 1)
@@ -116,7 +120,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: uptime returns a value" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x10000, 0xF000, "task")
@@ -135,7 +140,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: uptime increases after sleep" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x10000, 0xF000, "task")
@@ -159,7 +165,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: thread_id returns current thread index" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task0, 0x10000, 0xF000, "t0")
@@ -183,7 +190,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: get_thread_count returns number of threads" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x10000, 0xF000, "task")
@@ -210,7 +218,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: get_thread_state returns correct states" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(checker, 0x10000, 0xF000, "checker")
@@ -236,7 +245,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: sleep_until blocks until absolute tick" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x10000, 0xF000, "task")
@@ -262,7 +272,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: context switch count increments" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x10000, 0xF000, "t")
@@ -287,7 +298,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: cpu ticks accumulate" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x10000, 0xF000, "t")
@@ -310,7 +322,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: total context switches tracks all threads" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task_a, 0x10000, 0xF000, "a")
@@ -345,7 +358,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: watchdog terminates runaway thread" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    set_watchdog(3)
@@ -378,7 +392,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: watchdog does not kill yielding thread" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    set_watchdog(3)
@@ -410,7 +425,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: putstr prints string" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x10000, 0xF000, "t")
@@ -431,7 +447,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: stack canary intact after normal execution" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x10000, 0xF000, "t")
@@ -455,7 +472,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: suspend and resume thread" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(worker, 0x10000, 0xF000, "w")
@@ -490,7 +508,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: suspended thread state is queryable" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(target, 0x10000, 0xF000, "t")
@@ -522,7 +541,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: panic terminates all threads" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x10000, 0xF000, "t")
@@ -546,7 +566,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: tls_set and tls_get basic" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x10000, 0xF000, "t")
@@ -572,7 +593,8 @@ class OSKitThreadTests extends OSKitTestHelpers {
   "TOS: tls is per-thread" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task_a, 0x10000, 0xF000, "a")

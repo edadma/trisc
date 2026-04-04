@@ -26,8 +26,8 @@ class OSKitBootTests extends OSKitTestHelpers {
     // Step 2: Compile Sysl files together (kernel + demo)
     val driver = new SyslDriver
     val result = driver.compile(Map(
-      "oskit/kernel" -> kernelSysl,
-      "oskit/services" -> servicesSysl,
+      "oskit/kernel/kernel" -> kernelSysl,
+      "oskit/services/services" -> servicesSysl,
       "tasks" -> tasksSysl,
       "main" -> mainSysl,
     ))

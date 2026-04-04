@@ -12,6 +12,10 @@ case class RunCommand(
     inputs: Seq[String] = Seq.empty,
     programArgs: Seq[String] = Seq.empty,
 ) extends SyslCommand
+case class DocCommand(
+    inputs: Seq[String] = Seq.empty,
+    output: Option[String] = None,
+) extends SyslCommand
 
 case class SyslConfig(
     command: SyslCommand = CompileCommand(),
@@ -75,6 +79,29 @@ object SyslCli:
               )
             ),
         ),
+      // doc: generate styled HTML page from literate source
+      cmd("doc")
+        .text("Generate a styled HTML page from a .lsysl file")
+        .action((_, c) => c.copy(command = DocCommand()))
+        .children(
+          opt[String]('o', "output")
+            .text("Output file or directory")
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case dc: DocCommand => dc.copy(output = Some(v))
+                case other          => other
+              )
+            ),
+          arg[String]("<source>...")
+            .unbounded()
+            .text("Literate source files (.lsysl) or a directory")
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case dc: DocCommand => dc.copy(inputs = dc.inputs :+ v)
+                case other          => other
+              )
+            ),
+        ),
       // Allow bare options/args (no subcommand) to default to compile
       opt[String]('o', "output")
         .hidden()
@@ -108,6 +135,8 @@ object SyslCli:
             failure("No input files specified")
           case RunCommand(inputs, _) if inputs.isEmpty =>
             failure("No input files specified for run")
+          case DocCommand(inputs, _) if inputs.isEmpty =>
+            failure("No input files specified for doc")
           case _ => success
       ),
     )
@@ -139,6 +168,7 @@ object SyslCli:
       config.command match
         case cmd: CompileCommand => executeCompile(cmd)
         case cmd: RunCommand     => executeRun(cmd)
+        case cmd: DocCommand     => executeDoc(cmd)
     catch case CliError(_) => () // already printed
 
   private def executeCompile(cmd: CompileCommand): Unit =
@@ -224,6 +254,42 @@ object SyslCli:
       wireStdlib(interpreter, stdlibImports, argv)
       val value = interpreter.run(merged)
       if value != 0 then println(value)
+
+  private def executeDoc(cmd: DocCommand): Unit =
+    val isModule = cmd.inputs.size == 1 && io.isDirectory(cmd.inputs.head)
+    val sources = resolveLiterateSources(cmd.inputs)
+    val backLink = if isModule then Some("index.html") else None
+
+    for (name, source) <- sources do
+      val html = LiterateRenderer.renderPage(source, name, backLink)
+      val outFile = outputPath(cmd.output, name, ".html", sources.size)
+      io.writeFile(outFile, html)
+      System.err.println(s"  $name -> $outFile")
+
+    if isModule then
+      val moduleName = io.fileName(cmd.inputs.head)
+      val sorted = sources.keys.toSeq.sorted.map(n => (n, n + ".html"))
+      val index = LiterateRenderer.renderIndex(moduleName, sorted)
+      val outDir = cmd.output.getOrElse(".")
+      if !io.exists(outDir) then io.mkdirs(outDir)
+      val indexFile = io.joinPath(outDir, "index.html")
+      io.writeFile(indexFile, index)
+      System.err.println(s"  index -> $indexFile")
+
+  private def resolveLiterateSources(inputs: Seq[String]): Map[String, String] =
+    if inputs.size == 1 && io.isDirectory(inputs.head) then
+      val files = io.listFiles(inputs.head).filter(f => io.fileName(f).endsWith(".lsysl"))
+      if files.isEmpty then
+        fail(s"error: no .lsysl files in directory: ${inputs.head}")
+      files.map(f => (io.fileName(f).stripSuffix(".lsysl"), io.readFile(f))).toMap
+    else
+      inputs.map { path =>
+        if !io.exists(path) then
+          fail(s"error: file not found: $path")
+        if !io.fileName(path).endsWith(".lsysl") then
+          fail(s"error: not a literate source file: $path")
+        (io.fileName(path).stripSuffix(".lsysl"), io.readFile(path))
+      }.toMap
 
   private def wireStdlib(interpreter: SyslInterpreter, imports: Set[String], argv: Array[String] = Array.empty): Unit =
     if imports.nonEmpty then

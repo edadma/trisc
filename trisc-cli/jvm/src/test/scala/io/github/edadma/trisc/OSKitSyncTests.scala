@@ -7,7 +7,9 @@ class OSKitSyncTests extends OSKitTestHelpers {
   "TOS: sem_init and sem_wait/sem_post basic" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var sem: i64 = 0
           |
@@ -32,7 +34,9 @@ class OSKitSyncTests extends OSKitTestHelpers {
   "TOS: semaphore enforces mutual exclusion between two tasks" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mutex: i64 = 0
           |
@@ -76,7 +80,9 @@ class OSKitSyncTests extends OSKitTestHelpers {
   "TOS: sem_trywait returns 0 when semaphore is zero" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var sem: i64 = 0
           |
@@ -101,7 +107,9 @@ class OSKitSyncTests extends OSKitTestHelpers {
   "TOS: counting semaphore allows N concurrent permits" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var sem: i64 = 0
           |var done_count: i64 = 0
@@ -144,7 +152,9 @@ class OSKitSyncTests extends OSKitTestHelpers {
   "TOS: sem_wait blocks until sem_post from another thread" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var sem: i64 = 0
           |
@@ -182,7 +192,9 @@ class OSKitSyncTests extends OSKitTestHelpers {
   "TOS: mutex basic lock/unlock" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: i64 = 0
           |
@@ -207,7 +219,9 @@ class OSKitSyncTests extends OSKitTestHelpers {
   "TOS: mutex_trylock fails when locked" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: i64 = 0
           |
@@ -243,7 +257,9 @@ class OSKitSyncTests extends OSKitTestHelpers {
   "TOS: condvar signal wakes one waiter" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: i64 = 0
           |var cv: Condvar
@@ -281,7 +297,9 @@ class OSKitSyncTests extends OSKitTestHelpers {
   "TOS: condvar broadcast wakes all waiters" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: i64 = 0
           |var cv: Condvar
@@ -328,7 +346,9 @@ class OSKitSyncTests extends OSKitTestHelpers {
   "TOS: barrier synchronizes three threads" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var bar: Barrier
           |
@@ -371,7 +391,9 @@ class OSKitSyncTests extends OSKitTestHelpers {
   "TOS: rwlock allows concurrent readers" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var rw: RWLock
           |
@@ -408,7 +430,9 @@ class OSKitSyncTests extends OSKitTestHelpers {
   "TOS: rwlock writer excludes readers" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var rw: RWLock
           |

@@ -17,6 +17,7 @@ case class AsmCommand(
 case class LinkCommand(
     inputs: Seq[String] = Seq.empty,
     output: Option[String] = None,
+    script: Option[String] = None,
 ) extends TriscCommand
 case class DisasmCommand(
     input: String = "",
@@ -112,6 +113,14 @@ object TriscCli:
                 case other           => other
               )
             ),
+          opt[String]('s', "script")
+            .text("Linker script file")
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case lc: LinkCommand => lc.copy(script = Some(v))
+                case other           => other
+              )
+            ),
           arg[String]("<file.tof>...")
             .unbounded()
             .text("TOF files to link")
@@ -141,7 +150,7 @@ object TriscCli:
             failure("No input file specified for run")
           case AsmCommand(input, _) if input.isEmpty =>
             failure("No input file specified for asm")
-          case LinkCommand(inputs, _) if inputs.isEmpty =>
+          case LinkCommand(inputs, _, _) if inputs.isEmpty =>
             failure("No input files specified for link")
           case DisasmCommand(input) if input.isEmpty =>
             failure("No input file specified for disasm")
@@ -223,7 +232,13 @@ object TriscCli:
 
   private def executeLink(cmd: LinkCommand): Unit =
     val tofs = cmd.inputs.map(f => TOF.deserialize(readFile(f)))
-    val linked = Linker.link(tofs)
+    val linked = cmd.script match
+      case Some(path) =>
+        val script = LinkerScriptParser.parse(readFile(path)) match
+          case Right(s) => s
+          case Left(e)  => throw new RuntimeException(s"Failed to parse linker script: $e")
+        Linker.link(tofs, script, 0)
+      case None => Linker.link(tofs)
     val outFile = cmd.output.getOrElse("out.tof")
     writeFile(outFile, linked.serialize)
     System.err.println(s"  -> $outFile")

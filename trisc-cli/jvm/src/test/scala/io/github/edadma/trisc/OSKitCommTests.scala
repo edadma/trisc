@@ -7,7 +7,9 @@ class OSKitCommTests extends OSKitTestHelpers {
   "TOS: channel send and receive" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var ch: Channel
           |var buf: [4]i64
@@ -37,7 +39,9 @@ class OSKitCommTests extends OSKitTestHelpers {
   "TOS: channel blocks sender when full" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var ch: Channel
           |var buf: [2]i64
@@ -75,7 +79,9 @@ class OSKitCommTests extends OSKitTestHelpers {
   "TOS: mailbox send and receive" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mb: Mailbox
           |
@@ -103,7 +109,9 @@ class OSKitCommTests extends OSKitTestHelpers {
   "TOS: mailbox blocks sender until receiver drains" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mb: Mailbox
           |
