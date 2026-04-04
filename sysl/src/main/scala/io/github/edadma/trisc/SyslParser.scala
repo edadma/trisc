@@ -478,6 +478,7 @@ class SyslParser extends StandardTokenParsers {
       "sizeof" ~> "(" ~> sizeofArg <~ ")" |
       "new" ~> "[" ~> expr ~ ("]" ~> typeRef) ^^ { case size ~ elemType => NewArrayAST(size, elemType) } |
       "new" ~> ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => NewExprAST(name, args) } |
+      "string" ~> "(" ~> rep1sep(expr, ",") <~ ")" ^^ { args => CallAST("string", args) } |
       cast |
       ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |
       ident ^^ VarRefAST.apply |
