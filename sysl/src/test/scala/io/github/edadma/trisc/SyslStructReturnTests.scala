@@ -173,4 +173,38 @@ class SyslStructReturnTests extends SyslTestHelpers {
         |    0
         |""".stripMargin) shouldBe 0  // just check it parses — x is a tuple
   }
+
+  // ===== Parallel assignment (swap) =====
+
+  "a, b = b, a swaps values" in {
+    eval(
+      """main() -> int
+        |    a = 10
+        |    b = 20
+        |    a, b = b, a
+        |    a * 100 + b
+        |""".stripMargin) shouldBe 2010
+  }
+
+  "parallel assignment from function" in {
+    eval(
+      """divmod(a: int, b: int) -> (int, int) = a / b, a % b
+        |
+        |main() -> int
+        |    q = 0
+        |    r = 0
+        |    q, r = divmod(17, 5)
+        |    q * 10 + r
+        |""".stripMargin) shouldBe 32
+  }
+
+  "mixed declared/undeclared is error" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """main() -> int
+        |    a = 10
+        |    a, b = 20, 30
+        |    0
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
 }

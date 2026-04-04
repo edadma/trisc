@@ -314,6 +314,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         for (name, i) <- names.zipWithIndex do
           env(name) = new Cell(cells(off + i).value)
 
+      case TDestructureAssignStmt(names, _, init) =>
+        // Parallel assignment: evaluate RHS fully, then assign all values
+        val ArrVal(cells, off) = evalAny(init, env): @unchecked
+        val values = names.indices.map(i => cells(off + i).value)
+        for (name, v) <- names.zip(values) do
+          lookupCell(name, env).value = v
+
       case TAssignStmt(target, value) =>
         val v = evalAny(value, env)
         // Increment refcount for copies only
