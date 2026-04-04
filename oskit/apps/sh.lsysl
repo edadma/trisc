@@ -19,7 +19,8 @@ Built-in commands:
 
     import oskit.lib.streq
     import oskit.fs.ROOT_INODE
-    import posix.string.{strlen, strtok, strcpy, strcat}
+    import posix.string.{strlen, strtok}
+    import posix.stdlib.malloc
     import oskit.services.{sleep}
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
     import oskit.servers.{fs_open, fs_read, fs_write, fs_create, fs_unlink, fs_stat, fs_mkdir, fs_rmdir, fs_readdir}
@@ -27,7 +28,7 @@ Built-in commands:
 Shell state: current working directory as inode and path string.
 
     var cwd_ino = 1
-    var cwd_path: [128]i8
+    var cwd_path: string
 
 Output helpers. These use the TTY server for all I/O.
 
@@ -39,6 +40,9 @@ Output helpers. These use the TTY server for all I/O.
 
     sh_print(s: string)
         tty_puts(*i8(s), len(s))
+
+    str(s: *i8) -> string
+        string(s, strlen(s))
 
     sh_newline()
         sh_putc('\n')
@@ -242,17 +246,14 @@ from cwd by building an absolute path.
     sh_resolve_path(path: *i8) -> int
         if path[0] == '/'
             return fs_open(path)
-        // Relative path — build absolute path
-        var abspath: [256]i8
-        strcpy(abspath, cwd_path)
-        val cwdlen = strlen(cwd_path)
-        if cwdlen > 1
-            abspath[cwdlen] = '/'
-            abspath[cwdlen + 1] = 0
-        else if cwdlen == 1
-            abspath[1] = 0
-        strcat(abspath, path)
-        fs_open(abspath)
+        // Relative path — build absolute path from cwd
+        val s = str(path)
+        var full: string
+        if len(cwd_path) == 1
+            full = "/" + s
+        else
+            full = cwd_path + "/" + s
+        fs_open(*i8(full))
 
 Built-in commands.
 
@@ -347,15 +348,14 @@ Built-in commands.
             sh_error()
 
     cmd_pwd(argc: int, argv: *i64)
-        sh_puts(cwd_path)
+        sh_print(cwd_path)
         sh_newline()
 
     cmd_cd(argc: int, argv: *i64)
         if argc < 2
             // cd with no args → go to root
             cwd_ino = ROOT_INODE
-            cwd_path[0] = '/'
-            cwd_path[1] = 0
+            cwd_path = "/"
             return
         val ino = sh_resolve_path(*i8(argv[1]))
         if ino < 0
@@ -371,15 +371,13 @@ Built-in commands.
         cwd_ino = ino
         // Update cwd_path
         // Update cwd_path
-        val arg1: *i8 = *i8(argv[1])
+        val arg1 = str(*i8(argv[1]))
         if arg1[0] == '/'
-            strcpy(cwd_path, arg1)
+            cwd_path = arg1
+        else if len(cwd_path) == 1
+            cwd_path = "/" + arg1
         else
-            val cwdlen = strlen(cwd_path)
-            if cwdlen > 1
-                cwd_path[cwdlen] = '/'
-                cwd_path[cwdlen + 1] = 0
-            strcat(cwd_path, arg1)
+            cwd_path = cwd_path + "/" + arg1
 
     cmd_stat(argc: int, argv: *i64)
         if argc < 2
@@ -460,8 +458,7 @@ tokenizes it, and dispatches to the appropriate command.
 
     shell()
         // Initialize
-        cwd_path[0] = '/'
-        cwd_path[1] = 0
+        cwd_path = "/"
         sh_init_cmds()
 
         // Wait for servers to start
