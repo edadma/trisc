@@ -14,7 +14,7 @@ Red-black invariants maintained by this implementation:
 4. Every path from root to nil has the same black depth
 
 
-    module oskit
+    module oskit.kernel
 
     val RB_BLACK = 0
     val RB_RED   = 1

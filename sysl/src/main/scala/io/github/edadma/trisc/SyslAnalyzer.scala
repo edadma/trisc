@@ -39,6 +39,7 @@ class SyslAnalyzer:
     "calloc" -> FunInfo("calloc", List("count" -> I64, "size" -> I64), PtrType(I8)),
     "realloc" -> FunInfo("realloc", List("ptr" -> PtrType(I8), "size" -> I64), PtrType(I8)),
     "sbrk" -> FunInfo("sbrk", List("increment" -> I32), PtrType(I8)),
+    "abort" -> FunInfo("abort", Nil, VoidType),
   )
 
   def registerImport(meta: ModuleMeta, selectors: List[ImportSelector] = List(WildcardImport)): Unit =
@@ -267,8 +268,8 @@ class SyslAnalyzer:
       info
 
   private def lookupFun(name: String): FunInfo =
-    builtinFunctions.getOrElse(name,
-      functions.getOrElse(name,
+    functions.getOrElse(name,
+      builtinFunctions.getOrElse(name,
         throw AnalysisError(s"undefined function: '$name'")))
 
   private def checkArgs(name: String, params: List[(String, SyslType)], args: List[TExpr]): List[TExpr] =
@@ -278,7 +279,10 @@ class SyslAnalyzer:
       val coerced = coerceLiteral(arg, pType)
       if !compatible(coerced.typ, pType) then
         throw AnalysisError(s"argument '$pName' of '$name' expects $pType, got ${coerced.typ}")
-      coerced
+      // Insert explicit cast for string→*i8 decay so codegen can handle it
+      (coerced.typ, pType) match
+        case (StringType, PtrType(I8 | U8)) => TCast(coerced, pType)
+        case _ => coerced
     }
 
   private def analyzeBlock(stmts: List[StmtAST]): List[TStmt] =
@@ -579,6 +583,17 @@ class SyslAnalyzer:
           case t => throw AnalysisError(s"cannot index $t")
         TIndex(tArr, tIndex, elemType)
 
+      case SliceExprAST(arr, low, high) =>
+        val tArr = analyzeExpr(arr)
+        val tLow = low.map(analyzeExpr)
+        val tHigh = high.map(analyzeExpr)
+        val elemType = tArr.typ match
+          case SliceType(elem) => elem
+          case RefType(SliceType(elem)) => elem
+          case ArrayType(elem, _) => elem
+          case t => throw AnalysisError(s"cannot sub-slice $t")
+        TSliceExpr(tArr, tLow, tHigh, SliceType(elemType))
+
       case FieldAccessAST(VarRefAST(enumName), member) if enumTypes.contains(enumName) =>
         val members = enumTypes(enumName)
         if !members.contains(member) then throw AnalysisError(s"enum $enumName has no member '$member'")
@@ -620,6 +635,7 @@ class SyslAnalyzer:
         val tLeft = if tRight0.typ.isIntegral then coerceSignedness(tLeft0, tRight0.typ) else tLeft0
         val tRight = if tLeft.typ.isIntegral then coerceSignedness(tRight0, tLeft.typ) else tRight0
         val resultType = op match
+          case "+" if tLeft.typ == StringType && tRight.typ == StringType => StringType // string concatenation
           case "+" | "-" if tLeft.typ == StringType && tRight.typ.isNumeric =>
             throw AnalysisError("pointer arithmetic not allowed on string")
           case "+" | "-" if tLeft.typ.isPointerLike && tRight.typ.isNumeric => tLeft.typ
@@ -673,6 +689,7 @@ class SyslAnalyzer:
           case (from, to) if from.isIntegral && to.isIntegral => // integer to integer (including signed↔unsigned)
           case (_: PtrType, to) if to.isIntegral => // pointer to integer
           case (from, _: PtrType) if from.isIntegral => // integer to pointer
+          case (StringType, PtrType(I8 | U8)) => // string to *i8/*u8 decay
           case (from, to) => throw AnalysisError(s"cannot cast $from to $to")
         TCast(tInner, target)
 
@@ -688,31 +705,69 @@ class SyslAnalyzer:
         val tArg = analyzeExpr(args.head)
         tArg.typ match
           case SliceType(_) => TCap(tArg, I32)
+          case RefType(SliceType(_)) => TCap(tArg, I32)
           case ArrayType(_, _) => TCap(tArg, I32)
           case t => throw AnalysisError(s"cap() not supported on $t")
+
+      case CallAST("append", args) =>
+        if args.size != 2 then throw AnalysisError("append() takes exactly 2 arguments")
+        val tSlice = analyzeExpr(args(0))
+        val tElem = analyzeExpr(args(1))
+        val elemType = tSlice.typ match
+          case SliceType(elem) => elem
+          case t => throw AnalysisError(s"append() requires []T, got $t")
+        val coerced = coerceLiteral(tElem, elemType)
+        if !compatible(coerced.typ, elemType) then
+          throw AnalysisError(s"cannot append ${coerced.typ} to []$elemType")
+        TAppend(tSlice, coerced, SliceType(elemType))
+
+      case IndirectCallAST(callee, args) =>
+        val tCallee = analyzeExpr(callee)
+        val tArgs = args.map(analyzeExpr)
+        tCallee.typ match
+          case FuncType(paramTypes, returnType) =>
+            val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
+            val checkedArgs = checkArgs("<indirect>", params, tArgs)
+            TIndirectCall(tCallee, checkedArgs, returnType)
+          case other =>
+            throw AnalysisError(s"cannot call expression of type $other as a function")
 
       case MethodCallAST(obj, method, args) =>
         val tObj = analyzeExpr(obj)
         val tArgs = args.map(analyzeExpr)
-        // Determine the struct type and build self argument
-        val (structName, selfArg) = tObj.typ match
-          case st @ StructType(name, _) =>
-            // Need address of struct — build &obj
-            val addr = tObj match
-              case TVarRef(n, _) => TAddrOf(n, PtrType(st))
-              case TFieldAccess(innerObj, idx, _) => TAddrOfField(innerObj, idx, PtrType(st))
-              case _ => throw AnalysisError(s"cannot call method on this struct expression")
-            (name, addr)
-          case PtrType(StructType(name, _)) => (name, tObj) // already a pointer
-          case RefType(StructType(name, _)) => (name, tObj) // already a ref
+        // Determine the struct type (defer self-arg computation until we know it's a method)
+        val structType = tObj.typ match
+          case st: StructType          => st
+          case PtrType(st: StructType) => st
+          case RefType(st: StructType) => st
           case other => throw AnalysisError(s"cannot call method '$method' on $other")
-        // Look up the method
+        val structName = structType.name
         val funcName = s"${structName}_$method"
-        if !functions.contains(funcName) then
-          throw AnalysisError(s"struct $structName has no method '$method'")
-        val funInfo = functions(funcName)
-        val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs) // .tail skips self param
-        TCall(funcName, selfArg :: checkedArgs, funInfo.returnType)
+        if functions.contains(funcName) then
+          // It's a real method — build self argument (need address for value structs)
+          val selfArg = tObj.typ match
+            case st @ StructType(_, _) =>
+              tObj match
+                case TVarRef(n, _) => TAddrOf(n, PtrType(st))
+                case TFieldAccess(innerObj, idx, _) => TAddrOfField(innerObj, idx, PtrType(st))
+                case TIndex(arr, idx, _) => TAddrOfIndex(arr, idx, PtrType(st))
+                case _ => throw AnalysisError(s"cannot take address of expression for method call")
+            case _ => tObj // PtrType or RefType — already a pointer
+          val funInfo = functions(funcName)
+          val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs) // .tail skips self param
+          TCall(funcName, selfArg :: checkedArgs, funInfo.returnType)
+        else
+          // Fall back to calling a function-typed field
+          structType.fields.zipWithIndex.find(_._1._1 == method) match
+            case Some(((_, FuncType(paramTypes, returnType)), idx)) =>
+              val fieldAccess = TFieldAccess(tObj, idx, FuncType(paramTypes, returnType))
+              val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
+              val checkedArgs = checkArgs(s"$structName.$method", params, tArgs)
+              TIndirectCall(fieldAccess, checkedArgs, returnType)
+            case Some(((_, other), _)) =>
+              throw AnalysisError(s"field '$method' of struct $structName is $other, not a function")
+            case None =>
+              throw AnalysisError(s"struct $structName has no method or field '$method'")
 
       case CallAST(name, args) =>
         val tArgs = args.map(analyzeExpr)

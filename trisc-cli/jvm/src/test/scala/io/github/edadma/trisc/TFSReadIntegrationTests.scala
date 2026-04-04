@@ -13,7 +13,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
 
   "tfs_init reads superblock" in {
     val (cpu, output) = runTFS(
-      """import tfs.*
+      """import oskit.fs.*
         |
         |main() -> int
         |    tfs_init()
@@ -33,7 +33,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
 
   "tfs_lookup finds root" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -52,7 +52,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
 
   "tfs_lookup finds /dev" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -71,7 +71,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
 
   "tfs_lookup finds /dev/tty0" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -90,7 +90,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
 
   "tfs_lookup finds /etc/motd" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -109,7 +109,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
 
   "tfs_lookup returns -1 for nonexistent" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -130,7 +130,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
 
   "tfs_stat returns file mode and size" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -151,7 +151,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
 
   "tfs_stat returns dir mode" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -172,7 +172,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
 
   "tfs_stat returns char device mode" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -195,7 +195,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
 
   "tfs_read reads file content" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -217,7 +217,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
 
   "tfs_read with offset" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -239,7 +239,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
 
   "tfs_read clamps to file size" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -260,7 +260,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
 
   "tfs_read past end returns 0" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()

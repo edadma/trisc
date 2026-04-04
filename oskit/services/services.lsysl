@@ -19,7 +19,7 @@ Syscall numbers:
 - 13 = total_switches -- get global context switch count
 - 14 = set_watchdog -- set watchdog quanta limit (0 = disable)
 
-    module oskit
+    module oskit.services
 
     extern syscall(number: int, arg: i64) -> i64
 

@@ -2,8 +2,8 @@
 ; TOS (Tiny OS) — Boot, ISR, Trap Handler, Syscall Wrappers
 ; ============================================================================
 ;
-; Syscall convention:
-;   r1 = syscall number, r2 = arg1
+; Syscall convention (trap):
+;   r1 = syscall number, r2 = arg1 (loaded from caller stack by syscall wrapper)
 ;   Return value in r1
 ;
 ; Syscall numbers:
@@ -31,7 +31,7 @@ segment vectors
   dl isr_priv              ; Slot 7:  PrivilegeViolation
   dl isr_divzero           ; Slot 8:  IllegalDivide
   dl trap_handler          ; Slot 9:  Trap0
-  dl trap_handler          ; Slot 10: Trap1
+  dl trap1_fault           ; Slot 10: Trap1 (runtime fault — kill thread)
   dl trap_handler          ; Slot 11: Trap2
   dl trap_handler          ; Slot 12: Trap3
   dl trap_handler          ; Slot 13: Trap4
@@ -298,10 +298,12 @@ trap_handler
   movi r5, syscall_ssp
   std r7, r5, r0               ; syscall_ssp = current SSP
 
-  ; Call handler: r1 = arg1 (from saved r2), r2 = arg2 (from saved r3)
-  mov r1, r2                   ; shift: r1 = first arg
-  mov r2, r3                   ; r2 = second arg (if any)
+  ; Call handler: r1 = arg1 (from saved r2), stack = arg2 (from saved r3)
+  ; r1-only ABI: first arg in r1, second arg on stack
+  pshd r3                      ; push second arg on stack
+  mov r1, r2                   ; r1 = first arg
   jalr r6, r4                  ; call handler
+  addi r7, r7, 8               ; clean up stack arg
   bra do_schedule
 
 .bad_syscall
@@ -585,13 +587,16 @@ extern notify_send
   ; Unpack: r2 = (id << 24) | value
   mov  r1, r2
   ldi  r3, 24
-  asr  r1, r1, r3            ; r1 = high 8 bits
+  asr  r1, r1, r3            ; r1 = id (high 8 bits)
   ldi  r3, 0xFF
   sli  r3, 0xFF
   sli  r3, 0xFF
   and  r2, r2, r3            ; r2 = value (low 24 bits)
+  ; r1-only ABI: push value (second arg) on stack
+  pshd r2
   movi r4, notify_send
   jalr r6, r4
+  addi r7, r7, 8             ; clean up stack arg
   popd r6
   popd r5
   popd r4
@@ -645,13 +650,13 @@ extern event_wait_current
   sli  r3, 0xFF
   sli  r3, 0xFF
   and  r2, r2, r3            ; r2 = mask (low 24 bits)
-  ; Call event_wait_current(mask, wait_all)
-  ; But this is a 2-arg kernel function — r1=mask, r2=wait_all
+  ; Call event_wait_current(mask, wait_all) — r1-only ABI
   mov  r3, r1                ; r3 = wait_all
-  mov  r1, r2                ; r1 = mask
-  mov  r2, r3                ; r2 = wait_all
+  mov  r1, r2                ; r1 = mask (first arg)
+  pshd r3                    ; push wait_all (second arg) on stack
   movi r4, event_wait_current
   jalr r6, r4
+  addi r7, r7, 8             ; clean up stack arg
   bra do_schedule
 
 ; event_set(packed): set bits on target — fast path
@@ -664,13 +669,16 @@ extern event_set_bits
   pshd r6
   mov  r1, r2
   ldi  r3, 24
-  asr  r1, r1, r3            ; r1 = target id
+  asr  r1, r1, r3            ; r1 = target id (first arg)
   ldi  r3, 0xFF
   sli  r3, 0xFF
   sli  r3, 0xFF
   and  r2, r2, r3            ; r2 = bits
+  ; r1-only ABI: push bits (second arg) on stack
+  pshd r2
   movi r4, event_set_bits
   jalr r6, r4
+  addi r7, r7, 8             ; clean up stack arg
   popd r6
   popd r5
   popd r4
@@ -688,13 +696,16 @@ extern event_clear_bits
   pshd r6
   mov  r1, r2
   ldi  r3, 24
-  asr  r1, r1, r3            ; r1 = target id
+  asr  r1, r1, r3            ; r1 = target id (first arg)
   ldi  r3, 0xFF
   sli  r3, 0xFF
   sli  r3, 0xFF
   and  r2, r2, r3            ; r2 = bits
+  ; r1-only ABI: push bits (second arg) on stack
+  pshd r2
   movi r4, event_clear_bits
   jalr r6, r4
+  addi r7, r7, 8             ; clean up stack arg
   popd r6
   popd r5
   popd r4
@@ -709,9 +720,9 @@ extern event_clear_bits
 ;
 ; syscall(number: int, arg: int) -> int
 ;
-; Generic syscall bridge. Sysl calling convention:
-;   r1 = first arg (syscall number)
-;   r2 = second arg
+; Generic syscall bridge. r1-only ABI:
+;   r1 = number (first arg, in register)
+;   [sp+0] = arg (second arg, on stack from caller)
 ;
 ; Trap convention: r1 = number, r2 = arg
 ;
@@ -720,6 +731,7 @@ extern event_clear_bits
 global syscall, func
 
 syscall
+  ldd  r2, r7, r0      ; load arg from caller stack into r2
   trap 0                ; r1 = number, r2 = arg
   jalr r0, r6           ; return (r1 = return value from trap handler)
 
@@ -730,9 +742,40 @@ global thread_exit, func
 
 thread_exit
   ldi  r1, 3            ; r1 = SYS_EXIT
-  ldi  r2, 0            ; r2 = unused
+  ldi  r2, 0            ; r2 = unused (trap reads from saved registers, not ABI)
   trap 0
   ; never returns — schedule switches to another thread
+
+
+; ============================================================================
+; trap1_fault — Runtime fault handler (trap 1)
+; ============================================================================
+;
+; Codegen emits "trap 1" for runtime errors (bounds check, null pointer, etc.).
+; r1 = error code: 1=out-of-bounds, 2=null pointer, 3=abort
+; Terminates the current thread and reschedules.
+;
+; ============================================================================
+extern terminate_current
+
+global trap1_fault, func
+
+trap1_fault
+  cli
+  ; Output fault marker: '!' followed by error code digit
+  ; r1 = error code (1=bounds, 2=null, 3=abort)
+  movi r3, STDOUT
+  ldi  r2, 33            ; '!'
+  stb  r2, r3, r0
+  addi r2, r1, 48        ; r2 = '0' + error code
+  stb  r2, r3, r0
+  ; Save context and terminate thread
+  pshr r6                       ; save user's r1-r6
+  gusp r1
+  pshd r1                       ; save USP
+  movi r4, terminate_current
+  jalr r6, r4
+  bra do_schedule
 
 
 ; ============================================================================

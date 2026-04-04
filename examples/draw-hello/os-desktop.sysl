@@ -3,7 +3,12 @@
 // Window creation and compositing go through IPC to the display server.
 // Drawing uses direct DrawEngine register writes for performance (client-side rendering).
 
-import oskit.*
+import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.display.*
+import oskit.drivers.kbd.*
+import oskit.drivers.mouse.*
 
 FB_WIDTH  = 1440
 FB_HEIGHT = 900

@@ -127,10 +127,10 @@ trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
     val bootTof = assemble(bootAsm, relocatable = true)
 
     val allSources = Map(
-      "oskit/kernel" -> kernelSysl, "oskit/services" -> servicesSysl, "oskit/timer" -> timerSysl, "oskit/semaphore" -> semaphoreSysl,
-      "oskit/mutex" -> mutexSysl, "oskit/condvar" -> condvarSysl, "oskit/barrier" -> barrierSysl,
-      "oskit/rwlock" -> rwlockSysl, "oskit/channel" -> channelSysl, "oskit/mailbox" -> mailboxSysl,
-      "oskit/rmutex" -> rmutexSysl, "oskit/qset" -> qsetSysl, "oskit/pimutex" -> pimutexSysl,
+      "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl, "oskit/sync/semaphore" -> semaphoreSysl,
+      "oskit/sync/mutex" -> mutexSysl, "oskit/sync/condvar" -> condvarSysl, "oskit/sync/barrier" -> barrierSysl,
+      "oskit/sync/rwlock" -> rwlockSysl, "oskit/sync/channel" -> channelSysl, "oskit/sync/mailbox" -> mailboxSysl,
+      "oskit/sync/rmutex" -> rmutexSysl, "oskit/sync/qset" -> qsetSysl, "oskit/sync/pimutex" -> pimutexSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -163,5 +163,5 @@ trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
     (cpu, output.toString)
 
   def runRBTest(appSource: String): (CPU, String) =
-    runWithBoot(Map("oskit/rbtree" -> rbtreeSysl, "main" -> appSource))
+    runWithBoot(Map("oskit/kernel/rbtree" -> rbtreeSysl, "main" -> appSource))
 }

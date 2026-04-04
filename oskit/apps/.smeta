@@ -1,0 +1,35 @@
+SMETA v1
+SOURCE oskit/apps/sh.sysl
+DATA cwd_ino i32
+DATA cwd_path arr 128 i8
+FUNC sh_putc 1 u32 void
+FUNC sh_puts 1 ptr i8 void
+FUNC sh_newline 0 void
+FUNC sh_putint 1 i32 void
+DATA PROMPT_LEN i32
+FUNC sh_append_csi 4 ptr i8 i32 i32 i8 i32
+FUNC sh_csi_num 2 i32 u32 void
+DATA sh_out arr 140 i8
+FUNC sh_refresh_line 3 ptr i8 i32 i32 void
+FUNC sh_readline 2 ptr i8 i32 i32
+FUNC sh_resolve_parent 1 ptr i8 i32
+FUNC sh_basename 1 ptr i8 ptr i8
+FUNC sh_resolve_path 1 ptr i8 i32
+FUNC cmd_echo 2 i32 ptr i64 void
+FUNC sh_not_found 1 ptr i8 void
+FUNC sh_error 0 void
+FUNC cmd_ls 2 i32 ptr i64 void
+FUNC cmd_cat 2 i32 ptr i64 void
+FUNC cmd_mkdir 2 i32 ptr i64 void
+FUNC cmd_rm 2 i32 ptr i64 void
+FUNC cmd_rmdir 2 i32 ptr i64 void
+FUNC cmd_pwd 0 void
+FUNC cmd_cd 2 i32 ptr i64 void
+FUNC cmd_stat 2 i32 ptr i64 void
+FUNC cmd_help 0 void
+DATA MAX_ARGS i32
+FUNC sh_dispatch 2 i32 ptr i64 void
+FUNC shell 0 void
+SOURCE oskit/apps/init.sysl
+FUNC shell 0 void
+FUNC init 0 void

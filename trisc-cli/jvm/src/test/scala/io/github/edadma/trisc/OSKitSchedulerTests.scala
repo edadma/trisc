@@ -5,7 +5,8 @@ class OSKitSchedulerTests extends OSKitTestHelpers {
   "Scheduler: three threads same priority" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task_a, 0x10000, 0xF000, "a")
@@ -34,7 +35,8 @@ class OSKitSchedulerTests extends OSKitTestHelpers {
   "Scheduler: basic two-priority smoke test" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread_pri(task_b, 0x14000, 0x13000, "b", 1)
@@ -62,7 +64,8 @@ class OSKitSchedulerTests extends OSKitTestHelpers {
   "Scheduler: quantum expiry causes round-robin rotation" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task_a, 0x10000, 0xF000, "a")
@@ -94,7 +97,8 @@ class OSKitSchedulerTests extends OSKitTestHelpers {
   "Scheduler: high priority preempts low priority" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(high, 0x20000, 0x1F000, "high")
@@ -123,7 +127,8 @@ class OSKitSchedulerTests extends OSKitTestHelpers {
   "Scheduler: blocked thread removed from queue" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(blocker, 0x10000, 0xF000, "blocker")
@@ -153,7 +158,8 @@ class OSKitSchedulerTests extends OSKitTestHelpers {
   "Scheduler: three priority levels strict ordering" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread_pri(high, 0x20000, 0x1F000, "high", 0)
@@ -188,7 +194,8 @@ class OSKitSchedulerTests extends OSKitTestHelpers {
   "Scheduler: yield moves to back of queue" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task_a, 0x10000, 0xF000, "a")
@@ -215,7 +222,8 @@ class OSKitSchedulerTests extends OSKitTestHelpers {
   "Scheduler: unblock higher priority preempts current" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(high, 0x20000, 0x1F000, "high")

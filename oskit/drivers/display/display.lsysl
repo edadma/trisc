@@ -9,7 +9,12 @@ Architecture follows macOS WindowServer: the display server owns
 all rendering. Clients never touch pixels directly — they send
 high-level commands over IPC.
 
-    module oskit
+    module oskit.drivers.display
+
+    import oskit.kernel.{notify_read}
+    import oskit.services.{thread_id}
+    import oskit.ipc.*
+    import oskit.drivers.mouse.{mouse_x, mouse_y, mouse_buttons, mouse_set_notify}
 
     val DISPLAY_CTRL = 0x100008
     val DRAW_ENGINE  = 0x1000A0
@@ -185,10 +190,6 @@ Initialize the framebuffer via the display controller.
 Handle mouse notification: read mouse state from driver globals,
 update DrawEngine cursor, run PROCESS_MOUSE for drag/focus, then
 composite.
-
-    extern mouse_x: int
-    extern mouse_y: int
-    extern mouse_buttons: int
 
     var ds_mouse_composite = 0
 
