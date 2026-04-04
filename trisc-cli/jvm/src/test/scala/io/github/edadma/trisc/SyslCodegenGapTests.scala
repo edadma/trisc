@@ -65,22 +65,34 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
     val asm = codegen.generate(unit.typed)
     assemble(asm, relocatable = true)
 
-  def runWithBoot(syslSource: String): (CPU, String) =
-    val bootTof = assemble(minimalBoot, relocatable = true)
-    val progTof = compileSysl(syslSource)
+  def runWithBoot(syslSource: String): (CPU, String) = runWithBoot(Map("main" -> syslSource))
+
+  private val largeBoot: String = minimalBoot.replace("0xFF8", "0x10000").replace("0xFF0", "0xFFF8")
+
+  def runWithBoot(sources: Map[String, String], maxCycles: Int = 100000): (CPU, String) =
+    val boot = if sources.size > 1 then largeBoot else minimalBoot
+    val stdoutAddr = if sources.size > 1 then 0x10000L else 0xFF8L
+    val bootTof = assemble(boot, relocatable = true)
+    val driver = new SyslDriver
+    val result = driver.compile(sources)
+    val codegen = new SyslTriscCodegen
+    val tofs = for unit <- result.units yield
+      val asm = codegen.generate(unit.typed)
+      assemble(asm, relocatable = true)
+    val progTof = Linker.link(tofs, relocatable = true)
     val linked = Linker.link(Seq(bootTof, progTof))
 
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
       val name = "stdout"
-      val base: Long = 0xFF8
+      val base: Long = stdoutAddr
       val size: Long = 1
       def writeByte(addr: Long, data: Long): Unit = output += data.toChar
       override def loadByte(addr: Long, data: Long): Unit = ()
     }
-    val mem = new Memory("Memory", new RAM(0, 0xFF8), stdout)
+    val mem = new Memory("Memory", new RAM(0, stdoutAddr.toInt), stdout)
     linked.load(mem)
-    val cpu = new CPU(mem) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = maxCycles }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)
@@ -398,6 +410,42 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
         |    0
         |""".stripMargin)
     output shouldBe "OK"
+  }
+
+  "string concatenation with malloc" in {
+    val allocSource = scala.io.Source.fromFile("posix/stdlib/alloc.sysl").mkString
+    val stringSource = scala.io.Source.fromFile("posix/string/string.sysl").mkString
+    val sbrkSource =
+      s"""module posix.unistd
+         |var _heap: [4096]i8
+         |var _brk: *i8 = *i8(0)
+         |var _brk_initialized = false
+         |sbrk(increment: int) -> *i8
+         |    if !_brk_initialized
+         |        _brk = &_heap[0]
+         |        _brk_initialized = true
+         |    if increment == 0
+         |        return _brk
+         |    val old_brk = _brk
+         |    _brk = old_brk + increment
+         |    old_brk
+         |""".stripMargin
+    val (_, output) = runWithBoot(Map(
+      "posix/unistd/sbrk" -> sbrkSource,
+      "posix/string/string" -> stringSource,
+      "posix/stdlib/alloc" -> allocSource,
+      "main" ->
+        """extern putchar(ch: int)
+          |import posix.stdlib.malloc
+          |
+          |main() -> int
+          |    val s = "Hello" + " " + "World"
+          |    for var i = 0; i < len(s); i++
+          |        putchar(s[i])
+          |    0
+          |""".stripMargin
+    ), maxCycles = 100000)
+    output shouldBe "Hello World"
   }
 
   "user-defined function shadows builtin" in {

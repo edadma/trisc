@@ -241,18 +241,15 @@ from cwd by building an absolute path.
 
     sh_resolve_path(path: *i8) -> int
         if path[0] == '/'
-            // Absolute path
             return fs_open(path)
         // Relative path — build absolute path
         var abspath: [256]i8
         strcpy(abspath, cwd_path)
-        // Add separator if cwd is not "/"
         val cwdlen = strlen(cwd_path)
         if cwdlen > 1
             abspath[cwdlen] = '/'
             abspath[cwdlen + 1] = 0
         else if cwdlen == 1
-            // cwd is "/" — don't add extra slash
             abspath[1] = 0
         strcat(abspath, path)
         fs_open(abspath)
@@ -373,12 +370,11 @@ Built-in commands.
             return
         cwd_ino = ino
         // Update cwd_path
+        // Update cwd_path
         val arg1: *i8 = *i8(argv[1])
         if arg1[0] == '/'
-            // Absolute path
             strcpy(cwd_path, arg1)
         else
-            // Relative path
             val cwdlen = strlen(cwd_path)
             if cwdlen > 1
                 cwd_path[cwdlen] = '/'
