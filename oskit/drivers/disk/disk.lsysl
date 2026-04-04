@@ -197,3 +197,4 @@ without building IPC messages manually.
         if reply[0] != 0
             return -1
         disk_read_i32(&reply[0], 1)
+

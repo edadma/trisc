@@ -1,0 +1,18 @@
+Block I/O Bridge
+
+Connects the TFS library's extern rd_read/rd_write to the
+disk server's IPC wrappers. No module declaration — this
+avoids conflicting with `import oskit.fs.*` in the TFS server
+(which imports the TFS library's extern declarations).
+
+The linker resolves the extern disk_read/disk_write to the
+disk driver's IPC wrappers (in module oskit).
+
+    extern disk_read(lba: int, addr: *i8) -> int
+    extern disk_write(lba: int, addr: *i8) -> int
+
+    rd_read(lba: int, addr: *i8)
+        disk_read(lba, addr)
+
+    rd_write(lba: int, addr: *i8)
+        disk_write(lba, addr)

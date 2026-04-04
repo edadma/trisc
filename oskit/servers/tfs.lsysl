@@ -28,20 +28,7 @@ Commands:
 
     module oskit
 
-TFS library externs — the portable TFS library has no module
-declaration, so we declare the functions we call as extern.
-The linker resolves them from oskit/fs/tfs.lsysl.
-
-    extern tfs_init()
-    extern tfs_lookup(path: *i8) -> int
-    extern tfs_read(ino: int, buf: *i8, offset: int, len: int) -> int
-    extern tfs_write(ino: int, buf: *i8, offset: int, len: int) -> int
-    extern tfs_create(parent_ino: int, name: *i8, ftype: int, perm: int) -> int
-    extern tfs_unlink(parent_ino: int, name: *i8) -> int
-    extern tfs_stat(ino: int, out: *int) -> int
-    extern tfs_readdir(dir_ino: int, index: int, out_ino: *int, out_name: *i8) -> int
-    extern tfs_rmdir(parent_ino: int, name: *i8) -> int
-    extern sync_superblock()
+    import oskit.fs.*
 
     val TFS_CMD_OPEN    = 1
     val TFS_CMD_READ    = 2
@@ -56,16 +43,6 @@ The linker resolves them from oskit/fs/tfs.lsysl.
 
     var tfs_port = -1
     var tfs_srv_name: [3]i8
-
-Bridge functions: these implement the extern rd_read/rd_write
-that the TFS library expects, by forwarding to the disk server
-via IPC.
-
-    rd_read(lba: int, addr: *i8)
-        disk_read(lba, addr)
-
-    rd_write(lba: int, addr: *i8)
-        disk_write(lba, addr)
 
 Big-endian message helpers (local to this server).
 

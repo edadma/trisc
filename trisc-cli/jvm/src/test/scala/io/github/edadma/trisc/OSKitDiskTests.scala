@@ -11,6 +11,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
   private lazy val diskSysl: String = readLsysl("oskit/drivers/disk/disk.lsysl")
   private lazy val tfsSysl: String = readLsysl("oskit/fs/tfs.lsysl")
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
+  private lazy val blkioSysl: String = readLsysl("oskit/drivers/disk/blkio.lsysl")
 
   // Stack layout for 2-thread tests (disk server + client):
   //   disk:   USP=0x10000 SSP=0xE000
@@ -88,8 +89,9 @@ class OSKitDiskTests extends OSKitTestHelpers {
       "oskit/mutex" -> mutexSysl,
       "oskit/ipc" -> ipcSysl,
       "oskit/disk" -> diskSysl,
-      "oskit/tfs" -> tfsSysl,
+      "oskit/fs/tfs" -> tfsSysl,
       "oskit/tfs_srv" -> tfsSrvSysl,
+      "blkio" -> blkioSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
