@@ -518,13 +518,8 @@ On notification, call notify_read() to get the value.
         ipc_ctx[me].len = buf_len
         ipc_ctx[me].port = port
 
-        // Check for pending notification first
-        if tasks[me].notify_pending == 1
-            syscall_return(-2)
-            ipc_continue_current()
-            return
-
-        // Check the port's wait queue for a blocked sender
+        // Check the port's wait queue for a blocked sender FIRST
+        // (notifications are frequent — e.g. mouse events — and must not starve IPC)
         var sender = ipc_queue_pop(port)
         while sender != IPC_QUEUE_EMPTY
             if tasks[sender].state == STATE_SEND_BLOCKED
@@ -535,6 +530,12 @@ On notification, call notify_read() to get the value.
                 enqueue(tasks[me].priority, me)
                 return
             sender = ipc_queue_pop(port)
+
+        // No IPC message — check for pending notification
+        if tasks[me].notify_pending == 1
+            syscall_return(-2)
+            ipc_continue_current()
+            return
 
         // No sender, no notification — block waiting for either
         tasks[me].state = STATE_RECV_NOTIFY_BLOCKED

@@ -359,6 +359,49 @@ class SyslCodegenVariableTests extends SyslCodegenHelpers {
     )) shouldBe 12387
   }
 
+  "cross-unit global int read uses correct load width" in {
+    // Regression: codegen defaulted cross-unit globals to i64 (ldd),
+    // causing MisalignedAccess when int globals (4 bytes) weren't 8-aligned.
+    // Fix: use the AST node's type instead of SyslType.I64 fallback.
+    compileMultiAndRun(Map(
+      "mymod/data" ->
+        """module mymod
+          |var counter = 0
+          |var flag = 0
+          |
+          |set_values()
+          |    counter = 99
+          |    flag = 1
+          |""".stripMargin,
+      "app" ->
+        """import mymod.*
+          |
+          |main() -> int
+          |    set_values()
+          |    counter + flag
+          |""".stripMargin
+    )) shouldBe 100
+  }
+
+  "cross-unit global compound assignment uses correct width" in {
+    compileMultiAndRun(Map(
+      "mymod/state" ->
+        """module mymod
+          |var total = 10
+          |
+          |add_to_total(n: int)
+          |    total += n
+          |""".stripMargin,
+      "app" ->
+        """import mymod.*
+          |
+          |main() -> int
+          |    add_to_total(32)
+          |    total
+          |""".stripMargin
+    )) shouldBe 42
+  }
+
   "sieve of eratosthenes" in {
     compileAndRun(
       """main() -> int

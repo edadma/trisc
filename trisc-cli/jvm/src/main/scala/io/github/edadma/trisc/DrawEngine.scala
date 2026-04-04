@@ -219,6 +219,23 @@ class DrawEngine(
   private var wallpaperColor2: Color = null
   private var wallpaperImage: BufferedImage = null
 
+  /** Reset all state — call on emulator reset to avoid stale content */
+  def reset(): Unit =
+    java.util.Arrays.fill(regs, 0.toByte)
+    for i <- 0 until MaxSurfaces do surfaces(i) = null
+    for i <- 0 until MaxWindows do windows(i) = null
+    windowOrder.clear()
+    cursorX = 0; cursorY = 0; cursorVisible = true; cursorSurfaceId = 0
+    dragging = false; dragWindowId = 0; prevMouseButton = false
+    gradientPaint = null
+    wallpaperMode = 0; wallpaperColor = null; wallpaperColor2 = null; wallpaperImage = null
+    if backG2D != null then backG2D.dispose()
+    if sceneG2D != null then sceneG2D.dispose()
+    backBuffer = null; backG2D = null; sceneBuffer = null; sceneG2D = null
+    sceneDirty = true
+    currentFontFamily = Font.SANS_SERIF
+    path.reset()
+
   // Double buffer for flicker-free compositing
   private var backBuffer: BufferedImage = null
   private var backG2D: Graphics2D = null
