@@ -19,7 +19,7 @@
 
 ## Missing — Important
 
-- [ ] **Dirty tracking** — COMPOSITE redraws everything; should track changed regions
+- [x] **Dirty tracking** — scene buffer caches window composite; cursor-only moves skip full redraw
 - [x] **Window minimize/maximize** — MINIMIZE, MAXIMIZE, RESTORE with saved normal geometry
 - [x] **Alpha compositing** — SET_WINDOW_OPACITY sets per-window opacity (0-255) via AlphaComposite
 - [x] **Font family selection** — SET_FONT by name, LOAD_FONT from RAM binary data
