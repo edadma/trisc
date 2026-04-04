@@ -394,7 +394,7 @@ initializes keyboard, then loops handling messages.
 Userspace wrappers. These build IPC messages and send
 them to the TTY port.
 
-    tty_putc(ch: int)
+    tty_putc(ch: char)
         val port = port_lookup(&tty_name[0])
         if port >= 0
             var msg: [3]i8

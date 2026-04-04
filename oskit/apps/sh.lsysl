@@ -30,23 +30,23 @@ Shell state: current working directory as inode and path string.
 
 Output helpers. These use the TTY server for all I/O.
 
-    sh_putc(ch: int)
+    sh_putc(ch: char)
         tty_putc(ch)
 
     sh_puts(s: *i8)
         tty_puts(s, strlen(s))
 
     sh_newline()
-        sh_putc(10)
+        sh_putc('\n')
 
     sh_putint(n: int)
         if n < 0
-            sh_putc(45)
+            sh_putc('-')
             sh_putint(-n)
             return
         if n >= 10
             sh_putint(n / 10)
-        sh_putc(48 + (n % 10))
+        sh_putc('0' + (n % 10))
 
 Read a line from the TTY with full line editing.
 
@@ -66,15 +66,15 @@ ESC [ n ch.  Returns new position.
         var p = pos
         out[p] = 27
         p += 1
-        out[p] = 91
+        out[p] = '['
         p += 1
         if n >= 100
-            out[p] = i8(48 + n / 100)
+            out[p] = i8('0' + n / 100)
             p += 1
         if n >= 10
-            out[p] = i8(48 + (n / 10) % 10)
+            out[p] = i8('0' + (n / 10) % 10)
             p += 1
-        out[p] = i8(48 + n % 10)
+        out[p] = i8('0' + n % 10)
         p += 1
         out[p] = ch
         p += 1
@@ -82,14 +82,14 @@ ESC [ n ch.  Returns new position.
 
 Emit a CSI sequence with numeric parameter directly.
 
-    sh_csi_num(n: int, ch: int)
+    sh_csi_num(n: int, ch: char)
         sh_putc(27)
-        sh_putc(91)
+        sh_putc('[')
         if n >= 100
-            sh_putc(48 + n / 100)
+            sh_putc('0' + n / 100)
         if n >= 10
-            sh_putc(48 + (n / 10) % 10)
-        sh_putc(48 + n % 10)
+            sh_putc('0' + (n / 10) % 10)
+        sh_putc('0' + n % 10)
         sh_putc(ch)
 
 Redraw the full line in a single batched write.
@@ -100,11 +100,11 @@ buffer and sends it with one tty_puts call.
 
     sh_refresh_line(buf: *i8, len: int, cursor: int)
         var p = 0
-        sh_out[p] = 13        // CR
+        sh_out[p] = 13
         p += 1
-        sh_out[p] = 62        // >
+        sh_out[p] = '>'
         p += 1
-        sh_out[p] = 32        // space
+        sh_out[p] = ' '
         p += 1
         // Copy line content (flush if approaching IPC limit)
         var i = 0
@@ -116,9 +116,9 @@ buffer and sends it with one tty_puts call.
             p += 1
             i += 1
         // ESC[K — clear to end of line
-        p = sh_append_csi(&sh_out[0], p, 0, i8(75))
+        p = sh_append_csi(&sh_out[0], p, 0, i8('K'))
         // ESC[nG — cursor to column (1-based)
-        p = sh_append_csi(&sh_out[0], p, PROMPT_LEN + cursor + 1, i8(71))
+        p = sh_append_csi(&sh_out[0], p, PROMPT_LEN + cursor + 1, i8('G'))
         tty_puts(&sh_out[0], p)
 
     sh_readline(buf: *i8, maxlen: int) -> int
@@ -126,9 +126,9 @@ buffer and sends it with one tty_puts call.
         var cursor = 0
         while len < maxlen - 1
             val ch = tty_getc()
-            if ch == 10
+            if ch == '\n'
                 // Enter — done
-                sh_putc(10)
+                sh_putc('\n')
                 buf[len] = 0
                 return len
             else if ch == 8
@@ -144,30 +144,30 @@ buffer and sends it with one tty_puts call.
             else if ch == 27
                 // Escape sequence
                 val c2 = tty_getc()
-                if c2 == 91
+                if c2 == '['
                     val c3 = tty_getc()
-                    if c3 == 67
+                    if c3 == 'C'
                         // Right arrow
                         if cursor < len
                             cursor += 1
-                            sh_csi_num(PROMPT_LEN + cursor + 1, 71)
-                    else if c3 == 68
+                            sh_csi_num(PROMPT_LEN + cursor + 1, 'G')
+                    else if c3 == 'D'
                         // Left arrow
                         if cursor > 0
                             cursor -= 1
-                            sh_csi_num(PROMPT_LEN + cursor + 1, 71)
-                    else if c3 == 72
+                            sh_csi_num(PROMPT_LEN + cursor + 1, 'G')
+                    else if c3 == 'H'
                         // Home
                         cursor = 0
-                        sh_csi_num(PROMPT_LEN + 1, 71)
-                    else if c3 == 70
+                        sh_csi_num(PROMPT_LEN + 1, 'G')
+                    else if c3 == 'F'
                         // End
                         cursor = len
-                        sh_csi_num(PROMPT_LEN + cursor + 1, 71)
-                    else if c3 == 51
+                        sh_csi_num(PROMPT_LEN + cursor + 1, 'G')
+                    else if c3 == '3'
                         // Could be Delete: ESC[3~
                         val c4 = tty_getc()
-                        if c4 == 126
+                        if c4 == '~'
                             if cursor < len
                                 var i = cursor
                                 while i < len - 1
@@ -175,7 +175,7 @@ buffer and sends it with one tty_puts call.
                                     i += 1
                                 len -= 1
                                 sh_refresh_line(buf, len, cursor)
-            else if ch >= 32
+            else if ch >= ' '
                 // Printable character — insert at cursor
                 if len < maxlen - 1
                     var i = len
@@ -204,7 +204,7 @@ For "file" (no slash) returns cwd_ino.
         var last_slash = -1
         var i = 0
         while path[i] != 0
-            if path[i] == 47
+            if path[i] == '/'
                 last_slash = i
             i += 1
         if last_slash == -1
@@ -226,7 +226,7 @@ sh_basename(path) — Return pointer to the last component of path.
         var last_slash = -1
         var i = 0
         while path[i] != 0
-            if path[i] == 47
+            if path[i] == '/'
                 last_slash = i
             i += 1
         if last_slash == -1
@@ -238,7 +238,7 @@ Absolute paths start with /. Relative paths are resolved
 from cwd by building an absolute path.
 
     sh_resolve_path(path: *i8) -> int
-        if path[0] == 47
+        if path[0] == '/'
             // Absolute path
             return fs_open(path)
         // Relative path — build absolute path
@@ -247,7 +247,7 @@ from cwd by building an absolute path.
         // Add separator if cwd is not "/"
         val cwdlen = strlen(&cwd_path[0])
         if cwdlen > 1
-            abspath[cwdlen] = 47
+            abspath[cwdlen] = '/'
             abspath[cwdlen + 1] = 0
         else if cwdlen == 1
             // cwd is "/" — don't add extra slash
@@ -261,43 +261,57 @@ Built-in commands.
         var i = 1
         while i < argc
             if i > 1
-                sh_putc(32)
+                sh_putc(' ')
             sh_puts(*i8(argv[i]))
             i += 1
         sh_newline()
+
+    sh_not_found(name: *i8)
+        sh_puts(name)
+        var e: [13]i8
+        e[0] = ':'
+        e[1] = ' '
+        e[2] = 'n'
+        e[3] = 'o'
+        e[4] = 't'
+        e[5] = ' '
+        e[6] = 'f'
+        e[7] = 'o'
+        e[8] = 'u'
+        e[9] = 'n'
+        e[10] = 'd'
+        e[11] = '\n'
+        e[12] = 0
+        sh_puts(&e[0])
+
+    sh_error()
+        var e: [7]i8
+        e[0] = 'e'
+        e[1] = 'r'
+        e[2] = 'r'
+        e[3] = 'o'
+        e[4] = 'r'
+        e[5] = '\n'
+        e[6] = 0
+        sh_puts(&e[0])
 
     cmd_ls(argc: int, argv: *i64)
         var dir_ino = cwd_ino
         if argc > 1
             dir_ino = sh_resolve_path(*i8(argv[1]))
             if dir_ino < 0
-                sh_puts(*i8(argv[1]))
-                var e1: [13]i8
-                e1[0] = 58   // :
-                e1[1] = 32   // space
-                e1[2] = 110  // n
-                e1[3] = 111  // o
-                e1[4] = 116  // t
-                e1[5] = 32   // space
-                e1[6] = 102  // f
-                e1[7] = 111  // o
-                e1[8] = 117  // u
-                e1[9] = 110  // n
-                e1[10] = 100 // d
-                e1[11] = 10  // newline
-                e1[12] = 0
-                sh_puts(&e1[0])
+                sh_not_found(*i8(argv[1]))
                 return
         var entry_ino: int
         var entry_name: [14]i8
         var idx = 0
         while fs_readdir(dir_ino, idx, &entry_ino, &entry_name[0]) == 0
             // Skip . and ..
-            if entry_name[0] != 46
+            if entry_name[0] != '.'
                 sh_puts(&entry_name[0])
                 sh_newline()
             else if entry_name[1] != 0
-                if entry_name[1] != 46
+                if entry_name[1] != '.'
                     sh_puts(&entry_name[0])
                     sh_newline()
                 else if entry_name[2] != 0
@@ -307,42 +321,27 @@ Built-in commands.
 
     cmd_cat(argc: int, argv: *i64)
         if argc < 2
-            var u1: [15]i8
-            u1[0] = 117  // u
-            u1[1] = 115  // s
-            u1[2] = 97   // a
-            u1[3] = 103  // g
-            u1[4] = 101  // e
-            u1[5] = 58   // :
-            u1[6] = 32   // space
-            u1[7] = 99   // c
-            u1[8] = 97   // a
-            u1[9] = 116  // t
-            u1[10] = 32  // space
-            u1[11] = 60  // <
-            u1[12] = 62  // >
-            u1[13] = 10  // newline
-            u1[14] = 0
-            sh_puts(&u1[0])
+            var u: [15]i8
+            u[0] = 'u'
+            u[1] = 's'
+            u[2] = 'a'
+            u[3] = 'g'
+            u[4] = 'e'
+            u[5] = ':'
+            u[6] = ' '
+            u[7] = 'c'
+            u[8] = 'a'
+            u[9] = 't'
+            u[10] = ' '
+            u[11] = '<'
+            u[12] = '>'
+            u[13] = '\n'
+            u[14] = 0
+            sh_puts(&u[0])
             return
         val ino = sh_resolve_path(*i8(argv[1]))
         if ino < 0
-            sh_puts(*i8(argv[1]))
-            var e1: [13]i8
-            e1[0] = 58
-            e1[1] = 32
-            e1[2] = 110
-            e1[3] = 111
-            e1[4] = 116
-            e1[5] = 32
-            e1[6] = 102
-            e1[7] = 111
-            e1[8] = 117
-            e1[9] = 110
-            e1[10] = 100
-            e1[11] = 10
-            e1[12] = 0
-            sh_puts(&e1[0])
+            sh_not_found(*i8(argv[1]))
             return
         var buf: [128]i8
         var offset = 0
@@ -361,35 +360,12 @@ Built-in commands.
             return
         val parent = sh_resolve_parent(*i8(argv[1]))
         if parent < 0
-            sh_puts(*i8(argv[1]))
-            var e1: [13]i8
-            e1[0] = 58
-            e1[1] = 32
-            e1[2] = 110
-            e1[3] = 111
-            e1[4] = 116
-            e1[5] = 32
-            e1[6] = 102
-            e1[7] = 111
-            e1[8] = 117
-            e1[9] = 110
-            e1[10] = 100
-            e1[11] = 10
-            e1[12] = 0
-            sh_puts(&e1[0])
+            sh_not_found(*i8(argv[1]))
             return
         val name = sh_basename(*i8(argv[1]))
         val result = fs_mkdir(parent, name, 0x1FF)
         if result < 0
-            var e2: [7]i8
-            e2[0] = 101  // e
-            e2[1] = 114  // r
-            e2[2] = 114  // r
-            e2[3] = 111  // o
-            e2[4] = 114  // r
-            e2[5] = 10   // newline
-            e2[6] = 0
-            sh_puts(&e2[0])
+            sh_error()
 
     cmd_rm(argc: int, argv: *i64)
         if argc < 2
@@ -400,15 +376,7 @@ Built-in commands.
         val name = sh_basename(*i8(argv[1]))
         val result = fs_unlink(parent, name)
         if result < 0
-            var e2: [7]i8
-            e2[0] = 101
-            e2[1] = 114
-            e2[2] = 114
-            e2[3] = 111
-            e2[4] = 114
-            e2[5] = 10
-            e2[6] = 0
-            sh_puts(&e2[0])
+            sh_error()
 
     cmd_rmdir(argc: int, argv: *i64)
         if argc < 2
@@ -419,15 +387,7 @@ Built-in commands.
         val name = sh_basename(*i8(argv[1]))
         val result = fs_rmdir(parent, name)
         if result < 0
-            var e2: [7]i8
-            e2[0] = 101
-            e2[1] = 114
-            e2[2] = 114
-            e2[3] = 111
-            e2[4] = 114
-            e2[5] = 10
-            e2[6] = 0
-            sh_puts(&e2[0])
+            sh_error()
 
     cmd_pwd()
         sh_puts(&cwd_path[0])
@@ -437,63 +397,49 @@ Built-in commands.
         if argc < 2
             // cd with no args → go to root
             cwd_ino = ROOT_INODE
-            cwd_path[0] = 47
+            cwd_path[0] = '/'
             cwd_path[1] = 0
             return
         val ino = sh_resolve_path(*i8(argv[1]))
         if ino < 0
-            sh_puts(*i8(argv[1]))
-            var e1: [13]i8
-            e1[0] = 58
-            e1[1] = 32
-            e1[2] = 110
-            e1[3] = 111
-            e1[4] = 116
-            e1[5] = 32
-            e1[6] = 102
-            e1[7] = 111
-            e1[8] = 117
-            e1[9] = 110
-            e1[10] = 100
-            e1[11] = 10
-            e1[12] = 0
-            sh_puts(&e1[0])
+            sh_not_found(*i8(argv[1]))
             return
         // Verify it's a directory
         var st: [7]int
         fs_stat(ino, &st[0])
         val ftype = (st[0] >> 12) & 0xF
         if ftype != 2
-            var e2: [15]i8
-            e2[0] = 110  // n
-            e2[1] = 111  // o
-            e2[2] = 116  // t
-            e2[3] = 32   // space
-            e2[4] = 97   // a
-            e2[5] = 32   // space
-            e2[6] = 100  // d
-            e2[7] = 105  // i
-            e2[8] = 114  // r
-            e2[9] = 101  // e
-            e2[10] = 99  // c
-            e2[11] = 116 // t
-            e2[12] = 111 // o
-            e2[13] = 114 // r
-            e2[14] = 121 // y
-            sh_puts(&e2[0])
+            var e: [16]i8
+            e[0] = 'n'
+            e[1] = 'o'
+            e[2] = 't'
+            e[3] = ' '
+            e[4] = 'a'
+            e[5] = ' '
+            e[6] = 'd'
+            e[7] = 'i'
+            e[8] = 'r'
+            e[9] = 'e'
+            e[10] = 'c'
+            e[11] = 't'
+            e[12] = 'o'
+            e[13] = 'r'
+            e[14] = 'y'
+            e[15] = 0
+            sh_puts(&e[0])
             sh_newline()
             return
         cwd_ino = ino
         // Update cwd_path
         val arg1: *i8 = *i8(argv[1])
-        if arg1[0] == 47
+        if arg1[0] == '/'
             // Absolute path
             strcpy(&cwd_path[0], arg1)
         else
             // Relative path
             val cwdlen = strlen(&cwd_path[0])
             if cwdlen > 1
-                cwd_path[cwdlen] = 47
+                cwd_path[cwdlen] = '/'
                 cwd_path[cwdlen + 1] = 0
             strcat(&cwd_path[0], arg1)
 
@@ -502,49 +448,34 @@ Built-in commands.
             return
         val ino = sh_resolve_path(*i8(argv[1]))
         if ino < 0
-            sh_puts(*i8(argv[1]))
-            var e1: [13]i8
-            e1[0] = 58
-            e1[1] = 32
-            e1[2] = 110
-            e1[3] = 111
-            e1[4] = 116
-            e1[5] = 32
-            e1[6] = 102
-            e1[7] = 111
-            e1[8] = 117
-            e1[9] = 110
-            e1[10] = 100
-            e1[11] = 10
-            e1[12] = 0
-            sh_puts(&e1[0])
+            sh_not_found(*i8(argv[1]))
             return
         var st: [7]int
         fs_stat(ino, &st[0])
         // Type
         val ftype = (st[0] >> 12) & 0xF
         var t1: [7]i8
-        t1[0] = 116  // t
-        t1[1] = 121  // y
-        t1[2] = 112  // p
-        t1[3] = 101  // e
-        t1[4] = 58   // :
-        t1[5] = 32   // space
+        t1[0] = 't'
+        t1[1] = 'y'
+        t1[2] = 'p'
+        t1[3] = 'e'
+        t1[4] = ':'
+        t1[5] = ' '
         t1[6] = 0
         sh_puts(&t1[0])
         if ftype == 1
             var r: [5]i8
-            r[0] = 102  // f
-            r[1] = 105  // i
-            r[2] = 108  // l
-            r[3] = 101  // e
+            r[0] = 'f'
+            r[1] = 'i'
+            r[2] = 'l'
+            r[3] = 'e'
             r[4] = 0
             sh_puts(&r[0])
         else if ftype == 2
             var d: [4]i8
-            d[0] = 100  // d
-            d[1] = 105  // i
-            d[2] = 114  // r
+            d[0] = 'd'
+            d[1] = 'i'
+            d[2] = 'r'
             d[3] = 0
             sh_puts(&d[0])
         else
@@ -552,74 +483,75 @@ Built-in commands.
         sh_newline()
         // Size
         var s1: [7]i8
-        s1[0] = 115  // s
-        s1[1] = 105  // i
-        s1[2] = 122  // z
-        s1[3] = 101  // e
-        s1[4] = 58   // :
-        s1[5] = 32   // space
+        s1[0] = 's'
+        s1[1] = 'i'
+        s1[2] = 'z'
+        s1[3] = 'e'
+        s1[4] = ':'
+        s1[5] = ' '
         s1[6] = 0
         sh_puts(&s1[0])
         sh_putint(st[4])
         sh_newline()
         // Inode
         var i1: [5]i8
-        i1[0] = 105  // i
-        i1[1] = 110  // n
-        i1[2] = 111  // o
-        i1[3] = 58   // :
+        i1[0] = 'i'
+        i1[1] = 'n'
+        i1[2] = 'o'
+        i1[3] = ':'
         i1[4] = 0
         sh_puts(&i1[0])
-        sh_putc(32)
+        sh_putc(' ')
         sh_putint(ino)
         sh_newline()
 
     cmd_help()
-        var h: [57]i8
-        h[0] = 101   // e
-        h[1] = 99    // c
-        h[2] = 104   // h
-        h[3] = 111   // o
-        h[4] = 32    // space
-        h[5] = 108   // l
-        h[6] = 115   // s
-        h[7] = 32    // space
-        h[8] = 99    // c
-        h[9] = 97    // a
-        h[10] = 116  // t
-        h[11] = 32   // space
-        h[12] = 109  // m
-        h[13] = 107  // k
-        h[14] = 100  // d
-        h[15] = 105  // i
-        h[16] = 114  // r
-        h[17] = 32   // space
-        h[18] = 114  // r
-        h[19] = 109  // m
-        h[20] = 32   // space
-        h[21] = 114  // r
-        h[22] = 109  // m
-        h[23] = 100  // d
-        h[24] = 105  // i
-        h[25] = 114  // r
-        h[26] = 32   // space
-        h[27] = 112  // p
-        h[28] = 119  // w
-        h[29] = 100  // d
-        h[30] = 32   // space
-        h[31] = 99   // c
-        h[32] = 100  // d
-        h[33] = 32   // space
-        h[34] = 115  // s
-        h[35] = 116  // t
-        h[36] = 97   // a
-        h[37] = 116  // t
-        h[38] = 32   // space
-        h[39] = 104  // h
-        h[40] = 101  // e
-        h[41] = 108  // l
-        h[42] = 112  // p
-        h[43] = 10   // newline
+        var h: [45]i8
+        // "echo ls cat mkdir rm rmdir pwd cd stat help\n"
+        h[0] = 'e'
+        h[1] = 'c'
+        h[2] = 'h'
+        h[3] = 'o'
+        h[4] = ' '
+        h[5] = 'l'
+        h[6] = 's'
+        h[7] = ' '
+        h[8] = 'c'
+        h[9] = 'a'
+        h[10] = 't'
+        h[11] = ' '
+        h[12] = 'm'
+        h[13] = 'k'
+        h[14] = 'd'
+        h[15] = 'i'
+        h[16] = 'r'
+        h[17] = ' '
+        h[18] = 'r'
+        h[19] = 'm'
+        h[20] = ' '
+        h[21] = 'r'
+        h[22] = 'm'
+        h[23] = 'd'
+        h[24] = 'i'
+        h[25] = 'r'
+        h[26] = ' '
+        h[27] = 'p'
+        h[28] = 'w'
+        h[29] = 'd'
+        h[30] = ' '
+        h[31] = 'c'
+        h[32] = 'd'
+        h[33] = ' '
+        h[34] = 's'
+        h[35] = 't'
+        h[36] = 'a'
+        h[37] = 't'
+        h[38] = ' '
+        h[39] = 'h'
+        h[40] = 'e'
+        h[41] = 'l'
+        h[42] = 'p'
+        h[43] = '\n'
         h[44] = 0
         sh_puts(&h[0])
 
@@ -642,49 +574,49 @@ Command name constants.
     var _cmd_help: [5]i8
 
     sh_init_cmds()
-        _cmd_echo[0] = 101
-        _cmd_echo[1] = 99
-        _cmd_echo[2] = 104
-        _cmd_echo[3] = 111
+        _cmd_echo[0] = 'e'
+        _cmd_echo[1] = 'c'
+        _cmd_echo[2] = 'h'
+        _cmd_echo[3] = 'o'
         _cmd_echo[4] = 0
-        _cmd_ls[0] = 108
-        _cmd_ls[1] = 115
+        _cmd_ls[0] = 'l'
+        _cmd_ls[1] = 's'
         _cmd_ls[2] = 0
-        _cmd_cat[0] = 99
-        _cmd_cat[1] = 97
-        _cmd_cat[2] = 116
+        _cmd_cat[0] = 'c'
+        _cmd_cat[1] = 'a'
+        _cmd_cat[2] = 't'
         _cmd_cat[3] = 0
-        _cmd_mkdir[0] = 109
-        _cmd_mkdir[1] = 107
-        _cmd_mkdir[2] = 100
-        _cmd_mkdir[3] = 105
-        _cmd_mkdir[4] = 114
+        _cmd_mkdir[0] = 'm'
+        _cmd_mkdir[1] = 'k'
+        _cmd_mkdir[2] = 'd'
+        _cmd_mkdir[3] = 'i'
+        _cmd_mkdir[4] = 'r'
         _cmd_mkdir[5] = 0
-        _cmd_rm[0] = 114
-        _cmd_rm[1] = 109
+        _cmd_rm[0] = 'r'
+        _cmd_rm[1] = 'm'
         _cmd_rm[2] = 0
-        _cmd_rmdir[0] = 114
-        _cmd_rmdir[1] = 109
-        _cmd_rmdir[2] = 100
-        _cmd_rmdir[3] = 105
-        _cmd_rmdir[4] = 114
+        _cmd_rmdir[0] = 'r'
+        _cmd_rmdir[1] = 'm'
+        _cmd_rmdir[2] = 'd'
+        _cmd_rmdir[3] = 'i'
+        _cmd_rmdir[4] = 'r'
         _cmd_rmdir[5] = 0
-        _cmd_pwd[0] = 112
-        _cmd_pwd[1] = 119
-        _cmd_pwd[2] = 100
+        _cmd_pwd[0] = 'p'
+        _cmd_pwd[1] = 'w'
+        _cmd_pwd[2] = 'd'
         _cmd_pwd[3] = 0
-        _cmd_cd[0] = 99
-        _cmd_cd[1] = 100
+        _cmd_cd[0] = 'c'
+        _cmd_cd[1] = 'd'
         _cmd_cd[2] = 0
-        _cmd_stat[0] = 115
-        _cmd_stat[1] = 116
-        _cmd_stat[2] = 97
-        _cmd_stat[3] = 116
+        _cmd_stat[0] = 's'
+        _cmd_stat[1] = 't'
+        _cmd_stat[2] = 'a'
+        _cmd_stat[3] = 't'
         _cmd_stat[4] = 0
-        _cmd_help[0] = 104
-        _cmd_help[1] = 101
-        _cmd_help[2] = 108
-        _cmd_help[3] = 112
+        _cmd_help[0] = 'h'
+        _cmd_help[1] = 'e'
+        _cmd_help[2] = 'l'
+        _cmd_help[3] = 'p'
         _cmd_help[4] = 0
 
     sh_dispatch(argc: int, argv: *i64)
@@ -712,29 +644,14 @@ Command name constants.
         else if streq(cmd, &_cmd_help[0]) == 1
             cmd_help()
         else
-            sh_puts(cmd)
-            var e: [13]i8
-            e[0] = 58   // :
-            e[1] = 32   // space
-            e[2] = 110  // n
-            e[3] = 111  // o
-            e[4] = 116  // t
-            e[5] = 32   // space
-            e[6] = 102  // f
-            e[7] = 111  // o
-            e[8] = 117  // u
-            e[9] = 110  // n
-            e[10] = 100 // d
-            e[11] = 10  // newline
-            e[12] = 0
-            sh_puts(&e[0])
+            sh_not_found(cmd)
 
 The shell main loop. Prints a prompt, reads a line,
 tokenizes it, and dispatches to the appropriate command.
 
     shell()
         // Initialize
-        cwd_path[0] = 47  // /
+        cwd_path[0] = '/'
         cwd_path[1] = 0
         sh_init_cmds()
 
@@ -743,15 +660,15 @@ tokenizes it, and dispatches to the appropriate command.
 
         var line: [256]i8
         var delim: [2]i8
-        delim[0] = 32  // space
+        delim[0] = ' '
         delim[1] = 0
 
         var argv: [16]i64
 
         while 1 == 1
             // Print prompt: "> "
-            sh_putc(62)   // >
-            sh_putc(32)   // space
+            sh_putc('>')
+            sh_putc(' ')
 
             // Read a line
             val len = sh_readline(&line[0], 256)

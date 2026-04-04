@@ -27,7 +27,7 @@ FUNC tty_handle_read 2 i32 i32 void
 FUNC tty_handle_switch 2 i32 i32 void
 DATA tty_name arr 4 i8
 FUNC tty_server 0 void
-FUNC tty_putc 1 i32 void
+FUNC tty_putc 1 u32 void
 FUNC tty_puts 2 ptr i8 i32 void
 FUNC tty_getc 0 i32
 FUNC tty_switch 1 i32 void

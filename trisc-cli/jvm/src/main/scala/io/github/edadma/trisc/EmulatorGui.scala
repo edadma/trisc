@@ -64,8 +64,6 @@ object EmulatorGui:
 
       // CPU setup — output feeds the ANSI parser on the EDT
       val outputFn: String => Unit = s =>
-        System.err.print(s)
-        System.err.flush()
         val update: Runnable = () => {
           for b <- s.getBytes("UTF-8") do parser.feed(b & 0xff)
           terminal.repaint()
