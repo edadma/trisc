@@ -351,7 +351,7 @@ Built-in commands.
         if result < 0
             sh_error()
 
-    cmd_pwd()
+    cmd_pwd(argc: int, argv: *i64)
         sh_puts(&cwd_path[0])
         sh_newline()
 
@@ -413,42 +413,55 @@ Built-in commands.
         sh_putint(ino)
         sh_newline()
 
-    cmd_help()
+    cmd_help(argc: int, argv: *i64)
         sh_puts(*i8("echo ls cat mkdir rm rmdir pwd cd stat help\n"))
 
-Command dispatch table. Matches the first token against
-known commands and calls the handler.
+Command dispatch table. Each entry pairs a command name with
+its handler function. All handlers have the same signature
+so they can be stored as function pointers.
 
     val MAX_ARGS = 16
+    val NUM_CMDS = 10
 
-Command dispatch. Matches the first token against known commands.
+    struct Command
+        name: i64
+        handler: func(int, *i64)
+
+    var cmds: [10]Command
+
+    sh_init_cmds()
+        cmds[0].name = i64(*i8("echo"))
+        cmds[0].handler = cmd_echo
+        cmds[1].name = i64(*i8("ls"))
+        cmds[1].handler = cmd_ls
+        cmds[2].name = i64(*i8("cat"))
+        cmds[2].handler = cmd_cat
+        cmds[3].name = i64(*i8("mkdir"))
+        cmds[3].handler = cmd_mkdir
+        cmds[4].name = i64(*i8("rm"))
+        cmds[4].handler = cmd_rm
+        cmds[5].name = i64(*i8("rmdir"))
+        cmds[5].handler = cmd_rmdir
+        cmds[6].name = i64(*i8("pwd"))
+        cmds[6].handler = cmd_pwd
+        cmds[7].name = i64(*i8("cd"))
+        cmds[7].handler = cmd_cd
+        cmds[8].name = i64(*i8("stat"))
+        cmds[8].handler = cmd_stat
+        cmds[9].name = i64(*i8("help"))
+        cmds[9].handler = cmd_help
 
     sh_dispatch(argc: int, argv: *i64)
         if argc == 0
             return
         val cmd: *i8 = *i8(argv[0])
-        if streq(cmd, *i8("echo")) == 1
-            cmd_echo(argc, argv)
-        else if streq(cmd, *i8("ls")) == 1
-            cmd_ls(argc, argv)
-        else if streq(cmd, *i8("cat")) == 1
-            cmd_cat(argc, argv)
-        else if streq(cmd, *i8("mkdir")) == 1
-            cmd_mkdir(argc, argv)
-        else if streq(cmd, *i8("rm")) == 1
-            cmd_rm(argc, argv)
-        else if streq(cmd, *i8("rmdir")) == 1
-            cmd_rmdir(argc, argv)
-        else if streq(cmd, *i8("pwd")) == 1
-            cmd_pwd()
-        else if streq(cmd, *i8("cd")) == 1
-            cmd_cd(argc, argv)
-        else if streq(cmd, *i8("stat")) == 1
-            cmd_stat(argc, argv)
-        else if streq(cmd, *i8("help")) == 1
-            cmd_help()
-        else
-            sh_not_found(cmd)
+        var i = 0
+        while i < NUM_CMDS
+            if streq(cmd, *i8(cmds[i].name)) == 1
+                cmds[i].handler(argc, argv)
+                return
+            i += 1
+        sh_not_found(cmd)
 
 The shell main loop. Prints a prompt, reads a line,
 tokenizes it, and dispatches to the appropriate command.
@@ -457,6 +470,7 @@ tokenizes it, and dispatches to the appropriate command.
         // Initialize
         cwd_path[0] = '/'
         cwd_path[1] = 0
+        sh_init_cmds()
 
         // Wait for servers to start
         sleep(5)
