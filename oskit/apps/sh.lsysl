@@ -1,0 +1,634 @@
+OSKit Shell
+
+Minimal interactive shell. Reads commands from the TTY,
+tokenizes with strtok, and dispatches to built-in commands.
+
+Built-in commands:
+- echo [args...]   — print arguments
+- ls [path]         — list directory
+- cat path          — print file contents
+- mkdir path        — create directory
+- rm path           — remove file
+- rmdir path        — remove empty directory
+- pwd               — print working directory
+- cd path           — change directory
+- stat path         — show file info
+- help              — list commands
+
+    module oskit
+
+    import oskit.lib.{strtok, streq, strlen, strcpy, strcat}
+
+Extern declarations for TTY and filesystem server functions.
+These are in module oskit but may be compiled in any order.
+
+    extern tty_putc(ch: int)
+    extern tty_puts(s: *i8, len: int)
+    extern tty_getc() -> int
+
+    extern fs_open(path: *i8) -> int
+    extern fs_read(ino: int, buf: *i8, offset: int, len: int) -> int
+    extern fs_write(ino: int, data: *i8, offset: int, len: int) -> int
+    extern fs_create(parent_ino: int, name: *i8, ftype: int, perm: int) -> int
+    extern fs_unlink(parent_ino: int, name: *i8) -> int
+    extern fs_stat(ino: int, out: *int) -> int
+    extern fs_mkdir(parent_ino: int, name: *i8, perm: int) -> int
+    extern fs_rmdir(parent_ino: int, name: *i8) -> int
+    extern fs_readdir(dir_ino: int, index: int, out_ino: *int, out_name: *i8) -> int
+
+Shell state: current working directory as inode and path string.
+
+    val ROOT_INODE = 1
+    var cwd_ino = 1
+    var cwd_path: [128]i8
+
+Output helpers. These use the TTY server for all I/O.
+
+    sh_putc(ch: int)
+        tty_putc(ch)
+
+    sh_puts(s: *i8)
+        tty_puts(s, strlen(s))
+
+    sh_newline()
+        sh_putc(10)
+
+    sh_putint(n: int)
+        if n < 0
+            sh_putc(45)
+            sh_putint(-n)
+            return
+        if n >= 10
+            sh_putint(n / 10)
+        sh_putc(48 + (n % 10))
+
+Read a line from the TTY into buf. Echoes characters as typed.
+Handles backspace. Returns when newline is received.
+
+    sh_readline(buf: *i8, maxlen: int) -> int
+        var pos = 0
+        while pos < maxlen - 1
+            val ch = tty_getc()
+            if ch == 10
+                // Enter — done
+                sh_putc(10)
+                buf[pos] = 0
+                return pos
+            else if ch == 8
+                // Backspace
+                if pos > 0
+                    pos -= 1
+                    sh_putc(8)
+                    sh_putc(32)
+                    sh_putc(8)
+            else if ch >= 32
+                // Printable character
+                buf[pos] = i8(ch)
+                pos += 1
+                sh_putc(ch)
+        buf[pos] = 0
+        pos
+
+Path resolution helpers. Splits a path into parent directory
+and basename. Resolves the parent to an inode.
+
+resolve_parent(path) — Open the parent directory of path.
+For "/dir/file" returns the inode of "/dir".
+For "file" (no slash) returns cwd_ino.
+
+    sh_resolve_parent(path: *i8) -> int
+        // Find the last slash
+        var last_slash = -1
+        var i = 0
+        while path[i] != 0
+            if path[i] == 47
+                last_slash = i
+            i += 1
+        if last_slash == -1
+            // No slash — parent is cwd
+            return cwd_ino
+        if last_slash == 0
+            // "/file" — parent is root
+            return ROOT_INODE
+        // Temporarily null-terminate at last slash
+        val saved = path[last_slash]
+        path[last_slash] = 0
+        val ino = sh_resolve_path(path)
+        path[last_slash] = saved
+        ino
+
+sh_basename(path) — Return pointer to the last component of path.
+
+    sh_basename(path: *i8) -> *i8
+        var last_slash = -1
+        var i = 0
+        while path[i] != 0
+            if path[i] == 47
+                last_slash = i
+            i += 1
+        if last_slash == -1
+            return path
+        path + last_slash + 1
+
+sh_resolve_path(path) — Resolve a path to an inode.
+Absolute paths start with /. Relative paths are resolved
+from cwd by building an absolute path.
+
+    sh_resolve_path(path: *i8) -> int
+        if path[0] == 47
+            // Absolute path
+            return fs_open(path)
+        // Relative path — build absolute path
+        var abspath: [256]i8
+        strcpy(&abspath[0], &cwd_path[0])
+        // Add separator if cwd is not "/"
+        val cwdlen = strlen(&cwd_path[0])
+        if cwdlen > 1
+            abspath[cwdlen] = 47
+            abspath[cwdlen + 1] = 0
+        else if cwdlen == 1
+            // cwd is "/" — don't add extra slash
+            abspath[1] = 0
+        strcat(&abspath[0], path)
+        fs_open(&abspath[0])
+
+Built-in commands.
+
+    cmd_echo(argc: int, argv: *(*i8))
+        var i = 1
+        while i < argc
+            if i > 1
+                sh_putc(32)
+            sh_puts(argv[i])
+            i += 1
+        sh_newline()
+
+    cmd_ls(argc: int, argv: *(*i8))
+        var dir_ino = cwd_ino
+        if argc > 1
+            dir_ino = sh_resolve_path(argv[1])
+            if dir_ino < 0
+                sh_puts(argv[1])
+                var e1: [13]i8
+                e1[0] = 58   // :
+                e1[1] = 32   // space
+                e1[2] = 110  // n
+                e1[3] = 111  // o
+                e1[4] = 116  // t
+                e1[5] = 32   // space
+                e1[6] = 102  // f
+                e1[7] = 111  // o
+                e1[8] = 117  // u
+                e1[9] = 110  // n
+                e1[10] = 100 // d
+                e1[11] = 10  // newline
+                e1[12] = 0
+                sh_puts(&e1[0])
+                return
+        var entry_ino: int
+        var entry_name: [14]i8
+        var idx = 0
+        while fs_readdir(dir_ino, idx, &entry_ino, &entry_name[0]) == 0
+            // Skip . and ..
+            if entry_name[0] != 46
+                sh_puts(&entry_name[0])
+                sh_newline()
+            else if entry_name[1] != 0
+                if entry_name[1] != 46
+                    sh_puts(&entry_name[0])
+                    sh_newline()
+                else if entry_name[2] != 0
+                    sh_puts(&entry_name[0])
+                    sh_newline()
+            idx += 1
+
+    cmd_cat(argc: int, argv: *(*i8))
+        if argc < 2
+            var u1: [15]i8
+            u1[0] = 117  // u
+            u1[1] = 115  // s
+            u1[2] = 97   // a
+            u1[3] = 103  // g
+            u1[4] = 101  // e
+            u1[5] = 58   // :
+            u1[6] = 32   // space
+            u1[7] = 99   // c
+            u1[8] = 97   // a
+            u1[9] = 116  // t
+            u1[10] = 32  // space
+            u1[11] = 60  // <
+            u1[12] = 62  // >
+            u1[13] = 10  // newline
+            u1[14] = 0
+            sh_puts(&u1[0])
+            return
+        val ino = sh_resolve_path(argv[1])
+        if ino < 0
+            sh_puts(argv[1])
+            var e1: [13]i8
+            e1[0] = 58
+            e1[1] = 32
+            e1[2] = 110
+            e1[3] = 111
+            e1[4] = 116
+            e1[5] = 32
+            e1[6] = 102
+            e1[7] = 111
+            e1[8] = 117
+            e1[9] = 110
+            e1[10] = 100
+            e1[11] = 10
+            e1[12] = 0
+            sh_puts(&e1[0])
+            return
+        var buf: [128]i8
+        var offset = 0
+        var nr = fs_read(ino, &buf[0], offset, 128)
+        while nr > 0
+            var i = 0
+            while i < nr
+                sh_putc(int(buf[i]))
+                i += 1
+            offset += nr
+            nr = fs_read(ino, &buf[0], offset, 128)
+        sh_newline()
+
+    cmd_mkdir(argc: int, argv: *(*i8))
+        if argc < 2
+            return
+        val parent = sh_resolve_parent(argv[1])
+        if parent < 0
+            sh_puts(argv[1])
+            var e1: [13]i8
+            e1[0] = 58
+            e1[1] = 32
+            e1[2] = 110
+            e1[3] = 111
+            e1[4] = 116
+            e1[5] = 32
+            e1[6] = 102
+            e1[7] = 111
+            e1[8] = 117
+            e1[9] = 110
+            e1[10] = 100
+            e1[11] = 10
+            e1[12] = 0
+            sh_puts(&e1[0])
+            return
+        val name = sh_basename(argv[1])
+        val result = fs_mkdir(parent, name, 0x1FF)
+        if result < 0
+            var e2: [7]i8
+            e2[0] = 101  // e
+            e2[1] = 114  // r
+            e2[2] = 114  // r
+            e2[3] = 111  // o
+            e2[4] = 114  // r
+            e2[5] = 10   // newline
+            e2[6] = 0
+            sh_puts(&e2[0])
+
+    cmd_rm(argc: int, argv: *(*i8))
+        if argc < 2
+            return
+        val parent = sh_resolve_parent(argv[1])
+        if parent < 0
+            return
+        val name = sh_basename(argv[1])
+        val result = fs_unlink(parent, name)
+        if result < 0
+            var e2: [7]i8
+            e2[0] = 101
+            e2[1] = 114
+            e2[2] = 114
+            e2[3] = 111
+            e2[4] = 114
+            e2[5] = 10
+            e2[6] = 0
+            sh_puts(&e2[0])
+
+    cmd_rmdir(argc: int, argv: *(*i8))
+        if argc < 2
+            return
+        val parent = sh_resolve_parent(argv[1])
+        if parent < 0
+            return
+        val name = sh_basename(argv[1])
+        val result = fs_rmdir(parent, name)
+        if result < 0
+            var e2: [7]i8
+            e2[0] = 101
+            e2[1] = 114
+            e2[2] = 114
+            e2[3] = 111
+            e2[4] = 114
+            e2[5] = 10
+            e2[6] = 0
+            sh_puts(&e2[0])
+
+    cmd_pwd()
+        sh_puts(&cwd_path[0])
+        sh_newline()
+
+    cmd_cd(argc: int, argv: *(*i8))
+        if argc < 2
+            // cd with no args → go to root
+            cwd_ino = ROOT_INODE
+            cwd_path[0] = 47
+            cwd_path[1] = 0
+            return
+        val ino = sh_resolve_path(argv[1])
+        if ino < 0
+            sh_puts(argv[1])
+            var e1: [13]i8
+            e1[0] = 58
+            e1[1] = 32
+            e1[2] = 110
+            e1[3] = 111
+            e1[4] = 116
+            e1[5] = 32
+            e1[6] = 102
+            e1[7] = 111
+            e1[8] = 117
+            e1[9] = 110
+            e1[10] = 100
+            e1[11] = 10
+            e1[12] = 0
+            sh_puts(&e1[0])
+            return
+        // Verify it's a directory
+        var st: [7]int
+        fs_stat(ino, &st[0])
+        val ftype = (st[0] >> 12) & 0xF
+        if ftype != 2
+            var e2: [15]i8
+            e2[0] = 110  // n
+            e2[1] = 111  // o
+            e2[2] = 116  // t
+            e2[3] = 32   // space
+            e2[4] = 97   // a
+            e2[5] = 32   // space
+            e2[6] = 100  // d
+            e2[7] = 105  // i
+            e2[8] = 114  // r
+            e2[9] = 101  // e
+            e2[10] = 99  // c
+            e2[11] = 116 // t
+            e2[12] = 111 // o
+            e2[13] = 114 // r
+            e2[14] = 121 // y
+            sh_puts(&e2[0])
+            sh_newline()
+            return
+        cwd_ino = ino
+        // Update cwd_path
+        if argv[1][0] == 47
+            // Absolute path
+            strcpy(&cwd_path[0], argv[1])
+        else
+            // Relative path
+            val cwdlen = strlen(&cwd_path[0])
+            if cwdlen > 1
+                cwd_path[cwdlen] = 47
+                cwd_path[cwdlen + 1] = 0
+            strcat(&cwd_path[0], argv[1])
+
+    cmd_stat(argc: int, argv: *(*i8))
+        if argc < 2
+            return
+        val ino = sh_resolve_path(argv[1])
+        if ino < 0
+            sh_puts(argv[1])
+            var e1: [13]i8
+            e1[0] = 58
+            e1[1] = 32
+            e1[2] = 110
+            e1[3] = 111
+            e1[4] = 116
+            e1[5] = 32
+            e1[6] = 102
+            e1[7] = 111
+            e1[8] = 117
+            e1[9] = 110
+            e1[10] = 100
+            e1[11] = 10
+            e1[12] = 0
+            sh_puts(&e1[0])
+            return
+        var st: [7]int
+        fs_stat(ino, &st[0])
+        // Type
+        val ftype = (st[0] >> 12) & 0xF
+        var t1: [7]i8
+        t1[0] = 116  // t
+        t1[1] = 121  // y
+        t1[2] = 112  // p
+        t1[3] = 101  // e
+        t1[4] = 58   // :
+        t1[5] = 32   // space
+        t1[6] = 0
+        sh_puts(&t1[0])
+        if ftype == 1
+            var r: [5]i8
+            r[0] = 102  // f
+            r[1] = 105  // i
+            r[2] = 108  // l
+            r[3] = 101  // e
+            r[4] = 0
+            sh_puts(&r[0])
+        else if ftype == 2
+            var d: [4]i8
+            d[0] = 100  // d
+            d[1] = 105  // i
+            d[2] = 114  // r
+            d[3] = 0
+            sh_puts(&d[0])
+        else
+            sh_putint(ftype)
+        sh_newline()
+        // Size
+        var s1: [7]i8
+        s1[0] = 115  // s
+        s1[1] = 105  // i
+        s1[2] = 122  // z
+        s1[3] = 101  // e
+        s1[4] = 58   // :
+        s1[5] = 32   // space
+        s1[6] = 0
+        sh_puts(&s1[0])
+        sh_putint(st[4])
+        sh_newline()
+        // Inode
+        var i1: [5]i8
+        i1[0] = 105  // i
+        i1[1] = 110  // n
+        i1[2] = 111  // o
+        i1[3] = 58   // :
+        i1[4] = 0
+        sh_puts(&i1[0])
+        sh_putc(32)
+        sh_putint(ino)
+        sh_newline()
+
+    cmd_help()
+        var h: [57]i8
+        h[0] = 101   // e
+        h[1] = 99    // c
+        h[2] = 104   // h
+        h[3] = 111   // o
+        h[4] = 32    // space
+        h[5] = 108   // l
+        h[6] = 115   // s
+        h[7] = 32    // space
+        h[8] = 99    // c
+        h[9] = 97    // a
+        h[10] = 116  // t
+        h[11] = 32   // space
+        h[12] = 109  // m
+        h[13] = 107  // k
+        h[14] = 100  // d
+        h[15] = 105  // i
+        h[16] = 114  // r
+        h[17] = 32   // space
+        h[18] = 114  // r
+        h[19] = 109  // m
+        h[20] = 32   // space
+        h[21] = 114  // r
+        h[22] = 109  // m
+        h[23] = 100  // d
+        h[24] = 105  // i
+        h[25] = 114  // r
+        h[26] = 32   // space
+        h[27] = 112  // p
+        h[28] = 119  // w
+        h[29] = 100  // d
+        h[30] = 32   // space
+        h[31] = 99   // c
+        h[32] = 100  // d
+        h[33] = 32   // space
+        h[34] = 115  // s
+        h[35] = 116  // t
+        h[36] = 97   // a
+        h[37] = 116  // t
+        h[38] = 32   // space
+        h[39] = 104  // h
+        h[40] = 101  // e
+        h[41] = 108  // l
+        h[42] = 112  // p
+        h[43] = 10   // newline
+        h[44] = 0
+        sh_puts(&h[0])
+
+Command dispatch table. Matches the first token against
+known commands and calls the handler.
+
+    val MAX_ARGS = 16
+
+Command name constants.
+
+    var _cmd_echo: [5]i8
+    var _cmd_ls: [3]i8
+    var _cmd_cat: [4]i8
+    var _cmd_mkdir: [6]i8
+    var _cmd_rm: [3]i8
+    var _cmd_rmdir: [6]i8
+    var _cmd_pwd: [4]i8
+    var _cmd_cd: [3]i8
+    var _cmd_stat: [5]i8
+    var _cmd_help: [5]i8
+
+    sh_init_cmds()
+        _cmd_echo[0] = 101; _cmd_echo[1] = 99; _cmd_echo[2] = 104; _cmd_echo[3] = 111; _cmd_echo[4] = 0
+        _cmd_ls[0] = 108; _cmd_ls[1] = 115; _cmd_ls[2] = 0
+        _cmd_cat[0] = 99; _cmd_cat[1] = 97; _cmd_cat[2] = 116; _cmd_cat[3] = 0
+        _cmd_mkdir[0] = 109; _cmd_mkdir[1] = 107; _cmd_mkdir[2] = 100; _cmd_mkdir[3] = 105; _cmd_mkdir[4] = 114; _cmd_mkdir[5] = 0
+        _cmd_rm[0] = 114; _cmd_rm[1] = 109; _cmd_rm[2] = 0
+        _cmd_rmdir[0] = 114; _cmd_rmdir[1] = 109; _cmd_rmdir[2] = 100; _cmd_rmdir[3] = 105; _cmd_rmdir[4] = 114; _cmd_rmdir[5] = 0
+        _cmd_pwd[0] = 112; _cmd_pwd[1] = 119; _cmd_pwd[2] = 100; _cmd_pwd[3] = 0
+        _cmd_cd[0] = 99; _cmd_cd[1] = 100; _cmd_cd[2] = 0
+        _cmd_stat[0] = 115; _cmd_stat[1] = 116; _cmd_stat[2] = 97; _cmd_stat[3] = 116; _cmd_stat[4] = 0
+        _cmd_help[0] = 104; _cmd_help[1] = 101; _cmd_help[2] = 108; _cmd_help[3] = 112; _cmd_help[4] = 0
+
+    sh_dispatch(argc: int, argv: *(*i8))
+        if argc == 0
+            return
+        val cmd = argv[0]
+        if streq(cmd, &_cmd_echo[0]) == 1
+            cmd_echo(argc, argv)
+        else if streq(cmd, &_cmd_ls[0]) == 1
+            cmd_ls(argc, argv)
+        else if streq(cmd, &_cmd_cat[0]) == 1
+            cmd_cat(argc, argv)
+        else if streq(cmd, &_cmd_mkdir[0]) == 1
+            cmd_mkdir(argc, argv)
+        else if streq(cmd, &_cmd_rm[0]) == 1
+            cmd_rm(argc, argv)
+        else if streq(cmd, &_cmd_rmdir[0]) == 1
+            cmd_rmdir(argc, argv)
+        else if streq(cmd, &_cmd_pwd[0]) == 1
+            cmd_pwd()
+        else if streq(cmd, &_cmd_cd[0]) == 1
+            cmd_cd(argc, argv)
+        else if streq(cmd, &_cmd_stat[0]) == 1
+            cmd_stat(argc, argv)
+        else if streq(cmd, &_cmd_help[0]) == 1
+            cmd_help()
+        else
+            sh_puts(cmd)
+            var e: [13]i8
+            e[0] = 58   // :
+            e[1] = 32   // space
+            e[2] = 110  // n
+            e[3] = 111  // o
+            e[4] = 116  // t
+            e[5] = 32   // space
+            e[6] = 102  // f
+            e[7] = 111  // o
+            e[8] = 117  // u
+            e[9] = 110  // n
+            e[10] = 100 // d
+            e[11] = 10  // newline
+            e[12] = 0
+            sh_puts(&e[0])
+
+The shell main loop. Prints a prompt, reads a line,
+tokenizes it, and dispatches to the appropriate command.
+
+    shell()
+        // Initialize
+        cwd_path[0] = 47  // /
+        cwd_path[1] = 0
+        sh_init_cmds()
+
+        // Wait for servers to start
+        sleep(200)
+
+        var line: [256]i8
+        var delim: [2]i8
+        delim[0] = 32  // space
+        delim[1] = 0
+
+        var argv: [16]*i8
+
+        while 1 == 1
+            // Print prompt: "cwd$ "
+            sh_puts(&cwd_path[0])
+            sh_putc(36)   // $
+            sh_putc(32)   // space
+
+            // Read a line
+            val len = sh_readline(&line[0], 256)
+            if len == 0
+                continue
+
+            // Tokenize
+            var argc = 0
+            var tok = strtok(&line[0], &delim[0])
+            while i64(tok) != 0
+                if argc < MAX_ARGS
+                    argv[argc] = tok
+                    argc += 1
+                tok = strtok(*i8(0), &delim[0])
+
+            // Dispatch
+            sh_dispatch(argc, &argv[0])
