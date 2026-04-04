@@ -5,12 +5,13 @@ class DrawEngineTests extends TestHelpers {
   val W = 320
   val H = 240
 
-  def mkDraw(): (DrawEngine, RAM) =
-    val fbMem = new RAM(0, W * H * 4)
+  def mkDraw(): (DrawEngine, FramebufferImage) =
+    val fb = new FramebufferImage(0, (W * H * 4).toLong)
+    fb.setResolution(W, H)
     val ram = new RAM(0x100000, 0x10000)
-    val mem = new Memory("mem", fbMem, ram)
-    val draw = new DrawEngine(0x200000, mem, fbMem, () => W, () => H)
-    (draw, fbMem)
+    val mem = new Memory("mem", fb, ram)
+    val draw = new DrawEngine(0x200000, mem, fb, () => W, () => H)
+    (draw, fb)
 
   /** Set 16-bit register */
   def set16(d: DrawEngine, off: Int, v: Int): Unit =
@@ -29,22 +30,21 @@ class DrawEngineTests extends TestHelpers {
     d.writeByte(0x200000, cmd)
 
   /** Read pixel RGBA from framebuffer */
-  def pixel(fb: RAM, x: Int, y: Int): (Int, Int, Int, Int) =
-    val off = (y * W + x) * 4
-    (fb.bytes(off) & 0xFF, fb.bytes(off + 1) & 0xFF, fb.bytes(off + 2) & 0xFF, fb.bytes(off + 3) & 0xFF)
+  def pixel(fb: FramebufferImage, x: Int, y: Int): (Int, Int, Int, Int) =
+    val p = fb.pixels(y * W + x)
+    ((p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF, (p >> 24) & 0xFF)
 
   // ===== Basic =====
 
   "DrawEngine has correct size" in {
     val (draw, _) = mkDraw()
-    draw.size shouldBe 64
+    draw.size shouldBe 128
   }
 
   "clear fills framebuffer" in {
     val (draw, fb) = mkDraw()
     setColor(draw, 255, 0, 0)
     exec(draw, 0x01) // CLEAR
-    exec(draw, 0x0A) // FLUSH
     val (r, g, b, a) = pixel(fb, 0, 0)
     r shouldBe 255
     g shouldBe 0
@@ -56,7 +56,6 @@ class DrawEngineTests extends TestHelpers {
     val (draw, fb) = mkDraw()
     setColor(draw, 0, 128, 255)
     exec(draw, 0x01)
-    exec(draw, 0x0A)
     val (r, g, b, _) = pixel(fb, W / 2, H / 2)
     r shouldBe 0
     g shouldBe 128
@@ -77,7 +76,6 @@ class DrawEngineTests extends TestHelpers {
     set16(draw, 6, 50)  // X2 (width)
     set16(draw, 8, 30)  // Y2 (height)
     exec(draw, 0x10) // FILL_RECT
-    exec(draw, 0x0A) // FLUSH
 
     // Inside rect should be green
     val (r1, g1, b1, _) = pixel(fb, 20, 20)
@@ -105,7 +103,6 @@ class DrawEngineTests extends TestHelpers {
     set16(draw, 6, 100) // X2
     set16(draw, 8, 50)  // Y2
     exec(draw, 0x11) // DRAW_LINE
-    exec(draw, 0x0A) // FLUSH
 
     // Pixel on the line should be white (or near-white with anti-aliasing)
     val (r, g, b, _) = pixel(fb, 50, 50)
@@ -129,7 +126,6 @@ class DrawEngineTests extends TestHelpers {
     set16(draw, 8, 40) // H
     exec(draw, 0x07) // RECT
     exec(draw, 0x05) // FILL
-    exec(draw, 0x0A) // FLUSH
 
     val (r, g, b, _) = pixel(fb, 40, 30)
     b shouldBe 255
@@ -150,7 +146,6 @@ class DrawEngineTests extends TestHelpers {
     set16(draw, 6, 40)  // radius
     exec(draw, 0x08) // CIRCLE
     exec(draw, 0x05) // FILL
-    exec(draw, 0x0A) // FLUSH
 
     // Center should be yellow
     val (r, g, b, _) = pixel(fb, 100, 100)
@@ -187,10 +182,8 @@ class DrawEngineTests extends TestHelpers {
     draw.writeByte(0x200000L + 18, 0)
     draw.writeByte(0x200000L + 19, 0)
     exec(draw, 0x09) // DRAW_TEXT
-    exec(draw, 0x0A) // FLUSH
 
     // Check that some pixels near the text position are non-black
-    // (exact pixels depend on font rendering, so just verify something was drawn)
     var nonBlack = 0
     for x <- 45 until 80 do
       for y <- 30 until 55 do
@@ -218,8 +211,6 @@ class DrawEngineTests extends TestHelpers {
     set16(draw, 2, 50); set16(draw, 4, 50)
     set16(draw, 6, 100); set16(draw, 8, 100)
     exec(draw, 0x10)
-
-    exec(draw, 0x0A) // FLUSH
 
     // Top-left corner: red
     val (r1, _, b1, _) = pixel(fb, 10, 10)

@@ -124,10 +124,9 @@ class SyslParser extends StandardTokenParsers {
           val size = t match { case ArrayTypeAST(s, _) => s; case _ => 0 }
           VarDeclAST(name, Some(t), ArrayDeclAST(size, t), priv, mut.getOrElse(true))
       } |
-      opt(mutability) ~ ident ~ (":" ~> ident) ~ not("=") ^^ {
+      opt(mutability) ~ ident ~ (":" ~> typeRef) ~ not("=") ^^ {
         case mut ~ name ~ t ~ _ =>
-          val ta = NamedTypeAST(t)
-          VarDeclAST(name, Some(ta), UninitDeclAST(ta), priv, mut.getOrElse(true))
+          VarDeclAST(name, Some(t), UninitDeclAST(t), priv, mut.getOrElse(true))
       } |
       opt(mutability) ~ ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ {
         case mut ~ name ~ t ~ e => VarDeclAST(name, Some(t), e, priv, mut.getOrElse(true))
@@ -153,9 +152,10 @@ class SyslParser extends StandardTokenParsers {
     ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool" | "void" | "string") ^^ NamedTypeAST.apply |
       ident ^^ NamedTypeAST.apply
 
-  // Full type reference: *int, **int, [5]int, []int (slice), func(int)->int, string, int, etc.
+  // Full type reference: *int, **int, &Node, [5]int, []int (slice), func(int)->int, string, int, etc.
   lazy val typeRef: Parser[TypeAST] =
     "*" ~> typeRef ^^ PtrTypeAST.apply |
+      "&" ~> typeRef ^^ RefTypeAST.apply |
       "[" ~> "]" ~> typeRef ^^ SliceTypeAST.apply |
       "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => ArrayTypeAST(n.toInt, t) } |
       "(" ~> rep1sep(typeRef, ",") <~ ")" ^^ TupleTypeAST.apply |
@@ -248,6 +248,9 @@ class SyslParser extends StandardTokenParsers {
         val size = t match { case ArrayTypeAST(s, _) => s; case _ => 0 }
         VarStmtAST(name, Some(t), ArrayDeclAST(size, t), mut)
       } |
+      mutability ~ ident ~ (":" ~> typeRef) ~ not("=") ^^ { case mut ~ name ~ t ~ _ =>
+        VarStmtAST(name, Some(t), UninitDeclAST(t), mut)
+      } |
       mutability ~ ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ { case mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut) } |
       mutability ~ ident ~ ("=" ~> expr) ^^ { case mut ~ name ~ e => VarStmtAST(name, None, e, mut) } |
       ident ~ (":" ~> typeExpr) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
@@ -255,9 +258,8 @@ class SyslParser extends StandardTokenParsers {
         val size = t match { case ArrayTypeAST(s, _) => s; case _ => 0 }
         VarStmtAST(name, Some(t), ArrayDeclAST(size, t))
       } |
-      ident ~ (":" ~> ident) ~ not("=") ^^ { case name ~ t ~ _ =>
-        val ta = NamedTypeAST(t)
-        VarStmtAST(name, Some(ta), UninitDeclAST(ta))
+      ident ~ (":" ~> typeRef) ~ not("=") ^^ { case name ~ t ~ _ =>
+        VarStmtAST(name, Some(t), UninitDeclAST(t))
       } |
       ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ lvalueChain ~ compoundOp ~ expr ^^ { case name ~ chain ~ op ~ value =>
@@ -417,6 +419,7 @@ class SyslParser extends StandardTokenParsers {
       ident <~ "++" ^^ PostIncAST.apply |
       ident <~ "--" ^^ PostDecAST.apply |
       primary ~ rep(
+        ("[" ~> opt(expr) ~ (":" ~> opt(expr)) <~ "]") ^^ { case lo ~ hi => (4, null, "", List(lo.orNull, hi.orNull)) } |
         ("[" ~> expr <~ "]") ^^ (idx => (0, idx, "", Nil: List[ExpressionAST])) |
         ("." ~> ident) ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case m ~ args => (2, null, m, args) } |
         ("." ~> numericLit) ^^ (n => (1, null, s"_${n.toInt}", Nil)) |
@@ -431,7 +434,9 @@ class SyslParser extends StandardTokenParsers {
             // Indirect call: expr(args) — e is a function pointer
             e match
               case VarRefAST(name) => CallAST(name, args)
-              case _ => MethodCallAST(e, "", args) // TODO: indirect call on arbitrary expression
+              case _ => IndirectCallAST(e, args)
+          case (e, (4, _, _, args)) =>
+            SliceExprAST(e, Option(args(0)), Option(args(1)))
           case (e, _) => e // shouldn't happen
         }
       }
@@ -471,6 +476,8 @@ class SyslParser extends StandardTokenParsers {
       "false" ^^^ BoolLitAST(false) |
       "[" ~> rep1sep(expr, ",") <~ "]" ^^ ArrayLitAST.apply |
       "sizeof" ~> "(" ~> sizeofArg <~ ")" |
+      "new" ~> "[" ~> expr ~ ("]" ~> typeRef) ^^ { case size ~ elemType => NewArrayAST(size, elemType) } |
+      "new" ~> ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => NewExprAST(name, args) } |
       cast |
       ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |
       ident ^^ VarRefAST.apply |

@@ -13,23 +13,27 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
 
   private var pending: Int = 0
   private var enabled: Int = 0xff // all sources enabled by default
-  private var delivered: Int = 0 // IRQs signaled to CPU but not yet claimed
+  private var delivered: Int = 0
+  @volatile private var irqSignal: Boolean = false // fast cross-thread signal
   val log: Logger = {
     val l = new Logger(new ConsoleHandler, new DefaultLogFormatter(includeTimestamp = false))
     l.setLogLevel(LogLevel.OFF)
     l
   }
 
-  def raise(irq: Int): Unit =
+  def raise(irq: Int): Unit = synchronized {
     pending |= (1 << irq)
     delivered &= ~(1 << irq)
+    irqSignal = true // cheap volatile write to wake fast-path check
     log.trace(f"raise IRQ $irq — pending=$pending%02x delivered=$delivered%02x", category = "INTC")
+  }
 
-  def lower(irq: Int): Unit =
+  def lower(irq: Int): Unit = synchronized {
     pending &= ~(1 << irq)
     log.trace(f"lower IRQ $irq — pending=$pending%02x", category = "INTC")
+  }
 
-  def readByte(addr: Long): Int =
+  def readByte(addr: Long): Int = synchronized {
     (addr - base).toInt match
       case PENDING => pending & 0xff
       case ENABLED => enabled & 0xff
@@ -42,8 +46,9 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
           delivered &= ~(1 << irq)
           irq
       case _ => 0
+  }
 
-  def writeByte(addr: Long, data: Long): Unit =
+  def writeByte(addr: Long, data: Long): Unit = synchronized {
     (addr - base).toInt match
       case ENABLED => enabled = data.toInt & 0xff
       case ACK =>
@@ -51,9 +56,16 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
         pending &= ~(1 << irq)
         delivered &= ~(1 << irq)
       case _ =>
+  }
 
   def apply(cpu: CPU): Unit =
-    val active = (pending & enabled) & ~delivered
-    if active != 0 then
-      delivered |= active
-      cpu.interrupt()
+    if !irqSignal then return // fast path: single volatile read, no lock
+    irqSignal = false
+    synchronized {
+      val active = (pending & enabled) & ~delivered
+      if active != 0 then
+        delivered |= active
+        cpu.interrupt()
+      // Re-arm signal if more interrupts pending
+      if (pending & enabled) != 0 then irqSignal = true
+    }

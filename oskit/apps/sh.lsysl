@@ -1,0 +1,491 @@
+OSKit Shell
+
+Minimal interactive shell. Reads commands from the TTY,
+tokenizes with strtok, and dispatches to built-in commands.
+
+Built-in commands:
+- echo [args...]   — print arguments
+- ls [path]         — list directory
+- cat path          — print file contents
+- mkdir path        — create directory
+- rm path           — remove file
+- rmdir path        — remove empty directory
+- pwd               — print working directory
+- cd path           — change directory
+- stat path         — show file info
+- help              — list commands
+
+    module oskit.apps
+
+    import oskit.lib.{strtok, streq, strcpy, strcat}
+    import oskit.fs.{strlen, ROOT_INODE}
+    import oskit.services.{sleep}
+    import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
+    import oskit.servers.{fs_open, fs_read, fs_write, fs_create, fs_unlink, fs_stat, fs_mkdir, fs_rmdir, fs_readdir}
+
+Shell state: current working directory as inode and path string.
+
+    var cwd_ino = 1
+    var cwd_path: [128]i8
+
+Output helpers. These use the TTY server for all I/O.
+
+    sh_putc(ch: char)
+        tty_putc(ch)
+
+    sh_puts(s: *i8)
+        tty_puts(s, strlen(s))
+
+    sh_newline()
+        sh_putc('\n')
+
+    sh_putint(n: int)
+        if n < 0
+            sh_putc('-')
+            sh_putint(-n)
+            return
+        if n >= 10
+            sh_putint(n / 10)
+        sh_putc('0' + (n % 10))
+
+Read a line from the TTY with full line editing.
+
+Supports: left/right arrow, Home/End, Delete, Backspace,
+and character insertion at cursor position.
+
+Redraw strategy: on any edit, redraws the entire line using
+CR + prompt + buffer + ESC[K + ESC[nG to position cursor.
+This avoids visible cursor animation.
+
+    val PROMPT_LEN = 2
+
+Append a CSI sequence with numeric parameter to a buffer:
+ESC [ n ch.  Returns new position.
+
+    sh_append_csi(out: *i8, pos: int, n: int, ch: i8) -> int
+        var p = pos
+        out[p] = 27
+        p += 1
+        out[p] = '['
+        p += 1
+        if n >= 100
+            out[p] = i8('0' + n / 100)
+            p += 1
+        if n >= 10
+            out[p] = i8('0' + (n / 10) % 10)
+            p += 1
+        out[p] = i8('0' + n % 10)
+        p += 1
+        out[p] = ch
+        p += 1
+        p
+
+Emit a CSI sequence with numeric parameter directly.
+
+    sh_csi_num(n: int, ch: char)
+        sh_putc(27)
+        sh_putc('[')
+        if n >= 100
+            sh_putc('0' + n / 100)
+        if n >= 10
+            sh_putc('0' + (n / 10) % 10)
+        sh_putc('0' + n % 10)
+        sh_putc(ch)
+
+Redraw the full line in a single batched write.
+Builds CR + prompt + buffer + ESC[K + ESC[nG into a local
+buffer and sends it with one tty_puts call.
+
+    var sh_out: [140]i8
+
+    sh_refresh_line(buf: *i8, len: int, cursor: int)
+        var p = 0
+        sh_out[p] = 13
+        p += 1
+        sh_out[p] = '>'
+        p += 1
+        sh_out[p] = ' '
+        p += 1
+        // Copy line content (flush if approaching IPC limit)
+        var i = 0
+        while i < len
+            if p >= 120
+                tty_puts(&sh_out[0], p)
+                p = 0
+            sh_out[p] = buf[i]
+            p += 1
+            i += 1
+        // ESC[K — clear to end of line
+        p = sh_append_csi(&sh_out[0], p, 0, i8('K'))
+        // ESC[nG — cursor to column (1-based)
+        p = sh_append_csi(&sh_out[0], p, PROMPT_LEN + cursor + 1, i8('G'))
+        tty_puts(&sh_out[0], p)
+
+    sh_readline(buf: *i8, maxlen: int) -> int
+        var len = 0
+        var cursor = 0
+        while len < maxlen - 1
+            val ch = tty_getc()
+            if ch == '\n'
+                // Enter — done
+                sh_putc('\n')
+                buf[len] = 0
+                return len
+            else if ch == 8
+                // Backspace — delete character before cursor
+                if cursor > 0
+                    var i = cursor - 1
+                    while i < len - 1
+                        buf[i] = buf[i + 1]
+                        i += 1
+                    len -= 1
+                    cursor -= 1
+                    sh_refresh_line(buf, len, cursor)
+            else if ch == 27
+                // Escape sequence
+                val c2 = tty_getc()
+                if c2 == '['
+                    val c3 = tty_getc()
+                    if c3 == 'C'
+                        // Right arrow
+                        if cursor < len
+                            cursor += 1
+                            sh_csi_num(PROMPT_LEN + cursor + 1, 'G')
+                    else if c3 == 'D'
+                        // Left arrow
+                        if cursor > 0
+                            cursor -= 1
+                            sh_csi_num(PROMPT_LEN + cursor + 1, 'G')
+                    else if c3 == 'H'
+                        // Home
+                        cursor = 0
+                        sh_csi_num(PROMPT_LEN + 1, 'G')
+                    else if c3 == 'F'
+                        // End
+                        cursor = len
+                        sh_csi_num(PROMPT_LEN + cursor + 1, 'G')
+                    else if c3 == '3'
+                        // Could be Delete: ESC[3~
+                        val c4 = tty_getc()
+                        if c4 == '~'
+                            if cursor < len
+                                var i = cursor
+                                while i < len - 1
+                                    buf[i] = buf[i + 1]
+                                    i += 1
+                                len -= 1
+                                sh_refresh_line(buf, len, cursor)
+            else if ch >= ' '
+                // Printable character — insert at cursor
+                if len < maxlen - 1
+                    var i = len
+                    while i > cursor
+                        buf[i] = buf[i - 1]
+                        i -= 1
+                    buf[cursor] = i8(ch)
+                    len += 1
+                    cursor += 1
+                    if cursor == len
+                        sh_putc(ch)
+                    else
+                        sh_refresh_line(buf, len, cursor)
+        buf[len] = 0
+        len
+
+Path resolution helpers. Splits a path into parent directory
+and basename. Resolves the parent to an inode.
+
+resolve_parent(path) — Open the parent directory of path.
+For "/dir/file" returns the inode of "/dir".
+For "file" (no slash) returns cwd_ino.
+
+    sh_resolve_parent(path: *i8) -> int
+        // Find the last slash
+        var last_slash = -1
+        var i = 0
+        while path[i] != 0
+            if path[i] == '/'
+                last_slash = i
+            i += 1
+        if last_slash == -1
+            // No slash — parent is cwd
+            return cwd_ino
+        if last_slash == 0
+            // "/file" — parent is root
+            return ROOT_INODE
+        // Temporarily null-terminate at last slash
+        val saved = path[last_slash]
+        path[last_slash] = 0
+        val ino = sh_resolve_path(path)
+        path[last_slash] = saved
+        ino
+
+sh_basename(path) — Return pointer to the last component of path.
+
+    sh_basename(path: *i8) -> *i8
+        var last_slash = -1
+        var i = 0
+        while path[i] != 0
+            if path[i] == '/'
+                last_slash = i
+            i += 1
+        if last_slash == -1
+            return path
+        path + last_slash + 1
+
+sh_resolve_path(path) — Resolve a path to an inode.
+Absolute paths start with /. Relative paths are resolved
+from cwd by building an absolute path.
+
+    sh_resolve_path(path: *i8) -> int
+        if path[0] == '/'
+            // Absolute path
+            return fs_open(path)
+        // Relative path — build absolute path
+        var abspath: [256]i8
+        strcpy(&abspath[0], &cwd_path[0])
+        // Add separator if cwd is not "/"
+        val cwdlen = strlen(&cwd_path[0])
+        if cwdlen > 1
+            abspath[cwdlen] = '/'
+            abspath[cwdlen + 1] = 0
+        else if cwdlen == 1
+            // cwd is "/" — don't add extra slash
+            abspath[1] = 0
+        strcat(&abspath[0], path)
+        fs_open(&abspath[0])
+
+Built-in commands.
+
+    cmd_echo(argc: int, argv: *i64)
+        var i = 1
+        while i < argc
+            if i > 1
+                sh_putc(' ')
+            sh_puts(*i8(argv[i]))
+            i += 1
+        sh_newline()
+
+    sh_not_found(name: *i8)
+        sh_puts(name)
+        sh_puts(*i8(": not found\n"))
+
+    sh_error()
+        sh_puts(*i8("error\n"))
+
+    cmd_ls(argc: int, argv: *i64)
+        var dir_ino = cwd_ino
+        if argc > 1
+            dir_ino = sh_resolve_path(*i8(argv[1]))
+            if dir_ino < 0
+                sh_not_found(*i8(argv[1]))
+                return
+        var entry_ino: int
+        var entry_name: [14]i8
+        var idx = 0
+        while fs_readdir(dir_ino, idx, &entry_ino, &entry_name[0]) == 0
+            // Skip . and ..
+            if entry_name[0] != '.'
+                sh_puts(&entry_name[0])
+                sh_newline()
+            else if entry_name[1] != 0
+                if entry_name[1] != '.'
+                    sh_puts(&entry_name[0])
+                    sh_newline()
+                else if entry_name[2] != 0
+                    sh_puts(&entry_name[0])
+                    sh_newline()
+            idx += 1
+
+    cmd_cat(argc: int, argv: *i64)
+        if argc < 2
+            sh_puts(*i8("usage: cat <file>\n"))
+            return
+        val ino = sh_resolve_path(*i8(argv[1]))
+        if ino < 0
+            sh_not_found(*i8(argv[1]))
+            return
+        var buf: [128]i8
+        var offset = 0
+        var nr = fs_read(ino, &buf[0], offset, 128)
+        while nr > 0
+            var i = 0
+            while i < nr
+                sh_putc(int(buf[i]))
+                i += 1
+            offset += nr
+            nr = fs_read(ino, &buf[0], offset, 128)
+        sh_newline()
+
+    cmd_mkdir(argc: int, argv: *i64)
+        if argc < 2
+            return
+        val parent = sh_resolve_parent(*i8(argv[1]))
+        if parent < 0
+            sh_not_found(*i8(argv[1]))
+            return
+        val name = sh_basename(*i8(argv[1]))
+        val result = fs_mkdir(parent, name, 0x1FF)
+        if result < 0
+            sh_error()
+
+    cmd_rm(argc: int, argv: *i64)
+        if argc < 2
+            return
+        val parent = sh_resolve_parent(*i8(argv[1]))
+        if parent < 0
+            return
+        val name = sh_basename(*i8(argv[1]))
+        val result = fs_unlink(parent, name)
+        if result < 0
+            sh_error()
+
+    cmd_rmdir(argc: int, argv: *i64)
+        if argc < 2
+            return
+        val parent = sh_resolve_parent(*i8(argv[1]))
+        if parent < 0
+            return
+        val name = sh_basename(*i8(argv[1]))
+        val result = fs_rmdir(parent, name)
+        if result < 0
+            sh_error()
+
+    cmd_pwd()
+        sh_puts(&cwd_path[0])
+        sh_newline()
+
+    cmd_cd(argc: int, argv: *i64)
+        if argc < 2
+            // cd with no args → go to root
+            cwd_ino = ROOT_INODE
+            cwd_path[0] = '/'
+            cwd_path[1] = 0
+            return
+        val ino = sh_resolve_path(*i8(argv[1]))
+        if ino < 0
+            sh_not_found(*i8(argv[1]))
+            return
+        // Verify it's a directory
+        var st: [7]int
+        fs_stat(ino, &st[0])
+        val ftype = (st[0] >> 12) & 0xF
+        if ftype != 2
+            sh_puts(*i8("not a directory\n"))
+            return
+        cwd_ino = ino
+        // Update cwd_path
+        val arg1: *i8 = *i8(argv[1])
+        if arg1[0] == '/'
+            // Absolute path
+            strcpy(&cwd_path[0], arg1)
+        else
+            // Relative path
+            val cwdlen = strlen(&cwd_path[0])
+            if cwdlen > 1
+                cwd_path[cwdlen] = '/'
+                cwd_path[cwdlen + 1] = 0
+            strcat(&cwd_path[0], arg1)
+
+    cmd_stat(argc: int, argv: *i64)
+        if argc < 2
+            return
+        val ino = sh_resolve_path(*i8(argv[1]))
+        if ino < 0
+            sh_not_found(*i8(argv[1]))
+            return
+        var st: [7]int
+        fs_stat(ino, &st[0])
+        // Type
+        val ftype = (st[0] >> 12) & 0xF
+        sh_puts(*i8("type: "))
+        if ftype == 1
+            sh_puts(*i8("file"))
+        else if ftype == 2
+            sh_puts(*i8("dir"))
+        else
+            sh_putint(ftype)
+        sh_newline()
+        sh_puts(*i8("size: "))
+        sh_putint(st[4])
+        sh_newline()
+        sh_puts(*i8("ino: "))
+        sh_putint(ino)
+        sh_newline()
+
+    cmd_help()
+        sh_puts(*i8("echo ls cat mkdir rm rmdir pwd cd stat help\n"))
+
+Command dispatch table. Matches the first token against
+known commands and calls the handler.
+
+    val MAX_ARGS = 16
+
+Command dispatch. Matches the first token against known commands.
+
+    sh_dispatch(argc: int, argv: *i64)
+        if argc == 0
+            return
+        val cmd: *i8 = *i8(argv[0])
+        if streq(cmd, *i8("echo")) == 1
+            cmd_echo(argc, argv)
+        else if streq(cmd, *i8("ls")) == 1
+            cmd_ls(argc, argv)
+        else if streq(cmd, *i8("cat")) == 1
+            cmd_cat(argc, argv)
+        else if streq(cmd, *i8("mkdir")) == 1
+            cmd_mkdir(argc, argv)
+        else if streq(cmd, *i8("rm")) == 1
+            cmd_rm(argc, argv)
+        else if streq(cmd, *i8("rmdir")) == 1
+            cmd_rmdir(argc, argv)
+        else if streq(cmd, *i8("pwd")) == 1
+            cmd_pwd()
+        else if streq(cmd, *i8("cd")) == 1
+            cmd_cd(argc, argv)
+        else if streq(cmd, *i8("stat")) == 1
+            cmd_stat(argc, argv)
+        else if streq(cmd, *i8("help")) == 1
+            cmd_help()
+        else
+            sh_not_found(cmd)
+
+The shell main loop. Prints a prompt, reads a line,
+tokenizes it, and dispatches to the appropriate command.
+
+    shell()
+        // Initialize
+        cwd_path[0] = '/'
+        cwd_path[1] = 0
+
+        // Wait for servers to start
+        sleep(5)
+
+        var line: [256]i8
+        var delim: [2]i8
+        delim[0] = ' '
+        delim[1] = 0
+
+        var argv: [16]i64
+
+        while 1 == 1
+            // Print prompt: "> "
+            sh_putc('>')
+            sh_putc(' ')
+
+            // Read a line
+            val len = sh_readline(&line[0], 256)
+            if len == 0
+                continue
+
+            // Tokenize
+            var argc = 0
+            var tok = strtok(&line[0], &delim[0])
+            while i64(tok) != 0
+                if argc < MAX_ARGS
+                    argv[argc] = i64(tok)
+                    argc += 1
+                tok = strtok(*i8(0), &delim[0])
+
+            // Dispatch
+            sh_dispatch(argc, &argv[0])

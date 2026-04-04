@@ -1,0 +1,44 @@
+TOS Barriers
+
+A barrier synchronizes N threads at a rendezvous point.
+All threads call barrier_wait; none proceeds until all N
+have arrived. The barrier then resets for reuse.
+
+    module oskit.sync
+
+Uses a generation counter to allow reuse. Each call to
+barrier_wait increments the arrival count. The last thread
+to arrive resets the count and posts the semaphore N-1 times
+to release the others. Waiting threads block on the semaphore
+until released.
+
+    struct Barrier
+        target: i64
+        count: i64
+        generation: i64
+        sem: i64
+
+    barrier_sem(b: i64) -> *i64
+        *i64(b + 24)
+
+    barrier_init(b: *Barrier, n: i64)
+        b.target = n
+        b.count = 0
+        b.generation = 0
+        val addr: i64 = i64(b)
+        sem_init(barrier_sem(addr), 0)
+
+    barrier_wait(b: *Barrier)
+        val addr: i64 = i64(b)
+        val gen = b.generation
+        b.count += 1
+        if b.count == b.target
+            b.count = 0
+            b.generation += 1
+            var i: i64 = 1
+            while i < b.target
+                sem_post(barrier_sem(addr))
+                i += 1
+        else
+            while b.generation == gen
+                sem_wait(barrier_sem(addr))

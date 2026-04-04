@@ -9,8 +9,8 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
 
   "smeta with source files serializes SOURCE lines" in {
     val meta = new ModuleMeta(List(
-      SymbolMeta("strlen", SymbolMeta.Kind.Func(List(SyslType.PtrType(SyslType.I8)), SyslType.I64), isPrivate = false, Some("strlen.sysl")),
-      SymbolMeta("strcpy", SymbolMeta.Kind.Func(List(SyslType.PtrType(SyslType.I8), SyslType.PtrType(SyslType.I8)), SyslType.PtrType(SyslType.I8)), isPrivate = false, Some("strcpy.sysl")),
+      SymbolMeta("strlen", SymbolMeta.Kind.Func(List(SyslType.PtrType(SyslType.I8)), SyslType.I64), isPrivate = false, sourceFile = Some("strlen.sysl")),
+      SymbolMeta("strcpy", SymbolMeta.Kind.Func(List(SyslType.PtrType(SyslType.I8), SyslType.PtrType(SyslType.I8)), SyslType.PtrType(SyslType.I8)), isPrivate = false, sourceFile = Some("strcpy.sysl")),
     ))
     val smeta = meta.toSmeta
     smeta should include("SOURCE strlen.sysl")
@@ -30,9 +30,9 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
 
   "smeta groups symbols under same SOURCE" in {
     val meta = new ModuleMeta(List(
-      SymbolMeta("f1", SymbolMeta.Kind.Func(Nil, SyslType.VoidType), isPrivate = false, Some("a.sysl")),
-      SymbolMeta("f2", SymbolMeta.Kind.Func(Nil, SyslType.VoidType), isPrivate = false, Some("a.sysl")),
-      SymbolMeta("f3", SymbolMeta.Kind.Func(Nil, SyslType.VoidType), isPrivate = false, Some("b.sysl")),
+      SymbolMeta("f1", SymbolMeta.Kind.Func(Nil, SyslType.VoidType), isPrivate = false, sourceFile = Some("a.sysl")),
+      SymbolMeta("f2", SymbolMeta.Kind.Func(Nil, SyslType.VoidType), isPrivate = false, sourceFile = Some("a.sysl")),
+      SymbolMeta("f3", SymbolMeta.Kind.Func(Nil, SyslType.VoidType), isPrivate = false, sourceFile = Some("b.sysl")),
     ))
     val smeta = meta.toSmeta
     smeta.split("SOURCE a.sysl").length shouldBe 2
@@ -43,9 +43,9 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
 
   "smeta round-trip preserves source files" in {
     val original = new ModuleMeta(List(
-      SymbolMeta("strlen", SymbolMeta.Kind.Func(List(SyslType.PtrType(SyslType.I8)), SyslType.I64), isPrivate = false, Some("strlen.sysl")),
-      SymbolMeta("helper", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = true, Some("strlen.sysl")),
-      SymbolMeta("strcpy", SymbolMeta.Kind.Func(List(SyslType.PtrType(SyslType.I8), SyslType.PtrType(SyslType.I8)), SyslType.PtrType(SyslType.I8)), isPrivate = false, Some("strcpy.sysl")),
+      SymbolMeta("strlen", SymbolMeta.Kind.Func(List(SyslType.PtrType(SyslType.I8)), SyslType.I64), isPrivate = false, sourceFile = Some("strlen.sysl")),
+      SymbolMeta("helper", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = true, sourceFile = Some("strlen.sysl")),
+      SymbolMeta("strcpy", SymbolMeta.Kind.Func(List(SyslType.PtrType(SyslType.I8), SyslType.PtrType(SyslType.I8)), SyslType.PtrType(SyslType.I8)), isPrivate = false, sourceFile = Some("strcpy.sysl")),
     ))
     val parsed = ModuleMeta.fromSmeta(original.toSmeta)
     parsed.symbols.length shouldBe 3
@@ -69,8 +69,8 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
 
   "smeta with DATA and STRUCT and SOURCE" in {
     val original = new ModuleMeta(List(
-      SymbolMeta("count", SymbolMeta.Kind.Data(SyslType.I32), isPrivate = false, Some("globals.sysl")),
-      SymbolMeta("Point", SymbolMeta.Kind.Struct(SyslType.StructType("Point", List(("x", SyslType.I32), ("y", SyslType.I32)))), isPrivate = false, Some("types.sysl")),
+      SymbolMeta("count", SymbolMeta.Kind.Data(SyslType.I32), isPrivate = false, sourceFile = Some("globals.sysl")),
+      SymbolMeta("Point", SymbolMeta.Kind.Struct(SyslType.StructType("Point", List(("x", SyslType.I32), ("y", SyslType.I32)))), isPrivate = false, sourceFile = Some("types.sysl")),
     ))
     val parsed = ModuleMeta.fromSmeta(original.toSmeta)
     parsed.symbols.length shouldBe 2
@@ -82,11 +82,11 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
 
   "merge replaces symbols from same source file" in {
     val existing = new ModuleMeta(List(
-      SymbolMeta("strlen", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, Some("strlen.sysl")),
-      SymbolMeta("strcpy", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, Some("strcpy.sysl")),
+      SymbolMeta("strlen", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, sourceFile = Some("strlen.sysl")),
+      SymbolMeta("strcpy", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, sourceFile = Some("strcpy.sysl")),
     ))
     val updated = new ModuleMeta(List(
-      SymbolMeta("strlen", SymbolMeta.Kind.Func(List(SyslType.PtrType(SyslType.I8)), SyslType.I64), isPrivate = false, Some("strlen.sysl")),
+      SymbolMeta("strlen", SymbolMeta.Kind.Func(List(SyslType.PtrType(SyslType.I8)), SyslType.I64), isPrivate = false, sourceFile = Some("strlen.sysl")),
     ))
     val merged = existing.merge(updated)
     merged.symbols.length shouldBe 2
@@ -99,10 +99,10 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
 
   "merge adds new source files" in {
     val existing = new ModuleMeta(List(
-      SymbolMeta("f1", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, Some("a.sysl")),
+      SymbolMeta("f1", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, sourceFile = Some("a.sysl")),
     ))
     val newFile = new ModuleMeta(List(
-      SymbolMeta("f2", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, Some("b.sysl")),
+      SymbolMeta("f2", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, sourceFile = Some("b.sysl")),
     ))
     val merged = existing.merge(newFile)
     merged.symbols.length shouldBe 2
@@ -124,18 +124,18 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
 
   "sourceFilesFor returns correct files" in {
     val meta = new ModuleMeta(List(
-      SymbolMeta("strlen", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, Some("strlen.sysl")),
-      SymbolMeta("strcpy", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, Some("strcpy.sysl")),
-      SymbolMeta("memcpy", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, Some("memcpy.sysl")),
+      SymbolMeta("strlen", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, sourceFile = Some("strlen.sysl")),
+      SymbolMeta("strcpy", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, sourceFile = Some("strcpy.sysl")),
+      SymbolMeta("memcpy", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, sourceFile = Some("memcpy.sysl")),
     ))
     meta.sourceFilesFor(Set("strlen", "memcpy")) shouldBe Set("strlen.sysl", "memcpy.sysl")
   }
 
   "allSourceFiles returns all files" in {
     val meta = new ModuleMeta(List(
-      SymbolMeta("f1", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, Some("a.sysl")),
-      SymbolMeta("f2", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, Some("a.sysl")),
-      SymbolMeta("f3", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, Some("b.sysl")),
+      SymbolMeta("f1", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, sourceFile = Some("a.sysl")),
+      SymbolMeta("f2", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, sourceFile = Some("a.sysl")),
+      SymbolMeta("f3", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = false, sourceFile = Some("b.sysl")),
     ))
     meta.allSourceFiles shouldBe Set("a.sysl", "b.sysl")
   }

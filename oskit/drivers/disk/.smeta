@@ -1,0 +1,28 @@
+SMETA v1
+SOURCE oskit/drivers/disk/disk.sysl
+DATA DISK_CMD_READ i32
+DATA DISK_CMD_WRITE i32
+DATA DISK_CMD_CAPACITY i32
+DATA RD_BASE i32
+DATA RD_STATUS_OFF i32
+DATA RD_COMMAND_OFF i32
+DATA RD_LBA_OFF i32
+DATA RD_ADDR_OFF i32
+DATA RD_COUNT_OFF i32
+DATA RD_CAPACITY_OFF i32
+DATA RD_CMD_READ i32
+DATA RD_CMD_WRITE i32
+DATA disk_port i32
+DATA disk_name arr 5 i8
+FUNC disk_hw_read 2 i32 i64 void
+FUNC disk_hw_write 2 i32 i64 void
+FUNC disk_hw_capacity 0 i32
+FUNC disk_read_i32 2 ptr i8 i32 i32
+FUNC disk_write_i32 3 ptr i8 i32 i32 void
+FUNC disk_handle_read 2 i32 ptr i8 void
+FUNC disk_handle_write 2 i32 ptr i8 void
+FUNC disk_handle_capacity 1 i32 void
+FUNC disk_server 0 void
+FUNC disk_read 2 i32 ptr i8 i32
+FUNC disk_write 2 i32 ptr i8 i32
+FUNC disk_capacity 0 i32

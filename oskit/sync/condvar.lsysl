@@ -1,0 +1,49 @@
+TOS Condition Variables
+
+Condition variables allow threads to block until a condition
+becomes true, signaled by another thread. Always use with a
+mutex and check the condition in a loop (Mesa semantics).
+
+    module oskit.sync
+
+A Condvar holds a waiter count and an internal semaphore.
+- cond_wait: increments waiters, releases mutex, blocks on
+    the semaphore, then re-acquires mutex.
+- cond_signal: if waiters > 0, decrements and posts the
+    semaphore to wake one waiter.
+- cond_broadcast: wakes all waiters by posting once per waiter.
+
+The semaphore handles the case where signal arrives between
+unlocking the mutex and blocking: the post increments the
+semaphore so the subsequent sem_wait succeeds immediately.
+
+    struct Condvar
+        waiters: i64
+        sem: i64
+
+    condvar_sem(c: i64) -> *i64
+        *i64(c + 8)
+
+    cond_init(c: *Condvar)
+        c.waiters = 0
+        val addr: i64 = i64(c)
+        sem_init(condvar_sem(addr), 0)
+
+    cond_wait(c: *Condvar, m: *i64)
+        c.waiters += 1
+        mutex_unlock(m)
+        val addr: i64 = i64(c)
+        sem_wait(condvar_sem(addr))
+        mutex_lock(m)
+
+    cond_signal(c: *Condvar)
+        if c.waiters > 0
+            c.waiters -= 1
+            val addr: i64 = i64(c)
+            sem_post(condvar_sem(addr))
+
+    cond_broadcast(c: *Condvar)
+        val addr: i64 = i64(c)
+        while c.waiters > 0
+            c.waiters -= 1
+            sem_post(condvar_sem(addr))

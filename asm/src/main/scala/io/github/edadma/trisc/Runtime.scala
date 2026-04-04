@@ -10,7 +10,8 @@ object Runtime:
   val timerAddress = 0x100040L   // 33 bytes (MCU-style timer with channels)
   val intcAddress = 0x100080L
   val mouseAddress = 0x100090L
-  val ramdiskAddress = 0x1000A0L
+  val drawEngineAddress = 0x1000A0L
+  val ramdiskAddress = 0x100140L
   val framebufferAddress = 0x200000L // 2MB — framebuffer pixel data
   val framebufferMaxSize: Long = 1920 * 1080 * 4
   val initialSSP: Long = stdoutAddress - 8 // stack grows down, below devices
@@ -23,7 +24,7 @@ object Runtime:
        |; vector table (20 slots x 8 bytes = 160 bytes)
        |  dl $initialSSP
        |  dl _start
-       |  dl _fault
+       |  dl _irq_ignore
        |  dl _fault
        |  dl _fault
        |  dl _fault
@@ -46,6 +47,8 @@ object Runtime:
        |  movi r4, main
        |  jalr r6, r4
        |  halt
+       |_irq_ignore
+       |  rte
        |_fault
        |  halt
        |  align 8
@@ -72,6 +75,24 @@ object Runtime:
        |  stb r1, r2, r0
        |  ldi r1, 10
        |  stb r1, r2, r0
+       |  jalr r0, r6
+       |
+       |; puts: write string to stdout
+       |; r1 = address of {ptr, len} string struct (16 bytes)
+       |puts
+       |  ldd r2, r1, r0
+       |  addi r1, r1, 8
+       |  ldd r3, r1, r0
+       |  movi r1, ${stdoutAddress}
+       |_puts_loop
+       |  beq r3, r0, _puts_done
+       |  ldb r4, r2, r0
+       |  stb r4, r1, r0
+       |  addi r2, r2, 1
+       |  addi r3, r3, -1
+       |  bra _puts_loop
+       |_puts_done
+       |  ldi r1, 0
        |  jalr r0, r6
        |
        |; kbhit: return 1 in r1 if keyboard has data, 0 otherwise

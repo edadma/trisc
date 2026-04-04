@@ -127,7 +127,7 @@ lazy val cpu = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .settings(
     name := "trisc-cpu",
     libraryDependencies ++= Seq(
-      "io.github.edadma" %%% "logger" % "0.0.9",
+      "io.github.edadma" %%% "logger" % "0.0.11",
       "io.github.edadma" %%% "cross_platform" % "0.1.3",
     ),
   )
@@ -197,21 +197,6 @@ lazy val syslCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .jvmSettings(jvmNativeStubs)
   .nativeSettings(jvmNativeStubs)
 
-lazy val docsCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
-  .in(file("docs-cli"))
-  .settings(commonSettings)
-  .settings(
-    name := "docs-cli",
-    libraryDependencies += "com.github.scopt" %%% "scopt" % "4.1.0",
-  )
-  .dependsOn(docs)
-  .jsSettings(jsSettings)
-  .jsSettings(
-    scalaJSUseMainModuleInitializer := true,
-  )
-  .jvmSettings(jvmNativeStubs)
-  .nativeSettings(jvmNativeStubs)
-
 lazy val ttf = project
   .in(file("ttf/scala"))
   .settings(commonSettings)
@@ -239,7 +224,6 @@ lazy val root = project
     sysl.jvm, /* sysl.js, sysl.native, */
     triscCli.jvm, /* triscCli.js, triscCli.native, */
     syslCli.jvm, /* syslCli.js, syslCli.native, */
-    docsCli.jvm, /* docsCli.js, docsCli.native, */
     ttf,
     /* fonts, */
   )
@@ -254,11 +238,11 @@ commands ++= Seq(
   Command.command("testNative") { state =>
     "utilsNative/test" :: "memNative/test" :: "tofNative/test" :: "asmNative/test" ::
     "cpuNative/test" :: "docsNative/test" :: "syslNative/test" ::
-    "triscCliNative/test" :: "syslCliNative/test" :: "docsCliNative/test" :: state
+    "triscCliNative/test" :: "syslCliNative/test" :: state
   },
   Command.command("testJS") { state =>
     "utilsJS/test" :: "memJS/test" :: "tofJS/test" :: "asmJS/test" ::
     "cpuJS/test" :: "docsJS/test" :: "syslJS/test" ::
-    "triscCliJS/test" :: "syslCliJS/test" :: "docsCliJS/test" :: state
+    "triscCliJS/test" :: "syslCliJS/test" :: state
   },
 )

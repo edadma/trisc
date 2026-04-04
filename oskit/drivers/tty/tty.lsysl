@@ -1,0 +1,439 @@
+OSKit TTY Driver — Virtual Console Server
+
+MINIX 3-style TTY driver: one server thread manages multiple
+virtual consoles. Clients send IPC messages to write/read
+characters. The keyboard ISR notifies the server when keys
+arrive; the server translates scancodes to ASCII and delivers
+to the active console's input buffer.
+
+    module oskit.drivers.tty
+
+    import oskit.kernel.{notify_read}
+    import oskit.services.{thread_id, putc}
+    import oskit.ipc.*
+    import oskit.drivers.kbd.*
+
+    val TTY_CMD_WRITE   = 1
+    val TTY_CMD_READ    = 2
+    val TTY_CMD_PUTS    = 3
+    val TTY_CMD_SWITCH  = 4
+
+    val MAX_CONSOLES    = 4
+    val TTY_INPUT_SIZE  = 64
+
+Message format (byte layout):
+- Request:  [cmd(1), console(1), data...]
+- Reply:    [status(1), data...]
+Status: 0 = ok, -1 = error
+
+Per-console state. Each console has its own input ring buffer
+and tracks pending read requests.
+
+    struct Console
+        in_buf: [64]i8
+        in_head: int
+        in_tail: int
+        in_count: int
+        pending_reader: int
+        pending_buf: i64
+        pending_len: int
+
+    var consoles: [4]Console
+    var active_console = 0
+    var tty_port = -1
+    var tty_tid = -1
+
+HID scancode to ASCII translation table (US layout, lowercase).
+Covers basic printable characters. Shift handling uses a
+separate table.
+
+    var sc_to_ascii: [128]i8
+    var sc_to_ascii_shift: [128]i8
+
+    tty_init_tables()
+        // Letters a-z: HID 0x04-0x1D
+        sc_to_ascii[0x04] = 97   // a
+        sc_to_ascii[0x05] = 98   // b
+        sc_to_ascii[0x06] = 99   // c
+        sc_to_ascii[0x07] = 100  // d
+        sc_to_ascii[0x08] = 101  // e
+        sc_to_ascii[0x09] = 102  // f
+        sc_to_ascii[0x0A] = 103  // g
+        sc_to_ascii[0x0B] = 104  // h
+        sc_to_ascii[0x0C] = 105  // i
+        sc_to_ascii[0x0D] = 106  // j
+        sc_to_ascii[0x0E] = 107  // k
+        sc_to_ascii[0x0F] = 108  // l
+        sc_to_ascii[0x10] = 109  // m
+        sc_to_ascii[0x11] = 110  // n
+        sc_to_ascii[0x12] = 111  // o
+        sc_to_ascii[0x13] = 112  // p
+        sc_to_ascii[0x14] = 113  // q
+        sc_to_ascii[0x15] = 114  // r
+        sc_to_ascii[0x16] = 115  // s
+        sc_to_ascii[0x17] = 116  // t
+        sc_to_ascii[0x18] = 117  // u
+        sc_to_ascii[0x19] = 118  // v
+        sc_to_ascii[0x1A] = 119  // w
+        sc_to_ascii[0x1B] = 120  // x
+        sc_to_ascii[0x1C] = 121  // y
+        sc_to_ascii[0x1D] = 122  // z
+        // Digits 1-9, 0: HID 0x1E-0x27
+        sc_to_ascii[0x1E] = 49   // 1
+        sc_to_ascii[0x1F] = 50   // 2
+        sc_to_ascii[0x20] = 51   // 3
+        sc_to_ascii[0x21] = 52   // 4
+        sc_to_ascii[0x22] = 53   // 5
+        sc_to_ascii[0x23] = 54   // 6
+        sc_to_ascii[0x24] = 55   // 7
+        sc_to_ascii[0x25] = 56   // 8
+        sc_to_ascii[0x26] = 57   // 9
+        sc_to_ascii[0x27] = 48   // 0
+        // Control keys
+        sc_to_ascii[0x28] = 10   // Enter → newline
+        sc_to_ascii[0x29] = 27   // Escape
+        sc_to_ascii[0x2A] = 8    // Backspace
+        sc_to_ascii[0x2B] = 9    // Tab
+        sc_to_ascii[0x2C] = 32   // Space
+        // Punctuation
+        sc_to_ascii[0x2D] = 45   // -
+        sc_to_ascii[0x2E] = 61   // =
+        sc_to_ascii[0x2F] = 91   // [
+        sc_to_ascii[0x30] = 93   // ]
+        sc_to_ascii[0x31] = 92   // backslash
+        sc_to_ascii[0x33] = 59   // ;
+        sc_to_ascii[0x34] = 39   // '
+        sc_to_ascii[0x35] = 96   // `
+        sc_to_ascii[0x36] = 44   // ,
+        sc_to_ascii[0x37] = 46   // .
+        sc_to_ascii[0x38] = 47   // /
+
+        // Shifted: A-Z
+        sc_to_ascii_shift[0x04] = 65   // A
+        sc_to_ascii_shift[0x05] = 66   // B
+        sc_to_ascii_shift[0x06] = 67   // C
+        sc_to_ascii_shift[0x07] = 68   // D
+        sc_to_ascii_shift[0x08] = 69   // E
+        sc_to_ascii_shift[0x09] = 70   // F
+        sc_to_ascii_shift[0x0A] = 71   // G
+        sc_to_ascii_shift[0x0B] = 72   // H
+        sc_to_ascii_shift[0x0C] = 73   // I
+        sc_to_ascii_shift[0x0D] = 74   // J
+        sc_to_ascii_shift[0x0E] = 75   // K
+        sc_to_ascii_shift[0x0F] = 76   // L
+        sc_to_ascii_shift[0x10] = 77   // M
+        sc_to_ascii_shift[0x11] = 78   // N
+        sc_to_ascii_shift[0x12] = 79   // O
+        sc_to_ascii_shift[0x13] = 80   // P
+        sc_to_ascii_shift[0x14] = 81   // Q
+        sc_to_ascii_shift[0x15] = 82   // R
+        sc_to_ascii_shift[0x16] = 83   // S
+        sc_to_ascii_shift[0x17] = 84   // T
+        sc_to_ascii_shift[0x18] = 85   // U
+        sc_to_ascii_shift[0x19] = 86   // V
+        sc_to_ascii_shift[0x1A] = 87   // W
+        sc_to_ascii_shift[0x1B] = 88   // X
+        sc_to_ascii_shift[0x1C] = 89   // Y
+        sc_to_ascii_shift[0x1D] = 90   // Z
+        // Shifted digits → symbols
+        sc_to_ascii_shift[0x1E] = 33   // !
+        sc_to_ascii_shift[0x1F] = 64   // @
+        sc_to_ascii_shift[0x20] = 35   // #
+        sc_to_ascii_shift[0x21] = 36   // $
+        sc_to_ascii_shift[0x22] = 37   // %
+        sc_to_ascii_shift[0x23] = 94   // ^
+        sc_to_ascii_shift[0x24] = 38   // &
+        sc_to_ascii_shift[0x25] = 42   // *
+        sc_to_ascii_shift[0x26] = 40   // (
+        sc_to_ascii_shift[0x27] = 41   // )
+        // Shifted punctuation
+        sc_to_ascii_shift[0x2D] = 95   // _
+        sc_to_ascii_shift[0x2E] = 43   // +
+        sc_to_ascii_shift[0x2F] = 123  // {
+        sc_to_ascii_shift[0x30] = 125  // }
+        sc_to_ascii_shift[0x31] = 124  // |
+        sc_to_ascii_shift[0x33] = 58   // :
+        sc_to_ascii_shift[0x34] = 34   // "
+        sc_to_ascii_shift[0x35] = 126  // ~
+        sc_to_ascii_shift[0x36] = 60   // <
+        sc_to_ascii_shift[0x37] = 62   // >
+        sc_to_ascii_shift[0x38] = 63   // ?
+        // Non-shifted control keys also work shifted
+        sc_to_ascii_shift[0x28] = 10   // Enter
+        sc_to_ascii_shift[0x2A] = 8    // Backspace
+        sc_to_ascii_shift[0x2B] = 9    // Tab
+        sc_to_ascii_shift[0x2C] = 32   // Space
+
+Initialize a console's state.
+
+    tty_console_init(id: int)
+        consoles[id].in_head = 0
+        consoles[id].in_tail = 0
+        consoles[id].in_count = 0
+        consoles[id].pending_reader = -1
+        consoles[id].pending_buf = 0
+        consoles[id].pending_len = 0
+
+Push a character into a console's input buffer.
+Returns 1 if buffered, 0 if full.
+
+    tty_console_push(id: int, ch: i8) -> int
+        if consoles[id].in_count >= TTY_INPUT_SIZE
+            return 0
+        consoles[id].in_buf[consoles[id].in_tail] = ch
+        consoles[id].in_tail = (consoles[id].in_tail + 1) % TTY_INPUT_SIZE
+        consoles[id].in_count += 1
+        1
+
+Pop a character from a console's input buffer.
+Returns the character, or -1 if empty.
+
+    tty_console_pop(id: int) -> int
+        if consoles[id].in_count == 0
+            return -1
+        val ch = consoles[id].in_buf[consoles[id].in_head]
+        consoles[id].in_head = (consoles[id].in_head + 1) % TTY_INPUT_SIZE
+        consoles[id].in_count -= 1
+        int(ch)
+
+Push an ANSI escape sequence (ESC [ X) into the active console.
+
+    tty_push_escape(final_ch: i8)
+        tty_console_push(active_console, i8(27))   // ESC
+        tty_console_push(active_console, i8(91))   // [
+        tty_console_push(active_console, final_ch)
+
+Push a CSI sequence with a numeric parameter (ESC [ n ~).
+
+    tty_push_csi_tilde(n: i8)
+        tty_console_push(active_console, i8(27))   // ESC
+        tty_console_push(active_console, i8(91))   // [
+        tty_console_push(active_console, i8(48 + n)) // digit
+        tty_console_push(active_console, i8(126))  // ~
+
+Process keyboard input. Called when the keyboard ISR
+has buffered events. Translates scancodes to ASCII and
+delivers to the active console. Arrow keys, Home, End,
+and Delete are translated to ANSI escape sequences.
+
+HID scancodes for special keys:
+- 0x4F = Right Arrow   → ESC[C
+- 0x50 = Left Arrow    → ESC[D
+- 0x51 = Down Arrow    → ESC[B
+- 0x52 = Up Arrow      → ESC[A
+- 0x4A = Home          → ESC[H
+- 0x4D = End           → ESC[F
+- 0x4C = Delete        → ESC[3~
+
+    tty_process_keyboard()
+        while kb_has_key() == 1
+            val evt = kb_read_key()
+            val sc = kb_scancode(evt)
+            val press = kb_is_press(evt)
+            val mods = kb_modifiers(evt)
+            // Only process key presses, not releases
+            if press == 1
+                // Arrow keys → ANSI escape sequences
+                if sc == 0x4F
+                    tty_push_escape(67)       // Right → ESC[C
+                else if sc == 0x50
+                    tty_push_escape(68)       // Left → ESC[D
+                else if sc == 0x51
+                    tty_push_escape(66)       // Down → ESC[B
+                else if sc == 0x52
+                    tty_push_escape(65)       // Up → ESC[A
+                else if sc == 0x4A
+                    tty_push_escape(72)       // Home → ESC[H
+                else if sc == 0x4D
+                    tty_push_escape(70)       // End → ESC[F
+                else if sc == 0x4C
+                    tty_push_csi_tilde(3)     // Delete → ESC[3~
+                else if sc == 0x2A
+                    // Backspace scancode
+                    if (mods & 8) != 0
+                        // Cmd+Backspace → forward delete (ESC[3~)
+                        tty_push_csi_tilde(3)
+                    else
+                        tty_console_push(active_console, i8(8))
+                else if sc < 128
+                    var ch: i8 = 0
+                    if (mods & 1) != 0
+                        // Shift held
+                        ch = sc_to_ascii_shift[sc]
+                    else
+                        ch = sc_to_ascii[sc]
+                    if ch != 0
+                        tty_console_push(active_console, ch)
+
+Deliver buffered input to any pending readers across
+all consoles.
+
+    tty_deliver_pending()
+        var con = 0
+        while con < MAX_CONSOLES
+            if consoles[con].pending_reader >= 0
+                val ch = tty_console_pop(con)
+                if ch >= 0
+                    val reader = consoles[con].pending_reader
+                    var reply: [2]i8
+                    reply[0] = 0
+                    reply[1] = i8(ch)
+                    ipc_reply(reader, &reply[0], 2)
+                    consoles[con].pending_reader = -1
+            con += 1
+
+Handle a WRITE command: output a character.
+
+    tty_handle_write(sender: int, console: int, ch: i8)
+        putc(ch)
+        var reply: [1]i8
+        reply[0] = 0
+        ipc_reply(sender, &reply[0], 1)
+
+Handle a PUTS command: output a string.
+Message format: [cmd, console, len, chars...]
+
+    tty_handle_puts(sender: int, console: int, buf: *i8)
+        val len = int(buf[2])
+        var i = 0
+        while i < len
+            putc(buf[i + 3])
+            i += 1
+        var reply: [1]i8
+        reply[0] = 0
+        ipc_reply(sender, &reply[0], 1)
+
+Handle a READ command: return next character from input buffer.
+If no character available, save as pending (will be replied
+when keyboard input arrives).
+
+    tty_handle_read(sender: int, console: int)
+        val ch = tty_console_pop(console)
+        if ch >= 0
+            var reply: [2]i8
+            reply[0] = 0
+            reply[1] = i8(ch)
+            ipc_reply(sender, &reply[0], 2)
+        else
+            // No input — save pending request.
+            // The server will reply when keyboard input arrives
+            // (via tty_deliver_pending after notification).
+            consoles[console].pending_reader = sender
+
+Handle a SWITCH command: change active console.
+
+    tty_handle_switch(sender: int, console: int)
+        if console >= 0
+            if console < MAX_CONSOLES
+                active_console = console
+        var reply: [1]i8
+        reply[0] = 0
+        ipc_reply(sender, &reply[0], 1)
+
+The TTY server loop. Creates port, registers as "tty",
+initializes keyboard, then loops handling messages.
+
+    var tty_name: [4]i8
+
+    tty_server()
+        // Set up name
+        tty_name[0] = 116  // t
+        tty_name[1] = 116  // t
+        tty_name[2] = 121  // y
+        tty_name[3] = 0
+
+        // Init tables and consoles
+        tty_init_tables()
+        var i = 0
+        while i < MAX_CONSOLES
+            tty_console_init(i)
+            i += 1
+
+        // Init keyboard
+        keyboard_init()
+
+        // Create and register port
+        tty_port = port_create()
+        port_register(tty_port, &tty_name[0])
+        tty_tid = thread_id()
+        keyboard_set_notify(tty_tid)
+
+        // Server loop — waits for IPC messages OR keyboard notifications
+        var buf: [128]i8
+        while 1 == 1
+            // Check for keyboard input before blocking
+            tty_process_keyboard()
+            tty_deliver_pending()
+
+            val result = ipc_recv_notify(tty_port, &buf[0], 128)
+            if result == -2
+                // Notification: keyboard input arrived
+                notify_read(tty_tid)
+                tty_process_keyboard()
+                tty_deliver_pending()
+            else if result >= 0
+                // IPC message from client
+                val sender = result
+                val cmd = int(buf[0])
+                val console = int(buf[1])
+
+                if cmd == TTY_CMD_WRITE
+                    tty_handle_write(sender, console, buf[2])
+                else if cmd == TTY_CMD_PUTS
+                    tty_handle_puts(sender, console, &buf[0])
+                else if cmd == TTY_CMD_READ
+                    tty_handle_read(sender, console)
+                else if cmd == TTY_CMD_SWITCH
+                    tty_handle_switch(sender, console)
+                else
+                    // Unknown command — reply with error
+                    var reply: [1]i8
+                    reply[0] = -1
+                    ipc_reply(sender, &reply[0], 1)
+
+Userspace wrappers. These build IPC messages and send
+them to the TTY port.
+
+    tty_putc(ch: char)
+        val port = port_lookup(&tty_name[0])
+        if port >= 0
+            var msg: [3]i8
+            msg[0] = TTY_CMD_WRITE
+            msg[1] = 0
+            msg[2] = i8(ch)
+            var reply: [1]i8
+            ipc_send(port, &msg[0], 3, &reply[0], 1)
+
+    tty_puts(s: *i8, len: int)
+        val port = port_lookup(&tty_name[0])
+        if port >= 0
+            var msg: [128]i8
+            msg[0] = i8(TTY_CMD_PUTS)
+            msg[1] = 0
+            msg[2] = i8(len)
+            var i = 0
+            while i < len
+                msg[i + 3] = s[i]
+                i += 1
+            var reply: [1]i8
+            ipc_send(port, &msg[0], len + 3, &reply[0], 1)
+
+    tty_getc() -> int
+        val port = port_lookup(&tty_name[0])
+        if port >= 0
+            var msg: [2]i8
+            msg[0] = TTY_CMD_READ
+            msg[1] = 0
+            var reply: [2]i8
+            ipc_send(port, &msg[0], 2, &reply[0], 2)
+            return int(reply[1])
+        -1
+
+    tty_switch(console: int)
+        val port = port_lookup(&tty_name[0])
+        if port >= 0
+            var msg: [2]i8
+            msg[0] = i8(TTY_CMD_SWITCH)
+            msg[1] = i8(console)
+            var reply: [1]i8
+            ipc_send(port, &msg[0], 2, &reply[0], 1)

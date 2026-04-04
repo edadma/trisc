@@ -96,6 +96,15 @@ Complete opcode listing for all native instructions. Pseudo-instructions are doc
 | Opcode | Mnemonic | Operation |
 |--------|----------|-----------|
 | 00000 | fpow | ra = pow(ra, rb) (destructive) |
+| 01001 | fsin | fa = sin(fb) |
+| 01010 | fcos | fa = cos(fb) |
+| 01011 | ftan | fa = tan(fb) |
+| 01100 | fasin | fa = asin(fb) |
+| 01101 | facos | fa = acos(fb) |
+| 01110 | fatan | fa = atan(fb) |
+| 01111 | fatan2 | fa = atan2(fa, fb) (destructive) |
+| 10000 | fexp | fa = exp(fb) |
+| 10001 | flog | fa = ln(fb) |
 | 00001 | tlbi | invalidate TLB entry for virtual address rb (supervisor) |
 | 00010 | tlbia | invalidate all TLB entries (supervisor) |
 | 00011 | sptbr | set page table base register to rb (supervisor) |

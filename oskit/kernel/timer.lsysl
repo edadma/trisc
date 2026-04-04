@@ -1,0 +1,50 @@
+TOS Timer Driver
+
+Handles timer IRQ 0. Acknowledges the timer device so it can
+fire again. The tick counting and thread wake logic lives in
+the kernel's schedule() function, which runs after every
+context switch.
+
+Device registers (MCU-style timer):
+- 0x100040 + 0-1 = PSC (prescaler, 16-bit)
+- 0x100040 + 2-5 = ARR (auto-reload/period, 32-bit)
+- 0x100040 + 6-9 = CNT (counter, 32-bit)
+- 0x100040 + 10 = CR (control: bit 0 = enable)
+- 0x100040 + 11 = SR (status: bit 0 = overflow, write-1-to-clear)
+- 0x100040 + 12 = IER (interrupt enable: bit 0 = overflow)
+
+
+    module oskit.kernel
+
+    val TIMER_BASE = 0x100040
+    val TIMER_ARR  = 0x100042
+    val TIMER_CR   = 0x10004A
+    val TIMER_SR   = 0x10004B
+    val TIMER_IER  = 0x10004C
+    val TIMER_IRQ  = 0
+
+    extern register_irq(irq: int, handler: i64)
+
+    timer_init(period: int)
+        register_irq(TIMER_IRQ, timer_handler)
+
+        // Write ARR period (big-endian 32-bit)
+        val arr: *i8 = *i8(TIMER_ARR)
+        *(arr + 0) = (period >> 24) & 0xFF
+        *(arr + 1) = (period >> 16) & 0xFF
+        *(arr + 2) = (period >> 8) & 0xFF
+        *(arr + 3) = period & 0xFF
+
+        // Enable overflow interrupt and start timer
+        val ier: *i8 = *i8(TIMER_IER)
+        *ier = 1
+        val cr: *i8 = *i8(TIMER_CR)
+        *cr = 1
+
+timer_handler -- Called by the generic IRQ dispatcher in boot.asm.
+Just acknowledges the timer device. The dispatcher handles the
+context switch, and schedule() handles tick counting and waking.
+
+    timer_handler()
+        val sr: *i8 = *i8(TIMER_SR)
+        *sr = 1

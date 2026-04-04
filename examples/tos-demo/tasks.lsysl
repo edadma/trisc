@@ -13,7 +13,7 @@ A
 B
 ...
 
-    import services.*
+    import oskit.services.{putc, sleep}
 
     task_a()
         while true

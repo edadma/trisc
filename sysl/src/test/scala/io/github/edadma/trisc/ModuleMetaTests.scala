@@ -131,7 +131,7 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
 
   // ===== toAsmGlobals =====
 
-  "toAsmGlobals emits only public symbols" in {
+  "toAsmGlobals emits all symbols including private" in {
     val meta = ModuleMeta.fromProgram(analyze(
       """private helper(x: int) -> int = x
         |add(a: int, b: int) -> int = a + b
@@ -140,7 +140,7 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
     val asm = meta.toAsmGlobals
     asm should include("global add, func, 2 i32 i32 i32")
     asm should include("global main, func, 0 i32")
-    asm should not include "helper"
+    asm should include("global helper, func, 1 i32 i32")
   }
 
   "toAsmGlobals emits data types" in {

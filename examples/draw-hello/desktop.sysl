@@ -1,0 +1,423 @@
+// DrawEngine fake desktop demo — draws a complete desktop environment
+// with multiple windows, taskbar, icons, and menus to stress test rendering.
+
+DISPLAY_CTRL = 0x100008
+DRAW_ENGINE  = 0x1000A0
+FB_WIDTH  = 1440
+FB_HEIGHT = 900
+
+// DrawEngine register offsets
+DE_EXEC       = 0
+DE_X1         = 2
+DE_Y1         = 4
+DE_X2         = 6
+DE_Y2         = 8
+DE_R          = 10
+DE_G          = 11
+DE_B          = 12
+DE_A          = 13
+DE_LINE_W     = 14
+DE_FONT_SIZE  = 20
+DE_FONT_STYLE = 22
+DE_TEXT_BUF   = 32
+
+// DrawEngine commands
+CMD_CLEAR     = 0x01
+CMD_STROKE    = 0x04
+CMD_FILL      = 0x05
+CMD_NEW_PATH  = 0x06
+CMD_RECT      = 0x07
+CMD_CIRCLE    = 0x08
+CMD_DRAW_TEXT = 0x09
+CMD_FLUSH     = 0x0A
+CMD_FILL_RECT = 0x10
+CMD_DRAW_LINE = 0x11
+
+// Display controller
+dc_write(offset: int, v: int)
+    p: *i8 = *i8(DISPLAY_CTRL + offset)
+    *p = byte(v)
+
+init_fb()
+    dc_write(0, 1)
+    dc_write(2, FB_WIDTH >> 8)
+    dc_write(3, FB_WIDTH & 0xFF)
+    dc_write(4, FB_HEIGHT >> 8)
+    dc_write(5, FB_HEIGHT & 0xFF)
+    dc_write(1, 1)
+
+// DrawEngine helpers
+de_write8(offset: int, v: int)
+    p: *i8 = *i8(DRAW_ENGINE + offset)
+    *p = byte(v)
+
+de_write16(offset: int, v: int)
+    p: *i16 = *i16(DRAW_ENGINE + offset)
+    *p = i16(v)
+
+de_exec(cmd: int)
+    de_write8(DE_EXEC, cmd)
+
+de_color(r: int, g: int, b: int, a: int)
+    de_write8(DE_R, r)
+    de_write8(DE_G, g)
+    de_write8(DE_B, b)
+    de_write8(DE_A, a)
+
+de_pos(x: int, y: int)
+    de_write16(DE_X1, x)
+    de_write16(DE_Y1, y)
+
+de_size(w: int, h: int)
+    de_write16(DE_X2, w)
+    de_write16(DE_Y2, h)
+
+de_font(size: int, style: int)
+    de_write16(DE_FONT_SIZE, size)
+    de_write8(DE_FONT_STYLE, style)
+
+de_text(s: *int, len: int)
+    var i = 0
+    while i < len
+        if i >= 31 then break
+        de_write8(DE_TEXT_BUF + i, s[i])
+        i += 1
+    de_write8(DE_TEXT_BUF + i, 0)
+
+draw_text(x: int, y: int, s: *int, len: int, r: int, g: int, b: int)
+    de_color(r, g, b, 255)
+    de_pos(x, y)
+    de_text(s, len)
+    de_exec(CMD_DRAW_TEXT)
+
+fill_rect(x: int, y: int, w: int, h: int, r: int, g: int, b: int)
+    de_color(r, g, b, 255)
+    de_pos(x, y)
+    de_size(w, h)
+    de_exec(CMD_FILL_RECT)
+
+draw_line(x1: int, y1: int, x2: int, y2: int, r: int, g: int, b: int)
+    de_color(r, g, b, 255)
+    de_write16(DE_LINE_W, 16)
+    de_pos(x1, y1)
+    de_size(x2, y2)
+    de_exec(CMD_DRAW_LINE)
+
+fill_circle(cx: int, cy: int, radius: int, r: int, g: int, b: int)
+    de_color(r, g, b, 255)
+    de_pos(cx, cy)
+    de_write16(DE_X2, radius)
+    de_exec(CMD_NEW_PATH)
+    de_exec(CMD_CIRCLE)
+    de_exec(CMD_FILL)
+
+// Window drawing
+draw_window(x: int, y: int, w: int, h: int, title: *int, tlen: int, active: int)
+    // Shadow
+    fill_rect(x + 4, y + 4, w, h, 0, 0, 0)
+    de_color(0, 0, 0, 80)
+    de_pos(x + 4, y + 4)
+    de_size(w, h)
+    de_exec(CMD_FILL_RECT)
+
+    // Window body
+    fill_rect(x, y, w, h, 240, 240, 240)
+
+    // Title bar
+    if active == 1
+        fill_rect(x, y, w, 28, 60, 100, 170)
+    else
+        fill_rect(x, y, w, 28, 120, 120, 130)
+
+    // Title text
+    de_font(13, 1)
+    draw_text(x + 36, y + 19, title, tlen, 255, 255, 255)
+
+    // Close button (red circle)
+    fill_circle(x + 15, y + 14, 6, 220, 60, 60)
+    // Minimize button (yellow)
+    fill_circle(x + w - 30, y + 14, 6, 220, 180, 50)
+    // Maximize button (green)
+    fill_circle(x + w - 15, y + 14, 6, 60, 190, 60)
+
+    // Border
+    de_color(160, 160, 165, 255)
+    de_write16(DE_LINE_W, 16)
+    de_exec(CMD_NEW_PATH)
+    de_pos(x, y)
+    de_size(w, h)
+    de_exec(CMD_RECT)
+    de_exec(CMD_STROKE)
+
+main() -> int
+    init_fb()
+
+    // === Desktop background — gradient bands ===
+    fill_rect(0, 0, FB_WIDTH, 180, 25, 60, 120)
+    fill_rect(0, 180, FB_WIDTH, 180, 30, 70, 130)
+    fill_rect(0, 360, FB_WIDTH, 180, 35, 80, 140)
+    fill_rect(0, 540, FB_WIDTH, 180, 28, 65, 125)
+    fill_rect(0, 720, FB_WIDTH, 140, 22, 55, 115)
+
+    // === Desktop icons (right side) ===
+    // Documents icon
+    fill_rect(1330, 30, 60, 50, 220, 190, 100)
+    de_font(11, 0)
+    s_docs = [68, 111, 99, 117, 109, 101, 110, 116, 115]
+    draw_text(1318, 100, s_docs, 9, 220, 220, 220)
+
+    // Pictures icon
+    fill_rect(1330, 120, 60, 50, 100, 180, 220)
+    s_pics = [80, 105, 99, 116, 117, 114, 101, 115]
+    draw_text(1325, 190, s_pics, 8, 220, 220, 220)
+
+    // Terminal icon
+    fill_rect(1330, 210, 60, 50, 40, 40, 50)
+    de_font(16, 1)
+    s_gt = [62, 95]
+    draw_text(1342, 245, s_gt, 2, 0, 220, 0)
+    de_font(11, 0)
+    s_term = [84, 101, 114, 109, 105, 110, 97, 108]
+    draw_text(1325, 280, s_term, 8, 220, 220, 220)
+
+    // Trash icon
+    fill_rect(1330, 300, 60, 50, 140, 140, 150)
+    s_trash = [84, 114, 97, 115, 104]
+    draw_text(1338, 370, s_trash, 5, 220, 220, 220)
+
+    // === Window 1: File Manager ===
+    s_fm = [70, 105, 108, 101, 32, 77, 97, 110, 97, 103, 101, 114]
+    draw_window(40, 40, 520, 380, s_fm, 12, 0)
+
+    // Toolbar
+    fill_rect(41, 69, 518, 30, 225, 225, 230)
+    de_font(12, 0)
+    s_back = [60, 32, 66, 97, 99, 107]
+    draw_text(55, 89, s_back, 6, 80, 80, 80)
+    s_fwd = [70, 119, 100, 32, 62]
+    draw_text(130, 89, s_fwd, 5, 80, 80, 80)
+
+    // Path bar
+    fill_rect(200, 73, 340, 22, 255, 255, 255)
+    de_font(12, 0)
+    s_path = [47, 104, 111, 109, 101, 47, 117, 115, 101, 114, 47, 68, 111, 99, 117, 109, 101, 110, 116, 115]
+    draw_text(208, 89, s_path, 20, 60, 60, 60)
+
+    // Sidebar
+    fill_rect(41, 100, 120, 319, 218, 222, 230)
+    de_font(12, 1)
+    s_places = [80, 108, 97, 99, 101, 115]
+    draw_text(55, 122, s_places, 6, 80, 80, 90)
+    de_font(12, 0)
+    s_home = [72, 111, 109, 101]
+    draw_text(60, 145, s_home, 4, 50, 50, 60)
+    s_desk = [68, 101, 115, 107, 116, 111, 112]
+    draw_text(60, 165, s_desk, 7, 50, 50, 60)
+    draw_text(60, 185, s_docs, 9, 50, 50, 60)
+    draw_text(60, 205, s_pics, 8, 50, 50, 60)
+
+    // Highlight selected item
+    fill_rect(55, 174, 100, 18, 60, 100, 170)
+    draw_text(60, 185, s_docs, 9, 255, 255, 255)
+
+    // File list
+    de_font(12, 0)
+    // File icons (small colored squares) + names
+    fill_rect(175, 110, 14, 14, 220, 190, 100)
+    s_f1 = [114, 101, 112, 111, 114, 116, 46, 112, 100, 102]
+    draw_text(195, 122, s_f1, 10, 40, 40, 50)
+
+    fill_rect(175, 135, 14, 14, 220, 190, 100)
+    s_f2 = [110, 111, 116, 101, 115, 46, 116, 120, 116]
+    draw_text(195, 147, s_f2, 9, 40, 40, 50)
+
+    fill_rect(175, 160, 14, 14, 100, 160, 220)
+    s_f3 = [112, 114, 111, 106, 101, 99, 116, 115]
+    draw_text(195, 172, s_f3, 8, 40, 40, 50)
+
+    fill_rect(175, 185, 14, 14, 100, 160, 220)
+    s_f4 = [112, 104, 111, 116, 111, 115]
+    draw_text(195, 197, s_f4, 6, 40, 40, 50)
+
+    fill_rect(175, 210, 14, 14, 220, 190, 100)
+    s_f5 = [98, 117, 100, 103, 101, 116, 46, 120, 108, 115, 120]
+    draw_text(195, 222, s_f5, 11, 40, 40, 50)
+
+    fill_rect(175, 235, 14, 14, 220, 190, 100)
+    s_f6 = [114, 101, 97, 100, 109, 101, 46, 109, 100]
+    draw_text(195, 247, s_f6, 9, 40, 40, 50)
+
+    // Status bar
+    fill_rect(41, 392, 518, 27, 225, 225, 230)
+    de_font(11, 0)
+    s_items = [54, 32, 105, 116, 101, 109, 115]
+    draw_text(55, 409, s_items, 7, 100, 100, 110)
+
+    // === Window 2: Text Editor (active, on top) ===
+    s_te = [84, 101, 120, 116, 32, 69, 100, 105, 116, 111, 114]
+    draw_window(280, 200, 620, 400, s_te, 11, 1)
+
+    // Menu bar
+    fill_rect(281, 229, 618, 24, 248, 248, 250)
+    de_font(12, 0)
+    s_file = [70, 105, 108, 101]
+    draw_text(295, 246, s_file, 4, 50, 50, 50)
+    s_edit = [69, 100, 105, 116]
+    draw_text(345, 246, s_edit, 4, 50, 50, 50)
+    s_view = [86, 105, 101, 119]
+    draw_text(395, 246, s_view, 4, 50, 50, 50)
+    s_help = [72, 101, 108, 112]
+    draw_text(445, 246, s_help, 4, 50, 50, 50)
+
+    // Editor content area
+    fill_rect(281, 254, 618, 318, 255, 255, 255)
+
+    // Line numbers
+    fill_rect(281, 254, 35, 318, 245, 245, 248)
+    de_font(12, 0)
+    s_1 = [49]
+    draw_text(301, 272, s_1, 1, 160, 160, 170)
+    s_2 = [50]
+    draw_text(301, 290, s_2, 1, 160, 160, 170)
+    s_3 = [51]
+    draw_text(301, 308, s_3, 1, 160, 160, 170)
+    s_4 = [52]
+    draw_text(301, 326, s_4, 1, 160, 160, 170)
+    s_5 = [53]
+    draw_text(301, 344, s_5, 1, 160, 160, 170)
+    s_6 = [54]
+    draw_text(301, 362, s_6, 1, 160, 160, 170)
+    s_7 = [55]
+    draw_text(301, 380, s_7, 1, 160, 160, 170)
+
+    // Code content with syntax coloring
+    de_font(13, 0)
+    // Line 1: "main() -> int"
+    s_c1a = [109, 97, 105, 110]
+    draw_text(325, 272, s_c1a, 4, 60, 130, 190)
+    s_c1b = [40, 41, 32, 45, 62, 32]
+    draw_text(360, 272, s_c1b, 6, 50, 50, 60)
+    s_c1c = [105, 110, 116]
+    draw_text(405, 272, s_c1c, 3, 180, 100, 60)
+
+    // Line 2: "    init_fb()"
+    s_c2 = [32, 32, 32, 32, 105, 110, 105, 116, 95, 102, 98, 40, 41]
+    draw_text(325, 290, s_c2, 13, 60, 130, 190)
+
+    // Line 3: "    // draw the desktop"
+    s_c3 = [32, 32, 32, 32, 47, 47, 32, 100, 114, 97, 119, 32, 116, 104, 101, 32, 100, 101, 115, 107, 116, 111, 112]
+    draw_text(325, 308, s_c3, 23, 120, 160, 120)
+
+    // Line 4: "    draw_desktop()"
+    s_c4 = [32, 32, 32, 32, 100, 114, 97, 119, 95, 100, 101, 115, 107, 116, 111, 112, 40, 41]
+    draw_text(325, 326, s_c4, 18, 60, 130, 190)
+
+    // Line 5: "    flush()"
+    s_c5 = [32, 32, 32, 32, 102, 108, 117, 115, 104, 40, 41]
+    draw_text(325, 344, s_c5, 11, 60, 130, 190)
+
+    // Line 6: "    0"
+    s_c6 = [32, 32, 32, 32, 48]
+    draw_text(325, 362, s_c6, 5, 200, 140, 60)
+
+    // Line 7 empty
+
+    // Cursor blink
+    fill_rect(325, 370, 2, 16, 50, 50, 60)
+
+    // Status bar
+    fill_rect(281, 572, 618, 27, 50, 55, 65)
+    de_font(11, 0)
+    s_ln = [76, 110, 32, 55, 44, 32, 67, 111, 108, 32, 49]
+    draw_text(295, 589, s_ln, 11, 180, 180, 190)
+    s_utf = [85, 84, 70, 45, 56]
+    draw_text(820, 589, s_utf, 5, 180, 180, 190)
+
+    // === Window 3: Terminal ===
+    s_trm = [84, 101, 114, 109, 105, 110, 97, 108]
+    draw_window(700, 80, 540, 320, s_trm, 8, 0)
+
+    // Terminal body (dark)
+    fill_rect(701, 109, 538, 290, 30, 30, 35)
+
+    // Terminal text
+    de_font(13, 0)
+    s_t1 = [84, 79, 83, 32, 118, 48, 46, 49, 32, 45, 32, 84, 82, 73, 83, 67, 32, 79, 83]
+    draw_text(715, 135, s_t1, 19, 100, 220, 100)
+
+    s_t2 = [67, 111, 112, 121, 114, 105, 103, 104, 116, 32, 50, 48, 50, 54]
+    draw_text(715, 155, s_t2, 14, 100, 220, 100)
+
+    // Blank line then prompt
+    s_t3 = [117, 115, 101, 114, 64, 116, 114, 105, 115, 99]
+    draw_text(715, 195, s_t3, 10, 80, 200, 220)
+    s_t3b = [58, 126, 36, 32]
+    draw_text(795, 195, s_t3b, 4, 180, 180, 190)
+    s_t3c = [108, 115, 32, 45, 108, 97]
+    draw_text(825, 195, s_t3c, 6, 230, 230, 230)
+
+    // ls output
+    s_t4 = [100, 114, 119, 120, 114, 45, 120, 114, 45, 120]
+    draw_text(715, 215, s_t4, 10, 180, 180, 190)
+    s_t4b = [32, 115, 114, 99, 47]
+    draw_text(795, 215, s_t4b, 5, 80, 160, 220)
+
+    s_t5a = [100, 114, 119, 120, 114, 45, 120, 114, 45, 120]
+    draw_text(715, 235, s_t5a, 10, 180, 180, 190)
+    s_t5b = [32, 98, 117, 105, 108, 100, 47]
+    draw_text(795, 235, s_t5b, 7, 80, 160, 220)
+
+    s_t6a = [45, 114, 119, 45, 114, 45, 45, 114, 45, 45]
+    draw_text(715, 255, s_t6a, 10, 180, 180, 190)
+    s_t6b = [32, 77, 97, 107, 101, 102, 105, 108, 101]
+    draw_text(795, 255, s_t6b, 9, 230, 230, 230)
+
+    s_t7a = [45, 114, 119, 45, 114, 45, 45, 114, 45, 45]
+    draw_text(715, 275, s_t7a, 10, 180, 180, 190)
+    s_t7b = [32, 82, 69, 65, 68, 77, 69, 46, 109, 100]
+    draw_text(795, 275, s_t7b, 10, 230, 230, 230)
+
+    // New prompt
+    draw_text(715, 305, s_t3, 10, 80, 200, 220)
+    draw_text(795, 305, s_t3b, 4, 180, 180, 190)
+
+    // Blinking cursor
+    fill_rect(830, 295, 8, 16, 100, 220, 100)
+
+    // === Taskbar ===
+    fill_rect(0, 860, FB_WIDTH, 40, 35, 35, 42)
+    // Top edge highlight
+    fill_rect(0, 860, FB_WIDTH, 1, 60, 60, 70)
+
+    // Start button
+    fill_rect(8, 866, 80, 28, 60, 100, 170)
+    de_font(13, 1)
+    s_start = [84, 79, 83]
+    draw_text(30, 885, s_start, 3, 255, 255, 255)
+
+    // Running apps in taskbar
+    fill_rect(100, 866, 140, 28, 50, 50, 58)
+    de_font(11, 0)
+    draw_text(115, 884, s_fm, 12, 180, 180, 190)
+
+    fill_rect(248, 866, 140, 28, 60, 70, 85)
+    draw_text(263, 884, s_te, 11, 220, 220, 230)
+
+    fill_rect(396, 866, 120, 28, 50, 50, 58)
+    draw_text(411, 884, s_trm, 8, 180, 180, 190)
+
+    // System tray (right side)
+    de_font(12, 0)
+    s_vol = [86, 111, 108]
+    draw_text(1280, 884, s_vol, 3, 160, 160, 170)
+    s_net = [87, 105, 70, 105]
+    draw_text(1320, 884, s_net, 4, 100, 200, 100)
+
+    // Clock
+    de_font(13, 1)
+    s_time = [49, 52, 58, 51, 50]
+    draw_text(1385, 885, s_time, 5, 200, 200, 210)
+
+    // === Flush everything ===
+    de_exec(CMD_FLUSH)
+    0

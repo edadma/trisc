@@ -1,0 +1,80 @@
+SMETA v1
+SOURCE oskit/fs/tfs.sysl
+FUNC rd_read 2 i32 ptr i8 void
+FUNC rd_write 2 i32 ptr i8 void
+DATA TFS_MAGIC i32
+DATA ROOT_INODE i32
+DATA INODE_SIZE i32
+DATA DIR_ENTRY_SIZE i32
+DATA DIR_NAME_LEN i32
+DATA NUM_DIRECT i32
+DATA S_IFREG i32
+DATA S_IFDIR i32
+DATA S_IFCHR i32
+DATA S_IFBLK i32
+DATA sb_block_size i32
+DATA sb_total_blocks i32
+DATA sb_total_inodes i32
+DATA sb_inode_bitmap i32
+DATA sb_block_bitmap i32
+DATA sb_inode_table i32
+DATA sb_first_data i32
+DATA sb_free_blocks i32
+DATA sb_free_inodes i32
+DATA blkbuf arr 512 i8
+DATA blkbuf2 arr 512 i8
+FUNC read_i16 1 ptr i8 i32
+FUNC read_i32 1 ptr i8 i32
+FUNC write_i16 2 ptr i8 i32 void
+FUNC write_i32 2 ptr i8 i32 void
+FUNC tfs_init 0 void
+FUNC inode_block 1 i32 i32
+FUNC inode_off 1 i32 i32
+FUNC tfs_read_inode 2 i32 ptr i8 void
+FUNC ino_mode 1 ptr i8 i32
+FUNC ino_type 1 ptr i8 i32
+FUNC ino_perm 1 ptr i8 i32
+FUNC ino_nlinks 1 ptr i8 i32
+FUNC ino_uid 1 ptr i8 i32
+FUNC ino_gid 1 ptr i8 i32
+FUNC ino_size 1 ptr i8 i32
+FUNC ino_mtime 1 ptr i8 i32
+FUNC ino_ctime 1 ptr i8 i32
+FUNC ino_direct 2 ptr i8 i32 i32
+FUNC ino_indirect 1 ptr i8 i32
+FUNC ino_set_size 2 ptr i8 i32 void
+FUNC ino_set_nlinks 2 ptr i8 i32 void
+FUNC ino_set_direct 3 ptr i8 i32 i32 void
+FUNC ino_set_indirect 2 ptr i8 i32 void
+FUNC ino_set_mode 2 ptr i8 i32 void
+FUNC tfs_write_inode 2 i32 ptr i8 void
+FUNC get_file_block 2 ptr i8 i32 i32
+FUNC bitmap_test 2 i32 i32 i32
+FUNC bitmap_set 2 i32 i32 void
+FUNC bitmap_clear 2 i32 i32 void
+FUNC alloc_inode 0 i32
+FUNC free_inode 1 i32 void
+FUNC alloc_block 0 i32
+FUNC free_block 1 i32 void
+FUNC sync_superblock 0 void
+FUNC streq_n 3 ptr i8 ptr i8 i32 i32
+FUNC strlen 1 ptr i8 i32
+FUNC tfs_dir_lookup 2 i32 ptr i8 i32
+FUNC tfs_lookup 1 ptr i8 i32
+FUNC tfs_read 4 i32 ptr i8 i32 i32 i32
+FUNC tfs_write 4 i32 ptr i8 i32 i32 i32
+FUNC dir_add_entry 3 i32 ptr i8 i32 i32
+FUNC dir_remove_entry 2 i32 ptr i8 i32
+FUNC tfs_create 4 i32 ptr i8 i32 i32 i32
+FUNC tfs_mknod 5 i32 ptr i8 i32 i32 i32 i32
+FUNC tfs_unlink 2 i32 ptr i8 i32
+FUNC tfs_stat 2 i32 ptr i32 i32
+FUNC tfs_chmod 2 i32 i32 i32
+FUNC tfs_chown 3 i32 i32 i32 i32
+FUNC tfs_freeblocks 0 i32
+FUNC tfs_freeinodes 0 i32
+FUNC tfs_truncate 2 i32 i32 i32
+FUNC tfs_rmdir 2 i32 ptr i8 i32
+FUNC tfs_rename 4 i32 ptr i8 i32 ptr i8 i32
+FUNC tfs_readdir 4 i32 i32 ptr i32 ptr i8 i32
+FUNC tfs_link 3 i32 ptr i8 i32 i32

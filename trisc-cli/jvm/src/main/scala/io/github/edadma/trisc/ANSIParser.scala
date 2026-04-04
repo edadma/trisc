@@ -104,7 +104,7 @@ class ANSIParser(terminal: TerminalEmulator):
         if terminal.cursorCol > 0 then terminal.cursorCol -= 1
       case 0x09 => // tab
         terminal.cursorCol = math.min((terminal.cursorCol + 8) & ~7, terminal.cols - 1)
-      case 0x0a | 0x0b | 0x0c => linefeed() // LF, VT, FF all do linefeed
+      case 0x0a | 0x0b | 0x0c => terminal.cursorCol = 0; linefeed() // LF implies CR (standard onlcr mode)
       case 0x0d => terminal.cursorCol = 0
       case 0x0e | 0x0f => () // shift out/in — ignore
       case b if b >= 0x20 =>

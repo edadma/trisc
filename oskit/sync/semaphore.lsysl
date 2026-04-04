@@ -1,0 +1,35 @@
+TOS Semaphores
+
+Counting semaphores built on ll/sc atomic instructions.
+Threads that cannot acquire a semaphore yield and retry,
+spinning through the scheduler rather than busy-waiting.
+
+A semaphore is a single i64 in memory (ll/sc operate on 64-bit values):
+- value > 0 -- available (value = number of permits)
+- value == 0 -- all permits taken, waiters must yield and retry
+
+
+    module oskit.sync
+
+    import oskit.services.{yield}
+
+    extern atomic_dec_if_positive(addr: *i64) -> i64
+    extern atomic_inc(addr: *i64)
+
+    sem_init(sem: *i64, value: i64)
+        *sem = value
+
+Uses atomic_dec_if_positive which atomically reads the value,
+and if positive, decrements it and returns 1. If zero, returns 0
+without modifying memory. On failure, the thread yields its
+timeslice and retries after being rescheduled.
+
+    sem_wait(sem: *i64)
+        while atomic_dec_if_positive(sem) == 0
+            yield()
+
+    sem_post(sem: *i64)
+        atomic_inc(sem)
+
+    sem_trywait(sem: *i64) -> i64
+        atomic_dec_if_positive(sem)
