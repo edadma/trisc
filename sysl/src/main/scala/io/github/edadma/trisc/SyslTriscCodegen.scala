@@ -385,7 +385,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     emit(s"${fun.name}:")
 
     // ABI: params 0-2 in r1-r3, params 3+ on caller's stack
-    // If the function returns a struct, r1 = hidden return pointer (before user params).
+    // If the function returns a struct/string, r1 = hidden return pointer (before user params).
     // User params shift: param 0 in r2, param 1 in r3, param 2+ on stack.
     val allRegSlots = if structReturn then 1 + fun.params.length else fun.params.length
     val nRegPushed = allRegSlots.min(3)
@@ -402,27 +402,24 @@ class SyslTriscCodegen(addresses: Int = 4):
     //   [r5+0] = saved r5, [r5+8] = saved r6/lr
     //   [r5+16] = last pushed param, ... [r5+16+(nRegPushed-1)*8] = first pushed param
     val retPtrOffset = if structReturn then
-      // Hidden return pointer was in r1, pushed first among register args
-      val off = 16 + (nRegPushed - 1) * 8  // r1 was pushed first, so it's at the highest offset
+      val off = 16 + (nRegPushed - 1) * 8
       locals("_ret_ptr") = LocalVar("_ret_ptr", off, SyslType.PtrType(fun.returnType))
       off
     else -1
 
     // Map user params to their stack locations
-    val userParamRegStart = if structReturn then 1 else 0  // user params start at r2 if struct return
+    val userParamRegStart = if structReturn then 1 else 0
     val userRegParams = fun.params.length.min(3 - userParamRegStart)
     for (param, i) <- fun.params.take(userRegParams).zipWithIndex do
-      val regIndex = userParamRegStart + i  // which register slot (0-based from r1)
+      val regIndex = userParamRegStart + i
       val callerOffset = 16 + (nRegPushed - 1 - regIndex) * 8
       locals(param.name) = LocalVar(param.name, callerOffset, SyslType.I64)
     // Stack params: those beyond register capacity
     // String params take 16 bytes on the caller stack, others take 8
-    val nUserStackStart = 3 - userParamRegStart  // how many user params fit in registers
-    val stackParams = fun.params.drop(nUserStackStart)
+    val nUserStackStart = 3 - userParamRegStart
     var stackParamOffset = 16 + nRegPushed * 8
-    for param <- stackParams do
+    for param <- fun.params.drop(nUserStackStart) do
       if param.typ == SyslType.StringType then
-        // String param is 16 bytes on stack: {ptr, len}
         locals(param.name) = LocalVar(param.name, stackParamOffset, SyslType.StringType)
         stackParamOffset += 16
       else
@@ -436,17 +433,16 @@ class SyslTriscCodegen(addresses: Int = 4):
         case _ =>
 
     // Copy string params into local 16-byte slots so TVarRef works uniformly.
-    // Register string params: the register held an 8-byte address → dereference and copy.
-    // Stack string params: 16 bytes are already on the caller stack → copy directly.
+    // Register string params: the register holds an 8-byte address → dereference and copy.
+    // Stack string params: 16 bytes {ptr, len} on caller stack → copy directly.
     for (param, i) <- fun.params.zipWithIndex if param.typ == SyslType.StringType do
       val srcLocal = locals(param.name)
       val isRegParam = i < (3 - userParamRegStart)
-      // Allocate 16-byte local
       emitAddImm(7, 7, -16)
       stackOffset -= 16
       val strLocal = LocalVar(param.name, stackOffset, SyslType.StringType)
       if isRegParam then
-        // Register param: srcLocal contains an 8-byte address → dereference
+        // Register param: srcLocal holds an 8-byte address → dereference
         emitAddImm(1, 5, srcLocal.offset)
         emit("  ldd r1, r1, r0")        // r1 = caller's string struct address
         emit("  ldd r2, r1, r0")        // r2 = ptr
@@ -456,7 +452,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitAddImm(3, 7, 8)
         emit("  std r2, r3, r0")        // store len at local+8
       else
-        // Stack param: 16 bytes already on caller stack → copy
+        // Stack param: 16 bytes {ptr, len} already on caller stack
         emitAddImm(1, 5, srcLocal.offset)
         emit("  ldd r2, r1, r0")        // r2 = ptr
         emit("  std r2, r7, r0")        // store ptr at local+0
@@ -464,7 +460,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  ldd r2, r1, r0")        // r2 = len
         emitAddImm(3, 7, 8)
         emit("  std r2, r3, r0")        // store len at local+8
-      locals(param.name) = strLocal     // update to point to 16-byte local slot
+      locals(param.name) = strLocal
 
     // Generate body
     fun.body match
@@ -1373,58 +1369,68 @@ class SyslTriscCodegen(addresses: Int = 4):
         // r4 is reserved for the call address (movi r4, name)
         val nRegArgs = allArgs.length.min(3)
         val stackArgs = allArgs.drop(3)
-        // Track stack before arg evaluation (genExpr may allocate temps)
         val savedOffset = stackOffset
-        // Helper: evaluate arg, clean up genExpr temps, and push value contiguously
-        def evalAndPushArg(arg: TExpr, isRegArg: Boolean): Unit =
+
+        def evalAndPush(arg: TExpr): Unit =
           val preOffset = stackOffset
           arg match
             case TAddrLit(off) => emitAddImm(1, 5, off)
             case _ => genExpr(arg)
-          // Retain ref args for ownership transfer
           arg.typ match
             case rt: SyslType.RefType => arg match
               case _: TNew | _: TNewArray =>
               case _ => emitRefIncr(1, refHeaderOffset(rt))
             case SyslType.StringType if needsAllocExtern => arg match
-              case _: TBinary =>  // concat result already has refcount=1
+              case _: TBinary =>
               case _ =>
                 emit("  pshd r1")
-                emit("  ldd r1, r1, r0")  // load ptr field for refIncr
+                emit("  ldd r1, r1, r0")
                 emitRefIncr(1, 8)
                 emit("  popd r1")
             case _ =>
-          if arg.typ == SyslType.StringType && !isRegArg then
-            // Stack string args: push 16 bytes (ptr, len) contiguously
+          if arg.typ == SyslType.StringType then
+            // String stack args: extract ptr/len, clean up temps, push 16 bytes
             emit("  addi r2, r1, 8")
             emit("  ldd r2, r2, r0")     // r2 = len
             emit("  ldd r1, r1, r0")     // r1 = ptr
-            // Reclaim any genExpr temps
-            val extraAlloc = preOffset - stackOffset
-            if extraAlloc > 0 then
-              emitAddImm(7, 7, extraAlloc)
+            val extra = preOffset - stackOffset
+            if extra > 0 then
+              emitAddImm(7, 7, extra)
               stackOffset = preOffset
-            emit("  pshd r2")            // push len
-            emit("  pshd r1")            // push ptr
+            emit("  pshd r2")
+            emit("  pshd r1")
             stackOffset -= 16
           else
-            // Scalar/register args: push 8 bytes, reclaim genExpr temps for non-string args
-            val extraAlloc = preOffset - stackOffset
-            if extraAlloc > 0 && arg.typ != SyslType.StringType then
-              // r1 is a scalar value, safe to reclaim temps
-              emitAddImm(7, 7, extraAlloc)
+            // Scalar args: clean up temps, push 8 bytes
+            val extra = preOffset - stackOffset
+            if extra > 0 then
+              emitAddImm(7, 7, extra)
               stackOffset = preOffset
-            // For register string args: r1 = address of temp struct, DON'T reclaim
             emit("  pshd r1")
             stackOffset -= 8
 
         // Push stack args (3+) right-to-left
         for arg <- stackArgs.reverse do
-          evalAndPushArg(arg, isRegArg = false)
-        // Evaluate register args in reverse, push as temporaries
+          evalAndPush(arg)
+        // Evaluate register args in reverse, push as temporaries, then pop into r1-rN.
         for arg <- allArgs.take(nRegArgs).reverse do
-          evalAndPushArg(arg, isRegArg = true)
-        // Pop into r1-rN
+          arg match
+            case TAddrLit(off) => emitAddImm(1, 5, off)
+            case _ => genExpr(arg)
+          arg.typ match
+            case rt: SyslType.RefType => arg match
+              case _: TNew | _: TNewArray =>
+              case _ => emitRefIncr(1, refHeaderOffset(rt))
+            case SyslType.StringType if needsAllocExtern => arg match
+              case _: TBinary =>
+              case _ =>
+                emit("  pshd r1")
+                emit("  ldd r1, r1, r0")
+                emitRefIncr(1, 8)
+                emit("  popd r1")
+            case _ =>
+          emit("  pshd r1")
+          stackOffset -= 8
         for i <- 0 until nRegArgs do
           emit(s"  popd r${i + 1}")
           stackOffset += 8
