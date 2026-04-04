@@ -340,7 +340,6 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
     cpu.r(1).read shouldBe 10  // 0+1+2+3+4
   }
 
-
   "array decay: pass array where *i8 expected" in {
     val (_, output) = runWithBoot(
       """extern putchar(ch: int)
@@ -399,5 +398,27 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
         |    0
         |""".stripMargin)
     output shouldBe "OK"
+  }
+
+  "user-defined function shadows builtin" in {
+    val (_, output) = runWithBoot(
+      """extern putchar(ch: int)
+        |
+        |print(s: *i8)
+        |    var i = 0
+        |    while s[i] != 0
+        |        putchar(int(s[i]))
+        |        i += 1
+        |
+        |var buf: [4]i8
+        |
+        |main() -> int
+        |    buf[0] = 'H'
+        |    buf[1] = 'i'
+        |    buf[2] = 0
+        |    print(buf)
+        |    0
+        |""".stripMargin)
+    output shouldBe "Hi"
   }
 }

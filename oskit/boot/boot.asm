@@ -31,7 +31,7 @@ segment vectors
   dl isr_priv              ; Slot 7:  PrivilegeViolation
   dl isr_divzero           ; Slot 8:  IllegalDivide
   dl trap_handler          ; Slot 9:  Trap0
-  dl trap_handler          ; Slot 10: Trap1
+  dl trap1_fault           ; Slot 10: Trap1 (runtime fault — kill thread)
   dl trap_handler          ; Slot 11: Trap2
   dl trap_handler          ; Slot 12: Trap3
   dl trap_handler          ; Slot 13: Trap4
@@ -745,6 +745,37 @@ thread_exit
   ldi  r2, 0            ; r2 = unused (trap reads from saved registers, not ABI)
   trap 0
   ; never returns — schedule switches to another thread
+
+
+; ============================================================================
+; trap1_fault — Runtime fault handler (trap 1)
+; ============================================================================
+;
+; Codegen emits "trap 1" for runtime errors (bounds check, null pointer, etc.).
+; r1 = error code: 1=out-of-bounds, 2=null pointer, 3=abort
+; Terminates the current thread and reschedules.
+;
+; ============================================================================
+extern terminate_current
+
+global trap1_fault, func
+
+trap1_fault
+  cli
+  ; Output fault marker: '!' followed by error code digit
+  ; r1 = error code (1=bounds, 2=null, 3=abort)
+  movi r3, STDOUT
+  ldi  r2, 33            ; '!'
+  stb  r2, r3, r0
+  addi r2, r1, 48        ; r2 = '0' + error code
+  stb  r2, r3, r0
+  ; Save context and terminate thread
+  pshr r6                       ; save user's r1-r6
+  gusp r1
+  pshd r1                       ; save USP
+  movi r4, terminate_current
+  jalr r6, r4
+  bra do_schedule
 
 
 ; ============================================================================

@@ -39,6 +39,7 @@ class SyslAnalyzer:
     "calloc" -> FunInfo("calloc", List("count" -> I64, "size" -> I64), PtrType(I8)),
     "realloc" -> FunInfo("realloc", List("ptr" -> PtrType(I8), "size" -> I64), PtrType(I8)),
     "sbrk" -> FunInfo("sbrk", List("increment" -> I32), PtrType(I8)),
+    "abort" -> FunInfo("abort", Nil, VoidType),
   )
 
   def registerImport(meta: ModuleMeta, selectors: List[ImportSelector] = List(WildcardImport)): Unit =
@@ -267,8 +268,8 @@ class SyslAnalyzer:
       info
 
   private def lookupFun(name: String): FunInfo =
-    builtinFunctions.getOrElse(name,
-      functions.getOrElse(name,
+    functions.getOrElse(name,
+      builtinFunctions.getOrElse(name,
         throw AnalysisError(s"undefined function: '$name'")))
 
   private def checkArgs(name: String, params: List[(String, SyslType)], args: List[TExpr]): List[TExpr] =
