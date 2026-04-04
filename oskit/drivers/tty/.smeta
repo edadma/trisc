@@ -17,6 +17,8 @@ FUNC tty_init_tables 0 void
 FUNC tty_console_init 1 i32 void
 FUNC tty_console_push 2 i32 i8 i32
 FUNC tty_console_pop 1 i32 i32
+FUNC tty_push_escape 1 i8 void
+FUNC tty_push_csi_tilde 1 i8 void
 FUNC tty_process_keyboard 0 void
 FUNC tty_deliver_pending 0 void
 FUNC tty_handle_write 3 i32 i32 i8 void

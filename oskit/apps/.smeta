@@ -6,6 +6,11 @@ FUNC sh_putc 1 i32 void
 FUNC sh_puts 1 ptr i8 void
 FUNC sh_newline 0 void
 FUNC sh_putint 1 i32 void
+DATA PROMPT_LEN i32
+FUNC sh_append_csi 4 ptr i8 i32 i32 i8 i32
+FUNC sh_csi_num 2 i32 i32 void
+DATA sh_out arr 140 i8
+FUNC sh_refresh_line 3 ptr i8 i32 i32 void
 FUNC sh_readline 2 ptr i8 i32 i32
 FUNC sh_resolve_parent 1 ptr i8 i32
 FUNC sh_basename 1 ptr i8 ptr i8

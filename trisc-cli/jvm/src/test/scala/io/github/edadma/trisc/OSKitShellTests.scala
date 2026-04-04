@@ -172,7 +172,7 @@ import oskit.apps.*
     val keys        = typeString("pwd\n", startTick = 500000, spacing = 2000)
     val (_, output) = runShell(scheduledKeys = keys)
     // Output should show "/" from pwd
-    // The prompt is "/ $ " and pwd prints "/"
+    // The prompt is "> " and pwd prints "/"
     val pwdLines = output.split('\n').filter(_.trim == "/")
     pwdLines.length should be >= 1
   }

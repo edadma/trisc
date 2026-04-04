@@ -48,32 +48,149 @@ Output helpers. These use the TTY server for all I/O.
             sh_putint(n / 10)
         sh_putc(48 + (n % 10))
 
-Read a line from the TTY into buf. Echoes characters as typed.
-Handles backspace. Returns when newline is received.
+Read a line from the TTY with full line editing.
+
+Supports: left/right arrow, Home/End, Delete, Backspace,
+and character insertion at cursor position.
+
+Redraw strategy: on any edit, redraws the entire line using
+CR + prompt + buffer + ESC[K + ESC[nG to position cursor.
+This avoids visible cursor animation.
+
+    val PROMPT_LEN = 2
+
+Append a CSI sequence with numeric parameter to a buffer:
+ESC [ n ch.  Returns new position.
+
+    sh_append_csi(out: *i8, pos: int, n: int, ch: i8) -> int
+        var p = pos
+        out[p] = 27
+        p += 1
+        out[p] = 91
+        p += 1
+        if n >= 100
+            out[p] = i8(48 + n / 100)
+            p += 1
+        if n >= 10
+            out[p] = i8(48 + (n / 10) % 10)
+            p += 1
+        out[p] = i8(48 + n % 10)
+        p += 1
+        out[p] = ch
+        p += 1
+        p
+
+Emit a CSI sequence with numeric parameter directly.
+
+    sh_csi_num(n: int, ch: int)
+        sh_putc(27)
+        sh_putc(91)
+        if n >= 100
+            sh_putc(48 + n / 100)
+        if n >= 10
+            sh_putc(48 + (n / 10) % 10)
+        sh_putc(48 + n % 10)
+        sh_putc(ch)
+
+Redraw the full line in a single batched write.
+Builds CR + prompt + buffer + ESC[K + ESC[nG into a local
+buffer and sends it with one tty_puts call.
+
+    var sh_out: [140]i8
+
+    sh_refresh_line(buf: *i8, len: int, cursor: int)
+        var p = 0
+        sh_out[p] = 13        // CR
+        p += 1
+        sh_out[p] = 62        // >
+        p += 1
+        sh_out[p] = 32        // space
+        p += 1
+        // Copy line content (flush if approaching IPC limit)
+        var i = 0
+        while i < len
+            if p >= 120
+                tty_puts(&sh_out[0], p)
+                p = 0
+            sh_out[p] = buf[i]
+            p += 1
+            i += 1
+        // ESC[K — clear to end of line
+        p = sh_append_csi(&sh_out[0], p, 0, i8(75))
+        // ESC[nG — cursor to column (1-based)
+        p = sh_append_csi(&sh_out[0], p, PROMPT_LEN + cursor + 1, i8(71))
+        tty_puts(&sh_out[0], p)
 
     sh_readline(buf: *i8, maxlen: int) -> int
-        var pos = 0
-        while pos < maxlen - 1
+        var len = 0
+        var cursor = 0
+        while len < maxlen - 1
             val ch = tty_getc()
             if ch == 10
                 // Enter — done
                 sh_putc(10)
-                buf[pos] = 0
-                return pos
+                buf[len] = 0
+                return len
             else if ch == 8
-                // Backspace
-                if pos > 0
-                    pos -= 1
-                    sh_putc(8)
-                    sh_putc(32)
-                    sh_putc(8)
+                // Backspace — delete character before cursor
+                if cursor > 0
+                    var i = cursor - 1
+                    while i < len - 1
+                        buf[i] = buf[i + 1]
+                        i += 1
+                    len -= 1
+                    cursor -= 1
+                    sh_refresh_line(buf, len, cursor)
+            else if ch == 27
+                // Escape sequence
+                val c2 = tty_getc()
+                if c2 == 91
+                    val c3 = tty_getc()
+                    if c3 == 67
+                        // Right arrow
+                        if cursor < len
+                            cursor += 1
+                            sh_csi_num(PROMPT_LEN + cursor + 1, 71)
+                    else if c3 == 68
+                        // Left arrow
+                        if cursor > 0
+                            cursor -= 1
+                            sh_csi_num(PROMPT_LEN + cursor + 1, 71)
+                    else if c3 == 72
+                        // Home
+                        cursor = 0
+                        sh_csi_num(PROMPT_LEN + 1, 71)
+                    else if c3 == 70
+                        // End
+                        cursor = len
+                        sh_csi_num(PROMPT_LEN + cursor + 1, 71)
+                    else if c3 == 51
+                        // Could be Delete: ESC[3~
+                        val c4 = tty_getc()
+                        if c4 == 126
+                            if cursor < len
+                                var i = cursor
+                                while i < len - 1
+                                    buf[i] = buf[i + 1]
+                                    i += 1
+                                len -= 1
+                                sh_refresh_line(buf, len, cursor)
             else if ch >= 32
-                // Printable character
-                buf[pos] = i8(ch)
-                pos += 1
-                sh_putc(ch)
-        buf[pos] = 0
-        pos
+                // Printable character — insert at cursor
+                if len < maxlen - 1
+                    var i = len
+                    while i > cursor
+                        buf[i] = buf[i - 1]
+                        i -= 1
+                    buf[cursor] = i8(ch)
+                    len += 1
+                    cursor += 1
+                    if cursor == len
+                        sh_putc(ch)
+                    else
+                        sh_refresh_line(buf, len, cursor)
+        buf[len] = 0
+        len
 
 Path resolution helpers. Splits a path into parent directory
 and basename. Resolves the parent to an inode.
@@ -632,9 +749,8 @@ tokenizes it, and dispatches to the appropriate command.
         var argv: [16]i64
 
         while 1 == 1
-            // Print prompt: "cwd$ "
-            sh_puts(&cwd_path[0])
-            sh_putc(36)   // $
+            // Print prompt: "> "
+            sh_putc(62)   // >
             sh_putc(32)   // space
 
             // Read a line
