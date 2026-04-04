@@ -17,13 +17,8 @@ class OSKitShellTests extends OSKitTestHelpers {
   private lazy val shSysl: String     = readLsysl("oskit/apps/sh.lsysl")
   private lazy val initSysl: String   = readLsysl("oskit/apps/init.lsysl")
 
-  // Shell tests need the full stack: keyboard, TTY, disk, TFS, shell
-  def runShell(
-      userSources: Map[String, String],
-      maxCycles: Int = 20000000,
-      prefill: String = "\n",
-      scheduledKeys: Seq[(Int, Int, Boolean, Int)] = Seq.empty,
-  ): (CPU, String) =
+  // Cache the compiled+linked OS image — all shell tests use the same app source
+  private lazy val shellLinked: TOF =
     val bootTof    = assemble(bootAsm, relocatable = true)
     val allSources = Map(
       "oskit/kernel"     -> kernelSysl,
@@ -40,7 +35,19 @@ class OSKitShellTests extends OSKitTestHelpers {
       "oskit/lib/string" -> stringSysl,
       "oskit/sh"         -> shSysl,
       "oskit/init"       -> initSysl,
-    ) ++ userSources
+      "app" ->
+        """import oskit.*
+          |var _n: [2]i8
+          |
+          |kernel_main() -> int
+          |    _n[0] = 73
+          |    _n[1] = 0
+          |    ipc_init()
+          |    create_thread(init, 0x90000, 0x8E000, &_n[0])
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |""".stripMargin,
+    )
     val driver  = new SyslDriver
     val result  = driver.compile(allSources)
     val codegen = new SyslTriscCodegen
@@ -49,7 +56,15 @@ class OSKitShellTests extends OSKitTestHelpers {
         val asm = codegen.generate(unit.typed)
         assemble(asm, relocatable = true)
     val syslTof = Linker.link(tofs, relocatable = true)
-    val linked  = Linker.link(Seq(bootTof, syslTof), linkerScript, 0)
+    Linker.link(Seq(bootTof, syslTof), linkerScript, 0)
+
+  // Shell tests need the full stack: keyboard, TTY, disk, TFS, shell
+  def runShell(
+      maxCycles: Int = 5200000,
+      prefill: String = "\n",
+      scheduledKeys: Seq[(Int, Int, Boolean, Int)] = Seq.empty,
+  ): (CPU, String) =
+    val linked = shellLinked
 
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
@@ -125,96 +140,26 @@ class OSKitShellTests extends OSKitTestHelpers {
   // === Shell integration tests ===
 
   "Shell: init boots system" in {
-    val keys          = typeString("pwd\n", startTick = 4600000, spacing = 100000)
-    val (cpu, output) = runShell(
-      Map(
-        "app" ->
-          """import oskit.*
-          |var _n: [2]i8
-          |
-          |kernel_main() -> int
-          |    _n[0] = 73
-          |    _n[1] = 0
-          |    ipc_init()
-          |    create_thread(init, 0x90000, 0x8E000, &_n[0])
-          |    timer_init(1000)
-          |    first_thread_ssp()
-          |""".stripMargin,
-      ),
-      scheduledKeys = keys,
-    )
-    println(s"INIT output (${output.length} chars): '${output.take(300)}' cycles=${cpu.cycles}")
+    val keys          = typeString("pwd\n", startTick = 4500000, spacing = 2000)
+    val (cpu, output) = runShell(scheduledKeys = keys)
     output should include("/")
   }
 
   "Shell: echo command via putc" in {
-    // Keys use CPU cycle counts — shell boots at ~4.5M, space keys 100K cycles apart
-    val keys          = typeString("echo hi\n", startTick = 4600000, spacing = 100000)
-    val (cpu, output) = runShell(
-      Map(
-        "app" ->
-          """import oskit.*
-          |
-          |var _n: [2]i8
-          |
-          |kernel_main() -> int
-          |    _n[0] = 73
-          |    _n[1] = 0
-          |    ipc_init()
-          |    create_thread(init, 0x90000, 0x8E000, &_n[0])
-          |    timer_init(1000)
-          |    first_thread_ssp()
-          |""".stripMargin,
-      ),
-      scheduledKeys = keys,
-      maxCycles = 20000000,
-    )
-    println(s"SHELL output (${output.length} chars): '${output.take(200)}' cycles=${cpu.cycles}")
+    val keys          = typeString("echo hi\n", startTick = 4500000, spacing = 2000)
+    val (cpu, output) = runShell(scheduledKeys = keys)
     output should include("hi")
   }
 
   "Shell: echo command" in {
-    val keys        = typeString("echo hi\n", startTick = 4600000, spacing = 100000)
-    val (_, output) = runShell(
-      Map(
-        "app" ->
-          """import oskit.*
-          |
-          |var _n: [2]i8
-          |
-          |kernel_main() -> int
-          |    _n[0] = 73
-          |    _n[1] = 0
-          |    ipc_init()
-          |    create_thread(init, 0x90000, 0x8E000, &_n[0])
-          |    timer_init(1000)
-          |    first_thread_ssp()
-          |""".stripMargin,
-      ),
-      scheduledKeys = keys,
-    )
-    // Output should contain the prompt, echoed input, and "hi"
+    val keys        = typeString("echo hi\n", startTick = 4500000, spacing = 2000)
+    val (_, output) = runShell(scheduledKeys = keys)
     output should include("hi")
   }
 
   "Shell: ls on root with prefilled file" in {
-    val keys        = typeString("ls\n", startTick = 4600000, spacing = 100000)
+    val keys        = typeString("ls\n", startTick = 4500000, spacing = 2000)
     val (_, output) = runShell(
-      Map(
-        "app" ->
-          """import oskit.*
-          |
-          |var _n: [2]i8
-          |
-          |kernel_main() -> int
-          |    _n[0] = 73
-          |    _n[1] = 0
-          |    ipc_init()
-          |    create_thread(init, 0x90000, 0x8E000, &_n[0])
-          |    timer_init(1000)
-          |    first_thread_ssp()
-          |""".stripMargin,
-      ),
       prefill = """/hello file "world"""",
       scheduledKeys = keys,
     )
@@ -222,25 +167,8 @@ class OSKitShellTests extends OSKitTestHelpers {
   }
 
   "Shell: pwd shows root" in {
-    val keys        = typeString("pwd\n", startTick = 4600000, spacing = 100000)
-    val (_, output) = runShell(
-      Map(
-        "app" ->
-          """import oskit.*
-          |
-          |var _n: [2]i8
-          |
-          |kernel_main() -> int
-          |    _n[0] = 73
-          |    _n[1] = 0
-          |    ipc_init()
-          |    create_thread(init, 0x90000, 0x8E000, &_n[0])
-          |    timer_init(1000)
-          |    first_thread_ssp()
-          |""".stripMargin,
-      ),
-      scheduledKeys = keys,
-    )
+    val keys        = typeString("pwd\n", startTick = 4500000, spacing = 2000)
+    val (_, output) = runShell(scheduledKeys = keys)
     // Output should show "/" from pwd
     // The prompt is "/ $ " and pwd prints "/"
     val pwdLines = output.split('\n').filter(_.trim == "/")
