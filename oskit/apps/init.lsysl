@@ -1,0 +1,34 @@
+OSKit Init — System Initialization
+
+The first userspace process. Starts system servers in the
+correct order, waits for them to register their IPC ports,
+then launches the shell.
+
+Boot sequence:
+1. Disk server — owns block device hardware
+2. TFS server — filesystem, needs disk server
+3. TTY server — terminal, needs keyboard hardware
+4. Shell — interactive, needs TTY and TFS
+
+    module oskit
+
+    extern disk_server()
+    extern tfs_server()
+    extern tty_server()
+    extern shell()
+
+Stack layout — placed in upper RAM to avoid code/data segment
+overlap. Each thread gets 0x4000 (16KB) with user and system
+stacks separated by 0x2000.
+
+    init()
+        // Start system servers
+        create_thread(disk_server, 0x80000, 0x7E000, "disk")
+        create_thread(tfs_server, 0x84000, 0x82000, "tfs")
+        create_thread(tty_server, 0x88000, 0x86000, "tty")
+
+        // Wait for servers to initialize and register ports
+        sleep(100)
+
+        // Start the shell
+        create_thread(shell, 0x8C000, 0x8A000, "sh")

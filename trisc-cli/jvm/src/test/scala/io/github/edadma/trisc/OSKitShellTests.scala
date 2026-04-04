@@ -15,6 +15,7 @@ class OSKitShellTests extends OSKitTestHelpers {
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val stringSysl: String = readLsysl("oskit/lib/string.lsysl")
   private lazy val shSysl: String = readLsysl("oskit/apps/sh.lsysl")
+  private lazy val initSysl: String = readLsysl("oskit/apps/init.lsysl")
 
   // String library tests use minimal boot (no OS)
   def runStringTest(source: String, maxCycles: Int = 500000): (CPU, String) =
@@ -42,6 +43,7 @@ class OSKitShellTests extends OSKitTestHelpers {
       "oskit/tfs_srv" -> tfsSrvSysl,
       "oskit/lib/string" -> stringSysl,
       "oskit/sh" -> shSysl,
+      "oskit/init" -> initSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -278,6 +280,25 @@ class OSKitShellTests extends OSKitTestHelpers {
 
   // === Shell integration tests ===
 
+  "Shell: init boots system" in {
+    val keys = typeString("pwd\n", startTick = 2000, spacing = 300)
+    val (_, output) = runShell(Map(
+      "app" ->
+        """import oskit.*
+          |var _n: [2]i8
+          |
+          |kernel_main() -> int
+          |    _n[0] = 73
+          |    _n[1] = 0
+          |    ipc_init()
+          |    create_thread(init, 0x90000, 0x8E000, &_n[0])
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |""".stripMargin
+    ), scheduledKeys = keys)
+    output should include("/")
+  }
+
   "Shell: echo command via putc" in {
     // Simpler test: type "echo hi\n" and check output
     val keys = typeString("echo hi\n", startTick = 2000, spacing = 300)
@@ -285,12 +306,13 @@ class OSKitShellTests extends OSKitTestHelpers {
       "app" ->
         """import oskit.*
           |
+          |var _n: [2]i8
+          |
           |kernel_main() -> int
+          |    _n[0] = 73
+          |    _n[1] = 0
           |    ipc_init()
-          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
-          |    create_thread(tfs_server, 0x20000, 0x1E000, "tfs")
-          |    create_thread(tty_server, 0x30000, 0x2E000, "tty")
-          |    create_thread(shell, 0x40000, 0x3E000, "sh")
+          |    create_thread(init, 0x90000, 0x8E000, &_n[0])
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin
@@ -306,12 +328,13 @@ class OSKitShellTests extends OSKitTestHelpers {
       "app" ->
         """import oskit.*
           |
+          |var _n: [2]i8
+          |
           |kernel_main() -> int
+          |    _n[0] = 73
+          |    _n[1] = 0
           |    ipc_init()
-          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
-          |    create_thread(tfs_server, 0x20000, 0x1E000, "tfs")
-          |    create_thread(tty_server, 0x30000, 0x2E000, "tty")
-          |    create_thread(shell, 0x40000, 0x3E000, "sh")
+          |    create_thread(init, 0x90000, 0x8E000, &_n[0])
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin
@@ -326,12 +349,13 @@ class OSKitShellTests extends OSKitTestHelpers {
       "app" ->
         """import oskit.*
           |
+          |var _n: [2]i8
+          |
           |kernel_main() -> int
+          |    _n[0] = 73
+          |    _n[1] = 0
           |    ipc_init()
-          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
-          |    create_thread(tfs_server, 0x20000, 0x1E000, "tfs")
-          |    create_thread(tty_server, 0x30000, 0x2E000, "tty")
-          |    create_thread(shell, 0x40000, 0x3E000, "sh")
+          |    create_thread(init, 0x90000, 0x8E000, &_n[0])
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin
@@ -345,12 +369,13 @@ class OSKitShellTests extends OSKitTestHelpers {
       "app" ->
         """import oskit.*
           |
+          |var _n: [2]i8
+          |
           |kernel_main() -> int
+          |    _n[0] = 73
+          |    _n[1] = 0
           |    ipc_init()
-          |    create_thread(disk_server, 0x10000, 0xE000, "disk")
-          |    create_thread(tfs_server, 0x20000, 0x1E000, "tfs")
-          |    create_thread(tty_server, 0x30000, 0x2E000, "tty")
-          |    create_thread(shell, 0x40000, 0x3E000, "sh")
+          |    create_thread(init, 0x90000, 0x8E000, &_n[0])
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin
