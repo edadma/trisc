@@ -5,15 +5,15 @@ import org.scalatest.matchers.should.Matchers
 
 class SyslAllocTests extends AnyFreeSpec with Matchers {
 
-  private val allocSource = scala.io.Source.fromFile("sysl/lib/alloc.sysl").mkString
+  private val sources = Map(
+    "posix/stdlib/alloc" -> scala.io.Source.fromFile("posix/stdlib/alloc.sysl").mkString,
+    "posix/string/string" -> scala.io.Source.fromFile("posix/string/string.sysl").mkString,
+    "posix/unistd/unistd" -> scala.io.Source.fromFile("posix/unistd/unistd.sysl").mkString,
+  )
 
-  "allocator parses" in {
-    val result = (new SyslParser).parseProgram(allocSource)
-    result shouldBe a[Right[_, _]]
-  }
-
-  "allocator analyzes" in {
-    val Right(ast) = (new SyslParser).parseProgram(allocSource): @unchecked
-    (new SyslAnalyzer).analyze(ast) // should not throw
+  "allocator parses and analyzes" in {
+    val driver = new SyslDriver
+    val result = driver.compile(sources)
+    result.units.length shouldBe 3
   }
 }

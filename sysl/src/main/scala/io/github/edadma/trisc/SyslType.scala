@@ -12,6 +12,7 @@ enum SyslType:
   case DoubleType
   case StringType
   case SliceType(elem: SyslType)
+  case RefType(inner: SyslType)  // &T — ref-counted heap reference
 
   def isNumeric: Boolean = this match
     case _: IntType | _: UIntType => true
@@ -35,7 +36,7 @@ enum SyslType:
     case _ => false
 
   def isPointerLike: Boolean = this match
-    case PtrType(_) | ArrayType(_, _) | SliceType(_) => true
+    case PtrType(_) | ArrayType(_, _) | SliceType(_) | RefType(_) => true
     case _ => false
 
   // Size in bytes
@@ -48,8 +49,9 @@ enum SyslType:
     case FuncType(_, _) => 8
     case ArrayType(elem, size) => elem.sizeOf * size
     case DoubleType => 8
-    case StringType => 12        // ptr(8) + len(4)
+    case StringType => 16        // ptr(8) + len(8) — Go-style fat pointer
     case SliceType(_) => 16      // ptr(8) + len(4) + cap(4)
+    case RefType(_) => 8         // pointer to heap object (refcount header + data)
     case st @ StructType(_, fields) =>
       var offset = 0L
       for (_, typ) <- fields do
@@ -71,6 +73,7 @@ enum SyslType:
     case DoubleType => 8
     case StringType => 8
     case SliceType(_) => 8
+    case RefType(_) => 8
     case StructType(_, fields) => if fields.isEmpty then 1 else fields.map(_._2.alignOf).max
 
   // Width in bits (for integer types)
@@ -102,6 +105,7 @@ enum SyslType:
     case StructType(name, _) => name
     case StringType => "string"
     case SliceType(t) => s"[]$t"
+    case RefType(t) => s"&$t"
 
   def toPrefix: String = this match
     case IntType(w) => s"i$w"
@@ -114,6 +118,7 @@ enum SyslType:
     case FuncType(params, ret) => s"func ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}"
     case StringType => "string"
     case SliceType(t) => s"slice ${t.toPrefix}"
+    case RefType(t) => s"ref ${t.toPrefix}"
     case StructType(name, fields) => s"struct $name ${fields.size} ${fields.map((n, t) => s"$n ${t.toPrefix}").mkString(" ")}"
 
   def isTuple: Boolean = this match
@@ -161,6 +166,7 @@ object SyslType:
       case "byte" => I8
       case "string" => StringType
       case "ptr"  => PtrType(parseType(tokens))
+      case "ref"  => RefType(parseType(tokens))
       case "slice" => SliceType(parseType(tokens))
       case "arr" =>
         val size = tokens.next().toInt

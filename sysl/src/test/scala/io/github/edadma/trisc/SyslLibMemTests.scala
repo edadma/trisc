@@ -2,14 +2,16 @@ package io.github.edadma.trisc
 
 class SyslLibMemTests extends SyslTestHelpers {
 
-  private def readLsysl(path: String): String =
-    val raw = scala.io.Source.fromFile(path).mkString
-    val doc = new LiterateParser().parse(raw)
-    LiterateRenderer.tangle(doc)
+  val libs: Map[String, String] = Map(
+    "posix/string/string" -> readSysl("posix/string/string.sysl"),
+    "posix/stdlib/stdlib" -> readSysl("posix/stdlib/stdlib.sysl"),
+  )
 
-  val memLib: String = readLsysl("lib/mem.lsysl")
-
-  private def evalWith(main: String): Long = eval(memLib + "\n" + main)
+  private def evalWith(main: String): Long = evalWithLibs(libs,
+    s"""import posix.string.*
+       |import posix.stdlib.*
+       |$main
+       |""".stripMargin)
 
   // ===== memset =====
 
@@ -81,14 +83,7 @@ class SyslLibMemTests extends SyslTestHelpers {
 
   "memcmp a less than b" in {
     evalWith(
-      """sign(x: int) -> int
-        |    if x < 0
-        |        return -1
-        |    if x > 0
-        |        return 1
-        |    0
-        |
-        |main() -> int
+      """main() -> int
         |    a: [3]byte
         |    b: [3]byte
         |    a[0] = 1
@@ -103,14 +98,7 @@ class SyslLibMemTests extends SyslTestHelpers {
 
   "memcmp a greater than b" in {
     evalWith(
-      """sign(x: int) -> int
-        |    if x < 0
-        |        return -1
-        |    if x > 0
-        |        return 1
-        |    0
-        |
-        |main() -> int
+      """main() -> int
         |    a: [3]byte
         |    b: [3]byte
         |    a[0] = 9

@@ -11,7 +11,7 @@ class TFSDirTests extends TFSTestHelpers {
 
   "tfs_dir_lookup finds . in root" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", ".")}
@@ -27,7 +27,7 @@ class TFSDirTests extends TFSTestHelpers {
 
   "tfs_dir_lookup finds .. in root" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "..")}
@@ -43,7 +43,7 @@ class TFSDirTests extends TFSTestHelpers {
 
   "tfs_dir_lookup finds dev in root" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "dev")}
@@ -59,7 +59,7 @@ class TFSDirTests extends TFSTestHelpers {
 
   "tfs_dir_lookup returns -1 for missing name" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "nope")}
@@ -77,7 +77,7 @@ class TFSDirTests extends TFSTestHelpers {
 
   "dir_add_entry adds to root" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |main() -> int
          |    tfs_init()
          |    val ino = alloc_inode()
@@ -96,7 +96,7 @@ class TFSDirTests extends TFSTestHelpers {
 
   "dir_remove_entry removes from root" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |main() -> int
          |    tfs_init()
          |    val ino = alloc_inode()
@@ -116,7 +116,7 @@ class TFSDirTests extends TFSTestHelpers {
 
   "dir_remove_entry returns -1 for missing" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "nope")}
@@ -134,7 +134,7 @@ class TFSDirTests extends TFSTestHelpers {
 
   "tfs_lookup root" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/")}
@@ -149,7 +149,7 @@ class TFSDirTests extends TFSTestHelpers {
 
   "tfs_lookup /dev/tty0" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/dev/tty0")}
@@ -165,7 +165,7 @@ class TFSDirTests extends TFSTestHelpers {
 
   "tfs_lookup nonexistent returns -1" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/nonexistent")}
@@ -182,7 +182,7 @@ class TFSDirTests extends TFSTestHelpers {
 
   "tfs_readdir index 0 is dot" in {
     val (_, output) = runTFS(
-      """import tfs.*
+      """import oskit.fs.*
         |main() -> int
         |    tfs_init()
         |    var ino = 0
@@ -199,7 +199,7 @@ class TFSDirTests extends TFSTestHelpers {
 
   "tfs_readdir past end returns -1" in {
     val (_, output) = runTFS(
-      """import tfs.*
+      """import oskit.fs.*
         |main() -> int
         |    tfs_init()
         |    var ino = 0

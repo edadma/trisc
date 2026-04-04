@@ -1,0 +1,249 @@
+module posix.string
+
+/*
+ * string.sysl — String and memory operations (<string.h>)
+ *
+ * Null-terminated byte string functions and raw memory operations.
+ * No OS dependency — usable in bare-metal programs.
+ */
+
+/* Return the length of null-terminated string s. */
+strlen(s: *byte) -> int
+    var i = 0
+
+    while s[i] != 0 do i++
+
+    i
+
+/* Compare two strings. Returns <0, 0, or >0. */
+strcmp(a: *byte, b: *byte) -> int
+    while *a != 0 && *b != 0
+        val d = *a - *b
+
+        if d != 0 then return d
+
+        a++
+        b++
+
+    *a - *b
+
+/* Compare at most n bytes of two strings. */
+strncmp(a: *byte, b: *byte, n: int) -> int
+    var i = 0
+
+    while i < n && *a != 0 && *b != 0
+        val d = *a - *b
+
+        if d != 0 then return d
+
+        a++
+        b++
+        i++
+
+    if i == n then 0
+    else *a - *b
+
+/* Copy src to dst, including the null terminator. */
+strcpy(dst: *byte, src: *byte) -> *byte
+    val ret = dst
+
+    for var p = src; *p != 0; p++ do *dst++ = *p
+
+    *dst = 0
+    ret
+
+/* Copy at most n bytes from src to dst, padding with nulls. */
+strncpy(dst: *byte, src: *byte, n: int) -> *byte
+    val ret = dst
+    var i = 0
+
+    while i < n && *src != 0
+        *dst++ = *src++
+        i++
+
+    while i < n
+        *dst++ = 0
+        i++
+
+    ret
+
+/* Append src to the end of dst. */
+strcat(dst: *byte, src: *byte) -> *byte
+    val ret = dst
+
+    while *dst != 0 do dst++
+
+    for var p = src; *p != 0; p++ do *dst++ = *p
+
+    *dst = 0
+    ret
+
+/* Append at most n bytes of src to dst. */
+strncat(dst: *byte, src: *byte, n: int) -> *byte
+    val ret = dst
+
+    while *dst != 0 do dst++
+
+    var i = 0
+
+    while i < n && *src != 0
+        *dst++ = *src++
+        i++
+
+    *dst = 0
+    ret
+
+/* Return index of first occurrence of c in s, or -1. */
+strchr(s: *byte, c: int) -> int
+    for var i = 0; s[i] != 0; i++
+        if s[i] == c then return i
+
+    -1
+
+/* Return index of last occurrence of c in s, or -1. */
+strrchr(s: *byte, c: int) -> int
+    var result = -1
+
+    for var i = 0; s[i] != 0; i++
+        if s[i] == c then result = i
+
+    result
+
+/* Find first occurrence of needle in haystack. Returns pointer or null. */
+strstr(haystack: *byte, needle: *byte) -> *byte
+    if *needle == 0 then return haystack
+
+    while *haystack != 0
+        var h = haystack
+        var n = needle
+
+        while *h != 0 && *n != 0 && *h == *n
+            h++
+            n++
+
+        if *n == 0 then return haystack
+
+        haystack++
+
+    *byte(0)
+
+/* Return length of initial segment of s containing only bytes in accept. */
+strspn(s: *byte, accept: *byte) -> int
+    var i = 0
+
+    while s[i] != 0
+        var found = false
+
+        for var p = accept; *p != 0; p++
+            if s[i] == *p
+                found = true
+                break
+
+        if !found then return i
+
+        i++
+
+    i
+
+/* Return length of initial segment of s containing no bytes in reject. */
+strcspn(s: *byte, reject: *byte) -> int
+    var i = 0
+
+    while s[i] != 0
+        for var p = reject; *p != 0; p++
+            if s[i] == *p then return i
+
+        i++
+
+    i
+
+/* Find first occurrence in s of any byte in accept. Returns pointer or null. */
+strpbrk(s: *byte, accept: *byte) -> *byte
+    while *s != 0
+        for var p = accept; *p != 0; p++
+            if *s == *p then return s
+
+        s++
+
+    *byte(0)
+
+/* Tokenize string. First call passes the string, subsequent calls pass null. */
+var _strtok_pos: *byte = *byte(0)
+
+strtok(s: *byte, delim: *byte) -> *byte
+    var p = if s != *byte(0) then s else _strtok_pos
+
+    if p == *byte(0) then return *byte(0)
+
+    // Skip leading delimiters
+    while *p != 0
+        var is_delim = false
+
+        for var d = delim; *d != 0; d++
+            if *p == *d
+                is_delim = true
+                break
+
+        if !is_delim then break
+
+        p++
+
+    if *p == 0
+        _strtok_pos = *byte(0)
+        return *byte(0)
+
+    val token = p
+
+    // Find end of token
+    while *p != 0
+        for var d = delim; *d != 0; d++
+            if *p == *d
+                *p = 0
+                _strtok_pos = p + 1
+                return token
+
+        p++
+
+    _strtok_pos = *byte(0)
+    token
+
+/* Fill n bytes of dst with value v. */
+memset(dst: *byte, v: int, n: int) -> *byte
+    for var i = 0; i < n; i++ do dst[i] = v
+
+    dst
+
+/* Copy n bytes from src to dst (must not overlap). */
+memcpy(dst: *byte, src: *byte, n: int) -> *byte
+    for var i = 0; i < n; i++ do dst[i] = src[i]
+
+    dst
+
+/* Copy n bytes from src to dst (handles overlapping regions). */
+memmove(dst: *byte, src: *byte, n: int) -> *byte
+    if dst < src
+        for var i = 0; i < n; i++ do dst[i] = src[i]
+    else if dst > src
+        var i = n
+
+        while i > 0
+            i--
+            dst[i] = src[i]
+
+    dst
+
+/* Compare n bytes of a and b. Returns <0, 0, or >0. */
+memcmp(a: *byte, b: *byte, n: int) -> int
+    for var i = 0; i < n; i++
+        val d = a[i] - b[i]
+
+        if d != 0 then return d
+
+    0
+
+/* Find first occurrence of c in the first n bytes of s. Returns pointer or null. */
+memchr(s: *byte, c: int, n: int) -> *byte
+    for var i = 0; i < n; i++
+        if s[i] == c then return s + i
+
+    *byte(0)

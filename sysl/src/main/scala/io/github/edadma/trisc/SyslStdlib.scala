@@ -1,10 +1,29 @@
 package io.github.edadma.trisc
 
 import scala.collection.mutable
+import scala.util.chaining.*
 import SyslType.*
 
 object SyslStdlib:
   import Value.*
+
+  private val IMMORTAL_RC = -1
+
+  // Helper: extract Scala string from any string value
+  private def asString(v: Value): String = v match
+    case RefStringVal(bytes, len, _) => new String(bytes, 0, len, "UTF-8")
+    case StrVal(s) => s // legacy fallback
+    case _ => throw RuntimeException(s"expected string, got $v")
+
+  // Helper: create a ref-counted string (heap-allocated, refcount=1)
+  private def mkString(s: String): RefStringVal =
+    val bytes = s.getBytes("UTF-8")
+    RefStringVal(bytes, bytes.length, new java.util.concurrent.atomic.AtomicInteger(1))
+
+  // Helper: create an immortal string (literal, refcount=-1)
+  private def mkStaticString(s: String): RefStringVal =
+    val bytes = s.getBytes("UTF-8")
+    RefStringVal(bytes, bytes.length, new java.util.concurrent.atomic.AtomicInteger(IMMORTAL_RC))
 
   val modules: Set[String] = Set("std/io", "std/fs", "std/process", "std/string")
 
@@ -90,7 +109,7 @@ object SyslStdlib:
   private def ioBuiltins(ctx: StdlibContext): Map[String, List[Value] => Value] = Map(
     // Constants as "functions" that return their value — will be registered as globals
     "open" -> (args => {
-      val path = args.head.asInstanceOf[StrVal].s
+      val path = args.head.pipe(asString)
       val flags = args(1).asInstanceOf[IntVal].n.toInt
       try
         val mode = if (flags & O_RDWR) != 0 then "rw"
@@ -111,19 +130,22 @@ object SyslStdlib:
     }),
     "read" -> (args => {
       val fd = args.head.asInstanceOf[IntVal].n.toInt
-      val buf = args(1) // ArrVal or PtrVal
+      val buf = args(1)
       val count = args(2).asInstanceOf[IntVal].n.toInt
+      val (cells, off) = buf match
+        case ArrVal(c, o) => (c, o)
+        case PtrVal(ArrayPtr(c, o)) => (c, o)
+        case _ => throw RuntimeException("read: expected array or array pointer for buffer")
       if fd == 0 then
         // stdin
         var bytesRead = 0
-        val arr = buf.asInstanceOf[ArrVal]
         var i = 0
         while i < count do
           val b = ctx.input()
           if b == -1 then
             i = count // break
           else
-            arr.cells(arr.offset + bytesRead).value = IntVal(b.toLong)
+            cells(off + bytesRead).value = IntVal(b.toLong)
             bytesRead += 1
             i += 1
         IntVal(bytesRead)
@@ -134,20 +156,23 @@ object SyslStdlib:
               val bytes = new Array[Byte](count)
               val n = raf.read(bytes)
               if n > 0 then
-                val arr = buf.asInstanceOf[ArrVal]
                 for i <- 0 until n do
-                  arr.cells(arr.offset + i).value = IntVal(bytes(i) & 0xff)
+                  cells(off + i).value = IntVal(bytes(i) & 0xff)
               IntVal(n)
             catch case _: Exception => IntVal(-1)
           case None => IntVal(-1)
     }),
     "write" -> (args => {
       val fd = args.head.asInstanceOf[IntVal].n.toInt
-      val buf = args(1).asInstanceOf[ArrVal]
+      val buf = args(1)
       val count = args(2).asInstanceOf[IntVal].n.toInt
+      val (cells, off) = buf match
+        case ArrVal(c, o) => (c, o)
+        case PtrVal(ArrayPtr(c, o)) => (c, o)
+        case _ => throw RuntimeException("write: expected array or array pointer for buffer")
       val bytes = new Array[Byte](count)
       for i <- 0 until count do
-        bytes(i) = buf.cells(buf.offset + i).value.asInstanceOf[IntVal].n.toByte
+        bytes(i) = cells(off + i).value.asInstanceOf[IntVal].n.toByte
       if fd == 1 || fd == 2 then
         ctx.output(new String(bytes, "UTF-8"))
         IntVal(count)
@@ -162,7 +187,7 @@ object SyslStdlib:
     }),
     "write_string" -> (args => {
       val fd = args.head.asInstanceOf[IntVal].n.toInt
-      val s = args(1).asInstanceOf[StrVal].s
+      val s = args(1).pipe(asString)
       if fd == 1 || fd == 2 then
         ctx.output(s)
         IntVal(s.getBytes("UTF-8").length)
@@ -186,15 +211,15 @@ object SyslStdlib:
           val b = ctx.input()
           if b == -1 || b == '\n' then done = true
           else sb += b.toChar
-        StrVal(sb.toString)
+        mkString(sb.toString)
       else
         ctx.getFile(fd) match
           case Some(raf) =>
             try
               val line = raf.readLine()
-              if line == null then StrVal("") else StrVal(line)
-            catch case _: Exception => StrVal("")
-          case None => StrVal("")
+              if line == null then mkString("") else mkString(line)
+            catch case _: Exception => mkString("")
+          case None => mkString("")
     }),
     "seek" -> (args => {
       val fd = args.head.asInstanceOf[IntVal].n.toInt
@@ -277,14 +302,14 @@ object SyslStdlib:
 
   private def mkDirEntry(file: java.io.File): ArrVal =
     val cells = Array(
-      new Cell(StrVal(file.getName)),
+      new Cell(mkString(file.getName)),
       new Cell(IntVal(if file.isDirectory then 1L else 0L)),
     )
     ArrVal(cells, 0)
 
   private def fsBuiltins(ctx: StdlibContext): Map[String, List[Value] => Value] = Map(
     "stat" -> (args => {
-      val path = args.head.asInstanceOf[StrVal].s
+      val path = args.head.pipe(asString)
       val file = new java.io.File(path)
       if file.exists() then mkFileStat(file)
       else
@@ -292,7 +317,7 @@ object SyslStdlib:
         ArrVal(Array.fill(5)(new Cell(IntVal(0))), 0)
     }),
     "readdir" -> (args => {
-      val path = args.head.asInstanceOf[StrVal].s
+      val path = args.head.pipe(asString)
       val dir = new java.io.File(path)
       if dir.isDirectory then
         val files = dir.listFiles()
@@ -303,41 +328,41 @@ object SyslStdlib:
       else SliceVal(Array.empty, 0, 0, 0)
     }),
     "exists" -> (args => {
-      val path = args.head.asInstanceOf[StrVal].s
+      val path = args.head.pipe(asString)
       IntVal(if new java.io.File(path).exists() then 1L else 0L)
     }),
     "is_dir" -> (args => {
-      val path = args.head.asInstanceOf[StrVal].s
+      val path = args.head.pipe(asString)
       IntVal(if new java.io.File(path).isDirectory then 1L else 0L)
     }),
     "mkdir" -> (args => {
-      val path = args.head.asInstanceOf[StrVal].s
+      val path = args.head.pipe(asString)
       IntVal(if new java.io.File(path).mkdir() then 0 else -1)
     }),
     "mkdirs" -> (args => {
-      val path = args.head.asInstanceOf[StrVal].s
+      val path = args.head.pipe(asString)
       IntVal(if new java.io.File(path).mkdirs() then 0 else -1)
     }),
     "remove" -> (args => {
-      val path = args.head.asInstanceOf[StrVal].s
+      val path = args.head.pipe(asString)
       IntVal(if new java.io.File(path).delete() then 0 else -1)
     }),
     "rename" -> (args => {
-      val old = args.head.asInstanceOf[StrVal].s
-      val newName = args(1).asInstanceOf[StrVal].s
+      val old = args.head.pipe(asString)
+      val newName = args(1).pipe(asString)
       IntVal(if new java.io.File(old).renameTo(new java.io.File(newName)) then 0 else -1)
     }),
-    "getcwd" -> (_ => StrVal(System.getProperty("user.dir"))),
+    "getcwd" -> (_ => mkString(System.getProperty("user.dir"))),
     "read_file" -> (args => {
-      val path = args.head.asInstanceOf[StrVal].s
+      val path = args.head.pipe(asString)
       try
         val bytes = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(path))
-        StrVal(new String(bytes, "UTF-8"))
-      catch case _: Exception => StrVal("")
+        mkString(new String(bytes, "UTF-8"))
+      catch case _: Exception => mkString("")
     }),
     "write_file" -> (args => {
-      val path = args.head.asInstanceOf[StrVal].s
-      val data = args(1).asInstanceOf[StrVal].s
+      val path = args.head.pipe(asString)
+      val data = args(1).pipe(asString)
       try
         java.nio.file.Files.write(java.nio.file.Paths.get(path), data.getBytes("UTF-8"))
         IntVal(0)
@@ -363,15 +388,15 @@ object SyslStdlib:
       throw new ExitException(code)
     }),
     "getenv" -> (args => {
-      val name = args.head.asInstanceOf[StrVal].s
+      val name = args.head.pipe(asString)
       val v = System.getenv(name)
-      StrVal(if v == null then "" else v)
+      mkString(if v == null then "" else v)
     }),
     "argc" -> (_ => IntVal(ctx.argv.length)),
     "argv" -> (args => {
       val i = args.head.asInstanceOf[IntVal].n.toInt
-      if i >= 0 && i < ctx.argv.length then StrVal(ctx.argv(i))
-      else StrVal("")
+      if i >= 0 && i < ctx.argv.length then mkString(ctx.argv(i))
+      else mkString("")
     }),
   )
 
@@ -396,71 +421,71 @@ object SyslStdlib:
 
   private def stringBuiltins(ctx: StdlibContext): Map[String, List[Value] => Value] = Map(
     "length" -> (args => {
-      val s = args.head.asInstanceOf[StrVal].s
+      val s = args.head.pipe(asString)
       IntVal(s.length) // character count, not byte count
     }),
     "concat" -> (args => {
-      val a = args.head.asInstanceOf[StrVal].s
-      val b = args(1).asInstanceOf[StrVal].s
-      StrVal(a + b)
+      val a = args.head.pipe(asString)
+      val b = args(1).pipe(asString)
+      mkString(a + b)
     }),
     "substr" -> (args => {
-      val s = args.head.asInstanceOf[StrVal].s
+      val s = args.head.pipe(asString)
       val start = args(1).asInstanceOf[IntVal].n.toInt
       val length = args(2).asInstanceOf[IntVal].n.toInt
-      try StrVal(s.substring(start, (start + length).min(s.length)))
-      catch case _: Exception => StrVal("")
+      try mkString(s.substring(start, (start + length).min(s.length)))
+      catch case _: Exception => mkString("")
     }),
     "index_of" -> (args => {
-      val s = args.head.asInstanceOf[StrVal].s
-      val sub = args(1).asInstanceOf[StrVal].s
+      val s = args.head.pipe(asString)
+      val sub = args(1).pipe(asString)
       IntVal(s.indexOf(sub))
     }),
     "starts_with" -> (args => {
-      val s = args.head.asInstanceOf[StrVal].s
-      val prefix = args(1).asInstanceOf[StrVal].s
+      val s = args.head.pipe(asString)
+      val prefix = args(1).pipe(asString)
       IntVal(if s.startsWith(prefix) then 1L else 0L)
     }),
     "ends_with" -> (args => {
-      val s = args.head.asInstanceOf[StrVal].s
-      val suffix = args(1).asInstanceOf[StrVal].s
+      val s = args.head.pipe(asString)
+      val suffix = args(1).pipe(asString)
       IntVal(if s.endsWith(suffix) then 1L else 0L)
     }),
     "trim" -> (args => {
-      val s = args.head.asInstanceOf[StrVal].s
-      StrVal(s.trim)
+      val s = args.head.pipe(asString)
+      mkString(s.trim)
     }),
     "split" -> (args => {
-      val s = args.head.asInstanceOf[StrVal].s
-      val delim = args(1).asInstanceOf[StrVal].s
+      val s = args.head.pipe(asString)
+      val delim = args(1).pipe(asString)
       val parts = if s.isEmpty then Array.empty[String]
       else s.split(java.util.regex.Pattern.quote(delim), -1)
-      val cells = parts.map(p => new Cell(StrVal(p)))
+      val cells = parts.map(p => new Cell(mkString(p)))
       SliceVal(cells, 0, cells.length, cells.length)
     }),
     "to_int" -> (args => {
-      val s = args.head.asInstanceOf[StrVal].s
+      val s = args.head.pipe(asString)
       try IntVal(s.trim.toLong)
       catch case _: Exception => IntVal(0)
     }),
     "from_int" -> (args => {
       val n = args.head.asInstanceOf[IntVal].n
-      StrVal(n.toString)
+      mkString(n.toString)
     }),
     "char_at" -> (args => {
-      val s = args.head.asInstanceOf[StrVal].s
+      val s = args.head.pipe(asString)
       val i = args(1).asInstanceOf[IntVal].n.toInt
       if i >= 0 && i < s.length then IntVal(s.charAt(i).toLong)
       else IntVal(-1)
     }),
     "equal" -> (args => {
-      val a = args.head.asInstanceOf[StrVal].s
-      val b = args(1).asInstanceOf[StrVal].s
+      val a = args.head.pipe(asString)
+      val b = args(1).pipe(asString)
       IntVal(if a == b then 1L else 0L)
     }),
     "contains" -> (args => {
-      val s = args.head.asInstanceOf[StrVal].s
-      val sub = args(1).asInstanceOf[StrVal].s
+      val s = args.head.pipe(asString)
+      val sub = args(1).pipe(asString)
       IntVal(if s.contains(sub) then 1L else 0L)
     }),
   )

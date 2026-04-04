@@ -5,8 +5,10 @@ case class TProgram(decls: List[TDecl])
 
 // Declarations
 trait TDecl
+case class TModuleDecl(path: List[String]) extends TDecl
 case class TImportDecl(path: String) extends TDecl
 case class TExternFuncDecl(name: String, params: List[SyslType], returnType: SyslType) extends TDecl
+case class TExternVarDecl(name: String, typ: SyslType) extends TDecl
 case class TFunDecl(name: String, params: List[TParam], returnType: SyslType, body: TFunBody, isPrivate: Boolean = false) extends TDecl
 case class TVarDecl(name: String, typ: SyslType, init: TExpr, isPrivate: Boolean = false) extends TDecl
 case class TStructDecl(name: String, fields: List[(String, SyslType)]) extends TDecl
@@ -48,7 +50,7 @@ case class TIntLit(value: Long, typ: SyslType) extends TExpr
 case class TFloatLit(value: Double, typ: SyslType) extends TExpr
 case class TBoolLit(value: Boolean, typ: SyslType) extends TExpr
 case class TStringLit(value: String, typ: SyslType) extends TExpr
-case class TArrayDecl(size: Int, elemType: String, typ: SyslType) extends TExpr
+case class TArrayDecl(size: Int, typ: SyslType) extends TExpr
 case class TArrayLit(elements: List[TExpr], typ: SyslType) extends TExpr
 case class TVarRef(name: String, typ: SyslType) extends TExpr
 case class TAddrOf(name: String, typ: SyslType) extends TExpr
@@ -77,5 +79,7 @@ case class TIndirectCall(callee: TExpr, args: List[TExpr], typ: SyslType) extend
 case class TFuncRef(name: String, typ: SyslType) extends TExpr
 case class TCast(expr: TExpr, typ: SyslType) extends TExpr
 case class TIfExpr(cond: TExpr, thenBody: List[TStmt], elseBody: Option[List[TStmt]], typ: SyslType) extends TExpr
+case class TNew(structType: SyslType.StructType, args: List[TExpr]) extends TExpr { def typ: SyslType = SyslType.RefType(structType) }
+case class TNewArray(elemType: SyslType, size: TExpr) extends TExpr { def typ: SyslType = SyslType.RefType(SyslType.SliceType(elemType)) }
 case class TLen(expr: TExpr, typ: SyslType) extends TExpr
 case class TCap(expr: TExpr, typ: SyslType) extends TExpr

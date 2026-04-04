@@ -149,7 +149,7 @@ class LiterateParserTests extends AnyFreeSpec with Matchers:
   }
 
   "services.lsysl round-trip" in {
-    val source = scala.io.Source.fromFile("tos/services.lsysl").mkString
+    val source = scala.io.Source.fromFile("oskit/services/services.lsysl").mkString
     val doc = parser.parse(source)
     val tangled = LiterateRenderer.tangle(doc)
     info(s"codeBlocks: ${doc.codeBlocks.size}")

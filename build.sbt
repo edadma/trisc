@@ -127,7 +127,7 @@ lazy val cpu = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .settings(
     name := "trisc-cpu",
     libraryDependencies ++= Seq(
-      "io.github.edadma" %%% "logger" % "0.0.9",
+      "io.github.edadma" %%% "logger" % "0.0.11",
       "io.github.edadma" %%% "cross_platform" % "0.1.3",
     ),
   )

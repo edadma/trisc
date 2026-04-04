@@ -1,0 +1,62 @@
+TOS Recursive Mutex
+
+A mutex that can be locked multiple times by the same thread.
+The thread must unlock the same number of times before the
+mutex becomes available to other threads.
+
+A recursive mutex is a struct with an owner, lock count, and
+a semaphore for cross-thread contention.
+
+    module oskit
+
+    struct RMutex
+        owner: int
+        count: int
+        sem: i64
+
+rmutex_sem — Helper to get the semaphore field address.
+
+    rmutex_sem(m: i64) -> *i64
+        *i64(m + 8)
+
+    rmutex_init(m: *RMutex)
+        m.owner = -1
+        m.count = 0
+        val addr: i64 = i64(m)
+        sem_init(rmutex_sem(addr), 1)
+
+If the current thread already owns the mutex, increments the
+count. Otherwise, waits on the semaphore and takes ownership.
+
+    rmutex_lock(m: *RMutex)
+        val me = thread_id()
+        if m.owner == me
+            m.count += 1
+        else
+            val addr: i64 = i64(m)
+            sem_wait(rmutex_sem(addr))
+            m.owner = me
+            m.count = 1
+
+Decrements the count. When count reaches 0, releases ownership
+and posts the semaphore so another thread can acquire.
+
+    rmutex_unlock(m: *RMutex)
+        m.count -= 1
+        if m.count == 0
+            m.owner = -1
+            val addr: i64 = i64(m)
+            sem_post(rmutex_sem(addr))
+
+    rmutex_trylock(m: *RMutex) -> int
+        val me = thread_id()
+        if m.owner == me
+            m.count += 1
+            return 1
+        val addr: i64 = i64(m)
+        val got = sem_trywait(rmutex_sem(addr))
+        if got != 0
+            m.owner = me
+            m.count = 1
+            return 1
+        0

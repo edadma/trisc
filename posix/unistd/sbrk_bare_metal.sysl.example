@@ -1,0 +1,30 @@
+/*
+ * sbrk implementation for bare metal
+ *
+ * The heap region is defined by the linker script.
+ * _HEAP_START and _HEAP_END are linker symbols marking the
+ * heap boundaries.
+ *
+ * sbrk grows within this fixed region and returns -1 when exhausted.
+ */
+
+extern _HEAP_START: *i8
+extern _HEAP_END: *i8
+
+var _brk: *i8 = *i8(0)
+var _brk_initialized = false
+
+sbrk(increment: int) -> *i8
+    if !_brk_initialized
+        _brk = _HEAP_START
+        _brk_initialized = true
+
+    if increment == 0 then return _brk
+
+    val old_brk = _brk
+    val new_brk = old_brk + increment
+
+    if i64(new_brk) > i64(_HEAP_END) then return *i8(-1)
+
+    _brk = new_brk
+    old_brk

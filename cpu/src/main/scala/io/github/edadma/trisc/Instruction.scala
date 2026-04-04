@@ -455,6 +455,51 @@ class FPOW(a: Int, b: Int) extends RRInstruction(a, b):
 
   def apply(cpu: CPU): Unit = cpu.r(a).write(math.pow(cpu.r(a).readf, cpu.r(b).readf))
 
+class FSIN(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "fsin"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(math.sin(cpu.r(b).readf))
+
+class FCOS(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "fcos"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(math.cos(cpu.r(b).readf))
+
+class FTAN(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "ftan"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(math.tan(cpu.r(b).readf))
+
+class FASIN(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "fasin"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(math.asin(cpu.r(b).readf))
+
+class FACOS(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "facos"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(math.acos(cpu.r(b).readf))
+
+class FATAN(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "fatan"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(math.atan(cpu.r(b).readf))
+
+class FATAN2(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "fatan2"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(math.atan2(cpu.r(a).readf, cpu.r(b).readf))
+
+class FEXP(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "fexp"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(math.exp(cpu.r(b).readf))
+
+class FLOG(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "flog"
+
+  def apply(cpu: CPU): Unit = cpu.r(a).write(math.log(cpu.r(b).readf))
+
 // MMU instructions (RR 01 sub-format, supervisor only)
 
 class TLBI(a: Int, b: Int) extends RRInstruction(a, b):

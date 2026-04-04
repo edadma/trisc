@@ -1,0 +1,15 @@
+[project]
+name = "tos"
+version = "0.1.0"
+description = "Tiny preemptive OS for TRISC"
+authors = ["Ed de Almeida"]
+sysl = "0.1.0"
+
+sources = ["posix/", "tos/"]
+
+[config]
+BARE_METAL = true
+ARCH = "trisc"
+WORD_SIZE = 64
+HAS_FPU = true
+HAS_MMU = false

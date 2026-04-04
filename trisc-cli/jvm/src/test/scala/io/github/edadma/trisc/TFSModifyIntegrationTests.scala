@@ -13,7 +13,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
 
   "tfs_unlink removes file" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -39,7 +39,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
 
   "tfs_unlink nonexistent returns -1" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -60,7 +60,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
 
   "tfs_rmdir removes empty directory" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -82,7 +82,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
 
   "tfs_rmdir rejects non-empty directory" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -106,7 +106,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
 
   "tfs_rename moves file" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -142,7 +142,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
 
   "tfs_readdir lists directory entries" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -174,7 +174,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
 
   "tfs_link creates hard link" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -211,7 +211,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
 
   "tfs_link rejects directory" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -234,7 +234,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
 
   "tfs_chmod changes permissions" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -262,7 +262,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
 
   "tfs_chmod preserves file type" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -288,7 +288,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
 
   "tfs_chown changes owner and group" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -317,7 +317,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
 
   "tfs_freeblocks and tfs_freeinodes" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -350,7 +350,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
 
   "tfs_mknod creates device node" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -379,7 +379,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
 
   "tfs_truncate shrinks file" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()
@@ -414,7 +414,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
 
   "tfs_truncate to zero" in {
     val (_, output) = runTFS(
-      s"""import tfs.*
+      s"""import oskit.fs.*
          |
          |main() -> int
          |    tfs_init()

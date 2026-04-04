@@ -1,0 +1,84 @@
+TOS Keyboard Driver
+
+Handles keyboard IRQ 1. Reads USB HID scancodes from the device
+and stores them in a ring buffer. Provides getkey/kbhit for
+syscall access.
+
+Device registers:
+- 0x100004 + 0 = STATUS (bit 0 = event ready)
+- 0x100004 + 1 = SCANCODE (read consumes event, clears IRQ)
+- 0x100004 + 2 = FLAGS (bit 0 = press/release)
+- 0x100004 + 3 = MODIFIERS (shift/ctrl/alt/meta bitmask)
+
+
+    module oskit
+
+    val KB_BASE = 0x100004
+    val KB_IRQ = 1
+
+    extern register_irq(irq: int, handler: i64)
+
+Ring buffer for keyboard events. Each event is stored as a packed
+32-bit value: scancode(8) | flags(8) | modifiers(8) | reserved(8).
+
+    val KB_BUF_SIZE = 32
+    var kb_buf: [32]int
+    var kb_head = 0
+    var kb_tail = 0
+    var kb_count = 0
+    var kb_notify_tid = -1
+
+    keyboard_set_notify(tid: int)
+        kb_notify_tid = tid
+
+    keyboard_init()
+        register_irq(KB_IRQ, keyboard_handler)
+        // Drain any events that arrived before handler was registered
+        keyboard_handler()
+
+keyboard_handler -- Called by the generic IRQ dispatcher.
+
+Reads all pending events from the device and buffers them.
+Does NOT context-switch -- returns to the interrupted thread.
+
+    keyboard_handler()
+        var status: *i8 = *i8(KB_BASE)
+        var scancode: *i8 = *i8(KB_BASE + 1)
+        var flags: *i8 = *i8(KB_BASE + 2)
+        var mods: *i8 = *i8(KB_BASE + 3)
+        var got_events = 0
+        while (*status & 1) != 0
+            val sc = *scancode
+            val fl = *flags
+            val md = *mods
+            if kb_count < KB_BUF_SIZE
+                kb_buf[kb_tail] = (sc << 24) | (fl << 16) | (md << 8)
+                kb_tail = (kb_tail + 1) % KB_BUF_SIZE
+                kb_count += 1
+                got_events = 1
+        // Notify registered listener if events were buffered
+        if got_events == 1
+            if kb_notify_tid >= 0
+                notify_send(kb_notify_tid, 1)
+
+    kb_has_key() -> int
+        if kb_count > 0
+            return 1
+        0
+
+    kb_read_key() -> int
+        if kb_count == 0
+            return 0
+        val evt = kb_buf[kb_head]
+        kb_head = (kb_head + 1) % KB_BUF_SIZE
+        kb_count -= 1
+        evt
+
+    kb_scancode(evt: int) -> int
+        (evt >> 24) & 0xFF
+
+    kb_is_press(evt: int) -> int
+        (evt >> 16) & 1
+
+    kb_modifiers(evt: int) -> int
+        (evt >> 8) & 0xFF

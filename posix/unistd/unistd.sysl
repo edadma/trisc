@@ -1,0 +1,19 @@
+module posix.unistd
+
+/*
+ * unistd.sysl — Standard symbolic constants and types (<unistd.h>)
+ *
+ * Low-level I/O primitives. These are extern — the actual implementation
+ * is provided by the platform (TOS syscalls, bare metal drivers, etc.).
+ */
+
+extern read(fd: int, buf: *byte, n: int) -> int
+extern write(fd: int, buf: *byte, n: int) -> int
+extern open(path: *byte, flags: int) -> int
+extern close(fd: int) -> int
+extern lseek(fd: int, offset: int, whence: int) -> int
+extern sbrk(increment: int) -> *i8
+
+val STDIN_FILENO = 0
+val STDOUT_FILENO = 1
+val STDERR_FILENO = 2

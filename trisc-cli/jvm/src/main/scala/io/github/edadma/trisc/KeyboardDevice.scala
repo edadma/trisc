@@ -52,6 +52,11 @@ class KeyboardDevice(val base: Long, intc: InterruptController, irq: Int) extend
       currentFlags = 0
       currentModifiers = 0
 
+  // Latched copies of the consumed event's flags/mods, preserved
+  // across the advance() that pre-loads the next event after SCANCODE read.
+  private var latchedFlags: Int = 0
+  private var latchedModifiers: Int = 0
+
   def readByte(addr: Long): Int =
     (addr - base).toInt match
       case STATUS =>
@@ -60,13 +65,15 @@ class KeyboardDevice(val base: Long, intc: InterruptController, irq: Int) extend
       case SCANCODE =>
         if !ready then advance()
         val sc = currentScancode
+        latchedFlags = currentFlags
+        latchedModifiers = currentModifiers
         ready = false // consume this event
         intc.lower(irq)
         // Pre-load next event so STATUS is immediately correct
         advance()
         sc
-      case FLAGS => currentFlags
-      case MODIFIERS => currentModifiers
+      case FLAGS => latchedFlags
+      case MODIFIERS => latchedModifiers
       case _ => 0
 
   def writeByte(addr: Long, data: Long): Unit =

@@ -1,0 +1,27 @@
+TOS Mutexes
+
+Binary locks built on ll/sc atomic instructions.
+A mutex is a single i64: 0 = unlocked, 1 = locked.
+Threads that cannot acquire the mutex yield and retry.
+
+    module oskit
+
+    extern atomic_dec_if_positive(addr: *i64) -> i64
+    extern atomic_inc(addr: *i64)
+
+    mutex_init(m: *i64)
+        *m = 1
+
+The mutex is modeled as a binary semaphore: value 1 means
+unlocked (one permit available), value 0 means locked.
+mutex_lock decrements atomically; mutex_unlock increments.
+
+    mutex_lock(m: *i64)
+        while atomic_dec_if_positive(m) == 0
+            yield()
+
+    mutex_unlock(m: *i64)
+        atomic_inc(m)
+
+    mutex_trylock(m: *i64) -> i64
+        atomic_dec_if_positive(m)

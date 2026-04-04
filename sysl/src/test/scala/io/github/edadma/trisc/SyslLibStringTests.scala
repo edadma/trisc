@@ -2,14 +2,16 @@ package io.github.edadma.trisc
 
 class SyslLibStringTests extends SyslTestHelpers {
 
-  private def readLsysl(path: String): String =
-    val raw = scala.io.Source.fromFile(path).mkString
-    val doc = new LiterateParser().parse(raw)
-    LiterateRenderer.tangle(doc)
+  val libs: Map[String, String] = Map(
+    "posix/string/string" -> readSysl("posix/string/string.sysl"),
+    "posix/stdlib/stdlib" -> readSysl("posix/stdlib/stdlib.sysl"),
+  )
 
-  val stringLib: String = readLsysl("lib/string.lsysl")
-
-  private def evalWith(main: String): Long = eval(stringLib + "\n" + main)
+  private def evalWith(main: String): Long = evalWithLibs(libs,
+    s"""import posix.string.*
+       |import posix.stdlib.*
+       |$main
+       |""".stripMargin)
 
   // ===== strcmp =====
 
@@ -32,14 +34,7 @@ class SyslLibStringTests extends SyslTestHelpers {
 
   "strcmp a less" in {
     evalWith(
-      """sign(x: int) -> int
-        |    if x < 0
-        |        return -1
-        |    if x > 0
-        |        return 1
-        |    0
-        |
-        |main() -> int
+      """main() -> int
         |    a: [4]byte
         |    b: [4]byte
         |    a[0] = 'a'
@@ -56,14 +51,7 @@ class SyslLibStringTests extends SyslTestHelpers {
 
   "strcmp a greater" in {
     evalWith(
-      """sign(x: int) -> int
-        |    if x < 0
-        |        return -1
-        |    if x > 0
-        |        return 1
-        |    0
-        |
-        |main() -> int
+      """main() -> int
         |    a: [4]byte
         |    b: [4]byte
         |    a[0] = 'z'
@@ -80,14 +68,7 @@ class SyslLibStringTests extends SyslTestHelpers {
 
   "strcmp different lengths" in {
     evalWith(
-      """sign(x: int) -> int
-        |    if x < 0
-        |        return -1
-        |    if x > 0
-        |        return 1
-        |    0
-        |
-        |main() -> int
+      """main() -> int
         |    a: [3]byte
         |    b: [4]byte
         |    a[0] = 'a'
@@ -122,14 +103,7 @@ class SyslLibStringTests extends SyslTestHelpers {
 
   "strncmp different within n" in {
     evalWith(
-      """sign(x: int) -> int
-        |    if x < 0
-        |        return -1
-        |    if x > 0
-        |        return 1
-        |    0
-        |
-        |main() -> int
+      """main() -> int
         |    a: [4]byte
         |    b: [4]byte
         |    a[0] = 'a'

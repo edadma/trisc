@@ -1,0 +1,94 @@
+module posix.stdio
+
+import posix.unistd.*
+
+/*
+ * stdio.sysl — Standard I/O (<stdio.h>)
+ *
+ * Character and string I/O built on top of unistd read/write.
+ * No FILE buffering yet — all operations are unbuffered.
+ */
+
+val EOF = -1
+
+/* Write a character to stdout. Returns the character written, or EOF on error. */
+putchar(c: int) -> int
+    var b: [1]byte
+
+    b[0] = byte(c)
+
+    if write(STDOUT_FILENO, b, 1) <= 0 then return EOF
+
+    c
+
+/* Read a character from stdin. Returns the character read, or EOF on end/error. */
+getchar() -> int
+    var b: [1]byte
+
+    val n = read(STDIN_FILENO, b, 1)
+
+    if n <= 0 then EOF
+    else int(b[0])
+
+/* Write a string followed by a newline to stdout. Returns non-negative on success, EOF on error. */
+puts(s: *byte) -> int
+    var p = s
+
+    while *p != 0
+        if putchar(int(*p)) == EOF then return EOF
+
+        p++
+
+    putchar(10)
+
+/* Write a string to a file descriptor. Returns non-negative on success, EOF on error. */
+fputs(s: *byte, fd: int) -> int
+    var p = s
+    var len = 0
+
+    while *p != 0
+        len++
+        p++
+
+    if write(fd, s, len) < len then EOF
+    else 0
+
+/* Write a character to a file descriptor. Returns the character written, or EOF on error. */
+fputc(c: int, fd: int) -> int
+    var b: [1]byte
+
+    b[0] = byte(c)
+
+    if write(fd, b, 1) <= 0 then return EOF
+
+    c
+
+/* Read a character from a file descriptor. Returns the character read, or EOF on end/error. */
+fgetc(fd: int) -> int
+    var b: [1]byte
+
+    val n = read(fd, b, 1)
+
+    if n <= 0 then EOF
+    else int(b[0])
+
+/* Read a line from a file descriptor into buf (at most n-1 chars). Null-terminates.
+   Returns buf on success, null on EOF/error. */
+fgets(buf: *byte, n: int, fd: int) -> *byte
+    var i = 0
+
+    while i < n - 1
+        val c = fgetc(fd)
+
+        if c == EOF
+            if i == 0 then return *byte(0)
+
+            break
+
+        buf[i] = byte(c)
+        i++
+
+        if c == 10 then break
+
+    buf[i] = 0
+    buf

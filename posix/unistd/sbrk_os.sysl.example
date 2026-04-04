@@ -1,0 +1,21 @@
+/*
+ * sbrk implementation for a full OS with processes
+ *
+ * Each process has a data segment that can be extended.
+ * sbrk issues a syscall to the kernel to grow the process's
+ * data segment by the requested amount.
+ *
+ * The kernel manages virtual memory and returns -1 if the
+ * process has exhausted its address space or memory limit.
+ */
+
+val SYS_SBRK = 12
+
+sbrk(increment: int) -> *i8
+    asm("
+        ldi r1, {increment}
+        ldi r2, {SYS_SBRK}
+        trap
+    ")
+    // r1 contains the old break on success, or -1 on failure
+    // (the asm block leaves the return value in r1 per ABI)

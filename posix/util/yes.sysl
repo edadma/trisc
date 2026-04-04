@@ -1,0 +1,11 @@
+/* yes — repeatedly output a line */
+import std/process.*
+
+main() -> int
+    val msg = if argc() > 1 then argv(1) else "y"
+
+    while true
+        puts(msg)
+        putc('\n')
+
+    0

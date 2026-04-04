@@ -7,7 +7,7 @@ class DisplayController(
     val base: Long,
     terminal: TerminalEmulator,
     framebuffer: FramebufferWidget,
-    fbMemory: RAM,
+    fb: FramebufferImage,
     displayPanel: JPanel,
     frame: JFrame,
 ) extends Device:
@@ -27,13 +27,13 @@ class DisplayController(
   private var heightHi: Int = 0
   private var heightLo: Int = 24
 
-  // Wire up framebuffer data on creation
-  framebuffer.fbData = fbMemory.bytes
+  // Wire up framebuffer on creation
+  framebuffer.setFramebuffer(fb)
 
   private def width: Int = (widthHi << 8) | widthLo
   private def height: Int = (heightHi << 8) | heightLo
 
-  // Current framebuffer dimensions (updated on commit, used by blitter)
+  // Current framebuffer dimensions (updated on commit, used by blitter/draw engine)
   var currentFBWidth: Int = 640
   var currentFBHeight: Int = 480
 
@@ -60,11 +60,11 @@ class DisplayController(
   private def commit(): Unit =
     val w = width
     val h = height
-    // Clear memory synchronously before the CPU continues drawing
     if mode == 1 then
-      fbMemory.clear()
-      currentFBWidth = w
-      currentFBHeight = h
+      fb.setResolution(w, h)
+      fb.clear()
+      currentFBWidth = fb.width
+      currentFBHeight = fb.height
     val update: Runnable = () => {
       val layout = displayPanel.getLayout.asInstanceOf[CardLayout]
       if mode == 0 then
@@ -72,7 +72,7 @@ class DisplayController(
         terminal.clear(java.awt.Color.GREEN, java.awt.Color.BLACK)
         layout.show(displayPanel, "terminal")
       else
-        framebuffer.setResolution(w, h)
+        framebuffer.setResolution(fb.width, fb.height)
         layout.show(displayPanel, "framebuffer")
       frame.pack()
       frame.setLocationRelativeTo(null)

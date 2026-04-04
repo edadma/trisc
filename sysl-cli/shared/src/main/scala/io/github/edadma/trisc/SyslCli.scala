@@ -173,9 +173,20 @@ object SyslCli:
 
   private def executeCompile(cmd: CompileCommand): Unit =
     val sources = resolveSources(cmd.inputs)
+    val baseDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList match
+      case Nil => List(".")
+      case dirs => dirs
 
-    val driver = new SyslDriver
+    val driver = new SyslDriver(Some(io), baseDirs)
     val result = driver.compile(sources)
+
+    // Write .smeta files for package modules
+    for (path, meta) <- result.packageMetas do
+      val parts = path.split("/")
+      for base <- baseDirs do
+        val dirPath = io.joinPath(base, path)
+        if io.exists(dirPath) && io.isDirectory(dirPath) then
+          io.writeFile(io.joinPath(dirPath, ".smeta"), meta.toSmeta)
 
     cmd.emit match
       case "asm" =>
@@ -232,7 +243,10 @@ object SyslCli:
           if result != 0 then println(result)
     else
       // Multi-file: use driver, merge typed ASTs, then interpret
-      val driver = new SyslDriver
+      val baseDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList match
+        case Nil => List(".")
+        case dirs => dirs
+      val driver = new SyslDriver(Some(io), baseDirs)
       val result = driver.compile(sources)
       val stdlibImports = driver.collectStdlibImports(result.units)
       val merged = TProgram(result.units.flatMap(_.typed.decls))
@@ -292,27 +306,44 @@ object SyslCli:
   private def isSyslSource(name: String): Boolean =
     name.endsWith(".sysl") || name.endsWith(".lsysl")
 
-  private def resolveSource(path: String): (String, String) =
+  /** Resolve a source file, returning (relative-path-without-extension, source-code). */
+  private def resolveSource(path: String, baseDir: String): (String, String) =
     val name = io.fileName(path)
     val raw = io.readFile(path)
-    if name.endsWith(".lsysl") then
+    // Compute relative path from base directory
+    val relPath = if path.startsWith(baseDir) then
+      val rel = path.drop(baseDir.length).dropWhile(c => c == '/' || c == '\\')
+      if rel.nonEmpty then rel else name
+    else name
+    val key = if relPath.endsWith(".lsysl") then relPath.stripSuffix(".lsysl")
+    else relPath.stripSuffix(".sysl")
+    val source = if name.endsWith(".lsysl") then
       val doc = new LiterateParser().parse(raw)
-      (name.stripSuffix(".lsysl"), LiterateRenderer.tangle(doc))
-    else
-      (name.stripSuffix(".sysl"), raw)
+      LiterateRenderer.tangle(doc)
+    else raw
+    (key, source)
 
   private def resolveSources(inputs: Seq[String]): Map[String, String] =
     if inputs.size == 1 && io.isDirectory(inputs.head) then
-      val files = io.listFiles(inputs.head).filter(f => isSyslSource(io.fileName(f)))
+      val baseDir = inputs.head + (if inputs.head.endsWith("/") then "" else "/")
+      val files = collectSyslFiles(inputs.head)
       if files.isEmpty then
         fail(s"error: no .sysl or .lsysl files in directory: ${inputs.head}")
-      files.map(f => resolveSource(f)).toMap
+      files.map(f => resolveSource(f, baseDir)).toMap
     else
       inputs.map { path =>
         if !io.exists(path) then
           fail(s"error: file not found: $path")
-        resolveSource(path)
+        resolveSource(path, "")
       }.toMap
+
+  /** Recursively collect all .sysl/.lsysl files under a directory. */
+  private def collectSyslFiles(dir: String): Seq[String] =
+    io.listFiles(dir).flatMap { f =>
+      if io.isDirectory(f) then collectSyslFiles(f)
+      else if isSyslSource(io.fileName(f)) then Seq(f)
+      else Seq.empty
+    }
 
   private def outputPath(output: Option[String], name: String, ext: String, unitCount: Int): String =
     output match

@@ -1,0 +1,141 @@
+// DrawEngine text demo — renders "Hello World!" using the DrawEngine's
+// DRAW_TEXT command backed by Java Graphics2D (antialiased, fast).
+
+DISPLAY_CTRL = 0x100008
+DRAW_ENGINE  = 0x1000A0
+FB_WIDTH  = 1440
+FB_HEIGHT = 900
+
+// DrawEngine register offsets
+DE_EXEC       = 0
+DE_X1         = 2
+DE_Y1         = 4
+DE_X2         = 6
+DE_Y2         = 8
+DE_R          = 10
+DE_G          = 11
+DE_B          = 12
+DE_A          = 13
+DE_LINE_W     = 14
+DE_FONT_SIZE  = 20
+DE_FONT_STYLE = 22
+DE_TEXT_BUF   = 32
+
+// DrawEngine commands
+CMD_CLEAR     = 0x01
+CMD_FILL_RECT = 0x10
+CMD_DRAW_TEXT = 0x09
+CMD_DRAW_LINE = 0x11
+CMD_FLUSH     = 0x0A
+
+// Display controller helpers
+dc_write(offset: int, v: int)
+    p: *i8 = *i8(DISPLAY_CTRL + offset)
+    *p = byte(v)
+
+init_fb()
+    dc_write(0, 1)
+    dc_write(2, FB_WIDTH >> 8)
+    dc_write(3, FB_WIDTH & 0xFF)
+    dc_write(4, FB_HEIGHT >> 8)
+    dc_write(5, FB_HEIGHT & 0xFF)
+    dc_write(1, 1)
+
+// DrawEngine helpers
+de_write8(offset: int, v: int)
+    p: *i8 = *i8(DRAW_ENGINE + offset)
+    *p = byte(v)
+
+de_write16(offset: int, v: int)
+    p: *i16 = *i16(DRAW_ENGINE + offset)
+    *p = i16(v)
+
+de_exec(cmd: int)
+    de_write8(DE_EXEC, cmd)
+
+de_color(r: int, g: int, b: int, a: int)
+    de_write8(DE_R, r)
+    de_write8(DE_G, g)
+    de_write8(DE_B, b)
+    de_write8(DE_A, a)
+
+de_pos(x: int, y: int)
+    de_write16(DE_X1, x)
+    de_write16(DE_Y1, y)
+
+de_size(w: int, h: int)
+    de_write16(DE_X2, w)
+    de_write16(DE_Y2, h)
+
+de_font(size: int, style: int)
+    de_write16(DE_FONT_SIZE, size)
+    de_write8(DE_FONT_STYLE, style)
+
+// Write a string into the inline text buffer (max 31 chars + null)
+de_text(s: *int, len: int)
+    var i = 0
+    while i < len
+        if i >= 31 then break
+        de_write8(DE_TEXT_BUF + i, s[i])
+        i += 1
+    de_write8(DE_TEXT_BUF + i, 0)
+
+draw_text(x: int, y: int, s: *int, len: int, r: int, g: int, b: int)
+    de_color(r, g, b, 255)
+    de_pos(x, y)
+    de_text(s, len)
+    de_exec(CMD_DRAW_TEXT)
+
+fill_rect(x: int, y: int, w: int, h: int, r: int, g: int, b: int)
+    de_color(r, g, b, 255)
+    de_pos(x, y)
+    de_size(w, h)
+    de_exec(CMD_FILL_RECT)
+
+main() -> int
+    init_fb()
+
+    // Clear to dark background
+    de_color(30, 30, 40, 255)
+    de_exec(CMD_CLEAR)
+
+    // Title bar
+    fill_rect(0, 0, FB_WIDTH, 65, 50, 80, 140)
+
+    // Title text
+    de_font(40, 1)
+    msg_title = [72, 101, 108, 108, 111, 32, 87, 111, 114, 108, 100, 33]
+    draw_text(530, 48, msg_title, 12, 255, 255, 255)
+
+    // Body text in different colors and sizes
+    de_font(26, 0)
+    msg1 = [68, 114, 97, 119, 69, 110, 103, 105, 110, 101, 32, 116, 101, 120, 116, 32, 100, 101, 109, 111, 46, 46, 46]
+    draw_text(80, 150, msg1, 23, 200, 200, 200)
+
+    de_font(20, 0)
+    msg2 = [65, 110, 116, 105, 97, 108, 105, 97, 115, 101, 100, 32, 71, 114, 97, 112, 104, 105, 99, 115, 50, 68, 32, 116, 101, 120, 116, 46]
+    draw_text(80, 210, msg2, 28, 255, 80, 80)
+
+    de_font(20, 2)
+    msg3 = [73, 116, 97, 108, 105, 99, 32, 115, 116, 121, 108, 101, 32, 116, 101, 120, 116, 46]
+    draw_text(80, 260, msg3, 18, 80, 255, 80)
+
+    de_font(20, 1)
+    msg4 = [66, 111, 108, 100, 32, 115, 116, 121, 108, 101, 32, 116, 101, 120, 116, 46]
+    draw_text(80, 310, msg4, 16, 80, 200, 255)
+
+    // Decorative line
+    de_color(255, 200, 50, 255)
+    de_write16(DE_LINE_W, 40)
+    de_pos(80, 360)
+    de_size(1280, 360)
+    de_exec(CMD_DRAW_LINE)
+
+    // Large text
+    de_font(96, 1)
+    msg5 = [84, 82, 73, 83, 67]
+    draw_text(490, 520, msg5, 5, 255, 220, 100)
+
+    // Flush to framebuffer
+    de_exec(CMD_FLUSH)
+    0

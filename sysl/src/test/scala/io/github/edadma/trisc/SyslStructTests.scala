@@ -168,7 +168,7 @@ class SyslStructTests extends SyslTestHelpers {
         |""".stripMargin): @unchecked
     ast.decls(0) shouldBe a[StructDeclAST]
     ast.decls(0).asInstanceOf[StructDeclAST].name shouldBe "Point"
-    ast.decls(0).asInstanceOf[StructDeclAST].fields shouldBe List(("x", "int"), ("y", "int"))
+    ast.decls(0).asInstanceOf[StructDeclAST].fields shouldBe List(("x", NamedTypeAST("int")), ("y", NamedTypeAST("int")))
   }
 
   // ===== Struct in loop =====
