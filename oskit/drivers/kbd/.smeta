@@ -3,7 +3,7 @@ SOURCE oskit/drivers/kbd/keyboard.sysl
 DATA KB_BASE i32
 DATA KB_IRQ i32
 DATA KB_BUF_SIZE i32
-DATA kb_buf arr 32 i32
+DATA kb_buf arr 256 i32
 DATA kb_head i32
 DATA kb_tail i32
 DATA kb_count i32

@@ -142,25 +142,25 @@ import oskit.apps.*
   // === Shell integration tests ===
 
   "Shell: init boots system" in {
-    val keys          = typeString("pwd\n", startTick = 4500000, spacing = 2000)
+    val keys          = typeString("pwd\n", startTick = 500000, spacing = 2000)
     val (cpu, output) = runShell(scheduledKeys = keys)
     output should include("/")
   }
 
   "Shell: echo command via putc" in {
-    val keys          = typeString("echo hi\n", startTick = 4500000, spacing = 2000)
+    val keys          = typeString("echo hi\n", startTick = 500000, spacing = 2000)
     val (cpu, output) = runShell(scheduledKeys = keys)
     output should include("hi")
   }
 
   "Shell: echo command" in {
-    val keys        = typeString("echo hi\n", startTick = 4500000, spacing = 2000)
+    val keys        = typeString("echo hi\n", startTick = 500000, spacing = 2000)
     val (_, output) = runShell(scheduledKeys = keys)
     output should include("hi")
   }
 
   "Shell: ls on root with prefilled file" in {
-    val keys        = typeString("ls\n", startTick = 4500000, spacing = 2000)
+    val keys        = typeString("ls\n", startTick = 500000, spacing = 2000)
     val (_, output) = runShell(
       prefill = """/hello file "world"""",
       scheduledKeys = keys,
@@ -169,7 +169,7 @@ import oskit.apps.*
   }
 
   "Shell: pwd shows root" in {
-    val keys        = typeString("pwd\n", startTick = 4500000, spacing = 2000)
+    val keys        = typeString("pwd\n", startTick = 500000, spacing = 2000)
     val (_, output) = runShell(scheduledKeys = keys)
     // Output should show "/" from pwd
     // The prompt is "/ $ " and pwd prints "/"

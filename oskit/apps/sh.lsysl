@@ -622,7 +622,7 @@ tokenizes it, and dispatches to the appropriate command.
         sh_init_cmds()
 
         // Wait for servers to start
-        sleep(200)
+        sleep(5)
 
         var line: [256]i8
         var delim: [2]i8

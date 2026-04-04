@@ -31,7 +31,7 @@ stacks separated by 0x2000.
         create_thread(tty_server, 0x88000, 0x86000, "tty")
 
         // Wait for servers to initialize and register ports
-        sleep(100)
+        sleep(5)
 
         // Start the shell
         create_thread(shell, 0x8C000, 0x8A000, "sh")
