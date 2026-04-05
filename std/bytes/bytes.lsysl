@@ -1,0 +1,664 @@
+std.bytes — Byte-slice operations
+===================================
+
+The `std.bytes` module provides the same API surface as
+`std.strings`, but operating on `[]byte` slices instead of
+`string` values. Use it when working with mutable buffers,
+binary data, or I/O payloads — anywhere a `string`'s
+immutability is inconvenient.
+
+The two modules are parallel by design: every `std.strings.X`
+function has a `std.bytes.X` counterpart with identical
+semantics and matching test coverage. Switching between them
+is a matter of choosing the representation that fits the
+task.
+
+Dependencies: none. `std.bytes` uses `append` for growable
+buffers directly rather than going through `std.builder`,
+keeping it independent of the string layer.
+
+
+    module std.bytes
+
+
+as_bytes
+--------
+
+`as_bytes(s)` returns a fresh `[]byte` containing the bytes
+of `s`. It is the conventional entry point for taking a
+`string` and processing its bytes through `std.bytes`.
+
+    as_bytes(s: string) -> []byte
+        val n = len(s)
+        val buf = new [n]byte
+        var i = 0
+
+        while i < n
+            buf[i] = s[i]
+            i++
+
+        buf[:]
+
+
+Searching
+---------
+
+### has_prefix
+
+`has_prefix(s, prefix)` returns `true` iff `s` begins with
+`prefix`. The empty slice is a prefix of every slice.
+
+    has_prefix(s: []byte, prefix: []byte) -> bool
+        val n = len(s)
+        val m = len(prefix)
+
+        if m > n then return false
+
+        var i = 0
+
+        while i < m
+            if s[i] != prefix[i] then return false
+            i++
+
+        true
+
+
+### has_suffix
+
+    has_suffix(s: []byte, suffix: []byte) -> bool
+        val n = len(s)
+        val m = len(suffix)
+
+        if m > n then return false
+
+        var i = 0
+
+        while i < m
+            if s[n - m + i] != suffix[i] then return false
+            i++
+
+        true
+
+
+### index
+
+    index(s: []byte, sub: []byte) -> int
+        val n = len(s)
+        val m = len(sub)
+
+        if m == 0 then return 0
+        if m > n then return -1
+
+        val last = n - m
+        var i = 0
+
+        while i <= last
+            var j = 0
+            var matched = true
+
+            while j < m
+                if s[i + j] != sub[j]
+                    matched = false
+                    break
+                j++
+
+            if matched then return i
+
+            i++
+
+        -1
+
+
+### last_index
+
+    last_index(s: []byte, sub: []byte) -> int
+        val n = len(s)
+        val m = len(sub)
+
+        if m == 0 then return n
+        if m > n then return -1
+
+        var i = n - m
+
+        while i >= 0
+            var j = 0
+            var matched = true
+
+            while j < m
+                if s[i + j] != sub[j]
+                    matched = false
+                    break
+                j++
+
+            if matched then return i
+
+            i--
+
+        -1
+
+
+### contains
+
+    contains(s: []byte, sub: []byte) -> bool = index(s, sub) >= 0
+
+
+### count
+
+`count(s, sub)` returns the number of non-overlapping
+occurrences of `sub` in `s`. Empty `sub` yields `len(s) + 1`.
+
+    count(s: []byte, sub: []byte) -> int
+        val m = len(sub)
+
+        if m == 0 then return len(s) + 1
+
+        var i = 0
+        var n = 0
+        val last = len(s) - m
+
+        while i <= last
+            var j = 0
+            var matched = true
+
+            while j < m
+                if s[i + j] != sub[j]
+                    matched = false
+                    break
+                j++
+
+            if matched
+                n++
+                i += m
+            else
+                i++
+
+        n
+
+
+### index_byte / last_index_byte
+
+    index_byte(s: []byte, b: byte) -> int
+        val n = len(s)
+        var i = 0
+
+        while i < n
+            if s[i] == b then return i
+            i++
+
+        -1
+
+    last_index_byte(s: []byte, b: byte) -> int
+        var i = len(s) - 1
+
+        while i >= 0
+            if s[i] == b then return i
+            i--
+
+        -1
+
+
+subslice
+--------
+
+`subslice(s, lo, hi)` returns a fresh `[]byte` containing
+`s[lo..hi]`. Callers must ensure `0 <= lo <= hi <= len(s)`.
+
+Unlike Sysl's built-in slice expression `s[lo:hi]`, which
+produces a view sharing the backing array, this function
+**copies** — the returned slice is independent of `s`. Use
+the built-in form for zero-copy views.
+
+    subslice(s: []byte, lo: int, hi: int) -> []byte
+        val n = hi - lo
+        val buf = new [n]byte
+        var i = 0
+
+        while i < n
+            buf[i] = s[lo + i]
+            i++
+
+        buf[:]
+
+
+Trimming
+--------
+
+Helper: ASCII whitespace detection.
+
+    is_ascii_space(b: byte) -> bool
+        b == byte(' ') || b == byte('\t') || b == byte('\n') || b == byte('\r') || b == 0x0Bu8 || b == 0x0Cu8
+
+
+### trim_space
+
+    trim_space(s: []byte) -> []byte
+        val n = len(s)
+        var lo = 0
+        var hi = n
+
+        while lo < hi && is_ascii_space(s[lo]) do lo++
+        while hi > lo && is_ascii_space(s[hi - 1]) do hi--
+
+        subslice(s, lo, hi)
+
+
+Helper: byte membership in cutset.
+
+    in_cutset(b: byte, cutset: []byte) -> bool
+        val n = len(cutset)
+        var i = 0
+
+        while i < n
+            if cutset[i] == b then return true
+            i++
+
+        false
+
+
+### trim_left / trim_right / trim
+
+    trim_left(s: []byte, cutset: []byte) -> []byte
+        val n = len(s)
+        var lo = 0
+
+        while lo < n && in_cutset(s[lo], cutset) do lo++
+
+        subslice(s, lo, n)
+
+    trim_right(s: []byte, cutset: []byte) -> []byte
+        val n = len(s)
+        var hi = n
+
+        while hi > 0 && in_cutset(s[hi - 1], cutset) do hi--
+
+        subslice(s, 0, hi)
+
+    trim(s: []byte, cutset: []byte) -> []byte
+        val n = len(s)
+        var lo = 0
+        var hi = n
+
+        while lo < hi && in_cutset(s[lo], cutset) do lo++
+        while hi > lo && in_cutset(s[hi - 1], cutset) do hi--
+
+        subslice(s, lo, hi)
+
+
+Case conversion (ASCII)
+-----------------------
+
+    to_upper(s: []byte) -> []byte
+        val n = len(s)
+        val buf = new [n]byte
+        var i = 0
+
+        while i < n
+            val c = s[i]
+
+            if c >= byte('a') && c <= byte('z') then buf[i] = c - 0x20u8
+            else buf[i] = c
+
+            i++
+
+        buf[:]
+
+    to_lower(s: []byte) -> []byte
+        val n = len(s)
+        val buf = new [n]byte
+        var i = 0
+
+        while i < n
+            val c = s[i]
+
+            if c >= byte('A') && c <= byte('Z') then buf[i] = c + 0x20u8
+            else buf[i] = c
+
+            i++
+
+        buf[:]
+
+
+Replacement
+-----------
+
+### replace_all
+
+`replace_all(s, old, repl)` returns a fresh `[]byte` with
+every non-overlapping occurrence of `old` replaced by `repl`.
+Empty `old` inserts `repl` between every byte of `s`.
+
+    replace_all(s: []byte, old: []byte, repl: []byte) -> []byte
+        val n = len(s)
+        val m = len(old)
+        val k = len(repl)
+
+        val tmp = new [n]byte
+        var out = tmp[:0]
+
+        if m == 0
+            // insert 'repl' between every byte and at both ends
+            var j = 0
+
+            while j < k
+                out = append(out, repl[j])
+                j++
+
+            var i = 0
+
+            while i < n
+                out = append(out, s[i])
+
+                var jj = 0
+
+                while jj < k
+                    out = append(out, repl[jj])
+                    jj++
+
+                i++
+
+            return out
+
+        var i = 0
+        val last = n - m
+
+        while i <= last
+            var j = 0
+            var matched = true
+
+            while j < m
+                if s[i + j] != old[j]
+                    matched = false
+                    break
+                j++
+
+            if matched
+                var jj = 0
+
+                while jj < k
+                    out = append(out, repl[jj])
+                    jj++
+
+                i += m
+            else
+                out = append(out, s[i])
+                i++
+
+        while i < n
+            out = append(out, s[i])
+            i++
+
+        out
+
+
+### repeat
+
+    repeat(s: []byte, n: int) -> []byte
+        if n <= 0
+            val empty = new [0]byte
+            return empty[:]
+
+        val slen = len(s)
+        val buf = new [slen * n]byte
+        var k = 0
+
+        while k < n
+            var j = 0
+
+            while j < slen
+                buf[k * slen + j] = s[j]
+                j++
+
+            k++
+
+        buf[:]
+
+
+Tests
+=====
+
+### as_bytes round-trip
+
+    #test
+    test_as_bytes_roundtrip() -> void
+        val b = as_bytes("hello")
+        assert(string(b) == "hello", "round-trip")
+        assert(len(b) == 5, "length")
+
+    #test
+    test_as_bytes_empty() -> void
+        val b = as_bytes("")
+        assert(len(b) == 0, "empty")
+
+
+### has_prefix / has_suffix
+
+    #test
+    test_bytes_has_prefix_yes() -> void
+        assert(has_prefix(as_bytes("hello world"), as_bytes("hello")), "match")
+
+    #test
+    test_bytes_has_prefix_no() -> void
+        assert(!has_prefix(as_bytes("hello"), as_bytes("world")), "no match")
+
+    #test
+    test_bytes_has_prefix_empty() -> void
+        assert(has_prefix(as_bytes("hi"), as_bytes("")), "empty prefix")
+
+    #test
+    test_bytes_has_prefix_too_long() -> void
+        assert(!has_prefix(as_bytes("hi"), as_bytes("hello")), "longer prefix")
+
+    #test
+    test_bytes_has_suffix_yes() -> void
+        assert(has_suffix(as_bytes("hello world"), as_bytes("world")), "trailing")
+
+    #test
+    test_bytes_has_suffix_no() -> void
+        assert(!has_suffix(as_bytes("hello"), as_bytes("world")), "no match")
+
+
+### index / last_index / contains
+
+    #test
+    test_bytes_index_found() -> void
+        assert(index(as_bytes("hello world"), as_bytes("world")) == 6, "at 6")
+
+    #test
+    test_bytes_index_not_found() -> void
+        assert(index(as_bytes("hello"), as_bytes("xyz")) == -1, "not found")
+
+    #test
+    test_bytes_last_index_repeated() -> void
+        assert(last_index(as_bytes("banana"), as_bytes("an")) == 3, "last")
+
+    #test
+    test_bytes_contains_yes() -> void
+        assert(contains(as_bytes("hello world"), as_bytes("world")), "yes")
+
+    #test
+    test_bytes_contains_no() -> void
+        assert(!contains(as_bytes("hello"), as_bytes("xyz")), "no")
+
+
+### count
+
+    #test
+    test_bytes_count_basic() -> void
+        assert(count(as_bytes("banana"), as_bytes("an")) == 2, "non-overlap")
+
+    #test
+    test_bytes_count_not_found() -> void
+        assert(count(as_bytes("banana"), as_bytes("xyz")) == 0, "zero")
+
+    #test
+    test_bytes_count_empty_sub() -> void
+        assert(count(as_bytes("abc"), as_bytes("")) == 4, "len+1")
+
+
+### index_byte / last_index_byte
+
+    #test
+    test_bytes_index_byte_found() -> void
+        assert(index_byte(as_bytes("hello"), byte('l')) == 2, "first l")
+
+    #test
+    test_bytes_index_byte_not_found() -> void
+        assert(index_byte(as_bytes("hello"), byte('z')) == -1, "missing")
+
+    #test
+    test_bytes_last_index_byte() -> void
+        assert(last_index_byte(as_bytes("hello"), byte('l')) == 3, "last l")
+
+
+### subslice
+
+    #test
+    test_bytes_subslice_basic() -> void
+        val b = subslice(as_bytes("hello world"), 6, 11)
+        assert(string(b) == "world", "tail")
+
+    #test
+    test_bytes_subslice_empty() -> void
+        val b = subslice(as_bytes("hello"), 2, 2)
+        assert(len(b) == 0, "empty range")
+
+    #test
+    test_bytes_subslice_full() -> void
+        val b = subslice(as_bytes("hi"), 0, 2)
+        assert(string(b) == "hi", "full")
+
+
+### trim variants
+
+    #test
+    test_bytes_trim_space() -> void
+        assert(string(trim_space(as_bytes("  hello  "))) == "hello", "both sides")
+
+    #test
+    test_bytes_trim_space_mixed() -> void
+        assert(string(trim_space(as_bytes("\t\nhi\r\n"))) == "hi", "mixed ws")
+
+    #test
+    test_bytes_trim_space_none() -> void
+        assert(string(trim_space(as_bytes("hello"))) == "hello", "no change")
+
+    #test
+    test_bytes_trim_space_all() -> void
+        assert(len(trim_space(as_bytes("   "))) == 0, "becomes empty")
+
+    #test
+    test_bytes_trim_left() -> void
+        assert(string(trim_left(as_bytes("xxhelloxx"), as_bytes("x"))) == "helloxx", "left only")
+
+    #test
+    test_bytes_trim_right() -> void
+        assert(string(trim_right(as_bytes("xxhelloxx"), as_bytes("x"))) == "xxhello", "right only")
+
+    #test
+    test_bytes_trim_both() -> void
+        assert(string(trim(as_bytes("xxhelloxx"), as_bytes("x"))) == "hello", "both")
+
+
+### case conversion
+
+    #test
+    test_bytes_to_upper() -> void
+        assert(string(to_upper(as_bytes("hello"))) == "HELLO", "upper")
+
+    #test
+    test_bytes_to_upper_mixed() -> void
+        assert(string(to_upper(as_bytes("Hi, World!"))) == "HI, WORLD!", "mixed")
+
+    #test
+    test_bytes_to_lower() -> void
+        assert(string(to_lower(as_bytes("HELLO"))) == "hello", "lower")
+
+    #test
+    test_bytes_to_lower_mixed() -> void
+        assert(string(to_lower(as_bytes("Hi, World!"))) == "hi, world!", "mixed")
+
+
+### replace_all
+
+    #test
+    test_bytes_replace_all_basic() -> void
+        val r = replace_all(as_bytes("hello world"), as_bytes("world"), as_bytes("there"))
+        assert(string(r) == "hello there", "one")
+
+    #test
+    test_bytes_replace_all_multiple() -> void
+        val r = replace_all(as_bytes("aaa"), as_bytes("a"), as_bytes("b"))
+        assert(string(r) == "bbb", "each")
+
+    #test
+    test_bytes_replace_all_no_match() -> void
+        val r = replace_all(as_bytes("hello"), as_bytes("xyz"), as_bytes("abc"))
+        assert(string(r) == "hello", "untouched")
+
+    #test
+    test_bytes_replace_all_longer() -> void
+        val r = replace_all(as_bytes("hi hi"), as_bytes("hi"), as_bytes("hello"))
+        assert(string(r) == "hello hello", "grows")
+
+    #test
+    test_bytes_replace_all_shorter() -> void
+        val r = replace_all(as_bytes("hello hello"), as_bytes("hello"), as_bytes("hi"))
+        assert(string(r) == "hi hi", "shrinks")
+
+    #test
+    test_bytes_replace_all_non_overlap() -> void
+        val r = replace_all(as_bytes("aaaa"), as_bytes("aa"), as_bytes("X"))
+        assert(string(r) == "XX", "non-overlap")
+
+
+### repeat
+
+    #test
+    test_bytes_repeat_basic() -> void
+        assert(string(repeat(as_bytes("ab"), 3)) == "ababab", "three")
+
+    #test
+    test_bytes_repeat_zero() -> void
+        assert(len(repeat(as_bytes("abc"), 0)) == 0, "zero")
+
+    #test
+    test_bytes_repeat_negative() -> void
+        assert(len(repeat(as_bytes("abc"), -1)) == 0, "negative")
+
+    #test
+    test_bytes_repeat_one() -> void
+        assert(string(repeat(as_bytes("abc"), 1)) == "abc", "identity")
+
+    #test
+    test_bytes_repeat_empty() -> void
+        assert(len(repeat(as_bytes(""), 100)) == 0, "empty")
+
+
+Design notes
+------------
+
+**Parallel to `std.strings`.** The two modules should stay in
+lockstep: any operation added to one should be added to the
+other unless there's a specific reason. This keeps the mental
+model uniform — "do I have a string or a []byte?" is the only
+question users ask when choosing.
+
+**`append` directly, not `StrBuilder`.** `std.bytes` is
+positioned as a lower-layer module than `std.strings`.
+Pulling in `StrBuilder` would create an awkward dependency
+inversion: the builder is *for building strings*, but here
+the output type is `[]byte`. Using `append` keeps the layering
+clean.
+
+**Return values are always fresh copies.** `subslice`, `trim_*`,
+`to_upper`, `to_lower`, `replace_all`, `repeat` all return
+independent `[]byte` buffers. For zero-copy sub-slicing, use
+the built-in slice expression `s[lo:hi]`.
+
+**`as_bytes` is the conversion entry point.** It's the
+canonical way to move a `string` into the `[]byte` world.
+Going the other way, `string(b)` (the builtin) does the same.
+
+**No `split` / `join` yet.** Same reason as in `std.strings`:
+these produce or consume collections of slices, which needs
+`[]&[]byte` support that hasn't been exercised yet.
