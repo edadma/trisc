@@ -48,13 +48,19 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
   val relaxationExports = new mutable.LinkedHashSet[String]
 
   // Constant pool: 64-bit value (bits) → auto-generated label name
+  // Per-TOF unique prefix avoids symbol collisions when linking multiple modules
+  // that each have their own constant pool (e.g. both define .const_1).
   val constPool = new mutable.LinkedHashMap[Long, String]
   var constPoolCounter = 0
+  val constPoolPrefix: String =
+    val r = new scala.util.Random()
+    val chars = "0123456789abcdef"
+    (1 to 8).map(_ => chars(r.nextInt(16))).mkString
 
   def addConstant(bits: Long): String =
     constPool.getOrElseUpdate(bits, {
       constPoolCounter += 1
-      s".const_$constPoolCounter"
+      s".const_${constPoolPrefix}_$constPoolCounter"
     })
 
   def addSymbol(sym: Positional, name: String): Unit =
