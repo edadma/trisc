@@ -673,6 +673,15 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           newCells(sliceVal.length).value = newElem
           SliceVal(newCells, 0, sliceVal.length + 1, newCap)
 
+      case TStr(inner) =>
+        val v = evalAny(inner, env)
+        val s = v match
+          case IntVal(n) => n.toString
+          case FloatVal(d) => d.toString
+          case _ => throw RuntimeError(s"str(): unsupported value $v")
+        val bytes = s.getBytes("UTF-8")
+        RefStringVal(bytes, bytes.length, new java.util.concurrent.atomic.AtomicInteger(1))
+
       case TStringFromPtr(ptrExpr, lenExpr, _) =>
         val ptr = evalAny(ptrExpr, env)
         val len = toLong(evalAny(lenExpr, env)).toInt

@@ -760,10 +760,19 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o2, "expected register as second operand")
 
       addInstruction(3 -> 6, 3 -> reg1, 3 -> reg2, 2 -> 0, 5 -> opcode)
-    case InstructionLineAST(mnemonic @ ("fpow" | "tlbi" | "tlbia" | "sptbr" | "gptbr" | "gfault" | "sasid" | "gasid" | "gfcause"), Seq(o1, o2)) =>
+    case InstructionLineAST(mnemonic @ ("fpow" | "fsin" | "fcos" | "ftan" | "fasin" | "facos" | "fatan" | "fatan2" | "fexp" | "flog" | "tlbi" | "tlbia" | "sptbr" | "gptbr" | "gfault" | "sasid" | "gasid" | "gfcause"), Seq(o1, o2)) =>
       val opcode =
         mnemonic match
           case "fpow"    => 0
+          case "fsin"    => 9
+          case "fcos"    => 10
+          case "ftan"    => 11
+          case "fasin"   => 12
+          case "facos"   => 13
+          case "fatan"   => 14
+          case "fatan2"  => 15
+          case "fexp"    => 16
+          case "flog"    => 17
           case "tlbi"    => 1
           case "tlbia"   => 2
           case "sptbr"   => 3

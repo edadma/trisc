@@ -17,6 +17,13 @@ class SyslParser extends StandardTokenParsers {
       case Success(result, _) => Right(result)
       case ns: NoSuccess      => Left(ns.toString)
 
+  def parseExpression(source: String): Either[String, ExpressionAST] =
+    // Use logicalOr (not expr) to avoid match/if which need indentation context.
+    // Accept optional trailing Newline that the IndentationLexical may insert.
+    phrase(logicalOr <~ opt(Newline))(lexical.read(new CharSequenceReader(source))) match
+      case Success(result, _) => Right(result)
+      case ns: NoSuccess      => Left(ns.toString)
+
   // --- Program ---
 
   lazy val program: Parser[ProgramAST] =

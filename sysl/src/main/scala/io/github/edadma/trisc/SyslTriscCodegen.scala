@@ -7,6 +7,7 @@ class SyslTriscCodegen(addresses: Int = 4):
   private var labelCounter = 0
   private val stringLiterals = new mutable.ListBuffer[(String, String)]() // (label, value)
   private var needsAllocExtern = false // set when codegen emits malloc/free references
+  private var needsStrInt = false // set when codegen needs __str_int helper
 
   private def newLabel(prefix: String): String =
     labelCounter += 1
@@ -21,6 +22,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     stringLiterals.clear()
     deinitTypes.clear()
     needsAllocExtern = false
+    needsStrInt = false
 
     // Scan for deinit methods: functions named TypeName_deinit
     for decl <- program.decls do
@@ -53,6 +55,9 @@ class SyslTriscCodegen(addresses: Int = 4):
       decl match
         case f: TFunDecl => genFunction(f)
         case _ => // skip
+
+    // Emit __str_int helper if needed (integer to string conversion)
+    if needsStrInt then emitStrIntHelper()
 
     // Emit rodata segment — string literals with immortal refcount headers
     if stringLiterals.nonEmpty then
@@ -1823,6 +1828,31 @@ class SyslTriscCodegen(addresses: Int = 4):
         // r1 = address of the 16-byte string struct
         emit("  mov r1, r7")
 
+      case TStr(inner) =>
+        // Convert integer/bool value to string via __str_int helper
+        genExpr(inner) // r1 = integer value
+        needsStrInt = true
+        needsAllocExtern = true
+        // Allocate 16-byte return slot for the result string
+        emitAddImm(7, 7, -16)
+        stackOffset -= 16
+        emit("  std r0, r7, r0")
+        emitAddImm(2, 7, 8)
+        emit("  std r0, r2, r0")
+        // Push value as stack arg for __str_int
+        emit("  pshd r1")
+        stackOffset -= 8
+        // r1 = hidden return slot ptr (just above the pushed value)
+        emitAddImm(1, 7, 8)
+        // Call __str_int
+        emit("  movi r4, __str_int")
+        emit("  jalr r6, r4")
+        // Clean value arg
+        emitAddImm(7, 7, 8)
+        stackOffset += 8
+        // r1 = address of return slot (which now contains {ptr, len})
+        emit("  mov r1, r7")
+
       case TIfExpr(cond, thenBody, elseBody, typ) =>
         val elseLabel = newLabel("else")
         val endLabel = newLabel("endif")
@@ -2708,6 +2738,157 @@ class SyslTriscCodegen(addresses: Int = 4):
   private def emitLocalAddr(name: String, reg: Int): Unit =
     val local = locals(name)
     emitAddImm(reg, 5, local.offset)
+
+  // Emit the __str_int helper function: converts i64 in stack arg to a refcounted string
+  // ABI: r1 = hidden return slot ptr, [fp+24] = integer value
+  // Returns: {ptr, len} written to return slot, r1 = return slot address
+  private def emitStrIntHelper(): Unit =
+    emit("# helper: __str_int(value: int) -> string")
+    emit("global __str_int, func, 1 i64 i64")
+    emit("__str_int:")
+    // Pre-prologue: save register arg (hidden return ptr)
+    emit("  pshd r1")
+    // Prologue
+    emit("  pshd r6")
+    emit("  pshd r5")
+    emit("  mov r5, r7")
+    // [fp+16] = hidden return ptr, [fp+24] = integer value
+    // Allocate locals: 8 (is_negative) + 8 (digit_count) + 24 (digit buffer) = 40 bytes
+    emitAddImm(7, 7, -40)
+    // [fp-8]  = is_negative
+    // [fp-16] = digit_count
+    // [fp-40] = digit_buffer[24]
+
+    // Load integer value from [fp+24]
+    emitAddImm(2, 5, 24)
+    emit("  ldd r1, r2, r0")       // r1 = value
+
+    // Check sign: slt r2, r1, r0 → r2 = 1 if value < 0
+    emit("  slt r2, r1, r0")
+    emitAddImm(3, 5, -8)
+    emit("  std r2, r3, r0")       // save is_negative
+    val posLabel = newLabel("str_pos")
+    emit(s"  beq r2, r0, $posLabel")
+    emit("  neg r1, r1")           // r1 = |value|
+    emit(s"$posLabel")
+
+    // Extract digits reversed into buffer
+    emit("  ldi r3, 0")            // r3 = digit_count
+
+    // Special case: value == 0
+    val loopLabel = newLabel("str_loop")
+    val doneLabel = newLabel("str_done")
+    emit(s"  bne r1, r0, $loopLabel")
+    emitAddImm(4, 5, -40)
+    emit("  ldi r2, 48")           // '0'
+    emit("  stb r2, r4, r0")
+    emit("  ldi r3, 1")
+    emit(s"  bra $doneLabel")
+
+    // Division loop: extract digits
+    emit(s"$loopLabel")
+    emit(s"  beq r1, r0, $doneLabel")
+    // Save digit_count to [fp-16] (div will clobber r2)
+    emitAddImm(4, 5, -16)
+    emit("  std r3, r4, r0")
+    emit("  ldi r3, 10")
+    emit("  div r1, r1, r3")       // r1 = quotient, r2 = remainder
+    emit("  addi r2, r2, 48")      // r2 = ASCII digit
+    // Restore digit_count
+    emitAddImm(4, 5, -16)
+    emit("  ldd r3, r4, r0")
+    // Store digit at buffer[count]
+    emitAddImm(4, 5, -40)
+    emit("  add r4, r4, r3")       // r4 = &buffer[count]
+    emit("  stb r2, r4, r0")
+    emit("  addi r3, r3, 1")       // count++
+    emit(s"  bra $loopLabel")
+
+    emit(s"$doneLabel")
+    // Save digit_count to [fp-16]
+    emitAddImm(4, 5, -16)
+    emit("  std r3, r4, r0")
+
+    // Compute total_length = digit_count + is_negative
+    emitAddImm(4, 5, -8)
+    emit("  ldd r2, r4, r0")       // r2 = is_negative
+    emit("  add r1, r3, r2")       // r1 = total_length
+    emit("  pshd r1")              // save total_length
+
+    // Malloc(8 + total_length) for refcount header + data
+    emit("  addi r1, r1, 8")
+    emit("  movi r4, malloc")
+    emit("  jalr r6, r4")
+
+    // Null check
+    val allocOkLabel = newLabel("str_alloc_ok")
+    emit(s"  bne r1, r0, $allocOkLabel")
+    emit("  ldi r1, 2")
+    emit("  trap 1")
+    emit(s"$allocOkLabel")
+
+    // Set refcount = 1 at [base+0]
+    emit("  ldi r2, 1")
+    emit("  std r2, r1, r0")
+
+    // data_ptr = base + 8
+    emit("  addi r1, r1, 8")
+
+    // Pop total_length
+    emit("  popd r3")               // r3 = total_length
+
+    // Save data_ptr and total_length
+    emit("  pshd r1")               // save data_ptr
+    emit("  pshd r3")               // save total_length
+
+    // Write '-' if negative
+    emitAddImm(4, 5, -8)
+    emit("  ldd r2, r4, r0")        // r2 = is_negative
+    val noSignLabel = newLabel("str_nosign")
+    emit(s"  beq r2, r0, $noSignLabel")
+    emit("  ldi r2, 45")            // '-'
+    emit("  stb r2, r1, r0")
+    emit("  addi r1, r1, 1")
+    emit(s"$noSignLabel")
+
+    // Copy digits in reverse: buffer[count-1]..buffer[0] → data
+    emitAddImm(4, 5, -16)
+    emit("  ldd r3, r4, r0")        // r3 = digit_count
+    emitAddImm(4, 5, -40)
+    emit("  add r4, r4, r3")        // r4 = &buffer[count] (one past last)
+
+    val copyLabel = newLabel("str_copy")
+    val copyDoneLabel = newLabel("str_copy_done")
+    emit(s"$copyLabel")
+    emit(s"  beq r3, r0, $copyDoneLabel")
+    emit("  addi r4, r4, -1")       // r4 = &buffer[--i]
+    emit("  ldb r2, r4, r0")        // r2 = digit
+    emit("  stb r2, r1, r0")        // *dest = digit
+    emit("  addi r1, r1, 1")
+    emit("  addi r3, r3, -1")
+    emit(s"  bra $copyLabel")
+    emit(s"$copyDoneLabel")
+
+    // Pop total_length and data_ptr
+    emit("  popd r3")               // r3 = total_length
+    emit("  popd r1")               // r1 = data_ptr
+
+    // Write {ptr, len} to return slot
+    emitAddImm(4, 5, 16)
+    emit("  ldd r4, r4, r0")        // r4 = return slot address
+    emit("  std r1, r4, r0")        // [ret+0] = data_ptr
+    emit("  addi r2, r4, 8")
+    emit("  std r3, r2, r0")        // [ret+8] = total_length
+
+    // r1 = return slot address (ABI)
+    emit("  mov r1, r4")
+
+    // Epilogue
+    emit("  mov r7, r5")
+    emit("  popd r5")
+    emit("  popd r6")
+    emitAddImm(7, 7, 8)             // skip 1 reg param
+    emit("  jalr r0, r6")
 
   private def emit(line: String): Unit =
     out ++= line
