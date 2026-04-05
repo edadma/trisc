@@ -1,0 +1,591 @@
+std.slices — Generic slice operations
+=======================================
+
+The `std.slices` module provides generic operations on `[]T`
+for any element type `T`: equality testing, searching, cloning,
+reversing, filling, concatenation, and min/max. It is the
+first `std` module that leans on Sysl's generics and serves
+as a reference for what generic stdlib code looks like.
+
+Unlike `std.mem` (which operates byte-by-byte on `[]byte`
+only), `std.slices` works element-wise on slices of any type
+for which the relevant operators are defined. The underlying
+comparisons (`==`, `<`, `>`) may be primitive-built-in for
+types like `int`, or may dispatch through user-defined traits
+(`Eq[T]`, `Ord[T]`) for struct types that implement them.
+
+At instantiation time, the compiler requires the operators to
+be resolvable for the chosen concrete type. A call to
+`contains(s, x)` where neither `T == T` nor a matching `Eq[T]`
+impl exists fails at the call site.
+
+Dependencies: none.
+
+
+    module std.slices
+
+
+equal
+-----
+
+`equal(a, b)` returns `true` iff `a` and `b` have the same
+length and matching elements at every index.
+
+    equal[T](a: []T, b: []T) -> bool
+        val n = len(a)
+
+        if len(b) != n then return false
+
+        var i = 0
+
+        while i < n
+            if a[i] != b[i] then return false
+            i++
+
+        true
+
+
+contains
+--------
+
+`contains(s, x)` returns `true` iff `x` appears anywhere in `s`.
+
+    contains[T](s: []T, x: T) -> bool
+        val n = len(s)
+        var i = 0
+
+        while i < n
+            if s[i] == x then return true
+            i++
+
+        false
+
+
+index
+-----
+
+`index(s, x)` returns the position of the first occurrence of
+`x` in `s`, or `-1` if `x` is not present.
+
+    index[T](s: []T, x: T) -> int
+        val n = len(s)
+        var i = 0
+
+        while i < n
+            if s[i] == x then return i
+            i++
+
+        -1
+
+
+clone
+-----
+
+`clone(s)` returns a fresh `[]T` with the same elements as
+`s`. The new slice is independent of `s`; modifying one does
+not affect the other.
+
+    clone[T](s: []T) -> []T
+        val n = len(s)
+        val buf = new [n]T
+        var i = 0
+
+        while i < n
+            buf[i] = s[i]
+            i++
+
+        buf[:]
+
+
+reverse
+-------
+
+`reverse(s)` returns a fresh `[]T` containing the elements of
+`s` in reverse order. `s` itself is unchanged.
+
+    reverse[T](s: []T) -> []T
+        val n = len(s)
+        val buf = new [n]T
+        var i = 0
+
+        while i < n
+            buf[i] = s[n - 1 - i]
+            i++
+
+        buf[:]
+
+
+fill
+----
+
+`fill(s, x)` sets every element of `s` to `x`. This is an
+in-place mutation and modifies the caller's slice.
+
+    fill[T](s: []T, x: T)
+        val n = len(s)
+        var i = 0
+
+        while i < n
+            s[i] = x
+            i++
+
+
+concat
+------
+
+`concat(a, b)` returns a fresh `[]T` containing the elements
+of `a` followed by the elements of `b`.
+
+    concat[T](a: []T, b: []T) -> []T
+        val na = len(a)
+        val nb = len(b)
+        val buf = new [na + nb]T
+        var i = 0
+
+        while i < na
+            buf[i] = a[i]
+            i++
+
+        var j = 0
+
+        while j < nb
+            buf[na + j] = b[j]
+            j++
+
+        buf[:]
+
+
+min
+---
+
+`min(s)` returns the smallest element of `s` (by `<`). Panics
+if `s` is empty — callers must guard against the empty case.
+
+    min[T](s: []T) -> T
+        val n = len(s)
+
+        if n == 0 then panic("std.slices.min: empty slice")
+
+        var m: T = s[0]
+        var i = 1
+
+        while i < n
+            if s[i] < m then m = s[i]
+            i++
+
+        m
+
+
+max
+---
+
+`max(s)` returns the largest element of `s` (by `>`). Panics
+on empty input.
+
+    max[T](s: []T) -> T
+        val n = len(s)
+
+        if n == 0 then panic("std.slices.max: empty slice")
+
+        var m: T = s[0]
+        var i = 1
+
+        while i < n
+            if s[i] > m then m = s[i]
+            i++
+
+        m
+
+
+Tests
+=====
+
+### equal
+
+    #test
+    test_equal_same_contents() -> void
+        val a = new [3]int
+        val b = new [3]int
+
+        a[0] = 1
+        a[1] = 2
+        a[2] = 3
+        b[0] = 1
+        b[1] = 2
+        b[2] = 3
+
+        assert(equal(a[:], b[:]), "identical")
+
+    #test
+    test_equal_different_values() -> void
+        val a = new [3]int
+        val b = new [3]int
+
+        a[0] = 1
+        a[1] = 2
+        a[2] = 3
+        b[0] = 1
+        b[1] = 2
+        b[2] = 4
+
+        assert(!equal(a[:], b[:]), "last differs")
+
+    #test
+    test_equal_different_lengths() -> void
+        val a = new [2]int
+        val b = new [3]int
+
+        a[0] = 1
+        a[1] = 2
+        b[0] = 1
+        b[1] = 2
+        b[2] = 0
+
+        assert(!equal(a[:], b[:]), "length mismatch")
+
+    #test
+    test_equal_empty() -> void
+        val a = new [0]int
+        val b = new [0]int
+
+        assert(equal(a[:], b[:]), "empty equals empty")
+
+
+### contains / index
+
+    #test
+    test_contains_found() -> void
+        val s = new [4]int
+        s[0] = 10
+        s[1] = 20
+        s[2] = 30
+        s[3] = 40
+
+        assert(contains(s[:], 30), "found")
+
+    #test
+    test_contains_not_found() -> void
+        val s = new [3]int
+        s[0] = 1
+        s[1] = 2
+        s[2] = 3
+
+        assert(!contains(s[:], 99), "missing")
+
+    #test
+    test_contains_empty() -> void
+        val s = new [0]int
+        assert(!contains(s[:], 1), "empty never contains")
+
+    #test
+    test_index_first_occurrence() -> void
+        val s = new [4]int
+        s[0] = 1
+        s[1] = 2
+        s[2] = 1
+        s[3] = 2
+
+        assert(index(s[:], 2) == 1, "first 2")
+
+    #test
+    test_index_not_found() -> void
+        val s = new [3]int
+        s[0] = 1
+        s[1] = 2
+        s[2] = 3
+
+        assert(index(s[:], 99) == -1, "missing")
+
+
+### clone
+
+    #test
+    test_clone_independent() -> void
+        val src = new [3]int
+        src[0] = 1
+        src[1] = 2
+        src[2] = 3
+
+        val c = clone(src[:])
+
+        // Mutate original — clone should be untouched
+        src[0] = 99
+
+        assert(c[0] == 1, "clone preserved byte 0")
+        assert(c[1] == 2, "clone preserved byte 1")
+        assert(c[2] == 3, "clone preserved byte 2")
+
+    #test
+    test_clone_empty() -> void
+        val s = new [0]int
+        val c = clone(s[:])
+
+        assert(len(c) == 0, "empty clone")
+
+
+### reverse
+
+    #test
+    test_reverse_odd_length() -> void
+        val s = new [5]int
+        s[0] = 1
+        s[1] = 2
+        s[2] = 3
+        s[3] = 4
+        s[4] = 5
+
+        val r = reverse(s[:])
+
+        assert(r[0] == 5, "first")
+        assert(r[1] == 4, "second")
+        assert(r[2] == 3, "middle")
+        assert(r[3] == 2, "fourth")
+        assert(r[4] == 1, "fifth")
+
+    #test
+    test_reverse_even_length() -> void
+        val s = new [4]int
+        s[0] = 1
+        s[1] = 2
+        s[2] = 3
+        s[3] = 4
+
+        val r = reverse(s[:])
+
+        assert(r[0] == 4, "first")
+        assert(r[3] == 1, "last")
+
+    #test
+    test_reverse_single() -> void
+        val s = new [1]int
+        s[0] = 42
+
+        val r = reverse(s[:])
+
+        assert(r[0] == 42, "identity")
+
+    #test
+    test_reverse_empty() -> void
+        val s = new [0]int
+        val r = reverse(s[:])
+
+        assert(len(r) == 0, "empty")
+
+
+### fill
+
+    #test
+    test_fill_replaces_all() -> void
+        val s = new [4]int
+        s[0] = 1
+        s[1] = 2
+        s[2] = 3
+        s[3] = 4
+
+        fill(s[:], 99)
+
+        assert(s[0] == 99, "byte 0")
+        assert(s[1] == 99, "byte 1")
+        assert(s[2] == 99, "byte 2")
+        assert(s[3] == 99, "byte 3")
+
+    #test
+    test_fill_empty_is_noop() -> void
+        val s = new [0]int
+        fill(s[:], 99)
+
+
+### concat
+
+    #test
+    test_concat_basic() -> void
+        val a = new [2]int
+        val b = new [3]int
+        a[0] = 1
+        a[1] = 2
+        b[0] = 3
+        b[1] = 4
+        b[2] = 5
+
+        val c = concat(a[:], b[:])
+
+        assert(len(c) == 5, "combined length")
+        assert(c[0] == 1, "a[0]")
+        assert(c[1] == 2, "a[1]")
+        assert(c[2] == 3, "b[0]")
+        assert(c[3] == 4, "b[1]")
+        assert(c[4] == 5, "b[2]")
+
+    #test
+    test_concat_empty_left() -> void
+        val a = new [0]int
+        val b = new [2]int
+        b[0] = 10
+        b[1] = 20
+
+        val c = concat(a[:], b[:])
+
+        assert(len(c) == 2, "length")
+        assert(c[0] == 10, "b[0]")
+        assert(c[1] == 20, "b[1]")
+
+    #test
+    test_concat_empty_right() -> void
+        val a = new [2]int
+        val b = new [0]int
+        a[0] = 10
+        a[1] = 20
+
+        val c = concat(a[:], b[:])
+
+        assert(len(c) == 2, "length")
+        assert(c[0] == 10, "a[0]")
+        assert(c[1] == 20, "a[1]")
+
+    #test
+    test_concat_both_empty() -> void
+        val a = new [0]int
+        val b = new [0]int
+
+        val c = concat(a[:], b[:])
+
+        assert(len(c) == 0, "empty")
+
+
+### min / max
+
+    #test
+    test_min_basic() -> void
+        val s = new [4]int
+        s[0] = 30
+        s[1] = 10
+        s[2] = 40
+        s[3] = 20
+
+        assert(min(s[:]) == 10, "smallest")
+
+    #test
+    test_min_single() -> void
+        val s = new [1]int
+        s[0] = 42
+
+        assert(min(s[:]) == 42, "identity")
+
+    #test
+    test_min_all_equal() -> void
+        val s = new [3]int
+        s[0] = 7
+        s[1] = 7
+        s[2] = 7
+
+        assert(min(s[:]) == 7, "all equal")
+
+    #test
+    test_max_basic() -> void
+        val s = new [4]int
+        s[0] = 30
+        s[1] = 10
+        s[2] = 40
+        s[3] = 20
+
+        assert(max(s[:]) == 40, "largest")
+
+    #test
+    test_max_single() -> void
+        val s = new [1]int
+        s[0] = 42
+
+        assert(max(s[:]) == 42, "identity")
+
+    #test(should_panic: "empty slice")
+    test_min_empty_panics() -> void
+        val s = new [0]int
+        val _r = min(s[:])
+
+    #test(should_panic: "empty slice")
+    test_max_empty_panics() -> void
+        val s = new [0]int
+        val _r = max(s[:])
+
+
+### Generic instantiation — other types
+
+    #test
+    test_contains_i64() -> void
+        val s = new [3]i64
+        s[0] = 100i64
+        s[1] = 200i64
+        s[2] = 300i64
+
+        assert(contains(s[:], 200i64), "found i64")
+        assert(!contains(s[:], 999i64), "missing i64")
+
+    #test
+    test_clone_i64() -> void
+        val s = new [3]i64
+        s[0] = 1i64
+        s[1] = 2i64
+        s[2] = 3i64
+
+        val c = clone(s[:])
+
+        assert(c[0] == 1i64, "byte 0")
+        assert(c[1] == 2i64, "byte 1")
+        assert(c[2] == 3i64, "byte 2")
+
+    #test
+    test_reverse_byte() -> void
+        val s = new [3]byte
+        s[0] = 10u8
+        s[1] = 20u8
+        s[2] = 30u8
+
+        val r = reverse(s[:])
+
+        assert(r[0] == 30u8, "first")
+        assert(r[1] == 20u8, "middle")
+        assert(r[2] == 10u8, "last")
+
+
+Design notes
+------------
+
+**No trait bounds for v1.** `contains`, `equal`, `index` rely
+on `==`; `min`, `max` rely on `<` and `>`. These resolve at
+instantiation time — built-in for primitives, dispatched
+through `Eq[T]`/`Ord[T]` traits for user types that define
+them. A user-supplied trait-free struct type will fail with
+a clear error at the call site.
+
+Later, a canonical `std.cmp` module providing `Eq[T]` and
+`Ord[T]` trait declarations will formalize these bounds:
+`contains[T: Eq]`, `min[T: Ord]`. The function signatures
+will tighten but the behavior and callers won't change.
+
+**Panic on empty min/max.** The alternative — returning
+`Option[T]` — requires `std.result` (or generic enums
+elsewhere) and adds allocation pressure. Panicking on empty
+input makes callers handle the edge case explicitly at the
+call site via a length check. Go's `slices.Min` does the
+same thing.
+
+**Allocation model.** `clone`, `reverse`, `concat` all
+allocate fresh `&[]T` heap arrays and return a slice over
+them. `fill` mutates in place. There is no in-place
+`reverse` (yet) because it requires a temp variable typed
+`T` and the allocation semantics are not obviously better
+than the copy-returning version.
+
+**No `sort`, `binary_search`, `insert`, `delete`.** Sort
+deserves its own module or section once a comparator
+convention is settled — likely `sort[T: Ord]` using a
+simple O(n log n) algorithm (heapsort is a good default:
+in-place, guaranteed n log n, no recursion depth concerns).
+Binary search composes on top. Insert/delete wait until
+there's a clear story for slice reallocation costs.
+
+**No `ContainsFunc` / `IndexFunc` / `EqualFunc`.** Go's
+closure-predicate variants wait until Sysl's closure story
+is settled and first-class function values are comfortable
+to pass around. For now, `contains`/`index`/`equal` cover
+the cases that pure-value semantics reach.
