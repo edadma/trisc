@@ -351,8 +351,10 @@ class SyslParser extends StandardTokenParsers {
             val fullLvalue = IndexAST(base, idx)
             IndexAssignStmtAST(base, idx, BinaryAST(fullLvalue, op, value))
 
+  lazy val bindName: Parser[String] = ident | "_"
+
   lazy val identStmt: Parser[StmtAST] =
-    mutability ~ ident ~ (":" ~> typeExpr) ~ ("=" ~> tupleExpr) ^^ { case mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut) } |
+    mutability ~ bindName ~ (":" ~> typeExpr) ~ ("=" ~> tupleExpr) ^^ { case mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut) } |
       mutability ~ ident ~ (":" ~> typeExpr) ^^ { case mut ~ name ~ t =>
         val size = t match { case ArrayTypeAST(s, _) => s; case _ => 0 }
         VarStmtAST(name, Some(t), ArrayDeclAST(size, t), mut)
@@ -360,8 +362,8 @@ class SyslParser extends StandardTokenParsers {
       mutability ~ ident ~ (":" ~> typeRef) ~ not("=") ^^ { case mut ~ name ~ t ~ _ =>
         VarStmtAST(name, Some(t), UninitDeclAST(t), mut)
       } |
-      mutability ~ ident ~ (":" ~> typeRef) ~ ("=" ~> tupleExpr) ^^ { case mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut) } |
-      mutability ~ ident ~ ("=" ~> tupleExpr) ^^ { case mut ~ name ~ e => VarStmtAST(name, None, e, mut) } |
+      mutability ~ bindName ~ (":" ~> typeRef) ~ ("=" ~> tupleExpr) ^^ { case mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut) } |
+      mutability ~ bindName ~ ("=" ~> tupleExpr) ^^ { case mut ~ name ~ e => VarStmtAST(name, None, e, mut) } |
       ident ~ (":" ~> typeExpr) ~ ("=" ~> tupleExpr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ (":" ~> typeExpr) ^^ { case name ~ t =>
         val size = t match { case ArrayTypeAST(s, _) => s; case _ => 0 }

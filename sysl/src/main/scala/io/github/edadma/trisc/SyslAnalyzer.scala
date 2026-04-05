@@ -749,9 +749,14 @@ class SyslAnalyzer:
         val tInit = coerceLiteral(tInit0, declType)
         if typOpt.isDefined && !compatible(tInit.typ, declType) then
           throw AnalysisError(s"cannot assign ${tInit.typ} to $declType variable '$name'")
-        if scopeStack != null then
-          currentScope(name) = SymInfo(name, declType, isMutable)
-        TVarStmt(name, declType, tInit)
+        // `_` is a discard binding: evaluate the initializer for its side effects
+        // but don't bind any name. Multiple `_`s in the same scope don't collide.
+        if name == "_" then
+          TExprStmt(tInit)
+        else
+          if scopeStack != null then
+            currentScope(name) = SymInfo(name, declType, isMutable)
+          TVarStmt(name, declType, tInit)
 
       case DestructureStmtAST(names, init, isMutable) =>
         val tInit = analyzeExpr(init)
@@ -1065,6 +1070,8 @@ class SyslAnalyzer:
           case _ => TIntLit(0, t)  // zero-initialize scalars and pointers
 
       case VarRefAST(name) =>
+        if name == "_" then
+          throw AnalysisError("cannot read from '_' — it is a write-only discard binding")
         // Check if name is a function (used as a value = function pointer)
         if functions.contains(name) then
           val f = functions(name)
