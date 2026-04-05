@@ -939,7 +939,7 @@ puts(s"cost is $$5")        // prints "cost is $5" ($$ = literal $)
 
 Plain strings (`"..."`) are never interpolated — `$` is just a regular character.
 
-Non-string expressions are automatically converted via `str()`. Only integer and boolean types are currently supported for interpolation.
+Non-string expressions are automatically converted via `str()`. Integer, boolean, and float (`f64`) types are supported.
 
 ### `str()` Builtin
 
@@ -950,7 +950,12 @@ str(42)                   // "42"
 str(-5)                   // "-5"
 str(0)                    // "0"
 str("hello")              // "hello" (identity for strings)
+str(3.14)                 // "3.140000" (codegen: fixed 6-digit fractional)
 ```
+
+Float formatting uses fixed 6-digit fractional precision in TRISC codegen
+(`3.14 -> "3.140000"`). The interpreter uses the host's default float
+formatting (`3.14 -> "3.14"`).
 
 ### String Construction from Bytes
 

@@ -122,4 +122,33 @@ class SyslStringInterpolationTests extends SyslTestHelpers {
     output(
       "main() -> int\n    x = -5\n    puts(s\"x is $x\")\n    0\n") shouldBe "x is -5"
   }
+
+  // ===== Float interpolation =====
+
+  "interpolate positive float" in {
+    output(
+      """main() -> int
+        |    val x = 3.14
+        |    puts(s"x=$x")
+        |    0
+        |""".stripMargin) shouldBe "x=3.14"
+  }
+
+  "interpolate integer-valued float" in {
+    output(
+      """main() -> int
+        |    val x = 42.0
+        |    puts(s"x=$x")
+        |    0
+        |""".stripMargin) shouldBe "x=42.0"
+  }
+
+  "str of float" in {
+    output(
+      """main() -> int
+        |    val x = 1.5
+        |    puts(str(x))
+        |    0
+        |""".stripMargin) shouldBe "1.5"
+  }
 }
