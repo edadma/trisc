@@ -474,14 +474,17 @@ instantiation time.
 
 ### Methods
 
-Methods are functions named `StructName_methodName` with a `self` parameter:
+Methods are declared with the `StructName.methodName(...)` syntax. The parser
+automatically prepends a hidden `__self__: *StructName` parameter, so you do
+**not** write `self` in the parameter list — just refer to `self` inside the
+method body:
 
 ```sysl
 struct Point
     x: int
     y: int
 
-Point.magnitude(self: *Point) -> int
+Point.magnitude() -> int
     self.x * self.x + self.y * self.y
 
 main() -> int
@@ -491,6 +494,9 @@ main() -> int
     p.magnitude()     // desugars to Point_magnitude(&p)
 ```
 
+Inside the method body, `self` is an alias for the implicit receiver — it
+has type `*StructName` (raw pointer to the instance).
+
 ### Deinit Blocks
 
 ```sysl
@@ -498,7 +504,7 @@ struct Buffer
     data: *byte
     size: int
 
-Buffer.deinit(self: *Buffer)
+Buffer.deinit()
     free(self.data)   // called automatically when &Buffer refcount hits 0
 ```
 
