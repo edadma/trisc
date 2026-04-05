@@ -1133,7 +1133,7 @@ class SyslAnalyzer:
           case PtrType(elem) => elem
           case SliceType(elem) => elem
           case RefType(SliceType(elem)) => elem
-          case StringType => I8
+          case StringType => U8
           case t => throw AnalysisError(s"cannot index $t")
         TIndex(tArr, tIndex, elemType)
 
