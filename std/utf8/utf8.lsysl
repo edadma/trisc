@@ -225,7 +225,7 @@ and codepoints exceeding `MAX_RUNE`.
 
             return r, 4
 
-        RUNE_ERROR, 1
+        return RUNE_ERROR, 1
 
 
 rune_count

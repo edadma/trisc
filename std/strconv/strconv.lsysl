@@ -61,7 +61,7 @@ want lenient behavior can normalize their input first.
         if n == 4 && s[0] == byte('t') && s[1] == byte('r') && s[2] == byte('u') && s[3] == byte('e') then return true, true
         if n == 5 && s[0] == byte('f') && s[1] == byte('a') && s[2] == byte('l') && s[3] == byte('s') && s[4] == byte('e') then return false, true
 
-        false, false
+        return false, false
 
 
 ### parse_i64
@@ -115,7 +115,7 @@ negative-accumulation covers the whole range with one code path.
         // Positive: negate. If acc == MIN_I64, -acc would overflow.
         if acc < -9223372036854775807i64 then return 0i64, false
 
-        -acc, true
+        return -acc, true
 
 
 ### parse_int
@@ -131,7 +131,7 @@ range. Values outside `[MIN_I32, MAX_I32]` fail with
         if v > 2147483647i64 then return 0, false
         if v < -2147483648i64 then return 0, false
 
-        int(v), true
+        return int(v), true
 
 
 Formatters
