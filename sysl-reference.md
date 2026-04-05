@@ -89,7 +89,18 @@ enum Color
     Yellow            // 11 (auto-increment)
 ```
 
-Access via `Color.Red`, `Color.Blue`, etc. At runtime, simple enum members are plain `i32` values.
+Access via `Color.Red`, `Color.Blue`, etc. At runtime, simple enum members are plain `i32` values. Simple enums can also be used as distinct types in type positions (e.g. `Result[int, ParseError]`); their bare variant names work as constructors:
+
+```sysl
+enum ParseError
+    EmptyInput
+    BadDigit
+    Overflow
+
+parse(s: string) -> Result[i64, ParseError]
+    if len(s) == 0 then return Err(EmptyInput)   // bare variant name
+    Ok(42)
+```
 
 ### Tagged Unions (Data Enums)
 
@@ -190,6 +201,26 @@ var p: *Node
 // Inferred type (mutable by default in blocks)
 x = 42               // inferred as int
 name = "hello"       // inferred as string
+```
+
+### Discard Binding (`_`)
+
+`_` is a write-only binding (Go/Rust style). You can bind to it; you cannot reference it; multiple `_` bindings in the same scope don't collide.
+
+```sysl
+val _ = foo()              // evaluate for side effects, discard result
+val _ = bar()              // fine — no collision with the first _
+val _: int = 7             // type annotations allowed
+var _ = baz()              // var form also works
+```
+
+In destructuring patterns, `_` discards the corresponding field:
+
+```sysl
+_, y = pair()              // discard first, bind second
+val x, _ = pair()          // discard second
+val a, _, c = triple()     // discard middle element
+_, _ = pair()              // discard all (evaluate for side effects)
 ```
 
 ### Global Variables
@@ -554,6 +585,7 @@ extern var errno: int
 0xFF                  // hex literal
 100u32                // typed literal suffix
 3.14                  // double (f64)
+1.5e10                // scientific notation
 'A'                   // char literal (u32, value 65)
 '\n'                  // escape char
 "hello"               // string literal
@@ -563,6 +595,33 @@ true, false           // bool
 0xDEAD_BEEF           // grouping for readability
 0xFF_00_FF_00u32      // combined with type suffix
 3.141_592             // underscores in fractional part
+```
+
+**Type suffixes** on integer literals force a specific type:
+
+```sysl
+42i8                  // i8
+42i16                 // i16
+42i32                 // i32 (same as plain `42`)
+42i64                 // i64
+200u8                 // u8
+1000u16               // u16
+100u32                // u32
+0xFFu64               // u64
+```
+
+Float literals (`3.14`, `1e5`) are always `f64`. There is no `f32` type.
+
+**Escape sequences** in string and char literals:
+
+```
+\n    newline
+\t    tab
+\r    carriage return
+\0    null (0x00)
+\\    literal backslash
+\'    literal single quote
+\"    literal double quote
 ```
 
 ### Operators (by precedence, lowest to highest)
@@ -1002,6 +1061,8 @@ s = string(data[:5])      // string from []byte slice
 | `calloc` | `(count: i64, size: i64) -> *i8` | Allocate zeroed memory |
 | `realloc` | `(ptr: *i8, size: i64) -> *i8` | Resize allocation |
 | `sbrk` | `(increment: i32) -> *i8` | Extend heap (POSIX) |
+| `panic` | `(msg: string) -> void` | Halt with message (trap 1, error code 4) |
+| `assert` | `(cond: bool, msg: string) -> void` | Panic with `msg` if `cond` is false |
 | `abort` | `()` | Terminate execution (trap 1, error code 3) |
 
 User-defined functions shadow builtins of the same name.
@@ -1053,6 +1114,7 @@ The codegen emits `trap 1` for runtime errors. On the OS, the trap handler termi
 | 1 | Array/slice index out of bounds |
 | 2 | Null pointer (malloc returned null) |
 | 3 | `abort()` called |
+| 4 | `panic()` or `assert()` failure |
 
 ---
 
@@ -1068,9 +1130,21 @@ The codegen emits `trap 1` for runtime errors. On the OS, the trap handler termi
 #if !BARE_METAL
     import posix.stdlib.*
 #endif
+
+#if TARGET == "trisc"
+    extern halt()
+#endif
+
+#if VERSION != "1.0"
+    import new_api.*
+#endif
 ```
 
-Conditions support: symbols, negation (`!`), equality (`==`), inequality (`!=`), numeric values.
+**Condition forms:**
+- `#if SYMBOL` — true if the symbol is defined and not `"false"`, `"0"`, or `""`
+- `#if !SYMBOL` — negation
+- `#if SYMBOL == "value"` — string equality
+- `#if SYMBOL != "value"` — string inequality
 
 ---
 
@@ -1198,3 +1272,58 @@ Calls still compile and run normally — `#deprecated` only reports usage.
 - Struct/string return: caller allocates return slot, passes hidden pointer as first arg in r1.
 - String arguments: 16 bytes `{ptr, len}` pushed on stack.
 - `mul Rd, Rs1, Rs2` writes high bits to `r((d+1) & 7)` — never use `mul r4`/`r5`/`r6` as destination.
+
+---
+
+## Literate Sysl (`.lsysl` files)
+
+`.lsysl` files are **literate programming** sources — full Markdown documents that contain Sysl code as indented blocks. The compiler extracts (tangles) the code and discards the prose; the documentation toolchain renders (weaves) the prose with syntax-highlighted code.
+
+### Format
+
+- **Prose** starts at column 0 — it's standard Markdown.
+- **Code** is indented (4+ spaces or 1+ tabs) — extracted as Sysl source.
+- Fenced code blocks (triple backticks) in the prose are **not** extracted as code — they're documentation-only examples.
+
+```
+This is prose explaining the module.
+
+    module std.mem
+
+    copy(dst: []byte, src: []byte) -> int
+        // ... implementation ...
+
+More prose describing the next function.
+
+    set(dst: []byte, val: byte)
+        // ...
+```
+
+### Markdown Features
+
+The `.lsysl` renderer supports:
+
+- **Headings** (`#` through `######`)
+- **Paragraphs**, **bold** (`**text**`), **italic** (`*text*`)
+- **Inline code** (backtick-delimited)
+- **Fenced code blocks** with syntax highlighting (15+ languages including `sysl`, `python`, `javascript`, `rust`, `c`, `bash`, `json`, and more)
+- **Indented code blocks** (default to `sysl` highlighting)
+- **Unordered and ordered lists** (with nesting)
+- **Block quotes** (`>`)
+- **Tables** (GFM-style pipe tables)
+- **Horizontal rules** (`---`)
+- **Links** (`[text](url)`)
+- **HTML comments** (`<!-- -->`)
+- **LaTeX math** via KaTeX — inline `\(x^2\)` and display `\[equation\]`
+
+### Commands
+
+```
+sysl doc <file.lsysl>                   # render one file to HTML
+sysl doc <directory>                     # render all .lsysl in directory + index
+sysl doc --output <dir> <file.lsysl>    # specify output directory
+```
+
+### Tangling
+
+When compiling, the `.lsysl` parser extracts all indented blocks as Sysl source, concatenating them in order. The extracted code is then compiled identically to a `.sysl` file. Module declarations, imports, functions, and `#test` annotations all work inside `.lsysl` code blocks.
