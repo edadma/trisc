@@ -500,12 +500,12 @@ Tests
     #test(should_panic: "empty slice")
     test_min_empty_panics() -> void
         val s = new [0]int
-        val _r = min(s[:])
+        val _ = min(s[:])
 
     #test(should_panic: "empty slice")
     test_max_empty_panics() -> void
         val s = new [0]int
-        val _r = max(s[:])
+        val _ = max(s[:])
 
 
 ### Generic instantiation — other types
