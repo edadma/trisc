@@ -101,9 +101,12 @@ class SyslTriscCodegen(addresses: Int = 4):
                     case None => emit(s"  $elemDir 0")
               case _ =>
                 val directive = emitDataDirective(typ)
-                constEval(init) match
-                  case Some(n) => emit(s"  $directive $n")
-                  case None => emit(s"  $directive 0")
+                floatConstEval(init) match
+                  case Some(d) => emit(s"  $directive $d")
+                  case None =>
+                    constEval(init) match
+                      case Some(n) => emit(s"  $directive $n")
+                      case None => emit(s"  $directive 0")
           case _ =>
 
     // Emit bss segment — zero-initialized globals (arrays, structs, uninitialized)
@@ -175,14 +178,24 @@ class SyslTriscCodegen(addresses: Int = 4):
     init match
       case TArrayLit(_, _) => false // array literal has explicit values → data
       case _ =>
-        typ match
-          case SyslType.ArrayType(_, _) => true // uninitialized array → bss
-          case _: SyslType.StructType => true // struct → bss
-          case _ =>
-            constEval(init) match
-              case Some(0) => true // explicitly zero → bss
-              case None => true // no initializer → bss
-              case _ => false // nonzero constant → data
+        floatConstEval(init) match
+          case Some(0.0) => true  // explicit zero float → bss
+          case Some(_) => false   // nonzero float constant → data
+          case None =>
+            typ match
+              case SyslType.ArrayType(_, _) => true // uninitialized array → bss
+              case _: SyslType.StructType => true // struct → bss
+              case _ =>
+                constEval(init) match
+                  case Some(0) => true // explicitly zero → bss
+                  case None => true // no initializer → bss
+                  case _ => false // nonzero constant → data
+
+  // Compile-time evaluate a float expression (handles literal and unary minus).
+  private def floatConstEval(expr: TExpr): Option[Double] = expr match
+    case TFloatLit(d, _) => Some(d)
+    case TUnary("-", operand, _) => floatConstEval(operand).map(-_)
+    case _ => None
 
   // Does this return type require a caller-allocated return slot?
   private def returnsViaPointer(typ: SyslType): Boolean = typ.isInstanceOf[SyslType.StructType] || typ == SyslType.StringType || typ.isInstanceOf[SyslType.SliceType] || typ.isInstanceOf[SyslType.EnumType]
@@ -2754,6 +2767,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType => "db"
     case SyslType.IntType(16) | SyslType.UIntType(16) => "ds"
     case SyslType.IntType(32) | SyslType.UIntType(32) => "dw"
+    case SyslType.DoubleType => "dd"
     case _ => "dl"
 
   // Emit address of local variable into target register

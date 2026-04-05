@@ -240,4 +240,47 @@ class SyslCodegenFloatTests extends SyslCodegenHelpers {
         |    int(sum)
         |""".stripMargin) shouldBe 7
   }
+
+  // ===== Global float initializers (regression) =====
+  // Global val/var with a nonzero double initializer must emit the value
+  // in the data segment, not reserve zero bytes in bss.
+
+  "global float val with nonzero initializer" in {
+    compileAndRun(
+      """val g: f64 = 3.5
+        |main() -> int = int(g)
+        |""".stripMargin) shouldBe 3
+  }
+
+  "global float var with nonzero initializer" in {
+    compileAndRun(
+      """var g: f64 = 7.25
+        |main() -> int = int(g)
+        |""".stripMargin) shouldBe 7
+  }
+
+  "global float used in arithmetic" in {
+    compileAndRun(
+      """val pi: f64 = 3.14
+        |main() -> int
+        |    val x = pi + 1.0
+        |    int(x)
+        |""".stripMargin) shouldBe 4
+  }
+
+  "global float zero stays in bss" in {
+    compileAndRun(
+      """val g: f64 = 0.0
+        |main() -> int = int(g)
+        |""".stripMargin) shouldBe 0
+  }
+
+  "global float negative literal" in {
+    compileAndRun(
+      """val g: f64 = -2.5
+        |main() -> int
+        |    val x = g + 10.0
+        |    int(x)
+        |""".stripMargin) shouldBe 7
+  }
 }
