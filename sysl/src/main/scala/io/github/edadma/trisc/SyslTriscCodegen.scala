@@ -1763,7 +1763,16 @@ class SyslTriscCodegen(addresses: Int = 4):
         // Bounds check: load length from [r1 - 8]
         emitAddImm(3, 1, -8)
         emit("  ldd r3, r3, r0") // r3 = length
-        // TODO: emit trap/abort if r2 >= r3 (bounds check)
+        emit("  slt r4, r2, r0")
+        val boundsOk = newLabel("bounds_ok")
+        val boundsErr = newLabel("bounds_err")
+        emit(s"  bne r4, r0, $boundsErr")
+        emit("  slt r4, r2, r3")
+        emit(s"  bne r4, r0, $boundsOk")
+        emit(s"$boundsErr")
+        emit("  ldi r1, 1")      // error code: 1 = out-of-bounds
+        emit("  trap 1")
+        emit(s"$boundsOk")
         emitLoadImm(3, elemSize)
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = element address
