@@ -388,7 +388,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case ArrVal(c, o) => (c, o)
           case RefVal(c, _, _) => (c, 0)
           case other => throw RuntimeError(s"cannot destructure $other")
-        for (name, i) <- names.zipWithIndex do
+        for (name, i) <- names.zipWithIndex if name != "_" do
           env(name) = new Cell(cells(off + i).value)
 
       case TDestructureAssignStmt(names, _, init) =>
@@ -398,7 +398,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case RefVal(c, _, _) => (c, 0)
           case other => throw RuntimeError(s"cannot destructure $other")
         val values = names.indices.map(i => cells(off + i).value)
-        for (name, v) <- names.zip(values) do
+        for (name, v) <- names.zip(values) if name != "_" do
           lookupCell(name, env).value = v
 
       case TAssignStmt(target, value) =>

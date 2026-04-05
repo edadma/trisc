@@ -298,10 +298,11 @@ class SyslParser extends StandardTokenParsers {
     asmStmt | forStmt | doWhileStmt | whileStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
 
   lazy val destructureStmt: Parser[DestructureStmtAST] =
-    mutability ~ ("(" ~> rep1sep(ident, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case mut ~ names ~ init => DestructureStmtAST(names, init, mut) } |
-      ("(" ~> rep1sep(ident, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case names ~ init => DestructureStmtAST(names, init) } |
-      mutability ~ ident ~ ("," ~> rep1sep(ident, ",")) ~ ("=" ~> tupleExpr) ^^ { case mut ~ first ~ rest ~ init => DestructureStmtAST(first :: rest, init, mut) } |
-      ident ~ ("," ~> rep1sep(ident, ",")) ~ ("=" ~> tupleExpr) ^^ { case first ~ rest ~ init => DestructureStmtAST(first :: rest, init) }
+    mutability ~ ("(" ~> rep1sep(bindName, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case mut ~ names ~ init => DestructureStmtAST(names, init, mut) } |
+      ("(" ~> rep1sep(bindName, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case names ~ init => DestructureStmtAST(names, init) } |
+      mutability ~ bindName ~ ("," ~> rep1sep(bindName, ",")) ~ ("=" ~> tupleExpr) ^^ { case mut ~ first ~ rest ~ init => DestructureStmtAST(first :: rest, init, mut) } |
+      "_" ~ ("," ~> rep1sep(bindName, ",")) ~ ("=" ~> tupleExpr) ^^ { case _ ~ rest ~ init => DestructureStmtAST("_" :: rest, init) } |
+      ident ~ ("," ~> rep1sep(bindName, ",")) ~ ("=" ~> tupleExpr) ^^ { case first ~ rest ~ init => DestructureStmtAST(first :: rest, init) }
 
   lazy val breakStmt: Parser[BreakStmtAST] =
     "break" ^^^ BreakStmtAST()

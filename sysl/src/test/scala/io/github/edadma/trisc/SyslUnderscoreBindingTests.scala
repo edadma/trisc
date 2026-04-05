@@ -63,4 +63,73 @@ class SyslUnderscoreBindingTests extends SyslTestHelpers {
         |    x
         |""".stripMargin) shouldBe 5
   }
+
+  // ===== Destructuring with _ =====
+
+  "destructure with _ discards first field" in {
+    eval(
+      """pair() -> (int, int)
+        |    (10, 20)
+        |
+        |main() -> int
+        |    val _, y = pair()
+        |    y
+        |""".stripMargin) shouldBe 20
+  }
+
+  "destructure with _ discards second field" in {
+    eval(
+      """pair() -> (int, int)
+        |    (10, 20)
+        |
+        |main() -> int
+        |    val x, _ = pair()
+        |    x
+        |""".stripMargin) shouldBe 10
+  }
+
+  "destructure discard all with _" in {
+    eval(
+      """pair() -> (int, int)
+        |    (10, 20)
+        |
+        |main() -> int
+        |    val _, _ = pair()
+        |    42
+        |""".stripMargin) shouldBe 42
+  }
+
+  "bare destructure with _ as declaration" in {
+    eval(
+      """pair() -> (int, int)
+        |    (100, 200)
+        |
+        |main() -> int
+        |    _, y = pair()
+        |    y
+        |""".stripMargin) shouldBe 200
+  }
+
+  "bare destructure assignment with _" in {
+    eval(
+      """pair() -> (int, int)
+        |    (100, 200)
+        |
+        |main() -> int
+        |    var x = 0
+        |    _, x = pair()
+        |    x
+        |""".stripMargin) shouldBe 200
+  }
+
+  "triple destructure with _ in middle" in {
+    eval(
+      """triple() -> (int, int, int)
+        |    (1, 2, 3)
+        |
+        |main() -> int
+        |    val a, _, c = triple()
+        |    a * 10 + c
+        |""".stripMargin) shouldBe 13
+  }
 }
