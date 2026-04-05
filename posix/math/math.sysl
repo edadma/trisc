@@ -3,9 +3,8 @@ module posix.math
 /*
  * math.sysl — Floating-point math operations (<math.h>)
  *
- * Hardware-backed where possible via TRISC float instructions.
+ * Hardware-backed via TRISC float instructions where available.
  * No OS dependency — usable in bare-metal programs.
- *
  */
 
 val PI = 3.14159265358979323846
@@ -30,7 +29,7 @@ signbit(x: double) -> int
     else 0
 
 /* Return the absolute value of x. */
-fabs(x: double) -> double = if x < 0.0 then -x else x
+fabs(x: double) -> double = asm("fabs r1, r1")
 
 /* Return the smaller of a and b. */
 fmin(a: double, b: double) -> double = if a < b then a else b
@@ -39,17 +38,7 @@ fmin(a: double, b: double) -> double = if a < b then a else b
 fmax(a: double, b: double) -> double = if a > b then a else b
 
 /* Return the square root of x. */
-sqrt(x: double) -> double
-    // TODO: maps to fsqrt instruction; needs inline asm or compiler intrinsic
-    var guess = x / 2.0
-
-    if x <= 0.0 then return 0.0
-
-    // Newton's method (temporary until inline asm available)
-    for var i = 0; i < 50; i++
-        guess = (guess + x / guess) / 2.0
-
-    guess
+sqrt(x: double) -> double = asm("fsqrt r1, r1")
 
 /* Truncate x toward zero. */
 trunc(x: double) -> double = double(int(x))
@@ -85,177 +74,37 @@ copysign(x: double, y: double) -> double
 
 /* Return x raised to the power y. */
 fpow(x: double, y: double) -> double
-    // TODO: maps to fpow instruction; needs inline asm or compiler intrinsic
-    // Integer exponent fallback
-    if y == trunc(y) && y >= 0.0
-        var result = 1.0
-        var base = x
-        var e = int(y)
-
-        while e > 0
-            if e & 1 == 1 then result *= base
-
-            base *= base
-            e = e >> 1
-
-        return result
-
-    // Negative integer exponent
-    if y == trunc(y)
-        return 1.0 / fpow(x, -y)
-
-    // Non-integer exponents: x^y = exp(y * log(x))
-    if x > 0.0 then return exp(y * log(x))
-
-    0.0  // negative base with fractional exponent is undefined
+    asm("ldd r2, r5, 24")
+    asm("fpow r1, r2")
 
 /* Return the sine of x (radians). */
-sin(x: double) -> double
-    // TODO: maps to fsin instruction; needs inline asm or compiler intrinsic
-    // Taylor series with range reduction (temporary until inline asm available)
-    // Reduce x to [-pi, pi]
-    var a = fmod(x, 2.0 * PI)
-
-    if a > PI then a -= 2.0 * PI
-    if a < -PI then a += 2.0 * PI
-
-    var term = a
-    var sum = a
-
-    for var i = 1; i < 20; i++
-        term = -term * a * a / double((2 * i) * (2 * i + 1))
-        sum += term
-
-    sum
+sin(x: double) -> double = asm("fsin r1, r1")
 
 /* Return the cosine of x (radians). */
-cos(x: double) -> double
-    // TODO: maps to fcos instruction; needs inline asm or compiler intrinsic
-    // Taylor series with range reduction (temporary until inline asm available)
-    var a = fmod(x, 2.0 * PI)
-
-    if a > PI then a -= 2.0 * PI
-    if a < -PI then a += 2.0 * PI
-
-    var term = 1.0
-    var sum = 1.0
-
-    for var i = 1; i < 20; i++
-        term = -term * a * a / double((2 * i - 1) * (2 * i))
-        sum += term
-
-    sum
+cos(x: double) -> double = asm("fcos r1, r1")
 
 /* Return the tangent of x (radians). */
-tan(x: double) -> double
-    // TODO: maps to ftan instruction; needs inline asm or compiler intrinsic
-    val c = cos(x)
-
-    if c == 0.0 then return 0.0  // degenerate — hardware would return ±inf
-
-    sin(x) / c
+tan(x: double) -> double = asm("ftan r1, r1")
 
 /* Return the arc sine of x. Result in [-pi/2, pi/2]. */
-asin(x: double) -> double
-    // TODO: maps to fasin instruction; needs inline asm or compiler intrinsic
-    // Identity: asin(x) = atan2(x, sqrt(1 - x*x))
-    if x >= 1.0 then return PI / 2.0
-    if x <= -1.0 then return -PI / 2.0
-
-    atan2(x, sqrt(1.0 - x * x))
+asin(x: double) -> double = asm("fasin r1, r1")
 
 /* Return the arc cosine of x. Result in [0, pi]. */
-acos(x: double) -> double
-    // TODO: maps to facos instruction; needs inline asm or compiler intrinsic
-    // Identity: acos(x) = pi/2 - asin(x)
-    PI / 2.0 - asin(x)
+acos(x: double) -> double = asm("facos r1, r1")
 
 /* Return the arc tangent of x. Result in [-pi/2, pi/2]. */
-atan(x: double) -> double
-    // TODO: maps to fatan instruction; needs inline asm or compiler intrinsic
-    // Convergent series with range reduction
-    // For |x| > 1: atan(x) = pi/2 - atan(1/x)
-    if x > 1.0 then return PI / 2.0 - atan(1.0 / x)
-    if x < -1.0 then return -PI / 2.0 - atan(1.0 / x)
-
-    // Taylor series for |x| <= 1: x - x³/3 + x⁵/5 - x⁷/7 + ...
-    var term = x
-    var sum = x
-    val x2 = x * x
-
-    for var i = 1; i < 40; i++
-        term = -term * x2
-        sum += term / double(2 * i + 1)
-
-    sum
+atan(x: double) -> double = asm("fatan r1, r1")
 
 /* Return the arc tangent of y/x, using signs to determine quadrant. Result in [-pi, pi]. */
 atan2(y: double, x: double) -> double
-    // TODO: maps to fatan2 instruction; needs inline asm or compiler intrinsic
-    if x > 0.0 then return atan(y / x)
-    if x < 0.0
-        if y >= 0.0 then return atan(y / x) + PI
-        else return atan(y / x) - PI
-    // x == 0
-    if y > 0.0 then return PI / 2.0
-    if y < 0.0 then return -PI / 2.0
-
-    0.0  // atan2(0, 0) = 0
+    asm("ldd r2, r5, 24")
+    asm("fatan2 r1, r2")
 
 /* Return e raised to the power x. */
-exp(x: double) -> double
-    // TODO: maps to fexp instruction; needs inline asm or compiler intrinsic
-    // Taylor series: e^x = 1 + x + x²/2! + x³/3! + ...
-    // Range reduction: e^x = 2^k * e^r where r = x - k*ln2, |r| <= ln2/2
-    val k = int(x / LN2 + (if x >= 0.0 then 0.5 else -0.5))
-    val r = x - double(k) * LN2
-    var term = 1.0
-    var sum = 1.0
-
-    for var i = 1; i < 30; i++
-        term = term * r / double(i)
-        sum += term
-
-    // Multiply by 2^k via repeated doubling/halving
-    if k >= 0
-        for var i = 0; i < k; i++
-            sum *= 2.0
-    else
-        for var i = 0; i < -k; i++
-            sum /= 2.0
-
-    sum
+exp(x: double) -> double = asm("fexp r1, r1")
 
 /* Return the natural logarithm of x. */
-log(x: double) -> double
-    // TODO: maps to flog instruction; needs inline asm or compiler intrinsic
-    if x <= 0.0 then return 0.0  // undefined — hardware would return NaN/-inf
-
-    // Range reduction: x = m * 2^e where 0.5 <= m < 1
-    // log(x) = log(m) + e * ln2
-    var m = x
-    var e = 0
-
-    while m >= 2.0
-        m /= 2.0
-        e++
-
-    while m < 0.5
-        m *= 2.0
-        e--
-
-    // log(m) via series: log((1+t)/(1-t)) = 2*(t + t³/3 + t⁵/5 + ...)
-    // where t = (m-1)/(m+1)
-    val t = (m - 1.0) / (m + 1.0)
-    val t2 = t * t
-    var term = t
-    var sum = t
-
-    for var i = 1; i < 30; i++
-        term *= t2
-        sum += term / double(2 * i + 1)
-
-    2.0 * sum + double(e) * LN2
+log(x: double) -> double = asm("flog r1, r1")
 
 /* Return 2 raised to the power x. */
 exp2(x: double) -> double = exp(x * LN2)
