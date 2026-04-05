@@ -1,0 +1,495 @@
+std.strconv — Numeric and boolean string conversion
+=====================================================
+
+The `std.strconv` module parses and formats primitive values
+as decimal strings. It is the second-lowest text-handling
+module in the standard library: it depends only on `std.mem`
+for byte manipulation, and is itself the foundation for
+`std.builder` (which uses it for numeric interpolation) and
+for user code that needs to read or write simple numeric text.
+
+API shape:
+
+- **Parsers** take a `string` and return `(value, ok)`. The
+  boolean `ok` is `true` iff the entire input was consumed as
+  a well-formed value. This mirrors Go's `strconv.ParseInt` in
+  outcome, but uses a plain boolean rather than an error type,
+  matching the convention established by `std.utf8.decode_rune`.
+  When `ok` is `false`, the returned value is zero (or `false`
+  for `parse_bool`).
+
+- **Formatters** return a freshly-allocated `string` containing
+  the decimal representation. A second, lower-level form
+  (`format_*_into`) writes into a caller-supplied buffer and
+  returns the number of bytes written, which is what
+  `std.builder` will call internally to avoid an allocation.
+
+When Sysl gains a `Result[T, E]` type and `std` adopts it
+uniformly, the `(value, ok)` tuple will be replaced by
+`Result[T, ParseError]`. The API shape is forward-compatible:
+callers pattern-match `ok` today and will pattern-match
+`Ok(v) | Err(e)` later.
+
+Dependencies: `std.mem` (not directly used in this file, but
+conceptually part of the layering).
+
+
+    module std.strconv
+
+    import std.debug.{assert}
+
+
+Parsers
+-------
+
+### parse_bool
+
+`parse_bool(s)` recognizes exactly `"true"`, `"false"`, `"1"`,
+and `"0"`. No leading or trailing whitespace, no alternate
+casings (`"True"`, `"TRUE"`, `"yes"`, `"no"` all reject). The
+strict set keeps this module unopinionated — callers that
+want lenient behavior can normalize their input first.
+
+    parse_bool(s: string) -> (bool, bool)
+        val n = len(s)
+
+        if n == 1
+            if s[0] == byte('1') then return true, true
+            if s[0] == byte('0') then return false, true
+            return false, false
+
+        if n == 4 && s[0] == byte('t') && s[1] == byte('r') && s[2] == byte('u') && s[3] == byte('e') then return true, true
+        if n == 5 && s[0] == byte('f') && s[1] == byte('a') && s[2] == byte('l') && s[3] == byte('s') && s[4] == byte('e') then return false, true
+
+        return false, false
+
+
+### parse_i64
+
+`parse_i64(s)` parses a decimal integer with an optional
+leading `+` or `-`. At least one digit is required. The entire
+input must be consumed; trailing non-digits cause failure.
+
+The full 64-bit signed range `[-2^63, 2^63-1]` is supported,
+including `MIN_I64` (which cannot be represented as a positive
+magnitude). This is achieved by accumulating the value as a
+negative number: `|MIN_I64|` is one larger than `MAX_I64`, so
+negative-accumulation covers the whole range with one code path.
+
+    parse_i64(s: string) -> (i64, bool)
+        val n = len(s)
+
+        if n == 0 then return 0i64, false
+
+        var i = 0
+        var neg = false
+
+        if s[0] == byte('+')
+            i = 1
+        else if s[0] == byte('-')
+            neg = true
+            i = 1
+
+        if i >= n then return 0i64, false
+
+        // Accumulate as a negative i64 to cover MIN_I64.
+        // LIMIT = MIN_I64 / 10, truncated toward zero.
+        var acc: i64 = 0i64
+        val LIMIT: i64 = -922337203685477580i64
+
+        while i < n
+            val b = s[i]
+
+            if b < byte('0') || b > byte('9') then return 0i64, false
+
+            val d: i64 = i64(b - byte('0'))
+
+            if acc < LIMIT then return 0i64, false
+            if acc == LIMIT && d > 8i64 then return 0i64, false
+
+            acc = acc * 10i64 - d
+            i++
+
+        if neg then return acc, true
+
+        // Positive: negate. If acc == MIN_I64, -acc would overflow.
+        if acc < -9223372036854775807i64 then return 0i64, false
+
+        return -acc, true
+
+
+### parse_int
+
+`parse_int(s)` is `parse_i64` narrowed to the 32-bit signed
+range. Values outside `[MIN_I32, MAX_I32]` fail with
+`(0, false)` even if they are valid i64 values.
+
+    parse_int(s: string) -> (int, bool)
+        val v, ok = parse_i64(s)
+
+        if !ok then return 0, false
+        if v > 2147483647i64 then return 0, false
+        if v < -2147483648i64 then return 0, false
+
+        return int(v), true
+
+
+Formatters
+----------
+
+### format_bool
+
+`format_bool(b)` returns `"true"` or `"false"` as a string.
+
+    format_bool(b: bool) -> string
+        if b then "true" else "false"
+
+
+### format_i64_into
+
+`format_i64_into(dst, n)` writes the decimal representation of
+`n` into `dst` starting at index 0, and returns the number of
+bytes written. Returns `0` if `dst` is too small (maximum of
+20 bytes is required, for `-9223372036854775808`).
+
+Digits are generated by repeated division. To handle `MIN_I64`,
+the value is accumulated negatively throughout, so `-n` is
+never computed on a positive overflow path.
+
+    format_i64_into(dst: []byte, n: i64) -> int
+        val cap = len(dst)
+
+        if cap < 1 then return 0
+
+        // Accumulate as a negative number to cover MIN_I64.
+        var x: i64 = n
+
+        if x > 0i64 then x = -x
+
+        // Write digits to a temporary buffer in reverse.
+        // Max 19 digits + optional sign = 20 bytes.
+        val tmp = new [20]byte
+        var i = 20
+
+        if x == 0i64
+            i--
+            tmp[i] = byte('0')
+        else
+            while x < 0i64
+                i--
+
+                val d: i64 = -(x - (x / 10i64) * 10i64)
+
+                tmp[i] = byte(int(byte('0')) + int(d))
+                x = x / 10i64
+
+        if n < 0i64
+            i--
+            tmp[i] = byte('-')
+
+        val written: int = 20 - i
+
+        if written > cap then return 0
+
+        for j = 0; j < written; j++ do dst[j] = tmp[i + j]
+
+        written
+
+
+### format_i64
+
+`format_i64(n)` returns the decimal representation of `n` as
+a freshly-allocated `string`.
+
+    format_i64(n: i64) -> string
+        val buf = new [20]byte
+        val written = format_i64_into(buf[:], n)
+
+        string(buf[:written])
+
+
+### format_int
+
+`format_int(n)` is `format_i64` on an `int` value.
+
+    format_int(n: int) -> string = format_i64(i64(n))
+
+
+Design notes
+------------
+
+**Why `(value, ok)` and not `Result[T, E]`.** Sum types exist
+in Sysl, and a `Result` type is eventually the right shape for
+parse errors carrying location and reason. But introducing a
+`std.result.Result[T, E]` type is a stdlib-wide commitment —
+every parser, every I/O op, every operation that can fail
+wants to use it consistently. Rather than choose it piecemeal,
+`std.strconv` uses the simpler tuple form now and migrates
+when the `Result` type is formally introduced.
+
+**Why strict parsing.** `parse_i64(" 42 ")` fails, not succeeds.
+This module is a primitive; lenient behavior (whitespace
+trimming, alternate radices, thousands separators) belongs in
+higher-level modules that explicitly opt in. A strict primitive
+can always be wrapped; a lenient one cannot be unwrapped.
+
+**Why parse_bool accepts "1"/"0".** Many data sources (CLI
+flags, CSV, config files) emit `1`/`0` for booleans. Accepting
+both pays for itself immediately. Rejecting `"True"`/`"TRUE"`
+is deliberate: locale-dependent or case-insensitive matching
+belongs outside the primitive.
+
+**No radix support yet.** Hex, octal, and binary parsing will
+appear as `parse_i64_radix(s, base)` when needed. Not planning
+for Go's `ParseInt(s, base, bitSize)` surface — base is
+usually known at compile time, and callers can wrap as needed.
+
+**No floating-point yet.** `parse_f64` / `format_f64` require
+IEEE 754 rounding, shortest-representation algorithms
+(Grisu3/Ryu), and scientific notation — enough complexity to
+justify their own module (`std.strconv.float` or similar).
+Deferred until there's concrete demand from user code.
+
+**Allocation in format_i64.** The public formatters allocate.
+Callers in hot paths should use `format_i64_into` with a
+caller-owned buffer; `std.builder` will do exactly this. The
+allocation is small (up to 20 bytes, ref-counted), so it is
+fine for most uses.
+
+
+Tests
+=====
+
+### parse_bool
+
+    #test
+    test_parse_bool_true() -> void
+        val v, ok = parse_bool("true")
+        assert(ok, "true recognized")
+        assert(v, "value is true")
+
+    #test
+    test_parse_bool_false() -> void
+        val v, ok = parse_bool("false")
+        assert(ok, "false recognized")
+        assert(!v, "value is false")
+
+    #test
+    test_parse_bool_one() -> void
+        val v, ok = parse_bool("1")
+        assert(ok, "1 recognized")
+        assert(v, "value is true")
+
+    #test
+    test_parse_bool_zero() -> void
+        val v, ok = parse_bool("0")
+        assert(ok, "0 recognized")
+        assert(!v, "value is false")
+
+    #test
+    test_parse_bool_rejects_caps() -> void
+        val _v1, ok1 = parse_bool("True")
+        assert(!ok1, "True rejected")
+
+        val _v2, ok2 = parse_bool("TRUE")
+        assert(!ok2, "TRUE rejected")
+
+    #test
+    test_parse_bool_rejects_yes_no() -> void
+        val _v1, ok1 = parse_bool("yes")
+        assert(!ok1, "yes rejected")
+
+        val _v2, ok2 = parse_bool("no")
+        assert(!ok2, "no rejected")
+
+    #test
+    test_parse_bool_rejects_whitespace() -> void
+        val _v, ok = parse_bool(" true")
+        assert(!ok, "leading space rejected")
+
+    #test
+    test_parse_bool_rejects_empty() -> void
+        val _v, ok = parse_bool("")
+        assert(!ok, "empty rejected")
+
+
+### parse_i64
+
+    #test
+    test_parse_i64_zero() -> void
+        val v, ok = parse_i64("0")
+        assert(ok, "zero parses")
+        assert(v == 0i64, "value")
+
+    #test
+    test_parse_i64_positive() -> void
+        val v, ok = parse_i64("42")
+        assert(ok, "parses")
+        assert(v == 42i64, "value")
+
+    #test
+    test_parse_i64_explicit_plus() -> void
+        val v, ok = parse_i64("+123")
+        assert(ok, "plus sign accepted")
+        assert(v == 123i64, "value")
+
+    #test
+    test_parse_i64_negative() -> void
+        val v, ok = parse_i64("-42")
+        assert(ok, "negative parses")
+        assert(v == -42i64, "value")
+
+    #test
+    test_parse_i64_max() -> void
+        val v, ok = parse_i64("9223372036854775807")
+        assert(ok, "MAX_I64 parses")
+        assert(v == 9223372036854775807i64, "value")
+
+    #test
+    test_parse_i64_min() -> void
+        val v, ok = parse_i64("-9223372036854775808")
+        assert(ok, "MIN_I64 parses (edge case)")
+        assert(v == -9223372036854775807i64 - 1i64, "value")
+
+    #test
+    test_parse_i64_overflow_positive() -> void
+        val _v, ok = parse_i64("9223372036854775808")
+        assert(!ok, "MAX_I64+1 rejects")
+
+    #test
+    test_parse_i64_overflow_negative() -> void
+        val _v, ok = parse_i64("-9223372036854775809")
+        assert(!ok, "MIN_I64-1 rejects")
+
+    #test
+    test_parse_i64_rejects_empty() -> void
+        val _v, ok = parse_i64("")
+        assert(!ok, "empty rejects")
+
+    #test
+    test_parse_i64_rejects_sign_only() -> void
+        val _v1, ok1 = parse_i64("+")
+        assert(!ok1, "lone plus")
+
+        val _v2, ok2 = parse_i64("-")
+        assert(!ok2, "lone minus")
+
+    #test
+    test_parse_i64_rejects_non_digit() -> void
+        val _v1, ok1 = parse_i64("12x3")
+        assert(!ok1, "embedded non-digit")
+
+        val _v2, ok2 = parse_i64("abc")
+        assert(!ok2, "all letters")
+
+    #test
+    test_parse_i64_rejects_trailing_garbage() -> void
+        val _v, ok = parse_i64("42 ")
+        assert(!ok, "trailing space")
+
+    #test
+    test_parse_i64_rejects_leading_zeros_are_ok() -> void
+        val v, ok = parse_i64("007")
+        assert(ok, "leading zeros permitted")
+        assert(v == 7i64, "value")
+
+
+### parse_int
+
+    #test
+    test_parse_int_basic() -> void
+        val v, ok = parse_int("100")
+        assert(ok, "parses")
+        assert(v == 100, "value")
+
+    #test
+    test_parse_int_range_check_positive() -> void
+        val _v, ok = parse_int("2147483648")
+        assert(!ok, "MAX_I32+1 rejects")
+
+    #test
+    test_parse_int_range_check_negative() -> void
+        val _v, ok = parse_int("-2147483649")
+        assert(!ok, "MIN_I32-1 rejects")
+
+    #test
+    test_parse_int_max() -> void
+        val v, ok = parse_int("2147483647")
+        assert(ok, "MAX_I32 parses")
+        assert(v == 2147483647, "value")
+
+
+### format_bool
+
+    #test
+    test_format_bool_true() -> void
+        assert(format_bool(true) == "true", "true")
+
+    #test
+    test_format_bool_false() -> void
+        assert(format_bool(false) == "false", "false")
+
+
+### format_i64 and format_int
+
+    #test
+    test_format_i64_zero() -> void
+        assert(format_i64(0i64) == "0", "zero")
+
+    #test
+    test_format_i64_positive() -> void
+        assert(format_i64(42i64) == "42", "positive")
+
+    #test
+    test_format_i64_negative() -> void
+        assert(format_i64(-42i64) == "-42", "negative")
+
+    #test
+    test_format_i64_max() -> void
+        assert(format_i64(9223372036854775807i64) == "9223372036854775807", "MAX_I64")
+
+    #test
+    test_format_i64_min() -> void
+        assert(format_i64(-9223372036854775807i64 - 1i64) == "-9223372036854775808", "MIN_I64")
+
+    #test
+    test_format_int_basic() -> void
+        assert(format_int(100) == "100", "positive")
+        assert(format_int(-100) == "-100", "negative")
+        assert(format_int(0) == "0", "zero")
+
+
+### round-trips
+
+    #test
+    test_roundtrip_i64_positive() -> void
+        val n = 1234567890i64
+        val v, ok = parse_i64(format_i64(n))
+        assert(ok, "parses back")
+        assert(v == n, "value preserved")
+
+    #test
+    test_roundtrip_i64_negative() -> void
+        val n = -9876543210i64
+        val v, ok = parse_i64(format_i64(n))
+        assert(ok, "parses back")
+        assert(v == n, "value preserved")
+
+    #test
+    test_roundtrip_i64_min() -> void
+        val n = -9223372036854775807i64 - 1i64
+        val v, ok = parse_i64(format_i64(n))
+        assert(ok, "MIN_I64 round-trips")
+        assert(v == n, "value preserved")
+
+    #test
+    test_roundtrip_bool_true() -> void
+        val v, ok = parse_bool(format_bool(true))
+        assert(ok, "parses back")
+        assert(v, "value preserved")
+
+    #test
+    test_roundtrip_bool_false() -> void
+        val v, ok = parse_bool(format_bool(false))
+        assert(ok, "parses back")
+        assert(!v, "value preserved")

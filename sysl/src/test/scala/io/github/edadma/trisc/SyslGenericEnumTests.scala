@@ -176,4 +176,85 @@ class SyslGenericEnumTests extends SyslTestHelpers {
         |        None -> -1
         |""".stripMargin) shouldBe 34
   }
+
+  // ===== Generic function inference through generic-enum parameter types =====
+  // Regression: inferring T, E from Result[T, E] in a generic-function parameter
+  // position. Previously only unified through StructType, not EnumType.
+
+  "infer type params through generic enum parameter — unwrap" in {
+    eval(
+      """enum Result[T, E]
+        |    Ok(value: T)
+        |    Err(error: E)
+        |
+        |unwrap[T, E](r: Result[T, E]) -> T
+        |    r match
+        |        Ok(v) -> v
+        |        Err(_) -> 0
+        |
+        |main() -> int
+        |    val r: Result[int, int] = Ok(42)
+        |    unwrap(r)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "infer type params through generic enum parameter — is_ok" in {
+    eval(
+      """enum Result[T, E]
+        |    Ok(value: T)
+        |    Err(error: E)
+        |
+        |is_ok[T, E](r: Result[T, E]) -> bool
+        |    r match
+        |        Ok(_) -> true
+        |        Err(_) -> false
+        |
+        |main() -> int
+        |    val a: Result[int, int] = Ok(1)
+        |    val b: Result[int, int] = Err(2)
+        |    var count = 0
+        |    if is_ok(a) then count = count + 10
+        |    if is_ok(b) then count = count + 100
+        |    count
+        |""".stripMargin) shouldBe 10
+  }
+
+  "infer type params with Option[T] single-arg form" in {
+    eval(
+      """enum Option[T]
+        |    Some(value: T)
+        |    None
+        |
+        |is_some[T](o: Option[T]) -> bool
+        |    o match
+        |        Some(_) -> true
+        |        None -> false
+        |
+        |main() -> int
+        |    val a: Option[int] = Some(7)
+        |    val b: Option[int] = None
+        |    var r = 0
+        |    if is_some(a) then r = r + 1
+        |    if is_some(b) then r = r + 100
+        |    r
+        |""".stripMargin) shouldBe 1
+  }
+
+  "infer type params through Option with default return" in {
+    eval(
+      """enum Option[T]
+        |    Some(value: T)
+        |    None
+        |
+        |unwrap_or[T](o: Option[T], d: T) -> T
+        |    o match
+        |        Some(v) -> v
+        |        None -> d
+        |
+        |main() -> int
+        |    val a: Option[int] = Some(100)
+        |    val b: Option[int] = None
+        |    unwrap_or(a, -1) + unwrap_or(b, -1)
+        |""".stripMargin) shouldBe 99
+  }
 }

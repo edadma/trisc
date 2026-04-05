@@ -150,4 +150,63 @@ class SyslEnumTests extends SyslTestHelpers {
         |""".stripMargin): @unchecked
     an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
   }
+
+  // ===== Simple enum usable as a distinct type =====
+
+  "simple enum usable as generic type argument" in {
+    eval(
+      """enum Result[T, E]
+        |    Ok(value: T)
+        |    Err(error: E)
+        |
+        |enum ParseError
+        |    EmptyInput
+        |    BadDigit
+        |    Overflow
+        |
+        |is_ok[T, E](r: Result[T, E]) -> bool
+        |    r match
+        |        Ok(_) -> true
+        |        Err(_) -> false
+        |
+        |main() -> int
+        |    val ok: Result[int, ParseError] = Ok(42)
+        |    val err: Result[int, ParseError] = Err(BadDigit)
+        |    var n = 0
+        |    if is_ok(ok)  then n = n + 1
+        |    if is_ok(err) then n = n + 100
+        |    n
+        |""".stripMargin) shouldBe 1
+  }
+
+  "simple enum bare variant constructs value of enum type" in {
+    eval(
+      """enum Status
+        |    Active
+        |    Pending
+        |    Closed
+        |
+        |describe(s: Status) -> int
+        |    s match
+        |        Active -> 1
+        |        Pending -> 2
+        |        Closed -> 3
+        |
+        |main() -> int
+        |    describe(Pending)
+        |""".stripMargin) shouldBe 2
+  }
+
+  "qualified simple enum access still returns int constant" in {
+    // Backward compat: TestError.BadDigit still works as an int value.
+    eval(
+      """enum ParseError
+        |    EmptyInput
+        |    BadDigit
+        |    Overflow
+        |
+        |main() -> int
+        |    ParseError.BadDigit
+        |""".stripMargin) shouldBe 1
+  }
 }

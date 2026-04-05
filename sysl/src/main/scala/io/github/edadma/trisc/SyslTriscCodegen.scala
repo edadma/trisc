@@ -732,8 +732,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitAddImm(2, 5, tmpLocal.offset)
         emit("  std r1, r2, r0")
         val st = init.typ.asInstanceOf[SyslType.StructType]
-        // Extract each field into a new local
-        for ((name, fieldType), i) <- names.zip(types).zipWithIndex do
+        // Extract each field into a new local (skip `_` discards)
+        for ((name, fieldType), i) <- names.zip(types).zipWithIndex if name != "_" do
           val off = fieldOffset(st, i)
           emitAddImm(1, 5, tmpLocal.offset)
           emit("  ldd r1, r1, r0")  // r1 = tuple address
@@ -751,8 +751,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitAddImm(2, 5, tmpLocal.offset)
         emit("  std r1, r2, r0")
         val st = init.typ.asInstanceOf[SyslType.StructType]
-        // Extract each field and store to existing variable
-        for ((name, fieldType), i) <- names.zip(types).zipWithIndex do
+        // Extract each field and store to existing variable (skip `_` discards)
+        for ((name, fieldType), i) <- names.zip(types).zipWithIndex if name != "_" do
           val off = fieldOffset(st, i)
           emitAddImm(1, 5, tmpLocal.offset)
           emit("  ldd r1, r1, r0")  // r1 = tuple address
