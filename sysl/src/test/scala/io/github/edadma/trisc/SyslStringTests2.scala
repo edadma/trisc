@@ -24,7 +24,7 @@ class SyslStringTests2 extends SyslTestHelpers {
     eval(
       """main() -> int
         |    val s = "ABC"
-        |    s[0] * 100 + s[1] * 10 + s[2] - 65 * 111
+        |    int(s[0]) * 100 + int(s[1]) * 10 + int(s[2]) - 65 * 111
         |""".stripMargin) shouldBe 12
   }
 

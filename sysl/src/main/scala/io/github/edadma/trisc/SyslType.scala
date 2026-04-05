@@ -104,7 +104,7 @@ enum SyslType:
     case _ => 64
 
   override def toString: String = this match
-    case IntType(8) => "byte"
+    case IntType(8) => "i8"
     case IntType(16) => "i16"
     case IntType(32) => "int"
     case IntType(64) => "i64"
@@ -178,7 +178,7 @@ object SyslType:
   val U64: UIntType = UIntType(64)
 
   // Source-level aliases
-  val Byte: IntType = I8
+  val Byte: UIntType = U8
   val Char: UIntType = U32
   val Int: IntType = I32
   val Double: DoubleType.type = DoubleType
@@ -199,7 +199,7 @@ object SyslType:
       // Legacy prefix names for backward compatibility
       case "int"  => I32
       case "char" => U32
-      case "byte" => I8
+      case "byte" => U8
       case "string" => StringType
       case "ptr"  => PtrType(parseType(tokens))
       case "ref"  => RefType(parseType(tokens))
