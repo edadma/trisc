@@ -62,3 +62,203 @@ pow(base: int, exp: int) -> int
 /* Compute quotient and remainder of numer / denom. */
 div(numer: int, denom: int) -> div_t
     div_t(numer / denom, numer % denom)
+
+/* Convert a string to an integer, skipping leading whitespace and optional sign. */
+atoi(s: *byte) -> int
+    var p = s
+
+    while *p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' do p++
+
+    var neg = false
+
+    if *p == '-'
+        neg = true
+        p++
+    elif *p == '+'
+        p++
+
+    var result = 0
+
+    while '0' <= *p <= '9'
+        result = result * 10 + int(*p - '0')
+        p++
+
+    if neg then -result
+    else result
+
+/* Convert a string to a long integer. */
+atol(s: *byte) -> i64
+    var p = s
+
+    while *p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' do p++
+
+    var neg = false
+
+    if *p == '-'
+        neg = true
+        p++
+    elif *p == '+'
+        p++
+
+    var result: i64 = 0
+
+    while '0' <= *p <= '9'
+        result = result * 10 + i64(*p - '0')
+        p++
+
+    if neg then -result
+    else result
+
+/* Convert a string to a long integer with base detection and error reporting. */
+strtol(s: *byte, endptr: **byte, base: int) -> i64
+    var p = s
+
+    while *p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' do p++
+
+    var neg = false
+
+    if *p == '-'
+        neg = true
+        p++
+    elif *p == '+'
+        p++
+
+    var b = base
+
+    if b == 0
+        if *p == '0'
+            p++
+
+            if *p == 'x' || *p == 'X'
+                b = 16
+                p++
+            else
+                b = 8
+        else
+            b = 10
+    elif b == 16
+        if *p == '0'
+            p++
+
+            if *p == 'x' || *p == 'X' then p++
+
+    var result: i64 = 0
+
+    while *p != 0
+        var d = -1
+
+        if '0' <= *p <= '9' then d = int(*p - '0')
+        elif 'a' <= *p <= 'z' then d = int(*p - 'a') + 10
+        elif 'A' <= *p <= 'Z' then d = int(*p - 'A') + 10
+
+        if d < 0 || d >= b then break
+
+        result = result * i64(b) + i64(d)
+        p++
+
+    if endptr != *byte(0) then *endptr = p
+
+    if neg then -result
+    else result
+
+/* Convert a string to an unsigned long integer with base detection. */
+strtoul(s: *byte, endptr: **byte, base: int) -> i64
+    var p = s
+
+    while *p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' do p++
+
+    if *p == '+' then p++
+
+    var b = base
+
+    if b == 0
+        if *p == '0'
+            p++
+
+            if *p == 'x' || *p == 'X'
+                b = 16
+                p++
+            else
+                b = 8
+        else
+            b = 10
+    elif b == 16
+        if *p == '0'
+            p++
+
+            if *p == 'x' || *p == 'X' then p++
+
+    var result: i64 = 0
+
+    while *p != 0
+        var d = -1
+
+        if '0' <= *p <= '9' then d = int(*p - '0')
+        elif 'a' <= *p <= 'z' then d = int(*p - 'a') + 10
+        elif 'A' <= *p <= 'Z' then d = int(*p - 'A') + 10
+
+        if d < 0 || d >= b then break
+
+        result = result * i64(b) + i64(d)
+        p++
+
+    if endptr != *byte(0) then *endptr = p
+
+    result
+
+/* PRNG state. */
+val RAND_MAX = 32767
+var _rand_next: i64 = 1
+
+/* Seed the PRNG. */
+srand(seed: int)
+    _rand_next = i64(seed)
+
+/* Return a pseudo-random integer in [0, RAND_MAX]. */
+rand() -> int
+    _rand_next = _rand_next * 1103515245i64 + 12345i64
+    int((_rand_next >> 16) & i64(RAND_MAX))
+
+/* Swap n bytes between a and b. */
+private _swap(a: *byte, b: *byte, n: int)
+    for var i = 0; i < n; i++
+        val t = a[i]
+
+        a[i] = b[i]
+        b[i] = t
+
+/* Sort an array.
+ * base: pointer to the first element
+ * nmemb: number of elements
+ * size: size of each element in bytes
+ * compar: comparison function returning <0, 0, or >0
+ */
+qsort(base: *byte, nmemb: int, size: int, compar: func(*byte, *byte) -> int)
+    for var i = 1; i < nmemb; i++
+        var j = i
+
+        while j > 0 && compar(base + (j - 1) * size, base + j * size) > 0
+            _swap(base + (j - 1) * size, base + j * size, size)
+            j--
+
+/* Binary search a sorted array.
+ * key: pointer to the element to search for
+ * base: pointer to the first element of the sorted array
+ * nmemb: number of elements
+ * size: size of each element in bytes
+ * compar: comparison function
+ * Returns pointer to the matching element, or null if not found.
+ */
+bsearch(key: *byte, base: *byte, nmemb: int, size: int, compar: func(*byte, *byte) -> int) -> *byte
+    var lo = 0
+    var hi = nmemb
+
+    while lo < hi
+        val mid = lo + (hi - lo) / 2
+        val c = compar(key, base + mid * size)
+
+        if c == 0 then return base + mid * size
+        elif c < 0 then hi = mid
+        else lo = mid + 1
+
+    *byte(0)
