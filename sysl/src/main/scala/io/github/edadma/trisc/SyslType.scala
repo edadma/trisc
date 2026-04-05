@@ -13,6 +13,7 @@ enum SyslType:
   case StringType
   case SliceType(elem: SyslType)
   case RefType(inner: SyslType)  // &T — ref-counted heap reference
+  case EnumType(name: String, variants: List[(String, List[(String, SyslType)])])  // tagged union
 
   def isNumeric: Boolean = this match
     case _: IntType | _: UIntType => true
@@ -61,6 +62,20 @@ enum SyslType:
       // Pad to struct alignment for array stride
       val structAlign = st.alignOf
       ((offset + structAlign - 1) / structAlign) * structAlign
+    case et @ EnumType(_, variants) =>
+      // Layout: {tag: i32, padding, data: union of variant fields}
+      val dataAlign = et.dataAlignOf
+      val tagSize = 4L
+      val dataOffset = if dataAlign > 4 then dataAlign else 4L
+      val maxDataSize = if variants.isEmpty then 0L else variants.map { (_, fields) =>
+        if fields.isEmpty then 0L
+        else
+          val st = StructType("", fields)
+          st.sizeOf
+      }.max
+      val totalAlign = et.alignOf
+      val raw = dataOffset + maxDataSize
+      ((raw + totalAlign - 1) / totalAlign) * totalAlign
 
   def alignOf: Long = this match
     case IntType(w) => (w / 8).toLong.min(8)
@@ -75,6 +90,9 @@ enum SyslType:
     case SliceType(_) => 8
     case RefType(_) => 8
     case StructType(_, fields) => if fields.isEmpty then 1 else fields.map(_._2.alignOf).max
+    case EnumType(_, variants) =>
+      val fieldAligns = variants.flatMap(_._2.map(_._2.alignOf))
+      if fieldAligns.isEmpty then 4 else fieldAligns.max.max(4)  // at least 4 for tag
 
   // Width in bits (for integer types)
   def bitWidth: Int = this match
@@ -106,6 +124,7 @@ enum SyslType:
     case StringType => "string"
     case SliceType(t) => s"[]$t"
     case RefType(t) => s"&$t"
+    case EnumType(name, _) => name
 
   def toPrefix: String = this match
     case IntType(w) => s"i$w"
@@ -120,10 +139,27 @@ enum SyslType:
     case SliceType(t) => s"slice ${t.toPrefix}"
     case RefType(t) => s"ref ${t.toPrefix}"
     case StructType(name, fields) => s"struct $name ${fields.size} ${fields.map((n, t) => s"$n ${t.toPrefix}").mkString(" ")}"
+    case EnumType(name, variants) =>
+      val vs = variants.map { (vn, fields) => s"$vn ${fields.size} ${fields.map((n, t) => s"$n ${t.toPrefix}").mkString(" ")}" }.mkString(" ")
+      s"enum $name ${variants.size} $vs"
 
   def isTuple: Boolean = this match
     case StructType(name, _) => name.startsWith("_Tuple")
     case _ => false
+
+  // For EnumType: alignment of the data portion (excluding tag)
+  def dataAlignOf: Long = this match
+    case EnumType(_, variants) =>
+      val fieldAligns = variants.flatMap(_._2.map(_._2.alignOf))
+      if fieldAligns.isEmpty then 1 else fieldAligns.max
+    case _ => 1
+
+  // For EnumType: byte offset where variant data starts (after tag + padding)
+  def dataOffset: Long = this match
+    case et @ EnumType(_, _) =>
+      val da = et.dataAlignOf
+      if da > 4 then da else 4L
+    case _ => 0
 
 object SyslType:
   def tupleType(elemTypes: List[SyslType]): StructType =
@@ -185,6 +221,20 @@ object SyslType:
           (fname, ftype)
         }.toList
         StructType(name, fields)
+      case "enum" =>
+        val name = tokens.next()
+        val nvariants = tokens.next().toInt
+        val variants = (1 to nvariants).map { _ =>
+          val vname = tokens.next()
+          val nfields = tokens.next().toInt
+          val fields = (1 to nfields).map { _ =>
+            val fname = tokens.next()
+            val ftype = parseType(tokens)
+            (fname, ftype)
+          }.toList
+          (vname, fields)
+        }.toList
+        EnumType(name, variants)
       case other => throw IllegalArgumentException(s"unknown type token: '$other'")
 
   def funcSigToPrefix(params: List[SyslType], ret: SyslType): String =

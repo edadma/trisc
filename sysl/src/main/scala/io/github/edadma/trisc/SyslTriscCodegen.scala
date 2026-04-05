@@ -175,7 +175,7 @@ class SyslTriscCodegen(addresses: Int = 4):
               case _ => false // nonzero constant → data
 
   // Does this return type require a caller-allocated return slot?
-  private def returnsViaPointer(typ: SyslType): Boolean = typ.isInstanceOf[SyslType.StructType] || typ == SyslType.StringType || typ.isInstanceOf[SyslType.SliceType]
+  private def returnsViaPointer(typ: SyslType): Boolean = typ.isInstanceOf[SyslType.StructType] || typ == SyslType.StringType || typ.isInstanceOf[SyslType.SliceType] || typ.isInstanceOf[SyslType.EnumType]
 
   // Size of a type on the stack in bytes, rounded up to alignment
   private def stackSize(typ: SyslType): Int =
@@ -192,6 +192,9 @@ class SyslTriscCodegen(addresses: Int = 4):
     case SyslType.FuncType(_, _) => 8
     case SyslType.ArrayType(elem, _) => stackAlign(elem)
     case SyslType.StructType(_, fields) => if fields.isEmpty then 1 else fields.map(f => stackAlign(f._2)).max
+    case SyslType.EnumType(_, variants) =>
+      val fieldAligns = variants.flatMap(_._2.map(f => stackAlign(f._2)))
+      if fieldAligns.isEmpty then 4 else fieldAligns.max.max(4)
     case SyslType.StringType => 8    // contains a pointer
     case SyslType.SliceType(_) => 8  // contains a pointer
     case _ => 8
@@ -252,6 +255,14 @@ class SyslTriscCodegen(addresses: Int = 4):
       case st: SyslType.StructType =>
         // Struct copy: srcReg = source address, addrReg = dest address
         val size = stackSize(st)
+        for i <- 0 until size by 8 do
+          emitAddImm(4, srcReg, i)
+          emit("  ldd r4, r4, r0")
+          emitAddImm(3, addrReg, i)
+          emit("  std r4, r3, r0")
+      case et: SyslType.EnumType =>
+        // Enum copy: srcReg = source address, addrReg = dest address
+        val size = stackSize(et)
         for i <- 0 until size by 8 do
           emitAddImm(4, srcReg, i)
           emit("  ldd r4, r4, r0")
@@ -525,6 +536,7 @@ class SyslTriscCodegen(addresses: Int = 4):
   private def emitStructReturn(): Unit =
     val size = currentFunction.returnType match
       case st: SyslType.StructType => stackSize(st)
+      case et: SyslType.EnumType => stackSize(et)
       case SyslType.StringType => 16
       case _ => 8
     val retLocal = locals("_ret_ptr")
@@ -634,6 +646,35 @@ class SyslTriscCodegen(addresses: Int = 4):
               genExpr(arg)                              // r1 = field value
               emitAddImm(2, 5, local.offset + off)     // r2 = field address (via fp)
               emitStore(1, 2, fieldType)
+          case TEnumConstruct(et, variantIndex, args) =>
+            // Allocate enum on stack, zero-initialize, set tag + fields
+            val totalSize = stackSize(et)
+            val aligned = (totalSize + 7) & ~7
+            emitAddImm(7, 7, -aligned)
+            stackOffset -= aligned
+            val local = LocalVar(name, stackOffset, typ)
+            locals(name) = local
+            // Zero-fill
+            emitAddImm(1, 5, local.offset)
+            for i <- 0 until aligned by 8 do
+              emitAddImm(2, 1, i)
+              emit("  std r0, r2, r0")
+            // Write tag (i32 at offset 0)
+            emitLoadImm(1, variantIndex)
+            emitAddImm(2, 5, local.offset)
+            emit("  stw r1, r2, r0")
+            // Write variant fields
+            val dataOff = et.dataOffset.toInt
+            val variantFields = et.variants(variantIndex)._2
+            var fieldOff = 0
+            for (arg, i) <- args.zipWithIndex do
+              val (_, fieldType) = variantFields(i)
+              val align = stackAlign(fieldType)
+              fieldOff = ((fieldOff + align - 1) / align) * align
+              genExpr(arg)
+              emitAddImm(2, 5, local.offset + dataOff + fieldOff)
+              emitStore(1, 2, fieldType)
+              fieldOff += fieldType.sizeOf.toInt
           case call @ TCall(_, _, retType) if returnsViaPointer(retType) =>
             // Function returns struct via caller-allocated slot.
             // genExpr allocates the return slot and returns its address in r1.
@@ -1014,7 +1055,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         if locals != null && locals.contains(name) then
           val local = locals(name)
           local.typ match
-            case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType | _: SyslType.SliceType =>
+            case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType | _: SyslType.SliceType | _: SyslType.EnumType =>
               emitAddImm(1, 5, local.offset) // aggregates: address, not value
             case _ =>
               emitAddImm(2, 5, local.offset)
@@ -1023,7 +1064,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit(s"  movi r1, $name")
           val gt = globals.getOrElse(name, typ) // use AST type for cross-unit globals
           gt match
-            case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType | _: SyslType.SliceType =>
+            case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType | _: SyslType.SliceType | _: SyslType.EnumType =>
               () // aggregates: address is the value
             case _ =>
               emitLoad(1, 1, gt)
@@ -1411,6 +1452,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         val retSlotOffset = if callStructReturn then
           val size = retType match
             case st: SyslType.StructType => stackSize(st)
+            case et: SyslType.EnumType => stackSize(et)
             case SyslType.StringType => 16
             case _ => 8
           val aligned = (size + 7) & ~7
@@ -1465,6 +1507,10 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  pshd r2")
             emit("  pshd r1")
             stackOffset -= 16
+          else if arg.typ.isInstanceOf[SyslType.EnumType] || arg.typ.isInstanceOf[SyslType.StructType] || arg.typ.isInstanceOf[SyslType.SliceType] then
+            // Aggregate args: r1 is an address into our stack — do NOT reclaim the temp!
+            emit("  pshd r1")
+            stackOffset -= 8
           else
             // Scalar args: clean up temps, push 8 bytes
             val extra = preOffset - stackOffset
@@ -1522,10 +1568,12 @@ class SyslTriscCodegen(addresses: Int = 4):
                 case _: TNew | _: TNewArray =>
                 case _ => emitRefIncr(1, refHeaderOffset(rt))
               case _ =>
-            val extra = preOffset - stackOffset
-            if extra > 0 then
-              emitAddImm(7, 7, extra)
-              stackOffset = preOffset
+            // Don't reclaim temp stack space for aggregate types — r1 is a pointer into that space
+            if !arg.typ.isInstanceOf[SyslType.EnumType] && !arg.typ.isInstanceOf[SyslType.StructType] && !arg.typ.isInstanceOf[SyslType.SliceType] then
+              val extra = preOffset - stackOffset
+              if extra > 0 then
+                emitAddImm(7, 7, extra)
+                stackOffset = preOffset
           emit("  pshd r1")
           stackOffset -= 8
         }
@@ -1744,10 +1792,17 @@ class SyslTriscCodegen(addresses: Int = 4):
         val elseLabel = newLabel("else")
         val endLabel = newLabel("endif")
         val isString = typ == SyslType.StringType
-        // For string results: pre-allocate a 16-byte result slot BEFORE the if/else
-        val strResultOffset = if isString then
+        val isAggregate = typ.isInstanceOf[SyslType.EnumType] || typ.isInstanceOf[SyslType.StructType] || typ.isInstanceOf[SyslType.SliceType]
+        val aggregateSize = if isAggregate then stackSize(typ) else 0
+        // For string/aggregate results: pre-allocate a result slot BEFORE the if/else
+        val resultSlotOffset = if isString then
           emitAddImm(7, 7, -16)
           stackOffset -= 16
+          stackOffset
+        else if isAggregate then
+          val aligned = (aggregateSize + 7) & ~7
+          emitAddImm(7, 7, -aligned)
+          stackOffset -= aligned
           stackOffset
         else 0
         genExpr(cond)
@@ -1757,14 +1812,18 @@ class SyslTriscCodegen(addresses: Int = 4):
         if isString then
           // Copy result into pre-allocated slot
           emit("  ldd r2, r1, r0")           // r2 = ptr
-          emitAddImm(3, 5, strResultOffset)
+          emitAddImm(3, 5, resultSlotOffset)
           emit("  std r2, r3, r0")           // store ptr
           emit("  addi r1, r1, 8")
           emit("  ldd r2, r1, r0")           // r2 = len
-          emitAddImm(3, 5, strResultOffset + 8)
+          emitAddImm(3, 5, resultSlotOffset + 8)
           emit("  std r2, r3, r0")           // store len
+        else if isAggregate then
+          // Copy aggregate data into pre-allocated slot
+          emitAddImm(2, 5, resultSlotOffset)
+          emitStore(1, 2, typ)
         leaveScope()
-        if isString then emitAddImm(1, 5, strResultOffset)
+        if isString || isAggregate then emitAddImm(1, 5, resultSlotOffset)
         emit(s"  bra $endLabel")
         emit(s"$elseLabel")
         elseBody.foreach { stmts =>
@@ -1772,14 +1831,17 @@ class SyslTriscCodegen(addresses: Int = 4):
           for stmt <- stmts do genStmt(stmt)
           if isString then
             emit("  ldd r2, r1, r0")
-            emitAddImm(3, 5, strResultOffset)
+            emitAddImm(3, 5, resultSlotOffset)
             emit("  std r2, r3, r0")
             emit("  addi r1, r1, 8")
             emit("  ldd r2, r1, r0")
-            emitAddImm(3, 5, strResultOffset + 8)
+            emitAddImm(3, 5, resultSlotOffset + 8)
             emit("  std r2, r3, r0")
+          else if isAggregate then
+            emitAddImm(2, 5, resultSlotOffset)
+            emitStore(1, 2, typ)
           leaveScope()
-          if isString then emitAddImm(1, 5, strResultOffset)
+          if isString || isAggregate then emitAddImm(1, 5, resultSlotOffset)
         }
         emit(s"$endLabel")
 
@@ -1821,15 +1883,17 @@ class SyslTriscCodegen(addresses: Int = 4):
                 emit(s"$rangeCheck")
               case TDestructurePattern(_, _, _) =>
                 emit(s"  bra $hitLabel")      // destructure always matches
+              case TVariantPattern(_, variantIndex, _, _) =>
+                // Load tag from scrutinee enum and compare with variant index
+                emitAddImm(1, 5, scrutineeOffset)
+                emit("  ldd r1, r1, r0")     // r1 = enum address
+                emit("  ldw r1, r1, r0")     // r1 = tag (i32 at offset 0)
+                emitLoadImm(2, variantIndex)
+                emit(s"  beq r1, r2, $hitLabel")
           emit(s"  bra $nextArm")
           emit(s"$hitLabel")
-          // Guard check
-          arm.guard.foreach { guard =>
-            genExpr(guard)
-            emit(s"  beq r1, r0, $nextArm")  // guard false → skip
-          }
           enterScope()
-          // Bind destructure patterns
+          // Bind destructure/variant patterns BEFORE guard (guard may reference bindings)
           for pat <- arm.patterns do
             pat match
               case TDestructurePattern(st, bindings, fieldTypes) =>
@@ -1845,7 +1909,31 @@ class SyslTriscCodegen(addresses: Int = 4):
                     emitAddImm(2, 5, local.offset)
                     emitStore(1, 2, fieldTypes(i))
                   }
+              case TVariantPattern(et, variantIndex, bindings, fieldTypes) =>
+                val dataOff = et.dataOffset.toInt
+                val variantFields = et.variants(variantIndex)._2
+                var fieldOff = 0
+                for (binding, i) <- bindings.zipWithIndex do
+                  val (_, fieldType) = variantFields(i)
+                  val align = stackAlign(fieldType)
+                  fieldOff = ((fieldOff + align - 1) / align) * align
+                  binding.foreach { name =>
+                    // Reload scrutinee address each time (allocLocal may move sp)
+                    emitAddImm(1, 5, scrutineeOffset)
+                    emit("  ldd r1, r1, r0")  // r1 = enum address
+                    if dataOff + fieldOff != 0 then emitAddImm(1, 1, dataOff + fieldOff)
+                    emitLoad(1, 1, fieldType)
+                    val local = allocLocal(name, fieldType)
+                    emitAddImm(2, 5, local.offset)
+                    emitStore(1, 2, fieldType)
+                  }
+                  fieldOff += fieldType.sizeOf.toInt
               case _ =>
+          // Guard check (after bindings so guard can reference bound variables)
+          arm.guard.foreach { guard =>
+            genExpr(guard)
+            emit(s"  beq r1, r0, $nextArm")  // guard false → skip
+          }
           for stmt <- arm.body do genStmt(stmt)
           leaveScope()
           emit(s"  bra $endLabel")
@@ -2284,8 +2372,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  mov r1, r7")
 
       case TFloatLit(d, _) =>
-        val bits = java.lang.Double.doubleToRawLongBits(d)
-        emit(s"  movi r1, $bits")
+        emit(s"  ldc r1, $d")
 
       case TAsmExpr(code, _) =>
         for line <- code.split("\\\\n|\\n") do
@@ -2445,6 +2532,37 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitStore(1, 2, fieldType)
         // r1 = struct base address (fp-relative, stable)
         emitAddImm(1, 5, structBaseOffset)
+
+      case TEnumConstruct(et, variantIndex, args) =>
+        // Allocate enum-sized space on stack and zero-initialize
+        val totalSize = stackSize(et)
+        val aligned = (totalSize + 7) & ~7
+        emitAddImm(7, 7, -aligned)
+        stackOffset -= aligned
+        val enumBaseOffset = stackOffset
+        emit("  mov r1, r7")
+        for i <- 0 until aligned by 8 do
+          emitAddImm(2, 1, i)
+          emit("  std r0, r2, r0")
+        // Write tag (i32 at offset 0)
+        emitLoadImm(1, variantIndex)
+        emitAddImm(2, 5, enumBaseOffset)
+        emit("  stw r1, r2, r0")
+        // Write variant fields at data offset
+        val dataOff = et.dataOffset.toInt
+        val variantFields = et.variants(variantIndex)._2
+        // Compute field offsets within variant data (laid out like a struct)
+        var fieldOff = 0
+        for (arg, i) <- args.zipWithIndex do
+          val (_, fieldType) = variantFields(i)
+          val align = stackAlign(fieldType)
+          fieldOff = ((fieldOff + align - 1) / align) * align
+          genExpr(arg) // r1 = field value
+          emitAddImm(2, 5, enumBaseOffset + dataOff + fieldOff)
+          emitStore(1, 2, fieldType)
+          fieldOff += fieldType.sizeOf.toInt
+        // r1 = enum base address
+        emitAddImm(1, 5, enumBaseOffset)
 
       case TFieldPreInc(obj, fieldIndex, _) =>
         val st = obj.typ.asInstanceOf[SyslType.StructType]

@@ -90,7 +90,7 @@ object AssemblerParser extends RegexParsers:
     "gasid", "gfault", "gfcause", "gpsr", "gptbr", "gusp",
     "halt",
     "jalr",
-    "ld", "ldb", "ldd", "ldi", "lds", "ldw", "ll", "lsl", "lsr",
+    "ld", "ldb", "ldc", "ldd", "ldi", "lds", "ldw", "ll", "lsl", "lsr",
     "max", "min", "mov", "movi", "mul", "mulu",
     "neg", "nop", "not",
     "or",

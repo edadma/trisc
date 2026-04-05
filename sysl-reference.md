@@ -77,7 +77,9 @@ struct Node
     next: *Node       // recursive via pointer
 ```
 
-### Enum Types
+### Enum Types (Simple)
+
+Simple enums are integer constants with auto-incrementing values:
 
 ```sysl
 enum Color
@@ -86,6 +88,57 @@ enum Color
     Blue = 10         // explicit value
     Yellow            // 11 (auto-increment)
 ```
+
+Access via `Color.Red`, `Color.Blue`, etc. At runtime, simple enum members are plain `i32` values.
+
+### Tagged Unions (Data Enums)
+
+Enums can carry data in each variant (Rust-style tagged unions):
+
+```sysl
+enum Shape
+    Circle(radius: int)
+    Rect(w: int, h: int)
+    Empty                   // no-data variant
+```
+
+**Construction:**
+```sysl
+s = Circle(5)              // variant with data
+e = Empty                  // no-data variant (bare name)
+e2 = Shape.Empty           // qualified name also works
+```
+
+**Pattern matching:**
+```sysl
+s match
+    Circle(r) -> r * r * 3    // destructure fields
+    Rect(w, h) -> w * h       // bind multiple fields
+    Empty -> 0                 // match no-data variant
+```
+
+**As function parameters and return values:**
+```sysl
+area(s: Shape) -> int
+    s match
+        Circle(r) -> r * r * 3
+        Rect(w, h) -> w * h
+        Empty -> 0
+
+make_shape(kind: int) -> Shape
+    if kind == 0 then Circle(5)
+    else Rect(3, 4)
+```
+
+**Guards on variant patterns:**
+```sysl
+s match
+    Circle(r) if r > 10 -> 1   // guard with binding
+    Circle(r) -> 2
+    Rect(w, h) -> 3
+```
+
+**Memory layout:** `{tag: i32, padding, data: union of variant fields}`. The tag is a small integer (0, 1, 2...) identifying the variant. Data is overlapping storage sized to the largest variant. `sizeof(Shape)` returns the total size including tag and padding.
 
 ### Type Aliases
 
@@ -377,6 +430,13 @@ p match
     Point(x, y) -> x + y      // binds x and y from fields
     Point(_, y) -> y           // wildcard ignores field
     Point(x, y) if x == 0 -> y  // guard with bindings
+
+// tagged union (data enum) matching
+s match
+    Circle(r) -> r * r * 3    // match variant, bind fields
+    Rect(w, h) -> w * h       // each variant checked by tag
+    Empty -> 0                 // no-data variant
+    Circle(r) if r > 5 -> 1   // guard with variant binding
 
 // match with block bodies
 x match

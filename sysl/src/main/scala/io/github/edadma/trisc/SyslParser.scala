@@ -61,14 +61,26 @@ class SyslParser extends StandardTokenParsers {
   lazy val structField: Parser[(String, TypeAST)] =
     ident ~ (":" ~> typeRef) ^^ { case name ~ typ => (name, typ) }
 
-  lazy val enumDecl: Parser[EnumDeclAST] =
-    "enum" ~> ident ~ (Newline ~> Indent ~> rep1sep(enumMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
-      case name ~ members => EnumDeclAST(name, members)
+  lazy val enumDecl: Parser[DeclAST] =
+    "enum" ~> ident ~ (Newline ~> Indent ~> rep1sep(enumVariantOrMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
+      case name ~ members =>
+        // If any member has fields, it's a data enum
+        val hasData = members.exists(_.isInstanceOf[Right[?, ?]])
+        if hasData then
+          val variants = members.map {
+            case Right(v) => v
+            case Left((n, _)) => EnumVariantAST(n, Nil) // plain member in a data enum = no-arg variant
+          }
+          DataEnumDeclAST(name, variants)
+        else
+          EnumDeclAST(name, members.map { case Left(m) => m; case _ => ??? })
     }
 
-  lazy val enumMember: Parser[(String, Option[Long])] =
-    ident ~ ("=" ~> numericLit) ^^ { case name ~ value => (name, Some(value.toLong)) } |
-      ident ^^ (name => (name, None))
+  // Returns Left for simple members, Right for data variants
+  lazy val enumVariantOrMember: Parser[Either[(String, Option[Long]), EnumVariantAST]] =
+    ident ~ ("(" ~> repsep(structField, ",") <~ ")") ^^ { case name ~ fields => Right(EnumVariantAST(name, fields)) } |
+      ident ~ ("=" ~> numericLit) ^^ { case name ~ value => Left((name, Some(value.toLong))) } |
+      ident ^^ (name => Left((name, None)))
 
   lazy val typeAliasDecl: Parser[TypeAliasDeclAST] =
     "type" ~> ident ~ ("=" ~> typeRef) ^^ { case name ~ target => TypeAliasDeclAST(name, target) }

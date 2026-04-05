@@ -13,6 +13,7 @@ case class TFunDecl(name: String, params: List[TParam], returnType: SyslType, bo
 case class TVarDecl(name: String, typ: SyslType, init: TExpr, isPrivate: Boolean = false) extends TDecl
 case class TStructDecl(name: String, fields: List[(String, SyslType)]) extends TDecl
 case class TEnumDecl(name: String, members: List[(String, Long)]) extends TDecl
+case class TDataEnumDecl(name: String, enumType: SyslType.EnumType) extends TDecl
 case class TTypeAliasDecl(name: String, target: SyslType) extends TDecl
 
 case class TParam(name: String, typ: SyslType)
@@ -89,6 +90,8 @@ case object TWildcard extends TMatchPattern
 case class TValuePattern(expr: TExpr) extends TMatchPattern
 case class TRangePattern(low: TExpr, high: TExpr) extends TMatchPattern
 case class TDestructurePattern(structType: SyslType.StructType, bindings: List[Option[String]], fieldTypes: List[SyslType]) extends TMatchPattern
+case class TVariantPattern(enumType: SyslType.EnumType, variantIndex: Int, bindings: List[Option[String]], fieldTypes: List[SyslType]) extends TMatchPattern
+case class TEnumConstruct(enumType: SyslType.EnumType, variantIndex: Int, args: List[TExpr]) extends TExpr { def typ: SyslType = enumType }
 case class TNew(structType: SyslType.StructType, args: List[TExpr]) extends TExpr { def typ: SyslType = SyslType.RefType(structType) }
 case class TNewArray(elemType: SyslType, size: TExpr) extends TExpr { def typ: SyslType = SyslType.RefType(SyslType.SliceType(elemType)) }
 case class TLen(expr: TExpr, typ: SyslType) extends TExpr
