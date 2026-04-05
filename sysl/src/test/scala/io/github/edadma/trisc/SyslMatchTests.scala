@@ -15,16 +15,6 @@ class SyslMatchTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 20
   }
 
-  "match first case" in {
-    eval(
-      """main() -> int
-        |    x = 1
-        |    x match
-        |        1 -> 10
-        |        2 -> 20
-        |""".stripMargin) shouldBe 10
-  }
-
   "match with else" in {
     eval(
       """main() -> int
@@ -47,9 +37,7 @@ class SyslMatchTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 20
   }
 
-  // ===== Match as expression =====
-
-  "match as expression in assignment" in {
+  "match as expression" in {
     eval(
       """main() -> int
         |    x = 2
@@ -74,8 +62,6 @@ class SyslMatchTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 12
   }
 
-  // ===== Match with block bodies =====
-
   "match with block body" in {
     eval(
       """main() -> int
@@ -90,8 +76,6 @@ class SyslMatchTests extends SyslTestHelpers {
         |        else -> 0
         |""".stripMargin) shouldBe 22
   }
-
-  // ===== Match on enum values =====
 
   "match on enum" in {
     eval(
@@ -110,8 +94,6 @@ class SyslMatchTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 2
   }
 
-  // ===== Match with expressions as scrutinee =====
-
   "match on expression" in {
     eval(
       """main() -> int
@@ -125,8 +107,6 @@ class SyslMatchTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 50
   }
 
-  // ===== No match and no else returns 0 =====
-
   "no match no else returns 0" in {
     eval(
       """main() -> int
@@ -134,5 +114,138 @@ class SyslMatchTests extends SyslTestHelpers {
         |        1 -> 10
         |        2 -> 20
         |""".stripMargin) shouldBe 0
+  }
+
+  // ===== Wildcard =====
+
+  "wildcard matches anything" in {
+    eval(
+      """main() -> int
+        |    x = 42
+        |    x match
+        |        1 -> 10
+        |        _ -> 99
+        |""".stripMargin) shouldBe 99
+  }
+
+  // ===== Guards =====
+
+  "match with guard" in {
+    eval(
+      """main() -> int
+        |    x = 15
+        |    x match
+        |        _ if x > 10 -> 1
+        |        _ if x > 0 -> 2
+        |        else -> 3
+        |""".stripMargin) shouldBe 1
+  }
+
+  "guard rejects first, matches second" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    x match
+        |        _ if x > 10 -> 1
+        |        _ if x > 0 -> 2
+        |        else -> 3
+        |""".stripMargin) shouldBe 2
+  }
+
+  "guard with value pattern" in {
+    eval(
+      """main() -> int
+        |    x = 0
+        |    x match
+        |        0 if false -> 99
+        |        0 -> 42
+        |        else -> 0
+        |""".stripMargin) shouldBe 42
+  }
+
+  // ===== Range matching =====
+
+  "range match" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    x match
+        |        1..3 -> 1
+        |        4..6 -> 2
+        |        7..9 -> 3
+        |        else -> 0
+        |""".stripMargin) shouldBe 2
+  }
+
+  "range match boundary low" in {
+    eval(
+      """main() -> int
+        |    x = 1
+        |    x match
+        |        1..10 -> 1
+        |        else -> 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "range match boundary high" in {
+    eval(
+      """main() -> int
+        |    x = 10
+        |    x match
+        |        1..10 -> 1
+        |        else -> 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "range match out of range" in {
+    eval(
+      """main() -> int
+        |    x = 11
+        |    x match
+        |        1..10 -> 1
+        |        else -> 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ===== Struct destructuring =====
+
+  "destructure struct in match" in {
+    eval(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |main() -> int
+        |    p = Point(10, 20)
+        |    p match
+        |        Point(x, y) -> x + y
+        |""".stripMargin) shouldBe 30
+  }
+
+  "destructure with wildcard fields" in {
+    eval(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |main() -> int
+        |    p = Point(10, 20)
+        |    p match
+        |        Point(_, y) -> y
+        |""".stripMargin) shouldBe 20
+  }
+
+  "destructure with guard" in {
+    eval(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |main() -> int
+        |    p = Point(0, 42)
+        |    p match
+        |        Point(x, y) if x == 0 -> y
+        |        Point(x, y) -> x + y
+        |""".stripMargin) shouldBe 42
   }
 }

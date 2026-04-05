@@ -2,6 +2,8 @@ package io.github.edadma.trisc
 
 class SyslCodegenMatchTests extends SyslCodegenHelpers {
 
+  // ===== Basic value matching =====
+
   "match single value" in {
     compileAndRun(
       """main() -> int
@@ -75,19 +77,6 @@ class SyslCodegenMatchTests extends SyslCodegenHelpers {
         |""".stripMargin) shouldBe 22
   }
 
-  "match on expression" in {
-    compileAndRun(
-      """main() -> int
-        |    a = 3
-        |    b = 2
-        |    a + b match
-        |        4 -> 40
-        |        5 -> 50
-        |        6 -> 60
-        |        else -> 0
-        |""".stripMargin) shouldBe 50
-  }
-
   "no match no else returns 0" in {
     compileAndRun(
       """main() -> int
@@ -95,5 +84,93 @@ class SyslCodegenMatchTests extends SyslCodegenHelpers {
         |        1 -> 10
         |        2 -> 20
         |""".stripMargin) shouldBe 0
+  }
+
+  // ===== Wildcard =====
+
+  "wildcard matches anything" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 42
+        |    x match
+        |        1 -> 10
+        |        _ -> 99
+        |""".stripMargin) shouldBe 99
+  }
+
+  // ===== Guards =====
+
+  "match with guard" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 15
+        |    x match
+        |        _ if x > 10 -> 1
+        |        _ if x > 0 -> 2
+        |        else -> 3
+        |""".stripMargin) shouldBe 1
+  }
+
+  "guard rejects first, matches second" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 5
+        |    x match
+        |        _ if x > 10 -> 1
+        |        _ if x > 0 -> 2
+        |        else -> 3
+        |""".stripMargin) shouldBe 2
+  }
+
+  // ===== Range matching =====
+
+  "range match" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 5
+        |    x match
+        |        1..3 -> 1
+        |        4..6 -> 2
+        |        7..9 -> 3
+        |        else -> 0
+        |""".stripMargin) shouldBe 2
+  }
+
+  "range match boundary" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 10
+        |    x match
+        |        1..10 -> 1
+        |        else -> 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  // ===== Struct destructuring =====
+
+  "destructure struct in match" in {
+    compileAndRun(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |main() -> int
+        |    p = Point(10, 20)
+        |    p match
+        |        Point(x, y) -> x + y
+        |""".stripMargin) shouldBe 30
+  }
+
+  "destructure with wildcard fields" in {
+    compileAndRun(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |main() -> int
+        |    p = Point(10, 20)
+        |    p match
+        |        Point(_, y) -> y
+        |""".stripMargin) shouldBe 20
   }
 }

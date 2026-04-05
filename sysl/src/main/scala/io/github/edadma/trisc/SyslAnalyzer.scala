@@ -437,6 +437,38 @@ class SyslAnalyzer:
       case ExprStmtAST(expr) =>
         TExprStmt(analyzeExpr(expr))
 
+  private def analyzePattern(pat: MatchPatternAST, scrutineeType: SyslType): TMatchPattern =
+    pat match
+      case WildcardPatternAST => TWildcard
+      case ValuePatternAST(expr) =>
+        val tv = analyzeExpr(expr)
+        val coerced = coerceLiteral(tv, scrutineeType)
+        if !compatible(coerced.typ, scrutineeType) then
+          throw AnalysisError(s"match pattern type ${coerced.typ} incompatible with ${scrutineeType}")
+        TValuePattern(coerced)
+      case RangePatternAST(low, high) =>
+        val tLow = coerceLiteral(analyzeExpr(low), scrutineeType)
+        val tHigh = coerceLiteral(analyzeExpr(high), scrutineeType)
+        TRangePattern(tLow, tHigh)
+      case DestructurePatternAST(name, fields) =>
+        val st = structTypes.getOrElse(name, throw AnalysisError(s"unknown struct '$name' in match pattern"))
+        if fields.length != st.fields.length then
+          throw AnalysisError(s"struct '$name' has ${st.fields.length} fields, pattern has ${fields.length}")
+        val bindings = fields.zip(st.fields).map { case (fieldPat, (fieldName, fieldType)) =>
+          fieldPat match
+            case WildcardPatternAST => None
+            case ValuePatternAST(VarRefAST(bindName)) =>
+              // In destructure context, bare names are bindings
+              if scopeStack != null then
+                currentScope(bindName) = SymInfo(bindName, fieldType, false) // val binding
+              Some(bindName)
+            case ValuePatternAST(expr) =>
+              // Literal value — not a binding
+              None
+            case _ => throw AnalysisError(s"unsupported pattern in struct destructure")
+        }
+        TDestructurePattern(st, bindings, st.fields.map(_._2))
+
   private def analyzeExpr(expr: ExpressionAST): TExpr =
     expr match
       case IntLitAST(n) => TIntLit(n, I32)
@@ -865,23 +897,22 @@ class SyslAnalyzer:
           case _ => VoidType
         TIfExpr(tCond, tThen, tElse, resultType)
 
-      case MatchExprAST(scrutinee, cases, default) =>
+      case MatchExprAST(scrutinee, arms, default) =>
         val tScrutinee = analyzeExpr(scrutinee)
-        val tCases = cases.map { (values, body) =>
-          val tValues = values.map { v =>
-            val tv = analyzeExpr(v)
-            val coerced = coerceLiteral(tv, tScrutinee.typ)
-            if !compatible(coerced.typ, tScrutinee.typ) then
-              throw AnalysisError(s"match case type ${coerced.typ} incompatible with ${tScrutinee.typ}")
-            coerced
-          }
+        val tArms = arms.map { arm =>
           pushScope()
-          val tBody = analyzeBlock(body)
+          val tPatterns = arm.patterns.map(p => analyzePattern(p, tScrutinee.typ))
+          val tGuard = arm.guard.map { g =>
+            val tg = analyzeExpr(g)
+            if tg.typ != BoolType then throw AnalysisError(s"match guard must be bool, got ${tg.typ}")
+            tg
+          }
+          val tBody = analyzeBlock(arm.body)
           popScope()
-          (tValues, tBody)
+          TMatchArm(tPatterns, tGuard, tBody)
         }
         val tDefault = default.map { stmts => pushScope(); val r = analyzeBlock(stmts); popScope(); r }
-        val resultType = tCases.headOption.flatMap(_._2.lastOption) match
+        val resultType = tArms.headOption.flatMap(_.body.lastOption) match
           case Some(TExprStmt(e)) => e.typ
           case _ => VoidType
-        TMatchExpr(tScrutinee, tCases, tDefault, resultType)
+        TMatchExpr(tScrutinee, tArms, tDefault, resultType)

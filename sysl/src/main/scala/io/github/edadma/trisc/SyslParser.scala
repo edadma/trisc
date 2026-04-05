@@ -312,10 +312,16 @@ class SyslParser extends StandardTokenParsers {
       case scrutinee ~ (arms ~ default) => MatchExprAST(scrutinee, arms, default)
     }
 
-  lazy val matchArm: Parser[(List[ExpressionAST], List[StmtAST])] =
-    rep1sep(logicalOr, ",") ~ ("->" ~> (block | inlineStmt ^^ (s => List(s)))) <~ opt(Newline) ^^ {
-      case values ~ body => (values, body)
+  lazy val matchArm: Parser[MatchArmAST] =
+    rep1sep(matchPattern, ",") ~ opt("if" ~> logicalOr) ~ ("->" ~> (block | inlineStmt ^^ (s => List(s)))) <~ opt(Newline) ^^ {
+      case patterns ~ guard ~ body => MatchArmAST(patterns, guard, body)
     }
+
+  lazy val matchPattern: Parser[MatchPatternAST] =
+    "_" ^^^ WildcardPatternAST |
+      ident ~ ("(" ~> repsep(matchPattern, ",") <~ ")") ^^ { case name ~ fields => DestructurePatternAST(name, fields) } |
+      logicalOr ~ (".." ~> logicalOr) ^^ { case lo ~ hi => RangePatternAST(lo, hi) } |
+      logicalOr ^^ ValuePatternAST.apply
 
   lazy val matchElse: Parser[List[StmtAST]] =
     "else" ~> "->" ~> (block | inlineStmt ^^ (s => List(s))) <~ opt(Newline)

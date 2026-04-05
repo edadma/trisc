@@ -351,13 +351,32 @@ if x > 0 then positive()
 x match
     1 -> doA()
     2, 3 -> doB()              // multiple values per arm
-    else -> doDefault()
+    _ -> doDefault()           // wildcard (matches anything)
+    else -> doDefault()        // alternative to wildcard
 
 // match as expression
 y = x match
     1 -> "one"
     2, 3 -> "few"
     else -> "many"
+
+// match with guards
+x match
+    _ if x > 10 -> "big"
+    _ if x > 0 -> "positive"
+    else -> "non-positive"
+
+// range matching (inclusive)
+x match
+    1..10 -> "small"
+    11..100 -> "medium"
+    else -> "large"
+
+// struct destructuring in match
+p match
+    Point(x, y) -> x + y      // binds x and y from fields
+    Point(_, y) -> y           // wildcard ignores field
+    Point(x, y) if x == 0 -> y  // guard with bindings
 
 // match with block bodies
 x match

@@ -52,6 +52,29 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private type Env = mutable.LinkedHashMap[String, Cell]
   private val deferStack = new mutable.ArrayBuffer[(TStmt, Env)]
 
+  private def matchPattern(pat: TMatchPattern, value: Value, env: Env): Boolean =
+    pat match
+      case TWildcard => true
+      case TValuePattern(expr) => toLong(evalAny(expr, env)) == toLong(value)
+      case TRangePattern(low, high) =>
+        val v = toLong(value)
+        v >= toLong(evalAny(low, env)) && v <= toLong(evalAny(high, env))
+      case TDestructurePattern(_, bindings, _) =>
+        true // struct destructure always matches (no value check, just binding)
+
+  private def bindPattern(pat: TMatchPattern, value: Value, env: Env): Unit =
+    pat match
+      case TDestructurePattern(_, bindings, fieldTypes) =>
+        val (cells, off) = value match
+          case ArrVal(c, o) => (c, o)
+          case RefVal(c, _, _) => (c, 0)
+          case _ => return
+        for (binding, i) <- bindings.zipWithIndex do
+          binding.foreach { name =>
+            env(name) = new Cell(cells(off + i).value)
+          }
+      case _ => // nothing to bind
+
   private def toLong(v: Value): Long = v match
     case IntVal(n)    => n
     case FloatVal(d)  => d.toLong
@@ -669,14 +692,18 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             case Some(stmts) => evalBlock(stmts, env)
             case None => IntVal(0)
 
-      case TMatchExpr(scrutinee, cases, default, _) =>
+      case TMatchExpr(scrutinee, arms, default, _) =>
         val sv = evalAny(scrutinee, env)
-        val svLong = toLong(sv)
-        val matched = cases.find { (values, _) =>
-          values.exists(v => toLong(evalAny(v, env)) == svLong)
+        val matched = arms.find { arm =>
+          val patternMatches = arm.patterns.exists(p => matchPattern(p, sv, env))
+          if patternMatches then
+            // Bind destructure patterns before checking guard
+            arm.patterns.find(p => matchPattern(p, sv, env)).foreach(p => bindPattern(p, sv, env))
+            arm.guard.forall(g => toLong(evalAny(g, env)) != 0)
+          else false
         }
         matched match
-          case Some((_, body)) => evalBlock(body, env)
+          case Some(arm) => evalBlock(arm.body, env)
           case None =>
             default match
               case Some(stmts) => evalBlock(stmts, env)

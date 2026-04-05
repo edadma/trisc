@@ -87,7 +87,14 @@ case class IndirectCallAST(callee: ExpressionAST, args: List[ExpressionAST]) ext
 case class MethodCallAST(obj: ExpressionAST, method: String, args: List[ExpressionAST]) extends ExpressionAST
 case class CastAST(targetType: TypeAST, expr: ExpressionAST) extends ExpressionAST
 case class IfExprAST(cond: ExpressionAST, thenBody: List[StmtAST], elseBody: Option[List[StmtAST]]) extends ExpressionAST
-case class MatchExprAST(expr: ExpressionAST, cases: List[(List[ExpressionAST], List[StmtAST])], default: Option[List[StmtAST]]) extends ExpressionAST
+case class MatchExprAST(expr: ExpressionAST, arms: List[MatchArmAST], default: Option[List[StmtAST]]) extends ExpressionAST
+case class MatchArmAST(patterns: List[MatchPatternAST], guard: Option[ExpressionAST], body: List[StmtAST])
+
+sealed trait MatchPatternAST
+case object WildcardPatternAST extends MatchPatternAST
+case class ValuePatternAST(expr: ExpressionAST) extends MatchPatternAST
+case class RangePatternAST(low: ExpressionAST, high: ExpressionAST) extends MatchPatternAST
+case class DestructurePatternAST(name: String, fields: List[MatchPatternAST]) extends MatchPatternAST
 case class AddrOfAST(name: String) extends ExpressionAST
 case class AddrOfIndexAST(array: ExpressionAST, index: ExpressionAST) extends ExpressionAST
 case class AddrOfFieldAST(obj: ExpressionAST, field: String) extends ExpressionAST
