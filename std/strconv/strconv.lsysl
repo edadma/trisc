@@ -288,28 +288,28 @@ Tests
 
     #test
     test_parse_bool_rejects_caps() -> void
-        val _v1, ok1 = parse_bool("True")
+        val _, ok1 = parse_bool("True")
         assert(!ok1, "True rejected")
 
-        val _v2, ok2 = parse_bool("TRUE")
+        val _, ok2 = parse_bool("TRUE")
         assert(!ok2, "TRUE rejected")
 
     #test
     test_parse_bool_rejects_yes_no() -> void
-        val _v1, ok1 = parse_bool("yes")
+        val _, ok1 = parse_bool("yes")
         assert(!ok1, "yes rejected")
 
-        val _v2, ok2 = parse_bool("no")
+        val _, ok2 = parse_bool("no")
         assert(!ok2, "no rejected")
 
     #test
     test_parse_bool_rejects_whitespace() -> void
-        val _v, ok = parse_bool(" true")
+        val _, ok = parse_bool(" true")
         assert(!ok, "leading space rejected")
 
     #test
     test_parse_bool_rejects_empty() -> void
-        val _v, ok = parse_bool("")
+        val _, ok = parse_bool("")
         assert(!ok, "empty rejected")
 
 
@@ -353,38 +353,38 @@ Tests
 
     #test
     test_parse_i64_overflow_positive() -> void
-        val _v, ok = parse_i64("9223372036854775808")
+        val _, ok = parse_i64("9223372036854775808")
         assert(!ok, "MAX_I64+1 rejects")
 
     #test
     test_parse_i64_overflow_negative() -> void
-        val _v, ok = parse_i64("-9223372036854775809")
+        val _, ok = parse_i64("-9223372036854775809")
         assert(!ok, "MIN_I64-1 rejects")
 
     #test
     test_parse_i64_rejects_empty() -> void
-        val _v, ok = parse_i64("")
+        val _, ok = parse_i64("")
         assert(!ok, "empty rejects")
 
     #test
     test_parse_i64_rejects_sign_only() -> void
-        val _v1, ok1 = parse_i64("+")
+        val _, ok1 = parse_i64("+")
         assert(!ok1, "lone plus")
 
-        val _v2, ok2 = parse_i64("-")
+        val _, ok2 = parse_i64("-")
         assert(!ok2, "lone minus")
 
     #test
     test_parse_i64_rejects_non_digit() -> void
-        val _v1, ok1 = parse_i64("12x3")
+        val _, ok1 = parse_i64("12x3")
         assert(!ok1, "embedded non-digit")
 
-        val _v2, ok2 = parse_i64("abc")
+        val _, ok2 = parse_i64("abc")
         assert(!ok2, "all letters")
 
     #test
     test_parse_i64_rejects_trailing_garbage() -> void
-        val _v, ok = parse_i64("42 ")
+        val _, ok = parse_i64("42 ")
         assert(!ok, "trailing space")
 
     #test
@@ -404,12 +404,12 @@ Tests
 
     #test
     test_parse_int_range_check_positive() -> void
-        val _v, ok = parse_int("2147483648")
+        val _, ok = parse_int("2147483648")
         assert(!ok, "MAX_I32+1 rejects")
 
     #test
     test_parse_int_range_check_negative() -> void
-        val _v, ok = parse_int("-2147483649")
+        val _, ok = parse_int("-2147483649")
         assert(!ok, "MIN_I32-1 rejects")
 
     #test
