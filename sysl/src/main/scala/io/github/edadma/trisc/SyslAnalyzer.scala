@@ -27,6 +27,12 @@ class SyslAnalyzer:
   private val specializedDecls = mutable.ListBuffer.empty[TDecl]
   private var typeEnv: Map[String, SyslType] = Map.empty
 
+  // Generic struct support
+  private val genericStructs = new mutable.LinkedHashMap[String, StructDeclAST]
+  private val genericStructInstantiations = new mutable.LinkedHashMap[(String, List[SyslType]), SyslType.StructType]
+  // Reverse map: mangled struct name -> (template name, concrete type args) for unification at call sites
+  private val structToTemplate = new mutable.LinkedHashMap[String, (String, List[SyslType])]
+
   // Trait / impl support
   private case class TraitInfo(name: String, typeParam: String, methods: List[TraitMethodAST])
   private case class ImplMethodInfo(mangled: String, paramTypes: List[(String, SyslType)], retType: SyslType, body: FunBodyAST, isSynthesized: Boolean)
@@ -114,10 +120,16 @@ class SyslAnalyzer:
             globalScope(name) = SymInfo(name, resolved, mutable = false)
             externalSymbols += name
           // else: already registered from same-module sibling or import — skip
-        case StructDeclAST(name, fields) =>
-          if structTypes.contains(name) then throw AnalysisError(s"duplicate struct: '$name'", decl)
-          val resolvedFields = fields.map((n, t) => (n, resolveType(t)))
-          structTypes(name) = SyslType.StructType(name, resolvedFields)
+        case sd @ StructDeclAST(name, fields, typeParams) =>
+          if typeParams.nonEmpty then
+            // Generic struct: store as template, don't resolve fields yet
+            if genericStructs.contains(name) || structTypes.contains(name) then
+              throw AnalysisError(s"duplicate struct: '$name'", decl)
+            genericStructs(name) = sd
+          else
+            if structTypes.contains(name) || genericStructs.contains(name) then throw AnalysisError(s"duplicate struct: '$name'", decl)
+            val resolvedFields = fields.map((n, t) => (n, resolveType(t)))
+            structTypes(name) = SyslType.StructType(name, resolvedFields)
         case fd @ FunDeclAST(name, params, returnType, _, _, typeParams) =>
           if typeParams.nonEmpty then
             // Generic function: store as template, don't resolve types yet
@@ -230,6 +242,7 @@ class SyslAnalyzer:
     // Second pass: produce typed AST (skip generic templates; they're instantiated on demand)
     val tDecls = program.decls.flatMap {
       case f: FunDeclAST if f.typeParams.nonEmpty => Nil
+      case s: StructDeclAST if s.typeParams.nonEmpty => Nil
       case _: TraitDeclAST => Nil // traits emit nothing; only impls do
       case impl: ImplDeclAST   => analyzeImplMethods(impl)
       case d => List(analyzeDecl(d))
@@ -252,7 +265,7 @@ class SyslAnalyzer:
       case ExternVarDeclAST(name, typ) =>
         TExternVarDecl(name, resolveType(typ))
 
-      case StructDeclAST(name, _) =>
+      case StructDeclAST(name, _, _) =>
         val st = structTypes(name)
         TStructDecl(name, st.fields)
 
@@ -290,8 +303,10 @@ class SyslAnalyzer:
         TVarDecl(name, declType, tInit, isPrivate)
 
   private def resolveType(t: TypeAST): SyslType = t match
-    case NamedTypeAST(name) if typeEnv.contains(name) => typeEnv(name)
-    case NamedTypeAST(name) => name match
+    case NamedTypeAST(name, typeArgs) if typeArgs.nonEmpty =>
+      instantiateGenericStruct(name, typeArgs.map(resolveType))
+    case NamedTypeAST(name, _) if typeEnv.contains(name) => typeEnv(name)
+    case NamedTypeAST(name, _) => name match
       case "int" | "i32" => I32
       case "char" => U32
       case "i64" => I64
@@ -416,7 +431,7 @@ class SyslAnalyzer:
   // recording type variable bindings. Returns true if unification succeeded structurally.
   private def unifyTypes(param: TypeAST, arg: SyslType, typeParams: Set[String], env: mutable.Map[String, SyslType]): Unit =
     param match
-      case NamedTypeAST(name) if typeParams.contains(name) =>
+      case NamedTypeAST(name, _) if typeParams.contains(name) =>
         env.get(name) match
           case Some(existing) if existing == arg => ()
           case Some(existing) =>
@@ -434,10 +449,44 @@ class SyslAnalyzer:
       case SliceTypeAST(inner) => arg match
         case SliceType(a) => unifyTypes(inner, a, typeParams, env)
         case _ => ()
+      case NamedTypeAST(name, tArgs) if tArgs.nonEmpty => arg match
+        case SyslType.StructType(argName, _) =>
+          structToTemplate.get(argName) match
+            case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
+              for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
+            case _ => ()
+        case _ => ()
       case _ => () // concrete parameter type, nothing to infer
 
   // Instantiate a generic function with inferred type arguments, returning the mangled name
   // and FunInfo of the instantiated function. Reuses cached instantiations.
+  // Instantiate a generic struct with concrete type arguments, returning its StructType
+  private def instantiateGenericStruct(name: String, typeArgs: List[SyslType]): SyslType.StructType =
+    val cacheKey = (name, typeArgs)
+    genericStructInstantiations.get(cacheKey) match
+      case Some(st) => st
+      case None =>
+        val template = genericStructs.getOrElse(name,
+          throw AnalysisError(s"'$name' is not a generic struct"))
+        if template.typeParams.length != typeArgs.length then
+          throw AnalysisError(s"generic struct '$name' expects ${template.typeParams.length} type arg(s), got ${typeArgs.length}")
+        val mangled = name + "_" + typeArgs.map(typeToMangled).mkString("_")
+        // Insert a placeholder StructType to handle recursive field types
+        val placeholder: SyslType.StructType = SyslType.StructType(mangled, Nil)
+        genericStructInstantiations(cacheKey) = placeholder
+        structTypes(mangled) = placeholder
+        structToTemplate(mangled) = (name, typeArgs)
+        val savedEnv = typeEnv
+        typeEnv = typeEnv ++ template.typeParams.zip(typeArgs).toMap
+        try
+          val resolvedFields = template.fields.map((n, t) => (n, resolveType(t)))
+          val st: SyslType.StructType = SyslType.StructType(mangled, resolvedFields)
+          genericStructInstantiations(cacheKey) = st
+          structTypes(mangled) = st
+          specializedDecls += TStructDecl(mangled, resolvedFields)
+          st
+        finally typeEnv = savedEnv
+
   // Analyze each impl method (including synthesized defaults) as a mangled top-level function
   private def analyzeImplMethods(impl: ImplDeclAST): List[TDecl] =
     val resolvedTarget = resolveType(impl.targetType)
@@ -1196,6 +1245,25 @@ class SyslAnalyzer:
           val st = structTypes(name)
           if tArgs.length != st.fields.length then
             throw AnalysisError(s"struct '${st.name}' has ${st.fields.length} field(s), got ${tArgs.length} argument(s)")
+          val checkedArgs = tArgs.zip(st.fields).map { case (arg, (fieldName, fieldType)) =>
+            val coerced = coerceLiteral(arg, fieldType)
+            if !compatible(coerced.typ, fieldType) then
+              throw AnalysisError(s"field '$fieldName' of '${st.name}' expects $fieldType, got ${coerced.typ}")
+            coerced
+          }
+          TStructConstruct(st, checkedArgs)
+        else if genericStructs.contains(name) then
+          // Generic struct constructor: Pair(1, 2) — infer type args from argument types
+          val template = genericStructs(name)
+          if tArgs.length != template.fields.length then
+            throw AnalysisError(s"generic struct '$name' has ${template.fields.length} field(s), got ${tArgs.length} argument(s)")
+          val env = mutable.Map.empty[String, SyslType]
+          for ((_, ftype), arg) <- template.fields.zip(tArgs) do
+            unifyTypes(ftype, arg.typ, template.typeParams.toSet, env)
+          for tp <- template.typeParams if !env.contains(tp) do
+            throw AnalysisError(s"cannot infer type parameter '$tp' for generic struct '$name'")
+          val inferredArgs = template.typeParams.map(env(_))
+          val st = instantiateGenericStruct(name, inferredArgs)
           val checkedArgs = tArgs.zip(st.fields).map { case (arg, (fieldName, fieldType)) =>
             val coerced = coerceLiteral(arg, fieldType)
             if !compatible(coerced.typ, fieldType) then

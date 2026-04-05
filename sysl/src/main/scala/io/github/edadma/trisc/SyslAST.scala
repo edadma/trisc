@@ -7,7 +7,7 @@ case class ProgramAST(decls: List[DeclAST])
 
 // Type syntax AST — structured representation of type references
 sealed trait TypeAST
-case class NamedTypeAST(name: String) extends TypeAST
+case class NamedTypeAST(name: String, typeArgs: List[TypeAST] = Nil) extends TypeAST
 case class PtrTypeAST(inner: TypeAST) extends TypeAST
 case class ArrayTypeAST(size: Int, elem: TypeAST) extends TypeAST
 case class SliceTypeAST(elem: TypeAST) extends TypeAST
@@ -28,7 +28,7 @@ case class ExternFuncDeclAST(name: String, params: List[ParamAST], returnType: O
 case class ExternVarDeclAST(name: String, typ: TypeAST) extends DeclAST
 case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST], body: FunBodyAST, isPrivate: Boolean = false, typeParams: List[String] = Nil) extends DeclAST
 case class VarDeclAST(name: String, typ: Option[TypeAST], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true) extends DeclAST
-case class StructDeclAST(name: String, fields: List[(String, TypeAST)]) extends DeclAST
+case class StructDeclAST(name: String, fields: List[(String, TypeAST)], typeParams: List[String] = Nil) extends DeclAST
 case class EnumDeclAST(name: String, members: List[(String, Option[Long])]) extends DeclAST
 case class DataEnumDeclAST(name: String, variants: List[EnumVariantAST]) extends DeclAST
 case class EnumVariantAST(name: String, fields: List[(String, TypeAST)])

@@ -271,6 +271,39 @@ main() -> int
 - Operations on a type parameter that are invalid for the concrete type produce
   an error at the call site where the instantiation happens.
 
+### Generic Structs
+
+Structs may declare type parameters in square brackets after the name. Each
+distinct instantiation gets its own monomorphized struct layout and `sizeof`.
+
+```sysl
+struct Pair[T]
+    a: T
+    b: T
+
+struct Tuple[K, V]
+    key: K
+    value: V
+
+main() -> int
+    p = Pair(10, 20)            // T inferred as int from arg types
+    q: Pair[i64] = Pair(1i64, 2i64)
+    t = Tuple(5, 'A')
+    p.a + p.b + int(q.a) + t.key
+```
+
+**Rules:**
+- Type parameters appear in square brackets after the struct name.
+- Field types may reference the type parameters.
+- Constructor calls infer type arguments from the argument types.
+- Explicit type annotations (`Pair[int]`) may also be used in variable
+  declarations and parameter types.
+- Each `(struct, type-args)` pair produces one monomorphized struct type with a
+  mangled name (e.g. `Pair_i32`, `Tuple_i32_u32`).
+- Generic functions and generic structs compose: a function like
+  `swapPair[T](p: *Pair[T])` is fully supported — `T` is inferred from the
+  concrete `Pair[i32]` passed in.
+
 ### Traits and `impl` blocks
 
 Traits describe a set of methods a type may implement. Each trait is parameterized
