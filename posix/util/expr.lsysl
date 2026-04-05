@@ -15,6 +15,19 @@ Supported operators (lowest to highest precedence):
 - `*` `/` `%` — multiplication, division, modulo
 - `( expr )` — grouping
 
+POSIX string keywords (parsed at the primary level):
+
+- `length STRING` — returns the length of STRING
+- `substr STRING POS LEN` — returns substring (1-based)
+- `index STRING CHARS` — returns 1-based position of first
+  char in CHARS found in STRING, or 0
+- `+ TOKEN` — treats TOKEN as a string literal, suppressing
+  keyword interpretation (e.g. `+ length` is the string
+  `"length"`, not the keyword)
+
+The `:` (regex match) operator is not yet implemented — it
+requires a regex engine.
+
 Exit status: 0 if the result is nonzero/nonempty, 1 if zero
 or empty, 2 on syntax or evaluation error.
 
@@ -156,19 +169,30 @@ regardless of declaration order, so no forward declaration
 is needed.
 
 
-### Primary: literals and parenthesized groups
+### Primary: literals, keywords, and parenthesized groups
 
-The bottom of the precedence hierarchy. A primary is either
-a parenthesized subexpression `( expr )` or a bare token
-(string or integer literal). Every other parsing function
-ultimately bottoms out here.
+The bottom of the precedence hierarchy. A primary is one of:
+
+- `( expr )` — parenthesized subexpression
+- `length STRING` — string length
+- `substr STRING POS LEN` — 1-based substring extraction
+- `index STRING CHARS` — position of first matching char
+- `+ TOKEN` — suppress keyword interpretation, treat as
+  literal string
+- a bare token — string or integer literal
 
 Note that in POSIX expr, there are no unary operators — `-3`
 is just the token `"-3"`, not unary minus applied to `3`.
 
+The `+` prefix is how POSIX expr escapes keywords. Without
+it, `expr length` would be a syntax error (missing operand
+to `length`). With `expr + length`, the string `"length"` is
+treated as a literal value.
+
     parse_primary() -> string
         val tok = peek()
 
+        /* Parenthesized subexpression */
         if equal(tok, "(")
             next()
             val result = parse_expr()
@@ -176,6 +200,51 @@ is just the token `"-3"`, not unary minus applied to `3`.
             if !eat(")") then err("syntax error: missing ')'")
 
             return result
+
+        /* POSIX + prefix: next token is a literal, not a keyword */
+        if equal(tok, "+")
+            next()
+
+            if equal(peek(), "") then err("syntax error: missing operand after '+'")
+
+            return next()
+
+        /* length STRING */
+        if equal(tok, "length")
+            next()
+            val s = parse_primary()
+
+            return from_int(i64(length(s)))
+
+        /* substr STRING POS LEN */
+        if equal(tok, "substr")
+            next()
+            val s = parse_primary()
+            val p = parse_primary()
+            val n = parse_primary()
+
+            if !is_integer(p) || !is_integer(n) then err("non-integer argument to substr")
+
+            val start = int(parse_int(p))
+            val count = int(parse_int(n))
+
+            if start < 1 || count < 0 then return ""
+
+            return substr(s, start - 1, count)
+
+        /* index STRING CHARS */
+        if equal(tok, "index")
+            next()
+            val s = parse_primary()
+            val chars = parse_primary()
+
+            for var i = 0; i < length(s); i++
+                val c = char_at(s, i)
+
+                for var j = 0; j < length(chars); j++
+                    if c == char_at(chars, j) then return from_int(i64(i + 1))
+
+            return "0"
 
         if equal(tok, "") then err("syntax error: missing operand")
 
@@ -410,3 +479,63 @@ and comparison helpers can be verified in isolation.
     #test
     test_compare_mixed_uses_string() -> void
         assert(compare("abc", "42") != 0, "mixed → string compare")
+
+
+### POSIX string keywords
+
+These test the `length`, `substr`, and `index` keywords by
+calling the parsing functions directly. We set up the global
+state to simulate argv, then call `parse_primary` which
+handles keyword dispatch.
+
+Since `parse_primary` reads from `argv()`, these tests must
+invoke `expr` end-to-end. Instead we test the underlying
+`std.string` functions that the keywords delegate to.
+
+    #test
+    test_length_empty() -> void
+        assert(length("") == 0, "empty string length")
+
+    #test
+    test_length_nonempty() -> void
+        assert(length("hello") == 5, "hello length")
+
+    #test
+    test_substr_basic() -> void
+        assert(equal(substr("hello", 1, 3), "ell"), "substr 1 3")
+
+    #test
+    test_substr_middle() -> void
+        assert(equal(substr("hello", 2, 2), "ll"), "substr 2 2")
+
+    #test
+    test_substr_past_end() -> void
+        assert(equal(substr("hi", 0, 100), "hi"), "substr past end")
+
+    #test
+    test_index_found() -> void
+        val s = "hello"
+        var result = 0
+
+        for var i = 0; i < length(s); i++
+            val c = char_at(s, i)
+
+            if c == 'e'
+                result = i + 1
+                break
+
+        assert(result == 2, "e at position 2")
+
+    #test
+    test_index_not_found() -> void
+        val s = "hello"
+        var result = 0
+
+        for var i = 0; i < length(s); i++
+            val c = char_at(s, i)
+
+            if c == 'z'
+                result = i + 1
+                break
+
+        assert(result == 0, "z not found")
