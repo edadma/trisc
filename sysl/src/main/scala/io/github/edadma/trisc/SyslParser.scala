@@ -132,8 +132,8 @@ class SyslParser extends StandardTokenParsers {
         val selfParam = ParamAST("self", PtrTypeAST(NamedTypeAST(typeName)))
         FunDeclAST(s"${typeName}_$methodName", selfParam :: params, rt, body, priv)
     } |
-    ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
-      case name ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body, priv)
+    ident ~ typeParamList ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
+      case name ~ tps ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body, priv, tps)
     } |
       opt(mutability) ~ ident ~ (":" ~> typeExpr) ~ ("=" ~> expr) ^^ {
         case mut ~ name ~ t ~ e => VarDeclAST(name, Some(t), e, priv, mut.getOrElse(true))
@@ -153,6 +153,10 @@ class SyslParser extends StandardTokenParsers {
       opt(mutability) ~ ident ~ ("=" ~> expr) ^^ {
         case mut ~ name ~ e => VarDeclAST(name, None, e, priv, mut.getOrElse(true))
       }
+
+  // Optional type parameter list for generic functions: [T], [T, U], or absent
+  lazy val typeParamList: Parser[List[String]] =
+    opt("[" ~> rep1sep(ident, ",") <~ "]") ^^ (_.getOrElse(Nil))
 
   lazy val funRest: Parser[(Option[TypeAST], FunBodyAST)] =
     "->" ~> typeRef ~ ("=" ~> bodyExprOrBlock) ^^ { case rt ~ body => (Some(rt), body) } |

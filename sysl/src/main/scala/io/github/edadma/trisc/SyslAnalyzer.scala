@@ -21,6 +21,12 @@ class SyslAnalyzer:
   private var scopeStack: mutable.ArrayBuffer[mutable.LinkedHashMap[String, SymInfo]] = null
   private var loopDepth: Int = 0
 
+  // Generic function support
+  private val genericTemplates = new mutable.LinkedHashMap[String, FunDeclAST]
+  private val instantiations = new mutable.LinkedHashMap[(String, List[SyslType]), String]
+  private val specializedDecls = mutable.ListBuffer.empty[TDecl]
+  private var typeEnv: Map[String, SyslType] = Map.empty
+
   private def pushScope(): Unit =
     scopeStack += new mutable.LinkedHashMap[String, SymInfo]
 
@@ -100,19 +106,25 @@ class SyslAnalyzer:
           if structTypes.contains(name) then throw AnalysisError(s"duplicate struct: '$name'", decl)
           val resolvedFields = fields.map((n, t) => (n, resolveType(t)))
           structTypes(name) = SyslType.StructType(name, resolvedFields)
-        case FunDeclAST(name, params, returnType, _, _) =>
-          val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
-          val retType = returnType.map(resolveType).getOrElse(VoidType)
-          if functions.contains(name) then
-            throw AnalysisError(s"duplicate function: '$name'", decl)
-          functions(name) = FunInfo(name, paramTypes, retType)
-          // Register as method if name matches StructName_methodName pattern
-          val underscoreIdx = name.indexOf('_')
-          if underscoreIdx > 0 && params.nonEmpty && params.head.name == "self" then
-            val structName = name.substring(0, underscoreIdx)
-            val methodName = name.substring(underscoreIdx + 1)
-            if structTypes.contains(structName) then
-              methods.getOrElseUpdate(structName, mutable.Set.empty) += methodName
+        case fd @ FunDeclAST(name, params, returnType, _, _, typeParams) =>
+          if typeParams.nonEmpty then
+            // Generic function: store as template, don't resolve types yet
+            if genericTemplates.contains(name) || functions.contains(name) then
+              throw AnalysisError(s"duplicate function: '$name'", decl)
+            genericTemplates(name) = fd
+          else
+            val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
+            val retType = returnType.map(resolveType).getOrElse(VoidType)
+            if functions.contains(name) || genericTemplates.contains(name) then
+              throw AnalysisError(s"duplicate function: '$name'", decl)
+            functions(name) = FunInfo(name, paramTypes, retType)
+            // Register as method if name matches StructName_methodName pattern
+            val underscoreIdx = name.indexOf('_')
+            if underscoreIdx > 0 && params.nonEmpty && params.head.name == "self" then
+              val structName = name.substring(0, underscoreIdx)
+              val methodName = name.substring(underscoreIdx + 1)
+              if structTypes.contains(structName) then
+                methods.getOrElseUpdate(structName, mutable.Set.empty) += methodName
         case EnumDeclAST(name, members) =>
           if enumTypes.contains(name) then throw AnalysisError(s"duplicate enum: '$name'", decl)
           var nextValue = 0L
@@ -140,9 +152,12 @@ class SyslAnalyzer:
           if globalScope.contains(name) then
             throw AnalysisError(s"duplicate global: '$name'", decl)
 
-    // Second pass: produce typed AST
-    val tDecls = program.decls.map(analyzeDecl)
-    TProgram(tDecls)
+    // Second pass: produce typed AST (skip generic templates; they're instantiated on demand)
+    val tDecls = program.decls.flatMap {
+      case f: FunDeclAST if f.typeParams.nonEmpty => None
+      case d => Some(analyzeDecl(d))
+    }
+    TProgram(tDecls ++ specializedDecls.toList)
 
   private def analyzeDecl(decl: DeclAST): TDecl =
     decl match
@@ -174,7 +189,7 @@ class SyslAnalyzer:
       case TypeAliasDeclAST(name, target) =>
         TTypeAliasDecl(name, resolveType(target))
 
-      case FunDeclAST(name, params, _, body, isPrivate) =>
+      case FunDeclAST(name, params, _, body, isPrivate, _) =>
         scopeStack = new mutable.ArrayBuffer
         pushScope()
         val funInfo = functions(name)
@@ -198,6 +213,7 @@ class SyslAnalyzer:
         TVarDecl(name, declType, tInit, isPrivate)
 
   private def resolveType(t: TypeAST): SyslType = t match
+    case NamedTypeAST(name) if typeEnv.contains(name) => typeEnv(name)
     case NamedTypeAST(name) => name match
       case "int" | "i32" => I32
       case "char" => U32
@@ -297,6 +313,103 @@ class SyslAnalyzer:
     functions.getOrElse(name,
       builtinFunctions.getOrElse(name,
         throw AnalysisError(s"undefined function: '$name'")))
+
+  // ===== Generic function support =====
+
+  // Mangle a type to a name-safe identifier for use in instantiated function names
+  private def typeToMangled(t: SyslType): String = t match
+    case IntType(w)      => s"i$w"
+    case UIntType(w)     => s"u$w"
+    case BoolType        => "bool"
+    case DoubleType      => "f64"
+    case StringType      => "string"
+    case VoidType        => "void"
+    case PtrType(i)      => "ptr" + typeToMangled(i)
+    case RefType(i)      => "ref" + typeToMangled(i)
+    case ArrayType(e, n) => s"arr${n}${typeToMangled(e)}"
+    case SliceType(e)    => "slice" + typeToMangled(e)
+    case FuncType(ps, r) => "fn" + ps.map(typeToMangled).mkString("") + "Ret" + typeToMangled(r)
+    case StructType(n, _) => n
+    case EnumType(n, _)   => n
+
+  private def mangleGenericName(base: String, typeArgs: List[SyslType]): String =
+    base + "_" + typeArgs.map(typeToMangled).mkString("_")
+
+  // Unify a parameter TypeAST (which may contain type variables) against a concrete SyslType,
+  // recording type variable bindings. Returns true if unification succeeded structurally.
+  private def unifyTypes(param: TypeAST, arg: SyslType, typeParams: Set[String], env: mutable.Map[String, SyslType]): Unit =
+    param match
+      case NamedTypeAST(name) if typeParams.contains(name) =>
+        env.get(name) match
+          case Some(existing) if existing == arg => ()
+          case Some(existing) =>
+            throw AnalysisError(s"cannot infer type parameter '$name': seen both $existing and $arg")
+          case None => env(name) = arg
+      case PtrTypeAST(inner) => arg match
+        case PtrType(a) => unifyTypes(inner, a, typeParams, env)
+        case _ => () // type mismatch handled later by checkArgs
+      case RefTypeAST(inner) => arg match
+        case RefType(a) => unifyTypes(inner, a, typeParams, env)
+        case _ => ()
+      case ArrayTypeAST(_, inner) => arg match
+        case ArrayType(a, _) => unifyTypes(inner, a, typeParams, env)
+        case _ => ()
+      case SliceTypeAST(inner) => arg match
+        case SliceType(a) => unifyTypes(inner, a, typeParams, env)
+        case _ => ()
+      case _ => () // concrete parameter type, nothing to infer
+
+  // Instantiate a generic function with inferred type arguments, returning the mangled name
+  // and FunInfo of the instantiated function. Reuses cached instantiations.
+  private def instantiateGeneric(name: String, argTypes: List[SyslType]): (String, FunInfo) =
+    val template = genericTemplates(name)
+    val typeParams = template.typeParams
+    // Infer type arguments
+    val env = mutable.Map.empty[String, SyslType]
+    if template.params.length != argTypes.length then
+      throw AnalysisError(s"generic function '$name' expects ${template.params.length} argument(s), got ${argTypes.length}")
+    for (p, a) <- template.params.zip(argTypes) do
+      unifyTypes(p.typ, a, typeParams.toSet, env)
+    // Require all type params to be pinned
+    for tp <- typeParams if !env.contains(tp) do
+      throw AnalysisError(s"cannot infer type parameter '$tp' for generic function '$name'")
+    val inferredArgs = typeParams.map(env(_))
+    val cacheKey = (name, inferredArgs)
+    instantiations.get(cacheKey) match
+      case Some(mangled) => (mangled, functions(mangled))
+      case None =>
+        val mangled = mangleGenericName(name, inferredArgs)
+        if functions.contains(mangled) then
+          throw AnalysisError(s"generic instantiation '$mangled' collides with existing function")
+        // Save and install typeEnv for this instantiation
+        val savedEnv = typeEnv
+        typeEnv = typeParams.zip(inferredArgs).toMap
+        try
+          // Resolve param/return types in the new env
+          val paramTypes = template.params.map(p => (p.name, resolveType(p.typ)))
+          val retType = template.returnType.map(resolveType).getOrElse(VoidType)
+          val funInfo = FunInfo(mangled, paramTypes, retType)
+          // Register before analyzing body to support recursion
+          functions(mangled) = funInfo
+          instantiations(cacheKey) = mangled
+          // Analyze body in a fresh scope, using the mangled name
+          val savedScopeStack = scopeStack
+          val savedLoopDepth = loopDepth
+          scopeStack = new mutable.ArrayBuffer
+          loopDepth = 0
+          pushScope()
+          for (paramName, paramType) <- paramTypes do
+            currentScope(paramName) = SymInfo(paramName, paramType, true)
+          val tBody = template.body match
+            case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
+            case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
+          scopeStack = savedScopeStack
+          loopDepth = savedLoopDepth
+          val tParams = paramTypes.map((n, t) => TParam(n, t))
+          specializedDecls += TFunDecl(mangled, tParams, retType, tBody, template.isPrivate)
+          (mangled, funInfo)
+        finally
+          typeEnv = savedEnv
 
   private def checkArgs(name: String, params: List[(String, SyslType)], args: List[TExpr]): List[TExpr] =
     if args.length != params.length then
@@ -928,7 +1041,11 @@ class SyslAnalyzer:
       case CallAST(name, args) =>
         val tArgs = args.map(analyzeExpr)
         // Check if it's a direct function call or an indirect call through a variable
-        if functions.contains(name) || builtinFunctions.contains(name) then
+        if genericTemplates.contains(name) then
+          val (mangled, funInfo) = instantiateGeneric(name, tArgs.map(_.typ))
+          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
+          TCall(mangled, checkedArgs, funInfo.returnType)
+        else if functions.contains(name) || builtinFunctions.contains(name) then
           val funInfo = lookupFun(name)
           val checkedArgs = checkArgs(name, funInfo.params, tArgs)
           TCall(name, checkedArgs, funInfo.returnType)

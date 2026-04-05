@@ -228,6 +228,49 @@ double(x: int) = x * 2
 getAnswer() -> int = 42
 ```
 
+### Generic Functions
+
+Functions may declare type parameters in square brackets after the name. The
+compiler monomorphizes each instantiation — one specialized copy per unique set
+of type arguments, just like Go or C++. Type arguments are inferred from the
+call-site argument types.
+
+```sysl
+// Identity — works for any type
+id[T](x: T) -> T = x
+
+// Swap via pointers — works for any T
+swap[T](a: *T, b: *T)
+    var tmp: T = *a
+    *a = *b
+    *b = tmp
+
+// Multiple type parameters
+pair_first[K, V](k: K, v: V) -> K = k
+
+// Instantiation-time checking: operations on T are checked when T is pinned.
+// max[int] works; max[bool] errors at the call site because > is not defined.
+max[T](a: T, b: T) -> T
+    if a > b then a else b
+
+main() -> int
+    var x = 10
+    var y = 20
+    swap(&x, &y)        // T inferred as int
+    max(1.5, 2.5)       // T inferred as f64
+    id(42)              // T inferred as int
+```
+
+**Rules:**
+- Type parameters may appear in parameter types, return type, and local variable
+  type annotations.
+- Type arguments are **inferred** from argument types (explicit type arguments
+  come in a later phase).
+- Each unique `(function, type-args)` combination produces one specialized copy
+  (cached; name-mangled to e.g. `swap_i32`).
+- Operations on a type parameter that are invalid for the concrete type produce
+  an error at the call site where the instantiation happens.
+
 ### Methods
 
 Methods are functions named `StructName_methodName` with a `self` parameter:
