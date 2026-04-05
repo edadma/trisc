@@ -134,6 +134,19 @@ class SyslCodegenTupleTests extends SyslCodegenHelpers {
         |""".stripMargin) shouldBe 2010
   }
 
+  "destructure named struct" in {
+    compileAndRun(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |main() -> int
+        |    p = Point(10, 20)
+        |    x, y = p
+        |    x * 100 + y
+        |""".stripMargin) shouldBe 1020
+  }
+
   "parallel assignment from function" in {
     compileAndRun(
       """divmod(a: int, b: int) -> (int, int) = a / b, a % b

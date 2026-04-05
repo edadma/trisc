@@ -297,6 +297,9 @@ x--       // postfix decrement
 ```sysl
 x += 5    x -= 3    x *= 2    x /= 4    x %= 7
 x &= 0xFF   x |= 0x01   x ^= 0xAA   x <<= 2   x >>= 1
+
+// Also works on pointers (scaled by element size)
+p += 2    p -= 1
 ```
 
 ### Casts
@@ -344,6 +347,44 @@ else
 // if-then (inline)
 if x > 0 then positive()
 
+// match (value matching, no fallthrough)
+x match
+    1 -> doA()
+    2, 3 -> doB()              // multiple values per arm
+    _ -> doDefault()           // wildcard (matches anything)
+    else -> doDefault()        // alternative to wildcard
+
+// match as expression
+y = x match
+    1 -> "one"
+    2, 3 -> "few"
+    else -> "many"
+
+// match with guards
+x match
+    _ if x > 10 -> "big"
+    _ if x > 0 -> "positive"
+    else -> "non-positive"
+
+// range matching (inclusive)
+x match
+    1..10 -> "small"
+    11..100 -> "medium"
+    else -> "large"
+
+// struct destructuring in match
+p match
+    Point(x, y) -> x + y      // binds x and y from fields
+    Point(_, y) -> y           // wildcard ignores field
+    Point(x, y) if x == 0 -> y  // guard with bindings
+
+// match with block bodies
+x match
+    1 ->
+        a = compute()
+        doSomething(a)
+    else -> fallback()
+
 // while
 while cond
     body
@@ -370,18 +411,46 @@ while true
     process()
 ```
 
-### Destructuring
+### Destructuring and Parallel Assignment
+
+Tuples can be destructured with or without parentheses (Go/Python style):
 
 ```sysl
-(x, y, z) = getTuple()
-var (a, b) = divmod(17, 5)
+// Declaration (new variables)
+q, r = divmod(17, 5)           // Go-style, creates q and r as var
+(q, r) = divmod(17, 5)         // parenthesized form also works
+val q, r = divmod(17, 5)       // immutable
+var q, r = divmod(17, 5)       // explicit mutable
+
+// Parallel assignment (existing variables)
+a = 10
+b = 20
+a, b = b, a                    // swap: RHS fully evaluated before assignment
+
+// Works on named structs too (not just tuples)
+p = Point(10, 20)
+x, y = p                      // x = p.x, y = p.y (field order)
+
+// And ref structs
+r = new Point(3, 4)
+a, b = r                      // a = 3, b = 4
+
+// Mixed declared/undeclared is an error
+a = 10
+a, b = 20, 30                  // ERROR: a exists but b doesn't
 ```
+
+Rules for `a, b = ...` without `val`/`var`:
+- All names new → declaration as `var`
+- All names exist as `var` → parallel assignment
+- Mixed → error
 
 ### Return
 
 ```sysl
-return           // void return
-return expr      // return value
+return              // void return
+return expr         // return single value
+return a, b         // return tuple (no parens needed)
 // or: last expression in block is implicit return
 ```
 
@@ -446,10 +515,16 @@ p = &x                    // p: *int
 *p = 100                  // dereference and assign
 val y = *p                // dereference and read
 
-// Pointer arithmetic
+// Pointer arithmetic (scaled by element size)
 p = &arr[0]
 val second = *(p + 1)     // pointer + offset
-p++                       // advance pointer
+p++                       // advance by one element
+p += 3                    // advance by 3 elements
+p--                       // retreat by one element
+p -= 2                    // retreat by 2 elements
+
+// Array + offset decays to pointer
+q = arr + 2               // q: *int (not [n]int)
 ```
 
 ---
@@ -478,14 +553,19 @@ ptr = &p                  // type: *Point
 ptr.x = 50               // auto-deref: (*ptr).x = 50
 ```
 
-### Struct Return
+### Struct Return and Tuples
 
 ```sysl
 makePoint(x: int, y: int) -> Point = Point(x, y)
 
-// Tuple return (anonymous struct)
-divmod(a: int, b: int) -> (int, int) = (a / b, a % b)
-(q, r) = divmod(17, 5)
+// Tuple return — parens optional in return and expression bodies
+divmod(a: int, b: int) -> (int, int) = a / b, a % b
+swap(a: int, b: int) -> (int, int)
+    return b, a
+
+// Destructure — parens optional
+q, r = divmod(17, 5)
+(q, r) = divmod(17, 5)         // also works
 ```
 
 ---
@@ -506,6 +586,24 @@ s != t                    // structural inequality
 puts(s: *byte)            // can pass string directly
 ```
 
+### String Construction from Bytes
+
+```sysl
+// From pointer + length (copies the bytes)
+var buf: [5]byte
+buf[0] = 'h'
+buf[1] = 'e'
+buf[2] = 'l'
+buf[3] = 'l'
+buf[4] = 'o'
+s = string(&buf[0], 5)   // s = "hello"
+
+// From byte slice (copies the bytes)
+data = new [10]byte
+// ... fill data ...
+s = string(data[:5])      // string from []byte slice
+```
+
 ---
 
 ## Builtin Functions
@@ -519,6 +617,8 @@ puts(s: *byte)            // can pass string directly
 | `len` | `(x) -> int` | Length of string, array, slice, or `&[]T` |
 | `cap` | `(x) -> int` | Capacity of slice or `&[]T` |
 | `append` | `(s: []T, elem: T) -> []T` | Append to slice (Go semantics) |
+| `string` | `(ptr: *T, len: int) -> string` | Construct string from pointer + length |
+| `string` | `(s: []byte) -> string` | Construct string from byte slice |
 | `malloc` | `(size: i64) -> *i8` | Allocate heap memory |
 | `free` | `(ptr: *i8)` | Free heap memory |
 | `calloc` | `(count: i64, size: i64) -> *i8` | Allocate zeroed memory |

@@ -198,6 +198,77 @@ class SyslStructReturnTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 32
   }
 
+  // ===== Struct destructuring =====
+
+  "destructure named struct" in {
+    eval(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |main() -> int
+        |    p = Point(10, 20)
+        |    x, y = p
+        |    x * 100 + y
+        |""".stripMargin) shouldBe 1020
+  }
+
+  "destructure struct from function return" in {
+    eval(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |origin() -> Point = Point(0, 0)
+        |offset() -> Point = Point(3, 4)
+        |
+        |main() -> int
+        |    x, y = offset()
+        |    x * 10 + y
+        |""".stripMargin) shouldBe 34
+  }
+
+  "destructure struct with three fields" in {
+    eval(
+      """struct RGB
+        |    r: int
+        |    g: int
+        |    b: int
+        |
+        |main() -> int
+        |    c = RGB(255, 128, 0)
+        |    r, g, b = c
+        |    r * 10000 + g * 100 + b
+        |""".stripMargin) shouldBe 2562800
+  }
+
+  "destructure ref struct" in {
+    eval(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |main() -> int
+        |    p = new Point(30, 40)
+        |    x, y = p
+        |    x * 10 + y
+        |""".stripMargin) shouldBe 340
+  }
+
+  "destructure struct wrong count is error" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |main() -> int
+        |    p = Point(10, 20)
+        |    a, b, c = p
+        |    0
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
   "mixed declared/undeclared is error" in {
     val Right(ast) = (new SyslParser).parseProgram(
       """main() -> int
