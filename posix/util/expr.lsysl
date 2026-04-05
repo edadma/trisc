@@ -1,0 +1,412 @@
+expr — evaluate expressions (POSIX)
+=====================================
+
+The `expr` utility evaluates an expression and writes the
+result to standard output. Each token of the expression is a
+separate command-line argument, following POSIX conventions.
+
+Supported operators (lowest to highest precedence):
+
+- `|` — logical OR (returns first nonzero/nonempty operand)
+- `&` — logical AND (returns first operand if both nonzero)
+- `=` `!=` `<` `<=` `>` `>=` — comparison (numeric if both
+  are integers, otherwise lexicographic; returns 1 or 0)
+- `+` `-` — addition and subtraction
+- `*` `/` `%` — multiplication, division, modulo
+- `( expr )` — grouping
+
+Exit status: 0 if the result is nonzero/nonempty, 1 if zero
+or empty, 2 on syntax or evaluation error.
+
+Dependencies: std.process, std.io, std.string.
+
+
+Imports and global state
+------------------------
+
+The parser walks through argv using a global position counter.
+
+    import std.process.*
+    import std.io.*
+    import std.string.*
+
+    var pos: int
+    var ac: int
+
+
+Error handling
+--------------
+
+Any syntax or evaluation error prints a message to stderr and
+exits immediately with code 2.
+
+    err(msg: string)
+        write_string(STDERR, s"expr: $msg\n")
+        exit(2)
+
+
+Token access
+------------
+
+The parser treats argv entries as tokens. `peek` looks ahead
+without consuming; `next` consumes and returns; `eat` tries
+to consume a specific token.
+
+    peek() -> string
+        if pos >= ac then ""
+        else argv(pos)
+
+    next() -> string
+        if pos >= ac then err("syntax error: unexpected end of expression")
+
+        val tok = argv(pos)
+
+        pos++
+        tok
+
+    eat(tok: string) -> bool
+        if pos < ac && equal(peek(), tok)
+            pos++
+            return true
+
+        false
+
+
+Numeric helpers
+---------------
+
+POSIX expr treats values as integers when possible. These
+helpers detect and parse integer strings.
+
+    is_integer(s: string) -> bool
+        if length(s) == 0 then return false
+
+        var start = 0
+
+        if char_at(s, 0) == '-'
+            if length(s) == 1 then return false
+
+            start = 1
+
+        for var i = start; i < length(s); i++
+            val c = char_at(s, i)
+
+            if c < '0' || c > '9' then return false
+
+        true
+
+    parse_int(s: string) -> i64 = to_int(s)
+
+
+Comparison
+----------
+
+If both operands are valid integers, comparison is numeric.
+Otherwise it falls back to lexicographic ordering.
+
+    compare(a: string, b: string) -> int
+        if is_integer(a) && is_integer(b)
+            val ia = parse_int(a)
+            val ib = parse_int(b)
+
+            if ia < ib then return -1
+            elif ia > ib then return 1
+            else return 0
+
+        val la = length(a)
+        val lb = length(b)
+        val n = if la < lb then la else lb
+
+        for var i = 0; i < n; i++
+            val ca = char_at(a, i)
+            val cb = char_at(b, i)
+
+            if ca < cb then return -1
+            elif ca > cb then return 1
+
+        if la < lb then -1
+        elif la > lb then 1
+        else 0
+
+
+Recursive descent parser
+-------------------------
+
+Each precedence level in the grammar corresponds to one
+parsing function. Lower-precedence operators sit higher in
+the call tree: `parse_or` calls `parse_and`, which calls
+`parse_cmp`, and so on down to `parse_primary`. This
+structure ensures that tighter-binding operators are
+evaluated first — exactly how precedence works in arithmetic.
+
+The pattern for left-associative binary operators is always
+the same:
+
+1. Parse the left operand at the next-higher precedence.
+2. While the current token is one of this level's operators,
+   consume it, parse the right operand, and fold the result
+   into `left`.
+
+This naturally produces left-to-right evaluation.
+
+Since `parse_primary` may encounter a parenthesized
+subexpression, it calls back to `parse_expr` — creating
+mutual recursion. Sysl resolves function references by name
+regardless of declaration order, so no forward declaration
+is needed.
+
+
+### Primary: literals and parenthesized groups
+
+The bottom of the precedence hierarchy. A primary is either
+a parenthesized subexpression `( expr )` or a bare token
+(string or integer literal). Every other parsing function
+ultimately bottoms out here.
+
+Note that in POSIX expr, there are no unary operators — `-3`
+is just the token `"-3"`, not unary minus applied to `3`.
+
+    parse_primary() -> string
+        val tok = peek()
+
+        if equal(tok, "(")
+            next()
+            val result = parse_expr()
+
+            if !eat(")") then err("syntax error: missing ')'")
+
+            return result
+
+        if equal(tok, "") then err("syntax error: missing operand")
+
+        next()
+
+
+### Multiplicative: `*`, `/`, `%`
+
+Highest-precedence binary operators. Both operands must be
+integers — POSIX expr has no floating-point support. Division
+by zero is a hard error (exit 2), not a special return value.
+
+    parse_mul() -> string
+        var left = parse_primary()
+
+        while equal(peek(), "*") || equal(peek(), "/") || equal(peek(), "%")
+            val op = next()
+            val right = parse_primary()
+
+            if !is_integer(left) || !is_integer(right) then err("non-integer argument")
+
+            val a = parse_int(left)
+            val b = parse_int(right)
+
+            if equal(op, "*") then left = from_int(a * b)
+            elif equal(op, "/")
+                if b == 0 then err("division by zero")
+
+                left = from_int(a / b)
+            else
+                if b == 0 then err("division by zero")
+
+                left = from_int(a % b)
+
+        left
+
+
+### Additive: `+`, `-`
+
+Same structure as multiplicative, one step lower in
+precedence. The `while` loop handles chains like
+`1 + 2 + 3` left-to-right.
+
+    parse_add() -> string
+        var left = parse_mul()
+
+        while equal(peek(), "+") || equal(peek(), "-")
+            val op = next()
+            val right = parse_mul()
+
+            if !is_integer(left) || !is_integer(right) then err("non-integer argument")
+
+            val a = parse_int(left)
+            val b = parse_int(right)
+
+            if equal(op, "+") then left = from_int(a + b)
+            else left = from_int(a - b)
+
+        left
+
+
+### Comparison: `=`, `!=`, `<`, `<=`, `>`, `>=`
+
+Comparisons are not chainable in POSIX expr — at most one
+comparison operator is consumed. If both operands parse as
+integers, comparison is numeric; otherwise it is
+lexicographic. The result is always "1" (true) or "0"
+(false).
+
+This is where `compare()` earns its keep: the caller just
+checks the sign of the return value against the operator,
+without caring whether the comparison was numeric or string.
+
+    parse_cmp() -> string
+        var left = parse_add()
+        val op = peek()
+
+        if equal(op, "=") || equal(op, "!=") || equal(op, "<") || equal(op, "<=") || equal(op, ">") || equal(op, ">=")
+            next()
+            val right = parse_add()
+            val c = compare(left, right)
+            var result = false
+
+            if equal(op, "=") then result = c == 0
+            elif equal(op, "!=") then result = c != 0
+            elif equal(op, "<") then result = c < 0
+            elif equal(op, "<=") then result = c <= 0
+            elif equal(op, ">") then result = c > 0
+            elif equal(op, ">=") then result = c >= 0
+
+            left = if result then "1" else "0"
+
+        left
+
+
+### Logical AND: `&`
+
+POSIX semantics: if either operand is zero or the empty
+string, the result is "0". Otherwise the result is the
+first (left) operand. Both sides are always evaluated —
+there is no short-circuit in POSIX expr's `&`.
+
+    parse_and() -> string
+        var left = parse_cmp()
+
+        while eat("&")
+            val right = parse_cmp()
+
+            if (equal(left, "0") || equal(left, "")) || (equal(right, "0") || equal(right, ""))
+                left = "0"
+
+        left
+
+
+### Logical OR: `|`
+
+If the left operand is nonzero and nonempty, it is the
+result. Otherwise the right operand is the result. Like `&`,
+both sides are always evaluated.
+
+This is useful for providing defaults:
+`expr "$X" "|" "fallback"` returns `$X` if set, otherwise
+`"fallback"`.
+
+    parse_or() -> string
+        var left = parse_and()
+
+        while eat("|")
+            val right = parse_and()
+
+            if equal(left, "0") || equal(left, "")
+                left = right
+
+        left
+
+
+### Entry point
+
+The top-level expression is an OR expression — the
+lowest-precedence operator.
+
+    parse_expr() -> string = parse_or()
+
+
+Main
+----
+
+Parse argv, evaluate, print result, and set exit status per
+POSIX: 0 if nonzero/nonempty, 1 if zero or empty, 2+ on
+error.
+
+    main() -> int
+        ac = argc()
+
+        if ac < 1
+            write_string(STDERR, "expr: missing operand\n")
+            return 2
+
+        pos = 0
+        val result = parse_expr()
+
+        if pos < ac then err("syntax error: unexpected extra tokens")
+
+        puts(result)
+        putchar(10)
+
+        if equal(result, "0") || equal(result, "") then 1
+        else 0
+
+
+Tests
+-----
+
+Unit tests for the helper functions. The parser itself is
+best tested end-to-end via the command line, but the numeric
+and comparison helpers can be verified in isolation.
+
+
+### `is_integer`
+
+    #test
+    test_is_integer_positive() -> void
+        assert(is_integer("42"), "positive int")
+
+    #test
+    test_is_integer_negative() -> void
+        assert(is_integer("-7"), "negative int")
+
+    #test
+    test_is_integer_zero() -> void
+        assert(is_integer("0"), "zero")
+
+    #test
+    test_is_integer_not_alpha() -> void
+        assert(!is_integer("abc"), "alpha not int")
+
+    #test
+    test_is_integer_empty() -> void
+        assert(!is_integer(""), "empty not int")
+
+    #test
+    test_is_integer_bare_minus() -> void
+        assert(!is_integer("-"), "bare minus not int")
+
+    #test
+    test_is_integer_mixed() -> void
+        assert(!is_integer("12x"), "mixed not int")
+
+
+### `compare`
+
+    #test
+    test_compare_numeric_equal() -> void
+        assert(compare("42", "42") == 0, "equal")
+
+    #test
+    test_compare_numeric_less() -> void
+        assert(compare("3", "10") < 0, "3 < 10 numerically")
+
+    #test
+    test_compare_numeric_greater() -> void
+        assert(compare("10", "3") > 0, "10 > 3 numerically")
+
+    #test
+    test_compare_string_less() -> void
+        assert(compare("abc", "def") < 0, "abc < def")
+
+    #test
+    test_compare_string_equal() -> void
+        assert(compare("hello", "hello") == 0, "equal strings")
+
+    #test
+    test_compare_mixed_uses_string() -> void
+        assert(compare("abc", "42") != 0, "mixed → string compare")
