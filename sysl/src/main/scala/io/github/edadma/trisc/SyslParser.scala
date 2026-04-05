@@ -37,7 +37,45 @@ class SyslParser extends StandardTokenParsers {
   // --- Declarations ---
 
   lazy val decl: Parser[DeclAST] =
+    rep(positioned(attribute) <~ rep1(Newline)) ~ declBare ^^ {
+      case attrs ~ d => if attrs.isEmpty then d else attachAttrs(d, attrs)
+    }
+
+  lazy val declBare: Parser[DeclAST] =
     condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | typeAliasDecl | "private" ~> declBody(true) | declBody(false)
+
+  // --- Attributes ---
+
+  lazy val attribute: Parser[Attribute] =
+    "#" ~> ident ~ opt("(" ~> repsep(attrArg, ",") <~ ")") ^^ {
+      case name ~ args => Attribute(name, args.getOrElse(Nil))
+    }
+
+  lazy val attrArg: Parser[AttrArg] =
+    ident ~ opt(":" ~> attrLiteral) ^^ {
+      case name ~ Some(v) => AttrNamed(name, v)
+      case name ~ None    => AttrPositional(AttrLitIdent(name))
+    } |
+    attrLiteral ^^ AttrPositional.apply
+
+  lazy val attrLiteral: Parser[AttrLiteral] =
+    stringLit ^^ AttrLitString.apply |
+    numericLit ^^ (s => AttrLitInt(s.toLong)) |
+    "true" ^^^ AttrLitBool(true) |
+    "false" ^^^ AttrLitBool(false)
+
+  private def attachAttrs(d: DeclAST, attrs: List[Attribute]): DeclAST = d match
+    case f: FunDeclAST        => f.copy(attributes = attrs ++ f.attributes)
+    case s: StructDeclAST     => s.copy(attributes = attrs ++ s.attributes)
+    case e: EnumDeclAST       => e.copy(attributes = attrs ++ e.attributes)
+    case e: DataEnumDeclAST   => e.copy(attributes = attrs ++ e.attributes)
+    case v: VarDeclAST        => v.copy(attributes = attrs ++ v.attributes)
+    case t: TraitDeclAST      => t.copy(attributes = attrs ++ t.attributes)
+    case i: ImplDeclAST       => i.copy(attributes = attrs ++ i.attributes)
+    case t: TypeAliasDeclAST  => t.copy(attributes = attrs ++ t.attributes)
+    case e: ExternFuncDeclAST => e.copy(attributes = attrs ++ e.attributes)
+    case e: ExternVarDeclAST  => e.copy(attributes = attrs ++ e.attributes)
+    case other                => other
 
   // --- Conditional compilation ---
 

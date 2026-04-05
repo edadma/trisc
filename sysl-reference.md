@@ -1063,6 +1063,92 @@ Conditions support: symbols, negation (`!`), equality (`==`), inequality (`!=`),
 
 ---
 
+## Attributes
+
+Attributes are annotations prefixed with `#` that attach to the following declaration. They appear on their own line(s) immediately before the declaration:
+
+```
+#test
+test_copy_basic() -> void
+    0
+
+#inline
+#deprecated("use foo2")
+foo() -> int = 1
+```
+
+**Forms:**
+- Flag: `#name`
+- With arguments: `#name(arg1, arg2, ...)` — arguments are literals (string, int, bool), bare identifiers, or `key: value` pairs
+
+Multiple attributes stack on separate preceding lines. Unknown attribute names are stored as-is (no error), so new attributes can be introduced incrementally.
+
+`#if` / `#else` / `#endif` (conditional compilation) use `#` but are not attributes — they work the same as before.
+
+### `#test` — unit tests
+
+Functions marked `#test` are unit tests. Requirements:
+- zero parameters,
+- returns `void` (or no return type),
+- not generic,
+- not a method.
+
+A test **passes** iff it does not panic. A panic (`panic("msg")`, `abort()`, or any runtime trap) fails the test.
+
+```
+#test
+test_trivial() -> void
+    assert(1 + 1 == 2, "math is broken")
+
+#test("descriptive name shown in output")
+test_with_display_name() -> void
+    0
+```
+
+**`should_panic`** — the test is expected to panic:
+
+```
+#test(should_panic)
+test_guard() -> void
+    panic("this must fire")
+
+#test(should_panic: "out of range")
+test_bounds() -> void
+    // substring match: panic message must contain "out of range"
+    panic("index 42 is out of range")
+```
+
+`#test` functions are **excluded from non-test builds** — `sysl compile` and `sysl run` strip them, so they don't contaminate normal execution and aren't emitted to `.asm` / `.tof` / `.ll` output.
+
+### `sysl test` — running tests
+
+```
+sysl test <path>                      # file or directory (recursive)
+sysl test --filter <pattern> <path>   # substring match on test/display name
+sysl test --backend interpreter|trisc|all <path>
+sysl test --fail-fast <path>
+sysl test --verbose <path>
+```
+
+Output groups tests by source file with pass/fail markers and timings:
+
+```
+running 6 tests
+std/mem/mem.lsysl
+  ✓ test_copy_basic              (0.2ms)
+  ✗ test_cmp_prefix              (0.1ms)
+      panic: expected -1, got 1
+  ✓ test_index_byte_found        (0.1ms)
+...
+5 passed, 1 failed, 0 skipped — 0.6ms
+```
+
+Exit code is 0 iff all tests pass.
+
+`panic(msg: string) -> void` is a builtin that halts with the given message — the primary failure signal inside tests.
+
+---
+
 ## Calling Convention (TRISC ABI)
 
 | Register | Purpose |

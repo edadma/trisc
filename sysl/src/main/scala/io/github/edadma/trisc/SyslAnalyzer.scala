@@ -85,6 +85,7 @@ class SyslAnalyzer:
     "realloc" -> FunInfo("realloc", List("ptr" -> PtrType(I8), "size" -> I64), PtrType(I8)),
     "sbrk" -> FunInfo("sbrk", List("increment" -> I32), PtrType(I8)),
     "abort" -> FunInfo("abort", Nil, VoidType),
+    "panic" -> FunInfo("panic", List("msg" -> StringType), VoidType),
   )
 
   def registerImport(meta: ModuleMeta, selectors: List[ImportSelector] = List(WildcardImport)): Unit =
@@ -126,20 +127,20 @@ class SyslAnalyzer:
       decl match
         case _: ModuleDeclAST => // metadata only
         case _: ImportDeclAST => // handled later
-        case ExternFuncDeclAST(name, params, returnType) =>
+        case ExternFuncDeclAST(name, params, returnType, _) =>
           if !functions.contains(name) && !builtinFunctions.contains(name) then
             val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
             val retType = returnType.map(resolveType).getOrElse(VoidType)
             functions(name) = FunInfo(name, paramTypes, retType)
             externalSymbols += name
           // else: already registered from same-module sibling or import — skip
-        case ExternVarDeclAST(name, typ) =>
+        case ExternVarDeclAST(name, typ, _) =>
           if !globalScope.contains(name) then
             val resolved = resolveType(typ)
             globalScope(name) = SymInfo(name, resolved, mutable = false)
             externalSymbols += name
           // else: already registered from same-module sibling or import — skip
-        case sd @ StructDeclAST(name, fields, typeParams) =>
+        case sd @ StructDeclAST(name, fields, typeParams, _) =>
           if typeParams.nonEmpty then
             // Generic struct: store as template, don't resolve fields yet
             if genericStructs.contains(name) || structTypes.contains(name) then
@@ -149,7 +150,7 @@ class SyslAnalyzer:
             if structTypes.contains(name) || genericStructs.contains(name) then throw AnalysisError(s"duplicate struct: '$name'", decl)
             val resolvedFields = fields.map((n, t) => (n, resolveType(t)))
             structTypes(name) = SyslType.StructType(name, resolvedFields)
-        case fd @ FunDeclAST(name, params, returnType, _, _, typeParams, _) =>
+        case fd @ FunDeclAST(name, params, returnType, _, _, typeParams, _, _) =>
           if typeParams.nonEmpty then
             // Generic function: store as template, don't resolve types yet
             if genericTemplates.contains(name) || functions.contains(name) then
@@ -168,7 +169,7 @@ class SyslAnalyzer:
               val methodName = name.substring(underscoreIdx + 1)
               if structTypes.contains(structName) then
                 methods.getOrElseUpdate(structName, mutable.Set.empty) += methodName
-        case EnumDeclAST(name, members) =>
+        case EnumDeclAST(name, members, _) =>
           if enumTypes.contains(name) then throw AnalysisError(s"duplicate enum: '$name'", decl)
           var nextValue = 0L
           val resolved = members.map { (memberName, explicitValue) =>
@@ -177,7 +178,7 @@ class SyslAnalyzer:
             (memberName, value)
           }
           enumTypes(name) = resolved.toMap
-        case de @ DataEnumDeclAST(name, variants, typeParams) =>
+        case de @ DataEnumDeclAST(name, variants, typeParams, _) =>
           if typeParams.nonEmpty then
             // Generic enum: store template, don't resolve fields
             if genericEnums.contains(name) || dataEnumTypes.contains(name) || enumTypes.contains(name) then
@@ -199,27 +200,27 @@ class SyslAnalyzer:
             dataEnumTypes(name) = et
             for ((vname, _), idx) <- resolvedVariants.zipWithIndex do
               variantToEnum(vname) = (et, idx)
-        case TypeAliasDeclAST(name, target) =>
+        case TypeAliasDeclAST(name, target, _) =>
           if typeAliases.contains(name) then throw AnalysisError(s"duplicate type alias: '$name'", decl)
           typeAliases(name) = target
-        case TraitDeclAST(name, tparam, methods) =>
+        case TraitDeclAST(name, tparam, methods, _) =>
           if traits.contains(name) then throw AnalysisError(s"duplicate trait: '$name'", decl)
           // Check no duplicate method names within the trait
           val methodNames = methods.map(_.name)
           if methodNames.distinct.length != methodNames.length then
             throw AnalysisError(s"duplicate method names in trait '$name'")
           traits(name) = TraitInfo(name, tparam, methods)
-        case ImplDeclAST(_, _, _) =>
+        case ImplDeclAST(_, _, _, _) =>
           // Deferred to registerImpls after all traits are known
           ()
-        case VarDeclAST(name, _, _, _, _) =>
+        case VarDeclAST(name, _, _, _, _, _) =>
           if globalScope.contains(name) then
             throw AnalysisError(s"duplicate global: '$name'", decl)
 
     // Intermediate pass: register impl blocks (traits now known; signatures may reference traits)
     for decl <- program.decls do
       decl match
-        case ImplDeclAST(traitName, targetType, methods) =>
+        case ImplDeclAST(traitName, targetType, methods, _) =>
           val trait_ = traits.getOrElse(traitName,
             throw AnalysisError(s"impl references unknown trait '$traitName'", decl))
           val resolvedTarget = resolveType(targetType)
@@ -288,29 +289,29 @@ class SyslAnalyzer:
       case ImportDeclAST(modulePath, _) =>
         TImportDecl(modulePath)
 
-      case ExternFuncDeclAST(name, params, returnType) =>
+      case ExternFuncDeclAST(name, params, returnType, _) =>
         val paramTypes = params.map(p => resolveType(p.typ))
         val retType = returnType.map(resolveType).getOrElse(VoidType)
         TExternFuncDecl(name, paramTypes, retType)
 
-      case ExternVarDeclAST(name, typ) =>
+      case ExternVarDeclAST(name, typ, _) =>
         TExternVarDecl(name, resolveType(typ))
 
-      case StructDeclAST(name, _, _) =>
+      case StructDeclAST(name, _, _, _) =>
         val st = structTypes(name)
         TStructDecl(name, st.fields)
 
-      case EnumDeclAST(name, _) =>
+      case EnumDeclAST(name, _, _) =>
         val members = enumTypes(name).toList.sortBy(_._2)
         TEnumDecl(name, members)
 
-      case DataEnumDeclAST(name, _, _) =>
+      case DataEnumDeclAST(name, _, _, _) =>
         TDataEnumDecl(name, dataEnumTypes(name))
 
-      case TypeAliasDeclAST(name, target) =>
+      case TypeAliasDeclAST(name, target, _) =>
         TTypeAliasDecl(name, resolveType(target))
 
-      case FunDeclAST(name, params, _, body, isPrivate, _, _) =>
+      case fdAst @ FunDeclAST(name, params, _, body, isPrivate, _, _, attrs) =>
         scopeStack = new mutable.ArrayBuffer
         pushScope()
         val funInfo = functions(name)
@@ -324,9 +325,10 @@ class SyslAnalyzer:
         finally currentExpected = savedExp
         val tParams = funInfo.params.map((n, t) => TParam(n, t))
         scopeStack = null
-        TFunDecl(name, tParams, funInfo.returnType, tBody, isPrivate)
+        validateTestAttr(fdAst, funInfo)
+        TFunDecl(name, tParams, funInfo.returnType, tBody, isPrivate, attrs)
 
-      case VarDeclAST(name, typOpt, init, isPrivate, isMutable) =>
+      case VarDeclAST(name, typOpt, init, isPrivate, isMutable, _) =>
         scopeStack = new mutable.ArrayBuffer
         pushScope()
         val tInit0 = analyzeExpr(init)
@@ -335,6 +337,21 @@ class SyslAnalyzer:
         globalScope(name) = SymInfo(name, declType, isMutable)
         scopeStack = null
         TVarDecl(name, declType, tInit, isPrivate)
+
+  private def validateTestAttr(fd: FunDeclAST, info: FunInfo): Unit =
+    fd.attributes.find(_.name == "test") match
+      case None => ()
+      case Some(attr) =>
+        if fd.params.nonEmpty then
+          throw AnalysisError(s"#test function '${fd.name}' must take zero parameters", fd)
+        if info.returnType != VoidType then
+          throw AnalysisError(s"#test function '${fd.name}' must return void", fd)
+        if fd.typeParams.nonEmpty then
+          throw AnalysisError(s"#test function '${fd.name}' cannot be generic", fd)
+        // Methods are registered via the StructName_methodName convention; reject those
+        val underscoreIdx = fd.name.indexOf('_')
+        if underscoreIdx > 0 && fd.params.nonEmpty && fd.params.head.name == "self" then
+          throw AnalysisError(s"#test cannot be applied to a method ('${fd.name}')", fd)
 
   private def resolveType(t: TypeAST): SyslType = t match
     case NamedTypeAST(name, typeArgs) if typeArgs.nonEmpty =>
