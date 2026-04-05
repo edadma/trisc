@@ -254,6 +254,15 @@ class SyslAnalyzer:
     if globalScope.contains(name) then globalScope(name)
     else throw AnalysisError(s"undefined variable: '$name'")
 
+  private def tryLookup(name: String): Option[SymInfo] =
+    if scopeStack != null then
+      var i = scopeStack.length - 1
+      while i >= 0 do
+        if scopeStack(i).contains(name) then return Some(scopeStack(i)(name))
+        i -= 1
+    if globalScope.contains(name) then Some(globalScope(name))
+    else None
+
   private def lookupOrCreate(name: String, typ: SyslType): SymInfo =
     if scopeStack != null then
       var i = scopeStack.length - 1
@@ -306,10 +315,22 @@ class SyslAnalyzer:
           case st: StructType if st.isTuple =>
             if names.length != st.fields.length then
               throw AnalysisError(s"destructuring expects ${st.fields.length} names, got ${names.length}")
-            for (name, (_, fieldType)) <- names.zip(st.fields) do
-              if scopeStack != null then
-                currentScope(name) = SymInfo(name, fieldType, isMutable)
-            TDestructureStmt(names, st.fields.map(_._2), tInit)
+            // Check if this is declaration or assignment (when no val/var prefix)
+            val existingCount = names.count(n => tryLookup(n).isDefined)
+            if isMutable || existingCount == 0 then
+              // Declaration: create new variables
+              for (name, (_, fieldType)) <- names.zip(st.fields) do
+                if scopeStack != null then
+                  currentScope(name) = SymInfo(name, fieldType, isMutable)
+              TDestructureStmt(names, st.fields.map(_._2), tInit)
+            else if existingCount == names.length then
+              // All exist: parallel assignment
+              for name <- names do
+                val sym = lookup(name)
+                if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$name'")
+              TDestructureAssignStmt(names, st.fields.map(_._2), tInit)
+            else
+              throw AnalysisError(s"cannot mix declared and undeclared names in destructuring")
           case other =>
             throw AnalysisError(s"cannot destructure non-tuple type $other")
 
