@@ -99,3 +99,4 @@ case class TSliceExpr(array: TExpr, low: Option[TExpr], high: Option[TExpr], typ
 case class TAppend(slice: TExpr, elem: TExpr, typ: SyslType) extends TExpr
 case class TStringFromPtr(ptr: TExpr, len: TExpr, typ: SyslType) extends TExpr
 case class TStringFromSlice(slice: TExpr, typ: SyslType) extends TExpr
+case class TStr(expr: TExpr) extends TExpr { def typ: SyslType = SyslType.StringType }

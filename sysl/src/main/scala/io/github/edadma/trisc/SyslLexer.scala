@@ -60,7 +60,22 @@ class SyslLexical extends IndentationLexical(
       elem('"') ^^^ '"'
     )
 
+  // Interpolated string: s"..." — uses "s:" prefix in token value to mark it
+  // Custom parser to avoid consuming 's' when not followed by '"'
+  private def interpStringLit: Parser[Token] =
+    Parser { in =>
+      if in.first == 's' && !in.rest.atEnd && in.rest.first == '"' then
+        val bodyParser = rep(escapeChar | chrExcept('"', '\n', EofCh)) <~ '"'
+        bodyParser(in.rest.rest) match // skip 's' and opening '"'
+          case Success(chars, next) => Success(StringLit("s:" + chars.mkString), next)
+          case ns: NoSuccess => ns
+      else
+        Failure("not an interpolated string", in)
+    }
+
   override def token: Parser[Token] =
+    // Interpolated string literal: s"hello $name" — must come before identifiers
+    interpStringLit |
     // Character literal: 'x' or '\n' — emitted as NumericLit with :char suffix
     '\'' ~> (escapeChar | chrExcept('\'', '\n', EofCh)) <~ '\'' ^^ { c =>
       NumericLit(s"${c.toLong}:char")
