@@ -194,7 +194,7 @@ treated as a literal value.
 
         /* Parenthesized subexpression */
         if equal(tok, "(")
-            next()
+            val _ = next()
             val result = parse_expr()
 
             if !eat(")") then err("syntax error: missing ')'")
@@ -203,7 +203,7 @@ treated as a literal value.
 
         /* POSIX + prefix: next token is a literal, not a keyword */
         if equal(tok, "+")
-            next()
+            val _ = next()
 
             if equal(peek(), "") then err("syntax error: missing operand after '+'")
 
@@ -211,14 +211,14 @@ treated as a literal value.
 
         /* length STRING */
         if equal(tok, "length")
-            next()
+            val _ = next()
             val s = parse_primary()
 
             return from_int(i64(length(s)))
 
         /* substr STRING POS LEN */
         if equal(tok, "substr")
-            next()
+            val _ = next()
             val s = parse_primary()
             val p = parse_primary()
             val n = parse_primary()
@@ -234,7 +234,7 @@ treated as a literal value.
 
         /* index STRING CHARS */
         if equal(tok, "index")
-            next()
+            val _ = next()
             val s = parse_primary()
             val chars = parse_primary()
 
@@ -269,15 +269,16 @@ by zero is a hard error (exit 2), not a special return value.
             val a = parse_int(left)
             val b = parse_int(right)
 
-            if equal(op, "*") then left = from_int(a * b)
-            elif equal(op, "/")
-                if b == 0 then err("division by zero")
+            left = op match
+                "*" -> from_int(a * b)
+                "/" ->
+                    if b == 0 then err("division by zero")
 
-                left = from_int(a / b)
-            else
-                if b == 0 then err("division by zero")
+                    from_int(a / b)
+                _ ->
+                    if b == 0 then err("division by zero")
 
-                left = from_int(a % b)
+                    from_int(a % b)
 
         left
 
@@ -300,8 +301,9 @@ precedence. The `while` loop handles chains like
             val a = parse_int(left)
             val b = parse_int(right)
 
-            if equal(op, "+") then left = from_int(a + b)
-            else left = from_int(a - b)
+            left = op match
+                "+" -> from_int(a + b)
+                _ -> from_int(a - b)
 
         left
 
@@ -323,17 +325,17 @@ without caring whether the comparison was numeric or string.
         val op = peek()
 
         if equal(op, "=") || equal(op, "!=") || equal(op, "<") || equal(op, "<=") || equal(op, ">") || equal(op, ">=")
-            next()
+            val _ = next()
             val right = parse_add()
             val c = compare(left, right)
-            var result = false
 
-            if equal(op, "=") then result = c == 0
-            elif equal(op, "!=") then result = c != 0
-            elif equal(op, "<") then result = c < 0
-            elif equal(op, "<=") then result = c <= 0
-            elif equal(op, ">") then result = c > 0
-            elif equal(op, ">=") then result = c >= 0
+            val result = op match
+                "="  -> c == 0
+                "!=" -> c != 0
+                "<"  -> c < 0
+                "<=" -> c <= 0
+                ">"  -> c > 0
+                _    -> c >= 0
 
             left = if result then "1" else "0"
 
