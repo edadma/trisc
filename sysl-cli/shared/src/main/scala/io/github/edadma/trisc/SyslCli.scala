@@ -384,26 +384,26 @@ object SyslCli:
       throw CliError("unsupported backend")
 
     // Derive baseDirs so each input's path is treated as the base module.
-    // For a directory input, baseDir = the directory itself.
-    // For a file input,      baseDir = the parent directory of the file.
-    // This makes unit names relative to that base (e.g. `demo` rather than `tmp/systest/demo`).
+    // For a directory input, baseDir = the PARENT directory of the directory
+    //   (so the directory's own name is included in unit names — e.g. `std/strconv/strconv`
+    //    for input `std/`, giving module name `std.strconv`).
+    // For a file input, baseDir = the parent directory of the file.
     def parentDir(path: String): String =
-      val slash = path.lastIndexOf('/')
-      if slash < 0 then "." else path.substring(0, slash)
-    val baseDirs = cmd.inputs.map { p =>
-      if io.exists(p) && io.isDirectory(p) then p else parentDir(p)
-    }.distinct.toList match
+      val p = if path.endsWith("/") then path.dropRight(1) else path
+      val slash = p.lastIndexOf('/')
+      if slash < 0 then "." else p.substring(0, slash)
+    val baseDirs = cmd.inputs.map(p => parentDir(p)).distinct.toList match
       case Nil  => List(".")
       case dirs => dirs
     // Collect sources using each input's baseDir so unit names come out relative.
     val sources: Map[String, String] =
       cmd.inputs.flatMap { p =>
         if !io.exists(p) then fail(s"error: file not found: $p")
+        val parent = parentDir(p)
+        val baseDir = if parent == "." then "" else parent + "/"
         if io.isDirectory(p) then
-          val baseDir = p + (if p.endsWith("/") then "" else "/")
           collectSyslFiles(p).map(f => resolveSource(f, baseDir))
         else
-          val baseDir = parentDir(p) + "/"
           List(resolveSource(p, baseDir))
       }.toMap
     val driver = new SyslDriver(Some(io), baseDirs)
