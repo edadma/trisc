@@ -13,8 +13,8 @@ class SyslLexical extends IndentationLexical(
   blockCommentEnd = "*/",
 ) {
   reserved ++= List(
-    "if", "then", "elif", "else", "while", "do", "for", "break", "continue", "return", "defer", "match", "_",
-    "import", "module", "private", "var", "val", "struct", "enum", "type", "sizeof", "asm", "extern", "endif", "new",
+    "if", "then", "elif", "else", "while", "do", "for", "in", "downTo", "step", "break", "continue", "return", "defer", "match", "_",
+    "import", "module", "private", "var", "val", "struct", "enum", "trait", "impl", "type", "sizeof", "asm", "extern", "endif", "new",
     "func",
     "int", "char", "byte", "bool", "void", "string",
     "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "double", "f64",
@@ -33,13 +33,20 @@ class SyslLexical extends IndentationLexical(
     "=", "+=", "-=", "*=", "/=", "%=",
     "&=", "|=", "^=", "<<=", ">>=",
     "->", "=>",
-    ",", ":", ";", "..", ".", "#",
+    ",", ":", ";", "..<", "..", ".", "#", "?",
   )
 
   private def hexDigit = elem("hex digit", c => c.isDigit || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F')
 
+  // Digits with optional `_` separators between (e.g. 1_000_000). Underscore must be followed by a digit.
+  private def digits1: Parser[List[Char]] =
+    digit ~ rep(rep(elem('_')) ~> digit) ^^ { case first ~ rest => first :: rest }
+
+  private def hexDigits1: Parser[List[Char]] =
+    hexDigit ~ rep(rep(elem('_')) ~> hexDigit) ^^ { case first ~ rest => first :: rest }
+
   private def exponent: Parser[List[Char]] =
-    (elem('e') | elem('E')) ~ opt(elem('+') | elem('-')) ~ rep1(digit) ^^ {
+    (elem('e') | elem('E')) ~ opt(elem('+') | elem('-')) ~ digits1 ^^ {
       case e ~ sign ~ digits => e :: sign.toList ::: digits
     }
 
@@ -81,23 +88,23 @@ class SyslLexical extends IndentationLexical(
       NumericLit(s"${c.toLong}:char")
     } |
     // Float literal: digits.digits[e[+-]digits] or digits e[+-]digits
-    rep1(digit) ~ '.' ~ rep1(digit) ~ opt(exponent) ^^ {
+    digits1 ~ '.' ~ digits1 ~ opt(exponent) ^^ {
       case intPart ~ dot ~ fracPart ~ exp =>
         NumericLit((intPart ::: dot :: fracPart ::: exp.getOrElse(Nil)).mkString)
     } |
-    rep1(digit) ~ exponent ^^ {
+    digits1 ~ exponent ^^ {
       case intPart ~ exp => NumericLit((intPart ::: exp).mkString)
     } |
-    // Hex literal with optional type suffix: 0xFF, 0xFFu8
-    '0' ~> (elem('x') | elem('X')) ~> rep1(hexDigit) ~ opt(typeSuffix) ^^ {
+    // Hex literal with optional type suffix: 0xFF, 0xFFu8, 0xFF_FF
+    '0' ~> (elem('x') | elem('X')) ~> hexDigits1 ~ opt(typeSuffix) ^^ {
       case digits ~ suffix =>
         val value = java.lang.Long.parseLong(digits.mkString, 16).toString
         suffix match
           case Some(s) => NumericLit(s"$value:$s")
           case None => NumericLit(value)
     } |
-    // Decimal literal with optional type suffix: 100, 100u32
-    rep1(digit) ~ opt(typeSuffix) ^^ {
+    // Decimal literal with optional type suffix: 100, 100u32, 1_000_000
+    digits1 ~ opt(typeSuffix) ^^ {
       case digits ~ suffix =>
         val value = digits.mkString
         suffix match

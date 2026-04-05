@@ -22,6 +22,49 @@ class SyslAnalyzer:
   private var loopDepth: Int = 0
   private var currentReturnType: SyslType = VoidType
 
+  // Generic function support
+  private val genericTemplates = new mutable.LinkedHashMap[String, FunDeclAST]
+  private val instantiations = new mutable.LinkedHashMap[(String, List[SyslType]), String]
+  private val specializedDecls = mutable.ListBuffer.empty[TDecl]
+  private var typeEnv: Map[String, SyslType] = Map.empty
+
+  // Generic struct support
+  private val genericStructs = new mutable.LinkedHashMap[String, StructDeclAST]
+  private val genericStructInstantiations = new mutable.LinkedHashMap[(String, List[SyslType]), SyslType.StructType]
+  // Reverse map: mangled struct name -> (template name, concrete type args) for unification at call sites
+  private val structToTemplate = new mutable.LinkedHashMap[String, (String, List[SyslType])]
+
+  // Generic enum support
+  private val genericEnums = new mutable.LinkedHashMap[String, DataEnumDeclAST]
+  private val genericEnumInstantiations = new mutable.LinkedHashMap[(String, List[SyslType]), SyslType.EnumType]
+  // variant name -> (generic enum name, variant index) for generic enum variants
+  private val genericVariantToEnum = new mutable.LinkedHashMap[String, (String, Int)]
+
+  // Expected type for bidirectional inference (used by generic variant constructors)
+  private var currentExpected: Option[SyslType] = None
+
+  // Operator desugaring: operator → (trait name, method name). Requires user to define
+  // the traits and provide impls for their types.
+  private val operatorToTrait: Map[String, (String, String)] = Map(
+    "<"  -> ("Ord", "lt"),  "<=" -> ("Ord", "le"),
+    ">"  -> ("Ord", "gt"),  ">=" -> ("Ord", "ge"),
+    "==" -> ("Eq",  "eq"),  "!=" -> ("Eq",  "ne"),
+    "+"  -> ("Add", "add"), "-"  -> ("Sub", "sub"),
+    "*"  -> ("Mul", "mul"), "/"  -> ("Div", "div"),
+  )
+
+  // Trait / impl support
+  private case class TraitInfo(name: String, typeParam: String, methods: List[TraitMethodAST])
+  private case class ImplMethodInfo(mangled: String, paramTypes: List[(String, SyslType)], retType: SyslType, body: FunBodyAST, isSynthesized: Boolean)
+  private val traits = new mutable.LinkedHashMap[String, TraitInfo]
+  // (traitName, targetType) -> (methodName -> mangledFunName)
+  private val impls = new mutable.LinkedHashMap[(String, SyslType), mutable.LinkedHashMap[String, String]]
+  // Methods to analyze (provided + synthesized defaults) keyed by (traitName, targetType)
+  private val implMethodInfos = new mutable.LinkedHashMap[(String, SyslType), List[ImplMethodInfo]]
+  // When analyzing a synthesized default method body, rewrite unqualified calls
+  // to sibling trait methods to their impl's mangled names
+  private var traitCallRewrite: Map[String, String] = Map.empty
+
   private def pushScope(): Unit =
     scopeStack += new mutable.LinkedHashMap[String, SymInfo]
 
@@ -43,6 +86,7 @@ class SyslAnalyzer:
     "realloc" -> FunInfo("realloc", List("ptr" -> PtrType(I8), "size" -> I64), PtrType(I8)),
     "sbrk" -> FunInfo("sbrk", List("increment" -> I32), PtrType(I8)),
     "abort" -> FunInfo("abort", Nil, VoidType),
+    "panic" -> FunInfo("panic", List("msg" -> StringType), VoidType),
   )
 
   def registerImport(meta: ModuleMeta, selectors: List[ImportSelector] = List(WildcardImport)): Unit =
@@ -84,37 +128,49 @@ class SyslAnalyzer:
       decl match
         case _: ModuleDeclAST => // metadata only
         case _: ImportDeclAST => // handled later
-        case ExternFuncDeclAST(name, params, returnType) =>
+        case ExternFuncDeclAST(name, params, returnType, _) =>
           if !functions.contains(name) && !builtinFunctions.contains(name) then
             val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
             val retType = returnType.map(resolveType).getOrElse(VoidType)
             functions(name) = FunInfo(name, paramTypes, retType)
             externalSymbols += name
           // else: already registered from same-module sibling or import — skip
-        case ExternVarDeclAST(name, typ) =>
+        case ExternVarDeclAST(name, typ, _) =>
           if !globalScope.contains(name) then
             val resolved = resolveType(typ)
             globalScope(name) = SymInfo(name, resolved, mutable = false)
             externalSymbols += name
           // else: already registered from same-module sibling or import — skip
-        case StructDeclAST(name, fields) =>
-          if structTypes.contains(name) then throw AnalysisError(s"duplicate struct: '$name'", decl)
-          val resolvedFields = fields.map((n, t) => (n, resolveType(t)))
-          structTypes(name) = SyslType.StructType(name, resolvedFields)
-        case FunDeclAST(name, params, returnType, _, _) =>
-          val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
-          val retType = returnType.map(resolveType).getOrElse(VoidType)
-          if functions.contains(name) then
-            throw AnalysisError(s"duplicate function: '$name'", decl)
-          functions(name) = FunInfo(name, paramTypes, retType)
-          // Register as method if name matches StructName_methodName pattern
-          val underscoreIdx = name.indexOf('_')
-          if underscoreIdx > 0 && params.nonEmpty && params.head.name == "self" then
-            val structName = name.substring(0, underscoreIdx)
-            val methodName = name.substring(underscoreIdx + 1)
-            if structTypes.contains(structName) then
-              methods.getOrElseUpdate(structName, mutable.Set.empty) += methodName
-        case EnumDeclAST(name, members) =>
+        case sd @ StructDeclAST(name, fields, typeParams, _) =>
+          if typeParams.nonEmpty then
+            // Generic struct: store as template, don't resolve fields yet
+            if genericStructs.contains(name) || structTypes.contains(name) then
+              throw AnalysisError(s"duplicate struct: '$name'", decl)
+            genericStructs(name) = sd
+          else
+            if structTypes.contains(name) || genericStructs.contains(name) then throw AnalysisError(s"duplicate struct: '$name'", decl)
+            val resolvedFields = fields.map((n, t) => (n, resolveType(t)))
+            structTypes(name) = SyslType.StructType(name, resolvedFields)
+        case fd @ FunDeclAST(name, params, returnType, _, _, typeParams, _, _) =>
+          if typeParams.nonEmpty then
+            // Generic function: store as template, don't resolve types yet
+            if genericTemplates.contains(name) || functions.contains(name) then
+              throw AnalysisError(s"duplicate function: '$name'", decl)
+            genericTemplates(name) = fd
+          else
+            val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
+            val retType = returnType.map(resolveType).getOrElse(VoidType)
+            if functions.contains(name) || genericTemplates.contains(name) then
+              throw AnalysisError(s"duplicate function: '$name'", decl)
+            functions(name) = FunInfo(name, paramTypes, retType)
+            // Register as method if name matches StructName_methodName pattern
+            val underscoreIdx = name.indexOf('_')
+            if underscoreIdx > 0 && params.nonEmpty && params.head.name == "self" then
+              val structName = name.substring(0, underscoreIdx)
+              val methodName = name.substring(underscoreIdx + 1)
+              if structTypes.contains(structName) then
+                methods.getOrElseUpdate(structName, mutable.Set.empty) += methodName
+        case EnumDeclAST(name, members, _) =>
           if enumTypes.contains(name) then throw AnalysisError(s"duplicate enum: '$name'", decl)
           var nextValue = 0L
           val resolved = members.map { (memberName, explicitValue) =>
@@ -123,27 +179,108 @@ class SyslAnalyzer:
             (memberName, value)
           }
           enumTypes(name) = resolved.toMap
-        case DataEnumDeclAST(name, variants) =>
-          if dataEnumTypes.contains(name) || enumTypes.contains(name) then
-            throw AnalysisError(s"duplicate enum: '$name'", decl)
-          val resolvedVariants = variants.map { case EnumVariantAST(vname, fields) =>
-            val resolvedFields = fields.map((fname, ftype) => (fname, resolveType(ftype)))
-            (vname, resolvedFields)
-          }
-          val et: SyslType.EnumType = SyslType.EnumType(name, resolvedVariants)
-          dataEnumTypes(name) = et
-          for ((vname, _), idx) <- resolvedVariants.zipWithIndex do
-            variantToEnum(vname) = (et, idx)
-        case TypeAliasDeclAST(name, target) =>
+        case de @ DataEnumDeclAST(name, variants, typeParams, _) =>
+          if typeParams.nonEmpty then
+            // Generic enum: store template, don't resolve fields
+            if genericEnums.contains(name) || dataEnumTypes.contains(name) || enumTypes.contains(name) then
+              throw AnalysisError(s"duplicate enum: '$name'", decl)
+            genericEnums(name) = de
+            // Register bare variant names for inference at construction sites
+            for (EnumVariantAST(vname, _), idx) <- variants.zipWithIndex do
+              if genericVariantToEnum.contains(vname) || variantToEnum.contains(vname) then
+                throw AnalysisError(s"duplicate variant name: '$vname'")
+              genericVariantToEnum(vname) = (name, idx)
+          else
+            if dataEnumTypes.contains(name) || enumTypes.contains(name) || genericEnums.contains(name) then
+              throw AnalysisError(s"duplicate enum: '$name'", decl)
+            val resolvedVariants = variants.map { case EnumVariantAST(vname, fields) =>
+              val resolvedFields = fields.map((fname, ftype) => (fname, resolveType(ftype)))
+              (vname, resolvedFields)
+            }
+            val et: SyslType.EnumType = SyslType.EnumType(name, resolvedVariants)
+            dataEnumTypes(name) = et
+            for ((vname, _), idx) <- resolvedVariants.zipWithIndex do
+              variantToEnum(vname) = (et, idx)
+        case TypeAliasDeclAST(name, target, _) =>
           if typeAliases.contains(name) then throw AnalysisError(s"duplicate type alias: '$name'", decl)
           typeAliases(name) = target
-        case VarDeclAST(name, _, _, _, _) =>
+        case TraitDeclAST(name, tparam, methods, _) =>
+          if traits.contains(name) then throw AnalysisError(s"duplicate trait: '$name'", decl)
+          // Check no duplicate method names within the trait
+          val methodNames = methods.map(_.name)
+          if methodNames.distinct.length != methodNames.length then
+            throw AnalysisError(s"duplicate method names in trait '$name'")
+          traits(name) = TraitInfo(name, tparam, methods)
+        case ImplDeclAST(_, _, _, _) =>
+          // Deferred to registerImpls after all traits are known
+          ()
+        case VarDeclAST(name, _, _, _, _, _) =>
           if globalScope.contains(name) then
             throw AnalysisError(s"duplicate global: '$name'", decl)
 
-    // Second pass: produce typed AST
-    val tDecls = program.decls.map(analyzeDecl)
-    TProgram(tDecls)
+    // Intermediate pass: register impl blocks (traits now known; signatures may reference traits)
+    for decl <- program.decls do
+      decl match
+        case ImplDeclAST(traitName, targetType, methods, _) =>
+          val trait_ = traits.getOrElse(traitName,
+            throw AnalysisError(s"impl references unknown trait '$traitName'", decl))
+          val resolvedTarget = resolveType(targetType)
+          if impls.contains((traitName, resolvedTarget)) then
+            throw AnalysisError(s"duplicate impl: trait '$traitName' already implemented for ${resolvedTarget}")
+          // Check required methods are all provided
+          val providedNames = methods.map(_.name).toSet
+          val missing = trait_.methods.filter(m => m.body.isEmpty && !providedNames.contains(m.name))
+          if missing.nonEmpty then
+            throw AnalysisError(s"impl ${traitName}[$resolvedTarget] missing required method(s): ${missing.map(_.name).mkString(", ")}")
+          // Check each impl method exists in trait
+          for m <- methods do
+            if !trait_.methods.exists(_.name == m.name) then
+              throw AnalysisError(s"impl method '${m.name}' is not declared in trait '$traitName'")
+          // Register mangled functions for both provided methods and synthesized defaults
+          val methodMap = mutable.LinkedHashMap.empty[String, String]
+          val infos = mutable.ListBuffer.empty[ImplMethodInfo]
+          val typeMangled = typeToMangled(resolvedTarget)
+          val savedEnv = typeEnv
+          typeEnv = Map(trait_.typeParam -> resolvedTarget)
+          try
+            for traitMethod <- trait_.methods do
+              val mangled = s"${traitName}_${traitMethod.name}_${typeMangled}"
+              if functions.contains(mangled) then
+                throw AnalysisError(s"impl method collides with existing function '$mangled'")
+              val expectedParams = traitMethod.params.map(p => (p.name, resolveType(p.typ)))
+              val expectedRet = resolveType(traitMethod.returnType)
+              val providedOpt = methods.find(_.name == traitMethod.name)
+              val (paramTypes, retType, body, synthesized) = providedOpt match
+                case Some(implMethod) =>
+                  val pTypes = implMethod.params.map(p => (p.name, resolveType(p.typ)))
+                  val r = implMethod.returnType.map(resolveType).getOrElse(VoidType)
+                  // Verify signature matches trait
+                  if pTypes.map(_._2) != expectedParams.map(_._2) then
+                    throw AnalysisError(s"impl method '${implMethod.name}' parameter types don't match trait: expected ${expectedParams.map(_._2).mkString("(", ", ", ")")}, got ${pTypes.map(_._2).mkString("(", ", ", ")")}")
+                  if r != expectedRet then
+                    throw AnalysisError(s"impl method '${implMethod.name}' return type doesn't match trait: expected $expectedRet, got $r")
+                  (pTypes, r, implMethod.body, false)
+                case None =>
+                  // Synthesized default — body comes from the trait (we checked it's Some above)
+                  (expectedParams, expectedRet, traitMethod.body.get, true)
+              functions(mangled) = FunInfo(mangled, paramTypes, retType)
+              methodMap(traitMethod.name) = mangled
+              infos += ImplMethodInfo(mangled, paramTypes, retType, body, isSynthesized = synthesized)
+          finally typeEnv = savedEnv
+          impls((traitName, resolvedTarget)) = methodMap
+          implMethodInfos((traitName, resolvedTarget)) = infos.toList
+        case _ =>
+
+    // Second pass: produce typed AST (skip generic templates; they're instantiated on demand)
+    val tDecls = program.decls.flatMap {
+      case f: FunDeclAST if f.typeParams.nonEmpty => Nil
+      case s: StructDeclAST if s.typeParams.nonEmpty => Nil
+      case e: DataEnumDeclAST if e.typeParams.nonEmpty => Nil
+      case _: TraitDeclAST => Nil // traits emit nothing; only impls do
+      case impl: ImplDeclAST   => analyzeImplMethods(impl)
+      case d => List(analyzeDecl(d))
+    }
+    TProgram(tDecls ++ specializedDecls.toList)
 
   private def analyzeDecl(decl: DeclAST): TDecl =
     decl match
@@ -153,29 +290,29 @@ class SyslAnalyzer:
       case ImportDeclAST(modulePath, _) =>
         TImportDecl(modulePath)
 
-      case ExternFuncDeclAST(name, params, returnType) =>
+      case ExternFuncDeclAST(name, params, returnType, _) =>
         val paramTypes = params.map(p => resolveType(p.typ))
         val retType = returnType.map(resolveType).getOrElse(VoidType)
         TExternFuncDecl(name, paramTypes, retType)
 
-      case ExternVarDeclAST(name, typ) =>
+      case ExternVarDeclAST(name, typ, _) =>
         TExternVarDecl(name, resolveType(typ))
 
-      case StructDeclAST(name, _) =>
+      case StructDeclAST(name, _, _, _) =>
         val st = structTypes(name)
         TStructDecl(name, st.fields)
 
-      case EnumDeclAST(name, _) =>
+      case EnumDeclAST(name, _, _) =>
         val members = enumTypes(name).toList.sortBy(_._2)
         TEnumDecl(name, members)
 
-      case DataEnumDeclAST(name, _) =>
+      case DataEnumDeclAST(name, _, _, _) =>
         TDataEnumDecl(name, dataEnumTypes(name))
 
-      case TypeAliasDeclAST(name, target) =>
+      case TypeAliasDeclAST(name, target, _) =>
         TTypeAliasDecl(name, resolveType(target))
 
-      case FunDeclAST(name, params, _, body, isPrivate) =>
+      case fdAst @ FunDeclAST(name, params, _, body, isPrivate, _, _, attrs) =>
         scopeStack = new mutable.ArrayBuffer
         pushScope()
         val funInfo = functions(name)
@@ -183,15 +320,19 @@ class SyslAnalyzer:
         currentReturnType = funInfo.returnType
         for (paramName, paramType) <- funInfo.params do
           currentScope(paramName) = SymInfo(paramName, paramType, true)
-        val tBody = body match
+        val savedExp = currentExpected
+        currentExpected = if funInfo.returnType == VoidType then None else Some(funInfo.returnType)
+        val tBody = try body match
           case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
           case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
+        finally currentExpected = savedExp
         val tParams = funInfo.params.map((n, t) => TParam(n, t))
         currentReturnType = savedReturnType
         scopeStack = null
-        TFunDecl(name, tParams, funInfo.returnType, tBody, isPrivate)
+        validateTestAttr(fdAst, funInfo)
+        TFunDecl(name, tParams, funInfo.returnType, tBody, isPrivate, attrs)
 
-      case VarDeclAST(name, typOpt, init, isPrivate, isMutable) =>
+      case VarDeclAST(name, typOpt, init, isPrivate, isMutable, _) =>
         scopeStack = new mutable.ArrayBuffer
         pushScope()
         val tInit0 = analyzeExpr(init)
@@ -201,8 +342,29 @@ class SyslAnalyzer:
         scopeStack = null
         TVarDecl(name, declType, tInit, isPrivate)
 
+  private def validateTestAttr(fd: FunDeclAST, info: FunInfo): Unit =
+    fd.attributes.find(_.name == "test") match
+      case None => ()
+      case Some(attr) =>
+        if fd.params.nonEmpty then
+          throw AnalysisError(s"#test function '${fd.name}' must take zero parameters", fd)
+        if info.returnType != VoidType then
+          throw AnalysisError(s"#test function '${fd.name}' must return void", fd)
+        if fd.typeParams.nonEmpty then
+          throw AnalysisError(s"#test function '${fd.name}' cannot be generic", fd)
+        // Methods are registered via the StructName_methodName convention; reject those
+        val underscoreIdx = fd.name.indexOf('_')
+        if underscoreIdx > 0 && fd.params.nonEmpty && fd.params.head.name == "self" then
+          throw AnalysisError(s"#test cannot be applied to a method ('${fd.name}')", fd)
+
   private def resolveType(t: TypeAST): SyslType = t match
-    case NamedTypeAST(name) => name match
+    case NamedTypeAST(name, typeArgs) if typeArgs.nonEmpty =>
+      val resolved = typeArgs.map(resolveType)
+      if genericStructs.contains(name) then instantiateGenericStruct(name, resolved)
+      else if genericEnums.contains(name) then instantiateGenericEnum(name, resolved)
+      else throw AnalysisError(s"'$name' is not a generic type")
+    case NamedTypeAST(name, _) if typeEnv.contains(name) => typeEnv(name)
+    case NamedTypeAST(name, _) => name match
       case "int" | "i32" => I32
       case "char" => U32
       case "i64" => I64
@@ -302,6 +464,242 @@ class SyslAnalyzer:
       builtinFunctions.getOrElse(name,
         throw AnalysisError(s"undefined function: '$name'")))
 
+  // ===== Generic function support =====
+
+  // Mangle a type to a name-safe identifier for use in instantiated function names
+  private def typeToMangled(t: SyslType): String = t match
+    case IntType(w)      => s"i$w"
+    case UIntType(w)     => s"u$w"
+    case BoolType        => "bool"
+    case DoubleType      => "f64"
+    case StringType      => "string"
+    case VoidType        => "void"
+    case PtrType(i)      => "ptr" + typeToMangled(i)
+    case RefType(i)      => "ref" + typeToMangled(i)
+    case ArrayType(e, n) => s"arr${n}${typeToMangled(e)}"
+    case SliceType(e)    => "slice" + typeToMangled(e)
+    case FuncType(ps, r) => "fn" + ps.map(typeToMangled).mkString("") + "Ret" + typeToMangled(r)
+    case StructType(n, _) => n
+    case EnumType(n, _)   => n
+
+  private def mangleGenericName(base: String, typeArgs: List[SyslType]): String =
+    base + "_" + typeArgs.map(typeToMangled).mkString("_")
+
+  // Unify a parameter TypeAST (which may contain type variables) against a concrete SyslType,
+  // recording type variable bindings. Returns true if unification succeeded structurally.
+  private def unifyTypes(param: TypeAST, arg: SyslType, typeParams: Set[String], env: mutable.Map[String, SyslType]): Unit =
+    param match
+      case NamedTypeAST(name, _) if typeParams.contains(name) =>
+        env.get(name) match
+          case Some(existing) if existing == arg => ()
+          case Some(existing) =>
+            throw AnalysisError(s"cannot infer type parameter '$name': seen both $existing and $arg")
+          case None => env(name) = arg
+      case PtrTypeAST(inner) => arg match
+        case PtrType(a) => unifyTypes(inner, a, typeParams, env)
+        case _ => () // type mismatch handled later by checkArgs
+      case RefTypeAST(inner) => arg match
+        case RefType(a) => unifyTypes(inner, a, typeParams, env)
+        case _ => ()
+      case ArrayTypeAST(_, inner) => arg match
+        case ArrayType(a, _) => unifyTypes(inner, a, typeParams, env)
+        case _ => ()
+      case SliceTypeAST(inner) => arg match
+        case SliceType(a) => unifyTypes(inner, a, typeParams, env)
+        case _ => ()
+      case NamedTypeAST(name, tArgs) if tArgs.nonEmpty => arg match
+        case SyslType.StructType(argName, _) =>
+          structToTemplate.get(argName) match
+            case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
+              for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
+            case _ => ()
+        case _ => ()
+      case _ => () // concrete parameter type, nothing to infer
+
+  // Instantiate a generic function with inferred type arguments, returning the mangled name
+  // and FunInfo of the instantiated function. Reuses cached instantiations.
+  // If an operator has a user-defined struct/enum operand, desugar to the corresponding trait call.
+  // Returns None if no desugaring applies (use built-in dispatch).
+  private def tryOperatorDispatch(op: String, tLeft: TExpr, tRight: TExpr): Option[TExpr] =
+    operatorToTrait.get(op) match
+      case None => None
+      case Some((traitName, methodName)) =>
+        val operandType = tLeft.typ
+        operandType match
+          case _: SyslType.StructType | _: SyslType.EnumType =>
+            if !traits.contains(traitName) then
+              throw AnalysisError(s"operator '$op' on $operandType requires trait '$traitName' but it is not defined")
+            impls.get((traitName, operandType)) match
+              case Some(methodMap) =>
+                val mangled = methodMap(methodName)
+                val funInfo = functions(mangled)
+                val checkedArgs = checkArgs(mangled, funInfo.params, List(tLeft, tRight))
+                Some(TCall(mangled, checkedArgs, funInfo.returnType))
+              case None =>
+                throw AnalysisError(s"no impl of '$traitName' for $operandType: operator '$op' not defined")
+          case _ => None
+
+  // Instantiate a generic struct with concrete type arguments, returning its StructType
+  private def instantiateGenericStruct(name: String, typeArgs: List[SyslType]): SyslType.StructType =
+    val cacheKey = (name, typeArgs)
+    genericStructInstantiations.get(cacheKey) match
+      case Some(st) => st
+      case None =>
+        val template = genericStructs.getOrElse(name,
+          throw AnalysisError(s"'$name' is not a generic struct"))
+        if template.typeParams.length != typeArgs.length then
+          throw AnalysisError(s"generic struct '$name' expects ${template.typeParams.length} type arg(s), got ${typeArgs.length}")
+        val mangled = name + "_" + typeArgs.map(typeToMangled).mkString("_")
+        // Insert a placeholder StructType to handle recursive field types
+        val placeholder: SyslType.StructType = SyslType.StructType(mangled, Nil)
+        genericStructInstantiations(cacheKey) = placeholder
+        structTypes(mangled) = placeholder
+        structToTemplate(mangled) = (name, typeArgs)
+        val savedEnv = typeEnv
+        typeEnv = typeEnv ++ template.typeParams.zip(typeArgs).toMap
+        try
+          val resolvedFields = template.fields.map((n, t) => (n, resolveType(t)))
+          val st: SyslType.StructType = SyslType.StructType(mangled, resolvedFields)
+          genericStructInstantiations(cacheKey) = st
+          structTypes(mangled) = st
+          specializedDecls += TStructDecl(mangled, resolvedFields)
+          st
+        finally typeEnv = savedEnv
+
+  // Instantiate a generic enum with concrete type arguments, returning its EnumType
+  private def instantiateGenericEnum(name: String, typeArgs: List[SyslType]): SyslType.EnumType =
+    val cacheKey = (name, typeArgs)
+    genericEnumInstantiations.get(cacheKey) match
+      case Some(et) => et
+      case None =>
+        val template = genericEnums(name)
+        if template.typeParams.length != typeArgs.length then
+          throw AnalysisError(s"generic enum '$name' expects ${template.typeParams.length} type arg(s), got ${typeArgs.length}")
+        val mangled = name + "_" + typeArgs.map(typeToMangled).mkString("_")
+        val savedEnv = typeEnv
+        typeEnv = typeEnv ++ template.typeParams.zip(typeArgs).toMap
+        try
+          val resolvedVariants = template.variants.map { case EnumVariantAST(vname, fields) =>
+            val resolvedFields = fields.map((fname, ftype) => (fname, resolveType(ftype)))
+            (vname, resolvedFields)
+          }
+          val et: SyslType.EnumType = SyslType.EnumType(mangled, resolvedVariants)
+          genericEnumInstantiations(cacheKey) = et
+          dataEnumTypes(mangled) = et
+          specializedDecls += TDataEnumDecl(mangled, et)
+          et
+        finally typeEnv = savedEnv
+
+  // Analyze each impl method (including synthesized defaults) as a mangled top-level function
+  private def analyzeImplMethods(impl: ImplDeclAST): List[TDecl] =
+    val resolvedTarget = resolveType(impl.targetType)
+    val methodMap = impls((impl.traitName, resolvedTarget))
+    val infos = implMethodInfos((impl.traitName, resolvedTarget))
+    val trait_ = traits(impl.traitName)
+    val savedEnv = typeEnv
+    val savedRewrite = traitCallRewrite
+    try
+      // For synthesized defaults, set typeEnv + traitCallRewrite so T resolves and
+      // unqualified calls to sibling trait methods route to the impl's mangled functions.
+      infos.map { info =>
+        if info.isSynthesized then
+          typeEnv = Map(trait_.typeParam -> resolvedTarget)
+          traitCallRewrite = methodMap.toMap
+        else
+          typeEnv = savedEnv
+          traitCallRewrite = savedRewrite
+        scopeStack = new mutable.ArrayBuffer
+        pushScope()
+        for (paramName, paramType) <- info.paramTypes do
+          currentScope(paramName) = SymInfo(paramName, paramType, true)
+        val tBody = info.body match
+          case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
+          case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
+        val tParams = info.paramTypes.map((n, t) => TParam(n, t))
+        scopeStack = null
+        TFunDecl(info.mangled, tParams, info.retType, tBody, isPrivate = false)
+      }
+    finally
+      typeEnv = savedEnv
+      traitCallRewrite = savedRewrite
+
+  // Resolve a trait method call like Ord.cmp(a, b) to the appropriate impl's mangled function
+  private def analyzeTraitCall(traitName: String, methodName: String, tArgs: List[TExpr]): (String, FunInfo) =
+    val trait_ = traits(traitName)
+    val method = trait_.methods.find(_.name == methodName).getOrElse(
+      throw AnalysisError(s"trait '$traitName' has no method '$methodName'"))
+    if method.params.length != tArgs.length then
+      throw AnalysisError(s"trait method '$traitName.$methodName' expects ${method.params.length} argument(s), got ${tArgs.length}")
+    // Infer the target type by unifying each param type against the arg type, using typeParam as the variable
+    val env = mutable.Map.empty[String, SyslType]
+    for (p, a) <- method.params.zip(tArgs) do
+      unifyTypes(p.typ, a.typ, Set(trait_.typeParam), env)
+    val targetType = env.get(trait_.typeParam).getOrElse(
+      throw AnalysisError(s"cannot infer target type for trait method '$traitName.$methodName'"))
+    val methodMap = impls.getOrElse((traitName, targetType),
+      throw AnalysisError(s"no impl of trait '$traitName' for type $targetType"))
+    val mangled = methodMap(methodName)
+    (mangled, functions(mangled))
+
+  private def instantiateGeneric(name: String, argTypes: List[SyslType]): (String, FunInfo) =
+    val template = genericTemplates(name)
+    val typeParams = template.typeParams
+    // Infer type arguments
+    val env = mutable.Map.empty[String, SyslType]
+    if template.params.length != argTypes.length then
+      throw AnalysisError(s"generic function '$name' expects ${template.params.length} argument(s), got ${argTypes.length}")
+    for (p, a) <- template.params.zip(argTypes) do
+      unifyTypes(p.typ, a, typeParams.toSet, env)
+    // Require all type params to be pinned
+    for tp <- typeParams if !env.contains(tp) do
+      throw AnalysisError(s"cannot infer type parameter '$tp' for generic function '$name'")
+    val inferredArgs = typeParams.map(env(_))
+    // Check trait bounds
+    for tp <- typeParams do
+      val bounds = template.typeBounds.getOrElse(tp, Nil)
+      val concreteType = env(tp)
+      for traitName <- bounds do
+        if !traits.contains(traitName) then
+          throw AnalysisError(s"bound '$traitName' on type parameter '$tp' of '$name' refers to unknown trait")
+        if !impls.contains((traitName, concreteType)) then
+          throw AnalysisError(s"type $concreteType does not satisfy bound '$traitName' for type parameter '$tp' in call to '$name'")
+    val cacheKey = (name, inferredArgs)
+    instantiations.get(cacheKey) match
+      case Some(mangled) => (mangled, functions(mangled))
+      case None =>
+        val mangled = mangleGenericName(name, inferredArgs)
+        if functions.contains(mangled) then
+          throw AnalysisError(s"generic instantiation '$mangled' collides with existing function")
+        // Save and install typeEnv for this instantiation
+        val savedEnv = typeEnv
+        typeEnv = typeParams.zip(inferredArgs).toMap
+        try
+          // Resolve param/return types in the new env
+          val paramTypes = template.params.map(p => (p.name, resolveType(p.typ)))
+          val retType = template.returnType.map(resolveType).getOrElse(VoidType)
+          val funInfo = FunInfo(mangled, paramTypes, retType)
+          // Register before analyzing body to support recursion
+          functions(mangled) = funInfo
+          instantiations(cacheKey) = mangled
+          // Analyze body in a fresh scope, using the mangled name
+          val savedScopeStack = scopeStack
+          val savedLoopDepth = loopDepth
+          scopeStack = new mutable.ArrayBuffer
+          loopDepth = 0
+          pushScope()
+          for (paramName, paramType) <- paramTypes do
+            currentScope(paramName) = SymInfo(paramName, paramType, true)
+          val tBody = template.body match
+            case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
+            case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
+          scopeStack = savedScopeStack
+          loopDepth = savedLoopDepth
+          val tParams = paramTypes.map((n, t) => TParam(n, t))
+          specializedDecls += TFunDecl(mangled, tParams, retType, tBody, template.isPrivate)
+          (mangled, funInfo)
+        finally
+          typeEnv = savedEnv
+
   private def checkArgs(name: String, params: List[(String, SyslType)], args: List[TExpr]): List[TExpr] =
     if args.length != params.length then
       throw AnalysisError(s"function '$name' expects ${params.length} argument(s), got ${args.length}")
@@ -321,8 +719,11 @@ class SyslAnalyzer:
   private def analyzeStmt(stmt: StmtAST): TStmt =
     stmt match
       case VarStmtAST(name, typOpt, init, isMutable) =>
-        val tInit0 = analyzeExpr(init)
-        val declType = typOpt.map(resolveType).getOrElse(tInit0.typ)
+        val declared = typOpt.map(resolveType)
+        val savedExp = currentExpected
+        currentExpected = declared.orElse(currentExpected)
+        val tInit0 = try analyzeExpr(init) finally currentExpected = savedExp
+        val declType = declared.getOrElse(tInit0.typ)
         val tInit = coerceLiteral(tInit0, declType)
         if typOpt.isDefined && !compatible(tInit.typ, declType) then
           throw AnalysisError(s"cannot assign ${tInit.typ} to $declType variable '$name'")
@@ -458,12 +859,22 @@ class SyslAnalyzer:
       case ExprStmtAST(expr) =>
         TExprStmt(analyzeExpr(expr))
 
+  // Resolve a variant name to its (EnumType, variant index), consulting the scrutinee
+  // type first (for monomorphized generic enums) and then the global variantToEnum map.
+  private def resolveVariant(name: String, scrutineeType: SyslType): Option[(SyslType.EnumType, Int)] =
+    scrutineeType match
+      case et: SyslType.EnumType =>
+        val idx = et.variants.indexWhere(_._1 == name)
+        if idx >= 0 then Some((et, idx))
+        else variantToEnum.get(name)
+      case _ => variantToEnum.get(name)
+
   private def analyzePattern(pat: MatchPatternAST, scrutineeType: SyslType): TMatchPattern =
     pat match
       case WildcardPatternAST => TWildcard
-      case ValuePatternAST(VarRefAST(name)) if variantToEnum.contains(name) =>
+      case ValuePatternAST(VarRefAST(name)) if resolveVariant(name, scrutineeType).isDefined =>
         // No-arg variant pattern (e.g., `Empty` in a match arm)
-        val (et, variantIdx) = variantToEnum(name)
+        val (et, variantIdx) = resolveVariant(name, scrutineeType).get
         val (_, variantFields) = et.variants(variantIdx)
         if variantFields.nonEmpty then throw AnalysisError(s"variant '$name' requires ${variantFields.length} argument(s) in pattern")
         TVariantPattern(et, variantIdx, Nil, Nil)
@@ -479,8 +890,8 @@ class SyslAnalyzer:
         TRangePattern(tLow, tHigh)
       case DestructurePatternAST(name, fields) =>
         // Check if name is an enum variant first, then struct
-        if variantToEnum.contains(name) then
-          val (et, variantIdx) = variantToEnum(name)
+        if resolveVariant(name, scrutineeType).isDefined then
+          val (et, variantIdx) = resolveVariant(name, scrutineeType).get
           val (_, variantFields) = et.variants(variantIdx)
           if fields.length != variantFields.length then
             throw AnalysisError(s"variant '$name' has ${variantFields.length} fields, pattern has ${fields.length}")
@@ -652,6 +1063,25 @@ class SyslAnalyzer:
                 val (_, fields) = et.variants(idx)
                 if fields.nonEmpty then throw AnalysisError(s"variant '$name' requires ${fields.length} argument(s)")
                 TEnumConstruct(et, idx, Nil)
+              else if genericVariantToEnum.contains(name) then
+                val (enumName, idx) = genericVariantToEnum(name)
+                val template = genericEnums(enumName)
+                val variant = template.variants(idx)
+                if variant.fields.nonEmpty then
+                  throw AnalysisError(s"variant '$name' requires ${variant.fields.length} argument(s)")
+                // No args to infer from — must use currentExpected
+                currentExpected match
+                  case Some(et: SyslType.EnumType) =>
+                    // Find this enum's instantiation args from its mangled name
+                    val matching = genericEnumInstantiations.collectFirst {
+                      case ((n, args), inst) if n == enumName && inst.name == et.name => args
+                    }
+                    matching match
+                      case Some(args) => TEnumConstruct(et, idx, Nil)
+                      case None =>
+                        throw AnalysisError(s"expected enum type $et does not match variant '$name' of generic enum '$enumName'")
+                  case _ =>
+                    throw AnalysisError(s"cannot infer type parameters for no-arg variant '$name' of generic enum '$enumName' — use explicit type annotation")
               else
                 val sym = lookup(name)  // will throw proper error
                 TVarRef(name, sym.typ)
@@ -758,6 +1188,9 @@ class SyslAnalyzer:
         // Coerce integer literal signedness to match the other operand (preserve width)
         val tLeft = if tRight0.typ.isIntegral then coerceSignedness(tLeft0, tRight0.typ) else tLeft0
         val tRight = if tLeft.typ.isIntegral then coerceSignedness(tRight0, tLeft.typ) else tRight0
+        // Try to desugar operator to a trait call when operands are user-defined types
+        val dispatchedOpt = tryOperatorDispatch(op, tLeft, tRight)
+        if dispatchedOpt.isDefined then return dispatchedOpt.get
         val resultType = op match
           case "+" if tLeft.typ == StringType && tRight.typ == StringType => StringType // string concatenation
           case "+" | "-" if tLeft.typ == StringType && tRight.typ.isNumeric =>
@@ -895,6 +1328,13 @@ class SyslAnalyzer:
           case other =>
             throw AnalysisError(s"cannot call expression of type $other as a function")
 
+      case MethodCallAST(VarRefAST(name), method, args) if traits.contains(name) =>
+        // Trait method call: Ord.cmp(a, b)
+        val tArgs = args.map(analyzeExpr)
+        val (mangled, funInfo) = analyzeTraitCall(name, method, tArgs)
+        val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
+        TCall(mangled, checkedArgs, funInfo.returnType)
+
       case MethodCallAST(obj, method, args) =>
         val tObj = analyzeExpr(obj)
         val tArgs = args.map(analyzeExpr)
@@ -933,9 +1373,35 @@ class SyslAnalyzer:
               throw AnalysisError(s"struct $structName has no method or field '$method'")
 
       case CallAST(name, args) =>
-        val tArgs = args.map(analyzeExpr)
+        // Determine expected types for args if callee has known concrete signature
+        val argExpected: List[Option[SyslType]] =
+          if traitCallRewrite.contains(name) then
+            val mangled = traitCallRewrite(name)
+            functions(mangled).params.map(p => Some(p._2))
+          else if functions.contains(name) || builtinFunctions.contains(name) then
+            lookupFun(name).params.map(p => Some(p._2))
+          else if structTypes.contains(name) then
+            structTypes(name).fields.map(f => Some(f._2))
+          else
+            List.fill(args.length)(None)
+        val tArgs = args.zip(argExpected.padTo(args.length, None)).map { case (a, exp) =>
+          val saved = currentExpected
+          currentExpected = exp.orElse(saved)
+          try analyzeExpr(a) finally currentExpected = saved
+        }
+        // Check for trait-method-call rewrite (inside a synthesized default body)
+        if traitCallRewrite.contains(name) then
+          val mangled = traitCallRewrite(name)
+          val funInfo = functions(mangled)
+          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
+          TCall(mangled, checkedArgs, funInfo.returnType)
+        else
         // Check if it's a direct function call or an indirect call through a variable
-        if functions.contains(name) || builtinFunctions.contains(name) then
+        if genericTemplates.contains(name) then
+          val (mangled, funInfo) = instantiateGeneric(name, tArgs.map(_.typ))
+          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
+          TCall(mangled, checkedArgs, funInfo.returnType)
+        else if functions.contains(name) || builtinFunctions.contains(name) then
           val funInfo = lookupFun(name)
           val checkedArgs = checkArgs(name, funInfo.params, tArgs)
           TCall(name, checkedArgs, funInfo.returnType)
@@ -944,6 +1410,25 @@ class SyslAnalyzer:
           val st = structTypes(name)
           if tArgs.length != st.fields.length then
             throw AnalysisError(s"struct '${st.name}' has ${st.fields.length} field(s), got ${tArgs.length} argument(s)")
+          val checkedArgs = tArgs.zip(st.fields).map { case (arg, (fieldName, fieldType)) =>
+            val coerced = coerceLiteral(arg, fieldType)
+            if !compatible(coerced.typ, fieldType) then
+              throw AnalysisError(s"field '$fieldName' of '${st.name}' expects $fieldType, got ${coerced.typ}")
+            coerced
+          }
+          TStructConstruct(st, checkedArgs)
+        else if genericStructs.contains(name) then
+          // Generic struct constructor: Pair(1, 2) — infer type args from argument types
+          val template = genericStructs(name)
+          if tArgs.length != template.fields.length then
+            throw AnalysisError(s"generic struct '$name' has ${template.fields.length} field(s), got ${tArgs.length} argument(s)")
+          val env = mutable.Map.empty[String, SyslType]
+          for ((_, ftype), arg) <- template.fields.zip(tArgs) do
+            unifyTypes(ftype, arg.typ, template.typeParams.toSet, env)
+          for tp <- template.typeParams if !env.contains(tp) do
+            throw AnalysisError(s"cannot infer type parameter '$tp' for generic struct '$name'")
+          val inferredArgs = template.typeParams.map(env(_))
+          val st = instantiateGenericStruct(name, inferredArgs)
           val checkedArgs = tArgs.zip(st.fields).map { case (arg, (fieldName, fieldType)) =>
             val coerced = coerceLiteral(arg, fieldType)
             if !compatible(coerced.typ, fieldType) then
@@ -964,6 +1449,37 @@ class SyslAnalyzer:
             coerced
           }
           TEnumConstruct(et, variantIdx, checkedArgs)
+        else if genericVariantToEnum.contains(name) then
+          // Generic enum variant constructor: Some(42) — infer T from args, then fall back to expected type
+          val (enumName, variantIdx) = genericVariantToEnum(name)
+          val template = genericEnums(enumName)
+          val variant = template.variants(variantIdx)
+          if variant.fields.length != tArgs.length then
+            throw AnalysisError(s"variant '$name' has ${variant.fields.length} field(s), got ${tArgs.length} argument(s)")
+          val env = mutable.Map.empty[String, SyslType]
+          for ((_, ftype), arg) <- variant.fields.zip(tArgs) do
+            unifyTypes(ftype, arg.typ, template.typeParams.toSet, env)
+          // For any type params not inferred from args, try pulling them from currentExpected
+          val missing = template.typeParams.filter(tp => !env.contains(tp))
+          if missing.nonEmpty then
+            currentExpected match
+              case Some(SyslType.EnumType(expectedName, _)) if genericEnumInstantiations.exists { case ((n, _), et) => et.name == expectedName && n == enumName } =>
+                val (_, expectedArgs) = genericEnumInstantiations.collectFirst { case ((n, args), et) if et.name == expectedName && n == enumName => (n, args) }.get
+                for (tp, arg) <- template.typeParams.zip(expectedArgs) if !env.contains(tp) do
+                  env(tp) = arg
+              case _ => ()
+          for tp <- template.typeParams if !env.contains(tp) do
+            throw AnalysisError(s"cannot infer type parameter '$tp' for variant '$name' of generic enum '$enumName' — use explicit type annotation")
+          val inferredArgs = template.typeParams.map(env(_))
+          val et = instantiateGenericEnum(enumName, inferredArgs)
+          val (_, variantFields) = et.variants(variantIdx)
+          val checkedArgs = tArgs.zip(variantFields).map { case (arg, (fieldName, fieldType)) =>
+            val coerced = coerceLiteral(arg, fieldType)
+            if !compatible(coerced.typ, fieldType) then
+              throw AnalysisError(s"variant '$name' field '$fieldName' expects $fieldType, got ${coerced.typ}")
+            coerced
+          }
+          TEnumConstruct(et, variantIdx, checkedArgs)
         else
           // Try as a variable of FuncType
           val sym = lookup(name)
@@ -974,6 +1490,45 @@ class SyslAnalyzer:
               TIndirectCall(TVarRef(name, sym.typ), checkedArgs, returnType)
             case other =>
               throw AnalysisError(s"'$name' is not a function (type: $other)")
+
+      case TryAST(inner) =>
+        val tInner = analyzeExpr(inner)
+        val enumType = tInner.typ match
+          case et: SyslType.EnumType => et
+          case other => throw AnalysisError(s"'?' operator requires an enum type (Option/Result-style), got $other")
+        if enumType.variants.length != 2 then
+          throw AnalysisError(s"'?' operator requires a 2-variant enum, got ${enumType.variants.length} variants")
+        val (successName, successFields) = enumType.variants(0)
+        val (failureName, failureFields) = enumType.variants(1)
+        if successFields.length != 1 then
+          throw AnalysisError(s"'?' operator: first variant '$successName' must have exactly 1 field, got ${successFields.length}")
+        val successType = successFields(0)._2
+        // Verify the enclosing function's return type matches
+        currentExpected match
+          case Some(et: SyslType.EnumType) if et.name == enumType.name => ()
+          case Some(other) =>
+            throw AnalysisError(s"'?' on $enumType requires enclosing function to return $enumType, got $other")
+          case None =>
+            throw AnalysisError(s"'?' operator requires enclosing function with matching return type")
+        // Build: match tInner { Success(v) -> v; Failure(e) -> return Failure(e) }
+        val successBindName = "_try_v"
+        val failureBindNames = failureFields.indices.map(i => s"_try_e$i").toList
+        // Failure arm: return Failure(e0, e1, ...)
+        val failureReconstructArgs: List[TExpr] = failureBindNames.zip(failureFields).map {
+          case (bindName, (_, ft)) => TVarRef(bindName, ft)
+        }
+        val failureReturnValue = TEnumConstruct(enumType, 1, failureReconstructArgs)
+        val failureArm = TMatchArm(
+          List(TVariantPattern(enumType, 1, failureBindNames.map(Some(_)), failureFields.map(_._2))),
+          None,
+          List(TReturnStmt(Some(failureReturnValue)))
+        )
+        val successArm = TMatchArm(
+          List(TVariantPattern(enumType, 0, List(Some(successBindName)), List(successType))),
+          None,
+          List(TExprStmt(TVarRef(successBindName, successType)))
+        )
+        TMatchExpr(tInner, List(successArm, failureArm), None, successType)
 
       case IfExprAST(cond, thenBody, elseBody) =>
         val tCond = analyzeExpr(cond)
