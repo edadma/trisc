@@ -203,7 +203,7 @@ a freshly-allocated `string`.
 
     format_i64(n: i64) -> string
         val buf = new [20]byte
-        val written = format_i64_into(buf, n)
+        val written = format_i64_into(buf[:], n)
 
         string(buf[:written])
 
