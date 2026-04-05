@@ -311,28 +311,30 @@ class SyslAnalyzer:
 
       case DestructureStmtAST(names, init, isMutable) =>
         val tInit = analyzeExpr(init)
-        tInit.typ match
-          case st: StructType if st.isTuple =>
-            if names.length != st.fields.length then
-              throw AnalysisError(s"destructuring expects ${st.fields.length} names, got ${names.length}")
-            // Check if this is declaration or assignment (when no val/var prefix)
-            val existingCount = names.count(n => tryLookup(n).isDefined)
-            if isMutable || existingCount == 0 then
-              // Declaration: create new variables
-              for (name, (_, fieldType)) <- names.zip(st.fields) do
-                if scopeStack != null then
-                  currentScope(name) = SymInfo(name, fieldType, isMutable)
-              TDestructureStmt(names, st.fields.map(_._2), tInit)
-            else if existingCount == names.length then
-              // All exist: parallel assignment
-              for name <- names do
-                val sym = lookup(name)
-                if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$name'")
-              TDestructureAssignStmt(names, st.fields.map(_._2), tInit)
-            else
-              throw AnalysisError(s"cannot mix declared and undeclared names in destructuring")
-          case other =>
-            throw AnalysisError(s"cannot destructure non-tuple type $other")
+        // Extract struct type (works for value structs, refs, and pointers to structs)
+        val st = tInit.typ match
+          case s: StructType => s
+          case RefType(s: StructType) => s
+          case PtrType(s: StructType) => s
+          case other => throw AnalysisError(s"cannot destructure non-struct type $other")
+        if names.length != st.fields.length then
+          throw AnalysisError(s"destructuring expects ${st.fields.length} names, got ${names.length}")
+        // Check if this is declaration or assignment (when no val/var prefix)
+        val existingCount = names.count(n => tryLookup(n).isDefined)
+        if isMutable || existingCount == 0 then
+          // Declaration: create new variables
+          for (name, (_, fieldType)) <- names.zip(st.fields) do
+            if scopeStack != null then
+              currentScope(name) = SymInfo(name, fieldType, isMutable)
+          TDestructureStmt(names, st.fields.map(_._2), tInit)
+        else if existingCount == names.length then
+          // All exist: parallel assignment
+          for name <- names do
+            val sym = lookup(name)
+            if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$name'")
+          TDestructureAssignStmt(names, st.fields.map(_._2), tInit)
+        else
+          throw AnalysisError(s"cannot mix declared and undeclared names in destructuring")
 
       case AssignStmtAST(target, value) =>
         val tValue = analyzeExpr(value)

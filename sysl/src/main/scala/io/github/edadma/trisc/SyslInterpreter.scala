@@ -310,13 +310,19 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         env(name) = new Cell(v)
 
       case TDestructureStmt(names, _, init) =>
-        val ArrVal(cells, off) = evalAny(init, env): @unchecked
+        val (cells, off) = evalAny(init, env) match
+          case ArrVal(c, o) => (c, o)
+          case RefVal(c, _, _) => (c, 0)
+          case other => throw RuntimeError(s"cannot destructure $other")
         for (name, i) <- names.zipWithIndex do
           env(name) = new Cell(cells(off + i).value)
 
       case TDestructureAssignStmt(names, _, init) =>
         // Parallel assignment: evaluate RHS fully, then assign all values
-        val ArrVal(cells, off) = evalAny(init, env): @unchecked
+        val (cells, off) = evalAny(init, env) match
+          case ArrVal(c, o) => (c, o)
+          case RefVal(c, _, _) => (c, 0)
+          case other => throw RuntimeError(s"cannot destructure $other")
         val values = names.indices.map(i => cells(off + i).value)
         for (name, v) <- names.zip(values) do
           lookupCell(name, env).value = v

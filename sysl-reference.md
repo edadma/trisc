@@ -389,6 +389,14 @@ a = 10
 b = 20
 a, b = b, a                    // swap: RHS fully evaluated before assignment
 
+// Works on named structs too (not just tuples)
+p = Point(10, 20)
+x, y = p                      // x = p.x, y = p.y (field order)
+
+// And ref structs
+r = new Point(3, 4)
+a, b = r                      // a = 3, b = 4
+
 // Mixed declared/undeclared is an error
 a = 10
 a, b = 20, 30                  // ERROR: a exists but b doesn't
