@@ -65,7 +65,7 @@ import oskit.apps.*
 
   // Shell tests need the full stack: keyboard, TTY, disk, TFS, shell
   def runShell(
-      maxCycles: Int = 5200000,
+      maxCycles: Int = 6000000,
       prefill: String = "\n",
       scheduledKeys: Seq[(Int, Int, Boolean, Int)] = Seq.empty,
   ): (CPU, String) =

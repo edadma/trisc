@@ -28,7 +28,7 @@ so the scheduler can reference them).
     val IPC_PORT_FREE = -1
     val IPC_QUEUE_EMPTY = -1
 
-Per-thread IPC state, parallel to the tasks[] array. Each
+Per-thread IPC state, parallel to the threads[] array. Each
 thread has its own IPC context used during send/recv/reply.
 wait_next forms an intrusive linked list for per-port FIFO
 queues of blocked senders.
@@ -134,8 +134,8 @@ Helper to re-enqueue the current thread so it keeps running
 after do_schedule. Used by handlers that don't block.
 
     ipc_continue_current()
-        tasks[current_thread].state = STATE_READY
-        enqueue(tasks[current_thread].priority, current_thread)
+        threads[current_thread].state = STATE_READY
+        enqueue(threads[current_thread].priority, current_thread)
 
 Initialize the IPC subsystem. Clears all ports and registers
 syscall handlers. Call from kernel_main before creating threads.
@@ -211,22 +211,22 @@ Returns 0 on success, -1 on error (invalid port, port closed).
         val owner = port_owner[port]
         if ipc_server_waiting(owner, port) == 1
             ipc_deliver_and_wake(owner, me, msg_ptr, msg_len)
-            tasks[me].state = STATE_SEND_BLOCKED
-            tasks[me].wake_tick = 0
+            threads[me].state = STATE_SEND_BLOCKED
+            threads[me].wake_tick = 0
             return
 
         // Server not waiting — enqueue sender in port's FIFO
         ipc_queue_push(port, me)
 
         // Block the sender (waits for reply, no timeout)
-        tasks[me].state = STATE_SEND_BLOCKED
-        tasks[me].wake_tick = 0
+        threads[me].state = STATE_SEND_BLOCKED
+        threads[me].wake_tick = 0
 
 Check if a server is waiting for a message on a given port.
 Returns 1 if waiting (RECV_BLOCKED or RECV_NOTIFY_BLOCKED), 0 otherwise.
 
     ipc_server_waiting(owner: int, port: int) -> int
-        val st = tasks[owner].state
+        val st = threads[owner].state
         if st == STATE_RECV_BLOCKED
             if ipc_ctx[owner].port == port
                 return 1
@@ -240,11 +240,11 @@ Used by send handlers when the server is already waiting.
 
     ipc_deliver_and_wake(owner: int, sender: int, msg_ptr: i64, msg_len: int)
         ipc_deliver(owner, sender, msg_ptr, msg_len)
-        var ssp_r1: *i64 = *i64(tasks[owner].ssp + 48)
+        var ssp_r1: *i64 = *i64(threads[owner].ssp + 48)
         *ssp_r1 = sender
-        tasks[owner].state = STATE_READY
-        tasks[owner].quantum = DEFAULT_QUANTUM
-        enqueue(tasks[owner].priority, owner)
+        threads[owner].state = STATE_READY
+        threads[owner].quantum = DEFAULT_QUANTUM
+        enqueue(threads[owner].priority, owner)
 
 Copy message from sender to receiver's buffer, handling
 truncation. Sets actual_len on the receiver's IPC context.
@@ -295,7 +295,7 @@ Blocks until a client sends a message.
         // Skip stale entries (threads that timed out)
         var sender = ipc_queue_pop(port)
         while sender != IPC_QUEUE_EMPTY
-            if tasks[sender].state == STATE_SEND_BLOCKED
+            if threads[sender].state == STATE_SEND_BLOCKED
                 // Found a valid sender — deliver their message
                 ipc_deliver(me, sender, ipc_ctx[sender].buf, ipc_ctx[sender].len)
 
@@ -303,15 +303,15 @@ Blocks until a client sends a message.
                 syscall_return(sender)
 
                 // Server stays runnable (re-enqueue)
-                tasks[me].state = STATE_READY
-                tasks[me].quantum = DEFAULT_QUANTUM
-                enqueue(tasks[me].priority, me)
+                threads[me].state = STATE_READY
+                threads[me].quantum = DEFAULT_QUANTUM
+                enqueue(threads[me].priority, me)
                 return
             // Stale entry (timed out) — skip and try next
             sender = ipc_queue_pop(port)
 
         // No sender waiting — block the receiver
-        tasks[me].state = STATE_RECV_BLOCKED
+        threads[me].state = STATE_RECV_BLOCKED
 
 Reply to a client. The arg is a pointer to a packed argument
 block: [caller_tid, msg_ptr, msg_len].
@@ -334,7 +334,7 @@ The server continues running (no block).
             syscall_return(-1)
             ipc_continue_current()
             return
-        if tasks[caller].state != STATE_SEND_BLOCKED
+        if threads[caller].state != STATE_SEND_BLOCKED
             syscall_return(-1)
             ipc_continue_current()
             return
@@ -347,12 +347,12 @@ The server continues running (no block).
             ipc_memcpy(ipc_ctx[caller].reply_buf, msg_ptr, msg_len)
 
         // Unblock the caller (return 0 = success, clear timeout)
-        var caller_r1: *i64 = *i64(tasks[caller].ssp + 48)
+        var caller_r1: *i64 = *i64(threads[caller].ssp + 48)
         *caller_r1 = 0
-        tasks[caller].state = STATE_READY
-        tasks[caller].quantum = DEFAULT_QUANTUM
-        tasks[caller].wake_tick = 0
-        enqueue(tasks[caller].priority, caller)
+        threads[caller].state = STATE_READY
+        threads[caller].quantum = DEFAULT_QUANTUM
+        threads[caller].wake_tick = 0
+        enqueue(threads[caller].priority, caller)
 
         // Server re-enqueues itself
         ipc_continue_current()
@@ -381,11 +381,11 @@ Only the port owner can close it.
         // Wake all blocked senders with error
         var tid = ipc_queue_pop(port)
         while tid != IPC_QUEUE_EMPTY
-            var caller_r1: *i64 = *i64(tasks[tid].ssp + 48)
+            var caller_r1: *i64 = *i64(threads[tid].ssp + 48)
             *caller_r1 = -1
-            tasks[tid].state = STATE_READY
-            tasks[tid].quantum = DEFAULT_QUANTUM
-            enqueue(tasks[tid].priority, tid)
+            threads[tid].state = STATE_READY
+            threads[tid].quantum = DEFAULT_QUANTUM
+            enqueue(threads[tid].priority, tid)
             tid = ipc_queue_pop(port)
 
         // Free the port
@@ -479,14 +479,14 @@ Returns 0 on success, -1 on error, -2 on timeout.
         if ipc_server_waiting(owner, port) == 1
             ipc_deliver_and_wake(owner, me, msg_ptr, msg_len)
             // Block sender with timeout (waiting for reply)
-            tasks[me].state = STATE_SEND_BLOCKED
-            tasks[me].wake_tick = ticks + timeout
+            threads[me].state = STATE_SEND_BLOCKED
+            threads[me].wake_tick = ticks + timeout
             return
 
         // Server not waiting — enqueue with timeout
         ipc_queue_push(port, me)
-        tasks[me].state = STATE_SEND_BLOCKED
-        tasks[me].wake_tick = ticks + timeout
+        threads[me].state = STATE_SEND_BLOCKED
+        threads[me].wake_tick = ticks + timeout
 
 Receive a message OR notification. Like ipc_recv but also
 wakes when a notification is sent to this thread.
@@ -523,23 +523,23 @@ On notification, call notify_read() to get the value.
         // (notifications are frequent — e.g. mouse events — and must not starve IPC)
         var sender = ipc_queue_pop(port)
         while sender != IPC_QUEUE_EMPTY
-            if tasks[sender].state == STATE_SEND_BLOCKED
+            if threads[sender].state == STATE_SEND_BLOCKED
                 ipc_deliver(me, sender, ipc_ctx[sender].buf, ipc_ctx[sender].len)
                 syscall_return(sender)
-                tasks[me].state = STATE_READY
-                tasks[me].quantum = DEFAULT_QUANTUM
-                enqueue(tasks[me].priority, me)
+                threads[me].state = STATE_READY
+                threads[me].quantum = DEFAULT_QUANTUM
+                enqueue(threads[me].priority, me)
                 return
             sender = ipc_queue_pop(port)
 
         // No IPC message — check for pending notification
-        if tasks[me].notify_pending == 1
+        if threads[me].notify_pending == 1
             syscall_return(-2)
             ipc_continue_current()
             return
 
         // No sender, no notification — block waiting for either
-        tasks[me].state = STATE_RECV_NOTIFY_BLOCKED
+        threads[me].state = STATE_RECV_NOTIFY_BLOCKED
 
 Userspace wrappers. These pack arguments and invoke syscalls.
 
