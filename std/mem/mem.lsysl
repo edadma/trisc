@@ -30,6 +30,8 @@ Design rules:
 
     module std.mem
 
+    import std.debug.{assert}
+
 
 copy
 ----
@@ -174,3 +176,281 @@ deferred.
 prose; bounds are enforced by the language's built-in array
 bounds checks. Callers who want extra checking can call
 `std.debug.assert` themselves.
+
+
+Tests
+=====
+
+### copy
+
+    #test
+    test_copy_equal_lengths() -> void
+        val src = new [4]byte
+        val dst = new [4]byte
+
+        src[0] = 10
+        src[1] = 20
+        src[2] = 30
+        src[3] = 40
+
+        val n = copy(dst[:], src[:])
+
+        assert(n == 4, "copy returns source length")
+        assert(dst[0] == 10, "byte 0")
+        assert(dst[1] == 20, "byte 1")
+        assert(dst[2] == 30, "byte 2")
+        assert(dst[3] == 40, "byte 3")
+
+    #test
+    test_copy_src_longer() -> void
+        val src = new [5]byte
+        val dst = new [3]byte
+
+        src[0] = 1
+        src[1] = 2
+        src[2] = 3
+        src[3] = 4
+        src[4] = 5
+
+        val n = copy(dst[:], src[:])
+
+        assert(n == 3, "limited by dst length")
+        assert(dst[0] == 1, "byte 0")
+        assert(dst[1] == 2, "byte 1")
+        assert(dst[2] == 3, "byte 2")
+
+    #test
+    test_copy_dst_longer() -> void
+        val src = new [2]byte
+        val dst = new [4]byte
+
+        src[0] = 7
+        src[1] = 8
+        dst[2] = 99
+        dst[3] = 99
+
+        val n = copy(dst[:], src[:])
+
+        assert(n == 2, "limited by src length")
+        assert(dst[0] == 7, "byte 0 copied")
+        assert(dst[1] == 8, "byte 1 copied")
+        assert(dst[2] == 99, "byte 2 untouched")
+        assert(dst[3] == 99, "byte 3 untouched")
+
+    #test
+    test_copy_empty_src() -> void
+        val src = new [0]byte
+        val dst = new [3]byte
+
+        dst[0] = 5
+
+        val n = copy(dst[:], src[:])
+
+        assert(n == 0, "nothing copied")
+        assert(dst[0] == 5, "dst untouched")
+
+    #test
+    test_copy_empty_dst() -> void
+        val src = new [3]byte
+        val dst = new [0]byte
+
+        src[0] = 5
+
+        val n = copy(dst[:], src[:])
+
+        assert(n == 0, "nothing copied")
+
+
+### set and zero
+
+    #test
+    test_set_fills_all_bytes() -> void
+        val buf = new [4]byte
+
+        set(buf[:], 0x7F)
+
+        assert(buf[0] == 0x7F, "byte 0")
+        assert(buf[1] == 0x7F, "byte 1")
+        assert(buf[2] == 0x7F, "byte 2")
+        assert(buf[3] == 0x7F, "byte 3")
+
+    #test
+    test_set_empty_is_noop() -> void
+        val buf = new [0]byte
+
+        set(buf[:], 0xFF)
+        // nothing to check — should not panic
+
+    #test
+    test_zero_fills_zeros() -> void
+        val buf = new [3]byte
+
+        buf[0] = 0xAA
+        buf[1] = 0xBB
+        buf[2] = 0xCC
+
+        zero(buf[:])
+
+        assert(buf[0] == 0, "byte 0")
+        assert(buf[1] == 0, "byte 1")
+        assert(buf[2] == 0, "byte 2")
+
+
+### eq
+
+    #test
+    test_eq_same_contents() -> void
+        val a = new [3]byte
+        val b = new [3]byte
+
+        a[0] = 1
+        a[1] = 2
+        a[2] = 3
+        b[0] = 1
+        b[1] = 2
+        b[2] = 3
+
+        assert(eq(a[:], b[:]), "equal slices")
+
+    #test
+    test_eq_different_contents() -> void
+        val a = new [3]byte
+        val b = new [3]byte
+
+        a[0] = 1
+        a[1] = 2
+        a[2] = 3
+        b[0] = 1
+        b[1] = 2
+        b[2] = 4
+
+        assert(!eq(a[:], b[:]), "last byte differs")
+
+    #test
+    test_eq_different_lengths() -> void
+        val a = new [2]byte
+        val b = new [3]byte
+
+        a[0] = 1
+        a[1] = 2
+        b[0] = 1
+        b[1] = 2
+        b[2] = 0
+
+        assert(!eq(a[:], b[:]), "different lengths never equal")
+
+    #test
+    test_eq_empty_empty() -> void
+        val a = new [0]byte
+        val b = new [0]byte
+
+        assert(eq(a[:], b[:]), "empty slices are equal")
+
+
+### cmp
+
+    #test
+    test_cmp_equal() -> void
+        val a = new [2]byte
+        val b = new [2]byte
+
+        a[0] = 5
+        a[1] = 10
+        b[0] = 5
+        b[1] = 10
+
+        assert(cmp(a[:], b[:]) == 0, "equal slices compare zero")
+
+    #test
+    test_cmp_less() -> void
+        val a = new [2]byte
+        val b = new [2]byte
+
+        a[0] = 1
+        a[1] = 2
+        b[0] = 1
+        b[1] = 3
+
+        assert(cmp(a[:], b[:]) < 0, "a < b")
+
+    #test
+    test_cmp_greater() -> void
+        val a = new [2]byte
+        val b = new [2]byte
+
+        a[0] = 2
+        a[1] = 0
+        b[0] = 1
+        b[1] = 99
+
+        assert(cmp(a[:], b[:]) > 0, "a > b on first byte")
+
+    #test
+    test_cmp_prefix_sorts_first() -> void
+        val a = new [2]byte
+        val b = new [3]byte
+
+        a[0] = 1
+        a[1] = 2
+        b[0] = 1
+        b[1] = 2
+        b[2] = 0
+
+        assert(cmp(a[:], b[:]) < 0, "shorter prefix sorts first")
+
+    #test
+    test_cmp_empty_empty() -> void
+        val a = new [0]byte
+        val b = new [0]byte
+
+        assert(cmp(a[:], b[:]) == 0, "empty vs empty is zero")
+
+
+### index_byte
+
+    #test
+    test_index_byte_found_at_start() -> void
+        val s = new [3]byte
+
+        s[0] = 7
+        s[1] = 8
+        s[2] = 9
+
+        assert(index_byte(s[:], 7) == 0, "first byte")
+
+    #test
+    test_index_byte_found_at_end() -> void
+        val s = new [3]byte
+
+        s[0] = 7
+        s[1] = 8
+        s[2] = 9
+
+        assert(index_byte(s[:], 9) == 2, "last byte")
+
+    #test
+    test_index_byte_returns_first_occurrence() -> void
+        val s = new [4]byte
+
+        s[0] = 1
+        s[1] = 2
+        s[2] = 1
+        s[3] = 2
+
+        assert(index_byte(s[:], 2) == 1, "first match only")
+
+    #test
+    test_index_byte_not_found() -> void
+        val s = new [3]byte
+
+        s[0] = 1
+        s[1] = 2
+        s[2] = 3
+
+        assert(index_byte(s[:], 99) == -1, "sentinel on miss")
+
+    #test
+    test_index_byte_empty() -> void
+        val s = new [0]byte
+
+        assert(index_byte(s[:], 0) == -1, "empty slice never finds")

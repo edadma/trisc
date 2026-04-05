@@ -36,6 +36,8 @@ Core rules:
 
     module std.utf8
 
+    import std.debug.{assert}
+
 
 Constants
 ---------
@@ -320,3 +322,278 @@ containing the literal replacement character as invalid.
 `runes(s)` to `std.strings`, but the primitives here are all
 index-and-slice based. This module knows nothing about strings
 as a type — just byte slices.
+
+
+Tests
+=====
+
+### valid_rune and rune_start
+
+    #test
+    test_valid_rune_ascii() -> void
+        assert(valid_rune(0x41), "'A' is valid")
+        assert(valid_rune(0x00), "U+0000 is valid")
+        assert(valid_rune(0x7F), "U+007F is valid")
+
+    #test
+    test_valid_rune_rejects_surrogates() -> void
+        assert(!valid_rune(0xD800), "low surrogate start")
+        assert(!valid_rune(0xDFFF), "high surrogate end")
+
+    #test
+    test_valid_rune_accepts_bmp_edges() -> void
+        assert(valid_rune(0xD7FF), "just before surrogates")
+        assert(valid_rune(0xE000), "just after surrogates")
+
+    #test
+    test_valid_rune_rejects_above_max() -> void
+        assert(valid_rune(0x10FFFF), "MAX_RUNE itself")
+        assert(!valid_rune(0x110000), "one past MAX_RUNE")
+
+    #test
+    test_rune_start_classifies_bytes() -> void
+        assert(rune_start(0x00), "ASCII")
+        assert(rune_start(0x7F), "ASCII max")
+        assert(!rune_start(0x80), "continuation byte start")
+        assert(!rune_start(0xBF), "continuation byte end")
+        assert(rune_start(0xC0), "2-byte lead (even if overlong)")
+        assert(rune_start(0xE0), "3-byte lead")
+        assert(rune_start(0xF0), "4-byte lead")
+
+
+### rune_len
+
+    #test
+    test_rune_len_by_range() -> void
+        assert(rune_len(0x00) == 1, "NUL")
+        assert(rune_len(0x7F) == 1, "max 1-byte")
+        assert(rune_len(0x80) == 2, "min 2-byte")
+        assert(rune_len(0x7FF) == 2, "max 2-byte")
+        assert(rune_len(0x800) == 3, "min 3-byte")
+        assert(rune_len(0xFFFF) == 3, "max 3-byte")
+        assert(rune_len(0x10000) == 4, "min 4-byte")
+        assert(rune_len(0x10FFFF) == 4, "MAX_RUNE")
+
+    #test
+    test_rune_len_rejects_invalid() -> void
+        assert(rune_len(0xD800) == -1, "surrogate")
+        assert(rune_len(0xDFFF) == -1, "surrogate")
+        assert(rune_len(0x110000) == -1, "above MAX_RUNE")
+
+
+### encode_rune and decode_rune — round trip
+
+    #test
+    test_roundtrip_ascii() -> void
+        val buf = new [4]byte
+        val n = encode_rune(buf[:], 0x41)
+
+        assert(n == 1, "ASCII is 1 byte")
+        assert(buf[0] == 0x41, "raw byte match")
+
+        val r, m = decode_rune(buf[:n])
+        assert(r == 0x41, "decode gives 'A'")
+        assert(m == 1, "consumed 1 byte")
+
+    #test
+    test_roundtrip_2byte() -> void
+        val buf = new [4]byte
+        // U+00E9 (é)
+        val n = encode_rune(buf[:], 0xE9)
+        assert(n == 2, "2 bytes")
+
+        val r, m = decode_rune(buf[:n])
+        assert(r == 0xE9, "decoded codepoint")
+        assert(m == 2, "consumed 2 bytes")
+
+    #test
+    test_roundtrip_3byte() -> void
+        val buf = new [4]byte
+        // U+20AC (€)
+        val n = encode_rune(buf[:], 0x20AC)
+        assert(n == 3, "3 bytes")
+
+        val r, m = decode_rune(buf[:n])
+        assert(r == 0x20AC, "decoded codepoint")
+        assert(m == 3, "consumed 3 bytes")
+
+    #test
+    test_roundtrip_4byte() -> void
+        val buf = new [4]byte
+        // U+1F600 (😀)
+        val n = encode_rune(buf[:], 0x1F600)
+        assert(n == 4, "4 bytes")
+
+        val r, m = decode_rune(buf[:n])
+        assert(r == 0x1F600, "decoded codepoint")
+        assert(m == 4, "consumed 4 bytes")
+
+    #test
+    test_roundtrip_max_rune() -> void
+        val buf = new [4]byte
+        val n = encode_rune(buf[:], 0x10FFFF)
+        assert(n == 4, "MAX_RUNE is 4 bytes")
+
+        val r, m = decode_rune(buf[:n])
+        assert(r == 0x10FFFF, "MAX_RUNE round-trips")
+        assert(m == 4, "consumed 4 bytes")
+
+
+### encode_rune — invalid codepoints become RUNE_ERROR
+
+    #test
+    test_encode_surrogate_becomes_replacement() -> void
+        val buf = new [4]byte
+        val n = encode_rune(buf[:], 0xD800)
+
+        assert(n == 3, "RUNE_ERROR is 3 bytes")
+
+        val r, m = decode_rune(buf[:n])
+        assert(r == RUNE_ERROR, "decoded as U+FFFD")
+        assert(m == 3, "consumed 3 bytes")
+
+    #test
+    test_encode_above_max_becomes_replacement() -> void
+        val buf = new [4]byte
+        val n = encode_rune(buf[:], 0x200000)
+
+        assert(n == 3, "RUNE_ERROR encoding")
+
+        val r, m = decode_rune(buf[:n])
+        assert(r == RUNE_ERROR, "decoded as U+FFFD")
+
+    #test
+    test_encode_buffer_too_small() -> void
+        val buf = new [1]byte
+        val n = encode_rune(buf[:], 0xE9)
+        assert(n == 0, "cannot encode 2-byte into 1-byte buffer")
+
+
+### decode_rune — invalid input returns (RUNE_ERROR, 1)
+
+    #test
+    test_decode_empty() -> void
+        val buf = new [0]byte
+
+        val r, n = decode_rune(buf[:])
+        assert(r == RUNE_ERROR, "empty yields replacement")
+        assert(n == 0, "empty consumes zero")
+
+    #test
+    test_decode_lone_continuation() -> void
+        val buf = new [1]byte
+        buf[0] = 0x80
+
+        val r, n = decode_rune(buf[:])
+        assert(r == RUNE_ERROR, "continuation byte alone")
+        assert(n == 1, "skip one byte")
+
+    #test
+    test_decode_truncated_2byte() -> void
+        val buf = new [1]byte
+        buf[0] = 0xC3  // lead of 2-byte
+
+        val r, n = decode_rune(buf[:])
+        assert(r == RUNE_ERROR, "missing continuation")
+        assert(n == 1, "skip one byte")
+
+    #test
+    test_decode_bad_continuation() -> void
+        val buf = new [2]byte
+        buf[0] = 0xC3
+        buf[1] = 0x40  // not a continuation byte (not 10xxxxxx)
+
+        val r, n = decode_rune(buf[:])
+        assert(r == RUNE_ERROR, "malformed continuation")
+        assert(n == 1, "skip one byte")
+
+    #test
+    test_decode_overlong_2byte() -> void
+        val buf = new [2]byte
+        buf[0] = 0xC0
+        buf[1] = 0x80  // would decode to U+0000 but overlong
+
+        val r, n = decode_rune(buf[:])
+        assert(r == RUNE_ERROR, "overlong 2-byte rejected")
+        assert(n == 1, "skip one byte")
+
+    #test
+    test_decode_surrogate_3byte() -> void
+        val buf = new [3]byte
+        buf[0] = 0xED
+        buf[1] = 0xA0
+        buf[2] = 0x80  // encodes U+D800 — surrogate, invalid
+
+        val r, n = decode_rune(buf[:])
+        assert(r == RUNE_ERROR, "surrogate rejected")
+        assert(n == 1, "skip one byte")
+
+
+### rune_count
+
+    #test
+    test_rune_count_ascii() -> void
+        val buf = new [5]byte
+        buf[0] = byte('H')
+        buf[1] = byte('e')
+        buf[2] = byte('l')
+        buf[3] = byte('l')
+        buf[4] = byte('o')
+
+        assert(rune_count(buf[:]) == 5, "5 ASCII runes")
+
+    #test
+    test_rune_count_mixed_widths() -> void
+        val buf = new [6]byte
+        buf[0] = byte('A')   // 1 byte
+        buf[1] = 0xC3        // 2-byte lead
+        buf[2] = 0xA9        // continuation (é)
+        buf[3] = 0xE2        // 3-byte lead
+        buf[4] = 0x82        // continuation
+        buf[5] = 0xAC        // continuation (€)
+
+        assert(rune_count(buf[:]) == 3, "A é €")
+
+    #test
+    test_rune_count_empty() -> void
+        val buf = new [0]byte
+        assert(rune_count(buf[:]) == 0, "empty has zero runes")
+
+
+### valid
+
+    #test
+    test_valid_ascii() -> void
+        val buf = new [3]byte
+        buf[0] = byte('a')
+        buf[1] = byte('b')
+        buf[2] = byte('c')
+
+        assert(valid(buf[:]), "ASCII is valid")
+
+    #test
+    test_valid_empty_is_true() -> void
+        val buf = new [0]byte
+        assert(valid(buf[:]), "empty is valid UTF-8")
+
+    #test
+    test_valid_replacement_char_passes() -> void
+        val buf = new [3]byte
+        buf[0] = 0xEF
+        buf[1] = 0xBF
+        buf[2] = 0xBD  // U+FFFD itself, correctly encoded
+
+        assert(valid(buf[:]), "literal U+FFFD is valid input")
+
+    #test
+    test_valid_rejects_lone_continuation() -> void
+        val buf = new [1]byte
+        buf[0] = 0x80
+        assert(!valid(buf[:]), "continuation byte alone")
+
+    #test
+    test_valid_rejects_overlong() -> void
+        val buf = new [2]byte
+        buf[0] = 0xC0
+        buf[1] = 0x80
+        assert(!valid(buf[:]), "overlong encoding")

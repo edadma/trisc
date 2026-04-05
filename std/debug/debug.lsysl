@@ -1,127 +1,97 @@
-std.debug — Assertions, panics, and fatal error reporting
-===========================================================
+std.debug — Assertions and fatal-error helpers
+===============================================
 
-The `std.debug` module provides the primitives used by all other
-standard-library code to signal violated invariants, unreachable
-code paths, and unfinished work. It is deliberately the lowest
-layer of the standard library: it depends on nothing except the
-runtime's trap mechanism.
+The `std.debug` module provides the assertion and
+unreachable-path helpers that the rest of the standard library
+and user code use to signal violated invariants and
+unfinished work. It is the foundational module that every
+other `std` module depends on.
 
-All fatal paths here terminate the process (or the system, in
-kernel contexts) via **trap 1**. Trap 1 is reserved throughout
-the TRISC ecosystem as the *panic/fatal* trap. Its exact
-runtime behavior is defined outside this module — the runtime
-decides whether to print, log, halt, or reboot — but once trap 1
-is taken, control never returns to the caller.
+`panic(msg: string)` is a Sysl language builtin, not defined
+here: it halts execution with the given message. `std.debug`
+layers three small helpers on top of it.
 
 Contract summary:
 
-- `panic(msg)` — report and terminate, never returns.
 - `assert(cond, msg)` — panic if `cond` is false, otherwise no-op.
-- `unreachable(msg)` — panic; marks code paths the programmer
-  believes cannot be executed.
-- `todo(msg)` — panic; marks code paths not yet implemented.
+- `unreachable(msg)` — panic with a `"unreachable: "` prefix.
+- `todo(msg)` — panic with a `"todo: "` prefix.
 
-These four entry points are the only supported way to trigger
-trap 1 from Sysl code.
-
-
-Runtime interface
------------------
-
-`std.debug` relies on two primitives provided by the runtime:
-
-- `__debug_write(msg: str)` — write a diagnostic message to the
-  panic/console sink. MAY be unbuffered and MAY be a no-op in
-  profiles that do not have a console (e.g. freestanding with
-  no UART). This function MUST NOT fail and MUST NOT itself panic.
-- `__debug_trap()` — issue trap 1. Never returns.
-
-Both symbols are supplied by the platform runtime (slix, TOS,
-or the hosted test harness). They are `extern` here; no Sysl
-implementation exists in this module.
+These funnel through `panic`, so they all trigger the normal
+test-failure path under `sysl test` and the normal halt path
+under `sysl run`.
 
 
     module std.debug
-
-    extern __debug_write(msg: str)
-    extern __debug_trap()
-
-
-panic
------
-
-`panic(msg)` reports `msg` to the debug sink and issues trap 1.
-It never returns.
-
-It is the single point through which all other `std.debug`
-entry points funnel, and the only place in the standard library
-that speaks directly to `__debug_trap`.
-
-    panic(msg: str)
-        __debug_write("panic: ")
-        __debug_write(msg)
-        __debug_write("\n")
-        __debug_trap()
 
 
 assert
 ------
 
-`assert(cond, msg)` is a no-op when `cond` is true, and panics
-with `msg` when `cond` is false. The message should describe
-the invariant that was violated, not the condition that was
-checked. Prefer:
-
-> "buffer index out of range"
-
-over:
-
-> "i >= 0 && i < len"
+`assert(cond, msg)` is a no-op when `cond` is true and calls
+`panic(msg)` when it is false. The message should describe the
+invariant that was violated, not the condition that was
+checked. Prefer `"buffer index out of range"` over
+`"i >= 0 && i < len"`.
 
 Assertions are not stripped in any build profile. Sysl has no
-release/debug distinction for assertions: if you do not want
-the check at runtime, do not write it. This is a deliberate
-choice — silently-disappearing checks are a common source of
-bugs.
+release-mode assertion removal: if you do not want the check
+at runtime, do not write it. Silently-disappearing checks are
+a common bug source and `std.debug.assert` does not introduce
+them.
 
-    assert(cond: bool, msg: str)
-        if not cond then
-            panic(msg)
+    assert(cond: bool, msg: string) -> void
+        if !cond then panic(msg)
 
 
 unreachable
 -----------
 
-`unreachable(msg)` panics unconditionally. It marks code paths
-the programmer asserts cannot execute — typically the default
-arm of an exhaustive `match`, or the fall-through after a
-non-returning call. The message should explain *why* the
-programmer believes the path is unreachable.
+`unreachable(msg)` panics unconditionally with a `"unreachable: "`
+prefix. It marks code paths the programmer asserts cannot
+execute — typically the default arm of an exhaustive match, or
+the fall-through after a non-returning call. The message
+should explain *why* the programmer believes the path is
+unreachable.
 
-    unreachable(msg: str)
-        __debug_write("unreachable: ")
-        __debug_write(msg)
-        __debug_write("\n")
-        __debug_trap()
+    unreachable(msg: string) -> void
+        panic("unreachable: " + msg)
 
 
 todo
 ----
 
-`todo(msg)` panics unconditionally. It marks code paths that
-have not yet been implemented, so that partial code compiles
-and links but fails loudly at runtime if exercised. The message
-should describe what needs to be done.
+`todo(msg)` panics unconditionally with a `"todo: "` prefix.
+It marks code paths that have not yet been implemented. Code
+containing `todo` compiles and links but fails loudly at
+runtime if exercised. The message should describe what needs
+to be done.
 
-`todo` is distinct from `unreachable` so that grep and tooling
-can distinguish "not implemented yet" from "cannot happen".
+`todo` is distinct from `unreachable` so that tooling can tell
+"not implemented yet" from "cannot happen".
 
-    todo(msg: str)
-        __debug_write("todo: ")
-        __debug_write(msg)
-        __debug_write("\n")
-        __debug_trap()
+    todo(msg: string) -> void
+        panic("todo: " + msg)
+
+
+Tests
+=====
+
+    #test
+    test_assert_true_is_noop() -> void
+        assert(true, "should not fire")
+
+    #test(should_panic: "math is broken")
+    test_assert_false_panics() -> void
+        assert(false, "math is broken")
+
+    #test(should_panic: "unreachable: dead branch")
+    test_unreachable_panics_with_prefix() -> void
+        unreachable("dead branch")
+
+    #test(should_panic: "todo: implement me")
+    test_todo_panics_with_prefix() -> void
+        todo("implement me")
 
 
 Design notes
@@ -130,25 +100,15 @@ Design notes
 **No source location capture yet.** Rust's `panic!`, `assert!`,
 `unreachable!`, and `todo!` macros capture `file!()`/`line!()`
 automatically. Sysl has no macro system, so location capture
-would require dedicated compiler support (an intrinsic that
-inserts a `SourceLoc` argument at the call site). This is
-deferred; when added, it will be a non-breaking change — the
-compiler will inject an extra argument that defaults to the
-caller's location.
+would require dedicated compiler support — an intrinsic that
+inserts location information at the call site. This is
+deferred; when added, it will be a non-breaking change.
 
-**No formatted messages.** These functions take a plain `str`,
-not a format string. Formatting would require `std.builder` and
-`std.strconv`, which depend on `std.debug` transitively through
-the other `std` modules. Users who need a formatted panic
-message should build the string themselves with `StrBuilder`
-and pass the result to `panic`. This keeps `std.debug`
-dependency-free.
+**No formatted messages.** These functions take a plain
+`string`, not a format string. Users who want a formatted
+message should build it with `std.builder` or Sysl's string
+interpolation and pass the result to `assert` / `unreachable`
+/ `todo`. This keeps `std.debug` dependency-free.
 
-**No recovery.** There is no `catch_panic` or unwinding. Trap 1
-is terminal. Code that needs to fail recoverably should return
-a `Result`, not panic.
-
-**Kernel and userspace share this module.** The runtime
-decides what trap 1 does — a hosted test harness may print to
-stderr and `exit(1)`; slix may kill the current process; TOS
-may halt the CPU. `std.debug` does not care.
+**No recovery.** `panic` is terminal. Code that needs to fail
+recoverably should return a `Result`, not panic.
