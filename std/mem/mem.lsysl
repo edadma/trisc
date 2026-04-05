@@ -1,0 +1,176 @@
+std.mem — Raw byte operations on slices
+========================================
+
+The `std.mem` module provides the foundational byte-level
+operations that the rest of the standard library builds on:
+copy, fill, compare, search. It works exclusively on `[]byte`
+slices — views over contiguous bytes, independent of where
+those bytes were allocated.
+
+This module deliberately stays at the level of raw bytes. It
+has no opinion about encoding, structure, or ownership — it
+just moves, compares, and searches bytes. Higher-level modules
+(`std.bytes`, `std.strings`, `std.utf8`, `std.strconv`) layer
+interpretation on top.
+
+Dependencies: `std.debug` (for preconditions only; not used in
+the hot path).
+
+Design rules:
+
+- Every function takes `[]byte` slices, never raw pointers.
+- Indices and lengths are `int`.
+- Functions return primitive values (`int`, `bool`), never
+  `Result`. These are low-level ops that cannot fail on
+  well-formed slices.
+- Functions that write into a destination never grow it;
+  callers are responsible for sizing `dst` before calling.
+- No overlap handling. See `copy` below.
+
+
+    module std.mem
+
+
+copy
+----
+
+`copy(dst, src)` copies bytes from `src` into `dst` and returns
+the number of bytes copied: `min(len(dst), len(src))`. The
+remainder of `dst` (if any) is left unchanged.
+
+Copy proceeds **forward** from index 0. This is correct for
+non-overlapping slices and for the case where `dst` begins at
+or before `src` in memory. It is **not safe** when `dst`
+overlaps `src` with `dst` strictly after `src` — in that case
+the source bytes will be overwritten before they are read.
+
+If overlapping copies in either direction are needed, use a
+future `move` function (not yet defined) or copy through a
+temporary buffer. Most callers — slice-to-fresh-buffer, append,
+concatenation — have non-overlapping arguments by construction.
+
+    copy(dst: []byte, src: []byte) -> int
+        var n: int = len(dst)
+
+        if len(src) < n then n = len(src)
+
+        for i = 0; i < n; i++ do dst[i] = src[i]
+
+        n
+
+
+set
+---
+
+`set(dst, b)` fills every byte of `dst` with the value `b`.
+
+    set(dst: []byte, b: byte)
+        val n = len(dst)
+
+        for i = 0; i < n; i++ do dst[i] = b
+
+
+zero
+----
+
+`zero(dst)` fills `dst` with zero bytes. Equivalent to
+`set(dst, 0)` and exists as a named convenience — zeroing is
+common enough that a dedicated name aids readability.
+
+    zero(dst: []byte) = set(dst, 0)
+
+
+eq
+--
+
+`eq(a, b)` returns `true` iff `a` and `b` have the same length
+and the same byte values at every position.
+
+Length mismatch short-circuits to `false` without comparing any
+bytes.
+
+    eq(a: []byte, b: []byte) -> bool
+        val n = len(a)
+
+        if len(b) != n then return false
+
+        for i = 0; i < n; i++
+            if a[i] != b[i] then return false
+
+        true
+
+
+cmp
+---
+
+`cmp(a, b)` compares `a` and `b` lexicographically and returns:
+
+- a negative `int` if `a` sorts before `b`
+- zero if `a` and `b` are equal
+- a positive `int` if `a` sorts after `b`
+
+Comparison proceeds byte-by-byte over the shared prefix. If one
+slice is a prefix of the other, the shorter slice sorts first.
+
+    cmp(a: []byte, b: []byte) -> int
+        var na = len(a)
+        var nb = len(b)
+        var n = na
+
+        if nb < n then n = nb
+
+        for i = 0; i < n; i++
+            val ai: int = int(a[i])
+            val bi: int = int(b[i])
+
+            if ai != bi then return ai - bi
+
+        na - nb
+
+
+index_byte
+----------
+
+`index_byte(s, b)` returns the index of the first occurrence of
+byte `b` in `s`, or `-1` if `b` does not appear.
+
+This is the primitive that string and byte searches build on.
+It returns a raw index (a sentinel `-1` for "not found") rather
+than an `Option` to keep `std.mem` free of dependencies on sum
+types and to match the convention established by the built-in
+indexing operator.
+
+    index_byte(s: []byte, b: byte) -> int
+        val n = len(s)
+
+        for i = 0; i < n; i++
+            if s[i] == b then return i
+
+        -1
+
+
+Design notes
+------------
+
+**Why `[]byte` and not `&[]byte`.** The `&[]T` type is a
+ref-counted heap array; `[]T` is a slice view. `std.mem` takes
+slices because slice views compose naturally over sub-ranges,
+stack buffers, heap arrays, and sections of larger allocations
+alike. Callers can obtain a `[]byte` slice from any of these.
+
+**No generic element type.** `std.mem` is bytes only. A generic
+`slice.copy[T]` belongs in `std.slices`, once generics allow
+computing per-element strides. The byte-level primitives here
+are exactly what `std.bytes` and `std.strings` need, and no
+more.
+
+**Forward iteration.** All loops walk slices front-to-back.
+This makes the code easy to reason about and straightforward
+to codegen. The only function that would benefit from reverse
+iteration (`move` with overlap handling) is deliberately
+deferred.
+
+**No asserts in hot paths.** Preconditions are stated in the
+prose; bounds are enforced by the language's built-in array
+bounds checks. Callers who want extra checking can call
+`std.debug.assert` themselves.

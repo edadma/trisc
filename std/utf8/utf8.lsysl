@@ -1,0 +1,322 @@
+std.utf8 — UTF-8 encoding and decoding
+=======================================
+
+The `std.utf8` module provides the primitives for converting
+between byte sequences and Unicode codepoints. Sysl strings are
+byte-oriented `{ptr, len}` values with no enforced encoding,
+but by convention they hold UTF-8. This module is what makes
+that convention usable.
+
+The API follows Go's `unicode/utf8` package closely: invalid
+byte sequences decode to the Unicode replacement character
+(U+FFFD) with a consumed length of 1, letting callers skip one
+byte and continue without aborting. Rust's "validity is a type
+invariant" approach would be stricter but requires up-front
+validation of every string at construction time — a cost Sysl
+does not pay.
+
+Dependencies: `std.mem` is not required. `std.debug` is
+optional (for precondition assertions if callers add them).
+
+Core rules:
+
+- Codepoints are `char` (u32). Valid codepoints are in the
+  range `[0, 0xD7FF] ∪ [0xE000, 0x10FFFF]`. The surrogate
+  range is excluded because surrogates are a UTF-16 artifact
+  and never appear in well-formed UTF-8.
+- Encodings are 1-4 bytes:
+  - 1 byte:  `0xxxxxxx`                           (codepoints 0..0x7F)
+  - 2 bytes: `110xxxxx 10xxxxxx`                   (0x80..0x7FF)
+  - 3 bytes: `1110xxxx 10xxxxxx 10xxxxxx`          (0x800..0xFFFF, excl. surrogates)
+  - 4 bytes: `11110xxx 10xxxxxx 10xxxxxx 10xxxxxx` (0x10000..0x10FFFF)
+- Invalid sequences include: truncated input, bad continuation
+  bytes, overlong encodings (using more bytes than necessary),
+  surrogates, and codepoints > 0x10FFFF.
+
+
+    module std.utf8
+
+
+Constants
+---------
+
+`RUNE_ERROR` is the Unicode replacement character (U+FFFD)
+returned by decoders for invalid input, and emitted by
+`encode_rune` when given an invalid codepoint.
+
+`RUNE_SELF` is the boundary above which a codepoint requires
+multi-byte encoding. Codepoints below `RUNE_SELF` are ASCII
+and encode to exactly one byte equal to themselves.
+
+`MAX_RUNE` is the largest valid Unicode codepoint.
+
+`UTF_MAX` is the maximum number of bytes a single encoded
+rune can occupy.
+
+    val RUNE_ERROR: char = 0xFFFD
+    val RUNE_SELF: char  = 0x80
+    val MAX_RUNE: char   = 0x10FFFF
+    val UTF_MAX: int     = 4
+
+
+valid_rune
+----------
+
+`valid_rune(r)` returns `true` iff `r` is a codepoint that can
+be encoded as UTF-8: non-surrogate, within the Unicode range.
+
+    valid_rune(r: char) -> bool
+        if r < 0xD800 then return true
+        if r < 0xE000 then return false
+        r <= MAX_RUNE
+
+
+rune_start
+----------
+
+`rune_start(b)` returns `true` iff `b` could be the first byte
+of a UTF-8 encoding — that is, not a continuation byte.
+Continuation bytes match the pattern `10xxxxxx` (`0x80..0xBF`).
+
+Useful for resynchronizing after an invalid decode: scan
+forward until `rune_start(b)` is true, then retry.
+
+    rune_start(b: byte) -> bool = (b & 0xC0) != 0x80
+
+
+rune_len
+--------
+
+`rune_len(r)` returns the number of bytes required to encode
+`r` as UTF-8, or `-1` if `r` is not a valid codepoint.
+
+    rune_len(r: char) -> int
+        if r < 0x80 then return 1
+        if r < 0x800 then return 2
+        if r < 0xD800 then return 3
+        if r < 0xE000 then return -1
+        if r < 0x10000 then return 3
+        if r <= MAX_RUNE then return 4
+        -1
+
+
+encode_rune
+-----------
+
+`encode_rune(p, r)` writes the UTF-8 encoding of `r` into `p`
+starting at index 0 and returns the number of bytes written.
+Returns `0` if `p` is too small to hold the encoding.
+
+If `r` is not a valid codepoint, `RUNE_ERROR` is encoded
+instead. This matches Go's behavior: lossy but non-panicking.
+
+    encode_rune(p: []byte, r: char) -> int
+        var c: char = r
+
+        if !valid_rune(c) then c = RUNE_ERROR
+
+        val n = len(p)
+
+        if c < 0x80
+            if n < 1 then return 0
+            p[0] = byte(c)
+            return 1
+
+        if c < 0x800
+            if n < 2 then return 0
+            p[0] = byte(0xC0 | (c >> 6))
+            p[1] = byte(0x80 | (c & 0x3F))
+            return 2
+
+        if c < 0x10000
+            if n < 3 then return 0
+            p[0] = byte(0xE0 | (c >> 12))
+            p[1] = byte(0x80 | ((c >> 6) & 0x3F))
+            p[2] = byte(0x80 | (c & 0x3F))
+            return 3
+
+        if n < 4 then return 0
+        p[0] = byte(0xF0 | (c >> 18))
+        p[1] = byte(0x80 | ((c >> 12) & 0x3F))
+        p[2] = byte(0x80 | ((c >> 6) & 0x3F))
+        p[3] = byte(0x80 | (c & 0x3F))
+        4
+
+
+decode_rune
+-----------
+
+`decode_rune(p)` decodes the first UTF-8 sequence in `p` and
+returns the decoded codepoint and the number of bytes consumed.
+
+Result conventions (matching Go):
+
+- Empty input returns `(RUNE_ERROR, 0)`.
+- Any invalid sequence returns `(RUNE_ERROR, 1)`. Callers can
+  skip one byte and continue, or use `rune_start` to
+  resynchronize to the next plausible lead byte.
+- Valid input returns the decoded rune and the actual byte
+  width (1-4).
+
+Invalid sequences include: lead byte outside the valid ranges,
+truncated input (not enough continuation bytes), malformed
+continuation bytes, overlong encodings, surrogate codepoints,
+and codepoints exceeding `MAX_RUNE`.
+
+    decode_rune(p: []byte) -> (char, int)
+        val n = len(p)
+
+        if n < 1 then return RUNE_ERROR, 0
+
+        val b0: byte = p[0]
+
+        if b0 < 0x80 then return char(b0), 1
+
+        // 0x80..0xC1: continuation byte or overlong 2-byte lead
+        if b0 < 0xC2 then return RUNE_ERROR, 1
+
+        if b0 < 0xE0
+            // 2-byte sequence
+            if n < 2 then return RUNE_ERROR, 1
+
+            val b1: byte = p[1]
+
+            if (b1 & 0xC0) != 0x80 then return RUNE_ERROR, 1
+
+            val r: char = (char(b0 & 0x1F) << 6) | char(b1 & 0x3F)
+
+            return r, 2
+
+        if b0 < 0xF0
+            // 3-byte sequence
+            if n < 3 then return RUNE_ERROR, 1
+
+            val b1: byte = p[1]
+            val b2: byte = p[2]
+
+            if (b1 & 0xC0) != 0x80 then return RUNE_ERROR, 1
+            if (b2 & 0xC0) != 0x80 then return RUNE_ERROR, 1
+
+            val r: char = (char(b0 & 0x0F) << 12) | (char(b1 & 0x3F) << 6) | char(b2 & 0x3F)
+
+            if r < 0x800 then return RUNE_ERROR, 1
+            if r >= 0xD800 && r < 0xE000 then return RUNE_ERROR, 1
+
+            return r, 3
+
+        if b0 < 0xF5
+            // 4-byte sequence
+            if n < 4 then return RUNE_ERROR, 1
+
+            val b1: byte = p[1]
+            val b2: byte = p[2]
+            val b3: byte = p[3]
+
+            if (b1 & 0xC0) != 0x80 then return RUNE_ERROR, 1
+            if (b2 & 0xC0) != 0x80 then return RUNE_ERROR, 1
+            if (b3 & 0xC0) != 0x80 then return RUNE_ERROR, 1
+
+            val r: char = (char(b0 & 0x07) << 18) | (char(b1 & 0x3F) << 12) | (char(b2 & 0x3F) << 6) | char(b3 & 0x3F)
+
+            if r < 0x10000 then return RUNE_ERROR, 1
+            if r > MAX_RUNE then return RUNE_ERROR, 1
+
+            return r, 4
+
+        RUNE_ERROR, 1
+
+
+rune_count
+----------
+
+`rune_count(p)` returns the number of UTF-8 codepoints in `p`.
+Each invalid byte sequence contributes one to the count, since
+it decodes to a single `RUNE_ERROR`.
+
+    rune_count(p: []byte) -> int
+        val n = len(p)
+
+        var i = 0
+        var count = 0
+
+        while i < n
+            var b: byte = p[i]
+            var size: int = 1
+
+            // Inlined size lookup for speed — avoids full decode
+            // when the input is known-valid. Unchecked: invalid
+            // sequences still count correctly because decode_rune
+            // returns 1 in those cases.
+            if b < 0x80 then size = 1
+            else if b < 0xC2 then size = 1
+            else if b < 0xE0 then size = 2
+            else if b < 0xF0 then size = 3
+            else if b < 0xF5 then size = 4
+            else size = 1
+
+            if i + size > n then size = 1
+
+            i += size
+            count++
+
+        count
+
+
+valid
+-----
+
+`valid(p)` returns `true` iff `p` is entirely well-formed
+UTF-8. Returns `true` for the empty slice.
+
+    valid(p: []byte) -> bool
+        val n = len(p)
+
+        var i = 0
+
+        while i < n
+            var size: int = 0
+            var _r: char = 0
+
+            _r, size = decode_rune(p[i:])
+
+            if _r == RUNE_ERROR && size == 1
+                // Could be genuinely a U+FFFD in the input, or an
+                // invalid sequence. Distinguish by checking if the
+                // actual bytes encode U+FFFD (EF BF BD).
+                if i + 3 <= n && p[i] == 0xEF && p[i+1] == 0xBF && p[i+2] == 0xBD
+                    size = 3
+                else
+                    return false
+
+            i += size
+
+        true
+
+
+Design notes
+------------
+
+**Why (`rune`, `int`) returns.** Decoding needs to produce both
+the value and the byte width. Named structs would be clearer
+but heavier; Sysl's tuple return keeps call sites compact and
+matches Go's idiom.
+
+**Why `rune_count` inlines the size lookup.** Calling
+`decode_rune` for every rune would double the per-codepoint
+work for the common case of valid input. The inline classifier
+is faster and correct: it produces the same total as
+`decode_rune` would, because invalid leads in Go's model
+consume exactly one byte (`size = 1`) — and the classifier
+falls through to that default for any ambiguous byte.
+
+**`valid` vs `decode_rune` ambiguity.** `decode_rune` returns
+`(RUNE_ERROR, 1)` for both an invalid sequence and a valid
+three-byte encoding of U+FFFD itself. `valid` disambiguates
+by peeking at the raw bytes: a real U+FFFD is `EF BF BD`.
+Without this check, `valid` would incorrectly report strings
+containing the literal replacement character as invalid.
+
+**No streaming decoder.** A future iterator protocol will add
+`runes(s)` to `std.strings`, but the primitives here are all
+index-and-slice based. This module knows nothing about strings
+as a type — just byte slices.

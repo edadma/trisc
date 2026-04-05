@@ -1,0 +1,154 @@
+std.debug — Assertions, panics, and fatal error reporting
+===========================================================
+
+The `std.debug` module provides the primitives used by all other
+standard-library code to signal violated invariants, unreachable
+code paths, and unfinished work. It is deliberately the lowest
+layer of the standard library: it depends on nothing except the
+runtime's trap mechanism.
+
+All fatal paths here terminate the process (or the system, in
+kernel contexts) via **trap 1**. Trap 1 is reserved throughout
+the TRISC ecosystem as the *panic/fatal* trap. Its exact
+runtime behavior is defined outside this module — the runtime
+decides whether to print, log, halt, or reboot — but once trap 1
+is taken, control never returns to the caller.
+
+Contract summary:
+
+- `panic(msg)` — report and terminate, never returns.
+- `assert(cond, msg)` — panic if `cond` is false, otherwise no-op.
+- `unreachable(msg)` — panic; marks code paths the programmer
+  believes cannot be executed.
+- `todo(msg)` — panic; marks code paths not yet implemented.
+
+These four entry points are the only supported way to trigger
+trap 1 from Sysl code.
+
+
+Runtime interface
+-----------------
+
+`std.debug` relies on two primitives provided by the runtime:
+
+- `__debug_write(msg: str)` — write a diagnostic message to the
+  panic/console sink. MAY be unbuffered and MAY be a no-op in
+  profiles that do not have a console (e.g. freestanding with
+  no UART). This function MUST NOT fail and MUST NOT itself panic.
+- `__debug_trap()` — issue trap 1. Never returns.
+
+Both symbols are supplied by the platform runtime (slix, TOS,
+or the hosted test harness). They are `extern` here; no Sysl
+implementation exists in this module.
+
+
+    module std.debug
+
+    extern __debug_write(msg: str)
+    extern __debug_trap()
+
+
+panic
+-----
+
+`panic(msg)` reports `msg` to the debug sink and issues trap 1.
+It never returns.
+
+It is the single point through which all other `std.debug`
+entry points funnel, and the only place in the standard library
+that speaks directly to `__debug_trap`.
+
+    panic(msg: str)
+        __debug_write("panic: ")
+        __debug_write(msg)
+        __debug_write("\n")
+        __debug_trap()
+
+
+assert
+------
+
+`assert(cond, msg)` is a no-op when `cond` is true, and panics
+with `msg` when `cond` is false. The message should describe
+the invariant that was violated, not the condition that was
+checked. Prefer:
+
+> "buffer index out of range"
+
+over:
+
+> "i >= 0 && i < len"
+
+Assertions are not stripped in any build profile. Sysl has no
+release/debug distinction for assertions: if you do not want
+the check at runtime, do not write it. This is a deliberate
+choice — silently-disappearing checks are a common source of
+bugs.
+
+    assert(cond: bool, msg: str)
+        if not cond then
+            panic(msg)
+
+
+unreachable
+-----------
+
+`unreachable(msg)` panics unconditionally. It marks code paths
+the programmer asserts cannot execute — typically the default
+arm of an exhaustive `match`, or the fall-through after a
+non-returning call. The message should explain *why* the
+programmer believes the path is unreachable.
+
+    unreachable(msg: str)
+        __debug_write("unreachable: ")
+        __debug_write(msg)
+        __debug_write("\n")
+        __debug_trap()
+
+
+todo
+----
+
+`todo(msg)` panics unconditionally. It marks code paths that
+have not yet been implemented, so that partial code compiles
+and links but fails loudly at runtime if exercised. The message
+should describe what needs to be done.
+
+`todo` is distinct from `unreachable` so that grep and tooling
+can distinguish "not implemented yet" from "cannot happen".
+
+    todo(msg: str)
+        __debug_write("todo: ")
+        __debug_write(msg)
+        __debug_write("\n")
+        __debug_trap()
+
+
+Design notes
+------------
+
+**No source location capture yet.** Rust's `panic!`, `assert!`,
+`unreachable!`, and `todo!` macros capture `file!()`/`line!()`
+automatically. Sysl has no macro system, so location capture
+would require dedicated compiler support (an intrinsic that
+inserts a `SourceLoc` argument at the call site). This is
+deferred; when added, it will be a non-breaking change — the
+compiler will inject an extra argument that defaults to the
+caller's location.
+
+**No formatted messages.** These functions take a plain `str`,
+not a format string. Formatting would require `std.builder` and
+`std.strconv`, which depend on `std.debug` transitively through
+the other `std` modules. Users who need a formatted panic
+message should build the string themselves with `StrBuilder`
+and pass the result to `panic`. This keeps `std.debug`
+dependency-free.
+
+**No recovery.** There is no `catch_panic` or unwinding. Trap 1
+is terminal. Code that needs to fail recoverably should return
+a `Result`, not panic.
+
+**Kernel and userspace share this module.** The runtime
+decides what trap 1 does — a hosted test harness may print to
+stderr and `exit(1)`; slix may kill the current process; TOS
+may halt the CPU. `std.debug` does not care.
