@@ -210,7 +210,7 @@ class SyslCodegenMathHwTests extends SyslCodegenHelpers {
   "exp2 3" in {
     compileMultiAndRun(mathSources(
       """import posix.math.*
-        |main() -> int = int(exp2(3.0))
+        |main() -> int = int(round(exp2(3.0)))
         |""".stripMargin)) shouldBe 8
   }
 

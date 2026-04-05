@@ -74,7 +74,8 @@ copysign(x: double, y: double) -> double
 
 /* Return x raised to the power y. */
 fpow(x: double, y: double) -> double
-    asm("ldd r2, r5, 24")
+    asm("addi r2, r5, 24")
+    asm("ldd r2, r2, r0")
     asm("fpow r1, r2")
 
 /* Return the sine of x (radians). */
@@ -97,7 +98,8 @@ atan(x: double) -> double = asm("fatan r1, r1")
 
 /* Return the arc tangent of y/x, using signs to determine quadrant. Result in [-pi, pi]. */
 atan2(y: double, x: double) -> double
-    asm("ldd r2, r5, 24")
+    asm("addi r2, r5, 24")
+    asm("ldd r2, r2, r0")
     asm("fatan2 r1, r2")
 
 /* Return e raised to the power x. */
