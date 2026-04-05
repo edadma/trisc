@@ -33,6 +33,16 @@ class SyslAnalyzer:
   // Reverse map: mangled struct name -> (template name, concrete type args) for unification at call sites
   private val structToTemplate = new mutable.LinkedHashMap[String, (String, List[SyslType])]
 
+  // Operator desugaring: operator → (trait name, method name). Requires user to define
+  // the traits and provide impls for their types.
+  private val operatorToTrait: Map[String, (String, String)] = Map(
+    "<"  -> ("Ord", "lt"),  "<=" -> ("Ord", "le"),
+    ">"  -> ("Ord", "gt"),  ">=" -> ("Ord", "ge"),
+    "==" -> ("Eq",  "eq"),  "!=" -> ("Eq",  "ne"),
+    "+"  -> ("Add", "add"), "-"  -> ("Sub", "sub"),
+    "*"  -> ("Mul", "mul"), "/"  -> ("Div", "div"),
+  )
+
   // Trait / impl support
   private case class TraitInfo(name: String, typeParam: String, methods: List[TraitMethodAST])
   private case class ImplMethodInfo(mangled: String, paramTypes: List[(String, SyslType)], retType: SyslType, body: FunBodyAST, isSynthesized: Boolean)
@@ -460,6 +470,27 @@ class SyslAnalyzer:
 
   // Instantiate a generic function with inferred type arguments, returning the mangled name
   // and FunInfo of the instantiated function. Reuses cached instantiations.
+  // If an operator has a user-defined struct/enum operand, desugar to the corresponding trait call.
+  // Returns None if no desugaring applies (use built-in dispatch).
+  private def tryOperatorDispatch(op: String, tLeft: TExpr, tRight: TExpr): Option[TExpr] =
+    operatorToTrait.get(op) match
+      case None => None
+      case Some((traitName, methodName)) =>
+        val operandType = tLeft.typ
+        operandType match
+          case _: SyslType.StructType | _: SyslType.EnumType =>
+            if !traits.contains(traitName) then
+              throw AnalysisError(s"operator '$op' on $operandType requires trait '$traitName' but it is not defined")
+            impls.get((traitName, operandType)) match
+              case Some(methodMap) =>
+                val mangled = methodMap(methodName)
+                val funInfo = functions(mangled)
+                val checkedArgs = checkArgs(mangled, funInfo.params, List(tLeft, tRight))
+                Some(TCall(mangled, checkedArgs, funInfo.returnType))
+              case None =>
+                throw AnalysisError(s"no impl of '$traitName' for $operandType: operator '$op' not defined")
+          case _ => None
+
   // Instantiate a generic struct with concrete type arguments, returning its StructType
   private def instantiateGenericStruct(name: String, typeArgs: List[SyslType]): SyslType.StructType =
     val cacheKey = (name, typeArgs)
@@ -1041,6 +1072,9 @@ class SyslAnalyzer:
         // Coerce integer literal signedness to match the other operand (preserve width)
         val tLeft = if tRight0.typ.isIntegral then coerceSignedness(tLeft0, tRight0.typ) else tLeft0
         val tRight = if tLeft.typ.isIntegral then coerceSignedness(tRight0, tLeft.typ) else tRight0
+        // Try to desugar operator to a trait call when operands are user-defined types
+        val dispatchedOpt = tryOperatorDispatch(op, tLeft, tRight)
+        if dispatchedOpt.isDefined then return dispatchedOpt.get
         val resultType = op match
           case "+" if tLeft.typ == StringType && tRight.typ == StringType => StringType // string concatenation
           case "+" | "-" if tLeft.typ == StringType && tRight.typ.isNumeric =>
