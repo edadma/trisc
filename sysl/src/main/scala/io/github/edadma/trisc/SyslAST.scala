@@ -26,7 +26,7 @@ case class ModuleDeclAST(path: List[String]) extends DeclAST
 case class ImportDeclAST(modulePath: String, selectors: List[ImportSelector]) extends DeclAST
 case class ExternFuncDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST]) extends DeclAST
 case class ExternVarDeclAST(name: String, typ: TypeAST) extends DeclAST
-case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST], body: FunBodyAST, isPrivate: Boolean = false, typeParams: List[String] = Nil) extends DeclAST
+case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST], body: FunBodyAST, isPrivate: Boolean = false, typeParams: List[String] = Nil, typeBounds: Map[String, List[String]] = Map.empty) extends DeclAST
 case class VarDeclAST(name: String, typ: Option[TypeAST], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true) extends DeclAST
 case class StructDeclAST(name: String, fields: List[(String, TypeAST)], typeParams: List[String] = Nil) extends DeclAST
 case class EnumDeclAST(name: String, members: List[(String, Option[Long])]) extends DeclAST

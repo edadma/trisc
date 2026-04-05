@@ -140,7 +140,7 @@ class SyslAnalyzer:
             if structTypes.contains(name) || genericStructs.contains(name) then throw AnalysisError(s"duplicate struct: '$name'", decl)
             val resolvedFields = fields.map((n, t) => (n, resolveType(t)))
             structTypes(name) = SyslType.StructType(name, resolvedFields)
-        case fd @ FunDeclAST(name, params, returnType, _, _, typeParams) =>
+        case fd @ FunDeclAST(name, params, returnType, _, _, typeParams, _) =>
           if typeParams.nonEmpty then
             // Generic function: store as template, don't resolve types yet
             if genericTemplates.contains(name) || functions.contains(name) then
@@ -289,7 +289,7 @@ class SyslAnalyzer:
       case TypeAliasDeclAST(name, target) =>
         TTypeAliasDecl(name, resolveType(target))
 
-      case FunDeclAST(name, params, _, body, isPrivate, _) =>
+      case FunDeclAST(name, params, _, body, isPrivate, _, _) =>
         scopeStack = new mutable.ArrayBuffer
         pushScope()
         val funInfo = functions(name)
@@ -582,6 +582,15 @@ class SyslAnalyzer:
     for tp <- typeParams if !env.contains(tp) do
       throw AnalysisError(s"cannot infer type parameter '$tp' for generic function '$name'")
     val inferredArgs = typeParams.map(env(_))
+    // Check trait bounds
+    for tp <- typeParams do
+      val bounds = template.typeBounds.getOrElse(tp, Nil)
+      val concreteType = env(tp)
+      for traitName <- bounds do
+        if !traits.contains(traitName) then
+          throw AnalysisError(s"bound '$traitName' on type parameter '$tp' of '$name' refers to unknown trait")
+        if !impls.contains((traitName, concreteType)) then
+          throw AnalysisError(s"type $concreteType does not satisfy bound '$traitName' for type parameter '$tp' in call to '$name'")
     val cacheKey = (name, inferredArgs)
     instantiations.get(cacheKey) match
       case Some(mangled) => (mangled, functions(mangled))

@@ -230,7 +230,8 @@ getAnswer() -> int = 42
 
 ### Generic Functions
 
-Functions may declare type parameters in square brackets after the name. The
+Functions may declare type parameters in square brackets after the name, with
+optional trait bounds using `:` and `+`. The
 compiler monomorphizes each instantiation — one specialized copy per unique set
 of type arguments, just like Go or C++. Type arguments are inferred from the
 call-site argument types.
@@ -260,6 +261,19 @@ main() -> int
     max(1.5, 2.5)       // T inferred as f64
     id(42)              // T inferred as int
 ```
+
+**Trait bounds.** A type parameter may be constrained to types that implement
+one or more traits:
+
+```sysl
+maxOf[T: Ord](a: T, b: T) -> T       // T must implement Ord
+bothCheck[T: Ord + Eq](a: T, b: T)   // T must implement Ord AND Eq
+```
+
+Bounds are checked at each call site when the concrete type arguments are known.
+An unsatisfied bound produces a clear error naming the missing trait and the
+type parameter. Inside the generic body, operators like `a > b` and `a == b`
+route through the bounded trait's methods.
 
 **Rules:**
 - Type parameters may appear in parameter types, return type, and local variable
