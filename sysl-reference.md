@@ -585,6 +585,7 @@ extern var errno: int
 0xFF                  // hex literal
 100u32                // typed literal suffix
 3.14                  // double (f64)
+1.5e10                // scientific notation
 'A'                   // char literal (u32, value 65)
 '\n'                  // escape char
 "hello"               // string literal
@@ -594,6 +595,33 @@ true, false           // bool
 0xDEAD_BEEF           // grouping for readability
 0xFF_00_FF_00u32      // combined with type suffix
 3.141_592             // underscores in fractional part
+```
+
+**Type suffixes** on integer literals force a specific type:
+
+```sysl
+42i8                  // i8
+42i16                 // i16
+42i32                 // i32 (same as plain `42`)
+42i64                 // i64
+200u8                 // u8
+1000u16               // u16
+100u32                // u32
+0xFFu64               // u64
+```
+
+Float literals (`3.14`, `1e5`) are always `f64`. There is no `f32` type.
+
+**Escape sequences** in string and char literals:
+
+```
+\n    newline
+\t    tab
+\r    carriage return
+\0    null (0x00)
+\\    literal backslash
+\'    literal single quote
+\"    literal double quote
 ```
 
 ### Operators (by precedence, lowest to highest)
@@ -1102,9 +1130,21 @@ The codegen emits `trap 1` for runtime errors. On the OS, the trap handler termi
 #if !BARE_METAL
     import posix.stdlib.*
 #endif
+
+#if TARGET == "trisc"
+    extern halt()
+#endif
+
+#if VERSION != "1.0"
+    import new_api.*
+#endif
 ```
 
-Conditions support: symbols, negation (`!`), equality (`==`), inequality (`!=`), numeric values.
+**Condition forms:**
+- `#if SYMBOL` — true if the symbol is defined and not `"false"`, `"0"`, or `""`
+- `#if !SYMBOL` — negation
+- `#if SYMBOL == "value"` — string equality
+- `#if SYMBOL != "value"` — string inequality
 
 ---
 
