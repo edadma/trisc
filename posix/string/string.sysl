@@ -1,5 +1,7 @@
 module posix.string
 
+import posix.ctype.{tolower}
+
 /*
  * string.sysl — String and memory operations (<string.h>)
  *
@@ -331,3 +333,45 @@ strsep(stringp: **byte, delim: *byte) -> *byte
 
     *stringp = *byte(0)
     s
+
+/* Case-insensitive comparison of two strings. Returns <0, 0, or >0. */
+strcasecmp(a: *byte, b: *byte) -> int
+    var pa = a
+    var pb = b
+
+    while *pa != 0 && *pb != 0
+        val d = tolower(int(*pa)) - tolower(int(*pb))
+
+        if d != 0 then return d
+
+        pa++
+        pb++
+
+    tolower(int(*pa)) - tolower(int(*pb))
+
+/* Case-insensitive comparison of at most n bytes. */
+strncasecmp(a: *byte, b: *byte, n: int) -> int
+    for var i = 0; i < n; i++
+        if a[i] == 0 && b[i] == 0 then return 0
+
+        val d = tolower(int(a[i])) - tolower(int(b[i]))
+
+        if d != 0 then return d
+
+        if a[i] == 0 || b[i] == 0 then return d
+
+    0
+
+/* Case-insensitive substring search. Returns pointer to match or null. */
+strcasestr(haystack: *byte, needle: *byte) -> *byte
+    if *needle == 0 then return haystack
+
+    val nlen = strlen(needle)
+    var p = haystack
+
+    while *p != 0
+        if strncasecmp(p, needle, nlen) == 0 then return p
+
+        p++
+
+    *byte(0)
