@@ -13,6 +13,8 @@ class SyslAnalyzer:
   private val functions = new mutable.LinkedHashMap[String, FunInfo]
   private val structTypes = new mutable.LinkedHashMap[String, SyslType.StructType]
   private val enumTypes = new mutable.LinkedHashMap[String, Map[String, Long]]  // enum name → (member name → value)
+  private val dataEnumTypes = new mutable.LinkedHashMap[String, SyslType.EnumType]  // data enum name → EnumType
+  private val variantToEnum = new mutable.LinkedHashMap[String, (SyslType.EnumType, Int)]  // variant name → (enum type, variant index)
   private val typeAliases = new mutable.LinkedHashMap[String, TypeAST]  // alias name → target type AST
   private val methods = new mutable.LinkedHashMap[String, mutable.Set[String]]  // struct name → set of method names
   private val externalSymbols = new mutable.LinkedHashSet[String]
@@ -120,6 +122,17 @@ class SyslAnalyzer:
             (memberName, value)
           }
           enumTypes(name) = resolved.toMap
+        case DataEnumDeclAST(name, variants) =>
+          if dataEnumTypes.contains(name) || enumTypes.contains(name) then
+            throw AnalysisError(s"duplicate enum: '$name'", decl)
+          val resolvedVariants = variants.map { case EnumVariantAST(vname, fields) =>
+            val resolvedFields = fields.map((fname, ftype) => (fname, resolveType(ftype)))
+            (vname, resolvedFields)
+          }
+          val et: SyslType.EnumType = SyslType.EnumType(name, resolvedVariants)
+          dataEnumTypes(name) = et
+          for ((vname, _), idx) <- resolvedVariants.zipWithIndex do
+            variantToEnum(vname) = (et, idx)
         case TypeAliasDeclAST(name, target) =>
           if typeAliases.contains(name) then throw AnalysisError(s"duplicate type alias: '$name'", decl)
           typeAliases(name) = target
@@ -154,6 +167,9 @@ class SyslAnalyzer:
       case EnumDeclAST(name, _) =>
         val members = enumTypes(name).toList.sortBy(_._2)
         TEnumDecl(name, members)
+
+      case DataEnumDeclAST(name, _) =>
+        TDataEnumDecl(name, dataEnumTypes(name))
 
       case TypeAliasDeclAST(name, target) =>
         TTypeAliasDecl(name, resolveType(target))
@@ -198,6 +214,7 @@ class SyslAnalyzer:
       case "string" => StringType
       case name if typeAliases.contains(name) => resolveType(typeAliases(name))
       case name if structTypes.contains(name) => structTypes(name)
+      case name if dataEnumTypes.contains(name) => dataEnumTypes(name)
       case other => throw AnalysisError(s"unknown type: '$other'")
     case PtrTypeAST(inner) => PtrType(resolveType(inner))
     case ArrayTypeAST(size, elem) => ArrayType(resolveType(elem), size)
@@ -440,6 +457,12 @@ class SyslAnalyzer:
   private def analyzePattern(pat: MatchPatternAST, scrutineeType: SyslType): TMatchPattern =
     pat match
       case WildcardPatternAST => TWildcard
+      case ValuePatternAST(VarRefAST(name)) if variantToEnum.contains(name) =>
+        // No-arg variant pattern (e.g., `Empty` in a match arm)
+        val (et, variantIdx) = variantToEnum(name)
+        val (_, variantFields) = et.variants(variantIdx)
+        if variantFields.nonEmpty then throw AnalysisError(s"variant '$name' requires ${variantFields.length} argument(s) in pattern")
+        TVariantPattern(et, variantIdx, Nil, Nil)
       case ValuePatternAST(expr) =>
         val tv = analyzeExpr(expr)
         val coerced = coerceLiteral(tv, scrutineeType)
@@ -451,23 +474,41 @@ class SyslAnalyzer:
         val tHigh = coerceLiteral(analyzeExpr(high), scrutineeType)
         TRangePattern(tLow, tHigh)
       case DestructurePatternAST(name, fields) =>
-        val st = structTypes.getOrElse(name, throw AnalysisError(s"unknown struct '$name' in match pattern"))
-        if fields.length != st.fields.length then
-          throw AnalysisError(s"struct '$name' has ${st.fields.length} fields, pattern has ${fields.length}")
-        val bindings = fields.zip(st.fields).map { case (fieldPat, (fieldName, fieldType)) =>
-          fieldPat match
-            case WildcardPatternAST => None
-            case ValuePatternAST(VarRefAST(bindName)) =>
-              // In destructure context, bare names are bindings
-              if scopeStack != null then
-                currentScope(bindName) = SymInfo(bindName, fieldType, false) // val binding
-              Some(bindName)
-            case ValuePatternAST(expr) =>
-              // Literal value — not a binding
-              None
-            case _ => throw AnalysisError(s"unsupported pattern in struct destructure")
-        }
-        TDestructurePattern(st, bindings, st.fields.map(_._2))
+        // Check if name is an enum variant first, then struct
+        if variantToEnum.contains(name) then
+          val (et, variantIdx) = variantToEnum(name)
+          val (_, variantFields) = et.variants(variantIdx)
+          if fields.length != variantFields.length then
+            throw AnalysisError(s"variant '$name' has ${variantFields.length} fields, pattern has ${fields.length}")
+          val bindings = fields.zip(variantFields).map { case (fieldPat, (fieldName, fieldType)) =>
+            fieldPat match
+              case WildcardPatternAST => None
+              case ValuePatternAST(VarRefAST(bindName)) =>
+                if scopeStack != null then
+                  currentScope(bindName) = SymInfo(bindName, fieldType, false)
+                Some(bindName)
+              case ValuePatternAST(expr) => None
+              case _ => throw AnalysisError(s"unsupported pattern in variant destructure")
+          }
+          TVariantPattern(et, variantIdx, bindings, variantFields.map(_._2))
+        else
+          val st = structTypes.getOrElse(name, throw AnalysisError(s"unknown struct or variant '$name' in match pattern"))
+          if fields.length != st.fields.length then
+            throw AnalysisError(s"struct '$name' has ${st.fields.length} fields, pattern has ${fields.length}")
+          val bindings = fields.zip(st.fields).map { case (fieldPat, (fieldName, fieldType)) =>
+            fieldPat match
+              case WildcardPatternAST => None
+              case ValuePatternAST(VarRefAST(bindName)) =>
+                // In destructure context, bare names are bindings
+                if scopeStack != null then
+                  currentScope(bindName) = SymInfo(bindName, fieldType, false) // val binding
+                Some(bindName)
+              case ValuePatternAST(expr) =>
+                // Literal value — not a binding
+                None
+              case _ => throw AnalysisError(s"unsupported pattern in struct destructure")
+          }
+          TDestructurePattern(st, bindings, st.fields.map(_._2))
 
   private def analyzeExpr(expr: ExpressionAST): TExpr =
     expr match
@@ -498,6 +539,9 @@ class SyslAnalyzer:
       case SizeofExprAST(VarRefAST(name)) if structTypes.contains(name) =>
         // sizeof(StructName) — treat as type sizeof
         TSizeof(structTypes(name).sizeOf, I32)
+
+      case SizeofExprAST(VarRefAST(name)) if dataEnumTypes.contains(name) =>
+        TSizeof(dataEnumTypes(name).sizeOf, I32)
 
       case SizeofExprAST(inner) =>
         val tInner = analyzeExpr(inner)
@@ -590,8 +634,18 @@ class SyslAnalyzer:
           val f = builtinFunctions(name)
           TFuncRef(name, FuncType(f.params.map(_._2), f.returnType))
         else
-          val sym = lookup(name)
-          TVarRef(name, sym.typ)
+          // Check for no-arg enum variant before falling through to variable lookup
+          tryLookup(name) match
+            case Some(sym) => TVarRef(name, sym.typ)
+            case None =>
+              if variantToEnum.contains(name) then
+                val (et, idx) = variantToEnum(name)
+                val (_, fields) = et.variants(idx)
+                if fields.nonEmpty then throw AnalysisError(s"variant '$name' requires ${fields.length} argument(s)")
+                TEnumConstruct(et, idx, Nil)
+              else
+                val sym = lookup(name)  // will throw proper error
+                TVarRef(name, sym.typ)
 
       case AddrOfAST(name) =>
         val sym = lookup(name)
@@ -653,6 +707,12 @@ class SyslAnalyzer:
         val members = enumTypes(enumName)
         if !members.contains(member) then throw AnalysisError(s"enum $enumName has no member '$member'")
         TIntLit(members(member), I32)
+
+      case FieldAccessAST(VarRefAST(enumName), variantName) if dataEnumTypes.contains(enumName) =>
+        val et = dataEnumTypes(enumName)
+        val idx = et.variants.indexWhere(_._1 == variantName)
+        if idx < 0 then throw AnalysisError(s"enum $enumName has no variant '$variantName'")
+        TEnumConstruct(et, idx, Nil)
 
       case FieldAccessAST(obj, field) =>
         val tObj = analyzeExpr(obj)
@@ -874,6 +934,19 @@ class SyslAnalyzer:
             coerced
           }
           TStructConstruct(st, checkedArgs)
+        else if variantToEnum.contains(name) then
+          // Enum variant constructor: Circle(5)
+          val (et, variantIdx) = variantToEnum(name)
+          val (_, variantFields) = et.variants(variantIdx)
+          if tArgs.length != variantFields.length then
+            throw AnalysisError(s"variant '$name' has ${variantFields.length} field(s), got ${tArgs.length} argument(s)")
+          val checkedArgs = tArgs.zip(variantFields).map { case (arg, (fieldName, fieldType)) =>
+            val coerced = coerceLiteral(arg, fieldType)
+            if !compatible(coerced.typ, fieldType) then
+              throw AnalysisError(s"variant '$name' field '$fieldName' expects $fieldType, got ${coerced.typ}")
+            coerced
+          }
+          TEnumConstruct(et, variantIdx, checkedArgs)
         else
           // Try as a variable of FuncType
           val sym = lookup(name)

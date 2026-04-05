@@ -37,6 +37,7 @@ enum Value:
   case SliceVal(cells: Array[Cell], offset: Int, length: Int, capacity: Int)
   case RefVal(cells: Array[Cell], refCount: java.util.concurrent.atomic.AtomicInteger, typeName: String = "")
   case RefSliceVal(cells: Array[Cell], length: Int, refCount: java.util.concurrent.atomic.AtomicInteger)
+  case EnumVal(tag: Int, fields: Array[Cell])
   case RefStringVal(bytes: Array[Byte], length: Int, refCount: java.util.concurrent.atomic.AtomicInteger)
 
 class Cell(var value: Value)
@@ -61,6 +62,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         v >= toLong(evalAny(low, env)) && v <= toLong(evalAny(high, env))
       case TDestructurePattern(_, bindings, _) =>
         true // struct destructure always matches (no value check, just binding)
+      case TVariantPattern(_, variantIndex, _, _) =>
+        value match
+          case EnumVal(tag, _) => tag == variantIndex
+          case _ => false
 
   private def bindPattern(pat: TMatchPattern, value: Value, env: Env): Unit =
     pat match
@@ -72,6 +77,12 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         for (binding, i) <- bindings.zipWithIndex do
           binding.foreach { name =>
             env(name) = new Cell(cells(off + i).value)
+          }
+      case TVariantPattern(_, _, bindings, _) =>
+        val EnumVal(_, fields) = value: @unchecked
+        for (binding, i) <- bindings.zipWithIndex do
+          binding.foreach { name =>
+            env(name) = new Cell(fields(i).value)
           }
       case _ => // nothing to bind
 
@@ -86,6 +97,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case FuncVal(_)         => throw RuntimeError("expected integer, got function")
     case StrVal(_)          => throw RuntimeError("expected integer, got string")
     case SliceVal(_, _, _, _) => throw RuntimeError("expected integer, got slice")
+    case EnumVal(_, _) => throw RuntimeError("expected integer, got enum value")
 
   private def toDouble(v: Value): Double = v match
     case FloatVal(d)  => d
@@ -209,6 +221,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TExternVarDecl => // not handled in interpreter
         case _: TStructDecl => // type only, no runtime effect
         case _: TEnumDecl => // type only, no runtime effect
+        case _: TDataEnumDecl => // type only, no runtime effect
         case _: TTypeAliasDecl => // type only, no runtime effect
         case f: TFunDecl => functions(f.name) = f
         case TVarDecl(name, _, init, _) =>
@@ -912,6 +925,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           new Cell(value)
         }.toArray
         ArrVal(cells, 0)
+
+      case TEnumConstruct(_, variantIndex, args) =>
+        val cells = args.map(arg => new Cell(evalAny(arg, env))).toArray
+        EnumVal(variantIndex, cells)
 
       case TFieldAccess(obj, fieldIndex, _) =>
         val ArrVal(cells, off) = evalAny(obj, env): @unchecked
