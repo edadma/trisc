@@ -47,6 +47,16 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
   val symbolSegment = new mutable.LinkedHashMap[String, String]
   val relaxationExports = new mutable.LinkedHashSet[String]
 
+  // Constant pool: 64-bit value (bits) → auto-generated label name
+  val constPool = new mutable.LinkedHashMap[Long, String]
+  var constPoolCounter = 0
+
+  def addConstant(bits: Long): String =
+    constPool.getOrElseUpdate(bits, {
+      constPoolCounter += 1
+      s".const_$constPoolCounter"
+    })
+
   def addSymbol(sym: Positional, name: String): Unit =
     if symbols contains name then problem(sym, s"duplicate symbol: '$name'")
     symbols(name) = LabelSymbol(name, segment.size, sym)
@@ -202,6 +212,8 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           segment.size += short
         case "movi" =>
           segment.size += addresses * 2
+        case "ldc" =>
+          segment.size += addresses * 2 + 2  // movi + ldd
         case _ =>
           segment.size += 2
   }
@@ -838,6 +850,18 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
               addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> ((imm >> 16) & 0xff))
               addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> ((imm >> 8) & 0xff))
               addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff))
+    case InstructionLineAST("ldc", Seq(o1, o2)) =>
+      val reg =
+        fold(o1) match
+          case RegisterExprAST(reg) => reg
+          case _                    => problem(o1, "expected register as first operand")
+      val bits: Long = fold(o2, absolute = true, immediate = true) match
+        case DoubleExprAST(d) => java.lang.Double.doubleToLongBits(d)
+        case LongExprAST(n)  => n
+        case _                => problem(o2, "expected numeric constant")
+      val label = addConstant(bits)
+      emitMoviReloc(reg, label)                                        // movi rN, .const_N
+      addInstruction(3 -> 0, 3 -> reg, 3 -> reg, 3 -> 0, 4 -> 6)     // ldd rN, rN, r0
     case InstructionLineAST("nop", Nil) => addInstruction(3 -> 5, 3 -> 0, 3 -> 0, 7 -> 0) // addi r0, r0, 0
     case InstructionLineAST("ret", Nil) =>
       addInstruction(3 -> 6, 3 -> 0, 3 -> 7, 2 -> 0, 5 -> 0) // jalr r0, r7
@@ -908,5 +932,14 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
   for name <- declaredExterns do
     if !referencedExterns.contains(name) then
       println(s"Warning: extern '$name' declared but never referenced")
+
+  // Emit constant pool segment if any ldc instructions were used
+  if constPool.nonEmpty then
+    builder.segment("const", 0)
+    autoAlign(8)
+    for (bits, label) <- constPool do
+      builder.addSymbol(label, builder.length, SymbolType.Data)
+      for shift <- (56 to 0 by -8) do
+        builder += ((bits >> shift) & 0xff).toByte
 
   builder.tof

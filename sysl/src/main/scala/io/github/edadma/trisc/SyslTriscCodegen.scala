@@ -2365,8 +2365,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  mov r1, r7")
 
       case TFloatLit(d, _) =>
-        val bits = java.lang.Double.doubleToRawLongBits(d)
-        emit(s"  movi r1, $bits  # float $d")
+        emit(s"  ldc r1, $d")
 
       case TSizeof(size, _) =>
         emitLoadImm(1, size.toInt)
