@@ -46,10 +46,12 @@ isblank(c: int) -> int = int(c == int(' ') || c == int('\t'))
 
 /* Convert uppercase letter to lowercase. */
 tolower(c: int) -> int
-    if int('A') <= c <= int('Z') then c + 32
-    else c
+    c match
+        int('A')..int('Z') -> c + 32
+        _ -> c
 
 /* Convert lowercase letter to uppercase. */
 toupper(c: int) -> int
-    if int('a') <= c <= int('z') then c - 32
-    else c
+    c match
+        int('a')..int('z') -> c - 32
+        _ -> c
