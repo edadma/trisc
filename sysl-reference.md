@@ -646,6 +646,34 @@ s != t                    // structural inequality
 puts(s: *byte)            // can pass string directly
 ```
 
+### String Interpolation
+
+Prefix a string with `s` to enable interpolation. Use `$name` for variables and `${expr}` for expressions:
+
+```sysl
+x = 42
+s = s"value is $x"          // "value is 42"
+puts(s"${x + 1}")           // prints "43"
+name = "world"
+puts(s"hello $name")        // prints "hello world"
+puts(s"cost is $$5")        // prints "cost is $5" ($$ = literal $)
+```
+
+Plain strings (`"..."`) are never interpolated — `$` is just a regular character.
+
+Non-string expressions are automatically converted via `str()`. Only integer and boolean types are currently supported for interpolation.
+
+### `str()` Builtin
+
+Converts a value to its string representation:
+
+```sysl
+str(42)                   // "42"
+str(-5)                   // "-5"
+str(0)                    // "0"
+str("hello")              // "hello" (identity for strings)
+```
+
 ### String Construction from Bytes
 
 ```sysl
@@ -677,6 +705,7 @@ s = string(data[:5])      // string from []byte slice
 | `len` | `(x) -> int` | Length of string, array, slice, or `&[]T` |
 | `cap` | `(x) -> int` | Capacity of slice or `&[]T` |
 | `append` | `(s: []T, elem: T) -> []T` | Append to slice (Go semantics) |
+| `str` | `(x) -> string` | Convert int/bool to string representation |
 | `string` | `(ptr: *T, len: int) -> string` | Construct string from pointer + length |
 | `string` | `(s: []byte) -> string` | Construct string from byte slice |
 | `malloc` | `(size: i64) -> *i8` | Allocate heap memory |

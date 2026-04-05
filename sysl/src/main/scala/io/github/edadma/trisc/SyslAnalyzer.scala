@@ -518,7 +518,9 @@ class SyslAnalyzer:
       case CharLitAST(c) => TIntLit(c.toLong, U32)
       case BoolLitAST(b) => TBoolLit(b, BoolType)
       case StringLitAST(s) => TStringLit(s, StringType)
-      case StringLitExprAST(s) => TStringLit(s, StringType)
+      case StringLitExprAST(s) =>
+        if s.startsWith("s:") then analyzeInterpolatedString(s.substring(2))
+        else TStringLit(s, StringType)
       case TupleLitAST(elements) =>
         val tElems = elements.map(analyzeExpr)
         val tupleType = SyslType.tupleType(tElems.map(_.typ))
@@ -819,6 +821,14 @@ class SyslAnalyzer:
           case (from, to) => throw AnalysisError(s"cannot cast $from to $to")
         TCast(tInner, target)
 
+      case CallAST("str", args) =>
+        if args.size != 1 then throw AnalysisError("str() takes exactly 1 argument")
+        val tArg = analyzeExpr(args.head)
+        tArg.typ match
+          case StringType => tArg // identity — already a string
+          case t if t.isNumeric || t == BoolType || t == DoubleType => TStr(tArg)
+          case t => throw AnalysisError(s"str() not supported on $t")
+
       case CallAST("string", args) =>
         args.size match
           case 2 =>
@@ -989,3 +999,65 @@ class SyslAnalyzer:
           case Some(TExprStmt(e)) => e.typ
           case _ => VoidType
         TMatchExpr(tScrutinee, tArms, tDefault, resultType)
+
+  private def analyzeInterpolatedString(s: String): TExpr =
+    // Parse $name, ${expr}, $$ patterns in Scala-style interpolated string
+    val parts = mutable.ArrayBuffer[Either[String, String]]() // Left = literal, Right = expression text
+    val buf = new StringBuilder
+    var i = 0
+    while i < s.length do
+      if s(i) == '$' then
+        if i + 1 < s.length && s(i + 1) == '$' then
+          // $$ → literal $
+          buf += '$'
+          i += 2
+        else if i + 1 < s.length && s(i + 1) == '{' then
+          // ${expr}
+          if buf.nonEmpty then
+            parts += Left(buf.toString)
+            buf.clear()
+          i += 2 // skip ${
+          var depth = 1
+          while i < s.length && depth > 0 do
+            if s(i) == '{' then depth += 1
+            else if s(i) == '}' then depth -= 1
+            if depth > 0 then buf += s(i)
+            i += 1
+          if depth != 0 then throw AnalysisError("unterminated '${' in string interpolation")
+          parts += Right(buf.toString.trim)
+          buf.clear()
+        else if i + 1 < s.length && (s(i + 1).isLetter || s(i + 1) == '_') then
+          // $name — identifier chars
+          if buf.nonEmpty then
+            parts += Left(buf.toString)
+            buf.clear()
+          i += 1 // skip $
+          while i < s.length && (s(i).isLetterOrDigit || s(i) == '_') do
+            buf += s(i)
+            i += 1
+          parts += Right(buf.toString)
+          buf.clear()
+        else
+          // Lone $ at end or before non-identifier — literal
+          buf += '$'
+          i += 1
+      else
+        buf += s(i)
+        i += 1
+    if buf.nonEmpty then parts += Left(buf.toString)
+
+    // Build a chain of TBinary("+") on StringType
+    val parser = new SyslParser
+    val tExprs: List[TExpr] = parts.toList.map {
+      case Left(lit) => TStringLit(lit, SyslType.StringType)
+      case Right(exprText) =>
+        parser.parseExpression(exprText) match
+          case Right(ast) =>
+            val analyzed = analyzeExpr(ast)
+            analyzed.typ match
+              case SyslType.StringType => analyzed
+              case t if t.isNumeric || t == SyslType.BoolType || t == SyslType.DoubleType => TStr(analyzed)
+              case t => throw AnalysisError(s"cannot interpolate value of type $t into string")
+          case Left(err) => throw AnalysisError(s"parse error in string interpolation: $err")
+    }
+    tExprs.reduceLeft((l, r) => TBinary(l, "+", r, SyslType.StringType))
