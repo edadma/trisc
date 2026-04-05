@@ -1776,6 +1776,86 @@ class SyslTriscCodegen(addresses: Int = 4):
         }
         emit(s"$endLabel")
 
+      case TMatchExpr(scrutinee, arms, default, _) =>
+        // Evaluate scrutinee once, save on stack
+        genExpr(scrutinee)
+        emit("  pshd r1")
+        stackOffset -= 8
+        val scrutineeOffset = stackOffset
+        val endLabel = newLabel("match_end")
+        // Emit each arm
+        for arm <- arms do
+          val hitLabel = newLabel("match_hit")
+          val nextArm = newLabel("match_next")
+          // Check patterns — jump to hit if any matches
+          for pat <- arm.patterns do
+            pat match
+              case TWildcard =>
+                emit(s"  bra $hitLabel")
+              case TValuePattern(v) =>
+                genExpr(v)
+                emitAddImm(2, 5, scrutineeOffset)
+                emit("  ldd r2, r2, r0")
+                emit(s"  beq r1, r2, $hitLabel")
+              case TRangePattern(low, high) =>
+                val rangeCheck = newLabel("range_chk")
+                emitAddImm(1, 5, scrutineeOffset)
+                emit("  ldd r1, r1, r0")     // r1 = scrutinee
+                emit("  pshd r1")
+                genExpr(low)                  // r1 = low
+                emit("  popd r2")             // r2 = scrutinee
+                emit("  slt r3, r2, r1")      // scrutinee < low?
+                emit(s"  bne r3, r0, $rangeCheck") // out of range
+                emit("  pshd r2")
+                genExpr(high)                 // r1 = high
+                emit("  popd r2")             // r2 = scrutinee
+                emit("  slt r3, r1, r2")      // high < scrutinee?
+                emit(s"  beq r3, r0, $hitLabel") // hit if high >= scrutinee
+                emit(s"$rangeCheck")
+              case TDestructurePattern(_, _, _) =>
+                emit(s"  bra $hitLabel")      // destructure always matches
+          emit(s"  bra $nextArm")
+          emit(s"$hitLabel")
+          // Guard check
+          arm.guard.foreach { guard =>
+            genExpr(guard)
+            emit(s"  beq r1, r0, $nextArm")  // guard false → skip
+          }
+          enterScope()
+          // Bind destructure patterns
+          for pat <- arm.patterns do
+            pat match
+              case TDestructurePattern(st, bindings, fieldTypes) =>
+                for (binding, i) <- bindings.zipWithIndex do
+                  binding.foreach { name =>
+                    val off = fieldOffset(st, i)
+                    // Reload scrutinee address each time (allocLocal may move sp)
+                    emitAddImm(1, 5, scrutineeOffset)
+                    emit("  ldd r1, r1, r0")  // r1 = scrutinee address
+                    if off != 0 then emitAddImm(1, 1, off)
+                    emitLoad(1, 1, fieldTypes(i))
+                    val local = allocLocal(name, fieldTypes(i))
+                    emitAddImm(2, 5, local.offset)
+                    emitStore(1, 2, fieldTypes(i))
+                  }
+              case _ =>
+          for stmt <- arm.body do genStmt(stmt)
+          leaveScope()
+          emit(s"  bra $endLabel")
+          emit(s"$nextArm")
+        // Default arm
+        default match
+          case Some(stmts) =>
+            enterScope()
+            for stmt <- stmts do genStmt(stmt)
+            leaveScope()
+          case None =>
+            emit("  ldi r1, 0")
+        emit(s"$endLabel")
+        // Clean up scrutinee from stack
+        emitAddImm(7, 7, 8)
+        stackOffset += 8
+
       case TLen(inner, _) =>
         genExpr(inner)           // r1 = struct address (string or slice)
         inner.typ match

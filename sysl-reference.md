@@ -347,6 +347,44 @@ else
 // if-then (inline)
 if x > 0 then positive()
 
+// match (value matching, no fallthrough)
+x match
+    1 -> doA()
+    2, 3 -> doB()              // multiple values per arm
+    _ -> doDefault()           // wildcard (matches anything)
+    else -> doDefault()        // alternative to wildcard
+
+// match as expression
+y = x match
+    1 -> "one"
+    2, 3 -> "few"
+    else -> "many"
+
+// match with guards
+x match
+    _ if x > 10 -> "big"
+    _ if x > 0 -> "positive"
+    else -> "non-positive"
+
+// range matching (inclusive)
+x match
+    1..10 -> "small"
+    11..100 -> "medium"
+    else -> "large"
+
+// struct destructuring in match
+p match
+    Point(x, y) -> x + y      // binds x and y from fields
+    Point(_, y) -> y           // wildcard ignores field
+    Point(x, y) if x == 0 -> y  // guard with bindings
+
+// match with block bodies
+x match
+    1 ->
+        a = compute()
+        doSomething(a)
+    else -> fallback()
+
 // while
 while cond
     body
@@ -388,6 +426,14 @@ var q, r = divmod(17, 5)       // explicit mutable
 a = 10
 b = 20
 a, b = b, a                    // swap: RHS fully evaluated before assignment
+
+// Works on named structs too (not just tuples)
+p = Point(10, 20)
+x, y = p                      // x = p.x, y = p.y (field order)
+
+// And ref structs
+r = new Point(3, 4)
+a, b = r                      // a = 3, b = 4
 
 // Mixed declared/undeclared is an error
 a = 10

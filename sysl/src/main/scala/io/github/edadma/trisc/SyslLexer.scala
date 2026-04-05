@@ -13,7 +13,7 @@ class SyslLexical extends IndentationLexical(
   blockCommentEnd = "*/",
 ) {
   reserved ++= List(
-    "if", "then", "elif", "else", "while", "do", "for", "break", "continue", "return", "defer",
+    "if", "then", "elif", "else", "while", "do", "for", "break", "continue", "return", "defer", "match", "_",
     "import", "module", "private", "var", "val", "struct", "enum", "type", "sizeof", "asm", "extern", "endif", "new",
     "func",
     "int", "char", "byte", "bool", "void", "string",
@@ -33,7 +33,7 @@ class SyslLexical extends IndentationLexical(
     "=", "+=", "-=", "*=", "/=", "%=",
     "&=", "|=", "^=", "<<=", ">>=",
     "->", "=>",
-    ",", ":", ";", ".", "#",
+    ",", ":", ";", "..", ".", "#",
   )
 
   private def hexDigit = elem("hex digit", c => c.isDigit || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F')
