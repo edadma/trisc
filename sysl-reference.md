@@ -228,6 +228,84 @@ double(x: int) = x * 2
 getAnswer() -> int = 42
 ```
 
+### Generic Functions
+
+Functions may declare type parameters in square brackets after the name. The
+compiler monomorphizes each instantiation — one specialized copy per unique set
+of type arguments, just like Go or C++. Type arguments are inferred from the
+call-site argument types.
+
+```sysl
+// Identity — works for any type
+id[T](x: T) -> T = x
+
+// Swap via pointers — works for any T
+swap[T](a: *T, b: *T)
+    var tmp: T = *a
+    *a = *b
+    *b = tmp
+
+// Multiple type parameters
+pair_first[K, V](k: K, v: V) -> K = k
+
+// Instantiation-time checking: operations on T are checked when T is pinned.
+// max[int] works; max[bool] errors at the call site because > is not defined.
+max[T](a: T, b: T) -> T
+    if a > b then a else b
+
+main() -> int
+    var x = 10
+    var y = 20
+    swap(&x, &y)        // T inferred as int
+    max(1.5, 2.5)       // T inferred as f64
+    id(42)              // T inferred as int
+```
+
+**Rules:**
+- Type parameters may appear in parameter types, return type, and local variable
+  type annotations.
+- Type arguments are **inferred** from argument types (explicit type arguments
+  come in a later phase).
+- Each unique `(function, type-args)` combination produces one specialized copy
+  (cached; name-mangled to e.g. `swap_i32`).
+- Operations on a type parameter that are invalid for the concrete type produce
+  an error at the call site where the instantiation happens.
+
+### Traits and `impl` blocks
+
+Traits describe a set of methods a type may implement. Each trait is parameterized
+by a subject type `T` (the type that will conform). Methods may have default
+bodies; implementers override or inherit them. No orphan rule — any `impl` may
+be written anywhere.
+
+```sysl
+trait Ord[T]
+    cmp(a: T, b: T) -> int                  // required (no body)
+    lt(a: T, b: T) -> bool = cmp(a, b) < 0  // default body
+    le(a: T, b: T) -> bool = cmp(a, b) <= 0
+    gt(a: T, b: T) -> bool = cmp(a, b) > 0
+    ge(a: T, b: T) -> bool = cmp(a, b) >= 0
+
+impl Ord[int]
+    cmp(a: int, b: int) -> int = a - b
+
+main() -> int
+    if Ord.lt(3, 5) then 1 else 0
+```
+
+**Rules:**
+- A trait method with a body is a **default**; implementers may override it.
+- A trait method without a body is **required**; every impl must provide it.
+- `impl Trait[T]` for the same `(trait, type)` pair may appear only once.
+- Calls via `Trait.method(args)` infer the concrete target type from argument
+  types and dispatch to the matching impl's method.
+- Inside a default body, unqualified calls to sibling trait methods (like
+  `cmp(a, b)` inside `lt`) resolve to the current impl's methods.
+
+**Monomorphization:** each impl method — whether provided or synthesized from a
+default — compiles to a mangled top-level function like `Ord_cmp_i32`,
+`Ord_lt_i32`. There is no runtime dispatch; trait calls are resolved statically.
+
 ### Methods
 
 Methods are functions named `StructName_methodName` with a `self` parameter:
@@ -309,6 +387,10 @@ extern var errno: int
 "hello"               // string literal
 true, false           // bool
 [1, 2, 3]            // array literal
+1_000_000             // underscore separators (decimal, hex, float, exponent)
+0xDEAD_BEEF           // grouping for readability
+0xFF_00_FF_00u32      // combined with type suffix
+3.141_592             // underscores in fractional part
 ```
 
 ### Operators (by precedence, lowest to highest)
@@ -463,6 +545,36 @@ for i = 0; i < 10; i++
 
 // for-do (inline)
 for i = 0; i < 10; i++ do sum += i
+
+// for-in range (inclusive — includes upper bound)
+for i in 1..5
+    body                       // i takes 1, 2, 3, 4, 5
+
+// for-in range (exclusive — excludes upper bound)
+for i in 0..<5
+    body                       // i takes 0, 1, 2, 3, 4
+
+// for-in with do inline
+for i in 0..<n do print(i)
+
+// for-in counting down (inclusive of both bounds)
+for i in 10 downTo 0
+    body                       // i takes 10, 9, ..., 0
+
+// for-in with step
+for i in 0..100 step 5          // 0, 5, 10, ..., 100
+for i in 0..<30 step 3          // 0, 3, 6, ..., 27
+for i in 20 downTo 0 step 4     // 20, 16, 12, 8, 4, 0
+
+// Go-style iteration over arrays/slices
+for i, x in arr
+    body                       // i = index, x = arr[i]
+
+// `in` as range membership operator
+x in 1..4                       // true if 1 <= x <= 4 (inclusive)
+x in 1..<4                      // true if 1 <= x < 4  (exclusive)
+x !in 1..4                      // negated membership
+if score in 90..100 then grade = 'A'
 
 // break and continue
 while true

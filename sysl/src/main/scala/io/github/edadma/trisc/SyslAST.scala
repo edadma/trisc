@@ -26,13 +26,16 @@ case class ModuleDeclAST(path: List[String]) extends DeclAST
 case class ImportDeclAST(modulePath: String, selectors: List[ImportSelector]) extends DeclAST
 case class ExternFuncDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST]) extends DeclAST
 case class ExternVarDeclAST(name: String, typ: TypeAST) extends DeclAST
-case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST], body: FunBodyAST, isPrivate: Boolean = false) extends DeclAST
+case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST], body: FunBodyAST, isPrivate: Boolean = false, typeParams: List[String] = Nil) extends DeclAST
 case class VarDeclAST(name: String, typ: Option[TypeAST], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true) extends DeclAST
 case class StructDeclAST(name: String, fields: List[(String, TypeAST)]) extends DeclAST
 case class EnumDeclAST(name: String, members: List[(String, Option[Long])]) extends DeclAST
 case class DataEnumDeclAST(name: String, variants: List[EnumVariantAST]) extends DeclAST
 case class EnumVariantAST(name: String, fields: List[(String, TypeAST)])
 case class TypeAliasDeclAST(name: String, target: TypeAST) extends DeclAST
+case class TraitDeclAST(name: String, typeParam: String, methods: List[TraitMethodAST]) extends DeclAST
+case class TraitMethodAST(name: String, params: List[ParamAST], returnType: TypeAST, body: Option[FunBodyAST]) extends Positional
+case class ImplDeclAST(traitName: String, targetType: TypeAST, methods: List[FunDeclAST]) extends DeclAST
 case class CondDeclAST(cond: CondExpr, thenDecls: List[DeclAST], elseDecls: Option[List[DeclAST]]) extends DeclAST
 
 // Conditional compilation expressions

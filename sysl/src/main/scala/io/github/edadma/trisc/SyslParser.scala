@@ -37,7 +37,7 @@ class SyslParser extends StandardTokenParsers {
   // --- Declarations ---
 
   lazy val decl: Parser[DeclAST] =
-    condDecl | importDecl | externDecl | structDecl | enumDecl | typeAliasDecl | "private" ~> declBody(true) | declBody(false)
+    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | typeAliasDecl | "private" ~> declBody(true) | declBody(false)
 
   // --- Conditional compilation ---
 
@@ -92,6 +92,32 @@ class SyslParser extends StandardTokenParsers {
   lazy val typeAliasDecl: Parser[TypeAliasDeclAST] =
     "type" ~> ident ~ ("=" ~> typeRef) ^^ { case name ~ target => TypeAliasDeclAST(name, target) }
 
+  lazy val traitDecl: Parser[TraitDeclAST] =
+    "trait" ~> ident ~ ("[" ~> ident <~ "]") ~
+      (Newline ~> Indent ~> rep1sep(traitMethod, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
+        case name ~ tparam ~ methods => TraitDeclAST(name, tparam, methods)
+      }
+
+  lazy val traitMethod: Parser[TraitMethodAST] =
+    ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ ("->" ~> typeRef) ~ opt(traitMethodBody) ^^ {
+      case name ~ params ~ rt ~ body => TraitMethodAST(name, params, rt, body)
+    }
+
+  lazy val traitMethodBody: Parser[FunBodyAST] =
+    "=" ~> bodyExprOrBlock |
+      block ^^ (stmts => BlockBodyAST(stmts))
+
+  lazy val implDecl: Parser[ImplDeclAST] =
+    "impl" ~> ident ~ ("[" ~> typeRef <~ "]") ~
+      (Newline ~> Indent ~> rep1sep(implMethod, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
+        case name ~ typ ~ methods => ImplDeclAST(name, typ, methods)
+      }
+
+  lazy val implMethod: Parser[FunDeclAST] =
+    ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
+      case name ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body)
+    }
+
 
   // Accept identifiers and type keywords (e.g., "string") in import paths
   private lazy val importIdent: Parser[String] =
@@ -132,8 +158,8 @@ class SyslParser extends StandardTokenParsers {
         val selfParam = ParamAST("self", PtrTypeAST(NamedTypeAST(typeName)))
         FunDeclAST(s"${typeName}_$methodName", selfParam :: params, rt, body, priv)
     } |
-    ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
-      case name ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body, priv)
+    ident ~ typeParamList ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
+      case name ~ tps ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body, priv, tps)
     } |
       opt(mutability) ~ ident ~ (":" ~> typeExpr) ~ ("=" ~> expr) ^^ {
         case mut ~ name ~ t ~ e => VarDeclAST(name, Some(t), e, priv, mut.getOrElse(true))
@@ -153,6 +179,10 @@ class SyslParser extends StandardTokenParsers {
       opt(mutability) ~ ident ~ ("=" ~> expr) ^^ {
         case mut ~ name ~ e => VarDeclAST(name, None, e, priv, mut.getOrElse(true))
       }
+
+  // Optional type parameter list for generic functions: [T], [T, U], or absent
+  lazy val typeParamList: Parser[List[String]] =
+    opt("[" ~> rep1sep(ident, ",") <~ "]") ^^ (_.getOrElse(Nil))
 
   lazy val funRest: Parser[(Option[TypeAST], FunBodyAST)] =
     "->" ~> typeRef ~ ("=" ~> bodyExprOrBlock) ^^ { case rt ~ body => (Some(rt), body) } |
@@ -293,13 +323,47 @@ class SyslParser extends StandardTokenParsers {
   lazy val derefAssignStmt: Parser[StmtAST] =
     "*" ~> unary ~ ("=" ~> expr) ^^ { case ptr ~ value => DerefAssignStmtAST(ptr, value) }
 
+  lazy val forBody: Parser[List[StmtAST]] =
+    ("do" ~> (block | inlineStmt ^^ (s => List(s)))) | block
+
+  lazy val rangeOp: Parser[String] = "..<" | ".." | "downTo"
+
   lazy val forStmt: Parser[ForStmtAST] =
     "for" ~> identStmt ~ (";" ~> expr) ~ (";" ~> forUpdate) ~ ("do" ~> (block | inlineStmt ^^ (s => List(s)))) ^^ {
       case init ~ cond ~ update ~ body => ForStmtAST(init, cond, update, body)
     } |
       "for" ~> identStmt ~ (";" ~> expr) ~ (";" ~> forUpdate) ~ block ^^ {
         case init ~ cond ~ update ~ body => ForStmtAST(init, cond, update, body)
+      } |
+      "for" ~> ident ~ ("," ~> ident) ~ ("in" ~> logicalOr) ~ forBody ^^ {
+        case idxName ~ valName ~ arr ~ body => buildForGo(idxName, valName, arr, body)
+      } |
+      "for" ~> ident ~ ("in" ~> logicalOr) ~ rangeOp ~ logicalOr ~ opt("step" ~> logicalOr) ~ forBody ^^ {
+        case name ~ lo ~ op ~ hi ~ step ~ body => buildForRange(name, lo, op, hi, step, body)
       }
+
+  private def buildForRange(name: String, lo: ExpressionAST, op: String, hi: ExpressionAST, step: Option[ExpressionAST], body: List[StmtAST]): ForStmtAST =
+    val (condOp, updateOp) = op match
+      case "..<"    => ("<",  "+")
+      case ".."     => ("<=", "+")
+      case "downTo" => (">=", "-")
+    val update: StmtAST = step match
+      case Some(s) => CompoundAssignStmtAST(name, updateOp, s)
+      case None    => if updateOp == "+" then ExprStmtAST(PostIncAST(name)) else ExprStmtAST(PostDecAST(name))
+    ForStmtAST(
+      VarStmtAST(name, None, lo),
+      BinaryAST(VarRefAST(name), condOp, hi),
+      update,
+      body,
+    )
+
+  private def buildForGo(idxName: String, valName: String, arr: ExpressionAST, body: List[StmtAST]): ForStmtAST =
+    ForStmtAST(
+      VarStmtAST(idxName, None, IntLitAST(0)),
+      BinaryAST(VarRefAST(idxName), "<", CallAST("len", List(arr))),
+      ExprStmtAST(PostIncAST(idxName)),
+      VarStmtAST(valName, None, IndexAST(arr, VarRefAST(idxName))) :: body,
+    )
 
   lazy val forUpdate: Parser[StmtAST] =
     identStmt | expr ^^ ExprStmtAST.apply
@@ -400,15 +464,21 @@ class SyslParser extends StandardTokenParsers {
     "==" | "!=" | "<=" | ">=" | "<" | ">"
 
   lazy val comparison: Parser[ExpressionAST] =
-    bitwiseOr ~ rep(comparisonOp ~ bitwiseOr) ^^ {
-      case first ~ Nil => first
-      case first ~ chain =>
-        val operands = first :: chain.map { case _ ~ operand => operand }
-        val ops = chain.map { case op ~ _ => op }
-        val pairs = for i <- ops.indices yield
-          BinaryAST(operands(i), ops(i), operands(i + 1))
-        pairs.reduceLeft((l, r) => BinaryAST(l, "&&", r))
-    }
+    bitwiseOr ~ (opt("!") <~ "in") ~ bitwiseOr ~ (("..<" | "..") ~ bitwiseOr) ^^ {
+      case x ~ neg ~ lo ~ (op ~ hi) =>
+        val hiOp = if op == "..<" then "<" else "<="
+        val inExpr = BinaryAST(BinaryAST(x, ">=", lo), "&&", BinaryAST(x, hiOp, hi))
+        if neg.isDefined then UnaryAST("!", inExpr) else inExpr
+    } |
+      bitwiseOr ~ rep(comparisonOp ~ bitwiseOr) ^^ {
+        case first ~ Nil => first
+        case first ~ chain =>
+          val operands = first :: chain.map { case _ ~ operand => operand }
+          val ops = chain.map { case op ~ _ => op }
+          val pairs = for i <- ops.indices yield
+            BinaryAST(operands(i), ops(i), operands(i + 1))
+          pairs.reduceLeft((l, r) => BinaryAST(l, "&&", r))
+      }
 
   lazy val bitwiseOr: Parser[ExpressionAST] =
     bitwiseXor ~ rep("|" ~> bitwiseXor) ^^ {
