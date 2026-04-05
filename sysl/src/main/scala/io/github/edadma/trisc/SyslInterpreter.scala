@@ -204,6 +204,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           PtrVal(ArrayPtr(heapCells, oldBreak))
     }),
     "abort" -> (_ => throw RuntimeError("abort")),
+    "panic" -> (args => {
+      val msg = args.headOption match
+        case Some(RefStringVal(bytes, len, _)) => new String(bytes, 0, len, "UTF-8")
+        case Some(StrVal(s)) => s
+        case _ => "panic"
+      throw RuntimeError(msg)
+    }),
   )
 
   def registerBuiltins(extra: Map[String, List[Value] => Value]): Unit =
@@ -230,6 +237,28 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     functions.get("main") match
       case Some(main) => toLong(call(main, Nil))
       case None => throw RuntimeError("no main function")
+
+  /** Register all declarations without calling main. Used by the test runner. */
+  def load(program: TProgram): Unit =
+    for decl <- program.decls do
+      decl match
+        case _: TModuleDecl => // metadata only
+        case _: TImportDecl => // not handled in interpreter
+        case _: TExternFuncDecl => // not handled in interpreter
+        case _: TExternVarDecl => // not handled in interpreter
+        case _: TStructDecl => // type only
+        case _: TEnumDecl => // type only
+        case _: TDataEnumDecl => // type only
+        case _: TTypeAliasDecl => // type only
+        case f: TFunDecl => functions(f.name) = f
+        case TVarDecl(name, _, init, _) =>
+          globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
+
+  /** Invoke a zero-arg function by name. Throws RuntimeError on panic. */
+  def runNamed(name: String): Long =
+    functions.get(name) match
+      case Some(fn) => toLong(call(fn, Nil))
+      case None => throw RuntimeError(s"no function named '$name'")
 
   private def runDefers(savedDefers: mutable.ArrayBuffer[(TStmt, Env)]): Unit =
     for (stmt, env) <- savedDefers.reverseIterator do

@@ -27,7 +27,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     // Scan for deinit methods: functions named TypeName_deinit
     for decl <- program.decls do
       decl match
-        case TFunDecl(name, _, _, _, _) if name.endsWith("_deinit") =>
+        case TFunDecl(name, _, _, _, _, _) if name.endsWith("_deinit") =>
           deinitTypes += name.dropRight(7) // remove "_deinit" suffix
         case _ =>
 
@@ -124,7 +124,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     if needsAllocExtern then
       // Only emit if not already defined in this module
       val definedSymbols = (for decl <- program.decls yield decl match
-        case TFunDecl(name, _, _, _, _) => Some(name)
+        case TFunDecl(name, _, _, _, _, _) => Some(name)
         case TVarDecl(name, _, _, _) => Some(name)
         case _ => None).flatten.toSet
       if !definedSymbols.contains("malloc") then emit("extern malloc")

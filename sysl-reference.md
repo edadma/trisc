@@ -230,7 +230,8 @@ getAnswer() -> int = 42
 
 ### Generic Functions
 
-Functions may declare type parameters in square brackets after the name. The
+Functions may declare type parameters in square brackets after the name, with
+optional trait bounds using `:` and `+`. The
 compiler monomorphizes each instantiation — one specialized copy per unique set
 of type arguments, just like Go or C++. Type arguments are inferred from the
 call-site argument types.
@@ -261,6 +262,19 @@ main() -> int
     id(42)              // T inferred as int
 ```
 
+**Trait bounds.** A type parameter may be constrained to types that implement
+one or more traits:
+
+```sysl
+maxOf[T: Ord](a: T, b: T) -> T       // T must implement Ord
+bothCheck[T: Ord + Eq](a: T, b: T)   // T must implement Ord AND Eq
+```
+
+Bounds are checked at each call site when the concrete type arguments are known.
+An unsatisfied bound produces a clear error naming the missing trait and the
+type parameter. Inside the generic body, operators like `a > b` and `a == b`
+route through the bounded trait's methods.
+
 **Rules:**
 - Type parameters may appear in parameter types, return type, and local variable
   type annotations.
@@ -270,6 +284,117 @@ main() -> int
   (cached; name-mangled to e.g. `swap_i32`).
 - Operations on a type parameter that are invalid for the concrete type produce
   an error at the call site where the instantiation happens.
+
+### Generic Structs
+
+Structs may declare type parameters in square brackets after the name. Each
+distinct instantiation gets its own monomorphized struct layout and `sizeof`.
+
+```sysl
+struct Pair[T]
+    a: T
+    b: T
+
+struct Tuple[K, V]
+    key: K
+    value: V
+
+main() -> int
+    p = Pair(10, 20)            // T inferred as int from arg types
+    q: Pair[i64] = Pair(1i64, 2i64)
+    t = Tuple(5, 'A')
+    p.a + p.b + int(q.a) + t.key
+```
+
+**Rules:**
+- Type parameters appear in square brackets after the struct name.
+- Field types may reference the type parameters.
+- Constructor calls infer type arguments from the argument types.
+- Explicit type annotations (`Pair[int]`) may also be used in variable
+  declarations and parameter types.
+- Each `(struct, type-args)` pair produces one monomorphized struct type with a
+  mangled name (e.g. `Pair_i32`, `Tuple_i32_u32`).
+- Generic functions and generic structs compose: a function like
+  `swapPair[T](p: *Pair[T])` is fully supported — `T` is inferred from the
+  concrete `Pair[i32]` passed in.
+
+### Generic Tagged Unions
+
+Tagged unions (data enums) may declare type parameters — the foundation for
+`Option[T]`, `Result[T, E]`, and similar sum types.
+
+```sysl
+enum Option[T]
+    Some(value: T)
+    None
+
+enum Result[T, E]
+    Ok(value: T)
+    Err(error: E)
+
+safeDiv(a: int, b: int) -> Option[int]
+    if b == 0 then None
+    else Some(a / b)
+
+main() -> int
+    r = safeDiv(20, 4)
+    r match
+        Some(v) -> v
+        None -> -1
+```
+
+**Rules:**
+- Type parameters in square brackets after the enum name.
+- Variant field types may reference the type parameters.
+- Each `(enum, type-args)` pair produces one monomorphized `EnumType` with a
+  mangled name (e.g. `Option_i32`, `Result_i32_string`).
+- Pattern matching uses the scrutinee's concrete enum type to look up variants.
+
+**Type inference:** variant constructors prefer to infer type args from
+argument types (`Some(42)` infers `T=int`). When a variant doesn't pin all
+type parameters — e.g. `Ok(42)` for `Result[T, E]` leaves `E` unknown — the
+analyzer consults the **expected type** from context:
+
+| Context | Expected type source |
+|---|---|
+| `var x: Option[int] = None` | the declared variable type |
+| `fn f() -> Result[int, string] { Ok(42) }` | the function's return type |
+
+Without an expected type and incomplete argument-based inference, the compiler
+errors with a message asking for an explicit type annotation.
+
+### `?` Operator (Try)
+
+The postfix `?` operator on an enum value unwraps the success variant or
+early-returns the failure variant from the enclosing function. It's the
+standard ergonomic for working with `Option[T]` and `Result[T, E]`.
+
+```sysl
+enum Option[T]
+    Some(value: T)
+    None
+
+parseAndDouble(s: string, start: int) -> Option[int]
+    x = parseInt(s, start)?         // unwrap Some(x), or early-return None
+    Some(x * 2)
+```
+
+**Rules:**
+- Applies only to monomorphized generic enum values where the enum has exactly
+  two variants and the first variant has exactly one field (the success type).
+- The enclosing function's return type must be the **same** enum type as the
+  value being `?`-unwrapped (no error-type conversion yet).
+- `expr?` desugars at analyze time to:
+  ```
+  match expr
+      Success(v) -> v
+      Failure(...) -> return Failure(...)
+  ```
+  where `Success` is variant 0 and `Failure` is variant 1.
+- The result type of the whole `expr?` is the success variant's field type.
+
+**Chainable:** `a?.field` works if `a?` returns a struct; multiple `?`s across
+separate statements also work (e.g. `x = a?` followed by `y = b?`).
 
 ### Traits and `impl` blocks
 
@@ -305,6 +430,47 @@ main() -> int
 **Monomorphization:** each impl method — whether provided or synthesized from a
 default — compiles to a mangled top-level function like `Ord_cmp_i32`,
 `Ord_lt_i32`. There is no runtime dispatch; trait calls are resolved statically.
+
+### Operator Overloading via Traits
+
+Operators on user-defined struct and enum types desugar to trait method calls.
+The compiler maps each operator to a fixed `(trait, method)` pair and dispatches
+through the impl registered for the operand type.
+
+| Operator | Trait | Method | Signature |
+|---|---|---|---|
+| `<` `<=` `>` `>=` | `Ord` | `lt` `le` `gt` `ge` | `(T, T) -> bool` |
+| `==` `!=` | `Eq` | `eq` `ne` | `(T, T) -> bool` |
+| `+` | `Add` | `add` | `(T, T) -> T` |
+| `-` | `Sub` | `sub` | `(T, T) -> T` |
+| `*` | `Mul` | `mul` | `(T, T) -> T` |
+| `/` | `Div` | `div` | `(T, T) -> T` |
+
+```sysl
+struct Vec2
+    x: int
+    y: int
+
+trait Add[T]
+    add(a: T, b: T) -> T
+
+impl Add[Vec2]
+    add(a: Vec2, b: Vec2) -> Vec2 = Vec2(a.x + b.x, a.y + b.y)
+
+main() -> int
+    a = Vec2(1, 2)
+    b = Vec2(10, 20)
+    c = a + b                  // desugars to Add.add(a, b) → Add_add_Vec2(a, b)
+    c.x * 100 + c.y
+```
+
+Built-in numeric operators are unaffected — `3 + 4` on `int` still uses the
+native instruction. Dispatch through a trait only applies when the left operand
+is a struct or enum type.
+
+Operator sugar composes with generic functions. Inside `max[T](a: T, b: T)`,
+writing `a > b` works for any `T` that has an `Ord` impl, checked at
+instantiation time.
 
 ### Methods
 
@@ -894,6 +1060,92 @@ The codegen emits `trap 1` for runtime errors. On the OS, the trap handler termi
 ```
 
 Conditions support: symbols, negation (`!`), equality (`==`), inequality (`!=`), numeric values.
+
+---
+
+## Attributes
+
+Attributes are annotations prefixed with `#` that attach to the following declaration. They appear on their own line(s) immediately before the declaration:
+
+```
+#test
+test_copy_basic() -> void
+    0
+
+#inline
+#deprecated("use foo2")
+foo() -> int = 1
+```
+
+**Forms:**
+- Flag: `#name`
+- With arguments: `#name(arg1, arg2, ...)` — arguments are literals (string, int, bool), bare identifiers, or `key: value` pairs
+
+Multiple attributes stack on separate preceding lines. Unknown attribute names are stored as-is (no error), so new attributes can be introduced incrementally.
+
+`#if` / `#else` / `#endif` (conditional compilation) use `#` but are not attributes — they work the same as before.
+
+### `#test` — unit tests
+
+Functions marked `#test` are unit tests. Requirements:
+- zero parameters,
+- returns `void` (or no return type),
+- not generic,
+- not a method.
+
+A test **passes** iff it does not panic. A panic (`panic("msg")`, `abort()`, or any runtime trap) fails the test.
+
+```
+#test
+test_trivial() -> void
+    assert(1 + 1 == 2, "math is broken")
+
+#test("descriptive name shown in output")
+test_with_display_name() -> void
+    0
+```
+
+**`should_panic`** — the test is expected to panic:
+
+```
+#test(should_panic)
+test_guard() -> void
+    panic("this must fire")
+
+#test(should_panic: "out of range")
+test_bounds() -> void
+    // substring match: panic message must contain "out of range"
+    panic("index 42 is out of range")
+```
+
+`#test` functions are **excluded from non-test builds** — `sysl compile` and `sysl run` strip them, so they don't contaminate normal execution and aren't emitted to `.asm` / `.tof` / `.ll` output.
+
+### `sysl test` — running tests
+
+```
+sysl test <path>                      # file or directory (recursive)
+sysl test --filter <pattern> <path>   # substring match on test/display name
+sysl test --backend interpreter|trisc|all <path>
+sysl test --fail-fast <path>
+sysl test --verbose <path>
+```
+
+Output groups tests by source file with pass/fail markers and timings:
+
+```
+running 6 tests
+std/mem/mem.lsysl
+  ✓ test_copy_basic              (0.2ms)
+  ✗ test_cmp_prefix              (0.1ms)
+      panic: expected -1, got 1
+  ✓ test_index_byte_found        (0.1ms)
+...
+5 passed, 1 failed, 0 skipped — 0.6ms
+```
+
+Exit code is 0 iff all tests pass.
+
+`panic(msg: string) -> void` is a builtin that halts with the given message — the primary failure signal inside tests.
 
 ---
 
