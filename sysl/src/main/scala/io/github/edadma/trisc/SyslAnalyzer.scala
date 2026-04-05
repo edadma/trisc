@@ -13,6 +13,10 @@ class SyslAnalyzer:
   private val functions = new mutable.LinkedHashMap[String, FunInfo]
   private val structTypes = new mutable.LinkedHashMap[String, SyslType.StructType]
   private val enumTypes = new mutable.LinkedHashMap[String, Map[String, Long]]  // enum name → (member name → value)
+  // Simple enums registered as EnumType so they can appear in type positions.
+  // Distinct from dataEnumTypes because simple-enum `Name.Member` access still
+  // lowers to TIntLit (integer constant), not TEnumConstruct.
+  private val simpleEnumTypes = new mutable.LinkedHashMap[String, SyslType.EnumType]
   private val dataEnumTypes = new mutable.LinkedHashMap[String, SyslType.EnumType]  // data enum name → EnumType
   private val variantToEnum = new mutable.LinkedHashMap[String, (SyslType.EnumType, Int)]  // variant name → (enum type, variant index)
   private val typeAliases = new mutable.LinkedHashMap[String, TypeAST]  // alias name → target type AST
@@ -40,6 +44,8 @@ class SyslAnalyzer:
   private val genericEnumInstantiations = new mutable.LinkedHashMap[(String, List[SyslType]), SyslType.EnumType]
   // variant name -> (generic enum name, variant index) for generic enum variants
   private val genericVariantToEnum = new mutable.LinkedHashMap[String, (String, Int)]
+  // Reverse map: mangled enum name -> (template name, concrete type args) for unification at call sites
+  private val enumToTemplate = new mutable.LinkedHashMap[String, (String, List[SyslType])]
 
   // Expected type for bidirectional inference (used by generic variant constructors)
   private var currentExpected: Option[SyslType] = None
@@ -193,6 +199,19 @@ class SyslAnalyzer:
             (memberName, value)
           }
           enumTypes(name) = resolved.toMap
+          // Also register as an EnumType so it can appear in type positions
+          // (e.g. `Result[int, TestError]`). Variants carry no payload.
+          val variants = resolved.map((vname, _) => (vname, Nil: List[(String, SyslType)]))
+          val et: SyslType.EnumType = SyslType.EnumType(name, variants)
+          simpleEnumTypes(name) = et
+          // Register bare variant names as constructors, so `NotFound` produces
+          // a TEnumConstruct value usable where `TestError` is expected.
+          // `TestError.NotFound` (qualified access) still yields the integer
+          // constant via the enumTypes path for backward compatibility.
+          for ((vname, _), idx) <- variants.zipWithIndex do
+            if variantToEnum.contains(vname) || genericVariantToEnum.contains(vname) then
+              throw AnalysisError(s"duplicate variant name: '$vname'")
+            variantToEnum(vname) = (et, idx)
         case de @ DataEnumDeclAST(name, variants, typeParams, _) =>
           if typeParams.nonEmpty then
             // Generic enum: store template, don't resolve fields
@@ -403,6 +422,7 @@ class SyslAnalyzer:
       case name if typeAliases.contains(name) => resolveType(typeAliases(name))
       case name if structTypes.contains(name) => structTypes(name)
       case name if dataEnumTypes.contains(name) => dataEnumTypes(name)
+      case name if simpleEnumTypes.contains(name) => simpleEnumTypes(name)
       case other => throw AnalysisError(s"unknown type: '$other'")
     case PtrTypeAST(inner) => PtrType(resolveType(inner))
     case ArrayTypeAST(size, elem) => ArrayType(resolveType(elem), size)
@@ -535,6 +555,11 @@ class SyslAnalyzer:
             case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
               for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
             case _ => ()
+        case SyslType.EnumType(argName, _) =>
+          enumToTemplate.get(argName) match
+            case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
+              for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
+            case _ => ()
         case _ => ()
       case _ => () // concrete parameter type, nothing to infer
 
@@ -608,6 +633,7 @@ class SyslAnalyzer:
           val et: SyslType.EnumType = SyslType.EnumType(mangled, resolvedVariants)
           genericEnumInstantiations(cacheKey) = et
           dataEnumTypes(mangled) = et
+          enumToTemplate(mangled) = (name, typeArgs)
           specializedDecls += TDataEnumDecl(mangled, et)
           et
         finally typeEnv = savedEnv
