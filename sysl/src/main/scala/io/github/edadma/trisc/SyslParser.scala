@@ -61,8 +61,8 @@ class SyslParser extends StandardTokenParsers {
       "false" ^^^ "false"
 
   lazy val structDecl: Parser[StructDeclAST] =
-    "struct" ~> ident ~ (Newline ~> Indent ~> rep1sep(structField, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
-      case name ~ fields => StructDeclAST(name, fields)
+    "struct" ~> ident ~ typeParamList ~ (Newline ~> Indent ~> rep1sep(structField, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
+      case name ~ tps ~ fields => StructDeclAST(name, fields, tps)
     }
 
   lazy val structField: Parser[(String, TypeAST)] =
@@ -197,9 +197,13 @@ class SyslParser extends StandardTokenParsers {
   lazy val param: Parser[ParamAST] =
     ident ~ (":" ~> typeRef) ^^ { case name ~ t => ParamAST(name, t) }
 
+  // Optional type argument list for generic type references: [T], [T, U], or absent
+  lazy val typeArgList: Parser[List[TypeAST]] =
+    opt("[" ~> rep1sep(typeRef, ",") <~ "]") ^^ (_.getOrElse(Nil))
+
   lazy val typeName: Parser[TypeAST] =
-    ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool" | "void" | "string") ^^ NamedTypeAST.apply |
-      ident ^^ NamedTypeAST.apply
+    ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool" | "void" | "string") ^^ (n => NamedTypeAST(n)) |
+      ident ~ typeArgList ^^ { case name ~ args => NamedTypeAST(name, args) }
 
   // Full type reference: *int, **int, &Node, [5]int, []int (slice), func(int)->int, string, int, etc.
   lazy val typeRef: Parser[TypeAST] =
