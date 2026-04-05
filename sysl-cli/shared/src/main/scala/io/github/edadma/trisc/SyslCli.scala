@@ -331,6 +331,7 @@ object SyslCli:
       displayName: String,
       shouldPanic: Boolean,
       expectedMsg: Option[String],
+      line: Option[Int],
   )
 
   private def attrString(a: AttrArg): Option[String] = a match
@@ -351,7 +352,8 @@ object SyslCli:
       val shouldPanicFlag = attr.args.exists(attrIdent(_).contains("should_panic"))
       val expectedMsg = attr.args.flatMap(a => attrNamedString(a, "should_panic")).headOption
       val sp = shouldPanicFlag || expectedMsg.isDefined
-      DiscoveredTest(unitName, fn, displayName, sp, expectedMsg)
+      val line = if attr.pos == scala.util.parsing.input.NoPosition then None else Some(attr.pos.line)
+      DiscoveredTest(unitName, fn, displayName, sp, expectedMsg, line)
     }
 
   private sealed trait TestOutcome
@@ -381,10 +383,29 @@ object SyslCli:
       System.err.println(s"error: backend '${cmd.backend}' not yet implemented (use 'interpreter')")
       throw CliError("unsupported backend")
 
-    val sources = resolveSources(cmd.inputs)
-    val baseDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList match
+    // Derive baseDirs so each input's path is treated as the base module.
+    // For a directory input, baseDir = the PARENT directory of the directory
+    //   (so the directory's own name is included in unit names — e.g. `std/strconv/strconv`
+    //    for input `std/`, giving module name `std.strconv`).
+    // For a file input, baseDir = the parent directory of the file.
+    def parentDir(path: String): String =
+      val p = if path.endsWith("/") then path.dropRight(1) else path
+      val slash = p.lastIndexOf('/')
+      if slash < 0 then "." else p.substring(0, slash)
+    val baseDirs = cmd.inputs.map(p => parentDir(p)).distinct.toList match
       case Nil  => List(".")
       case dirs => dirs
+    // Collect sources using each input's baseDir so unit names come out relative.
+    val sources: Map[String, String] =
+      cmd.inputs.flatMap { p =>
+        if !io.exists(p) then fail(s"error: file not found: $p")
+        val parent = parentDir(p)
+        val baseDir = if parent == "." then "" else parent + "/"
+        if io.isDirectory(p) then
+          collectSyslFiles(p).map(f => resolveSource(f, baseDir))
+        else
+          List(resolveSource(p, baseDir))
+      }.toMap
     val driver = new SyslDriver(Some(io), baseDirs)
     val result = driver.compile(sources)
     val stdlibImports = driver.collectStdlibImports(result.units)
@@ -424,6 +445,7 @@ object SyslCli:
           failed += 1
           println(f"  ✗ ${t.displayName}%-28s ($elapsedMs%.1fms)")
           println(s"      $msg")
+          t.line.foreach(l => println(s"      at ${t.unitName}:$l"))
           if cmd.failFast then stop = true
 
     val totalMs = (System.nanoTime() - totalStart) / 1e6

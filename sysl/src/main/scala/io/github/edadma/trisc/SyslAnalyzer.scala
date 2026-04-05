@@ -17,6 +17,8 @@ class SyslAnalyzer:
   private val variantToEnum = new mutable.LinkedHashMap[String, (SyslType.EnumType, Int)]  // variant name → (enum type, variant index)
   private val typeAliases = new mutable.LinkedHashMap[String, TypeAST]  // alias name → target type AST
   private val methods = new mutable.LinkedHashMap[String, mutable.Set[String]]  // struct name → set of method names
+  private val deprecations = new mutable.LinkedHashMap[String, Option[String]]  // name → optional reason
+  private val warnedDeprecations = new mutable.HashSet[String]
   private val externalSymbols = new mutable.LinkedHashSet[String]
   private var scopeStack: mutable.ArrayBuffer[mutable.LinkedHashMap[String, SymInfo]] = null
   private var loopDepth: Int = 0
@@ -87,6 +89,7 @@ class SyslAnalyzer:
     "sbrk" -> FunInfo("sbrk", List("increment" -> I32), PtrType(I8)),
     "abort" -> FunInfo("abort", Nil, VoidType),
     "panic" -> FunInfo("panic", List("msg" -> StringType), VoidType),
+    "assert" -> FunInfo("assert", List("cond" -> BoolType, "msg" -> StringType), VoidType),
   )
 
   def registerImport(meta: ModuleMeta, selectors: List[ImportSelector] = List(WildcardImport)): Unit =
@@ -163,6 +166,10 @@ class SyslAnalyzer:
             if functions.contains(name) || genericTemplates.contains(name) then
               throw AnalysisError(s"duplicate function: '$name'", decl)
             functions(name) = FunInfo(name, paramTypes, retType)
+            // Record #deprecated info
+            for attr <- fd.attributes if attr.name == "deprecated" do
+              val reason = attr.args.collectFirst { case AttrPositional(AttrLitString(s)) => s }
+              deprecations(name) = reason
             // Register as method if name matches StructName_methodName pattern
             val underscoreIdx = name.indexOf('_')
             if underscoreIdx > 0 && params.nonEmpty && params.head.name == "self" then
@@ -341,6 +348,12 @@ class SyslAnalyzer:
         globalScope(name) = SymInfo(name, declType, isMutable)
         scopeStack = null
         TVarDecl(name, declType, tInit, isPrivate)
+
+  private def warnDeprecated(name: String): Unit =
+    if deprecations.contains(name) && !warnedDeprecations.contains(name) then
+      warnedDeprecations += name
+      val suffix = deprecations(name).map(r => s": $r").getOrElse("")
+      System.err.println(s"warning: '$name' is deprecated$suffix")
 
   private def validateTestAttr(fd: FunDeclAST, info: FunInfo): Unit =
     fd.attributes.find(_.name == "test") match
@@ -1127,7 +1140,7 @@ class SyslAnalyzer:
           case PtrType(elem) => elem
           case SliceType(elem) => elem
           case RefType(SliceType(elem)) => elem
-          case StringType => I8
+          case StringType => U8
           case t => throw AnalysisError(s"cannot index $t")
         TIndex(tArr, tIndex, elemType)
 
@@ -1402,6 +1415,7 @@ class SyslAnalyzer:
           val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
           TCall(mangled, checkedArgs, funInfo.returnType)
         else if functions.contains(name) || builtinFunctions.contains(name) then
+          warnDeprecated(name)
           val funInfo = lookupFun(name)
           val checkedArgs = checkArgs(name, funInfo.params, tArgs)
           TCall(name, checkedArgs, funInfo.returnType)
