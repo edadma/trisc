@@ -211,6 +211,15 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _ => "panic"
       throw RuntimeError(msg)
     }),
+    "assert" -> (args => {
+      if toLong(args.head) == 0 then
+        val msg = args.lift(1) match
+          case Some(RefStringVal(bytes, len, _)) => new String(bytes, 0, len, "UTF-8")
+          case Some(StrVal(s)) => s
+          case _ => "assertion failed"
+        throw RuntimeError(msg)
+      IntVal(0)
+    }),
   )
 
   def registerBuiltins(extra: Map[String, List[Value] => Value]): Unit =

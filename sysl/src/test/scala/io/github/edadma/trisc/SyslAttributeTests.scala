@@ -135,6 +135,84 @@ class SyslAttributeTests extends SyslTestHelpers {
     }
   }
 
+  "assert builtin" - {
+    "passes through when condition is true" in {
+      eval("""main() -> int
+             |    assert(1 == 1, "nope")
+             |    42
+             |""".stripMargin) shouldBe 42
+    }
+
+    "panics when condition is false" in {
+      val thrown = intercept[RuntimeException] {
+        eval("""main() -> int
+               |    assert(1 == 2, "math failed")
+               |    0
+               |""".stripMargin)
+      }
+      thrown.getMessage should include ("math failed")
+    }
+  }
+
+  "#deprecated warnings" - {
+    def captureStderr(f: => Unit): String =
+      val out = new java.io.ByteArrayOutputStream
+      val saved = System.err
+      System.setErr(new java.io.PrintStream(out))
+      try f finally System.setErr(saved)
+      out.toString
+
+    "emits warning with reason when deprecated function is called" in {
+      val err = captureStderr {
+        eval("""#deprecated("use foo2 instead")
+               |foo() -> int = 1
+               |
+               |main() -> int = foo()
+               |""".stripMargin)
+      }
+      err should include ("foo")
+      err should include ("deprecated")
+      err should include ("use foo2 instead")
+    }
+
+    "emits warning without reason for bare #deprecated" in {
+      val err = captureStderr {
+        eval("""#deprecated
+               |old() -> int = 1
+               |
+               |main() -> int = old()
+               |""".stripMargin)
+      }
+      err should include ("old")
+      err should include ("deprecated")
+    }
+
+    "only warns once per deprecated function" in {
+      val err = captureStderr {
+        eval("""#deprecated("gone")
+               |f() -> int = 1
+               |
+               |main() -> int
+               |    f()
+               |    f()
+               |    f()
+               |""".stripMargin)
+      }
+      err.split("\n").count(_.contains("deprecated")) shouldBe 1
+    }
+
+    "no warning when function is not called" in {
+      val err = captureStderr {
+        eval("""#deprecated
+               |unused() -> int = 1
+               |
+               |main() -> int = 42
+               |""".stripMargin)
+      }
+      err should not include ("deprecated")
+    }
+  }
+
   "runNamed invocation" - {
     "calls a zero-arg function by name without invoking main" in {
       val Right(ast) = (new SyslParser).parseProgram(

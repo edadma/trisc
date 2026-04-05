@@ -331,6 +331,7 @@ object SyslCli:
       displayName: String,
       shouldPanic: Boolean,
       expectedMsg: Option[String],
+      line: Option[Int],
   )
 
   private def attrString(a: AttrArg): Option[String] = a match
@@ -351,7 +352,8 @@ object SyslCli:
       val shouldPanicFlag = attr.args.exists(attrIdent(_).contains("should_panic"))
       val expectedMsg = attr.args.flatMap(a => attrNamedString(a, "should_panic")).headOption
       val sp = shouldPanicFlag || expectedMsg.isDefined
-      DiscoveredTest(unitName, fn, displayName, sp, expectedMsg)
+      val line = if attr.pos == scala.util.parsing.input.NoPosition then None else Some(attr.pos.line)
+      DiscoveredTest(unitName, fn, displayName, sp, expectedMsg, line)
     }
 
   private sealed trait TestOutcome
@@ -424,6 +426,7 @@ object SyslCli:
           failed += 1
           println(f"  ✗ ${t.displayName}%-28s ($elapsedMs%.1fms)")
           println(s"      $msg")
+          t.line.foreach(l => println(s"      at ${t.unitName}:$l"))
           if cmd.failFast then stop = true
 
     val totalMs = (System.nanoTime() - totalStart) / 1e6
