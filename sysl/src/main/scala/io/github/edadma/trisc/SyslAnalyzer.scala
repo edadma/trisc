@@ -794,17 +794,18 @@ class SyslAnalyzer:
           case other => throw AnalysisError(s"cannot destructure non-struct type $other")
         if names.length != st.fields.length then
           throw AnalysisError(s"destructuring expects ${st.fields.length} names, got ${names.length}")
-        // Check if this is declaration or assignment (when no val/var prefix)
-        val existingCount = names.count(n => tryLookup(n).isDefined)
+        // `_` names are discards — don't bind, don't count for existing/new check.
+        val realNames = names.filter(_ != "_")
+        val existingCount = realNames.count(n => tryLookup(n).isDefined)
         if isMutable || existingCount == 0 then
-          // Declaration: create new variables
-          for (name, (_, fieldType)) <- names.zip(st.fields) do
+          // Declaration: create new variables (skip `_`)
+          for (name, (_, fieldType)) <- names.zip(st.fields) if name != "_" do
             if scopeStack != null then
               currentScope(name) = SymInfo(name, fieldType, isMutable)
           TDestructureStmt(names, st.fields.map(_._2), tInit)
-        else if existingCount == names.length then
-          // All exist: parallel assignment
-          for name <- names do
+        else if existingCount == realNames.length then
+          // All real names exist: parallel assignment (skip `_`)
+          for name <- realNames do
             val sym = lookup(name)
             if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$name'")
           TDestructureAssignStmt(names, st.fields.map(_._2), tInit)
