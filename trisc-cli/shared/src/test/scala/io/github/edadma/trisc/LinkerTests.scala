@@ -629,4 +629,16 @@ class LinkerTests extends TestHelpers {
     cpu.r(1).read shouldBe 77
     cpu.state shouldBe State.Halt
   }
+
+  // ===== Constant pool symbol uniqueness =====
+
+  "link two TOFs that each use ldc without symbol collision" in {
+    // Before the per-TOF prefix fix, both modules emitted .const_1, causing
+    // a "duplicate symbol" error at link time.
+    val mod1 = assemble("ldc r1, 1.5\nhalt\n", relocatable = true)
+    val mod2 = assemble("ldc r2, 2.5\nhalt\n", relocatable = true)
+
+    val linked = Linker.link(Seq(mod1, mod2))
+    linked.isFullyResolved shouldBe true
+  }
 }
