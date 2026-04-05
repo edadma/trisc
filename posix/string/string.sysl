@@ -247,3 +247,38 @@ memchr(s: *byte, c: int, n: int) -> *byte
         if s[i] == c then return s + i
 
     *byte(0)
+
+/* Copy src to dst, guaranteeing null-termination. Returns strlen(src). */
+strlcpy(dst: *byte, src: *byte, dstsize: int) -> int
+    var i = 0
+
+    if dstsize > 0
+        while i < dstsize - 1 && src[i] != 0
+            dst[i] = src[i]
+            i++
+
+        dst[i] = 0
+
+    while src[i] != 0 do i++
+
+    i
+
+/* Append src to dst, guaranteeing null-termination. Returns strlen(dst) + strlen(src). */
+strlcat(dst: *byte, src: *byte, dstsize: int) -> int
+    var dlen = 0
+
+    while dlen < dstsize && dst[dlen] != 0 do dlen++
+
+    if dlen == dstsize then return dlen + strlen(src)
+
+    var i = 0
+
+    while dlen + i + 1 < dstsize && src[i] != 0
+        dst[dlen + i] = src[i]
+        i++
+
+    dst[dlen + i] = 0
+
+    while src[i] != 0 do i++
+
+    dlen + i
