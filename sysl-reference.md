@@ -347,6 +347,25 @@ else
 // if-then (inline)
 if x > 0 then positive()
 
+// match (value matching, no fallthrough)
+x match
+    1 -> doA()
+    2, 3 -> doB()              // multiple values per arm
+    else -> doDefault()
+
+// match as expression
+y = x match
+    1 -> "one"
+    2, 3 -> "few"
+    else -> "many"
+
+// match with block bodies
+x match
+    1 ->
+        a = compute()
+        doSomething(a)
+    else -> fallback()
+
 // while
 while cond
     body

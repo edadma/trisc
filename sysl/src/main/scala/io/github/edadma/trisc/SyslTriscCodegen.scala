@@ -1776,6 +1776,41 @@ class SyslTriscCodegen(addresses: Int = 4):
         }
         emit(s"$endLabel")
 
+      case TMatchExpr(scrutinee, cases, default, _) =>
+        // Evaluate scrutinee once, save on stack
+        genExpr(scrutinee)
+        emit("  pshd r1")
+        stackOffset -= 8
+        val endLabel = newLabel("match_end")
+        // Emit each case arm
+        for (values, body) <- cases do
+          val hitLabel = newLabel("match_hit")
+          val nextArm = newLabel("match_next")
+          // Check if scrutinee matches any value — jump to hit if so
+          for v <- values do
+            genExpr(v)                    // r1 = case value
+            emit("  ldd r2, r7, r0")     // r2 = scrutinee (from stack)
+            emit(s"  beq r1, r2, $hitLabel")
+          emit(s"  bra $nextArm")         // no match, try next arm
+          emit(s"$hitLabel")
+          enterScope()
+          for stmt <- body do genStmt(stmt)
+          leaveScope()
+          emit(s"  bra $endLabel")
+          emit(s"$nextArm")
+        // Default arm
+        default match
+          case Some(stmts) =>
+            enterScope()
+            for stmt <- stmts do genStmt(stmt)
+            leaveScope()
+          case None =>
+            emit("  ldi r1, 0")  // no match, no default → 0
+        emit(s"$endLabel")
+        // Clean up scrutinee from stack
+        emitAddImm(7, 7, 8)
+        stackOffset += 8
+
       case TLen(inner, _) =>
         genExpr(inner)           // r1 = struct address (string or slice)
         inner.typ match

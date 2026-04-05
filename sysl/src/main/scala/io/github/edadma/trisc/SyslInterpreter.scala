@@ -669,6 +669,19 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             case Some(stmts) => evalBlock(stmts, env)
             case None => IntVal(0)
 
+      case TMatchExpr(scrutinee, cases, default, _) =>
+        val sv = evalAny(scrutinee, env)
+        val svLong = toLong(sv)
+        val matched = cases.find { (values, _) =>
+          values.exists(v => toLong(evalAny(v, env)) == svLong)
+        }
+        matched match
+          case Some((_, body)) => evalBlock(body, env)
+          case None =>
+            default match
+              case Some(stmts) => evalBlock(stmts, env)
+              case None => IntVal(0)
+
       case TBinary(left, op, right, _) =>
         val lv = evalAny(left, env)
         (lv, op) match

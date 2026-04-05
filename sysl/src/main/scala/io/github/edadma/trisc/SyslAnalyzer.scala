@@ -864,3 +864,24 @@ class SyslAnalyzer:
           case Some(TExprStmt(e)) => e.typ
           case _ => VoidType
         TIfExpr(tCond, tThen, tElse, resultType)
+
+      case MatchExprAST(scrutinee, cases, default) =>
+        val tScrutinee = analyzeExpr(scrutinee)
+        val tCases = cases.map { (values, body) =>
+          val tValues = values.map { v =>
+            val tv = analyzeExpr(v)
+            val coerced = coerceLiteral(tv, tScrutinee.typ)
+            if !compatible(coerced.typ, tScrutinee.typ) then
+              throw AnalysisError(s"match case type ${coerced.typ} incompatible with ${tScrutinee.typ}")
+            coerced
+          }
+          pushScope()
+          val tBody = analyzeBlock(body)
+          popScope()
+          (tValues, tBody)
+        }
+        val tDefault = default.map { stmts => pushScope(); val r = analyzeBlock(stmts); popScope(); r }
+        val resultType = tCases.headOption.flatMap(_._2.lastOption) match
+          case Some(TExprStmt(e)) => e.typ
+          case _ => VoidType
+        TMatchExpr(tScrutinee, tCases, tDefault, resultType)
