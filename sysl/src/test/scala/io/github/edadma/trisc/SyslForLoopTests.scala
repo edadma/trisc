@@ -420,4 +420,211 @@ class SyslForLoopTests extends SyslTestHelpers {
         |    count
         |""".stripMargin) shouldBe 6
   }
+
+  // ===== !in negated membership =====
+
+  "!in inclusive range — outside" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if x !in 1..4 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "!in inclusive range — inside" in {
+    eval(
+      """main() -> int
+        |    x = 3
+        |    if x !in 1..4 then 1 else 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "!in exclusive range — at upper bound" in {
+    eval(
+      """main() -> int
+        |    x = 4
+        |    if x !in 1..<4 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  // ===== downTo ranges =====
+
+  "for in downTo range" in {
+    output(
+      """main() -> int
+        |    for i in 5 downTo 1
+        |        print(i)
+        |    0
+        |""".stripMargin) shouldBe "54321"
+  }
+
+  "for in downTo inclusive of zero" in {
+    output(
+      """main() -> int
+        |    for i in 3 downTo 0
+        |        print(i)
+        |    0
+        |""".stripMargin) shouldBe "3210"
+  }
+
+  "for in downTo sum" in {
+    eval(
+      """main() -> int
+        |    sum = 0
+        |    for i in 10 downTo 1
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 55
+  }
+
+  "for in downTo single iteration" in {
+    eval(
+      """main() -> int
+        |    count = 0
+        |    for i in 5 downTo 5
+        |        count += 1
+        |    count
+        |""".stripMargin) shouldBe 1
+  }
+
+  "for in downTo zero iterations" in {
+    eval(
+      """main() -> int
+        |    count = 0
+        |    for i in 0 downTo 5
+        |        count += 1
+        |    count
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ===== step =====
+
+  "for in inclusive with step" in {
+    output(
+      """main() -> int
+        |    for i in 0..10 step 2
+        |        print(i)
+        |    0
+        |""".stripMargin) shouldBe "0246810"
+  }
+
+  "for in exclusive with step" in {
+    output(
+      """main() -> int
+        |    for i in 0..<10 step 3
+        |        print(i)
+        |    0
+        |""".stripMargin) shouldBe "0369"
+  }
+
+  "for in downTo with step" in {
+    output(
+      """main() -> int
+        |    for i in 10 downTo 0 step 2
+        |        print(i)
+        |    0
+        |""".stripMargin) shouldBe "1086420"
+  }
+
+  "for in step sum of evens" in {
+    eval(
+      """main() -> int
+        |    sum = 0
+        |    for i in 2..20 step 2
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 110
+  }
+
+  "for in step with variable step" in {
+    eval(
+      """main() -> int
+        |    s = 3
+        |    count = 0
+        |    for i in 0..<30 step s
+        |        count += 1
+        |    count
+        |""".stripMargin) shouldBe 10
+  }
+
+  // ===== Go-style for i, x in arr =====
+
+  "for i, x in array" in {
+    eval(
+      """main() -> int
+        |    arr: [5]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    arr[3] = 40
+        |    arr[4] = 50
+        |    sum = 0
+        |    for i, x in arr
+        |        sum = sum + x
+        |    sum
+        |""".stripMargin) shouldBe 150
+  }
+
+  "for i, x in array uses index" in {
+    eval(
+      """main() -> int
+        |    arr: [4]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    arr[3] = 40
+        |    total = 0
+        |    for i, x in arr
+        |        total = total + i * x
+        |    total
+        |""".stripMargin) shouldBe (0*10 + 1*20 + 2*30 + 3*40)
+  }
+
+  "for i, x in array with break" in {
+    eval(
+      """main() -> int
+        |    arr: [5]int
+        |    arr[0] = 1
+        |    arr[1] = 2
+        |    arr[2] = 3
+        |    arr[3] = 4
+        |    arr[4] = 5
+        |    sum = 0
+        |    for i, x in arr
+        |        if i == 3 then break
+        |        sum = sum + x
+        |    sum
+        |""".stripMargin) shouldBe 6
+  }
+
+  "for i, x in array with continue" in {
+    eval(
+      """main() -> int
+        |    arr: [5]int
+        |    arr[0] = 1
+        |    arr[1] = 2
+        |    arr[2] = 3
+        |    arr[3] = 4
+        |    arr[4] = 5
+        |    sum = 0
+        |    for i, x in arr
+        |        if i % 2 == 0 then continue
+        |        sum = sum + x
+        |    sum
+        |""".stripMargin) shouldBe 6
+  }
+
+  "for i, x in empty-like range" in {
+    eval(
+      """main() -> int
+        |    arr: [3]int
+        |    arr[0] = 7
+        |    arr[1] = 8
+        |    arr[2] = 9
+        |    last = 0
+        |    for i, x in arr
+        |        last = x
+        |    last
+        |""".stripMargin) shouldBe 9
+  }
 }

@@ -13,7 +13,7 @@ class SyslLexical extends IndentationLexical(
   blockCommentEnd = "*/",
 ) {
   reserved ++= List(
-    "if", "then", "elif", "else", "while", "do", "for", "in", "break", "continue", "return", "defer", "match", "_",
+    "if", "then", "elif", "else", "while", "do", "for", "in", "downTo", "step", "break", "continue", "return", "defer", "match", "_",
     "import", "module", "private", "var", "val", "struct", "enum", "type", "sizeof", "asm", "extern", "endif", "new",
     "func",
     "int", "char", "byte", "bool", "void", "string",

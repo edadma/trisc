@@ -475,9 +475,23 @@ for i in 0..<5
 // for-in with do inline
 for i in 0..<n do print(i)
 
+// for-in counting down (inclusive of both bounds)
+for i in 10 downTo 0
+    body                       // i takes 10, 9, ..., 0
+
+// for-in with step
+for i in 0..100 step 5          // 0, 5, 10, ..., 100
+for i in 0..<30 step 3          // 0, 3, 6, ..., 27
+for i in 20 downTo 0 step 4     // 20, 16, 12, 8, 4, 0
+
+// Go-style iteration over arrays/slices
+for i, x in arr
+    body                       // i = index, x = arr[i]
+
 // `in` as range membership operator
 x in 1..4                       // true if 1 <= x <= 4 (inclusive)
 x in 1..<4                      // true if 1 <= x < 4  (exclusive)
+x !in 1..4                      // negated membership
 if score in 90..100 then grade = 'A'
 
 // break and continue

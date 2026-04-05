@@ -293,6 +293,11 @@ class SyslParser extends StandardTokenParsers {
   lazy val derefAssignStmt: Parser[StmtAST] =
     "*" ~> unary ~ ("=" ~> expr) ^^ { case ptr ~ value => DerefAssignStmtAST(ptr, value) }
 
+  lazy val forBody: Parser[List[StmtAST]] =
+    ("do" ~> (block | inlineStmt ^^ (s => List(s)))) | block
+
+  lazy val rangeOp: Parser[String] = "..<" | ".." | "downTo"
+
   lazy val forStmt: Parser[ForStmtAST] =
     "for" ~> identStmt ~ (";" ~> expr) ~ (";" ~> forUpdate) ~ ("do" ~> (block | inlineStmt ^^ (s => List(s)))) ^^ {
       case init ~ cond ~ update ~ body => ForStmtAST(init, cond, update, body)
@@ -300,20 +305,34 @@ class SyslParser extends StandardTokenParsers {
       "for" ~> identStmt ~ (";" ~> expr) ~ (";" ~> forUpdate) ~ block ^^ {
         case init ~ cond ~ update ~ body => ForStmtAST(init, cond, update, body)
       } |
-      "for" ~> ident ~ ("in" ~> logicalOr) ~ (("..<" | "..") ~ logicalOr) ~ ("do" ~> (block | inlineStmt ^^ (s => List(s)))) ^^ {
-        case name ~ lo ~ (op ~ hi) ~ body => buildForRange(name, lo, op, hi, body)
+      "for" ~> ident ~ ("," ~> ident) ~ ("in" ~> logicalOr) ~ forBody ^^ {
+        case idxName ~ valName ~ arr ~ body => buildForGo(idxName, valName, arr, body)
       } |
-      "for" ~> ident ~ ("in" ~> logicalOr) ~ (("..<" | "..") ~ logicalOr) ~ block ^^ {
-        case name ~ lo ~ (op ~ hi) ~ body => buildForRange(name, lo, op, hi, body)
+      "for" ~> ident ~ ("in" ~> logicalOr) ~ rangeOp ~ logicalOr ~ opt("step" ~> logicalOr) ~ forBody ^^ {
+        case name ~ lo ~ op ~ hi ~ step ~ body => buildForRange(name, lo, op, hi, step, body)
       }
 
-  private def buildForRange(name: String, lo: ExpressionAST, op: String, hi: ExpressionAST, body: List[StmtAST]): ForStmtAST =
-    val condOp = if op == "..<" then "<" else "<="
+  private def buildForRange(name: String, lo: ExpressionAST, op: String, hi: ExpressionAST, step: Option[ExpressionAST], body: List[StmtAST]): ForStmtAST =
+    val (condOp, updateOp) = op match
+      case "..<"    => ("<",  "+")
+      case ".."     => ("<=", "+")
+      case "downTo" => (">=", "-")
+    val update: StmtAST = step match
+      case Some(s) => CompoundAssignStmtAST(name, updateOp, s)
+      case None    => if updateOp == "+" then ExprStmtAST(PostIncAST(name)) else ExprStmtAST(PostDecAST(name))
     ForStmtAST(
       VarStmtAST(name, None, lo),
       BinaryAST(VarRefAST(name), condOp, hi),
-      ExprStmtAST(PostIncAST(name)),
+      update,
       body,
+    )
+
+  private def buildForGo(idxName: String, valName: String, arr: ExpressionAST, body: List[StmtAST]): ForStmtAST =
+    ForStmtAST(
+      VarStmtAST(idxName, None, IntLitAST(0)),
+      BinaryAST(VarRefAST(idxName), "<", CallAST("len", List(arr))),
+      ExprStmtAST(PostIncAST(idxName)),
+      VarStmtAST(valName, None, IndexAST(arr, VarRefAST(idxName))) :: body,
     )
 
   lazy val forUpdate: Parser[StmtAST] =
@@ -415,10 +434,11 @@ class SyslParser extends StandardTokenParsers {
     "==" | "!=" | "<=" | ">=" | "<" | ">"
 
   lazy val comparison: Parser[ExpressionAST] =
-    bitwiseOr ~ ("in" ~> bitwiseOr) ~ (("..<" | "..") ~ bitwiseOr) ^^ {
-      case x ~ lo ~ (op ~ hi) =>
+    bitwiseOr ~ (opt("!") <~ "in") ~ bitwiseOr ~ (("..<" | "..") ~ bitwiseOr) ^^ {
+      case x ~ neg ~ lo ~ (op ~ hi) =>
         val hiOp = if op == "..<" then "<" else "<="
-        BinaryAST(BinaryAST(x, ">=", lo), "&&", BinaryAST(x, hiOp, hi))
+        val inExpr = BinaryAST(BinaryAST(x, ">=", lo), "&&", BinaryAST(x, hiOp, hi))
+        if neg.isDefined then UnaryAST("!", inExpr) else inExpr
     } |
       bitwiseOr ~ rep(comparisonOp ~ bitwiseOr) ^^ {
         case first ~ Nil => first

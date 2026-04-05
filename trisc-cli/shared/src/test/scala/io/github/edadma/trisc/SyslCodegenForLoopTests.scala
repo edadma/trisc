@@ -238,4 +238,119 @@ class SyslCodegenForLoopTests extends SyslCodegenHelpers {
         |    if x in lo..hi then 1 else 0
         |""".stripMargin) shouldBe 1
   }
+
+  // ===== !in negated membership =====
+
+  "!in inclusive range — outside" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 5
+        |    if x !in 1..4 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "!in inclusive range — inside" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 3
+        |    if x !in 1..4 then 1 else 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ===== downTo =====
+
+  "for in downTo range sum" in {
+    compileAndRun(
+      """main() -> int
+        |    sum = 0
+        |    for i in 10 downTo 1
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 55
+  }
+
+  "for in downTo single iteration" in {
+    compileAndRun(
+      """main() -> int
+        |    count = 0
+        |    for i in 5 downTo 5
+        |        count += 1
+        |    count
+        |""".stripMargin) shouldBe 1
+  }
+
+  "for in downTo zero iterations" in {
+    compileAndRun(
+      """main() -> int
+        |    count = 0
+        |    for i in 0 downTo 5
+        |        count += 1
+        |    count
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ===== step =====
+
+  "for in inclusive with step" in {
+    compileAndRun(
+      """main() -> int
+        |    sum = 0
+        |    for i in 0..10 step 2
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 30
+  }
+
+  "for in exclusive with step" in {
+    compileAndRun(
+      """main() -> int
+        |    count = 0
+        |    for i in 0..<10 step 3
+        |        count += 1
+        |    count
+        |""".stripMargin) shouldBe 4
+  }
+
+  "for in downTo with step" in {
+    compileAndRun(
+      """main() -> int
+        |    sum = 0
+        |    for i in 10 downTo 0 step 2
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 30
+  }
+
+  // ===== Go-style for i, x in arr =====
+
+  "for i, x in array" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [5]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    arr[3] = 40
+        |    arr[4] = 50
+        |    sum = 0
+        |    for i, x in arr
+        |        sum = sum + x
+        |    sum
+        |""".stripMargin) shouldBe 150
+  }
+
+  "for i, x in array with index" in {
+    compileAndRun(
+      """main() -> int
+        |    arr: [4]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    arr[3] = 40
+        |    total = 0
+        |    for i, x in arr
+        |        total = total + i * x
+        |    total
+        |""".stripMargin) shouldBe 200
+  }
 }
