@@ -248,6 +248,17 @@ memchr(s: *byte, c: int, n: int) -> *byte
 
     *byte(0)
 
+/* Search n bytes of s for c, starting from the end. */
+memrchr(s: *byte, c: int, n: int) -> *byte
+    var i = n
+
+    while i > 0
+        i--
+
+        if s[i] == c then return s + i
+
+    *byte(0)
+
 /* Copy src to dst, guaranteeing null-termination. Returns strlen(src). */
 strlcpy(dst: *byte, src: *byte, dstsize: int) -> int
     var i = 0

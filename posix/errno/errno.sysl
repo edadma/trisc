@@ -1,0 +1,60 @@
+module posix.errno
+
+/*
+ * errno.sysl — Error number definitions (<errno.h>)
+ *
+ * Standard POSIX error codes. The global errno variable is set by
+ * system calls and library functions to indicate errors.
+ */
+
+var errno = 0
+
+/* Set errno to the given value. */
+set_errno(e: int)
+    errno = e
+
+/* Get the current errno value. */
+get_errno() -> int = errno
+
+val EPERM = 1           /* Operation not permitted */
+val ENOENT = 2          /* No such file or directory */
+val ESRCH = 3           /* No such process */
+val EINTR = 4           /* Interrupted system call */
+val EIO = 5             /* I/O error */
+val ENXIO = 6           /* No such device or address */
+val E2BIG = 7           /* Argument list too long */
+val ENOEXEC = 8         /* Exec format error */
+val EBADF = 9           /* Bad file descriptor */
+val ECHILD = 10         /* No child processes */
+val EAGAIN = 11         /* Try again / Resource temporarily unavailable */
+val ENOMEM = 12         /* Out of memory */
+val EACCES = 13         /* Permission denied */
+val EFAULT = 14         /* Bad address */
+val EBUSY = 16          /* Device or resource busy */
+val EEXIST = 17         /* File exists */
+val EXDEV = 18          /* Cross-device link */
+val ENODEV = 19         /* No such device */
+val ENOTDIR = 20        /* Not a directory */
+val EISDIR = 21         /* Is a directory */
+val EINVAL = 22         /* Invalid argument */
+val ENFILE = 23         /* File table overflow */
+val EMFILE = 24         /* Too many open files */
+val ENOTTY = 25         /* Not a typewriter */
+val EFBIG = 27          /* File too large */
+val ENOSPC = 28         /* No space left on device */
+val ESPIPE = 29         /* Illegal seek */
+val EROFS = 30          /* Read-only file system */
+val EMLINK = 31         /* Too many links */
+val EPIPE = 32          /* Broken pipe */
+val EDOM = 33           /* Math argument out of domain */
+val ERANGE = 34         /* Math result not representable */
+val EDEADLK = 35        /* Resource deadlock would occur */
+val ENAMETOOLONG = 36   /* File name too long */
+val ENOSYS = 38         /* Function not implemented */
+val ENOTEMPTY = 39      /* Directory not empty */
+val ELOOP = 40          /* Too many symbolic links */
+val EWOULDBLOCK = 11    /* Same as EAGAIN */
+val ENOPROTOOPT = 92    /* Protocol not available */
+val ENOTSOCK = 88       /* Socket operation on non-socket */
+val ECONNREFUSED = 111  /* Connection refused */
+val ETIMEDOUT = 110     /* Connection timed out */

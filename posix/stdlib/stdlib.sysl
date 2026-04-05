@@ -66,6 +66,52 @@ pow(base: int, exp: int) -> int
 div(numer: int, denom: int) -> div_t
     div_t(numer / denom, numer % denom)
 
+/* Convert an integer to a string in the given buffer. Returns the buffer pointer.
+ * buf must be large enough (12 bytes for int, 21 for i64).
+ */
+itoa(value: int, buf: *byte, base: int) -> *byte
+    var v = value
+    var neg = false
+
+    if v < 0 && base == 10
+        neg = true
+        v = -v
+
+    var i = 0
+
+    if v == 0
+        buf[0] = '0'
+        i = 1
+    else
+        while v != 0
+            val d = v % base
+
+            if d < 10 then buf[i] = int('0') + d
+            else buf[i] = int('a') + d - 10
+
+            v = v / base
+            i++
+
+    if neg
+        buf[i] = '-'
+        i++
+
+    buf[i] = 0
+
+    /* Reverse in place. */
+    var lo = 0
+    var hi = i - 1
+
+    while lo < hi
+        val t = buf[lo]
+
+        buf[lo] = buf[hi]
+        buf[hi] = t
+        lo++
+        hi--
+
+    buf
+
 /* Convert a string to an integer, skipping leading whitespace and optional sign. */
 atoi(s: *byte) -> int
     var p = s
