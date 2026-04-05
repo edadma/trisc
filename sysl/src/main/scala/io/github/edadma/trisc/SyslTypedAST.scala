@@ -41,6 +41,7 @@ case object TBreakStmt extends TStmt
 case object TContinueStmt extends TStmt
 case class TDeferStmt(body: TStmt) extends TStmt
 case class TAsmStmt(code: String) extends TStmt
+case class TAsmExpr(code: String, typ: SyslType) extends TExpr
 case class TExprStmt(expr: TExpr) extends TStmt
 
 // Expressions — every expression carries its type

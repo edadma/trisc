@@ -65,6 +65,7 @@ case class BreakStmtAST() extends StmtAST
 case class ContinueStmtAST() extends StmtAST
 case class DeferStmtAST(body: StmtAST) extends StmtAST
 case class AsmStmtAST(code: String) extends StmtAST
+case class AsmExprAST(code: String) extends ExpressionAST
 case class ExprStmtAST(expr: ExpressionAST) extends StmtAST
 
 // Expressions

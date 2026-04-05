@@ -11,6 +11,23 @@ module posix.math
 val PI = 3.14159265358979323846
 val LN2 = 0.69314718055994530942
 val LN10 = 2.30258509299404568402
+val E = 2.71828182845904523536
+val HUGE_VAL = 1.0e308
+
+/* Test whether x is NaN. NaN is the only value not equal to itself. */
+isnan(x: double) -> int = int(x != x)
+
+/* Test whether x is positive or negative infinity. */
+isinf(x: double) -> int = int(x == 1.0e308 * 10.0 || x == -1.0e308 * 10.0)
+
+/* Test whether x is finite (not NaN and not infinity). */
+isfinite(x: double) -> int = int(isnan(x) == 0 && isinf(x) == 0)
+
+/* Return 1 if x is negative (including -0.0), 0 otherwise. */
+signbit(x: double) -> int
+    if x < 0.0 then 1
+    elif x == 0.0 && 1.0 / x < 0.0 then 1
+    else 0
 
 /* Return the absolute value of x. */
 fabs(x: double) -> double = if x < 0.0 then -x else x
@@ -132,7 +149,7 @@ cos(x: double) -> double
 /* Return the tangent of x (radians). */
 tan(x: double) -> double
     // TODO: maps to ftan instruction; needs inline asm or compiler intrinsic
-    cos(x) |> val c
+    val c = cos(x)
 
     if c == 0.0 then return 0.0  // degenerate — hardware would return ±inf
 

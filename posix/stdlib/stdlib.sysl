@@ -23,6 +23,12 @@ min(a: int, b: int) -> int = if a < b then a else b
 /* Return the larger of a and b. */
 max(a: int, b: int) -> int = if a > b then a else b
 
+/* Return the smaller of a and b (long). */
+lmin(a: i64, b: i64) -> i64 = if a < b then a else b
+
+/* Return the larger of a and b (long). */
+lmax(a: i64, b: i64) -> i64 = if a > b then a else b
+
 /* Clamp x to the range [lo, hi]. */
 clamp(x: int, lo: int, hi: int) -> int
     if x < lo then lo

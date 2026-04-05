@@ -840,6 +840,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case _ => v
           case _ => v
 
+      case TAsmExpr(_, _) => IntVal(0) // no-op in interpreter
+
       case TSizeof(size, _) => IntVal(size)
 
       case TLen(inner, _) =>
