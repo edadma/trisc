@@ -56,7 +56,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private def matchPattern(pat: TMatchPattern, value: Value, env: Env): Boolean =
     pat match
       case TWildcard => true
-      case TValuePattern(expr) => toLong(evalAny(expr, env)) == toLong(value)
+      case TValuePattern(expr) =>
+        val pv = evalAny(expr, env)
+        // String comparison must be structural (byte-for-byte), not pointer-based.
+        (pv, value) match
+          case (RefStringVal(lb, ll, _), RefStringVal(rb, rl, _)) =>
+            java.util.Arrays.equals(lb, 0, ll, rb, 0, rl)
+          case _ => toLong(pv) == toLong(value)
       case TRangePattern(low, high) =>
         val v = toLong(value)
         v >= toLong(evalAny(low, env)) && v <= toLong(evalAny(high, env))
