@@ -1143,9 +1143,31 @@ std/mem/mem.lsysl
 5 passed, 1 failed, 0 skipped — 0.6ms
 ```
 
-Exit code is 0 iff all tests pass.
+Exit code is 0 iff all tests pass. Failing tests print the source file and line of the `#test` attribute (`at file:line`).
 
-`panic(msg: string) -> void` is a builtin that halts with the given message — the primary failure signal inside tests.
+**Builtins useful in tests:**
+- `panic(msg: string) -> void` — halts with the given message. Primary failure signal inside tests.
+- `assert(cond: bool, msg: string) -> void` — panics with `msg` if `cond` is false; returns otherwise.
+
+### `#deprecated` — warn on use
+
+Marks a function as deprecated. Calls to the function emit a warning to stderr during analysis (once per callee per compilation):
+
+```
+#deprecated("use foo2 instead")
+foo() -> int = 1
+
+#deprecated
+old_api() -> int = 2
+```
+
+Warnings look like:
+```
+warning: 'foo' is deprecated: use foo2 instead
+warning: 'old_api' is deprecated
+```
+
+Calls still compile and run normally — `#deprecated` only reports usage.
 
 ---
 
