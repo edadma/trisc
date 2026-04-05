@@ -1478,6 +1478,20 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  ldi r1, 3")           // error code: 3 = abort
         emit("  trap 1")
 
+      case TCall("panic", _, _) =>
+        // message arg is discarded in codegen — emulator has no stderr channel
+        emit("  ldi r1, 4")           // error code: 4 = panic
+        emit("  trap 1")
+
+      case TCall("assert", List(cond, _), _) =>
+        // evaluate cond only; if false (r1 == 0), trap with error code 4
+        genExpr(cond)
+        val passLabel = newLabel("assert_pass")
+        emit(s"  bne r1, r0, $passLabel")
+        emit("  ldi r1, 4")           // error code: 4 = assert/panic
+        emit("  trap 1")
+        emit(s"$passLabel:")
+
       case TCall(name, args, retType) =>
         val callStructReturn = returnsViaPointer(retType)
         // If struct/string return, allocate space on caller's stack for the return value
