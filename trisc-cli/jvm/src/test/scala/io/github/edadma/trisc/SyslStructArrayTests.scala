@@ -435,4 +435,167 @@ class SyslStructArrayTests extends OSKitTestHelpers {
     output shouldBe "ABCDEFGHIJKLMNOPQRST"
     cpu.state shouldBe State.Halt
   }
+
+  // === Codegen bug: if/else + struct array field copy ===
+
+  "struct array: copy field between elements with if/else" in {
+    val (cpu, output) = runWithBoot(
+      """struct Thread
+        |    a: int
+        |    b: int
+        |    uid: int
+        |    c: int
+        |
+        |var threads: [4]Thread
+        |var current = 0
+        |
+        |main() -> int
+        |    threads[0].uid = 42
+        |    var idx = 1
+        |    if current >= 0
+        |        threads[idx].uid = threads[current].uid
+        |    else
+        |        threads[idx].uid = 0
+        |    if threads[1].uid == 42
+        |        putchar(89)
+        |    else
+        |        putchar(78)
+        |    0
+        |""".stripMargin
+    )
+    output shouldBe "Y"
+    cpu.state shouldBe State.Halt
+  }
+
+  "struct array: copy field between elements without if/else" in {
+    val (cpu, output) = runWithBoot(
+      """struct Thread
+        |    a: int
+        |    b: int
+        |    uid: int
+        |    c: int
+        |
+        |var threads: [4]Thread
+        |var current = 0
+        |
+        |main() -> int
+        |    threads[0].uid = 42
+        |    var idx = 1
+        |    threads[idx].uid = threads[current].uid
+        |    if threads[1].uid == 42
+        |        putchar(89)
+        |    else
+        |        putchar(78)
+        |    0
+        |""".stripMargin
+    )
+    output shouldBe "Y"
+    cpu.state shouldBe State.Halt
+  }
+
+  "struct array: copy field with larger struct (16 fields)" in {
+    val (cpu, output) = runWithBoot(
+      """struct Thread
+        |    f0: int
+        |    f1: int
+        |    f2: int
+        |    f3: int
+        |    f4: int
+        |    f5: int
+        |    f6: int
+        |    f7: int
+        |    f8: int
+        |    f9: int
+        |    f10: int
+        |    f11: int
+        |    f12: int
+        |    f13: int
+        |    uid: int
+        |    f15: i64
+        |
+        |var threads: [8]Thread
+        |var current_thread = 0
+        |
+        |main() -> int
+        |    threads[0].uid = 99
+        |    var idx = 1
+        |    if current_thread >= 0
+        |        threads[idx].uid = threads[current_thread].uid
+        |    else
+        |        threads[idx].uid = 0
+        |    if threads[1].uid == 99
+        |        putchar(89)
+        |    else
+        |        putchar(78)
+        |    0
+        |""".stripMargin
+    )
+    output shouldBe "Y"
+    cpu.state shouldBe State.Halt
+  }
+
+  "struct array: many field assignments then uid copy (create_thread_pri pattern)" in {
+    val (cpu, output) = runWithBoot(
+      """struct Thread
+        |    ssp: i64
+        |    state: int
+        |    wake_tick: int
+        |    name: i64
+        |    priority: int
+        |    join_target: int
+        |    quantum: int
+        |    next: int
+        |    ctx_switches: int
+        |    cpu_ticks: int
+        |    consec_quanta: int
+        |    notify_value: int
+        |    notify_pending: int
+        |    base_priority: int
+        |    uid: int
+        |    blocked_on: i64
+        |
+        |var threads: [8]Thread
+        |var current_thread = -1
+        |var thread_count = 0
+        |
+        |create_thread(priority: int)
+        |    val idx = thread_count
+        |    threads[idx].ssp = 0
+        |    threads[idx].state = 1
+        |    threads[idx].wake_tick = 0
+        |    threads[idx].name = 0
+        |    threads[idx].priority = priority
+        |    threads[idx].join_target = -1
+        |    threads[idx].quantum = 10
+        |    threads[idx].next = -1
+        |    threads[idx].ctx_switches = 0
+        |    threads[idx].cpu_ticks = 0
+        |    threads[idx].consec_quanta = 0
+        |    threads[idx].notify_value = 0
+        |    threads[idx].notify_pending = 0
+        |    threads[idx].base_priority = priority
+        |    threads[idx].blocked_on = 0
+        |    if current_thread >= 0
+        |        threads[idx].uid = threads[current_thread].uid
+        |    else
+        |        threads[idx].uid = 0
+        |    thread_count += 1
+        |
+        |main() -> int
+        |    // First thread: current_thread = -1, should use else branch
+        |    create_thread(0)
+        |    current_thread = 0
+        |    threads[0].uid = 42
+        |    // Second thread: current_thread = 0, should copy uid
+        |    create_thread(0)
+        |    if threads[1].uid == 42
+        |        putchar(89)
+        |    else
+        |        putchar(78)
+        |    0
+        |""".stripMargin
+    )
+    output shouldBe "Y"
+    cpu.state shouldBe State.Halt
+  }
 }

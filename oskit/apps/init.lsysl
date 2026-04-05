@@ -25,8 +25,11 @@ overlap. Each thread gets 0x4000 (16KB) with user and system
 stacks separated by 0x2000.
 
     init()
-        // Start system servers
+        // Start disk server first — TFS depends on it
         create_thread(disk_server, 0x80000, 0x7E000, "disk")
+        sleep(5)
+
+        // Start TFS and TTY servers
         create_thread(tfs_server, 0x84000, 0x82000, "tfs")
         create_thread(tty_server, 0x88000, 0x86000, "tty")
 
