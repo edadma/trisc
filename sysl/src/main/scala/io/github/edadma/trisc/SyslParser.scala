@@ -192,8 +192,11 @@ class SyslParser extends StandardTokenParsers {
   def declBody(priv: Boolean): Parser[DeclAST] =
     ident ~ ("." ~> ident) ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
       case typeName ~ methodName ~ params ~ ((rt, body)) =>
-        // Sem.wait(params) -> ret { body } desugars to Sem_wait(self: *Sem, params) -> ret { body }
-        val selfParam = ParamAST("self", PtrTypeAST(NamedTypeAST(typeName)))
+        // Sem.wait(params) -> ret { body } desugars to Sem_wait(__self__: *Sem, params) -> ret { body }
+        // The parameter is named `__self__` to avoid collisions with user-declared
+        // params named `self`. The analyzer auto-aliases `self` -> `__self__` in
+        // method bodies, so users still write `self.x`.
+        val selfParam = ParamAST("__self__", PtrTypeAST(NamedTypeAST(typeName)))
         FunDeclAST(s"${typeName}_$methodName", selfParam :: params, rt, body, priv)
     } |
     ident ~ typeParamListWithBounds ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {

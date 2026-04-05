@@ -8,6 +8,7 @@ class SyslTriscCodegen(addresses: Int = 4):
   private val stringLiterals = new mutable.ListBuffer[(String, String)]() // (label, value)
   private var needsAllocExtern = false // set when codegen emits malloc/free references
   private var needsStrInt = false // set when codegen needs __str_int helper
+  private var needsStrFloat = false // set when codegen needs __str_float helper
 
   private def newLabel(prefix: String): String =
     labelCounter += 1
@@ -23,6 +24,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     deinitTypes.clear()
     needsAllocExtern = false
     needsStrInt = false
+    needsStrFloat = false
 
     // Scan for deinit methods: functions named TypeName_deinit
     for decl <- program.decls do
@@ -58,6 +60,9 @@ class SyslTriscCodegen(addresses: Int = 4):
 
     // Emit __str_int helper if needed (integer to string conversion)
     if needsStrInt then emitStrIntHelper()
+
+    // Emit __str_float helper if needed (float to string conversion)
+    if needsStrFloat then emitStrFloatHelper()
 
     // Emit rodata segment — string literals with immortal refcount headers
     if stringLiterals.nonEmpty then
@@ -96,9 +101,12 @@ class SyslTriscCodegen(addresses: Int = 4):
                     case None => emit(s"  $elemDir 0")
               case _ =>
                 val directive = emitDataDirective(typ)
-                constEval(init) match
-                  case Some(n) => emit(s"  $directive $n")
-                  case None => emit(s"  $directive 0")
+                floatConstEval(init) match
+                  case Some(d) => emit(s"  $directive $d")
+                  case None =>
+                    constEval(init) match
+                      case Some(n) => emit(s"  $directive $n")
+                      case None => emit(s"  $directive 0")
           case _ =>
 
     // Emit bss segment — zero-initialized globals (arrays, structs, uninitialized)
@@ -170,14 +178,24 @@ class SyslTriscCodegen(addresses: Int = 4):
     init match
       case TArrayLit(_, _) => false // array literal has explicit values → data
       case _ =>
-        typ match
-          case SyslType.ArrayType(_, _) => true // uninitialized array → bss
-          case _: SyslType.StructType => true // struct → bss
-          case _ =>
-            constEval(init) match
-              case Some(0) => true // explicitly zero → bss
-              case None => true // no initializer → bss
-              case _ => false // nonzero constant → data
+        floatConstEval(init) match
+          case Some(0.0) => true  // explicit zero float → bss
+          case Some(_) => false   // nonzero float constant → data
+          case None =>
+            typ match
+              case SyslType.ArrayType(_, _) => true // uninitialized array → bss
+              case _: SyslType.StructType => true // struct → bss
+              case _ =>
+                constEval(init) match
+                  case Some(0) => true // explicitly zero → bss
+                  case None => true // no initializer → bss
+                  case _ => false // nonzero constant → data
+
+  // Compile-time evaluate a float expression (handles literal and unary minus).
+  private def floatConstEval(expr: TExpr): Option[Double] = expr match
+    case TFloatLit(d, _) => Some(d)
+    case TUnary("-", operand, _) => floatConstEval(operand).map(-_)
+    case _ => None
 
   // Does this return type require a caller-allocated return slot?
   private def returnsViaPointer(typ: SyslType): Boolean = typ.isInstanceOf[SyslType.StructType] || typ == SyslType.StringType || typ.isInstanceOf[SyslType.SliceType] || typ.isInstanceOf[SyslType.EnumType]
@@ -1852,9 +1870,13 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  mov r1, r7")
 
       case TStr(inner) =>
-        // Convert integer/bool value to string via __str_int helper
-        genExpr(inner) // r1 = integer value
-        needsStrInt = true
+        // Convert value to string — dispatch on type.
+        // __str_int handles integers/bool (bits interpreted as signed i64);
+        // __str_float handles f64 values.
+        val isFloat = inner.typ == SyslType.DoubleType
+        genExpr(inner) // r1 = value (integer bits or f64 bits)
+        if isFloat then needsStrFloat = true
+        else needsStrInt = true
         needsAllocExtern = true
         // Allocate 16-byte return slot for the result string
         emitAddImm(7, 7, -16)
@@ -1862,13 +1884,14 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  std r0, r7, r0")
         emitAddImm(2, 7, 8)
         emit("  std r0, r2, r0")
-        // Push value as stack arg for __str_int
+        // Push value as stack arg
         emit("  pshd r1")
         stackOffset -= 8
         // r1 = hidden return slot ptr (just above the pushed value)
         emitAddImm(1, 7, 8)
-        // Call __str_int
-        emit("  movi r4, __str_int")
+        // Call helper
+        if isFloat then emit("  movi r4, __str_float")
+        else emit("  movi r4, __str_int")
         emit("  jalr r6, r4")
         // Clean value arg
         emitAddImm(7, 7, 8)
@@ -2755,6 +2778,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType => "db"
     case SyslType.IntType(16) | SyslType.UIntType(16) => "ds"
     case SyslType.IntType(32) | SyslType.UIntType(32) => "dw"
+    case SyslType.DoubleType => "dd"
     case _ => "dl"
 
   // Emit address of local variable into target register
@@ -2911,6 +2935,206 @@ class SyslTriscCodegen(addresses: Int = 4):
     emit("  popd r5")
     emit("  popd r6")
     emitAddImm(7, 7, 8)             // skip 1 reg param
+    emit("  jalr r0, r6")
+
+  // Emit the __str_float helper: converts f64 to a refcounted string with
+  // fixed 6-digit fractional precision (e.g. 3.14 -> "3.140000", -0.5 -> "-0.500000").
+  // ABI: r1 = hidden return slot ptr, [fp+24] = f64 value (bits)
+  // Returns: {ptr, len} written to return slot, r1 = return slot address
+  private def emitStrFloatHelper(): Unit =
+    emit("# helper: __str_float(value: f64) -> string")
+    emit("global __str_float, func, 1 i64 i64")
+    emit("__str_float:")
+    // Pre-prologue: save hidden return ptr
+    emit("  pshd r1")
+    // Prologue
+    emit("  pshd r6")
+    emit("  pshd r5")
+    emit("  mov r5, r7")
+    // [fp+16] = hidden return ptr, [fp+24] = f64 value (bits)
+    //
+    // Locals (56 bytes):
+    //   [fp-8]  = is_negative (i64: 0 or 1)
+    //   [fp-16] = int_part    (i64: |v| truncated to integer)
+    //   [fp-24] = scaled_frac (i64: rounded |frac| * 1e6, in [0, 999999])
+    //   [fp-32] = int_digit_count (i64)
+    //   [fp-56] = digit_buffer[24]  (reversed int digits)
+    emitAddImm(7, 7, -56)
+
+    // Load value from [fp+24]
+    emitAddImm(2, 5, 24)
+    emit("  ldd r1, r2, r0")       // r1 = v (f64 bits)
+
+    // Check sign: v < 0.0
+    emit("  ldc r2, 0.0")
+    emit("  fslt r3, r1, r2")      // r3 = 1 if v < 0
+    emitAddImm(4, 5, -8)
+    emit("  std r3, r4, r0")       // save is_negative
+
+    // Abs
+    emit("  fabs r1, r1")
+
+    // int_part = fint(|v|) (truncates)
+    emit("  fint r2, r1")          // r2 = int_part (i64)
+
+    // frac_f = |v| - cvt(int_part)
+    emit("  cvt r3, r2")           // r3 = float bits of int_part
+    emit("  fsub r1, r1, r3")      // r1 = frac (f64, in [0, 1))
+
+    // scaled = fint(frac * 1e6 + 0.5)   (round to nearest)
+    emit("  ldc r3, 1000000.0")
+    emit("  fmul r1, r1, r3")
+    emit("  ldc r3, 0.5")
+    emit("  fadd r1, r1, r3")
+    emit("  fint r1, r1")          // r1 = scaled_frac (i64)
+
+    // Rollover: if scaled_frac >= 1000000, int_part++, scaled_frac = 0
+    emit("  movi r3, 1000000")
+    emit("  slt r4, r1, r3")       // r4 = 1 if scaled_frac < 1000000
+    val noRollLabel = newLabel("strf_noroll")
+    emit(s"  bne r4, r0, $noRollLabel")
+    emit("  addi r2, r2, 1")
+    emit("  ldi r1, 0")
+    emit(s"$noRollLabel")
+
+    // Save int_part and scaled_frac
+    emitAddImm(4, 5, -16)
+    emit("  std r2, r4, r0")       // int_part
+    emitAddImm(4, 5, -24)
+    emit("  std r1, r4, r0")       // scaled_frac
+
+    // Extract integer digits into buffer at [fp-56]
+    emitAddImm(4, 5, -16)
+    emit("  ldd r1, r4, r0")       // r1 = int_part
+    emit("  ldi r3, 0")            // r3 = digit_count
+
+    // Special case: int_part == 0
+    val intLoopLabel = newLabel("strf_int_loop")
+    val intDoneLabel = newLabel("strf_int_done")
+    emit(s"  bne r1, r0, $intLoopLabel")
+    emitAddImm(4, 5, -56)
+    emit("  ldi r2, 48")           // '0'
+    emit("  stb r2, r4, r0")
+    emit("  ldi r3, 1")
+    emit(s"  bra $intDoneLabel")
+
+    // Division loop: extract int digits
+    emit(s"$intLoopLabel")
+    emit(s"  beq r1, r0, $intDoneLabel")
+    // Save digit_count (div clobbers r2)
+    emitAddImm(4, 5, -32)
+    emit("  std r3, r4, r0")
+    emit("  ldi r3, 10")
+    emit("  div r1, r1, r3")       // r1 = quot, r2 = rem
+    emit("  addi r2, r2, 48")
+    // Restore digit_count
+    emitAddImm(4, 5, -32)
+    emit("  ldd r3, r4, r0")
+    emitAddImm(4, 5, -56)
+    emit("  add r4, r4, r3")
+    emit("  stb r2, r4, r0")
+    emit("  addi r3, r3, 1")
+    emit(s"  bra $intLoopLabel")
+
+    emit(s"$intDoneLabel")
+    // Save int_digit_count
+    emitAddImm(4, 5, -32)
+    emit("  std r3, r4, r0")
+
+    // total_length = is_negative + int_digit_count + 1 (.) + 6 (frac digits)
+    emitAddImm(4, 5, -8)
+    emit("  ldd r2, r4, r0")       // r2 = is_negative
+    emit("  add r1, r3, r2")       // r1 = is_negative + int_digit_count
+    emit("  addi r1, r1, 7")       // + 1 (dot) + 6 (frac)
+    emit("  pshd r1")              // save total_length
+
+    // Malloc(8 + total_length)
+    emit("  addi r1, r1, 8")
+    emit("  movi r4, malloc")
+    emit("  jalr r6, r4")
+
+    // Null check
+    val allocOkLabel = newLabel("strf_alloc_ok")
+    emit(s"  bne r1, r0, $allocOkLabel")
+    emit("  ldi r1, 2")
+    emit("  trap 1")
+    emit(s"$allocOkLabel")
+
+    // Set refcount = 1 at [base+0]
+    emit("  ldi r2, 1")
+    emit("  std r2, r1, r0")
+    // data_ptr = base + 8
+    emit("  addi r1, r1, 8")
+
+    // Pop total_length (keep on stack briefly for return)
+    emit("  popd r3")              // r3 = total_length
+    emit("  pshd r1")              // save data_ptr
+    emit("  pshd r3")              // save total_length
+
+    // Write '-' if negative
+    emitAddImm(4, 5, -8)
+    emit("  ldd r2, r4, r0")
+    val noSignLabel = newLabel("strf_nosign")
+    emit(s"  beq r2, r0, $noSignLabel")
+    emit("  ldi r2, 45")           // '-'
+    emit("  stb r2, r1, r0")
+    emit("  addi r1, r1, 1")
+    emit(s"$noSignLabel")
+
+    // Copy int digits from buffer in reverse
+    emitAddImm(4, 5, -32)
+    emit("  ldd r3, r4, r0")       // r3 = int_digit_count
+    emitAddImm(4, 5, -56)
+    emit("  add r4, r4, r3")       // r4 = &buffer[count] (one past last)
+    val copyIntLabel = newLabel("strf_copy_int")
+    val copyIntDoneLabel = newLabel("strf_copy_int_done")
+    emit(s"$copyIntLabel")
+    emit(s"  beq r3, r0, $copyIntDoneLabel")
+    emit("  addi r4, r4, -1")
+    emit("  ldb r2, r4, r0")
+    emit("  stb r2, r1, r0")
+    emit("  addi r1, r1, 1")
+    emit("  addi r3, r3, -1")
+    emit(s"  bra $copyIntLabel")
+    emit(s"$copyIntDoneLabel")
+
+    // Write '.'
+    emit("  ldi r2, 46")           // '.'
+    emit("  stb r2, r1, r0")
+    emit("  addi r1, r1, 1")
+
+    // Write 6 fractional digits from scaled_frac (MSB first — divide by 100000, 10000, ...)
+    // Load scaled_frac
+    emitAddImm(4, 5, -24)
+    emit("  ldd r2, r4, r0")       // r2 = scaled_frac
+    // For each divisor 100000, 10000, 1000, 100, 10, 1:
+    for divisor <- List(100000, 10000, 1000, 100, 10, 1) do
+      emitLoadImm(3, divisor)
+      emit("  div r3, r2, r3")     // r3 = scaled_frac / divisor, r4 = remainder
+      emit("  mov r2, r4")         // r2 = new remainder
+      emit("  addi r3, r3, 48")    // r3 = ASCII digit
+      emit("  stb r3, r1, r0")
+      emit("  addi r1, r1, 1")
+
+    // Pop total_length and data_ptr
+    emit("  popd r3")              // r3 = total_length
+    emit("  popd r1")              // r1 = data_ptr
+
+    // Write {ptr, len} to return slot
+    emitAddImm(4, 5, 16)
+    emit("  ldd r4, r4, r0")       // r4 = return slot address
+    emit("  std r1, r4, r0")
+    emit("  addi r2, r4, 8")
+    emit("  std r3, r2, r0")
+
+    // r1 = return slot address
+    emit("  mov r1, r4")
+
+    // Epilogue
+    emit("  mov r7, r5")
+    emit("  popd r5")
+    emit("  popd r6")
+    emitAddImm(7, 7, 8)            // skip 1 reg param
     emit("  jalr r0, r6")
 
   private def emit(line: String): Unit =

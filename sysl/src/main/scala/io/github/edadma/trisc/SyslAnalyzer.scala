@@ -155,6 +155,14 @@ class SyslAnalyzer:
             val resolvedFields = fields.map((n, t) => (n, resolveType(t)))
             structTypes(name) = SyslType.StructType(name, resolvedFields)
         case fd @ FunDeclAST(name, params, returnType, _, _, typeParams, _, _) =>
+          // Duplicate-parameter-name check.
+          val seenParams = mutable.HashSet[String]()
+          for p <- params do
+            if !seenParams.add(p.name) then
+              val friendly = if p.name == "__self__"
+                then "method '$name' already has an implicit 'self' parameter — remove the explicit 'self: *Type' declaration"
+                else s"duplicate parameter name '${p.name}' in function '$name'"
+              throw AnalysisError(friendly, decl)
           if typeParams.nonEmpty then
             // Generic function: store as template, don't resolve types yet
             if genericTemplates.contains(name) || functions.contains(name) then
@@ -172,7 +180,7 @@ class SyslAnalyzer:
               deprecations(name) = reason
             // Register as method if name matches StructName_methodName pattern
             val underscoreIdx = name.indexOf('_')
-            if underscoreIdx > 0 && params.nonEmpty && params.head.name == "self" then
+            if underscoreIdx > 0 && params.nonEmpty && params.head.name == "__self__" then
               val structName = name.substring(0, underscoreIdx)
               val methodName = name.substring(underscoreIdx + 1)
               if structTypes.contains(structName) then
@@ -327,6 +335,11 @@ class SyslAnalyzer:
         currentReturnType = funInfo.returnType
         for (paramName, paramType) <- funInfo.params do
           currentScope(paramName) = SymInfo(paramName, paramType, true)
+          // Auto-alias the implicit method receiver: `self` -> `__self__`
+          // so method bodies can write `self.x` while the actual parameter
+          // is named `__self__` to avoid conflicting with user-declared names.
+          if paramName == "__self__" then
+            currentScope("self") = SymInfo(paramName, paramType, true)
         val savedExp = currentExpected
         currentExpected = if funInfo.returnType == VoidType then None else Some(funInfo.returnType)
         val tBody = try body match
@@ -367,7 +380,7 @@ class SyslAnalyzer:
           throw AnalysisError(s"#test function '${fd.name}' cannot be generic", fd)
         // Methods are registered via the StructName_methodName convention; reject those
         val underscoreIdx = fd.name.indexOf('_')
-        if underscoreIdx > 0 && fd.params.nonEmpty && fd.params.head.name == "self" then
+        if underscoreIdx > 0 && fd.params.nonEmpty && fd.params.head.name == "__self__" then
           throw AnalysisError(s"#test cannot be applied to a method ('${fd.name}')", fd)
 
   private def resolveType(t: TypeAST): SyslType = t match
@@ -1069,7 +1082,7 @@ class SyslAnalyzer:
         else
           // Check for no-arg enum variant before falling through to variable lookup
           tryLookup(name) match
-            case Some(sym) => TVarRef(name, sym.typ)
+            case Some(sym) => TVarRef(sym.name, sym.typ)
             case None =>
               if variantToEnum.contains(name) then
                 val (et, idx) = variantToEnum(name)

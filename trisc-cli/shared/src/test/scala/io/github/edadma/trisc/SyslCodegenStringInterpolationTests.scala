@@ -155,4 +155,85 @@ class SyslCodegenStringInterpolationTests extends SyslCodegenHelpers {
     compileMultiAndRun(allocSources(
       "import posix.stdlib.*\nmain() -> int\n    x = 42\n    s: string = s\"v=$x\"\n    len(s)\n")) shouldBe 4
   }
+
+  // ===== Float interpolation (6-digit fixed precision) =====
+
+  "str of positive float" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |main() -> int
+        |    val x = 3.14
+        |    puts(str(x))
+        |    0
+        |""".stripMargin))
+    out shouldBe "3.140000"
+  }
+
+  "str of negative float" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |main() -> int
+        |    val x = 0.0 - 0.5
+        |    puts(str(x))
+        |    0
+        |""".stripMargin))
+    out shouldBe "-0.500000"
+  }
+
+  "str of zero float" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |main() -> int
+        |    val x = 0.0
+        |    puts(str(x))
+        |    0
+        |""".stripMargin))
+    out shouldBe "0.000000"
+  }
+
+  "str of integer-valued float" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |main() -> int
+        |    val x = 42.0
+        |    puts(str(x))
+        |    0
+        |""".stripMargin))
+    out shouldBe "42.000000"
+  }
+
+  "interpolate float variable" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |main() -> int
+        |    val x = 1.5
+        |    puts(s"x = $x")
+        |    0
+        |""".stripMargin))
+    out shouldBe "x = 1.500000"
+  }
+
+  "interpolate float expression" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |main() -> int
+        |    val a = 2.5
+        |    val b = 1.5
+        |    puts(s"sum=${a + b}")
+        |    0
+        |""".stripMargin))
+    out shouldBe "sum=4.000000"
+  }
+
+  "interpolate int and float together" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |main() -> int
+        |    val i = 10
+        |    val f = 0.25
+        |    puts(s"i=$i f=$f")
+        |    0
+        |""".stripMargin))
+    out shouldBe "i=10 f=0.250000"
+  }
 }
