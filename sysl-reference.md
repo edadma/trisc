@@ -309,6 +309,10 @@ extern var errno: int
 "hello"               // string literal
 true, false           // bool
 [1, 2, 3]            // array literal
+1_000_000             // underscore separators (decimal, hex, float, exponent)
+0xDEAD_BEEF           // grouping for readability
+0xFF_00_FF_00u32      // combined with type suffix
+3.141_592             // underscores in fractional part
 ```
 
 ### Operators (by precedence, lowest to highest)
