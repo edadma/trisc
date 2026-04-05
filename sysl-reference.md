@@ -464,6 +464,22 @@ for i = 0; i < 10; i++
 // for-do (inline)
 for i = 0; i < 10; i++ do sum += i
 
+// for-in range (inclusive — includes upper bound)
+for i in 1..5
+    body                       // i takes 1, 2, 3, 4, 5
+
+// for-in range (exclusive — excludes upper bound)
+for i in 0..<5
+    body                       // i takes 0, 1, 2, 3, 4
+
+// for-in with do inline
+for i in 0..<n do print(i)
+
+// `in` as range membership operator
+x in 1..4                       // true if 1 <= x <= 4 (inclusive)
+x in 1..<4                      // true if 1 <= x < 4  (exclusive)
+if score in 90..100 then grade = 'A'
+
 // break and continue
 while true
     if done then break

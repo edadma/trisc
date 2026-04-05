@@ -299,7 +299,22 @@ class SyslParser extends StandardTokenParsers {
     } |
       "for" ~> identStmt ~ (";" ~> expr) ~ (";" ~> forUpdate) ~ block ^^ {
         case init ~ cond ~ update ~ body => ForStmtAST(init, cond, update, body)
+      } |
+      "for" ~> ident ~ ("in" ~> logicalOr) ~ (("..<" | "..") ~ logicalOr) ~ ("do" ~> (block | inlineStmt ^^ (s => List(s)))) ^^ {
+        case name ~ lo ~ (op ~ hi) ~ body => buildForRange(name, lo, op, hi, body)
+      } |
+      "for" ~> ident ~ ("in" ~> logicalOr) ~ (("..<" | "..") ~ logicalOr) ~ block ^^ {
+        case name ~ lo ~ (op ~ hi) ~ body => buildForRange(name, lo, op, hi, body)
       }
+
+  private def buildForRange(name: String, lo: ExpressionAST, op: String, hi: ExpressionAST, body: List[StmtAST]): ForStmtAST =
+    val condOp = if op == "..<" then "<" else "<="
+    ForStmtAST(
+      VarStmtAST(name, None, lo),
+      BinaryAST(VarRefAST(name), condOp, hi),
+      ExprStmtAST(PostIncAST(name)),
+      body,
+    )
 
   lazy val forUpdate: Parser[StmtAST] =
     identStmt | expr ^^ ExprStmtAST.apply
@@ -400,15 +415,20 @@ class SyslParser extends StandardTokenParsers {
     "==" | "!=" | "<=" | ">=" | "<" | ">"
 
   lazy val comparison: Parser[ExpressionAST] =
-    bitwiseOr ~ rep(comparisonOp ~ bitwiseOr) ^^ {
-      case first ~ Nil => first
-      case first ~ chain =>
-        val operands = first :: chain.map { case _ ~ operand => operand }
-        val ops = chain.map { case op ~ _ => op }
-        val pairs = for i <- ops.indices yield
-          BinaryAST(operands(i), ops(i), operands(i + 1))
-        pairs.reduceLeft((l, r) => BinaryAST(l, "&&", r))
-    }
+    bitwiseOr ~ ("in" ~> bitwiseOr) ~ (("..<" | "..") ~ bitwiseOr) ^^ {
+      case x ~ lo ~ (op ~ hi) =>
+        val hiOp = if op == "..<" then "<" else "<="
+        BinaryAST(BinaryAST(x, ">=", lo), "&&", BinaryAST(x, hiOp, hi))
+    } |
+      bitwiseOr ~ rep(comparisonOp ~ bitwiseOr) ^^ {
+        case first ~ Nil => first
+        case first ~ chain =>
+          val operands = first :: chain.map { case _ ~ operand => operand }
+          val ops = chain.map { case op ~ _ => op }
+          val pairs = for i <- ops.indices yield
+            BinaryAST(operands(i), ops(i), operands(i + 1))
+          pairs.reduceLeft((l, r) => BinaryAST(l, "&&", r))
+      }
 
   lazy val bitwiseOr: Parser[ExpressionAST] =
     bitwiseXor ~ rep("|" ~> bitwiseXor) ^^ {

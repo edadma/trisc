@@ -239,4 +239,185 @@ class SyslForLoopTests extends SyslTestHelpers {
         |    0
         |""".stripMargin) shouldBe ""
   }
+
+  // ===== Range for loops =====
+
+  "for in inclusive range" in {
+    eval(
+      """main() -> int
+        |    sum = 0
+        |    for i in 1..5
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 15
+  }
+
+  "for in exclusive range" in {
+    eval(
+      """main() -> int
+        |    sum = 0
+        |    for i in 1..<5
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 10
+  }
+
+  "for in range with do inline" in {
+    output(
+      """main() -> int
+        |    for i in 0..<5 do print(i)
+        |    0
+        |""".stripMargin) shouldBe "01234"
+  }
+
+  "for in range with do block" in {
+    output(
+      """main() -> int
+        |    for i in 1..3 do
+        |        print(i)
+        |    0
+        |""".stripMargin) shouldBe "123"
+  }
+
+  "for in range with variable bounds" in {
+    eval(
+      """main() -> int
+        |    lo = 2
+        |    hi = 6
+        |    sum = 0
+        |    for i in lo..<hi
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 14
+  }
+
+  "for in range with break" in {
+    eval(
+      """main() -> int
+        |    sum = 0
+        |    for i in 0..100
+        |        if i > 4 then break
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 10
+  }
+
+  "for in range with continue" in {
+    output(
+      """main() -> int
+        |    for i in 0..<6
+        |        if i % 2 == 0 then continue
+        |        print(i)
+        |    0
+        |""".stripMargin) shouldBe "135"
+  }
+
+  "for in range nested" in {
+    output(
+      """main() -> int
+        |    for i in 0..<3
+        |        for j in 0..<3
+        |            print(i * 3 + j)
+        |    0
+        |""".stripMargin) shouldBe "012345678"
+  }
+
+  "for in range zero iterations (exclusive)" in {
+    eval(
+      """main() -> int
+        |    count = 0
+        |    for i in 0..<0
+        |        count += 1
+        |    count
+        |""".stripMargin) shouldBe 0
+  }
+
+  "for in range single iteration (inclusive)" in {
+    eval(
+      """main() -> int
+        |    count = 0
+        |    for i in 5..5
+        |        count += 1
+        |    count
+        |""".stripMargin) shouldBe 1
+  }
+
+  // ===== `in` range membership operator =====
+
+  "in inclusive range — inside" in {
+    eval(
+      """main() -> int
+        |    x = 4
+        |    if x in 1..4 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "in inclusive range — at lower bound" in {
+    eval(
+      """main() -> int
+        |    x = 1
+        |    if x in 1..4 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "in inclusive range — above" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if x in 1..4 then 1 else 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "in exclusive range — inside" in {
+    eval(
+      """main() -> int
+        |    x = 3
+        |    if x in 1..<4 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "in exclusive range — at upper bound (excluded)" in {
+    eval(
+      """main() -> int
+        |    x = 4
+        |    if x in 1..<4 then 1 else 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "in range — below lower" in {
+    eval(
+      """main() -> int
+        |    x = 0
+        |    if x in 1..4 then 1 else 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "in range with variable bounds" in {
+    eval(
+      """main() -> int
+        |    lo = 10
+        |    hi = 20
+        |    x = 15
+        |    if x in lo..hi then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "in range combined with && " in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    y = 7
+        |    if x in 1..10 && y in 5..8 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "in range as counting loop" in {
+    eval(
+      """main() -> int
+        |    count = 0
+        |    for i in 0..<20
+        |        if i in 5..10 then count += 1
+        |    count
+        |""".stripMargin) shouldBe 6
+  }
 }

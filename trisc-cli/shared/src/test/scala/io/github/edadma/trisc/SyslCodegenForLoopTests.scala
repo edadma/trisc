@@ -146,4 +146,96 @@ class SyslCodegenForLoopTests extends SyslCodegenHelpers {
         |    sum
         |""".stripMargin) shouldBe 15
   }
+
+  // ===== Range for loops =====
+
+  "for in inclusive range" in {
+    compileAndRun(
+      """main() -> int
+        |    sum = 0
+        |    for i in 1..5
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 15
+  }
+
+  "for in exclusive range" in {
+    compileAndRun(
+      """main() -> int
+        |    sum = 0
+        |    for i in 1..<5
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 10
+  }
+
+  "for in range with variable bounds" in {
+    compileAndRun(
+      """main() -> int
+        |    lo = 2
+        |    hi = 6
+        |    sum = 0
+        |    for i in lo..<hi
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 14
+  }
+
+  "for in range with break" in {
+    compileAndRun(
+      """main() -> int
+        |    sum = 0
+        |    for i in 0..100
+        |        if i > 4 then break
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 10
+  }
+
+  "for in range nested" in {
+    compileAndRun(
+      """main() -> int
+        |    sum = 0
+        |    for i in 0..<3
+        |        for j in 0..<3
+        |            sum = sum + i * 3 + j
+        |    sum
+        |""".stripMargin) shouldBe 36
+  }
+
+  // ===== `in` range membership operator =====
+
+  "in inclusive range — inside" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 4
+        |    if x in 1..4 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "in inclusive range — above" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 5
+        |    if x in 1..4 then 1 else 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "in exclusive range — upper bound excluded" in {
+    compileAndRun(
+      """main() -> int
+        |    x = 4
+        |    if x in 1..<4 then 1 else 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "in range with variable bounds" in {
+    compileAndRun(
+      """main() -> int
+        |    lo = 10
+        |    hi = 20
+        |    x = 15
+        |    if x in lo..hi then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
 }
