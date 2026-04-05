@@ -409,7 +409,44 @@ object SyslCli:
     val driver = new SyslDriver(Some(io), baseDirs)
     val result = driver.compile(sources)
     val stdlibImports = driver.collectStdlibImports(result.units)
-    val merged = TProgram(result.units.flatMap(_.typed.decls))
+
+    // Build per-test scoped programs so that each test sees only the
+    // functions from its own unit + transitively-imported units.
+    //
+    // Without this, merging all units into one TProgram lets functions
+    // from unrelated modules (e.g. std.bytes.trim_space) shadow the
+    // caller's intended function (std.strings.trim_space), since
+    // the interpreter keeps a flat function-name -> TFunDecl map.
+    val unitImports: Map[String, Set[String]] =
+      result.units.map(u =>
+        u.name -> u.typed.decls.collect { case TImportDecl(p) => p }.toSet
+      ).toMap
+    val unitsByModule: Map[String, List[CompilationUnit]] =
+      result.units.groupBy(_.modulePath.getOrElse(""))
+    val unitByName: Map[String, CompilationUnit] =
+      result.units.map(u => u.name -> u).toMap
+    def reachableUnits(startUnitName: String): Set[String] =
+      val visited = scala.collection.mutable.Set[String](startUnitName)
+      val queue = scala.collection.mutable.Queue[String](startUnitName)
+      while queue.nonEmpty do
+        val u = queue.dequeue()
+        val myModule = unitByName.get(u).flatMap(_.modulePath).getOrElse("")
+        // Same-module siblings
+        for sib <- unitsByModule.getOrElse(myModule, Nil) if !visited(sib.name) do
+          visited += sib.name
+          queue += sib.name
+        // Imported modules (only those that are in-tree; stdlib is wired separately)
+        for imp <- unitImports.getOrElse(u, Set.empty) do
+          for impUnit <- unitsByModule.getOrElse(imp, Nil) if !visited(impUnit.name) do
+            visited += impUnit.name
+            queue += impUnit.name
+      visited.toSet
+    val scopedPrograms = scala.collection.mutable.Map[String, TProgram]()
+    def programFor(unitName: String): TProgram =
+      scopedPrograms.getOrElseUpdate(unitName, {
+        val reach = reachableUnits(unitName)
+        TProgram(result.units.filter(u => reach(u.name)).flatMap(_.typed.decls))
+      })
 
     // Discover tests, tagging each with its unit
     val discovered = result.units.flatMap { unit =>
@@ -435,7 +472,7 @@ object SyslCli:
         currentUnit = t.unitName
         println(currentUnit)
       val start = System.nanoTime()
-      val outcome = runOneInterpreter(merged, stdlibImports, t)
+      val outcome = runOneInterpreter(programFor(t.unitName), stdlibImports, t)
       val elapsedMs = (System.nanoTime() - start) / 1e6
       outcome match
         case Pass =>
