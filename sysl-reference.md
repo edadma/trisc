@@ -77,7 +77,9 @@ struct Node
     next: *Node       // recursive via pointer
 ```
 
-### Enum Types
+### Enum Types (Simple)
+
+Simple enums are integer constants with auto-incrementing values:
 
 ```sysl
 enum Color
@@ -86,6 +88,57 @@ enum Color
     Blue = 10         // explicit value
     Yellow            // 11 (auto-increment)
 ```
+
+Access via `Color.Red`, `Color.Blue`, etc. At runtime, simple enum members are plain `i32` values.
+
+### Tagged Unions (Data Enums)
+
+Enums can carry data in each variant (Rust-style tagged unions):
+
+```sysl
+enum Shape
+    Circle(radius: int)
+    Rect(w: int, h: int)
+    Empty                   // no-data variant
+```
+
+**Construction:**
+```sysl
+s = Circle(5)              // variant with data
+e = Empty                  // no-data variant (bare name)
+e2 = Shape.Empty           // qualified name also works
+```
+
+**Pattern matching:**
+```sysl
+s match
+    Circle(r) -> r * r * 3    // destructure fields
+    Rect(w, h) -> w * h       // bind multiple fields
+    Empty -> 0                 // match no-data variant
+```
+
+**As function parameters and return values:**
+```sysl
+area(s: Shape) -> int
+    s match
+        Circle(r) -> r * r * 3
+        Rect(w, h) -> w * h
+        Empty -> 0
+
+make_shape(kind: int) -> Shape
+    if kind == 0 then Circle(5)
+    else Rect(3, 4)
+```
+
+**Guards on variant patterns:**
+```sysl
+s match
+    Circle(r) if r > 10 -> 1   // guard with binding
+    Circle(r) -> 2
+    Rect(w, h) -> 3
+```
+
+**Memory layout:** `{tag: i32, padding, data: union of variant fields}`. The tag is a small integer (0, 1, 2...) identifying the variant. Data is overlapping storage sized to the largest variant. `sizeof(Shape)` returns the total size including tag and padding.
 
 ### Type Aliases
 
@@ -175,16 +228,263 @@ double(x: int) = x * 2
 getAnswer() -> int = 42
 ```
 
+### Generic Functions
+
+Functions may declare type parameters in square brackets after the name, with
+optional trait bounds using `:` and `+`. The
+compiler monomorphizes each instantiation — one specialized copy per unique set
+of type arguments, just like Go or C++. Type arguments are inferred from the
+call-site argument types.
+
+```sysl
+// Identity — works for any type
+id[T](x: T) -> T = x
+
+// Swap via pointers — works for any T
+swap[T](a: *T, b: *T)
+    var tmp: T = *a
+    *a = *b
+    *b = tmp
+
+// Multiple type parameters
+pair_first[K, V](k: K, v: V) -> K = k
+
+// Instantiation-time checking: operations on T are checked when T is pinned.
+// max[int] works; max[bool] errors at the call site because > is not defined.
+max[T](a: T, b: T) -> T
+    if a > b then a else b
+
+main() -> int
+    var x = 10
+    var y = 20
+    swap(&x, &y)        // T inferred as int
+    max(1.5, 2.5)       // T inferred as f64
+    id(42)              // T inferred as int
+```
+
+**Trait bounds.** A type parameter may be constrained to types that implement
+one or more traits:
+
+```sysl
+maxOf[T: Ord](a: T, b: T) -> T       // T must implement Ord
+bothCheck[T: Ord + Eq](a: T, b: T)   // T must implement Ord AND Eq
+```
+
+Bounds are checked at each call site when the concrete type arguments are known.
+An unsatisfied bound produces a clear error naming the missing trait and the
+type parameter. Inside the generic body, operators like `a > b` and `a == b`
+route through the bounded trait's methods.
+
+**Rules:**
+- Type parameters may appear in parameter types, return type, and local variable
+  type annotations.
+- Type arguments are **inferred** from argument types (explicit type arguments
+  come in a later phase).
+- Each unique `(function, type-args)` combination produces one specialized copy
+  (cached; name-mangled to e.g. `swap_i32`).
+- Operations on a type parameter that are invalid for the concrete type produce
+  an error at the call site where the instantiation happens.
+
+### Generic Structs
+
+Structs may declare type parameters in square brackets after the name. Each
+distinct instantiation gets its own monomorphized struct layout and `sizeof`.
+
+```sysl
+struct Pair[T]
+    a: T
+    b: T
+
+struct Tuple[K, V]
+    key: K
+    value: V
+
+main() -> int
+    p = Pair(10, 20)            // T inferred as int from arg types
+    q: Pair[i64] = Pair(1i64, 2i64)
+    t = Tuple(5, 'A')
+    p.a + p.b + int(q.a) + t.key
+```
+
+**Rules:**
+- Type parameters appear in square brackets after the struct name.
+- Field types may reference the type parameters.
+- Constructor calls infer type arguments from the argument types.
+- Explicit type annotations (`Pair[int]`) may also be used in variable
+  declarations and parameter types.
+- Each `(struct, type-args)` pair produces one monomorphized struct type with a
+  mangled name (e.g. `Pair_i32`, `Tuple_i32_u32`).
+- Generic functions and generic structs compose: a function like
+  `swapPair[T](p: *Pair[T])` is fully supported — `T` is inferred from the
+  concrete `Pair[i32]` passed in.
+
+### Generic Tagged Unions
+
+Tagged unions (data enums) may declare type parameters — the foundation for
+`Option[T]`, `Result[T, E]`, and similar sum types.
+
+```sysl
+enum Option[T]
+    Some(value: T)
+    None
+
+enum Result[T, E]
+    Ok(value: T)
+    Err(error: E)
+
+safeDiv(a: int, b: int) -> Option[int]
+    if b == 0 then None
+    else Some(a / b)
+
+main() -> int
+    r = safeDiv(20, 4)
+    r match
+        Some(v) -> v
+        None -> -1
+```
+
+**Rules:**
+- Type parameters in square brackets after the enum name.
+- Variant field types may reference the type parameters.
+- Each `(enum, type-args)` pair produces one monomorphized `EnumType` with a
+  mangled name (e.g. `Option_i32`, `Result_i32_string`).
+- Pattern matching uses the scrutinee's concrete enum type to look up variants.
+
+**Type inference:** variant constructors prefer to infer type args from
+argument types (`Some(42)` infers `T=int`). When a variant doesn't pin all
+type parameters — e.g. `Ok(42)` for `Result[T, E]` leaves `E` unknown — the
+analyzer consults the **expected type** from context:
+
+| Context | Expected type source |
+|---|---|
+| `var x: Option[int] = None` | the declared variable type |
+| `fn f() -> Result[int, string] { Ok(42) }` | the function's return type |
+
+Without an expected type and incomplete argument-based inference, the compiler
+errors with a message asking for an explicit type annotation.
+
+### `?` Operator (Try)
+
+The postfix `?` operator on an enum value unwraps the success variant or
+early-returns the failure variant from the enclosing function. It's the
+standard ergonomic for working with `Option[T]` and `Result[T, E]`.
+
+```sysl
+enum Option[T]
+    Some(value: T)
+    None
+
+parseAndDouble(s: string, start: int) -> Option[int]
+    x = parseInt(s, start)?         // unwrap Some(x), or early-return None
+    Some(x * 2)
+```
+
+**Rules:**
+- Applies only to monomorphized generic enum values where the enum has exactly
+  two variants and the first variant has exactly one field (the success type).
+- The enclosing function's return type must be the **same** enum type as the
+  value being `?`-unwrapped (no error-type conversion yet).
+- `expr?` desugars at analyze time to:
+  ```
+  match expr
+      Success(v) -> v
+      Failure(...) -> return Failure(...)
+  ```
+  where `Success` is variant 0 and `Failure` is variant 1.
+- The result type of the whole `expr?` is the success variant's field type.
+
+**Chainable:** `a?.field` works if `a?` returns a struct; multiple `?`s across
+separate statements also work (e.g. `x = a?` followed by `y = b?`).
+
+### Traits and `impl` blocks
+
+Traits describe a set of methods a type may implement. Each trait is parameterized
+by a subject type `T` (the type that will conform). Methods may have default
+bodies; implementers override or inherit them. No orphan rule — any `impl` may
+be written anywhere.
+
+```sysl
+trait Ord[T]
+    cmp(a: T, b: T) -> int                  // required (no body)
+    lt(a: T, b: T) -> bool = cmp(a, b) < 0  // default body
+    le(a: T, b: T) -> bool = cmp(a, b) <= 0
+    gt(a: T, b: T) -> bool = cmp(a, b) > 0
+    ge(a: T, b: T) -> bool = cmp(a, b) >= 0
+
+impl Ord[int]
+    cmp(a: int, b: int) -> int = a - b
+
+main() -> int
+    if Ord.lt(3, 5) then 1 else 0
+```
+
+**Rules:**
+- A trait method with a body is a **default**; implementers may override it.
+- A trait method without a body is **required**; every impl must provide it.
+- `impl Trait[T]` for the same `(trait, type)` pair may appear only once.
+- Calls via `Trait.method(args)` infer the concrete target type from argument
+  types and dispatch to the matching impl's method.
+- Inside a default body, unqualified calls to sibling trait methods (like
+  `cmp(a, b)` inside `lt`) resolve to the current impl's methods.
+
+**Monomorphization:** each impl method — whether provided or synthesized from a
+default — compiles to a mangled top-level function like `Ord_cmp_i32`,
+`Ord_lt_i32`. There is no runtime dispatch; trait calls are resolved statically.
+
+### Operator Overloading via Traits
+
+Operators on user-defined struct and enum types desugar to trait method calls.
+The compiler maps each operator to a fixed `(trait, method)` pair and dispatches
+through the impl registered for the operand type.
+
+| Operator | Trait | Method | Signature |
+|---|---|---|---|
+| `<` `<=` `>` `>=` | `Ord` | `lt` `le` `gt` `ge` | `(T, T) -> bool` |
+| `==` `!=` | `Eq` | `eq` `ne` | `(T, T) -> bool` |
+| `+` | `Add` | `add` | `(T, T) -> T` |
+| `-` | `Sub` | `sub` | `(T, T) -> T` |
+| `*` | `Mul` | `mul` | `(T, T) -> T` |
+| `/` | `Div` | `div` | `(T, T) -> T` |
+
+```sysl
+struct Vec2
+    x: int
+    y: int
+
+trait Add[T]
+    add(a: T, b: T) -> T
+
+impl Add[Vec2]
+    add(a: Vec2, b: Vec2) -> Vec2 = Vec2(a.x + b.x, a.y + b.y)
+
+main() -> int
+    a = Vec2(1, 2)
+    b = Vec2(10, 20)
+    c = a + b                  // desugars to Add.add(a, b) → Add_add_Vec2(a, b)
+    c.x * 100 + c.y
+```
+
+Built-in numeric operators are unaffected — `3 + 4` on `int` still uses the
+native instruction. Dispatch through a trait only applies when the left operand
+is a struct or enum type.
+
+Operator sugar composes with generic functions. Inside `max[T](a: T, b: T)`,
+writing `a > b` works for any `T` that has an `Ord` impl, checked at
+instantiation time.
+
 ### Methods
 
-Methods are functions named `StructName_methodName` with a `self` parameter:
+Methods are declared with the `StructName.methodName(...)` syntax. The parser
+automatically prepends a hidden `__self__: *StructName` parameter, so you do
+**not** write `self` in the parameter list — just refer to `self` inside the
+method body:
 
 ```sysl
 struct Point
     x: int
     y: int
 
-Point.magnitude(self: *Point) -> int
+Point.magnitude() -> int
     self.x * self.x + self.y * self.y
 
 main() -> int
@@ -194,6 +494,9 @@ main() -> int
     p.magnitude()     // desugars to Point_magnitude(&p)
 ```
 
+Inside the method body, `self` is an alias for the implicit receiver — it
+has type `*StructName` (raw pointer to the instance).
+
 ### Deinit Blocks
 
 ```sysl
@@ -201,7 +504,7 @@ struct Buffer
     data: *byte
     size: int
 
-Buffer.deinit(self: *Buffer)
+Buffer.deinit()
     free(self.data)   // called automatically when &Buffer refcount hits 0
 ```
 
@@ -256,6 +559,10 @@ extern var errno: int
 "hello"               // string literal
 true, false           // bool
 [1, 2, 3]            // array literal
+1_000_000             // underscore separators (decimal, hex, float, exponent)
+0xDEAD_BEEF           // grouping for readability
+0xFF_00_FF_00u32      // combined with type suffix
+3.141_592             // underscores in fractional part
 ```
 
 ### Operators (by precedence, lowest to highest)
@@ -378,6 +685,13 @@ p match
     Point(_, y) -> y           // wildcard ignores field
     Point(x, y) if x == 0 -> y  // guard with bindings
 
+// tagged union (data enum) matching
+s match
+    Circle(r) -> r * r * 3    // match variant, bind fields
+    Rect(w, h) -> w * h       // each variant checked by tag
+    Empty -> 0                 // no-data variant
+    Circle(r) if r > 5 -> 1   // guard with variant binding
+
 // match with block bodies
 x match
     1 ->
@@ -403,6 +717,36 @@ for i = 0; i < 10; i++
 
 // for-do (inline)
 for i = 0; i < 10; i++ do sum += i
+
+// for-in range (inclusive — includes upper bound)
+for i in 1..5
+    body                       // i takes 1, 2, 3, 4, 5
+
+// for-in range (exclusive — excludes upper bound)
+for i in 0..<5
+    body                       // i takes 0, 1, 2, 3, 4
+
+// for-in with do inline
+for i in 0..<n do print(i)
+
+// for-in counting down (inclusive of both bounds)
+for i in 10 downTo 0
+    body                       // i takes 10, 9, ..., 0
+
+// for-in with step
+for i in 0..100 step 5          // 0, 5, 10, ..., 100
+for i in 0..<30 step 3          // 0, 3, 6, ..., 27
+for i in 20 downTo 0 step 4     // 20, 16, 12, 8, 4, 0
+
+// Go-style iteration over arrays/slices
+for i, x in arr
+    body                       // i = index, x = arr[i]
+
+// `in` as range membership operator
+x in 1..4                       // true if 1 <= x <= 4 (inclusive)
+x in 1..<4                      // true if 1 <= x < 4  (exclusive)
+x !in 1..4                      // negated membership
+if score in 90..100 then grade = 'A'
 
 // break and continue
 while true
@@ -586,6 +930,39 @@ s != t                    // structural inequality
 puts(s: *byte)            // can pass string directly
 ```
 
+### String Interpolation
+
+Prefix a string with `s` to enable interpolation. Use `$name` for variables and `${expr}` for expressions:
+
+```sysl
+x = 42
+s = s"value is $x"          // "value is 42"
+puts(s"${x + 1}")           // prints "43"
+name = "world"
+puts(s"hello $name")        // prints "hello world"
+puts(s"cost is $$5")        // prints "cost is $5" ($$ = literal $)
+```
+
+Plain strings (`"..."`) are never interpolated — `$` is just a regular character.
+
+Non-string expressions are automatically converted via `str()`. Integer, boolean, and float (`f64`) types are supported.
+
+### `str()` Builtin
+
+Converts a value to its string representation:
+
+```sysl
+str(42)                   // "42"
+str(-5)                   // "-5"
+str(0)                    // "0"
+str("hello")              // "hello" (identity for strings)
+str(3.14)                 // "3.140000" (codegen: fixed 6-digit fractional)
+```
+
+Float formatting uses fixed 6-digit fractional precision in TRISC codegen
+(`3.14 -> "3.140000"`). The interpreter uses the host's default float
+formatting (`3.14 -> "3.14"`).
+
 ### String Construction from Bytes
 
 ```sysl
@@ -617,6 +994,7 @@ s = string(data[:5])      // string from []byte slice
 | `len` | `(x) -> int` | Length of string, array, slice, or `&[]T` |
 | `cap` | `(x) -> int` | Capacity of slice or `&[]T` |
 | `append` | `(s: []T, elem: T) -> []T` | Append to slice (Go semantics) |
+| `str` | `(x) -> string` | Convert int/bool to string representation |
 | `string` | `(ptr: *T, len: int) -> string` | Construct string from pointer + length |
 | `string` | `(s: []byte) -> string` | Construct string from byte slice |
 | `malloc` | `(size: i64) -> *i8` | Allocate heap memory |
@@ -693,6 +1071,114 @@ The codegen emits `trap 1` for runtime errors. On the OS, the trap handler termi
 ```
 
 Conditions support: symbols, negation (`!`), equality (`==`), inequality (`!=`), numeric values.
+
+---
+
+## Attributes
+
+Attributes are annotations prefixed with `#` that attach to the following declaration. They appear on their own line(s) immediately before the declaration:
+
+```
+#test
+test_copy_basic() -> void
+    0
+
+#inline
+#deprecated("use foo2")
+foo() -> int = 1
+```
+
+**Forms:**
+- Flag: `#name`
+- With arguments: `#name(arg1, arg2, ...)` — arguments are literals (string, int, bool), bare identifiers, or `key: value` pairs
+
+Multiple attributes stack on separate preceding lines. Unknown attribute names are stored as-is (no error), so new attributes can be introduced incrementally.
+
+`#if` / `#else` / `#endif` (conditional compilation) use `#` but are not attributes — they work the same as before.
+
+### `#test` — unit tests
+
+Functions marked `#test` are unit tests. Requirements:
+- zero parameters,
+- returns `void` (or no return type),
+- not generic,
+- not a method.
+
+A test **passes** iff it does not panic. A panic (`panic("msg")`, `abort()`, or any runtime trap) fails the test.
+
+```
+#test
+test_trivial() -> void
+    assert(1 + 1 == 2, "math is broken")
+
+#test("descriptive name shown in output")
+test_with_display_name() -> void
+    0
+```
+
+**`should_panic`** — the test is expected to panic:
+
+```
+#test(should_panic)
+test_guard() -> void
+    panic("this must fire")
+
+#test(should_panic: "out of range")
+test_bounds() -> void
+    // substring match: panic message must contain "out of range"
+    panic("index 42 is out of range")
+```
+
+`#test` functions are **excluded from non-test builds** — `sysl compile` and `sysl run` strip them, so they don't contaminate normal execution and aren't emitted to `.asm` / `.tof` / `.ll` output.
+
+### `sysl test` — running tests
+
+```
+sysl test <path>                      # file or directory (recursive)
+sysl test --filter <pattern> <path>   # substring match on test/display name
+sysl test --backend interpreter|trisc|all <path>
+sysl test --fail-fast <path>
+sysl test --verbose <path>
+```
+
+Output groups tests by source file with pass/fail markers and timings:
+
+```
+running 6 tests
+std/mem/mem.lsysl
+  ✓ test_copy_basic              (0.2ms)
+  ✗ test_cmp_prefix              (0.1ms)
+      panic: expected -1, got 1
+  ✓ test_index_byte_found        (0.1ms)
+...
+5 passed, 1 failed, 0 skipped — 0.6ms
+```
+
+Exit code is 0 iff all tests pass. Failing tests print the source file and line of the `#test` attribute (`at file:line`).
+
+**Builtins useful in tests:**
+- `panic(msg: string) -> void` — halts with the given message. Primary failure signal inside tests.
+- `assert(cond: bool, msg: string) -> void` — panics with `msg` if `cond` is false; returns otherwise.
+
+### `#deprecated` — warn on use
+
+Marks a function as deprecated. Calls to the function emit a warning to stderr during analysis (once per callee per compilation):
+
+```
+#deprecated("use foo2 instead")
+foo() -> int = 1
+
+#deprecated
+old_api() -> int = 2
+```
+
+Warnings look like:
+```
+warning: 'foo' is deprecated: use foo2 instead
+warning: 'old_api' is deprecated
+```
+
+Calls still compile and run normally — `#deprecated` only reports usage.
 
 ---
 

@@ -76,7 +76,7 @@ object ModuleMeta:
         SymbolMeta(name, SymbolMeta.Kind.Func(params, returnType), isPrivate = false, isExtern = true, sourceFile = sourceFile)
       case TExternVarDecl(name, typ) =>
         SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate = false, isExtern = true, sourceFile = sourceFile)
-      case TFunDecl(name, params, returnType, _, isPrivate) =>
+      case TFunDecl(name, params, returnType, _, isPrivate, _) =>
         SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType), isPrivate, sourceFile = sourceFile)
       case TVarDecl(name, typ, _, isPrivate) =>
         SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate, sourceFile = sourceFile)

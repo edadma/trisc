@@ -86,11 +86,11 @@ object AssemblerParser extends RegexParsers:
     "chk", "cli", "clz", "cnt", "ctz", "cvt",
     "div", "divu",
     "exg",
-    "fabs", "fadd", "fdiv", "fence", "fint", "finv", "fmul", "fneg", "fpow", "fseq", "fslt", "fsqrt", "fsub",
+    "fabs", "facos", "fadd", "fasin", "fatan", "fatan2", "fcos", "fdiv", "fexp", "fence", "fint", "finv", "flog", "fmul", "fneg", "fpow", "fseq", "fsin", "fslt", "fsqrt", "fsub", "ftan",
     "gasid", "gfault", "gfcause", "gpsr", "gptbr", "gusp",
     "halt",
     "jalr",
-    "ld", "ldb", "ldd", "ldi", "lds", "ldw", "ll", "lsl", "lsr",
+    "ld", "ldb", "ldc", "ldd", "ldi", "lds", "ldw", "ll", "lsl", "lsr",
     "max", "min", "mov", "movi", "mul", "mulu",
     "neg", "nop", "not",
     "or",
@@ -140,14 +140,16 @@ object AssemblerParser extends RegexParsers:
           case "data"  => SymbolType.Data
           case "const" => SymbolType.Const
           case other   => sys.error(s"unknown symbol type '$other' (expected func, data, or const)")
-        val isHex = (s: String) =>
-          val raw = if s.startsWith("0x") || s.startsWith("0X") then s.drop(2) else s
-          raw.nonEmpty && raw.forall(c => c.isDigit || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F')
+        val isNumeric = (s: String) =>
+          if s.startsWith("0x") || s.startsWith("0X") then
+            val raw = s.drop(2)
+            raw.nonEmpty && raw.forall(c => c.isDigit || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F')
+          else s.nonEmpty && s.forall(_.isDigit)
         val parseNum = (s: String) => if s.startsWith("0x") then java.lang.Long.parseLong(s.drop(2), 16) else s.toLong
         val (symSize, typeInfo) = fields match
           case Nil => (None, None)
           case List(tokens) =>
-            if symType == SymbolType.Data && tokens.size == 1 && isHex(tokens.head) then
+            if symType == SymbolType.Data && tokens.size == 1 && isNumeric(tokens.head) then
               (Some(parseNum(tokens.head)), None)
             else
               (None, Some(tokens.mkString(" ")))

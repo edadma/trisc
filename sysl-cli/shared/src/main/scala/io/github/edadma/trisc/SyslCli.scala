@@ -16,6 +16,13 @@ case class DocCommand(
     inputs: Seq[String] = Seq.empty,
     output: Option[String] = None,
 ) extends SyslCommand
+case class TestCommand(
+    inputs: Seq[String] = Seq.empty,
+    filter: Option[String] = None,
+    backend: String = "interpreter",
+    failFast: Boolean = false,
+    verbose: Boolean = false,
+) extends SyslCommand
 
 case class SyslConfig(
     command: SyslCommand = CompileCommand(),
@@ -102,6 +109,57 @@ object SyslCli:
               )
             ),
         ),
+      // test: run #test-annotated functions
+      cmd("test")
+        .text("Discover and run #test functions")
+        .action((_, c) => c.copy(command = TestCommand()))
+        .children(
+          opt[String]("filter")
+            .text("Only run tests whose name contains this substring")
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case tc: TestCommand => tc.copy(filter = Some(v))
+                case other           => other
+              )
+            ),
+          opt[String]("backend")
+            .text("Backend: interpreter (default) | trisc | all")
+            .validate(v =>
+              if Seq("interpreter", "trisc", "all").contains(v) then success
+              else failure(s"Unknown backend: $v (expected interpreter, trisc, all)")
+            )
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case tc: TestCommand => tc.copy(backend = v)
+                case other           => other
+              )
+            ),
+          opt[Unit]("fail-fast")
+            .text("Stop at first failing test")
+            .action((_, c) =>
+              c.copy(command = c.command match
+                case tc: TestCommand => tc.copy(failFast = true)
+                case other           => other
+              )
+            ),
+          opt[Unit]("verbose")
+            .text("Verbose output")
+            .action((_, c) =>
+              c.copy(command = c.command match
+                case tc: TestCommand => tc.copy(verbose = true)
+                case other           => other
+              )
+            ),
+          arg[String]("<source>...")
+            .unbounded()
+            .text("Sysl source files or a directory")
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case tc: TestCommand => tc.copy(inputs = tc.inputs :+ v)
+                case other           => other
+              )
+            ),
+        ),
       // Allow bare options/args (no subcommand) to default to compile
       opt[String]('o', "output")
         .hidden()
@@ -137,6 +195,8 @@ object SyslCli:
             failure("No input files specified for run")
           case DocCommand(inputs, _) if inputs.isEmpty =>
             failure("No input files specified for doc")
+          case TestCommand(inputs, _, _, _, _) if inputs.isEmpty =>
+            failure("No input files specified for test")
           case _ => success
       ),
     )
@@ -169,6 +229,7 @@ object SyslCli:
         case cmd: CompileCommand => executeCompile(cmd)
         case cmd: RunCommand     => executeRun(cmd)
         case cmd: DocCommand     => executeDoc(cmd)
+        case cmd: TestCommand    => executeTest(cmd)
     catch case CliError(_) => () // already printed
 
   private def executeCompile(cmd: CompileCommand): Unit =
@@ -192,7 +253,7 @@ object SyslCli:
       case "asm" =>
         val codegen = new SyslTriscCodegen
         for unit <- result.units do
-          val asm = codegen.generate(unit.typed)
+          val asm = codegen.generate(stripTestDecls(unit.typed))
           val outFile = outputPath(cmd.output, unit.name, ".asm", result.units.size)
           io.writeFile(outFile, asm)
           System.err.println(s"  ${unit.name} -> $outFile")
@@ -200,7 +261,7 @@ object SyslCli:
       case "tof" =>
         val codegen = new SyslTriscCodegen
         val tofs = for unit <- result.units yield
-          val asm = codegen.generate(unit.typed)
+          val asm = codegen.generate(stripTestDecls(unit.typed))
           assemble(asm, relocatable = true)
         val linked = Linker.link(tofs, relocatable = true)
         val outFile = cmd.output.getOrElse("out.tof")
@@ -210,7 +271,7 @@ object SyslCli:
       case "llvm" =>
         val codegen = new SyslLLVMCodegen
         for unit <- result.units do
-          val ir = codegen.generate(unit.typed)
+          val ir = codegen.generate(stripTestDecls(unit.typed))
           val outFile = outputPath(cmd.output, unit.name, ".ll", result.units.size)
           io.writeFile(outFile, ir)
           System.err.println(s"  ${unit.name} -> $outFile")
@@ -236,7 +297,7 @@ object SyslCli:
           val analyzer = new SyslAnalyzer
           for mod <- stdlibImports do
             analyzer.registerImport(SyslStdlib.meta(mod))
-          val typed = analyzer.analyze(ast)
+          val typed = stripTestDecls(analyzer.analyze(ast))
           val interpreter = new SyslInterpreter()
           wireStdlib(interpreter, stdlibImports, argv)
           val result = interpreter.run(typed)
@@ -249,11 +310,148 @@ object SyslCli:
       val driver = new SyslDriver(Some(io), baseDirs)
       val result = driver.compile(sources)
       val stdlibImports = driver.collectStdlibImports(result.units)
-      val merged = TProgram(result.units.flatMap(_.typed.decls))
+      val merged = stripTestDecls(TProgram(result.units.flatMap(_.typed.decls)))
       val interpreter = new SyslInterpreter()
       wireStdlib(interpreter, stdlibImports, argv)
       val value = interpreter.run(merged)
       if value != 0 then println(value)
+
+  private def isTestFn(f: TFunDecl): Boolean =
+    f.attributes.exists(_.name == "test")
+
+  private def stripTestDecls(p: TProgram): TProgram =
+    TProgram(p.decls.filter {
+      case f: TFunDecl => !isTestFn(f)
+      case _           => true
+    })
+
+  private case class DiscoveredTest(
+      unitName: String,
+      fn: TFunDecl,
+      displayName: String,
+      shouldPanic: Boolean,
+      expectedMsg: Option[String],
+      line: Option[Int],
+  )
+
+  private def attrString(a: AttrArg): Option[String] = a match
+    case AttrPositional(AttrLitString(v)) => Some(v)
+    case _                                => None
+
+  private def attrIdent(a: AttrArg): Option[String] = a match
+    case AttrPositional(AttrLitIdent(v)) => Some(v)
+    case _                               => None
+
+  private def attrNamedString(a: AttrArg, key: String): Option[String] = a match
+    case AttrNamed(k, AttrLitString(v)) if k == key => Some(v)
+    case _                                          => None
+
+  private def discoverTest(unitName: String, fn: TFunDecl): Option[DiscoveredTest] =
+    fn.attributes.find(_.name == "test").map { attr =>
+      val displayName = attr.args.flatMap(attrString).headOption.getOrElse(fn.name)
+      val shouldPanicFlag = attr.args.exists(attrIdent(_).contains("should_panic"))
+      val expectedMsg = attr.args.flatMap(a => attrNamedString(a, "should_panic")).headOption
+      val sp = shouldPanicFlag || expectedMsg.isDefined
+      val line = if attr.pos == scala.util.parsing.input.NoPosition then None else Some(attr.pos.line)
+      DiscoveredTest(unitName, fn, displayName, sp, expectedMsg, line)
+    }
+
+  private sealed trait TestOutcome
+  private case object Pass extends TestOutcome
+  private case class Fail(msg: String) extends TestOutcome
+
+  private def runOneInterpreter(program: TProgram, stdlibImports: Set[String], t: DiscoveredTest): TestOutcome =
+    val interp = new SyslInterpreter(_ => ())
+    wireStdlib(interp, stdlibImports)
+    try interp.load(program)
+    catch case e: Throwable => return Fail(s"test init failed: ${e.getMessage}")
+    try
+      interp.runNamed(t.fn.name)
+      if t.shouldPanic then Fail("expected panic, got normal return") else Pass
+    catch
+      case e: RuntimeException if e.getClass.getSimpleName == "RuntimeError" =>
+        val msg = Option(e.getMessage).getOrElse("")
+        if !t.shouldPanic then Fail(s"panic: $msg")
+        else t.expectedMsg match
+          case Some(substr) if !msg.contains(substr) =>
+            Fail(s"panic message did not contain '$substr' (got: $msg)")
+          case _ => Pass
+      case e: Throwable => Fail(s"unexpected error: ${e.getClass.getSimpleName}: ${e.getMessage}")
+
+  private def executeTest(cmd: TestCommand): Unit =
+    if cmd.backend == "trisc" || cmd.backend == "all" then
+      System.err.println(s"error: backend '${cmd.backend}' not yet implemented (use 'interpreter')")
+      throw CliError("unsupported backend")
+
+    // Derive baseDirs so each input's path is treated as the base module.
+    // For a directory input, baseDir = the PARENT directory of the directory
+    //   (so the directory's own name is included in unit names — e.g. `std/strconv/strconv`
+    //    for input `std/`, giving module name `std.strconv`).
+    // For a file input, baseDir = the parent directory of the file.
+    def parentDir(path: String): String =
+      val p = if path.endsWith("/") then path.dropRight(1) else path
+      val slash = p.lastIndexOf('/')
+      if slash < 0 then "." else p.substring(0, slash)
+    val baseDirs = cmd.inputs.map(p => parentDir(p)).distinct.toList match
+      case Nil  => List(".")
+      case dirs => dirs
+    // Collect sources using each input's baseDir so unit names come out relative.
+    val sources: Map[String, String] =
+      cmd.inputs.flatMap { p =>
+        if !io.exists(p) then fail(s"error: file not found: $p")
+        val parent = parentDir(p)
+        val baseDir = if parent == "." then "" else parent + "/"
+        if io.isDirectory(p) then
+          collectSyslFiles(p).map(f => resolveSource(f, baseDir))
+        else
+          List(resolveSource(p, baseDir))
+      }.toMap
+    val driver = new SyslDriver(Some(io), baseDirs)
+    val result = driver.compile(sources)
+    val stdlibImports = driver.collectStdlibImports(result.units)
+    val merged = TProgram(result.units.flatMap(_.typed.decls))
+
+    // Discover tests, tagging each with its unit
+    val discovered = result.units.flatMap { unit =>
+      unit.typed.decls.collect { case f: TFunDecl => f }
+        .flatMap(discoverTest(unit.name, _))
+    }
+
+    val filtered = cmd.filter match
+      case None => discovered
+      case Some(pat) => discovered.filter(t =>
+        t.fn.name.contains(pat) || t.displayName.contains(pat))
+
+    println(s"running ${filtered.size} tests")
+
+    var passed = 0
+    var failed = 0
+    val totalStart = System.nanoTime()
+    var currentUnit = ""
+    var stop = false
+
+    for t <- filtered if !stop do
+      if t.unitName != currentUnit then
+        currentUnit = t.unitName
+        println(currentUnit)
+      val start = System.nanoTime()
+      val outcome = runOneInterpreter(merged, stdlibImports, t)
+      val elapsedMs = (System.nanoTime() - start) / 1e6
+      outcome match
+        case Pass =>
+          passed += 1
+          println(f"  ✓ ${t.displayName}%-28s ($elapsedMs%.1fms)")
+        case Fail(msg) =>
+          failed += 1
+          println(f"  ✗ ${t.displayName}%-28s ($elapsedMs%.1fms)")
+          println(s"      $msg")
+          t.line.foreach(l => println(s"      at ${t.unitName}:$l"))
+          if cmd.failFast then stop = true
+
+    val totalMs = (System.nanoTime() - totalStart) / 1e6
+    val skipped = discovered.size - filtered.size
+    println(f"\n$passed passed, $failed failed, $skipped skipped — $totalMs%.1fms")
+    if failed > 0 then throw CliError(s"$failed test(s) failed")
 
   private def executeDoc(cmd: DocCommand): Unit =
     val isModule = cmd.inputs.size == 1 && io.isDirectory(cmd.inputs.head)

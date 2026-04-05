@@ -208,4 +208,52 @@ class SyslCodegenDynArrayTests extends SyslCodegenHelpers {
         |    sum
         |""".stripMargin)) shouldBe 100
   }
+
+  // Bounds check: out-of-bounds index on &[]T emits `trap 1` (error code 1).
+  // The fault handler halts, leaving r1 = 1.
+
+  "out-of-bounds index traps with r1 = 1" in {
+    compileMultiAndRun(arraySources(
+      """import posix.stdlib.{malloc, free}
+        |
+        |main() -> int
+        |    val a = new [3]int
+        |    a[5]
+        |""".stripMargin)) shouldBe 1
+  }
+
+  "negative index traps with r1 = 1" in {
+    compileMultiAndRun(arraySources(
+      """import posix.stdlib.{malloc, free}
+        |
+        |main() -> int
+        |    val a = new [3]int
+        |    var i = 0 - 1
+        |    a[i]
+        |""".stripMargin)) shouldBe 1
+  }
+
+  "in-bounds index with runtime index passes bounds check" in {
+    compileMultiAndRun(arraySources(
+      """import posix.stdlib.{malloc, free}
+        |
+        |main() -> int
+        |    val a = new [3]int
+        |    a[0] = 100
+        |    a[1] = 200
+        |    a[2] = 300
+        |    var i = 1
+        |    a[i]
+        |""".stripMargin)) shouldBe 200
+  }
+
+  "index equal to length traps" in {
+    compileMultiAndRun(arraySources(
+      """import posix.stdlib.{malloc, free}
+        |
+        |main() -> int
+        |    val a = new [3]int
+        |    a[3]
+        |""".stripMargin)) shouldBe 1
+  }
 }
