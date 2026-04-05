@@ -248,4 +248,60 @@ class SyslMatchTests extends SyslTestHelpers {
         |        Point(x, y) -> x + y
         |""".stripMargin) shouldBe 42
   }
+
+  // ===== String matching (regression: was comparing pointer addresses) =====
+
+  "match on string literal" in {
+    output(
+      """test(s: string) -> string
+        |    s match
+        |        "a" -> "got a"
+        |        _ -> s
+        |
+        |main() -> int
+        |    puts(test("a"))
+        |    0
+        |""".stripMargin) shouldBe "got a"
+  }
+
+  "match on string with return" in {
+    output(
+      """test(s: string) -> string
+        |    s match
+        |        "hello" -> return "matched"
+        |        _ -> return "default"
+        |
+        |main() -> int
+        |    puts(test("hello"))
+        |    0
+        |""".stripMargin) shouldBe "matched"
+  }
+
+  "match on string default arm" in {
+    output(
+      """test(s: string) -> string
+        |    s match
+        |        "a" -> "got a"
+        |        "b" -> "got b"
+        |        _ -> "other"
+        |
+        |main() -> int
+        |    puts(test("c"))
+        |    0
+        |""".stripMargin) shouldBe "other"
+  }
+
+  "match on string multiple arms" in {
+    eval(
+      """classify(s: string) -> int
+        |    s match
+        |        "foo" -> 1
+        |        "bar" -> 2
+        |        "baz" -> 3
+        |        _ -> 0
+        |
+        |main() -> int
+        |    classify("bar")
+        |""".stripMargin) shouldBe 2
+  }
 }
