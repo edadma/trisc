@@ -39,7 +39,7 @@ Output helpers. These use the TTY server for all I/O.
     sh_print(s: string)
         tty_puts(*byte(s), len(s))
 
-    str(s: *byte) -> string
+    cstr(s: *byte) -> string
         string(s, strlen(s))
 
     sh_newline()
@@ -373,7 +373,7 @@ Built-in commands.
         cwd_ino = ino
         // Update cwd_path
         // Update cwd_path
-        val arg1 = str(*byte(argv[1]))
+        val arg1 = cstr(*byte(argv[1]))
         if arg1[0] == '/'
             strcpy(cwd_path, arg1)
         else
