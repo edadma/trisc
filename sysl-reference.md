@@ -271,6 +271,41 @@ main() -> int
 - Operations on a type parameter that are invalid for the concrete type produce
   an error at the call site where the instantiation happens.
 
+### Traits and `impl` blocks
+
+Traits describe a set of methods a type may implement. Each trait is parameterized
+by a subject type `T` (the type that will conform). Methods may have default
+bodies; implementers override or inherit them. No orphan rule — any `impl` may
+be written anywhere.
+
+```sysl
+trait Ord[T]
+    cmp(a: T, b: T) -> int                  // required (no body)
+    lt(a: T, b: T) -> bool = cmp(a, b) < 0  // default body
+    le(a: T, b: T) -> bool = cmp(a, b) <= 0
+    gt(a: T, b: T) -> bool = cmp(a, b) > 0
+    ge(a: T, b: T) -> bool = cmp(a, b) >= 0
+
+impl Ord[int]
+    cmp(a: int, b: int) -> int = a - b
+
+main() -> int
+    if Ord.lt(3, 5) then 1 else 0
+```
+
+**Rules:**
+- A trait method with a body is a **default**; implementers may override it.
+- A trait method without a body is **required**; every impl must provide it.
+- `impl Trait[T]` for the same `(trait, type)` pair may appear only once.
+- Calls via `Trait.method(args)` infer the concrete target type from argument
+  types and dispatch to the matching impl's method.
+- Inside a default body, unqualified calls to sibling trait methods (like
+  `cmp(a, b)` inside `lt`) resolve to the current impl's methods.
+
+**Monomorphization:** each impl method — whether provided or synthesized from a
+default — compiles to a mangled top-level function like `Ord_cmp_i32`,
+`Ord_lt_i32`. There is no runtime dispatch; trait calls are resolved statically.
+
 ### Methods
 
 Methods are functions named `StructName_methodName` with a `self` parameter:

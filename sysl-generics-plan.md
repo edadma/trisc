@@ -133,38 +133,40 @@ val ys: &[]int = make_empty()    // alternative: infer from context (optional)
 
 ---
 
-### Phase 4 — Constraints
+### Phase 4 — Trait bounds on type parameters
 
-**Scope**
-- Built-in constraint predicates (Go-inspired):
-  - `any` — no constraint (default)
-  - `comparable` — supports `==`, `!=`
-  - `ordered` — supports `<`, `<=`, `>`, `>=` (also implies comparable)
-  - `numeric` — integer/float arithmetic
-  - `integer` — integer-only arithmetic
-- Syntax: `func max[T ordered](a: T, b: T) -> T`
-- Analyzer rejects calls where the instantiated type doesn't satisfy the constraint,
-  with an error at the call site naming the constraint violated
+**This phase is owned by the traits feature.** See `sysl/traits-design.md` for the
+full design. Generic type parameters gain the ability to constrain themselves to
+types that implement a nominal trait:
 
-**Non-goals**
-- User-defined constraints / interfaces (separate, larger feature)
-- Type-set unions (`~int | ~float`) — possibly a Phase 5
+```sysl
+func max[T: Ord](a: T, b: T) -> T =
+    if Ord.gt(a, b) then a else b
 
-**Rationale for deferring to Phase 4**
-- Phase 1's instantiation-time checking already surfaces the same errors, just with
-  worse error messages ("operator > not defined for bool" vs "type bool does not
-  satisfy constraint ordered")
-- Built-in constraints are a presentation layer over what Phase 1 already enforces
+func sort[T: Ord + Eq](s: []T) = ...
+```
+
+Trait bounds **replace** the earlier idea of built-in pseudo-constraints like
+`any` / `comparable` / `ordered` / `numeric`. Real nominal traits (`Eq`, `Ord`,
+`Hash`, `Display`, `Iterator`, etc.) are strictly better: they carry laws,
+support default methods, allow `?`/`From[E]`-style conversion, and give much
+better error messages.
+
+**Interaction with monomorphization:** at each generic instantiation, the
+analyzer checks that the concrete type satisfies every declared bound by looking
+up the corresponding `impl` block. Missing impl → clear error at the call site
+naming the trait. Trait method calls inside the generic body (`Ord.cmp(a, b)`)
+resolve via the same impl lookup after substitution.
+
+**Depends on:** generics Phase 1 (this document), traits Phases 1-2 (separate doc).
 
 ---
 
-### Phase 5 — Advanced (maybe)
+### Phase 5 — Generic type aliases and misc.
 
-- User-defined constraint traits (requires interface-like syntax)
-- Higher-kinded parameters (unlikely — beyond Go's scope)
-- Variadic type parameters
-- Associated types
 - Generic type aliases: `type Callback[T] = func(T) -> T`
+- Variadic type parameters (probably not)
+- Higher-kinded parameters (not planned)
 
 ---
 
@@ -338,8 +340,10 @@ After each phase, `sysl-reference.md` is updated with the newly-available syntax
 
 | Phase | Adds | Effort | Blockers |
 |-------|------|--------|----------|
-| 1 | Generic functions, inference, monomorphization infrastructure | ~1 day | none |
+| 1 | Generic functions, inference, monomorphization infrastructure | done (cec4281) | — |
 | 2 | Generic structs, enums, methods | ~2 days | Phase 1 |
 | 3 | Explicit type arguments at call sites | ~0.5 day | Phase 1 |
-| 4 | Built-in constraints (`any`, `comparable`, `ordered`, `numeric`) | ~1 day | Phase 1 |
-| 5 | User-defined constraints / traits | TBD | Phase 4 + interfaces |
+| 4 | Trait bounds on type parameters | ~1 day | Phase 1, traits Phase 1-2 |
+| 5 | Generic type aliases and misc. | ~0.5 day | Phase 1 |
+
+See also: `sysl/traits-design.md` for the companion traits design.

@@ -37,7 +37,7 @@ class SyslParser extends StandardTokenParsers {
   // --- Declarations ---
 
   lazy val decl: Parser[DeclAST] =
-    condDecl | importDecl | externDecl | structDecl | enumDecl | typeAliasDecl | "private" ~> declBody(true) | declBody(false)
+    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | typeAliasDecl | "private" ~> declBody(true) | declBody(false)
 
   // --- Conditional compilation ---
 
@@ -91,6 +91,32 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val typeAliasDecl: Parser[TypeAliasDeclAST] =
     "type" ~> ident ~ ("=" ~> typeRef) ^^ { case name ~ target => TypeAliasDeclAST(name, target) }
+
+  lazy val traitDecl: Parser[TraitDeclAST] =
+    "trait" ~> ident ~ ("[" ~> ident <~ "]") ~
+      (Newline ~> Indent ~> rep1sep(traitMethod, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
+        case name ~ tparam ~ methods => TraitDeclAST(name, tparam, methods)
+      }
+
+  lazy val traitMethod: Parser[TraitMethodAST] =
+    ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ ("->" ~> typeRef) ~ opt(traitMethodBody) ^^ {
+      case name ~ params ~ rt ~ body => TraitMethodAST(name, params, rt, body)
+    }
+
+  lazy val traitMethodBody: Parser[FunBodyAST] =
+    "=" ~> bodyExprOrBlock |
+      block ^^ (stmts => BlockBodyAST(stmts))
+
+  lazy val implDecl: Parser[ImplDeclAST] =
+    "impl" ~> ident ~ ("[" ~> typeRef <~ "]") ~
+      (Newline ~> Indent ~> rep1sep(implMethod, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
+        case name ~ typ ~ methods => ImplDeclAST(name, typ, methods)
+      }
+
+  lazy val implMethod: Parser[FunDeclAST] =
+    ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
+      case name ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body)
+    }
 
 
   // Accept identifiers and type keywords (e.g., "string") in import paths

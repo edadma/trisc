@@ -33,6 +33,9 @@ case class EnumDeclAST(name: String, members: List[(String, Option[Long])]) exte
 case class DataEnumDeclAST(name: String, variants: List[EnumVariantAST]) extends DeclAST
 case class EnumVariantAST(name: String, fields: List[(String, TypeAST)])
 case class TypeAliasDeclAST(name: String, target: TypeAST) extends DeclAST
+case class TraitDeclAST(name: String, typeParam: String, methods: List[TraitMethodAST]) extends DeclAST
+case class TraitMethodAST(name: String, params: List[ParamAST], returnType: TypeAST, body: Option[FunBodyAST]) extends Positional
+case class ImplDeclAST(traitName: String, targetType: TypeAST, methods: List[FunDeclAST]) extends DeclAST
 case class CondDeclAST(cond: CondExpr, thenDecls: List[DeclAST], elseDecls: Option[List[DeclAST]]) extends DeclAST
 
 // Conditional compilation expressions

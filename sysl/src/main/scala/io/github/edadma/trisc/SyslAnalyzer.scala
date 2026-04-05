@@ -27,6 +27,18 @@ class SyslAnalyzer:
   private val specializedDecls = mutable.ListBuffer.empty[TDecl]
   private var typeEnv: Map[String, SyslType] = Map.empty
 
+  // Trait / impl support
+  private case class TraitInfo(name: String, typeParam: String, methods: List[TraitMethodAST])
+  private case class ImplMethodInfo(mangled: String, paramTypes: List[(String, SyslType)], retType: SyslType, body: FunBodyAST, isSynthesized: Boolean)
+  private val traits = new mutable.LinkedHashMap[String, TraitInfo]
+  // (traitName, targetType) -> (methodName -> mangledFunName)
+  private val impls = new mutable.LinkedHashMap[(String, SyslType), mutable.LinkedHashMap[String, String]]
+  // Methods to analyze (provided + synthesized defaults) keyed by (traitName, targetType)
+  private val implMethodInfos = new mutable.LinkedHashMap[(String, SyslType), List[ImplMethodInfo]]
+  // When analyzing a synthesized default method body, rewrite unqualified calls
+  // to sibling trait methods to their impl's mangled names
+  private var traitCallRewrite: Map[String, String] = Map.empty
+
   private def pushScope(): Unit =
     scopeStack += new mutable.LinkedHashMap[String, SymInfo]
 
@@ -148,14 +160,79 @@ class SyslAnalyzer:
         case TypeAliasDeclAST(name, target) =>
           if typeAliases.contains(name) then throw AnalysisError(s"duplicate type alias: '$name'", decl)
           typeAliases(name) = target
+        case TraitDeclAST(name, tparam, methods) =>
+          if traits.contains(name) then throw AnalysisError(s"duplicate trait: '$name'", decl)
+          // Check no duplicate method names within the trait
+          val methodNames = methods.map(_.name)
+          if methodNames.distinct.length != methodNames.length then
+            throw AnalysisError(s"duplicate method names in trait '$name'")
+          traits(name) = TraitInfo(name, tparam, methods)
+        case ImplDeclAST(_, _, _) =>
+          // Deferred to registerImpls after all traits are known
+          ()
         case VarDeclAST(name, _, _, _, _) =>
           if globalScope.contains(name) then
             throw AnalysisError(s"duplicate global: '$name'", decl)
 
+    // Intermediate pass: register impl blocks (traits now known; signatures may reference traits)
+    for decl <- program.decls do
+      decl match
+        case ImplDeclAST(traitName, targetType, methods) =>
+          val trait_ = traits.getOrElse(traitName,
+            throw AnalysisError(s"impl references unknown trait '$traitName'", decl))
+          val resolvedTarget = resolveType(targetType)
+          if impls.contains((traitName, resolvedTarget)) then
+            throw AnalysisError(s"duplicate impl: trait '$traitName' already implemented for ${resolvedTarget}")
+          // Check required methods are all provided
+          val providedNames = methods.map(_.name).toSet
+          val missing = trait_.methods.filter(m => m.body.isEmpty && !providedNames.contains(m.name))
+          if missing.nonEmpty then
+            throw AnalysisError(s"impl ${traitName}[$resolvedTarget] missing required method(s): ${missing.map(_.name).mkString(", ")}")
+          // Check each impl method exists in trait
+          for m <- methods do
+            if !trait_.methods.exists(_.name == m.name) then
+              throw AnalysisError(s"impl method '${m.name}' is not declared in trait '$traitName'")
+          // Register mangled functions for both provided methods and synthesized defaults
+          val methodMap = mutable.LinkedHashMap.empty[String, String]
+          val infos = mutable.ListBuffer.empty[ImplMethodInfo]
+          val typeMangled = typeToMangled(resolvedTarget)
+          val savedEnv = typeEnv
+          typeEnv = Map(trait_.typeParam -> resolvedTarget)
+          try
+            for traitMethod <- trait_.methods do
+              val mangled = s"${traitName}_${traitMethod.name}_${typeMangled}"
+              if functions.contains(mangled) then
+                throw AnalysisError(s"impl method collides with existing function '$mangled'")
+              val expectedParams = traitMethod.params.map(p => (p.name, resolveType(p.typ)))
+              val expectedRet = resolveType(traitMethod.returnType)
+              val providedOpt = methods.find(_.name == traitMethod.name)
+              val (paramTypes, retType, body, synthesized) = providedOpt match
+                case Some(implMethod) =>
+                  val pTypes = implMethod.params.map(p => (p.name, resolveType(p.typ)))
+                  val r = implMethod.returnType.map(resolveType).getOrElse(VoidType)
+                  // Verify signature matches trait
+                  if pTypes.map(_._2) != expectedParams.map(_._2) then
+                    throw AnalysisError(s"impl method '${implMethod.name}' parameter types don't match trait: expected ${expectedParams.map(_._2).mkString("(", ", ", ")")}, got ${pTypes.map(_._2).mkString("(", ", ", ")")}")
+                  if r != expectedRet then
+                    throw AnalysisError(s"impl method '${implMethod.name}' return type doesn't match trait: expected $expectedRet, got $r")
+                  (pTypes, r, implMethod.body, false)
+                case None =>
+                  // Synthesized default — body comes from the trait (we checked it's Some above)
+                  (expectedParams, expectedRet, traitMethod.body.get, true)
+              functions(mangled) = FunInfo(mangled, paramTypes, retType)
+              methodMap(traitMethod.name) = mangled
+              infos += ImplMethodInfo(mangled, paramTypes, retType, body, isSynthesized = synthesized)
+          finally typeEnv = savedEnv
+          impls((traitName, resolvedTarget)) = methodMap
+          implMethodInfos((traitName, resolvedTarget)) = infos.toList
+        case _ =>
+
     // Second pass: produce typed AST (skip generic templates; they're instantiated on demand)
     val tDecls = program.decls.flatMap {
-      case f: FunDeclAST if f.typeParams.nonEmpty => None
-      case d => Some(analyzeDecl(d))
+      case f: FunDeclAST if f.typeParams.nonEmpty => Nil
+      case _: TraitDeclAST => Nil // traits emit nothing; only impls do
+      case impl: ImplDeclAST   => analyzeImplMethods(impl)
+      case d => List(analyzeDecl(d))
     }
     TProgram(tDecls ++ specializedDecls.toList)
 
@@ -361,6 +438,57 @@ class SyslAnalyzer:
 
   // Instantiate a generic function with inferred type arguments, returning the mangled name
   // and FunInfo of the instantiated function. Reuses cached instantiations.
+  // Analyze each impl method (including synthesized defaults) as a mangled top-level function
+  private def analyzeImplMethods(impl: ImplDeclAST): List[TDecl] =
+    val resolvedTarget = resolveType(impl.targetType)
+    val methodMap = impls((impl.traitName, resolvedTarget))
+    val infos = implMethodInfos((impl.traitName, resolvedTarget))
+    val trait_ = traits(impl.traitName)
+    val savedEnv = typeEnv
+    val savedRewrite = traitCallRewrite
+    try
+      // For synthesized defaults, set typeEnv + traitCallRewrite so T resolves and
+      // unqualified calls to sibling trait methods route to the impl's mangled functions.
+      infos.map { info =>
+        if info.isSynthesized then
+          typeEnv = Map(trait_.typeParam -> resolvedTarget)
+          traitCallRewrite = methodMap.toMap
+        else
+          typeEnv = savedEnv
+          traitCallRewrite = savedRewrite
+        scopeStack = new mutable.ArrayBuffer
+        pushScope()
+        for (paramName, paramType) <- info.paramTypes do
+          currentScope(paramName) = SymInfo(paramName, paramType, true)
+        val tBody = info.body match
+          case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
+          case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
+        val tParams = info.paramTypes.map((n, t) => TParam(n, t))
+        scopeStack = null
+        TFunDecl(info.mangled, tParams, info.retType, tBody, isPrivate = false)
+      }
+    finally
+      typeEnv = savedEnv
+      traitCallRewrite = savedRewrite
+
+  // Resolve a trait method call like Ord.cmp(a, b) to the appropriate impl's mangled function
+  private def analyzeTraitCall(traitName: String, methodName: String, tArgs: List[TExpr]): (String, FunInfo) =
+    val trait_ = traits(traitName)
+    val method = trait_.methods.find(_.name == methodName).getOrElse(
+      throw AnalysisError(s"trait '$traitName' has no method '$methodName'"))
+    if method.params.length != tArgs.length then
+      throw AnalysisError(s"trait method '$traitName.$methodName' expects ${method.params.length} argument(s), got ${tArgs.length}")
+    // Infer the target type by unifying each param type against the arg type, using typeParam as the variable
+    val env = mutable.Map.empty[String, SyslType]
+    for (p, a) <- method.params.zip(tArgs) do
+      unifyTypes(p.typ, a.typ, Set(trait_.typeParam), env)
+    val targetType = env.get(trait_.typeParam).getOrElse(
+      throw AnalysisError(s"cannot infer target type for trait method '$traitName.$methodName'"))
+    val methodMap = impls.getOrElse((traitName, targetType),
+      throw AnalysisError(s"no impl of trait '$traitName' for type $targetType"))
+    val mangled = methodMap(methodName)
+    (mangled, functions(mangled))
+
   private def instantiateGeneric(name: String, argTypes: List[SyslType]): (String, FunInfo) =
     val template = genericTemplates(name)
     val typeParams = template.typeParams
@@ -1001,6 +1129,13 @@ class SyslAnalyzer:
           case other =>
             throw AnalysisError(s"cannot call expression of type $other as a function")
 
+      case MethodCallAST(VarRefAST(name), method, args) if traits.contains(name) =>
+        // Trait method call: Ord.cmp(a, b)
+        val tArgs = args.map(analyzeExpr)
+        val (mangled, funInfo) = analyzeTraitCall(name, method, tArgs)
+        val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
+        TCall(mangled, checkedArgs, funInfo.returnType)
+
       case MethodCallAST(obj, method, args) =>
         val tObj = analyzeExpr(obj)
         val tArgs = args.map(analyzeExpr)
@@ -1040,6 +1175,13 @@ class SyslAnalyzer:
 
       case CallAST(name, args) =>
         val tArgs = args.map(analyzeExpr)
+        // Check for trait-method-call rewrite (inside a synthesized default body)
+        if traitCallRewrite.contains(name) then
+          val mangled = traitCallRewrite(name)
+          val funInfo = functions(mangled)
+          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
+          TCall(mangled, checkedArgs, funInfo.returnType)
+        else
         // Check if it's a direct function call or an indirect call through a variable
         if genericTemplates.contains(name) then
           val (mangled, funInfo) = instantiateGeneric(name, tArgs.map(_.typ))

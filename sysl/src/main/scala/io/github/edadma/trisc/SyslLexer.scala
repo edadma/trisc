@@ -14,7 +14,7 @@ class SyslLexical extends IndentationLexical(
 ) {
   reserved ++= List(
     "if", "then", "elif", "else", "while", "do", "for", "in", "downTo", "step", "break", "continue", "return", "defer", "match", "_",
-    "import", "module", "private", "var", "val", "struct", "enum", "type", "sizeof", "asm", "extern", "endif", "new",
+    "import", "module", "private", "var", "val", "struct", "enum", "trait", "impl", "type", "sizeof", "asm", "extern", "endif", "new",
     "func",
     "int", "char", "byte", "bool", "void", "string",
     "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "double", "f64",
