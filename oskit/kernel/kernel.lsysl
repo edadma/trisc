@@ -229,7 +229,7 @@ PSR, PC, r1-r6, USP (9 x 8 bytes, top to bottom)
     build_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64
         var sp = ssp
         sp -= 8
-        *(*i64(sp)) = 0                 // PSR
+        *(*i64(sp)) = 2                 // PSR: Mode=1 (supervisor), Ind=0 (interrupts on)
         sp -= 8
         *(*i64(sp)) = entry_point       // PC
         sp -= 8
@@ -254,6 +254,7 @@ PSR, PC, r1-r6, USP (9 x 8 bytes, top to bottom)
 Lower priority number = higher priority. Priority 0 runs first.
 
     create_thread_pri(entry_point: i64, usp: i64, ssp: i64, name: *byte, priority: int)
+        asm("cli")
         ensure_queues_init()
         val idx = thread_count
         val sp = build_stack_frame(entry_point, usp, ssp)
@@ -281,6 +282,7 @@ Lower priority number = higher priority. Priority 0 runs first.
         *canary_addr = STACK_CANARY
         thread_count += 1
         enqueue(priority, idx)
+        asm("sti")
 
     sleep_current(nticks: int)
         threads[current_thread].state = STATE_BLOCKED
