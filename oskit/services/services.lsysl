@@ -52,8 +52,6 @@ Syscall numbers:
     val SYS_EVENT_WAIT     = 26
     val SYS_EVENT_SET      = 27
     val SYS_EVENT_CLEAR    = 28
-    val SYS_GETUID         = 29
-    val SYS_SETUID         = 30
 
     sleep(ticks: int)
         syscall(SYS_SLEEP, ticks)
@@ -117,12 +115,6 @@ Syscall numbers:
 
     resume(id: int)
         syscall(SYS_RESUME, id)
-
-    getuid() -> int
-        syscall(SYS_GETUID, 0)
-
-    setuid(uid: int) -> int
-        syscall(SYS_SETUID, uid)
 
     putstr(s: *byte)
         var i = 0

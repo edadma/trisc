@@ -260,10 +260,6 @@ trap_handler
   beq r1, r3, .sys_event_set    ; 27 = event_set(packed)
   ldi r3, 28
   beq r1, r3, .sys_event_clear  ; 28 = event_clear(packed)
-  ldi r3, 29
-  beq r1, r3, .sys_getuid       ; 29 = getuid
-  ldi r3, 30
-  beq r1, r3, .sys_setuid       ; 30 = setuid(uid)
 
   ; Slow path: save full context for syscalls that context-switch
   pshr r6                       ; save user's r1-r6
@@ -683,39 +679,6 @@ extern event_set_bits
   movi r4, event_set_bits
   jalr r6, r4
   addi r7, r7, 8             ; clean up stack arg
-  popd r6
-  popd r5
-  popd r4
-  popd r2
-  sti
-  rte
-
-; getuid: return current thread's UID — fast path
-extern kernel_getuid
-
-.sys_getuid
-  pshd r4
-  pshd r5
-  pshd r6
-  movi r4, kernel_getuid
-  jalr r6, r4
-  popd r6
-  popd r5
-  popd r4
-  sti
-  rte
-
-; setuid(uid): set current thread's UID — fast path
-extern kernel_setuid
-
-.sys_setuid
-  pshd r2
-  pshd r4
-  pshd r5
-  pshd r6
-  mov  r1, r2
-  movi r4, kernel_setuid
-  jalr r6, r4
   popd r6
   popd r5
   popd r4
