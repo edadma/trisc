@@ -41,7 +41,7 @@ The trap handler in boot.asm dispatches based on r1:
     val QUEUE_EMPTY = -1
     val STACK_CANARY = 0xDEAD
 
-Task struct field order matters: ssp must remain at offset 0
+Thread struct field order matters: ssp must remain at offset 0
 because boot.asm accesses it directly when saving/restoring
 context.
 
@@ -54,7 +54,7 @@ Statistics fields track per-thread performance:
 - consec_quanta: consecutive full quanta without voluntary yield/sleep
 
 
-    struct Task
+    struct Thread
         ssp: i64
         state: int
         wake_tick: int
@@ -84,7 +84,7 @@ from bit 0.
     var ready_mask = 0
     var queues_initialized = 0
 
-    var tasks: [8]Task
+    var threads: [8]Thread
     var current_thread = -1
     var thread_count = 0
     var ticks = 0
@@ -130,7 +130,7 @@ Write a return value into a specific thread's saved context.
 Used by the scheduler for generic timeout wakeups.
 
     syscall_return_for(tid: int, value: i64)
-        var p: *i64 = *i64(tasks[tid].ssp + 48)
+        var p: *i64 = *i64(threads[tid].ssp + 48)
         *p = value
 
     register_syscall(num: int, handler: i64)
@@ -193,12 +193,12 @@ Queue operations -- enqueue, dequeue, and remove from run queues.
 These maintain the ready_mask invariant.
 
     enqueue(pri: int, idx: int)
-        tasks[idx].next = QUEUE_EMPTY
+        threads[idx].next = QUEUE_EMPTY
         if queue_head[pri] == QUEUE_EMPTY
             queue_head[pri] = idx
             queue_tail[pri] = idx
         else
-            tasks[queue_tail[pri]].next = idx
+            threads[queue_tail[pri]].next = idx
             queue_tail[pri] = idx
         ready_mask = ready_mask | (1 << pri)
 
@@ -206,11 +206,11 @@ These maintain the ready_mask invariant.
         val idx = queue_head[pri]
         if idx == QUEUE_EMPTY
             return QUEUE_EMPTY
-        queue_head[pri] = tasks[idx].next
+        queue_head[pri] = threads[idx].next
         if queue_head[pri] == QUEUE_EMPTY
             queue_tail[pri] = QUEUE_EMPTY
             ready_mask = ready_mask & ~(1 << pri)
-        tasks[idx].next = QUEUE_EMPTY
+        threads[idx].next = QUEUE_EMPTY
         idx
 
     init_queues()
@@ -256,21 +256,21 @@ Lower priority number = higher priority. Priority 0 runs first.
         ensure_queues_init()
         val idx = thread_count
         val sp = build_stack_frame(entry_point, usp, ssp)
-        tasks[idx].ssp = sp
-        tasks[idx].state = STATE_READY
-        tasks[idx].wake_tick = 0
-        tasks[idx].name = name
-        tasks[idx].priority = priority
-        tasks[idx].join_target = -1
-        tasks[idx].quantum = DEFAULT_QUANTUM
-        tasks[idx].next = QUEUE_EMPTY
-        tasks[idx].ctx_switches = 0
-        tasks[idx].cpu_ticks = 0
-        tasks[idx].consec_quanta = 0
-        tasks[idx].notify_value = 0
-        tasks[idx].notify_pending = 0
-        tasks[idx].base_priority = priority
-        tasks[idx].blocked_on = 0
+        threads[idx].ssp = sp
+        threads[idx].state = STATE_READY
+        threads[idx].wake_tick = 0
+        threads[idx].name = name
+        threads[idx].priority = priority
+        threads[idx].join_target = -1
+        threads[idx].quantum = DEFAULT_QUANTUM
+        threads[idx].next = QUEUE_EMPTY
+        threads[idx].ctx_switches = 0
+        threads[idx].cpu_ticks = 0
+        threads[idx].consec_quanta = 0
+        threads[idx].notify_value = 0
+        threads[idx].notify_pending = 0
+        threads[idx].base_priority = priority
+        threads[idx].blocked_on = 0
         // Write stack canary at bottom of user stack
         var canary_addr: *int = *int(usp)
         *canary_addr = STACK_CANARY
@@ -278,30 +278,30 @@ Lower priority number = higher priority. Priority 0 runs first.
         enqueue(priority, idx)
 
     sleep_current(nticks: int)
-        tasks[current_thread].state = STATE_BLOCKED
-        tasks[current_thread].wake_tick = ticks + nticks
-        tasks[current_thread].consec_quanta = 0
+        threads[current_thread].state = STATE_BLOCKED
+        threads[current_thread].wake_tick = ticks + nticks
+        threads[current_thread].consec_quanta = 0
 
     sleep_until_current(target_tick: int)
-        tasks[current_thread].state = STATE_BLOCKED
-        tasks[current_thread].wake_tick = target_tick
-        tasks[current_thread].consec_quanta = 0
+        threads[current_thread].state = STATE_BLOCKED
+        threads[current_thread].wake_tick = target_tick
+        threads[current_thread].consec_quanta = 0
 
     yield_current()
-        tasks[current_thread].consec_quanta = 0
-        tasks[current_thread].quantum = DEFAULT_QUANTUM
+        threads[current_thread].consec_quanta = 0
+        threads[current_thread].quantum = DEFAULT_QUANTUM
 
     query_thread_state(id: int) -> int
-        tasks[id].state
+        threads[id].state
 
     query_thread_name(id: int) -> *byte
-        tasks[id].name
+        threads[id].name
 
     query_thread_ctx_switches(id: int) -> int
-        tasks[id].ctx_switches
+        threads[id].ctx_switches
 
     query_thread_cpu_ticks(id: int) -> int
-        tasks[id].cpu_ticks
+        threads[id].cpu_ticks
 
     query_total_ctx_switches() -> int
         total_ctx_switches
@@ -313,16 +313,16 @@ Also wakes any threads that are joining on this thread,
 enqueueing them back into their priority run queue.
 
     terminate_current()
-        tasks[current_thread].state = STATE_TERMINATED
+        threads[current_thread].state = STATE_TERMINATED
 
         // Wake threads waiting to join on this thread
         var i = 0
         while i < thread_count
-            if tasks[i].state == STATE_JOINING
-                if tasks[i].join_target == current_thread
-                    tasks[i].state = STATE_READY
-                    tasks[i].quantum = DEFAULT_QUANTUM
-                    enqueue(tasks[i].priority, i)
+            if threads[i].state == STATE_JOINING
+                if threads[i].join_target == current_thread
+                    threads[i].state = STATE_READY
+                    threads[i].quantum = DEFAULT_QUANTUM
+                    enqueue(threads[i].priority, i)
             i += 1
 
 If the target is already terminated, returns immediately without
@@ -330,11 +330,11 @@ blocking. Otherwise sets state to STATE_JOINING and records the
 target thread ID so terminate_current can wake us.
 
     join_current(target_id: int)
-        if tasks[target_id].state == STATE_TERMINATED
+        if threads[target_id].state == STATE_TERMINATED
             return
-        tasks[current_thread].state = STATE_JOINING
-        tasks[current_thread].join_target = target_id
-        tasks[current_thread].consec_quanta = 0
+        threads[current_thread].state = STATE_JOINING
+        threads[current_thread].join_target = target_id
+        threads[current_thread].consec_quanta = 0
 
 Returns next thread's SSP, or 0 if no threads are READY.
 When 0 is returned, the assembly caller does wfi + retries.
@@ -355,42 +355,42 @@ Steps:
 
         // Save current thread (skip when idle, current_thread == -1)
         if current_thread >= 0
-            tasks[current_thread].ssp = current_ssp
-            tasks[current_thread].cpu_ticks += 1
-            if tasks[current_thread].state == STATE_RUNNING
+            threads[current_thread].ssp = current_ssp
+            threads[current_thread].cpu_ticks += 1
+            if threads[current_thread].state == STATE_RUNNING
                 // Decrement quantum and handle expiry
-                tasks[current_thread].quantum -= 1
-                tasks[current_thread].state = STATE_READY
-                if tasks[current_thread].quantum <= 0
+                threads[current_thread].quantum -= 1
+                threads[current_thread].state = STATE_READY
+                if threads[current_thread].quantum <= 0
                     // Full quantum consumed without voluntary yield
-                    tasks[current_thread].quantum = DEFAULT_QUANTUM
-                    tasks[current_thread].consec_quanta += 1
+                    threads[current_thread].quantum = DEFAULT_QUANTUM
+                    threads[current_thread].consec_quanta += 1
                     // Watchdog check
                     if watchdog_limit > 0
-                        if tasks[current_thread].consec_quanta >= watchdog_limit
-                            tasks[current_thread].state = STATE_TERMINATED
+                        if threads[current_thread].consec_quanta >= watchdog_limit
+                            threads[current_thread].state = STATE_TERMINATED
                 // Re-enqueue if still ready (watchdog may have terminated)
-                if tasks[current_thread].state == STATE_READY
-                    enqueue(tasks[current_thread].priority, current_thread)
+                if threads[current_thread].state == STATE_READY
+                    enqueue(threads[current_thread].priority, current_thread)
 
         // Wake threads whose sleep/timeout has expired
         var i = 0
         while i < thread_count
-            if tasks[i].state == STATE_BLOCKED
-                if ticks >= tasks[i].wake_tick
-                    tasks[i].state = STATE_READY
-                    tasks[i].quantum = DEFAULT_QUANTUM
-                    enqueue(tasks[i].priority, i)
+            if threads[i].state == STATE_BLOCKED
+                if ticks >= threads[i].wake_tick
+                    threads[i].state = STATE_READY
+                    threads[i].quantum = DEFAULT_QUANTUM
+                    enqueue(threads[i].priority, i)
             // IPC send timeout: wake_tick > 0 means a deadline was set
-            if tasks[i].state == STATE_SEND_BLOCKED
-                if tasks[i].wake_tick > 0
-                    if ticks >= tasks[i].wake_tick
+            if threads[i].state == STATE_SEND_BLOCKED
+                if threads[i].wake_tick > 0
+                    if ticks >= threads[i].wake_tick
                         // Timeout expired — wake with -2 in saved r1
                         syscall_return_for(i, -2)
-                        tasks[i].state = STATE_READY
-                        tasks[i].quantum = DEFAULT_QUANTUM
-                        tasks[i].wake_tick = 0
-                        enqueue(tasks[i].priority, i)
+                        threads[i].state = STATE_READY
+                        threads[i].quantum = DEFAULT_QUANTUM
+                        threads[i].wake_tick = 0
+                        enqueue(threads[i].priority, i)
             i += 1
 
         // Find highest-priority non-empty queue (lowest number)
@@ -400,10 +400,10 @@ Steps:
                 val next = dequeue(pri)
                 if next != QUEUE_EMPTY
                     current_thread = next
-                    tasks[next].state = STATE_RUNNING
-                    tasks[next].ctx_switches += 1
+                    threads[next].state = STATE_RUNNING
+                    threads[next].ctx_switches += 1
                     total_ctx_switches += 1
-                    return tasks[next].ssp
+                    return threads[next].ssp
             pri += 1
 
         // No ready threads — return 0 to signal idle
@@ -422,10 +422,10 @@ highest-priority non-empty queue.
                 val next = dequeue(pri)
                 if next != QUEUE_EMPTY
                     current_thread = next
-                    tasks[next].state = STATE_RUNNING
-                    tasks[next].ctx_switches += 1
+                    threads[next].state = STATE_RUNNING
+                    threads[next].ctx_switches += 1
                     total_ctx_switches += 1
-                    return tasks[next].ssp
+                    return threads[next].ssp
             pri += 1
         0
 
@@ -455,7 +455,7 @@ limit is reached (or wfi forever in production).
     kernel_panic()
         var i = 0
         while i < thread_count
-            tasks[i].state = STATE_TERMINATED
+            threads[i].state = STATE_TERMINATED
             i += 1
         current_thread = -1
         init_queues()
@@ -483,15 +483,15 @@ until resume_thread is called. Does not affect the thread's
 stack or context -- it can be resumed exactly where it left off.
 
     suspend_thread(id: int)
-        if tasks[id].state != STATE_TERMINATED
-            if tasks[id].state != STATE_SUSPENDED
-                tasks[id].state = STATE_SUSPENDED
+        if threads[id].state != STATE_TERMINATED
+            if threads[id].state != STATE_SUSPENDED
+                threads[id].state = STATE_SUSPENDED
 
     resume_thread(id: int)
-        if tasks[id].state == STATE_SUSPENDED
-            tasks[id].state = STATE_READY
-            tasks[id].quantum = DEFAULT_QUANTUM
-            enqueue(tasks[id].priority, id)
+        if threads[id].state == STATE_SUSPENDED
+            threads[id].state = STATE_READY
+            threads[id].quantum = DEFAULT_QUANTUM
+            enqueue(threads[id].priority, id)
 
     kernel_tls_set(packed: int)
         val slot = (packed >> 24) & 0xFF
@@ -512,34 +512,34 @@ If the target is waiting for a notification (STATE_NOTIFY_WAIT),
 it is woken and re-enqueued.
 
     notify_send(target_id: int, value: int)
-        tasks[target_id].notify_value = value
-        tasks[target_id].notify_pending = 1
-        val st = tasks[target_id].state
+        threads[target_id].notify_value = value
+        threads[target_id].notify_pending = 1
+        val st = threads[target_id].state
         if st == STATE_NOTIFY_WAIT
-            tasks[target_id].state = STATE_READY
-            tasks[target_id].quantum = DEFAULT_QUANTUM
-            enqueue(tasks[target_id].priority, target_id)
+            threads[target_id].state = STATE_READY
+            threads[target_id].quantum = DEFAULT_QUANTUM
+            enqueue(threads[target_id].priority, target_id)
         else if st == STATE_RECV_NOTIFY_BLOCKED
             // Wake with -2 to indicate notification (not IPC message)
             syscall_return_for(target_id, -2)
-            tasks[target_id].state = STATE_READY
-            tasks[target_id].quantum = DEFAULT_QUANTUM
-            enqueue(tasks[target_id].priority, target_id)
+            threads[target_id].state = STATE_READY
+            threads[target_id].quantum = DEFAULT_QUANTUM
+            enqueue(threads[target_id].priority, target_id)
 
 If a notification is already pending, returns immediately.
 Otherwise sets state to STATE_NOTIFY_WAIT and the scheduler
 will skip this thread until notify_send wakes it.
 
     notify_wait_current()
-        if tasks[current_thread].notify_pending == 1
+        if threads[current_thread].notify_pending == 1
             return
-        tasks[current_thread].state = STATE_NOTIFY_WAIT
-        tasks[current_thread].consec_quanta = 0
+        threads[current_thread].state = STATE_NOTIFY_WAIT
+        threads[current_thread].consec_quanta = 0
 
     notify_read(id: int) -> int
-        val v = tasks[id].notify_value
-        tasks[id].notify_pending = 0
-        tasks[id].notify_value = 0
+        val v = threads[id].notify_value
+        threads[id].notify_pending = 0
+        threads[id].notify_value = 0
         v
 
 Uses notify_value as the event bits. wait_all=1 means all bits
@@ -551,24 +551,24 @@ as its event bits. Other threads set bits via notify_send.
 
     event_wait_current(mask: int, wait_all: int)
         if wait_all != 0
-            if (tasks[current_thread].notify_value & mask) == mask
+            if (threads[current_thread].notify_value & mask) == mask
                 return
         else
-            if (tasks[current_thread].notify_value & mask) != 0
+            if (threads[current_thread].notify_value & mask) != 0
                 return
-        tasks[current_thread].state = STATE_NOTIFY_WAIT
-        tasks[current_thread].consec_quanta = 0
+        threads[current_thread].state = STATE_NOTIFY_WAIT
+        threads[current_thread].consec_quanta = 0
 
     event_set_bits(target_id: int, bits: int)
-        tasks[target_id].notify_value = tasks[target_id].notify_value | bits
-        tasks[target_id].notify_pending = 1
-        if tasks[target_id].state == STATE_NOTIFY_WAIT
-            tasks[target_id].state = STATE_READY
-            tasks[target_id].quantum = DEFAULT_QUANTUM
-            enqueue(tasks[target_id].priority, target_id)
+        threads[target_id].notify_value = threads[target_id].notify_value | bits
+        threads[target_id].notify_pending = 1
+        if threads[target_id].state == STATE_NOTIFY_WAIT
+            threads[target_id].state = STATE_READY
+            threads[target_id].quantum = DEFAULT_QUANTUM
+            enqueue(threads[target_id].priority, target_id)
 
     event_clear_bits(target_id: int, bits: int)
-        tasks[target_id].notify_value = tasks[target_id].notify_value & ~bits
+        threads[target_id].notify_value = threads[target_id].notify_value & ~bits
 
 Priority inheritance support. PIMutex is a kernel-managed mutex
 that prevents priority inversion: when a high-priority thread
@@ -597,23 +597,23 @@ re-enqueue at new priority.
 
     remove_from_queue(pri: int, idx: int)
         if queue_head[pri] == idx
-            queue_head[pri] = tasks[idx].next
+            queue_head[pri] = threads[idx].next
             if queue_head[pri] == QUEUE_EMPTY
                 queue_tail[pri] = QUEUE_EMPTY
                 ready_mask = ready_mask & ~(1 << pri)
-            tasks[idx].next = QUEUE_EMPTY
+            threads[idx].next = QUEUE_EMPTY
             return
         var prev = queue_head[pri]
         while prev != QUEUE_EMPTY
-            if tasks[prev].next == idx
-                tasks[prev].next = tasks[idx].next
+            if threads[prev].next == idx
+                threads[prev].next = threads[idx].next
                 if queue_tail[pri] == idx
                     queue_tail[pri] = prev
-                tasks[idx].next = QUEUE_EMPTY
+                threads[idx].next = QUEUE_EMPTY
                 if queue_head[pri] == QUEUE_EMPTY
                     ready_mask = ready_mask & ~(1 << pri)
                 return
-            prev = tasks[prev].next
+            prev = threads[prev].next
 
 boost_thread_priority -- Boost a thread's effective priority.
 Handles the thread regardless of state:
@@ -624,16 +624,16 @@ Handles the thread regardless of state:
 
 
     boost_thread_priority(id: int, new_pri: int)
-        if new_pri >= tasks[id].priority
+        if new_pri >= threads[id].priority
             return
-        val old_pri = tasks[id].priority
-        tasks[id].priority = new_pri
-        if tasks[id].state == STATE_READY
+        val old_pri = threads[id].priority
+        threads[id].priority = new_pri
+        if threads[id].state == STATE_READY
             remove_from_queue(old_pri, id)
             enqueue(new_pri, id)
-        else if tasks[id].state == STATE_MUTEX_WAIT
-            if tasks[id].blocked_on != 0
-                var bm: *PIMutex = *int(tasks[id].blocked_on)
+        else if threads[id].state == STATE_MUTEX_WAIT
+            if threads[id].blocked_on != 0
+                var bm: *PIMutex = *int(threads[id].blocked_on)
                 if bm.owner >= 0
                     boost_thread_priority(bm.owner, new_pri)
 
@@ -647,18 +647,18 @@ us until pimutex_unlock_kernel wakes us.
             m.owner = current_thread
             return
         val owner = m.owner
-        if tasks[current_thread].priority < tasks[owner].priority
-            boost_thread_priority(owner, tasks[current_thread].priority)
-        tasks[current_thread].next = QUEUE_EMPTY
+        if threads[current_thread].priority < threads[owner].priority
+            boost_thread_priority(owner, threads[current_thread].priority)
+        threads[current_thread].next = QUEUE_EMPTY
         if m.wait_head == QUEUE_EMPTY
             m.wait_head = current_thread
             m.wait_tail = current_thread
         else
-            tasks[m.wait_tail].next = current_thread
+            threads[m.wait_tail].next = current_thread
             m.wait_tail = current_thread
-        tasks[current_thread].state = STATE_MUTEX_WAIT
-        tasks[current_thread].blocked_on = i64(m)
-        tasks[current_thread].consec_quanta = 0
+        threads[current_thread].state = STATE_MUTEX_WAIT
+        threads[current_thread].blocked_on = i64(m)
+        threads[current_thread].consec_quanta = 0
 
 Restores the caller's priority to base_priority. If there are
 waiters, transfers ownership to the first waiter (FIFO order)
@@ -667,17 +667,17 @@ runnable thread.
 
     pimutex_unlock_kernel(m: *PIMutex)
         val me = current_thread
-        tasks[me].priority = tasks[me].base_priority
+        threads[me].priority = threads[me].base_priority
         if m.wait_head == QUEUE_EMPTY
             m.owner = -1
             return
         val waiter = m.wait_head
-        m.wait_head = tasks[waiter].next
+        m.wait_head = threads[waiter].next
         if m.wait_head == QUEUE_EMPTY
             m.wait_tail = QUEUE_EMPTY
-        tasks[waiter].next = QUEUE_EMPTY
+        threads[waiter].next = QUEUE_EMPTY
         m.owner = waiter
-        tasks[waiter].state = STATE_READY
-        tasks[waiter].blocked_on = 0
-        tasks[waiter].quantum = DEFAULT_QUANTUM
-        enqueue(tasks[waiter].priority, waiter)
+        threads[waiter].state = STATE_READY
+        threads[waiter].blocked_on = 0
+        threads[waiter].quantum = DEFAULT_QUANTUM
+        enqueue(threads[waiter].priority, waiter)
