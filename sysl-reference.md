@@ -318,6 +318,51 @@ main() -> int
   `swapPair[T](p: *Pair[T])` is fully supported — `T` is inferred from the
   concrete `Pair[i32]` passed in.
 
+### Generic Tagged Unions
+
+Tagged unions (data enums) may declare type parameters — the foundation for
+`Option[T]`, `Result[T, E]`, and similar sum types.
+
+```sysl
+enum Option[T]
+    Some(value: T)
+    None
+
+enum Result[T, E]
+    Ok(value: T)
+    Err(error: E)
+
+safeDiv(a: int, b: int) -> Option[int]
+    if b == 0 then None
+    else Some(a / b)
+
+main() -> int
+    r = safeDiv(20, 4)
+    r match
+        Some(v) -> v
+        None -> -1
+```
+
+**Rules:**
+- Type parameters in square brackets after the enum name.
+- Variant field types may reference the type parameters.
+- Each `(enum, type-args)` pair produces one monomorphized `EnumType` with a
+  mangled name (e.g. `Option_i32`, `Result_i32_string`).
+- Pattern matching uses the scrutinee's concrete enum type to look up variants.
+
+**Type inference:** variant constructors prefer to infer type args from
+argument types (`Some(42)` infers `T=int`). When a variant doesn't pin all
+type parameters — e.g. `Ok(42)` for `Result[T, E]` leaves `E` unknown — the
+analyzer consults the **expected type** from context:
+
+| Context | Expected type source |
+|---|---|
+| `var x: Option[int] = None` | the declared variable type |
+| `fn f() -> Result[int, string] { Ok(42) }` | the function's return type |
+
+Without an expected type and incomplete argument-based inference, the compiler
+errors with a message asking for an explicit type annotation.
+
 ### Traits and `impl` blocks
 
 Traits describe a set of methods a type may implement. Each trait is parameterized

@@ -69,16 +69,16 @@ class SyslParser extends StandardTokenParsers {
     ident ~ (":" ~> typeRef) ^^ { case name ~ typ => (name, typ) }
 
   lazy val enumDecl: Parser[DeclAST] =
-    "enum" ~> ident ~ (Newline ~> Indent ~> rep1sep(enumVariantOrMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
-      case name ~ members =>
+    "enum" ~> ident ~ typeParamList ~ (Newline ~> Indent ~> rep1sep(enumVariantOrMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
+      case name ~ tps ~ members =>
         // If any member has fields, it's a data enum
-        val hasData = members.exists(_.isInstanceOf[Right[?, ?]])
+        val hasData = members.exists(_.isInstanceOf[Right[?, ?]]) || tps.nonEmpty
         if hasData then
           val variants = members.map {
             case Right(v) => v
             case Left((n, _)) => EnumVariantAST(n, Nil) // plain member in a data enum = no-arg variant
           }
-          DataEnumDeclAST(name, variants)
+          DataEnumDeclAST(name, variants, tps)
         else
           EnumDeclAST(name, members.map { case Left(m) => m; case _ => ??? })
     }

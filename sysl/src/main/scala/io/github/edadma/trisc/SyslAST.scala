@@ -30,7 +30,7 @@ case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[T
 case class VarDeclAST(name: String, typ: Option[TypeAST], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true) extends DeclAST
 case class StructDeclAST(name: String, fields: List[(String, TypeAST)], typeParams: List[String] = Nil) extends DeclAST
 case class EnumDeclAST(name: String, members: List[(String, Option[Long])]) extends DeclAST
-case class DataEnumDeclAST(name: String, variants: List[EnumVariantAST]) extends DeclAST
+case class DataEnumDeclAST(name: String, variants: List[EnumVariantAST], typeParams: List[String] = Nil) extends DeclAST
 case class EnumVariantAST(name: String, fields: List[(String, TypeAST)])
 case class TypeAliasDeclAST(name: String, target: TypeAST) extends DeclAST
 case class TraitDeclAST(name: String, typeParam: String, methods: List[TraitMethodAST]) extends DeclAST

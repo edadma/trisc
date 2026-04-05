@@ -33,6 +33,15 @@ class SyslAnalyzer:
   // Reverse map: mangled struct name -> (template name, concrete type args) for unification at call sites
   private val structToTemplate = new mutable.LinkedHashMap[String, (String, List[SyslType])]
 
+  // Generic enum support
+  private val genericEnums = new mutable.LinkedHashMap[String, DataEnumDeclAST]
+  private val genericEnumInstantiations = new mutable.LinkedHashMap[(String, List[SyslType]), SyslType.EnumType]
+  // variant name -> (generic enum name, variant index) for generic enum variants
+  private val genericVariantToEnum = new mutable.LinkedHashMap[String, (String, Int)]
+
+  // Expected type for bidirectional inference (used by generic variant constructors)
+  private var currentExpected: Option[SyslType] = None
+
   // Operator desugaring: operator → (trait name, method name). Requires user to define
   // the traits and provide impls for their types.
   private val operatorToTrait: Map[String, (String, String)] = Map(
@@ -168,17 +177,28 @@ class SyslAnalyzer:
             (memberName, value)
           }
           enumTypes(name) = resolved.toMap
-        case DataEnumDeclAST(name, variants) =>
-          if dataEnumTypes.contains(name) || enumTypes.contains(name) then
-            throw AnalysisError(s"duplicate enum: '$name'", decl)
-          val resolvedVariants = variants.map { case EnumVariantAST(vname, fields) =>
-            val resolvedFields = fields.map((fname, ftype) => (fname, resolveType(ftype)))
-            (vname, resolvedFields)
-          }
-          val et: SyslType.EnumType = SyslType.EnumType(name, resolvedVariants)
-          dataEnumTypes(name) = et
-          for ((vname, _), idx) <- resolvedVariants.zipWithIndex do
-            variantToEnum(vname) = (et, idx)
+        case de @ DataEnumDeclAST(name, variants, typeParams) =>
+          if typeParams.nonEmpty then
+            // Generic enum: store template, don't resolve fields
+            if genericEnums.contains(name) || dataEnumTypes.contains(name) || enumTypes.contains(name) then
+              throw AnalysisError(s"duplicate enum: '$name'", decl)
+            genericEnums(name) = de
+            // Register bare variant names for inference at construction sites
+            for (EnumVariantAST(vname, _), idx) <- variants.zipWithIndex do
+              if genericVariantToEnum.contains(vname) || variantToEnum.contains(vname) then
+                throw AnalysisError(s"duplicate variant name: '$vname'")
+              genericVariantToEnum(vname) = (name, idx)
+          else
+            if dataEnumTypes.contains(name) || enumTypes.contains(name) || genericEnums.contains(name) then
+              throw AnalysisError(s"duplicate enum: '$name'", decl)
+            val resolvedVariants = variants.map { case EnumVariantAST(vname, fields) =>
+              val resolvedFields = fields.map((fname, ftype) => (fname, resolveType(ftype)))
+              (vname, resolvedFields)
+            }
+            val et: SyslType.EnumType = SyslType.EnumType(name, resolvedVariants)
+            dataEnumTypes(name) = et
+            for ((vname, _), idx) <- resolvedVariants.zipWithIndex do
+              variantToEnum(vname) = (et, idx)
         case TypeAliasDeclAST(name, target) =>
           if typeAliases.contains(name) then throw AnalysisError(s"duplicate type alias: '$name'", decl)
           typeAliases(name) = target
@@ -253,6 +273,7 @@ class SyslAnalyzer:
     val tDecls = program.decls.flatMap {
       case f: FunDeclAST if f.typeParams.nonEmpty => Nil
       case s: StructDeclAST if s.typeParams.nonEmpty => Nil
+      case e: DataEnumDeclAST if e.typeParams.nonEmpty => Nil
       case _: TraitDeclAST => Nil // traits emit nothing; only impls do
       case impl: ImplDeclAST   => analyzeImplMethods(impl)
       case d => List(analyzeDecl(d))
@@ -283,7 +304,7 @@ class SyslAnalyzer:
         val members = enumTypes(name).toList.sortBy(_._2)
         TEnumDecl(name, members)
 
-      case DataEnumDeclAST(name, _) =>
+      case DataEnumDeclAST(name, _, _) =>
         TDataEnumDecl(name, dataEnumTypes(name))
 
       case TypeAliasDeclAST(name, target) =>
@@ -295,9 +316,12 @@ class SyslAnalyzer:
         val funInfo = functions(name)
         for (paramName, paramType) <- funInfo.params do
           currentScope(paramName) = SymInfo(paramName, paramType, true)
-        val tBody = body match
+        val savedExp = currentExpected
+        currentExpected = if funInfo.returnType == VoidType then None else Some(funInfo.returnType)
+        val tBody = try body match
           case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
           case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
+        finally currentExpected = savedExp
         val tParams = funInfo.params.map((n, t) => TParam(n, t))
         scopeStack = null
         TFunDecl(name, tParams, funInfo.returnType, tBody, isPrivate)
@@ -314,7 +338,10 @@ class SyslAnalyzer:
 
   private def resolveType(t: TypeAST): SyslType = t match
     case NamedTypeAST(name, typeArgs) if typeArgs.nonEmpty =>
-      instantiateGenericStruct(name, typeArgs.map(resolveType))
+      val resolved = typeArgs.map(resolveType)
+      if genericStructs.contains(name) then instantiateGenericStruct(name, resolved)
+      else if genericEnums.contains(name) then instantiateGenericEnum(name, resolved)
+      else throw AnalysisError(s"'$name' is not a generic type")
     case NamedTypeAST(name, _) if typeEnv.contains(name) => typeEnv(name)
     case NamedTypeAST(name, _) => name match
       case "int" | "i32" => I32
@@ -518,6 +545,30 @@ class SyslAnalyzer:
           st
         finally typeEnv = savedEnv
 
+  // Instantiate a generic enum with concrete type arguments, returning its EnumType
+  private def instantiateGenericEnum(name: String, typeArgs: List[SyslType]): SyslType.EnumType =
+    val cacheKey = (name, typeArgs)
+    genericEnumInstantiations.get(cacheKey) match
+      case Some(et) => et
+      case None =>
+        val template = genericEnums(name)
+        if template.typeParams.length != typeArgs.length then
+          throw AnalysisError(s"generic enum '$name' expects ${template.typeParams.length} type arg(s), got ${typeArgs.length}")
+        val mangled = name + "_" + typeArgs.map(typeToMangled).mkString("_")
+        val savedEnv = typeEnv
+        typeEnv = typeEnv ++ template.typeParams.zip(typeArgs).toMap
+        try
+          val resolvedVariants = template.variants.map { case EnumVariantAST(vname, fields) =>
+            val resolvedFields = fields.map((fname, ftype) => (fname, resolveType(ftype)))
+            (vname, resolvedFields)
+          }
+          val et: SyslType.EnumType = SyslType.EnumType(mangled, resolvedVariants)
+          genericEnumInstantiations(cacheKey) = et
+          dataEnumTypes(mangled) = et
+          specializedDecls += TDataEnumDecl(mangled, et)
+          et
+        finally typeEnv = savedEnv
+
   // Analyze each impl method (including synthesized defaults) as a mangled top-level function
   private def analyzeImplMethods(impl: ImplDeclAST): List[TDecl] =
     val resolvedTarget = resolveType(impl.targetType)
@@ -647,8 +698,11 @@ class SyslAnalyzer:
   private def analyzeStmt(stmt: StmtAST): TStmt =
     stmt match
       case VarStmtAST(name, typOpt, init, isMutable) =>
-        val tInit0 = analyzeExpr(init)
-        val declType = typOpt.map(resolveType).getOrElse(tInit0.typ)
+        val declared = typOpt.map(resolveType)
+        val savedExp = currentExpected
+        currentExpected = declared.orElse(currentExpected)
+        val tInit0 = try analyzeExpr(init) finally currentExpected = savedExp
+        val declType = declared.getOrElse(tInit0.typ)
         val tInit = coerceLiteral(tInit0, declType)
         if typOpt.isDefined && !compatible(tInit.typ, declType) then
           throw AnalysisError(s"cannot assign ${tInit.typ} to $declType variable '$name'")
@@ -784,12 +838,22 @@ class SyslAnalyzer:
       case ExprStmtAST(expr) =>
         TExprStmt(analyzeExpr(expr))
 
+  // Resolve a variant name to its (EnumType, variant index), consulting the scrutinee
+  // type first (for monomorphized generic enums) and then the global variantToEnum map.
+  private def resolveVariant(name: String, scrutineeType: SyslType): Option[(SyslType.EnumType, Int)] =
+    scrutineeType match
+      case et: SyslType.EnumType =>
+        val idx = et.variants.indexWhere(_._1 == name)
+        if idx >= 0 then Some((et, idx))
+        else variantToEnum.get(name)
+      case _ => variantToEnum.get(name)
+
   private def analyzePattern(pat: MatchPatternAST, scrutineeType: SyslType): TMatchPattern =
     pat match
       case WildcardPatternAST => TWildcard
-      case ValuePatternAST(VarRefAST(name)) if variantToEnum.contains(name) =>
+      case ValuePatternAST(VarRefAST(name)) if resolveVariant(name, scrutineeType).isDefined =>
         // No-arg variant pattern (e.g., `Empty` in a match arm)
-        val (et, variantIdx) = variantToEnum(name)
+        val (et, variantIdx) = resolveVariant(name, scrutineeType).get
         val (_, variantFields) = et.variants(variantIdx)
         if variantFields.nonEmpty then throw AnalysisError(s"variant '$name' requires ${variantFields.length} argument(s) in pattern")
         TVariantPattern(et, variantIdx, Nil, Nil)
@@ -805,8 +869,8 @@ class SyslAnalyzer:
         TRangePattern(tLow, tHigh)
       case DestructurePatternAST(name, fields) =>
         // Check if name is an enum variant first, then struct
-        if variantToEnum.contains(name) then
-          val (et, variantIdx) = variantToEnum(name)
+        if resolveVariant(name, scrutineeType).isDefined then
+          val (et, variantIdx) = resolveVariant(name, scrutineeType).get
           val (_, variantFields) = et.variants(variantIdx)
           if fields.length != variantFields.length then
             throw AnalysisError(s"variant '$name' has ${variantFields.length} fields, pattern has ${fields.length}")
@@ -975,6 +1039,25 @@ class SyslAnalyzer:
                 val (_, fields) = et.variants(idx)
                 if fields.nonEmpty then throw AnalysisError(s"variant '$name' requires ${fields.length} argument(s)")
                 TEnumConstruct(et, idx, Nil)
+              else if genericVariantToEnum.contains(name) then
+                val (enumName, idx) = genericVariantToEnum(name)
+                val template = genericEnums(enumName)
+                val variant = template.variants(idx)
+                if variant.fields.nonEmpty then
+                  throw AnalysisError(s"variant '$name' requires ${variant.fields.length} argument(s)")
+                // No args to infer from — must use currentExpected
+                currentExpected match
+                  case Some(et: SyslType.EnumType) =>
+                    // Find this enum's instantiation args from its mangled name
+                    val matching = genericEnumInstantiations.collectFirst {
+                      case ((n, args), inst) if n == enumName && inst.name == et.name => args
+                    }
+                    matching match
+                      case Some(args) => TEnumConstruct(et, idx, Nil)
+                      case None =>
+                        throw AnalysisError(s"expected enum type $et does not match variant '$name' of generic enum '$enumName'")
+                  case _ =>
+                    throw AnalysisError(s"cannot infer type parameters for no-arg variant '$name' of generic enum '$enumName' — use explicit type annotation")
               else
                 val sym = lookup(name)  // will throw proper error
                 TVarRef(name, sym.typ)
@@ -1320,6 +1403,37 @@ class SyslAnalyzer:
           val (_, variantFields) = et.variants(variantIdx)
           if tArgs.length != variantFields.length then
             throw AnalysisError(s"variant '$name' has ${variantFields.length} field(s), got ${tArgs.length} argument(s)")
+          val checkedArgs = tArgs.zip(variantFields).map { case (arg, (fieldName, fieldType)) =>
+            val coerced = coerceLiteral(arg, fieldType)
+            if !compatible(coerced.typ, fieldType) then
+              throw AnalysisError(s"variant '$name' field '$fieldName' expects $fieldType, got ${coerced.typ}")
+            coerced
+          }
+          TEnumConstruct(et, variantIdx, checkedArgs)
+        else if genericVariantToEnum.contains(name) then
+          // Generic enum variant constructor: Some(42) — infer T from args, then fall back to expected type
+          val (enumName, variantIdx) = genericVariantToEnum(name)
+          val template = genericEnums(enumName)
+          val variant = template.variants(variantIdx)
+          if variant.fields.length != tArgs.length then
+            throw AnalysisError(s"variant '$name' has ${variant.fields.length} field(s), got ${tArgs.length} argument(s)")
+          val env = mutable.Map.empty[String, SyslType]
+          for ((_, ftype), arg) <- variant.fields.zip(tArgs) do
+            unifyTypes(ftype, arg.typ, template.typeParams.toSet, env)
+          // For any type params not inferred from args, try pulling them from currentExpected
+          val missing = template.typeParams.filter(tp => !env.contains(tp))
+          if missing.nonEmpty then
+            currentExpected match
+              case Some(SyslType.EnumType(expectedName, _)) if genericEnumInstantiations.exists { case ((n, _), et) => et.name == expectedName && n == enumName } =>
+                val (_, expectedArgs) = genericEnumInstantiations.collectFirst { case ((n, args), et) if et.name == expectedName && n == enumName => (n, args) }.get
+                for (tp, arg) <- template.typeParams.zip(expectedArgs) if !env.contains(tp) do
+                  env(tp) = arg
+              case _ => ()
+          for tp <- template.typeParams if !env.contains(tp) do
+            throw AnalysisError(s"cannot infer type parameter '$tp' for variant '$name' of generic enum '$enumName' — use explicit type annotation")
+          val inferredArgs = template.typeParams.map(env(_))
+          val et = instantiateGenericEnum(enumName, inferredArgs)
+          val (_, variantFields) = et.variants(variantIdx)
           val checkedArgs = tArgs.zip(variantFields).map { case (arg, (fieldName, fieldType)) =>
             val coerced = coerceLiteral(arg, fieldType)
             if !compatible(coerced.typ, fieldType) then
