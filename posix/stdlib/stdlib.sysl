@@ -271,7 +271,7 @@ rand() -> int
     int((_rand_next >> 16) & i64(RAND_MAX))
 
 /* Swap n bytes between a and b. */
-private _swap(a: *byte, b: *byte, n: int)
+swap(a: *byte, b: *byte, n: int)
     for var i = 0; i < n; i++
         val t = a[i]
 
@@ -289,7 +289,7 @@ qsort(base: *byte, nmemb: int, size: int, compar: func(*byte, *byte) -> int)
         var j = i
 
         while j > 0 && compar(base + (j - 1) * size, base + j * size) > 0
-            _swap(base + (j - 1) * size, base + j * size, size)
+            swap(base + (j - 1) * size, base + j * size, size)
             j--
 
 /* Binary search a sorted array.

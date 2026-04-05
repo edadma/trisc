@@ -293,3 +293,41 @@ strlcat(dst: *byte, src: *byte, dstsize: int) -> int
     while src[i] != 0 do i++
 
     dlen + i
+
+/* Reverse a null-terminated string in place. Returns the string pointer. */
+strrev(s: *byte) -> *byte
+    var lo = 0
+    var hi = strlen(s) - 1
+
+    while lo < hi
+        val t = s[lo]
+
+        s[lo] = s[hi]
+        s[hi] = t
+        lo++
+        hi--
+
+    s
+
+/* Extract a token from *stringp, delimited by any byte in delim.
+ * Updates *stringp to point past the delimiter (or null if end).
+ * Returns the original *stringp, or null if *stringp was null.
+ */
+strsep(stringp: **byte, delim: *byte) -> *byte
+    val s = *stringp
+
+    if s == *byte(0) then return *byte(0)
+
+    var p = s
+
+    while *p != 0
+        for var d = delim; *d != 0; d++
+            if *p == *d
+                *p = 0
+                *stringp = p + 1
+                return s
+
+        p++
+
+    *stringp = *byte(0)
+    s
