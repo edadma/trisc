@@ -140,14 +140,16 @@ object AssemblerParser extends RegexParsers:
           case "data"  => SymbolType.Data
           case "const" => SymbolType.Const
           case other   => sys.error(s"unknown symbol type '$other' (expected func, data, or const)")
-        val isHex = (s: String) =>
-          val raw = if s.startsWith("0x") || s.startsWith("0X") then s.drop(2) else s
-          raw.nonEmpty && raw.forall(c => c.isDigit || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F')
+        val isNumeric = (s: String) =>
+          if s.startsWith("0x") || s.startsWith("0X") then
+            val raw = s.drop(2)
+            raw.nonEmpty && raw.forall(c => c.isDigit || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F')
+          else s.nonEmpty && s.forall(_.isDigit)
         val parseNum = (s: String) => if s.startsWith("0x") then java.lang.Long.parseLong(s.drop(2), 16) else s.toLong
         val (symSize, typeInfo) = fields match
           case Nil => (None, None)
           case List(tokens) =>
-            if symType == SymbolType.Data && tokens.size == 1 && isHex(tokens.head) then
+            if symType == SymbolType.Data && tokens.size == 1 && isNumeric(tokens.head) then
               (Some(parseNum(tokens.head)), None)
             else
               (None, Some(tokens.mkString(" ")))
