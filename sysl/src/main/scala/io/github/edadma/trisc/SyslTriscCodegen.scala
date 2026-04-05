@@ -1278,48 +1278,75 @@ class SyslTriscCodegen(addresses: Int = 4):
         genExpr(right)       // r1 = right
         emit("  mov r2, r1") // r2 = right
         emit("  popd r1")   // r1 = left
+        val isFloat = left.typ == SyslType.DoubleType
         val unsigned = left.typ.isUnsigned
-        op match
-          case "+"  => emit("  add r1, r1, r2")
-          case "-"  => emit("  sub r1, r1, r2")
-          case "*"  => emit(if unsigned then "  mulu r1, r1, r2" else "  mul r1, r1, r2")
-          case "/"  => emit(if unsigned then "  divu r1, r1, r2" else "  div r1, r1, r2")
-          case "%"  => emit(if unsigned then "  divu r1, r1, r2" else "  div r1, r1, r2"); emit("  mov r1, r2") // remainder in r2
-          case "&"  => emit("  and r1, r1, r2")
-          case "|"  => emit("  or r1, r1, r2")
-          case "^"  => emit("  xor r1, r1, r2")
-          case "<<" => emit("  lsl r1, r1, r2")
-          case ">>" => emit(if unsigned then "  lsr r1, r1, r2" else "  asr r1, r1, r2")
-          case "==" =>
-            val eq = newLabel("eq")
-            val end = newLabel("end")
-            emit(s"  beq r1, r2, $eq")
-            emit("  ldi r1, 0")
-            emit(s"  bra $end")
-            emit(s"$eq")
-            emit("  ldi r1, 1")
-            emit(s"$end")
-          case "!=" =>
-            val ne = newLabel("ne")
-            val end = newLabel("end")
-            emit(s"  beq r1, r2, $ne")
-            emit("  ldi r1, 1")
-            emit(s"  bra $end")
-            emit(s"$ne")
-            emit("  ldi r1, 0")
-            emit(s"$end")
-          case "<" =>
-            emit(if unsigned then "  sltu r1, r1, r2" else "  slt r1, r1, r2")
-          case ">" =>
-            emit(if unsigned then "  sltu r1, r2, r1" else "  slt r1, r2, r1")
-          case "<=" =>
-            emit(if unsigned then "  sltu r1, r2, r1" else "  slt r1, r2, r1")
-            emit("  ldi r3, 1")
-            emit("  xor r1, r1, r3") // flip: 0→1, 1→0
-          case ">=" =>
-            emit(if unsigned then "  sltu r1, r1, r2" else "  slt r1, r1, r2")
-            emit("  ldi r3, 1")
-            emit("  xor r1, r1, r3") // flip
+        if isFloat then
+          op match
+            case "+"  => emit("  fadd r1, r1, r2")
+            case "-"  => emit("  fsub r1, r1, r2")
+            case "*"  => emit("  fmul r1, r1, r2")
+            case "/"  => emit("  fdiv r1, r1, r2")
+            case "==" =>
+              emit("  fseq r1, r1, r2")  // r1 = 1 if equal, 0 if not
+            case "!=" =>
+              emit("  fseq r1, r1, r2")
+              emit("  ldi r3, 1")
+              emit("  xor r1, r1, r3")   // flip
+            case "<" =>
+              emit("  fslt r1, r1, r2")
+            case ">" =>
+              emit("  fslt r1, r2, r1")
+            case "<=" =>
+              emit("  fslt r1, r2, r1")  // r1 = (right < left)
+              emit("  ldi r3, 1")
+              emit("  xor r1, r1, r3")   // flip: !(right < left) = left <= right
+            case ">=" =>
+              emit("  fslt r1, r1, r2")  // r1 = (left < right)
+              emit("  ldi r3, 1")
+              emit("  xor r1, r1, r3")   // flip: !(left < right) = left >= right
+            case _ => // unsupported float op — fall through
+        else
+          op match
+            case "+"  => emit("  add r1, r1, r2")
+            case "-"  => emit("  sub r1, r1, r2")
+            case "*"  => emit(if unsigned then "  mulu r1, r1, r2" else "  mul r1, r1, r2")
+            case "/"  => emit(if unsigned then "  divu r1, r1, r2" else "  div r1, r1, r2")
+            case "%"  => emit(if unsigned then "  divu r1, r1, r2" else "  div r1, r1, r2"); emit("  mov r1, r2") // remainder in r2
+            case "&"  => emit("  and r1, r1, r2")
+            case "|"  => emit("  or r1, r1, r2")
+            case "^"  => emit("  xor r1, r1, r2")
+            case "<<" => emit("  lsl r1, r1, r2")
+            case ">>" => emit(if unsigned then "  lsr r1, r1, r2" else "  asr r1, r1, r2")
+            case "==" =>
+              val eq = newLabel("eq")
+              val end = newLabel("end")
+              emit(s"  beq r1, r2, $eq")
+              emit("  ldi r1, 0")
+              emit(s"  bra $end")
+              emit(s"$eq")
+              emit("  ldi r1, 1")
+              emit(s"$end")
+            case "!=" =>
+              val ne = newLabel("ne")
+              val end = newLabel("end")
+              emit(s"  beq r1, r2, $ne")
+              emit("  ldi r1, 1")
+              emit(s"  bra $end")
+              emit(s"$ne")
+              emit("  ldi r1, 0")
+              emit(s"$end")
+            case "<" =>
+              emit(if unsigned then "  sltu r1, r1, r2" else "  slt r1, r1, r2")
+            case ">" =>
+              emit(if unsigned then "  sltu r1, r2, r1" else "  slt r1, r2, r1")
+            case "<=" =>
+              emit(if unsigned then "  sltu r1, r2, r1" else "  slt r1, r2, r1")
+              emit("  ldi r3, 1")
+              emit("  xor r1, r1, r3") // flip: 0→1, 1→0
+            case ">=" =>
+              emit(if unsigned then "  sltu r1, r1, r2" else "  slt r1, r1, r2")
+              emit("  ldi r3, 1")
+              emit("  xor r1, r1, r3") // flip
 
       case TPreInc(name, typ) =>
         val step = typ match
@@ -1383,7 +1410,14 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TCast(inner, target) =>
         genExpr(inner)
         import SyslType.*
+        val srcIsFloat = inner.typ == DoubleType
+        val tgtIsFloat = target == DoubleType
+        // Float → int: convert float bits to integer value first
+        if srcIsFloat && !tgtIsFloat then emit("  fint r1, r1")
+        // Int → float: convert integer value to float bits
+        else if !srcIsFloat && tgtIsFloat then emit("  cvt r1, r1")
         target match
+          case DoubleType => // cvt already emitted above (or no-op if src is already float)
           case BoolType =>
             // nonzero → 1, zero → 0
             val isZero = newLabel("iszero")
@@ -1414,7 +1448,8 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TUnary("-", operand, _) =>
         genExpr(operand)
-        emit("  neg r1, r1")
+        if operand.typ == SyslType.DoubleType then emit("  fneg r1, r1")
+        else emit("  neg r1, r1")
 
       case TUnary("!", operand, _) =>
         genExpr(operand)
