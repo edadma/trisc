@@ -54,4 +54,5 @@ class SyslCodegenTrapTests extends SyslCodegenHelpers {
         |    0
         |""".stripMargin) shouldBe 3
   }
+
 }
