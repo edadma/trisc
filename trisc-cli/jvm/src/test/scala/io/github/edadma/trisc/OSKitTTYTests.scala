@@ -20,9 +20,9 @@ class OSKitTTYTests extends OSKitTestHelpers {
              scheduledKeys: Seq[(Int, Int, Boolean, Int)] = Seq.empty): (CPU, String) =
     val bootTof = assemble(bootAsm, relocatable = true)
     val allSources = Map(
-      "oskit/kernel" -> kernelSysl, "oskit/services" -> servicesSysl, "oskit/timer" -> timerSysl,
-      "oskit/semaphore" -> semaphoreSysl, "oskit/mutex" -> mutexSysl,
-      "oskit/ipc" -> ipcSysl, "oskit/kbd" -> kbdSysl, "oskit/tty" -> ttySysl,
+      "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
+      "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
+      "oskit/ipc/ipc" -> ipcSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl, "oskit/drivers/tty/tty" -> ttySysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -81,7 +81,11 @@ class OSKitTTYTests extends OSKitTestHelpers {
   "TTY: write single character via IPC" in {
     val (_, output) = runTTY(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.tty.*
+import oskit.drivers.kbd.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -104,7 +108,11 @@ class OSKitTTYTests extends OSKitTestHelpers {
   "TTY: write string via IPC" in {
     val (_, output) = runTTY(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.tty.*
+import oskit.drivers.kbd.*
           |
           |var hello: [6]i8
           |
@@ -133,7 +141,11 @@ class OSKitTTYTests extends OSKitTestHelpers {
   "TTY: multiple clients write to same tty" in {
     val (_, output) = runTTY(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.tty.*
+import oskit.drivers.kbd.*
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -165,7 +177,11 @@ class OSKitTTYTests extends OSKitTestHelpers {
   "TTY: client discovers tty port by name" in {
     val (_, output) = runTTY(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.tty.*
+import oskit.drivers.kbd.*
           |
           |var tname: [4]i8
           |
@@ -197,7 +213,11 @@ class OSKitTTYTests extends OSKitTestHelpers {
     val (_, output) = runTTY(
       Map(
         "app" ->
-          """import oskit.*
+          """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.tty.*
+import oskit.drivers.kbd.*
             |
             |kernel_main() -> int
             |    ipc_init()
@@ -225,7 +245,11 @@ class OSKitTTYTests extends OSKitTestHelpers {
     val (_, output) = runTTY(
       Map(
         "app" ->
-          """import oskit.*
+          """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.tty.*
+import oskit.drivers.kbd.*
             |
             |kernel_main() -> int
             |    ipc_init()
@@ -252,7 +276,11 @@ class OSKitTTYTests extends OSKitTestHelpers {
     val (_, output) = runTTY(
       Map(
         "app" ->
-          """import oskit.*
+          """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.tty.*
+import oskit.drivers.kbd.*
             |
             |kernel_main() -> int
             |    ipc_init()
@@ -284,7 +312,11 @@ class OSKitTTYTests extends OSKitTestHelpers {
     val (_, output) = runTTY(
       Map(
         "app" ->
-          """import oskit.*
+          """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.tty.*
+import oskit.drivers.kbd.*
             |
             |kernel_main() -> int
             |    ipc_init()
@@ -322,7 +354,11 @@ class OSKitTTYTests extends OSKitTestHelpers {
     val (_, output) = runTTY(
       Map(
         "app" ->
-          """import oskit.*
+          """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.tty.*
+import oskit.drivers.kbd.*
             |
             |kernel_main() -> int
             |    ipc_init()
@@ -371,7 +407,11 @@ class OSKitTTYTests extends OSKitTestHelpers {
     val (_, output) = runTTY(
       Map(
         "app" ->
-          """import oskit.*
+          """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.tty.*
+import oskit.drivers.kbd.*
             |
             |var my_tid = -1
             |
@@ -412,7 +452,11 @@ class OSKitTTYTests extends OSKitTestHelpers {
     val (_, output) = runTTY(
       Map(
         "app" ->
-          """import oskit.*
+          """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.tty.*
+import oskit.drivers.kbd.*
             |
             |kernel_main() -> int
             |    ipc_init()
@@ -447,7 +491,11 @@ class OSKitTTYTests extends OSKitTestHelpers {
     val (_, output) = runTTY(
       Map(
         "app" ->
-          """import oskit.*
+          """import oskit.kernel.*
+import oskit.services.*
+import oskit.ipc.*
+import oskit.drivers.tty.*
+import oskit.drivers.kbd.*
             |
             |kernel_main() -> int
             |    ipc_init()

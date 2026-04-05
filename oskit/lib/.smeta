@@ -1,0 +1,8 @@
+SMETA v1
+SOURCE oskit/lib/string.sysl
+DATA _strtok_pos i64
+FUNC _is_delim 2 i8 ptr i8 i32
+FUNC strtok 2 ptr i8 ptr i8 ptr i8
+FUNC streq 2 ptr i8 ptr i8 i32
+FUNC strcpy 2 ptr i8 ptr i8 void
+FUNC strcat 2 ptr i8 ptr i8 void

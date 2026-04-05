@@ -1,0 +1,50 @@
+# Math Demo
+
+Demonstrates the math utility functions by computing a few results
+and printing them as decimal text.
+
+## Printing an Integer
+
+A helper that converts a non-negative integer $n$ to its decimal
+representation and prints it followed by a newline. The algorithm:
+
+1. Extract digits via repeated `mod 10`
+2. Store them in a fixed-size buffer (least-significant first)
+3. Print in reverse order, converting each digit $d$ to its
+   ASCII code point $d + 48$
+
+The maximum number of digits for a 32-bit integer is
+$\lfloor \log_{10}(2^{31} - 1) \rfloor + 1 = 10$, so a buffer of
+16 is more than sufficient.
+
+    print_int(n: int)
+        if n == 0
+            putchar(48)
+            putchar(10)
+            return
+        var digits: [16]int
+        var count: int = 0
+        var val: int = n
+        while val > 0
+            digits[count] = val % 10
+            count = count + 1
+            val = val / 10
+        for i = count - 1; i >= 0; i--
+            putchar(digits[i] + 48)
+        putchar(10)
+
+## Main
+
+Compute and print three results:
+
+- `power(2, 10)` — should print **1024** since $2^{10} = 1024$
+- `gcd(48, 18)` — should print **6** since $\gcd(48, 18) = 6$
+- `abs(-42)` — should print **42** since $|-42| = 42$
+
+---
+
+    main() -> int
+        print_int(power(2, 10))
+        print_int(gcd(48, 18))
+        print_int(abs(-42))
+        0

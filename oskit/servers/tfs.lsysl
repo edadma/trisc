@@ -1,0 +1,496 @@
+OSKit TFS Server — Filesystem Server
+
+MINIX 3-style filesystem server. Wraps the portable TFS library
+(oskit/fs/tfs.lsysl) with IPC, providing filesystem operations
+to userspace clients. Block I/O is forwarded to the disk server
+via IPC (rd_read/rd_write use disk_read/disk_write).
+
+Clients send IPC messages with a command byte and arguments;
+the server dispatches to the appropriate TFS library function
+and replies with results.
+
+Message format:
+- Request:  [cmd(1), args...]
+- Reply:    [status(1), data...]
+Status: 0 = ok, negative = error
+
+Commands:
+- TFS_OPEN    (1): [cmd, path...NUL] → [status(1), ino(4)]
+- TFS_READ    (2): [cmd, ino(4), offset(4), len(4)] → [status(1), bytes_read(4), data...]
+- TFS_WRITE   (3): [cmd, ino(4), offset(4), len(4), data...] → [status(1), bytes_written(4)]
+- TFS_CREATE  (4): [cmd, parent_ino(4), type(1), perm(2), name...NUL] → [status(1), ino(4)]
+- TFS_UNLINK  (5): [cmd, parent_ino(4), name...NUL] → [status(1)]
+- TFS_STAT    (6): [cmd, ino(4)] → [status(1), mode(4), nlinks(4), uid(4), gid(4), size(4), mtime(4), ctime(4)]
+- TFS_MKDIR   (7): [cmd, parent_ino(4), perm(2), name...NUL] → [status(1), ino(4)]
+- TFS_RMDIR   (8): [cmd, parent_ino(4), name...NUL] → [status(1)]
+- TFS_READDIR (9): [cmd, dir_ino(4), index(4)] → [status(1), ino(4), name(14)]
+- TFS_SYNC   (10): [cmd] → [status(1)]
+
+    module oskit.servers
+
+    import oskit.fs.{tfs_init, tfs_lookup, tfs_read, tfs_write, tfs_create, tfs_unlink, tfs_stat, tfs_readdir, tfs_rmdir, sync_superblock}
+    import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv, ipc_reply, ipc_send}
+    import oskit.drivers.disk.{disk_read, disk_write}
+
+    val TFS_CMD_OPEN    = 1
+    val TFS_CMD_READ    = 2
+    val TFS_CMD_WRITE   = 3
+    val TFS_CMD_CREATE  = 4
+    val TFS_CMD_UNLINK  = 5
+    val TFS_CMD_STAT    = 6
+    val TFS_CMD_MKDIR   = 7
+    val TFS_CMD_RMDIR   = 8
+    val TFS_CMD_READDIR = 9
+    val TFS_CMD_SYNC    = 10
+
+    var tfs_port = -1
+    var tfs_srv_name: [3]i8
+
+Block I/O bridge: provides the rd_read/rd_write that the TFS
+library externs expect, forwarding to the disk server via IPC.
+
+    rd_read(lba: int, addr: *i8)
+        disk_read(lba, addr)
+
+    rd_write(lba: int, addr: *i8)
+        disk_write(lba, addr)
+
+Big-endian message helpers (local to this server).
+
+    tfs_msg_read_i32(buf: *i8, off: int) -> int
+        ((buf[off] & 0xFF) << 24) | ((buf[off + 1] & 0xFF) << 16) | ((buf[off + 2] & 0xFF) << 8) | (buf[off + 3] & 0xFF)
+
+    tfs_msg_write_i32(buf: *i8, off: int, v: int)
+        buf[off] = (v >> 24) & 0xFF
+        buf[off + 1] = (v >> 16) & 0xFF
+        buf[off + 2] = (v >> 8) & 0xFF
+        buf[off + 3] = v & 0xFF
+
+    tfs_msg_read_i16(buf: *i8, off: int) -> int
+        ((buf[off] & 0xFF) << 8) | (buf[off + 1] & 0xFF)
+
+Handle OPEN: resolve a path to an inode number.
+Request: [cmd(1), path...NUL]
+Reply:   [status(1), ino(4)]
+
+    tfs_handle_open(sender: int, buf: *i8)
+        val path: *i8 = buf + 1
+        val ino = tfs_lookup(path)
+        var reply: [5]i8
+        if ino == -1
+            reply[0] = -1
+        else
+            reply[0] = 0
+            tfs_msg_write_i32(&reply[0], 1, ino)
+        ipc_reply(sender, &reply[0], 5)
+
+Handle READ: read bytes from a file.
+Request: [cmd(1), ino(4), offset(4), len(4)]
+Reply:   [status(1), bytes_read(4), data...]
+
+    tfs_handle_read(sender: int, buf: *i8)
+        val ino = tfs_msg_read_i32(buf, 1)
+        val offset = tfs_msg_read_i32(buf, 5)
+        val len = tfs_msg_read_i32(buf, 9)
+        // Cap read size to reply buffer
+        var rlen = len
+        if rlen > 500
+            rlen = 500
+        var data: [512]i8
+        val nr = tfs_read(ino, &data[0], offset, rlen)
+        // Build reply: [status(1), bytes_read(4), data...]
+        var reply: [512]i8
+        reply[0] = 0
+        tfs_msg_write_i32(&reply[0], 1, nr)
+        var i = 0
+        while i < nr
+            reply[i + 5] = data[i]
+            i += 1
+        ipc_reply(sender, &reply[0], nr + 5)
+
+Handle WRITE: write bytes to a file.
+Request: [cmd(1), ino(4), offset(4), len(4), data...]
+Reply:   [status(1), bytes_written(4)]
+
+    tfs_handle_write(sender: int, buf: *i8)
+        val ino = tfs_msg_read_i32(buf, 1)
+        val offset = tfs_msg_read_i32(buf, 5)
+        val len = tfs_msg_read_i32(buf, 9)
+        val data: *i8 = buf + 13
+        val nw = tfs_write(ino, data, offset, len)
+        var reply: [5]i8
+        reply[0] = 0
+        tfs_msg_write_i32(&reply[0], 1, nw)
+        ipc_reply(sender, &reply[0], 5)
+
+Handle CREATE: create a file or directory entry.
+Request: [cmd(1), parent_ino(4), type(1), perm(2), name...NUL]
+Reply:   [status(1), ino(4)]
+
+    tfs_handle_create(sender: int, buf: *i8)
+        val parent_ino = tfs_msg_read_i32(buf, 1)
+        val ftype = int(buf[5])
+        val perm = tfs_msg_read_i16(buf, 6)
+        val name: *i8 = buf + 8
+        val ino = tfs_create(parent_ino, name, ftype, perm)
+        var reply: [5]i8
+        if ino == -1
+            reply[0] = -1
+        else
+            reply[0] = 0
+            tfs_msg_write_i32(&reply[0], 1, ino)
+        ipc_reply(sender, &reply[0], 5)
+
+Handle UNLINK: remove a file.
+Request: [cmd(1), parent_ino(4), name...NUL]
+Reply:   [status(1)]
+
+    tfs_handle_unlink(sender: int, buf: *i8)
+        val parent_ino = tfs_msg_read_i32(buf, 1)
+        val name: *i8 = buf + 5
+        val result = tfs_unlink(parent_ino, name)
+        var reply: [1]i8
+        if result == -1
+            reply[0] = -1
+        else
+            reply[0] = 0
+        ipc_reply(sender, &reply[0], 1)
+
+Handle STAT: get file metadata.
+Request: [cmd(1), ino(4)]
+Reply:   [status(1), mode(4), nlinks(4), uid(4), gid(4), size(4), mtime(4), ctime(4)]
+
+    tfs_handle_stat(sender: int, buf: *i8)
+        val ino = tfs_msg_read_i32(buf, 1)
+        var out: [7]int
+        val result = tfs_stat(ino, &out[0])
+        var reply: [29]i8
+        if result != 0
+            reply[0] = -1
+            ipc_reply(sender, &reply[0], 1)
+            return
+        reply[0] = 0
+        tfs_msg_write_i32(&reply[0], 1, out[0])   // mode
+        tfs_msg_write_i32(&reply[0], 5, out[1])   // nlinks
+        tfs_msg_write_i32(&reply[0], 9, out[2])   // uid
+        tfs_msg_write_i32(&reply[0], 13, out[3])  // gid
+        tfs_msg_write_i32(&reply[0], 17, out[4])  // size
+        tfs_msg_write_i32(&reply[0], 21, out[5])  // mtime
+        tfs_msg_write_i32(&reply[0], 25, out[6])  // ctime
+        ipc_reply(sender, &reply[0], 29)
+
+Handle MKDIR: create a directory.
+Request: [cmd(1), parent_ino(4), perm(2), name...NUL]
+Reply:   [status(1), ino(4)]
+
+    tfs_handle_mkdir(sender: int, buf: *i8)
+        val parent_ino = tfs_msg_read_i32(buf, 1)
+        val perm = tfs_msg_read_i16(buf, 5)
+        val name: *i8 = buf + 7
+        val ino = tfs_create(parent_ino, name, 2, perm)
+        var reply: [5]i8
+        if ino == -1
+            reply[0] = -1
+        else
+            reply[0] = 0
+            tfs_msg_write_i32(&reply[0], 1, ino)
+        ipc_reply(sender, &reply[0], 5)
+
+Handle RMDIR: remove a directory.
+Request: [cmd(1), parent_ino(4), name...NUL]
+Reply:   [status(1)]
+
+    tfs_handle_rmdir(sender: int, buf: *i8)
+        val parent_ino = tfs_msg_read_i32(buf, 1)
+        val name: *i8 = buf + 5
+        val result = tfs_rmdir(parent_ino, name)
+        var reply: [1]i8
+        if result == -1
+            reply[0] = -1
+        else
+            reply[0] = 0
+        ipc_reply(sender, &reply[0], 1)
+
+Handle READDIR: read a directory entry by index.
+Request: [cmd(1), dir_ino(4), index(4)]
+Reply:   [status(1), ino(4), name(14)]
+
+    tfs_handle_readdir(sender: int, buf: *i8)
+        val dir_ino = tfs_msg_read_i32(buf, 1)
+        val index = tfs_msg_read_i32(buf, 5)
+        var out_ino: int
+        var out_name: [14]i8
+        val result = tfs_readdir(dir_ino, index, &out_ino, &out_name[0])
+        var reply: [19]i8
+        if result == -1
+            reply[0] = -1
+            ipc_reply(sender, &reply[0], 1)
+            return
+        reply[0] = 0
+        tfs_msg_write_i32(&reply[0], 1, out_ino)
+        var i = 0
+        while i < 14
+            reply[i + 5] = out_name[i]
+            i += 1
+        ipc_reply(sender, &reply[0], 19)
+
+Handle SYNC: flush superblock to disk.
+Request: [cmd(1)]
+Reply:   [status(1)]
+
+    tfs_handle_sync(sender: int)
+        sync_superblock()
+        var reply: [1]i8
+        reply[0] = 0
+        ipc_reply(sender, &reply[0], 1)
+
+The TFS server loop. Creates port, registers as "fs",
+initializes TFS, then loops handling filesystem requests.
+
+The disk server must be running before this server starts,
+since tfs_init() reads the superblock via rd_read → disk_read.
+
+    tfs_server()
+        // Set up name
+        tfs_srv_name[0] = 102  // f
+        tfs_srv_name[1] = 115  // s
+        tfs_srv_name[2] = 0
+
+        // Create and register port
+        tfs_port = port_create()
+        port_register(tfs_port, &tfs_srv_name[0])
+
+        // Initialize TFS (reads superblock from disk server)
+        tfs_init()
+
+        // Server loop
+        var buf: [512]i8
+        while 1 == 1
+            val sender = ipc_recv(tfs_port, &buf[0], 512)
+            if sender >= 0
+                val cmd = int(buf[0])
+                if cmd == TFS_CMD_OPEN
+                    tfs_handle_open(sender, &buf[0])
+                else if cmd == TFS_CMD_READ
+                    tfs_handle_read(sender, &buf[0])
+                else if cmd == TFS_CMD_WRITE
+                    tfs_handle_write(sender, &buf[0])
+                else if cmd == TFS_CMD_CREATE
+                    tfs_handle_create(sender, &buf[0])
+                else if cmd == TFS_CMD_UNLINK
+                    tfs_handle_unlink(sender, &buf[0])
+                else if cmd == TFS_CMD_STAT
+                    tfs_handle_stat(sender, &buf[0])
+                else if cmd == TFS_CMD_MKDIR
+                    tfs_handle_mkdir(sender, &buf[0])
+                else if cmd == TFS_CMD_RMDIR
+                    tfs_handle_rmdir(sender, &buf[0])
+                else if cmd == TFS_CMD_READDIR
+                    tfs_handle_readdir(sender, &buf[0])
+                else if cmd == TFS_CMD_SYNC
+                    tfs_handle_sync(sender)
+                else
+                    var reply: [1]i8
+                    reply[0] = -1
+                    ipc_reply(sender, &reply[0], 1)
+
+Userspace wrappers. Clients use these to talk to the TFS server
+without building IPC messages manually.
+
+    fs_open(path: *i8) -> int
+        val port = port_lookup(&tfs_srv_name[0])
+        if port < 0
+            return -1
+        // Build message: [cmd(1), path...NUL]
+        var msg: [128]i8
+        msg[0] = TFS_CMD_OPEN
+        var i = 0
+        while path[i] != 0
+            msg[i + 1] = path[i]
+            i += 1
+        msg[i + 1] = 0
+        var reply: [5]i8
+        ipc_send(port, &msg[0], i + 2, &reply[0], 5)
+        if reply[0] != 0
+            return -1
+        tfs_msg_read_i32(&reply[0], 1)
+
+    fs_read(ino: int, buf: *i8, offset: int, len: int) -> int
+        val port = port_lookup(&tfs_srv_name[0])
+        if port < 0
+            return -1
+        var msg: [13]i8
+        msg[0] = TFS_CMD_READ
+        tfs_msg_write_i32(&msg[0], 1, ino)
+        tfs_msg_write_i32(&msg[0], 5, offset)
+        tfs_msg_write_i32(&msg[0], 9, len)
+        var reply: [512]i8
+        val result = ipc_send(port, &msg[0], 13, &reply[0], 512)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        val nr = tfs_msg_read_i32(&reply[0], 1)
+        // Copy data to caller's buffer
+        var i = 0
+        while i < nr
+            buf[i] = reply[i + 5]
+            i += 1
+        nr
+
+    fs_write(ino: int, data: *i8, offset: int, len: int) -> int
+        val port = port_lookup(&tfs_srv_name[0])
+        if port < 0
+            return -1
+        var msg: [512]i8
+        msg[0] = TFS_CMD_WRITE
+        tfs_msg_write_i32(&msg[0], 1, ino)
+        tfs_msg_write_i32(&msg[0], 5, offset)
+        tfs_msg_write_i32(&msg[0], 9, len)
+        var i = 0
+        while i < len
+            msg[i + 13] = data[i]
+            i += 1
+        var reply: [5]i8
+        val result = ipc_send(port, &msg[0], len + 13, &reply[0], 5)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        tfs_msg_read_i32(&reply[0], 1)
+
+    fs_create(parent_ino: int, name: *i8, ftype: int, perm: int) -> int
+        val port = port_lookup(&tfs_srv_name[0])
+        if port < 0
+            return -1
+        var msg: [128]i8
+        msg[0] = TFS_CMD_CREATE
+        tfs_msg_write_i32(&msg[0], 1, parent_ino)
+        msg[5] = i8(ftype)
+        msg[6] = (perm >> 8) & 0xFF
+        msg[7] = perm & 0xFF
+        var i = 0
+        while name[i] != 0
+            msg[i + 8] = name[i]
+            i += 1
+        msg[i + 8] = 0
+        var reply: [5]i8
+        val result = ipc_send(port, &msg[0], i + 9, &reply[0], 5)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        tfs_msg_read_i32(&reply[0], 1)
+
+    fs_unlink(parent_ino: int, name: *i8) -> int
+        val port = port_lookup(&tfs_srv_name[0])
+        if port < 0
+            return -1
+        var msg: [128]i8
+        msg[0] = TFS_CMD_UNLINK
+        tfs_msg_write_i32(&msg[0], 1, parent_ino)
+        var i = 0
+        while name[i] != 0
+            msg[i + 5] = name[i]
+            i += 1
+        msg[i + 5] = 0
+        var reply: [1]i8
+        val result = ipc_send(port, &msg[0], i + 6, &reply[0], 1)
+        if result != 0
+            return -1
+        int(reply[0])
+
+    fs_stat(ino: int, out: *int) -> int
+        val port = port_lookup(&tfs_srv_name[0])
+        if port < 0
+            return -1
+        var msg: [5]i8
+        msg[0] = TFS_CMD_STAT
+        tfs_msg_write_i32(&msg[0], 1, ino)
+        var reply: [29]i8
+        val result = ipc_send(port, &msg[0], 5, &reply[0], 29)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        out[0] = tfs_msg_read_i32(&reply[0], 1)   // mode
+        out[1] = tfs_msg_read_i32(&reply[0], 5)   // nlinks
+        out[2] = tfs_msg_read_i32(&reply[0], 9)   // uid
+        out[3] = tfs_msg_read_i32(&reply[0], 13)  // gid
+        out[4] = tfs_msg_read_i32(&reply[0], 17)  // size
+        out[5] = tfs_msg_read_i32(&reply[0], 21)  // mtime
+        out[6] = tfs_msg_read_i32(&reply[0], 25)  // ctime
+        0
+
+    fs_mkdir(parent_ino: int, name: *i8, perm: int) -> int
+        val port = port_lookup(&tfs_srv_name[0])
+        if port < 0
+            return -1
+        var msg: [128]i8
+        msg[0] = TFS_CMD_MKDIR
+        tfs_msg_write_i32(&msg[0], 1, parent_ino)
+        msg[5] = (perm >> 8) & 0xFF
+        msg[6] = perm & 0xFF
+        var i = 0
+        while name[i] != 0
+            msg[i + 7] = name[i]
+            i += 1
+        msg[i + 7] = 0
+        var reply: [5]i8
+        val result = ipc_send(port, &msg[0], i + 8, &reply[0], 5)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        tfs_msg_read_i32(&reply[0], 1)
+
+    fs_rmdir(parent_ino: int, name: *i8) -> int
+        val port = port_lookup(&tfs_srv_name[0])
+        if port < 0
+            return -1
+        var msg: [128]i8
+        msg[0] = TFS_CMD_RMDIR
+        tfs_msg_write_i32(&msg[0], 1, parent_ino)
+        var i = 0
+        while name[i] != 0
+            msg[i + 5] = name[i]
+            i += 1
+        msg[i + 5] = 0
+        var reply: [1]i8
+        val result = ipc_send(port, &msg[0], i + 6, &reply[0], 1)
+        if result != 0
+            return -1
+        int(reply[0])
+
+    fs_readdir(dir_ino: int, index: int, out_ino: *int, out_name: *i8) -> int
+        val port = port_lookup(&tfs_srv_name[0])
+        if port < 0
+            return -1
+        var msg: [9]i8
+        msg[0] = TFS_CMD_READDIR
+        tfs_msg_write_i32(&msg[0], 1, dir_ino)
+        tfs_msg_write_i32(&msg[0], 5, index)
+        var reply: [19]i8
+        val result = ipc_send(port, &msg[0], 9, &reply[0], 19)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        *out_ino = tfs_msg_read_i32(&reply[0], 1)
+        var i = 0
+        while i < 14
+            out_name[i] = reply[i + 5]
+            i += 1
+        0
+
+    fs_sync() -> int
+        val port = port_lookup(&tfs_srv_name[0])
+        if port < 0
+            return -1
+        var msg: [1]i8
+        msg[0] = TFS_CMD_SYNC
+        var reply: [1]i8
+        val result = ipc_send(port, &msg[0], 1, &reply[0], 1)
+        if result != 0
+            return -1
+        int(reply[0])

@@ -4,7 +4,9 @@ Binary locks built on ll/sc atomic instructions.
 A mutex is a single i64: 0 = unlocked, 1 = locked.
 Threads that cannot acquire the mutex yield and retry.
 
-    module oskit
+    module oskit.sync
+
+    import oskit.services.{yield}
 
     extern atomic_dec_if_positive(addr: *i64) -> i64
     extern atomic_inc(addr: *i64)

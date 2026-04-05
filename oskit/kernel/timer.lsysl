@@ -14,7 +14,7 @@ Device registers (MCU-style timer):
 - 0x100040 + 12 = IER (interrupt enable: bit 0 = overflow)
 
 
-    module oskit
+    module oskit.kernel
 
     val TIMER_BASE = 0x100040
     val TIMER_ARR  = 0x100042

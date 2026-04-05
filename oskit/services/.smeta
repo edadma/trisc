@@ -1,0 +1,66 @@
+SMETA v1
+SOURCE oskit/services/services.sysl
+FUNC syscall 2 i32 i64 i64
+DATA SYS_SLEEP i32
+DATA SYS_PUTC i32
+DATA SYS_YIELD i32
+DATA SYS_EXIT i32
+DATA SYS_JOIN i32
+DATA SYS_THREAD_ID i32
+DATA SYS_UPTIME i32
+DATA SYS_THREAD_COUNT i32
+DATA SYS_THREAD_STATE i32
+DATA SYS_THREAD_NAME i32
+DATA SYS_SLEEP_UNTIL i32
+DATA SYS_KBHIT i32
+DATA SYS_GETKEY i32
+DATA SYS_CTX_SWITCHES i32
+DATA SYS_CPU_TICKS i32
+DATA SYS_TOTAL_SWITCHES i32
+DATA SYS_SET_WATCHDOG i32
+DATA SYS_PANIC i32
+DATA SYS_CHECK_STACK i32
+DATA SYS_SUSPEND i32
+DATA SYS_RESUME i32
+DATA SYS_TLS_SET i32
+DATA SYS_TLS_GET i32
+DATA SYS_NOTIFY_SEND i32
+DATA SYS_NOTIFY_WAIT i32
+DATA SYS_NOTIFY_READ i32
+DATA SYS_EVENT_WAIT i32
+DATA SYS_EVENT_SET i32
+DATA SYS_EVENT_CLEAR i32
+FUNC sleep 1 i32 void
+FUNC putc 1 u32 void
+FUNC yield 0 void
+FUNC exit 0 void
+FUNC join 1 i32 void
+FUNC thread_id 0 i32
+FUNC uptime 0 i32
+FUNC get_thread_count 0 i32
+FUNC get_thread_state 1 i32 i32
+FUNC get_thread_name 1 i32 ptr i8
+FUNC sleep_until 1 i32 void
+FUNC kbhit 0 i32
+FUNC getkey 0 i32
+FUNC get_ctx_switches 1 i32 i32
+FUNC get_cpu_ticks 1 i32 i32
+FUNC get_total_switches 0 i32
+FUNC set_watchdog 1 i32 void
+FUNC panic 0 void
+FUNC check_stack 1 i64 i32
+FUNC suspend 1 i32 void
+FUNC resume 1 i32 void
+FUNC putstr 1 ptr i8 void
+FUNC notify_send_to 2 i32 i32 void
+FUNC notify_wait 0 void
+FUNC notify_read_self 0 i32
+FUNC event_wait 2 i32 i32 void
+FUNC event_set 2 i32 i32 void
+FUNC event_clear 2 i32 i32 void
+FUNC tls_set 2 i32 i32 void
+FUNC tls_get 1 i32 i32
+DATA SYS_PIMUTEX_LOCK i32
+DATA SYS_PIMUTEX_UNLOCK i32
+FUNC pimutex_lock_sys 1 i64 void
+FUNC pimutex_unlock_sys 1 i64 void

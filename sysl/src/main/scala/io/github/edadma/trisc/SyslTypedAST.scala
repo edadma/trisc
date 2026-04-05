@@ -13,6 +13,7 @@ case class TFunDecl(name: String, params: List[TParam], returnType: SyslType, bo
 case class TVarDecl(name: String, typ: SyslType, init: TExpr, isPrivate: Boolean = false) extends TDecl
 case class TStructDecl(name: String, fields: List[(String, SyslType)]) extends TDecl
 case class TEnumDecl(name: String, members: List[(String, Long)]) extends TDecl
+case class TDataEnumDecl(name: String, enumType: SyslType.EnumType) extends TDecl
 case class TTypeAliasDecl(name: String, target: SyslType) extends TDecl
 
 case class TParam(name: String, typ: SyslType)
@@ -26,6 +27,7 @@ case class TBlockBody(stmts: List[TStmt]) extends TFunBody
 trait TStmt
 case class TVarStmt(name: String, typ: SyslType, init: TExpr) extends TStmt
 case class TDestructureStmt(names: List[String], types: List[SyslType], init: TExpr) extends TStmt
+case class TDestructureAssignStmt(names: List[String], types: List[SyslType], init: TExpr) extends TStmt
 case class TAssignStmt(target: String, value: TExpr) extends TStmt
 case class TCompoundAssignStmt(target: String, op: String, value: TExpr) extends TStmt
 case class TDerefAssignStmt(pointer: TExpr, value: TExpr) extends TStmt
@@ -79,7 +81,21 @@ case class TIndirectCall(callee: TExpr, args: List[TExpr], typ: SyslType) extend
 case class TFuncRef(name: String, typ: SyslType) extends TExpr
 case class TCast(expr: TExpr, typ: SyslType) extends TExpr
 case class TIfExpr(cond: TExpr, thenBody: List[TStmt], elseBody: Option[List[TStmt]], typ: SyslType) extends TExpr
+case class TMatchExpr(expr: TExpr, arms: List[TMatchArm], default: Option[List[TStmt]], typ: SyslType) extends TExpr
+case class TMatchArm(patterns: List[TMatchPattern], guard: Option[TExpr], body: List[TStmt])
+
+sealed trait TMatchPattern
+case object TWildcard extends TMatchPattern
+case class TValuePattern(expr: TExpr) extends TMatchPattern
+case class TRangePattern(low: TExpr, high: TExpr) extends TMatchPattern
+case class TDestructurePattern(structType: SyslType.StructType, bindings: List[Option[String]], fieldTypes: List[SyslType]) extends TMatchPattern
+case class TVariantPattern(enumType: SyslType.EnumType, variantIndex: Int, bindings: List[Option[String]], fieldTypes: List[SyslType]) extends TMatchPattern
+case class TEnumConstruct(enumType: SyslType.EnumType, variantIndex: Int, args: List[TExpr]) extends TExpr { def typ: SyslType = enumType }
 case class TNew(structType: SyslType.StructType, args: List[TExpr]) extends TExpr { def typ: SyslType = SyslType.RefType(structType) }
 case class TNewArray(elemType: SyslType, size: TExpr) extends TExpr { def typ: SyslType = SyslType.RefType(SyslType.SliceType(elemType)) }
 case class TLen(expr: TExpr, typ: SyslType) extends TExpr
 case class TCap(expr: TExpr, typ: SyslType) extends TExpr
+case class TSliceExpr(array: TExpr, low: Option[TExpr], high: Option[TExpr], typ: SyslType) extends TExpr
+case class TAppend(slice: TExpr, elem: TExpr, typ: SyslType) extends TExpr
+case class TStringFromPtr(ptr: TExpr, len: TExpr, typ: SyslType) extends TExpr
+case class TStringFromSlice(slice: TExpr, typ: SyslType) extends TExpr

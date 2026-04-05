@@ -149,4 +149,81 @@ class SyslFuncPointerTests extends SyslTestHelpers {
         |""".stripMargin): @unchecked
     ast.decls.length shouldBe 2
   }
+
+  // ===== Indirect calls on arbitrary expressions =====
+
+  "call function pointer from array" in {
+    eval(
+      """dbl(x: int) -> int = x * 2
+        |triple(x: int) -> int = x * 3
+        |main() -> int
+        |    var funcs: [2]func(int) -> int
+        |    funcs[0] = dbl
+        |    funcs[1] = triple
+        |    funcs[0](10) + funcs[1](10)
+        |""".stripMargin) shouldBe 50
+  }
+
+  "call function returned by another function" in {
+    eval(
+      """dbl(x: int) -> int = x * 2
+        |getFunc() -> func(int) -> int = dbl
+        |main() -> int = getFunc()(21)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "chain: function returning function pointer called immediately" in {
+    output(
+      """add(a: int, b: int) -> int = a + b
+        |getOp() -> func(int, int) -> int = add
+        |main() -> int
+        |    print(getOp()(20, 22))
+        |    0
+        |""".stripMargin) shouldBe "42"
+  }
+
+  "call dereferenced function pointer" in {
+    eval(
+      """dbl(x: int) -> int = x * 2
+        |main() -> int
+        |    f: func(int) -> int = dbl
+        |    fp = &f
+        |    (*fp)(21)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "indirect call on struct field" in {
+    eval(
+      """struct Ops
+        |    apply: func(int) -> int
+        |dbl(x: int) -> int = x * 2
+        |main() -> int
+        |    var ops: Ops
+        |    ops.apply = dbl
+        |    ops.apply(21)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "call function-typed field on indexed struct" in {
+    eval(
+      """struct Cmd
+        |    handler: func(int) -> int
+        |dbl(x: int) -> int = x * 2
+        |triple(x: int) -> int = x * 3
+        |main() -> int
+        |    var cmds: [2]Cmd
+        |    cmds[0].handler = dbl
+        |    cmds[1].handler = triple
+        |    cmds[0].handler(10) + cmds[1].handler(10)
+        |""".stripMargin) shouldBe 50
+  }
+
+  "analyzer rejects indirect call on non-function expression" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """main() -> int
+        |    var arr: [3]int
+        |    arr[0](1)
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
 }

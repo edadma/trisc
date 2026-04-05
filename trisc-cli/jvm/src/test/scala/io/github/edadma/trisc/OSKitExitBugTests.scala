@@ -16,7 +16,8 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: single thread, no calls, implicit return" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x20000, 0x1F000, "task")
@@ -35,7 +36,8 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: single thread, sleep+putc, implicit return" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x20000, 0x1F000, "task")
@@ -57,7 +59,8 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: two threads, both sleep+putc, implicit return" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task_a, 0x20000, 0x1F000, "a")
@@ -85,7 +88,8 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: three threads same priority, sleep+putc, implicit return" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task_a, 0x20000, 0x1F000, "a")
@@ -119,7 +123,8 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: three threads different priorities, sleep+putc, implicit return" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
@@ -153,7 +158,8 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: three threads different priorities, sleep+putc, implicit return, pimutex imported" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
@@ -187,7 +193,9 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: three threads diff pri, sleep+putc, implicit return, pimutex var declared" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: PIMutex
           |
@@ -224,7 +232,9 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: PI scenario, med implicit return (original failing case)" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: PIMutex
           |
@@ -266,7 +276,9 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: PI scenario, med has only putc (no sleep), implicit return" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: PIMutex
           |
@@ -305,7 +317,9 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: PI scenario, med has putc+putc, implicit return" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: PIMutex
           |
@@ -345,7 +359,9 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: PI scenario, med has sleep only (no putc), implicit return" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: PIMutex
           |
@@ -384,7 +400,9 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: PI scenario, med has yield+putc, implicit return" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: PIMutex
           |
@@ -426,7 +444,9 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: PI scenario, med has sleep+yield (slow+slow), implicit return" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: PIMutex
           |
@@ -465,7 +485,9 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: PI scenario, med has sleep+sleep (slow+slow), implicit return" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: PIMutex
           |
@@ -506,7 +528,8 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: three threads diff pri, no mutex, med sleep+putc implicit return" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
@@ -546,7 +569,9 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: PI scenario, LOW implicit return (instead of med)" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: PIMutex
           |
@@ -588,7 +613,9 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: PI scenario, HIGH implicit return (instead of med)" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: PIMutex
           |
@@ -632,7 +659,9 @@ class OSKitExitBugTests extends OSKitTestHelpers {
   "Exit: PI scenario, ALL threads implicit return" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
+import oskit.sync.*
           |
           |var mtx: PIMutex
           |

@@ -189,13 +189,13 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
 
   // ===== Pointer arithmetic type =====
 
-  "array + int stays array/pointer" in {
+  "array + int decays to pointer" in {
     analyzeExprType(
       """main() -> int
         |    a: [5]int
         |    p = a + 2
         |    p
-        |""".stripMargin) shouldBe ArrayType(I32, 5)
+        |""".stripMargin) shouldBe PtrType(I32)
   }
 
   // ===== Error detection =====

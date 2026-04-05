@@ -30,6 +30,8 @@ case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[T
 case class VarDeclAST(name: String, typ: Option[TypeAST], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true) extends DeclAST
 case class StructDeclAST(name: String, fields: List[(String, TypeAST)]) extends DeclAST
 case class EnumDeclAST(name: String, members: List[(String, Option[Long])]) extends DeclAST
+case class DataEnumDeclAST(name: String, variants: List[EnumVariantAST]) extends DeclAST
+case class EnumVariantAST(name: String, fields: List[(String, TypeAST)])
 case class TypeAliasDeclAST(name: String, target: TypeAST) extends DeclAST
 case class CondDeclAST(cond: CondExpr, thenDecls: List[DeclAST], elseDecls: Option[List[DeclAST]]) extends DeclAST
 
@@ -83,14 +85,24 @@ case class PreDecAST(name: String) extends ExpressionAST
 case class PostIncAST(name: String) extends ExpressionAST
 case class PostDecAST(name: String) extends ExpressionAST
 case class CallAST(name: String, args: List[ExpressionAST]) extends ExpressionAST
+case class IndirectCallAST(callee: ExpressionAST, args: List[ExpressionAST]) extends ExpressionAST
 case class MethodCallAST(obj: ExpressionAST, method: String, args: List[ExpressionAST]) extends ExpressionAST
 case class CastAST(targetType: TypeAST, expr: ExpressionAST) extends ExpressionAST
 case class IfExprAST(cond: ExpressionAST, thenBody: List[StmtAST], elseBody: Option[List[StmtAST]]) extends ExpressionAST
+case class MatchExprAST(expr: ExpressionAST, arms: List[MatchArmAST], default: Option[List[StmtAST]]) extends ExpressionAST
+case class MatchArmAST(patterns: List[MatchPatternAST], guard: Option[ExpressionAST], body: List[StmtAST])
+
+sealed trait MatchPatternAST
+case object WildcardPatternAST extends MatchPatternAST
+case class ValuePatternAST(expr: ExpressionAST) extends MatchPatternAST
+case class RangePatternAST(low: ExpressionAST, high: ExpressionAST) extends MatchPatternAST
+case class DestructurePatternAST(name: String, fields: List[MatchPatternAST]) extends MatchPatternAST
 case class AddrOfAST(name: String) extends ExpressionAST
 case class AddrOfIndexAST(array: ExpressionAST, index: ExpressionAST) extends ExpressionAST
 case class AddrOfFieldAST(obj: ExpressionAST, field: String) extends ExpressionAST
 case class DerefAST(expr: ExpressionAST) extends ExpressionAST
 case class IndexAST(expr: ExpressionAST, index: ExpressionAST) extends ExpressionAST
+case class SliceExprAST(array: ExpressionAST, low: Option[ExpressionAST], high: Option[ExpressionAST]) extends ExpressionAST
 case class FieldAccessAST(obj: ExpressionAST, field: String) extends ExpressionAST
 case class FieldPreIncAST(obj: ExpressionAST, field: String) extends ExpressionAST
 case class FieldPreDecAST(obj: ExpressionAST, field: String) extends ExpressionAST

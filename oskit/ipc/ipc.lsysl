@@ -19,7 +19,10 @@ per-port. recv always dequeues the oldest waiting sender.
 States 11-12 are reserved for IPC (defined in kernel.lsysl
 so the scheduler can reference them).
 
-    module oskit
+    module oskit.ipc
+
+    import oskit.kernel.*
+    import oskit.services.syscall
 
     val MAX_PORTS = 8
     val IPC_PORT_FREE = -1
@@ -60,8 +63,6 @@ Syscall numbers for IPC (31-37).
     val SYS_PORT_LOOKUP    = 37
     val SYS_IPC_SEND_TIMED    = 38
     val SYS_IPC_RECV_NOTIFY   = 39
-
-    extern syscall(num: int, arg: i64) -> int
 
 Simple byte copy between memory addresses.
 

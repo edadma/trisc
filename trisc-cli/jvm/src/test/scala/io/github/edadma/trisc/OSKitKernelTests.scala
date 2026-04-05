@@ -5,7 +5,8 @@ class OSKitKernelTests extends OSKitTestHelpers {
   "TOS: putc syscall prints character" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x10000, 0xF000, "task")
@@ -25,7 +26,8 @@ class OSKitKernelTests extends OSKitTestHelpers {
   "TOS: thread exit works cleanly" in {
     val (cpu, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task1, 0x10000, 0xF000, "t1")
@@ -49,7 +51,8 @@ class OSKitKernelTests extends OSKitTestHelpers {
   "TOS: sleep syscall delays output" in {
     val (_, output) = runTOS(Map(
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(task, 0x10000, 0xF000, "task")
@@ -71,7 +74,8 @@ class OSKitKernelTests extends OSKitTestHelpers {
   "TOS: two tasks interleave with sleep" in {
     val (_, output) = runTOS(Map(
       "tasks" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |
           |task_a()
           |    var i = 0
@@ -88,7 +92,8 @@ class OSKitKernelTests extends OSKitTestHelpers {
           |        i += 1
           |""".stripMargin,
       "app" ->
-        """import oskit.*
+        """import oskit.kernel.*
+import oskit.services.*
           |import tasks.*
           |
           |kernel_main() -> int

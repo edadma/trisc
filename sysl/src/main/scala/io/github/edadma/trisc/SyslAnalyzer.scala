@@ -13,6 +13,8 @@ class SyslAnalyzer:
   private val functions = new mutable.LinkedHashMap[String, FunInfo]
   private val structTypes = new mutable.LinkedHashMap[String, SyslType.StructType]
   private val enumTypes = new mutable.LinkedHashMap[String, Map[String, Long]]  // enum name → (member name → value)
+  private val dataEnumTypes = new mutable.LinkedHashMap[String, SyslType.EnumType]  // data enum name → EnumType
+  private val variantToEnum = new mutable.LinkedHashMap[String, (SyslType.EnumType, Int)]  // variant name → (enum type, variant index)
   private val typeAliases = new mutable.LinkedHashMap[String, TypeAST]  // alias name → target type AST
   private val methods = new mutable.LinkedHashMap[String, mutable.Set[String]]  // struct name → set of method names
   private val externalSymbols = new mutable.LinkedHashSet[String]
@@ -39,6 +41,7 @@ class SyslAnalyzer:
     "calloc" -> FunInfo("calloc", List("count" -> I64, "size" -> I64), PtrType(I8)),
     "realloc" -> FunInfo("realloc", List("ptr" -> PtrType(I8), "size" -> I64), PtrType(I8)),
     "sbrk" -> FunInfo("sbrk", List("increment" -> I32), PtrType(I8)),
+    "abort" -> FunInfo("abort", Nil, VoidType),
   )
 
   def registerImport(meta: ModuleMeta, selectors: List[ImportSelector] = List(WildcardImport)): Unit =
@@ -119,6 +122,17 @@ class SyslAnalyzer:
             (memberName, value)
           }
           enumTypes(name) = resolved.toMap
+        case DataEnumDeclAST(name, variants) =>
+          if dataEnumTypes.contains(name) || enumTypes.contains(name) then
+            throw AnalysisError(s"duplicate enum: '$name'", decl)
+          val resolvedVariants = variants.map { case EnumVariantAST(vname, fields) =>
+            val resolvedFields = fields.map((fname, ftype) => (fname, resolveType(ftype)))
+            (vname, resolvedFields)
+          }
+          val et: SyslType.EnumType = SyslType.EnumType(name, resolvedVariants)
+          dataEnumTypes(name) = et
+          for ((vname, _), idx) <- resolvedVariants.zipWithIndex do
+            variantToEnum(vname) = (et, idx)
         case TypeAliasDeclAST(name, target) =>
           if typeAliases.contains(name) then throw AnalysisError(s"duplicate type alias: '$name'", decl)
           typeAliases(name) = target
@@ -154,6 +168,9 @@ class SyslAnalyzer:
         val members = enumTypes(name).toList.sortBy(_._2)
         TEnumDecl(name, members)
 
+      case DataEnumDeclAST(name, _) =>
+        TDataEnumDecl(name, dataEnumTypes(name))
+
       case TypeAliasDeclAST(name, target) =>
         TTypeAliasDecl(name, resolveType(target))
 
@@ -186,9 +203,9 @@ class SyslAnalyzer:
       case "char" => U32
       case "i64" => I64
       case "double" | "f64" => DoubleType
-      case "byte" | "i8"  => I8
+      case "byte" | "u8"  => U8
+      case "i8"  => I8
       case "i16"  => I16
-      case "u8"   => U8
       case "u16"  => U16
       case "u32"  => U32
       case "u64"  => U64
@@ -197,6 +214,7 @@ class SyslAnalyzer:
       case "string" => StringType
       case name if typeAliases.contains(name) => resolveType(typeAliases(name))
       case name if structTypes.contains(name) => structTypes(name)
+      case name if dataEnumTypes.contains(name) => dataEnumTypes(name)
       case other => throw AnalysisError(s"unknown type: '$other'")
     case PtrTypeAST(inner) => PtrType(resolveType(inner))
     case ArrayTypeAST(size, elem) => ArrayType(resolveType(elem), size)
@@ -253,6 +271,15 @@ class SyslAnalyzer:
     if globalScope.contains(name) then globalScope(name)
     else throw AnalysisError(s"undefined variable: '$name'")
 
+  private def tryLookup(name: String): Option[SymInfo] =
+    if scopeStack != null then
+      var i = scopeStack.length - 1
+      while i >= 0 do
+        if scopeStack(i).contains(name) then return Some(scopeStack(i)(name))
+        i -= 1
+    if globalScope.contains(name) then Some(globalScope(name))
+    else None
+
   private def lookupOrCreate(name: String, typ: SyslType): SymInfo =
     if scopeStack != null then
       var i = scopeStack.length - 1
@@ -267,8 +294,8 @@ class SyslAnalyzer:
       info
 
   private def lookupFun(name: String): FunInfo =
-    builtinFunctions.getOrElse(name,
-      functions.getOrElse(name,
+    functions.getOrElse(name,
+      builtinFunctions.getOrElse(name,
         throw AnalysisError(s"undefined function: '$name'")))
 
   private def checkArgs(name: String, params: List[(String, SyslType)], args: List[TExpr]): List[TExpr] =
@@ -278,7 +305,10 @@ class SyslAnalyzer:
       val coerced = coerceLiteral(arg, pType)
       if !compatible(coerced.typ, pType) then
         throw AnalysisError(s"argument '$pName' of '$name' expects $pType, got ${coerced.typ}")
-      coerced
+      // Insert explicit cast for string→*i8 decay so codegen can handle it
+      (coerced.typ, pType) match
+        case (StringType, PtrType(I8 | U8)) => TCast(coerced, pType)
+        case _ => coerced
     }
 
   private def analyzeBlock(stmts: List[StmtAST]): List[TStmt] =
@@ -298,16 +328,30 @@ class SyslAnalyzer:
 
       case DestructureStmtAST(names, init, isMutable) =>
         val tInit = analyzeExpr(init)
-        tInit.typ match
-          case st: StructType if st.isTuple =>
-            if names.length != st.fields.length then
-              throw AnalysisError(s"destructuring expects ${st.fields.length} names, got ${names.length}")
-            for (name, (_, fieldType)) <- names.zip(st.fields) do
-              if scopeStack != null then
-                currentScope(name) = SymInfo(name, fieldType, isMutable)
-            TDestructureStmt(names, st.fields.map(_._2), tInit)
-          case other =>
-            throw AnalysisError(s"cannot destructure non-tuple type $other")
+        // Extract struct type (works for value structs, refs, and pointers to structs)
+        val st = tInit.typ match
+          case s: StructType => s
+          case RefType(s: StructType) => s
+          case PtrType(s: StructType) => s
+          case other => throw AnalysisError(s"cannot destructure non-struct type $other")
+        if names.length != st.fields.length then
+          throw AnalysisError(s"destructuring expects ${st.fields.length} names, got ${names.length}")
+        // Check if this is declaration or assignment (when no val/var prefix)
+        val existingCount = names.count(n => tryLookup(n).isDefined)
+        if isMutable || existingCount == 0 then
+          // Declaration: create new variables
+          for (name, (_, fieldType)) <- names.zip(st.fields) do
+            if scopeStack != null then
+              currentScope(name) = SymInfo(name, fieldType, isMutable)
+          TDestructureStmt(names, st.fields.map(_._2), tInit)
+        else if existingCount == names.length then
+          // All exist: parallel assignment
+          for name <- names do
+            val sym = lookup(name)
+            if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$name'")
+          TDestructureAssignStmt(names, st.fields.map(_._2), tInit)
+        else
+          throw AnalysisError(s"cannot mix declared and undeclared names in destructuring")
 
       case AssignStmtAST(target, value) =>
         val tValue = analyzeExpr(value)
@@ -410,6 +454,62 @@ class SyslAnalyzer:
       case ExprStmtAST(expr) =>
         TExprStmt(analyzeExpr(expr))
 
+  private def analyzePattern(pat: MatchPatternAST, scrutineeType: SyslType): TMatchPattern =
+    pat match
+      case WildcardPatternAST => TWildcard
+      case ValuePatternAST(VarRefAST(name)) if variantToEnum.contains(name) =>
+        // No-arg variant pattern (e.g., `Empty` in a match arm)
+        val (et, variantIdx) = variantToEnum(name)
+        val (_, variantFields) = et.variants(variantIdx)
+        if variantFields.nonEmpty then throw AnalysisError(s"variant '$name' requires ${variantFields.length} argument(s) in pattern")
+        TVariantPattern(et, variantIdx, Nil, Nil)
+      case ValuePatternAST(expr) =>
+        val tv = analyzeExpr(expr)
+        val coerced = coerceLiteral(tv, scrutineeType)
+        if !compatible(coerced.typ, scrutineeType) then
+          throw AnalysisError(s"match pattern type ${coerced.typ} incompatible with ${scrutineeType}")
+        TValuePattern(coerced)
+      case RangePatternAST(low, high) =>
+        val tLow = coerceLiteral(analyzeExpr(low), scrutineeType)
+        val tHigh = coerceLiteral(analyzeExpr(high), scrutineeType)
+        TRangePattern(tLow, tHigh)
+      case DestructurePatternAST(name, fields) =>
+        // Check if name is an enum variant first, then struct
+        if variantToEnum.contains(name) then
+          val (et, variantIdx) = variantToEnum(name)
+          val (_, variantFields) = et.variants(variantIdx)
+          if fields.length != variantFields.length then
+            throw AnalysisError(s"variant '$name' has ${variantFields.length} fields, pattern has ${fields.length}")
+          val bindings = fields.zip(variantFields).map { case (fieldPat, (fieldName, fieldType)) =>
+            fieldPat match
+              case WildcardPatternAST => None
+              case ValuePatternAST(VarRefAST(bindName)) =>
+                if scopeStack != null then
+                  currentScope(bindName) = SymInfo(bindName, fieldType, false)
+                Some(bindName)
+              case ValuePatternAST(expr) => None
+              case _ => throw AnalysisError(s"unsupported pattern in variant destructure")
+          }
+          TVariantPattern(et, variantIdx, bindings, variantFields.map(_._2))
+        else
+          val st = structTypes.getOrElse(name, throw AnalysisError(s"unknown struct or variant '$name' in match pattern"))
+          if fields.length != st.fields.length then
+            throw AnalysisError(s"struct '$name' has ${st.fields.length} fields, pattern has ${fields.length}")
+          val bindings = fields.zip(st.fields).map { case (fieldPat, (fieldName, fieldType)) =>
+            fieldPat match
+              case WildcardPatternAST => None
+              case ValuePatternAST(VarRefAST(bindName)) =>
+                // In destructure context, bare names are bindings
+                if scopeStack != null then
+                  currentScope(bindName) = SymInfo(bindName, fieldType, false) // val binding
+                Some(bindName)
+              case ValuePatternAST(expr) =>
+                // Literal value — not a binding
+                None
+              case _ => throw AnalysisError(s"unsupported pattern in struct destructure")
+          }
+          TDestructurePattern(st, bindings, st.fields.map(_._2))
+
   private def analyzeExpr(expr: ExpressionAST): TExpr =
     expr match
       case IntLitAST(n) => TIntLit(n, I32)
@@ -439,6 +539,9 @@ class SyslAnalyzer:
       case SizeofExprAST(VarRefAST(name)) if structTypes.contains(name) =>
         // sizeof(StructName) — treat as type sizeof
         TSizeof(structTypes(name).sizeOf, I32)
+
+      case SizeofExprAST(VarRefAST(name)) if dataEnumTypes.contains(name) =>
+        TSizeof(dataEnumTypes(name).sizeOf, I32)
 
       case SizeofExprAST(inner) =>
         val tInner = analyzeExpr(inner)
@@ -531,8 +634,18 @@ class SyslAnalyzer:
           val f = builtinFunctions(name)
           TFuncRef(name, FuncType(f.params.map(_._2), f.returnType))
         else
-          val sym = lookup(name)
-          TVarRef(name, sym.typ)
+          // Check for no-arg enum variant before falling through to variable lookup
+          tryLookup(name) match
+            case Some(sym) => TVarRef(name, sym.typ)
+            case None =>
+              if variantToEnum.contains(name) then
+                val (et, idx) = variantToEnum(name)
+                val (_, fields) = et.variants(idx)
+                if fields.nonEmpty then throw AnalysisError(s"variant '$name' requires ${fields.length} argument(s)")
+                TEnumConstruct(et, idx, Nil)
+              else
+                val sym = lookup(name)  // will throw proper error
+                TVarRef(name, sym.typ)
 
       case AddrOfAST(name) =>
         val sym = lookup(name)
@@ -579,10 +692,27 @@ class SyslAnalyzer:
           case t => throw AnalysisError(s"cannot index $t")
         TIndex(tArr, tIndex, elemType)
 
+      case SliceExprAST(arr, low, high) =>
+        val tArr = analyzeExpr(arr)
+        val tLow = low.map(analyzeExpr)
+        val tHigh = high.map(analyzeExpr)
+        val elemType = tArr.typ match
+          case SliceType(elem) => elem
+          case RefType(SliceType(elem)) => elem
+          case ArrayType(elem, _) => elem
+          case t => throw AnalysisError(s"cannot sub-slice $t")
+        TSliceExpr(tArr, tLow, tHigh, SliceType(elemType))
+
       case FieldAccessAST(VarRefAST(enumName), member) if enumTypes.contains(enumName) =>
         val members = enumTypes(enumName)
         if !members.contains(member) then throw AnalysisError(s"enum $enumName has no member '$member'")
         TIntLit(members(member), I32)
+
+      case FieldAccessAST(VarRefAST(enumName), variantName) if dataEnumTypes.contains(enumName) =>
+        val et = dataEnumTypes(enumName)
+        val idx = et.variants.indexWhere(_._1 == variantName)
+        if idx < 0 then throw AnalysisError(s"enum $enumName has no variant '$variantName'")
+        TEnumConstruct(et, idx, Nil)
 
       case FieldAccessAST(obj, field) =>
         val tObj = analyzeExpr(obj)
@@ -620,9 +750,15 @@ class SyslAnalyzer:
         val tLeft = if tRight0.typ.isIntegral then coerceSignedness(tLeft0, tRight0.typ) else tLeft0
         val tRight = if tLeft.typ.isIntegral then coerceSignedness(tRight0, tLeft.typ) else tRight0
         val resultType = op match
+          case "+" if tLeft.typ == StringType && tRight.typ == StringType => StringType // string concatenation
           case "+" | "-" if tLeft.typ == StringType && tRight.typ.isNumeric =>
             throw AnalysisError("pointer arithmetic not allowed on string")
-          case "+" | "-" if tLeft.typ.isPointerLike && tRight.typ.isNumeric => tLeft.typ
+          case "+" | "-" if tLeft.typ.isPointerLike && tRight.typ.isNumeric =>
+            // Pointer arithmetic always yields a pointer (array decays)
+            tLeft.typ match
+              case PtrType(_) => tLeft.typ
+              case ArrayType(elem, _) => PtrType(elem)
+              case _ => tLeft.typ
           case "+" | "-" | "*" | "/" =>
             if !tLeft.typ.isNumeric || !tRight.typ.isNumeric then
               throw AnalysisError(s"operator $op requires numeric types, got ${tLeft.typ} $op ${tRight.typ}")
@@ -631,6 +767,8 @@ class SyslAnalyzer:
               case (DoubleType, _) | (_, DoubleType) => DoubleType
               case (IntType(a), IntType(b)) => IntType(a max b)
               case (UIntType(a), UIntType(b)) => UIntType(a max b)
+              case (UIntType(a), IntType(b)) if a < b => IntType(b)   // unsigned fits in signed
+              case (IntType(a), UIntType(b)) if b < a => IntType(a)   // unsigned fits in signed
               case (l, r) if l.isIntegral && r.isIntegral =>
                 throw AnalysisError(s"cannot mix signed and unsigned in $op: ${tLeft.typ} $op ${tRight.typ}")
               case _ => tLeft.typ
@@ -640,15 +778,19 @@ class SyslAnalyzer:
             (tLeft.typ, tRight.typ) match
               case (IntType(a), IntType(b)) => IntType(a max b)
               case (UIntType(a), UIntType(b)) => UIntType(a max b)
+              case (UIntType(a), IntType(b)) if a < b => IntType(b)   // unsigned fits in signed
+              case (IntType(a), UIntType(b)) if b < a => IntType(a)   // unsigned fits in signed
               case _ =>
                 throw AnalysisError(s"cannot mix signed and unsigned in $op: ${tLeft.typ} $op ${tRight.typ}")
           case "==" | "!=" | "<" | ">" | "<=" | ">=" =>
-            // Disallow mixed signed/unsigned comparisons
+            // Disallow mixed signed/unsigned comparisons unless unsigned fits in signed
             if tLeft.typ.isIntegral && tRight.typ.isIntegral then
               (tLeft.typ, tRight.typ) match
-                case (_: IntType, _: UIntType) | (_: UIntType, _: IntType) =>
+                case (UIntType(a), IntType(b)) if a >= b =>
                   throw AnalysisError(s"cannot compare signed and unsigned: ${tLeft.typ} $op ${tRight.typ}")
-                case _ => // ok
+                case (IntType(a), UIntType(b)) if b >= a =>
+                  throw AnalysisError(s"cannot compare signed and unsigned: ${tLeft.typ} $op ${tRight.typ}")
+                case _ => // ok: same signedness, or unsigned fits in signed
             BoolType
           case "&&" | "||" =>
             if tLeft.typ != BoolType then throw AnalysisError(s"$op requires bool operands, got ${tLeft.typ}")
@@ -673,8 +815,29 @@ class SyslAnalyzer:
           case (from, to) if from.isIntegral && to.isIntegral => // integer to integer (including signed↔unsigned)
           case (_: PtrType, to) if to.isIntegral => // pointer to integer
           case (from, _: PtrType) if from.isIntegral => // integer to pointer
+          case (StringType, PtrType(I8 | U8)) => // string to *i8/*u8 decay
           case (from, to) => throw AnalysisError(s"cannot cast $from to $to")
         TCast(tInner, target)
+
+      case CallAST("string", args) =>
+        args.size match
+          case 2 =>
+            // string(ptr, len) — construct string from *byte + length
+            val tPtr = analyzeExpr(args(0))
+            val tLen = analyzeExpr(args(1))
+            if !tPtr.typ.isInstanceOf[PtrType] then
+              throw AnalysisError(s"string() first argument must be a pointer, got ${tPtr.typ}")
+            if !tLen.typ.isIntegral then
+              throw AnalysisError(s"string() second argument must be an integer, got ${tLen.typ}")
+            TStringFromPtr(tPtr, tLen, StringType)
+          case 1 =>
+            // string(slice) — construct string from []byte slice
+            val tSlice = analyzeExpr(args(0))
+            tSlice.typ match
+              case SliceType(U8 | I8) => TStringFromSlice(tSlice, StringType)
+              case RefType(SliceType(U8 | I8)) => TStringFromSlice(tSlice, StringType)
+              case other => throw AnalysisError(s"string() from single argument requires []byte or &[]byte, got $other")
+          case n => throw AnalysisError(s"string() takes 1 or 2 arguments, got $n")
 
       case CallAST("len", args) =>
         if args.size != 1 then throw AnalysisError("len() takes exactly 1 argument")
@@ -688,31 +851,69 @@ class SyslAnalyzer:
         val tArg = analyzeExpr(args.head)
         tArg.typ match
           case SliceType(_) => TCap(tArg, I32)
+          case RefType(SliceType(_)) => TCap(tArg, I32)
           case ArrayType(_, _) => TCap(tArg, I32)
           case t => throw AnalysisError(s"cap() not supported on $t")
+
+      case CallAST("append", args) =>
+        if args.size != 2 then throw AnalysisError("append() takes exactly 2 arguments")
+        val tSlice = analyzeExpr(args(0))
+        val tElem = analyzeExpr(args(1))
+        val elemType = tSlice.typ match
+          case SliceType(elem) => elem
+          case t => throw AnalysisError(s"append() requires []T, got $t")
+        val coerced = coerceLiteral(tElem, elemType)
+        if !compatible(coerced.typ, elemType) then
+          throw AnalysisError(s"cannot append ${coerced.typ} to []$elemType")
+        TAppend(tSlice, coerced, SliceType(elemType))
+
+      case IndirectCallAST(callee, args) =>
+        val tCallee = analyzeExpr(callee)
+        val tArgs = args.map(analyzeExpr)
+        tCallee.typ match
+          case FuncType(paramTypes, returnType) =>
+            val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
+            val checkedArgs = checkArgs("<indirect>", params, tArgs)
+            TIndirectCall(tCallee, checkedArgs, returnType)
+          case other =>
+            throw AnalysisError(s"cannot call expression of type $other as a function")
 
       case MethodCallAST(obj, method, args) =>
         val tObj = analyzeExpr(obj)
         val tArgs = args.map(analyzeExpr)
-        // Determine the struct type and build self argument
-        val (structName, selfArg) = tObj.typ match
-          case st @ StructType(name, _) =>
-            // Need address of struct — build &obj
-            val addr = tObj match
-              case TVarRef(n, _) => TAddrOf(n, PtrType(st))
-              case TFieldAccess(innerObj, idx, _) => TAddrOfField(innerObj, idx, PtrType(st))
-              case _ => throw AnalysisError(s"cannot call method on this struct expression")
-            (name, addr)
-          case PtrType(StructType(name, _)) => (name, tObj) // already a pointer
-          case RefType(StructType(name, _)) => (name, tObj) // already a ref
+        // Determine the struct type (defer self-arg computation until we know it's a method)
+        val structType = tObj.typ match
+          case st: StructType          => st
+          case PtrType(st: StructType) => st
+          case RefType(st: StructType) => st
           case other => throw AnalysisError(s"cannot call method '$method' on $other")
-        // Look up the method
+        val structName = structType.name
         val funcName = s"${structName}_$method"
-        if !functions.contains(funcName) then
-          throw AnalysisError(s"struct $structName has no method '$method'")
-        val funInfo = functions(funcName)
-        val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs) // .tail skips self param
-        TCall(funcName, selfArg :: checkedArgs, funInfo.returnType)
+        if functions.contains(funcName) then
+          // It's a real method — build self argument (need address for value structs)
+          val selfArg = tObj.typ match
+            case st @ StructType(_, _) =>
+              tObj match
+                case TVarRef(n, _) => TAddrOf(n, PtrType(st))
+                case TFieldAccess(innerObj, idx, _) => TAddrOfField(innerObj, idx, PtrType(st))
+                case TIndex(arr, idx, _) => TAddrOfIndex(arr, idx, PtrType(st))
+                case _ => throw AnalysisError(s"cannot take address of expression for method call")
+            case _ => tObj // PtrType or RefType — already a pointer
+          val funInfo = functions(funcName)
+          val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs) // .tail skips self param
+          TCall(funcName, selfArg :: checkedArgs, funInfo.returnType)
+        else
+          // Fall back to calling a function-typed field
+          structType.fields.zipWithIndex.find(_._1._1 == method) match
+            case Some(((_, FuncType(paramTypes, returnType)), idx)) =>
+              val fieldAccess = TFieldAccess(tObj, idx, FuncType(paramTypes, returnType))
+              val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
+              val checkedArgs = checkArgs(s"$structName.$method", params, tArgs)
+              TIndirectCall(fieldAccess, checkedArgs, returnType)
+            case Some(((_, other), _)) =>
+              throw AnalysisError(s"field '$method' of struct $structName is $other, not a function")
+            case None =>
+              throw AnalysisError(s"struct $structName has no method or field '$method'")
 
       case CallAST(name, args) =>
         val tArgs = args.map(analyzeExpr)
@@ -733,6 +934,19 @@ class SyslAnalyzer:
             coerced
           }
           TStructConstruct(st, checkedArgs)
+        else if variantToEnum.contains(name) then
+          // Enum variant constructor: Circle(5)
+          val (et, variantIdx) = variantToEnum(name)
+          val (_, variantFields) = et.variants(variantIdx)
+          if tArgs.length != variantFields.length then
+            throw AnalysisError(s"variant '$name' has ${variantFields.length} field(s), got ${tArgs.length} argument(s)")
+          val checkedArgs = tArgs.zip(variantFields).map { case (arg, (fieldName, fieldType)) =>
+            val coerced = coerceLiteral(arg, fieldType)
+            if !compatible(coerced.typ, fieldType) then
+              throw AnalysisError(s"variant '$name' field '$fieldName' expects $fieldType, got ${coerced.typ}")
+            coerced
+          }
+          TEnumConstruct(et, variantIdx, checkedArgs)
         else
           // Try as a variable of FuncType
           val sym = lookup(name)
@@ -755,3 +969,23 @@ class SyslAnalyzer:
           case Some(TExprStmt(e)) => e.typ
           case _ => VoidType
         TIfExpr(tCond, tThen, tElse, resultType)
+
+      case MatchExprAST(scrutinee, arms, default) =>
+        val tScrutinee = analyzeExpr(scrutinee)
+        val tArms = arms.map { arm =>
+          pushScope()
+          val tPatterns = arm.patterns.map(p => analyzePattern(p, tScrutinee.typ))
+          val tGuard = arm.guard.map { g =>
+            val tg = analyzeExpr(g)
+            if tg.typ != BoolType then throw AnalysisError(s"match guard must be bool, got ${tg.typ}")
+            tg
+          }
+          val tBody = analyzeBlock(arm.body)
+          popScope()
+          TMatchArm(tPatterns, tGuard, tBody)
+        }
+        val tDefault = default.map { stmts => pushScope(); val r = analyzeBlock(stmts); popScope(); r }
+        val resultType = tArms.headOption.flatMap(_.body.lastOption) match
+          case Some(TExprStmt(e)) => e.typ
+          case _ => VoidType
+        TMatchExpr(tScrutinee, tArms, tDefault, resultType)

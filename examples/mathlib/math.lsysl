@@ -1,0 +1,55 @@
+# Math Utilities
+
+A small collection of integer math functions for use in other programs.
+These implement common numerical algorithms suitable for systems without
+floating-point hardware.
+
+## Absolute Value
+
+Returns the absolute value of an integer, defined as:
+
+$$|n| = \begin{cases} n & \text{if } n \geq 0 \\ -n & \text{if } n < 0 \end{cases}$$
+
+    abs(n: int) -> int
+        if n < 0 then return -n
+        n
+
+## Power
+
+Computes $b^e$ for non-negative exponent $e$ using repeated multiplication.
+The time complexity is $O(e)$ — a future version could use
+**exponentiation by squaring** to achieve $O(\log e)$.
+
+> **Note:** Only non-negative exponents are supported. Passing a negative
+> exponent will return 1 (the loop body never executes).
+
+    power(base: int, exp: int) -> int
+        var result: int = 1
+        for i = 0; i < exp; i++
+            result = result * base
+        result
+
+## Greatest Common Divisor
+
+Uses the [Euclidean algorithm](https://en.wikipedia.org/wiki/Euclidean_algorithm)
+to find $\gcd(a, b)$. The algorithm relies on the identity:
+
+$$\gcd(a, b) = \gcd(b, \; a \bmod b)$$
+
+repeatedly replacing the larger operand until the remainder is zero.
+
+| Step | $x$ | $y$ |
+|------|-----|-----|
+| 0    | 48  | 18  |
+| 1    | 18  | 12  |
+| 2    | 12  | 6   |
+| 3    | 6   | 0   |
+
+    gcd(a: int, b: int) -> int
+        var x: int = abs(a)
+        var y: int = abs(b)
+        while y != 0
+            t = y
+            y = x % y
+            x = t
+        x

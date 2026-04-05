@@ -14,7 +14,9 @@ Usage:
 6. Posters call qset_notify(qs, slot_index) after posting
 
 
-    module oskit
+    module oskit.sync
+
+    import oskit.services.{notify_send_to, thread_id, notify_wait}
 
     val QSET_MAX_SLOTS = 8
 

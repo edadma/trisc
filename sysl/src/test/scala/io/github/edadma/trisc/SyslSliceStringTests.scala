@@ -266,7 +266,7 @@ class SyslSliceStringTests extends SyslTestHelpers {
   // ===== sizeof =====
 
   "sizeof string" in {
-    eval("main() -> int = sizeof(string)\n") shouldBe 12
+    eval("main() -> int = sizeof(string)\n") shouldBe 16
   }
 
   // ===== Type parsing =====

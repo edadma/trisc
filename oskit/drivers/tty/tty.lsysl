@@ -6,7 +6,12 @@ characters. The keyboard ISR notifies the server when keys
 arrive; the server translates scancodes to ASCII and delivers
 to the active console's input buffer.
 
-    module oskit
+    module oskit.drivers.tty
+
+    import oskit.kernel.{notify_read}
+    import oskit.services.{thread_id, putc}
+    import oskit.ipc.*
+    import oskit.drivers.kbd.*
 
     val TTY_CMD_WRITE   = 1
     val TTY_CMD_READ    = 2
@@ -191,9 +196,34 @@ Returns the character, or -1 if empty.
         consoles[id].in_count -= 1
         int(ch)
 
+Push an ANSI escape sequence (ESC [ X) into the active console.
+
+    tty_push_escape(final_ch: i8)
+        tty_console_push(active_console, i8(27))   // ESC
+        tty_console_push(active_console, i8(91))   // [
+        tty_console_push(active_console, final_ch)
+
+Push a CSI sequence with a numeric parameter (ESC [ n ~).
+
+    tty_push_csi_tilde(n: i8)
+        tty_console_push(active_console, i8(27))   // ESC
+        tty_console_push(active_console, i8(91))   // [
+        tty_console_push(active_console, i8(48 + n)) // digit
+        tty_console_push(active_console, i8(126))  // ~
+
 Process keyboard input. Called when the keyboard ISR
 has buffered events. Translates scancodes to ASCII and
-delivers to the active console.
+delivers to the active console. Arrow keys, Home, End,
+and Delete are translated to ANSI escape sequences.
+
+HID scancodes for special keys:
+- 0x4F = Right Arrow   → ESC[C
+- 0x50 = Left Arrow    → ESC[D
+- 0x51 = Down Arrow    → ESC[B
+- 0x52 = Up Arrow      → ESC[A
+- 0x4A = Home          → ESC[H
+- 0x4D = End           → ESC[F
+- 0x4C = Delete        → ESC[3~
 
     tty_process_keyboard()
         while kb_has_key() == 1
@@ -203,7 +233,29 @@ delivers to the active console.
             val mods = kb_modifiers(evt)
             // Only process key presses, not releases
             if press == 1
-                if sc < 128
+                // Arrow keys → ANSI escape sequences
+                if sc == 0x4F
+                    tty_push_escape(67)       // Right → ESC[C
+                else if sc == 0x50
+                    tty_push_escape(68)       // Left → ESC[D
+                else if sc == 0x51
+                    tty_push_escape(66)       // Down → ESC[B
+                else if sc == 0x52
+                    tty_push_escape(65)       // Up → ESC[A
+                else if sc == 0x4A
+                    tty_push_escape(72)       // Home → ESC[H
+                else if sc == 0x4D
+                    tty_push_escape(70)       // End → ESC[F
+                else if sc == 0x4C
+                    tty_push_csi_tilde(3)     // Delete → ESC[3~
+                else if sc == 0x2A
+                    // Backspace scancode
+                    if (mods & 8) != 0
+                        // Cmd+Backspace → forward delete (ESC[3~)
+                        tty_push_csi_tilde(3)
+                    else
+                        tty_console_push(active_console, i8(8))
+                else if sc < 128
                     var ch: i8 = 0
                     if (mods & 1) != 0
                         // Shift held
@@ -342,7 +394,7 @@ initializes keyboard, then loops handling messages.
 Userspace wrappers. These build IPC messages and send
 them to the TTY port.
 
-    tty_putc(ch: int)
+    tty_putc(ch: char)
         val port = port_lookup(&tty_name[0])
         if port >= 0
             var msg: [3]i8

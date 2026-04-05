@@ -20,10 +20,10 @@ class BuildOSDesktop extends OSKitTestHelpers {
   "build OS desktop TOF" in {
     val bootTof = assemble(bootAsm, relocatable = true)
     val allSources = Map(
-      "oskit/kernel" -> kernelSysl, "oskit/services" -> servicesSysl, "oskit/timer" -> timerSysl,
-      "oskit/semaphore" -> semaphoreSysl, "oskit/mutex" -> mutexSysl,
-      "oskit/ipc" -> ipcSysl, "oskit/kbd" -> kbdSysl,
-      "oskit/mouse" -> mouseSysl, "oskit/display" -> displaySysl,
+      "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
+      "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
+      "oskit/ipc/ipc" -> ipcSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl,
+      "oskit/drivers/mouse/mouse" -> mouseSysl, "oskit/drivers/display/display" -> displaySysl,
       "app" -> appSysl,
     )
     val driver = new SyslDriver

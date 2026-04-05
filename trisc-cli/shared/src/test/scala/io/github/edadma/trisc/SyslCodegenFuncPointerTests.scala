@@ -1,0 +1,147 @@
+package io.github.edadma.trisc
+
+class SyslCodegenFuncPointerTests extends SyslCodegenHelpers {
+
+  // ===== Basic function pointer =====
+
+  "assign function to variable and call" in {
+    compileAndRun(
+      """dbl(x: int) -> int = x * 2
+        |main() -> int
+        |    f: func(int) -> int = dbl
+        |    f(21)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "function pointer with inferred type" in {
+    compileAndRun(
+      """dbl(x: int) -> int = x * 2
+        |main() -> int
+        |    f = dbl
+        |    f(21)
+        |""".stripMargin) shouldBe 42
+  }
+
+  // ===== Passing function pointers as arguments =====
+
+  "pass function as argument" in {
+    compileAndRun(
+      """dbl(x: int) -> int = x * 2
+        |apply(f: func(int) -> int, x: int) -> int = f(x)
+        |main() -> int = apply(dbl, 21)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "pass different functions" in {
+    compileAndRun(
+      """dbl(x: int) -> int = x * 2
+        |triple(x: int) -> int = x * 3
+        |apply(f: func(int) -> int, x: int) -> int = f(x)
+        |main() -> int = apply(dbl, 10) + apply(triple, 10)
+        |""".stripMargin) shouldBe 50
+  }
+
+  // ===== Reassignment =====
+
+  "reassign function pointer" in {
+    compileAndRun(
+      """dbl(x: int) -> int = x * 2
+        |triple(x: int) -> int = x * 3
+        |main() -> int
+        |    f = dbl
+        |    a = f(10)
+        |    f = triple
+        |    b = f(10)
+        |    a + b
+        |""".stripMargin) shouldBe 50
+  }
+
+  // ===== Two-arg function pointer =====
+
+  "two-arg function pointer" in {
+    compileAndRun(
+      """myAdd(a: int, b: int) -> int = a + b
+        |apply2(f: func(int, int) -> int, a: int, b: int) -> int = f(a, b)
+        |main() -> int = apply2(myAdd, 20, 22)
+        |""".stripMargin) shouldBe 42
+  }
+
+  // ===== Indirect calls on arbitrary expressions =====
+
+  "call function pointer from array index" in {
+    compileAndRun(
+      """dbl(x: int) -> int = x * 2
+        |triple(x: int) -> int = x * 3
+        |main() -> int
+        |    var funcs: [2]func(int) -> int
+        |    funcs[0] = dbl
+        |    funcs[1] = triple
+        |    funcs[0](10) + funcs[1](10)
+        |""".stripMargin) shouldBe 50
+  }
+
+  "call function returned by another function" in {
+    compileAndRun(
+      """dbl(x: int) -> int = x * 2
+        |getFunc() -> func(int) -> int = dbl
+        |main() -> int = getFunc()(21)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "chain: function returning function pointer called immediately" in {
+    compileAndRun(
+      """add(a: int, b: int) -> int = a + b
+        |getOp() -> func(int, int) -> int = add
+        |main() -> int = getOp()(20, 22)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "call dereferenced function pointer" in {
+    compileAndRun(
+      """dbl(x: int) -> int = x * 2
+        |main() -> int
+        |    f: func(int) -> int = dbl
+        |    fp = &f
+        |    (*fp)(21)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "indirect call on struct field" in {
+    compileAndRun(
+      """struct Ops
+        |    apply: func(int) -> int
+        |dbl(x: int) -> int = x * 2
+        |main() -> int
+        |    var ops: Ops
+        |    ops.apply = dbl
+        |    ops.apply(21)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "call function-typed field on indexed struct" in {
+    compileAndRun(
+      """struct Cmd
+        |    handler: func(int) -> int
+        |dbl(x: int) -> int = x * 2
+        |triple(x: int) -> int = x * 3
+        |main() -> int
+        |    var cmds: [2]Cmd
+        |    cmds[0].handler = dbl
+        |    cmds[1].handler = triple
+        |    cmds[0].handler(10) + cmds[1].handler(10)
+        |""".stripMargin) shouldBe 50
+  }
+
+  "select function pointer at runtime" in {
+    compileAndRun(
+      """dbl(x: int) -> int = x * 2
+        |triple(x: int) -> int = x * 3
+        |main() -> int
+        |    var funcs: [2]func(int) -> int
+        |    funcs[0] = dbl
+        |    funcs[1] = triple
+        |    i = 1
+        |    funcs[i](14)
+        |""".stripMargin) shouldBe 42
+  }
+}
