@@ -557,7 +557,8 @@ class SyslParser extends StandardTokenParsers {
         ("." ~> ident) ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case m ~ args => (2, null, m, args) } |
         ("." ~> numericLit) ^^ (n => (1, null, s"_${n.toInt}", Nil)) |
         ("." ~> ident) ^^ (f => (1, null, f, Nil)) |
-        ("(" ~> repsep(expr, ",") <~ ")") ^^ (args => (3, null, "", args))
+        ("(" ~> repsep(expr, ",") <~ ")") ^^ (args => (3, null, "", args)) |
+        "?" ^^^ ((5, null, "", Nil: List[ExpressionAST]))
       ) ^^ {
         case base ~ ops => ops.foldLeft(base) {
           case (e, (0, idx, _, _)) => IndexAST(e, idx)
@@ -570,6 +571,7 @@ class SyslParser extends StandardTokenParsers {
               case _ => IndirectCallAST(e, args)
           case (e, (4, _, _, args)) =>
             SliceExprAST(e, Option(args(0)), Option(args(1)))
+          case (e, (5, _, _, _)) => TryAST(e)
           case (e, _) => e // shouldn't happen
         }
       }

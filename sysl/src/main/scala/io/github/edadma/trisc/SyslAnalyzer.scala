@@ -1349,7 +1349,22 @@ class SyslAnalyzer:
               throw AnalysisError(s"struct $structName has no method or field '$method'")
 
       case CallAST(name, args) =>
-        val tArgs = args.map(analyzeExpr)
+        // Determine expected types for args if callee has known concrete signature
+        val argExpected: List[Option[SyslType]] =
+          if traitCallRewrite.contains(name) then
+            val mangled = traitCallRewrite(name)
+            functions(mangled).params.map(p => Some(p._2))
+          else if functions.contains(name) || builtinFunctions.contains(name) then
+            lookupFun(name).params.map(p => Some(p._2))
+          else if structTypes.contains(name) then
+            structTypes(name).fields.map(f => Some(f._2))
+          else
+            List.fill(args.length)(None)
+        val tArgs = args.zip(argExpected.padTo(args.length, None)).map { case (a, exp) =>
+          val saved = currentExpected
+          currentExpected = exp.orElse(saved)
+          try analyzeExpr(a) finally currentExpected = saved
+        }
         // Check for trait-method-call rewrite (inside a synthesized default body)
         if traitCallRewrite.contains(name) then
           val mangled = traitCallRewrite(name)
@@ -1451,6 +1466,45 @@ class SyslAnalyzer:
               TIndirectCall(TVarRef(name, sym.typ), checkedArgs, returnType)
             case other =>
               throw AnalysisError(s"'$name' is not a function (type: $other)")
+
+      case TryAST(inner) =>
+        val tInner = analyzeExpr(inner)
+        val enumType = tInner.typ match
+          case et: SyslType.EnumType => et
+          case other => throw AnalysisError(s"'?' operator requires an enum type (Option/Result-style), got $other")
+        if enumType.variants.length != 2 then
+          throw AnalysisError(s"'?' operator requires a 2-variant enum, got ${enumType.variants.length} variants")
+        val (successName, successFields) = enumType.variants(0)
+        val (failureName, failureFields) = enumType.variants(1)
+        if successFields.length != 1 then
+          throw AnalysisError(s"'?' operator: first variant '$successName' must have exactly 1 field, got ${successFields.length}")
+        val successType = successFields(0)._2
+        // Verify the enclosing function's return type matches
+        currentExpected match
+          case Some(et: SyslType.EnumType) if et.name == enumType.name => ()
+          case Some(other) =>
+            throw AnalysisError(s"'?' on $enumType requires enclosing function to return $enumType, got $other")
+          case None =>
+            throw AnalysisError(s"'?' operator requires enclosing function with matching return type")
+        // Build: match tInner { Success(v) -> v; Failure(e) -> return Failure(e) }
+        val successBindName = "_try_v"
+        val failureBindNames = failureFields.indices.map(i => s"_try_e$i").toList
+        // Failure arm: return Failure(e0, e1, ...)
+        val failureReconstructArgs: List[TExpr] = failureBindNames.zip(failureFields).map {
+          case (bindName, (_, ft)) => TVarRef(bindName, ft)
+        }
+        val failureReturnValue = TEnumConstruct(enumType, 1, failureReconstructArgs)
+        val failureArm = TMatchArm(
+          List(TVariantPattern(enumType, 1, failureBindNames.map(Some(_)), failureFields.map(_._2))),
+          None,
+          List(TReturnStmt(Some(failureReturnValue)))
+        )
+        val successArm = TMatchArm(
+          List(TVariantPattern(enumType, 0, List(Some(successBindName)), List(successType))),
+          None,
+          List(TExprStmt(TVarRef(successBindName, successType)))
+        )
+        TMatchExpr(tInner, List(successArm, failureArm), None, successType)
 
       case IfExprAST(cond, thenBody, elseBody) =>
         val tCond = analyzeExpr(cond)

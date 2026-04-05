@@ -363,6 +363,39 @@ analyzer consults the **expected type** from context:
 Without an expected type and incomplete argument-based inference, the compiler
 errors with a message asking for an explicit type annotation.
 
+### `?` Operator (Try)
+
+The postfix `?` operator on an enum value unwraps the success variant or
+early-returns the failure variant from the enclosing function. It's the
+standard ergonomic for working with `Option[T]` and `Result[T, E]`.
+
+```sysl
+enum Option[T]
+    Some(value: T)
+    None
+
+parseAndDouble(s: string, start: int) -> Option[int]
+    x = parseInt(s, start)?         // unwrap Some(x), or early-return None
+    Some(x * 2)
+```
+
+**Rules:**
+- Applies only to monomorphized generic enum values where the enum has exactly
+  two variants and the first variant has exactly one field (the success type).
+- The enclosing function's return type must be the **same** enum type as the
+  value being `?`-unwrapped (no error-type conversion yet).
+- `expr?` desugars at analyze time to:
+  ```
+  match expr
+      Success(v) -> v
+      Failure(...) -> return Failure(...)
+  ```
+  where `Success` is variant 0 and `Failure` is variant 1.
+- The result type of the whole `expr?` is the success variant's field type.
+
+**Chainable:** `a?.field` works if `a?` returns a struct; multiple `?`s across
+separate statements also work (e.g. `x = a?` followed by `y = b?`).
+
 ### Traits and `impl` blocks
 
 Traits describe a set of methods a type may implement. Each trait is parameterized
