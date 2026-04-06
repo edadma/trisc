@@ -111,11 +111,14 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case EnumVal(_, _) => throw RuntimeError("expected integer, got enum value")
     case RefEnumVal(_, _, _) => throw RuntimeError("expected integer, got ref enum value")
 
-  /** Truncate a Long result to the width of a narrow unsigned type. */
-  private def truncateUnsigned(raw: Long, typ: SyslType): Long = typ match
+  /** Truncate a Long result to the width of a narrow integer type. */
+  private def truncateNarrow(raw: Long, typ: SyslType): Long = typ match
     case SyslType.UIntType(8)  => raw & 0xFFL
     case SyslType.UIntType(16) => raw & 0xFFFFL
     case SyslType.UIntType(32) => raw & 0xFFFFFFFFL
+    case SyslType.IntType(8)   => (raw << 56) >> 56
+    case SyslType.IntType(16)  => (raw << 48) >> 48
+    case SyslType.IntType(32)  => (raw << 32) >> 32
     case _ => raw
 
   private def toDouble(v: Value): Double = v match
@@ -493,7 +496,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case "^"  => l ^ r
               case "<<" => l << r.toInt
               case ">>" => l >> r.toInt
-            cell.value = IntVal(truncateUnsigned(raw, value.typ))
+            cell.value = IntVal(truncateNarrow(raw, value.typ))
 
       case TDerefAssignStmt(pointer, value) =>
         val cell = derefCell(evalAny(pointer, env))
@@ -525,7 +528,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case "^"  => l ^ r
           case "<<" => l << r.toInt
           case ">>" => l >> r.toInt
-        cell.value = IntVal(truncateUnsigned(raw, value.typ))
+        cell.value = IntVal(truncateNarrow(raw, value.typ))
 
       case TReturnStmt(value) =>
         throw ReturnException(value.map(evalAny(_, env)).getOrElse(IntVal(0)))
@@ -641,7 +644,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             cell.value = nv
             nv
           case _ =>
-            val v = truncateUnsigned(toLong(cell.value) + 1, typ)
+            val v = truncateNarrow(toLong(cell.value) + 1, typ)
             cell.value = IntVal(v)
             IntVal(v)
 
@@ -657,7 +660,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             cell.value = nv
             nv
           case _ =>
-            val v = truncateUnsigned(toLong(cell.value) - 1, typ)
+            val v = truncateNarrow(toLong(cell.value) - 1, typ)
             cell.value = IntVal(v)
             IntVal(v)
 
@@ -672,7 +675,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             old
           case _ =>
             val old = toLong(cell.value)
-            cell.value = IntVal(truncateUnsigned(old + 1, typ))
+            cell.value = IntVal(truncateNarrow(old + 1, typ))
             IntVal(old)
 
       case TPostDec(name, typ) =>
@@ -686,7 +689,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             old
           case _ =>
             val old = toLong(cell.value)
-            cell.value = IntVal(truncateUnsigned(old - 1, typ))
+            cell.value = IntVal(truncateNarrow(old - 1, typ))
             IntVal(old)
 
       case TDeref(inner, _) =>
@@ -896,7 +899,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case "<<" => l << r.toInt
           case ">>" => if unsigned then l >>> r.toInt else l >> r.toInt
           case _    => throw RuntimeError(s"unknown operator: $op")
-        IntVal(truncateUnsigned(raw, resultType))
+        IntVal(truncateNarrow(raw, resultType))
 
       case TUnary(op, operand, resultType) =>
         val v = evalAny(operand, env)
@@ -912,7 +915,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case "!" => if n == 0 then 1L else 0L
               case "~" => ~n
               case _   => throw RuntimeError(s"unknown unary operator: $op")
-            IntVal(truncateUnsigned(raw, resultType))
+            IntVal(truncateNarrow(raw, resultType))
 
       case TCast(inner, target) =>
         val v = evalAny(inner, env)

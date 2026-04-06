@@ -876,7 +876,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitLoad(1, 2, local.typ)
           emit("  popd r3")
           emitBinOp(op)
-          emitNarrowUnsigned(1, local.typ)
+          emitNarrow(1, local.typ)
           emitAddImm(2, 5, local.offset)
           emitStore(1, 2, local.typ)
         else
@@ -885,7 +885,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitLoad(1, 2, gtyp)
           emit("  popd r3")
           emitBinOp(op)
-          emitNarrowUnsigned(1, gtyp)
+          emitNarrow(1, gtyp)
           emit(s"  movi r2, $target")
           emitStore(1, 2, gtyp)
 
@@ -1054,7 +1054,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           case "<<" => emit("  lsl r2, r2, r1")
           case ">>" => emit("  asr r2, r2, r1")
         // Step 5: truncate narrow unsigned, then store (field address is safely on stack)
-        emitNarrowUnsigned(2, fieldType)
+        emitNarrow(2, fieldType)
         emit("  popd r1")        // r1 = field address
         emitStore(2, 1, fieldType)
 
@@ -1396,7 +1396,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitAddImm(2, 5, local.offset)
         emitLoad(1, 2, local.typ)
         emit(s"  addi r1, r1, $step")
-        emitNarrowUnsigned(1, typ)
+        emitNarrow(1, typ)
         emitAddImm(2, 5, local.offset)
         emitStore(1, 2, local.typ)
 
@@ -1409,7 +1409,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitAddImm(2, 5, local.offset)
         emitLoad(1, 2, local.typ)
         emit(s"  addi r1, r1, -$step")
-        emitNarrowUnsigned(1, typ)
+        emitNarrow(1, typ)
         emitAddImm(2, 5, local.offset)
         emitStore(1, 2, local.typ)
 
@@ -1422,7 +1422,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitAddImm(2, 5, local.offset)
         emitLoad(1, 2, local.typ)
         emit(s"  addi r3, r1, $step")
-        emitNarrowUnsigned(3, typ)
+        emitNarrow(3, typ)
         emitStore(3, 2, local.typ)
 
       case TPostDec(name, typ) =>
@@ -1434,7 +1434,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitAddImm(2, 5, local.offset)
         emitLoad(1, 2, local.typ)
         emit(s"  addi r3, r1, -$step")
-        emitNarrowUnsigned(3, typ)
+        emitNarrow(3, typ)
         emitStore(3, 2, local.typ)
 
       case TCast(TStringLit(value, _), target) if target.isInstanceOf[SyslType.PtrType] =>
@@ -1494,7 +1494,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         if operand.typ == SyslType.DoubleType then emit("  fneg r1, r1")
         else
           emit("  neg r1, r1")
-          emitNarrowUnsigned(1, resultType)
+          emitNarrow(1, resultType)
 
       case TUnary("!", operand, _) =>
         genExpr(operand)
@@ -1510,7 +1510,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TUnary("~", operand, resultType) =>
         genExpr(operand)
         emit("  not r1, r1")
-        emitNarrowUnsigned(1, resultType)
+        emitNarrow(1, resultType)
 
       case TFuncRef(name, _) =>
         emit(s"  movi r1, $name") // r1 = address of function
@@ -2804,11 +2804,14 @@ class SyslTriscCodegen(addresses: Int = 4):
       case other =>
         throw new RuntimeException(s"codegen: unhandled expression type: ${other.getClass.getSimpleName}")
 
-  // Emit zero-extend for narrow unsigned types after arithmetic (no-op for i64/u64/signed)
-  private def emitNarrowUnsigned(reg: Int, typ: SyslType): Unit = typ match
+  // Emit truncation for narrow integer types after arithmetic (no-op for i64/u64)
+  private def emitNarrow(reg: Int, typ: SyslType): Unit = typ match
     case SyslType.UIntType(8)  => emit(s"  zeb r$reg, r$reg")
     case SyslType.UIntType(16) => emit(s"  zes r$reg, r$reg")
     case SyslType.UIntType(32) => emit(s"  zew r$reg, r$reg")
+    case SyslType.IntType(8)   => emit(s"  seb r$reg, r$reg")
+    case SyslType.IntType(16)  => emit(s"  ses r$reg, r$reg")
+    case SyslType.IntType(32)  => emit(s"  sew r$reg, r$reg")
     case _ =>
 
   // Emit reg = base + offset, handling large offsets that don't fit in addi
