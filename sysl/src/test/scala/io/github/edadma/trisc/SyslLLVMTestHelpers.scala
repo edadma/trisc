@@ -25,7 +25,7 @@ trait SyslLLVMTestHelpers extends AnyFreeSpec with Matchers {
       val llFile = dir.resolve("test.ll")
       val exeFile = dir.resolve("test")
       Files.writeString(llFile, ir)
-      val compileResult = Process(Seq("clang", llFile.toString, "-o", exeFile.toString)).!
+      val compileResult = Process(Seq("clang", "-w", llFile.toString, "-o", exeFile.toString)).!
       if compileResult != 0 then
         fail(s"clang failed with exit code $compileResult\n\nLLVM IR:\n$ir")
       val outBuf = new StringBuilder
