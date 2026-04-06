@@ -73,13 +73,9 @@ Class(id) → ClassCheck id
 ```
 
 
-    module std.regex.compiler
+    module std.regex
 
-    import std.regex.{Node, Inst, CharClass,
-        NK_LITERAL, NK_DOT, NK_ANCHOR_START, NK_ANCHOR_END,
-        NK_CLASS, NK_STAR, NK_CAPTURE, NK_SEQ, NK_QUEST, NK_PLUS,
-        OP_CHAR, OP_ANY, OP_MATCH, OP_JUMP, OP_SPLIT,
-        OP_SAVE, OP_ANCHOR_START, OP_ANCHOR_END, OP_CLASS}
+    /* All types and constants are in the same module (std.regex) */
 
 
 Compiler state
@@ -206,7 +202,7 @@ known AST structures. We use `parse_bre` to build the AST,
 then `compile` to produce bytecode, and inspect the
 instruction array.
 
-    import std.regex.parser.{parse_bre}
+    /* parse_bre is in the same module */
 
 
 ### Single literal produces Char instruction

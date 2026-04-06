@@ -36,11 +36,9 @@ instruction array) plus a set of saved capture positions.
 Threads share structure where possible — the `saves` array
 is copied only when a `Save` instruction is executed.
 
-    module std.regex.vm
+    module std.regex
 
-    import std.regex.{Inst, CharClass, CharRange, Match,
-        OP_CHAR, OP_ANY, OP_MATCH, OP_JUMP, OP_SPLIT,
-        OP_SAVE, OP_ANCHOR_START, OP_ANCHOR_END, OP_CLASS}
+    /* All types and constants are in the same module (std.regex) */
 
     struct Thread
         pc: int
@@ -240,8 +238,7 @@ execute against an input string, and verify match results.
 > for epsilon transitions). They are written now so they're
 > ready to run once the fix lands.
 
-    import std.regex.parser.{parse_bre}
-    import std.regex.compiler.{compile}
+    /* parse_bre and compile are in the same module */
 
 
 ### Helper
@@ -267,10 +264,10 @@ in one step, returning the Match result.
 
         assert(m.matched(), "should match")
 
-        start, end = m.group(0)
+        start, en = m.group(0)
 
         assert(start == 4, s"start=4, got $start")
-        assert(end == 9, s"end=9, got $end")
+        assert(en == 9, s"end=9, got $en")
 
 
 ### Dot matches any character
@@ -325,10 +322,10 @@ in one step, returning the Match result.
         assert(m.matched(), "should match")
         assert(m.n_groups == 2, "group 0 + group 1")
 
-        start, end = m.group(1)
+        start, en = m.group(1)
 
         assert(start == 4, s"group 1 start=4, got $start")
-        assert(end == 9, s"group 1 end=9, got $end")
+        assert(en == 9, s"group 1 end=9, got $en")
 
 
 ### Character class
@@ -361,10 +358,10 @@ in one step, returning the Match result.
 
         assert(m.matched(), "should match")
 
-        start, end = m.group(0)
+        start, en = m.group(0)
 
         assert(start == 0, "leftmost")
-        assert(end == 3, s"longest: end=3, got $end")
+        assert(en == 3, s"longest: end=3, got $en")
 
 
 ### Complex pattern

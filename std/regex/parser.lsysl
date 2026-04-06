@@ -31,12 +31,9 @@ Key BRE quirks:
 - There is no alternation (`|`) in BRE
 
 
-    module std.regex.parser
+    module std.regex
 
-    import std.regex.{Node, CharRange, CharClass,
-        NK_LITERAL, NK_DOT, NK_ANCHOR_START, NK_ANCHOR_END,
-        NK_CLASS, NK_STAR, NK_CAPTURE, NK_SEQ, NK_QUEST, NK_PLUS,
-        RegexError}
+    /* All types and constants are in the same module (std.regex) */
 
 
 Parser state
