@@ -9,7 +9,7 @@ case class TModuleDecl(path: List[String]) extends TDecl
 case class TImportDecl(path: String) extends TDecl
 case class TExternFuncDecl(name: String, params: List[SyslType], returnType: SyslType) extends TDecl
 case class TExternVarDecl(name: String, typ: SyslType) extends TDecl
-case class TFunDecl(name: String, params: List[TParam], returnType: SyslType, body: TFunBody, isPrivate: Boolean = false) extends TDecl
+case class TFunDecl(name: String, params: List[TParam], returnType: SyslType, body: TFunBody, isPrivate: Boolean = false, attributes: List[Attribute] = Nil) extends TDecl
 case class TVarDecl(name: String, typ: SyslType, init: TExpr, isPrivate: Boolean = false) extends TDecl
 case class TStructDecl(name: String, fields: List[(String, SyslType)]) extends TDecl
 case class TEnumDecl(name: String, members: List[(String, Long)]) extends TDecl
@@ -42,6 +42,7 @@ case object TBreakStmt extends TStmt
 case object TContinueStmt extends TStmt
 case class TDeferStmt(body: TStmt) extends TStmt
 case class TAsmStmt(code: String) extends TStmt
+case class TAsmExpr(code: String, typ: SyslType) extends TExpr
 case class TExprStmt(expr: TExpr) extends TStmt
 
 // Expressions — every expression carries its type
@@ -92,6 +93,7 @@ case class TDestructurePattern(structType: SyslType.StructType, bindings: List[O
 case class TVariantPattern(enumType: SyslType.EnumType, variantIndex: Int, bindings: List[Option[String]], fieldTypes: List[SyslType]) extends TMatchPattern
 case class TEnumConstruct(enumType: SyslType.EnumType, variantIndex: Int, args: List[TExpr]) extends TExpr { def typ: SyslType = enumType }
 case class TNew(structType: SyslType.StructType, args: List[TExpr]) extends TExpr { def typ: SyslType = SyslType.RefType(structType) }
+case class TNewEnum(enumType: SyslType.EnumType, variantIndex: Int, args: List[TExpr]) extends TExpr { def typ: SyslType = SyslType.RefType(enumType) }
 case class TNewArray(elemType: SyslType, size: TExpr) extends TExpr { def typ: SyslType = SyslType.RefType(SyslType.SliceType(elemType)) }
 case class TLen(expr: TExpr, typ: SyslType) extends TExpr
 case class TCap(expr: TExpr, typ: SyslType) extends TExpr
@@ -99,3 +101,4 @@ case class TSliceExpr(array: TExpr, low: Option[TExpr], high: Option[TExpr], typ
 case class TAppend(slice: TExpr, elem: TExpr, typ: SyslType) extends TExpr
 case class TStringFromPtr(ptr: TExpr, len: TExpr, typ: SyslType) extends TExpr
 case class TStringFromSlice(slice: TExpr, typ: SyslType) extends TExpr
+case class TStr(expr: TExpr) extends TExpr { def typ: SyslType = SyslType.StringType }

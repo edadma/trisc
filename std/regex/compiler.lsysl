@@ -1,0 +1,405 @@
+std.regex.compiler — AST to VM bytecode
+========================================
+
+The compiler walks the flat AST produced by the parser and
+emits a linear array of Pike VM instructions. The key
+insight is that every regex construct maps to a small,
+fixed pattern of `Split`, `Jump`, `Char`, and `Save`
+instructions.
+
+
+Compilation patterns
+--------------------
+
+Each AST node type compiles to a specific instruction
+sequence. Let `e` denote the compiled code for a
+subexpression.
+
+### Literal / Dot / Anchor
+
+A single instruction:
+
+```
+Literal(ch) → Char ch
+Dot         → Any
+AnchorStart → AnchorStart
+AnchorEnd   → AnchorEnd
+```
+
+### Concatenation
+
+Just emit both sides in order:
+
+```
+Seq(a, b) → [code for a] [code for b]
+```
+
+### Star (zero or more)
+
+Greedy `e*` — prefer matching, but allow skipping:
+
+```
+     ┌─────────────┐
+     ↓              │
+L1:  Split L2, L3   │  try L2 (match e), fallback L3 (skip)
+L2:  [code for e]   │
+     Jump L1       ─┘  loop back
+L3:  ...               continue
+```
+
+For POSIX leftmost-longest, the Split prefers the match
+path (`L2`). The VM explores both paths and keeps the
+longest result.
+
+### Capture group
+
+Wrap the subexpression with `Save` instructions. Each
+capture group $i$ uses slots $2i$ (start) and $2i + 1$
+(end).
+
+```
+Capture(e, i) → Save 2*i
+                [code for e]
+                Save 2*i+1
+```
+
+### Alternation
+
+`a|b` — try the left branch; if it fails, try the right:
+
+```
+     Split L1, L2
+L1:  [code for left]
+     Jump L3
+L2:  [code for right]
+L3:  ...
+```
+
+### Character class
+
+A single `Class` instruction that references the class
+definition by index.
+
+```
+Class(id) → ClassCheck id
+```
+
+
+    module std.regex
+
+    /* All types and constants are in the same module (std.regex) */
+
+
+Compiler state
+--------------
+
+The compiler holds the instruction array being built and a
+reference to the AST node array.
+
+    struct Compiler
+        insts: []Inst
+        nodes: []Node
+
+    private Compiler.emit(op: int, arg1: int, arg2: int) -> int
+        val pc = len(self.insts)
+
+        self.insts = append(self.insts, Inst(op, arg1, arg2))
+        pc
+
+    private Compiler.patch(pc: int, arg1: int, arg2: int)
+        /* Update a previously emitted instruction's arguments */
+        /* This is used for forward jumps where the target isn't known yet */
+        self.insts[pc] = Inst(self.insts[pc].op, arg1, arg2)
+
+
+Recursive compilation
+---------------------
+
+`compile_node` dispatches on the node kind. Since the AST is
+flat (stored in an array), we look up each node by index.
+
+    private Compiler.compile_node(idx: int)
+        if idx < 0 then return
+
+        val node = self.nodes[idx]
+
+        node.kind match
+            0 -> /* NK_LITERAL */
+                self.emit(OP_CHAR, node.ch, 0)
+            1 -> /* NK_DOT */
+                self.emit(OP_ANY, 0, 0)
+            2 -> /* NK_ANCHOR_START */
+                self.emit(OP_ANCHOR_START, 0, 0)
+            3 -> /* NK_ANCHOR_END */
+                self.emit(OP_ANCHOR_END, 0, 0)
+            4 -> /* NK_CLASS */
+                self.emit(OP_CLASS, node.extra, 0)
+            5 -> /* NK_STAR */
+                /*
+                 * L1: Split L2, L3
+                 * L2: [child]
+                 *     Jump L1
+                 * L3: ...
+                 */
+                val l1 = self.emit(OP_SPLIT, 0, 0)
+
+                self.compile_node(node.left)
+                self.emit(OP_JUMP, l1, 0)
+
+                val l3 = len(self.insts)
+
+                self.patch(l1, l1 + 1, l3)
+            6 -> /* NK_CAPTURE */
+                self.emit(OP_SAVE, node.extra * 2, 0)
+                self.compile_node(node.left)
+                self.emit(OP_SAVE, node.extra * 2 + 1, 0)
+            7 -> /* NK_SEQ */
+                self.compile_node(node.left)
+                self.compile_node(node.right)
+            8 -> /* NK_QUEST (zero or one) */
+                /*
+                 * Split L1, L2
+                 * L1: [child]
+                 * L2: ...
+                 */
+                val split = self.emit(OP_SPLIT, 0, 0)
+
+                self.compile_node(node.left)
+
+                val l2 = len(self.insts)
+
+                self.patch(split, split + 1, l2)
+            9 -> /* NK_PLUS (one or more) */
+                /*
+                 * L1: [child]
+                 *     Split L1, L2
+                 * L2: ...
+                 */
+                val l1 = len(self.insts)
+
+                self.compile_node(node.left)
+
+                val l2 = len(self.insts) + 1
+
+                self.emit(OP_SPLIT, l1, l2)
+            10 -> /* NK_ALT (alternation) */
+                /*
+                 *     Split L1, L2
+                 * L1: [left]
+                 *     Jump L3
+                 * L2: [right]
+                 * L3: ...
+                 */
+                val split = self.emit(OP_SPLIT, 0, 0)
+
+                self.compile_node(node.left)
+
+                val jmp = self.emit(OP_JUMP, 0, 0)
+                val l2 = len(self.insts)
+
+                self.compile_node(node.right)
+
+                val l3 = len(self.insts)
+
+                self.patch(split, split + 1, l2)
+                self.patch(jmp, l3, 0)
+            _ -> return
+
+
+Top-level compilation
+---------------------
+
+Wraps the entire pattern in a group-0 capture (the full
+match) and appends the `Match` instruction.
+
+    compile(root: int, nodes: []Node, n_groups: int) -> []Inst
+        var c: Compiler
+
+        val _i = new [16]Inst
+        c.insts = _i[:0]
+        c.nodes = nodes
+
+        /* Group 0 captures the full match */
+        c.emit(OP_SAVE, 0, 0)
+        c.compile_node(root)
+        c.emit(OP_SAVE, 1, 0)
+        c.emit(OP_MATCH, 0, 0)
+
+        c.insts
+
+
+Tests
+-----
+
+Compiler tests verify the instruction sequences produced for
+known AST structures. We use `parse_bre` to build the AST,
+then `compile` to produce bytecode, and inspect the
+instruction array.
+
+    /* parse_bre is in the same module */
+
+
+### Single literal produces Char instruction
+
+    #test
+    test_compile_literal() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_bre("a")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        /* Expected: Save 0, Char 'a', Save 1, Match */
+        assert(len(insts) == 4, s"4 instructions, got ${len(insts)}")
+        assert(insts[0].op == OP_SAVE, "save 0")
+        assert(insts[0].arg1 == 0, "slot 0")
+        assert(insts[1].op == OP_CHAR, "char")
+        assert(insts[1].arg1 == int('a'), "char a")
+        assert(insts[2].op == OP_SAVE, "save 1")
+        assert(insts[2].arg1 == 1, "slot 1")
+        assert(insts[3].op == OP_MATCH, "match")
+
+
+### Dot produces Any instruction
+
+    #test
+    test_compile_dot() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_bre(".")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        assert(insts[1].op == OP_ANY, "any")
+
+
+### Concatenation produces sequential instructions
+
+    #test
+    test_compile_concat() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_bre("ab")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        /* Save 0, Char 'a', Char 'b', Save 1, Match */
+        assert(len(insts) == 5, s"5 instructions, got ${len(insts)}")
+        assert(insts[1].op == OP_CHAR, "char a")
+        assert(insts[1].arg1 == int('a'), "a")
+        assert(insts[2].op == OP_CHAR, "char b")
+        assert(insts[2].arg1 == int('b'), "b")
+
+
+### Star produces Split/Jump loop
+
+    #test
+    test_compile_star() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_bre("a*")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        /* Save 0, Split(2,4), Char 'a', Jump(1), Save 1, Match */
+        assert(insts[1].op == OP_SPLIT, "split")
+        assert(insts[2].op == OP_CHAR, "char in loop")
+        assert(insts[3].op == OP_JUMP, "jump back")
+        assert(insts[3].arg1 == 1, "jumps to split")
+
+
+### Capture group produces Save pair
+
+    #test
+    test_compile_capture() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_bre("\\(a\\)")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        /* Save 0, Save 2, Char 'a', Save 3, Save 1, Match */
+        assert(insts[1].op == OP_SAVE, "group 1 open")
+        assert(insts[1].arg1 == 2, "slot 2")
+        assert(insts[2].op == OP_CHAR, "literal")
+        assert(insts[3].op == OP_SAVE, "group 1 close")
+        assert(insts[3].arg1 == 3, "slot 3")
+
+
+### Anchors produce anchor instructions
+
+    #test
+    test_compile_anchors() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_bre("^a$")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        assert(insts[1].op == OP_ANCHOR_START, "anchor start")
+        assert(insts[2].op == OP_CHAR, "char")
+        assert(insts[3].op == OP_ANCHOR_END, "anchor end")
+
+
+### Character class produces Class instruction
+
+    #test
+    test_compile_class() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_bre("[abc]")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        assert(insts[1].op == OP_CLASS, "class check")
+        assert(insts[1].arg1 == 0, "class index 0")
+
+
+### Alternation produces Split/Jump
+
+    #test
+    test_compile_alt() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_regex("a|b")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        /* Save 0, Split(2,4), Char 'a', Jump(5), Char 'b', Save 1, Match */
+        assert(insts[1].op == OP_SPLIT, "split for alt")
+        assert(insts[2].op == OP_CHAR, "left branch: char a")
+        assert(insts[2].arg1 == int('a'), "a")
+        assert(insts[3].op == OP_JUMP, "jump past right")
+        assert(insts[4].op == OP_CHAR, "right branch: char b")
+        assert(insts[4].arg1 == int('b'), "b")
+
+
+### Plus produces child then Split loop
+
+    #test
+    test_compile_plus() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_regex("a+")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        /* Save 0, Char 'a', Split(1,3), Save 1, Match */
+        assert(insts[1].op == OP_CHAR, "char first")
+        assert(insts[2].op == OP_SPLIT, "split after")
+        assert(insts[2].arg1 == 1, "back to char")
+
+
+### Question produces Split then child
+
+    #test
+    test_compile_quest() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_regex("a?")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        /* Save 0, Split(2,3), Char 'a', Save 1, Match */
+        assert(insts[1].op == OP_SPLIT, "split for quest")
+        assert(insts[2].op == OP_CHAR, "char in optional")

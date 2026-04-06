@@ -239,4 +239,392 @@ class SyslForLoopTests extends SyslTestHelpers {
         |    0
         |""".stripMargin) shouldBe ""
   }
+
+  // ===== Range for loops =====
+
+  "for in inclusive range" in {
+    eval(
+      """main() -> int
+        |    sum = 0
+        |    for i in 1..5
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 15
+  }
+
+  "for in exclusive range" in {
+    eval(
+      """main() -> int
+        |    sum = 0
+        |    for i in 1..<5
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 10
+  }
+
+  "for in range with do inline" in {
+    output(
+      """main() -> int
+        |    for i in 0..<5 do print(i)
+        |    0
+        |""".stripMargin) shouldBe "01234"
+  }
+
+  "for in range with do block" in {
+    output(
+      """main() -> int
+        |    for i in 1..3 do
+        |        print(i)
+        |    0
+        |""".stripMargin) shouldBe "123"
+  }
+
+  "for in range with variable bounds" in {
+    eval(
+      """main() -> int
+        |    lo = 2
+        |    hi = 6
+        |    sum = 0
+        |    for i in lo..<hi
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 14
+  }
+
+  "for in range with break" in {
+    eval(
+      """main() -> int
+        |    sum = 0
+        |    for i in 0..100
+        |        if i > 4 then break
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 10
+  }
+
+  "for in range with continue" in {
+    output(
+      """main() -> int
+        |    for i in 0..<6
+        |        if i % 2 == 0 then continue
+        |        print(i)
+        |    0
+        |""".stripMargin) shouldBe "135"
+  }
+
+  "for in range nested" in {
+    output(
+      """main() -> int
+        |    for i in 0..<3
+        |        for j in 0..<3
+        |            print(i * 3 + j)
+        |    0
+        |""".stripMargin) shouldBe "012345678"
+  }
+
+  "for in range zero iterations (exclusive)" in {
+    eval(
+      """main() -> int
+        |    count = 0
+        |    for i in 0..<0
+        |        count += 1
+        |    count
+        |""".stripMargin) shouldBe 0
+  }
+
+  "for in range single iteration (inclusive)" in {
+    eval(
+      """main() -> int
+        |    count = 0
+        |    for i in 5..5
+        |        count += 1
+        |    count
+        |""".stripMargin) shouldBe 1
+  }
+
+  // ===== `in` range membership operator =====
+
+  "in inclusive range — inside" in {
+    eval(
+      """main() -> int
+        |    x = 4
+        |    if x in 1..4 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "in inclusive range — at lower bound" in {
+    eval(
+      """main() -> int
+        |    x = 1
+        |    if x in 1..4 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "in inclusive range — above" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if x in 1..4 then 1 else 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "in exclusive range — inside" in {
+    eval(
+      """main() -> int
+        |    x = 3
+        |    if x in 1..<4 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "in exclusive range — at upper bound (excluded)" in {
+    eval(
+      """main() -> int
+        |    x = 4
+        |    if x in 1..<4 then 1 else 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "in range — below lower" in {
+    eval(
+      """main() -> int
+        |    x = 0
+        |    if x in 1..4 then 1 else 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "in range with variable bounds" in {
+    eval(
+      """main() -> int
+        |    lo = 10
+        |    hi = 20
+        |    x = 15
+        |    if x in lo..hi then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "in range combined with && " in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    y = 7
+        |    if x in 1..10 && y in 5..8 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "in range as counting loop" in {
+    eval(
+      """main() -> int
+        |    count = 0
+        |    for i in 0..<20
+        |        if i in 5..10 then count += 1
+        |    count
+        |""".stripMargin) shouldBe 6
+  }
+
+  // ===== !in negated membership =====
+
+  "!in inclusive range — outside" in {
+    eval(
+      """main() -> int
+        |    x = 5
+        |    if x !in 1..4 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "!in inclusive range — inside" in {
+    eval(
+      """main() -> int
+        |    x = 3
+        |    if x !in 1..4 then 1 else 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "!in exclusive range — at upper bound" in {
+    eval(
+      """main() -> int
+        |    x = 4
+        |    if x !in 1..<4 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  // ===== downTo ranges =====
+
+  "for in downTo range" in {
+    output(
+      """main() -> int
+        |    for i in 5 downTo 1
+        |        print(i)
+        |    0
+        |""".stripMargin) shouldBe "54321"
+  }
+
+  "for in downTo inclusive of zero" in {
+    output(
+      """main() -> int
+        |    for i in 3 downTo 0
+        |        print(i)
+        |    0
+        |""".stripMargin) shouldBe "3210"
+  }
+
+  "for in downTo sum" in {
+    eval(
+      """main() -> int
+        |    sum = 0
+        |    for i in 10 downTo 1
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 55
+  }
+
+  "for in downTo single iteration" in {
+    eval(
+      """main() -> int
+        |    count = 0
+        |    for i in 5 downTo 5
+        |        count += 1
+        |    count
+        |""".stripMargin) shouldBe 1
+  }
+
+  "for in downTo zero iterations" in {
+    eval(
+      """main() -> int
+        |    count = 0
+        |    for i in 0 downTo 5
+        |        count += 1
+        |    count
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ===== step =====
+
+  "for in inclusive with step" in {
+    output(
+      """main() -> int
+        |    for i in 0..10 step 2
+        |        print(i)
+        |    0
+        |""".stripMargin) shouldBe "0246810"
+  }
+
+  "for in exclusive with step" in {
+    output(
+      """main() -> int
+        |    for i in 0..<10 step 3
+        |        print(i)
+        |    0
+        |""".stripMargin) shouldBe "0369"
+  }
+
+  "for in downTo with step" in {
+    output(
+      """main() -> int
+        |    for i in 10 downTo 0 step 2
+        |        print(i)
+        |    0
+        |""".stripMargin) shouldBe "1086420"
+  }
+
+  "for in step sum of evens" in {
+    eval(
+      """main() -> int
+        |    sum = 0
+        |    for i in 2..20 step 2
+        |        sum = sum + i
+        |    sum
+        |""".stripMargin) shouldBe 110
+  }
+
+  "for in step with variable step" in {
+    eval(
+      """main() -> int
+        |    s = 3
+        |    count = 0
+        |    for i in 0..<30 step s
+        |        count += 1
+        |    count
+        |""".stripMargin) shouldBe 10
+  }
+
+  // ===== Go-style for i, x in arr =====
+
+  "for i, x in array" in {
+    eval(
+      """main() -> int
+        |    arr: [5]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    arr[3] = 40
+        |    arr[4] = 50
+        |    sum = 0
+        |    for i, x in arr
+        |        sum = sum + x
+        |    sum
+        |""".stripMargin) shouldBe 150
+  }
+
+  "for i, x in array uses index" in {
+    eval(
+      """main() -> int
+        |    arr: [4]int
+        |    arr[0] = 10
+        |    arr[1] = 20
+        |    arr[2] = 30
+        |    arr[3] = 40
+        |    total = 0
+        |    for i, x in arr
+        |        total = total + i * x
+        |    total
+        |""".stripMargin) shouldBe (0*10 + 1*20 + 2*30 + 3*40)
+  }
+
+  "for i, x in array with break" in {
+    eval(
+      """main() -> int
+        |    arr: [5]int
+        |    arr[0] = 1
+        |    arr[1] = 2
+        |    arr[2] = 3
+        |    arr[3] = 4
+        |    arr[4] = 5
+        |    sum = 0
+        |    for i, x in arr
+        |        if i == 3 then break
+        |        sum = sum + x
+        |    sum
+        |""".stripMargin) shouldBe 6
+  }
+
+  "for i, x in array with continue" in {
+    eval(
+      """main() -> int
+        |    arr: [5]int
+        |    arr[0] = 1
+        |    arr[1] = 2
+        |    arr[2] = 3
+        |    arr[3] = 4
+        |    arr[4] = 5
+        |    sum = 0
+        |    for i, x in arr
+        |        if i % 2 == 0 then continue
+        |        sum = sum + x
+        |    sum
+        |""".stripMargin) shouldBe 6
+  }
+
+  "for i, x in empty-like range" in {
+    eval(
+      """main() -> int
+        |    arr: [3]int
+        |    arr[0] = 7
+        |    arr[1] = 8
+        |    arr[2] = 9
+        |    last = 0
+        |    for i, x in arr
+        |        last = x
+        |    last
+        |""".stripMargin) shouldBe 9
+  }
 }

@@ -28,6 +28,59 @@ class SyslCodegenCastTests extends SyslCodegenHelpers {
   "bool from nonzero is true" in { compileAndRun("main() -> int = if bool(42) then 1 else 0\n") shouldBe 1 }
   "bool from negative is true" in { compileAndRun("main() -> int = if bool(-1) then 1 else 0\n") shouldBe 1 }
 
+  // ===== float ↔ int casts =====
+
+  "int from f64 truncates" in {
+    compileAndRun(
+      """main() -> int
+        |    x: f64 = 3.7
+        |    int(x)
+        |""".stripMargin) shouldBe 3
+  }
+
+  "int from negative f64" in {
+    compileAndRun(
+      """main() -> int
+        |    x: f64 = -2.9
+        |    int(x)
+        |""".stripMargin) shouldBe -2
+  }
+
+  "int from f64 zero" in {
+    compileAndRun(
+      """main() -> int
+        |    x: f64 = 0.0
+        |    int(x)
+        |""".stripMargin) shouldBe 0
+  }
+
+  "int from large f64" in {
+    compileAndRun(
+      """main() -> int
+        |    x: f64 = 1000.99
+        |    int(x)
+        |""".stripMargin) shouldBe 1000
+  }
+
+  "f64 from int roundtrip" in {
+    // int → f64 → int should preserve value for exact integers
+    compileAndRun(
+      """main() -> int
+        |    x = 42
+        |    y: f64 = f64(x)
+        |    int(y)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "f64 arithmetic after cast from int" in {
+    compileAndRun(
+      """main() -> int
+        |    a: f64 = f64(10)
+        |    b: f64 = f64(3)
+        |    int(a / b)
+        |""".stripMargin) shouldBe 3
+  }
+
   // ===== Cast in expressions =====
 
   "cast in arithmetic" in { compileAndRun("main() -> int = int(true) + int(true)\n") shouldBe 2 }

@@ -49,11 +49,11 @@ class SyslIntWidthTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 42
   }
 
-  "byte is alias for i8" in {
+  "byte is alias for u8" in {
     eval(
       """main() -> int
         |    var x: byte = 42
-        |    var y: i8 = x
+        |    var y: u8 = x
         |    y
         |""".stripMargin) shouldBe 42
   }
@@ -289,7 +289,7 @@ class SyslIntWidthTests extends SyslTestHelpers {
 
   "legacy prefix names still parse" in {
     SyslType.fromPrefix("int") shouldBe IntType(32)
-    SyslType.fromPrefix("byte") shouldBe IntType(8)
+    SyslType.fromPrefix("byte") shouldBe UIntType(8)
     SyslType.fromPrefix("char") shouldBe UIntType(32)
   }
 

@@ -1,0 +1,370 @@
+std.builder — Efficient string construction
+=============================================
+
+The `std.builder` module provides `StrBuilder`, a mutable
+buffer for constructing strings incrementally. It is the tool
+users reach for when assembling a string from many pieces, and
+it is what Sysl's string interpolation lowers to at runtime.
+
+`StrBuilder` wraps a growable `[]byte` slice. Each write
+appends bytes, and the underlying slice grows amortized-O(1)
+via Go-style `append`. When construction is done, `to_str`
+produces a `string` from the accumulated bytes.
+
+The module sits between the byte-level primitives
+(`std.mem`, `std.utf8`) and the string-level modules that
+will build on top of it (`std.strings`, `std.bytes`).
+
+Dependencies:
+
+- `std.strconv` for numeric formatting (`format_i64_into`)
+- `std.utf8` for rune encoding (`encode_rune`)
+
+
+    module std.builder
+
+    import std.strconv.{format_i64_into}
+    import std.utf8.{encode_rune}
+
+
+StrBuilder
+----------
+
+`StrBuilder` holds a single growable byte buffer. Construct
+one with `new_builder()`; then call `write_*` methods to
+accumulate bytes, and `to_str()` to produce the final string.
+
+    struct StrBuilder
+        buf: []byte
+
+
+new_builder
+-----------
+
+`new_builder()` returns a `StrBuilder` with a small
+pre-allocated backing buffer (16 bytes) and a length of zero.
+Writes grow the buffer automatically.
+
+For callers that know the approximate final length in advance,
+`new_builder_cap(n)` preallocates `n` bytes, avoiding
+intermediate reallocations.
+
+    new_builder() -> StrBuilder
+        val arr = new [16]byte
+        StrBuilder(arr[:0])
+
+    new_builder_cap(cap: int) -> StrBuilder
+        val arr = new [cap]byte
+        StrBuilder(arr[:0])
+
+
+len
+---
+
+`b.len()` returns the number of bytes currently in the
+builder. This is byte count, not rune count — consistent with
+`len(string)`.
+
+    StrBuilder.len() -> int = len(self.buf)
+
+
+reset
+-----
+
+`b.reset()` drops all accumulated bytes without releasing the
+backing buffer. Subsequent writes reuse the existing capacity.
+Useful when a single builder is reused across many
+formatting operations.
+
+    StrBuilder.reset()
+        self.buf = self.buf[:0]
+
+
+write_byte
+----------
+
+`b.write_byte(x)` appends a single byte.
+
+    StrBuilder.write_byte(x: byte)
+        self.buf = append(self.buf, x)
+
+
+write
+-----
+
+`b.write(s)` appends every byte of `s` in order.
+
+    StrBuilder.write(s: string)
+        val n = len(s)
+        var i = 0
+
+        while i < n
+            self.buf = append(self.buf, s[i])
+            i++
+
+
+write_rune
+----------
+
+`b.write_rune(r)` encodes `r` as UTF-8 and appends the
+resulting 1-4 bytes. Invalid codepoints are encoded as the
+Unicode replacement character (U+FFFD), matching
+`std.utf8.encode_rune`'s behavior.
+
+    StrBuilder.write_rune(r: char)
+        val tmp = new [4]byte
+        val n = encode_rune(tmp[:], r)
+        var i = 0
+
+        while i < n
+            self.buf = append(self.buf, tmp[i])
+            i++
+
+
+write_i64 / write_int
+---------------------
+
+`b.write_i64(n)` appends the decimal representation of `n`.
+Uses `std.strconv.format_i64_into` with a small stack-style
+buffer, so no intermediate `string` is allocated.
+
+    StrBuilder.write_i64(n: i64)
+        val tmp = new [20]byte
+        val written = format_i64_into(tmp[:], n)
+        var i = 0
+
+        while i < written
+            self.buf = append(self.buf, tmp[i])
+            i++
+
+    StrBuilder.write_int(n: int)
+        StrBuilder_write_i64(self, i64(n))
+
+
+write_bool
+----------
+
+`b.write_bool(x)` appends `"true"` or `"false"`.
+
+    StrBuilder.write_bool(x: bool)
+        if x then StrBuilder_write(self, "true") else StrBuilder_write(self, "false")
+
+
+to_str
+------
+
+`b.to_str()` returns a `string` containing the accumulated
+bytes. The builder's state is not modified — subsequent
+writes continue to append, and the returned string is
+independent.
+
+    StrBuilder.to_str() -> string = string(self.buf)
+
+
+Tests
+=====
+
+### Construction and basic writes
+
+    #test
+    test_new_builder_is_empty() -> void
+        var b = new_builder()
+        assert(b.len() == 0, "empty")
+        assert(b.to_str() == "", "empty string")
+
+    #test
+    test_write_byte() -> void
+        var b = new_builder()
+        b.write_byte(byte('a'))
+        b.write_byte(byte('b'))
+        b.write_byte(byte('c'))
+        assert(b.to_str() == "abc", "three bytes")
+
+    #test
+    test_write_string() -> void
+        var b = new_builder()
+        b.write("hello")
+        assert(b.to_str() == "hello", "one write")
+
+    #test
+    test_write_multiple_strings() -> void
+        var b = new_builder()
+        b.write("hello")
+        b.write(" ")
+        b.write("world")
+        assert(b.to_str() == "hello world", "concatenation")
+
+
+### Growth beyond initial capacity
+
+    #test
+    test_grows_past_initial_cap() -> void
+        var b = new_builder()
+        // Initial cap is 16; write more than that
+        b.write("this string is definitely longer than sixteen bytes")
+        assert(b.to_str() == "this string is definitely longer than sixteen bytes", "grown buffer")
+
+
+### write_i64 / write_int
+
+    #test
+    test_write_i64_zero() -> void
+        var b = new_builder()
+        b.write_i64(0i64)
+        assert(b.to_str() == "0", "zero")
+
+    #test
+    test_write_i64_positive() -> void
+        var b = new_builder()
+        b.write_i64(12345i64)
+        assert(b.to_str() == "12345", "positive")
+
+    #test
+    test_write_i64_negative() -> void
+        var b = new_builder()
+        b.write_i64(-42i64)
+        assert(b.to_str() == "-42", "negative")
+
+    #test
+    test_write_i64_min() -> void
+        var b = new_builder()
+        b.write_i64(-9223372036854775807i64 - 1i64)
+        assert(b.to_str() == "-9223372036854775808", "MIN_I64")
+
+    #test
+    test_write_int() -> void
+        var b = new_builder()
+        b.write_int(100)
+        b.write_int(-200)
+        assert(b.to_str() == "100-200", "two ints")
+
+
+### write_bool
+
+    #test
+    test_write_bool_true() -> void
+        var b = new_builder()
+        b.write_bool(true)
+        assert(b.to_str() == "true", "true")
+
+    #test
+    test_write_bool_false() -> void
+        var b = new_builder()
+        b.write_bool(false)
+        assert(b.to_str() == "false", "false")
+
+
+### write_rune
+
+    #test
+    test_write_rune_ascii() -> void
+        var b = new_builder()
+        b.write_rune(0x41)  // 'A'
+        assert(b.to_str() == "A", "ascii")
+
+    #test
+    test_write_rune_2byte() -> void
+        var b = new_builder()
+        b.write_rune(0xE9)  // é
+        assert(b.len() == 2, "two bytes")
+
+    #test
+    test_write_rune_4byte() -> void
+        var b = new_builder()
+        b.write_rune(0x1F600)  // 😀
+        assert(b.len() == 4, "four bytes")
+
+
+### Mixed writes (interpolation-style)
+
+    #test
+    test_mixed_writes() -> void
+        var b = new_builder()
+        b.write("user ")
+        b.write_int(42)
+        b.write(" has ")
+        b.write_int(7)
+        b.write(" items")
+        assert(b.to_str() == "user 42 has 7 items", "interpolation-style")
+
+    #test
+    test_mixed_with_bool() -> void
+        var b = new_builder()
+        b.write("active: ")
+        b.write_bool(true)
+        b.write(", verified: ")
+        b.write_bool(false)
+        assert(b.to_str() == "active: true, verified: false", "bool mix")
+
+
+### len and reset
+
+    #test
+    test_len_tracks_bytes() -> void
+        var b = new_builder()
+        assert(b.len() == 0, "start")
+        b.write("abc")
+        assert(b.len() == 3, "after 3 bytes")
+        b.write_byte(byte('d'))
+        assert(b.len() == 4, "after 4")
+
+    #test
+    test_reset_clears() -> void
+        var b = new_builder()
+        b.write("hello")
+        b.reset()
+        assert(b.len() == 0, "empty after reset")
+        assert(b.to_str() == "", "empty string after reset")
+        b.write("world")
+        assert(b.to_str() == "world", "reusable after reset")
+
+
+### to_str is a snapshot, not a terminator
+
+    #test
+    test_to_str_does_not_invalidate() -> void
+        var b = new_builder()
+        b.write("hello")
+        val s1 = b.to_str()
+        b.write(" world")
+        val s2 = b.to_str()
+        assert(s1 == "hello", "first snapshot preserved")
+        assert(s2 == "hello world", "continued accumulation")
+
+
+Design notes
+------------
+
+**Why a growable slice, not a fixed buffer.** The common case
+is that callers don't know the final length. A fixed-size
+buffer forces them to guess and re-allocate on overflow;
+growable `[]byte` + `append` hides this entirely.
+
+**Initial capacity of 16.** Small enough to be cheap, large
+enough to cover most identifier/short-message use cases
+without a reallocation. Matches common Go practice.
+
+**`to_str` copies.** The current implementation calls
+`string(self.buf)` which copies the accumulated bytes. A
+future zero-copy variant — `into_str(self)` that transfers
+ownership and leaves the builder invalidated — can be added
+when ARC interop allows handing the backing array to the
+`string` type directly. For most builder workloads the copy
+is negligible.
+
+**`to_str` is idempotent.** Calling `to_str` does not mutate
+the builder. Subsequent writes still work, and subsequent
+`to_str` calls return the current state. This differs from
+Go's `strings.Builder.String()` which leaves the builder in a
+state that should not be reused after extraction.
+
+**Method style, not functions.** Methods on a pointer
+receiver (`self: *StrBuilder`) mutate in place. Functional
+transformations (immutable builders that return a new builder
+per write) would be cleaner but allocate per write, defeating
+the purpose.
+
+**No format strings.** `write`, `write_int`, `write_bool`,
+`write_rune` compose cleanly for everything interpolation
+needs. If a printf-style `write_fmt` is ever wanted, it can
+live in a `std.fmt` module that builds on `StrBuilder`.

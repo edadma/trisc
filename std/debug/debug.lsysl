@@ -1,0 +1,114 @@
+std.debug — Assertions and fatal-error helpers
+===============================================
+
+The `std.debug` module provides the assertion and
+unreachable-path helpers that the rest of the standard library
+and user code use to signal violated invariants and
+unfinished work. It is the foundational module that every
+other `std` module depends on.
+
+`panic(msg: string)` is a Sysl language builtin, not defined
+here: it halts execution with the given message. `std.debug`
+layers three small helpers on top of it.
+
+Contract summary:
+
+- `assert(cond, msg)` — panic if `cond` is false, otherwise no-op.
+- `unreachable(msg)` — panic with a `"unreachable: "` prefix.
+- `todo(msg)` — panic with a `"todo: "` prefix.
+
+These funnel through `panic`, so they all trigger the normal
+test-failure path under `sysl test` and the normal halt path
+under `sysl run`.
+
+
+    module std.debug
+
+
+assert
+------
+
+`assert(cond, msg)` is a no-op when `cond` is true and calls
+`panic(msg)` when it is false. The message should describe the
+invariant that was violated, not the condition that was
+checked. Prefer `"buffer index out of range"` over
+`"i >= 0 && i < len"`.
+
+Assertions are not stripped in any build profile. Sysl has no
+release-mode assertion removal: if you do not want the check
+at runtime, do not write it. Silently-disappearing checks are
+a common bug source and `std.debug.assert` does not introduce
+them.
+
+    assert(cond: bool, msg: string) -> void
+        if !cond then panic(msg)
+
+
+unreachable
+-----------
+
+`unreachable(msg)` panics unconditionally with a `"unreachable: "`
+prefix. It marks code paths the programmer asserts cannot
+execute — typically the default arm of an exhaustive match, or
+the fall-through after a non-returning call. The message
+should explain *why* the programmer believes the path is
+unreachable.
+
+    unreachable(msg: string) -> void
+        panic("unreachable: " + msg)
+
+
+todo
+----
+
+`todo(msg)` panics unconditionally with a `"todo: "` prefix.
+It marks code paths that have not yet been implemented. Code
+containing `todo` compiles and links but fails loudly at
+runtime if exercised. The message should describe what needs
+to be done.
+
+`todo` is distinct from `unreachable` so that tooling can tell
+"not implemented yet" from "cannot happen".
+
+    todo(msg: string) -> void
+        panic("todo: " + msg)
+
+
+Tests
+=====
+
+    #test
+    test_assert_true_is_noop() -> void
+        assert(true, "should not fire")
+
+    #test(should_panic: "math is broken")
+    test_assert_false_panics() -> void
+        assert(false, "math is broken")
+
+    #test(should_panic: "unreachable: dead branch")
+    test_unreachable_panics_with_prefix() -> void
+        unreachable("dead branch")
+
+    #test(should_panic: "todo: implement me")
+    test_todo_panics_with_prefix() -> void
+        todo("implement me")
+
+
+Design notes
+------------
+
+**No source location capture yet.** Rust's `panic!`, `assert!`,
+`unreachable!`, and `todo!` macros capture `file!()`/`line!()`
+automatically. Sysl has no macro system, so location capture
+would require dedicated compiler support — an intrinsic that
+inserts location information at the call site. This is
+deferred; when added, it will be a non-breaking change.
+
+**No formatted messages.** These functions take a plain
+`string`, not a format string. Users who want a formatted
+message should build it with `std.builder` or Sysl's string
+interpolation and pass the result to `assert` / `unreachable`
+/ `todo`. This keeps `std.debug` dependency-free.
+
+**No recovery.** `panic` is terminal. Code that needs to fail
+recoverably should return a `Result`, not panic.

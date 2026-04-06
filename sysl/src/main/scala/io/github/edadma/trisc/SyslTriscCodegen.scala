@@ -7,6 +7,8 @@ class SyslTriscCodegen(addresses: Int = 4):
   private var labelCounter = 0
   private val stringLiterals = new mutable.ListBuffer[(String, String)]() // (label, value)
   private var needsAllocExtern = false // set when codegen emits malloc/free references
+  private var needsStrInt = false // set when codegen needs __str_int helper
+  private var needsStrFloat = false // set when codegen needs __str_float helper
 
   private def newLabel(prefix: String): String =
     labelCounter += 1
@@ -21,11 +23,13 @@ class SyslTriscCodegen(addresses: Int = 4):
     stringLiterals.clear()
     deinitTypes.clear()
     needsAllocExtern = false
+    needsStrInt = false
+    needsStrFloat = false
 
     // Scan for deinit methods: functions named TypeName_deinit
     for decl <- program.decls do
       decl match
-        case TFunDecl(name, _, _, _, _) if name.endsWith("_deinit") =>
+        case TFunDecl(name, _, _, _, _, _) if name.endsWith("_deinit") =>
           deinitTypes += name.dropRight(7) // remove "_deinit" suffix
         case _ =>
 
@@ -53,6 +57,12 @@ class SyslTriscCodegen(addresses: Int = 4):
       decl match
         case f: TFunDecl => genFunction(f)
         case _ => // skip
+
+    // Emit __str_int helper if needed (integer to string conversion)
+    if needsStrInt then emitStrIntHelper()
+
+    // Emit __str_float helper if needed (float to string conversion)
+    if needsStrFloat then emitStrFloatHelper()
 
     // Emit rodata segment — string literals with immortal refcount headers
     if stringLiterals.nonEmpty then
@@ -91,9 +101,12 @@ class SyslTriscCodegen(addresses: Int = 4):
                     case None => emit(s"  $elemDir 0")
               case _ =>
                 val directive = emitDataDirective(typ)
-                constEval(init) match
-                  case Some(n) => emit(s"  $directive $n")
-                  case None => emit(s"  $directive 0")
+                floatConstEval(init) match
+                  case Some(d) => emit(s"  $directive $d")
+                  case None =>
+                    constEval(init) match
+                      case Some(n) => emit(s"  $directive $n")
+                      case None => emit(s"  $directive 0")
           case _ =>
 
     // Emit bss segment — zero-initialized globals (arrays, structs, uninitialized)
@@ -119,7 +132,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     if needsAllocExtern then
       // Only emit if not already defined in this module
       val definedSymbols = (for decl <- program.decls yield decl match
-        case TFunDecl(name, _, _, _, _) => Some(name)
+        case TFunDecl(name, _, _, _, _, _) => Some(name)
         case TVarDecl(name, _, _, _) => Some(name)
         case _ => None).flatten.toSet
       if !definedSymbols.contains("malloc") then emit("extern malloc")
@@ -165,14 +178,24 @@ class SyslTriscCodegen(addresses: Int = 4):
     init match
       case TArrayLit(_, _) => false // array literal has explicit values → data
       case _ =>
-        typ match
-          case SyslType.ArrayType(_, _) => true // uninitialized array → bss
-          case _: SyslType.StructType => true // struct → bss
-          case _ =>
-            constEval(init) match
-              case Some(0) => true // explicitly zero → bss
-              case None => true // no initializer → bss
-              case _ => false // nonzero constant → data
+        floatConstEval(init) match
+          case Some(0.0) => true  // explicit zero float → bss
+          case Some(_) => false   // nonzero float constant → data
+          case None =>
+            typ match
+              case SyslType.ArrayType(_, _) => true // uninitialized array → bss
+              case _: SyslType.StructType => true // struct → bss
+              case _ =>
+                constEval(init) match
+                  case Some(0) => true // explicitly zero → bss
+                  case None => true // no initializer → bss
+                  case _ => false // nonzero constant → data
+
+  // Compile-time evaluate a float expression (handles literal and unary minus).
+  private def floatConstEval(expr: TExpr): Option[Double] = expr match
+    case TFloatLit(d, _) => Some(d)
+    case TUnary("-", operand, _) => floatConstEval(operand).map(-_)
+    case _ => None
 
   // Does this return type require a caller-allocated return slot?
   private def returnsViaPointer(typ: SyslType): Boolean = typ.isInstanceOf[SyslType.StructType] || typ == SyslType.StringType || typ.isInstanceOf[SyslType.SliceType] || typ.isInstanceOf[SyslType.EnumType]
@@ -497,6 +520,13 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitDefers()
           emitRefCleanup()
           emitEpilogue()
+        case TAsmStmt(code) =>
+          // asm as last statement: emit assembly, assume r1 is set
+          for line <- code.split("\\\\n|\\n") do
+            emit(s"  ${line.trim}")
+          emitDefers()
+          emitRefCleanup()
+          emitEpilogue()
         case other =>
           genStmt(other)
           // If no explicit return, return 0
@@ -680,7 +710,7 @@ class SyslTriscCodegen(addresses: Int = 4):
             genExpr(init) // result in r1
             // Increment refcount for copies (not for new — TNew already sets refcount=1)
             (typ, init) match
-              case (rt: SyslType.RefType, _: TNew | _: TNewArray) => // owned, no incr needed
+              case (rt: SyslType.RefType, _: TNew | _: TNewArray | _: TNewEnum) => // owned, no incr needed
               case (rt: SyslType.RefType, _) => emitRefIncr(1, refHeaderOffset(rt))
               case (SyslType.StringType, _: TBinary) => // concat result already has refcount=1
               case (SyslType.StringType, _) if needsAllocExtern =>
@@ -702,8 +732,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitAddImm(2, 5, tmpLocal.offset)
         emit("  std r1, r2, r0")
         val st = init.typ.asInstanceOf[SyslType.StructType]
-        // Extract each field into a new local
-        for ((name, fieldType), i) <- names.zip(types).zipWithIndex do
+        // Extract each field into a new local (skip `_` discards)
+        for ((name, fieldType), i) <- names.zip(types).zipWithIndex if name != "_" do
           val off = fieldOffset(st, i)
           emitAddImm(1, 5, tmpLocal.offset)
           emit("  ldd r1, r1, r0")  // r1 = tuple address
@@ -721,8 +751,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitAddImm(2, 5, tmpLocal.offset)
         emit("  std r1, r2, r0")
         val st = init.typ.asInstanceOf[SyslType.StructType]
-        // Extract each field and store to existing variable
-        for ((name, fieldType), i) <- names.zip(types).zipWithIndex do
+        // Extract each field and store to existing variable (skip `_` discards)
+        for ((name, fieldType), i) <- names.zip(types).zipWithIndex if name != "_" do
           val off = fieldOffset(st, i)
           emitAddImm(1, 5, tmpLocal.offset)
           emit("  ldd r1, r1, r0")  // r1 = tuple address
@@ -749,7 +779,7 @@ class SyslTriscCodegen(addresses: Int = 4):
               genExpr(value)
               // Increment only for copies, not new allocations
               value match
-                case _: TNew | _: TNewArray => // owned, no incr needed
+                case _: TNew | _: TNewArray | _: TNewEnum => // owned, no incr needed
                 case _ => emitRefIncr(1, hoff)
               emitAddImm(2, 5, local.offset)
               emitStore(1, 2, local.typ)
@@ -786,7 +816,7 @@ class SyslTriscCodegen(addresses: Int = 4):
               emitRefDecr(1, hoff, deinitFor(rt))
               genExpr(value)
               value match
-                case _: TNew | _: TNewArray =>
+                case _: TNew | _: TNewArray | _: TNewEnum =>
                 case _ => emitRefIncr(1, hoff)
               emit("  pshd r1")
               emit(s"  movi r1, $target")
@@ -1278,48 +1308,75 @@ class SyslTriscCodegen(addresses: Int = 4):
         genExpr(right)       // r1 = right
         emit("  mov r2, r1") // r2 = right
         emit("  popd r1")   // r1 = left
+        val isFloat = left.typ == SyslType.DoubleType
         val unsigned = left.typ.isUnsigned
-        op match
-          case "+"  => emit("  add r1, r1, r2")
-          case "-"  => emit("  sub r1, r1, r2")
-          case "*"  => emit(if unsigned then "  mulu r1, r1, r2" else "  mul r1, r1, r2")
-          case "/"  => emit(if unsigned then "  divu r1, r1, r2" else "  div r1, r1, r2")
-          case "%"  => emit(if unsigned then "  divu r1, r1, r2" else "  div r1, r1, r2"); emit("  mov r1, r2") // remainder in r2
-          case "&"  => emit("  and r1, r1, r2")
-          case "|"  => emit("  or r1, r1, r2")
-          case "^"  => emit("  xor r1, r1, r2")
-          case "<<" => emit("  lsl r1, r1, r2")
-          case ">>" => emit(if unsigned then "  lsr r1, r1, r2" else "  asr r1, r1, r2")
-          case "==" =>
-            val eq = newLabel("eq")
-            val end = newLabel("end")
-            emit(s"  beq r1, r2, $eq")
-            emit("  ldi r1, 0")
-            emit(s"  bra $end")
-            emit(s"$eq")
-            emit("  ldi r1, 1")
-            emit(s"$end")
-          case "!=" =>
-            val ne = newLabel("ne")
-            val end = newLabel("end")
-            emit(s"  beq r1, r2, $ne")
-            emit("  ldi r1, 1")
-            emit(s"  bra $end")
-            emit(s"$ne")
-            emit("  ldi r1, 0")
-            emit(s"$end")
-          case "<" =>
-            emit(if unsigned then "  sltu r1, r1, r2" else "  slt r1, r1, r2")
-          case ">" =>
-            emit(if unsigned then "  sltu r1, r2, r1" else "  slt r1, r2, r1")
-          case "<=" =>
-            emit(if unsigned then "  sltu r1, r2, r1" else "  slt r1, r2, r1")
-            emit("  ldi r3, 1")
-            emit("  xor r1, r1, r3") // flip: 0→1, 1→0
-          case ">=" =>
-            emit(if unsigned then "  sltu r1, r1, r2" else "  slt r1, r1, r2")
-            emit("  ldi r3, 1")
-            emit("  xor r1, r1, r3") // flip
+        if isFloat then
+          op match
+            case "+"  => emit("  fadd r1, r1, r2")
+            case "-"  => emit("  fsub r1, r1, r2")
+            case "*"  => emit("  fmul r1, r1, r2")
+            case "/"  => emit("  fdiv r1, r1, r2")
+            case "==" =>
+              emit("  fseq r1, r1, r2")  // r1 = 1 if equal, 0 if not
+            case "!=" =>
+              emit("  fseq r1, r1, r2")
+              emit("  ldi r3, 1")
+              emit("  xor r1, r1, r3")   // flip
+            case "<" =>
+              emit("  fslt r1, r1, r2")
+            case ">" =>
+              emit("  fslt r1, r2, r1")
+            case "<=" =>
+              emit("  fslt r1, r2, r1")  // r1 = (right < left)
+              emit("  ldi r3, 1")
+              emit("  xor r1, r1, r3")   // flip: !(right < left) = left <= right
+            case ">=" =>
+              emit("  fslt r1, r1, r2")  // r1 = (left < right)
+              emit("  ldi r3, 1")
+              emit("  xor r1, r1, r3")   // flip: !(left < right) = left >= right
+            case _ => // unsupported float op — fall through
+        else
+          op match
+            case "+"  => emit("  add r1, r1, r2")
+            case "-"  => emit("  sub r1, r1, r2")
+            case "*"  => emit(if unsigned then "  mulu r1, r1, r2" else "  mul r1, r1, r2")
+            case "/"  => emit(if unsigned then "  divu r1, r1, r2" else "  div r1, r1, r2")
+            case "%"  => emit(if unsigned then "  divu r1, r1, r2" else "  div r1, r1, r2"); emit("  mov r1, r2") // remainder in r2
+            case "&"  => emit("  and r1, r1, r2")
+            case "|"  => emit("  or r1, r1, r2")
+            case "^"  => emit("  xor r1, r1, r2")
+            case "<<" => emit("  lsl r1, r1, r2")
+            case ">>" => emit(if unsigned then "  lsr r1, r1, r2" else "  asr r1, r1, r2")
+            case "==" =>
+              val eq = newLabel("eq")
+              val end = newLabel("end")
+              emit(s"  beq r1, r2, $eq")
+              emit("  ldi r1, 0")
+              emit(s"  bra $end")
+              emit(s"$eq")
+              emit("  ldi r1, 1")
+              emit(s"$end")
+            case "!=" =>
+              val ne = newLabel("ne")
+              val end = newLabel("end")
+              emit(s"  beq r1, r2, $ne")
+              emit("  ldi r1, 1")
+              emit(s"  bra $end")
+              emit(s"$ne")
+              emit("  ldi r1, 0")
+              emit(s"$end")
+            case "<" =>
+              emit(if unsigned then "  sltu r1, r1, r2" else "  slt r1, r1, r2")
+            case ">" =>
+              emit(if unsigned then "  sltu r1, r2, r1" else "  slt r1, r2, r1")
+            case "<=" =>
+              emit(if unsigned then "  sltu r1, r2, r1" else "  slt r1, r2, r1")
+              emit("  ldi r3, 1")
+              emit("  xor r1, r1, r3") // flip: 0→1, 1→0
+            case ">=" =>
+              emit(if unsigned then "  sltu r1, r1, r2" else "  slt r1, r1, r2")
+              emit("  ldi r3, 1")
+              emit("  xor r1, r1, r3") // flip
 
       case TPreInc(name, typ) =>
         val step = typ match
@@ -1383,7 +1440,14 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TCast(inner, target) =>
         genExpr(inner)
         import SyslType.*
+        val srcIsFloat = inner.typ == DoubleType
+        val tgtIsFloat = target == DoubleType
+        // Float → int: convert float bits to integer value first
+        if srcIsFloat && !tgtIsFloat then emit("  fint r1, r1")
+        // Int → float: convert integer value to float bits
+        else if !srcIsFloat && tgtIsFloat then emit("  cvt r1, r1")
         target match
+          case DoubleType => // cvt already emitted above (or no-op if src is already float)
           case BoolType =>
             // nonzero → 1, zero → 0
             val isZero = newLabel("iszero")
@@ -1414,7 +1478,8 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TUnary("-", operand, _) =>
         genExpr(operand)
-        emit("  neg r1, r1")
+        if operand.typ == SyslType.DoubleType then emit("  fneg r1, r1")
+        else emit("  neg r1, r1")
 
       case TUnary("!", operand, _) =>
         genExpr(operand)
@@ -1437,6 +1502,20 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TCall("abort", _, _) =>
         emit("  ldi r1, 3")           // error code: 3 = abort
         emit("  trap 1")
+
+      case TCall("panic", _, _) =>
+        // message arg is discarded in codegen — emulator has no stderr channel
+        emit("  ldi r1, 4")           // error code: 4 = panic
+        emit("  trap 1")
+
+      case TCall("assert", List(cond, _), _) =>
+        // evaluate cond only; if false (r1 == 0), trap with error code 4
+        genExpr(cond)
+        val passLabel = newLabel("assert_pass")
+        emit(s"  bne r1, r0, $passLabel")
+        emit("  ldi r1, 4")           // error code: 4 = assert/panic
+        emit("  trap 1")
+        emit(s"$passLabel:")
 
       case TCall(name, args, retType) =>
         val callStructReturn = returnsViaPointer(retType)
@@ -1478,7 +1557,7 @@ class SyslTriscCodegen(addresses: Int = 4):
             case _ => genExpr(arg)
           arg.typ match
             case rt: SyslType.RefType => arg match
-              case _: TNew | _: TNewArray =>
+              case _: TNew | _: TNewArray | _: TNewEnum =>
               case _ => emitRefIncr(1, refHeaderOffset(rt))
             case SyslType.StringType if needsAllocExtern => arg match
               case _: TBinary =>
@@ -1558,7 +1637,7 @@ class SyslTriscCodegen(addresses: Int = 4):
               case _ => genExpr(arg)
             arg.typ match
               case rt: SyslType.RefType => arg match
-                case _: TNew | _: TNewArray =>
+                case _: TNew | _: TNewArray | _: TNewEnum =>
                 case _ => emitRefIncr(1, refHeaderOffset(rt))
               case _ =>
             // Don't reclaim temp stack space for aggregate types — r1 is a pointer into that space
@@ -1643,7 +1722,11 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TDeref(inner, typ) =>
         genExpr(inner)           // r1 = pointer address
-        emitLoad(1, 1, typ)      // load with width matching pointee type
+        typ match
+          case _: SyslType.StructType | _: SyslType.EnumType =>
+            () // aggregate: pointer IS the base address, don't load
+          case _ =>
+            emitLoad(1, 1, typ)  // scalar: load value at pointer
 
       case TIndex(array, index, elemType) if array.typ == SyslType.StringType =>
         // String indexing: bounds-checked byte access
@@ -1709,7 +1792,16 @@ class SyslTriscCodegen(addresses: Int = 4):
         // Bounds check: load length from [r1 - 8]
         emitAddImm(3, 1, -8)
         emit("  ldd r3, r3, r0") // r3 = length
-        // TODO: emit trap/abort if r2 >= r3 (bounds check)
+        emit("  slt r4, r2, r0")
+        val boundsOk = newLabel("bounds_ok")
+        val boundsErr = newLabel("bounds_err")
+        emit(s"  bne r4, r0, $boundsErr")
+        emit("  slt r4, r2, r3")
+        emit(s"  bne r4, r0, $boundsOk")
+        emit(s"$boundsErr")
+        emit("  ldi r1, 1")      // error code: 1 = out-of-bounds
+        emit("  trap 1")
+        emit(s"$boundsOk")
         emitLoadImm(3, elemSize)
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = element address
@@ -1779,6 +1871,36 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitAddImm(2, 7, 8)
         emit("  std r1, r2, r0") // store len at offset 8
         // r1 = address of the 16-byte string struct
+        emit("  mov r1, r7")
+
+      case TStr(inner) =>
+        // Convert value to string — dispatch on type.
+        // __str_int handles integers/bool (bits interpreted as signed i64);
+        // __str_float handles f64 values.
+        val isFloat = inner.typ == SyslType.DoubleType
+        genExpr(inner) // r1 = value (integer bits or f64 bits)
+        if isFloat then needsStrFloat = true
+        else needsStrInt = true
+        needsAllocExtern = true
+        // Allocate 16-byte return slot for the result string
+        emitAddImm(7, 7, -16)
+        stackOffset -= 16
+        emit("  std r0, r7, r0")
+        emitAddImm(2, 7, 8)
+        emit("  std r0, r2, r0")
+        // Push value as stack arg
+        emit("  pshd r1")
+        stackOffset -= 8
+        // r1 = hidden return slot ptr (just above the pushed value)
+        emitAddImm(1, 7, 8)
+        // Call helper
+        if isFloat then emit("  movi r4, __str_float")
+        else emit("  movi r4, __str_int")
+        emit("  jalr r6, r4")
+        // Clean value arg
+        emitAddImm(7, 7, 8)
+        stackOffset += 8
+        // r1 = address of return slot (which now contains {ptr, len})
         emit("  mov r1, r7")
 
       case TIfExpr(cond, thenBody, elseBody, typ) =>
@@ -2367,6 +2489,10 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TFloatLit(d, _) =>
         emit(s"  ldc r1, $d")
 
+      case TAsmExpr(code, _) =>
+        for line <- code.split("\\\\n|\\n") do
+          emit(s"  ${line.trim}")
+
       case TSizeof(size, _) =>
         emitLoadImm(1, size.toInt)
 
@@ -2492,6 +2618,66 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  ldd r3, r3, r0") // r3 = malloc result
           emitAddImm(2, 3, 8 + off) // r2 = field address (past header)
           emitStore(1, 2, fieldType)
+        // r1 = data pointer (past refcount header)
+        emitAddImm(1, 5, ptrOffset)
+        emit("  ldd r1, r1, r0")
+        emitAddImm(1, 1, 8)
+        // Clean up temp
+        emitAddImm(7, 7, 8)
+        stackOffset += 8
+
+      case TNewEnum(et, variantIndex, args) =>
+        // Heap-allocate ref-counted enum: [refcount_i64 | tag_i32 | padding | variant_data...]
+        val dataSize = stackSize(et)
+        val totalAlloc = dataSize + 8 // 8 bytes for refcount header
+        // Call malloc(totalAlloc) — result in r1
+        emitLoadImm(1, totalAlloc)
+        emit("  pshd r1")
+        stackOffset -= 8
+        emit("  popd r1")
+        stackOffset += 8
+        emit("  movi r4, malloc")
+        emit("  jalr r6, r4")
+        needsAllocExtern = true
+        // Null check: trap if malloc returned 0
+        val allocOk = newLabel("alloc_ok")
+        emit(s"  bne r1, r0, $allocOk")
+        emit("  ldi r1, 2")         // error code: 2 = null pointer
+        emit("  trap 1")
+        emit(s"$allocOk")
+        // r1 = allocated pointer. Save it as a temp on stack.
+        emit("  pshd r1")
+        stackOffset -= 8
+        val ptrOffset = stackOffset
+        // Initialize refcount = 1
+        emitLoadImm(2, 1)
+        emit("  std r2, r1, r0") // store refcount at [ptr+0]
+        // Zero-fill data area (past refcount header)
+        emitAddImm(1, 1, 8) // r1 = data start
+        for i <- 0 until ((dataSize + 7) & ~7) by 8 do
+          emitAddImm(2, 1, i)
+          emit("  std r0, r2, r0")
+        // Write tag (i32 at data offset 0)
+        emitLoadImm(1, variantIndex)
+        emitAddImm(2, 5, ptrOffset)
+        emit("  ldd r2, r2, r0")    // r2 = malloc result
+        emitAddImm(2, 2, 8)         // r2 = data start (past refcount)
+        emit("  stw r1, r2, r0")    // store tag
+        // Write variant fields at data + dataOffset
+        val dataOff = et.dataOffset.toInt
+        val variantFields = et.variants(variantIndex)._2
+        var fieldOff = 0
+        for (arg, i) <- args.zipWithIndex do
+          val (_, fieldType) = variantFields(i)
+          val align = stackAlign(fieldType)
+          fieldOff = ((fieldOff + align - 1) / align) * align
+          genExpr(arg) // r1 = field value
+          // Reload base pointer from stack
+          emitAddImm(3, 5, ptrOffset)
+          emit("  ldd r3, r3, r0")          // r3 = malloc result
+          emitAddImm(2, 3, 8 + dataOff + fieldOff) // r2 = field address (past header + data offset)
+          emitStore(1, 2, fieldType)
+          fieldOff += fieldType.sizeOf.toInt
         // r1 = data pointer (past refcount header)
         emitAddImm(1, 5, ptrOffset)
         emit("  ldd r1, r1, r0")
@@ -2656,12 +2842,364 @@ class SyslTriscCodegen(addresses: Int = 4):
     case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType => "db"
     case SyslType.IntType(16) | SyslType.UIntType(16) => "ds"
     case SyslType.IntType(32) | SyslType.UIntType(32) => "dw"
+    case SyslType.DoubleType => "dd"
     case _ => "dl"
 
   // Emit address of local variable into target register
   private def emitLocalAddr(name: String, reg: Int): Unit =
     val local = locals(name)
     emitAddImm(reg, 5, local.offset)
+
+  // Emit the __str_int helper function: converts i64 in stack arg to a refcounted string
+  // ABI: r1 = hidden return slot ptr, [fp+24] = integer value
+  // Returns: {ptr, len} written to return slot, r1 = return slot address
+  private def emitStrIntHelper(): Unit =
+    emit("# helper: __str_int(value: int) -> string")
+    emit("global __str_int, func, 1 i64 i64")
+    emit("__str_int:")
+    // Pre-prologue: save register arg (hidden return ptr)
+    emit("  pshd r1")
+    // Prologue
+    emit("  pshd r6")
+    emit("  pshd r5")
+    emit("  mov r5, r7")
+    // [fp+16] = hidden return ptr, [fp+24] = integer value
+    // Allocate locals: 8 (is_negative) + 8 (digit_count) + 24 (digit buffer) = 40 bytes
+    emitAddImm(7, 7, -40)
+    // [fp-8]  = is_negative
+    // [fp-16] = digit_count
+    // [fp-40] = digit_buffer[24]
+
+    // Load integer value from [fp+24]
+    emitAddImm(2, 5, 24)
+    emit("  ldd r1, r2, r0")       // r1 = value
+
+    // Check sign: slt r2, r1, r0 → r2 = 1 if value < 0
+    emit("  slt r2, r1, r0")
+    emitAddImm(3, 5, -8)
+    emit("  std r2, r3, r0")       // save is_negative
+    val posLabel = newLabel("str_pos")
+    emit(s"  beq r2, r0, $posLabel")
+    emit("  neg r1, r1")           // r1 = |value|
+    emit(s"$posLabel")
+
+    // Extract digits reversed into buffer
+    emit("  ldi r3, 0")            // r3 = digit_count
+
+    // Special case: value == 0
+    val loopLabel = newLabel("str_loop")
+    val doneLabel = newLabel("str_done")
+    emit(s"  bne r1, r0, $loopLabel")
+    emitAddImm(4, 5, -40)
+    emit("  ldi r2, 48")           // '0'
+    emit("  stb r2, r4, r0")
+    emit("  ldi r3, 1")
+    emit(s"  bra $doneLabel")
+
+    // Division loop: extract digits
+    emit(s"$loopLabel")
+    emit(s"  beq r1, r0, $doneLabel")
+    // Save digit_count to [fp-16] (div will clobber r2)
+    emitAddImm(4, 5, -16)
+    emit("  std r3, r4, r0")
+    emit("  ldi r3, 10")
+    emit("  div r1, r1, r3")       // r1 = quotient, r2 = remainder
+    emit("  addi r2, r2, 48")      // r2 = ASCII digit
+    // Restore digit_count
+    emitAddImm(4, 5, -16)
+    emit("  ldd r3, r4, r0")
+    // Store digit at buffer[count]
+    emitAddImm(4, 5, -40)
+    emit("  add r4, r4, r3")       // r4 = &buffer[count]
+    emit("  stb r2, r4, r0")
+    emit("  addi r3, r3, 1")       // count++
+    emit(s"  bra $loopLabel")
+
+    emit(s"$doneLabel")
+    // Save digit_count to [fp-16]
+    emitAddImm(4, 5, -16)
+    emit("  std r3, r4, r0")
+
+    // Compute total_length = digit_count + is_negative
+    emitAddImm(4, 5, -8)
+    emit("  ldd r2, r4, r0")       // r2 = is_negative
+    emit("  add r1, r3, r2")       // r1 = total_length
+    emit("  pshd r1")              // save total_length
+
+    // Malloc(8 + total_length) for refcount header + data
+    emit("  addi r1, r1, 8")
+    emit("  movi r4, malloc")
+    emit("  jalr r6, r4")
+
+    // Null check
+    val allocOkLabel = newLabel("str_alloc_ok")
+    emit(s"  bne r1, r0, $allocOkLabel")
+    emit("  ldi r1, 2")
+    emit("  trap 1")
+    emit(s"$allocOkLabel")
+
+    // Set refcount = 1 at [base+0]
+    emit("  ldi r2, 1")
+    emit("  std r2, r1, r0")
+
+    // data_ptr = base + 8
+    emit("  addi r1, r1, 8")
+
+    // Pop total_length
+    emit("  popd r3")               // r3 = total_length
+
+    // Save data_ptr and total_length
+    emit("  pshd r1")               // save data_ptr
+    emit("  pshd r3")               // save total_length
+
+    // Write '-' if negative
+    emitAddImm(4, 5, -8)
+    emit("  ldd r2, r4, r0")        // r2 = is_negative
+    val noSignLabel = newLabel("str_nosign")
+    emit(s"  beq r2, r0, $noSignLabel")
+    emit("  ldi r2, 45")            // '-'
+    emit("  stb r2, r1, r0")
+    emit("  addi r1, r1, 1")
+    emit(s"$noSignLabel")
+
+    // Copy digits in reverse: buffer[count-1]..buffer[0] → data
+    emitAddImm(4, 5, -16)
+    emit("  ldd r3, r4, r0")        // r3 = digit_count
+    emitAddImm(4, 5, -40)
+    emit("  add r4, r4, r3")        // r4 = &buffer[count] (one past last)
+
+    val copyLabel = newLabel("str_copy")
+    val copyDoneLabel = newLabel("str_copy_done")
+    emit(s"$copyLabel")
+    emit(s"  beq r3, r0, $copyDoneLabel")
+    emit("  addi r4, r4, -1")       // r4 = &buffer[--i]
+    emit("  ldb r2, r4, r0")        // r2 = digit
+    emit("  stb r2, r1, r0")        // *dest = digit
+    emit("  addi r1, r1, 1")
+    emit("  addi r3, r3, -1")
+    emit(s"  bra $copyLabel")
+    emit(s"$copyDoneLabel")
+
+    // Pop total_length and data_ptr
+    emit("  popd r3")               // r3 = total_length
+    emit("  popd r1")               // r1 = data_ptr
+
+    // Write {ptr, len} to return slot
+    emitAddImm(4, 5, 16)
+    emit("  ldd r4, r4, r0")        // r4 = return slot address
+    emit("  std r1, r4, r0")        // [ret+0] = data_ptr
+    emit("  addi r2, r4, 8")
+    emit("  std r3, r2, r0")        // [ret+8] = total_length
+
+    // r1 = return slot address (ABI)
+    emit("  mov r1, r4")
+
+    // Epilogue
+    emit("  mov r7, r5")
+    emit("  popd r5")
+    emit("  popd r6")
+    emitAddImm(7, 7, 8)             // skip 1 reg param
+    emit("  jalr r0, r6")
+
+  // Emit the __str_float helper: converts f64 to a refcounted string with
+  // fixed 6-digit fractional precision (e.g. 3.14 -> "3.140000", -0.5 -> "-0.500000").
+  // ABI: r1 = hidden return slot ptr, [fp+24] = f64 value (bits)
+  // Returns: {ptr, len} written to return slot, r1 = return slot address
+  private def emitStrFloatHelper(): Unit =
+    emit("# helper: __str_float(value: f64) -> string")
+    emit("global __str_float, func, 1 i64 i64")
+    emit("__str_float:")
+    // Pre-prologue: save hidden return ptr
+    emit("  pshd r1")
+    // Prologue
+    emit("  pshd r6")
+    emit("  pshd r5")
+    emit("  mov r5, r7")
+    // [fp+16] = hidden return ptr, [fp+24] = f64 value (bits)
+    //
+    // Locals (56 bytes):
+    //   [fp-8]  = is_negative (i64: 0 or 1)
+    //   [fp-16] = int_part    (i64: |v| truncated to integer)
+    //   [fp-24] = scaled_frac (i64: rounded |frac| * 1e6, in [0, 999999])
+    //   [fp-32] = int_digit_count (i64)
+    //   [fp-56] = digit_buffer[24]  (reversed int digits)
+    emitAddImm(7, 7, -56)
+
+    // Load value from [fp+24]
+    emitAddImm(2, 5, 24)
+    emit("  ldd r1, r2, r0")       // r1 = v (f64 bits)
+
+    // Check sign: v < 0.0
+    emit("  ldc r2, 0.0")
+    emit("  fslt r3, r1, r2")      // r3 = 1 if v < 0
+    emitAddImm(4, 5, -8)
+    emit("  std r3, r4, r0")       // save is_negative
+
+    // Abs
+    emit("  fabs r1, r1")
+
+    // int_part = fint(|v|) (truncates)
+    emit("  fint r2, r1")          // r2 = int_part (i64)
+
+    // frac_f = |v| - cvt(int_part)
+    emit("  cvt r3, r2")           // r3 = float bits of int_part
+    emit("  fsub r1, r1, r3")      // r1 = frac (f64, in [0, 1))
+
+    // scaled = fint(frac * 1e6 + 0.5)   (round to nearest)
+    emit("  ldc r3, 1000000.0")
+    emit("  fmul r1, r1, r3")
+    emit("  ldc r3, 0.5")
+    emit("  fadd r1, r1, r3")
+    emit("  fint r1, r1")          // r1 = scaled_frac (i64)
+
+    // Rollover: if scaled_frac >= 1000000, int_part++, scaled_frac = 0
+    emit("  movi r3, 1000000")
+    emit("  slt r4, r1, r3")       // r4 = 1 if scaled_frac < 1000000
+    val noRollLabel = newLabel("strf_noroll")
+    emit(s"  bne r4, r0, $noRollLabel")
+    emit("  addi r2, r2, 1")
+    emit("  ldi r1, 0")
+    emit(s"$noRollLabel")
+
+    // Save int_part and scaled_frac
+    emitAddImm(4, 5, -16)
+    emit("  std r2, r4, r0")       // int_part
+    emitAddImm(4, 5, -24)
+    emit("  std r1, r4, r0")       // scaled_frac
+
+    // Extract integer digits into buffer at [fp-56]
+    emitAddImm(4, 5, -16)
+    emit("  ldd r1, r4, r0")       // r1 = int_part
+    emit("  ldi r3, 0")            // r3 = digit_count
+
+    // Special case: int_part == 0
+    val intLoopLabel = newLabel("strf_int_loop")
+    val intDoneLabel = newLabel("strf_int_done")
+    emit(s"  bne r1, r0, $intLoopLabel")
+    emitAddImm(4, 5, -56)
+    emit("  ldi r2, 48")           // '0'
+    emit("  stb r2, r4, r0")
+    emit("  ldi r3, 1")
+    emit(s"  bra $intDoneLabel")
+
+    // Division loop: extract int digits
+    emit(s"$intLoopLabel")
+    emit(s"  beq r1, r0, $intDoneLabel")
+    // Save digit_count (div clobbers r2)
+    emitAddImm(4, 5, -32)
+    emit("  std r3, r4, r0")
+    emit("  ldi r3, 10")
+    emit("  div r1, r1, r3")       // r1 = quot, r2 = rem
+    emit("  addi r2, r2, 48")
+    // Restore digit_count
+    emitAddImm(4, 5, -32)
+    emit("  ldd r3, r4, r0")
+    emitAddImm(4, 5, -56)
+    emit("  add r4, r4, r3")
+    emit("  stb r2, r4, r0")
+    emit("  addi r3, r3, 1")
+    emit(s"  bra $intLoopLabel")
+
+    emit(s"$intDoneLabel")
+    // Save int_digit_count
+    emitAddImm(4, 5, -32)
+    emit("  std r3, r4, r0")
+
+    // total_length = is_negative + int_digit_count + 1 (.) + 6 (frac digits)
+    emitAddImm(4, 5, -8)
+    emit("  ldd r2, r4, r0")       // r2 = is_negative
+    emit("  add r1, r3, r2")       // r1 = is_negative + int_digit_count
+    emit("  addi r1, r1, 7")       // + 1 (dot) + 6 (frac)
+    emit("  pshd r1")              // save total_length
+
+    // Malloc(8 + total_length)
+    emit("  addi r1, r1, 8")
+    emit("  movi r4, malloc")
+    emit("  jalr r6, r4")
+
+    // Null check
+    val allocOkLabel = newLabel("strf_alloc_ok")
+    emit(s"  bne r1, r0, $allocOkLabel")
+    emit("  ldi r1, 2")
+    emit("  trap 1")
+    emit(s"$allocOkLabel")
+
+    // Set refcount = 1 at [base+0]
+    emit("  ldi r2, 1")
+    emit("  std r2, r1, r0")
+    // data_ptr = base + 8
+    emit("  addi r1, r1, 8")
+
+    // Pop total_length (keep on stack briefly for return)
+    emit("  popd r3")              // r3 = total_length
+    emit("  pshd r1")              // save data_ptr
+    emit("  pshd r3")              // save total_length
+
+    // Write '-' if negative
+    emitAddImm(4, 5, -8)
+    emit("  ldd r2, r4, r0")
+    val noSignLabel = newLabel("strf_nosign")
+    emit(s"  beq r2, r0, $noSignLabel")
+    emit("  ldi r2, 45")           // '-'
+    emit("  stb r2, r1, r0")
+    emit("  addi r1, r1, 1")
+    emit(s"$noSignLabel")
+
+    // Copy int digits from buffer in reverse
+    emitAddImm(4, 5, -32)
+    emit("  ldd r3, r4, r0")       // r3 = int_digit_count
+    emitAddImm(4, 5, -56)
+    emit("  add r4, r4, r3")       // r4 = &buffer[count] (one past last)
+    val copyIntLabel = newLabel("strf_copy_int")
+    val copyIntDoneLabel = newLabel("strf_copy_int_done")
+    emit(s"$copyIntLabel")
+    emit(s"  beq r3, r0, $copyIntDoneLabel")
+    emit("  addi r4, r4, -1")
+    emit("  ldb r2, r4, r0")
+    emit("  stb r2, r1, r0")
+    emit("  addi r1, r1, 1")
+    emit("  addi r3, r3, -1")
+    emit(s"  bra $copyIntLabel")
+    emit(s"$copyIntDoneLabel")
+
+    // Write '.'
+    emit("  ldi r2, 46")           // '.'
+    emit("  stb r2, r1, r0")
+    emit("  addi r1, r1, 1")
+
+    // Write 6 fractional digits from scaled_frac (MSB first — divide by 100000, 10000, ...)
+    // Load scaled_frac
+    emitAddImm(4, 5, -24)
+    emit("  ldd r2, r4, r0")       // r2 = scaled_frac
+    // For each divisor 100000, 10000, 1000, 100, 10, 1:
+    for divisor <- List(100000, 10000, 1000, 100, 10, 1) do
+      emitLoadImm(3, divisor)
+      emit("  div r3, r2, r3")     // r3 = scaled_frac / divisor, r4 = remainder
+      emit("  mov r2, r4")         // r2 = new remainder
+      emit("  addi r3, r3, 48")    // r3 = ASCII digit
+      emit("  stb r3, r1, r0")
+      emit("  addi r1, r1, 1")
+
+    // Pop total_length and data_ptr
+    emit("  popd r3")              // r3 = total_length
+    emit("  popd r1")              // r1 = data_ptr
+
+    // Write {ptr, len} to return slot
+    emitAddImm(4, 5, 16)
+    emit("  ldd r4, r4, r0")       // r4 = return slot address
+    emit("  std r1, r4, r0")
+    emit("  addi r2, r4, 8")
+    emit("  std r3, r2, r0")
+
+    // r1 = return slot address
+    emit("  mov r1, r4")
+
+    // Epilogue
+    emit("  mov r7, r5")
+    emit("  popd r5")
+    emit("  popd r6")
+    emitAddImm(7, 7, 8)            // skip 1 reg param
+    emit("  jalr r0, r6")
 
   private def emit(line: String): Unit =
     out ++= line

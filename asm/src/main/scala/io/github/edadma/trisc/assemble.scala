@@ -48,13 +48,19 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
   val relaxationExports = new mutable.LinkedHashSet[String]
 
   // Constant pool: 64-bit value (bits) → auto-generated label name
+  // Per-TOF unique prefix avoids symbol collisions when linking multiple modules
+  // that each have their own constant pool (e.g. both define .const_1).
   val constPool = new mutable.LinkedHashMap[Long, String]
   var constPoolCounter = 0
+  val constPoolPrefix: String =
+    val r = new scala.util.Random()
+    val chars = "0123456789abcdef"
+    (1 to 8).map(_ => chars(r.nextInt(16))).mkString
 
   def addConstant(bits: Long): String =
     constPool.getOrElseUpdate(bits, {
       constPoolCounter += 1
-      s".const_$constPoolCounter"
+      s".const_${constPoolPrefix}_$constPoolCounter"
     })
 
   def addSymbol(sym: Positional, name: String): Unit =
@@ -760,10 +766,19 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o2, "expected register as second operand")
 
       addInstruction(3 -> 6, 3 -> reg1, 3 -> reg2, 2 -> 0, 5 -> opcode)
-    case InstructionLineAST(mnemonic @ ("fpow" | "tlbi" | "tlbia" | "sptbr" | "gptbr" | "gfault" | "sasid" | "gasid" | "gfcause"), Seq(o1, o2)) =>
+    case InstructionLineAST(mnemonic @ ("fpow" | "fsin" | "fcos" | "ftan" | "fasin" | "facos" | "fatan" | "fatan2" | "fexp" | "flog" | "tlbi" | "tlbia" | "sptbr" | "gptbr" | "gfault" | "sasid" | "gasid" | "gfcause"), Seq(o1, o2)) =>
       val opcode =
         mnemonic match
           case "fpow"    => 0
+          case "fsin"    => 9
+          case "fcos"    => 10
+          case "ftan"    => 11
+          case "fasin"   => 12
+          case "facos"   => 13
+          case "fatan"   => 14
+          case "fatan2"  => 15
+          case "fexp"    => 16
+          case "flog"    => 17
           case "tlbi"    => 1
           case "tlbia"   => 2
           case "sptbr"   => 3
