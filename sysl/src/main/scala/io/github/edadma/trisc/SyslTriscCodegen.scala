@@ -30,7 +30,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     for decl <- program.decls do
       decl match
         case TFunDecl(name, _, _, _, _, _) if name.endsWith("_deinit") =>
-          val structName = name.lastIndexOf("__") match
+          val structName = name.indexOf("__") match
             case -1 => name.dropRight(7)
             case i  => name.substring(i + 2).dropRight(7)
           deinitFunctions(structName) = name
@@ -1399,50 +1399,82 @@ class SyslTriscCodegen(addresses: Int = 4):
           case SyslType.PtrType(pointee) => stackSize(pointee).max(1)
           case SyslType.ArrayType(elem, _) => stackSize(elem).max(1)
           case _ => 1
-        val local = locals(name)
-        emitAddImm(2, 5, local.offset)
-        emitLoad(1, 2, local.typ)
-        emit(s"  addi r1, r1, $step")
-        emitNarrow(1, typ)
-        emitAddImm(2, 5, local.offset)
-        emitStore(1, 2, local.typ)
+        if locals != null && locals.contains(name) then
+          val local = locals(name)
+          emitAddImm(2, 5, local.offset)
+          emitLoad(1, 2, local.typ)
+          emit(s"  addi r1, r1, $step")
+          emitNarrow(1, typ)
+          emitAddImm(2, 5, local.offset)
+          emitStore(1, 2, local.typ)
+        else
+          emit(s"  movi r2, $name")
+          emitLoad(1, 2, typ)
+          emit(s"  addi r1, r1, $step")
+          emitNarrow(1, typ)
+          emit(s"  movi r2, $name")
+          emitStore(1, 2, typ)
 
       case TPreDec(name, typ) =>
         val step = typ match
           case SyslType.PtrType(pointee) => stackSize(pointee).max(1)
           case SyslType.ArrayType(elem, _) => stackSize(elem).max(1)
           case _ => 1
-        val local = locals(name)
-        emitAddImm(2, 5, local.offset)
-        emitLoad(1, 2, local.typ)
-        emit(s"  addi r1, r1, -$step")
-        emitNarrow(1, typ)
-        emitAddImm(2, 5, local.offset)
-        emitStore(1, 2, local.typ)
+        if locals != null && locals.contains(name) then
+          val local = locals(name)
+          emitAddImm(2, 5, local.offset)
+          emitLoad(1, 2, local.typ)
+          emit(s"  addi r1, r1, -$step")
+          emitNarrow(1, typ)
+          emitAddImm(2, 5, local.offset)
+          emitStore(1, 2, local.typ)
+        else
+          emit(s"  movi r2, $name")
+          emitLoad(1, 2, typ)
+          emit(s"  addi r1, r1, -$step")
+          emitNarrow(1, typ)
+          emit(s"  movi r2, $name")
+          emitStore(1, 2, typ)
 
       case TPostInc(name, typ) =>
         val step = typ match
           case SyslType.PtrType(pointee) => stackSize(pointee).max(1)
           case SyslType.ArrayType(elem, _) => stackSize(elem).max(1)
           case _ => 1
-        val local = locals(name)
-        emitAddImm(2, 5, local.offset)
-        emitLoad(1, 2, local.typ)
-        emit(s"  addi r3, r1, $step")
-        emitNarrow(3, typ)
-        emitStore(3, 2, local.typ)
+        if locals != null && locals.contains(name) then
+          val local = locals(name)
+          emitAddImm(2, 5, local.offset)
+          emitLoad(1, 2, local.typ)
+          emit(s"  addi r3, r1, $step")
+          emitNarrow(3, typ)
+          emitStore(3, 2, local.typ)
+        else
+          emit(s"  movi r2, $name")
+          emitLoad(1, 2, typ)
+          emit(s"  addi r3, r1, $step")
+          emitNarrow(3, typ)
+          emit(s"  movi r2, $name")
+          emitStore(3, 2, typ)
 
       case TPostDec(name, typ) =>
         val step = typ match
           case SyslType.PtrType(pointee) => stackSize(pointee).max(1)
           case SyslType.ArrayType(elem, _) => stackSize(elem).max(1)
           case _ => 1
-        val local = locals(name)
-        emitAddImm(2, 5, local.offset)
-        emitLoad(1, 2, local.typ)
-        emit(s"  addi r3, r1, -$step")
-        emitNarrow(3, typ)
-        emitStore(3, 2, local.typ)
+        if locals != null && locals.contains(name) then
+          val local = locals(name)
+          emitAddImm(2, 5, local.offset)
+          emitLoad(1, 2, local.typ)
+          emit(s"  addi r3, r1, -$step")
+          emitNarrow(3, typ)
+          emitStore(3, 2, local.typ)
+        else
+          emit(s"  movi r2, $name")
+          emitLoad(1, 2, typ)
+          emit(s"  addi r3, r1, -$step")
+          emitNarrow(3, typ)
+          emit(s"  movi r2, $name")
+          emitStore(3, 2, typ)
 
       case TCast(TStringLit(value, _), target) if target.isInstanceOf[SyslType.PtrType] =>
         // String literal → *i8 decay: emit data pointer directly, no fat pointer needed

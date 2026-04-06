@@ -5,6 +5,7 @@ class SyslLibStringTests extends SyslTestHelpers {
   val libs: Map[String, String] = Map(
     "posix/string/string" -> readSysl("posix/string/string.sysl"),
     "posix/stdlib/stdlib" -> readSysl("posix/stdlib/stdlib.sysl"),
+    "posix/ctype/ctype" -> readSysl("posix/ctype/ctype.sysl"),
   )
 
   private def evalWith(main: String): Long = evalWithLibs(libs,

@@ -266,7 +266,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case f: TFunDecl =>
           functions(f.name) = f
           if f.name.endsWith("_deinit") then
-            val structName = f.name.lastIndexOf("__") match
+            val structName = f.name.indexOf("__") match
               case -1 => f.name.dropRight(7)
               case i  => f.name.substring(i + 2).dropRight(7)
             deinitMap(structName) = f.name
@@ -292,7 +292,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case f: TFunDecl =>
           functions(f.name) = f
           if f.name.endsWith("_deinit") then
-            val structName = f.name.lastIndexOf("__") match
+            val structName = f.name.indexOf("__") match
               case -1 => f.name.dropRight(7)
               case i  => f.name.substring(i + 2).dropRight(7)
             deinitMap(structName) = f.name

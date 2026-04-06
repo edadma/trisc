@@ -60,9 +60,12 @@ class SyslAnalyzer:
   def registerNoMangle(names: Iterable[String]): Unit =
     neverMangle ++= names
 
-  /** Strip module prefix from a mangled name to get the short name. */
+  /** Strip module prefix from a mangled name to get the short name.
+    * Uses indexOf (first `__`) not lastIndexOf, because function names
+    * can contain `_` (e.g. `_run_atexit` → mangled `mod___run_atexit`).
+    */
   private def shortName(mangledName: String): String =
-    mangledName.lastIndexOf("__") match
+    mangledName.indexOf("__") match
       case -1 => mangledName
       case i  => mangledName.substring(i + 2)
 

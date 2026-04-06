@@ -348,7 +348,7 @@ object SyslCli:
 
   /** Strip module prefix from a mangled name for display. */
   private def shortFnName(name: String): String =
-    name.lastIndexOf("__") match
+    name.indexOf("__") match
       case -1 => name
       case i  => name.substring(i + 2)
 
