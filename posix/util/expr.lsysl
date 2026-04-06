@@ -13,6 +13,7 @@ Supported operators (lowest to highest precedence):
   are integers, otherwise lexicographic; returns 1 or 0)
 - `+` `-` — addition and subtraction
 - `*` `/` `%` — multiplication, division, modulo
+- `STRING : REGEX` — regex match (BRE, anchored at start)
 - `( expr )` — grouping
 
 POSIX string keywords (parsed at the primary level):
@@ -25,8 +26,12 @@ POSIX string keywords (parsed at the primary level):
   keyword interpretation (e.g. `+ length` is the string
   `"length"`, not the keyword)
 
-The `:` (regex match) operator is not yet implemented — it
-requires a regex engine.
+The `:` operator matches STRING against a BRE pattern,
+implicitly anchored at the start (`^` is prepended). If the
+pattern contains `\(...\)`, the result is the text captured
+by the first group. Otherwise the result is the number of
+characters matched. On no match, returns `""` (with a group)
+or `"0"` (without).
 
 Exit status: 0 if the result is nonzero/nonempty, 1 if zero
 or empty, 2 on syntax or evaluation error.
@@ -42,6 +47,7 @@ The parser walks through argv using a global position counter.
     import std.process.*
     import std.io.*
     import std.string.*
+    import std.regex.*
 
     var pos: int
     var ac: int
@@ -241,14 +247,64 @@ treated as a literal value.
             _ -> return next()
 
 
+### Match: `STRING : REGEX`
+
+The `:` operator has higher precedence than `*`/`/`/`%`.
+It matches the left operand (a string) against the right
+operand (a BRE pattern), with an implicit `^` anchor.
+
+If the pattern contains `\(...\)`, the result is the text
+of the first capture group. Otherwise it is the number of
+characters in the match. On failure, the result is `""` (if
+a group exists) or `"0"`.
+
+    parse_match() -> string
+        var left = parse_primary()
+
+        while equal(peek(), ":")
+            val _ = next()
+            val pattern = next()
+
+            /* Prepend ^ for implicit start anchor */
+            val anchored = concat("^", pattern)
+            val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre(anchored)
+
+            if parse_err then err("invalid regular expression")
+
+            val insts = compile(root, nodes, n_groups)
+            val m = exec(insts, classes, left, n_groups)
+
+            if n_groups > 0
+                /* Has capture group — return captured text or "" */
+                if m.matched()
+                    val s, en = m.group(1)
+
+                    if s >= 0
+                        left = substr(left, s, en - s)
+                    else
+                        left = ""
+                else
+                    left = ""
+            else
+                /* No capture — return character count or "0" */
+                if m.matched()
+                    val _, en = m.group(0)
+
+                    left = from_int(i64(en))
+                else
+                    left = "0"
+
+        left
+
+
 ### Multiplicative: `*`, `/`, `%`
 
-Highest-precedence binary operators. Both operands must be
-integers — POSIX expr has no floating-point support. Division
-by zero is a hard error (exit 2), not a special return value.
+Both operands must be integers — POSIX expr has no
+floating-point support. Division by zero is a hard error
+(exit 2), not a special return value.
 
     parse_mul() -> string
-        var left = parse_primary()
+        var left = parse_match()
 
         while equal(peek(), "*") || equal(peek(), "/") || equal(peek(), "%")
             val op = next()
@@ -531,3 +587,133 @@ invoke `expr` end-to-end. Instead we test the underlying
                 break
 
         assert(result == 0, "z not found")
+
+
+### `:` regex match operator
+
+These tests exercise the regex match logic by calling the
+underlying `std.regex` functions directly, mirroring what
+`parse_match` does.
+
+    #test
+    test_match_count_basic() -> void
+        /* "abcdef" : "abc" → 3 (three chars matched) */
+        val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^abc")
+        val insts = compile(root, nodes, n_groups)
+        val m = exec(insts, classes, "abcdef", n_groups)
+
+        assert(m.matched(), "should match")
+
+        val _, en = m.group(0)
+
+        assert(en == 3, s"matched 3 chars, got $en")
+
+    #test
+    test_match_count_star() -> void
+        /* "aabbb" : "a*" → 2 (greedy match of a's) */
+        val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^a*")
+        val insts = compile(root, nodes, n_groups)
+        val m = exec(insts, classes, "aabbb", n_groups)
+
+        assert(m.matched(), "should match")
+
+        val _, en = m.group(0)
+
+        assert(en == 2, s"matched 2 chars, got $en")
+
+    #test
+    test_match_count_no_match() -> void
+        /* "hello" : "xyz" → 0 (no match) */
+        val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^xyz")
+        val insts = compile(root, nodes, n_groups)
+        val m = exec(insts, classes, "hello", n_groups)
+
+        assert(!m.matched(), "should not match")
+
+    #test
+    test_match_capture_basic() -> void
+        val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^\\(abc\\)")
+        val insts = compile(root, nodes, n_groups)
+        val m = exec(insts, classes, "abcdef", n_groups)
+
+        assert(m.matched(), "should match")
+        assert(n_groups == 1, "one capture group")
+
+        val s, en = m.group(1)
+
+        assert(s == 0, "group start")
+        assert(en == 3, s"group end=3, got $en")
+
+    #test
+    test_match_capture_digits() -> void
+        val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^[a-z]*\\([0-9]*\\)")
+        val insts = compile(root, nodes, n_groups)
+        val m = exec(insts, classes, "abc123def", n_groups)
+
+        assert(m.matched(), "should match")
+
+        val s, en = m.group(1)
+
+        assert(s == 3, s"group start=3, got $s")
+        assert(en == 6, s"group end=6, got $en")
+        assert(equal(substr("abc123def", s, en - s), "123"), "captured 123")
+
+    #test
+    test_match_capture_no_match() -> void
+        val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^\\(xyz\\)")
+        val insts = compile(root, nodes, n_groups)
+        val m = exec(insts, classes, "hello", n_groups)
+
+        assert(!m.matched(), "should not match")
+
+    #test
+    test_match_dot_star() -> void
+        /* "foobar" : ".*" → 6 (matches entire string) */
+        val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^.*")
+        val insts = compile(root, nodes, n_groups)
+        val m = exec(insts, classes, "foobar", n_groups)
+
+        assert(m.matched(), "should match")
+
+        val _, en = m.group(0)
+
+        assert(en == 6, s"matched 6 chars, got $en")
+
+    #test
+    test_match_capture_path_basename() -> void
+        /* Classic use: extract filename from path */
+        val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^.*/\\(.*\\)")
+        val insts = compile(root, nodes, n_groups)
+        val m = exec(insts, classes, "/usr/bin/cat", n_groups)
+
+        assert(m.matched(), "should match")
+
+        val s, en = m.group(1)
+
+        assert(equal(substr("/usr/bin/cat", s, en - s), "cat"), "captured basename")
+
+    #test
+    test_match_capture_extension() -> void
+        /* Extract file extension */
+        val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^.*\\.\\(.*\\)")
+        val insts = compile(root, nodes, n_groups)
+        val m = exec(insts, classes, "file.tar.gz", n_groups)
+
+        assert(m.matched(), "should match")
+
+        val s, en = m.group(1)
+
+        assert(equal(substr("file.tar.gz", s, en - s), "gz"), "captured extension")
+
+    #test
+    test_match_empty_string() -> void
+        /* "" : ".*" → 0 (empty match) */
+        val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^.*")
+        val insts = compile(root, nodes, n_groups)
+        val m = exec(insts, classes, "", n_groups)
+
+        assert(m.matched(), "should match empty")
+
+        val _, en = m.group(0)
+
+        assert(en == 0, "matched 0 chars")
