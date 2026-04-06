@@ -1,0 +1,229 @@
+std.regex.vm — Pike VM executor
+================================
+
+The Pike VM simulates a nondeterministic finite automaton
+(NFA) by maintaining a *set* of active threads, one per
+possible path through the regex. At each input character,
+every active thread advances one step. Threads that fail are
+discarded; threads that reach `Match` record a successful
+match.
+
+This is Ken Thompson's 1968 algorithm, extended by Rob Pike
+to track capture group positions. It guarantees $O(n \cdot m)$
+time: for each of the $n$ input characters, we process at
+most $m$ threads (one per VM instruction), and each
+instruction is visited at most once per input position.
+
+
+POSIX leftmost-longest semantics
+---------------------------------
+
+POSIX requires the **leftmost** match, and among leftmost
+matches, the **longest**. The Pike VM achieves this by:
+
+1. Starting a new thread at every input position (leftmost).
+2. Running all threads in parallel, not stopping at the
+   first match (longest).
+3. When multiple threads match, keeping the one with the
+   best (earliest start, longest span) captures.
+
+
+Thread representation
+---------------------
+
+Each thread is a program counter (index into the
+instruction array) plus a set of saved capture positions.
+Threads share structure where possible — the `saves` array
+is copied only when a `Save` instruction is executed.
+
+    module std.regex.vm
+
+    import std.regex.{Inst, CharClass, CharRange, Match,
+        OP_CHAR, OP_ANY, OP_MATCH, OP_JUMP, OP_SPLIT,
+        OP_SAVE, OP_ANCHOR_START, OP_ANCHOR_END, OP_CLASS}
+
+    struct Thread
+        pc: int
+        saves: &[]int
+
+
+VM state
+--------
+
+The VM alternates between two thread lists: `current`
+(threads to process at this input position) and `next`
+(threads that survived and advanced to the next position).
+After processing each character, the lists swap.
+
+    struct VM
+        insts: &[]Inst
+        classes: &[]CharClass
+        input: string
+        n_slots: int
+
+A `visited` bitmap prevents adding duplicate threads at the
+same program counter within a single step. Without this, a
+`Split` loop could generate exponentially many threads.
+
+    private VM.add_thread(self: *VM, list: &[]Thread, t: Thread, visited: &[]bool)
+        if t.pc < 0 || t.pc >= len(self.insts) then return
+        if visited[t.pc] then return
+
+        visited[t.pc] = true
+
+        val inst = self.insts[t.pc]
+
+        /* Epsilon transitions: process immediately without consuming input */
+        inst.op match
+            3 -> /* OP_JUMP */
+                self.add_thread(list, Thread(inst.arg1, t.saves), visited)
+            4 -> /* OP_SPLIT */
+                /* Add preferred path first (greedy) */
+                self.add_thread(list, Thread(inst.arg1, t.saves), visited)
+                /* Then alternate path */
+                self.add_thread(list, Thread(inst.arg2, t.saves), visited)
+            5 -> /* OP_SAVE */
+                var new_saves = new [self.n_slots]int
+
+                for var i = 0; i < self.n_slots; i++ do new_saves[i] = t.saves[i]
+
+                new_saves[inst.arg1] = -2
+                self.add_thread(list, Thread(t.pc + 1, new_saves), visited)
+            _ ->
+                /* Non-epsilon: add to list for character processing */
+                list = append(list, t)
+
+> **Note:** The `Save` instruction above uses `-2` as a
+> placeholder. During actual execution, it stores the current
+> input position. The `-2` sentinel is replaced in `exec`
+> below — this is a simplification to avoid passing the
+> position through `add_thread`.
+
+
+Character class matching
+------------------------
+
+    private VM.class_matches(self: *VM, class_id: int, ch: int) -> bool
+        val cls = self.classes[class_id]
+        var matched = false
+
+        for var i = 0; i < len(cls.ranges); i++
+            if cls.ranges[i].lo <= ch <= cls.ranges[i].hi
+                matched = true
+                break
+
+        if cls.negated then !matched
+        else matched
+
+
+Execution
+---------
+
+The main loop processes one input character per iteration.
+At each step:
+
+1. For every thread in `current`, check if the current
+   instruction matches the input character.
+2. If it matches, advance the thread's PC and add it to
+   `next`.
+3. If a thread reaches `Match`, record the captures as the
+   best match so far.
+4. Swap `current` and `next`; clear `next`.
+
+The loop also starts a new thread at PC 0 before each
+character, so that matches beginning at any position are
+found (unless an earlier match has already been found — for
+leftmost semantics).
+
+    exec(insts: &[]Inst, classes: &[]CharClass, input: string, n_groups: int) -> Match
+        val n_slots = (n_groups + 1) * 2
+        var best_starts = new [n_groups + 1]int
+        var best_ends = new [n_groups + 1]int
+        var matched = false
+
+        for var i = 0; i <= n_groups; i++
+            best_starts[i] = -1
+            best_ends[i] = -1
+
+        var vm: VM
+
+        vm.insts = insts
+        vm.classes = classes
+        vm.input = input
+        vm.n_slots = n_slots
+
+        var current = new [0]Thread
+        var next_list = new [0]Thread
+        val input_len = len(input)
+
+        /* Process each input position, plus one past the end (for $ anchor and final matches) */
+        for var sp = 0; sp <= input_len; sp++
+            /* Start a new thread at position sp if we haven't found a match yet */
+            if !matched
+                var init_saves = new [n_slots]int
+
+                for var j = 0; j < n_slots; j++ do init_saves[j] = -1
+
+                var visited = new [len(insts)]bool
+
+                vm.add_thread(current, Thread(0, init_saves), visited)
+
+            val ch = if sp < input_len then input[sp] else -1
+
+            /* Process all current threads */
+            next_list = new [0]Thread
+
+            for var i = 0; i < len(current); i++
+                val t = current[i]
+                val inst = insts[t.pc]
+
+                /* Fix up Save placeholders: replace -2 with actual position */
+                for var s = 0; s < n_slots; s++
+                    if t.saves[s] == -2 then t.saves[s] = sp
+
+                inst.op match
+                    0 -> /* OP_CHAR */
+                        if ch == inst.arg1
+                            var visited = new [len(insts)]bool
+
+                            vm.add_thread(next_list, Thread(t.pc + 1, t.saves), visited)
+                    1 -> /* OP_ANY */
+                        if ch >= 0
+                            var visited = new [len(insts)]bool
+
+                            vm.add_thread(next_list, Thread(t.pc + 1, t.saves), visited)
+                    2 -> /* OP_MATCH */
+                        /* Record this match if it's better than the current best */
+                        if !matched || t.saves[0] < best_starts[0] || (t.saves[0] == best_starts[0] && sp > best_ends[0])
+                            matched = true
+
+                            for var g = 0; g <= n_groups; g++
+                                best_starts[g] = t.saves[g * 2]
+                                best_ends[g] = t.saves[g * 2 + 1]
+
+                            /* For group 0, end = current position */
+                            best_ends[0] = sp
+                    6 -> /* OP_ANCHOR_START */
+                        if sp == 0
+                            var visited = new [len(insts)]bool
+
+                            vm.add_thread(next_list, Thread(t.pc + 1, t.saves), visited)
+                    7 -> /* OP_ANCHOR_END */
+                        if sp == input_len
+                            var visited = new [len(insts)]bool
+
+                            vm.add_thread(next_list, Thread(t.pc + 1, t.saves), visited)
+                    8 -> /* OP_CLASS */
+                        if ch >= 0 && vm.class_matches(inst.arg1, ch)
+                            var visited = new [len(insts)]bool
+
+                            vm.add_thread(next_list, Thread(t.pc + 1, t.saves), visited)
+                    _ -> return
+
+            /* Swap lists */
+            current = next_list
+
+            /* If no threads left and we have a match, we're done */
+            if len(current) == 0 && matched then break
+
+        Match(best_starts, best_ends, n_groups + 1)

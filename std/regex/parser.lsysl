@@ -1,0 +1,335 @@
+std.regex.parser — BRE pattern parser
+======================================
+
+This module implements a recursive descent parser for POSIX
+Basic Regular Expressions (BRE). The parser consumes a
+pattern string and produces a flat array of `Node` structs
+— the regex AST.
+
+
+BRE grammar
+-----------
+
+The BRE grammar, from POSIX, adapted for recursive descent:
+
+```
+bre        → branch
+branch     → piece branch | ε
+piece      → atom quantifier?
+quantifier → '*' | '\{' bounds '\}'
+atom       → '.' | '^' | '$' | '[' class ']'
+           | '\(' bre '\)' | '\' escaped | literal
+bounds     → n | n ',' | n ',' m
+class      → '^'? class_item+
+class_item → char '-' char | '[:' name ':]' | char
+```
+
+Key BRE quirks:
+- Parentheses and braces are escaped: `\(`, `\)`, `\{`, `\}`
+- `*` at the start of a pattern or subgroup is a literal
+- `^` is only an anchor at the start; `$` only at the end
+- There is no alternation (`|`) in BRE
+
+
+    module std.regex.parser
+
+    import std.regex.{Node, CharRange, CharClass,
+        NK_LITERAL, NK_DOT, NK_ANCHOR_START, NK_ANCHOR_END,
+        NK_CLASS, NK_STAR, NK_CAPTURE, NK_SEQ, NK_QUEST, NK_PLUS,
+        RegexError}
+
+
+Parser state
+------------
+
+The parser maintains a position in the pattern string, a
+flat array of AST nodes (built by appending), and a counter
+for capture groups.
+
+    struct Parser
+        pattern: string
+        pos: int
+        nodes: &[]Node
+        classes: &[]CharClass
+        n_groups: int
+        err: bool
+        err_msg: string
+        err_pos: int
+
+
+### Helpers
+
+    private Parser.at_end(self: *Parser) -> bool = self.pos >= len(self.pattern)
+
+    private Parser.peek(self: *Parser) -> int
+        if self.at_end() then return -1
+
+        self.pattern[self.pos]
+
+    private Parser.advance(self: *Parser) -> int
+        val ch = self.peek()
+
+        self.pos++
+        ch
+
+    private Parser.expect(self: *Parser, ch: int) -> bool
+        if self.peek() == ch
+            self.pos++
+            return true
+
+        false
+
+Setting an error records the position and message. Once set,
+the parser winds down without producing more nodes.
+
+    private Parser.set_error(self: *Parser, msg: string)
+        if !self.err
+            self.err = true
+            self.err_msg = msg
+            self.err_pos = self.pos
+
+
+### Node construction
+
+Each `add_*` method appends a node to the flat array and
+returns its index. This is how the "tree" is built without
+recursive types — parent nodes store the indices of their
+children.
+
+    private Parser.add_node(self: *Parser, kind: int, ch: int, left: int, right: int, extra: int) -> int
+        val idx = len(self.nodes)
+
+        self.nodes = append(self.nodes, Node(kind, ch, left, right, extra))
+        idx
+
+    private Parser.add_literal(self: *Parser, ch: int) -> int
+        self.add_node(NK_LITERAL, ch, -1, -1, 0)
+
+    private Parser.add_dot(self: *Parser) -> int
+        self.add_node(NK_DOT, 0, -1, -1, 0)
+
+    private Parser.add_anchor_start(self: *Parser) -> int
+        self.add_node(NK_ANCHOR_START, 0, -1, -1, 0)
+
+    private Parser.add_anchor_end(self: *Parser) -> int
+        self.add_node(NK_ANCHOR_END, 0, -1, -1, 0)
+
+    private Parser.add_star(self: *Parser, child: int) -> int
+        self.add_node(NK_STAR, 0, child, -1, 0)
+
+    private Parser.add_capture(self: *Parser, child: int, group: int) -> int
+        self.add_node(NK_CAPTURE, 0, child, -1, group)
+
+    private Parser.add_seq(self: *Parser, left: int, right: int) -> int
+        self.add_node(NK_SEQ, 0, left, right, 0)
+
+    private Parser.add_class(self: *Parser, class_id: int) -> int
+        self.add_node(NK_CLASS, 0, -1, -1, class_id)
+
+
+Parsing character classes
+-------------------------
+
+A character class `[...]` contains ranges, POSIX named
+classes (like `[:alpha:]`), and individual characters. A
+leading `^` negates the class.
+
+    private Parser.parse_class(self: *Parser) -> int
+        if self.err then return -1
+
+        var negated = false
+
+        if self.peek() == int('^')
+            self.advance()
+            negated = true
+
+        var ranges = new [0]CharRange
+        var first = true
+
+        /* A ] as the first character is a literal ] */
+        while !self.at_end() && (first || self.peek() != int(']'))
+            first = false
+            val ch = self.advance()
+
+            /* Check for POSIX named class [:name:] */
+            if ch == int('[') && self.peek() == int(':')
+                self.advance()
+                var name_start = self.pos
+
+                while !self.at_end() && self.peek() != int(':') do self.advance()
+
+                if self.at_end()
+                    self.set_error("unterminated POSIX class")
+                    return -1
+
+                /* skip closing :] */
+                self.advance()
+
+                if !self.expect(int(']'))
+                    self.set_error("expected ] after POSIX class")
+                    return -1
+
+                /* Add ranges for the named class */
+                /* For now, handle common ones */
+                ranges = self.add_posix_class(ranges, name_start)
+            elif !self.at_end() && self.peek() == int('-') && self.pos + 1 < len(self.pattern)
+                /* Range: a-z */
+                self.advance()
+                val hi = self.advance()
+
+                ranges = append(ranges, CharRange(ch, hi))
+            else
+                /* Single character */
+                ranges = append(ranges, CharRange(ch, ch))
+
+        if !self.expect(int(']'))
+            self.set_error("unterminated character class")
+            return -1
+
+        val cls = CharClass(ranges, negated)
+        val class_id = len(self.classes)
+
+        self.classes = append(self.classes, cls)
+        self.add_class(class_id)
+
+POSIX named character classes map to character ranges. These
+correspond exactly to the functions in our `posix.ctype`
+module.
+
+    private Parser.add_posix_class(self: *Parser, ranges: &[]CharRange, name_start: int) -> &[]CharRange
+        /* TODO: extract name from pattern[name_start..self.pos-2] and match */
+        /* For now, add ASCII ranges for common classes */
+        /* This is a placeholder — full implementation needs string comparison */
+        append(ranges, CharRange(0, 127))
+
+
+Parsing atoms
+-------------
+
+An atom is the smallest unit of a BRE: a literal character,
+`.`, `^`, `$`, a character class, a capture group, or an
+escaped character.
+
+    private Parser.parse_atom(self: *Parser) -> int
+        if self.err || self.at_end() then return -1
+
+        val ch = self.peek()
+
+        ch match
+            int('.') ->
+                self.advance()
+                return self.add_dot()
+            int('^') ->
+                self.advance()
+                return self.add_anchor_start()
+            int('$') ->
+                self.advance()
+                return self.add_anchor_end()
+            int('[') ->
+                self.advance()
+                return self.parse_class()
+            int('\\') ->
+                self.advance()
+
+                if self.at_end()
+                    self.set_error("trailing backslash")
+                    return -1
+
+                val esc = self.advance()
+
+                esc match
+                    int('(') ->
+                        /* Start capture group */
+                        self.n_groups++
+                        val group = self.n_groups
+                        val inner = self.parse_branch()
+
+                        if !self.expect(int('\\')) || !self.expect(int(')'))
+                            self.set_error("unterminated \\( group")
+                            return -1
+
+                        return self.add_capture(inner, group)
+                    _ ->
+                        /* Escaped literal: \., \\, \*, etc. */
+                        return self.add_literal(esc)
+            _ ->
+                /* Check if this could be a quantifier — if so, don't consume */
+                if ch == int('*') then return -1
+
+                self.advance()
+                return self.add_literal(ch)
+
+
+Parsing pieces (atom + optional quantifier)
+-------------------------------------------
+
+A piece is an atom optionally followed by `*` (or `\{n,m\}`
+in full BRE). The quantifier wraps the atom node.
+
+    private Parser.parse_piece(self: *Parser) -> int
+        if self.err then return -1
+
+        val atom = self.parse_atom()
+
+        if atom < 0 then return -1
+
+        /* Check for * quantifier */
+        if !self.at_end() && self.peek() == int('*')
+            self.advance()
+            return self.add_star(atom)
+
+        atom
+
+
+Parsing branches (concatenation)
+---------------------------------
+
+A branch is a sequence of pieces concatenated together. We
+build a left-leaning tree of `NK_SEQ` nodes: the first two
+pieces become a SEQ, then each subsequent piece is SEQ'd
+onto the result.
+
+    private Parser.parse_branch(self: *Parser) -> int
+        if self.err then return -1
+
+        var left = self.parse_piece()
+
+        if left < 0 then return -1
+
+        while !self.at_end() && !self.err
+            val ch = self.peek()
+
+            /* Stop at end-of-group markers */
+            if ch == int('\\') && self.pos + 1 < len(self.pattern) && self.pattern[self.pos + 1] == int(')')
+                break
+
+            val right = self.parse_piece()
+
+            if right < 0 then break
+
+            left = self.add_seq(left, right)
+
+        left
+
+
+Top-level parse entry point
+---------------------------
+
+    parse_bre(pattern: string) -> (int, &[]Node, &[]CharClass, int, bool, string, int)
+        var p: Parser
+
+        p.pattern = pattern
+        p.pos = 0
+        p.nodes = new [0]Node
+        p.classes = new [0]CharClass
+        p.n_groups = 0
+        p.err = false
+        p.err_msg = ""
+        p.err_pos = 0
+
+        val root = p.parse_branch()
+
+        if !p.at_end() && !p.err
+            p.set_error("unexpected character")
+
+        (root, p.nodes, p.classes, p.n_groups, p.err, p.err_msg, p.err_pos)

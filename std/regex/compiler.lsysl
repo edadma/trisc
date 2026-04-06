@@ -1,0 +1,198 @@
+std.regex.compiler — AST to VM bytecode
+========================================
+
+The compiler walks the flat AST produced by the parser and
+emits a linear array of Pike VM instructions. The key
+insight is that every regex construct maps to a small,
+fixed pattern of `Split`, `Jump`, `Char`, and `Save`
+instructions.
+
+
+Compilation patterns
+--------------------
+
+Each AST node type compiles to a specific instruction
+sequence. Let `e` denote the compiled code for a
+subexpression.
+
+### Literal / Dot / Anchor
+
+A single instruction:
+
+```
+Literal(ch) → Char ch
+Dot         → Any
+AnchorStart → AnchorStart
+AnchorEnd   → AnchorEnd
+```
+
+### Concatenation
+
+Just emit both sides in order:
+
+```
+Seq(a, b) → [code for a] [code for b]
+```
+
+### Star (zero or more)
+
+Greedy `e*` — prefer matching, but allow skipping:
+
+```
+     ┌─────────────┐
+     ↓              │
+L1:  Split L2, L3   │  try L2 (match e), fallback L3 (skip)
+L2:  [code for e]   │
+     Jump L1       ─┘  loop back
+L3:  ...               continue
+```
+
+For POSIX leftmost-longest, the Split prefers the match
+path (`L2`). The VM explores both paths and keeps the
+longest result.
+
+### Capture group
+
+Wrap the subexpression with `Save` instructions. Each
+capture group $i$ uses slots $2i$ (start) and $2i + 1$
+(end).
+
+```
+Capture(e, i) → Save 2*i
+                [code for e]
+                Save 2*i+1
+```
+
+### Character class
+
+A single `Class` instruction that references the class
+definition by index.
+
+```
+Class(id) → ClassCheck id
+```
+
+
+    module std.regex.compiler
+
+    import std.regex.{Node, Inst, CharClass,
+        NK_LITERAL, NK_DOT, NK_ANCHOR_START, NK_ANCHOR_END,
+        NK_CLASS, NK_STAR, NK_CAPTURE, NK_SEQ, NK_QUEST, NK_PLUS,
+        OP_CHAR, OP_ANY, OP_MATCH, OP_JUMP, OP_SPLIT,
+        OP_SAVE, OP_ANCHOR_START, OP_ANCHOR_END, OP_CLASS}
+
+
+Compiler state
+--------------
+
+The compiler holds the instruction array being built and a
+reference to the AST node array.
+
+    struct Compiler
+        insts: &[]Inst
+        nodes: &[]Node
+
+    private Compiler.emit(self: *Compiler, op: int, arg1: int, arg2: int) -> int
+        val pc = len(self.insts)
+
+        self.insts = append(self.insts, Inst(op, arg1, arg2))
+        pc
+
+    private Compiler.patch(self: *Compiler, pc: int, arg1: int, arg2: int)
+        /* Update a previously emitted instruction's arguments */
+        /* This is used for forward jumps where the target isn't known yet */
+        self.insts[pc] = Inst(self.insts[pc].op, arg1, arg2)
+
+
+Recursive compilation
+---------------------
+
+`compile_node` dispatches on the node kind. Since the AST is
+flat (stored in an array), we look up each node by index.
+
+    private Compiler.compile_node(self: *Compiler, idx: int)
+        if idx < 0 then return
+
+        val node = self.nodes[idx]
+
+        node.kind match
+            0 -> /* NK_LITERAL */
+                self.emit(OP_CHAR, node.ch, 0)
+            1 -> /* NK_DOT */
+                self.emit(OP_ANY, 0, 0)
+            2 -> /* NK_ANCHOR_START */
+                self.emit(OP_ANCHOR_START, 0, 0)
+            3 -> /* NK_ANCHOR_END */
+                self.emit(OP_ANCHOR_END, 0, 0)
+            4 -> /* NK_CLASS */
+                self.emit(OP_CLASS, node.extra, 0)
+            5 -> /* NK_STAR */
+                /*
+                 * L1: Split L2, L3
+                 * L2: [child]
+                 *     Jump L1
+                 * L3: ...
+                 */
+                val l1 = self.emit(OP_SPLIT, 0, 0)
+
+                self.compile_node(node.left)
+                self.emit(OP_JUMP, l1, 0)
+
+                val l3 = len(self.insts)
+
+                self.patch(l1, l1 + 1, l3)
+            6 -> /* NK_CAPTURE */
+                self.emit(OP_SAVE, node.extra * 2, 0)
+                self.compile_node(node.left)
+                self.emit(OP_SAVE, node.extra * 2 + 1, 0)
+            7 -> /* NK_SEQ */
+                self.compile_node(node.left)
+                self.compile_node(node.right)
+            8 -> /* NK_QUEST (zero or one) */
+                /*
+                 * Split L1, L2
+                 * L1: [child]
+                 * L2: ...
+                 */
+                val split = self.emit(OP_SPLIT, 0, 0)
+
+                self.compile_node(node.left)
+
+                val l2 = len(self.insts)
+
+                self.patch(split, split + 1, l2)
+            9 -> /* NK_PLUS (one or more) */
+                /*
+                 * L1: [child]
+                 *     Split L1, L2
+                 * L2: ...
+                 */
+                val l1 = len(self.insts)
+
+                self.compile_node(node.left)
+
+                val l2 = len(self.insts) + 1
+
+                self.emit(OP_SPLIT, l1, l2)
+            _ -> return
+
+
+Top-level compilation
+---------------------
+
+Wraps the entire pattern in a group-0 capture (the full
+match) and appends the `Match` instruction.
+
+    compile(root: int, nodes: &[]Node, n_groups: int) -> &[]Inst
+        var c: Compiler
+
+        c.insts = new [0]Inst
+        c.nodes = nodes
+
+        /* Group 0 captures the full match */
+        c.emit(OP_SAVE, 0, 0)
+        c.compile_node(root)
+        c.emit(OP_SAVE, 1, 0)
+        c.emit(OP_MATCH, 0, 0)
+
+        c.insts
