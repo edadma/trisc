@@ -469,4 +469,158 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
         |""".stripMargin)
     output shouldBe "Hi"
   }
+
+  // ===== string == in nested if/elif =====
+
+  "string == first branch matches" in {
+    val (_, output) = runWithBoot(
+      """extern putchar(ch: int)
+        |
+        |main() -> int
+        |    val s = "echo"
+        |    if s == "echo"
+        |        putchar('A')
+        |    else if s == "pwd"
+        |        putchar('B')
+        |    else if s == "help"
+        |        putchar('C')
+        |    else
+        |        putchar('D')
+        |    0
+        |""".stripMargin)
+    output shouldBe "A"
+  }
+
+  "string == second branch matches" in {
+    val (_, output) = runWithBoot(
+      """extern putchar(ch: int)
+        |
+        |main() -> int
+        |    val s = "pwd"
+        |    if s == "echo"
+        |        putchar('A')
+        |    else if s == "pwd"
+        |        putchar('B')
+        |    else if s == "help"
+        |        putchar('C')
+        |    else
+        |        putchar('D')
+        |    0
+        |""".stripMargin)
+    output shouldBe "B"
+  }
+
+  "string == third branch matches" in {
+    val (_, output) = runWithBoot(
+      """extern putchar(ch: int)
+        |
+        |main() -> int
+        |    val s = "help"
+        |    if s == "echo"
+        |        putchar('A')
+        |    else if s == "pwd"
+        |        putchar('B')
+        |    else if s == "help"
+        |        putchar('C')
+        |    else
+        |        putchar('D')
+        |    0
+        |""".stripMargin)
+    output shouldBe "C"
+  }
+
+  "string == third branch via argv" in {
+    val (_, output) = runWithBoot(
+      """extern putchar(ch: int)
+        |
+        |dispatch(argc: int, argv: *string)
+        |    val cmd = argv[0]
+        |    if cmd == "echo"
+        |        putchar('A')
+        |    else if cmd == "pwd"
+        |        putchar('B')
+        |    else if cmd == "help"
+        |        putchar('C')
+        |    else
+        |        putchar('D')
+        |
+        |main() -> int
+        |    var args: [4]string
+        |    args[0] = "help"
+        |    dispatch(1, args)
+        |    0
+        |""".stripMargin)
+    output shouldBe "C"
+  }
+
+  "string == fourth branch via argv" in {
+    val (_, output) = runWithBoot(
+      """extern putchar(ch: int)
+        |
+        |dispatch(argc: int, argv: *string)
+        |    val cmd = argv[0]
+        |    if cmd == "echo"
+        |        putchar('A')
+        |    else if cmd == "pwd"
+        |        putchar('B')
+        |    else if cmd == "help"
+        |        putchar('C')
+        |    else if cmd == "whoami"
+        |        putchar('D')
+        |    else
+        |        putchar('E')
+        |
+        |main() -> int
+        |    var args: [4]string
+        |    args[0] = "whoami"
+        |    dispatch(1, args)
+        |    0
+        |""".stripMargin)
+    output shouldBe "D"
+  }
+
+  "string == else branch via argv" in {
+    val (_, output) = runWithBoot(
+      """extern putchar(ch: int)
+        |
+        |dispatch(argc: int, argv: *string)
+        |    val cmd = argv[0]
+        |    if cmd == "echo"
+        |        putchar('A')
+        |    else if cmd == "pwd"
+        |        putchar('B')
+        |    else if cmd == "help"
+        |        putchar('C')
+        |    else if cmd == "whoami"
+        |        putchar('D')
+        |    else
+        |        putchar('E')
+        |
+        |main() -> int
+        |    var args: [4]string
+        |    args[0] = "foo"
+        |    dispatch(1, args)
+        |    0
+        |""".stripMargin)
+    output shouldBe "E"
+  }
+
+  "string == falls through to else" in {
+    val (_, output) = runWithBoot(
+      """extern putchar(ch: int)
+        |
+        |main() -> int
+        |    val s = "foo"
+        |    if s == "echo"
+        |        putchar('A')
+        |    else if s == "pwd"
+        |        putchar('B')
+        |    else if s == "help"
+        |        putchar('C')
+        |    else
+        |        putchar('D')
+        |    0
+        |""".stripMargin)
+    output shouldBe "D"
+  }
 }

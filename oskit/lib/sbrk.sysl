@@ -6,7 +6,7 @@ module posix.unistd
  * RAM (0x80000+), so heap ceiling is set to 0x7E000.
  */
 
-extern _heap_start: i64
+extern _heap_start: i8
 
 val HEAP_CEILING: i64 = 0x7E000
 
@@ -15,7 +15,7 @@ var _brk_initialized = false
 
 sbrk(increment: int) -> *i8
     if !_brk_initialized
-        _brk = *i8(_heap_start)
+        _brk = &_heap_start
         _brk_initialized = true
     if increment == 0
         return _brk

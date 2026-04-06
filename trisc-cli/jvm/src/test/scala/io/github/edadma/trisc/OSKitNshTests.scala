@@ -44,16 +44,16 @@ import oskit.apps.nsh
 import oskit.services.sleep
           |
           |init()
-          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
+          |    create_thread(disk_server, 0x80000, 0x80000, "disk")
           |    sleep(5)
-          |    create_thread(tfs_server, 0x84000, 0x82000, "tfs")
-          |    create_thread(tty_server, 0x88000, 0x86000, "tty")
+          |    create_thread(tfs_server, 0x90000, 0x90000, "tfs")
+          |    create_thread(tty_server, 0xA0000, 0xA0000, "tty")
           |    sleep(5)
-          |    create_thread(nsh, 0x8C000, 0x8A000, "nsh")
+          |    create_thread(nsh, 0xB0000, 0xB0000, "nsh")
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(init, 0x90000, 0x8E000, "init")
+          |    create_thread(init, 0xC0000, 0xC0000, "init")
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin,

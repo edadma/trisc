@@ -71,10 +71,9 @@ class SyslTriscCodegen(addresses: Int = 4):
         val bytes = value.getBytes("UTF-8")
         // Total: 8 (refcount) + bytes + 1 (null terminator)
         emit(s"global $label, data, ${bytes.length + 9}")
-      emit("  align 8")
       for (label, value) <- stringLiterals do
         val bytes = value.getBytes("UTF-8")
-        emit(s"  dl -1") // immortal refcount header
+        emit(s"  dl -1") // immortal refcount header (assembler auto-aligns dl)
         emit(s"$label:")
         for b <- bytes do emit(s"  db ${b & 0xff}")
         emit("  db 0") // null terminator for *i8 decay compatibility
@@ -1767,7 +1766,10 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitLoadImm(3, elemSize)
         emit("  mul r2, r2, r3")
         emit("  add r1, r1, r2")
-        emitLoad(1, 1, elemType)
+        elemType match
+          case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType | _: SyslType.SliceType | _: SyslType.EnumType =>
+            () // address is the value for aggregates
+          case _ => emitLoad(1, 1, elemType)
 
       case TIndex(array, index, elemType) if array.typ.isInstanceOf[SyslType.RefType] =>
         // &[]T indexing: data pointer at r1, length at [r1 - 8]
@@ -1795,7 +1797,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = element address
         elemType match
-          case _: SyslType.StructType | _: SyslType.ArrayType => ()
+          case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType | _: SyslType.SliceType | _: SyslType.EnumType =>
+            () // address is the value for aggregates
           case _ => emitLoad(1, 1, elemType)
 
       case TIndex(array, index, elemType) =>
@@ -1808,7 +1811,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = element address
         elemType match
-          case _: SyslType.StructType | _: SyslType.ArrayType => () // address is the value for aggregates
+          case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType | _: SyslType.SliceType | _: SyslType.EnumType =>
+            () // address is the value for aggregates
           case _ => emitLoad(1, 1, elemType) // load scalar with proper width
 
       case TArrayDecl(size, typ) =>
