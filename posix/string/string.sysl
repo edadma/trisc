@@ -18,21 +18,21 @@ strlen(s: *byte) -> int
 /* Compare two strings. Returns <0, 0, or >0. */
 strcmp(a: *byte, b: *byte) -> int
     while *a != 0 && *b != 0
-        val d = *a - *b
+        val d = int(*a) - int(*b)
 
         if d != 0 then return d
 
         a++
         b++
 
-    *a - *b
+    int(*a) - int(*b)
 
 /* Compare at most n bytes of two strings. */
 strncmp(a: *byte, b: *byte, n: int) -> int
     var i = 0
 
     while i < n && *a != 0 && *b != 0
-        val d = *a - *b
+        val d = int(*a) - int(*b)
 
         if d != 0 then return d
 
@@ -41,7 +41,7 @@ strncmp(a: *byte, b: *byte, n: int) -> int
         i++
 
     if i == n then 0
-    else *a - *b
+    else int(*a) - int(*b)
 
 /* Copy src to dst, including the null terminator. */
 strcpy(dst: *byte, src: *byte) -> *byte
@@ -235,7 +235,7 @@ memmove(dst: *byte, src: *byte, n: int) -> *byte
 /* Compare n bytes of a and b. Returns <0, 0, or >0. */
 memcmp(a: *byte, b: *byte, n: int) -> int
     for var i = 0; i < n; i++
-        val d = a[i] - b[i]
+        val d = int(a[i]) - int(b[i])
 
         if d != 0 then return d
 

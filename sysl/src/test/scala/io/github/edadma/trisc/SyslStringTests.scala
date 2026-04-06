@@ -210,7 +210,7 @@ class SyslStringTests extends SyslTestHelpers {
       """strcmp(a: *byte, b: *byte) -> int
         |    i = 0
         |    while a[i] != 0 && a[i] == b[i] do i++
-        |    a[i] - b[i]
+        |    int(a[i]) - int(b[i])
         |
         |main() -> int
         |    s1: [4]int
