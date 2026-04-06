@@ -15,7 +15,7 @@ class TFSDirTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", ".")}
-         |    val ino = tfs_dir_lookup(1, &name)
+         |    val ino = tfs_dir_lookup(1, &name, name_len)
          |    if ino == 1
          |        putchar(89)
          |    else
@@ -31,7 +31,7 @@ class TFSDirTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "..")}
-         |    val ino = tfs_dir_lookup(1, &name)
+         |    val ino = tfs_dir_lookup(1, &name, name_len)
          |    if ino == 1
          |        putchar(89)
          |    else
@@ -47,7 +47,7 @@ class TFSDirTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "dev")}
-         |    val ino = tfs_dir_lookup(1, &name)
+         |    val ino = tfs_dir_lookup(1, &name, name_len)
          |    if ino > 0
          |        putchar(89)
          |    else
@@ -63,7 +63,7 @@ class TFSDirTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "nope")}
-         |    val ino = tfs_dir_lookup(1, &name)
+         |    val ino = tfs_dir_lookup(1, &name, name_len)
          |    if ino == -1
          |        putchar(89)
          |    else
@@ -82,11 +82,11 @@ class TFSDirTests extends TFSTestHelpers {
          |    tfs_init()
          |    val ino = alloc_inode()
          |${syslBytes("name", "test")}
-         |    val r = dir_add_entry(1, &name[0], ino)
+         |    val r = dir_add_entry(1, &name[0], name_len, ino)
          |    if r == 0
          |        putchar(65)
          |    // Verify lookup finds it
-         |    val found = tfs_dir_lookup(1, &name[0])
+         |    val found = tfs_dir_lookup(1, &name[0], name_len)
          |    if found == ino
          |        putchar(66)
          |    0
@@ -101,12 +101,12 @@ class TFSDirTests extends TFSTestHelpers {
          |    tfs_init()
          |    val ino = alloc_inode()
          |${syslBytes("name", "rem")}
-         |    dir_add_entry(1, &name[0], ino)
-         |    val removed = dir_remove_entry(1, &name[0])
+         |    dir_add_entry(1, &name[0], name_len, ino)
+         |    val removed = dir_remove_entry(1, &name[0], name_len)
          |    if removed == ino
          |        putchar(65)
          |    // Verify gone
-         |    val found = tfs_dir_lookup(1, &name[0])
+         |    val found = tfs_dir_lookup(1, &name[0], name_len)
          |    if found == -1
          |        putchar(66)
          |    0
@@ -120,7 +120,7 @@ class TFSDirTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "nope")}
-         |    val r = dir_remove_entry(1, &name[0])
+         |    val r = dir_remove_entry(1, &name[0], name_len)
          |    if r == -1
          |        putchar(89)
          |    else
@@ -138,7 +138,7 @@ class TFSDirTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/")}
-         |    if tfs_lookup(&p) == 1
+         |    if tfs_lookup(&p, p_len) == 1
          |        putchar(89)
          |    else
          |        putchar(78)
@@ -153,7 +153,7 @@ class TFSDirTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/dev/tty0")}
-         |    val ino = tfs_lookup(&p)
+         |    val ino = tfs_lookup(&p, p_len)
          |    if ino > 0
          |        putchar(89)
          |    else
@@ -169,7 +169,7 @@ class TFSDirTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/nonexistent")}
-         |    if tfs_lookup(&p) == -1
+         |    if tfs_lookup(&p, p_len) == -1
          |        putchar(89)
          |    else
          |        putchar(78)

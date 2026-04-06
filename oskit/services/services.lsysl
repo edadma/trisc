@@ -21,6 +21,8 @@ Syscall numbers:
 
     module oskit.services
 
+    import oskit.kernel.{kernel_getuid, kernel_setuid}
+
     extern syscall(number: int, arg: i64) -> i64
 
     val SYS_SLEEP          = 0
@@ -157,3 +159,9 @@ Slot range: 0-3. Value range: 0 to 16777215.
 
     pimutex_unlock_sys(addr: i64)
         syscall(SYS_PIMUTEX_UNLOCK, addr)
+
+    getuid() -> int
+        kernel_getuid()
+
+    setuid(uid: int)
+        kernel_setuid(uid)

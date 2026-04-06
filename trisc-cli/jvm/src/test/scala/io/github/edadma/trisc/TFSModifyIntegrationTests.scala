@@ -18,16 +18,16 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "temp")}
-         |    tfs_create(1, &name, 1, 0x1A4)
+         |    tfs_create(1, &name, name_len, 1, 0x1A4)
          |${syslBytes("path", "/temp")}
-         |    val before = tfs_lookup(&path)
+         |    val before = tfs_lookup(&path, path_len)
          |    if before > 0
          |        putchar(66)
-         |    val result = tfs_unlink(1, &name)
+         |    val result = tfs_unlink(1, &name, name_len)
          |    if result == 0
          |        putchar(85)
          |${syslBytes("path2", "/temp")}
-         |    val after = tfs_lookup(&path2)
+         |    val after = tfs_lookup(&path2, path2_len)
          |    if after == -1
          |        putchar(71)
          |    0
@@ -44,7 +44,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "nope")}
-         |    val result = tfs_unlink(1, &name)
+         |    val result = tfs_unlink(1, &name, name_len)
          |    if result == -1
          |        putchar(89)
          |    else
@@ -65,12 +65,12 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "empty")}
-         |    tfs_create(1, &name[0], 2, 0x1ED)
-         |    val r = tfs_rmdir(1, &name[0])
+         |    tfs_create(1, &name[0], name_len, 2, 0x1ED)
+         |    val r = tfs_rmdir(1, &name[0], name_len)
          |    if r == 0
          |        putchar(82)
          |${syslBytes("path", "/empty")}
-         |    val ino = tfs_lookup(&path[0])
+         |    val ino = tfs_lookup(&path[0], path_len)
          |    if ino == -1
          |        putchar(71)
          |    0
@@ -87,10 +87,10 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("dirname", "stuff")}
-         |    val dir = tfs_create(1, &dirname[0], 2, 0x1ED)
+         |    val dir = tfs_create(1, &dirname[0], dirname_len, 2, 0x1ED)
          |${syslBytes("fname", "f")}
-         |    tfs_create(dir, &fname[0], 1, 0x1A4)
-         |    val r = tfs_rmdir(1, &dirname[0])
+         |    tfs_create(dir, &fname[0], fname_len, 1, 0x1A4)
+         |    val r = tfs_rmdir(1, &dirname[0], dirname_len)
          |    if r == -1
          |        putchar(89)
          |    else
@@ -111,19 +111,19 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "old")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |    var data: [4]i8
          |    data[0] = 88
          |    tfs_write(ino, &data[0], 0, 1)
          |${syslBytes("newname", "new")}
-         |    tfs_rename(1, &name[0], 1, &newname[0])
+         |    tfs_rename(1, &name[0], name_len, 1, &newname[0], newname_len)
          |    // Old name gone
          |${syslBytes("oldpath", "/old")}
-         |    if tfs_lookup(&oldpath[0]) == -1
+         |    if tfs_lookup(&oldpath[0], oldpath_len) == -1
          |        putchar(71)
          |    // New name works
          |${syslBytes("newpath", "/new")}
-         |    val found = tfs_lookup(&newpath[0])
+         |    val found = tfs_lookup(&newpath[0], newpath_len)
          |    if found == ino
          |        putchar(70)
          |    // Content preserved
@@ -179,17 +179,17 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "orig")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |    var data: [4]i8
          |    data[0] = 90
          |    tfs_write(ino, &data[0], 0, 1)
          |${syslBytes("link", "alias")}
-         |    tfs_link(1, &link[0], ino)
+         |    tfs_link(1, &link[0], link_len, ino)
          |    // Both names resolve to same inode
          |${syslBytes("p1", "/orig")}
          |${syslBytes("p2", "/alias")}
-         |    val i1 = tfs_lookup(&p1[0])
-         |    val i2 = tfs_lookup(&p2[0])
+         |    val i1 = tfs_lookup(&p1[0], p1_len)
+         |    val i2 = tfs_lookup(&p2[0], p2_len)
          |    if i1 == i2
          |        putchar(69)
          |    // nlinks should be 2
@@ -216,9 +216,9 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("path", "/dev")}
-         |    val dev_ino = tfs_lookup(&path[0])
+         |    val dev_ino = tfs_lookup(&path[0], path_len)
          |${syslBytes("name", "devlink")}
-         |    val r = tfs_link(1, &name[0], dev_ino)
+         |    val r = tfs_link(1, &name[0], name_len, dev_ino)
          |    if r == -1
          |        putchar(89)
          |    else
@@ -239,7 +239,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "script")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |    // Initially 0644 (rw-r--r--)
          |    var stat: [7]int
          |    tfs_stat(ino, &stat[0])
@@ -267,7 +267,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "d")}
-         |    val ino = tfs_create(1, &name[0], 2, 0x1ED)
+         |    val ino = tfs_create(1, &name[0], name_len, 2, 0x1ED)
          |    tfs_chmod(ino, 0x1FF)
          |    var stat: [7]int
          |    tfs_stat(ino, &stat[0])
@@ -293,7 +293,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "owned")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |    // Initially uid=0 gid=0
          |    var stat: [7]int
          |    tfs_stat(ino, &stat[0])
@@ -329,7 +329,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |        putchar(73)
          |    // Create a file with data — should use 1 inode + 1 block
          |${syslBytes("name", "f")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |    var data: [4]i8
          |    data[0] = 65
          |    tfs_write(ino, &data[0], 0, 1)
@@ -355,9 +355,9 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("path", "/dev")}
-         |    val dev_dir = tfs_lookup(&path)
+         |    val dev_dir = tfs_lookup(&path, path_len)
          |${syslBytes("name", "test")}
-         |    val ino = tfs_mknod(dev_dir, &name, 3, 7, 2)
+         |    val ino = tfs_mknod(dev_dir, &name, name_len, 3, 7, 2)
          |    if ino > 0
          |        putchar(67)
          |    var stat: [7]int
@@ -365,7 +365,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |    if (stat[0] >> 12) == 3
          |        putchar(84)
          |${syslBytes("fullpath", "/dev/test")}
-         |    val found = tfs_lookup(&fullpath)
+         |    val found = tfs_lookup(&fullpath, fullpath_len)
          |    if found == ino
          |        putchar(76)
          |    0
@@ -384,7 +384,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "big")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |    var data: [8]i8
          |    data[0] = 65
          |    data[1] = 66
@@ -419,7 +419,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |    var data: [4]i8
          |    data[0] = 65
          |    tfs_write(ino, &data[0], 0, 1)

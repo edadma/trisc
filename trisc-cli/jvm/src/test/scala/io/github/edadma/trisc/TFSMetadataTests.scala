@@ -15,7 +15,7 @@ class TFSMetadataTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "c")}
-         |    val ino = tfs_mknod(1, &name[0], 3, 7, 2)
+         |    val ino = tfs_mknod(1, &name[0], name_len, 3, 7, 2)
          |    if ino > 0
          |        putchar(65)
          |    var stat: [7]int
@@ -43,7 +43,7 @@ class TFSMetadataTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |    tfs_chmod(ino, 0x1FF)
          |    var stat: [7]int
          |    tfs_stat(ino, &stat[0])
@@ -64,7 +64,7 @@ class TFSMetadataTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |    tfs_chown(ino, 3, 7)
          |    var stat: [7]int
          |    tfs_stat(ino, &stat[0])
@@ -85,13 +85,13 @@ class TFSMetadataTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |    var stat: [7]int
          |    tfs_stat(ino, &stat[0])
          |    if stat[1] == 1
          |        putchar(65)
          |${syslBytes("link", "l")}
-         |    tfs_link(1, &link[0], ino)
+         |    tfs_link(1, &link[0], link_len, ino)
          |    tfs_stat(ino, &stat[0])
          |    if stat[1] == 2
          |        putchar(66)
@@ -108,8 +108,8 @@ class TFSMetadataTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}
-         |    tfs_create(1, &name[0], 1, 0x1A4)
-         |    val r = tfs_rmdir(1, &name[0])
+         |    tfs_create(1, &name[0], name_len, 1, 0x1A4)
+         |    val r = tfs_rmdir(1, &name[0], name_len)
          |    if r == -1
          |        putchar(89)
          |    else
@@ -128,7 +128,7 @@ class TFSMetadataTests extends TFSTestHelpers {
          |    tfs_init()
          |${syslBytes("old", "nope")}
          |${syslBytes("newn", "also_nope")}
-         |    val r = tfs_rename(1, &old[0], 1, &newn[0])
+         |    val r = tfs_rename(1, &old[0], old_len, 1, &newn[0], newn_len)
          |    if r == -1
          |        putchar(89)
          |    else
@@ -144,16 +144,16 @@ class TFSMetadataTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "a")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |${syslBytes("newn", "b")}
-         |    val r = tfs_rename(1, &name[0], 1, &newn[0])
+         |    val r = tfs_rename(1, &name[0], name_len, 1, &newn[0], newn_len)
          |    if r == 0
          |        putchar(82)
          |    // Old gone
-         |    if tfs_dir_lookup(1, &name[0]) == -1
+         |    if tfs_dir_lookup(1, &name[0], name_len) == -1
          |        putchar(71)
          |    // New found
-         |    if tfs_dir_lookup(1, &newn[0]) == ino
+         |    if tfs_dir_lookup(1, &newn[0], newn_len) == ino
          |        putchar(70)
          |    0
          |""".stripMargin, prefill = prefill)
@@ -166,11 +166,11 @@ class TFSMetadataTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "d")}
-         |    tfs_create(1, &name[0], 2, 0x1ED)
-         |    val r = tfs_rmdir(1, &name[0])
+         |    tfs_create(1, &name[0], name_len, 2, 0x1ED)
+         |    val r = tfs_rmdir(1, &name[0], name_len)
          |    if r == 0
          |        putchar(82)
-         |    if tfs_dir_lookup(1, &name[0]) == -1
+         |    if tfs_dir_lookup(1, &name[0], name_len) == -1
          |        putchar(71)
          |    0
          |""".stripMargin, prefill = prefill)
@@ -183,9 +183,9 @@ class TFSMetadataTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "d")}
-         |    val ino = tfs_create(1, &name[0], 2, 0x1ED)
+         |    val ino = tfs_create(1, &name[0], name_len, 2, 0x1ED)
          |${syslBytes("link", "dl")}
-         |    val r = tfs_link(1, &link[0], ino)
+         |    val r = tfs_link(1, &link[0], link_len, ino)
          |    if r == -1
          |        putchar(89)
          |    else
