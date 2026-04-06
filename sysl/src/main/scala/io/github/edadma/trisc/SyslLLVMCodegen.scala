@@ -4,6 +4,8 @@ import scala.collection.mutable
 
 class SyslLLVMCodegen:
   private val out = new StringBuilder
+  private val stringConstants = new mutable.LinkedHashMap[String, (String, Int)] // value -> (label, byte length including null)
+  private var stringCounter = 0
   private var regCounter = 0
   private var labelCounter = 0
 
@@ -15,6 +17,14 @@ class SyslLLVMCodegen:
     labelCounter += 1
     s"${prefix}_$labelCounter"
 
+  private def internString(s: String): (String, Int) =
+    stringConstants.getOrElseUpdate(s, {
+      stringCounter += 1
+      val label = s"@.str.$stringCounter"
+      val byteLen = s.getBytes("UTF-8").length + 1 // +1 for null terminator
+      (label, byteLen)
+    })
+
   private case class LocalVar(name: String, reg: String, typ: SyslType)
 
   private var locals: mutable.LinkedHashMap[String, LocalVar] = null
@@ -23,13 +33,11 @@ class SyslLLVMCodegen:
 
   def generate(program: TProgram): String =
     out.clear()
+    stringConstants.clear()
+    stringCounter = 0
 
-    // Declare external C functions
-    emit("declare i32 @putchar(i32)")
-    emit("declare i32 @printf(i8*, ...)")
-    emit("")
-
-    // Generate functions
+    // Generate functions into a buffer so string constants are collected first
+    out.clear()
     for decl <- program.decls do
       decl match
         case _: TModuleDecl => // skip
@@ -43,6 +51,33 @@ class SyslLLVMCodegen:
         case TVarDecl(name, typ, _, _) =>
           emit(s"@$name = global ${llvmType(typ)} 0")
     emit("")
+    val funcCode = out.toString
+
+    // Now build final output with string constants at the top
+    out.clear()
+
+    // Declare external C functions
+    emit("declare i32 @putchar(i32)")
+    emit("declare i32 @printf(i8*, ...)")
+    emit("declare i32 @puts(i8*)")
+    emit("")
+
+    // Emit string constants
+    for (s, (label, byteLen)) <- stringConstants do
+      val escaped = s.flatMap {
+        case '\n' => "\\0A"
+        case '\r' => "\\0D"
+        case '\t' => "\\09"
+        case '\\' => "\\5C"
+        case '"'  => "\\22"
+        case '\u0000' => "\\00"
+        case c    => c.toString
+      }
+      emit(s"""$label = private unnamed_addr constant [$byteLen x i8] c"$escaped\\00"""")
+    if stringConstants.nonEmpty then emit("")
+
+    // Append function code
+    out ++= funcCode
 
     out.toString
 
@@ -174,6 +209,12 @@ class SyslLLVMCodegen:
       case TBoolLit(true, _) => "1"
       case TBoolLit(false, _) => "0"
 
+      case TStringLit(s, _) =>
+        val (label, byteLen) = internString(s)
+        val r = newReg()
+        emit(s"  $r = getelementptr [$byteLen x i8], [$byteLen x i8]* $label, i32 0, i32 0")
+        r
+
       case TVarRef(name, _) =>
         if locals.contains(name) then
           val local = locals(name)
@@ -293,6 +334,12 @@ class SyslLLVMCodegen:
         emit(s"""  $result = call i32 (i8*, ...) @printf(i8* getelementptr ([5 x i8], [5 x i8]* @.fmt_dn, i32 0, i32 0), $vt $v)""")
         "0"
 
+      case TCall("puts", List(arg), _) =>
+        val v = genExpr(arg)
+        val result = newReg()
+        emit(s"  $result = call i32 @puts(i8* $v)")
+        "0"
+
       case TCall(name, args, _) =>
         val argVals = args.map(a => (genExpr(a), exprType(a)))
         val argStr = argVals.map((v, vt) => s"$vt $v").mkString(", ")
@@ -368,7 +415,8 @@ class SyslLLVMCodegen:
     case SyslType.UIntType(w) => s"i$w"  // LLVM uses same integer type for signed/unsigned
     case SyslType.BoolType => "i8"
     case SyslType.VoidType => "void"
-    case SyslType.PtrType(_) => "i64"
+    case SyslType.StringType => "i8*"
+    case SyslType.PtrType(_) => "i8*"
     case _ => "i64"
 
   private def emit(line: String): Unit =
