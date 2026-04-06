@@ -333,3 +333,202 @@ Top-level parse entry point
             p.set_error("unexpected character")
 
         (root, p.nodes, p.classes, p.n_groups, p.err, p.err_msg, p.err_pos)
+
+
+Tests
+-----
+
+Parser tests verify that patterns produce the expected AST
+structure. We call `parse_bre` and inspect the returned node
+array.
+
+
+### Single literal
+
+    #test
+    test_parse_literal() -> void
+        root, nodes, _, _, err, _, _ = parse_bre("a")
+
+        assert(!err, "no error")
+        assert(root == 0, "root is node 0")
+        assert(len(nodes) == 1, "one node")
+        assert(nodes[0].kind == NK_LITERAL, "literal node")
+        assert(nodes[0].ch == int('a'), "char is 'a'")
+
+
+### Dot
+
+    #test
+    test_parse_dot() -> void
+        root, nodes, _, _, err, _, _ = parse_bre(".")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_DOT, "dot node")
+
+
+### Anchors
+
+    #test
+    test_parse_anchor_start() -> void
+        root, nodes, _, _, err, _, _ = parse_bre("^a")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_SEQ, "seq node")
+        assert(nodes[nodes[root].left].kind == NK_ANCHOR_START, "^ anchor")
+
+    #test
+    test_parse_anchor_end() -> void
+        root, nodes, _, _, err, _, _ = parse_bre("a$")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_SEQ, "seq node")
+        assert(nodes[nodes[root].right].kind == NK_ANCHOR_END, "$ anchor")
+
+
+### Concatenation
+
+    #test
+    test_parse_concat() -> void
+        root, nodes, _, _, err, _, _ = parse_bre("abc")
+
+        assert(!err, "no error")
+        /* abc → SEQ(SEQ(a, b), c) */
+        assert(nodes[root].kind == NK_SEQ, "outer seq")
+
+        val left = nodes[root].left
+
+        assert(nodes[left].kind == NK_SEQ, "inner seq")
+        assert(nodes[nodes[left].left].kind == NK_LITERAL, "a")
+        assert(nodes[nodes[left].left].ch == int('a'), "char a")
+        assert(nodes[nodes[left].right].kind == NK_LITERAL, "b")
+        assert(nodes[nodes[root].right].kind == NK_LITERAL, "c")
+
+
+### Star quantifier
+
+    #test
+    test_parse_star() -> void
+        root, nodes, _, _, err, _, _ = parse_bre("a*")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_STAR, "star node")
+        assert(nodes[nodes[root].left].kind == NK_LITERAL, "child is literal")
+        assert(nodes[nodes[root].left].ch == int('a'), "child is 'a'")
+
+
+### Capture group
+
+    #test
+    test_parse_capture() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_bre("\\(a\\)")
+
+        assert(!err, "no error")
+        assert(n_groups == 1, "one capture group")
+        assert(nodes[root].kind == NK_CAPTURE, "capture node")
+        assert(nodes[root].extra == 1, "group 1")
+        assert(nodes[nodes[root].left].kind == NK_LITERAL, "inner literal")
+
+
+### Nested captures
+
+    #test
+    test_parse_nested_capture() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_bre("\\(a\\(b\\)\\)")
+
+        assert(!err, "no error")
+        assert(n_groups == 2, "two capture groups")
+        assert(nodes[root].kind == NK_CAPTURE, "outer capture")
+        assert(nodes[root].extra == 1, "outer is group 1")
+
+
+### Character class
+
+    #test
+    test_parse_class() -> void
+        root, nodes, classes, _, err, _, _ = parse_bre("[abc]")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_CLASS, "class node")
+        assert(len(classes) == 1, "one class")
+        assert(len(classes[0].ranges) == 3, "three single-char ranges")
+        assert(!classes[0].negated, "not negated")
+
+
+### Negated character class
+
+    #test
+    test_parse_negated_class() -> void
+        root, nodes, classes, _, err, _, _ = parse_bre("[^ab]")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_CLASS, "class node")
+        assert(classes[0].negated, "negated")
+
+
+### Character range in class
+
+    #test
+    test_parse_class_range() -> void
+        _, _, classes, _, err, _, _ = parse_bre("[a-z]")
+
+        assert(!err, "no error")
+        assert(len(classes[0].ranges) == 1, "one range")
+        assert(classes[0].ranges[0].lo == int('a'), "lo is a")
+        assert(classes[0].ranges[0].hi == int('z'), "hi is z")
+
+
+### Escaped characters
+
+    #test
+    test_parse_escaped_dot() -> void
+        root, nodes, _, _, err, _, _ = parse_bre("\\.")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_LITERAL, "literal node")
+        assert(nodes[root].ch == int('.'), "char is '.'")
+
+    #test
+    test_parse_escaped_star() -> void
+        root, nodes, _, _, err, _, _ = parse_bre("\\*")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_LITERAL, "literal node")
+        assert(nodes[root].ch == int('*'), "char is '*'")
+
+
+### Error cases
+
+    #test
+    test_parse_unterminated_class() -> void
+        _, _, _, _, err, msg, _ = parse_bre("[abc")
+
+        assert(err, "error set")
+
+    #test
+    test_parse_unterminated_group() -> void
+        _, _, _, _, err, msg, _ = parse_bre("\\(abc")
+
+        assert(err, "error set")
+
+    #test
+    test_parse_trailing_backslash() -> void
+        _, _, _, _, err, _, _ = parse_bre("abc\\")
+
+        assert(err, "error set")
+
+
+### Complex patterns
+
+    #test
+    test_parse_email_like() -> void
+        _, _, _, n_groups, err, _, _ = parse_bre("[a-z]*@[a-z]*\\.[a-z]*")
+
+        assert(!err, "no error")
+        assert(n_groups == 0, "no captures")
+
+    #test
+    test_parse_empty() -> void
+        root, nodes, _, _, err, _, _ = parse_bre("")
+
+        assert(!err, "no error")
+        assert(root == -1, "empty pattern")

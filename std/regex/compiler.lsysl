@@ -196,3 +196,130 @@ match) and appends the `Match` instruction.
         c.emit(OP_MATCH, 0, 0)
 
         c.insts
+
+
+Tests
+-----
+
+Compiler tests verify the instruction sequences produced for
+known AST structures. We use `parse_bre` to build the AST,
+then `compile` to produce bytecode, and inspect the
+instruction array.
+
+    import std.regex.parser.{parse_bre}
+
+
+### Single literal produces Char instruction
+
+    #test
+    test_compile_literal() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_bre("a")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        /* Expected: Save 0, Char 'a', Save 1, Match */
+        assert(len(insts) == 4, s"4 instructions, got ${len(insts)}")
+        assert(insts[0].op == OP_SAVE, "save 0")
+        assert(insts[0].arg1 == 0, "slot 0")
+        assert(insts[1].op == OP_CHAR, "char")
+        assert(insts[1].arg1 == int('a'), "char a")
+        assert(insts[2].op == OP_SAVE, "save 1")
+        assert(insts[2].arg1 == 1, "slot 1")
+        assert(insts[3].op == OP_MATCH, "match")
+
+
+### Dot produces Any instruction
+
+    #test
+    test_compile_dot() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_bre(".")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        assert(insts[1].op == OP_ANY, "any")
+
+
+### Concatenation produces sequential instructions
+
+    #test
+    test_compile_concat() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_bre("ab")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        /* Save 0, Char 'a', Char 'b', Save 1, Match */
+        assert(len(insts) == 5, s"5 instructions, got ${len(insts)}")
+        assert(insts[1].op == OP_CHAR, "char a")
+        assert(insts[1].arg1 == int('a'), "a")
+        assert(insts[2].op == OP_CHAR, "char b")
+        assert(insts[2].arg1 == int('b'), "b")
+
+
+### Star produces Split/Jump loop
+
+    #test
+    test_compile_star() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_bre("a*")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        /* Save 0, Split(2,4), Char 'a', Jump(1), Save 1, Match */
+        assert(insts[1].op == OP_SPLIT, "split")
+        assert(insts[2].op == OP_CHAR, "char in loop")
+        assert(insts[3].op == OP_JUMP, "jump back")
+        assert(insts[3].arg1 == 1, "jumps to split")
+
+
+### Capture group produces Save pair
+
+    #test
+    test_compile_capture() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_bre("\\(a\\)")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        /* Save 0, Save 2, Char 'a', Save 3, Save 1, Match */
+        assert(insts[1].op == OP_SAVE, "group 1 open")
+        assert(insts[1].arg1 == 2, "slot 2")
+        assert(insts[2].op == OP_CHAR, "literal")
+        assert(insts[3].op == OP_SAVE, "group 1 close")
+        assert(insts[3].arg1 == 3, "slot 3")
+
+
+### Anchors produce anchor instructions
+
+    #test
+    test_compile_anchors() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_bre("^a$")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        assert(insts[1].op == OP_ANCHOR_START, "anchor start")
+        assert(insts[2].op == OP_CHAR, "char")
+        assert(insts[3].op == OP_ANCHOR_END, "anchor end")
+
+
+### Character class produces Class instruction
+
+    #test
+    test_compile_class() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_bre("[abc]")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        assert(insts[1].op == OP_CLASS, "class check")
+        assert(insts[1].arg1 == 0, "class index 0")

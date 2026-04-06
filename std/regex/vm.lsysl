@@ -227,3 +227,160 @@ leftmost semantics).
             if len(current) == 0 && matched then break
 
         Match(best_starts, best_ends, n_groups + 1)
+
+
+Tests
+-----
+
+End-to-end tests: parse a BRE pattern, compile to bytecode,
+execute against an input string, and verify match results.
+
+> **Note:** These tests are blocked until recursive function
+> calls work in the interpreter (`add_thread` calls itself
+> for epsilon transitions). They are written now so they're
+> ready to run once the fix lands.
+
+    import std.regex.parser.{parse_bre}
+    import std.regex.compiler.{compile}
+
+
+### Helper
+
+A convenience function that parses, compiles, and executes
+in one step, returning the Match result.
+
+    match_bre(pattern: string, input: string) -> Match
+        root, nodes, classes, n_groups, err, _, _ = parse_bre(pattern)
+
+        assert(!err, s"pattern '$pattern' should parse")
+
+        val insts = compile(root, nodes, n_groups)
+
+        exec(insts, classes, input, n_groups)
+
+
+### Literal match
+
+    #test
+    test_match_literal() -> void
+        val m = match_bre("hello", "say hello world")
+
+        assert(m.matched(), "should match")
+
+        start, end = m.group(0)
+
+        assert(start == 4, s"start=4, got $start")
+        assert(end == 9, s"end=9, got $end")
+
+
+### Dot matches any character
+
+    #test
+    test_match_dot() -> void
+        val m = match_bre("h.llo", "hello")
+
+        assert(m.matched(), "should match")
+
+        start, _ = m.group(0)
+
+        assert(start == 0, "starts at 0")
+
+
+### Anchored match
+
+    #test
+    test_match_anchored() -> void
+        val m = match_bre("^hello$", "hello")
+
+        assert(m.matched(), "anchored match")
+
+    #test
+    test_match_anchored_fail() -> void
+        val m = match_bre("^hello$", "say hello")
+
+        assert(!m.matched(), "anchored should not match")
+
+
+### Star — zero or more
+
+    #test
+    test_match_star_zero() -> void
+        val m = match_bre("^ab*c$", "ac")
+
+        assert(m.matched(), "b* matches zero b's")
+
+    #test
+    test_match_star_many() -> void
+        val m = match_bre("^ab*c$", "abbbc")
+
+        assert(m.matched(), "b* matches three b's")
+
+
+### Capture groups
+
+    #test
+    test_match_capture() -> void
+        val m = match_bre("\\(hello\\)", "say hello world")
+
+        assert(m.matched(), "should match")
+        assert(m.n_groups == 2, "group 0 + group 1")
+
+        start, end = m.group(1)
+
+        assert(start == 4, s"group 1 start=4, got $start")
+        assert(end == 9, s"group 1 end=9, got $end")
+
+
+### Character class
+
+    #test
+    test_match_class() -> void
+        val m = match_bre("[aeiou]", "hello")
+
+        assert(m.matched(), "should match vowel")
+
+        start, _ = m.group(0)
+
+        assert(start == 1, "first vowel at 1 (e)")
+
+
+### No match
+
+    #test
+    test_no_match() -> void
+        val m = match_bre("xyz", "hello")
+
+        assert(!m.matched(), "should not match")
+
+
+### Leftmost-longest
+
+    #test
+    test_leftmost_longest() -> void
+        val m = match_bre("a*", "aaa")
+
+        assert(m.matched(), "should match")
+
+        start, end = m.group(0)
+
+        assert(start == 0, "leftmost")
+        assert(end == 3, s"longest: end=3, got $end")
+
+
+### Complex pattern
+
+    #test
+    test_match_complex() -> void
+        val m = match_bre("^\\([a-z]*\\)@\\([a-z]*\\)$", "user@host")
+
+        assert(m.matched(), "should match")
+
+        s1, e1 = m.group(1)
+
+        assert(s1 == 0, "group 1 start")
+        assert(e1 == 4, "group 1 end")
+
+        s2, e2 = m.group(2)
+
+        assert(s2 == 5, "group 2 start")
+        assert(e2 == 9, "group 2 end")
