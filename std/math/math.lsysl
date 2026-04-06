@@ -1,16 +1,13 @@
-std.math — Numeric functions
-==============================
+std.math — Integer numeric functions
+======================================
 
 The `std.math` module provides common mathematical operations
-on integers and floating-point values. It covers the basics
-that systems code and general-purpose programs reach for
-constantly: absolute value, clamping, min/max, power, and
-integer division helpers.
+on integers and floating-point values across multiple source
+files:
 
-Floating-point functions (`sqrt`, `sin`, `cos`, etc.) are
-deferred until the TRISC float instruction set and Sysl's
-`f64` runtime are exercised more thoroughly. This module
-starts with the integer operations that are useful today.
+- `math.lsysl` (this file) — integer operations
+- `float.lsysl` — floating-point operations backed by TRISC
+  hardware float instructions
 
 Dependencies: none.
 
@@ -74,17 +71,17 @@ is unspecified.
 
 ### pow
 
-`pow(base, exp)` computes integer exponentiation via repeated
-squaring. `exp` must be non-negative; negative exponents
+`pow(base, n)` computes integer exponentiation via repeated
+squaring. `n` must be non-negative; negative exponents
 return `0` (integer truncation of the true result). `pow(0, 0)`
 returns `1` by convention.
 
-    pow(base: int, exp: int) -> int
-        if exp < 0 then return 0
+    pow(base: int, n: int) -> int
+        if n < 0 then return 0
 
         var result = 1
         var b = base
-        var e = exp
+        var e = n
 
         while e > 0
             if e & 1 == 1 then result = result * b
