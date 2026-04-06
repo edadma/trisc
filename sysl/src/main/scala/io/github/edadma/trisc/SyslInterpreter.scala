@@ -56,7 +56,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private def matchPattern(pat: TMatchPattern, value: Value, env: Env): Boolean =
     pat match
       case TWildcard => true
-      case TValuePattern(expr) => toLong(evalAny(expr, env)) == toLong(value)
+      case TValuePattern(expr) =>
+        val pv = evalAny(expr, env)
+        // String comparison must be structural (byte-for-byte), not pointer-based.
+        (pv, value) match
+          case (RefStringVal(lb, ll, _), RefStringVal(rb, rl, _)) =>
+            java.util.Arrays.equals(lb, 0, ll, rb, 0, rl)
+          case _ => toLong(pv) == toLong(value)
       case TRangePattern(low, high) =>
         val v = toLong(value)
         v >= toLong(evalAny(low, env)) && v <= toLong(evalAny(high, env))
@@ -388,7 +394,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case ArrVal(c, o) => (c, o)
           case RefVal(c, _, _) => (c, 0)
           case other => throw RuntimeError(s"cannot destructure $other")
-        for (name, i) <- names.zipWithIndex do
+        for (name, i) <- names.zipWithIndex if name != "_" do
           env(name) = new Cell(cells(off + i).value)
 
       case TDestructureAssignStmt(names, _, init) =>
@@ -398,7 +404,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case RefVal(c, _, _) => (c, 0)
           case other => throw RuntimeError(s"cannot destructure $other")
         val values = names.indices.map(i => cells(off + i).value)
-        for (name, v) <- names.zip(values) do
+        for (name, v) <- names.zip(values) if name != "_" do
           lookupCell(name, env).value = v
 
       case TAssignStmt(target, value) =>

@@ -13,6 +13,10 @@ class SyslAnalyzer:
   private val functions = new mutable.LinkedHashMap[String, FunInfo]
   private val structTypes = new mutable.LinkedHashMap[String, SyslType.StructType]
   private val enumTypes = new mutable.LinkedHashMap[String, Map[String, Long]]  // enum name → (member name → value)
+  // Simple enums registered as EnumType so they can appear in type positions.
+  // Distinct from dataEnumTypes because simple-enum `Name.Member` access still
+  // lowers to TIntLit (integer constant), not TEnumConstruct.
+  private val simpleEnumTypes = new mutable.LinkedHashMap[String, SyslType.EnumType]
   private val dataEnumTypes = new mutable.LinkedHashMap[String, SyslType.EnumType]  // data enum name → EnumType
   private val variantToEnum = new mutable.LinkedHashMap[String, (SyslType.EnumType, Int)]  // variant name → (enum type, variant index)
   private val typeAliases = new mutable.LinkedHashMap[String, TypeAST]  // alias name → target type AST
@@ -40,6 +44,8 @@ class SyslAnalyzer:
   private val genericEnumInstantiations = new mutable.LinkedHashMap[(String, List[SyslType]), SyslType.EnumType]
   // variant name -> (generic enum name, variant index) for generic enum variants
   private val genericVariantToEnum = new mutable.LinkedHashMap[String, (String, Int)]
+  // Reverse map: mangled enum name -> (template name, concrete type args) for unification at call sites
+  private val enumToTemplate = new mutable.LinkedHashMap[String, (String, List[SyslType])]
 
   // Expected type for bidirectional inference (used by generic variant constructors)
   private var currentExpected: Option[SyslType] = None
@@ -193,6 +199,19 @@ class SyslAnalyzer:
             (memberName, value)
           }
           enumTypes(name) = resolved.toMap
+          // Also register as an EnumType so it can appear in type positions
+          // (e.g. `Result[int, TestError]`). Variants carry no payload.
+          val variants = resolved.map((vname, _) => (vname, Nil: List[(String, SyslType)]))
+          val et: SyslType.EnumType = SyslType.EnumType(name, variants)
+          simpleEnumTypes(name) = et
+          // Register bare variant names as constructors, so `NotFound` produces
+          // a TEnumConstruct value usable where `TestError` is expected.
+          // `TestError.NotFound` (qualified access) still yields the integer
+          // constant via the enumTypes path for backward compatibility.
+          for ((vname, _), idx) <- variants.zipWithIndex do
+            if variantToEnum.contains(vname) || genericVariantToEnum.contains(vname) then
+              throw AnalysisError(s"duplicate variant name: '$vname'")
+            variantToEnum(vname) = (et, idx)
         case de @ DataEnumDeclAST(name, variants, typeParams, _) =>
           if typeParams.nonEmpty then
             // Generic enum: store template, don't resolve fields
@@ -403,6 +422,7 @@ class SyslAnalyzer:
       case name if typeAliases.contains(name) => resolveType(typeAliases(name))
       case name if structTypes.contains(name) => structTypes(name)
       case name if dataEnumTypes.contains(name) => dataEnumTypes(name)
+      case name if simpleEnumTypes.contains(name) => simpleEnumTypes(name)
       case other => throw AnalysisError(s"unknown type: '$other'")
     case PtrTypeAST(inner) => PtrType(resolveType(inner))
     case ArrayTypeAST(size, elem) => ArrayType(resolveType(elem), size)
@@ -535,6 +555,11 @@ class SyslAnalyzer:
             case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
               for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
             case _ => ()
+        case SyslType.EnumType(argName, _) =>
+          enumToTemplate.get(argName) match
+            case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
+              for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
+            case _ => ()
         case _ => ()
       case _ => () // concrete parameter type, nothing to infer
 
@@ -608,6 +633,7 @@ class SyslAnalyzer:
           val et: SyslType.EnumType = SyslType.EnumType(mangled, resolvedVariants)
           genericEnumInstantiations(cacheKey) = et
           dataEnumTypes(mangled) = et
+          enumToTemplate(mangled) = (name, typeArgs)
           specializedDecls += TDataEnumDecl(mangled, et)
           et
         finally typeEnv = savedEnv
@@ -749,9 +775,14 @@ class SyslAnalyzer:
         val tInit = coerceLiteral(tInit0, declType)
         if typOpt.isDefined && !compatible(tInit.typ, declType) then
           throw AnalysisError(s"cannot assign ${tInit.typ} to $declType variable '$name'")
-        if scopeStack != null then
-          currentScope(name) = SymInfo(name, declType, isMutable)
-        TVarStmt(name, declType, tInit)
+        // `_` is a discard binding: evaluate the initializer for its side effects
+        // but don't bind any name. Multiple `_`s in the same scope don't collide.
+        if name == "_" then
+          TExprStmt(tInit)
+        else
+          if scopeStack != null then
+            currentScope(name) = SymInfo(name, declType, isMutable)
+          TVarStmt(name, declType, tInit)
 
       case DestructureStmtAST(names, init, isMutable) =>
         val tInit = analyzeExpr(init)
@@ -763,17 +794,18 @@ class SyslAnalyzer:
           case other => throw AnalysisError(s"cannot destructure non-struct type $other")
         if names.length != st.fields.length then
           throw AnalysisError(s"destructuring expects ${st.fields.length} names, got ${names.length}")
-        // Check if this is declaration or assignment (when no val/var prefix)
-        val existingCount = names.count(n => tryLookup(n).isDefined)
+        // `_` names are discards — don't bind, don't count for existing/new check.
+        val realNames = names.filter(_ != "_")
+        val existingCount = realNames.count(n => tryLookup(n).isDefined)
         if isMutable || existingCount == 0 then
-          // Declaration: create new variables
-          for (name, (_, fieldType)) <- names.zip(st.fields) do
+          // Declaration: create new variables (skip `_`)
+          for (name, (_, fieldType)) <- names.zip(st.fields) if name != "_" do
             if scopeStack != null then
               currentScope(name) = SymInfo(name, fieldType, isMutable)
           TDestructureStmt(names, st.fields.map(_._2), tInit)
-        else if existingCount == names.length then
-          // All exist: parallel assignment
-          for name <- names do
+        else if existingCount == realNames.length then
+          // All real names exist: parallel assignment (skip `_`)
+          for name <- realNames do
             val sym = lookup(name)
             if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$name'")
           TDestructureAssignStmt(names, st.fields.map(_._2), tInit)
@@ -1065,6 +1097,8 @@ class SyslAnalyzer:
           case _ => TIntLit(0, t)  // zero-initialize scalars and pointers
 
       case VarRefAST(name) =>
+        if name == "_" then
+          throw AnalysisError("cannot read from '_' — it is a write-only discard binding")
         // Check if name is a function (used as a value = function pointer)
         if functions.contains(name) then
           val f = functions(name)

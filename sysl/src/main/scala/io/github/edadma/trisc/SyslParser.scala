@@ -298,10 +298,11 @@ class SyslParser extends StandardTokenParsers {
     asmStmt | forStmt | doWhileStmt | whileStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
 
   lazy val destructureStmt: Parser[DestructureStmtAST] =
-    mutability ~ ("(" ~> rep1sep(ident, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case mut ~ names ~ init => DestructureStmtAST(names, init, mut) } |
-      ("(" ~> rep1sep(ident, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case names ~ init => DestructureStmtAST(names, init) } |
-      mutability ~ ident ~ ("," ~> rep1sep(ident, ",")) ~ ("=" ~> tupleExpr) ^^ { case mut ~ first ~ rest ~ init => DestructureStmtAST(first :: rest, init, mut) } |
-      ident ~ ("," ~> rep1sep(ident, ",")) ~ ("=" ~> tupleExpr) ^^ { case first ~ rest ~ init => DestructureStmtAST(first :: rest, init) }
+    mutability ~ ("(" ~> rep1sep(bindName, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case mut ~ names ~ init => DestructureStmtAST(names, init, mut) } |
+      ("(" ~> rep1sep(bindName, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case names ~ init => DestructureStmtAST(names, init) } |
+      mutability ~ bindName ~ ("," ~> rep1sep(bindName, ",")) ~ ("=" ~> tupleExpr) ^^ { case mut ~ first ~ rest ~ init => DestructureStmtAST(first :: rest, init, mut) } |
+      "_" ~ ("," ~> rep1sep(bindName, ",")) ~ ("=" ~> tupleExpr) ^^ { case _ ~ rest ~ init => DestructureStmtAST("_" :: rest, init) } |
+      ident ~ ("," ~> rep1sep(bindName, ",")) ~ ("=" ~> tupleExpr) ^^ { case first ~ rest ~ init => DestructureStmtAST(first :: rest, init) }
 
   lazy val breakStmt: Parser[BreakStmtAST] =
     "break" ^^^ BreakStmtAST()
@@ -351,8 +352,10 @@ class SyslParser extends StandardTokenParsers {
             val fullLvalue = IndexAST(base, idx)
             IndexAssignStmtAST(base, idx, BinaryAST(fullLvalue, op, value))
 
+  lazy val bindName: Parser[String] = ident | "_"
+
   lazy val identStmt: Parser[StmtAST] =
-    mutability ~ ident ~ (":" ~> typeExpr) ~ ("=" ~> tupleExpr) ^^ { case mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut) } |
+    mutability ~ bindName ~ (":" ~> typeExpr) ~ ("=" ~> tupleExpr) ^^ { case mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut) } |
       mutability ~ ident ~ (":" ~> typeExpr) ^^ { case mut ~ name ~ t =>
         val size = t match { case ArrayTypeAST(s, _) => s; case _ => 0 }
         VarStmtAST(name, Some(t), ArrayDeclAST(size, t), mut)
@@ -360,8 +363,8 @@ class SyslParser extends StandardTokenParsers {
       mutability ~ ident ~ (":" ~> typeRef) ~ not("=") ^^ { case mut ~ name ~ t ~ _ =>
         VarStmtAST(name, Some(t), UninitDeclAST(t), mut)
       } |
-      mutability ~ ident ~ (":" ~> typeRef) ~ ("=" ~> tupleExpr) ^^ { case mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut) } |
-      mutability ~ ident ~ ("=" ~> tupleExpr) ^^ { case mut ~ name ~ e => VarStmtAST(name, None, e, mut) } |
+      mutability ~ bindName ~ (":" ~> typeRef) ~ ("=" ~> tupleExpr) ^^ { case mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut) } |
+      mutability ~ bindName ~ ("=" ~> tupleExpr) ^^ { case mut ~ name ~ e => VarStmtAST(name, None, e, mut) } |
       ident ~ (":" ~> typeExpr) ~ ("=" ~> tupleExpr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ (":" ~> typeExpr) ^^ { case name ~ t =>
         val size = t match { case ArrayTypeAST(s, _) => s; case _ => 0 }
