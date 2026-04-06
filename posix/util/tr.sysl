@@ -1,0 +1,40 @@
+/* tr — translate characters */
+import std/process.*
+import std/io.*
+import std/string.*
+
+/* Usage: tr string1 string2
+ * Reads stdin, replaces characters in string1 with
+ * corresponding characters in string2.
+ */
+
+main() -> int
+    if argc() < 3
+        write_string(STDERR, "tr: missing operand\n")
+        return 1
+
+    val set1 = argv(1)
+    val set2 = argv(2)
+
+    var buf: [4096]u8
+    var n = read(STDIN, buf, 4096)
+
+    while n > 0
+        for var i = 0; i < n; i++
+            val ch = int(buf[i])
+            var replaced = false
+
+            for var j = 0; j < length(set1); j++
+                if ch == char_at(set1, j)
+                    if j < length(set2)
+                        buf[i] = char_at(set2, j)
+                    else
+                        buf[i] = char_at(set2, length(set2) - 1)
+
+                    replaced = true
+                    break
+
+        write(STDOUT, buf, n)
+        n = read(STDIN, buf, 4096)
+
+    0

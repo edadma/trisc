@@ -1,0 +1,81 @@
+/* cut — extract fields from lines */
+import std/process.*
+import std/io.*
+import std/string.*
+import std/fs.*
+
+/* Usage: cut -d delim -f field_list [file...]
+ * Extracts fields separated by delim (default tab).
+ * Field numbering is 1-based.
+ */
+
+main() -> int
+    var delim = '\t'
+    var field = 1
+    var file_start = 1
+
+    /* Parse options */
+    var i = 1
+
+    while i < argc()
+        val arg = argv(i)
+
+        if equal(arg, "-d")
+            i++
+
+            if i >= argc()
+                write_string(STDERR, "cut: missing delimiter\n")
+                return 1
+
+            delim = char_at(argv(i), 0)
+        elif equal(arg, "-f")
+            i++
+
+            if i >= argc()
+                write_string(STDERR, "cut: missing field number\n")
+                return 1
+
+            field = to_int(argv(i))
+        else
+            file_start = i
+            break
+
+        i++
+
+    if i >= argc()
+        write_string(STDERR, "cut: missing file\n")
+        return 1
+
+    for var fi = file_start; fi < argc(); fi++
+        val content = read_file(argv(fi))
+        var start = 0
+
+        for var j = 0; j <= length(content); j++
+            val at_end = j == length(content)
+            val is_nl = !at_end && char_at(content, j) == '\n'
+
+            if is_nl || at_end
+                val line = substr(content, start, j - start)
+                start = j + 1
+
+                /* Extract the requested field */
+                var fnum = 1
+                var fstart = 0
+
+                for var k = 0; k <= length(line); k++
+                    val field_end = k == length(line)
+                    val is_delim = !field_end && char_at(line, k) == delim
+
+                    if is_delim || field_end
+                        if fnum == field
+                            puts(substr(line, fstart, k - fstart))
+                            putchar(10)
+                            break
+
+                        fnum++
+                        fstart = k + 1
+
+                /* If field not found, print empty line */
+                if fnum < field then putchar(10)
+
+    0
