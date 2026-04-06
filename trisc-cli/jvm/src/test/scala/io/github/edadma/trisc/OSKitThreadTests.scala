@@ -627,4 +627,81 @@ import oskit.services.*
     output should include("B")
     output should not include("N")
   }
+
+  "TOS: getuid returns current thread uid (default 0)" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import oskit.kernel.*
+import oskit.services.*
+          |
+          |kernel_main() -> int
+          |    create_thread(worker, 0x10000, 0xF000, "worker")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |
+          |worker()
+          |    val u = getuid()
+          |    if u == 0
+          |        putc('Z')
+          |    else
+          |        putc('X')
+          |""".stripMargin
+    ))
+
+    output should include("Z")
+  }
+
+  "TOS: setuid sets uid, getuid returns new value" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import oskit.kernel.*
+import oskit.services.*
+          |
+          |kernel_main() -> int
+          |    create_thread(worker, 0x10000, 0xF000, "worker")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |
+          |worker()
+          |    setuid(42)
+          |    val u = getuid()
+          |    if u == 42
+          |        putc('Y')
+          |    else
+          |        putc('N')
+          |""".stripMargin
+    ))
+
+    output should include("Y")
+    output should not include("N")
+  }
+
+  "TOS: child thread inherits uid from parent" in {
+    val (_, output) = runTOS(Map(
+      "app" ->
+        """import oskit.kernel.*
+import oskit.services.*
+          |
+          |kernel_main() -> int
+          |    create_thread(parent, 0x10000, 0xF000, "parent")
+          |    timer_init(1000)
+          |    first_thread_ssp()
+          |
+          |parent()
+          |    setuid(7)
+          |    create_thread(child, 0x14000, 0x13000, "child")
+          |    sleep(20)
+          |
+          |child()
+          |    val u = getuid()
+          |    if u == 7
+          |        putc('I')
+          |    else
+          |        putc('N')
+          |""".stripMargin
+    ))
+
+    output should include("I")
+    output should not include("N")
+  }
 }

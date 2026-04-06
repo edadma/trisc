@@ -18,7 +18,7 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "hello")}
-         |    val ino = tfs_create(1, &name, 1, 0x1A4)
+         |    val ino = tfs_create(1, &name, name_len, 1, 0x1A4)
          |    if ino == -1
          |        putchar(69)
          |        return 1
@@ -50,9 +50,9 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "newfile")}
-         |    tfs_create(1, &name, 1, 0x1A4)
+         |    tfs_create(1, &name, name_len, 1, 0x1A4)
          |${syslBytes("path", "/newfile")}
-         |    val ino = tfs_lookup(&path)
+         |    val ino = tfs_lookup(&path, path_len)
          |    if ino > 0
          |        putchar(89)
          |    else
@@ -73,14 +73,14 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "mydir")}
-         |    val ino = tfs_create(1, &name, 2, 0x1ED)
+         |    val ino = tfs_create(1, &name, name_len, 2, 0x1ED)
          |    if ino == -1
          |        putchar(69)
          |        return 1
          |${syslBytes("dot", ".")}
          |${syslBytes("dotdot", "..")}
-         |    val d = tfs_dir_lookup(ino, &dot)
-         |    val dd = tfs_dir_lookup(ino, &dotdot)
+         |    val d = tfs_dir_lookup(ino, &dot, dot_len)
+         |    val dd = tfs_dir_lookup(ino, &dotdot, dotdot_len)
          |    if d == ino
          |        putchar(68)
          |    if dd == 1
@@ -99,15 +99,15 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("dirname", "data")}
-         |    val dir_ino = tfs_create(1, &dirname, 2, 0x1ED)
+         |    val dir_ino = tfs_create(1, &dirname, dirname_len, 2, 0x1ED)
          |${syslBytes("fname", "log")}
-         |    val file_ino = tfs_create(dir_ino, &fname, 1, 0x1A4)
+         |    val file_ino = tfs_create(dir_ino, &fname, fname_len, 1, 0x1A4)
          |    var msg: [3]i8
          |    msg[0] = 79
          |    msg[1] = 75
          |    tfs_write(file_ino, &msg, 0, 2)
          |${syslBytes("path", "/data/log")}
-         |    val found = tfs_lookup(&path)
+         |    val found = tfs_lookup(&path, path_len)
          |    if found == file_ino
          |        putchar(89)
          |    else
@@ -133,7 +133,7 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "sized")}
-         |    val ino = tfs_create(1, &name, 1, 0x1A4)
+         |    val ino = tfs_create(1, &name, name_len, 1, 0x1A4)
          |    var data: [4]i8
          |    data[0] = 65
          |    data[1] = 66
@@ -159,7 +159,7 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "ext")}
-         |    val ino = tfs_create(1, &name, 1, 0x1A4)
+         |    val ino = tfs_create(1, &name, name_len, 1, 0x1A4)
          |    var data: [4]i8
          |    data[0] = 65
          |    data[1] = 66
@@ -188,7 +188,7 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "ow")}
-         |    val ino = tfs_create(1, &name, 1, 0x1A4)
+         |    val ino = tfs_create(1, &name, name_len, 1, 0x1A4)
          |    var data: [8]i8
          |    data[0] = 65
          |    data[1] = 66

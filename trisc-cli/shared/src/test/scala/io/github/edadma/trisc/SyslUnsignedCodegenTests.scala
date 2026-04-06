@@ -241,7 +241,7 @@ class SyslUnsignedCodegenTests extends AnyFreeSpec with Matchers {
         |    arr[0] = 200
         |    arr[1] = 128
         |    arr[2] = 255
-        |    int(arr[0] + arr[1] + arr[2])
+        |    int(arr[0]) + int(arr[1]) + int(arr[2])
         |""".stripMargin) shouldBe 583
   }
 

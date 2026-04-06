@@ -408,6 +408,133 @@ times. `repeat(s, 0)` returns `""`.
         b.to_str()
 
 
+Split and join
+--------------
+
+### split
+
+`split(s, sep)` splits `s` by `sep` and returns a slice of
+the parts. If `sep` is empty, splits into individual bytes
+as single-character strings. Adjacent separators produce
+empty strings in the result.
+
+    split(s: string, sep: string) -> []string
+        val m = len(sep)
+
+        if m == 0
+            // split into single-byte strings
+            val n = len(s)
+            val parts = new [n]string
+
+            var i = 0
+
+            while i < n
+                parts[i] = substring(s, i, i + 1)
+                i++
+
+            return parts[:]
+
+        val n = count(s, sep) + 1
+        val parts = new [n]string
+        var start = 0
+        var pi = 0
+        val slen = len(s)
+        val last = slen - m
+
+        var i = 0
+
+        while i <= last
+            var j = 0
+            var matched = true
+
+            while j < m
+                if s[i + j] != sep[j]
+                    matched = false
+                    break
+                j++
+
+            if matched
+                parts[pi] = substring(s, start, i)
+                pi++
+                i += m
+                start = i
+            else
+                i++
+
+        parts[pi] = substring(s, start, slen)
+        parts[:]
+
+
+### join
+
+`join(parts, sep)` concatenates the strings in `parts` with
+`sep` between each pair. `join` of an empty slice returns `""`.
+
+    join(parts: []string, sep: string) -> string
+        val n = len(parts)
+
+        if n == 0 then return ""
+        if n == 1 then return parts[0]
+
+        var b = new_builder()
+        var i = 0
+
+        while i < n
+            if i > 0 then b.write(sep)
+
+            b.write(parts[i])
+            i++
+
+        b.to_str()
+
+
+### fields
+
+`fields(s)` splits `s` on runs of ASCII whitespace. Leading
+and trailing whitespace is ignored. Multiple consecutive
+whitespace characters are treated as a single separator.
+
+    fields(s: string) -> []string
+        val slen = len(s)
+
+        // Count fields first
+        var nf = 0
+        var in_word = false
+        var i = 0
+
+        while i < slen
+            if is_ascii_space(s[i])
+                in_word = false
+            else
+                if !in_word
+                    nf++
+                    in_word = true
+            i++
+
+        val parts = new [nf]string
+        var pi = 0
+        var start = 0
+        in_word = false
+        i = 0
+
+        while i < slen
+            if is_ascii_space(s[i])
+                if in_word
+                    parts[pi] = substring(s, start, i)
+                    pi++
+                    in_word = false
+            else
+                if !in_word
+                    start = i
+                    in_word = true
+            i++
+
+        if in_word
+            parts[pi] = substring(s, start, slen)
+
+        parts[:]
+
+
 Tests
 =====
 
@@ -653,6 +780,111 @@ Tests
         assert(repeat("abc", 1) == "abc", "identity")
 
 
+### split
+
+    #test
+    test_split_basic() -> void
+        val parts = split("a,b,c", ",")
+        assert(len(parts) == 3, "three parts")
+        assert(parts[0] == "a", "first")
+        assert(parts[1] == "b", "second")
+        assert(parts[2] == "c", "third")
+
+    #test
+    test_split_no_match() -> void
+        val parts = split("hello", ",")
+        assert(len(parts) == 1, "one part")
+        assert(parts[0] == "hello", "whole string")
+
+    #test
+    test_split_empty_sep() -> void
+        val parts = split("abc", "")
+        assert(len(parts) == 3, "three chars")
+        assert(parts[0] == "a", "a")
+        assert(parts[1] == "b", "b")
+        assert(parts[2] == "c", "c")
+
+    #test
+    test_split_adjacent_separators() -> void
+        val parts = split("a,,b", ",")
+        assert(len(parts) == 3, "three parts")
+        assert(parts[0] == "a", "first")
+        assert(parts[1] == "", "empty middle")
+        assert(parts[2] == "b", "third")
+
+    #test
+    test_split_leading_trailing() -> void
+        val parts = split(",a,b,", ",")
+        assert(len(parts) == 4, "four parts")
+        assert(parts[0] == "", "leading empty")
+        assert(parts[3] == "", "trailing empty")
+
+    #test
+    test_split_multi_char_sep() -> void
+        val parts = split("one::two::three", "::")
+        assert(len(parts) == 3, "three parts")
+        assert(parts[0] == "one", "first")
+        assert(parts[1] == "two", "second")
+        assert(parts[2] == "three", "third")
+
+
+### join
+
+    #test
+    test_join_basic() -> void
+        val parts = split("a,b,c", ",")
+        assert(join(parts, "-") == "a-b-c", "rejoin")
+
+    #test
+    test_join_empty_sep() -> void
+        val parts = split("a,b,c", ",")
+        assert(join(parts, "") == "abc", "no separator")
+
+    #test
+    test_join_single() -> void
+        val parts = new [1]string
+        parts[0] = "hello"
+        assert(join(parts[:], ",") == "hello", "single")
+
+    #test
+    test_join_empty_parts() -> void
+        val parts = new [0]string
+        assert(join(parts[:], ",") == "", "empty")
+
+
+### fields
+
+    #test
+    test_fields_basic() -> void
+        val parts = fields("  hello   world  ")
+        assert(len(parts) == 2, "two words")
+        assert(parts[0] == "hello", "first")
+        assert(parts[1] == "world", "second")
+
+    #test
+    test_fields_tabs_newlines() -> void
+        val parts = fields("\thello\n\nworld\t")
+        assert(len(parts) == 2, "two words")
+        assert(parts[0] == "hello", "first")
+        assert(parts[1] == "world", "second")
+
+    #test
+    test_fields_no_whitespace() -> void
+        val parts = fields("hello")
+        assert(len(parts) == 1, "one word")
+        assert(parts[0] == "hello", "whole")
+
+    #test
+    test_fields_all_whitespace() -> void
+        val parts = fields("   ")
+        assert(len(parts) == 0, "no words")
+
+    #test
+    test_fields_empty() -> void
+        val parts = fields("")
+        assert(len(parts) == 0, "no words")
+
+
 Design notes
 ------------
 
@@ -673,12 +905,6 @@ strings are immutable and don't share backing arrays, so
 `substring`, `trim_space`, etc. copy. If allocation becomes
 a bottleneck, a sliced-string type with shared backing can
 come later — the API won't change, the representation will.
-
-**No `split` or `join` yet.** These need `[]string` support
-(array/slice of strings) which hasn't been exercised in the
-codebase. They'll land once `std` has reason to return arrays
-of strings — most likely alongside `std.bytes` which needs
-the same capability.
 
 **`is_ascii_space` only.** Go's `strings.TrimSpace` uses
 Unicode's whitespace set. This module intentionally stays

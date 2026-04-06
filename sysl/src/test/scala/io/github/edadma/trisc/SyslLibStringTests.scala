@@ -5,6 +5,7 @@ class SyslLibStringTests extends SyslTestHelpers {
   val libs: Map[String, String] = Map(
     "posix/string/string" -> readSysl("posix/string/string.sysl"),
     "posix/stdlib/stdlib" -> readSysl("posix/stdlib/stdlib.sysl"),
+    "posix/ctype/ctype" -> readSysl("posix/ctype/ctype.sysl"),
   )
 
   private def evalWith(main: String): Long = evalWithLibs(libs,
@@ -236,7 +237,7 @@ class SyslLibStringTests extends SyslTestHelpers {
         |    src[4] = 'o'
         |    src[5] = 0
         |    strncpy(dst, src, 3)
-        |    dst[0] + dst[1] + dst[2]
+        |    int(dst[0]) + int(dst[1]) + int(dst[2])
         |""".stripMargin) shouldBe 'H' + 'e' + 'l'
   }
 

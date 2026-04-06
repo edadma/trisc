@@ -111,6 +111,16 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case EnumVal(_, _) => throw RuntimeError("expected integer, got enum value")
     case RefEnumVal(_, _, _) => throw RuntimeError("expected integer, got ref enum value")
 
+  /** Truncate a Long result to the width of a narrow integer type. */
+  private def truncateNarrow(raw: Long, typ: SyslType): Long = typ match
+    case SyslType.UIntType(8)  => raw & 0xFFL
+    case SyslType.UIntType(16) => raw & 0xFFFFL
+    case SyslType.UIntType(32) => raw & 0xFFFFFFFFL
+    case SyslType.IntType(8)   => (raw << 56) >> 56
+    case SyslType.IntType(16)  => (raw << 48) >> 48
+    case SyslType.IntType(32)  => (raw << 32) >> 32
+    case _ => raw
+
   private def toDouble(v: Value): Double = v match
     case FloatVal(d)  => d
     case IntVal(n)    => n.toDouble
@@ -118,6 +128,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
   private val globals: Env = new mutable.LinkedHashMap
   private val functions = new mutable.LinkedHashMap[String, TFunDecl]
+  // Map struct name → deinit function name (handles module-mangled deinit names)
+  private val deinitMap = new mutable.HashMap[String, String]
 
   // Address table for pointer ↔ integer round-tripping
   private val ptrToAddr = new mutable.HashMap[Pointer, Long]
@@ -251,7 +263,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TEnumDecl => // type only, no runtime effect
         case _: TDataEnumDecl => // type only, no runtime effect
         case _: TTypeAliasDecl => // type only, no runtime effect
-        case f: TFunDecl => functions(f.name) = f
+        case f: TFunDecl =>
+          functions(f.name) = f
+          if f.name.endsWith("_deinit") then
+            val structName = f.name.indexOf("__") match
+              case -1 => f.name.dropRight(7)
+              case i  => f.name.substring(i + 2).dropRight(7)
+            deinitMap(structName) = f.name
         case TVarDecl(name, _, init, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
@@ -271,7 +289,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TEnumDecl => // type only
         case _: TDataEnumDecl => // type only
         case _: TTypeAliasDecl => // type only
-        case f: TFunDecl => functions(f.name) = f
+        case f: TFunDecl =>
+          functions(f.name) = f
+          if f.name.endsWith("_deinit") then
+            val structName = f.name.indexOf("__") match
+              case -1 => f.name.dropRight(7)
+              case i  => f.name.substring(i + 2).dropRight(7)
+            deinitMap(structName) = f.name
         case TVarDecl(name, _, init, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
@@ -351,7 +375,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       if count == 0 then
         rc.set(IMMORTAL_RC) // prevent re-entrant deinit from releaseRefs
         if typeName.nonEmpty then
-          val deinitName = s"${typeName}_deinit"
+          val deinitName = deinitMap.getOrElse(typeName, s"${typeName}_deinit")
           functions.get(deinitName).foreach { fun =>
             call(fun, List(v))
           }
@@ -461,7 +485,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case _ =>
             val l = toLong(cell.value)
             val r = toLong(rv)
-            cell.value = IntVal(op match
+            val raw = op match
               case "+"  => l + r
               case "-"  => l - r
               case "*"  => l * r
@@ -472,7 +496,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case "^"  => l ^ r
               case "<<" => l << r.toInt
               case ">>" => l >> r.toInt
-            )
+            cell.value = IntVal(truncateNarrow(raw, value.typ))
 
       case TDerefAssignStmt(pointer, value) =>
         val cell = derefCell(evalAny(pointer, env))
@@ -493,7 +517,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val cell = cells(off + fieldIndex)
         val l = toLong(cell.value)
         val r = toLong(evalAny(value, env))
-        cell.value = IntVal(op match
+        val raw = op match
           case "+"  => l + r
           case "-"  => l - r
           case "*"  => l * r
@@ -504,7 +528,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case "^"  => l ^ r
           case "<<" => l << r.toInt
           case ">>" => l >> r.toInt
-        )
+        cell.value = IntVal(truncateNarrow(raw, value.typ))
 
       case TReturnStmt(value) =>
         throw ReturnException(value.map(evalAny(_, env)).getOrElse(IntVal(0)))
@@ -620,7 +644,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             cell.value = nv
             nv
           case _ =>
-            val v = toLong(cell.value) + 1
+            val v = truncateNarrow(toLong(cell.value) + 1, typ)
             cell.value = IntVal(v)
             IntVal(v)
 
@@ -636,7 +660,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             cell.value = nv
             nv
           case _ =>
-            val v = toLong(cell.value) - 1
+            val v = truncateNarrow(toLong(cell.value) - 1, typ)
             cell.value = IntVal(v)
             IntVal(v)
 
@@ -651,7 +675,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             old
           case _ =>
             val old = toLong(cell.value)
-            cell.value = IntVal(old + 1)
+            cell.value = IntVal(truncateNarrow(old + 1, typ))
             IntVal(old)
 
       case TPostDec(name, typ) =>
@@ -665,7 +689,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             old
           case _ =>
             val old = toLong(cell.value)
-            cell.value = IntVal(old - 1)
+            cell.value = IntVal(truncateNarrow(old - 1, typ))
             IntVal(old)
 
       case TDeref(inner, _) =>
@@ -786,7 +810,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case Some(stmts) => evalBlock(stmts, env)
               case None => IntVal(0)
 
-      case TBinary(left, op, right, _) =>
+      case TBinary(left, op, right, resultType) =>
         val lv = evalAny(left, env)
         (lv, op) match
           case (PtrVal(ptr), "+") =>
@@ -851,7 +875,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val l = toLong(lv)
         val r = toLong(rv)
         val unsigned = left.typ.isUnsigned
-        IntVal(op match
+        val raw = op match
           case "+"  => l + r
           case "-"  => l - r
           case "*"  => l * r
@@ -875,9 +899,9 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case "<<" => l << r.toInt
           case ">>" => if unsigned then l >>> r.toInt else l >> r.toInt
           case _    => throw RuntimeError(s"unknown operator: $op")
-        )
+        IntVal(truncateNarrow(raw, resultType))
 
-      case TUnary(op, operand, _) =>
+      case TUnary(op, operand, resultType) =>
         val v = evalAny(operand, env)
         v match
           case FloatVal(d) =>
@@ -886,12 +910,12 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case _   => throw RuntimeError(s"unsupported float unary operator: $op")
           case _ =>
             val n = toLong(v)
-            IntVal(op match
+            val raw = op match
               case "-" => -n
               case "!" => if n == 0 then 1L else 0L
               case "~" => ~n
               case _   => throw RuntimeError(s"unknown unary operator: $op")
-            )
+            IntVal(truncateNarrow(raw, resultType))
 
       case TCast(inner, target) =>
         val v = evalAny(inner, env)

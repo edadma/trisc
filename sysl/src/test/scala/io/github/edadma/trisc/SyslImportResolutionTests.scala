@@ -102,10 +102,11 @@ class SyslImportResolutionTests extends AnyFreeSpec with Matchers {
 
   // ===== Error cases =====
 
-  "rejects duplicate imported function" in {
+  "allows re-importing same module (idempotent)" in {
     val analyzer = new SyslAnalyzer
     analyzer.registerImport(ModuleMeta.fromSmeta(mathSmeta))
-    an[Exception] should be thrownBy analyzer.registerImport(ModuleMeta.fromSmeta(mathSmeta))
+    // Re-importing the same module should not throw — same symbols, same names
+    noException should be thrownBy analyzer.registerImport(ModuleMeta.fromSmeta(mathSmeta))
   }
 
   "rejects import conflicting with local function" in {

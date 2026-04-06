@@ -241,8 +241,13 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
             case Some(LabelSymbol(_, targetOffset, _, _)) if symbolSegment.get(symName).contains(b.segmentName) =>
               val branchAdj = adjustedOffset(b.segmentName, b.offsetInSegment)
               val targetAdj = adjustedOffset(b.segmentName, targetOffset)
-              val offset = targetAdj - (branchAdj + 2)
-              if offset % 2 != 0 || offset < -128 || offset > 126 then
+              // fold() computes displacement as target - (pc + 2). For synthesized
+              // branches (bne/bge/etc., shortSize=4), the actual bra displacement
+              // is (fold_result - 2). Check that the ACTUAL displacement fits in
+              // the bra's 7-bit signed field so we don't silently emit wrong code.
+              val foldDisp = targetAdj - (branchAdj + 2)
+              val actualDisp = if b.shortSize > 2 then foldDisp - (b.shortSize - 2) else foldDisp
+              if actualDisp % 2 != 0 || actualDisp < -128 || actualDisp > 126 then
                 b.relaxed = true
                 relaxationChanged = true
             case _ =>
