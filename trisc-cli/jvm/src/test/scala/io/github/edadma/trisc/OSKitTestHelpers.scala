@@ -29,6 +29,7 @@ object OSKitTestData {
 
   lazy val sbrkSysl: String = readSysl("oskit/lib/sbrk.sysl")
   lazy val posixStringSysl: String = readSysl("posix/string/string.sysl")
+  lazy val posixCtypeSysl: String = readSysl("posix/ctype/ctype.sysl")
   lazy val posixAllocSysl: String = readSysl("posix/stdlib/alloc.sysl")
 
   lazy val linkerScript: LinkerScript =

@@ -32,6 +32,7 @@ class OSKitNshTests extends OSKitTestHelpers {
       "oskit/servers/tfs"           -> tfsSrvSysl,
       "posix/unistd/sbrk"          -> sbrkSysl,
       "posix/string/string"        -> posixStringSysl,
+      "posix/ctype/ctype"          -> posixCtypeSysl,
       "posix/stdlib/alloc"         -> posixAllocSysl,
       "oskit/apps/nsh"              -> nshSysl,
       "app" ->

@@ -4,6 +4,7 @@ class SyslCodegenSliceOpsTests extends SyslCodegenHelpers {
 
   private val allocSource = scala.io.Source.fromFile("posix/stdlib/alloc.sysl").mkString
   private val stringSource = scala.io.Source.fromFile("posix/string/string.sysl").mkString
+  private val ctypeSource = scala.io.Source.fromFile("posix/ctype/ctype.sysl").mkString
 
   private def sbrkModule(heapSize: Int = 16384): String =
     s"""module posix.unistd
@@ -25,6 +26,7 @@ class SyslCodegenSliceOpsTests extends SyslCodegenHelpers {
     Map(
       "posix/unistd/sbrk" -> sbrkModule(),
       "posix/string/string" -> stringSource,
+      "posix/ctype/ctype" -> ctypeSource,
       "posix/stdlib/alloc" -> allocSource,
       "main" -> mainSource,
     )

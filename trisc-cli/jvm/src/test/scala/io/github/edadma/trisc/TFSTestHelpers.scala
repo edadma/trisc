@@ -12,6 +12,7 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
 
   private lazy val tfsSource: String = readLsysl("oskit/fs/tfs.lsysl")
   private lazy val posixStringSysl: String = scala.io.Source.fromFile("posix/string/string.sysl").mkString
+  private lazy val posixCtypeSysl: String = scala.io.Source.fromFile("posix/ctype/ctype.sysl").mkString
 
   // Inline ramdisk block I/O for tests — provides rd_read/rd_write
   // that the TFS library externs. Talks directly to the emulated ramdisk.
@@ -132,7 +133,7 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
       maxCycles: Int,
   ): (CPU, String) =
     val bootTof = assemble(tfsBoot, relocatable = true)
-    val allSources = sources + ("oskit/fs/tfs" -> tfsSource) + ("posix/string/string" -> posixStringSysl) + ("ramdisk" -> ramdiskSource)
+    val allSources = sources + ("oskit/fs/tfs" -> tfsSource) + ("posix/string/string" -> posixStringSysl) + ("posix/ctype/ctype" -> posixCtypeSysl) + ("ramdisk" -> ramdiskSource)
     val driver = new SyslDriver
     val result = driver.compile(allSources)
     val codegen = new SyslTriscCodegen

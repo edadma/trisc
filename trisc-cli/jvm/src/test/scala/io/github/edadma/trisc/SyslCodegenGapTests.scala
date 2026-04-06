@@ -415,6 +415,7 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
   "string concatenation with malloc" in {
     val allocSource = scala.io.Source.fromFile("posix/stdlib/alloc.sysl").mkString
     val stringSource = scala.io.Source.fromFile("posix/string/string.sysl").mkString
+    val ctypeSource = scala.io.Source.fromFile("posix/ctype/ctype.sysl").mkString
     val sbrkSource =
       s"""module posix.unistd
          |var _heap: [4096]i8
@@ -433,6 +434,7 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
     val (_, output) = runWithBoot(Map(
       "posix/unistd/sbrk" -> sbrkSource,
       "posix/string/string" -> stringSource,
+      "posix/ctype/ctype" -> ctypeSource,
       "posix/stdlib/alloc" -> allocSource,
       "main" ->
         """extern putchar(ch: int)
