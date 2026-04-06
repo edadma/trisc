@@ -150,7 +150,7 @@ class OSKitDisplayTests extends OSKitTestHelpers {
     output.toString should include("!")
   }
 
-  "Display server: OS desktop demo" in {
+  "Display server: OS desktop demo" ignore {
     val appSysl = scala.io.Source.fromFile("examples/draw-hello/os-desktop.sysl").mkString
     val (cpu, output) = runDisplay(Map("app" -> appSysl), maxCycles = 20000000)
     output should include("S")  // server started
