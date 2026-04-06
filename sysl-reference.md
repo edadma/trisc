@@ -149,6 +149,42 @@ s match
     Rect(w, h) -> 3
 ```
 
+**Heap-allocated enums (`new` on variants):**
+
+`new VariantName(args)` heap-allocates an enum value and returns a ref-counted
+`&EnumType`. This enables recursive data structures like AST trees:
+
+```sysl
+enum Expr
+    Lit(value: int)
+    Add(left: &Expr, right: &Expr)
+
+eval_expr(e: &Expr) -> int
+    *e match
+        Lit(v) -> v
+        Add(l, r) -> eval_expr(l) + eval_expr(r)
+
+main() -> int
+    val tree = new Add(new Lit(1), new Add(new Lit(2), new Lit(3)))
+    eval_expr(tree)    // 6
+```
+
+`*e` dereferences the ref to a value enum for pattern matching. The ref is
+automatically freed when the refcount reaches zero, just like `&Struct`.
+
+**Recursive types:** Structs and enums may reference themselves (or each other)
+through pointers (`*T`) or refs (`&T`):
+
+```sysl
+struct Node
+    value: int
+    next: *Node       // recursive via pointer
+
+enum Tree
+    Leaf(value: int)
+    Branch(left: &Tree, right: &Tree)   // recursive via ref
+```
+
 **Memory layout:** `{tag: i32, padding, data: union of variant fields}`. The tag is a small integer (0, 1, 2...) identifying the variant. Data is overlapping storage sized to the largest variant. `sizeof(Shape)` returns the total size including tag and padding.
 
 ### Type Aliases
