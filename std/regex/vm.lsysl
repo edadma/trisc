@@ -42,7 +42,7 @@ is copied only when a `Save` instruction is executed.
 
     struct Thread
         pc: int
-        saves: &[]int
+        saves: []int
 
 
 VM state
@@ -54,8 +54,8 @@ The VM alternates between two thread lists: `current`
 After processing each character, the lists swap.
 
     struct VM
-        insts: &[]Inst
-        classes: &[]CharClass
+        insts: []Inst
+        classes: []CharClass
         input: string
         n_slots: int
 
@@ -63,9 +63,9 @@ A `visited` bitmap prevents adding duplicate threads at the
 same program counter within a single step. Without this, a
 `Split` loop could generate exponentially many threads.
 
-    private VM.add_thread(self: *VM, list: &[]Thread, t: Thread, visited: &[]bool)
-        if t.pc < 0 || t.pc >= len(self.insts) then return
-        if visited[t.pc] then return
+    private VM.add_thread(list: []Thread, t: Thread, visited: []bool, sp: int, input_len: int) -> []Thread
+        if t.pc < 0 || t.pc >= len(self.insts) then return list
+        if visited[t.pc] then return list
 
         visited[t.pc] = true
 
@@ -74,34 +74,43 @@ same program counter within a single step. Without this, a
         /* Epsilon transitions: process immediately without consuming input */
         inst.op match
             3 -> /* OP_JUMP */
-                self.add_thread(list, Thread(inst.arg1, t.saves), visited)
+                return self.add_thread(list, Thread(inst.arg1, t.saves), visited, sp, input_len)
             4 -> /* OP_SPLIT */
                 /* Add preferred path first (greedy) */
-                self.add_thread(list, Thread(inst.arg1, t.saves), visited)
+                var l = self.add_thread(list, Thread(inst.arg1, t.saves), visited, sp, input_len)
                 /* Then alternate path */
-                self.add_thread(list, Thread(inst.arg2, t.saves), visited)
+                return self.add_thread(l, Thread(inst.arg2, t.saves), visited, sp, input_len)
             5 -> /* OP_SAVE */
-                var new_saves = new [self.n_slots]int
+                val _ns = new [self.n_slots]int
+                var new_saves = _ns[:self.n_slots]
 
                 for var i = 0; i < self.n_slots; i++ do new_saves[i] = t.saves[i]
 
                 new_saves[inst.arg1] = -2
-                self.add_thread(list, Thread(t.pc + 1, new_saves), visited)
+                return self.add_thread(list, Thread(t.pc + 1, new_saves), visited, sp, input_len)
+            6 -> /* OP_ANCHOR_START — zero-width assertion */
+                if sp == 0
+                    return self.add_thread(list, Thread(t.pc + 1, t.saves), visited, sp, input_len)
+                return list
+            7 -> /* OP_ANCHOR_END — zero-width assertion */
+                if sp == input_len
+                    return self.add_thread(list, Thread(t.pc + 1, t.saves), visited, sp, input_len)
+                return list
             _ ->
                 /* Non-epsilon: add to list for character processing */
-                list = append(list, t)
+                return append(list, t)
 
 > **Note:** The `Save` instruction above uses `-2` as a
-> placeholder. During actual execution, it stores the current
-> input position. The `-2` sentinel is replaced in `exec`
-> below — this is a simplification to avoid passing the
-> position through `add_thread`.
+> placeholder. During character processing in `exec`, the
+> `-2` sentinels are replaced with the actual input position
+> `sp` before the thread is matched against the current
+> character.
 
 
 Character class matching
 ------------------------
 
-    private VM.class_matches(self: *VM, class_id: int, ch: int) -> bool
+    private VM.class_matches(class_id: int, ch: int) -> bool
         val cls = self.classes[class_id]
         var matched = false
 
@@ -133,10 +142,12 @@ character, so that matches beginning at any position are
 found (unless an earlier match has already been found — for
 leftmost semantics).
 
-    exec(insts: &[]Inst, classes: &[]CharClass, input: string, n_groups: int) -> Match
+    exec(insts: []Inst, classes: []CharClass, input: string, n_groups: int) -> Match
         val n_slots = (n_groups + 1) * 2
-        var best_starts = new [n_groups + 1]int
-        var best_ends = new [n_groups + 1]int
+        val _bs = new [n_groups + 1]int
+        var best_starts = _bs[:n_groups + 1]
+        val _be = new [n_groups + 1]int
+        var best_ends = _be[:n_groups + 1]
         var matched = false
 
         for var i = 0; i <= n_groups; i++
@@ -150,26 +161,31 @@ leftmost semantics).
         vm.input = input
         vm.n_slots = n_slots
 
-        var current = new [0]Thread
-        var next_list = new [0]Thread
+        val _cur = new [16]Thread
+        var current = _cur[:0]
+        val _nxt = new [16]Thread
+        var next_list = _nxt[:0]
         val input_len = len(input)
 
         /* Process each input position, plus one past the end (for $ anchor and final matches) */
         for var sp = 0; sp <= input_len; sp++
             /* Start a new thread at position sp if we haven't found a match yet */
             if !matched
-                var init_saves = new [n_slots]int
+                val _is = new [n_slots]int
+                var init_saves = _is[:n_slots]
 
                 for var j = 0; j < n_slots; j++ do init_saves[j] = -1
 
-                var visited = new [len(insts)]bool
+                val _v = new [len(insts)]bool
+                var visited = _v[:len(insts)]
 
-                vm.add_thread(current, Thread(0, init_saves), visited)
+                current = vm.add_thread(current, Thread(0, init_saves), visited, sp, input_len)
 
             val ch = if sp < input_len then input[sp] else -1
 
             /* Process all current threads */
-            next_list = new [0]Thread
+            val _nl = new [16]Thread
+            next_list = _nl[:0]
 
             for var i = 0; i < len(current); i++
                 val t = current[i]
@@ -182,14 +198,16 @@ leftmost semantics).
                 inst.op match
                     0 -> /* OP_CHAR */
                         if ch == inst.arg1
-                            var visited = new [len(insts)]bool
+                            val _v = new [len(insts)]bool
+                            var visited = _v[:len(insts)]
 
-                            vm.add_thread(next_list, Thread(t.pc + 1, t.saves), visited)
+                            next_list = vm.add_thread(next_list, Thread(t.pc + 1, t.saves), visited, sp + 1, input_len)
                     1 -> /* OP_ANY */
                         if ch >= 0
-                            var visited = new [len(insts)]bool
+                            val _v = new [len(insts)]bool
+                            var visited = _v[:len(insts)]
 
-                            vm.add_thread(next_list, Thread(t.pc + 1, t.saves), visited)
+                            next_list = vm.add_thread(next_list, Thread(t.pc + 1, t.saves), visited, sp + 1, input_len)
                     2 -> /* OP_MATCH */
                         /* Record this match if it's better than the current best */
                         if !matched || t.saves[0] < best_starts[0] || (t.saves[0] == best_starts[0] && sp > best_ends[0])
@@ -201,21 +219,12 @@ leftmost semantics).
 
                             /* For group 0, end = current position */
                             best_ends[0] = sp
-                    6 -> /* OP_ANCHOR_START */
-                        if sp == 0
-                            var visited = new [len(insts)]bool
-
-                            vm.add_thread(next_list, Thread(t.pc + 1, t.saves), visited)
-                    7 -> /* OP_ANCHOR_END */
-                        if sp == input_len
-                            var visited = new [len(insts)]bool
-
-                            vm.add_thread(next_list, Thread(t.pc + 1, t.saves), visited)
                     8 -> /* OP_CLASS */
                         if ch >= 0 && vm.class_matches(inst.arg1, ch)
-                            var visited = new [len(insts)]bool
+                            val _v = new [len(insts)]bool
+                            var visited = _v[:len(insts)]
 
-                            vm.add_thread(next_list, Thread(t.pc + 1, t.saves), visited)
+                            next_list = vm.add_thread(next_list, Thread(t.pc + 1, t.saves), visited, sp + 1, input_len)
                     _ -> return
 
             /* Swap lists */
@@ -233,10 +242,9 @@ Tests
 End-to-end tests: parse a BRE pattern, compile to bytecode,
 execute against an input string, and verify match results.
 
-> **Note:** These tests are blocked until recursive function
-> calls work in the interpreter (`add_thread` calls itself
-> for epsilon transitions). They are written now so they're
-> ready to run once the fix lands.
+> All end-to-end tests pass: the Pike VM correctly handles
+> recursive `add_thread` calls for epsilon transitions
+> (jump, split, save, anchors).
 
     /* parse_bre and compile are in the same module */
 

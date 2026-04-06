@@ -46,8 +46,8 @@ for capture groups.
     struct Parser
         pattern: string
         pos: int
-        nodes: &[]Node
-        classes: &[]CharClass
+        nodes: []Node
+        classes: []CharClass
         n_groups: int
         err: bool
         err_msg: string
@@ -56,20 +56,20 @@ for capture groups.
 
 ### Helpers
 
-    private Parser.at_end(self: *Parser) -> bool = self.pos >= len(self.pattern)
+    private Parser.at_end() -> bool = self.pos >= len(self.pattern)
 
-    private Parser.peek(self: *Parser) -> int
+    private Parser.peek() -> int
         if self.at_end() then return -1
 
         self.pattern[self.pos]
 
-    private Parser.advance(self: *Parser) -> int
+    private Parser.advance() -> int
         val ch = self.peek()
 
         self.pos++
         ch
 
-    private Parser.expect(self: *Parser, ch: int) -> bool
+    private Parser.expect(ch: int) -> bool
         if self.peek() == ch
             self.pos++
             return true
@@ -79,7 +79,7 @@ for capture groups.
 Setting an error records the position and message. Once set,
 the parser winds down without producing more nodes.
 
-    private Parser.set_error(self: *Parser, msg: string)
+    private Parser.set_error(msg: string)
         if !self.err
             self.err = true
             self.err_msg = msg
@@ -93,34 +93,34 @@ returns its index. This is how the "tree" is built without
 recursive types — parent nodes store the indices of their
 children.
 
-    private Parser.add_node(self: *Parser, kind: int, ch: int, left: int, right: int, extra: int) -> int
+    private Parser.add_node(kind: int, ch: int, left: int, right: int, extra: int) -> int
         val idx = len(self.nodes)
 
         self.nodes = append(self.nodes, Node(kind, ch, left, right, extra))
         idx
 
-    private Parser.add_literal(self: *Parser, ch: int) -> int
+    private Parser.add_literal(ch: int) -> int
         self.add_node(NK_LITERAL, ch, -1, -1, 0)
 
-    private Parser.add_dot(self: *Parser) -> int
+    private Parser.add_dot() -> int
         self.add_node(NK_DOT, 0, -1, -1, 0)
 
-    private Parser.add_anchor_start(self: *Parser) -> int
+    private Parser.add_anchor_start() -> int
         self.add_node(NK_ANCHOR_START, 0, -1, -1, 0)
 
-    private Parser.add_anchor_end(self: *Parser) -> int
+    private Parser.add_anchor_end() -> int
         self.add_node(NK_ANCHOR_END, 0, -1, -1, 0)
 
-    private Parser.add_star(self: *Parser, child: int) -> int
+    private Parser.add_star(child: int) -> int
         self.add_node(NK_STAR, 0, child, -1, 0)
 
-    private Parser.add_capture(self: *Parser, child: int, group: int) -> int
+    private Parser.add_capture(child: int, group: int) -> int
         self.add_node(NK_CAPTURE, 0, child, -1, group)
 
-    private Parser.add_seq(self: *Parser, left: int, right: int) -> int
+    private Parser.add_seq(left: int, right: int) -> int
         self.add_node(NK_SEQ, 0, left, right, 0)
 
-    private Parser.add_class(self: *Parser, class_id: int) -> int
+    private Parser.add_class(class_id: int) -> int
         self.add_node(NK_CLASS, 0, -1, -1, class_id)
 
 
@@ -131,7 +131,7 @@ A character class `[...]` contains ranges, POSIX named
 classes (like `[:alpha:]`), and individual characters. A
 leading `^` negates the class.
 
-    private Parser.parse_class(self: *Parser) -> int
+    private Parser.parse_class() -> int
         if self.err then return -1
 
         var negated = false
@@ -140,7 +140,8 @@ leading `^` negates the class.
             self.advance()
             negated = true
 
-        var ranges = new [0]CharRange
+        val _r = new [8]CharRange
+        var ranges = _r[:0]
         var first = true
 
         /* A ] as the first character is a literal ] */
@@ -193,7 +194,7 @@ POSIX named character classes map to character ranges. These
 correspond exactly to the functions in our `posix.ctype`
 module.
 
-    private Parser.add_posix_class(self: *Parser, ranges: &[]CharRange, name_start: int) -> &[]CharRange
+    private Parser.add_posix_class(ranges: []CharRange, name_start: int) -> []CharRange
         /* TODO: extract name from pattern[name_start..self.pos-2] and match */
         /* For now, add ASCII ranges for common classes */
         /* This is a placeholder — full implementation needs string comparison */
@@ -207,7 +208,7 @@ An atom is the smallest unit of a BRE: a literal character,
 `.`, `^`, `$`, a character class, a capture group, or an
 escaped character.
 
-    private Parser.parse_atom(self: *Parser) -> int
+    private Parser.parse_atom() -> int
         if self.err || self.at_end() then return -1
 
         val ch = self.peek()
@@ -263,7 +264,7 @@ Parsing pieces (atom + optional quantifier)
 A piece is an atom optionally followed by `*` (or `\{n,m\}`
 in full BRE). The quantifier wraps the atom node.
 
-    private Parser.parse_piece(self: *Parser) -> int
+    private Parser.parse_piece() -> int
         if self.err then return -1
 
         val atom = self.parse_atom()
@@ -286,7 +287,7 @@ build a left-leaning tree of `NK_SEQ` nodes: the first two
 pieces become a SEQ, then each subsequent piece is SEQ'd
 onto the result.
 
-    private Parser.parse_branch(self: *Parser) -> int
+    private Parser.parse_branch() -> int
         if self.err then return -1
 
         var left = self.parse_piece()
@@ -312,13 +313,15 @@ onto the result.
 Top-level parse entry point
 ---------------------------
 
-    parse_bre(pattern: string) -> (int, &[]Node, &[]CharClass, int, bool, string, int)
+    parse_bre(pattern: string) -> (int, []Node, []CharClass, int, bool, string, int)
         var p: Parser
 
         p.pattern = pattern
         p.pos = 0
-        p.nodes = new [0]Node
-        p.classes = new [0]CharClass
+        val _n = new [16]Node
+        p.nodes = _n[:0]
+        val _c = new [4]CharClass
+        p.classes = _c[:0]
         p.n_groups = 0
         p.err = false
         p.err_msg = ""

@@ -85,16 +85,16 @@ The compiler holds the instruction array being built and a
 reference to the AST node array.
 
     struct Compiler
-        insts: &[]Inst
-        nodes: &[]Node
+        insts: []Inst
+        nodes: []Node
 
-    private Compiler.emit(self: *Compiler, op: int, arg1: int, arg2: int) -> int
+    private Compiler.emit(op: int, arg1: int, arg2: int) -> int
         val pc = len(self.insts)
 
         self.insts = append(self.insts, Inst(op, arg1, arg2))
         pc
 
-    private Compiler.patch(self: *Compiler, pc: int, arg1: int, arg2: int)
+    private Compiler.patch(pc: int, arg1: int, arg2: int)
         /* Update a previously emitted instruction's arguments */
         /* This is used for forward jumps where the target isn't known yet */
         self.insts[pc] = Inst(self.insts[pc].op, arg1, arg2)
@@ -106,7 +106,7 @@ Recursive compilation
 `compile_node` dispatches on the node kind. Since the AST is
 flat (stored in an array), we look up each node by index.
 
-    private Compiler.compile_node(self: *Compiler, idx: int)
+    private Compiler.compile_node(idx: int)
         if idx < 0 then return
 
         val node = self.nodes[idx]
@@ -179,10 +179,11 @@ Top-level compilation
 Wraps the entire pattern in a group-0 capture (the full
 match) and appends the `Match` instruction.
 
-    compile(root: int, nodes: &[]Node, n_groups: int) -> &[]Inst
+    compile(root: int, nodes: []Node, n_groups: int) -> []Inst
         var c: Compiler
 
-        c.insts = new [0]Inst
+        val _i = new [16]Inst
+        c.insts = _i[:0]
         c.nodes = nodes
 
         /* Group 0 captures the full match */

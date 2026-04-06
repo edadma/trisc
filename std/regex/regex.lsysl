@@ -47,7 +47,7 @@ A compiled regular expression is an opaque handle containing
 the VM bytecode and metadata.
 
     struct Regex
-        insts: &[]Inst
+        insts: []Inst
         n_groups: int
 
 A successful match returns capture group positions. Each
@@ -55,14 +55,14 @@ group has a start and end index into the input string.
 Group 0 is always the full match.
 
     struct Match
-        starts: &[]int
-        ends: &[]int
+        starts: []int
+        ends: []int
         n_groups: int
 
-    Match.group(self: *Match, i: int) -> (int, int)
+    Match.group(i: int) -> (int, int)
         (self.starts[i], self.ends[i])
 
-    Match.matched(self: *Match) -> bool = self.starts[0] >= 0
+    Match.matched() -> bool = self.starts[0] >= 0
 
 
 AST node representation
@@ -105,7 +105,7 @@ The class struct also tracks negation (`[^...]`).
         hi: int
 
     struct CharClass
-        ranges: &[]CharRange
+        ranges: []CharRange
         negated: bool
 
 
