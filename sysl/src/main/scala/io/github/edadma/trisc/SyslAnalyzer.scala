@@ -27,6 +27,44 @@ class SyslAnalyzer:
   private var scopeStack: mutable.ArrayBuffer[mutable.LinkedHashMap[String, SymInfo]] = null
   private var loopDepth: Int = 0
 
+  // Module-path name mangling: set from ModuleDeclAST during analyze()
+  private var currentModule: Option[String] = None // e.g. "std_strings"
+
+  private def mangleName(name: String): String =
+    currentModule match
+      case Some(mod) => s"${mod}__$name"
+      case None => name
+
+  // Names that must never be mangled: entry point + ABI-level allocation symbols
+  // Names that must not be mangled: entry points, ABI-level symbols, and OS kernel
+  // functions called from boot.asm. Future: replace with #[no_mangle] attribute.
+  private val neverMangle = mutable.HashSet(
+    "main", "malloc", "free", "calloc", "realloc", "sbrk",
+    // OS kernel ABI (called from boot.asm):
+    "kernel_init", "kernel_main", "schedule", "current_thread",
+    "syscall_table", "syscall_ssp", "irq_handlers", "ticks",
+    "thread_count", "query_thread_state", "query_thread_name",
+    "sleep_until_current", "query_thread_ctx_switches", "query_thread_cpu_ticks",
+    "query_total_ctx_switches", "kernel_set_watchdog", "kernel_panic",
+    "check_stack_at", "suspend_thread", "resume_thread",
+    "kernel_tls_set", "kernel_tls_get", "notify_send", "notify_wait_current",
+    "notify_read", "event_wait_current", "event_set_bits", "event_clear_bits",
+    "terminate_current",
+  )
+
+  private def shouldMangle(name: String): Boolean =
+    currentModule.isDefined && !neverMangle.contains(name)
+
+  /** Register names that must not be mangled (e.g. extern declarations from sibling files). */
+  def registerNoMangle(names: Iterable[String]): Unit =
+    neverMangle ++= names
+
+  /** Strip module prefix from a mangled name to get the short name. */
+  private def shortName(mangledName: String): String =
+    mangledName.lastIndexOf("__") match
+      case -1 => mangledName
+      case i  => mangledName.substring(i + 2)
+
   // Generic function support
   private val genericTemplates = new mutable.LinkedHashMap[String, FunDeclAST]
   private val instantiations = new mutable.LinkedHashMap[(String, List[SyslType]), String]
@@ -98,34 +136,55 @@ class SyslAnalyzer:
   )
 
   def registerImport(meta: ModuleMeta, selectors: List[ImportSelector] = List(WildcardImport)): Unit =
+    // Symbol names in meta may be module-mangled (e.g. "std_strings__trim_space").
+    // Strip the prefix for selector matching and local lookup keys, but keep
+    // the mangled name in FunInfo.name so TCall/TFunDecl use it for codegen/linker.
+    // Deduplicate by short name: if both a mangled and extern version exist, prefer non-extern.
+    def dedup(syms: List[SymbolMeta]): List[SymbolMeta] =
+      syms.groupBy(s => shortName(s.name)).values.map { group =>
+        if group.size > 1 then group.find(!_.isExtern).getOrElse(group.head)
+        else group.head
+      }.toList
     val selectedSymbols = selectors match
-      case List(WildcardImport) => meta.publicSymbols
+      case List(WildcardImport) => dedup(meta.publicSymbols)
       case named =>
         val nameMap = named.collect { case NamedImport(n, r) => (n, r) }.toMap
-        meta.publicSymbols.filter(sym => nameMap.contains(sym.name)).map { sym =>
-          nameMap(sym.name) match
-            case Some(alias) => sym.copy(name = alias)
-            case None => sym
-        }
+        // Match selectors against short names (without module prefix)
+        dedup(meta.publicSymbols.filter(sym => nameMap.contains(shortName(sym.name))))
+    // Build alias map for renamed imports: alias -> original mangled name
+    val aliasMap: Map[String, String] = selectors match
+      case List(WildcardImport) => Map.empty
+      case named =>
+        named.collect { case NamedImport(n, Some(alias)) => (alias, n) }.toMap
+    // Reverse: short-name -> alias
+    val shortToAlias: Map[String, String] = selectors match
+      case List(WildcardImport) => Map.empty
+      case named =>
+        named.collect { case NamedImport(n, Some(alias)) => (n, alias) }.toMap
     for sym <- selectedSymbols do
+      val sn = shortName(sym.name)
+      val localKey = shortToAlias.getOrElse(sn, sn) // use alias if provided
       sym.typ match
         case SymbolMeta.Kind.Func(params, returnType) =>
           val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
-          if functions.contains(sym.name) then
-            if !sym.isExtern then
-              throw AnalysisError(s"imported symbol '${sym.name}' conflicts with existing function")
+          if functions.contains(localKey) then
+            // Allow same-module sibling re-registration (same mangled name) and externs
+            val existing = functions(localKey)
+            if !sym.isExtern && existing.name != sym.name then
+              throw AnalysisError(s"imported symbol '$localKey' conflicts with existing function")
           else
-            functions(sym.name) = FunInfo(sym.name, paramPairs, returnType)
-            externalSymbols += sym.name
+            functions(localKey) = FunInfo(sym.name, paramPairs, returnType)
+            externalSymbols += localKey
         case SymbolMeta.Kind.Data(dataType) =>
-          if globalScope.contains(sym.name) then
-            if !sym.isExtern then
-              throw AnalysisError(s"imported symbol '${sym.name}' conflicts with existing global")
+          if globalScope.contains(localKey) then
+            val existing = globalScope(localKey)
+            if !sym.isExtern && existing.name != sym.name then
+              throw AnalysisError(s"imported symbol '$localKey' conflicts with existing global")
           else
-            globalScope(sym.name) = SymInfo(sym.name, dataType, mutable = false)
-            externalSymbols += sym.name
+            globalScope(localKey) = SymInfo(sym.name, dataType, mutable = false)
+            externalSymbols += localKey
         case SymbolMeta.Kind.Struct(st) =>
-          structTypes(sym.name) = st
+          structTypes(shortName(sym.name)) = st
 
   def isExternal(name: String): Boolean = externalSymbols.contains(name)
   def externals: Set[String] = externalSymbols.toSet
@@ -149,6 +208,13 @@ class SyslAnalyzer:
           pass0Enums += name
           dataEnumTypes(name) = SyslType.EnumType(name, Nil) // placeholder — variants filled below
         case _ => ()
+
+    // Extract module path for name mangling
+    for decl <- program.decls do
+      decl match
+        case ModuleDeclAST(path) =>
+          currentModule = Some(path.mkString("_"))
+        case _ =>
 
     // First pass: register all functions and globals
     for decl <- program.decls do
@@ -198,7 +264,8 @@ class SyslAnalyzer:
             val retType = returnType.map(resolveType).getOrElse(VoidType)
             if functions.contains(name) || genericTemplates.contains(name) then
               throw AnalysisError(s"duplicate function: '$name'", decl)
-            functions(name) = FunInfo(name, paramTypes, retType)
+            val mangledName = if shouldMangle(name) then mangleName(name) else name
+            functions(name) = FunInfo(mangledName, paramTypes, retType)
             // Record #deprecated info
             for attr <- fd.attributes if attr.name == "deprecated" do
               val reason = attr.args.collectFirst { case AttrPositional(AttrLitString(s)) => s }
@@ -298,7 +365,8 @@ class SyslAnalyzer:
           typeEnv = Map(trait_.typeParam -> resolvedTarget)
           try
             for traitMethod <- trait_.methods do
-              val mangled = s"${traitName}_${traitMethod.name}_${typeMangled}"
+              val rawMangled = s"${traitName}_${traitMethod.name}_${typeMangled}"
+              val mangled = if shouldMangle(rawMangled) then mangleName(rawMangled) else rawMangled
               if functions.contains(mangled) then
                 throw AnalysisError(s"impl method collides with existing function '$mangled'")
               val expectedParams = traitMethod.params.map(p => (p.name, resolveType(p.typ)))
@@ -386,7 +454,7 @@ class SyslAnalyzer:
         val tParams = funInfo.params.map((n, t) => TParam(n, t))
         scopeStack = null
         validateTestAttr(fdAst, funInfo)
-        TFunDecl(name, tParams, funInfo.returnType, tBody, isPrivate, attrs)
+        TFunDecl(funInfo.name, tParams, funInfo.returnType, tBody, isPrivate, attrs)
 
       case VarDeclAST(name, typOpt, init, isPrivate, isMutable, _) =>
         scopeStack = new mutable.ArrayBuffer
@@ -394,9 +462,10 @@ class SyslAnalyzer:
         val tInit0 = analyzeExpr(init)
         val declType = typOpt.map(resolveType).getOrElse(tInit0.typ)
         val tInit = coerceLiteral(tInit0, declType)
-        globalScope(name) = SymInfo(name, declType, isMutable)
+        val mangledVarName = if shouldMangle(name) then mangleName(name) else name
+        globalScope(name) = SymInfo(mangledVarName, declType, isMutable)
         scopeStack = null
-        TVarDecl(name, declType, tInit, isPrivate)
+        TVarDecl(mangledVarName, declType, tInit, isPrivate)
 
   private def warnDeprecated(name: String): Unit =
     if deprecations.contains(name) && !warnedDeprecations.contains(name) then
@@ -842,13 +911,13 @@ class SyslAnalyzer:
         val tValue = analyzeExpr(value)
         val sym = lookupOrCreate(target, tValue.typ)
         if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$target'")
-        TAssignStmt(target, tValue)
+        TAssignStmt(sym.name, tValue)
 
       case CompoundAssignStmtAST(target, op, value) =>
         val sym = lookup(target)
         if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$target'")
         val tValue = analyzeExpr(value)
-        TCompoundAssignStmt(target, op, tValue)
+        TCompoundAssignStmt(sym.name, op, tValue)
 
       case DerefAssignStmtAST(pointer, value) =>
         val tPointer = analyzeExpr(pointer)
@@ -1144,7 +1213,7 @@ class SyslAnalyzer:
         // Check if name is a function (used as a value = function pointer)
         if functions.contains(name) then
           val f = functions(name)
-          TFuncRef(name, FuncType(f.params.map(_._2), f.returnType))
+          TFuncRef(f.name, FuncType(f.params.map(_._2), f.returnType))
         else if builtinFunctions.contains(name) then
           val f = builtinFunctions(name)
           TFuncRef(name, FuncType(f.params.map(_._2), f.returnType))
@@ -1179,11 +1248,11 @@ class SyslAnalyzer:
                     throw AnalysisError(s"cannot infer type parameters for no-arg variant '$name' of generic enum '$enumName' — use explicit type annotation")
               else
                 val sym = lookup(name)  // will throw proper error
-                TVarRef(name, sym.typ)
+                TVarRef(sym.name, sym.typ)
 
       case AddrOfAST(name) =>
         val sym = lookup(name)
-        TAddrOf(name, PtrType(sym.typ))
+        TAddrOf(sym.name, PtrType(sym.typ))
 
       case AddrOfFieldAST(obj, field) =>
         val tObj = analyzeExpr(obj)
@@ -1264,10 +1333,10 @@ class SyslAnalyzer:
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
         TFieldAccess(resolvedObj, idx, structType.fields(idx)._2)
 
-      case PreIncAST(name) => TPreInc(name, lookup(name).typ)
-      case PreDecAST(name) => TPreDec(name, lookup(name).typ)
-      case PostIncAST(name) => TPostInc(name, lookup(name).typ)
-      case PostDecAST(name) => TPostDec(name, lookup(name).typ)
+      case PreIncAST(name) => val s = lookup(name); TPreInc(s.name, s.typ)
+      case PreDecAST(name) => val s = lookup(name); TPreDec(s.name, s.typ)
+      case PostIncAST(name) => val s = lookup(name); TPostInc(s.name, s.typ)
+      case PostDecAST(name) => val s = lookup(name); TPostDec(s.name, s.typ)
 
       case UnaryAST(op, operand) =>
         val tOperand = analyzeExpr(operand)
@@ -1457,7 +1526,7 @@ class SyslAnalyzer:
             case _ => tObj // PtrType or RefType — already a pointer
           val funInfo = functions(funcName)
           val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs) // .tail skips self param
-          TCall(funcName, selfArg :: checkedArgs, funInfo.returnType)
+          TCall(funInfo.name, selfArg :: checkedArgs, funInfo.returnType)
         else
           // Fall back to calling a function-typed field
           structType.fields.zipWithIndex.find(_._1._1 == method) match
@@ -1504,7 +1573,7 @@ class SyslAnalyzer:
           warnDeprecated(name)
           val funInfo = lookupFun(name)
           val checkedArgs = checkArgs(name, funInfo.params, tArgs)
-          TCall(name, checkedArgs, funInfo.returnType)
+          TCall(funInfo.name, checkedArgs, funInfo.returnType)
         else if structTypes.contains(name) then
           // Struct constructor: Point(10, 20)
           val st = structTypes(name)

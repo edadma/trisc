@@ -346,9 +346,15 @@ object SyslCli:
     case AttrNamed(k, AttrLitString(v)) if k == key => Some(v)
     case _                                          => None
 
+  /** Strip module prefix from a mangled name for display. */
+  private def shortFnName(name: String): String =
+    name.lastIndexOf("__") match
+      case -1 => name
+      case i  => name.substring(i + 2)
+
   private def discoverTest(unitName: String, fn: TFunDecl): Option[DiscoveredTest] =
     fn.attributes.find(_.name == "test").map { attr =>
-      val displayName = attr.args.flatMap(attrString).headOption.getOrElse(fn.name)
+      val displayName = attr.args.flatMap(attrString).headOption.getOrElse(shortFnName(fn.name))
       val shouldPanicFlag = attr.args.exists(attrIdent(_).contains("should_panic"))
       val expectedMsg = attr.args.flatMap(a => attrNamedString(a, "should_panic")).headOption
       val sp = shouldPanicFlag || expectedMsg.isDefined
@@ -446,7 +452,7 @@ object SyslCli:
     val filtered = cmd.filter match
       case None => discovered
       case Some(pat) => discovered.filter(t =>
-        t.fn.name.contains(pat) || t.displayName.contains(pat))
+        shortFnName(t.fn.name).contains(pat) || t.displayName.contains(pat) || t.fn.name.contains(pat))
 
     println(s"running ${filtered.size} tests")
 

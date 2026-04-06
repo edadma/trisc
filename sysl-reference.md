@@ -32,6 +32,19 @@ private myHelper() -> int = 42      // not exported
 myPublicFunc() -> int = 0           // public by default
 ```
 
+### Name Mangling
+
+Functions and global variables in modules are mangled with the module path to avoid cross-module name collisions. The mangled name format is `modpart1_modpart2__funcname` (module parts joined by `_`, separated from the function name by `__`).
+
+```
+module std.strings → trim_space → std_strings__trim_space
+module mylib       → helper     → mylib__helper
+```
+
+**Never mangled:** `main`, `extern` functions, builtin functions, functions in files without a `module` declaration, and any function whose name matches an `extern` declaration in the compilation.
+
+Source code always uses the short name — the compiler resolves it to the mangled name automatically.
+
 ---
 
 ## Types

@@ -15,13 +15,13 @@ class SyslTriscCodegen(addresses: Int = 4):
     s".${prefix}_$labelCounter"
 
   // Struct types that have a deinit method (populated during generate)
-  private val deinitTypes = new mutable.HashSet[String]
+  private val deinitFunctions = new mutable.HashMap[String, String] // struct name → deinit function name
 
   def generate(program: TProgram): String =
     out.clear()
     labelCounter = 0
     stringLiterals.clear()
-    deinitTypes.clear()
+    deinitFunctions.clear()
     needsAllocExtern = false
     needsStrInt = false
     needsStrFloat = false
@@ -30,7 +30,10 @@ class SyslTriscCodegen(addresses: Int = 4):
     for decl <- program.decls do
       decl match
         case TFunDecl(name, _, _, _, _, _) if name.endsWith("_deinit") =>
-          deinitTypes += name.dropRight(7) // remove "_deinit" suffix
+          val structName = name.lastIndexOf("__") match
+            case -1 => name.dropRight(7)
+            case i  => name.substring(i + 2).dropRight(7)
+          deinitFunctions(structName) = name
         case _ =>
 
     // Emit entry point and global directives from module metadata
@@ -303,8 +306,8 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   // Get deinit function name for a ref type, if one exists
   private def deinitFor(typ: SyslType): Option[String] = typ match
-    case SyslType.RefType(SyslType.StructType(name, _)) if deinitTypes.contains(name) =>
-      Some(s"${name}_deinit")
+    case SyslType.RefType(SyslType.StructType(name, _)) if deinitFunctions.contains(name) =>
+      Some(deinitFunctions(name))
     case _ => None
 
   // Emit refcount increment: ptr in rPtr, refcount is at [rPtr - headerOffset]

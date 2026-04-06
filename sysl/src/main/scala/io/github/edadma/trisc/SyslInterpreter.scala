@@ -118,6 +118,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
   private val globals: Env = new mutable.LinkedHashMap
   private val functions = new mutable.LinkedHashMap[String, TFunDecl]
+  // Map struct name → deinit function name (handles module-mangled deinit names)
+  private val deinitMap = new mutable.HashMap[String, String]
 
   // Address table for pointer ↔ integer round-tripping
   private val ptrToAddr = new mutable.HashMap[Pointer, Long]
@@ -251,7 +253,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TEnumDecl => // type only, no runtime effect
         case _: TDataEnumDecl => // type only, no runtime effect
         case _: TTypeAliasDecl => // type only, no runtime effect
-        case f: TFunDecl => functions(f.name) = f
+        case f: TFunDecl =>
+          functions(f.name) = f
+          if f.name.endsWith("_deinit") then
+            val structName = f.name.lastIndexOf("__") match
+              case -1 => f.name.dropRight(7)
+              case i  => f.name.substring(i + 2).dropRight(7)
+            deinitMap(structName) = f.name
         case TVarDecl(name, _, init, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
@@ -271,7 +279,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TEnumDecl => // type only
         case _: TDataEnumDecl => // type only
         case _: TTypeAliasDecl => // type only
-        case f: TFunDecl => functions(f.name) = f
+        case f: TFunDecl =>
+          functions(f.name) = f
+          if f.name.endsWith("_deinit") then
+            val structName = f.name.lastIndexOf("__") match
+              case -1 => f.name.dropRight(7)
+              case i  => f.name.substring(i + 2).dropRight(7)
+            deinitMap(structName) = f.name
         case TVarDecl(name, _, init, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
@@ -351,7 +365,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       if count == 0 then
         rc.set(IMMORTAL_RC) // prevent re-entrant deinit from releaseRefs
         if typeName.nonEmpty then
-          val deinitName = s"${typeName}_deinit"
+          val deinitName = deinitMap.getOrElse(typeName, s"${typeName}_deinit")
           functions.get(deinitName).foreach { fun =>
             call(fun, List(v))
           }
