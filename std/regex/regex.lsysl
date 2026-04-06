@@ -8,17 +8,24 @@ VM guarantees $O(n \cdot m)$ time complexity where $n$ is
 the input length and $m$ is the pattern size — no
 exponential backtracking.
 
-The engine supports:
+The engine supports the full POSIX regex grammar:
 
-- **BRE** (Basic Regular Expressions) — the default mode,
-  used by `grep`, `sed`, and `expr`
-- **ERE** (Extended Regular Expressions) — planned, used by
-  `egrep` and `awk`
-- **POSIX leftmost-longest** match semantics
-- **Capture groups** — `\(` and `\)` in BRE
-- **Character classes** — `[abc]`, `[a-z]`, `[[:alpha:]]`
+- **Alternation** — `a|b`
+- **Grouping and captures** — `(` and `)`
+- **Quantifiers** — `*`, `+`, `?`, `{n}`, `{n,m}`, `{n,}`
+- **Character classes** — `[abc]`, `[a-z]`, `[^...]`
+- **POSIX named classes** — `[[:alpha:]]`, `[[:digit:]]`,
+  `[[:alnum:]]`, `[[:upper:]]`, `[[:lower:]]`,
+  `[[:space:]]`, `[[:blank:]]`, `[[:print:]]`,
+  `[[:graph:]]`, `[[:cntrl:]]`, `[[:punct:]]`,
+  `[[:xdigit:]]`
 - **Anchors** — `^` and `$`
-- **Repetition** — `*`, `\{n,m\}` in BRE
+- **Dot** — `.` matches any character
+- **Escaping** — `\` for literal special characters
+- **POSIX leftmost-longest** match semantics
+
+A separate BRE parser (`parse_bre`) is available for tools
+like `expr` and `sed` that require BRE escaping conventions.
 
 Architecture:
 
@@ -86,8 +93,9 @@ flat.
     val NK_STAR = 5         /* * (zero or more of left) */
     val NK_CAPTURE = 6      /* \(...\) group; extra = group number */
     val NK_SEQ = 7          /* concatenation: left then right */
-    val NK_QUEST = 8        /* \? (zero or one of left) — BRE \{0,1\} */
-    val NK_PLUS = 9         /* \+ (one or more of left) — BRE \{1,\} */
+    val NK_QUEST = 8        /* ? (zero or one of left) */
+    val NK_PLUS = 9         /* + (one or more of left) */
+    val NK_ALT = 10         /* | alternation: left or right */
 
     struct Node
         kind: int
@@ -154,22 +162,17 @@ description.
 Public API
 ----------
 
-These are the entry points. The engine is used in two steps:
-compile a pattern, then execute it against input strings.
+The primary entry points:
 
-Compilation parses the pattern and produces VM bytecode.
-It can fail if the pattern has syntax errors.
+- `parse_regex(pattern)` — parse a pattern into AST
+- `compile(root, nodes, n_groups)` — compile AST to bytecode
+- `exec(insts, classes, input, n_groups)` — execute VM
+- `match_regex(pattern, input)` — convenience: all-in-one
 
-    /* Compile a BRE pattern. Returns a compiled Regex or an error. */
-    /* compile_bre(pattern: string) -> Result[Regex, RegexError] */
+For BRE compatibility (used by `expr`, `sed`):
 
-    /* Execute a compiled regex against an input string. */
-    /* Returns a Match on success, or nothing. */
-    /* exec(re: *Regex, input: string) -> Result[Match, int] */
-
-    /* Convenience: compile and execute in one step. */
-    /* match_bre(pattern: string, input: string) -> Result[Match, RegexError] */
+- `parse_bre(pattern)` — parse using BRE escaping rules
+- `match_bre(pattern, input)` — convenience BRE wrapper
 
 > **Note:** The function bodies are in the `parser`, `compiler`,
-> and `vm` submodules. They are left as signatures here until
-> cross-module re-export is wired up.
+> and `vm` submodules. They are in the same `std.regex` module.

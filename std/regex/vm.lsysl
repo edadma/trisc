@@ -389,3 +389,713 @@ in one step, returning the Match result.
 
         assert(s2 == 5, "group 2 start")
         assert(e2 == 9, "group 2 end")
+
+
+Extended tests
+--------------
+
+Tests for features beyond the basics: alternation, `+`, `?`,
+groups, intervals, named classes, escaping, and edge cases.
+
+
+### Helper
+
+    match_regex(pattern: string, input: string) -> Match
+        root, nodes, classes, n_groups, err, _, _ = parse_regex(pattern)
+
+        assert(!err, s"pattern '$pattern' should parse")
+
+        val insts = compile(root, nodes, n_groups)
+
+        exec(insts, classes, input, n_groups)
+
+
+### Alternation — basic
+
+    #test
+    test_ere_alt_first() -> void
+        val m = match_regex("cat|dog", "the cat sat")
+
+        assert(m.matched(), "should match cat")
+
+        start, en = m.group(0)
+
+        assert(start == 4, s"start=4, got $start")
+        assert(en == 7, s"end=7, got $en")
+
+    #test
+    test_ere_alt_second() -> void
+        val m = match_regex("cat|dog", "the dog sat")
+
+        assert(m.matched(), "should match dog")
+
+        start, en = m.group(0)
+
+        assert(start == 4, s"start=4, got $start")
+        assert(en == 7, s"end=7, got $en")
+
+    #test
+    test_ere_alt_no_match() -> void
+        val m = match_regex("cat|dog", "the bird sat")
+
+        assert(!m.matched(), "should not match")
+
+
+### Alternation — leftmost wins
+
+    #test
+    test_ere_alt_leftmost() -> void
+        val m = match_regex("a|ab", "ab")
+
+        assert(m.matched(), "should match")
+
+        start, en = m.group(0)
+
+        assert(start == 0, "leftmost at 0")
+
+
+### Multi-way alternation
+
+    #test
+    test_ere_alt_three() -> void
+        val m = match_regex("red|green|blue", "the blue sky")
+
+        assert(m.matched(), "should match blue")
+
+        start, en = m.group(0)
+
+        assert(start == 4, s"start=4, got $start")
+        assert(en == 8, s"end=8, got $en")
+
+    #test
+    test_ere_alt_first_of_three() -> void
+        val m = match_regex("red|green|blue", "a red car")
+
+        assert(m.matched(), "should match red")
+
+        start, en = m.group(0)
+
+        assert(start == 2, s"start=2, got $start")
+        assert(en == 5, s"end=5, got $en")
+
+
+### Plus quantifier
+
+    #test
+    test_ere_plus_one() -> void
+        val m = match_regex("^ab+c$", "abc")
+
+        assert(m.matched(), "b+ matches one b")
+
+    #test
+    test_ere_plus_many() -> void
+        val m = match_regex("^ab+c$", "abbbbc")
+
+        assert(m.matched(), "b+ matches four b's")
+
+    #test
+    test_ere_plus_zero_fail() -> void
+        val m = match_regex("^ab+c$", "ac")
+
+        assert(!m.matched(), "b+ requires at least one b")
+
+
+### Question quantifier
+
+    #test
+    test_ere_quest_zero() -> void
+        val m = match_regex("^ab?c$", "ac")
+
+        assert(m.matched(), "b? matches zero b's")
+
+    #test
+    test_ere_quest_one() -> void
+        val m = match_regex("^ab?c$", "abc")
+
+        assert(m.matched(), "b? matches one b")
+
+    #test
+    test_ere_quest_two_fail() -> void
+        val m = match_regex("^ab?c$", "abbc")
+
+        assert(!m.matched(), "b? doesn't match two b's")
+
+
+### Unescaped groups
+
+    #test
+    test_ere_group_capture() -> void
+        val m = match_regex("(hello) (world)", "say hello world")
+
+        assert(m.matched(), "should match")
+
+        s1, e1 = m.group(1)
+
+        assert(s1 == 4, s"group 1 start=4, got $s1")
+        assert(e1 == 9, s"group 1 end=9, got $e1")
+
+        s2, e2 = m.group(2)
+
+        assert(s2 == 10, s"group 2 start=10, got $s2")
+        assert(e2 == 15, s"group 2 end=15, got $e2")
+
+
+### Groups with quantifiers
+
+    #test
+    test_ere_group_star() -> void
+        val m = match_regex("^(ab)*$", "ababab")
+
+        assert(m.matched(), "(ab)* matches three repetitions")
+
+    #test
+    test_ere_group_star_zero() -> void
+        val m = match_regex("^(ab)*$", "")
+
+        assert(m.matched(), "(ab)* matches zero repetitions")
+
+    #test
+    test_ere_group_plus() -> void
+        val m = match_regex("^(ab)+$", "ababab")
+
+        assert(m.matched(), "(ab)+ matches three repetitions")
+
+    #test
+    test_ere_group_plus_zero_fail() -> void
+        val m = match_regex("^(ab)+$", "")
+
+        assert(!m.matched(), "(ab)+ requires at least one")
+
+    #test
+    test_ere_group_quest() -> void
+        val m = match_regex("^a(bc)?d$", "ad")
+
+        assert(m.matched(), "(bc)? matches zero")
+
+    #test
+    test_ere_group_quest_one() -> void
+        val m = match_regex("^a(bc)?d$", "abcd")
+
+        assert(m.matched(), "(bc)? matches one")
+
+
+### Alternation within groups
+
+    #test
+    test_ere_group_alt() -> void
+        val m = match_regex("^(cat|dog)s$", "cats")
+
+        assert(m.matched(), "should match cats")
+
+        s1, e1 = m.group(1)
+
+        assert(s1 == 0, "group 1 starts at 0")
+        assert(e1 == 3, "group 1 ends at 3")
+
+    #test
+    test_ere_group_alt_second() -> void
+        val m = match_regex("^(cat|dog)s$", "dogs")
+
+        assert(m.matched(), "should match dogs")
+
+        s1, e1 = m.group(1)
+
+        assert(s1 == 0, "group 1 starts at 0")
+        assert(e1 == 3, "group 1 ends at 3")
+
+
+### Anchored ERE
+
+    #test
+    test_ere_anchored() -> void
+        val m = match_regex("^hello$", "hello")
+
+        assert(m.matched(), "anchored match")
+
+    #test
+    test_ere_anchored_fail() -> void
+        val m = match_regex("^hello$", "say hello")
+
+        assert(!m.matched(), "anchored should not match")
+
+
+### Dot in ERE
+
+    #test
+    test_ere_dot() -> void
+        val m = match_regex("h.llo", "hello")
+
+        assert(m.matched(), "dot matches")
+
+    #test
+    test_ere_dot_star() -> void
+        val m = match_regex("^h.*o$", "hello")
+
+        assert(m.matched(), ".* matches ell")
+
+
+### Character classes in ERE
+
+    #test
+    test_ere_class() -> void
+        val m = match_regex("[0-9]+", "abc123def")
+
+        assert(m.matched(), "should match digits")
+
+        start, en = m.group(0)
+
+        assert(start == 3, s"start=3, got $start")
+        assert(en == 6, s"end=6, got $en")
+
+    #test
+    test_ere_negated_class() -> void
+        val m = match_regex("^[^aeiou]+$", "bcd")
+
+        assert(m.matched(), "consonants only")
+
+    #test
+    test_ere_negated_class_fail() -> void
+        val m = match_regex("^[^aeiou]+$", "bad")
+
+        assert(!m.matched(), "contains vowel")
+
+
+### Escaped special characters in ERE
+
+    #test
+    test_ere_escaped_paren() -> void
+        val m = match_regex("\\(a\\)", "(a)")
+
+        assert(m.matched(), "literal parens")
+
+    #test
+    test_ere_escaped_pipe() -> void
+        val m = match_regex("a\\|b", "a|b")
+
+        assert(m.matched(), "literal pipe")
+
+    #test
+    test_ere_escaped_plus() -> void
+        val m = match_regex("a\\+", "a+")
+
+        assert(m.matched(), "literal plus")
+
+    #test
+    test_ere_escaped_quest() -> void
+        val m = match_regex("a\\?", "a?")
+
+        assert(m.matched(), "literal question")
+
+    #test
+    test_ere_escaped_dot() -> void
+        val m = match_regex("a\\.b", "a.b")
+
+        assert(m.matched(), "literal dot")
+
+    #test
+    test_ere_escaped_dot_no_match() -> void
+        val m = match_regex("^a\\.b$", "axb")
+
+        assert(!m.matched(), "escaped dot doesn't match x")
+
+
+### Complex ERE patterns
+
+    #test
+    test_ere_email() -> void
+        val m = match_regex("[a-z]+@[a-z]+\\.[a-z]+", "send to user@host.com please")
+
+        assert(m.matched(), "should match email")
+
+        start, en = m.group(0)
+
+        assert(start == 8, s"start=8, got $start")
+        assert(en == 21, s"end=21, got $en")
+
+    #test
+    test_ere_ip_like() -> void
+        val m = match_regex("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$", "192.168.1.1")
+
+        assert(m.matched(), "should match IP")
+
+    #test
+    test_ere_complex_alt_groups() -> void
+        val m = match_regex("^(https?|ftp)://([a-z]+)$", "http://host")
+
+        assert(m.matched(), "should match URL")
+
+        s1, e1 = m.group(1)
+
+        assert(s1 == 0, "group 1 start")
+        assert(e1 == 4, "group 1 end")
+
+        s2, e2 = m.group(2)
+
+        assert(s2 == 7, s"group 2 start=7, got $s2")
+        assert(e2 == 11, s"group 2 end=11, got $e2")
+
+    #test
+    test_ere_complex_alt_groups_https() -> void
+        val m = match_regex("^(https?|ftp)://([a-z]+)$", "https://host")
+
+        assert(m.matched(), "should match https URL")
+
+        s1, e1 = m.group(1)
+
+        assert(s1 == 0, "group 1 start")
+        assert(e1 == 5, s"group 1 end=5, got $e1")
+
+    #test
+    test_ere_complex_alt_groups_ftp() -> void
+        val m = match_regex("^(https?|ftp)://([a-z]+)$", "ftp://files")
+
+        assert(m.matched(), "should match ftp URL")
+
+        s1, e1 = m.group(1)
+
+        assert(s1 == 0, "group 1 start")
+        assert(e1 == 3, s"group 1 end=3, got $e1")
+
+
+### Leftmost-longest with ERE
+
+    #test
+    test_ere_leftmost_longest() -> void
+        val m = match_regex("a+", "baaab")
+
+        assert(m.matched(), "should match")
+
+        start, en = m.group(0)
+
+        assert(start == 1, "leftmost at 1")
+        assert(en == 4, s"longest: end=4, got $en")
+
+
+### No match cases
+
+    #test
+    test_ere_no_match_alt() -> void
+        val m = match_regex("^(abc|def)$", "xyz")
+
+        assert(!m.matched(), "neither branch matches")
+
+    #test
+    test_ere_no_match_complex() -> void
+        val m = match_regex("^[A-Z][a-z]+$", "hello")
+
+        assert(!m.matched(), "must start with uppercase")
+
+
+### Edge cases
+
+    #test
+    test_ere_empty_alt_branch() -> void
+        /* a| means "a or empty string" — empty always matches */
+        val m = match_regex("a|", "b")
+
+        assert(m.matched(), "empty branch matches anything")
+
+    #test
+    test_ere_nested_groups() -> void
+        val m = match_regex("^((a)(b))$", "ab")
+
+        assert(m.matched(), "should match")
+        assert(m.n_groups == 4, s"4 groups (0+3), got ${m.n_groups}")
+
+        s1, e1 = m.group(1)
+
+        assert(s1 == 0, "group 1 start")
+        assert(e1 == 2, s"group 1 end=2, got $e1")
+
+        s2, e2 = m.group(2)
+
+        assert(s2 == 0, "group 2 start")
+        assert(e2 == 1, s"group 2 end=1, got $e2")
+
+        s3, e3 = m.group(3)
+
+        assert(s3 == 1, "group 3 start")
+        assert(e3 == 2, s"group 3 end=2, got $e3")
+
+    #test
+    test_ere_star_of_class() -> void
+        val m = match_regex("^[a-z]*$", "hello")
+
+        assert(m.matched(), "all lowercase")
+
+    #test
+    test_ere_plus_of_class() -> void
+        val m = match_regex("^[a-z]+$", "")
+
+        assert(!m.matched(), "empty fails plus")
+
+    #test
+    test_ere_only_anchor_start() -> void
+        val m = match_regex("^abc", "abcdef")
+
+        assert(m.matched(), "prefix match")
+
+        start, en = m.group(0)
+
+        assert(start == 0, "at start")
+        assert(en == 3, s"end=3, got $en")
+
+    #test
+    test_ere_only_anchor_end() -> void
+        val m = match_regex("def$", "abcdef")
+
+        assert(m.matched(), "suffix match")
+
+        start, en = m.group(0)
+
+        assert(start == 3, s"start=3, got $start")
+        assert(en == 6, s"end=6, got $en")
+
+
+### Interval — exact count
+
+    #test
+    test_interval_exact() -> void
+        val m = match_regex("^a{3}$", "aaa")
+
+        assert(m.matched(), "a{3} matches aaa")
+
+    #test
+    test_interval_exact_fail_short() -> void
+        val m = match_regex("^a{3}$", "aa")
+
+        assert(!m.matched(), "a{3} doesn't match aa")
+
+    #test
+    test_interval_exact_fail_long() -> void
+        val m = match_regex("^a{3}$", "aaaa")
+
+        assert(!m.matched(), "a{3} doesn't match aaaa")
+
+
+### Interval — range
+
+    #test
+    test_interval_range_min() -> void
+        val m = match_regex("^a{2,4}$", "aa")
+
+        assert(m.matched(), "a{2,4} matches aa")
+
+    #test
+    test_interval_range_mid() -> void
+        val m = match_regex("^a{2,4}$", "aaa")
+
+        assert(m.matched(), "a{2,4} matches aaa")
+
+    #test
+    test_interval_range_max() -> void
+        val m = match_regex("^a{2,4}$", "aaaa")
+
+        assert(m.matched(), "a{2,4} matches aaaa")
+
+    #test
+    test_interval_range_below() -> void
+        val m = match_regex("^a{2,4}$", "a")
+
+        assert(!m.matched(), "a{2,4} doesn't match a")
+
+    #test
+    test_interval_range_above() -> void
+        val m = match_regex("^a{2,4}$", "aaaaa")
+
+        assert(!m.matched(), "a{2,4} doesn't match aaaaa")
+
+
+### Interval — unbounded
+
+    #test
+    test_interval_unbounded() -> void
+        val m = match_regex("^a{2,}$", "aaaaaa")
+
+        assert(m.matched(), "a{2,} matches 6 a's")
+
+    #test
+    test_interval_unbounded_exact() -> void
+        val m = match_regex("^a{2,}$", "aa")
+
+        assert(m.matched(), "a{2,} matches exactly 2")
+
+    #test
+    test_interval_unbounded_fail() -> void
+        val m = match_regex("^a{2,}$", "a")
+
+        assert(!m.matched(), "a{2,} doesn't match 1")
+
+
+### Interval — zero minimum
+
+    #test
+    test_interval_zero_min() -> void
+        val m = match_regex("^a{0,2}$", "")
+
+        assert(m.matched(), "a{0,2} matches empty")
+
+    #test
+    test_interval_zero_min_one() -> void
+        val m = match_regex("^a{0,2}$", "a")
+
+        assert(m.matched(), "a{0,2} matches a")
+
+    #test
+    test_interval_zero_min_max() -> void
+        val m = match_regex("^a{0,2}$", "aa")
+
+        assert(m.matched(), "a{0,2} matches aa")
+
+    #test
+    test_interval_zero_min_above() -> void
+        val m = match_regex("^a{0,2}$", "aaa")
+
+        assert(!m.matched(), "a{0,2} doesn't match aaa")
+
+
+### Interval on group
+
+    #test
+    test_interval_group() -> void
+        val m = match_regex("^(ab){3}$", "ababab")
+
+        assert(m.matched(), "(ab){3} matches ababab")
+
+    #test
+    test_interval_group_fail() -> void
+        val m = match_regex("^(ab){3}$", "abab")
+
+        assert(!m.matched(), "(ab){3} doesn't match abab")
+
+
+### Interval in context
+
+    #test
+    test_interval_in_pattern() -> void
+        val m = match_regex("^[0-9]{3}-[0-9]{4}$", "555-1234")
+
+        assert(m.matched(), "phone number pattern")
+
+    #test
+    test_interval_in_pattern_fail() -> void
+        val m = match_regex("^[0-9]{3}-[0-9]{4}$", "55-1234")
+
+        assert(!m.matched(), "too few area digits")
+
+
+### BRE intervals (via match_bre)
+
+    #test
+    test_bre_interval_exact() -> void
+        val m = match_bre("^a\\{3\\}$", "aaa")
+
+        assert(m.matched(), "BRE a\\{3\\} matches aaa")
+
+    #test
+    test_bre_interval_range() -> void
+        val m = match_bre("^a\\{2,4\\}$", "aaa")
+
+        assert(m.matched(), "BRE a\\{2,4\\} matches aaa")
+
+    #test
+    test_bre_interval_unbounded() -> void
+        val m = match_bre("^a\\{2,\\}$", "aaaa")
+
+        assert(m.matched(), "BRE a\\{2,\\} matches aaaa")
+
+
+### POSIX named character classes
+
+    #test
+    test_named_class_alpha() -> void
+        val m = match_regex("^[[:alpha:]]+$", "Hello")
+
+        assert(m.matched(), "[:alpha:] matches letters")
+
+    #test
+    test_named_class_alpha_fail() -> void
+        val m = match_regex("^[[:alpha:]]+$", "Hello123")
+
+        assert(!m.matched(), "[:alpha:] rejects digits")
+
+    #test
+    test_named_class_digit() -> void
+        val m = match_regex("^[[:digit:]]+$", "12345")
+
+        assert(m.matched(), "[:digit:] matches digits")
+
+    #test
+    test_named_class_digit_fail() -> void
+        val m = match_regex("^[[:digit:]]+$", "123abc")
+
+        assert(!m.matched(), "[:digit:] rejects letters")
+
+    #test
+    test_named_class_alnum() -> void
+        val m = match_regex("^[[:alnum:]]+$", "Hello123")
+
+        assert(m.matched(), "[:alnum:] matches letters and digits")
+
+    #test
+    test_named_class_alnum_fail() -> void
+        val m = match_regex("^[[:alnum:]]+$", "Hello 123")
+
+        assert(!m.matched(), "[:alnum:] rejects space")
+
+    #test
+    test_named_class_upper() -> void
+        val m = match_regex("^[[:upper:]]+$", "HELLO")
+
+        assert(m.matched(), "[:upper:] matches uppercase")
+
+    #test
+    test_named_class_upper_fail() -> void
+        val m = match_regex("^[[:upper:]]+$", "Hello")
+
+        assert(!m.matched(), "[:upper:] rejects lowercase")
+
+    #test
+    test_named_class_lower() -> void
+        val m = match_regex("^[[:lower:]]+$", "hello")
+
+        assert(m.matched(), "[:lower:] matches lowercase")
+
+    #test
+    test_named_class_space() -> void
+        val m = match_regex("^[[:space:]]+$", " \t")
+
+        assert(m.matched(), "[:space:] matches whitespace")
+
+    #test
+    test_named_class_xdigit() -> void
+        val m = match_regex("^[[:xdigit:]]+$", "0123456789abcdefABCDEF")
+
+        assert(m.matched(), "[:xdigit:] matches hex digits")
+
+    #test
+    test_named_class_xdigit_fail() -> void
+        val m = match_regex("^[[:xdigit:]]+$", "0123g")
+
+        assert(!m.matched(), "[:xdigit:] rejects g")
+
+
+### Named class combined with ranges
+
+    #test
+    test_named_class_combined() -> void
+        val m = match_regex("^[[:digit:]_]+$", "123_456")
+
+        assert(m.matched(), "digits and underscore")
+
+    #test
+    test_named_class_negated() -> void
+        val m = match_regex("^[^[:digit:]]+$", "hello")
+
+        assert(m.matched(), "not-digits matches letters")
+
+    #test
+    test_named_class_negated_fail() -> void
+        val m = match_regex("^[^[:digit:]]+$", "hello123")
+
+        assert(!m.matched(), "not-digits rejects digits")

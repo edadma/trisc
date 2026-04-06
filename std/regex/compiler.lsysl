@@ -63,6 +63,18 @@ Capture(e, i) → Save 2*i
                 Save 2*i+1
 ```
 
+### Alternation
+
+`a|b` — try the left branch; if it fails, try the right:
+
+```
+     Split L1, L2
+L1:  [code for left]
+     Jump L3
+L2:  [code for right]
+L3:  ...
+```
+
 ### Character class
 
 A single `Class` instruction that references the class
@@ -170,6 +182,27 @@ flat (stored in an array), we look up each node by index.
                 val l2 = len(self.insts) + 1
 
                 self.emit(OP_SPLIT, l1, l2)
+            10 -> /* NK_ALT (alternation) */
+                /*
+                 *     Split L1, L2
+                 * L1: [left]
+                 *     Jump L3
+                 * L2: [right]
+                 * L3: ...
+                 */
+                val split = self.emit(OP_SPLIT, 0, 0)
+
+                self.compile_node(node.left)
+
+                val jmp = self.emit(OP_JUMP, 0, 0)
+                val l2 = len(self.insts)
+
+                self.compile_node(node.right)
+
+                val l3 = len(self.insts)
+
+                self.patch(split, split + 1, l2)
+                self.patch(jmp, l3, 0)
             _ -> return
 
 
@@ -320,3 +353,53 @@ instruction array.
 
         assert(insts[1].op == OP_CLASS, "class check")
         assert(insts[1].arg1 == 0, "class index 0")
+
+
+### Alternation produces Split/Jump
+
+    #test
+    test_compile_alt() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_regex("a|b")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        /* Save 0, Split(2,4), Char 'a', Jump(5), Char 'b', Save 1, Match */
+        assert(insts[1].op == OP_SPLIT, "split for alt")
+        assert(insts[2].op == OP_CHAR, "left branch: char a")
+        assert(insts[2].arg1 == int('a'), "a")
+        assert(insts[3].op == OP_JUMP, "jump past right")
+        assert(insts[4].op == OP_CHAR, "right branch: char b")
+        assert(insts[4].arg1 == int('b'), "b")
+
+
+### Plus produces child then Split loop
+
+    #test
+    test_compile_plus() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_regex("a+")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        /* Save 0, Char 'a', Split(1,3), Save 1, Match */
+        assert(insts[1].op == OP_CHAR, "char first")
+        assert(insts[2].op == OP_SPLIT, "split after")
+        assert(insts[2].arg1 == 1, "back to char")
+
+
+### Question produces Split then child
+
+    #test
+    test_compile_quest() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_regex("a?")
+
+        assert(!err, "parse ok")
+
+        val insts = compile(root, nodes, n_groups)
+
+        /* Save 0, Split(2,3), Char 'a', Save 1, Match */
+        assert(insts[1].op == OP_SPLIT, "split for quest")
+        assert(insts[2].op == OP_CHAR, "char in optional")

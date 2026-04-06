@@ -1,10 +1,10 @@
-std.regex.parser — BRE pattern parser
-======================================
+std.regex.parser — BRE and ERE pattern parser
+==============================================
 
-This module implements a recursive descent parser for POSIX
-Basic Regular Expressions (BRE). The parser consumes a
-pattern string and produces a flat array of `Node` structs
-— the regex AST.
+This module implements recursive descent parsers for both
+POSIX Basic Regular Expressions (BRE) and Extended Regular
+Expressions (ERE). Both parsers produce the same flat array
+of `Node` structs — the regex AST.
 
 
 BRE grammar
@@ -29,6 +29,27 @@ Key BRE quirks:
 - `*` at the start of a pattern or subgroup is a literal
 - `^` is only an anchor at the start; `$` only at the end
 - There is no alternation (`|`) in BRE
+
+
+ERE grammar
+-----------
+
+```
+ere        → branch ('|' branch)*
+branch     → piece+
+piece      → atom quantifier?
+quantifier → '*' | '+' | '?' | '{' bounds '}'
+atom       → '.' | '^' | '$' | '[' class ']'
+           | '(' ere ')' | '\' escaped | literal
+```
+
+Key ERE differences from BRE:
+- Parentheses and braces are *unescaped*: `(`, `)`, `{`, `}`
+- `|` alternation operator
+- `+` (one or more) and `?` (zero or one) quantifiers
+- `\(` and `\)` are literal parentheses (opposite of BRE)
+- `*`, `+`, `?` at the start of a pattern are undefined
+  (we treat them as literals, matching common implementations)
 
 
     module std.regex
@@ -123,6 +144,79 @@ children.
     private Parser.add_class(class_id: int) -> int
         self.add_node(NK_CLASS, 0, -1, -1, class_id)
 
+    private Parser.add_quest(child: int) -> int
+        self.add_node(NK_QUEST, 0, child, -1, 0)
+
+    private Parser.add_plus(child: int) -> int
+        self.add_node(NK_PLUS, 0, child, -1, 0)
+
+    private Parser.add_alt(left: int, right: int) -> int
+        self.add_node(NK_ALT, 0, left, right, 0)
+
+
+### Parsing a decimal integer from the pattern
+
+    private Parser.parse_int() -> int
+        var n = 0
+        var found = false
+
+        while !self.at_end() && self.peek() >= int('0') && self.peek() <= int('9')
+            n = n * 10 + (self.advance() - int('0'))
+            found = true
+
+        if !found then return -1
+
+        n
+
+
+### Building interval repetition
+
+Interval expressions `{n,m}` are desugared into existing
+node kinds. The child node index can be reused — the
+compiler walks the AST multiple times and emits independent
+instruction sequences each time.
+
+- `a{3}`   → `SEQ(SEQ(a, a), a)` — exactly 3
+- `a{2,5}` → `SEQ(SEQ(a, a), SEQ(QUEST(a), SEQ(QUEST(a), QUEST(a))))` — 2 required + up to 3 optional
+- `a{3,}`  → `SEQ(SEQ(SEQ(a, a), a), STAR(a))` — 3 required + unbounded
+- `a{0,3}` → `SEQ(QUEST(a), SEQ(QUEST(a), QUEST(a)))` — all optional
+
+    private Parser.build_repeat(child: int, lo: int, hi: int) -> int
+        /* hi == -1 means unbounded (e.g. {3,}) */
+        var result = -1
+
+        /* Emit the required part: lo copies */
+        for var i = 0; i < lo; i++
+            if result < 0
+                result = child
+            else
+                result = self.add_seq(result, child)
+
+        /* Emit the optional part */
+        if hi == -1
+            /* Unbounded: append star */
+            val star = self.add_star(child)
+
+            if result < 0
+                result = star
+            else
+                result = self.add_seq(result, star)
+        else
+            /* Bounded: append (hi - lo) quest nodes */
+            for var i = 0; i < hi - lo; i++
+                val opt = self.add_quest(child)
+
+                if result < 0
+                    result = opt
+                else
+                    result = self.add_seq(result, opt)
+
+        if result < 0
+            /* {0,0} or {0} — matches empty string; use quest of child */
+            result = self.add_quest(child)
+
+        result
+
 
 Parsing character classes
 -------------------------
@@ -190,15 +284,62 @@ leading `^` negates the class.
         self.classes = append(self.classes, cls)
         self.add_class(class_id)
 
-POSIX named character classes map to character ranges. These
-correspond exactly to the functions in our `posix.ctype`
-module.
+POSIX named character classes map to ASCII character ranges.
+These correspond exactly to the functions in `posix.ctype`.
+
+The helper `name_eq` checks whether the pattern substring
+from `name_start` to `self.pos - 2` (before the closing
+`:`) matches a given string.
+
+    private Parser.name_eq(name_start: int, name: string) -> bool
+        val name_len = self.pos - 2 - name_start
+
+        if name_len != len(name) then return false
+
+        for var i = 0; i < name_len; i++
+            if self.pattern[name_start + i] != name[i] then return false
+
+        true
 
     private Parser.add_posix_class(ranges: []CharRange, name_start: int) -> []CharRange
-        /* TODO: extract name from pattern[name_start..self.pos-2] and match */
-        /* For now, add ASCII ranges for common classes */
-        /* This is a placeholder — full implementation needs string comparison */
-        append(ranges, CharRange(0, 127))
+        if self.name_eq(name_start, "alpha")
+            ranges = append(ranges, CharRange(int('A'), int('Z')))
+            return append(ranges, CharRange(int('a'), int('z')))
+        elif self.name_eq(name_start, "upper")
+            return append(ranges, CharRange(int('A'), int('Z')))
+        elif self.name_eq(name_start, "lower")
+            return append(ranges, CharRange(int('a'), int('z')))
+        elif self.name_eq(name_start, "digit")
+            return append(ranges, CharRange(int('0'), int('9')))
+        elif self.name_eq(name_start, "alnum")
+            ranges = append(ranges, CharRange(int('0'), int('9')))
+            ranges = append(ranges, CharRange(int('A'), int('Z')))
+            return append(ranges, CharRange(int('a'), int('z')))
+        elif self.name_eq(name_start, "space")
+            ranges = append(ranges, CharRange(int('\t'), int('\r')))
+            return append(ranges, CharRange(int(' '), int(' ')))
+        elif self.name_eq(name_start, "blank")
+            ranges = append(ranges, CharRange(int('\t'), int('\t')))
+            return append(ranges, CharRange(int(' '), int(' ')))
+        elif self.name_eq(name_start, "print")
+            return append(ranges, CharRange(int(' '), int('~')))
+        elif self.name_eq(name_start, "graph")
+            return append(ranges, CharRange(int('!'), int('~')))
+        elif self.name_eq(name_start, "cntrl")
+            ranges = append(ranges, CharRange(0, 31))
+            return append(ranges, CharRange(127, 127))
+        elif self.name_eq(name_start, "punct")
+            ranges = append(ranges, CharRange(int('!'), int('/')))
+            ranges = append(ranges, CharRange(int(':'), int('@')))
+            ranges = append(ranges, CharRange(int('['), int('`')))
+            return append(ranges, CharRange(int('{'), int('~')))
+        elif self.name_eq(name_start, "xdigit")
+            ranges = append(ranges, CharRange(int('0'), int('9')))
+            ranges = append(ranges, CharRange(int('A'), int('F')))
+            return append(ranges, CharRange(int('a'), int('f')))
+
+        self.set_error("unknown POSIX class")
+        ranges
 
 
 Parsing atoms
@@ -276,7 +417,36 @@ in full BRE). The quantifier wraps the atom node.
             self.advance()
             return self.add_star(atom)
 
+        /* Check for \{n,m\} interval */
+        if self.pos + 1 < len(self.pattern) && self.peek() == int('\\') && self.pattern[self.pos + 1] == int('{')
+            self.advance()
+            self.advance()
+            return self.parse_interval(atom)
+
         atom
+
+BRE interval parsing: `\{n\}`, `\{n,\}`, `\{n,m\}`.
+
+    private Parser.parse_interval(child: int) -> int
+        val lo = self.parse_int()
+
+        if lo < 0
+            self.set_error("expected number in \\{...\\}")
+            return -1
+
+        var hi = lo
+
+        if !self.at_end() && self.peek() == int(',')
+            self.advance()
+            hi = self.parse_int()
+
+            /* {n,} means unbounded — hi stays -1 from parse_int */
+
+        if !self.expect(int('\\')) || !self.expect(int('}'))
+            self.set_error("unterminated \\{...\\}")
+            return -1
+
+        self.build_repeat(child, lo, hi)
 
 
 Parsing branches (concatenation)
@@ -328,6 +498,195 @@ Top-level parse entry point
         p.err_pos = 0
 
         val root = p.parse_branch()
+
+        if !p.at_end() && !p.err
+            p.set_error("unexpected character")
+
+        (root, p.nodes, p.classes, p.n_groups, p.err, p.err_msg, p.err_pos)
+
+
+ERE parser
+----------
+
+The ERE parser reuses the `Parser` struct, helpers, node
+builders, and character class parsing from BRE. Only the
+atom, piece, branch, and top-level rules differ.
+
+
+### ERE atoms
+
+ERE atoms are like BRE atoms but with unescaped parentheses
+for grouping and different escaping rules. In ERE, `\(`
+is a literal `(`, not a group — the opposite of BRE.
+
+    private Parser.ere_parse_atom() -> int
+        if self.err || self.at_end() then return -1
+
+        val ch = self.peek()
+
+        ch match
+            int('.') ->
+                self.advance()
+                return self.add_dot()
+            int('^') ->
+                self.advance()
+                return self.add_anchor_start()
+            int('$') ->
+                self.advance()
+                return self.add_anchor_end()
+            int('[') ->
+                self.advance()
+                return self.parse_class()
+            int('(') ->
+                self.advance()
+                self.n_groups++
+                val group = self.n_groups
+                val inner = self.ere_parse_regex()
+
+                if !self.expect(int(')'))
+                    self.set_error("unterminated ( group")
+                    return -1
+
+                return self.add_capture(inner, group)
+            int('\\') ->
+                self.advance()
+
+                if self.at_end()
+                    self.set_error("trailing backslash")
+                    return -1
+
+                val esc = self.advance()
+
+                return self.add_literal(esc)
+            _ ->
+                /* These are not atoms in ERE */
+                if ch == int('*') || ch == int('+') || ch == int('?') || ch == int('{') || ch == int('|') || ch == int(')')
+                    return -1
+
+                self.advance()
+                return self.add_literal(ch)
+
+
+### ERE pieces (atom + optional quantifier)
+
+ERE supports `*`, `+`, and `?` as quantifiers (all
+unescaped, unlike BRE).
+
+    private Parser.ere_parse_piece() -> int
+        if self.err then return -1
+
+        val atom = self.ere_parse_atom()
+
+        if atom < 0 then return -1
+
+        if !self.at_end()
+            val q = self.peek()
+
+            if q == int('*')
+                self.advance()
+                return self.add_star(atom)
+            elif q == int('+')
+                self.advance()
+                return self.add_plus(atom)
+            elif q == int('?')
+                self.advance()
+                return self.add_quest(atom)
+            elif q == int('{')
+                self.advance()
+                return self.ere_parse_interval(atom)
+
+        atom
+
+ERE interval parsing: `{n}`, `{n,}`, `{n,m}`.
+
+    private Parser.ere_parse_interval(child: int) -> int
+        val lo = self.parse_int()
+
+        if lo < 0
+            self.set_error("expected number in {...}")
+            return -1
+
+        var hi = lo
+
+        if !self.at_end() && self.peek() == int(',')
+            self.advance()
+            hi = self.parse_int()
+
+            /* {n,} means unbounded — hi stays -1 from parse_int */
+
+        if !self.expect(int('}'))
+            self.set_error("unterminated {...}")
+            return -1
+
+        self.build_repeat(child, lo, hi)
+
+
+### ERE branches (concatenation)
+
+A branch is one or more pieces concatenated. Concatenation
+stops at `|` (alternation) or `)` (end of group).
+
+    private Parser.ere_parse_branch() -> int
+        if self.err then return -1
+
+        var left = self.ere_parse_piece()
+
+        if left < 0 then return -1
+
+        while !self.at_end() && !self.err
+            val ch = self.peek()
+
+            /* Stop at alternation or end-of-group */
+            if ch == int('|') || ch == int(')') then break
+
+            val right = self.ere_parse_piece()
+
+            if right < 0 then break
+
+            left = self.add_seq(left, right)
+
+        left
+
+
+### ERE alternation (top-level)
+
+The top-level ERE rule handles `|` alternation. Each `|`
+creates an `NK_ALT` node combining the left and right
+branches.
+
+    private Parser.ere_parse_regex() -> int
+        if self.err then return -1
+
+        var left = self.ere_parse_branch()
+
+        while !self.at_end() && !self.err && self.peek() == int('|')
+            self.advance()
+
+            val right = self.ere_parse_branch()
+
+            left = self.add_alt(left, right)
+
+        left
+
+
+Top-level ERE parse entry point
+--------------------------------
+
+    parse_regex(pattern: string) -> (int, []Node, []CharClass, int, bool, string, int)
+        var p: Parser
+
+        p.pattern = pattern
+        p.pos = 0
+        val _n = new [16]Node
+        p.nodes = _n[:0]
+        val _c = new [4]CharClass
+        p.classes = _c[:0]
+        p.n_groups = 0
+        p.err = false
+        p.err_msg = ""
+        p.err_pos = 0
+
+        val root = p.ere_parse_regex()
 
         if !p.at_end() && !p.err
             p.set_error("unexpected character")
@@ -532,3 +891,255 @@ array.
 
         assert(!err, "no error")
         assert(root == -1, "empty pattern")
+
+
+Extended parser tests
+---------------------
+
+### Literal (parse_regex)
+
+
+
+    #test
+    test_ere_parse_literal() -> void
+        root, nodes, _, _, err, _, _ = parse_regex("a")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_LITERAL, "literal")
+        assert(nodes[root].ch == int('a'), "char a")
+
+
+### ERE alternation
+
+    #test
+    test_ere_parse_alt() -> void
+        root, nodes, _, _, err, _, _ = parse_regex("a|b")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_ALT, "alt node")
+        assert(nodes[nodes[root].left].kind == NK_LITERAL, "left literal")
+        assert(nodes[nodes[root].left].ch == int('a'), "left is a")
+        assert(nodes[nodes[root].right].kind == NK_LITERAL, "right literal")
+        assert(nodes[nodes[root].right].ch == int('b'), "right is b")
+
+
+### ERE multi-way alternation
+
+    #test
+    test_ere_parse_multi_alt() -> void
+        root, nodes, _, _, err, _, _ = parse_regex("a|b|c")
+
+        assert(!err, "no error")
+        /* a|b|c → ALT(ALT(a, b), c) */
+        assert(nodes[root].kind == NK_ALT, "outer alt")
+        assert(nodes[nodes[root].left].kind == NK_ALT, "inner alt")
+        assert(nodes[nodes[root].right].kind == NK_LITERAL, "c")
+        assert(nodes[nodes[root].right].ch == int('c'), "char c")
+
+
+### ERE unescaped groups
+
+    #test
+    test_ere_parse_group() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_regex("(a)")
+
+        assert(!err, "no error")
+        assert(n_groups == 1, "one group")
+        assert(nodes[root].kind == NK_CAPTURE, "capture")
+        assert(nodes[nodes[root].left].kind == NK_LITERAL, "inner a")
+
+
+### ERE nested groups
+
+    #test
+    test_ere_parse_nested_groups() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_regex("(a(b))")
+
+        assert(!err, "no error")
+        assert(n_groups == 2, "two groups")
+        assert(nodes[root].kind == NK_CAPTURE, "outer capture")
+        assert(nodes[root].extra == 1, "outer is group 1")
+
+
+### ERE plus quantifier
+
+    #test
+    test_ere_parse_plus() -> void
+        root, nodes, _, _, err, _, _ = parse_regex("a+")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_PLUS, "plus node")
+        assert(nodes[nodes[root].left].kind == NK_LITERAL, "child is literal")
+        assert(nodes[nodes[root].left].ch == int('a'), "child is a")
+
+
+### ERE question quantifier
+
+    #test
+    test_ere_parse_quest() -> void
+        root, nodes, _, _, err, _, _ = parse_regex("a?")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_QUEST, "quest node")
+        assert(nodes[nodes[root].left].kind == NK_LITERAL, "child is literal")
+
+
+### ERE star quantifier
+
+    #test
+    test_ere_parse_star() -> void
+        root, nodes, _, _, err, _, _ = parse_regex("a*")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_STAR, "star node")
+
+
+### ERE concatenation
+
+    #test
+    test_ere_parse_concat() -> void
+        root, nodes, _, _, err, _, _ = parse_regex("abc")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_SEQ, "outer seq")
+
+
+### ERE alternation with concatenation
+
+    #test
+    test_ere_parse_alt_concat() -> void
+        root, nodes, _, _, err, _, _ = parse_regex("ab|cd")
+
+        assert(!err, "no error")
+        /* ab|cd → ALT(SEQ(a,b), SEQ(c,d)) */
+        assert(nodes[root].kind == NK_ALT, "alt")
+        assert(nodes[nodes[root].left].kind == NK_SEQ, "left seq")
+        assert(nodes[nodes[root].right].kind == NK_SEQ, "right seq")
+
+
+### ERE group with alternation
+
+    #test
+    test_ere_parse_group_alt() -> void
+        root, nodes, _, n_groups, err, _, _ = parse_regex("(a|b)")
+
+        assert(!err, "no error")
+        assert(n_groups == 1, "one group")
+        assert(nodes[root].kind == NK_CAPTURE, "capture")
+        assert(nodes[nodes[root].left].kind == NK_ALT, "inner alt")
+
+
+### ERE anchors
+
+    #test
+    test_ere_parse_anchors() -> void
+        root, nodes, _, _, err, _, _ = parse_regex("^a$")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_SEQ, "seq")
+
+
+### ERE character class
+
+    #test
+    test_ere_parse_class() -> void
+        root, nodes, classes, _, err, _, _ = parse_regex("[a-z]")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_CLASS, "class node")
+        assert(len(classes) == 1, "one class")
+
+
+### ERE dot
+
+    #test
+    test_ere_parse_dot() -> void
+        root, nodes, _, _, err, _, _ = parse_regex(".")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_DOT, "dot")
+
+
+### ERE escaped special chars
+
+    #test
+    test_ere_parse_escaped_paren() -> void
+        root, nodes, _, _, err, _, _ = parse_regex("\\(")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_LITERAL, "literal")
+        assert(nodes[root].ch == int('('), "char is (")
+
+    #test
+    test_ere_parse_escaped_pipe() -> void
+        root, nodes, _, _, err, _, _ = parse_regex("\\|")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_LITERAL, "literal")
+        assert(nodes[root].ch == int('|'), "char is |")
+
+    #test
+    test_ere_parse_escaped_plus() -> void
+        root, nodes, _, _, err, _, _ = parse_regex("\\+")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_LITERAL, "literal")
+        assert(nodes[root].ch == int('+'), "char is +")
+
+
+### ERE error cases
+
+    #test
+    test_ere_parse_unterminated_group() -> void
+        _, _, _, _, err, _, _ = parse_regex("(abc")
+
+        assert(err, "error set")
+
+    #test
+    test_ere_parse_unterminated_class() -> void
+        _, _, _, _, err, _, _ = parse_regex("[abc")
+
+        assert(err, "error set")
+
+    #test
+    test_ere_parse_trailing_backslash() -> void
+        _, _, _, _, err, _, _ = parse_regex("abc\\")
+
+        assert(err, "error set")
+
+
+### ERE empty alternation branch
+
+    #test
+    test_ere_parse_empty() -> void
+        root, nodes, _, _, err, _, _ = parse_regex("")
+
+        assert(!err, "no error")
+        assert(root == -1, "empty pattern")
+
+
+### ERE quantifier on group
+
+    #test
+    test_ere_parse_group_star() -> void
+        root, nodes, _, _, err, _, _ = parse_regex("(ab)*")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_STAR, "star")
+        assert(nodes[nodes[root].left].kind == NK_CAPTURE, "child is capture")
+
+    #test
+    test_ere_parse_group_plus() -> void
+        root, nodes, _, _, err, _, _ = parse_regex("(ab)+")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_PLUS, "plus")
+        assert(nodes[nodes[root].left].kind == NK_CAPTURE, "child is capture")
+
+    #test
+    test_ere_parse_group_quest() -> void
+        root, nodes, _, _, err, _, _ = parse_regex("(ab)?")
+
+        assert(!err, "no error")
+        assert(nodes[root].kind == NK_QUEST, "quest")
+        assert(nodes[nodes[root].left].kind == NK_CAPTURE, "child is capture")
