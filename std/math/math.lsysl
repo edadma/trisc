@@ -1,0 +1,381 @@
+std.math — Integer numeric functions
+======================================
+
+The `std.math` module provides common mathematical operations
+on integers and floating-point values across multiple source
+files:
+
+- `math.lsysl` (this file) — integer operations
+- `float.lsysl` — floating-point operations backed by TRISC
+  hardware float instructions
+
+Dependencies: none.
+
+
+    module std.math
+
+
+Integer functions
+-----------------
+
+### abs
+
+`abs(x)` returns the absolute value of `x`.
+
+    abs(x: int) -> int = if x < 0 then -x else x
+
+    abs_i64(x: i64) -> i64 = if x < 0i64 then -x else x
+
+
+### min / max
+
+`min(a, b)` returns the smaller value; `max(a, b)` returns
+the larger.
+
+    min(a: int, b: int) -> int = if a < b then a else b
+
+    max(a: int, b: int) -> int = if a > b then a else b
+
+    min_i64(a: i64, b: i64) -> i64 = if a < b then a else b
+
+    max_i64(a: i64, b: i64) -> i64 = if a > b then a else b
+
+
+### clamp
+
+`clamp(x, lo, hi)` constrains `x` to the range `[lo, hi]`.
+Callers must ensure `lo <= hi`; the behavior when `lo > hi`
+is unspecified.
+
+    clamp(x: int, lo: int, hi: int) -> int
+        if x < lo then lo
+        else if x > hi then hi
+        else x
+
+    clamp_i64(x: i64, lo: i64, hi: i64) -> i64
+        if x < lo then lo
+        else if x > hi then hi
+        else x
+
+
+### sign
+
+`sign(x)` returns `-1`, `0`, or `1` depending on the sign of
+`x`.
+
+    sign(x: int) -> int
+        if x < 0 then -1
+        else if x > 0 then 1
+        else 0
+
+
+### pow
+
+`pow(base, n)` computes integer exponentiation via repeated
+squaring. `n` must be non-negative; negative exponents
+return `0` (integer truncation of the true result). `pow(0, 0)`
+returns `1` by convention.
+
+    pow(base: int, n: int) -> int
+        if n < 0 then return 0
+
+        var result = 1
+        var b = base
+        var e = n
+
+        while e > 0
+            if e & 1 == 1 then result = result * b
+
+            b = b * b
+            e = e >> 1
+
+        result
+
+
+### gcd
+
+`gcd(a, b)` returns the greatest common divisor of `a` and
+`b` via the Euclidean algorithm. Always returns a non-negative
+value.
+
+    gcd(a: int, b: int) -> int
+        var x = abs(a)
+        var y = abs(b)
+
+        while y != 0
+            val t = y
+
+            y = x % y
+            x = t
+
+        x
+
+
+### lcm
+
+`lcm(a, b)` returns the least common multiple of `a` and `b`.
+Returns `0` if either input is `0`.
+
+    lcm(a: int, b: int) -> int
+        if a == 0 || b == 0 then return 0
+
+        val g = gcd(a, b)
+
+        abs(a / g * b)
+
+
+### divmod
+
+`divmod(a, b)` returns both the quotient and remainder of
+`a / b` in one call.
+
+    divmod(a: int, b: int) -> (int, int)
+        return a / b, a % b
+
+
+### is_power_of_two
+
+`is_power_of_two(n)` returns `true` iff `n` is a positive
+power of two (including 1). Uses the bit-trick `n & (n-1) == 0`.
+
+    is_power_of_two(n: int) -> bool
+        n > 0 && (n & (n - 1)) == 0
+
+
+### next_power_of_two
+
+`next_power_of_two(n)` returns the smallest power of two
+that is >= `n`. Returns 1 for `n <= 1`.
+
+    next_power_of_two(n: int) -> int
+        if n <= 1 then return 1
+
+        var p = 1
+
+        while p < n do p = p << 1
+
+        p
+
+
+Tests
+=====
+
+### abs
+
+    #test
+    test_abs_positive() -> void
+        assert(abs(42) == 42, "positive")
+
+    #test
+    test_abs_negative() -> void
+        assert(abs(-42) == 42, "negative")
+
+    #test
+    test_abs_zero() -> void
+        assert(abs(0) == 0, "zero")
+
+    #test
+    test_abs_i64() -> void
+        assert(abs_i64(-100i64) == 100i64, "i64 negative")
+
+
+### min / max
+
+    #test
+    test_min_basic() -> void
+        assert(min(3, 7) == 3, "first smaller")
+        assert(min(7, 3) == 3, "second smaller")
+        assert(min(5, 5) == 5, "equal")
+
+    #test
+    test_max_basic() -> void
+        assert(max(3, 7) == 7, "second larger")
+        assert(max(7, 3) == 7, "first larger")
+        assert(max(5, 5) == 5, "equal")
+
+    #test
+    test_min_max_i64() -> void
+        assert(min_i64(3i64, 7i64) == 3i64, "min i64")
+        assert(max_i64(3i64, 7i64) == 7i64, "max i64")
+
+    #test
+    test_min_negative() -> void
+        assert(min(-5, 3) == -5, "negative smaller")
+        assert(max(-5, 3) == 3, "positive larger")
+
+
+### clamp
+
+    #test
+    test_clamp_within_range() -> void
+        assert(clamp(5, 0, 10) == 5, "within")
+
+    #test
+    test_clamp_below() -> void
+        assert(clamp(-5, 0, 10) == 0, "clamped to lo")
+
+    #test
+    test_clamp_above() -> void
+        assert(clamp(15, 0, 10) == 10, "clamped to hi")
+
+    #test
+    test_clamp_at_boundary() -> void
+        assert(clamp(0, 0, 10) == 0, "at lo")
+        assert(clamp(10, 0, 10) == 10, "at hi")
+
+
+### sign
+
+    #test
+    test_sign_positive() -> void
+        assert(sign(42) == 1, "positive")
+
+    #test
+    test_sign_negative() -> void
+        assert(sign(-42) == -1, "negative")
+
+    #test
+    test_sign_zero() -> void
+        assert(sign(0) == 0, "zero")
+
+
+### pow
+
+    #test
+    test_pow_basic() -> void
+        assert(pow(2, 10) == 1024, "2^10")
+
+    #test
+    test_pow_zero_exp() -> void
+        assert(pow(5, 0) == 1, "x^0 = 1")
+
+    #test
+    test_pow_one_exp() -> void
+        assert(pow(7, 1) == 7, "x^1 = x")
+
+    #test
+    test_pow_zero_base() -> void
+        assert(pow(0, 5) == 0, "0^n = 0")
+
+    #test
+    test_pow_zero_zero() -> void
+        assert(pow(0, 0) == 1, "0^0 = 1 by convention")
+
+    #test
+    test_pow_negative_exp() -> void
+        assert(pow(2, -1) == 0, "negative exp truncates to 0")
+
+
+### gcd / lcm
+
+    #test
+    test_gcd_basic() -> void
+        assert(gcd(12, 8) == 4, "gcd(12,8)")
+
+    #test
+    test_gcd_coprime() -> void
+        assert(gcd(7, 13) == 1, "coprime")
+
+    #test
+    test_gcd_one_zero() -> void
+        assert(gcd(5, 0) == 5, "gcd(n,0) = n")
+        assert(gcd(0, 5) == 5, "gcd(0,n) = n")
+
+    #test
+    test_gcd_negative() -> void
+        assert(gcd(-12, 8) == 4, "negative input")
+
+    #test
+    test_lcm_basic() -> void
+        assert(lcm(4, 6) == 12, "lcm(4,6)")
+
+    #test
+    test_lcm_coprime() -> void
+        assert(lcm(7, 13) == 91, "coprime lcm")
+
+    #test
+    test_lcm_zero() -> void
+        assert(lcm(0, 5) == 0, "zero input")
+
+
+### divmod
+
+    #test
+    test_divmod_basic() -> void
+        val q, r = divmod(17, 5)
+        assert(q == 3, "quotient")
+        assert(r == 2, "remainder")
+
+    #test
+    test_divmod_exact() -> void
+        val q, r = divmod(20, 5)
+        assert(q == 4, "quotient")
+        assert(r == 0, "no remainder")
+
+    #test
+    test_divmod_negative() -> void
+        val q, r = divmod(-17, 5)
+        assert(q == -3, "quotient")
+        assert(r == -2, "remainder")
+
+
+### is_power_of_two
+
+    #test
+    test_is_power_of_two_yes() -> void
+        assert(is_power_of_two(1), "1")
+        assert(is_power_of_two(2), "2")
+        assert(is_power_of_two(4), "4")
+        assert(is_power_of_two(1024), "1024")
+
+    #test
+    test_is_power_of_two_no() -> void
+        assert(!is_power_of_two(0), "0")
+        assert(!is_power_of_two(3), "3")
+        assert(!is_power_of_two(6), "6")
+        assert(!is_power_of_two(-4), "negative")
+
+
+### next_power_of_two
+
+    #test
+    test_next_power_of_two_exact() -> void
+        assert(next_power_of_two(8) == 8, "already power")
+
+    #test
+    test_next_power_of_two_round_up() -> void
+        assert(next_power_of_two(5) == 8, "round up")
+        assert(next_power_of_two(9) == 16, "round up")
+
+    #test
+    test_next_power_of_two_small() -> void
+        assert(next_power_of_two(0) == 1, "zero")
+        assert(next_power_of_two(1) == 1, "one")
+        assert(next_power_of_two(-5) == 1, "negative")
+
+
+Design notes
+------------
+
+**Integer-only for now.** `sqrt`, `sin`, `cos`, `floor`,
+`ceil`, `log`, `exp` all need `f64` and either FPU
+instructions or software implementations. They'll arrive as
+a `std.math.float` section or separate module once the TRISC
+float pipeline is solid.
+
+**No generics on min/max/abs/clamp.** These take concrete
+`int` or `i64` parameters. Generic versions (`min[T: Ord]`)
+belong in `std.slices` (for slice min/max) or wait for
+`std.cmp` with canonical `Ord[T]` impls for primitives. The
+concrete versions here are what users reach for 90% of the
+time.
+
+**Repeated-squaring pow.** O(log n) multiplications. No
+overflow detection — the result silently wraps on overflow.
+Sysl integers are fixed-width; callers working near the
+limits should check bounds before calling.
+
+**divmod returns both.** On most hardware, integer division
+produces both quotient and remainder in a single instruction.
+`divmod` exposes that as a single function call, though the
+Sysl compiler may or may not fuse the two divisions today.

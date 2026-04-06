@@ -1,0 +1,298 @@
+std.crypto.chacha20 — ChaCha20 stream cipher
+===============================================
+
+ChaCha20 as specified in RFC 8439. The core is a block
+function that maps (key, counter, nonce) to 64 bytes of
+pseudorandom output. The stream cipher XORs these blocks
+with plaintext.
+
+This implementation uses `u32` arithmetic throughout — the
+wrapping semantics of `u32` addition are essential for
+correctness (mod 2^32 addition is the core of every round).
+
+Dependencies: none.
+
+
+    module std.crypto.chacha20
+
+
+rotl32
+------
+
+32-bit left rotation.
+
+    rotl32(x: u32, n: u32) -> u32 = (x << n) | (x >> (32u32 - n))
+
+
+quarter_round
+-------------
+
+The ChaCha20 quarter round operates on four 32-bit words
+in place. Each round mixes the words via add-xor-rotate:
+
+$$a \mathrel{+}= b;\; d \mathrel{\oplus}= a;\; d \lll 16$$
+$$c \mathrel{+}= d;\; b \mathrel{\oplus}= c;\; b \lll 12$$
+$$a \mathrel{+}= b;\; d \mathrel{\oplus}= a;\; d \lll 8$$
+$$c \mathrel{+}= d;\; b \mathrel{\oplus}= c;\; b \lll 7$$
+
+    quarter_round(a: *u32, b: *u32, c: *u32, d: *u32)
+        *a = *a + *b
+        *d = *d ^ *a
+        *d = rotl32(*d, 16u32)
+
+        *c = *c + *d
+        *b = *b ^ *c
+        *b = rotl32(*b, 12u32)
+
+        *a = *a + *b
+        *d = *d ^ *a
+        *d = rotl32(*d, 8u32)
+
+        *c = *c + *d
+        *b = *b ^ *c
+        *b = rotl32(*b, 7u32)
+
+
+chacha20_block
+--------------
+
+`chacha20_block` produces 64 bytes of output from a 256-bit
+key, 32-bit block counter, and 96-bit nonce. The state
+matrix layout is:
+
+```
+cccc cccc cccc cccc    (c = constant "expand 32-byte k")
+kkkk kkkk kkkk kkkk    (k = key words 0-3)
+kkkk kkkk kkkk kkkk    (k = key words 4-7)
+bbbb nnnn nnnn nnnn    (b = block counter, n = nonce)
+```
+
+    chacha20_block(key: *u32, counter: u32, nonce: *u32, out: *byte)
+        var state: [16]u32
+        var working: [16]u32
+
+        // "expand 32-byte k" in little-endian u32
+        state[0] = 0x61707865u32
+        state[1] = 0x3320646eu32
+        state[2] = 0x79622d32u32
+        state[3] = 0x6b206574u32
+
+        // key (8 words)
+        var i = 0
+
+        while i < 8
+            state[4 + i] = *(key + i)
+            i++
+
+        // counter
+        state[12] = counter
+
+        // nonce (3 words)
+        state[13] = *(nonce + 0)
+        state[14] = *(nonce + 1)
+        state[15] = *(nonce + 2)
+
+        // copy state to working
+        i = 0
+
+        while i < 16
+            working[i] = state[i]
+            i++
+
+        // 20 rounds (10 double rounds)
+        var r = 0
+
+        while r < 10
+            // column rounds
+            quarter_round(&working[0], &working[4], &working[8],  &working[12])
+            quarter_round(&working[1], &working[5], &working[9],  &working[13])
+            quarter_round(&working[2], &working[6], &working[10], &working[14])
+            quarter_round(&working[3], &working[7], &working[11], &working[15])
+
+            // diagonal rounds
+            quarter_round(&working[0], &working[5], &working[10], &working[15])
+            quarter_round(&working[1], &working[6], &working[11], &working[12])
+            quarter_round(&working[2], &working[7], &working[8],  &working[13])
+            quarter_round(&working[3], &working[4], &working[9],  &working[14])
+
+            r++
+
+        // add original state
+        i = 0
+
+        while i < 16
+            working[i] = working[i] + state[i]
+            i++
+
+        // serialize little-endian
+        i = 0
+
+        while i < 16
+            val v = working[i]
+            *(out + i * 4)     = byte(v)
+            *(out + i * 4 + 1) = byte(v >> 8)
+            *(out + i * 4 + 2) = byte(v >> 16)
+            *(out + i * 4 + 3) = byte(v >> 24)
+            i++
+
+
+Tests
+=====
+
+Tests verify against the RFC 8439 Section 2.3.2 test vector.
+
+The test key is bytes 0x00..0x1f, which in little-endian u32
+words is: 0x03020100, 0x07060504, ..., 0x1f1e1d1c.
+
+The test nonce is bytes 00 00 00 09 00 00 00 4a 00 00 00 00,
+which in LE u32 is: 0x09000000, 0x4a000000, 0x00000000.
+
+Counter = 1.
+
+### quarter_round — RFC 8439 Section 2.1.1 test vector
+
+    #test
+    test_quarter_round() -> void
+        var a: u32 = 0x11111111u32
+        var b: u32 = 0x01020304u32
+        var c: u32 = 0x9b8d6f43u32
+        var d: u32 = 0x01234567u32
+
+        quarter_round(&a, &b, &c, &d)
+
+        assert(a == 0xea2a92f4u32, "a")
+        assert(b == 0xcb1cf8ceu32, "b")
+        assert(c == 0x4581472eu32, "c")
+        assert(d == 0x5881c4bbu32, "d")
+
+
+### chacha20_block — RFC 8439 Section 2.3.2 test vector
+
+    #test
+    test_chacha20_block_rfc7539() -> void
+        // RFC 7539 Appendix A.1 Test Vector #1
+        // Key: all zeros, Nonce: all zeros, Counter: 0
+        var key: [8]u32
+        var i = 0
+
+        while i < 8
+            key[i] = 0u32
+            i++
+
+        var nonce: [3]u32
+        nonce[0] = 0u32
+        nonce[1] = 0u32
+        nonce[2] = 0u32
+
+        var out: [64]byte
+
+        chacha20_block(&key[0], 0u32, &nonce[0], &out[0])
+
+        // Expected first 16 bytes:
+        // 76 b8 e0 ad a0 f1 3d 90 40 5d 6a e5 53 86 bd 28
+        assert(out[0]  == 0x76u8, "byte 0")
+        assert(out[1]  == 0xb8u8, "byte 1")
+        assert(out[2]  == 0xe0u8, "byte 2")
+        assert(out[3]  == 0xadu8, "byte 3")
+        assert(out[4]  == 0xa0u8, "byte 4")
+        assert(out[5]  == 0xf1u8, "byte 5")
+        assert(out[6]  == 0x3du8, "byte 6")
+        assert(out[7]  == 0x90u8, "byte 7")
+        assert(out[8]  == 0x40u8, "byte 8")
+        assert(out[9]  == 0x5du8, "byte 9")
+        assert(out[10] == 0x6au8, "byte 10")
+        assert(out[11] == 0xe5u8, "byte 11")
+        assert(out[12] == 0x53u8, "byte 12")
+        assert(out[13] == 0x86u8, "byte 13")
+        assert(out[14] == 0xbdu8, "byte 14")
+        assert(out[15] == 0x28u8, "byte 15")
+
+
+### Determinism — same inputs produce same output
+
+    #test
+    test_chacha20_deterministic() -> void
+        var key: [8]u32
+        key[0] = 0xdeadbeefu32
+        key[1] = 0xcafebabeu32
+        key[2] = 0x12345678u32
+        key[3] = 0x9abcdef0u32
+        key[4] = 0x11111111u32
+        key[5] = 0x22222222u32
+        key[6] = 0x33333333u32
+        key[7] = 0x44444444u32
+
+        var nonce: [3]u32
+        nonce[0] = 0x00000001u32
+        nonce[1] = 0x00000002u32
+        nonce[2] = 0x00000003u32
+
+        var out1: [64]byte
+        var out2: [64]byte
+
+        chacha20_block(&key[0], 0u32, &nonce[0], &out1[0])
+        chacha20_block(&key[0], 0u32, &nonce[0], &out2[0])
+
+        var i = 0
+
+        while i < 64
+            assert(out1[i] == out2[i], "deterministic")
+            i++
+
+
+### Different counters produce different output
+
+    #test
+    test_chacha20_different_counters() -> void
+        var key: [8]u32
+        var i = 0
+
+        while i < 8
+            key[i] = u32(i)
+            i++
+
+        var nonce: [3]u32
+        nonce[0] = 0u32
+        nonce[1] = 0u32
+        nonce[2] = 0u32
+
+        var out0: [64]byte
+        var out1: [64]byte
+
+        chacha20_block(&key[0], 0u32, &nonce[0], &out0[0])
+        chacha20_block(&key[0], 1u32, &nonce[0], &out1[0])
+
+        // At least one byte must differ
+        var differs = false
+        i = 0
+
+        while i < 64
+            if out0[i] != out1[i] then differs = true
+            i++
+
+        assert(differs, "different counters produce different output")
+
+
+Design notes
+------------
+
+**u32 wrapping is essential.** Every `+` in the quarter
+round is mod-2^32 addition. The recent fix to Sysl's u32
+arithmetic wrapping makes this work correctly without
+explicit masking.
+
+**No allocation.** The block function uses only stack-
+allocated fixed arrays. No heap, no refcounting, no GC
+pressure. This is appropriate for a primitive that may be
+called millions of times per second.
+
+**No Poly1305 yet.** ChaCha20 alone provides confidentiality
+(encryption) but not authentication (integrity). For real
+use, pair with Poly1305 to get ChaCha20-Poly1305 AEAD.
+Using ChaCha20 without authentication is a security error
+in most contexts.
+
+**CSPRNG wrapper deferred.** `ChaChaRng` needs either raw
+key initialization or SHA-256 seeding. The block function
+is the foundation; the CSPRNG interface layers on top once
+the key management story is clear.

@@ -175,8 +175,8 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
     result.packageMetas.contains("mymath") shouldBe true
     val pkgMeta = result.packageMetas("mymath")
     val names = pkgMeta.publicSymbols.map(_.name).toSet
-    names should contain("add")
-    names should contain("mul")
+    names should contain("mymath__add")
+    names should contain("mymath__mul")
   }
 
   "driver compiles module with importer" in {
@@ -209,9 +209,9 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
     val driver = new SyslDriver
     val result = driver.compile(sources)
     val pkgMeta = result.packageMetas("stringlib")
-    val strlenSym = pkgMeta.symbols.find(_.name == "strlen").get
+    val strlenSym = pkgMeta.symbols.find(_.name == "stringlib__strlen").get
     strlenSym.sourceFile shouldBe Some("stringlib/strlen.sysl")
-    val strcpySym = pkgMeta.symbols.find(_.name == "strcpy").get
+    val strcpySym = pkgMeta.symbols.find(_.name == "stringlib__strcpy").get
     strcpySym.sourceFile shouldBe Some("stringlib/strcpy.sysl")
   }
 

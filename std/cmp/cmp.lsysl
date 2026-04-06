@@ -1,0 +1,188 @@
+std.cmp — Eq and Ord traits
+============================
+
+The `std.cmp` module provides the canonical `Eq[T]` and
+`Ord[T]` trait declarations. User-defined struct and enum
+types implement these traits to participate in operator
+overloading (`==`, `!=`, `<`, `>`, `<=`, `>=`) and in
+generic functions bounded by `Eq` or `Ord`.
+
+Primitive types (`int`, `i64`, `byte`, `bool`, `double`,
+`string`) have built-in equality and comparison that works
+without these traits. `Eq[T]` and `Ord[T]` extend that
+capability to user-defined types.
+
+Dependencies: none.
+
+
+    module std.cmp
+
+
+Eq
+--
+
+`Eq[T]` requires a single method `eq(a, b) -> bool`.
+The default method `ne` is provided automatically.
+
+When a type implements `Eq[T]`, the operators `==` and `!=`
+dispatch through `eq` and `ne` respectively for values of
+that type.
+
+    trait Eq[T]
+        eq(a: T, b: T) -> bool
+        ne(a: T, b: T) -> bool = !eq(a, b)
+
+
+Ord
+---
+
+`Ord[T]` requires a single method `cmp(a, b) -> int`:
+
+- negative → `a` before `b`
+- zero → `a` equal to `b`
+- positive → `a` after `b`
+
+Default methods derive `lt`, `le`, `gt`, `ge` from `cmp`.
+When a type implements `Ord[T]`, the operators `<`, `>`,
+`<=`, `>=` dispatch through these methods.
+
+    trait Ord[T]
+        cmp(a: T, b: T) -> int
+        lt(a: T, b: T) -> bool = cmp(a, b) < 0
+        le(a: T, b: T) -> bool = cmp(a, b) <= 0
+        gt(a: T, b: T) -> bool = cmp(a, b) > 0
+        ge(a: T, b: T) -> bool = cmp(a, b) >= 0
+
+
+Tests
+=====
+
+Tests exercise `Eq` and `Ord` on a simple user-defined struct.
+
+    struct Point
+        x: int
+        y: int
+
+    impl Eq[Point]
+        eq(a: Point, b: Point) -> bool = a.x == b.x && a.y == b.y
+
+    impl Ord[Point]
+        cmp(a: Point, b: Point) -> int
+            if a.x != b.x then return a.x - b.x
+            a.y - b.y
+
+
+### Eq
+
+    #test
+    test_eq_same() -> void
+        var a: Point
+        a.x = 1
+        a.y = 2
+        var b: Point
+        b.x = 1
+        b.y = 2
+        assert(a == b, "equal")
+
+    #test
+    test_eq_different() -> void
+        var a: Point
+        a.x = 1
+        a.y = 2
+        var b: Point
+        b.x = 1
+        b.y = 3
+        assert(a != b, "not equal")
+
+    #test
+    test_ne_is_derived() -> void
+        var a: Point
+        a.x = 1
+        a.y = 2
+        var b: Point
+        b.x = 3
+        b.y = 4
+        assert(Eq.ne(a, b), "ne works via default method")
+
+
+### Ord
+
+    #test
+    test_ord_less() -> void
+        var a: Point
+        a.x = 1
+        a.y = 0
+        var b: Point
+        b.x = 2
+        b.y = 0
+        assert(a < b, "1 < 2")
+
+    #test
+    test_ord_greater() -> void
+        var a: Point
+        a.x = 3
+        a.y = 0
+        var b: Point
+        b.x = 1
+        b.y = 0
+        assert(a > b, "3 > 1")
+
+    #test
+    test_ord_equal() -> void
+        var a: Point
+        a.x = 1
+        a.y = 2
+        var b: Point
+        b.x = 1
+        b.y = 2
+        assert(a <= b, "le")
+        assert(a >= b, "ge")
+        assert(!(a < b), "not lt")
+        assert(!(a > b), "not gt")
+
+    #test
+    test_ord_secondary_key() -> void
+        var a: Point
+        a.x = 1
+        a.y = 2
+        var b: Point
+        b.x = 1
+        b.y = 5
+        assert(a < b, "same x, compare y")
+
+    #test
+    test_ord_default_methods() -> void
+        var a: Point
+        a.x = 1
+        a.y = 0
+        var b: Point
+        b.x = 2
+        b.y = 0
+        assert(Ord.lt(a, b), "lt via trait call")
+        assert(Ord.le(a, b), "le via trait call")
+        assert(!Ord.gt(a, b), "not gt via trait call")
+        assert(!Ord.ge(a, b), "not ge via trait call")
+
+
+Design notes
+------------
+
+**Minimal trait surface.** `Eq` requires only `eq`; `Ord`
+requires only `cmp`. Everything else is a default method.
+This matches Rust's `PartialEq`/`Ord` in spirit, with one
+simplification: Sysl doesn't distinguish `PartialEq` from
+`Eq` (no NaN-aware partial equality), because `Eq` is the
+common case and partial ordering is a niche concern.
+
+**No impls for primitives.** `int == int` and `int < int`
+work via built-in operators, not through these traits.
+Trait-based dispatch applies only to user-defined types that
+explicitly `impl Eq[T]` or `impl Ord[T]`. When trait bounds
+are used in generic functions (`fn f[T: Ord]`), the bound is
+checked at instantiation time: primitive types satisfy it via
+built-in operators, user types via their trait impl.
+
+**Operator desugaring.** When the analyzer sees `a < b` where
+`a` and `b` are a struct type with `impl Ord[T]`, it rewrites
+to `Ord.lt(a, b)`. This is transparent to the user — they
+write operators and the compiler routes to trait methods.

@@ -51,17 +51,17 @@ object TFS:
   val INO_INDIRECT = 30 // 2 bytes
   // Total: 32 bytes
 
-  def format(blockSize: Int, totalBlocks: Int, maxInodes: Int, prefill: String, now: Int = 0): Array[Byte] =
+  def format(blockSize: Int, totalBlocks: Int, maxInodes: Int, prefill: String, now: Int = 0, files: Map[String, Array[Byte]] = Map.empty): Array[Byte] =
     require(blockSize >= INODE_SIZE, "block size too small for inodes")
     require(blockSize >= DIR_ENTRY_SIZE, "block size too small for dir entries")
     require(maxInodes > 1, "need at least 2 inodes")
-    val f = new Formatter(blockSize, totalBlocks, maxInodes, now)
+    val f = new Formatter(blockSize, totalBlocks, maxInodes, now, files)
     f.run(prefill)
     f.disk
 
   private def ceilDiv(a: Int, b: Int): Int = (a + b - 1) / b
 
-  private class Formatter(blockSize: Int, totalBlocks: Int, maxInodes: Int, now: Int):
+  private class Formatter(blockSize: Int, totalBlocks: Int, maxInodes: Int, now: Int, files: Map[String, Array[Byte]] = Map.empty):
     val disk = new Array[Byte](totalBlocks * blockSize)
 
     // Layout
@@ -146,7 +146,9 @@ object TFS:
           writeInode(ino, S_IFBLK | DEFAULT_DEV_PERM, 1, 0, 0, 0, Seq(devNum))
           addDirEntry(parentIno, name, ino)
         case "file" =>
-          val content = extractContent(parts)
+          val content = files.get(path) match
+            case Some(data) => data
+            case None => extractContent(parts)
           val ino = allocInode()
           if content.nonEmpty then writeFileWithContent(ino, content)
           else writeInode(ino, S_IFREG | DEFAULT_FILE_PERM, 1, 0, 0, 0)

@@ -32,6 +32,19 @@ private myHelper() -> int = 42      // not exported
 myPublicFunc() -> int = 0           // public by default
 ```
 
+### Name Mangling
+
+Functions and global variables in modules are mangled with the module path to avoid cross-module name collisions. The mangled name format is `modpart1_modpart2__funcname` (module parts joined by `_`, separated from the function name by `__`).
+
+```
+module std.strings → trim_space → std_strings__trim_space
+module mylib       → helper     → mylib__helper
+```
+
+**Never mangled:** `main`, `extern` functions, builtin functions, functions in files without a `module` declaration, and any function whose name matches an `extern` declaration in the compilation.
+
+Source code always uses the short name — the compiler resolves it to the mangled name automatically.
+
 ---
 
 ## Types
@@ -52,6 +65,18 @@ myPublicFunc() -> int = 0           // public by default
 | `bool` | | 1 byte | `true` or `false` |
 | `void` | | 0 bytes | no value |
 | `string` | | 16 bytes | fat pointer: `{ptr: *u8, len: i64}` |
+
+### Integer Overflow
+
+All integer arithmetic wraps at the declared type width. There is no implicit integer promotion — `u8 + u8` produces `u8`, not `int`.
+
+- **Unsigned types** wrap via modular arithmetic (zero-extension): `u8(255) + u8(1)` → `0`
+- **Signed types** wrap via two's complement (sign-extension): `int(2147483647) + 1` → `-2147483648`
+- **64-bit types** (`i64`, `u64`) use the full register width and do not truncate
+
+To avoid wrapping, widen operands explicitly before arithmetic: `int(a) + int(b)`.
+
+This matches Go, Rust, and Swift. C-style implicit integer promotion is not used.
 
 ### Composite Types
 
