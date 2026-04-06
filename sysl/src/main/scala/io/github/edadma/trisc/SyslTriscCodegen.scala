@@ -13,10 +13,13 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   private def newLabel(prefix: String): String =
     labelCounter += 1
-    s".${prefix}_$labelCounter"
+    if modulePrefix.nonEmpty then s".${prefix}_${modulePrefix}_$labelCounter"
+    else s".${prefix}_$labelCounter"
 
   // Struct types that have a deinit method (populated during generate)
   private val deinitFunctions = new mutable.HashMap[String, String] // struct name → deinit function name
+
+  private var modulePrefix = ""
 
   def generate(program: TProgram): String =
     out.clear()
@@ -28,6 +31,9 @@ class SyslTriscCodegen(addresses: Int = 4):
     modulePrefix = program.decls.collectFirst { case TModuleDecl(path) => path.mkString("_") }.getOrElse("")
     needsStrInt = false
     needsStrFloat = false
+
+    // Extract module path for unique label prefixing
+    modulePrefix = program.decls.collectFirst { case TModuleDecl(path) => path.mkString("_") }.getOrElse("")
 
     // Scan for deinit methods: functions named TypeName_deinit
     for decl <- program.decls do
@@ -1482,7 +1488,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         // String literal → *i8 decay: emit data pointer directly, no fat pointer needed
         val bytes = value.getBytes("UTF-8")
         labelCounter += 1
-        val strLabel = if modulePrefix.isEmpty then s"__str_$labelCounter" else s"__str_${modulePrefix}_$labelCounter"
+        val strLabel = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_$labelCounter" else s"__str_$labelCounter"
         stringLiterals += ((strLabel, value))
         emit(s"  movi r1, $strLabel")  // r1 = ptr to byte data (past refcount header)
 
@@ -1920,7 +1926,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         // Allocate 16-byte {ptr, len} fat pointer on stack
         val bytes = value.getBytes("UTF-8")
         labelCounter += 1
-        val strLabel = if modulePrefix.isEmpty then s"__str_$labelCounter" else s"__str_${modulePrefix}_$labelCounter"
+        val strLabel = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_$labelCounter" else s"__str_$labelCounter"
         stringLiterals += ((strLabel, value))
         // Allocate 16 bytes on stack for the string struct
         emitAddImm(7, 7, -16)

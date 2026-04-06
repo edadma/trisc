@@ -1,0 +1,34 @@
+/* uniq — filter adjacent duplicate lines */
+import std/process.*
+import std/io.*
+import std/string.*
+import std/fs.*
+
+main() -> int
+    var content: string
+
+    if argc() >= 2
+        content = read_file(argv(1))
+    else
+        write_string(STDERR, "uniq: reading from stdin not yet supported\n")
+        return 1
+
+    var prev = ""
+    var first = true
+    var start = 0
+
+    for var i = 0; i <= length(content); i++
+        val at_end = i == length(content)
+        val is_nl = !at_end && char_at(content, i) == '\n'
+
+        if is_nl || at_end
+            val line = substr(content, start, i - start)
+            start = i + 1
+
+            if first || !equal(line, prev)
+                puts(line)
+                putchar(10)
+                prev = line
+                first = false
+
+    0

@@ -35,6 +35,10 @@ class OSKitDiskTests extends OSKitTestHelpers {
       "oskit/sync/mutex" -> mutexSysl,
       "oskit/ipc/ipc" -> ipcSysl,
       "oskit/drivers/disk/disk" -> diskSysl,
+      "posix/string/string" -> posixStringSysl,
+      "posix/ctype/ctype" -> posixCtypeSysl,
+      "posix/stdlib/alloc" -> posixAllocSysl,
+      "posix/unistd/sbrk" -> sbrkSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -91,6 +95,8 @@ class OSKitDiskTests extends OSKitTestHelpers {
       "oskit/fs/tfs" -> tfsSysl,
       "posix/string/string" -> posixStringSysl,
       "posix/ctype/ctype" -> posixCtypeSysl,
+      "posix/stdlib/alloc" -> posixAllocSysl,
+      "posix/unistd/sbrk" -> sbrkSysl,
       "oskit/servers/tfs" -> tfsSrvSysl,
     ) ++ userSources
     val driver = new SyslDriver

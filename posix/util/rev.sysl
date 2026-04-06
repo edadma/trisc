@@ -1,0 +1,31 @@
+/* rev — reverse lines of a file */
+import std/process.*
+import std/io.*
+import std/string.*
+import std/fs.*
+
+main() -> int
+    if argc() < 2
+        write_string(STDERR, "rev: reading from stdin not yet supported\n")
+        return 1
+
+    for var i = 1; i < argc(); i++
+        val content = read_file(argv(i))
+        var start = 0
+
+        for var j = 0; j <= length(content); j++
+            val at_end = j == length(content)
+            val is_nl = !at_end && char_at(content, j) == '\n'
+
+            if is_nl || at_end
+                val line = substr(content, start, j - start)
+                var k = length(line) - 1
+
+                while k >= 0
+                    putchar(char_at(line, k))
+                    k--
+
+                putchar(10)
+                start = j + 1
+
+    0

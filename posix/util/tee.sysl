@@ -1,0 +1,21 @@
+/* tee — copy stdin to stdout and files */
+import std/process.*
+import std/io.*
+import std/fs.*
+
+main() -> int
+    var buf: [4096]u8
+    var n = read(STDIN, buf, 4096)
+
+    /* Collect all input first (simple approach) */
+    /* For large inputs, would need streaming */
+    while n > 0
+        write(STDOUT, buf, n)
+
+        /* Write to each output file */
+        for var i = 1; i < argc(); i++
+            write_file(argv(i), buf, n)
+
+        n = read(STDIN, buf, 4096)
+
+    0

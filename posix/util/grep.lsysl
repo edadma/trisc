@@ -1,0 +1,256 @@
+grep — search files for a pattern (POSIX)
+==========================================
+
+The `grep` utility searches input lines for matches to a
+regular expression pattern and prints matching lines. This
+implementation supports the core POSIX options.
+
+Usage: `grep [-Eivclnqs] pattern [file...]`
+
+Options:
+
+- `-E` — use extended regular expressions (ERE); default is
+  BRE
+- `-v` — invert match: print non-matching lines
+- `-c` — print only a count of matching lines
+- `-l` — print only filenames with matches
+- `-n` — prefix each line with its line number
+- `-q` — quiet: no output, exit status only
+- `-s` — suppress error messages about nonexistent files
+
+Exit status: 0 if any match, 1 if no match, 2 on error.
+
+
+    import std.process.*
+    import std.io.*
+    import std.string.*
+    import std.fs.*
+    import std.regex.*
+
+
+Global state
+------------
+
+Flags set by option parsing, plus match tracking.
+
+    var flag_ere = false
+    var flag_invert = false
+    var flag_count = false
+    var flag_list = false
+    var flag_number = false
+    var flag_quiet = false
+    var flag_suppress = false
+    var any_match = false
+
+
+Compile the pattern once, then reuse for each line.
+
+    var g_insts: []Inst
+    var g_classes: []CharClass
+    var g_ngroups: int
+
+
+Matching a single line
+----------------------
+
+    private match_line(line: string) -> bool
+        val m = exec(g_insts, g_classes, line, g_ngroups)
+
+        if flag_invert then !m.matched()
+        else m.matched()
+
+
+Processing one input source
+---------------------------
+
+Reads lines from a file (or stdin) and applies the match.
+The `prefix` is the filename shown when multiple files are
+being searched.
+
+    private process_lines(content: string, prefix: string, show_prefix: bool)
+        var line_num = 0
+        var count = 0
+        var start = 0
+
+        for var i = 0; i <= length(content); i++
+            val at_end = i == length(content)
+            val is_nl = !at_end && char_at(content, i) == '\n'
+
+            if is_nl || at_end
+                line_num++
+
+                val line = substr(content, start, i - start)
+                start = i + 1
+
+                if match_line(line)
+                    any_match = true
+                    count++
+
+                    if flag_quiet then return
+
+                    if flag_list
+                        puts(prefix)
+                        putchar(10)
+                        return
+
+                    if !flag_count
+                        if show_prefix
+                            puts(prefix)
+                            putchar(int(':'))
+
+                        if flag_number
+                            puti(line_num)
+                            putchar(int(':'))
+
+                        puts(line)
+                        putchar(10)
+
+        if flag_count
+            if show_prefix
+                puts(prefix)
+                putchar(int(':'))
+
+            puti(count)
+            putchar(10)
+
+
+Main
+----
+
+    main() -> int
+        val ac = argc()
+
+        /* Parse options */
+        var i = 0
+
+        while i < ac && length(argv(i)) > 1 && char_at(argv(i), 0) == '-'
+            val arg = argv(i)
+
+            for var j = 1; j < length(arg); j++
+                char_at(arg, j) match
+                    'E' -> flag_ere = true
+                    'v' -> flag_invert = true
+                    'c' -> flag_count = true
+                    'l' -> flag_list = true
+                    'n' -> flag_number = true
+                    'q' -> flag_quiet = true
+                    's' -> flag_suppress = true
+                    _ ->
+                        write_string(STDERR, "grep: invalid option\n")
+                        return 2
+
+            i++
+
+        if i >= ac
+            write_string(STDERR, "grep: missing pattern\n")
+            return 2
+
+        /* Compile pattern */
+        val pattern = argv(i)
+
+        i++
+
+        var root: int
+        var nodes: []Node
+        var classes: []CharClass
+        var n_groups: int
+        var err: bool
+        var err_msg: string
+        var err_pos: int
+
+        if flag_ere
+            root, nodes, classes, n_groups, err, err_msg, err_pos = parse_regex(pattern)
+        else
+            root, nodes, classes, n_groups, err, err_msg, err_pos = parse_bre(pattern)
+
+        if err
+            write_string(STDERR, s"grep: invalid pattern: $err_msg\n")
+            return 2
+
+        g_insts = compile(root, nodes, n_groups)
+        g_classes = classes
+        g_ngroups = n_groups
+
+        /* Process files or stdin */
+        val n_files = ac - i
+        val show_prefix = n_files > 1
+
+        if n_files == 0
+            /* TODO: stdin support needs line-by-line reading */
+            write_string(STDERR, "grep: reading from stdin not yet supported\n")
+            return 2
+
+        while i < ac
+            val filename = argv(i)
+
+            if !exists(filename)
+                if !flag_suppress
+                    write_string(STDERR, s"grep: $filename: No such file or directory\n")
+            else
+                val content = read_file(filename)
+
+                process_lines(content, filename, show_prefix)
+
+            i++
+
+        if any_match then 0 else 1
+
+
+Tests
+-----
+
+Unit tests for the helper functions.
+
+    #test
+    test_match_line_basic() -> void
+        flag_invert = false
+        val root, nodes, classes, n_groups, err, _, _ = parse_regex("hello")
+
+        g_insts = compile(root, nodes, n_groups)
+        g_classes = classes
+        g_ngroups = n_groups
+        assert(match_line("say hello world"), "should match")
+
+    #test
+    test_match_line_no_match() -> void
+        flag_invert = false
+        val root, nodes, classes, n_groups, err, _, _ = parse_regex("xyz")
+
+        g_insts = compile(root, nodes, n_groups)
+        g_classes = classes
+        g_ngroups = n_groups
+        assert(!match_line("hello world"), "should not match")
+
+    #test
+    test_match_line_inverted() -> void
+        flag_invert = true
+        val root, nodes, classes, n_groups, err, _, _ = parse_regex("xyz")
+
+        g_insts = compile(root, nodes, n_groups)
+        g_classes = classes
+        g_ngroups = n_groups
+        assert(match_line("hello world"), "inverted: non-match becomes match")
+        flag_invert = false
+
+    #test
+    test_match_line_regex() -> void
+        flag_invert = false
+        val root, nodes, classes, n_groups, err, _, _ = parse_regex("^[0-9]+$")
+
+        g_insts = compile(root, nodes, n_groups)
+        g_classes = classes
+        g_ngroups = n_groups
+        assert(match_line("12345"), "digits match")
+        assert(!match_line("abc"), "letters don't")
+
+    #test
+    test_match_line_ere_alt() -> void
+        flag_invert = false
+        val root, nodes, classes, n_groups, err, _, _ = parse_regex("cat|dog")
+
+        g_insts = compile(root, nodes, n_groups)
+        g_classes = classes
+        g_ngroups = n_groups
+        assert(match_line("I have a cat"), "cat matches")
+        assert(match_line("I have a dog"), "dog matches")
+        assert(!match_line("I have a bird"), "bird doesn't")

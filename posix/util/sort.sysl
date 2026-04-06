@@ -1,0 +1,77 @@
+/* sort — sort lines of text */
+import std/process.*
+import std/io.*
+import std/string.*
+import std/fs.*
+
+/* Split content into lines, returning a slice */
+private split_lines(content: string) -> []string
+    var count = 0
+
+    for var i = 0; i < length(content); i++
+        if char_at(content, i) == '\n' then count++
+
+    if length(content) > 0 && char_at(content, length(content) - 1) != '\n'
+        count++
+
+    val _lines = new [count + 1]string
+    var lines = _lines[:0]
+    var start = 0
+
+    for var i = 0; i <= length(content); i++
+        val at_end = i == length(content)
+        val is_nl = !at_end && char_at(content, i) == '\n'
+
+        if is_nl || at_end
+            lines = append(lines, substr(content, start, i - start))
+            start = i + 1
+
+    lines
+
+/* Compare two strings lexicographically */
+private str_less(a: string, b: string) -> bool
+    val la = length(a)
+    val lb = length(b)
+    val n = if la < lb then la else lb
+
+    for var i = 0; i < n; i++
+        val ca = char_at(a, i)
+        val cb = char_at(b, i)
+
+        if ca < cb then return true
+        if ca > cb then return false
+
+    la < lb
+
+/* Insertion sort — simple and correct */
+private sort_lines(lines: []string)
+    val n = len(lines)
+
+    for var i = 1; i < n; i++
+        val key = lines[i]
+        var j = i - 1
+
+        while j >= 0 && str_less(key, lines[j])
+            lines[j + 1] = lines[j]
+            j--
+
+        lines[j + 1] = key
+
+main() -> int
+    var content: string
+
+    if argc() >= 2
+        content = read_file(argv(1))
+    else
+        write_string(STDERR, "sort: reading from stdin not yet supported\n")
+        return 1
+
+    var lines = split_lines(content)
+
+    sort_lines(lines)
+
+    for var i = 0; i < len(lines); i++
+        puts(lines[i])
+        putchar(10)
+
+    0

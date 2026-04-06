@@ -1,0 +1,39 @@
+/* nl — number lines of a file */
+import std/process.*
+import std/io.*
+import std/string.*
+import std/fs.*
+
+main() -> int
+    if argc() < 2
+        write_string(STDERR, "nl: reading from stdin not yet supported\n")
+        return 1
+
+    for var fi = 1; fi < argc(); fi++
+        val content = read_file(argv(fi))
+        var start = 0
+        var line_num = 0
+
+        for var j = 0; j <= length(content); j++
+            val at_end = j == length(content)
+            val is_nl = !at_end && char_at(content, j) == '\n'
+
+            if is_nl || at_end
+                line_num++
+                val line = substr(content, start, j - start)
+
+                /* Right-justify line number in 6 chars */
+                val num_str = str(line_num)
+                var pad = 6 - length(num_str)
+
+                while pad > 0
+                    putchar(int(' '))
+                    pad--
+
+                puts(num_str)
+                putchar(int('\t'))
+                puts(line)
+                putchar(10)
+                start = j + 1
+
+    0

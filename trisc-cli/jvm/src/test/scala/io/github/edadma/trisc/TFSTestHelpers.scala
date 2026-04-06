@@ -13,6 +13,19 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
   private lazy val tfsSource: String = readLsysl("oskit/fs/tfs.lsysl")
   private lazy val posixStringSysl: String = scala.io.Source.fromFile("posix/string/string.sysl").mkString
   private lazy val posixCtypeSysl: String = scala.io.Source.fromFile("posix/ctype/ctype.sysl").mkString
+  private lazy val posixAllocSysl: String = scala.io.Source.fromFile("posix/stdlib/alloc.sysl").mkString
+
+  // Inline sbrk for TFS tests — simple bump allocator in high RAM
+  private val sbrk_inline: String =
+    """module posix.unistd
+      |var _brk: *i8 = *i8(0xC0000)
+      |sbrk(increment: int) -> *i8
+      |    if increment == 0
+      |        return _brk
+      |    val old = _brk
+      |    _brk = _brk + increment
+      |    old
+      |""".stripMargin
 
   // Inline ramdisk block I/O for tests — provides rd_read/rd_write
   // that the TFS library externs. Talks directly to the emulated ramdisk.
@@ -133,7 +146,7 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
       maxCycles: Int,
   ): (CPU, String) =
     val bootTof = assemble(tfsBoot, relocatable = true)
-    val allSources = sources + ("oskit/fs/tfs" -> tfsSource) + ("posix/string/string" -> posixStringSysl) + ("posix/ctype/ctype" -> posixCtypeSysl) + ("ramdisk" -> ramdiskSource)
+    val allSources = sources + ("oskit/fs/tfs" -> tfsSource) + ("posix/string/string" -> posixStringSysl) + ("posix/ctype/ctype" -> posixCtypeSysl) + ("posix/stdlib/alloc" -> posixAllocSysl) + ("posix/unistd/sbrk" -> sbrk_inline) + ("ramdisk" -> ramdiskSource)
     val driver = new SyslDriver
     val result = driver.compile(allSources)
     val codegen = new SyslTriscCodegen
