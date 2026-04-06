@@ -131,6 +131,25 @@ class SyslAnalyzer:
   def externals: Set[String] = externalSymbols.toSet
 
   def analyze(program: ProgramAST): TProgram =
+    // Pass 0: forward-declare all type names so recursive references resolve.
+    // Struct and enum names are registered as placeholder types; fields are
+    // resolved in the next pass once all names are visible.
+    val pass0Structs = mutable.HashSet[String]()
+    val pass0Enums = mutable.HashSet[String]()
+    for decl <- program.decls do
+      decl match
+        case StructDeclAST(name, _, typeParams, _) if typeParams.isEmpty =>
+          if pass0Structs.contains(name) || structTypes.contains(name) then
+            throw AnalysisError(s"duplicate struct: '$name'", decl)
+          pass0Structs += name
+          structTypes(name) = SyslType.StructType(name, Nil) // placeholder — fields filled below
+        case DataEnumDeclAST(name, _, typeParams, _) if typeParams.isEmpty =>
+          if pass0Enums.contains(name) || dataEnumTypes.contains(name) then
+            throw AnalysisError(s"duplicate enum: '$name'", decl)
+          pass0Enums += name
+          dataEnumTypes(name) = SyslType.EnumType(name, Nil) // placeholder — variants filled below
+        case _ => ()
+
     // First pass: register all functions and globals
     for decl <- program.decls do
       decl match
@@ -152,12 +171,13 @@ class SyslAnalyzer:
         case sd @ StructDeclAST(name, fields, typeParams, _) =>
           if typeParams.nonEmpty then
             // Generic struct: store as template, don't resolve fields yet
-            if genericStructs.contains(name) || structTypes.contains(name) then
+            if genericStructs.contains(name) then
               throw AnalysisError(s"duplicate struct: '$name'", decl)
             genericStructs(name) = sd
           else
-            if structTypes.contains(name) || genericStructs.contains(name) then throw AnalysisError(s"duplicate struct: '$name'", decl)
+            if genericStructs.contains(name) then throw AnalysisError(s"duplicate struct: '$name'", decl)
             val resolvedFields = fields.map((n, t) => (n, resolveType(t)))
+            // Update the placeholder with resolved fields
             structTypes(name) = SyslType.StructType(name, resolvedFields)
         case fd @ FunDeclAST(name, params, returnType, _, _, typeParams, _, _) =>
           // Duplicate-parameter-name check.
@@ -224,13 +244,14 @@ class SyslAnalyzer:
                 throw AnalysisError(s"duplicate variant name: '$vname'")
               genericVariantToEnum(vname) = (name, idx)
           else
-            if dataEnumTypes.contains(name) || enumTypes.contains(name) || genericEnums.contains(name) then
+            if enumTypes.contains(name) || genericEnums.contains(name) then
               throw AnalysisError(s"duplicate enum: '$name'", decl)
             val resolvedVariants = variants.map { case EnumVariantAST(vname, fields) =>
               val resolvedFields = fields.map((fname, ftype) => (fname, resolveType(ftype)))
               (vname, resolvedFields)
             }
             val et: SyslType.EnumType = SyslType.EnumType(name, resolvedVariants)
+            // Update the placeholder with resolved variants
             dataEnumTypes(name) = et
             for ((vname, _), idx) <- resolvedVariants.zipWithIndex do
               variantToEnum(vname) = (et, idx)
@@ -1209,11 +1230,14 @@ class SyslAnalyzer:
       case FieldAccessAST(obj, field) =>
         val tObj = analyzeExpr(obj)
         // Auto-dereference pointers to structs (p.x works like (*p).x)
-        val (resolvedObj, structType) = tObj.typ match
+        val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
           case PtrType(st: StructType) => (TDeref(tObj, st), st)
           case RefType(st: StructType) => (TDeref(tObj, st), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
+        // Resolve through structTypes to get the latest definition — the inline
+        // StructType may be a stale placeholder from forward declaration.
+        val structType = structTypes.getOrElse(structType0.name, structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
         TFieldAccess(resolvedObj, idx, structType.fields(idx)._2)
