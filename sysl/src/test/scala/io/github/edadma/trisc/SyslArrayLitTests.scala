@@ -71,6 +71,6 @@ class SyslArrayLitTests extends SyslTestHelpers:
       """font: [3]byte = [0x30, 0x78, 0xCC]
         |
         |main() -> int
-        |    font[0] + font[1] + font[2]
+        |    int(font[0]) + int(font[1]) + int(font[2])
         |""".stripMargin) shouldBe (0x30 + 0x78 + 0xCC)
   }
