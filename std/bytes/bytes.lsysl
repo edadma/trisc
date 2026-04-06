@@ -413,6 +413,107 @@ Empty `old` inserts `repl` between every byte of `s`.
         buf[:]
 
 
+Split and join
+--------------
+
+### split
+
+`split(s, sep)` splits `s` by `sep` and returns a slice of
+the parts as `[][]byte`. If `sep` is empty, splits into
+individual bytes.
+
+    split(s: []byte, sep: []byte) -> []&[]byte
+        val m = len(sep)
+
+        if m == 0
+            val n = len(s)
+            val parts = new [n]&[]byte
+            var i = 0
+
+            while i < n
+                parts[i] = subslice(s, i, i + 1)
+                i++
+
+            return parts[:]
+
+        val n = count(s, sep) + 1
+        val parts = new [n]&[]byte
+        var start = 0
+        var pi = 0
+        val slen = len(s)
+        val last = slen - m
+        var i = 0
+
+        while i <= last
+            var j = 0
+            var matched = true
+
+            while j < m
+                if s[i + j] != sep[j]
+                    matched = false
+                    break
+                j++
+
+            if matched
+                parts[pi] = subslice(s, start, i)
+                pi++
+                i += m
+                start = i
+            else
+                i++
+
+        parts[pi] = subslice(s, start, slen)
+        parts[:]
+
+
+### join
+
+`join(parts, sep)` concatenates the byte slices in `parts`
+with `sep` between each pair.
+
+    join(parts: []&[]byte, sep: []byte) -> []byte
+        val n = len(parts)
+
+        if n == 0
+            val empty = new [0]byte
+            return empty[:]
+
+        // Calculate total size
+        var total = 0
+        var i = 0
+
+        while i < n
+            total = total + len(parts[i])
+            i++
+
+        total = total + len(sep) * (n - 1)
+
+        val buf = new [total]byte
+        var pos = 0
+        i = 0
+
+        while i < n
+            if i > 0
+                var j = 0
+
+                while j < len(sep)
+                    buf[pos] = sep[j]
+                    pos++
+                    j++
+
+            var j = 0
+            val plen = len(parts[i])
+
+            while j < plen
+                buf[pos] = parts[i][j]
+                pos++
+                j++
+
+            i++
+
+        buf[:]
+
+
 Tests
 =====
 
@@ -634,6 +735,41 @@ Tests
         assert(len(repeat(as_bytes(""), 100)) == 0, "empty")
 
 
+### split / join
+
+    #test
+    test_bytes_split_basic() -> void
+        val parts = split(as_bytes("a,b,c"), as_bytes(","))
+        assert(len(parts) == 3, "three parts")
+        assert(string(parts[0]) == "a", "first")
+        assert(string(parts[1]) == "b", "second")
+        assert(string(parts[2]) == "c", "third")
+
+    #test
+    test_bytes_split_no_match() -> void
+        val parts = split(as_bytes("hello"), as_bytes(","))
+        assert(len(parts) == 1, "one part")
+        assert(string(parts[0]) == "hello", "whole")
+
+    #test
+    test_bytes_split_adjacent() -> void
+        val parts = split(as_bytes("a,,b"), as_bytes(","))
+        assert(len(parts) == 3, "three parts")
+        assert(string(parts[1]) == "", "empty middle")
+
+    #test
+    test_bytes_join_basic() -> void
+        val parts = split(as_bytes("a,b,c"), as_bytes(","))
+        val joined = join(parts, as_bytes("-"))
+        assert(string(joined) == "a-b-c", "rejoin")
+
+    #test
+    test_bytes_join_empty() -> void
+        val parts = new [0]&[]byte
+        val joined = join(parts[:], as_bytes(","))
+        assert(len(joined) == 0, "empty")
+
+
 Design notes
 ------------
 
@@ -659,6 +795,6 @@ the built-in slice expression `s[lo:hi]`.
 canonical way to move a `string` into the `[]byte` world.
 Going the other way, `string(b)` (the builtin) does the same.
 
-**No `split` / `join` yet.** Same reason as in `std.strings`:
-these produce or consume collections of slices, which needs
-`[]&[]byte` support that hasn't been exercised yet.
+**`split` returns `[]&[]byte`.** Each part is a freshly
+allocated byte slice (independent copy). `join` takes the
+same type and concatenates with a separator.
