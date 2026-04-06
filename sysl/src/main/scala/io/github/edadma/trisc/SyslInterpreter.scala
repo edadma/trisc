@@ -38,6 +38,7 @@ enum Value:
   case RefVal(cells: Array[Cell], refCount: java.util.concurrent.atomic.AtomicInteger, typeName: String = "")
   case RefSliceVal(cells: Array[Cell], length: Int, refCount: java.util.concurrent.atomic.AtomicInteger)
   case EnumVal(tag: Int, fields: Array[Cell])
+  case RefEnumVal(tag: Int, fields: Array[Cell], refCount: java.util.concurrent.atomic.AtomicInteger)
   case RefStringVal(bytes: Array[Byte], length: Int, refCount: java.util.concurrent.atomic.AtomicInteger)
 
 class Cell(var value: Value)
@@ -71,6 +72,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TVariantPattern(_, variantIndex, _, _) =>
         value match
           case EnumVal(tag, _) => tag == variantIndex
+          case RefEnumVal(tag, _, _) => tag == variantIndex
           case _ => false
 
   private def bindPattern(pat: TMatchPattern, value: Value, env: Env): Unit =
@@ -85,7 +87,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             env(name) = new Cell(cells(off + i).value)
           }
       case TVariantPattern(_, _, bindings, _) =>
-        val EnumVal(_, fields) = value: @unchecked
+        val fields = value match
+          case EnumVal(_, f) => f
+          case RefEnumVal(_, f, _) => f
+          case other => throw RuntimeError(s"cannot bind variant pattern on $other")
         for (binding, i) <- bindings.zipWithIndex do
           binding.foreach { name =>
             env(name) = new Cell(fields(i).value)
@@ -104,6 +109,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case StrVal(_)          => throw RuntimeError("expected integer, got string")
     case SliceVal(_, _, _, _) => throw RuntimeError("expected integer, got slice")
     case EnumVal(_, _) => throw RuntimeError("expected integer, got enum value")
+    case RefEnumVal(_, _, _) => throw RuntimeError("expected integer, got ref enum value")
 
   private def toDouble(v: Value): Double = v match
     case FloatVal(d)  => d
@@ -333,6 +339,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
   private def refIncr(v: Value): Unit = v match
     case RefVal(_, rc, _) => if rc.get() != IMMORTAL_RC then rc.incrementAndGet()
+    case RefEnumVal(_, _, rc) => if rc.get() != IMMORTAL_RC then rc.incrementAndGet()
     case RefSliceVal(_, _, rc) => if rc.get() != IMMORTAL_RC then rc.incrementAndGet()
     case RefStringVal(_, _, rc) => if rc.get() != IMMORTAL_RC then rc.incrementAndGet()
     case _ =>
@@ -348,6 +355,9 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           functions.get(deinitName).foreach { fun =>
             call(fun, List(v))
           }
+    case RefEnumVal(_, _, rc) =>
+      if rc.get() != IMMORTAL_RC then
+        if rc.decrementAndGet() <= 0 then ()
     case RefSliceVal(_, _, rc) =>
       if rc.get() != IMMORTAL_RC then
         if rc.decrementAndGet() <= 0 then ()
@@ -660,7 +670,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TDeref(inner, _) =>
         evalAny(inner, env) match
-          case RefVal(cells, _, _) => ArrVal(cells, 0)  // deref &T → expose struct fields
+          case RefVal(cells, _, _) => ArrVal(cells, 0)  // deref &Struct → expose struct fields
+          case RefEnumVal(tag, fields, _) => EnumVal(tag, fields) // deref &Enum → value enum
           case other => derefCell(other).value
 
       case TIndex(arr, index, _) =>
@@ -968,6 +979,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           new Cell(evalAny(arg, env))
         }.toArray
         RefVal(cells, new java.util.concurrent.atomic.AtomicInteger(1), name)
+
+      case TNewEnum(_, variantIndex, args) =>
+        val cells = args.map(arg => new Cell(evalAny(arg, env))).toArray
+        RefEnumVal(variantIndex, cells, new java.util.concurrent.atomic.AtomicInteger(1))
 
       case TNewArray(elemType, sizeExpr) =>
         val n = toLong(evalAny(sizeExpr, env)).toInt
