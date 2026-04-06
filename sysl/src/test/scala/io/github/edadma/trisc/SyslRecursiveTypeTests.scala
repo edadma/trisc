@@ -65,6 +65,44 @@ class SyslRecursiveTypeTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 7
   }
 
+  // ===== Ref-counted recursive enum (new on enum variant) =====
+
+  "new on enum variant creates &Enum" in {
+    eval(
+      """enum Expr
+        |    Lit(value: int)
+        |    Add(left: &Expr, right: &Expr)
+        |
+        |eval_expr(e: &Expr) -> int
+        |    *e match
+        |        Lit(v) -> v
+        |        Add(l, r) -> eval_expr(l) + eval_expr(r)
+        |
+        |main() -> int
+        |    val tree = new Add(new Lit(3), new Lit(4))
+        |    eval_expr(tree)
+        |""".stripMargin) shouldBe 7
+  }
+
+  "nested new enum — 3-level tree" in {
+    eval(
+      """enum Expr
+        |    Lit(value: int)
+        |    Add(left: &Expr, right: &Expr)
+        |
+        |eval_expr(e: &Expr) -> int
+        |    *e match
+        |        Lit(v) -> v
+        |        Add(l, r) -> eval_expr(l) + eval_expr(r)
+        |
+        |main() -> int
+        |    val tree = new Add(
+        |        new Add(new Lit(1), new Lit(2)),
+        |        new Lit(10))
+        |    eval_expr(tree)
+        |""".stripMargin) shouldBe 13
+  }
+
   // ===== Mutual recursion =====
 
   "mutually recursive structs" in {

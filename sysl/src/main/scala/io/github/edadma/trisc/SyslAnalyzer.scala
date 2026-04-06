@@ -455,6 +455,11 @@ class SyslAnalyzer:
   private def compatible(from: SyslType, to: SyslType): Boolean =
     (from, to) match
       case (a, b) if a == b => true
+      // Name-based equality for nominal types — handles stale placeholders from
+      // forward declarations where two StructType/EnumType with the same name
+      // have different field/variant lists.
+      case (StructType(n1, _), StructType(n2, _)) if n1 == n2 => true
+      case (EnumType(n1, _), EnumType(n2, _)) if n1 == n2 => true
       case (IntType(a), IntType(b)) if a <= b => true    // signed widening
       case (UIntType(a), UIntType(b)) if a <= b => true  // unsigned widening
       case (IntType(a), UIntType(b)) if a <= b => true   // signed → unsigned widening
@@ -473,7 +478,7 @@ class SyslAnalyzer:
       case (ArrayType(e1, _), ArrayType(e2, _)) if e1 == e2 => true
       case (ArrayType(e1, _), SliceType(e2)) if e1 == e2 => true  // fixed array → slice
       case (SliceType(e1), SliceType(e2)) if e1 == e2 => true
-      case (RefType(a), RefType(b)) if a == b => true      // same ref type
+      case (RefType(a), RefType(b)) if compatible(a, b) => true // same ref type (recursive check handles nominal types)
       case (RefType(inner), PtrType(_)) => true             // &T → *U (ref decays to pointer)
       case _ => false
 
@@ -1089,20 +1094,36 @@ class SyslAnalyzer:
         TNewArray(elemType, tSize)
 
       case NewExprAST(typeName, args) =>
-        val t = resolveType(NamedTypeAST(typeName))
-        t match
-          case st: StructType =>
+        // Check variant name first (e.g. `new Ok(42)`) before resolving as type
+        variantToEnum.get(typeName) match
+          case Some((et, idx)) =>
             val tArgs = args.map(analyzeExpr)
-            if tArgs.length != st.fields.length then
-              throw AnalysisError(s"new '${st.name}' expects ${st.fields.length} field(s), got ${tArgs.length}")
-            val checkedArgs = tArgs.zip(st.fields).map { case (arg, (fieldName, fieldType)) =>
+            val variantFields = et.variants(idx)._2
+            if tArgs.length != variantFields.length then
+              throw AnalysisError(s"variant '${et.variants(idx)._1}' expects ${variantFields.length} field(s), got ${tArgs.length}")
+            val checkedArgs = tArgs.zip(variantFields).map { case (arg, (fieldName, fieldType)) =>
               val coerced = coerceLiteral(arg, fieldType)
               if !compatible(coerced.typ, fieldType) then
-                throw AnalysisError(s"field '$fieldName' of '${st.name}' expects $fieldType, got ${coerced.typ}")
+                throw AnalysisError(s"field '$fieldName' expects $fieldType, got ${coerced.typ}")
               coerced
             }
-            TNew(st, checkedArgs)
-          case _ => throw AnalysisError(s"'new' requires a struct type, got $t")
+            TNewEnum(et, idx, checkedArgs)
+          case None =>
+            val t = resolveType(NamedTypeAST(typeName))
+            t match
+              case st: StructType =>
+                val tArgs = args.map(analyzeExpr)
+                if tArgs.length != st.fields.length then
+                  throw AnalysisError(s"new '${st.name}' expects ${st.fields.length} field(s), got ${tArgs.length}")
+                val checkedArgs = tArgs.zip(st.fields).map { case (arg, (fieldName, fieldType)) =>
+                  val coerced = coerceLiteral(arg, fieldType)
+                  if !compatible(coerced.typ, fieldType) then
+                    throw AnalysisError(s"field '$fieldName' of '${st.name}' expects $fieldType, got ${coerced.typ}")
+                  coerced
+                }
+                TNew(st, checkedArgs)
+              case _ =>
+                throw AnalysisError(s"'new' requires a struct type or enum variant name, got '$typeName'")
 
       case StructInitAST(typeName) =>
         val t = resolveType(NamedTypeAST(typeName))
@@ -1187,6 +1208,7 @@ class SyslAnalyzer:
         val tInner = analyzeExpr(inner)
         val resultType = tInner.typ match
           case PtrType(t) => t
+          case RefType(t) => t
           case ArrayType(t, _) => t
           case StringType => throw AnalysisError("cannot dereference string — use indexing instead")
           case SliceType(_) => throw AnalysisError("cannot dereference slice — use indexing instead")
