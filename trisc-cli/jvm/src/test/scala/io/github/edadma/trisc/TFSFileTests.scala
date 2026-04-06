@@ -35,7 +35,7 @@ class TFSFileTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/etc/motd")}
-         |    val ino = tfs_lookup(&p)
+         |    val ino = tfs_lookup(&p, p_len)
          |    var buf: [32]i8
          |    val n = tfs_read(ino, &buf, 0, 9)
          |    val bp: *i8 = &buf
@@ -54,7 +54,7 @@ class TFSFileTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/etc/motd")}
-         |    val ino = tfs_lookup(&p)
+         |    val ino = tfs_lookup(&p, p_len)
          |    var buf: [16]i8
          |    val n = tfs_read(ino, &buf, 6, 3)
          |    val bp: *i8 = &buf
@@ -73,7 +73,7 @@ class TFSFileTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/etc/motd")}
-         |    val ino = tfs_lookup(&p)
+         |    val ino = tfs_lookup(&p, p_len)
          |    var buf: [16]i8
          |    val n = tfs_read(ino, &buf, 999, 10)
          |    if n == 0
@@ -91,7 +91,7 @@ class TFSFileTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/etc/motd")}
-         |    val ino = tfs_lookup(&p)
+         |    val ino = tfs_lookup(&p, p_len)
          |    var buf: [64]i8
          |    val n = tfs_read(ino, &buf, 0, 100)
          |    if n == 9
@@ -111,7 +111,7 @@ class TFSFileTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |    var data: [4]i8
          |    data[0] = 65
          |    data[1] = 66
@@ -132,7 +132,7 @@ class TFSFileTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |    var data: [4]i8
          |    data[0] = 65
          |    tfs_write(ino, &data[0], 0, 3)
@@ -154,7 +154,7 @@ class TFSFileTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("path", "/etc/motd")}
-         |    val ino = tfs_lookup(&path[0])
+         |    val ino = tfs_lookup(&path[0], path_len)
          |    var data: [4]i8
          |    data[0] = 88
          |    data[1] = 89
@@ -181,7 +181,7 @@ class TFSFileTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |    // Pre-allocate block so tfs_write doesn't need to
          |    var ibuf: [32]i8
          |    tfs_read_inode(ino, &ibuf[0])
@@ -214,7 +214,7 @@ class TFSFileTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "x")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |    if ino > 0
          |        putchar(65)
          |    var stat: [7]int
@@ -236,7 +236,7 @@ class TFSFileTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "d")}
-         |    val ino = tfs_create(1, &name[0], 2, 0x1ED)
+         |    val ino = tfs_create(1, &name[0], name_len, 2, 0x1ED)
          |    if ino > 0
          |        putchar(65)
          |    var stat: [7]int
@@ -258,7 +258,7 @@ class TFSFileTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |    var data: [4]i8
          |    data[0] = 65
          |    tfs_write(ino, &data[0], 0, 3)
@@ -284,11 +284,11 @@ class TFSFileTests extends TFSTestHelpers {
          |    val fb1 = tfs_freeblocks()
          |    val fi1 = tfs_freeinodes()
          |${syslBytes("name", "tmp")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |    var data: [4]i8
          |    data[0] = 65
          |    tfs_write(ino, &data[0], 0, 1)
-         |    tfs_unlink(1, &name[0])
+         |    tfs_unlink(1, &name[0], name_len)
          |    val fb2 = tfs_freeblocks()
          |    val fi2 = tfs_freeinodes()
          |    // Blocks and inodes restored
@@ -307,7 +307,7 @@ class TFSFileTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("name", "f")}
-         |    val ino = tfs_create(1, &name[0], 1, 0x1A4)
+         |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
          |    var data: [8]i8
          |    data[0] = 65
          |    data[1] = 66

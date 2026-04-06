@@ -9,12 +9,20 @@ class Ramdisk(
     irq: Int,
     prefill: String = "",
     maxInodes: Int = 128,
+    files: Map[String, Array[Byte]] = Map.empty,
 ) extends Device:
   val name = "Ramdisk"
   val size = 16
 
   private val disk: Array[Byte] =
-    if prefill.nonEmpty then TFS.format(sectorSize, sectors, maxInodes, prefill)
+    if prefill.nonEmpty || files.nonEmpty then
+      val layout = if prefill.nonEmpty then prefill else ""
+      // Add file entries for any files not already in the prefill layout
+      val extraLines = files.keys.filterNot(path =>
+        layout.linesIterator.map(_.trim).exists(l => l.startsWith(path + " "))
+      ).map(path => s"$path file").mkString("\n")
+      val fullLayout = (layout + "\n" + extraLines).trim
+      TFS.format(sectorSize, sectors, maxInodes, fullLayout, files = files)
     else new Array[Byte](sectors * sectorSize)
 
   // Register offsets
@@ -85,6 +93,7 @@ class Ramdisk(
 
     cmd match
       case CMD_READ =>
+        println(f"[RD] READ lba=$lba addr=0x$addr%06x count=$count first4=${(0 until 4.min(byteCount)).map(i => f"${disk(diskOffset + i) & 0xFF}%02x").mkString(" ")}")
         var i = 0
         while i < byteCount do
           mem.writeByte(addr.toLong + i, disk(diskOffset + i))

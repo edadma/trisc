@@ -38,7 +38,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("path", "/")}
-         |    val ino = tfs_lookup(&path)
+         |    val ino = tfs_lookup(&path, path_len)
          |    if ino == 1
          |        putchar(89)
          |    else
@@ -57,7 +57,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("path", "/dev")}
-         |    val ino = tfs_lookup(&path)
+         |    val ino = tfs_lookup(&path, path_len)
          |    if ino > 0
          |        putchar(89)
          |    else
@@ -76,7 +76,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("path", "/dev/tty0")}
-         |    val ino = tfs_lookup(&path)
+         |    val ino = tfs_lookup(&path, path_len)
          |    if ino > 0
          |        putchar(89)
          |    else
@@ -95,7 +95,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("path", "/etc/motd")}
-         |    val ino = tfs_lookup(&path)
+         |    val ino = tfs_lookup(&path, path_len)
          |    if ino > 0
          |        putchar(89)
          |    else
@@ -114,7 +114,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("path", "/nope")}
-         |    val ino = tfs_lookup(&path)
+         |    val ino = tfs_lookup(&path, path_len)
          |    if ino == -1
          |        putchar(89)
          |    else
@@ -135,7 +135,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("path", "/etc/motd")}
-         |    val ino = tfs_lookup(&path)
+         |    val ino = tfs_lookup(&path, path_len)
          |    var stat: [7]int
          |    tfs_stat(ino, &stat)
          |    if (stat[0] >> 12) == 1
@@ -156,7 +156,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("path", "/dev")}
-         |    val ino = tfs_lookup(&path)
+         |    val ino = tfs_lookup(&path, path_len)
          |    var stat: [7]int
          |    tfs_stat(ino, &stat)
          |    if (stat[0] >> 12) == 2
@@ -177,7 +177,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("path", "/dev/tty0")}
-         |    val ino = tfs_lookup(&path)
+         |    val ino = tfs_lookup(&path, path_len)
          |    var stat: [7]int
          |    tfs_stat(ino, &stat)
          |    if (stat[0] >> 12) == 3
@@ -200,7 +200,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("path", "/etc/motd")}
-         |    val ino = tfs_lookup(&path)
+         |    val ino = tfs_lookup(&path, path_len)
          |    var buf: [32]i8
          |    val n = tfs_read(ino, &buf, 0, 9)
          |    val p: *i8 = &buf
@@ -222,7 +222,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("path", "/etc/motd")}
-         |    val ino = tfs_lookup(&path)
+         |    val ino = tfs_lookup(&path, path_len)
          |    var buf: [32]i8
          |    val n = tfs_read(ino, &buf, 6, 3)
          |    val p: *i8 = &buf
@@ -244,7 +244,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("path", "/etc/motd")}
-         |    val ino = tfs_lookup(&path)
+         |    val ino = tfs_lookup(&path, path_len)
          |    var buf: [64]i8
          |    val n = tfs_read(ino, &buf, 0, 100)
          |    if n == 9
@@ -265,7 +265,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
          |main() -> int
          |    tfs_init()
          |${syslBytes("path", "/etc/motd")}
-         |    val ino = tfs_lookup(&path)
+         |    val ino = tfs_lookup(&path, path_len)
          |    var buf: [32]i8
          |    val n = tfs_read(ino, &buf, 100, 10)
          |    if n == 0

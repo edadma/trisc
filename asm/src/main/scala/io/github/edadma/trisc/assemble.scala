@@ -47,6 +47,22 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
   val symbolSegment = new mutable.LinkedHashMap[String, String]
   val relaxationExports = new mutable.LinkedHashSet[String]
 
+  // Constant pool: 64-bit value (bits) → auto-generated label name
+  // Per-TOF unique prefix avoids symbol collisions when linking multiple modules
+  // that each have their own constant pool (e.g. both define .const_1).
+  val constPool = new mutable.LinkedHashMap[Long, String]
+  var constPoolCounter = 0
+  val constPoolPrefix: String =
+    val r = new scala.util.Random()
+    val chars = "0123456789abcdef"
+    (1 to 8).map(_ => chars(r.nextInt(16))).mkString
+
+  def addConstant(bits: Long): String =
+    constPool.getOrElseUpdate(bits, {
+      constPoolCounter += 1
+      s".const_${constPoolPrefix}_$constPoolCounter"
+    })
+
   def addSymbol(sym: Positional, name: String): Unit =
     if symbols contains name then problem(sym, s"duplicate symbol: '$name'")
     symbols(name) = LabelSymbol(name, segment.size, sym)
@@ -202,6 +218,8 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           segment.size += short
         case "movi" =>
           segment.size += addresses * 2
+        case "ldc" =>
+          segment.size += addresses * 2 + 2  // movi + ldd
         case _ =>
           segment.size += 2
   }
@@ -223,8 +241,13 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
             case Some(LabelSymbol(_, targetOffset, _, _)) if symbolSegment.get(symName).contains(b.segmentName) =>
               val branchAdj = adjustedOffset(b.segmentName, b.offsetInSegment)
               val targetAdj = adjustedOffset(b.segmentName, targetOffset)
-              val offset = targetAdj - (branchAdj + 2)
-              if offset % 2 != 0 || offset < -128 || offset > 126 then
+              // fold() computes displacement as target - (pc + 2). For synthesized
+              // branches (bne/bge/etc., shortSize=4), the actual bra displacement
+              // is (fold_result - 2). Check that the ACTUAL displacement fits in
+              // the bra's 7-bit signed field so we don't silently emit wrong code.
+              val foldDisp = targetAdj - (branchAdj + 2)
+              val actualDisp = if b.shortSize > 2 then foldDisp - (b.shortSize - 2) else foldDisp
+              if actualDisp % 2 != 0 || actualDisp < -128 || actualDisp > 126 then
                 b.relaxed = true
                 relaxationChanged = true
             case _ =>
@@ -748,10 +771,19 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o2, "expected register as second operand")
 
       addInstruction(3 -> 6, 3 -> reg1, 3 -> reg2, 2 -> 0, 5 -> opcode)
-    case InstructionLineAST(mnemonic @ ("fpow" | "tlbi" | "tlbia" | "sptbr" | "gptbr" | "gfault" | "sasid" | "gasid" | "gfcause"), Seq(o1, o2)) =>
+    case InstructionLineAST(mnemonic @ ("fpow" | "fsin" | "fcos" | "ftan" | "fasin" | "facos" | "fatan" | "fatan2" | "fexp" | "flog" | "tlbi" | "tlbia" | "sptbr" | "gptbr" | "gfault" | "sasid" | "gasid" | "gfcause"), Seq(o1, o2)) =>
       val opcode =
         mnemonic match
           case "fpow"    => 0
+          case "fsin"    => 9
+          case "fcos"    => 10
+          case "ftan"    => 11
+          case "fasin"   => 12
+          case "facos"   => 13
+          case "fatan"   => 14
+          case "fatan2"  => 15
+          case "fexp"    => 16
+          case "flog"    => 17
           case "tlbi"    => 1
           case "tlbia"   => 2
           case "sptbr"   => 3
@@ -838,6 +870,18 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
               addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> ((imm >> 16) & 0xff))
               addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> ((imm >> 8) & 0xff))
               addInstruction(3 -> 7, 3 -> reg, 2 -> 2, 8 -> (imm & 0xff))
+    case InstructionLineAST("ldc", Seq(o1, o2)) =>
+      val reg =
+        fold(o1) match
+          case RegisterExprAST(reg) => reg
+          case _                    => problem(o1, "expected register as first operand")
+      val bits: Long = fold(o2, absolute = true, immediate = true) match
+        case DoubleExprAST(d) => java.lang.Double.doubleToLongBits(d)
+        case LongExprAST(n)  => n
+        case _                => problem(o2, "expected numeric constant")
+      val label = addConstant(bits)
+      emitMoviReloc(reg, label)                                        // movi rN, .const_N
+      addInstruction(3 -> 0, 3 -> reg, 3 -> reg, 3 -> 0, 4 -> 6)     // ldd rN, rN, r0
     case InstructionLineAST("nop", Nil) => addInstruction(3 -> 5, 3 -> 0, 3 -> 0, 7 -> 0) // addi r0, r0, 0
     case InstructionLineAST("ret", Nil) =>
       addInstruction(3 -> 6, 3 -> 0, 3 -> 7, 2 -> 0, 5 -> 0) // jalr r0, r7
@@ -908,5 +952,14 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
   for name <- declaredExterns do
     if !referencedExterns.contains(name) then
       println(s"Warning: extern '$name' declared but never referenced")
+
+  // Emit constant pool segment if any ldc instructions were used
+  if constPool.nonEmpty then
+    builder.segment("const", 0)
+    autoAlign(8)
+    for (bits, label) <- constPool do
+      builder.addSymbol(label, builder.length, SymbolType.Data)
+      for shift <- (56 to 0 by -8) do
+        builder += ((bits >> shift) & 0xff).toByte
 
   builder.tof

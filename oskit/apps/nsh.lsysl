@@ -1,0 +1,473 @@
+NSH — Native SLIX Shell
+
+Idiomatic sysl shell with no POSIX dependencies. Uses sysl
+string type throughout. All path and name handling is
+length-based — no NUL-terminated strings in the API.
+
+Built-in commands:
+- echo [args...]   — print arguments
+- ls [path]        — list directory
+- cat path         — print file contents
+- mkdir path       — create directory
+- rm path          — remove file
+- rmdir path       — remove empty directory
+- pwd              — print working directory
+- cd [path]        — change directory
+- stat path        — show file info
+- whoami           — print uid
+- help             — list commands
+
+    module oskit.apps
+
+    import oskit.fs.ROOT_INODE
+    import oskit.services.{sleep, getuid}
+    import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
+    import oskit.servers.{fs_open, fs_read, fs_stat, fs_create, fs_unlink, fs_mkdir, fs_rmdir, fs_readdir}
+
+Shell state.
+
+    var cwd: string
+    var cwd_ino = 1
+
+Output helpers.
+
+    nsh_putc(ch: char)
+        tty_putc(ch)
+
+    nsh_print(s: string)
+        tty_puts(*byte(s), len(s))
+
+    nsh_newline()
+        nsh_putc('\n')
+
+    nsh_putint(n: int)
+        if n < 0
+            nsh_putc('-')
+            nsh_putint(-n)
+            return
+        if n >= 10
+            nsh_putint(n / 10)
+        nsh_putc('0' + (n % 10))
+
+Convert a NUL-padded byte buffer (e.g. dir entry name) to a string.
+
+    buf_to_str(buf: *i8, max: int) -> string
+        var n = 0
+        while n < max
+            if buf[n] == 0
+                break
+            n += 1
+        string(buf, n)
+
+Tokenizer. Splits a line buffer into string tokens separated
+by spaces. Returns the number of tokens found.
+
+    val MAX_ARGS = 16
+
+    tokenize(buf: *i8, buflen: int, argv: *string) -> int
+        var argc = 0
+        var pos = 0
+        while pos < buflen
+            // Skip spaces
+            while pos < buflen
+                if buf[pos] != ' '
+                    break
+                pos += 1
+            if pos >= buflen
+                break
+            // Start of token
+            val start = pos
+            while pos < buflen
+                if buf[pos] == ' '
+                    break
+                pos += 1
+            if argc < MAX_ARGS
+                argv[argc] = string(buf + start, pos - start)
+                argc += 1
+        argc
+
+Line editing. Reads a line from the TTY with arrow keys,
+Home/End, Delete, Backspace, and character insertion.
+
+    val PROMPT_LEN = 2
+
+Append a CSI sequence with numeric parameter to a buffer.
+
+    var nsh_out: [140]i8
+
+    nsh_append_csi(out: *i8, pos: int, n: int, ch: i8) -> int
+        var p = pos
+        out[p] = 27
+        p += 1
+        out[p] = '['
+        p += 1
+        if n >= 100
+            out[p] = i8('0' + n / 100)
+            p += 1
+        if n >= 10
+            out[p] = i8('0' + (n / 10) % 10)
+            p += 1
+        out[p] = i8('0' + n % 10)
+        p += 1
+        out[p] = ch
+        p += 1
+        p
+
+Emit a CSI sequence directly.
+
+    nsh_csi_num(n: int, ch: char)
+        nsh_putc(27)
+        nsh_putc('[')
+        if n >= 100
+            nsh_putc('0' + n / 100)
+        if n >= 10
+            nsh_putc('0' + (n / 10) % 10)
+        nsh_putc('0' + n % 10)
+        nsh_putc(ch)
+
+Redraw the full line in a single batched write.
+
+    nsh_refresh_line(buf: *i8, blen: int, cursor: int, prompt_len: int)
+        var p = 0
+        nsh_out[p] = 13
+        p += 1
+        // Write prompt (cwd + "> ")
+        val pp = *byte(cwd)
+        val plen = len(cwd)
+        for var i = 0; i < plen; i++
+            nsh_out[p] = pp[i]
+            p += 1
+        nsh_out[p] = '>'
+        p += 1
+        nsh_out[p] = ' '
+        p += 1
+        // Copy line content
+        for var i = 0; i < blen; i++
+            if p >= 120
+                tty_puts(nsh_out, p)
+                p = 0
+            nsh_out[p] = buf[i]
+            p += 1
+        // ESC[K — clear to end of line
+        p = nsh_append_csi(nsh_out, p, 0, i8('K'))
+        // ESC[nG — cursor to column (1-based)
+        p = nsh_append_csi(nsh_out, p, prompt_len + cursor + 1, i8('G'))
+        tty_puts(nsh_out, p)
+
+    nsh_readline(buf: *i8, maxlen: int, prompt_len: int) -> int
+        var blen = 0
+        var cursor = 0
+        while blen < maxlen - 1
+            val ch = tty_getc()
+            if ch == '\n'
+                nsh_putc('\n')
+                buf[blen] = 0
+                return blen
+            else if ch == 8
+                if cursor > 0
+                    var i = cursor - 1
+                    while i < blen - 1
+                        buf[i] = buf[i + 1]
+                        i += 1
+                    blen -= 1
+                    cursor -= 1
+                    nsh_refresh_line(buf, blen, cursor, prompt_len)
+            else if ch == 27
+                val c2 = tty_getc()
+                if c2 == '['
+                    val c3 = tty_getc()
+                    if c3 == 'C'
+                        if cursor < blen
+                            cursor += 1
+                            nsh_csi_num(prompt_len + cursor + 1, 'G')
+                    else if c3 == 'D'
+                        if cursor > 0
+                            cursor -= 1
+                            nsh_csi_num(prompt_len + cursor + 1, 'G')
+                    else if c3 == 'H'
+                        cursor = 0
+                        nsh_csi_num(prompt_len + 1, 'G')
+                    else if c3 == 'F'
+                        cursor = blen
+                        nsh_csi_num(prompt_len + cursor + 1, 'G')
+                    else if c3 == '3'
+                        val c4 = tty_getc()
+                        if c4 == '~'
+                            if cursor < blen
+                                var i = cursor
+                                while i < blen - 1
+                                    buf[i] = buf[i + 1]
+                                    i += 1
+                                blen -= 1
+                                nsh_refresh_line(buf, blen, cursor, prompt_len)
+            else if ch >= ' '
+                if blen < maxlen - 1
+                    var i = blen
+                    while i > cursor
+                        buf[i] = buf[i - 1]
+                        i -= 1
+                    buf[cursor] = i8(ch)
+                    blen += 1
+                    cursor += 1
+                    if cursor == blen
+                        nsh_putc(ch)
+                    else
+                        nsh_refresh_line(buf, blen, cursor, prompt_len)
+        buf[blen] = 0
+        blen
+
+Path resolution. Resolves a path string to an inode.
+Absolute paths start from root, relative paths prepend cwd.
+
+    nsh_resolve(path: string) -> int
+        if len(path) == 0
+            return cwd_ino
+        if path[0] == '/'
+            return fs_open(path)
+        // Relative path — prepend cwd
+        if len(cwd) > 1
+            return fs_open(cwd + "/" + path)
+        fs_open(cwd + path)
+
+Split a path into parent directory and basename.
+Returns the parent inode and the basename as a string.
+
+    nsh_parent_ino(path: string) -> int
+        // Find last slash
+        var last_slash = -1
+        for var i = 0; i < len(path); i++
+            if path[i] == '/'
+                last_slash = i
+        if last_slash == -1
+            return cwd_ino
+        if last_slash == 0
+            return ROOT_INODE
+        // Parent is path up to last slash
+        val parent_path = string(*byte(path), last_slash)
+        nsh_resolve(parent_path)
+
+    nsh_basename(path: string) -> string
+        var last_slash = -1
+        for var i = 0; i < len(path); i++
+            if path[i] == '/'
+                last_slash = i
+        if last_slash == -1
+            return path
+        string(*byte(path) + last_slash + 1, len(path) - last_slash - 1)
+
+Built-in commands.
+
+    cmd_echo(argc: int, argv: *string)
+        for var i = 1; i < argc; i++
+            if i > 1
+                nsh_putc(' ')
+            nsh_print(argv[i])
+        nsh_newline()
+
+    cmd_ls(argc: int, argv: *string)
+        var dir_ino = cwd_ino
+        if argc > 1
+            dir_ino = nsh_resolve(argv[1])
+            if dir_ino < 0
+                nsh_print(argv[1])
+                nsh_print(": not found\n")
+                return
+        var entry_ino: int
+        var entry_name: [14]i8
+        var idx = 0
+        while fs_readdir(dir_ino, idx, &entry_ino, entry_name) == 0
+            val name = buf_to_str(entry_name, 14)
+            // Skip . and ..
+            if len(name) > 0
+                if name[0] != '.'
+                    nsh_print(name)
+                    nsh_newline()
+                else if len(name) > 1
+                    if name[1] != '.'
+                        nsh_print(name)
+                        nsh_newline()
+                    else if len(name) > 2
+                        nsh_print(name)
+                        nsh_newline()
+            idx += 1
+
+    cmd_cat(argc: int, argv: *string)
+        if argc < 2
+            nsh_print("usage: cat <file>\n")
+            return
+        val ino = nsh_resolve(argv[1])
+        if ino < 0
+            nsh_print(argv[1])
+            nsh_print(": not found\n")
+            return
+        var buf: [128]i8
+        var offset = 0
+        var nr = fs_read(ino, buf, offset, 128)
+        while nr > 0
+            for var i = 0; i < nr; i++
+                nsh_putc(int(buf[i]))
+            offset += nr
+            nr = fs_read(ino, buf, offset, 128)
+        nsh_newline()
+
+    cmd_mkdir(argc: int, argv: *string)
+        if argc < 2
+            return
+        val parent = nsh_parent_ino(argv[1])
+        if parent < 0
+            nsh_print(argv[1])
+            nsh_print(": not found\n")
+            return
+        val name = nsh_basename(argv[1])
+        val result = fs_mkdir(parent, name, 0x1FF)
+        if result < 0
+            nsh_print("error\n")
+
+    cmd_rm(argc: int, argv: *string)
+        if argc < 2
+            return
+        val parent = nsh_parent_ino(argv[1])
+        if parent < 0
+            return
+        val name = nsh_basename(argv[1])
+        val result = fs_unlink(parent, name)
+        if result < 0
+            nsh_print("error\n")
+
+    cmd_rmdir(argc: int, argv: *string)
+        if argc < 2
+            return
+        val parent = nsh_parent_ino(argv[1])
+        if parent < 0
+            return
+        val name = nsh_basename(argv[1])
+        val result = fs_rmdir(parent, name)
+        if result < 0
+            nsh_print("error\n")
+
+    cmd_pwd(argc: int, argv: *string)
+        nsh_print(cwd)
+        nsh_newline()
+
+    cmd_cd(argc: int, argv: *string)
+        if argc < 2
+            cwd_ino = ROOT_INODE
+            cwd = "/"
+            return
+        val ino = nsh_resolve(argv[1])
+        if ino < 0
+            nsh_print(argv[1])
+            nsh_print(": not found\n")
+            return
+        // Verify it's a directory
+        var st: [7]int
+        fs_stat(ino, st)
+        val ftype = (st[0] >> 12) & 0xF
+        if ftype != 2
+            nsh_print("not a directory\n")
+            return
+        cwd_ino = ino
+        // Update cwd path
+        val arg = argv[1]
+        if arg[0] == '/'
+            cwd = arg
+        else
+            if len(cwd) > 1
+                cwd = cwd + "/" + arg
+            else
+                cwd = cwd + arg
+
+    cmd_stat(argc: int, argv: *string)
+        if argc < 2
+            return
+        val ino = nsh_resolve(argv[1])
+        if ino < 0
+            nsh_print(argv[1])
+            nsh_print(": not found\n")
+            return
+        var st: [7]int
+        fs_stat(ino, st)
+        val ftype = (st[0] >> 12) & 0xF
+        nsh_print("type: ")
+        if ftype == 1
+            nsh_print("file")
+        else if ftype == 2
+            nsh_print("dir")
+        else
+            nsh_putint(ftype)
+        nsh_newline()
+        nsh_print("size: ")
+        nsh_putint(st[4])
+        nsh_newline()
+        nsh_print("ino: ")
+        nsh_putint(ino)
+        nsh_newline()
+
+    cmd_whoami(argc: int, argv: *string)
+        nsh_putint(getuid())
+        nsh_newline()
+
+    cmd_help(argc: int, argv: *string)
+        nsh_putc('H')
+        nsh_newline()
+
+Command dispatch.
+
+    nsh_dispatch(argc: int, argv: *string)
+        if argc == 0
+            return
+        val cmd = argv[0]
+        if cmd == "echo"
+            cmd_echo(argc, argv)
+        else if cmd == "pwd"
+            cmd_pwd(argc, argv)
+        else if cmd == "help"
+            cmd_help(argc, argv)
+        else if cmd == "whoami"
+            cmd_whoami(argc, argv)
+        else if cmd == "ls"
+            cmd_ls(argc, argv)
+        else if cmd == "cat"
+            cmd_cat(argc, argv)
+        else if cmd == "mkdir"
+            cmd_mkdir(argc, argv)
+        else if cmd == "rm"
+            cmd_rm(argc, argv)
+        else if cmd == "rmdir"
+            cmd_rmdir(argc, argv)
+        else if cmd == "cd"
+            cmd_cd(argc, argv)
+        else if cmd == "stat"
+            cmd_stat(argc, argv)
+        else
+            nsh_print(cmd)
+            nsh_print(": not found\n")
+
+The shell main loop.
+
+    nsh()
+        cwd = "/"
+        sleep(5)
+
+        var line: [256]i8
+        var argv: [16]string
+
+        while 1 == 1
+            // Print prompt: "cwd> "
+            nsh_print(cwd)
+            nsh_putc('>')
+            nsh_putc(' ')
+
+            // Prompt length = cwd length + 2 ("> ")
+            val prompt_len = len(cwd) + 2
+
+            // Read a line
+            val blen = nsh_readline(line, 256, prompt_len)
+            if blen == 0
+                continue
+
+            // Tokenize
+            val argc = tokenize(line, blen, argv)
+
+            // Dispatch
+            nsh_dispatch(argc, argv)

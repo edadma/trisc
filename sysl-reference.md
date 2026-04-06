@@ -1,0 +1,1390 @@
+# Sysl Language Reference Manual
+
+Sysl is a systems programming language targeting the TRISC architecture. It combines Go-style syntax with Swift-inspired memory management (value types, reference-counted refs, raw pointers) and C-level control over memory layout.
+
+---
+
+## Program Structure
+
+```sysl
+module path.to.module
+
+import path.to.other.{name1, name2}
+import path.to.all.*
+
+// Top-level declarations: functions, variables, structs, enums, type aliases, externs
+```
+
+### Modules and Imports
+
+```sysl
+module oskit.kernel              // module declaration (one per file)
+
+import posix.stdlib.{malloc, free}   // named imports
+import posix.string.*                // wildcard import
+import posix.io.{open => fopen}      // aliased import
+```
+
+### Visibility
+
+```sysl
+private myHelper() -> int = 42      // not exported
+myPublicFunc() -> int = 0           // public by default
+```
+
+### Name Mangling
+
+Functions and global variables in modules are mangled with the module path to avoid cross-module name collisions. The mangled name format is `modpart1_modpart2__funcname` (module parts joined by `_`, separated from the function name by `__`).
+
+```
+module std.strings → trim_space → std_strings__trim_space
+module mylib       → helper     → mylib__helper
+```
+
+**Never mangled:** `main`, `extern` functions, builtin functions, functions in files without a `module` declaration, and any function whose name matches an `extern` declaration in the compilation.
+
+Source code always uses the short name — the compiler resolves it to the mangled name automatically.
+
+---
+
+## Types
+
+### Scalar Types
+
+| Type | Alias | Size | Description |
+|------|-------|------|-------------|
+| `i8` | | 1 byte | signed 8-bit integer |
+| `i16` | | 2 bytes | signed 16-bit integer |
+| `i32` | `int` | 4 bytes | signed 32-bit integer |
+| `i64` | | 8 bytes | signed 64-bit integer |
+| `u8` | `byte` | 1 byte | unsigned 8-bit integer |
+| `u16` | | 2 bytes | unsigned 16-bit integer |
+| `u32` | `char` | 4 bytes | unsigned 32-bit integer (Unicode codepoint) |
+| `u64` | | 8 bytes | unsigned 64-bit integer |
+| `f64` | `double` | 8 bytes | 64-bit floating point |
+| `bool` | | 1 byte | `true` or `false` |
+| `void` | | 0 bytes | no value |
+| `string` | | 16 bytes | fat pointer: `{ptr: *u8, len: i64}` |
+
+### Integer Overflow
+
+All integer arithmetic wraps at the declared type width. There is no implicit integer promotion — `u8 + u8` produces `u8`, not `int`.
+
+- **Unsigned types** wrap via modular arithmetic (zero-extension): `u8(255) + u8(1)` → `0`
+- **Signed types** wrap via two's complement (sign-extension): `int(2147483647) + 1` → `-2147483648`
+- **64-bit types** (`i64`, `u64`) use the full register width and do not truncate
+
+To avoid wrapping, widen operands explicitly before arithmetic: `int(a) + int(b)`.
+
+This matches Go, Rust, and Swift. C-style implicit integer promotion is not used.
+
+### Composite Types
+
+```sysl
+*T              // raw pointer (8 bytes, unmanaged)
+&T              // ref-counted reference (8 bytes, auto-freed at rc=0)
+[n]T            // fixed-size array (n * sizeof(T) bytes, stack-allocated)
+[]T             // slice: {ptr: *T, len: i32, cap: i32} (16 bytes)
+&[]T            // ref-counted heap array from new [n]T
+(T1, T2, T3)   // tuple (desugars to anonymous struct)
+func(P1, P2) -> R  // function pointer (8 bytes)
+```
+
+### Struct Types
+
+```sysl
+struct Point
+    x: int
+    y: int
+
+struct Node
+    value: int
+    next: *Node       // recursive via pointer
+```
+
+### Enum Types (Simple)
+
+Simple enums are integer constants with auto-incrementing values:
+
+```sysl
+enum Color
+    Red               // 0
+    Green             // 1
+    Blue = 10         // explicit value
+    Yellow            // 11 (auto-increment)
+```
+
+Access via `Color.Red`, `Color.Blue`, etc. At runtime, simple enum members are plain `i32` values. Simple enums can also be used as distinct types in type positions (e.g. `Result[int, ParseError]`); their bare variant names work as constructors:
+
+```sysl
+enum ParseError
+    EmptyInput
+    BadDigit
+    Overflow
+
+parse(s: string) -> Result[i64, ParseError]
+    if len(s) == 0 then return Err(EmptyInput)   // bare variant name
+    Ok(42)
+```
+
+### Tagged Unions (Data Enums)
+
+Enums can carry data in each variant (Rust-style tagged unions):
+
+```sysl
+enum Shape
+    Circle(radius: int)
+    Rect(w: int, h: int)
+    Empty                   // no-data variant
+```
+
+**Construction:**
+```sysl
+s = Circle(5)              // variant with data
+e = Empty                  // no-data variant (bare name)
+e2 = Shape.Empty           // qualified name also works
+```
+
+**Pattern matching:**
+```sysl
+s match
+    Circle(r) -> r * r * 3    // destructure fields
+    Rect(w, h) -> w * h       // bind multiple fields
+    Empty -> 0                 // match no-data variant
+```
+
+**As function parameters and return values:**
+```sysl
+area(s: Shape) -> int
+    s match
+        Circle(r) -> r * r * 3
+        Rect(w, h) -> w * h
+        Empty -> 0
+
+make_shape(kind: int) -> Shape
+    if kind == 0 then Circle(5)
+    else Rect(3, 4)
+```
+
+**Guards on variant patterns:**
+```sysl
+s match
+    Circle(r) if r > 10 -> 1   // guard with binding
+    Circle(r) -> 2
+    Rect(w, h) -> 3
+```
+
+**Heap-allocated enums (`new` on variants):**
+
+`new VariantName(args)` heap-allocates an enum value and returns a ref-counted
+`&EnumType`. This enables recursive data structures like AST trees:
+
+```sysl
+enum Expr
+    Lit(value: int)
+    Add(left: &Expr, right: &Expr)
+
+eval_expr(e: &Expr) -> int
+    *e match
+        Lit(v) -> v
+        Add(l, r) -> eval_expr(l) + eval_expr(r)
+
+main() -> int
+    val tree = new Add(new Lit(1), new Add(new Lit(2), new Lit(3)))
+    eval_expr(tree)    // 6
+```
+
+`*e` dereferences the ref to a value enum for pattern matching. The ref is
+automatically freed when the refcount reaches zero, just like `&Struct`.
+
+**Recursive types:** Structs and enums may reference themselves (or each other)
+through pointers (`*T`) or refs (`&T`):
+
+```sysl
+struct Node
+    value: int
+    next: *Node       // recursive via pointer
+
+enum Tree
+    Leaf(value: int)
+    Branch(left: &Tree, right: &Tree)   // recursive via ref
+```
+
+**Memory layout:** `{tag: i32, padding, data: union of variant fields}`. The tag is a small integer (0, 1, 2...) identifying the variant. Data is overlapping storage sized to the largest variant. `sizeof(Shape)` returns the total size including tag and padding.
+
+### Type Aliases
+
+```sysl
+type IntPtr = *int
+type Callback = func(int) -> int
+```
+
+---
+
+## Three Allocation Modes
+
+The same struct definition supports three usage modes at the use site:
+
+| Declaration | Type | Semantics |
+|---|---|---|
+| `var v = Point(10, 20)` | `Point` (value) | stack-allocated, bitwise copy, no refcount |
+| `val r = new Point(10, 20)` | `&Point` (ref) | heap-allocated, ref-counted, auto-freed at zero |
+| `var p: *Point = &v` | `*Point` (pointer) | raw, unmanaged, kernel-safe |
+
+### Conversion Rules
+
+- `ref -> value`: not implicit (use `.copy()`)
+- `value -> ref`: `new Point(v)`
+- `ref -> ptr`: `&r` (unsafe, no refcount change)
+- `ptr -> ref`: **always an error** (can't manufacture a refcount)
+- `value -> ptr`: `&v` (address-of)
+- `ptr -> value`: `*p` (dereference)
+
+---
+
+## Variables
+
+```sysl
+// Immutable
+val x = 42
+val y: int = 42
+
+// Mutable
+var x = 42
+var y: int = 42
+x = 100              // reassignment
+
+// Uninitialized (zero-initialized)
+var x: int
+var arr: [10]int
+var p: *Node
+
+// Inferred type (mutable by default in blocks)
+x = 42               // inferred as int
+name = "hello"       // inferred as string
+```
+
+### Discard Binding (`_`)
+
+`_` is a write-only binding (Go/Rust style). You can bind to it; you cannot reference it; multiple `_` bindings in the same scope don't collide.
+
+```sysl
+val _ = foo()              // evaluate for side effects, discard result
+val _ = bar()              // fine — no collision with the first _
+val _: int = 7             // type annotations allowed
+var _ = baz()              // var form also works
+```
+
+In destructuring patterns, `_` discards the corresponding field:
+
+```sysl
+_, y = pair()              // discard first, bind second
+val x, _ = pair()          // discard second
+val a, _, c = triple()     // discard middle element
+_, _ = pair()              // discard all (evaluate for side effects)
+```
+
+### Global Variables
+
+```sysl
+var count = 0         // module-level mutable
+val MAX = 100         // module-level immutable
+
+main() -> int
+    count += 1
+    count
+```
+
+---
+
+## Functions
+
+```sysl
+// Expression body
+add(a: int, b: int) -> int = a + b
+
+// Block body
+factorial(n: int) -> int
+    if n <= 1
+        return 1
+    return n * factorial(n - 1)
+
+// Void function (no return type)
+greet(name: *byte)
+    puts(name)
+
+// Inferred return type
+double(x: int) = x * 2
+
+// No parameters
+getAnswer() -> int = 42
+```
+
+### Generic Functions
+
+Functions may declare type parameters in square brackets after the name, with
+optional trait bounds using `:` and `+`. The
+compiler monomorphizes each instantiation — one specialized copy per unique set
+of type arguments, just like Go or C++. Type arguments are inferred from the
+call-site argument types.
+
+```sysl
+// Identity — works for any type
+id[T](x: T) -> T = x
+
+// Swap via pointers — works for any T
+swap[T](a: *T, b: *T)
+    var tmp: T = *a
+    *a = *b
+    *b = tmp
+
+// Multiple type parameters
+pair_first[K, V](k: K, v: V) -> K = k
+
+// Instantiation-time checking: operations on T are checked when T is pinned.
+// max[int] works; max[bool] errors at the call site because > is not defined.
+max[T](a: T, b: T) -> T
+    if a > b then a else b
+
+main() -> int
+    var x = 10
+    var y = 20
+    swap(&x, &y)        // T inferred as int
+    max(1.5, 2.5)       // T inferred as f64
+    id(42)              // T inferred as int
+```
+
+**Trait bounds.** A type parameter may be constrained to types that implement
+one or more traits:
+
+```sysl
+maxOf[T: Ord](a: T, b: T) -> T       // T must implement Ord
+bothCheck[T: Ord + Eq](a: T, b: T)   // T must implement Ord AND Eq
+```
+
+Bounds are checked at each call site when the concrete type arguments are known.
+An unsatisfied bound produces a clear error naming the missing trait and the
+type parameter. Inside the generic body, operators like `a > b` and `a == b`
+route through the bounded trait's methods.
+
+**Rules:**
+- Type parameters may appear in parameter types, return type, and local variable
+  type annotations.
+- Type arguments are **inferred** from argument types (explicit type arguments
+  come in a later phase).
+- Each unique `(function, type-args)` combination produces one specialized copy
+  (cached; name-mangled to e.g. `swap_i32`).
+- Operations on a type parameter that are invalid for the concrete type produce
+  an error at the call site where the instantiation happens.
+
+### Generic Structs
+
+Structs may declare type parameters in square brackets after the name. Each
+distinct instantiation gets its own monomorphized struct layout and `sizeof`.
+
+```sysl
+struct Pair[T]
+    a: T
+    b: T
+
+struct Tuple[K, V]
+    key: K
+    value: V
+
+main() -> int
+    p = Pair(10, 20)            // T inferred as int from arg types
+    q: Pair[i64] = Pair(1i64, 2i64)
+    t = Tuple(5, 'A')
+    p.a + p.b + int(q.a) + t.key
+```
+
+**Rules:**
+- Type parameters appear in square brackets after the struct name.
+- Field types may reference the type parameters.
+- Constructor calls infer type arguments from the argument types.
+- Explicit type annotations (`Pair[int]`) may also be used in variable
+  declarations and parameter types.
+- Each `(struct, type-args)` pair produces one monomorphized struct type with a
+  mangled name (e.g. `Pair_i32`, `Tuple_i32_u32`).
+- Generic functions and generic structs compose: a function like
+  `swapPair[T](p: *Pair[T])` is fully supported — `T` is inferred from the
+  concrete `Pair[i32]` passed in.
+
+### Generic Tagged Unions
+
+Tagged unions (data enums) may declare type parameters — the foundation for
+`Option[T]`, `Result[T, E]`, and similar sum types.
+
+```sysl
+enum Option[T]
+    Some(value: T)
+    None
+
+enum Result[T, E]
+    Ok(value: T)
+    Err(error: E)
+
+safeDiv(a: int, b: int) -> Option[int]
+    if b == 0 then None
+    else Some(a / b)
+
+main() -> int
+    r = safeDiv(20, 4)
+    r match
+        Some(v) -> v
+        None -> -1
+```
+
+**Rules:**
+- Type parameters in square brackets after the enum name.
+- Variant field types may reference the type parameters.
+- Each `(enum, type-args)` pair produces one monomorphized `EnumType` with a
+  mangled name (e.g. `Option_i32`, `Result_i32_string`).
+- Pattern matching uses the scrutinee's concrete enum type to look up variants.
+
+**Type inference:** variant constructors prefer to infer type args from
+argument types (`Some(42)` infers `T=int`). When a variant doesn't pin all
+type parameters — e.g. `Ok(42)` for `Result[T, E]` leaves `E` unknown — the
+analyzer consults the **expected type** from context:
+
+| Context | Expected type source |
+|---|---|
+| `var x: Option[int] = None` | the declared variable type |
+| `fn f() -> Result[int, string] { Ok(42) }` | the function's return type |
+
+Without an expected type and incomplete argument-based inference, the compiler
+errors with a message asking for an explicit type annotation.
+
+### `?` Operator (Try)
+
+The postfix `?` operator on an enum value unwraps the success variant or
+early-returns the failure variant from the enclosing function. It's the
+standard ergonomic for working with `Option[T]` and `Result[T, E]`.
+
+```sysl
+enum Option[T]
+    Some(value: T)
+    None
+
+parseAndDouble(s: string, start: int) -> Option[int]
+    x = parseInt(s, start)?         // unwrap Some(x), or early-return None
+    Some(x * 2)
+```
+
+**Rules:**
+- Applies only to monomorphized generic enum values where the enum has exactly
+  two variants and the first variant has exactly one field (the success type).
+- The enclosing function's return type must be the **same** enum type as the
+  value being `?`-unwrapped (no error-type conversion yet).
+- `expr?` desugars at analyze time to:
+  ```
+  match expr
+      Success(v) -> v
+      Failure(...) -> return Failure(...)
+  ```
+  where `Success` is variant 0 and `Failure` is variant 1.
+- The result type of the whole `expr?` is the success variant's field type.
+
+**Chainable:** `a?.field` works if `a?` returns a struct; multiple `?`s across
+separate statements also work (e.g. `x = a?` followed by `y = b?`).
+
+### Traits and `impl` blocks
+
+Traits describe a set of methods a type may implement. Each trait is parameterized
+by a subject type `T` (the type that will conform). Methods may have default
+bodies; implementers override or inherit them. No orphan rule — any `impl` may
+be written anywhere.
+
+```sysl
+trait Ord[T]
+    cmp(a: T, b: T) -> int                  // required (no body)
+    lt(a: T, b: T) -> bool = cmp(a, b) < 0  // default body
+    le(a: T, b: T) -> bool = cmp(a, b) <= 0
+    gt(a: T, b: T) -> bool = cmp(a, b) > 0
+    ge(a: T, b: T) -> bool = cmp(a, b) >= 0
+
+impl Ord[int]
+    cmp(a: int, b: int) -> int = a - b
+
+main() -> int
+    if Ord.lt(3, 5) then 1 else 0
+```
+
+**Rules:**
+- A trait method with a body is a **default**; implementers may override it.
+- A trait method without a body is **required**; every impl must provide it.
+- `impl Trait[T]` for the same `(trait, type)` pair may appear only once.
+- Calls via `Trait.method(args)` infer the concrete target type from argument
+  types and dispatch to the matching impl's method.
+- Inside a default body, unqualified calls to sibling trait methods (like
+  `cmp(a, b)` inside `lt`) resolve to the current impl's methods.
+
+**Monomorphization:** each impl method — whether provided or synthesized from a
+default — compiles to a mangled top-level function like `Ord_cmp_i32`,
+`Ord_lt_i32`. There is no runtime dispatch; trait calls are resolved statically.
+
+### Operator Overloading via Traits
+
+Operators on user-defined struct and enum types desugar to trait method calls.
+The compiler maps each operator to a fixed `(trait, method)` pair and dispatches
+through the impl registered for the operand type.
+
+| Operator | Trait | Method | Signature |
+|---|---|---|---|
+| `<` `<=` `>` `>=` | `Ord` | `lt` `le` `gt` `ge` | `(T, T) -> bool` |
+| `==` `!=` | `Eq` | `eq` `ne` | `(T, T) -> bool` |
+| `+` | `Add` | `add` | `(T, T) -> T` |
+| `-` | `Sub` | `sub` | `(T, T) -> T` |
+| `*` | `Mul` | `mul` | `(T, T) -> T` |
+| `/` | `Div` | `div` | `(T, T) -> T` |
+
+```sysl
+struct Vec2
+    x: int
+    y: int
+
+trait Add[T]
+    add(a: T, b: T) -> T
+
+impl Add[Vec2]
+    add(a: Vec2, b: Vec2) -> Vec2 = Vec2(a.x + b.x, a.y + b.y)
+
+main() -> int
+    a = Vec2(1, 2)
+    b = Vec2(10, 20)
+    c = a + b                  // desugars to Add.add(a, b) → Add_add_Vec2(a, b)
+    c.x * 100 + c.y
+```
+
+Built-in numeric operators are unaffected — `3 + 4` on `int` still uses the
+native instruction. Dispatch through a trait only applies when the left operand
+is a struct or enum type.
+
+Operator sugar composes with generic functions. Inside `max[T](a: T, b: T)`,
+writing `a > b` works for any `T` that has an `Ord` impl, checked at
+instantiation time.
+
+### Methods
+
+Methods are declared with the `StructName.methodName(...)` syntax. The parser
+automatically prepends a hidden `__self__: *StructName` parameter, so you do
+**not** write `self` in the parameter list — just refer to `self` inside the
+method body:
+
+```sysl
+struct Point
+    x: int
+    y: int
+
+Point.magnitude() -> int
+    self.x * self.x + self.y * self.y
+
+main() -> int
+    var p: Point
+    p.x = 3
+    p.y = 4
+    p.magnitude()     // desugars to Point_magnitude(&p)
+```
+
+Inside the method body, `self` is an alias for the implicit receiver — it
+has type `*StructName` (raw pointer to the instance).
+
+### Deinit Blocks
+
+```sysl
+struct Buffer
+    data: *byte
+    size: int
+
+Buffer.deinit()
+    free(self.data)   // called automatically when &Buffer refcount hits 0
+```
+
+### Defer
+
+```sysl
+main() -> int
+    f = open("file.txt", O_RDONLY)
+    defer close(f)     // runs when function exits
+    // ... use f ...
+    42                 // close(f) runs after return value is computed
+```
+
+Multiple defers execute in LIFO order.
+
+### Function Pointers
+
+```sysl
+dbl(x: int) -> int = x * 2
+
+main() -> int
+    f: func(int) -> int = dbl
+    f(21)                         // indirect call → 42
+
+    var funcs: [2]func(int) -> int
+    funcs[0] = dbl
+    funcs[1] = triple
+    funcs[0](10) + funcs[1](10)  // call through array
+```
+
+### Extern Declarations
+
+```sysl
+extern putchar(ch: int)
+extern sbrk(increment: int) -> *i8
+extern var errno: int
+```
+
+---
+
+## Expressions
+
+### Literals
+
+```sysl
+42                    // int (i32)
+0xFF                  // hex literal
+100u32                // typed literal suffix
+3.14                  // double (f64)
+1.5e10                // scientific notation
+'A'                   // char literal (u32, value 65)
+'\n'                  // escape char
+"hello"               // string literal
+true, false           // bool
+[1, 2, 3]            // array literal
+1_000_000             // underscore separators (decimal, hex, float, exponent)
+0xDEAD_BEEF           // grouping for readability
+0xFF_00_FF_00u32      // combined with type suffix
+3.141_592             // underscores in fractional part
+```
+
+**Type suffixes** on integer literals force a specific type:
+
+```sysl
+42i8                  // i8
+42i16                 // i16
+42i32                 // i32 (same as plain `42`)
+42i64                 // i64
+200u8                 // u8
+1000u16               // u16
+100u32                // u32
+0xFFu64               // u64
+```
+
+Float literals (`3.14`, `1e5`) are always `f64`. There is no `f32` type.
+
+**Escape sequences** in string and char literals:
+
+```
+\n    newline
+\t    tab
+\r    carriage return
+\0    null (0x00)
+\\    literal backslash
+\'    literal single quote
+\"    literal double quote
+```
+
+### Operators (by precedence, lowest to highest)
+
+| Precedence | Operators | Associativity |
+|---|---|---|
+| 1 | `\|\|` | left |
+| 2 | `&&` | left |
+| 3 | `==` `!=` `<` `>` `<=` `>=` | left (chainable) |
+| 4 | `\|` | left |
+| 5 | `^` | left |
+| 6 | `&` | left |
+| 7 | `<<` `>>` | left |
+| 8 | `+` `-` | left |
+| 9 | `*` `/` `%` | left |
+| 10 | `-` `!` `~` `*` `&` `++` `--` (prefix) | right |
+| 11 | `[]` `.` `()` `++` `--` (postfix) | left |
+
+Note: bitwise operators bind tighter than comparisons (unlike C). `x & mask == 0` works as expected.
+
+### Chained Comparisons
+
+```sysl
+if 1 <= x <= 10 then ...    // equivalent to: 1 <= x && x <= 10
+if a < b < c < d then ...   // all pairs checked, short-circuits
+```
+
+### Increment/Decrement
+
+```sysl
+++x       // prefix: increments x, returns new value
+x++       // postfix: returns old value, then increments
+--x       // prefix decrement
+x--       // postfix decrement
+```
+
+### Compound Assignment
+
+```sysl
+x += 5    x -= 3    x *= 2    x /= 4    x %= 7
+x &= 0xFF   x |= 0x01   x ^= 0xAA   x <<= 2   x >>= 1
+
+// Also works on pointers (scaled by element size)
+p += 2    p -= 1
+```
+
+### Casts
+
+```sysl
+int(true)         // bool -> int: 1
+bool(42)          // int -> bool: true (nonzero)
+byte(0x1FF)       // truncate to u8: 255
+char(65)          // int -> u32: 65
+*i8(address)      // int -> pointer
+i64(ptr)          // pointer -> int
+```
+
+### sizeof
+
+```sysl
+sizeof(int)        // 4
+sizeof(*int)       // 8
+sizeof(Point)      // sum of fields + padding
+sizeof([10]int)    // 40
+```
+
+### If Expression
+
+```sysl
+x = if cond then a else b
+result = if x > 0 then x else -x
+```
+
+---
+
+## Statements
+
+### Control Flow
+
+```sysl
+// if/elif/else
+if x > 0
+    positive()
+elif x == 0
+    zero()
+else
+    negative()
+
+// if-then (inline)
+if x > 0 then positive()
+
+// match (value matching, no fallthrough)
+x match
+    1 -> doA()
+    2, 3 -> doB()              // multiple values per arm
+    _ -> doDefault()           // wildcard (matches anything)
+    else -> doDefault()        // alternative to wildcard
+
+// match as expression
+y = x match
+    1 -> "one"
+    2, 3 -> "few"
+    else -> "many"
+
+// match with guards
+x match
+    _ if x > 10 -> "big"
+    _ if x > 0 -> "positive"
+    else -> "non-positive"
+
+// range matching (inclusive)
+x match
+    1..10 -> "small"
+    11..100 -> "medium"
+    else -> "large"
+
+// struct destructuring in match
+p match
+    Point(x, y) -> x + y      // binds x and y from fields
+    Point(_, y) -> y           // wildcard ignores field
+    Point(x, y) if x == 0 -> y  // guard with bindings
+
+// tagged union (data enum) matching
+s match
+    Circle(r) -> r * r * 3    // match variant, bind fields
+    Rect(w, h) -> w * h       // each variant checked by tag
+    Empty -> 0                 // no-data variant
+    Circle(r) if r > 5 -> 1   // guard with variant binding
+
+// match with block bodies
+x match
+    1 ->
+        a = compute()
+        doSomething(a)
+    else -> fallback()
+
+// while
+while cond
+    body
+
+// while-do (inline)
+while i < 10 do i++
+
+// do-while
+do
+    body
+while cond
+
+// for (C-style)
+for i = 0; i < 10; i++
+    body
+
+// for-do (inline)
+for i = 0; i < 10; i++ do sum += i
+
+// for-in range (inclusive — includes upper bound)
+for i in 1..5
+    body                       // i takes 1, 2, 3, 4, 5
+
+// for-in range (exclusive — excludes upper bound)
+for i in 0..<5
+    body                       // i takes 0, 1, 2, 3, 4
+
+// for-in with do inline
+for i in 0..<n do print(i)
+
+// for-in counting down (inclusive of both bounds)
+for i in 10 downTo 0
+    body                       // i takes 10, 9, ..., 0
+
+// for-in with step
+for i in 0..100 step 5          // 0, 5, 10, ..., 100
+for i in 0..<30 step 3          // 0, 3, 6, ..., 27
+for i in 20 downTo 0 step 4     // 20, 16, 12, 8, 4, 0
+
+// Go-style iteration over arrays/slices
+for i, x in arr
+    body                       // i = index, x = arr[i]
+
+// `in` as range membership operator
+x in 1..4                       // true if 1 <= x <= 4 (inclusive)
+x in 1..<4                      // true if 1 <= x < 4  (exclusive)
+x !in 1..4                      // negated membership
+if score in 90..100 then grade = 'A'
+
+// break and continue
+while true
+    if done then break
+    if skip then continue
+    process()
+```
+
+### Destructuring and Parallel Assignment
+
+Tuples can be destructured with or without parentheses (Go/Python style):
+
+```sysl
+// Declaration (new variables)
+q, r = divmod(17, 5)           // Go-style, creates q and r as var
+(q, r) = divmod(17, 5)         // parenthesized form also works
+val q, r = divmod(17, 5)       // immutable
+var q, r = divmod(17, 5)       // explicit mutable
+
+// Parallel assignment (existing variables)
+a = 10
+b = 20
+a, b = b, a                    // swap: RHS fully evaluated before assignment
+
+// Works on named structs too (not just tuples)
+p = Point(10, 20)
+x, y = p                      // x = p.x, y = p.y (field order)
+
+// And ref structs
+r = new Point(3, 4)
+a, b = r                      // a = 3, b = 4
+
+// Mixed declared/undeclared is an error
+a = 10
+a, b = 20, 30                  // ERROR: a exists but b doesn't
+```
+
+Rules for `a, b = ...` without `val`/`var`:
+- All names new → declaration as `var`
+- All names exist as `var` → parallel assignment
+- Mixed → error
+
+### Return
+
+```sysl
+return              // void return
+return expr         // return single value
+return a, b         // return tuple (no parens needed)
+// or: last expression in block is implicit return
+```
+
+### Inline Assembly
+
+```sysl
+asm("halt")
+asm("trap 0")
+```
+
+---
+
+## Arrays, Slices, and Pointers
+
+### Fixed Arrays
+
+```sysl
+var arr: [5]int           // zero-initialized
+arr[0] = 42
+arr: [3]int = [10, 20, 30]  // array literal
+
+// Array decays to pointer when passed to *T parameter
+sum(arr: *int, n: int) -> int = ...
+sum(myArr, 5)             // myArr decays to *int
+```
+
+### Dynamic Arrays (Heap)
+
+```sysl
+a = new [5]int            // type: &[]int, ref-counted
+a[0] = 42
+len(a)                    // 5 (from heap header)
+cap(a)                    // 5
+// automatically freed when refcount reaches 0
+```
+
+### Slices (Sub-slicing)
+
+```sysl
+a = new [5]int
+s = a[1:4]                // type: []int, shares backing array
+s = a[:3]                 // s = a[0:3]
+s = a[2:]                 // s = a[2:len]
+s = a[:]                  // s = a[0:len]
+len(s)                    // hi - lo
+cap(s)                    // original_cap - lo
+```
+
+### Append
+
+```sysl
+s = a[:0]                 // empty slice with capacity
+s = append(s, 42)         // returns new slice value
+s = append(s, 99)         // Go semantics: may grow if len == cap
+```
+
+### Pointers
+
+```sysl
+x = 42
+p = &x                    // p: *int
+*p = 100                  // dereference and assign
+val y = *p                // dereference and read
+
+// Pointer arithmetic (scaled by element size)
+p = &arr[0]
+val second = *(p + 1)     // pointer + offset
+p++                       // advance by one element
+p += 3                    // advance by 3 elements
+p--                       // retreat by one element
+p -= 2                    // retreat by 2 elements
+
+// Array + offset decays to pointer
+q = arr + 2               // q: *int (not [n]int)
+```
+
+---
+
+## Structs
+
+```sysl
+struct Point
+    x: int
+    y: int
+
+// Value construction
+var p: Point              // zero-initialized
+p.x = 10
+p.y = 20
+
+// Constructor syntax
+p = Point(10, 20)
+
+// Heap-allocated (ref-counted)
+r = new Point(10, 20)    // type: &Point
+r.x = 30                 // access through ref
+
+// Pointer to struct
+ptr = &p                  // type: *Point
+ptr.x = 50               // auto-deref: (*ptr).x = 50
+```
+
+### Struct Return and Tuples
+
+```sysl
+makePoint(x: int, y: int) -> Point = Point(x, y)
+
+// Tuple return — parens optional in return and expression bodies
+divmod(a: int, b: int) -> (int, int) = a / b, a % b
+swap(a: int, b: int) -> (int, int)
+    return b, a
+
+// Destructure — parens optional
+q, r = divmod(17, 5)
+(q, r) = divmod(17, 5)         // also works
+```
+
+---
+
+## Strings
+
+Strings are fat pointers: `{ptr: *u8, len: i64}` with a ref-counted heap buffer.
+
+```sysl
+s = "hello"
+len(s)                    // 5
+s[0]                      // 104 ('h' as byte value)
+t = s + " world"          // concatenation → new string
+s == t                    // structural equality
+s != t                    // structural inequality
+
+// String decays to *u8 / *i8
+puts(s: *byte)            // can pass string directly
+```
+
+### String Interpolation
+
+Prefix a string with `s` to enable interpolation. Use `$name` for variables and `${expr}` for expressions:
+
+```sysl
+x = 42
+s = s"value is $x"          // "value is 42"
+puts(s"${x + 1}")           // prints "43"
+name = "world"
+puts(s"hello $name")        // prints "hello world"
+puts(s"cost is $$5")        // prints "cost is $5" ($$ = literal $)
+```
+
+Plain strings (`"..."`) are never interpolated — `$` is just a regular character.
+
+Non-string expressions are automatically converted via `str()`. Integer, boolean, and float (`f64`) types are supported.
+
+### `str()` Builtin
+
+Converts a value to its string representation:
+
+```sysl
+str(42)                   // "42"
+str(-5)                   // "-5"
+str(0)                    // "0"
+str("hello")              // "hello" (identity for strings)
+str(3.14)                 // "3.140000" (codegen: fixed 6-digit fractional)
+```
+
+Float formatting uses fixed 6-digit fractional precision in TRISC codegen
+(`3.14 -> "3.140000"`). The interpreter uses the host's default float
+formatting (`3.14 -> "3.14"`).
+
+### String Construction from Bytes
+
+```sysl
+// From pointer + length (copies the bytes)
+var buf: [5]byte
+buf[0] = 'h'
+buf[1] = 'e'
+buf[2] = 'l'
+buf[3] = 'l'
+buf[4] = 'o'
+s = string(&buf[0], 5)   // s = "hello"
+
+// From byte slice (copies the bytes)
+data = new [10]byte
+// ... fill data ...
+s = string(data[:5])      // string from []byte slice
+```
+
+---
+
+## Builtin Functions
+
+| Function | Signature | Description |
+|---|---|---|
+| `putchar` | `(c: u32) -> u32` | Output single character |
+| `print` | `(n: int)` | Print integer |
+| `println` | `(n: int)` | Print integer with newline |
+| `puts` | `(s: string)` | Print string |
+| `len` | `(x) -> int` | Length of string, array, slice, or `&[]T` |
+| `cap` | `(x) -> int` | Capacity of slice or `&[]T` |
+| `append` | `(s: []T, elem: T) -> []T` | Append to slice (Go semantics) |
+| `str` | `(x) -> string` | Convert int/bool to string representation |
+| `string` | `(ptr: *T, len: int) -> string` | Construct string from pointer + length |
+| `string` | `(s: []byte) -> string` | Construct string from byte slice |
+| `malloc` | `(size: i64) -> *i8` | Allocate heap memory |
+| `free` | `(ptr: *i8)` | Free heap memory |
+| `calloc` | `(count: i64, size: i64) -> *i8` | Allocate zeroed memory |
+| `realloc` | `(ptr: *i8, size: i64) -> *i8` | Resize allocation |
+| `sbrk` | `(increment: i32) -> *i8` | Extend heap (POSIX) |
+| `panic` | `(msg: string) -> void` | Halt with message (trap 1, error code 4) |
+| `assert` | `(cond: bool, msg: string) -> void` | Panic with `msg` if `cond` is false |
+| `abort` | `()` | Terminate execution (trap 1, error code 3) |
+
+User-defined functions shadow builtins of the same name.
+
+---
+
+## Type Compatibility and Coercion
+
+### Implicit Widening
+
+- Signed: `i8` -> `i16` -> `i32` -> `i64`
+- Unsigned: `u8` -> `u16` -> `u32` -> `u64`
+- Cross-sign: `u8` -> `i16` (unsigned fits in wider signed)
+- Int to float: any integer -> `f64`
+
+### Mixed Signed/Unsigned Rules
+
+Operations between signed and unsigned types are allowed when the unsigned value fits entirely within the signed type's range:
+
+```sysl
+var b: byte = 200       // u8
+var x: int = b + 1      // OK: u8 fits in i32
+if b == 0 then ...       // OK: u8 compared with i32 literal
+
+var big: u32 = 100
+var y: int = big + 1     // ERROR: u32 doesn't fit in i32
+```
+
+### Array/Pointer Decay
+
+- `[n]T` -> `*T` (array decays to pointer)
+- `string` -> `*u8` or `*i8`
+- `&T` -> `*U` (ref decays to raw pointer)
+- Any `*T` -> any `*U` (permissive pointer casting)
+
+### Explicit Casts Required
+
+- `bool` <-> `int`: use `int(flag)` or `bool(n)`
+- `int` <-> pointer: use `*i8(addr)` or `i64(ptr)`
+
+---
+
+## Runtime Safety
+
+The codegen emits `trap 1` for runtime errors. On the OS, the trap handler terminates the faulting thread and outputs `!N` where N is the error code. On bare metal, execution halts.
+
+| Error Code | Condition |
+|---|---|
+| 1 | Array/slice index out of bounds |
+| 2 | Null pointer (malloc returned null) |
+| 3 | `abort()` called |
+| 4 | `panic()` or `assert()` failure |
+
+---
+
+## Conditional Compilation
+
+```sysl
+#if DEBUG
+    var verbose = true
+#else
+    var verbose = false
+#endif
+
+#if !BARE_METAL
+    import posix.stdlib.*
+#endif
+
+#if TARGET == "trisc"
+    extern halt()
+#endif
+
+#if VERSION != "1.0"
+    import new_api.*
+#endif
+```
+
+**Condition forms:**
+- `#if SYMBOL` — true if the symbol is defined and not `"false"`, `"0"`, or `""`
+- `#if !SYMBOL` — negation
+- `#if SYMBOL == "value"` — string equality
+- `#if SYMBOL != "value"` — string inequality
+
+---
+
+## Attributes
+
+Attributes are annotations prefixed with `#` that attach to the following declaration. They appear on their own line(s) immediately before the declaration:
+
+```
+#test
+test_copy_basic() -> void
+    0
+
+#inline
+#deprecated("use foo2")
+foo() -> int = 1
+```
+
+**Forms:**
+- Flag: `#name`
+- With arguments: `#name(arg1, arg2, ...)` — arguments are literals (string, int, bool), bare identifiers, or `key: value` pairs
+
+Multiple attributes stack on separate preceding lines. Unknown attribute names are stored as-is (no error), so new attributes can be introduced incrementally.
+
+`#if` / `#else` / `#endif` (conditional compilation) use `#` but are not attributes — they work the same as before.
+
+### `#test` — unit tests
+
+Functions marked `#test` are unit tests. Requirements:
+- zero parameters,
+- returns `void` (or no return type),
+- not generic,
+- not a method.
+
+A test **passes** iff it does not panic. A panic (`panic("msg")`, `abort()`, or any runtime trap) fails the test.
+
+```
+#test
+test_trivial() -> void
+    assert(1 + 1 == 2, "math is broken")
+
+#test("descriptive name shown in output")
+test_with_display_name() -> void
+    0
+```
+
+**`should_panic`** — the test is expected to panic:
+
+```
+#test(should_panic)
+test_guard() -> void
+    panic("this must fire")
+
+#test(should_panic: "out of range")
+test_bounds() -> void
+    // substring match: panic message must contain "out of range"
+    panic("index 42 is out of range")
+```
+
+`#test` functions are **excluded from non-test builds** — `sysl compile` and `sysl run` strip them, so they don't contaminate normal execution and aren't emitted to `.asm` / `.tof` / `.ll` output.
+
+### `sysl test` — running tests
+
+```
+sysl test <path>                      # file or directory (recursive)
+sysl test --filter <pattern> <path>   # substring match on test/display name
+sysl test --backend interpreter|trisc|all <path>
+sysl test --fail-fast <path>
+sysl test --verbose <path>
+```
+
+Output groups tests by source file with pass/fail markers and timings:
+
+```
+running 6 tests
+std/mem/mem.lsysl
+  ✓ test_copy_basic              (0.2ms)
+  ✗ test_cmp_prefix              (0.1ms)
+      panic: expected -1, got 1
+  ✓ test_index_byte_found        (0.1ms)
+...
+5 passed, 1 failed, 0 skipped — 0.6ms
+```
+
+Exit code is 0 iff all tests pass. Failing tests print the source file and line of the `#test` attribute (`at file:line`).
+
+**Builtins useful in tests:**
+- `panic(msg: string) -> void` — halts with the given message. Primary failure signal inside tests.
+- `assert(cond: bool, msg: string) -> void` — panics with `msg` if `cond` is false; returns otherwise.
+
+### `#deprecated` — warn on use
+
+Marks a function as deprecated. Calls to the function emit a warning to stderr during analysis (once per callee per compilation):
+
+```
+#deprecated("use foo2 instead")
+foo() -> int = 1
+
+#deprecated
+old_api() -> int = 2
+```
+
+Warnings look like:
+```
+warning: 'foo' is deprecated: use foo2 instead
+warning: 'old_api' is deprecated
+```
+
+Calls still compile and run normally — `#deprecated` only reports usage.
+
+---
+
+## Calling Convention (TRISC ABI)
+
+| Register | Purpose |
+|---|---|
+| r0 | Zero register (hardwired to 0) |
+| r1 | First argument / return value |
+| r2-r3 | Scratch (caller-saved) |
+| r4 | Call address temp |
+| r5 | Frame pointer |
+| r6 | Link register (return address) |
+| r7 | Stack pointer |
+
+- At most one scalar argument in r1; additional arguments pushed right-to-left on the stack.
+- Struct/string return: caller allocates return slot, passes hidden pointer as first arg in r1.
+- String arguments: 16 bytes `{ptr, len}` pushed on stack.
+- `mul Rd, Rs1, Rs2` writes high bits to `r((d+1) & 7)` — never use `mul r4`/`r5`/`r6` as destination.
+
+---
+
+## Literate Sysl (`.lsysl` files)
+
+`.lsysl` files are **literate programming** sources — full Markdown documents that contain Sysl code as indented blocks. The compiler extracts (tangles) the code and discards the prose; the documentation toolchain renders (weaves) the prose with syntax-highlighted code.
+
+### Format
+
+- **Prose** starts at column 0 — it's standard Markdown.
+- **Code** is indented (4+ spaces or 1+ tabs) — extracted as Sysl source.
+- Fenced code blocks (triple backticks) in the prose are **not** extracted as code — they're documentation-only examples.
+
+```
+This is prose explaining the module.
+
+    module std.mem
+
+    copy(dst: []byte, src: []byte) -> int
+        // ... implementation ...
+
+More prose describing the next function.
+
+    set(dst: []byte, val: byte)
+        // ...
+```
+
+### Markdown Features
+
+The `.lsysl` renderer supports:
+
+- **Headings** (`#` through `######`)
+- **Paragraphs**, **bold** (`**text**`), **italic** (`*text*`)
+- **Inline code** (backtick-delimited)
+- **Fenced code blocks** with syntax highlighting (15+ languages including `sysl`, `python`, `javascript`, `rust`, `c`, `bash`, `json`, and more)
+- **Indented code blocks** (default to `sysl` highlighting)
+- **Unordered and ordered lists** (with nesting)
+- **Block quotes** (`>`)
+- **Tables** (GFM-style pipe tables)
+- **Horizontal rules** (`---`)
+- **Links** (`[text](url)`)
+- **HTML comments** (`<!-- -->`)
+- **LaTeX math** via KaTeX — inline `\(x^2\)` and display `\[equation\]`
+
+### Commands
+
+```
+sysl doc <file.lsysl>                   # render one file to HTML
+sysl doc <directory>                     # render all .lsysl in directory + index
+sysl doc --output <dir> <file.lsysl>    # specify output directory
+```
+
+### Tangling
+
+When compiling, the `.lsysl` parser extracts all indented blocks as Sysl source, concatenating them in order. The extracted code is then compiled identically to a `.sysl` file. Module declarations, imports, functions, and `#test` annotations all work inside `.lsysl` code blocks.

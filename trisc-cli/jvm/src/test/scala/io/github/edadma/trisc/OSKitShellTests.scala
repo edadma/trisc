@@ -13,7 +13,6 @@ class OSKitShellTests extends OSKitTestHelpers {
   private lazy val ttySysl: String    = readLsysl("oskit/drivers/tty/tty.lsysl")
   private lazy val tfsSysl: String    = readLsysl("oskit/fs/tfs.lsysl")
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
-  private lazy val stringSysl: String = readLsysl("oskit/lib/string.lsysl")
   private lazy val shSysl: String     = readLsysl("oskit/apps/sh.lsysl")
   private lazy val initSysl: String   = readLsysl("oskit/apps/init.lsysl")
 
@@ -32,7 +31,10 @@ class OSKitShellTests extends OSKitTestHelpers {
       "oskit/drivers/tty/tty"    -> ttySysl,
       "oskit/fs/tfs"             -> tfsSysl,
       "oskit/servers/tfs"        -> tfsSrvSysl,
-      "oskit/lib/string"         -> stringSysl,
+      "posix/unistd/sbrk"        -> sbrkSysl,
+      "posix/string/string"      -> posixStringSysl,
+      "posix/ctype/ctype"        -> posixCtypeSysl,
+      "posix/stdlib/alloc"       -> posixAllocSysl,
       "oskit/apps/sh"            -> shSysl,
       "oskit/apps/init"          -> initSysl,
       "app" ->

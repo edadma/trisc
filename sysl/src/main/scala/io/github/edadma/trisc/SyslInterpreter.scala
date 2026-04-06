@@ -37,6 +37,8 @@ enum Value:
   case SliceVal(cells: Array[Cell], offset: Int, length: Int, capacity: Int)
   case RefVal(cells: Array[Cell], refCount: java.util.concurrent.atomic.AtomicInteger, typeName: String = "")
   case RefSliceVal(cells: Array[Cell], length: Int, refCount: java.util.concurrent.atomic.AtomicInteger)
+  case EnumVal(tag: Int, fields: Array[Cell])
+  case RefEnumVal(tag: Int, fields: Array[Cell], refCount: java.util.concurrent.atomic.AtomicInteger)
   case RefStringVal(bytes: Array[Byte], length: Int, refCount: java.util.concurrent.atomic.AtomicInteger)
 
 class Cell(var value: Value)
@@ -52,6 +54,49 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private type Env = mutable.LinkedHashMap[String, Cell]
   private val deferStack = new mutable.ArrayBuffer[(TStmt, Env)]
 
+  private def matchPattern(pat: TMatchPattern, value: Value, env: Env): Boolean =
+    pat match
+      case TWildcard => true
+      case TValuePattern(expr) =>
+        val pv = evalAny(expr, env)
+        // String comparison must be structural (byte-for-byte), not pointer-based.
+        (pv, value) match
+          case (RefStringVal(lb, ll, _), RefStringVal(rb, rl, _)) =>
+            java.util.Arrays.equals(lb, 0, ll, rb, 0, rl)
+          case _ => toLong(pv) == toLong(value)
+      case TRangePattern(low, high) =>
+        val v = toLong(value)
+        v >= toLong(evalAny(low, env)) && v <= toLong(evalAny(high, env))
+      case TDestructurePattern(_, bindings, _) =>
+        true // struct destructure always matches (no value check, just binding)
+      case TVariantPattern(_, variantIndex, _, _) =>
+        value match
+          case EnumVal(tag, _) => tag == variantIndex
+          case RefEnumVal(tag, _, _) => tag == variantIndex
+          case _ => false
+
+  private def bindPattern(pat: TMatchPattern, value: Value, env: Env): Unit =
+    pat match
+      case TDestructurePattern(_, bindings, fieldTypes) =>
+        val (cells, off) = value match
+          case ArrVal(c, o) => (c, o)
+          case RefVal(c, _, _) => (c, 0)
+          case _ => return
+        for (binding, i) <- bindings.zipWithIndex do
+          binding.foreach { name =>
+            env(name) = new Cell(cells(off + i).value)
+          }
+      case TVariantPattern(_, _, bindings, _) =>
+        val fields = value match
+          case EnumVal(_, f) => f
+          case RefEnumVal(_, f, _) => f
+          case other => throw RuntimeError(s"cannot bind variant pattern on $other")
+        for (binding, i) <- bindings.zipWithIndex do
+          binding.foreach { name =>
+            env(name) = new Cell(fields(i).value)
+          }
+      case _ => // nothing to bind
+
   private def toLong(v: Value): Long = v match
     case IntVal(n)    => n
     case FloatVal(d)  => d.toLong
@@ -63,6 +108,18 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case FuncVal(_)         => throw RuntimeError("expected integer, got function")
     case StrVal(_)          => throw RuntimeError("expected integer, got string")
     case SliceVal(_, _, _, _) => throw RuntimeError("expected integer, got slice")
+    case EnumVal(_, _) => throw RuntimeError("expected integer, got enum value")
+    case RefEnumVal(_, _, _) => throw RuntimeError("expected integer, got ref enum value")
+
+  /** Truncate a Long result to the width of a narrow integer type. */
+  private def truncateNarrow(raw: Long, typ: SyslType): Long = typ match
+    case SyslType.UIntType(8)  => raw & 0xFFL
+    case SyslType.UIntType(16) => raw & 0xFFFFL
+    case SyslType.UIntType(32) => raw & 0xFFFFFFFFL
+    case SyslType.IntType(8)   => (raw << 56) >> 56
+    case SyslType.IntType(16)  => (raw << 48) >> 48
+    case SyslType.IntType(32)  => (raw << 32) >> 32
+    case _ => raw
 
   private def toDouble(v: Value): Double = v match
     case FloatVal(d)  => d
@@ -71,6 +128,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
   private val globals: Env = new mutable.LinkedHashMap
   private val functions = new mutable.LinkedHashMap[String, TFunDecl]
+  // Map struct name → deinit function name (handles module-mangled deinit names)
+  private val deinitMap = new mutable.HashMap[String, String]
 
   // Address table for pointer ↔ integer round-tripping
   private val ptrToAddr = new mutable.HashMap[Pointer, Long]
@@ -169,6 +228,22 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           PtrVal(ArrayPtr(heapCells, oldBreak))
     }),
     "abort" -> (_ => throw RuntimeError("abort")),
+    "panic" -> (args => {
+      val msg = args.headOption match
+        case Some(RefStringVal(bytes, len, _)) => new String(bytes, 0, len, "UTF-8")
+        case Some(StrVal(s)) => s
+        case _ => "panic"
+      throw RuntimeError(msg)
+    }),
+    "assert" -> (args => {
+      if toLong(args.head) == 0 then
+        val msg = args.lift(1) match
+          case Some(RefStringVal(bytes, len, _)) => new String(bytes, 0, len, "UTF-8")
+          case Some(StrVal(s)) => s
+          case _ => "assertion failed"
+        throw RuntimeError(msg)
+      IntVal(0)
+    }),
   )
 
   def registerBuiltins(extra: Map[String, List[Value] => Value]): Unit =
@@ -186,14 +261,49 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TExternVarDecl => // not handled in interpreter
         case _: TStructDecl => // type only, no runtime effect
         case _: TEnumDecl => // type only, no runtime effect
+        case _: TDataEnumDecl => // type only, no runtime effect
         case _: TTypeAliasDecl => // type only, no runtime effect
-        case f: TFunDecl => functions(f.name) = f
+        case f: TFunDecl =>
+          functions(f.name) = f
+          if f.name.endsWith("_deinit") then
+            val structName = f.name.indexOf("__") match
+              case -1 => f.name.dropRight(7)
+              case i  => f.name.substring(i + 2).dropRight(7)
+            deinitMap(structName) = f.name
         case TVarDecl(name, _, init, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
     functions.get("main") match
       case Some(main) => toLong(call(main, Nil))
       case None => throw RuntimeError("no main function")
+
+  /** Register all declarations without calling main. Used by the test runner. */
+  def load(program: TProgram): Unit =
+    for decl <- program.decls do
+      decl match
+        case _: TModuleDecl => // metadata only
+        case _: TImportDecl => // not handled in interpreter
+        case _: TExternFuncDecl => // not handled in interpreter
+        case _: TExternVarDecl => // not handled in interpreter
+        case _: TStructDecl => // type only
+        case _: TEnumDecl => // type only
+        case _: TDataEnumDecl => // type only
+        case _: TTypeAliasDecl => // type only
+        case f: TFunDecl =>
+          functions(f.name) = f
+          if f.name.endsWith("_deinit") then
+            val structName = f.name.indexOf("__") match
+              case -1 => f.name.dropRight(7)
+              case i  => f.name.substring(i + 2).dropRight(7)
+            deinitMap(structName) = f.name
+        case TVarDecl(name, _, init, _) =>
+          globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
+
+  /** Invoke a zero-arg function by name. Throws RuntimeError on panic. */
+  def runNamed(name: String): Long =
+    functions.get(name) match
+      case Some(fn) => toLong(call(fn, Nil))
+      case None => throw RuntimeError(s"no function named '$name'")
 
   private def runDefers(savedDefers: mutable.ArrayBuffer[(TStmt, Env)]): Unit =
     for (stmt, env) <- savedDefers.reverseIterator do
@@ -253,6 +363,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
   private def refIncr(v: Value): Unit = v match
     case RefVal(_, rc, _) => if rc.get() != IMMORTAL_RC then rc.incrementAndGet()
+    case RefEnumVal(_, _, rc) => if rc.get() != IMMORTAL_RC then rc.incrementAndGet()
     case RefSliceVal(_, _, rc) => if rc.get() != IMMORTAL_RC then rc.incrementAndGet()
     case RefStringVal(_, _, rc) => if rc.get() != IMMORTAL_RC then rc.incrementAndGet()
     case _ =>
@@ -264,10 +375,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       if count == 0 then
         rc.set(IMMORTAL_RC) // prevent re-entrant deinit from releaseRefs
         if typeName.nonEmpty then
-          val deinitName = s"${typeName}_deinit"
+          val deinitName = deinitMap.getOrElse(typeName, s"${typeName}_deinit")
           functions.get(deinitName).foreach { fun =>
             call(fun, List(v))
           }
+    case RefEnumVal(_, _, rc) =>
+      if rc.get() != IMMORTAL_RC then
+        if rc.decrementAndGet() <= 0 then ()
     case RefSliceVal(_, _, rc) =>
       if rc.get() != IMMORTAL_RC then
         if rc.decrementAndGet() <= 0 then ()
@@ -310,9 +424,22 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         env(name) = new Cell(v)
 
       case TDestructureStmt(names, _, init) =>
-        val ArrVal(cells, off) = evalAny(init, env): @unchecked
-        for (name, i) <- names.zipWithIndex do
+        val (cells, off) = evalAny(init, env) match
+          case ArrVal(c, o) => (c, o)
+          case RefVal(c, _, _) => (c, 0)
+          case other => throw RuntimeError(s"cannot destructure $other")
+        for (name, i) <- names.zipWithIndex if name != "_" do
           env(name) = new Cell(cells(off + i).value)
+
+      case TDestructureAssignStmt(names, _, init) =>
+        // Parallel assignment: evaluate RHS fully, then assign all values
+        val (cells, off) = evalAny(init, env) match
+          case ArrVal(c, o) => (c, o)
+          case RefVal(c, _, _) => (c, 0)
+          case other => throw RuntimeError(s"cannot destructure $other")
+        val values = names.indices.map(i => cells(off + i).value)
+        for (name, v) <- names.zip(values) if name != "_" do
+          lookupCell(name, env).value = v
 
       case TAssignStmt(target, value) =>
         val v = evalAny(value, env)
@@ -343,10 +470,22 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case "%"  => l % r
               case _    => throw RuntimeError(s"unsupported float compound operator: $op")
             )
+          case (PtrVal(ptr), _) =>
+            val n = toLong(rv).toInt
+            cell.value = op match
+              case "+" => PtrVal(ptr.add(n))
+              case "-" => PtrVal(ptr.sub(n))
+              case _ => throw RuntimeError(s"unsupported pointer compound operator: $op")
+          case (ArrVal(cells, off), _) =>
+            val n = toLong(rv).toInt
+            cell.value = op match
+              case "+" => ArrVal(cells, off + n)
+              case "-" => ArrVal(cells, off - n)
+              case _ => throw RuntimeError(s"unsupported pointer compound operator: $op")
           case _ =>
             val l = toLong(cell.value)
             val r = toLong(rv)
-            cell.value = IntVal(op match
+            val raw = op match
               case "+"  => l + r
               case "-"  => l - r
               case "*"  => l * r
@@ -357,7 +496,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case "^"  => l ^ r
               case "<<" => l << r.toInt
               case ">>" => l >> r.toInt
-            )
+            cell.value = IntVal(truncateNarrow(raw, value.typ))
 
       case TDerefAssignStmt(pointer, value) =>
         val cell = derefCell(evalAny(pointer, env))
@@ -378,7 +517,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val cell = cells(off + fieldIndex)
         val l = toLong(cell.value)
         val r = toLong(evalAny(value, env))
-        cell.value = IntVal(op match
+        val raw = op match
           case "+"  => l + r
           case "-"  => l - r
           case "*"  => l * r
@@ -389,7 +528,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case "^"  => l ^ r
           case "<<" => l << r.toInt
           case ">>" => l >> r.toInt
-        )
+        cell.value = IntVal(truncateNarrow(raw, value.typ))
 
       case TReturnStmt(value) =>
         throw ReturnException(value.map(evalAny(_, env)).getOrElse(IntVal(0)))
@@ -505,7 +644,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             cell.value = nv
             nv
           case _ =>
-            val v = toLong(cell.value) + 1
+            val v = truncateNarrow(toLong(cell.value) + 1, typ)
             cell.value = IntVal(v)
             IntVal(v)
 
@@ -521,7 +660,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             cell.value = nv
             nv
           case _ =>
-            val v = toLong(cell.value) - 1
+            val v = truncateNarrow(toLong(cell.value) - 1, typ)
             cell.value = IntVal(v)
             IntVal(v)
 
@@ -536,7 +675,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             old
           case _ =>
             val old = toLong(cell.value)
-            cell.value = IntVal(old + 1)
+            cell.value = IntVal(truncateNarrow(old + 1, typ))
             IntVal(old)
 
       case TPostDec(name, typ) =>
@@ -550,12 +689,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             old
           case _ =>
             val old = toLong(cell.value)
-            cell.value = IntVal(old - 1)
+            cell.value = IntVal(truncateNarrow(old - 1, typ))
             IntVal(old)
 
       case TDeref(inner, _) =>
         evalAny(inner, env) match
-          case RefVal(cells, _, _) => ArrVal(cells, 0)  // deref &T → expose struct fields
+          case RefVal(cells, _, _) => ArrVal(cells, 0)  // deref &Struct → expose struct fields
+          case RefEnumVal(tag, fields, _) => EnumVal(tag, fields) // deref &Enum → value enum
           case other => derefCell(other).value
 
       case TIndex(arr, index, _) =>
@@ -612,6 +752,39 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           newCells(sliceVal.length).value = newElem
           SliceVal(newCells, 0, sliceVal.length + 1, newCap)
 
+      case TStr(inner) =>
+        val v = evalAny(inner, env)
+        val s = v match
+          case IntVal(n) => n.toString
+          case FloatVal(d) => d.toString
+          case _ => throw RuntimeError(s"str(): unsupported value $v")
+        val bytes = s.getBytes("UTF-8")
+        RefStringVal(bytes, bytes.length, new java.util.concurrent.atomic.AtomicInteger(1))
+
+      case TStringFromPtr(ptrExpr, lenExpr, _) =>
+        val ptr = evalAny(ptrExpr, env)
+        val len = toLong(evalAny(lenExpr, env)).toInt
+        val bytes = new Array[Byte](len)
+        ptr match
+          case PtrVal(p) =>
+            for i <- 0 until len do
+              bytes(i) = toLong(p.add(i).deref.value).toByte
+          case ArrVal(cells, off) =>
+            for i <- 0 until len do
+              bytes(i) = toLong(cells(off + i).value).toByte
+          case _ => throw RuntimeError(s"string(): expected pointer, got $ptr")
+        RefStringVal(bytes, len, new java.util.concurrent.atomic.AtomicInteger(IMMORTAL_RC))
+
+      case TStringFromSlice(sliceExpr, _) =>
+        val (cells, off, slen) = evalAny(sliceExpr, env) match
+          case SliceVal(c, o, l, _) => (c, o, l)
+          case RefSliceVal(c, l, _) => (c, 0, l)
+          case other => throw RuntimeError(s"string() requires a slice, got $other")
+        val bytes = new Array[Byte](slen)
+        for i <- 0 until slen do
+          bytes(i) = toLong(cells(off + i).value).toByte
+        RefStringVal(bytes, slen, new java.util.concurrent.atomic.AtomicInteger(IMMORTAL_RC))
+
       case TIfExpr(cond, thenBody, elseBody, _) =>
         if toLong(evalAny(cond, env)) != 0 then
           evalBlock(thenBody, env)
@@ -620,7 +793,24 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             case Some(stmts) => evalBlock(stmts, env)
             case None => IntVal(0)
 
-      case TBinary(left, op, right, _) =>
+      case TMatchExpr(scrutinee, arms, default, _) =>
+        val sv = evalAny(scrutinee, env)
+        val matched = arms.find { arm =>
+          val patternMatches = arm.patterns.exists(p => matchPattern(p, sv, env))
+          if patternMatches then
+            // Bind destructure patterns before checking guard
+            arm.patterns.find(p => matchPattern(p, sv, env)).foreach(p => bindPattern(p, sv, env))
+            arm.guard.forall(g => toLong(evalAny(g, env)) != 0)
+          else false
+        }
+        matched match
+          case Some(arm) => evalBlock(arm.body, env)
+          case None =>
+            default match
+              case Some(stmts) => evalBlock(stmts, env)
+              case None => IntVal(0)
+
+      case TBinary(left, op, right, resultType) =>
         val lv = evalAny(left, env)
         (lv, op) match
           case (PtrVal(ptr), "+") =>
@@ -685,7 +875,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val l = toLong(lv)
         val r = toLong(rv)
         val unsigned = left.typ.isUnsigned
-        IntVal(op match
+        val raw = op match
           case "+"  => l + r
           case "-"  => l - r
           case "*"  => l * r
@@ -709,9 +899,9 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case "<<" => l << r.toInt
           case ">>" => if unsigned then l >>> r.toInt else l >> r.toInt
           case _    => throw RuntimeError(s"unknown operator: $op")
-        )
+        IntVal(truncateNarrow(raw, resultType))
 
-      case TUnary(op, operand, _) =>
+      case TUnary(op, operand, resultType) =>
         val v = evalAny(operand, env)
         v match
           case FloatVal(d) =>
@@ -720,12 +910,12 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case _   => throw RuntimeError(s"unsupported float unary operator: $op")
           case _ =>
             val n = toLong(v)
-            IntVal(op match
+            val raw = op match
               case "-" => -n
               case "!" => if n == 0 then 1L else 0L
               case "~" => ~n
               case _   => throw RuntimeError(s"unknown unary operator: $op")
-            )
+            IntVal(truncateNarrow(raw, resultType))
 
       case TCast(inner, target) =>
         val v = evalAny(inner, env)
@@ -750,6 +940,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case IntVal(n) => PtrVal(longToPointer(n))  // integer to pointer
               case _ => v
           case _ => v
+
+      case TAsmExpr(_, _) => IntVal(0) // no-op in interpreter
 
       case TSizeof(size, _) => IntVal(size)
 
@@ -812,6 +1004,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         }.toArray
         RefVal(cells, new java.util.concurrent.atomic.AtomicInteger(1), name)
 
+      case TNewEnum(_, variantIndex, args) =>
+        val cells = args.map(arg => new Cell(evalAny(arg, env))).toArray
+        RefEnumVal(variantIndex, cells, new java.util.concurrent.atomic.AtomicInteger(1))
+
       case TNewArray(elemType, sizeExpr) =>
         val n = toLong(evalAny(sizeExpr, env)).toInt
         val cells = Array.fill(n)(new Cell(IntVal(0)))
@@ -823,6 +1019,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           new Cell(value)
         }.toArray
         ArrVal(cells, 0)
+
+      case TEnumConstruct(_, variantIndex, args) =>
+        val cells = args.map(arg => new Cell(evalAny(arg, env))).toArray
+        EnumVal(variantIndex, cells)
 
       case TFieldAccess(obj, fieldIndex, _) =>
         val ArrVal(cells, off) = evalAny(obj, env): @unchecked

@@ -1,0 +1,178 @@
+std.regex — Regular expression engine
+======================================
+
+A POSIX-conformant regular expression engine for Sysl,
+implemented as a Pike VM (an extension of Thompson's NFA
+construction that tracks capture group positions). The Pike
+VM guarantees $O(n \cdot m)$ time complexity where $n$ is
+the input length and $m$ is the pattern size — no
+exponential backtracking.
+
+The engine supports the full POSIX regex grammar:
+
+- **Alternation** — `a|b`
+- **Grouping and captures** — `(` and `)`
+- **Quantifiers** — `*`, `+`, `?`, `{n}`, `{n,m}`, `{n,}`
+- **Character classes** — `[abc]`, `[a-z]`, `[^...]`
+- **POSIX named classes** — `[[:alpha:]]`, `[[:digit:]]`,
+  `[[:alnum:]]`, `[[:upper:]]`, `[[:lower:]]`,
+  `[[:space:]]`, `[[:blank:]]`, `[[:print:]]`,
+  `[[:graph:]]`, `[[:cntrl:]]`, `[[:punct:]]`,
+  `[[:xdigit:]]`
+- **Anchors** — `^` and `$`
+- **Dot** — `.` matches any character
+- **Escaping** — `\` for literal special characters
+- **POSIX leftmost-longest** match semantics
+
+A separate BRE parser (`parse_bre`) is available for tools
+like `expr` and `sed` that require BRE escaping conventions.
+
+Architecture:
+
+```
+pattern string ──→ [Parser] ──→ AST ──→ [Compiler] ──→ VM bytecode ──→ [VM] ──→ match result
+                                 │                        │
+                           flat array of              flat array of
+                           Node structs               Inst structs
+```
+
+The AST and VM instructions are stored in flat arrays with
+integer indices for child references, avoiding the need for
+recursive types or pointer-based trees.
+
+
+Module declaration and imports
+------------------------------
+
+    module std.regex
+
+
+Public types
+------------
+
+A compiled regular expression is an opaque handle containing
+the VM bytecode and metadata.
+
+    struct Regex
+        insts: []Inst
+        n_groups: int
+
+A successful match returns capture group positions. Each
+group has a start and end index into the input string.
+Group 0 is always the full match.
+
+    struct Match
+        starts: []int
+        ends: []int
+        n_groups: int
+
+    Match.group(i: int) -> (int, int)
+        (self.starts[i], self.ends[i])
+
+    Match.matched() -> bool = self.starts[0] >= 0
+
+
+AST node representation
+-----------------------
+
+Since Sysl does not yet support recursive types, the AST is
+a flat array of `Node` structs. Each node references its
+children by index into the array. An index of `-1` means
+"no child."
+
+The `kind` field selects the node type. We use integer
+constants rather than an enum so the struct stays simple and
+flat.
+
+    /* Node kind constants */
+    val NK_LITERAL = 0      /* single character */
+    val NK_DOT = 1          /* . (any character) */
+    val NK_ANCHOR_START = 2 /* ^ */
+    val NK_ANCHOR_END = 3   /* $ */
+    val NK_CLASS = 4        /* [...] character class */
+    val NK_STAR = 5         /* * (zero or more of left) */
+    val NK_CAPTURE = 6      /* \(...\) group; extra = group number */
+    val NK_SEQ = 7          /* concatenation: left then right */
+    val NK_QUEST = 8        /* ? (zero or one of left) */
+    val NK_PLUS = 9         /* + (one or more of left) */
+    val NK_ALT = 10         /* | alternation: left or right */
+
+    struct Node
+        kind: int
+        ch: int             /* character for NK_LITERAL */
+        left: int           /* child index, or -1 */
+        right: int          /* child index (for NK_SEQ), or -1 */
+        extra: int          /* group number (NK_CAPTURE), class id (NK_CLASS) */
+
+Character classes are stored separately — a class is a list
+of ranges. Each range is a `(low, high)` pair inclusive.
+The class struct also tracks negation (`[^...]`).
+
+    struct CharRange
+        lo: int
+        hi: int
+
+    struct CharClass
+        ranges: []CharRange
+        negated: bool
+
+
+VM instruction set
+------------------
+
+The Pike VM executes a linear array of instructions. Each
+instruction is one struct with an opcode and up to two
+operands. The instruction set is minimal — just enough to
+implement all regex constructs.
+
+    /* Instruction opcodes */
+    val OP_CHAR = 0         /* match literal character (arg1 = char) */
+    val OP_ANY = 1          /* match any character (.) */
+    val OP_MATCH = 2        /* successful match — stop */
+    val OP_JUMP = 3         /* unconditional jump (arg1 = target pc) */
+    val OP_SPLIT = 4        /* fork: try arg1, queue arg2 */
+    val OP_SAVE = 5         /* save position into capture slot arg1 */
+    val OP_ANCHOR_START = 6 /* assert at start of string */
+    val OP_ANCHOR_END = 7   /* assert at end of string */
+    val OP_CLASS = 8        /* match character class (arg1 = class index) */
+
+    struct Inst
+        op: int
+        arg1: int
+        arg2: int
+
+The `SPLIT` instruction is the heart of the NFA simulation.
+It represents a branch point: the VM adds *both* targets to
+its work list, preferring `arg1` (the "greedy" path). For
+POSIX leftmost-longest semantics, the VM tries all paths
+and keeps the longest match.
+
+
+Error type
+----------
+
+Parse errors carry the position in the pattern and a
+description.
+
+    struct RegexError
+        pos: int
+        msg: string
+
+
+Public API
+----------
+
+The primary entry points:
+
+- `parse_regex(pattern)` — parse a pattern into AST
+- `compile(root, nodes, n_groups)` — compile AST to bytecode
+- `exec(insts, classes, input, n_groups)` — execute VM
+- `match_regex(pattern, input)` — convenience: all-in-one
+
+For BRE compatibility (used by `expr`, `sed`):
+
+- `parse_bre(pattern)` — parse using BRE escaping rules
+- `match_bre(pattern, input)` — convenience BRE wrapper
+
+> **Note:** The function bodies are in the `parser`, `compiler`,
+> and `vm` submodules. They are in the same `std.regex` module.

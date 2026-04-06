@@ -1,0 +1,912 @@
+std.strings — Text operations on string values
+================================================
+
+The `std.strings` module provides byte-oriented operations on
+`string` values: searching, trimming, case conversion,
+replacement, and simple transformations. It is the text-layer
+counterpart to `std.bytes` (which provides the same API surface
+over `[]byte`).
+
+All operations treat strings as sequences of bytes, not runes.
+`contains`, `index`, `count` etc. find byte substrings. Case
+conversion (`to_upper`, `to_lower`) and whitespace detection
+(`trim_space`) handle ASCII only; Unicode-aware variants will
+live in a future `std.unicode` module.
+
+Every function that produces a `string` allocates a fresh
+buffer. Sysl strings are immutable; there is no zero-copy
+substring view today. Operations that don't change the string
+(like `contains`) don't allocate.
+
+Dependencies: `std.builder` (for assembling result strings).
+
+
+    module std.strings
+
+    import std.builder.*
+
+
+Searching
+---------
+
+### has_prefix
+
+`has_prefix(s, prefix)` returns `true` iff `s` begins with
+`prefix`. The empty string is a prefix of every string.
+
+    has_prefix(s: string, prefix: string) -> bool
+        val n = len(s)
+        val m = len(prefix)
+
+        if m > n then return false
+
+        var i = 0
+
+        while i < m
+            if s[i] != prefix[i] then return false
+            i++
+
+        true
+
+
+### has_suffix
+
+`has_suffix(s, suffix)` returns `true` iff `s` ends with
+`suffix`.
+
+    has_suffix(s: string, suffix: string) -> bool
+        val n = len(s)
+        val m = len(suffix)
+
+        if m > n then return false
+
+        var i = 0
+
+        while i < m
+            if s[n - m + i] != suffix[i] then return false
+            i++
+
+        true
+
+
+### index
+
+`index(s, sub)` returns the byte offset of the first
+occurrence of `sub` in `s`, or `-1` if not found. The empty
+substring is found at position 0.
+
+This is a naive O(n*m) search. A Boyer-Moore or similar
+sub-linear search may replace it later; the observable
+behavior is unchanged.
+
+    index(s: string, sub: string) -> int
+        val n = len(s)
+        val m = len(sub)
+
+        if m == 0 then return 0
+        if m > n then return -1
+
+        val last = n - m
+        var i = 0
+
+        while i <= last
+            var j = 0
+            var matched = true
+
+            while j < m
+                if s[i + j] != sub[j]
+                    matched = false
+                    break
+                j++
+
+            if matched then return i
+
+            i++
+
+        -1
+
+
+### last_index
+
+`last_index(s, sub)` returns the byte offset of the last
+occurrence of `sub` in `s`, or `-1` if not found. The empty
+substring matches at position `len(s)`.
+
+    last_index(s: string, sub: string) -> int
+        val n = len(s)
+        val m = len(sub)
+
+        if m == 0 then return n
+        if m > n then return -1
+
+        var i = n - m
+
+        while i >= 0
+            var j = 0
+            var matched = true
+
+            while j < m
+                if s[i + j] != sub[j]
+                    matched = false
+                    break
+                j++
+
+            if matched then return i
+
+            i--
+
+        -1
+
+
+### contains
+
+`contains(s, sub)` returns `true` iff `sub` appears in `s`.
+
+    contains(s: string, sub: string) -> bool = index(s, sub) >= 0
+
+
+### count
+
+`count(s, sub)` returns the number of non-overlapping
+occurrences of `sub` in `s`. When `sub` is empty, returns
+`len(s) + 1` (matching Go's behavior: one match at each
+byte boundary, including the ends).
+
+    count(s: string, sub: string) -> int
+        val m = len(sub)
+
+        if m == 0 then return len(s) + 1
+
+        var i = 0
+        var n = 0
+        val last = len(s) - m
+
+        while i <= last
+            var j = 0
+            var matched = true
+
+            while j < m
+                if s[i + j] != sub[j]
+                    matched = false
+                    break
+                j++
+
+            if matched
+                n++
+                i += m
+            else
+                i++
+
+        n
+
+
+### index_byte / last_index_byte
+
+Byte-level search. Faster than the string-sub variants when
+looking for a single character.
+
+    index_byte(s: string, b: byte) -> int
+        val n = len(s)
+        var i = 0
+
+        while i < n
+            if s[i] == b then return i
+            i++
+
+        -1
+
+    last_index_byte(s: string, b: byte) -> int
+        var i = len(s) - 1
+
+        while i >= 0
+            if s[i] == b then return i
+            i--
+
+        -1
+
+
+Substring extraction
+--------------------
+
+### substring
+
+`substring(s, lo, hi)` returns `s[lo..hi]` as a new string.
+Callers must ensure `0 <= lo <= hi <= len(s)`; out-of-range
+indices are a bug.
+
+    substring(s: string, lo: int, hi: int) -> string
+        var b = new_builder_cap(hi - lo)
+        var i = lo
+
+        while i < hi
+            b.write_byte(s[i])
+            i++
+
+        b.to_str()
+
+
+Trimming
+--------
+
+Helper for ASCII whitespace detection — space, tab, newline,
+carriage return, vertical tab, form feed.
+
+    is_ascii_space(b: byte) -> bool
+        b == byte(' ') || b == byte('\t') || b == byte('\n') || b == byte('\r') || b == 0x0Bu8 || b == 0x0Cu8
+
+
+### trim_space
+
+`trim_space(s)` removes leading and trailing ASCII whitespace.
+
+    trim_space(s: string) -> string
+        val n = len(s)
+        var lo = 0
+        var hi = n
+
+        while lo < hi && is_ascii_space(s[lo]) do lo++
+        while hi > lo && is_ascii_space(s[hi - 1]) do hi--
+
+        substring(s, lo, hi)
+
+
+Helper: is the byte `b` present anywhere in `cutset`.
+
+    in_cutset(b: byte, cutset: string) -> bool
+        val n = len(cutset)
+        var i = 0
+
+        while i < n
+            if cutset[i] == b then return true
+            i++
+
+        false
+
+
+### trim_left / trim_right / trim
+
+`trim_left(s, cutset)` removes leading bytes that appear in
+`cutset`. `trim_right` trims from the end. `trim` trims both.
+
+    trim_left(s: string, cutset: string) -> string
+        val n = len(s)
+        var lo = 0
+
+        while lo < n && in_cutset(s[lo], cutset) do lo++
+
+        substring(s, lo, n)
+
+    trim_right(s: string, cutset: string) -> string
+        val n = len(s)
+        var hi = n
+
+        while hi > 0 && in_cutset(s[hi - 1], cutset) do hi--
+
+        substring(s, 0, hi)
+
+    trim(s: string, cutset: string) -> string
+        val n = len(s)
+        var lo = 0
+        var hi = n
+
+        while lo < hi && in_cutset(s[lo], cutset) do lo++
+        while hi > lo && in_cutset(s[hi - 1], cutset) do hi--
+
+        substring(s, lo, hi)
+
+
+Case conversion (ASCII)
+-----------------------
+
+`to_upper(s)` maps ASCII lowercase letters to uppercase and
+leaves everything else untouched. `to_lower(s)` is symmetric.
+Non-ASCII bytes pass through unchanged.
+
+    to_upper(s: string) -> string
+        val n = len(s)
+        var b = new_builder_cap(n)
+        var i = 0
+
+        while i < n
+            val c = s[i]
+
+            if c >= byte('a') && c <= byte('z') then b.write_byte(c - 0x20u8)
+            else b.write_byte(c)
+
+            i++
+
+        b.to_str()
+
+    to_lower(s: string) -> string
+        val n = len(s)
+        var b = new_builder_cap(n)
+        var i = 0
+
+        while i < n
+            val c = s[i]
+
+            if c >= byte('A') && c <= byte('Z') then b.write_byte(c + 0x20u8)
+            else b.write_byte(c)
+
+            i++
+
+        b.to_str()
+
+
+Replacement
+-----------
+
+### replace_all
+
+`replace_all(s, old, repl)` returns a copy of `s` with every
+non-overlapping occurrence of `old` replaced by `new`. When
+`old` is empty, `new` is inserted between every byte of `s`
+and at both ends, matching Go's behavior.
+
+    replace_all(s: string, old: string, repl: string) -> string
+        val n = len(s)
+        val m = len(old)
+        var b = new_builder_cap(n)
+
+        if m == 0
+            // insert 'repl' between every byte and at both ends
+            b.write(repl)
+
+            var i = 0
+
+            while i < n
+                b.write_byte(s[i])
+                b.write(repl)
+                i++
+
+            return b.to_str()
+
+        var i = 0
+        val last = n - m
+
+        while i <= last
+            var j = 0
+            var matched = true
+
+            while j < m
+                if s[i + j] != old[j]
+                    matched = false
+                    break
+                j++
+
+            if matched
+                b.write(repl)
+                i += m
+            else
+                b.write_byte(s[i])
+                i++
+
+        // emit any remaining bytes that couldn't start a match
+        while i < n
+            b.write_byte(s[i])
+            i++
+
+        b.to_str()
+
+
+### repeat
+
+`repeat(s, n)` returns `s` concatenated with itself `n`
+times. `repeat(s, 0)` returns `""`.
+
+    repeat(s: string, n: int) -> string
+        if n <= 0 then return ""
+
+        val slen = len(s)
+        var b = new_builder_cap(slen * n)
+        var i = 0
+
+        while i < n
+            b.write(s)
+            i++
+
+        b.to_str()
+
+
+Split and join
+--------------
+
+### split
+
+`split(s, sep)` splits `s` by `sep` and returns a slice of
+the parts. If `sep` is empty, splits into individual bytes
+as single-character strings. Adjacent separators produce
+empty strings in the result.
+
+    split(s: string, sep: string) -> []string
+        val m = len(sep)
+
+        if m == 0
+            // split into single-byte strings
+            val n = len(s)
+            val parts = new [n]string
+
+            var i = 0
+
+            while i < n
+                parts[i] = substring(s, i, i + 1)
+                i++
+
+            return parts[:]
+
+        val n = count(s, sep) + 1
+        val parts = new [n]string
+        var start = 0
+        var pi = 0
+        val slen = len(s)
+        val last = slen - m
+
+        var i = 0
+
+        while i <= last
+            var j = 0
+            var matched = true
+
+            while j < m
+                if s[i + j] != sep[j]
+                    matched = false
+                    break
+                j++
+
+            if matched
+                parts[pi] = substring(s, start, i)
+                pi++
+                i += m
+                start = i
+            else
+                i++
+
+        parts[pi] = substring(s, start, slen)
+        parts[:]
+
+
+### join
+
+`join(parts, sep)` concatenates the strings in `parts` with
+`sep` between each pair. `join` of an empty slice returns `""`.
+
+    join(parts: []string, sep: string) -> string
+        val n = len(parts)
+
+        if n == 0 then return ""
+        if n == 1 then return parts[0]
+
+        var b = new_builder()
+        var i = 0
+
+        while i < n
+            if i > 0 then b.write(sep)
+
+            b.write(parts[i])
+            i++
+
+        b.to_str()
+
+
+### fields
+
+`fields(s)` splits `s` on runs of ASCII whitespace. Leading
+and trailing whitespace is ignored. Multiple consecutive
+whitespace characters are treated as a single separator.
+
+    fields(s: string) -> []string
+        val slen = len(s)
+
+        // Count fields first
+        var nf = 0
+        var in_word = false
+        var i = 0
+
+        while i < slen
+            if is_ascii_space(s[i])
+                in_word = false
+            else
+                if !in_word
+                    nf++
+                    in_word = true
+            i++
+
+        val parts = new [nf]string
+        var pi = 0
+        var start = 0
+        in_word = false
+        i = 0
+
+        while i < slen
+            if is_ascii_space(s[i])
+                if in_word
+                    parts[pi] = substring(s, start, i)
+                    pi++
+                    in_word = false
+            else
+                if !in_word
+                    start = i
+                    in_word = true
+            i++
+
+        if in_word
+            parts[pi] = substring(s, start, slen)
+
+        parts[:]
+
+
+Tests
+=====
+
+### has_prefix / has_suffix
+
+    #test
+    test_has_prefix_empty() -> void
+        assert(has_prefix("hello", ""), "empty prefix always matches")
+
+    #test
+    test_has_prefix_full() -> void
+        assert(has_prefix("hello", "hello"), "full match")
+
+    #test
+    test_has_prefix_partial() -> void
+        assert(has_prefix("hello world", "hello"), "partial")
+
+    #test
+    test_has_prefix_no_match() -> void
+        assert(!has_prefix("hello", "world"), "no match")
+
+    #test
+    test_has_prefix_too_long() -> void
+        assert(!has_prefix("hi", "hello"), "prefix longer than string")
+
+    #test
+    test_has_suffix_empty() -> void
+        assert(has_suffix("hello", ""), "empty suffix always matches")
+
+    #test
+    test_has_suffix_full() -> void
+        assert(has_suffix("hello", "hello"), "full match")
+
+    #test
+    test_has_suffix_partial() -> void
+        assert(has_suffix("hello world", "world"), "trailing")
+
+    #test
+    test_has_suffix_no_match() -> void
+        assert(!has_suffix("hello", "world"), "no match")
+
+
+### index / last_index / contains
+
+    #test
+    test_index_empty_sub() -> void
+        assert(index("abc", "") == 0, "empty at 0")
+
+    #test
+    test_index_found_at_start() -> void
+        assert(index("hello world", "hello") == 0, "at start")
+
+    #test
+    test_index_found_middle() -> void
+        assert(index("hello world", "lo w") == 3, "middle")
+
+    #test
+    test_index_found_end() -> void
+        assert(index("hello world", "world") == 6, "at end")
+
+    #test
+    test_index_not_found() -> void
+        assert(index("hello", "xyz") == -1, "not found")
+
+    #test
+    test_index_sub_longer() -> void
+        assert(index("hi", "hello") == -1, "sub longer than s")
+
+    #test
+    test_last_index_empty_sub() -> void
+        assert(last_index("abc", "") == 3, "empty at len")
+
+    #test
+    test_last_index_repeated() -> void
+        assert(last_index("banana", "an") == 3, "last 'an' in banana")
+
+    #test
+    test_last_index_not_found() -> void
+        assert(last_index("banana", "xyz") == -1, "not found")
+
+    #test
+    test_contains_yes() -> void
+        assert(contains("hello world", "world"), "found")
+
+    #test
+    test_contains_no() -> void
+        assert(!contains("hello", "xyz"), "not found")
+
+
+### count
+
+    #test
+    test_count_basic() -> void
+        assert(count("banana", "an") == 2, "non-overlapping")
+
+    #test
+    test_count_all_overlap_avoided() -> void
+        assert(count("aaaa", "aa") == 2, "non-overlapping counts 2, not 3")
+
+    #test
+    test_count_not_found() -> void
+        assert(count("banana", "xyz") == 0, "zero")
+
+    #test
+    test_count_empty_sub() -> void
+        assert(count("abc", "") == 4, "len(s) + 1")
+
+
+### index_byte
+
+    #test
+    test_index_byte_found() -> void
+        assert(index_byte("hello", byte('l')) == 2, "first 'l'")
+
+    #test
+    test_index_byte_not_found() -> void
+        assert(index_byte("hello", byte('z')) == -1, "not found")
+
+    #test
+    test_last_index_byte_found() -> void
+        assert(last_index_byte("hello", byte('l')) == 3, "last 'l'")
+
+
+### substring
+
+    #test
+    test_substring_basic() -> void
+        assert(substring("hello world", 6, 11) == "world", "tail")
+
+    #test
+    test_substring_empty_range() -> void
+        assert(substring("hello", 2, 2) == "", "empty")
+
+    #test
+    test_substring_full() -> void
+        assert(substring("hello", 0, 5) == "hello", "full")
+
+
+### trim variants
+
+    #test
+    test_trim_space_both_sides() -> void
+        assert(trim_space("  hello  ") == "hello", "both sides")
+
+    #test
+    test_trim_space_tabs_and_newlines() -> void
+        assert(trim_space("\t\nhi\r\n") == "hi", "mixed whitespace")
+
+    #test
+    test_trim_space_no_whitespace() -> void
+        assert(trim_space("hello") == "hello", "untouched")
+
+    #test
+    test_trim_space_all_whitespace() -> void
+        assert(trim_space("   ") == "", "becomes empty")
+
+    #test
+    test_trim_left_cutset() -> void
+        assert(trim_left("xxhelloxx", "x") == "helloxx", "left only")
+
+    #test
+    test_trim_right_cutset() -> void
+        assert(trim_right("xxhelloxx", "x") == "xxhello", "right only")
+
+    #test
+    test_trim_cutset_both() -> void
+        assert(trim("xxhelloxx", "x") == "hello", "both")
+
+    #test
+    test_trim_multi_char_cutset() -> void
+        assert(trim("!?hello?!", "!?") == "hello", "any of the chars")
+
+
+### case conversion
+
+    #test
+    test_to_upper_basic() -> void
+        assert(to_upper("hello") == "HELLO", "letters")
+
+    #test
+    test_to_upper_mixed() -> void
+        assert(to_upper("Hello, World!") == "HELLO, WORLD!", "mixed")
+
+    #test
+    test_to_upper_already_upper() -> void
+        assert(to_upper("ABC") == "ABC", "idempotent")
+
+    #test
+    test_to_lower_basic() -> void
+        assert(to_lower("HELLO") == "hello", "letters")
+
+    #test
+    test_to_lower_mixed() -> void
+        assert(to_lower("Hello, World!") == "hello, world!", "mixed")
+
+### replace_all
+
+    #test
+    test_replace_all_basic() -> void
+        assert(replace_all("hello world", "world", "there") == "hello there", "one")
+
+    #test
+    test_replace_all_multiple() -> void
+        assert(replace_all("aaa", "a", "b") == "bbb", "each char")
+
+    #test
+    test_replace_all_no_match() -> void
+        assert(replace_all("hello", "xyz", "abc") == "hello", "untouched")
+
+    #test
+    test_replace_all_longer_replacement() -> void
+        assert(replace_all("hi hi", "hi", "hello") == "hello hello", "grows")
+
+    #test
+    test_replace_all_shorter_replacement() -> void
+        assert(replace_all("hello hello", "hello", "hi") == "hi hi", "shrinks")
+
+    #test
+    test_replace_all_non_overlapping() -> void
+        assert(replace_all("aaaa", "aa", "X") == "XX", "non-overlap")
+
+
+### repeat
+
+    #test
+    test_repeat_basic() -> void
+        assert(repeat("ab", 3) == "ababab", "three times")
+
+    #test
+    test_repeat_zero() -> void
+        assert(repeat("abc", 0) == "", "zero")
+
+    #test
+    test_repeat_negative() -> void
+        assert(repeat("abc", -5) == "", "negative treated as zero")
+
+    #test
+    test_repeat_empty_string() -> void
+        assert(repeat("", 100) == "", "empty stays empty")
+
+    #test
+    test_repeat_one() -> void
+        assert(repeat("abc", 1) == "abc", "identity")
+
+
+### split
+
+    #test
+    test_split_basic() -> void
+        val parts = split("a,b,c", ",")
+        assert(len(parts) == 3, "three parts")
+        assert(parts[0] == "a", "first")
+        assert(parts[1] == "b", "second")
+        assert(parts[2] == "c", "third")
+
+    #test
+    test_split_no_match() -> void
+        val parts = split("hello", ",")
+        assert(len(parts) == 1, "one part")
+        assert(parts[0] == "hello", "whole string")
+
+    #test
+    test_split_empty_sep() -> void
+        val parts = split("abc", "")
+        assert(len(parts) == 3, "three chars")
+        assert(parts[0] == "a", "a")
+        assert(parts[1] == "b", "b")
+        assert(parts[2] == "c", "c")
+
+    #test
+    test_split_adjacent_separators() -> void
+        val parts = split("a,,b", ",")
+        assert(len(parts) == 3, "three parts")
+        assert(parts[0] == "a", "first")
+        assert(parts[1] == "", "empty middle")
+        assert(parts[2] == "b", "third")
+
+    #test
+    test_split_leading_trailing() -> void
+        val parts = split(",a,b,", ",")
+        assert(len(parts) == 4, "four parts")
+        assert(parts[0] == "", "leading empty")
+        assert(parts[3] == "", "trailing empty")
+
+    #test
+    test_split_multi_char_sep() -> void
+        val parts = split("one::two::three", "::")
+        assert(len(parts) == 3, "three parts")
+        assert(parts[0] == "one", "first")
+        assert(parts[1] == "two", "second")
+        assert(parts[2] == "three", "third")
+
+
+### join
+
+    #test
+    test_join_basic() -> void
+        val parts = split("a,b,c", ",")
+        assert(join(parts, "-") == "a-b-c", "rejoin")
+
+    #test
+    test_join_empty_sep() -> void
+        val parts = split("a,b,c", ",")
+        assert(join(parts, "") == "abc", "no separator")
+
+    #test
+    test_join_single() -> void
+        val parts = new [1]string
+        parts[0] = "hello"
+        assert(join(parts[:], ",") == "hello", "single")
+
+    #test
+    test_join_empty_parts() -> void
+        val parts = new [0]string
+        assert(join(parts[:], ",") == "", "empty")
+
+
+### fields
+
+    #test
+    test_fields_basic() -> void
+        val parts = fields("  hello   world  ")
+        assert(len(parts) == 2, "two words")
+        assert(parts[0] == "hello", "first")
+        assert(parts[1] == "world", "second")
+
+    #test
+    test_fields_tabs_newlines() -> void
+        val parts = fields("\thello\n\nworld\t")
+        assert(len(parts) == 2, "two words")
+        assert(parts[0] == "hello", "first")
+        assert(parts[1] == "world", "second")
+
+    #test
+    test_fields_no_whitespace() -> void
+        val parts = fields("hello")
+        assert(len(parts) == 1, "one word")
+        assert(parts[0] == "hello", "whole")
+
+    #test
+    test_fields_all_whitespace() -> void
+        val parts = fields("   ")
+        assert(len(parts) == 0, "no words")
+
+    #test
+    test_fields_empty() -> void
+        val parts = fields("")
+        assert(len(parts) == 0, "no words")
+
+
+Design notes
+------------
+
+**Byte-oriented.** Strings are byte sequences. `index` finds
+byte substrings; `count` counts byte matches; `to_upper`
+touches ASCII only. A future `std.unicode` module will layer
+rune-aware operations (casefolding, grapheme clusters,
+normalization) on top.
+
+**Naive search algorithms.** `index`, `last_index`, `count`,
+and `replace_all` use O(n*m) byte-by-byte matching. Boyer-Moore
+or Knuth-Morris-Pratt can replace them later without API
+changes. For the input sizes typical in systems code (paths,
+identifiers, short messages) the naive approach is competitive.
+
+**Every function allocates when it produces a string.** Sysl
+strings are immutable and don't share backing arrays, so
+`substring`, `trim_space`, etc. copy. If allocation becomes
+a bottleneck, a sliced-string type with shared backing can
+come later — the API won't change, the representation will.
+
+**`is_ascii_space` only.** Go's `strings.TrimSpace` uses
+Unicode's whitespace set. This module intentionally stays
+ASCII-only for now — pulling in Unicode category data is
+a bigger commitment than a byte-level primitive should make.

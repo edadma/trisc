@@ -1,0 +1,230 @@
+std.rand — Pseudo-random number generation
+============================================
+
+The `std.rand` module provides a simple, fast PRNG using the
+xorshift64 algorithm. It is deterministic: given the same
+seed, it produces the same sequence. Not cryptographically
+secure — use only for testing, simulation, and shuffling.
+
+State is held in a module-level variable. Call `seed(n)` to
+initialize; subsequent calls to `next()`, `next_int()`,
+`next_range()` etc. advance the state.
+
+Dependencies: none.
+
+
+    module std.rand
+
+    var state: i64 = 1i64
+
+
+seed
+----
+
+`seed(s)` sets the PRNG state. If `s` is 0, it is replaced
+with 1 (xorshift requires non-zero state).
+
+    seed(s: i64)
+        if s == 0i64 then state = 1i64
+        else state = s
+
+
+next
+----
+
+`next()` returns the next pseudo-random `i64` and advances
+the state. Uses xorshift64.
+
+    next() -> i64
+        state = state ^ (state << 13i64)
+        state = state ^ (state >> 7i64)
+        state = state ^ (state << 17i64)
+        state
+
+
+next_int
+--------
+
+`next_int()` returns a non-negative `int` (i32).
+
+    next_int() -> int
+        val n = next()
+        val r = int(n)
+
+        if r < 0 then -r else r
+
+
+next_range
+----------
+
+`next_range(lo, hi)` returns a value in `[lo, hi)`. Callers
+must ensure `lo < hi`.
+
+    next_range(lo: int, hi: int) -> int
+        val span = hi - lo
+
+        lo + next_int() % span
+
+
+next_f64
+--------
+
+`next_f64()` returns a value in `[0.0, 1.0)`.
+
+    next_f64() -> double
+        val n = next()
+        val r = if n < 0i64 then -n else n
+        val max: double = 9223372036854775807.0
+
+        double(r) / max
+
+
+shuffle
+-------
+
+`shuffle(s)` randomly reorders `s` in-place using the
+Fisher-Yates algorithm.
+
+    shuffle[T](s: []T)
+        var i = len(s) - 1
+
+        while i > 0
+            val j = next_range(0, i + 1)
+            val tmp: T = s[i]
+            s[i] = s[j]
+            s[j] = tmp
+            i--
+
+
+Tests
+=====
+
+    #test
+    test_seed_produces_deterministic_sequence() -> void
+        seed(42i64)
+        val a = next()
+        val b = next()
+        seed(42i64)
+        val c = next()
+        val d = next()
+        assert(a == c, "first matches")
+        assert(b == d, "second matches")
+
+    #test
+    test_next_int_non_negative() -> void
+        seed(123i64)
+
+        var i = 0
+
+        while i < 100
+            assert(next_int() >= 0, "non-negative")
+            i++
+
+    #test
+    test_next_range_bounds() -> void
+        seed(456i64)
+
+        var i = 0
+
+        while i < 100
+            val r = next_range(10, 20)
+            assert(r >= 10, "lower bound")
+            assert(r < 20, "upper bound")
+            i++
+
+    #test
+    test_next_f64_bounds() -> void
+        seed(789i64)
+
+        var i = 0
+
+        while i < 100
+            val r = next_f64()
+            assert(r >= 0.0, "lower bound")
+            assert(r < 1.0, "upper bound")
+            i++
+
+    #test
+    test_different_seeds_produce_different_sequences() -> void
+        seed(1i64)
+        val a = next()
+        seed(2i64)
+        val b = next()
+        assert(a != b, "different seeds differ")
+
+    #test
+    test_seed_zero_treated_as_one() -> void
+        seed(0i64)
+        seed(1i64)
+        val a = next()
+        seed(0i64)
+        val b = next()
+        assert(a == b, "seed(0) == seed(1)")
+
+    #test
+    test_shuffle_preserves_elements() -> void
+        seed(42i64)
+        val s = new [5]int
+        s[0] = 10
+        s[1] = 20
+        s[2] = 30
+        s[3] = 40
+        s[4] = 50
+
+        shuffle(s[:])
+
+        // All original elements should still be present
+        var sum = 0
+        var i = 0
+
+        while i < 5
+            sum = sum + s[i]
+            i++
+
+        assert(sum == 150, "sum preserved")
+
+    #test
+    test_shuffle_changes_order() -> void
+        seed(42i64)
+        val s = new [10]int
+        var i = 0
+
+        while i < 10
+            s[i] = i
+            i++
+
+        shuffle(s[:])
+
+        // Very unlikely that a 10-element shuffle produces identity
+        var same = 0
+        i = 0
+
+        while i < 10
+            if s[i] == i then same++
+            i++
+
+        assert(same < 10, "at least one element moved")
+
+
+Design notes
+------------
+
+**Xorshift64.** Fast (3 shifts + 3 XORs per step), good
+statistical properties for non-cryptographic use, trivially
+portable. Period is $2^{64} - 1$.
+
+**Global mutable state.** Matches Go's `math/rand` (before
+v2) and C's `rand()/srand()`. A struct-based PRNG
+(`Rng.next()`) would be cleaner but requires method support
+on non-struct types or passing the state explicitly.
+
+**Not thread-safe.** The global `state` variable is not
+atomic. In a concurrent context, each thread should use its
+own seeded PRNG. This is a concern for slix but not for
+single-threaded stdlib use.
+
+**Shuffle uses Fisher-Yates.** O(n), in-place, uniform
+distribution. Relies on `next_range` being reasonably
+uniform, which xorshift + modulo is for practical purposes
+(slight bias for non-power-of-two ranges, negligible for
+most uses).

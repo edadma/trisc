@@ -1,0 +1,338 @@
+std.result — Result[T, E] for explicit error handling
+========================================================
+
+The `std.result` module provides `Result[T, E]`, Sysl's
+standard type for fallible operations. A function that can
+fail returns a `Result` carrying either a success value
+(`Ok(value)`) or an error (`Err(error)`). Callers choose to
+handle the error explicitly, propagate it with `?`, or
+unwrap and panic.
+
+This is the Rust model of error handling, adapted to Sysl:
+
+- **Fallibility is in the type.** If a function returns
+  `Result[T, E]`, you know it can fail. If it returns `T`
+  directly, you know it cannot.
+- **No hidden control flow.** Errors don't unwind the stack
+  or jump to catch blocks. They're ordinary values returned
+  from functions.
+- **`?` for propagation.** `x = foo()?` unwraps an `Ok` or
+  early-returns the `Err` from the enclosing function.
+- **`match` for inspection.** Full pattern matching on
+  `Ok(v)` and `Err(e)` with the compiler ensuring
+  exhaustiveness.
+
+The error type `E` is chosen per-function or per-module.
+There is no central `Error` type — small modules use simple
+error codes or short enums, larger systems use richer error
+structs with context.
+
+Dependencies: none.
+
+
+    module std.result
+
+    enum Result[T, E]
+        Ok(value: T)
+        Err(error: E)
+
+
+Utility functions
+-----------------
+
+The following functions work on any `Result[T, E]`. They are
+the building blocks for working with `Result` values outside
+of `match` and `?`.
+
+
+### is_ok / is_err
+
+    is_ok[T, E](r: Result[T, E]) -> bool
+        r match
+            Ok(_) -> true
+            Err(_) -> false
+
+    is_err[T, E](r: Result[T, E]) -> bool
+        r match
+            Ok(_) -> false
+            Err(_) -> true
+
+
+### unwrap
+
+`unwrap(r)` returns the `Ok` value or panics if `r` is `Err`.
+Use when the error case is impossible by construction, or
+when propagation isn't available (e.g. in `main`).
+
+    unwrap[T, E](r: Result[T, E]) -> T
+        r match
+            Ok(v) -> v
+            Err(_) -> panic("unwrap on Err")
+
+
+### expect
+
+`expect(r, msg)` is `unwrap` with a caller-supplied panic
+message. The message should describe *why* the caller
+expected this result to be `Ok`, not just that it failed.
+
+    expect[T, E](r: Result[T, E], msg: string) -> T
+        r match
+            Ok(v) -> v
+            Err(_) -> panic(msg)
+
+
+### unwrap_or
+
+`unwrap_or(r, default)` returns the `Ok` value or `default`
+on `Err`. Does not panic. Use when a fallback value is
+meaningful.
+
+    unwrap_or[T, E](r: Result[T, E], default: T) -> T
+        r match
+            Ok(v) -> v
+            Err(_) -> default
+
+
+### unwrap_err
+
+`unwrap_err(r)` returns the `Err` value or panics on `Ok`.
+Symmetric to `unwrap`; useful in tests that assert a
+particular error was produced.
+
+    unwrap_err[T, E](r: Result[T, E]) -> E
+        r match
+            Ok(_) -> panic("unwrap_err on Ok")
+            Err(e) -> e
+
+
+Tests
+=====
+
+A tagged-union error type used by all tests below. Each
+variant can carry data if needed (e.g. `OutOfRange` stores
+the invalid value). This demonstrates the full Rust pattern:
+distinct error types as the `E` in `Result[T, E]`.
+
+    enum ParseErr
+        BadInput(value: int)
+        OutOfRange(value: int)
+        Empty
+
+
+### Construction and inspection
+
+    #test
+    test_is_ok_on_ok() -> void
+        val r: Result[int, ParseErr] = Ok(42)
+        assert(is_ok(r), "Ok is ok")
+        assert(!is_err(r), "Ok is not err")
+
+    #test
+    test_is_ok_on_err() -> void
+        val r: Result[int, ParseErr] = Err(Empty)
+        assert(!is_ok(r), "Err is not ok")
+        assert(is_err(r), "Err is err")
+
+
+### unwrap
+
+    #test
+    test_unwrap_returns_ok_value() -> void
+        val r: Result[int, ParseErr] = Ok(42)
+        assert(unwrap(r) == 42, "gets value")
+
+    #test(should_panic: "unwrap on Err")
+    test_unwrap_panics_on_err() -> void
+        val r: Result[int, ParseErr] = Err(BadInput(0))
+        val _ = unwrap(r)
+
+
+### expect
+
+    #test
+    test_expect_returns_ok_value() -> void
+        val r: Result[int, ParseErr] = Ok(99)
+        assert(expect(r, "should exist") == 99, "gets value")
+
+    #test(should_panic: "missing user record")
+    test_expect_panics_with_custom_message() -> void
+        val r: Result[int, ParseErr] = Err(BadInput(0))
+        val _ = expect(r, "missing user record")
+
+
+### unwrap_or
+
+    #test
+    test_unwrap_or_returns_value_on_ok() -> void
+        val r: Result[int, ParseErr] = Ok(42)
+        assert(unwrap_or(r, 0) == 42, "Ok")
+
+    #test
+    test_unwrap_or_returns_default_on_err() -> void
+        val r: Result[int, ParseErr] = Err(Empty)
+        assert(unwrap_or(r, 99) == 99, "default")
+
+
+### unwrap_err
+
+    #test
+    test_unwrap_err_returns_error() -> void
+        val r: Result[int, ParseErr] = Err(OutOfRange(999))
+        val e = unwrap_err(r)
+
+        val ok = e match
+            OutOfRange(v) -> v == 999
+            BadInput(_) -> false
+            Empty -> false
+
+        assert(ok, "got OutOfRange with value 999")
+
+    #test(should_panic: "unwrap_err on Ok")
+    test_unwrap_err_panics_on_ok() -> void
+        val r: Result[int, ParseErr] = Ok(42)
+        val _ = unwrap_err(r)
+
+
+### `?` propagation
+
+Tests here mirror the `Result`-using patterns users will
+write in their own code.
+
+    parse_positive(n: int) -> Result[int, ParseErr]
+        if n < 0 then Err(BadInput(n))
+        else if n > 100 then Err(OutOfRange(n))
+        else if n == 0 then Err(Empty)
+        else Ok(n)
+
+    double_positive(n: int) -> Result[int, ParseErr]
+        v = parse_positive(n)?
+        Ok(v * 2)
+
+    #test
+    test_question_unwraps_ok() -> void
+        val r = double_positive(21)
+
+        r match
+            Ok(v) -> assert(v == 42, "doubled")
+            Err(_) -> panic("expected Ok")
+
+    #test
+    test_question_propagates_err() -> void
+        val r = double_positive(-5)
+
+        val got_bad_input = r match
+            Ok(_) -> false
+            Err(e) -> e match
+                BadInput(_) -> true
+                OutOfRange(_) -> false
+                Empty -> false
+
+        assert(got_bad_input, "got BadInput")
+
+    #test
+    test_question_propagates_err_too_large() -> void
+        val r = double_positive(200)
+
+        val got_out_of_range = r match
+            Ok(_) -> false
+            Err(e) -> e match
+                BadInput(_) -> false
+                OutOfRange(_) -> true
+                Empty -> false
+
+        assert(got_out_of_range, "got OutOfRange")
+
+
+### Chained `?` — multi-step validation
+
+    validate_sum(a: int, b: int) -> Result[int, ParseErr]
+        x = parse_positive(a)?
+        y = parse_positive(b)?
+        Ok(x + y)
+
+    #test
+    test_chained_both_ok() -> void
+        val r = validate_sum(10, 32)
+
+        r match
+            Ok(v) -> assert(v == 42, "sum")
+            Err(_) -> panic("expected Ok")
+
+    #test
+    test_chained_first_fails() -> void
+        val r = validate_sum(-1, 50)
+
+        val got_bad_input = r match
+            Ok(_) -> false
+            Err(e) -> e match
+                BadInput(_) -> true
+                OutOfRange(_) -> false
+                Empty -> false
+
+        assert(got_bad_input, "got BadInput from first arg")
+
+    #test
+    test_chained_second_fails() -> void
+        val r = validate_sum(10, 500)
+
+        val got_out_of_range = r match
+            Ok(_) -> false
+            Err(e) -> e match
+                BadInput(_) -> false
+                OutOfRange(_) -> true
+                Empty -> false
+
+        assert(got_out_of_range, "got OutOfRange from second arg")
+
+
+### Mixed with unwrap / unwrap_or
+
+    #test
+    test_unwrap_or_pipeline() -> void
+        val sum = unwrap_or(validate_sum(10, 20), -1)
+        assert(sum == 30, "success")
+
+        val fail = unwrap_or(validate_sum(-1, 20), -1)
+        assert(fail == -1, "default on failure")
+
+
+Design notes
+------------
+
+**Generic over both T and E.** Users pick both the success
+type and the error type. The compiler infers both from the
+arguments to `Ok`/`Err` at construction. Two `Result`
+instantiations with different `E` types are distinct types,
+and `?` only propagates between functions where both
+`Result` types share the same `E` (until `From[E1] for E2`
+conversion is wired into `?`).
+
+**No `map` / `map_err` yet.** Both require first-class
+function values as arguments. Sysl has function types, but
+higher-order convenience for `Result` waits until closures
+are comfortable to use and `From[E]`-conversion is working —
+at which point `map`, `map_err`, `and_then`, `or_else` all
+come together.
+
+**Panic-based `unwrap`.** `unwrap` on `Err` calls `panic`,
+matching Rust. Callers who want non-panicking handling use
+`match`, `unwrap_or`, or `?`.
+
+**Error type is unopinionated.** Tests use a `ParseErr`
+tagged union with data-carrying variants. User code can use
+any type as the error:
+integer codes, tagged unions describing failure modes,
+structs with source location and context — whatever fits the
+problem. Eventually a `std.error` module may provide a
+canonical `Error` trait for types that participate in `?`
+conversion, but for now the error type is entirely chosen by
+the caller.
+
+**`?` is the primary tool.** For code paths where every step
+is fallible, `?` keeps the happy path on the page and
+failure propagation automatic. `match` is for explicit
+handling (recovery, logging, branching on variant).
+`unwrap_or` is for default fallbacks. `unwrap` / `expect`
+are escape hatches where failure is impossible or
+catastrophic.

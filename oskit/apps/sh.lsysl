@@ -17,8 +17,8 @@ Built-in commands:
 
     module oskit.apps
 
-    import oskit.lib.{strtok, streq, strcpy, strcat}
-    import oskit.fs.{strlen, ROOT_INODE}
+    import oskit.fs.ROOT_INODE
+    import posix.string.{strlen, strcmp, strcpy, strcat, strtok}
     import oskit.services.{sleep}
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
     import oskit.servers.{fs_open, fs_read, fs_write, fs_create, fs_unlink, fs_stat, fs_mkdir, fs_rmdir, fs_readdir}
@@ -33,8 +33,14 @@ Output helpers. These use the TTY server for all I/O.
     sh_putc(ch: char)
         tty_putc(ch)
 
-    sh_puts(s: *i8)
+    sh_puts(s: *byte)
         tty_puts(s, strlen(s))
+
+    sh_print(s: string)
+        tty_puts(*byte(s), len(s))
+
+    cstr(s: *byte) -> string
+        string(s, strlen(s))
 
     sh_newline()
         sh_putc('\n')
@@ -107,19 +113,17 @@ buffer and sends it with one tty_puts call.
         sh_out[p] = ' '
         p += 1
         // Copy line content (flush if approaching IPC limit)
-        var i = 0
-        while i < len
+        for var i = 0; i < len; i++
             if p >= 120
-                tty_puts(&sh_out[0], p)
+                tty_puts(sh_out, p)
                 p = 0
             sh_out[p] = buf[i]
             p += 1
-            i += 1
         // ESC[K — clear to end of line
-        p = sh_append_csi(&sh_out[0], p, 0, i8('K'))
+        p = sh_append_csi(sh_out, p, 0, i8('K'))
         // ESC[nG — cursor to column (1-based)
-        p = sh_append_csi(&sh_out[0], p, PROMPT_LEN + cursor + 1, i8('G'))
-        tty_puts(&sh_out[0], p)
+        p = sh_append_csi(sh_out, p, PROMPT_LEN + cursor + 1, i8('G'))
+        tty_puts(sh_out, p)
 
     sh_readline(buf: *i8, maxlen: int) -> int
         var len = 0
@@ -199,7 +203,7 @@ resolve_parent(path) — Open the parent directory of path.
 For "/dir/file" returns the inode of "/dir".
 For "file" (no slash) returns cwd_ino.
 
-    sh_resolve_parent(path: *i8) -> int
+    sh_resolve_parent(path: *byte) -> int
         // Find the last slash
         var last_slash = -1
         var i = 0
@@ -222,7 +226,7 @@ For "file" (no slash) returns cwd_ino.
 
 sh_basename(path) — Return pointer to the last component of path.
 
-    sh_basename(path: *i8) -> *i8
+    sh_basename(path: *byte) -> *byte
         var last_slash = -1
         var i = 0
         while path[i] != 0
@@ -237,122 +241,115 @@ sh_resolve_path(path) — Resolve a path to an inode.
 Absolute paths start with /. Relative paths are resolved
 from cwd by building an absolute path.
 
-    sh_resolve_path(path: *i8) -> int
+    sh_resolve_path(path: *byte) -> int
         if path[0] == '/'
-            // Absolute path
-            return fs_open(path)
+            return fs_open(cstr(path))
         // Relative path — build absolute path
         var abspath: [256]i8
-        strcpy(&abspath[0], &cwd_path[0])
-        // Add separator if cwd is not "/"
-        val cwdlen = strlen(&cwd_path[0])
+        strcpy(abspath, cwd_path)
+        val cwdlen = strlen(cwd_path)
         if cwdlen > 1
             abspath[cwdlen] = '/'
             abspath[cwdlen + 1] = 0
         else if cwdlen == 1
-            // cwd is "/" — don't add extra slash
             abspath[1] = 0
-        strcat(&abspath[0], path)
-        fs_open(&abspath[0])
+        strcat(abspath, path)
+        fs_open(cstr(abspath))
 
 Built-in commands.
 
     cmd_echo(argc: int, argv: *i64)
-        var i = 1
-        while i < argc
+        for var i = 1; i < argc; i++
             if i > 1
                 sh_putc(' ')
-            sh_puts(*i8(argv[i]))
-            i += 1
+            sh_puts(*byte(argv[i]))
         sh_newline()
 
-    sh_not_found(name: *i8)
+    sh_not_found(name: *byte)
         sh_puts(name)
-        sh_puts(*i8(": not found\n"))
+        sh_print(": not found\n")
 
     sh_error()
-        sh_puts(*i8("error\n"))
+        sh_print("error\n")
 
     cmd_ls(argc: int, argv: *i64)
         var dir_ino = cwd_ino
         if argc > 1
-            dir_ino = sh_resolve_path(*i8(argv[1]))
+            dir_ino = sh_resolve_path(*byte(argv[1]))
             if dir_ino < 0
-                sh_not_found(*i8(argv[1]))
+                sh_not_found(*byte(argv[1]))
                 return
         var entry_ino: int
         var entry_name: [14]i8
         var idx = 0
-        while fs_readdir(dir_ino, idx, &entry_ino, &entry_name[0]) == 0
+        while fs_readdir(dir_ino, idx, &entry_ino, entry_name) == 0
             // Skip . and ..
             if entry_name[0] != '.'
-                sh_puts(&entry_name[0])
+                sh_puts(entry_name)
                 sh_newline()
             else if entry_name[1] != 0
                 if entry_name[1] != '.'
-                    sh_puts(&entry_name[0])
+                    sh_puts(entry_name)
                     sh_newline()
                 else if entry_name[2] != 0
-                    sh_puts(&entry_name[0])
+                    sh_puts(entry_name)
                     sh_newline()
             idx += 1
 
     cmd_cat(argc: int, argv: *i64)
         if argc < 2
-            sh_puts(*i8("usage: cat <file>\n"))
+            sh_print("usage: cat <file>\n")
             return
-        val ino = sh_resolve_path(*i8(argv[1]))
+        val ino = sh_resolve_path(*byte(argv[1]))
         if ino < 0
-            sh_not_found(*i8(argv[1]))
+            sh_not_found(*byte(argv[1]))
             return
         var buf: [128]i8
         var offset = 0
-        var nr = fs_read(ino, &buf[0], offset, 128)
+        var nr = fs_read(ino, buf, offset, 128)
         while nr > 0
-            var i = 0
-            while i < nr
+            for var i = 0; i < nr; i++
                 sh_putc(int(buf[i]))
-                i += 1
             offset += nr
-            nr = fs_read(ino, &buf[0], offset, 128)
+            nr = fs_read(ino, buf, offset, 128)
         sh_newline()
 
     cmd_mkdir(argc: int, argv: *i64)
         if argc < 2
             return
-        val parent = sh_resolve_parent(*i8(argv[1]))
+        val parent = sh_resolve_parent(*byte(argv[1]))
         if parent < 0
-            sh_not_found(*i8(argv[1]))
+            sh_not_found(*byte(argv[1]))
             return
-        val name = sh_basename(*i8(argv[1]))
-        val result = fs_mkdir(parent, name, 0x1FF)
+        val name = sh_basename(*byte(argv[1]))
+        val result = fs_mkdir(parent, cstr(name), 0x1FF)
         if result < 0
             sh_error()
 
     cmd_rm(argc: int, argv: *i64)
         if argc < 2
             return
-        val parent = sh_resolve_parent(*i8(argv[1]))
+        val parent = sh_resolve_parent(*byte(argv[1]))
         if parent < 0
             return
-        val name = sh_basename(*i8(argv[1]))
-        val result = fs_unlink(parent, name)
+        val name = sh_basename(*byte(argv[1]))
+        val result = fs_unlink(parent, cstr(name))
         if result < 0
             sh_error()
 
     cmd_rmdir(argc: int, argv: *i64)
         if argc < 2
             return
-        val parent = sh_resolve_parent(*i8(argv[1]))
+        val parent = sh_resolve_parent(*byte(argv[1]))
         if parent < 0
             return
-        val name = sh_basename(*i8(argv[1]))
-        val result = fs_rmdir(parent, name)
+        val name = sh_basename(*byte(argv[1]))
+        val result = fs_rmdir(parent, cstr(name))
         if result < 0
             sh_error()
 
-    cmd_pwd()
-        sh_puts(&cwd_path[0])
+    cmd_pwd(argc: int, argv: *i64)
+        sh_puts(cwd_path)
         sh_newline()
 
     cmd_cd(argc: int, argv: *i64)
@@ -362,93 +359,103 @@ Built-in commands.
             cwd_path[0] = '/'
             cwd_path[1] = 0
             return
-        val ino = sh_resolve_path(*i8(argv[1]))
+        val ino = sh_resolve_path(*byte(argv[1]))
         if ino < 0
-            sh_not_found(*i8(argv[1]))
+            sh_not_found(*byte(argv[1]))
             return
         // Verify it's a directory
         var st: [7]int
-        fs_stat(ino, &st[0])
+        fs_stat(ino, st)
         val ftype = (st[0] >> 12) & 0xF
         if ftype != 2
-            sh_puts(*i8("not a directory\n"))
+            sh_print("not a directory\n")
             return
         cwd_ino = ino
         // Update cwd_path
-        val arg1: *i8 = *i8(argv[1])
+        // Update cwd_path
+        val arg1 = cstr(*byte(argv[1]))
         if arg1[0] == '/'
-            // Absolute path
-            strcpy(&cwd_path[0], arg1)
+            strcpy(cwd_path, arg1)
         else
-            // Relative path
-            val cwdlen = strlen(&cwd_path[0])
+            val cwdlen = strlen(cwd_path)
             if cwdlen > 1
                 cwd_path[cwdlen] = '/'
                 cwd_path[cwdlen + 1] = 0
-            strcat(&cwd_path[0], arg1)
+            strcat(cwd_path, arg1)
 
     cmd_stat(argc: int, argv: *i64)
         if argc < 2
             return
-        val ino = sh_resolve_path(*i8(argv[1]))
+        val ino = sh_resolve_path(*byte(argv[1]))
         if ino < 0
-            sh_not_found(*i8(argv[1]))
+            sh_not_found(*byte(argv[1]))
             return
         var st: [7]int
-        fs_stat(ino, &st[0])
+        fs_stat(ino, st)
         // Type
         val ftype = (st[0] >> 12) & 0xF
-        sh_puts(*i8("type: "))
+        sh_print("type: ")
         if ftype == 1
-            sh_puts(*i8("file"))
+            sh_print("file")
         else if ftype == 2
-            sh_puts(*i8("dir"))
+            sh_print("dir")
         else
             sh_putint(ftype)
         sh_newline()
-        sh_puts(*i8("size: "))
+        sh_print("size: ")
         sh_putint(st[4])
         sh_newline()
-        sh_puts(*i8("ino: "))
+        sh_print("ino: ")
         sh_putint(ino)
         sh_newline()
 
-    cmd_help()
-        sh_puts(*i8("echo ls cat mkdir rm rmdir pwd cd stat help\n"))
+    cmd_help(argc: int, argv: *i64)
+        sh_print("echo ls cat mkdir rm rmdir pwd cd stat help\n")
 
-Command dispatch table. Matches the first token against
-known commands and calls the handler.
+Command dispatch table. Each entry pairs a command name with
+its handler function. All handlers have the same signature
+so they can be stored as function pointers.
 
     val MAX_ARGS = 16
+    val NUM_CMDS = 10
 
-Command dispatch. Matches the first token against known commands.
+    struct Command
+        name: string
+        handler: func(int, *i64)
+
+    var cmds: [10]Command
+
+    sh_init_cmds()
+        cmds[0].name = "echo"
+        cmds[0].handler = cmd_echo
+        cmds[1].name = "ls"
+        cmds[1].handler = cmd_ls
+        cmds[2].name = "cat"
+        cmds[2].handler = cmd_cat
+        cmds[3].name = "mkdir"
+        cmds[3].handler = cmd_mkdir
+        cmds[4].name = "rm"
+        cmds[4].handler = cmd_rm
+        cmds[5].name = "rmdir"
+        cmds[5].handler = cmd_rmdir
+        cmds[6].name = "pwd"
+        cmds[6].handler = cmd_pwd
+        cmds[7].name = "cd"
+        cmds[7].handler = cmd_cd
+        cmds[8].name = "stat"
+        cmds[8].handler = cmd_stat
+        cmds[9].name = "help"
+        cmds[9].handler = cmd_help
 
     sh_dispatch(argc: int, argv: *i64)
         if argc == 0
             return
-        val cmd: *i8 = *i8(argv[0])
-        if streq(cmd, *i8("echo")) == 1
-            cmd_echo(argc, argv)
-        else if streq(cmd, *i8("ls")) == 1
-            cmd_ls(argc, argv)
-        else if streq(cmd, *i8("cat")) == 1
-            cmd_cat(argc, argv)
-        else if streq(cmd, *i8("mkdir")) == 1
-            cmd_mkdir(argc, argv)
-        else if streq(cmd, *i8("rm")) == 1
-            cmd_rm(argc, argv)
-        else if streq(cmd, *i8("rmdir")) == 1
-            cmd_rmdir(argc, argv)
-        else if streq(cmd, *i8("pwd")) == 1
-            cmd_pwd()
-        else if streq(cmd, *i8("cd")) == 1
-            cmd_cd(argc, argv)
-        else if streq(cmd, *i8("stat")) == 1
-            cmd_stat(argc, argv)
-        else if streq(cmd, *i8("help")) == 1
-            cmd_help()
-        else
-            sh_not_found(cmd)
+        val cmd: *byte = *byte(argv[0])
+        for var i = 0; i < NUM_CMDS; i++
+            if strcmp(cmd, *byte(cmds[i].name)) == 0
+                cmds[i].handler(argc, argv)
+                return
+        sh_not_found(cmd)
 
 The shell main loop. Prints a prompt, reads a line,
 tokenizes it, and dispatches to the appropriate command.
@@ -457,6 +464,7 @@ tokenizes it, and dispatches to the appropriate command.
         // Initialize
         cwd_path[0] = '/'
         cwd_path[1] = 0
+        sh_init_cmds()
 
         // Wait for servers to start
         sleep(5)
@@ -474,18 +482,18 @@ tokenizes it, and dispatches to the appropriate command.
             sh_putc(' ')
 
             // Read a line
-            val len = sh_readline(&line[0], 256)
+            val len = sh_readline(line, 256)
             if len == 0
                 continue
 
             // Tokenize
             var argc = 0
-            var tok = strtok(&line[0], &delim[0])
+            var tok = strtok(line, delim)
             while i64(tok) != 0
                 if argc < MAX_ARGS
                     argv[argc] = i64(tok)
                     argc += 1
-                tok = strtok(*i8(0), &delim[0])
+                tok = strtok(*byte(0), delim)
 
             // Dispatch
-            sh_dispatch(argc, &argv[0])
+            sh_dispatch(argc, argv)

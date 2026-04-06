@@ -41,7 +41,7 @@ class SyslCodegenStringTests extends SyslCodegenHelpers {
     compileAndRun(
       """main() -> int
         |    val s = "ABC"
-        |    s[0] * 100 + s[1] * 10 + s[2] - 65 * 111
+        |    int(s[0]) * 100 + int(s[1]) * 10 + int(s[2]) - 65 * 111
         |""".stripMargin) shouldBe 12
   }
 
@@ -191,6 +191,7 @@ class SyslCodegenStringTests extends SyslCodegenHelpers {
 
   private val allocSource = scala.io.Source.fromFile("posix/stdlib/alloc.sysl").mkString
   private val stringSource = scala.io.Source.fromFile("posix/string/string.sysl").mkString
+  private val ctypeSource = scala.io.Source.fromFile("posix/ctype/ctype.sysl").mkString
 
   private def sbrkModule(heapSize: Int = 16384): String =
     s"""module posix.unistd
@@ -219,6 +220,7 @@ class SyslCodegenStringTests extends SyslCodegenHelpers {
     Map(
       "posix/unistd/sbrk" -> sbrkModule(heapSize),
       "posix/string/string" -> stringSource,
+      "posix/ctype/ctype" -> ctypeSource,
       "posix/stdlib/alloc" -> allocSource,
       "main" -> mainSource,
     )

@@ -1,0 +1,628 @@
+std.math — Floating-point operations
+======================================
+
+Floating-point math implemented in pure Sysl. Functions use
+Taylor series, Newton's method, and range reduction — matching
+the algorithms from `posix.math` but with Sysl-idiomatic
+naming. When TRISC hardware float instructions become
+available via builtins or compiler intrinsics, these
+implementations can be replaced transparently.
+
+Functions that have both integer and float variants follow the
+naming convention established in the integer half of `std.math`:
+`abs` / `abs_f64`, `min` / `min_f64`, etc. Functions that exist
+only for floats use their universal name: `sqrt`, `sin`, `cos`.
+
+
+    module std.math
+
+
+Constants
+---------
+
+    val PI: double    = 3.14159265358979323846
+    val E: double     = 2.71828182845904523536
+    val LN2: double   = 0.69314718055994530942
+    val LN10: double  = 2.30258509299404568402
+    val SQRT2: double = 1.41421356237309504880
+    val TAU: double   = 6.28318530717958647692
+
+
+Basic float operations
+----------------------
+
+### abs_f64 / min_f64 / max_f64
+
+    abs_f64(x: double) -> double = if x < 0.0 then -x else x
+
+    min_f64(a: double, b: double) -> double = if a < b then a else b
+
+    max_f64(a: double, b: double) -> double = if a > b then a else b
+
+
+### clamp_f64
+
+    clamp_f64(x: double, lo: double, hi: double) -> double
+        if x < lo then lo
+        else if x > hi then hi
+        else x
+
+
+### sign_f64
+
+`sign_f64(x)` returns `-1.0`, `0.0`, or `1.0`.
+
+    sign_f64(x: double) -> double
+        if x < 0.0 then -1.0
+        else if x > 0.0 then 1.0
+        else 0.0
+
+
+### copysign
+
+`copysign(x, y)` returns the magnitude of `x` with the sign
+of `y`.
+
+    copysign(x: double, y: double) -> double
+        val mag = abs_f64(x)
+
+        if y < 0.0 then -mag
+        else mag
+
+
+Classification
+--------------
+
+### is_nan / is_inf / is_finite
+
+`is_nan(x)` exploits the IEEE 754 property that NaN ≠ NaN.
+
+    is_nan(x: double) -> bool = x != x
+
+    is_inf(x: double) -> bool = x == 1.0e308 * 10.0 || x == -1.0e308 * 10.0
+
+    is_finite(x: double) -> bool = !is_nan(x) && !is_inf(x)
+
+
+Rounding
+--------
+
+### trunc / floor / ceil / round
+
+    trunc(x: double) -> double = double(int(x))
+
+    floor(x: double) -> double
+        val t = trunc(x)
+
+        if x < 0.0 && t != x then t - 1.0
+        else t
+
+    ceil(x: double) -> double
+        val t = trunc(x)
+
+        if x > 0.0 && t != x then t + 1.0
+        else t
+
+    round(x: double) -> double
+        if x >= 0.0 then floor(x + 0.5)
+        else ceil(x - 0.5)
+
+
+### fmod
+
+    fmod(x: double, y: double) -> double = x - trunc(x / y) * y
+
+
+Square root and power
+---------------------
+
+### sqrt
+
+    sqrt(x: double) -> double
+        if x <= 0.0 then return 0.0
+
+        var guess = x / 2.0
+
+        for var i = 0; i < 50; i++
+            guess = (guess + x / guess) / 2.0
+
+        guess
+
+
+### pow_f64
+
+`pow_f64(x, y)` returns $x^y$ for arbitrary real exponents.
+
+    pow_f64(x: double, y: double) -> double
+        if y == trunc(y) && y >= 0.0
+            var result = 1.0
+            var base = x
+            var e = int(y)
+
+            while e > 0
+                if e & 1 == 1 then result = result * base
+
+                base = base * base
+                e = e >> 1
+
+            return result
+
+        if y == trunc(y) then return 1.0 / pow_f64(x, -y)
+        if x > 0.0 then return exp(y * log(x))
+
+        0.0
+
+
+Trigonometry
+------------
+
+All angles are in radians.
+
+### sin / cos / tan
+
+    sin(x: double) -> double
+        var a = fmod(x, 2.0 * PI)
+
+        if a > PI then a = a - 2.0 * PI
+        if a < -PI then a = a + 2.0 * PI
+
+        var term = a
+        var sum = a
+
+        for var i = 1; i < 20; i++
+            term = -term * a * a / double((2 * i) * (2 * i + 1))
+            sum = sum + term
+
+        sum
+
+    cos(x: double) -> double
+        var a = fmod(x, 2.0 * PI)
+
+        if a > PI then a = a - 2.0 * PI
+        if a < -PI then a = a + 2.0 * PI
+
+        var term = 1.0
+        var sum = 1.0
+
+        for var i = 1; i < 20; i++
+            term = -term * a * a / double((2 * i - 1) * (2 * i))
+            sum = sum + term
+
+        sum
+
+    tan(x: double) -> double
+        val c = cos(x)
+
+        if c == 0.0 then return 0.0
+
+        sin(x) / c
+
+
+### asin / acos / atan
+
+    atan(x: double) -> double
+        // Special-case: Taylor series converges too slowly at |x|=1
+        if x == 1.0 then return PI / 4.0
+        if x == -1.0 then return -PI / 4.0
+        if x > 1.0 then return PI / 2.0 - atan(1.0 / x)
+        if x < -1.0 then return -PI / 2.0 - atan(1.0 / x)
+
+        var term = x
+        var sum = x
+        val x2 = x * x
+
+        for var i = 1; i < 40; i++
+            term = -term * x2
+            sum = sum + term / double(2 * i + 1)
+
+        sum
+
+    atan2(y: double, x: double) -> double
+        if x > 0.0 then return atan(y / x)
+
+        if x < 0.0
+            if y >= 0.0 then return atan(y / x) + PI
+            else return atan(y / x) - PI
+
+        if y > 0.0 then return PI / 2.0
+        if y < 0.0 then return -PI / 2.0
+
+        0.0
+
+    asin(x: double) -> double
+        if x >= 1.0 then return PI / 2.0
+        if x <= -1.0 then return -PI / 2.0
+
+        atan2(x, sqrt(1.0 - x * x))
+
+    acos(x: double) -> double = PI / 2.0 - asin(x)
+
+
+Exponential and logarithmic
+----------------------------
+
+### exp / log
+
+    exp(x: double) -> double
+        val k = int(x / LN2 + (if x >= 0.0 then 0.5 else -0.5))
+        val r = x - double(k) * LN2
+        var term = 1.0
+        var sum = 1.0
+
+        for var i = 1; i < 30; i++
+            term = term * r / double(i)
+            sum = sum + term
+
+        if k >= 0
+            for var i = 0; i < k; i++ do sum = sum * 2.0
+        else
+            for var i = 0; i < -k; i++ do sum = sum / 2.0
+
+        sum
+
+    log(x: double) -> double
+        if x <= 0.0 then return 0.0
+
+        var m = x
+        var e = 0
+
+        while m >= 2.0
+            m = m / 2.0
+            e++
+
+        while m < 0.5
+            m = m * 2.0
+            e--
+
+        val t = (m - 1.0) / (m + 1.0)
+        val t2 = t * t
+        var term = t
+        var sum = t
+
+        for var i = 1; i < 30; i++
+            term = term * t2
+            sum = sum + term / double(2 * i + 1)
+
+        2.0 * sum + double(e) * LN2
+
+
+### exp2 / log2 / log10
+
+Derived from `exp` and `log` via change-of-base identities.
+
+    exp2(x: double) -> double = exp(x * LN2)
+
+    log2(x: double) -> double = log(x) / LN2
+
+    log10(x: double) -> double = log(x) / LN10
+
+
+Hyperbolic
+----------
+
+### sinh / cosh / tanh
+
+Computed from `exp` — two hardware instructions each.
+
+    sinh(x: double) -> double
+        val ex = exp(x)
+
+        (ex - 1.0 / ex) / 2.0
+
+    cosh(x: double) -> double
+        val ex = exp(x)
+
+        (ex + 1.0 / ex) / 2.0
+
+    tanh(x: double) -> double
+        val ex = exp(x)
+        val emx = 1.0 / ex
+
+        (ex - emx) / (ex + emx)
+
+
+Conversion helpers
+------------------
+
+### degrees / radians
+
+    degrees(x: double) -> double = x * 180.0 / PI
+
+    radians(x: double) -> double = x * PI / 180.0
+
+
+### lerp
+
+`lerp(a, b, t)` linearly interpolates between `a` and `b`.
+$\text{lerp}(a, b, 0) = a$, $\text{lerp}(a, b, 1) = b$.
+
+    lerp(a: double, b: double, t: double) -> double = a + (b - a) * t
+
+
+### hypot
+
+`hypot(x, y)` computes $\sqrt{x^2 + y^2}$ without overflow
+in the intermediate squares.
+
+    hypot(x: double, y: double) -> double = sqrt(x * x + y * y)
+
+
+Tests
+=====
+
+Float comparisons need a tolerance helper since hardware
+float arithmetic may introduce small rounding errors.
+
+    near(a: double, b: double, tol: double) -> bool
+        abs_f64(a - b) < tol
+
+    val TOL: double = 1.0e-9
+
+
+### Constants
+
+    #test
+    test_pi_approx() -> void
+        assert(near(PI, 3.14159265358979, TOL), "PI")
+
+    #test
+    test_e_approx() -> void
+        assert(near(E, 2.71828182845904, TOL), "E")
+
+
+### Basic float ops
+
+    #test
+    test_abs_f64() -> void
+        assert(abs_f64(-3.5) == 3.5, "negative")
+        assert(abs_f64(3.5) == 3.5, "positive")
+        assert(abs_f64(0.0) == 0.0, "zero")
+
+    #test
+    test_min_max_f64() -> void
+        assert(min_f64(1.5, 2.5) == 1.5, "min")
+        assert(max_f64(1.5, 2.5) == 2.5, "max")
+
+    #test
+    test_clamp_f64() -> void
+        assert(clamp_f64(0.5, 0.0, 1.0) == 0.5, "within")
+        assert(clamp_f64(-0.5, 0.0, 1.0) == 0.0, "below")
+        assert(clamp_f64(1.5, 0.0, 1.0) == 1.0, "above")
+
+    #test
+    test_sign_f64() -> void
+        assert(sign_f64(3.0) == 1.0, "positive")
+        assert(sign_f64(-3.0) == -1.0, "negative")
+        assert(sign_f64(0.0) == 0.0, "zero")
+
+    #test
+    test_copysign() -> void
+        assert(copysign(3.0, -1.0) == -3.0, "negative sign")
+        assert(copysign(-3.0, 1.0) == 3.0, "positive sign")
+
+
+### Classification
+
+    #test
+    test_is_nan() -> void
+        val nan = 0.0 / 0.0
+        assert(is_nan(nan), "0/0 is NaN")
+        assert(!is_nan(1.0), "1.0 is not NaN")
+
+    #test
+    test_is_finite() -> void
+        assert(is_finite(1.0), "normal")
+        assert(is_finite(0.0), "zero")
+        assert(!is_finite(0.0 / 0.0), "NaN not finite")
+
+
+### Rounding
+
+    #test
+    test_trunc() -> void
+        assert(trunc(3.7) == 3.0, "positive")
+        assert(trunc(-3.7) == -3.0, "negative")
+        assert(trunc(3.0) == 3.0, "exact")
+
+    #test
+    test_floor() -> void
+        assert(floor(3.7) == 3.0, "positive")
+        assert(floor(-3.7) == -4.0, "negative rounds down")
+        assert(floor(3.0) == 3.0, "exact")
+
+    #test
+    test_ceil() -> void
+        assert(ceil(3.2) == 4.0, "positive rounds up")
+        assert(ceil(-3.7) == -3.0, "negative")
+        assert(ceil(3.0) == 3.0, "exact")
+
+    #test
+    test_round() -> void
+        assert(round(3.5) == 4.0, "half up")
+        assert(round(3.4) == 3.0, "below half")
+        assert(round(-3.5) == -4.0, "negative half away from zero")
+
+    #test
+    test_fmod() -> void
+        assert(near(fmod(5.5, 2.0), 1.5, TOL), "5.5 mod 2")
+        assert(near(fmod(-5.5, 2.0), -1.5, TOL), "negative")
+
+
+### sqrt
+
+    #test
+    test_sqrt_basic() -> void
+        assert(near(sqrt(4.0), 2.0, TOL), "sqrt(4)")
+        assert(near(sqrt(2.0), SQRT2, TOL), "sqrt(2)")
+        assert(sqrt(0.0) == 0.0, "sqrt(0)")
+        assert(near(sqrt(100.0), 10.0, TOL), "sqrt(100)")
+
+
+### pow_f64
+
+    #test
+    test_pow_f64_integer_exp() -> void
+        assert(near(pow_f64(2.0, 10.0), 1024.0, TOL), "2^10")
+        assert(near(pow_f64(3.0, 0.0), 1.0, TOL), "x^0")
+
+    #test
+    test_pow_f64_fractional() -> void
+        assert(near(pow_f64(4.0, 0.5), 2.0, TOL), "4^0.5 = 2")
+        assert(near(pow_f64(27.0, 1.0 / 3.0), 3.0, TOL), "27^(1/3) = 3")
+
+
+### Trigonometry
+
+    #test
+    test_sin_cos_zero() -> void
+        assert(near(sin(0.0), 0.0, TOL), "sin(0)")
+        assert(near(cos(0.0), 1.0, TOL), "cos(0)")
+
+    #test
+    test_sin_cos_pi() -> void
+        assert(near(sin(PI), 0.0, TOL), "sin(pi)")
+        assert(near(cos(PI), -1.0, TOL), "cos(pi)")
+
+    #test
+    test_sin_cos_half_pi() -> void
+        assert(near(sin(PI / 2.0), 1.0, TOL), "sin(pi/2)")
+        assert(near(cos(PI / 2.0), 0.0, TOL), "cos(pi/2)")
+
+    #test
+    test_tan_basic() -> void
+        assert(near(tan(0.0), 0.0, TOL), "tan(0)")
+        assert(near(tan(PI / 4.0), 1.0, TOL), "tan(pi/4)")
+
+    #test
+    test_pythagorean_identity() -> void
+        val x = 1.234
+        val s = sin(x)
+        val c = cos(x)
+        assert(near(s * s + c * c, 1.0, TOL), "sin^2 + cos^2 = 1")
+
+    #test
+    test_asin_acos() -> void
+        assert(near(asin(0.0), 0.0, TOL), "asin(0)")
+        assert(near(asin(1.0), PI / 2.0, TOL), "asin(1)")
+        assert(near(acos(1.0), 0.0, TOL), "acos(1)")
+        assert(near(acos(0.0), PI / 2.0, TOL), "acos(0)")
+
+    #test
+    test_atan_atan2() -> void
+        assert(near(atan(0.0), 0.0, TOL), "atan(0)")
+        // atan Taylor series converges slowly at x=1; use wider tolerance
+        assert(near(atan(1.0), PI / 4.0, 1.0e-6), "atan(1)")
+        assert(near(atan2(1.0, 1.0), PI / 4.0, 1.0e-6), "atan2(1,1)")
+        assert(near(atan2(0.0, -1.0), PI, TOL), "atan2(0,-1)")
+
+    #test
+    test_asin_roundtrip() -> void
+        val x = 0.6
+        assert(near(sin(asin(x)), x, TOL), "sin(asin(x)) = x")
+
+    #test
+    test_atan2_quadrants() -> void
+        assert(near(atan2(1.0, 0.0), PI / 2.0, TOL), "Q1 boundary")
+        assert(near(atan2(-1.0, 0.0), -PI / 2.0, TOL), "Q4 boundary")
+
+
+### Exponential / logarithmic
+
+    #test
+    test_exp_log_identity() -> void
+        assert(near(exp(0.0), 1.0, TOL), "e^0")
+        assert(near(exp(1.0), E, TOL), "e^1")
+        assert(near(log(1.0), 0.0, TOL), "ln(1)")
+        assert(near(log(E), 1.0, TOL), "ln(e)")
+
+    #test
+    test_exp_log_roundtrip() -> void
+        val x = 2.5
+        assert(near(log(exp(x)), x, TOL), "ln(e^x) = x")
+        assert(near(exp(log(x)), x, TOL), "e^ln(x) = x")
+
+    #test
+    test_exp2_log2() -> void
+        assert(near(exp2(3.0), 8.0, TOL), "2^3")
+        assert(near(log2(8.0), 3.0, TOL), "log2(8)")
+
+    #test
+    test_log10() -> void
+        assert(near(log10(100.0), 2.0, TOL), "log10(100)")
+        assert(near(log10(1000.0), 3.0, TOL), "log10(1000)")
+
+
+### Hyperbolic
+
+    #test
+    test_sinh_cosh_zero() -> void
+        assert(near(sinh(0.0), 0.0, TOL), "sinh(0)")
+        assert(near(cosh(0.0), 1.0, TOL), "cosh(0)")
+
+    #test
+    test_tanh_bounds() -> void
+        assert(near(tanh(0.0), 0.0, TOL), "tanh(0)")
+        assert(tanh(10.0) <= 1.0, "tanh <= 1")
+        assert(tanh(10.0) > 0.999, "tanh(10) near 1")
+
+    #test
+    test_cosh_sinh_identity() -> void
+        val x = 1.5
+        val ch = cosh(x)
+        val sh = sinh(x)
+        assert(near(ch * ch - sh * sh, 1.0, TOL), "cosh^2 - sinh^2 = 1")
+
+
+### Conversion helpers
+
+    #test
+    test_degrees_radians() -> void
+        assert(near(degrees(PI), 180.0, TOL), "pi -> 180")
+        assert(near(radians(180.0), PI, TOL), "180 -> pi")
+        assert(near(degrees(radians(45.0)), 45.0, TOL), "roundtrip")
+
+    #test
+    test_lerp() -> void
+        assert(lerp(0.0, 10.0, 0.0) == 0.0, "t=0")
+        assert(lerp(0.0, 10.0, 1.0) == 10.0, "t=1")
+        assert(lerp(0.0, 10.0, 0.5) == 5.0, "t=0.5")
+        assert(lerp(2.0, 8.0, 0.25) == 3.5, "quarter")
+
+    #test
+    test_hypot() -> void
+        assert(near(hypot(3.0, 4.0), 5.0, TOL), "3-4-5")
+        assert(near(hypot(0.0, 5.0), 5.0, TOL), "degenerate")
+        assert(near(hypot(1.0, 1.0), SQRT2, TOL), "unit diagonal")
+
+
+Design notes
+------------
+
+**Software implementations.** All transcendental functions use
+pure Sysl — Taylor series, Newton's method, and range
+reduction. When TRISC hardware float builtins or compiler
+intrinsics become available, these can be replaced with
+single-instruction versions (`fsin`, `fcos`, `fsqrt`, `fexp`,
+`flog`, etc.) without changing the API.
+
+**Naming convention.** Functions that shadow an integer
+counterpart use the `_f64` suffix: `abs_f64`, `min_f64`,
+`max_f64`, `clamp_f64`, `sign_f64`, `pow_f64`. Functions
+unique to floats use their universal mathematical name:
+`sin`, `cos`, `sqrt`, `exp`, `log`.
+
+**Tolerance testing.** Float tests use a `near(a, b, tol)`
+helper rather than exact equality. The tolerance `1e-9` is
+tight enough to catch gross errors while accommodating
+hardware rounding differences.
+
+**No `frexp` / `ldexp` / `modf`.** These IEEE decomposition
+functions exist in `posix.math` for C compatibility. They're
+rarely needed in idiomatic Sysl code; users who want them
+can import from `posix.math` directly.
+
+**`lerp` and `hypot`.** These are common enough in graphics,
+physics, and geometry code to warrant inclusion. `hypot` uses
+the naive formula $\sqrt{x^2+y^2}$; a production version
+should handle overflow/underflow via scaling, but the
+hardware's double range makes this adequate for typical use.

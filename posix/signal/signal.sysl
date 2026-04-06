@@ -1,0 +1,34 @@
+module posix.signal
+
+/*
+ * signal.sysl — Signal definitions (<signal.h>)
+ *
+ * Standard POSIX signal numbers and related constants.
+ */
+
+val SIGHUP = 1          /* Hangup */
+val SIGINT = 2          /* Interrupt (Ctrl-C) */
+val SIGQUIT = 3         /* Quit (Ctrl-\) */
+val SIGILL = 4          /* Illegal instruction */
+val SIGTRAP = 5         /* Trace/breakpoint trap */
+val SIGABRT = 6         /* Abort */
+val SIGBUS = 7          /* Bus error */
+val SIGFPE = 8          /* Floating-point exception */
+val SIGKILL = 9         /* Kill (cannot be caught) */
+val SIGUSR1 = 10        /* User-defined signal 1 */
+val SIGSEGV = 11        /* Segmentation fault */
+val SIGUSR2 = 12        /* User-defined signal 2 */
+val SIGPIPE = 13        /* Broken pipe */
+val SIGALRM = 14        /* Alarm clock */
+val SIGTERM = 15        /* Termination */
+val SIGCHLD = 17        /* Child status changed */
+val SIGCONT = 18        /* Continue */
+val SIGSTOP = 19        /* Stop (cannot be caught) */
+val SIGTSTP = 20        /* Terminal stop (Ctrl-Z) */
+val SIGTTIN = 21        /* Background read from tty */
+val SIGTTOU = 22        /* Background write to tty */
+
+/* Signal action constants */
+val SIG_DFL = 0         /* Default signal action */
+val SIG_IGN = 1         /* Ignore signal */
+val SIG_ERR = -1        /* Error return from signal() */

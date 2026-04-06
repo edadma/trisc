@@ -1,5 +1,7 @@
 module posix.string
 
+import posix.ctype.{tolower}
+
 /*
  * string.sysl — String and memory operations (<string.h>)
  *
@@ -18,21 +20,21 @@ strlen(s: *byte) -> int
 /* Compare two strings. Returns <0, 0, or >0. */
 strcmp(a: *byte, b: *byte) -> int
     while *a != 0 && *b != 0
-        val d = *a - *b
+        val d = int(*a) - int(*b)
 
         if d != 0 then return d
 
         a++
         b++
 
-    *a - *b
+    int(*a) - int(*b)
 
 /* Compare at most n bytes of two strings. */
 strncmp(a: *byte, b: *byte, n: int) -> int
     var i = 0
 
     while i < n && *a != 0 && *b != 0
-        val d = *a - *b
+        val d = int(*a) - int(*b)
 
         if d != 0 then return d
 
@@ -41,7 +43,7 @@ strncmp(a: *byte, b: *byte, n: int) -> int
         i++
 
     if i == n then 0
-    else *a - *b
+    else int(*a) - int(*b)
 
 /* Copy src to dst, including the null terminator. */
 strcpy(dst: *byte, src: *byte) -> *byte
@@ -235,7 +237,7 @@ memmove(dst: *byte, src: *byte, n: int) -> *byte
 /* Compare n bytes of a and b. Returns <0, 0, or >0. */
 memcmp(a: *byte, b: *byte, n: int) -> int
     for var i = 0; i < n; i++
-        val d = a[i] - b[i]
+        val d = int(a[i]) - int(b[i])
 
         if d != 0 then return d
 
@@ -245,5 +247,131 @@ memcmp(a: *byte, b: *byte, n: int) -> int
 memchr(s: *byte, c: int, n: int) -> *byte
     for var i = 0; i < n; i++
         if s[i] == c then return s + i
+
+    *byte(0)
+
+/* Search n bytes of s for c, starting from the end. */
+memrchr(s: *byte, c: int, n: int) -> *byte
+    var i = n
+
+    while i > 0
+        i--
+
+        if s[i] == c then return s + i
+
+    *byte(0)
+
+/* Copy src to dst, guaranteeing null-termination. Returns strlen(src). */
+strlcpy(dst: *byte, src: *byte, dstsize: int) -> int
+    var i = 0
+
+    if dstsize > 0
+        while i < dstsize - 1 && src[i] != 0
+            dst[i] = src[i]
+            i++
+
+        dst[i] = 0
+
+    while src[i] != 0 do i++
+
+    i
+
+/* Append src to dst, guaranteeing null-termination. Returns strlen(dst) + strlen(src). */
+strlcat(dst: *byte, src: *byte, dstsize: int) -> int
+    var dlen = 0
+
+    while dlen < dstsize && dst[dlen] != 0 do dlen++
+
+    if dlen == dstsize then return dlen + strlen(src)
+
+    var i = 0
+
+    while dlen + i + 1 < dstsize && src[i] != 0
+        dst[dlen + i] = src[i]
+        i++
+
+    dst[dlen + i] = 0
+
+    while src[i] != 0 do i++
+
+    dlen + i
+
+/* Reverse a null-terminated string in place. Returns the string pointer. */
+strrev(s: *byte) -> *byte
+    var lo = 0
+    var hi = strlen(s) - 1
+
+    while lo < hi
+        val t = s[lo]
+
+        s[lo] = s[hi]
+        s[hi] = t
+        lo++
+        hi--
+
+    s
+
+/* Extract a token from *stringp, delimited by any byte in delim.
+ * Updates *stringp to point past the delimiter (or null if end).
+ * Returns the original *stringp, or null if *stringp was null.
+ */
+strsep(stringp: **byte, delim: *byte) -> *byte
+    val s = *stringp
+
+    if s == *byte(0) then return *byte(0)
+
+    var p = s
+
+    while *p != 0
+        for var d = delim; *d != 0; d++
+            if *p == *d
+                *p = 0
+                *stringp = p + 1
+                return s
+
+        p++
+
+    *stringp = *byte(0)
+    s
+
+/* Case-insensitive comparison of two strings. Returns <0, 0, or >0. */
+strcasecmp(a: *byte, b: *byte) -> int
+    var pa = a
+    var pb = b
+
+    while *pa != 0 && *pb != 0
+        val d = tolower(int(*pa)) - tolower(int(*pb))
+
+        if d != 0 then return d
+
+        pa++
+        pb++
+
+    tolower(int(*pa)) - tolower(int(*pb))
+
+/* Case-insensitive comparison of at most n bytes. */
+strncasecmp(a: *byte, b: *byte, n: int) -> int
+    for var i = 0; i < n; i++
+        if a[i] == 0 && b[i] == 0 then return 0
+
+        val d = tolower(int(a[i])) - tolower(int(b[i]))
+
+        if d != 0 then return d
+
+        if a[i] == 0 || b[i] == 0 then return d
+
+    0
+
+/* Case-insensitive substring search. Returns pointer to match or null. */
+strcasestr(haystack: *byte, needle: *byte) -> *byte
+    if *needle == 0 then return haystack
+
+    val nlen = strlen(needle)
+    var p = haystack
+
+    while *p != 0
+        if strncasecmp(p, needle, nlen) == 0 then return p
+
+        p++
 
     *byte(0)
