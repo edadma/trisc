@@ -19,8 +19,6 @@ class SyslTriscCodegen(addresses: Int = 4):
   // Struct types that have a deinit method (populated during generate)
   private val deinitFunctions = new mutable.HashMap[String, String] // struct name → deinit function name
 
-  private var modulePrefix = ""
-
   def generate(program: TProgram): String =
     out.clear()
     labelCounter = 0
