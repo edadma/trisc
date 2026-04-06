@@ -118,15 +118,15 @@ class TFSHelperTests extends TFSTestHelpers {
     output shouldBe "Y"
   }
 
-  // ===== streq_n =====
+  // ===== entry_name_eq =====
 
-  "streq_n matching strings" in {
+  "entry_name_eq matching strings" in {
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
          |${syslBytes("a", "hello")}
          |${syslBytes("b", "hello")}
-         |    if streq_n(&a, &b, 14) == 1
+         |    if entry_name_eq(&a, 14, &b, b_len) == 1
          |        putchar(89)
          |    else
          |        putchar(78)
@@ -135,13 +135,13 @@ class TFSHelperTests extends TFSTestHelpers {
     output shouldBe "Y"
   }
 
-  "streq_n different strings" in {
+  "entry_name_eq different strings" in {
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
          |${syslBytes("a", "hello")}
          |${syslBytes("b", "world")}
-         |    if streq_n(&a, &b, 14) == 0
+         |    if entry_name_eq(&a, 14, &b, b_len) == 0
          |        putchar(89)
          |    else
          |        putchar(78)
@@ -154,14 +154,14 @@ class TFSHelperTests extends TFSTestHelpers {
 
   "strlen empty" in {
     val (_, output) = runTFS(
-      s"""import oskit.fs.*
+      s"""import posix.string.strlen
          |main() -> int
          |${syslBytes("s", "")}
-         |    val n = strlen(&s[0])
+         |    val n = strlen(s)
          |    if n == 0
-         |        putchar(89)
+         |        putchar('Y')
          |    else
-         |        putchar(78)
+         |        putchar('N')
          |    0
          |""".stripMargin, prefill = prefill)
     output shouldBe "Y"
@@ -169,14 +169,14 @@ class TFSHelperTests extends TFSTestHelpers {
 
   "strlen nonempty" in {
     val (_, output) = runTFS(
-      s"""import oskit.fs.*
+      s"""import posix.string.strlen
          |main() -> int
          |${syslBytes("s", "hello")}
-         |    val n = strlen(&s[0])
+         |    val n = strlen(s)
          |    if n == 5
-         |        putchar(89)
+         |        putchar('Y')
          |    else
-         |        putchar(78)
+         |        putchar('N')
          |    0
          |""".stripMargin, prefill = prefill)
     output shouldBe "Y"

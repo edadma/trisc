@@ -358,4 +358,82 @@ class AssemblerTests extends TestHelpers {
     cpu.run()
     cpu.r(2).read shouldBe 42
   }
+
+  // ===== Synthesized branch relaxation boundary tests =====
+  //
+  // bne/bge/etc. emit two instructions in short form:
+  //   beq rA, rB, +2    (skip bra if condition FALSE)
+  //   bra target         (take branch if condition TRUE)
+  //
+  // The relaxation check must account for the bra being 2 bytes
+  // past the start, so its displacement is (fold_offset - 2).
+
+  "bne backward branch at relaxation boundary should relax" in {
+    // Execution flow: skip past target, run through nops, bne backward to target,
+    // target sets r2=99 and halts. If bne goes to the wrong place, r2 stays 77.
+    //
+    // Layout (code starts at 160 after VECTORS):
+    //   160: bra skip           (2 bytes)
+    //   162: target: ldi r2,99  (2 bytes)
+    //   164:         halt        (2 bytes)
+    //   166: skip:   ldi r1, 1  (2 bytes)
+    //   168: <60 nops>          (120 bytes)
+    //   288: bne r1, r0, target (short form = 4 bytes)
+    //   292:         ldi r2,77  (2 bytes, reached if bne is buggy backward)
+    //   294:         halt
+    //
+    // fold offset at bne (addr 288): n = 162 - (288 + 2) = -128 (at boundary).
+    // bra's actual displacement would be -130 if not relaxed — overflows 7-bit.
+    // Without the fix: bra wraps to +63, jumps +126 bytes from bra (at 290 + 2),
+    //                  lands at 418 (garbage zeros, eventually executes halt-like 0s).
+    // With the fix: bne is relaxed to long branch, correctly reaches target → r2=99.
+    val nops = "  nop\n" * 60
+    val program = VECTORS +
+      s"""  bra skip
+         |target
+         |  ldi r2, 99
+         |  halt
+         |skip
+         |  ldi r1, 1
+         |$nops  bne r1, r0, target
+         |  ldi r2, 77
+         |  halt
+         |""".stripMargin
+    val cpu = runCPU(program)
+    cpu.r(2).read shouldBe 99
+  }
+
+  "bne backward branch just within short-form range works correctly" in {
+    // 59 nops instead of 60. fold offset = -126, actual bra disp = -128. Fits.
+    val nops = "  nop\n" * 59
+    val program = VECTORS +
+      s"""  bra skip
+         |target
+         |  ldi r2, 99
+         |  halt
+         |skip
+         |  ldi r1, 1
+         |$nops  bne r1, r0, target
+         |  ldi r2, 77
+         |  halt
+         |""".stripMargin
+    val cpu = runCPU(program)
+    cpu.r(2).read shouldBe 99
+  }
+
+  "bne forward branch at relaxation boundary should work" in {
+    // 63 nops between bne and target. fold offset = +130. Needs relaxation.
+    val nops = "  nop\n" * 63
+    val program = VECTORS +
+      s"""ldi r1, 0
+         |  bne r1, r0, target
+         |$nops  halt
+         |target
+         |  ldi r2, 42
+         |  halt
+         |""".stripMargin
+    val cpu = runCPU(program)
+    // bne r1, r0 is false (r1=0), so should NOT branch — fall through to nops then halt
+    cpu.r(2).read shouldBe 0
+  }
 }

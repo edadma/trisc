@@ -404,7 +404,7 @@ them to the TTY port.
             var reply: [1]i8
             ipc_send(port, &msg[0], 3, &reply[0], 1)
 
-    tty_puts(s: *i8, len: int)
+    tty_puts(s: *byte, len: int)
         val port = port_lookup(&tty_name[0])
         if port >= 0
             var msg: [128]i8

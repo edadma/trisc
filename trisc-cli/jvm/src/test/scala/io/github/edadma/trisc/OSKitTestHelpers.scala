@@ -25,6 +25,13 @@ object OSKitTestData {
   lazy val qsetSysl: String = readLsysl("oskit/sync/qset.lsysl")
   lazy val timerSysl: String = readLsysl("oskit/kernel/timer.lsysl")
   lazy val pimutexSysl: String = readLsysl("oskit/sync/pimutex.lsysl")
+  private def readSysl(path: String): String = scala.io.Source.fromFile(path).mkString
+
+  lazy val sbrkSysl: String = readSysl("oskit/lib/sbrk.sysl")
+  lazy val posixStringSysl: String = readSysl("posix/string/string.sysl")
+  lazy val posixCtypeSysl: String = readSysl("posix/ctype/ctype.sysl")
+  lazy val posixAllocSysl: String = readSysl("posix/stdlib/alloc.sysl")
+
   lazy val linkerScript: LinkerScript =
     LinkerScriptParser.parse(scala.io.Source.fromFile("tos/linker.ld").mkString) match
       case Right(s) => s
