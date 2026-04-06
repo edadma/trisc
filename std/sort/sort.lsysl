@@ -1,0 +1,421 @@
+std.sort — Sorting
+====================
+
+The `std.sort` module provides in-place sorting for slices.
+The core algorithm is heapsort — O(n log n) worst case, in-
+place (no allocation), and non-recursive (no stack overflow
+risk on large inputs). Heapsort is the right default for a
+systems language: predictable performance, zero memory
+overhead.
+
+The primary entry point is `sort_by`, which takes a
+comparator function pointer. Convenience wrappers `sort_int`
+and `sort_i64` provide the common cases without requiring
+the caller to pass a comparator.
+
+Dependencies: none.
+
+
+    module std.sort
+
+
+sort_by
+-------
+
+`sort_by(s, cmp)` sorts `s` in-place using the comparator
+`cmp(a, b) -> int`:
+
+- negative → `a` before `b`
+- zero → equal
+- positive → `a` after `b`
+
+The sort is **not stable** — equal elements may be reordered.
+Heapsort is inherently unstable; a stable sort (merge sort)
+requires allocation and is deferred.
+
+    sort_by[T](s: []T, cmp: func(T, T) -> int)
+        val n = len(s)
+
+        if n < 2 then return
+
+        // Phase 1: build max-heap (bottom-up)
+        var i = n / 2 - 1
+
+        while i >= 0
+            sift_down(s, i, n, cmp)
+            i--
+
+        // Phase 2: extract max repeatedly
+        var hi = n - 1
+
+        while hi > 0
+            // swap s[0] (max) with s[hi]
+            val tmp: T = s[0]
+            s[0] = s[hi]
+            s[hi] = tmp
+
+            sift_down(s, 0, hi, cmp)
+            hi--
+
+
+sift_down
+---------
+
+`sift_down` restores the max-heap property for the subtree
+rooted at index `root` within the range `[0, size)`.
+
+    sift_down[T](s: []T, root: int, size: int, cmp: func(T, T) -> int)
+        var r = root
+
+        while true
+            var largest = r
+            val left = 2 * r + 1
+            val right = 2 * r + 2
+
+            if left < size && cmp(s[left], s[largest]) > 0 then largest = left
+            if right < size && cmp(s[right], s[largest]) > 0 then largest = right
+
+            if largest == r then return
+
+            val tmp: T = s[r]
+            s[r] = s[largest]
+            s[largest] = tmp
+            r = largest
+
+
+is_sorted
+---------
+
+`is_sorted(s, cmp)` returns `true` iff `s` is in non-
+decreasing order according to `cmp`.
+
+    is_sorted[T](s: []T, cmp: func(T, T) -> int) -> bool
+        val n = len(s)
+        var i = 1
+
+        while i < n
+            if cmp(s[i - 1], s[i]) > 0 then return false
+            i++
+
+        true
+
+
+Convenience wrappers
+--------------------
+
+### cmp_int / cmp_i64
+
+Standard comparators for the common integer types.
+
+    cmp_int(a: int, b: int) -> int = a - b
+
+    cmp_i64(a: i64, b: i64) -> int
+        if a < b then -1
+        else if a > b then 1
+        else 0
+
+
+### sort_int / sort_i64
+
+    sort_int(s: []int) = sort_by(s, cmp_int)
+
+    sort_i64(s: []i64) = sort_by(s, cmp_i64)
+
+
+Use `is_sorted(s, cmp_int)` or `is_sorted(s, cmp_i64)` to
+check ordering.
+
+
+### sort_int_desc
+
+Descending sort for `[]int`. Without closures, a negating
+comparator wrapper isn't possible, so this is a dedicated
+implementation.
+
+    sort_int_desc(s: []int)
+        val n = len(s)
+
+        if n < 2 then return
+
+        // Build max-heap using reversed comparator (min-heap effect)
+        var i = n / 2 - 1
+
+        while i >= 0
+            sift_down_desc_int(s, i, n)
+            i--
+
+        var hi = n - 1
+
+        while hi > 0
+            val tmp = s[0]
+            s[0] = s[hi]
+            s[hi] = tmp
+
+            sift_down_desc_int(s, 0, hi)
+            hi--
+
+    sift_down_desc_int(s: []int, root: int, size: int)
+        var r = root
+
+        while true
+            var smallest = r
+            val left = 2 * r + 1
+            val right = 2 * r + 2
+
+            if left < size && s[left] < s[smallest] then smallest = left
+            if right < size && s[right] < s[smallest] then smallest = right
+
+            if smallest == r then return
+
+            val tmp = s[r]
+            s[r] = s[smallest]
+            s[smallest] = tmp
+            r = smallest
+
+
+Tests
+=====
+
+### sort_int
+
+    #test
+    test_sort_int_basic() -> void
+        val s = new [5]int
+        s[0] = 5
+        s[1] = 3
+        s[2] = 1
+        s[3] = 4
+        s[4] = 2
+
+        sort_int(s[:])
+
+        assert(s[0] == 1, "0")
+        assert(s[1] == 2, "1")
+        assert(s[2] == 3, "2")
+        assert(s[3] == 4, "3")
+        assert(s[4] == 5, "4")
+
+    #test
+    test_sort_int_already_sorted() -> void
+        val s = new [4]int
+        s[0] = 1
+        s[1] = 2
+        s[2] = 3
+        s[3] = 4
+
+        sort_int(s[:])
+
+        assert(s[0] == 1, "0")
+        assert(s[3] == 4, "3")
+
+    #test
+    test_sort_int_reverse() -> void
+        val s = new [4]int
+        s[0] = 4
+        s[1] = 3
+        s[2] = 2
+        s[3] = 1
+
+        sort_int(s[:])
+
+        assert(s[0] == 1, "0")
+        assert(s[3] == 4, "3")
+
+    #test
+    test_sort_int_duplicates() -> void
+        val s = new [5]int
+        s[0] = 3
+        s[1] = 1
+        s[2] = 3
+        s[3] = 1
+        s[4] = 2
+
+        sort_int(s[:])
+
+        assert(s[0] == 1, "0")
+        assert(s[1] == 1, "1")
+        assert(s[2] == 2, "2")
+        assert(s[3] == 3, "3")
+        assert(s[4] == 3, "4")
+
+    #test
+    test_sort_int_single() -> void
+        val s = new [1]int
+        s[0] = 42
+
+        sort_int(s[:])
+
+        assert(s[0] == 42, "unchanged")
+
+    #test
+    test_sort_int_empty() -> void
+        val s = new [0]int
+        sort_int(s[:])
+
+    #test
+    test_sort_int_negative() -> void
+        val s = new [5]int
+        s[0] = 3
+        s[1] = -1
+        s[2] = 0
+        s[3] = -5
+        s[4] = 2
+
+        sort_int(s[:])
+
+        assert(s[0] == -5, "0")
+        assert(s[1] == -1, "1")
+        assert(s[2] == 0, "2")
+        assert(s[3] == 2, "3")
+        assert(s[4] == 3, "4")
+
+    #test
+    test_sort_int_all_same() -> void
+        val s = new [4]int
+        s[0] = 7
+        s[1] = 7
+        s[2] = 7
+        s[3] = 7
+
+        sort_int(s[:])
+
+        assert(s[0] == 7, "0")
+        assert(s[3] == 7, "3")
+
+
+### sort_int_desc
+
+    #test
+    test_sort_int_desc() -> void
+        val s = new [5]int
+        s[0] = 1
+        s[1] = 5
+        s[2] = 3
+        s[3] = 2
+        s[4] = 4
+
+        sort_int_desc(s[:])
+
+        assert(s[0] == 5, "0")
+        assert(s[1] == 4, "1")
+        assert(s[2] == 3, "2")
+        assert(s[3] == 2, "3")
+        assert(s[4] == 1, "4")
+
+
+### is_sorted
+
+    #test
+    test_is_sorted_yes() -> void
+        val s = new [4]int
+        s[0] = 1
+        s[1] = 2
+        s[2] = 3
+        s[3] = 4
+
+        assert(is_sorted(s[:], cmp_int), "sorted")
+
+    #test
+    test_is_sorted_no() -> void
+        val s = new [3]int
+        s[0] = 1
+        s[1] = 3
+        s[2] = 2
+
+        assert(!is_sorted(s[:], cmp_int), "not sorted")
+
+    #test
+    test_is_sorted_empty() -> void
+        val s = new [0]int
+        assert(is_sorted(s[:], cmp_int), "empty is sorted")
+
+    #test
+    test_is_sorted_single() -> void
+        val s = new [1]int
+        s[0] = 42
+        assert(is_sorted(s[:], cmp_int), "single is sorted")
+
+
+### sort then verify with is_sorted
+
+    #test
+    test_sort_then_check() -> void
+        val s = new [8]int
+        s[0] = 42
+        s[1] = 7
+        s[2] = 99
+        s[3] = 1
+        s[4] = 55
+        s[5] = 3
+        s[6] = 88
+        s[7] = 12
+
+        assert(!is_sorted(s[:], cmp_int), "initially unsorted")
+        sort_int(s[:])
+        assert(is_sorted(s[:], cmp_int), "sorted after sort")
+        assert(s[0] == 1, "min")
+        assert(s[7] == 99, "max")
+
+
+### sort_by with custom comparator
+
+    cmp_desc(a: int, b: int) -> int = b - a
+
+    #test
+    test_sort_by_custom_comparator() -> void
+        val s = new [4]int
+        s[0] = 1
+        s[1] = 4
+        s[2] = 2
+        s[3] = 3
+
+        sort_by(s[:], cmp_desc)
+
+        assert(s[0] == 4, "0")
+        assert(s[1] == 3, "1")
+        assert(s[2] == 2, "2")
+        assert(s[3] == 1, "3")
+
+
+### sort_i64
+
+    #test
+    test_sort_i64() -> void
+        val s = new [4]i64
+        s[0] = 100i64
+        s[1] = 1i64
+        s[2] = 50i64
+        s[3] = 10i64
+
+        sort_i64(s[:])
+
+        assert(s[0] == 1i64, "0")
+        assert(s[1] == 10i64, "1")
+        assert(s[2] == 50i64, "2")
+        assert(s[3] == 100i64, "3")
+
+
+Design notes
+------------
+
+**Heapsort, not quicksort.** Quicksort has better average
+performance but O(n²) worst case. For a stdlib default,
+guaranteed O(n log n) is more important than a constant
+factor. Heapsort also uses no extra memory beyond the input
+slice and has no recursion depth concerns.
+
+**Function-pointer comparators.** `sort_by` takes a
+`func(T, T) -> int`. This works without closures: the
+comparator is a top-level function. When closures arrive,
+sort-by-key patterns (`sort_by_key(s, fn(x) -> x.field)`)
+will compose naturally.
+
+**No stable sort.** Merge sort (stable, O(n log n)) requires
+O(n) auxiliary memory. Deferred until there's a clear need
+and an allocation strategy (caller-provided buffer or
+stdlib-managed temp).
+
+**Descending sort.** Without closures, can't negate a
+comparator generically. `sort_int_desc` is a dedicated
+implementation. A future `reverse_cmp` wrapper will replace
+it once closures exist.
