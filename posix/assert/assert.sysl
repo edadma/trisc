@@ -1,0 +1,13 @@
+module posix.assert
+
+/*
+ * assert.sysl — Diagnostics (<assert.h>)
+ *
+ * Runtime assertion. Calls abort() if the condition is false.
+ * Unlike C's assert macro, this cannot print file/line info since
+ * Sysl has no preprocessor. The trap handler will report the fault.
+ */
+
+/* Abort execution if cond is false. */
+assert(cond: bool)
+    if !cond then abort()

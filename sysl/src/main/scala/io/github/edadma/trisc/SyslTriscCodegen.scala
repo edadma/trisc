@@ -519,6 +519,13 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitDefers()
           emitRefCleanup()
           emitEpilogue()
+        case TAsmStmt(code) =>
+          // asm as last statement: emit assembly, assume r1 is set
+          for line <- code.split("\\\\n|\\n") do
+            emit(s"  ${line.trim}")
+          emitDefers()
+          emitRefCleanup()
+          emitEpilogue()
         case other =>
           genStmt(other)
           // If no explicit return, return 0
@@ -702,7 +709,7 @@ class SyslTriscCodegen(addresses: Int = 4):
             genExpr(init) // result in r1
             // Increment refcount for copies (not for new — TNew already sets refcount=1)
             (typ, init) match
-              case (rt: SyslType.RefType, _: TNew | _: TNewArray) => // owned, no incr needed
+              case (rt: SyslType.RefType, _: TNew | _: TNewArray | _: TNewEnum) => // owned, no incr needed
               case (rt: SyslType.RefType, _) => emitRefIncr(1, refHeaderOffset(rt))
               case (SyslType.StringType, _: TBinary) => // concat result already has refcount=1
               case (SyslType.StringType, _) if needsAllocExtern =>
@@ -771,7 +778,7 @@ class SyslTriscCodegen(addresses: Int = 4):
               genExpr(value)
               // Increment only for copies, not new allocations
               value match
-                case _: TNew | _: TNewArray => // owned, no incr needed
+                case _: TNew | _: TNewArray | _: TNewEnum => // owned, no incr needed
                 case _ => emitRefIncr(1, hoff)
               emitAddImm(2, 5, local.offset)
               emitStore(1, 2, local.typ)
@@ -808,7 +815,7 @@ class SyslTriscCodegen(addresses: Int = 4):
               emitRefDecr(1, hoff, deinitFor(rt))
               genExpr(value)
               value match
-                case _: TNew | _: TNewArray =>
+                case _: TNew | _: TNewArray | _: TNewEnum =>
                 case _ => emitRefIncr(1, hoff)
               emit("  pshd r1")
               emit(s"  movi r1, $target")
@@ -1549,7 +1556,7 @@ class SyslTriscCodegen(addresses: Int = 4):
             case _ => genExpr(arg)
           arg.typ match
             case rt: SyslType.RefType => arg match
-              case _: TNew | _: TNewArray =>
+              case _: TNew | _: TNewArray | _: TNewEnum =>
               case _ => emitRefIncr(1, refHeaderOffset(rt))
             case SyslType.StringType if needsAllocExtern => arg match
               case _: TBinary =>
@@ -1629,7 +1636,7 @@ class SyslTriscCodegen(addresses: Int = 4):
               case _ => genExpr(arg)
             arg.typ match
               case rt: SyslType.RefType => arg match
-                case _: TNew | _: TNewArray =>
+                case _: TNew | _: TNewArray | _: TNewEnum =>
                 case _ => emitRefIncr(1, refHeaderOffset(rt))
               case _ =>
             // Don't reclaim temp stack space for aggregate types — r1 is a pointer into that space
@@ -1714,7 +1721,11 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TDeref(inner, typ) =>
         genExpr(inner)           // r1 = pointer address
-        emitLoad(1, 1, typ)      // load with width matching pointee type
+        typ match
+          case _: SyslType.StructType | _: SyslType.EnumType =>
+            () // aggregate: pointer IS the base address, don't load
+          case _ =>
+            emitLoad(1, 1, typ)  // scalar: load value at pointer
 
       case TIndex(array, index, elemType) if array.typ == SyslType.StringType =>
         // String indexing: bounds-checked byte access
@@ -2482,6 +2493,10 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TFloatLit(d, _) =>
         emit(s"  ldc r1, $d")
 
+      case TAsmExpr(code, _) =>
+        for line <- code.split("\\\\n|\\n") do
+          emit(s"  ${line.trim}")
+
       case TSizeof(size, _) =>
         emitLoadImm(1, size.toInt)
 
@@ -2607,6 +2622,66 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  ldd r3, r3, r0") // r3 = malloc result
           emitAddImm(2, 3, 8 + off) // r2 = field address (past header)
           emitStore(1, 2, fieldType)
+        // r1 = data pointer (past refcount header)
+        emitAddImm(1, 5, ptrOffset)
+        emit("  ldd r1, r1, r0")
+        emitAddImm(1, 1, 8)
+        // Clean up temp
+        emitAddImm(7, 7, 8)
+        stackOffset += 8
+
+      case TNewEnum(et, variantIndex, args) =>
+        // Heap-allocate ref-counted enum: [refcount_i64 | tag_i32 | padding | variant_data...]
+        val dataSize = stackSize(et)
+        val totalAlloc = dataSize + 8 // 8 bytes for refcount header
+        // Call malloc(totalAlloc) — result in r1
+        emitLoadImm(1, totalAlloc)
+        emit("  pshd r1")
+        stackOffset -= 8
+        emit("  popd r1")
+        stackOffset += 8
+        emit("  movi r4, malloc")
+        emit("  jalr r6, r4")
+        needsAllocExtern = true
+        // Null check: trap if malloc returned 0
+        val allocOk = newLabel("alloc_ok")
+        emit(s"  bne r1, r0, $allocOk")
+        emit("  ldi r1, 2")         // error code: 2 = null pointer
+        emit("  trap 1")
+        emit(s"$allocOk")
+        // r1 = allocated pointer. Save it as a temp on stack.
+        emit("  pshd r1")
+        stackOffset -= 8
+        val ptrOffset = stackOffset
+        // Initialize refcount = 1
+        emitLoadImm(2, 1)
+        emit("  std r2, r1, r0") // store refcount at [ptr+0]
+        // Zero-fill data area (past refcount header)
+        emitAddImm(1, 1, 8) // r1 = data start
+        for i <- 0 until ((dataSize + 7) & ~7) by 8 do
+          emitAddImm(2, 1, i)
+          emit("  std r0, r2, r0")
+        // Write tag (i32 at data offset 0)
+        emitLoadImm(1, variantIndex)
+        emitAddImm(2, 5, ptrOffset)
+        emit("  ldd r2, r2, r0")    // r2 = malloc result
+        emitAddImm(2, 2, 8)         // r2 = data start (past refcount)
+        emit("  stw r1, r2, r0")    // store tag
+        // Write variant fields at data + dataOffset
+        val dataOff = et.dataOffset.toInt
+        val variantFields = et.variants(variantIndex)._2
+        var fieldOff = 0
+        for (arg, i) <- args.zipWithIndex do
+          val (_, fieldType) = variantFields(i)
+          val align = stackAlign(fieldType)
+          fieldOff = ((fieldOff + align - 1) / align) * align
+          genExpr(arg) // r1 = field value
+          // Reload base pointer from stack
+          emitAddImm(3, 5, ptrOffset)
+          emit("  ldd r3, r3, r0")          // r3 = malloc result
+          emitAddImm(2, 3, 8 + dataOff + fieldOff) // r2 = field address (past header + data offset)
+          emitStore(1, 2, fieldType)
+          fieldOff += fieldType.sizeOf.toInt
         // r1 = data pointer (past refcount header)
         emitAddImm(1, 5, ptrOffset)
         emit("  ldd r1, r1, r0")

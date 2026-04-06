@@ -383,28 +383,17 @@ object SyslCli:
       System.err.println(s"error: backend '${cmd.backend}' not yet implemented (use 'interpreter')")
       throw CliError("unsupported backend")
 
-    // Derive baseDirs so each input's path is treated as the base module.
-    // For a directory input, baseDir = the PARENT directory of the directory
-    //   (so the directory's own name is included in unit names — e.g. `std/strconv/strconv`
-    //    for input `std/`, giving module name `std.strconv`).
-    // For a file input, baseDir = the parent directory of the file.
-    def parentDir(path: String): String =
-      val p = if path.endsWith("/") then path.dropRight(1) else path
-      val slash = p.lastIndexOf('/')
-      if slash < 0 then "." else p.substring(0, slash)
-    val baseDirs = cmd.inputs.map(p => parentDir(p)).distinct.toList match
-      case Nil  => List(".")
-      case dirs => dirs
-    // Collect sources using each input's baseDir so unit names come out relative.
+    // Always use project root as base so module paths resolve correctly.
+    // e.g. std/regex/regex.lsysl → key "std/regex/regex" → module "std.regex"
+    // This works regardless of input depth (std/, std/regex/, std/regex/regex.lsysl).
+    val baseDirs = List(".")
     val sources: Map[String, String] =
       cmd.inputs.flatMap { p =>
         if !io.exists(p) then fail(s"error: file not found: $p")
-        val parent = parentDir(p)
-        val baseDir = if parent == "." then "" else parent + "/"
         if io.isDirectory(p) then
-          collectSyslFiles(p).map(f => resolveSource(f, baseDir))
+          collectSyslFiles(p).map(f => resolveSource(f, ""))
         else
-          List(resolveSource(p, baseDir))
+          List(resolveSource(p, ""))
       }.toMap
     val driver = new SyslDriver(Some(io), baseDirs)
     val result = driver.compile(sources)

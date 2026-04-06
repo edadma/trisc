@@ -654,6 +654,7 @@ class SyslParser extends StandardTokenParsers {
       "true" ^^^ BoolLitAST(true) |
       "false" ^^^ BoolLitAST(false) |
       "[" ~> rep1sep(expr, ",") <~ "]" ^^ ArrayLitAST.apply |
+      "asm" ~> "(" ~> stringLit <~ ")" ^^ AsmExprAST.apply |
       "sizeof" ~> "(" ~> sizeofArg <~ ")" |
       "new" ~> "[" ~> expr ~ ("]" ~> typeRef) ^^ { case size ~ elemType => NewArrayAST(size, elemType) } |
       "new" ~> ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => NewExprAST(name, args) } |

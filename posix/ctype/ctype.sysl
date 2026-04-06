@@ -1,0 +1,57 @@
+module posix.ctype
+
+/*
+ * ctype.sysl — Character classification and conversion (<ctype.h>)
+ *
+ * All functions take an int (character value) and return an int
+ * (nonzero for true, zero for false), matching POSIX signatures.
+ * Assumes ASCII encoding.
+ */
+
+/* Test for an alphabetic character. */
+isalpha(c: int) -> int = int((int('A') <= c <= int('Z')) || (int('a') <= c <= int('z')))
+
+/* Test for a decimal digit. */
+isdigit(c: int) -> int = int(int('0') <= c <= int('9'))
+
+/* Test for an alphanumeric character. */
+isalnum(c: int) -> int = int(isalpha(c) != 0 || isdigit(c) != 0)
+
+/* Test for a whitespace character. */
+isspace(c: int) -> int = int(c == int(' ') || c == int('\t') || c == int('\n') || c == int('\r') || c == 0x0B || c == 0x0C)
+
+/* Test for an uppercase letter. */
+isupper(c: int) -> int = int(int('A') <= c <= int('Z'))
+
+/* Test for a lowercase letter. */
+islower(c: int) -> int = int(int('a') <= c <= int('z'))
+
+/* Test for a printable character including space. */
+isprint(c: int) -> int = int(int(' ') <= c <= int('~'))
+
+/* Test for any printable character except space. */
+isgraph(c: int) -> int = int(int('!') <= c <= int('~'))
+
+/* Test for a punctuation character. */
+ispunct(c: int) -> int = int(isgraph(c) != 0 && isalnum(c) == 0)
+
+/* Test for a control character. */
+iscntrl(c: int) -> int = int(c < 0x20 || c == 0x7F)
+
+/* Test for a hexadecimal digit. */
+isxdigit(c: int) -> int = int((int('0') <= c <= int('9')) || (int('A') <= c <= int('F')) || (int('a') <= c <= int('f')))
+
+/* Test for a blank character (space or tab). */
+isblank(c: int) -> int = int(c == int(' ') || c == int('\t'))
+
+/* Convert uppercase letter to lowercase. */
+tolower(c: int) -> int
+    c match
+        int('A')..int('Z') -> c + 32
+        _ -> c
+
+/* Convert lowercase letter to uppercase. */
+toupper(c: int) -> int
+    c match
+        int('a')..int('z') -> c - 32
+        _ -> c
