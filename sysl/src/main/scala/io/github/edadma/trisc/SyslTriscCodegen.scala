@@ -15,13 +15,13 @@ class SyslTriscCodegen(addresses: Int = 4):
     s".${prefix}_$labelCounter"
 
   // Struct types that have a deinit method (populated during generate)
-  private val deinitTypes = new mutable.HashSet[String]
+  private val deinitFunctions = new mutable.HashMap[String, String] // struct name → deinit function name
 
   def generate(program: TProgram): String =
     out.clear()
     labelCounter = 0
     stringLiterals.clear()
-    deinitTypes.clear()
+    deinitFunctions.clear()
     needsAllocExtern = false
     needsStrInt = false
     needsStrFloat = false
@@ -30,7 +30,10 @@ class SyslTriscCodegen(addresses: Int = 4):
     for decl <- program.decls do
       decl match
         case TFunDecl(name, _, _, _, _, _) if name.endsWith("_deinit") =>
-          deinitTypes += name.dropRight(7) // remove "_deinit" suffix
+          val structName = name.indexOf("__") match
+            case -1 => name.dropRight(7)
+            case i  => name.substring(i + 2).dropRight(7)
+          deinitFunctions(structName) = name
         case _ =>
 
     // Emit entry point and global directives from module metadata
@@ -303,8 +306,8 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   // Get deinit function name for a ref type, if one exists
   private def deinitFor(typ: SyslType): Option[String] = typ match
-    case SyslType.RefType(SyslType.StructType(name, _)) if deinitTypes.contains(name) =>
-      Some(s"${name}_deinit")
+    case SyslType.RefType(SyslType.StructType(name, _)) if deinitFunctions.contains(name) =>
+      Some(deinitFunctions(name))
     case _ => None
 
   // Emit refcount increment: ptr in rPtr, refcount is at [rPtr - headerOffset]
@@ -880,6 +883,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitLoad(1, 2, local.typ)
           emit("  popd r3")
           emitBinOp(op)
+          emitNarrow(1, local.typ)
           emitAddImm(2, 5, local.offset)
           emitStore(1, 2, local.typ)
         else
@@ -888,6 +892,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitLoad(1, 2, gtyp)
           emit("  popd r3")
           emitBinOp(op)
+          emitNarrow(1, gtyp)
           emit(s"  movi r2, $target")
           emitStore(1, 2, gtyp)
 
@@ -1055,7 +1060,8 @@ class SyslTriscCodegen(addresses: Int = 4):
           case "^"  => emit("  xor r2, r2, r1")
           case "<<" => emit("  lsl r2, r2, r1")
           case ">>" => emit("  asr r2, r2, r1")
-        // Step 5: store result (field address is safely on stack)
+        // Step 5: truncate narrow unsigned, then store (field address is safely on stack)
+        emitNarrow(2, fieldType)
         emit("  popd r1")        // r1 = field address
         emitStore(2, 1, fieldType)
 
@@ -1302,7 +1308,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         if op == "+" then emit("  add r1, r2, r1")
         else emit("  sub r1, r2, r1")
 
-      case TBinary(left, op, right, _) =>
+      case TBinary(left, op, right, resultType) =>
         genExpr(left)        // r1 = left
         emit("  pshd r1")   // save left on stack
         genExpr(right)       // r1 = right
@@ -1377,52 +1383,98 @@ class SyslTriscCodegen(addresses: Int = 4):
               emit(if unsigned then "  sltu r1, r1, r2" else "  slt r1, r1, r2")
               emit("  ldi r3, 1")
               emit("  xor r1, r1, r3") // flip
+          // Truncate narrow unsigned results after arithmetic ops
+          if !isFloat then
+            op match
+              case "+" | "-" | "*" | "/" | "%" | "<<" | "~" =>
+                resultType match
+                  case SyslType.UIntType(8)  => emit("  zeb r1, r1")
+                  case SyslType.UIntType(16) => emit("  zes r1, r1")
+                  case SyslType.UIntType(32) => emit("  zew r1, r1")
+                  case _ =>
+              case _ => // comparisons, bitwise &/|/^, >> — no truncation needed
 
       case TPreInc(name, typ) =>
         val step = typ match
           case SyslType.PtrType(pointee) => stackSize(pointee).max(1)
           case SyslType.ArrayType(elem, _) => stackSize(elem).max(1)
           case _ => 1
-        val local = locals(name)
-        emitAddImm(2, 5, local.offset)
-        emitLoad(1, 2, local.typ)
-        emit(s"  addi r1, r1, $step")
-        emitAddImm(2, 5, local.offset)
-        emitStore(1, 2, local.typ)
+        if locals != null && locals.contains(name) then
+          val local = locals(name)
+          emitAddImm(2, 5, local.offset)
+          emitLoad(1, 2, local.typ)
+          emit(s"  addi r1, r1, $step")
+          emitNarrow(1, typ)
+          emitAddImm(2, 5, local.offset)
+          emitStore(1, 2, local.typ)
+        else
+          emit(s"  movi r2, $name")
+          emitLoad(1, 2, typ)
+          emit(s"  addi r1, r1, $step")
+          emitNarrow(1, typ)
+          emit(s"  movi r2, $name")
+          emitStore(1, 2, typ)
 
       case TPreDec(name, typ) =>
         val step = typ match
           case SyslType.PtrType(pointee) => stackSize(pointee).max(1)
           case SyslType.ArrayType(elem, _) => stackSize(elem).max(1)
           case _ => 1
-        val local = locals(name)
-        emitAddImm(2, 5, local.offset)
-        emitLoad(1, 2, local.typ)
-        emit(s"  addi r1, r1, -$step")
-        emitAddImm(2, 5, local.offset)
-        emitStore(1, 2, local.typ)
+        if locals != null && locals.contains(name) then
+          val local = locals(name)
+          emitAddImm(2, 5, local.offset)
+          emitLoad(1, 2, local.typ)
+          emit(s"  addi r1, r1, -$step")
+          emitNarrow(1, typ)
+          emitAddImm(2, 5, local.offset)
+          emitStore(1, 2, local.typ)
+        else
+          emit(s"  movi r2, $name")
+          emitLoad(1, 2, typ)
+          emit(s"  addi r1, r1, -$step")
+          emitNarrow(1, typ)
+          emit(s"  movi r2, $name")
+          emitStore(1, 2, typ)
 
       case TPostInc(name, typ) =>
         val step = typ match
           case SyslType.PtrType(pointee) => stackSize(pointee).max(1)
           case SyslType.ArrayType(elem, _) => stackSize(elem).max(1)
           case _ => 1
-        val local = locals(name)
-        emitAddImm(2, 5, local.offset)
-        emitLoad(1, 2, local.typ)
-        emit(s"  addi r3, r1, $step")
-        emitStore(3, 2, local.typ)
+        if locals != null && locals.contains(name) then
+          val local = locals(name)
+          emitAddImm(2, 5, local.offset)
+          emitLoad(1, 2, local.typ)
+          emit(s"  addi r3, r1, $step")
+          emitNarrow(3, typ)
+          emitStore(3, 2, local.typ)
+        else
+          emit(s"  movi r2, $name")
+          emitLoad(1, 2, typ)
+          emit(s"  addi r3, r1, $step")
+          emitNarrow(3, typ)
+          emit(s"  movi r2, $name")
+          emitStore(3, 2, typ)
 
       case TPostDec(name, typ) =>
         val step = typ match
           case SyslType.PtrType(pointee) => stackSize(pointee).max(1)
           case SyslType.ArrayType(elem, _) => stackSize(elem).max(1)
           case _ => 1
-        val local = locals(name)
-        emitAddImm(2, 5, local.offset)
-        emitLoad(1, 2, local.typ)
-        emit(s"  addi r3, r1, -$step")
-        emitStore(3, 2, local.typ)
+        if locals != null && locals.contains(name) then
+          val local = locals(name)
+          emitAddImm(2, 5, local.offset)
+          emitLoad(1, 2, local.typ)
+          emit(s"  addi r3, r1, -$step")
+          emitNarrow(3, typ)
+          emitStore(3, 2, local.typ)
+        else
+          emit(s"  movi r2, $name")
+          emitLoad(1, 2, typ)
+          emit(s"  addi r3, r1, -$step")
+          emitNarrow(3, typ)
+          emit(s"  movi r2, $name")
+          emitStore(3, 2, typ)
 
       case TCast(TStringLit(value, _), target) if target.isInstanceOf[SyslType.PtrType] =>
         // String literal → *i8 decay: emit data pointer directly, no fat pointer needed
@@ -1476,10 +1528,12 @@ class SyslTriscCodegen(addresses: Int = 4):
             // no-op — already 64-bit
           case _ =>
 
-      case TUnary("-", operand, _) =>
+      case TUnary("-", operand, resultType) =>
         genExpr(operand)
         if operand.typ == SyslType.DoubleType then emit("  fneg r1, r1")
-        else emit("  neg r1, r1")
+        else
+          emit("  neg r1, r1")
+          emitNarrow(1, resultType)
 
       case TUnary("!", operand, _) =>
         genExpr(operand)
@@ -1492,9 +1546,10 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  ldi r1, 1")
         emit(s"$end")
 
-      case TUnary("~", operand, _) =>
+      case TUnary("~", operand, resultType) =>
         genExpr(operand)
         emit("  not r1, r1")
+        emitNarrow(1, resultType)
 
       case TFuncRef(name, _) =>
         emit(s"  movi r1, $name") // r1 = address of function
@@ -2791,6 +2846,16 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case other =>
         throw new RuntimeException(s"codegen: unhandled expression type: ${other.getClass.getSimpleName}")
+
+  // Emit truncation for narrow integer types after arithmetic (no-op for i64/u64)
+  private def emitNarrow(reg: Int, typ: SyslType): Unit = typ match
+    case SyslType.UIntType(8)  => emit(s"  zeb r$reg, r$reg")
+    case SyslType.UIntType(16) => emit(s"  zes r$reg, r$reg")
+    case SyslType.UIntType(32) => emit(s"  zew r$reg, r$reg")
+    case SyslType.IntType(8)   => emit(s"  seb r$reg, r$reg")
+    case SyslType.IntType(16)  => emit(s"  ses r$reg, r$reg")
+    case SyslType.IntType(32)  => emit(s"  sew r$reg, r$reg")
+    case _ =>
 
   // Emit reg = base + offset, handling large offsets that don't fit in addi
   private def emitAddImm(destReg: Int, baseReg: Int, offset: Int): Unit =

@@ -53,6 +53,15 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
     val moduleToSources = modules.groupMap(_._2)(_._1).map((k, v) => (k, v.toSet))
     val order = topologicalSort(imports, sources.keySet, moduleToSources)
 
+    // Step 4b-pre: Collect all extern function names across all sources.
+    // Extern declarations are ABI promises — the named function must be
+    // linkable by its unmangled name, even if defined in a different module.
+    val globalExternNames: Set[String] =
+      asts.values.flatMap(_.decls.collect {
+        case ExternFuncDeclAST(name, _, _, _) => name
+        case ExternVarDeclAST(name, _, _) => name
+      }).toSet
+
     // Step 4b: Pre-collect declarations for intra-module visibility
     // Iteratively analyze module files to extract declarations. Each round
     // makes previously collected symbols available to unresolved files.
@@ -69,7 +78,8 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
           scala.util.Try {
             val ast = asts(name)
             val analyzer = new SyslAnalyzer
-            // Register already-collected sibling symbols, excluding externs
+            // Register extern names so they are never mangled (ABI-level symbols)
+            analyzer.registerNoMangle(globalExternNames)
             val siblings = new ModuleMeta(meta.symbols.filter(s => !s.isExtern))
             analyzer.registerImport(siblings)
             val typed = analyzer.analyze(ast)
@@ -91,8 +101,11 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
       val ast = asts(name)
       val analyzer = new SyslAnalyzer
 
+      // Register extern names so they are never mangled (ABI-level symbols)
+      analyzer.registerNoMangle(globalExternNames)
+
       // Register same-module siblings (intra-module visibility),
-      // excluding own symbols and externs (which are private to each file)
+      // excluding own symbols and externs (which are private to each file).
       for modPath <- modules.get(name) do
         packageMetaCache.get(modPath).foreach { meta =>
           val siblings = new ModuleMeta(meta.symbols.filter(s => s.sourceFile != Some(s"$name.sysl") && !s.isExtern))

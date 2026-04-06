@@ -4,6 +4,7 @@ class SyslCodegenAllocTests extends SyslCodegenHelpers {
 
   private val allocSource = scala.io.Source.fromFile("posix/stdlib/alloc.sysl").mkString
   private val stringSource = scala.io.Source.fromFile("posix/string/string.sysl").mkString
+  private val ctypeSource = scala.io.Source.fromFile("posix/ctype/ctype.sysl").mkString
 
   // Bare-metal sbrk backed by a static array
   private def sbrkModule(heapSize: Int = 16384): String =
@@ -33,6 +34,7 @@ class SyslCodegenAllocTests extends SyslCodegenHelpers {
     Map(
       "posix/unistd/sbrk" -> sbrkModule(heapSize),
       "posix/string/string" -> stringSource,
+      "posix/ctype/ctype" -> ctypeSource,
       "posix/stdlib/alloc" -> allocSource,
       "main" -> mainSource,
     )
@@ -90,6 +92,7 @@ class SyslCodegenAllocTests extends SyslCodegenHelpers {
     compileMultiAndRun(Map(
       "posix/unistd/sbrk" -> failSbrk,
       "posix/string/string" -> stringSource,
+      "posix/ctype/ctype" -> ctypeSource,
       "posix/stdlib/alloc" -> allocSource,
       "main" ->
         """import posix.stdlib.*

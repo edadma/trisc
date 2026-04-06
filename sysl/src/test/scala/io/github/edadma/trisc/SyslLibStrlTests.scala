@@ -4,6 +4,7 @@ class SyslLibStrlTests extends SyslTestHelpers {
 
   val libs: Map[String, String] = Map(
     "posix/string/string" -> readSysl("posix/string/string.sysl"),
+    "posix/ctype/ctype" -> readSysl("posix/ctype/ctype.sysl"),
     "posix/stdlib/stdlib" -> readSysl("posix/stdlib/stdlib.sysl"),
   )
 
