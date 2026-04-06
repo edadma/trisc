@@ -667,4 +667,89 @@ class SyslCodegenStringTests extends SyslCodegenHelpers {
         |    len(s)
         |""".stripMargin, heapSize = 4096)) shouldBe 50
   }
+
+  // ===== Cross-module string label uniqueness =====
+
+  "string labels unique across modules" in {
+    // Two separate modules both produce string literals.
+    // Before the module-prefix fix, both would generate __str_1, __str_2, etc.
+    // causing a linker "duplicate symbol" error.
+    compileMultiAndRun(Map(
+      "mod_a/lib" ->
+        """module mod_a
+          |
+          |get_a() -> string = "alpha"
+          |""".stripMargin,
+      "mod_b/lib" ->
+        """module mod_b
+          |
+          |get_b() -> string = "bravo"
+          |""".stripMargin,
+      "main" ->
+        """import mod_a.*
+          |import mod_b.*
+          |
+          |main() -> int
+          |    val a = get_a()
+          |    val b = get_b()
+          |    len(a) + len(b)
+          |""".stripMargin
+    )) shouldBe 10  // "alpha" (5) + "bravo" (5)
+  }
+
+  "string labels unique with many strings per module" in {
+    // Both modules produce multiple string literals, maximizing collision risk.
+    compileMultiAndRun(Map(
+      "mod_x/lib" ->
+        """module mod_x
+          |
+          |sum_x() -> int
+          |    val a = "one"
+          |    val b = "two"
+          |    val c = "three"
+          |    len(a) + len(b) + len(c)
+          |""".stripMargin,
+      "mod_y/lib" ->
+        """module mod_y
+          |
+          |sum_y() -> int
+          |    val a = "four"
+          |    val b = "five"
+          |    val c = "six"
+          |    len(a) + len(b) + len(c)
+          |""".stripMargin,
+      "main" ->
+        """import mod_x.*
+          |import mod_y.*
+          |
+          |main() -> int = sum_x() + sum_y()
+          |""".stripMargin
+    )) shouldBe 22  // 3+3+5 + 4+4+3
+  }
+
+  "string-to-pointer decay labels unique across modules" in {
+    // Tests the TCast(TStringLit → PtrType) path, which also generates __str_ labels.
+    compileMultiAndRun(Map(
+      "mod_p/lib" ->
+        """module mod_p
+          |
+          |private byte_p(s: *i8) -> int = s[0]
+          |
+          |get_p() -> int = byte_p("hello")
+          |""".stripMargin,
+      "mod_q/lib" ->
+        """module mod_q
+          |
+          |private byte_q(s: *i8) -> int = s[0]
+          |
+          |get_q() -> int = byte_q("world")
+          |""".stripMargin,
+      "main" ->
+        """import mod_p.*
+          |import mod_q.*
+          |
+          |main() -> int = get_p() + get_q()
+          |""".stripMargin
+    )) shouldBe 'h' + 'w'  // 104 + 119 = 223
+  }
 }
