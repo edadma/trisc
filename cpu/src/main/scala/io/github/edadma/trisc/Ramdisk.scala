@@ -93,7 +93,6 @@ class Ramdisk(
 
     cmd match
       case CMD_READ =>
-        println(f"[RD] READ lba=$lba addr=0x$addr%06x count=$count first4=${(0 until 4.min(byteCount)).map(i => f"${disk(diskOffset + i) & 0xFF}%02x").mkString(" ")}")
         var i = 0
         while i < byteCount do
           mem.writeByte(addr.toLong + i, disk(diskOffset + i))
