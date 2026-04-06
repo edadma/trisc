@@ -26,6 +26,7 @@ class SyslAnalyzer:
   private val externalSymbols = new mutable.LinkedHashSet[String]
   private var scopeStack: mutable.ArrayBuffer[mutable.LinkedHashMap[String, SymInfo]] = null
   private var loopDepth: Int = 0
+  private var currentReturnType: SyslType = VoidType
 
   // Module-path name mangling: set from ModuleDeclAST during analyze()
   private var currentModule: Option[String] = None // e.g. "std_strings"
@@ -438,6 +439,8 @@ class SyslAnalyzer:
         scopeStack = new mutable.ArrayBuffer
         pushScope()
         val funInfo = functions(name)
+        val savedReturnType = currentReturnType
+        currentReturnType = funInfo.returnType
         for (paramName, paramType) <- funInfo.params do
           currentScope(paramName) = SymInfo(paramName, paramType, true)
           // Auto-alias the implicit method receiver: `self` -> `__self__`
@@ -452,6 +455,7 @@ class SyslAnalyzer:
           case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
         finally currentExpected = savedExp
         val tParams = funInfo.params.map((n, t) => TParam(n, t))
+        currentReturnType = savedReturnType
         scopeStack = null
         validateTestAttr(fdAst, funInfo)
         TFunDecl(funInfo.name, tParams, funInfo.returnType, tBody, isPrivate, attrs)
@@ -1097,6 +1101,9 @@ class SyslAnalyzer:
         val tElems = elements.map(analyzeExpr)
         val elemType = tElems.head.typ
         TArrayLit(tElems, SyslType.ArrayType(elemType, tElems.length))
+
+      case AsmExprAST(code) =>
+        TAsmExpr(code, currentReturnType)
 
       case SizeofTypeAST(typAST) =>
         val t = resolveType(typAST)

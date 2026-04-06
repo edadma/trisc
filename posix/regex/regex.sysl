@@ -1,0 +1,373 @@
+module posix.regex
+
+/*
+ * regex.sysl — POSIX regex API (<regex.h>)
+ *
+ * Thin wrapper around std.regex providing the standard
+ * regcomp/regexec/regfree/regerror interface.
+ */
+
+import std.regex.*
+
+/* ===== Flags for regcomp (cflags) ===== */
+
+val REG_EXTENDED = 1    /* Use ERE (default is BRE) */
+val REG_ICASE = 2       /* Case-insensitive matching (not yet implemented) */
+val REG_NOSUB = 4       /* Don't report match positions */
+val REG_NEWLINE = 8     /* Newline-sensitive matching (not yet implemented) */
+
+/* ===== Flags for regexec (eflags) ===== */
+
+val REG_NOTBOL = 1      /* ^ doesn't match start of string */
+val REG_NOTEOL = 2      /* $ doesn't match end of string */
+
+/* ===== Error codes ===== */
+
+val REG_OK = 0          /* Success */
+val REG_NOMATCH = 1     /* No match */
+val REG_BADPAT = 2      /* Invalid regular expression */
+val REG_ECOLLATE = 3    /* Invalid collating element */
+val REG_ECTYPE = 4      /* Invalid character class name */
+val REG_EESCAPE = 5     /* Trailing backslash */
+val REG_ESUBREG = 6     /* Invalid back reference */
+val REG_EBRACK = 7      /* Unmatched [ */
+val REG_EPAREN = 8      /* Unmatched ( or \( */
+val REG_EBRACE = 9      /* Unmatched { or \{ */
+val REG_BADBR = 10      /* Invalid contents of {} */
+val REG_ERANGE = 11     /* Invalid range endpoint */
+val REG_ESPACE = 12     /* Out of memory */
+val REG_BADRPT = 13     /* Invalid preceding regex */
+
+/* ===== Types ===== */
+
+/*
+ * regex_t — compiled regular expression.
+ *
+ * Opaque to the caller. Holds the compiled VM instructions,
+ * character class definitions, and group count from the
+ * underlying std.regex engine.
+ */
+struct regex_t
+    insts: []Inst
+    classes: []CharClass
+    n_groups: int
+    cflags: int
+    nosub: bool
+
+/*
+ * regmatch_t — match offset pair.
+ *
+ * rm_so is the start offset, rm_eo is the end offset (one
+ * past the last matched character). Set to -1 if the group
+ * did not participate in the match.
+ */
+struct regmatch_t
+    rm_so: int
+    rm_eo: int
+
+/* ===== Functions ===== */
+
+/*
+ * regcomp — compile a regular expression.
+ *
+ * Returns REG_OK (0) on success, or an error code.
+ * The compiled regex is stored in *preg.
+ */
+regcomp(preg: *regex_t, pattern: string, cflags: int) -> int
+    var root: int
+    var nodes: []Node
+    var classes: []CharClass
+    var n_groups: int
+    var err: bool
+    var err_msg: string
+    var err_pos: int
+
+    if cflags & REG_EXTENDED != 0
+        root, nodes, classes, n_groups, err, err_msg, err_pos = parse_regex(pattern)
+    else
+        root, nodes, classes, n_groups, err, err_msg, err_pos = parse_bre(pattern)
+
+    if err then return REG_BADPAT
+
+    preg.insts = compile(root, nodes, n_groups)
+    preg.classes = classes
+    preg.n_groups = n_groups
+    preg.cflags = cflags
+    preg.nosub = (cflags & REG_NOSUB) != 0
+
+    REG_OK
+
+/*
+ * regexec — execute a compiled regex against a string.
+ *
+ * Fills pmatch[0..nmatch-1] with match offsets.
+ * Returns REG_OK (0) on match, REG_NOMATCH (1) otherwise.
+ */
+regexec(preg: *regex_t, input: string, nmatch: int, pmatch: []regmatch_t, eflags: int) -> int
+    val m = exec(preg.insts, preg.classes, input, preg.n_groups)
+
+    if !m.matched() then return REG_NOMATCH
+
+    if !preg.nosub
+        /* Fill match array */
+        val n = if nmatch < m.n_groups then nmatch else m.n_groups
+
+        for var i = 0; i < n; i++
+            start, en = m.group(i)
+            pmatch[i] = regmatch_t(start, en)
+
+        /* Clear remaining entries */
+        for var i = n; i < nmatch; i++
+            pmatch[i] = regmatch_t(-1, -1)
+
+    REG_OK
+
+/*
+ * regfree — free a compiled regex.
+ *
+ * No-op in a garbage-collected language, but provided for
+ * API completeness.
+ */
+regfree(preg: *regex_t)
+    return
+
+/*
+ * regerror — map an error code to a human-readable message.
+ *
+ * Returns the length of the error message (including NUL).
+ * If errbuf is provided and errbuf_size > 0, copies the
+ * message into errbuf. For now, returns a static string
+ * since we don't have snprintf yet.
+ */
+regerror(errcode: int, preg: *regex_t) -> string
+    errcode match
+        0 -> "success"
+        1 -> "no match"
+        2 -> "invalid regular expression"
+        3 -> "invalid collating element"
+        4 -> "invalid character class name"
+        5 -> "trailing backslash"
+        6 -> "invalid back reference"
+        7 -> "unmatched ["
+        8 -> "unmatched ( or \\("
+        9 -> "unmatched { or \\{"
+        10 -> "invalid contents of {}"
+        11 -> "invalid range endpoint"
+        12 -> "out of memory"
+        13 -> "invalid preceding regular expression"
+        _ -> "unknown error"
+
+
+/* ===== Tests ===== */
+
+#test
+test_regcomp_ere() -> void
+    var re: regex_t
+    val rc = regcomp(&re, "hello", REG_EXTENDED)
+
+    assert(rc == REG_OK, "compiles ok")
+
+#test
+test_regcomp_bre() -> void
+    var re: regex_t
+    val rc = regcomp(&re, "hello", 0)
+
+    assert(rc == REG_OK, "compiles ok")
+
+#test
+test_regcomp_bad_pattern() -> void
+    var re: regex_t
+    val rc = regcomp(&re, "[abc", REG_EXTENDED)
+
+    assert(rc == REG_BADPAT, "bad pattern")
+
+#test
+test_regexec_match() -> void
+    var re: regex_t
+
+    regcomp(&re, "hello", REG_EXTENDED)
+
+    val _pm = new [1]regmatch_t
+    var pm = _pm[:1]
+    val rc = regexec(&re, "say hello world", 1, pm, 0)
+
+    assert(rc == REG_OK, "matches")
+    assert(pm[0].rm_so == 4, s"start=4, got ${pm[0].rm_so}")
+    assert(pm[0].rm_eo == 9, s"end=9, got ${pm[0].rm_eo}")
+
+#test
+test_regexec_no_match() -> void
+    var re: regex_t
+
+    regcomp(&re, "xyz", REG_EXTENDED)
+
+    val _pm = new [1]regmatch_t
+    var pm = _pm[:1]
+    val rc = regexec(&re, "hello", 1, pm, 0)
+
+    assert(rc == REG_NOMATCH, "no match")
+
+#test
+test_regexec_groups() -> void
+    var re: regex_t
+
+    regcomp(&re, "([a-z]+)@([a-z]+)", REG_EXTENDED)
+
+    val _pm = new [3]regmatch_t
+    var pm = _pm[:3]
+    val rc = regexec(&re, "user@host", 3, pm, 0)
+
+    assert(rc == REG_OK, "matches")
+    assert(pm[0].rm_so == 0, "full match start")
+    assert(pm[0].rm_eo == 9, "full match end")
+    assert(pm[1].rm_so == 0, "group 1 start")
+    assert(pm[1].rm_eo == 4, s"group 1 end=4, got ${pm[1].rm_eo}")
+    assert(pm[2].rm_so == 5, "group 2 start")
+    assert(pm[2].rm_eo == 9, s"group 2 end=9, got ${pm[2].rm_eo}")
+
+#test
+test_regexec_bre_groups() -> void
+    var re: regex_t
+
+    regcomp(&re, "\\([a-z]*\\)@\\([a-z]*\\)", 0)
+
+    val _pm = new [3]regmatch_t
+    var pm = _pm[:3]
+    val rc = regexec(&re, "user@host", 3, pm, 0)
+
+    assert(rc == REG_OK, "BRE matches")
+    assert(pm[1].rm_so == 0, "group 1 start")
+    assert(pm[1].rm_eo == 4, "group 1 end")
+    assert(pm[2].rm_so == 5, "group 2 start")
+    assert(pm[2].rm_eo == 9, "group 2 end")
+
+#test
+test_regexec_nosub() -> void
+    var re: regex_t
+
+    regcomp(&re, "(hello)", REG_EXTENDED | REG_NOSUB)
+
+    val _pm = new [2]regmatch_t
+    var pm = _pm[:2]
+    val rc = regexec(&re, "hello", 2, pm, 0)
+
+    assert(rc == REG_OK, "matches with NOSUB")
+
+#test
+test_regexec_anchored() -> void
+    var re: regex_t
+
+    regcomp(&re, "^hello$", REG_EXTENDED)
+
+    val _pm = new [1]regmatch_t
+    var pm = _pm[:1]
+
+    assert(regexec(&re, "hello", 1, pm, 0) == REG_OK, "exact match")
+    assert(regexec(&re, "hello world", 1, pm, 0) == REG_NOMATCH, "no suffix match")
+    assert(regexec(&re, "say hello", 1, pm, 0) == REG_NOMATCH, "no prefix match")
+
+#test
+test_regexec_intervals() -> void
+    var re: regex_t
+
+    regcomp(&re, "^a{2,4}$", REG_EXTENDED)
+
+    val _pm = new [1]regmatch_t
+    var pm = _pm[:1]
+
+    assert(regexec(&re, "a", 1, pm, 0) == REG_NOMATCH, "too few")
+    assert(regexec(&re, "aa", 1, pm, 0) == REG_OK, "min")
+    assert(regexec(&re, "aaa", 1, pm, 0) == REG_OK, "mid")
+    assert(regexec(&re, "aaaa", 1, pm, 0) == REG_OK, "max")
+    assert(regexec(&re, "aaaaa", 1, pm, 0) == REG_NOMATCH, "too many")
+
+#test
+test_regexec_alternation() -> void
+    var re: regex_t
+
+    regcomp(&re, "cat|dog", REG_EXTENDED)
+
+    val _pm = new [1]regmatch_t
+    var pm = _pm[:1]
+
+    assert(regexec(&re, "the cat", 1, pm, 0) == REG_OK, "cat matches")
+    assert(regexec(&re, "the dog", 1, pm, 0) == REG_OK, "dog matches")
+    assert(regexec(&re, "the bird", 1, pm, 0) == REG_NOMATCH, "bird doesn't")
+
+#test
+test_regexec_named_class() -> void
+    var re: regex_t
+
+    regcomp(&re, "^[[:digit:]]+$", REG_EXTENDED)
+
+    val _pm = new [1]regmatch_t
+    var pm = _pm[:1]
+
+    assert(regexec(&re, "12345", 1, pm, 0) == REG_OK, "digits match")
+    assert(regexec(&re, "123abc", 1, pm, 0) == REG_NOMATCH, "mixed doesn't")
+
+#test
+test_regexec_nmatch_zero() -> void
+    var re: regex_t
+
+    regcomp(&re, "(a)(b)", REG_EXTENDED)
+
+    val _pm = new [1]regmatch_t
+    var pm = _pm[:1]
+
+    /* nmatch=0 means don't care about positions */
+    val _empty = new [1]regmatch_t
+    var empty = _empty[:0]
+    val rc = regexec(&re, "ab", 0, empty, 0)
+
+    assert(rc == REG_OK, "matches even with nmatch=0")
+
+#test
+test_regexec_partial_nmatch() -> void
+    var re: regex_t
+
+    regcomp(&re, "((a)(b)(c))", REG_EXTENDED)
+
+    /* Only ask for 2 matches (group 0 and 1), ignore groups 2-4 */
+    val _pm = new [2]regmatch_t
+    var pm = _pm[:2]
+    val rc = regexec(&re, "abc", 2, pm, 0)
+
+    assert(rc == REG_OK, "matches")
+    assert(pm[0].rm_so == 0, "group 0 start")
+    assert(pm[0].rm_eo == 3, "group 0 end")
+    assert(pm[1].rm_so == 0, "group 1 start")
+    assert(pm[1].rm_eo == 3, "group 1 end")
+
+#test
+test_regfree() -> void
+    var re: regex_t
+
+    regcomp(&re, "hello", REG_EXTENDED)
+    regfree(&re)
+    /* No crash — that's the test */
+
+#test
+test_regerror() -> void
+    assert(regerror(REG_OK, 0) == "success", "ok msg")
+    assert(regerror(REG_NOMATCH, 0) == "no match", "nomatch msg")
+    assert(regerror(REG_BADPAT, 0) == "invalid regular expression", "badpat msg")
+    assert(regerror(99, 0) == "unknown error", "unknown msg")
+
+#test
+test_regexec_complex_pattern() -> void
+    var re: regex_t
+
+    regcomp(&re, "^(https?|ftp)://([a-z]+)\\.([a-z]+)$", REG_EXTENDED)
+
+    val _pm = new [4]regmatch_t
+    var pm = _pm[:4]
+    val rc = regexec(&re, "http://www.example", 4, pm, 0)
+
+    assert(rc == REG_OK, "matches URL")
+    assert(pm[1].rm_so == 0, "scheme start")
+    assert(pm[1].rm_eo == 4, s"scheme end=4, got ${pm[1].rm_eo}")
+    assert(pm[2].rm_so == 7, s"host start=7, got ${pm[2].rm_so}")
+    assert(pm[2].rm_eo == 10, s"host end=10, got ${pm[2].rm_eo}")
+    assert(pm[3].rm_so == 11, s"tld start=11, got ${pm[3].rm_so}")
+    assert(pm[3].rm_eo == 18, s"tld end=18, got ${pm[3].rm_eo}")

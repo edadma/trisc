@@ -14,11 +14,20 @@ struct div_t
 /* Return the absolute value of x. */
 abs(x: int) -> int = if x < 0 then -x else x
 
+/* Return the absolute value of a long integer. */
+labs(x: i64) -> i64 = if x < 0 then -x else x
+
 /* Return the smaller of a and b. */
 min(a: int, b: int) -> int = if a < b then a else b
 
 /* Return the larger of a and b. */
 max(a: int, b: int) -> int = if a > b then a else b
+
+/* Return the smaller of a and b (long). */
+lmin(a: i64, b: i64) -> i64 = if a < b then a else b
+
+/* Return the larger of a and b (long). */
+lmax(a: i64, b: i64) -> i64 = if a > b then a else b
 
 /* Clamp x to the range [lo, hi]. */
 clamp(x: int, lo: int, hi: int) -> int
@@ -28,9 +37,10 @@ clamp(x: int, lo: int, hi: int) -> int
 
 /* Return -1, 0, or 1 depending on the sign of x. */
 sign(x: int) -> int
-    if x < 0 then -1
-    else if x > 0 then 1
-    else 0
+    x match
+        _ if x < 0 -> -1
+        _ if x > 0 -> 1
+        _ -> 0
 
 /* Return the greatest common divisor of a and b. */
 gcd(a: int, b: int) -> int
@@ -62,3 +72,274 @@ pow(base: int, exp: int) -> int
 /* Compute quotient and remainder of numer / denom. */
 div(numer: int, denom: int) -> div_t
     div_t(numer / denom, numer % denom)
+
+/* Exit handler table. POSIX requires at least 32. */
+val ATEXIT_MAX = 32
+var _atexit_funcs: [32]func()
+var _atexit_count = 0
+
+/* Register a function to be called at normal process termination.
+ * Returns 0 on success, -1 if the table is full.
+ */
+atexit(f: func()) -> int
+    if _atexit_count >= ATEXIT_MAX then return -1
+
+    _atexit_funcs[_atexit_count] = f
+    _atexit_count++
+    0
+
+/* Call all registered atexit handlers in reverse order. */
+_run_atexit()
+    var i = _atexit_count
+
+    while i > 0
+        i--
+        _atexit_funcs[i]()
+
+/* Convert an integer to a string in the given buffer. Returns the buffer pointer.
+ * buf must be large enough (12 bytes for int, 21 for i64).
+ */
+itoa(value: int, buf: *byte, base: int) -> *byte
+    var v = value
+    var neg = false
+
+    if v < 0 && base == 10
+        neg = true
+        v = -v
+
+    var i = 0
+
+    if v == 0
+        buf[0] = '0'
+        i = 1
+    else
+        while v != 0
+            val d = v % base
+
+            buf[i] = d match
+                0..9 -> int('0') + d
+                _ -> int('a') + d - 10
+
+            v = v / base
+            i++
+
+    if neg
+        buf[i] = '-'
+        i++
+
+    buf[i] = 0
+
+    /* Reverse in place. */
+    var lo = 0
+    var hi = i - 1
+
+    while lo < hi
+        val t = buf[lo]
+
+        buf[lo] = buf[hi]
+        buf[hi] = t
+        lo++
+        hi--
+
+    buf
+
+/* Convert a string to an integer, skipping leading whitespace and optional sign. */
+atoi(s: *byte) -> int
+    var p = s
+
+    while *p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' do p++
+
+    var neg = false
+
+    if *p == '-'
+        neg = true
+        p++
+    elif *p == '+'
+        p++
+
+    var result = 0
+
+    while '0' <= *p <= '9'
+        result = result * 10 + int(*p - '0')
+        p++
+
+    if neg then -result
+    else result
+
+/* Convert a string to a long integer. */
+atol(s: *byte) -> i64
+    var p = s
+
+    while *p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' do p++
+
+    var neg = false
+
+    if *p == '-'
+        neg = true
+        p++
+    elif *p == '+'
+        p++
+
+    var result: i64 = 0
+
+    while '0' <= *p <= '9'
+        result = result * 10 + i64(*p - '0')
+        p++
+
+    if neg then -result
+    else result
+
+/* Convert a string to a long integer with base detection and error reporting. */
+strtol(s: *byte, endptr: **byte, base: int) -> i64
+    var p = s
+
+    while *p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' do p++
+
+    var neg = false
+
+    if *p == '-'
+        neg = true
+        p++
+    elif *p == '+'
+        p++
+
+    var b = base
+
+    if b == 0
+        if *p == '0'
+            p++
+
+            if *p == 'x' || *p == 'X'
+                b = 16
+                p++
+            else
+                b = 8
+        else
+            b = 10
+    elif b == 16
+        if *p == '0'
+            p++
+
+            if *p == 'x' || *p == 'X' then p++
+
+    var result: i64 = 0
+
+    while *p != 0
+        val d = int(*p) match
+            int('0')..int('9') -> int(*p - '0')
+            int('a')..int('z') -> int(*p - 'a') + 10
+            int('A')..int('Z') -> int(*p - 'A') + 10
+            _ -> -1
+
+        if d < 0 || d >= b then break
+
+        result = result * i64(b) + i64(d)
+        p++
+
+    if endptr != *byte(0) then *endptr = p
+
+    if neg then -result
+    else result
+
+/* Convert a string to an unsigned long integer with base detection. */
+strtoul(s: *byte, endptr: **byte, base: int) -> i64
+    var p = s
+
+    while *p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' do p++
+
+    if *p == '+' then p++
+
+    var b = base
+
+    if b == 0
+        if *p == '0'
+            p++
+
+            if *p == 'x' || *p == 'X'
+                b = 16
+                p++
+            else
+                b = 8
+        else
+            b = 10
+    elif b == 16
+        if *p == '0'
+            p++
+
+            if *p == 'x' || *p == 'X' then p++
+
+    var result: i64 = 0
+
+    while *p != 0
+        val d = int(*p) match
+            int('0')..int('9') -> int(*p - '0')
+            int('a')..int('z') -> int(*p - 'a') + 10
+            int('A')..int('Z') -> int(*p - 'A') + 10
+            _ -> -1
+
+        if d < 0 || d >= b then break
+
+        result = result * i64(b) + i64(d)
+        p++
+
+    if endptr != *byte(0) then *endptr = p
+
+    result
+
+/* PRNG state. */
+val RAND_MAX = 32767
+var _rand_next: i64 = 1
+
+/* Seed the PRNG. */
+srand(seed: int)
+    _rand_next = i64(seed)
+
+/* Return a pseudo-random integer in [0, RAND_MAX]. */
+rand() -> int
+    _rand_next = _rand_next * 1103515245i64 + 12345i64
+    int((_rand_next >> 16) & i64(RAND_MAX))
+
+/* Swap n bytes between a and b. */
+swap(a: *byte, b: *byte, n: int)
+    for var i = 0; i < n; i++
+        val t = a[i]
+
+        a[i] = b[i]
+        b[i] = t
+
+/* Sort an array.
+ * base: pointer to the first element
+ * nmemb: number of elements
+ * size: size of each element in bytes
+ * compar: comparison function returning <0, 0, or >0
+ */
+qsort(base: *byte, nmemb: int, size: int, compar: func(*byte, *byte) -> int)
+    for var i = 1; i < nmemb; i++
+        var j = i
+
+        while j > 0 && compar(base + (j - 1) * size, base + j * size) > 0
+            swap(base + (j - 1) * size, base + j * size, size)
+            j--
+
+/* Binary search a sorted array.
+ * key: pointer to the element to search for
+ * base: pointer to the first element of the sorted array
+ * nmemb: number of elements
+ * size: size of each element in bytes
+ * compar: comparison function
+ * Returns pointer to the matching element, or null if not found.
+ */
+bsearch(key: *byte, base: *byte, nmemb: int, size: int, compar: func(*byte, *byte) -> int) -> *byte
+    var lo = 0
+    var hi = nmemb
+
+    while lo < hi
+        val mid = lo + (hi - lo) / 2
+        val c = compar(key, base + mid * size)
+
+        c match
+            0 -> return base + mid * size
+            _ if c < 0 -> hi = mid
+            _ -> lo = mid + 1
+
+    *byte(0)
