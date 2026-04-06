@@ -1,0 +1,34 @@
+module posix.fcntl
+
+/*
+ * fcntl.sysl — File control options (<fcntl.h>)
+ *
+ * Constants for open() flags and file control operations.
+ */
+
+/* File access modes */
+val O_RDONLY = 0        /* Open for reading only */
+val O_WRONLY = 1        /* Open for writing only */
+val O_RDWR = 2          /* Open for reading and writing */
+
+/* File creation flags */
+val O_CREAT = 0x40      /* Create file if it does not exist */
+val O_EXCL = 0x80       /* Error if O_CREAT and file exists */
+val O_TRUNC = 0x200     /* Truncate file to zero length */
+val O_APPEND = 0x400    /* Append on each write */
+val O_NONBLOCK = 0x800  /* Non-blocking mode */
+
+/* Seek whence constants (also in unistd, duplicated here for convenience) */
+val SEEK_SET = 0        /* Seek from beginning of file */
+val SEEK_CUR = 1        /* Seek from current position */
+val SEEK_END = 2        /* Seek from end of file */
+
+/* File descriptor flags */
+val FD_CLOEXEC = 1      /* Close on exec */
+
+/* fcntl commands */
+val F_DUPFD = 0         /* Duplicate file descriptor */
+val F_GETFD = 1         /* Get file descriptor flags */
+val F_SETFD = 2         /* Set file descriptor flags */
+val F_GETFL = 3         /* Get file status flags */
+val F_SETFL = 4         /* Set file status flags */

@@ -520,6 +520,13 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitDefers()
           emitRefCleanup()
           emitEpilogue()
+        case TAsmStmt(code) =>
+          // asm as last statement: emit assembly, assume r1 is set
+          for line <- code.split("\\\\n|\\n") do
+            emit(s"  ${line.trim}")
+          emitDefers()
+          emitRefCleanup()
+          emitEpilogue()
         case other =>
           genStmt(other)
           // If no explicit return, return 0
@@ -2481,6 +2488,10 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TFloatLit(d, _) =>
         emit(s"  ldc r1, $d")
+
+      case TAsmExpr(code, _) =>
+        for line <- code.split("\\\\n|\\n") do
+          emit(s"  ${line.trim}")
 
       case TSizeof(size, _) =>
         emitLoadImm(1, size.toInt)
