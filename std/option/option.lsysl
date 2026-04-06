@@ -1,0 +1,247 @@
+std.option — Option[T] for nullable values
+============================================
+
+The `std.option` module provides `Option[T]`, Sysl's standard
+type for values that may or may not be present. A function
+that might not produce a result returns `Option[T]` carrying
+either a value (`Some(value)`) or nothing (`None`).
+
+This is the companion to `Result[T, E]`:
+
+- `Result[T, E]` — failure with a reason (the `E`).
+- `Option[T]` — absence without a reason.
+
+Use `Option` when there is no meaningful error to report —
+lookup misses, optional configuration, end-of-iteration.
+Use `Result` when the caller needs to know *why* the
+operation failed.
+
+The `?` operator works on `Option[T]`: it unwraps `Some` or
+early-returns `None` from the enclosing function (which must
+itself return `Option[T]`).
+
+Dependencies: none.
+
+
+    module std.option
+
+    enum Option[T]
+        Some(value: T)
+        None
+
+
+Utility functions
+-----------------
+
+### is_some / is_none
+
+    is_some[T](o: Option[T]) -> bool
+        o match
+            Some(_) -> true
+            None -> false
+
+    is_none[T](o: Option[T]) -> bool
+        o match
+            Some(_) -> false
+            None -> true
+
+
+### unwrap
+
+`unwrap(o)` returns the `Some` value or panics on `None`.
+
+    unwrap[T](o: Option[T]) -> T
+        o match
+            Some(v) -> v
+            None -> panic("unwrap on None")
+
+
+### expect
+
+`expect(o, msg)` is `unwrap` with a custom panic message.
+
+    expect[T](o: Option[T], msg: string) -> T
+        o match
+            Some(v) -> v
+            None -> panic(msg)
+
+
+### unwrap_or
+
+`unwrap_or(o, default)` returns the value or `default` on
+`None`. Does not panic.
+
+    unwrap_or[T](o: Option[T], default: T) -> T
+        o match
+            Some(v) -> v
+            None -> default
+
+
+Tests
+=====
+
+### Construction and inspection
+
+    #test
+    test_is_some_on_some() -> void
+        val o: Option[int] = Some(42)
+        assert(is_some(o), "Some is some")
+        assert(!is_none(o), "Some is not none")
+
+    #test
+    test_is_some_on_none() -> void
+        val o: Option[int] = None
+        assert(!is_some(o), "None is not some")
+        assert(is_none(o), "None is none")
+
+
+### unwrap
+
+    #test
+    test_unwrap_returns_value() -> void
+        val o: Option[int] = Some(42)
+        assert(unwrap(o) == 42, "gets value")
+
+    #test(should_panic: "unwrap on None")
+    test_unwrap_panics_on_none() -> void
+        val o: Option[int] = None
+        val _ = unwrap(o)
+
+
+### expect
+
+    #test
+    test_expect_returns_value() -> void
+        val o: Option[int] = Some(99)
+        assert(expect(o, "should exist") == 99, "gets value")
+
+    #test(should_panic: "missing config")
+    test_expect_panics_with_message() -> void
+        val o: Option[int] = None
+        val _ = expect(o, "missing config")
+
+
+### unwrap_or
+
+    #test
+    test_unwrap_or_returns_value_on_some() -> void
+        val o: Option[int] = Some(42)
+        assert(unwrap_or(o, 0) == 42, "Some value")
+
+    #test
+    test_unwrap_or_returns_default_on_none() -> void
+        val o: Option[int] = None
+        assert(unwrap_or(o, 99) == 99, "default")
+
+
+### `?` propagation
+
+    safe_div(a: int, b: int) -> Option[int]
+        if b == 0 then None
+        else Some(a / b)
+
+    half_of_quotient(a: int, b: int) -> Option[int]
+        val q = safe_div(a, b)?
+        safe_div(q, 2)
+
+    #test
+    test_question_unwraps_some() -> void
+        val r = half_of_quotient(100, 5)
+
+        r match
+            Some(v) -> assert(v == 10, "100/5 = 20, 20/2 = 10")
+            None -> panic("expected Some")
+
+    #test
+    test_question_propagates_none() -> void
+        val r = half_of_quotient(100, 0)
+        assert(is_none(r), "div by zero propagates None")
+
+
+### Chained `?`
+
+    lookup(key: int) -> Option[int]
+        if key == 1 then Some(100)
+        else if key == 2 then Some(200)
+        else None
+
+    sum_two_keys(a: int, b: int) -> Option[int]
+        val x = lookup(a)?
+        val y = lookup(b)?
+        Some(x + y)
+
+    #test
+    test_chained_both_found() -> void
+        val r = sum_two_keys(1, 2)
+
+        r match
+            Some(v) -> assert(v == 300, "100 + 200")
+            None -> panic("expected Some")
+
+    #test
+    test_chained_first_missing() -> void
+        val r = sum_two_keys(99, 2)
+        assert(is_none(r), "first key missing")
+
+    #test
+    test_chained_second_missing() -> void
+        val r = sum_two_keys(1, 99)
+        assert(is_none(r), "second key missing")
+
+
+### Match patterns
+
+    #test
+    test_match_some_binds_value() -> void
+        val o: Option[int] = Some(7)
+
+        val doubled = o match
+            Some(v) -> v * 2
+            None -> 0
+
+        assert(doubled == 14, "matched and transformed")
+
+    #test
+    test_match_none_takes_default() -> void
+        val o: Option[int] = None
+
+        val result = o match
+            Some(v) -> v * 2
+            None -> -1
+
+        assert(result == -1, "None branch")
+
+
+### unwrap_or pipeline
+
+    #test
+    test_unwrap_or_pipeline() -> void
+        val found = unwrap_or(lookup(1), -1)
+        assert(found == 100, "key 1 exists")
+
+        val missing = unwrap_or(lookup(99), -1)
+        assert(missing == -1, "key 99 defaults")
+
+
+Design notes
+------------
+
+**Mirror of `std.result`.** The two modules share the same
+shape: enum type, utility functions (`is_*`, `unwrap`,
+`expect`, `unwrap_or`), `?` propagation. Users learn one
+pattern and apply it to both.
+
+**No `map` / `and_then` / `or_else` yet.** Same reason as
+`std.result`: these need closures to be ergonomic. They'll
+arrive as a batch when first-class functions are comfortable.
+
+**`None` is typed.** `val o: Option[int] = None` requires a
+type annotation because `None` alone doesn't tell the
+compiler what `T` is. This matches Rust's `None::<i32>`.
+Inference from context (return types, function args) often
+makes the annotation unnecessary in practice.
+
+**No `ok_or` / `ok_or_else` yet.** Converting `Option[T]` to
+`Result[T, E]` is useful but requires specifying the error
+type. Deferred until `std.result` and `std.option` can
+cross-import cleanly.
