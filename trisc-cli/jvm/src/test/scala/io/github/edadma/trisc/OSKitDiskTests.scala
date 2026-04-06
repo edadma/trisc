@@ -287,10 +287,7 @@ import oskit.servers.*
           |
           |client()
           |    sleep(100)
-          |    var path: [2]i8
-          |    path[0] = 47  // /
-          |    path[1] = 0
-          |    val ino = fs_open(&path[0])
+          |    val ino = fs_open("/")
           |    if ino == 1
           |        putc('Y')
           |    else
@@ -319,19 +316,10 @@ import oskit.servers.*
           |
           |client()
           |    sleep(100)
-          |    var name: [3]i8
-          |    name[0] = 104  // h
-          |    name[1] = 105  // i
-          |    name[2] = 0
-          |    val ino = fs_create(1, &name[0], 1, 0x1B6)
+          |    val ino = fs_create(1, "hi", 1, 0x1B6)
           |    if ino > 1
           |        putc('C')
-          |    var path: [4]i8
-          |    path[0] = 47   // /
-          |    path[1] = 104  // h
-          |    path[2] = 105  // i
-          |    path[3] = 0
-          |    val ino2 = fs_open(&path[0])
+          |    val ino2 = fs_open("/hi")
           |    if ino2 == ino
           |        putc('O')
           |""".stripMargin
@@ -358,13 +346,7 @@ import oskit.servers.*
           |
           |client()
           |    sleep(100)
-          |    var name: [5]i8
-          |    name[0] = 116  // t
-          |    name[1] = 101  // e
-          |    name[2] = 115  // s
-          |    name[3] = 116  // t
-          |    name[4] = 0
-          |    val ino = fs_create(1, &name[0], 1, 0x1B6)
+          |    val ino = fs_create(1, "test", 1, 0x1B6)
           |
           |    var data: [4]i8
           |    data[0] = 65
@@ -404,10 +386,7 @@ import oskit.servers.*
           |
           |client()
           |    sleep(100)
-          |    var name: [2]i8
-          |    name[0] = 102  // f
-          |    name[1] = 0
-          |    val ino = fs_create(1, &name[0], 1, 0x1B6)
+          |    val ino = fs_create(1, "f", 1, 0x1B6)
           |
           |    var data: [10]i8
           |    var i = 0
@@ -446,12 +425,7 @@ import oskit.servers.*
           |
           |client()
           |    sleep(100)
-          |    var dname: [4]i8
-          |    dname[0] = 115  // s
-          |    dname[1] = 117  // u
-          |    dname[2] = 98   // b
-          |    dname[3] = 0
-          |    val dir_ino = fs_mkdir(1, &dname[0], 0x1FF)
+          |    val dir_ino = fs_mkdir(1, "sub", 0x1FF)
           |    if dir_ino > 1
           |        putc('D')
           |
@@ -491,20 +465,13 @@ import oskit.servers.*
           |
           |client()
           |    sleep(100)
-          |    var name: [2]i8
-          |    name[0] = 120  // x
-          |    name[1] = 0
-          |    val ino = fs_create(1, &name[0], 1, 0x1B6)
+          |    val ino = fs_create(1, "x", 1, 0x1B6)
           |    if ino > 1
           |        putc('C')
-          |    val r = fs_unlink(1, &name[0])
+          |    val r = fs_unlink(1, "x")
           |    if r == 0
           |        putc('U')
-          |    var path: [3]i8
-          |    path[0] = 47   // /
-          |    path[1] = 120  // x
-          |    path[2] = 0
-          |    val ino2 = fs_open(&path[0])
+          |    val ino2 = fs_open("/x")
           |    if ino2 == -1
           |        putc('G')
           |""".stripMargin
@@ -531,15 +498,7 @@ import oskit.servers.*
           |
           |client()
           |    sleep(100)
-          |    var path: [7]i8
-          |    path[0] = 47   // /
-          |    path[1] = 104  // h
-          |    path[2] = 101  // e
-          |    path[3] = 108  // l
-          |    path[4] = 108  // l
-          |    path[5] = 111  // o
-          |    path[6] = 0
-          |    val ino = fs_open(&path[0])
+          |    val ino = fs_open("/hello")
           |    if ino > 0
           |        putc('F')
           |        var buf: [16]i8
@@ -572,18 +531,7 @@ import oskit.servers.*
           |
           |client()
           |    sleep(100)
-          |    var path: [10]i8
-          |    path[0] = 47   // /
-          |    path[1] = 100  // d
-          |    path[2] = 105  // i
-          |    path[3] = 114  // r
-          |    path[4] = 47   // /
-          |    path[5] = 102  // f
-          |    path[6] = 105  // i
-          |    path[7] = 108  // l
-          |    path[8] = 101  // e
-          |    path[9] = 0
-          |    val ino = fs_open(&path[0])
+          |    val ino = fs_open("/dir/file")
           |    if ino > 0
           |        var buf: [16]i8
           |        val nr = fs_read(ino, &buf[0], 0, 16)

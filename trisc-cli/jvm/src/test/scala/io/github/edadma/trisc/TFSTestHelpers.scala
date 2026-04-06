@@ -51,6 +51,12 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
        |    p[RD_COUNT_OFF + 0] = 0
        |    p[RD_COUNT_OFF + 1] = 1
        |    p[RD_COMMAND_OFF] = 2
+       |
+       |slen(s: *i8) -> int
+       |    var i = 0
+       |    while s[i] != 0
+       |        i += 1
+       |    i
        |""".stripMargin
 
   private val tfsBoot: String =
@@ -182,5 +188,6 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
     val bytes = s.getBytes("UTF-8") :+ 0.toByte
     val decl = s"    var $name: [${bytes.length}]i8"
     val assigns = bytes.zipWithIndex.map { (b, i) => s"    $name[$i] = ${b & 0xff}" }.mkString("\n")
-    s"$decl\n$assigns"
+    val lenDecl = s"    val ${name}_len = ${s.length}"
+    s"$decl\n$assigns\n$lenDecl"
 }

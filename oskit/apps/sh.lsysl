@@ -243,7 +243,7 @@ from cwd by building an absolute path.
 
     sh_resolve_path(path: *byte) -> int
         if path[0] == '/'
-            return fs_open(path)
+            return fs_open(cstr(path))
         // Relative path — build absolute path
         var abspath: [256]i8
         strcpy(abspath, cwd_path)
@@ -254,7 +254,7 @@ from cwd by building an absolute path.
         else if cwdlen == 1
             abspath[1] = 0
         strcat(abspath, path)
-        fs_open(abspath)
+        fs_open(cstr(abspath))
 
 Built-in commands.
 
@@ -322,7 +322,7 @@ Built-in commands.
             sh_not_found(*byte(argv[1]))
             return
         val name = sh_basename(*byte(argv[1]))
-        val result = fs_mkdir(parent, name, 0x1FF)
+        val result = fs_mkdir(parent, cstr(name), 0x1FF)
         if result < 0
             sh_error()
 
@@ -333,7 +333,7 @@ Built-in commands.
         if parent < 0
             return
         val name = sh_basename(*byte(argv[1]))
-        val result = fs_unlink(parent, name)
+        val result = fs_unlink(parent, cstr(name))
         if result < 0
             sh_error()
 
@@ -344,7 +344,7 @@ Built-in commands.
         if parent < 0
             return
         val name = sh_basename(*byte(argv[1]))
-        val result = fs_rmdir(parent, name)
+        val result = fs_rmdir(parent, cstr(name))
         if result < 0
             sh_error()
 

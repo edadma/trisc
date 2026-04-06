@@ -541,6 +541,12 @@ On notification, call notify_read() to get the value.
         // No sender, no notification — block waiting for either
         threads[me].state = STATE_RECV_NOTIFY_BLOCKED
 
+Returns the actual byte count of the last received IPC message.
+Call after ipc_recv returns to get the message length.
+
+    ipc_last_msg_len() -> int
+        ipc_ctx[current_thread].actual_len
+
 Userspace wrappers. These pack arguments and invoke syscalls.
 
     port_create() -> int
