@@ -42,7 +42,7 @@ Primitives
 
     rotr(x: u32, n: u32) -> u32 = (x >> n) | (x << (32u32 - n))
 
-    ch(x: u32, y: u32, z: u32) -> u32 = (x & y) ^ ((x ^ 0xFFFFFFFFu32) & z)
+    ch(x: u32, y: u32, z: u32) -> u32 = (x & y) ^ (~x & z)
 
     maj(x: u32, y: u32, z: u32) -> u32 = (x & y) ^ (x & z) ^ (y & z)
 
@@ -215,14 +215,49 @@ sha256
 Tests
 =====
 
+### Sigma functions
+
+    #test
+    test_small_sigma0() -> void
+        // σ0(0x61626380) = rotr(x,7) ^ rotr(x,18) ^ (x >> 3)
+        val x: u32 = 0x61626380u32
+        val r = small_sigma0(x)
+        // Manual: rotr(0x61626380, 7) = 0x00c2c4c7
+        // No wait, let me compute step by step via the test
+        val r7 = rotr(x, 7u32)
+        val r18 = rotr(x, 18u32)
+        val s3 = x >> 3u32
+        val manual = r7 ^ r18 ^ s3
+        assert(r == manual, s"sigma0 consistency: fn=${i64(r)} manual=${i64(manual)}")
+
+    #test
+    test_message_schedule_w16() -> void
+        // For "abc": w[0]=0x61626380, w[1..14]=0, w[15]=0x18
+        // w[16] = σ1(w[14]) + w[9] + σ0(w[1]) + w[0]
+        //       = σ1(0) + 0 + σ0(0) + 0x61626380
+        //       = 0 + 0 + 0 + 0x61626380 = 0x61626380
+        val w16 = small_sigma1(0u32) + 0u32 + small_sigma0(0u32) + 0x61626380u32
+        assert(w16 == 0x61626380u32, s"w16: got ${i64(w16)}")
+
+    #test
+    test_message_schedule_w17() -> void
+        // w[17] = σ1(w[15]) + w[10] + σ0(w[2]) + w[1]
+        //       = σ1(0x18) + 0 + σ0(0) + 0
+        //       = σ1(0x18)
+        val w17 = small_sigma1(0x00000018u32)
+        assert(w17 == 0x000F0000u32, s"w17: got ${i64(w17)}")
+
+
 ### K constants integrity
 
     #test
     test_k_constants() -> void
-        assert(K[0] == 0x428a2f98u32, s"K[0]: got ${int(K[0])}")
-        assert(K[1] == 0x71374491u32, s"K[1]: got ${int(K[1])}")
-        assert(K[16] == 0xe49b69c1u32, s"K[16]: got ${int(K[16])}")
-        assert(K[63] == 0xc67178f2u32, s"K[63]: got ${int(K[63])}")
+        val expected: [64]u32 = [0x428a2f98u32, 0x71374491u32, 0xb5c0fbcfu32, 0xe9b5dba5u32, 0x3956c25bu32, 0x59f111f1u32, 0x923f82a4u32, 0xab1c5ed5u32, 0xd807aa98u32, 0x12835b01u32, 0x243185beu32, 0x550c7dc3u32, 0x72be5d74u32, 0x80deb1feu32, 0x9bdc06a7u32, 0xc19bf174u32, 0xe49b69c1u32, 0xefbe4786u32, 0x0fc19dc6u32, 0x240ca1ccu32, 0x2de92c6fu32, 0x4a7484aau32, 0x5cb0a9dcu32, 0x76f988dau32, 0x983e5152u32, 0xa831c66du32, 0xb00327c8u32, 0xbf597fc7u32, 0xc6e00bf3u32, 0xd5a79147u32, 0x06ca6351u32, 0x14292967u32, 0x27b70a85u32, 0x2e1b2138u32, 0x4d2c6dfcu32, 0x53380d13u32, 0x650a7354u32, 0x766a0abbu32, 0x81c2c92eu32, 0x92722c85u32, 0xa2bfe8a1u32, 0xa81a664bu32, 0xc24b8b70u32, 0xc76c51a3u32, 0xd192e819u32, 0xd6990624u32, 0xf40e3585u32, 0x106aa070u32, 0x19a4c116u32, 0x1e376c08u32, 0x2748774cu32, 0x34b0bcb5u32, 0x391c0cb3u32, 0x4ed8aa4au32, 0x5b9cca4fu32, 0x682e6ff3u32, 0x748f82eeu32, 0x78a5636fu32, 0x84c87814u32, 0x8cc70208u32, 0x90befffau32, 0xa4506cebu32, 0xbef9a3f7u32, 0xc67178f2u32]
+        var i = 0
+
+        while i < 64
+            assert(K[i] == expected[i], s"K[$i]: got ${i64(K[i])} want ${i64(expected[i])}")
+            i++
 
 
 ### SHA-256("") — empty string
@@ -307,16 +342,75 @@ NIST test vector. Expected:
         expected[30] = 0xe1u8
         expected[31] = 0x3fu8
 
-        // TODO: byte 17 computes as 3 instead of 54 (0x36).
-        // Empty-string hash passes, so the core algorithm works.
-        // Subtle issue in message schedule or round computation
-        // for non-zero message content. Needs printf-debugging.
-        // Checking first 16 bytes only for now:
         var i = 0
 
-        while i < 16
+        while i < 32
             assert(out[i] == expected[i], s"byte $i: got ${int(out[i])} want ${int(expected[i])}")
             i++
+
+
+### Block loading verification
+
+    #test
+    test_block_loading_abc() -> void
+        var block: [128]byte
+
+        // Zero ALL bytes first
+        var j = 0
+
+        while j < 64
+            block[j] = 0u8
+            j++
+
+        block[0] = byte('a')
+        block[1] = byte('b')
+        block[2] = byte('c')
+        block[3] = 0x80u8
+        block[63] = 0x18u8
+
+        // Verify w[0] = 0x61626380
+        val w0 = (u32(block[0]) << 24u32) | (u32(block[1]) << 16u32) | (u32(block[2]) << 8u32) | u32(block[3])
+        assert(w0 == 0x61626380u32, s"w0: got ${i64(w0)}")
+
+        // Verify w[15] = 0x00000018
+        val w15 = (u32(block[60]) << 24u32) | (u32(block[61]) << 16u32) | (u32(block[62]) << 8u32) | u32(block[63])
+        assert(w15 == 0x00000018u32, s"w15: got ${i64(w15)}")
+
+        // Now hash this block and check state
+        var state: [8]u32
+        state[0] = 0x6a09e667u32
+        state[1] = 0xbb67ae85u32
+        state[2] = 0x3c6ef372u32
+        state[3] = 0xa54ff53au32
+        state[4] = 0x510e527fu32
+        state[5] = 0x9b05688cu32
+        state[6] = 0x1f83d9abu32
+        state[7] = 0x5be0cd19u32
+
+        process_block(&state[0], &block[0])
+
+        // Expected: ba7816bf 8f01cfea 414140de 5dae2223 b036a13f 0529e5e9 b2ced806 6a72e13f
+        assert(state[0] == 0xba7816bfu32, s"state[0]: ${i64(state[0])}")
+        assert(state[4] == 0xb036a13fu32, s"state[4]: ${i64(state[4])}")
+
+
+### SHA-256("a") — single byte
+
+    #test
+    test_sha256_a() -> void
+        var msg: [1]byte
+        msg[0] = byte('a')
+        var out: [32]byte
+        sha256(&msg[0], 1, &out[0])
+
+        // ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb
+        assert(out[0] == 0xcau8, s"byte 0: got ${int(out[0])}")
+        assert(out[1] == 0x97u8, s"byte 1: got ${int(out[1])}")
+        assert(out[2] == 0x81u8, s"byte 2: got ${int(out[2])}")
+        assert(out[3] == 0x12u8, s"byte 3: got ${int(out[3])}")
+        assert(out[16] == 0xa7u8, s"byte 16: got ${int(out[16])}")
+        assert(out[17] == 0x86u8, s"byte 17: got ${int(out[17])}")
+        assert(out[31] == 0xbbu8, s"byte 31: got ${int(out[31])}")
 
 
 ### Determinism
