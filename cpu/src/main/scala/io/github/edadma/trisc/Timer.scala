@@ -15,27 +15,21 @@ package io.github.edadma.trisc
  *
  * Channels are wired to GPIO pins via callbacks passed at construction time.
  *
- * Register map:
- *   0-1:   PSC      (R/W) 16-bit prescaler value (counter increments every PSC+1 ticks)
- *   2-5:   ARR      (R/W) 32-bit auto-reload value (period)
- *   6-9:   CNT      (R/W) 32-bit counter value
- *   10:    CR       (R/W) control — bit 0: enable, bit 1: one-shot, bit 2: count direction (0=up)
- *   11:    SR       (R/W) status — bit 0: overflow, bits 1-4: channel 0-3 event (write-1-to-clear)
- *   12:    IER      (R/W) interrupt enable — bits match SR
+ * Register map (word-aligned for struct access):
+ *   +0   ARR      (4B, R/W) — auto-reload value (period)
+ *   +4   CNT      (4B, R/W) — counter value
+ *   +8   PSC      (2B, R/W) — prescaler (counter increments every PSC+1 ticks)
+ *   +10  CR       (1B, R/W) — control: bit0=enable, bit1=one-shot, bit2=down
+ *   +11  SR       (1B, R/W) — status: bit0=overflow, bits1-4=channel events (write-1-to-clear)
+ *   +12  IER      (1B, R/W) — interrupt enable (bits match SR)
+ *   +13-15 pad
  *
- * Per channel (4 channels × 5 bytes, starting at offset 13):
- *   +0 to +3: CCR   (R/W) 32-bit capture/compare register
- *   +4:       CCMR  (R/W) channel mode:
- *     0 = disabled
- *     1 = input capture, rising edge
- *     2 = input capture, falling edge
- *     3 = input capture, both edges
- *     4 = output compare, toggle pin
- *     5 = output compare, set pin high
- *     6 = output compare, clear pin low
- *     7 = PWM (set at start, clear on match, reset on overflow)
+ * Per channel (4 channels × 8 bytes, starting at offset 16):
+ *   +0-3  CCR     (4B, R/W) — capture/compare register
+ *   +4    CCMR    (1B, R/W) — channel mode (0=off..7=PWM)
+ *   +5-7  pad
  *
- * Total size: 13 + 4×5 = 33 bytes
+ * Total size: 16 + 4×8 = 48 bytes
  *
  * @param base      Base address in memory map
  * @param intc      Interrupt controller
@@ -45,19 +39,20 @@ package io.github.edadma.trisc
 class Timer(val base: Long, intc: InterruptController, irq: Int, channels: Seq[TimerChannel] = Nil)
     extends Device with (CPU => Unit):
   val name = "timer"
-  val size = 33
+  val size = 48
 
   private val numChannels = channels.size.min(4)
 
-  // Global register offsets
-  private val PSC = 0  // 2 bytes
-  private val ARR = 2  // 4 bytes
-  private val CNT = 6  // 4 bytes
-  private val CR = 10  // 1 byte
-  private val SR = 11  // 1 byte
-  private val IER = 12 // 1 byte
-  private val CH_BASE = 13
-  private val CH_SIZE = 5
+  // Global register offsets (word-aligned)
+  private val ARR = 0   // 4 bytes
+  private val CNT = 4   // 4 bytes
+  private val PSC = 8   // 2 bytes
+  private val CR = 10   // 1 byte
+  private val SR = 11   // 1 byte
+  private val IER = 12  // 1 byte
+  // 13-15: padding
+  private val CH_BASE = 16
+  private val CH_SIZE = 8 // CCR(4) + CCMR(1) + pad(3)
 
   // CR bits
   private val CR_EN = 0x01
@@ -90,15 +85,10 @@ class Timer(val base: Long, intc: InterruptController, irq: Int, channels: Seq[T
 
   // ===== Backward compatibility =====
 
-  /** Expose running state for existing tests. */
   var running: Boolean = false
-  /** Expose fired state for existing tests. */
   var fired: Boolean = false
-  /** Expose period for existing tests. */
   def period: Long = arr
   def period_=(v: Long): Unit = arr = v
-
-  /** Direct tick for existing tests that call timer.tick() manually. */
   def tick(): Unit = apply(null)
 
   // ===== Register access =====
@@ -106,19 +96,19 @@ class Timer(val base: Long, intc: InterruptController, irq: Int, channels: Seq[T
   def readByte(addr: Long): Int =
     val off = (addr - base).toInt
     off match
-      case 0  => (psc >> 8) & 0xFF
-      case 1  => psc & 0xFF
-      case 2  => ((arr >> 24) & 0xFF).toInt
-      case 3  => ((arr >> 16) & 0xFF).toInt
-      case 4  => ((arr >> 8) & 0xFF).toInt
-      case 5  => (arr & 0xFF).toInt
-      case 6  => ((cnt >> 24) & 0xFF).toInt
-      case 7  => ((cnt >> 16) & 0xFF).toInt
-      case 8  => ((cnt >> 8) & 0xFF).toInt
-      case 9  => (cnt & 0xFF).toInt
-      case CR => cr
-      case SR => sr
-      case IER => ier
+      case 0  => ((arr >> 24) & 0xFF).toInt
+      case 1  => ((arr >> 16) & 0xFF).toInt
+      case 2  => ((arr >> 8) & 0xFF).toInt
+      case 3  => (arr & 0xFF).toInt
+      case 4  => ((cnt >> 24) & 0xFF).toInt
+      case 5  => ((cnt >> 16) & 0xFF).toInt
+      case 6  => ((cnt >> 8) & 0xFF).toInt
+      case 7  => (cnt & 0xFF).toInt
+      case 8  => (psc >> 8) & 0xFF
+      case 9  => psc & 0xFF
+      case 10 => cr
+      case 11 => sr
+      case 12 => ier
       case n if n >= CH_BASE && n < CH_BASE + 4 * CH_SIZE =>
         val ch = (n - CH_BASE) / CH_SIZE
         val field = (n - CH_BASE) % CH_SIZE
@@ -135,22 +125,21 @@ class Timer(val base: Long, intc: InterruptController, irq: Int, channels: Seq[T
     val d = (data & 0xFF).toInt
     val off = (addr - base).toInt
     off match
-      case 0  => psc = (psc & 0x00FF) | (d << 8)
-      case 1  => psc = (psc & 0xFF00) | d
-      case 2  => arr = (arr & 0x00FFFFFFL) | ((d.toLong & 0xFF) << 24)
-      case 3  => arr = (arr & 0xFF00FFFFL) | ((d.toLong & 0xFF) << 16)
-      case 4  => arr = (arr & 0xFFFF00FFL) | ((d.toLong & 0xFF) << 8)
-      case 5  => arr = (arr & 0xFFFFFF00L) | (d.toLong & 0xFF)
-      case 6  => cnt = (cnt & 0x00FFFFFFL) | ((d.toLong & 0xFF) << 24)
-      case 7  => cnt = (cnt & 0xFF00FFFFL) | ((d.toLong & 0xFF) << 16)
-      case 8  => cnt = (cnt & 0xFFFF00FFL) | ((d.toLong & 0xFF) << 8)
-      case 9  => cnt = (cnt & 0xFFFFFF00L) | (d.toLong & 0xFF)
+      case 0  => arr = (arr & 0x00FFFFFFL) | ((d.toLong & 0xFF) << 24)
+      case 1  => arr = (arr & 0xFF00FFFFL) | ((d.toLong & 0xFF) << 16)
+      case 2  => arr = (arr & 0xFFFF00FFL) | ((d.toLong & 0xFF) << 8)
+      case 3  => arr = (arr & 0xFFFFFF00L) | (d.toLong & 0xFF)
+      case 4  => cnt = (cnt & 0x00FFFFFFL) | ((d.toLong & 0xFF) << 24)
+      case 5  => cnt = (cnt & 0xFF00FFFFL) | ((d.toLong & 0xFF) << 16)
+      case 6  => cnt = (cnt & 0xFFFF00FFL) | ((d.toLong & 0xFF) << 8)
+      case 7  => cnt = (cnt & 0xFFFFFF00L) | (d.toLong & 0xFF)
+      case 8  => psc = (psc & 0x00FF) | (d << 8)
+      case 9  => psc = (psc & 0xFF00) | d
       case CR =>
         cr = d
         val nowEnabled = (cr & CR_EN) != 0
         running = nowEnabled
         if nowEnabled then
-          // Enable/re-enable: reset counter and prescaler
           cnt = 0
           prescaleCounter = 0
           fired = false
@@ -172,6 +161,40 @@ class Timer(val base: Long, intc: InterruptController, irq: Int, channels: Seq[T
           case 4 => ccmr(ch) = d
           case _ =>
       case _ =>
+
+  // Word-level access for struct pointer writes
+  override def writeInt(address: Long, data: Long): Unit =
+    val off = (address - base).toInt
+    val v = data.toInt
+    off match
+      case ARR => arr = v & 0xFFFFFFFFL
+      case CNT => cnt = v & 0xFFFFFFFFL
+      case n if n >= CH_BASE && (n - CH_BASE) % CH_SIZE == 0 =>
+        val ch = (n - CH_BASE) / CH_SIZE
+        if ch < 4 then ccr(ch) = v & 0xFFFFFFFFL
+      case _ => super.writeInt(address, data)
+
+  override def readInt(address: Long): Int =
+    val off = (address - base).toInt
+    off match
+      case ARR => arr.toInt
+      case CNT => cnt.toInt
+      case n if n >= CH_BASE && (n - CH_BASE) % CH_SIZE == 0 =>
+        val ch = (n - CH_BASE) / CH_SIZE
+        if ch < 4 then ccr(ch).toInt else 0
+      case _ => super.readInt(address)
+
+  override def writeShort(address: Long, data: Long): Unit =
+    val off = (address - base).toInt
+    off match
+      case PSC => psc = data.toInt & 0xFFFF
+      case _ => super.writeShort(address, data)
+
+  override def readShort(address: Long): Int =
+    val off = (address - base).toInt
+    off match
+      case PSC => psc
+      case _ => super.readShort(address)
 
   // ===== Tick =====
 

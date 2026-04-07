@@ -617,7 +617,7 @@ class SyslParser extends StandardTokenParsers {
       "-" ~> unary ^^ (e => UnaryAST("-", e)) |
       "!" ~> unary ^^ (e => UnaryAST("!", e)) |
       "~" ~> unary ^^ (e => UnaryAST("~", e)) |
-      "*" ~> scalarCastType ~ ("(" ~> expr <~ ")") ^^ { case t ~ e => CastAST(PtrTypeAST(NamedTypeAST(t)), e) } |
+      "*" ~> (scalarCastType | ident) ~ ("(" ~> expr <~ ")") ^^ { case t ~ e => CastAST(PtrTypeAST(NamedTypeAST(t)), e) } |
       "*" ~> unary ^^ DerefAST.apply |
       "&" ~> ident ~ rep1("." ~> ident) ^^ { case name ~ fields =>
         val base: ExpressionAST = VarRefAST(name)
