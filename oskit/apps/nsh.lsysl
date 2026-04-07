@@ -29,16 +29,37 @@ Shell state.
     var cwd: string
     var cwd_ino = 1
 
-Output helpers.
+Buffered output. All output accumulates in nsh_out and is
+sent to the TTY in a single IPC call on flush. This matches
+the Minix 3 approach where output is batched to reduce IPC
+round-trips.
+
+    var nsh_out: [140]i8
+    var nsh_outpos = 0
+
+    nsh_flush()
+        if nsh_outpos > 0
+            tty_puts(nsh_out, nsh_outpos)
+            nsh_outpos = 0
 
     nsh_putc(ch: char)
-        tty_putc(ch)
+        if nsh_outpos >= 120
+            nsh_flush()
+        nsh_out[nsh_outpos] = i8(ch)
+        nsh_outpos += 1
 
     nsh_print(s: string)
-        tty_puts(*byte(s), len(s))
+        val p = *byte(s)
+        val n = len(s)
+        for var i = 0; i < n; i++
+            if nsh_outpos >= 120
+                nsh_flush()
+            nsh_out[nsh_outpos] = p[i]
+            nsh_outpos += 1
 
     nsh_newline()
         nsh_putc('\n')
+        nsh_flush()
 
     nsh_putint(n: int)
         if n < 0
@@ -93,8 +114,6 @@ Home/End, Delete, Backspace, and character insertion.
 
 Append a CSI sequence with numeric parameter to a buffer.
 
-    var nsh_out: [140]i8
-
     nsh_append_csi(out: *i8, pos: int, n: int, ch: i8) -> int
         var p = pos
         out[p] = 27
@@ -124,10 +143,12 @@ Emit a CSI sequence directly.
             nsh_putc('0' + (n / 10) % 10)
         nsh_putc('0' + n % 10)
         nsh_putc(ch)
+        nsh_flush()
 
 Redraw the full line in a single batched write.
 
     nsh_refresh_line(buf: *i8, blen: int, cursor: int, prompt_len: int)
+        nsh_flush()
         var p = 0
         nsh_out[p] = 13
         p += 1
@@ -211,6 +232,7 @@ Redraw the full line in a single batched write.
                     cursor += 1
                     if cursor == blen
                         nsh_putc(ch)
+                        nsh_flush()
                     else
                         nsh_refresh_line(buf, blen, cursor, prompt_len)
         buf[blen] = 0
@@ -408,8 +430,7 @@ Built-in commands.
         nsh_newline()
 
     cmd_help(argc: int, argv: *string)
-        nsh_putc('H')
-        nsh_newline()
+        nsh_print("echo ls cat mkdir rm rmdir pwd cd stat whoami help\n")
 
 Command dispatch.
 
@@ -457,6 +478,7 @@ The shell main loop.
             nsh_print(cwd)
             nsh_putc('>')
             nsh_putc(' ')
+            nsh_flush()
 
             // Prompt length = cwd length + 2 ("> ")
             val prompt_len = len(cwd) + 2
@@ -471,3 +493,4 @@ The shell main loop.
 
             // Dispatch
             nsh_dispatch(argc, argv)
+            nsh_flush()

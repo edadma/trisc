@@ -267,6 +267,103 @@ class SyslCodegenStringTests extends SyslCodegenHelpers {
     out shouldBe "hello world"
   }
 
+  "concat to global var" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |
+        |var g: string
+        |
+        |main() -> int
+        |    g = "/"
+        |    g = g + "dev"
+        |    puts(g)
+        |    0
+        |""".stripMargin))
+    out shouldBe "/dev"
+  }
+
+  "concat to global var via function arg" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |
+        |var g: string
+        |
+        |do_cd(arg: string)
+        |    if len(g) > 1
+        |        g = g + "/" + arg
+        |    else
+        |        g = g + arg
+        |
+        |main() -> int
+        |    g = "/"
+        |    do_cd("dev")
+        |    puts(g)
+        |    0
+        |""".stripMargin))
+    out shouldBe "/dev"
+  }
+
+  "concat to global var via argv" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |
+        |var g: string
+        |
+        |do_cd(argc: int, argv: *string)
+        |    val arg = argv[1]
+        |    if len(g) > 1
+        |        g = g + "/" + arg
+        |    else
+        |        g = g + arg
+        |
+        |main() -> int
+        |    g = "/"
+        |    var args: [4]string
+        |    args[0] = "cd"
+        |    args[1] = "dev"
+        |    do_cd(2, args)
+        |    puts(g)
+        |    0
+        |""".stripMargin))
+    out shouldBe "/dev"
+  }
+
+  "concat to global var with needsAllocExtern" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |
+        |var g: string
+        |
+        |make_str(buf: *i8, n: int) -> string
+        |    string(buf, n)
+        |
+        |do_cd(argc: int, argv: *string)
+        |    val arg = argv[1]
+        |    if len(g) > 1
+        |        g = g + "/" + arg
+        |    else
+        |        g = g + arg
+        |
+        |main() -> int
+        |    g = "/"
+        |    var line: [64]i8
+        |    line[0] = 99   // c
+        |    line[1] = 100  // d
+        |    line[2] = 0
+        |    line[3] = 100  // d
+        |    line[4] = 101  // e
+        |    line[5] = 118  // v
+        |    line[6] = 0
+        |    var args: [4]string
+        |    args[0] = make_str(line, 2)
+        |    args[1] = make_str(line + 3, 3)
+        |    do_cd(2, args)
+        |    puts(g)
+        |    0
+        |""".stripMargin))
+    out shouldBe "/dev"
+  }
+
   "concat preserves originals" in {
     val (_, out) = compileMultiAndRunOutput(allocSources(
       """import posix.stdlib.*
@@ -751,5 +848,160 @@ class SyslCodegenStringTests extends SyslCodegenHelpers {
           |main() -> int = get_p() + get_q()
           |""".stripMargin
     )) shouldBe 'h' + 'w'  // 104 + 119 = 223
+  }
+
+  // ===== Bug reproduction: function call with concat then concat in caller =====
+
+  "concat after function that concats" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |
+        |var g: string
+        |
+        |do_concat(a: string, b: string) -> int
+        |    val result = a + b
+        |    len(result)
+        |
+        |main() -> int
+        |    g = "/"
+        |    val n = do_concat(g, "dev")
+        |    g = g + "dev"
+        |    puts(g)
+        |    0
+        |""".stripMargin))
+    out shouldBe "/dev"
+  }
+
+  "concat after function that concats via global" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |
+        |var cwd: string
+        |
+        |resolve(path: string) -> int
+        |    val full = cwd + path
+        |    len(full)
+        |
+        |main() -> int
+        |    cwd = "/"
+        |    val n = resolve("dev")
+        |    cwd = cwd + "dev"
+        |    puts(cwd)
+        |    0
+        |""".stripMargin))
+    out shouldBe "/dev"
+  }
+
+  "REGRESSION: cmd_cd with make_str (no tokenizer)" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |
+        |var cwd: string
+        |
+        |make_str(p: *i8, n: int) -> string
+        |    string(p, n)
+        |
+        |do_concat_len(a: string, b: string) -> int
+        |    val result = a + b
+        |    len(result)
+        |
+        |cmd_cd(argc: int, argv: *string)
+        |    if argc < 2
+        |        cwd = "/"
+        |        return
+        |    val n = do_concat_len(cwd, argv[1])
+        |    val arg = argv[1]
+        |    if arg[0] == '/'
+        |        cwd = arg
+        |    else
+        |        if len(cwd) > 1
+        |            cwd = cwd + "/" + arg
+        |        else
+        |            cwd = cwd + arg
+        |
+        |main() -> int
+        |    cwd = "/"
+        |    var line: [64]i8
+        |    line[0] = 99
+        |    line[1] = 100
+        |    line[2] = 32
+        |    line[3] = 100
+        |    line[4] = 101
+        |    line[5] = 118
+        |    var argv: [4]string
+        |    argv[0] = make_str(line, 2)
+        |    argv[1] = make_str(line + 3, 3)
+        |    cmd_cd(2, argv)
+        |    puts(cwd)
+        |    0
+        |""".stripMargin))
+    out shouldBe "/dev"
+  }
+
+  "REGRESSION-tokenizer: tokenized args + function concat then concat" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |
+        |var cwd: string
+        |
+        |val MAX_ARGS = 16
+        |
+        |tokenize(buf: *i8, buflen: int, argv: *string) -> int
+        |    var argc = 0
+        |    var pos = 0
+        |    while pos < buflen
+        |        while pos < buflen
+        |            if buf[pos] != ' '
+        |                break
+        |            pos += 1
+        |        if pos >= buflen
+        |            break
+        |        val start = pos
+        |        while pos < buflen
+        |            if buf[pos] == ' '
+        |                break
+        |            pos += 1
+        |        if argc < MAX_ARGS
+        |            argv[argc] = string(buf + start, pos - start)
+        |            argc += 1
+        |    argc
+        |
+        |do_concat_len(a: string, b: string) -> int
+        |    val result = a + b
+        |    len(result)
+        |
+        |cmd_cd(argc: int, argv: *string)
+        |    if argc < 2
+        |        cwd = "/"
+        |        return
+        |    val n = do_concat_len(cwd, argv[1])
+        |    val arg = argv[1]
+        |    if arg[0] == '/'
+        |        cwd = arg
+        |    else
+        |        if len(cwd) > 1
+        |            cwd = cwd + "/" + arg
+        |        else
+        |            cwd = cwd + arg
+        |
+        |main() -> int
+        |    cwd = "/"
+        |    var line: [256]i8
+        |    var argv: [16]string
+        |    line[0] = 99
+        |    line[1] = 100
+        |    line[2] = 32
+        |    line[3] = 100
+        |    line[4] = 101
+        |    line[5] = 118
+        |    val argc = tokenize(line, 6, argv)
+        |    if argc > 0
+        |        val cmd = argv[0]
+        |        if cmd == "cd"
+        |            cmd_cd(argc, argv)
+        |    puts(cwd)
+        |    0
+        |""".stripMargin))
+    out shouldBe "/dev"
   }
 }

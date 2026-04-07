@@ -388,16 +388,9 @@ class SyslTriscCodegen(addresses: Int = 4):
       emit("  ldd r1, r1, r0")
       emitRefDecr(1, hoff, deinitFor(rt))
       emit("  popd r1")
-    // Decrement string params (only when heap strings are possible)
-    if needsAllocExtern then
-      for param <- if currentFunction != null then currentFunction.params else Nil do
-        if param.typ == SyslType.StringType then
-          val local = locals(param.name)
-          emit("  pshd r1")
-          emitAddImm(1, 5, local.offset)
-          emit("  ldd r1, r1, r0")       // load ptr from string struct
-          emitRefDecr(1, 8)
-          emit("  popd r1")
+    // Note: string params are already handled by the locals loop above
+    // (string params are copied into locals during prologue, so they
+    // appear in the locals map with offset < 0 and get cleaned up there)
 
   // Allocate a local variable on the stack, return its offset from fp.
   // The variable is aligned to the greater of its natural alignment and 8
