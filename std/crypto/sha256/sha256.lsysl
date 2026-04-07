@@ -61,12 +61,12 @@ process_block
 Process a single 512-bit (64-byte) block, updating the
 8-word state.
 
-    process_block(state: *u32, block: *byte)
+    process_block(state: []u32, block: []byte, off: int)
         var w: [64]u32
 
         // Load first 16 words (big-endian)
         for i in 0..<16
-            val j = i * 4
+            val j = off + i * 4
             w[i] = (u32(block[j]) << 24u32) | (u32(block[j + 1]) << 16u32) | (u32(block[j + 2]) << 8u32) | u32(block[j + 3])
 
         // Expand to 64 words
@@ -74,14 +74,14 @@ Process a single 512-bit (64-byte) block, updating the
             w[i] = small_sigma1(w[i - 2]) + w[i - 7] + small_sigma0(w[i - 15]) + w[i - 16]
 
         // Working variables
-        var a = *(state + 0)
-        var b = *(state + 1)
-        var c = *(state + 2)
-        var d = *(state + 3)
-        var e = *(state + 4)
-        var f = *(state + 5)
-        var g = *(state + 6)
-        var h = *(state + 7)
+        var a = state[0]
+        var b = state[1]
+        var c = state[2]
+        var d = state[3]
+        var e = state[4]
+        var f = state[5]
+        var g = state[6]
+        var h = state[7]
 
         // 64 rounds
         for i in 0..<64
@@ -101,23 +101,23 @@ Process a single 512-bit (64-byte) block, updating the
             a = t1 + t2
 
         // Add working variables back to state
-        *(state + 0) = *(state + 0) + a
-        *(state + 1) = *(state + 1) + b
-        *(state + 2) = *(state + 2) + c
-        *(state + 3) = *(state + 3) + d
-        *(state + 4) = *(state + 4) + e
-        *(state + 5) = *(state + 5) + f
-        *(state + 6) = *(state + 6) + g
-        *(state + 7) = *(state + 7) + h
+        state[0] += a
+        state[1] += b
+        state[2] += c
+        state[3] += d
+        state[4] += e
+        state[5] += f
+        state[6] += g
+        state[7] += h
 
 
 sha256
 ------
 
-`sha256(data, len, out)` hashes `len` bytes starting at
-`data` and writes the 32-byte digest to `out`.
+`sha256(data, out)` hashes `data` and writes the 32-byte
+digest to `out`.
 
-    sha256(data: *byte, data_len: int, out: *byte)
+    sha256(data: []byte, out: []byte)
         var state: [8]u32
         state[0] = 0x6a09e667u32
         state[1] = 0xbb67ae85u32
@@ -128,42 +128,40 @@ sha256
         state[6] = 0x1f83d9abu32
         state[7] = 0x5be0cd19u32
 
+        val n = len(data)
         var i = 0
 
         // Process full 64-byte blocks
-        while i + 64 <= data_len
-            process_block(&state[0], data + i)
+        while i + 64 <= n
+            process_block(state[:], data, i)
             i += 64
 
         // Final block with padding
-        var block: [128]byte
-        val rem = data_len - i
+        var block: [128]byte = ""
+        val rem = n - i
 
         // Copy remainder
         for j in 0..<rem
-            block[j] = *(data + i + j)
+            block[j] = data[i + j]
 
         // Append 1-bit
         block[rem] = 0x80u8
 
         // Zero-fill between data and length
-        val total_bits: i64 = i64(data_len) * 8i64
+        val total_bits: i64 = i64(n) * 8i64
 
         if rem < 56
-            for j in (rem + 1)..<56
-                block[j] = 0u8
-
             // Append length as big-endian 64-bit
             for j in 0..<8
                 block[56 + j] = byte(total_bits >> i64(56 - j * 8))
 
-            process_block(&state[0], &block[0])
+            process_block(state[:], block[:], 0)
         else
             // Pad rest of first block
             for j in (rem + 1)..<64
                 block[j] = 0u8
 
-            process_block(&state[0], &block[0])
+            process_block(state[:], block[:], 0)
 
             // Second block: zeros + length
             for j in 0..<56
@@ -172,16 +170,15 @@ sha256
             for j in 0..<8
                 block[56 + j] = byte(total_bits >> i64(56 - j * 8))
 
-            process_block(&state[0], &block[0])
+            process_block(state[:], block[:], 0)
 
         // Output state as big-endian bytes
         for i in 0..<8
             val v = state[i]
-            val p = out + i * 4
-            *(p + 0) = byte(v >> 24u32)
-            *(p + 1) = byte(v >> 16u32)
-            *(p + 2) = byte(v >> 8u32)
-            *(p + 3) = byte(v)
+            out[i * 4]     = byte(v >> 24u32)
+            out[i * 4 + 1] = byte(v >> 16u32)
+            out[i * 4 + 2] = byte(v >> 8u32)
+            out[i * 4 + 3] = byte(v)
 
 
 Tests
@@ -236,9 +233,9 @@ Expected:
 
     #test
     test_sha256_empty() -> void
+        val empty: [0]byte = ""
         var out: [32]byte
-        var dummy: byte = 0u8
-        sha256(&dummy, 0, &out[0])
+        sha256(empty[:], out[:])
 
         // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
         val expected: [32]byte = [0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55]
@@ -256,7 +253,7 @@ Expected:
     test_sha256_abc() -> void
         val msg: [3]byte = "abc"
         var out: [32]byte
-        sha256(&msg[0], 3, &out[0])
+        sha256(msg[:], out[:])
 
         // ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad
         val expected: [32]byte = [0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad]
@@ -295,7 +292,7 @@ Expected:
         state[6] = 0x1f83d9abu32
         state[7] = 0x5be0cd19u32
 
-        process_block(&state[0], &block[0])
+        process_block(state[:], block[:], 0)
 
         // Expected: ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad
         assert(state[0] == 0xba7816bfu32, s"state[0]: ${i64(state[0])}")
@@ -314,7 +311,7 @@ Expected:
     test_sha256_a() -> void
         val msg: [1]byte = "a"
         var out: [32]byte
-        sha256(&msg[0], 1, &out[0])
+        sha256(msg[:], out[:])
 
         // ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb
         val expected: [32]byte = [0xca, 0x97, 0x81, 0x12, 0xca, 0x1b, 0xbd, 0xca, 0xfa, 0xc2, 0x31, 0xb3, 0x9a, 0x23, 0xdc, 0x4d, 0xa7, 0x86, 0xef, 0xf8, 0x14, 0x7c, 0x4e, 0x72, 0xb9, 0x80, 0x77, 0x85, 0xaf, 0xee, 0x48, 0xbb]
@@ -331,8 +328,8 @@ Expected:
 
         var out1: [32]byte
         var out2: [32]byte
-        sha256(&msg[0], 5, &out1[0])
-        sha256(&msg[0], 5, &out2[0])
+        sha256(msg[:], out1[:])
+        sha256(msg[:], out2[:])
 
         for i in 0..<32
             assert(out1[i] == out2[i], "deterministic")
@@ -347,8 +344,8 @@ Expected:
 
         var out1: [32]byte
         var out2: [32]byte
-        sha256(&msg1[0], 1, &out1[0])
-        sha256(&msg2[0], 1, &out2[0])
+        sha256(msg1[:], out1[:])
+        sha256(msg2[:], out2[:])
 
         var differs = false
 
@@ -364,7 +361,7 @@ Expected:
     test_sha256_hello() -> void
         val msg: [5]byte = "hello"
         var out: [32]byte
-        sha256(&msg[0], 5, &out[0])
+        sha256(msg[:], out[:])
 
         // 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
         val expected: [32]byte = [0x2c, 0xf2, 0x4d, 0xba, 0x5f, 0xb0, 0xa3, 0x0e, 0x26, 0xe8, 0x3b, 0x2a, 0xc5, 0xb9, 0xe2, 0x9e, 0x1b, 0x16, 0x1e, 0x5c, 0x1f, 0xa7, 0x42, 0x5e, 0x73, 0x04, 0x33, 0x62, 0x93, 0x8b, 0x98, 0x24]
@@ -382,7 +379,7 @@ which forces the padding into a second block.
     test_sha256_two_block() -> void
         val msg: [56]byte = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
         var out: [32]byte
-        sha256(&msg[0], 56, &out[0])
+        sha256(msg[:], out[:])
 
         // 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
         val expected: [32]byte = [0x24, 0x8d, 0x6a, 0x61, 0xd2, 0x06, 0x38, 0xb8, 0xe5, 0xc0, 0x26, 0x93, 0x0c, 0x3e, 0x60, 0x39, 0xa3, 0x3c, 0xe4, 0x59, 0x64, 0xff, 0x21, 0x67, 0xf6, 0xec, 0xed, 0xd4, 0x19, 0xdb, 0x06, 0xc1]

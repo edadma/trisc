@@ -17,28 +17,23 @@ Constants
 
     val BLOCK_SIZE = 64
     val HASH_SIZE = 32
-    val MAX_MSG = 1024
 
 
 hmac_sha256
 -----------
 
-`hmac_sha256(key, key_len, msg, msg_len, out)` computes
-HMAC-SHA-256 and writes the 32-byte MAC to `out`.
+`hmac_sha256(key, msg, out)` computes HMAC-SHA-256 and
+writes the 32-byte MAC to `out`.
 
-The message must be at most `MAX_MSG` bytes (1024). This
-limit avoids dynamic allocation and is sufficient for
-password hashing and key derivation.
-
-    hmac_sha256(key: *byte, key_len: int, msg: *byte, msg_len: int, out: *byte)
+    hmac_sha256(key: []byte, msg: []byte, out: []byte)
         // Step 1: normalize key to BLOCK_SIZE bytes
         var k0: [64]byte = ""
 
-        if key_len > BLOCK_SIZE
-            sha256(key, key_len, &k0[0])
+        if len(key) > BLOCK_SIZE
+            sha256(key, k0[:])
         else
-            for i in 0..<key_len
-                k0[i] = *(key + i)
+            for i in 0..<len(key)
+                k0[i] = key[i]
 
         // Step 2: XOR key with ipad/opad
         var ipad: [64]byte
@@ -49,14 +44,15 @@ password hashing and key derivation.
             opad[i] = k0[i] ^ 0x5cu8
 
         // Step 3: inner hash = SHA256(ipad || msg)
-        var inner_buf: [1088]byte
+        val inner_len = BLOCK_SIZE + len(msg)
+        val inner_buf = (new [inner_len]byte)[:]
         for i in 0..<BLOCK_SIZE
             inner_buf[i] = ipad[i]
-        for i in 0..<msg_len
-            inner_buf[BLOCK_SIZE + i] = *(msg + i)
+        for i in 0..<len(msg)
+            inner_buf[BLOCK_SIZE + i] = msg[i]
 
         var inner_hash: [32]byte
-        sha256(&inner_buf[0], BLOCK_SIZE + msg_len, &inner_hash[0])
+        sha256(inner_buf, inner_hash[:])
 
         // Step 4: outer hash = SHA256(opad || inner_hash)
         var outer_buf: [96]byte
@@ -65,7 +61,7 @@ password hashing and key derivation.
         for i in 0..<HASH_SIZE
             outer_buf[BLOCK_SIZE + i] = inner_hash[i]
 
-        sha256(&outer_buf[0], BLOCK_SIZE + HASH_SIZE, out)
+        sha256(outer_buf[:], out)
 
 
 Tests
@@ -86,7 +82,7 @@ Key = 20 bytes of 0x0b, data = "Hi There".
 
         val msg: [8]byte = "Hi There"
         var out: [32]byte
-        hmac_sha256(&key[0], 20, &msg[0], 8, &out[0])
+        hmac_sha256(key[:], msg[:], out[:])
 
         // b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
         val expected: [32]byte = [0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53, 0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b, 0xf1, 0x2b, 0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7, 0x26, 0xe9, 0x37, 0x6c, 0x2e, 0x32, 0xcf, 0xf7]
@@ -104,7 +100,7 @@ Key = "Jefe", data = "what do ya want for nothing?".
         val key: [4]byte = "Jefe"
         val msg: [28]byte = "what do ya want for nothing?"
         var out: [32]byte
-        hmac_sha256(&key[0], 4, &msg[0], 28, &out[0])
+        hmac_sha256(key[:], msg[:], out[:])
 
         // 5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843
         val expected: [32]byte = [0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e, 0x6a, 0x04, 0x24, 0x26, 0x08, 0x95, 0x75, 0xc7, 0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83, 0x9d, 0xec, 0x58, 0xb9, 0x64, 0xec, 0x38, 0x43]
@@ -128,7 +124,7 @@ Key = 20 bytes of 0xaa, data = 50 bytes of 0xdd.
             msg[i] = 0xddu8
 
         var out: [32]byte
-        hmac_sha256(&key[0], 20, &msg[0], 50, &out[0])
+        hmac_sha256(key[:], msg[:], out[:])
 
         // 773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe
         val expected: [32]byte = [0x77, 0x3e, 0xa9, 0x1e, 0x36, 0x80, 0x0e, 0x46, 0x85, 0x4d, 0xb8, 0xeb, 0xd0, 0x91, 0x81, 0xa7, 0x29, 0x59, 0x09, 0x8b, 0x3e, 0xf8, 0xc1, 0x22, 0xd9, 0x63, 0x55, 0x14, 0xce, 0xd5, 0x65, 0xfe]
@@ -144,7 +140,7 @@ Key = 20 bytes of 0xaa, data = 50 bytes of 0xdd.
         val key: [3]byte = "key"
         val msg: [3]byte = "msg"
         var out: [32]byte
-        hmac_sha256(&key[0], 3, &msg[0], 3, &out[0])
+        hmac_sha256(key[:], msg[:], out[:])
 
         // 2d93cbc1be167bcb1637a4a23cbff01a7878f0c50ee833954ea5221bb1b8c628
         val expected: [32]byte = [0x2d, 0x93, 0xcb, 0xc1, 0xbe, 0x16, 0x7b, 0xcb, 0x16, 0x37, 0xa4, 0xa2, 0x3c, 0xbf, 0xf0, 0x1a, 0x78, 0x78, 0xf0, 0xc5, 0x0e, 0xe8, 0x33, 0x95, 0x4e, 0xa5, 0x22, 0x1b, 0xb1, 0xb8, 0xc6, 0x28]
@@ -158,9 +154,9 @@ Key = 20 bytes of 0xaa, data = 50 bytes of 0xdd.
     #test
     test_hmac_empty_message() -> void
         val key: [6]byte = "secret"
-        var dummy: byte = 0u8
+        val empty: [0]byte = ""
         var out: [32]byte
-        hmac_sha256(&key[0], 6, &dummy, 0, &out[0])
+        hmac_sha256(key[:], empty[:], out[:])
 
         // f9e66e179b6747ae54108f82f8ade8b3c25d76fd30afde6c395822c530196169
         val expected: [32]byte = [0xf9, 0xe6, 0x6e, 0x17, 0x9b, 0x67, 0x47, 0xae, 0x54, 0x10, 0x8f, 0x82, 0xf8, 0xad, 0xe8, 0xb3, 0xc2, 0x5d, 0x76, 0xfd, 0x30, 0xaf, 0xde, 0x6c, 0x39, 0x58, 0x22, 0xc5, 0x30, 0x19, 0x61, 0x69]
@@ -177,8 +173,8 @@ Key = 20 bytes of 0xaa, data = 50 bytes of 0xdd.
         val msg: [5]byte = "hello"
         var out1: [32]byte
         var out2: [32]byte
-        hmac_sha256(&key[0], 4, &msg[0], 5, &out1[0])
-        hmac_sha256(&key[0], 4, &msg[0], 5, &out2[0])
+        hmac_sha256(key[:], msg[:], out1[:])
+        hmac_sha256(key[:], msg[:], out2[:])
 
         for i in 0..<32
             assert(out1[i] == out2[i], "deterministic")
@@ -187,10 +183,9 @@ Key = 20 bytes of 0xaa, data = 50 bytes of 0xdd.
 Design notes
 ------------
 
-**Fixed buffer size.** The inner buffer is statically sized
-at 1088 bytes (64 + 1024). This avoids dynamic allocation
-and is sufficient for password hashing where messages are
-short. A streaming API would remove this limit.
+**Dynamic inner buffer.** The inner buffer is dynamically
+allocated to exactly `BLOCK_SIZE + len(msg)` bytes, so there
+is no message size limit.
 
 **Key normalization.** Keys longer than 64 bytes are hashed
 with SHA-256 first (per RFC 2104). Keys shorter than 64
