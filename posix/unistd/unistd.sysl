@@ -12,7 +12,7 @@ extern write(fd: int, buf: *byte, n: int) -> int
 extern open(path: *byte, flags: int) -> int
 extern close(fd: int) -> int
 extern lseek(fd: int, offset: int, whence: int) -> int
-extern sbrk(increment: int) -> *i8
+extern sbrk(increment: int) -> *byte
 
 val STDIN_FILENO = 0
 val STDOUT_FILENO = 1

@@ -63,7 +63,8 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
     val output = new StringBuilder
     val stdout = new Stdout(Runtime.stdoutAddress, s => output ++= s)
     val ram = new RAM(0, Runtime.stdoutAddress.toInt)
-    val mem = new Memory("Memory", ram, stdout)
+    val sha = new ShaAccelerator(Runtime.shaAccelAddress)
+    val mem = new Memory("Memory", ram, stdout, sha)
     linked.load(mem)
     val cpu = new CPU(mem) { this.limit = maxCycles }
     cpu.reset()
@@ -345,6 +346,112 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |""".stripMargin))
     info(s"Output: '$out', code: $code")
     out shouldBe "AB"
+  }
+
+  "MMIO: write and read SHA_TEXT register" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import posix.stdlib.*
+        |
+        |main() -> int
+        |    // Write 0xAB to SHA_TEXT byte 0 (addr 0x100160)
+        |    var p: *i8 = *i8(0x100160)
+        |    *p = 0xABi8
+        |    // Read it back
+        |    val v = int(*p) & 0xFF
+        |    if v == 0xAB
+        |        putchar(89)
+        |    else
+        |        putchar(78)
+        |    putchar(48 + v / 16)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out should startWith("Y")
+  }
+
+  "MMIO: SHA_START trigger" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import posix.stdlib.*
+        |
+        |main() -> int
+        |    // Write "abc" padded block to SHA_TEXT
+        |    // word 0: 0x61626380
+        |    var p: *i8 = *i8(0x100160)
+        |    *p = 0x61i8
+        |    p = *i8(0x100161)
+        |    *p = 0x62i8
+        |    p = *i8(0x100162)
+        |    *p = 0x63i8
+        |    p = *i8(0x100163)
+        |    *p = i8(0x80)
+        |    // words 1..14 = 0 (already zero)
+        |    // word 15: 0x00000018 (24 bits)
+        |    p = *i8(0x100160 + 63)
+        |    *p = 0x18i8
+        |    // Trigger SHA_START
+        |    p = *i8(0x100160 + 0x43)
+        |    *p = 1
+        |    // Read TEXT[0] byte 0
+        |    p = *i8(0x100160)
+        |    val b0 = int(*p) & 0xFF
+        |    // Expected: 0xBA (first byte of SHA-256("abc"))
+        |    if b0 == 0xBA
+        |        putchar(89)
+        |    else
+        |        putchar(78)
+        |        // Print what we got
+        |        val hi = b0 >> 4
+        |        val lo = b0 & 0xF
+        |        if hi < 10
+        |            putchar(48 + hi)
+        |        else
+        |            putchar(87 + hi)
+        |        if lo < 10
+        |            putchar(48 + lo)
+        |        else
+        |            putchar(87 + lo)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out shouldBe "Y"
+  }
+
+  "SHA-256 abc (hw) via process_block_hw" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import std.crypto.sha256.*
+        |import posix.stdlib.*
+        |
+        |main() -> int
+        |    // Build padded block manually
+        |    var block: [64]byte
+        |    for var i = 0; i < 64; i++
+        |        block[i] = 0u8
+        |    block[0] = 0x61u8
+        |    block[1] = 0x62u8
+        |    block[2] = 0x63u8
+        |    block[3] = 0x80u8
+        |    block[63] = 0x18u8
+        |    // Call process_block_hw
+        |    process_block_hw(block[:], 0, 1)
+        |    // Read result
+        |    var out: [32]byte
+        |    read_hw_state(out[:])
+        |    for var i = 0; i < 4; i++
+        |        val b = int(out[i])
+        |        val hi = b >> 4
+        |        val lo = b & 0xF
+        |        if hi < 10
+        |            putchar(48 + hi)
+        |        else
+        |            putchar(87 + hi)
+        |        if lo < 10
+        |            putchar(48 + lo)
+        |        else
+        |            putchar(87 + lo)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out shouldBe "ba7816bf"
   }
 
   "SHA-256 abc" in {

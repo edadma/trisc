@@ -4,11 +4,10 @@ Minix 3-style login. Reads /etc/passwd and /etc/shadow,
 authenticates the user, sets uid, then spawns the shell.
 
 Passwd format: username:x:uid:gid:gecos:home:shell
-Shadow format: username:password
+Shadow format: username:salt:hash_hex
 
 Password field "x" in passwd means look up in shadow.
-Passwords are currently stored in cleartext (placeholder
-for std.crypto hash when available).
+Passwords are hashed with PBKDF2-HMAC-SHA256 (c=1).
 
     module oskit.apps
 
@@ -16,12 +15,14 @@ for std.crypto hash when available).
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
     import oskit.servers.fs_open
     import oskit.servers.fs_read
+    import std.crypto.pbkdf2.{pbkdf2_hmac_sha256_hw}
 
     extern nsh()
+    extern nsh_set_home(home: *byte, homelen: int)
 
 Buffered output.
 
-    var login_out: [140]i8
+    var login_out: [140]byte
     var login_outpos = 0
 
     login_flush()
@@ -32,7 +33,7 @@ Buffered output.
     login_putc(ch: char)
         if login_outpos >= 120
             login_flush()
-        login_out[login_outpos] = i8(ch)
+        login_out[login_outpos] = byte(ch)
         login_outpos += 1
 
     login_print(s: string)
@@ -51,7 +52,7 @@ Buffered output.
 Read a line from the TTY into buf. Returns length.
 If echo is false, characters are not echoed (for passwords).
 
-    login_readline(buf: *i8, maxlen: int, echo: int) -> int
+    login_readline(buf: *byte, maxlen: int, echo: int) -> int
         var blen = 0
         while blen < maxlen - 1
             val ch = tty_getc()
@@ -68,7 +69,7 @@ If echo is false, characters are not echoed (for passwords).
                         login_putc(8)
                         login_flush()
             else if ch >= ' '
-                buf[blen] = i8(ch)
+                buf[blen] = byte(ch)
                 blen += 1
                 if echo != 0
                     login_putc(ch)
@@ -78,7 +79,7 @@ If echo is false, characters are not echoed (for passwords).
 
 Compare two byte buffers for equality.
 
-    bufcmp(a: *i8, alen: int, b: *i8, blen: int) -> int
+    bufcmp(a: *byte, alen: int, b: *byte, blen: int) -> int
         if alen != blen
             return 0
         for var i = 0; i < alen; i++
@@ -88,7 +89,7 @@ Compare two byte buffers for equality.
 
 Read a file into a buffer. Returns bytes read.
 
-    read_file(path: string, buf: *i8, maxlen: int) -> int
+    read_file(path: string, buf: *byte, maxlen: int) -> int
         val ino = fs_open(path)
         if ino < 0
             return -1
@@ -101,7 +102,7 @@ Parse a colon-delimited field from a line buffer.
 Sets field_start and field_len, returns position after
 the delimiter (or end of line).
 
-    parse_field(buf: *i8, pos: int, limit: int, field_start: *int, field_len: *int) -> int
+    parse_field(buf: *byte, pos: int, limit: int, field_start: *int, field_len: *int) -> int
         *field_start = pos
         var p = pos
         while p < limit
@@ -119,7 +120,7 @@ Find a line in a passwd/shadow file matching a username.
 Returns the position of the start of the matching line,
 or -1 if not found.
 
-    find_user_line(buf: *i8, buflen: int, user: *i8, userlen: int) -> int
+    find_user_line(buf: *byte, buflen: int, user: *byte, userlen: int) -> int
         var pos = 0
         while pos < buflen
             // Find end of current line
@@ -139,10 +140,16 @@ or -1 if not found.
             pos = eol + 1
         -1
 
-Look up a user in /etc/passwd. Returns uid or -1 on failure.
+Parsed home directory from the last successful lookup_passwd call.
 
-    lookup_passwd(user: *i8, userlen: int) -> int
-        var filebuf: [512]i8
+    var login_home: [128]byte
+    var login_home_len = 0
+
+Look up a user in /etc/passwd. Returns uid or -1 on failure.
+Also stores the home directory in login_home/login_home_len.
+
+    lookup_passwd(user: *byte, userlen: int) -> int
+        var filebuf: [512]byte
         val nr = read_file("/etc/passwd", filebuf, 512)
         if nr <= 0
             return -1
@@ -153,47 +160,95 @@ Look up a user in /etc/passwd. Returns uid or -1 on failure.
         var fstart: int
         var flen: int
         var pos = line
-        val eol = line + nr  // conservative end
         // Skip username
         pos = parse_field(filebuf, pos, nr, &fstart, &flen)
         // Skip password field (should be "x")
         pos = parse_field(filebuf, pos, nr, &fstart, &flen)
         // Parse uid
         pos = parse_field(filebuf, pos, nr, &fstart, &flen)
-        // Convert uid string to int
         var uid = 0
         for var i = 0; i < flen; i++
             uid = uid * 10 + int(filebuf[fstart + i]) - '0'
+        // Skip gid
+        pos = parse_field(filebuf, pos, nr, &fstart, &flen)
+        // Skip gecos
+        pos = parse_field(filebuf, pos, nr, &fstart, &flen)
+        // Parse home directory
+        pos = parse_field(filebuf, pos, nr, &fstart, &flen)
+        login_home_len = flen
+        for var i = 0; i < flen; i++
+            login_home[i] = filebuf[fstart + i]
         uid
 
-Look up a password in /etc/shadow. Returns 1 if match, 0 if not.
+Convert a hex character to its nibble value (0-15). Returns -1 on invalid.
 
-    check_shadow(user: *i8, userlen: int, pass: *i8, passlen: int) -> int
-        var filebuf: [512]i8
+    hex_nibble(ch: int) -> int
+        if ch >= '0' && ch <= '9'
+            return ch - '0'
+        if ch >= 'a' && ch <= 'f'
+            return ch - 'a' + 10
+        if ch >= 'A' && ch <= 'F'
+            return ch - 'A' + 10
+        -1
+
+Look up a password in /etc/shadow. Returns 1 if match, 0 if not.
+Shadow format: username:salt:hash_hex (PBKDF2-HMAC-SHA256, c=1).
+
+    check_shadow(user: *byte, userlen: int, pass: *byte, passlen: int) -> int
+        var filebuf: [512]byte
         val nr = read_file("/etc/shadow", filebuf, 512)
         if nr <= 0
             return 0
         val line = find_user_line(filebuf, nr, user, userlen)
         if line < 0
             return 0
-        // Parse fields: username:password
+        // Parse fields: username:salt:hash_hex
         var fstart: int
         var flen: int
         var pos = line
         // Skip username
         pos = parse_field(filebuf, pos, nr, &fstart, &flen)
-        // Get password field
+        // Get salt field
+        pos = parse_field(filebuf, pos, nr, &fstart, &flen)
+        val salt_start = fstart
+        val salt_len = flen
+        // Get hash field
         parse_field(filebuf, pos, nr, &fstart, &flen)
-        // Compare with provided password (cleartext for now)
-        bufcmp(filebuf + fstart, flen, pass, passlen)
+        val hash_start = fstart
+        val hash_len = flen
+        if hash_len != 64
+            return 0
+
+        // Copy password and salt into byte arrays for PBKDF2
+        var pass_buf: [64]byte
+        for var i = 0; i < passlen; i++
+            pass_buf[i] = byte(pass[i])
+        var salt_buf: [64]byte
+        for var i = 0; i < salt_len; i++
+            salt_buf[i] = byte(filebuf[salt_start + i])
+
+        // Compute PBKDF2-HMAC-SHA256 with c=1
+        var computed: [32]byte
+        pbkdf2_hmac_sha256_hw(pass_buf[:passlen], salt_buf[:salt_len], 1, computed[:])
+
+        // Compare computed hash with stored hash (hex-encoded)
+        for var i = 0; i < 32; i++
+            val b = int(computed[i])
+            val hi = hex_nibble(int(filebuf[hash_start + i * 2]))
+            val lo = hex_nibble(int(filebuf[hash_start + i * 2 + 1]))
+            if hi < 0 || lo < 0
+                return 0
+            if b != hi * 16 + lo
+                return 0
+        1
 
 The login main loop. Prompts for credentials, authenticates,
 sets uid, and runs the shell. Loops on failure or when shell exits.
 
     login()
         sleep(10)
-        var user: [64]i8
-        var pass: [64]i8
+        var user: [64]byte
+        var pass: [64]byte
 
         while 1 == 1
             login_newline()
@@ -221,7 +276,8 @@ sets uid, and runs the shell. Loops on failure or when shell exits.
                 login_flush()
                 continue
 
-            // Authenticated — set uid and run shell
+            // Authenticated — set uid, home dir, and run shell
             setuid(uid)
+            nsh_set_home(login_home, login_home_len)
             nsh()
             // Shell exited — loop back to login

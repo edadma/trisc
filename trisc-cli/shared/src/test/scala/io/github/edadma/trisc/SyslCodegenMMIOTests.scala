@@ -55,6 +55,41 @@ class SyslCodegenMMIOTests extends SyslCodegenHelpers {
         |""".stripMargin) shouldBe 42
   }
 
+  "struct pointer cast and field access" in {
+    compileAndRun(
+      """struct Pair
+        |    a: u32
+        |    b: u32
+        |
+        |main() -> int
+        |    var data: [8]byte
+        |    var p: *Pair = *Pair(i64(&data[0]))
+        |    p.a = 100u32
+        |    p.b = 200u32
+        |    i64(p.a) + i64(p.b)
+        |""".stripMargin) shouldBe 300
+  }
+
+  "struct pointer with mixed field sizes" in {
+    val asm = compile(
+      """struct Regs
+        |    word: u32
+        |    half: u16
+        |    flag: byte
+        |    cmd: byte
+        |
+        |main() -> int
+        |    var r: *Regs = *Regs(0x1000)
+        |    r.word = 42u32
+        |    r.half = 7u16
+        |    r.flag = 1u8
+        |    0
+        |""".stripMargin)
+    asm should include("stw")
+    asm should include("sts")
+    asm should include("stb")
+  }
+
   "MMIO write through *byte" in {
     compileAndRun(
       """main() -> int

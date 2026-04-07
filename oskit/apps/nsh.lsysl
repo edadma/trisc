@@ -34,13 +34,23 @@ Shell state.
 
     var cwd: string
     var cwd_ino = 1
+    var nsh_home_buf: [128]byte
+    var nsh_home_len = 0
+
+Set the initial home directory for the next nsh() call.
+Called by login before spawning the shell.
+
+    nsh_set_home(home: *byte, homelen: int)
+        for var i = 0; i < homelen; i++
+            nsh_home_buf[i] = byte(home[i])
+        nsh_home_len = homelen
 
 Buffered output. All output accumulates in nsh_out and is
 sent to the TTY in a single IPC call on flush. This matches
 the Minix 3 approach where output is batched to reduce IPC
 round-trips.
 
-    var nsh_out: [140]i8
+    var nsh_out: [140]byte
     var nsh_outpos = 0
 
     nsh_flush()
@@ -51,7 +61,7 @@ round-trips.
     nsh_putc(ch: char)
         if nsh_outpos >= 120
             nsh_flush()
-        nsh_out[nsh_outpos] = i8(ch)
+        nsh_out[nsh_outpos] = byte(ch)
         nsh_outpos += 1
 
     nsh_print(s: string)
@@ -78,7 +88,7 @@ round-trips.
 
 Convert a NUL-padded byte buffer (e.g. dir entry name) to a string.
 
-    buf_to_str(buf: *i8, max: int) -> string
+    buf_to_str(buf: *byte, max: int) -> string
         var n = 0
         while n < max
             if buf[n] == 0
@@ -91,7 +101,7 @@ by spaces. Returns the number of tokens found.
 
     val MAX_ARGS = 16
 
-    tokenize(buf: *i8, buflen: int, argv: *string) -> int
+    tokenize(buf: *byte, buflen: int, argv: *string) -> int
         var argc = 0
         var pos = 0
         while pos < buflen
@@ -120,19 +130,19 @@ Home/End, Delete, Backspace, and character insertion.
 
 Append a CSI sequence with numeric parameter to a buffer.
 
-    nsh_append_csi(out: *i8, pos: int, n: int, ch: i8) -> int
+    nsh_append_csi(out: *byte, pos: int, n: int, ch: byte) -> int
         var p = pos
         out[p] = 27
         p += 1
         out[p] = '['
         p += 1
         if n >= 100
-            out[p] = i8('0' + n / 100)
+            out[p] = byte('0' + n / 100)
             p += 1
         if n >= 10
-            out[p] = i8('0' + (n / 10) % 10)
+            out[p] = byte('0' + (n / 10) % 10)
             p += 1
-        out[p] = i8('0' + n % 10)
+        out[p] = byte('0' + n % 10)
         p += 1
         out[p] = ch
         p += 1
@@ -153,7 +163,7 @@ Emit a CSI sequence directly.
 
 Redraw the full line in a single batched write.
 
-    nsh_refresh_line(buf: *i8, blen: int, cursor: int, prompt_len: int)
+    nsh_refresh_line(buf: *byte, blen: int, cursor: int, prompt_len: int)
         nsh_flush()
         var p = 0
         nsh_out[p] = 13
@@ -176,12 +186,12 @@ Redraw the full line in a single batched write.
             nsh_out[p] = buf[i]
             p += 1
         // ESC[K — clear to end of line
-        p = nsh_append_csi(nsh_out, p, 0, i8('K'))
+        p = nsh_append_csi(nsh_out, p, 0, byte('K'))
         // ESC[nG — cursor to column (1-based)
-        p = nsh_append_csi(nsh_out, p, prompt_len + cursor + 1, i8('G'))
+        p = nsh_append_csi(nsh_out, p, prompt_len + cursor + 1, byte('G'))
         tty_puts(nsh_out, p)
 
-    nsh_readline(buf: *i8, maxlen: int, prompt_len: int) -> int
+    nsh_readline(buf: *byte, maxlen: int, prompt_len: int) -> int
         var blen = 0
         var cursor = 0
         while blen < maxlen - 1
@@ -233,7 +243,7 @@ Redraw the full line in a single batched write.
                     while i > cursor
                         buf[i] = buf[i - 1]
                         i -= 1
-                    buf[cursor] = i8(ch)
+                    buf[cursor] = byte(ch)
                     blen += 1
                     cursor += 1
                     if cursor == blen
@@ -301,7 +311,7 @@ Built-in commands.
                 nsh_print(": not found\n")
                 return
         var entry_ino: int
-        var entry_name: [14]i8
+        var entry_name: [14]byte
         var idx = 0
         while fs_readdir(dir_ino, idx, &entry_ino, entry_name) == 0
             val name = buf_to_str(entry_name, 14)
@@ -328,7 +338,7 @@ Built-in commands.
             nsh_print(argv[1])
             nsh_print(": not found\n")
             return
-        var buf: [128]i8
+        var buf: [128]byte
         var offset = 0
         var nr = fs_read(ino, buf, offset, 128)
         while nr > 0
@@ -599,10 +609,19 @@ Command dispatch.
 The shell main loop.
 
     nsh()
-        cwd = "/"
+        if nsh_home_len > 0
+            cwd = string(&nsh_home_buf[0], nsh_home_len)
+            cwd_ino = fs_open(cwd)
+            if cwd_ino < 0
+                cwd = "/"
+                cwd_ino = 1
+            nsh_home_len = 0
+        else
+            cwd = "/"
+            cwd_ino = 1
         sleep(5)
 
-        var line: [256]i8
+        var line: [256]byte
         var argv: [16]string
 
         while 1 == 1

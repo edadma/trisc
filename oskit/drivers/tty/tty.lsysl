@@ -30,7 +30,7 @@ Per-console state. Each console has its own input ring buffer
 and tracks pending read requests.
 
     struct Console
-        in_buf: [64]i8
+        in_buf: [64]byte
         in_head: int
         in_tail: int
         in_count: int
@@ -47,8 +47,8 @@ HID scancode to ASCII translation table (US layout, lowercase).
 Covers basic printable characters. Shift handling uses a
 separate table.
 
-    var sc_to_ascii: [128]i8
-    var sc_to_ascii_shift: [128]i8
+    var sc_to_ascii: [128]byte
+    var sc_to_ascii_shift: [128]byte
 
     tty_init_tables()
         // Letters a-z: HID 0x04-0x1D
@@ -177,7 +177,7 @@ Initialize a console's state.
 Push a character into a console's input buffer.
 Returns 1 if buffered, 0 if full.
 
-    tty_console_push(id: int, ch: i8) -> int
+    tty_console_push(id: int, ch: byte) -> int
         if consoles[id].in_count >= TTY_INPUT_SIZE
             return 0
         consoles[id].in_buf[consoles[id].in_tail] = ch
@@ -198,18 +198,18 @@ Returns the character, or -1 if empty.
 
 Push an ANSI escape sequence (ESC [ X) into the active console.
 
-    tty_push_escape(final_ch: i8)
-        tty_console_push(active_console, i8(27))   // ESC
-        tty_console_push(active_console, i8(91))   // [
+    tty_push_escape(final_ch: byte)
+        tty_console_push(active_console, byte(27))   // ESC
+        tty_console_push(active_console, byte(91))   // [
         tty_console_push(active_console, final_ch)
 
 Push a CSI sequence with a numeric parameter (ESC [ n ~).
 
-    tty_push_csi_tilde(n: i8)
-        tty_console_push(active_console, i8(27))   // ESC
-        tty_console_push(active_console, i8(91))   // [
-        tty_console_push(active_console, i8(48 + n)) // digit
-        tty_console_push(active_console, i8(126))  // ~
+    tty_push_csi_tilde(n: byte)
+        tty_console_push(active_console, byte(27))   // ESC
+        tty_console_push(active_console, byte(91))   // [
+        tty_console_push(active_console, byte(48 + n)) // digit
+        tty_console_push(active_console, byte(126))  // ~
 
 Process keyboard input. Called when the keyboard ISR
 has buffered events. Translates scancodes to ASCII and
@@ -254,9 +254,9 @@ HID scancodes for special keys:
                         // Cmd+Backspace → forward delete (ESC[3~)
                         tty_push_csi_tilde(3)
                     else
-                        tty_console_push(active_console, i8(8))
+                        tty_console_push(active_console, byte(8))
                 else if sc < 128
-                    var ch: i8 = 0
+                    var ch: byte = 0
                     if (mods & 1) != 0
                         // Shift held
                         ch = sc_to_ascii_shift[sc]
@@ -275,31 +275,31 @@ all consoles.
                 val ch = tty_console_pop(con)
                 if ch >= 0
                     val reader = consoles[con].pending_reader
-                    var reply: [2]i8
+                    var reply: [2]byte
                     reply[0] = 0
-                    reply[1] = i8(ch)
+                    reply[1] = byte(ch)
                     ipc_reply(reader, &reply[0], 2)
                     consoles[con].pending_reader = -1
             con += 1
 
 Handle a WRITE command: output a character.
 
-    tty_handle_write(sender: int, console: int, ch: i8)
+    tty_handle_write(sender: int, console: int, ch: byte)
         putc(ch)
-        var reply: [1]i8
+        var reply: [1]byte
         reply[0] = 0
         ipc_reply(sender, &reply[0], 1)
 
 Handle a PUTS command: output a string.
 Message format: [cmd, console, len, chars...]
 
-    tty_handle_puts(sender: int, console: int, buf: *i8)
+    tty_handle_puts(sender: int, console: int, buf: *byte)
         val len = int(buf[2])
         var i = 0
         while i < len
             putc(buf[i + 3])
             i += 1
-        var reply: [1]i8
+        var reply: [1]byte
         reply[0] = 0
         ipc_reply(sender, &reply[0], 1)
 
@@ -310,9 +310,9 @@ when keyboard input arrives).
     tty_handle_read(sender: int, console: int)
         val ch = tty_console_pop(console)
         if ch >= 0
-            var reply: [2]i8
+            var reply: [2]byte
             reply[0] = 0
-            reply[1] = i8(ch)
+            reply[1] = byte(ch)
             ipc_reply(sender, &reply[0], 2)
         else
             // No input — save pending request.
@@ -326,14 +326,14 @@ Handle a SWITCH command: change active console.
         if console >= 0
             if console < MAX_CONSOLES
                 active_console = console
-        var reply: [1]i8
+        var reply: [1]byte
         reply[0] = 0
         ipc_reply(sender, &reply[0], 1)
 
 The TTY server loop. Creates port, registers as "tty",
 initializes keyboard, then loops handling messages.
 
-    var tty_name: [4]i8
+    var tty_name: [4]byte
 
     tty_server()
         // Set up name
@@ -359,7 +359,7 @@ initializes keyboard, then loops handling messages.
         keyboard_set_notify(tty_tid)
 
         // Server loop — waits for IPC messages OR keyboard notifications
-        var buf: [128]i8
+        var buf: [128]byte
         while 1 == 1
             // Check for keyboard input before blocking
             tty_process_keyboard()
@@ -387,7 +387,7 @@ initializes keyboard, then loops handling messages.
                     tty_handle_switch(sender, console)
                 else
                     // Unknown command — reply with error
-                    var reply: [1]i8
+                    var reply: [1]byte
                     reply[0] = -1
                     ipc_reply(sender, &reply[0], 1)
 
@@ -397,34 +397,34 @@ them to the TTY port.
     tty_putc(ch: char)
         val port = port_lookup(&tty_name[0])
         if port >= 0
-            var msg: [3]i8
+            var msg: [3]byte
             msg[0] = TTY_CMD_WRITE
             msg[1] = 0
-            msg[2] = i8(ch)
-            var reply: [1]i8
+            msg[2] = byte(ch)
+            var reply: [1]byte
             ipc_send(port, &msg[0], 3, &reply[0], 1)
 
     tty_puts(s: *byte, len: int)
         val port = port_lookup(&tty_name[0])
         if port >= 0
-            var msg: [128]i8
-            msg[0] = i8(TTY_CMD_PUTS)
+            var msg: [128]byte
+            msg[0] = byte(TTY_CMD_PUTS)
             msg[1] = 0
-            msg[2] = i8(len)
+            msg[2] = byte(len)
             var i = 0
             while i < len
                 msg[i + 3] = s[i]
                 i += 1
-            var reply: [1]i8
+            var reply: [1]byte
             ipc_send(port, &msg[0], len + 3, &reply[0], 1)
 
     tty_getc() -> int
         val port = port_lookup(&tty_name[0])
         if port >= 0
-            var msg: [2]i8
+            var msg: [2]byte
             msg[0] = TTY_CMD_READ
             msg[1] = 0
-            var reply: [2]i8
+            var reply: [2]byte
             ipc_send(port, &msg[0], 2, &reply[0], 2)
             return int(reply[1])
         -1
@@ -432,8 +432,8 @@ them to the TTY port.
     tty_switch(console: int)
         val port = port_lookup(&tty_name[0])
         if port >= 0
-            var msg: [2]i8
-            msg[0] = i8(TTY_CMD_SWITCH)
-            msg[1] = i8(console)
-            var reply: [1]i8
+            var msg: [2]byte
+            msg[0] = byte(TTY_CMD_SWITCH)
+            msg[1] = byte(console)
+            var reply: [1]byte
             ipc_send(port, &msg[0], 2, &reply[0], 1)

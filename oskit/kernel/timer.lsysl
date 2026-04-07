@@ -33,9 +33,9 @@ Device registers (MCU-style timer, word-aligned):
         *arr = u32(period)
 
         // Enable overflow interrupt and start timer
-        val ier: *i8 = *i8(TIMER_IER)
+        val ier: *byte = *byte(TIMER_IER)
         *ier = 1
-        val cr: *i8 = *i8(TIMER_CR)
+        val cr: *byte = *byte(TIMER_CR)
         *cr = 1
 
 timer_handler -- Called by the generic IRQ dispatcher in boot.asm.
@@ -43,5 +43,5 @@ Just acknowledges the timer device. The dispatcher handles the
 context switch, and schedule() handles tick counting and waking.
 
     timer_handler()
-        val sr: *i8 = *i8(TIMER_SR)
+        val sr: *byte = *byte(TIMER_SR)
         *sr = 1

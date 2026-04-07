@@ -19,6 +19,11 @@ class BuildOSLogin extends OSKitTestHelpers {
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val nshSysl: String    = readLsysl("oskit/apps/nsh.lsysl")
   private lazy val loginSysl: String  = readLsysl("oskit/apps/login.lsysl")
+  private lazy val debugSysl: String  = readLsysl("std/debug/debug.lsysl")
+  private lazy val memSysl: String    = readLsysl("std/mem/mem.lsysl")
+  private lazy val sha256Sysl: String = readLsysl("std/crypto/sha256/sha256.lsysl")
+  private lazy val hmacSysl: String   = readLsysl("std/crypto/hmac/hmac.lsysl")
+  private lazy val pbkdf2Sysl: String = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
 
   "build OS login TOF" in {
     val bootTof = assemble(bootAsm, relocatable = true)
@@ -38,6 +43,11 @@ class BuildOSLogin extends OSKitTestHelpers {
       "posix/string/string"        -> posixStringSysl,
       "posix/ctype/ctype"          -> posixCtypeSysl,
       "posix/stdlib/alloc"         -> posixAllocSysl,
+      "std/debug/debug"             -> debugSysl,
+      "std/mem/mem"                 -> memSysl,
+      "std/crypto/sha256/sha256"   -> sha256Sysl,
+      "std/crypto/hmac/hmac"       -> hmacSysl,
+      "std/crypto/pbkdf2/pbkdf2"   -> pbkdf2Sysl,
       "oskit/apps/nsh"              -> nshSysl,
       "oskit/apps/login"            -> loginSysl,
       "app" ->
