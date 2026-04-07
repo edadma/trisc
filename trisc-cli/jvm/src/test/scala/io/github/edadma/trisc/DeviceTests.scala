@@ -160,14 +160,11 @@ class DeviceTests extends TestHelpers {
   }
 
   // ===== Timer =====
-  // New register map: PSC(0-1), ARR(2-5), CNT(6-9), CR(10), SR(11), IER(12), channels(13+)
+  // Register map: ARR(0-3), CNT(4-7), PSC(8-9), CR(10), SR(11), IER(12), pad(13-15), channels(16+)
 
-  /** Helper: set ARR (period) as 32-bit big-endian at offset 2-5 */
+  /** Helper: set ARR (period) via word write at offset 0 */
   def setARR(timer: Timer, base: Long, value: Int): Unit =
-    timer.writeByte(base + 2, (value >> 24) & 0xFF)
-    timer.writeByte(base + 3, (value >> 16) & 0xFF)
-    timer.writeByte(base + 4, (value >> 8) & 0xFF)
-    timer.writeByte(base + 5, value & 0xFF)
+    timer.writeInt(base, value)
 
   /** Helper: enable timer with overflow interrupt */
   def startTimer(timer: Timer, base: Long): Unit =
@@ -177,7 +174,7 @@ class DeviceTests extends TestHelpers {
   "timer has correct size" in {
     val intc = new InterruptController(0x200)
     val timer = new Timer(0x100, intc, irq = 0)
-    timer.size shouldBe 33
+    timer.size shouldBe 48
   }
 
   "timer ARR registers accept 32-bit write" in {

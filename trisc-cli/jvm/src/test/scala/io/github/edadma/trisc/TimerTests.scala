@@ -7,37 +7,25 @@ class TimerTests extends TestHelpers {
     val timer = new Timer(0x100, intc, irq = 0, channels = channels)
     (timer, intc)
 
-  /** Set ARR (period) as 32-bit big-endian at base+2 */
+  /** Set ARR (period) via word write at base+0 */
   def setARR(t: Timer, v: Long): Unit =
-    t.writeByte(0x102, (v >> 24) & 0xFF)
-    t.writeByte(0x103, (v >> 16) & 0xFF)
-    t.writeByte(0x104, (v >> 8) & 0xFF)
-    t.writeByte(0x105, v & 0xFF)
+    t.writeInt(0x100, v)
 
-  /** Set PSC (prescaler) as 16-bit big-endian at base+0 */
+  /** Set PSC (prescaler) via short write at base+8 */
   def setPSC(t: Timer, v: Int): Unit =
-    t.writeByte(0x100, (v >> 8) & 0xFF)
-    t.writeByte(0x101, v & 0xFF)
+    t.writeShort(0x108, v)
 
-  /** Set CCR for channel ch */
+  /** Set CCR for channel ch via word write at base+16+ch*8 */
   def setCCR(t: Timer, ch: Int, v: Long): Unit =
-    val off = 0x10D + ch * 5
-    t.writeByte(off, (v >> 24) & 0xFF)
-    t.writeByte(off + 1, (v >> 16) & 0xFF)
-    t.writeByte(off + 2, (v >> 8) & 0xFF)
-    t.writeByte(off + 3, v & 0xFF)
+    t.writeInt(0x110 + ch * 8, v)
 
-  /** Read CCR for channel ch */
+  /** Read CCR for channel ch via word read at base+16+ch*8 */
   def readCCR(t: Timer, ch: Int): Long =
-    val off = 0x10D + ch * 5
-    ((t.readByte(off).toLong & 0xFF) << 24) |
-    ((t.readByte(off + 1).toLong & 0xFF) << 16) |
-    ((t.readByte(off + 2).toLong & 0xFF) << 8) |
-    (t.readByte(off + 3).toLong & 0xFF)
+    t.readInt(0x110 + ch * 8).toLong & 0xFFFFFFFFL
 
-  /** Set CCMR for channel ch */
+  /** Set CCMR for channel ch at base+16+ch*8+4 */
   def setCCMR(t: Timer, ch: Int, mode: Int): Unit =
-    t.writeByte(0x10D + ch * 5 + 4, mode)
+    t.writeByte(0x110 + ch * 8 + 4, mode)
 
   /** Enable timer with overflow interrupt */
   def enable(t: Timer): Unit =
@@ -58,10 +46,7 @@ class TimerTests extends TestHelpers {
     enable(t)
     for _ <- 1 to 5 do t.tick()
     // Counter should be 5 (increments every tick)
-    val cnt = ((t.readByte(0x106).toLong & 0xFF) << 24) |
-              ((t.readByte(0x107).toLong & 0xFF) << 16) |
-              ((t.readByte(0x108).toLong & 0xFF) << 8) |
-              (t.readByte(0x109).toLong & 0xFF)
+    val cnt = t.readInt(0x104).toLong & 0xFFFFFFFFL
     cnt shouldBe 5
   }
 
@@ -71,10 +56,7 @@ class TimerTests extends TestHelpers {
     setPSC(t, 1)
     enable(t)
     for _ <- 1 to 10 do t.tick()
-    val cnt = ((t.readByte(0x106).toLong & 0xFF) << 24) |
-              ((t.readByte(0x107).toLong & 0xFF) << 16) |
-              ((t.readByte(0x108).toLong & 0xFF) << 8) |
-              (t.readByte(0x109).toLong & 0xFF)
+    val cnt = t.readInt(0x104).toLong & 0xFFFFFFFFL
     cnt shouldBe 5
   }
 
@@ -84,10 +66,7 @@ class TimerTests extends TestHelpers {
     setPSC(t, 4)
     enable(t)
     for _ <- 1 to 25 do t.tick()
-    val cnt = ((t.readByte(0x106).toLong & 0xFF) << 24) |
-              ((t.readByte(0x107).toLong & 0xFF) << 16) |
-              ((t.readByte(0x108).toLong & 0xFF) << 8) |
-              (t.readByte(0x109).toLong & 0xFF)
+    val cnt = t.readInt(0x104).toLong & 0xFFFFFFFFL
     cnt shouldBe 5
   }
 
@@ -123,10 +102,7 @@ class TimerTests extends TestHelpers {
     setARR(t, 100)
     enable(t)
     for _ <- 1 to 7 do t.tick()
-    val cnt = ((t.readByte(0x106).toLong & 0xFF) << 24) |
-              ((t.readByte(0x107).toLong & 0xFF) << 16) |
-              ((t.readByte(0x108).toLong & 0xFF) << 8) |
-              (t.readByte(0x109).toLong & 0xFF)
+    val cnt = t.readInt(0x104).toLong & 0xFFFFFFFFL
     cnt shouldBe 7
   }
 
@@ -135,7 +111,7 @@ class TimerTests extends TestHelpers {
     setARR(t, 100)
     enable(t)
     // Set counter to 95
-    t.writeByte(0x109, 95)
+    t.writeInt(0x104, 95)
     for _ <- 1 to 5 do t.tick()
     t.fired shouldBe true // 95 + 5 = 100 = overflow
   }
