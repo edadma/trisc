@@ -9,7 +9,7 @@ Dependencies: std.crypto.sha256.
 
     module std.crypto.hmac
 
-    import std.crypto.sha256.{sha256}
+    import std.crypto.sha256.{sha256, sha256_hw}
 
 
 Constants
@@ -62,6 +62,46 @@ writes the 32-byte MAC to `out`.
             outer_buf[BLOCK_SIZE + i] = inner_hash[i]
 
         sha256(outer_buf[:], out)
+
+
+hmac_sha256_hw — hardware-accelerated path
+-------------------------------------------
+
+Same algorithm, uses `sha256_hw` for the compression.
+
+    hmac_sha256_hw(key: []byte, msg: []byte, out: []byte)
+        var k0: [64]byte = ""
+
+        if len(key) > BLOCK_SIZE
+            sha256_hw(key, k0[:])
+        else
+            for i in 0..<len(key)
+                k0[i] = key[i]
+
+        var ipad: [64]byte
+        var opad: [64]byte
+
+        for i in 0..<BLOCK_SIZE
+            ipad[i] = k0[i] ^ 0x36u8
+            opad[i] = k0[i] ^ 0x5cu8
+
+        val inner_len = BLOCK_SIZE + len(msg)
+        val inner_buf = (new [inner_len]byte)[:]
+        for i in 0..<BLOCK_SIZE
+            inner_buf[i] = ipad[i]
+        for i in 0..<len(msg)
+            inner_buf[BLOCK_SIZE + i] = msg[i]
+
+        var inner_hash: [32]byte
+        sha256_hw(inner_buf, inner_hash[:])
+
+        var outer_buf: [96]byte
+        for i in 0..<BLOCK_SIZE
+            outer_buf[i] = opad[i]
+        for i in 0..<HASH_SIZE
+            outer_buf[BLOCK_SIZE + i] = inner_hash[i]
+
+        sha256_hw(outer_buf[:], out)
 
 
 Tests

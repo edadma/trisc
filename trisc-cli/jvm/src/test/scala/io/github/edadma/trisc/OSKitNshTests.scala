@@ -15,6 +15,11 @@ class OSKitNshTests extends OSKitTestHelpers {
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val nshSysl: String    = readLsysl("oskit/apps/nsh.lsysl")
   private lazy val loginSysl: String  = readLsysl("oskit/apps/login.lsysl")
+  private lazy val debugSysl: String  = readLsysl("std/debug/debug.lsysl")
+  private lazy val memSysl: String    = readLsysl("std/mem/mem.lsysl")
+  private lazy val sha256Sysl: String = readLsysl("std/crypto/sha256/sha256.lsysl")
+  private lazy val hmacSysl: String   = readLsysl("std/crypto/hmac/hmac.lsysl")
+  private lazy val pbkdf2Sysl: String = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
 
   // Build OS with nsh launched directly (no login).
   private lazy val nshLinked: TOF =
@@ -89,6 +94,11 @@ import oskit.services.sleep
       "posix/string/string"        -> posixStringSysl,
       "posix/ctype/ctype"          -> posixCtypeSysl,
       "posix/stdlib/alloc"         -> posixAllocSysl,
+      "std/debug/debug"             -> debugSysl,
+      "std/mem/mem"                 -> memSysl,
+      "std/crypto/sha256/sha256"   -> sha256Sysl,
+      "std/crypto/hmac/hmac"       -> hmacSysl,
+      "std/crypto/pbkdf2/pbkdf2"   -> pbkdf2Sysl,
       "oskit/apps/nsh"              -> nshSysl,
       "oskit/apps/login"            -> loginSysl,
       "app" ->
@@ -155,7 +165,8 @@ import oskit.services.sleep
       prefill = prefill,
       maxInodes = 32,
     )
-    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk)
+    val sha = new ShaAccelerator(Runtime.shaAccelAddress)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha)
     linked.load(mem)
 
     val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
@@ -282,7 +293,7 @@ import oskit.services.sleep
 
   // === Login integration tests ===
 
-  private val passwdPrefill = "/etc/passwd file \"root:x:0:0:root:/:/nsh\"\n/etc/shadow file \"root:toor\"\n"
+  private val passwdPrefill = "/etc/passwd file \"root:x:0:0:root:/:/nsh\"\n/etc/shadow file \"root:slix:3b1b8291c0bdb62febcd914f45884bca403ae1c42a4bb1c41755881f3886d158\"\n"
 
   def runLogin(
       maxCycles: Int = 15000000,
@@ -314,7 +325,8 @@ import oskit.services.sleep
       prefill = prefill,
       maxInodes = 32,
     )
-    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk)
+    val sha = new ShaAccelerator(Runtime.shaAccelAddress)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha)
     linked.load(mem)
 
     val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)

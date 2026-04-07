@@ -4,11 +4,10 @@ Minix 3-style login. Reads /etc/passwd and /etc/shadow,
 authenticates the user, sets uid, then spawns the shell.
 
 Passwd format: username:x:uid:gid:gecos:home:shell
-Shadow format: username:password
+Shadow format: username:salt:hash_hex
 
 Password field "x" in passwd means look up in shadow.
-Passwords are currently stored in cleartext (placeholder
-for std.crypto hash when available).
+Passwords are hashed with PBKDF2-HMAC-SHA256 (c=1).
 
     module oskit.apps
 
@@ -16,6 +15,7 @@ for std.crypto hash when available).
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
     import oskit.servers.fs_open
     import oskit.servers.fs_read
+    import std.crypto.pbkdf2.{pbkdf2_hmac_sha256_hw}
 
     extern nsh()
 
@@ -166,7 +166,19 @@ Look up a user in /etc/passwd. Returns uid or -1 on failure.
             uid = uid * 10 + int(filebuf[fstart + i]) - '0'
         uid
 
+Convert a hex character to its nibble value (0-15). Returns -1 on invalid.
+
+    hex_nibble(ch: int) -> int
+        if ch >= '0' && ch <= '9'
+            return ch - '0'
+        if ch >= 'a' && ch <= 'f'
+            return ch - 'a' + 10
+        if ch >= 'A' && ch <= 'F'
+            return ch - 'A' + 10
+        -1
+
 Look up a password in /etc/shadow. Returns 1 if match, 0 if not.
+Shadow format: username:salt:hash_hex (PBKDF2-HMAC-SHA256, c=1).
 
     check_shadow(user: *i8, userlen: int, pass: *i8, passlen: int) -> int
         var filebuf: [512]i8
@@ -176,16 +188,45 @@ Look up a password in /etc/shadow. Returns 1 if match, 0 if not.
         val line = find_user_line(filebuf, nr, user, userlen)
         if line < 0
             return 0
-        // Parse fields: username:password
+        // Parse fields: username:salt:hash_hex
         var fstart: int
         var flen: int
         var pos = line
         // Skip username
         pos = parse_field(filebuf, pos, nr, &fstart, &flen)
-        // Get password field
+        // Get salt field
+        pos = parse_field(filebuf, pos, nr, &fstart, &flen)
+        val salt_start = fstart
+        val salt_len = flen
+        // Get hash field
         parse_field(filebuf, pos, nr, &fstart, &flen)
-        // Compare with provided password (cleartext for now)
-        bufcmp(filebuf + fstart, flen, pass, passlen)
+        val hash_start = fstart
+        val hash_len = flen
+        if hash_len != 64
+            return 0
+
+        // Copy password and salt into byte arrays for PBKDF2
+        var pass_buf: [64]byte
+        for var i = 0; i < passlen; i++
+            pass_buf[i] = byte(pass[i])
+        var salt_buf: [64]byte
+        for var i = 0; i < salt_len; i++
+            salt_buf[i] = byte(filebuf[salt_start + i])
+
+        // Compute PBKDF2-HMAC-SHA256 with c=1
+        var computed: [32]byte
+        pbkdf2_hmac_sha256_hw(pass_buf[:passlen], salt_buf[:salt_len], 1, computed[:])
+
+        // Compare computed hash with stored hash (hex-encoded)
+        for var i = 0; i < 32; i++
+            val b = int(computed[i])
+            val hi = hex_nibble(int(filebuf[hash_start + i * 2]))
+            val lo = hex_nibble(int(filebuf[hash_start + i * 2 + 1]))
+            if hi < 0 || lo < 0
+                return 0
+            if b != hi * 16 + lo
+                return 0
+        1
 
 The login main loop. Prompts for credentials, authenticates,
 sets uid, and runs the shell. Loops on failure or when shell exits.

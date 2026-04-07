@@ -198,10 +198,11 @@ object TriscCli:
         /dev/disk0 block 1 0
         /dev/null char 0 1
         /etc/passwd file "root:x:0:0:root:/:/nsh"
-        /etc/shadow file "root:toor"
+        /etc/shadow file "root:slix:3b1b8291c0bdb62febcd914f45884bca403ae1c42a4bb1c41755881f3886d158"
       """,
     )
-    val mem = new Memory("Memory", (Seq(ram, stdout, intc, timer, ramdisk) ++ extraDevices)*)
+    val sha = new ShaAccelerator(Runtime.shaAccelAddress)
+    val mem = new Memory("Memory", (Seq(ram, stdout, intc, timer, ramdisk, sha) ++ extraDevices)*)
     linked.load(mem)
     val cpu = new CPU(mem, Seq(timer, intc))
     cpu.reset() // like 68000: reads SSP from vector[0], PC from vector[1], enters supervisor mode
