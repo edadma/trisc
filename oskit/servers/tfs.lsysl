@@ -25,10 +25,12 @@ Commands:
 - TFS_RMDIR   (8): [cmd, parent_ino(4), name...NUL] → [status(1)]
 - TFS_READDIR (9): [cmd, dir_ino(4), index(4)] → [status(1), ino(4), name(14)]
 - TFS_SYNC   (10): [cmd] → [status(1)]
+- TFS_CHMOD  (11): [cmd, ino(4), perm(2)] → [status(1)]
+- TFS_RENAME (12): [cmd, old_parent(4), new_parent(4), old_name_len(1), old_name(N), new_name(M)] → [status(1)]
 
     module oskit.servers
 
-    import oskit.fs.{tfs_init, tfs_lookup, tfs_read, tfs_write, tfs_create, tfs_unlink, tfs_stat, tfs_readdir, tfs_rmdir, sync_superblock}
+    import oskit.fs.{tfs_init, tfs_lookup, tfs_read, tfs_write, tfs_create, tfs_unlink, tfs_stat, tfs_readdir, tfs_rmdir, tfs_chmod, tfs_rename, sync_superblock}
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv, ipc_reply, ipc_send, ipc_last_msg_len}
     import oskit.drivers.disk.{disk_read, disk_write}
 
@@ -42,6 +44,8 @@ Commands:
     val TFS_CMD_RMDIR   = 8
     val TFS_CMD_READDIR = 9
     val TFS_CMD_SYNC    = 10
+    val TFS_CMD_CHMOD   = 11
+    val TFS_CMD_RENAME  = 12
 
     var tfs_port = -1
     var tfs_srv_name: [3]i8
@@ -249,6 +253,40 @@ Reply:   [status(1)]
         reply[0] = 0
         ipc_reply(sender, &reply[0], 1)
 
+Handle CHMOD: change file permissions.
+Request: [cmd(1), ino(4), perm(2)]
+Reply:   [status(1)]
+
+    tfs_handle_chmod(sender: int, buf: *i8)
+        val ino = tfs_msg_read_i32(buf, 1)
+        val perm = tfs_msg_read_i16(buf, 5)
+        val result = tfs_chmod(ino, perm)
+        var reply: [1]i8
+        if result == -1
+            reply[0] = -1
+        else
+            reply[0] = 0
+        ipc_reply(sender, &reply[0], 1)
+
+Handle RENAME: move/rename a file.
+Request: [cmd(1), old_parent(4), new_parent(4), old_name_len(1), old_name(N), new_name(M)]
+Reply:   [status(1)]
+
+    tfs_handle_rename(sender: int, buf: *i8, msg_len: int)
+        val old_parent = tfs_msg_read_i32(buf, 1)
+        val new_parent = tfs_msg_read_i32(buf, 5)
+        val old_name_len = int(buf[9])
+        val old_name: *i8 = buf + 10
+        val new_name: *i8 = buf + 10 + old_name_len
+        val new_name_len = msg_len - 10 - old_name_len
+        val result = tfs_rename(old_parent, old_name, old_name_len, new_parent, new_name, new_name_len)
+        var reply: [1]i8
+        if result == -1
+            reply[0] = -1
+        else
+            reply[0] = 0
+        ipc_reply(sender, &reply[0], 1)
+
 The TFS server loop. Creates port, registers as "fs",
 initializes TFS, then loops handling filesystem requests.
 
@@ -295,6 +333,10 @@ since tfs_init() reads the superblock via rd_read → disk_read.
                     tfs_handle_readdir(sender, &buf[0])
                 else if cmd == TFS_CMD_SYNC
                     tfs_handle_sync(sender)
+                else if cmd == TFS_CMD_CHMOD
+                    tfs_handle_chmod(sender, &buf[0])
+                else if cmd == TFS_CMD_RENAME
+                    tfs_handle_rename(sender, &buf[0], msg_len)
                 else
                     var reply: [1]i8
                     reply[0] = -1
@@ -492,6 +534,48 @@ without building IPC messages manually.
         msg[0] = TFS_CMD_SYNC
         var reply: [1]i8
         val result = ipc_send(port, &msg[0], 1, &reply[0], 1)
+        if result != 0
+            return -1
+        int(reply[0])
+
+    fs_chmod(ino: int, perm: int) -> int
+        val port = port_lookup(&tfs_srv_name[0])
+        if port < 0
+            return -1
+        var msg: [7]i8
+        msg[0] = TFS_CMD_CHMOD
+        tfs_msg_write_i32(&msg[0], 1, ino)
+        msg[5] = (perm >> 8) & 0xFF
+        msg[6] = perm & 0xFF
+        var reply: [1]i8
+        val result = ipc_send(port, &msg[0], 7, &reply[0], 1)
+        if result != 0
+            return -1
+        int(reply[0])
+
+    fs_rename(old_parent: int, old_name: string, new_parent: int, new_name: string) -> int
+        val port = port_lookup(&tfs_srv_name[0])
+        if port < 0
+            return -1
+        val onp = *byte(old_name)
+        val onl = len(old_name)
+        val nnp = *byte(new_name)
+        val nnl = len(new_name)
+        var msg: [128]i8
+        msg[0] = TFS_CMD_RENAME
+        tfs_msg_write_i32(&msg[0], 1, old_parent)
+        tfs_msg_write_i32(&msg[0], 5, new_parent)
+        msg[9] = i8(onl)
+        var i = 0
+        while i < onl
+            msg[10 + i] = onp[i]
+            i += 1
+        i = 0
+        while i < nnl
+            msg[10 + onl + i] = nnp[i]
+            i += 1
+        var reply: [1]i8
+        val result = ipc_send(port, &msg[0], 10 + onl + nnl, &reply[0], 1)
         if result != 0
             return -1
         int(reply[0])

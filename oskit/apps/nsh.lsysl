@@ -9,20 +9,26 @@ Built-in commands:
 - ls [path]        — list directory
 - cat path         — print file contents
 - mkdir path       — create directory
+- touch path       — create empty file
 - rm path          — remove file
 - rmdir path       — remove empty directory
+- mv src dst       — move/rename file
+- chmod mode path  — change permissions (octal)
 - pwd              — print working directory
 - cd [path]        — change directory
 - stat path        — show file info
+- write path text  — write text to file
+- ps               — list threads
+- uptime           — show system uptime
 - whoami           — print uid
 - help             — list commands
 
     module oskit.apps
 
     import oskit.fs.ROOT_INODE
-    import oskit.services.{sleep, getuid}
+    import oskit.services.{sleep, getuid, uptime, thread_id, get_thread_count, get_thread_state, get_thread_name, get_cpu_ticks}
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
-    import oskit.servers.{fs_open, fs_read, fs_stat, fs_create, fs_unlink, fs_mkdir, fs_rmdir, fs_readdir}
+    import oskit.servers.{fs_open, fs_read, fs_write, fs_stat, fs_create, fs_unlink, fs_mkdir, fs_rmdir, fs_readdir, fs_chmod, fs_rename}
 
 Shell state.
 
@@ -425,12 +431,126 @@ Built-in commands.
         nsh_putint(ino)
         nsh_newline()
 
+    cmd_touch(argc: int, argv: *string)
+        if argc < 2
+            nsh_print("usage: touch <file>\n")
+            return
+        val parent = nsh_parent_ino(argv[1])
+        if parent < 0
+            nsh_print(argv[1])
+            nsh_print(": not found\n")
+            return
+        val name = nsh_basename(argv[1])
+        val result = fs_create(parent, name, 1, 0x1FF)
+        if result < 0
+            nsh_print("error\n")
+
+    cmd_mv(argc: int, argv: *string)
+        if argc < 3
+            nsh_print("usage: mv <src> <dst>\n")
+            return
+        val old_parent = nsh_parent_ino(argv[1])
+        if old_parent < 0
+            nsh_print(argv[1])
+            nsh_print(": not found\n")
+            return
+        val new_parent = nsh_parent_ino(argv[2])
+        if new_parent < 0
+            nsh_print(argv[2])
+            nsh_print(": not found\n")
+            return
+        val old_name = nsh_basename(argv[1])
+        val new_name = nsh_basename(argv[2])
+        val result = fs_rename(old_parent, old_name, new_parent, new_name)
+        if result < 0
+            nsh_print("error\n")
+
+    cmd_chmod(argc: int, argv: *string)
+        if argc < 3
+            nsh_print("usage: chmod <mode> <path>\n")
+            return
+        // Parse octal mode from argv[1]
+        val mp = *byte(argv[1])
+        val ml = len(argv[1])
+        var mode = 0
+        for var i = 0; i < ml; i++
+            val d = int(mp[i]) - '0'
+            if d < 0
+                nsh_print("bad mode\n")
+                return
+            if d > 7
+                nsh_print("bad mode\n")
+                return
+            mode = mode * 8 + d
+        val ino = nsh_resolve(argv[2])
+        if ino < 0
+            nsh_print(argv[2])
+            nsh_print(": not found\n")
+            return
+        val result = fs_chmod(ino, mode)
+        if result < 0
+            nsh_print("error\n")
+
+    cmd_write(argc: int, argv: *string)
+        if argc < 3
+            nsh_print("usage: write <file> <text>\n")
+            return
+        val ino = nsh_resolve(argv[1])
+        if ino < 0
+            nsh_print(argv[1])
+            nsh_print(": not found\n")
+            return
+        val data = *byte(argv[2])
+        val dlen = len(argv[2])
+        val nw = fs_write(ino, data, 0, dlen)
+        if nw < 0
+            nsh_print("error\n")
+
+    cmd_ps(argc: int, argv: *string)
+        nsh_print("  ID STATE    NAME\n")
+        val count = get_thread_count()
+        for var i = 0; i < count; i++
+            val state = get_thread_state(i)
+            if state != 3
+                // Print ID (right-aligned in 4 chars)
+                if i < 10
+                    nsh_print("   ")
+                else
+                    nsh_print("  ")
+                nsh_putint(i)
+                nsh_putc(' ')
+                // Print state
+                if state == 0
+                    nsh_print("ready   ")
+                else if state == 1
+                    nsh_print("running ")
+                else if state == 2
+                    nsh_print("blocked ")
+                else if state == 5
+                    nsh_print("suspend ")
+                else
+                    nsh_print("unknown ")
+                // Print name
+                val np = get_thread_name(i)
+                var j = 0
+                while np[j] != 0
+                    nsh_putc(int(np[j]))
+                    j += 1
+                nsh_newline()
+
+    cmd_uptime(argc: int, argv: *string)
+        val ticks = uptime()
+        nsh_print("up ")
+        nsh_putint(ticks)
+        nsh_print(" ticks\n")
+
     cmd_whoami(argc: int, argv: *string)
         nsh_putint(getuid())
         nsh_newline()
 
     cmd_help(argc: int, argv: *string)
-        nsh_print("echo ls cat mkdir rm rmdir pwd cd stat whoami help\n")
+        nsh_print("echo ls cat touch write mkdir rm rmdir mv chmod\n")
+        nsh_print("pwd cd stat ps uptime whoami help\n")
 
 Command dispatch.
 
@@ -450,16 +570,28 @@ Command dispatch.
             cmd_ls(argc, argv)
         else if cmd == "cat"
             cmd_cat(argc, argv)
+        else if cmd == "touch"
+            cmd_touch(argc, argv)
+        else if cmd == "write"
+            cmd_write(argc, argv)
         else if cmd == "mkdir"
             cmd_mkdir(argc, argv)
         else if cmd == "rm"
             cmd_rm(argc, argv)
         else if cmd == "rmdir"
             cmd_rmdir(argc, argv)
+        else if cmd == "mv"
+            cmd_mv(argc, argv)
+        else if cmd == "chmod"
+            cmd_chmod(argc, argv)
         else if cmd == "cd"
             cmd_cd(argc, argv)
         else if cmd == "stat"
             cmd_stat(argc, argv)
+        else if cmd == "ps"
+            cmd_ps(argc, argv)
+        else if cmd == "uptime"
+            cmd_uptime(argc, argv)
         else
             nsh_print(cmd)
             nsh_print(": not found\n")

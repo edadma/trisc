@@ -248,6 +248,38 @@ import oskit.services.sleep
     output should include("/dev")
   }
 
+  "NSH: touch creates file" in {
+    val keys        = typeString("touch /hello\nls\n", startTick = 500000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 10000000)
+    output should include("hello")
+  }
+
+  "NSH: write and cat" in {
+    val keys        = typeString("touch /msg\nwrite /msg hi\ncat /msg\n", startTick = 500000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 15000000)
+    output should include("hi")
+  }
+
+  "NSH: mv renames file" in {
+    val keys        = typeString("mv /old /new\ncat /new\n", startTick = 500000)
+    val (_, output) = runNsh(scheduledKeys = keys, prefill = "/old file \"data\"\n", maxCycles = 10000000)
+    output should include("data")
+  }
+
+  "NSH: ps shows threads" in {
+    val keys        = typeString("ps\n", startTick = 500000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 10000000)
+    output should include("nsh")
+    output should include("STATE")
+  }
+
+  "NSH: uptime shows ticks" in {
+    val keys        = typeString("uptime\n", startTick = 500000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 10000000)
+    output should include("up ")
+    output should include("ticks")
+  }
+
   // === Login integration tests ===
 
   private val passwdPrefill = "/etc/passwd file \"root:x:0:0:root:/:/nsh\"\n/etc/shadow file \"root:toor\"\n"
