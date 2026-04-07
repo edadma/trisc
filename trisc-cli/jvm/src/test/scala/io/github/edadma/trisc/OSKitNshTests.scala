@@ -242,6 +242,12 @@ import oskit.services.sleep
     output should include("not found")
   }
 
+  "NSH: cd dev then pwd" in pendingUntilFixed {
+    val keys        = typeString("cd dev\npwd\n", startTick = 500000)
+    val (_, output) = runNsh(scheduledKeys = keys, prefill = "/dev dir\n", maxCycles = 10000000)
+    output should include("/dev")
+  }
+
   // === Login integration tests ===
 
   private val passwdPrefill = "/etc/passwd file \"root:x:0:0:root:/:/nsh\"\n/etc/shadow file \"root:toor\"\n"

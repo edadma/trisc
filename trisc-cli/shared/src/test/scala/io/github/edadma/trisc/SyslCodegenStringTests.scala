@@ -267,6 +267,103 @@ class SyslCodegenStringTests extends SyslCodegenHelpers {
     out shouldBe "hello world"
   }
 
+  "concat to global var" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |
+        |var g: string
+        |
+        |main() -> int
+        |    g = "/"
+        |    g = g + "dev"
+        |    puts(g)
+        |    0
+        |""".stripMargin))
+    out shouldBe "/dev"
+  }
+
+  "concat to global var via function arg" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |
+        |var g: string
+        |
+        |do_cd(arg: string)
+        |    if len(g) > 1
+        |        g = g + "/" + arg
+        |    else
+        |        g = g + arg
+        |
+        |main() -> int
+        |    g = "/"
+        |    do_cd("dev")
+        |    puts(g)
+        |    0
+        |""".stripMargin))
+    out shouldBe "/dev"
+  }
+
+  "concat to global var via argv" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |
+        |var g: string
+        |
+        |do_cd(argc: int, argv: *string)
+        |    val arg = argv[1]
+        |    if len(g) > 1
+        |        g = g + "/" + arg
+        |    else
+        |        g = g + arg
+        |
+        |main() -> int
+        |    g = "/"
+        |    var args: [4]string
+        |    args[0] = "cd"
+        |    args[1] = "dev"
+        |    do_cd(2, args)
+        |    puts(g)
+        |    0
+        |""".stripMargin))
+    out shouldBe "/dev"
+  }
+
+  "concat to global var with needsAllocExtern" in {
+    val (_, out) = compileMultiAndRunOutput(allocSources(
+      """import posix.stdlib.*
+        |
+        |var g: string
+        |
+        |make_str(buf: *i8, n: int) -> string
+        |    string(buf, n)
+        |
+        |do_cd(argc: int, argv: *string)
+        |    val arg = argv[1]
+        |    if len(g) > 1
+        |        g = g + "/" + arg
+        |    else
+        |        g = g + arg
+        |
+        |main() -> int
+        |    g = "/"
+        |    var line: [64]i8
+        |    line[0] = 99   // c
+        |    line[1] = 100  // d
+        |    line[2] = 0
+        |    line[3] = 100  // d
+        |    line[4] = 101  // e
+        |    line[5] = 118  // v
+        |    line[6] = 0
+        |    var args: [4]string
+        |    args[0] = make_str(line, 2)
+        |    args[1] = make_str(line + 3, 3)
+        |    do_cd(2, args)
+        |    puts(g)
+        |    0
+        |""".stripMargin))
+    out shouldBe "/dev"
+  }
+
   "concat preserves originals" in {
     val (_, out) = compileMultiAndRunOutput(allocSources(
       """import posix.stdlib.*
