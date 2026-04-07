@@ -262,7 +262,7 @@ Tests
 
 ### SHA-256("") — empty string
 
-NIST test vector. Expected:
+Expected:
 `e3b0c442 98fc1c14 9afbf4c8 996fb924 27ae41e4 649b934c a495991b 7852b855`
 
     #test
@@ -284,8 +284,8 @@ NIST test vector. Expected:
 
 ### SHA-256("abc")
 
-NIST test vector. Expected:
-`ba7816bf 8f01cfea 414140de 5dae2223 b036a13f 0529e5e9 b2ced806 6a72e13f`
+Expected:
+`ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad`
 
     #test
     test_sha256_abc() -> void
@@ -307,7 +307,7 @@ NIST test vector. Expected:
         assert(out[7]  == 0xeau8, "byte 7")
         // Check all 32 bytes
         // ba7816bf 8f01cfea 414140de 5dae2223
-        // b036a13f 0529e5e9 b2ced806 6a72e13f
+        // b00361a3 96177a9c b410ff61 f20015ad
         val expected = new [32]byte
         expected[0] = 0xbau8
         expected[1] = 0x78u8
@@ -326,21 +326,21 @@ NIST test vector. Expected:
         expected[14] = 0x22u8
         expected[15] = 0x23u8
         expected[16] = 0xb0u8
-        expected[17] = 0x36u8
-        expected[18] = 0xa1u8
-        expected[19] = 0x3fu8
-        expected[20] = 0x05u8
-        expected[21] = 0x29u8
-        expected[22] = 0xe5u8
-        expected[23] = 0xe9u8
-        expected[24] = 0xb2u8
-        expected[25] = 0xceu8
-        expected[26] = 0xd8u8
-        expected[27] = 0x06u8
-        expected[28] = 0x6au8
-        expected[29] = 0x72u8
-        expected[30] = 0xe1u8
-        expected[31] = 0x3fu8
+        expected[17] = 0x03u8
+        expected[18] = 0x61u8
+        expected[19] = 0xa3u8
+        expected[20] = 0x96u8
+        expected[21] = 0x17u8
+        expected[22] = 0x7au8
+        expected[23] = 0x9cu8
+        expected[24] = 0xb4u8
+        expected[25] = 0x10u8
+        expected[26] = 0xffu8
+        expected[27] = 0x61u8
+        expected[28] = 0xf2u8
+        expected[29] = 0x00u8
+        expected[30] = 0x15u8
+        expected[31] = 0xadu8
 
         var i = 0
 
@@ -389,9 +389,15 @@ NIST test vector. Expected:
 
         process_block(&state[0], &block[0])
 
-        // Expected: ba7816bf 8f01cfea 414140de 5dae2223 b036a13f 0529e5e9 b2ced806 6a72e13f
+        // Expected: ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad
         assert(state[0] == 0xba7816bfu32, s"state[0]: ${i64(state[0])}")
-        assert(state[4] == 0xb036a13fu32, s"state[4]: ${i64(state[4])}")
+        assert(state[1] == 0x8f01cfeau32, s"state[1]: ${i64(state[1])}")
+        assert(state[2] == 0x414140deu32, s"state[2]: ${i64(state[2])}")
+        assert(state[3] == 0x5dae2223u32, s"state[3]: ${i64(state[3])}")
+        assert(state[4] == 0xb00361a3u32, s"state[4]: ${i64(state[4])}")
+        assert(state[5] == 0x96177a9cu32, s"state[5]: ${i64(state[5])}")
+        assert(state[6] == 0xb410ff61u32, s"state[6]: ${i64(state[6])}")
+        assert(state[7] == 0xf20015adu32, s"state[7]: ${i64(state[7])}")
 
 
 ### SHA-256("a") — single byte
@@ -458,6 +464,91 @@ NIST test vector. Expected:
             i++
 
         assert(differs, "different inputs differ")
+
+
+### SHA-256("hello") — full verification
+
+    #test
+    test_sha256_hello() -> void
+        var msg: [5]byte
+        msg[0] = byte('h')
+        msg[1] = byte('e')
+        msg[2] = byte('l')
+        msg[3] = byte('l')
+        msg[4] = byte('o')
+
+        var out: [32]byte
+        sha256(&msg[0], 5, &out[0])
+
+        // 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+        val expected = new [32]byte
+        expected[0] = 0x2cu8
+        expected[1] = 0xf2u8
+        expected[2] = 0x4du8
+        expected[3] = 0xbau8
+        expected[4] = 0x5fu8
+        expected[5] = 0xb0u8
+        expected[6] = 0xa3u8
+        expected[7] = 0x0eu8
+        expected[8] = 0x26u8
+        expected[9] = 0xe8u8
+        expected[10] = 0x3bu8
+        expected[11] = 0x2au8
+        expected[12] = 0xc5u8
+        expected[13] = 0xb9u8
+        expected[14] = 0xe2u8
+        expected[15] = 0x9eu8
+        expected[16] = 0x1bu8
+        expected[17] = 0x16u8
+        expected[18] = 0x1eu8
+        expected[19] = 0x5cu8
+        expected[20] = 0x1fu8
+        expected[21] = 0xa7u8
+        expected[22] = 0x42u8
+        expected[23] = 0x5eu8
+        expected[24] = 0x73u8
+        expected[25] = 0x04u8
+        expected[26] = 0x33u8
+        expected[27] = 0x62u8
+        expected[28] = 0x93u8
+        expected[29] = 0x8bu8
+        expected[30] = 0x98u8
+        expected[31] = 0x24u8
+
+        var i = 0
+
+        while i < 32
+            assert(out[i] == expected[i], s"byte $i: got ${int(out[i])} want ${int(expected[i])}")
+            i++
+
+
+### SHA-256 two-block message (56 bytes)
+
+The 448-bit test vector. The message is exactly 56 bytes,
+which forces the padding into a second block.
+
+    #test
+    test_sha256_two_block() -> void
+        // "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq" = 56 bytes
+        val s = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+        var msg: [56]byte
+        var j = 0
+
+        while j < 56
+            msg[j] = byte(s[j])
+            j++
+
+        var out: [32]byte
+        sha256(&msg[0], 56, &out[0])
+
+        // 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+        assert(out[0] == 0x24u8, s"byte 0: got ${int(out[0])}")
+        assert(out[1] == 0x8du8, s"byte 1: got ${int(out[1])}")
+        assert(out[2] == 0x6au8, s"byte 2: got ${int(out[2])}")
+        assert(out[3] == 0x61u8, s"byte 3: got ${int(out[3])}")
+        assert(out[15] == 0x39u8, s"byte 15: got ${int(out[15])}")
+        assert(out[16] == 0xa3u8, s"byte 16: got ${int(out[16])}")
+        assert(out[31] == 0xc1u8, s"byte 31: got ${int(out[31])}")
 
 
 Design notes
