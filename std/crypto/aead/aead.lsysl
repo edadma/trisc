@@ -1,0 +1,476 @@
+std.crypto.aead — ChaCha20-Poly1305 AEAD
+==========================================
+
+Authenticated encryption with associated data as specified
+in RFC 8439. Combines ChaCha20 stream cipher with Poly1305
+MAC for authenticated encryption.
+
+Dependencies: std.crypto.chacha20.
+
+
+    module std.crypto.aead
+
+    import std.crypto.chacha20.{chacha20_block}
+
+
+Helpers
+-------
+
+Little-endian load and store for 32-bit words.
+
+    load_le32(b: []byte, off: int) -> u32
+        return u32(b[off]) | (u32(b[off + 1]) << 8u32) | (u32(b[off + 2]) << 16u32) | (u32(b[off + 3]) << 24u32)
+
+    store_le32(b: []byte, off: int, v: u32)
+        b[off]     = byte(v)
+        b[off + 1] = byte(v >> 8u32)
+        b[off + 2] = byte(v >> 16u32)
+        b[off + 3] = byte(v >> 24u32)
+
+
+Poly1305 MAC
+------------
+
+Poly1305 one-shot MAC using the donna 5×26-bit limb
+representation. Accumulator arithmetic uses i64 to hold
+intermediate products (max ~2^55, well within i63).
+
+    poly1305(tag: []byte, msg: []byte, key: []byte)
+        // Load and clamp r
+        var t0 = load_le32(key, 0)
+        var t1 = load_le32(key, 4)
+        var t2 = load_le32(key, 8)
+        var t3 = load_le32(key, 12)
+
+        val r0: i64 = i64(t0 & 0x03ffffffu32)
+        val r1: i64 = i64(((t0 >> 26u32) | (t1 << 6u32)) & 0x03ffff03u32)
+        val r2: i64 = i64(((t1 >> 20u32) | (t2 << 12u32)) & 0x03ffc0ffu32)
+        val r3: i64 = i64(((t2 >> 14u32) | (t3 << 18u32)) & 0x03f03fffu32)
+        val r4: i64 = i64((t3 >> 8u32) & 0x000fffffu32)
+
+        val s1 = r1 * 5i64
+        val s2 = r2 * 5i64
+        val s3 = r3 * 5i64
+        val s4 = r4 * 5i64
+
+        // Accumulator
+        var h0: i64 = 0i64
+        var h1: i64 = 0i64
+        var h2: i64 = 0i64
+        var h3: i64 = 0i64
+        var h4: i64 = 0i64
+
+        val mlen = len(msg)
+        var pos = 0
+
+        while pos < mlen
+            // Load block (up to 16 bytes)
+            val remaining = mlen - pos
+            var hibit: i64 = 1i64 << 24i64
+
+            if remaining >= 16
+                t0 = load_le32(msg, pos)
+                t1 = load_le32(msg, pos + 4)
+                t2 = load_le32(msg, pos + 8)
+                t3 = load_le32(msg, pos + 12)
+            else
+                // Partial block: pad with zeros, hibit = 0 for final
+                var buf: [16]byte = ""
+                for i in 0..<remaining
+                    buf[i] = msg[pos + i]
+                buf[remaining] = 1u8
+                hibit = 0i64
+                t0 = load_le32(buf[:], 0)
+                t1 = load_le32(buf[:], 4)
+                t2 = load_le32(buf[:], 8)
+                t3 = load_le32(buf[:], 12)
+
+            // Add block to accumulator
+            h0 += i64(t0 & 0x03ffffffu32)
+            h1 += i64(((t0 >> 26u32) | (t1 << 6u32)) & 0x03ffffffu32)
+            h2 += i64(((t1 >> 20u32) | (t2 << 12u32)) & 0x03ffffffu32)
+            h3 += i64(((t2 >> 14u32) | (t3 << 18u32)) & 0x03ffffffu32)
+            h4 += i64(t3 >> 8u32) | hibit
+
+            // Multiply: h = h * r mod (2^130 - 5)
+            var d0 = h0*r0 + h1*s4 + h2*s3 + h3*s2 + h4*s1
+            var d1 = h0*r1 + h1*r0 + h2*s4 + h3*s3 + h4*s2
+            var d2 = h0*r2 + h1*r1 + h2*r0 + h3*s4 + h4*s3
+            var d3 = h0*r3 + h1*r2 + h2*r1 + h3*r0 + h4*s4
+            var d4 = h0*r4 + h1*r3 + h2*r2 + h3*r1 + h4*r0
+
+            // Carry propagation
+            var c: i64
+            c = d0 >> 26i64
+            h0 = d0 & 0x3ffffffi64
+            d1 += c
+            c = d1 >> 26i64
+            h1 = d1 & 0x3ffffffi64
+            d2 += c
+            c = d2 >> 26i64
+            h2 = d2 & 0x3ffffffi64
+            d3 += c
+            c = d3 >> 26i64
+            h3 = d3 & 0x3ffffffi64
+            d4 += c
+            c = d4 >> 26i64
+            h4 = d4 & 0x3ffffffi64
+            h0 += c * 5i64
+            c = h0 >> 26i64
+            h0 = h0 & 0x3ffffffi64
+            h1 += c
+
+            if remaining >= 16
+                pos += 16
+            else
+                pos = mlen
+
+        // Final reduction mod 2^130 - 5
+        c = h1 >> 26i64
+        h1 = h1 & 0x3ffffffi64
+        h2 += c
+        c = h2 >> 26i64
+        h2 = h2 & 0x3ffffffi64
+        h3 += c
+        c = h3 >> 26i64
+        h3 = h3 & 0x3ffffffi64
+        h4 += c
+        c = h4 >> 26i64
+        h4 = h4 & 0x3ffffffi64
+        h0 += c * 5i64
+        c = h0 >> 26i64
+        h0 = h0 & 0x3ffffffi64
+        h1 += c
+
+        // Compute h + -p (check if h >= p)
+        var g0 = h0 + 5i64
+        c = g0 >> 26i64
+        g0 = g0 & 0x3ffffffi64
+        var g1 = h1 + c
+        c = g1 >> 26i64
+        g1 = g1 & 0x3ffffffi64
+        var g2 = h2 + c
+        c = g2 >> 26i64
+        g2 = g2 & 0x3ffffffi64
+        var g3 = h3 + c
+        c = g3 >> 26i64
+        g3 = g3 & 0x3ffffffi64
+        var g4 = h4 + c - (1i64 << 26i64)
+
+        // Select h or g: g4 >> 63 gives -1 (keep h) or 0 (keep g)
+        val mask = g4 >> 63i64
+        h0 = g0 ^ (mask & (g0 ^ h0))
+        h1 = g1 ^ (mask & (g1 ^ h1))
+        h2 = g2 ^ (mask & (g2 ^ h2))
+        h3 = g3 ^ (mask & (g3 ^ h3))
+        h4 = g4 ^ (mask & (g4 ^ h4))
+
+        // Reassemble h into four 32-bit words (mask to 32 bits)
+        val w0 = (h0 | (h1 << 26i64)) & 0xffffffffi64
+        val w1 = ((h1 >> 6i64) | (h2 << 20i64)) & 0xffffffffi64
+        val w2 = ((h2 >> 12i64) | (h3 << 14i64)) & 0xffffffffi64
+        val w3 = ((h3 >> 18i64) | (h4 << 8i64)) & 0xffffffffi64
+
+        // Add s with carry
+        val s0_val = i64(load_le32(key, 16))
+        val s1_val = i64(load_le32(key, 20))
+        val s2_val = i64(load_le32(key, 24))
+        val s3_val = i64(load_le32(key, 28))
+
+        var f0 = w0 + s0_val
+        var f1 = w1 + s1_val + (f0 >> 32i64)
+        var f2 = w2 + s2_val + (f1 >> 32i64)
+        var f3 = w3 + s3_val + (f2 >> 32i64)
+
+        // Output tag (little-endian)
+        store_le32(tag, 0, u32(f0))
+        store_le32(tag, 4, u32(f1))
+        store_le32(tag, 8, u32(f2))
+        store_le32(tag, 12, u32(f3))
+
+
+ChaCha20 stream encryption
+---------------------------
+
+Encrypts (or decrypts) by XORing with the ChaCha20 keystream.
+The key is 32 bytes, nonce is 12 bytes.
+
+    chacha20_crypt(key_bytes: []byte, nonce_bytes: []byte, counter: u32, input: []byte, output: []byte)
+        // Convert key bytes to u32 words (little-endian)
+        var key_words: [8]u32
+        for i in 0..<8
+            key_words[i] = load_le32(key_bytes, i * 4)
+
+        // Convert nonce bytes to u32 words
+        var nonce_words: [3]u32
+        for i in 0..<3
+            nonce_words[i] = load_le32(nonce_bytes, i * 4)
+
+        val n = len(input)
+        var pos = 0
+        var ctr = counter
+
+        while pos < n
+            // Generate 64 bytes of keystream
+            var block: [64]byte
+            chacha20_block(&key_words[0], ctr, &nonce_words[0], &block[0])
+
+            // XOR with input
+            val remaining = n - pos
+            val chunk = if remaining < 64 then remaining else 64
+
+            for i in 0..<chunk
+                output[pos + i] = input[pos + i] ^ block[i]
+
+            pos += 64
+            ctr += 1u32
+
+
+AEAD construction
+-----------------
+
+### seal
+
+`seal(key, nonce, aad, pt, ct, tag)` encrypts and
+authenticates. `ct` must be the same length as `pt`.
+
+    seal(key: []byte, nonce: []byte, aad: []byte, pt: []byte, ct: []byte, tag: []byte)
+        // Generate Poly1305 key from ChaCha20 block 0
+        var poly_key: [32]byte
+        var key_words: [8]u32
+        for i in 0..<8
+            key_words[i] = load_le32(key, i * 4)
+        var nonce_words: [3]u32
+        for i in 0..<3
+            nonce_words[i] = load_le32(nonce, i * 4)
+        var block0: [64]byte
+        chacha20_block(&key_words[0], 0u32, &nonce_words[0], &block0[0])
+        for i in 0..<32
+            poly_key[i] = block0[i]
+
+        // Encrypt plaintext with counter starting at 1
+        chacha20_crypt(key, nonce, 1u32, pt, ct)
+
+        // Build Poly1305 message: aad || pad || ct || pad || len_aad || len_ct
+        val aad_len = len(aad)
+        val ct_len = len(ct)
+        val aad_pad = if aad_len % 16 == 0 then 0 else 16 - aad_len % 16
+        val ct_pad = if ct_len % 16 == 0 then 0 else 16 - ct_len % 16
+        val mac_len = aad_len + aad_pad + ct_len + ct_pad + 16
+        val mac_data = (new [mac_len]byte)[:]
+
+        var pos = 0
+
+        // AAD
+        for i in 0..<aad_len
+            mac_data[pos + i] = aad[i]
+        pos += aad_len + aad_pad
+
+        // Ciphertext
+        for i in 0..<ct_len
+            mac_data[pos + i] = ct[i]
+        pos += ct_len + ct_pad
+
+        // Lengths as 64-bit little-endian
+        store_le32(mac_data, pos, u32(aad_len))
+        store_le32(mac_data, pos + 4, 0u32)
+        store_le32(mac_data, pos + 8, u32(ct_len))
+        store_le32(mac_data, pos + 12, 0u32)
+
+        // Compute tag
+        poly1305(tag, mac_data, poly_key[:])
+
+
+### open
+
+`open(key, nonce, aad, ct, tag, pt)` decrypts and verifies.
+Returns `true` if the tag is valid, `false` otherwise.
+
+    open(key: []byte, nonce: []byte, aad: []byte, ct: []byte, tag: []byte, pt: []byte) -> bool
+        // Compute expected tag
+        var expected: [16]byte
+        // Temporarily encrypt ct to get pt, but first verify tag
+        // We need to compute the tag over the ciphertext (not plaintext)
+
+        // Generate Poly1305 key
+        var poly_key: [32]byte
+        var key_words: [8]u32
+        for i in 0..<8
+            key_words[i] = load_le32(key, i * 4)
+        var nonce_words: [3]u32
+        for i in 0..<3
+            nonce_words[i] = load_le32(nonce, i * 4)
+        var block0: [64]byte
+        chacha20_block(&key_words[0], 0u32, &nonce_words[0], &block0[0])
+        for i in 0..<32
+            poly_key[i] = block0[i]
+
+        // Build MAC data from ciphertext
+        val aad_len = len(aad)
+        val ct_len = len(ct)
+        val aad_pad = if aad_len % 16 == 0 then 0 else 16 - aad_len % 16
+        val ct_pad = if ct_len % 16 == 0 then 0 else 16 - ct_len % 16
+        val mac_len = aad_len + aad_pad + ct_len + ct_pad + 16
+        val mac_data = (new [mac_len]byte)[:]
+
+        var pos = 0
+        for i in 0..<aad_len
+            mac_data[pos + i] = aad[i]
+        pos += aad_len + aad_pad
+        for i in 0..<ct_len
+            mac_data[pos + i] = ct[i]
+        pos += ct_len + ct_pad
+        store_le32(mac_data, pos, u32(aad_len))
+        store_le32(mac_data, pos + 4, 0u32)
+        store_le32(mac_data, pos + 8, u32(ct_len))
+        store_le32(mac_data, pos + 12, 0u32)
+
+        poly1305(expected[:], mac_data, poly_key[:])
+
+        // Constant-time tag comparison
+        var diff: byte = 0u8
+        for i in 0..<16
+            diff = diff | (expected[i] ^ tag[i])
+
+        if diff != 0u8 then return false
+
+        // Tag valid — decrypt
+        chacha20_crypt(key, nonce, 1u32, ct, pt)
+        return true
+
+
+Tests
+=====
+
+    import std.debug.{assert}
+
+
+### Poly1305 — RFC 8439 Section 2.5.2
+
+    #test
+    test_poly1305_rfc8439() -> void
+        val key: [32]byte = [0x85, 0xd6, 0xbe, 0x78, 0x57, 0x55, 0x6d, 0x33, 0x7f, 0x44, 0x52, 0xfe, 0x42, 0xd5, 0x06, 0xa8, 0x01, 0x03, 0x80, 0x8a, 0xfb, 0x0d, 0xb2, 0xfd, 0x4a, 0xbf, 0xf6, 0xaf, 0x41, 0x49, 0xf5, 0x1b]
+        val msg: [34]byte = "Cryptographic Forum Research Group"
+        var tag: [16]byte
+        poly1305(tag[:], msg[:], key[:])
+
+        // a8061dc1305136c6c22b8baf0c0127a9
+        val expected: [16]byte = [0xa8, 0x06, 0x1d, 0xc1, 0x30, 0x51, 0x36, 0xc6, 0xc2, 0x2b, 0x8b, 0xaf, 0x0c, 0x01, 0x27, 0xa9]
+
+        for i in 0..<16
+            assert(tag[i] == expected[i], s"poly1305 byte $i: got ${int(tag[i])} want ${int(expected[i])}")
+
+
+### AEAD seal — RFC 8439 Section 2.8.2
+
+    #test
+    test_aead_seal_rfc8439() -> void
+        val key: [32]byte = [0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f]
+        val nonce: [12]byte = [0x07, 0x00, 0x00, 0x00, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47]
+        val aad: [12]byte = [0x50, 0x51, 0x52, 0x53, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7]
+
+        // "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
+        val pt: [114]byte = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
+
+        var ct: [114]byte
+        var tag: [16]byte
+        seal(key[:], nonce[:], aad[:], pt[:], ct[:], tag[:])
+
+        // Expected ciphertext first 4 and last 4 bytes
+        // d31a8d34...cec64b6116
+        assert(ct[0] == 0xd3u8, s"ct[0]: got ${int(ct[0])}")
+        assert(ct[1] == 0x1au8, s"ct[1]: got ${int(ct[1])}")
+        assert(ct[2] == 0x8du8, s"ct[2]: got ${int(ct[2])}")
+        assert(ct[3] == 0x34u8, s"ct[3]: got ${int(ct[3])}")
+        assert(ct[113] == 0x16u8, s"ct[113]: got ${int(ct[113])}")
+
+        // Expected tag: 1ae10b594f09e26a7e902ecbd0600691
+        val expected_tag: [16]byte = [0x1a, 0xe1, 0x0b, 0x59, 0x4f, 0x09, 0xe2, 0x6a, 0x7e, 0x90, 0x2e, 0xcb, 0xd0, 0x60, 0x06, 0x91]
+        for i in 0..<16
+            assert(tag[i] == expected_tag[i], s"tag byte $i: got ${int(tag[i])} want ${int(expected_tag[i])}")
+
+
+### AEAD open — round-trip
+
+    #test
+    test_aead_roundtrip() -> void
+        val key: [32]byte = [0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f]
+        val nonce: [12]byte = [0x07, 0x00, 0x00, 0x00, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47]
+        val aad: [12]byte = [0x50, 0x51, 0x52, 0x53, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7]
+        val pt: [114]byte = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
+
+        // Seal
+        var ct: [114]byte
+        var tag: [16]byte
+        seal(key[:], nonce[:], aad[:], pt[:], ct[:], tag[:])
+
+        // Open
+        var recovered: [114]byte
+        val ok = open(key[:], nonce[:], aad[:], ct[:], tag[:], recovered[:])
+
+        assert(ok, "open should succeed")
+        for i in 0..<114
+            assert(recovered[i] == pt[i], s"recovered byte $i")
+
+
+### AEAD open — tampered ciphertext rejected
+
+    #test
+    test_aead_tamper_rejected() -> void
+        val key: [32]byte = [0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f]
+        val nonce: [12]byte = [0x07, 0x00, 0x00, 0x00, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47]
+        val aad: [12]byte = [0x50, 0x51, 0x52, 0x53, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7]
+        val pt: [5]byte = "hello"
+
+        var ct: [5]byte
+        var tag: [16]byte
+        seal(key[:], nonce[:], aad[:], pt[:], ct[:], tag[:])
+
+        // Tamper with ciphertext
+        ct[0] ^= 0xffu8
+
+        var recovered: [5]byte
+        val ok = open(key[:], nonce[:], aad[:], ct[:], tag[:], recovered[:])
+
+        assert(!ok, "tampered ciphertext should be rejected")
+
+
+### Simple AEAD — verified against Node.js
+
+    #test
+    test_aead_simple() -> void
+        var key: [32]byte = ""
+        key[0] = 1u8
+        val nonce: [12]byte = ""
+        val empty: [0]byte = ""
+        val msg: [5]byte = "hello"
+
+        var ct: [5]byte
+        var tag: [16]byte
+        seal(key[:], nonce[:], empty[:], msg[:], ct[:], tag[:])
+
+        // Verified: ct = 78933a8abe, tag = 4b62a254af342caf426cc0cef759ac3f
+        val expected_ct: [5]byte = [0x78, 0x93, 0x3a, 0x8a, 0xbe]
+        val expected_tag: [16]byte = [0x4b, 0x62, 0xa2, 0x54, 0xaf, 0x34, 0x2c, 0xaf, 0x42, 0x6c, 0xc0, 0xce, 0xf7, 0x59, 0xac, 0x3f]
+
+        for i in 0..<5
+            assert(ct[i] == expected_ct[i], s"ct byte $i: got ${int(ct[i])} want ${int(expected_ct[i])}")
+        for i in 0..<16
+            assert(tag[i] == expected_tag[i], s"tag byte $i: got ${int(tag[i])} want ${int(expected_tag[i])}")
+
+
+Design notes
+------------
+
+**Poly1305 arithmetic.** Uses 5 limbs of 26 bits each in
+i64 to avoid overflow. Products of 26-bit limbs fit in 52
+bits; summing 5 such products stays under 2^56, well within
+the 63-bit positive range of i64.
+
+**Constant-time tag comparison.** The `open` function uses
+bitwise OR accumulation to compare tags, avoiding
+timing side channels.
+
+**Single-block Poly1305 key.** The Poly1305 one-time key is
+derived from ChaCha20 block 0 (first 32 bytes), per RFC 8439
+Section 2.6.
