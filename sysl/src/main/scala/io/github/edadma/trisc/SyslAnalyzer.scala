@@ -1454,14 +1454,26 @@ class SyslAnalyzer:
         // Validate cast is possible
         (tInner.typ, target) match
           case (from, to) if from == to => // no-op cast
+          // bool conversions
           case (from, BoolType) if from.isNumeric => // numeric to bool: != 0
           case (BoolType, to) if to.isNumeric => // bool to numeric: true=1, false=0
+          case (_: PtrType | _: RefType | _: FuncType, BoolType) => // pointer/ref/func to bool: null check
+          // float conversions
           case (from, DoubleType) if from.isIntegral => // int to float (cvt)
           case (DoubleType, to) if to.isIntegral => // float to int (fint)
-          case (from, to) if from.isIntegral && to.isIntegral => // integer to integer (including signed↔unsigned)
+          // integer conversions
+          case (from, to) if from.isIntegral && to.isIntegral => // int ↔ int (signed/unsigned, any width)
+          // pointer conversions
           case (_: PtrType, to) if to.isIntegral => // pointer to integer
           case (from, _: PtrType) if from.isIntegral => // integer to pointer
-          case (StringType, PtrType(I8 | U8)) => // string to *i8/*u8 decay
+          case (_: PtrType, _: PtrType) => // pointer to pointer (like C's void* cast)
+          case (StringType, PtrType(I8 | U8)) => // string to *i8/*byte decay
+          // ref conversions
+          case (_: RefType, _: PtrType) => // ref to raw pointer (&T → *U)
+          case (_: RefType, to) if to.isIntegral => // ref to integer (address)
+          // func conversions
+          case (_: FuncType, to) if to.isIntegral => // func to integer (address)
+          case (_: FuncType, _: PtrType) => // func to pointer
           case (from, to) => throw AnalysisError(s"cannot cast $from to $to")
         TCast(tInner, target)
 

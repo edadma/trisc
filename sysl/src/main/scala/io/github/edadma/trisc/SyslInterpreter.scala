@@ -105,7 +105,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case RefVal(cells, _, _) => pointerToLong(ArrayPtr(cells, 0))
     case RefSliceVal(cells, _, _) => pointerToLong(ArrayPtr(cells, 0))
     case RefStringVal(bytes, _, _) => pointerToLong(ArrayPtr(bytes.map(b => new Cell(IntVal(b & 0xff))), 0))
-    case FuncVal(_)         => throw RuntimeError("expected integer, got function")
+    case FuncVal(_)         => 1L // non-zero sentinel for casts (address not meaningful in interpreter)
     case StrVal(_)          => throw RuntimeError("expected integer, got string")
     case SliceVal(_, _, _, _) => throw RuntimeError("expected integer, got slice")
     case EnumVal(_, _) => throw RuntimeError("expected integer, got enum value")
@@ -933,7 +933,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         import SyslType.*
         target match
           case DoubleType  => FloatVal(toDouble(v))
-          case BoolType => IntVal(if toLong(v) != 0 then 1L else 0L)
+          case BoolType => v match
+            case FuncVal(_) => IntVal(1L) // function references are always non-null
+            case RefVal(_, _, _) | RefEnumVal(_, _, _) | RefSliceVal(_, _, _) | RefStringVal(_, _, _) => IntVal(1L)
+            case _ => IntVal(if toLong(v) != 0 then 1L else 0L)
           case IntType(64)  => IntVal(toLong(v))
           case IntType(32)  => IntVal((toLong(v) << 32) >> 32)  // sign-extend from 32 bits
           case IntType(16)  => IntVal((toLong(v) << 48) >> 48)  // sign-extend from 16 bits
@@ -947,6 +950,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case _: PtrType =>
             v match
               case PtrVal(_) | ArrVal(_, _) => v  // already a pointer
+              case RefVal(cells, _, _) => PtrVal(ArrayPtr(cells, 0))  // ref to pointer
+              case FuncVal(name) => IntVal(0) // func to pointer (address not meaningful in interpreter)
               case IntVal(0) => PtrVal(ArrayPtr(Array.empty[Cell], 0))  // null pointer
               case IntVal(n) => PtrVal(longToPointer(n))  // integer to pointer
               case _ => v
