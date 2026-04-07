@@ -23,4 +23,41 @@ class SyslCodegenPointerCastTests extends SyslCodegenHelpers {
         |    *raw
         |""".stripMargin) shouldBe 42
   }
+
+  "cast *i8 to *byte" in {
+    compileAndRun(
+      """main() -> int
+        |    var x: i8 = 42
+        |    var p: *i8 = &x
+        |    var q: *byte = *byte(p)
+        |    int(*q)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "non-null pointer to bool" in {
+    compileAndRun(
+      """main() -> int
+        |    var x = 42
+        |    var p = &x
+        |    if bool(p) then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "null pointer to bool" in {
+    compileAndRun(
+      """main() -> int
+        |    var p = *int(0)
+        |    if bool(p) then 1 else 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "func to bool" in {
+    compileAndRun(
+      """helper() -> int = 42
+        |
+        |main() -> int
+        |    val f: func() -> int = helper
+        |    if bool(f) then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
 }
