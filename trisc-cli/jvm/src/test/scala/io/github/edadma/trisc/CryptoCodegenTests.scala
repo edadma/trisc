@@ -312,6 +312,41 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
     out should include("123")
   }
 
+  "local slice as first arg to second call in same function" in {
+    // Regression test: when a local slice variable is passed as the first (register)
+    // arg to a function, the pre-evaluation must copy the slice data to the stack
+    // (not just record stackOffset, which doesn't change for local var references).
+    // Without the fix, the second call gets a wrong pointer and produces wrong results.
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import posix.stdlib.*
+        |
+        |sum_bytes(s: []byte) -> int
+        |    var total = 0
+        |    for i in 0..<len(s)
+        |        total += int(s[i])
+        |    total
+        |
+        |main() -> int
+        |    var a: [3]byte = [1u8, 2u8, 3u8]
+        |    val sa = sum_bytes(a[:])
+        |    // Second call: local slice from 'new', passed as first arg
+        |    val buf = (new [4]byte)[:]
+        |    buf[0] = 10u8
+        |    buf[1] = 20u8
+        |    buf[2] = 30u8
+        |    buf[3] = 40u8
+        |    val sb = sum_bytes(buf)
+        |    // sa = 6, sb = 100
+        |    if sa == 6
+        |        putchar(65)
+        |    if sb == 100
+        |        putchar(66)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out shouldBe "AB"
+  }
+
   "SHA-256 abc" in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import std.crypto.sha256.*
