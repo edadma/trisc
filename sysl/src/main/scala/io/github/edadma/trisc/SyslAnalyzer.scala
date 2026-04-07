@@ -1131,6 +1131,79 @@ class SyslAnalyzer:
         val elemType = tElems.head.typ
         TArrayLit(tElems, SyslType.ArrayType(elemType, tElems.length))
 
+      case ClosureAST(params, body) =>
+        // Infer parameter types from currentExpected (the target func type)
+        val expectedFunc = currentExpected.collect { case ft: FuncType => ft }
+        val typedParams = params.zipWithIndex.map { case (p, i) =>
+          val paramType = p.typ match
+            case Some(typeAST) => resolveType(typeAST)
+            case None =>
+              expectedFunc match
+                case Some(ft) if i < ft.params.length => ft.params(i)
+                case _ => throw AnalysisError(s"cannot infer type for closure parameter '${p.name}' — add a type annotation")
+          TParam(p.name, paramType)
+        }
+        val expectedRet = expectedFunc.map(_.returnType).getOrElse(VoidType)
+        // Push scope with closure params
+        pushScope()
+        for p <- typedParams do
+          currentScope(p.name) = SymInfo(p.name, p.typ, mutable = false)
+        // Analyze body
+        val savedExp = currentExpected
+        currentExpected = if expectedRet == VoidType then None else Some(expectedRet)
+        val tBody = try body match
+          case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
+          case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
+        finally currentExpected = savedExp
+        popScope()
+        // Detect captures: variables referenced from enclosing scope (not globals, not params)
+        val paramNames = typedParams.map(_.name).toSet
+        val captures = scala.collection.mutable.ListBuffer.empty[(String, SyslType)]
+        def scanCaptures(expr: TExpr): Unit = expr match
+          case TVarRef(name, typ) =>
+            if !paramNames.contains(name) && !globalScope.contains(name) && !functions.contains(name) && !builtinFunctions.contains(name) then
+              if !captures.exists(_._1 == name) then captures += ((name, typ))
+          case _ =>
+            // Walk child expressions
+            expr match
+              case TBinary(l, _, r, _) => scanCaptures(l); scanCaptures(r)
+              case TUnary(_, e, _) => scanCaptures(e)
+              case TCall(_, args, _) => args.foreach(scanCaptures)
+              case TIndirectCall(c, args, _) => scanCaptures(c); args.foreach(scanCaptures)
+              case TIndex(a, i, _) => scanCaptures(a); scanCaptures(i)
+              case TFieldAccess(o, _, _) => scanCaptures(o)
+              case TDeref(e, _) => scanCaptures(e)
+              case TCast(e, _) => scanCaptures(e)
+              case TAddrOf(n, t) =>
+                if !paramNames.contains(n) && !globalScope.contains(n) then
+                  if !captures.exists(_._1 == n) then captures += ((n, t))
+              case TIfExpr(c, th, el, _) =>
+                scanCaptures(c)
+                th.foreach { case TExprStmt(e) => scanCaptures(e); case _ => () }
+                el.foreach(_.foreach { case TExprStmt(e) => scanCaptures(e); case _ => () })
+              case _ => ()
+        def scanStmtCaptures(stmt: TStmt): Unit = stmt match
+          case TExprStmt(e) => scanCaptures(e)
+          case TVarStmt(_, _, init) => scanCaptures(init)
+          case TAssignStmt(_, v) => scanCaptures(v)
+          case TCompoundAssignStmt(_, _, v) => scanCaptures(v)
+          case TReturnStmt(Some(e)) => scanCaptures(e)
+          case TWhileStmt(c, body) => scanCaptures(c); body.foreach(scanStmtCaptures)
+          case TForStmt(init, c, upd, body) => scanStmtCaptures(init); scanCaptures(c); scanStmtCaptures(upd); body.foreach(scanStmtCaptures)
+          case TIfExpr(c, th, el, _) => scanCaptures(c); th.foreach(scanStmtCaptures); el.foreach(_.foreach(scanStmtCaptures))
+          case _ => ()
+        tBody match
+          case TExprBody(e) => scanCaptures(e)
+          case TBlockBody(stmts) => stmts.foreach(scanStmtCaptures)
+        // Determine actual return type from body
+        val actualRet = tBody match
+          case TExprBody(e) => e.typ
+          case TBlockBody(stmts) =>
+            stmts.lastOption match
+              case Some(TExprStmt(e)) => e.typ
+              case _ => VoidType
+        TClosure(typedParams, actualRet, tBody, captures.toList)
+
       case AsmExprAST(code) =>
         TAsmExpr(code, currentReturnType)
 

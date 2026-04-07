@@ -1,0 +1,115 @@
+package io.github.edadma.trisc
+
+class SyslClosureTests extends SyslTestHelpers {
+
+  // ===== Basic closures (no captures) =====
+
+  "zero-capture closure" in {
+    eval(
+      """apply(f: func(int) -> int, x: int) -> int = f(x)
+        |
+        |main() -> int = apply(x -> x + 1, 41)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "multi-param closure" in {
+    eval(
+      """apply2(f: func(int, int) -> int, a: int, b: int) -> int = f(a, b)
+        |
+        |main() -> int = apply2((x, y) -> x + y, 20, 22)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "zero-param closure" in {
+    eval(
+      """call(f: func() -> int) -> int = f()
+        |
+        |main() -> int = call(() -> 42)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "closure assigned to variable" in {
+    eval(
+      """main() -> int
+        |    val f: func(int) -> int = x -> x * 2
+        |    f(21)
+        |""".stripMargin) shouldBe 42
+  }
+
+  // ===== Capture by value =====
+
+  "capture local variable" in {
+    eval(
+      """apply(f: func(int) -> int, x: int) -> int = f(x)
+        |
+        |main() -> int
+        |    val a = 10
+        |    apply(x -> x + a, 32)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "capture is frozen (by value)" in {
+    eval(
+      """apply(f: func(int) -> int, x: int) -> int = f(x)
+        |
+        |main() -> int
+        |    var a = 10
+        |    val f: func(int) -> int = x -> x + a
+        |    a = 100
+        |    f(32)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "capture multiple variables" in {
+    eval(
+      """apply(f: func(int) -> int, x: int) -> int = f(x)
+        |
+        |main() -> int
+        |    val a = 10
+        |    val b = 20
+        |    apply(x -> x + a + b, 12)
+        |""".stripMargin) shouldBe 42
+  }
+
+  // ===== Higher-order functions =====
+
+  "closure passed to higher-order function" in {
+    eval(
+      """apply(f: func(int) -> int, x: int) -> int = f(x)
+        |
+        |main() -> int = apply(x -> x * 2, 21)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "closure as return value" in {
+    eval(
+      """make_adder(n: int) -> func(int) -> int
+        |    val captured = n
+        |    x -> x + captured
+        |
+        |main() -> int
+        |    val add10 = make_adder(10)
+        |    add10(32)
+        |""".stripMargin) shouldBe 42
+  }
+
+  // ===== Type-annotated parameters =====
+
+  "closure with typed parameters" in {
+    eval(
+      """apply(f: func(int) -> int, x: int) -> int = f(x)
+        |
+        |main() -> int = apply((x: int) -> x + 1, 41)
+        |""".stripMargin) shouldBe 42
+  }
+
+  // ===== Expressions =====
+
+  "closure in arithmetic expression" in {
+    eval(
+      """apply(f: func(int) -> int, x: int) -> int = f(x)
+        |
+        |main() -> int = apply(x -> x + 1, 20) + apply(x -> x + 1, 20)
+        |""".stripMargin) shouldBe 42
+  }
+}
