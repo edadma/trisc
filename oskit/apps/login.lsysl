@@ -46,6 +46,7 @@ Buffered output.
 
     login_newline()
         login_putc('\n')
+        login_flush()
 
 Read a line from the TTY into buf. Returns length.
 If echo is false, characters are not echoed (for passwords).

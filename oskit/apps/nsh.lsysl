@@ -59,6 +59,7 @@ round-trips.
 
     nsh_newline()
         nsh_putc('\n')
+        nsh_flush()
 
     nsh_putint(n: int)
         if n < 0
