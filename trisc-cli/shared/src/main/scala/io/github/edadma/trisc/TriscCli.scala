@@ -197,6 +197,8 @@ object TriscCli:
         /dev/tty0 char 0 0
         /dev/disk0 block 1 0
         /dev/null char 0 1
+        /etc/passwd file "root:x:0:0:root:/:/nsh"
+        /etc/shadow file "root:toor"
       """,
     )
     val mem = new Memory("Memory", (Seq(ram, stdout, intc, timer, ramdisk) ++ extraDevices)*)
