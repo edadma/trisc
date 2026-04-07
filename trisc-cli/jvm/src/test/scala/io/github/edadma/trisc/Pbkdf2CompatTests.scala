@@ -40,6 +40,12 @@ class Pbkdf2CompatTests extends AnyFreeSpec with Matchers {
     hash.length shouldBe 64
   }
 
+  "compute hash for user ed" in {
+    val hash = jvmPbkdf2("ed", "slix", 1)
+    info(s"ed hash: $hash")
+    hash.length shouldBe 64
+  }
+
   "SHA accelerator device: SHA-256 abc" in {
     val sha = new ShaAccelerator(0x1000L)
     // "abc" padded to 512-bit block

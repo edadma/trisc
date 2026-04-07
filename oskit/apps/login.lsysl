@@ -18,6 +18,7 @@ Passwords are hashed with PBKDF2-HMAC-SHA256 (c=1).
     import std.crypto.pbkdf2.{pbkdf2_hmac_sha256_hw}
 
     extern nsh()
+    extern nsh_set_home(home: *i8, homelen: int)
 
 Buffered output.
 
@@ -139,7 +140,13 @@ or -1 if not found.
             pos = eol + 1
         -1
 
+Parsed home directory from the last successful lookup_passwd call.
+
+    var login_home: [128]i8
+    var login_home_len = 0
+
 Look up a user in /etc/passwd. Returns uid or -1 on failure.
+Also stores the home directory in login_home/login_home_len.
 
     lookup_passwd(user: *i8, userlen: int) -> int
         var filebuf: [512]i8
@@ -153,17 +160,24 @@ Look up a user in /etc/passwd. Returns uid or -1 on failure.
         var fstart: int
         var flen: int
         var pos = line
-        val eol = line + nr  // conservative end
         // Skip username
         pos = parse_field(filebuf, pos, nr, &fstart, &flen)
         // Skip password field (should be "x")
         pos = parse_field(filebuf, pos, nr, &fstart, &flen)
         // Parse uid
         pos = parse_field(filebuf, pos, nr, &fstart, &flen)
-        // Convert uid string to int
         var uid = 0
         for var i = 0; i < flen; i++
             uid = uid * 10 + int(filebuf[fstart + i]) - '0'
+        // Skip gid
+        pos = parse_field(filebuf, pos, nr, &fstart, &flen)
+        // Skip gecos
+        pos = parse_field(filebuf, pos, nr, &fstart, &flen)
+        // Parse home directory
+        pos = parse_field(filebuf, pos, nr, &fstart, &flen)
+        login_home_len = flen
+        for var i = 0; i < flen; i++
+            login_home[i] = filebuf[fstart + i]
         uid
 
 Convert a hex character to its nibble value (0-15). Returns -1 on invalid.
@@ -262,7 +276,8 @@ sets uid, and runs the shell. Loops on failure or when shell exits.
                 login_flush()
                 continue
 
-            // Authenticated — set uid and run shell
+            // Authenticated — set uid, home dir, and run shell
             setuid(uid)
+            nsh_set_home(login_home, login_home_len)
             nsh()
             // Shell exited — loop back to login

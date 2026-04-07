@@ -197,8 +197,11 @@ object TriscCli:
         /dev/tty0 char 0 0
         /dev/disk0 block 1 0
         /dev/null char 0 1
-        /etc/passwd file "root:x:0:0:root:/:/nsh"
-        /etc/shadow file "root:slix:3b1b8291c0bdb62febcd914f45884bca403ae1c42a4bb1c41755881f3886d158"
+        /root dir
+        /home dir
+        /home/ed dir
+        /etc/passwd file "root:x:0:0:root:/root:/nsh\ned:x:1000:1000:ed:/home/ed:/nsh"
+        /etc/shadow file "root:slix:3b1b8291c0bdb62febcd914f45884bca403ae1c42a4bb1c41755881f3886d158\ned:slix:c638d5b6e91f70b96934aac8d7be42363ce4ea5927f9a9bbbe2d64a8b51926b5"
       """,
     )
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)

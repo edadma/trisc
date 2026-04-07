@@ -293,7 +293,12 @@ import oskit.services.sleep
 
   // === Login integration tests ===
 
-  private val passwdPrefill = "/etc/passwd file \"root:x:0:0:root:/:/nsh\"\n/etc/shadow file \"root:slix:3b1b8291c0bdb62febcd914f45884bca403ae1c42a4bb1c41755881f3886d158\"\n"
+  private val passwdPrefill =
+    "/root dir\n" +
+    "/home dir\n" +
+    "/home/ed dir\n" +
+    "/etc/passwd file \"root:x:0:0:root:/root:/nsh\\ned:x:1000:1000:ed:/home/ed:/nsh\"\n" +
+    "/etc/shadow file \"root:slix:3b1b8291c0bdb62febcd914f45884bca403ae1c42a4bb1c41755881f3886d158\\ned:slix:c638d5b6e91f70b96934aac8d7be42363ce4ea5927f9a9bbbe2d64a8b51926b5\"\n"
 
   def runLogin(
       maxCycles: Int = 15000000,
@@ -360,18 +365,31 @@ import oskit.services.sleep
     output should include("login: ")
   }
 
-  "Login: successful login shows shell prompt" in {
+  "Login: successful login shows shell prompt in home dir" in {
     val keys        = loginAndType("")
     val (_, output) = runLogin(scheduledKeys = keys)
     output should include("login: ")
     output should include("password: ")
-    output should include("> ")
+    output should include("/root> ")
   }
 
   "Login: whoami returns 0 for root" in {
     val keys        = loginAndType("whoami\n")
     val (_, output) = runLogin(scheduledKeys = keys)
     output should include("0")
+  }
+
+  "Login: pwd shows home directory" in {
+    val keys        = loginAndType("pwd\n")
+    val (_, output) = runLogin(scheduledKeys = keys)
+    output should include("/root")
+  }
+
+  "Login: user ed gets home /home/ed" in {
+    val keys = typeString("ed\n", startTick = 800000) ++
+               typeString("ed\n", startTick = 840000)
+    val (_, output) = runLogin(scheduledKeys = keys)
+    output should include("/home/ed> ")
   }
 
   "Login: bad password rejected" in {

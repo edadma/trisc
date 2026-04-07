@@ -34,6 +34,16 @@ Shell state.
 
     var cwd: string
     var cwd_ino = 1
+    var nsh_home_buf: [128]byte
+    var nsh_home_len = 0
+
+Set the initial home directory for the next nsh() call.
+Called by login before spawning the shell.
+
+    nsh_set_home(home: *i8, homelen: int)
+        for var i = 0; i < homelen; i++
+            nsh_home_buf[i] = byte(home[i])
+        nsh_home_len = homelen
 
 Buffered output. All output accumulates in nsh_out and is
 sent to the TTY in a single IPC call on flush. This matches
@@ -599,7 +609,16 @@ Command dispatch.
 The shell main loop.
 
     nsh()
-        cwd = "/"
+        if nsh_home_len > 0
+            cwd = string(&nsh_home_buf[0], nsh_home_len)
+            cwd_ino = fs_open(cwd)
+            if cwd_ino < 0
+                cwd = "/"
+                cwd_ino = 1
+            nsh_home_len = 0
+        else
+            cwd = "/"
+            cwd_ino = 1
         sleep(5)
 
         var line: [256]i8
