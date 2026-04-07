@@ -1007,14 +1007,18 @@ class SyslTriscCodegen(addresses: Int = 4):
         val elemType = array.typ match
           case SyslType.ArrayType(e, _) => e
           case SyslType.PtrType(e) => e
+          case SyslType.SliceType(e) => e
           case SyslType.RefType(SyslType.SliceType(e)) => e
           case _ => SyslType.I64
         val elemSize = stackSize(elemType)
+        val isSlice = array.typ.isInstanceOf[SyslType.SliceType]
         genExpr(value)           // r1 = value
         emit("  pshd r1")       // save as 64-bit temp
         genExpr(index)           // r1 = index
         emit("  pshd r1")
-        genExpr(array)           // r1 = array base address
+        genExpr(array)           // r1 = array/slice address
+        if isSlice then
+          emit("  ldd r1, r1, r0") // r1 = data pointer (from slice struct)
         emit("  popd r2")        // r2 = index
         emitLoadImm(3, elemSize)
         emit("  mul r2, r2, r3") // r2 = index * elemSize
@@ -1790,7 +1794,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  popd r2")        // r2 = index
         // Bounds check: 0 <= index < len
         emit("  addi r3, r1, 8")
-        emit("  ldd r3, r3, r0") // r3 = len (i64 from fat pointer)
+        emit("  ldw r3, r3, r0") // r3 = len (32-bit in slice struct) (i64 from fat pointer)
         emit("  slt r4, r2, r0") // r4 = (index < 0)
         val boundsOk = newLabel("bounds_ok")
         val boundsErr = newLabel("bounds_error")
@@ -1816,7 +1820,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  popd r2")        // r2 = index
         // Bounds check
         emit("  addi r3, r1, 8")
-        emit("  ldw r3, r3, r0") // r3 = len
+        emit("  ldw r3, r3, r0") // r3 = len (32-bit in slice struct)
         emit("  slt r4, r2, r0")
         val boundsOk = newLabel("bounds_ok")
         val boundsErr = newLabel("bounds_err")
@@ -2134,7 +2138,7 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  ldd r1, r1, r0") // len at offset 8 (i64 in fat pointer)
           case SyslType.SliceType(_) =>
             emit("  addi r1, r1, 8")
-            emit("  ldw r1, r1, r0") // len at offset 8
+            emit("  ldw r1, r1, r0") // len at offset 8 (i32 in slice struct)
           case SyslType.ArrayType(_, size) =>
             emitLoadImm(1, size) // compile-time constant
           case SyslType.RefType(SyslType.SliceType(_)) =>

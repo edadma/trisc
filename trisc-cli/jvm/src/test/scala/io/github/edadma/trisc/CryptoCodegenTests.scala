@@ -253,13 +253,12 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
     out shouldBe "A"
   }
 
-  "basic: u32 slice indexing with multiply" in {
+  "basic: byte slice with offset param" in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import posix.stdlib.*
         |
-        |load_word(block: []byte, off: int) -> u32
-        |    val j = off
-        |    (u32(block[j]) << 24u32) | (u32(block[j + 1]) << 16u32) | (u32(block[j + 2]) << 8u32) | u32(block[j + 3])
+        |load_word(s: []byte, off: int) -> u32
+        |    (u32(s[off]) << 24u32) | (u32(s[off + 1]) << 16u32) | (u32(s[off + 2]) << 8u32) | u32(s[off + 3])
         |
         |main() -> int
         |    var data: [8]byte
