@@ -96,12 +96,221 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |main() -> int
         |    val x = 0x6A09E667u32
         |    val r = rotr(x, 2u32)
-        |    // Just check it returns without faulting
         |    putchar(65)
         |    0
         |""".stripMargin))
     info(s"Output: '$out', code: $code")
     code shouldBe 0
+  }
+
+  "basic: u32 array init and index" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import posix.stdlib.*
+        |
+        |main() -> int
+        |    val arr: [4]u32 = [0x6A09E667u32, 0xBB67AE85u32, 0x3C6EF372u32, 0xA54FF53Au32]
+        |    putchar(65)
+        |    if arr[0] == 0x6A09E667u32
+        |        putchar(66)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out should include("AB")
+  }
+
+  "basic: for-in range loop" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import posix.stdlib.*
+        |
+        |main() -> int
+        |    var sum = 0
+        |    for i in 0..<4
+        |        sum += 1
+        |    putchar(48 + sum)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out shouldBe "4"
+  }
+
+  "basic: slice from array" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import posix.stdlib.*
+        |
+        |sum_slice(s: []byte) -> int
+        |    var total = 0
+        |    for var i = 0; i < len(s); i++
+        |        total += int(s[i])
+        |    total
+        |
+        |main() -> int
+        |    val data: [3]byte = "abc"
+        |    val result = sum_slice(data[:])
+        |    putchar(48 + result / 100)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    code shouldBe 0
+  }
+
+  "basic: K table access" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import std.crypto.sha256.*
+        |import posix.stdlib.*
+        |
+        |main() -> int
+        |    // Access K[0] = 0x428a2f98
+        |    if K[0] == 0x428a2f98u32
+        |        putchar(65)
+        |    else
+        |        putchar(78)
+        |    // Access K[63] = 0xc67178f2
+        |    if K[63] == 0xc67178f2u32
+        |        putchar(66)
+        |    else
+        |        putchar(78)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out shouldBe "AB"
+  }
+
+  "basic: large u32 local array" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import posix.stdlib.*
+        |
+        |main() -> int
+        |    var w: [64]u32
+        |    w[0] = 0x12345678u32
+        |    w[63] = 0xDEADBEEFu32
+        |    if w[0] == 0x12345678u32
+        |        putchar(65)
+        |    if w[63] == 0xDEADBEEFu32
+        |        putchar(66)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out shouldBe "AB"
+  }
+
+  "basic: u32 wrapping add" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import posix.stdlib.*
+        |
+        |main() -> int
+        |    val a = 0xFFFFFFFFu32
+        |    val b = 1u32
+        |    val c = a + b
+        |    // c should wrap to 0
+        |    if c == 0u32
+        |        putchar(65)
+        |    else
+        |        putchar(78)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out shouldBe "A"
+  }
+
+  "basic: u32 byte assembly" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import posix.stdlib.*
+        |
+        |main() -> int
+        |    var block: [4]byte
+        |    block[0] = 0x61u8
+        |    block[1] = 0x62u8
+        |    block[2] = 0x63u8
+        |    block[3] = 0x80u8
+        |    // Assemble big-endian u32 like process_block does
+        |    val w = (u32(block[0]) << 24u32) | (u32(block[1]) << 16u32) | (u32(block[2]) << 8u32) | u32(block[3])
+        |    // w should be 0x61626380
+        |    if w == 0x61626380u32
+        |        putchar(65)
+        |    else
+        |        putchar(78)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out shouldBe "A"
+  }
+
+  "basic: u32 slice write and read" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import posix.stdlib.*
+        |
+        |modify(s: []u32)
+        |    s[0] = s[0] + 1u32
+        |
+        |main() -> int
+        |    var arr: [4]u32 = [10u32, 20u32, 30u32, 40u32]
+        |    modify(arr[:])
+        |    if arr[0] == 11u32
+        |        putchar(65)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out shouldBe "A"
+  }
+
+  "basic: u32 slice indexing with multiply" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import posix.stdlib.*
+        |
+        |load_word(block: []byte, off: int) -> u32
+        |    val j = off
+        |    (u32(block[j]) << 24u32) | (u32(block[j + 1]) << 16u32) | (u32(block[j + 2]) << 8u32) | u32(block[j + 3])
+        |
+        |main() -> int
+        |    var data: [8]byte
+        |    data[0] = 0x61u8
+        |    data[1] = 0x62u8
+        |    data[2] = 0x63u8
+        |    data[3] = 0x80u8
+        |    data[4] = 0x00u8
+        |    data[5] = 0x00u8
+        |    data[6] = 0x00u8
+        |    data[7] = 0x18u8
+        |    val w0 = load_word(data[:], 0)
+        |    val w1 = load_word(data[:], 4)
+        |    if w0 == 0x61626380u32
+        |        putchar(65)
+        |    if w1 == 0x00000018u32
+        |        putchar(66)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out shouldBe "AB"
+  }
+
+  "basic: process_block call" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import std.crypto.sha256.*
+        |import posix.stdlib.*
+        |
+        |main() -> int
+        |    putchar(49)
+        |    var state: [8]u32 = [0x6A09E667u32, 0xBB67AE85u32, 0x3C6EF372u32, 0xA54FF53Au32, 0x510E527Fu32, 0x9B05688Cu32, 0x1F83D9ABu32, 0x5BE0CD19u32]
+        |    var block: [64]byte
+        |    block[0] = 0x61u8
+        |    block[1] = 0x62u8
+        |    block[2] = 0x63u8
+        |    block[3] = 0x80u8
+        |    block[56] = 0u8
+        |    block[57] = 0u8
+        |    block[58] = 0u8
+        |    block[59] = 0u8
+        |    block[60] = 0u8
+        |    block[61] = 0u8
+        |    block[62] = 0u8
+        |    block[63] = 24u8
+        |    putchar(50)
+        |    process_block(state[:], block[:], 0)
+        |    putchar(51)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out should include("123")
   }
 
   "SHA-256 abc" in {
