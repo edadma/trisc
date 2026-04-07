@@ -196,32 +196,37 @@ handles padding and block sequencing.
     // SHA_BUSY  = 0x1001AC (SHA_BASE + 0x4C)
 
 Write a 512-bit message block to the accelerator's TEXT
-registers and trigger compression. Uses byte-level MMIO
-writes (4 bytes per word) to avoid codegen issues with
-`*u32` pointer stores.
+registers and trigger compression. Uses `*u32` word-level
+MMIO writes (16 words instead of 64 bytes).
 
     process_block_hw(block: []byte, off: int, first: int)
         val base = 0x100160
-        // Write 16 big-endian words to SHA_TEXT[0..15] as bytes
-        for i in 0..<64
-            var p: *byte = *byte(base + i)
-            *p = byte(block[off + i])
-        // Trigger compression (write last byte to fire trigger)
+        // Write 16 big-endian words to SHA_TEXT[0..15]
+        for i in 0..<16
+            val j = off + i * 4
+            val w = (u32(block[j]) << 24u32) | (u32(block[j + 1]) << 16u32) | (u32(block[j + 2]) << 8u32) | u32(block[j + 3])
+            var p: *u32 = *u32(base + i * 4)
+            *p = w
+        // Trigger compression
         if first != 0
-            var p: *byte = *byte(base + 0x43)
-            *p = 1
+            var p: *u32 = *u32(base + 0x40)
+            *p = 1u32
         else
-            var p: *byte = *byte(base + 0x47)
-            *p = 1
+            var p: *u32 = *u32(base + 0x44)
+            *p = 1u32
 
 Read the 8-word hash state from the accelerator's TEXT
 registers into an output buffer.
 
     read_hw_state(out: []byte)
         val base = 0x100160
-        for i in 0..<32
-            var p: *byte = *byte(base + i)
-            out[i] = byte(*p)
+        for i in 0..<8
+            var p: *u32 = *u32(base + i * 4)
+            val v = *p
+            out[i * 4]     = byte(v >> 24u32)
+            out[i * 4 + 1] = byte(v >> 16u32)
+            out[i * 4 + 2] = byte(v >> 8u32)
+            out[i * 4 + 3] = byte(v)
 
 `sha256_hw(data, out)` — same interface as `sha256()` but
 uses the MMIO accelerator for the compression function.
