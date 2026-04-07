@@ -429,8 +429,7 @@ Built-in commands.
         nsh_newline()
 
     cmd_help(argc: int, argv: *string)
-        nsh_putc('H')
-        nsh_newline()
+        nsh_print("echo ls cat mkdir rm rmdir pwd cd stat whoami help\n")
 
 Command dispatch.
 

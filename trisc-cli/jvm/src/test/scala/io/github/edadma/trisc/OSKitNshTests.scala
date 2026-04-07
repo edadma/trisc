@@ -227,7 +227,7 @@ import oskit.services.sleep
   "NSH: help command" in {
     val keys        = typeString("help\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys)
-    output should include("H")
+    output should include("echo ls cat")
   }
 
   "NSH: whoami returns 0" in {
