@@ -31,11 +31,9 @@ of `s`. It is the conventional entry point for taking a
     as_bytes(s: string) -> []byte
         val n = len(s)
         val buf = new [n]byte
-        var i = 0
 
-        while i < n
+        for i in 0..<n
             buf[i] = s[i]
-            i++
 
         buf[:]
 
@@ -54,11 +52,8 @@ Searching
 
         if m > n then return false
 
-        var i = 0
-
-        while i < m
+        for i in 0..<m
             if s[i] != prefix[i] then return false
-            i++
 
         true
 
@@ -71,11 +66,8 @@ Searching
 
         if m > n then return false
 
-        var i = 0
-
-        while i < m
+        for i in 0..<m
             if s[n - m + i] != suffix[i] then return false
-            i++
 
         true
 
@@ -90,21 +82,16 @@ Searching
         if m > n then return -1
 
         val last = n - m
-        var i = 0
 
-        while i <= last
-            var j = 0
+        for i in 0..last
             var matched = true
 
-            while j < m
+            for j in 0..<m
                 if s[i + j] != sub[j]
                     matched = false
                     break
-                j++
 
             if matched then return i
-
-            i++
 
         -1
 
@@ -121,14 +108,12 @@ Searching
         var i = n - m
 
         while i >= 0
-            var j = 0
             var matched = true
 
-            while j < m
+            for j in 0..<m
                 if s[i + j] != sub[j]
                     matched = false
                     break
-                j++
 
             if matched then return i
 
@@ -157,14 +142,12 @@ occurrences of `sub` in `s`. Empty `sub` yields `len(s) + 1`.
         val last = len(s) - m
 
         while i <= last
-            var j = 0
             var matched = true
 
-            while j < m
+            for j in 0..<m
                 if s[i + j] != sub[j]
                     matched = false
                     break
-                j++
 
             if matched
                 n++
@@ -179,11 +162,9 @@ occurrences of `sub` in `s`. Empty `sub` yields `len(s) + 1`.
 
     index_byte(s: []byte, b: byte) -> int
         val n = len(s)
-        var i = 0
 
-        while i < n
+        for i in 0..<n
             if s[i] == b then return i
-            i++
 
         -1
 
@@ -211,11 +192,9 @@ the built-in form for zero-copy views.
     subslice(s: []byte, lo: int, hi: int) -> []byte
         val n = hi - lo
         val buf = new [n]byte
-        var i = 0
 
-        while i < n
+        for i in 0..<n
             buf[i] = s[lo + i]
-            i++
 
         buf[:]
 
@@ -246,11 +225,9 @@ Helper: byte membership in cutset.
 
     in_cutset(b: byte, cutset: []byte) -> bool
         val n = len(cutset)
-        var i = 0
 
-        while i < n
+        for i in 0..<n
             if cutset[i] == b then return true
-            i++
 
         false
 
@@ -290,30 +267,24 @@ Case conversion (ASCII)
     to_upper(s: []byte) -> []byte
         val n = len(s)
         val buf = new [n]byte
-        var i = 0
 
-        while i < n
+        for i in 0..<n
             val c = s[i]
 
             if c >= byte('a') && c <= byte('z') then buf[i] = c - 0x20u8
             else buf[i] = c
-
-            i++
 
         buf[:]
 
     to_lower(s: []byte) -> []byte
         val n = len(s)
         val buf = new [n]byte
-        var i = 0
 
-        while i < n
+        for i in 0..<n
             val c = s[i]
 
             if c >= byte('A') && c <= byte('Z') then buf[i] = c + 0x20u8
             else buf[i] = c
-
-            i++
 
         buf[:]
 
@@ -337,24 +308,14 @@ Empty `old` inserts `repl` between every byte of `s`.
 
         if m == 0
             // insert 'repl' between every byte and at both ends
-            var j = 0
-
-            while j < k
+            for j in 0..<k
                 out = append(out, repl[j])
-                j++
 
-            var i = 0
-
-            while i < n
+            for i in 0..<n
                 out = append(out, s[i])
 
-                var jj = 0
-
-                while jj < k
+                for jj in 0..<k
                     out = append(out, repl[jj])
-                    jj++
-
-                i++
 
             return out
 
@@ -362,21 +323,16 @@ Empty `old` inserts `repl` between every byte of `s`.
         val last = n - m
 
         while i <= last
-            var j = 0
             var matched = true
 
-            while j < m
+            for j in 0..<m
                 if s[i + j] != old[j]
                     matched = false
                     break
-                j++
 
             if matched
-                var jj = 0
-
-                while jj < k
+                for jj in 0..<k
                     out = append(out, repl[jj])
-                    jj++
 
                 i += m
             else
@@ -399,16 +355,10 @@ Empty `old` inserts `repl` between every byte of `s`.
 
         val slen = len(s)
         val buf = new [slen * n]byte
-        var k = 0
 
-        while k < n
-            var j = 0
-
-            while j < slen
+        for k in 0..<n
+            for j in 0..<slen
                 buf[k * slen + j] = s[j]
-                j++
-
-            k++
 
         buf[:]
 
@@ -428,11 +378,9 @@ individual bytes.
         if m == 0
             val n = len(s)
             val parts = new [n]&[]byte
-            var i = 0
 
-            while i < n
+            for i in 0..<n
                 parts[i] = subslice(s, i, i + 1)
-                i++
 
             return parts[:]
 
@@ -445,14 +393,12 @@ individual bytes.
         var i = 0
 
         while i <= last
-            var j = 0
             var matched = true
 
-            while j < m
+            for j in 0..<m
                 if s[i + j] != sep[j]
                     matched = false
                     break
-                j++
 
             if matched
                 parts[pi] = subslice(s, start, i)
@@ -494,20 +440,15 @@ with `sep` between each pair.
 
         while i < n
             if i > 0
-                var j = 0
-
-                while j < len(sep)
+                for j in 0..<len(sep)
                     buf[pos] = sep[j]
                     pos++
-                    j++
 
-            var j = 0
             val plen = len(parts[i])
 
-            while j < plen
+            for j in 0..<plen
                 buf[pos] = parts[i][j]
                 pos++
-                j++
 
             i++
 

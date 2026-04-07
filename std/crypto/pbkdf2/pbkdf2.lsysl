@@ -1,0 +1,149 @@
+std.crypto.pbkdf2 — PBKDF2-HMAC-SHA256
+========================================
+
+PBKDF2 key derivation as specified in RFC 2898, instantiated
+with HMAC-SHA256. Derives a 32-byte key from a password and
+salt using iterated hashing.
+
+Dependencies: std.crypto.hmac.
+
+
+    module std.crypto.pbkdf2
+
+    import std.crypto.hmac.{hmac_sha256}
+    import std.mem.{copy}
+
+
+Constants
+---------
+
+    val HASH_SIZE = 32
+
+
+pbkdf2_hmac_sha256
+------------------
+
+`pbkdf2_hmac_sha256(password, salt, iterations, out)` derives
+a 32-byte key and writes it to `out`.
+
+    pbkdf2_hmac_sha256(password: []byte, salt: []byte, iterations: int, out: []byte)
+        var U: [32]byte
+        var T: [32]byte
+
+        // Build salt || INT_32_BE(1)
+        val slen = len(salt)
+        val sbuf = (new [slen + 4]byte)[:]
+        copy(sbuf, salt)
+        sbuf[slen]     = 0u8
+        sbuf[slen + 1] = 0u8
+        sbuf[slen + 2] = 0u8
+        sbuf[slen + 3] = 1u8
+
+        // U1 = HMAC(password, salt || 1)
+        hmac_sha256(password, sbuf, U[:])
+        copy(T[:], U[:])
+
+        // U2..Uc: each round feeds U back through HMAC and XORs into T
+        for i in 1..<iterations
+            hmac_sha256(password, U[:], U[:])
+            for j in 0..<HASH_SIZE
+                T[j] ^= U[j]
+
+        copy(out, T[:])
+
+
+Tests
+=====
+
+    import std.debug.{assert}
+
+
+### PBKDF2 c=1
+
+    #test
+    test_pbkdf2_c1() -> void
+        val password: [8]byte = "password"
+        val salt: [4]byte = "salt"
+        var out: [32]byte
+        pbkdf2_hmac_sha256(password[:], salt[:], 1, out[:])
+
+        // 120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b
+        val expected: [32]byte = [0x12, 0x0f, 0xb6, 0xcf, 0xfc, 0xf8, 0xb3, 0x2c, 0x43, 0xe7, 0x22, 0x52, 0x56, 0xc4, 0xf8, 0x37, 0xa8, 0x65, 0x48, 0xc9, 0x2c, 0xcc, 0x35, 0x48, 0x08, 0x05, 0x98, 0x7c, 0xb7, 0x0b, 0xe1, 0x7b]
+
+        for i in 0..<32
+            assert(out[i] == expected[i], s"c=1 byte $i: got ${int(out[i])} want ${int(expected[i])}")
+
+
+### PBKDF2 c=2
+
+    #test
+    test_pbkdf2_c2() -> void
+        val password: [8]byte = "password"
+        val salt: [4]byte = "salt"
+        var out: [32]byte
+        pbkdf2_hmac_sha256(password[:], salt[:], 2, out[:])
+
+        // ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43
+        val expected: [32]byte = [0xae, 0x4d, 0x0c, 0x95, 0xaf, 0x6b, 0x46, 0xd3, 0x2d, 0x0a, 0xdf, 0xf9, 0x28, 0xf0, 0x6d, 0xd0, 0x2a, 0x30, 0x3f, 0x8e, 0xf3, 0xc2, 0x51, 0xdf, 0xd6, 0xe2, 0xd8, 0x5a, 0x95, 0x47, 0x4c, 0x43]
+
+        for i in 0..<32
+            assert(out[i] == expected[i], s"c=2 byte $i: got ${int(out[i])} want ${int(expected[i])}")
+
+
+### PBKDF2 short password and salt
+
+    #test
+    test_pbkdf2_short() -> void
+        val password: [4]byte = "pass"
+        val salt: [2]byte = "sa"
+        var out: [32]byte
+        pbkdf2_hmac_sha256(password[:], salt[:], 1, out[:])
+
+        // ee3128e0a8ed80ff7d38f46e7a97a2b0a33fc494189aedafcd812acc752f14ca
+        val expected: [32]byte = [0xee, 0x31, 0x28, 0xe0, 0xa8, 0xed, 0x80, 0xff, 0x7d, 0x38, 0xf4, 0x6e, 0x7a, 0x97, 0xa2, 0xb0, 0xa3, 0x3f, 0xc4, 0x94, 0x18, 0x9a, 0xed, 0xaf, 0xcd, 0x81, 0x2a, 0xcc, 0x75, 0x2f, 0x14, 0xca]
+
+        for i in 0..<32
+            assert(out[i] == expected[i], s"short byte $i: got ${int(out[i])} want ${int(expected[i])}")
+
+
+### PBKDF2 c=100
+
+    #test
+    test_pbkdf2_c100() -> void
+        val password: [8]byte = "password"
+        val salt: [4]byte = "salt"
+        var out: [32]byte
+        pbkdf2_hmac_sha256(password[:], salt[:], 100, out[:])
+
+        // 07e6997180cf7f12904f04100d405d34888fdf62af6d506a0ecc23b196fe99d8
+        val expected: [32]byte = [0x07, 0xe6, 0x99, 0x71, 0x80, 0xcf, 0x7f, 0x12, 0x90, 0x4f, 0x04, 0x10, 0x0d, 0x40, 0x5d, 0x34, 0x88, 0x8f, 0xdf, 0x62, 0xaf, 0x6d, 0x50, 0x6a, 0x0e, 0xcc, 0x23, 0xb1, 0x96, 0xfe, 0x99, 0xd8]
+
+        for i in 0..<32
+            assert(out[i] == expected[i], s"c=100 byte $i: got ${int(out[i])} want ${int(expected[i])}")
+
+
+### Determinism
+
+    #test
+    test_pbkdf2_deterministic() -> void
+        val password: [4]byte = "test"
+        val salt: [4]byte = "salt"
+        var out1: [32]byte
+        var out2: [32]byte
+        pbkdf2_hmac_sha256(password[:], salt[:], 10, out1[:])
+        pbkdf2_hmac_sha256(password[:], salt[:], 10, out2[:])
+
+        for i in 0..<32
+            assert(out1[i] == out2[i], "deterministic")
+
+
+Design notes
+------------
+
+**Single block output.** This implementation derives exactly
+one 32-byte block (block index = 1). For longer derived keys,
+the outer loop over block indices would be needed — deferred
+until there's a use case beyond password hashing.
+
+**Dynamic salt buffer.** The salt || INT_32_BE(1) buffer is
+dynamically allocated, so there is no salt size limit.

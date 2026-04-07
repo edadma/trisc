@@ -91,11 +91,9 @@ decreasing order according to `cmp`.
 
     is_sorted[T](s: []T, cmp: func(T, T) -> int) -> bool
         val n = len(s)
-        var i = 1
 
-        while i < n
+        for i in 1..<n
             if cmp(s[i - 1], s[i]) > 0 then return false
-            i++
 
         true
 

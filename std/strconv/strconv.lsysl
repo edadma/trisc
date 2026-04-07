@@ -191,7 +191,7 @@ never computed on a positive overflow path.
 
         if written > cap then return 0
 
-        for j = 0; j < written; j++ do dst[j] = tmp[i + j]
+        for j in 0..<written do dst[j] = tmp[i + j]
 
         written
 

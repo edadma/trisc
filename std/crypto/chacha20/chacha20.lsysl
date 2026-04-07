@@ -78,11 +78,8 @@ bbbb nnnn nnnn nnnn    (b = block counter, n = nonce)
         state[3] = 0x6b206574u32
 
         // key (8 words)
-        var i = 0
-
-        while i < 8
+        for i in 0..<8
             state[4 + i] = *(key + i)
-            i++
 
         // counter
         state[12] = counter
@@ -93,16 +90,11 @@ bbbb nnnn nnnn nnnn    (b = block counter, n = nonce)
         state[15] = *(nonce + 2)
 
         // copy state to working
-        i = 0
-
-        while i < 16
+        for i in 0..<16
             working[i] = state[i]
-            i++
 
         // 20 rounds (10 double rounds)
-        var r = 0
-
-        while r < 10
+        for r in 0..<10
             // column rounds
             quarter_round(&working[0], &working[4], &working[8],  &working[12])
             quarter_round(&working[1], &working[5], &working[9],  &working[13])
@@ -115,25 +107,17 @@ bbbb nnnn nnnn nnnn    (b = block counter, n = nonce)
             quarter_round(&working[2], &working[7], &working[8],  &working[13])
             quarter_round(&working[3], &working[4], &working[9],  &working[14])
 
-            r++
-
         // add original state
-        i = 0
-
-        while i < 16
+        for i in 0..<16
             working[i] = working[i] + state[i]
-            i++
 
         // serialize little-endian
-        i = 0
-
-        while i < 16
+        for i in 0..<16
             val v = working[i]
             *(out + i * 4)     = byte(v)
             *(out + i * 4 + 1) = byte(v >> 8)
             *(out + i * 4 + 2) = byte(v >> 16)
             *(out + i * 4 + 3) = byte(v >> 24)
-            i++
 
 
 Tests
@@ -173,11 +157,9 @@ Counter = 1.
         // RFC 7539 Appendix A.1 Test Vector #1
         // Key: all zeros, Nonce: all zeros, Counter: 0
         var key: [8]u32
-        var i = 0
 
-        while i < 8
+        for i in 0..<8
             key[i] = 0u32
-            i++
 
         var nonce: [3]u32
         nonce[0] = 0u32
@@ -188,24 +170,11 @@ Counter = 1.
 
         chacha20_block(&key[0], 0u32, &nonce[0], &out[0])
 
-        // Expected first 16 bytes:
-        // 76 b8 e0 ad a0 f1 3d 90 40 5d 6a e5 53 86 bd 28
-        assert(out[0]  == 0x76u8, "byte 0")
-        assert(out[1]  == 0xb8u8, "byte 1")
-        assert(out[2]  == 0xe0u8, "byte 2")
-        assert(out[3]  == 0xadu8, "byte 3")
-        assert(out[4]  == 0xa0u8, "byte 4")
-        assert(out[5]  == 0xf1u8, "byte 5")
-        assert(out[6]  == 0x3du8, "byte 6")
-        assert(out[7]  == 0x90u8, "byte 7")
-        assert(out[8]  == 0x40u8, "byte 8")
-        assert(out[9]  == 0x5du8, "byte 9")
-        assert(out[10] == 0x6au8, "byte 10")
-        assert(out[11] == 0xe5u8, "byte 11")
-        assert(out[12] == 0x53u8, "byte 12")
-        assert(out[13] == 0x86u8, "byte 13")
-        assert(out[14] == 0xbdu8, "byte 14")
-        assert(out[15] == 0x28u8, "byte 15")
+        // Expected first 16 bytes: 76 b8 e0 ad a0 f1 3d 90 40 5d 6a e5 53 86 bd 28
+        val expected: [16]byte = [0x76, 0xb8, 0xe0, 0xad, 0xa0, 0xf1, 0x3d, 0x90, 0x40, 0x5d, 0x6a, 0xe5, 0x53, 0x86, 0xbd, 0x28]
+
+        for i in 0..<16
+            assert(out[i] == expected[i], s"byte $i: got ${int(out[i])} want ${int(expected[i])}")
 
 
 ### Determinism — same inputs produce same output
@@ -233,11 +202,8 @@ Counter = 1.
         chacha20_block(&key[0], 0u32, &nonce[0], &out1[0])
         chacha20_block(&key[0], 0u32, &nonce[0], &out2[0])
 
-        var i = 0
-
-        while i < 64
+        for i in 0..<64
             assert(out1[i] == out2[i], "deterministic")
-            i++
 
 
 ### Different counters produce different output
@@ -245,11 +211,9 @@ Counter = 1.
     #test
     test_chacha20_different_counters() -> void
         var key: [8]u32
-        var i = 0
 
-        while i < 8
+        for i in 0..<8
             key[i] = u32(i)
-            i++
 
         var nonce: [3]u32
         nonce[0] = 0u32
@@ -264,11 +228,9 @@ Counter = 1.
 
         // At least one byte must differ
         var differs = false
-        i = 0
 
-        while i < 64
+        for i in 0..<64
             if out0[i] != out1[i] then differs = true
-            i++
 
         assert(differs, "different counters produce different output")
 

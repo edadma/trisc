@@ -1,0 +1,408 @@
+std.crypto.sha256 — SHA-256 hash function
+============================================
+
+SHA-256 as specified in FIPS 180-4. Produces a 256-bit
+(32-byte) hash from arbitrary-length input. Uses u32
+wrapping arithmetic throughout.
+
+Dependencies: none.
+
+
+    module std.crypto.sha256
+
+
+Constants
+---------
+
+First 32 bits of the fractional parts of the cube roots of
+the first 64 prime numbers.
+
+    val K: [64]u32 = [
+        0x428a2f98u32, 0x71374491u32, 0xb5c0fbcfu32, 0xe9b5dba5u32,
+        0x3956c25bu32, 0x59f111f1u32, 0x923f82a4u32, 0xab1c5ed5u32,
+        0xd807aa98u32, 0x12835b01u32, 0x243185beu32, 0x550c7dc3u32,
+        0x72be5d74u32, 0x80deb1feu32, 0x9bdc06a7u32, 0xc19bf174u32,
+        0xe49b69c1u32, 0xefbe4786u32, 0x0fc19dc6u32, 0x240ca1ccu32,
+        0x2de92c6fu32, 0x4a7484aau32, 0x5cb0a9dcu32, 0x76f988dau32,
+        0x983e5152u32, 0xa831c66du32, 0xb00327c8u32, 0xbf597fc7u32,
+        0xc6e00bf3u32, 0xd5a79147u32, 0x06ca6351u32, 0x14292967u32,
+        0x27b70a85u32, 0x2e1b2138u32, 0x4d2c6dfcu32, 0x53380d13u32,
+        0x650a7354u32, 0x766a0abbu32, 0x81c2c92eu32, 0x92722c85u32,
+        0xa2bfe8a1u32, 0xa81a664bu32, 0xc24b8b70u32, 0xc76c51a3u32,
+        0xd192e819u32, 0xd6990624u32, 0xf40e3585u32, 0x106aa070u32,
+        0x19a4c116u32, 0x1e376c08u32, 0x2748774cu32, 0x34b0bcb5u32,
+        0x391c0cb3u32, 0x4ed8aa4au32, 0x5b9cca4fu32, 0x682e6ff3u32,
+        0x748f82eeu32, 0x78a5636fu32, 0x84c87814u32, 0x8cc70208u32,
+        0x90befffau32, 0xa4506cebu32, 0xbef9a3f7u32, 0xc67178f2u32
+    ]
+
+
+Primitives
+----------
+
+    rotr(x: u32, n: u32) -> u32 = (x >> n) | (x << (32u32 - n))
+
+    ch(x: u32, y: u32, z: u32) -> u32 = (x & y) ^ (~x & z)
+
+    maj(x: u32, y: u32, z: u32) -> u32 = (x & y) ^ (x & z) ^ (y & z)
+
+    big_sigma0(x: u32) -> u32 = rotr(x, 2u32) ^ rotr(x, 13u32) ^ rotr(x, 22u32)
+
+    big_sigma1(x: u32) -> u32 = rotr(x, 6u32) ^ rotr(x, 11u32) ^ rotr(x, 25u32)
+
+    small_sigma0(x: u32) -> u32 = rotr(x, 7u32) ^ rotr(x, 18u32) ^ (x >> 3u32)
+
+    small_sigma1(x: u32) -> u32 = rotr(x, 17u32) ^ rotr(x, 19u32) ^ (x >> 10u32)
+
+
+process_block
+-------------
+
+Process a single 512-bit (64-byte) block, updating the
+8-word state.
+
+    process_block(state: []u32, block: []byte, off: int)
+        var w: [64]u32
+
+        // Load first 16 words (big-endian)
+        for i in 0..<16
+            val j = off + i * 4
+            w[i] = (u32(block[j]) << 24u32) | (u32(block[j + 1]) << 16u32) | (u32(block[j + 2]) << 8u32) | u32(block[j + 3])
+
+        // Expand to 64 words
+        for i in 16..<64
+            w[i] = small_sigma1(w[i - 2]) + w[i - 7] + small_sigma0(w[i - 15]) + w[i - 16]
+
+        // Working variables
+        var a = state[0]
+        var b = state[1]
+        var c = state[2]
+        var d = state[3]
+        var e = state[4]
+        var f = state[5]
+        var g = state[6]
+        var h = state[7]
+
+        // 64 rounds
+        for i in 0..<64
+            var t1: u32 = h + big_sigma1(e)
+            t1 = t1 + ch(e, f, g)
+            t1 = t1 + K[i]
+            t1 = t1 + w[i]
+            var t2: u32 = big_sigma0(a) + maj(a, b, c)
+
+            h = g
+            g = f
+            f = e
+            e = d + t1
+            d = c
+            c = b
+            b = a
+            a = t1 + t2
+
+        // Add working variables back to state
+        state[0] += a
+        state[1] += b
+        state[2] += c
+        state[3] += d
+        state[4] += e
+        state[5] += f
+        state[6] += g
+        state[7] += h
+
+
+sha256
+------
+
+`sha256(data, out)` hashes `data` and writes the 32-byte
+digest to `out`.
+
+    sha256(data: []byte, out: []byte)
+        var state: [8]u32
+        state[0] = 0x6a09e667u32
+        state[1] = 0xbb67ae85u32
+        state[2] = 0x3c6ef372u32
+        state[3] = 0xa54ff53au32
+        state[4] = 0x510e527fu32
+        state[5] = 0x9b05688cu32
+        state[6] = 0x1f83d9abu32
+        state[7] = 0x5be0cd19u32
+
+        val n = len(data)
+        var i = 0
+
+        // Process full 64-byte blocks
+        while i + 64 <= n
+            process_block(state[:], data, i)
+            i += 64
+
+        // Final block with padding
+        var block: [128]byte = ""
+        val rem = n - i
+
+        // Copy remainder
+        for j in 0..<rem
+            block[j] = data[i + j]
+
+        // Append 1-bit
+        block[rem] = 0x80u8
+
+        // Zero-fill between data and length
+        val total_bits: i64 = i64(n) * 8i64
+
+        if rem < 56
+            // Append length as big-endian 64-bit
+            for j in 0..<8
+                block[56 + j] = byte(total_bits >> i64(56 - j * 8))
+
+            process_block(state[:], block[:], 0)
+        else
+            // Pad rest of first block
+            for j in (rem + 1)..<64
+                block[j] = 0u8
+
+            process_block(state[:], block[:], 0)
+
+            // Second block: zeros + length
+            for j in 0..<56
+                block[j] = 0u8
+
+            for j in 0..<8
+                block[56 + j] = byte(total_bits >> i64(56 - j * 8))
+
+            process_block(state[:], block[:], 0)
+
+        // Output state as big-endian bytes
+        for i in 0..<8
+            val v = state[i]
+            out[i * 4]     = byte(v >> 24u32)
+            out[i * 4 + 1] = byte(v >> 16u32)
+            out[i * 4 + 2] = byte(v >> 8u32)
+            out[i * 4 + 3] = byte(v)
+
+
+Tests
+=====
+
+### Sigma functions
+
+    #test
+    test_small_sigma0() -> void
+        // σ0(0x61626380) = rotr(x,7) ^ rotr(x,18) ^ (x >> 3)
+        val x: u32 = 0x61626380u32
+        val r = small_sigma0(x)
+        // Manual: rotr(0x61626380, 7) = 0x00c2c4c7
+        // No wait, let me compute step by step via the test
+        val r7 = rotr(x, 7u32)
+        val r18 = rotr(x, 18u32)
+        val s3 = x >> 3u32
+        val manual = r7 ^ r18 ^ s3
+        assert(r == manual, s"sigma0 consistency: fn=${i64(r)} manual=${i64(manual)}")
+
+    #test
+    test_message_schedule_w16() -> void
+        // For "abc": w[0]=0x61626380, w[1..14]=0, w[15]=0x18
+        // w[16] = σ1(w[14]) + w[9] + σ0(w[1]) + w[0]
+        //       = σ1(0) + 0 + σ0(0) + 0x61626380
+        //       = 0 + 0 + 0 + 0x61626380 = 0x61626380
+        val w16 = small_sigma1(0u32) + 0u32 + small_sigma0(0u32) + 0x61626380u32
+        assert(w16 == 0x61626380u32, s"w16: got ${i64(w16)}")
+
+    #test
+    test_message_schedule_w17() -> void
+        // w[17] = σ1(w[15]) + w[10] + σ0(w[2]) + w[1]
+        //       = σ1(0x18) + 0 + σ0(0) + 0
+        //       = σ1(0x18)
+        val w17 = small_sigma1(0x00000018u32)
+        assert(w17 == 0x000F0000u32, s"w17: got ${i64(w17)}")
+
+
+### K constants integrity
+
+    #test
+    test_k_constants() -> void
+        val expected: [64]u32 = [0x428a2f98u32, 0x71374491u32, 0xb5c0fbcfu32, 0xe9b5dba5u32, 0x3956c25bu32, 0x59f111f1u32, 0x923f82a4u32, 0xab1c5ed5u32, 0xd807aa98u32, 0x12835b01u32, 0x243185beu32, 0x550c7dc3u32, 0x72be5d74u32, 0x80deb1feu32, 0x9bdc06a7u32, 0xc19bf174u32, 0xe49b69c1u32, 0xefbe4786u32, 0x0fc19dc6u32, 0x240ca1ccu32, 0x2de92c6fu32, 0x4a7484aau32, 0x5cb0a9dcu32, 0x76f988dau32, 0x983e5152u32, 0xa831c66du32, 0xb00327c8u32, 0xbf597fc7u32, 0xc6e00bf3u32, 0xd5a79147u32, 0x06ca6351u32, 0x14292967u32, 0x27b70a85u32, 0x2e1b2138u32, 0x4d2c6dfcu32, 0x53380d13u32, 0x650a7354u32, 0x766a0abbu32, 0x81c2c92eu32, 0x92722c85u32, 0xa2bfe8a1u32, 0xa81a664bu32, 0xc24b8b70u32, 0xc76c51a3u32, 0xd192e819u32, 0xd6990624u32, 0xf40e3585u32, 0x106aa070u32, 0x19a4c116u32, 0x1e376c08u32, 0x2748774cu32, 0x34b0bcb5u32, 0x391c0cb3u32, 0x4ed8aa4au32, 0x5b9cca4fu32, 0x682e6ff3u32, 0x748f82eeu32, 0x78a5636fu32, 0x84c87814u32, 0x8cc70208u32, 0x90befffau32, 0xa4506cebu32, 0xbef9a3f7u32, 0xc67178f2u32]
+        for i in 0..<64
+            assert(K[i] == expected[i], s"K[$i]: got ${i64(K[i])} want ${i64(expected[i])}")
+
+
+### SHA-256("") — empty string
+
+Expected:
+`e3b0c442 98fc1c14 9afbf4c8 996fb924 27ae41e4 649b934c a495991b 7852b855`
+
+    #test
+    test_sha256_empty() -> void
+        val empty: [0]byte = ""
+        var out: [32]byte
+        sha256(empty[:], out[:])
+
+        // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        val expected: [32]byte = [0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55]
+
+        for i in 0..<32
+            assert(out[i] == expected[i], s"byte $i: got ${int(out[i])} want ${int(expected[i])}")
+
+
+### SHA-256("abc")
+
+Expected:
+`ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad`
+
+    #test
+    test_sha256_abc() -> void
+        val msg: [3]byte = "abc"
+        var out: [32]byte
+        sha256(msg[:], out[:])
+
+        // ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad
+        val expected: [32]byte = [0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad]
+
+        for i in 0..<32
+            assert(out[i] == expected[i], s"byte $i: got ${int(out[i])} want ${int(expected[i])}")
+
+
+### Block loading verification
+
+    #test
+    test_block_loading_abc() -> void
+        var block: [128]byte = ""
+        block[0] = byte('a')
+        block[1] = byte('b')
+        block[2] = byte('c')
+        block[3] = 0x80u8
+        block[63] = 0x18u8
+
+        // Verify w[0] = 0x61626380
+        val w0 = (u32(block[0]) << 24u32) | (u32(block[1]) << 16u32) | (u32(block[2]) << 8u32) | u32(block[3])
+        assert(w0 == 0x61626380u32, s"w0: got ${i64(w0)}")
+
+        // Verify w[15] = 0x00000018
+        val w15 = (u32(block[60]) << 24u32) | (u32(block[61]) << 16u32) | (u32(block[62]) << 8u32) | u32(block[63])
+        assert(w15 == 0x00000018u32, s"w15: got ${i64(w15)}")
+
+        // Now hash this block and check state
+        var state: [8]u32
+        state[0] = 0x6a09e667u32
+        state[1] = 0xbb67ae85u32
+        state[2] = 0x3c6ef372u32
+        state[3] = 0xa54ff53au32
+        state[4] = 0x510e527fu32
+        state[5] = 0x9b05688cu32
+        state[6] = 0x1f83d9abu32
+        state[7] = 0x5be0cd19u32
+
+        process_block(state[:], block[:], 0)
+
+        // Expected: ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad
+        assert(state[0] == 0xba7816bfu32, s"state[0]: ${i64(state[0])}")
+        assert(state[1] == 0x8f01cfeau32, s"state[1]: ${i64(state[1])}")
+        assert(state[2] == 0x414140deu32, s"state[2]: ${i64(state[2])}")
+        assert(state[3] == 0x5dae2223u32, s"state[3]: ${i64(state[3])}")
+        assert(state[4] == 0xb00361a3u32, s"state[4]: ${i64(state[4])}")
+        assert(state[5] == 0x96177a9cu32, s"state[5]: ${i64(state[5])}")
+        assert(state[6] == 0xb410ff61u32, s"state[6]: ${i64(state[6])}")
+        assert(state[7] == 0xf20015adu32, s"state[7]: ${i64(state[7])}")
+
+
+### SHA-256("a") — single byte
+
+    #test
+    test_sha256_a() -> void
+        val msg: [1]byte = "a"
+        var out: [32]byte
+        sha256(msg[:], out[:])
+
+        // ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb
+        val expected: [32]byte = [0xca, 0x97, 0x81, 0x12, 0xca, 0x1b, 0xbd, 0xca, 0xfa, 0xc2, 0x31, 0xb3, 0x9a, 0x23, 0xdc, 0x4d, 0xa7, 0x86, 0xef, 0xf8, 0x14, 0x7c, 0x4e, 0x72, 0xb9, 0x80, 0x77, 0x85, 0xaf, 0xee, 0x48, 0xbb]
+
+        for i in 0..<32
+            assert(out[i] == expected[i], s"byte $i: got ${int(out[i])} want ${int(expected[i])}")
+
+
+### Determinism
+
+    #test
+    test_sha256_deterministic() -> void
+        val msg: [5]byte = "hello"
+
+        var out1: [32]byte
+        var out2: [32]byte
+        sha256(msg[:], out1[:])
+        sha256(msg[:], out2[:])
+
+        for i in 0..<32
+            assert(out1[i] == out2[i], "deterministic")
+
+
+### Different inputs produce different hashes
+
+    #test
+    test_sha256_different_inputs() -> void
+        val msg1: [1]byte = "a"
+        val msg2: [1]byte = "b"
+
+        var out1: [32]byte
+        var out2: [32]byte
+        sha256(msg1[:], out1[:])
+        sha256(msg2[:], out2[:])
+
+        var differs = false
+
+        for i in 0..<32
+            if out1[i] != out2[i] then differs = true
+
+        assert(differs, "different inputs differ")
+
+
+### SHA-256("hello") — full verification
+
+    #test
+    test_sha256_hello() -> void
+        val msg: [5]byte = "hello"
+        var out: [32]byte
+        sha256(msg[:], out[:])
+
+        // 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+        val expected: [32]byte = [0x2c, 0xf2, 0x4d, 0xba, 0x5f, 0xb0, 0xa3, 0x0e, 0x26, 0xe8, 0x3b, 0x2a, 0xc5, 0xb9, 0xe2, 0x9e, 0x1b, 0x16, 0x1e, 0x5c, 0x1f, 0xa7, 0x42, 0x5e, 0x73, 0x04, 0x33, 0x62, 0x93, 0x8b, 0x98, 0x24]
+
+        for i in 0..<32
+            assert(out[i] == expected[i], s"byte $i: got ${int(out[i])} want ${int(expected[i])}")
+
+
+### SHA-256 two-block message (56 bytes)
+
+The 448-bit test vector. The message is exactly 56 bytes,
+which forces the padding into a second block.
+
+    #test
+    test_sha256_two_block() -> void
+        val msg: [56]byte = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+        var out: [32]byte
+        sha256(msg[:], out[:])
+
+        // 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+        val expected: [32]byte = [0x24, 0x8d, 0x6a, 0x61, 0xd2, 0x06, 0x38, 0xb8, 0xe5, 0xc0, 0x26, 0x93, 0x0c, 0x3e, 0x60, 0x39, 0xa3, 0x3c, 0xe4, 0x59, 0x64, 0xff, 0x21, 0x67, 0xf6, 0xec, 0xed, 0xd4, 0x19, 0xdb, 0x06, 0xc1]
+
+        for i in 0..<32
+            assert(out[i] == expected[i], s"byte $i: got ${int(out[i])} want ${int(expected[i])}")
+
+
+Design notes
+------------
+
+**Big-endian word loading.** SHA-256 operates on 32-bit
+big-endian words, unlike ChaCha20 which uses little-endian.
+The `process_block` function converts bytes to u32 words
+at the input boundary.
+
+**Two-block final padding.** When the message remainder is
+56 bytes or more, the padding doesn't fit in one block.
+The code handles this by processing two consecutive blocks
+from a 128-byte buffer.
+
+**No streaming API.** The current interface hashes a
+contiguous byte buffer in one call. A streaming API
+(`sha256_init`/`sha256_update`/`sha256_finalize`) would
+allow incremental hashing. Deferred until there's a use
+case (e.g., hashing data from a slix file handle).

@@ -40,11 +40,8 @@ Searching
 
         if m > n then return false
 
-        var i = 0
-
-        while i < m
+        for i in 0..<m
             if s[i] != prefix[i] then return false
-            i++
 
         true
 
@@ -60,11 +57,8 @@ Searching
 
         if m > n then return false
 
-        var i = 0
-
-        while i < m
+        for i in 0..<m
             if s[n - m + i] != suffix[i] then return false
-            i++
 
         true
 
@@ -87,21 +81,16 @@ behavior is unchanged.
         if m > n then return -1
 
         val last = n - m
-        var i = 0
 
-        while i <= last
-            var j = 0
+        for i in 0..last
             var matched = true
 
-            while j < m
+            for j in 0..<m
                 if s[i + j] != sub[j]
                     matched = false
                     break
-                j++
 
             if matched then return i
-
-            i++
 
         -1
 
@@ -122,14 +111,12 @@ substring matches at position `len(s)`.
         var i = n - m
 
         while i >= 0
-            var j = 0
             var matched = true
 
-            while j < m
+            for j in 0..<m
                 if s[i + j] != sub[j]
                     matched = false
                     break
-                j++
 
             if matched then return i
 
@@ -162,14 +149,12 @@ byte boundary, including the ends).
         val last = len(s) - m
 
         while i <= last
-            var j = 0
             var matched = true
 
-            while j < m
+            for j in 0..<m
                 if s[i + j] != sub[j]
                     matched = false
                     break
-                j++
 
             if matched
                 n++
@@ -187,11 +172,9 @@ looking for a single character.
 
     index_byte(s: string, b: byte) -> int
         val n = len(s)
-        var i = 0
 
-        while i < n
+        for i in 0..<n
             if s[i] == b then return i
-            i++
 
         -1
 
@@ -216,11 +199,9 @@ indices are a bug.
 
     substring(s: string, lo: int, hi: int) -> string
         var b = new_builder_cap(hi - lo)
-        var i = lo
 
-        while i < hi
+        for i in lo..<hi
             b.write_byte(s[i])
-            i++
 
         b.to_str()
 
@@ -254,11 +235,9 @@ Helper: is the byte `b` present anywhere in `cutset`.
 
     in_cutset(b: byte, cutset: string) -> bool
         val n = len(cutset)
-        var i = 0
 
-        while i < n
+        for i in 0..<n
             if cutset[i] == b then return true
-            i++
 
         false
 
@@ -305,30 +284,24 @@ Non-ASCII bytes pass through unchanged.
     to_upper(s: string) -> string
         val n = len(s)
         var b = new_builder_cap(n)
-        var i = 0
 
-        while i < n
+        for i in 0..<n
             val c = s[i]
 
             if c >= byte('a') && c <= byte('z') then b.write_byte(c - 0x20u8)
             else b.write_byte(c)
-
-            i++
 
         b.to_str()
 
     to_lower(s: string) -> string
         val n = len(s)
         var b = new_builder_cap(n)
-        var i = 0
 
-        while i < n
+        for i in 0..<n
             val c = s[i]
 
             if c >= byte('A') && c <= byte('Z') then b.write_byte(c + 0x20u8)
             else b.write_byte(c)
-
-            i++
 
         b.to_str()
 
@@ -352,12 +325,9 @@ and at both ends, matching Go's behavior.
             // insert 'repl' between every byte and at both ends
             b.write(repl)
 
-            var i = 0
-
-            while i < n
+            for i in 0..<n
                 b.write_byte(s[i])
                 b.write(repl)
-                i++
 
             return b.to_str()
 
@@ -365,14 +335,12 @@ and at both ends, matching Go's behavior.
         val last = n - m
 
         while i <= last
-            var j = 0
             var matched = true
 
-            while j < m
+            for j in 0..<m
                 if s[i + j] != old[j]
                     matched = false
                     break
-                j++
 
             if matched
                 b.write(repl)
@@ -399,11 +367,9 @@ times. `repeat(s, 0)` returns `""`.
 
         val slen = len(s)
         var b = new_builder_cap(slen * n)
-        var i = 0
 
-        while i < n
+        for i in 0..<n
             b.write(s)
-            i++
 
         b.to_str()
 
@@ -426,11 +392,8 @@ empty strings in the result.
             val n = len(s)
             val parts = new [n]string
 
-            var i = 0
-
-            while i < n
+            for i in 0..<n
                 parts[i] = substring(s, i, i + 1)
-                i++
 
             return parts[:]
 
@@ -444,14 +407,12 @@ empty strings in the result.
         var i = 0
 
         while i <= last
-            var j = 0
             var matched = true
 
-            while j < m
+            for j in 0..<m
                 if s[i + j] != sep[j]
                     matched = false
                     break
-                j++
 
             if matched
                 parts[pi] = substring(s, start, i)
@@ -477,13 +438,11 @@ empty strings in the result.
         if n == 1 then return parts[0]
 
         var b = new_builder()
-        var i = 0
 
-        while i < n
+        for i in 0..<n
             if i > 0 then b.write(sep)
 
             b.write(parts[i])
-            i++
 
         b.to_str()
 

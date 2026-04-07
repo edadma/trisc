@@ -56,7 +56,7 @@ concatenation — have non-overlapping arguments by construction.
 
         if len(src) < n then n = len(src)
 
-        for i = 0; i < n; i++ do dst[i] = src[i]
+        for i in 0..<n do dst[i] = src[i]
 
         n
 
@@ -69,7 +69,7 @@ set
     set(dst: []byte, b: byte)
         val n = len(dst)
 
-        for i = 0; i < n; i++ do dst[i] = b
+        for i in 0..<n do dst[i] = b
 
 
 zero
@@ -96,7 +96,7 @@ bytes.
 
         if len(b) != n then return false
 
-        for i = 0; i < n; i++
+        for i in 0..<n
             if a[i] != b[i] then return false
 
         true
@@ -121,7 +121,7 @@ slice is a prefix of the other, the shorter slice sorts first.
 
         if nb < n then n = nb
 
-        for i = 0; i < n; i++
+        for i in 0..<n
             val ai: int = int(a[i])
             val bi: int = int(b[i])
 
@@ -145,7 +145,7 @@ indexing operator.
     index_byte(s: []byte, b: byte) -> int
         val n = len(s)
 
-        for i = 0; i < n; i++
+        for i in 0..<n
             if s[i] == b then return i
 
         -1
