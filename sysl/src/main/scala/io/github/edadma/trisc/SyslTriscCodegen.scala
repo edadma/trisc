@@ -29,6 +29,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     modulePrefix = program.decls.collectFirst { case TModuleDecl(path) => path.mkString("_") }.getOrElse("")
     needsStrInt = false
     needsStrFloat = false
+    globalConstants.clear()
 
     // Extract module path for unique label prefixing
     modulePrefix = program.decls.collectFirst { case TModuleDecl(path) => path.mkString("_") }.getOrElse("")
@@ -57,6 +58,9 @@ class SyslTriscCodegen(addresses: Int = 4):
       decl match
         case v @ TVarDecl(_, typ, init, _) =>
           globals(v.name) = typ
+          // Track constant values for cross-reference in other global initializers
+          constEval(init).foreach(n => globalConstants(v.name) = n)
+          floatConstEval(init).foreach(d => globalConstants(v.name) = java.lang.Double.doubleToRawLongBits(d))
           if isZeroInit(typ, init) then bssGlobals += v
           else dataGlobals += v
         case _ => // functions, externs, types — handled below
@@ -231,11 +235,16 @@ class SyslTriscCodegen(addresses: Int = 4):
     case SyslType.SliceType(_) => 8  // contains a pointer
     case _ => 8
 
+  // Map of global constant names to their evaluated values (populated during global processing)
+  private val globalConstants = new mutable.LinkedHashMap[String, Long]
+
   // Try to evaluate a constant expression at compile time.
   // Returns Some(value) for integer constants, None otherwise.
+  // Resolves TVarRef to previously evaluated global constants.
   private def constEval(expr: TExpr): Option[Long] = expr match
     case TIntLit(n, _) => Some(n)
     case TBoolLit(b, _) => Some(if b then 1 else 0)
+    case TVarRef(name, _) => globalConstants.get(name)
     case TUnary("-", operand, _) => constEval(operand).map(-_)
     case TUnary("~", operand, _) => constEval(operand).map(~_)
     case TBinary(left, "+", right, _) => for l <- constEval(left); r <- constEval(right) yield l + r
