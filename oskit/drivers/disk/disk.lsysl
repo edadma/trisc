@@ -25,16 +25,16 @@ where capacity is the number of 512-byte sectors.
     val DISK_CMD_WRITE    = 2
     val DISK_CMD_CAPACITY = 3
 
-Ramdisk hardware register layout. The driver talks directly
-to the memory-mapped ramdisk device.
+Ramdisk hardware register layout (aligned — word regs first).
+The driver talks directly to the memory-mapped ramdisk device.
 
-    val RD_BASE        = 0x100140
-    val RD_STATUS_OFF  = 0
-    val RD_COMMAND_OFF = 1
-    val RD_LBA_OFF     = 2
-    val RD_ADDR_OFF    = 6
-    val RD_COUNT_OFF   = 10
-    val RD_CAPACITY_OFF = 12
+    val RD_BASE     = 0x100140
+    val RD_LBA      = 0x100140      // +0:  u32, logical block address
+    val RD_ADDR     = 0x100144      // +4:  u32, memory address for DMA
+    val RD_CAPACITY = 0x100148      // +8:  u32, total sectors (read-only)
+    val RD_COUNT    = 0x10014C      // +12: u16, sector count
+    val RD_STATUS   = 0x10014E      // +14: byte, bit0=ready, bit1=error
+    val RD_COMMAND  = 0x10014F      // +15: byte, 1=read, 2=write (triggers op)
 
     val RD_CMD_READ  = 1
     val RD_CMD_WRITE = 2
@@ -46,45 +46,24 @@ Perform a raw block read from the ramdisk hardware.
 Reads one 512-byte sector at the given LBA into addr.
 
     disk_hw_read(lba: int, addr: i64)
-        var p: *byte = *byte(RD_BASE)
-        p[RD_LBA_OFF + 0] = (lba >> 24) & 0xFF
-        p[RD_LBA_OFF + 1] = (lba >> 16) & 0xFF
-        p[RD_LBA_OFF + 2] = (lba >> 8) & 0xFF
-        p[RD_LBA_OFF + 3] = lba & 0xFF
-        p[RD_ADDR_OFF + 0] = (addr >> 24) & 0xFF
-        p[RD_ADDR_OFF + 1] = (addr >> 16) & 0xFF
-        p[RD_ADDR_OFF + 2] = (addr >> 8) & 0xFF
-        p[RD_ADDR_OFF + 3] = addr & 0xFF
-        p[RD_COUNT_OFF + 0] = 0
-        p[RD_COUNT_OFF + 1] = 1
-        p[RD_COMMAND_OFF] = RD_CMD_READ
+        *(*u32(RD_LBA)) = u32(lba)
+        *(*u32(RD_ADDR)) = u32(addr)
+        *(*u16(RD_COUNT)) = 1u16
+        *(*byte(RD_COMMAND)) = RD_CMD_READ
 
 Perform a raw block write to the ramdisk hardware.
 Writes one 512-byte sector from addr to the given LBA.
 
     disk_hw_write(lba: int, addr: i64)
-        var p: *byte = *byte(RD_BASE)
-        p[RD_LBA_OFF + 0] = (lba >> 24) & 0xFF
-        p[RD_LBA_OFF + 1] = (lba >> 16) & 0xFF
-        p[RD_LBA_OFF + 2] = (lba >> 8) & 0xFF
-        p[RD_LBA_OFF + 3] = lba & 0xFF
-        p[RD_ADDR_OFF + 0] = (addr >> 24) & 0xFF
-        p[RD_ADDR_OFF + 1] = (addr >> 16) & 0xFF
-        p[RD_ADDR_OFF + 2] = (addr >> 8) & 0xFF
-        p[RD_ADDR_OFF + 3] = addr & 0xFF
-        p[RD_COUNT_OFF + 0] = 0
-        p[RD_COUNT_OFF + 1] = 1
-        p[RD_COMMAND_OFF] = RD_CMD_WRITE
+        *(*u32(RD_LBA)) = u32(lba)
+        *(*u32(RD_ADDR)) = u32(addr)
+        *(*u16(RD_COUNT)) = 1u16
+        *(*byte(RD_COMMAND)) = RD_CMD_WRITE
 
 Read the disk capacity (number of sectors) from hardware.
 
     disk_hw_capacity() -> int
-        var p: *byte = *byte(RD_BASE)
-        val b0 = p[RD_CAPACITY_OFF + 0] & 0xFF
-        val b1 = p[RD_CAPACITY_OFF + 1] & 0xFF
-        val b2 = p[RD_CAPACITY_OFF + 2] & 0xFF
-        val b3 = p[RD_CAPACITY_OFF + 3] & 0xFF
-        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+        int(*(*u32(RD_CAPACITY)))
 
 Parse a 4-byte big-endian integer from a message buffer.
 
