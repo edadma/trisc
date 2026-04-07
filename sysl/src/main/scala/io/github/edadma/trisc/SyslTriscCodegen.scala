@@ -450,12 +450,15 @@ class SyslTriscCodegen(addresses: Int = 4):
       val callerOffset = 16 + (nRegPushed - 1 - regIndex) * 8
       locals(param.name) = LocalVar(param.name, callerOffset, SyslType.I64)
     // Stack params: those beyond register capacity
-    // String params take 16 bytes on the caller stack, others take 8
+    // String and slice params take 16 bytes on the caller stack, others take 8
     val nUserStackStart = 1 - userParamRegStart
     var stackParamOffset = 16 + nRegPushed * 8
     for param <- fun.params.drop(nUserStackStart) do
       if param.typ == SyslType.StringType then
         locals(param.name) = LocalVar(param.name, stackParamOffset, SyslType.StringType)
+        stackParamOffset += 16
+      else if param.typ.isInstanceOf[SyslType.SliceType] then
+        locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
         stackParamOffset += 16
       else
         locals(param.name) = LocalVar(param.name, stackParamOffset, SyslType.I64)
@@ -1637,7 +1640,19 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  pshd r2")
             emit("  pshd r1")
             stackOffset -= 16
-          else if arg.typ.isInstanceOf[SyslType.EnumType] || arg.typ.isInstanceOf[SyslType.StructType] || arg.typ.isInstanceOf[SyslType.SliceType] then
+          else if arg.typ.isInstanceOf[SyslType.SliceType] then
+            // Slice stack arg: copy 16-byte {ptr, len+cap} inline, reclaim temp
+            emit("  ldd r2, r1, r0")       // r2 = data pointer (8 bytes)
+            emit("  addi r3, r1, 8")
+            emit("  ldd r3, r3, r0")       // r3 = len(4)+cap(4) packed as 8 bytes
+            val extra = preOffset - stackOffset
+            if extra > 0 then
+              emitAddImm(7, 7, extra)
+              stackOffset = preOffset
+            emit("  pshd r3")              // push len+cap
+            emit("  pshd r2")              // push ptr
+            stackOffset -= 16
+          else if arg.typ.isInstanceOf[SyslType.EnumType] || arg.typ.isInstanceOf[SyslType.StructType] then
             // Aggregate args: r1 is an address into our stack — do NOT reclaim the temp!
             emit("  pshd r1")
             stackOffset -= 8
@@ -1651,10 +1666,11 @@ class SyslTriscCodegen(addresses: Int = 4):
             stackOffset -= 8
 
         // With r1-only ABI, there's at most one register arg.
-        // If it's a string: pre-evaluate it FIRST (pushing 16-byte data above stack args),
-        // then push stack args, then push the string data address as the register arg.
+        // If it's a string or slice: pre-evaluate it FIRST (pushing data above stack args),
+        // then push stack args, then set r1 to address of the pre-pushed data.
+        // This ensures the temp data doesn't sit between callee's saved regs and stack args.
         val regArgOpt = allArgs.headOption.filter(_ => nRegArgs > 0)
-        var regStringDataOffset = 0 // fp-relative offset of pre-pushed string data
+        var regAggregateDataOffset = 0 // fp-relative offset of pre-pushed aggregate data
         regArgOpt.foreach { arg =>
           if arg.typ == SyslType.StringType then
             val preOffset = stackOffset
@@ -1678,7 +1694,13 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  pshd r2")            // push len
             emit("  pshd r1")            // push ptr
             stackOffset -= 16
-            regStringDataOffset = stackOffset
+            regAggregateDataOffset = stackOffset
+          else if arg.typ.isInstanceOf[SyslType.SliceType] || arg.typ.isInstanceOf[SyslType.StructType] || arg.typ.isInstanceOf[SyslType.EnumType] then
+            // Pre-evaluate aggregate register arg: genExpr produces a pointer to temp data on stack.
+            // We leave it in place so the pointer remains valid; record its offset for later.
+            genExpr(arg)
+            // r1 = pointer to the aggregate data on the stack (genExpr doesn't reclaim temp)
+            regAggregateDataOffset = stackOffset
         }
         // Push stack args (1+) right-to-left
         for arg <- stackArgs.reverse do
@@ -1687,7 +1709,10 @@ class SyslTriscCodegen(addresses: Int = 4):
         regArgOpt.foreach { arg =>
           if arg.typ == SyslType.StringType then
             // Address of the pre-pushed 16-byte string data (above stack args)
-            emitAddImm(1, 5, regStringDataOffset)
+            emitAddImm(1, 5, regAggregateDataOffset)
+          else if arg.typ.isInstanceOf[SyslType.SliceType] || arg.typ.isInstanceOf[SyslType.StructType] || arg.typ.isInstanceOf[SyslType.EnumType] then
+            // Address of the pre-pushed aggregate data (above stack args)
+            emitAddImm(1, 5, regAggregateDataOffset)
           else
             val preOffset = stackOffset
             arg match
@@ -1698,12 +1723,10 @@ class SyslTriscCodegen(addresses: Int = 4):
                 case _: TNew | _: TNewArray | _: TNewEnum =>
                 case _ => emitRefIncr(1, refHeaderOffset(rt))
               case _ =>
-            // Don't reclaim temp stack space for aggregate types — r1 is a pointer into that space
-            if !arg.typ.isInstanceOf[SyslType.EnumType] && !arg.typ.isInstanceOf[SyslType.StructType] && !arg.typ.isInstanceOf[SyslType.SliceType] then
-              val extra = preOffset - stackOffset
-              if extra > 0 then
-                emitAddImm(7, 7, extra)
-                stackOffset = preOffset
+            val extra = preOffset - stackOffset
+            if extra > 0 then
+              emitAddImm(7, 7, extra)
+              stackOffset = preOffset
           emit("  pshd r1")
           stackOffset -= 8
         }
@@ -1794,7 +1817,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  popd r2")        // r2 = index
         // Bounds check: 0 <= index < len
         emit("  addi r3, r1, 8")
-        emit("  ldw r3, r3, r0") // r3 = len (32-bit in slice struct) (i64 from fat pointer)
+        emit("  ldd r3, r3, r0") // r3 = len (i64 from string fat pointer {ptr(8), len(8)})
         emit("  slt r4, r2, r0") // r4 = (index < 0)
         val boundsOk = newLabel("bounds_ok")
         val boundsErr = newLabel("bounds_error")

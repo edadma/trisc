@@ -340,6 +340,306 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
     out shouldBe "ba7816bf"  // First 4 bytes of SHA-256("abc")
   }
 
+  "HMAC-SHA256 inner hash only" in {
+    // Manually compute the inner hash step of HMAC: SHA256(ipad || msg)
+    // key = "key" (3 bytes), msg = "msg" (3 bytes)
+    // k0 = "key" + 61 zero bytes
+    // ipad = k0 XOR 0x36 repeated
+    // inner = SHA256(ipad || msg) where ipad is 64 bytes and msg is 3 bytes
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import std.crypto.sha256.*
+        |import posix.stdlib.*
+        |
+        |main() -> int
+        |    // Build ipad: key XOR 0x36, padded to 64 bytes
+        |    var ipad: [67]byte  // 64 + 3 = 67 for ipad || msg
+        |    val key: [3]byte = "key"
+        |    for var i = 0; i < 3; i++
+        |        ipad[i] = key[i] ^ 0x36u8
+        |    for var i = 3; i < 64; i++
+        |        ipad[i] = 0x36u8
+        |    // Append msg
+        |    val msg: [3]byte = "msg"
+        |    ipad[64] = msg[0]
+        |    ipad[65] = msg[1]
+        |    ipad[66] = msg[2]
+        |    // SHA256(ipad || msg)
+        |    var inner: [32]byte
+        |    sha256(ipad[:], inner[:])
+        |    for var i = 0; i < 4; i++
+        |        val b = int(inner[i])
+        |        val hi = b >> 4
+        |        val lo = b & 0xF
+        |        if hi < 10
+        |            putchar(48 + hi)
+        |        else
+        |            putchar(87 + hi)
+        |        if lo < 10
+        |            putchar(48 + lo)
+        |        else
+        |            putchar(87 + lo)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    // Just check it runs and produces something non-zero
+    code shouldBe 0
+    out.length shouldBe 8
+  }
+
+  "HMAC-SHA256 inner hash via dynamic alloc" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import std.crypto.sha256.*
+        |import posix.stdlib.*
+        |
+        |main() -> int
+        |    val key: [3]byte = "key"
+        |    val msg: [3]byte = "msg"
+        |    // Build ipad
+        |    var ipad: [64]byte
+        |    for var i = 0; i < 3; i++
+        |        ipad[i] = key[i] ^ 0x36u8
+        |    for var i = 3; i < 64; i++
+        |        ipad[i] = 0x36u8
+        |    // Dynamic buffer like HMAC does
+        |    val inner_len = 64 + len(msg[:])
+        |    val inner_buf = (new [inner_len]byte)[:]
+        |    for i in 0..<64
+        |        inner_buf[i] = ipad[i]
+        |    for i in 0..<len(msg[:])
+        |        inner_buf[64 + i] = msg[i]
+        |    var inner: [32]byte
+        |    sha256(inner_buf, inner[:])
+        |    for var i = 0; i < 4; i++
+        |        val b = int(inner[i])
+        |        val hi = b >> 4
+        |        val lo = b & 0xF
+        |        if hi < 10
+        |            putchar(48 + hi)
+        |        else
+        |            putchar(87 + hi)
+        |        if lo < 10
+        |            putchar(48 + lo)
+        |        else
+        |            putchar(87 + lo)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    // Should match the inline version: cb143663
+    out shouldBe "cb143663"
+  }
+
+  "basic: new array + slice write" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import posix.stdlib.*
+        |
+        |main() -> int
+        |    val n = 10
+        |    val buf = (new [n]byte)[:]
+        |    buf[0] = 65u8
+        |    buf[1] = 66u8
+        |    putchar(int(buf[0]))
+        |    putchar(int(buf[1]))
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out shouldBe "AB"
+  }
+
+  "basic: new array + for-in write" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import posix.stdlib.*
+        |
+        |main() -> int
+        |    val n = 67
+        |    val buf = (new [n]byte)[:]
+        |    for i in 0..<67
+        |        buf[i] = 0x36u8
+        |    putchar(int(buf[0]) + 29)
+        |    putchar(int(buf[66]) + 29)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out shouldBe "SS"
+  }
+
+  "basic: new array + for-in write then sha256" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import std.crypto.sha256.*
+        |import posix.stdlib.*
+        |
+        |main() -> int
+        |    val n = 67
+        |    val buf = (new [n]byte)[:]
+        |    for i in 0..<67
+        |        buf[i] = 0x36u8
+        |    var hash: [32]byte
+        |    sha256(buf, hash[:])
+        |    putchar(65)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out shouldBe "A"
+  }
+
+  "basic: dynamic alloc in function with slice params" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import std.crypto.sha256.*
+        |import posix.stdlib.*
+        |
+        |do_hash(key: []byte, msg: []byte, out: []byte)
+        |    val inner_len = 64 + len(msg)
+        |    val inner_buf = (new [inner_len]byte)[:]
+        |    for i in 0..<64
+        |        inner_buf[i] = key[i % len(key)] ^ 0x36u8
+        |    for i in 0..<len(msg)
+        |        inner_buf[64 + i] = msg[i]
+        |    sha256(inner_buf, out)
+        |
+        |main() -> int
+        |    val key: [3]byte = "key"
+        |    val msg: [3]byte = "msg"
+        |    var hash: [32]byte
+        |    do_hash(key[:], msg[:], hash[:])
+        |    putchar(65)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out shouldBe "A"
+  }
+
+  "basic: two sha256 calls in one function" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import std.crypto.sha256.*
+        |import posix.stdlib.*
+        |
+        |do_hmac(key: []byte, msg: []byte, out: []byte)
+        |    // Step 1: build k0 (zero-padded key)
+        |    var k0: [64]byte
+        |    for var i = 0; i < 64; i++
+        |        k0[i] = 0u8
+        |    for i in 0..<len(key)
+        |        k0[i] = key[i]
+        |    // Step 2: ipad/opad
+        |    var ipad: [64]byte
+        |    var opad: [64]byte
+        |    for i in 0..<64
+        |        ipad[i] = k0[i] ^ 0x36u8
+        |        opad[i] = k0[i] ^ 0x5cu8
+        |    // Step 3: inner hash
+        |    val inner_len = 64 + len(msg)
+        |    val inner_buf = (new [inner_len]byte)[:]
+        |    for i in 0..<64
+        |        inner_buf[i] = ipad[i]
+        |    for i in 0..<len(msg)
+        |        inner_buf[64 + i] = msg[i]
+        |    var inner_hash: [32]byte
+        |    sha256(inner_buf, inner_hash[:])
+        |    // Step 4: outer hash
+        |    var outer_buf: [96]byte
+        |    for i in 0..<64
+        |        outer_buf[i] = opad[i]
+        |    for i in 0..<32
+        |        outer_buf[64 + i] = inner_hash[i]
+        |    sha256(outer_buf[:], out)
+        |
+        |main() -> int
+        |    val key: [3]byte = "key"
+        |    val msg: [3]byte = "msg"
+        |    var hash: [32]byte
+        |    do_hmac(key[:], msg[:], hash[:])
+        |    for var i = 0; i < 4; i++
+        |        val b = int(hash[i])
+        |        val hi = b >> 4
+        |        val lo = b & 0xF
+        |        if hi < 10
+        |            putchar(48 + hi)
+        |        else
+        |            putchar(87 + hi)
+        |        if lo < 10
+        |            putchar(48 + lo)
+        |        else
+        |            putchar(87 + lo)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    out shouldBe "2d93cbc1"
+  }
+
+  "basic: check inner hash inside function" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import std.crypto.sha256.*
+        |import posix.stdlib.*
+        |
+        |do_inner(key: []byte, msg: []byte, out: []byte)
+        |    var k0: [64]byte
+        |    for var i = 0; i < 64; i++
+        |        k0[i] = 0u8
+        |    for i in 0..<len(key)
+        |        k0[i] = key[i]
+        |    var ipad: [64]byte
+        |    for i in 0..<64
+        |        ipad[i] = k0[i] ^ 0x36u8
+        |    val inner_len = 64 + len(msg)
+        |    val inner_buf = (new [inner_len]byte)[:]
+        |    for i in 0..<64
+        |        inner_buf[i] = ipad[i]
+        |    for i in 0..<len(msg)
+        |        inner_buf[64 + i] = msg[i]
+        |    sha256(inner_buf, out)
+        |
+        |main() -> int
+        |    val key: [3]byte = "key"
+        |    val msg: [3]byte = "msg"
+        |    var hash: [32]byte
+        |    do_inner(key[:], msg[:], hash[:])
+        |    for var i = 0; i < 4; i++
+        |        val b = int(hash[i])
+        |        val hi = b >> 4
+        |        val lo = b & 0xF
+        |        if hi < 10
+        |            putchar(48 + hi)
+        |        else
+        |            putchar(87 + hi)
+        |        if lo < 10
+        |            putchar(48 + lo)
+        |        else
+        |            putchar(87 + lo)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    // Should match the inline version: cb143663
+    out shouldBe "cb143663"
+  }
+
+  "HMAC-SHA256 basic" in {
+    val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
+      """import std.crypto.hmac.*
+        |import posix.stdlib.*
+        |
+        |main() -> int
+        |    val key: [3]byte = "key"
+        |    val msg: [3]byte = "msg"
+        |    var out: [32]byte
+        |    hmac_sha256(key[:], msg[:], out[:])
+        |    for var i = 0; i < 4; i++
+        |        val b = int(out[i])
+        |        val hi = b >> 4
+        |        val lo = b & 0xF
+        |        if hi < 10
+        |            putchar(48 + hi)
+        |        else
+        |            putchar(87 + hi)
+        |        if lo < 10
+        |            putchar(48 + lo)
+        |        else
+        |            putchar(87 + lo)
+        |    0
+        |""".stripMargin))
+    info(s"Output: '$out', code: $code")
+    // Expected first 4 bytes of HMAC-SHA256("key", "msg") = 2d93cbc1
+    out shouldBe "2d93cbc1"
+  }
+
   "PBKDF2 c=1 matches JVM" in {
     val (code, out) = compileMultiAndRunOutput(cryptoSources(
       """import std.crypto.pbkdf2.*
