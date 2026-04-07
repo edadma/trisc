@@ -96,11 +96,9 @@ write
 
     StrBuilder.write(s: string)
         val n = len(s)
-        var i = 0
 
-        while i < n
+        for i in 0..<n
             self.buf = append(self.buf, s[i])
-            i++
 
 
 write_rune
@@ -114,11 +112,9 @@ Unicode replacement character (U+FFFD), matching
     StrBuilder.write_rune(r: char)
         val tmp = new [4]byte
         val n = encode_rune(tmp[:], r)
-        var i = 0
 
-        while i < n
+        for i in 0..<n
             self.buf = append(self.buf, tmp[i])
-            i++
 
 
 write_i64 / write_int
@@ -131,11 +127,9 @@ buffer, so no intermediate `string` is allocated.
     StrBuilder.write_i64(n: i64)
         val tmp = new [20]byte
         val written = format_i64_into(tmp[:], n)
-        var i = 0
 
-        while i < written
+        for i in 0..<written
             self.buf = append(self.buf, tmp[i])
-            i++
 
     StrBuilder.write_int(n: int)
         StrBuilder_write_i64(self, i64(n))

@@ -36,11 +36,8 @@ length and matching elements at every index.
 
         if len(b) != n then return false
 
-        var i = 0
-
-        while i < n
+        for i in 0..<n
             if a[i] != b[i] then return false
-            i++
 
         true
 
@@ -52,11 +49,8 @@ contains
 
     contains[T](s: []T, x: T) -> bool
         val n = len(s)
-        var i = 0
-
-        while i < n
+        for i in 0..<n
             if s[i] == x then return true
-            i++
 
         false
 
@@ -69,11 +63,8 @@ index
 
     index[T](s: []T, x: T) -> int
         val n = len(s)
-        var i = 0
-
-        while i < n
+        for i in 0..<n
             if s[i] == x then return i
-            i++
 
         -1
 
@@ -88,11 +79,8 @@ not affect the other.
     clone[T](s: []T) -> []T
         val n = len(s)
         val buf = new [n]T
-        var i = 0
-
-        while i < n
+        for i in 0..<n
             buf[i] = s[i]
-            i++
 
         buf[:]
 
@@ -106,11 +94,8 @@ reverse
     reverse[T](s: []T) -> []T
         val n = len(s)
         val buf = new [n]T
-        var i = 0
-
-        while i < n
+        for i in 0..<n
             buf[i] = s[n - 1 - i]
-            i++
 
         buf[:]
 
@@ -123,11 +108,8 @@ in-place mutation and modifies the caller's slice.
 
     fill[T](s: []T, x: T)
         val n = len(s)
-        var i = 0
-
-        while i < n
+        for i in 0..<n
             s[i] = x
-            i++
 
 
 concat
@@ -140,17 +122,11 @@ of `a` followed by the elements of `b`.
         val na = len(a)
         val nb = len(b)
         val buf = new [na + nb]T
-        var i = 0
-
-        while i < na
+        for i in 0..<na
             buf[i] = a[i]
-            i++
 
-        var j = 0
-
-        while j < nb
+        for j in 0..<nb
             buf[na + j] = b[j]
-            j++
 
         buf[:]
 
@@ -167,11 +143,9 @@ if `s` is empty — callers must guard against the empty case.
         if n == 0 then panic("std.slices.min: empty slice")
 
         var m: T = s[0]
-        var i = 1
 
-        while i < n
+        for i in 1..<n
             if s[i] < m then m = s[i]
-            i++
 
         m
 
@@ -188,11 +162,9 @@ on empty input.
         if n == 0 then panic("std.slices.max: empty slice")
 
         var m: T = s[0]
-        var i = 1
 
-        while i < n
+        for i in 1..<n
             if s[i] > m then m = s[i]
-            i++
 
         m
 

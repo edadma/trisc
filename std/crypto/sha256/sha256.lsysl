@@ -65,17 +65,13 @@ Process a single 512-bit (64-byte) block, updating the
         var w: [64]u32
 
         // Load first 16 words (big-endian)
-        var i = 0
-
-        while i < 16
+        for i in 0..<16
             val j = i * 4
             w[i] = (u32(block[j]) << 24u32) | (u32(block[j + 1]) << 16u32) | (u32(block[j + 2]) << 8u32) | u32(block[j + 3])
-            i++
 
         // Expand to 64 words
-        while i < 64
+        for i in 16..<64
             w[i] = small_sigma1(w[i - 2]) + w[i - 7] + small_sigma0(w[i - 15]) + w[i - 16]
-            i++
 
         // Working variables
         var a = *(state + 0)
@@ -88,9 +84,7 @@ Process a single 512-bit (64-byte) block, updating the
         var h = *(state + 7)
 
         // 64 rounds
-        i = 0
-
-        while i < 64
+        for i in 0..<64
             var t1: u32 = h + big_sigma1(e)
             t1 = t1 + ch(e, f, g)
             t1 = t1 + K[i]
@@ -105,7 +99,6 @@ Process a single 512-bit (64-byte) block, updating the
             c = b
             b = a
             a = t1 + t2
-            i++
 
         // Add working variables back to state
         *(state + 0) = *(state + 0) + a
@@ -147,11 +140,8 @@ sha256
         val rem = data_len - i
 
         // Copy remainder
-        var j = 0
-
-        while j < rem
+        for j in 0..<rem
             block[j] = *(data + i + j)
-            j++
 
         // Append 1-bit
         block[rem] = 0x80u8
@@ -160,56 +150,38 @@ sha256
         val total_bits: i64 = i64(data_len) * 8i64
 
         if rem < 56
-            j = rem + 1
-
-            while j < 56
+            for j in (rem + 1)..<56
                 block[j] = 0u8
-                j++
 
             // Append length as big-endian 64-bit
-            j = 0
-
-            while j < 8
+            for j in 0..<8
                 block[56 + j] = byte(total_bits >> i64(56 - j * 8))
-                j++
 
             process_block(&state[0], &block[0])
         else
             // Pad rest of first block
-            j = rem + 1
-
-            while j < 64
+            for j in (rem + 1)..<64
                 block[j] = 0u8
-                j++
 
             process_block(&state[0], &block[0])
 
             // Second block: zeros + length
-            j = 0
-
-            while j < 56
+            for j in 0..<56
                 block[j] = 0u8
-                j++
 
-            j = 0
-
-            while j < 8
+            for j in 0..<8
                 block[56 + j] = byte(total_bits >> i64(56 - j * 8))
-                j++
 
             process_block(&state[0], &block[0])
 
         // Output state as big-endian bytes
-        i = 0
-
-        while i < 8
+        for i in 0..<8
             val v = state[i]
             val p = out + i * 4
             *(p + 0) = byte(v >> 24u32)
             *(p + 1) = byte(v >> 16u32)
             *(p + 2) = byte(v >> 8u32)
             *(p + 3) = byte(v)
-            i++
 
 
 Tests
@@ -253,11 +225,8 @@ Tests
     #test
     test_k_constants() -> void
         val expected: [64]u32 = [0x428a2f98u32, 0x71374491u32, 0xb5c0fbcfu32, 0xe9b5dba5u32, 0x3956c25bu32, 0x59f111f1u32, 0x923f82a4u32, 0xab1c5ed5u32, 0xd807aa98u32, 0x12835b01u32, 0x243185beu32, 0x550c7dc3u32, 0x72be5d74u32, 0x80deb1feu32, 0x9bdc06a7u32, 0xc19bf174u32, 0xe49b69c1u32, 0xefbe4786u32, 0x0fc19dc6u32, 0x240ca1ccu32, 0x2de92c6fu32, 0x4a7484aau32, 0x5cb0a9dcu32, 0x76f988dau32, 0x983e5152u32, 0xa831c66du32, 0xb00327c8u32, 0xbf597fc7u32, 0xc6e00bf3u32, 0xd5a79147u32, 0x06ca6351u32, 0x14292967u32, 0x27b70a85u32, 0x2e1b2138u32, 0x4d2c6dfcu32, 0x53380d13u32, 0x650a7354u32, 0x766a0abbu32, 0x81c2c92eu32, 0x92722c85u32, 0xa2bfe8a1u32, 0xa81a664bu32, 0xc24b8b70u32, 0xc76c51a3u32, 0xd192e819u32, 0xd6990624u32, 0xf40e3585u32, 0x106aa070u32, 0x19a4c116u32, 0x1e376c08u32, 0x2748774cu32, 0x34b0bcb5u32, 0x391c0cb3u32, 0x4ed8aa4au32, 0x5b9cca4fu32, 0x682e6ff3u32, 0x748f82eeu32, 0x78a5636fu32, 0x84c87814u32, 0x8cc70208u32, 0x90befffau32, 0xa4506cebu32, 0xbef9a3f7u32, 0xc67178f2u32]
-        var i = 0
-
-        while i < 64
+        for i in 0..<64
             assert(K[i] == expected[i], s"K[$i]: got ${i64(K[i])} want ${i64(expected[i])}")
-            i++
 
 
 ### SHA-256("") — empty string
@@ -342,11 +311,8 @@ Expected:
         expected[30] = 0x15u8
         expected[31] = 0xadu8
 
-        var i = 0
-
-        while i < 32
+        for i in 0..<32
             assert(out[i] == expected[i], s"byte $i: got ${int(out[i])} want ${int(expected[i])}")
-            i++
 
 
 ### Block loading verification
@@ -356,11 +322,8 @@ Expected:
         var block: [128]byte
 
         // Zero ALL bytes first
-        var j = 0
-
-        while j < 64
+        for j in 0..<64
             block[j] = 0u8
-            j++
 
         block[0] = byte('a')
         block[1] = byte('b')
@@ -435,11 +398,8 @@ Expected:
         sha256(&msg[0], 5, &out1[0])
         sha256(&msg[0], 5, &out2[0])
 
-        var i = 0
-
-        while i < 32
+        for i in 0..<32
             assert(out1[i] == out2[i], "deterministic")
-            i++
 
 
 ### Different inputs produce different hashes
@@ -457,11 +417,9 @@ Expected:
         sha256(&msg2[0], 1, &out2[0])
 
         var differs = false
-        var i = 0
 
-        while i < 32
+        for i in 0..<32
             if out1[i] != out2[i] then differs = true
-            i++
 
         assert(differs, "different inputs differ")
 
@@ -515,11 +473,8 @@ Expected:
         expected[30] = 0x98u8
         expected[31] = 0x24u8
 
-        var i = 0
-
-        while i < 32
+        for i in 0..<32
             assert(out[i] == expected[i], s"byte $i: got ${int(out[i])} want ${int(expected[i])}")
-            i++
 
 
 ### SHA-256 two-block message (56 bytes)
@@ -532,11 +487,8 @@ which forces the padding into a second block.
         // "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq" = 56 bytes
         val s = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
         var msg: [56]byte
-        var j = 0
-
-        while j < 56
+        for j in 0..<56
             msg[j] = byte(s[j])
-            j++
 
         var out: [32]byte
         sha256(&msg[0], 56, &out[0])

@@ -114,35 +114,26 @@ Tests
     test_next_int_non_negative() -> void
         seed(123i64)
 
-        var i = 0
-
-        while i < 100
+        for i in 0..<100
             assert(next_int() >= 0, "non-negative")
-            i++
 
     #test
     test_next_range_bounds() -> void
         seed(456i64)
 
-        var i = 0
-
-        while i < 100
+        for i in 0..<100
             val r = next_range(10, 20)
             assert(r >= 10, "lower bound")
             assert(r < 20, "upper bound")
-            i++
 
     #test
     test_next_f64_bounds() -> void
         seed(789i64)
 
-        var i = 0
-
-        while i < 100
+        for i in 0..<100
             val r = next_f64()
             assert(r >= 0.0, "lower bound")
             assert(r < 1.0, "upper bound")
-            i++
 
     #test
     test_different_seeds_produce_different_sequences() -> void
@@ -175,11 +166,9 @@ Tests
 
         // All original elements should still be present
         var sum = 0
-        var i = 0
 
-        while i < 5
+        for i in 0..<5
             sum = sum + s[i]
-            i++
 
         assert(sum == 150, "sum preserved")
 
@@ -187,21 +176,17 @@ Tests
     test_shuffle_changes_order() -> void
         seed(42i64)
         val s = new [10]int
-        var i = 0
 
-        while i < 10
+        for i in 0..<10
             s[i] = i
-            i++
 
         shuffle(s[:])
 
         // Very unlikely that a 10-element shuffle produces identity
         var same = 0
-        i = 0
 
-        while i < 10
+        for i in 0..<10
             if s[i] == i then same++
-            i++
 
         assert(same < 10, "at least one element moved")
 
