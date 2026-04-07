@@ -26,16 +26,19 @@ where capacity is the number of 512-byte sectors.
     val DISK_CMD_CAPACITY = 3
 
 Ramdisk hardware register layout (aligned — word regs first).
-The driver talks directly to the memory-mapped ramdisk device.
+The struct maps 1:1 to the MMIO register block. COMMAND is
+last so that writing fields top-to-bottom naturally triggers
+the operation after all parameters are set.
 
-    val RD_BASE     = 0x100140
-    val RD_LBA      = 0x100140      // +0:  u32, logical block address
-    val RD_ADDR     = 0x100144      // +4:  u32, memory address for DMA
-    val RD_CAPACITY = 0x100148      // +8:  u32, total sectors (read-only)
-    val RD_COUNT    = 0x10014C      // +12: u16, sector count
-    val RD_STATUS   = 0x10014E      // +14: byte, bit0=ready, bit1=error
-    val RD_COMMAND  = 0x10014F      // +15: byte, 1=read, 2=write (triggers op)
+    struct RamdiskRegs
+        lba:      u32     // +0:  logical block address
+        addr:     u32     // +4:  memory address for DMA
+        capacity: u32     // +8:  total sectors (read-only)
+        count:    u16     // +12: sector count
+        status:   byte    // +14: bit0=ready, bit1=error
+        command:  byte    // +15: 1=read, 2=write (triggers op)
 
+    val RD_BASE = 0x100140
     val RD_CMD_READ  = 1
     val RD_CMD_WRITE = 2
 
@@ -46,24 +49,27 @@ Perform a raw block read from the ramdisk hardware.
 Reads one 512-byte sector at the given LBA into addr.
 
     disk_hw_read(lba: int, addr: i64)
-        *(*u32(RD_LBA)) = u32(lba)
-        *(*u32(RD_ADDR)) = u32(addr)
-        *(*u16(RD_COUNT)) = 1u16
-        *(*byte(RD_COMMAND)) = RD_CMD_READ
+        var rd: *RamdiskRegs = *RamdiskRegs(RD_BASE)
+        rd.lba = u32(lba)
+        rd.addr = u32(addr)
+        rd.count = 1u16
+        rd.command = RD_CMD_READ
 
 Perform a raw block write to the ramdisk hardware.
 Writes one 512-byte sector from addr to the given LBA.
 
     disk_hw_write(lba: int, addr: i64)
-        *(*u32(RD_LBA)) = u32(lba)
-        *(*u32(RD_ADDR)) = u32(addr)
-        *(*u16(RD_COUNT)) = 1u16
-        *(*byte(RD_COMMAND)) = RD_CMD_WRITE
+        var rd: *RamdiskRegs = *RamdiskRegs(RD_BASE)
+        rd.lba = u32(lba)
+        rd.addr = u32(addr)
+        rd.count = 1u16
+        rd.command = RD_CMD_WRITE
 
 Read the disk capacity (number of sectors) from hardware.
 
     disk_hw_capacity() -> int
-        int(*(*u32(RD_CAPACITY)))
+        var rd: *RamdiskRegs = *RamdiskRegs(RD_BASE)
+        int(rd.capacity)
 
 Parse a 4-byte big-endian integer from a message buffer.
 
