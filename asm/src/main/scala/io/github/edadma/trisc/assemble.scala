@@ -468,7 +468,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
               case 2 =>
                 value match
                   case _: DoubleExprAST => problem(d, "expected an int value, found float")
-                  case LongExprAST(v) if v.isValidShort =>
+                  case LongExprAST(v) if -32768 <= v && v <= 0xffffL =>
                     builder += (v >> 8).toByte
                     builder += v.toByte
                   case _ => problem(d, "expected a short value, out of range")
@@ -479,12 +479,12 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
                     builder.addReloc(RelocType.ABS32, builder.length, ref)
                     builder.addExtern(ref)
                     for _ <- 0 until 4 do builder += 0.toByte
-                  case LongExprAST(v) if v.isValidInt =>
+                  case LongExprAST(v) if -2147483648L <= v && v <= 0xffffffffL =>
                     builder += (v >> 24).toByte
                     builder += (v >> 16).toByte
                     builder += (v >> 8).toByte
                     builder += v.toByte
-                  case _ => problem(d, "expected a short value, out of range")
+                  case _ => problem(d, "expected a word value, out of range")
               case 8 =>
                 value match
                   case _: DoubleExprAST => problem(d, "expected an int value, found float")
@@ -853,8 +853,8 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         case result =>
           val imm = result match
             case _: DoubleExprAST                            => problem(o2, "immediate must be integral")
-            case LongExprAST(n) if 0 <= n && n <= 0x7fffffff => n.toInt
-            case _: LongExprAST                              => problem(o2, "immediate out of range")
+            case LongExprAST(n) if 0 <= n && n <= 0xffffffffL => n.toInt
+            case _: LongExprAST                               => problem(o2, "immediate out of range")
 
           addresses match
             case 1 => addInstruction(3 -> 7, 3 -> reg, 2 -> 0, 8 -> (imm & 0xff))

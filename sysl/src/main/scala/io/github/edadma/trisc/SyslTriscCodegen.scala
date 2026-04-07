@@ -1953,8 +1953,9 @@ class SyslTriscCodegen(addresses: Int = 4):
         // r1 = hidden return slot ptr (just above the pushed value)
         emitAddImm(1, 7, 8)
         // Call helper
-        if isFloat then emit("  movi r4, __str_float")
-        else emit("  movi r4, __str_int")
+        val mp = if modulePrefix.nonEmpty then s"_$modulePrefix" else ""
+        if isFloat then emit(s"  movi r4, __str_float$mp")
+        else emit(s"  movi r4, __str_int$mp")
         emit("  jalr r6, r4")
         // Clean value arg
         emitAddImm(7, 7, 8)
@@ -2923,9 +2924,10 @@ class SyslTriscCodegen(addresses: Int = 4):
   // ABI: r1 = hidden return slot ptr, [fp+24] = integer value
   // Returns: {ptr, len} written to return slot, r1 = return slot address
   private def emitStrIntHelper(): Unit =
-    emit("# helper: __str_int(value: int) -> string")
-    emit("global __str_int, func, 1 i64 i64")
-    emit("__str_int:")
+    val mp = if modulePrefix.nonEmpty then s"_$modulePrefix" else ""
+    emit(s"# helper: __str_int$mp(value: int) -> string")
+    emit(s"global __str_int$mp, func, 1 i64 i64")
+    emit(s"__str_int$mp:")
     // Pre-prologue: save register arg (hidden return ptr)
     emit("  pshd r1")
     // Prologue
@@ -3075,9 +3077,10 @@ class SyslTriscCodegen(addresses: Int = 4):
   // ABI: r1 = hidden return slot ptr, [fp+24] = f64 value (bits)
   // Returns: {ptr, len} written to return slot, r1 = return slot address
   private def emitStrFloatHelper(): Unit =
-    emit("# helper: __str_float(value: f64) -> string")
-    emit("global __str_float, func, 1 i64 i64")
-    emit("__str_float:")
+    val mp = if modulePrefix.nonEmpty then s"_$modulePrefix" else ""
+    emit(s"# helper: __str_float$mp(value: f64) -> string")
+    emit(s"global __str_float$mp, func, 1 i64 i64")
+    emit(s"__str_float$mp:")
     // Pre-prologue: save hidden return ptr
     emit("  pshd r1")
     // Prologue
