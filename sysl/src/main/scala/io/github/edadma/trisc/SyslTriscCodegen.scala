@@ -1695,11 +1695,28 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  pshd r1")            // push ptr
             stackOffset -= 16
             regAggregateDataOffset = stackOffset
-          else if arg.typ.isInstanceOf[SyslType.SliceType] || arg.typ.isInstanceOf[SyslType.StructType] || arg.typ.isInstanceOf[SyslType.EnumType] then
-            // Pre-evaluate aggregate register arg: genExpr produces a pointer to temp data on stack.
-            // We leave it in place so the pointer remains valid; record its offset for later.
+          else if arg.typ.isInstanceOf[SyslType.SliceType] then
+            // Pre-evaluate slice register arg: copy 16-byte struct to a known stack location.
+            // genExpr may return an address to a local (no stack alloc) or to temp data.
+            val preOffset = stackOffset
             genExpr(arg)
-            // r1 = pointer to the aggregate data on the stack (genExpr doesn't reclaim temp)
+            // r1 = address of 16-byte slice struct
+            emit("  ldd r2, r1, r0")       // r2 = data pointer
+            emit("  addi r3, r1, 8")
+            emit("  ldd r3, r3, r0")       // r3 = len+cap (8 bytes)
+            val extra = preOffset - stackOffset
+            if extra > 0 then
+              emitAddImm(7, 7, extra)
+              stackOffset = preOffset
+            emit("  pshd r3")              // push len+cap
+            emit("  pshd r2")              // push ptr
+            stackOffset -= 16
+            regAggregateDataOffset = stackOffset
+          else if arg.typ.isInstanceOf[SyslType.StructType] || arg.typ.isInstanceOf[SyslType.EnumType] then
+            // Pre-evaluate other aggregates: save the address on the stack.
+            genExpr(arg)
+            emit("  pshd r1")
+            stackOffset -= 8
             regAggregateDataOffset = stackOffset
         }
         // Push stack args (1+) right-to-left
@@ -1710,9 +1727,13 @@ class SyslTriscCodegen(addresses: Int = 4):
           if arg.typ == SyslType.StringType then
             // Address of the pre-pushed 16-byte string data (above stack args)
             emitAddImm(1, 5, regAggregateDataOffset)
-          else if arg.typ.isInstanceOf[SyslType.SliceType] || arg.typ.isInstanceOf[SyslType.StructType] || arg.typ.isInstanceOf[SyslType.EnumType] then
-            // Address of the pre-pushed aggregate data (above stack args)
+          else if arg.typ.isInstanceOf[SyslType.SliceType] then
+            // Address of the pre-pushed 16-byte slice data (above stack args)
             emitAddImm(1, 5, regAggregateDataOffset)
+          else if arg.typ.isInstanceOf[SyslType.StructType] || arg.typ.isInstanceOf[SyslType.EnumType] then
+            // Load the saved address from the stack (pushed as 8-byte pointer)
+            emitAddImm(2, 5, regAggregateDataOffset)
+            emit("  ldd r1, r2, r0")
           else
             val preOffset = stackOffset
             arg match
