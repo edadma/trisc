@@ -19,13 +19,30 @@ for std.crypto hash when available).
 
     extern nsh()
 
-Output helpers.
+Buffered output.
+
+    var login_out: [140]i8
+    var login_outpos = 0
+
+    login_flush()
+        if login_outpos > 0
+            tty_puts(login_out, login_outpos)
+            login_outpos = 0
 
     login_putc(ch: char)
-        tty_putc(ch)
+        if login_outpos >= 120
+            login_flush()
+        login_out[login_outpos] = i8(ch)
+        login_outpos += 1
 
     login_print(s: string)
-        tty_puts(*byte(s), len(s))
+        val p = *byte(s)
+        val n = len(s)
+        for var i = 0; i < n; i++
+            if login_outpos >= 120
+                login_flush()
+            login_out[login_outpos] = p[i]
+            login_outpos += 1
 
     login_newline()
         login_putc('\n')
@@ -48,11 +65,13 @@ If echo is false, characters are not echoed (for passwords).
                         login_putc(8)
                         login_putc(' ')
                         login_putc(8)
+                        login_flush()
             else if ch >= ' '
                 buf[blen] = i8(ch)
                 blen += 1
                 if echo != 0
                     login_putc(ch)
+                    login_flush()
         buf[blen] = 0
         blen
 
@@ -178,10 +197,12 @@ sets uid, and runs the shell. Loops on failure or when shell exits.
         while 1 == 1
             login_newline()
             login_print("login: ")
+            login_flush()
             val ulen = login_readline(user, 64, 1)
             if ulen == 0
                 continue
             login_print("password: ")
+            login_flush()
             val plen = login_readline(pass, 64, 0)
 
             // Look up user
@@ -189,12 +210,14 @@ sets uid, and runs the shell. Loops on failure or when shell exits.
             if uid < 0
                 sleep(3)
                 login_print("Login incorrect\n")
+                login_flush()
                 continue
 
             // Check password
             if check_shadow(user, ulen, pass, plen) == 0
                 sleep(3)
                 login_print("Login incorrect\n")
+                login_flush()
                 continue
 
             // Authenticated — set uid and run shell
