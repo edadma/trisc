@@ -25,13 +25,19 @@ class Ramdisk(
       TFS.format(sectorSize, sectors, maxInodes, fullLayout, files = files)
     else new Array[Byte](sectors * sectorSize)
 
-  // Register offsets
-  private val STATUS = 0 // 1 byte, R
-  private val COMMAND = 1 // 1 byte, W
-  private val LBA = 2 // 4 bytes, R/W
-  private val ADDR = 6 // 4 bytes, R/W
-  private val COUNT = 10 // 2 bytes, R/W
-  private val CAPACITY = 12 // 4 bytes, R
+  // Register offsets (word-aligned layout for struct access)
+  //   +0  LBA      (4B, R/W) — logical block address
+  //   +4  ADDR     (4B, R/W) — memory address for DMA
+  //   +8  CAPACITY (4B, R)   — total sectors
+  //   +12 COUNT    (2B, R/W) — sector count
+  //   +14 STATUS   (1B, R)   — bit0=ready, bit1=error
+  //   +15 COMMAND  (1B, W)   — 1=read, 2=write (triggers operation)
+  private val LBA = 0
+  private val ADDR = 4
+  private val CAPACITY = 8
+  private val COUNT = 12
+  private val STATUS = 14
+  private val COMMAND = 15
 
   // Commands
   private val CMD_READ = 0x01
@@ -49,39 +55,68 @@ class Ramdisk(
 
   def readByte(address: Long): Int =
     (address - base).toInt match
-      case STATUS => status
-      case 2      => (lba >> 24) & 0xff
-      case 3      => (lba >> 16) & 0xff
-      case 4      => (lba >> 8) & 0xff
-      case 5      => lba & 0xff
-      case 6      => (addr >> 24) & 0xff
-      case 7      => (addr >> 16) & 0xff
-      case 8      => (addr >> 8) & 0xff
-      case 9      => addr & 0xff
-      case 10     => (count >> 8) & 0xff
-      case 11     => count & 0xff
-      case 12     => (sectors >> 24) & 0xff
-      case 13     => (sectors >> 16) & 0xff
-      case 14     => (sectors >> 8) & 0xff
-      case 15     => sectors & 0xff
-      case _      => 0
+      case 0  => (lba >> 24) & 0xff
+      case 1  => (lba >> 16) & 0xff
+      case 2  => (lba >> 8) & 0xff
+      case 3  => lba & 0xff
+      case 4  => (addr >> 24) & 0xff
+      case 5  => (addr >> 16) & 0xff
+      case 6  => (addr >> 8) & 0xff
+      case 7  => addr & 0xff
+      case 8  => (sectors >> 24) & 0xff
+      case 9  => (sectors >> 16) & 0xff
+      case 10 => (sectors >> 8) & 0xff
+      case 11 => sectors & 0xff
+      case 12 => (count >> 8) & 0xff
+      case 13 => count & 0xff
+      case 14 => status
+      case _  => 0
 
   def writeByte(address: Long, data: Long): Unit =
     val b = (data & 0xff).toInt
     (address - base).toInt match
-      case COMMAND => execute(b)
-      case 2       => lba = (lba & 0x00ffffff) | (b << 24)
-      case 3       => lba = (lba & 0xff00ffff) | (b << 16)
-      case 4       => lba = (lba & 0xffff00ff) | (b << 8)
-      case 5       => lba = (lba & 0xffffff00) | b
-      case 6       => addr = (addr & 0x00ffffff) | (b << 24)
-      case 7       => addr = (addr & 0xff00ffff) | (b << 16)
-      case 8       => addr = (addr & 0xffff00ff) | (b << 8)
-      case 9       => addr = (addr & 0xffffff00) | b
-      case 10      => count = (count & 0x00ff) | (b << 8)
-      case 11      => count = (count & 0xff00) | b
-      case STATUS  => status = STATUS_READY // write to clear error
-      case _       =>
+      case 0  => lba = (lba & 0x00ffffff) | (b << 24)
+      case 1  => lba = (lba & 0xff00ffff) | (b << 16)
+      case 2  => lba = (lba & 0xffff00ff) | (b << 8)
+      case 3  => lba = (lba & 0xffffff00) | b
+      case 4  => addr = (addr & 0x00ffffff) | (b << 24)
+      case 5  => addr = (addr & 0xff00ffff) | (b << 16)
+      case 6  => addr = (addr & 0xffff00ff) | (b << 8)
+      case 7  => addr = (addr & 0xffffff00) | b
+      case 12 => count = (count & 0x00ff) | (b << 8)
+      case 13 => count = (count & 0xff00) | b
+      case 14 => status = STATUS_READY // write to clear error
+      case 15 => execute(b) // COMMAND — triggers operation
+      case _  =>
+
+  // Word-level access for struct pointer writes (stw/ldw)
+  override def writeInt(address: Long, data: Long): Unit =
+    val off = (address - base).toInt
+    val v = data.toInt
+    off match
+      case LBA  => lba = v
+      case ADDR => addr = v
+      case _ => super.writeInt(address, data) // fall back to byte-by-byte
+
+  override def readInt(address: Long): Int =
+    val off = (address - base).toInt
+    off match
+      case LBA      => lba
+      case ADDR     => addr
+      case CAPACITY => sectors
+      case _ => super.readInt(address)
+
+  override def writeShort(address: Long, data: Long): Unit =
+    val off = (address - base).toInt
+    off match
+      case COUNT => count = data.toInt & 0xffff
+      case _ => super.writeShort(address, data)
+
+  override def readShort(address: Long): Int =
+    val off = (address - base).toInt
+    off match
+      case COUNT => count
+      case _ => super.readShort(address)
 
   private def execute(cmd: Int): Unit =
     if count <= 0 || lba < 0 || lba + count > sectors then
