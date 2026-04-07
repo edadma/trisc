@@ -1124,6 +1124,7 @@ s = string(data[:5])      // string from []byte slice
 | `sbrk` | `(increment: i32) -> *i8` | Extend heap (POSIX) |
 | `panic` | `(msg: string) -> void` | Halt with message (trap 1, error code 4) |
 | `assert` | `(cond: bool, msg: string) -> void` | Panic with `msg` if `cond` is false |
+| `expect` | `(actual: i64, expected: i64, msg: string) -> void` | Panic with `"msg: expected N, got M"` if values differ |
 | `abort` | `()` | Terminate execution (trap 1, error code 3) |
 
 User-defined functions shadow builtins of the same name.
@@ -1294,6 +1295,9 @@ Exit code is 0 iff all tests pass. Failing tests print the source file and line 
 **Builtins useful in tests:**
 - `panic(msg: string) -> void` — halts with the given message. Primary failure signal inside tests.
 - `assert(cond: bool, msg: string) -> void` — panics with `msg` if `cond` is false; returns otherwise.
+- `expect(actual: i64, expected: i64, msg: string) -> void` — panics with `"msg: expected N, got M"` if values differ. Better diagnostics than `assert(a == b, ...)`.
+
+**Test output capture:** Any output from `print`, `println`, `puts`, or `puti` inside a test function is captured and displayed below the failure message if the test fails. This is useful for debugging intermediate values.
 
 ### `#deprecated` — warn on use
 

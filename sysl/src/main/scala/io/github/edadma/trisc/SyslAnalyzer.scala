@@ -137,6 +137,7 @@ class SyslAnalyzer:
     "abort" -> FunInfo("abort", Nil, VoidType),
     "panic" -> FunInfo("panic", List("msg" -> StringType), VoidType),
     "assert" -> FunInfo("assert", List("cond" -> BoolType, "msg" -> StringType), VoidType),
+    "expect" -> FunInfo("expect", List("actual" -> I64, "expected" -> I64, "msg" -> StringType), VoidType),
   )
 
   def registerImport(meta: ModuleMeta, selectors: List[ImportSelector] = List(WildcardImport)): Unit =
