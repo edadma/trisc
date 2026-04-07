@@ -564,6 +564,31 @@ class SyslAnalyzer:
     expr match
       case TIntLit(value, _) if target.isIntegral => TIntLit(value, target)
       case TIntLit(0, _) if target.isInstanceOf[PtrType] => TIntLit(0, target) // null pointer
+      // String literal → byte array: "hello" initializing [n]byte
+      case TStringLit(s, _) if target.isInstanceOf[ArrayType] =>
+        val ArrayType(elemType, size) = target: @unchecked
+        if elemType != U8 && elemType != I8 then
+          throw AnalysisError(s"cannot initialize [$size]$elemType from string literal (element type must be byte or i8)")
+        val bytes = s.getBytes("UTF-8")
+        if bytes.length > size then
+          throw AnalysisError(s"string literal has ${bytes.length} bytes but array has only $size elements")
+        val elems = bytes.map(b => TIntLit((b & 0xff).toLong, elemType)).toList ++
+          List.fill(size - bytes.length)(TIntLit(0L, elemType))
+        TArrayLit(elems, target)
+      // Array literal → byte array: ['h', 'e', 'l'] initializing [n]byte
+      case TArrayLit(elems, _) if target.isInstanceOf[ArrayType] =>
+        val ArrayType(elemType, size) = target: @unchecked
+        if (elemType == U8 || elemType == I8) && elems.forall(_.isInstanceOf[TIntLit]) then
+          if elems.length > size then
+            throw AnalysisError(s"array literal has ${elems.length} elements but target has only $size")
+          val coerced = elems.map { case TIntLit(v, _) =>
+            if v < 0 || v > 255 then
+              throw AnalysisError(s"value $v does not fit in a byte")
+            TIntLit(v, elemType)
+          case e => e }
+          val padded = coerced ++ List.fill(size - elems.length)(TIntLit(0L, elemType))
+          TArrayLit(padded, target)
+        else expr
       case _ => expr
 
   // Coerce integer literals to match the target's signedness only (preserving original width)
