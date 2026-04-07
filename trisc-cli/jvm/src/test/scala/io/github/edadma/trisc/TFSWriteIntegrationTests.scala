@@ -22,16 +22,16 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
          |    if ino == -1
          |        putchar(69)
          |        return 1
-         |    var data: [6]i8
+         |    var data: [6]byte
          |    data[0] = 72
          |    data[1] = 101
          |    data[2] = 108
          |    data[3] = 108
          |    data[4] = 111
          |    tfs_write(ino, &data, 0, 5)
-         |    var buf: [32]i8
+         |    var buf: [32]byte
          |    val n = tfs_read(ino, &buf, 0, 5)
-         |    val bp: *i8 = &buf
+         |    val bp: *byte = &buf
          |    var i = 0
          |    while i < n
          |        putchar(bp[i])
@@ -102,7 +102,7 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
          |    val dir_ino = tfs_create(1, &dirname, dirname_len, 2, 0x1ED)
          |${syslBytes("fname", "log")}
          |    val file_ino = tfs_create(dir_ino, &fname, fname_len, 1, 0x1A4)
-         |    var msg: [3]i8
+         |    var msg: [3]byte
          |    msg[0] = 79
          |    msg[1] = 75
          |    tfs_write(file_ino, &msg, 0, 2)
@@ -112,9 +112,9 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
          |        putchar(89)
          |    else
          |        putchar(78)
-         |    var buf: [8]i8
+         |    var buf: [8]byte
          |    tfs_read(found, &buf, 0, 2)
-         |    val bp: *i8 = &buf
+         |    val bp: *byte = &buf
          |    putchar(bp[0])
          |    putchar(bp[1])
          |    0
@@ -134,7 +134,7 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
          |    tfs_init()
          |${syslBytes("name", "sized")}
          |    val ino = tfs_create(1, &name, name_len, 1, 0x1A4)
-         |    var data: [4]i8
+         |    var data: [4]byte
          |    data[0] = 65
          |    data[1] = 66
          |    data[2] = 67
@@ -160,16 +160,16 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
          |    tfs_init()
          |${syslBytes("name", "ext")}
          |    val ino = tfs_create(1, &name, name_len, 1, 0x1A4)
-         |    var data: [4]i8
+         |    var data: [4]byte
          |    data[0] = 65
          |    data[1] = 66
          |    tfs_write(ino, &data, 0, 2)
          |    data[0] = 67
          |    data[1] = 68
          |    tfs_write(ino, &data, 2, 2)
-         |    var buf: [8]i8
+         |    var buf: [8]byte
          |    tfs_read(ino, &buf, 0, 4)
-         |    val bp: *i8 = &buf
+         |    val bp: *byte = &buf
          |    putchar(bp[0])
          |    putchar(bp[1])
          |    putchar(bp[2])
@@ -189,7 +189,7 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
          |    tfs_init()
          |${syslBytes("name", "ow")}
          |    val ino = tfs_create(1, &name, name_len, 1, 0x1A4)
-         |    var data: [8]i8
+         |    var data: [8]byte
          |    data[0] = 65
          |    data[1] = 66
          |    data[2] = 67
@@ -199,9 +199,9 @@ class TFSWriteIntegrationTests extends TFSTestHelpers {
          |    data[0] = 88
          |    data[1] = 89
          |    tfs_write(ino, &data, 1, 2)
-         |    var buf: [8]i8
+         |    var buf: [8]byte
          |    tfs_read(ino, &buf, 0, 5)
-         |    val bp: *i8 = &buf
+         |    val bp: *byte = &buf
          |    putchar(bp[0])
          |    putchar(bp[1])
          |    putchar(bp[2])

@@ -112,7 +112,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |    tfs_init()
          |${syslBytes("name", "old")}
          |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
-         |    var data: [4]i8
+         |    var data: [4]byte
          |    data[0] = 88
          |    tfs_write(ino, &data[0], 0, 1)
          |${syslBytes("newname", "new")}
@@ -127,9 +127,9 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |    if found == ino
          |        putchar(70)
          |    // Content preserved
-         |    var buf: [4]i8
+         |    var buf: [4]byte
          |    tfs_read(found, &buf[0], 0, 1)
-         |    val bp: *i8 = &buf[0]
+         |    val bp: *byte = &buf[0]
          |    putchar(bp[0])
          |    0
          |""".stripMargin,
@@ -148,7 +148,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |    tfs_init()
          |    // Root has: . .. dev etc tmp (from prefill)
          |    var ino = 0
-         |    var name: [15]i8
+         |    var name: [15]byte
          |    // Entry 0 should be .
          |    tfs_readdir(1, 0, &ino, &name[0])
          |    putchar(name[0])
@@ -180,7 +180,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |    tfs_init()
          |${syslBytes("name", "orig")}
          |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
-         |    var data: [4]i8
+         |    var data: [4]byte
          |    data[0] = 90
          |    tfs_write(ino, &data[0], 0, 1)
          |${syslBytes("link", "alias")}
@@ -198,9 +198,9 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |    if stat[1] == 2
          |        putchar(76)
          |    // Content accessible via link
-         |    var buf: [4]i8
+         |    var buf: [4]byte
          |    tfs_read(i2, &buf[0], 0, 1)
-         |    val bp: *i8 = &buf[0]
+         |    val bp: *byte = &buf[0]
          |    putchar(bp[0])
          |    0
          |""".stripMargin,
@@ -330,7 +330,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |    // Create a file with data — should use 1 inode + 1 block
          |${syslBytes("name", "f")}
          |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
-         |    var data: [4]i8
+         |    var data: [4]byte
          |    data[0] = 65
          |    tfs_write(ino, &data[0], 0, 1)
          |    val fb2 = tfs_freeblocks()
@@ -385,7 +385,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |    tfs_init()
          |${syslBytes("name", "big")}
          |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
-         |    var data: [8]i8
+         |    var data: [8]byte
          |    data[0] = 65
          |    data[1] = 66
          |    data[2] = 67
@@ -398,9 +398,9 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |    if stat[4] == 3
          |        putchar(83)
          |    // Read back — should only get 3 bytes
-         |    var buf: [8]i8
+         |    var buf: [8]byte
          |    val n = tfs_read(ino, &buf[0], 0, 10)
-         |    val bp: *i8 = &buf[0]
+         |    val bp: *byte = &buf[0]
          |    var i = 0
          |    while i < n
          |        putchar(bp[i])
@@ -420,7 +420,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |    tfs_init()
          |${syslBytes("name", "f")}
          |    val ino = tfs_create(1, &name[0], name_len, 1, 0x1A4)
-         |    var data: [4]i8
+         |    var data: [4]byte
          |    data[0] = 65
          |    tfs_write(ino, &data[0], 0, 1)
          |    tfs_truncate(ino, 0)

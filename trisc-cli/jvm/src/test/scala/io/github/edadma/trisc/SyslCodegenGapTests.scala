@@ -356,13 +356,13 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
     val (_, output) = runWithBoot(
       """extern putchar(ch: int)
         |
-        |emit(s: *i8)
+        |emit(s: *byte)
         |    var i = 0
         |    while s[i] != 0
         |        putchar(int(s[i]))
         |        i += 1
         |
-        |var buf: [4]i8
+        |var buf: [4]byte
         |
         |main() -> int
         |    buf[0] = 'H'
@@ -418,10 +418,10 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
     val ctypeSource = scala.io.Source.fromFile("posix/ctype/ctype.sysl").mkString
     val sbrkSource =
       s"""module posix.unistd
-         |var _heap: [4096]i8
-         |var _brk: *i8 = *i8(0)
+         |var _heap: [4096]byte
+         |var _brk: *byte = *byte(0)
          |var _brk_initialized = false
-         |sbrk(increment: int) -> *i8
+         |sbrk(increment: int) -> *byte
          |    if !_brk_initialized
          |        _brk = &_heap[0]
          |        _brk_initialized = true
@@ -454,13 +454,13 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
     val (_, output) = runWithBoot(
       """extern putchar(ch: int)
         |
-        |print(s: *i8)
+        |print(s: *byte)
         |    var i = 0
         |    while s[i] != 0
         |        putchar(int(s[i]))
         |        i += 1
         |
-        |var buf: [4]i8
+        |var buf: [4]byte
         |
         |main() -> int
         |    buf[0] = 'H'

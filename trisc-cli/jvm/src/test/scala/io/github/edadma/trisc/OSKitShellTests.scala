@@ -41,7 +41,7 @@ class OSKitShellTests extends OSKitTestHelpers {
         """import oskit.kernel.*
 import oskit.ipc.*
 import oskit.apps.*
-          |var _n: [2]i8
+          |var _n: [2]byte
           |
           |kernel_main() -> int
           |    _n[0] = 73
