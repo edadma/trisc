@@ -1777,7 +1777,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TDeref(inner, typ) =>
         genExpr(inner)           // r1 = pointer address
         typ match
-          case _: SyslType.StructType | _: SyslType.EnumType =>
+          case _: SyslType.StructType | _: SyslType.EnumType | _: SyslType.ArrayType =>
             () // aggregate: pointer IS the base address, don't load
           case _ =>
             emitLoad(1, 1, typ)  // scalar: load value at pointer

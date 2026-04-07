@@ -244,6 +244,17 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         throw RuntimeError(msg)
       IntVal(0)
     }),
+    "expect" -> (args => {
+      val actual = toLong(args.head)
+      val expected = toLong(args(1))
+      if actual != expected then
+        val label = args.lift(2) match
+          case Some(RefStringVal(bytes, len, _)) => new String(bytes, 0, len, "UTF-8")
+          case Some(StrVal(s)) => s
+          case _ => "expect"
+        throw RuntimeError(s"$label: expected $expected, got $actual")
+      IntVal(0)
+    }),
   )
 
   def registerBuiltins(extra: Map[String, List[Value] => Value]): Unit =
