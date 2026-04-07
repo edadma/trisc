@@ -204,14 +204,14 @@ writes (4 bytes per word) to avoid codegen issues with
         val base = 0x100160
         // Write 16 big-endian words to SHA_TEXT[0..15] as bytes
         for i in 0..<64
-            var p: *i8 = *i8(base + i)
-            *p = i8(block[off + i])
+            var p: *byte = *byte(base + i)
+            *p = byte(block[off + i])
         // Trigger compression (write last byte to fire trigger)
         if first != 0
-            var p: *i8 = *i8(base + 0x43)
+            var p: *byte = *byte(base + 0x43)
             *p = 1
         else
-            var p: *i8 = *i8(base + 0x47)
+            var p: *byte = *byte(base + 0x47)
             *p = 1
 
 Read the 8-word hash state from the accelerator's TEXT
@@ -220,7 +220,7 @@ registers into an output buffer.
     read_hw_state(out: []byte)
         val base = 0x100160
         for i in 0..<32
-            var p: *i8 = *i8(base + i)
+            var p: *byte = *byte(base + i)
             out[i] = byte(*p)
 
 `sha256_hw(data, out)` — same interface as `sha256()` but

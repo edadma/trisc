@@ -125,7 +125,7 @@ Server state.
 Low-level DrawEngine register access.
 
     ds_write8(offset: int, v: int)
-        p: *i8 = *i8(DRAW_ENGINE + offset)
+        p: *byte = *byte(DRAW_ENGINE + offset)
         *p = byte(v)
 
     ds_write16(offset: int, v: int)
@@ -133,7 +133,7 @@ Low-level DrawEngine register access.
         *p = i16(v)
 
     ds_read8(offset: int) -> int
-        p: *i8 = *i8(DRAW_ENGINE + offset)
+        p: *byte = *byte(DRAW_ENGINE + offset)
         int(*p) & 0xFF
 
     ds_exec(cmd: int)
@@ -156,7 +156,7 @@ Low-level DrawEngine register access.
     ds_target(surface: int)
         ds_write8(DE_TARGET, surface)
 
-    ds_set_title_buf(buf: *i8, len: int)
+    ds_set_title_buf(buf: *byte, len: int)
         var i = 0
         while i < len
             if i >= 31 then break
@@ -164,7 +164,7 @@ Low-level DrawEngine register access.
             i += 1
         ds_write8(DE_TITLE_BUF + i, 0)
 
-    ds_set_text_buf(buf: *i8, len: int)
+    ds_set_text_buf(buf: *byte, len: int)
         var i = 0
         while i < len
             if i >= 31 then break
@@ -177,7 +177,7 @@ Initialize the framebuffer via the display controller.
     ds_init_fb(width: int, height: int)
         ds_fb_width = width
         ds_fb_height = height
-        var dc: *i8 = *i8(DISPLAY_CTRL)
+        var dc: *byte = *byte(DISPLAY_CTRL)
         dc[0] = byte(1)
         dc[2] = byte(width >> 8)
         dc[3] = byte(width & 0xFF)
@@ -214,8 +214,8 @@ composite.
 Handle IPC messages from clients. Each command is parsed from
 the message buffer and translated to DrawEngine operations.
 
-    ds_handle_message(sender: int, buf: *i8, len: int)
-        var reply: [4]i8
+    ds_handle_message(sender: int, buf: *byte, len: int)
+        var reply: [4]byte
         reply[0] = 0  // status ok
         val cmd = int(buf[0]) & 0xFF
 
@@ -405,7 +405,7 @@ up the wallpaper, and enters the event loop.
         keyboard_set_notify(ds_tid)
 
         // Event loop
-        var buf: [128]i8
+        var buf: [128]byte
         while true
             val result = ipc_recv_notify(ds_port, &buf[0], 128)
             if result == -2
@@ -429,10 +429,10 @@ display server without knowing the IPC protocol details.
             ds_client_port = port_lookup("display")
         ds_client_port
 
-    ds_create_window(x: int, y: int, w: int, h: int, flags: int, title: *i8, title_len: int) -> int
+    ds_create_window(x: int, y: int, w: int, h: int, flags: int, title: *byte, title_len: int) -> int
         val port = ds_connect()
         if port < 0 then return -1
-        var msg: [64]i8
+        var msg: [64]byte
         msg[0] = byte(DS_CREATE_WINDOW)
         msg[1] = byte(x >> 8)
         msg[2] = byte(x & 0xFF)
@@ -448,26 +448,26 @@ display server without knowing the IPC protocol details.
             if i >= 53 then break
             msg[10 + i] = title[i]
             i += 1
-        var reply: [4]i8
+        var reply: [4]byte
         ipc_send(port, &msg[0], 10 + i, &reply[0], 4)
         int(reply[2]) & 0xFF  // surf_id (used for drawing into the window)
 
     ds_set_color(r: int, g: int, b: int, a: int)
         val port = ds_connect()
         if port < 0 then return
-        var msg: [8]i8
+        var msg: [8]byte
         msg[0] = byte(DS_SET_COLOR)
         msg[1] = byte(r)
         msg[2] = byte(g)
         msg[3] = byte(b)
         msg[4] = byte(a)
-        var reply: [2]i8
+        var reply: [2]byte
         ipc_send(port, &msg[0], 5, &reply[0], 2)
 
     ds_fill_rect(surf: int, x: int, y: int, w: int, h: int)
         val port = ds_connect()
         if port < 0 then return
-        var msg: [16]i8
+        var msg: [16]byte
         msg[0] = byte(DS_FILL_RECT)
         msg[1] = byte(surf)
         msg[2] = byte(x >> 8)
@@ -478,13 +478,13 @@ display server without knowing the IPC protocol details.
         msg[7] = byte(w & 0xFF)
         msg[8] = byte(h >> 8)
         msg[9] = byte(h & 0xFF)
-        var reply: [2]i8
+        var reply: [2]byte
         ipc_send(port, &msg[0], 10, &reply[0], 2)
 
-    ds_draw_text(surf: int, x: int, y: int, size: int, style: int, text: *i8, text_len: int)
+    ds_draw_text(surf: int, x: int, y: int, size: int, style: int, text: *byte, text_len: int)
         val port = ds_connect()
         if port < 0 then return
-        var msg: [64]i8
+        var msg: [64]byte
         msg[0] = byte(DS_DRAW_TEXT)
         msg[1] = byte(surf)
         msg[2] = byte(x >> 8)
@@ -499,31 +499,31 @@ display server without knowing the IPC protocol details.
             if i >= 54 then break
             msg[9 + i] = text[i]
             i += 1
-        var reply: [2]i8
+        var reply: [2]byte
         ipc_send(port, &msg[0], 9 + i, &reply[0], 2)
 
     ds_clear(surf: int)
         val port = ds_connect()
         if port < 0 then return
-        var msg: [4]i8
+        var msg: [4]byte
         msg[0] = byte(DS_CLEAR)
         msg[1] = byte(surf)
-        var reply: [2]i8
+        var reply: [2]byte
         ipc_send(port, &msg[0], 2, &reply[0], 2)
 
     ds_composite()
         val port = ds_connect()
         if port < 0 then return
-        var msg: [2]i8
+        var msg: [2]byte
         msg[0] = byte(DS_COMPOSITE)
-        var reply: [2]i8
+        var reply: [2]byte
         ipc_send(port, &msg[0], 1, &reply[0], 2)
 
     ds_get_key() -> int
         val port = ds_connect()
         if port < 0 then return 0
-        var msg: [2]i8
+        var msg: [2]byte
         msg[0] = byte(DS_GET_KEY)
-        var reply: [8]i8
+        var reply: [8]byte
         ipc_send(port, &msg[0], 1, &reply[0], 5)
         ((int(reply[1]) & 0xFF) << 24) | ((int(reply[2]) & 0xFF) << 16) | ((int(reply[3]) & 0xFF) << 8) | (int(reply[4]) & 0xFF)

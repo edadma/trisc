@@ -42,10 +42,10 @@ Reads all pending events from the device and buffers them.
 Does NOT context-switch -- returns to the interrupted thread.
 
     keyboard_handler()
-        var status: *i8 = *i8(KB_BASE)
-        var scancode: *i8 = *i8(KB_BASE + 1)
-        var flags: *i8 = *i8(KB_BASE + 2)
-        var mods: *i8 = *i8(KB_BASE + 3)
+        var status: *byte = *byte(KB_BASE)
+        var scancode: *byte = *byte(KB_BASE + 1)
+        var flags: *byte = *byte(KB_BASE + 2)
+        var mods: *byte = *byte(KB_BASE + 3)
         var got_events = 0
         while (*status & 1) != 0
             val sc = *scancode

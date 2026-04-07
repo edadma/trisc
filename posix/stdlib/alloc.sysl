@@ -23,30 +23,30 @@ private val SBRK_FAIL: i64 = -1
 
 // --- State ---
 
-private var free_lists: [8]*i8
-private var large_free: *i8 = *i8(0)
-private var heap_base: *i8 = *i8(0)
-private var heap_top: *i8 = *i8(0)
+private var free_lists: [8]*byte
+private var large_free: *byte = *byte(0)
+private var heap_base: *byte = *byte(0)
+private var heap_top: *byte = *byte(0)
 private var initialized = false
 
 // --- Block accessors ---
 
-private _get_header(block: *i8) -> i64
+private _get_header(block: *byte) -> i64
     val p: *i64 = *i64(i64(block))
 
     *p
 
-private _set_header(block: *i8, value: i64)
+private _set_header(block: *byte, value: i64)
     val p: *i64 = *i64(i64(block))
 
     *p = value
 
-private _set_footer(block: *i8, size: i64)
+private _set_footer(block: *byte, size: i64)
     val p: *i64 = *i64(i64(block) + size - FOOTER_SIZE)
 
     *p = size
 
-private _prev_footer(block: *i8) -> i64
+private _prev_footer(block: *byte) -> i64
     val p: *i64 = *i64(i64(block) - FOOTER_SIZE)
 
     *p
@@ -55,12 +55,12 @@ private _block_size(header: i64) -> i64 = header & ~ALLOC_FLAG
 
 private _is_alloc(header: i64) -> i64 = header & ALLOC_FLAG
 
-private _get_next(block: *i8) -> *i8
+private _get_next(block: *byte) -> *byte
     val p: *i64 = *i64(i64(block) + HEADER_SIZE)
 
-    *i8(*p)
+    *byte(*p)
 
-private _set_next(block: *i8, next: *i8)
+private _set_next(block: *byte, next: *byte)
     val p: *i64 = *i64(i64(block) + HEADER_SIZE)
 
     *p = i64(next)
@@ -81,7 +81,7 @@ private _size_class(size: i64) -> int
 
 // --- Free list operations ---
 
-private _add_to_free(block: *i8, size: i64)
+private _add_to_free(block: *byte, size: i64)
     _set_header(block, size)
     _set_footer(block, size)
 
@@ -94,7 +94,7 @@ private _add_to_free(block: *i8, size: i64)
         _set_next(block, large_free)
         large_free = block
 
-private _remove_from_free(block: *i8, size: i64)
+private _remove_from_free(block: *byte, size: i64)
     val cls = _size_class(size)
 
     if cls >= 0
@@ -133,20 +133,20 @@ private _ensure_init()
         if i64(brk) != SBRK_FAIL
             heap_base = brk
             heap_top = brk
-            large_free = *i8(0)
+            large_free = *byte(0)
 
             for var i = 0; i < NUM_CLASSES; i++
-                free_lists[i] = *i8(0)
+                free_lists[i] = *byte(0)
 
             initialized = true
 
 // --- POSIX API ---
 
 /* Allocate size bytes of memory. Returns pointer to allocated memory, or null. */
-malloc(size: i64) -> *i8
+malloc(size: i64) -> *byte
     _ensure_init()
 
-    if !initialized then return *i8(0)
+    if !initialized then return *byte(0)
 
     var total = size + HEADER_SIZE + FOOTER_SIZE
 
@@ -183,7 +183,7 @@ malloc(size: i64) -> *i8
 
     // Try large free list (first fit)
     if cls < 0
-        var prev: *i8 = *i8(0)
+        var prev: *byte = *byte(0)
         var cur = large_free
 
         while i64(cur) != 0
@@ -213,7 +213,7 @@ malloc(size: i64) -> *i8
     // Extend heap via sbrk
     val brk = sbrk(int(total))
 
-    if i64(brk) == SBRK_FAIL then return *i8(0)
+    if i64(brk) == SBRK_FAIL then return *byte(0)
 
     val block = brk
 
@@ -224,7 +224,7 @@ malloc(size: i64) -> *i8
     block + HEADER_SIZE
 
 /* Free a previously allocated pointer. */
-free(ptr: *i8)
+free(ptr: *byte)
     if i64(ptr) == 0 then return
 
     var block = ptr - HEADER_SIZE
@@ -256,12 +256,12 @@ free(ptr: *i8)
     _add_to_free(block, size)
 
 /* Reallocate a previously allocated pointer to a new size. */
-realloc(ptr: *i8, new_size: i64) -> *i8
+realloc(ptr: *byte, new_size: i64) -> *byte
     if i64(ptr) == 0 then return malloc(new_size)
 
     if new_size == 0
         free(ptr)
-        return *i8(0)
+        return *byte(0)
 
     val block = ptr - HEADER_SIZE
     val old_size = _block_size(_get_header(block))
@@ -287,7 +287,7 @@ realloc(ptr: *i8, new_size: i64) -> *i8
     // Need bigger block: alloc, copy, free
     val new_ptr = malloc(new_size)
 
-    if i64(new_ptr) == 0 then return *i8(0)
+    if i64(new_ptr) == 0 then return *byte(0)
 
     // Copy old payload (8 bytes at a time)
     var i: i64 = 0
@@ -303,7 +303,7 @@ realloc(ptr: *i8, new_size: i64) -> *i8
     new_ptr
 
 /* Allocate and zero-initialize memory for count elements of size bytes each. */
-calloc(count: i64, size: i64) -> *i8
+calloc(count: i64, size: i64) -> *byte
     val total = count * size
     val ptr = malloc(total)
 
