@@ -364,25 +364,27 @@ object SyslCli:
 
   private sealed trait TestOutcome
   private case object Pass extends TestOutcome
-  private case class Fail(msg: String) extends TestOutcome
+  private case class Fail(msg: String, output: String = "") extends TestOutcome
 
   private def runOneInterpreter(program: TProgram, stdlibImports: Set[String], t: DiscoveredTest): TestOutcome =
-    val interp = new SyslInterpreter(_ => ())
+    val outputBuf = new StringBuilder
+    val interp = new SyslInterpreter(s => outputBuf ++= s)
     wireStdlib(interp, stdlibImports)
     try interp.load(program)
     catch case e: Throwable => return Fail(s"test init failed: ${e.getMessage}")
+    val captured = outputBuf.toString
     try
       interp.runNamed(t.fn.name)
-      if t.shouldPanic then Fail("expected panic, got normal return") else Pass
+      if t.shouldPanic then Fail("expected panic, got normal return", captured) else Pass
     catch
       case e: RuntimeException if e.getClass.getSimpleName == "RuntimeError" =>
         val msg = Option(e.getMessage).getOrElse("")
-        if !t.shouldPanic then Fail(s"panic: $msg")
+        if !t.shouldPanic then Fail(s"panic: $msg", captured)
         else t.expectedMsg match
           case Some(substr) if !msg.contains(substr) =>
-            Fail(s"panic message did not contain '$substr' (got: $msg)")
+            Fail(s"panic message did not contain '$substr' (got: $msg)", captured)
           case _ => Pass
-      case e: Throwable => Fail(s"unexpected error: ${e.getClass.getSimpleName}: ${e.getMessage}")
+      case e: Throwable => Fail(s"unexpected error: ${e.getClass.getSimpleName}: ${e.getMessage}", captured)
 
   private def executeTest(cmd: TestCommand): Unit =
     if cmd.backend == "trisc" || cmd.backend == "all" then
@@ -473,11 +475,14 @@ object SyslCli:
         case Pass =>
           passed += 1
           println(f"  ✓ ${t.displayName}%-28s ($elapsedMs%.1fms)")
-        case Fail(msg) =>
+        case Fail(msg, output) =>
           failed += 1
           println(f"  ✗ ${t.displayName}%-28s ($elapsedMs%.1fms)")
           println(s"      $msg")
           t.line.foreach(l => println(s"      at ${t.unitName}:$l"))
+          if output.nonEmpty then
+            for line <- output.split("\n") do
+              println(s"      | $line")
           if cmd.failFast then stop = true
 
     val totalMs = (System.nanoTime() - totalStart) / 1e6
