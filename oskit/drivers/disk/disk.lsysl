@@ -50,9 +50,9 @@ Reads one 512-byte sector at the given LBA into addr.
 
     disk_hw_read(lba: int, addr: i64)
         var rd: *RamdiskRegs = *RamdiskRegs(RD_BASE)
-        rd.lba = u32(lba)
-        rd.addr = u32(addr)
-        rd.count = 1u16
+        rd.lba = lba
+        rd.addr = addr
+        rd.count = 1
         rd.command = RD_CMD_READ
 
 Perform a raw block write to the ramdisk hardware.
@@ -60,9 +60,9 @@ Writes one 512-byte sector from addr to the given LBA.
 
     disk_hw_write(lba: int, addr: i64)
         var rd: *RamdiskRegs = *RamdiskRegs(RD_BASE)
-        rd.lba = u32(lba)
-        rd.addr = u32(addr)
-        rd.count = 1u16
+        rd.lba = lba
+        rd.addr = addr
+        rd.count = 1
         rd.command = RD_CMD_WRITE
 
 Read the disk capacity (number of sectors) from hardware.
