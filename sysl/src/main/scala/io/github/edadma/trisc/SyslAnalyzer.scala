@@ -190,6 +190,18 @@ class SyslAnalyzer:
             externalSymbols += localKey
         case SymbolMeta.Kind.Struct(st) =>
           structTypes(shortName(sym.name)) = st
+        case SymbolMeta.Kind.Enum(et) =>
+          val sn = shortName(sym.name)
+          if et.variants.forall(_._2.isEmpty) then
+            // Simple enum (no data variants) — register as both simpleEnumTypes and enumTypes
+            simpleEnumTypes(sn) = et
+            val members = et.variants.zipWithIndex.map { case ((vname, _), idx) => (vname, idx.toLong) }.toMap
+            enumTypes(sn) = members
+          else
+            // Data enum — register in dataEnumTypes and variantToEnum
+            dataEnumTypes(sn) = et
+            for ((vname, _), idx) <- et.variants.zipWithIndex do
+              variantToEnum(vname) = (et, idx)
 
   def isExternal(name: String): Boolean = externalSymbols.contains(name)
   def externals: Set[String] = externalSymbols.toSet
