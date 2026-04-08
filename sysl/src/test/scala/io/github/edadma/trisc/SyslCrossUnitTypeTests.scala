@@ -156,4 +156,30 @@ class SyslCrossUnitTypeTests extends SyslTestHelpers {
         et.variants(1)._1 shouldBe "None"
       case _ => fail("expected Enum kind")
   }
+
+  // ===== Struct as field type across units =====
+
+  "imported struct used as field type" in {
+    evalWithLibs(
+      Map(
+        "mylib/types/types" ->
+          """module mylib.types
+            |struct Point
+            |    x: int
+            |    y: int
+            |""".stripMargin,
+      ),
+      """import mylib.types.*
+        |struct Line
+        |    start: Point
+        |    end_: Point
+        |
+        |main() -> int
+        |    var l: Line
+        |    l.start = Point(10, 20)
+        |    l.end_ = Point(30, 12)
+        |    l.start.x + l.end_.y
+        |""".stripMargin
+    ) shouldBe 22
+  }
 }
