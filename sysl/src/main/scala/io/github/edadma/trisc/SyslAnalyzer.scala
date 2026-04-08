@@ -165,7 +165,18 @@ class SyslAnalyzer:
       case named =>
         val nameMap = named.collect { case NamedImport(n, r) => (n, r) }.toMap
         // Match selectors against short names (without module prefix)
-        dedup(meta.publicSymbols.filter(sym => nameMap.contains(shortName(sym.name))))
+        // When a struct or enum is imported by name, also pull in its methods (StructName_method)
+        val directMatch = meta.publicSymbols.filter(sym => nameMap.contains(shortName(sym.name)))
+        val importedTypeNames = directMatch.collect {
+          case sym if sym.typ.isInstanceOf[SymbolMeta.Kind.Struct] => shortName(sym.name)
+          case sym if sym.typ.isInstanceOf[SymbolMeta.Kind.Enum] => shortName(sym.name)
+        }.toSet
+        val withMethods = if importedTypeNames.isEmpty then directMatch
+        else directMatch ++ meta.publicSymbols.filter { sym =>
+          sym.typ.isInstanceOf[SymbolMeta.Kind.Func] &&
+            importedTypeNames.exists(tn => shortName(sym.name).startsWith(s"${tn}_"))
+        }
+        dedup(withMethods)
     // Build alias map for renamed imports: alias -> original mangled name
     val aliasMap: Map[String, String] = selectors match
       case List(WildcardImport) => Map.empty

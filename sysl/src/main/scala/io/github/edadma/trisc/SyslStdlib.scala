@@ -106,6 +106,8 @@ object SyslStdlib:
       SymbolMeta("seek", SymbolMeta.Kind.Func(List(I32, I64, I32), I64), isPrivate = false),
       // Struct types
       SymbolMeta("ByteReader", SymbolMeta.Kind.Struct(SyslType.StructType("ByteReader", List(("data", SliceType(U8)), ("pos", I32)))), isPrivate = false),
+      // Methods
+      SymbolMeta("ByteReader_read", SymbolMeta.Kind.Func(List(PtrType(SyslType.StructType("ByteReader", List(("data", SliceType(U8)), ("pos", I32)))), SliceType(U8)), I32), isPrivate = false),
     ))
 
   private def ioBuiltins(ctx: StdlibContext): Map[String, List[Value] => Value] = Map(
