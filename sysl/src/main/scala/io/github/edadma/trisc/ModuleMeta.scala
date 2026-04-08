@@ -34,6 +34,12 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
           buf ++= s"${vis}ENUM ${sym.name} ${et.toPrefix}\n"
         case SymbolMeta.Kind.Interface(it) =>
           buf ++= s"${vis}IFACE ${sym.name} ${it.toPrefix}\n"
+    if genericTemplates.nonEmpty then
+      buf ++= "TEMPLATES\n"
+      for template <- genericTemplates do
+        buf ++= SyslPrettyPrinter.declToSource(template)
+        buf ++= "\n\n"
+      buf ++= "TEMPLATES_END\n"
     buf.toString
 
   def toAsmGlobals: String =
@@ -75,7 +81,7 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
 object ModuleMeta:
 
   /** Bump this whenever the .smeta format changes. Stale files are silently ignored. */
-  val SMETA_VERSION = 3
+  val SMETA_VERSION = 4
 
   def fromProgram(program: TProgram, sourceFile: Option[String] = None): ModuleMeta =
     val syms = program.decls.collect {
@@ -108,43 +114,68 @@ object ModuleMeta:
       var lineNum = 0
       var headerSeen = false
       var currentSource: Option[String] = None
+      var inTemplates = false
+      val templateBuf = new StringBuilder
 
       for rawLine <- source.linesIterator do
         lineNum += 1
-        val line = rawLine.trim
-        if line.nonEmpty then
-          if !headerSeen then
-            if !line.startsWith("SMETA") then break(None) // not a valid smeta file — treat as stale
-            val version = line.stripPrefix("SMETA").trim.stripPrefix("v").trim.toIntOption.getOrElse(0)
-            if version < SMETA_VERSION then break(None) // stale — caller should recompile from source
-            headerSeen = true
-          else if line.startsWith("SOURCE ") then
-            currentSource = Some(line.drop(7).trim)
+        if inTemplates then
+          if rawLine.trim == "TEMPLATES_END" then
+            inTemplates = false
           else
-            val (isPrivate, rest) = if line.startsWith("PRIVATE ") then (true, line.drop(8)) else (false, line)
-            val tokens = rest.split("\\s+").iterator
-            val kind = tokens.next()
-            val name = tokens.next()
-            kind match
-              case "FUNC" =>
-                val nparams = tokens.next().toInt
-                val params = (1 to nparams).map(_ => SyslType.parseType(tokens)).toList
-                val ret = SyslType.parseType(tokens)
-                syms += SymbolMeta(name, SymbolMeta.Kind.Func(params, ret), isPrivate, sourceFile = currentSource)
-              case "DATA" =>
-                val dataType = SyslType.parseType(tokens)
-                syms += SymbolMeta(name, SymbolMeta.Kind.Data(dataType), isPrivate, sourceFile = currentSource)
-              case "STRUCT" =>
-                val st = SyslType.parseType(tokens).asInstanceOf[SyslType.StructType]
-                syms += SymbolMeta(name, SymbolMeta.Kind.Struct(st), isPrivate, sourceFile = currentSource)
-              case "ENUM" =>
-                val et = SyslType.parseType(tokens).asInstanceOf[SyslType.EnumType]
-                syms += SymbolMeta(name, SymbolMeta.Kind.Enum(et), isPrivate, sourceFile = currentSource)
-              case "IFACE" =>
-                val it = SyslType.parseType(tokens).asInstanceOf[SyslType.InterfaceType]
-                syms += SymbolMeta(name, SymbolMeta.Kind.Interface(it), isPrivate, sourceFile = currentSource)
-              case other =>
-                throw IllegalArgumentException(s"line $lineNum: unknown symbol kind '$other'")
+            templateBuf ++= rawLine
+            templateBuf += '\n'
+        else
+          val line = rawLine.trim
+          if line.nonEmpty then
+            if !headerSeen then
+              if !line.startsWith("SMETA") then break(None) // not a valid smeta file — treat as stale
+              val version = line.stripPrefix("SMETA").trim.stripPrefix("v").trim.toIntOption.getOrElse(0)
+              if version < SMETA_VERSION then break(None) // stale — caller should recompile from source
+              headerSeen = true
+            else if line == "TEMPLATES" then
+              inTemplates = true
+            else if line.startsWith("SOURCE ") then
+              currentSource = Some(line.drop(7).trim)
+            else
+              val (isPrivate, rest) = if line.startsWith("PRIVATE ") then (true, line.drop(8)) else (false, line)
+              val tokens = rest.split("\\s+").iterator
+              val kind = tokens.next()
+              val name = tokens.next()
+              kind match
+                case "FUNC" =>
+                  val nparams = tokens.next().toInt
+                  val params = (1 to nparams).map(_ => SyslType.parseType(tokens)).toList
+                  val ret = SyslType.parseType(tokens)
+                  syms += SymbolMeta(name, SymbolMeta.Kind.Func(params, ret), isPrivate, sourceFile = currentSource)
+                case "DATA" =>
+                  val dataType = SyslType.parseType(tokens)
+                  syms += SymbolMeta(name, SymbolMeta.Kind.Data(dataType), isPrivate, sourceFile = currentSource)
+                case "STRUCT" =>
+                  val st = SyslType.parseType(tokens).asInstanceOf[SyslType.StructType]
+                  syms += SymbolMeta(name, SymbolMeta.Kind.Struct(st), isPrivate, sourceFile = currentSource)
+                case "ENUM" =>
+                  val et = SyslType.parseType(tokens).asInstanceOf[SyslType.EnumType]
+                  syms += SymbolMeta(name, SymbolMeta.Kind.Enum(et), isPrivate, sourceFile = currentSource)
+                case "IFACE" =>
+                  val it = SyslType.parseType(tokens).asInstanceOf[SyslType.InterfaceType]
+                  syms += SymbolMeta(name, SymbolMeta.Kind.Interface(it), isPrivate, sourceFile = currentSource)
+                case other =>
+                  throw IllegalArgumentException(s"line $lineNum: unknown symbol kind '$other'")
 
       if !headerSeen then None
-      else Some(new ModuleMeta(syms.toList))
+      else
+        // Parse generic templates from the TEMPLATES section
+        val templates = if templateBuf.nonEmpty then
+          val parser = new SyslParser
+          parser.parseProgram(templateBuf.toString) match
+            case Right(ast) =>
+              ast.decls.filter {
+                case StructDeclAST(_, _, tps, _)           => tps.nonEmpty
+                case DataEnumDeclAST(_, _, tps, _)         => tps.nonEmpty
+                case FunDeclAST(_, _, _, _, _, tps, _, _)   => tps.nonEmpty
+                case _                                      => false
+              }
+            case Left(_) => Nil // silently ignore parse failures in templates
+        else Nil
+        Some(new ModuleMeta(syms.toList, templates))

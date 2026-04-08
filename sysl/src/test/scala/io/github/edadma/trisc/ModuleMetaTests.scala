@@ -169,4 +169,146 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
   "fromSmeta returns None for stale version" in {
     ModuleMeta.fromSmeta("SMETA v1\nFUNC add 0 i32\n") shouldBe None
   }
+
+  // ===== Generic template round-trip through smeta =====
+
+  "round-trips generic data enum templates" in {
+    val source =
+      """enum Result[T, E]
+        |    Ok(value: T)
+        |    Err(error: E)
+        |
+        |main() -> int = 0
+        |""".stripMargin
+    val Right(ast) = (new SyslParser).parseProgram(source): @unchecked
+    val templates = ast.decls.filter {
+      case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
+      case _ => false
+    }
+    templates.length shouldBe 1
+    val meta = new ModuleMeta(Nil, templates)
+    val text = meta.toSmeta
+    text should include("TEMPLATES")
+    text should include("TEMPLATES_END")
+    text should include("enum Result[T, E]")
+    text should include("Ok(value: T)")
+    text should include("Err(error: E)")
+    val meta2 = ModuleMeta.fromSmeta(text).get
+    meta2.genericTemplates.length shouldBe 1
+    meta2.genericTemplates.head shouldBe a[DataEnumDeclAST]
+    val de = meta2.genericTemplates.head.asInstanceOf[DataEnumDeclAST]
+    de.name shouldBe "Result"
+    de.typeParams shouldBe List("T", "E")
+    de.variants.length shouldBe 2
+    de.variants(0).name shouldBe "Ok"
+    de.variants(1).name shouldBe "Err"
+  }
+
+  "round-trips generic struct templates" in {
+    val source =
+      """struct Pair[A, B]
+        |    first: A
+        |    second: B
+        |
+        |main() -> int = 0
+        |""".stripMargin
+    val Right(ast) = (new SyslParser).parseProgram(source): @unchecked
+    val templates = ast.decls.filter {
+      case StructDeclAST(_, _, tps, _) => tps.nonEmpty
+      case _ => false
+    }
+    templates.length shouldBe 1
+    val meta = new ModuleMeta(Nil, templates)
+    val text = meta.toSmeta
+    text should include("struct Pair[A, B]")
+    val meta2 = ModuleMeta.fromSmeta(text).get
+    meta2.genericTemplates.length shouldBe 1
+    val st = meta2.genericTemplates.head.asInstanceOf[StructDeclAST]
+    st.name shouldBe "Pair"
+    st.typeParams shouldBe List("A", "B")
+    st.fields.length shouldBe 2
+  }
+
+  "round-trips generic function templates" in {
+    val source =
+      """enum Option[T]
+        |    Some(value: T)
+        |    None
+        |
+        |unwrap[T](o: Option[T]) -> T
+        |    o match
+        |        Some(v) -> v
+        |        None -> panic("unwrap on None")
+        |
+        |main() -> int = 0
+        |""".stripMargin
+    val Right(ast) = (new SyslParser).parseProgram(source): @unchecked
+    val templates = ast.decls.filter {
+      case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
+      case FunDeclAST(_, _, _, _, _, tps, _, _) => tps.nonEmpty
+      case _ => false
+    }
+    templates.length shouldBe 2
+    val meta = new ModuleMeta(Nil, templates)
+    val text = meta.toSmeta
+    text should include("unwrap[T]")
+    val meta2 = ModuleMeta.fromSmeta(text).get
+    meta2.genericTemplates.length shouldBe 2
+    val funTemplate = meta2.genericTemplates.find(_.isInstanceOf[FunDeclAST]).get.asInstanceOf[FunDeclAST]
+    funTemplate.name shouldBe "unwrap"
+    funTemplate.typeParams shouldBe List("T")
+    funTemplate.params.length shouldBe 1
+  }
+
+  "smeta without templates has no TEMPLATES section" in {
+    val meta = ModuleMeta.fromProgram(analyze(
+      """main() -> int = 0
+        |""".stripMargin))
+    val text = meta.toSmeta
+    text should not include "TEMPLATES"
+  }
+
+  "generic templates usable after smeta round-trip" in {
+    // Build smeta with Result[T, E] template
+    val source =
+      """enum Result[T, E]
+        |    Ok(value: T)
+        |    Err(error: E)
+        |
+        |is_ok[T, E](r: Result[T, E]) -> bool
+        |    r match
+        |        Ok(_) -> true
+        |        Err(_) -> false
+        |
+        |main() -> int = 0
+        |""".stripMargin
+    val Right(ast) = (new SyslParser).parseProgram(source): @unchecked
+    val analyzer = new SyslAnalyzer
+    val typed = analyzer.analyze(ast)
+    val baseMeta = ModuleMeta.fromProgram(typed)
+    val templates = ast.decls.filter {
+      case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
+      case FunDeclAST(_, _, _, _, _, tps, _, _) => tps.nonEmpty
+      case _ => false
+    }
+    val meta = new ModuleMeta(baseMeta.symbols, templates)
+    val smetaText = meta.toSmeta
+    // Round-trip through text
+    val meta2 = ModuleMeta.fromSmeta(smetaText).get
+    meta2.genericTemplates.length shouldBe 2
+    // Now use meta2 to compile code that uses Result[int, string]
+    val userSource =
+      """import result.*
+        |
+        |test() -> int
+        |    val r: Result[int, string] = Ok(42)
+        |    r match
+        |        Ok(v) -> v
+        |        Err(_) -> 0
+        |""".stripMargin
+    val Right(userAst) = (new SyslParser).parseProgram(userSource): @unchecked
+    val userAnalyzer = new SyslAnalyzer
+    userAnalyzer.registerImport(meta2)
+    noException should be thrownBy userAnalyzer.analyze(userAst)
+  }
 }
