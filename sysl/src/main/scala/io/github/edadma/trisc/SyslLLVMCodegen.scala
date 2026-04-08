@@ -7,6 +7,10 @@ class SyslLLVMCodegen:
   private val stringConstants = new mutable.LinkedHashMap[String, (String, Int)] // value -> (label, byte length including null)
   private val structTypes = new mutable.LinkedHashMap[String, SyslType.StructType] // name -> struct type
   private val deinitFunctions = new mutable.HashMap[String, String] // struct name -> deinit function name
+  private var closureCounter = 0
+  private val pendingClosures = new mutable.ListBuffer[(String, TClosure)] // (name, closure)
+  private val funcWrappers = new mutable.LinkedHashMap[String, String] // original name -> wrapper name
+  private val pendingWrappers = new mutable.ListBuffer[(String, String, List[SyslType], SyslType)] // (wrapperName, origName, params, retType)
   private var stringCounter = 0
   private var regCounter = 0
   private var labelCounter = 0
@@ -42,6 +46,10 @@ class SyslLLVMCodegen:
     out.clear()
     stringConstants.clear()
     stringCounter = 0
+    closureCounter = 0
+    pendingClosures.clear()
+    pendingWrappers.clear()
+    funcWrappers.clear()
 
     // First pass: collect struct type definitions and deinit functions
     structTypes.clear()
@@ -77,6 +85,16 @@ class SyslLLVMCodegen:
           val initVal = constValue(init, typ)
           emit(s"@$name = global ${llvmType(typ)} $initVal")
     emit("")
+    // Generate pending closure functions and wrappers
+    while pendingClosures.nonEmpty || pendingWrappers.nonEmpty do
+      val closureBatch = pendingClosures.toList
+      pendingClosures.clear()
+      for (name, closure) <- closureBatch do
+        genClosureFunction(name, closure)
+      val wrapperBatch = pendingWrappers.toList
+      pendingWrappers.clear()
+      for (wn, origName, params, retType) <- wrapperBatch do
+        emitFuncWrapper(wn, origName, params, retType)
     val funcCode = out.toString
 
     // Now build final output with string constants at the top
@@ -109,6 +127,8 @@ class SyslLLVMCodegen:
 
     // Slice struct type: { ptr, len, cap }
     emit("%struct.slice = type { i8*, i32, i32 }")
+    // Closure struct type: { func_ptr, env_ptr }
+    emit("%struct.closure = type { i8*, i8* }")
     emit("")
 
     // Emit struct type definitions
@@ -180,6 +200,83 @@ class SyslLLVMCodegen:
     emit("")
     locals = null
     currentFunction = null
+
+  /** Generate a closure function with hidden env_ptr first parameter. */
+  private def genClosureFunction(name: String, closure: TClosure): Unit =
+    locals = new mutable.LinkedHashMap
+    regCounter = 0
+    labelCounter = 0
+    hasReturned = false
+    deferStack.clear()
+
+    val retLt = llvmType(closure.returnType)
+    val paramStrs = "i8* %env" +: closure.params.map(p => s"${llvmType(p.typ)} %${p.name}_arg")
+
+    emit(s"define $retLt @$name(${paramStrs.mkString(", ")}) {")
+    emit("entry:")
+
+    // Unpack captured variables from env
+    var offset = 0L
+    for (capName, capType) <- closure.captures do
+      val lt = llvmType(capType)
+      val envFieldPtr = newReg()
+      emit(s"  $envFieldPtr = getelementptr i8, i8* %env, i64 $offset")
+      val typedPtr = newReg()
+      emit(s"  $typedPtr = bitcast i8* $envFieldPtr to $lt*")
+      if isAggregate(capType) then
+        locals(capName) = LocalVar(capName, typedPtr, capType)
+      else
+        val alloca = newReg()
+        emit(s"  $alloca = alloca $lt")
+        val v = newReg()
+        emit(s"  $v = load $lt, $lt* $typedPtr")
+        emit(s"  store $lt $v, $lt* $alloca")
+        locals(capName) = LocalVar(capName, alloca, capType)
+      offset += llvmSizeOf(capType)
+
+    // Allocate and store regular parameters
+    for param <- closure.params do
+      val lt = llvmType(param.typ)
+      val alloca = newReg()
+      emit(s"  $alloca = alloca $lt")
+      emit(s"  store $lt %${param.name}_arg, $lt* $alloca")
+      locals(param.name) = LocalVar(param.name, alloca, param.typ)
+
+    // Generate body
+    closure.body match
+      case TExprBody(expr) =>
+        val result = genExpr(expr)
+        val rt = exprType(expr)
+        val finalVal = if isAggregate(expr.typ) then
+          val loaded = newReg()
+          emit(s"  $loaded = load $retLt, $retLt* $result")
+          loaded
+        else emitSextIfNeeded(result, rt, retLt)
+        emitReleaseRefs()
+        emit(s"  ret $retLt $finalVal")
+      case TBlockBody(stmts) =>
+        genBlock(stmts, retLt)
+
+    emit("}")
+    emit("")
+    locals = null
+
+  /** Generate a wrapper function that adapts a plain function to the closure ABI (env as first param). */
+  private def emitFuncWrapper(wrapperName: String, origName: String, params: List[SyslType], retType: SyslType): Unit =
+    val retLt = llvmType(retType)
+    val paramNames = params.zipWithIndex.map((_, i) => s"%p$i")
+    val paramStrs = "i8* %env" +: params.zip(paramNames).map((t, n) => s"${llvmType(t)} $n")
+    emit(s"define $retLt @$wrapperName(${paramStrs.mkString(", ")}) {")
+    emit("entry:")
+    val argStr = params.zip(paramNames).map((t, n) => s"${llvmType(t)} $n").mkString(", ")
+    if retLt == "void" then
+      emit(s"  call void @$origName($argStr)")
+      emit("  ret void")
+    else
+      emit(s"  %r = call $retLt @$origName($argStr)")
+      emit(s"  ret $retLt %r")
+    emit("}")
+    emit("")
 
   private def genBlock(stmts: List[TStmt], retType: String): Unit =
     if stmts.nonEmpty then
@@ -1263,20 +1360,101 @@ class SyslLLVMCodegen:
           r
         else "0"
 
-      // ===== Function pointers =====
+      // ===== Function pointers and closures =====
 
       case TFuncRef(name, typ) =>
-        val funcType = typ match
+        // Build a %struct.closure { wrapper_func_ptr, null }
+        val wrapperName = funcWrappers.getOrElseUpdate(name, {
+          val wn = s"__wrap_$name"
+          typ match
+            case SyslType.FuncType(params, retType) =>
+              pendingWrappers += ((wn, name, params, retType))
+            case _ =>
+          wn
+        })
+        val alloca = newReg()
+        emit(s"  $alloca = alloca %struct.closure")
+        // Store func ptr
+        val fpGep = newReg()
+        emit(s"  $fpGep = getelementptr %struct.closure, %struct.closure* $alloca, i32 0, i32 0")
+        val fpCast = newReg()
+        typ match
           case SyslType.FuncType(params, retType) =>
-            val paramStr = params.map(llvmType).mkString(", ")
-            s"${llvmType(retType)} ($paramStr)"
-          case _ => "i8"
-        val r = newReg()
-        emit(s"  $r = bitcast $funcType* @$name to i8*")
-        r
+            val paramStr = ("i8*" +: params.map(llvmType)).mkString(", ")
+            emit(s"  $fpCast = bitcast ${llvmType(retType)} ($paramStr)* @$wrapperName to i8*")
+          case _ =>
+            emit(s"  $fpCast = bitcast i8* null to i8*")
+        emit(s"  store i8* $fpCast, i8** $fpGep")
+        // Store null env
+        val envGep = newReg()
+        emit(s"  $envGep = getelementptr %struct.closure, %struct.closure* $alloca, i32 0, i32 1")
+        emit(s"  store i8* null, i8** $envGep")
+        alloca
+
+      case c: TClosure =>
+        // Generate closure function (deferred)
+        closureCounter += 1
+        val closureName = s"__closure_$closureCounter"
+        pendingClosures += ((closureName, c))
+        // Build environment on heap
+        val envSize = c.captures.map((_, t) => llvmSizeOf(t)).sum
+        val envPtr = if c.captures.nonEmpty then
+          val ep = newReg()
+          emit(s"  $ep = call i8* @malloc(i64 $envSize)")
+          // Store captured values into environment
+          var offset = 0L
+          for (capName, capType) <- c.captures do
+            val lt = llvmType(capType)
+            val v = if locals.contains(capName) then
+              val local = locals(capName)
+              if isAggregate(local.typ) then local.reg
+              else
+                val r = newReg()
+                emit(s"  $r = load $lt, $lt* ${local.reg}")
+                r
+            else
+              val r = newReg()
+              emit(s"  $r = load $lt, $lt* @$capName")
+              r
+            val envFieldPtr = newReg()
+            emit(s"  $envFieldPtr = getelementptr i8, i8* $ep, i64 $offset")
+            val typedEnvPtr = newReg()
+            emit(s"  $typedEnvPtr = bitcast i8* $envFieldPtr to $lt*")
+            if isAggregate(capType) then
+              val loaded = newReg()
+              emit(s"  $loaded = load $lt, $lt* $v")
+              emit(s"  store $lt $loaded, $lt* $typedEnvPtr")
+            else
+              emit(s"  store $lt $v, $lt* $typedEnvPtr")
+            offset += llvmSizeOf(capType)
+          ep
+        else "null"
+        // Build %struct.closure
+        val alloca = newReg()
+        emit(s"  $alloca = alloca %struct.closure")
+        val fpGep = newReg()
+        emit(s"  $fpGep = getelementptr %struct.closure, %struct.closure* $alloca, i32 0, i32 0")
+        val retLt = llvmType(c.returnType)
+        val paramStr = ("i8*" +: c.params.map(p => llvmType(p.typ))).mkString(", ")
+        val fpCast = newReg()
+        emit(s"  $fpCast = bitcast $retLt ($paramStr)* @$closureName to i8*")
+        emit(s"  store i8* $fpCast, i8** $fpGep")
+        val envGep = newReg()
+        emit(s"  $envGep = getelementptr %struct.closure, %struct.closure* $alloca, i32 0, i32 1")
+        emit(s"  store i8* $envPtr, i8** $envGep")
+        alloca
 
       case TIndirectCall(callee, args, typ) =>
-        val calleePtr = genExpr(callee)
+        // callee is a %struct.closure — extract func_ptr and env_ptr
+        val closurePtr = genExpr(callee) // returns alloca pointer (aggregate)
+        val fpGep = newReg()
+        emit(s"  $fpGep = getelementptr %struct.closure, %struct.closure* $closurePtr, i32 0, i32 0")
+        val fpRaw = newReg()
+        emit(s"  $fpRaw = load i8*, i8** $fpGep")
+        val envGep = newReg()
+        emit(s"  $envGep = getelementptr %struct.closure, %struct.closure* $closurePtr, i32 0, i32 1")
+        val envPtr = newReg()
+        emit(s"  $envPtr = load i8*, i8** $envGep")
         callee.typ match
           case SyslType.FuncType(params, retType) =>
             val paramTypes = params.map(llvmType)
@@ -1288,18 +1466,24 @@ class SyslLLVMCodegen:
                 (loaded, pt)
               else (v, pt)
             }
-            val argStr = argVals.map((v, vt) => s"$vt $v").mkString(", ")
+            // All indirect calls pass env as first arg
+            val allArgStr = s"i8* $envPtr" + (if argVals.nonEmpty then ", " + argVals.map((v, vt) => s"$vt $v").mkString(", ") else "")
             val retLt = llvmType(retType)
-            val paramStr = paramTypes.mkString(", ")
-            val typedPtr = newReg()
-            emit(s"  $typedPtr = bitcast i8* $calleePtr to $retLt ($paramStr)*")
+            val allParamStr = ("i8*" +: paramTypes).mkString(", ")
+            val typedFp = newReg()
+            emit(s"  $typedFp = bitcast i8* $fpRaw to $retLt ($allParamStr)*")
             if retLt == "void" then
-              emit(s"  call void $typedPtr($argStr)")
+              emit(s"  call void $typedFp($allArgStr)")
               "0"
             else
               val result = newReg()
-              emit(s"  $result = call $retLt $typedPtr($argStr)")
-              result
+              emit(s"  $result = call $retLt $typedFp($allArgStr)")
+              if isAggregate(typ) then
+                val ra = newReg()
+                emit(s"  $ra = alloca $retLt")
+                emit(s"  store $retLt $result, $retLt* $ra")
+                ra
+              else result
           case _ =>
             emit(s"  ; TODO: indirect call on non-function type")
             "0"
@@ -1445,7 +1629,7 @@ class SyslLLVMCodegen:
     case SyslType.SliceType(_) => "%struct.slice"
     case SyslType.PtrType(_) => "i8*"
     case SyslType.RefType(_) => "i8*"
-    case SyslType.FuncType(_, _) => "i8*"
+    case SyslType.FuncType(_, _) => "%struct.closure"
     case _ => "i64"
 
   // LLVM-side size in bytes (may differ from Sysl's sizeOf for types like strings)
@@ -1453,7 +1637,7 @@ class SyslLLVMCodegen:
     case SyslType.StringType => 8   // i8* pointer, not fat pointer
     case SyslType.PtrType(_) => 8
     case SyslType.RefType(_) => 8
-    case SyslType.FuncType(_, _) => 8
+    case SyslType.FuncType(_, _) => 16  // {i8*, i8*}
     case SyslType.BoolType => 1
     case SyslType.SliceType(_) => 16  // {i8*, i32, i32}
     case SyslType.StructType(_, fields) =>
@@ -1464,7 +1648,7 @@ class SyslLLVMCodegen:
 
   // Types that are passed by pointer (alloca) rather than by value
   private def isAggregate(t: SyslType): Boolean = t match
-    case _: SyslType.StructType | _: SyslType.ArrayType | _: SyslType.SliceType | _: SyslType.EnumType => true
+    case _: SyslType.StructType | _: SyslType.ArrayType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType => true
     case _ => false
 
   // ===== Refcounting helpers =====
