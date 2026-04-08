@@ -1024,6 +1024,9 @@ class SyslAnalyzer:
       // Insert explicit conversions for codegen
       (coerced.typ, pType) match
         case (StringType, PtrType(I8 | U8)) => TCast(coerced, pType)
+        case (_: FuncType, IntType(64) | UIntType(64)) =>
+          // Function reference coerced to i64 — retype so codegen treats it as a scalar address
+          TCast(coerced, pType)
         case (_, iface: InterfaceType) if !coerced.typ.isInstanceOf[InterfaceType] =>
           TInterfaceBox(coerced, iface)
         case _ => coerced
