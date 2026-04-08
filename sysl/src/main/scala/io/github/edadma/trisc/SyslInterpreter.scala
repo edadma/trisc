@@ -774,6 +774,41 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val bytes = s.getBytes("UTF-8")
         RefStringVal(bytes, bytes.length, new java.util.concurrent.atomic.AtomicInteger(1))
 
+      case TFmtStr(inner, spec) =>
+        val v = evalAny(inner, env)
+        val raw = v match
+          case IntVal(n) =>
+            val base = spec.verb match
+              case 'x' => 16
+              case 'o' => 8
+              case 'b' => 2
+              case _   => 10
+            val s = if base == 10 then
+              val r = n.toString
+              if spec.showSign && n >= 0 then "+" + r else r
+            else
+              val unsigned = if n < 0 then
+                "-" + java.lang.Long.toUnsignedString(-n, base)
+              else
+                java.lang.Long.toUnsignedString(n, base)
+              if spec.upperCase then unsigned.toUpperCase else unsigned
+            s
+          case FloatVal(d) => d.toString
+          case RefStringVal(b, l, _) => new String(b, 0, l, "UTF-8")
+          case _ => throw RuntimeError(s"fmt: unsupported value $v")
+        // Apply width padding
+        val padded = if spec.width > 0 && raw.length < spec.width then
+          val pad = spec.width - raw.length
+          if spec.leftAlign then raw + " " * pad
+          else if spec.zeroPad && (spec.verb != 's') then
+            if raw.startsWith("-") then "-" + "0" * pad + raw.substring(1)
+            else if raw.startsWith("+") then "+" + "0" * pad + raw.substring(1)
+            else "0" * pad + raw
+          else " " * pad + raw
+        else raw
+        val bytes = padded.getBytes("UTF-8")
+        RefStringVal(bytes, bytes.length, new java.util.concurrent.atomic.AtomicInteger(1))
+
       case TStringFromPtr(ptrExpr, lenExpr, _) =>
         val ptr = evalAny(ptrExpr, env)
         val len = toLong(evalAny(lenExpr, env)).toInt

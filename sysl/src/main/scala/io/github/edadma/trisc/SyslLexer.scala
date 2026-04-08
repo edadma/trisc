@@ -80,9 +80,22 @@ class SyslLexical extends IndentationLexical(
         Failure("not an interpolated string", in)
     }
 
+  // Formatted string: f"..." — uses "f:" prefix in token value
+  private def fmtStringLit: Parser[Token] =
+    Parser { in =>
+      if in.first == 'f' && !in.rest.atEnd && in.rest.first == '"' then
+        val bodyParser = rep(escapeChar | chrExcept('"', '\n', EofCh)) <~ '"'
+        bodyParser(in.rest.rest) match
+          case Success(chars, next) => Success(StringLit("f:" + chars.mkString), next)
+          case ns: NoSuccess => ns
+      else
+        Failure("not a formatted string", in)
+    }
+
   override def token: Parser[Token] =
-    // Interpolated string literal: s"hello $name" — must come before identifiers
+    // Interpolated/formatted string literals — must come before identifiers
     interpStringLit |
+    fmtStringLit |
     // Character literal: 'x' or '\n' — emitted as NumericLit with :char suffix
     '\'' ~> (escapeChar | chrExcept('\'', '\n', EofCh)) <~ '\'' ^^ { c =>
       NumericLit(s"${c.toLong}:char")

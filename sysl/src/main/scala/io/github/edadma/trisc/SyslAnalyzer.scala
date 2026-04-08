@@ -1262,6 +1262,7 @@ class SyslAnalyzer:
       case StringLitAST(s) => TStringLit(s, StringType)
       case StringLitExprAST(s) =>
         if s.startsWith("s:") then analyzeInterpolatedString(s.substring(2))
+        else if s.startsWith("f:") then analyzeFormattedString(s.substring(2))
         else TStringLit(s, StringType)
       case TupleLitAST(elements) =>
         val tElems = elements.map(analyzeExpr)
@@ -2175,3 +2176,100 @@ class SyslAnalyzer:
           case Left(err) => throw AnalysisError(s"parse error in string interpolation: $err")
     }
     tExprs.reduceLeft((l, r) => TBinary(l, "+", r, SyslType.StringType))
+
+  private def parseFmtSpec(s: String, pos: Int): (FmtSpec, Int) =
+    var i = pos
+    if i >= s.length || s(i) != '%' then return (FmtSpec('s'), pos)
+    i += 1
+    var zeroPad = false
+    var leftAlign = false
+    var showSign = false
+    var parsing = true
+    while i < s.length && parsing do
+      s(i) match
+        case '0' => zeroPad = true; i += 1
+        case '-' => leftAlign = true; i += 1
+        case '+' => showSign = true; i += 1
+        case _   => parsing = false
+    var width = 0
+    while i < s.length && s(i).isDigit do
+      width = width * 10 + (s(i) - '0')
+      i += 1
+    if i >= s.length then throw AnalysisError("missing verb in format spec")
+    val verb = s(i)
+    i += 1
+    val upperCase = verb == 'X'
+    val normalVerb = verb.toLower match
+      case v @ ('d' | 'x' | 'o' | 'b' | 's' | 'c') => v
+      case _ => if verb == 'X' then 'x' else throw AnalysisError(s"unknown format verb '%$verb'")
+    (FmtSpec(normalVerb, width, zeroPad, leftAlign, showSign, upperCase), i)
+
+  private def analyzeFormattedString(s: String): TExpr =
+    val parts = mutable.ArrayBuffer[TExpr]()
+    val buf = new StringBuilder
+    var i = 0
+    def flushLiteral(): Unit =
+      if buf.nonEmpty then
+        parts += TStringLit(buf.toString, SyslType.StringType)
+        buf.clear()
+    while i < s.length do
+      if s(i) == '$' then
+        if i + 1 < s.length && s(i + 1) == '$' then
+          buf += '$'; i += 2
+        else if i + 1 < s.length && s(i + 1) == '{' then
+          flushLiteral()
+          i += 2
+          var depth = 1
+          val exprBuf = new StringBuilder
+          while i < s.length && depth > 0 do
+            if s(i) == '{' then depth += 1
+            else if s(i) == '}' then depth -= 1
+            if depth > 0 then exprBuf += s(i)
+            i += 1
+          if depth != 0 then throw AnalysisError("unterminated '${' in f-string")
+          val (spec, newI) = parseFmtSpec(s, i)
+          i = newI
+          val parser = new SyslParser
+          parser.parseExpression(exprBuf.toString.trim) match
+            case Right(ast) => parts += wrapWithFmtSpec(analyzeExpr(ast), spec)
+            case Left(err) => throw AnalysisError(s"parse error in f-string: $err")
+        else if i + 1 < s.length && (s(i + 1).isLetter || s(i + 1) == '_') then
+          flushLiteral()
+          i += 1
+          val nameBuf = new StringBuilder
+          while i < s.length && (s(i).isLetterOrDigit || s(i) == '_') do
+            nameBuf += s(i); i += 1
+          val (spec, newI) = parseFmtSpec(s, i)
+          i = newI
+          val parser = new SyslParser
+          parser.parseExpression(nameBuf.toString) match
+            case Right(ast) => parts += wrapWithFmtSpec(analyzeExpr(ast), spec)
+            case Left(err) => throw AnalysisError(s"parse error in f-string: $err")
+        else
+          buf += '$'; i += 1
+      else if s(i) == '%' && i + 1 < s.length && s(i + 1) == '%' then
+        buf += '%'; i += 2
+      else
+        buf += s(i); i += 1
+    flushLiteral()
+    if parts.isEmpty then TStringLit("", SyslType.StringType)
+    else parts.toList.reduceLeft((l, r) => TBinary(l, "+", r, SyslType.StringType))
+
+  private def wrapWithFmtSpec(expr: TExpr, spec: FmtSpec): TExpr =
+    spec.verb match
+      case 'd' | 'x' | 'o' | 'b' =>
+        if !expr.typ.isNumeric then
+          throw AnalysisError(s"format verb '%${spec.verb}' requires numeric type, got ${expr.typ}")
+        if spec.verb == 'd' && spec.width == 0 && !spec.zeroPad && !spec.leftAlign && !spec.showSign then TStr(expr)
+        else TFmtStr(expr, spec)
+      case 's' =>
+        if expr.typ == SyslType.StringType then
+          if spec.width == 0 && !spec.leftAlign then expr else TFmtStr(expr, spec)
+        else if expr.typ.isNumeric || expr.typ == SyslType.BoolType || expr.typ == SyslType.DoubleType then
+          if spec.width == 0 && !spec.leftAlign then TStr(expr) else TFmtStr(TStr(expr), spec)
+        else throw AnalysisError(s"cannot format value of type ${expr.typ} with %s")
+      case 'c' =>
+        if !expr.typ.isNumeric then
+          throw AnalysisError(s"format verb '%c' requires numeric type, got ${expr.typ}")
+        TFmtStr(expr, spec)
+      case _ => throw AnalysisError(s"unknown format verb '%${spec.verb}'")

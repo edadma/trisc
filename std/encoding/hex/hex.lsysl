@@ -1,0 +1,254 @@
+std.encoding.hex — Hexadecimal encoding
+========================================
+
+Encodes and decodes byte slices as hexadecimal strings,
+matching Go's `encoding/hex` package.
+
+Dependencies: std.strconv (for digit_val).
+
+
+    module std.encoding.hex
+
+    import std.debug.{assert}
+    import std.strconv.{digit_val}
+
+
+Constants
+---------
+
+    val HEX_DIGITS: [16]byte = "0123456789abcdef"
+
+
+Encoding
+--------
+
+### encoded_len
+
+`encoded_len(n)` returns the length of a hex encoding of `n`
+bytes.
+
+    encoded_len(n: int) -> int = n * 2
+
+
+### encode
+
+`encode(dst, src)` hex-encodes `src` into `dst`. `dst` must
+be at least `encoded_len(len(src))` bytes. Returns the number
+of bytes written.
+
+    encode(dst: []byte, src: []byte) -> int
+        val n = len(src)
+        for i in 0..<n
+            dst[i * 2]     = HEX_DIGITS[int(src[i]) >> 4]
+            dst[i * 2 + 1] = HEX_DIGITS[int(src[i]) & 0x0f]
+        return n * 2
+
+
+### encode_to_string
+
+`encode_to_string(src)` returns the hex encoding of `src` as
+a string.
+
+    encode_to_string(src: []byte) -> string
+        val n = len(src)
+        val buf = (new [n * 2]byte)[:]
+        val _ = encode(buf, src)
+        return string(buf)
+
+
+Decoding
+--------
+
+### decoded_len
+
+`decoded_len(n)` returns the length of a decoding of `n` hex
+characters.
+
+    decoded_len(n: int) -> int = n / 2
+
+
+### decode
+
+`decode(dst, src)` decodes hex bytes from `src` into `dst`.
+`src` must have even length. Returns `(bytes_written, ok)`.
+
+    decode(dst: []byte, src: []byte) -> (int, bool)
+        val n = len(src)
+
+        if n % 2 != 0 then return 0, false
+
+        val pairs = n / 2
+        for i in 0..<pairs
+            val hi = digit_val(src[i * 2], 16)
+            val lo = digit_val(src[i * 2 + 1], 16)
+
+            if hi < 0 || lo < 0 then return i, false
+
+            dst[i] = byte(hi * 16 + lo)
+
+        return pairs, true
+
+
+### decode_string
+
+`decode_string(s)` decodes a hex string into a byte slice.
+Returns `(bytes, ok)`.
+
+    decode_string(s: string) -> ([]byte, bool)
+        val n = len(s)
+
+        if n % 2 != 0
+            val empty = (new [0]byte)[:]
+            return empty, false
+
+        val out = (new [n / 2]byte)[:]
+        // Convert string to byte slice for decode
+        val src = (new [n]byte)[:]
+        for i in 0..<n
+            src[i] = byte(s[i])
+
+        val written, ok = decode(out, src)
+        return out, ok
+
+
+Tests
+=====
+
+
+### encode_to_string
+
+    #test
+    test_encode_empty() -> void
+        val empty: [0]byte = ""
+        assert(encode_to_string(empty[:]) == "", "empty")
+
+    #test
+    test_encode_single_byte() -> void
+        val src: [1]byte = [0xff]
+        assert(encode_to_string(src[:]) == "ff", "ff")
+
+    #test
+    test_encode_hello() -> void
+        val src: [5]byte = "hello"
+        assert(encode_to_string(src[:]) == "68656c6c6f", "hello")
+
+    #test
+    test_encode_zeros() -> void
+        val src: [3]byte = [0x00, 0x00, 0x00]
+        assert(encode_to_string(src[:]) == "000000", "zeros")
+
+    #test
+    test_encode_all_values() -> void
+        val src: [4]byte = [0xde, 0xad, 0xbe, 0xef]
+        assert(encode_to_string(src[:]) == "deadbeef", "deadbeef")
+
+    #test
+    test_encode_high_bytes() -> void
+        val src: [2]byte = [0xfe, 0xca]
+        assert(encode_to_string(src[:]) == "feca", "feca")
+
+
+### decode_string
+
+    #test
+    test_decode_empty() -> void
+        val out, ok = decode_string("")
+        assert(ok, "ok")
+        assert(len(out) == 0, "empty")
+
+    #test
+    test_decode_single_byte() -> void
+        val out, ok = decode_string("ff")
+        assert(ok, "ok")
+        assert(len(out) == 1, "length")
+        assert(out[0] == 0xffu8, "value")
+
+    #test
+    test_decode_hello() -> void
+        val out, ok = decode_string("68656c6c6f")
+        assert(ok, "ok")
+        assert(len(out) == 5, "length")
+        assert(out[0] == byte('h'), "h")
+        assert(out[4] == byte('o'), "o")
+
+    #test
+    test_decode_uppercase() -> void
+        val out, ok = decode_string("DEADBEEF")
+        assert(ok, "uppercase ok")
+        assert(len(out) == 4, "length")
+        assert(out[0] == 0xdeu8, "de")
+        assert(out[1] == 0xadu8, "ad")
+        assert(out[2] == 0xbeu8, "be")
+        assert(out[3] == 0xefu8, "ef")
+
+    #test
+    test_decode_mixed_case() -> void
+        val out, ok = decode_string("DeAdBeEf")
+        assert(ok, "mixed ok")
+        assert(out[0] == 0xdeu8, "de")
+
+    #test
+    test_decode_rejects_odd_length() -> void
+        val _, ok = decode_string("abc")
+        assert(!ok, "odd length rejected")
+
+    #test
+    test_decode_rejects_invalid_char() -> void
+        val _, ok = decode_string("zz")
+        assert(!ok, "invalid hex char rejected")
+
+    #test
+    test_decode_rejects_space() -> void
+        val _, ok = decode_string("ab cd")
+        assert(!ok, "space rejected")
+
+
+### encode/decode round-trip
+
+    #test
+    test_roundtrip_bytes() -> void
+        val src: [8]byte = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]
+        val hex = encode_to_string(src[:])
+        val out, ok = decode_string(hex)
+        assert(ok, "decodes")
+        assert(len(out) == 8, "length")
+        for i in 0..<8
+            assert(out[i] == src[i], s"byte $i")
+
+    #test
+    test_roundtrip_zeros() -> void
+        val src: [16]byte = ""
+        val hex = encode_to_string(src[:])
+        assert(hex == "00000000000000000000000000000000", "all zeros")
+        val out, ok = decode_string(hex)
+        assert(ok, "decodes")
+        for i in 0..<16
+            assert(out[i] == 0u8, s"byte $i")
+
+
+### encode into buffer
+
+    #test
+    test_encode_into_buffer() -> void
+        val src: [3]byte = [0xab, 0xcd, 0xef]
+        var dst: [6]byte
+        val n = encode(dst[:], src[:])
+        assert(n == 6, "wrote 6")
+        assert(dst[0] == byte('a'), "a")
+        assert(dst[1] == byte('b'), "b")
+        assert(dst[4] == byte('e'), "e")
+        assert(dst[5] == byte('f'), "f")
+
+
+### decode into buffer
+
+    #test
+    test_decode_into_buffer() -> void
+        val src: [6]byte = "abcdef"
+        var dst: [3]byte
+        val n, ok = decode(dst[:], src[:])
+        assert(ok, "ok")
+        assert(n == 3, "3 bytes")
+        assert(dst[0] == 0xabu8, "ab")
+        assert(dst[1] == 0xcdu8, "cd")
+        assert(dst[2] == 0xefu8, "ef")
