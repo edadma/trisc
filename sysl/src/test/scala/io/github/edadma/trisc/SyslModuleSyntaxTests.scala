@@ -82,13 +82,14 @@ class SyslModuleSyntaxTests extends AnyFreeSpec with Matchers {
   // ===== selective imports =====
 
   "import single name" in {
+    // Parser produces QualifiedImport; driver resolves ambiguity at compile time
     val ast = parse(
       """import math.add
         |main() -> int = 0
         |""".stripMargin)
     val imp = ast.decls.head.asInstanceOf[ImportDeclAST]
-    imp.modulePath shouldBe "math"
-    imp.selectors shouldBe List(NamedImport("add"))
+    imp.modulePath shouldBe "math/add"
+    imp.selectors shouldBe List(QualifiedImport)
   }
 
   "import named list" in {
@@ -112,13 +113,14 @@ class SyslModuleSyntaxTests extends AnyFreeSpec with Matchers {
   }
 
   "import path single name" in {
+    // Parser produces QualifiedImport; driver resolves ambiguity at compile time
     val ast = parse(
       """import std.io.println
         |main() -> int = 0
         |""".stripMargin)
     val imp = ast.decls.head.asInstanceOf[ImportDeclAST]
-    imp.modulePath shouldBe "std/io"
-    imp.selectors shouldBe List(NamedImport("println"))
+    imp.modulePath shouldBe "std/io/println"
+    imp.selectors shouldBe List(QualifiedImport)
   }
 
   "import path with braces" in {

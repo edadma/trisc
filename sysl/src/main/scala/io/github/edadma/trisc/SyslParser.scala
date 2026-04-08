@@ -182,7 +182,10 @@ class SyslParser extends StandardTokenParsers {
       case path ~ Some(selectors) => ImportDeclAST(path.mkString("/"), selectors)
       case path ~ None =>
         if path.length < 2 then sys.error(s"import requires selector: use 'import ${path.head}.*' or 'import ${path.head}.name'")
-        ImportDeclAST(path.init.mkString("/"), List(NamedImport(path.last)))
+        // Ambiguous: could be qualified module import (import std.strings)
+        // or single symbol import (import math.add). Mark as QualifiedImport;
+        // the driver resolves by checking if the full path is a known module.
+        ImportDeclAST(path.mkString("/"), List(QualifiedImport))
     }
 
   lazy val importTail: Parser[List[ImportSelector]] =

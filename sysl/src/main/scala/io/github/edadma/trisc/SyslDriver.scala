@@ -117,19 +117,35 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         }
 
       // Register imports from previously compiled modules (or stdlib)
-      for imp <- imports(name) do
+      for imp0 <- imports(name) do
+        // Resolve QualifiedImport ambiguity: import std.strings could be a qualified
+        // module import (access as strings.foo) or a single-symbol import (import "strings" from "std").
+        // Try full path as module first; if not found, fall back to last-segment-as-name.
+        val imp = imp0.selectors match
+          case List(QualifiedImport) =>
+            def isKnownModule(path: String): Boolean =
+              SyslStdlib.modules.contains(path) || smetaCache.contains(path) ||
+                packageMetaCache.contains(path) || resolveExternalMeta(path).isDefined
+            if isKnownModule(imp0.modulePath) then imp0 // full path is a module → qualified import
+            else
+              // Fall back: treat last segment as a named import from parent path
+              val parts = imp0.modulePath.split("/")
+              if parts.length >= 2 then
+                ImportDeclAST(parts.init.mkString("/"), List(NamedImport(parts.last)))
+              else imp0
+          case _ => imp0
         if SyslStdlib.modules.contains(imp.modulePath) then
-          analyzer.registerImport(SyslStdlib.meta(imp.modulePath), imp.selectors)
+          analyzer.registerImport(SyslStdlib.meta(imp.modulePath), imp.selectors, imp.modulePath)
         else if smetaCache.contains(imp.modulePath) then
-          ModuleMeta.fromSmeta(smetaCache(imp.modulePath)).foreach(analyzer.registerImport(_, imp.selectors))
+          ModuleMeta.fromSmeta(smetaCache(imp.modulePath)).foreach(analyzer.registerImport(_, imp.selectors, imp.modulePath))
         else if packageMetaCache.contains(imp.modulePath) then
-          analyzer.registerImport(packageMetaCache(imp.modulePath), imp.selectors)
+          analyzer.registerImport(packageMetaCache(imp.modulePath), imp.selectors, imp.modulePath)
         else
           // Try resolving from file system
           resolveExternalMeta(imp.modulePath) match
             case Some(meta) =>
               packageMetaCache(imp.modulePath) = meta
-              analyzer.registerImport(meta, imp.selectors)
+              analyzer.registerImport(meta, imp.selectors, imp.modulePath)
             case None =>
               throw DriverError(s"$name: import '${imp.modulePath}' not found (not in source set)")
 
@@ -178,12 +194,24 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
     val visiting = new mutable.LinkedHashSet[String]
     val result = new mutable.ListBuffer[String]
 
+    // For QualifiedImport, the module path might be the full path (e.g., "posix/string/memset").
+    // Try the full path first; if not found, try parent path (e.g., "posix/string").
+    def resolveDepPath(imp: ImportDeclAST): String =
+      imp.selectors match
+        case List(QualifiedImport) =>
+          val path = imp.modulePath
+          if allNames.contains(path) || moduleToSources.contains(path) then path
+          else
+            val parts = path.split("/")
+            if parts.length >= 2 then parts.init.mkString("/") else path
+        case _ => imp.modulePath
+
     def visit(name: String): Unit =
       if visiting.contains(name) then
         throw DriverError(s"circular dependency involving '$name'")
       if !visited.contains(name) then
         visiting += name
-        for dep <- imports.getOrElse(name, Nil).map(_.modulePath).distinct do
+        for dep <- imports.getOrElse(name, Nil).map(resolveDepPath).distinct do
           if allNames.contains(dep) then
             visit(dep)
           else

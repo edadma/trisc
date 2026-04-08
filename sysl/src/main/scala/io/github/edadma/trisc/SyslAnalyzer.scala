@@ -20,6 +20,7 @@ class SyslAnalyzer:
   private val dataEnumTypes = new mutable.LinkedHashMap[String, SyslType.EnumType]  // data enum name → EnumType
   private val variantToEnum = new mutable.LinkedHashMap[String, (SyslType.EnumType, Int)]  // variant name → (enum type, variant index)
   private val interfaceTypes = new mutable.LinkedHashMap[String, SyslType.InterfaceType]  // interface name → InterfaceType
+  private val moduleNamespaces = new mutable.LinkedHashMap[String, ModuleMeta]  // short name → module meta (for qualified imports)
   private val typeAliases = new mutable.LinkedHashMap[String, TypeAST]  // alias name → target type AST
   private val methods = new mutable.LinkedHashMap[String, mutable.Set[String]]  // struct name → set of method names
   private val deprecations = new mutable.LinkedHashMap[String, Option[String]]  // name → optional reason
@@ -141,7 +142,14 @@ class SyslAnalyzer:
     "expect" -> FunInfo("expect", List("actual" -> I64, "expected" -> I64, "msg" -> StringType), VoidType),
   )
 
-  def registerImport(meta: ModuleMeta, selectors: List[ImportSelector] = List(WildcardImport)): Unit =
+  def registerImport(meta: ModuleMeta, selectors: List[ImportSelector] = List(WildcardImport), modulePath: String = ""): Unit =
+    // Qualified import: import std.strings → access as strings.foo
+    selectors match
+      case List(QualifiedImport) =>
+        val nsName = modulePath.split("/").last
+        moduleNamespaces(nsName) = meta
+        return
+      case _ =>
     // Symbol names in meta may be module-mangled (e.g. "std_strings__trim_space").
     // Strip the prefix for selector matching and local lookup keys, but keep
     // the mangled name in FunInfo.name so TCall/TFunDecl use it for codegen/linker.
@@ -1680,6 +1688,17 @@ class SyslAnalyzer:
           case t => throw AnalysisError(s"cannot sub-slice $t")
         TSliceExpr(tArr, tLow, tHigh, SliceType(elemType))
 
+      case FieldAccessAST(VarRefAST(nsName), member) if moduleNamespaces.contains(nsName) =>
+        // Qualified import access: strings.MAX_LEN
+        val meta = moduleNamespaces(nsName)
+        val sym = meta.publicSymbols.find(s => shortName(s.name) == member)
+          .getOrElse(throw AnalysisError(s"module '$nsName' has no symbol '$member'"))
+        sym.typ match
+          case SymbolMeta.Kind.Data(dataType) => TVarRef(sym.name, dataType)
+          case SymbolMeta.Kind.Func(params, retType) => TFuncRef(sym.name, SyslType.FuncType(params, retType))
+          case SymbolMeta.Kind.Struct(st) => throw AnalysisError(s"'$nsName.$member' is a struct type, not a value")
+          case SymbolMeta.Kind.Enum(_) => throw AnalysisError(s"'$nsName.$member' is an enum type, not a value")
+
       case FieldAccessAST(VarRefAST(enumName), member) if enumTypes.contains(enumName) =>
         val members = enumTypes(enumName)
         if !members.contains(member) then throw AnalysisError(s"enum $enumName has no member '$member'")
@@ -1880,6 +1899,20 @@ class SyslAnalyzer:
             TIndirectCall(tCallee, checkedArgs, returnType)
           case other =>
             throw AnalysisError(s"cannot call expression of type $other as a function")
+
+      case MethodCallAST(VarRefAST(nsName), method, args) if moduleNamespaces.contains(nsName) =>
+        // Qualified import call: strings.has_prefix(s, prefix)
+        val meta = moduleNamespaces(nsName)
+        val tArgs = args.map(analyzeExpr)
+        // Find the function in the module's symbols
+        val funcSym = meta.publicSymbols.find(s => shortName(s.name) == method)
+          .getOrElse(throw AnalysisError(s"module '$nsName' has no function '$method'"))
+        funcSym.typ match
+          case SymbolMeta.Kind.Func(params, returnType) =>
+            val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
+            val checkedArgs = checkArgs(s"$nsName.$method", paramPairs, tArgs)
+            TCall(funcSym.name, checkedArgs, returnType)
+          case _ => throw AnalysisError(s"'$nsName.$method' is not a function")
 
       case MethodCallAST(VarRefAST(name), method, args) if traits.contains(name) =>
         // Trait method call: Ord.cmp(a, b)

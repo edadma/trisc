@@ -18,6 +18,7 @@ case class RefTypeAST(inner: TypeAST) extends TypeAST
 // Import selectors
 sealed trait ImportSelector
 case object WildcardImport extends ImportSelector
+case object QualifiedImport extends ImportSelector  // import std.strings → access as strings.foo
 case class NamedImport(name: String, rename: Option[String] = None) extends ImportSelector
 
 // Attributes (annotations)
