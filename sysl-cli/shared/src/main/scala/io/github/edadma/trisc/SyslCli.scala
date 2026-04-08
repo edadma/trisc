@@ -238,7 +238,7 @@ object SyslCli:
       case Nil => List(".")
       case dirs => dirs
 
-    val driver = new SyslDriver(Some(io), baseDirs)
+    val driver = new SyslDriver(Some(io), baseDirs, tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
     val result = driver.compile(sources)
 
     // Write .smeta files for package modules
@@ -307,7 +307,7 @@ object SyslCli:
       val baseDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList match
         case Nil => List(".")
         case dirs => dirs
-      val driver = new SyslDriver(Some(io), baseDirs)
+      val driver = new SyslDriver(Some(io), baseDirs, tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
       val result = driver.compile(sources)
       val stdlibImports = driver.collectStdlibImports(result.units)
       val merged = stripTestDecls(TProgram(result.units.flatMap(_.typed.decls)))
@@ -403,7 +403,7 @@ object SyslCli:
         else
           List(resolveSource(p, ""))
       }.toMap
-    val driver = new SyslDriver(Some(io), baseDirs)
+    val driver = new SyslDriver(Some(io), baseDirs, tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
     val result = driver.compile(sources)
     val stdlibImports = driver.collectStdlibImports(result.units)
 

@@ -19,7 +19,7 @@ case class CompilationResult(
     packageMetas: Map[String, ModuleMeta] = Map.empty,
 )
 
-class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, config: Map[String, String] = Map.empty):
+class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, config: Map[String, String] = Map.empty, tangler: Option[String => String] = None):
 
   case class DriverError(msg: String) extends RuntimeException(msg)
 
@@ -254,6 +254,15 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
       case CondEq(name, value) => config.get(name).contains(value)
       case CondNeq(name, value) => !config.get(name).contains(value)
 
+  private def compileExternalFile(source: String): Option[ModuleMeta] =
+    val parser = new SyslParser
+    parser.parseProgram(source) match
+      case Right(ast) =>
+        val analyzer = new SyslAnalyzer
+        val typed = analyzer.analyze(ast)
+        Some(ModuleMeta.fromProgram(typed))
+      case Left(_) => None
+
   /** Try to resolve an import path from the file system by looking for a .smeta file. */
   private def resolveExternalMeta(modulePath: String): Option[ModuleMeta] =
     fileOps match
@@ -272,13 +281,22 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
             ModuleMeta.fromSmeta(io.readFile(smetaPath))
           else if io.exists(filePath) then
             // Single file module — compile it on demand
-            val source = io.readFile(filePath)
-            val parser = new SyslParser
-            parser.parseProgram(source) match
-              case Right(ast) =>
-                val analyzer = new SyslAnalyzer
-                val typed = analyzer.analyze(ast)
-                Some(ModuleMeta.fromProgram(typed))
-              case Left(_) => None
-          else None
+            compileExternalFile(io.readFile(filePath))
+          else
+            // Try .lsysl (literate source) — requires tangler
+            val lsyslPath = s"${io.joinPath(base, modulePath)}.lsysl"
+            if tangler.isDefined && io.exists(lsyslPath) then
+              compileExternalFile(tangler.get(io.readFile(lsyslPath)))
+            else
+              // Try directory with .lsysl files inside
+              if tangler.isDefined && io.exists(dirPath) && io.isDirectory(dirPath) then
+                val lsyslFiles = io.listFiles(dirPath).filter(_.endsWith(".lsysl"))
+                if lsyslFiles.nonEmpty then
+                  val metas = lsyslFiles.flatMap { f =>
+                    compileExternalFile(tangler.get(io.readFile(f)))
+                  }
+                  if metas.nonEmpty then Some(metas.reduce(_.merge(_)))
+                  else None
+                else None
+              else None
         }.nextOption()

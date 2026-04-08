@@ -159,7 +159,7 @@ class SyslCrossUnitTypeTests extends SyslTestHelpers {
 
   // ===== Struct as field type across units =====
 
-  "imported struct used as field type" in {
+  "imported struct used as field type (wildcard)" in {
     evalWithLibs(
       Map(
         "mylib/types/types" ->
@@ -181,5 +181,51 @@ class SyslCrossUnitTypeTests extends SyslTestHelpers {
         |    l.start.x + l.end_.y
         |""".stripMargin
     ) shouldBe 22
+  }
+
+  "imported struct used as field type (named import)" in {
+    evalWithLibs(
+      Map(
+        "mylib/io/io" ->
+          """module mylib.io
+            |struct ByteReader
+            |    pos: int
+            |""".stripMargin,
+      ),
+      """import mylib.io.{ByteReader}
+        |struct BufReader
+        |    inner: ByteReader
+        |    count: int
+        |
+        |main() -> int
+        |    var br: BufReader
+        |    br.inner = ByteReader(0)
+        |    br.count = 42
+        |    br.inner.pos + br.count
+        |""".stripMargin
+    ) shouldBe 42
+  }
+
+  "imported struct as field type — module path matches source" in {
+    evalWithLibs(
+      Map(
+        "mylib/io/io" ->
+          """module mylib.io
+            |struct ByteReader
+            |    data: []byte
+            |    pos: int
+            |""".stripMargin,
+      ),
+      """import mylib.io.{ByteReader}
+        |struct BufReader
+        |    inner: ByteReader
+        |    count: int
+        |
+        |main() -> int
+        |    var br: BufReader
+        |    br.count = 42
+        |    br.count
+        |""".stripMargin
+    ) shouldBe 42
   }
 }
