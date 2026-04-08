@@ -60,7 +60,7 @@ class OSKitTTYTests extends OSKitTestHelpers {
     val pending = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
     var tickCount = 0L
     var injectedCount = 0
-    val keyInjector: CPU => Unit = _ => {
+    val keyInjector: Processor => Unit = _ => {
       tickCount += 1
       while pending.nonEmpty && tickCount >= pending.head._1 do
         val (_, vk, press, mods) = pending.dequeue()
@@ -71,7 +71,7 @@ class OSKitTTYTests extends OSKitTestHelpers {
           metaDown = (mods & 8) != 0)
         injectedCount += 1
     }
-    val ticks: Seq[CPU => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
+    val ticks: Seq[Processor => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
     val cpu = new CPU(mem, ticks) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()

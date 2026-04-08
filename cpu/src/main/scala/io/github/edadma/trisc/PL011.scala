@@ -47,7 +47,7 @@ import scala.collection.mutable
  * @param fifoDepth FIFO depth (standard PL011 = 16)
  */
 class PL011(val base: Long, intc: InterruptController, irq: Int, onTx: Int => Unit = _ => (), fifoDepth: Int = 16)
-    extends Device with (CPU => Unit):
+    extends Device with (Processor => Unit):
   val name = "PL011"
   val size = 0x1000 // 4KB region as per ARM spec
 
@@ -163,7 +163,7 @@ class PL011(val base: Long, intc: InterruptController, irq: Int, onTx: Int => Un
         updateInterrupt()
       case _ =>
 
-  def apply(cpu: CPU): Unit =
+  def apply(cpu: Processor): Unit =
     if (cr & UARTEN) == 0 then return
     // Transmit: drain TX FIFO one byte per tick
     if txFifo.nonEmpty && (cr & TXE) != 0 then

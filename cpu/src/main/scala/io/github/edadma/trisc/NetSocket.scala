@@ -63,7 +63,7 @@ class NetSocket(
     irq: Int,
     transport: NetTransport,
     maxConns: Int = 8,
-) extends Device with (CPU => Unit):
+) extends Device with (Processor => Unit):
   val name = "NetSocket"
   val size = 32
 
@@ -236,7 +236,7 @@ class NetSocket(
           conns(connId) = null
       case _ =>
 
-  def apply(cpu: CPU): Unit =
+  def apply(cpu: Processor): Unit =
     if ier == 0 then return
     // Check for events that should raise interrupts
     var raised = false

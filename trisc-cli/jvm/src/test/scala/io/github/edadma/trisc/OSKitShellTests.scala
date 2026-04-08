@@ -105,7 +105,7 @@ import oskit.services.sleep
     linked.load(mem)
 
     val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
-    val keyInjector: CPU => Unit = cpu => {
+    val keyInjector: Processor => Unit = cpu => {
       // Use CPU cycle count so key delivery is deterministic
       val cycle = cpu.cycles
       while pending.nonEmpty && cycle >= pending.head._1 do
@@ -119,7 +119,7 @@ import oskit.services.sleep
           metaDown = (mods & 8) != 0,
         )
     }
-    val ticks: Seq[CPU => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
+    val ticks: Seq[Processor => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
     val cpu                     = new CPU(mem, ticks) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
