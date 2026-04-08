@@ -18,7 +18,13 @@ class BuildOSLogin extends OSKitTestHelpers {
   private lazy val tfsSysl: String    = readLsysl("oskit/fs/tfs.lsysl")
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val nshSysl: String    = readLsysl("oskit/apps/nsh.lsysl")
+  private lazy val initSysl: String   = readLsysl("oskit/apps/init.lsysl")
   private lazy val loginSysl: String  = readLsysl("oskit/apps/login.lsysl")
+  private lazy val debugSysl: String  = readLsysl("std/debug/debug.lsysl")
+  private lazy val memSysl: String    = readLsysl("std/mem/mem.lsysl")
+  private lazy val sha256Sysl: String = readLsysl("std/crypto/sha256/sha256.lsysl")
+  private lazy val hmacSysl: String   = readLsysl("std/crypto/hmac/hmac.lsysl")
+  private lazy val pbkdf2Sysl: String = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
 
   "build OS login TOF" in {
     val bootTof = assemble(bootAsm, relocatable = true)
@@ -38,24 +44,18 @@ class BuildOSLogin extends OSKitTestHelpers {
       "posix/string/string"        -> posixStringSysl,
       "posix/ctype/ctype"          -> posixCtypeSysl,
       "posix/stdlib/alloc"         -> posixAllocSysl,
-      "oskit/apps/nsh"              -> nshSysl,
-      "oskit/apps/login"            -> loginSysl,
+      "std/debug/debug"             -> debugSysl,
+      "std/mem/mem"                 -> memSysl,
+      "std/crypto/sha256/sha256"   -> sha256Sysl,
+      "std/crypto/hmac/hmac"       -> hmacSysl,
+      "std/crypto/pbkdf2/pbkdf2"   -> pbkdf2Sysl,
+      "oskit/apps/nsh/nsh"           -> nshSysl,
+      "oskit/apps/init/init"        -> initSysl,
+      "oskit/apps/login/login"      -> loginSysl,
       "app" ->
         """import oskit.kernel.*
 import oskit.ipc.*
-import oskit.drivers.disk.disk_server
-import oskit.servers.tfs_server
-import oskit.drivers.tty.tty_server
-import oskit.apps.login
-import oskit.services.sleep
-          |
-          |init()
-          |    create_thread(disk_server, 0x80000, 0x80000, "disk")
-          |    sleep(5)
-          |    create_thread(tfs_server, 0x90000, 0x90000, "tfs")
-          |    create_thread(tty_server, 0xA0000, 0xA0000, "tty")
-          |    sleep(5)
-          |    create_thread(login, 0xB0000, 0xB0000, "login")
+import oskit.apps.init.{init}
           |
           |kernel_main() -> int
           |    ipc_init()

@@ -33,4 +33,33 @@ class Pbkdf2CompatTests extends AnyFreeSpec with Matchers {
   "JVM PBKDF2 matches sysl test vector c=100" in {
     jvmPbkdf2("password", "salt", 100) shouldBe expectedC100
   }
+
+  "compute hash for default root password" in {
+    val hash = jvmPbkdf2("toor", "slix", 1)
+    info(s"root hash: $hash")
+    hash.length shouldBe 64
+  }
+
+  "compute hash for user ed" in {
+    val hash = jvmPbkdf2("ed", "slix", 1)
+    info(s"ed hash: $hash")
+    hash.length shouldBe 64
+  }
+
+  "SHA accelerator device: SHA-256 abc" in {
+    val sha = new ShaAccelerator(0x1000L)
+    // "abc" padded to 512-bit block
+    val block = Array(
+      0x61626380, 0x00000000, 0x00000000, 0x00000000,
+      0x00000000, 0x00000000, 0x00000000, 0x00000000,
+      0x00000000, 0x00000000, 0x00000000, 0x00000000,
+      0x00000000, 0x00000000, 0x00000000, 0x00000018,
+    )
+    for i <- 0 until 16 do
+      sha.writeInt(0x1000L + i * 4, block(i))
+    sha.writeInt(0x1000L + 0x40, 1) // SHA_START
+    val h0 = sha.readInt(0x1000L)
+    info(f"TEXT[0] = 0x${h0.toLong & 0xFFFFFFFFL}%08x (expected 0xba7816bf)")
+    (h0.toLong & 0xFFFFFFFFL) shouldBe 0xba7816bfL
+  }
 }

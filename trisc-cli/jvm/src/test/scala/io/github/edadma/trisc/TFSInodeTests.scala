@@ -13,9 +13,9 @@ class TFSInodeTests extends TFSTestHelpers {
     val (_, output) = runTFS(
       """import oskit.fs.*
         |main() -> int
-        |    var ibuf: [32]i8
+        |    var ibuf: [32]byte
         |    var i = 0
-        |    val p: *i8 = &ibuf
+        |    val p: *byte = &ibuf
         |    while i < 32
         |        p[i] = 0
         |        i += 1
@@ -35,9 +35,9 @@ class TFSInodeTests extends TFSTestHelpers {
     val (_, output) = runTFS(
       """import oskit.fs.*
         |main() -> int
-        |    var ibuf: [32]i8
+        |    var ibuf: [32]byte
         |    var i = 0
-        |    val p: *i8 = &ibuf
+        |    val p: *byte = &ibuf
         |    while i < 32
         |        p[i] = 0
         |        i += 1
@@ -56,9 +56,9 @@ class TFSInodeTests extends TFSTestHelpers {
     val (_, output) = runTFS(
       """import oskit.fs.*
         |main() -> int
-        |    var ibuf: [32]i8
+        |    var ibuf: [32]byte
         |    var i = 0
-        |    val p: *i8 = &ibuf
+        |    val p: *byte = &ibuf
         |    while i < 32
         |        p[i] = 0
         |        i += 1
@@ -76,9 +76,9 @@ class TFSInodeTests extends TFSTestHelpers {
     val (_, output) = runTFS(
       """import oskit.fs.*
         |main() -> int
-        |    var ibuf: [32]i8
+        |    var ibuf: [32]byte
         |    var i = 0
-        |    val p: *i8 = &ibuf
+        |    val p: *byte = &ibuf
         |    while i < 32
         |        p[i] = 0
         |        i += 1
@@ -99,8 +99,8 @@ class TFSInodeTests extends TFSTestHelpers {
     val (_, output) = runTFS(
       """import oskit.fs.*
         |main() -> int
-        |    var ibuf: [32]i8
-        |    val p: *i8 = &ibuf[0]
+        |    var ibuf: [32]byte
+        |    val p: *byte = &ibuf[0]
         |    var i = 0
         |    while i < 32
         |        p[i] = 0
@@ -121,7 +121,7 @@ class TFSInodeTests extends TFSTestHelpers {
       """import oskit.fs.*
         |main() -> int
         |    tfs_init()
-        |    var ibuf: [32]i8
+        |    var ibuf: [32]byte
         |    tfs_read_inode(1, &ibuf[0])
         |    // mtime and ctime should be 0 (from format with now=0)
         |    if ino_mtime(&ibuf[0]) == 0
@@ -137,8 +137,8 @@ class TFSInodeTests extends TFSTestHelpers {
     val (_, output) = runTFS(
       """import oskit.fs.*
         |main() -> int
-        |    var ibuf: [32]i8
-        |    val p: *i8 = &ibuf[0]
+        |    var ibuf: [32]byte
+        |    val p: *byte = &ibuf[0]
         |    var i = 0
         |    while i < 32
         |        p[i] = 0
@@ -157,8 +157,8 @@ class TFSInodeTests extends TFSTestHelpers {
     val (_, output) = runTFS(
       """import oskit.fs.*
         |main() -> int
-        |    var ibuf: [32]i8
-        |    val p: *i8 = &ibuf[0]
+        |    var ibuf: [32]byte
+        |    val p: *byte = &ibuf[0]
         |    var i = 0
         |    while i < 32
         |        p[i] = 0
@@ -180,7 +180,7 @@ class TFSInodeTests extends TFSTestHelpers {
       """import oskit.fs.*
         |main() -> int
         |    tfs_init()
-        |    var ibuf: [32]i8
+        |    var ibuf: [32]byte
         |    tfs_read_inode(1, &ibuf)
         |    // Root should be a directory
         |    if ino_type(&ibuf) == 2
@@ -205,7 +205,7 @@ class TFSInodeTests extends TFSTestHelpers {
         |main() -> int
         |    tfs_init()
         |    // inode 3 should be tty0 (root=1, dev=2, tty0=3)
-        |    var ibuf: [32]i8
+        |    var ibuf: [32]byte
         |    tfs_read_inode(3, &ibuf)
         |    if ino_type(&ibuf) == 3
         |        putchar(67)
@@ -226,12 +226,12 @@ class TFSInodeTests extends TFSTestHelpers {
       """import oskit.fs.*
         |main() -> int
         |    tfs_init()
-        |    var ibuf: [32]i8
+        |    var ibuf: [32]byte
         |    tfs_read_inode(1, &ibuf)
         |    val sz1 = ino_size(&ibuf)
         |    tfs_write_inode(1, &ibuf)
         |    // Re-read and verify
-        |    var ibuf2: [32]i8
+        |    var ibuf2: [32]byte
         |    tfs_read_inode(1, &ibuf2)
         |    val sz2 = ino_size(&ibuf2)
         |    if sz1 == sz2
@@ -250,7 +250,7 @@ class TFSInodeTests extends TFSTestHelpers {
       """import oskit.fs.*
         |main() -> int
         |    tfs_init()
-        |    var ibuf: [32]i8
+        |    var ibuf: [32]byte
         |    tfs_read_inode(1, &ibuf[0])
         |    val blk = get_file_block(&ibuf[0], 0)
         |    if blk > 0
@@ -266,8 +266,8 @@ class TFSInodeTests extends TFSTestHelpers {
     val (_, output) = runTFS(
       """import oskit.fs.*
         |main() -> int
-        |    var ibuf: [32]i8
-        |    val p: *i8 = &ibuf[0]
+        |    var ibuf: [32]byte
+        |    val p: *byte = &ibuf[0]
         |    var i = 0
         |    while i < 32
         |        p[i] = 0

@@ -54,7 +54,7 @@ class TFSHelperTests extends TFSTestHelpers {
     val (_, output) = runTFS(
       """import oskit.fs.*
         |main() -> int
-        |    var buf: [4]i8
+        |    var buf: [4]byte
         |    buf[0] = 0x01
         |    buf[1] = 0x02
         |    val v = read_i16(&buf)
@@ -71,7 +71,7 @@ class TFSHelperTests extends TFSTestHelpers {
     val (_, output) = runTFS(
       """import oskit.fs.*
         |main() -> int
-        |    var buf: [4]i8
+        |    var buf: [4]byte
         |    buf[0] = 0x54
         |    buf[1] = 0x46
         |    buf[2] = 0x53
@@ -90,7 +90,7 @@ class TFSHelperTests extends TFSTestHelpers {
     val (_, output) = runTFS(
       """import oskit.fs.*
         |main() -> int
-        |    var buf: [4]i8
+        |    var buf: [4]byte
         |    write_i16(&buf, 0x1234)
         |    val v = read_i16(&buf)
         |    if v == 0x1234
@@ -106,7 +106,7 @@ class TFSHelperTests extends TFSTestHelpers {
     val (_, output) = runTFS(
       """import oskit.fs.*
         |main() -> int
-        |    var buf: [4]i8
+        |    var buf: [4]byte
         |    write_i32(&buf, 0x12345678)
         |    val v = read_i32(&buf)
         |    if v == 0x12345678

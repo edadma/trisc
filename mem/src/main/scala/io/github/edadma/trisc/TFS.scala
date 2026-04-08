@@ -282,9 +282,10 @@ object TFS:
     private def extractContent(parts: Seq[String]): Array[Byte] =
       if parts.length > 2 then
         val quoted = parts.drop(2).mkString(" ")
-        if quoted.startsWith("\"") && quoted.endsWith("\"") then
-          quoted.substring(1, quoted.length - 1).getBytes("UTF-8")
-        else quoted.getBytes("UTF-8")
+        val raw = if quoted.startsWith("\"") && quoted.endsWith("\"") then
+          quoted.substring(1, quoted.length - 1)
+        else quoted
+        raw.replace("\\n", "\n").replace("\\t", "\t").getBytes("UTF-8")
       else Array.emptyByteArray
 
     private def splitLine(line: String): Seq[String] =

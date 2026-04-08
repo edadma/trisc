@@ -59,10 +59,10 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |main() -> int = 0
         |""".stripMargin))
     val text = meta.toSmeta
-    text should include("SMETA v1")
+    text should include(s"SMETA v${ModuleMeta.SMETA_VERSION}")
     text should include("FUNC add 2 i32 i32 i32")
     text should include("FUNC main 0 i32")
-    val meta2 = ModuleMeta.fromSmeta(text)
+    val meta2 = ModuleMeta.fromSmeta(text).get
     meta2.symbols.length shouldBe 2
     meta2.symbols(0).name shouldBe "add"
     meta2.symbols(0).typ shouldBe SymbolMeta.Kind.Func(List(I32, I32), I32)
@@ -75,7 +75,7 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |""".stripMargin))
     val text = meta.toSmeta
     text should include("PRIVATE FUNC helper")
-    val meta2 = ModuleMeta.fromSmeta(text)
+    val meta2 = ModuleMeta.fromSmeta(text).get
     meta2.symbols.find(_.name == "helper").get.isPrivate shouldBe true
     meta2.symbols.find(_.name == "main").get.isPrivate shouldBe false
   }
@@ -87,7 +87,7 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |""".stripMargin))
     val text = meta.toSmeta
     text should include("DATA x i32")
-    val meta2 = ModuleMeta.fromSmeta(text)
+    val meta2 = ModuleMeta.fromSmeta(text).get
     meta2.symbols.find(_.name == "x").get.typ shouldBe SymbolMeta.Kind.Data(I32)
   }
 
@@ -101,7 +101,7 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |""".stripMargin))
     val text = meta.toSmeta
     text should include("FUNC swap 2 ptr i32 ptr i32 void")
-    val meta2 = ModuleMeta.fromSmeta(text)
+    val meta2 = ModuleMeta.fromSmeta(text).get
     val swap = meta2.symbols.find(_.name == "swap").get
     swap.typ shouldBe SymbolMeta.Kind.Func(List(PtrType(I32), PtrType(I32)), VoidType)
   }
@@ -113,7 +113,7 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |""".stripMargin))
     val text = meta.toSmeta
     text should include("DATA buf arr 10 i32")
-    val meta2 = ModuleMeta.fromSmeta(text)
+    val meta2 = ModuleMeta.fromSmeta(text).get
     meta2.symbols.find(_.name == "buf").get.typ shouldBe SymbolMeta.Kind.Data(ArrayType(I32, 10))
   }
 
@@ -125,7 +125,7 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |""".stripMargin))
     val text = meta.toSmeta
     text should include("FUNC doNothing 0 void")
-    val meta2 = ModuleMeta.fromSmeta(text)
+    val meta2 = ModuleMeta.fromSmeta(text).get
     meta2.symbols.find(_.name == "doNothing").get.typ shouldBe SymbolMeta.Kind.Func(Nil, VoidType)
   }
 
@@ -154,15 +154,19 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
 
   // ===== Error handling =====
 
-  "fromSmeta rejects missing header" in {
-    an[IllegalArgumentException] should be thrownBy ModuleMeta.fromSmeta("FUNC add 0 i32\n")
+  "fromSmeta returns None for missing header" in {
+    ModuleMeta.fromSmeta("FUNC add 0 i32\n") shouldBe None
   }
 
-  "fromSmeta rejects empty input" in {
-    an[IllegalArgumentException] should be thrownBy ModuleMeta.fromSmeta("")
+  "fromSmeta returns None for empty input" in {
+    ModuleMeta.fromSmeta("") shouldBe None
   }
 
   "fromSmeta rejects unknown kind" in {
-    an[IllegalArgumentException] should be thrownBy ModuleMeta.fromSmeta("SMETA v1\nBLOB foo\n")
+    an[IllegalArgumentException] should be thrownBy ModuleMeta.fromSmeta(s"SMETA v${ModuleMeta.SMETA_VERSION}\nBLOB foo\n")
+  }
+
+  "fromSmeta returns None for stale version" in {
+    ModuleMeta.fromSmeta("SMETA v1\nFUNC add 0 i32\n") shouldBe None
   }
 }

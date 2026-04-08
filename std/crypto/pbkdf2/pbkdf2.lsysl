@@ -10,7 +10,7 @@ Dependencies: std.crypto.hmac.
 
     module std.crypto.pbkdf2
 
-    import std.crypto.hmac.{hmac_sha256}
+    import std.crypto.hmac.{hmac_sha256, hmac_sha256_hw}
     import std.mem.{copy}
 
 
@@ -46,6 +46,34 @@ a 32-byte key and writes it to `out`.
         // U2..Uc: each round feeds U back through HMAC and XORs into T
         for i in 1..<iterations
             hmac_sha256(password, U[:], U[:])
+            for j in 0..<HASH_SIZE
+                T[j] ^= U[j]
+
+        copy(out, T[:])
+
+
+pbkdf2_hmac_sha256_hw — hardware-accelerated path
+--------------------------------------------------
+
+Same algorithm, uses `hmac_sha256_hw` for the HMAC calls.
+
+    pbkdf2_hmac_sha256_hw(password: []byte, salt: []byte, iterations: int, out: []byte)
+        var U: [32]byte
+        var T: [32]byte
+
+        val slen = len(salt)
+        val sbuf = (new [slen + 4]byte)[:]
+        copy(sbuf, salt)
+        sbuf[slen]     = 0u8
+        sbuf[slen + 1] = 0u8
+        sbuf[slen + 2] = 0u8
+        sbuf[slen + 3] = 1u8
+
+        hmac_sha256_hw(password, sbuf, U[:])
+        copy(T[:], U[:])
+
+        for i in 1..<iterations
+            hmac_sha256_hw(password, U[:], U[:])
             for j in 0..<HASH_SIZE
                 T[j] ^= U[j]
 

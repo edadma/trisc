@@ -99,14 +99,16 @@ class SyslCastTests extends SyslTestHelpers {
     (new SyslAnalyzer).analyze(ast) // should not throw
   }
 
-  "analyzer rejects cast from pointer to bool" in {
+  "pointer to bool cast is null check" in {
     val Right(ast) = (new SyslParser).parseProgram(
       """main() -> int
         |    x = 42
         |    p = &x
         |    if bool(p) then 1 else 0
         |""".stripMargin): @unchecked
-    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+    val typed = (new SyslAnalyzer).analyze(ast)
+    val interp = new SyslInterpreter()
+    interp.run(typed) shouldBe 1
   }
 
   "analyzer infers correct type from cast" in {

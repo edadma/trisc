@@ -83,7 +83,7 @@ import oskit.ipc.*
           |
           |server()
           |    val port = port_create()
-          |    var buf: [64]i8
+          |    var buf: [64]byte
           |    val sender = ipc_recv(port, &buf[0], 64)
           |    // Check first byte of message
           |    if buf[0] == 72
@@ -91,7 +91,7 @@ import oskit.ipc.*
           |    else
           |        putc('N')
           |    // Reply with 'O' 'K'
-          |    var reply: [2]i8
+          |    var reply: [2]byte
           |    reply[0] = 79
           |    reply[1] = 75
           |    ipc_reply(sender, &reply[0], 2)
@@ -99,10 +99,10 @@ import oskit.ipc.*
           |client()
           |    sleep(5)
           |    // Send "Hi" (72, 105)
-          |    var msg: [2]i8
+          |    var msg: [2]byte
           |    msg[0] = 72
           |    msg[1] = 105
-          |    var reply: [64]i8
+          |    var reply: [64]byte
           |    ipc_send(0, &msg[0], 2, &reply[0], 64)
           |    // Check reply
           |    if reply[0] == 79
@@ -135,33 +135,33 @@ import oskit.ipc.*
           |    val port = port_create()
           |    sleep(20)
           |    // Both clients should be queued by now
-          |    var buf: [64]i8
+          |    var buf: [64]byte
           |    // First recv — should get client A (sent first)
           |    val s1 = ipc_recv(port, &buf[0], 64)
           |    putc(buf[0])
-          |    var r1: [1]i8
+          |    var r1: [1]byte
           |    r1[0] = 1
           |    ipc_reply(s1, &r1[0], 1)
           |    // Second recv — should get client B
           |    val s2 = ipc_recv(port, &buf[0], 64)
           |    putc(buf[0])
-          |    var r2: [1]i8
+          |    var r2: [1]byte
           |    r2[0] = 2
           |    ipc_reply(s2, &r2[0], 1)
           |
           |clientA()
           |    sleep(5)
-          |    var msg: [1]i8
+          |    var msg: [1]byte
           |    msg[0] = 65
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    ipc_send(0, &msg[0], 1, &reply[0], 1)
           |    putc('a')
           |
           |clientB()
           |    sleep(10)
-          |    var msg: [1]i8
+          |    var msg: [1]byte
           |    msg[0] = 66
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    ipc_send(0, &msg[0], 1, &reply[0], 1)
           |    putc('b')
           |""".stripMargin
@@ -189,9 +189,9 @@ import oskit.ipc.*
           |    first_thread_ssp()
           |
           |task()
-          |    var msg: [1]i8
+          |    var msg: [1]byte
           |    msg[0] = 1
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    val r = ipc_send(99, &msg[0], 1, &reply[0], 1)
           |    if r == -1
           |        putc('E')
@@ -227,9 +227,9 @@ import oskit.ipc.*
           |
           |client()
           |    sleep(5)
-          |    var msg: [1]i8
+          |    var msg: [1]byte
           |    msg[0] = 1
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    val r = ipc_send(0, &msg[0], 1, &reply[0], 1)
           |    if r == -1
           |        putc('W')
@@ -261,7 +261,7 @@ import oskit.ipc.*
           |
           |thief()
           |    sleep(5)
-          |    var buf: [64]i8
+          |    var buf: [64]byte
           |    val r = ipc_recv(0, &buf[0], 64)
           |    if r == -1
           |        putc('E')
@@ -291,19 +291,19 @@ import oskit.ipc.*
           |    val port = port_create()
           |    sleep(20)
           |    putc('R')
-          |    var buf: [64]i8
+          |    var buf: [64]byte
           |    val sender = ipc_recv(port, &buf[0], 64)
           |    putc('D')
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    reply[0] = 1
           |    ipc_reply(sender, &reply[0], 1)
           |
           |client()
           |    sleep(5)
           |    putc('S')
-          |    var msg: [1]i8
+          |    var msg: [1]byte
           |    msg[0] = 42
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    ipc_send(0, &msg[0], 1, &reply[0], 1)
           |    putc('E')
           |""".stripMargin
@@ -342,9 +342,9 @@ import oskit.ipc.*
           |
           |client()
           |    sleep(10)
-          |    var msg: [1]i8
+          |    var msg: [1]byte
           |    msg[0] = 1
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    val r = ipc_send(0, &msg[0], 1, &reply[0], 1)
           |    if r == -1
           |        putc('E')
@@ -372,7 +372,7 @@ import oskit.ipc.*
           |
           |task()
           |    // Try to reply to thread 1 which is not send-blocked
-          |    var msg: [1]i8
+          |    var msg: [1]byte
           |    msg[0] = 1
           |    ipc_reply(1, &msg[0], 1)
           |    putc('D')
@@ -434,7 +434,7 @@ import oskit.ipc.*
           |server()
           |    val port = port_create()
           |    // Recv with small buffer (2 bytes)
-          |    var buf: [2]i8
+          |    var buf: [2]byte
           |    buf[0] = 0
           |    buf[1] = 0
           |    val sender = ipc_recv(port, &buf[0], 2)
@@ -442,19 +442,19 @@ import oskit.ipc.*
           |    if buf[0] == 65
           |        if buf[1] == 66
           |            putc('T')
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    reply[0] = 1
           |    ipc_reply(sender, &reply[0], 1)
           |
           |client()
           |    sleep(5)
           |    // Send 4 bytes: A B C D
-          |    var msg: [4]i8
+          |    var msg: [4]byte
           |    msg[0] = 65
           |    msg[1] = 66
           |    msg[2] = 67
           |    msg[3] = 68
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    ipc_send(0, &msg[0], 4, &reply[0], 1)
           |    putc('!')
           |""".stripMargin
@@ -481,10 +481,10 @@ import oskit.ipc.*
           |
           |server()
           |    val port = port_create()
-          |    var buf: [64]i8
+          |    var buf: [64]byte
           |    val sender = ipc_recv(port, &buf[0], 64)
           |    // Reply with 4 bytes
-          |    var reply: [4]i8
+          |    var reply: [4]byte
           |    reply[0] = 65
           |    reply[1] = 66
           |    reply[2] = 67
@@ -493,10 +493,10 @@ import oskit.ipc.*
           |
           |client()
           |    sleep(5)
-          |    var msg: [1]i8
+          |    var msg: [1]byte
           |    msg[0] = 1
           |    // Reply buffer only 2 bytes — should truncate
-          |    var reply: [2]i8
+          |    var reply: [2]byte
           |    reply[0] = 0
           |    reply[1] = 0
           |    ipc_send(0, &msg[0], 1, &reply[0], 2)
@@ -528,12 +528,12 @@ import oskit.ipc.*
           |server()
           |    val port = port_create()
           |    // Handle two requests then close
-          |    var buf: [64]i8
+          |    var buf: [64]byte
           |    var i = 0
           |    while i < 2
           |        val sender = ipc_recv(port, &buf[0], 64)
           |        putc(buf[0])
-          |        var reply: [1]i8
+          |        var reply: [1]byte
           |        reply[0] = buf[0] + 32
           |        ipc_reply(sender, &reply[0], 1)
           |        i += 1
@@ -542,9 +542,9 @@ import oskit.ipc.*
           |
           |clientA()
           |    sleep(5)
-          |    var msg: [1]i8
+          |    var msg: [1]byte
           |    msg[0] = 65
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    ipc_send(0, &msg[0], 1, &reply[0], 1)
           |    // Reply should be 'a' (65 + 32 = 97)
           |    if reply[0] == 97
@@ -552,9 +552,9 @@ import oskit.ipc.*
           |
           |clientB()
           |    sleep(10)
-          |    var msg: [1]i8
+          |    var msg: [1]byte
           |    msg[0] = 66
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    ipc_send(0, &msg[0], 1, &reply[0], 1)
           |    // Reply should be 'b' (66 + 32 = 98)
           |    if reply[0] == 98
@@ -578,7 +578,7 @@ import oskit.ipc.*
 import oskit.services.*
 import oskit.ipc.*
           |
-          |var tty_name: [5]i8
+          |var tty_name: [5]byte
           |
           |kernel_main() -> int
           |    tty_name[0] = 116
@@ -597,10 +597,10 @@ import oskit.ipc.*
           |    val r = port_register(port, &tty_name[0])
           |    if r == 0
           |        putc('R')
-          |    var buf: [64]i8
+          |    var buf: [64]byte
           |    val sender = ipc_recv(port, &buf[0], 64)
           |    putc(buf[0])
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    reply[0] = 1
           |    ipc_reply(sender, &reply[0], 1)
           |
@@ -610,9 +610,9 @@ import oskit.ipc.*
           |    val port = port_lookup(&tty_name[0])
           |    if port >= 0
           |        putc('L')
-          |    var msg: [1]i8
+          |    var msg: [1]byte
           |    msg[0] = 72
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    ipc_send(port, &msg[0], 1, &reply[0], 1)
           |    putc('!')
           |""".stripMargin
@@ -632,7 +632,7 @@ import oskit.ipc.*
 import oskit.services.*
 import oskit.ipc.*
           |
-          |var bad_name: [4]i8
+          |var bad_name: [4]byte
           |
           |kernel_main() -> int
           |    bad_name[0] = 120
@@ -675,18 +675,18 @@ import oskit.ipc.*
           |    // Server loop: handle requests until told to stop
           |    var running = 1
           |    while running == 1
-          |        var buf: [64]i8
+          |        var buf: [64]byte
           |        val sender = ipc_recv(port, &buf[0], 64)
           |        if buf[0] == 0
           |            // Stop command
           |            running = 0
-          |            var reply: [1]i8
+          |            var reply: [1]byte
           |            reply[0] = 0
           |            ipc_reply(sender, &reply[0], 1)
           |        else
           |            // Echo command: reply with same byte + 32
           |            putc(buf[0])
-          |            var reply: [1]i8
+          |            var reply: [1]byte
           |            reply[0] = buf[0] + 32
           |            ipc_reply(sender, &reply[0], 1)
           |    putc('Q')
@@ -694,8 +694,8 @@ import oskit.ipc.*
           |client()
           |    sleep(5)
           |    // Send 3 requests then stop
-          |    var msg: [1]i8
-          |    var reply: [1]i8
+          |    var msg: [1]byte
+          |    var reply: [1]byte
           |
           |    msg[0] = 65
           |    ipc_send(0, &msg[0], 1, &reply[0], 1)
@@ -736,7 +736,7 @@ import oskit.ipc.*
 import oskit.services.*
 import oskit.ipc.*
           |
-          |var name: [4]i8
+          |var name: [4]byte
           |
           |kernel_main() -> int
           |    name[0] = 97
@@ -774,7 +774,7 @@ import oskit.ipc.*
 import oskit.services.*
 import oskit.ipc.*
           |
-          |var name: [4]i8
+          |var name: [4]byte
           |
           |kernel_main() -> int
           |    name[0] = 97
@@ -813,8 +813,8 @@ import oskit.ipc.*
 import oskit.services.*
 import oskit.ipc.*
           |
-          |var n_tty: [5]i8
-          |var n_dsk: [5]i8
+          |var n_tty: [5]byte
+          |var n_dsk: [5]byte
           |
           |kernel_main() -> int
           |    n_tty[0] = 116
@@ -873,9 +873,9 @@ import oskit.ipc.*
           |
           |client()
           |    sleep(5)
-          |    var msg: [1]i8
+          |    var msg: [1]byte
           |    msg[0] = 1
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    val r = ipc_send_timeout(0, &msg[0], 1, &reply[0], 1, 30)
           |    if r == -2
           |        putc('T')
@@ -903,18 +903,18 @@ import oskit.ipc.*
           |
           |server()
           |    val port = port_create()
-          |    var buf: [64]i8
+          |    var buf: [64]byte
           |    val sender = ipc_recv(port, &buf[0], 64)
           |    putc(buf[0])
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    reply[0] = 1
           |    ipc_reply(sender, &reply[0], 1)
           |
           |client()
           |    sleep(5)
-          |    var msg: [1]i8
+          |    var msg: [1]byte
           |    msg[0] = 72
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    val r = ipc_send_timeout(0, &msg[0], 1, &reply[0], 1, 100)
           |    if r == 0
           |        putc('S')
@@ -945,18 +945,18 @@ import oskit.ipc.*
           |server()
           |    val port = port_create()
           |    sleep(20)
-          |    var buf: [64]i8
+          |    var buf: [64]byte
           |    val sender = ipc_recv(port, &buf[0], 64)
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    reply[0] = 1
           |    ipc_reply(sender, &reply[0], 1)
           |    putc('D')
           |
           |client()
           |    sleep(5)
-          |    var msg: [1]i8
+          |    var msg: [1]byte
           |    msg[0] = 1
-          |    var reply: [1]i8
+          |    var reply: [1]byte
           |    val r = ipc_send_timeout(0, &msg[0], 1, &reply[0], 1, 100)
           |    if r == 0
           |        putc('S')
@@ -977,8 +977,8 @@ import oskit.ipc.*
 import oskit.services.*
 import oskit.ipc.*
           |
-          |var name1: [4]i8
-          |var name2: [4]i8
+          |var name1: [4]byte
+          |var name2: [4]byte
           |
           |kernel_main() -> int
           |    name1[0] = 97

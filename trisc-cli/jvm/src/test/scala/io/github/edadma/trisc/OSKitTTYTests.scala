@@ -114,7 +114,7 @@ import oskit.ipc.*
 import oskit.drivers.tty.*
 import oskit.drivers.kbd.*
           |
-          |var hello: [6]i8
+          |var hello: [6]byte
           |
           |kernel_main() -> int
           |    hello[0] = 72
@@ -183,7 +183,7 @@ import oskit.ipc.*
 import oskit.drivers.tty.*
 import oskit.drivers.kbd.*
           |
-          |var tname: [4]i8
+          |var tname: [4]byte
           |
           |kernel_main() -> int
           |    tname[0] = 116
@@ -329,7 +329,7 @@ import oskit.drivers.kbd.*
             |    keyboard_set_notify(thread_id())
             |    val port = port_create()
             |    putc('W')
-            |    var buf: [64]i8
+            |    var buf: [64]byte
             |    val result = ipc_recv_notify(port, &buf[0], 64)
             |    if result == -2
             |        putc('N')
@@ -371,7 +371,7 @@ import oskit.drivers.kbd.*
             |    sleep(50)
             |    putc('R')
             |    // Manual tty_getc with diagnostics
-            |    var tname: [4]i8
+            |    var tname: [4]byte
             |    tname[0] = 116
             |    tname[1] = 116
             |    tname[2] = 121
@@ -381,10 +381,10 @@ import oskit.drivers.kbd.*
             |        putc('P')
             |    else
             |        putc('p')
-            |    var msg: [2]i8
+            |    var msg: [2]byte
             |    msg[0] = 2
             |    msg[1] = 0
-            |    var reply: [2]i8
+            |    var reply: [2]byte
             |    val r = ipc_send(port, &msg[0], 2, &reply[0], 2)
             |    putc('S')
             |    putc(reply[1])

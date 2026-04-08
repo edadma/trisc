@@ -1,28 +1,135 @@
 OSKit Init — System Initialization
 
-The first userspace process. Starts system servers in the
-correct order, waits for them to register their IPC ports,
-then launches the shell.
+The first userspace process. Starts core servers in hardcoded
+order (they must run before the filesystem is readable), then
+reads `/etc/ttytab` to spawn login sessions.
 
 Boot sequence:
 1. Disk server — owns block device hardware
 2. TFS server — filesystem, needs disk server
 3. TTY server — terminal, needs keyboard hardware
-4. Shell — interactive, needs TTY and TFS
+4. Read `/etc/ttytab` — spawn login/shell per terminal
 
-    module oskit.apps
+Minix 3-style: core servers are hardcoded because init can't
+read config files until the filesystem is up.
+
+    module oskit.apps.init
 
     import oskit.kernel.{create_thread}
     import oskit.services.{sleep}
     import oskit.drivers.disk.{disk_server}
-    import oskit.servers.{tfs_server}
+    import oskit.servers.{tfs_server, fs_open, fs_read}
     import oskit.drivers.tty.{tty_server}
+    import oskit.apps.login.{login}
+    import oskit.apps.nsh.{nsh}
 
-    extern shell()
+Stack addresses for spawned sessions. Each thread gets
+0x4000 (16KB) with user and system stacks separated by
+0x2000. Session slots start at 0x8C000.
 
-Stack layout — placed in upper RAM to avoid code/data segment
-overlap. Each thread gets 0x4000 (16KB) with user and system
-stacks separated by 0x2000.
+    val SESSION_BASE = 0x8C000
+    val SESSION_STRIDE = 0x4000
+
+Parse `/etc/ttytab` and spawn a thread for each entry.
+Format: `terminal command` — one entry per line.
+Supported commands: `login`, `nsh`.
+
+    spawn_sessions()
+        var buf: [256]byte
+        val ino = fs_open("/etc/ttytab")
+        if ino < 0
+            // No ttytab — fall back to single login
+            create_thread(login, SESSION_BASE, SESSION_BASE - 0x2000, "login")
+            return
+        val nr = fs_read(ino, buf, 0, 256)
+        if nr <= 0
+            create_thread(login, SESSION_BASE, SESSION_BASE - 0x2000, "login")
+            return
+
+        var pos = 0
+        var slot = 0
+
+        while pos < nr
+            // Skip leading whitespace
+            while pos < nr
+                if buf[pos] != ' '
+                    if buf[pos] != '\t'
+                        break
+                pos += 1
+
+            // Skip comment lines
+            if pos < nr
+                if buf[pos] == '#'
+                    while pos < nr
+                        if buf[pos] == '\n'
+                            break
+                        pos += 1
+                    if pos < nr
+                        pos += 1
+                    continue
+
+            // Skip blank lines
+            if pos >= nr
+                break
+            if buf[pos] == '\n'
+                pos += 1
+                continue
+
+            // Parse terminal name (skip it — not used yet)
+            while pos < nr
+                if buf[pos] == ' '
+                    break
+                if buf[pos] == '\t'
+                    break
+                if buf[pos] == '\n'
+                    break
+                pos += 1
+
+            // Skip whitespace between fields
+            while pos < nr
+                if buf[pos] != ' '
+                    if buf[pos] != '\t'
+                        break
+                pos += 1
+
+            // Parse command name
+            val cmd_start = pos
+            while pos < nr
+                if buf[pos] == ' '
+                    break
+                if buf[pos] == '\t'
+                    break
+                if buf[pos] == '\n'
+                    break
+                pos += 1
+            val cmd_len = pos - cmd_start
+
+            // Skip to end of line
+            while pos < nr
+                if buf[pos] == '\n'
+                    break
+                pos += 1
+            if pos < nr
+                pos += 1
+
+            // Spawn based on command
+            if cmd_len > 0
+                val usp = SESSION_BASE + slot * SESSION_STRIDE
+                val ssp = usp - 0x2000
+                if cmd_len == 5
+                    if buf[cmd_start] == 'l'
+                        if buf[cmd_start + 1] == 'o'
+                            if buf[cmd_start + 2] == 'g'
+                                if buf[cmd_start + 3] == 'i'
+                                    if buf[cmd_start + 4] == 'n'
+                                        create_thread(login, i64(usp), i64(ssp), "login")
+                                        slot += 1
+                if cmd_len == 3
+                    if buf[cmd_start] == 'n'
+                        if buf[cmd_start + 1] == 's'
+                            if buf[cmd_start + 2] == 'h'
+                                create_thread(nsh, i64(usp), i64(ssp), "nsh")
+                                slot += 1
 
     init()
         // Start disk server first — TFS depends on it
@@ -36,5 +143,5 @@ stacks separated by 0x2000.
         // Wait for servers to initialize and register ports
         sleep(5)
 
-        // Start the shell
-        create_thread(shell, 0x8C000, 0x8A000, "sh")
+        // Read /etc/ttytab and spawn sessions
+        spawn_sessions()

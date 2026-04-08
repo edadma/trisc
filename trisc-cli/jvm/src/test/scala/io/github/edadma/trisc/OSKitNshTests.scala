@@ -14,10 +14,16 @@ class OSKitNshTests extends OSKitTestHelpers {
   private lazy val tfsSysl: String    = readLsysl("oskit/fs/tfs.lsysl")
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val nshSysl: String    = readLsysl("oskit/apps/nsh.lsysl")
+  private lazy val initSysl: String   = readLsysl("oskit/apps/init.lsysl")
   private lazy val loginSysl: String  = readLsysl("oskit/apps/login.lsysl")
+  private lazy val debugSysl: String  = readLsysl("std/debug/debug.lsysl")
+  private lazy val memSysl: String    = readLsysl("std/mem/mem.lsysl")
+  private lazy val sha256Sysl: String = readLsysl("std/crypto/sha256/sha256.lsysl")
+  private lazy val hmacSysl: String   = readLsysl("std/crypto/hmac/hmac.lsysl")
+  private lazy val pbkdf2Sysl: String = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
 
-  // Build OS with nsh launched directly (no login).
-  private lazy val nshLinked: TOF =
+  // Shared OS source set — init reads /etc/ttytab to decide what to spawn.
+  private def buildOS(): TOF =
     val bootTof    = assemble(bootAsm, relocatable = true)
     val allSources = Map(
       "oskit/kernel/kernel"         -> kernelSysl,
@@ -35,23 +41,18 @@ class OSKitNshTests extends OSKitTestHelpers {
       "posix/string/string"        -> posixStringSysl,
       "posix/ctype/ctype"          -> posixCtypeSysl,
       "posix/stdlib/alloc"         -> posixAllocSysl,
-      "oskit/apps/nsh"              -> nshSysl,
+      "std/debug/debug"             -> debugSysl,
+      "std/mem/mem"                 -> memSysl,
+      "std/crypto/sha256/sha256"   -> sha256Sysl,
+      "std/crypto/hmac/hmac"       -> hmacSysl,
+      "std/crypto/pbkdf2/pbkdf2"   -> pbkdf2Sysl,
+      "oskit/apps/nsh/nsh"           -> nshSysl,
+      "oskit/apps/init/init"        -> initSysl,
+      "oskit/apps/login/login"      -> loginSysl,
       "app" ->
         """import oskit.kernel.*
 import oskit.ipc.*
-import oskit.drivers.disk.disk_server
-import oskit.servers.tfs_server
-import oskit.drivers.tty.tty_server
-import oskit.apps.nsh
-import oskit.services.sleep
-          |
-          |init()
-          |    create_thread(disk_server, 0x80000, 0x80000, "disk")
-          |    sleep(5)
-          |    create_thread(tfs_server, 0x90000, 0x90000, "tfs")
-          |    create_thread(tty_server, 0xA0000, 0xA0000, "tty")
-          |    sleep(5)
-          |    create_thread(nsh, 0xB0000, 0xB0000, "nsh")
+import oskit.apps.init.{init}
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -70,67 +71,16 @@ import oskit.services.sleep
     val syslTof = Linker.link(tofs, relocatable = true)
     Linker.link(Seq(bootTof, syslTof), linkerScript, 0)
 
-  // Build OS with login → nsh.
-  private lazy val loginLinked: TOF =
-    val bootTof    = assemble(bootAsm, relocatable = true)
-    val allSources = Map(
-      "oskit/kernel/kernel"         -> kernelSysl,
-      "oskit/services/services"     -> servicesSysl,
-      "oskit/kernel/timer"          -> timerSysl,
-      "oskit/sync/semaphore"        -> semaphoreSysl,
-      "oskit/sync/mutex"            -> mutexSysl,
-      "oskit/ipc/ipc"               -> ipcSysl,
-      "oskit/drivers/disk/disk"     -> diskSysl,
-      "oskit/drivers/kbd/keyboard"  -> kbdSysl,
-      "oskit/drivers/tty/tty"       -> ttySysl,
-      "oskit/fs/tfs"                -> tfsSysl,
-      "oskit/servers/tfs"           -> tfsSrvSysl,
-      "posix/unistd/sbrk"          -> sbrkSysl,
-      "posix/string/string"        -> posixStringSysl,
-      "posix/ctype/ctype"          -> posixCtypeSysl,
-      "posix/stdlib/alloc"         -> posixAllocSysl,
-      "oskit/apps/nsh"              -> nshSysl,
-      "oskit/apps/login"            -> loginSysl,
-      "app" ->
-        """import oskit.kernel.*
-import oskit.ipc.*
-import oskit.drivers.disk.disk_server
-import oskit.servers.tfs_server
-import oskit.drivers.tty.tty_server
-import oskit.apps.login
-import oskit.services.sleep
-          |
-          |init()
-          |    create_thread(disk_server, 0x80000, 0x80000, "disk")
-          |    sleep(5)
-          |    create_thread(tfs_server, 0x90000, 0x90000, "tfs")
-          |    create_thread(tty_server, 0xA0000, 0xA0000, "tty")
-          |    sleep(5)
-          |    create_thread(login, 0xB0000, 0xB0000, "login")
-          |
-          |kernel_main() -> int
-          |    ipc_init()
-          |    create_thread(init, 0xC0000, 0xC0000, "init")
-          |    timer_init(1000)
-          |    first_thread_ssp()
-          |""".stripMargin,
-    )
-    val driver  = new SyslDriver
-    val result  = driver.compile(allSources)
-    val codegen = new SyslTriscCodegen
-    val tofs    =
-      for unit <- result.units yield
-        val asm = codegen.generate(unit.typed)
-        assemble(asm, relocatable = true)
-    val syslTof = Linker.link(tofs, relocatable = true)
-    Linker.link(Seq(bootTof, syslTof), linkerScript, 0)
+  private lazy val osLinked: TOF = buildOS()
+
+  private val nshTtytab = "/etc/ttytab file \"tty0 nsh\"\n"
 
   def runNsh(
       maxCycles: Int = 5200000,
       prefill: String = "\n",
       scheduledKeys: Seq[(Int, Int, Boolean, Int)] = Seq.empty,
   ): (CPU, String) =
-    val linked = nshLinked
+    val linked = osLinked
 
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
@@ -152,10 +102,11 @@ import oskit.services.sleep
       sectorSize = 512,
       intc,
       irq = 3,
-      prefill = prefill,
+      prefill = nshTtytab + prefill,
       maxInodes = 32,
     )
-    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk)
+    val sha = new ShaAccelerator(Runtime.shaAccelAddress)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha)
     linked.load(mem)
 
     val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
@@ -282,14 +233,20 @@ import oskit.services.sleep
 
   // === Login integration tests ===
 
-  private val passwdPrefill = "/etc/passwd file \"root:x:0:0:root:/:/nsh\"\n/etc/shadow file \"root:toor\"\n"
+  private val passwdPrefill =
+    "/etc/ttytab file \"tty0 login\"\n" +
+    "/root dir\n" +
+    "/home dir\n" +
+    "/home/ed dir\n" +
+    "/etc/passwd file \"root:x:0:0:root:/root:/nsh\\ned:x:1000:1000:ed:/home/ed:/nsh\"\n" +
+    "/etc/shadow file \"root:slix:3b1b8291c0bdb62febcd914f45884bca403ae1c42a4bb1c41755881f3886d158\\ned:slix:c638d5b6e91f70b96934aac8d7be42363ce4ea5927f9a9bbbe2d64a8b51926b5\"\n"
 
   def runLogin(
       maxCycles: Int = 15000000,
       prefill: String = passwdPrefill,
       scheduledKeys: Seq[(Int, Int, Boolean, Int)] = Seq.empty,
   ): (CPU, String) =
-    val linked = loginLinked
+    val linked = osLinked
 
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
@@ -314,7 +271,8 @@ import oskit.services.sleep
       prefill = prefill,
       maxInodes = 32,
     )
-    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk)
+    val sha = new ShaAccelerator(Runtime.shaAccelAddress)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha)
     linked.load(mem)
 
     val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
@@ -348,18 +306,31 @@ import oskit.services.sleep
     output should include("login: ")
   }
 
-  "Login: successful login shows shell prompt" in {
+  "Login: successful login shows shell prompt in home dir" in {
     val keys        = loginAndType("")
     val (_, output) = runLogin(scheduledKeys = keys)
     output should include("login: ")
     output should include("password: ")
-    output should include("> ")
+    output should include("/root> ")
   }
 
   "Login: whoami returns 0 for root" in {
     val keys        = loginAndType("whoami\n")
     val (_, output) = runLogin(scheduledKeys = keys)
     output should include("0")
+  }
+
+  "Login: pwd shows home directory" in {
+    val keys        = loginAndType("pwd\n")
+    val (_, output) = runLogin(scheduledKeys = keys)
+    output should include("/root")
+  }
+
+  "Login: user ed gets home /home/ed" in {
+    val keys = typeString("ed\n", startTick = 800000) ++
+               typeString("ed\n", startTick = 840000)
+    val (_, output) = runLogin(scheduledKeys = keys)
+    output should include("/home/ed> ")
   }
 
   "Login: bad password rejected" in {

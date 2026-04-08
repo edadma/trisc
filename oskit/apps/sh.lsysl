@@ -26,7 +26,7 @@ Built-in commands:
 Shell state: current working directory as inode and path string.
 
     var cwd_ino = 1
-    var cwd_path: [128]i8
+    var cwd_path: [128]byte
 
 Output helpers. These use the TTY server for all I/O.
 
@@ -68,19 +68,19 @@ This avoids visible cursor animation.
 Append a CSI sequence with numeric parameter to a buffer:
 ESC [ n ch.  Returns new position.
 
-    sh_append_csi(out: *i8, pos: int, n: int, ch: i8) -> int
+    sh_append_csi(out: *byte, pos: int, n: int, ch: byte) -> int
         var p = pos
         out[p] = 27
         p += 1
         out[p] = '['
         p += 1
         if n >= 100
-            out[p] = i8('0' + n / 100)
+            out[p] = byte('0' + n / 100)
             p += 1
         if n >= 10
-            out[p] = i8('0' + (n / 10) % 10)
+            out[p] = byte('0' + (n / 10) % 10)
             p += 1
-        out[p] = i8('0' + n % 10)
+        out[p] = byte('0' + n % 10)
         p += 1
         out[p] = ch
         p += 1
@@ -102,9 +102,9 @@ Redraw the full line in a single batched write.
 Builds CR + prompt + buffer + ESC[K + ESC[nG into a local
 buffer and sends it with one tty_puts call.
 
-    var sh_out: [140]i8
+    var sh_out: [140]byte
 
-    sh_refresh_line(buf: *i8, len: int, cursor: int)
+    sh_refresh_line(buf: *byte, len: int, cursor: int)
         var p = 0
         sh_out[p] = 13
         p += 1
@@ -120,12 +120,12 @@ buffer and sends it with one tty_puts call.
             sh_out[p] = buf[i]
             p += 1
         // ESC[K — clear to end of line
-        p = sh_append_csi(sh_out, p, 0, i8('K'))
+        p = sh_append_csi(sh_out, p, 0, byte('K'))
         // ESC[nG — cursor to column (1-based)
-        p = sh_append_csi(sh_out, p, PROMPT_LEN + cursor + 1, i8('G'))
+        p = sh_append_csi(sh_out, p, PROMPT_LEN + cursor + 1, byte('G'))
         tty_puts(sh_out, p)
 
-    sh_readline(buf: *i8, maxlen: int) -> int
+    sh_readline(buf: *byte, maxlen: int) -> int
         var len = 0
         var cursor = 0
         while len < maxlen - 1
@@ -186,7 +186,7 @@ buffer and sends it with one tty_puts call.
                     while i > cursor
                         buf[i] = buf[i - 1]
                         i -= 1
-                    buf[cursor] = i8(ch)
+                    buf[cursor] = byte(ch)
                     len += 1
                     cursor += 1
                     if cursor == len
@@ -245,7 +245,7 @@ from cwd by building an absolute path.
         if path[0] == '/'
             return fs_open(cstr(path))
         // Relative path — build absolute path
-        var abspath: [256]i8
+        var abspath: [256]byte
         strcpy(abspath, cwd_path)
         val cwdlen = strlen(cwd_path)
         if cwdlen > 1
@@ -280,7 +280,7 @@ Built-in commands.
                 sh_not_found(*byte(argv[1]))
                 return
         var entry_ino: int
-        var entry_name: [14]i8
+        var entry_name: [14]byte
         var idx = 0
         while fs_readdir(dir_ino, idx, &entry_ino, entry_name) == 0
             // Skip . and ..
@@ -304,7 +304,7 @@ Built-in commands.
         if ino < 0
             sh_not_found(*byte(argv[1]))
             return
-        var buf: [128]i8
+        var buf: [128]byte
         var offset = 0
         var nr = fs_read(ino, buf, offset, 128)
         while nr > 0
@@ -469,8 +469,8 @@ tokenizes it, and dispatches to the appropriate command.
         // Wait for servers to start
         sleep(5)
 
-        var line: [256]i8
-        var delim: [2]i8
+        var line: [256]byte
+        var delim: [2]byte
         delim[0] = ' '
         delim[1] = 0
 

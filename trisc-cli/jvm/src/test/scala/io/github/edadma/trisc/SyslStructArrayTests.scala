@@ -7,7 +7,7 @@ class SyslStructArrayTests extends OSKitTestHelpers {
   "struct with i8 array field: write and read back" in {
     val (_, output) = runWithBoot(
       """struct Buf
-        |    data: [4]i8
+        |    data: [4]byte
         |    len: int
         |
         |var b: Buf
@@ -59,7 +59,7 @@ class SyslStructArrayTests extends OSKitTestHelpers {
       """struct Record
         |    id: int
         |    tag: int
-        |    name: [4]i8
+        |    name: [4]byte
         |
         |var r: Record
         |
@@ -88,7 +88,7 @@ class SyslStructArrayTests extends OSKitTestHelpers {
   "array of structs with array field" in {
     val (_, output) = runWithBoot(
       """struct Entry
-        |    buf: [4]i8
+        |    buf: [4]byte
         |    len: int
         |
         |var entries: [3]Entry
@@ -120,8 +120,8 @@ class SyslStructArrayTests extends OSKitTestHelpers {
   "struct with multiple array fields" in {
     val (_, output) = runWithBoot(
       """struct TwoArrays
-        |    first: [4]i8
-        |    second: [4]i8
+        |    first: [4]byte
+        |    second: [4]byte
         |
         |var t: TwoArrays
         |
@@ -145,7 +145,7 @@ class SyslStructArrayTests extends OSKitTestHelpers {
   "struct array field with computed index" in {
     val (_, output) = runWithBoot(
       """struct Buf
-        |    data: [8]i8
+        |    data: [8]byte
         |    head: int
         |    tail: int
         |
@@ -176,7 +176,7 @@ class SyslStructArrayTests extends OSKitTestHelpers {
   "local struct variable with array field" in {
     val (_, output) = runWithBoot(
       """struct Msg
-        |    data: [4]i8
+        |    data: [4]byte
         |    len: int
         |
         |main() -> int
@@ -199,7 +199,7 @@ class SyslStructArrayTests extends OSKitTestHelpers {
   "pointer to struct: access array field" in {
     val (_, output) = runWithBoot(
       """struct Buf
-        |    data: [4]i8
+        |    data: [4]byte
         |    len: int
         |
         |var b: Buf
@@ -226,7 +226,7 @@ class SyslStructArrayTests extends OSKitTestHelpers {
   "nested struct with array field" in {
     val (_, output) = runWithBoot(
       """struct Inner
-        |    items: [4]i8
+        |    items: [4]byte
         |    count: int
         |
         |struct Outer
@@ -257,7 +257,7 @@ class SyslStructArrayTests extends OSKitTestHelpers {
   "struct with only an array field" in {
     val (_, output) = runWithBoot(
       """struct Wrapper
-        |    data: [8]i8
+        |    data: [8]byte
         |
         |var w: Wrapper
         |
@@ -279,14 +279,14 @@ class SyslStructArrayTests extends OSKitTestHelpers {
   "ring buffer in struct — the TTY pattern" in {
     val (_, output) = runWithBoot(
       """struct RingBuf
-        |    buf: [64]i8
+        |    buf: [64]byte
         |    head: int
         |    tail: int
         |    count: int
         |
         |var ring: RingBuf
         |
-        |push(ch: i8) -> int
+        |push(ch: byte) -> int
         |    if ring.count >= 64
         |        return 0
         |    ring.buf[ring.tail] = ch
@@ -326,7 +326,7 @@ class SyslStructArrayTests extends OSKitTestHelpers {
   "array of structs indexed by variable, accessing array field" in {
     val (_, output) = runWithBoot(
       """struct Console
-        |    in_buf: [8]i8
+        |    in_buf: [8]byte
         |    in_count: int
         |
         |var consoles: [2]Console
@@ -359,7 +359,7 @@ class SyslStructArrayTests extends OSKitTestHelpers {
   "struct array field: fill and read in loop" in {
     val (_, output) = runWithBoot(
       """struct Buf
-        |    data: [8]i8
+        |    data: [8]byte
         |    len: int
         |
         |var b: Buf
@@ -367,7 +367,7 @@ class SyslStructArrayTests extends OSKitTestHelpers {
         |main() -> int
         |    var i = 0
         |    while i < 8
-        |        b.data[i] = i8(65 + i)
+        |        b.data[i] = byte(65 + i)
         |        i += 1
         |    b.len = 8
         |    i = 0
@@ -409,7 +409,7 @@ class SyslStructArrayTests extends OSKitTestHelpers {
   "struct array field writes don't corrupt low memory" in {
     val (cpu, output) = runWithBoot(
       """struct Console
-        |    in_buf: [64]i8
+        |    in_buf: [64]byte
         |    in_head: int
         |    in_tail: int
         |    in_count: int
@@ -420,7 +420,7 @@ class SyslStructArrayTests extends OSKitTestHelpers {
         |    // Write 20 characters to console 0's buffer
         |    var i = 0
         |    while i < 20
-        |        consoles[0].in_buf[i] = i8(65 + i)
+        |        consoles[0].in_buf[i] = byte(65 + i)
         |        i += 1
         |    consoles[0].in_tail = 20
         |    consoles[0].in_count = 20

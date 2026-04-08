@@ -136,3 +136,5 @@ case class SizeofExprAST(expr: ExpressionAST) extends ExpressionAST
 case class NewExprAST(typeName: String, args: List[ExpressionAST]) extends ExpressionAST
 case class NewArrayAST(size: ExpressionAST, elemType: TypeAST) extends ExpressionAST
 case class StringLitExprAST(value: String) extends ExpressionAST
+case class ClosureParamAST(name: String, typ: Option[TypeAST])
+case class ClosureAST(params: List[ClosureParamAST], body: FunBodyAST) extends ExpressionAST
