@@ -250,7 +250,7 @@ class SyslDriverTests extends AnyFreeSpec with Matchers {
           |""".stripMargin
     ))
     val mathSmeta = result.units.find(_.name == "math").get.smeta
-    val meta = ModuleMeta.fromSmeta(mathSmeta)
+    val meta = ModuleMeta.fromSmeta(mathSmeta).get
     meta.publicSymbols.length shouldBe 1
     meta.publicSymbols.head.name shouldBe "add"
     meta.publicSymbols.head.typ shouldBe SymbolMeta.Kind.Func(List(I32, I32), I32)

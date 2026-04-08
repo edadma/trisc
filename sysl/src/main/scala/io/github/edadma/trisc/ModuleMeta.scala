@@ -15,7 +15,7 @@ class ModuleMeta(val symbols: List[SymbolMeta]):
 
   def toSmeta: String =
     val buf = new StringBuilder
-    buf ++= "SMETA v1\n"
+    buf ++= s"SMETA v${ModuleMeta.SMETA_VERSION}\n"
     var currentSource: Option[String] = None
     for sym <- symbols do
       if sym.sourceFile != currentSource && sym.sourceFile.isDefined then
@@ -71,6 +71,9 @@ class ModuleMeta(val symbols: List[SymbolMeta]):
 
 object ModuleMeta:
 
+  /** Bump this whenever the .smeta format changes. Stale files are silently ignored. */
+  val SMETA_VERSION = 2
+
   def fromProgram(program: TProgram, sourceFile: Option[String] = None): ModuleMeta =
     val syms = program.decls.collect {
       case TStructDecl(name, fields) =>
@@ -93,7 +96,7 @@ object ModuleMeta:
     }
     new ModuleMeta(syms)
 
-  def fromSmeta(source: String): ModuleMeta =
+  def fromSmeta(source: String): Option[ModuleMeta] =
     val syms = scala.collection.mutable.ListBuffer[SymbolMeta]()
     var lineNum = 0
     var headerSeen = false
@@ -104,7 +107,9 @@ object ModuleMeta:
       val line = rawLine.trim
       if line.nonEmpty then
         if !headerSeen then
-          if line != "SMETA v1" then throw IllegalArgumentException(s"line $lineNum: expected SMETA v1 header")
+          if !line.startsWith("SMETA") then return None // not a valid smeta file — treat as stale
+          val version = line.stripPrefix("SMETA").trim.stripPrefix("v").trim.toIntOption.getOrElse(0)
+          if version < SMETA_VERSION then return None // stale — caller should recompile from source
           headerSeen = true
         else if line.startsWith("SOURCE ") then
           currentSource = Some(line.drop(7).trim)
@@ -131,5 +136,5 @@ object ModuleMeta:
             case other =>
               throw IllegalArgumentException(s"line $lineNum: unknown symbol kind '$other'")
 
-    if !headerSeen then throw IllegalArgumentException("empty or missing SMETA header")
-    new ModuleMeta(syms.toList)
+    if !headerSeen then return None
+    Some(new ModuleMeta(syms.toList))
