@@ -161,28 +161,28 @@ regerror(errcode: int, preg: *regex_t) -> string
 /* ===== Tests ===== */
 
 #test
-test_regcomp_ere() -> void
+test_regcomp_ere() -> unit
     var re: regex_t
     val rc = regcomp(&re, "hello", REG_EXTENDED)
 
     assert(rc == REG_OK, "compiles ok")
 
 #test
-test_regcomp_bre() -> void
+test_regcomp_bre() -> unit
     var re: regex_t
     val rc = regcomp(&re, "hello", 0)
 
     assert(rc == REG_OK, "compiles ok")
 
 #test
-test_regcomp_bad_pattern() -> void
+test_regcomp_bad_pattern() -> unit
     var re: regex_t
     val rc = regcomp(&re, "[abc", REG_EXTENDED)
 
     assert(rc == REG_BADPAT, "bad pattern")
 
 #test
-test_regexec_match() -> void
+test_regexec_match() -> unit
     var re: regex_t
 
     regcomp(&re, "hello", REG_EXTENDED)
@@ -196,7 +196,7 @@ test_regexec_match() -> void
     assert(pm[0].rm_eo == 9, s"end=9, got ${pm[0].rm_eo}")
 
 #test
-test_regexec_no_match() -> void
+test_regexec_no_match() -> unit
     var re: regex_t
 
     regcomp(&re, "xyz", REG_EXTENDED)
@@ -208,7 +208,7 @@ test_regexec_no_match() -> void
     assert(rc == REG_NOMATCH, "no match")
 
 #test
-test_regexec_groups() -> void
+test_regexec_groups() -> unit
     var re: regex_t
 
     regcomp(&re, "([a-z]+)@([a-z]+)", REG_EXTENDED)
@@ -226,7 +226,7 @@ test_regexec_groups() -> void
     assert(pm[2].rm_eo == 9, s"group 2 end=9, got ${pm[2].rm_eo}")
 
 #test
-test_regexec_bre_groups() -> void
+test_regexec_bre_groups() -> unit
     var re: regex_t
 
     regcomp(&re, "\\([a-z]*\\)@\\([a-z]*\\)", 0)
@@ -242,7 +242,7 @@ test_regexec_bre_groups() -> void
     assert(pm[2].rm_eo == 9, "group 2 end")
 
 #test
-test_regexec_nosub() -> void
+test_regexec_nosub() -> unit
     var re: regex_t
 
     regcomp(&re, "(hello)", REG_EXTENDED | REG_NOSUB)
@@ -254,7 +254,7 @@ test_regexec_nosub() -> void
     assert(rc == REG_OK, "matches with NOSUB")
 
 #test
-test_regexec_anchored() -> void
+test_regexec_anchored() -> unit
     var re: regex_t
 
     regcomp(&re, "^hello$", REG_EXTENDED)
@@ -267,7 +267,7 @@ test_regexec_anchored() -> void
     assert(regexec(&re, "say hello", 1, pm, 0) == REG_NOMATCH, "no prefix match")
 
 #test
-test_regexec_intervals() -> void
+test_regexec_intervals() -> unit
     var re: regex_t
 
     regcomp(&re, "^a{2,4}$", REG_EXTENDED)
@@ -282,7 +282,7 @@ test_regexec_intervals() -> void
     assert(regexec(&re, "aaaaa", 1, pm, 0) == REG_NOMATCH, "too many")
 
 #test
-test_regexec_alternation() -> void
+test_regexec_alternation() -> unit
     var re: regex_t
 
     regcomp(&re, "cat|dog", REG_EXTENDED)
@@ -295,7 +295,7 @@ test_regexec_alternation() -> void
     assert(regexec(&re, "the bird", 1, pm, 0) == REG_NOMATCH, "bird doesn't")
 
 #test
-test_regexec_named_class() -> void
+test_regexec_named_class() -> unit
     var re: regex_t
 
     regcomp(&re, "^[[:digit:]]+$", REG_EXTENDED)
@@ -307,7 +307,7 @@ test_regexec_named_class() -> void
     assert(regexec(&re, "123abc", 1, pm, 0) == REG_NOMATCH, "mixed doesn't")
 
 #test
-test_regexec_nmatch_zero() -> void
+test_regexec_nmatch_zero() -> unit
     var re: regex_t
 
     regcomp(&re, "(a)(b)", REG_EXTENDED)
@@ -323,7 +323,7 @@ test_regexec_nmatch_zero() -> void
     assert(rc == REG_OK, "matches even with nmatch=0")
 
 #test
-test_regexec_partial_nmatch() -> void
+test_regexec_partial_nmatch() -> unit
     var re: regex_t
 
     regcomp(&re, "((a)(b)(c))", REG_EXTENDED)
@@ -340,7 +340,7 @@ test_regexec_partial_nmatch() -> void
     assert(pm[1].rm_eo == 3, "group 1 end")
 
 #test
-test_regfree() -> void
+test_regfree() -> unit
     var re: regex_t
 
     regcomp(&re, "hello", REG_EXTENDED)
@@ -348,14 +348,14 @@ test_regfree() -> void
     /* No crash — that's the test */
 
 #test
-test_regerror() -> void
+test_regerror() -> unit
     assert(regerror(REG_OK, 0) == "success", "ok msg")
     assert(regerror(REG_NOMATCH, 0) == "no match", "nomatch msg")
     assert(regerror(REG_BADPAT, 0) == "invalid regular expression", "badpat msg")
     assert(regerror(99, 0) == "unknown error", "unknown msg")
 
 #test
-test_regexec_complex_pattern() -> void
+test_regexec_complex_pattern() -> unit
     var re: regex_t
 
     regcomp(&re, "^(https?|ftp)://([a-z]+)\\.([a-z]+)$", REG_EXTENDED)

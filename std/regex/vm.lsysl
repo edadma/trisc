@@ -267,7 +267,7 @@ in one step, returning the Match result.
 ### Literal match
 
     #test
-    test_match_literal() -> void
+    test_match_literal() -> unit
         val m = match_bre("hello", "say hello world")
 
         assert(m.matched(), "should match")
@@ -281,7 +281,7 @@ in one step, returning the Match result.
 ### Dot matches any character
 
     #test
-    test_match_dot() -> void
+    test_match_dot() -> unit
         val m = match_bre("h.llo", "hello")
 
         assert(m.matched(), "should match")
@@ -294,13 +294,13 @@ in one step, returning the Match result.
 ### Anchored match
 
     #test
-    test_match_anchored() -> void
+    test_match_anchored() -> unit
         val m = match_bre("^hello$", "hello")
 
         assert(m.matched(), "anchored match")
 
     #test
-    test_match_anchored_fail() -> void
+    test_match_anchored_fail() -> unit
         val m = match_bre("^hello$", "say hello")
 
         assert(!m.matched(), "anchored should not match")
@@ -309,13 +309,13 @@ in one step, returning the Match result.
 ### Star — zero or more
 
     #test
-    test_match_star_zero() -> void
+    test_match_star_zero() -> unit
         val m = match_bre("^ab*c$", "ac")
 
         assert(m.matched(), "b* matches zero b's")
 
     #test
-    test_match_star_many() -> void
+    test_match_star_many() -> unit
         val m = match_bre("^ab*c$", "abbbc")
 
         assert(m.matched(), "b* matches three b's")
@@ -324,7 +324,7 @@ in one step, returning the Match result.
 ### Capture groups
 
     #test
-    test_match_capture() -> void
+    test_match_capture() -> unit
         val m = match_bre("\\(hello\\)", "say hello world")
 
         assert(m.matched(), "should match")
@@ -339,7 +339,7 @@ in one step, returning the Match result.
 ### Character class
 
     #test
-    test_match_class() -> void
+    test_match_class() -> unit
         val m = match_bre("[aeiou]", "hello")
 
         assert(m.matched(), "should match vowel")
@@ -352,7 +352,7 @@ in one step, returning the Match result.
 ### No match
 
     #test
-    test_no_match() -> void
+    test_no_match() -> unit
         val m = match_bre("xyz", "hello")
 
         assert(!m.matched(), "should not match")
@@ -361,7 +361,7 @@ in one step, returning the Match result.
 ### Leftmost-longest
 
     #test
-    test_leftmost_longest() -> void
+    test_leftmost_longest() -> unit
         val m = match_bre("a*", "aaa")
 
         assert(m.matched(), "should match")
@@ -375,7 +375,7 @@ in one step, returning the Match result.
 ### Complex pattern
 
     #test
-    test_match_complex() -> void
+    test_match_complex() -> unit
         val m = match_bre("^\\([a-z]*\\)@\\([a-z]*\\)$", "user@host")
 
         assert(m.matched(), "should match")
@@ -413,7 +413,7 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Alternation — basic
 
     #test
-    test_ere_alt_first() -> void
+    test_ere_alt_first() -> unit
         val m = match_regex("cat|dog", "the cat sat")
 
         assert(m.matched(), "should match cat")
@@ -424,7 +424,7 @@ groups, intervals, named classes, escaping, and edge cases.
         assert(en == 7, s"end=7, got $en")
 
     #test
-    test_ere_alt_second() -> void
+    test_ere_alt_second() -> unit
         val m = match_regex("cat|dog", "the dog sat")
 
         assert(m.matched(), "should match dog")
@@ -435,7 +435,7 @@ groups, intervals, named classes, escaping, and edge cases.
         assert(en == 7, s"end=7, got $en")
 
     #test
-    test_ere_alt_no_match() -> void
+    test_ere_alt_no_match() -> unit
         val m = match_regex("cat|dog", "the bird sat")
 
         assert(!m.matched(), "should not match")
@@ -444,7 +444,7 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Alternation — leftmost wins
 
     #test
-    test_ere_alt_leftmost() -> void
+    test_ere_alt_leftmost() -> unit
         val m = match_regex("a|ab", "ab")
 
         assert(m.matched(), "should match")
@@ -457,7 +457,7 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Multi-way alternation
 
     #test
-    test_ere_alt_three() -> void
+    test_ere_alt_three() -> unit
         val m = match_regex("red|green|blue", "the blue sky")
 
         assert(m.matched(), "should match blue")
@@ -468,7 +468,7 @@ groups, intervals, named classes, escaping, and edge cases.
         assert(en == 8, s"end=8, got $en")
 
     #test
-    test_ere_alt_first_of_three() -> void
+    test_ere_alt_first_of_three() -> unit
         val m = match_regex("red|green|blue", "a red car")
 
         assert(m.matched(), "should match red")
@@ -482,19 +482,19 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Plus quantifier
 
     #test
-    test_ere_plus_one() -> void
+    test_ere_plus_one() -> unit
         val m = match_regex("^ab+c$", "abc")
 
         assert(m.matched(), "b+ matches one b")
 
     #test
-    test_ere_plus_many() -> void
+    test_ere_plus_many() -> unit
         val m = match_regex("^ab+c$", "abbbbc")
 
         assert(m.matched(), "b+ matches four b's")
 
     #test
-    test_ere_plus_zero_fail() -> void
+    test_ere_plus_zero_fail() -> unit
         val m = match_regex("^ab+c$", "ac")
 
         assert(!m.matched(), "b+ requires at least one b")
@@ -503,19 +503,19 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Question quantifier
 
     #test
-    test_ere_quest_zero() -> void
+    test_ere_quest_zero() -> unit
         val m = match_regex("^ab?c$", "ac")
 
         assert(m.matched(), "b? matches zero b's")
 
     #test
-    test_ere_quest_one() -> void
+    test_ere_quest_one() -> unit
         val m = match_regex("^ab?c$", "abc")
 
         assert(m.matched(), "b? matches one b")
 
     #test
-    test_ere_quest_two_fail() -> void
+    test_ere_quest_two_fail() -> unit
         val m = match_regex("^ab?c$", "abbc")
 
         assert(!m.matched(), "b? doesn't match two b's")
@@ -524,7 +524,7 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Unescaped groups
 
     #test
-    test_ere_group_capture() -> void
+    test_ere_group_capture() -> unit
         val m = match_regex("(hello) (world)", "say hello world")
 
         assert(m.matched(), "should match")
@@ -543,37 +543,37 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Groups with quantifiers
 
     #test
-    test_ere_group_star() -> void
+    test_ere_group_star() -> unit
         val m = match_regex("^(ab)*$", "ababab")
 
         assert(m.matched(), "(ab)* matches three repetitions")
 
     #test
-    test_ere_group_star_zero() -> void
+    test_ere_group_star_zero() -> unit
         val m = match_regex("^(ab)*$", "")
 
         assert(m.matched(), "(ab)* matches zero repetitions")
 
     #test
-    test_ere_group_plus() -> void
+    test_ere_group_plus() -> unit
         val m = match_regex("^(ab)+$", "ababab")
 
         assert(m.matched(), "(ab)+ matches three repetitions")
 
     #test
-    test_ere_group_plus_zero_fail() -> void
+    test_ere_group_plus_zero_fail() -> unit
         val m = match_regex("^(ab)+$", "")
 
         assert(!m.matched(), "(ab)+ requires at least one")
 
     #test
-    test_ere_group_quest() -> void
+    test_ere_group_quest() -> unit
         val m = match_regex("^a(bc)?d$", "ad")
 
         assert(m.matched(), "(bc)? matches zero")
 
     #test
-    test_ere_group_quest_one() -> void
+    test_ere_group_quest_one() -> unit
         val m = match_regex("^a(bc)?d$", "abcd")
 
         assert(m.matched(), "(bc)? matches one")
@@ -582,7 +582,7 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Alternation within groups
 
     #test
-    test_ere_group_alt() -> void
+    test_ere_group_alt() -> unit
         val m = match_regex("^(cat|dog)s$", "cats")
 
         assert(m.matched(), "should match cats")
@@ -593,7 +593,7 @@ groups, intervals, named classes, escaping, and edge cases.
         assert(e1 == 3, "group 1 ends at 3")
 
     #test
-    test_ere_group_alt_second() -> void
+    test_ere_group_alt_second() -> unit
         val m = match_regex("^(cat|dog)s$", "dogs")
 
         assert(m.matched(), "should match dogs")
@@ -607,13 +607,13 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Anchored ERE
 
     #test
-    test_ere_anchored() -> void
+    test_ere_anchored() -> unit
         val m = match_regex("^hello$", "hello")
 
         assert(m.matched(), "anchored match")
 
     #test
-    test_ere_anchored_fail() -> void
+    test_ere_anchored_fail() -> unit
         val m = match_regex("^hello$", "say hello")
 
         assert(!m.matched(), "anchored should not match")
@@ -622,13 +622,13 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Dot in ERE
 
     #test
-    test_ere_dot() -> void
+    test_ere_dot() -> unit
         val m = match_regex("h.llo", "hello")
 
         assert(m.matched(), "dot matches")
 
     #test
-    test_ere_dot_star() -> void
+    test_ere_dot_star() -> unit
         val m = match_regex("^h.*o$", "hello")
 
         assert(m.matched(), ".* matches ell")
@@ -637,7 +637,7 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Character classes in ERE
 
     #test
-    test_ere_class() -> void
+    test_ere_class() -> unit
         val m = match_regex("[0-9]+", "abc123def")
 
         assert(m.matched(), "should match digits")
@@ -648,13 +648,13 @@ groups, intervals, named classes, escaping, and edge cases.
         assert(en == 6, s"end=6, got $en")
 
     #test
-    test_ere_negated_class() -> void
+    test_ere_negated_class() -> unit
         val m = match_regex("^[^aeiou]+$", "bcd")
 
         assert(m.matched(), "consonants only")
 
     #test
-    test_ere_negated_class_fail() -> void
+    test_ere_negated_class_fail() -> unit
         val m = match_regex("^[^aeiou]+$", "bad")
 
         assert(!m.matched(), "contains vowel")
@@ -663,37 +663,37 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Escaped special characters in ERE
 
     #test
-    test_ere_escaped_paren() -> void
+    test_ere_escaped_paren() -> unit
         val m = match_regex("\\(a\\)", "(a)")
 
         assert(m.matched(), "literal parens")
 
     #test
-    test_ere_escaped_pipe() -> void
+    test_ere_escaped_pipe() -> unit
         val m = match_regex("a\\|b", "a|b")
 
         assert(m.matched(), "literal pipe")
 
     #test
-    test_ere_escaped_plus() -> void
+    test_ere_escaped_plus() -> unit
         val m = match_regex("a\\+", "a+")
 
         assert(m.matched(), "literal plus")
 
     #test
-    test_ere_escaped_quest() -> void
+    test_ere_escaped_quest() -> unit
         val m = match_regex("a\\?", "a?")
 
         assert(m.matched(), "literal question")
 
     #test
-    test_ere_escaped_dot() -> void
+    test_ere_escaped_dot() -> unit
         val m = match_regex("a\\.b", "a.b")
 
         assert(m.matched(), "literal dot")
 
     #test
-    test_ere_escaped_dot_no_match() -> void
+    test_ere_escaped_dot_no_match() -> unit
         val m = match_regex("^a\\.b$", "axb")
 
         assert(!m.matched(), "escaped dot doesn't match x")
@@ -702,7 +702,7 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Complex ERE patterns
 
     #test
-    test_ere_email() -> void
+    test_ere_email() -> unit
         val m = match_regex("[a-z]+@[a-z]+\\.[a-z]+", "send to user@host.com please")
 
         assert(m.matched(), "should match email")
@@ -713,13 +713,13 @@ groups, intervals, named classes, escaping, and edge cases.
         assert(en == 21, s"end=21, got $en")
 
     #test
-    test_ere_ip_like() -> void
+    test_ere_ip_like() -> unit
         val m = match_regex("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$", "192.168.1.1")
 
         assert(m.matched(), "should match IP")
 
     #test
-    test_ere_complex_alt_groups() -> void
+    test_ere_complex_alt_groups() -> unit
         val m = match_regex("^(https?|ftp)://([a-z]+)$", "http://host")
 
         assert(m.matched(), "should match URL")
@@ -735,7 +735,7 @@ groups, intervals, named classes, escaping, and edge cases.
         assert(e2 == 11, s"group 2 end=11, got $e2")
 
     #test
-    test_ere_complex_alt_groups_https() -> void
+    test_ere_complex_alt_groups_https() -> unit
         val m = match_regex("^(https?|ftp)://([a-z]+)$", "https://host")
 
         assert(m.matched(), "should match https URL")
@@ -746,7 +746,7 @@ groups, intervals, named classes, escaping, and edge cases.
         assert(e1 == 5, s"group 1 end=5, got $e1")
 
     #test
-    test_ere_complex_alt_groups_ftp() -> void
+    test_ere_complex_alt_groups_ftp() -> unit
         val m = match_regex("^(https?|ftp)://([a-z]+)$", "ftp://files")
 
         assert(m.matched(), "should match ftp URL")
@@ -760,7 +760,7 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Leftmost-longest with ERE
 
     #test
-    test_ere_leftmost_longest() -> void
+    test_ere_leftmost_longest() -> unit
         val m = match_regex("a+", "baaab")
 
         assert(m.matched(), "should match")
@@ -774,13 +774,13 @@ groups, intervals, named classes, escaping, and edge cases.
 ### No match cases
 
     #test
-    test_ere_no_match_alt() -> void
+    test_ere_no_match_alt() -> unit
         val m = match_regex("^(abc|def)$", "xyz")
 
         assert(!m.matched(), "neither branch matches")
 
     #test
-    test_ere_no_match_complex() -> void
+    test_ere_no_match_complex() -> unit
         val m = match_regex("^[A-Z][a-z]+$", "hello")
 
         assert(!m.matched(), "must start with uppercase")
@@ -789,14 +789,14 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Edge cases
 
     #test
-    test_ere_empty_alt_branch() -> void
+    test_ere_empty_alt_branch() -> unit
         /* a| means "a or empty string" — empty always matches */
         val m = match_regex("a|", "b")
 
         assert(m.matched(), "empty branch matches anything")
 
     #test
-    test_ere_nested_groups() -> void
+    test_ere_nested_groups() -> unit
         val m = match_regex("^((a)(b))$", "ab")
 
         assert(m.matched(), "should match")
@@ -818,19 +818,19 @@ groups, intervals, named classes, escaping, and edge cases.
         assert(e3 == 2, s"group 3 end=2, got $e3")
 
     #test
-    test_ere_star_of_class() -> void
+    test_ere_star_of_class() -> unit
         val m = match_regex("^[a-z]*$", "hello")
 
         assert(m.matched(), "all lowercase")
 
     #test
-    test_ere_plus_of_class() -> void
+    test_ere_plus_of_class() -> unit
         val m = match_regex("^[a-z]+$", "")
 
         assert(!m.matched(), "empty fails plus")
 
     #test
-    test_ere_only_anchor_start() -> void
+    test_ere_only_anchor_start() -> unit
         val m = match_regex("^abc", "abcdef")
 
         assert(m.matched(), "prefix match")
@@ -841,7 +841,7 @@ groups, intervals, named classes, escaping, and edge cases.
         assert(en == 3, s"end=3, got $en")
 
     #test
-    test_ere_only_anchor_end() -> void
+    test_ere_only_anchor_end() -> unit
         val m = match_regex("def$", "abcdef")
 
         assert(m.matched(), "suffix match")
@@ -855,19 +855,19 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Interval — exact count
 
     #test
-    test_interval_exact() -> void
+    test_interval_exact() -> unit
         val m = match_regex("^a{3}$", "aaa")
 
         assert(m.matched(), "a{3} matches aaa")
 
     #test
-    test_interval_exact_fail_short() -> void
+    test_interval_exact_fail_short() -> unit
         val m = match_regex("^a{3}$", "aa")
 
         assert(!m.matched(), "a{3} doesn't match aa")
 
     #test
-    test_interval_exact_fail_long() -> void
+    test_interval_exact_fail_long() -> unit
         val m = match_regex("^a{3}$", "aaaa")
 
         assert(!m.matched(), "a{3} doesn't match aaaa")
@@ -876,31 +876,31 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Interval — range
 
     #test
-    test_interval_range_min() -> void
+    test_interval_range_min() -> unit
         val m = match_regex("^a{2,4}$", "aa")
 
         assert(m.matched(), "a{2,4} matches aa")
 
     #test
-    test_interval_range_mid() -> void
+    test_interval_range_mid() -> unit
         val m = match_regex("^a{2,4}$", "aaa")
 
         assert(m.matched(), "a{2,4} matches aaa")
 
     #test
-    test_interval_range_max() -> void
+    test_interval_range_max() -> unit
         val m = match_regex("^a{2,4}$", "aaaa")
 
         assert(m.matched(), "a{2,4} matches aaaa")
 
     #test
-    test_interval_range_below() -> void
+    test_interval_range_below() -> unit
         val m = match_regex("^a{2,4}$", "a")
 
         assert(!m.matched(), "a{2,4} doesn't match a")
 
     #test
-    test_interval_range_above() -> void
+    test_interval_range_above() -> unit
         val m = match_regex("^a{2,4}$", "aaaaa")
 
         assert(!m.matched(), "a{2,4} doesn't match aaaaa")
@@ -909,19 +909,19 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Interval — unbounded
 
     #test
-    test_interval_unbounded() -> void
+    test_interval_unbounded() -> unit
         val m = match_regex("^a{2,}$", "aaaaaa")
 
         assert(m.matched(), "a{2,} matches 6 a's")
 
     #test
-    test_interval_unbounded_exact() -> void
+    test_interval_unbounded_exact() -> unit
         val m = match_regex("^a{2,}$", "aa")
 
         assert(m.matched(), "a{2,} matches exactly 2")
 
     #test
-    test_interval_unbounded_fail() -> void
+    test_interval_unbounded_fail() -> unit
         val m = match_regex("^a{2,}$", "a")
 
         assert(!m.matched(), "a{2,} doesn't match 1")
@@ -930,25 +930,25 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Interval — zero minimum
 
     #test
-    test_interval_zero_min() -> void
+    test_interval_zero_min() -> unit
         val m = match_regex("^a{0,2}$", "")
 
         assert(m.matched(), "a{0,2} matches empty")
 
     #test
-    test_interval_zero_min_one() -> void
+    test_interval_zero_min_one() -> unit
         val m = match_regex("^a{0,2}$", "a")
 
         assert(m.matched(), "a{0,2} matches a")
 
     #test
-    test_interval_zero_min_max() -> void
+    test_interval_zero_min_max() -> unit
         val m = match_regex("^a{0,2}$", "aa")
 
         assert(m.matched(), "a{0,2} matches aa")
 
     #test
-    test_interval_zero_min_above() -> void
+    test_interval_zero_min_above() -> unit
         val m = match_regex("^a{0,2}$", "aaa")
 
         assert(!m.matched(), "a{0,2} doesn't match aaa")
@@ -957,13 +957,13 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Interval on group
 
     #test
-    test_interval_group() -> void
+    test_interval_group() -> unit
         val m = match_regex("^(ab){3}$", "ababab")
 
         assert(m.matched(), "(ab){3} matches ababab")
 
     #test
-    test_interval_group_fail() -> void
+    test_interval_group_fail() -> unit
         val m = match_regex("^(ab){3}$", "abab")
 
         assert(!m.matched(), "(ab){3} doesn't match abab")
@@ -972,13 +972,13 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Interval in context
 
     #test
-    test_interval_in_pattern() -> void
+    test_interval_in_pattern() -> unit
         val m = match_regex("^[0-9]{3}-[0-9]{4}$", "555-1234")
 
         assert(m.matched(), "phone number pattern")
 
     #test
-    test_interval_in_pattern_fail() -> void
+    test_interval_in_pattern_fail() -> unit
         val m = match_regex("^[0-9]{3}-[0-9]{4}$", "55-1234")
 
         assert(!m.matched(), "too few area digits")
@@ -987,19 +987,19 @@ groups, intervals, named classes, escaping, and edge cases.
 ### BRE intervals (via match_bre)
 
     #test
-    test_bre_interval_exact() -> void
+    test_bre_interval_exact() -> unit
         val m = match_bre("^a\\{3\\}$", "aaa")
 
         assert(m.matched(), "BRE a\\{3\\} matches aaa")
 
     #test
-    test_bre_interval_range() -> void
+    test_bre_interval_range() -> unit
         val m = match_bre("^a\\{2,4\\}$", "aaa")
 
         assert(m.matched(), "BRE a\\{2,4\\} matches aaa")
 
     #test
-    test_bre_interval_unbounded() -> void
+    test_bre_interval_unbounded() -> unit
         val m = match_bre("^a\\{2,\\}$", "aaaa")
 
         assert(m.matched(), "BRE a\\{2,\\} matches aaaa")
@@ -1008,73 +1008,73 @@ groups, intervals, named classes, escaping, and edge cases.
 ### POSIX named character classes
 
     #test
-    test_named_class_alpha() -> void
+    test_named_class_alpha() -> unit
         val m = match_regex("^[[:alpha:]]+$", "Hello")
 
         assert(m.matched(), "[:alpha:] matches letters")
 
     #test
-    test_named_class_alpha_fail() -> void
+    test_named_class_alpha_fail() -> unit
         val m = match_regex("^[[:alpha:]]+$", "Hello123")
 
         assert(!m.matched(), "[:alpha:] rejects digits")
 
     #test
-    test_named_class_digit() -> void
+    test_named_class_digit() -> unit
         val m = match_regex("^[[:digit:]]+$", "12345")
 
         assert(m.matched(), "[:digit:] matches digits")
 
     #test
-    test_named_class_digit_fail() -> void
+    test_named_class_digit_fail() -> unit
         val m = match_regex("^[[:digit:]]+$", "123abc")
 
         assert(!m.matched(), "[:digit:] rejects letters")
 
     #test
-    test_named_class_alnum() -> void
+    test_named_class_alnum() -> unit
         val m = match_regex("^[[:alnum:]]+$", "Hello123")
 
         assert(m.matched(), "[:alnum:] matches letters and digits")
 
     #test
-    test_named_class_alnum_fail() -> void
+    test_named_class_alnum_fail() -> unit
         val m = match_regex("^[[:alnum:]]+$", "Hello 123")
 
         assert(!m.matched(), "[:alnum:] rejects space")
 
     #test
-    test_named_class_upper() -> void
+    test_named_class_upper() -> unit
         val m = match_regex("^[[:upper:]]+$", "HELLO")
 
         assert(m.matched(), "[:upper:] matches uppercase")
 
     #test
-    test_named_class_upper_fail() -> void
+    test_named_class_upper_fail() -> unit
         val m = match_regex("^[[:upper:]]+$", "Hello")
 
         assert(!m.matched(), "[:upper:] rejects lowercase")
 
     #test
-    test_named_class_lower() -> void
+    test_named_class_lower() -> unit
         val m = match_regex("^[[:lower:]]+$", "hello")
 
         assert(m.matched(), "[:lower:] matches lowercase")
 
     #test
-    test_named_class_space() -> void
+    test_named_class_space() -> unit
         val m = match_regex("^[[:space:]]+$", " \t")
 
         assert(m.matched(), "[:space:] matches whitespace")
 
     #test
-    test_named_class_xdigit() -> void
+    test_named_class_xdigit() -> unit
         val m = match_regex("^[[:xdigit:]]+$", "0123456789abcdefABCDEF")
 
         assert(m.matched(), "[:xdigit:] matches hex digits")
 
     #test
-    test_named_class_xdigit_fail() -> void
+    test_named_class_xdigit_fail() -> unit
         val m = match_regex("^[[:xdigit:]]+$", "0123g")
 
         assert(!m.matched(), "[:xdigit:] rejects g")
@@ -1083,19 +1083,19 @@ groups, intervals, named classes, escaping, and edge cases.
 ### Named class combined with ranges
 
     #test
-    test_named_class_combined() -> void
+    test_named_class_combined() -> unit
         val m = match_regex("^[[:digit:]_]+$", "123_456")
 
         assert(m.matched(), "digits and underscore")
 
     #test
-    test_named_class_negated() -> void
+    test_named_class_negated() -> unit
         val m = match_regex("^[^[:digit:]]+$", "hello")
 
         assert(m.matched(), "not-digits matches letters")
 
     #test
-    test_named_class_negated_fail() -> void
+    test_named_class_negated_fail() -> unit
         val m = match_regex("^[^[:digit:]]+$", "hello123")
 
         assert(!m.matched(), "not-digits rejects digits")

@@ -104,7 +104,7 @@ class SyslCodegenFunctionTests extends SyslCodegenHelpers {
   "pass function pointer as argument" in {
     compileAndRun(
       """myDouble(x: int) -> int = x * 2
-        |apply(f: func(int) -> int, x: int) -> int = f(x)
+        |apply(f: (int) -> int, x: int) -> int = f(x)
         |main() -> int = apply(myDouble, 21)
         |""".stripMargin) shouldBe 42
   }

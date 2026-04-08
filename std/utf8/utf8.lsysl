@@ -330,28 +330,28 @@ Tests
 ### valid_rune and rune_start
 
     #test
-    test_valid_rune_ascii() -> void
+    test_valid_rune_ascii() -> unit
         assert(valid_rune(0x41), "'A' is valid")
         assert(valid_rune(0x00), "U+0000 is valid")
         assert(valid_rune(0x7F), "U+007F is valid")
 
     #test
-    test_valid_rune_rejects_surrogates() -> void
+    test_valid_rune_rejects_surrogates() -> unit
         assert(!valid_rune(0xD800), "low surrogate start")
         assert(!valid_rune(0xDFFF), "high surrogate end")
 
     #test
-    test_valid_rune_accepts_bmp_edges() -> void
+    test_valid_rune_accepts_bmp_edges() -> unit
         assert(valid_rune(0xD7FF), "just before surrogates")
         assert(valid_rune(0xE000), "just after surrogates")
 
     #test
-    test_valid_rune_rejects_above_max() -> void
+    test_valid_rune_rejects_above_max() -> unit
         assert(valid_rune(0x10FFFF), "MAX_RUNE itself")
         assert(!valid_rune(0x110000), "one past MAX_RUNE")
 
     #test
-    test_rune_start_classifies_bytes() -> void
+    test_rune_start_classifies_bytes() -> unit
         assert(rune_start(0x00), "ASCII")
         assert(rune_start(0x7F), "ASCII max")
         assert(!rune_start(0x80), "continuation byte start")
@@ -364,7 +364,7 @@ Tests
 ### rune_len
 
     #test
-    test_rune_len_by_range() -> void
+    test_rune_len_by_range() -> unit
         assert(rune_len(0x00) == 1, "NUL")
         assert(rune_len(0x7F) == 1, "max 1-byte")
         assert(rune_len(0x80) == 2, "min 2-byte")
@@ -375,7 +375,7 @@ Tests
         assert(rune_len(0x10FFFF) == 4, "MAX_RUNE")
 
     #test
-    test_rune_len_rejects_invalid() -> void
+    test_rune_len_rejects_invalid() -> unit
         assert(rune_len(0xD800) == -1, "surrogate")
         assert(rune_len(0xDFFF) == -1, "surrogate")
         assert(rune_len(0x110000) == -1, "above MAX_RUNE")
@@ -384,7 +384,7 @@ Tests
 ### encode_rune and decode_rune — round trip
 
     #test
-    test_roundtrip_ascii() -> void
+    test_roundtrip_ascii() -> unit
         val buf = new [4]byte
         val n = encode_rune(buf[:], 0x41)
 
@@ -396,7 +396,7 @@ Tests
         assert(m == 1, "consumed 1 byte")
 
     #test
-    test_roundtrip_2byte() -> void
+    test_roundtrip_2byte() -> unit
         val buf = new [4]byte
         // U+00E9 (é)
         val n = encode_rune(buf[:], 0xE9)
@@ -407,7 +407,7 @@ Tests
         assert(m == 2, "consumed 2 bytes")
 
     #test
-    test_roundtrip_3byte() -> void
+    test_roundtrip_3byte() -> unit
         val buf = new [4]byte
         // U+20AC (€)
         val n = encode_rune(buf[:], 0x20AC)
@@ -418,7 +418,7 @@ Tests
         assert(m == 3, "consumed 3 bytes")
 
     #test
-    test_roundtrip_4byte() -> void
+    test_roundtrip_4byte() -> unit
         val buf = new [4]byte
         // U+1F600 (😀)
         val n = encode_rune(buf[:], 0x1F600)
@@ -429,7 +429,7 @@ Tests
         assert(m == 4, "consumed 4 bytes")
 
     #test
-    test_roundtrip_max_rune() -> void
+    test_roundtrip_max_rune() -> unit
         val buf = new [4]byte
         val n = encode_rune(buf[:], 0x10FFFF)
         assert(n == 4, "MAX_RUNE is 4 bytes")
@@ -442,7 +442,7 @@ Tests
 ### encode_rune — invalid codepoints become RUNE_ERROR
 
     #test
-    test_encode_surrogate_becomes_replacement() -> void
+    test_encode_surrogate_becomes_replacement() -> unit
         val buf = new [4]byte
         val n = encode_rune(buf[:], 0xD800)
 
@@ -453,7 +453,7 @@ Tests
         assert(m == 3, "consumed 3 bytes")
 
     #test
-    test_encode_above_max_becomes_replacement() -> void
+    test_encode_above_max_becomes_replacement() -> unit
         val buf = new [4]byte
         val n = encode_rune(buf[:], 0x200000)
 
@@ -463,7 +463,7 @@ Tests
         assert(r == RUNE_ERROR, "decoded as U+FFFD")
 
     #test
-    test_encode_buffer_too_small() -> void
+    test_encode_buffer_too_small() -> unit
         val buf = new [1]byte
         val n = encode_rune(buf[:], 0xE9)
         assert(n == 0, "cannot encode 2-byte into 1-byte buffer")
@@ -472,7 +472,7 @@ Tests
 ### decode_rune — invalid input returns (RUNE_ERROR, 1)
 
     #test
-    test_decode_empty() -> void
+    test_decode_empty() -> unit
         val buf = new [0]byte
 
         val r, n = decode_rune(buf[:])
@@ -480,7 +480,7 @@ Tests
         assert(n == 0, "empty consumes zero")
 
     #test
-    test_decode_lone_continuation() -> void
+    test_decode_lone_continuation() -> unit
         val buf = new [1]byte
         buf[0] = 0x80
 
@@ -489,7 +489,7 @@ Tests
         assert(n == 1, "skip one byte")
 
     #test
-    test_decode_truncated_2byte() -> void
+    test_decode_truncated_2byte() -> unit
         val buf = new [1]byte
         buf[0] = 0xC3  // lead of 2-byte
 
@@ -498,7 +498,7 @@ Tests
         assert(n == 1, "skip one byte")
 
     #test
-    test_decode_bad_continuation() -> void
+    test_decode_bad_continuation() -> unit
         val buf = new [2]byte
         buf[0] = 0xC3
         buf[1] = 0x40  // not a continuation byte (not 10xxxxxx)
@@ -508,7 +508,7 @@ Tests
         assert(n == 1, "skip one byte")
 
     #test
-    test_decode_overlong_2byte() -> void
+    test_decode_overlong_2byte() -> unit
         val buf = new [2]byte
         buf[0] = 0xC0
         buf[1] = 0x80  // would decode to U+0000 but overlong
@@ -518,7 +518,7 @@ Tests
         assert(n == 1, "skip one byte")
 
     #test
-    test_decode_surrogate_3byte() -> void
+    test_decode_surrogate_3byte() -> unit
         val buf = new [3]byte
         buf[0] = 0xED
         buf[1] = 0xA0
@@ -532,7 +532,7 @@ Tests
 ### rune_count
 
     #test
-    test_rune_count_ascii() -> void
+    test_rune_count_ascii() -> unit
         val buf = new [5]byte
         buf[0] = byte('H')
         buf[1] = byte('e')
@@ -543,7 +543,7 @@ Tests
         assert(rune_count(buf[:]) == 5, "5 ASCII runes")
 
     #test
-    test_rune_count_mixed_widths() -> void
+    test_rune_count_mixed_widths() -> unit
         val buf = new [6]byte
         buf[0] = byte('A')   // 1 byte
         buf[1] = 0xC3        // 2-byte lead
@@ -555,7 +555,7 @@ Tests
         assert(rune_count(buf[:]) == 3, "A é €")
 
     #test
-    test_rune_count_empty() -> void
+    test_rune_count_empty() -> unit
         val buf = new [0]byte
         assert(rune_count(buf[:]) == 0, "empty has zero runes")
 
@@ -563,7 +563,7 @@ Tests
 ### valid
 
     #test
-    test_valid_ascii() -> void
+    test_valid_ascii() -> unit
         val buf = new [3]byte
         buf[0] = byte('a')
         buf[1] = byte('b')
@@ -572,12 +572,12 @@ Tests
         assert(valid(buf[:]), "ASCII is valid")
 
     #test
-    test_valid_empty_is_true() -> void
+    test_valid_empty_is_true() -> unit
         val buf = new [0]byte
         assert(valid(buf[:]), "empty is valid UTF-8")
 
     #test
-    test_valid_replacement_char_passes() -> void
+    test_valid_replacement_char_passes() -> unit
         val buf = new [3]byte
         buf[0] = 0xEF
         buf[1] = 0xBF
@@ -586,13 +586,13 @@ Tests
         assert(valid(buf[:]), "literal U+FFFD is valid input")
 
     #test
-    test_valid_rejects_lone_continuation() -> void
+    test_valid_rejects_lone_continuation() -> unit
         val buf = new [1]byte
         buf[0] = 0x80
         assert(!valid(buf[:]), "continuation byte alone")
 
     #test
-    test_valid_rejects_overlong() -> void
+    test_valid_rejects_overlong() -> unit
         val buf = new [2]byte
         buf[0] = 0xC0
         buf[1] = 0x80

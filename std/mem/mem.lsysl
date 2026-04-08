@@ -184,7 +184,7 @@ Tests
 ### copy
 
     #test
-    test_copy_equal_lengths() -> void
+    test_copy_equal_lengths() -> unit
         val src = new [4]byte
         val dst = new [4]byte
 
@@ -202,7 +202,7 @@ Tests
         assert(dst[3] == 40, "byte 3")
 
     #test
-    test_copy_src_longer() -> void
+    test_copy_src_longer() -> unit
         val src = new [5]byte
         val dst = new [3]byte
 
@@ -220,7 +220,7 @@ Tests
         assert(dst[2] == 3, "byte 2")
 
     #test
-    test_copy_dst_longer() -> void
+    test_copy_dst_longer() -> unit
         val src = new [2]byte
         val dst = new [4]byte
 
@@ -238,7 +238,7 @@ Tests
         assert(dst[3] == 99, "byte 3 untouched")
 
     #test
-    test_copy_empty_src() -> void
+    test_copy_empty_src() -> unit
         val src = new [0]byte
         val dst = new [3]byte
 
@@ -250,7 +250,7 @@ Tests
         assert(dst[0] == 5, "dst untouched")
 
     #test
-    test_copy_empty_dst() -> void
+    test_copy_empty_dst() -> unit
         val src = new [3]byte
         val dst = new [0]byte
 
@@ -264,7 +264,7 @@ Tests
 ### set and zero
 
     #test
-    test_set_fills_all_bytes() -> void
+    test_set_fills_all_bytes() -> unit
         val buf = new [4]byte
 
         set(buf[:], 0x7F)
@@ -275,14 +275,14 @@ Tests
         assert(buf[3] == 0x7F, "byte 3")
 
     #test
-    test_set_empty_is_noop() -> void
+    test_set_empty_is_noop() -> unit
         val buf = new [0]byte
 
         set(buf[:], 0xFF)
         // nothing to check — should not panic
 
     #test
-    test_zero_fills_zeros() -> void
+    test_zero_fills_zeros() -> unit
         val buf = new [3]byte
 
         buf[0] = 0xAA
@@ -299,7 +299,7 @@ Tests
 ### eq
 
     #test
-    test_eq_same_contents() -> void
+    test_eq_same_contents() -> unit
         val a = new [3]byte
         val b = new [3]byte
 
@@ -313,7 +313,7 @@ Tests
         assert(eq(a[:], b[:]), "equal slices")
 
     #test
-    test_eq_different_contents() -> void
+    test_eq_different_contents() -> unit
         val a = new [3]byte
         val b = new [3]byte
 
@@ -327,7 +327,7 @@ Tests
         assert(!eq(a[:], b[:]), "last byte differs")
 
     #test
-    test_eq_different_lengths() -> void
+    test_eq_different_lengths() -> unit
         val a = new [2]byte
         val b = new [3]byte
 
@@ -340,7 +340,7 @@ Tests
         assert(!eq(a[:], b[:]), "different lengths never equal")
 
     #test
-    test_eq_empty_empty() -> void
+    test_eq_empty_empty() -> unit
         val a = new [0]byte
         val b = new [0]byte
 
@@ -350,7 +350,7 @@ Tests
 ### cmp
 
     #test
-    test_cmp_equal() -> void
+    test_cmp_equal() -> unit
         val a = new [2]byte
         val b = new [2]byte
 
@@ -362,7 +362,7 @@ Tests
         assert(cmp(a[:], b[:]) == 0, "equal slices compare zero")
 
     #test
-    test_cmp_less() -> void
+    test_cmp_less() -> unit
         val a = new [2]byte
         val b = new [2]byte
 
@@ -374,7 +374,7 @@ Tests
         assert(cmp(a[:], b[:]) < 0, "a < b")
 
     #test
-    test_cmp_greater() -> void
+    test_cmp_greater() -> unit
         val a = new [2]byte
         val b = new [2]byte
 
@@ -386,7 +386,7 @@ Tests
         assert(cmp(a[:], b[:]) > 0, "a > b on first byte")
 
     #test
-    test_cmp_prefix_sorts_first() -> void
+    test_cmp_prefix_sorts_first() -> unit
         val a = new [2]byte
         val b = new [3]byte
 
@@ -399,7 +399,7 @@ Tests
         assert(cmp(a[:], b[:]) < 0, "shorter prefix sorts first")
 
     #test
-    test_cmp_empty_empty() -> void
+    test_cmp_empty_empty() -> unit
         val a = new [0]byte
         val b = new [0]byte
 
@@ -409,7 +409,7 @@ Tests
 ### index_byte
 
     #test
-    test_index_byte_found_at_start() -> void
+    test_index_byte_found_at_start() -> unit
         val s = new [3]byte
 
         s[0] = 7
@@ -419,7 +419,7 @@ Tests
         assert(index_byte(s[:], 7) == 0, "first byte")
 
     #test
-    test_index_byte_found_at_end() -> void
+    test_index_byte_found_at_end() -> unit
         val s = new [3]byte
 
         s[0] = 7
@@ -429,7 +429,7 @@ Tests
         assert(index_byte(s[:], 9) == 2, "last byte")
 
     #test
-    test_index_byte_returns_first_occurrence() -> void
+    test_index_byte_returns_first_occurrence() -> unit
         val s = new [4]byte
 
         s[0] = 1
@@ -440,7 +440,7 @@ Tests
         assert(index_byte(s[:], 2) == 1, "first match only")
 
     #test
-    test_index_byte_not_found() -> void
+    test_index_byte_not_found() -> unit
         val s = new [3]byte
 
         s[0] = 1
@@ -450,7 +450,7 @@ Tests
         assert(index_byte(s[:], 99) == -1, "sentinel on miss")
 
     #test
-    test_index_byte_empty() -> void
+    test_index_byte_empty() -> unit
         val s = new [0]byte
 
         assert(index_byte(s[:], 0) == -1, "empty slice never finds")

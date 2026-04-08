@@ -161,13 +161,13 @@ Tests
 ### Construction and basic writes
 
     #test
-    test_new_builder_is_empty() -> void
+    test_new_builder_is_empty() -> unit
         var b = new_builder()
         assert(b.len() == 0, "empty")
         assert(b.to_str() == "", "empty string")
 
     #test
-    test_write_byte() -> void
+    test_write_byte() -> unit
         var b = new_builder()
         b.write_byte(byte('a'))
         b.write_byte(byte('b'))
@@ -175,13 +175,13 @@ Tests
         assert(b.to_str() == "abc", "three bytes")
 
     #test
-    test_write_string() -> void
+    test_write_string() -> unit
         var b = new_builder()
         b.write("hello")
         assert(b.to_str() == "hello", "one write")
 
     #test
-    test_write_multiple_strings() -> void
+    test_write_multiple_strings() -> unit
         var b = new_builder()
         b.write("hello")
         b.write(" ")
@@ -192,7 +192,7 @@ Tests
 ### Growth beyond initial capacity
 
     #test
-    test_grows_past_initial_cap() -> void
+    test_grows_past_initial_cap() -> unit
         var b = new_builder()
         // Initial cap is 16; write more than that
         b.write("this string is definitely longer than sixteen bytes")
@@ -202,31 +202,31 @@ Tests
 ### write_i64 / write_int
 
     #test
-    test_write_i64_zero() -> void
+    test_write_i64_zero() -> unit
         var b = new_builder()
         b.write_i64(0i64)
         assert(b.to_str() == "0", "zero")
 
     #test
-    test_write_i64_positive() -> void
+    test_write_i64_positive() -> unit
         var b = new_builder()
         b.write_i64(12345i64)
         assert(b.to_str() == "12345", "positive")
 
     #test
-    test_write_i64_negative() -> void
+    test_write_i64_negative() -> unit
         var b = new_builder()
         b.write_i64(-42i64)
         assert(b.to_str() == "-42", "negative")
 
     #test
-    test_write_i64_min() -> void
+    test_write_i64_min() -> unit
         var b = new_builder()
         b.write_i64(-9223372036854775807i64 - 1i64)
         assert(b.to_str() == "-9223372036854775808", "MIN_I64")
 
     #test
-    test_write_int() -> void
+    test_write_int() -> unit
         var b = new_builder()
         b.write_int(100)
         b.write_int(-200)
@@ -236,13 +236,13 @@ Tests
 ### write_bool
 
     #test
-    test_write_bool_true() -> void
+    test_write_bool_true() -> unit
         var b = new_builder()
         b.write_bool(true)
         assert(b.to_str() == "true", "true")
 
     #test
-    test_write_bool_false() -> void
+    test_write_bool_false() -> unit
         var b = new_builder()
         b.write_bool(false)
         assert(b.to_str() == "false", "false")
@@ -251,19 +251,19 @@ Tests
 ### write_rune
 
     #test
-    test_write_rune_ascii() -> void
+    test_write_rune_ascii() -> unit
         var b = new_builder()
         b.write_rune(0x41)  // 'A'
         assert(b.to_str() == "A", "ascii")
 
     #test
-    test_write_rune_2byte() -> void
+    test_write_rune_2byte() -> unit
         var b = new_builder()
         b.write_rune(0xE9)  // é
         assert(b.len() == 2, "two bytes")
 
     #test
-    test_write_rune_4byte() -> void
+    test_write_rune_4byte() -> unit
         var b = new_builder()
         b.write_rune(0x1F600)  // 😀
         assert(b.len() == 4, "four bytes")
@@ -272,7 +272,7 @@ Tests
 ### Mixed writes (interpolation-style)
 
     #test
-    test_mixed_writes() -> void
+    test_mixed_writes() -> unit
         var b = new_builder()
         b.write("user ")
         b.write_int(42)
@@ -282,7 +282,7 @@ Tests
         assert(b.to_str() == "user 42 has 7 items", "interpolation-style")
 
     #test
-    test_mixed_with_bool() -> void
+    test_mixed_with_bool() -> unit
         var b = new_builder()
         b.write("active: ")
         b.write_bool(true)
@@ -294,7 +294,7 @@ Tests
 ### len and reset
 
     #test
-    test_len_tracks_bytes() -> void
+    test_len_tracks_bytes() -> unit
         var b = new_builder()
         assert(b.len() == 0, "start")
         b.write("abc")
@@ -303,7 +303,7 @@ Tests
         assert(b.len() == 4, "after 4")
 
     #test
-    test_reset_clears() -> void
+    test_reset_clears() -> unit
         var b = new_builder()
         b.write("hello")
         b.reset()
@@ -316,7 +316,7 @@ Tests
 ### to_str is a snapshot, not a terminator
 
     #test
-    test_to_str_does_not_invalidate() -> void
+    test_to_str_does_not_invalidate() -> unit
         var b = new_builder()
         b.write("hello")
         val s1 = b.to_str()

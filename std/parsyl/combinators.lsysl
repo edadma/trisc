@@ -8,31 +8,31 @@ run helpers, and `many0_int` / `many1_int`. Depends on **`ParseMaybe[T]`** from
 
     module std.parsyl
 
-    succeed[T](v: T) -> func(string, int) -> ParseMaybe[T] =
+    succeed[T](v: T) -> (string, int) -> ParseMaybe[T] =
         (s: string, i: int) ->
             val captured = v
             Got(i, captured)
 
-    fail[T]() -> func(string, int) -> ParseMaybe[T] =
+    fail[T]() -> (string, int) -> ParseMaybe[T] =
         (s: string, i: int) -> Miss
 
-    satisfy(pred: func(int) -> bool) -> func(string, int) -> ParseMaybe[int] =
+    satisfy(pred: (int) -> bool) -> (string, int) -> ParseMaybe[int] =
         (s: string, pos: int) ->
             if pos >= len(s) then Miss
             else
                 val next = pos + 1
                 if pred(s[pos]) then Got(next, s[pos]) else Miss
 
-    lit(ch: int) -> func(string, int) -> ParseMaybe[int] =
+    lit(ch: int) -> (string, int) -> ParseMaybe[int] =
         satisfy((x: int) -> x == ch)
 
-    alt[T](a: func(string, int) -> ParseMaybe[T], b: func(string, int) -> ParseMaybe[T]) -> func(string, int) -> ParseMaybe[T] =
+    alt[T](a: (string, int) -> ParseMaybe[T], b: (string, int) -> ParseMaybe[T]) -> (string, int) -> ParseMaybe[T] =
         (s: string, i: int) ->
             a(s, i) match
                 Got(p, v) -> Got(p, v)
                 Miss -> b(s, i)
 
-    seq[A, B](a: func(string, int) -> ParseMaybe[A], b: func(string, int) -> ParseMaybe[B]) -> func(string, int) -> ParseMaybe[(A, B)] =
+    seq[A, B](a: (string, int) -> ParseMaybe[A], b: (string, int) -> ParseMaybe[B]) -> (string, int) -> ParseMaybe[(A, B)] =
         (s: string, i: int) ->
             a(s, i) match
                 Got(p1, va) ->
@@ -41,34 +41,34 @@ run helpers, and `many0_int` / `many1_int`. Depends on **`ParseMaybe[T]`** from
                         Miss -> Miss
                 Miss -> Miss
 
-    map[A, B](p: func(string, int) -> ParseMaybe[A], f: func(A) -> B) -> func(string, int) -> ParseMaybe[B] =
+    map[A, B](p: (string, int) -> ParseMaybe[A], f: (A) -> B) -> (string, int) -> ParseMaybe[B] =
         (s: string, i: int) ->
             p(s, i) match
                 Got(p, v) -> Got(p, f(v))
                 Miss -> Miss
 
-    run_all[T](p: func(string, int) -> ParseMaybe[T], input: string) -> ParseMaybe[T] =
+    run_all[T](p: (string, int) -> ParseMaybe[T], input: string) -> ParseMaybe[T] =
         p(input, 0) match
             Got(p, v) ->
                 if p != len(input) then Miss
                 else Got(len(input), v)
             Miss -> Miss
 
-    run_all_int(p: func(string, int) -> ParseMaybe[int], input: string) -> ParseMaybe[int] =
+    run_all_int(p: (string, int) -> ParseMaybe[int], input: string) -> ParseMaybe[int] =
         p(input, 0) match
             Got(p, v) ->
                 if p != len(input) then Miss
                 else Got(len(input), v)
             Miss -> Miss
 
-    run_all_ints(p: func(string, int) -> ParseMaybe[[]int], input: string) -> ParseMaybe[[]int] =
+    run_all_ints(p: (string, int) -> ParseMaybe[[]int], input: string) -> ParseMaybe[[]int] =
         p(input, 0) match
             Got(p, v) ->
                 if p != len(input) then Miss
                 else Got(len(input), v)
             Miss -> Miss
 
-    many0_int(p: func(string, int) -> ParseMaybe[int]) -> func(string, int) -> ParseMaybe[[]int] =
+    many0_int(p: (string, int) -> ParseMaybe[int]) -> (string, int) -> ParseMaybe[[]int] =
         (s: string, i0: int) ->
             var i = i0
             val mem = new [256]int
@@ -83,7 +83,7 @@ run helpers, and `many0_int` / `many1_int`. Depends on **`ParseMaybe[T]`** from
                         done = true
             Got(i, acc)
 
-    many1_int(p: func(string, int) -> ParseMaybe[int]) -> func(string, int) -> ParseMaybe[[]int] =
+    many1_int(p: (string, int) -> ParseMaybe[int]) -> (string, int) -> ParseMaybe[[]int] =
         (s: string, i0: int) ->
             p(s, i0) match
                 Miss -> Miss

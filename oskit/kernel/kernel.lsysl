@@ -162,7 +162,7 @@ queue is scanned each tick in schedule().
 Each timer has:
 - active: 1 if armed, 0 if free
 - fire_tick: absolute tick when the timer fires
-- callback: function pointer to call (void -> void)
+- callback: function pointer to call (unit -> unit)
 
 
     val MAX_TIMERS = 8

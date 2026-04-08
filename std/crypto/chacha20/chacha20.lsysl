@@ -136,7 +136,7 @@ Counter = 1.
 ### quarter_round — RFC 8439 Section 2.1.1 test vector
 
     #test
-    test_quarter_round() -> void
+    test_quarter_round() -> unit
         var a: u32 = 0x11111111u32
         var b: u32 = 0x01020304u32
         var c: u32 = 0x9b8d6f43u32
@@ -153,7 +153,7 @@ Counter = 1.
 ### chacha20_block — RFC 8439 Section 2.3.2 test vector
 
     #test
-    test_chacha20_block_rfc7539() -> void
+    test_chacha20_block_rfc7539() -> unit
         // RFC 7539 Appendix A.1 Test Vector #1
         // Key: all zeros, Nonce: all zeros, Counter: 0
         var key: [8]u32
@@ -180,7 +180,7 @@ Counter = 1.
 ### Determinism — same inputs produce same output
 
     #test
-    test_chacha20_deterministic() -> void
+    test_chacha20_deterministic() -> unit
         var key: [8]u32
         key[0] = 0xdeadbeefu32
         key[1] = 0xcafebabeu32
@@ -209,7 +209,7 @@ Counter = 1.
 ### Different counters produce different output
 
     #test
-    test_chacha20_different_counters() -> void
+    test_chacha20_different_counters() -> unit
         var key: [8]u32
 
         for i in 0..<8

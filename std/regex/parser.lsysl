@@ -705,7 +705,7 @@ array.
 ### Single literal
 
     #test
-    test_parse_literal() -> void
+    test_parse_literal() -> unit
         root, nodes, _, _, err, _, _ = parse_bre("a")
 
         assert(!err, "no error")
@@ -718,7 +718,7 @@ array.
 ### Dot
 
     #test
-    test_parse_dot() -> void
+    test_parse_dot() -> unit
         root, nodes, _, _, err, _, _ = parse_bre(".")
 
         assert(!err, "no error")
@@ -728,7 +728,7 @@ array.
 ### Anchors
 
     #test
-    test_parse_anchor_start() -> void
+    test_parse_anchor_start() -> unit
         root, nodes, _, _, err, _, _ = parse_bre("^a")
 
         assert(!err, "no error")
@@ -736,7 +736,7 @@ array.
         assert(nodes[nodes[root].left].kind == NK_ANCHOR_START, "^ anchor")
 
     #test
-    test_parse_anchor_end() -> void
+    test_parse_anchor_end() -> unit
         root, nodes, _, _, err, _, _ = parse_bre("a$")
 
         assert(!err, "no error")
@@ -747,7 +747,7 @@ array.
 ### Concatenation
 
     #test
-    test_parse_concat() -> void
+    test_parse_concat() -> unit
         root, nodes, _, _, err, _, _ = parse_bre("abc")
 
         assert(!err, "no error")
@@ -766,7 +766,7 @@ array.
 ### Star quantifier
 
     #test
-    test_parse_star() -> void
+    test_parse_star() -> unit
         root, nodes, _, _, err, _, _ = parse_bre("a*")
 
         assert(!err, "no error")
@@ -778,7 +778,7 @@ array.
 ### Capture group
 
     #test
-    test_parse_capture() -> void
+    test_parse_capture() -> unit
         root, nodes, _, n_groups, err, _, _ = parse_bre("\\(a\\)")
 
         assert(!err, "no error")
@@ -791,7 +791,7 @@ array.
 ### Nested captures
 
     #test
-    test_parse_nested_capture() -> void
+    test_parse_nested_capture() -> unit
         root, nodes, _, n_groups, err, _, _ = parse_bre("\\(a\\(b\\)\\)")
 
         assert(!err, "no error")
@@ -803,7 +803,7 @@ array.
 ### Character class
 
     #test
-    test_parse_class() -> void
+    test_parse_class() -> unit
         root, nodes, classes, _, err, _, _ = parse_bre("[abc]")
 
         assert(!err, "no error")
@@ -816,7 +816,7 @@ array.
 ### Negated character class
 
     #test
-    test_parse_negated_class() -> void
+    test_parse_negated_class() -> unit
         root, nodes, classes, _, err, _, _ = parse_bre("[^ab]")
 
         assert(!err, "no error")
@@ -827,7 +827,7 @@ array.
 ### Character range in class
 
     #test
-    test_parse_class_range() -> void
+    test_parse_class_range() -> unit
         _, _, classes, _, err, _, _ = parse_bre("[a-z]")
 
         assert(!err, "no error")
@@ -839,7 +839,7 @@ array.
 ### Escaped characters
 
     #test
-    test_parse_escaped_dot() -> void
+    test_parse_escaped_dot() -> unit
         root, nodes, _, _, err, _, _ = parse_bre("\\.")
 
         assert(!err, "no error")
@@ -847,7 +847,7 @@ array.
         assert(nodes[root].ch == int('.'), "char is '.'")
 
     #test
-    test_parse_escaped_star() -> void
+    test_parse_escaped_star() -> unit
         root, nodes, _, _, err, _, _ = parse_bre("\\*")
 
         assert(!err, "no error")
@@ -858,19 +858,19 @@ array.
 ### Error cases
 
     #test
-    test_parse_unterminated_class() -> void
+    test_parse_unterminated_class() -> unit
         _, _, _, _, err, msg, _ = parse_bre("[abc")
 
         assert(err, "error set")
 
     #test
-    test_parse_unterminated_group() -> void
+    test_parse_unterminated_group() -> unit
         _, _, _, _, err, msg, _ = parse_bre("\\(abc")
 
         assert(err, "error set")
 
     #test
-    test_parse_trailing_backslash() -> void
+    test_parse_trailing_backslash() -> unit
         _, _, _, _, err, _, _ = parse_bre("abc\\")
 
         assert(err, "error set")
@@ -879,14 +879,14 @@ array.
 ### Complex patterns
 
     #test
-    test_parse_email_like() -> void
+    test_parse_email_like() -> unit
         _, _, _, n_groups, err, _, _ = parse_bre("[a-z]*@[a-z]*\\.[a-z]*")
 
         assert(!err, "no error")
         assert(n_groups == 0, "no captures")
 
     #test
-    test_parse_empty() -> void
+    test_parse_empty() -> unit
         root, nodes, _, _, err, _, _ = parse_bre("")
 
         assert(!err, "no error")
@@ -901,7 +901,7 @@ Extended parser tests
 
 
     #test
-    test_ere_parse_literal() -> void
+    test_ere_parse_literal() -> unit
         root, nodes, _, _, err, _, _ = parse_regex("a")
 
         assert(!err, "no error")
@@ -912,7 +912,7 @@ Extended parser tests
 ### ERE alternation
 
     #test
-    test_ere_parse_alt() -> void
+    test_ere_parse_alt() -> unit
         root, nodes, _, _, err, _, _ = parse_regex("a|b")
 
         assert(!err, "no error")
@@ -926,7 +926,7 @@ Extended parser tests
 ### ERE multi-way alternation
 
     #test
-    test_ere_parse_multi_alt() -> void
+    test_ere_parse_multi_alt() -> unit
         root, nodes, _, _, err, _, _ = parse_regex("a|b|c")
 
         assert(!err, "no error")
@@ -940,7 +940,7 @@ Extended parser tests
 ### ERE unescaped groups
 
     #test
-    test_ere_parse_group() -> void
+    test_ere_parse_group() -> unit
         root, nodes, _, n_groups, err, _, _ = parse_regex("(a)")
 
         assert(!err, "no error")
@@ -952,7 +952,7 @@ Extended parser tests
 ### ERE nested groups
 
     #test
-    test_ere_parse_nested_groups() -> void
+    test_ere_parse_nested_groups() -> unit
         root, nodes, _, n_groups, err, _, _ = parse_regex("(a(b))")
 
         assert(!err, "no error")
@@ -964,7 +964,7 @@ Extended parser tests
 ### ERE plus quantifier
 
     #test
-    test_ere_parse_plus() -> void
+    test_ere_parse_plus() -> unit
         root, nodes, _, _, err, _, _ = parse_regex("a+")
 
         assert(!err, "no error")
@@ -976,7 +976,7 @@ Extended parser tests
 ### ERE question quantifier
 
     #test
-    test_ere_parse_quest() -> void
+    test_ere_parse_quest() -> unit
         root, nodes, _, _, err, _, _ = parse_regex("a?")
 
         assert(!err, "no error")
@@ -987,7 +987,7 @@ Extended parser tests
 ### ERE star quantifier
 
     #test
-    test_ere_parse_star() -> void
+    test_ere_parse_star() -> unit
         root, nodes, _, _, err, _, _ = parse_regex("a*")
 
         assert(!err, "no error")
@@ -997,7 +997,7 @@ Extended parser tests
 ### ERE concatenation
 
     #test
-    test_ere_parse_concat() -> void
+    test_ere_parse_concat() -> unit
         root, nodes, _, _, err, _, _ = parse_regex("abc")
 
         assert(!err, "no error")
@@ -1007,7 +1007,7 @@ Extended parser tests
 ### ERE alternation with concatenation
 
     #test
-    test_ere_parse_alt_concat() -> void
+    test_ere_parse_alt_concat() -> unit
         root, nodes, _, _, err, _, _ = parse_regex("ab|cd")
 
         assert(!err, "no error")
@@ -1020,7 +1020,7 @@ Extended parser tests
 ### ERE group with alternation
 
     #test
-    test_ere_parse_group_alt() -> void
+    test_ere_parse_group_alt() -> unit
         root, nodes, _, n_groups, err, _, _ = parse_regex("(a|b)")
 
         assert(!err, "no error")
@@ -1032,7 +1032,7 @@ Extended parser tests
 ### ERE anchors
 
     #test
-    test_ere_parse_anchors() -> void
+    test_ere_parse_anchors() -> unit
         root, nodes, _, _, err, _, _ = parse_regex("^a$")
 
         assert(!err, "no error")
@@ -1042,7 +1042,7 @@ Extended parser tests
 ### ERE character class
 
     #test
-    test_ere_parse_class() -> void
+    test_ere_parse_class() -> unit
         root, nodes, classes, _, err, _, _ = parse_regex("[a-z]")
 
         assert(!err, "no error")
@@ -1053,7 +1053,7 @@ Extended parser tests
 ### ERE dot
 
     #test
-    test_ere_parse_dot() -> void
+    test_ere_parse_dot() -> unit
         root, nodes, _, _, err, _, _ = parse_regex(".")
 
         assert(!err, "no error")
@@ -1063,7 +1063,7 @@ Extended parser tests
 ### ERE escaped special chars
 
     #test
-    test_ere_parse_escaped_paren() -> void
+    test_ere_parse_escaped_paren() -> unit
         root, nodes, _, _, err, _, _ = parse_regex("\\(")
 
         assert(!err, "no error")
@@ -1071,7 +1071,7 @@ Extended parser tests
         assert(nodes[root].ch == int('('), "char is (")
 
     #test
-    test_ere_parse_escaped_pipe() -> void
+    test_ere_parse_escaped_pipe() -> unit
         root, nodes, _, _, err, _, _ = parse_regex("\\|")
 
         assert(!err, "no error")
@@ -1079,7 +1079,7 @@ Extended parser tests
         assert(nodes[root].ch == int('|'), "char is |")
 
     #test
-    test_ere_parse_escaped_plus() -> void
+    test_ere_parse_escaped_plus() -> unit
         root, nodes, _, _, err, _, _ = parse_regex("\\+")
 
         assert(!err, "no error")
@@ -1090,19 +1090,19 @@ Extended parser tests
 ### ERE error cases
 
     #test
-    test_ere_parse_unterminated_group() -> void
+    test_ere_parse_unterminated_group() -> unit
         _, _, _, _, err, _, _ = parse_regex("(abc")
 
         assert(err, "error set")
 
     #test
-    test_ere_parse_unterminated_class() -> void
+    test_ere_parse_unterminated_class() -> unit
         _, _, _, _, err, _, _ = parse_regex("[abc")
 
         assert(err, "error set")
 
     #test
-    test_ere_parse_trailing_backslash() -> void
+    test_ere_parse_trailing_backslash() -> unit
         _, _, _, _, err, _, _ = parse_regex("abc\\")
 
         assert(err, "error set")
@@ -1111,7 +1111,7 @@ Extended parser tests
 ### ERE empty alternation branch
 
     #test
-    test_ere_parse_empty() -> void
+    test_ere_parse_empty() -> unit
         root, nodes, _, _, err, _, _ = parse_regex("")
 
         assert(!err, "no error")
@@ -1121,7 +1121,7 @@ Extended parser tests
 ### ERE quantifier on group
 
     #test
-    test_ere_parse_group_star() -> void
+    test_ere_parse_group_star() -> unit
         root, nodes, _, _, err, _, _ = parse_regex("(ab)*")
 
         assert(!err, "no error")
@@ -1129,7 +1129,7 @@ Extended parser tests
         assert(nodes[nodes[root].left].kind == NK_CAPTURE, "child is capture")
 
     #test
-    test_ere_parse_group_plus() -> void
+    test_ere_parse_group_plus() -> unit
         root, nodes, _, _, err, _, _ = parse_regex("(ab)+")
 
         assert(!err, "no error")
@@ -1137,7 +1137,7 @@ Extended parser tests
         assert(nodes[nodes[root].left].kind == NK_CAPTURE, "child is capture")
 
     #test
-    test_ere_parse_group_quest() -> void
+    test_ere_parse_group_quest() -> unit
         root, nodes, _, _, err, _, _ = parse_regex("(ab)?")
 
         assert(!err, "no error")
