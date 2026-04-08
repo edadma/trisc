@@ -640,13 +640,24 @@ class SyslAnalyzer:
     case FuncTypeAST(params, ret) => FuncType(params.map(resolveType), resolveType(ret))
     case RefTypeAST(inner) => RefType(resolveType(inner))
 
+  /** Look up a method function by struct name and method name, trying both unmangled and mangled forms. */
+  private def lookupMethod(structName: String, methodName: String): Option[FunInfo] =
+    val shortName = s"${structName}_$methodName"
+    functions.get(shortName).orElse {
+      // Try with module prefix (mangled name)
+      currentModule match
+        case Some(mod) => functions.get(s"${mod}__$shortName")
+        case None => None
+    }.orElse {
+      // Search all functions for a match (imported methods may have arbitrary module prefix)
+      functions.values.find(f => SyslAnalyzer.this.shortName(f.name) == shortName)
+    }
+
   private def satisfiesInterface(st: SyslType.StructType, iface: SyslType.InterfaceType): Boolean =
     val structName = st.name
     iface.methods.forall { (methodName, paramTypes, retType) =>
-      val funcName = s"${structName}_$methodName"
-      functions.get(funcName) match
+      lookupMethod(structName, methodName) match
         case Some(funInfo) =>
-          // Skip self param (first param is *StructType), compare the rest
           val userParams = funInfo.params.drop(1).map(_._2)
           userParams == paramTypes && funInfo.returnType == retType
         case None => false
