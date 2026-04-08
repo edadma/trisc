@@ -42,7 +42,7 @@ class SyslParser extends StandardTokenParsers {
     }
 
   lazy val declBare: Parser[DeclAST] =
-    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | typeAliasDecl | "private" ~> declBody(true) | declBody(false)
+    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | interfaceDecl | typeAliasDecl | "private" ~> declBody(true) | declBody(false)
 
   // --- Attributes ---
 
@@ -155,6 +155,21 @@ class SyslParser extends StandardTokenParsers {
     ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
       case name ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body)
     }
+
+  lazy val interfaceDecl: Parser[InterfaceDeclAST] =
+    "interface" ~> ident ~
+      (Newline ~> Indent ~> rep1sep(interfaceMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
+        case name ~ members =>
+          val methods = members.collect { case Right(m) => m }
+          val embedded = members.collect { case Left(n) => n }
+          InterfaceDeclAST(name, methods, embedded)
+      }
+
+  lazy val interfaceMember: Parser[Either[String, InterfaceMethodAST]] =
+    ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ opt("->" ~> typeRef) ^^ {
+      case name ~ params ~ rt => Right(InterfaceMethodAST(name, params, rt.getOrElse(NamedTypeAST("void"))))
+    } |
+    ident ^^ (name => Left(name))
 
 
   // Accept identifiers and type keywords (e.g., "string") in import paths
@@ -488,7 +503,26 @@ class SyslParser extends StandardTokenParsers {
 
   // --- Expressions ---
 
-  lazy val expr: Parser[ExpressionAST] = matchExpr | ifExpr | logicalOr
+  lazy val expr: Parser[ExpressionAST] = closureExpr | matchExpr | ifExpr | logicalOr
+
+  lazy val closureExpr: Parser[ClosureAST] =
+    // Zero params: () -> body
+    "(" ~ ")" ~ "->" ~> closureBody ^^ { body => ClosureAST(Nil, body) } |
+    // Multi params: (x, y) -> body or (x: int, y: int) -> body
+    ("(" ~> rep1sep(closureParam, ",") <~ ")") ~ ("->" ~> closureBody) ^^ {
+      case params ~ body => ClosureAST(params, body)
+    } |
+    // Single param: x -> body
+    ident ~ ("->" ~> closureBody) ^^ { case name ~ body =>
+      ClosureAST(List(ClosureParamAST(name, None)), body)
+    }
+
+  lazy val closureParam: Parser[ClosureParamAST] =
+    ident ~ opt(":" ~> typeRef) ^^ { case name ~ typ => ClosureParamAST(name, typ) }
+
+  lazy val closureBody: Parser[FunBodyAST] =
+    block ^^ BlockBodyAST.apply |
+    logicalOr ^^ ExprBodyAST.apply
 
   lazy val matchExpr: Parser[MatchExprAST] =
     logicalOr ~ ("match" ~> Newline ~> Indent ~> rep1(matchArm) ~ opt(matchElse) <~ Dedent) ^^ {
@@ -617,7 +651,7 @@ class SyslParser extends StandardTokenParsers {
       "-" ~> unary ^^ (e => UnaryAST("-", e)) |
       "!" ~> unary ^^ (e => UnaryAST("!", e)) |
       "~" ~> unary ^^ (e => UnaryAST("~", e)) |
-      "*" ~> scalarCastType ~ ("(" ~> expr <~ ")") ^^ { case t ~ e => CastAST(PtrTypeAST(NamedTypeAST(t)), e) } |
+      "*" ~> (scalarCastType | ident) ~ ("(" ~> expr <~ ")") ^^ { case t ~ e => CastAST(PtrTypeAST(NamedTypeAST(t)), e) } |
       "*" ~> unary ^^ DerefAST.apply |
       "&" ~> ident ~ rep1("." ~> ident) ^^ { case name ~ fields =>
         val base: ExpressionAST = VarRefAST(name)

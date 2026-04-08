@@ -87,7 +87,7 @@ This matches Go, Rust, and Swift. C-style implicit integer promotion is not used
 []T             // slice: {ptr: *T, len: i32, cap: i32} (16 bytes)
 &[]T            // ref-counted heap array from new [n]T
 (T1, T2, T3)   // tuple (desugars to anonymous struct)
-func(P1, P2) -> R  // function pointer (8 bytes)
+func(P1, P2) -> R  // function pointer / closure (16 bytes: {func_ptr, env_ptr})
 ```
 
 ### Struct Types
@@ -627,6 +627,70 @@ main() -> int
     funcs[0](10) + funcs[1](10)  // call through array
 ```
 
+### Closures
+
+Closures are anonymous functions that can capture variables from their enclosing scope. They use the `->` arrow syntax:
+
+```sysl
+// Single parameter (no parens needed)
+f = x -> x + 1
+
+// Multiple parameters
+g = (x, y) -> x + y
+
+// Zero parameters
+h = () -> 42
+
+// With type annotations
+f = (x: int) -> x * 2
+
+// Multi-line body (indentation block)
+transform = x ->
+    val doubled = x * 2
+    doubled + 1
+```
+
+**Capture semantics:** Closures capture variables **by value** (copy at creation time). Mutations to the original variable after the closure is created do not affect the captured value:
+
+```sysl
+var a = 10
+f = x -> x + a      // captures a = 10
+a = 100
+f(32)                // 42 (uses captured a = 10, not 100)
+```
+
+To share mutable state, capture a pointer (`*T`) or ref (`&T`).
+
+**Type inference:** Closure parameter types are inferred from context when the closure is passed to a function expecting a specific `func(...)` type:
+
+```sysl
+apply(f: func(int) -> int, x: int) -> int = f(x)
+
+main() -> int = apply(x -> x + 1, 41)    // x inferred as int
+```
+
+**Higher-order patterns:**
+
+```sysl
+// Closure as argument
+apply(f: func(int) -> int, x: int) -> int = f(x)
+apply(x -> x * 2, 21)           // 42
+
+// Closure as return value (requires captures)
+make_adder(n: int) -> func(int) -> int
+    val captured = n
+    x -> x + captured
+
+add10 = make_adder(10)
+add10(32)                        // 42
+
+// Closure assigned to variable
+val f: func(int) -> int = x -> x * 2
+f(21)                            // 42
+```
+
+**Implementation:** All function values (including plain function pointers) are 16-byte fat pointers: `{func_ptr: i64, env_ptr: i64}`. Plain function pointers have `env_ptr = 0`. Closures with captures heap-allocate an environment struct and store captured values by copy. The `env_ptr` is passed to the closure function via register r3 in the TRISC calling convention.
+
 ### Extern Declarations
 
 ```sysl
@@ -732,12 +796,26 @@ p += 2    p -= 1
 ### Casts
 
 ```sysl
+// Numeric
 int(true)         // bool -> int: 1
 bool(42)          // int -> bool: true (nonzero)
 byte(0x1FF)       // truncate to u8: 255
 char(65)          // int -> u32: 65
+i64(3.14)         // float -> int: 3
+
+// Pointer / int conversions
 *i8(address)      // int -> pointer
+*Point(address)   // int -> struct pointer
 i64(ptr)          // pointer -> int
+bool(ptr)         // pointer -> bool (null = false)
+
+// Pointer-to-pointer
+*byte(charPtr)    // *T -> *U (any pointer to any pointer)
+*i8(refVal)       // &T -> *i8 (ref to raw pointer)
+
+// Function pointers
+i64(funcPtr)      // func -> int (address)
+bool(funcPtr)     // func -> bool (non-null = true)
 ```
 
 ### sizeof
@@ -936,6 +1014,10 @@ var arr: [5]int           // zero-initialized
 arr[0] = 42
 arr: [3]int = [10, 20, 30]  // array literal
 
+// Byte arrays from string and char literals
+var buf: [5]byte = "hello"          // copies string bytes into array
+var msg: [3]byte = ['H', 'i', '!'] // char literals coerce to bytes
+
 // Array decays to pointer when passed to *T parameter
 sum(arr: *int, n: int) -> int = ...
 sum(myArr, 5)             // myArr decays to *int
@@ -978,6 +1060,11 @@ x = 42
 p = &x                    // p: *int
 *p = 100                  // dereference and assign
 val y = *p                // dereference and read
+
+// Expression lvalues (C-style)
+(*p).field = 10           // deref pointer, assign field
+(*p)[i] = 42              // deref pointer, index, assign
+(arr + 2)[0] = 99         // pointer arithmetic, index, assign
 
 // Pointer arithmetic (scaled by element size)
 p = &arr[0]

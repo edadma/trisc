@@ -12,6 +12,7 @@ object Runtime:
   val mouseAddress = 0x100090L
   val drawEngineAddress = 0x1000A0L
   val ramdiskAddress = 0x100140L
+  val shaAccelAddress = 0x100160L // 80 bytes: ESP32-style SHA-256 accelerator
   val framebufferAddress = 0x200000L // 2MB — framebuffer pixel data
   val framebufferMaxSize: Long = 1920 * 1080 * 4
   val initialSSP: Long = stdoutAddress - 8 // stack grows down, below devices

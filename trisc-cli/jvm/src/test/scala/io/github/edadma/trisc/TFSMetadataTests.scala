@@ -23,7 +23,7 @@ class TFSMetadataTests extends TFSTestHelpers {
          |    if (stat[0] >> 12) == 3
          |        putchar(66)
          |    // Check major/minor via inode direct[0]
-         |    var ibuf: [32]i8
+         |    var ibuf: [32]byte
          |    tfs_read_inode(ino, &ibuf[0])
          |    val dev = ino_direct(&ibuf[0], 0)
          |    if (dev >> 8) == 7

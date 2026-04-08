@@ -80,6 +80,8 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
             val analyzer = new SyslAnalyzer
             // Register extern names so they are never mangled (ABI-level symbols)
             analyzer.registerNoMangle(globalExternNames)
+            for src <- sourceNames if src != name do
+              analyzer.registerGenericTemplatesFrom(asts(src))
             val siblings = new ModuleMeta(meta.symbols.filter(s => !s.isExtern))
             analyzer.registerImport(siblings)
             val typed = analyzer.analyze(ast)
@@ -107,6 +109,8 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
       // Register same-module siblings (intra-module visibility),
       // excluding own symbols and externs (which are private to each file).
       for modPath <- modules.get(name) do
+        for src <- moduleToSources.getOrElse(modPath, Set.empty) if src != name do
+          analyzer.registerGenericTemplatesFrom(asts(src))
         packageMetaCache.get(modPath).foreach { meta =>
           val siblings = new ModuleMeta(meta.symbols.filter(s => s.sourceFile != Some(s"$name.sysl") && !s.isExtern))
           analyzer.registerImport(siblings)
@@ -117,7 +121,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         if SyslStdlib.modules.contains(imp.modulePath) then
           analyzer.registerImport(SyslStdlib.meta(imp.modulePath), imp.selectors)
         else if smetaCache.contains(imp.modulePath) then
-          analyzer.registerImport(ModuleMeta.fromSmeta(smetaCache(imp.modulePath)), imp.selectors)
+          ModuleMeta.fromSmeta(smetaCache(imp.modulePath)).foreach(analyzer.registerImport(_, imp.selectors))
         else if packageMetaCache.contains(imp.modulePath) then
           analyzer.registerImport(packageMetaCache(imp.modulePath), imp.selectors)
         else
@@ -236,8 +240,8 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
           val filePath = s"${io.joinPath(base, modulePath)}.sysl"
 
           if io.exists(smetaPath) then
-            // Directory with .smeta
-            Some(ModuleMeta.fromSmeta(io.readFile(smetaPath)))
+            // Directory with .smeta — returns None if stale version
+            ModuleMeta.fromSmeta(io.readFile(smetaPath))
           else if io.exists(filePath) then
             // Single file module — compile it on demand
             val source = io.readFile(filePath)

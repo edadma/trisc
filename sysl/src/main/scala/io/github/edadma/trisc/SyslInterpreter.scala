@@ -40,6 +40,8 @@ enum Value:
   case EnumVal(tag: Int, fields: Array[Cell])
   case RefEnumVal(tag: Int, fields: Array[Cell], refCount: java.util.concurrent.atomic.AtomicInteger)
   case RefStringVal(bytes: Array[Byte], length: Int, refCount: java.util.concurrent.atomic.AtomicInteger)
+  case ClosureVal(body: TFunBody, params: List[TParam], captured: scala.collection.mutable.LinkedHashMap[String, Cell])
+  case InterfaceVal(methodMap: Map[String, String], dataVal: Value, concreteType: SyslType)
 
 class Cell(var value: Value)
 
@@ -105,7 +107,9 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case RefVal(cells, _, _) => pointerToLong(ArrayPtr(cells, 0))
     case RefSliceVal(cells, _, _) => pointerToLong(ArrayPtr(cells, 0))
     case RefStringVal(bytes, _, _) => pointerToLong(ArrayPtr(bytes.map(b => new Cell(IntVal(b & 0xff))), 0))
-    case FuncVal(_)         => throw RuntimeError("expected integer, got function")
+    case FuncVal(_)         => 1L // non-zero sentinel for casts (address not meaningful in interpreter)
+    case ClosureVal(_, _, _) => 1L // non-zero sentinel
+    case InterfaceVal(_, _, _) => throw RuntimeError("expected integer, got interface")
     case StrVal(_)          => throw RuntimeError("expected integer, got string")
     case SliceVal(_, _, _, _) => throw RuntimeError("expected integer, got slice")
     case EnumVal(_, _) => throw RuntimeError("expected integer, got enum value")
@@ -772,6 +776,41 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val bytes = s.getBytes("UTF-8")
         RefStringVal(bytes, bytes.length, new java.util.concurrent.atomic.AtomicInteger(1))
 
+      case TFmtStr(inner, spec) =>
+        val v = evalAny(inner, env)
+        val raw = v match
+          case IntVal(n) =>
+            val base = spec.verb match
+              case 'x' => 16
+              case 'o' => 8
+              case 'b' => 2
+              case _   => 10
+            val s = if base == 10 then
+              val r = n.toString
+              if spec.showSign && n >= 0 then "+" + r else r
+            else
+              val unsigned = if n < 0 then
+                "-" + java.lang.Long.toUnsignedString(-n, base)
+              else
+                java.lang.Long.toUnsignedString(n, base)
+              if spec.upperCase then unsigned.toUpperCase else unsigned
+            s
+          case FloatVal(d) => d.toString
+          case RefStringVal(b, l, _) => new String(b, 0, l, "UTF-8")
+          case _ => throw RuntimeError(s"fmt: unsupported value $v")
+        // Apply width padding
+        val padded = if spec.width > 0 && raw.length < spec.width then
+          val pad = spec.width - raw.length
+          if spec.leftAlign then raw + " " * pad
+          else if spec.zeroPad && (spec.verb != 's') then
+            if raw.startsWith("-") then "-" + "0" * pad + raw.substring(1)
+            else if raw.startsWith("+") then "+" + "0" * pad + raw.substring(1)
+            else "0" * pad + raw
+          else " " * pad + raw
+        else raw
+        val bytes = padded.getBytes("UTF-8")
+        RefStringVal(bytes, bytes.length, new java.util.concurrent.atomic.AtomicInteger(1))
+
       case TStringFromPtr(ptrExpr, lenExpr, _) =>
         val ptr = evalAny(ptrExpr, env)
         val len = toLong(evalAny(lenExpr, env)).toInt
@@ -933,7 +972,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         import SyslType.*
         target match
           case DoubleType  => FloatVal(toDouble(v))
-          case BoolType => IntVal(if toLong(v) != 0 then 1L else 0L)
+          case BoolType => v match
+            case FuncVal(_) => IntVal(1L) // function references are always non-null
+            case RefVal(_, _, _) | RefEnumVal(_, _, _) | RefSliceVal(_, _, _) | RefStringVal(_, _, _) => IntVal(1L)
+            case _ => IntVal(if toLong(v) != 0 then 1L else 0L)
           case IntType(64)  => IntVal(toLong(v))
           case IntType(32)  => IntVal((toLong(v) << 32) >> 32)  // sign-extend from 32 bits
           case IntType(16)  => IntVal((toLong(v) << 48) >> 48)  // sign-extend from 16 bits
@@ -947,6 +989,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case _: PtrType =>
             v match
               case PtrVal(_) | ArrVal(_, _) => v  // already a pointer
+              case RefVal(cells, _, _) => PtrVal(ArrayPtr(cells, 0))  // ref to pointer
+              case FuncVal(name) => IntVal(0) // func to pointer (address not meaningful in interpreter)
               case IntVal(0) => PtrVal(ArrayPtr(Array.empty[Cell], 0))  // null pointer
               case IntVal(n) => PtrVal(longToPointer(n))  // integer to pointer
               case _ => v
@@ -1041,6 +1085,42 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TFuncRef(name, _) => FuncVal(name)
 
+      case TClosure(params, _, body, captures) =>
+        // Capture current values by value (copy)
+        val capturedEnv = new mutable.LinkedHashMap[String, Cell]
+        for (varName, _) <- captures do
+          val cell = lookupCell(varName, env)
+          capturedEnv(varName) = new Cell(cell.value) // copy value, not share cell
+        ClosureVal(body, params, capturedEnv)
+
+      case TInterfaceBox(expr, iface) =>
+        val dataVal = evalAny(expr, env)
+        // Build method map: interface method name → mangled function name
+        val structName = expr.typ match
+          case SyslType.StructType(name, _) => name
+          case SyslType.PtrType(SyslType.StructType(name, _)) => name
+          case SyslType.RefType(SyslType.StructType(name, _)) => name
+          case other => throw RuntimeError(s"cannot box $other into interface")
+        val methodMap = iface.methods.map { (mname, _, _) => (mname, s"${structName}_$mname") }.toMap
+        InterfaceVal(methodMap, dataVal, expr.typ)
+
+      case TInterfaceDispatch(ifaceVal, methodIndex, args, _) =>
+        val InterfaceVal(methodMap, dataVal, concreteType) = evalAny(ifaceVal, env): @unchecked
+        val iface = ifaceVal.typ.asInstanceOf[SyslType.InterfaceType]
+        val (methodName, _, _) = iface.methods(methodIndex)
+        val funcName = methodMap(methodName)
+        val argValues = args.map(evalAny(_, env))
+        // Build self arg — for value types, wrap in a cell so the method can modify via pointer
+        val selfArg = concreteType match
+          case _: SyslType.StructType =>
+            // Wrap data in a single-element array to create a pointer-like cell
+            val cells = Array(new Cell(dataVal))
+            PtrVal(ArrayPtr(cells, 0))
+          case _ => dataVal // already a pointer or ref
+        functions.get(funcName) match
+          case Some(fun) => call(fun, selfArg :: argValues)
+          case None => throw RuntimeError(s"interface dispatch: undefined method '$funcName'")
+
       case TCall(name, args, _) =>
         val argValues = args.map(evalAny(_, env))
         functions.get(name) match
@@ -1051,11 +1131,28 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case None => throw RuntimeError(s"undefined function: $name")
 
       case TIndirectCall(callee, args, _) =>
-        val FuncVal(name) = evalAny(callee, env): @unchecked
+        val calleeVal = evalAny(callee, env)
         val argValues = args.map(evalAny(_, env))
-        functions.get(name) match
-          case Some(fun) => call(fun, argValues)
-          case None =>
-            builtins.get(name) match
-              case Some(f) => f(argValues)
-              case None => throw RuntimeError(s"undefined function: $name")
+        calleeVal match
+          case FuncVal(name) =>
+            functions.get(name) match
+              case Some(fun) => call(fun, argValues)
+              case None =>
+                builtins.get(name) match
+                  case Some(f) => f(argValues)
+                  case None => throw RuntimeError(s"undefined function: $name")
+          case ClosureVal(body, closureParams, captured) =>
+            val closureEnv: Env = new mutable.LinkedHashMap
+            // Pre-populate with captured values (by-value copies)
+            for (name, cell) <- captured do
+              closureEnv(name) = new Cell(cell.value)
+            // Bind parameters
+            for (param, arg) <- closureParams.zip(argValues) do
+              closureEnv(param.name) = new Cell(arg)
+            // Evaluate body
+            body match
+              case TExprBody(expr) => evalAny(expr, closureEnv)
+              case TBlockBody(stmts) =>
+                try evalBlock(stmts, closureEnv)
+                catch case ReturnException(v) => v
+          case other => throw RuntimeError(s"cannot call ${other}")

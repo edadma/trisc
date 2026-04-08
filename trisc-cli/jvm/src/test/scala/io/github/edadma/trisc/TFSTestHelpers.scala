@@ -18,8 +18,8 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
   // Inline sbrk for TFS tests — simple bump allocator in high RAM
   private val sbrk_inline: String =
     """module posix.unistd
-      |var _brk: *i8 = *i8(0xC0000)
-      |sbrk(increment: int) -> *i8
+      |var _brk: *byte = *byte(0xC0000)
+      |sbrk(increment: int) -> *byte
       |    if increment == 0
       |        return _brk
       |    val old = _brk
@@ -30,43 +30,24 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
   // Inline ramdisk block I/O for tests — provides rd_read/rd_write
   // that the TFS library externs. Talks directly to the emulated ramdisk.
   private val ramdiskSource: String =
-    s"""val RD_BASE = ${Runtime.ramdiskAddress}
-       |val RD_COMMAND_OFF = 1
-       |val RD_LBA_OFF = 2
-       |val RD_ADDR_OFF = 6
-       |val RD_COUNT_OFF = 10
+    s"""val RD_LBA      = ${Runtime.ramdiskAddress}
+       |val RD_ADDR     = ${Runtime.ramdiskAddress + 4}
+       |val RD_COUNT    = ${Runtime.ramdiskAddress + 12}
+       |val RD_COMMAND  = ${Runtime.ramdiskAddress + 15}
        |
-       |rd_read(lba: int, addr: *i8)
-       |    val a: i64 = i64(addr)
-       |    var p: *i8 = *i8(RD_BASE)
-       |    p[RD_LBA_OFF + 0] = (lba >> 24) & 0xFF
-       |    p[RD_LBA_OFF + 1] = (lba >> 16) & 0xFF
-       |    p[RD_LBA_OFF + 2] = (lba >> 8) & 0xFF
-       |    p[RD_LBA_OFF + 3] = lba & 0xFF
-       |    p[RD_ADDR_OFF + 0] = (a >> 24) & 0xFF
-       |    p[RD_ADDR_OFF + 1] = (a >> 16) & 0xFF
-       |    p[RD_ADDR_OFF + 2] = (a >> 8) & 0xFF
-       |    p[RD_ADDR_OFF + 3] = a & 0xFF
-       |    p[RD_COUNT_OFF + 0] = 0
-       |    p[RD_COUNT_OFF + 1] = 1
-       |    p[RD_COMMAND_OFF] = 1
+       |rd_read(lba: int, addr: *byte)
+       |    *(*u32(RD_LBA)) = u32(lba)
+       |    *(*u32(RD_ADDR)) = u32(i64(addr))
+       |    *(*u16(RD_COUNT)) = u16(1)
+       |    *(*byte(RD_COMMAND)) = 1
        |
-       |rd_write(lba: int, addr: *i8)
-       |    val a: i64 = i64(addr)
-       |    var p: *i8 = *i8(RD_BASE)
-       |    p[RD_LBA_OFF + 0] = (lba >> 24) & 0xFF
-       |    p[RD_LBA_OFF + 1] = (lba >> 16) & 0xFF
-       |    p[RD_LBA_OFF + 2] = (lba >> 8) & 0xFF
-       |    p[RD_LBA_OFF + 3] = lba & 0xFF
-       |    p[RD_ADDR_OFF + 0] = (a >> 24) & 0xFF
-       |    p[RD_ADDR_OFF + 1] = (a >> 16) & 0xFF
-       |    p[RD_ADDR_OFF + 2] = (a >> 8) & 0xFF
-       |    p[RD_ADDR_OFF + 3] = a & 0xFF
-       |    p[RD_COUNT_OFF + 0] = 0
-       |    p[RD_COUNT_OFF + 1] = 1
-       |    p[RD_COMMAND_OFF] = 2
+       |rd_write(lba: int, addr: *byte)
+       |    *(*u32(RD_LBA)) = u32(lba)
+       |    *(*u32(RD_ADDR)) = u32(i64(addr))
+       |    *(*u16(RD_COUNT)) = u16(1)
+       |    *(*byte(RD_COMMAND)) = 2
        |
-       |slen(s: *i8) -> int
+       |slen(s: *byte) -> int
        |    var i = 0
        |    while s[i] != 0
        |        i += 1
@@ -125,6 +106,33 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
        |  align 8
        |""".stripMargin
 
+  // Library source keys — these never change between tests
+  private val libSourceKeys = Set(
+    "oskit/fs/tfs", "posix/string/string", "posix/ctype/ctype",
+    "posix/stdlib/alloc", "posix/unistd/sbrk", "ramdisk",
+  )
+
+  // Cache: boot TOF + compiled+assembled library TOFs (compiled once with dummy main)
+  private lazy val cachedBootTof: TOF = assemble(tfsBoot, relocatable = true)
+  private lazy val cachedLibTof: TOF =
+    val dummySources = Map("main" -> "main() -> int = 0") ++ libSources
+    val driver = new SyslDriver
+    val result = driver.compile(dummySources)
+    val codegen = new SyslTriscCodegen
+    val libTofs = for unit <- result.units if libSourceKeys.contains(unit.name) yield
+      val asm = codegen.generate(unit.typed)
+      assemble(asm, relocatable = true)
+    Linker.link(libTofs, relocatable = true)
+
+  private val libSources: Map[String, String] = Map(
+    "oskit/fs/tfs" -> tfsSource,
+    "posix/string/string" -> posixStringSysl,
+    "posix/ctype/ctype" -> posixCtypeSysl,
+    "posix/stdlib/alloc" -> posixAllocSysl,
+    "posix/unistd/sbrk" -> sbrk_inline,
+    "ramdisk" -> ramdiskSource,
+  )
+
   private var _tracing = false
 
   /** Wrap a test body to enable CPU instruction tracing to /tmp/trisc_tfs_debug.log */
@@ -145,16 +153,17 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
       prefill: String,
       maxCycles: Int,
   ): (CPU, String) =
-    val bootTof = assemble(tfsBoot, relocatable = true)
-    val allSources = sources + ("oskit/fs/tfs" -> tfsSource) + ("posix/string/string" -> posixStringSysl) + ("posix/ctype/ctype" -> posixCtypeSysl) + ("posix/stdlib/alloc" -> posixAllocSysl) + ("posix/unistd/sbrk" -> sbrk_inline) + ("ramdisk" -> ramdiskSource)
+    // Compile all sources together (needed for import resolution), but only
+    // codegen+assemble the user sources — library TOFs are cached.
+    val allSources = sources ++ libSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
     val codegen = new SyslTriscCodegen
-    val tofs = for unit <- result.units yield
+    val userTofs = for unit <- result.units if !libSourceKeys.contains(unit.name) yield
       val asm = codegen.generate(unit.typed)
       assemble(asm, relocatable = true)
-    val progTof = Linker.link(tofs, relocatable = true)
-    val linked = Linker.link(Seq(bootTof, progTof))
+    val userTof = Linker.link(userTofs, relocatable = true)
+    val linked = Linker.link(Seq(cachedBootTof, cachedLibTof, userTof))
 
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
@@ -192,7 +201,7 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
 
   /** Generate SYSL code to declare a null-terminated byte array from a string.
     * Usage: `syslBytes("path", "/dev/tty0")` produces:
-    *   var path: [11]i8
+    *   var path: [11]byte
     *   path[0] = 47
     *   path[1] = 100
     *   ...
@@ -200,7 +209,7 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
     */
   def syslBytes(name: String, s: String): String =
     val bytes = s.getBytes("UTF-8") :+ 0.toByte
-    val decl = s"    var $name: [${bytes.length}]i8"
+    val decl = s"    var $name: [${bytes.length}]byte"
     val assigns = bytes.zipWithIndex.map { (b, i) => s"    $name[$i] = ${b & 0xff}" }.mkString("\n")
     val lenDecl = s"    val ${name}_len = ${s.length}"
     s"$decl\n$assigns\n$lenDecl"

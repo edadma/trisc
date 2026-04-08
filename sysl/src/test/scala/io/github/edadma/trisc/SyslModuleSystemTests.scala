@@ -47,7 +47,7 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
       SymbolMeta("helper", SymbolMeta.Kind.Func(Nil, SyslType.I32), isPrivate = true, sourceFile = Some("strlen.sysl")),
       SymbolMeta("strcpy", SymbolMeta.Kind.Func(List(SyslType.PtrType(SyslType.I8), SyslType.PtrType(SyslType.I8)), SyslType.PtrType(SyslType.I8)), isPrivate = false, sourceFile = Some("strcpy.sysl")),
     ))
-    val parsed = ModuleMeta.fromSmeta(original.toSmeta)
+    val parsed = ModuleMeta.fromSmeta(original.toSmeta).get
     parsed.symbols.length shouldBe 3
     parsed.symbols(0).name shouldBe "strlen"
     parsed.symbols(0).sourceFile shouldBe Some("strlen.sysl")
@@ -62,7 +62,7 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
     val original = new ModuleMeta(List(
       SymbolMeta("add", SymbolMeta.Kind.Func(List(SyslType.I32, SyslType.I32), SyslType.I32), isPrivate = false),
     ))
-    val parsed = ModuleMeta.fromSmeta(original.toSmeta)
+    val parsed = ModuleMeta.fromSmeta(original.toSmeta).get
     parsed.symbols.length shouldBe 1
     parsed.symbols.head.sourceFile shouldBe None
   }
@@ -72,7 +72,7 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
       SymbolMeta("count", SymbolMeta.Kind.Data(SyslType.I32), isPrivate = false, sourceFile = Some("globals.sysl")),
       SymbolMeta("Point", SymbolMeta.Kind.Struct(SyslType.StructType("Point", List(("x", SyslType.I32), ("y", SyslType.I32)))), isPrivate = false, sourceFile = Some("types.sysl")),
     ))
-    val parsed = ModuleMeta.fromSmeta(original.toSmeta)
+    val parsed = ModuleMeta.fromSmeta(original.toSmeta).get
     parsed.symbols.length shouldBe 2
     parsed.symbols(0).sourceFile shouldBe Some("globals.sysl")
     parsed.symbols(1).sourceFile shouldBe Some("types.sysl")

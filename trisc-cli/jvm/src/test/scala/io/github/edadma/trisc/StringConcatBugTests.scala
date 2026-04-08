@@ -253,7 +253,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |
           |val MAX_ARGS = 16
           |
-          |tokenize(buf: *i8, buflen: int, argv: *string) -> int
+          |tokenize(buf: *byte, buflen: int, argv: *string) -> int
           |    var argc = 0
           |    var pos = 0
           |    while pos < buflen
@@ -296,7 +296,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |    if cmd == "cd"
           |        cmd_cd(argc, argv)
           |
-          |shell_run(line: *i8, linelen: int)
+          |shell_run(line: *byte, linelen: int)
           |    var argv: [16]string
           |    val argc = tokenize(line, linelen, argv)
           |    dispatch(argc, argv)
@@ -309,7 +309,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |
           |main() -> int
           |    shell_init()
-          |    var line: [64]i8
+          |    var line: [64]byte
           |    // "cd dev"
           |    line[0] = 99   // c
           |    line[1] = 100  // d
@@ -342,7 +342,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |var cwd_ino = 1
           |
           |// Buffers to increase BSS, mimicking nsh
-          |var nsh_out: [140]i8
+          |var nsh_out: [140]byte
           |var nsh_outpos = 0
           |
           |val MAX_ARGS = 16
@@ -353,7 +353,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |    for var i = 0; i < n; i++
           |        putchar(p[i])
           |
-          |tokenize(buf: *i8, buflen: int, argv: *string) -> int
+          |tokenize(buf: *byte, buflen: int, argv: *string) -> int
           |    var argc = 0
           |    var pos = 0
           |    while pos < buflen
@@ -406,7 +406,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |        nsh_print(cmd)
           |        nsh_print(": not found\n")
           |
-          |shell_run(line: *i8, linelen: int)
+          |shell_run(line: *byte, linelen: int)
           |    var argv: [16]string
           |    val argc = tokenize(line, linelen, argv)
           |    dispatch(argc, argv)
@@ -419,7 +419,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |
           |main() -> int
           |    shell_init()
-          |    var line: [64]i8
+          |    var line: [64]byte
           |    // "cd dev"
           |    line[0] = 99   // c
           |    line[1] = 100  // d
@@ -473,7 +473,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |
           |val MAX_ARGS = 16
           |
-          |tokenize(buf: *i8, buflen: int, argv: *string) -> int
+          |tokenize(buf: *byte, buflen: int, argv: *string) -> int
           |    var argc = 0
           |    var pos = 0
           |    while pos < buflen
@@ -513,7 +513,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |
           |do_test()
           |    cwd = "/"
-          |    var line: [256]i8
+          |    var line: [256]byte
           |    var argv: [16]string
           |    line[0] = 99
           |    line[1] = 100
@@ -554,7 +554,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |var cwd: string
           |var cwd_ino = 1
           |
-          |var nsh_out: [140]i8
+          |var nsh_out: [140]byte
           |var nsh_outpos = 0
           |
           |do_concat_len(a: string, b: string) -> int
@@ -578,7 +578,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |
           |val MAX_ARGS = 16
           |
-          |tokenize(buf: *i8, buflen: int, argv: *string) -> int
+          |tokenize(buf: *byte, buflen: int, argv: *string) -> int
           |    var argc = 0
           |    var pos = 0
           |    while pos < buflen
@@ -600,7 +600,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |
           |concat_test3()
           |    cwd = "/"
-          |    var line: [256]i8
+          |    var line: [256]byte
           |    var argv: [16]string
           |    line[0] = 99
           |    line[1] = 100
@@ -668,7 +668,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |var cwd_ino = 1
           |
           |// Same buffers as nsh to match BSS layout
-          |var nsh_out: [140]i8
+          |var nsh_out: [140]byte
           |var nsh_outpos = 0
           |
           |val MAX_ARGS = 16
@@ -681,7 +681,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |nsh_putc(ch: char)
           |    if nsh_outpos >= 120
           |        nsh_flush()
-          |    nsh_out[nsh_outpos] = i8(ch)
+          |    nsh_out[nsh_outpos] = byte(ch)
           |    nsh_outpos += 1
           |
           |nsh_print(s: string)
@@ -697,7 +697,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |    nsh_putc('\n')
           |    nsh_flush()
           |
-          |tokenize(buf: *i8, buflen: int, argv: *string) -> int
+          |tokenize(buf: *byte, buflen: int, argv: *string) -> int
           |    var argc = 0
           |    var pos = 0
           |    while pos < buflen
@@ -749,7 +749,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |
           |concat_test()
           |    cwd = "/"
-          |    var line: [256]i8
+          |    var line: [256]byte
           |    var argv: [16]string
           |    // Execute "cd dev"
           |    line[0] = 99   // c
@@ -864,7 +864,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |var cwd: string
           |var cwd_ino = 1
           |
-          |var nsh_out: [140]i8
+          |var nsh_out: [140]byte
           |var nsh_outpos = 0
           |
           |val MAX_ARGS = 16
@@ -877,7 +877,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |nsh_putc(ch: char)
           |    if nsh_outpos >= 120
           |        nsh_flush()
-          |    nsh_out[nsh_outpos] = i8(ch)
+          |    nsh_out[nsh_outpos] = byte(ch)
           |    nsh_outpos += 1
           |
           |nsh_print(s: string)
@@ -893,7 +893,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |    nsh_putc('\n')
           |    nsh_flush()
           |
-          |tokenize(buf: *i8, buflen: int, argv: *string) -> int
+          |tokenize(buf: *byte, buflen: int, argv: *string) -> int
           |    var argc = 0
           |    var pos = 0
           |    while pos < buflen
@@ -965,7 +965,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |
           |concat_test2()
           |    cwd = "/"
-          |    var line: [256]i8
+          |    var line: [256]byte
           |    var argv: [16]string
           |    // Execute "cd dev"
           |    line[0] = 99   // c
@@ -1043,7 +1043,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |var cwd: string
           |var cwd_ino = 1
           |
-          |var nsh_out: [140]i8
+          |var nsh_out: [140]byte
           |var nsh_outpos = 0
           |
           |nsh_flush()
@@ -1054,7 +1054,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |nsh_putc(ch: char)
           |    if nsh_outpos >= 120
           |        nsh_flush()
-          |    nsh_out[nsh_outpos] = i8(ch)
+          |    nsh_out[nsh_outpos] = byte(ch)
           |    nsh_outpos += 1
           |
           |nsh_print(s: string)
@@ -1092,7 +1092,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |
           |val MAX_ARGS = 16
           |
-          |tokenize(buf: *i8, buflen: int, argv: *string) -> int
+          |tokenize(buf: *byte, buflen: int, argv: *string) -> int
           |    var argc = 0
           |    var pos = 0
           |    while pos < buflen
@@ -1114,7 +1114,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |
           |concat_test3()
           |    cwd = "/"
-          |    var line: [256]i8
+          |    var line: [256]byte
           |    var argv: [16]string
           |    line[0] = 99   // c
           |    line[1] = 100  // d

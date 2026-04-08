@@ -201,9 +201,9 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
          |    tfs_init()
          |${syslBytes("path", "/etc/motd")}
          |    val ino = tfs_lookup(&path, path_len)
-         |    var buf: [32]i8
+         |    var buf: [32]byte
          |    val n = tfs_read(ino, &buf, 0, 9)
-         |    val p: *i8 = &buf
+         |    val p: *byte = &buf
          |    var i = 0
          |    while i < n
          |        putchar(p[i])
@@ -223,9 +223,9 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
          |    tfs_init()
          |${syslBytes("path", "/etc/motd")}
          |    val ino = tfs_lookup(&path, path_len)
-         |    var buf: [32]i8
+         |    var buf: [32]byte
          |    val n = tfs_read(ino, &buf, 6, 3)
-         |    val p: *i8 = &buf
+         |    val p: *byte = &buf
          |    var i = 0
          |    while i < n
          |        putchar(p[i])
@@ -245,7 +245,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
          |    tfs_init()
          |${syslBytes("path", "/etc/motd")}
          |    val ino = tfs_lookup(&path, path_len)
-         |    var buf: [64]i8
+         |    var buf: [64]byte
          |    val n = tfs_read(ino, &buf, 0, 100)
          |    if n == 9
          |        putchar(89)
@@ -266,7 +266,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
          |    tfs_init()
          |${syslBytes("path", "/etc/motd")}
          |    val ino = tfs_lookup(&path, path_len)
-         |    var buf: [32]i8
+         |    var buf: [32]byte
          |    val n = tfs_read(ino, &buf, 100, 10)
          |    if n == 0
          |        putchar(89)

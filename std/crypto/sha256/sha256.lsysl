@@ -181,6 +181,94 @@ digest to `out`.
             out[i * 4 + 3] = byte(v)
 
 
+sha256_hw — hardware-accelerated path
+--------------------------------------
+
+Uses the ESP32-style SHA-256 MMIO accelerator. The host
+computes the compression function in hardware; software
+handles padding and block sequencing.
+
+    val SHA_BASE = 0x100160
+
+Write a 512-bit message block to the accelerator's TEXT
+registers and trigger compression. Uses `*u32` word-level
+MMIO writes (16 words instead of 64 bytes).
+
+    process_block_hw(block: []byte, off: int, first: int)
+        val base = SHA_BASE
+        // Write 16 big-endian words to SHA_TEXT[0..15]
+        for i in 0..<16
+            val j = off + i * 4
+            val w = (u32(block[j]) << 24u32) | (u32(block[j + 1]) << 16u32) | (u32(block[j + 2]) << 8u32) | u32(block[j + 3])
+            var p: *u32 = *u32(base + i * 4)
+            *p = w
+        // Trigger compression
+        if first != 0
+            var p: *u32 = *u32(base + 0x40)
+            *p = 1u32
+        else
+            var p: *u32 = *u32(base + 0x44)
+            *p = 1u32
+
+Read the 8-word hash state from the accelerator's TEXT
+registers into an output buffer.
+
+    read_hw_state(out: []byte)
+        val base = SHA_BASE
+        for i in 0..<8
+            var p: *u32 = *u32(base + i * 4)
+            val v = *p
+            out[i * 4]     = byte(v >> 24u32)
+            out[i * 4 + 1] = byte(v >> 16u32)
+            out[i * 4 + 2] = byte(v >> 8u32)
+            out[i * 4 + 3] = byte(v)
+
+`sha256_hw(data, out)` — same interface as `sha256()` but
+uses the MMIO accelerator for the compression function.
+
+    sha256_hw(data: []byte, out: []byte)
+        val n = len(data)
+        var i = 0
+        var first = 1
+
+        // Process full 64-byte blocks
+        while i + 64 <= n
+            process_block_hw(data, i, first)
+            first = 0
+            i += 64
+
+        // Final block with padding
+        var block: [128]byte = ""
+        val rem = n - i
+
+        // Copy remainder
+        for j in 0..<rem
+            block[j] = data[i + j]
+
+        // Append 1-bit
+        block[rem] = 0x80u8
+
+        // Length in bits as big-endian 64-bit
+        val total_bits: i64 = i64(n) * 8i64
+
+        if rem < 56
+            for j in 0..<8
+                block[56 + j] = byte(total_bits >> i64(56 - j * 8))
+            process_block_hw(block[:], 0, first)
+        else
+            for j in (rem + 1)..<64
+                block[j] = 0u8
+            process_block_hw(block[:], 0, first)
+            first = 0
+            for j in 0..<56
+                block[j] = 0u8
+            for j in 0..<8
+                block[56 + j] = byte(total_bits >> i64(56 - j * 8))
+            process_block_hw(block[:], 0, first)
+
+        read_hw_state(out)
+
+
 Tests
 =====
 

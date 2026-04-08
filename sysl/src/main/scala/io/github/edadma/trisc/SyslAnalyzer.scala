@@ -19,6 +19,7 @@ class SyslAnalyzer:
   private val simpleEnumTypes = new mutable.LinkedHashMap[String, SyslType.EnumType]
   private val dataEnumTypes = new mutable.LinkedHashMap[String, SyslType.EnumType]  // data enum name → EnumType
   private val variantToEnum = new mutable.LinkedHashMap[String, (SyslType.EnumType, Int)]  // variant name → (enum type, variant index)
+  private val interfaceTypes = new mutable.LinkedHashMap[String, SyslType.InterfaceType]  // interface name → InterfaceType
   private val typeAliases = new mutable.LinkedHashMap[String, TypeAST]  // alias name → target type AST
   private val methods = new mutable.LinkedHashMap[String, mutable.Set[String]]  // struct name → set of method names
   private val deprecations = new mutable.LinkedHashMap[String, Option[String]]  // name → optional reason
@@ -190,9 +191,88 @@ class SyslAnalyzer:
             externalSymbols += localKey
         case SymbolMeta.Kind.Struct(st) =>
           structTypes(shortName(sym.name)) = st
+        case SymbolMeta.Kind.Enum(et) =>
+          val sn = shortName(sym.name)
+          if et.variants.forall(_._2.isEmpty) then
+            // Simple enum (no data variants) — register as both simpleEnumTypes and enumTypes
+            simpleEnumTypes(sn) = et
+            val members = et.variants.zipWithIndex.map { case ((vname, _), idx) => (vname, idx.toLong) }.toMap
+            enumTypes(sn) = members
+          else
+            // Data enum — register in dataEnumTypes and variantToEnum
+            linkImportedDataEnumToTemplate(et)
+            dataEnumTypes(sn) = et
+            // Mangled generic instances (e.g. ParseMaybe_i32) link via enumToTemplate when the suffix
+            // parses as a monotype. Suffixes like _Tuple2 or func(...) do not parse — still do not
+            // register Got/Miss on variantToEnum or the last imported instance wins and breaks seq/map.
+            val isMangledGenericInstance =
+              genericEnums.exists { case (base, decl) =>
+                decl.typeParams.length == 1 && et.name.startsWith(base + "_") && et.name != base
+              }
+            if !enumToTemplate.contains(et.name) && !isMangledGenericInstance then
+              for ((vname, _), idx) <- et.variants.zipWithIndex do
+                variantToEnum(vname) = (et, idx)
 
   def isExternal(name: String): Boolean = externalSymbols.contains(name)
   def externals: Set[String] = externalSymbols.toSet
+
+  /** Inverse of `typeToMangled` for a single type (used in mangled generic enum names like `ParseMaybe_i32`). */
+  private def parseMangledMonotype(s: String): Option[SyslType] =
+    if s.isEmpty then None
+    else if s.startsWith("slice") then parseMangledMonotype(s.drop(5)).map(SyslType.SliceType.apply)
+    else if s.startsWith("ptr") then parseMangledMonotype(s.drop(3)).map(SyslType.PtrType.apply)
+    else if s.startsWith("ref") then parseMangledMonotype(s.drop(3)).map(SyslType.RefType.apply)
+    else
+      s match
+        case "i8" => Some(SyslType.I8)
+        case "i16" => Some(SyslType.I16)
+        case "i32" => Some(SyslType.I32)
+        case "i64" => Some(SyslType.I64)
+        case "u8" => Some(SyslType.U8)
+        case "u16" => Some(SyslType.U16)
+        case "u32" => Some(SyslType.U32)
+        case "u64" => Some(SyslType.U64)
+        case "bool" => Some(SyslType.BoolType)
+        case "string" => Some(SyslType.StringType)
+        case "void" => Some(SyslType.VoidType)
+        case "f64" => Some(SyslType.DoubleType)
+        case _ => None
+
+  /** Link mangled imported enum names to generic templates for `unifyTypes` only. Do not call `instantiateGenericEnum` here — it would overwrite `variantToEnum` for shared variant names like `Got`/`Miss`. */
+  private def linkImportedDataEnumToTemplate(et: SyslType.EnumType): Unit =
+    if genericEnums.isEmpty then return
+    for (baseName, decl) <- genericEnums if decl.typeParams.length == 1 do
+      val prefix = baseName + "_"
+      if et.name.startsWith(prefix) then
+        val suffix = et.name.drop(prefix.length)
+        parseMangledMonotype(suffix).foreach { t =>
+          enumToTemplate(et.name) = (baseName, List(t))
+        }
+
+  /** Generic templates are omitted from `ModuleMeta` / typed `TProgram`; same-package siblings need the raw AST templates to resolve calls like `alt(...)`. */
+  def registerGenericTemplatesFrom(program: ProgramAST): Unit =
+    for decl <- program.decls do
+      decl match
+        case fd @ FunDeclAST(name, _, _, _, _, tps, _, _) if tps.nonEmpty =>
+          if !genericTemplates.contains(name) && !functions.contains(name) then
+            genericTemplates(name) = fd
+        case sd @ StructDeclAST(name, _, tps, _) if tps.nonEmpty =>
+          if !genericStructs.contains(name) then
+            genericStructs(name) = sd
+        case de @ DataEnumDeclAST(name, variants, tps, _) if tps.nonEmpty =>
+          if !genericEnums.contains(name) then
+            genericEnums(name) = de
+            for (EnumVariantAST(vname, _), idx) <- variants.zipWithIndex do
+              genericVariantToEnum.get(vname) match
+                case Some((n, i)) =>
+                  if n != name || i != idx then
+                    throw AnalysisError(s"duplicate variant name: '$vname'", de)
+                case None =>
+                  // Import may have registered Got/Miss on variantToEnum when mangled linking failed;
+                  // template wins so analyze(generic enum) does not see variantToEnum + empty genericVariantToEnum.
+                  if variantToEnum.contains(vname) then variantToEnum.remove(vname)
+                  genericVariantToEnum(vname) = (name, idx)
+        case _ => ()
 
   def analyze(program: ProgramAST): TProgram =
     // Pass 0: forward-declare all type names so recursive references resolve.
@@ -312,9 +392,13 @@ class SyslAnalyzer:
             genericEnums(name) = de
             // Register bare variant names for inference at construction sites
             for (EnumVariantAST(vname, _), idx) <- variants.zipWithIndex do
-              if genericVariantToEnum.contains(vname) || variantToEnum.contains(vname) then
-                throw AnalysisError(s"duplicate variant name: '$vname'")
-              genericVariantToEnum(vname) = (name, idx)
+              genericVariantToEnum.get(vname) match
+                case Some((n, i)) if n == name && i == idx => () // already from registerGenericTemplatesFrom(sibling)
+                case Some((n, i)) =>
+                  throw AnalysisError(s"duplicate variant name: '$vname' ($n#$i vs '$name'#$idx)", decl)
+                case None =>
+                  if variantToEnum.contains(vname) then variantToEnum.remove(vname)
+                  genericVariantToEnum(vname) = (name, idx)
           else
             if enumTypes.contains(name) || genericEnums.contains(name) then
               throw AnalysisError(s"duplicate enum: '$name'", decl)
@@ -337,6 +421,23 @@ class SyslAnalyzer:
           if methodNames.distinct.length != methodNames.length then
             throw AnalysisError(s"duplicate method names in trait '$name'")
           traits(name) = TraitInfo(name, tparam, methods)
+        case InterfaceDeclAST(name, methodASTs, embeddedNames, _) =>
+          if interfaceTypes.contains(name) then throw AnalysisError(s"duplicate interface: '$name'", decl)
+          // Resolve embedded interfaces and flatten methods
+          val embeddedMethods = embeddedNames.flatMap { en =>
+            interfaceTypes.getOrElse(en, throw AnalysisError(s"embedded interface '$en' not found", decl)).methods
+          }
+          val ownMethods = methodASTs.map { m =>
+            val paramTypes = m.params.map(p => resolveType(p.typ))
+            val retType = resolveType(m.returnType)
+            (m.name, paramTypes, retType)
+          }
+          val allMethods = embeddedMethods ++ ownMethods
+          // Check for duplicate method names
+          val names = allMethods.map(_._1)
+          if names.distinct.length != names.length then
+            throw AnalysisError(s"duplicate method names in interface '$name'")
+          interfaceTypes(name) = SyslType.InterfaceType(name, allMethods)
         case ImplDeclAST(_, _, _, _) =>
           // Deferred to registerImpls after all traits are known
           ()
@@ -404,6 +505,7 @@ class SyslAnalyzer:
       case s: StructDeclAST if s.typeParams.nonEmpty => Nil
       case e: DataEnumDeclAST if e.typeParams.nonEmpty => Nil
       case _: TraitDeclAST => Nil // traits emit nothing; only impls do
+      case _: InterfaceDeclAST => Nil // interfaces are type-only; emitted via TInterfaceDecl
       case impl: ImplDeclAST   => analyzeImplMethods(impl)
       case d => List(analyzeDecl(d))
     }
@@ -521,6 +623,7 @@ class SyslAnalyzer:
       case name if structTypes.contains(name) => structTypes(name)
       case name if dataEnumTypes.contains(name) => dataEnumTypes(name)
       case name if simpleEnumTypes.contains(name) => simpleEnumTypes(name)
+      case name if interfaceTypes.contains(name) => interfaceTypes(name)
       case other => throw AnalysisError(s"unknown type: '$other'")
     case PtrTypeAST(inner) => PtrType(resolveType(inner))
     case ArrayTypeAST(size, elem) => ArrayType(resolveType(elem), size)
@@ -528,6 +631,18 @@ class SyslAnalyzer:
     case TupleTypeAST(elems) => SyslType.tupleType(elems.map(resolveType))
     case FuncTypeAST(params, ret) => FuncType(params.map(resolveType), resolveType(ret))
     case RefTypeAST(inner) => RefType(resolveType(inner))
+
+  private def satisfiesInterface(st: SyslType.StructType, iface: SyslType.InterfaceType): Boolean =
+    val structName = st.name
+    iface.methods.forall { (methodName, paramTypes, retType) =>
+      val funcName = s"${structName}_$methodName"
+      functions.get(funcName) match
+        case Some(funInfo) =>
+          // Skip self param (first param is *StructType), compare the rest
+          val userParams = funInfo.params.drop(1).map(_._2)
+          userParams == paramTypes && funInfo.returnType == retType
+        case None => false
+    }
 
   private def compatible(from: SyslType, to: SyslType): Boolean =
     (from, to) match
@@ -557,6 +672,13 @@ class SyslAnalyzer:
       case (SliceType(e1), SliceType(e2)) if e1 == e2 => true
       case (RefType(a), RefType(b)) if compatible(a, b) => true // same ref type (recursive check handles nominal types)
       case (RefType(inner), PtrType(_)) => true             // &T → *U (ref decays to pointer)
+      // Interface satisfaction: struct/ptr/ref → interface (if methods match)
+      case (st: StructType, iface: InterfaceType) => satisfiesInterface(st, iface)
+      case (PtrType(st: StructType), iface: InterfaceType) => satisfiesInterface(st, iface)
+      case (RefType(st: StructType), iface: InterfaceType) => satisfiesInterface(st, iface)
+      // Interface-to-interface widening (superset of methods)
+      case (InterfaceType(_, methodsA), InterfaceType(_, methodsB)) =>
+        methodsB.forall(mb => methodsA.exists(_ == mb))
       case _ => false
 
   // Coerce integer literals to the target type (like Rust's untyped integer literals)
@@ -649,8 +771,9 @@ class SyslAnalyzer:
     case ArrayType(e, n) => s"arr${n}${typeToMangled(e)}"
     case SliceType(e)    => "slice" + typeToMangled(e)
     case FuncType(ps, r) => "fn" + ps.map(typeToMangled).mkString("") + "Ret" + typeToMangled(r)
-    case StructType(n, _) => n
-    case EnumType(n, _)   => n
+    case StructType(n, _)    => n
+    case EnumType(n, _)      => n
+    case InterfaceType(n, _) => n
 
   private def mangleGenericName(base: String, typeArgs: List[SyslType]): String =
     base + "_" + typeArgs.map(typeToMangled).mkString("_")
@@ -676,6 +799,16 @@ class SyslAnalyzer:
         case _ => ()
       case SliceTypeAST(inner) => arg match
         case SliceType(a) => unifyTypes(inner, a, typeParams, env)
+        case _ => ()
+      case FuncTypeAST(paramTypes, ret) => arg match
+        case FuncType(argParams, argRet) =>
+          if paramTypes.length == argParams.length then
+            for (pt, at) <- paramTypes.zip(argParams) do unifyTypes(pt, at, typeParams, env)
+          unifyTypes(ret, argRet, typeParams, env)
+        case _ => ()
+      case TupleTypeAST(elems) => arg match
+        case StructType(_, fields) if elems.length == fields.length =>
+          for (e, (_, ft)) <- elems.zip(fields) do unifyTypes(e, ft, typeParams, env)
         case _ => ()
       case NamedTypeAST(name, tArgs) if tArgs.nonEmpty => arg match
         case SyslType.StructType(argName, _) =>
@@ -865,9 +998,20 @@ class SyslAnalyzer:
           pushScope()
           for (paramName, paramType) <- paramTypes do
             currentScope(paramName) = SymInfo(paramName, paramType, true)
-          val tBody = template.body match
-            case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
-            case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
+          val savedExpectedInst = currentExpected
+          // Use only the *result* R of `func(...) -> R`, not the full function type, so nested
+          // closures still treat outer parameters (e.g. alt's `a`, `b`) as captures rather than
+          // mis-reading `func(string,int)->…` as the expected shape of a single-arg closure.
+          currentExpected = template.returnType.map(resolveType).map {
+            case ft: FuncType => ft.returnType
+            case t => t
+          }
+          val tBody = try
+            template.body match
+              case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
+              case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
+          finally
+            currentExpected = savedExpectedInst
           scopeStack = savedScopeStack
           loopDepth = savedLoopDepth
           val tParams = paramTypes.map((n, t) => TParam(n, t))
@@ -883,9 +1027,12 @@ class SyslAnalyzer:
       val coerced = coerceLiteral(arg, pType)
       if !compatible(coerced.typ, pType) then
         throw AnalysisError(s"argument '$pName' of '$name' expects $pType, got ${coerced.typ}")
-      // Insert explicit cast for string→*i8 decay so codegen can handle it
+      // Insert explicit conversions for codegen
       (coerced.typ, pType) match
         case (StringType, PtrType(I8 | U8)) => TCast(coerced, pType)
+        case (_: FuncType, IntType(64) | UIntType(64)) => TCast(coerced, pType)
+        case (_, iface: InterfaceType) if !coerced.typ.isInstanceOf[InterfaceType] =>
+          TInterfaceBox(coerced, iface)
         case _ => coerced
     }
 
@@ -903,14 +1050,19 @@ class SyslAnalyzer:
         val tInit = coerceLiteral(tInit0, declType)
         if typOpt.isDefined && !compatible(tInit.typ, declType) then
           throw AnalysisError(s"cannot assign ${tInit.typ} to $declType variable '$name'")
+        // Box concrete type into interface if needed
+        val tInitFinal = (tInit.typ, declType) match
+          case (_, iface: InterfaceType) if !tInit.typ.isInstanceOf[InterfaceType] =>
+            TInterfaceBox(tInit, iface)
+          case _ => tInit
         // `_` is a discard binding: evaluate the initializer for its side effects
         // but don't bind any name. Multiple `_`s in the same scope don't collide.
         if name == "_" then
-          TExprStmt(tInit)
+          TExprStmt(tInitFinal)
         else
           if scopeStack != null then
             currentScope(name) = SymInfo(name, declType, isMutable)
-          TVarStmt(name, declType, tInit)
+          TVarStmt(name, declType, tInitFinal)
 
       case DestructureStmtAST(names, init, isMutable) =>
         val tInit = analyzeExpr(init)
@@ -955,7 +1107,11 @@ class SyslAnalyzer:
       case DerefAssignStmtAST(pointer, value) =>
         val tPointer = analyzeExpr(pointer)
         val tValue = analyzeExpr(value)
-        TDerefAssignStmt(tPointer, tValue)
+        // Insert FuncType → i64 coercion when storing function pointer to *i64
+        val coerced = (tValue.typ, tPointer.typ) match
+          case (_: FuncType, PtrType(IntType(64) | UIntType(64))) => TCast(tValue, IntType(64))
+          case _ => tValue
+        TDerefAssignStmt(tPointer, coerced)
 
       case IndexAssignStmtAST(array, index, value) =>
         val tArray = analyzeExpr(array)
@@ -1117,6 +1273,7 @@ class SyslAnalyzer:
       case StringLitAST(s) => TStringLit(s, StringType)
       case StringLitExprAST(s) =>
         if s.startsWith("s:") then analyzeInterpolatedString(s.substring(2))
+        else if s.startsWith("f:") then analyzeFormattedString(s.substring(2))
         else TStringLit(s, StringType)
       case TupleLitAST(elements) =>
         val tElems = elements.map(analyzeExpr)
@@ -1130,6 +1287,186 @@ class SyslAnalyzer:
         val tElems = elements.map(analyzeExpr)
         val elemType = tElems.head.typ
         TArrayLit(tElems, SyslType.ArrayType(elemType, tElems.length))
+
+      case ClosureAST(params, body) =>
+        // Infer parameter types from currentExpected (the target func type)
+        val expectedFunc = currentExpected.collect { case ft: FuncType => ft }
+        val typedParams = params.zipWithIndex.map { case (p, i) =>
+          val paramType = p.typ match
+            case Some(typeAST) => resolveType(typeAST)
+            case None =>
+              // Only use currentExpected when it is a function type with the *same arity*
+              // as this closure. Otherwise a parser return type `func(string,int)->R`
+              // would wrongly supply `string` as the type of a single-parameter combinator
+              // argument (e.g. `ch` in `map(p, ch -> ...)`).
+              expectedFunc match
+                case Some(ft) if ft.params.length == params.length && i < ft.params.length =>
+                  ft.params(i)
+                case _ => throw AnalysisError(s"cannot infer type for closure parameter '${p.name}' — add a type annotation")
+          TParam(p.name, paramType)
+        }
+        val expectedRet = expectedFunc.map(_.returnType).getOrElse(
+          currentExpected match
+            case Some(t) if t != VoidType => t
+            case _ => VoidType
+        )
+        // Push scope with closure params
+        pushScope()
+        for p <- typedParams do
+          currentScope(p.name) = SymInfo(p.name, p.typ, mutable = false)
+        // Analyze body
+        val savedExp = currentExpected
+        currentExpected = if expectedRet == VoidType then None else Some(expectedRet)
+        val tBody = try body match
+          case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
+          case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
+        finally currentExpected = savedExp
+        popScope()
+        // Detect captures: variables referenced from enclosing scope (not globals, not params).
+        // `locals` = params in scope at this point (outer closure params + any nested closure params).
+        val paramNames = typedParams.map(_.name).toSet
+        val captures = scala.collection.mutable.ListBuffer.empty[(String, SyslType)]
+        def recordCapture(name: String, typ: SyslType, locals: Set[String]): Unit =
+          if !locals.contains(name) && !globalScope.contains(name) && !functions.contains(name) && !builtinFunctions.contains(name) then
+            if !captures.exists(_._1 == name) then captures += ((name, typ))
+        def scanMatchPattern(pat: TMatchPattern, locals: Set[String]): Unit = pat match
+          case TValuePattern(e) => scanCaptures(e, locals)
+          case TRangePattern(lo, hi) => scanCaptures(lo, locals); scanCaptures(hi, locals)
+          case _ => ()
+        def patternBindings(pats: List[TMatchPattern]): Set[String] =
+          val b = scala.collection.mutable.Set.empty[String]
+          for p <- pats do
+            p match
+              case TVariantPattern(_, _, bindings, _) => bindings.flatten.foreach(b += _)
+              case TDestructurePattern(_, bindings, _) => bindings.flatten.foreach(b += _)
+              case _ => ()
+          b.toSet
+        def scanCaptures(expr: TExpr, locals: Set[String]): Unit = expr match
+          case TVarRef(name, typ) => recordCapture(name, typ, locals)
+          case TBinary(l, _, r, _) => scanCaptures(l, locals); scanCaptures(r, locals)
+          case TUnary(_, e, _) => scanCaptures(e, locals)
+          case TCall(_, args, _) => args.foreach(scanCaptures(_, locals))
+          case TIndirectCall(c, args, _) => scanCaptures(c, locals); args.foreach(scanCaptures(_, locals))
+          case TIndex(a, i, _) => scanCaptures(a, locals); scanCaptures(i, locals)
+          case TFieldAccess(o, _, _) => scanCaptures(o, locals)
+          case TDeref(e, _) => scanCaptures(e, locals)
+          case TCast(e, _) => scanCaptures(e, locals)
+          case TAddrOf(n, t) => recordCapture(n, t, locals)
+          case TAddrOfIndex(a, i, _) => scanCaptures(a, locals); scanCaptures(i, locals)
+          case TAddrOfField(o, _, _) => scanCaptures(o, locals)
+          case TFieldPreInc(o, _, _) => scanCaptures(o, locals)
+          case TFieldPreDec(o, _, _) => scanCaptures(o, locals)
+          case TFieldPostInc(o, _, _) => scanCaptures(o, locals)
+          case TFieldPostDec(o, _, _) => scanCaptures(o, locals)
+          case TIfExpr(c, th, el, _) =>
+            scanCaptures(c, locals)
+            scanStmtSeq(th, locals)
+            el.foreach(scanStmtSeq(_, locals))
+          case TMatchExpr(scrutinee, arms, default, _) =>
+            scanCaptures(scrutinee, locals)
+            for arm <- arms do
+              arm.patterns.foreach(scanMatchPattern(_, locals))
+              val armLocals = locals ++ patternBindings(arm.patterns)
+              arm.guard.foreach(scanCaptures(_, armLocals))
+              scanStmtSeq(arm.body, armLocals)
+            default.foreach(scanStmtSeq(_, locals))
+          case TEnumConstruct(_, _, args) => args.foreach(scanCaptures(_, locals))
+          case TStructConstruct(_, args) => args.foreach(scanCaptures(_, locals))
+          case TArrayLit(elems, _) => elems.foreach(scanCaptures(_, locals))
+          case TNew(_, args) => args.foreach(scanCaptures(_, locals))
+          case TNewEnum(_, _, args) => args.foreach(scanCaptures(_, locals))
+          case TNewArray(_, size) => scanCaptures(size, locals)
+          case TLen(e, _) => scanCaptures(e, locals)
+          case TCap(e, _) => scanCaptures(e, locals)
+          case TSliceExpr(arr, lo, hi, _) =>
+            scanCaptures(arr, locals)
+            lo.foreach(scanCaptures(_, locals))
+            hi.foreach(scanCaptures(_, locals))
+          case TAppend(slc, elem, _) => scanCaptures(slc, locals); scanCaptures(elem, locals)
+          case TStringFromPtr(ptr, len, _) => scanCaptures(ptr, locals); scanCaptures(len, locals)
+          case TStringFromSlice(slc, _) => scanCaptures(slc, locals)
+          case TStr(e) => scanCaptures(e, locals)
+          case TClosure(innerParams, _, innerBody, _) =>
+            val innerLocals = locals ++ innerParams.map(_.name).toSet
+            innerBody match
+              case TExprBody(e) => scanCaptures(e, innerLocals)
+              case TBlockBody(stmts) => scanStmtSeq(stmts, innerLocals)
+          case _ => ()
+        /** Walk statements in order; extend locals with val/destructure bindings so they are not mistaken for captures. */
+        def scanStmtSeq(stmts: List[TStmt], startLocals: Set[String]): Unit =
+          var L = startLocals
+          for stmt <- stmts do L = scanStmtInSeq(stmt, L)
+        def scanStmtInSeq(stmt: TStmt, locals: Set[String]): Set[String] = stmt match
+          case TVarStmt(name, _, init) =>
+            scanCaptures(init, locals)
+            if name == "_" then locals else locals + name
+          case TDestructureStmt(names, _, init) =>
+            scanCaptures(init, locals)
+            locals ++ names.filter(_ != "_").toSet
+          case TDestructureAssignStmt(_, _, init) =>
+            scanCaptures(init, locals)
+            locals
+          case TExprStmt(e) =>
+            scanCaptures(e, locals)
+            locals
+          case TAssignStmt(_, v) =>
+            scanCaptures(v, locals)
+            locals
+          case TCompoundAssignStmt(_, _, v) =>
+            scanCaptures(v, locals)
+            locals
+          case TDerefAssignStmt(ptr, v) =>
+            scanCaptures(ptr, locals)
+            scanCaptures(v, locals)
+            locals
+          case TIndexAssignStmt(arr, idx, v) =>
+            scanCaptures(arr, locals)
+            scanCaptures(idx, locals)
+            scanCaptures(v, locals)
+            locals
+          case TFieldAssignStmt(obj, _, v) =>
+            scanCaptures(obj, locals)
+            scanCaptures(v, locals)
+            locals
+          case TFieldCompoundAssignStmt(obj, _, _, v) =>
+            scanCaptures(obj, locals)
+            scanCaptures(v, locals)
+            locals
+          case TReturnStmt(Some(e)) =>
+            scanCaptures(e, locals)
+            locals
+          case TReturnStmt(None) => locals
+          case TWhileStmt(c, body) =>
+            scanCaptures(c, locals)
+            scanStmtSeq(body, locals)
+            locals
+          case TForStmt(init, c, upd, body) =>
+            var Lf = scanStmtInSeq(init, locals)
+            scanCaptures(c, Lf)
+            Lf = scanStmtInSeq(upd, Lf)
+            scanStmtSeq(body, Lf)
+            locals
+          case TDoWhileStmt(c, body) =>
+            scanStmtSeq(body, locals)
+            scanCaptures(c, locals)
+            locals
+          case TDeferStmt(inner) =>
+            scanStmtInSeq(inner, locals)
+            locals
+          case TAsmStmt(_) => locals
+          case TBreakStmt | TContinueStmt => locals
+          case _ => locals
+        tBody match
+          case TExprBody(e) => scanCaptures(e, paramNames)
+          case TBlockBody(stmts) => scanStmtSeq(stmts, paramNames)
+        // Determine actual return type from body
+        val actualRet = tBody match
+          case TExprBody(e) => e.typ
+          case TBlockBody(stmts) =>
+            stmts.lastOption match
+              case Some(TExprStmt(e)) => e.typ
+              case _ => VoidType
+        TClosure(typedParams, actualRet, tBody, captures.toList)
 
       case AsmExprAST(code) =>
         TAsmExpr(code, currentReturnType)
@@ -1454,14 +1791,26 @@ class SyslAnalyzer:
         // Validate cast is possible
         (tInner.typ, target) match
           case (from, to) if from == to => // no-op cast
+          // bool conversions
           case (from, BoolType) if from.isNumeric => // numeric to bool: != 0
           case (BoolType, to) if to.isNumeric => // bool to numeric: true=1, false=0
+          case (_: PtrType | _: RefType | _: FuncType, BoolType) => // pointer/ref/func to bool: null check
+          // float conversions
           case (from, DoubleType) if from.isIntegral => // int to float (cvt)
           case (DoubleType, to) if to.isIntegral => // float to int (fint)
-          case (from, to) if from.isIntegral && to.isIntegral => // integer to integer (including signed↔unsigned)
+          // integer conversions
+          case (from, to) if from.isIntegral && to.isIntegral => // int ↔ int (signed/unsigned, any width)
+          // pointer conversions
           case (_: PtrType, to) if to.isIntegral => // pointer to integer
           case (from, _: PtrType) if from.isIntegral => // integer to pointer
-          case (StringType, PtrType(I8 | U8)) => // string to *i8/*u8 decay
+          case (_: PtrType, _: PtrType) => // pointer to pointer (like C's void* cast)
+          case (StringType, PtrType(I8 | U8)) => // string to *i8/*byte decay
+          // ref conversions
+          case (_: RefType, _: PtrType) => // ref to raw pointer (&T → *U)
+          case (_: RefType, to) if to.isIntegral => // ref to integer (address)
+          // func conversions
+          case (_: FuncType, to) if to.isIntegral => // func to integer (address)
+          case (_: FuncType, _: PtrType) => // func to pointer
           case (from, to) => throw AnalysisError(s"cannot cast $from to $to")
         TCast(tInner, target)
 
@@ -1542,6 +1891,16 @@ class SyslAnalyzer:
       case MethodCallAST(obj, method, args) =>
         val tObj = analyzeExpr(obj)
         val tArgs = args.map(analyzeExpr)
+        // Interface dispatch
+        tObj.typ match
+          case iface: InterfaceType =>
+            val methodIdx = iface.methods.indexWhere(_._1 == method)
+            if methodIdx < 0 then throw AnalysisError(s"interface ${iface.name} has no method '$method'")
+            val (_, paramTypes, retType) = iface.methods(methodIdx)
+            val params = paramTypes.zipWithIndex.map((t, i) => (s"arg$i", t))
+            val checkedArgs = checkArgs(s"${iface.name}.$method", params, tArgs)
+            return TInterfaceDispatch(tObj, methodIdx, checkedArgs, retType)
+          case _ => ()
         // Determine the struct type (defer self-arg computation until we know it's a method)
         val structType = tObj.typ match
           case st: StructType          => st
@@ -1828,3 +2187,100 @@ class SyslAnalyzer:
           case Left(err) => throw AnalysisError(s"parse error in string interpolation: $err")
     }
     tExprs.reduceLeft((l, r) => TBinary(l, "+", r, SyslType.StringType))
+
+  private def parseFmtSpec(s: String, pos: Int): (FmtSpec, Int) =
+    var i = pos
+    if i >= s.length || s(i) != '%' then return (FmtSpec('s'), pos)
+    i += 1
+    var zeroPad = false
+    var leftAlign = false
+    var showSign = false
+    var parsing = true
+    while i < s.length && parsing do
+      s(i) match
+        case '0' => zeroPad = true; i += 1
+        case '-' => leftAlign = true; i += 1
+        case '+' => showSign = true; i += 1
+        case _   => parsing = false
+    var width = 0
+    while i < s.length && s(i).isDigit do
+      width = width * 10 + (s(i) - '0')
+      i += 1
+    if i >= s.length then throw AnalysisError("missing verb in format spec")
+    val verb = s(i)
+    i += 1
+    val upperCase = verb == 'X'
+    val normalVerb = verb.toLower match
+      case v @ ('d' | 'x' | 'o' | 'b' | 's' | 'c') => v
+      case _ => if verb == 'X' then 'x' else throw AnalysisError(s"unknown format verb '%$verb'")
+    (FmtSpec(normalVerb, width, zeroPad, leftAlign, showSign, upperCase), i)
+
+  private def analyzeFormattedString(s: String): TExpr =
+    val parts = mutable.ArrayBuffer[TExpr]()
+    val buf = new StringBuilder
+    var i = 0
+    def flushLiteral(): Unit =
+      if buf.nonEmpty then
+        parts += TStringLit(buf.toString, SyslType.StringType)
+        buf.clear()
+    while i < s.length do
+      if s(i) == '$' then
+        if i + 1 < s.length && s(i + 1) == '$' then
+          buf += '$'; i += 2
+        else if i + 1 < s.length && s(i + 1) == '{' then
+          flushLiteral()
+          i += 2
+          var depth = 1
+          val exprBuf = new StringBuilder
+          while i < s.length && depth > 0 do
+            if s(i) == '{' then depth += 1
+            else if s(i) == '}' then depth -= 1
+            if depth > 0 then exprBuf += s(i)
+            i += 1
+          if depth != 0 then throw AnalysisError("unterminated '${' in f-string")
+          val (spec, newI) = parseFmtSpec(s, i)
+          i = newI
+          val parser = new SyslParser
+          parser.parseExpression(exprBuf.toString.trim) match
+            case Right(ast) => parts += wrapWithFmtSpec(analyzeExpr(ast), spec)
+            case Left(err) => throw AnalysisError(s"parse error in f-string: $err")
+        else if i + 1 < s.length && (s(i + 1).isLetter || s(i + 1) == '_') then
+          flushLiteral()
+          i += 1
+          val nameBuf = new StringBuilder
+          while i < s.length && (s(i).isLetterOrDigit || s(i) == '_') do
+            nameBuf += s(i); i += 1
+          val (spec, newI) = parseFmtSpec(s, i)
+          i = newI
+          val parser = new SyslParser
+          parser.parseExpression(nameBuf.toString) match
+            case Right(ast) => parts += wrapWithFmtSpec(analyzeExpr(ast), spec)
+            case Left(err) => throw AnalysisError(s"parse error in f-string: $err")
+        else
+          buf += '$'; i += 1
+      else if s(i) == '%' && i + 1 < s.length && s(i + 1) == '%' then
+        buf += '%'; i += 2
+      else
+        buf += s(i); i += 1
+    flushLiteral()
+    if parts.isEmpty then TStringLit("", SyslType.StringType)
+    else parts.toList.reduceLeft((l, r) => TBinary(l, "+", r, SyslType.StringType))
+
+  private def wrapWithFmtSpec(expr: TExpr, spec: FmtSpec): TExpr =
+    spec.verb match
+      case 'd' | 'x' | 'o' | 'b' =>
+        if !expr.typ.isNumeric then
+          throw AnalysisError(s"format verb '%${spec.verb}' requires numeric type, got ${expr.typ}")
+        if spec.verb == 'd' && spec.width == 0 && !spec.zeroPad && !spec.leftAlign && !spec.showSign then TStr(expr)
+        else TFmtStr(expr, spec)
+      case 's' =>
+        if expr.typ == SyslType.StringType then
+          if spec.width == 0 && !spec.leftAlign then expr else TFmtStr(expr, spec)
+        else if expr.typ.isNumeric || expr.typ == SyslType.BoolType || expr.typ == SyslType.DoubleType then
+          if spec.width == 0 && !spec.leftAlign then TStr(expr) else TFmtStr(TStr(expr), spec)
+        else throw AnalysisError(s"cannot format value of type ${expr.typ} with %s")
+      case 'c' =>
+        if !expr.typ.isNumeric then
+          throw AnalysisError(s"format verb '%c' requires numeric type, got ${expr.typ}")
+        TFmtStr(expr, spec)
+      case _ => throw AnalysisError(s"unknown format verb '%${spec.verb}'")

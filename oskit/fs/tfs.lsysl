@@ -21,8 +21,8 @@ On-disk layout (block 0 = boot, block 1 = superblock):
 
     // === Block I/O — provided by the environment ===
 
-    extern rd_read(lba: int, addr: *i8)
-    extern rd_write(lba: int, addr: *i8)
+    extern rd_read(lba: int, addr: *byte)
+    extern rd_write(lba: int, addr: *byte)
 
     // === TFS constants ===
 
@@ -53,22 +53,22 @@ On-disk layout (block 0 = boot, block 1 = superblock):
 
     // === Block buffers ===
 
-    var blkbuf: [512]i8       // general purpose (file data, superblock, dir blocks, inodes)
-    var blkbuf2: [512]i8      // secondary (bitmaps, indirect blocks)
+    var blkbuf: [512]byte       // general purpose (file data, superblock, dir blocks, inodes)
+    var blkbuf2: [512]byte      // secondary (bitmaps, indirect blocks)
 
     // === Big-endian read helpers ===
 
-    read_i16(p: *i8) -> int
+    read_i16(p: *byte) -> int
         ((p[0] & 0xFF) << 8) | (p[1] & 0xFF)
 
-    read_i32(p: *i8) -> int
+    read_i32(p: *byte) -> int
         ((p[0] & 0xFF) << 24) | ((p[1] & 0xFF) << 16) | ((p[2] & 0xFF) << 8) | (p[3] & 0xFF)
 
-    write_i16(p: *i8, v: int)
+    write_i16(p: *byte, v: int)
         p[0] = (v >> 8) & 0xFF
         p[1] = v & 0xFF
 
-    write_i32(p: *i8, v: int)
+    write_i32(p: *byte, v: int)
         p[0] = (v >> 24) & 0xFF
         p[1] = (v >> 16) & 0xFF
         p[2] = (v >> 8) & 0xFF
@@ -105,11 +105,11 @@ for the given inode number.
 tfs_read_inode(ino, buf) — Read inode into buf (32 bytes).
 Reads the block containing the inode into blkbuf, then copies 32 bytes.
 
-    tfs_read_inode(ino: int, buf: *i8)
+    tfs_read_inode(ino: int, buf: *byte)
         val blk = inode_block(ino)
         rd_read(blk, blkbuf)
         val off = inode_off(ino)
-        val src: *i8 = blkbuf + off
+        val src: *byte = blkbuf + off
         var i = 0
         while i < INODE_SIZE
             buf[i] = src[i]
@@ -119,61 +119,61 @@ Inode field accessors — operate on a 32-byte inode buffer.
 Layout: mode(2) nlinks(1) uid(1) gid(1) pad(1) size(4) mtime(4) ctime(4)
 direct[0..5](12) indirect(2)
 
-    ino_mode(buf: *i8) -> int
+    ino_mode(buf: *byte) -> int
         read_i16(buf)
 
-    ino_type(buf: *i8) -> int
+    ino_type(buf: *byte) -> int
         (read_i16(buf) >> 12) & 0xF
 
-    ino_perm(buf: *i8) -> int
+    ino_perm(buf: *byte) -> int
         read_i16(buf) & 0x1FF
 
-    ino_nlinks(buf: *i8) -> int
+    ino_nlinks(buf: *byte) -> int
         buf[2] & 0xFF
 
-    ino_uid(buf: *i8) -> int
+    ino_uid(buf: *byte) -> int
         buf[3] & 0xFF
 
-    ino_gid(buf: *i8) -> int
+    ino_gid(buf: *byte) -> int
         buf[4] & 0xFF
 
-    ino_size(buf: *i8) -> int
+    ino_size(buf: *byte) -> int
         read_i32(buf + 6)
 
-    ino_mtime(buf: *i8) -> int
+    ino_mtime(buf: *byte) -> int
         read_i32(buf + 10)
 
-    ino_ctime(buf: *i8) -> int
+    ino_ctime(buf: *byte) -> int
         read_i32(buf + 14)
 
-    ino_direct(buf: *i8, idx: int) -> int
+    ino_direct(buf: *byte, idx: int) -> int
         read_i16(buf + 18 + idx * 2)
 
-    ino_indirect(buf: *i8) -> int
+    ino_indirect(buf: *byte) -> int
         read_i16(buf + 30)
 
-    ino_set_size(buf: *i8, size: int)
+    ino_set_size(buf: *byte, size: int)
         write_i32(buf + 6, size)
 
-    ino_set_nlinks(buf: *i8, n: int)
+    ino_set_nlinks(buf: *byte, n: int)
         buf[2] = n
 
-    ino_set_direct(buf: *i8, idx: int, blk: int)
+    ino_set_direct(buf: *byte, idx: int, blk: int)
         write_i16(buf + 18 + idx * 2, blk)
 
-    ino_set_indirect(buf: *i8, blk: int)
+    ino_set_indirect(buf: *byte, blk: int)
         write_i16(buf + 30, blk)
 
-    ino_set_mode(buf: *i8, mode: int)
+    ino_set_mode(buf: *byte, mode: int)
         write_i16(buf, mode)
 
 tfs_write_inode(ino, buf) — Write 32-byte inode buffer back to disk.
 
-    tfs_write_inode(ino: int, buf: *i8)
+    tfs_write_inode(ino: int, buf: *byte)
         val blk = inode_block(ino)
         rd_read(blk, blkbuf)
         val off = inode_off(ino)
-        val dst: *i8 = blkbuf + off
+        val dst: *byte = blkbuf + off
         var i = 0
         while i < INODE_SIZE
             dst[i] = buf[i]
@@ -186,7 +186,7 @@ get_file_block(inode_buf, block_idx) — Return the disk block number for
 logical block index within a file. Uses direct pointers (0-5) or the
 indirect block (6+).
 
-    get_file_block(ibuf: *i8, idx: int) -> int
+    get_file_block(ibuf: *byte, idx: int) -> int
         if idx < NUM_DIRECT
             return ino_direct(ibuf, idx)
         // Read indirect block into blkbuf2 (blkbuf used by callers for data)
@@ -203,7 +203,7 @@ indirect block (6+).
         rd_read(blk, blkbuf2)
         val byte_off = (idx % (sb_block_size * 8)) / 8
         val bit = idx % 8
-        val p: *i8 = blkbuf2 + byte_off
+        val p: *byte = blkbuf2 + byte_off
         if (*p & (1 << bit)) != 0
             return 1
         0
@@ -213,7 +213,7 @@ indirect block (6+).
         rd_read(blk, blkbuf2)
         val byte_off = (idx % (sb_block_size * 8)) / 8
         val bit = idx % 8
-        val p: *i8 = blkbuf2 + byte_off
+        val p: *byte = blkbuf2 + byte_off
         *p = *p | (1 << bit)
         rd_write(blk, blkbuf2)
 
@@ -222,7 +222,7 @@ indirect block (6+).
         rd_read(blk, blkbuf2)
         val byte_off = (idx % (sb_block_size * 8)) / 8
         val bit = idx % 8
-        val p: *i8 = blkbuf2 + byte_off
+        val p: *byte = blkbuf2 + byte_off
         *p = *p & ~(1 << bit)
         rd_write(blk, blkbuf2)
 
@@ -269,7 +269,7 @@ alloc_inode() — Find and allocate a free inode. Returns inode number or -1.
 Compare a NUL-padded on-disk entry name (a, max n bytes) against
 a length-delimited name (b, blen bytes). Returns 1 if equal.
 
-    entry_name_eq(a: *i8, n: int, b: *i8, blen: int) -> int
+    entry_name_eq(a: *byte, n: int, b: *byte, blen: int) -> int
         // Check each byte of the user name against the entry
         var i = 0
         while i < blen
@@ -289,18 +289,18 @@ a length-delimited name (b, blen bytes). Returns 1 if equal.
 tfs_dir_lookup(dir_ino, name, name_len) -> int
 Find a name in a directory. Returns the inode number or -1 if not found.
 
-    tfs_dir_lookup(dir_ino: int, name: *i8, name_len: int) -> int
-        var ibuf: [32]i8
+    tfs_dir_lookup(dir_ino: int, name: *byte, name_len: int) -> int
+        var ibuf: [32]byte
         tfs_read_inode(dir_ino, ibuf)
         val entries = ino_size(ibuf) / DIR_ENTRY_SIZE
         val data_blk = ino_direct(ibuf, 0)
         rd_read(data_blk, blkbuf)
         var i = 0
         while i < entries
-            val off: *i8 = blkbuf + i * DIR_ENTRY_SIZE
+            val off: *byte = blkbuf + i * DIR_ENTRY_SIZE
             val entry_ino = read_i16(off)
             if entry_ino != 0
-                val entry_name: *i8 = off + 2
+                val entry_name: *byte = off + 2
                 if entry_name_eq(entry_name, DIR_NAME_LEN, name, name_len) == 1
                     return entry_ino
             i += 1
@@ -310,7 +310,7 @@ tfs_lookup(path, path_len) -> int
 Resolve a full path (e.g. "/dev/tty0") to an inode number.
 Returns -1 if not found.
 
-    tfs_lookup(path: *i8, path_len: int) -> int
+    tfs_lookup(path: *byte, path_len: int) -> int
         if path_len == 0
             return -1
         if path[0] != 47
@@ -340,8 +340,8 @@ tfs_read(ino, buf, offset, len) -> int
 Read len bytes from file at inode ino, starting at offset.
 Returns bytes read.
 
-    tfs_read(ino: int, buf: *i8, offset: int, len: int) -> int
-        var ibuf: [32]i8
+    tfs_read(ino: int, buf: *byte, offset: int, len: int) -> int
+        var ibuf: [32]byte
         tfs_read_inode(ino, ibuf)
         val file_size = ino_size(ibuf)
         if offset >= file_size
@@ -361,7 +361,7 @@ Returns bytes read.
             var chunk = sb_block_size - blk_off
             if chunk > remaining
                 chunk = remaining
-            val src: *i8 = blkbuf + blk_off
+            val src: *byte = blkbuf + blk_off
             var i = 0
             while i < chunk
                 buf[buf_pos] = src[i]
@@ -376,8 +376,8 @@ tfs_write(ino, buf, offset, len) -> int
 Write len bytes to file at inode ino, starting at offset.
 Allocates new blocks as needed. Returns bytes written.
 
-    tfs_write(ino: int, buf: *i8, offset: int, len: int) -> int
-        var ibuf: [32]i8
+    tfs_write(ino: int, buf: *byte, offset: int, len: int) -> int
+        var ibuf: [32]byte
         tfs_read_inode(ino, ibuf)
         var remaining = len
         var buf_pos = 0
@@ -387,7 +387,7 @@ Allocates new blocks as needed. Returns bytes written.
         var chunk = 0
         var ind_blk = 0
         var i = 0
-        var dst: *i8 = buf
+        var dst: *byte = buf
         while remaining > 0
             blk_idx = (offset + buf_pos) / sb_block_size
             blk_off = (offset + buf_pos) % sb_block_size
@@ -429,8 +429,8 @@ Allocates new blocks as needed. Returns bytes written.
 
     // === Directory entry add/remove ===
 
-    dir_add_entry(dir_ino: int, name: *i8, name_len: int, child_ino: int) -> int
-        var ibuf: [32]i8
+    dir_add_entry(dir_ino: int, name: *byte, name_len: int, child_ino: int) -> int
+        var ibuf: [32]byte
         tfs_read_inode(dir_ino, ibuf)
         val data_blk = ino_direct(ibuf, 0)
         rd_read(data_blk, blkbuf)
@@ -440,7 +440,7 @@ Allocates new blocks as needed. Returns bytes written.
         var slot = -1
         var i = 0
         while i < entries
-            val off: *i8 = blkbuf + i * DIR_ENTRY_SIZE
+            val off: *byte = blkbuf + i * DIR_ENTRY_SIZE
             if read_i16(off) == 0
                 slot = i
                 break
@@ -453,10 +453,10 @@ Allocates new blocks as needed. Returns bytes written.
             tfs_write_inode(dir_ino, ibuf)
             // Re-read dir data since tfs_write_inode clobbered blkbuf
             rd_read(data_blk, blkbuf)
-        val off: *i8 = blkbuf + slot * DIR_ENTRY_SIZE
+        val off: *byte = blkbuf + slot * DIR_ENTRY_SIZE
         write_i16(off, child_ino)
         // Write name (copy name_len bytes, NUL-pad rest)
-        val dp: *i8 = off + 2
+        val dp: *byte = off + 2
         var j = 0
         while j < DIR_NAME_LEN
             if j < name_len
@@ -467,22 +467,22 @@ Allocates new blocks as needed. Returns bytes written.
         rd_write(data_blk, blkbuf)
         0
 
-    dir_remove_entry(dir_ino: int, name: *i8, name_len: int) -> int
-        var ibuf: [32]i8
+    dir_remove_entry(dir_ino: int, name: *byte, name_len: int) -> int
+        var ibuf: [32]byte
         tfs_read_inode(dir_ino, ibuf)
         val data_blk = ino_direct(ibuf, 0)
         rd_read(data_blk, blkbuf)
         val entries = ino_size(ibuf) / DIR_ENTRY_SIZE
         var i = 0
         while i < entries
-            val off: *i8 = blkbuf + i * DIR_ENTRY_SIZE
+            val off: *byte = blkbuf + i * DIR_ENTRY_SIZE
             val entry_ino = read_i16(off)
             if entry_ino != 0
-                val en: *i8 = off + 2
+                val en: *byte = off + 2
                 if entry_name_eq(en, DIR_NAME_LEN, name, name_len) == 1
                     // Clear the entry
                     write_i16(off, 0)
-                    val dp: *i8 = off + 2
+                    val dp: *byte = off + 2
                     var j = 0
                     while j < DIR_NAME_LEN
                         dp[j] = 0
@@ -498,11 +498,11 @@ tfs_create(parent_ino, name, name_len, type, perm) -> int
 Create a new file or directory. Returns inode number or -1 on error.
 type: 1=regular, 2=directory, 3=chardev, 4=blockdev
 
-    tfs_create(parent_ino: int, name: *i8, name_len: int, ftype: int, perm: int) -> int
+    tfs_create(parent_ino: int, name: *byte, name_len: int, ftype: int, perm: int) -> int
         val ino = alloc_inode()
         if ino == -1
             return -1
-        var ibuf: [32]i8
+        var ibuf: [32]byte
         var i = 0
         while i < INODE_SIZE
             ibuf[i] = 0
@@ -526,15 +526,15 @@ type: 1=regular, 2=directory, 3=chardev, 4=blockdev
                 blkbuf[zi] = 0
                 zi += 1
             write_i16(blkbuf, ino)
-            val d1: *i8 = blkbuf + 2
+            val d1: *byte = blkbuf + 2
             d1[0] = 46
             write_i16(blkbuf + DIR_ENTRY_SIZE, parent_ino)
-            val d2: *i8 = blkbuf + DIR_ENTRY_SIZE + 2
+            val d2: *byte = blkbuf + DIR_ENTRY_SIZE + 2
             d2[0] = 46
             d2[1] = 46
             rd_write(blk, blkbuf)
             // Increment parent nlinks
-            var pbuf: [32]i8
+            var pbuf: [32]byte
             tfs_read_inode(parent_ino, pbuf)
             ino_set_nlinks(pbuf, ino_nlinks(pbuf) + 1)
             tfs_write_inode(parent_ino, pbuf)
@@ -548,11 +548,11 @@ type: 1=regular, 2=directory, 3=chardev, 4=blockdev
 tfs_mknod(parent_ino, name, name_len, ftype, major, minor) -> int
 Create a device node. Returns inode number or -1.
 
-    tfs_mknod(parent_ino: int, name: *i8, name_len: int, ftype: int, major: int, minor: int) -> int
+    tfs_mknod(parent_ino: int, name: *byte, name_len: int, ftype: int, major: int, minor: int) -> int
         val ino = alloc_inode()
         if ino == -1
             return -1
-        var ibuf: [32]i8
+        var ibuf: [32]byte
         var i = 0
         while i < INODE_SIZE
             ibuf[i] = 0
@@ -571,11 +571,11 @@ tfs_unlink(parent_ino, name, name_len) -> int
 Remove a directory entry and free the inode if nlinks reaches 0.
 Returns 0 on success, -1 on error.
 
-    tfs_unlink(parent_ino: int, name: *i8, name_len: int) -> int
+    tfs_unlink(parent_ino: int, name: *byte, name_len: int) -> int
         val ino = dir_remove_entry(parent_ino, name, name_len)
         if ino == -1
             return -1
-        var ibuf: [32]i8
+        var ibuf: [32]byte
         tfs_read_inode(ino, ibuf)
         val nlinks = ino_nlinks(ibuf) - 1
         ino_set_nlinks(ibuf, nlinks)
@@ -610,7 +610,7 @@ Fill stat buffer: out[0]=mode, out[1]=nlinks, out[2]=uid, out[3]=gid,
 out[4]=size, out[5]=mtime, out[6]=ctime. Returns 0 on success.
 
     tfs_stat(ino: int, out: *int) -> int
-        var ibuf: [32]i8
+        var ibuf: [32]byte
         tfs_read_inode(ino, ibuf)
         out[0] = ino_mode(ibuf)
         out[1] = ino_nlinks(ibuf)
@@ -628,7 +628,7 @@ Change permission bits (lower 9 bits of mode). Preserves file type.
 Returns 0 on success.
 
     tfs_chmod(ino: int, perm: int) -> int
-        var ibuf: [32]i8
+        var ibuf: [32]byte
         tfs_read_inode(ino, ibuf)
         val ftype = ino_mode(ibuf) & 0xF000
         ino_set_mode(ibuf, ftype | (perm & 0x1FF))
@@ -639,7 +639,7 @@ tfs_chown(ino, uid, gid) -> int
 Change owner and group. Returns 0 on success.
 
     tfs_chown(ino: int, uid: int, gid: int) -> int
-        var ibuf: [32]i8
+        var ibuf: [32]byte
         tfs_read_inode(ino, ibuf)
         ibuf[3] = uid & 0xFF
         ibuf[4] = gid & 0xFF
@@ -665,7 +665,7 @@ Shrink a file to new_size bytes. Frees blocks beyond the new size.
 Returns 0 on success, -1 on error.
 
     tfs_truncate(ino: int, new_size: int) -> int
-        var ibuf: [32]i8
+        var ibuf: [32]byte
         tfs_read_inode(ino, ibuf)
         val old_size = ino_size(ibuf)
         if new_size >= old_size
@@ -720,11 +720,11 @@ Returns 0 on success, -1 on error.
 tfs_rmdir(parent_ino, name, name_len) -> int
 Remove an empty directory. Returns 0 on success, -1 if not empty or not found.
 
-    tfs_rmdir(parent_ino: int, name: *i8, name_len: int) -> int
+    tfs_rmdir(parent_ino: int, name: *byte, name_len: int) -> int
         val ino = tfs_dir_lookup(parent_ino, name, name_len)
         if ino == -1
             return -1
-        var ibuf: [32]i8
+        var ibuf: [32]byte
         tfs_read_inode(ino, ibuf)
         // Must be a directory
         if ino_type(ibuf) != S_IFDIR
@@ -736,7 +736,7 @@ Remove an empty directory. Returns 0 on success, -1 if not empty or not found.
         var count = 0
         var i = 0
         while i < entries
-            val off: *i8 = blkbuf + i * DIR_ENTRY_SIZE
+            val off: *byte = blkbuf + i * DIR_ENTRY_SIZE
             if read_i16(off) != 0
                 count += 1
             i += 1
@@ -749,7 +749,7 @@ Remove an empty directory. Returns 0 on success, -1 if not empty or not found.
         // Remove from parent
         dir_remove_entry(parent_ino, name, name_len)
         // Decrement parent nlinks (child's .. no longer points to parent)
-        var pbuf: [32]i8
+        var pbuf: [32]byte
         tfs_read_inode(parent_ino, pbuf)
         ino_set_nlinks(pbuf, ino_nlinks(pbuf) - 1)
         tfs_write_inode(parent_ino, pbuf)
@@ -760,13 +760,13 @@ Remove an empty directory. Returns 0 on success, -1 if not empty or not found.
 tfs_rename(old_parent, old_name, old_name_len, new_parent, new_name, new_name_len) -> int
 Move/rename a file or directory. Returns 0 on success, -1 on error.
 
-    tfs_rename(old_parent: int, old_name: *i8, old_name_len: int, new_parent: int, new_name: *i8, new_name_len: int) -> int
+    tfs_rename(old_parent: int, old_name: *byte, old_name_len: int, new_parent: int, new_name: *byte, new_name_len: int) -> int
         val ino = dir_remove_entry(old_parent, old_name, old_name_len)
         if ino == -1
             return -1
         dir_add_entry(new_parent, new_name, new_name_len, ino)
         // If moving a directory, update its .. entry
-        var ibuf: [32]i8
+        var ibuf: [32]byte
         tfs_read_inode(ino, ibuf)
         if ino_type(ibuf) == S_IFDIR
             val data_blk = ino_direct(ibuf, 0)
@@ -775,7 +775,7 @@ Move/rename a file or directory. Returns 0 on success, -1 on error.
             write_i16(blkbuf + DIR_ENTRY_SIZE, new_parent)
             rd_write(data_blk, blkbuf)
             // Update nlinks: old parent loses one, new parent gains one
-            var pbuf: [32]i8
+            var pbuf: [32]byte
             tfs_read_inode(old_parent, pbuf)
             ino_set_nlinks(pbuf, ino_nlinks(pbuf) - 1)
             tfs_write_inode(old_parent, pbuf)
@@ -791,8 +791,8 @@ Read the nth active directory entry. Skips free slots.
 Sets out_ino and copies name to out_name (14 bytes max).
 Returns 0 on success, -1 if index is past the last entry.
 
-    tfs_readdir(dir_ino: int, index: int, out_ino: *int, out_name: *i8) -> int
-        var ibuf: [32]i8
+    tfs_readdir(dir_ino: int, index: int, out_ino: *int, out_name: *byte) -> int
+        var ibuf: [32]byte
         tfs_read_inode(dir_ino, ibuf)
         val entries = ino_size(ibuf) / DIR_ENTRY_SIZE
         val data_blk = ino_direct(ibuf, 0)
@@ -800,12 +800,12 @@ Returns 0 on success, -1 if index is past the last entry.
         var count = 0
         var i = 0
         while i < entries
-            val off: *i8 = blkbuf + i * DIR_ENTRY_SIZE
+            val off: *byte = blkbuf + i * DIR_ENTRY_SIZE
             val entry_ino = read_i16(off)
             if entry_ino != 0
                 if count == index
                     *out_ino = entry_ino
-                    val src: *i8 = off + 2
+                    val src: *byte = off + 2
                     var j = 0
                     while j < DIR_NAME_LEN
                         out_name[j] = src[j]
@@ -821,8 +821,8 @@ tfs_link(parent_ino, name, target_ino) -> int
 Create a hard link. Adds a directory entry and increments nlinks.
 Returns 0 on success, -1 on error.
 
-    tfs_link(parent_ino: int, name: *i8, name_len: int, target_ino: int) -> int
-        var ibuf: [32]i8
+    tfs_link(parent_ino: int, name: *byte, name_len: int, target_ino: int) -> int
+        var ibuf: [32]byte
         tfs_read_inode(target_ino, ibuf)
         // Can't hard-link directories
         if ino_type(ibuf) == S_IFDIR

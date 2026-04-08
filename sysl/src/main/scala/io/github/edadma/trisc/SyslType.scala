@@ -14,6 +14,7 @@ enum SyslType:
   case SliceType(elem: SyslType)
   case RefType(inner: SyslType)  // &T — ref-counted heap reference
   case EnumType(name: String, variants: List[(String, List[(String, SyslType)])])  // tagged union
+  case InterfaceType(name: String, methods: List[(String, List[SyslType], SyslType)])  // {itable_ptr, data_ptr}
 
   def isNumeric: Boolean = this match
     case _: IntType | _: UIntType => true
@@ -47,7 +48,8 @@ enum SyslType:
     case BoolType => 1
     case VoidType => 0
     case PtrType(_) => 8
-    case FuncType(_, _) => 8
+    case FuncType(_, _) => 16       // {func_ptr(8), env_ptr(8)} — closure-ready fat pointer
+    case InterfaceType(_, _) => 16   // {itable_ptr(8), data_ptr(8)} — Go-style interface
     case ArrayType(elem, size) => elem.sizeOf * size
     case DoubleType => 8
     case StringType => 16        // ptr(8) + len(8) — Go-style fat pointer
@@ -84,6 +86,7 @@ enum SyslType:
     case VoidType => 1
     case PtrType(_) => 8
     case FuncType(_, _) => 8
+    case InterfaceType(_, _) => 8
     case ArrayType(elem, _) => elem.alignOf
     case DoubleType => 8
     case StringType => 8
@@ -125,6 +128,7 @@ enum SyslType:
     case SliceType(t) => s"[]$t"
     case RefType(t) => s"&$t"
     case EnumType(name, _) => name
+    case InterfaceType(name, _) => name
 
   def toPrefix: String = this match
     case IntType(w) => s"i$w"
@@ -142,6 +146,9 @@ enum SyslType:
     case EnumType(name, variants) =>
       val vs = variants.map { (vn, fields) => s"$vn ${fields.size} ${fields.map((n, t) => s"$n ${t.toPrefix}").mkString(" ")}" }.mkString(" ")
       s"enum $name ${variants.size} $vs"
+    case InterfaceType(name, methods) =>
+      val ms = methods.map { (mn, params, ret) => s"$mn ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}" }.mkString(" ")
+      s"iface $name ${methods.size} $ms"
 
   def isTuple: Boolean = this match
     case StructType(name, _) => name.startsWith("_Tuple")
@@ -235,6 +242,17 @@ object SyslType:
           (vname, fields)
         }.toList
         EnumType(name, variants)
+      case "iface" =>
+        val name = tokens.next()
+        val nmethods = tokens.next().toInt
+        val methods = (1 to nmethods).map { _ =>
+          val mname = tokens.next()
+          val nparams = tokens.next().toInt
+          val params = (1 to nparams).map(_ => parseType(tokens)).toList
+          val ret = parseType(tokens)
+          (mname, params, ret)
+        }.toList
+        InterfaceType(name, methods)
       case other => throw IllegalArgumentException(s"unknown type token: '$other'")
 
   def funcSigToPrefix(params: List[SyslType], ret: SyslType): String =

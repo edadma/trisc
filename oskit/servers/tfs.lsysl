@@ -48,40 +48,40 @@ Commands:
     val TFS_CMD_RENAME  = 12
 
     var tfs_port = -1
-    var tfs_srv_name: [3]i8
+    var tfs_srv_name: [3]byte
 
 Block I/O bridge: provides the rd_read/rd_write that the TFS
 library externs expect, forwarding to the disk server via IPC.
 
-    rd_read(lba: int, addr: *i8)
+    rd_read(lba: int, addr: *byte)
         disk_read(lba, addr)
 
-    rd_write(lba: int, addr: *i8)
+    rd_write(lba: int, addr: *byte)
         disk_write(lba, addr)
 
 Big-endian message helpers (local to this server).
 
-    tfs_msg_read_i32(buf: *i8, off: int) -> int
+    tfs_msg_read_i32(buf: *byte, off: int) -> int
         ((buf[off] & 0xFF) << 24) | ((buf[off + 1] & 0xFF) << 16) | ((buf[off + 2] & 0xFF) << 8) | (buf[off + 3] & 0xFF)
 
-    tfs_msg_write_i32(buf: *i8, off: int, v: int)
+    tfs_msg_write_i32(buf: *byte, off: int, v: int)
         buf[off] = (v >> 24) & 0xFF
         buf[off + 1] = (v >> 16) & 0xFF
         buf[off + 2] = (v >> 8) & 0xFF
         buf[off + 3] = v & 0xFF
 
-    tfs_msg_read_i16(buf: *i8, off: int) -> int
+    tfs_msg_read_i16(buf: *byte, off: int) -> int
         ((buf[off] & 0xFF) << 8) | (buf[off + 1] & 0xFF)
 
 Handle OPEN: resolve a path to an inode number.
 Request: [cmd(1), path(N)]
 Reply:   [status(1), ino(4)]
 
-    tfs_handle_open(sender: int, buf: *i8, msg_len: int)
-        val path: *i8 = buf + 1
+    tfs_handle_open(sender: int, buf: *byte, msg_len: int)
+        val path: *byte = buf + 1
         val path_len = msg_len - 1
         val ino = tfs_lookup(path, path_len)
-        var reply: [5]i8
+        var reply: [5]byte
         if ino == -1
             reply[0] = -1
         else
@@ -93,7 +93,7 @@ Handle READ: read bytes from a file.
 Request: [cmd(1), ino(4), offset(4), len(4)]
 Reply:   [status(1), bytes_read(4), data...]
 
-    tfs_handle_read(sender: int, buf: *i8)
+    tfs_handle_read(sender: int, buf: *byte)
         val ino = tfs_msg_read_i32(buf, 1)
         val offset = tfs_msg_read_i32(buf, 5)
         val len = tfs_msg_read_i32(buf, 9)
@@ -101,10 +101,10 @@ Reply:   [status(1), bytes_read(4), data...]
         var rlen = len
         if rlen > 500
             rlen = 500
-        var data: [512]i8
+        var data: [512]byte
         val nr = tfs_read(ino, &data[0], offset, rlen)
         // Build reply: [status(1), bytes_read(4), data...]
-        var reply: [512]i8
+        var reply: [512]byte
         reply[0] = 0
         tfs_msg_write_i32(&reply[0], 1, nr)
         var i = 0
@@ -117,13 +117,13 @@ Handle WRITE: write bytes to a file.
 Request: [cmd(1), ino(4), offset(4), len(4), data...]
 Reply:   [status(1), bytes_written(4)]
 
-    tfs_handle_write(sender: int, buf: *i8)
+    tfs_handle_write(sender: int, buf: *byte)
         val ino = tfs_msg_read_i32(buf, 1)
         val offset = tfs_msg_read_i32(buf, 5)
         val len = tfs_msg_read_i32(buf, 9)
-        val data: *i8 = buf + 13
+        val data: *byte = buf + 13
         val nw = tfs_write(ino, data, offset, len)
-        var reply: [5]i8
+        var reply: [5]byte
         reply[0] = 0
         tfs_msg_write_i32(&reply[0], 1, nw)
         ipc_reply(sender, &reply[0], 5)
@@ -132,14 +132,14 @@ Handle CREATE: create a file or directory entry.
 Request: [cmd(1), parent_ino(4), type(1), perm(2), name(N)]
 Reply:   [status(1), ino(4)]
 
-    tfs_handle_create(sender: int, buf: *i8, msg_len: int)
+    tfs_handle_create(sender: int, buf: *byte, msg_len: int)
         val parent_ino = tfs_msg_read_i32(buf, 1)
         val ftype = int(buf[5])
         val perm = tfs_msg_read_i16(buf, 6)
-        val name: *i8 = buf + 8
+        val name: *byte = buf + 8
         val name_len = msg_len - 8
         val ino = tfs_create(parent_ino, name, name_len, ftype, perm)
-        var reply: [5]i8
+        var reply: [5]byte
         if ino == -1
             reply[0] = -1
         else
@@ -151,12 +151,12 @@ Handle UNLINK: remove a file.
 Request: [cmd(1), parent_ino(4), name(N)]
 Reply:   [status(1)]
 
-    tfs_handle_unlink(sender: int, buf: *i8, msg_len: int)
+    tfs_handle_unlink(sender: int, buf: *byte, msg_len: int)
         val parent_ino = tfs_msg_read_i32(buf, 1)
-        val name: *i8 = buf + 5
+        val name: *byte = buf + 5
         val name_len = msg_len - 5
         val result = tfs_unlink(parent_ino, name, name_len)
-        var reply: [1]i8
+        var reply: [1]byte
         if result == -1
             reply[0] = -1
         else
@@ -167,11 +167,11 @@ Handle STAT: get file metadata.
 Request: [cmd(1), ino(4)]
 Reply:   [status(1), mode(4), nlinks(4), uid(4), gid(4), size(4), mtime(4), ctime(4)]
 
-    tfs_handle_stat(sender: int, buf: *i8)
+    tfs_handle_stat(sender: int, buf: *byte)
         val ino = tfs_msg_read_i32(buf, 1)
         var out: [7]int
         val result = tfs_stat(ino, &out[0])
-        var reply: [29]i8
+        var reply: [29]byte
         if result != 0
             reply[0] = -1
             ipc_reply(sender, &reply[0], 1)
@@ -190,13 +190,13 @@ Handle MKDIR: create a directory.
 Request: [cmd(1), parent_ino(4), perm(2), name(N)]
 Reply:   [status(1), ino(4)]
 
-    tfs_handle_mkdir(sender: int, buf: *i8, msg_len: int)
+    tfs_handle_mkdir(sender: int, buf: *byte, msg_len: int)
         val parent_ino = tfs_msg_read_i32(buf, 1)
         val perm = tfs_msg_read_i16(buf, 5)
-        val name: *i8 = buf + 7
+        val name: *byte = buf + 7
         val name_len = msg_len - 7
         val ino = tfs_create(parent_ino, name, name_len, 2, perm)
-        var reply: [5]i8
+        var reply: [5]byte
         if ino == -1
             reply[0] = -1
         else
@@ -208,12 +208,12 @@ Handle RMDIR: remove a directory.
 Request: [cmd(1), parent_ino(4), name(N)]
 Reply:   [status(1)]
 
-    tfs_handle_rmdir(sender: int, buf: *i8, msg_len: int)
+    tfs_handle_rmdir(sender: int, buf: *byte, msg_len: int)
         val parent_ino = tfs_msg_read_i32(buf, 1)
-        val name: *i8 = buf + 5
+        val name: *byte = buf + 5
         val name_len = msg_len - 5
         val result = tfs_rmdir(parent_ino, name, name_len)
-        var reply: [1]i8
+        var reply: [1]byte
         if result == -1
             reply[0] = -1
         else
@@ -224,13 +224,13 @@ Handle READDIR: read a directory entry by index.
 Request: [cmd(1), dir_ino(4), index(4)]
 Reply:   [status(1), ino(4), name(14)]
 
-    tfs_handle_readdir(sender: int, buf: *i8)
+    tfs_handle_readdir(sender: int, buf: *byte)
         val dir_ino = tfs_msg_read_i32(buf, 1)
         val index = tfs_msg_read_i32(buf, 5)
         var out_ino: int
-        var out_name: [14]i8
+        var out_name: [14]byte
         val result = tfs_readdir(dir_ino, index, &out_ino, &out_name[0])
-        var reply: [19]i8
+        var reply: [19]byte
         if result == -1
             reply[0] = -1
             ipc_reply(sender, &reply[0], 1)
@@ -249,7 +249,7 @@ Reply:   [status(1)]
 
     tfs_handle_sync(sender: int)
         sync_superblock()
-        var reply: [1]i8
+        var reply: [1]byte
         reply[0] = 0
         ipc_reply(sender, &reply[0], 1)
 
@@ -257,11 +257,11 @@ Handle CHMOD: change file permissions.
 Request: [cmd(1), ino(4), perm(2)]
 Reply:   [status(1)]
 
-    tfs_handle_chmod(sender: int, buf: *i8)
+    tfs_handle_chmod(sender: int, buf: *byte)
         val ino = tfs_msg_read_i32(buf, 1)
         val perm = tfs_msg_read_i16(buf, 5)
         val result = tfs_chmod(ino, perm)
-        var reply: [1]i8
+        var reply: [1]byte
         if result == -1
             reply[0] = -1
         else
@@ -272,15 +272,15 @@ Handle RENAME: move/rename a file.
 Request: [cmd(1), old_parent(4), new_parent(4), old_name_len(1), old_name(N), new_name(M)]
 Reply:   [status(1)]
 
-    tfs_handle_rename(sender: int, buf: *i8, msg_len: int)
+    tfs_handle_rename(sender: int, buf: *byte, msg_len: int)
         val old_parent = tfs_msg_read_i32(buf, 1)
         val new_parent = tfs_msg_read_i32(buf, 5)
         val old_name_len = int(buf[9])
-        val old_name: *i8 = buf + 10
-        val new_name: *i8 = buf + 10 + old_name_len
+        val old_name: *byte = buf + 10
+        val new_name: *byte = buf + 10 + old_name_len
         val new_name_len = msg_len - 10 - old_name_len
         val result = tfs_rename(old_parent, old_name, old_name_len, new_parent, new_name, new_name_len)
-        var reply: [1]i8
+        var reply: [1]byte
         if result == -1
             reply[0] = -1
         else
@@ -307,7 +307,7 @@ since tfs_init() reads the superblock via rd_read → disk_read.
         tfs_init()
 
         // Server loop
-        var buf: [512]i8
+        var buf: [512]byte
         while 1 == 1
             val sender = ipc_recv(tfs_port, &buf[0], 512)
             if sender >= 0
@@ -338,7 +338,7 @@ since tfs_init() reads the superblock via rd_read → disk_read.
                 else if cmd == TFS_CMD_RENAME
                     tfs_handle_rename(sender, &buf[0], msg_len)
                 else
-                    var reply: [1]i8
+                    var reply: [1]byte
                     reply[0] = -1
                     ipc_reply(sender, &reply[0], 1)
 
@@ -350,28 +350,28 @@ without building IPC messages manually.
         if port < 0
             return -1
         // Build message: [cmd(1), path(N)]
-        var msg: [128]i8
+        var msg: [128]byte
         msg[0] = TFS_CMD_OPEN
         val plen = len(path)
-        val p: *i8 = *i8(path)
+        val p: *byte = *byte(path)
         for var i = 0; i < plen; i++
             msg[i + 1] = p[i]
-        var reply: [5]i8
+        var reply: [5]byte
         ipc_send(port, &msg[0], plen + 1, &reply[0], 5)
         if reply[0] != 0
             return -1
         tfs_msg_read_i32(&reply[0], 1)
 
-    fs_read(ino: int, buf: *i8, offset: int, len: int) -> int
+    fs_read(ino: int, buf: *byte, offset: int, len: int) -> int
         val port = port_lookup(&tfs_srv_name[0])
         if port < 0
             return -1
-        var msg: [13]i8
+        var msg: [13]byte
         msg[0] = TFS_CMD_READ
         tfs_msg_write_i32(&msg[0], 1, ino)
         tfs_msg_write_i32(&msg[0], 5, offset)
         tfs_msg_write_i32(&msg[0], 9, len)
-        var reply: [512]i8
+        var reply: [512]byte
         val result = ipc_send(port, &msg[0], 13, &reply[0], 512)
         if result != 0
             return -1
@@ -385,11 +385,11 @@ without building IPC messages manually.
             i += 1
         nr
 
-    fs_write(ino: int, data: *i8, offset: int, len: int) -> int
+    fs_write(ino: int, data: *byte, offset: int, len: int) -> int
         val port = port_lookup(&tfs_srv_name[0])
         if port < 0
             return -1
-        var msg: [512]i8
+        var msg: [512]byte
         msg[0] = TFS_CMD_WRITE
         tfs_msg_write_i32(&msg[0], 1, ino)
         tfs_msg_write_i32(&msg[0], 5, offset)
@@ -398,7 +398,7 @@ without building IPC messages manually.
         while i < len
             msg[i + 13] = data[i]
             i += 1
-        var reply: [5]i8
+        var reply: [5]byte
         val result = ipc_send(port, &msg[0], len + 13, &reply[0], 5)
         if result != 0
             return -1
@@ -410,17 +410,17 @@ without building IPC messages manually.
         val port = port_lookup(&tfs_srv_name[0])
         if port < 0
             return -1
-        var msg: [128]i8
+        var msg: [128]byte
         msg[0] = TFS_CMD_CREATE
         tfs_msg_write_i32(&msg[0], 1, parent_ino)
-        msg[5] = i8(ftype)
+        msg[5] = byte(ftype)
         msg[6] = (perm >> 8) & 0xFF
         msg[7] = perm & 0xFF
         val nlen = len(name)
-        val np: *i8 = *i8(name)
+        val np: *byte = *byte(name)
         for var i = 0; i < nlen; i++
             msg[i + 8] = np[i]
-        var reply: [5]i8
+        var reply: [5]byte
         val result = ipc_send(port, &msg[0], nlen + 8, &reply[0], 5)
         if result != 0
             return -1
@@ -432,14 +432,14 @@ without building IPC messages manually.
         val port = port_lookup(&tfs_srv_name[0])
         if port < 0
             return -1
-        var msg: [128]i8
+        var msg: [128]byte
         msg[0] = TFS_CMD_UNLINK
         tfs_msg_write_i32(&msg[0], 1, parent_ino)
         val nlen = len(name)
-        val np: *i8 = *i8(name)
+        val np: *byte = *byte(name)
         for var i = 0; i < nlen; i++
             msg[i + 5] = np[i]
-        var reply: [1]i8
+        var reply: [1]byte
         val result = ipc_send(port, &msg[0], nlen + 5, &reply[0], 1)
         if result != 0
             return -1
@@ -449,10 +449,10 @@ without building IPC messages manually.
         val port = port_lookup(&tfs_srv_name[0])
         if port < 0
             return -1
-        var msg: [5]i8
+        var msg: [5]byte
         msg[0] = TFS_CMD_STAT
         tfs_msg_write_i32(&msg[0], 1, ino)
-        var reply: [29]i8
+        var reply: [29]byte
         val result = ipc_send(port, &msg[0], 5, &reply[0], 29)
         if result != 0
             return -1
@@ -471,16 +471,16 @@ without building IPC messages manually.
         val port = port_lookup(&tfs_srv_name[0])
         if port < 0
             return -1
-        var msg: [128]i8
+        var msg: [128]byte
         msg[0] = TFS_CMD_MKDIR
         tfs_msg_write_i32(&msg[0], 1, parent_ino)
         msg[5] = (perm >> 8) & 0xFF
         msg[6] = perm & 0xFF
         val nlen = len(name)
-        val np: *i8 = *i8(name)
+        val np: *byte = *byte(name)
         for var i = 0; i < nlen; i++
             msg[i + 7] = np[i]
-        var reply: [5]i8
+        var reply: [5]byte
         val result = ipc_send(port, &msg[0], nlen + 7, &reply[0], 5)
         if result != 0
             return -1
@@ -492,28 +492,28 @@ without building IPC messages manually.
         val port = port_lookup(&tfs_srv_name[0])
         if port < 0
             return -1
-        var msg: [128]i8
+        var msg: [128]byte
         msg[0] = TFS_CMD_RMDIR
         tfs_msg_write_i32(&msg[0], 1, parent_ino)
         val nlen = len(name)
-        val np: *i8 = *i8(name)
+        val np: *byte = *byte(name)
         for var i = 0; i < nlen; i++
             msg[i + 5] = np[i]
-        var reply: [1]i8
+        var reply: [1]byte
         val result = ipc_send(port, &msg[0], nlen + 5, &reply[0], 1)
         if result != 0
             return -1
         int(reply[0])
 
-    fs_readdir(dir_ino: int, index: int, out_ino: *int, out_name: *i8) -> int
+    fs_readdir(dir_ino: int, index: int, out_ino: *int, out_name: *byte) -> int
         val port = port_lookup(&tfs_srv_name[0])
         if port < 0
             return -1
-        var msg: [9]i8
+        var msg: [9]byte
         msg[0] = TFS_CMD_READDIR
         tfs_msg_write_i32(&msg[0], 1, dir_ino)
         tfs_msg_write_i32(&msg[0], 5, index)
-        var reply: [19]i8
+        var reply: [19]byte
         val result = ipc_send(port, &msg[0], 9, &reply[0], 19)
         if result != 0
             return -1
@@ -530,9 +530,9 @@ without building IPC messages manually.
         val port = port_lookup(&tfs_srv_name[0])
         if port < 0
             return -1
-        var msg: [1]i8
+        var msg: [1]byte
         msg[0] = TFS_CMD_SYNC
-        var reply: [1]i8
+        var reply: [1]byte
         val result = ipc_send(port, &msg[0], 1, &reply[0], 1)
         if result != 0
             return -1
@@ -542,12 +542,12 @@ without building IPC messages manually.
         val port = port_lookup(&tfs_srv_name[0])
         if port < 0
             return -1
-        var msg: [7]i8
+        var msg: [7]byte
         msg[0] = TFS_CMD_CHMOD
         tfs_msg_write_i32(&msg[0], 1, ino)
         msg[5] = (perm >> 8) & 0xFF
         msg[6] = perm & 0xFF
-        var reply: [1]i8
+        var reply: [1]byte
         val result = ipc_send(port, &msg[0], 7, &reply[0], 1)
         if result != 0
             return -1
@@ -561,11 +561,11 @@ without building IPC messages manually.
         val onl = len(old_name)
         val nnp = *byte(new_name)
         val nnl = len(new_name)
-        var msg: [128]i8
+        var msg: [128]byte
         msg[0] = TFS_CMD_RENAME
         tfs_msg_write_i32(&msg[0], 1, old_parent)
         tfs_msg_write_i32(&msg[0], 5, new_parent)
-        msg[9] = i8(onl)
+        msg[9] = byte(onl)
         var i = 0
         while i < onl
             msg[10 + i] = onp[i]
@@ -574,7 +574,7 @@ without building IPC messages manually.
         while i < nnl
             msg[10 + onl + i] = nnp[i]
             i += 1
-        var reply: [1]i8
+        var reply: [1]byte
         val result = ipc_send(port, &msg[0], 10 + onl + nnl, &reply[0], 1)
         if result != 0
             return -1
