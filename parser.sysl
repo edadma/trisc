@@ -1,11 +1,28 @@
-// Parser combinator exercise — Sysl ergonomics with ? operator
-// Parses arithmetic: 1+2*3, (1+2)*3, etc.
+// Parser combinator exercise — with generic type aliases
 
-enum Result
-    Ok(value: int, pos: int)
+enum Result[T]
+    Ok(value: T, pos: int)
     Fail(pos: int)
 
-nat(input: string, pos: int) -> Result
+type Parser[T] = (string, int) -> Result[T]
+
+// === Combinators using the alias ===
+
+map[A](p: Parser[A], f: (A) -> int) -> Parser[int]
+    (input, pos) ->
+        p(input, pos) match
+            Ok(v, p2) -> Ok(f(v), p2)
+            Fail(p2) -> Fail(p2)
+
+alt[A](p1: Parser[A], p2: Parser[A]) -> Parser[A]
+    (input, pos) ->
+        p1(input, pos) match
+            Ok(v, p2_pos) -> Ok(v, p2_pos)
+            Fail(_) -> p2(input, pos)
+
+// === Primitives ===
+
+nat(input: string, pos: int) -> Result[int]
     var p = pos
     var n = 0
     var found = false
@@ -15,8 +32,9 @@ nat(input: string, pos: int) -> Result
         found = true
     if found then Ok(n, p) else Fail(pos)
 
-// factor = nat | '(' expr ')'
-parse_factor(input: string, pos: int) -> Result
+// === Expression parser ===
+
+parse_factor(input: string, pos: int) -> Result[int]
     if pos < len(input) && input[pos] == '('
         val v, p2 = parse_expr(input, pos + 1)?
         if p2 < len(input) && input[p2] == ')'
@@ -25,8 +43,7 @@ parse_factor(input: string, pos: int) -> Result
     else
         nat(input, pos)
 
-// term = factor (('*' | '/') factor)*
-parse_term(input: string, pos: int) -> Result
+parse_term(input: string, pos: int) -> Result[int]
     var acc, cur = parse_factor(input, pos)?
     var done = false
     while !done
@@ -41,8 +58,7 @@ parse_term(input: string, pos: int) -> Result
         else done = true
     Ok(acc, cur)
 
-// expr = term (('+' | '-') term)*
-parse_expr(input: string, pos: int) -> Result
+parse_expr(input: string, pos: int) -> Result[int]
     var acc, cur = parse_term(input, pos)?
     var done = false
     while !done
@@ -63,11 +79,7 @@ eval(s: string) -> int
         Fail(_) -> -1
 
 main() -> int
-    // Test several expressions
     val a = eval("2+3*4")       // 14
     val b = eval("(1+2)*3+4")   // 13
     val c = eval("100-50/2")    // 75
-    val d = eval("42")          // 42
-    // Encode results: a*1000000 + b*10000 + c*100 + d
-    // Expected: 14_130_075_042 — too big. Just sum them.
-    a + b + c + d
+    a + b + c

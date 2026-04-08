@@ -22,6 +22,7 @@ class SyslAnalyzer:
   private val interfaceTypes = new mutable.LinkedHashMap[String, SyslType.InterfaceType]  // interface name → InterfaceType
   private val moduleNamespaces = new mutable.LinkedHashMap[String, ModuleMeta]  // short name → module meta (for qualified imports)
   private val typeAliases = new mutable.LinkedHashMap[String, TypeAST]  // alias name → target type AST
+  private val genericTypeAliases = new mutable.LinkedHashMap[String, (List[String], TypeAST)]  // name → (type params, target)
   private val methods = new mutable.LinkedHashMap[String, mutable.Set[String]]  // struct name → set of method names
   private val deprecations = new mutable.LinkedHashMap[String, Option[String]]  // name → optional reason
   private val warnedDeprecations = new mutable.HashSet[String]
@@ -419,9 +420,13 @@ class SyslAnalyzer:
             dataEnumTypes(name) = et
             for ((vname, _), idx) <- resolvedVariants.zipWithIndex do
               variantToEnum(vname) = (et, idx)
-        case TypeAliasDeclAST(name, target, _) =>
-          if typeAliases.contains(name) then throw AnalysisError(s"duplicate type alias: '$name'", decl)
-          typeAliases(name) = target
+        case TypeAliasDeclAST(name, target, tparams, _) =>
+          if typeAliases.contains(name) || genericTypeAliases.contains(name) then
+            throw AnalysisError(s"duplicate type alias: '$name'", decl)
+          if tparams.nonEmpty then
+            genericTypeAliases(name) = (tparams, target)
+          else
+            typeAliases(name) = target
         case TraitDeclAST(name, tparam, methods, _) =>
           if traits.contains(name) then throw AnalysisError(s"duplicate trait: '$name'", decl)
           // Check no duplicate method names within the trait
@@ -546,8 +551,9 @@ class SyslAnalyzer:
       case DataEnumDeclAST(name, _, _, _) =>
         TDataEnumDecl(name, dataEnumTypes(name))
 
-      case TypeAliasDeclAST(name, target, _) =>
-        TTypeAliasDecl(name, resolveType(target))
+      case TypeAliasDeclAST(name, target, tparams, _) =>
+        if tparams.nonEmpty then TTypeAliasDecl(name, VoidType) // generic alias: type-only, no codegen
+        else TTypeAliasDecl(name, resolveType(target))
 
       case fdAst @ FunDeclAST(name, params, _, body, isPrivate, _, _, attrs) =>
         scopeStack = new mutable.ArrayBuffer
@@ -609,7 +615,16 @@ class SyslAnalyzer:
   private def resolveType(t: TypeAST): SyslType = t match
     case NamedTypeAST(name, typeArgs) if typeArgs.nonEmpty =>
       val resolved = typeArgs.map(resolveType)
-      if genericStructs.contains(name) then instantiateGenericStruct(name, resolved)
+      if genericTypeAliases.contains(name) then
+        val (tparams, target) = genericTypeAliases(name)
+        if resolved.length != tparams.length then
+          throw AnalysisError(s"type alias '$name' expects ${tparams.length} type argument(s), got ${resolved.length}")
+        val savedEnv = typeEnv
+        typeEnv = typeEnv ++ tparams.zip(resolved).toMap
+        val result = resolveType(target)
+        typeEnv = savedEnv
+        result
+      else if genericStructs.contains(name) then instantiateGenericStruct(name, resolved)
       else if genericEnums.contains(name) then instantiateGenericEnum(name, resolved)
       else throw AnalysisError(s"'$name' is not a generic type")
     case NamedTypeAST(name, _) if typeEnv.contains(name) => typeEnv(name)

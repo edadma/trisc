@@ -46,7 +46,7 @@ case class StructDeclAST(name: String, fields: List[(String, TypeAST)], typePara
 case class EnumDeclAST(name: String, members: List[(String, Option[Long])], attributes: List[Attribute] = Nil) extends DeclAST
 case class DataEnumDeclAST(name: String, variants: List[EnumVariantAST], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil) extends DeclAST
 case class EnumVariantAST(name: String, fields: List[(String, TypeAST)])
-case class TypeAliasDeclAST(name: String, target: TypeAST, attributes: List[Attribute] = Nil) extends DeclAST
+case class TypeAliasDeclAST(name: String, target: TypeAST, typeParams: List[String] = Nil, attributes: List[Attribute] = Nil) extends DeclAST
 case class TraitDeclAST(name: String, typeParam: String, methods: List[TraitMethodAST], attributes: List[Attribute] = Nil) extends DeclAST
 case class TraitMethodAST(name: String, params: List[ParamAST], returnType: TypeAST, body: Option[FunBodyAST]) extends Positional
 case class ImplDeclAST(traitName: String, targetType: TypeAST, methods: List[FunDeclAST], attributes: List[Attribute] = Nil) extends DeclAST
