@@ -19,7 +19,7 @@ main() -> int
         val content = read_file(argv(i))
 
         if length(content) == 0
-            write_string(STDERR, concat("cat: ", concat(argv(i), ": No such file or directory\n")))
+            write_string(STDERR, s"cat: ${argv(i)}: No such file or directory\n")
             return 1
 
         puts(content)

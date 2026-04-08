@@ -135,7 +135,7 @@ private _ensure_init()
             heap_top = brk
             large_free = *byte(0)
 
-            for var i = 0; i < NUM_CLASSES; i++
+            for i in 0..<NUM_CLASSES
                 free_lists[i] = *byte(0)
 
             initialized = true

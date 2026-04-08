@@ -301,7 +301,7 @@ rand() -> int
 
 /* Swap n bytes between a and b. */
 swap(a: *byte, b: *byte, n: int)
-    for var i = 0; i < n; i++
+    for i in 0..<n
         val t = a[i]
 
         a[i] = b[i]
@@ -314,7 +314,7 @@ swap(a: *byte, b: *byte, n: int)
  * compar: comparison function returning <0, 0, or >0
  */
 qsort(base: *byte, nmemb: int, size: int, compar: (*byte, *byte) -> int)
-    for var i = 1; i < nmemb; i++
+    for i in 1..<nmemb
         var j = i
 
         while j > 0 && compar(base + (j - 1) * size, base + j * size) > 0

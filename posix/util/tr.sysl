@@ -20,18 +20,16 @@ main() -> int
     var n = read(STDIN, buf, 4096)
 
     while n > 0
-        for var i = 0; i < n; i++
+        for i in 0..<n
             val ch = int(buf[i])
-            var replaced = false
 
-            for var j = 0; j < length(set1); j++
+            for j in 0..<length(set1)
                 if ch == char_at(set1, j)
                     if j < length(set2)
                         buf[i] = char_at(set2, j)
                     else
                         buf[i] = char_at(set2, length(set2) - 1)
 
-                    replaced = true
                     break
 
         write(STDOUT, buf, n)

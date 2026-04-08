@@ -266,7 +266,7 @@ a group exists) or `"0"`.
             val pattern = next()
 
             /* Prepend ^ for implicit start anchor */
-            val anchored = concat("^", pattern)
+            val anchored = s"^$pattern"
             val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre(anchored)
 
             if parse_err then err("invalid regular expression")
