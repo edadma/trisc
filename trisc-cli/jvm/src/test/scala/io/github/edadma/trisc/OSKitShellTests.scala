@@ -14,9 +14,9 @@ class OSKitShellTests extends OSKitTestHelpers {
   private lazy val tfsSysl: String    = readLsysl("oskit/fs/tfs.lsysl")
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val shSysl: String     = readLsysl("oskit/apps/sh.lsysl")
-  private lazy val initSysl: String   = readLsysl("oskit/apps/init.lsysl")
 
-  // Cache the compiled+linked OS image — all shell tests use the same app source
+  // Cache the compiled+linked OS image — all shell tests use the same app source.
+  // Uses inline init (no ttytab) since sh.lsysl is the legacy shell.
   private lazy val shellLinked: TOF =
     val bootTof    = assemble(bootAsm, relocatable = true)
     val allSources = Map(
@@ -36,18 +36,26 @@ class OSKitShellTests extends OSKitTestHelpers {
       "posix/ctype/ctype"        -> posixCtypeSysl,
       "posix/stdlib/alloc"       -> posixAllocSysl,
       "oskit/apps/sh"            -> shSysl,
-      "oskit/apps/init"          -> initSysl,
       "app" ->
         """import oskit.kernel.*
 import oskit.ipc.*
-import oskit.apps.*
-          |var _n: [2]byte
+import oskit.drivers.disk.disk_server
+import oskit.servers.tfs_server
+import oskit.drivers.tty.tty_server
+import oskit.apps.shell
+import oskit.services.sleep
+          |
+          |init()
+          |    create_thread(disk_server, 0x80000, 0x80000, "disk")
+          |    sleep(5)
+          |    create_thread(tfs_server, 0x90000, 0x90000, "tfs")
+          |    create_thread(tty_server, 0xA0000, 0xA0000, "tty")
+          |    sleep(5)
+          |    create_thread(shell, 0xB0000, 0xB0000, "sh")
           |
           |kernel_main() -> int
-          |    _n[0] = 73
-          |    _n[1] = 0
           |    ipc_init()
-          |    create_thread(init, 0x90000, 0x8E000, &_n[0])
+          |    create_thread(init, 0xC0000, 0xC0000, "init")
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin,

@@ -14,6 +14,7 @@ class OSKitNshTests extends OSKitTestHelpers {
   private lazy val tfsSysl: String    = readLsysl("oskit/fs/tfs.lsysl")
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val nshSysl: String    = readLsysl("oskit/apps/nsh.lsysl")
+  private lazy val initSysl: String   = readLsysl("oskit/apps/init.lsysl")
   private lazy val loginSysl: String  = readLsysl("oskit/apps/login.lsysl")
   private lazy val debugSysl: String  = readLsysl("std/debug/debug.lsysl")
   private lazy val memSysl: String    = readLsysl("std/mem/mem.lsysl")
@@ -21,62 +22,8 @@ class OSKitNshTests extends OSKitTestHelpers {
   private lazy val hmacSysl: String   = readLsysl("std/crypto/hmac/hmac.lsysl")
   private lazy val pbkdf2Sysl: String = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
 
-  // Build OS with nsh launched directly (no login).
-  private lazy val nshLinked: TOF =
-    val bootTof    = assemble(bootAsm, relocatable = true)
-    val allSources = Map(
-      "oskit/kernel/kernel"         -> kernelSysl,
-      "oskit/services/services"     -> servicesSysl,
-      "oskit/kernel/timer"          -> timerSysl,
-      "oskit/sync/semaphore"        -> semaphoreSysl,
-      "oskit/sync/mutex"            -> mutexSysl,
-      "oskit/ipc/ipc"               -> ipcSysl,
-      "oskit/drivers/disk/disk"     -> diskSysl,
-      "oskit/drivers/kbd/keyboard"  -> kbdSysl,
-      "oskit/drivers/tty/tty"       -> ttySysl,
-      "oskit/fs/tfs"                -> tfsSysl,
-      "oskit/servers/tfs"           -> tfsSrvSysl,
-      "posix/unistd/sbrk"          -> sbrkSysl,
-      "posix/string/string"        -> posixStringSysl,
-      "posix/ctype/ctype"          -> posixCtypeSysl,
-      "posix/stdlib/alloc"         -> posixAllocSysl,
-      "oskit/apps/nsh"              -> nshSysl,
-      "app" ->
-        """import oskit.kernel.*
-import oskit.ipc.*
-import oskit.drivers.disk.disk_server
-import oskit.servers.tfs_server
-import oskit.drivers.tty.tty_server
-import oskit.apps.nsh
-import oskit.services.sleep
-          |
-          |init()
-          |    create_thread(disk_server, 0x80000, 0x80000, "disk")
-          |    sleep(5)
-          |    create_thread(tfs_server, 0x90000, 0x90000, "tfs")
-          |    create_thread(tty_server, 0xA0000, 0xA0000, "tty")
-          |    sleep(5)
-          |    create_thread(nsh, 0xB0000, 0xB0000, "nsh")
-          |
-          |kernel_main() -> int
-          |    ipc_init()
-          |    create_thread(init, 0xC0000, 0xC0000, "init")
-          |    timer_init(1000)
-          |    first_thread_ssp()
-          |""".stripMargin,
-    )
-    val driver  = new SyslDriver
-    val result  = driver.compile(allSources)
-    val codegen = new SyslTriscCodegen
-    val tofs    =
-      for unit <- result.units yield
-        val asm = codegen.generate(unit.typed)
-        assemble(asm, relocatable = true)
-    val syslTof = Linker.link(tofs, relocatable = true)
-    Linker.link(Seq(bootTof, syslTof), linkerScript, 0)
-
-  // Build OS with login → nsh.
-  private lazy val loginLinked: TOF =
+  // Shared OS source set — init reads /etc/ttytab to decide what to spawn.
+  private def buildOS(): TOF =
     val bootTof    = assemble(bootAsm, relocatable = true)
     val allSources = Map(
       "oskit/kernel/kernel"         -> kernelSysl,
@@ -99,24 +46,13 @@ import oskit.services.sleep
       "std/crypto/sha256/sha256"   -> sha256Sysl,
       "std/crypto/hmac/hmac"       -> hmacSysl,
       "std/crypto/pbkdf2/pbkdf2"   -> pbkdf2Sysl,
-      "oskit/apps/nsh"              -> nshSysl,
-      "oskit/apps/login"            -> loginSysl,
+      "oskit/apps/nsh/nsh"           -> nshSysl,
+      "oskit/apps/init/init"        -> initSysl,
+      "oskit/apps/login/login"      -> loginSysl,
       "app" ->
         """import oskit.kernel.*
 import oskit.ipc.*
-import oskit.drivers.disk.disk_server
-import oskit.servers.tfs_server
-import oskit.drivers.tty.tty_server
-import oskit.apps.login
-import oskit.services.sleep
-          |
-          |init()
-          |    create_thread(disk_server, 0x80000, 0x80000, "disk")
-          |    sleep(5)
-          |    create_thread(tfs_server, 0x90000, 0x90000, "tfs")
-          |    create_thread(tty_server, 0xA0000, 0xA0000, "tty")
-          |    sleep(5)
-          |    create_thread(login, 0xB0000, 0xB0000, "login")
+import oskit.apps.init.{init}
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -135,12 +71,16 @@ import oskit.services.sleep
     val syslTof = Linker.link(tofs, relocatable = true)
     Linker.link(Seq(bootTof, syslTof), linkerScript, 0)
 
+  private lazy val osLinked: TOF = buildOS()
+
+  private val nshTtytab = "/etc/ttytab file \"tty0 nsh\"\n"
+
   def runNsh(
       maxCycles: Int = 5200000,
       prefill: String = "\n",
       scheduledKeys: Seq[(Int, Int, Boolean, Int)] = Seq.empty,
   ): (CPU, String) =
-    val linked = nshLinked
+    val linked = osLinked
 
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
@@ -162,7 +102,7 @@ import oskit.services.sleep
       sectorSize = 512,
       intc,
       irq = 3,
-      prefill = prefill,
+      prefill = nshTtytab + prefill,
       maxInodes = 32,
     )
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)
@@ -294,6 +234,7 @@ import oskit.services.sleep
   // === Login integration tests ===
 
   private val passwdPrefill =
+    "/etc/ttytab file \"tty0 login\"\n" +
     "/root dir\n" +
     "/home dir\n" +
     "/home/ed dir\n" +
@@ -305,7 +246,7 @@ import oskit.services.sleep
       prefill: String = passwdPrefill,
       scheduledKeys: Seq[(Int, Int, Boolean, Int)] = Seq.empty,
   ): (CPU, String) =
-    val linked = loginLinked
+    val linked = osLinked
 
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {

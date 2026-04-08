@@ -23,7 +23,7 @@ Built-in commands:
 - whoami           — print uid
 - help             — list commands
 
-    module oskit.apps
+    module oskit.apps.nsh
 
     import oskit.fs.ROOT_INODE
     import oskit.services.{sleep, getuid, uptime, thread_id, get_thread_count, get_thread_state, get_thread_name, get_cpu_ticks}
