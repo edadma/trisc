@@ -10,25 +10,19 @@ for user code that needs to read or write simple numeric text.
 
 API shape:
 
-- **Parsers** take a `string` and return `(value, ok)`. The
-  boolean `ok` is `true` iff the entire input was consumed as
-  a well-formed value. This mirrors Go's `strconv.ParseInt` in
-  outcome, but uses a plain boolean rather than an error type,
-  matching the convention established by `std.utf8.decode_rune`.
-  When `ok` is `false`, the returned value is zero (or `false`
-  for `parse_bool`).
+- **Parsers** take a `string` and return `Result[T, Error]`,
+  where `T` is the parsed type (`bool`, `i64`, `int`) and
+  `Error` is from `std.errors`. On success the result is
+  `Ok(value)`; on failure it is `Err(new_error(msg))` with a
+  short message describing the failure reason. Callers use
+  `match`, `?`, `unwrap`, or `is_ok`/`is_err` to handle the
+  result.
 
 - **Formatters** return a freshly-allocated `string` containing
   the decimal representation. A second, lower-level form
   (`format_*_into`) writes into a caller-supplied buffer and
   returns the number of bytes written, which is what
   `std.builder` will call internally to avoid an allocation.
-
-When Sysl gains a `Result[T, E]` type and `std` adopts it
-uniformly, the `(value, ok)` tuple will be replaced by
-`Result[T, ParseError]`. The API shape is forward-compatible:
-callers pattern-match `ok` today and will pattern-match
-`Ok(v) | Err(e)` later.
 
 Dependencies: `std.mem` (not directly used in this file, but
 conceptually part of the layering).
@@ -37,6 +31,8 @@ conceptually part of the layering).
     module std.strconv
 
     import std.debug.{assert}
+    import std.errors.{Error, new_error}
+    import std.result.{Result, Ok, Err, is_ok, is_err, unwrap}
 
 
 Parsers
@@ -50,18 +46,18 @@ casings (`"True"`, `"TRUE"`, `"yes"`, `"no"` all reject). The
 strict set keeps this module unopinionated — callers that
 want lenient behavior can normalize their input first.
 
-    parse_bool(s: string) -> (bool, bool)
+    parse_bool(s: string) -> Result[bool, Error]
         val n = len(s)
 
         if n == 1
-            if s[0] == byte('1') then return true, true
-            if s[0] == byte('0') then return false, true
-            return false, false
+            if s[0] == byte('1') then return Ok[bool, Error](true)
+            if s[0] == byte('0') then return Ok[bool, Error](false)
+            return Err[bool, Error](new_error("invalid bool"))
 
-        if n == 4 && s[0] == byte('t') && s[1] == byte('r') && s[2] == byte('u') && s[3] == byte('e') then return true, true
-        if n == 5 && s[0] == byte('f') && s[1] == byte('a') && s[2] == byte('l') && s[3] == byte('s') && s[4] == byte('e') then return false, true
+        if n == 4 && s[0] == byte('t') && s[1] == byte('r') && s[2] == byte('u') && s[3] == byte('e') then return Ok[bool, Error](true)
+        if n == 5 && s[0] == byte('f') && s[1] == byte('a') && s[2] == byte('l') && s[3] == byte('s') && s[4] == byte('e') then return Ok[bool, Error](false)
 
-        return false, false
+        return Err[bool, Error](new_error("invalid bool"))
 
 
 ### parse_i64
@@ -76,10 +72,10 @@ magnitude). This is achieved by accumulating the value as a
 negative number: `|MIN_I64|` is one larger than `MAX_I64`, so
 negative-accumulation covers the whole range with one code path.
 
-    parse_i64(s: string) -> (i64, bool)
+    parse_i64(s: string) -> Result[i64, Error]
         val n = len(s)
 
-        if n == 0 then return 0i64, false
+        if n == 0 then return Err[i64, Error](new_error("invalid integer"))
 
         var i = 0
         var neg = false
@@ -90,7 +86,7 @@ negative-accumulation covers the whole range with one code path.
             neg = true
             i = 1
 
-        if i >= n then return 0i64, false
+        if i >= n then return Err[i64, Error](new_error("invalid integer"))
 
         // Accumulate as a negative i64 to cover MIN_I64.
         // LIMIT = MIN_I64 / 10, truncated toward zero.
@@ -100,38 +96,38 @@ negative-accumulation covers the whole range with one code path.
         while i < n
             val b = s[i]
 
-            if b < byte('0') || b > byte('9') then return 0i64, false
+            if b < byte('0') || b > byte('9') then return Err[i64, Error](new_error("invalid integer"))
 
             val d: i64 = i64(b - byte('0'))
 
-            if acc < LIMIT then return 0i64, false
-            if acc == LIMIT && d > 8i64 then return 0i64, false
+            if acc < LIMIT then return Err[i64, Error](new_error("integer overflow"))
+            if acc == LIMIT && d > 8i64 then return Err[i64, Error](new_error("integer overflow"))
 
             acc = acc * 10i64 - d
             i++
 
-        if neg then return acc, true
+        if neg then return Ok[i64, Error](acc)
 
         // Positive: negate. If acc == MIN_I64, -acc would overflow.
-        if acc < -9223372036854775807i64 then return 0i64, false
+        if acc < -9223372036854775807i64 then return Err[i64, Error](new_error("integer overflow"))
 
-        return -acc, true
+        return Ok[i64, Error](-acc)
 
 
 ### parse_int
 
 `parse_int(s)` is `parse_i64` narrowed to the 32-bit signed
-range. Values outside `[MIN_I32, MAX_I32]` fail with
-`(0, false)` even if they are valid i64 values.
+range. Values outside `[MIN_I32, MAX_I32]` return
+`Err(new_error("integer overflow"))` even if they are valid
+i64 values.
 
-    parse_int(s: string) -> (int, bool)
-        val v, ok = parse_i64(s)
-
-        if !ok then return 0, false
-        if v > 2147483647i64 then return 0, false
-        if v < -2147483648i64 then return 0, false
-
-        return int(v), true
+    parse_int(s: string) -> Result[int, Error]
+        match parse_i64(s)
+            Ok(v) ->
+                if v > 2147483647i64 then return Err[int, Error](new_error("integer overflow"))
+                if v < -2147483648i64 then return Err[int, Error](new_error("integer overflow"))
+                return Ok[int, Error](int(v))
+            Err(e) -> return Err[int, Error](e)
 
 
 Formatters
@@ -245,11 +241,11 @@ in the given base, or -1 if invalid.
 (2–36). Accepts an optional leading `+` or `-`. Digits above 9
 use letters a–z (case-insensitive).
 
-    parse_i64_base(s: string, base: int) -> (i64, bool)
+    parse_i64_base(s: string, base: int) -> Result[i64, Error]
         val n = len(s)
 
-        if n == 0 then return 0i64, false
-        if base < 2 || base > 36 then return 0i64, false
+        if n == 0 then return Err[i64, Error](new_error("invalid integer"))
+        if base < 2 || base > 36 then return Err[i64, Error](new_error("invalid base"))
 
         var i = 0
         var neg = false
@@ -260,7 +256,7 @@ use letters a–z (case-insensitive).
             neg = true
             i = 1
 
-        if i >= n then return 0i64, false
+        if i >= n then return Err[i64, Error](new_error("invalid integer"))
 
         // Accumulate as negative i64 to cover MIN_I64
         var acc: i64 = 0i64
@@ -270,22 +266,22 @@ use letters a–z (case-insensitive).
         while i < n
             val d = digit_val(s[i], base)
 
-            if d < 0 then return 0i64, false
+            if d < 0 then return Err[i64, Error](new_error("invalid digit for base"))
 
-            if acc < limit then return 0i64, false
+            if acc < limit then return Err[i64, Error](new_error("integer overflow"))
 
             acc = acc * b - i64(d)
 
             // Check for overflow after multiply-subtract
-            if acc > 0i64 then return 0i64, false
+            if acc > 0i64 then return Err[i64, Error](new_error("integer overflow"))
 
             i++
 
-        if neg then return acc, true
+        if neg then return Ok[i64, Error](acc)
 
-        if acc < -9223372036854775807i64 then return 0i64, false
+        if acc < -9223372036854775807i64 then return Err[i64, Error](new_error("integer overflow"))
 
-        return -acc, true
+        return Ok[i64, Error](-acc)
 
 
 ### parse_int_base
@@ -293,14 +289,13 @@ use letters a–z (case-insensitive).
 `parse_int_base(s, base)` is `parse_i64_base` narrowed to
 32-bit signed range.
 
-    parse_int_base(s: string, base: int) -> (int, bool)
-        val v, ok = parse_i64_base(s, base)
-
-        if !ok then return 0, false
-        if v > 2147483647i64 then return 0, false
-        if v < -2147483648i64 then return 0, false
-
-        return int(v), true
+    parse_int_base(s: string, base: int) -> Result[int, Error]
+        match parse_i64_base(s, base)
+            Ok(v) ->
+                if v > 2147483647i64 then return Err[int, Error](new_error("integer overflow"))
+                if v < -2147483648i64 then return Err[int, Error](new_error("integer overflow"))
+                return Ok[int, Error](int(v))
+            Err(e) -> return Err[int, Error](e)
 
 
 Multi-base formatting
@@ -371,14 +366,13 @@ of `n` in the given base.
 Design notes
 ------------
 
-**Why `(value, ok)` and not `Result[T, E]`.** Sum types exist
-in Sysl, and a `Result` type is eventually the right shape for
-parse errors carrying location and reason. But introducing a
-`std.result.Result[T, E]` type is a stdlib-wide commitment —
-every parser, every I/O op, every operation that can fail
-wants to use it consistently. Rather than choose it piecemeal,
-`std.strconv` uses the simpler tuple form now and migrates
-when the `Result` type is formally introduced.
+**Why `Result[T, Error]`.** Parsers return `Result[T, Error]`
+using `std.result.Result` and `std.errors.Error`. This gives
+callers pattern matching (`Ok(v)` / `Err(e)`), `?` propagation,
+`unwrap`, and `is_ok`/`is_err` — the full Rust-style error
+handling toolkit. Error messages are short strings describing
+the failure reason (`"invalid integer"`, `"integer overflow"`,
+`"invalid bool"`, etc.).
 
 **Why strict parsing.** `parse_i64(" 42 ")` fails, not succeeds.
 This module is a primitive; lenient behavior (whitespace
@@ -417,159 +411,159 @@ Tests
 
     #test
     test_parse_bool_true() -> unit
-        val v, ok = parse_bool("true")
-        assert(ok, "true recognized")
-        assert(v, "value is true")
+        val r = parse_bool("true")
+        assert(is_ok(r), "true recognized")
+        assert(unwrap(r), "value is true")
 
     #test
     test_parse_bool_false() -> unit
-        val v, ok = parse_bool("false")
-        assert(ok, "false recognized")
-        assert(!v, "value is false")
+        val r = parse_bool("false")
+        assert(is_ok(r), "false recognized")
+        assert(!unwrap(r), "value is false")
 
     #test
     test_parse_bool_one() -> unit
-        val v, ok = parse_bool("1")
-        assert(ok, "1 recognized")
-        assert(v, "value is true")
+        val r = parse_bool("1")
+        assert(is_ok(r), "1 recognized")
+        assert(unwrap(r), "value is true")
 
     #test
     test_parse_bool_zero() -> unit
-        val v, ok = parse_bool("0")
-        assert(ok, "0 recognized")
-        assert(!v, "value is false")
+        val r = parse_bool("0")
+        assert(is_ok(r), "0 recognized")
+        assert(!unwrap(r), "value is false")
 
     #test
     test_parse_bool_rejects_caps() -> unit
-        val _, ok1 = parse_bool("True")
-        assert(!ok1, "True rejected")
+        val r1 = parse_bool("True")
+        assert(is_err(r1), "True rejected")
 
-        val _, ok2 = parse_bool("TRUE")
-        assert(!ok2, "TRUE rejected")
+        val r2 = parse_bool("TRUE")
+        assert(is_err(r2), "TRUE rejected")
 
     #test
     test_parse_bool_rejects_yes_no() -> unit
-        val _, ok1 = parse_bool("yes")
-        assert(!ok1, "yes rejected")
+        val r1 = parse_bool("yes")
+        assert(is_err(r1), "yes rejected")
 
-        val _, ok2 = parse_bool("no")
-        assert(!ok2, "no rejected")
+        val r2 = parse_bool("no")
+        assert(is_err(r2), "no rejected")
 
     #test
     test_parse_bool_rejects_whitespace() -> unit
-        val _, ok = parse_bool(" true")
-        assert(!ok, "leading space rejected")
+        val r = parse_bool(" true")
+        assert(is_err(r), "leading space rejected")
 
     #test
     test_parse_bool_rejects_empty() -> unit
-        val _, ok = parse_bool("")
-        assert(!ok, "empty rejected")
+        val r = parse_bool("")
+        assert(is_err(r), "empty rejected")
 
 
 ### parse_i64
 
     #test
     test_parse_i64_zero() -> unit
-        val v, ok = parse_i64("0")
-        assert(ok, "zero parses")
-        assert(v == 0i64, "value")
+        val r = parse_i64("0")
+        assert(is_ok(r), "zero parses")
+        assert(unwrap(r) == 0i64, "value")
 
     #test
     test_parse_i64_positive() -> unit
-        val v, ok = parse_i64("42")
-        assert(ok, "parses")
-        assert(v == 42i64, "value")
+        val r = parse_i64("42")
+        assert(is_ok(r), "parses")
+        assert(unwrap(r) == 42i64, "value")
 
     #test
     test_parse_i64_explicit_plus() -> unit
-        val v, ok = parse_i64("+123")
-        assert(ok, "plus sign accepted")
-        assert(v == 123i64, "value")
+        val r = parse_i64("+123")
+        assert(is_ok(r), "plus sign accepted")
+        assert(unwrap(r) == 123i64, "value")
 
     #test
     test_parse_i64_negative() -> unit
-        val v, ok = parse_i64("-42")
-        assert(ok, "negative parses")
-        assert(v == -42i64, "value")
+        val r = parse_i64("-42")
+        assert(is_ok(r), "negative parses")
+        assert(unwrap(r) == -42i64, "value")
 
     #test
     test_parse_i64_max() -> unit
-        val v, ok = parse_i64("9223372036854775807")
-        assert(ok, "MAX_I64 parses")
-        assert(v == 9223372036854775807i64, "value")
+        val r = parse_i64("9223372036854775807")
+        assert(is_ok(r), "MAX_I64 parses")
+        assert(unwrap(r) == 9223372036854775807i64, "value")
 
     #test
     test_parse_i64_min() -> unit
-        val v, ok = parse_i64("-9223372036854775808")
-        assert(ok, "MIN_I64 parses (edge case)")
-        assert(v == -9223372036854775807i64 - 1i64, "value")
+        val r = parse_i64("-9223372036854775808")
+        assert(is_ok(r), "MIN_I64 parses (edge case)")
+        assert(unwrap(r) == -9223372036854775807i64 - 1i64, "value")
 
     #test
     test_parse_i64_overflow_positive() -> unit
-        val _, ok = parse_i64("9223372036854775808")
-        assert(!ok, "MAX_I64+1 rejects")
+        val r = parse_i64("9223372036854775808")
+        assert(is_err(r), "MAX_I64+1 rejects")
 
     #test
     test_parse_i64_overflow_negative() -> unit
-        val _, ok = parse_i64("-9223372036854775809")
-        assert(!ok, "MIN_I64-1 rejects")
+        val r = parse_i64("-9223372036854775809")
+        assert(is_err(r), "MIN_I64-1 rejects")
 
     #test
     test_parse_i64_rejects_empty() -> unit
-        val _, ok = parse_i64("")
-        assert(!ok, "empty rejects")
+        val r = parse_i64("")
+        assert(is_err(r), "empty rejects")
 
     #test
     test_parse_i64_rejects_sign_only() -> unit
-        val _, ok1 = parse_i64("+")
-        assert(!ok1, "lone plus")
+        val r1 = parse_i64("+")
+        assert(is_err(r1), "lone plus")
 
-        val _, ok2 = parse_i64("-")
-        assert(!ok2, "lone minus")
+        val r2 = parse_i64("-")
+        assert(is_err(r2), "lone minus")
 
     #test
     test_parse_i64_rejects_non_digit() -> unit
-        val _, ok1 = parse_i64("12x3")
-        assert(!ok1, "embedded non-digit")
+        val r1 = parse_i64("12x3")
+        assert(is_err(r1), "embedded non-digit")
 
-        val _, ok2 = parse_i64("abc")
-        assert(!ok2, "all letters")
+        val r2 = parse_i64("abc")
+        assert(is_err(r2), "all letters")
 
     #test
     test_parse_i64_rejects_trailing_garbage() -> unit
-        val _, ok = parse_i64("42 ")
-        assert(!ok, "trailing space")
+        val r = parse_i64("42 ")
+        assert(is_err(r), "trailing space")
 
     #test
     test_parse_i64_rejects_leading_zeros_are_ok() -> unit
-        val v, ok = parse_i64("007")
-        assert(ok, "leading zeros permitted")
-        assert(v == 7i64, "value")
+        val r = parse_i64("007")
+        assert(is_ok(r), "leading zeros permitted")
+        assert(unwrap(r) == 7i64, "value")
 
 
 ### parse_int
 
     #test
     test_parse_int_basic() -> unit
-        val v, ok = parse_int("100")
-        assert(ok, "parses")
-        assert(v == 100, "value")
+        val r = parse_int("100")
+        assert(is_ok(r), "parses")
+        assert(unwrap(r) == 100, "value")
 
     #test
     test_parse_int_range_check_positive() -> unit
-        val _, ok = parse_int("2147483648")
-        assert(!ok, "MAX_I32+1 rejects")
+        val r = parse_int("2147483648")
+        assert(is_err(r), "MAX_I32+1 rejects")
 
     #test
     test_parse_int_range_check_negative() -> unit
-        val _, ok = parse_int("-2147483649")
-        assert(!ok, "MIN_I32-1 rejects")
+        val r = parse_int("-2147483649")
+        assert(is_err(r), "MIN_I32-1 rejects")
 
     #test
     test_parse_int_max() -> unit
-        val v, ok = parse_int("2147483647")
-        assert(ok, "MAX_I32 parses")
-        assert(v == 2147483647, "value")
+        val r = parse_int("2147483647")
+        assert(is_ok(r), "MAX_I32 parses")
+        assert(unwrap(r) == 2147483647, "value")
 
 
 ### format_bool
@@ -617,108 +611,108 @@ Tests
     #test
     test_roundtrip_i64_positive() -> unit
         val n = 1234567890i64
-        val v, ok = parse_i64(format_i64(n))
-        assert(ok, "parses back")
-        assert(v == n, "value preserved")
+        val r = parse_i64(format_i64(n))
+        assert(is_ok(r), "parses back")
+        assert(unwrap(r) == n, "value preserved")
 
     #test
     test_roundtrip_i64_negative() -> unit
         val n = -9876543210i64
-        val v, ok = parse_i64(format_i64(n))
-        assert(ok, "parses back")
-        assert(v == n, "value preserved")
+        val r = parse_i64(format_i64(n))
+        assert(is_ok(r), "parses back")
+        assert(unwrap(r) == n, "value preserved")
 
     #test
     test_roundtrip_i64_min() -> unit
         val n = -9223372036854775807i64 - 1i64
-        val v, ok = parse_i64(format_i64(n))
-        assert(ok, "MIN_I64 round-trips")
-        assert(v == n, "value preserved")
+        val r = parse_i64(format_i64(n))
+        assert(is_ok(r), "MIN_I64 round-trips")
+        assert(unwrap(r) == n, "value preserved")
 
     #test
     test_roundtrip_bool_true() -> unit
-        val v, ok = parse_bool(format_bool(true))
-        assert(ok, "parses back")
-        assert(v, "value preserved")
+        val r = parse_bool(format_bool(true))
+        assert(is_ok(r), "parses back")
+        assert(unwrap(r), "value preserved")
 
     #test
     test_roundtrip_bool_false() -> unit
-        val v, ok = parse_bool(format_bool(false))
-        assert(ok, "parses back")
-        assert(!v, "value preserved")
+        val r = parse_bool(format_bool(false))
+        assert(is_ok(r), "parses back")
+        assert(!unwrap(r), "value preserved")
 
 
 ### parse_i64_base
 
     #test
     test_parse_hex_basic() -> unit
-        val v, ok = parse_i64_base("ff", 16)
-        assert(ok, "parses")
-        assert(v == 255i64, "value")
+        val r = parse_i64_base("ff", 16)
+        assert(is_ok(r), "parses")
+        assert(unwrap(r) == 255i64, "value")
 
     #test
     test_parse_hex_uppercase() -> unit
-        val v, ok = parse_i64_base("FF", 16)
-        assert(ok, "uppercase accepted")
-        assert(v == 255i64, "value")
+        val r = parse_i64_base("FF", 16)
+        assert(is_ok(r), "uppercase accepted")
+        assert(unwrap(r) == 255i64, "value")
 
     #test
     test_parse_hex_mixed_case() -> unit
-        val v, ok = parse_i64_base("DeAdBeEf", 16)
-        assert(ok, "mixed case")
-        assert(v == 3735928559i64, "value")
+        val r = parse_i64_base("DeAdBeEf", 16)
+        assert(is_ok(r), "mixed case")
+        assert(unwrap(r) == 3735928559i64, "value")
 
     #test
     test_parse_hex_zero() -> unit
-        val v, ok = parse_i64_base("0", 16)
-        assert(ok, "parses")
-        assert(v == 0i64, "value")
+        val r = parse_i64_base("0", 16)
+        assert(is_ok(r), "parses")
+        assert(unwrap(r) == 0i64, "value")
 
     #test
     test_parse_hex_negative() -> unit
-        val v, ok = parse_i64_base("-1a", 16)
-        assert(ok, "negative hex")
-        assert(v == -26i64, "value")
+        val r = parse_i64_base("-1a", 16)
+        assert(is_ok(r), "negative hex")
+        assert(unwrap(r) == -26i64, "value")
 
     #test
     test_parse_binary() -> unit
-        val v, ok = parse_i64_base("11010", 2)
-        assert(ok, "binary")
-        assert(v == 26i64, "value")
+        val r = parse_i64_base("11010", 2)
+        assert(is_ok(r), "binary")
+        assert(unwrap(r) == 26i64, "value")
 
     #test
     test_parse_octal() -> unit
-        val v, ok = parse_i64_base("777", 8)
-        assert(ok, "octal")
-        assert(v == 511i64, "value")
+        val r = parse_i64_base("777", 8)
+        assert(is_ok(r), "octal")
+        assert(unwrap(r) == 511i64, "value")
 
     #test
     test_parse_base36() -> unit
-        val v, ok = parse_i64_base("zz", 36)
-        assert(ok, "base36")
-        assert(v == 1295i64, "value")
+        val r = parse_i64_base("zz", 36)
+        assert(is_ok(r), "base36")
+        assert(unwrap(r) == 1295i64, "value")
 
     #test
     test_parse_hex_rejects_invalid_digit() -> unit
-        val _, ok = parse_i64_base("fg", 16)
-        assert(!ok, "g invalid in base 16")
+        val r = parse_i64_base("fg", 16)
+        assert(is_err(r), "g invalid in base 16")
 
     #test
     test_parse_binary_rejects_2() -> unit
-        val _, ok = parse_i64_base("102", 2)
-        assert(!ok, "2 invalid in base 2")
+        val r = parse_i64_base("102", 2)
+        assert(is_err(r), "2 invalid in base 2")
 
     #test
     test_parse_base_rejects_invalid_base() -> unit
-        val _, ok1 = parse_i64_base("0", 1)
-        assert(!ok1, "base 1 rejected")
-        val _, ok2 = parse_i64_base("0", 37)
-        assert(!ok2, "base 37 rejected")
+        val r1 = parse_i64_base("0", 1)
+        assert(is_err(r1), "base 1 rejected")
+        val r2 = parse_i64_base("0", 37)
+        assert(is_err(r2), "base 37 rejected")
 
     #test
     test_parse_hex_empty() -> unit
-        val _, ok = parse_i64_base("", 16)
-        assert(!ok, "empty rejected")
+        val r = parse_i64_base("", 16)
+        assert(is_err(r), "empty rejected")
 
 
 ### format_i64_base
@@ -757,20 +751,20 @@ Tests
     #test
     test_roundtrip_hex() -> unit
         val n = 48879i64
-        val v, ok = parse_i64_base(format_i64_base(n, 16), 16)
-        assert(ok, "parses back")
-        assert(v == n, "value preserved")
+        val r = parse_i64_base(format_i64_base(n, 16), 16)
+        assert(is_ok(r), "parses back")
+        assert(unwrap(r) == n, "value preserved")
 
     #test
     test_roundtrip_binary() -> unit
         val n = 12345i64
-        val v, ok = parse_i64_base(format_i64_base(n, 2), 2)
-        assert(ok, "parses back")
-        assert(v == n, "value preserved")
+        val r = parse_i64_base(format_i64_base(n, 2), 2)
+        assert(is_ok(r), "parses back")
+        assert(unwrap(r) == n, "value preserved")
 
     #test
     test_roundtrip_octal() -> unit
         val n = -4096i64
-        val v, ok = parse_i64_base(format_i64_base(n, 8), 8)
-        assert(ok, "parses back")
-        assert(v == n, "value preserved")
+        val r = parse_i64_base(format_i64_base(n, 8), 8)
+        assert(is_ok(r), "parses back")
+        assert(unwrap(r) == n, "value preserved")

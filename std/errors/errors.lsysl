@@ -1,0 +1,184 @@
+std.errors — Error creation and representation
+===============================================
+
+The `std.errors` module provides a simple, standard error
+type for use as the `E` in `Result[T, E]`. It pairs with
+`std.result` to give Sysl a lightweight, Go-inspired error
+story: errors are values carrying a human-readable message,
+created with `new_error`, compared with `is`, and inspected
+with `error_msg`.
+
+This module deliberately stays minimal. It defines one enum,
+three functions, and a handful of sentinel constructors for
+common error conditions. Richer error types (with context,
+source chains, error codes) belong in domain-specific modules
+that can define their own enums — `Result[T, E]` is generic
+over `E` for exactly this reason.
+
+Dependencies: `std.debug` (for test assertions only).
+
+
+    module std.errors
+
+    import std.debug.{assert}
+
+
+Error type
+----------
+
+A single-variant enum wrapping a message string. Using an
+enum (rather than a bare struct) keeps the door open for
+future variants — e.g. `Wrapped(msg: string, cause: Error)`
+for error chaining — without breaking existing code.
+
+    enum Error
+        Err(msg: string)
+
+
+Constructor
+-----------
+
+`new_error(msg)` creates an `Error` from a message string.
+All error creation goes through this function so the
+representation can change without touching call sites.
+
+    new_error(msg: string) -> Error
+        Err(msg)
+
+
+Accessor
+--------
+
+`error_msg(e)` extracts the message from an `Error`.
+
+    error_msg(e: Error) -> string
+        e match
+            Err(m) -> m
+
+
+Comparison
+----------
+
+`is(a, b)` compares two errors by message. Two errors are
+considered the same if they carry the same message string.
+This is identity-by-value, not identity-by-reference — it
+matches Go's `errors.Is` semantics for simple string errors.
+
+    is(a: Error, b: Error) -> bool
+        error_msg(a) == error_msg(b)
+
+
+Sentinel error constructors
+----------------------------
+
+Common error conditions as functions. Each call creates a
+fresh `Error` value. These are functions rather than
+module-level `val` constants because Sysl does not support
+module-level val expressions that call functions.
+
+    err_eof() -> Error
+        new_error("EOF")
+
+    err_not_found() -> Error
+        new_error("not found")
+
+    err_permission() -> Error
+        new_error("permission denied")
+
+    err_invalid() -> Error
+        new_error("invalid argument")
+
+    err_exists() -> Error
+        new_error("already exists")
+
+
+Tests
+=====
+
+### Create and extract message
+
+    #test
+    test_new_error_message() -> unit
+        val e = new_error("something failed")
+        assert(error_msg(e) == "something failed", "message preserved")
+
+
+### Compare equal errors (same message)
+
+    #test
+    test_is_same_message() -> unit
+        val a = new_error("timeout")
+        val b = new_error("timeout")
+        assert(is(a, b), "same message means same error")
+
+
+### Compare different errors
+
+    #test
+    test_is_different_message() -> unit
+        val a = new_error("timeout")
+        val b = new_error("not found")
+        assert(!is(a, b), "different messages are different errors")
+
+
+### Sentinel constructors return correct messages
+
+    #test
+    test_sentinel_eof() -> unit
+        assert(error_msg(err_eof()) == "EOF", "EOF sentinel")
+
+    #test
+    test_sentinel_not_found() -> unit
+        assert(error_msg(err_not_found()) == "not found", "not found sentinel")
+
+    #test
+    test_sentinel_permission() -> unit
+        assert(error_msg(err_permission()) == "permission denied", "permission sentinel")
+
+    #test
+    test_sentinel_invalid() -> unit
+        assert(error_msg(err_invalid()) == "invalid argument", "invalid sentinel")
+
+    #test
+    test_sentinel_exists() -> unit
+        assert(error_msg(err_exists()) == "already exists", "exists sentinel")
+
+
+### Sentinel comparison via is()
+
+    #test
+    test_sentinel_is_match() -> unit
+        val e = err_eof()
+        assert(is(e, err_eof()), "sentinel matches fresh copy")
+        assert(!is(e, err_not_found()), "different sentinels differ")
+
+
+Design notes
+------------
+
+**Message-based identity.** `is` compares by message string,
+not by reference. This is the simplest correct semantics for
+an immutable value type. If future needs require
+reference-based identity (e.g. for wrapped/chained errors
+where two errors share a message but differ in cause), `is`
+can be extended without breaking existing callers.
+
+**Sentinel functions, not constants.** Sysl does not support
+module-level `val` expressions that call functions (`val
+ERR_EOF = new_error("EOF")` would fail). The sentinel
+functions (`err_eof()`, etc.) are the idiomatic workaround.
+Callers write `err_eof()` instead of `ERR_EOF` — one extra
+pair of parentheses, no other cost.
+
+**Pairs with std.result.** The intended usage pattern is
+`Result[T, Error]` for functions that can fail with a
+message. Modules with richer failure modes should define
+their own error enum (as `std.result`'s tests demonstrate
+with `ParseErr`) and use `Result[T, MyError]` instead.
+
+**Single-variant enum.** `Error` has only `Err(msg)` today.
+The enum wrapper (rather than a bare `string` typedef) lets
+future versions add variants like `Wrapped(msg, cause)` for
+error chaining without breaking the match arms of existing
+code — new variants cause exhaustiveness errors, guiding
+callers to handle them.

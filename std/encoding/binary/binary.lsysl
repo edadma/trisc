@@ -146,6 +146,58 @@ Write a big-endian u64 to bytes 0-7.
         b[7] = byte(v)
 
 
+Offset Variants
+================
+
+Read/write at an arbitrary byte offset within a slice.
+
+
+### u16_le_at
+
+Read a little-endian u16 starting at byte `off`.
+
+    u16_le_at(b: []byte, off: int) -> int
+        return int(b[off]) | (int(b[off + 1]) << 8)
+
+
+### u32_le_at
+
+Read a little-endian u32 starting at byte `off`.
+
+    u32_le_at(b: []byte, off: int) -> u32
+        return u32(b[off]) | (u32(b[off + 1]) << 8u32) | (u32(b[off + 2]) << 16u32) | (u32(b[off + 3]) << 24u32)
+
+
+### u32_be_at
+
+Read a big-endian u32 starting at byte `off`.
+
+    u32_be_at(b: []byte, off: int) -> u32
+        return (u32(b[off]) << 24u32) | (u32(b[off + 1]) << 16u32) | (u32(b[off + 2]) << 8u32) | u32(b[off + 3])
+
+
+### put_u32_le_at
+
+Write a little-endian u32 starting at byte `off`.
+
+    put_u32_le_at(b: []byte, off: int, v: u32) -> unit
+        b[off] = byte(v)
+        b[off + 1] = byte(v >> 8u32)
+        b[off + 2] = byte(v >> 16u32)
+        b[off + 3] = byte(v >> 24u32)
+
+
+### put_u32_be_at
+
+Write a big-endian u32 starting at byte `off`.
+
+    put_u32_be_at(b: []byte, off: int, v: u32) -> unit
+        b[off] = byte(v >> 24u32)
+        b[off + 1] = byte(v >> 16u32)
+        b[off + 2] = byte(v >> 8u32)
+        b[off + 3] = byte(v)
+
+
 Tests
 =====
 

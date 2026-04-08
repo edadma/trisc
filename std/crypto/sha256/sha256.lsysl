@@ -10,6 +10,8 @@ Dependencies: none.
 
     module std.crypto.sha256
 
+    import std.encoding.binary.{u32_be_at, put_u32_be_at}
+
 
 Constants
 ---------
@@ -66,8 +68,7 @@ Process a single 512-bit (64-byte) block, updating the
 
         // Load first 16 words (big-endian)
         for i in 0..<16
-            val j = off + i * 4
-            w[i] = (u32(block[j]) << 24u32) | (u32(block[j + 1]) << 16u32) | (u32(block[j + 2]) << 8u32) | u32(block[j + 3])
+            w[i] = u32_be_at(block, off + i * 4)
 
         // Expand to 64 words
         for i in 16..<64
@@ -174,11 +175,7 @@ digest to `out`.
 
         // Output state as big-endian bytes
         for i in 0..<8
-            val v = state[i]
-            out[i * 4]     = byte(v >> 24u32)
-            out[i * 4 + 1] = byte(v >> 16u32)
-            out[i * 4 + 2] = byte(v >> 8u32)
-            out[i * 4 + 3] = byte(v)
+            put_u32_be_at(out, i * 4, state[i])
 
 
 sha256_hw — hardware-accelerated path
@@ -198,8 +195,7 @@ MMIO writes (16 words instead of 64 bytes).
         val base = SHA_BASE
         // Write 16 big-endian words to SHA_TEXT[0..15]
         for i in 0..<16
-            val j = off + i * 4
-            val w = (u32(block[j]) << 24u32) | (u32(block[j + 1]) << 16u32) | (u32(block[j + 2]) << 8u32) | u32(block[j + 3])
+            val w = u32_be_at(block, off + i * 4)
             var p: *u32 = *u32(base + i * 4)
             *p = w
         // Trigger compression
@@ -217,11 +213,7 @@ registers into an output buffer.
         val base = SHA_BASE
         for i in 0..<8
             var p: *u32 = *u32(base + i * 4)
-            val v = *p
-            out[i * 4]     = byte(v >> 24u32)
-            out[i * 4 + 1] = byte(v >> 16u32)
-            out[i * 4 + 2] = byte(v >> 8u32)
-            out[i * 4 + 3] = byte(v)
+            put_u32_be_at(out, i * 4, *p)
 
 `sha256_hw(data, out)` — same interface as `sha256()` but
 uses the MMIO accelerator for the compression function.
