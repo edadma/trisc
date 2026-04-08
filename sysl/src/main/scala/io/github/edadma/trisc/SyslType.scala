@@ -47,7 +47,7 @@ enum SyslType:
     case BoolType => 1
     case VoidType => 0
     case PtrType(_) => 8
-    case FuncType(_, _) => 8
+    case FuncType(_, _) => 16       // {func_ptr(8), env_ptr(8)} — closure-ready fat pointer
     case ArrayType(elem, size) => elem.sizeOf * size
     case DoubleType => 8
     case StringType => 16        // ptr(8) + len(8) — Go-style fat pointer
