@@ -215,6 +215,159 @@ a freshly-allocated `string`.
     format_int(n: int) -> string = format_i64(i64(n))
 
 
+Multi-base parsing
+------------------
+
+### digit_val
+
+`digit_val(b, base)` returns the numeric value of byte `b`
+in the given base, or -1 if invalid.
+
+    digit_val(b: byte, base: int) -> int
+        if b >= byte('0') && b <= byte('9')
+            val v = int(b - byte('0'))
+            if v < base then return v
+            return -1
+        if b >= byte('a') && b <= byte('z')
+            val v = 10 + int(b - byte('a'))
+            if v < base then return v
+            return -1
+        if b >= byte('A') && b <= byte('Z')
+            val v = 10 + int(b - byte('A'))
+            if v < base then return v
+            return -1
+        return -1
+
+
+### parse_i64_base
+
+`parse_i64_base(s, base)` parses an integer in the given base
+(2–36). Accepts an optional leading `+` or `-`. Digits above 9
+use letters a–z (case-insensitive).
+
+    parse_i64_base(s: string, base: int) -> (i64, bool)
+        val n = len(s)
+
+        if n == 0 then return 0i64, false
+        if base < 2 || base > 36 then return 0i64, false
+
+        var i = 0
+        var neg = false
+
+        if s[0] == byte('+')
+            i = 1
+        else if s[0] == byte('-')
+            neg = true
+            i = 1
+
+        if i >= n then return 0i64, false
+
+        // Accumulate as negative i64 to cover MIN_I64
+        var acc: i64 = 0i64
+        val b: i64 = i64(base)
+        val limit: i64 = -9223372036854775807i64 / b - 1i64
+
+        while i < n
+            val d = digit_val(s[i], base)
+
+            if d < 0 then return 0i64, false
+
+            if acc < limit then return 0i64, false
+
+            acc = acc * b - i64(d)
+
+            // Check for overflow after multiply-subtract
+            if acc > 0i64 then return 0i64, false
+
+            i++
+
+        if neg then return acc, true
+
+        if acc < -9223372036854775807i64 then return 0i64, false
+
+        return -acc, true
+
+
+### parse_int_base
+
+`parse_int_base(s, base)` is `parse_i64_base` narrowed to
+32-bit signed range.
+
+    parse_int_base(s: string, base: int) -> (int, bool)
+        val v, ok = parse_i64_base(s, base)
+
+        if !ok then return 0, false
+        if v > 2147483647i64 then return 0, false
+        if v < -2147483648i64 then return 0, false
+
+        return int(v), true
+
+
+Multi-base formatting
+---------------------
+
+### format_i64_base_into
+
+`format_i64_base_into(dst, n, base)` writes the representation
+of `n` in the given base (2–36) into `dst`. Digits above 9 use
+lowercase letters a–z. Returns the number of bytes written.
+
+    format_i64_base_into(dst: []byte, n: i64, base: int) -> int
+        val cap = len(dst)
+
+        if cap < 1 then return 0
+        if base < 2 || base > 36 then return 0
+
+        val b: i64 = i64(base)
+        val digits: [36]byte = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+        var x: i64 = n
+        if x > 0i64 then x = -x
+
+        val tmp = new [65]byte
+        var i = 65
+
+        if x == 0i64
+            i--
+            tmp[i] = byte('0')
+        else
+            while x < 0i64
+                i--
+                val d: i64 = -(x - (x / b) * b)
+                tmp[i] = digits[int(d)]
+                x = x / b
+
+        if n < 0i64
+            i--
+            tmp[i] = byte('-')
+
+        val written = 65 - i
+
+        if written > cap then return 0
+
+        for j in 0..<written do dst[j] = tmp[i + j]
+
+        written
+
+
+### format_i64_base
+
+`format_i64_base(n, base)` returns the string representation
+of `n` in the given base.
+
+    format_i64_base(n: i64, base: int) -> string
+        val buf = new [65]byte
+        val written = format_i64_base_into(buf[:], n, base)
+        string(buf[:written])
+
+
+### format_int_base
+
+`format_int_base(n, base)` is `format_i64_base` on an `int`.
+
+    format_int_base(n: int, base: int) -> string = format_i64_base(i64(n), base)
+
+
 Design notes
 ------------
 
@@ -239,10 +392,10 @@ both pays for itself immediately. Rejecting `"True"`/`"TRUE"`
 is deliberate: locale-dependent or case-insensitive matching
 belongs outside the primitive.
 
-**No radix support yet.** Hex, octal, and binary parsing will
-appear as `parse_i64_radix(s, base)` when needed. Not planning
-for Go's `ParseInt(s, base, bitSize)` surface — base is
-usually known at compile time, and callers can wrap as needed.
+**Multi-base support.** `parse_i64_base(s, base)` and
+`format_i64_base(n, base)` support bases 2–36, matching
+Go's `strconv.ParseInt` and `strconv.FormatInt`. Digits
+above 9 use lowercase a–z; parsing accepts both cases.
 
 **No floating-point yet.** `parse_f64` / `format_f64` require
 IEEE 754 rounding, shortest-representation algorithms
@@ -493,3 +646,131 @@ Tests
         val v, ok = parse_bool(format_bool(false))
         assert(ok, "parses back")
         assert(!v, "value preserved")
+
+
+### parse_i64_base
+
+    #test
+    test_parse_hex_basic() -> void
+        val v, ok = parse_i64_base("ff", 16)
+        assert(ok, "parses")
+        assert(v == 255i64, "value")
+
+    #test
+    test_parse_hex_uppercase() -> void
+        val v, ok = parse_i64_base("FF", 16)
+        assert(ok, "uppercase accepted")
+        assert(v == 255i64, "value")
+
+    #test
+    test_parse_hex_mixed_case() -> void
+        val v, ok = parse_i64_base("DeAdBeEf", 16)
+        assert(ok, "mixed case")
+        assert(v == 3735928559i64, "value")
+
+    #test
+    test_parse_hex_zero() -> void
+        val v, ok = parse_i64_base("0", 16)
+        assert(ok, "parses")
+        assert(v == 0i64, "value")
+
+    #test
+    test_parse_hex_negative() -> void
+        val v, ok = parse_i64_base("-1a", 16)
+        assert(ok, "negative hex")
+        assert(v == -26i64, "value")
+
+    #test
+    test_parse_binary() -> void
+        val v, ok = parse_i64_base("11010", 2)
+        assert(ok, "binary")
+        assert(v == 26i64, "value")
+
+    #test
+    test_parse_octal() -> void
+        val v, ok = parse_i64_base("777", 8)
+        assert(ok, "octal")
+        assert(v == 511i64, "value")
+
+    #test
+    test_parse_base36() -> void
+        val v, ok = parse_i64_base("zz", 36)
+        assert(ok, "base36")
+        assert(v == 1295i64, "value")
+
+    #test
+    test_parse_hex_rejects_invalid_digit() -> void
+        val _, ok = parse_i64_base("fg", 16)
+        assert(!ok, "g invalid in base 16")
+
+    #test
+    test_parse_binary_rejects_2() -> void
+        val _, ok = parse_i64_base("102", 2)
+        assert(!ok, "2 invalid in base 2")
+
+    #test
+    test_parse_base_rejects_invalid_base() -> void
+        val _, ok1 = parse_i64_base("0", 1)
+        assert(!ok1, "base 1 rejected")
+        val _, ok2 = parse_i64_base("0", 37)
+        assert(!ok2, "base 37 rejected")
+
+    #test
+    test_parse_hex_empty() -> void
+        val _, ok = parse_i64_base("", 16)
+        assert(!ok, "empty rejected")
+
+
+### format_i64_base
+
+    #test
+    test_format_hex_basic() -> void
+        assert(format_i64_base(255i64, 16) == "ff", "ff")
+
+    #test
+    test_format_hex_zero() -> void
+        assert(format_i64_base(0i64, 16) == "0", "zero")
+
+    #test
+    test_format_hex_negative() -> void
+        assert(format_i64_base(-26i64, 16) == "-1a", "negative hex")
+
+    #test
+    test_format_binary() -> void
+        assert(format_i64_base(26i64, 2) == "11010", "binary")
+
+    #test
+    test_format_octal() -> void
+        assert(format_i64_base(511i64, 8) == "777", "octal")
+
+    #test
+    test_format_base36() -> void
+        assert(format_i64_base(1295i64, 36) == "zz", "base36")
+
+    #test
+    test_format_hex_large() -> void
+        assert(format_i64_base(3735928559i64, 16) == "deadbeef", "deadbeef")
+
+
+### round-trips (multi-base)
+
+    #test
+    test_roundtrip_hex() -> void
+        val n = 48879i64
+        val v, ok = parse_i64_base(format_i64_base(n, 16), 16)
+        assert(ok, "parses back")
+        assert(v == n, "value preserved")
+
+    #test
+    test_roundtrip_binary() -> void
+        val n = 12345i64
+        val v, ok = parse_i64_base(format_i64_base(n, 2), 2)
+        assert(ok, "parses back")
+        assert(v == n, "value preserved")
+
+    #test
+    test_roundtrip_octal() -> void
+        val n = -4096i64
+        val v, ok = parse_i64_base(format_i64_base(n, 8), 8)
+        assert(ok, "parses back")
+        assert(v == n, "value preserved")
