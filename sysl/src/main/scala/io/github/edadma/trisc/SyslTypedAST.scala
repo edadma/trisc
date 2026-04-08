@@ -15,6 +15,7 @@ case class TStructDecl(name: String, fields: List[(String, SyslType)]) extends T
 case class TEnumDecl(name: String, members: List[(String, Long)]) extends TDecl
 case class TDataEnumDecl(name: String, enumType: SyslType.EnumType) extends TDecl
 case class TTypeAliasDecl(name: String, target: SyslType) extends TDecl
+case class TInterfaceDecl(name: String, ifaceType: SyslType.InterfaceType) extends TDecl
 
 case class TParam(name: String, typ: SyslType)
 
@@ -104,4 +105,10 @@ case class TStringFromSlice(slice: TExpr, typ: SyslType) extends TExpr
 case class TStr(expr: TExpr) extends TExpr { def typ: SyslType = SyslType.StringType }
 case class TClosure(params: List[TParam], returnType: SyslType, body: TFunBody, captures: List[(String, SyslType)]) extends TExpr {
   def typ: SyslType = SyslType.FuncType(params.map(_.typ), returnType)
+}
+case class TInterfaceBox(expr: TExpr, iface: SyslType.InterfaceType) extends TExpr {
+  def typ: SyslType = iface
+}
+case class TInterfaceDispatch(ifaceVal: TExpr, methodIndex: Int, args: List[TExpr], retType: SyslType) extends TExpr {
+  def typ: SyslType = retType
 }
