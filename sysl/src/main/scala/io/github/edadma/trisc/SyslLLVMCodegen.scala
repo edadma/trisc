@@ -342,7 +342,7 @@ class SyslLLVMCodegen:
           case SyslType.RefType(SyslType.SliceType(elem)) => elem
           case _ => SyslType.IntType(8) // fallback for string indexing
         val elt = llvmType(elemType)
-        val elemSize = elemType.sizeOf
+        val elemSize = llvmSizeOf(elemType)
         // Get data pointer
         val dataPtr = array.typ match
           case SyslType.ArrayType(_, _) =>
@@ -700,7 +700,7 @@ class SyslLLVMCodegen:
         // Zero-init
         val cast = newReg()
         emit(s"  $cast = bitcast $arrType* $alloca to i8*")
-        val byteSize = elemType.sizeOf * size
+        val byteSize = llvmSizeOf(elemType) * size
         emit(s"  call void @llvm.memset.p0i8.i64(i8* $cast, i8 0, i64 $byteSize, i1 false)")
         // Store each element
         for (elem, i) <- elements.zipWithIndex do
@@ -717,7 +717,7 @@ class SyslLLVMCodegen:
         emit(s"  $alloca = alloca $arrType")
         val cast = newReg()
         emit(s"  $cast = bitcast $arrType* $alloca to i8*")
-        val byteSize = elemType.sizeOf * size
+        val byteSize = llvmSizeOf(elemType) * size
         emit(s"  call void @llvm.memset.p0i8.i64(i8* $cast, i8 0, i64 $byteSize, i1 false)")
         alloca
 
@@ -755,7 +755,7 @@ class SyslLLVMCodegen:
             val idx64 = newReg()
             emit(s"  $idx64 = sext i32 $idx to i64")
             val offset = newReg()
-            emit(s"  $offset = mul i64 $idx64, ${elemSyslType.sizeOf}")
+            emit(s"  $offset = mul i64 $idx64, ${llvmSizeOf(elemSyslType)}")
             val elemAddr = newReg()
             emit(s"  $elemAddr = getelementptr i8, i8* $dataPtr, i64 $offset")
             val typedPtr = newReg()
@@ -831,7 +831,7 @@ class SyslLLVMCodegen:
       case TSliceExpr(array, low, high, SyslType.SliceType(elemType)) =>
         val base = genExpr(array)
         val elt = llvmType(elemType)
-        val elemSize = elemType.sizeOf
+        val elemSize = llvmSizeOf(elemType)
         // Get data pointer and length from source
         val (dataPtr, srcLen) = array.typ match
           case SyslType.ArrayType(_, size) =>
@@ -878,7 +878,7 @@ class SyslLLVMCodegen:
       case TAppend(slice, elem, SyslType.SliceType(elemType)) =>
         val base = genExpr(slice)
         val elt = llvmType(elemType)
-        val elemSize = elemType.sizeOf
+        val elemSize = llvmSizeOf(elemType)
         // Load current slice fields
         val ptrGep = newReg()
         emit(s"  $ptrGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 0")
@@ -992,7 +992,7 @@ class SyslLLVMCodegen:
         dataPtr // return pointer to data (past refcount)
 
       case TNewArray(elemType, size) =>
-        val elemSize = elemType.sizeOf
+        val elemSize = llvmSizeOf(elemType)
         val sizeVal = genExpr(size)
         val sizeVal64 = newReg()
         emit(s"  $sizeVal64 = sext i32 $sizeVal to i64")
@@ -1399,6 +1399,20 @@ class SyslLLVMCodegen:
     case SyslType.RefType(_) => "i8*"
     case SyslType.FuncType(_, _) => "i8*"
     case _ => "i64"
+
+  // LLVM-side size in bytes (may differ from Sysl's sizeOf for types like strings)
+  private def llvmSizeOf(t: SyslType): Long = t match
+    case SyslType.StringType => 8   // i8* pointer, not fat pointer
+    case SyslType.PtrType(_) => 8
+    case SyslType.RefType(_) => 8
+    case SyslType.FuncType(_, _) => 8
+    case SyslType.BoolType => 1
+    case SyslType.SliceType(_) => 16  // {i8*, i32, i32}
+    case SyslType.StructType(_, fields) =>
+      // Use LLVM's struct layout (simplified — no padding calc, just sum field sizes aligned)
+      fields.map(_._2).map(llvmSizeOf).sum // simplified
+    case SyslType.ArrayType(elem, size) => llvmSizeOf(elem) * size
+    case other => other.sizeOf
 
   // Types that are passed by pointer (alloca) rather than by value
   private def isAggregate(t: SyslType): Boolean = t match
