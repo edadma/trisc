@@ -202,9 +202,14 @@ class SyslAnalyzer:
             // Data enum — register in dataEnumTypes and variantToEnum
             linkImportedDataEnumToTemplate(et)
             dataEnumTypes(sn) = et
-            // Mangled generic instances (e.g. ParseMaybe_i32) link via enumToTemplate only; do not
-            // register Got/Miss in variantToEnum or they shadow genericVariantToEnum and break seq/map.
-            if !enumToTemplate.contains(et.name) then
+            // Mangled generic instances (e.g. ParseMaybe_i32) link via enumToTemplate when the suffix
+            // parses as a monotype. Suffixes like _Tuple2 or func(...) do not parse — still do not
+            // register Got/Miss on variantToEnum or the last imported instance wins and breaks seq/map.
+            val isMangledGenericInstance =
+              genericEnums.exists { case (base, decl) =>
+                decl.typeParams.length == 1 && et.name.startsWith(base + "_") && et.name != base
+              }
+            if !enumToTemplate.contains(et.name) && !isMangledGenericInstance then
               for ((vname, _), idx) <- et.variants.zipWithIndex do
                 variantToEnum(vname) = (et, idx)
 

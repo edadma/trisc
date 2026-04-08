@@ -1,23 +1,12 @@
-std.parsyl — library (`core.lsysl`)
-===================================
+std.parsyl — combinators
+========================
 
-Pedagogical parser combinators for Sysl. Parsers are closures
-`func(string, int) -> ParseMaybe[T]`; combinators return new closures that
-capture their arguments.
-
-This file holds **`enum ParseMaybe[T]`** and all functions that mention
-`ParseMaybe[…]` in their *declared* types. Executable examples live in
-`tests.lsysl` in the same directory (same `module std.parsyl`). Splitting
-that way works today: imported sibling `ModuleMeta` registers concrete enum
-shapes but not **generic** enum templates, so `ParseMaybe[T]` cannot be resolved
-from a separate compilation unit until that gap is closed.
+Core parser combinators: `succeed`, `fail`, `satisfy`, `lit`, `alt`, `seq`, `map`,
+run helpers, and `many0_int` / `many1_int`. Depends on **`ParseMaybe[T]`** from
+`types.lsysl` (same package).
 
 
     module std.parsyl
-
-    enum ParseMaybe[T]
-        Got(pos: int, value: T)
-        Miss
 
     succeed[T](v: T) -> func(string, int) -> ParseMaybe[T] =
         (s: string, i: int) ->
@@ -111,24 +100,3 @@ from a separate compilation unit until that gap is closed.
                             Miss ->
                                 done = true
                     Got(i, acc)
-
-    private digit_code_unit() -> func(string, int) -> ParseMaybe[int] =
-        satisfy(ch -> int('0') <= ch <= int('9'))
-
-    private digit_value() -> func(string, int) -> ParseMaybe[int] =
-        map(digit_code_unit(), (ch: int) -> ch - int('0'))
-
-    private fold_decimal(digits: []int) -> int
-        var acc = 0
-        for i in 0..<len(digits)
-            acc = acc * 10 + digits[i]
-        acc
-
-    natural() -> func(string, int) -> ParseMaybe[int] =
-        map(many1_int(digit_value()), (ds: []int) -> fold_decimal(ds))
-
-    private digit_pred(ch: int) -> bool =
-        int('0') <= ch <= int('9')
-
-    digit_unit() -> func(string, int) -> ParseMaybe[int] =
-        satisfy(digit_pred)
