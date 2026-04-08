@@ -19,8 +19,14 @@ trait SyslLLVMTestHelpers extends AnyFreeSpec with Matchers {
     val typed = (new SyslAnalyzer).analyze(ast)
     (new SyslLLVMCodegen).generate(typed)
 
-  def runLLVM(source: String): (Int, String) =
-    val ir = compileLLVM(source)
+  /** Compile multiple source files via SyslDriver, merge into single LLVM IR. */
+  def compileLLVMMulti(sources: Map[String, String]): String =
+    val driver = new SyslDriver()
+    val result = driver.compile(sources)
+    val merged = TProgram(result.units.flatMap(_.typed.decls))
+    (new SyslLLVMCodegen).generate(merged)
+
+  private def runIR(ir: String): (Int, String) =
     withTempDir { dir =>
       val llFile = dir.resolve("test.ll")
       val exeFile = dir.resolve("test")
@@ -34,7 +40,15 @@ trait SyslLLVMTestHelpers extends AnyFreeSpec with Matchers {
       (exitCode, outBuf.toString.stripSuffix("\n"))
     }
 
+  def runLLVM(source: String): (Int, String) = runIR(compileLLVM(source))
+
+  def runLLVMMulti(sources: Map[String, String]): (Int, String) = runIR(compileLLVMMulti(sources))
+
   def llvmOutput(source: String): String = runLLVM(source)._2
 
   def llvmExit(source: String): Int = runLLVM(source)._1
+
+  def llvmOutputMulti(sources: Map[String, String]): String = runLLVMMulti(sources)._2
+
+  def llvmExitMulti(sources: Map[String, String]): Int = runLLVMMulti(sources)._1
 }

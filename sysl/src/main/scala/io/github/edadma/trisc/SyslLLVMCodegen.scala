@@ -66,8 +66,9 @@ class SyslLLVMCodegen:
         case _: TDataEnumDecl => // type only
         case _: TTypeAliasDecl => // type only
         case f: TFunDecl => genFunction(f)
-        case TVarDecl(name, typ, _, _) =>
-          emit(s"@$name = global ${llvmType(typ)} 0")
+        case TVarDecl(name, typ, init, _) =>
+          val initVal = constValue(init, typ)
+          emit(s"@$name = global ${llvmType(typ)} $initVal")
     emit("")
     val funcCode = out.toString
 
@@ -155,7 +156,11 @@ class SyslLLVMCodegen:
       case TExprBody(expr) =>
         val result = genExpr(expr)
         val rt = exprType(expr)
-        val finalVal = emitSextIfNeeded(result, rt, retType)
+        val finalVal = if isAggregate(expr.typ) then
+          val loaded = newReg()
+          emit(s"  $loaded = load $retType, $retType* $result")
+          loaded
+        else emitSextIfNeeded(result, rt, retType)
         emit(s"  ret $retType $finalVal")
       case TBlockBody(stmts) =>
         genBlock(stmts, retType)
@@ -174,7 +179,11 @@ class SyslLLVMCodegen:
           case TExprStmt(expr) =>
             val result = genExpr(expr)
             val rt = exprType(expr)
-            val finalVal = emitSextIfNeeded(result, rt, retType)
+            val finalVal = if isAggregate(expr.typ) then
+              val loaded = newReg()
+              emit(s"  $loaded = load $retType, $retType* $result")
+              loaded
+            else emitSextIfNeeded(result, rt, retType)
             emitDefers()
             emit(s"  ret $retType $finalVal")
             hasReturned = true
@@ -233,7 +242,11 @@ class SyslLLVMCodegen:
         val v = genExpr(value)
         val retType = if currentFunction.name == "main" then "i64" else llvmType(currentFunction.returnType)
         val vt = exprType(value)
-        val finalVal = emitSextIfNeeded(v, vt, retType)
+        val finalVal = if isAggregate(value.typ) then
+          val loaded = newReg()
+          emit(s"  $loaded = load $retType, $retType* $v")
+          loaded
+        else emitSextIfNeeded(v, vt, retType)
         emitDefers()
         emit(s"  ret $retType $finalVal")
         hasReturned = true
@@ -600,7 +613,13 @@ class SyslLLVMCodegen:
         else
           val result = newReg()
           emit(s"  $result = call $retType @$name($argStr)")
-          result
+          // If the return type is aggregate, store into alloca so callers get a pointer
+          if isAggregate(expr.typ) then
+            val alloca = newReg()
+            emit(s"  $alloca = alloca $retType")
+            emit(s"  store $retType $result, $retType* $alloca")
+            alloca
+          else result
 
       case TIfExpr(cond, thenBody, elseBody, typ) =>
         val c = genExpr(cond)
@@ -1418,6 +1437,18 @@ class SyslLLVMCodegen:
   private def isAggregate(t: SyslType): Boolean = t match
     case _: SyslType.StructType | _: SyslType.ArrayType | _: SyslType.SliceType | _: SyslType.EnumType => true
     case _ => false
+
+  /** Convert a TExpr to an LLVM constant initializer for global variables. */
+  private def constValue(expr: TExpr, typ: SyslType): String = expr match
+    case TIntLit(v, _) => v.toString
+    case TFloatLit(v, _) =>
+      val bits = java.lang.Double.doubleToRawLongBits(v)
+      s"0x${bits.toHexString.toUpperCase}"
+    case TBoolLit(v, _) => if v then "1" else "0"
+    case TStringLit(s, _) =>
+      val (label, byteLen) = internString(s)
+      s"getelementptr inbounds ([$byteLen x i8], [$byteLen x i8]* $label, i32 0, i32 0)"
+    case _ => "0" // fallback zero-init
 
   private def emit(line: String): Unit =
     out ++= line

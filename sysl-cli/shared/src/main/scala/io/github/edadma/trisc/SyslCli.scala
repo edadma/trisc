@@ -270,11 +270,11 @@ object SyslCli:
 
       case "llvm" =>
         val codegen = new SyslLLVMCodegen
-        for unit <- result.units do
-          val ir = codegen.generate(stripTestDecls(unit.typed))
-          val outFile = outputPath(cmd.output, unit.name, ".ll", result.units.size)
-          io.writeFile(outFile, ir)
-          System.err.println(s"  ${unit.name} -> $outFile")
+        val merged = stripTestDecls(TProgram(result.units.flatMap(_.typed.decls)))
+        val ir = codegen.generate(merged)
+        val outFile = cmd.output.getOrElse(result.units.head.name + ".ll")
+        io.writeFile(outFile, ir)
+        System.err.println(s"  -> $outFile")
 
       case _ => System.err.println(s"Unknown emit format: ${cmd.emit}")
 
