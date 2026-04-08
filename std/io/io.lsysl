@@ -1,0 +1,326 @@
+std.io — I/O interfaces and utilities
+======================================
+
+Core I/O interfaces inspired by Go's `io` package. Defines
+`Reader`, `Writer`, and `Closer` as the building blocks for
+all I/O operations. Concrete in-memory types `ByteReader`
+and `ByteWriter` allow testing without OS file support.
+
+Dependencies: none.
+
+
+    module std.io
+
+    import std.debug.{assert}
+
+
+Interfaces
+----------
+
+### Reader
+
+`Reader` is the interface that wraps the basic `read`
+method. `read` reads up to `len(buf)` bytes into `buf`
+and returns the number of bytes read. Returns 0 at EOF.
+
+    interface Reader
+        read(buf: []byte) -> int
+
+### Writer
+
+`Writer` is the interface that wraps the basic `write`
+method. `write` writes `len(data)` bytes from `data`
+and returns the number of bytes written.
+
+    interface Writer
+        write(data: []byte) -> int
+
+### Closer
+
+`Closer` is the interface that wraps the basic `close`
+method.
+
+    interface Closer
+        close()
+
+### Composed interfaces
+
+    interface ReadWriter
+        Reader
+        Writer
+
+    interface ReadCloser
+        Reader
+        Closer
+
+    interface WriteCloser
+        Writer
+        Closer
+
+
+Concrete types
+--------------
+
+### ByteReader
+
+`ByteReader` reads from a byte slice. Tracks a read
+position that advances with each `read` call. Returns 0
+when all bytes have been consumed.
+
+    struct ByteReader
+        data: []byte
+        pos: int
+
+    ByteReader.read(buf: []byte) -> int
+        val remaining = len(self.data) - self.pos
+
+        if remaining <= 0 then return 0
+
+        val n = if len(buf) < remaining then len(buf) else remaining
+
+        for i in 0..<n
+            buf[i] = self.data[self.pos + i]
+
+        self.pos += n
+        return n
+
+
+### ByteWriter
+
+`ByteWriter` accumulates written bytes into a growable
+buffer. Use `bytes()` or `to_string()` to retrieve the
+result.
+
+    struct ByteWriter
+        buf: []byte
+
+    new_writer() -> ByteWriter
+        return ByteWriter((new [0]byte)[:0])
+
+    ByteWriter.write(data: []byte) -> int
+        val n = len(data)
+
+        for i in 0..<n
+            self.buf = append(self.buf, data[i])
+
+        return n
+
+    ByteWriter.bytes() -> []byte = self.buf
+
+    ByteWriter.to_string() -> string = string(self.buf)
+
+    ByteWriter.len() -> int = len(self.buf)
+
+    ByteWriter.reset()
+        self.buf = (new [0]byte)[:0]
+
+
+Utilities
+---------
+
+### read_all
+
+`read_all(r)` reads from `r` until EOF and returns all
+bytes read.
+
+    read_all(r: Reader) -> []byte
+        var result = (new [0]byte)[:0]
+        var buf: [1024]byte
+
+        var done = false
+
+        while !done
+            val n = r.read(buf[:])
+
+            if n <= 0
+                done = true
+            else
+                for i in 0..<n
+                    result = append(result, buf[i])
+
+        return result
+
+
+### copy
+
+`copy(dst, src)` copies from `src` to `dst` until EOF.
+Returns the total number of bytes copied.
+
+    copy(dst: Writer, src: Reader) -> int
+        var total = 0
+        var buf: [1024]byte
+
+        var done = false
+
+        while !done
+            val n = src.read(buf[:])
+
+            if n <= 0
+                done = true
+            else
+                val chunk = (new [n]byte)[:]
+                for i in 0..<n
+                    chunk[i] = buf[i]
+                val _ = dst.write(chunk)
+                total += n
+
+        return total
+
+
+### write_string
+
+`write_string(w, s)` writes the bytes of string `s` to `w`.
+
+    write_string(w: Writer, s: string) -> int
+        val n = len(s)
+        val buf = (new [n]byte)[:]
+
+        for i in 0..<n
+            buf[i] = byte(s[i])
+
+        return w.write(buf)
+
+
+Tests
+=====
+
+
+### ByteReader
+
+    #test
+    test_byte_reader_basic() -> void
+        val data: [5]byte = "hello"
+        var r = ByteReader(data[:], 0)
+        var buf: [5]byte
+        val n = r.read(buf[:])
+        assert(n == 5, s"read ${n}")
+        assert(buf[0] == byte('h'), "h")
+        assert(buf[4] == byte('o'), "o")
+
+    #test
+    test_byte_reader_partial() -> void
+        val data: [5]byte = "hello"
+        var r = ByteReader(data[:], 0)
+        var buf: [3]byte
+        val n1 = r.read(buf[:])
+        assert(n1 == 3, "first read")
+        assert(buf[0] == byte('h'), "h")
+        assert(buf[2] == byte('l'), "l")
+        val n2 = r.read(buf[:])
+        assert(n2 == 2, "second read")
+        assert(buf[0] == byte('l'), "l2")
+        assert(buf[1] == byte('o'), "o")
+
+    #test
+    test_byte_reader_eof() -> void
+        val data: [3]byte = "abc"
+        var r = ByteReader(data[:], 0)
+        var buf: [10]byte
+        val n1 = r.read(buf[:])
+        assert(n1 == 3, "first read")
+        val n2 = r.read(buf[:])
+        assert(n2 == 0, "eof")
+
+    #test
+    test_byte_reader_empty() -> void
+        val data: [0]byte = ""
+        var r = ByteReader(data[:], 0)
+        var buf: [10]byte
+        val n = r.read(buf[:])
+        assert(n == 0, "empty eof")
+
+
+### ByteWriter
+
+    #test
+    test_byte_writer_basic() -> void
+        var w = new_writer()
+        val data: [5]byte = "hello"
+        val n = w.write(data[:])
+        assert(n == 5, "wrote 5")
+        assert(w.len() == 5, "len 5")
+        assert(w.to_string() == "hello", "hello")
+
+    #test
+    test_byte_writer_multiple() -> void
+        var w = new_writer()
+        val d1: [3]byte = "foo"
+        val d2: [3]byte = "bar"
+        val _ = w.write(d1[:])
+        val _ = w.write(d2[:])
+        assert(w.to_string() == "foobar", "foobar")
+
+    #test
+    test_byte_writer_reset() -> void
+        var w = new_writer()
+        val data: [3]byte = "abc"
+        val _ = w.write(data[:])
+        assert(w.len() == 3, "before reset")
+        w.reset()
+        assert(w.len() == 0, "after reset")
+
+
+### Interface dispatch
+
+    #test
+    test_reader_interface() -> void
+        val data: [5]byte = "hello"
+        var r = ByteReader(data[:], 0)
+        val result = read_all(r)
+        assert(len(result) == 5, s"len ${len(result)}")
+        assert(result[0] == byte('h'), "h")
+        assert(result[4] == byte('o'), "o")
+
+    #test
+    test_writer_interface() -> void
+        var w = new_writer()
+        val n = write_string(w, "hello world")
+        assert(n == 11, "wrote 11")
+        assert(w.to_string() == "hello world", "content")
+
+    #test
+    test_copy() -> void
+        val data: [11]byte = "hello world"
+        var r = ByteReader(data[:], 0)
+        var w = new_writer()
+        val n = copy(w, r)
+        assert(n == 11, s"copied ${n}")
+        assert(w.to_string() == "hello world", "content")
+
+    #test
+    test_copy_empty() -> void
+        val data: [0]byte = ""
+        var r = ByteReader(data[:], 0)
+        var w = new_writer()
+        val n = copy(w, r)
+        assert(n == 0, "copied 0")
+        assert(w.len() == 0, "empty")
+
+
+### write_string
+
+    #test
+    test_write_string_empty() -> void
+        var w = new_writer()
+        val n = write_string(w, "")
+        assert(n == 0, "wrote 0")
+        assert(w.len() == 0, "empty")
+
+
+Design notes
+------------
+
+**Return convention.** `read` returns the byte count (0 =
+EOF) rather than a Result type. This matches Go's convention
+and keeps the interface simple. Error conditions beyond EOF
+(e.g. I/O errors from files) will use negative return values
+when OS support is added.
+
+**ByteWriter growth.** Uses `append` per byte, which is
+simple but O(n) amortized. For hot paths, direct buffer
+management is better — but for building up small results
+(formatted strings, test data), this is fine.
+
+**copy buffer size.** Uses a fixed 1024-byte stack buffer
+for the copy loop. A tunable buffer size could be offered
+as `copy_buffer(dst, src, buf)` later.
