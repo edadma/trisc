@@ -1335,8 +1335,12 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TIntLit(n, _) =>
         if n >= 0 && n <= 255 then
           emit(s"  ldi r1, $n")
+        else if n >= Int.MinValue && n <= 0xFFFFFFFFL then
+          // movi handles 0..0xFFFFFFFF; negative i32 values are sign-extended to unsigned
+          val unsigned = if n < 0 then n & 0xFFFFFFFFL else n
+          emit(s"  movi r1, $unsigned")
         else
-          emit(s"  movi r1, $n")
+          emit(s"  ldc r1, $n")
 
       case TBoolLit(true, _) => emit("  ldi r1, 1")
       case TBoolLit(false, _) => emit("  ldi r1, 0")
