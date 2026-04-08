@@ -122,7 +122,11 @@ range. Values outside `[MIN_I32, MAX_I32]` return
 i64 values.
 
     parse_int(s: string) -> Result[int, Error]
-        val v = parse_i64(s)?
+        val r = parse_i64(s)
+
+        if is_err(r) then return Err(unwrap_err(r))
+
+        val v = unwrap(r)
 
         if v > 2147483647i64 then return Err(new_error("integer overflow"))
         if v < -2147483648i64 then return Err(new_error("integer overflow"))
@@ -290,7 +294,11 @@ use letters a–z (case-insensitive).
 32-bit signed range.
 
     parse_int_base(s: string, base: int) -> Result[int, Error]
-        val v = parse_i64_base(s, base)?
+        val r = parse_i64_base(s, base)
+
+        if is_err(r) then return Err(unwrap_err(r))
+
+        val v = unwrap(r)
 
         if v > 2147483647i64 then return Err(new_error("integer overflow"))
         if v < -2147483648i64 then return Err(new_error("integer overflow"))

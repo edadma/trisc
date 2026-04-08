@@ -134,10 +134,10 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
                 ImportDeclAST(parts.init.mkString("/"), List(NamedImport(parts.last)))
               else imp0
           case _ => imp0
-        if smetaCache.contains(imp.modulePath) then
-          ModuleMeta.fromSmeta(smetaCache(imp.modulePath)).foreach(analyzer.registerImport(_, imp.selectors, imp.modulePath))
-        else if packageMetaCache.contains(imp.modulePath) then
+        if packageMetaCache.contains(imp.modulePath) then
           analyzer.registerImport(packageMetaCache(imp.modulePath), imp.selectors, imp.modulePath)
+        else if smetaCache.contains(imp.modulePath) then
+          ModuleMeta.fromSmeta(smetaCache(imp.modulePath)).foreach(analyzer.registerImport(_, imp.selectors, imp.modulePath))
         else
           // Try resolving from file system
           resolveExternalMeta(imp.modulePath) match
@@ -149,7 +149,15 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
 
       val typed = analyzer.analyze(ast)
       val modPath = modules.get(name)
-      val meta = ModuleMeta.fromProgram(typed, if modPath.isDefined then Some(s"$name.sysl") else None)
+      // Extract generic templates from the source AST for cross-module generic instantiation
+      val templates = ast.decls.filter {
+        case StructDeclAST(_, _, tps, _) => tps.nonEmpty
+        case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
+        case FunDeclAST(_, _, _, _, _, tps, _, _) => tps.nonEmpty
+        case _ => false
+      }
+      val baseMeta = ModuleMeta.fromProgram(typed, if modPath.isDefined then Some(s"$name.sysl") else None)
+      val meta = new ModuleMeta(baseMeta.symbols, templates)
       val smeta = meta.toSmeta
 
       modPath match
@@ -263,10 +271,18 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
           case f: FunDeclAST     => !f.attributes.exists(_.name == "test")
           case _                 => true
         })
+        // Extract generic templates (structs, enums, functions with type params)
+        val templates = stripped.decls.filter {
+          case StructDeclAST(_, _, tps, _) => tps.nonEmpty
+          case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
+          case FunDeclAST(_, _, _, _, _, tps, _, _) => tps.nonEmpty
+          case _ => false
+        }
         scala.util.Try {
           val analyzer = new SyslAnalyzer
           val typed = analyzer.analyze(stripped)
-          ModuleMeta.fromProgram(typed)
+          val meta = ModuleMeta.fromProgram(typed)
+          new ModuleMeta(meta.symbols, templates)
         }.toOption
       case Left(_) => None
 

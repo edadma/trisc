@@ -12,7 +12,7 @@ object SymbolMeta:
     case Enum(enumType: SyslType.EnumType)
     case Interface(ifaceType: SyslType.InterfaceType)
 
-class ModuleMeta(val symbols: List[SymbolMeta]):
+class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclAST] = Nil):
 
   def toSmeta: String =
     val buf = new StringBuilder
@@ -62,7 +62,7 @@ class ModuleMeta(val symbols: List[SymbolMeta]):
   def merge(other: ModuleMeta): ModuleMeta =
     val replacedSources = other.symbols.flatMap(_.sourceFile).toSet
     val kept = symbols.filterNot(s => s.sourceFile.exists(replacedSources.contains))
-    new ModuleMeta(kept ++ other.symbols)
+    new ModuleMeta(kept ++ other.symbols, genericTemplates ++ other.genericTemplates)
 
   /** Get the set of source files that define the given symbol names. */
   def sourceFilesFor(names: Set[String]): Set[String] =

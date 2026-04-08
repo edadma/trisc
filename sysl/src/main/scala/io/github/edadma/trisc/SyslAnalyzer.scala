@@ -235,6 +235,10 @@ class SyslAnalyzer:
               for ((vname, _), idx) <- et.variants.zipWithIndex do
                 variantToEnum(vname) = (et, idx)
 
+    // Register generic templates from imported module (needed for cross-module generic instantiation)
+    if meta.genericTemplates.nonEmpty then
+      registerGenericTemplatesFrom(ProgramAST(meta.genericTemplates))
+
   def isExternal(name: String): Boolean = externalSymbols.contains(name)
   def externals: Set[String] = externalSymbols.toSet
 
