@@ -33,25 +33,25 @@ slashes are ignored. If the path is empty, `base` returns
         if n == 0 then return "."
 
         // Strip trailing slashes
-        var end = n
+        var hi = n
 
-        while end > 1
-            if path[end - 1] != byte('/') then break
-            end--
+        while hi> 1
+            if path[hi - 1] != byte('/') then break
+            hi--
 
         // Root only
-        if end == 1
+        if hi== 1
             if path[0] == byte('/') then return "/"
 
-        // Find last slash before end
-        var i = end - 1
+        // Find last slash before hi
+        var i = hi- 1
 
         while i >= 0
             if path[i] == byte('/')
-                return substring(path, i + 1, end)
+                return substring(path, i + 1, hi)
             i--
 
-        substring(path, 0, end)
+        substring(path, 0, hi)
 
 
 ### dir
@@ -67,14 +67,14 @@ ignored.
         if n == 0 then return "."
 
         // Strip trailing slashes
-        var end = n
+        var hi = n
 
-        while end > 1
-            if path[end - 1] != byte('/') then break
-            end--
+        while hi> 1
+            if path[hi - 1] != byte('/') then break
+            hi--
 
-        // Find last slash before end
-        var i = end - 1
+        // Find last slash before hi
+        var i = hi- 1
 
         while i >= 0
             if path[i] == byte('/')
