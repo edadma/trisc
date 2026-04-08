@@ -1154,6 +1154,56 @@ Plain strings (`"..."`) are never interpolated — `$` is just a regular charact
 
 Non-string expressions are automatically converted via `str()`. Integer, boolean, and float (`f64`) types are supported.
 
+### Format Strings (f-strings)
+
+Prefix a string with `f` for printf-style format specifiers. Each interpolation can be followed by `%` and a format spec:
+
+```sysl
+val n = 255
+puts(f"hex: $n%x")               // "hex: ff"
+puts(f"HEX: $n%X")               // "HEX: FF"
+puts(f"padded: $n%08x")          // "padded: 000000ff"
+puts(f"decimal: $n%d")           // "decimal: 255"
+puts(f"binary: ${26}%b")         // "binary: 11010" (expression needs braces)
+puts(f"octal: ${511}%o")         // "octal: 777"
+```
+
+Format specifiers:
+
+| Spec | Meaning |
+|------|---------|
+| `%d` | Decimal integer |
+| `%x` | Hexadecimal (lowercase) |
+| `%X` | Hexadecimal (uppercase) |
+| `%b` | Binary |
+| `%o` | Octal |
+| `%s` | String (default if no spec given) |
+| `%+d` | Decimal with explicit sign |
+| `%%` | Literal `%` |
+
+Width and padding:
+
+```sysl
+val n = 42
+puts(f"$n%08d")                   // "00000042" (zero-padded, width 8)
+puts(f"0x${10}%04x")             // "0x000a"   (literal needs braces)
+val s = "hi"
+puts(f"[$s%10s]")                 // "[        hi]"  (right-aligned, width 10)
+puts(f"[$s%-10s]")                // "[hi        ]"  (left-aligned, width 10)
+```
+
+Mixed example:
+
+```sysl
+val cp = 65
+val count = 3
+val name = "LATIN"
+puts(f"U+$cp%04X count=$count%d name=$name%s")
+// "U+0041 count=3 name=LATIN"
+```
+
+Without a format spec, `f"..."` works like `s"..."` — values are converted via `str()`.
+
 ### `str()` Builtin
 
 Converts a value to its string representation:

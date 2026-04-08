@@ -47,6 +47,7 @@ class SyslLLVMCodegen:
         case _: TStructDecl => // type only
         case _: TEnumDecl => // type only
         case _: TTypeAliasDecl => // type only
+        case _: TInterfaceDecl => // type only
         case f: TFunDecl => genFunction(f)
         case TVarDecl(name, typ, _, _) =>
           emit(s"@$name = global ${llvmType(typ)} 0")

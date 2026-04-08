@@ -211,6 +211,8 @@ class SyslAnalyzer:
             externalSymbols += localKey
         case SymbolMeta.Kind.Struct(st) =>
           structTypes(shortName(sym.name)) = st
+        case SymbolMeta.Kind.Interface(it) =>
+          interfaceTypes(shortName(sym.name)) = it
         case SymbolMeta.Kind.Enum(et) =>
           val sn = shortName(sym.name)
           if et.variants.forall(_._2.isEmpty) then
@@ -529,7 +531,7 @@ class SyslAnalyzer:
       case s: StructDeclAST if s.typeParams.nonEmpty => Nil
       case e: DataEnumDeclAST if e.typeParams.nonEmpty => Nil
       case _: TraitDeclAST => Nil // traits emit nothing; only impls do
-      case _: InterfaceDeclAST => Nil // interfaces are type-only; emitted via TInterfaceDecl
+      case i: InterfaceDeclAST => List(TInterfaceDecl(i.name, interfaceTypes(i.name)))
       case impl: ImplDeclAST   => analyzeImplMethods(impl)
       case d => List(analyzeDecl(d))
     }
@@ -1735,6 +1737,7 @@ class SyslAnalyzer:
           case SymbolMeta.Kind.Func(params, retType) => TFuncRef(sym.name, SyslType.FuncType(params, retType))
           case SymbolMeta.Kind.Struct(st) => throw AnalysisError(s"'$nsName.$member' is a struct type, not a value")
           case SymbolMeta.Kind.Enum(_) => throw AnalysisError(s"'$nsName.$member' is an enum type, not a value")
+          case SymbolMeta.Kind.Interface(_) => throw AnalysisError(s"'$nsName.$member' is an interface type, not a value")
 
       case FieldAccessAST(VarRefAST(enumName), member) if enumTypes.contains(enumName) =>
         val members = enumTypes(enumName)

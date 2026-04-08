@@ -10,6 +10,7 @@ object SymbolMeta:
     case Data(dataType: SyslType)
     case Struct(structType: SyslType.StructType)
     case Enum(enumType: SyslType.EnumType)
+    case Interface(ifaceType: SyslType.InterfaceType)
 
 class ModuleMeta(val symbols: List[SymbolMeta]):
 
@@ -31,6 +32,8 @@ class ModuleMeta(val symbols: List[SymbolMeta]):
           buf ++= s"${vis}STRUCT ${sym.name} ${st.toPrefix}\n"
         case SymbolMeta.Kind.Enum(et) =>
           buf ++= s"${vis}ENUM ${sym.name} ${et.toPrefix}\n"
+        case SymbolMeta.Kind.Interface(it) =>
+          buf ++= s"${vis}IFACE ${sym.name} ${it.toPrefix}\n"
     buf.toString
 
   def toAsmGlobals: String =
@@ -43,7 +46,7 @@ class ModuleMeta(val symbols: List[SymbolMeta]):
           buf ++= s"global ${sym.name}, func, ${SyslType.funcSigToPrefix(params, ret)}\n"
         case SymbolMeta.Kind.Data(dataType) =>
           buf ++= s"global ${sym.name}, data, ${dataType.toPrefix}\n"
-        case SymbolMeta.Kind.Struct(_) | SymbolMeta.Kind.Enum(_) => // type-only, no asm global
+        case SymbolMeta.Kind.Struct(_) | SymbolMeta.Kind.Enum(_) | SymbolMeta.Kind.Interface(_) => // type-only, no asm global
     buf.toString
 
   def publicSymbols: List[SymbolMeta] =
@@ -72,7 +75,7 @@ class ModuleMeta(val symbols: List[SymbolMeta]):
 object ModuleMeta:
 
   /** Bump this whenever the .smeta format changes. Stale files are silently ignored. */
-  val SMETA_VERSION = 2
+  val SMETA_VERSION = 3
 
   def fromProgram(program: TProgram, sourceFile: Option[String] = None): ModuleMeta =
     val syms = program.decls.collect {
@@ -85,6 +88,8 @@ object ModuleMeta:
         SymbolMeta(name, SymbolMeta.Kind.Enum(et), isPrivate = false, sourceFile = sourceFile)
       case TDataEnumDecl(name, et: SyslType.EnumType) =>
         SymbolMeta(name, SymbolMeta.Kind.Enum(et), isPrivate = false, sourceFile = sourceFile)
+      case TInterfaceDecl(name, ifaceType) =>
+        SymbolMeta(name, SymbolMeta.Kind.Interface(ifaceType), isPrivate = false, sourceFile = sourceFile)
       case TExternFuncDecl(name, params, returnType) =>
         SymbolMeta(name, SymbolMeta.Kind.Func(params, returnType), isPrivate = false, isExtern = true, sourceFile = sourceFile)
       case TExternVarDecl(name, typ) =>
@@ -135,6 +140,9 @@ object ModuleMeta:
               case "ENUM" =>
                 val et = SyslType.parseType(tokens).asInstanceOf[SyslType.EnumType]
                 syms += SymbolMeta(name, SymbolMeta.Kind.Enum(et), isPrivate, sourceFile = currentSource)
+              case "IFACE" =>
+                val it = SyslType.parseType(tokens).asInstanceOf[SyslType.InterfaceType]
+                syms += SymbolMeta(name, SymbolMeta.Kind.Interface(it), isPrivate, sourceFile = currentSource)
               case other =>
                 throw IllegalArgumentException(s"line $lineNum: unknown symbol kind '$other'")
 

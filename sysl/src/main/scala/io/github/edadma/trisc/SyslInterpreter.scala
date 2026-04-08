@@ -278,6 +278,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TEnumDecl => // type only, no runtime effect
         case _: TDataEnumDecl => // type only, no runtime effect
         case _: TTypeAliasDecl => // type only, no runtime effect
+        case _: TInterfaceDecl => // type only, no runtime effect
         case f: TFunDecl =>
           functions(f.name) = f
           if f.name.endsWith("_deinit") then
@@ -304,6 +305,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TEnumDecl => // type only
         case _: TDataEnumDecl => // type only
         case _: TTypeAliasDecl => // type only
+        case _: TInterfaceDecl => // type only
         case f: TFunDecl =>
           functions(f.name) = f
           if f.name.endsWith("_deinit") then
