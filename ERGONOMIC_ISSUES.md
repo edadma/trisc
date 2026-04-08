@@ -47,14 +47,16 @@ val factor = alt(nat(), between(char('('), expr, char(')')))
 
 Fix: `lazy val`, or allow forward references to functions in closures.
 
-## 5. Expression-Body Ambiguity with `->` in Return Type
+## ~~5. Expression-Body Ambiguity with `->` in Return Type~~ ✅ Not an issue
 
-This doesn't parse as a block body:
+Works correctly:
 ```sysl
-char(expected: byte) -> (string, int) -> Result[byte]
-    char_if(ch -> ch == expected)
+char_exact(expected: int) -> (string, int) -> Result[int]
+    (input: string, pos: int) ->
+        if pos < len(input) && input[pos] == expected then Ok(expected, pos + 1)
+        else Fail(pos)
 ```
-Must use `=` for expression body. The `->` in the return type confuses the parser about where the return type ends and the body begins.
+Function types require parens around params (`(string, int) -> Result[T]`), so `funcTypeRef` unambiguously consumes the return type. Generic type aliases (`-> Parser[int]`) make this a non-issue in practice.
 
 ## ~~6. Match Arms Verbose for Two-Variant Enums~~ ✅ Solved by #3
 
@@ -91,4 +93,4 @@ Instead of a full `match` block for simple Ok/Fail dispatch.
 | 4 | Mutual recursion / lazy val | Open — medium priority |
 | 7 | Method syntax on functions | Open — medium priority |
 | 8 | Pattern match in `if` | Open — low priority |
-| 5 | Expression-body ambiguity | Open — low priority, workaround exists (`=`) |
+| 5 | Expression-body ambiguity | ✅ Not an issue — parens make it unambiguous |
