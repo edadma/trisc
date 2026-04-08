@@ -80,6 +80,8 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
             val analyzer = new SyslAnalyzer
             // Register extern names so they are never mangled (ABI-level symbols)
             analyzer.registerNoMangle(globalExternNames)
+            for src <- sourceNames if src != name do
+              analyzer.registerGenericTemplatesFrom(asts(src))
             val siblings = new ModuleMeta(meta.symbols.filter(s => !s.isExtern))
             analyzer.registerImport(siblings)
             val typed = analyzer.analyze(ast)
@@ -107,6 +109,8 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
       // Register same-module siblings (intra-module visibility),
       // excluding own symbols and externs (which are private to each file).
       for modPath <- modules.get(name) do
+        for src <- moduleToSources.getOrElse(modPath, Set.empty) if src != name do
+          analyzer.registerGenericTemplatesFrom(asts(src))
         packageMetaCache.get(modPath).foreach { meta =>
           val siblings = new ModuleMeta(meta.symbols.filter(s => s.sourceFile != Some(s"$name.sysl") && !s.isExtern))
           analyzer.registerImport(siblings)

@@ -1,0 +1,134 @@
+std.parsyl — library (`core.lsysl`)
+===================================
+
+Pedagogical parser combinators for Sysl. Parsers are closures
+`func(string, int) -> ParseMaybe[T]`; combinators return new closures that
+capture their arguments.
+
+This file holds **`enum ParseMaybe[T]`** and all functions that mention
+`ParseMaybe[…]` in their *declared* types. Executable examples live in
+`tests.lsysl` in the same directory (same `module std.parsyl`). Splitting
+that way works today: imported sibling `ModuleMeta` registers concrete enum
+shapes but not **generic** enum templates, so `ParseMaybe[T]` cannot be resolved
+from a separate compilation unit until that gap is closed.
+
+
+    module std.parsyl
+
+    enum ParseMaybe[T]
+        Got(pos: int, value: T)
+        Miss
+
+    succeed[T](v: T) -> func(string, int) -> ParseMaybe[T] =
+        (s: string, i: int) ->
+            val captured = v
+            Got(i, captured)
+
+    fail[T]() -> func(string, int) -> ParseMaybe[T] =
+        (s: string, i: int) -> Miss
+
+    satisfy(pred: func(int) -> bool) -> func(string, int) -> ParseMaybe[int] =
+        (s: string, pos: int) ->
+            if pos >= len(s) then Miss
+            else
+                val next = pos + 1
+                if pred(s[pos]) then Got(next, s[pos]) else Miss
+
+    lit(ch: int) -> func(string, int) -> ParseMaybe[int] =
+        satisfy((x: int) -> x == ch)
+
+    alt[T](a: func(string, int) -> ParseMaybe[T], b: func(string, int) -> ParseMaybe[T]) -> func(string, int) -> ParseMaybe[T] =
+        (s: string, i: int) ->
+            a(s, i) match
+                Got(p, v) -> Got(p, v)
+                Miss -> b(s, i)
+
+    seq[A, B](a: func(string, int) -> ParseMaybe[A], b: func(string, int) -> ParseMaybe[B]) -> func(string, int) -> ParseMaybe[(A, B)] =
+        (s: string, i: int) ->
+            a(s, i) match
+                Got(p1, va) ->
+                    b(s, p1) match
+                        Got(p2, vb) -> Got(p2, (va, vb))
+                        Miss -> Miss
+                Miss -> Miss
+
+    map[A, B](p: func(string, int) -> ParseMaybe[A], f: func(A) -> B) -> func(string, int) -> ParseMaybe[B] =
+        (s: string, i: int) ->
+            p(s, i) match
+                Got(p, v) -> Got(p, f(v))
+                Miss -> Miss
+
+    run_all[T](p: func(string, int) -> ParseMaybe[T], input: string) -> ParseMaybe[T] =
+        p(input, 0) match
+            Got(p, v) ->
+                if p != len(input) then Miss
+                else Got(len(input), v)
+            Miss -> Miss
+
+    run_all_int(p: func(string, int) -> ParseMaybe[int], input: string) -> ParseMaybe[int] =
+        p(input, 0) match
+            Got(p, v) ->
+                if p != len(input) then Miss
+                else Got(len(input), v)
+            Miss -> Miss
+
+    run_all_ints(p: func(string, int) -> ParseMaybe[[]int], input: string) -> ParseMaybe[[]int] =
+        p(input, 0) match
+            Got(p, v) ->
+                if p != len(input) then Miss
+                else Got(len(input), v)
+            Miss -> Miss
+
+    many0_int(p: func(string, int) -> ParseMaybe[int]) -> func(string, int) -> ParseMaybe[[]int] =
+        (s: string, i0: int) ->
+            var i = i0
+            val mem = new [256]int
+            var acc = mem[:0]
+            var done = false
+            while !done
+                p(s, i) match
+                    Got(pos, vv) ->
+                        acc = append(acc, vv)
+                        i = pos
+                    Miss ->
+                        done = true
+            Got(i, acc)
+
+    many1_int(p: func(string, int) -> ParseMaybe[int]) -> func(string, int) -> ParseMaybe[[]int] =
+        (s: string, i0: int) ->
+            p(s, i0) match
+                Miss -> Miss
+                Got(p1, v0) ->
+                    var i = p1
+                    val mem = new [256]int
+                    var acc = append(mem[:0], v0)
+                    var done = false
+                    while !done
+                        p(s, i) match
+                            Got(pos, vv) ->
+                                acc = append(acc, vv)
+                                i = pos
+                            Miss ->
+                                done = true
+                    Got(i, acc)
+
+    private digit_code_unit() -> func(string, int) -> ParseMaybe[int] =
+        satisfy(ch -> int('0') <= ch <= int('9'))
+
+    private digit_value() -> func(string, int) -> ParseMaybe[int] =
+        map(digit_code_unit(), (ch: int) -> ch - int('0'))
+
+    private fold_decimal(digits: []int) -> int
+        var acc = 0
+        for i in 0..<len(digits)
+            acc = acc * 10 + digits[i]
+        acc
+
+    natural() -> func(string, int) -> ParseMaybe[int] =
+        map(many1_int(digit_value()), (ds: []int) -> fold_decimal(ds))
+
+    private digit_pred(ch: int) -> bool =
+        int('0') <= ch <= int('9')
+
+    digit_unit() -> func(string, int) -> ParseMaybe[int] =
+        satisfy(digit_pred)
