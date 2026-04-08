@@ -474,58 +474,58 @@ and comparison helpers can be verified in isolation.
 ### `is_integer`
 
     #test
-    test_is_integer_positive() -> void
+    test_is_integer_positive() -> unit
         assert(is_integer("42"), "positive int")
 
     #test
-    test_is_integer_negative() -> void
+    test_is_integer_negative() -> unit
         assert(is_integer("-7"), "negative int")
 
     #test
-    test_is_integer_zero() -> void
+    test_is_integer_zero() -> unit
         assert(is_integer("0"), "zero")
 
     #test
-    test_is_integer_not_alpha() -> void
+    test_is_integer_not_alpha() -> unit
         assert(!is_integer("abc"), "alpha not int")
 
     #test
-    test_is_integer_empty() -> void
+    test_is_integer_empty() -> unit
         assert(!is_integer(""), "empty not int")
 
     #test
-    test_is_integer_bare_minus() -> void
+    test_is_integer_bare_minus() -> unit
         assert(!is_integer("-"), "bare minus not int")
 
     #test
-    test_is_integer_mixed() -> void
+    test_is_integer_mixed() -> unit
         assert(!is_integer("12x"), "mixed not int")
 
 
 ### `compare`
 
     #test
-    test_compare_numeric_equal() -> void
+    test_compare_numeric_equal() -> unit
         assert(compare("42", "42") == 0, "equal")
 
     #test
-    test_compare_numeric_less() -> void
+    test_compare_numeric_less() -> unit
         assert(compare("3", "10") < 0, "3 < 10 numerically")
 
     #test
-    test_compare_numeric_greater() -> void
+    test_compare_numeric_greater() -> unit
         assert(compare("10", "3") > 0, "10 > 3 numerically")
 
     #test
-    test_compare_string_less() -> void
+    test_compare_string_less() -> unit
         assert(compare("abc", "def") < 0, "abc < def")
 
     #test
-    test_compare_string_equal() -> void
+    test_compare_string_equal() -> unit
         assert(compare("hello", "hello") == 0, "equal strings")
 
     #test
-    test_compare_mixed_uses_string() -> void
+    test_compare_mixed_uses_string() -> unit
         assert(compare("abc", "42") != 0, "mixed → string compare")
 
 
@@ -541,27 +541,27 @@ invoke `expr` end-to-end. Instead we test the underlying
 `std.string` functions that the keywords delegate to.
 
     #test
-    test_length_empty() -> void
+    test_length_empty() -> unit
         assert(length("") == 0, "empty string length")
 
     #test
-    test_length_nonempty() -> void
+    test_length_nonempty() -> unit
         assert(length("hello") == 5, "hello length")
 
     #test
-    test_substr_basic() -> void
+    test_substr_basic() -> unit
         assert(equal(substr("hello", 1, 3), "ell"), "substr 1 3")
 
     #test
-    test_substr_middle() -> void
+    test_substr_middle() -> unit
         assert(equal(substr("hello", 2, 2), "ll"), "substr 2 2")
 
     #test
-    test_substr_past_end() -> void
+    test_substr_past_end() -> unit
         assert(equal(substr("hi", 0, 100), "hi"), "substr past end")
 
     #test
-    test_index_found() -> void
+    test_index_found() -> unit
         val s = "hello"
         var result = 0
 
@@ -575,7 +575,7 @@ invoke `expr` end-to-end. Instead we test the underlying
         assert(result == 2, "e at position 2")
 
     #test
-    test_index_not_found() -> void
+    test_index_not_found() -> unit
         val s = "hello"
         var result = 0
 
@@ -596,7 +596,7 @@ underlying `std.regex` functions directly, mirroring what
 `parse_match` does.
 
     #test
-    test_match_count_basic() -> void
+    test_match_count_basic() -> unit
         /* "abcdef" : "abc" → 3 (three chars matched) */
         val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^abc")
         val insts = compile(root, nodes, n_groups)
@@ -609,7 +609,7 @@ underlying `std.regex` functions directly, mirroring what
         assert(en == 3, s"matched 3 chars, got $en")
 
     #test
-    test_match_count_star() -> void
+    test_match_count_star() -> unit
         /* "aabbb" : "a*" → 2 (greedy match of a's) */
         val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^a*")
         val insts = compile(root, nodes, n_groups)
@@ -622,7 +622,7 @@ underlying `std.regex` functions directly, mirroring what
         assert(en == 2, s"matched 2 chars, got $en")
 
     #test
-    test_match_count_no_match() -> void
+    test_match_count_no_match() -> unit
         /* "hello" : "xyz" → 0 (no match) */
         val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^xyz")
         val insts = compile(root, nodes, n_groups)
@@ -631,7 +631,7 @@ underlying `std.regex` functions directly, mirroring what
         assert(!m.matched(), "should not match")
 
     #test
-    test_match_capture_basic() -> void
+    test_match_capture_basic() -> unit
         val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^\\(abc\\)")
         val insts = compile(root, nodes, n_groups)
         val m = exec(insts, classes, "abcdef", n_groups)
@@ -645,7 +645,7 @@ underlying `std.regex` functions directly, mirroring what
         assert(en == 3, s"group end=3, got $en")
 
     #test
-    test_match_capture_digits() -> void
+    test_match_capture_digits() -> unit
         val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^[a-z]*\\([0-9]*\\)")
         val insts = compile(root, nodes, n_groups)
         val m = exec(insts, classes, "abc123def", n_groups)
@@ -659,7 +659,7 @@ underlying `std.regex` functions directly, mirroring what
         assert(equal(substr("abc123def", s, en - s), "123"), "captured 123")
 
     #test
-    test_match_capture_no_match() -> void
+    test_match_capture_no_match() -> unit
         val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^\\(xyz\\)")
         val insts = compile(root, nodes, n_groups)
         val m = exec(insts, classes, "hello", n_groups)
@@ -667,7 +667,7 @@ underlying `std.regex` functions directly, mirroring what
         assert(!m.matched(), "should not match")
 
     #test
-    test_match_dot_star() -> void
+    test_match_dot_star() -> unit
         /* "foobar" : ".*" → 6 (matches entire string) */
         val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^.*")
         val insts = compile(root, nodes, n_groups)
@@ -680,7 +680,7 @@ underlying `std.regex` functions directly, mirroring what
         assert(en == 6, s"matched 6 chars, got $en")
 
     #test
-    test_match_capture_path_basename() -> void
+    test_match_capture_path_basename() -> unit
         /* Classic use: extract filename from path */
         val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^.*/\\(.*\\)")
         val insts = compile(root, nodes, n_groups)
@@ -693,7 +693,7 @@ underlying `std.regex` functions directly, mirroring what
         assert(equal(substr("/usr/bin/cat", s, en - s), "cat"), "captured basename")
 
     #test
-    test_match_capture_extension() -> void
+    test_match_capture_extension() -> unit
         /* Extract file extension */
         val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^.*\\.\\(.*\\)")
         val insts = compile(root, nodes, n_groups)
@@ -706,7 +706,7 @@ underlying `std.regex` functions directly, mirroring what
         assert(equal(substr("file.tar.gz", s, en - s), "gz"), "captured extension")
 
     #test
-    test_match_empty_string() -> void
+    test_match_empty_string() -> unit
         /* "" : ".*" → 0 (empty match) */
         val root, nodes, classes, n_groups, parse_err, _, _ = parse_bre("^.*")
         val insts = compile(root, nodes, n_groups)

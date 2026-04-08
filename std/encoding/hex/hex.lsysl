@@ -118,32 +118,32 @@ Tests
 ### encode_to_string
 
     #test
-    test_encode_empty() -> void
+    test_encode_empty() -> unit
         val empty: [0]byte = ""
         assert(encode_to_string(empty[:]) == "", "empty")
 
     #test
-    test_encode_single_byte() -> void
+    test_encode_single_byte() -> unit
         val src: [1]byte = [0xff]
         assert(encode_to_string(src[:]) == "ff", "ff")
 
     #test
-    test_encode_hello() -> void
+    test_encode_hello() -> unit
         val src: [5]byte = "hello"
         assert(encode_to_string(src[:]) == "68656c6c6f", "hello")
 
     #test
-    test_encode_zeros() -> void
+    test_encode_zeros() -> unit
         val src: [3]byte = [0x00, 0x00, 0x00]
         assert(encode_to_string(src[:]) == "000000", "zeros")
 
     #test
-    test_encode_all_values() -> void
+    test_encode_all_values() -> unit
         val src: [4]byte = [0xde, 0xad, 0xbe, 0xef]
         assert(encode_to_string(src[:]) == "deadbeef", "deadbeef")
 
     #test
-    test_encode_high_bytes() -> void
+    test_encode_high_bytes() -> unit
         val src: [2]byte = [0xfe, 0xca]
         assert(encode_to_string(src[:]) == "feca", "feca")
 
@@ -151,20 +151,20 @@ Tests
 ### decode_string
 
     #test
-    test_decode_empty() -> void
+    test_decode_empty() -> unit
         val out, ok = decode_string("")
         assert(ok, "ok")
         assert(len(out) == 0, "empty")
 
     #test
-    test_decode_single_byte() -> void
+    test_decode_single_byte() -> unit
         val out, ok = decode_string("ff")
         assert(ok, "ok")
         assert(len(out) == 1, "length")
         assert(out[0] == 0xffu8, "value")
 
     #test
-    test_decode_hello() -> void
+    test_decode_hello() -> unit
         val out, ok = decode_string("68656c6c6f")
         assert(ok, "ok")
         assert(len(out) == 5, "length")
@@ -172,7 +172,7 @@ Tests
         assert(out[4] == byte('o'), "o")
 
     #test
-    test_decode_uppercase() -> void
+    test_decode_uppercase() -> unit
         val out, ok = decode_string("DEADBEEF")
         assert(ok, "uppercase ok")
         assert(len(out) == 4, "length")
@@ -182,23 +182,23 @@ Tests
         assert(out[3] == 0xefu8, "ef")
 
     #test
-    test_decode_mixed_case() -> void
+    test_decode_mixed_case() -> unit
         val out, ok = decode_string("DeAdBeEf")
         assert(ok, "mixed ok")
         assert(out[0] == 0xdeu8, "de")
 
     #test
-    test_decode_rejects_odd_length() -> void
+    test_decode_rejects_odd_length() -> unit
         val _, ok = decode_string("abc")
         assert(!ok, "odd length rejected")
 
     #test
-    test_decode_rejects_invalid_char() -> void
+    test_decode_rejects_invalid_char() -> unit
         val _, ok = decode_string("zz")
         assert(!ok, "invalid hex char rejected")
 
     #test
-    test_decode_rejects_space() -> void
+    test_decode_rejects_space() -> unit
         val _, ok = decode_string("ab cd")
         assert(!ok, "space rejected")
 
@@ -206,7 +206,7 @@ Tests
 ### encode/decode round-trip
 
     #test
-    test_roundtrip_bytes() -> void
+    test_roundtrip_bytes() -> unit
         val src: [8]byte = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]
         val hex = encode_to_string(src[:])
         val out, ok = decode_string(hex)
@@ -216,7 +216,7 @@ Tests
             assert(out[i] == src[i], s"byte $i")
 
     #test
-    test_roundtrip_zeros() -> void
+    test_roundtrip_zeros() -> unit
         val src: [16]byte = ""
         val hex = encode_to_string(src[:])
         assert(hex == "00000000000000000000000000000000", "all zeros")
@@ -229,7 +229,7 @@ Tests
 ### encode into buffer
 
     #test
-    test_encode_into_buffer() -> void
+    test_encode_into_buffer() -> unit
         val src: [3]byte = [0xab, 0xcd, 0xef]
         var dst: [6]byte
         val n = encode(dst[:], src[:])
@@ -243,7 +243,7 @@ Tests
 ### decode into buffer
 
     #test
-    test_decode_into_buffer() -> void
+    test_decode_into_buffer() -> unit
         val src: [6]byte = "abcdef"
         var dst: [3]byte
         val n, ok = decode(dst[:], src[:])

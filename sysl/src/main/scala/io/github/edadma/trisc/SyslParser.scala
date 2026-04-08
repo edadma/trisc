@@ -174,7 +174,7 @@ class SyslParser extends StandardTokenParsers {
 
   // Accept identifiers and type keywords (e.g., "string") in import paths
   private lazy val importIdent: Parser[String] =
-    ident | "int" | "char" | "byte" | "bool" | "void" | "string" |
+    ident | "int" | "char" | "byte" | "bool" | "unit" | "string" |
       "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64"
 
   lazy val importDecl: Parser[ImportDeclAST] =
@@ -274,7 +274,8 @@ class SyslParser extends StandardTokenParsers {
     opt("[" ~> rep1sep(typeRef, ",") <~ "]") ^^ (_.getOrElse(Nil))
 
   lazy val typeName: Parser[TypeAST] =
-    ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool" | "void" | "string") ^^ (n => NamedTypeAST(n)) |
+    ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool" | "string") ^^ (n => NamedTypeAST(n)) |
+      "unit" ^^^ NamedTypeAST("void") |
       ident ~ typeArgList ^^ { case name ~ args => NamedTypeAST(name, args) }
 
   // Full type reference: *int, **int, &Node, [5]int, []int (slice), func(int)->int, string, int, etc.
@@ -283,17 +284,15 @@ class SyslParser extends StandardTokenParsers {
       "&" ~> typeRef ^^ RefTypeAST.apply |
       "[" ~> "]" ~> typeRef ^^ SliceTypeAST.apply |
       "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => ArrayTypeAST(n.toInt, t) } |
-      "(" ~> rep1sep(typeRef, ",") <~ ")" ^^ TupleTypeAST.apply |
       funcTypeRef |
+      "(" ~> rep1sep(typeRef, ",") <~ ")" ^^ TupleTypeAST.apply |
       typeName
 
   lazy val funcTypeRef: Parser[TypeAST] =
-    "func" ~> "(" ~> repsep(typeRef, ",") ~ (")" ~> "->" ~> typeRef) ^^ {
+    // (int, int) -> int   or   () -> unit
+    "(" ~> repsep(typeRef, ",") ~ (")" ~> "->" ~> typeRef) ^^ {
       case params ~ ret => FuncTypeAST(params, ret)
-    } |
-      "func" ~> "(" ~> repsep(typeRef, ",") <~ ")" ^^ {
-        params => FuncTypeAST(params, NamedTypeAST("void"))
-      }
+    }
 
   // Array type for uninitialized declarations: [5]int
   lazy val typeExpr: Parser[TypeAST] =
@@ -705,7 +704,8 @@ class SyslParser extends StandardTokenParsers {
       "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => SizeofTypeAST(ArrayTypeAST(n.toInt, t)) } |
       funcTypeRef ^^ SizeofTypeAST.apply |
       "[" ~> "]" ~> typeRef ^^ (t => SizeofTypeAST(SliceTypeAST(t))) |
-      ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool" | "void" | "string") ^^ (n => SizeofTypeAST(NamedTypeAST(n))) |
+      ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool" | "string") ^^ (n => SizeofTypeAST(NamedTypeAST(n))) |
+      "unit" ^^ (_ => SizeofTypeAST(NamedTypeAST("void"))) |
       expr ^^ SizeofExprAST.apply
 
   lazy val scalarCastType: Parser[String] =

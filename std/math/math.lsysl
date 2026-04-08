@@ -163,43 +163,43 @@ Tests
 ### abs
 
     #test
-    test_abs_positive() -> void
+    test_abs_positive() -> unit
         assert(abs(42) == 42, "positive")
 
     #test
-    test_abs_negative() -> void
+    test_abs_negative() -> unit
         assert(abs(-42) == 42, "negative")
 
     #test
-    test_abs_zero() -> void
+    test_abs_zero() -> unit
         assert(abs(0) == 0, "zero")
 
     #test
-    test_abs_i64() -> void
+    test_abs_i64() -> unit
         assert(abs_i64(-100i64) == 100i64, "i64 negative")
 
 
 ### min / max
 
     #test
-    test_min_basic() -> void
+    test_min_basic() -> unit
         assert(min(3, 7) == 3, "first smaller")
         assert(min(7, 3) == 3, "second smaller")
         assert(min(5, 5) == 5, "equal")
 
     #test
-    test_max_basic() -> void
+    test_max_basic() -> unit
         assert(max(3, 7) == 7, "second larger")
         assert(max(7, 3) == 7, "first larger")
         assert(max(5, 5) == 5, "equal")
 
     #test
-    test_min_max_i64() -> void
+    test_min_max_i64() -> unit
         assert(min_i64(3i64, 7i64) == 3i64, "min i64")
         assert(max_i64(3i64, 7i64) == 7i64, "max i64")
 
     #test
-    test_min_negative() -> void
+    test_min_negative() -> unit
         assert(min(-5, 3) == -5, "negative smaller")
         assert(max(-5, 3) == 3, "positive larger")
 
@@ -207,19 +207,19 @@ Tests
 ### clamp
 
     #test
-    test_clamp_within_range() -> void
+    test_clamp_within_range() -> unit
         assert(clamp(5, 0, 10) == 5, "within")
 
     #test
-    test_clamp_below() -> void
+    test_clamp_below() -> unit
         assert(clamp(-5, 0, 10) == 0, "clamped to lo")
 
     #test
-    test_clamp_above() -> void
+    test_clamp_above() -> unit
         assert(clamp(15, 0, 10) == 10, "clamped to hi")
 
     #test
-    test_clamp_at_boundary() -> void
+    test_clamp_at_boundary() -> unit
         assert(clamp(0, 0, 10) == 0, "at lo")
         assert(clamp(10, 0, 10) == 10, "at hi")
 
@@ -227,93 +227,93 @@ Tests
 ### sign
 
     #test
-    test_sign_positive() -> void
+    test_sign_positive() -> unit
         assert(sign(42) == 1, "positive")
 
     #test
-    test_sign_negative() -> void
+    test_sign_negative() -> unit
         assert(sign(-42) == -1, "negative")
 
     #test
-    test_sign_zero() -> void
+    test_sign_zero() -> unit
         assert(sign(0) == 0, "zero")
 
 
 ### pow
 
     #test
-    test_pow_basic() -> void
+    test_pow_basic() -> unit
         assert(pow(2, 10) == 1024, "2^10")
 
     #test
-    test_pow_zero_exp() -> void
+    test_pow_zero_exp() -> unit
         assert(pow(5, 0) == 1, "x^0 = 1")
 
     #test
-    test_pow_one_exp() -> void
+    test_pow_one_exp() -> unit
         assert(pow(7, 1) == 7, "x^1 = x")
 
     #test
-    test_pow_zero_base() -> void
+    test_pow_zero_base() -> unit
         assert(pow(0, 5) == 0, "0^n = 0")
 
     #test
-    test_pow_zero_zero() -> void
+    test_pow_zero_zero() -> unit
         assert(pow(0, 0) == 1, "0^0 = 1 by convention")
 
     #test
-    test_pow_negative_exp() -> void
+    test_pow_negative_exp() -> unit
         assert(pow(2, -1) == 0, "negative exp truncates to 0")
 
 
 ### gcd / lcm
 
     #test
-    test_gcd_basic() -> void
+    test_gcd_basic() -> unit
         assert(gcd(12, 8) == 4, "gcd(12,8)")
 
     #test
-    test_gcd_coprime() -> void
+    test_gcd_coprime() -> unit
         assert(gcd(7, 13) == 1, "coprime")
 
     #test
-    test_gcd_one_zero() -> void
+    test_gcd_one_zero() -> unit
         assert(gcd(5, 0) == 5, "gcd(n,0) = n")
         assert(gcd(0, 5) == 5, "gcd(0,n) = n")
 
     #test
-    test_gcd_negative() -> void
+    test_gcd_negative() -> unit
         assert(gcd(-12, 8) == 4, "negative input")
 
     #test
-    test_lcm_basic() -> void
+    test_lcm_basic() -> unit
         assert(lcm(4, 6) == 12, "lcm(4,6)")
 
     #test
-    test_lcm_coprime() -> void
+    test_lcm_coprime() -> unit
         assert(lcm(7, 13) == 91, "coprime lcm")
 
     #test
-    test_lcm_zero() -> void
+    test_lcm_zero() -> unit
         assert(lcm(0, 5) == 0, "zero input")
 
 
 ### divmod
 
     #test
-    test_divmod_basic() -> void
+    test_divmod_basic() -> unit
         val q, r = divmod(17, 5)
         assert(q == 3, "quotient")
         assert(r == 2, "remainder")
 
     #test
-    test_divmod_exact() -> void
+    test_divmod_exact() -> unit
         val q, r = divmod(20, 5)
         assert(q == 4, "quotient")
         assert(r == 0, "no remainder")
 
     #test
-    test_divmod_negative() -> void
+    test_divmod_negative() -> unit
         val q, r = divmod(-17, 5)
         assert(q == -3, "quotient")
         assert(r == -2, "remainder")
@@ -322,14 +322,14 @@ Tests
 ### is_power_of_two
 
     #test
-    test_is_power_of_two_yes() -> void
+    test_is_power_of_two_yes() -> unit
         assert(is_power_of_two(1), "1")
         assert(is_power_of_two(2), "2")
         assert(is_power_of_two(4), "4")
         assert(is_power_of_two(1024), "1024")
 
     #test
-    test_is_power_of_two_no() -> void
+    test_is_power_of_two_no() -> unit
         assert(!is_power_of_two(0), "0")
         assert(!is_power_of_two(3), "3")
         assert(!is_power_of_two(6), "6")
@@ -339,16 +339,16 @@ Tests
 ### next_power_of_two
 
     #test
-    test_next_power_of_two_exact() -> void
+    test_next_power_of_two_exact() -> unit
         assert(next_power_of_two(8) == 8, "already power")
 
     #test
-    test_next_power_of_two_round_up() -> void
+    test_next_power_of_two_round_up() -> unit
         assert(next_power_of_two(5) == 8, "round up")
         assert(next_power_of_two(9) == 16, "round up")
 
     #test
-    test_next_power_of_two_small() -> void
+    test_next_power_of_two_small() -> unit
         assert(next_power_of_two(0) == 1, "zero")
         assert(next_power_of_two(1) == 1, "one")
         assert(next_power_of_two(-5) == 1, "negative")

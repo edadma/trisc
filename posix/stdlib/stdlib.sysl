@@ -75,13 +75,13 @@ div(numer: int, denom: int) -> div_t
 
 /* Exit handler table. POSIX requires at least 32. */
 val ATEXIT_MAX = 32
-var _atexit_funcs: [32]func()
+var _atexit_funcs: [32]() -> unit
 var _atexit_count = 0
 
 /* Register a function to be called at normal process termination.
  * Returns 0 on success, -1 if the table is full.
  */
-atexit(f: func()) -> int
+atexit(f: () -> unit) -> int
     if _atexit_count >= ATEXIT_MAX then return -1
 
     _atexit_funcs[_atexit_count] = f
@@ -313,7 +313,7 @@ swap(a: *byte, b: *byte, n: int)
  * size: size of each element in bytes
  * compar: comparison function returning <0, 0, or >0
  */
-qsort(base: *byte, nmemb: int, size: int, compar: func(*byte, *byte) -> int)
+qsort(base: *byte, nmemb: int, size: int, compar: (*byte, *byte) -> int)
     for var i = 1; i < nmemb; i++
         var j = i
 
@@ -329,7 +329,7 @@ qsort(base: *byte, nmemb: int, size: int, compar: func(*byte, *byte) -> int)
  * compar: comparison function
  * Returns pointer to the matching element, or null if not found.
  */
-bsearch(key: *byte, base: *byte, nmemb: int, size: int, compar: func(*byte, *byte) -> int) -> *byte
+bsearch(key: *byte, base: *byte, nmemb: int, size: int, compar: (*byte, *byte) -> int) -> *byte
     var lo = 0
     var hi = nmemb
 

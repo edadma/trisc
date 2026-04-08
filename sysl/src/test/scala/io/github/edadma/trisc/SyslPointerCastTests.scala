@@ -214,7 +214,7 @@ class SyslPointerCastTests extends SyslTestHelpers {
       """helper() -> int = 42
         |
         |main() -> int
-        |    val f: func() -> int = helper
+        |    val f: () -> int = helper
         |    if i64(f) != 0 then 1 else 0
         |""".stripMargin) shouldBe 1
   }
@@ -226,7 +226,7 @@ class SyslPointerCastTests extends SyslTestHelpers {
       """helper() -> int = 42
         |
         |main() -> int
-        |    val f: func() -> int = helper
+        |    val f: () -> int = helper
         |    if bool(f) then 1 else 0
         |""".stripMargin) shouldBe 1
   }

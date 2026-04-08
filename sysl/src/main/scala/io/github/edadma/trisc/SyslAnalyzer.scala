@@ -598,7 +598,7 @@ class SyslAnalyzer:
         if fd.params.nonEmpty then
           throw AnalysisError(s"#test function '${fd.name}' must take zero parameters", fd)
         if info.returnType != VoidType then
-          throw AnalysisError(s"#test function '${fd.name}' must return void", fd)
+          throw AnalysisError(s"#test function '${fd.name}' must return unit", fd)
         if fd.typeParams.nonEmpty then
           throw AnalysisError(s"#test function '${fd.name}' cannot be generic", fd)
         // Methods are registered via the StructName_methodName convention; reject those

@@ -518,31 +518,31 @@ strerror(errnum: int) -> string
  * below cover what's testable in the interpreter. */
 
 #test
-test_strerror_success() -> void
+test_strerror_success() -> unit
     assert(strerror(0) == "Success", "errno 0")
 
 #test
-test_strerror_enoent() -> void
+test_strerror_enoent() -> unit
     assert(strerror(2) == "No such file or directory", "ENOENT")
 
 #test
-test_strerror_eperm() -> void
+test_strerror_eperm() -> unit
     assert(strerror(1) == "Operation not permitted", "EPERM")
 
 #test
-test_strerror_eacces() -> void
+test_strerror_eacces() -> unit
     assert(strerror(13) == "Permission denied", "EACCES")
 
 #test
-test_strerror_enosys() -> void
+test_strerror_enosys() -> unit
     assert(strerror(38) == "Function not implemented", "ENOSYS")
 
 #test
-test_strerror_unknown() -> void
+test_strerror_unknown() -> unit
     assert(strerror(999) == "Unknown error", "unknown")
 
 #test
-test_memset_basic() -> void
+test_memset_basic() -> unit
     var buf = new [5]byte
 
     memset(buf, int('x'), 5)
@@ -551,7 +551,7 @@ test_memset_basic() -> void
         assert(buf[i] == int('x'), s"byte $i is x")
 
 #test
-test_memset_zero() -> void
+test_memset_zero() -> unit
     var buf = new [5]byte
 
     buf[0] = int('a')
@@ -562,7 +562,7 @@ test_memset_zero() -> void
         assert(buf[i] == 0, s"byte $i is 0")
 
 #test
-test_memcpy_basic() -> void
+test_memcpy_basic() -> unit
     var src = new [5]byte
     var dst = new [5]byte
 
@@ -575,7 +575,7 @@ test_memcpy_basic() -> void
     assert(dst[2] == 3, "byte 2")
 
 #test
-test_memcmp_equal() -> void
+test_memcmp_equal() -> unit
     var a = new [3]byte
     var b = new [3]byte
 
@@ -588,7 +588,7 @@ test_memcmp_equal() -> void
     assert(memcmp(a, b, 3) == 0, "equal")
 
 #test
-test_memcmp_less() -> void
+test_memcmp_less() -> unit
     var a = new [3]byte
     var b = new [3]byte
 
@@ -599,7 +599,7 @@ test_memcmp_less() -> void
     assert(memcmp(a, b, 2) < 0, "a < b")
 
 #test
-test_memchr_found() -> void
+test_memchr_found() -> unit
     var buf = new [5]byte
 
     buf[0] = int('a')
@@ -609,7 +609,7 @@ test_memchr_found() -> void
     assert(p != *byte(0), "found")
 
 #test
-test_memchr_not_found() -> void
+test_memchr_not_found() -> unit
     var buf = new [3]byte
 
     buf[0] = int('a')

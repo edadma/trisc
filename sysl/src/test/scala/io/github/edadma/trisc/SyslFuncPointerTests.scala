@@ -11,7 +11,7 @@ class SyslFuncPointerTests extends SyslTestHelpers {
     eval(
       """dbl(x: int) -> int = x * 2
         |main() -> int
-        |    f: func(int) -> int = dbl
+        |    f: (int) -> int = dbl
         |    f(21)
         |""".stripMargin) shouldBe 42
   }
@@ -30,7 +30,7 @@ class SyslFuncPointerTests extends SyslTestHelpers {
   "pass function as argument" in {
     eval(
       """dbl(x: int) -> int = x * 2
-        |apply(f: func(int) -> int, x: int) -> int = f(x)
+        |apply(f: (int) -> int, x: int) -> int = f(x)
         |main() -> int = apply(dbl, 21)
         |""".stripMargin) shouldBe 42
   }
@@ -39,7 +39,7 @@ class SyslFuncPointerTests extends SyslTestHelpers {
     eval(
       """dbl(x: int) -> int = x * 2
         |triple(x: int) -> int = x * 3
-        |apply(f: func(int) -> int, x: int) -> int = f(x)
+        |apply(f: (int) -> int, x: int) -> int = f(x)
         |main() -> int = apply(dbl, 10) + apply(triple, 10)
         |""".stripMargin) shouldBe 50
   }
@@ -49,7 +49,7 @@ class SyslFuncPointerTests extends SyslTestHelpers {
   "map-like: apply function to array elements" in {
     output(
       """dbl(x: int) -> int = x * 2
-        |forEach(arr: *int, n: int, f: func(int) -> int)
+        |forEach(arr: *int, n: int, f: (int) -> int)
         |    for i = 0; i < n; i++
         |        print(f(arr[i]))
         |main() -> int
@@ -82,7 +82,7 @@ class SyslFuncPointerTests extends SyslTestHelpers {
   "two-arg function pointer" in {
     eval(
       """myAdd(a: int, b: int) -> int = a + b
-        |apply2(f: func(int, int) -> int, a: int, b: int) -> int = f(a, b)
+        |apply2(f: (int, int) -> int, a: int, b: int) -> int = f(a, b)
         |main() -> int = apply2(myAdd, 20, 22)
         |""".stripMargin) shouldBe 42
   }
@@ -94,7 +94,7 @@ class SyslFuncPointerTests extends SyslTestHelpers {
       """greet(x: int)
         |    print(x)
         |main() -> int
-        |    f: func(int) = greet
+        |    f: (int) -> unit = greet
         |    f(42)
         |    0
         |""".stripMargin) shouldBe "42"
@@ -125,25 +125,25 @@ class SyslFuncPointerTests extends SyslTestHelpers {
 
   // ===== Parser: function type syntax =====
 
-  "parse func(int) -> int type" in {
+  "parse (int) -> int type" in {
     val Right(ast) = (new SyslParser).parseProgram(
-      """apply(f: func(int) -> int, x: int) -> int = f(x)
+      """apply(f: (int) -> int, x: int) -> int = f(x)
         |main() -> int = 0
         |""".stripMargin): @unchecked
     ast.decls.length shouldBe 2
   }
 
-  "parse func() -> int type" in {
+  "parse () -> int type" in {
     val Right(ast) = (new SyslParser).parseProgram(
-      """apply(f: func() -> int) -> int = f()
+      """apply(f: () -> int) -> int = f()
         |main() -> int = 0
         |""".stripMargin): @unchecked
     ast.decls.length shouldBe 2
   }
 
-  "parse func(int) void type" in {
+  "parse (int) -> unit type" in {
     val Right(ast) = (new SyslParser).parseProgram(
-      """apply(f: func(int), x: int)
+      """apply(f: (int) -> unit, x: int)
         |    f(x)
         |main() -> int = 0
         |""".stripMargin): @unchecked
@@ -157,7 +157,7 @@ class SyslFuncPointerTests extends SyslTestHelpers {
       """dbl(x: int) -> int = x * 2
         |triple(x: int) -> int = x * 3
         |main() -> int
-        |    var funcs: [2]func(int) -> int
+        |    var funcs: [2](int) -> int
         |    funcs[0] = dbl
         |    funcs[1] = triple
         |    funcs[0](10) + funcs[1](10)
@@ -167,7 +167,7 @@ class SyslFuncPointerTests extends SyslTestHelpers {
   "call function returned by another function" in {
     eval(
       """dbl(x: int) -> int = x * 2
-        |getFunc() -> func(int) -> int = dbl
+        |getFunc() -> (int) -> int = dbl
         |main() -> int = getFunc()(21)
         |""".stripMargin) shouldBe 42
   }
@@ -175,7 +175,7 @@ class SyslFuncPointerTests extends SyslTestHelpers {
   "chain: function returning function pointer called immediately" in {
     output(
       """add(a: int, b: int) -> int = a + b
-        |getOp() -> func(int, int) -> int = add
+        |getOp() -> (int, int) -> int = add
         |main() -> int
         |    print(getOp()(20, 22))
         |    0
@@ -186,7 +186,7 @@ class SyslFuncPointerTests extends SyslTestHelpers {
     eval(
       """dbl(x: int) -> int = x * 2
         |main() -> int
-        |    f: func(int) -> int = dbl
+        |    f: (int) -> int = dbl
         |    fp = &f
         |    (*fp)(21)
         |""".stripMargin) shouldBe 42
@@ -195,7 +195,7 @@ class SyslFuncPointerTests extends SyslTestHelpers {
   "indirect call on struct field" in {
     eval(
       """struct Ops
-        |    apply: func(int) -> int
+        |    apply: (int) -> int
         |dbl(x: int) -> int = x * 2
         |main() -> int
         |    var ops: Ops
@@ -207,7 +207,7 @@ class SyslFuncPointerTests extends SyslTestHelpers {
   "call function-typed field on indexed struct" in {
     eval(
       """struct Cmd
-        |    handler: func(int) -> int
+        |    handler: (int) -> int
         |dbl(x: int) -> int = x * 2
         |triple(x: int) -> int = x * 3
         |main() -> int

@@ -416,31 +416,31 @@ Tests
 ### parse_bool
 
     #test
-    test_parse_bool_true() -> void
+    test_parse_bool_true() -> unit
         val v, ok = parse_bool("true")
         assert(ok, "true recognized")
         assert(v, "value is true")
 
     #test
-    test_parse_bool_false() -> void
+    test_parse_bool_false() -> unit
         val v, ok = parse_bool("false")
         assert(ok, "false recognized")
         assert(!v, "value is false")
 
     #test
-    test_parse_bool_one() -> void
+    test_parse_bool_one() -> unit
         val v, ok = parse_bool("1")
         assert(ok, "1 recognized")
         assert(v, "value is true")
 
     #test
-    test_parse_bool_zero() -> void
+    test_parse_bool_zero() -> unit
         val v, ok = parse_bool("0")
         assert(ok, "0 recognized")
         assert(!v, "value is false")
 
     #test
-    test_parse_bool_rejects_caps() -> void
+    test_parse_bool_rejects_caps() -> unit
         val _, ok1 = parse_bool("True")
         assert(!ok1, "True rejected")
 
@@ -448,7 +448,7 @@ Tests
         assert(!ok2, "TRUE rejected")
 
     #test
-    test_parse_bool_rejects_yes_no() -> void
+    test_parse_bool_rejects_yes_no() -> unit
         val _, ok1 = parse_bool("yes")
         assert(!ok1, "yes rejected")
 
@@ -456,12 +456,12 @@ Tests
         assert(!ok2, "no rejected")
 
     #test
-    test_parse_bool_rejects_whitespace() -> void
+    test_parse_bool_rejects_whitespace() -> unit
         val _, ok = parse_bool(" true")
         assert(!ok, "leading space rejected")
 
     #test
-    test_parse_bool_rejects_empty() -> void
+    test_parse_bool_rejects_empty() -> unit
         val _, ok = parse_bool("")
         assert(!ok, "empty rejected")
 
@@ -469,58 +469,58 @@ Tests
 ### parse_i64
 
     #test
-    test_parse_i64_zero() -> void
+    test_parse_i64_zero() -> unit
         val v, ok = parse_i64("0")
         assert(ok, "zero parses")
         assert(v == 0i64, "value")
 
     #test
-    test_parse_i64_positive() -> void
+    test_parse_i64_positive() -> unit
         val v, ok = parse_i64("42")
         assert(ok, "parses")
         assert(v == 42i64, "value")
 
     #test
-    test_parse_i64_explicit_plus() -> void
+    test_parse_i64_explicit_plus() -> unit
         val v, ok = parse_i64("+123")
         assert(ok, "plus sign accepted")
         assert(v == 123i64, "value")
 
     #test
-    test_parse_i64_negative() -> void
+    test_parse_i64_negative() -> unit
         val v, ok = parse_i64("-42")
         assert(ok, "negative parses")
         assert(v == -42i64, "value")
 
     #test
-    test_parse_i64_max() -> void
+    test_parse_i64_max() -> unit
         val v, ok = parse_i64("9223372036854775807")
         assert(ok, "MAX_I64 parses")
         assert(v == 9223372036854775807i64, "value")
 
     #test
-    test_parse_i64_min() -> void
+    test_parse_i64_min() -> unit
         val v, ok = parse_i64("-9223372036854775808")
         assert(ok, "MIN_I64 parses (edge case)")
         assert(v == -9223372036854775807i64 - 1i64, "value")
 
     #test
-    test_parse_i64_overflow_positive() -> void
+    test_parse_i64_overflow_positive() -> unit
         val _, ok = parse_i64("9223372036854775808")
         assert(!ok, "MAX_I64+1 rejects")
 
     #test
-    test_parse_i64_overflow_negative() -> void
+    test_parse_i64_overflow_negative() -> unit
         val _, ok = parse_i64("-9223372036854775809")
         assert(!ok, "MIN_I64-1 rejects")
 
     #test
-    test_parse_i64_rejects_empty() -> void
+    test_parse_i64_rejects_empty() -> unit
         val _, ok = parse_i64("")
         assert(!ok, "empty rejects")
 
     #test
-    test_parse_i64_rejects_sign_only() -> void
+    test_parse_i64_rejects_sign_only() -> unit
         val _, ok1 = parse_i64("+")
         assert(!ok1, "lone plus")
 
@@ -528,7 +528,7 @@ Tests
         assert(!ok2, "lone minus")
 
     #test
-    test_parse_i64_rejects_non_digit() -> void
+    test_parse_i64_rejects_non_digit() -> unit
         val _, ok1 = parse_i64("12x3")
         assert(!ok1, "embedded non-digit")
 
@@ -536,12 +536,12 @@ Tests
         assert(!ok2, "all letters")
 
     #test
-    test_parse_i64_rejects_trailing_garbage() -> void
+    test_parse_i64_rejects_trailing_garbage() -> unit
         val _, ok = parse_i64("42 ")
         assert(!ok, "trailing space")
 
     #test
-    test_parse_i64_rejects_leading_zeros_are_ok() -> void
+    test_parse_i64_rejects_leading_zeros_are_ok() -> unit
         val v, ok = parse_i64("007")
         assert(ok, "leading zeros permitted")
         assert(v == 7i64, "value")
@@ -550,23 +550,23 @@ Tests
 ### parse_int
 
     #test
-    test_parse_int_basic() -> void
+    test_parse_int_basic() -> unit
         val v, ok = parse_int("100")
         assert(ok, "parses")
         assert(v == 100, "value")
 
     #test
-    test_parse_int_range_check_positive() -> void
+    test_parse_int_range_check_positive() -> unit
         val _, ok = parse_int("2147483648")
         assert(!ok, "MAX_I32+1 rejects")
 
     #test
-    test_parse_int_range_check_negative() -> void
+    test_parse_int_range_check_negative() -> unit
         val _, ok = parse_int("-2147483649")
         assert(!ok, "MIN_I32-1 rejects")
 
     #test
-    test_parse_int_max() -> void
+    test_parse_int_max() -> unit
         val v, ok = parse_int("2147483647")
         assert(ok, "MAX_I32 parses")
         assert(v == 2147483647, "value")
@@ -575,38 +575,38 @@ Tests
 ### format_bool
 
     #test
-    test_format_bool_true() -> void
+    test_format_bool_true() -> unit
         assert(format_bool(true) == "true", "true")
 
     #test
-    test_format_bool_false() -> void
+    test_format_bool_false() -> unit
         assert(format_bool(false) == "false", "false")
 
 
 ### format_i64 and format_int
 
     #test
-    test_format_i64_zero() -> void
+    test_format_i64_zero() -> unit
         assert(format_i64(0i64) == "0", "zero")
 
     #test
-    test_format_i64_positive() -> void
+    test_format_i64_positive() -> unit
         assert(format_i64(42i64) == "42", "positive")
 
     #test
-    test_format_i64_negative() -> void
+    test_format_i64_negative() -> unit
         assert(format_i64(-42i64) == "-42", "negative")
 
     #test
-    test_format_i64_max() -> void
+    test_format_i64_max() -> unit
         assert(format_i64(9223372036854775807i64) == "9223372036854775807", "MAX_I64")
 
     #test
-    test_format_i64_min() -> void
+    test_format_i64_min() -> unit
         assert(format_i64(-9223372036854775807i64 - 1i64) == "-9223372036854775808", "MIN_I64")
 
     #test
-    test_format_int_basic() -> void
+    test_format_int_basic() -> unit
         assert(format_int(100) == "100", "positive")
         assert(format_int(-100) == "-100", "negative")
         assert(format_int(0) == "0", "zero")
@@ -615,34 +615,34 @@ Tests
 ### round-trips
 
     #test
-    test_roundtrip_i64_positive() -> void
+    test_roundtrip_i64_positive() -> unit
         val n = 1234567890i64
         val v, ok = parse_i64(format_i64(n))
         assert(ok, "parses back")
         assert(v == n, "value preserved")
 
     #test
-    test_roundtrip_i64_negative() -> void
+    test_roundtrip_i64_negative() -> unit
         val n = -9876543210i64
         val v, ok = parse_i64(format_i64(n))
         assert(ok, "parses back")
         assert(v == n, "value preserved")
 
     #test
-    test_roundtrip_i64_min() -> void
+    test_roundtrip_i64_min() -> unit
         val n = -9223372036854775807i64 - 1i64
         val v, ok = parse_i64(format_i64(n))
         assert(ok, "MIN_I64 round-trips")
         assert(v == n, "value preserved")
 
     #test
-    test_roundtrip_bool_true() -> void
+    test_roundtrip_bool_true() -> unit
         val v, ok = parse_bool(format_bool(true))
         assert(ok, "parses back")
         assert(v, "value preserved")
 
     #test
-    test_roundtrip_bool_false() -> void
+    test_roundtrip_bool_false() -> unit
         val v, ok = parse_bool(format_bool(false))
         assert(ok, "parses back")
         assert(!v, "value preserved")
@@ -651,72 +651,72 @@ Tests
 ### parse_i64_base
 
     #test
-    test_parse_hex_basic() -> void
+    test_parse_hex_basic() -> unit
         val v, ok = parse_i64_base("ff", 16)
         assert(ok, "parses")
         assert(v == 255i64, "value")
 
     #test
-    test_parse_hex_uppercase() -> void
+    test_parse_hex_uppercase() -> unit
         val v, ok = parse_i64_base("FF", 16)
         assert(ok, "uppercase accepted")
         assert(v == 255i64, "value")
 
     #test
-    test_parse_hex_mixed_case() -> void
+    test_parse_hex_mixed_case() -> unit
         val v, ok = parse_i64_base("DeAdBeEf", 16)
         assert(ok, "mixed case")
         assert(v == 3735928559i64, "value")
 
     #test
-    test_parse_hex_zero() -> void
+    test_parse_hex_zero() -> unit
         val v, ok = parse_i64_base("0", 16)
         assert(ok, "parses")
         assert(v == 0i64, "value")
 
     #test
-    test_parse_hex_negative() -> void
+    test_parse_hex_negative() -> unit
         val v, ok = parse_i64_base("-1a", 16)
         assert(ok, "negative hex")
         assert(v == -26i64, "value")
 
     #test
-    test_parse_binary() -> void
+    test_parse_binary() -> unit
         val v, ok = parse_i64_base("11010", 2)
         assert(ok, "binary")
         assert(v == 26i64, "value")
 
     #test
-    test_parse_octal() -> void
+    test_parse_octal() -> unit
         val v, ok = parse_i64_base("777", 8)
         assert(ok, "octal")
         assert(v == 511i64, "value")
 
     #test
-    test_parse_base36() -> void
+    test_parse_base36() -> unit
         val v, ok = parse_i64_base("zz", 36)
         assert(ok, "base36")
         assert(v == 1295i64, "value")
 
     #test
-    test_parse_hex_rejects_invalid_digit() -> void
+    test_parse_hex_rejects_invalid_digit() -> unit
         val _, ok = parse_i64_base("fg", 16)
         assert(!ok, "g invalid in base 16")
 
     #test
-    test_parse_binary_rejects_2() -> void
+    test_parse_binary_rejects_2() -> unit
         val _, ok = parse_i64_base("102", 2)
         assert(!ok, "2 invalid in base 2")
 
     #test
-    test_parse_base_rejects_invalid_base() -> void
+    test_parse_base_rejects_invalid_base() -> unit
         val _, ok1 = parse_i64_base("0", 1)
         assert(!ok1, "base 1 rejected")
         val _, ok2 = parse_i64_base("0", 37)
         assert(!ok2, "base 37 rejected")
 
     #test
-    test_parse_hex_empty() -> void
+    test_parse_hex_empty() -> unit
         val _, ok = parse_i64_base("", 16)
         assert(!ok, "empty rejected")
 
@@ -724,52 +724,52 @@ Tests
 ### format_i64_base
 
     #test
-    test_format_hex_basic() -> void
+    test_format_hex_basic() -> unit
         assert(format_i64_base(255i64, 16) == "ff", "ff")
 
     #test
-    test_format_hex_zero() -> void
+    test_format_hex_zero() -> unit
         assert(format_i64_base(0i64, 16) == "0", "zero")
 
     #test
-    test_format_hex_negative() -> void
+    test_format_hex_negative() -> unit
         assert(format_i64_base(-26i64, 16) == "-1a", "negative hex")
 
     #test
-    test_format_binary() -> void
+    test_format_binary() -> unit
         assert(format_i64_base(26i64, 2) == "11010", "binary")
 
     #test
-    test_format_octal() -> void
+    test_format_octal() -> unit
         assert(format_i64_base(511i64, 8) == "777", "octal")
 
     #test
-    test_format_base36() -> void
+    test_format_base36() -> unit
         assert(format_i64_base(1295i64, 36) == "zz", "base36")
 
     #test
-    test_format_hex_large() -> void
+    test_format_hex_large() -> unit
         assert(format_i64_base(3735928559i64, 16) == "deadbeef", "deadbeef")
 
 
 ### round-trips (multi-base)
 
     #test
-    test_roundtrip_hex() -> void
+    test_roundtrip_hex() -> unit
         val n = 48879i64
         val v, ok = parse_i64_base(format_i64_base(n, 16), 16)
         assert(ok, "parses back")
         assert(v == n, "value preserved")
 
     #test
-    test_roundtrip_binary() -> void
+    test_roundtrip_binary() -> unit
         val n = 12345i64
         val v, ok = parse_i64_base(format_i64_base(n, 2), 2)
         assert(ok, "parses back")
         assert(v == n, "value preserved")
 
     #test
-    test_roundtrip_octal() -> void
+    test_roundtrip_octal() -> unit
         val n = -4096i64
         val v, ok = parse_i64_base(format_i64_base(n, 8), 8)
         assert(ok, "parses back")

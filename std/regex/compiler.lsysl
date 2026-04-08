@@ -242,7 +242,7 @@ instruction array.
 ### Single literal produces Char instruction
 
     #test
-    test_compile_literal() -> void
+    test_compile_literal() -> unit
         root, nodes, _, n_groups, err, _, _ = parse_bre("a")
 
         assert(!err, "parse ok")
@@ -263,7 +263,7 @@ instruction array.
 ### Dot produces Any instruction
 
     #test
-    test_compile_dot() -> void
+    test_compile_dot() -> unit
         root, nodes, _, n_groups, err, _, _ = parse_bre(".")
 
         assert(!err, "parse ok")
@@ -276,7 +276,7 @@ instruction array.
 ### Concatenation produces sequential instructions
 
     #test
-    test_compile_concat() -> void
+    test_compile_concat() -> unit
         root, nodes, _, n_groups, err, _, _ = parse_bre("ab")
 
         assert(!err, "parse ok")
@@ -294,7 +294,7 @@ instruction array.
 ### Star produces Split/Jump loop
 
     #test
-    test_compile_star() -> void
+    test_compile_star() -> unit
         root, nodes, _, n_groups, err, _, _ = parse_bre("a*")
 
         assert(!err, "parse ok")
@@ -311,7 +311,7 @@ instruction array.
 ### Capture group produces Save pair
 
     #test
-    test_compile_capture() -> void
+    test_compile_capture() -> unit
         root, nodes, _, n_groups, err, _, _ = parse_bre("\\(a\\)")
 
         assert(!err, "parse ok")
@@ -329,7 +329,7 @@ instruction array.
 ### Anchors produce anchor instructions
 
     #test
-    test_compile_anchors() -> void
+    test_compile_anchors() -> unit
         root, nodes, _, n_groups, err, _, _ = parse_bre("^a$")
 
         assert(!err, "parse ok")
@@ -344,7 +344,7 @@ instruction array.
 ### Character class produces Class instruction
 
     #test
-    test_compile_class() -> void
+    test_compile_class() -> unit
         root, nodes, _, n_groups, err, _, _ = parse_bre("[abc]")
 
         assert(!err, "parse ok")
@@ -358,7 +358,7 @@ instruction array.
 ### Alternation produces Split/Jump
 
     #test
-    test_compile_alt() -> void
+    test_compile_alt() -> unit
         root, nodes, _, n_groups, err, _, _ = parse_regex("a|b")
 
         assert(!err, "parse ok")
@@ -377,7 +377,7 @@ instruction array.
 ### Plus produces child then Split loop
 
     #test
-    test_compile_plus() -> void
+    test_compile_plus() -> unit
         root, nodes, _, n_groups, err, _, _ = parse_regex("a+")
 
         assert(!err, "parse ok")
@@ -393,7 +393,7 @@ instruction array.
 ### Question produces Split then child
 
     #test
-    test_compile_quest() -> void
+    test_compile_quest() -> unit
         root, nodes, _, n_groups, err, _, _ = parse_regex("a?")
 
         assert(!err, "parse ok")

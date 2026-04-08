@@ -119,10 +119,10 @@ enum SyslType:
     case UIntType(w) => s"u$w"
     case DoubleType => "f64"
     case BoolType => "bool"
-    case VoidType => "void"
+    case VoidType => "unit"
     case PtrType(t) => s"*$t"
     case ArrayType(t, n) => s"[$n]$t"
-    case FuncType(params, ret) => s"func(${params.mkString(",")}) -> $ret"
+    case FuncType(params, ret) => s"(${params.mkString(", ")}) -> $ret"
     case StructType(name, _) => name
     case StringType => "string"
     case SliceType(t) => s"[]$t"

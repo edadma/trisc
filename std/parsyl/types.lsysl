@@ -2,7 +2,7 @@ std.parsyl — `ParseMaybe[T]`
 ============================
 
 Tagged result of running a parser: **`Got(pos, value)`** or **`Miss`**. Parsers are
-closures `func(string, int) -> ParseMaybe[T]` (input string and cursor).
+closures `(string, int) -> ParseMaybe[T]` (input string and cursor).
 
 Combinators and `natural` live in sibling `.lsysl` files in this directory, same
 `module std.parsyl`, so the generic enum and instantiated types are visible across

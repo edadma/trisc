@@ -75,7 +75,7 @@ Tests exercise `Eq` and `Ord` on a simple user-defined struct.
 ### Eq
 
     #test
-    test_eq_same() -> void
+    test_eq_same() -> unit
         var a: Point
         a.x = 1
         a.y = 2
@@ -85,7 +85,7 @@ Tests exercise `Eq` and `Ord` on a simple user-defined struct.
         assert(a == b, "equal")
 
     #test
-    test_eq_different() -> void
+    test_eq_different() -> unit
         var a: Point
         a.x = 1
         a.y = 2
@@ -95,7 +95,7 @@ Tests exercise `Eq` and `Ord` on a simple user-defined struct.
         assert(a != b, "not equal")
 
     #test
-    test_ne_is_derived() -> void
+    test_ne_is_derived() -> unit
         var a: Point
         a.x = 1
         a.y = 2
@@ -108,7 +108,7 @@ Tests exercise `Eq` and `Ord` on a simple user-defined struct.
 ### Ord
 
     #test
-    test_ord_less() -> void
+    test_ord_less() -> unit
         var a: Point
         a.x = 1
         a.y = 0
@@ -118,7 +118,7 @@ Tests exercise `Eq` and `Ord` on a simple user-defined struct.
         assert(a < b, "1 < 2")
 
     #test
-    test_ord_greater() -> void
+    test_ord_greater() -> unit
         var a: Point
         a.x = 3
         a.y = 0
@@ -128,7 +128,7 @@ Tests exercise `Eq` and `Ord` on a simple user-defined struct.
         assert(a > b, "3 > 1")
 
     #test
-    test_ord_equal() -> void
+    test_ord_equal() -> unit
         var a: Point
         a.x = 1
         a.y = 2
@@ -141,7 +141,7 @@ Tests exercise `Eq` and `Ord` on a simple user-defined struct.
         assert(!(a > b), "not gt")
 
     #test
-    test_ord_secondary_key() -> void
+    test_ord_secondary_key() -> unit
         var a: Point
         a.x = 1
         a.y = 2
@@ -151,7 +151,7 @@ Tests exercise `Eq` and `Ord` on a simple user-defined struct.
         assert(a < b, "same x, compare y")
 
     #test
-    test_ord_default_methods() -> void
+    test_ord_default_methods() -> unit
         var a: Point
         a.x = 1
         a.y = 0

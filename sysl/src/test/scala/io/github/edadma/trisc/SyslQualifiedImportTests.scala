@@ -73,7 +73,7 @@ class SyslQualifiedImportTests extends SyslTestHelpers {
             |""".stripMargin,
       ),
       """import mylib.math
-        |apply(f: func(int) -> int, x: int) -> int = f(x)
+        |apply(f: (int) -> int, x: int) -> int = f(x)
         |main() -> int = apply(math.dbl, 21)
         |""".stripMargin
     ) shouldBe 42

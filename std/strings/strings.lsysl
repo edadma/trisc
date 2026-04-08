@@ -500,249 +500,249 @@ Tests
 ### has_prefix / has_suffix
 
     #test
-    test_has_prefix_empty() -> void
+    test_has_prefix_empty() -> unit
         assert(has_prefix("hello", ""), "empty prefix always matches")
 
     #test
-    test_has_prefix_full() -> void
+    test_has_prefix_full() -> unit
         assert(has_prefix("hello", "hello"), "full match")
 
     #test
-    test_has_prefix_partial() -> void
+    test_has_prefix_partial() -> unit
         assert(has_prefix("hello world", "hello"), "partial")
 
     #test
-    test_has_prefix_no_match() -> void
+    test_has_prefix_no_match() -> unit
         assert(!has_prefix("hello", "world"), "no match")
 
     #test
-    test_has_prefix_too_long() -> void
+    test_has_prefix_too_long() -> unit
         assert(!has_prefix("hi", "hello"), "prefix longer than string")
 
     #test
-    test_has_suffix_empty() -> void
+    test_has_suffix_empty() -> unit
         assert(has_suffix("hello", ""), "empty suffix always matches")
 
     #test
-    test_has_suffix_full() -> void
+    test_has_suffix_full() -> unit
         assert(has_suffix("hello", "hello"), "full match")
 
     #test
-    test_has_suffix_partial() -> void
+    test_has_suffix_partial() -> unit
         assert(has_suffix("hello world", "world"), "trailing")
 
     #test
-    test_has_suffix_no_match() -> void
+    test_has_suffix_no_match() -> unit
         assert(!has_suffix("hello", "world"), "no match")
 
 
 ### index / last_index / contains
 
     #test
-    test_index_empty_sub() -> void
+    test_index_empty_sub() -> unit
         assert(index("abc", "") == 0, "empty at 0")
 
     #test
-    test_index_found_at_start() -> void
+    test_index_found_at_start() -> unit
         assert(index("hello world", "hello") == 0, "at start")
 
     #test
-    test_index_found_middle() -> void
+    test_index_found_middle() -> unit
         assert(index("hello world", "lo w") == 3, "middle")
 
     #test
-    test_index_found_end() -> void
+    test_index_found_end() -> unit
         assert(index("hello world", "world") == 6, "at end")
 
     #test
-    test_index_not_found() -> void
+    test_index_not_found() -> unit
         assert(index("hello", "xyz") == -1, "not found")
 
     #test
-    test_index_sub_longer() -> void
+    test_index_sub_longer() -> unit
         assert(index("hi", "hello") == -1, "sub longer than s")
 
     #test
-    test_last_index_empty_sub() -> void
+    test_last_index_empty_sub() -> unit
         assert(last_index("abc", "") == 3, "empty at len")
 
     #test
-    test_last_index_repeated() -> void
+    test_last_index_repeated() -> unit
         assert(last_index("banana", "an") == 3, "last 'an' in banana")
 
     #test
-    test_last_index_not_found() -> void
+    test_last_index_not_found() -> unit
         assert(last_index("banana", "xyz") == -1, "not found")
 
     #test
-    test_contains_yes() -> void
+    test_contains_yes() -> unit
         assert(contains("hello world", "world"), "found")
 
     #test
-    test_contains_no() -> void
+    test_contains_no() -> unit
         assert(!contains("hello", "xyz"), "not found")
 
 
 ### count
 
     #test
-    test_count_basic() -> void
+    test_count_basic() -> unit
         assert(count("banana", "an") == 2, "non-overlapping")
 
     #test
-    test_count_all_overlap_avoided() -> void
+    test_count_all_overlap_avoided() -> unit
         assert(count("aaaa", "aa") == 2, "non-overlapping counts 2, not 3")
 
     #test
-    test_count_not_found() -> void
+    test_count_not_found() -> unit
         assert(count("banana", "xyz") == 0, "zero")
 
     #test
-    test_count_empty_sub() -> void
+    test_count_empty_sub() -> unit
         assert(count("abc", "") == 4, "len(s) + 1")
 
 
 ### index_byte
 
     #test
-    test_index_byte_found() -> void
+    test_index_byte_found() -> unit
         assert(index_byte("hello", byte('l')) == 2, "first 'l'")
 
     #test
-    test_index_byte_not_found() -> void
+    test_index_byte_not_found() -> unit
         assert(index_byte("hello", byte('z')) == -1, "not found")
 
     #test
-    test_last_index_byte_found() -> void
+    test_last_index_byte_found() -> unit
         assert(last_index_byte("hello", byte('l')) == 3, "last 'l'")
 
 
 ### substring
 
     #test
-    test_substring_basic() -> void
+    test_substring_basic() -> unit
         assert(substring("hello world", 6, 11) == "world", "tail")
 
     #test
-    test_substring_empty_range() -> void
+    test_substring_empty_range() -> unit
         assert(substring("hello", 2, 2) == "", "empty")
 
     #test
-    test_substring_full() -> void
+    test_substring_full() -> unit
         assert(substring("hello", 0, 5) == "hello", "full")
 
 
 ### trim variants
 
     #test
-    test_trim_space_both_sides() -> void
+    test_trim_space_both_sides() -> unit
         assert(trim_space("  hello  ") == "hello", "both sides")
 
     #test
-    test_trim_space_tabs_and_newlines() -> void
+    test_trim_space_tabs_and_newlines() -> unit
         assert(trim_space("\t\nhi\r\n") == "hi", "mixed whitespace")
 
     #test
-    test_trim_space_no_whitespace() -> void
+    test_trim_space_no_whitespace() -> unit
         assert(trim_space("hello") == "hello", "untouched")
 
     #test
-    test_trim_space_all_whitespace() -> void
+    test_trim_space_all_whitespace() -> unit
         assert(trim_space("   ") == "", "becomes empty")
 
     #test
-    test_trim_left_cutset() -> void
+    test_trim_left_cutset() -> unit
         assert(trim_left("xxhelloxx", "x") == "helloxx", "left only")
 
     #test
-    test_trim_right_cutset() -> void
+    test_trim_right_cutset() -> unit
         assert(trim_right("xxhelloxx", "x") == "xxhello", "right only")
 
     #test
-    test_trim_cutset_both() -> void
+    test_trim_cutset_both() -> unit
         assert(trim("xxhelloxx", "x") == "hello", "both")
 
     #test
-    test_trim_multi_char_cutset() -> void
+    test_trim_multi_char_cutset() -> unit
         assert(trim("!?hello?!", "!?") == "hello", "any of the chars")
 
 
 ### case conversion
 
     #test
-    test_to_upper_basic() -> void
+    test_to_upper_basic() -> unit
         assert(to_upper("hello") == "HELLO", "letters")
 
     #test
-    test_to_upper_mixed() -> void
+    test_to_upper_mixed() -> unit
         assert(to_upper("Hello, World!") == "HELLO, WORLD!", "mixed")
 
     #test
-    test_to_upper_already_upper() -> void
+    test_to_upper_already_upper() -> unit
         assert(to_upper("ABC") == "ABC", "idempotent")
 
     #test
-    test_to_lower_basic() -> void
+    test_to_lower_basic() -> unit
         assert(to_lower("HELLO") == "hello", "letters")
 
     #test
-    test_to_lower_mixed() -> void
+    test_to_lower_mixed() -> unit
         assert(to_lower("Hello, World!") == "hello, world!", "mixed")
 
 ### replace_all
 
     #test
-    test_replace_all_basic() -> void
+    test_replace_all_basic() -> unit
         assert(replace_all("hello world", "world", "there") == "hello there", "one")
 
     #test
-    test_replace_all_multiple() -> void
+    test_replace_all_multiple() -> unit
         assert(replace_all("aaa", "a", "b") == "bbb", "each char")
 
     #test
-    test_replace_all_no_match() -> void
+    test_replace_all_no_match() -> unit
         assert(replace_all("hello", "xyz", "abc") == "hello", "untouched")
 
     #test
-    test_replace_all_longer_replacement() -> void
+    test_replace_all_longer_replacement() -> unit
         assert(replace_all("hi hi", "hi", "hello") == "hello hello", "grows")
 
     #test
-    test_replace_all_shorter_replacement() -> void
+    test_replace_all_shorter_replacement() -> unit
         assert(replace_all("hello hello", "hello", "hi") == "hi hi", "shrinks")
 
     #test
-    test_replace_all_non_overlapping() -> void
+    test_replace_all_non_overlapping() -> unit
         assert(replace_all("aaaa", "aa", "X") == "XX", "non-overlap")
 
 
 ### repeat
 
     #test
-    test_repeat_basic() -> void
+    test_repeat_basic() -> unit
         assert(repeat("ab", 3) == "ababab", "three times")
 
     #test
-    test_repeat_zero() -> void
+    test_repeat_zero() -> unit
         assert(repeat("abc", 0) == "", "zero")
 
     #test
-    test_repeat_negative() -> void
+    test_repeat_negative() -> unit
         assert(repeat("abc", -5) == "", "negative treated as zero")
 
     #test
-    test_repeat_empty_string() -> void
+    test_repeat_empty_string() -> unit
         assert(repeat("", 100) == "", "empty stays empty")
 
     #test
-    test_repeat_one() -> void
+    test_repeat_one() -> unit
         assert(repeat("abc", 1) == "abc", "identity")
 
 
 ### split
 
     #test
-    test_split_basic() -> void
+    test_split_basic() -> unit
         val parts = split("a,b,c", ",")
         assert(len(parts) == 3, "three parts")
         assert(parts[0] == "a", "first")
@@ -750,13 +750,13 @@ Tests
         assert(parts[2] == "c", "third")
 
     #test
-    test_split_no_match() -> void
+    test_split_no_match() -> unit
         val parts = split("hello", ",")
         assert(len(parts) == 1, "one part")
         assert(parts[0] == "hello", "whole string")
 
     #test
-    test_split_empty_sep() -> void
+    test_split_empty_sep() -> unit
         val parts = split("abc", "")
         assert(len(parts) == 3, "three chars")
         assert(parts[0] == "a", "a")
@@ -764,7 +764,7 @@ Tests
         assert(parts[2] == "c", "c")
 
     #test
-    test_split_adjacent_separators() -> void
+    test_split_adjacent_separators() -> unit
         val parts = split("a,,b", ",")
         assert(len(parts) == 3, "three parts")
         assert(parts[0] == "a", "first")
@@ -772,14 +772,14 @@ Tests
         assert(parts[2] == "b", "third")
 
     #test
-    test_split_leading_trailing() -> void
+    test_split_leading_trailing() -> unit
         val parts = split(",a,b,", ",")
         assert(len(parts) == 4, "four parts")
         assert(parts[0] == "", "leading empty")
         assert(parts[3] == "", "trailing empty")
 
     #test
-    test_split_multi_char_sep() -> void
+    test_split_multi_char_sep() -> unit
         val parts = split("one::two::three", "::")
         assert(len(parts) == 3, "three parts")
         assert(parts[0] == "one", "first")
@@ -790,23 +790,23 @@ Tests
 ### join
 
     #test
-    test_join_basic() -> void
+    test_join_basic() -> unit
         val parts = split("a,b,c", ",")
         assert(join(parts, "-") == "a-b-c", "rejoin")
 
     #test
-    test_join_empty_sep() -> void
+    test_join_empty_sep() -> unit
         val parts = split("a,b,c", ",")
         assert(join(parts, "") == "abc", "no separator")
 
     #test
-    test_join_single() -> void
+    test_join_single() -> unit
         val parts = new [1]string
         parts[0] = "hello"
         assert(join(parts[:], ",") == "hello", "single")
 
     #test
-    test_join_empty_parts() -> void
+    test_join_empty_parts() -> unit
         val parts = new [0]string
         assert(join(parts[:], ",") == "", "empty")
 
@@ -814,32 +814,32 @@ Tests
 ### fields
 
     #test
-    test_fields_basic() -> void
+    test_fields_basic() -> unit
         val parts = fields("  hello   world  ")
         assert(len(parts) == 2, "two words")
         assert(parts[0] == "hello", "first")
         assert(parts[1] == "world", "second")
 
     #test
-    test_fields_tabs_newlines() -> void
+    test_fields_tabs_newlines() -> unit
         val parts = fields("\thello\n\nworld\t")
         assert(len(parts) == 2, "two words")
         assert(parts[0] == "hello", "first")
         assert(parts[1] == "world", "second")
 
     #test
-    test_fields_no_whitespace() -> void
+    test_fields_no_whitespace() -> unit
         val parts = fields("hello")
         assert(len(parts) == 1, "one word")
         assert(parts[0] == "hello", "whole")
 
     #test
-    test_fields_all_whitespace() -> void
+    test_fields_all_whitespace() -> unit
         val parts = fields("   ")
         assert(len(parts) == 0, "no words")
 
     #test
-    test_fields_empty() -> void
+    test_fields_empty() -> unit
         val parts = fields("")
         assert(len(parts) == 0, "no words")
 

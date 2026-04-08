@@ -2,7 +2,7 @@
 twice(x: int) -> int = x * 2
 square(x: int) -> int = x * x
 
-apply_twice(f: func(int) -> int, x: int) -> int = f(f(x))
+apply_twice(f: (int) -> int, x: int) -> int = f(f(x))
 
 main() -> int
     a = apply_twice(twice, 3)   // twice(twice(3)) = 12
