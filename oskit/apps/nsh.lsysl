@@ -536,8 +536,20 @@ Built-in commands.
                     nsh_print("running ")
                 else if state == 2
                     nsh_print("blocked ")
+                else if state == 4
+                    nsh_print("joining ")
                 else if state == 5
                     nsh_print("suspend ")
+                else if state == 10
+                    nsh_print("notify  ")
+                else if state == 11
+                    nsh_print("mutex   ")
+                else if state == 20
+                    nsh_print("sendblk ")
+                else if state == 21
+                    nsh_print("recvblk ")
+                else if state == 22
+                    nsh_print("rcvntfy ")
                 else
                     nsh_print("unknown ")
                 // Print name
