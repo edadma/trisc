@@ -19,6 +19,7 @@ class SyslAnalyzer:
   private val simpleEnumTypes = new mutable.LinkedHashMap[String, SyslType.EnumType]
   private val dataEnumTypes = new mutable.LinkedHashMap[String, SyslType.EnumType]  // data enum name → EnumType
   private val variantToEnum = new mutable.LinkedHashMap[String, (SyslType.EnumType, Int)]  // variant name → (enum type, variant index)
+  private val interfaceTypes = new mutable.LinkedHashMap[String, SyslType.InterfaceType]  // interface name → InterfaceType
   private val typeAliases = new mutable.LinkedHashMap[String, TypeAST]  // alias name → target type AST
   private val methods = new mutable.LinkedHashMap[String, mutable.Set[String]]  // struct name → set of method names
   private val deprecations = new mutable.LinkedHashMap[String, Option[String]]  // name → optional reason
@@ -199,12 +200,74 @@ class SyslAnalyzer:
             enumTypes(sn) = members
           else
             // Data enum — register in dataEnumTypes and variantToEnum
+            linkImportedDataEnumToTemplate(et)
             dataEnumTypes(sn) = et
-            for ((vname, _), idx) <- et.variants.zipWithIndex do
-              variantToEnum(vname) = (et, idx)
+            // Mangled generic instances (e.g. ParseMaybe_i32) link via enumToTemplate only; do not
+            // register Got/Miss in variantToEnum or they shadow genericVariantToEnum and break seq/map.
+            if !enumToTemplate.contains(et.name) then
+              for ((vname, _), idx) <- et.variants.zipWithIndex do
+                variantToEnum(vname) = (et, idx)
 
   def isExternal(name: String): Boolean = externalSymbols.contains(name)
   def externals: Set[String] = externalSymbols.toSet
+
+  /** Inverse of `typeToMangled` for a single type (used in mangled generic enum names like `ParseMaybe_i32`). */
+  private def parseMangledMonotype(s: String): Option[SyslType] =
+    if s.isEmpty then None
+    else if s.startsWith("slice") then parseMangledMonotype(s.drop(5)).map(SyslType.SliceType.apply)
+    else if s.startsWith("ptr") then parseMangledMonotype(s.drop(3)).map(SyslType.PtrType.apply)
+    else if s.startsWith("ref") then parseMangledMonotype(s.drop(3)).map(SyslType.RefType.apply)
+    else
+      s match
+        case "i8" => Some(SyslType.I8)
+        case "i16" => Some(SyslType.I16)
+        case "i32" => Some(SyslType.I32)
+        case "i64" => Some(SyslType.I64)
+        case "u8" => Some(SyslType.U8)
+        case "u16" => Some(SyslType.U16)
+        case "u32" => Some(SyslType.U32)
+        case "u64" => Some(SyslType.U64)
+        case "bool" => Some(SyslType.BoolType)
+        case "string" => Some(SyslType.StringType)
+        case "void" => Some(SyslType.VoidType)
+        case "f64" => Some(SyslType.DoubleType)
+        case _ => None
+
+  /** Link mangled imported enum names to generic templates for `unifyTypes` only. Do not call `instantiateGenericEnum` here — it would overwrite `variantToEnum` for shared variant names like `Got`/`Miss`. */
+  private def linkImportedDataEnumToTemplate(et: SyslType.EnumType): Unit =
+    if genericEnums.isEmpty then return
+    for (baseName, decl) <- genericEnums if decl.typeParams.length == 1 do
+      val prefix = baseName + "_"
+      if et.name.startsWith(prefix) then
+        val suffix = et.name.drop(prefix.length)
+        parseMangledMonotype(suffix).foreach { t =>
+          enumToTemplate(et.name) = (baseName, List(t))
+        }
+
+  /** Generic templates are omitted from `ModuleMeta` / typed `TProgram`; same-package siblings need the raw AST templates to resolve calls like `alt(...)`. */
+  def registerGenericTemplatesFrom(program: ProgramAST): Unit =
+    for decl <- program.decls do
+      decl match
+        case fd @ FunDeclAST(name, _, _, _, _, tps, _, _) if tps.nonEmpty =>
+          if !genericTemplates.contains(name) && !functions.contains(name) then
+            genericTemplates(name) = fd
+        case sd @ StructDeclAST(name, _, tps, _) if tps.nonEmpty =>
+          if !genericStructs.contains(name) then
+            genericStructs(name) = sd
+        case de @ DataEnumDeclAST(name, variants, tps, _) if tps.nonEmpty =>
+          if !genericEnums.contains(name) then
+            genericEnums(name) = de
+            for (EnumVariantAST(vname, _), idx) <- variants.zipWithIndex do
+              genericVariantToEnum.get(vname) match
+                case Some((n, i)) =>
+                  if n != name || i != idx then
+                    throw AnalysisError(s"duplicate variant name: '$vname'", de)
+                case None =>
+                  // Import may have registered Got/Miss on variantToEnum when mangled linking failed;
+                  // template wins so analyze(generic enum) does not see variantToEnum + empty genericVariantToEnum.
+                  if variantToEnum.contains(vname) then variantToEnum.remove(vname)
+                  genericVariantToEnum(vname) = (name, idx)
+        case _ => ()
 
   def analyze(program: ProgramAST): TProgram =
     // Pass 0: forward-declare all type names so recursive references resolve.
@@ -324,9 +387,13 @@ class SyslAnalyzer:
             genericEnums(name) = de
             // Register bare variant names for inference at construction sites
             for (EnumVariantAST(vname, _), idx) <- variants.zipWithIndex do
-              if genericVariantToEnum.contains(vname) || variantToEnum.contains(vname) then
-                throw AnalysisError(s"duplicate variant name: '$vname'")
-              genericVariantToEnum(vname) = (name, idx)
+              genericVariantToEnum.get(vname) match
+                case Some((n, i)) if n == name && i == idx => () // already from registerGenericTemplatesFrom(sibling)
+                case Some((n, i)) =>
+                  throw AnalysisError(s"duplicate variant name: '$vname' ($n#$i vs '$name'#$idx)", decl)
+                case None =>
+                  if variantToEnum.contains(vname) then variantToEnum.remove(vname)
+                  genericVariantToEnum(vname) = (name, idx)
           else
             if enumTypes.contains(name) || genericEnums.contains(name) then
               throw AnalysisError(s"duplicate enum: '$name'", decl)
@@ -349,6 +416,23 @@ class SyslAnalyzer:
           if methodNames.distinct.length != methodNames.length then
             throw AnalysisError(s"duplicate method names in trait '$name'")
           traits(name) = TraitInfo(name, tparam, methods)
+        case InterfaceDeclAST(name, methodASTs, embeddedNames, _) =>
+          if interfaceTypes.contains(name) then throw AnalysisError(s"duplicate interface: '$name'", decl)
+          // Resolve embedded interfaces and flatten methods
+          val embeddedMethods = embeddedNames.flatMap { en =>
+            interfaceTypes.getOrElse(en, throw AnalysisError(s"embedded interface '$en' not found", decl)).methods
+          }
+          val ownMethods = methodASTs.map { m =>
+            val paramTypes = m.params.map(p => resolveType(p.typ))
+            val retType = resolveType(m.returnType)
+            (m.name, paramTypes, retType)
+          }
+          val allMethods = embeddedMethods ++ ownMethods
+          // Check for duplicate method names
+          val names = allMethods.map(_._1)
+          if names.distinct.length != names.length then
+            throw AnalysisError(s"duplicate method names in interface '$name'")
+          interfaceTypes(name) = SyslType.InterfaceType(name, allMethods)
         case ImplDeclAST(_, _, _, _) =>
           // Deferred to registerImpls after all traits are known
           ()
@@ -416,6 +500,7 @@ class SyslAnalyzer:
       case s: StructDeclAST if s.typeParams.nonEmpty => Nil
       case e: DataEnumDeclAST if e.typeParams.nonEmpty => Nil
       case _: TraitDeclAST => Nil // traits emit nothing; only impls do
+      case _: InterfaceDeclAST => Nil // interfaces are type-only; emitted via TInterfaceDecl
       case impl: ImplDeclAST   => analyzeImplMethods(impl)
       case d => List(analyzeDecl(d))
     }
@@ -533,6 +618,7 @@ class SyslAnalyzer:
       case name if structTypes.contains(name) => structTypes(name)
       case name if dataEnumTypes.contains(name) => dataEnumTypes(name)
       case name if simpleEnumTypes.contains(name) => simpleEnumTypes(name)
+      case name if interfaceTypes.contains(name) => interfaceTypes(name)
       case other => throw AnalysisError(s"unknown type: '$other'")
     case PtrTypeAST(inner) => PtrType(resolveType(inner))
     case ArrayTypeAST(size, elem) => ArrayType(resolveType(elem), size)
@@ -540,6 +626,18 @@ class SyslAnalyzer:
     case TupleTypeAST(elems) => SyslType.tupleType(elems.map(resolveType))
     case FuncTypeAST(params, ret) => FuncType(params.map(resolveType), resolveType(ret))
     case RefTypeAST(inner) => RefType(resolveType(inner))
+
+  private def satisfiesInterface(st: SyslType.StructType, iface: SyslType.InterfaceType): Boolean =
+    val structName = st.name
+    iface.methods.forall { (methodName, paramTypes, retType) =>
+      val funcName = s"${structName}_$methodName"
+      functions.get(funcName) match
+        case Some(funInfo) =>
+          // Skip self param (first param is *StructType), compare the rest
+          val userParams = funInfo.params.drop(1).map(_._2)
+          userParams == paramTypes && funInfo.returnType == retType
+        case None => false
+    }
 
   private def compatible(from: SyslType, to: SyslType): Boolean =
     (from, to) match
@@ -569,6 +667,13 @@ class SyslAnalyzer:
       case (SliceType(e1), SliceType(e2)) if e1 == e2 => true
       case (RefType(a), RefType(b)) if compatible(a, b) => true // same ref type (recursive check handles nominal types)
       case (RefType(inner), PtrType(_)) => true             // &T → *U (ref decays to pointer)
+      // Interface satisfaction: struct/ptr/ref → interface (if methods match)
+      case (st: StructType, iface: InterfaceType) => satisfiesInterface(st, iface)
+      case (PtrType(st: StructType), iface: InterfaceType) => satisfiesInterface(st, iface)
+      case (RefType(st: StructType), iface: InterfaceType) => satisfiesInterface(st, iface)
+      // Interface-to-interface widening (superset of methods)
+      case (InterfaceType(_, methodsA), InterfaceType(_, methodsB)) =>
+        methodsB.forall(mb => methodsA.exists(_ == mb))
       case _ => false
 
   // Coerce integer literals to the target type (like Rust's untyped integer literals)
@@ -916,9 +1021,11 @@ class SyslAnalyzer:
       val coerced = coerceLiteral(arg, pType)
       if !compatible(coerced.typ, pType) then
         throw AnalysisError(s"argument '$pName' of '$name' expects $pType, got ${coerced.typ}")
-      // Insert explicit cast for string→*i8 decay so codegen can handle it
+      // Insert explicit conversions for codegen
       (coerced.typ, pType) match
         case (StringType, PtrType(I8 | U8)) => TCast(coerced, pType)
+        case (_, iface: InterfaceType) if !coerced.typ.isInstanceOf[InterfaceType] =>
+          TInterfaceBox(coerced, iface)
         case _ => coerced
     }
 
@@ -936,14 +1043,19 @@ class SyslAnalyzer:
         val tInit = coerceLiteral(tInit0, declType)
         if typOpt.isDefined && !compatible(tInit.typ, declType) then
           throw AnalysisError(s"cannot assign ${tInit.typ} to $declType variable '$name'")
+        // Box concrete type into interface if needed
+        val tInitFinal = (tInit.typ, declType) match
+          case (_, iface: InterfaceType) if !tInit.typ.isInstanceOf[InterfaceType] =>
+            TInterfaceBox(tInit, iface)
+          case _ => tInit
         // `_` is a discard binding: evaluate the initializer for its side effects
         // but don't bind any name. Multiple `_`s in the same scope don't collide.
         if name == "_" then
-          TExprStmt(tInit)
+          TExprStmt(tInitFinal)
         else
           if scopeStack != null then
             currentScope(name) = SymInfo(name, declType, isMutable)
-          TVarStmt(name, declType, tInit)
+          TVarStmt(name, declType, tInitFinal)
 
       case DestructureStmtAST(names, init, isMutable) =>
         val tInit = analyzeExpr(init)
@@ -1767,6 +1879,16 @@ class SyslAnalyzer:
       case MethodCallAST(obj, method, args) =>
         val tObj = analyzeExpr(obj)
         val tArgs = args.map(analyzeExpr)
+        // Interface dispatch
+        tObj.typ match
+          case iface: InterfaceType =>
+            val methodIdx = iface.methods.indexWhere(_._1 == method)
+            if methodIdx < 0 then throw AnalysisError(s"interface ${iface.name} has no method '$method'")
+            val (_, paramTypes, retType) = iface.methods(methodIdx)
+            val params = paramTypes.zipWithIndex.map((t, i) => (s"arg$i", t))
+            val checkedArgs = checkArgs(s"${iface.name}.$method", params, tArgs)
+            return TInterfaceDispatch(tObj, methodIdx, checkedArgs, retType)
+          case _ => ()
         // Determine the struct type (defer self-arg computation until we know it's a method)
         val structType = tObj.typ match
           case st: StructType          => st

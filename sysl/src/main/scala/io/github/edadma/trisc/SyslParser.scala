@@ -42,7 +42,7 @@ class SyslParser extends StandardTokenParsers {
     }
 
   lazy val declBare: Parser[DeclAST] =
-    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | typeAliasDecl | "private" ~> declBody(true) | declBody(false)
+    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | interfaceDecl | typeAliasDecl | "private" ~> declBody(true) | declBody(false)
 
   // --- Attributes ---
 
@@ -155,6 +155,21 @@ class SyslParser extends StandardTokenParsers {
     ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
       case name ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body)
     }
+
+  lazy val interfaceDecl: Parser[InterfaceDeclAST] =
+    "interface" ~> ident ~
+      (Newline ~> Indent ~> rep1sep(interfaceMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
+        case name ~ members =>
+          val methods = members.collect { case Right(m) => m }
+          val embedded = members.collect { case Left(n) => n }
+          InterfaceDeclAST(name, methods, embedded)
+      }
+
+  lazy val interfaceMember: Parser[Either[String, InterfaceMethodAST]] =
+    ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ opt("->" ~> typeRef) ^^ {
+      case name ~ params ~ rt => Right(InterfaceMethodAST(name, params, rt.getOrElse(NamedTypeAST("void"))))
+    } |
+    ident ^^ (name => Left(name))
 
 
   // Accept identifiers and type keywords (e.g., "string") in import paths

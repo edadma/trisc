@@ -1,0 +1,112 @@
+std.parsyl.tests — `#test` examples
+===================================
+
+Library API and `ParseMaybe[T]` live in `core.lsysl`; this file only holds
+`#test` entry points. Run `sysl test std/parsyl` to compile every `.lsysl` in
+the directory as one package (`module std.parsyl`).
+
+
+    module std.parsyl
+
+    #test
+    smoke_lit_then_run_all() -> void
+        val p = lit(int('z'))
+        run_all_int(p, "z") match
+            Got(_, ch) -> expect(ch, int('z'), "literal round-trip")
+            Miss -> assert(false, "lit(z)")
+
+    #test
+    ex_lit_a_matches() -> void
+        val p = lit(int('a'))
+        run_all_int(p, "a") match
+            Got(_, _) -> assert(true, "ok")
+            Miss -> assert(false, "expected a")
+
+    #test
+    ex_lit_a_rejects_b() -> void
+        val p = lit(int('a'))
+        run_all_int(p, "b") match
+            Got(_, _) -> assert(false, "no match")
+            Miss -> assert(true, "ok")
+
+    #test
+    ex_alt_ab_accepts_either_byte() -> void
+        val p = alt(lit(int('a')), lit(int('b')))
+        run_all_int(p, "a") match
+            Got(_, _) -> assert(true, "a")
+            Miss -> assert(false, "a")
+        run_all_int(p, "b") match
+            Got(_, _) -> assert(true, "b")
+            Miss -> assert(false, "b")
+
+    #test
+    ex_seq_ab_then_map() -> void
+        val raw = seq(lit(int('a')), lit(int('b')))
+        val p = map(raw, (pair: (int, int)) -> pair.0 + pair.1)
+        run_all_int(p, "ab") match
+            Got(_, sum) -> expect(sum, int('a') + int('b'), "sum")
+            Miss -> assert(false, "ab")
+
+    #test
+    integration_xy_checksum() -> void
+        val p = map(
+            seq(lit(int('x')), lit(int('y'))),
+            (pair: (int, int)) -> pair.0 * 1000 + pair.1)
+        run_all_int(p, "xy") match
+            Got(_, v) -> expect(v, int('x') * 1000 + int('y'), "checksum")
+            Miss -> assert(false, "xy")
+
+    #test
+    ex_many0_allows_empty() -> void
+        val p = many0_int(digit_unit())
+        run_all_ints(p, "") match
+            Got(_, codes) -> expect(len(codes), 0, "zero digits")
+            Miss -> assert(false, "many0 empty")
+
+    #test
+    ex_many1_needs_at_least_one() -> void
+        val p = many1_int(digit_unit())
+        run_all_ints(p, "") match
+            Got(_, _) -> assert(false, "empty fail")
+            Miss -> assert(true, "ok")
+        run_all_ints(p, "2048") match
+            Got(_, codes) ->
+                expect(len(codes), 4, "four bytes")
+                expect(codes[0], int('2'), "first")
+            Miss -> assert(false, "2048")
+
+    #test
+    integration_natural_answers() -> void
+        run_all_int(natural(), "99") match
+            Got(_, n) -> expect(n, 99, "two-digit")
+            Miss -> assert(false, "99")
+
+    #test
+    integration_natural_rejects_trailing_garbage() -> void
+        run_all_int(natural(), "42!") match
+            Got(_, _) -> assert(false, "trailing junk")
+            Miss -> assert(true, "ok")
+
+    #test
+    ex_natural_single_digit() -> void
+        run_all_int(natural(), "7") match
+            Got(_, n) -> expect(n, 7, "digit")
+            Miss -> assert(false, "7")
+
+    #test
+    ex_natural_leading_zeros_count() -> void
+        run_all_int(natural(), "007") match
+            Got(_, n) -> expect(n, 7, "leading zeros")
+            Miss -> assert(false, "007")
+
+    #test
+    ex_natural_large_constant() -> void
+        run_all_int(natural(), "2048") match
+            Got(_, n) -> expect(n, 2048, "2048")
+            Miss -> assert(false, "2048")
+
+    #test
+    ex_natural_rejects_empty() -> void
+        run_all_int(natural(), "") match
+            Got(_, _) -> assert(false, "empty")
+            Miss -> assert(true, "ok")
