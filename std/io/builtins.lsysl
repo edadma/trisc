@@ -1,0 +1,79 @@
+std.io builtins — OS-level I/O primitives
+==========================================
+
+Low-level I/O functions backed by the host runtime. These
+are `extern` declarations — no Sysl implementation exists;
+the interpreter or codegen linker provides them.
+
+    module std.io
+
+
+Constants
+---------
+
+File open flags.
+
+    val O_RDONLY: int = 0
+    val O_WRONLY: int = 1
+    val O_RDWR: int = 2
+    val O_CREATE: int = 4
+    val O_TRUNC: int = 8
+    val O_APPEND: int = 16
+
+Standard file descriptors.
+
+    val STDIN: int = 0
+    val STDOUT: int = 1
+    val STDERR: int = 2
+
+Seek origins.
+
+    val SEEK_SET: int = 0
+    val SEEK_CUR: int = 1
+    val SEEK_END: int = 2
+
+
+Functions
+---------
+
+### open
+
+Open a file. Returns a file descriptor or -1 on error.
+
+    extern open(path: string, flags: int) -> int
+
+### close
+
+Close an open file descriptor.
+
+    extern close(fd: int) -> int
+
+### read
+
+Read up to `count` bytes into `buf`. Returns bytes read.
+
+    extern read(fd: int, buf: *byte, count: int) -> int
+
+### write
+
+Write `count` bytes from `buf`. Returns bytes written.
+
+    extern write(fd: int, buf: *byte, count: int) -> int
+
+### write_str
+
+Write a string to a file descriptor.
+
+    extern write_str(fd: int, s: string) -> int
+
+### read_line
+
+Read a line from a file descriptor.
+
+    extern read_line(fd: int) -> string
+
+### seek
+
+Seek to a position in an open file.
+
+    extern seek(fd: int, offset: i64, whence: int) -> i64

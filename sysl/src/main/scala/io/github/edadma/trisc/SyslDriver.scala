@@ -124,7 +124,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         val imp = imp0.selectors match
           case List(QualifiedImport) =>
             def isKnownModule(path: String): Boolean =
-              SyslStdlib.modules.contains(path) || smetaCache.contains(path) ||
+              smetaCache.contains(path) ||
                 packageMetaCache.contains(path) || resolveExternalMeta(path).isDefined
             if isKnownModule(imp0.modulePath) then imp0 // full path is a module → qualified import
             else
@@ -134,9 +134,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
                 ImportDeclAST(parts.init.mkString("/"), List(NamedImport(parts.last)))
               else imp0
           case _ => imp0
-        if SyslStdlib.modules.contains(imp.modulePath) then
-          analyzer.registerImport(SyslStdlib.meta(imp.modulePath), imp.selectors, imp.modulePath)
-        else if smetaCache.contains(imp.modulePath) then
+        if smetaCache.contains(imp.modulePath) then
           ModuleMeta.fromSmeta(smetaCache(imp.modulePath)).foreach(analyzer.registerImport(_, imp.selectors, imp.modulePath))
         else if packageMetaCache.contains(imp.modulePath) then
           analyzer.registerImport(packageMetaCache(imp.modulePath), imp.selectors, imp.modulePath)
@@ -227,7 +225,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
 
   def collectStdlibImports(units: List[CompilationUnit]): Set[String] =
     units.flatMap(_.typed.decls).collect {
-      case TImportDecl(path) if SyslStdlib.modules.contains(path) => path
+      case TImportDecl(path) if SyslStdlib.builtinModules.contains(path) => path
     }.toSet
 
   /** Resolve conditional compilation directives in a parsed AST. */
@@ -258,9 +256,18 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
     val parser = new SyslParser
     parser.parseProgram(source) match
       case Right(ast) =>
-        val analyzer = new SyslAnalyzer
-        val typed = analyzer.analyze(ast)
-        Some(ModuleMeta.fromProgram(typed))
+        // Strip imports and test functions — we only need declarations for metadata.
+        // This allows .lsysl files that import test utilities to still provide metadata.
+        val stripped = ProgramAST(ast.decls.filter {
+          case _: ImportDeclAST  => false
+          case f: FunDeclAST     => !f.attributes.exists(_.name == "test")
+          case _                 => true
+        })
+        scala.util.Try {
+          val analyzer = new SyslAnalyzer
+          val typed = analyzer.analyze(stripped)
+          ModuleMeta.fromProgram(typed)
+        }.toOption
       case Left(_) => None
 
   /** Try to resolve an import path from the file system by looking for a .smeta file. */

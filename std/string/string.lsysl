@@ -1,0 +1,89 @@
+std.string — Low-level string operations
+==========================================
+
+Primitive string functions backed by the host runtime.
+For higher-level utilities see `std.strings`.
+
+    module std.string
+
+
+Functions
+---------
+
+### length
+
+Return the character count of a string.
+
+    extern length(s: string) -> int
+
+### concat
+
+Concatenate two strings.
+
+    extern concat(a: string, b: string) -> string
+
+### substr
+
+Return a substring starting at `start` with the given `length`.
+
+    extern substr(s: string, start: int, length: int) -> string
+
+### index_of
+
+Return the index of the first occurrence of `needle` in `s`, or -1.
+
+    extern index_of(s: string, needle: string) -> int
+
+### starts_with
+
+Check whether `s` starts with `prefix`.
+
+    extern starts_with(s: string, prefix: string) -> bool
+
+### ends_with
+
+Check whether `s` ends with `suffix`.
+
+    extern ends_with(s: string, suffix: string) -> bool
+
+### trim
+
+Remove leading and trailing whitespace.
+
+    extern trim(s: string) -> string
+
+### split
+
+Split a string by a delimiter.
+
+    extern split(s: string, sep: string) -> []string
+
+### to_int
+
+Parse a string as a 64-bit integer.
+
+    extern to_int(s: string) -> i64
+
+### from_int
+
+Convert a 64-bit integer to its string representation.
+
+    extern from_int(n: i64) -> string
+
+### char_at
+
+Return the character code at index `i`.
+
+    extern char_at(s: string, i: int) -> int
+
+### equal
+
+Check whether two strings are equal.
+
+    extern equal(a: string, b: string) -> bool
+
+### contains
+
+Check whether `s` contains `needle`.
+
+    extern contains(s: string, needle: string) -> bool
