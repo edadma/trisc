@@ -2,44 +2,37 @@
 
 Found via parser combinator exercise (`parser.sysl`).
 
-## 1. No Generic Type Aliases
+## ~~1. No Generic Type Aliases~~ ✅ DONE
 
-Can't write:
+Works:
 ```sysl
 type Parser[T] = (string, int) -> Result[T]
+
+apply(f: Transform[int], x: int) -> int = f(x)
 ```
+Generic type aliases resolve through `typeEnv` substitution. Tested in `parser.sysl` and `SyslTypeAliasTests`.
 
-Every combinator repeats the full function type:
-```sysl
-map(p: (string, int) -> Result, f: (int) -> int) -> (string, int) -> Result
-```
+## ~~2. No Generic Combinators~~ ✅ DONE
 
-With a type alias:
-```sysl
-map(p: Parser, f: (int) -> int) -> Parser
-```
-
-## 2. No Generic Combinators
-
-`map`/`seq`/`alt` must be specialized per result type. Can't write:
+Works:
 ```sysl
 map[A, B](p: Parser[A], f: (A) -> B) -> Parser[B]
+    (input: string, pos: int) ->
+        p(input, pos) match
+            Ok(v, p2) -> Ok(f(v), p2)
+            Fail(p2) -> Fail(p2)
 ```
-because `Result[A]` and `Result[B]` are different monomorphized types. Currently must duplicate every combinator for each result type.
+Required fix: `unifyTypes` now expands generic type aliases before structural unification, so type parameters can be inferred through aliases. Tested in `parser.sysl` and `SyslTypeAliasTests`.
 
-## 3. `?` Operator on Result
+## ~~3. `?` Operator on Result~~ ✅ DONE
 
-`parse_factor` could be much cleaner:
+Works:
 ```sysl
-val (v, p2) = parse_expr(input, pos + 1)?
+parse_factor(input: string, pos: int) -> Result[int]
+    val v, p2 = parse_expr(input, pos + 1)?
+    Ok(v, p2 + 1)
 ```
-Instead of:
-```sysl
-parse_expr(input, pos + 1) match
-    Ok(v, p2) -> ...
-    Fail(fp) -> Fail(fp)
-```
-The `Fail` propagation is pure boilerplate. `?` should work here since the enclosing function returns the same `Result` type. Needs testing.
+`?` propagates the `Fail` variant automatically. Used throughout `parser.sysl`.
 
 ## 4. Mutual Recursion Prevents Closure Composition
 
@@ -63,15 +56,9 @@ char(expected: byte) -> (string, int) -> Result[byte]
 ```
 Must use `=` for expression body. The `->` in the return type confuses the parser about where the return type ends and the body begins.
 
-## 6. Match Arms Verbose for Two-Variant Enums
+## ~~6. Match Arms Verbose for Two-Variant Enums~~ ✅ Solved by #3
 
-Every parse result requires:
-```sysl
-p(input, pos) match
-    Ok(v, p2) -> ...
-    Fail(fp) -> Fail(fp)
-```
-The `Fail` arm is pure boilerplate. The `?` operator (issue #3) would eliminate this.
+The `?` operator eliminates the boilerplate `Fail` propagation arm.
 
 ## 7. No Method Syntax on Function Types
 
@@ -95,13 +82,13 @@ Instead of a full `match` block for simple Ok/Fail dispatch.
 
 ## Priority
 
-| # | Issue | Impact |
+| # | Issue | Status |
 |---|-------|--------|
-| 1 | Generic type aliases | High — eliminates signature noise |
-| 3 | `?` on Result | High — eliminates match boilerplate |
-| 2 | Generic combinators | High — enables reusable abstractions |
-| 4 | Mutual recursion / lazy val | Medium — enables combinator composition |
-| 7 | Method syntax on functions | Medium — fluent API style |
-| 8 | Pattern match in `if` | Low — convenience sugar |
-| 5 | Expression-body ambiguity | Low — workaround exists (`=`) |
-| 6 | Verbose match arms | Low — solved by #3 |
+| 1 | Generic type aliases | ✅ Done |
+| 2 | Generic combinators | ✅ Done |
+| 3 | `?` on Result | ✅ Done |
+| 6 | Verbose match arms | ✅ Solved by #3 |
+| 4 | Mutual recursion / lazy val | Open — medium priority |
+| 7 | Method syntax on functions | Open — medium priority |
+| 8 | Pattern match in `if` | Open — low priority |
+| 5 | Expression-body ambiguity | Open — low priority, workaround exists (`=`) |

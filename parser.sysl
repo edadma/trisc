@@ -1,4 +1,4 @@
-// Parser combinator exercise — with generic type aliases
+// Parser combinator exercise — generic type aliases + generic combinators
 
 enum Result[T]
     Ok(value: T, pos: int)
@@ -6,21 +6,67 @@ enum Result[T]
 
 type Parser[T] = (string, int) -> Result[T]
 
-// === Combinators using the alias ===
+// === Generic combinators ===
 
-map[A](p: Parser[A], f: (A) -> int) -> Parser[int]
-    (input, pos) ->
+map[A, B](p: Parser[A], f: (A) -> B) -> Parser[B]
+    (input: string, pos: int) ->
         p(input, pos) match
             Ok(v, p2) -> Ok(f(v), p2)
             Fail(p2) -> Fail(p2)
 
 alt[A](p1: Parser[A], p2: Parser[A]) -> Parser[A]
-    (input, pos) ->
+    (input: string, pos: int) ->
         p1(input, pos) match
-            Ok(v, p2_pos) -> Ok(v, p2_pos)
+            Ok(v, p2) -> Ok(v, p2)
             Fail(_) -> p2(input, pos)
 
-// === Primitives ===
+// skip_right: run two parsers, keep left result
+skip_right[A, B](p1: Parser[A], p2: Parser[B]) -> Parser[A]
+    (input: string, pos: int) ->
+        p1(input, pos) match
+            Ok(v, p2_pos) ->
+                p2(input, p2_pos) match
+                    Ok(_, p3) -> Ok(v, p3)
+                    Fail(fp) -> Fail(fp)
+            Fail(fp) -> Fail(fp)
+
+// skip_left: run two parsers, keep right result
+skip_left[A, B](p1: Parser[A], p2: Parser[B]) -> Parser[B]
+    (input: string, pos: int) ->
+        p1(input, pos) match
+            Ok(_, p2_pos) -> p2(input, p2_pos)
+            Fail(fp) -> Fail(fp)
+
+// between: parse surrounded value (e.g., parenthesized expression)
+between[A](open: Parser[int], p: Parser[A], close: Parser[int]) -> Parser[A]
+    (input: string, pos: int) ->
+        open(input, pos) match
+            Ok(_, p2) ->
+                p(input, p2) match
+                    Ok(v, p3) ->
+                        close(input, p3) match
+                            Ok(_, p4) -> Ok(v, p4)
+                            Fail(fp) -> Fail(fp)
+                    Fail(fp) -> Fail(fp)
+            Fail(fp) -> Fail(fp)
+
+// unwrap_or: extract value or default
+unwrap_or[T](r: Result[T], default: T) -> T
+    r match
+        Ok(v, _) -> v
+        Fail(_) -> default
+
+// === Character primitives ===
+
+char_if(pred: (int) -> bool, input: string, pos: int) -> Result[int]
+    if pos < len(input) && pred(input[pos]) then Ok(int(input[pos]), pos + 1)
+    else Fail(pos)
+
+char_exact(ch: int, input: string, pos: int) -> Result[int]
+    if pos < len(input) && input[pos] == ch then Ok(ch, pos + 1)
+    else Fail(pos)
+
+// === Number parser ===
 
 nat(input: string, pos: int) -> Result[int]
     var p = pos
@@ -32,7 +78,7 @@ nat(input: string, pos: int) -> Result[int]
         found = true
     if found then Ok(n, p) else Fail(pos)
 
-// === Expression parser ===
+// === Expression parser using ? propagation ===
 
 parse_factor(input: string, pos: int) -> Result[int]
     if pos < len(input) && input[pos] == '('
@@ -73,13 +119,135 @@ parse_expr(input: string, pos: int) -> Result[int]
         else done = true
     Ok(acc, cur)
 
-eval(s: string) -> int
-    parse_expr(s, 0) match
-        Ok(v, _) -> v
-        Fail(_) -> -1
+eval_expr(s: string) -> int
+    unwrap_or(parse_expr(s, 0), -1)
+
+// === Combinator-based parsers for testing ===
+
+// Parse a digit using char_if + map
+is_digit(ch: int) -> bool = ch >= '0' && ch <= '9'
+to_digit(ch: int) -> int = ch - int('0')
+
+digit(input: string, pos: int) -> Result[int]
+    char_if(is_digit, input, pos) match
+        Ok(ch, p2) -> Ok(to_digit(ch), p2)
+        Fail(fp) -> Fail(fp)
+
+// Parse 'a' or 'b' using alt
+parse_a(input: string, pos: int) -> Result[int] = char_exact(int('a'), input, pos)
+parse_b(input: string, pos: int) -> Result[int] = char_exact(int('b'), input, pos)
+
+parse_a_or_b(input: string, pos: int) -> Result[int]
+    val parser = alt(parse_a, parse_b)
+    parser(input, pos)
+
+// Parse number, negate with map
+negate(x: int) -> int = 0 - x
+
+parse_neg(input: string, pos: int) -> Result[int]
+    val parser = map(nat, negate)
+    parser(input, pos)
+
+// Parse parenthesized expression using between
+open_paren(input: string, pos: int) -> Result[int] = char_exact(int('('), input, pos)
+close_paren(input: string, pos: int) -> Result[int] = char_exact(int(')'), input, pos)
+
+parse_parens(input: string, pos: int) -> Result[int]
+    val parser = between(open_paren, nat, close_paren)
+    parser(input, pos)
+
+// === Tests ===
+
+#test
+test_eval_simple() -> unit
+    assert(eval_expr("42") == 42, "simple number")
+
+#test
+test_eval_add() -> unit
+    assert(eval_expr("2+3") == 5, "addition")
+
+#test
+test_eval_precedence() -> unit
+    assert(eval_expr("2+3*4") == 14, "precedence")
+
+#test
+test_eval_parens() -> unit
+    assert(eval_expr("(1+2)*3+4") == 13, "parens")
+
+#test
+test_eval_sub_div() -> unit
+    assert(eval_expr("100-50/2") == 75, "sub and div")
+
+#test
+test_eval_nested_parens() -> unit
+    assert(eval_expr("((2+3))") == 5, "nested parens")
+
+#test
+test_eval_complex() -> unit
+    assert(eval_expr("(2+3)*(4-1)") == 15, "complex")
+
+#test
+test_eval_fail() -> unit
+    assert(eval_expr("") == -1, "empty string fails")
+
+#test
+test_digit() -> unit
+    digit("5abc", 0) match
+        Ok(v, p) ->
+            assert(v == 5, "digit value")
+            assert(p == 1, "digit pos")
+        Fail(_) -> panic("expected Ok")
+
+#test
+test_alt_first() -> unit
+    parse_a_or_b("abc", 0) match
+        Ok(v, _) -> assert(v == int('a'), "alt picks first")
+        Fail(_) -> panic("expected Ok")
+
+#test
+test_alt_second() -> unit
+    parse_a_or_b("bcd", 0) match
+        Ok(v, _) -> assert(v == int('b'), "alt picks second")
+        Fail(_) -> panic("expected Ok")
+
+#test
+test_alt_fail() -> unit
+    parse_a_or_b("xyz", 0) match
+        Ok(_, _) -> panic("expected Fail")
+        Fail(_) -> assert(true, "alt fails correctly")
+
+#test
+test_map_negate() -> unit
+    parse_neg("42", 0) match
+        Ok(v, _) -> assert(v == -42, "map negates")
+        Fail(_) -> panic("expected Ok")
+
+#test
+test_between_parens() -> unit
+    parse_parens("(99)", 0) match
+        Ok(v, p) ->
+            assert(v == 99, "between value")
+            assert(p == 4, "between consumed all")
+        Fail(_) -> panic("expected Ok")
+
+#test
+test_between_missing_close() -> unit
+    parse_parens("(99", 0) match
+        Ok(_, _) -> panic("expected Fail")
+        Fail(_) -> assert(true, "between fails on missing close")
+
+#test
+test_unwrap_or_ok() -> unit
+    val r: Result[int] = Ok(42, 0)
+    assert(unwrap_or(r, -1) == 42, "unwrap_or on Ok")
+
+#test
+test_unwrap_or_fail() -> unit
+    val r: Result[int] = Fail(0)
+    assert(unwrap_or(r, -1) == -1, "unwrap_or on Fail")
 
 main() -> int
-    val a = eval("2+3*4")       // 14
-    val b = eval("(1+2)*3+4")   // 13
-    val c = eval("100-50/2")    // 75
+    val a = eval_expr("2+3*4")       // 14
+    val b = eval_expr("(1+2)*3+4")   // 13
+    val c = eval_expr("100-50/2")    // 75
     a + b + c
