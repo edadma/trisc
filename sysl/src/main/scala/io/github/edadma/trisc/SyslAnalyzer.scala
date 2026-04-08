@@ -2108,9 +2108,11 @@ class SyslAnalyzer:
           throw AnalysisError(s"'?' operator requires a 2-variant enum, got ${enumType.variants.length} variants")
         val (successName, successFields) = enumType.variants(0)
         val (failureName, failureFields) = enumType.variants(1)
-        if successFields.length != 1 then
-          throw AnalysisError(s"'?' operator: first variant '$successName' must have exactly 1 field, got ${successFields.length}")
-        val successType = successFields(0)._2
+        if successFields.isEmpty then
+          throw AnalysisError(s"'?' operator: first variant '$successName' must have at least 1 field")
+        // Single field → unwrap to that type; multiple fields → unwrap to tuple
+        val successType = if successFields.length == 1 then successFields(0)._2
+          else SyslType.tupleType(successFields.map(_._2))
         // Verify the enclosing function's return type matches
         currentExpected match
           case Some(et: SyslType.EnumType) if et.name == enumType.name => ()
@@ -2119,7 +2121,7 @@ class SyslAnalyzer:
           case None =>
             throw AnalysisError(s"'?' operator requires enclosing function with matching return type")
         // Build: match tInner { Success(v) -> v; Failure(e) -> return Failure(e) }
-        val successBindName = "_try_v"
+        val successBindNames = successFields.indices.map(i => s"_try_v$i").toList
         val failureBindNames = failureFields.indices.map(i => s"_try_e$i").toList
         // Failure arm: return Failure(e0, e1, ...)
         val failureReconstructArgs: List[TExpr] = failureBindNames.zip(failureFields).map {
@@ -2131,10 +2133,16 @@ class SyslAnalyzer:
           None,
           List(TReturnStmt(Some(failureReturnValue)))
         )
+        // Success arm: unwrap single field or construct tuple
+        val successExpr: TExpr = if successFields.length == 1 then
+          TVarRef(successBindNames.head, successFields.head._2)
+        else
+          TStructConstruct(successType.asInstanceOf[SyslType.StructType],
+            successBindNames.zip(successFields).map { case (name, (_, ft)) => TVarRef(name, ft) })
         val successArm = TMatchArm(
-          List(TVariantPattern(enumType, 0, List(Some(successBindName)), List(successType))),
+          List(TVariantPattern(enumType, 0, successBindNames.map(Some(_)), successFields.map(_._2))),
           None,
-          List(TExprStmt(TVarRef(successBindName, successType)))
+          List(TExprStmt(successExpr))
         )
         TMatchExpr(tInner, List(successArm, failureArm), None, successType)
 

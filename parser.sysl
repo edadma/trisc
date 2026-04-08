@@ -1,105 +1,73 @@
-// Parser combinator exercise — exploring Sysl ergonomics
-// Using short function type syntax: (int) -> int instead of func(int) -> int
+// Parser combinator exercise — Sysl ergonomics with ? operator
+// Parses arithmetic: 1+2*3, (1+2)*3, etc.
 
 enum Result
     Ok(value: int, pos: int)
     Fail(pos: int)
 
-// === Primitive parsers ===
+nat(input: string, pos: int) -> Result
+    var p = pos
+    var n = 0
+    var found = false
+    while p < len(input) && input[p] >= '0' && input[p] <= '9'
+        n = n * 10 + int(input[p]) - int('0')
+        p++
+        found = true
+    if found then Ok(n, p) else Fail(pos)
 
-digit() -> (string, int) -> Result
-    (input, pos) ->
-        if pos < len(input) && input[pos] >= '0' && input[pos] <= '9'
-            Ok(int(input[pos]) - int('0'), pos + 1)
-        else Fail(pos)
-
-nat() -> (string, int) -> Result
-    (input, pos) ->
-        var p = pos
-        var n = 0
-        var found = false
-        while p < len(input) && input[p] >= '0' && input[p] <= '9'
-            n = n * 10 + int(input[p]) - int('0')
-            p++
-            found = true
-        if found then Ok(n, p) else Fail(pos)
-
-// === Combinators ===
-
-map(p: (string, int) -> Result, f: (int) -> int) -> (string, int) -> Result
-    (input, pos) ->
-        p(input, pos) match
-            Ok(v, p2) -> Ok(f(v), p2)
-            Fail(p2) -> Fail(p2)
-
-alt(p1: (string, int) -> Result, p2: (string, int) -> Result) -> (string, int) -> Result
-    (input, pos) ->
-        p1(input, pos) match
-            Ok(v, p2_pos) -> Ok(v, p2_pos)
-            Fail(_) -> p2(input, pos)
-
-// === Expression parser ===
-
+// factor = nat | '(' expr ')'
 parse_factor(input: string, pos: int) -> Result
     if pos < len(input) && input[pos] == '('
-        parse_expr(input, pos + 1) match
-            Ok(v, p2) ->
-                if p2 < len(input) && input[p2] == ')'
-                    Ok(v, p2 + 1)
-                else Fail(p2)
-            Fail(fp) -> Fail(fp)
+        val v, p2 = parse_expr(input, pos + 1)?
+        if p2 < len(input) && input[p2] == ')'
+            Ok(v, p2 + 1)
+        else Fail(p2)
     else
-        nat()(input, pos)
+        nat(input, pos)
 
+// term = factor (('*' | '/') factor)*
 parse_term(input: string, pos: int) -> Result
-    parse_factor(input, pos) match
-        Ok(left, p2) ->
-            var acc = left
-            var cur = p2
-            var done = false
-            while !done
-                if cur < len(input) && input[cur] == '*'
-                    parse_factor(input, cur + 1) match
-                        Ok(right, p3) ->
-                            acc = acc * right
-                            cur = p3
-                        Fail(_) -> done = true
-                elif cur < len(input) && input[cur] == '/'
-                    parse_factor(input, cur + 1) match
-                        Ok(right, p3) ->
-                            acc = acc / right
-                            cur = p3
-                        Fail(_) -> done = true
-                else done = true
-            Ok(acc, cur)
-        Fail(fp) -> Fail(fp)
+    var acc, cur = parse_factor(input, pos)?
+    var done = false
+    while !done
+        if cur < len(input) && input[cur] == '*'
+            val right, p3 = parse_factor(input, cur + 1)?
+            acc = acc * right
+            cur = p3
+        elif cur < len(input) && input[cur] == '/'
+            val right, p3 = parse_factor(input, cur + 1)?
+            acc = acc / right
+            cur = p3
+        else done = true
+    Ok(acc, cur)
 
+// expr = term (('+' | '-') term)*
 parse_expr(input: string, pos: int) -> Result
-    parse_term(input, pos) match
-        Ok(left, p2) ->
-            var acc = left
-            var cur = p2
-            var done = false
-            while !done
-                if cur < len(input) && input[cur] == '+'
-                    parse_term(input, cur + 1) match
-                        Ok(right, p3) ->
-                            acc = acc + right
-                            cur = p3
-                        Fail(_) -> done = true
-                elif cur < len(input) && input[cur] == '-'
-                    parse_term(input, cur + 1) match
-                        Ok(right, p3) ->
-                            acc = acc - right
-                            cur = p3
-                        Fail(_) -> done = true
-                else done = true
-            Ok(acc, cur)
-        Fail(fp) -> Fail(fp)
+    var acc, cur = parse_term(input, pos)?
+    var done = false
+    while !done
+        if cur < len(input) && input[cur] == '+'
+            val right, p3 = parse_term(input, cur + 1)?
+            acc = acc + right
+            cur = p3
+        elif cur < len(input) && input[cur] == '-'
+            val right, p3 = parse_term(input, cur + 1)?
+            acc = acc - right
+            cur = p3
+        else done = true
+    Ok(acc, cur)
 
 eval(s: string) -> int
     parse_expr(s, 0) match
         Ok(v, _) -> v
         Fail(_) -> -1
 
-main() -> int = eval("2+3*4")
+main() -> int
+    // Test several expressions
+    val a = eval("2+3*4")       // 14
+    val b = eval("(1+2)*3+4")   // 13
+    val c = eval("100-50/2")    // 75
+    val d = eval("42")          // 42
+    // Encode results: a*1000000 + b*10000 + c*100 + d
+    // Expected: 14_130_075_042 — too big. Just sum them.
+    a + b + c + d
