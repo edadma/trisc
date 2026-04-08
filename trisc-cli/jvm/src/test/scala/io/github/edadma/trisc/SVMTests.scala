@@ -280,4 +280,145 @@ class SVMTests extends AnyFreeSpec with Matchers {
     val (svm, _) = runSVM(bytecode.toArray)
     svm.state shouldBe State.Halt
   }
+
+  // ===== Assembler-based tests =====
+
+  private val STDOUT = 0x10000
+
+  /** Helper: assemble SVM source, load TOF, run with stdout capture. */
+  private def runAsm(src: String, maxCycles: Int = 10000): (SVM, String) =
+    val tof = svmAssemble(src)
+    val output = new StringBuilder
+    val stdout = new Device with WriteOnlyAddressable {
+      val name = "stdout"
+      val base: Long = STDOUT
+      val size: Long = 1
+      def writeByte(addr: Long, data: Long): Unit = output += data.toChar
+      override def loadByte(addr: Long, data: Long): Unit = ()
+    }
+    val ram = new RAM(0, 0x10000)
+    val mem = new Memory("Memory", ram, stdout)
+    tof.load(mem)
+    val svm = new SVM(mem) { limit = maxCycles }
+    svm.reset()
+    svm.run()
+    (svm, output.toString)
+
+  "SVM asm: hello world" in {
+    val src =
+      s"""STDOUT = $STDOUT
+         |
+         |; vector table
+         |dl main    ; slot 0: initial IP
+         |dl 0       ; slot 1: interrupt handler (none)
+         |
+         |main:
+         |  push_i8 'H'
+         |  push_i32 STDOUT
+         |  store8
+         |  push_i8 'i'
+         |  push_i32 STDOUT
+         |  store8
+         |  halt
+         |""".stripMargin
+    val (svm, output) = runAsm(src)
+    output shouldBe "Hi"
+    svm.state shouldBe State.Halt
+  }
+
+  "SVM asm: call and ret" in {
+    val src =
+      s"""STDOUT = $STDOUT
+         |
+         |dl main
+         |dl 0
+         |
+         |main:
+         |  push_i8 65
+         |  call putc
+         |  push_i8 66
+         |  call putc
+         |  halt
+         |
+         |putc:
+         |  push_i32 STDOUT
+         |  store8
+         |  ret
+         |""".stripMargin
+    val (svm, output) = runAsm(src)
+    output shouldBe "AB"
+  }
+
+  "SVM asm: loop with locals" in {
+    val src =
+      s"""STDOUT = $STDOUT
+         |
+         |dl main
+         |dl 0
+         |
+         |main:
+         |  frame 1
+         |  push_i8 3
+         |  local_set 0      ; i = 3
+         |.loop:
+         |  push_i8 48       ; '0'
+         |  local_get 0
+         |  add              ; '0' + i
+         |  push_i32 STDOUT
+         |  store8
+         |  local_get 0
+         |  dec
+         |  dup
+         |  local_set 0
+         |  jumpnz .loop
+         |  drop
+         |  halt
+         |""".stripMargin
+    val (svm, output) = runAsm(src)
+    output shouldBe "321"
+  }
+
+  "SVM asm: conditional branch" in {
+    val src =
+      s"""STDOUT = $STDOUT
+         |
+         |dl main
+         |dl 0
+         |
+         |main:
+         |  push_1
+         |  jumpz skip
+         |  push_i8 'Y'
+         |  push_i32 STDOUT
+         |  store8
+         |skip:
+         |  push_i8 '!'
+         |  push_i32 STDOUT
+         |  store8
+         |  halt
+         |""".stripMargin
+    val (svm, output) = runAsm(src)
+    output shouldBe "Y!"
+  }
+
+  "SVM asm: arithmetic" in {
+    val src =
+      s"""STDOUT = $STDOUT
+         |
+         |dl main
+         |dl 0
+         |
+         |main:
+         |  push_i8 10
+         |  push_i8 20
+         |  add
+         |  push_i8 48   ; convert to ASCII digit offset
+         |  add
+         |  push_i32 STDOUT
+         |  store8        ; prints chr(30+48) = 'N'
+         |  halt
+         |""".stripMargin
+    val (svm, output) = runAsm(src)
+    output shouldBe "N"
+  }
 }
