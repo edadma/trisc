@@ -156,15 +156,14 @@ class SyslTriscCodegen(addresses: Int = 4):
                 emit(s"  rb ${stackSize(typ)}")
           case _ =>
 
-    // Emit extern declarations for malloc/free if referenced
-    if needsAllocExtern || needsFreeExtern then
-      // Only emit if not already defined in this module
-      val definedSymbols = (for decl <- program.decls yield decl match
-        case TFunDecl(name, _, _, _, _, _) => Some(name)
-        case TVarDecl(name, _, _, _) => Some(name)
-        case _ => None).flatten.toSet
-      if needsAllocExtern && !definedSymbols.contains("malloc") then emit("extern malloc")
-      if needsFreeExtern && !definedSymbols.contains("free") then emit("extern free")
+    // Emit extern declarations for malloc/free based on actual references in generated code
+    val generated = out.toString
+    val definedSymbols = (for decl <- program.decls yield decl match
+      case TFunDecl(name, _, _, _, _, _) => Some(name)
+      case TVarDecl(name, _, _, _) => Some(name)
+      case _ => None).flatten.toSet
+    if generated.contains("movi r4, malloc") && !definedSymbols.contains("malloc") then emit("extern malloc")
+    if generated.contains("movi r4, free") && !definedSymbols.contains("free") then emit("extern free")
 
     out.toString
 
