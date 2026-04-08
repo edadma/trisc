@@ -6,6 +6,7 @@ class SyslLLVMCodegen:
   private val out = new StringBuilder
   private val stringConstants = new mutable.LinkedHashMap[String, (String, Int)] // value -> (label, byte length including null)
   private val structTypes = new mutable.LinkedHashMap[String, SyslType.StructType] // name -> struct type
+  private val deinitFunctions = new mutable.HashMap[String, String] // struct name -> deinit function name
   private var stringCounter = 0
   private var regCounter = 0
   private var labelCounter = 0
@@ -42,12 +43,18 @@ class SyslLLVMCodegen:
     stringConstants.clear()
     stringCounter = 0
 
-    // First pass: collect struct type definitions
+    // First pass: collect struct type definitions and deinit functions
     structTypes.clear()
+    deinitFunctions.clear()
     for decl <- program.decls do
       decl match
         case TStructDecl(name, fields) =>
           structTypes(name) = SyslType.StructType(name, fields)
+        case TFunDecl(name, _, _, _, _, _) if name.endsWith("_deinit") =>
+          val structName = name.indexOf("__") match
+            case -1 => name.dropRight(7) // "Point_deinit" -> "Point"
+            case i  => name.substring(i + 2).dropRight(7) // "mod__Point_deinit" -> "Point"
+          deinitFunctions(structName) = name
         case _ =>
 
     // Generate functions into a buffer so string constants are collected first
@@ -150,6 +157,9 @@ class SyslLLVMCodegen:
       emit(s"  $alloca = alloca $lt")
       emit(s"  store $lt %${param.name}_arg, $lt* $alloca")
       locals(param.name) = LocalVar(param.name, alloca, param.typ)
+      // Increment refcount for ref-typed params (caller shares ownership)
+      if isRef(param.typ) then
+        emitRefIncr(s"%${param.name}_arg", refHeaderOffset(param.typ))
 
     // Generate body
     fun.body match
@@ -161,6 +171,7 @@ class SyslLLVMCodegen:
           emit(s"  $loaded = load $retType, $retType* $result")
           loaded
         else emitSextIfNeeded(result, rt, retType)
+        emitReleaseRefs()
         emit(s"  ret $retType $finalVal")
       case TBlockBody(stmts) =>
         genBlock(stmts, retType)
@@ -185,16 +196,19 @@ class SyslLLVMCodegen:
               loaded
             else emitSextIfNeeded(result, rt, retType)
             emitDefers()
+            emitReleaseRefs()
             emit(s"  ret $retType $finalVal")
             hasReturned = true
           case other =>
             genStmt(other)
             if !hasReturned then
               emitDefers()
+              emitReleaseRefs()
               emit(s"  ret $retType 0")
               hasReturned = true
     else
       emitDefers()
+      emitReleaseRefs()
       emit(s"  ret $retType 0")
       hasReturned = true
 
@@ -217,6 +231,9 @@ class SyslLLVMCodegen:
             val finalVal = emitSextIfNeeded(value, vt, lt)
             emit(s"  store $lt $finalVal, $lt* $alloca")
             locals(name) = LocalVar(name, alloca, typ)
+            // Ref init: increment unless we own it (TNew/TNewArray)
+            if isRef(typ) && !isOwnedNew(init) then
+              emitRefIncr(finalVal, refHeaderOffset(typ))
 
       case TAssignStmt(target, value) =>
         if !locals.contains(target) && isAggregate(value.typ) then
@@ -228,15 +245,25 @@ class SyslLLVMCodegen:
           if locals.contains(target) then
             val local = locals(target)
             val lt = llvmType(local.typ)
+            // Reassignment of ref: decrement old, increment new
+            if isRef(local.typ) then
+              val oldVal = newReg()
+              emit(s"  $oldVal = load $lt, $lt* ${local.reg}")
+              emitRefDecr(oldVal, refHeaderOffset(local.typ), deinitFor(local.typ))
             val vt = exprType(value)
             val finalVal = emitSextIfNeeded(v, vt, lt)
             emit(s"  store $lt $finalVal, $lt* ${local.reg}")
+            if isRef(local.typ) && !isOwnedNew(value) then
+              emitRefIncr(finalVal, refHeaderOffset(local.typ))
           else
             val lt = exprType(value)
             val alloca = newReg()
             emit(s"  $alloca = alloca $lt")
             emit(s"  store $lt $v, $lt* $alloca")
             locals(target) = LocalVar(target, alloca, value.typ)
+            // New ref binding: increment unless owned
+            if isRef(value.typ) && !isOwnedNew(value) then
+              emitRefIncr(v, refHeaderOffset(value.typ))
 
       case TReturnStmt(Some(value)) =>
         val v = genExpr(value)
@@ -248,11 +275,13 @@ class SyslLLVMCodegen:
           loaded
         else emitSextIfNeeded(v, vt, retType)
         emitDefers()
+        emitReleaseRefs()
         emit(s"  ret $retType $finalVal")
         hasReturned = true
 
       case TReturnStmt(None) =>
         emitDefers()
+        emitReleaseRefs()
         emit("  ret void")
         hasReturned = true
 
@@ -1436,6 +1465,107 @@ class SyslLLVMCodegen:
   // Types that are passed by pointer (alloca) rather than by value
   private def isAggregate(t: SyslType): Boolean = t match
     case _: SyslType.StructType | _: SyslType.ArrayType | _: SyslType.SliceType | _: SyslType.EnumType => true
+    case _ => false
+
+  // ===== Refcounting helpers =====
+
+  private def isRef(t: SyslType): Boolean = t match
+    case _: SyslType.RefType => true
+    case _ => false
+
+  /** Header offset: bytes from data pointer back to refcount field. */
+  private def refHeaderOffset(t: SyslType): Int = t match
+    case SyslType.RefType(SyslType.SliceType(_)) => 16  // refcount(8) + len(4) + cap(4)
+    case SyslType.RefType(_) => 8                        // refcount(8) only
+    case _ => 8
+
+  /** Emit inline refcount increment. ptr is the data pointer (past header). */
+  private def emitRefIncr(ptr: String, headerOffset: Int): Unit =
+    val skip = newLabel("rc_skip")
+    val doIncr = newLabel("rc_incr")
+    // Null check
+    val isNull = newReg()
+    emit(s"  $isNull = icmp eq i8* $ptr, null")
+    emit(s"  br i1 $isNull, label %$skip, label %$doIncr")
+    emit(s"$doIncr:")
+    // Get refcount pointer: ptr - headerOffset
+    val base = newReg()
+    emit(s"  $base = getelementptr i8, i8* $ptr, i64 -$headerOffset")
+    val rcPtr = newReg()
+    emit(s"  $rcPtr = bitcast i8* $base to i64*")
+    val rc = newReg()
+    emit(s"  $rc = load i64, i64* $rcPtr")
+    // Check immortal (-1)
+    val isImmortal = newReg()
+    emit(s"  $isImmortal = icmp eq i64 $rc, -1")
+    val doStore = newLabel("rc_store")
+    emit(s"  br i1 $isImmortal, label %$skip, label %$doStore")
+    emit(s"$doStore:")
+    val newRc = newReg()
+    emit(s"  $newRc = add i64 $rc, 1")
+    emit(s"  store i64 $newRc, i64* $rcPtr")
+    emit(s"  br label %$skip")
+    emit(s"$skip:")
+
+  /** Look up deinit function name for a RefType's inner type. */
+  private def deinitFor(typ: SyslType): Option[String] = typ match
+    case SyslType.RefType(SyslType.StructType(name, _)) => deinitFunctions.get(name)
+    case _ => None
+
+  /** Emit inline refcount decrement + free when count reaches 0.
+    * ptr is the data pointer (past header).
+    * deinit is an optional function to call before freeing. */
+  private def emitRefDecr(ptr: String, headerOffset: Int, deinit: Option[String] = None): Unit =
+    val skip = newLabel("rcd_skip")
+    val doDecr = newLabel("rcd_decr")
+    // Null check
+    val isNull = newReg()
+    emit(s"  $isNull = icmp eq i8* $ptr, null")
+    emit(s"  br i1 $isNull, label %$skip, label %$doDecr")
+    emit(s"$doDecr:")
+    // Get refcount pointer
+    val base = newReg()
+    emit(s"  $base = getelementptr i8, i8* $ptr, i64 -$headerOffset")
+    val rcPtr = newReg()
+    emit(s"  $rcPtr = bitcast i8* $base to i64*")
+    val rc = newReg()
+    emit(s"  $rc = load i64, i64* $rcPtr")
+    // Check immortal
+    val isImmortal = newReg()
+    emit(s"  $isImmortal = icmp eq i64 $rc, -1")
+    val doStore = newLabel("rcd_store")
+    emit(s"  br i1 $isImmortal, label %$skip, label %$doStore")
+    emit(s"$doStore:")
+    val newRc = newReg()
+    emit(s"  $newRc = sub i64 $rc, 1")
+    emit(s"  store i64 $newRc, i64* $rcPtr")
+    val isZero = newReg()
+    emit(s"  $isZero = icmp eq i64 $newRc, 0")
+    val doFree = newLabel("rcd_free")
+    emit(s"  br i1 $isZero, label %$doFree, label %$skip")
+    emit(s"$doFree:")
+    // Set refcount to IMMORTAL (-1) to prevent re-entrant deinit
+    emit(s"  store i64 -1, i64* $rcPtr")
+    // Call deinit if present (passes data pointer, not base)
+    deinit.foreach { name =>
+      emit(s"  call i32 @$name(i8* $ptr)")
+    }
+    // Free the base allocation
+    emit(s"  call void @free(i8* $base)")
+    emit(s"  br label %$skip")
+    emit(s"$skip:")
+
+  /** Decrement refcounts for all ref-typed locals before function exit. */
+  private def emitReleaseRefs(): Unit =
+    for (_, local) <- locals if isRef(local.typ) do
+      val hoff = refHeaderOffset(local.typ)
+      val ptr = newReg()
+      emit(s"  $ptr = load i8*, i8** ${local.reg}")
+      emitRefDecr(ptr, hoff, deinitFor(local.typ))
+
+  /** Check if an expression is a TNew/TNewArray (already owns the ref, no incr needed). */
+  private def isOwnedNew(expr: TExpr): Boolean = expr match
+    case _: TNew | _: TNewArray => true
     case _ => false
 
   /** Convert a TExpr to an LLVM constant initializer for global variables. */
