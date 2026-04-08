@@ -19,6 +19,7 @@ class SyslAnalyzer:
   private val simpleEnumTypes = new mutable.LinkedHashMap[String, SyslType.EnumType]
   private val dataEnumTypes = new mutable.LinkedHashMap[String, SyslType.EnumType]  // data enum name → EnumType
   private val variantToEnum = new mutable.LinkedHashMap[String, (SyslType.EnumType, Int)]  // variant name → (enum type, variant index)
+  private val interfaceTypes = new mutable.LinkedHashMap[String, SyslType.InterfaceType]  // interface name → InterfaceType
   private val typeAliases = new mutable.LinkedHashMap[String, TypeAST]  // alias name → target type AST
   private val methods = new mutable.LinkedHashMap[String, mutable.Set[String]]  // struct name → set of method names
   private val deprecations = new mutable.LinkedHashMap[String, Option[String]]  // name → optional reason
@@ -349,6 +350,23 @@ class SyslAnalyzer:
           if methodNames.distinct.length != methodNames.length then
             throw AnalysisError(s"duplicate method names in trait '$name'")
           traits(name) = TraitInfo(name, tparam, methods)
+        case InterfaceDeclAST(name, methodASTs, embeddedNames, _) =>
+          if interfaceTypes.contains(name) then throw AnalysisError(s"duplicate interface: '$name'", decl)
+          // Resolve embedded interfaces and flatten methods
+          val embeddedMethods = embeddedNames.flatMap { en =>
+            interfaceTypes.getOrElse(en, throw AnalysisError(s"embedded interface '$en' not found", decl)).methods
+          }
+          val ownMethods = methodASTs.map { m =>
+            val paramTypes = m.params.map(p => resolveType(p.typ))
+            val retType = resolveType(m.returnType)
+            (m.name, paramTypes, retType)
+          }
+          val allMethods = embeddedMethods ++ ownMethods
+          // Check for duplicate method names
+          val names = allMethods.map(_._1)
+          if names.distinct.length != names.length then
+            throw AnalysisError(s"duplicate method names in interface '$name'")
+          interfaceTypes(name) = SyslType.InterfaceType(name, allMethods)
         case ImplDeclAST(_, _, _, _) =>
           // Deferred to registerImpls after all traits are known
           ()
@@ -416,6 +434,7 @@ class SyslAnalyzer:
       case s: StructDeclAST if s.typeParams.nonEmpty => Nil
       case e: DataEnumDeclAST if e.typeParams.nonEmpty => Nil
       case _: TraitDeclAST => Nil // traits emit nothing; only impls do
+      case _: InterfaceDeclAST => Nil // interfaces are type-only; emitted via TInterfaceDecl
       case impl: ImplDeclAST   => analyzeImplMethods(impl)
       case d => List(analyzeDecl(d))
     }
@@ -533,6 +552,7 @@ class SyslAnalyzer:
       case name if structTypes.contains(name) => structTypes(name)
       case name if dataEnumTypes.contains(name) => dataEnumTypes(name)
       case name if simpleEnumTypes.contains(name) => simpleEnumTypes(name)
+      case name if interfaceTypes.contains(name) => interfaceTypes(name)
       case other => throw AnalysisError(s"unknown type: '$other'")
     case PtrTypeAST(inner) => PtrType(resolveType(inner))
     case ArrayTypeAST(size, elem) => ArrayType(resolveType(elem), size)
@@ -540,6 +560,18 @@ class SyslAnalyzer:
     case TupleTypeAST(elems) => SyslType.tupleType(elems.map(resolveType))
     case FuncTypeAST(params, ret) => FuncType(params.map(resolveType), resolveType(ret))
     case RefTypeAST(inner) => RefType(resolveType(inner))
+
+  private def satisfiesInterface(st: SyslType.StructType, iface: SyslType.InterfaceType): Boolean =
+    val structName = st.name
+    iface.methods.forall { (methodName, paramTypes, retType) =>
+      val funcName = s"${structName}_$methodName"
+      functions.get(funcName) match
+        case Some(funInfo) =>
+          // Skip self param (first param is *StructType), compare the rest
+          val userParams = funInfo.params.drop(1).map(_._2)
+          userParams == paramTypes && funInfo.returnType == retType
+        case None => false
+    }
 
   private def compatible(from: SyslType, to: SyslType): Boolean =
     (from, to) match
@@ -569,6 +601,13 @@ class SyslAnalyzer:
       case (SliceType(e1), SliceType(e2)) if e1 == e2 => true
       case (RefType(a), RefType(b)) if compatible(a, b) => true // same ref type (recursive check handles nominal types)
       case (RefType(inner), PtrType(_)) => true             // &T → *U (ref decays to pointer)
+      // Interface satisfaction: struct/ptr/ref → interface (if methods match)
+      case (st: StructType, iface: InterfaceType) => satisfiesInterface(st, iface)
+      case (PtrType(st: StructType), iface: InterfaceType) => satisfiesInterface(st, iface)
+      case (RefType(st: StructType), iface: InterfaceType) => satisfiesInterface(st, iface)
+      // Interface-to-interface widening (superset of methods)
+      case (InterfaceType(_, methodsA), InterfaceType(_, methodsB)) =>
+        methodsB.forall(mb => methodsA.exists(_ == mb))
       case _ => false
 
   // Coerce integer literals to the target type (like Rust's untyped integer literals)
@@ -916,9 +955,11 @@ class SyslAnalyzer:
       val coerced = coerceLiteral(arg, pType)
       if !compatible(coerced.typ, pType) then
         throw AnalysisError(s"argument '$pName' of '$name' expects $pType, got ${coerced.typ}")
-      // Insert explicit cast for string→*i8 decay so codegen can handle it
+      // Insert explicit conversions for codegen
       (coerced.typ, pType) match
         case (StringType, PtrType(I8 | U8)) => TCast(coerced, pType)
+        case (_, iface: InterfaceType) if !coerced.typ.isInstanceOf[InterfaceType] =>
+          TInterfaceBox(coerced, iface)
         case _ => coerced
     }
 
@@ -936,14 +977,19 @@ class SyslAnalyzer:
         val tInit = coerceLiteral(tInit0, declType)
         if typOpt.isDefined && !compatible(tInit.typ, declType) then
           throw AnalysisError(s"cannot assign ${tInit.typ} to $declType variable '$name'")
+        // Box concrete type into interface if needed
+        val tInitFinal = (tInit.typ, declType) match
+          case (_, iface: InterfaceType) if !tInit.typ.isInstanceOf[InterfaceType] =>
+            TInterfaceBox(tInit, iface)
+          case _ => tInit
         // `_` is a discard binding: evaluate the initializer for its side effects
         // but don't bind any name. Multiple `_`s in the same scope don't collide.
         if name == "_" then
-          TExprStmt(tInit)
+          TExprStmt(tInitFinal)
         else
           if scopeStack != null then
             currentScope(name) = SymInfo(name, declType, isMutable)
-          TVarStmt(name, declType, tInit)
+          TVarStmt(name, declType, tInitFinal)
 
       case DestructureStmtAST(names, init, isMutable) =>
         val tInit = analyzeExpr(init)
@@ -1767,6 +1813,16 @@ class SyslAnalyzer:
       case MethodCallAST(obj, method, args) =>
         val tObj = analyzeExpr(obj)
         val tArgs = args.map(analyzeExpr)
+        // Interface dispatch
+        tObj.typ match
+          case iface: InterfaceType =>
+            val methodIdx = iface.methods.indexWhere(_._1 == method)
+            if methodIdx < 0 then throw AnalysisError(s"interface ${iface.name} has no method '$method'")
+            val (_, paramTypes, retType) = iface.methods(methodIdx)
+            val params = paramTypes.zipWithIndex.map((t, i) => (s"arg$i", t))
+            val checkedArgs = checkArgs(s"${iface.name}.$method", params, tArgs)
+            return TInterfaceDispatch(tObj, methodIdx, checkedArgs, retType)
+          case _ => ()
         // Determine the struct type (defer self-arg computation until we know it's a method)
         val structType = tObj.typ match
           case st: StructType          => st

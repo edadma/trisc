@@ -41,6 +41,7 @@ enum Value:
   case RefEnumVal(tag: Int, fields: Array[Cell], refCount: java.util.concurrent.atomic.AtomicInteger)
   case RefStringVal(bytes: Array[Byte], length: Int, refCount: java.util.concurrent.atomic.AtomicInteger)
   case ClosureVal(body: TFunBody, params: List[TParam], captured: scala.collection.mutable.LinkedHashMap[String, Cell])
+  case InterfaceVal(methodMap: Map[String, String], dataVal: Value, concreteType: SyslType)
 
 class Cell(var value: Value)
 
@@ -1054,6 +1055,34 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           val cell = lookupCell(varName, env)
           capturedEnv(varName) = new Cell(cell.value) // copy value, not share cell
         ClosureVal(body, params, capturedEnv)
+
+      case TInterfaceBox(expr, iface) =>
+        val dataVal = evalAny(expr, env)
+        // Build method map: interface method name → mangled function name
+        val structName = expr.typ match
+          case SyslType.StructType(name, _) => name
+          case SyslType.PtrType(SyslType.StructType(name, _)) => name
+          case SyslType.RefType(SyslType.StructType(name, _)) => name
+          case other => throw RuntimeError(s"cannot box $other into interface")
+        val methodMap = iface.methods.map { (mname, _, _) => (mname, s"${structName}_$mname") }.toMap
+        InterfaceVal(methodMap, dataVal, expr.typ)
+
+      case TInterfaceDispatch(ifaceVal, methodIndex, args, _) =>
+        val InterfaceVal(methodMap, dataVal, concreteType) = evalAny(ifaceVal, env): @unchecked
+        val iface = ifaceVal.typ.asInstanceOf[SyslType.InterfaceType]
+        val (methodName, _, _) = iface.methods(methodIndex)
+        val funcName = methodMap(methodName)
+        val argValues = args.map(evalAny(_, env))
+        // Build self arg — for value types, wrap in a cell so the method can modify via pointer
+        val selfArg = concreteType match
+          case _: SyslType.StructType =>
+            // Wrap data in a single-element array to create a pointer-like cell
+            val cells = Array(new Cell(dataVal))
+            PtrVal(ArrayPtr(cells, 0))
+          case _ => dataVal // already a pointer or ref
+        functions.get(funcName) match
+          case Some(fun) => call(fun, selfArg :: argValues)
+          case None => throw RuntimeError(s"interface dispatch: undefined method '$funcName'")
 
       case TCall(name, args, _) =>
         val argValues = args.map(evalAny(_, env))

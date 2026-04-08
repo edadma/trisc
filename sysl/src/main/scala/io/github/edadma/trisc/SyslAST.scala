@@ -49,6 +49,8 @@ case class TypeAliasDeclAST(name: String, target: TypeAST, attributes: List[Attr
 case class TraitDeclAST(name: String, typeParam: String, methods: List[TraitMethodAST], attributes: List[Attribute] = Nil) extends DeclAST
 case class TraitMethodAST(name: String, params: List[ParamAST], returnType: TypeAST, body: Option[FunBodyAST]) extends Positional
 case class ImplDeclAST(traitName: String, targetType: TypeAST, methods: List[FunDeclAST], attributes: List[Attribute] = Nil) extends DeclAST
+case class InterfaceDeclAST(name: String, methods: List[InterfaceMethodAST], embedded: List[String], attributes: List[Attribute] = Nil) extends DeclAST
+case class InterfaceMethodAST(name: String, params: List[ParamAST], returnType: TypeAST) extends Positional
 case class CondDeclAST(cond: CondExpr, thenDecls: List[DeclAST], elseDecls: Option[List[DeclAST]]) extends DeclAST
 
 // Conditional compilation expressions
