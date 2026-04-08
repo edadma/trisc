@@ -40,6 +40,7 @@ enum Value:
   case EnumVal(tag: Int, fields: Array[Cell])
   case RefEnumVal(tag: Int, fields: Array[Cell], refCount: java.util.concurrent.atomic.AtomicInteger)
   case RefStringVal(bytes: Array[Byte], length: Int, refCount: java.util.concurrent.atomic.AtomicInteger)
+  case ClosureVal(body: TFunBody, params: List[TParam], captured: scala.collection.mutable.LinkedHashMap[String, Cell])
 
 class Cell(var value: Value)
 
@@ -1046,6 +1047,14 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TFuncRef(name, _) => FuncVal(name)
 
+      case TClosure(params, _, body, captures) =>
+        // Capture current values by value (copy)
+        val capturedEnv = new mutable.LinkedHashMap[String, Cell]
+        for (varName, _) <- captures do
+          val cell = lookupCell(varName, env)
+          capturedEnv(varName) = new Cell(cell.value) // copy value, not share cell
+        ClosureVal(body, params, capturedEnv)
+
       case TCall(name, args, _) =>
         val argValues = args.map(evalAny(_, env))
         functions.get(name) match
@@ -1056,11 +1065,28 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case None => throw RuntimeError(s"undefined function: $name")
 
       case TIndirectCall(callee, args, _) =>
-        val FuncVal(name) = evalAny(callee, env): @unchecked
+        val calleeVal = evalAny(callee, env)
         val argValues = args.map(evalAny(_, env))
-        functions.get(name) match
-          case Some(fun) => call(fun, argValues)
-          case None =>
-            builtins.get(name) match
-              case Some(f) => f(argValues)
-              case None => throw RuntimeError(s"undefined function: $name")
+        calleeVal match
+          case FuncVal(name) =>
+            functions.get(name) match
+              case Some(fun) => call(fun, argValues)
+              case None =>
+                builtins.get(name) match
+                  case Some(f) => f(argValues)
+                  case None => throw RuntimeError(s"undefined function: $name")
+          case ClosureVal(body, closureParams, captured) =>
+            val closureEnv: Env = new mutable.LinkedHashMap
+            // Pre-populate with captured values (by-value copies)
+            for (name, cell) <- captured do
+              closureEnv(name) = new Cell(cell.value)
+            // Bind parameters
+            for (param, arg) <- closureParams.zip(argValues) do
+              closureEnv(param.name) = new Cell(arg)
+            // Evaluate body
+            body match
+              case TExprBody(expr) => evalAny(expr, closureEnv)
+              case TBlockBody(stmts) =>
+                try evalBlock(stmts, closureEnv)
+                catch case ReturnException(v) => v
+          case other => throw RuntimeError(s"cannot call ${other}")

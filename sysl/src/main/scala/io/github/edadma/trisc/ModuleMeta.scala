@@ -9,12 +9,13 @@ object SymbolMeta:
     case Func(params: List[SyslType], returnType: SyslType)
     case Data(dataType: SyslType)
     case Struct(structType: SyslType.StructType)
+    case Enum(enumType: SyslType.EnumType)
 
 class ModuleMeta(val symbols: List[SymbolMeta]):
 
   def toSmeta: String =
     val buf = new StringBuilder
-    buf ++= "SMETA v1\n"
+    buf ++= s"SMETA v${ModuleMeta.SMETA_VERSION}\n"
     var currentSource: Option[String] = None
     for sym <- symbols do
       if sym.sourceFile != currentSource && sym.sourceFile.isDefined then
@@ -28,6 +29,8 @@ class ModuleMeta(val symbols: List[SymbolMeta]):
           buf ++= s"${vis}DATA ${sym.name} ${dataType.toPrefix}\n"
         case SymbolMeta.Kind.Struct(st) =>
           buf ++= s"${vis}STRUCT ${sym.name} ${st.toPrefix}\n"
+        case SymbolMeta.Kind.Enum(et) =>
+          buf ++= s"${vis}ENUM ${sym.name} ${et.toPrefix}\n"
     buf.toString
 
   def toAsmGlobals: String =
@@ -40,7 +43,7 @@ class ModuleMeta(val symbols: List[SymbolMeta]):
           buf ++= s"global ${sym.name}, func, ${SyslType.funcSigToPrefix(params, ret)}\n"
         case SymbolMeta.Kind.Data(dataType) =>
           buf ++= s"global ${sym.name}, data, ${dataType.toPrefix}\n"
-        case SymbolMeta.Kind.Struct(_) => // type-only, no asm global
+        case SymbolMeta.Kind.Struct(_) | SymbolMeta.Kind.Enum(_) => // type-only, no asm global
     buf.toString
 
   def publicSymbols: List[SymbolMeta] =
@@ -68,10 +71,20 @@ class ModuleMeta(val symbols: List[SymbolMeta]):
 
 object ModuleMeta:
 
+  /** Bump this whenever the .smeta format changes. Stale files are silently ignored. */
+  val SMETA_VERSION = 2
+
   def fromProgram(program: TProgram, sourceFile: Option[String] = None): ModuleMeta =
     val syms = program.decls.collect {
       case TStructDecl(name, fields) =>
         SymbolMeta(name, SymbolMeta.Kind.Struct(SyslType.StructType(name, fields)), isPrivate = false, sourceFile = sourceFile)
+      case TEnumDecl(name, members) =>
+        // Simple enum: convert to EnumType with empty variant fields for serialization
+        val variants: List[(String, List[(String, SyslType)])] = members.map((n, _) => (n, Nil))
+        val et: SyslType.EnumType = SyslType.EnumType(name, variants)
+        SymbolMeta(name, SymbolMeta.Kind.Enum(et), isPrivate = false, sourceFile = sourceFile)
+      case TDataEnumDecl(name, et: SyslType.EnumType) =>
+        SymbolMeta(name, SymbolMeta.Kind.Enum(et), isPrivate = false, sourceFile = sourceFile)
       case TExternFuncDecl(name, params, returnType) =>
         SymbolMeta(name, SymbolMeta.Kind.Func(params, returnType), isPrivate = false, isExtern = true, sourceFile = sourceFile)
       case TExternVarDecl(name, typ) =>
@@ -83,7 +96,7 @@ object ModuleMeta:
     }
     new ModuleMeta(syms)
 
-  def fromSmeta(source: String): ModuleMeta =
+  def fromSmeta(source: String): Option[ModuleMeta] =
     val syms = scala.collection.mutable.ListBuffer[SymbolMeta]()
     var lineNum = 0
     var headerSeen = false
@@ -94,7 +107,9 @@ object ModuleMeta:
       val line = rawLine.trim
       if line.nonEmpty then
         if !headerSeen then
-          if line != "SMETA v1" then throw IllegalArgumentException(s"line $lineNum: expected SMETA v1 header")
+          if !line.startsWith("SMETA") then return None // not a valid smeta file — treat as stale
+          val version = line.stripPrefix("SMETA").trim.stripPrefix("v").trim.toIntOption.getOrElse(0)
+          if version < SMETA_VERSION then return None // stale — caller should recompile from source
           headerSeen = true
         else if line.startsWith("SOURCE ") then
           currentSource = Some(line.drop(7).trim)
@@ -115,8 +130,11 @@ object ModuleMeta:
             case "STRUCT" =>
               val st = SyslType.parseType(tokens).asInstanceOf[SyslType.StructType]
               syms += SymbolMeta(name, SymbolMeta.Kind.Struct(st), isPrivate, sourceFile = currentSource)
+            case "ENUM" =>
+              val et = SyslType.parseType(tokens).asInstanceOf[SyslType.EnumType]
+              syms += SymbolMeta(name, SymbolMeta.Kind.Enum(et), isPrivate, sourceFile = currentSource)
             case other =>
               throw IllegalArgumentException(s"line $lineNum: unknown symbol kind '$other'")
 
-    if !headerSeen then throw IllegalArgumentException("empty or missing SMETA header")
-    new ModuleMeta(syms.toList)
+    if !headerSeen then return None
+    Some(new ModuleMeta(syms.toList))

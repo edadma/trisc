@@ -117,7 +117,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         if SyslStdlib.modules.contains(imp.modulePath) then
           analyzer.registerImport(SyslStdlib.meta(imp.modulePath), imp.selectors)
         else if smetaCache.contains(imp.modulePath) then
-          analyzer.registerImport(ModuleMeta.fromSmeta(smetaCache(imp.modulePath)), imp.selectors)
+          ModuleMeta.fromSmeta(smetaCache(imp.modulePath)).foreach(analyzer.registerImport(_, imp.selectors))
         else if packageMetaCache.contains(imp.modulePath) then
           analyzer.registerImport(packageMetaCache(imp.modulePath), imp.selectors)
         else
@@ -236,8 +236,8 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
           val filePath = s"${io.joinPath(base, modulePath)}.sysl"
 
           if io.exists(smetaPath) then
-            // Directory with .smeta
-            Some(ModuleMeta.fromSmeta(io.readFile(smetaPath)))
+            // Directory with .smeta — returns None if stale version
+            ModuleMeta.fromSmeta(io.readFile(smetaPath))
           else if io.exists(filePath) then
             // Single file module — compile it on demand
             val source = io.readFile(filePath)

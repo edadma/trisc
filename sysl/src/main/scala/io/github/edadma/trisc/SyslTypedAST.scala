@@ -102,3 +102,6 @@ case class TAppend(slice: TExpr, elem: TExpr, typ: SyslType) extends TExpr
 case class TStringFromPtr(ptr: TExpr, len: TExpr, typ: SyslType) extends TExpr
 case class TStringFromSlice(slice: TExpr, typ: SyslType) extends TExpr
 case class TStr(expr: TExpr) extends TExpr { def typ: SyslType = SyslType.StringType }
+case class TClosure(params: List[TParam], returnType: SyslType, body: TFunBody, captures: List[(String, SyslType)]) extends TExpr {
+  def typ: SyslType = SyslType.FuncType(params.map(_.typ), returnType)
+}

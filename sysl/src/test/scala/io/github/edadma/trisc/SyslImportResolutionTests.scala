@@ -8,14 +8,14 @@ class SyslImportResolutionTests extends AnyFreeSpec with Matchers {
 
   // Helper: create smeta for a "math" module
   private val mathSmeta =
-    """SMETA v1
+    s"""SMETA v${ModuleMeta.SMETA_VERSION}
       |FUNC add 2 int int int
       |FUNC square 1 int int
       |DATA pi int
       |""".stripMargin
 
   private val ioSmeta =
-    """SMETA v1
+    s"""SMETA v${ModuleMeta.SMETA_VERSION}
       |FUNC write 1 int void
       |""".stripMargin
 
@@ -23,7 +23,7 @@ class SyslImportResolutionTests extends AnyFreeSpec with Matchers {
     val Right(ast) = (new SyslParser).parseProgram(source): @unchecked
     val analyzer = new SyslAnalyzer
     for (_, smeta) <- imports do
-      analyzer.registerImport(ModuleMeta.fromSmeta(smeta))
+      analyzer.registerImport(ModuleMeta.fromSmeta(smeta).get)
     val typed = analyzer.analyze(ast)
     (typed, analyzer)
 
@@ -43,7 +43,7 @@ class SyslImportResolutionTests extends AnyFreeSpec with Matchers {
       """main() -> int = add(true, 2)
         |""".stripMargin): @unchecked
     val analyzer = new SyslAnalyzer
-    analyzer.registerImport(ModuleMeta.fromSmeta(mathSmeta))
+    analyzer.registerImport(ModuleMeta.fromSmeta(mathSmeta).get)
     // add expects (int, int), passing bool should be rejected
     a [RuntimeException] should be thrownBy analyzer.analyze(ast)
   }
@@ -104,9 +104,9 @@ class SyslImportResolutionTests extends AnyFreeSpec with Matchers {
 
   "allows re-importing same module (idempotent)" in {
     val analyzer = new SyslAnalyzer
-    analyzer.registerImport(ModuleMeta.fromSmeta(mathSmeta))
+    analyzer.registerImport(ModuleMeta.fromSmeta(mathSmeta).get)
     // Re-importing the same module should not throw — same symbols, same names
-    noException should be thrownBy analyzer.registerImport(ModuleMeta.fromSmeta(mathSmeta))
+    noException should be thrownBy analyzer.registerImport(ModuleMeta.fromSmeta(mathSmeta).get)
   }
 
   "rejects import conflicting with local function" in {
@@ -115,7 +115,7 @@ class SyslImportResolutionTests extends AnyFreeSpec with Matchers {
         |main() -> int = add(1, 2)
         |""".stripMargin): @unchecked
     val analyzer = new SyslAnalyzer
-    analyzer.registerImport(ModuleMeta.fromSmeta(mathSmeta))
+    analyzer.registerImport(ModuleMeta.fromSmeta(mathSmeta).get)
     an[Exception] should be thrownBy analyzer.analyze(ast)
   }
 
@@ -124,7 +124,7 @@ class SyslImportResolutionTests extends AnyFreeSpec with Matchers {
       """main() -> int = nonexistent(1)
         |""".stripMargin): @unchecked
     val analyzer = new SyslAnalyzer
-    analyzer.registerImport(ModuleMeta.fromSmeta(mathSmeta))
+    analyzer.registerImport(ModuleMeta.fromSmeta(mathSmeta).get)
     an[Exception] should be thrownBy analyzer.analyze(ast)
   }
 
@@ -132,7 +132,7 @@ class SyslImportResolutionTests extends AnyFreeSpec with Matchers {
 
   "private symbols are not visible" in {
     val smetaWithPrivate =
-      """SMETA v1
+      s"""SMETA v${ModuleMeta.SMETA_VERSION}
         |FUNC public_fn 0 int
         |PRIVATE FUNC secret_fn 0 int
         |""".stripMargin
@@ -140,13 +140,13 @@ class SyslImportResolutionTests extends AnyFreeSpec with Matchers {
       """main() -> int = secret_fn()
         |""".stripMargin): @unchecked
     val analyzer = new SyslAnalyzer
-    analyzer.registerImport(ModuleMeta.fromSmeta(smetaWithPrivate))
+    analyzer.registerImport(ModuleMeta.fromSmeta(smetaWithPrivate).get)
     an[Exception] should be thrownBy analyzer.analyze(ast)
   }
 
   "public symbols from same module are visible" in {
     val smetaWithPrivate =
-      """SMETA v1
+      s"""SMETA v${ModuleMeta.SMETA_VERSION}
         |FUNC public_fn 0 int
         |PRIVATE FUNC secret_fn 0 int
         |""".stripMargin
@@ -154,7 +154,7 @@ class SyslImportResolutionTests extends AnyFreeSpec with Matchers {
       """main() -> int = public_fn()
         |""".stripMargin): @unchecked
     val analyzer = new SyslAnalyzer
-    analyzer.registerImport(ModuleMeta.fromSmeta(smetaWithPrivate))
+    analyzer.registerImport(ModuleMeta.fromSmeta(smetaWithPrivate).get)
     analyzer.analyze(ast) // should not throw
   }
 
