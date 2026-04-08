@@ -677,6 +677,16 @@ class SyslAnalyzer:
       case SliceTypeAST(inner) => arg match
         case SliceType(a) => unifyTypes(inner, a, typeParams, env)
         case _ => ()
+      case FuncTypeAST(paramTypes, ret) => arg match
+        case FuncType(argParams, argRet) =>
+          if paramTypes.length == argParams.length then
+            for (pt, at) <- paramTypes.zip(argParams) do unifyTypes(pt, at, typeParams, env)
+          unifyTypes(ret, argRet, typeParams, env)
+        case _ => ()
+      case TupleTypeAST(elems) => arg match
+        case StructType(_, fields) if elems.length == fields.length =>
+          for (e, (_, ft)) <- elems.zip(fields) do unifyTypes(e, ft, typeParams, env)
+        case _ => ()
       case NamedTypeAST(name, tArgs) if tArgs.nonEmpty => arg match
         case SyslType.StructType(argName, _) =>
           structToTemplate.get(argName) match
@@ -865,9 +875,20 @@ class SyslAnalyzer:
           pushScope()
           for (paramName, paramType) <- paramTypes do
             currentScope(paramName) = SymInfo(paramName, paramType, true)
-          val tBody = template.body match
-            case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
-            case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
+          val savedExpectedInst = currentExpected
+          // Use only the *result* R of `func(...) -> R`, not the full function type, so nested
+          // closures still treat outer parameters (e.g. alt's `a`, `b`) as captures rather than
+          // mis-reading `func(string,int)->…` as the expected shape of a single-arg closure.
+          currentExpected = template.returnType.map(resolveType).map {
+            case ft: FuncType => ft.returnType
+            case t => t
+          }
+          val tBody = try
+            template.body match
+              case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
+              case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
+          finally
+            currentExpected = savedExpectedInst
           scopeStack = savedScopeStack
           loopDepth = savedLoopDepth
           val tParams = paramTypes.map((n, t) => TParam(n, t))
@@ -1138,12 +1159,21 @@ class SyslAnalyzer:
           val paramType = p.typ match
             case Some(typeAST) => resolveType(typeAST)
             case None =>
+              // Only use currentExpected when it is a function type with the *same arity*
+              // as this closure. Otherwise a parser return type `func(string,int)->R`
+              // would wrongly supply `string` as the type of a single-parameter combinator
+              // argument (e.g. `ch` in `map(p, ch -> ...)`).
               expectedFunc match
-                case Some(ft) if i < ft.params.length => ft.params(i)
+                case Some(ft) if ft.params.length == params.length && i < ft.params.length =>
+                  ft.params(i)
                 case _ => throw AnalysisError(s"cannot infer type for closure parameter '${p.name}' — add a type annotation")
           TParam(p.name, paramType)
         }
-        val expectedRet = expectedFunc.map(_.returnType).getOrElse(VoidType)
+        val expectedRet = expectedFunc.map(_.returnType).getOrElse(
+          currentExpected match
+            case Some(t) if t != VoidType => t
+            case _ => VoidType
+        )
         // Push scope with closure params
         pushScope()
         for p <- typedParams do
@@ -1156,45 +1186,143 @@ class SyslAnalyzer:
           case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
         finally currentExpected = savedExp
         popScope()
-        // Detect captures: variables referenced from enclosing scope (not globals, not params)
+        // Detect captures: variables referenced from enclosing scope (not globals, not params).
+        // `locals` = params in scope at this point (outer closure params + any nested closure params).
         val paramNames = typedParams.map(_.name).toSet
         val captures = scala.collection.mutable.ListBuffer.empty[(String, SyslType)]
-        def scanCaptures(expr: TExpr): Unit = expr match
-          case TVarRef(name, typ) =>
-            if !paramNames.contains(name) && !globalScope.contains(name) && !functions.contains(name) && !builtinFunctions.contains(name) then
-              if !captures.exists(_._1 == name) then captures += ((name, typ))
-          case _ =>
-            // Walk child expressions
-            expr match
-              case TBinary(l, _, r, _) => scanCaptures(l); scanCaptures(r)
-              case TUnary(_, e, _) => scanCaptures(e)
-              case TCall(_, args, _) => args.foreach(scanCaptures)
-              case TIndirectCall(c, args, _) => scanCaptures(c); args.foreach(scanCaptures)
-              case TIndex(a, i, _) => scanCaptures(a); scanCaptures(i)
-              case TFieldAccess(o, _, _) => scanCaptures(o)
-              case TDeref(e, _) => scanCaptures(e)
-              case TCast(e, _) => scanCaptures(e)
-              case TAddrOf(n, t) =>
-                if !paramNames.contains(n) && !globalScope.contains(n) then
-                  if !captures.exists(_._1 == n) then captures += ((n, t))
-              case TIfExpr(c, th, el, _) =>
-                scanCaptures(c)
-                th.foreach { case TExprStmt(e) => scanCaptures(e); case _ => () }
-                el.foreach(_.foreach { case TExprStmt(e) => scanCaptures(e); case _ => () })
-              case _ => ()
-        def scanStmtCaptures(stmt: TStmt): Unit = stmt match
-          case TExprStmt(e) => scanCaptures(e)
-          case TVarStmt(_, _, init) => scanCaptures(init)
-          case TAssignStmt(_, v) => scanCaptures(v)
-          case TCompoundAssignStmt(_, _, v) => scanCaptures(v)
-          case TReturnStmt(Some(e)) => scanCaptures(e)
-          case TWhileStmt(c, body) => scanCaptures(c); body.foreach(scanStmtCaptures)
-          case TForStmt(init, c, upd, body) => scanStmtCaptures(init); scanCaptures(c); scanStmtCaptures(upd); body.foreach(scanStmtCaptures)
-          case TIfExpr(c, th, el, _) => scanCaptures(c); th.foreach(scanStmtCaptures); el.foreach(_.foreach(scanStmtCaptures))
+        def recordCapture(name: String, typ: SyslType, locals: Set[String]): Unit =
+          if !locals.contains(name) && !globalScope.contains(name) && !functions.contains(name) && !builtinFunctions.contains(name) then
+            if !captures.exists(_._1 == name) then captures += ((name, typ))
+        def scanMatchPattern(pat: TMatchPattern, locals: Set[String]): Unit = pat match
+          case TValuePattern(e) => scanCaptures(e, locals)
+          case TRangePattern(lo, hi) => scanCaptures(lo, locals); scanCaptures(hi, locals)
           case _ => ()
+        def patternBindings(pats: List[TMatchPattern]): Set[String] =
+          val b = scala.collection.mutable.Set.empty[String]
+          for p <- pats do
+            p match
+              case TVariantPattern(_, _, bindings, _) => bindings.flatten.foreach(b += _)
+              case TDestructurePattern(_, bindings, _) => bindings.flatten.foreach(b += _)
+              case _ => ()
+          b.toSet
+        def scanCaptures(expr: TExpr, locals: Set[String]): Unit = expr match
+          case TVarRef(name, typ) => recordCapture(name, typ, locals)
+          case TBinary(l, _, r, _) => scanCaptures(l, locals); scanCaptures(r, locals)
+          case TUnary(_, e, _) => scanCaptures(e, locals)
+          case TCall(_, args, _) => args.foreach(scanCaptures(_, locals))
+          case TIndirectCall(c, args, _) => scanCaptures(c, locals); args.foreach(scanCaptures(_, locals))
+          case TIndex(a, i, _) => scanCaptures(a, locals); scanCaptures(i, locals)
+          case TFieldAccess(o, _, _) => scanCaptures(o, locals)
+          case TDeref(e, _) => scanCaptures(e, locals)
+          case TCast(e, _) => scanCaptures(e, locals)
+          case TAddrOf(n, t) => recordCapture(n, t, locals)
+          case TAddrOfIndex(a, i, _) => scanCaptures(a, locals); scanCaptures(i, locals)
+          case TAddrOfField(o, _, _) => scanCaptures(o, locals)
+          case TFieldPreInc(o, _, _) => scanCaptures(o, locals)
+          case TFieldPreDec(o, _, _) => scanCaptures(o, locals)
+          case TFieldPostInc(o, _, _) => scanCaptures(o, locals)
+          case TFieldPostDec(o, _, _) => scanCaptures(o, locals)
+          case TIfExpr(c, th, el, _) =>
+            scanCaptures(c, locals)
+            scanStmtSeq(th, locals)
+            el.foreach(scanStmtSeq(_, locals))
+          case TMatchExpr(scrutinee, arms, default, _) =>
+            scanCaptures(scrutinee, locals)
+            for arm <- arms do
+              arm.patterns.foreach(scanMatchPattern(_, locals))
+              val armLocals = locals ++ patternBindings(arm.patterns)
+              arm.guard.foreach(scanCaptures(_, armLocals))
+              scanStmtSeq(arm.body, armLocals)
+            default.foreach(scanStmtSeq(_, locals))
+          case TEnumConstruct(_, _, args) => args.foreach(scanCaptures(_, locals))
+          case TStructConstruct(_, args) => args.foreach(scanCaptures(_, locals))
+          case TArrayLit(elems, _) => elems.foreach(scanCaptures(_, locals))
+          case TNew(_, args) => args.foreach(scanCaptures(_, locals))
+          case TNewEnum(_, _, args) => args.foreach(scanCaptures(_, locals))
+          case TNewArray(_, size) => scanCaptures(size, locals)
+          case TLen(e, _) => scanCaptures(e, locals)
+          case TCap(e, _) => scanCaptures(e, locals)
+          case TSliceExpr(arr, lo, hi, _) =>
+            scanCaptures(arr, locals)
+            lo.foreach(scanCaptures(_, locals))
+            hi.foreach(scanCaptures(_, locals))
+          case TAppend(slc, elem, _) => scanCaptures(slc, locals); scanCaptures(elem, locals)
+          case TStringFromPtr(ptr, len, _) => scanCaptures(ptr, locals); scanCaptures(len, locals)
+          case TStringFromSlice(slc, _) => scanCaptures(slc, locals)
+          case TStr(e) => scanCaptures(e, locals)
+          case TClosure(innerParams, _, innerBody, _) =>
+            val innerLocals = locals ++ innerParams.map(_.name).toSet
+            innerBody match
+              case TExprBody(e) => scanCaptures(e, innerLocals)
+              case TBlockBody(stmts) => scanStmtSeq(stmts, innerLocals)
+          case _ => ()
+        /** Walk statements in order; extend locals with val/destructure bindings so they are not mistaken for captures. */
+        def scanStmtSeq(stmts: List[TStmt], startLocals: Set[String]): Unit =
+          var L = startLocals
+          for stmt <- stmts do L = scanStmtInSeq(stmt, L)
+        def scanStmtInSeq(stmt: TStmt, locals: Set[String]): Set[String] = stmt match
+          case TVarStmt(name, _, init) =>
+            scanCaptures(init, locals)
+            if name == "_" then locals else locals + name
+          case TDestructureStmt(names, _, init) =>
+            scanCaptures(init, locals)
+            locals ++ names.filter(_ != "_").toSet
+          case TDestructureAssignStmt(_, _, init) =>
+            scanCaptures(init, locals)
+            locals
+          case TExprStmt(e) =>
+            scanCaptures(e, locals)
+            locals
+          case TAssignStmt(_, v) =>
+            scanCaptures(v, locals)
+            locals
+          case TCompoundAssignStmt(_, _, v) =>
+            scanCaptures(v, locals)
+            locals
+          case TDerefAssignStmt(ptr, v) =>
+            scanCaptures(ptr, locals)
+            scanCaptures(v, locals)
+            locals
+          case TIndexAssignStmt(arr, idx, v) =>
+            scanCaptures(arr, locals)
+            scanCaptures(idx, locals)
+            scanCaptures(v, locals)
+            locals
+          case TFieldAssignStmt(obj, _, v) =>
+            scanCaptures(obj, locals)
+            scanCaptures(v, locals)
+            locals
+          case TFieldCompoundAssignStmt(obj, _, _, v) =>
+            scanCaptures(obj, locals)
+            scanCaptures(v, locals)
+            locals
+          case TReturnStmt(Some(e)) =>
+            scanCaptures(e, locals)
+            locals
+          case TReturnStmt(None) => locals
+          case TWhileStmt(c, body) =>
+            scanCaptures(c, locals)
+            scanStmtSeq(body, locals)
+            locals
+          case TForStmt(init, c, upd, body) =>
+            var Lf = scanStmtInSeq(init, locals)
+            scanCaptures(c, Lf)
+            Lf = scanStmtInSeq(upd, Lf)
+            scanStmtSeq(body, Lf)
+            locals
+          case TDoWhileStmt(c, body) =>
+            scanStmtSeq(body, locals)
+            scanCaptures(c, locals)
+            locals
+          case TDeferStmt(inner) =>
+            scanStmtInSeq(inner, locals)
+            locals
+          case TAsmStmt(_) => locals
+          case TBreakStmt | TContinueStmt => locals
+          case _ => locals
         tBody match
-          case TExprBody(e) => scanCaptures(e)
-          case TBlockBody(stmts) => stmts.foreach(scanStmtCaptures)
+          case TExprBody(e) => scanCaptures(e, paramNames)
+          case TBlockBody(stmts) => scanStmtSeq(stmts, paramNames)
         // Determine actual return type from body
         val actualRet = tBody match
           case TExprBody(e) => e.typ
