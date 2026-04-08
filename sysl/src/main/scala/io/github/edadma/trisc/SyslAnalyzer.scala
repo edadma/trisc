@@ -22,6 +22,7 @@ class SyslAnalyzer:
   private val interfaceTypes = new mutable.LinkedHashMap[String, SyslType.InterfaceType]  // interface name → InterfaceType
   private val moduleNamespaces = new mutable.LinkedHashMap[String, ModuleMeta]  // short name → module meta (for qualified imports)
   private val typeAliases = new mutable.LinkedHashMap[String, TypeAST]  // alias name → target type AST
+  private val genericTypeAliases = new mutable.LinkedHashMap[String, (List[String], TypeAST)]  // name → (type params, target)
   private val methods = new mutable.LinkedHashMap[String, mutable.Set[String]]  // struct name → set of method names
   private val deprecations = new mutable.LinkedHashMap[String, Option[String]]  // name → optional reason
   private val warnedDeprecations = new mutable.HashSet[String]
@@ -419,9 +420,13 @@ class SyslAnalyzer:
             dataEnumTypes(name) = et
             for ((vname, _), idx) <- resolvedVariants.zipWithIndex do
               variantToEnum(vname) = (et, idx)
-        case TypeAliasDeclAST(name, target, _) =>
-          if typeAliases.contains(name) then throw AnalysisError(s"duplicate type alias: '$name'", decl)
-          typeAliases(name) = target
+        case TypeAliasDeclAST(name, target, tparams, _) =>
+          if typeAliases.contains(name) || genericTypeAliases.contains(name) then
+            throw AnalysisError(s"duplicate type alias: '$name'", decl)
+          if tparams.nonEmpty then
+            genericTypeAliases(name) = (tparams, target)
+          else
+            typeAliases(name) = target
         case TraitDeclAST(name, tparam, methods, _) =>
           if traits.contains(name) then throw AnalysisError(s"duplicate trait: '$name'", decl)
           // Check no duplicate method names within the trait
@@ -546,8 +551,9 @@ class SyslAnalyzer:
       case DataEnumDeclAST(name, _, _, _) =>
         TDataEnumDecl(name, dataEnumTypes(name))
 
-      case TypeAliasDeclAST(name, target, _) =>
-        TTypeAliasDecl(name, resolveType(target))
+      case TypeAliasDeclAST(name, target, tparams, _) =>
+        if tparams.nonEmpty then TTypeAliasDecl(name, VoidType) // generic alias: type-only, no codegen
+        else TTypeAliasDecl(name, resolveType(target))
 
       case fdAst @ FunDeclAST(name, params, _, body, isPrivate, _, _, attrs) =>
         scopeStack = new mutable.ArrayBuffer
@@ -609,7 +615,16 @@ class SyslAnalyzer:
   private def resolveType(t: TypeAST): SyslType = t match
     case NamedTypeAST(name, typeArgs) if typeArgs.nonEmpty =>
       val resolved = typeArgs.map(resolveType)
-      if genericStructs.contains(name) then instantiateGenericStruct(name, resolved)
+      if genericTypeAliases.contains(name) then
+        val (tparams, target) = genericTypeAliases(name)
+        if resolved.length != tparams.length then
+          throw AnalysisError(s"type alias '$name' expects ${tparams.length} type argument(s), got ${resolved.length}")
+        val savedEnv = typeEnv
+        typeEnv = typeEnv ++ tparams.zip(resolved).toMap
+        val result = resolveType(target)
+        typeEnv = savedEnv
+        result
+      else if genericStructs.contains(name) then instantiateGenericStruct(name, resolved)
       else if genericEnums.contains(name) then instantiateGenericEnum(name, resolved)
       else throw AnalysisError(s"'$name' is not a generic type")
     case NamedTypeAST(name, _) if typeEnv.contains(name) => typeEnv(name)
@@ -2108,9 +2123,11 @@ class SyslAnalyzer:
           throw AnalysisError(s"'?' operator requires a 2-variant enum, got ${enumType.variants.length} variants")
         val (successName, successFields) = enumType.variants(0)
         val (failureName, failureFields) = enumType.variants(1)
-        if successFields.length != 1 then
-          throw AnalysisError(s"'?' operator: first variant '$successName' must have exactly 1 field, got ${successFields.length}")
-        val successType = successFields(0)._2
+        if successFields.isEmpty then
+          throw AnalysisError(s"'?' operator: first variant '$successName' must have at least 1 field")
+        // Single field → unwrap to that type; multiple fields → unwrap to tuple
+        val successType = if successFields.length == 1 then successFields(0)._2
+          else SyslType.tupleType(successFields.map(_._2))
         // Verify the enclosing function's return type matches
         currentExpected match
           case Some(et: SyslType.EnumType) if et.name == enumType.name => ()
@@ -2119,7 +2136,7 @@ class SyslAnalyzer:
           case None =>
             throw AnalysisError(s"'?' operator requires enclosing function with matching return type")
         // Build: match tInner { Success(v) -> v; Failure(e) -> return Failure(e) }
-        val successBindName = "_try_v"
+        val successBindNames = successFields.indices.map(i => s"_try_v$i").toList
         val failureBindNames = failureFields.indices.map(i => s"_try_e$i").toList
         // Failure arm: return Failure(e0, e1, ...)
         val failureReconstructArgs: List[TExpr] = failureBindNames.zip(failureFields).map {
@@ -2131,10 +2148,16 @@ class SyslAnalyzer:
           None,
           List(TReturnStmt(Some(failureReturnValue)))
         )
+        // Success arm: unwrap single field or construct tuple
+        val successExpr: TExpr = if successFields.length == 1 then
+          TVarRef(successBindNames.head, successFields.head._2)
+        else
+          TStructConstruct(successType.asInstanceOf[SyslType.StructType],
+            successBindNames.zip(successFields).map { case (name, (_, ft)) => TVarRef(name, ft) })
         val successArm = TMatchArm(
-          List(TVariantPattern(enumType, 0, List(Some(successBindName)), List(successType))),
+          List(TVariantPattern(enumType, 0, successBindNames.map(Some(_)), successFields.map(_._2))),
           None,
-          List(TExprStmt(TVarRef(successBindName, successType)))
+          List(TExprStmt(successExpr))
         )
         TMatchExpr(tInner, List(successArm, failureArm), None, successType)
 
