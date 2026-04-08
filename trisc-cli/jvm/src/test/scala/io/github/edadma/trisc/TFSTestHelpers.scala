@@ -106,6 +106,33 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
        |  align 8
        |""".stripMargin
 
+  // Library source keys — these never change between tests
+  private val libSourceKeys = Set(
+    "oskit/fs/tfs", "posix/string/string", "posix/ctype/ctype",
+    "posix/stdlib/alloc", "posix/unistd/sbrk", "ramdisk",
+  )
+
+  // Cache: boot TOF + compiled+assembled library TOFs (compiled once with dummy main)
+  private lazy val cachedBootTof: TOF = assemble(tfsBoot, relocatable = true)
+  private lazy val cachedLibTof: TOF =
+    val dummySources = Map("main" -> "main() -> int = 0") ++ libSources
+    val driver = new SyslDriver
+    val result = driver.compile(dummySources)
+    val codegen = new SyslTriscCodegen
+    val libTofs = for unit <- result.units if libSourceKeys.contains(unit.name) yield
+      val asm = codegen.generate(unit.typed)
+      assemble(asm, relocatable = true)
+    Linker.link(libTofs, relocatable = true)
+
+  private val libSources: Map[String, String] = Map(
+    "oskit/fs/tfs" -> tfsSource,
+    "posix/string/string" -> posixStringSysl,
+    "posix/ctype/ctype" -> posixCtypeSysl,
+    "posix/stdlib/alloc" -> posixAllocSysl,
+    "posix/unistd/sbrk" -> sbrk_inline,
+    "ramdisk" -> ramdiskSource,
+  )
+
   private var _tracing = false
 
   /** Wrap a test body to enable CPU instruction tracing to /tmp/trisc_tfs_debug.log */
@@ -126,16 +153,17 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
       prefill: String,
       maxCycles: Int,
   ): (CPU, String) =
-    val bootTof = assemble(tfsBoot, relocatable = true)
-    val allSources = sources + ("oskit/fs/tfs" -> tfsSource) + ("posix/string/string" -> posixStringSysl) + ("posix/ctype/ctype" -> posixCtypeSysl) + ("posix/stdlib/alloc" -> posixAllocSysl) + ("posix/unistd/sbrk" -> sbrk_inline) + ("ramdisk" -> ramdiskSource)
+    // Compile all sources together (needed for import resolution), but only
+    // codegen+assemble the user sources — library TOFs are cached.
+    val allSources = sources ++ libSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
     val codegen = new SyslTriscCodegen
-    val tofs = for unit <- result.units yield
+    val userTofs = for unit <- result.units if !libSourceKeys.contains(unit.name) yield
       val asm = codegen.generate(unit.typed)
       assemble(asm, relocatable = true)
-    val progTof = Linker.link(tofs, relocatable = true)
-    val linked = Linker.link(Seq(bootTof, progTof))
+    val userTof = Linker.link(userTofs, relocatable = true)
+    val linked = Linker.link(Seq(cachedBootTof, cachedLibTof, userTof))
 
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
