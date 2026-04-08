@@ -1029,6 +1029,7 @@ class SyslAnalyzer:
       // Insert explicit conversions for codegen
       (coerced.typ, pType) match
         case (StringType, PtrType(I8 | U8)) => TCast(coerced, pType)
+        case (_: FuncType, IntType(64) | UIntType(64)) => TCast(coerced, pType)
         case (_, iface: InterfaceType) if !coerced.typ.isInstanceOf[InterfaceType] =>
           TInterfaceBox(coerced, iface)
         case _ => coerced
@@ -1105,7 +1106,11 @@ class SyslAnalyzer:
       case DerefAssignStmtAST(pointer, value) =>
         val tPointer = analyzeExpr(pointer)
         val tValue = analyzeExpr(value)
-        TDerefAssignStmt(tPointer, tValue)
+        // Insert FuncType → i64 coercion when storing function pointer to *i64
+        val coerced = (tValue.typ, tPointer.typ) match
+          case (_: FuncType, PtrType(IntType(64) | UIntType(64))) => TCast(tValue, IntType(64))
+          case _ => tValue
+        TDerefAssignStmt(tPointer, coerced)
 
       case IndexAssignStmtAST(array, index, value) =>
         val tArray = analyzeExpr(array)

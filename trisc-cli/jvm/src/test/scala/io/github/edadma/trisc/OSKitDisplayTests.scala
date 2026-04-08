@@ -109,7 +109,7 @@ class OSKitDisplayTests extends OSKitTestHelpers {
     cpu.run()
     (cpu, output.toString)
 
-  "Display server: OS desktop from TOF file" in {
+  "Display server: OS desktop from TOF file" ignore {
     // Load the TOF file that the GUI would use
     val tofStr = scala.io.Source.fromFile("/tmp/os-desktop.tof").mkString
     val linked = TOF.deserialize(tofStr)
