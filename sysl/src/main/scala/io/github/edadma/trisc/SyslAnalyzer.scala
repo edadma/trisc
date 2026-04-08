@@ -202,9 +202,14 @@ class SyslAnalyzer:
             // Data enum — register in dataEnumTypes and variantToEnum
             linkImportedDataEnumToTemplate(et)
             dataEnumTypes(sn) = et
-            // Mangled generic instances (e.g. ParseMaybe_i32) link via enumToTemplate only; do not
-            // register Got/Miss in variantToEnum or they shadow genericVariantToEnum and break seq/map.
-            if !enumToTemplate.contains(et.name) then
+            // Mangled generic instances (e.g. ParseMaybe_i32) link via enumToTemplate when the suffix
+            // parses as a monotype. Suffixes like _Tuple2 or func(...) do not parse — still do not
+            // register Got/Miss on variantToEnum or the last imported instance wins and breaks seq/map.
+            val isMangledGenericInstance =
+              genericEnums.exists { case (base, decl) =>
+                decl.typeParams.length == 1 && et.name.startsWith(base + "_") && et.name != base
+              }
+            if !enumToTemplate.contains(et.name) && !isMangledGenericInstance then
               for ((vname, _), idx) <- et.variants.zipWithIndex do
                 variantToEnum(vname) = (et, idx)
 
@@ -766,8 +771,9 @@ class SyslAnalyzer:
     case ArrayType(e, n) => s"arr${n}${typeToMangled(e)}"
     case SliceType(e)    => "slice" + typeToMangled(e)
     case FuncType(ps, r) => "fn" + ps.map(typeToMangled).mkString("") + "Ret" + typeToMangled(r)
-    case StructType(n, _) => n
-    case EnumType(n, _)   => n
+    case StructType(n, _)    => n
+    case EnumType(n, _)      => n
+    case InterfaceType(n, _) => n
 
   private def mangleGenericName(base: String, typeArgs: List[SyslType]): String =
     base + "_" + typeArgs.map(typeToMangled).mkString("_")
@@ -1024,6 +1030,7 @@ class SyslAnalyzer:
       // Insert explicit conversions for codegen
       (coerced.typ, pType) match
         case (StringType, PtrType(I8 | U8)) => TCast(coerced, pType)
+        case (_: FuncType, IntType(64) | UIntType(64)) => TCast(coerced, pType)
         case (_, iface: InterfaceType) if !coerced.typ.isInstanceOf[InterfaceType] =>
           TInterfaceBox(coerced, iface)
         case _ => coerced
@@ -1100,7 +1107,11 @@ class SyslAnalyzer:
       case DerefAssignStmtAST(pointer, value) =>
         val tPointer = analyzeExpr(pointer)
         val tValue = analyzeExpr(value)
-        TDerefAssignStmt(tPointer, tValue)
+        // Insert FuncType → i64 coercion when storing function pointer to *i64
+        val coerced = (tValue.typ, tPointer.typ) match
+          case (_: FuncType, PtrType(IntType(64) | UIntType(64))) => TCast(tValue, IntType(64))
+          case _ => tValue
+        TDerefAssignStmt(tPointer, coerced)
 
       case IndexAssignStmtAST(array, index, value) =>
         val tArray = analyzeExpr(array)

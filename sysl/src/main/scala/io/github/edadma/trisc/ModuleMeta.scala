@@ -97,44 +97,46 @@ object ModuleMeta:
     new ModuleMeta(syms)
 
   def fromSmeta(source: String): Option[ModuleMeta] =
-    val syms = scala.collection.mutable.ListBuffer[SymbolMeta]()
-    var lineNum = 0
-    var headerSeen = false
-    var currentSource: Option[String] = None
+    import scala.util.boundary, boundary.break
+    boundary:
+      val syms = scala.collection.mutable.ListBuffer[SymbolMeta]()
+      var lineNum = 0
+      var headerSeen = false
+      var currentSource: Option[String] = None
 
-    for rawLine <- source.linesIterator do
-      lineNum += 1
-      val line = rawLine.trim
-      if line.nonEmpty then
-        if !headerSeen then
-          if !line.startsWith("SMETA") then return None // not a valid smeta file — treat as stale
-          val version = line.stripPrefix("SMETA").trim.stripPrefix("v").trim.toIntOption.getOrElse(0)
-          if version < SMETA_VERSION then return None // stale — caller should recompile from source
-          headerSeen = true
-        else if line.startsWith("SOURCE ") then
-          currentSource = Some(line.drop(7).trim)
-        else
-          val (isPrivate, rest) = if line.startsWith("PRIVATE ") then (true, line.drop(8)) else (false, line)
-          val tokens = rest.split("\\s+").iterator
-          val kind = tokens.next()
-          val name = tokens.next()
-          kind match
-            case "FUNC" =>
-              val nparams = tokens.next().toInt
-              val params = (1 to nparams).map(_ => SyslType.parseType(tokens)).toList
-              val ret = SyslType.parseType(tokens)
-              syms += SymbolMeta(name, SymbolMeta.Kind.Func(params, ret), isPrivate, sourceFile = currentSource)
-            case "DATA" =>
-              val dataType = SyslType.parseType(tokens)
-              syms += SymbolMeta(name, SymbolMeta.Kind.Data(dataType), isPrivate, sourceFile = currentSource)
-            case "STRUCT" =>
-              val st = SyslType.parseType(tokens).asInstanceOf[SyslType.StructType]
-              syms += SymbolMeta(name, SymbolMeta.Kind.Struct(st), isPrivate, sourceFile = currentSource)
-            case "ENUM" =>
-              val et = SyslType.parseType(tokens).asInstanceOf[SyslType.EnumType]
-              syms += SymbolMeta(name, SymbolMeta.Kind.Enum(et), isPrivate, sourceFile = currentSource)
-            case other =>
-              throw IllegalArgumentException(s"line $lineNum: unknown symbol kind '$other'")
+      for rawLine <- source.linesIterator do
+        lineNum += 1
+        val line = rawLine.trim
+        if line.nonEmpty then
+          if !headerSeen then
+            if !line.startsWith("SMETA") then break(None) // not a valid smeta file — treat as stale
+            val version = line.stripPrefix("SMETA").trim.stripPrefix("v").trim.toIntOption.getOrElse(0)
+            if version < SMETA_VERSION then break(None) // stale — caller should recompile from source
+            headerSeen = true
+          else if line.startsWith("SOURCE ") then
+            currentSource = Some(line.drop(7).trim)
+          else
+            val (isPrivate, rest) = if line.startsWith("PRIVATE ") then (true, line.drop(8)) else (false, line)
+            val tokens = rest.split("\\s+").iterator
+            val kind = tokens.next()
+            val name = tokens.next()
+            kind match
+              case "FUNC" =>
+                val nparams = tokens.next().toInt
+                val params = (1 to nparams).map(_ => SyslType.parseType(tokens)).toList
+                val ret = SyslType.parseType(tokens)
+                syms += SymbolMeta(name, SymbolMeta.Kind.Func(params, ret), isPrivate, sourceFile = currentSource)
+              case "DATA" =>
+                val dataType = SyslType.parseType(tokens)
+                syms += SymbolMeta(name, SymbolMeta.Kind.Data(dataType), isPrivate, sourceFile = currentSource)
+              case "STRUCT" =>
+                val st = SyslType.parseType(tokens).asInstanceOf[SyslType.StructType]
+                syms += SymbolMeta(name, SymbolMeta.Kind.Struct(st), isPrivate, sourceFile = currentSource)
+              case "ENUM" =>
+                val et = SyslType.parseType(tokens).asInstanceOf[SyslType.EnumType]
+                syms += SymbolMeta(name, SymbolMeta.Kind.Enum(et), isPrivate, sourceFile = currentSource)
+              case other =>
+                throw IllegalArgumentException(s"line $lineNum: unknown symbol kind '$other'")
 
-    if !headerSeen then return None
-    Some(new ModuleMeta(syms.toList))
+      if !headerSeen then None
+      else Some(new ModuleMeta(syms.toList))

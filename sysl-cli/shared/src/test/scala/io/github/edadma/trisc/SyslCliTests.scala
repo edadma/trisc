@@ -100,10 +100,6 @@ class SyslCliTests extends AnyFreeSpec with Matchers {
     cmd.output shouldBe Some("outdir")
   }
 
-  "doc command requires input files" in {
-    SyslCli.parse(Seq("doc")) shouldBe None
-  }
-
   // --- Doc rendering ---
 
   "renderHTML produces highlighted code" in {

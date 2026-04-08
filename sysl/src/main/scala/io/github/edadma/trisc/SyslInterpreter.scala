@@ -108,6 +108,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case RefSliceVal(cells, _, _) => pointerToLong(ArrayPtr(cells, 0))
     case RefStringVal(bytes, _, _) => pointerToLong(ArrayPtr(bytes.map(b => new Cell(IntVal(b & 0xff))), 0))
     case FuncVal(_)         => 1L // non-zero sentinel for casts (address not meaningful in interpreter)
+    case ClosureVal(_, _, _) => 1L // non-zero sentinel
+    case InterfaceVal(_, _, _) => throw RuntimeError("expected integer, got interface")
     case StrVal(_)          => throw RuntimeError("expected integer, got string")
     case SliceVal(_, _, _, _) => throw RuntimeError("expected integer, got slice")
     case EnumVal(_, _) => throw RuntimeError("expected integer, got enum value")
