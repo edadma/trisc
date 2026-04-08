@@ -771,8 +771,9 @@ class SyslAnalyzer:
     case ArrayType(e, n) => s"arr${n}${typeToMangled(e)}"
     case SliceType(e)    => "slice" + typeToMangled(e)
     case FuncType(ps, r) => "fn" + ps.map(typeToMangled).mkString("") + "Ret" + typeToMangled(r)
-    case StructType(n, _) => n
-    case EnumType(n, _)   => n
+    case StructType(n, _)    => n
+    case EnumType(n, _)      => n
+    case InterfaceType(n, _) => n
 
   private def mangleGenericName(base: String, typeArgs: List[SyslType]): String =
     base + "_" + typeArgs.map(typeToMangled).mkString("_")
