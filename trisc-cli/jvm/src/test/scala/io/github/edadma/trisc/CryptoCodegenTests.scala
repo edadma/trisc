@@ -23,18 +23,18 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
   private def sbrkModule(heapSize: Int = 65536): String =
     s"""module posix.unistd
        |
-       |var _heap: [$heapSize]i8
-       |var _brk: *i8 = *i8(0)
+       |var _heap: [$heapSize]byte
+       |var _brk: *byte = *byte(0)
        |var _brk_initialized = false
        |
-       |sbrk(increment: int) -> *i8
+       |sbrk(increment: int) -> *byte
        |    if !_brk_initialized
        |        _brk = &_heap
        |        _brk_initialized = true
        |    if increment == 0 then return _brk
        |    val old_brk = _brk
        |    val new_brk = old_brk + increment
-       |    if i64(new_brk) > i64(&_heap + $heapSize) then return *i8(-1)
+       |    if i64(new_brk) > i64(&_heap + $heapSize) then return *byte(-1)
        |    _brk = new_brk
        |    old_brk
        |""".stripMargin
@@ -354,8 +354,8 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |
         |main() -> int
         |    // Write 0xAB to SHA_TEXT byte 0 (addr 0x100160)
-        |    var p: *i8 = *i8(0x100160)
-        |    *p = 0xABi8
+        |    var p: *byte = *byte(0x100160)
+        |    *p = byte(0xAB)
         |    // Read it back
         |    val v = int(*p) & 0xFF
         |    if v == 0xAB
@@ -376,23 +376,23 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |main() -> int
         |    // Write "abc" padded block to SHA_TEXT
         |    // word 0: 0x61626380
-        |    var p: *i8 = *i8(0x100160)
-        |    *p = 0x61i8
-        |    p = *i8(0x100161)
-        |    *p = 0x62i8
-        |    p = *i8(0x100162)
-        |    *p = 0x63i8
-        |    p = *i8(0x100163)
-        |    *p = i8(0x80)
+        |    var p: *byte = *byte(0x100160)
+        |    *p = byte(0x61)
+        |    p = *byte(0x100161)
+        |    *p = byte(0x62)
+        |    p = *byte(0x100162)
+        |    *p = byte(0x63)
+        |    p = *byte(0x100163)
+        |    *p = byte(0x80)
         |    // words 1..14 = 0 (already zero)
         |    // word 15: 0x00000018 (24 bits)
-        |    p = *i8(0x100160 + 63)
-        |    *p = 0x18i8
+        |    p = *byte(0x100160 + 63)
+        |    *p = byte(0x18)
         |    // Trigger SHA_START
-        |    p = *i8(0x100160 + 0x43)
+        |    p = *byte(0x100160 + 0x43)
         |    *p = 1
         |    // Read TEXT[0] byte 0
-        |    p = *i8(0x100160)
+        |    p = *byte(0x100160)
         |    val b0 = int(*p) & 0xFF
         |    // Expected: 0xBA (first byte of SHA-256("abc"))
         |    if b0 == 0xBA

@@ -156,7 +156,7 @@ import oskit.drivers.disk.*
           |
           |client()
           |    sleep(50)
-          |    var name: [5]i8
+          |    var name: [5]byte
           |    name[0] = 100  // d
           |    name[1] = 105  // i
           |    name[2] = 115  // s
@@ -189,7 +189,7 @@ import oskit.drivers.disk.*
           |
           |client()
           |    sleep(50)
-          |    var wbuf: [512]i8
+          |    var wbuf: [512]byte
           |    wbuf[0] = 72   // H
           |    wbuf[1] = 101  // e
           |    wbuf[2] = 108  // l
@@ -197,7 +197,7 @@ import oskit.drivers.disk.*
           |    wbuf[4] = 111  // o
           |    disk_write(5, &wbuf[0])
           |
-          |    var rbuf: [512]i8
+          |    var rbuf: [512]byte
           |    disk_read(5, &rbuf[0])
           |
           |    putc(rbuf[0])
@@ -252,13 +252,13 @@ import oskit.drivers.disk.*
           |    timer_init(1000)
           |    first_thread_ssp()
           |
-          |write_block(lba: int, ch: i8)
-          |    var buf: [512]i8
+          |write_block(lba: int, ch: byte)
+          |    var buf: [512]byte
           |    buf[0] = ch
           |    disk_write(lba, &buf[0])
           |
           |read_and_print(lba: int)
-          |    var buf: [512]i8
+          |    var buf: [512]byte
           |    disk_read(lba, &buf[0])
           |    putc(buf[0])
           |
@@ -355,14 +355,14 @@ import oskit.servers.*
           |    sleep(100)
           |    val ino = fs_create(1, "test", 1, 0x1B6)
           |
-          |    var data: [4]i8
+          |    var data: [4]byte
           |    data[0] = 65
           |    data[1] = 66
           |    data[2] = 67
           |    data[3] = 68
           |    fs_write(ino, &data[0], 0, 4)
           |
-          |    var buf: [4]i8
+          |    var buf: [4]byte
           |    val nr = fs_read(ino, &buf[0], 0, 4)
           |    if nr == 4
           |        putc(buf[0])
@@ -395,7 +395,7 @@ import oskit.servers.*
           |    sleep(100)
           |    val ino = fs_create(1, "f", 1, 0x1B6)
           |
-          |    var data: [10]i8
+          |    var data: [10]byte
           |    var i = 0
           |    while i < 10
           |        data[i] = 65 + i
@@ -437,7 +437,7 @@ import oskit.servers.*
           |        putc('D')
           |
           |    var entry_ino: int
-          |    var entry_name: [14]i8
+          |    var entry_name: [14]byte
           |    fs_readdir(1, 0, &entry_ino, &entry_name[0])
           |    if entry_name[0] == 46
           |        putc('.')
@@ -508,7 +508,7 @@ import oskit.servers.*
           |    val ino = fs_open("/hello")
           |    if ino > 0
           |        putc('F')
-          |        var buf: [16]i8
+          |        var buf: [16]byte
           |        val nr = fs_read(ino, &buf[0], 0, 16)
           |        var i = 0
           |        while i < nr
@@ -540,7 +540,7 @@ import oskit.servers.*
           |    sleep(100)
           |    val ino = fs_open("/dir/file")
           |    if ino > 0
-          |        var buf: [16]i8
+          |        var buf: [16]byte
           |        val nr = fs_read(ino, &buf[0], 0, 16)
           |        var i = 0
           |        while i < nr

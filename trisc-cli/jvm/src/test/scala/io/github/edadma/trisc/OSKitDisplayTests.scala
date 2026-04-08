@@ -183,7 +183,7 @@ import oskit.drivers.mouse.*
           |
           |client()
           |    sleep(20)
-          |    var title: [5]i8
+          |    var title: [5]byte
           |    title[0] = byte(72)  // H
           |    title[1] = byte(101) // e
           |    title[2] = byte(108) // l
