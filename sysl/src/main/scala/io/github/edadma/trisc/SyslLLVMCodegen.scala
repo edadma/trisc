@@ -103,7 +103,6 @@ class SyslLLVMCodegen:
     // Declare external C functions
     emit("declare i32 @putchar(i32)")
     emit("declare i32 @printf(i8*, ...)")
-    emit("declare i32 @puts(i8*)")
     emit("declare i32 @snprintf(i8*, i64, i8*, ...)")
     emit("declare i8* @malloc(i64)")
     emit("declare i64 @strlen(i8*)")
@@ -111,6 +110,8 @@ class SyslLLVMCodegen:
     emit("declare i8* @memset(i8*, i32, i64)")
     emit("declare void @free(i8*)")
     emit("declare void @llvm.memset.p0i8.i64(i8*, i8, i64, i1)")
+    emit("declare i64 @write(i32, i8*, i64)")
+    emit("declare i32 @fflush(i8*)")
     emit("")
 
     // Format strings for print/println builtins
@@ -118,13 +119,14 @@ class SyslLLVMCodegen:
     emit("""@.fmt_dn = private unnamed_addr constant [4 x i8] c"%d\0A\00"""")
     emit("""@.fmt_f = private unnamed_addr constant [3 x i8] c"%g\00"""")
     emit("""@.fmt_fn = private unnamed_addr constant [4 x i8] c"%g\0A\00"""")
-    emit("""@.fmt_s = private unnamed_addr constant [3 x i8] c"%s\00"""")
-    emit("""@.fmt_sn = private unnamed_addr constant [4 x i8] c"%s\0A\00"""")
     emit("""@.fmt_ld = private unnamed_addr constant [4 x i8] c"%ld\00"""")
     emit("""@.str.true = private unnamed_addr constant [5 x i8] c"true\00"""")
     emit("""@.str.false = private unnamed_addr constant [6 x i8] c"false\00"""")
+    emit("""@.str.newline = private unnamed_addr constant [1 x i8] c"\0A"""")
     emit("")
 
+    // String struct type: { ptr, len }
+    emit("%struct.string = type { i8*, i32 }")
     // Slice struct type: { ptr, len, cap }
     emit("%struct.slice = type { i8*, i32, i32 }")
     // Closure struct type: { func_ptr, env_ptr }
@@ -347,11 +349,17 @@ class SyslLLVMCodegen:
               val oldVal = newReg()
               emit(s"  $oldVal = load $lt, $lt* ${local.reg}")
               emitRefDecr(oldVal, refHeaderOffset(local.typ), deinitFor(local.typ))
-            val vt = exprType(value)
-            val finalVal = emitSextIfNeeded(v, vt, lt)
-            emit(s"  store $lt $finalVal, $lt* ${local.reg}")
-            if isRef(local.typ) && !isOwnedNew(value) then
-              emitRefIncr(finalVal, refHeaderOffset(local.typ))
+            if isAggregate(local.typ) then
+              // Aggregate reassignment: load value from source, store to target
+              val loaded = newReg()
+              emit(s"  $loaded = load $lt, $lt* $v")
+              emit(s"  store $lt $loaded, $lt* ${local.reg}")
+            else
+              val vt = exprType(value)
+              val finalVal = emitSextIfNeeded(v, vt, lt)
+              emit(s"  store $lt $finalVal, $lt* ${local.reg}")
+              if isRef(local.typ) && !isOwnedNew(value) then
+                emitRefIncr(finalVal, refHeaderOffset(local.typ))
           else
             val lt = exprType(value)
             val alloca = newReg()
@@ -546,9 +554,18 @@ class SyslLLVMCodegen:
 
       case TStringLit(s, _) =>
         val (label, byteLen) = internString(s)
-        val r = newReg()
-        emit(s"  $r = getelementptr [$byteLen x i8], [$byteLen x i8]* $label, i32 0, i32 0")
-        r
+        val strLen = byteLen - 1 // exclude null terminator for fat string length
+        val alloca = newReg()
+        emit(s"  $alloca = alloca %struct.string")
+        val ptrGep = newReg()
+        emit(s"  $ptrGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 0")
+        val dataPtr = newReg()
+        emit(s"  $dataPtr = getelementptr [$byteLen x i8], [$byteLen x i8]* $label, i32 0, i32 0")
+        emit(s"  store i8* $dataPtr, i8** $ptrGep")
+        val lenGep = newReg()
+        emit(s"  $lenGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 1")
+        emit(s"  store i32 $strLen, i32* $lenGep")
+        alloca
 
       case TVarRef(name, typ) =>
         if locals.contains(name) then
@@ -567,28 +584,53 @@ class SyslLLVMCodegen:
 
       // String concatenation
       case TBinary(left, "+", right, SyslType.StringType) =>
-        val l = genExpr(left)
-        val r = genExpr(right)
-        val len1 = newReg()
-        val len2 = newReg()
-        val total = newReg()
-        val size = newReg()
+        val lp = genExpr(left) // alloca pointer to %struct.string
+        val rp = genExpr(right)
+        // Extract ptr and len from both
+        val lPtrGep = newReg()
+        emit(s"  $lPtrGep = getelementptr %struct.string, %struct.string* $lp, i32 0, i32 0")
+        val lPtr = newReg()
+        emit(s"  $lPtr = load i8*, i8** $lPtrGep")
+        val lLenGep = newReg()
+        emit(s"  $lLenGep = getelementptr %struct.string, %struct.string* $lp, i32 0, i32 1")
+        val lLen = newReg()
+        emit(s"  $lLen = load i32, i32* $lLenGep")
+        val rPtrGep = newReg()
+        emit(s"  $rPtrGep = getelementptr %struct.string, %struct.string* $rp, i32 0, i32 0")
+        val rPtr = newReg()
+        emit(s"  $rPtr = load i8*, i8** $rPtrGep")
+        val rLenGep = newReg()
+        emit(s"  $rLenGep = getelementptr %struct.string, %struct.string* $rp, i32 0, i32 1")
+        val rLen = newReg()
+        emit(s"  $rLen = load i32, i32* $rLenGep")
+        // Total length and allocate
+        val totalLen = newReg()
+        emit(s"  $totalLen = add i32 $lLen, $rLen")
+        val totalLen64 = newReg()
+        emit(s"  $totalLen64 = sext i32 $totalLen to i64")
         val buf = newReg()
-        val dest = newReg()
-        val end = newReg()
-        emit(s"  $len1 = call i64 @strlen(i8* $l)")
-        emit(s"  $len2 = call i64 @strlen(i8* $r)")
-        emit(s"  $total = add i64 $len1, $len2")
-        emit(s"  $size = add i64 $total, 1")
-        emit(s"  $buf = call i8* @malloc(i64 $size)")
+        emit(s"  $buf = call i8* @malloc(i64 $totalLen64)")
+        // Copy left then right
+        val lLen64 = newReg()
+        emit(s"  $lLen64 = sext i32 $lLen to i64")
         val cp1 = newReg()
-        emit(s"  $cp1 = call i8* @memcpy(i8* $buf, i8* $l, i64 $len1)")
-        emit(s"  $dest = getelementptr i8, i8* $buf, i64 $len1")
+        emit(s"  $cp1 = call i8* @memcpy(i8* $buf, i8* $lPtr, i64 $lLen64)")
+        val dest = newReg()
+        emit(s"  $dest = getelementptr i8, i8* $buf, i64 $lLen64")
+        val rLen64 = newReg()
+        emit(s"  $rLen64 = sext i32 $rLen to i64")
         val cp2 = newReg()
-        emit(s"  $cp2 = call i8* @memcpy(i8* $dest, i8* $r, i64 $len2)")
-        emit(s"  $end = getelementptr i8, i8* $buf, i64 $total")
-        emit(s"  store i8 0, i8* $end")
-        buf
+        emit(s"  $cp2 = call i8* @memcpy(i8* $dest, i8* $rPtr, i64 $rLen64)")
+        // Build result %struct.string
+        val alloca = newReg()
+        emit(s"  $alloca = alloca %struct.string")
+        val resPtrGep = newReg()
+        emit(s"  $resPtrGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 0")
+        emit(s"  store i8* $buf, i8** $resPtrGep")
+        val resLenGep = newReg()
+        emit(s"  $resLenGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 1")
+        emit(s"  store i32 $totalLen, i32* $resLenGep")
+        alloca
 
       case TBinary(left, op, right, _) =>
         val l = genExpr(left)
@@ -693,31 +735,50 @@ class SyslLLVMCodegen:
         emitSextIfNeeded(result, "i32", t)
 
       case TCall("print", List(arg), _) =>
-        val v = genExpr(arg)
-        val vt = exprType(arg)
-        val (fmtName, fmtLen) = arg.typ match
-          case SyslType.DoubleType  => ("@.fmt_f", 3)
-          case SyslType.StringType  => ("@.fmt_s", 3)
-          case _                    => ("@.fmt_d", 3)
-        val result = newReg()
-        emit(s"""  $result = call i32 (i8*, ...) @printf(i8* getelementptr ([$fmtLen x i8], [$fmtLen x i8]* $fmtName, i32 0, i32 0), $vt $v)""")
-        "0"
+        arg.typ match
+          case SyslType.StringType =>
+            val sp = genExpr(arg) // alloca pointer to %struct.string
+            emitWriteString(sp)
+            "0"
+          case _ =>
+            val v = genExpr(arg)
+            val vt = exprType(arg)
+            val (fmtName, fmtLen) = arg.typ match
+              case SyslType.DoubleType => ("@.fmt_f", 3)
+              case _                   => ("@.fmt_d", 3)
+            val result = newReg()
+            emit(s"""  $result = call i32 (i8*, ...) @printf(i8* getelementptr ([$fmtLen x i8], [$fmtLen x i8]* $fmtName, i32 0, i32 0), $vt $v)""")
+            "0"
 
       case TCall("println", List(arg), _) =>
-        val v = genExpr(arg)
-        val vt = exprType(arg)
-        val (fmtName, fmtLen) = arg.typ match
-          case SyslType.DoubleType  => ("@.fmt_fn", 4)
-          case SyslType.StringType  => ("@.fmt_sn", 4)
-          case _                    => ("@.fmt_dn", 4)
-        val result = newReg()
-        emit(s"""  $result = call i32 (i8*, ...) @printf(i8* getelementptr ([$fmtLen x i8], [$fmtLen x i8]* $fmtName, i32 0, i32 0), $vt $v)""")
-        "0"
+        arg.typ match
+          case SyslType.StringType =>
+            val sp = genExpr(arg)
+            emitWriteString(sp)
+            // Write newline
+            val nlPtr = newReg()
+            emit(s"  $nlPtr = getelementptr [1 x i8], [1 x i8]* @.str.newline, i32 0, i32 0")
+            val ignored = newReg()
+            emit(s"  $ignored = call i64 @write(i32 1, i8* $nlPtr, i64 1)")
+            "0"
+          case _ =>
+            val v = genExpr(arg)
+            val vt = exprType(arg)
+            val (fmtName, fmtLen) = arg.typ match
+              case SyslType.DoubleType => ("@.fmt_fn", 4)
+              case _                   => ("@.fmt_dn", 4)
+            val result = newReg()
+            emit(s"""  $result = call i32 (i8*, ...) @printf(i8* getelementptr ([$fmtLen x i8], [$fmtLen x i8]* $fmtName, i32 0, i32 0), $vt $v)""")
+            "0"
 
       case TCall("puts", List(arg), _) =>
-        val v = genExpr(arg)
-        val result = newReg()
-        emit(s"  $result = call i32 @puts(i8* $v)")
+        val sp = genExpr(arg)
+        emitWriteString(sp)
+        // puts also writes a newline
+        val nlPtr = newReg()
+        emit(s"  $nlPtr = getelementptr [1 x i8], [1 x i8]* @.str.newline, i32 0, i32 0")
+        val ignored = newReg()
+        emit(s"  $ignored = call i64 @write(i32 1, i8* $nlPtr, i64 1)")
         "0"
 
       case TCall(name, args, _) =>
@@ -852,7 +913,12 @@ class SyslLLVMCodegen:
           val v = genExpr(elem)
           val gep = newReg()
           emit(s"  $gep = getelementptr $arrType, $arrType* $alloca, i32 0, i32 $i")
-          emit(s"  store $elt $v, $elt* $gep")
+          val storeVal = if isAggregate(elemType) then
+            val loaded = newReg()
+            emit(s"  $loaded = load $elt, $elt* $v")
+            loaded
+          else v
+          emit(s"  store $elt $storeVal, $elt* $gep")
         alloca
 
       case TArrayDecl(size, SyslType.ArrayType(elemType, _)) =>
@@ -922,12 +988,12 @@ class SyslLLVMCodegen:
             emit(s"  $len32 = load i32, i32* $lenGep")
             len32
           case SyslType.StringType =>
-            val s = genExpr(array)
-            val r = newReg()
-            emit(s"  $r = call i64 @strlen(i8* $s)")
-            val r32 = newReg()
-            emit(s"  $r32 = trunc i64 $r to i32")
-            r32
+            val sp = genExpr(array) // alloca pointer to %struct.string
+            val lenGep = newReg()
+            emit(s"  $lenGep = getelementptr %struct.string, %struct.string* $sp, i32 0, i32 1")
+            val len32 = newReg()
+            emit(s"  $len32 = load i32, i32* $lenGep")
+            len32
           case _ =>
             emit(s"  ; TODO: len for ${array.typ}")
             "0"
@@ -1489,24 +1555,31 @@ class SyslLLVMCodegen:
             "0"
 
       case TStr(inner) =>
-        val v = genExpr(inner)
-        val vt = exprType(inner)
         inner.typ match
+          case SyslType.StringType =>
+            // String → string: identity (already a fat string)
+            genExpr(inner)
           case SyslType.BoolType =>
+            val v = genExpr(inner)
             // bool → "true" or "false" via select
             val cmp = newReg()
-            val result = newReg()
             emit(s"  $cmp = icmp ne i8 $v, 0")
             val truePtr = newReg()
             val falsePtr = newReg()
             emit(s"  $truePtr = getelementptr [5 x i8], [5 x i8]* @.str.true, i32 0, i32 0")
             emit(s"  $falsePtr = getelementptr [6 x i8], [6 x i8]* @.str.false, i32 0, i32 0")
-            emit(s"  $result = select i1 $cmp, i8* $truePtr, i8* $falsePtr")
-            result
+            val selPtr = newReg()
+            emit(s"  $selPtr = select i1 $cmp, i8* $truePtr, i8* $falsePtr")
+            val selLen = newReg()
+            emit(s"  $selLen = select i1 $cmp, i32 4, i32 5")
+            emitMakeString(selPtr, selLen)
           case SyslType.DoubleType =>
+            val v = genExpr(inner)
             // double → string via snprintf with %g
             emitSnprintfToString("@.fmt_f", 3, s"double $v")
           case t if t.isIntegral =>
+            val v = genExpr(inner)
+            val vt = exprType(inner)
             // int → string via snprintf
             val (fmtName, fmtLen, arg) = vt match
               case "i64" => ("@.fmt_ld", 4, s"i64 $v")
@@ -1521,9 +1594,9 @@ class SyslLLVMCodegen:
           case _ =>
             emit(s"  ; TODO: str() for ${inner.typ}")
             val (label, byteLen) = internString("???")
-            val r = newReg()
-            emit(s"  $r = getelementptr [$byteLen x i8], [$byteLen x i8]* $label, i32 0, i32 0")
-            r
+            val dataPtr = newReg()
+            emit(s"  $dataPtr = getelementptr [$byteLen x i8], [$byteLen x i8]* $label, i32 0, i32 0")
+            emitMakeString(dataPtr, s"${byteLen - 1}")
 
       case TCast(inner, targetType) =>
         val v = genExpr(inner)
@@ -1588,11 +1661,43 @@ class SyslLLVMCodegen:
       case SyslType.RefType(SyslType.SliceType(_)) =>
         base // ref-to-slice: base IS the data pointer
       case SyslType.StringType =>
-        base // C-string: base IS the char pointer
+        // Fat string: extract ptr field
+        val ptrGep = newReg()
+        emit(s"  $ptrGep = getelementptr %struct.string, %struct.string* $base, i32 0, i32 0")
+        val ptr = newReg()
+        emit(s"  $ptr = load i8*, i8** $ptrGep")
+        ptr
       case _ =>
         base
 
-  // Emit snprintf-based conversion: measure, malloc, format. Returns i8* register.
+  /** Write a fat string to stdout via write(2). sp is alloca pointer to %struct.string. */
+  private def emitWriteString(sp: String): Unit =
+    val ptrGep = newReg()
+    emit(s"  $ptrGep = getelementptr %struct.string, %struct.string* $sp, i32 0, i32 0")
+    val ptr = newReg()
+    emit(s"  $ptr = load i8*, i8** $ptrGep")
+    val lenGep = newReg()
+    emit(s"  $lenGep = getelementptr %struct.string, %struct.string* $sp, i32 0, i32 1")
+    val len32 = newReg()
+    emit(s"  $len32 = load i32, i32* $lenGep")
+    val len64 = newReg()
+    emit(s"  $len64 = sext i32 $len32 to i64")
+    val ignored = newReg()
+    emit(s"  $ignored = call i64 @write(i32 1, i8* $ptr, i64 $len64)")
+
+  /** Build a %struct.string from an i8* pointer and i32 length. Returns alloca pointer. */
+  private def emitMakeString(ptr: String, len: String): String =
+    val alloca = newReg()
+    emit(s"  $alloca = alloca %struct.string")
+    val ptrGep = newReg()
+    emit(s"  $ptrGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 0")
+    emit(s"  store i8* $ptr, i8** $ptrGep")
+    val lenGep = newReg()
+    emit(s"  $lenGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 1")
+    emit(s"  store i32 $len, i32* $lenGep")
+    alloca
+
+  /** Emit snprintf-based conversion: measure, malloc, format. Returns alloca pointer to %struct.string. */
   private def emitSnprintfToString(fmtName: String, fmtLen: Int, typedArg: String): String =
     val fmtPtr = newReg()
     emit(s"  $fmtPtr = getelementptr [$fmtLen x i8], [$fmtLen x i8]* $fmtName, i32 0, i32 0")
@@ -1606,7 +1711,7 @@ class SyslLLVMCodegen:
     emit(s"  $buf = call i8* @malloc(i64 $size)")
     val ignored = newReg()
     emit(s"  $ignored = call i32 (i8*, i64, i8*, ...) @snprintf(i8* $buf, i64 $size, i8* $fmtPtr, $typedArg)")
-    buf
+    emitMakeString(buf, len)
 
   // Emit sext only when fromType != toType; return the (possibly cast) register
   private def emitSextIfNeeded(value: String, fromType: String, toType: String): String =
@@ -1622,7 +1727,7 @@ class SyslLLVMCodegen:
     case SyslType.BoolType => "i8"
     case SyslType.DoubleType => "double"
     case SyslType.VoidType => "void"
-    case SyslType.StringType => "i8*"
+    case SyslType.StringType => "%struct.string"
     case SyslType.StructType(name, _) => s"%struct.$name"
     case SyslType.ArrayType(elem, size) => s"[$size x ${llvmType(elem)}]"
     case et: SyslType.EnumType => s"[${et.sizeOf} x i8]" // opaque byte array for tagged union
@@ -1634,7 +1739,7 @@ class SyslLLVMCodegen:
 
   // LLVM-side size in bytes (may differ from Sysl's sizeOf for types like strings)
   private def llvmSizeOf(t: SyslType): Long = t match
-    case SyslType.StringType => 8   // i8* pointer, not fat pointer
+    case SyslType.StringType => 16  // {i8*, i32} — matches Sysl's sizeOf
     case SyslType.PtrType(_) => 8
     case SyslType.RefType(_) => 8
     case SyslType.FuncType(_, _) => 16  // {i8*, i8*}
@@ -1648,7 +1753,7 @@ class SyslLLVMCodegen:
 
   // Types that are passed by pointer (alloca) rather than by value
   private def isAggregate(t: SyslType): Boolean = t match
-    case _: SyslType.StructType | _: SyslType.ArrayType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType => true
+    case _: SyslType.StructType | _: SyslType.ArrayType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | SyslType.StringType => true
     case _ => false
 
   // ===== Refcounting helpers =====
@@ -1741,6 +1846,11 @@ class SyslLLVMCodegen:
 
   /** Decrement refcounts for all ref-typed locals before function exit. */
   private def emitReleaseRefs(): Unit =
+    val hasRefs = locals.exists((_, l) => isRef(l.typ))
+    if hasRefs then
+      // Flush stdout before deinit functions might write to it
+      val flushIgnored = newReg()
+      emit(s"  $flushIgnored = call i32 @fflush(i8* null)")
     for (_, local) <- locals if isRef(local.typ) do
       val hoff = refHeaderOffset(local.typ)
       val ptr = newReg()
@@ -1761,8 +1871,12 @@ class SyslLLVMCodegen:
     case TBoolLit(v, _) => if v then "1" else "0"
     case TStringLit(s, _) =>
       val (label, byteLen) = internString(s)
-      s"getelementptr inbounds ([$byteLen x i8], [$byteLen x i8]* $label, i32 0, i32 0)"
-    case _ => "0" // fallback zero-init
+      val strLen = byteLen - 1
+      s"{ i8* getelementptr inbounds ([$byteLen x i8], [$byteLen x i8]* $label, i32 0, i32 0), i32 $strLen }"
+    case _ =>
+      typ match
+        case SyslType.StringType => "{ i8* null, i32 0 }"
+        case _ => "0"
 
   private def emit(line: String): Unit =
     out ++= line
