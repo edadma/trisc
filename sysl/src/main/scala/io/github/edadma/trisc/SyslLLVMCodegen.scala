@@ -31,6 +31,9 @@ class SyslLLVMCodegen:
   private var locals: mutable.LinkedHashMap[String, LocalVar] = null
   private var currentFunction: TFunDecl = null
   private var hasReturned = false
+  // Break/continue label stacks for loop codegen
+  private val breakLabels = new mutable.Stack[String]
+  private val continueLabels = new mutable.Stack[String]
 
   def generate(program: TProgram): String =
     out.clear()
@@ -73,6 +76,9 @@ class SyslLLVMCodegen:
     emit("declare i8* @malloc(i64)")
     emit("declare i64 @strlen(i8*)")
     emit("declare i8* @memcpy(i8*, i8*, i64)")
+    emit("declare i8* @memset(i8*, i32, i64)")
+    emit("declare void @free(i8*)")
+    emit("declare void @llvm.memset.p0i8.i64(i8*, i8, i64, i1)")
     emit("")
 
     // Format strings for print/println builtins
@@ -85,6 +91,10 @@ class SyslLLVMCodegen:
     emit("""@.fmt_ld = private unnamed_addr constant [4 x i8] c"%ld\00"""")
     emit("""@.str.true = private unnamed_addr constant [5 x i8] c"true\00"""")
     emit("""@.str.false = private unnamed_addr constant [6 x i8] c"false\00"""")
+    emit("")
+
+    // Slice struct type: { ptr, len, cap }
+    emit("%struct.slice = type { i8*, i32, i32 }")
     emit("")
 
     // Emit struct type definitions
@@ -176,12 +186,11 @@ class SyslLLVMCodegen:
     stmt match
       case TVarStmt(name, typ, init) =>
         val lt = llvmType(typ)
-        typ match
-          case _: SyslType.StructType =>
-            // Struct variable: genExpr returns an alloca pointer — use it directly
-            val ptr = genExpr(init)
-            locals(name) = LocalVar(name, ptr, typ)
-          case _ =>
+        if isAggregate(typ) then
+          // Aggregate variable: genExpr returns an alloca pointer — use it directly
+          val ptr = genExpr(init)
+          locals(name) = LocalVar(name, ptr, typ)
+        else
             val alloca = newReg()
             emit(s"  $alloca = alloca $lt")
             val value = genExpr(init)
@@ -229,6 +238,8 @@ class SyslLLVMCodegen:
         val condLabel = newLabel("while_cond")
         val bodyLabel = newLabel("while_body")
         val endLabel = newLabel("while_end")
+        breakLabels.push(endLabel)
+        continueLabels.push(condLabel)
         emit(s"  br label %$condLabel")
         emit(s"$condLabel:")
         val c = genExpr(cond)
@@ -237,9 +248,123 @@ class SyslLLVMCodegen:
         emit(s"  $cBool = icmp ne $ct $c, 0")
         emit(s"  br i1 $cBool, label %$bodyLabel, label %$endLabel")
         emit(s"$bodyLabel:")
-        for s <- body do genStmt(s)
+        val savedHR = hasReturned
+        hasReturned = false
+        for s <- body do if !hasReturned then genStmt(s)
         if !hasReturned then emit(s"  br label %$condLabel")
         emit(s"$endLabel:")
+        hasReturned = savedHR
+        breakLabels.pop()
+        continueLabels.pop()
+
+      case TForStmt(init, cond, update, body) =>
+        genStmt(init)
+        val condLabel = newLabel("for_cond")
+        val bodyLabel = newLabel("for_body")
+        val updateLabel = newLabel("for_update")
+        val endLabel = newLabel("for_end")
+        breakLabels.push(endLabel)
+        continueLabels.push(updateLabel)
+        emit(s"  br label %$condLabel")
+        emit(s"$condLabel:")
+        val c = genExpr(cond)
+        val ct = exprType(cond)
+        val cBool = newReg()
+        emit(s"  $cBool = icmp ne $ct $c, 0")
+        emit(s"  br i1 $cBool, label %$bodyLabel, label %$endLabel")
+        emit(s"$bodyLabel:")
+        val savedHR = hasReturned
+        hasReturned = false
+        for s <- body do if !hasReturned then genStmt(s)
+        if !hasReturned then emit(s"  br label %$updateLabel")
+        emit(s"$updateLabel:")
+        if !hasReturned then genStmt(update)
+        if !hasReturned then emit(s"  br label %$condLabel")
+        emit(s"$endLabel:")
+        hasReturned = savedHR
+        breakLabels.pop()
+        continueLabels.pop()
+
+      case TDoWhileStmt(cond, body) =>
+        val bodyLabel = newLabel("dowhile_body")
+        val condLabel = newLabel("dowhile_cond")
+        val endLabel = newLabel("dowhile_end")
+        breakLabels.push(endLabel)
+        continueLabels.push(condLabel)
+        emit(s"  br label %$bodyLabel")
+        emit(s"$bodyLabel:")
+        val savedHR = hasReturned
+        hasReturned = false
+        for s <- body do if !hasReturned then genStmt(s)
+        if !hasReturned then emit(s"  br label %$condLabel")
+        emit(s"$condLabel:")
+        if !hasReturned then
+          val c = genExpr(cond)
+          val ct = exprType(cond)
+          val cBool = newReg()
+          emit(s"  $cBool = icmp ne $ct $c, 0")
+          emit(s"  br i1 $cBool, label %$bodyLabel, label %$endLabel")
+        emit(s"$endLabel:")
+        hasReturned = savedHR
+        breakLabels.pop()
+        continueLabels.pop()
+
+      case TBreakStmt =>
+        emit(s"  br label %${breakLabels.top}")
+        hasReturned = true // stop emitting after unconditional branch
+
+      case TContinueStmt =>
+        emit(s"  br label %${continueLabels.top}")
+        hasReturned = true
+
+      case TIndexAssignStmt(array, index, value) =>
+        val base = genExpr(array)
+        val idx = genExpr(index)
+        val v = genExpr(value)
+        val elemType = array.typ match
+          case SyslType.ArrayType(elem, _) => elem
+          case SyslType.SliceType(elem) => elem
+          case SyslType.RefType(SyslType.SliceType(elem)) => elem
+          case _ => SyslType.IntType(8) // fallback for string indexing
+        val elt = llvmType(elemType)
+        val elemSize = elemType.sizeOf
+        // Get data pointer
+        val dataPtr = array.typ match
+          case SyslType.ArrayType(_, _) =>
+            val cast = newReg()
+            emit(s"  $cast = bitcast ${llvmType(array.typ)}* $base to i8*")
+            cast
+          case SyslType.SliceType(_) =>
+            // Slice struct: ptr at offset 0
+            val ptrGep = newReg()
+            emit(s"  $ptrGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 0")
+            val ptr = newReg()
+            emit(s"  $ptr = load i8*, i8** $ptrGep")
+            ptr
+          case _ =>
+            base // pointer type — already a data pointer
+        // Compute element address
+        val idx64 = newReg()
+        emit(s"  $idx64 = sext i32 $idx to i64")
+        val offset = newReg()
+        emit(s"  $offset = mul i64 $idx64, $elemSize")
+        val elemAddr = newReg()
+        emit(s"  $elemAddr = getelementptr i8, i8* $dataPtr, i64 $offset")
+        val typedPtr = newReg()
+        emit(s"  $typedPtr = bitcast i8* $elemAddr to $elt*")
+        emit(s"  store $elt $v, $elt* $typedPtr")
+
+      case TDerefAssignStmt(pointer, value) =>
+        val ptr = genExpr(pointer)
+        val v = genExpr(value)
+        val pointeeType = pointer.typ match
+          case SyslType.PtrType(inner) => inner
+          case SyslType.RefType(inner) => inner
+          case _ => SyslType.IntType(64)
+        val pt = llvmType(pointeeType)
+        val typedPtr = newReg()
+        emit(s"  $typedPtr = bitcast i8* $ptr to $pt*")
+        emit(s"  store $pt $v, $pt* $typedPtr")
 
       case TFieldAssignStmt(obj, fieldIndex, value) =>
         val st = obj.typ.asInstanceOf[SyslType.StructType]
@@ -549,6 +674,342 @@ class SyslLLVMCodegen:
           emit(s"  $r = load $ft, $ft* $gep")
           r
 
+      // ===== Arrays =====
+
+      case TArrayLit(elements, SyslType.ArrayType(elemType, size)) =>
+        val elt = llvmType(elemType)
+        val arrType = s"[$size x $elt]"
+        val alloca = newReg()
+        emit(s"  $alloca = alloca $arrType")
+        // Zero-init
+        val cast = newReg()
+        emit(s"  $cast = bitcast $arrType* $alloca to i8*")
+        val byteSize = elemType.sizeOf * size
+        emit(s"  call void @llvm.memset.p0i8.i64(i8* $cast, i8 0, i64 $byteSize, i1 false)")
+        // Store each element
+        for (elem, i) <- elements.zipWithIndex do
+          val v = genExpr(elem)
+          val gep = newReg()
+          emit(s"  $gep = getelementptr $arrType, $arrType* $alloca, i32 0, i32 $i")
+          emit(s"  store $elt $v, $elt* $gep")
+        alloca
+
+      case TArrayDecl(size, SyslType.ArrayType(elemType, _)) =>
+        val elt = llvmType(elemType)
+        val arrType = s"[$size x $elt]"
+        val alloca = newReg()
+        emit(s"  $alloca = alloca $arrType")
+        val cast = newReg()
+        emit(s"  $cast = bitcast $arrType* $alloca to i8*")
+        val byteSize = elemType.sizeOf * size
+        emit(s"  call void @llvm.memset.p0i8.i64(i8* $cast, i8 0, i64 $byteSize, i1 false)")
+        alloca
+
+      case TIndex(array, index, elemType) =>
+        val base = genExpr(array)
+        val idx = genExpr(index)
+        array.typ match
+          case SyslType.ArrayType(elem, size) =>
+            val elt = llvmType(elem)
+            val arrType = s"[$size x $elt]"
+            val gep = newReg()
+            emit(s"  $gep = getelementptr $arrType, $arrType* $base, i32 0, i32 $idx")
+            if isAggregate(elem) then gep
+            else
+              val r = newReg()
+              emit(s"  $r = load $elt, $elt* $gep")
+              r
+          case SyslType.PtrType(elem) =>
+            val elt = llvmType(elem)
+            val idx64 = newReg()
+            emit(s"  $idx64 = sext i32 $idx to i64")
+            val gep = newReg()
+            emit(s"  $gep = getelementptr $elt, $elt* $base, i64 $idx64")
+            if isAggregate(elem) then gep
+            else
+              val r = newReg()
+              emit(s"  $r = load $elt, $elt* $gep")
+              r
+          case _ =>
+            // Slice or other — use byte arithmetic on data pointer
+            val dataPtr = emitSliceDataPtr(base, array.typ)
+            val elemSyslType = elemType match
+              case t => t
+            val elt = llvmType(elemSyslType)
+            val idx64 = newReg()
+            emit(s"  $idx64 = sext i32 $idx to i64")
+            val offset = newReg()
+            emit(s"  $offset = mul i64 $idx64, ${elemSyslType.sizeOf}")
+            val elemAddr = newReg()
+            emit(s"  $elemAddr = getelementptr i8, i8* $dataPtr, i64 $offset")
+            val typedPtr = newReg()
+            emit(s"  $typedPtr = bitcast i8* $elemAddr to $elt*")
+            if isAggregate(elemSyslType) then typedPtr
+            else
+              val r = newReg()
+              emit(s"  $r = load $elt, $elt* $typedPtr")
+              r
+
+      case TLen(array, _) =>
+        array.typ match
+          case SyslType.ArrayType(_, size) => size.toString
+          case SyslType.SliceType(_) =>
+            val base = genExpr(array)
+            val lenGep = newReg()
+            emit(s"  $lenGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 1")
+            val len32 = newReg()
+            emit(s"  $len32 = load i32, i32* $lenGep")
+            len32
+          case SyslType.StringType =>
+            val s = genExpr(array)
+            val r = newReg()
+            emit(s"  $r = call i64 @strlen(i8* $s)")
+            val r32 = newReg()
+            emit(s"  $r32 = trunc i64 $r to i32")
+            r32
+          case _ =>
+            emit(s"  ; TODO: len for ${array.typ}")
+            "0"
+
+      case TCap(array, _) =>
+        array.typ match
+          case SyslType.ArrayType(_, size) => size.toString
+          case SyslType.SliceType(_) =>
+            val base = genExpr(array)
+            val capGep = newReg()
+            emit(s"  $capGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 2")
+            val cap32 = newReg()
+            emit(s"  $cap32 = load i32, i32* $capGep")
+            cap32
+          case _ =>
+            emit(s"  ; TODO: cap for ${array.typ}")
+            "0"
+
+      // ===== Pointers =====
+
+      case TAddrOf(name, _) =>
+        if locals.contains(name) then locals(name).reg
+        else s"@$name"
+
+      case TDeref(pointer, typ) =>
+        val ptr = genExpr(pointer)
+        val pointeeType = pointer.typ match
+          case SyslType.PtrType(inner) => inner
+          case SyslType.RefType(inner) => inner
+          case _ => typ
+        if isAggregate(pointeeType) then
+          // For aggregates, the pointer IS the address
+          val typedPtr = newReg()
+          emit(s"  $typedPtr = bitcast i8* $ptr to ${llvmType(pointeeType)}*")
+          typedPtr
+        else
+          val pt = llvmType(pointeeType)
+          val typedPtr = newReg()
+          emit(s"  $typedPtr = bitcast i8* $ptr to $pt*")
+          val r = newReg()
+          emit(s"  $r = load $pt, $pt* $typedPtr")
+          r
+
+      // ===== Slices =====
+
+      case TSliceExpr(array, low, high, SyslType.SliceType(elemType)) =>
+        val base = genExpr(array)
+        val elt = llvmType(elemType)
+        val elemSize = elemType.sizeOf
+        // Get data pointer and length from source
+        val (dataPtr, srcLen) = array.typ match
+          case SyslType.ArrayType(_, size) =>
+            val cast = newReg()
+            emit(s"  $cast = bitcast ${llvmType(array.typ)}* $base to i8*")
+            (cast, size.toString)
+          case SyslType.SliceType(_) =>
+            val ptrGep = newReg()
+            emit(s"  $ptrGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 0")
+            val ptr = newReg()
+            emit(s"  $ptr = load i8*, i8** $ptrGep")
+            val lenGep = newReg()
+            emit(s"  $lenGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 1")
+            val len = newReg()
+            emit(s"  $len = load i32, i32* $lenGep")
+            (ptr, len)
+          case _ => (base, "0")
+        val lo = low.map(genExpr).getOrElse("0")
+        val hi = high.map(genExpr).getOrElse(srcLen)
+        // Compute new data pointer = dataPtr + lo * elemSize
+        val lo64 = newReg()
+        emit(s"  $lo64 = sext i32 $lo to i64")
+        val loOffset = newReg()
+        emit(s"  $loOffset = mul i64 $lo64, $elemSize")
+        val newPtr = newReg()
+        emit(s"  $newPtr = getelementptr i8, i8* $dataPtr, i64 $loOffset")
+        // new len = hi - lo
+        val newLen = newReg()
+        emit(s"  $newLen = sub i32 $hi, $lo")
+        // Allocate slice struct on stack
+        val alloca = newReg()
+        emit(s"  $alloca = alloca %struct.slice")
+        val ptrGep = newReg()
+        emit(s"  $ptrGep = getelementptr %struct.slice, %struct.slice* $alloca, i32 0, i32 0")
+        emit(s"  store i8* $newPtr, i8** $ptrGep")
+        val lenGep2 = newReg()
+        emit(s"  $lenGep2 = getelementptr %struct.slice, %struct.slice* $alloca, i32 0, i32 1")
+        emit(s"  store i32 $newLen, i32* $lenGep2")
+        val capGep2 = newReg()
+        emit(s"  $capGep2 = getelementptr %struct.slice, %struct.slice* $alloca, i32 0, i32 2")
+        emit(s"  store i32 $newLen, i32* $capGep2") // cap = len for slicing
+        alloca
+
+      case TAppend(slice, elem, SyslType.SliceType(elemType)) =>
+        val base = genExpr(slice)
+        val elt = llvmType(elemType)
+        val elemSize = elemType.sizeOf
+        // Load current slice fields
+        val ptrGep = newReg()
+        emit(s"  $ptrGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 0")
+        val curPtr = newReg()
+        emit(s"  $curPtr = load i8*, i8** $ptrGep")
+        val lenGep = newReg()
+        emit(s"  $lenGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 1")
+        val curLen = newReg()
+        emit(s"  $curLen = load i32, i32* $lenGep")
+        val capGep = newReg()
+        emit(s"  $capGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 2")
+        val curCap = newReg()
+        emit(s"  $curCap = load i32, i32* $capGep")
+        // Check if we need to grow
+        val needGrow = newReg()
+        emit(s"  $needGrow = icmp eq i32 $curLen, $curCap")
+        val growLabel = newLabel("append_grow")
+        val noGrowLabel = newLabel("append_nogrow")
+        val contLabel = newLabel("append_cont")
+        emit(s"  br i1 $needGrow, label %$growLabel, label %$noGrowLabel")
+        // Grow path
+        emit(s"$growLabel:")
+        val isZero = newReg()
+        emit(s"  $isZero = icmp eq i32 $curCap, 0")
+        val newCap = newReg()
+        val doubled = newReg()
+        emit(s"  $doubled = mul i32 $curCap, 2")
+        emit(s"  $newCap = select i1 $isZero, i32 1, i32 $doubled")
+        val newCap64 = newReg()
+        emit(s"  $newCap64 = sext i32 $newCap to i64")
+        val allocSize = newReg()
+        emit(s"  $allocSize = mul i64 $newCap64, $elemSize")
+        val newBuf = newReg()
+        emit(s"  $newBuf = call i8* @malloc(i64 $allocSize)")
+        // Copy old data
+        val curLen64 = newReg()
+        emit(s"  $curLen64 = sext i32 $curLen to i64")
+        val copySize = newReg()
+        emit(s"  $copySize = mul i64 $curLen64, $elemSize")
+        val ignored = newReg()
+        emit(s"  $ignored = call i8* @memcpy(i8* $newBuf, i8* $curPtr, i64 $copySize)")
+        emit(s"  br label %$contLabel")
+        // No-grow path
+        emit(s"$noGrowLabel:")
+        emit(s"  br label %$contLabel")
+        // Continue — phi for ptr and cap
+        emit(s"$contLabel:")
+        val finalPtr = newReg()
+        emit(s"  $finalPtr = phi i8* [ $newBuf, %$growLabel ], [ $curPtr, %$noGrowLabel ]")
+        val finalCap = newReg()
+        emit(s"  $finalCap = phi i32 [ $newCap, %$growLabel ], [ $curCap, %$noGrowLabel ]")
+        // Store new element
+        val v = genExpr(elem)
+        val len64 = newReg()
+        emit(s"  $len64 = sext i32 $curLen to i64")
+        val elemOffset = newReg()
+        emit(s"  $elemOffset = mul i64 $len64, $elemSize")
+        val elemAddr = newReg()
+        emit(s"  $elemAddr = getelementptr i8, i8* $finalPtr, i64 $elemOffset")
+        val typedElemPtr = newReg()
+        emit(s"  $typedElemPtr = bitcast i8* $elemAddr to $elt*")
+        emit(s"  store $elt $v, $elt* $typedElemPtr")
+        // Build result slice
+        val newLen = newReg()
+        emit(s"  $newLen = add i32 $curLen, 1")
+        val result = newReg()
+        emit(s"  $result = alloca %struct.slice")
+        val rPtrGep = newReg()
+        emit(s"  $rPtrGep = getelementptr %struct.slice, %struct.slice* $result, i32 0, i32 0")
+        emit(s"  store i8* $finalPtr, i8** $rPtrGep")
+        val rLenGep = newReg()
+        emit(s"  $rLenGep = getelementptr %struct.slice, %struct.slice* $result, i32 0, i32 1")
+        emit(s"  store i32 $newLen, i32* $rLenGep")
+        val rCapGep = newReg()
+        emit(s"  $rCapGep = getelementptr %struct.slice, %struct.slice* $result, i32 0, i32 2")
+        emit(s"  store i32 $finalCap, i32* $rCapGep")
+        result
+
+      // ===== Refs (heap allocation) =====
+
+      case TNew(structType, args) =>
+        val st = structType
+        val dataSize = st.sizeOf
+        val totalSize = dataSize + 8 // 8-byte refcount header
+        val buf = newReg()
+        emit(s"  $buf = call i8* @malloc(i64 $totalSize)")
+        // Init refcount = 1
+        val rcPtr = newReg()
+        emit(s"  $rcPtr = bitcast i8* $buf to i64*")
+        emit(s"  store i64 1, i64* $rcPtr")
+        // Data pointer = buf + 8
+        val dataPtr = newReg()
+        emit(s"  $dataPtr = getelementptr i8, i8* $buf, i64 8")
+        // Zero-init data
+        emit(s"  call void @llvm.memset.p0i8.i64(i8* $dataPtr, i8 0, i64 $dataSize, i1 false)")
+        // Store constructor args
+        val structLt = llvmType(st)
+        val typedData = newReg()
+        emit(s"  $typedData = bitcast i8* $dataPtr to $structLt*")
+        for (arg, i) <- args.zipWithIndex do
+          val v = genExpr(arg)
+          val fieldType = llvmType(st.fields(i)._2)
+          val gep = newReg()
+          emit(s"  $gep = getelementptr $structLt, $structLt* $typedData, i32 0, i32 $i")
+          val storeVal = if isAggregate(st.fields(i)._2) then
+            val loaded = newReg()
+            emit(s"  $loaded = load $fieldType, $fieldType* $v")
+            loaded
+          else v
+          emit(s"  store $fieldType $storeVal, $fieldType* $gep")
+        dataPtr // return pointer to data (past refcount)
+
+      case TNewArray(elemType, size) =>
+        val elemSize = elemType.sizeOf
+        val sizeVal = genExpr(size)
+        val sizeVal64 = newReg()
+        emit(s"  $sizeVal64 = sext i32 $sizeVal to i64")
+        val dataBytes = newReg()
+        emit(s"  $dataBytes = mul i64 $sizeVal64, $elemSize")
+        // Total = 16 (refcount 8 + length 4 + cap 4) + data
+        val totalSize = newReg()
+        emit(s"  $totalSize = add i64 $dataBytes, 16")
+        val buf = newReg()
+        emit(s"  $buf = call i8* @malloc(i64 $totalSize)")
+        // Zero the whole thing
+        emit(s"  call void @llvm.memset.p0i8.i64(i8* $buf, i8 0, i64 $totalSize, i1 false)")
+        // Refcount = 1 at offset 0
+        val rcPtr = newReg()
+        emit(s"  $rcPtr = bitcast i8* $buf to i64*")
+        emit(s"  store i64 1, i64* $rcPtr")
+        // Length at offset 8
+        val lenPtr = newReg()
+        emit(s"  $lenPtr = getelementptr i8, i8* $buf, i64 8")
+        val lenTyped = newReg()
+        emit(s"  $lenTyped = bitcast i8* $lenPtr to i32*")
+        emit(s"  store i32 $sizeVal, i32* $lenTyped")
+        // Cap at offset 12
+        val capPtr = newReg()
+        emit(s"  $capPtr = getelementptr i8, i8* $buf, i64 12")
+        val capTyped = newReg()
+        emit(s"  $capTyped = bitcast i8* $capPtr to i32*")
+        emit(s"  store i32 $sizeVal, i32* $capTyped")
+        // Data pointer at offset 16
+        val dataPtr = newReg()
+        emit(s"  $dataPtr = getelementptr i8, i8* $buf, i64 16")
+        dataPtr
+
       case TStr(inner) =>
         val v = genExpr(inner)
         val vt = exprType(inner)
@@ -633,6 +1094,22 @@ class SyslLLVMCodegen:
       case _ =>
         genExpr(obj) // for other expressions, genExpr returns pointer for struct types
 
+  // Extract the data pointer from a slice or ref-to-slice
+  private def emitSliceDataPtr(base: String, typ: SyslType): String =
+    typ match
+      case SyslType.SliceType(_) =>
+        val ptrGep = newReg()
+        emit(s"  $ptrGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 0")
+        val ptr = newReg()
+        emit(s"  $ptr = load i8*, i8** $ptrGep")
+        ptr
+      case SyslType.RefType(SyslType.SliceType(_)) =>
+        base // ref-to-slice: base IS the data pointer
+      case SyslType.StringType =>
+        base // C-string: base IS the char pointer
+      case _ =>
+        base
+
   // Emit snprintf-based conversion: measure, malloc, format. Returns i8* register.
   private def emitSnprintfToString(fmtName: String, fmtLen: Int, typedArg: String): String =
     val fmtPtr = newReg()
@@ -659,18 +1136,22 @@ class SyslLLVMCodegen:
 
   private def llvmType(t: SyslType): String = t match
     case SyslType.IntType(w) => s"i$w"
-    case SyslType.UIntType(w) => s"i$w"  // LLVM uses same integer type for signed/unsigned
+    case SyslType.UIntType(w) => s"i$w"
     case SyslType.BoolType => "i8"
     case SyslType.DoubleType => "double"
     case SyslType.VoidType => "void"
     case SyslType.StringType => "i8*"
     case SyslType.StructType(name, _) => s"%struct.$name"
+    case SyslType.ArrayType(elem, size) => s"[${size} x ${llvmType(elem)}]"
+    case SyslType.SliceType(_) => "%struct.slice"
     case SyslType.PtrType(_) => "i8*"
+    case SyslType.RefType(_) => "i8*"
+    case SyslType.FuncType(_, _) => "i8*"
     case _ => "i64"
 
   // Types that are passed by pointer (alloca) rather than by value
   private def isAggregate(t: SyslType): Boolean = t match
-    case _: SyslType.StructType | _: SyslType.ArrayType => true
+    case _: SyslType.StructType | _: SyslType.ArrayType | _: SyslType.SliceType => true
     case _ => false
 
   private def emit(line: String): Unit =
