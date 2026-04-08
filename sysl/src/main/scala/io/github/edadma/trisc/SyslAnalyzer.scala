@@ -861,19 +861,42 @@ class SyslAnalyzer:
         case StructType(_, fields) if elems.length == fields.length =>
           for (e, (_, ft)) <- elems.zip(fields) do unifyTypes(e, ft, typeParams, env)
         case _ => ()
-      case NamedTypeAST(name, tArgs) if tArgs.nonEmpty => arg match
-        case SyslType.StructType(argName, _) =>
-          structToTemplate.get(argName) match
-            case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
-              for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
-            case _ => ()
-        case SyslType.EnumType(argName, _) =>
-          enumToTemplate.get(argName) match
-            case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
-              for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
-            case _ => ()
-        case _ => ()
+      case NamedTypeAST(name, tArgs) if tArgs.nonEmpty =>
+        // If this is a generic type alias, expand it and unify the expanded type
+        if genericTypeAliases.contains(name) then
+          val (tparams, target) = genericTypeAliases(name)
+          if tArgs.length == tparams.length then
+            // Substitute alias type params with the call's type args in the target TypeAST,
+            // then unify the expanded structure against the argument type.
+            // e.g., type Parser[T] = (string, int) -> Result[T, string]
+            //   Parser[A] → substitute T→A in target → (string, int) -> Result[A, string]
+            val subst = tparams.zip(tArgs).toMap
+            val expanded = substituteTypeAST(target, subst)
+            unifyTypes(expanded, arg, typeParams, env)
+        else arg match
+          case SyslType.StructType(argName, _) =>
+            structToTemplate.get(argName) match
+              case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
+                for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
+              case _ => ()
+          case SyslType.EnumType(argName, _) =>
+            enumToTemplate.get(argName) match
+              case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
+                for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
+              case _ => ()
+          case _ => ()
       case _ => () // concrete parameter type, nothing to infer
+
+  /** Substitute named types in a TypeAST. Used to expand generic type alias params before unification. */
+  private def substituteTypeAST(t: TypeAST, subst: Map[String, TypeAST]): TypeAST = t match
+    case NamedTypeAST(name, Nil) if subst.contains(name) => subst(name)
+    case NamedTypeAST(name, args) => NamedTypeAST(name, args.map(substituteTypeAST(_, subst)))
+    case PtrTypeAST(inner) => PtrTypeAST(substituteTypeAST(inner, subst))
+    case ArrayTypeAST(size, elem) => ArrayTypeAST(size, substituteTypeAST(elem, subst))
+    case SliceTypeAST(elem) => SliceTypeAST(substituteTypeAST(elem, subst))
+    case FuncTypeAST(params, ret) => FuncTypeAST(params.map(substituteTypeAST(_, subst)), substituteTypeAST(ret, subst))
+    case TupleTypeAST(elems) => TupleTypeAST(elems.map(substituteTypeAST(_, subst)))
+    case RefTypeAST(inner) => RefTypeAST(substituteTypeAST(inner, subst))
 
   // Instantiate a generic function with inferred type arguments, returning the mangled name
   // and FunInfo of the instantiated function. Reuses cached instantiations.
