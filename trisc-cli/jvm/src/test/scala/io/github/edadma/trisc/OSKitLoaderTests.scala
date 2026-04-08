@@ -100,8 +100,8 @@ import oskit.loader.{load_tof}
 import oskit.services.sleep
           |
           |test_loader()
-          |    // Wait for servers
-          |    sleep(10)
+          |    // Wait for servers to initialize
+          |    sleep(20)
           |    // Load /bin/hello
           |    val entry = load_tof("/bin/hello")
           |    if entry > 0
@@ -119,10 +119,8 @@ import oskit.services.sleep
           |kernel_main() -> int
           |    ipc_init()
           |    create_thread(disk_server, 0x80000, 0x80000, "disk")
-          |    sleep(5)
           |    create_thread(tfs_server, 0x90000, 0x90000, "tfs")
           |    create_thread(tty_server, 0xA0000, 0xA0000, "tty")
-          |    sleep(5)
           |    create_thread(test_loader, 0xB0000, 0xB0000, "loader")
           |    timer_init(1000)
           |    first_thread_ssp()
@@ -140,7 +138,7 @@ import oskit.services.sleep
   def runLoader(
       prefill: String,
       maxCycles: Int = 15000000,
-  ): (CPU, String) =
+  ): (CPU, String, RAM) =
     val linked = loaderLinked
 
     val output = new StringBuilder
@@ -173,11 +171,11 @@ import oskit.services.sleep
     val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
-    (cpu, output.toString)
+    (cpu, output.toString, ram)
 
   "Loader: load and run hello world from filesystem" in {
     val prefill = s"""/bin/hello file "${tofToPrefill(helloTofText)}"\n"""
-    val (_, output) = runLoader(prefill)
+    val (_, output, _) = runLoader(prefill)
     output should include("Hello")
   }
 }
