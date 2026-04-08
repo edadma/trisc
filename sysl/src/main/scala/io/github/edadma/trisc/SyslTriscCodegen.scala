@@ -1752,6 +1752,11 @@ class SyslTriscCodegen(addresses: Int = 4):
         genExpr(inner)               // r1 = address of {ptr, len}
         emit("  ldd r1, r1, r0")    // r1 = ptr (offset 0)
 
+      case TCast(inner, target) if inner.typ.isInstanceOf[SyslType.FuncType] && (target == SyslType.IntType(64) || target == SyslType.UIntType(64)) =>
+        // FuncType → i64: extract func_ptr from {func_ptr, env_ptr} fat pointer
+        genExpr(inner)
+        emit("  ldd r1, r1, r0")   // r1 = func_ptr (first 8 bytes of fat pointer)
+
       case TCast(inner, target) =>
         genExpr(inner)
         import SyslType.*
