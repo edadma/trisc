@@ -1,0 +1,193 @@
+TOF Loader — Load executable TOF files into memory
+===================================================
+
+Parses the TOF text format and loads executable programs
+into memory. This is the OS-side equivalent of what the
+emulator's `TOF.load()` does on the JVM.
+
+TOF text format (executable, fully linked):
+```
+TOF v1
+TYPE:executable
+ENTRY:main
+SEGMENT:code,d0000
+DATA:hexhexhex...
+RES:100
+SEGMENT:data,d1000
+DATA:hexhexhex...
+```
+
+The loader reads the file, parses each line, and copies
+decoded data to the addresses specified by each segment.
+RES lines advance the address without writing (BSS).
+The entry point is resolved from the ENTRY name by
+matching it against SYMBOL declarations.
+
+    module oskit.loader
+
+    import std.strings.{has_prefix, index_byte, substring, trim_space}
+    import oskit.servers.{fs_open, fs_read}
+
+Error codes returned when loading fails.
+
+    val LOAD_ERR_NOT_FOUND = -1
+    val LOAD_ERR_READ      = -2
+    val LOAD_ERR_FORMAT    = -3
+    val LOAD_ERR_NO_ENTRY  = -4
+
+Parse a hex string to an integer. Returns -1 on error.
+
+    parse_hex(s: string) -> i64
+        val n = len(s)
+        if n == 0
+            return -1
+        var result: i64 = 0
+        for var i = 0; i < n; i++
+            val v = hex_val(s[i])
+            if v < 0
+                return -1
+            result = result * 16 + i64(v)
+        result
+
+Hex nibble value: '0'-'9' → 0-9, 'a'-'f'/'A'-'F' → 10-15.
+Returns -1 on invalid character.
+
+    hex_val(ch: int) -> int
+        if ch >= '0'
+            if ch <= '9'
+                return ch - '0'
+        if ch >= 'a'
+            if ch <= 'f'
+                return ch - 'a' + 10
+        if ch >= 'A'
+            if ch <= 'F'
+                return ch - 'A' + 10
+        -1
+
+Decode a hex string and write raw bytes directly to a
+memory address. Returns the number of bytes written,
+or -1 on error.
+
+    hex_decode_to_mem(hex: string, addr: *byte) -> int
+        val n = len(hex)
+        if n % 2 != 0
+            return -1
+        val pairs = n / 2
+        for var i = 0; i < pairs; i++
+            val hi = hex_val(hex[i * 2])
+            val lo = hex_val(hex[i * 2 + 1])
+            if hi < 0
+                return -1
+            if lo < 0
+                return -1
+            addr[i] = byte(hi * 16 + lo)
+        pairs
+
+Parse a TOF file from a buffer and load it into memory.
+Returns the entry point address, or a negative error code.
+
+The buffer contains the entire TOF file as text. We parse
+it line by line, tracking the current segment base address
+and a write cursor within each segment.
+
+    load_tof_from_buf(buf: *byte, buflen: int) -> i64
+        var pos = 0
+        var seg_base: i64 = 0
+        var seg_cursor: i64 = 0
+        var entry_name_start = -1
+        var entry_name_len = 0
+        var entry_addr: i64 = -1
+        var header_seen = false
+
+        while pos < buflen
+            // Find end of current line
+            var eol = pos
+            while eol < buflen
+                if buf[eol] == '\n'
+                    break
+                eol += 1
+
+            // Build a string from this line
+            val line_len = eol - pos
+            if line_len > 0
+                val line = trim_space(string(buf + pos, line_len))
+
+                if len(line) > 0
+                    if !header_seen
+                        if !has_prefix(line, "TOF v")
+                            return LOAD_ERR_FORMAT
+                        header_seen = true
+                    else if has_prefix(line, "#")
+                        // Comment — skip
+                        pos = eol + 1
+                        continue
+                    else if has_prefix(line, "SEGMENT:")
+                        val rest = substring(line, 8, len(line))
+                        val comma = index_byte(rest, byte(','))
+                        if comma < 0
+                            return LOAD_ERR_FORMAT
+                        val org_str = substring(rest, comma + 1, len(rest))
+                        seg_base = parse_hex(org_str)
+                        if seg_base < 0
+                            return LOAD_ERR_FORMAT
+                        seg_cursor = seg_base
+                    else if has_prefix(line, "DATA:")
+                        val hex = substring(line, 5, len(line))
+                        val n = hex_decode_to_mem(hex, *byte(seg_cursor))
+                        if n < 0
+                            return LOAD_ERR_FORMAT
+                        seg_cursor = seg_cursor + i64(n)
+                    else if has_prefix(line, "RES:")
+                        val size_str = substring(line, 4, len(line))
+                        val sz64 = parse_hex(size_str)
+                        if sz64 < 0
+                            return LOAD_ERR_FORMAT
+                        val sz = int(sz64)
+                        val dest = *byte(seg_cursor)
+                        for var i = 0; i < sz; i++
+                            dest[i] = 0
+                        seg_cursor = seg_cursor + i64(sz)
+                    else if has_prefix(line, "ENTRY:")
+                        val rest = substring(line, 6, len(line))
+                        entry_name_len = len(rest)
+                        val p = *byte(rest)
+                        for var i = 0; i < entry_name_len; i++
+                            buf[buflen + i] = p[i]
+                        entry_name_start = buflen
+                    else if has_prefix(line, "SYMBOL:")
+                        val rest = substring(line, 7, len(line))
+                        val comma1 = index_byte(rest, byte(','))
+                        if comma1 >= 0
+                            if entry_name_start >= 0
+                                val sym_name = substring(rest, 0, comma1)
+                                val ename = string(buf + entry_name_start, entry_name_len)
+                                if sym_name == ename
+                                    val after1 = substring(rest, comma1 + 1, len(rest))
+                                    val comma2 = index_byte(after1, byte(','))
+                                    if comma2 >= 0
+                                        val off_str = substring(after1, 0, comma2)
+                                        val off = parse_hex(off_str)
+                                        if off >= 0
+                                            entry_addr = seg_base + off
+
+            pos = eol + 1
+
+        if entry_addr < 0
+            return LOAD_ERR_NO_ENTRY
+        entry_addr
+
+Load a TOF file from the filesystem. Returns the entry
+point address, or a negative error code.
+
+    load_tof(path: string) -> i64
+        val ino = fs_open(path)
+        if ino < 0
+            return LOAD_ERR_NOT_FOUND
+
+        // Read file into a buffer — TOF executables are small
+        var buf: [16384]byte
+        val nr = fs_read(ino, buf, 0, 16384)
+        if nr <= 0
+            return LOAD_ERR_READ
+
+        load_tof_from_buf(buf, nr)
