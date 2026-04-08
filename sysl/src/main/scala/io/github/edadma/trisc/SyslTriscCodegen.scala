@@ -8,6 +8,7 @@ class SyslTriscCodegen(addresses: Int = 4):
   private var modulePrefix = "" // unique prefix for this compilation unit
   private val stringLiterals = new mutable.ListBuffer[(String, String)]() // (label, value)
   private var needsAllocExtern = false // set when codegen emits malloc/free references
+  private var needsFreeExtern = false // set when codegen emits free references
   private var needsStrInt = false // set when codegen needs __str_int helper
   private var needsStrFloat = false // set when codegen needs __str_float helper
 
@@ -29,6 +30,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     stringLiterals.clear()
     deinitFunctions.clear()
     needsAllocExtern = false
+    needsFreeExtern = false
     // Extract module prefix for unique symbol names across compilation units
     modulePrefix = program.decls.collectFirst { case TModuleDecl(path) => path.mkString("_") }.getOrElse("")
     needsStrInt = false
@@ -154,15 +156,15 @@ class SyslTriscCodegen(addresses: Int = 4):
                 emit(s"  rb ${stackSize(typ)}")
           case _ =>
 
-    // Emit extern declarations for malloc/free if referenced by refcount management
-    if needsAllocExtern then
+    // Emit extern declarations for malloc/free if referenced
+    if needsAllocExtern || needsFreeExtern then
       // Only emit if not already defined in this module
       val definedSymbols = (for decl <- program.decls yield decl match
         case TFunDecl(name, _, _, _, _, _) => Some(name)
         case TVarDecl(name, _, _, _) => Some(name)
         case _ => None).flatten.toSet
-      if !definedSymbols.contains("malloc") then emit("extern malloc")
-      if !definedSymbols.contains("free") then emit("extern free")
+      if needsAllocExtern && !definedSymbols.contains("malloc") then emit("extern malloc")
+      if needsFreeExtern && !definedSymbols.contains("free") then emit("extern free")
 
     out.toString
 
@@ -355,6 +357,7 @@ class SyslTriscCodegen(addresses: Int = 4):
   // Emit refcount decrement + free-at-zero: ptr in rPtr, refcount at [rPtr - headerOffset]
   // Clobbers r3, r4. Skips if rPtr == 0 (null). Calls deinit then free(base) when refcount hits 0.
   private def emitRefDecr(ptrReg: Int, headerOff: Int = 8, deinitFunc: Option[String] = None): Unit =
+    needsFreeExtern = true
     val skip = newLabel("skip_decr")
     val noFree = newLabel("no_free")
     emit(s"  beq r$ptrReg, r0, $skip")
