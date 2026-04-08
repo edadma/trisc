@@ -25,31 +25,21 @@ Device registers (MCU-style timer, word-aligned):
         ier: byte
 
     val TIMER_BASE = 0x100040
-    val TIMER_ARR  = 0x100040
-    val TIMER_CR   = 0x10004A
-    val TIMER_SR   = 0x10004B
-    val TIMER_IER  = 0x10004C
     val TIMER_IRQ  = 0
 
     extern register_irq(irq: int, handler: i64)
 
     timer_init(period: int)
         register_irq(TIMER_IRQ, timer_handler)
-
-        // Write ARR period via u32 pointer
-        val arr: *u32 = *u32(TIMER_ARR)
-        *arr = u32(period)
-
-        // Enable overflow interrupt and start timer
-        val ier: *byte = *byte(TIMER_IER)
-        *ier = 1
-        val cr: *byte = *byte(TIMER_CR)
-        *cr = 1
+        var t = *TimerRegs(TIMER_BASE)
+        t.arr = u32(period)
+        t.ier = 1
+        t.cr = 1
 
 timer_handler -- Called by the generic IRQ dispatcher in boot.asm.
 Just acknowledges the timer device. The dispatcher handles the
 context switch, and schedule() handles tick counting and waking.
 
     timer_handler()
-        val sr: *byte = *byte(TIMER_SR)
-        *sr = 1
+        var t = *TimerRegs(TIMER_BASE)
+        t.sr = 1
