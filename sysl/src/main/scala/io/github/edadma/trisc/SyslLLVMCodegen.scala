@@ -5,6 +5,7 @@ import scala.collection.mutable
 class SyslLLVMCodegen:
   private val out = new StringBuilder
   private val stringConstants = new mutable.LinkedHashMap[String, (String, Int)] // value -> (label, byte length including null)
+  private val structTypes = new mutable.LinkedHashMap[String, SyslType.StructType] // name -> struct type
   private var stringCounter = 0
   private var regCounter = 0
   private var labelCounter = 0
@@ -36,6 +37,14 @@ class SyslLLVMCodegen:
     stringConstants.clear()
     stringCounter = 0
 
+    // First pass: collect struct type definitions
+    structTypes.clear()
+    for decl <- program.decls do
+      decl match
+        case TStructDecl(name, fields) =>
+          structTypes(name) = SyslType.StructType(name, fields)
+        case _ =>
+
     // Generate functions into a buffer so string constants are collected first
     out.clear()
     for decl <- program.decls do
@@ -44,7 +53,7 @@ class SyslLLVMCodegen:
         case _: TImportDecl => // skip
         case _: TExternFuncDecl => // skip
         case _: TExternVarDecl => // skip
-        case _: TStructDecl => // type only
+        case _: TStructDecl => // skip (handled above)
         case _: TEnumDecl => // type only
         case _: TTypeAliasDecl => // type only
         case f: TFunDecl => genFunction(f)
@@ -77,6 +86,12 @@ class SyslLLVMCodegen:
     emit("""@.str.true = private unnamed_addr constant [5 x i8] c"true\00"""")
     emit("""@.str.false = private unnamed_addr constant [6 x i8] c"false\00"""")
     emit("")
+
+    // Emit struct type definitions
+    for (name, st) <- structTypes do
+      val fieldTypes = st.fields.map((_, ft) => llvmType(ft)).mkString(", ")
+      emit(s"%struct.$name = type { $fieldTypes }")
+    if structTypes.nonEmpty then emit("")
 
     // Emit string constants
     for (s, (label, byteLen)) <- stringConstants do
@@ -161,28 +176,39 @@ class SyslLLVMCodegen:
     stmt match
       case TVarStmt(name, typ, init) =>
         val lt = llvmType(typ)
-        val alloca = newReg()
-        emit(s"  $alloca = alloca $lt")
-        val value = genExpr(init)
-        val vt = exprType(init)
-        val finalVal = emitSextIfNeeded(value, vt, lt)
-        emit(s"  store $lt $finalVal, $lt* $alloca")
-        locals(name) = LocalVar(name, alloca, typ)
+        typ match
+          case _: SyslType.StructType =>
+            // Struct variable: genExpr returns an alloca pointer — use it directly
+            val ptr = genExpr(init)
+            locals(name) = LocalVar(name, ptr, typ)
+          case _ =>
+            val alloca = newReg()
+            emit(s"  $alloca = alloca $lt")
+            val value = genExpr(init)
+            val vt = exprType(init)
+            val finalVal = emitSextIfNeeded(value, vt, lt)
+            emit(s"  store $lt $finalVal, $lt* $alloca")
+            locals(name) = LocalVar(name, alloca, typ)
 
       case TAssignStmt(target, value) =>
-        val v = genExpr(value)
-        if locals.contains(target) then
-          val local = locals(target)
-          val lt = llvmType(local.typ)
-          val vt = exprType(value)
-          val finalVal = emitSextIfNeeded(v, vt, lt)
-          emit(s"  store $lt $finalVal, $lt* ${local.reg}")
+        if !locals.contains(target) && isAggregate(value.typ) then
+          // New aggregate variable: genExpr returns an alloca pointer — use it directly
+          val ptr = genExpr(value)
+          locals(target) = LocalVar(target, ptr, value.typ)
         else
-          val lt = exprType(value)
-          val alloca = newReg()
-          emit(s"  $alloca = alloca $lt")
-          emit(s"  store $lt $v, $lt* $alloca")
-          locals(target) = LocalVar(target, alloca, value.typ)
+          val v = genExpr(value)
+          if locals.contains(target) then
+            val local = locals(target)
+            val lt = llvmType(local.typ)
+            val vt = exprType(value)
+            val finalVal = emitSextIfNeeded(v, vt, lt)
+            emit(s"  store $lt $finalVal, $lt* ${local.reg}")
+          else
+            val lt = exprType(value)
+            val alloca = newReg()
+            emit(s"  $alloca = alloca $lt")
+            emit(s"  store $lt $v, $lt* $alloca")
+            locals(target) = LocalVar(target, alloca, value.typ)
 
       case TReturnStmt(Some(value)) =>
         val v = genExpr(value)
@@ -215,6 +241,16 @@ class SyslLLVMCodegen:
         if !hasReturned then emit(s"  br label %$condLabel")
         emit(s"$endLabel:")
 
+      case TFieldAssignStmt(obj, fieldIndex, value) =>
+        val st = obj.typ.asInstanceOf[SyslType.StructType]
+        val structLt = llvmType(obj.typ)
+        val fieldType = llvmType(st.fields(fieldIndex)._2)
+        val addr = genStructAddr(obj)
+        val gep = newReg()
+        emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
+        val v = genExpr(value)
+        emit(s"  store $fieldType $v, $fieldType* $gep")
+
       case _ =>
         emit(s"  ; TODO: ${stmt.getClass.getSimpleName}")
 
@@ -235,13 +271,16 @@ class SyslLLVMCodegen:
         emit(s"  $r = getelementptr [$byteLen x i8], [$byteLen x i8]* $label, i32 0, i32 0")
         r
 
-      case TVarRef(name, _) =>
+      case TVarRef(name, typ) =>
         if locals.contains(name) then
           val local = locals(name)
-          val lt = llvmType(local.typ)
-          val r = newReg()
-          emit(s"  $r = load $lt, $lt* ${local.reg}")
-          r
+          if isAggregate(local.typ) then
+            local.reg // aggregates: return address, don't load
+          else
+            val lt = llvmType(local.typ)
+            val r = newReg()
+            emit(s"  $r = load $lt, $lt* ${local.reg}")
+            r
         else
           val r = newReg()
           emit(s"  $r = load $t, $t* @$name")
@@ -402,7 +441,16 @@ class SyslLLVMCodegen:
         "0"
 
       case TCall(name, args, _) =>
-        val argVals = args.map(a => (genExpr(a), exprType(a)))
+        val argVals = args.map { a =>
+          val v = genExpr(a)
+          val vt = exprType(a)
+          // For aggregate types, genExpr returns a pointer — load the value for pass-by-value
+          if isAggregate(a.typ) then
+            val loaded = newReg()
+            emit(s"  $loaded = load $vt, $vt* $v")
+            (loaded, vt)
+          else (v, vt)
+        }
         val argStr = argVals.map((v, vt) => s"$vt $v").mkString(", ")
         val retType = llvmType(expr.typ)
         if retType == "void" then
@@ -458,6 +506,48 @@ class SyslLLVMCodegen:
           emit(s"  $phi = phi $t [ $thenVal, %$thenLabel ], [ $elseVal, %$elseLabel ]")
           phi
         else "0"
+
+      case TStructConstruct(st, args) =>
+        // Alloca, zero-init, then fill fields
+        val lt = llvmType(st)
+        val alloca = newReg()
+        emit(s"  $alloca = alloca $lt")
+        emit(s"  store $lt zeroinitializer, $lt* $alloca")
+        for (arg, i) <- args.zipWithIndex do
+          val v = genExpr(arg)
+          val fieldSyslType = st.fields(i)._2
+          val fieldType = llvmType(fieldSyslType)
+          val gep = newReg()
+          emit(s"  $gep = getelementptr $lt, $lt* $alloca, i32 0, i32 $i")
+          // If the arg is an aggregate, genExpr returned a pointer — load the value
+          val storeVal = if isAggregate(fieldSyslType) then
+            val loaded = newReg()
+            emit(s"  $loaded = load $fieldType, $fieldType* $v")
+            loaded
+          else v
+          emit(s"  store $fieldType $storeVal, $fieldType* $gep")
+        alloca
+
+      case TStructLit(st @ SyslType.StructType(_, _)) =>
+        val lt = llvmType(st)
+        val alloca = newReg()
+        emit(s"  $alloca = alloca $lt")
+        emit(s"  store $lt zeroinitializer, $lt* $alloca")
+        alloca
+
+      case TFieldAccess(obj, fieldIndex, fieldType) =>
+        val st = obj.typ.asInstanceOf[SyslType.StructType]
+        val structLt = llvmType(obj.typ)
+        val addr = genStructAddr(obj)
+        val gep = newReg()
+        emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
+        if isAggregate(fieldType) then
+          gep // return address for aggregate fields
+        else
+          val ft = llvmType(fieldType)
+          val r = newReg()
+          emit(s"  $r = load $ft, $ft* $gep")
+          r
 
       case TStr(inner) =>
         val v = genExpr(inner)
@@ -527,6 +617,22 @@ class SyslLLVMCodegen:
         emit(s"  ; TODO: ${expr.getClass.getSimpleName}")
         "0"
 
+  // Get the address (alloca pointer) for a struct-typed expression
+  private def genStructAddr(obj: TExpr): String =
+    obj match
+      case TVarRef(name, _) =>
+        if locals.contains(name) then locals(name).reg
+        else s"@$name"
+      case TFieldAccess(innerObj, fieldIndex, _) =>
+        val st = innerObj.typ.asInstanceOf[SyslType.StructType]
+        val structLt = llvmType(innerObj.typ)
+        val addr = genStructAddr(innerObj)
+        val gep = newReg()
+        emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
+        gep
+      case _ =>
+        genExpr(obj) // for other expressions, genExpr returns pointer for struct types
+
   // Emit snprintf-based conversion: measure, malloc, format. Returns i8* register.
   private def emitSnprintfToString(fmtName: String, fmtLen: Int, typedArg: String): String =
     val fmtPtr = newReg()
@@ -558,8 +664,14 @@ class SyslLLVMCodegen:
     case SyslType.DoubleType => "double"
     case SyslType.VoidType => "void"
     case SyslType.StringType => "i8*"
+    case SyslType.StructType(name, _) => s"%struct.$name"
     case SyslType.PtrType(_) => "i8*"
     case _ => "i64"
+
+  // Types that are passed by pointer (alloca) rather than by value
+  private def isAggregate(t: SyslType): Boolean = t match
+    case _: SyslType.StructType | _: SyslType.ArrayType => true
+    case _ => false
 
   private def emit(line: String): Unit =
     out ++= line
