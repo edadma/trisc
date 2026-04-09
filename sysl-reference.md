@@ -785,6 +785,7 @@ Float literals (`3.14`, `1e5`) are always `f64`. There is no `f32` type.
 \\    literal backslash
 \'    literal single quote
 \"    literal double quote
+\xNN  hex byte (e.g., \x1b for ESC, \x00 for null)
 ```
 
 ### Operators (by precedence, lowest to highest)
