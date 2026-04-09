@@ -416,7 +416,11 @@ class TOF(val entry: Option[String], val segments: Seq[TOF.Segment], val tofType
 
       s.chunks foreach {
         case TOF.CommentChunk(text) => buf ++= s"# $text\n"
-        case TOF.DataChunk(data)    => buf ++= s"DATA:${data.map(b => f"${b & 0xff}%02x").mkString}\n"
+        case TOF.DataChunk(data)    =>
+          // Limit DATA lines to 2048 hex chars (1024 bytes) for readability
+          val hex = data.map(b => f"${b & 0xff}%02x").mkString
+          for chunk <- hex.grouped(2048) do
+            buf ++= s"DATA:$chunk\n"
         case TOF.ResChunk(size)     => buf ++= s"RES:${size.toHexString}\n"
         case c                      => sys.error(s"can't serialize $c")
       }
