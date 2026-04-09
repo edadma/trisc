@@ -12,6 +12,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
   private lazy val tfsSysl: String = readLsysl("oskit/fs/tfs.lsysl")
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
+  private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   // Stack layout for 2-thread tests (disk server + client):
   //   disk:   USP=0x10000 SSP=0xE000
@@ -40,7 +41,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
       "posix/ctype/ctype" -> posixCtypeSysl,
       "posix/stdlib/alloc" -> posixAllocSysl,
       "posix/unistd/sbrk" -> sbrkSysl,
-      "std/mem/mem" -> memSysl,
+      "std/mem/mem" -> memSysl, "std/debug/debug" -> debugSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -100,7 +101,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
       "posix/stdlib/alloc" -> posixAllocSysl,
       "posix/unistd/sbrk" -> sbrkSysl,
       "oskit/servers/tfs" -> tfsSrvSysl,
-      "std/mem/mem" -> memSysl,
+      "std/mem/mem" -> memSysl, "std/debug/debug" -> debugSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -256,12 +257,12 @@ import oskit.drivers.disk.*
           |    first_thread_ssp()
           |
           |write_block(lba: int, ch: byte)
-          |    var buf: [512]byte
+          |    var buf: [4096]byte
           |    buf[0] = ch
           |    disk_write(lba, &buf[0])
           |
           |read_and_print(lba: int)
-          |    var buf: [512]byte
+          |    var buf: [4096]byte
           |    disk_read(lba, &buf[0])
           |    putc(buf[0])
           |

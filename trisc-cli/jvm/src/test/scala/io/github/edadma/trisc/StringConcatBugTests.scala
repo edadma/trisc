@@ -640,6 +640,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
   private lazy val tfsSysl: String    = readLsysl("oskit/fs/tfs.lsysl")
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val memSysl: String   = readLsysl("std/mem/mem.lsysl")
+  private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   private lazy val concatAppLinked: TOF =
     val bootTof    = assemble(bootAsm, relocatable = true)
@@ -651,6 +652,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/sync/mutex"            -> mutexSysl,
       "oskit/ipc/ipc"               -> ipcSysl,
       "std/mem/mem"                 -> memSysl,
+      "std/debug/debug"             -> debugSysl,
       "oskit/drivers/disk/disk"     -> diskSysl,
       "oskit/drivers/kbd/keyboard"  -> kbdSysl,
       "oskit/drivers/tty/tty"       -> ttySysl,
@@ -847,6 +849,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/sync/mutex"            -> mutexSysl,
       "oskit/ipc/ipc"               -> ipcSysl,
       "std/mem/mem"                 -> memSysl,
+      "std/debug/debug"             -> debugSysl,
       "oskit/drivers/disk/disk"     -> diskSysl,
       "oskit/drivers/kbd/keyboard"  -> kbdSysl,
       "oskit/drivers/tty/tty"       -> ttySysl,
@@ -1027,6 +1030,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/sync/mutex"            -> mutexSysl,
       "oskit/ipc/ipc"               -> ipcSysl,
       "std/mem/mem"                 -> memSysl,
+      "std/debug/debug"             -> debugSysl,
       "oskit/drivers/disk/disk"     -> diskSysl,
       "oskit/drivers/kbd/keyboard"  -> kbdSysl,
       "oskit/drivers/tty/tty"       -> ttySysl,

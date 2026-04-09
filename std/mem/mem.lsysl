@@ -30,8 +30,6 @@ Design rules:
 
     module std.mem
 
-    import std.debug.{assert}
-
 
 copy
 ----

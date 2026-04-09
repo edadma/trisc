@@ -23,7 +23,6 @@ so the scheduler can reference them).
 
     import oskit.kernel.*
     import oskit.services.syscall
-    import std.mem.{memcpy}
 
     val MAX_PORTS = 8
     val IPC_PORT_FREE = -1
@@ -68,7 +67,12 @@ Syscall numbers for IPC (31-37).
 Copy bytes between memory addresses.
 
     ipc_memcpy(dst: i64, src: i64, len: int)
-        memcpy(*byte(dst), *byte(src), len)
+        var d: *byte = *byte(dst)
+        var s: *byte = *byte(src)
+        var i = 0
+        while i < len
+            d[i] = s[i]
+            i += 1
 
 Compare two null-terminated strings. Returns 0 if equal.
 

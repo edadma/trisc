@@ -16,6 +16,7 @@ class BuildOSDesktop extends OSKitTestHelpers {
   private lazy val mouseSysl: String = readLsysl("oskit/drivers/mouse/mouse.lsysl")
   private lazy val displaySysl: String = readLsysl("oskit/drivers/display/display.lsysl")
   private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
+  private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
   private lazy val suitSysl: String = readLsysl("suit/suit.lsysl")
   private lazy val appSysl: String = scala.io.Source.fromFile("examples/draw-hello/os-desktop.sysl").mkString
 
@@ -24,7 +25,7 @@ class BuildOSDesktop extends OSKitTestHelpers {
     val allSources = Map(
       "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
       "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
-      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl,
+      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "std/debug/debug" -> debugSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl,
       "oskit/drivers/mouse/mouse" -> mouseSysl, "oskit/drivers/display/display" -> displaySysl,
       "suit/suit" -> suitSysl, "app" -> appSysl,
     )
