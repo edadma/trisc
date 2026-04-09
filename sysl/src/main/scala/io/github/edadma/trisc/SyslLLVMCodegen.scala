@@ -2079,10 +2079,19 @@ class SyslLLVMCodegen:
     case SyslType.DoubleType => "double"
     case SyslType.VoidType => "void"
     case SyslType.StringType => "%struct.string"
-    case st @ SyslType.StructType(name, _) =>
+    case st @ SyslType.StructType(name, fields) =>
       // Auto-register struct types encountered in signatures (e.g., built-in tuples)
-      if !structTypes.contains(name) then structTypes(name) = st
-      s"%struct.$name"
+      // Tuple types share the same name (_Tuple2) for different field types,
+      // so disambiguate with a suffix when fields differ from an existing registration.
+      val key = if structTypes.contains(name) && structTypes(name).fields != fields then
+        val suffix = fields.map((_, ft) => llvmType(ft).replace("%struct.", "").replace("*", "p").replace(" ", "")).mkString("_")
+        val uniqueName = s"${name}_$suffix"
+        if !structTypes.contains(uniqueName) then structTypes(uniqueName) = SyslType.StructType(uniqueName, fields)
+        uniqueName
+      else
+        if !structTypes.contains(name) then structTypes(name) = st
+        name
+      s"%struct.$key"
     case SyslType.ArrayType(elem, size) => s"[$size x ${llvmType(elem)}]"
     case et: SyslType.EnumType => s"[${et.sizeOf} x i8]" // opaque byte array for tagged union
     case SyslType.SliceType(_) => "%struct.slice"

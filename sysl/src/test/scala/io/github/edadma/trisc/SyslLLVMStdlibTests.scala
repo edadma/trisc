@@ -424,7 +424,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 9 // 6 + 3
   }
 
-  "std.encoding.hex decode_string" ignore {
+  "std.encoding.hex decode_string" in {
     llvmExitWithStd(
       """import std.encoding.hex.*
         |
@@ -434,7 +434,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 5
   }
 
-  "std.encoding.hex roundtrip" ignore {
+  "std.encoding.hex roundtrip" in {
     llvmOutputWithStd(
       """import std.encoding.hex.*
         |
