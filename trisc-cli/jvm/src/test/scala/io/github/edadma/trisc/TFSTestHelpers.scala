@@ -20,7 +20,7 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
   // Inline sbrk for TFS tests — simple bump allocator in high RAM
   private val sbrk_inline: String =
     """module posix.unistd
-      |var _brk: *byte = *byte(0xC0000)
+      |var _brk: *byte = *byte(0x600000)
       |sbrk(increment: int) -> *byte
       |    if increment == 0
       |        return _brk
@@ -57,11 +57,11 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
        |""".stripMargin
 
   private val tfsBoot: String =
-    s"""STDOUT = 0x100000
+    s"""STDOUT = ${Runtime.stdoutAddress}
        |
        |segment vectors
        |
-       |  dl 0x7FFF8
+       |  dl ${Runtime.stdoutAddress - 8}
        |  dl boot
        |  dl default_isr
        |  dl default_isr
@@ -196,7 +196,9 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
       maxInodes = 32,
       files = files,
     )
-    val mem = new Memory("Memory", ram, stdout, intc, timer, ramdisk)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, ramdisk, dma)
+    dma.mem = mem
     linked.load(mem)
     val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles }
     if _tracing then

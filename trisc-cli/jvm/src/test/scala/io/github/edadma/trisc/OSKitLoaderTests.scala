@@ -113,7 +113,7 @@ import oskit.apps.init.{init}
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(init, 0xC0000, 0xC0000, "init")
+          |    create_thread(init, 0x640000, 0x640000, "init")
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin,
@@ -154,7 +154,7 @@ import oskit.apps.init.{init}
       scheduledKeys: Seq[(Int, Int, Boolean, Int)],
       maxCycles: Int = 15000000,
       files: Map[String, Array[Byte]] = Map.empty,
-  ): (CPU, String) =
+  ): (CPU, String, RAM) =
     val linked = osLinked
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
@@ -175,7 +175,9 @@ import oskit.apps.init.{init}
       files = files,
     )
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)
-    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha, dma)
+    dma.mem = mem
     linked.load(mem)
     val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
     val keyInjector: CPU => Unit = cpu => {
@@ -190,13 +192,13 @@ import oskit.apps.init.{init}
     val cpu = new CPU(mem, ticks) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
-    (cpu, output.toString)
+    (cpu, output.toString, ram)
 
   "Loader: run hello from shell" in {
     val tofBytes = helloTofText.getBytes("UTF-8")
     info(s"Hello TOF size: ${tofBytes.length} bytes (${(tofBytes.length + 511) / 512} blocks)")
     val keys = typeString("hello\n", startTick = 500000)
-    val (_, output) = runWithKeys("", keys, maxCycles = 30000000,
+    val (_, output, _) = runWithKeys("", keys, maxCycles = 30000000,
       files = Map("/bin/hello" -> tofBytes))
     val cleaned = output.filterNot(_ == '\n')
     cleaned should include("Hello, world!")
@@ -204,7 +206,7 @@ import oskit.apps.init.{init}
 
   "Loader: unknown program shows not found" in {
     val keys = typeString("nosuchprog\n", startTick = 500000)
-    val (_, output) = runWithKeys("", keys)
+    val (_, output, _) = runWithKeys("", keys)
     output should include("not found")
   }
 
@@ -222,7 +224,7 @@ import oskit.apps.init.{init}
     val tofBytes = padded.getBytes("UTF-8")
     info(s"Padded TOF size: ${tofBytes.length} bytes (${(tofBytes.length + 511) / 512} blocks)")
     val keys = typeString("hello\n", startTick = 500000)
-    val (cpu, output) = runWithKeys("", keys, maxCycles = maxCycles,
+    val (cpu, output, _) = runWithKeys("", keys, maxCycles = maxCycles,
       files = Map("/bin/hello" -> tofBytes))
     info(s"CPU state: ${cpu.state}, cycles: ${cpu.cycles}, PC: 0x${cpu.pc.toHexString}")
     info(s"Output: ${output.take(200)}")
@@ -230,4 +232,47 @@ import oskit.apps.init.{init}
     cleaned should include("Hello, world!")
 
   "Loader: padded hello 62KB" in { testPaddedHello(62000) }
+
+  // Syscall trampoline without malloc/free stubs (for linking with real posix alloc).
+  private val syscallOnlyAsm =
+    """segment code
+      |global syscall, func
+      |syscall
+      |    ldd  r2, r7, r0
+      |    trap 0
+      |    jalr r0, r6
+      |""".stripMargin
+
+  // Compile hello with posix modules linked in (larger TOF, exercises loader with many DATA lines).
+  private def compileFatProgram(progSources: Map[String, String]): String =
+    val syscallTof = assemble(syscallOnlyAsm, relocatable = true)
+    val allSources = progSources + ("oskit/ulib/ulib" -> ulibSysl)
+    val driver = new SyslDriver
+    val result = driver.compile(allSources)
+    val codegen = new SyslTriscCodegen
+    val tofs = for unit <- result.units yield
+      val asm = codegen.generate(unit.typed)
+      assemble(asm, relocatable = true)
+    val syslTof = Linker.link(tofs, relocatable = true)
+    val linked = Linker.link(Seq(syscallTof, syslTof), progScript, 0)
+    linked.serialize
+
+  private lazy val fatHelloTofText: String =
+    compileFatProgram(Map(
+      "oskit/bin/hello/hello"    -> helloSysl,
+      "posix/string/string"     -> posixStringSysl,
+      "posix/ctype/ctype"       -> posixCtypeSysl,
+      "posix/stdlib/alloc"      -> posixAllocSysl,
+      "posix/unistd/sbrk"       -> sbrkSysl,
+    ))
+
+  "Loader: run fat hello (60KB with posix modules)" in {
+    val tofBytes = fatHelloTofText.getBytes("UTF-8")
+    info(s"Fat hello TOF size: ${tofBytes.length} bytes")
+    val keys = typeString("hello\n", startTick = 500000)
+    val (_, output, _) = runWithKeys("", keys, maxCycles = 100000000,
+      files = Map("/bin/hello" -> tofBytes))
+    val cleaned = output.filterNot(_ == '\n')
+    cleaned should include("Hello, world!")
+  }
 }

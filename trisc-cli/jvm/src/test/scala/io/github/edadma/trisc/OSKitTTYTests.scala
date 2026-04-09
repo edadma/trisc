@@ -38,7 +38,7 @@ class OSKitTTYTests extends OSKitTestHelpers {
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
       val name = "stdout"
-      val base: Long = 0x100000
+      val base: Long = Runtime.stdoutAddress
       val size: Long = 1
       def writeByte(addr: Long, data: Long): Unit = output += data.toChar
       override def loadByte(addr: Long, data: Long): Unit = ()
@@ -46,7 +46,9 @@ class OSKitTTYTests extends OSKitTestHelpers {
     val intc = new InterruptController(Runtime.intcAddress)
     val timer = new Timer(Runtime.timerAddress, intc, irq = 0)
     val kbd = new KeyboardDevice(Runtime.keyboardAddress, intc, irq = 1)
-    val mem = new Memory("Memory", new RAM(0, 0x100000), stdout, intc, timer, kbd)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
+    val mem = new Memory("Memory", new RAM(0, Runtime.stdoutAddress.toInt), stdout, intc, timer, kbd, dma)
+    dma.mem = mem
     linked.load(mem)
 
     // Pre-enqueue keyboard events

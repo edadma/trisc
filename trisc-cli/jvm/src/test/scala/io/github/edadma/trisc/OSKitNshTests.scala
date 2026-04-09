@@ -72,7 +72,7 @@ import oskit.apps.init.{init}
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(init, 0xC0000, 0xC0000, "init")
+          |    create_thread(init, 0x640000, 0x640000, "init")
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin,
@@ -122,7 +122,9 @@ import oskit.apps.init.{init}
       maxInodes = 32,
     )
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)
-    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha, dma)
+    dma.mem = mem
     linked.load(mem)
 
     val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
@@ -288,7 +290,9 @@ import oskit.apps.init.{init}
       maxInodes = 32,
     )
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)
-    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha, dma)
+    dma.mem = mem
     linked.load(mem)
 
     val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)

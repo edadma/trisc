@@ -23,9 +23,13 @@ RES lines advance the address without writing (BSS).
 The entry point is resolved from the ENTRY name by
 matching it against SYMBOL declarations.
 
+Zero-allocation design: all parsing works directly on the
+raw buffer using pointer arithmetic and byte comparisons.
+No string temporaries are created, so there is no heap
+pressure regardless of file size.
+
     module oskit.loader
 
-    import std.strings.{has_prefix, index_byte, substring, trim_space}
     import oskit.servers.{fs_open, fs_read}
     import posix.stdlib.{malloc, free}
 
@@ -35,20 +39,6 @@ Error codes returned when loading fails.
     val LOAD_ERR_READ      = -2
     val LOAD_ERR_FORMAT    = -3
     val LOAD_ERR_NO_ENTRY  = -4
-
-Parse a hex string to an integer. Returns -1 on error.
-
-    parse_hex(s: string) -> i64
-        val n = len(s)
-        if n == 0
-            return -1
-        var result: i64 = 0
-        for var i = 0; i < n; i++
-            val v = hex_val(s[i])
-            if v < 0
-                return -1
-            result = result * 16 + i64(v)
-        result
 
 Hex nibble value: '0'-'9' → 0-9, 'a'-'f'/'A'-'F' → 10-15.
 Returns -1 on invalid character.
@@ -65,24 +55,66 @@ Returns -1 on invalid character.
                 return ch - 'A' + 10
         -1
 
-Decode a hex string and write raw bytes directly to a
+Decode hex bytes from a raw buffer region and write to a
 memory address. Returns the number of bytes written,
-or -1 on error.
+or -1 on error. Works directly with buffer pointers —
+no string allocation.
 
-    hex_decode_to_mem(hex: string, addr: *byte) -> int
-        val n = len(hex)
-        if n % 2 != 0
+    hex_decode_buf(src: *byte, hex_len: int, dst: *byte) -> int
+        if hex_len % 2 != 0
             return -1
-        val pairs = n / 2
+        val pairs = hex_len / 2
         for var i = 0; i < pairs; i++
-            val hi = hex_val(hex[i * 2])
-            val lo = hex_val(hex[i * 2 + 1])
+            val hi = hex_val(src[i * 2])
+            val lo = hex_val(src[i * 2 + 1])
             if hi < 0
                 return -1
             if lo < 0
                 return -1
-            addr[i] = byte(hi * 16 + lo)
+            dst[i] = byte(hi * 16 + lo)
         pairs
+
+Parse a hex number from a raw buffer region. Returns -1
+on error. Works directly with buffer pointers.
+
+    parse_hex_buf(src: *byte, n: int) -> i64
+        if n == 0
+            return -1
+        var result: i64 = 0
+        for var i = 0; i < n; i++
+            val v = hex_val(src[i])
+            if v < 0
+                return -1
+            result = result * 16 + i64(v)
+        result
+
+Check if buffer region starts with a given prefix.
+
+    buf_has_prefix(p: *byte, plen: int, prefix: *byte, prefix_len: int) -> bool
+        if plen < prefix_len
+            return false
+        for var i = 0; i < prefix_len; i++
+            if p[i] != prefix[i]
+                return false
+        true
+
+Find a byte in a buffer region. Returns offset or -1.
+
+    buf_index_byte(p: *byte, n: int, ch: byte) -> int
+        for var i = 0; i < n; i++
+            if p[i] == ch
+                return i
+        -1
+
+Compare two buffer regions for equality.
+
+    buf_equal(a: *byte, alen: int, b: *byte, blen: int) -> bool
+        if alen != blen
+            return false
+        for var i = 0; i < alen; i++
+            if a[i] != b[i]
+                return false
+        true
 
 Parse a TOF file from a buffer and load it into memory.
 Returns the entry point address, or a negative error code.
@@ -90,6 +122,9 @@ Returns the entry point address, or a negative error code.
 The buffer contains the entire TOF file as text. We parse
 it line by line, tracking the current segment base address
 and a write cursor within each segment.
+
+Zero-allocation: all comparisons and hex decoding work
+directly on `buf` pointers. No strings are created.
 
     load_tof_from_buf(buf: *byte, buflen: int) -> i64
         var pos = 0
@@ -108,77 +143,151 @@ and a write cursor within each segment.
                     break
                 eol += 1
 
-            // Skip blank lines and comments without allocating strings
-            val line_len = eol - pos
-            if line_len > 0
-                // Skip leading whitespace to find first real char
-                var first = pos
-                while first < eol
-                    if buf[first] != ' '
-                        if buf[first] != '\t'
-                            break
-                    first += 1
-                // Skip comment lines (# ...) without string allocation
-                if first < eol
-                    if buf[first] == '#'
-                        pos = eol + 1
-                        continue
+            // Find first non-whitespace character
+            var first = pos
+            while first < eol
+                if buf[first] != ' '
+                    if buf[first] != '\t'
+                        break
+                first += 1
 
-                val line = trim_space(string(buf + pos, line_len))
+            val line_start = first
+            val line_len = eol - first
 
-                if len(line) > 0
-                    if !header_seen
-                        if !has_prefix(line, "TOF v")
-                            return LOAD_ERR_FORMAT
-                        header_seen = true
-                    else if has_prefix(line, "SEGMENT:")
-                        val rest = substring(line, 8, len(line))
-                        val comma = index_byte(rest, byte(','))
+            // Find last non-whitespace for trimmed end
+            var last = eol - 1
+            while last >= first
+                if buf[last] != ' '
+                    if buf[last] != '\t'
+                        break
+                last -= 1
+            val trimmed_len = last - first + 1
+
+            if trimmed_len > 0
+                val p = buf + first
+
+                // Skip comments
+                if p[0] == '#'
+                    pos = eol + 1
+                    continue
+
+                if !header_seen
+                    // Check for "TOF v"
+                    var tof_v: [5]byte
+                    tof_v[0] = byte('T')
+                    tof_v[1] = byte('O')
+                    tof_v[2] = byte('F')
+                    tof_v[3] = byte(' ')
+                    tof_v[4] = byte('v')
+                    if !buf_has_prefix(p, trimmed_len, &tof_v[0], 5)
+                        return LOAD_ERR_FORMAT
+                    header_seen = true
+                else if trimmed_len >= 8
+                    // Check "SEGMENT:"
+                    var seg_pfx: [8]byte
+                    seg_pfx[0] = byte('S')
+                    seg_pfx[1] = byte('E')
+                    seg_pfx[2] = byte('G')
+                    seg_pfx[3] = byte('M')
+                    seg_pfx[4] = byte('E')
+                    seg_pfx[5] = byte('N')
+                    seg_pfx[6] = byte('T')
+                    seg_pfx[7] = byte(':')
+                    if buf_has_prefix(p, trimmed_len, &seg_pfx[0], 8)
+                        // Find comma after segment name
+                        val rest = p + 8
+                        val rest_len = trimmed_len - 8
+                        val comma = buf_index_byte(rest, rest_len, byte(','))
                         if comma < 0
                             return LOAD_ERR_FORMAT
-                        val org_str = substring(rest, comma + 1, len(rest))
-                        seg_base = parse_hex(org_str)
+                        seg_base = parse_hex_buf(rest + comma + 1, rest_len - comma - 1)
                         if seg_base < 0
                             return LOAD_ERR_FORMAT
                         seg_cursor = seg_base
-                    else if has_prefix(line, "DATA:")
-                        val hex = substring(line, 5, len(line))
-                        val n = hex_decode_to_mem(hex, *byte(seg_cursor))
-                        if n < 0
-                            return LOAD_ERR_FORMAT
-                        seg_cursor = seg_cursor + i64(n)
-                    else if has_prefix(line, "RES:")
-                        val size_str = substring(line, 4, len(line))
-                        val sz64 = parse_hex(size_str)
-                        if sz64 < 0
-                            return LOAD_ERR_FORMAT
-                        val sz = int(sz64)
-                        val dest = *byte(seg_cursor)
-                        for var i = 0; i < sz; i++
-                            dest[i] = 0
-                        seg_cursor = seg_cursor + i64(sz)
-                    else if has_prefix(line, "ENTRY:")
-                        val rest = substring(line, 6, len(line))
-                        entry_name_len = len(rest)
-                        val p = *byte(rest)
-                        for var i = 0; i < entry_name_len; i++
-                            buf[buflen + i] = p[i]
-                        entry_name_start = buflen
-                    else if has_prefix(line, "SYMBOL:")
-                        val rest = substring(line, 7, len(line))
-                        val comma1 = index_byte(rest, byte(','))
-                        if comma1 >= 0
-                            if entry_name_start >= 0
-                                val sym_name = substring(rest, 0, comma1)
-                                val ename = string(buf + entry_name_start, entry_name_len)
-                                if sym_name == ename
-                                    val after1 = substring(rest, comma1 + 1, len(rest))
-                                    val comma2 = index_byte(after1, byte(','))
-                                    if comma2 >= 0
-                                        val off_str = substring(after1, 0, comma2)
-                                        val off = parse_hex(off_str)
-                                        if off >= 0
-                                            entry_addr = seg_base + off
+                        pos = eol + 1
+                        continue
+
+                if trimmed_len >= 5
+                    // Check "DATA:"
+                    var data_pfx: [5]byte
+                    data_pfx[0] = byte('D')
+                    data_pfx[1] = byte('A')
+                    data_pfx[2] = byte('T')
+                    data_pfx[3] = byte('A')
+                    data_pfx[4] = byte(':')
+                    if header_seen
+                        if buf_has_prefix(p, trimmed_len, &data_pfx[0], 5)
+                            val hex_start = p + 5
+                            val hex_len = trimmed_len - 5
+                            val n = hex_decode_buf(hex_start, hex_len, *byte(seg_cursor))
+                            if n < 0
+                                return LOAD_ERR_FORMAT
+                            seg_cursor = seg_cursor + i64(n)
+                            pos = eol + 1
+                            continue
+
+                if trimmed_len >= 4
+                    // Check "RES:"
+                    if header_seen
+                        if p[0] == 'R'
+                            if p[1] == 'E'
+                                if p[2] == 'S'
+                                    if p[3] == ':'
+                                        val sz64 = parse_hex_buf(p + 4, trimmed_len - 4)
+                                        if sz64 < 0
+                                            return LOAD_ERR_FORMAT
+                                        val sz = int(sz64)
+                                        val dest = *byte(seg_cursor)
+                                        for var i = 0; i < sz; i++
+                                            dest[i] = 0
+                                        seg_cursor = seg_cursor + i64(sz)
+                                        pos = eol + 1
+                                        continue
+
+                if trimmed_len >= 6
+                    // Check "ENTRY:"
+                    if header_seen
+                        if p[0] == 'E'
+                            if p[1] == 'N'
+                                if p[2] == 'T'
+                                    if p[3] == 'R'
+                                        if p[4] == 'Y'
+                                            if p[5] == ':'
+                                                val name_start = first + 6
+                                                val name_len = trimmed_len - 6
+                                                // Copy entry name past buffer end
+                                                for var i = 0; i < name_len; i++
+                                                    buf[buflen + i] = p[6 + i]
+                                                entry_name_start = buflen
+                                                entry_name_len = name_len
+                                                pos = eol + 1
+                                                continue
+
+                if trimmed_len >= 7
+                    // Check "SYMBOL:"
+                    if header_seen
+                        if p[0] == 'S'
+                            if p[1] == 'Y'
+                                if p[2] == 'M'
+                                    if p[3] == 'B'
+                                        if p[4] == 'O'
+                                            if p[5] == 'L'
+                                                if p[6] == ':'
+                                                    val rest = p + 7
+                                                    val rest_len = trimmed_len - 7
+                                                    val comma1 = buf_index_byte(rest, rest_len, byte(','))
+                                                    if comma1 >= 0
+                                                        if entry_name_start >= 0
+                                                            // Compare symbol name with entry name
+                                                            if buf_equal(rest, comma1, buf + entry_name_start, entry_name_len)
+                                                                // Parse offset after first comma
+                                                                val after1 = rest + comma1 + 1
+                                                                val after1_len = rest_len - comma1 - 1
+                                                                val comma2 = buf_index_byte(after1, after1_len, byte(','))
+                                                                if comma2 >= 0
+                                                                    val off = parse_hex_buf(after1, comma2)
+                                                                    if off >= 0
+                                                                        entry_addr = seg_base + off
 
             pos = eol + 1
 

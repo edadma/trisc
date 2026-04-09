@@ -75,7 +75,7 @@ import oskit.apps.init.{init}
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(init, 0xC0000, 0xC0000, "init")
+          |    create_thread(init, 0x640000, 0x640000, "init")
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin,
