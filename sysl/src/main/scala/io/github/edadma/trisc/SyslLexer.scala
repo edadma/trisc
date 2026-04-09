@@ -13,8 +13,8 @@ class SyslLexical extends IndentationLexical(
   blockCommentEnd = "*/",
 ) {
   reserved ++= List(
-    "if", "then", "elif", "else", "while", "do", "for", "in", "downTo", "step", "break", "continue", "return", "defer", "match", "_",
-    "import", "module", "private", "var", "val", "struct", "enum", "trait", "impl", "type", "interface", "sizeof", "asm", "extern", "endif", "new",
+    "if", "then", "elif", "else", "while", "do", "for", "in", "downTo", "step", "break", "continue", "return", "defer", "match", "is", "_",
+    "import", "module", "private", "var", "val", "def", "struct", "enum", "trait", "impl", "type", "interface", "sizeof", "asm", "extern", "endif", "new",
     "int", "char", "byte", "bool", "unit", "string",
     "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "double", "f64",
     "true", "false",
@@ -55,6 +55,9 @@ class SyslLexical extends IndentationLexical(
       case sign ~ digits => (sign :: digits).mkString
     }
 
+  private def escapeHexDigit: Parser[Char] =
+    elem("hex digit", c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))
+
   private def escapeChar: Parser[Char] =
     '\\' ~> (
       elem('n') ^^^ '\n' |
@@ -63,7 +66,10 @@ class SyslLexical extends IndentationLexical(
       elem('0') ^^^ '\u0000' |
       elem('\\') ^^^ '\\' |
       elem('\'') ^^^ '\'' |
-      elem('"') ^^^ '"'
+      elem('"') ^^^ '"' |
+      elem('x') ~> escapeHexDigit ~ escapeHexDigit ^^ { case hi ~ lo =>
+        Integer.parseInt(s"$hi$lo", 16).toChar
+      }
     )
 
   // Interpolated string: s"..." — uses "s:" prefix in token value to mark it
