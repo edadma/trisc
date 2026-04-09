@@ -20,14 +20,14 @@ Counting
 `popcount(x)` returns the number of set bits in `x`.
 Uses the parallel bit-count algorithm.
 
-    popcount(x: i64) -> int
+    popcount(x: u64) -> int
         var v = x
-        v = (v & 0x5555555555555555i64) + ((v >> 1i64) & 0x5555555555555555i64)
-        v = (v & 0x3333333333333333i64) + ((v >> 2i64) & 0x3333333333333333i64)
-        v = (v & 0x0f0f0f0f0f0f0f0fi64) + ((v >> 4i64) & 0x0f0f0f0f0f0f0f0fi64)
-        v = (v & 0x00ff00ff00ff00ffi64) + ((v >> 8i64) & 0x00ff00ff00ff00ffi64)
-        v = (v & 0x0000ffff0000ffffi64) + ((v >> 16i64) & 0x0000ffff0000ffffi64)
-        v = (v & 0x00000000ffffffffi64) + ((v >> 32i64) & 0x00000000ffffffffi64)
+        v = (v & 0x5555555555555555u64) + ((v >> 1u64) & 0x5555555555555555u64)
+        v = (v & 0x3333333333333333u64) + ((v >> 2u64) & 0x3333333333333333u64)
+        v = (v & 0x0f0f0f0f0f0f0f0fu64) + ((v >> 4u64) & 0x0f0f0f0f0f0f0f0fu64)
+        v = (v & 0x00ff00ff00ff00ffu64) + ((v >> 8u64) & 0x00ff00ff00ff00ffu64)
+        v = (v & 0x0000ffff0000ffffu64) + ((v >> 16u64) & 0x0000ffff0000ffffu64)
+        v = (v & 0x00000000ffffffffu64) + ((v >> 32u64) & 0x00000000ffffffffu64)
         return int(v)
 
 ### popcount32
@@ -50,28 +50,28 @@ Leading and trailing zeros
 `clz(x)` returns the count of leading zero bits in a
 64-bit value. Returns 64 if `x` is 0.
 
-    clz(x: i64) -> int
-        if x == 0i64 then return 64
+    clz(x: u64) -> int
+        if x == 0u64 then return 64
 
         var n = 0
         var v = x
 
-        if (v & 0xffffffff00000000i64) == 0i64
+        if (v & 0xffffffff00000000u64) == 0u64
             n += 32
-            v = v << 32i64
-        if (v & 0xffff000000000000i64) == 0i64
+            v = v << 32u64
+        if (v & 0xffff000000000000u64) == 0u64
             n += 16
-            v = v << 16i64
-        if (v & 0xff00000000000000i64) == 0i64
+            v = v << 16u64
+        if (v & 0xff00000000000000u64) == 0u64
             n += 8
-            v = v << 8i64
-        if (v & 0xf000000000000000i64) == 0i64
+            v = v << 8u64
+        if (v & 0xf000000000000000u64) == 0u64
             n += 4
-            v = v << 4i64
-        if (v & 0xc000000000000000i64) == 0i64
+            v = v << 4u64
+        if (v & 0xc000000000000000u64) == 0u64
             n += 2
-            v = v << 2i64
-        if (v & 0x8000000000000000i64) == 0i64
+            v = v << 2u64
+        if (v & 0x8000000000000000u64) == 0u64
             n += 1
 
         return n
@@ -106,28 +106,28 @@ Leading and trailing zeros
 `ctz(x)` returns the count of trailing zero bits in a
 64-bit value. Returns 64 if `x` is 0.
 
-    ctz(x: i64) -> int
-        if x == 0i64 then return 64
+    ctz(x: u64) -> int
+        if x == 0u64 then return 64
 
         var n = 0
         var v = x
 
-        if (v & 0x00000000ffffffffi64) == 0i64
+        if (v & 0x00000000ffffffffu64) == 0u64
             n += 32
-            v = v >> 32i64
-        if (v & 0x000000000000ffffi64) == 0i64
+            v = v >> 32u64
+        if (v & 0x000000000000ffffu64) == 0u64
             n += 16
-            v = v >> 16i64
-        if (v & 0x00000000000000ffi64) == 0i64
+            v = v >> 16u64
+        if (v & 0x00000000000000ffu64) == 0u64
             n += 8
-            v = v >> 8i64
-        if (v & 0x000000000000000fi64) == 0i64
+            v = v >> 8u64
+        if (v & 0x000000000000000fu64) == 0u64
             n += 4
-            v = v >> 4i64
-        if (v & 0x0000000000000003i64) == 0i64
+            v = v >> 4u64
+        if (v & 0x0000000000000003u64) == 0u64
             n += 2
-            v = v >> 2i64
-        if (v & 0x0000000000000001i64) == 0i64
+            v = v >> 2u64
+        if (v & 0x0000000000000001u64) == 0u64
             n += 1
 
         return n
@@ -166,7 +166,7 @@ Bit length
 `bit_len(x)` returns the minimum number of bits needed
 to represent `x`. Returns 0 if `x` is 0.
 
-    bit_len(x: i64) -> int = 64 - clz(x)
+    bit_len(x: u64) -> int = 64 - clz(x)
 
 ### bit_len32
 
@@ -180,14 +180,14 @@ Rotation
 
 `rotate_left(x, k)` rotates `x` left by `k` bits (64-bit).
 
-    rotate_left(x: i64, k: int) -> i64
-        val s = k & 63
-        if s == 0 then return x
-        return (x << i64(s)) | ((x >> i64(64 - s)) & ((1i64 << i64(s)) - 1i64))
+    rotate_left(x: u64, k: int) -> u64
+        val s = u64(k & 63)
+        if s == 0u64 then return x
+        return (x << s) | (x >> (64u64 - s))
 
 ### rotate_right
 
-    rotate_right(x: i64, k: int) -> i64 = rotate_left(x, 64 - (k & 63))
+    rotate_right(x: u64, k: int) -> u64 = rotate_left(x, 64 - (k & 63))
 
 ### rotate_left32
 
@@ -242,7 +242,7 @@ that is >= x. Returns 1 for x <= 1.
 
     next_power_of_two(x: i64) -> i64
         if x <= 1i64 then return 1i64
-        return 1i64 << i64(bit_len(x - 1i64))
+        return 1i64 << i64(bit_len(u64(x - 1i64)))
 
 
 Tests
@@ -253,23 +253,23 @@ Tests
 
     #test
     test_popcount_zero() -> unit
-        assert(popcount(0i64) == 0, "0")
+        assert(popcount(0u64) == 0, "0")
 
     #test
     test_popcount_one() -> unit
-        assert(popcount(1i64) == 1, "1")
+        assert(popcount(1u64) == 1, "1")
 
     #test
     test_popcount_all_ones_byte() -> unit
-        assert(popcount(0xffi64) == 8, "0xff")
+        assert(popcount(0xffu64) == 8, "0xff")
 
     #test
     test_popcount_alternating() -> unit
-        assert(popcount(0x5555555555555555i64) == 32, "alternating")
+        assert(popcount(0x5555555555555555u64) == 32, "alternating")
 
     #test
     test_popcount_sparse() -> unit
-        assert(popcount(0x8000000000000001i64) == 2, "endpoints")
+        assert(popcount(0x8000000000000001u64) == 2, "endpoints")
 
     #test
     test_popcount32_basic() -> unit
@@ -280,19 +280,19 @@ Tests
 
     #test
     test_clz_zero() -> unit
-        assert(clz(0i64) == 64, "clz(0)")
+        assert(clz(0u64) == 64, "clz(0)")
 
     #test
     test_clz_one() -> unit
-        assert(clz(1i64) == 63, "clz(1)")
+        assert(clz(1u64) == 63, "clz(1)")
 
     #test
     test_clz_high_bit() -> unit
-        assert(clz(0x4000000000000000i64) == 1, "clz high")
+        assert(clz(0x4000000000000000u64) == 1, "clz high")
 
     #test
     test_clz_byte() -> unit
-        assert(clz(0x80i64) == 56, "clz 0x80")
+        assert(clz(0x80u64) == 56, "clz 0x80")
 
     #test
     test_clz32_zero() -> unit
@@ -311,19 +311,19 @@ Tests
 
     #test
     test_ctz_zero() -> unit
-        assert(ctz(0i64) == 64, "ctz(0)")
+        assert(ctz(0u64) == 64, "ctz(0)")
 
     #test
     test_ctz_one() -> unit
-        assert(ctz(1i64) == 0, "ctz(1)")
+        assert(ctz(1u64) == 0, "ctz(1)")
 
     #test
     test_ctz_power_of_two() -> unit
-        assert(ctz(0x100i64) == 8, "ctz 0x100")
+        assert(ctz(0x100u64) == 8, "ctz 0x100")
 
     #test
     test_ctz_high_bit() -> unit
-        assert(ctz(0x4000000000000000i64) == 62, "ctz high")
+        assert(ctz(0x4000000000000000u64) == 62, "ctz high")
 
     #test
     test_ctz32_basic() -> unit
@@ -338,19 +338,19 @@ Tests
 
     #test
     test_bit_len_zero() -> unit
-        assert(bit_len(0i64) == 0, "bit_len(0)")
+        assert(bit_len(0u64) == 0, "bit_len(0)")
 
     #test
     test_bit_len_one() -> unit
-        assert(bit_len(1i64) == 1, "bit_len(1)")
+        assert(bit_len(1u64) == 1, "bit_len(1)")
 
     #test
     test_bit_len_255() -> unit
-        assert(bit_len(255i64) == 8, "bit_len(255)")
+        assert(bit_len(255u64) == 8, "bit_len(255)")
 
     #test
     test_bit_len_256() -> unit
-        assert(bit_len(256i64) == 9, "bit_len(256)")
+        assert(bit_len(256u64) == 9, "bit_len(256)")
 
     #test
     test_bit_len32() -> unit
@@ -433,7 +433,7 @@ rather than a linear scan.
 **Parallel popcount.** The classic divide-and-conquer bit count
 algorithm, operating on pairs → nibbles → bytes → words.
 
-**No 64-bit rotate via shifts.** The 64-bit `rotate_left` masks
-the shifted-out bits explicitly because i64 arithmetic right
-shift sign-extends, which would corrupt the rotated bits.
-The u32 version doesn't need this since u32 shifts are logical.
+**Unsigned 64-bit operations.** The 64-bit popcount, clz, ctz,
+bit_len, and rotate functions use `u64` since they operate on
+bit patterns, not signed values. The power-of-two functions
+keep `i64` since they deal with logical magnitudes.
