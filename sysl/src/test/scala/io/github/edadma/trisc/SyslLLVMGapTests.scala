@@ -201,4 +201,49 @@ class SyslLLVMGapTests extends SyslLLVMTestHelpers {
         |main() -> int = check(20)
         |""".stripMargin) shouldBe 42
   }
+
+  // ===== Tuple type disambiguation =====
+
+  "two different 2-tuples in same function" in {
+    llvmExit(
+      """main() -> int
+        |    val a = (42, true)
+        |    val b = (10, 20)
+        |    if a.1 then a.0 + b.0 + b.1 else 0
+        |""".stripMargin) shouldBe 72
+  }
+
+  "function returning different tuple types" in {
+    llvmExit(
+      """pair_int() -> (int, int) = (10, 32)
+        |pair_bool() -> (int, bool) = (42, true)
+        |
+        |main() -> int
+        |    val a, b = pair_int()
+        |    val c, d = pair_bool()
+        |    if d then a + b + c else 0
+        |""".stripMargin) shouldBe 84
+  }
+
+  "tuple with string field" in {
+    llvmOutput(
+      """make() -> (string, int) = ("hello", 5)
+        |
+        |main()
+        |    val s, n = make()
+        |    puts(s)
+        |""".stripMargin) shouldBe "hello"
+  }
+
+  "cross-function tuple type disambiguation" in {
+    llvmExit(
+      """make_pair() -> (int, bool) = (42, true)
+        |make_nums() -> (int, int) = (10, 20)
+        |
+        |main() -> int
+        |    val x, ok = make_pair()
+        |    val a, b = make_nums()
+        |    if ok then x + a + b else 0
+        |""".stripMargin) shouldBe 72
+  }
 }
