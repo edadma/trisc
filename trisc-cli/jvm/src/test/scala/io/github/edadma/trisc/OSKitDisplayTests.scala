@@ -62,6 +62,7 @@ class OSKitDisplayTests extends OSKitTestHelpers {
       "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
       "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "std/debug/debug" -> debugSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl,
       "oskit/drivers/mouse/mouse" -> mouseSysl, "oskit/drivers/display/display" -> displaySysl,
+      "posix/unistd/sbrk" -> sbrkSysl, "posix/stdlib/alloc" -> posixAllocSysl, "posix/string/string" -> posixStringSysl, "posix/ctype/ctype" -> posixCtypeSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
