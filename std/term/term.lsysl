@@ -1,0 +1,325 @@
+std.term — Terminal escape sequences
+=====================================
+
+ANSI/VT100 escape sequence helpers for terminal control.
+Returns constant strings or builds parameterized escape
+sequences. No terminal state is tracked.
+
+Dependencies: std.builder, std.strconv.
+
+
+    module std.term
+
+    import std.debug.{assert}
+    import std.builder.{StrBuilder, new_builder_cap}
+    import std.strconv.{format_int}
+
+
+Constants
+---------
+
+    val ESC = "\x1b"
+
+Color constants (standard 8-color ANSI).
+
+    val BLACK   = 0
+    val RED     = 1
+    val GREEN   = 2
+    val YELLOW  = 3
+    val BLUE    = 4
+    val MAGENTA = 5
+    val CYAN    = 6
+    val WHITE   = 7
+
+Cursor visibility.
+
+    val HIDE_CURSOR    = "\x1b[?25l"
+    val SHOW_CURSOR    = "\x1b[?25h"
+    val SAVE_CURSOR    = "\x1b[s"
+    val RESTORE_CURSOR = "\x1b[u"
+
+Screen clearing.
+
+    val CLEAR        = "\x1b[2J"
+    val CLEAR_LINE   = "\x1b[2K"
+    val CLEAR_TO_EOL = "\x1b[K"
+    val CLEAR_TO_EOS = "\x1b[J"
+
+Style modifiers.
+
+    val BOLD      = "\x1b[1m"
+    val DIM       = "\x1b[2m"
+    val ITALIC    = "\x1b[3m"
+    val UNDERLINE = "\x1b[4m"
+    val BLINK     = "\x1b[5m"
+    val REVERSE   = "\x1b[7m"
+    val RESET     = "\x1b[0m"
+
+Alternate screen.
+
+    val ENTER_ALT_SCREEN = "\x1b[?1049h"
+    val LEAVE_ALT_SCREEN = "\x1b[?1049l"
+
+
+Parameterized sequences
+-----------------------
+
+These take arguments and build the escape string.
+
+### move_to
+
+`move_to(row, col)` moves the cursor to the given
+1-based row and column.
+
+    move_to(row: int, col: int) -> string
+        var b = new_builder_cap(16)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(row))
+        b.write(";")
+        b.write(format_int(col))
+        b.write("H")
+        return b.to_str()
+
+### move_up
+
+    move_up(n: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(n))
+        b.write("A")
+        return b.to_str()
+
+### move_down
+
+    move_down(n: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(n))
+        b.write("B")
+        return b.to_str()
+
+### move_right
+
+    move_right(n: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(n))
+        b.write("C")
+        return b.to_str()
+
+### move_left
+
+    move_left(n: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(n))
+        b.write("D")
+        return b.to_str()
+
+### set_fg
+
+`set_fg(color)` sets the foreground color (0-7).
+
+    set_fg(color: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(30 + color))
+        b.write("m")
+        return b.to_str()
+
+### set_bg
+
+`set_bg(color)` sets the background color (0-7).
+
+    set_bg(color: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(40 + color))
+        b.write("m")
+        return b.to_str()
+
+### set_bright_fg
+
+    set_bright_fg(color: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(90 + color))
+        b.write("m")
+        return b.to_str()
+
+### set_bright_bg
+
+    set_bright_bg(color: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(100 + color))
+        b.write("m")
+        return b.to_str()
+
+### scroll_up
+
+    scroll_up(n: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(n))
+        b.write("S")
+        return b.to_str()
+
+### scroll_down
+
+    scroll_down(n: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(n))
+        b.write("T")
+        return b.to_str()
+
+
+Tests
+=====
+
+### Cursor movement
+
+    #test
+    test_move_to() -> unit
+        assert(move_to(5, 10) == "\x1b[5;10H", "move 5,10")
+
+    #test
+    test_move_to_origin() -> unit
+        assert(move_to(1, 1) == "\x1b[1;1H", "move 1,1")
+
+    #test
+    test_move_up() -> unit
+        assert(move_up(3) == "\x1b[3A", "up 3")
+
+    #test
+    test_move_down() -> unit
+        assert(move_down(1) == "\x1b[1B", "down 1")
+
+    #test
+    test_move_right() -> unit
+        assert(move_right(5) == "\x1b[5C", "right 5")
+
+    #test
+    test_move_left() -> unit
+        assert(move_left(2) == "\x1b[2D", "left 2")
+
+### Constants
+
+    #test
+    test_clear() -> unit
+        assert(CLEAR == "\x1b[2J", "clear screen")
+
+    #test
+    test_clear_line() -> unit
+        assert(CLEAR_LINE == "\x1b[2K", "clear line")
+
+    #test
+    test_clear_to_eol() -> unit
+        assert(CLEAR_TO_EOL == "\x1b[K", "clear to eol")
+
+    #test
+    test_bold() -> unit
+        assert(BOLD == "\x1b[1m", "bold")
+
+    #test
+    test_underline() -> unit
+        assert(UNDERLINE == "\x1b[4m", "underline")
+
+    #test
+    test_reset() -> unit
+        assert(RESET == "\x1b[0m", "reset")
+
+    #test
+    test_hide_cursor() -> unit
+        assert(HIDE_CURSOR == "\x1b[?25l", "hide")
+
+    #test
+    test_show_cursor() -> unit
+        assert(SHOW_CURSOR == "\x1b[?25h", "show")
+
+    #test
+    test_enter_alt_screen() -> unit
+        assert(ENTER_ALT_SCREEN == "\x1b[?1049h", "enter alt")
+
+    #test
+    test_leave_alt_screen() -> unit
+        assert(LEAVE_ALT_SCREEN == "\x1b[?1049l", "leave alt")
+
+### Colors
+
+    #test
+    test_set_fg_red() -> unit
+        assert(set_fg(RED) == "\x1b[31m", "red fg")
+
+    #test
+    test_set_fg_green() -> unit
+        assert(set_fg(GREEN) == "\x1b[32m", "green fg")
+
+    #test
+    test_set_bg_blue() -> unit
+        assert(set_bg(BLUE) == "\x1b[44m", "blue bg")
+
+    #test
+    test_bright_fg() -> unit
+        assert(set_bright_fg(WHITE) == "\x1b[97m", "bright white")
+
+### Scrolling
+
+    #test
+    test_scroll_up() -> unit
+        assert(scroll_up(2) == "\x1b[2S", "scroll up 2")
+
+### Composability
+
+    #test
+    test_composed_builder() -> unit
+        var b = new_builder_cap(32)
+        b.write(move_to(1, 1))
+        b.write(CLEAR)
+        b.write(set_fg(RED))
+        b.write(BOLD)
+        val s = b.to_str()
+        // ESC[1;1H + ESC[2J + ESC[31m + ESC[1m = 6+4+5+4 = 19
+        assert(len(s) == 19, s"composed len: ${len(s)}")
+
+    #test
+    test_composed_interpolation() -> unit
+        val s = s"$BOLD$UNDERLINE"
+        // ESC[1m + ESC[4m = 4+4 = 8
+        assert(len(s) == 8, s"interpolated len: ${len(s)}")
+
+    #test
+    test_composed_with_text() -> unit
+        val s = s"${set_fg(RED)}${BOLD}hello$RESET"
+        // ESC[31m + ESC[1m + "hello" + ESC[0m = 5+4+5+4 = 18
+        assert(len(s) == 18, s"text len: ${len(s)}")
+
+
+Design notes
+------------
+
+**Constants vs functions.** Fixed escape sequences (clear,
+bold, reset, etc.) are `val` constants — no function call
+overhead. Only parameterized sequences (move_to, set_fg,
+scroll_up) are functions.
+
+**Hex escape in ESC constant.** `val ESC = "\x1b"` uses
+the `\xNN` hex escape syntax in string literals to produce
+the ESC byte (0x1b = 27).
+
+**8-color model.** The basic 8 ANSI colors (0-7) cover
+all terminals. 256-color and true-color (24-bit) support
+can be added later with `set_fg_256(n)` and
+`set_fg_rgb(r, g, b)`.

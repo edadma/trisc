@@ -5,27 +5,39 @@ import org.scalatest.matchers.should.Matchers
 
 class SyslStdlibTests extends AnyFreeSpec with Matchers {
 
+  private val testFileOps: FileOps = new FileOps:
+    def readFile(path: String): String = scala.io.Source.fromFile(path).mkString
+    def writeFile(path: String, content: String): Unit = java.nio.file.Files.writeString(java.nio.file.Paths.get(path), content)
+    def exists(path: String): Boolean = java.io.File(path).exists()
+    def isDirectory(path: String): Boolean = java.io.File(path).isDirectory
+    def listFiles(path: String): Seq[String] = java.io.File(path).listFiles().map(_.getPath).toSeq
+    def fileName(path: String): String = java.io.File(path).getName
+    def mkdirs(path: String): Unit = java.io.File(path).mkdirs()
+    def joinPath(dir: String, name: String): String = java.nio.file.Paths.get(dir, name).toString
+
+  // Minimal tangler: extract 4-space-indented code blocks from literate source
+  private val simpleTangler: String => String = raw =>
+    raw.linesIterator
+      .filter(_.startsWith("    "))
+      .map(_.drop(4))
+      .mkString("\n")
+
   // Helper: run a single-file program with stdlib support
   private def run(source: String): (Long, String) =
     val buf = new StringBuilder
-    val parser = new SyslParser
-    val Right(ast) = parser.parseProgram(source): @unchecked
-    val stdlibImports = ast.decls.collect {
-      case ImportDeclAST(path, _) if SyslStdlib.modules.contains(path) => path
-    }.toSet
-    val analyzer = new SyslAnalyzer
-    for mod <- stdlibImports do
-      analyzer.registerImport(SyslStdlib.meta(mod))
-    val typed = analyzer.analyze(ast)
+    val driver = new SyslDriver(Some(testFileOps), List("."), tangler = Some(simpleTangler))
+    val result = driver.compile(Map("main" -> source))
+    val stdlibImports = driver.collectStdlibImports(result.units)
+    val merged = TProgram(result.units.flatMap(_.typed.decls))
     val interp = new SyslInterpreter(s => buf ++= s)
     val ctx = new SyslStdlib.StdlibContext(output = s => buf ++= s)
     for mod <- stdlibImports do
       interp.registerBuiltins(SyslStdlib.builtins(mod, ctx))
     if stdlibImports.contains("std/io") then
       for (name, value) <- SyslStdlib.ioConstants do
-        interp.registerGlobal(name, value)
-    val result = interp.run(typed)
-    (result, buf.toString)
+        interp.registerGlobal(s"std_io__$name", value)
+    val value = interp.run(merged)
+    (value, buf.toString)
 
   private def eval(source: String): Long = run(source)._1
   private def output(source: String): String = run(source)._2
@@ -33,7 +45,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
   // Helper: run with multi-file driver
   private def runMulti(sources: Map[String, String]): (Long, String) =
     val buf = new StringBuilder
-    val driver = new SyslDriver
+    val driver = new SyslDriver(Some(testFileOps), List("."), tangler = Some(simpleTangler))
     val result = driver.compile(sources)
     val stdlibImports = driver.collectStdlibImports(result.units)
     val merged = TProgram(result.units.flatMap(_.typed.decls))
@@ -43,7 +55,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
       interp.registerBuiltins(SyslStdlib.builtins(mod, ctx))
     if stdlibImports.contains("std/io") then
       for (name, value) <- SyslStdlib.ioConstants do
-        interp.registerGlobal(name, value)
+        interp.registerGlobal(s"std_io__$name", value)
     val value = interp.run(merged)
     (value, buf.toString)
 
@@ -382,7 +394,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
       output(
         """import std.io.*
           |main() -> int
-          |    write_string(STDOUT, "hello io")
+          |    write_str(STDOUT, "hello io")
           |    0
           |""".stripMargin
       ) shouldBe "hello io"
@@ -391,7 +403,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
     "write_string returns byte count" in {
       eval(
         """import std.io.*
-          |main() -> int = write_string(STDOUT, "hello")
+          |main() -> int = write_str(STDOUT, "hello")
           |""".stripMargin
       ) shouldBe 5
     }
@@ -400,7 +412,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
       output(
         """import std.io.*
           |main() -> int
-          |    write_string(STDERR, "err msg")
+          |    write_str(STDERR, "err msg")
           |    0
           |""".stripMargin
       ) shouldBe "err msg"
@@ -416,7 +428,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
           |    fd = open(path, O_CREATE + O_WRONLY + O_TRUNC)
           |    if fd < 0
           |        return 1
-          |    write_string(fd, "hello from sysl")
+          |    write_str(fd, "hello from sysl")
           |    close(fd)
           |    content = read_file(path)
           |    puts(content)
@@ -905,7 +917,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
           |main() -> int
           |    found = int(exists("."))
           |    msg = concat("exists=", from_int(i64(found)))
-          |    write_string(STDOUT, msg)
+          |    write_str(STDOUT, msg)
           |    0
           |""".stripMargin
       ) shouldBe "exists=1"

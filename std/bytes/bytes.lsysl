@@ -461,13 +461,13 @@ Tests
 ### as_bytes round-trip
 
     #test
-    test_as_bytes_roundtrip() -> void
+    test_as_bytes_roundtrip() -> unit
         val b = as_bytes("hello")
         assert(string(b) == "hello", "round-trip")
         assert(len(b) == 5, "length")
 
     #test
-    test_as_bytes_empty() -> void
+    test_as_bytes_empty() -> unit
         val b = as_bytes("")
         assert(len(b) == 0, "empty")
 
@@ -475,97 +475,97 @@ Tests
 ### has_prefix / has_suffix
 
     #test
-    test_bytes_has_prefix_yes() -> void
+    test_bytes_has_prefix_yes() -> unit
         assert(has_prefix(as_bytes("hello world"), as_bytes("hello")), "match")
 
     #test
-    test_bytes_has_prefix_no() -> void
+    test_bytes_has_prefix_no() -> unit
         assert(!has_prefix(as_bytes("hello"), as_bytes("world")), "no match")
 
     #test
-    test_bytes_has_prefix_empty() -> void
+    test_bytes_has_prefix_empty() -> unit
         assert(has_prefix(as_bytes("hi"), as_bytes("")), "empty prefix")
 
     #test
-    test_bytes_has_prefix_too_long() -> void
+    test_bytes_has_prefix_too_long() -> unit
         assert(!has_prefix(as_bytes("hi"), as_bytes("hello")), "longer prefix")
 
     #test
-    test_bytes_has_suffix_yes() -> void
+    test_bytes_has_suffix_yes() -> unit
         assert(has_suffix(as_bytes("hello world"), as_bytes("world")), "trailing")
 
     #test
-    test_bytes_has_suffix_no() -> void
+    test_bytes_has_suffix_no() -> unit
         assert(!has_suffix(as_bytes("hello"), as_bytes("world")), "no match")
 
 
 ### index / last_index / contains
 
     #test
-    test_bytes_index_found() -> void
+    test_bytes_index_found() -> unit
         assert(index(as_bytes("hello world"), as_bytes("world")) == 6, "at 6")
 
     #test
-    test_bytes_index_not_found() -> void
+    test_bytes_index_not_found() -> unit
         assert(index(as_bytes("hello"), as_bytes("xyz")) == -1, "not found")
 
     #test
-    test_bytes_last_index_repeated() -> void
+    test_bytes_last_index_repeated() -> unit
         assert(last_index(as_bytes("banana"), as_bytes("an")) == 3, "last")
 
     #test
-    test_bytes_contains_yes() -> void
+    test_bytes_contains_yes() -> unit
         assert(contains(as_bytes("hello world"), as_bytes("world")), "yes")
 
     #test
-    test_bytes_contains_no() -> void
+    test_bytes_contains_no() -> unit
         assert(!contains(as_bytes("hello"), as_bytes("xyz")), "no")
 
 
 ### count
 
     #test
-    test_bytes_count_basic() -> void
+    test_bytes_count_basic() -> unit
         assert(count(as_bytes("banana"), as_bytes("an")) == 2, "non-overlap")
 
     #test
-    test_bytes_count_not_found() -> void
+    test_bytes_count_not_found() -> unit
         assert(count(as_bytes("banana"), as_bytes("xyz")) == 0, "zero")
 
     #test
-    test_bytes_count_empty_sub() -> void
+    test_bytes_count_empty_sub() -> unit
         assert(count(as_bytes("abc"), as_bytes("")) == 4, "len+1")
 
 
 ### index_byte / last_index_byte
 
     #test
-    test_bytes_index_byte_found() -> void
+    test_bytes_index_byte_found() -> unit
         assert(index_byte(as_bytes("hello"), byte('l')) == 2, "first l")
 
     #test
-    test_bytes_index_byte_not_found() -> void
+    test_bytes_index_byte_not_found() -> unit
         assert(index_byte(as_bytes("hello"), byte('z')) == -1, "missing")
 
     #test
-    test_bytes_last_index_byte() -> void
+    test_bytes_last_index_byte() -> unit
         assert(last_index_byte(as_bytes("hello"), byte('l')) == 3, "last l")
 
 
 ### subslice
 
     #test
-    test_bytes_subslice_basic() -> void
+    test_bytes_subslice_basic() -> unit
         val b = subslice(as_bytes("hello world"), 6, 11)
         assert(string(b) == "world", "tail")
 
     #test
-    test_bytes_subslice_empty() -> void
+    test_bytes_subslice_empty() -> unit
         val b = subslice(as_bytes("hello"), 2, 2)
         assert(len(b) == 0, "empty range")
 
     #test
-    test_bytes_subslice_full() -> void
+    test_bytes_subslice_full() -> unit
         val b = subslice(as_bytes("hi"), 0, 2)
         assert(string(b) == "hi", "full")
 
@@ -573,82 +573,82 @@ Tests
 ### trim variants
 
     #test
-    test_bytes_trim_space() -> void
+    test_bytes_trim_space() -> unit
         assert(string(trim_space(as_bytes("  hello  "))) == "hello", "both sides")
 
     #test
-    test_bytes_trim_space_mixed() -> void
+    test_bytes_trim_space_mixed() -> unit
         assert(string(trim_space(as_bytes("\t\nhi\r\n"))) == "hi", "mixed ws")
 
     #test
-    test_bytes_trim_space_none() -> void
+    test_bytes_trim_space_none() -> unit
         assert(string(trim_space(as_bytes("hello"))) == "hello", "no change")
 
     #test
-    test_bytes_trim_space_all() -> void
+    test_bytes_trim_space_all() -> unit
         assert(len(trim_space(as_bytes("   "))) == 0, "becomes empty")
 
     #test
-    test_bytes_trim_left() -> void
+    test_bytes_trim_left() -> unit
         assert(string(trim_left(as_bytes("xxhelloxx"), as_bytes("x"))) == "helloxx", "left only")
 
     #test
-    test_bytes_trim_right() -> void
+    test_bytes_trim_right() -> unit
         assert(string(trim_right(as_bytes("xxhelloxx"), as_bytes("x"))) == "xxhello", "right only")
 
     #test
-    test_bytes_trim_both() -> void
+    test_bytes_trim_both() -> unit
         assert(string(trim(as_bytes("xxhelloxx"), as_bytes("x"))) == "hello", "both")
 
 
 ### case conversion
 
     #test
-    test_bytes_to_upper() -> void
+    test_bytes_to_upper() -> unit
         assert(string(to_upper(as_bytes("hello"))) == "HELLO", "upper")
 
     #test
-    test_bytes_to_upper_mixed() -> void
+    test_bytes_to_upper_mixed() -> unit
         assert(string(to_upper(as_bytes("Hi, World!"))) == "HI, WORLD!", "mixed")
 
     #test
-    test_bytes_to_lower() -> void
+    test_bytes_to_lower() -> unit
         assert(string(to_lower(as_bytes("HELLO"))) == "hello", "lower")
 
     #test
-    test_bytes_to_lower_mixed() -> void
+    test_bytes_to_lower_mixed() -> unit
         assert(string(to_lower(as_bytes("Hi, World!"))) == "hi, world!", "mixed")
 
 
 ### replace_all
 
     #test
-    test_bytes_replace_all_basic() -> void
+    test_bytes_replace_all_basic() -> unit
         val r = replace_all(as_bytes("hello world"), as_bytes("world"), as_bytes("there"))
         assert(string(r) == "hello there", "one")
 
     #test
-    test_bytes_replace_all_multiple() -> void
+    test_bytes_replace_all_multiple() -> unit
         val r = replace_all(as_bytes("aaa"), as_bytes("a"), as_bytes("b"))
         assert(string(r) == "bbb", "each")
 
     #test
-    test_bytes_replace_all_no_match() -> void
+    test_bytes_replace_all_no_match() -> unit
         val r = replace_all(as_bytes("hello"), as_bytes("xyz"), as_bytes("abc"))
         assert(string(r) == "hello", "untouched")
 
     #test
-    test_bytes_replace_all_longer() -> void
+    test_bytes_replace_all_longer() -> unit
         val r = replace_all(as_bytes("hi hi"), as_bytes("hi"), as_bytes("hello"))
         assert(string(r) == "hello hello", "grows")
 
     #test
-    test_bytes_replace_all_shorter() -> void
+    test_bytes_replace_all_shorter() -> unit
         val r = replace_all(as_bytes("hello hello"), as_bytes("hello"), as_bytes("hi"))
         assert(string(r) == "hi hi", "shrinks")
 
     #test
-    test_bytes_replace_all_non_overlap() -> void
+    test_bytes_replace_all_non_overlap() -> unit
         val r = replace_all(as_bytes("aaaa"), as_bytes("aa"), as_bytes("X"))
         assert(string(r) == "XX", "non-overlap")
 
@@ -656,30 +656,30 @@ Tests
 ### repeat
 
     #test
-    test_bytes_repeat_basic() -> void
+    test_bytes_repeat_basic() -> unit
         assert(string(repeat(as_bytes("ab"), 3)) == "ababab", "three")
 
     #test
-    test_bytes_repeat_zero() -> void
+    test_bytes_repeat_zero() -> unit
         assert(len(repeat(as_bytes("abc"), 0)) == 0, "zero")
 
     #test
-    test_bytes_repeat_negative() -> void
+    test_bytes_repeat_negative() -> unit
         assert(len(repeat(as_bytes("abc"), -1)) == 0, "negative")
 
     #test
-    test_bytes_repeat_one() -> void
+    test_bytes_repeat_one() -> unit
         assert(string(repeat(as_bytes("abc"), 1)) == "abc", "identity")
 
     #test
-    test_bytes_repeat_empty() -> void
+    test_bytes_repeat_empty() -> unit
         assert(len(repeat(as_bytes(""), 100)) == 0, "empty")
 
 
 ### split / join
 
     #test
-    test_bytes_split_basic() -> void
+    test_bytes_split_basic() -> unit
         val parts = split(as_bytes("a,b,c"), as_bytes(","))
         assert(len(parts) == 3, "three parts")
         assert(string(parts[0]) == "a", "first")
@@ -687,25 +687,25 @@ Tests
         assert(string(parts[2]) == "c", "third")
 
     #test
-    test_bytes_split_no_match() -> void
+    test_bytes_split_no_match() -> unit
         val parts = split(as_bytes("hello"), as_bytes(","))
         assert(len(parts) == 1, "one part")
         assert(string(parts[0]) == "hello", "whole")
 
     #test
-    test_bytes_split_adjacent() -> void
+    test_bytes_split_adjacent() -> unit
         val parts = split(as_bytes("a,,b"), as_bytes(","))
         assert(len(parts) == 3, "three parts")
         assert(string(parts[1]) == "", "empty middle")
 
     #test
-    test_bytes_join_basic() -> void
+    test_bytes_join_basic() -> unit
         val parts = split(as_bytes("a,b,c"), as_bytes(","))
         val joined = join(parts, as_bytes("-"))
         assert(string(joined) == "a-b-c", "rejoin")
 
     #test
-    test_bytes_join_empty() -> void
+    test_bytes_join_empty() -> unit
         val parts = new [0]&[]byte
         val joined = join(parts[:], as_bytes(","))
         assert(len(joined) == 0, "empty")

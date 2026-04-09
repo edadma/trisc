@@ -1,0 +1,356 @@
+std.encoding.binary — Binary byte-order encoding
+==================================================
+
+Reads and writes fixed-size integers from byte slices in
+little-endian and big-endian byte order. Inspired by Go's
+`encoding/binary` package.
+
+Each function operates on the first N bytes of the given
+slice (2 for u16, 4 for u32, 8 for u64).
+
+Dependencies: none.
+
+
+    module std.encoding.binary
+
+    import std.debug.{assert}
+
+
+Little-Endian Reads
+-------------------
+
+### u16_le
+
+Read a little-endian u16 from bytes 0-1.
+
+    u16_le(b: []byte) -> int
+        return int(b[0]) | (int(b[1]) << 8)
+
+
+### u32_le
+
+Read a little-endian u32 from bytes 0-3.
+
+    u32_le(b: []byte) -> u32
+        return u32(b[0]) | (u32(b[1]) << 8u32) | (u32(b[2]) << 16u32) | (u32(b[3]) << 24u32)
+
+
+### u64_le
+
+Read a little-endian u64 from bytes 0-7.
+
+    u64_le(b: []byte) -> i64
+        return i64(b[0]) | (i64(b[1]) << 8) | (i64(b[2]) << 16) | (i64(b[3]) << 24) | (i64(b[4]) << 32) | (i64(b[5]) << 40) | (i64(b[6]) << 48) | (i64(b[7]) << 56)
+
+
+Big-Endian Reads
+----------------
+
+### u16_be
+
+Read a big-endian u16 from bytes 0-1.
+
+    u16_be(b: []byte) -> int
+        return (int(b[0]) << 8) | int(b[1])
+
+
+### u32_be
+
+Read a big-endian u32 from bytes 0-3.
+
+    u32_be(b: []byte) -> u32
+        return (u32(b[0]) << 24u32) | (u32(b[1]) << 16u32) | (u32(b[2]) << 8u32) | u32(b[3])
+
+
+### u64_be
+
+Read a big-endian u64 from bytes 0-7.
+
+    u64_be(b: []byte) -> i64
+        return (i64(b[0]) << 56) | (i64(b[1]) << 48) | (i64(b[2]) << 40) | (i64(b[3]) << 32) | (i64(b[4]) << 24) | (i64(b[5]) << 16) | (i64(b[6]) << 8) | i64(b[7])
+
+
+Little-Endian Writes
+--------------------
+
+### put_u16_le
+
+Write a little-endian u16 to bytes 0-1.
+
+    put_u16_le(b: []byte, v: int) -> unit
+        b[0] = byte(v)
+        b[1] = byte(v >> 8)
+
+
+### put_u32_le
+
+Write a little-endian u32 to bytes 0-3.
+
+    put_u32_le(b: []byte, v: u32) -> unit
+        b[0] = byte(v)
+        b[1] = byte(v >> 8u32)
+        b[2] = byte(v >> 16u32)
+        b[3] = byte(v >> 24u32)
+
+
+### put_u64_le
+
+Write a little-endian u64 to bytes 0-7.
+
+    put_u64_le(b: []byte, v: i64) -> unit
+        b[0] = byte(v)
+        b[1] = byte(v >> 8)
+        b[2] = byte(v >> 16)
+        b[3] = byte(v >> 24)
+        b[4] = byte(v >> 32)
+        b[5] = byte(v >> 40)
+        b[6] = byte(v >> 48)
+        b[7] = byte(v >> 56)
+
+
+Big-Endian Writes
+-----------------
+
+### put_u16_be
+
+Write a big-endian u16 to bytes 0-1.
+
+    put_u16_be(b: []byte, v: int) -> unit
+        b[0] = byte(v >> 8)
+        b[1] = byte(v)
+
+
+### put_u32_be
+
+Write a big-endian u32 to bytes 0-3.
+
+    put_u32_be(b: []byte, v: u32) -> unit
+        b[0] = byte(v >> 24u32)
+        b[1] = byte(v >> 16u32)
+        b[2] = byte(v >> 8u32)
+        b[3] = byte(v)
+
+
+### put_u64_be
+
+Write a big-endian u64 to bytes 0-7.
+
+    put_u64_be(b: []byte, v: i64) -> unit
+        b[0] = byte(v >> 56)
+        b[1] = byte(v >> 48)
+        b[2] = byte(v >> 40)
+        b[3] = byte(v >> 32)
+        b[4] = byte(v >> 24)
+        b[5] = byte(v >> 16)
+        b[6] = byte(v >> 8)
+        b[7] = byte(v)
+
+
+Offset Variants
+================
+
+Read/write at an arbitrary byte offset within a slice.
+
+
+### u16_le_at
+
+Read a little-endian u16 starting at byte `off`.
+
+    u16_le_at(b: []byte, off: int) -> int
+        return int(b[off]) | (int(b[off + 1]) << 8)
+
+
+### u32_le_at
+
+Read a little-endian u32 starting at byte `off`.
+
+    u32_le_at(b: []byte, off: int) -> u32
+        return u32(b[off]) | (u32(b[off + 1]) << 8u32) | (u32(b[off + 2]) << 16u32) | (u32(b[off + 3]) << 24u32)
+
+
+### u32_be_at
+
+Read a big-endian u32 starting at byte `off`.
+
+    u32_be_at(b: []byte, off: int) -> u32
+        return (u32(b[off]) << 24u32) | (u32(b[off + 1]) << 16u32) | (u32(b[off + 2]) << 8u32) | u32(b[off + 3])
+
+
+### put_u32_le_at
+
+Write a little-endian u32 starting at byte `off`.
+
+    put_u32_le_at(b: []byte, off: int, v: u32) -> unit
+        b[off] = byte(v)
+        b[off + 1] = byte(v >> 8u32)
+        b[off + 2] = byte(v >> 16u32)
+        b[off + 3] = byte(v >> 24u32)
+
+
+### put_u32_be_at
+
+Write a big-endian u32 starting at byte `off`.
+
+    put_u32_be_at(b: []byte, off: int, v: u32) -> unit
+        b[off] = byte(v >> 24u32)
+        b[off + 1] = byte(v >> 16u32)
+        b[off + 2] = byte(v >> 8u32)
+        b[off + 3] = byte(v)
+
+
+Tests
+=====
+
+
+### u16 little-endian
+
+    #test
+    test_u16_le_known() -> unit
+        val buf: [2]byte = [0x01, 0x02]
+        assert(u16_le(buf[:]) == 0x0201, "u16_le 0x0201")
+
+    #test
+    test_u16_le_zero() -> unit
+        val buf: [2]byte = [0x00, 0x00]
+        assert(u16_le(buf[:]) == 0, "u16_le zero")
+
+    #test
+    test_u16_le_max() -> unit
+        val buf: [2]byte = [0xff, 0xff]
+        assert(u16_le(buf[:]) == 0xffff, "u16_le max")
+
+    #test
+    test_u16_le_roundtrip() -> unit
+        var buf: [2]byte
+        put_u16_le(buf[:], 0x1234)
+        assert(u16_le(buf[:]) == 0x1234, "u16_le roundtrip")
+
+
+### u32 little-endian
+
+    #test
+    test_u32_le_known() -> unit
+        val buf: [4]byte = [0xef, 0xbe, 0xad, 0xde]
+        val v = u32_le(buf[:])
+        assert(v == 0xDEADBEEFu32, "u32_le deadbeef")
+
+    #test
+    test_u32_le_zero() -> unit
+        val buf: [4]byte = [0x00, 0x00, 0x00, 0x00]
+        assert(u32_le(buf[:]) == 0u32, "u32_le zero")
+
+    #test
+    test_u32_le_roundtrip() -> unit
+        var buf: [4]byte
+        put_u32_le(buf[:], 0x12345678u32)
+        assert(u32_le(buf[:]) == 0x12345678u32, "u32_le roundtrip")
+
+    #test
+    test_u32_le_bytes() -> unit
+        var buf: [4]byte
+        put_u32_le(buf[:], 0x04030201u32)
+        assert(buf[0] == 0x01u8, "byte 0")
+        assert(buf[1] == 0x02u8, "byte 1")
+        assert(buf[2] == 0x03u8, "byte 2")
+        assert(buf[3] == 0x04u8, "byte 3")
+
+
+### u64 little-endian
+
+    #test
+    test_u64_le_known() -> unit
+        val buf: [8]byte = [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        assert(u64_le(buf[:]) == 1i64, "u64_le 1")
+
+    #test
+    test_u64_le_zero() -> unit
+        val buf: [8]byte = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        assert(u64_le(buf[:]) == 0i64, "u64_le zero")
+
+    #test
+    test_u64_le_roundtrip() -> unit
+        var buf: [8]byte
+        put_u64_le(buf[:], 0x0102030405060708i64)
+        assert(u64_le(buf[:]) == 0x0102030405060708i64, "u64_le roundtrip")
+
+
+### u16 big-endian
+
+    #test
+    test_u16_be_known() -> unit
+        val buf: [2]byte = [0x01, 0x02]
+        assert(u16_be(buf[:]) == 0x0102, "u16_be 0x0102")
+
+    #test
+    test_u16_be_zero() -> unit
+        val buf: [2]byte = [0x00, 0x00]
+        assert(u16_be(buf[:]) == 0, "u16_be zero")
+
+    #test
+    test_u16_be_roundtrip() -> unit
+        var buf: [2]byte
+        put_u16_be(buf[:], 0xabcd)
+        assert(u16_be(buf[:]) == 0xabcd, "u16_be roundtrip")
+
+
+### u32 big-endian
+
+    #test
+    test_u32_be_known() -> unit
+        val buf: [4]byte = [0xde, 0xad, 0xbe, 0xef]
+        val v = u32_be(buf[:])
+        assert(v == 0xDEADBEEFu32, "u32_be deadbeef")
+
+    #test
+    test_u32_be_zero() -> unit
+        val buf: [4]byte = [0x00, 0x00, 0x00, 0x00]
+        assert(u32_be(buf[:]) == 0u32, "u32_be zero")
+
+    #test
+    test_u32_be_roundtrip() -> unit
+        var buf: [4]byte
+        put_u32_be(buf[:], 0x12345678u32)
+        assert(u32_be(buf[:]) == 0x12345678u32, "u32_be roundtrip")
+
+    #test
+    test_u32_be_bytes() -> unit
+        var buf: [4]byte
+        put_u32_be(buf[:], 0x01020304u32)
+        assert(buf[0] == 0x01u8, "byte 0")
+        assert(buf[1] == 0x02u8, "byte 1")
+        assert(buf[2] == 0x03u8, "byte 2")
+        assert(buf[3] == 0x04u8, "byte 3")
+
+
+### u64 big-endian
+
+    #test
+    test_u64_be_known() -> unit
+        val buf: [8]byte = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]
+        assert(u64_be(buf[:]) == 1i64, "u64_be 1")
+
+    #test
+    test_u64_be_zero() -> unit
+        val buf: [8]byte = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        assert(u64_be(buf[:]) == 0i64, "u64_be zero")
+
+    #test
+    test_u64_be_roundtrip() -> unit
+        var buf: [8]byte
+        put_u64_be(buf[:], 0x0102030405060708i64)
+        assert(u64_be(buf[:]) == 0x0102030405060708i64, "u64_be roundtrip")
+
+
+### Cross-endian
+
+    #test
+    test_u16_endian_swap() -> unit
+        var buf: [2]byte
+        put_u16_le(buf[:], 0x0102)
+        assert(u16_be(buf[:]) == 0x0201, "le write, be read")
+
+    #test
+    test_u32_endian_swap() -> unit
+        var buf: [4]byte
+        put_u32_le(buf[:], 0x01020304u32)
+        assert(u32_be(buf[:]) == 0x04030201u32, "le write, be read")

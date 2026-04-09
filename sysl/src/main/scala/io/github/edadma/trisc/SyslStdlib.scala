@@ -2,7 +2,6 @@ package io.github.edadma.trisc
 
 import scala.collection.mutable
 import scala.util.chaining.*
-import SyslType.*
 
 object SyslStdlib:
   import Value.*
@@ -25,14 +24,9 @@ object SyslStdlib:
     val bytes = s.getBytes("UTF-8")
     RefStringVal(bytes, bytes.length, new java.util.concurrent.atomic.AtomicInteger(IMMORTAL_RC))
 
-  val modules: Set[String] = Set("std/io", "std/fs", "std/process", "std/string")
-
-  def meta(name: String): ModuleMeta = name match
-    case "std/io"      => ioMeta
-    case "std/fs"      => fsMeta
-    case "std/process" => processMeta
-    case "std/string"  => stringMeta
-    case _             => throw IllegalArgumentException(s"unknown stdlib module: $name")
+  // Modules that have JVM runtime implementations (builtins).
+  // Metadata is now derived from .lsysl sources on the filesystem.
+  val builtinModules: Set[String] = Set("std/io", "std/fs", "std/process", "std/string")
 
   def builtins(name: String, ctx: StdlibContext): Map[String, List[Value] => Value] = name match
     case "std/io"      => ioBuiltins(ctx)
@@ -80,31 +74,6 @@ object SyslStdlib:
   private val SEEK_SET = 0
   private val SEEK_CUR = 1
   private val SEEK_END = 2
-
-  private lazy val ioMeta: ModuleMeta =
-    new ModuleMeta(List(
-      // Constants
-      SymbolMeta("O_RDONLY", SymbolMeta.Kind.Data(I32), isPrivate = false),
-      SymbolMeta("O_WRONLY", SymbolMeta.Kind.Data(I32), isPrivate = false),
-      SymbolMeta("O_RDWR", SymbolMeta.Kind.Data(I32), isPrivate = false),
-      SymbolMeta("O_CREATE", SymbolMeta.Kind.Data(I32), isPrivate = false),
-      SymbolMeta("O_TRUNC", SymbolMeta.Kind.Data(I32), isPrivate = false),
-      SymbolMeta("O_APPEND", SymbolMeta.Kind.Data(I32), isPrivate = false),
-      SymbolMeta("STDIN", SymbolMeta.Kind.Data(I32), isPrivate = false),
-      SymbolMeta("STDOUT", SymbolMeta.Kind.Data(I32), isPrivate = false),
-      SymbolMeta("STDERR", SymbolMeta.Kind.Data(I32), isPrivate = false),
-      SymbolMeta("SEEK_SET", SymbolMeta.Kind.Data(I32), isPrivate = false),
-      SymbolMeta("SEEK_CUR", SymbolMeta.Kind.Data(I32), isPrivate = false),
-      SymbolMeta("SEEK_END", SymbolMeta.Kind.Data(I32), isPrivate = false),
-      // Functions
-      SymbolMeta("open", SymbolMeta.Kind.Func(List(StringType, I32), I32), isPrivate = false),
-      SymbolMeta("close", SymbolMeta.Kind.Func(List(I32), I32), isPrivate = false),
-      SymbolMeta("read", SymbolMeta.Kind.Func(List(I32, PtrType(U8), I32), I32), isPrivate = false),
-      SymbolMeta("write", SymbolMeta.Kind.Func(List(I32, PtrType(U8), I32), I32), isPrivate = false),
-      SymbolMeta("write_string", SymbolMeta.Kind.Func(List(I32, StringType), I32), isPrivate = false),
-      SymbolMeta("read_line", SymbolMeta.Kind.Func(List(I32), StringType), isPrivate = false),
-      SymbolMeta("seek", SymbolMeta.Kind.Func(List(I32, I64, I32), I64), isPrivate = false),
-    ))
 
   private def ioBuiltins(ctx: StdlibContext): Map[String, List[Value] => Value] = Map(
     // Constants as "functions" that return their value — will be registered as globals
@@ -185,7 +154,7 @@ object SyslStdlib:
             catch case _: Exception => IntVal(-1)
           case None => IntVal(-1)
     }),
-    "write_string" -> (args => {
+    "write_str" -> (args => {
       val fd = args.head.asInstanceOf[IntVal].n.toInt
       val s = args(1).pipe(asString)
       if fd == 1 || fd == 2 then
@@ -259,36 +228,6 @@ object SyslStdlib:
   )
 
   // ── std/fs ──────────────────────────────────────────────────────────
-
-  private val fileStatType: StructType = StructType("FileStat", List(
-    ("size", I64),
-    ("mode", I32),
-    ("mtime", I64),
-    ("is_dir", BoolType),
-    ("is_file", BoolType),
-  ))
-
-  private val dirEntryType: StructType = StructType("DirEntry", List(
-    ("name", StringType),
-    ("is_dir", BoolType),
-  ))
-
-  private lazy val fsMeta: ModuleMeta =
-    new ModuleMeta(List(
-      SymbolMeta("FileStat", SymbolMeta.Kind.Struct(fileStatType), isPrivate = false),
-      SymbolMeta("DirEntry", SymbolMeta.Kind.Struct(dirEntryType), isPrivate = false),
-      SymbolMeta("stat", SymbolMeta.Kind.Func(List(StringType), fileStatType), isPrivate = false),
-      SymbolMeta("readdir", SymbolMeta.Kind.Func(List(StringType), SliceType(dirEntryType)), isPrivate = false),
-      SymbolMeta("exists", SymbolMeta.Kind.Func(List(StringType), BoolType), isPrivate = false),
-      SymbolMeta("is_dir", SymbolMeta.Kind.Func(List(StringType), BoolType), isPrivate = false),
-      SymbolMeta("mkdir", SymbolMeta.Kind.Func(List(StringType), I32), isPrivate = false),
-      SymbolMeta("mkdirs", SymbolMeta.Kind.Func(List(StringType), I32), isPrivate = false),
-      SymbolMeta("remove", SymbolMeta.Kind.Func(List(StringType), I32), isPrivate = false),
-      SymbolMeta("rename", SymbolMeta.Kind.Func(List(StringType, StringType), I32), isPrivate = false),
-      SymbolMeta("getcwd", SymbolMeta.Kind.Func(List(), StringType), isPrivate = false),
-      SymbolMeta("read_file", SymbolMeta.Kind.Func(List(StringType), StringType), isPrivate = false),
-      SymbolMeta("write_file", SymbolMeta.Kind.Func(List(StringType, StringType), I32), isPrivate = false),
-    ))
 
   private def mkFileStat(file: java.io.File): ArrVal =
     val cells = Array(
@@ -372,14 +311,6 @@ object SyslStdlib:
 
   // ── std/process ─────────────────────────────────────────────────────
 
-  private lazy val processMeta: ModuleMeta =
-    new ModuleMeta(List(
-      SymbolMeta("exit", SymbolMeta.Kind.Func(List(I32), VoidType), isPrivate = false),
-      SymbolMeta("getenv", SymbolMeta.Kind.Func(List(StringType), StringType), isPrivate = false),
-      SymbolMeta("argc", SymbolMeta.Kind.Func(List(), I32), isPrivate = false),
-      SymbolMeta("argv", SymbolMeta.Kind.Func(List(I32), StringType), isPrivate = false),
-    ))
-
   private class ExitException(val code: Int) extends RuntimeException(s"exit($code)")
 
   private def processBuiltins(ctx: StdlibContext): Map[String, List[Value] => Value] = Map(
@@ -401,23 +332,6 @@ object SyslStdlib:
   )
 
   // ── std/string ──────────────────────────────────────────────────────
-
-  private lazy val stringMeta: ModuleMeta =
-    new ModuleMeta(List(
-      SymbolMeta("length", SymbolMeta.Kind.Func(List(StringType), I32), isPrivate = false),
-      SymbolMeta("concat", SymbolMeta.Kind.Func(List(StringType, StringType), StringType), isPrivate = false),
-      SymbolMeta("substr", SymbolMeta.Kind.Func(List(StringType, I32, I32), StringType), isPrivate = false),
-      SymbolMeta("index_of", SymbolMeta.Kind.Func(List(StringType, StringType), I32), isPrivate = false),
-      SymbolMeta("starts_with", SymbolMeta.Kind.Func(List(StringType, StringType), BoolType), isPrivate = false),
-      SymbolMeta("ends_with", SymbolMeta.Kind.Func(List(StringType, StringType), BoolType), isPrivate = false),
-      SymbolMeta("trim", SymbolMeta.Kind.Func(List(StringType), StringType), isPrivate = false),
-      SymbolMeta("split", SymbolMeta.Kind.Func(List(StringType, StringType), SliceType(StringType)), isPrivate = false),
-      SymbolMeta("to_int", SymbolMeta.Kind.Func(List(StringType), I64), isPrivate = false),
-      SymbolMeta("from_int", SymbolMeta.Kind.Func(List(I64), StringType), isPrivate = false),
-      SymbolMeta("char_at", SymbolMeta.Kind.Func(List(StringType, I32), I32), isPrivate = false),
-      SymbolMeta("equal", SymbolMeta.Kind.Func(List(StringType, StringType), BoolType), isPrivate = false),
-      SymbolMeta("contains", SymbolMeta.Kind.Func(List(StringType, StringType), BoolType), isPrivate = false),
-    ))
 
   private def stringBuiltins(ctx: StdlibContext): Map[String, List[Value] => Value] = Map(
     "length" -> (args => {

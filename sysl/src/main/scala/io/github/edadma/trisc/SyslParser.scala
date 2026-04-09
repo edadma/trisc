@@ -42,7 +42,7 @@ class SyslParser extends StandardTokenParsers {
     }
 
   lazy val declBare: Parser[DeclAST] =
-    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | interfaceDecl | typeAliasDecl | "private" ~> declBody(true) | declBody(false)
+    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | interfaceDecl | typeAliasDecl | "private" ~> "def" ~> defDecl(true) | "private" ~> declBody(true) | "def" ~> defDecl(false) | declBody(false)
 
   // --- Attributes ---
 
@@ -128,7 +128,9 @@ class SyslParser extends StandardTokenParsers {
       ident ^^ (name => Left((name, None)))
 
   lazy val typeAliasDecl: Parser[TypeAliasDeclAST] =
-    "type" ~> ident ~ ("=" ~> typeRef) ^^ { case name ~ target => TypeAliasDeclAST(name, target) }
+    "type" ~> ident ~ opt("[" ~> rep1sep(ident, ",") <~ "]") ~ ("=" ~> typeRef) ^^ {
+      case name ~ tparams ~ target => TypeAliasDeclAST(name, target, tparams.getOrElse(Nil))
+    }
 
   lazy val traitDecl: Parser[TraitDeclAST] =
     "trait" ~> ident ~ ("[" ~> ident <~ "]") ~
@@ -174,7 +176,7 @@ class SyslParser extends StandardTokenParsers {
 
   // Accept identifiers and type keywords (e.g., "string") in import paths
   private lazy val importIdent: Parser[String] =
-    ident | "int" | "char" | "byte" | "bool" | "void" | "string" |
+    ident | "int" | "char" | "byte" | "bool" | "unit" | "string" |
       "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64"
 
   lazy val importDecl: Parser[ImportDeclAST] =
@@ -182,7 +184,10 @@ class SyslParser extends StandardTokenParsers {
       case path ~ Some(selectors) => ImportDeclAST(path.mkString("/"), selectors)
       case path ~ None =>
         if path.length < 2 then sys.error(s"import requires selector: use 'import ${path.head}.*' or 'import ${path.head}.name'")
-        ImportDeclAST(path.init.mkString("/"), List(NamedImport(path.last)))
+        // Ambiguous: could be qualified module import (import std.strings)
+        // or single symbol import (import math.add). Mark as QualifiedImport;
+        // the driver resolves by checking if the full path is a known module.
+        ImportDeclAST(path.mkString("/"), List(QualifiedImport))
     }
 
   lazy val importTail: Parser[List[ImportSelector]] =
@@ -239,6 +244,27 @@ class SyslParser extends StandardTokenParsers {
         case mut ~ name ~ e => VarDeclAST(name, None, e, priv, mut.getOrElse(true))
       }
 
+  /** `def name = expr` (zero-arg auto-call) or `def name(params) -> ret body` (documentary). */
+  def defDecl(priv: Boolean): Parser[FunDeclAST] =
+    // def name(params) -> ret body — parametric, isDef is documentary
+    ident ~ typeParamListWithBounds ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
+      case name ~ tps ~ params ~ ((rt, body)) =>
+        val names = tps.map(_._1)
+        val bounds = tps.collect { case (n, bs) if bs.nonEmpty => (n, bs) }.toMap
+        FunDeclAST(name, params, rt, body, priv, names, bounds, isDef = true)
+    } |
+    // def name -> RetType body — zero-arg with explicit return type
+    ident ~ ("->" ~> typeRef) ~ ("=" ~> bodyExprOrBlock) ^^ {
+      case name ~ rt ~ body => FunDeclAST(name, Nil, Some(rt), body, priv, isDef = true)
+    } |
+    ident ~ ("->" ~> typeRef) ~ block ^^ {
+      case name ~ rt ~ body => FunDeclAST(name, Nil, Some(rt), BlockBodyAST(body), priv, isDef = true)
+    } |
+    // def name = expr — zero-arg, inferred return type
+    ident ~ ("=" ~> bodyExprOrBlock) ^^ {
+      case name ~ body => FunDeclAST(name, Nil, None, body, priv, isDef = true)
+    }
+
   // Type parameter with optional trait bounds: T, T: Ord, T: Ord + Eq
   lazy val typeParamWithBounds: Parser[(String, List[String])] =
     ident ~ opt(":" ~> rep1sep(ident, "+")) ^^ {
@@ -271,7 +297,8 @@ class SyslParser extends StandardTokenParsers {
     opt("[" ~> rep1sep(typeRef, ",") <~ "]") ^^ (_.getOrElse(Nil))
 
   lazy val typeName: Parser[TypeAST] =
-    ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool" | "void" | "string") ^^ (n => NamedTypeAST(n)) |
+    ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool" | "string") ^^ (n => NamedTypeAST(n)) |
+      "unit" ^^^ NamedTypeAST("void") |
       ident ~ typeArgList ^^ { case name ~ args => NamedTypeAST(name, args) }
 
   // Full type reference: *int, **int, &Node, [5]int, []int (slice), func(int)->int, string, int, etc.
@@ -280,17 +307,15 @@ class SyslParser extends StandardTokenParsers {
       "&" ~> typeRef ^^ RefTypeAST.apply |
       "[" ~> "]" ~> typeRef ^^ SliceTypeAST.apply |
       "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => ArrayTypeAST(n.toInt, t) } |
-      "(" ~> rep1sep(typeRef, ",") <~ ")" ^^ TupleTypeAST.apply |
       funcTypeRef |
+      "(" ~> rep1sep(typeRef, ",") <~ ")" ^^ TupleTypeAST.apply |
       typeName
 
   lazy val funcTypeRef: Parser[TypeAST] =
-    "func" ~> "(" ~> repsep(typeRef, ",") ~ (")" ~> "->" ~> typeRef) ^^ {
+    // (int, int) -> int   or   () -> unit
+    "(" ~> repsep(typeRef, ",") ~ (")" ~> "->" ~> typeRef) ^^ {
       case params ~ ret => FuncTypeAST(params, ret)
-    } |
-      "func" ~> "(" ~> repsep(typeRef, ",") <~ ")" ^^ {
-        params => FuncTypeAST(params, NamedTypeAST("void"))
-      }
+    }
 
   // Array type for uninitialized declarations: [5]int
   lazy val typeExpr: Parser[TypeAST] =
@@ -503,7 +528,15 @@ class SyslParser extends StandardTokenParsers {
 
   // --- Expressions ---
 
-  lazy val expr: Parser[ExpressionAST] = closureExpr | matchExpr | ifExpr | logicalOr
+  lazy val expr: Parser[ExpressionAST] = closureExpr | matchExpr | ifIsExpr | ifExpr | logicalOr
+
+  /** `if expr is Pattern then body [else elseBody]` — desugars to match. */
+  lazy val ifIsExpr: Parser[MatchExprAST] =
+    "if" ~> logicalOr ~ ("is" ~> matchPattern) ~ ("then" ~> thenBody) ^^ {
+      case scrutinee ~ pattern ~ ((thenStmts, elseStmts)) =>
+        val arm = MatchArmAST(List(pattern), None, thenStmts)
+        MatchExprAST(scrutinee, List(arm), elseStmts)
+    }
 
   lazy val closureExpr: Parser[ClosureAST] =
     // Zero params: () -> body
@@ -702,7 +735,8 @@ class SyslParser extends StandardTokenParsers {
       "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => SizeofTypeAST(ArrayTypeAST(n.toInt, t)) } |
       funcTypeRef ^^ SizeofTypeAST.apply |
       "[" ~> "]" ~> typeRef ^^ (t => SizeofTypeAST(SliceTypeAST(t))) |
-      ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool" | "void" | "string") ^^ (n => SizeofTypeAST(NamedTypeAST(n))) |
+      ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool" | "string") ^^ (n => SizeofTypeAST(NamedTypeAST(n))) |
+      "unit" ^^ (_ => SizeofTypeAST(NamedTypeAST("void"))) |
       expr ^^ SizeofExprAST.apply
 
   lazy val scalarCastType: Parser[String] =

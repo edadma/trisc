@@ -421,7 +421,7 @@ so they can be stored as function pointers.
 
     struct Command
         name: string
-        handler: func(int, *i64)
+        handler: (int, *i64) -> unit
 
     var cmds: [10]Command
 

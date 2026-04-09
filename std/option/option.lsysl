@@ -83,13 +83,13 @@ Tests
 ### Construction and inspection
 
     #test
-    test_is_some_on_some() -> void
+    test_is_some_on_some() -> unit
         val o: Option[int] = Some(42)
         assert(is_some(o), "Some is some")
         assert(!is_none(o), "Some is not none")
 
     #test
-    test_is_some_on_none() -> void
+    test_is_some_on_none() -> unit
         val o: Option[int] = None
         assert(!is_some(o), "None is not some")
         assert(is_none(o), "None is none")
@@ -98,12 +98,12 @@ Tests
 ### unwrap
 
     #test
-    test_unwrap_returns_value() -> void
+    test_unwrap_returns_value() -> unit
         val o: Option[int] = Some(42)
         assert(unwrap(o) == 42, "gets value")
 
     #test(should_panic: "unwrap on None")
-    test_unwrap_panics_on_none() -> void
+    test_unwrap_panics_on_none() -> unit
         val o: Option[int] = None
         val _ = unwrap(o)
 
@@ -111,12 +111,12 @@ Tests
 ### expect
 
     #test
-    test_expect_returns_value() -> void
+    test_expect_returns_value() -> unit
         val o: Option[int] = Some(99)
         assert(expect(o, "should exist") == 99, "gets value")
 
     #test(should_panic: "missing config")
-    test_expect_panics_with_message() -> void
+    test_expect_panics_with_message() -> unit
         val o: Option[int] = None
         val _ = expect(o, "missing config")
 
@@ -124,12 +124,12 @@ Tests
 ### unwrap_or
 
     #test
-    test_unwrap_or_returns_value_on_some() -> void
+    test_unwrap_or_returns_value_on_some() -> unit
         val o: Option[int] = Some(42)
         assert(unwrap_or(o, 0) == 42, "Some value")
 
     #test
-    test_unwrap_or_returns_default_on_none() -> void
+    test_unwrap_or_returns_default_on_none() -> unit
         val o: Option[int] = None
         assert(unwrap_or(o, 99) == 99, "default")
 
@@ -145,7 +145,7 @@ Tests
         safe_div(q, 2)
 
     #test
-    test_question_unwraps_some() -> void
+    test_question_unwraps_some() -> unit
         val r = half_of_quotient(100, 5)
 
         r match
@@ -153,7 +153,7 @@ Tests
             None -> panic("expected Some")
 
     #test
-    test_question_propagates_none() -> void
+    test_question_propagates_none() -> unit
         val r = half_of_quotient(100, 0)
         assert(is_none(r), "div by zero propagates None")
 
@@ -171,7 +171,7 @@ Tests
         Some(x + y)
 
     #test
-    test_chained_both_found() -> void
+    test_chained_both_found() -> unit
         val r = sum_two_keys(1, 2)
 
         r match
@@ -179,12 +179,12 @@ Tests
             None -> panic("expected Some")
 
     #test
-    test_chained_first_missing() -> void
+    test_chained_first_missing() -> unit
         val r = sum_two_keys(99, 2)
         assert(is_none(r), "first key missing")
 
     #test
-    test_chained_second_missing() -> void
+    test_chained_second_missing() -> unit
         val r = sum_two_keys(1, 99)
         assert(is_none(r), "second key missing")
 
@@ -192,7 +192,7 @@ Tests
 ### Match patterns
 
     #test
-    test_match_some_binds_value() -> void
+    test_match_some_binds_value() -> unit
         val o: Option[int] = Some(7)
 
         val doubled = o match
@@ -202,7 +202,7 @@ Tests
         assert(doubled == 14, "matched and transformed")
 
     #test
-    test_match_none_takes_default() -> void
+    test_match_none_takes_default() -> unit
         val o: Option[int] = None
 
         val result = o match
@@ -215,7 +215,7 @@ Tests
 ### unwrap_or pipeline
 
     #test
-    test_unwrap_or_pipeline() -> void
+    test_unwrap_or_pipeline() -> unit
         val found = unwrap_or(lookup(1), -1)
         assert(found == 100, "key 1 exists")
 

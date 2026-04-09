@@ -63,7 +63,7 @@ Source code always uses the short name — the compiler resolves it to the mangl
 | `u64` | | 8 bytes | unsigned 64-bit integer |
 | `f64` | `double` | 8 bytes | 64-bit floating point |
 | `bool` | | 1 byte | `true` or `false` |
-| `void` | | 0 bytes | no value |
+| `unit` | | 0 bytes | no value |
 | `string` | | 16 bytes | fat pointer: `{ptr: *u8, len: i64}` |
 
 ### Integer Overflow
@@ -87,7 +87,7 @@ This matches Go, Rust, and Swift. C-style implicit integer promotion is not used
 []T             // slice: {ptr: *T, len: i32, cap: i32} (16 bytes)
 &[]T            // ref-counted heap array from new [n]T
 (T1, T2, T3)   // tuple (desugars to anonymous struct)
-func(P1, P2) -> R  // function pointer / closure (16 bytes: {func_ptr, env_ptr})
+(P1, P2) -> R  // function pointer / closure (16 bytes: {func_ptr, env_ptr})
 ```
 
 ### Struct Types
@@ -216,7 +216,7 @@ enum Tree
 
 ```sysl
 type IntPtr = *int
-type Callback = func(int) -> int
+type Callback = (int) -> int
 ```
 
 ---
@@ -318,6 +318,44 @@ double(x: int) = x * 2
 
 // No parameters
 getAnswer() -> int = 42
+```
+
+### `def` — Auto-Call Functions
+
+`def` declares a zero-argument function that is automatically called when
+referenced by bare name. Unlike `val`, a `def` is re-evaluated on every
+reference, and supports forward references (enabling mutual recursion).
+
+```sysl
+var counter = 0
+def next_id = counter++      // return type inferred from body
+
+def pi -> int = 314           // explicit return type
+
+def greeting -> string        // block body
+    "hello"
+
+main() -> int
+    val a = next_id           // auto-called: returns 0
+    val b = next_id           // auto-called: returns 1
+    a + b + pi                // 0 + 1 + 314 = 315
+```
+
+**Function pointer:** `&name` gives the function pointer for a `def`:
+
+```sysl
+apply_thunk(f: () -> int) -> int = f()
+
+main() -> int
+    counter = 0
+    apply_thunk(&next_id)     // passes next_id as a function pointer
+```
+
+**On parametric functions:** `def` is also accepted before functions with
+parameters, where it is purely documentary (no behavior change):
+
+```sysl
+def add(a: int, b: int) -> int = a + b   // same as: add(a: int, b: int) -> int = a + b
 ```
 
 ### Generic Functions
@@ -618,10 +656,10 @@ Multiple defers execute in LIFO order.
 dbl(x: int) -> int = x * 2
 
 main() -> int
-    f: func(int) -> int = dbl
+    f: (int) -> int = dbl
     f(21)                         // indirect call → 42
 
-    var funcs: [2]func(int) -> int
+    var funcs: [2](int) -> int
     funcs[0] = dbl
     funcs[1] = triple
     funcs[0](10) + funcs[1](10)  // call through array
@@ -661,10 +699,10 @@ f(32)                // 42 (uses captured a = 10, not 100)
 
 To share mutable state, capture a pointer (`*T`) or ref (`&T`).
 
-**Type inference:** Closure parameter types are inferred from context when the closure is passed to a function expecting a specific `func(...)` type:
+**Type inference:** Closure parameter types are inferred from context when the closure is passed to a function expecting a specific `(...) -> T` type:
 
 ```sysl
-apply(f: func(int) -> int, x: int) -> int = f(x)
+apply(f: (int) -> int, x: int) -> int = f(x)
 
 main() -> int = apply(x -> x + 1, 41)    // x inferred as int
 ```
@@ -673,11 +711,11 @@ main() -> int = apply(x -> x + 1, 41)    // x inferred as int
 
 ```sysl
 // Closure as argument
-apply(f: func(int) -> int, x: int) -> int = f(x)
+apply(f: (int) -> int, x: int) -> int = f(x)
 apply(x -> x * 2, 21)           // 42
 
 // Closure as return value (requires captures)
-make_adder(n: int) -> func(int) -> int
+make_adder(n: int) -> (int) -> int
     val captured = n
     x -> x + captured
 
@@ -685,7 +723,7 @@ add10 = make_adder(10)
 add10(32)                        // 42
 
 // Closure assigned to variable
-val f: func(int) -> int = x -> x * 2
+val f: (int) -> int = x -> x * 2
 f(21)                            // 42
 ```
 
@@ -747,6 +785,7 @@ Float literals (`3.14`, `1e5`) are always `f64`. There is no `f32` type.
 \\    literal backslash
 \'    literal single quote
 \"    literal double quote
+\xNN  hex byte (e.g., \x1b for ESC, \x00 for null)
 ```
 
 ### Operators (by precedence, lowest to highest)
@@ -833,6 +872,28 @@ sizeof([10]int)    // 40
 x = if cond then a else b
 result = if x > 0 then x else -x
 ```
+
+### If-Is (Pattern Matching in If)
+
+`if expr is Pattern then ...` is sugar for a single-arm `match`. The pattern
+binds variables in the then-branch. Like Rust's `if let`.
+
+```sysl
+// Extract value or use default
+val v = if r is Ok(x) then x else -1
+
+// Guard with pattern
+if o is Some(x) then
+    process(x)
+
+// With block body and else
+if parse(s) is Ok(val, pos) then
+    handle(val, pos)
+else
+    report_error()
+```
+
+Desugars to `match` at parse time — no new analyzer or runtime machinery.
 
 ---
 
@@ -990,7 +1051,7 @@ Rules for `a, b = ...` without `val`/`var`:
 ### Return
 
 ```sysl
-return              // void return
+return              // unit return
 return expr         // return single value
 return a, b         // return tuple (no parens needed)
 // or: last expression in block is implicit return
@@ -1154,6 +1215,56 @@ Plain strings (`"..."`) are never interpolated — `$` is just a regular charact
 
 Non-string expressions are automatically converted via `str()`. Integer, boolean, and float (`f64`) types are supported.
 
+### Format Strings (f-strings)
+
+Prefix a string with `f` for printf-style format specifiers. Each interpolation can be followed by `%` and a format spec:
+
+```sysl
+val n = 255
+puts(f"hex: $n%x")               // "hex: ff"
+puts(f"HEX: $n%X")               // "HEX: FF"
+puts(f"padded: $n%08x")          // "padded: 000000ff"
+puts(f"decimal: $n%d")           // "decimal: 255"
+puts(f"binary: ${26}%b")         // "binary: 11010" (expression needs braces)
+puts(f"octal: ${511}%o")         // "octal: 777"
+```
+
+Format specifiers:
+
+| Spec | Meaning |
+|------|---------|
+| `%d` | Decimal integer |
+| `%x` | Hexadecimal (lowercase) |
+| `%X` | Hexadecimal (uppercase) |
+| `%b` | Binary |
+| `%o` | Octal |
+| `%s` | String (default if no spec given) |
+| `%+d` | Decimal with explicit sign |
+| `%%` | Literal `%` |
+
+Width and padding:
+
+```sysl
+val n = 42
+puts(f"$n%08d")                   // "00000042" (zero-padded, width 8)
+puts(f"0x${10}%04x")             // "0x000a"   (literal needs braces)
+val s = "hi"
+puts(f"[$s%10s]")                 // "[        hi]"  (right-aligned, width 10)
+puts(f"[$s%-10s]")                // "[hi        ]"  (left-aligned, width 10)
+```
+
+Mixed example:
+
+```sysl
+val cp = 65
+val count = 3
+val name = "LATIN"
+puts(f"U+$cp%04X count=$count%d name=$name%s")
+// "U+0041 count=3 name=LATIN"
+```
+
+Without a format spec, `f"..."` works like `s"..."` — values are converted via `str()`.
+
 ### `str()` Builtin
 
 Converts a value to its string representation:
@@ -1209,9 +1320,9 @@ s = string(data[:5])      // string from []byte slice
 | `calloc` | `(count: i64, size: i64) -> *i8` | Allocate zeroed memory |
 | `realloc` | `(ptr: *i8, size: i64) -> *i8` | Resize allocation |
 | `sbrk` | `(increment: i32) -> *i8` | Extend heap (POSIX) |
-| `panic` | `(msg: string) -> void` | Halt with message (trap 1, error code 4) |
-| `assert` | `(cond: bool, msg: string) -> void` | Panic with `msg` if `cond` is false |
-| `expect` | `(actual: i64, expected: i64, msg: string) -> void` | Panic with `"msg: expected N, got M"` if values differ |
+| `panic` | `(msg: string) -> unit` | Halt with message (trap 1, error code 4) |
+| `assert` | `(cond: bool, msg: string) -> unit` | Panic with `msg` if `cond` is false |
+| `expect` | `(actual: i64, expected: i64, msg: string) -> unit` | Panic with `"msg: expected N, got M"` if values differ |
 | `abort` | `()` | Terminate execution (trap 1, error code 3) |
 
 User-defined functions shadow builtins of the same name.
@@ -1303,7 +1414,7 @@ Attributes are annotations prefixed with `#` that attach to the following declar
 
 ```
 #test
-test_copy_basic() -> void
+test_copy_basic() -> unit
     0
 
 #inline
@@ -1323,7 +1434,7 @@ Multiple attributes stack on separate preceding lines. Unknown attribute names a
 
 Functions marked `#test` are unit tests. Requirements:
 - zero parameters,
-- returns `void` (or no return type),
+- returns `unit` (or no return type),
 - not generic,
 - not a method.
 
@@ -1331,11 +1442,11 @@ A test **passes** iff it does not panic. A panic (`panic("msg")`, `abort()`, or 
 
 ```
 #test
-test_trivial() -> void
+test_trivial() -> unit
     assert(1 + 1 == 2, "math is broken")
 
 #test("descriptive name shown in output")
-test_with_display_name() -> void
+test_with_display_name() -> unit
     0
 ```
 
@@ -1343,11 +1454,11 @@ test_with_display_name() -> void
 
 ```
 #test(should_panic)
-test_guard() -> void
+test_guard() -> unit
     panic("this must fire")
 
 #test(should_panic: "out of range")
-test_bounds() -> void
+test_bounds() -> unit
     // substring match: panic message must contain "out of range"
     panic("index 42 is out of range")
 ```
@@ -1380,9 +1491,9 @@ std/mem/mem.lsysl
 Exit code is 0 iff all tests pass. Failing tests print the source file and line of the `#test` attribute (`at file:line`).
 
 **Builtins useful in tests:**
-- `panic(msg: string) -> void` — halts with the given message. Primary failure signal inside tests.
-- `assert(cond: bool, msg: string) -> void` — panics with `msg` if `cond` is false; returns otherwise.
-- `expect(actual: i64, expected: i64, msg: string) -> void` — panics with `"msg: expected N, got M"` if values differ. Better diagnostics than `assert(a == b, ...)`.
+- `panic(msg: string) -> unit` — halts with the given message. Primary failure signal inside tests.
+- `assert(cond: bool, msg: string) -> unit` — panics with `msg` if `cond` is false; returns otherwise.
+- `expect(actual: i64, expected: i64, msg: string) -> unit` — panics with `"msg: expected N, got M"` if values differ. Better diagnostics than `assert(a == b, ...)`.
 
 **Test output capture:** Any output from `print`, `println`, `puts`, or `puti` inside a test function is captured and displayed below the failure message if the test fails. This is useful for debugging intermediate values.
 

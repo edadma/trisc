@@ -1,0 +1,102 @@
+std.fs — File system operations
+================================
+
+Functions for querying and manipulating the file system:
+stat, readdir, exists, mkdir, remove, rename, etc.
+
+All functions are `extern` — backed by the host runtime.
+
+    module std.fs
+
+
+Types
+-----
+
+### FileStat
+
+Metadata about a file or directory.
+
+    struct FileStat
+        size: i64
+        mode: int
+        mtime: i64
+        is_dir: bool
+        is_file: bool
+
+### DirEntry
+
+A single directory entry returned by `readdir`.
+
+    struct DirEntry
+        name: string
+        is_dir: bool
+
+
+Functions
+---------
+
+### stat
+
+Return metadata about a file.
+
+    extern stat(path: string) -> FileStat
+
+### readdir
+
+List entries in a directory.
+
+    extern readdir(path: string) -> []DirEntry
+
+### exists
+
+Check whether a path exists.
+
+    extern exists(path: string) -> bool
+
+### is_dir
+
+Check whether a path is a directory.
+
+    extern is_dir(path: string) -> bool
+
+### mkdir
+
+Create a directory. Returns 0 on success.
+
+    extern mkdir(path: string) -> int
+
+### mkdirs
+
+Create a directory and all parent directories.
+
+    extern mkdirs(path: string) -> int
+
+### remove
+
+Remove a file or empty directory.
+
+    extern remove(path: string) -> int
+
+### rename
+
+Rename a file or directory.
+
+    extern rename(old_path: string, new_path: string) -> int
+
+### getcwd
+
+Return the current working directory.
+
+    extern getcwd() -> string
+
+### read_file
+
+Read an entire file into a string.
+
+    extern read_file(path: string) -> string
+
+### write_file
+
+Write a string to a file, replacing its contents.
+
+    extern write_file(path: string, data: string) -> int

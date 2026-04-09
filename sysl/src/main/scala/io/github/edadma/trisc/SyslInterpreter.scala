@@ -278,6 +278,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TEnumDecl => // type only, no runtime effect
         case _: TDataEnumDecl => // type only, no runtime effect
         case _: TTypeAliasDecl => // type only, no runtime effect
+        case _: TInterfaceDecl => // type only, no runtime effect
         case f: TFunDecl =>
           functions(f.name) = f
           if f.name.endsWith("_deinit") then
@@ -304,6 +305,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TEnumDecl => // type only
         case _: TDataEnumDecl => // type only
         case _: TTypeAliasDecl => // type only
+        case _: TInterfaceDecl => // type only
         case f: TFunDecl =>
           functions(f.name) = f
           if f.name.endsWith("_deinit") then
@@ -634,6 +636,12 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TVarRef(name, _) => lookupCell(name, env).value
 
       case TAddrOf(name, _) => PtrVal(CellPtr(lookupCell(name, env)))
+
+      case TTempAddr(expr, _) =>
+        // Evaluate expression, store in a temporary cell, return pointer to it
+        val value = evalAny(expr, env)
+        val cell = new Cell(value)
+        PtrVal(CellPtr(cell))
 
       case TAddrOfField(obj, fieldIndex, _) =>
         val ArrVal(cells, off) = evalAny(obj, env): @unchecked
@@ -1080,8 +1088,11 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         EnumVal(variantIndex, cells)
 
       case TFieldAccess(obj, fieldIndex, _) =>
-        val ArrVal(cells, off) = evalAny(obj, env): @unchecked
-        cells(off + fieldIndex).value
+        val struct = evalAny(obj, env) match
+          case arr: ArrVal => arr
+          case PtrVal(ptr) => ptr.deref.value.asInstanceOf[ArrVal]  // auto-deref pointer to struct
+          case other => throw RuntimeError(s"cannot access field on $other")
+        struct.cells(struct.offset + fieldIndex).value
 
       case TFuncRef(name, _) => FuncVal(name)
 
@@ -1095,13 +1106,23 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TInterfaceBox(expr, iface) =>
         val dataVal = evalAny(expr, env)
-        // Build method map: interface method name → mangled function name
+        // Build method map: interface method name → actual registered function name
         val structName = expr.typ match
           case SyslType.StructType(name, _) => name
           case SyslType.PtrType(SyslType.StructType(name, _)) => name
           case SyslType.RefType(SyslType.StructType(name, _)) => name
           case other => throw RuntimeError(s"cannot box $other into interface")
-        val methodMap = iface.methods.map { (mname, _, _) => (mname, s"${structName}_$mname") }.toMap
+        val methodMap = iface.methods.map { (mname, _, _) =>
+          val shortKey = s"${structName}_$mname"
+          // Try short name first, then search for mangled variant
+          val funcName = functions.get(shortKey) match
+            case Some(f) => f.name
+            case None =>
+              functions.values.find(f => f.name.endsWith(s"__$shortKey"))
+                .map(_.name)
+                .getOrElse(shortKey) // fallback to short name
+          (mname, funcName)
+        }.toMap
         InterfaceVal(methodMap, dataVal, expr.typ)
 
       case TInterfaceDispatch(ifaceVal, methodIndex, args, _) =>

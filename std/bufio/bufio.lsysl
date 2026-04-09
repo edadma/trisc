@@ -1,0 +1,272 @@
+std.bufio — Buffered I/O
+========================
+
+Buffered wrappers for `Reader` and `Writer` interfaces.
+`BufReader` provides `read_byte` and `read_line` on top
+of any `Reader`. Inspired by Go's `bufio` package.
+
+Since Sysl interfaces cannot yet be stored in struct
+fields, `BufReader` wraps a `ByteReader` directly. When
+interface-in-struct support lands, this can be generalized.
+
+Dependencies: std.io.
+
+
+    module std.bufio
+
+    import std.debug.{assert}
+    import std.io.{ByteReader}
+
+
+Constants
+---------
+
+    val DEFAULT_BUF_SIZE = 1024
+
+
+BufReader
+---------
+
+Wraps a `ByteReader` with single-byte and line reading.
+Uses a fixed internal buffer and refills from the inner
+reader as needed.
+
+    struct BufReader
+        inner: ByteReader
+        buf: [1024]byte
+        pos: int
+        count: int
+
+    new_buf_reader(data: []byte) -> BufReader
+        var br = BufReader(ByteReader(data, 0), "", 0, 0)
+        br.fill()
+        return br
+
+    BufReader.fill()
+        val n = self.inner.read(self.buf[:])
+        self.pos = 0
+        self.count = n
+
+    BufReader.read_byte() -> (int, bool)
+        if self.pos >= self.count
+            self.fill()
+            if self.count == 0 then return 0, false
+
+        val b = int(self.buf[self.pos])
+        self.pos++
+        return b, true
+
+
+### read_line
+
+`read_line()` reads until the next newline (`\n`) or EOF.
+Returns `(line, ok)` where `line` excludes the newline.
+Returns `("", false)` at EOF.
+
+    BufReader.read_line() -> (string, bool)
+        var result = (new [0]byte)[:0]
+        var found = false
+
+        while !found
+            val b, ok = self.read_byte()
+
+            if !ok
+                if len(result) > 0 then return string(result), true
+                return "", false
+
+            if b == 10
+                found = true
+            else
+                result = append(result, byte(b))
+
+        return string(result), true
+
+
+### peek
+
+`peek()` returns the next byte without consuming it.
+Returns `(byte, ok)`.
+
+    BufReader.peek() -> (int, bool)
+        if self.pos >= self.count
+            self.fill()
+            if self.count == 0 then return 0, false
+
+        return int(self.buf[self.pos]), true
+
+
+### at_eof
+
+    BufReader.at_eof() -> bool
+        if self.pos < self.count then return false
+        self.fill()
+        return self.count == 0
+
+
+Tests
+=====
+
+
+### read_byte
+
+    #test
+    test_read_byte_basic() -> unit
+        val data: [3]byte = "abc"
+        var r = new_buf_reader(data[:])
+        val b1, ok1 = r.read_byte()
+        assert(ok1, "ok1")
+        assert(b1 == 97, "a")
+        val b2, ok2 = r.read_byte()
+        assert(ok2, "ok2")
+        assert(b2 == 98, "b")
+        val b3, ok3 = r.read_byte()
+        assert(ok3, "ok3")
+        assert(b3 == 99, "c")
+        val _, ok4 = r.read_byte()
+        assert(!ok4, "eof")
+
+    #test
+    test_read_byte_empty() -> unit
+        val data: [0]byte = ""
+        var r = new_buf_reader(data[:])
+        val _, ok = r.read_byte()
+        assert(!ok, "eof immediately")
+
+
+### read_line
+
+    #test
+    test_read_line_single() -> unit
+        val data: [6]byte = "hello\n"
+        var r = new_buf_reader(data[:])
+        val line, ok = r.read_line()
+        assert(ok, "ok")
+        assert(line == "hello", s"got: ${line}")
+
+    #test
+    test_read_line_multiple() -> unit
+        val data: [12]byte = "foo\nbar\nbaz\n"
+        var r = new_buf_reader(data[:])
+
+        val l1, ok1 = r.read_line()
+        assert(ok1, "ok1")
+        assert(l1 == "foo", "foo")
+
+        val l2, ok2 = r.read_line()
+        assert(ok2, "ok2")
+        assert(l2 == "bar", "bar")
+
+        val l3, ok3 = r.read_line()
+        assert(ok3, "ok3")
+        assert(l3 == "baz", "baz")
+
+        val _, ok4 = r.read_line()
+        assert(!ok4, "eof")
+
+    #test
+    test_read_line_no_trailing_newline() -> unit
+        val data: [5]byte = "hello"
+        var r = new_buf_reader(data[:])
+        val line, ok = r.read_line()
+        assert(ok, "ok")
+        assert(line == "hello", "hello without newline")
+        val _, ok2 = r.read_line()
+        assert(!ok2, "eof")
+
+    #test
+    test_read_line_empty_lines() -> unit
+        val data: [3]byte = "\n\n\n"
+        var r = new_buf_reader(data[:])
+
+        val l1, ok1 = r.read_line()
+        assert(ok1, "ok1")
+        assert(l1 == "", "empty line 1")
+
+        val l2, ok2 = r.read_line()
+        assert(ok2, "ok2")
+        assert(l2 == "", "empty line 2")
+
+        val l3, ok3 = r.read_line()
+        assert(ok3, "ok3")
+        assert(l3 == "", "empty line 3")
+
+        val _, ok4 = r.read_line()
+        assert(!ok4, "eof")
+
+    #test
+    test_read_line_empty_input() -> unit
+        val data: [0]byte = ""
+        var r = new_buf_reader(data[:])
+        val _, ok = r.read_line()
+        assert(!ok, "eof immediately")
+
+
+### peek
+
+    #test
+    test_peek_basic() -> unit
+        val data: [3]byte = "abc"
+        var r = new_buf_reader(data[:])
+        val b1, ok1 = r.peek()
+        assert(ok1, "ok1")
+        assert(b1 == 97, "peeked a")
+        // peek doesn't consume
+        val b2, ok2 = r.peek()
+        assert(ok2, "ok2")
+        assert(b2 == 97, "still a")
+        // read consumes
+        val b3, _ = r.read_byte()
+        assert(b3 == 97, "read a")
+        val b4, _ = r.peek()
+        assert(b4 == 98, "peek b")
+
+    #test
+    test_peek_eof() -> unit
+        val data: [0]byte = ""
+        var r = new_buf_reader(data[:])
+        val _, ok = r.peek()
+        assert(!ok, "eof")
+
+
+### at_eof
+
+    #test
+    test_at_eof() -> unit
+        val data: [2]byte = "ab"
+        var r = new_buf_reader(data[:])
+        assert(!r.at_eof(), "not eof at start")
+        val _, _ = r.read_byte()
+        val _, _ = r.read_byte()
+        assert(r.at_eof(), "eof after reading all")
+
+
+### CSV-like parsing
+
+    #test
+    test_read_csv_lines() -> unit
+        val data: [18]byte = "name,age\nalice,30\n"
+        var r = new_buf_reader(data[:])
+
+        val header, ok1 = r.read_line()
+        assert(ok1, "header ok")
+        assert(header == "name,age", "header")
+
+        val row, ok2 = r.read_line()
+        assert(ok2, "row ok")
+        assert(row == "alice,30", "row")
+
+
+Design notes
+------------
+
+**ByteReader-only.** The current implementation wraps
+`ByteReader` directly since Sysl interfaces cannot be
+stored in struct fields yet. When that restriction is
+lifted, `BufReader` will take a `Reader` interface.
+
+**Fixed buffer.** Uses a 1024-byte stack buffer. For most
+text processing this is more than sufficient.
+
+**Line delimiter.** Only `\n` is recognized as a line
+terminator. `\r\n` handling (strip trailing `\r`) can be
+added when needed.

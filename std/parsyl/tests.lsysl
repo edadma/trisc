@@ -77,11 +77,11 @@ directory as one package.
         else
             natural()(s, j0)
 
-    expression_parser() -> func(string, int) -> ParseMaybe[int] =
+    expression_parser() -> (string, int) -> ParseMaybe[int] =
         (s: string, i: int) -> expr_parse_prec(s, i, 0)
 
     #test
-    integration_expression_parser() -> void
+    integration_expression_parser() -> unit
         val p = expression_parser()
         run_all_int(p, "1+2") match
             Got(_, v) -> expect(v, 3, "1+2")
@@ -106,28 +106,28 @@ directory as one package.
             Miss -> assert(false, "2+3*4")
 
     #test
-    smoke_lit_then_run_all() -> void
+    smoke_lit_then_run_all() -> unit
         val p = lit(int('z'))
         run_all_int(p, "z") match
             Got(_, ch) -> expect(ch, int('z'), "literal round-trip")
             Miss -> assert(false, "lit(z)")
 
     #test
-    ex_lit_a_matches() -> void
+    ex_lit_a_matches() -> unit
         val p = lit(int('a'))
         run_all_int(p, "a") match
             Got(_, _) -> assert(true, "ok")
             Miss -> assert(false, "expected a")
 
     #test
-    ex_lit_a_rejects_b() -> void
+    ex_lit_a_rejects_b() -> unit
         val p = lit(int('a'))
         run_all_int(p, "b") match
             Got(_, _) -> assert(false, "no match")
             Miss -> assert(true, "ok")
 
     #test
-    ex_alt_ab_accepts_either_byte() -> void
+    ex_alt_ab_accepts_either_byte() -> unit
         val p = alt(lit(int('a')), lit(int('b')))
         run_all_int(p, "a") match
             Got(_, _) -> assert(true, "a")
@@ -137,7 +137,7 @@ directory as one package.
             Miss -> assert(false, "b")
 
     #test
-    ex_seq_ab_then_map() -> void
+    ex_seq_ab_then_map() -> unit
         val raw = seq(lit(int('a')), lit(int('b')))
         val p = map(raw, (pair: (int, int)) -> pair.0 + pair.1)
         run_all_int(p, "ab") match
@@ -145,7 +145,7 @@ directory as one package.
             Miss -> assert(false, "ab")
 
     #test
-    integration_xy_checksum() -> void
+    integration_xy_checksum() -> unit
         val p = map(
             seq(lit(int('x')), lit(int('y'))),
             (pair: (int, int)) -> pair.0 * 1000 + pair.1)
@@ -154,14 +154,14 @@ directory as one package.
             Miss -> assert(false, "xy")
 
     #test
-    ex_many0_allows_empty() -> void
+    ex_many0_allows_empty() -> unit
         val p = many0_int(digit_unit())
         run_all_ints(p, "") match
             Got(_, codes) -> expect(len(codes), 0, "zero digits")
             Miss -> assert(false, "many0 empty")
 
     #test
-    ex_many1_needs_at_least_one() -> void
+    ex_many1_needs_at_least_one() -> unit
         val p = many1_int(digit_unit())
         run_all_ints(p, "") match
             Got(_, _) -> assert(false, "empty fail")
@@ -173,37 +173,37 @@ directory as one package.
             Miss -> assert(false, "2048")
 
     #test
-    integration_natural_answers() -> void
+    integration_natural_answers() -> unit
         run_all_int(natural(), "99") match
             Got(_, n) -> expect(n, 99, "two-digit")
             Miss -> assert(false, "99")
 
     #test
-    integration_natural_rejects_trailing_garbage() -> void
+    integration_natural_rejects_trailing_garbage() -> unit
         run_all_int(natural(), "42!") match
             Got(_, _) -> assert(false, "trailing junk")
             Miss -> assert(true, "ok")
 
     #test
-    ex_natural_single_digit() -> void
+    ex_natural_single_digit() -> unit
         run_all_int(natural(), "7") match
             Got(_, n) -> expect(n, 7, "digit")
             Miss -> assert(false, "7")
 
     #test
-    ex_natural_leading_zeros_count() -> void
+    ex_natural_leading_zeros_count() -> unit
         run_all_int(natural(), "007") match
             Got(_, n) -> expect(n, 7, "leading zeros")
             Miss -> assert(false, "007")
 
     #test
-    ex_natural_large_constant() -> void
+    ex_natural_large_constant() -> unit
         run_all_int(natural(), "2048") match
             Got(_, n) -> expect(n, 2048, "2048")
             Miss -> assert(false, "2048")
 
     #test
-    ex_natural_rejects_empty() -> void
+    ex_natural_rejects_empty() -> unit
         run_all_int(natural(), "") match
             Got(_, _) -> assert(false, "empty")
             Miss -> assert(true, "ok")

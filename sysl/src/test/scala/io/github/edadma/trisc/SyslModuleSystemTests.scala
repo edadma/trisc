@@ -92,7 +92,7 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
     merged.symbols.length shouldBe 2
     val strlen = merged.symbols.find(_.name == "strlen").get
     strlen.typ match
-      case SymbolMeta.Kind.Func(params, _) => params.length shouldBe 1
+      case SymbolMeta.Kind.Func(params, _, _) => params.length shouldBe 1
       case _ => fail("expected Func")
     merged.symbols.exists(_.name == "strcpy") shouldBe true
   }

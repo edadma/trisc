@@ -238,7 +238,7 @@ object SyslCli:
       case Nil => List(".")
       case dirs => dirs
 
-    val driver = new SyslDriver(Some(io), baseDirs)
+    val driver = new SyslDriver(Some(io), baseDirs, tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
     val result = driver.compile(sources)
 
     // Write .smeta files for package modules
@@ -282,39 +282,17 @@ object SyslCli:
     val sources = resolveSources(cmd.inputs)
     val argv = cmd.programArgs.toArray
 
-    if sources.size == 1 then
-      // Single file: parse → analyze → interpret directly
-      val source = sources.values.head
-      val parser = new SyslParser
-      parser.parseProgram(source) match
-        case Left(err) =>
-          fail(s"parse error: $err")
-        case Right(ast) =>
-          // Check for stdlib imports and register them with the analyzer
-          val stdlibImports = ast.decls.collect {
-            case ImportDeclAST(path, _) if SyslStdlib.modules.contains(path) => path
-          }.toSet
-          val analyzer = new SyslAnalyzer
-          for mod <- stdlibImports do
-            analyzer.registerImport(SyslStdlib.meta(mod))
-          val typed = stripTestDecls(analyzer.analyze(ast))
-          val interpreter = new SyslInterpreter()
-          wireStdlib(interpreter, stdlibImports, argv)
-          val result = interpreter.run(typed)
-          if result != 0 then println(result)
-    else
-      // Multi-file: use driver, merge typed ASTs, then interpret
-      val baseDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList match
-        case Nil => List(".")
-        case dirs => dirs
-      val driver = new SyslDriver(Some(io), baseDirs)
-      val result = driver.compile(sources)
-      val stdlibImports = driver.collectStdlibImports(result.units)
-      val merged = stripTestDecls(TProgram(result.units.flatMap(_.typed.decls)))
-      val interpreter = new SyslInterpreter()
-      wireStdlib(interpreter, stdlibImports, argv)
-      val value = interpreter.run(merged)
-      if value != 0 then println(value)
+    val baseDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList match
+      case Nil => List(".")
+      case dirs => dirs
+    val driver = new SyslDriver(Some(io), baseDirs, tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
+    val result = driver.compile(sources)
+    val stdlibImports = driver.collectStdlibImports(result.units)
+    val merged = stripTestDecls(TProgram(result.units.flatMap(_.typed.decls)))
+    val interpreter = new SyslInterpreter()
+    wireStdlib(interpreter, stdlibImports, argv)
+    val value = interpreter.run(merged)
+    if value != 0 then println(value)
 
   private def isTestFn(f: TFunDecl): Boolean =
     f.attributes.exists(_.name == "test")
@@ -403,7 +381,7 @@ object SyslCli:
         else
           List(resolveSource(p, ""))
       }.toMap
-    val driver = new SyslDriver(Some(io), baseDirs)
+    val driver = new SyslDriver(Some(io), baseDirs, tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
     val result = driver.compile(sources)
     val stdlibImports = driver.collectStdlibImports(result.units)
 
@@ -530,11 +508,12 @@ object SyslCli:
     if imports.nonEmpty then
       val ctx = new SyslStdlib.StdlibContext(argv = argv)
       for mod <- imports do
+        // Extern functions are NOT module-mangled (ABI-level names)
         interpreter.registerBuiltins(SyslStdlib.builtins(mod, ctx))
-      // Register constants (e.g., O_RDONLY, STDIN, etc.)
+      // Val constants ARE module-mangled (e.g., O_RDONLY → std_io__O_RDONLY)
       if imports.contains("std/io") then
         for (name, value) <- SyslStdlib.ioConstants do
-          interpreter.registerGlobal(name, value)
+          interpreter.registerGlobal(s"std_io__$name", value)
 
   private def io: FileOps = FileOps.instance
 
