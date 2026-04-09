@@ -189,10 +189,9 @@ and a write cursor within each segment.
 Load a TOF file from the filesystem. Returns the entry
 point address, or a negative error code.
 
-The file is read in a loop because `fs_read` returns at
-most ~507 bytes per IPC call. The buffer is heap-allocated
-since TOF executables can be large (tens of KB with
-statically linked libraries).
+With grant-based I/O, `fs_read` writes directly to our
+buffer — no size limit per call. We still loop because
+`tfs_read` is limited by file size, not IPC buffer size.
 
     val LOAD_BUF_SIZE = 65536
 
@@ -205,14 +204,14 @@ statically linked libraries).
         if i64(buf) == 0
             return LOAD_ERR_READ
 
-        // Read entire file in a loop
+        // Read entire file — grant-based I/O, no per-call size limit
         var total = 0
-        var nr = fs_read(ino, buf + total, total, 507)
+        var nr = fs_read(ino, buf, 0, LOAD_BUF_SIZE)
         while nr > 0
             total += nr
             if total >= LOAD_BUF_SIZE
                 break
-            nr = fs_read(ino, buf + total, total, 507)
+            nr = fs_read(ino, buf + total, total, LOAD_BUF_SIZE - total)
 
         if total <= 0
             free(buf)

@@ -132,21 +132,20 @@ or -1 on error.
         val port = port_lookup(&fs_name[0])
         if port < 0
             return -1
-        var msg: [13]byte
+        // Grant-based: pass buffer address, server writes directly
+        var msg: [17]byte
         msg[0] = byte(FS_CMD_READ)
         msg_write_i32(&msg[0], 1, ino)
         msg_write_i32(&msg[0], 5, offset)
         msg_write_i32(&msg[0], 9, count)
-        var reply: [512]byte
-        val result = ipc_send(port, &msg[0], 13, &reply[0], 512)
+        msg_write_i32(&msg[0], 13, int(i64(buf)))
+        var reply: [5]byte
+        val result = ipc_send(port, &msg[0], 17, &reply[0], 5)
         if result != 0
             return -1
         if reply[0] != 0
             return -1
-        val nr = msg_read_i32(&reply[0], 1)
-        for var i = 0; i < nr; i++
-            buf[i] = reply[i + 5]
-        nr
+        msg_read_i32(&reply[0], 1)
 
 Program arguments — stored at a well-known address by the
 shell before launching the program. This convention will be
