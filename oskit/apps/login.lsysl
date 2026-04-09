@@ -147,8 +147,8 @@ Look up a user in /etc/passwd. Returns uid or -1 on failure.
 Also stores the home directory in login_home/login_home_len.
 
     lookup_passwd(user: *byte, userlen: int) -> int
-        var filebuf: [512]byte
-        val nr = read_file("/etc/passwd", filebuf, 512)
+        var filebuf: [4096]byte
+        val nr = read_file("/etc/passwd", filebuf, 4096)
         if nr <= 0
             return -1
         val line = find_user_line(filebuf, nr, user, userlen)
@@ -193,8 +193,8 @@ Look up a password in /etc/shadow. Returns 1 if match, 0 if not.
 Shadow format: username:salt:hash_hex (PBKDF2-HMAC-SHA256, c=1).
 
     check_shadow(user: *byte, userlen: int, pass: *byte, passlen: int) -> int
-        var filebuf: [512]byte
-        val nr = read_file("/etc/shadow", filebuf, 512)
+        var filebuf: [4096]byte
+        val nr = read_file("/etc/shadow", filebuf, 4096)
         if nr <= 0
             return 0
         val line = find_user_line(filebuf, nr, user, userlen)

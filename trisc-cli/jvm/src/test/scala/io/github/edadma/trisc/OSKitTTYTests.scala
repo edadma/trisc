@@ -12,6 +12,8 @@ class OSKitTTYTests extends OSKitTestHelpers {
   private lazy val ipcSysl: String = readLsysl("oskit/ipc/ipc.lsysl")
   private lazy val kbdSysl: String = readLsysl("oskit/drivers/kbd/keyboard.lsysl")
   private lazy val ttySysl: String = readLsysl("oskit/drivers/tty/tty.lsysl")
+  private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
+  private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   // keyEvents: (vkCode, press, modifierBits) — pre-enqueued before CPU starts
   // scheduledKeys: (cycle, vkCode, press, modifierBits) — injected at specific cycle count
@@ -22,7 +24,8 @@ class OSKitTTYTests extends OSKitTestHelpers {
     val allSources = Map(
       "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
       "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
-      "oskit/ipc/ipc" -> ipcSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl, "oskit/drivers/tty/tty" -> ttySysl,
+      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "std/debug/debug" -> debugSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl, "oskit/drivers/tty/tty" -> ttySysl,
+      "posix/unistd/sbrk" -> sbrkSysl, "posix/stdlib/alloc" -> posixAllocSysl, "posix/string/string" -> posixStringSysl, "posix/ctype/ctype" -> posixCtypeSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -36,7 +39,7 @@ class OSKitTTYTests extends OSKitTestHelpers {
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
       val name = "stdout"
-      val base: Long = 0x100000
+      val base: Long = Runtime.stdoutAddress
       val size: Long = 1
       def writeByte(addr: Long, data: Long): Unit = output += data.toChar
       override def loadByte(addr: Long, data: Long): Unit = ()
@@ -44,7 +47,9 @@ class OSKitTTYTests extends OSKitTestHelpers {
     val intc = new InterruptController(Runtime.intcAddress)
     val timer = new Timer(Runtime.timerAddress, intc, irq = 0)
     val kbd = new KeyboardDevice(Runtime.keyboardAddress, intc, irq = 1)
-    val mem = new Memory("Memory", new RAM(0, 0x100000), stdout, intc, timer, kbd)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
+    val mem = new Memory("Memory", new RAM(0, Runtime.stdoutAddress.toInt), stdout, intc, timer, kbd, dma)
+    dma.mem = mem
     linked.load(mem)
 
     // Pre-enqueue keyboard events

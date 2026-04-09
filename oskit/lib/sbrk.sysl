@@ -3,12 +3,12 @@ module posix.unistd
 /*
  * sbrk for SLIX — uses linker-defined heap region.
  * Heap grows upward from _heap_start. Stacks are in upper
- * RAM (0x80000+), so heap ceiling is set to 0x7E000.
+ * RAM (0x600000+), so heap ceiling is set to 0x5FE000.
  */
 
 extern _heap_start: byte
 
-val HEAP_CEILING: i64 = 0x7E000
+val HEAP_CEILING: i64 = 0x5FE000
 
 var _brk: *byte = *byte(0)
 var _brk_initialized = false

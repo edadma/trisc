@@ -149,15 +149,15 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
 
       val typed = analyzer.analyze(ast)
       val modPath = modules.get(name)
-      // Extract generic templates from the source AST for cross-module generic instantiation
+      // Extract generic templates and trait declarations from the source AST
       val templates = ast.decls.filter {
         case StructDeclAST(_, _, tps, _) => tps.nonEmpty
         case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
         case FunDeclAST(_, _, _, _, _, tps, _, _, _) => tps.nonEmpty
         case _ => false
-      }
+      } ++ analyzer.getTraitDecls
       val baseMeta = ModuleMeta.fromProgram(typed, if modPath.isDefined then Some(s"$name.sysl") else None)
-      val meta = new ModuleMeta(baseMeta.symbols, templates)
+      val meta = new ModuleMeta(baseMeta.symbols, templates, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances)
       val smeta = meta.toSmeta
 
       modPath match
@@ -282,7 +282,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
           val analyzer = new SyslAnalyzer
           val typed = analyzer.analyze(stripped)
           val meta = ModuleMeta.fromProgram(typed)
-          new ModuleMeta(meta.symbols, templates)
+          new ModuleMeta(meta.symbols, templates ++ analyzer.getTraitDecls, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances)
         }.toOption
       case Left(_) => None
 

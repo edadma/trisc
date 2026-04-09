@@ -185,7 +185,7 @@ Uses the ESP32-style SHA-256 MMIO accelerator. The host
 computes the compression function in hardware; software
 handles padding and block sequencing.
 
-    val SHA_BASE = 0x100160
+    val SHA_BASE = 0x800160
 
 Write a 512-bit message block to the accelerator's TEXT
 registers and trigger compression. Uses `*u32` word-level

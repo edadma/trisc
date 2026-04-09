@@ -44,7 +44,7 @@ class BenchmarkTests extends TestHelpers {
     val progTof = Linker.link(tofs, relocatable = true)
     val linked = Linker.link(Seq(bootTof, progTof))
 
-    val mem = new Memory("Memory", new RAM(0, 0x100000))
+    val mem = new Memory("Memory", new RAM(0, Runtime.stdoutAddress.toInt))
     linked.load(mem)
     val cpu = new CPU(mem) { limit = maxCycles }
     cpu.reset()

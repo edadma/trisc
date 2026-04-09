@@ -9,13 +9,13 @@ package io.github.edadma.trisc
  */
 class StringConcatBugTests extends OSKitTestHelpers {
 
-  // Minimal boot that works with the linker script (1MB RAM, STDOUT at 0x100000)
+  // Minimal boot that works with the linker script (8MB RAM, STDOUT at 0x800000)
   private val linkerCompatBoot: String =
-    """STDOUT = 0x100000
+    s"""STDOUT = ${Runtime.stdoutAddress}
       |
       |segment vectors
       |
-      |  dl 0x0FFFF8
+      |  dl ${Runtime.stdoutAddress - 8}
       |  dl boot
       |  dl default_isr
       |  dl default_isr
@@ -108,13 +108,16 @@ class StringConcatBugTests extends OSKitTestHelpers {
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
       val name = "stdout"
-      val base: Long = 0x100000
+      val base: Long = Runtime.stdoutAddress
       val size: Long = 4
       def writeByte(addr: Long, data: Long): Unit = output += data.toChar
       override def loadByte(addr: Long, data: Long): Unit = ()
     }
-    val ram = new RAM(0, 0x100000)
-    val mem = new Memory("Memory", ram, stdout)
+    val ram = new RAM(0, Runtime.stdoutAddress.toInt)
+    val intc = new InterruptController(Runtime.intcAddress)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
+    val mem = new Memory("Memory", ram, stdout, intc, dma)
+    dma.mem = mem
     linked.load(mem)
     val cpu = new CPU(mem) { this.limit = maxCycles }
     cpu.reset()
@@ -639,6 +642,8 @@ class StringConcatBugTests extends OSKitTestHelpers {
   private lazy val ttySysl: String    = readLsysl("oskit/drivers/tty/tty.lsysl")
   private lazy val tfsSysl: String    = readLsysl("oskit/fs/tfs.lsysl")
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
+  private lazy val memSysl: String   = readLsysl("std/mem/mem.lsysl")
+  private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   private lazy val concatAppLinked: TOF =
     val bootTof    = assemble(bootAsm, relocatable = true)
@@ -649,6 +654,8 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/sync/semaphore"        -> semaphoreSysl,
       "oskit/sync/mutex"            -> mutexSysl,
       "oskit/ipc/ipc"               -> ipcSysl,
+      "std/mem/mem"                 -> memSysl,
+      "std/debug/debug"             -> debugSysl,
       "oskit/drivers/disk/disk"     -> diskSysl,
       "oskit/drivers/kbd/keyboard"  -> kbdSysl,
       "oskit/drivers/tty/tty"       -> ttySysl,
@@ -774,7 +781,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |import oskit.services.sleep
           |
           |init()
-          |    create_thread(disk_server, 0x80000, 0x80000, "disk")
+          |    create_thread(disk_server, 0x600000, 0x600000, "disk")
           |    sleep(5)
           |    create_thread(tfs_server, 0x90000, 0x90000, "tfs")
           |    create_thread(tty_server, 0xA0000, 0xA0000, "tty")
@@ -783,7 +790,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(init, 0xC0000, 0xC0000, "init")
+          |    create_thread(init, 0x640000, 0x640000, "init")
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin,
@@ -818,7 +825,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
       Runtime.ramdiskAddress,
       ram,
       sectors = 64,
-      sectorSize = 512,
+      sectorSize = 4096,
       intc,
       irq = 3,
       prefill = "\n",
@@ -844,6 +851,8 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/sync/semaphore"        -> semaphoreSysl,
       "oskit/sync/mutex"            -> mutexSysl,
       "oskit/ipc/ipc"               -> ipcSysl,
+      "std/mem/mem"                 -> memSysl,
+      "std/debug/debug"             -> debugSysl,
       "oskit/drivers/disk/disk"     -> diskSysl,
       "oskit/drivers/kbd/keyboard"  -> kbdSysl,
       "oskit/drivers/tty/tty"       -> ttySysl,
@@ -989,7 +998,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |import oskit.services.sleep
           |
           |init()
-          |    create_thread(disk_server, 0x80000, 0x80000, "disk")
+          |    create_thread(disk_server, 0x600000, 0x600000, "disk")
           |    sleep(5)
           |    create_thread(tfs_server, 0x90000, 0x90000, "tfs")
           |    create_thread(tty_server, 0xA0000, 0xA0000, "tty")
@@ -998,7 +1007,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(init, 0xC0000, 0xC0000, "init")
+          |    create_thread(init, 0x640000, 0x640000, "init")
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin,
@@ -1023,6 +1032,8 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/sync/semaphore"        -> semaphoreSysl,
       "oskit/sync/mutex"            -> mutexSysl,
       "oskit/ipc/ipc"               -> ipcSysl,
+      "std/mem/mem"                 -> memSysl,
+      "std/debug/debug"             -> debugSysl,
       "oskit/drivers/disk/disk"     -> diskSysl,
       "oskit/drivers/kbd/keyboard"  -> kbdSysl,
       "oskit/drivers/tty/tty"       -> ttySysl,
@@ -1138,7 +1149,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |import oskit.services.sleep
           |
           |init()
-          |    create_thread(disk_server, 0x80000, 0x80000, "disk")
+          |    create_thread(disk_server, 0x600000, 0x600000, "disk")
           |    sleep(5)
           |    create_thread(tfs_server, 0x90000, 0x90000, "tfs")
           |    create_thread(tty_server, 0xA0000, 0xA0000, "tty")
@@ -1147,7 +1158,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(init, 0xC0000, 0xC0000, "init")
+          |    create_thread(init, 0x640000, 0x640000, "init")
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin,
@@ -1176,7 +1187,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
     val ramSize = Runtime.stdoutAddress.toInt
     val ram     = new RAM(0, ramSize)
     val ramdisk = new Ramdisk(
-      Runtime.ramdiskAddress, ram, sectors = 64, sectorSize = 512,
+      Runtime.ramdiskAddress, ram, sectors = 64, sectorSize = 4096,
       intc, irq = 3, prefill = "/dev dir\n", maxInodes = 32,
     )
     val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk)
@@ -1207,7 +1218,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
       Runtime.ramdiskAddress,
       ram,
       sectors = 64,
-      sectorSize = 512,
+      sectorSize = 4096,
       intc,
       irq = 3,
       prefill = "/dev dir\n",

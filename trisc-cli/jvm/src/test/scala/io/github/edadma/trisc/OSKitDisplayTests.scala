@@ -52,14 +52,17 @@ class OSKitDisplayTests extends OSKitTestHelpers {
   private lazy val kbdSysl: String = readLsysl("oskit/drivers/kbd/keyboard.lsysl")
   private lazy val mouseSysl: String = readLsysl("oskit/drivers/mouse/mouse.lsysl")
   private lazy val displaySysl: String = readLsysl("oskit/drivers/display/display.lsysl")
+  private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
+  private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   def runDisplay(userSources: Map[String, String], maxCycles: Int = 10000000): (CPU, String) =
     val bootTof = assemble(bootAsm, relocatable = true)
     val allSources = Map(
       "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
       "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
-      "oskit/ipc/ipc" -> ipcSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl,
+      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "std/debug/debug" -> debugSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl,
       "oskit/drivers/mouse/mouse" -> mouseSysl, "oskit/drivers/display/display" -> displaySysl,
+      "posix/unistd/sbrk" -> sbrkSysl, "posix/stdlib/alloc" -> posixAllocSysl, "posix/string/string" -> posixStringSysl, "posix/ctype/ctype" -> posixCtypeSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -73,7 +76,7 @@ class OSKitDisplayTests extends OSKitTestHelpers {
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
       val name = "stdout"
-      val base: Long = 0x100000
+      val base: Long = Runtime.stdoutAddress
       val size: Long = 1
       def writeByte(addr: Long, data: Long): Unit = output += data.toChar
       override def loadByte(addr: Long, data: Long): Unit = ()
@@ -99,9 +102,11 @@ class OSKitDisplayTests extends OSKitTestHelpers {
       () => displayCtrl.currentFBWidth, () => displayCtrl.currentFBHeight,
     )
 
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
     val mem = new Memory("Memory",
-      new RAM(0, 0x100000), stdout, intc, timer, kbd, mouse,
-      displayCtrl, fb, drawEngine)
+      new RAM(0, Runtime.stdoutAddress.toInt), stdout, intc, timer, kbd, mouse,
+      displayCtrl, fb, drawEngine, dma)
+    dma.mem = mem
     memRef = mem
     linked.load(mem)
     val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles }
@@ -116,7 +121,7 @@ class OSKitDisplayTests extends OSKitTestHelpers {
     linked.tofType shouldBe TOFType.Executable
 
     val output = new StringBuilder
-    val stdout = new Stdout(0x100000, s => output ++= s)
+    val stdout = new Stdout(Runtime.stdoutAddress, s => output ++= s)
     val intc = new InterruptController(Runtime.intcAddress)
     val timer = new Timer(Runtime.timerAddress, intc, irq = 0)
     val kbd = new KeyboardDevice(Runtime.keyboardAddress, intc, irq = 1)
@@ -136,12 +141,14 @@ class OSKitDisplayTests extends OSKitTestHelpers {
       () => displayCtrl.currentFBWidth, () => displayCtrl.currentFBHeight,
     )
     // Include ramdisk like the GUI does
-    val ram = new RAM(0, 0x100000)
-    val ramdisk = new Ramdisk(Runtime.ramdiskAddress, ram, sectors = 2048, sectorSize = 512, intc, irq = 3,
+    val ram = new RAM(0, Runtime.stdoutAddress.toInt)
+    val ramdisk = new Ramdisk(Runtime.ramdiskAddress, ram, sectors = 256, sectorSize = 4096, intc, irq = 3,
       prefill = "/dev/tty0 char 0 0\n/dev/disk0 block 1 0\n/dev/null char 0 1\n")
     val blitter = new Blitter(Runtime.blitterAddress, memProxy, fb,
       () => displayCtrl.currentFBWidth, () => displayCtrl.currentFBHeight)
-    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, mouse, displayCtrl, fb, drawEngine, ramdisk, blitter)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, mouse, displayCtrl, fb, drawEngine, ramdisk, blitter, dma)
+    dma.mem = mem
     memRef = mem
     linked.load(mem)
     val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = 20000000 }

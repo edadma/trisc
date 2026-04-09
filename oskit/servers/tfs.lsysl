@@ -89,40 +89,35 @@ Reply:   [status(1), ino(4)]
             tfs_msg_write_i32(&reply[0], 1, ino)
         ipc_reply(sender, &reply[0], 5)
 
-Handle READ: read bytes from a file.
-Request: [cmd(1), ino(4), offset(4), len(4)]
-Reply:   [status(1), bytes_read(4), data...]
+Handle READ: read bytes from a file (grant-based).
+The client passes its buffer address in the message. The server
+writes directly to that address — no data in the reply.
+Request: [cmd(1), ino(4), offset(4), len(4), buf_addr(4)]
+Reply:   [status(1), bytes_read(4)]
 
     tfs_handle_read(sender: int, buf: *byte)
         val ino = tfs_msg_read_i32(buf, 1)
         val offset = tfs_msg_read_i32(buf, 5)
         val len = tfs_msg_read_i32(buf, 9)
-        // Cap read size to reply buffer
-        var rlen = len
-        if rlen > 500
-            rlen = 500
-        var data: [512]byte
-        val nr = tfs_read(ino, &data[0], offset, rlen)
-        // Build reply: [status(1), bytes_read(4), data...]
-        var reply: [512]byte
+        val buf_addr = *byte(tfs_msg_read_i32(buf, 13))
+        val nr = tfs_read(ino, buf_addr, offset, len)
+        var reply: [5]byte
         reply[0] = 0
         tfs_msg_write_i32(&reply[0], 1, nr)
-        var i = 0
-        while i < nr
-            reply[i + 5] = data[i]
-            i += 1
-        ipc_reply(sender, &reply[0], nr + 5)
+        ipc_reply(sender, &reply[0], 5)
 
-Handle WRITE: write bytes to a file.
-Request: [cmd(1), ino(4), offset(4), len(4), data...]
+Handle WRITE: write bytes to a file (grant-based).
+The client passes its buffer address in the message. The server
+reads directly from that address — no data in the message.
+Request: [cmd(1), ino(4), offset(4), len(4), buf_addr(4)]
 Reply:   [status(1), bytes_written(4)]
 
     tfs_handle_write(sender: int, buf: *byte)
         val ino = tfs_msg_read_i32(buf, 1)
         val offset = tfs_msg_read_i32(buf, 5)
         val len = tfs_msg_read_i32(buf, 9)
-        val data: *byte = buf + 13
-        val nw = tfs_write(ino, data, offset, len)
+        val buf_addr = *byte(tfs_msg_read_i32(buf, 13))
+        val nw = tfs_write(ino, buf_addr, offset, len)
         var reply: [5]byte
         reply[0] = 0
         tfs_msg_write_i32(&reply[0], 1, nw)
@@ -306,10 +301,11 @@ since tfs_init() reads the superblock via rd_read → disk_read.
         // Initialize TFS (reads superblock from disk server)
         tfs_init()
 
-        // Server loop
-        var buf: [512]byte
+        // Server loop — 64-byte messages (Minix 3 style).
+        // Bulk data uses grant-based I/O (buffer address in message).
+        var buf: [64]byte
         while 1 == 1
-            val sender = ipc_recv(tfs_port, &buf[0], 512)
+            val sender = ipc_recv(tfs_port, &buf[0], 64)
             if sender >= 0
                 val msg_len = ipc_last_msg_len()
                 val cmd = int(buf[0])
@@ -366,40 +362,34 @@ without building IPC messages manually.
         val port = port_lookup(&tfs_srv_name[0])
         if port < 0
             return -1
-        var msg: [13]byte
+        // Grant-based: pass buffer address, server writes directly
+        var msg: [17]byte
         msg[0] = TFS_CMD_READ
         tfs_msg_write_i32(&msg[0], 1, ino)
         tfs_msg_write_i32(&msg[0], 5, offset)
         tfs_msg_write_i32(&msg[0], 9, len)
-        var reply: [512]byte
-        val result = ipc_send(port, &msg[0], 13, &reply[0], 512)
+        tfs_msg_write_i32(&msg[0], 13, int(i64(buf)))
+        var reply: [5]byte
+        val result = ipc_send(port, &msg[0], 17, &reply[0], 5)
         if result != 0
             return -1
         if reply[0] != 0
             return -1
-        val nr = tfs_msg_read_i32(&reply[0], 1)
-        // Copy data to caller's buffer
-        var i = 0
-        while i < nr
-            buf[i] = reply[i + 5]
-            i += 1
-        nr
+        tfs_msg_read_i32(&reply[0], 1)
 
     fs_write(ino: int, data: *byte, offset: int, len: int) -> int
         val port = port_lookup(&tfs_srv_name[0])
         if port < 0
             return -1
-        var msg: [512]byte
+        // Grant-based: pass buffer address, server reads directly
+        var msg: [17]byte
         msg[0] = TFS_CMD_WRITE
         tfs_msg_write_i32(&msg[0], 1, ino)
         tfs_msg_write_i32(&msg[0], 5, offset)
         tfs_msg_write_i32(&msg[0], 9, len)
-        var i = 0
-        while i < len
-            msg[i + 13] = data[i]
-            i += 1
+        tfs_msg_write_i32(&msg[0], 13, int(i64(data)))
         var reply: [5]byte
-        val result = ipc_send(port, &msg[0], len + 13, &reply[0], 5)
+        val result = ipc_send(port, &msg[0], 17, &reply[0], 5)
         if result != 0
             return -1
         if reply[0] != 0

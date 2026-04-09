@@ -14,11 +14,13 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
   private lazy val posixStringSysl: String = scala.io.Source.fromFile("posix/string/string.sysl").mkString
   private lazy val posixCtypeSysl: String = scala.io.Source.fromFile("posix/ctype/ctype.sysl").mkString
   private lazy val posixAllocSysl: String = scala.io.Source.fromFile("posix/stdlib/alloc.sysl").mkString
+  private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
+  private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   // Inline sbrk for TFS tests — simple bump allocator in high RAM
   private val sbrk_inline: String =
     """module posix.unistd
-      |var _brk: *byte = *byte(0xC0000)
+      |var _brk: *byte = *byte(0x600000)
       |sbrk(increment: int) -> *byte
       |    if increment == 0
       |        return _brk
@@ -55,11 +57,11 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
        |""".stripMargin
 
   private val tfsBoot: String =
-    s"""STDOUT = 0x100000
+    s"""STDOUT = ${Runtime.stdoutAddress}
        |
        |segment vectors
        |
-       |  dl 0xFFF8
+       |  dl ${Runtime.stdoutAddress - 8}
        |  dl boot
        |  dl default_isr
        |  dl default_isr
@@ -109,7 +111,7 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
   // Library source keys — these never change between tests
   private val libSourceKeys = Set(
     "oskit/fs/tfs", "posix/string/string", "posix/ctype/ctype",
-    "posix/stdlib/alloc", "posix/unistd/sbrk", "ramdisk",
+    "posix/stdlib/alloc", "posix/unistd/sbrk", "ramdisk", "std/mem/mem", "std/debug/debug",
   )
 
   // Cache: boot TOF + compiled+assembled library TOFs (compiled once with dummy main)
@@ -131,6 +133,8 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
     "posix/stdlib/alloc" -> posixAllocSysl,
     "posix/unistd/sbrk" -> sbrk_inline,
     "ramdisk" -> ramdiskSource,
+    "std/mem/mem" -> memSysl,
+    "std/debug/debug" -> debugSysl,
   )
 
   private var _tracing = false
@@ -145,13 +149,17 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
       mainSource: String,
       prefill: String = "",
       maxCycles: Int = 5000000,
+      sectors: Int = 64,
+      files: Map[String, Array[Byte]] = Map.empty,
   ): (CPU, String) =
-    runTFS(Map("main" -> mainSource), prefill, maxCycles)
+    runTFS(Map("main" -> mainSource), prefill, maxCycles, sectors, files)
 
   def runTFS(
       sources: Map[String, String],
       prefill: String,
       maxCycles: Int,
+      sectors: Int,
+      files: Map[String, Array[Byte]],
   ): (CPU, String) =
     // Compile all sources together (needed for import resolution), but only
     // codegen+assemble the user sources — library TOFs are cached.
@@ -180,14 +188,17 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
     val ramdisk = new Ramdisk(
       Runtime.ramdiskAddress,
       ram,
-      sectors = 64,
-      sectorSize = 512,
+      sectors = sectors,
+      sectorSize = 4096,
       intc,
       irq = 3,
       prefill = prefill,
       maxInodes = 32,
+      files = files,
     )
-    val mem = new Memory("Memory", ram, stdout, intc, timer, ramdisk)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, ramdisk, dma)
+    dma.mem = mem
     linked.load(mem)
     val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles }
     if _tracing then

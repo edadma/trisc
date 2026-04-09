@@ -16,8 +16,8 @@ high-level commands over IPC.
     import oskit.ipc.*
     import oskit.drivers.mouse.{mouse_x, mouse_y, mouse_buttons, mouse_set_notify}
 
-    val DISPLAY_CTRL = 0x100008
-    val DRAW_ENGINE  = 0x1000A0
+    val DISPLAY_CTRL = 0x800008
+    val DRAW_ENGINE  = 0x8000A0
 
 DrawEngine register offsets.
 

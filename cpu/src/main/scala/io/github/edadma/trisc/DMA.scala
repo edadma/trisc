@@ -44,7 +44,7 @@ package io.github.edadma.trisc
  * @param intc  Interrupt controller
  * @param irq   IRQ line for DMA completion
  */
-class DMA(val base: Long, mem: Addressable, intc: InterruptController, irq: Int)
+class DMA(val base: Long, var mem: Addressable, intc: InterruptController, irq: Int)
     extends Device with (CPU => Unit):
   val name = "DMA"
   val size = 202
@@ -82,7 +82,7 @@ class DMA(val base: Long, mem: Addressable, intc: InterruptController, irq: Int)
   def readByte(addr: Long): Int =
     val off = (addr - base).toInt
     val regOff = off & ~3
-    val byteInReg = off & 3
+    val byteInReg = 3 - (off & 3) // big-endian: byte 0 is high byte
     val regVal = readReg(regOff)
     (regVal >> (byteInReg * 8)) & 0xFF
 
@@ -119,11 +119,11 @@ class DMA(val base: Long, mem: Addressable, intc: InterruptController, irq: Int)
   def writeByte(addr: Long, data: Long): Unit =
     val off = (addr - base).toInt
     val regOff = off & ~3
-    val byteInReg = off & 3
+    val byteInReg = 3 - (off & 3) // big-endian: byte 0 is high byte
     val current = readReg(regOff)
     val mask = 0xFF << (byteInReg * 8)
     val newVal = (current & ~mask) | (((data.toInt & 0xFF) << (byteInReg * 8)) & mask)
-    writeReg(regOff, newVal)
+    writeRegByteMode(regOff, newVal)
 
   override def writeInt(addr: Long, data: Long): Unit =
     writeReg((addr - base).toInt & ~3, data.toInt)
@@ -150,6 +150,25 @@ class DMA(val base: Long, mem: Addressable, intc: InterruptController, irq: Int)
                    else (current & 0x0000FFFF) | (sv << 16)
       writeReg(regBase, newVal)
 
+  /** Write register from byte-at-a-time access. For CTRL_TRIG, triggers
+    * when ENABLE transitions from 0 to 1 (i.e., the byte that sets ENABLE). */
+  private def writeRegByteMode(off: Int, data: Int): Unit =
+    if off < CH_AREA then
+      val ch = off / CH_SIZE
+      val field = off % CH_SIZE
+      if ch < NUM_CHANNELS then
+        field match
+          case 0  => readAddr(ch) = data.toLong & 0xFFFFFFFFL
+          case 4  => writeAddr(ch) = data.toLong & 0xFFFFFFFFL
+          case 8  => transCount(ch) = data
+          case 12 =>
+            val wasEnabled = (ctrl(ch) & ENABLE) != 0
+            ctrl(ch) = data & ~BUSY
+            if !wasEnabled && (data & ENABLE) != 0 && transCount(ch) > 0 then
+              completeTransfer(ch)
+          case _ =>
+    else ()
+
   private def writeReg(off: Int, data: Int): Unit =
     if off < CH_AREA then
       val ch = off / CH_SIZE
@@ -161,8 +180,48 @@ class DMA(val base: Long, mem: Addressable, intc: InterruptController, irq: Int)
           case 8  => transCount(ch) = data
           case 12 => // CTRL_TRIG
             ctrl(ch) = data & ~BUSY // BUSY is read-only
+            // Instant transfer: when ENABLE is set, complete all transfers immediately.
+            // This makes DMA copies effectively free from the CPU's perspective.
+            if (data & ENABLE) != 0 && transCount(ch) > 0 then
+              completeTransfer(ch)
           case _ =>
     else () // global registers handled by writeShort directly
+
+  /** Complete all remaining transfers for a channel immediately.
+    * This runs in the JVM, not emulated TRISC, so it's effectively instant
+    * compared to emulated byte-copy loops (~10 TRISC instructions per byte). */
+  private def completeTransfer(ch: Int): Unit =
+    val sz = dataSize(ch)
+    val count = transCount(ch)
+    val incrRead = (ctrl(ch) & INCR_READ) != 0
+    val incrWrite = (ctrl(ch) & INCR_WRITE) != 0
+
+    var i = 0
+    while i < count do
+      sz match
+        case 1 => mem.writeByte(writeAddr(ch), mem.readByte(readAddr(ch)))
+        case 2 => mem.writeShort(writeAddr(ch), mem.readShort(readAddr(ch)))
+        case 4 => mem.writeInt(writeAddr(ch), mem.readInt(readAddr(ch)))
+        case 8 => mem.writeLong(writeAddr(ch), mem.readLong(readAddr(ch)))
+        case _ =>
+      if incrRead then readAddr(ch) += sz
+      if incrWrite then writeAddr(ch) += sz
+      i += 1
+
+    // Complete
+    transCount(ch) = 0
+    ctrl(ch) &= ~ENABLE
+
+    // Raise interrupt
+    if (ctrl(ch) & IRQ_QUIET) == 0 then
+      intStatus |= (1 << ch)
+      updateInterrupt()
+
+    // Chain to next channel
+    val next = chainTo(ch)
+    if next < NUM_CHANNELS && next != ch then
+      ctrl(next) |= ENABLE
+      if transCount(next) > 0 then completeTransfer(next)
 
   private def updateInterrupt(): Unit =
     if (intStatus & intEnable) != 0 then intc.raise(irq)

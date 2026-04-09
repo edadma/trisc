@@ -64,7 +64,7 @@ Syscall numbers for IPC (31-37).
     val SYS_IPC_SEND_TIMED    = 38
     val SYS_IPC_RECV_NOTIFY   = 39
 
-Simple byte copy between memory addresses.
+Copy bytes between memory addresses.
 
     ipc_memcpy(dst: i64, src: i64, len: int)
         var d: *byte = *byte(dst)
