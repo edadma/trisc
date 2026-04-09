@@ -238,4 +238,91 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    len(parts)
         |""".stripMargin) shouldBe 2
   }
+
+  // ===== std.strconv =====
+
+  "std.strconv format_bool true" in {
+    llvmOutputWithStd(
+      """import std.strconv.*
+        |
+        |main()
+        |    puts(format_bool(true))
+        |""".stripMargin) shouldBe "true"
+  }
+
+  "std.strconv format_bool false" in {
+    llvmOutputWithStd(
+      """import std.strconv.*
+        |
+        |main()
+        |    puts(format_bool(false))
+        |""".stripMargin) shouldBe "false"
+  }
+
+  "std.strconv format_int" in {
+    llvmOutputWithStd(
+      """import std.strconv.*
+        |
+        |main()
+        |    puts(format_int(42))
+        |""".stripMargin) shouldBe "42"
+  }
+
+  "std.strconv format_int negative" in {
+    llvmOutputWithStd(
+      """import std.strconv.*
+        |
+        |main()
+        |    puts(format_int(-123))
+        |""".stripMargin) shouldBe "-123"
+  }
+
+  "std.strconv format_int_base hex" in {
+    llvmOutputWithStd(
+      """import std.strconv.*
+        |
+        |main()
+        |    puts(format_int_base(255, 16))
+        |""".stripMargin) shouldBe "ff"
+  }
+
+  "std.strconv parse_int" in {
+    llvmExitWithStd(
+      """import std.strconv.*
+        |import std.result.*
+        |
+        |main() -> int
+        |    val r = parse_int("42")
+        |    r match
+        |        Ok(v) -> v
+        |        Err(_) -> -1
+        |""".stripMargin) shouldBe 42
+  }
+
+  "std.strconv parse_bool" in {
+    llvmExitWithStd(
+      """import std.strconv.*
+        |import std.result.*
+        |
+        |main() -> int
+        |    val r = parse_bool("true")
+        |    r match
+        |        Ok(v) -> if v then 42 else 0
+        |        Err(_) -> -1
+        |""".stripMargin) shouldBe 42
+  }
+
+  // ===== std.encoding.hex =====
+
+  "std.encoding.hex encoded_len" in {
+    llvmExitWithStd(
+      """import std.encoding.hex.*
+        |
+        |main() -> int
+        |    encoded_len(3)
+        |""".stripMargin) shouldBe 6
+  }
+
+  // TODO: encode_to_string needs string-to-byte-array global initializer for HEX_DIGITS
+  // "std.encoding.hex encode_to_string" in { ... }
 }

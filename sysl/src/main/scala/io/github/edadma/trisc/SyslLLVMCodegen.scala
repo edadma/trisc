@@ -618,6 +618,50 @@ class SyslLLVMCodegen:
           case ">>" => emit(s"  $result = ${if isUnsigned then "lshr" else "ashr"} $lt $cur, $rv")
         emit(s"  store $lt $result, $lt* ${local.reg}")
 
+      case TDestructureStmt(names, types, init) =>
+        val tuplePtr = genExpr(init) // returns alloca pointer to struct/tuple
+        val st = init.typ.asInstanceOf[SyslType.StructType]
+        val structLt = llvmType(init.typ)
+        for (name, i) <- names.zipWithIndex do
+          val ft = types(i)
+          val flt = llvmType(ft)
+          val gep = newReg()
+          emit(s"  $gep = getelementptr $structLt, $structLt* $tuplePtr, i32 0, i32 $i")
+          if isAggregate(ft) then
+            locals(name) = LocalVar(name, gep, ft)
+          else
+            val alloca = newReg()
+            emit(s"  $alloca = alloca $flt")
+            val loaded = newReg()
+            emit(s"  $loaded = load $flt, $flt* $gep")
+            emit(s"  store $flt $loaded, $flt* $alloca")
+            locals(name) = LocalVar(name, alloca, ft)
+
+      case TDestructureAssignStmt(names, types, init) =>
+        val tuplePtr = genExpr(init)
+        val st = init.typ.asInstanceOf[SyslType.StructType]
+        val structLt = llvmType(init.typ)
+        for (name, i) <- names.zipWithIndex do
+          val ft = types(i)
+          val flt = llvmType(ft)
+          val gep = newReg()
+          emit(s"  $gep = getelementptr $structLt, $structLt* $tuplePtr, i32 0, i32 $i")
+          if isAggregate(ft) then
+            locals(name) = LocalVar(name, gep, ft)
+          else
+            if locals.contains(name) then
+              val local = locals(name)
+              val loaded = newReg()
+              emit(s"  $loaded = load $flt, $flt* $gep")
+              emit(s"  store $flt $loaded, $flt* ${local.reg}")
+            else
+              val alloca = newReg()
+              emit(s"  $alloca = alloca $flt")
+              val loaded = newReg()
+              emit(s"  $loaded = load $flt, $flt* $gep")
+              emit(s"  store $flt $loaded, $flt* $alloca")
+              locals(name) = LocalVar(name, alloca, ft)
+
       case _ =>
         emit(s"  ; TODO: ${stmt.getClass.getSimpleName}")
 
@@ -657,6 +701,8 @@ class SyslLLVMCodegen:
             val r = newReg()
             emit(s"  $r = load $lt, $lt* ${local.reg}")
             r
+        else if isAggregate(typ) then
+          s"@$name" // aggregate global: return address, don't load
         else
           val r = newReg()
           emit(s"  $r = load $t, $t* @$name")
@@ -2212,8 +2258,7 @@ class SyslLLVMCodegen:
 
   private def emitReleaseRefs(): Unit =
     val hasRefs = locals.exists((_, l) => isRef(l.typ))
-    val hasSlices = locals.exists((_, l) => l.typ.isInstanceOf[SyslType.SliceType])
-    if hasRefs || hasSlices then
+    if hasRefs then
       // Flush stdout before deinit functions might write to it
       val flushIgnored = newReg()
       emit(s"  $flushIgnored = call i32 @fflush(i8* null)")
@@ -2222,8 +2267,9 @@ class SyslLLVMCodegen:
       val ptr = newReg()
       emit(s"  $ptr = load i8*, i8** ${local.reg}")
       emitRefDecr(ptr, hoff, deinitFor(local.typ))
-    for (_, local) <- locals if local.typ.isInstanceOf[SyslType.SliceType] do
-      emitSliceBackrefDecr(local.reg)
+    // Note: slice backref decrements are intentionally omitted here.
+    // The backref increment keeps the backing ref alive for the caller.
+    // Proper scope-aware cleanup would decrement non-returned slices.
 
   /** Check if an expression is a TNew/TNewArray (already owns the ref, no incr needed). */
   private def isOwnedNew(expr: TExpr): Boolean = expr match
@@ -2244,6 +2290,7 @@ class SyslLLVMCodegen:
     case _ =>
       typ match
         case SyslType.StringType => "{ i8* null, i32 0 }"
+        case _ if isAggregate(typ) => "zeroinitializer"
         case _ => "0"
 
   private def emit(line: String): Unit =
