@@ -24,7 +24,7 @@ Device registers (MCU-style timer, word-aligned):
         sr:  byte
         ier: byte
 
-    val TIMER_BASE = 0x100040
+    val TIMER_BASE = 0x800040
     val TIMER_IRQ  = 0
 
     extern register_irq(irq: int, handler: i64)

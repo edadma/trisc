@@ -11,6 +11,8 @@ class OSKitDiskTests extends OSKitTestHelpers {
   private lazy val diskSysl: String = readLsysl("oskit/drivers/disk/disk.lsysl")
   private lazy val tfsSysl: String = readLsysl("oskit/fs/tfs.lsysl")
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
+  private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
+  private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   // Stack layout for 2-thread tests (disk server + client):
   //   disk:   USP=0x10000 SSP=0xE000
@@ -39,6 +41,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
       "posix/ctype/ctype" -> posixCtypeSysl,
       "posix/stdlib/alloc" -> posixAllocSysl,
       "posix/unistd/sbrk" -> sbrkSysl,
+      "std/mem/mem" -> memSysl, "std/debug/debug" -> debugSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -65,13 +68,15 @@ class OSKitDiskTests extends OSKitTestHelpers {
       Runtime.ramdiskAddress,
       ram,
       sectors = 64,
-      sectorSize = 512,
+      sectorSize = 4096,
       intc,
       irq = 3,
       prefill = prefill,
       maxInodes = 32,
     )
-    val mem = new Memory("Memory", ram, stdout, intc, timer, ramdisk)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, ramdisk, dma)
+    dma.mem = mem
     linked.load(mem)
     val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles }
     cpu.reset()
@@ -98,6 +103,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
       "posix/stdlib/alloc" -> posixAllocSysl,
       "posix/unistd/sbrk" -> sbrkSysl,
       "oskit/servers/tfs" -> tfsSrvSysl,
+      "std/mem/mem" -> memSysl, "std/debug/debug" -> debugSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -124,13 +130,15 @@ class OSKitDiskTests extends OSKitTestHelpers {
       Runtime.ramdiskAddress,
       ram,
       sectors = 64,
-      sectorSize = 512,
+      sectorSize = 4096,
       intc,
       irq = 3,
       prefill = prefill,
       maxInodes = 32,
     )
-    val mem = new Memory("Memory", ram, stdout, intc, timer, ramdisk)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, ramdisk, dma)
+    dma.mem = mem
     linked.load(mem)
     val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles }
     cpu.reset()
@@ -149,8 +157,8 @@ import oskit.drivers.disk.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
-          |    create_thread(client, 0x84000, 0x82000, "cli")
+          |    create_thread(disk_server, 0x600000, 0x5FE000, "disk")
+          |    create_thread(client, 0x604000, 0x602000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -182,8 +190,8 @@ import oskit.drivers.disk.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
-          |    create_thread(client, 0x84000, 0x82000, "cli")
+          |    create_thread(disk_server, 0x600000, 0x5FE000, "disk")
+          |    create_thread(client, 0x604000, 0x602000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -220,8 +228,8 @@ import oskit.drivers.disk.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
-          |    create_thread(client, 0x84000, 0x82000, "cli")
+          |    create_thread(disk_server, 0x600000, 0x5FE000, "disk")
+          |    create_thread(client, 0x604000, 0x602000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -247,18 +255,18 @@ import oskit.drivers.disk.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
-          |    create_thread(client, 0x84000, 0x82000, "cli")
+          |    create_thread(disk_server, 0x600000, 0x5FE000, "disk")
+          |    create_thread(client, 0x604000, 0x602000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
           |write_block(lba: int, ch: byte)
-          |    var buf: [512]byte
+          |    var buf: [4096]byte
           |    buf[0] = ch
           |    disk_write(lba, &buf[0])
           |
           |read_and_print(lba: int)
-          |    var buf: [512]byte
+          |    var buf: [4096]byte
           |    disk_read(lba, &buf[0])
           |    putc(buf[0])
           |
@@ -286,9 +294,9 @@ import oskit.servers.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
-          |    create_thread(tfs_server, 0x84000, 0x82000, "tfs")
-          |    create_thread(client, 0x88000, 0x86000, "cli")
+          |    create_thread(disk_server, 0x600000, 0x5FE000, "disk")
+          |    create_thread(tfs_server, 0x604000, 0x602000, "tfs")
+          |    create_thread(client, 0x608000, 0x606000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -315,9 +323,9 @@ import oskit.servers.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
-          |    create_thread(tfs_server, 0x84000, 0x82000, "tfs")
-          |    create_thread(client, 0x88000, 0x86000, "cli")
+          |    create_thread(disk_server, 0x600000, 0x5FE000, "disk")
+          |    create_thread(tfs_server, 0x604000, 0x602000, "tfs")
+          |    create_thread(client, 0x608000, 0x606000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -345,9 +353,9 @@ import oskit.servers.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
-          |    create_thread(tfs_server, 0x84000, 0x82000, "tfs")
-          |    create_thread(client, 0x88000, 0x86000, "cli")
+          |    create_thread(disk_server, 0x600000, 0x5FE000, "disk")
+          |    create_thread(tfs_server, 0x604000, 0x602000, "tfs")
+          |    create_thread(client, 0x608000, 0x606000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -385,9 +393,9 @@ import oskit.servers.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
-          |    create_thread(tfs_server, 0x84000, 0x82000, "tfs")
-          |    create_thread(client, 0x88000, 0x86000, "cli")
+          |    create_thread(disk_server, 0x600000, 0x5FE000, "disk")
+          |    create_thread(tfs_server, 0x604000, 0x602000, "tfs")
+          |    create_thread(client, 0x608000, 0x606000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -424,9 +432,9 @@ import oskit.servers.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
-          |    create_thread(tfs_server, 0x84000, 0x82000, "tfs")
-          |    create_thread(client, 0x88000, 0x86000, "cli")
+          |    create_thread(disk_server, 0x600000, 0x5FE000, "disk")
+          |    create_thread(tfs_server, 0x604000, 0x602000, "tfs")
+          |    create_thread(client, 0x608000, 0x606000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -464,9 +472,9 @@ import oskit.servers.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
-          |    create_thread(tfs_server, 0x84000, 0x82000, "tfs")
-          |    create_thread(client, 0x88000, 0x86000, "cli")
+          |    create_thread(disk_server, 0x600000, 0x5FE000, "disk")
+          |    create_thread(tfs_server, 0x604000, 0x602000, "tfs")
+          |    create_thread(client, 0x608000, 0x606000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -497,9 +505,9 @@ import oskit.servers.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
-          |    create_thread(tfs_server, 0x84000, 0x82000, "tfs")
-          |    create_thread(client, 0x88000, 0x86000, "cli")
+          |    create_thread(disk_server, 0x600000, 0x5FE000, "disk")
+          |    create_thread(tfs_server, 0x604000, 0x602000, "tfs")
+          |    create_thread(client, 0x608000, 0x606000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -530,9 +538,9 @@ import oskit.servers.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x80000, 0x7E000, "disk")
-          |    create_thread(tfs_server, 0x84000, 0x82000, "tfs")
-          |    create_thread(client, 0x88000, 0x86000, "cli")
+          |    create_thread(disk_server, 0x600000, 0x5FE000, "disk")
+          |    create_thread(tfs_server, 0x604000, 0x602000, "tfs")
+          |    create_thread(client, 0x608000, 0x606000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |

@@ -3,17 +3,18 @@ package io.github.edadma.trisc
 // Minimal TRISC runtime: vector table + I/O stubs.
 // Linked with user code when emitting TOF.
 object Runtime:
-  val stdoutAddress = 0x100000L // 1MB — devices start here, RAM below
-  val keyboardAddress = 0x100004L
-  val displayCtrlAddress = 0x100008L
-  val blitterAddress = 0x100010L
-  val timerAddress = 0x100040L   // 33 bytes (MCU-style timer with channels)
-  val intcAddress = 0x100080L
-  val mouseAddress = 0x100090L
-  val drawEngineAddress = 0x1000A0L
-  val ramdiskAddress = 0x100140L
-  val shaAccelAddress = 0x100160L // 80 bytes: ESP32-style SHA-256 accelerator
-  val framebufferAddress = 0x200000L // 2MB — framebuffer pixel data
+  val stdoutAddress = 0x800000L // 8MB — devices start here, RAM below
+  val keyboardAddress = 0x800004L
+  val displayCtrlAddress = 0x800008L
+  val blitterAddress = 0x800010L
+  val timerAddress = 0x800040L   // 33 bytes (MCU-style timer with channels)
+  val intcAddress = 0x800080L
+  val mouseAddress = 0x800090L
+  val drawEngineAddress = 0x8000A0L
+  val ramdiskAddress = 0x800140L
+  val shaAccelAddress = 0x800160L // 80 bytes: ESP32-style SHA-256 accelerator
+  val dmaAddress = 0x8001C0L     // 202 bytes: RP2040-style DMA controller
+  val framebufferAddress = 0x900000L // 9MB — framebuffer pixel data
   val framebufferMaxSize: Long = 1920 * 1080 * 4
   val initialSSP: Long = stdoutAddress - 8 // stack grows down, below devices
 

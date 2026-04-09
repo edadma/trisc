@@ -19,6 +19,8 @@ On-disk layout (block 0 = boot, block 1 = superblock):
 
     module oskit.fs
 
+    import std.mem.{memcpy}
+
     // === Block I/O — provided by the environment ===
 
     extern rd_read(lba: int, addr: *byte)
@@ -51,10 +53,10 @@ On-disk layout (block 0 = boot, block 1 = superblock):
     var sb_free_blocks  = 0
     var sb_free_inodes  = 0
 
-    // === Block buffers ===
+    // === Block buffers (4KB blocks) ===
 
-    var blkbuf: [512]byte       // general purpose (file data, superblock, dir blocks, inodes)
-    var blkbuf2: [512]byte      // secondary (bitmaps, indirect blocks)
+    var blkbuf: [4096]byte      // general purpose (file data, superblock, dir blocks, inodes)
+    var blkbuf2: [4096]byte     // secondary (bitmaps, indirect blocks)
 
     // === Big-endian read helpers ===
 
@@ -194,7 +196,7 @@ indirect block (6+).
         if ind_blk == 0
             return 0
         rd_read(ind_blk, blkbuf2)
-        read_i16(blkbuf2 + (idx - NUM_DIRECT) * 2)
+        return read_i16(blkbuf2 + (idx - NUM_DIRECT) * 2)
 
     // === Bitmap operations ===
 
@@ -361,12 +363,8 @@ Returns bytes read.
             var chunk = sb_block_size - blk_off
             if chunk > remaining
                 chunk = remaining
-            val src: *byte = blkbuf + blk_off
-            var i = 0
-            while i < chunk
-                buf[buf_pos] = src[i]
-                buf_pos += 1
-                i += 1
+            memcpy(buf + buf_pos, blkbuf + blk_off, chunk)
+            buf_pos += chunk
             remaining -= chunk
         total - remaining
 
@@ -412,12 +410,8 @@ Allocates new blocks as needed. Returns bytes written.
             chunk = sb_block_size - blk_off
             if chunk > remaining
                 chunk = remaining
-            dst = blkbuf + blk_off
-            i = 0
-            while i < chunk
-                dst[i] = buf[buf_pos]
-                buf_pos += 1
-                i += 1
+            memcpy(blkbuf + blk_off, buf + buf_pos, chunk)
+            buf_pos += chunk
             rd_write(disk_blk, blkbuf)
             remaining -= chunk
         // Update size if we wrote past end

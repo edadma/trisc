@@ -1,0 +1,25 @@
+hello — print a greeting
+=========================
+
+A simple standalone program that prints a message and exits.
+
+    module oskit.bin.hello
+
+    import oskit.ulib.{putc, exit}
+
+    main()
+        putc('H')
+        putc('e')
+        putc('l')
+        putc('l')
+        putc('o')
+        putc(',')
+        putc(' ')
+        putc('w')
+        putc('o')
+        putc('r')
+        putc('l')
+        putc('d')
+        putc('!')
+        putc('\n')
+        exit()
