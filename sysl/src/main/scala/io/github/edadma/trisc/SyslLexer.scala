@@ -116,7 +116,7 @@ class SyslLexical extends IndentationLexical(
     // Hex literal with optional type suffix: 0xFF, 0xFFu8, 0xFF_FF
     '0' ~> (elem('x') | elem('X')) ~> hexDigits1 ~ opt(typeSuffix) ^^ {
       case digits ~ suffix =>
-        val value = java.lang.Long.parseLong(digits.mkString, 16).toString
+        val value = java.lang.Long.parseUnsignedLong(digits.mkString, 16).toString
         suffix match
           case Some(s) => NumericLit(s"$value:$s")
           case None => NumericLit(value)
