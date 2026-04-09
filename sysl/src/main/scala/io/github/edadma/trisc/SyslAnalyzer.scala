@@ -7,7 +7,7 @@ class SyslAnalyzer:
   case class AnalysisError(msg: String, node: Any = null) extends RuntimeException(msg)
 
   private case class SymInfo(name: String, typ: SyslType, mutable: Boolean)
-  private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType)
+  private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false)
 
   private val globalScope = new mutable.LinkedHashMap[String, SymInfo]
   private val functions = new mutable.LinkedHashMap[String, FunInfo]
@@ -191,7 +191,7 @@ class SyslAnalyzer:
       val sn = shortName(sym.name)
       val localKey = shortToAlias.getOrElse(sn, sn) // use alias if provided
       sym.typ match
-        case SymbolMeta.Kind.Func(params, returnType) =>
+        case SymbolMeta.Kind.Func(params, returnType, isDef) =>
           val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
           if functions.contains(localKey) then
             // Allow same-module sibling re-registration (same mangled name) and externs
@@ -199,7 +199,7 @@ class SyslAnalyzer:
             if !sym.isExtern && existing.name != sym.name then
               throw AnalysisError(s"imported symbol '$localKey' conflicts with existing function")
           else
-            functions(localKey) = FunInfo(sym.name, paramPairs, returnType)
+            functions(localKey) = FunInfo(sym.name, paramPairs, returnType, isDef)
             externalSymbols += localKey
         case SymbolMeta.Kind.Data(dataType) =>
           if globalScope.contains(localKey) then
@@ -279,7 +279,7 @@ class SyslAnalyzer:
   def registerGenericTemplatesFrom(program: ProgramAST): Unit =
     for decl <- program.decls do
       decl match
-        case fd @ FunDeclAST(name, _, _, _, _, tps, _, _) if tps.nonEmpty =>
+        case fd @ FunDeclAST(name, _, _, _, _, tps, _, _, _) if tps.nonEmpty =>
           if !genericTemplates.contains(name) && !functions.contains(name) then
             genericTemplates(name) = fd
         case sd @ StructDeclAST(name, _, tps, _) if tps.nonEmpty =>
@@ -356,7 +356,7 @@ class SyslAnalyzer:
             val resolvedFields = fields.map((n, t) => (n, resolveType(t)))
             // Update the placeholder with resolved fields
             structTypes(name) = SyslType.StructType(name, resolvedFields)
-        case fd @ FunDeclAST(name, params, returnType, _, _, typeParams, _, _) =>
+        case fd @ FunDeclAST(name, params, returnType, _, _, typeParams, _, _, isDef) =>
           // Duplicate-parameter-name check.
           val seenParams = mutable.HashSet[String]()
           for p <- params do
@@ -376,7 +376,7 @@ class SyslAnalyzer:
             if functions.contains(name) || genericTemplates.contains(name) then
               throw AnalysisError(s"duplicate function: '$name'", decl)
             val mangledName = if shouldMangle(name) then mangleName(name) else name
-            functions(name) = FunInfo(mangledName, paramTypes, retType)
+            functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty)
             // Record #deprecated info
             for attr <- fd.attributes if attr.name == "deprecated" do
               val reason = attr.args.collectFirst { case AttrPositional(AttrLitString(s)) => s }
@@ -572,7 +572,7 @@ class SyslAnalyzer:
         if tparams.nonEmpty then TTypeAliasDecl(name, VoidType) // generic alias: type-only, no codegen
         else TTypeAliasDecl(name, resolveType(target))
 
-      case fdAst @ FunDeclAST(name, params, _, body, isPrivate, _, _, attrs) =>
+      case fdAst @ FunDeclAST(name, params, _, body, isPrivate, _, _, attrs, _) =>
         scopeStack = new mutable.ArrayBuffer
         pushScope()
         val funInfo = functions(name)
@@ -591,11 +591,20 @@ class SyslAnalyzer:
           case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
           case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
         finally currentExpected = savedExp
+        // For def functions with no explicit return type, infer from body
+        val retType = if funInfo.isDef && funInfo.returnType == VoidType then
+          val inferred = tBody match
+            case TExprBody(expr) => expr.typ
+            case _ => VoidType
+          // Update FunInfo so other references see the correct type
+          functions(name) = funInfo.copy(returnType = inferred)
+          inferred
+        else funInfo.returnType
         val tParams = funInfo.params.map((n, t) => TParam(n, t))
         currentReturnType = savedReturnType
         scopeStack = null
         validateTestAttr(fdAst, funInfo)
-        TFunDecl(funInfo.name, tParams, funInfo.returnType, tBody, isPrivate, attrs)
+        TFunDecl(funInfo.name, tParams, retType, tBody, isPrivate, attrs, funInfo.isDef)
 
       case VarDeclAST(name, typOpt, init, isPrivate, isMutable, _) =>
         scopeStack = new mutable.ArrayBuffer
@@ -861,19 +870,42 @@ class SyslAnalyzer:
         case StructType(_, fields) if elems.length == fields.length =>
           for (e, (_, ft)) <- elems.zip(fields) do unifyTypes(e, ft, typeParams, env)
         case _ => ()
-      case NamedTypeAST(name, tArgs) if tArgs.nonEmpty => arg match
-        case SyslType.StructType(argName, _) =>
-          structToTemplate.get(argName) match
-            case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
-              for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
-            case _ => ()
-        case SyslType.EnumType(argName, _) =>
-          enumToTemplate.get(argName) match
-            case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
-              for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
-            case _ => ()
-        case _ => ()
+      case NamedTypeAST(name, tArgs) if tArgs.nonEmpty =>
+        // If this is a generic type alias, expand it and unify the expanded type
+        if genericTypeAliases.contains(name) then
+          val (tparams, target) = genericTypeAliases(name)
+          if tArgs.length == tparams.length then
+            // Substitute alias type params with the call's type args in the target TypeAST,
+            // then unify the expanded structure against the argument type.
+            // e.g., type Parser[T] = (string, int) -> Result[T, string]
+            //   Parser[A] → substitute T→A in target → (string, int) -> Result[A, string]
+            val subst = tparams.zip(tArgs).toMap
+            val expanded = substituteTypeAST(target, subst)
+            unifyTypes(expanded, arg, typeParams, env)
+        else arg match
+          case SyslType.StructType(argName, _) =>
+            structToTemplate.get(argName) match
+              case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
+                for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
+              case _ => ()
+          case SyslType.EnumType(argName, _) =>
+            enumToTemplate.get(argName) match
+              case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
+                for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
+              case _ => ()
+          case _ => ()
       case _ => () // concrete parameter type, nothing to infer
+
+  /** Substitute named types in a TypeAST. Used to expand generic type alias params before unification. */
+  private def substituteTypeAST(t: TypeAST, subst: Map[String, TypeAST]): TypeAST = t match
+    case NamedTypeAST(name, Nil) if subst.contains(name) => subst(name)
+    case NamedTypeAST(name, args) => NamedTypeAST(name, args.map(substituteTypeAST(_, subst)))
+    case PtrTypeAST(inner) => PtrTypeAST(substituteTypeAST(inner, subst))
+    case ArrayTypeAST(size, elem) => ArrayTypeAST(size, substituteTypeAST(elem, subst))
+    case SliceTypeAST(elem) => SliceTypeAST(substituteTypeAST(elem, subst))
+    case FuncTypeAST(params, ret) => FuncTypeAST(params.map(substituteTypeAST(_, subst)), substituteTypeAST(ret, subst))
+    case TupleTypeAST(elems) => TupleTypeAST(elems.map(substituteTypeAST(_, subst)))
+    case RefTypeAST(inner) => RefTypeAST(substituteTypeAST(inner, subst))
 
   // Instantiate a generic function with inferred type arguments, returning the mangled name
   // and FunInfo of the instantiated function. Reuses cached instantiations.
@@ -1637,7 +1669,11 @@ class SyslAnalyzer:
         // Check if name is a function (used as a value = function pointer)
         if functions.contains(name) then
           val f = functions(name)
-          TFuncRef(f.name, FuncType(f.params.map(_._2), f.returnType))
+          if f.isDef then
+            // Auto-call: bare reference to a def function emits a call
+            TCall(f.name, Nil, f.returnType)
+          else
+            TFuncRef(f.name, FuncType(f.params.map(_._2), f.returnType))
         else if builtinFunctions.contains(name) then
           val f = builtinFunctions(name)
           TFuncRef(name, FuncType(f.params.map(_._2), f.returnType))
@@ -1675,8 +1711,13 @@ class SyslAnalyzer:
                 TVarRef(sym.name, sym.typ)
 
       case AddrOfAST(name) =>
-        val sym = lookup(name)
-        TAddrOf(sym.name, PtrType(sym.typ))
+        // &name on a function (including def) gives a function pointer
+        if functions.contains(name) then
+          val f = functions(name)
+          TFuncRef(f.name, FuncType(f.params.map(_._2), f.returnType))
+        else
+          val sym = lookup(name)
+          TAddrOf(sym.name, PtrType(sym.typ))
 
       case AddrOfFieldAST(obj, field) =>
         val tObj = analyzeExpr(obj)
@@ -1738,7 +1779,7 @@ class SyslAnalyzer:
           .getOrElse(throw AnalysisError(s"module '$nsName' has no symbol '$member'"))
         sym.typ match
           case SymbolMeta.Kind.Data(dataType) => TVarRef(sym.name, dataType)
-          case SymbolMeta.Kind.Func(params, retType) => TFuncRef(sym.name, SyslType.FuncType(params, retType))
+          case SymbolMeta.Kind.Func(params, retType, _) => TFuncRef(sym.name, SyslType.FuncType(params, retType))
           case SymbolMeta.Kind.Struct(st) => throw AnalysisError(s"'$nsName.$member' is a struct type, not a value")
           case SymbolMeta.Kind.Enum(_) => throw AnalysisError(s"'$nsName.$member' is an enum type, not a value")
           case SymbolMeta.Kind.Interface(_) => throw AnalysisError(s"'$nsName.$member' is an interface type, not a value")
@@ -1952,7 +1993,7 @@ class SyslAnalyzer:
         val funcSym = meta.publicSymbols.find(s => shortName(s.name) == method)
           .getOrElse(throw AnalysisError(s"module '$nsName' has no function '$method'"))
         funcSym.typ match
-          case SymbolMeta.Kind.Func(params, returnType) =>
+          case SymbolMeta.Kind.Func(params, returnType, _) =>
             val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
             val checkedArgs = checkArgs(s"$nsName.$method", paramPairs, tArgs)
             TCall(funcSym.name, checkedArgs, returnType)
@@ -1994,7 +2035,7 @@ class SyslAnalyzer:
                 case TVarRef(n, _) => TAddrOf(n, PtrType(st))
                 case TFieldAccess(innerObj, idx, _) => TAddrOfField(innerObj, idx, PtrType(st))
                 case TIndex(arr, idx, _) => TAddrOfIndex(arr, idx, PtrType(st))
-                case _ => throw AnalysisError(s"cannot take address of expression for method call")
+                case _ => TTempAddr(tObj, PtrType(st))  // method on temporary — copy into temp cell
             case _ => tObj // PtrType or RefType — already a pointer
           val funInfo = functions(funcName)
           val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs) // .tail skips self param
@@ -2044,8 +2085,18 @@ class SyslAnalyzer:
         else if functions.contains(name) || builtinFunctions.contains(name) then
           warnDeprecated(name)
           val funInfo = lookupFun(name)
-          val checkedArgs = checkArgs(name, funInfo.params, tArgs)
-          TCall(funInfo.name, checkedArgs, funInfo.returnType)
+          if funInfo.isDef && funInfo.params.isEmpty && tArgs.nonEmpty then
+            // Auto-call def, then indirect-call the result with the provided args
+            val autoCall = TCall(funInfo.name, Nil, funInfo.returnType)
+            funInfo.returnType match
+              case FuncType(fParams, fRet) =>
+                val paramPairs = fParams.zipWithIndex.map((t, i) => (s"_p$i", t))
+                val checkedArgs = checkArgs(name, paramPairs, tArgs)
+                TIndirectCall(autoCall, checkedArgs, fRet)
+              case _ => throw AnalysisError(s"def '$name' returns ${funInfo.returnType}, not a callable type")
+          else
+            val checkedArgs = checkArgs(name, funInfo.params, tArgs)
+            TCall(funInfo.name, checkedArgs, funInfo.returnType)
         else if structTypes.contains(name) then
           // Struct constructor: Point(10, 20)
           val st = structTypes(name)

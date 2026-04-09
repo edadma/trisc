@@ -59,12 +59,11 @@ Accessor
 Comparison
 ----------
 
-`is(a, b)` compares two errors by message. Two errors are
-considered the same if they carry the same message string.
-This is identity-by-value, not identity-by-reference — it
-matches Go's `errors.Is` semantics for simple string errors.
+`errors_equal(a, b)` compares two errors by message. Two
+errors are considered the same if they carry the same message
+string.
 
-    is(a: Error, b: Error) -> bool
+    errors_equal(a: Error, b: Error) -> bool
         error_msg(a) == error_msg(b)
 
 
@@ -109,7 +108,7 @@ Tests
     test_is_same_message() -> unit
         val a = new_error("timeout")
         val b = new_error("timeout")
-        assert(is(a, b), "same message means same error")
+        assert(errors_equal(a, b), "same message means same error")
 
 
 ### Compare different errors
@@ -118,7 +117,7 @@ Tests
     test_is_different_message() -> unit
         val a = new_error("timeout")
         val b = new_error("not found")
-        assert(!is(a, b), "different messages are different errors")
+        assert(!errors_equal(a, b), "different messages are different errors")
 
 
 ### Sentinel constructors return correct messages
@@ -144,13 +143,13 @@ Tests
         assert(error_msg(err_exists()) == "already exists", "exists sentinel")
 
 
-### Sentinel comparison via is()
+### Sentinel comparison via errors_equal()
 
     #test
     test_sentinel_is_match() -> unit
         val e = err_eof()
-        assert(is(e, err_eof()), "sentinel matches fresh copy")
-        assert(!is(e, err_not_found()), "different sentinels differ")
+        assert(errors_equal(e, err_eof()), "sentinel matches fresh copy")
+        assert(!errors_equal(e, err_not_found()), "different sentinels differ")
 
 
 Design notes

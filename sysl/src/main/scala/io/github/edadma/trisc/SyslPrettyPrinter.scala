@@ -35,8 +35,9 @@ object SyslPrettyPrinter:
       val body = fields.map((n, t) => s"${IND}$n: ${typeToSource(t)}").mkString("\n")
       s"struct $name$tpStr\n$body"
 
-    case FunDeclAST(name, params, returnType, body, isPrivate, typeParams, typeBounds, _) =>
+    case FunDeclAST(name, params, returnType, body, isPrivate, typeParams, typeBounds, _, isDef) =>
       val priv = if isPrivate then "private " else ""
+      val defKw = if isDef then "def " else ""
       val tpStr =
         if typeParams.nonEmpty then
           val tpParts = typeParams.map { tp =>
@@ -46,10 +47,19 @@ object SyslPrettyPrinter:
           }
           s"[${tpParts.mkString(", ")}]"
         else ""
-      val paramStr = params.map(p => s"${p.name}: ${typeToSource(p.typ)}").mkString(", ")
-      val retStr = returnType.map(t => s" -> ${typeToSource(t)}").getOrElse("")
-      val bodyStr = bodyToSource(body, 1)
-      s"$priv$name$tpStr($paramStr)$retStr$bodyStr"
+      if isDef && params.isEmpty then
+        val retStr = returnType.map(t => s" -> ${typeToSource(t)}").getOrElse("")
+        val bodyStr = body match
+          case ExprBodyAST(expr) => s" = ${exprToSource(expr)}"
+          case BlockBodyAST(stmts) =>
+            val b = stmts.map(s => s"${IND}${stmtToSource(s, 1)}").mkString("\n")
+            s"\n$b"
+        s"$priv${defKw}$name$retStr$bodyStr"
+      else
+        val paramStr = params.map(p => s"${p.name}: ${typeToSource(p.typ)}").mkString(", ")
+        val retStr = returnType.map(t => s" -> ${typeToSource(t)}").getOrElse("")
+        val bodyStr = bodyToSource(body, 1)
+        s"$priv$defKw$name$tpStr($paramStr)$retStr$bodyStr"
 
     case _ => s"// unsupported declaration: ${d.getClass.getSimpleName}"
 

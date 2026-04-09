@@ -320,6 +320,44 @@ double(x: int) = x * 2
 getAnswer() -> int = 42
 ```
 
+### `def` — Auto-Call Functions
+
+`def` declares a zero-argument function that is automatically called when
+referenced by bare name. Unlike `val`, a `def` is re-evaluated on every
+reference, and supports forward references (enabling mutual recursion).
+
+```sysl
+var counter = 0
+def next_id = counter++      // return type inferred from body
+
+def pi -> int = 314           // explicit return type
+
+def greeting -> string        // block body
+    "hello"
+
+main() -> int
+    val a = next_id           // auto-called: returns 0
+    val b = next_id           // auto-called: returns 1
+    a + b + pi                // 0 + 1 + 314 = 315
+```
+
+**Function pointer:** `&name` gives the function pointer for a `def`:
+
+```sysl
+apply_thunk(f: () -> int) -> int = f()
+
+main() -> int
+    counter = 0
+    apply_thunk(&next_id)     // passes next_id as a function pointer
+```
+
+**On parametric functions:** `def` is also accepted before functions with
+parameters, where it is purely documentary (no behavior change):
+
+```sysl
+def add(a: int, b: int) -> int = a + b   // same as: add(a: int, b: int) -> int = a + b
+```
+
 ### Generic Functions
 
 Functions may declare type parameters in square brackets after the name, with
@@ -833,6 +871,28 @@ sizeof([10]int)    // 40
 x = if cond then a else b
 result = if x > 0 then x else -x
 ```
+
+### If-Is (Pattern Matching in If)
+
+`if expr is Pattern then ...` is sugar for a single-arm `match`. The pattern
+binds variables in the then-branch. Like Rust's `if let`.
+
+```sysl
+// Extract value or use default
+val v = if r is Ok(x) then x else -1
+
+// Guard with pattern
+if o is Some(x) then
+    process(x)
+
+// With block body and else
+if parse(s) is Ok(val, pos) then
+    handle(val, pos)
+else
+    report_error()
+```
+
+Desugars to `match` at parse time — no new analyzer or runtime machinery.
 
 ---
 

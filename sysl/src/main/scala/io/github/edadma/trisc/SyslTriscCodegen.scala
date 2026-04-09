@@ -43,7 +43,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     // Scan for deinit methods: functions named TypeName_deinit
     for decl <- program.decls do
       decl match
-        case TFunDecl(name, _, _, _, _, _) if name.endsWith("_deinit") =>
+        case TFunDecl(name, _, _, _, _, _, _) if name.endsWith("_deinit") =>
           val structName = name.indexOf("__") match
             case -1 => name.dropRight(7)
             case i  => name.substring(i + 2).dropRight(7)
@@ -159,7 +159,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     // Emit extern declarations for malloc/free based on actual references in generated code
     val generated = out.toString
     val definedSymbols = (for decl <- program.decls yield decl match
-      case TFunDecl(name, _, _, _, _, _) => Some(name)
+      case TFunDecl(name, _, _, _, _, _, _) => Some(name)
       case TVarDecl(name, _, _, _) => Some(name)
       case _ => None).flatten.toSet
     if generated.contains("movi r4, malloc") && !definedSymbols.contains("malloc") then emit("extern malloc")
@@ -2196,6 +2196,18 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitLocalAddr(name, 1) // r1 = stack address of local variable
         else
           emit(s"  movi r1, $name") // r1 = address of global variable
+
+      case TTempAddr(expr, _) =>
+        // Evaluate expression, store on stack, return address
+        genExpr(expr) // r1 = value (or address of struct)
+        expr.typ match
+          case st: SyslType.StructType =>
+            // r1 already points to struct data, just use it
+            ()
+          case _ =>
+            // Scalar: push to stack, take address
+            emit("  pshd r1")
+            emit("  mov r1, r7") // r1 = sp (points to the pushed value)
 
       case TAddrOfIndex(array, index, SyslType.PtrType(elemType)) =>
         val elemSize = stackSize(elemType)

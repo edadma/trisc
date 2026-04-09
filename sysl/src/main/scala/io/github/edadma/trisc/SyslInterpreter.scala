@@ -637,6 +637,12 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TAddrOf(name, _) => PtrVal(CellPtr(lookupCell(name, env)))
 
+      case TTempAddr(expr, _) =>
+        // Evaluate expression, store in a temporary cell, return pointer to it
+        val value = evalAny(expr, env)
+        val cell = new Cell(value)
+        PtrVal(CellPtr(cell))
+
       case TAddrOfField(obj, fieldIndex, _) =>
         val ArrVal(cells, off) = evalAny(obj, env): @unchecked
         PtrVal(ArrayPtr(cells, off + fieldIndex))
@@ -1082,8 +1088,11 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         EnumVal(variantIndex, cells)
 
       case TFieldAccess(obj, fieldIndex, _) =>
-        val ArrVal(cells, off) = evalAny(obj, env): @unchecked
-        cells(off + fieldIndex).value
+        val struct = evalAny(obj, env) match
+          case arr: ArrVal => arr
+          case PtrVal(ptr) => ptr.deref.value.asInstanceOf[ArrVal]  // auto-deref pointer to struct
+          case other => throw RuntimeError(s"cannot access field on $other")
+        struct.cells(struct.offset + fieldIndex).value
 
       case TFuncRef(name, _) => FuncVal(name)
 

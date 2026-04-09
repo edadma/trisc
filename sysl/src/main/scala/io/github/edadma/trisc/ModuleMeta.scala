@@ -6,7 +6,7 @@ case class SymbolMeta(name: String, typ: SymbolMeta.Kind, isPrivate: Boolean, is
 
 object SymbolMeta:
   enum Kind:
-    case Func(params: List[SyslType], returnType: SyslType)
+    case Func(params: List[SyslType], returnType: SyslType, isDef: Boolean = false)
     case Data(dataType: SyslType)
     case Struct(structType: SyslType.StructType)
     case Enum(enumType: SyslType.EnumType)
@@ -24,8 +24,9 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
         currentSource = sym.sourceFile
       val vis = if sym.isPrivate then "PRIVATE " else ""
       sym.typ match
-        case SymbolMeta.Kind.Func(params, ret) =>
-          buf ++= s"${vis}FUNC ${sym.name} ${SyslType.funcSigToPrefix(params, ret)}\n"
+        case SymbolMeta.Kind.Func(params, ret, isDef) =>
+          val kw = if isDef then "DEFFUNC" else "FUNC"
+          buf ++= s"${vis}$kw ${sym.name} ${SyslType.funcSigToPrefix(params, ret)}\n"
         case SymbolMeta.Kind.Data(dataType) =>
           buf ++= s"${vis}DATA ${sym.name} ${dataType.toPrefix}\n"
         case SymbolMeta.Kind.Struct(st) =>
@@ -48,7 +49,7 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
       if sym.isExtern then
         buf ++= s"extern ${sym.name}\n"
       else sym.typ match
-        case SymbolMeta.Kind.Func(params, ret) =>
+        case SymbolMeta.Kind.Func(params, ret, _) =>
           buf ++= s"global ${sym.name}, func, ${SyslType.funcSigToPrefix(params, ret)}\n"
         case SymbolMeta.Kind.Data(dataType) =>
           buf ++= s"global ${sym.name}, data, ${dataType.toPrefix}\n"
@@ -81,7 +82,7 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
 object ModuleMeta:
 
   /** Bump this whenever the .smeta format changes. Stale files are silently ignored. */
-  val SMETA_VERSION = 4
+  val SMETA_VERSION = 5
 
   def fromProgram(program: TProgram, sourceFile: Option[String] = None): ModuleMeta =
     val syms = program.decls.collect {
@@ -100,8 +101,8 @@ object ModuleMeta:
         SymbolMeta(name, SymbolMeta.Kind.Func(params, returnType), isPrivate = false, isExtern = true, sourceFile = sourceFile)
       case TExternVarDecl(name, typ) =>
         SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate = false, isExtern = true, sourceFile = sourceFile)
-      case TFunDecl(name, params, returnType, _, isPrivate, _) =>
-        SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType), isPrivate, sourceFile = sourceFile)
+      case TFunDecl(name, params, returnType, _, isPrivate, _, isDef) =>
+        SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType, isDef), isPrivate, sourceFile = sourceFile)
       case TVarDecl(name, typ, _, isPrivate) =>
         SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate, sourceFile = sourceFile)
     }
@@ -143,11 +144,12 @@ object ModuleMeta:
               val kind = tokens.next()
               val name = tokens.next()
               kind match
-                case "FUNC" =>
+                case "FUNC" | "DEFFUNC" =>
+                  val isDef = kind == "DEFFUNC"
                   val nparams = tokens.next().toInt
                   val params = (1 to nparams).map(_ => SyslType.parseType(tokens)).toList
                   val ret = SyslType.parseType(tokens)
-                  syms += SymbolMeta(name, SymbolMeta.Kind.Func(params, ret), isPrivate, sourceFile = currentSource)
+                  syms += SymbolMeta(name, SymbolMeta.Kind.Func(params, ret, isDef), isPrivate, sourceFile = currentSource)
                 case "DATA" =>
                   val dataType = SyslType.parseType(tokens)
                   syms += SymbolMeta(name, SymbolMeta.Kind.Data(dataType), isPrivate, sourceFile = currentSource)
@@ -173,7 +175,7 @@ object ModuleMeta:
               ast.decls.filter {
                 case StructDeclAST(_, _, tps, _)           => tps.nonEmpty
                 case DataEnumDeclAST(_, _, tps, _)         => tps.nonEmpty
-                case FunDeclAST(_, _, _, _, _, tps, _, _)   => tps.nonEmpty
+                case FunDeclAST(_, _, _, _, _, tps, _, _, _) => tps.nonEmpty
                 case _                                      => false
               }
             case Left(_) => Nil // silently ignore parse failures in templates

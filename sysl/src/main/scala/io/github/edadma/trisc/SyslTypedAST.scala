@@ -9,7 +9,7 @@ case class TModuleDecl(path: List[String]) extends TDecl
 case class TImportDecl(path: String) extends TDecl
 case class TExternFuncDecl(name: String, params: List[SyslType], returnType: SyslType) extends TDecl
 case class TExternVarDecl(name: String, typ: SyslType) extends TDecl
-case class TFunDecl(name: String, params: List[TParam], returnType: SyslType, body: TFunBody, isPrivate: Boolean = false, attributes: List[Attribute] = Nil) extends TDecl
+case class TFunDecl(name: String, params: List[TParam], returnType: SyslType, body: TFunBody, isPrivate: Boolean = false, attributes: List[Attribute] = Nil, isDef: Boolean = false) extends TDecl
 case class TVarDecl(name: String, typ: SyslType, init: TExpr, isPrivate: Boolean = false) extends TDecl
 case class TStructDecl(name: String, fields: List[(String, SyslType)]) extends TDecl
 case class TEnumDecl(name: String, members: List[(String, Long)]) extends TDecl
@@ -60,6 +60,7 @@ case class TVarRef(name: String, typ: SyslType) extends TExpr
 case class TAddrOf(name: String, typ: SyslType) extends TExpr
 case class TAddrOfIndex(array: TExpr, index: TExpr, typ: SyslType) extends TExpr
 case class TAddrOfField(obj: TExpr, fieldIndex: Int, typ: SyslType) extends TExpr
+case class TTempAddr(expr: TExpr, typ: SyslType) extends TExpr  // evaluate expr, store in temp, return pointer
 case class TDeref(expr: TExpr, typ: SyslType) extends TExpr
 case class TIndex(expr: TExpr, index: TExpr, typ: SyslType) extends TExpr
 case class TFieldAccess(obj: TExpr, fieldIndex: Int, typ: SyslType) extends TExpr
