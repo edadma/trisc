@@ -14,8 +14,9 @@ object SymbolMeta:
     case Impl(traitName: String, targetType: SyslType, methods: Map[String, String]) // methodName → mangledFuncName
 
 case class TraitImplMeta(traitName: String, targetType: SyslType, methods: Map[String, String]) // methodName → mangledFuncName
+case class GenericEnumInstanceMeta(mangledName: String, baseName: String, typeArgs: List[SyslType])
 
-class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclAST] = Nil, val traitImpls: List[TraitImplMeta] = Nil):
+class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclAST] = Nil, val traitImpls: List[TraitImplMeta] = Nil, val genericEnumInstances: List[GenericEnumInstanceMeta] = Nil):
 
   def toSmeta: String =
     val buf = new StringBuilder
@@ -38,6 +39,9 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
           buf ++= s"${vis}ENUM ${sym.name} ${et.toPrefix}\n"
         case SymbolMeta.Kind.Interface(it) =>
           buf ++= s"${vis}IFACE ${sym.name} ${it.toPrefix}\n"
+    // Emit generic enum instance mappings
+    for inst <- genericEnumInstances do
+      buf ++= s"GENINST ${inst.mangledName} ${inst.baseName} ${inst.typeArgs.length} ${inst.typeArgs.map(_.toPrefix).mkString(" ")}\n"
     // Emit impl registrations
     for impl <- traitImpls do
       val methods = impl.methods.map((k, v) => s"$k=$v").mkString(" ")
@@ -76,7 +80,7 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
   def merge(other: ModuleMeta): ModuleMeta =
     val replacedSources = other.symbols.flatMap(_.sourceFile).toSet
     val kept = symbols.filterNot(s => s.sourceFile.exists(replacedSources.contains))
-    new ModuleMeta(kept ++ other.symbols, genericTemplates ++ other.genericTemplates, traitImpls ++ other.traitImpls)
+    new ModuleMeta(kept ++ other.symbols, genericTemplates ++ other.genericTemplates, traitImpls ++ other.traitImpls, genericEnumInstances ++ other.genericEnumInstances)
 
   /** Get the set of source files that define the given symbol names. */
   def sourceFilesFor(names: Set[String]): Set[String] =
@@ -120,6 +124,7 @@ object ModuleMeta:
     boundary:
       val syms = scala.collection.mutable.ListBuffer[SymbolMeta]()
       val implMetas = scala.collection.mutable.ListBuffer[TraitImplMeta]()
+      val genInstMetas = scala.collection.mutable.ListBuffer[GenericEnumInstanceMeta]()
       var lineNum = 0
       var headerSeen = false
       var currentSource: Option[String] = None
@@ -146,6 +151,14 @@ object ModuleMeta:
               inTemplates = true
             else if line.startsWith("SOURCE ") then
               currentSource = Some(line.drop(7).trim)
+            else if line.startsWith("GENINST ") then
+              // GENINST mangledName baseName nArgs type1 type2 ...
+              val tokens = line.drop(8).split("\\s+").iterator
+              val mangledName = tokens.next()
+              val baseName = tokens.next()
+              val nArgs = tokens.next().toInt
+              val typeArgs = (1 to nArgs).map(_ => SyslType.parseType(tokens)).toList
+              genInstMetas += GenericEnumInstanceMeta(mangledName, baseName, typeArgs)
             else if line.startsWith("IMPL ") then
               // IMPL traitName typePrefix method1=mangled1 method2=mangled2 ...
               val tokens = line.drop(5).split("\\s+").iterator
@@ -199,4 +212,4 @@ object ModuleMeta:
               }
             case Left(_) => Nil // silently ignore parse failures in templates
         else Nil
-        Some(new ModuleMeta(syms.toList, templates, implMetas.toList))
+        Some(new ModuleMeta(syms.toList, templates, implMetas.toList, genInstMetas.toList))

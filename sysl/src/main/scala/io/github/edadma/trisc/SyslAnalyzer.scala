@@ -127,6 +127,12 @@ class SyslAnalyzer:
   def getTraitDecls: List[TraitDeclAST] =
     traits.values.map(t => TraitDeclAST(t.name, t.typeParam, t.methods)).toList
 
+  /** Get generic enum instance mappings for cross-module type inference. */
+  def getGenericEnumInstances: List[GenericEnumInstanceMeta] =
+    enumToTemplate.map { case (mangledName, (baseName, typeArgs)) =>
+      GenericEnumInstanceMeta(mangledName, baseName, typeArgs)
+    }.toList
+
   private def pushScope(): Unit =
     scopeStack += new mutable.LinkedHashMap[String, SymInfo]
 
@@ -248,6 +254,11 @@ class SyslAnalyzer:
     // Register generic templates from imported module (needed for cross-module generic instantiation)
     if meta.genericTemplates.nonEmpty then
       registerGenericTemplatesFrom(ProgramAST(meta.genericTemplates))
+
+    // Register generic enum instance mappings for cross-module type inference
+    for inst <- meta.genericEnumInstances do
+      if !enumToTemplate.contains(inst.mangledName) then
+        enumToTemplate(inst.mangledName) = (inst.baseName, inst.typeArgs)
 
     // Register trait declarations from imported templates
     for template <- meta.genericTemplates do

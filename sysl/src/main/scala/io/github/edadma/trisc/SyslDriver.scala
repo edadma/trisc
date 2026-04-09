@@ -157,7 +157,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         case _ => false
       } ++ analyzer.getTraitDecls
       val baseMeta = ModuleMeta.fromProgram(typed, if modPath.isDefined then Some(s"$name.sysl") else None)
-      val meta = new ModuleMeta(baseMeta.symbols, templates, analyzer.getTraitImplMetas)
+      val meta = new ModuleMeta(baseMeta.symbols, templates, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances)
       val smeta = meta.toSmeta
 
       modPath match
@@ -282,7 +282,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
           val analyzer = new SyslAnalyzer
           val typed = analyzer.analyze(stripped)
           val meta = ModuleMeta.fromProgram(typed)
-          new ModuleMeta(meta.symbols, templates ++ analyzer.getTraitDecls, analyzer.getTraitImplMetas)
+          new ModuleMeta(meta.symbols, templates ++ analyzer.getTraitDecls, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances)
         }.toOption
       case Left(_) => None
 
