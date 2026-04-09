@@ -61,6 +61,9 @@ class SVM(
   private val locals = new Array[Long](maxLocals * maxCallDepth)
   private var localsTop: Int = 0 // next free local slot
 
+  /** Read the top-of-stack value (e.g., return value after halt). */
+  def result: Long = tos
+
   // Interrupt vector table: slot 0 = initial IP, slot 1 = interrupt handler
   private val VECTOR_INIT_IP = 0L
   private val VECTOR_INTERRUPT = 8L

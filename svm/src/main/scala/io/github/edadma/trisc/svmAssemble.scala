@@ -228,7 +228,19 @@ def svmAssemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = 
         case _ => problem(n, s"must be a positive integer up to 10 meg")
     case InstructionLineAST(mnemonic, operands) =>
       operands foreach locals
-      segment.size += instrSize(mnemonic, operands)
+      // For relocatable mode, some instructions may expand when referencing extern/unresolved symbols
+      val sz = if relocatable then
+        def isUnresolved(ref: String): Boolean = declaredExterns.contains(ref) || !symbols.contains(ref)
+        def hasUnresolvedRef: Boolean = operands.headOption match
+          case Some(ReferenceExprAST(ref)) => isUnresolved(ref)
+          case Some(LocalExprAST(_, ref)) if ref != null => isUnresolved(ref)
+          case _ => false
+        mnemonic match
+          case "call" | "tail" if hasUnresolvedRef => 9 // CALL_ABS
+          case "push_i32" if hasUnresolvedRef => 9 // promoted to push_i64 + reloc
+          case _ => instrSize(mnemonic, operands)
+      else instrSize(mnemonic, operands)
+      segment.size += sz
     case IncludeLineAST(_) =>
   }
 
@@ -308,13 +320,17 @@ def svmAssemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = 
     builder.addReloc(RelocType.ABS64, offset, symbolName)
     for _ <- 0 until 8 do builder += 0.toByte
 
-  // Resolve a branch/call operand to a relative offset from the byte AFTER the instruction
-  def resolveBranchRel(operand: ExprAST, instrEnd: Long): Long =
+  // Resolve a branch/call operand to a relative offset from the byte AFTER the instruction.
+  // Returns None if the operand is a relocatable extern (caller should emit CALL_ABS with relocation).
+  def resolveBranchRel(operand: ExprAST, instrEnd: Long): Option[Long] =
     fold(operand, absolute = true) match
-      case LongExprAST(target) => target - instrEnd
-      case ReferenceExprAST(ref) if relocatable =>
-        problem(operand, "relocatable branch targets not yet supported for SVM")
+      case LongExprAST(target) => Some(target - instrEnd)
+      case ReferenceExprAST(ref) if relocatable => None // caller handles via CALL_ABS relocation
       case _ => problem(operand, "expected label or constant for branch target")
+
+  def emitCallAbsReloc(symbolName: String): Unit =
+    emitByte(0x69) // CALL_ABS opcode
+    emitAbs64Reloc(symbolName)
 
   // Pass 2: code generation
   lines foreach {
@@ -403,10 +419,13 @@ def svmAssemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = 
              "inc_jumpnz" | "dec_jumpnz" | "drop_jump" =>
           if operands.size != 1 then problem(inst, s"$mnemonic requires 1 operand")
           val instrEnd = builder.length + builder.org + size
-          val offset = resolveBranchRel(operands.head, instrEnd)
-          if offset < -32768 || offset > 32767 then problem(operands.head, "branch offset out of 16-bit range")
-          emitByte(opcode)
-          emitI16(offset.toInt)
+          resolveBranchRel(operands.head, instrEnd) match
+            case Some(offset) =>
+              if offset < -32768 || offset > 32767 then problem(operands.head, "branch offset out of 16-bit range")
+              emitByte(opcode)
+              emitI16(offset.toInt)
+            case None =>
+              problem(operands.head, "relocatable branch targets not supported for 16-bit jumps")
 
         // --- opcode + i16 literal ---
         case "push_i16" =>
@@ -424,38 +443,57 @@ def svmAssemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = 
             case LongExprAST(n) if 0 <= n && n <= 255 => n.toInt
             case _ => problem(operands.head, "expected local index (0-255)")
           val instrEnd = builder.length + builder.org + size
-          val offset = resolveBranchRel(operands(1), instrEnd)
-          if offset < -32768 || offset > 32767 then problem(operands(1), "branch offset out of 16-bit range")
-          emitByte(opcode)
-          emitByte(idx)
-          emitI16(offset.toInt)
+          resolveBranchRel(operands(1), instrEnd) match
+            case Some(offset) =>
+              if offset < -32768 || offset > 32767 then problem(operands(1), "branch offset out of 16-bit range")
+              emitByte(opcode)
+              emitByte(idx)
+              emitI16(offset.toInt)
+            case None =>
+              problem(operands(1), "relocatable branch targets not supported for local_get_jump")
 
         // --- opcode + i32 relative (call, tail, jump_wide) ---
         case "call" | "tail" | "jump_wide" =>
           if operands.size != 1 then problem(inst, s"$mnemonic requires 1 operand")
           val instrEnd = builder.length + builder.org + size
-          val offset = resolveBranchRel(operands.head, instrEnd)
-          emitByte(opcode)
-          emitI32(offset.toInt)
+          resolveBranchRel(operands.head, instrEnd) match
+            case Some(offset) =>
+              emitByte(opcode)
+              emitI32(offset.toInt)
+            case None =>
+              // Extern/relocatable — emit CALL_ABS with ABS64 relocation
+              val ref = operands.head match
+                case ReferenceExprAST(name) => name
+                case _ => problem(operands.head, "expected symbol name for relocatable call")
+              emitCallAbsReloc(ref)
 
         // --- opcode + i32 literal ---
         case "push_i32" =>
           if operands.size != 1 then problem(inst, "push_i32 requires 1 operand")
-          val imm = fold(operands.head, absolute = true, immediate = true) match
-            case LongExprAST(n) => n.toInt
+          fold(operands.head, absolute = true, immediate = true) match
+            case LongExprAST(n) =>
+              emitByte(opcode)
+              emitI32(n.toInt)
+            case ReferenceExprAST(ref) if relocatable =>
+              // Promote to push_i64 with relocation
+              emitByte(0x18) // PUSH_i64 opcode
+              emitAbs64Reloc(ref)
             case _ => problem(operands.head, "expected 32-bit value")
-          emitByte(opcode)
-          emitI32(imm)
 
         // --- opcode + i64 ---
         case "push_i64" =>
           if operands.size != 1 then problem(inst, "push_i64 requires 1 operand")
-          val imm = fold(operands.head, absolute = true, immediate = true) match
-            case LongExprAST(n) => n
-            case DoubleExprAST(d) => java.lang.Double.doubleToLongBits(d)
+          fold(operands.head, absolute = true, immediate = true) match
+            case LongExprAST(n) =>
+              emitByte(opcode)
+              emitI64(n)
+            case DoubleExprAST(d) =>
+              emitByte(opcode)
+              emitI64(java.lang.Double.doubleToLongBits(d))
+            case ReferenceExprAST(ref) if relocatable =>
+              emitByte(opcode)
+              emitAbs64Reloc(ref)
             case _ => problem(operands.head, "expected 64-bit value")
-          emitByte(opcode)
-          emitI64(imm)
 
         // --- opcode + abs64 (call_abs) ---
         case "call_abs" =>
