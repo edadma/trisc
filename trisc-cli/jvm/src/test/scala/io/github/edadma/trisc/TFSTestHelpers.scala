@@ -145,13 +145,17 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
       mainSource: String,
       prefill: String = "",
       maxCycles: Int = 5000000,
+      sectors: Int = 64,
+      files: Map[String, Array[Byte]] = Map.empty,
   ): (CPU, String) =
-    runTFS(Map("main" -> mainSource), prefill, maxCycles)
+    runTFS(Map("main" -> mainSource), prefill, maxCycles, sectors, files)
 
   def runTFS(
       sources: Map[String, String],
       prefill: String,
       maxCycles: Int,
+      sectors: Int,
+      files: Map[String, Array[Byte]],
   ): (CPU, String) =
     // Compile all sources together (needed for import resolution), but only
     // codegen+assemble the user sources — library TOFs are cached.
@@ -180,12 +184,13 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
     val ramdisk = new Ramdisk(
       Runtime.ramdiskAddress,
       ram,
-      sectors = 64,
+      sectors = sectors,
       sectorSize = 512,
       intc,
       irq = 3,
       prefill = prefill,
       maxInodes = 32,
+      files = files,
     )
     val mem = new Memory("Memory", ram, stdout, intc, timer, ramdisk)
     linked.load(mem)

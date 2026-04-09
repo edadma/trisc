@@ -44,6 +44,8 @@ class OSKitLoaderTests extends OSKitTestHelpers {
       |    rodata
       |    data
       |    bss
+      |SYMBOL _heap_start = AFTER bss
+      |SYMBOL _heap_end = 0xCC000
       |ENTRY main
       |""".stripMargin) match
     case Right(s) => s
@@ -203,4 +205,5 @@ import oskit.apps.init.{init}
     val (_, output) = runWithKeys("", keys)
     output should include("not found")
   }
+
 }

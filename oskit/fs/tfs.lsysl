@@ -194,7 +194,7 @@ indirect block (6+).
         if ind_blk == 0
             return 0
         rd_read(ind_blk, blkbuf2)
-        read_i16(blkbuf2 + (idx - NUM_DIRECT) * 2)
+        return read_i16(blkbuf2 + (idx - NUM_DIRECT) * 2)
 
     // === Bitmap operations ===
 
