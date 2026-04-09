@@ -117,6 +117,16 @@ class SyslAnalyzer:
   // to sibling trait methods to their impl's mangled names
   private var traitCallRewrite: Map[String, String] = Map.empty
 
+  /** Get trait impl metadata for cross-unit serialization. */
+  def getTraitImplMetas: List[TraitImplMeta] =
+    impls.map { case ((traitName, targetType), methodMap) =>
+      TraitImplMeta(traitName, targetType, methodMap.toMap)
+    }.toList
+
+  /** Get trait declaration AST nodes for serialization in TEMPLATES section. */
+  def getTraitDecls: List[TraitDeclAST] =
+    traits.values.map(t => TraitDeclAST(t.name, t.typeParam, t.methods)).toList
+
   private def pushScope(): Unit =
     scopeStack += new mutable.LinkedHashMap[String, SymInfo]
 
@@ -238,6 +248,20 @@ class SyslAnalyzer:
     // Register generic templates from imported module (needed for cross-module generic instantiation)
     if meta.genericTemplates.nonEmpty then
       registerGenericTemplatesFrom(ProgramAST(meta.genericTemplates))
+
+    // Register trait declarations from imported templates
+    for template <- meta.genericTemplates do
+      template match
+        case TraitDeclAST(name, tparam, methods, _) =>
+          if !traits.contains(name) then
+            traits(name) = TraitInfo(name, tparam, methods)
+        case _ =>
+
+    // Register trait impl mappings from imported module
+    for impl <- meta.traitImpls do
+      val key = (impl.traitName, impl.targetType)
+      if !impls.contains(key) then
+        impls(key) = mutable.LinkedHashMap.from(impl.methods)
 
   def isExternal(name: String): Boolean = externalSymbols.contains(name)
   def externals: Set[String] = externalSymbols.toSet
@@ -1031,7 +1055,11 @@ class SyslAnalyzer:
     val methodMap = impls.getOrElse((traitName, targetType),
       throw AnalysisError(s"no impl of trait '$traitName' for type $targetType"))
     val mangled = methodMap(methodName)
-    (mangled, functions(mangled))
+    // Look up by full mangled name first, then by short name (for cross-module imports)
+    val funInfo = functions.getOrElse(mangled,
+      functions.getOrElse(shortName(mangled),
+        throw AnalysisError(s"trait method '$traitName.$methodName' resolved to '$mangled' but function not found")))
+    (mangled, funInfo)
 
   private def instantiateGeneric(name: String, argTypes: List[SyslType]): (String, FunInfo) =
     val template = genericTemplates(name)

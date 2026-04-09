@@ -11,8 +11,11 @@ object SymbolMeta:
     case Struct(structType: SyslType.StructType)
     case Enum(enumType: SyslType.EnumType)
     case Interface(ifaceType: SyslType.InterfaceType)
+    case Impl(traitName: String, targetType: SyslType, methods: Map[String, String]) // methodName → mangledFuncName
 
-class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclAST] = Nil):
+case class TraitImplMeta(traitName: String, targetType: SyslType, methods: Map[String, String]) // methodName → mangledFuncName
+
+class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclAST] = Nil, val traitImpls: List[TraitImplMeta] = Nil):
 
   def toSmeta: String =
     val buf = new StringBuilder
@@ -35,6 +38,10 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
           buf ++= s"${vis}ENUM ${sym.name} ${et.toPrefix}\n"
         case SymbolMeta.Kind.Interface(it) =>
           buf ++= s"${vis}IFACE ${sym.name} ${it.toPrefix}\n"
+    // Emit impl registrations
+    for impl <- traitImpls do
+      val methods = impl.methods.map((k, v) => s"$k=$v").mkString(" ")
+      buf ++= s"IMPL ${impl.traitName} ${impl.targetType.toPrefix} $methods\n"
     if genericTemplates.nonEmpty then
       buf ++= "TEMPLATES\n"
       for template <- genericTemplates do
@@ -53,7 +60,7 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
           buf ++= s"global ${sym.name}, func, ${SyslType.funcSigToPrefix(params, ret)}\n"
         case SymbolMeta.Kind.Data(dataType) =>
           buf ++= s"global ${sym.name}, data, ${dataType.toPrefix}\n"
-        case SymbolMeta.Kind.Struct(_) | SymbolMeta.Kind.Enum(_) | SymbolMeta.Kind.Interface(_) => // type-only, no asm global
+        case SymbolMeta.Kind.Struct(_) | SymbolMeta.Kind.Enum(_) | SymbolMeta.Kind.Interface(_) | SymbolMeta.Kind.Impl(_, _, _) => // type-only, no asm global
     buf.toString
 
   def publicSymbols: List[SymbolMeta] =
@@ -69,7 +76,7 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
   def merge(other: ModuleMeta): ModuleMeta =
     val replacedSources = other.symbols.flatMap(_.sourceFile).toSet
     val kept = symbols.filterNot(s => s.sourceFile.exists(replacedSources.contains))
-    new ModuleMeta(kept ++ other.symbols, genericTemplates ++ other.genericTemplates)
+    new ModuleMeta(kept ++ other.symbols, genericTemplates ++ other.genericTemplates, traitImpls ++ other.traitImpls)
 
   /** Get the set of source files that define the given symbol names. */
   def sourceFilesFor(names: Set[String]): Set[String] =
@@ -82,7 +89,7 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
 object ModuleMeta:
 
   /** Bump this whenever the .smeta format changes. Stale files are silently ignored. */
-  val SMETA_VERSION = 5
+  val SMETA_VERSION = 6
 
   def fromProgram(program: TProgram, sourceFile: Option[String] = None): ModuleMeta =
     val syms = program.decls.collect {
@@ -112,6 +119,7 @@ object ModuleMeta:
     import scala.util.boundary, boundary.break
     boundary:
       val syms = scala.collection.mutable.ListBuffer[SymbolMeta]()
+      val implMetas = scala.collection.mutable.ListBuffer[TraitImplMeta]()
       var lineNum = 0
       var headerSeen = false
       var currentSource: Option[String] = None
@@ -138,6 +146,16 @@ object ModuleMeta:
               inTemplates = true
             else if line.startsWith("SOURCE ") then
               currentSource = Some(line.drop(7).trim)
+            else if line.startsWith("IMPL ") then
+              // IMPL traitName typePrefix method1=mangled1 method2=mangled2 ...
+              val tokens = line.drop(5).split("\\s+").iterator
+              val traitName = tokens.next()
+              val targetType = SyslType.parseType(tokens)
+              val methods = scala.collection.mutable.Map[String, String]()
+              while tokens.hasNext do
+                val pair = tokens.next().split("=", 2)
+                if pair.length == 2 then methods(pair(0)) = pair(1)
+              implMetas += TraitImplMeta(traitName, targetType, methods.toMap)
             else
               val (isPrivate, rest) = if line.startsWith("PRIVATE ") then (true, line.drop(8)) else (false, line)
               val tokens = rest.split("\\s+").iterator
@@ -176,8 +194,9 @@ object ModuleMeta:
                 case StructDeclAST(_, _, tps, _)           => tps.nonEmpty
                 case DataEnumDeclAST(_, _, tps, _)         => tps.nonEmpty
                 case FunDeclAST(_, _, _, _, _, tps, _, _, _) => tps.nonEmpty
+                case _: TraitDeclAST                        => true
                 case _                                      => false
               }
             case Left(_) => Nil // silently ignore parse failures in templates
         else Nil
-        Some(new ModuleMeta(syms.toList, templates))
+        Some(new ModuleMeta(syms.toList, templates, implMetas.toList))
