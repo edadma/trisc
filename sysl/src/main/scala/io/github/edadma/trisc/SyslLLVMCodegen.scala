@@ -58,7 +58,7 @@ class SyslLLVMCodegen:
       decl match
         case TStructDecl(name, fields) =>
           structTypes(name) = SyslType.StructType(name, fields)
-        case TFunDecl(name, _, _, _, _, _) if name.endsWith("_deinit") =>
+        case TFunDecl(name, _, _, _, _, _, _) if name.endsWith("_deinit") =>
           val structName = name.indexOf("__") match
             case -1 => name.dropRight(7) // "Point_deinit" -> "Point"
             case i  => name.substring(i + 2).dropRight(7) // "mod__Point_deinit" -> "Point"
