@@ -25,6 +25,7 @@ class OSKitTTYTests extends OSKitTestHelpers {
       "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
       "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
       "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "std/debug/debug" -> debugSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl, "oskit/drivers/tty/tty" -> ttySysl,
+      "posix/unistd/sbrk" -> sbrkSysl, "posix/stdlib/alloc" -> posixAllocSysl, "posix/string/string" -> posixStringSysl, "posix/ctype/ctype" -> posixCtypeSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
