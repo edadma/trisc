@@ -412,4 +412,110 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    puts(b.to_str())
         |""".stripMargin) shouldBe "true false"
   }
+
+  // ===== std.encoding.hex (more) =====
+
+  "std.encoding.hex encoded_len/decoded_len" in {
+    llvmExitWithStd(
+      """import std.encoding.hex.*
+        |
+        |main() -> int
+        |    encoded_len(3) + decoded_len(6)
+        |""".stripMargin) shouldBe 9 // 6 + 3
+  }
+
+  "std.encoding.hex decode_string" ignore {
+    llvmExitWithStd(
+      """import std.encoding.hex.*
+        |
+        |main() -> int
+        |    val out, ok = decode_string("48454c4c4f")
+        |    if ok then len(out) else -1
+        |""".stripMargin) shouldBe 5
+  }
+
+  "std.encoding.hex roundtrip" ignore {
+    llvmOutputWithStd(
+      """import std.encoding.hex.*
+        |
+        |main()
+        |    val src = new [5]byte
+        |    src[0] = byte(72)
+        |    src[1] = byte(69)
+        |    src[2] = byte(76)
+        |    src[3] = byte(76)
+        |    src[4] = byte(79)
+        |    val hex = encode_to_string(src[:])
+        |    val decoded, ok = decode_string(hex)
+        |    if ok
+        |        puts(string(decoded))
+        |""".stripMargin) shouldBe "HELLO"
+  }
+
+  // ===== std.utf8 =====
+
+  "std.utf8 rune_len" in {
+    llvmExitWithStd(
+      """import std.utf8.*
+        |
+        |main() -> int
+        |    rune_len(char(65)) + rune_len(char(0x80)) + rune_len(char(0x800)) + rune_len(char(0x10000))
+        |""".stripMargin) shouldBe 10 // 1 + 2 + 3 + 4
+  }
+
+  "std.utf8 valid_rune" in {
+    llvmExitWithStd(
+      """import std.utf8.*
+        |
+        |main() -> int
+        |    if valid_rune(char(65)) && !valid_rune(char(0x110000)) then 42 else 0
+        |""".stripMargin) shouldBe 42
+  }
+
+  "std.utf8 rune_start" in {
+    llvmExitWithStd(
+      """import std.utf8.*
+        |
+        |main() -> int
+        |    if rune_start(byte(0xC0)) && !rune_start(byte(0x80)) then 42 else 0
+        |""".stripMargin) shouldBe 42
+  }
+
+  "std.utf8 rune_count ascii" in {
+    llvmExitWithStd(
+      """import std.utf8.*
+        |
+        |main() -> int
+        |    val buf = new [5]byte
+        |    buf[0] = byte('h')
+        |    buf[1] = byte('e')
+        |    buf[2] = byte('l')
+        |    buf[3] = byte('l')
+        |    buf[4] = byte('o')
+        |    rune_count(buf[:])
+        |""".stripMargin) shouldBe 5
+  }
+
+  "std.utf8 encode_rune" in {
+    llvmExitWithStd(
+      """import std.utf8.*
+        |
+        |main() -> int
+        |    val buf = new [4]byte
+        |    val n = encode_rune(buf[:], char(0xE4))
+        |    n
+        |""".stripMargin) shouldBe 2 // 0xE4 = ä, 2-byte UTF-8
+  }
+
+  "std.utf8 decode_rune" in {
+    llvmExitWithStd(
+      """import std.utf8.*
+        |
+        |main() -> int
+        |    val buf = new [4]byte
+        |    val n = encode_rune(buf[:], char(65))
+        |    val r, sz = decode_rune(buf[:])
+        |    int(r) + sz
+        |""".stripMargin) shouldBe 66 // 65 + 1
+  }
 }
