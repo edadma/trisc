@@ -1,0 +1,450 @@
+std.term — Terminal escape sequences
+=====================================
+
+ANSI/VT100 escape sequence helpers for terminal control.
+Builds escape strings that can be written to any `Writer`
+or printed directly. No terminal state is tracked — these
+are pure string builders.
+
+Dependencies: std.builder, std.strconv.
+
+
+    module std.term
+
+    import std.debug.{assert}
+    import std.builder.{StrBuilder, new_builder_cap}
+    import std.strconv.{format_int}
+
+
+Constants
+---------
+
+    val ESC = "\x1b"
+
+Color constants (standard 8-color ANSI).
+
+    val BLACK   = 0
+    val RED     = 1
+    val GREEN   = 2
+    val YELLOW  = 3
+    val BLUE    = 4
+    val MAGENTA = 5
+    val CYAN    = 6
+    val WHITE   = 7
+
+
+Cursor movement
+---------------
+
+### move_to
+
+`move_to(row, col)` returns the escape sequence to move
+the cursor to the given 1-based row and column.
+
+    move_to(row: int, col: int) -> string
+        var b = new_builder_cap(16)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(row))
+        b.write(";")
+        b.write(format_int(col))
+        b.write("H")
+        return b.to_str()
+
+### move_up
+
+    move_up(n: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(n))
+        b.write("A")
+        return b.to_str()
+
+### move_down
+
+    move_down(n: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(n))
+        b.write("B")
+        return b.to_str()
+
+### move_right
+
+    move_right(n: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(n))
+        b.write("C")
+        return b.to_str()
+
+### move_left
+
+    move_left(n: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(n))
+        b.write("D")
+        return b.to_str()
+
+### save_cursor
+
+    save_cursor() -> string
+        var b = new_builder_cap(4)
+        b.write(ESC)
+        b.write("[s")
+        return b.to_str()
+
+### restore_cursor
+
+    restore_cursor() -> string
+        var b = new_builder_cap(4)
+        b.write(ESC)
+        b.write("[u")
+        return b.to_str()
+
+
+Screen clearing
+---------------
+
+### clear
+
+`clear()` clears the entire screen.
+
+    clear() -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[2J")
+        return b.to_str()
+
+### clear_line
+
+`clear_line()` clears the current line.
+
+    clear_line() -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[2K")
+        return b.to_str()
+
+### clear_to_eol
+
+`clear_to_eol()` clears from cursor to end of line.
+
+    clear_to_eol() -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[K")
+        return b.to_str()
+
+### clear_to_eos
+
+`clear_to_eos()` clears from cursor to end of screen.
+
+    clear_to_eos() -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[J")
+        return b.to_str()
+
+
+Cursor visibility
+-----------------
+
+### hide_cursor
+
+    hide_cursor() -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[?25l")
+        return b.to_str()
+
+### show_cursor
+
+    show_cursor() -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[?25h")
+        return b.to_str()
+
+
+Colors and styles
+-----------------
+
+SGR (Select Graphic Rendition) codes.
+
+### set_fg
+
+`set_fg(color)` sets the foreground color (0-7).
+
+    set_fg(color: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(30 + color))
+        b.write("m")
+        return b.to_str()
+
+### set_bg
+
+`set_bg(color)` sets the background color (0-7).
+
+    set_bg(color: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(40 + color))
+        b.write("m")
+        return b.to_str()
+
+### set_bright_fg
+
+`set_bright_fg(color)` sets a bright/bold foreground (0-7).
+
+    set_bright_fg(color: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(90 + color))
+        b.write("m")
+        return b.to_str()
+
+### set_bright_bg
+
+    set_bright_bg(color: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(100 + color))
+        b.write("m")
+        return b.to_str()
+
+### Style modifiers
+
+    bold() -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[1m")
+        return b.to_str()
+
+    dim() -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[2m")
+        return b.to_str()
+
+    italic() -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[3m")
+        return b.to_str()
+
+    underline() -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[4m")
+        return b.to_str()
+
+    blink() -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[5m")
+        return b.to_str()
+
+    reverse() -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[7m")
+        return b.to_str()
+
+### reset
+
+`reset()` resets all attributes to default.
+
+    reset() -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[0m")
+        return b.to_str()
+
+
+Scrolling
+---------
+
+### scroll_up
+
+    scroll_up(n: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(n))
+        b.write("S")
+        return b.to_str()
+
+### scroll_down
+
+    scroll_down(n: int) -> string
+        var b = new_builder_cap(8)
+        b.write(ESC)
+        b.write("[")
+        b.write(format_int(n))
+        b.write("T")
+        return b.to_str()
+
+
+Alternate screen
+----------------
+
+### enter_alt_screen
+
+    enter_alt_screen() -> string
+        var b = new_builder_cap(12)
+        b.write(ESC)
+        b.write("[?1049h")
+        return b.to_str()
+
+### leave_alt_screen
+
+    leave_alt_screen() -> string
+        var b = new_builder_cap(12)
+        b.write(ESC)
+        b.write("[?1049l")
+        return b.to_str()
+
+
+Tests
+=====
+
+Tests verify exact escape sequence content.
+
+### Cursor movement
+
+    #test
+    test_move_to() -> unit
+        assert(move_to(5, 10) == "\x1b[5;10H", "move 5,10")
+
+    #test
+    test_move_to_origin() -> unit
+        assert(move_to(1, 1) == "\x1b[1;1H", "move 1,1")
+
+    #test
+    test_move_up() -> unit
+        assert(move_up(3) == "\x1b[3A", "up 3")
+
+    #test
+    test_move_down() -> unit
+        assert(move_down(1) == "\x1b[1B", "down 1")
+
+    #test
+    test_move_right() -> unit
+        assert(move_right(5) == "\x1b[5C", "right 5")
+
+    #test
+    test_move_left() -> unit
+        assert(move_left(2) == "\x1b[2D", "left 2")
+
+### Screen clearing
+
+    #test
+    test_clear() -> unit
+        assert(clear() == "\x1b[2J", "clear screen")
+
+    #test
+    test_clear_line() -> unit
+        assert(clear_line() == "\x1b[2K", "clear line")
+
+    #test
+    test_clear_to_eol() -> unit
+        assert(clear_to_eol() == "\x1b[K", "clear to eol")
+
+### Colors
+
+    #test
+    test_set_fg_red() -> unit
+        assert(set_fg(RED) == "\x1b[31m", "red fg")
+
+    #test
+    test_set_fg_green() -> unit
+        assert(set_fg(GREEN) == "\x1b[32m", "green fg")
+
+    #test
+    test_set_bg_blue() -> unit
+        assert(set_bg(BLUE) == "\x1b[44m", "blue bg")
+
+    #test
+    test_bright_fg() -> unit
+        assert(set_bright_fg(WHITE) == "\x1b[97m", "bright white")
+
+### Styles
+
+    #test
+    test_bold() -> unit
+        assert(bold() == "\x1b[1m", "bold")
+
+    #test
+    test_underline() -> unit
+        assert(underline() == "\x1b[4m", "underline")
+
+    #test
+    test_reset() -> unit
+        assert(reset() == "\x1b[0m", "reset")
+
+### Cursor visibility
+
+    #test
+    test_hide_cursor() -> unit
+        assert(hide_cursor() == "\x1b[?25l", "hide")
+
+    #test
+    test_show_cursor() -> unit
+        assert(show_cursor() == "\x1b[?25h", "show")
+
+### Scroll and alt screen
+
+    #test
+    test_scroll_up() -> unit
+        assert(scroll_up(2) == "\x1b[2S", "scroll up 2")
+
+    #test
+    test_enter_alt_screen() -> unit
+        assert(enter_alt_screen() == "\x1b[?1049h", "enter alt")
+
+    #test
+    test_leave_alt_screen() -> unit
+        assert(leave_alt_screen() == "\x1b[?1049l", "leave alt")
+
+### Composability
+
+    #test
+    test_composed_sequence() -> unit
+        var b = new_builder_cap(32)
+        b.write(move_to(1, 1))
+        b.write(clear())
+        b.write(set_fg(RED))
+        b.write(bold())
+        val s = b.to_str()
+        // ESC[1;1H + ESC[2J + ESC[31m + ESC[1m = 6+4+5+4 = 19
+        assert(len(s) == 19, s"composed len: ${len(s)}")
+
+
+Design notes
+------------
+
+**Pure string builders.** Every function returns a `string`
+containing the escape sequence. No I/O is performed — the
+caller decides how to write it (puts, Writer, tty driver).
+This makes the module testable and composable.
+
+**Hex escape in ESC constant.** `val ESC = "\x1b"` requires
+the lexer to support `\x` hex escapes in string literals.
+This is the correct way to express the ESC byte — no
+workarounds.
+
+**8-color model.** The basic 8 ANSI colors (0-7) cover
+all terminals. 256-color and true-color (24-bit) support
+can be added later with `set_fg_256(n)` and
+`set_fg_rgb(r, g, b)`.
