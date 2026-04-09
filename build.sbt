@@ -121,6 +121,22 @@ lazy val asm = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .jvmSettings(jvmNativeStubs)
   .nativeSettings(jvmNativeStubs)
 
+lazy val svm = crossProject(JSPlatform, JVMPlatform, NativePlatform)
+  .crossType(CrossType.Pure)
+  .in(file("svm"))
+  .settings(commonSettings)
+  .settings(
+    name := "trisc-svm",
+    libraryDependencies ++= Seq(
+      "org.scala-lang.modules" %%% "scala-parser-combinators" % "2.4.0",
+      "com.lihaoyi" %%% "pprint" % "0.9.0",
+    ),
+  )
+  .dependsOn(asm)
+  .jsSettings(jsSettings)
+  .jvmSettings(jvmNativeStubs)
+  .nativeSettings(jvmNativeStubs)
+
 lazy val cpu = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .crossType(CrossType.Pure)
   .in(file("cpu"))
@@ -178,7 +194,7 @@ lazy val triscCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
       "com.lihaoyi" %%% "pprint" % "0.9.0",
     ),
   )
-  .dependsOn(cpu, asm, sysl)
+  .dependsOn(cpu, asm, svm, sysl)
   .jsSettings(jsSettings)
   .jvmSettings(jvmNativeStubs)
   .nativeSettings(jvmNativeStubs)
@@ -220,6 +236,7 @@ lazy val root = project
     mem.jvm, /* mem.js, mem.native, */
     tof.jvm, /* tof.js, tof.native, */
     asm.jvm, /* asm.js, asm.native, */
+    svm.jvm, /* svm.js, svm.native, */
     cpu.jvm, /* cpu.js, cpu.native, */
     docs.jvm, /* docs.js, docs.native, */
     sysl.jvm, /* sysl.js, sysl.native, */

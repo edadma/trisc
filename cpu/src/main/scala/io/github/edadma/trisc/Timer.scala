@@ -37,7 +37,7 @@ package io.github.edadma.trisc
  * @param channels  Up to 4 channel I/O bindings (pinRead for capture, pinWrite for compare)
  */
 class Timer(val base: Long, intc: InterruptController, irq: Int, channels: Seq[TimerChannel] = Nil)
-    extends Device with (CPU => Unit):
+    extends Device with (Processor => Unit):
   val name = "timer"
   val size = 48
 
@@ -198,7 +198,7 @@ class Timer(val base: Long, intc: InterruptController, irq: Int, channels: Seq[T
 
   // ===== Tick =====
 
-  def apply(cpu: CPU): Unit =
+  def apply(cpu: Processor): Unit =
     if (cr & CR_EN) == 0 then return
 
     // Prescaler

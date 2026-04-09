@@ -117,6 +117,22 @@ class SyslAnalyzer:
   // to sibling trait methods to their impl's mangled names
   private var traitCallRewrite: Map[String, String] = Map.empty
 
+  /** Get trait impl metadata for cross-unit serialization. */
+  def getTraitImplMetas: List[TraitImplMeta] =
+    impls.map { case ((traitName, targetType), methodMap) =>
+      TraitImplMeta(traitName, targetType, methodMap.toMap)
+    }.toList
+
+  /** Get trait declaration AST nodes for serialization in TEMPLATES section. */
+  def getTraitDecls: List[TraitDeclAST] =
+    traits.values.map(t => TraitDeclAST(t.name, t.typeParam, t.methods)).toList
+
+  /** Get generic enum instance mappings for cross-module type inference. */
+  def getGenericEnumInstances: List[GenericEnumInstanceMeta] =
+    enumToTemplate.map { case (mangledName, (baseName, typeArgs)) =>
+      GenericEnumInstanceMeta(mangledName, baseName, typeArgs)
+    }.toList
+
   private def pushScope(): Unit =
     scopeStack += new mutable.LinkedHashMap[String, SymInfo]
 
@@ -238,6 +254,25 @@ class SyslAnalyzer:
     // Register generic templates from imported module (needed for cross-module generic instantiation)
     if meta.genericTemplates.nonEmpty then
       registerGenericTemplatesFrom(ProgramAST(meta.genericTemplates))
+
+    // Register generic enum instance mappings for cross-module type inference
+    for inst <- meta.genericEnumInstances do
+      if !enumToTemplate.contains(inst.mangledName) then
+        enumToTemplate(inst.mangledName) = (inst.baseName, inst.typeArgs)
+
+    // Register trait declarations from imported templates
+    for template <- meta.genericTemplates do
+      template match
+        case TraitDeclAST(name, tparam, methods, _) =>
+          if !traits.contains(name) then
+            traits(name) = TraitInfo(name, tparam, methods)
+        case _ =>
+
+    // Register trait impl mappings from imported module
+    for impl <- meta.traitImpls do
+      val key = (impl.traitName, impl.targetType)
+      if !impls.contains(key) then
+        impls(key) = mutable.LinkedHashMap.from(impl.methods)
 
   def isExternal(name: String): Boolean = externalSymbols.contains(name)
   def externals: Set[String] = externalSymbols.toSet
@@ -1031,7 +1066,11 @@ class SyslAnalyzer:
     val methodMap = impls.getOrElse((traitName, targetType),
       throw AnalysisError(s"no impl of trait '$traitName' for type $targetType"))
     val mangled = methodMap(methodName)
-    (mangled, functions(mangled))
+    // Look up by full mangled name first, then by short name (for cross-module imports)
+    val funInfo = functions.getOrElse(mangled,
+      functions.getOrElse(shortName(mangled),
+        throw AnalysisError(s"trait method '$traitName.$methodName' resolved to '$mangled' but function not found")))
+    (mangled, funInfo)
 
   private def instantiateGeneric(name: String, argTypes: List[SyslType]): (String, FunInfo) =
     val template = genericTemplates(name)
@@ -1368,8 +1407,16 @@ class SyslAnalyzer:
 
       case ArrayLitAST(elements) =>
         val tElems = elements.map(analyzeExpr)
-        val elemType = tElems.head.typ
-        TArrayLit(tElems, SyslType.ArrayType(elemType, tElems.length))
+        if tElems.isEmpty then
+          // Empty array literal — element type comes from target context (e.g. [0]string = [])
+          val elemType = currentExpected.flatMap {
+            case SyslType.ArrayType(et, _) => Some(et)
+            case _ => None
+          }.getOrElse(throw AnalysisError("cannot infer element type for empty array literal []"))
+          TArrayLit(Nil, SyslType.ArrayType(elemType, 0))
+        else
+          val elemType = tElems.head.typ
+          TArrayLit(tElems, SyslType.ArrayType(elemType, tElems.length))
 
       case ClosureAST(params, body) =>
         // Infer parameter types from currentExpected (the target func type)

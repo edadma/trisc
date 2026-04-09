@@ -21,7 +21,7 @@ enum State:
     Trace, Overflow, BoundsCheck,
     Halt, Run, Wfi, DoubleFault
 
-class CPU(mem: Addressable, tick: Seq[CPU => Unit] = Nil, mpu: Option[MPU] = None, mpuBase: Long = 0, val mmu: Option[MMU] = None) extends Addressable:
+class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU] = None, mpuBase: Long = 0, val mmu: Option[MMU] = None) extends Processor:
   val name: String = mem.name
   val base: Long = mem.base
   val size: Long = mem.size

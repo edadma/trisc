@@ -27,7 +27,7 @@ import scala.collection.mutable
  * @param fifoDepth Maximum FIFO depth (default 16)
  */
 class UART(val base: Long, intc: InterruptController, txIrq: Int, rxIrq: Int, onTx: Int => Unit = _ => (), fifoDepth: Int = 16)
-    extends Device with (CPU => Unit):
+    extends Device with (Processor => Unit):
   val name = "UART"
   val size = 8
 
@@ -108,7 +108,7 @@ class UART(val base: Long, intc: InterruptController, txIrq: Int, rxIrq: Int, on
       case 7 => divisor = (divisor & 0xFFFFFF00L) | (d.toLong & 0xFF)
       case _ =>
 
-  def apply(cpu: CPU): Unit =
+  def apply(cpu: Processor): Unit =
     if (control & CTL_ENABLE) == 0 then return
 
     // TX: count down and shift out

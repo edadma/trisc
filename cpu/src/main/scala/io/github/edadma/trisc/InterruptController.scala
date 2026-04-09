@@ -2,7 +2,7 @@ package io.github.edadma.trisc
 
 import io.github.edadma.logger._
 
-class InterruptController(val base: Long) extends Device with (CPU => Unit):
+class InterruptController(val base: Long) extends Device with (Processor => Unit):
   val name = "InterruptController"
   val size = 4
 
@@ -58,7 +58,7 @@ class InterruptController(val base: Long) extends Device with (CPU => Unit):
       case _ =>
   }
 
-  def apply(cpu: CPU): Unit =
+  def apply(cpu: Processor): Unit =
     if !irqSignal then return // fast path: single volatile read, no lock
     irqSignal = false
     synchronized {

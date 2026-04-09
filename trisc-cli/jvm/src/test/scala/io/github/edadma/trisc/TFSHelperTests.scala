@@ -189,7 +189,7 @@ class TFSHelperTests extends TFSTestHelpers {
       """import oskit.fs.*
         |main() -> int
         |    tfs_init()
-        |    if sb_block_size == 512
+        |    if sb_block_size == 4096
         |        putchar(65)
         |    if sb_total_inodes > 0
         |        putchar(66)

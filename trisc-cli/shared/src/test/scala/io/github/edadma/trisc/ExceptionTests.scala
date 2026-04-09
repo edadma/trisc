@@ -171,7 +171,8 @@ class ExceptionTests extends TestHelpers {
       override def loadByte(addr: Long, data: Long): Unit = ()
     }
     var interruptFired = false
-    val interruptSource: CPU => Unit = cpu =>
+    val interruptSource: Processor => Unit = p =>
+      val cpu = p.asInstanceOf[CPU]
       if !interruptFired && !cpu.test(Status.Ind) then
         interruptFired = true
         cpu.interrupt()
@@ -202,7 +203,7 @@ class ExceptionTests extends TestHelpers {
   }
 
   "interrupt is masked when Ind is set" in {
-    val interruptSource: CPU => Unit = cpu => cpu.interrupt()
+    val interruptSource: Processor => Unit = cpu => cpu.interrupt()
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     val tof = assemble(VECTORS + "ldi r1, 3\nspsr r1\nldi r1, 42\nhalt\n")
     tof.load(mem)

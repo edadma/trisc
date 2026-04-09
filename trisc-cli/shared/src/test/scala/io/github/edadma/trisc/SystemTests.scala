@@ -91,7 +91,7 @@ class SystemTests extends TestHelpers {
       override def loadByte(addr: Long, data: Long): Unit = ()
     }
     var interruptFired = false
-    val interruptSource: CPU => Unit = cpu =>
+    val interruptSource: Processor => Unit = cpu =>
       if !interruptFired && cpu.state == State.Wfi then
         interruptFired = true
         cpu.interrupt()
@@ -127,7 +127,7 @@ class SystemTests extends TestHelpers {
   "wfi does not execute next instruction before interrupt" in {
     // Interrupt fires only when CPU reaches WFI state.
     var interruptFired = false
-    val interruptSource: CPU => Unit = cpu =>
+    val interruptSource: Processor => Unit = cpu =>
       if !interruptFired && cpu.state == State.Wfi then
         interruptFired = true
         cpu.interrupt()
@@ -429,7 +429,7 @@ class SystemTests extends TestHelpers {
 
   "fence before wfi does not interfere" in {
     var interruptFired = false
-    val interruptSource: CPU => Unit = cpu =>
+    val interruptSource: Processor => Unit = cpu =>
       if !interruptFired && cpu.state == State.Wfi then
         interruptFired = true
         cpu.interrupt()
@@ -461,7 +461,7 @@ class SystemTests extends TestHelpers {
     // If Ind (interrupt disable) is set, wfi should stay suspended forever
     // because the interrupt callback calls cpu.interrupt() but it won't
     // transition state since Ind is set.
-    val interruptSource: CPU => Unit = cpu => cpu.interrupt()
+    val interruptSource: Processor => Unit = cpu => cpu.interrupt()
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     val tof = assemble(
       """dd 0xFF0

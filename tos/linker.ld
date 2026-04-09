@@ -12,8 +12,8 @@
 #   ...                Read-only data (string literals)
 #   ...                Initialized data (globals with values)
 #   ...                BSS (zero-initialized globals, arrays)
-#   ...     — 0xFFFFF  Heap / stack space
-#   0x100000+          Memory-mapped devices
+#   ...     — 0x7FFFFF Heap / stack space
+#   0x800000+          Memory-mapped devices
 #
 # ============================================================================
 
@@ -25,6 +25,6 @@ SECTIONS
     bss
 
 SYMBOL _heap_start = AFTER bss
-SYMBOL _heap_end = 0x100000
+SYMBOL _heap_end = 0x800000
 
 ENTRY boot

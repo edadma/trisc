@@ -1,7 +1,7 @@
 package io.github.edadma.trisc
 
 class GPIO(val base: Long, width: Int, intc: InterruptController, irq: Int, onChange: Int => Unit = _ => ())
-    extends Device with (CPU => Unit):
+    extends Device with (Processor => Unit):
   require(width >= 1 && width <= 8, "GPIO width must be 1-8 pins")
   val name = "GPIO"
   val size = 10
@@ -70,7 +70,7 @@ class GPIO(val base: Long, width: Int, intc: InterruptController, irq: Int, onCh
       case INT_POL    => intPolarity = d
       case _          =>
 
-  def apply(cpu: CPU): Unit =
+  def apply(cpu: Processor): Unit =
     val current = pinState
     val changed = current ^ previousInput
 

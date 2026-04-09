@@ -1,0 +1,580 @@
+std.flag — Command-line flag parsing
+=====================================
+
+A safe, idiomatic command-line flag parser inspired by Go's
+`flag` package but with short/long flag names and combined
+short flags. Returns `Result` on parse errors instead of
+panicking.
+
+Usage:
+
+```
+var p = new_parser("myapp", "does useful things")
+
+val opt_v = p.bool_flag("v", "verbose", "enable verbose output")
+val opt_p = p.int_flag("p", "port", 8080, "server port")
+val opt_o = p.str_flag("o", "output", "", "output file")
+
+val r = p.parse(args)
+
+if is_err(r) then ...
+
+val parsed = unwrap(r)
+val verbose = parsed.get_bool(opt_v)
+val port = parsed.get_int(opt_p)
+val output = parsed.get_str(opt_o)
+val files = parsed.args()
+```
+
+Dependencies: std.errors, std.result, std.strconv,
+std.strings, std.builder.
+
+
+    module std.flag
+
+    import std.debug.{assert}
+    import std.errors.{Error, new_error}
+    import std.result.{Result, Ok, Err, is_ok, is_err, unwrap}
+    import std.strconv.{parse_i64}
+    import std.strings.{has_prefix}
+    import std.builder.{StrBuilder, new_builder_cap}
+
+
+Constants
+---------
+
+Flag type tags.
+
+    val FLAG_BOOL = 0
+    val FLAG_INT  = 1
+    val FLAG_STR  = 2
+
+    val MAX_FLAGS = 32
+
+
+Flag descriptor
+---------------
+
+Each registered flag is stored as a descriptor.
+
+    struct FlagDesc
+        short_name: string
+        long_name: string
+        help_text: string
+        flag_type: int
+        default_int: int
+        default_str: string
+
+
+Parsed result
+-------------
+
+Holds the parsed values and positional arguments.
+
+    struct ParsedArgs
+        bool_vals: [32]bool
+        int_vals: [32]int
+        str_vals: [32]string
+        positional: []string
+        positional_count: int
+
+    ParsedArgs.get_bool(idx: int) -> bool = self.bool_vals[idx]
+
+    ParsedArgs.get_int(idx: int) -> int = self.int_vals[idx]
+
+    ParsedArgs.get_str(idx: int) -> string = self.str_vals[idx]
+
+    ParsedArgs.args() -> []string = self.positional
+
+    ParsedArgs.arg_count() -> int = self.positional_count
+
+
+Parser
+------
+
+    struct Parser
+        name: string
+        description: string
+        flags: [32]FlagDesc
+        count: int
+
+    new_parser(name: string, description: string) -> Parser
+        var p: Parser
+        p.name = name
+        p.description = description
+        p.count = 0
+        return p
+
+
+### Flag registration
+
+Each returns an index handle used to retrieve the
+parsed value.
+
+    Parser.bool_flag(short_name: string, long_name: string, help_text: string) -> int
+        val idx = self.count
+        self.flags[idx] = FlagDesc(short_name, long_name, help_text, FLAG_BOOL, 0, "")
+        self.count++
+        return idx
+
+    Parser.int_flag(short_name: string, long_name: string, default_val: int, help_text: string) -> int
+        val idx = self.count
+        self.flags[idx] = FlagDesc(short_name, long_name, help_text, FLAG_INT, default_val, "")
+        self.count++
+        return idx
+
+    Parser.str_flag(short_name: string, long_name: string, default_val: string, help_text: string) -> int
+        val idx = self.count
+        self.flags[idx] = FlagDesc(short_name, long_name, help_text, FLAG_STR, 0, default_val)
+        self.count++
+        return idx
+
+
+### find_flag
+
+Returns the index of a flag by short or long name, or -1.
+
+    Parser.find_flag(name: string) -> int
+        for i in 0..<self.count
+            if self.flags[i].short_name == name then return i
+            if self.flags[i].long_name == name then return i
+        return -1
+
+
+### parse
+
+Parses an argument list (typically argv[1:]). Supports:
+- `-v` (short bool)
+- `-abc` (combined short bools)
+- `-p 8080` (short with value)
+- `--verbose` (long bool)
+- `--port=8080` (long with =)
+- `--port 8080` (long with next arg)
+- `--` stops flag parsing
+
+    Parser.parse(argv: []string) -> Result[ParsedArgs, Error]
+        var result: ParsedArgs
+
+        // Set defaults
+        for i in 0..<self.count
+            val f = self.flags[i]
+
+            if f.flag_type == FLAG_INT
+                result.int_vals[i] = f.default_int
+            else if f.flag_type == FLAG_STR
+                result.str_vals[i] = f.default_str
+
+        // Collect positional args
+        val pos = (new [len(argv)]string)[:]
+        var pos_count = 0
+
+        var i = 0
+        val argc = len(argv)
+        var flags_done = false
+
+        while i < argc
+            val arg = argv[i]
+            val alen = len(arg)
+
+            if flags_done || alen == 0 || arg[0] != byte('-')
+                // Positional argument
+                pos[pos_count] = arg
+                pos_count++
+                i++
+            else if alen == 1
+                // Bare "-" is a positional
+                pos[pos_count] = arg
+                pos_count++
+                i++
+            else if alen == 2 && arg[1] == byte('-')
+                // "--" stops flag parsing
+                flags_done = true
+                i++
+            else if arg[1] == byte('-')
+                // Long flag: --name or --name=value or --name value
+                // Strip leading --
+                var name = ""
+                var value = ""
+                var has_eq = false
+                var j = 2
+
+                while j < alen
+                    if arg[j] == byte('=')
+                        has_eq = true
+                        // name is arg[2..j], value is arg[j+1..end]
+                        var nb = new_builder_cap(j - 2)
+                        for k in 2..<j
+                            nb.write_byte(byte(arg[k]))
+                        name = nb.to_str()
+
+                        var vb = new_builder_cap(alen - j - 1)
+                        for k in (j + 1)..<alen
+                            vb.write_byte(byte(arg[k]))
+                        value = vb.to_str()
+
+                        j = alen
+                    else
+                        j++
+
+                if !has_eq
+                    var nb = new_builder_cap(alen - 2)
+                    for k in 2..<alen
+                        nb.write_byte(byte(arg[k]))
+                    name = nb.to_str()
+
+                val idx = self.find_flag(name)
+
+                if idx < 0 then return Err(new_error(s"unknown flag: --$name"))
+
+                val f = self.flags[idx]
+
+                if f.flag_type == FLAG_BOOL
+                    result.bool_vals[idx] = true
+                    i++
+                else if has_eq
+                    if f.flag_type == FLAG_INT
+                        val rv = parse_i64(value)
+
+                        if is_err(rv) then return Err(new_error(s"invalid value for --$name: $value"))
+
+                        result.int_vals[idx] = int(unwrap(rv))
+                    else
+                        result.str_vals[idx] = value
+                    i++
+                else
+                    // Next arg is the value
+                    i++
+
+                    if i >= argc then return Err(new_error(s"flag --$name requires a value"))
+
+                    val next = argv[i]
+
+                    if f.flag_type == FLAG_INT
+                        val rv = parse_i64(next)
+
+                        if is_err(rv) then return Err(new_error(s"invalid value for --$name: $next"))
+
+                        result.int_vals[idx] = int(unwrap(rv))
+                    else
+                        result.str_vals[idx] = next
+                    i++
+            else
+                // Short flags: -v, -abc, -p 8080
+                j = 1
+
+                while j < alen
+                    var sb = new_builder_cap(1)
+                    sb.write_byte(byte(arg[j]))
+                    val ch = sb.to_str()
+                    val idx = self.find_flag(ch)
+
+                    if idx < 0 then return Err(new_error(s"unknown flag: -$ch"))
+
+                    val f = self.flags[idx]
+
+                    if f.flag_type == FLAG_BOOL
+                        result.bool_vals[idx] = true
+                        j++
+                    else
+                        // Value flag — rest of arg or next arg
+                        if j + 1 < alen
+                            // Rest of this arg is the value
+                            var vb = new_builder_cap(alen - j - 1)
+                            for k in (j + 1)..<alen
+                                vb.write_byte(byte(arg[k]))
+                            val value = vb.to_str()
+
+                            if f.flag_type == FLAG_INT
+                                val rv = parse_i64(value)
+
+                                if is_err(rv) then return Err(new_error(s"invalid value for -$ch: $value"))
+
+                                result.int_vals[idx] = int(unwrap(rv))
+                            else
+                                result.str_vals[idx] = value
+
+                            j = alen
+                        else
+                            // Next arg is the value
+                            i++
+
+                            if i >= argc then return Err(new_error(s"flag -$ch requires a value"))
+
+                            val next = argv[i]
+
+                            if f.flag_type == FLAG_INT
+                                val rv = parse_i64(next)
+
+                                if is_err(rv) then return Err(new_error(s"invalid value for -$ch: $next"))
+
+                                result.int_vals[idx] = int(unwrap(rv))
+                            else
+                                result.str_vals[idx] = next
+
+                            j = alen
+
+                i++
+
+        result.positional = pos
+        result.positional_count = pos_count
+        return Ok(result)
+
+
+### help
+
+Generate a usage/help string.
+
+    Parser.help() -> string
+        var b = new_builder_cap(256)
+        b.write("Usage: ")
+        b.write(self.name)
+        b.write(" [options] [arguments]\n")
+
+        if len(self.description) > 0
+            b.write(self.description)
+            b.write("\n")
+
+        b.write("\nOptions:\n")
+
+        for i in 0..<self.count
+            val f = self.flags[i]
+            b.write("  -")
+            b.write(f.short_name)
+            b.write(", --")
+            b.write(f.long_name)
+
+            if f.flag_type == FLAG_INT
+                b.write(" <int>")
+            else if f.flag_type == FLAG_STR
+                b.write(" <str>")
+
+            b.write("\t")
+            b.write(f.help_text)
+
+            if f.flag_type == FLAG_INT
+                b.write(s" (default: ${f.default_int})")
+            else if f.flag_type == FLAG_STR && len(f.default_str) > 0
+                b.write(s" (default: ${f.default_str})")
+
+            b.write("\n")
+
+        return b.to_str()
+
+
+Tests
+=====
+
+
+### Bool flags
+
+    #test
+    test_bool_short() -> unit
+        var p = new_parser("test", "")
+        val v = p.bool_flag("v", "verbose", "verbose")
+        val argv: [1]string = ["-v"]
+        val r = p.parse(argv[:])
+        assert(is_ok(r), "parses")
+        assert(unwrap(r).get_bool(v), "verbose set")
+
+    #test
+    test_bool_long() -> unit
+        var p = new_parser("test", "")
+        val v = p.bool_flag("v", "verbose", "verbose")
+        val argv: [1]string = ["--verbose"]
+        val r = p.parse(argv[:])
+        assert(is_ok(r), "parses")
+        assert(unwrap(r).get_bool(v), "verbose set")
+
+    #test
+    test_bool_default_false() -> unit
+        var p = new_parser("test", "")
+        val v = p.bool_flag("v", "verbose", "verbose")
+        val argv: [0]string = []
+        val r = p.parse(argv[:])
+        assert(is_ok(r), "parses")
+        assert(!unwrap(r).get_bool(v), "default false")
+
+    #test
+    test_combined_short_bools() -> unit
+        var p = new_parser("test", "")
+        val a = p.bool_flag("a", "all", "all")
+        val l = p.bool_flag("l", "long_flag", "long")
+        val h = p.bool_flag("h", "human", "human")
+        val argv: [1]string = ["-alh"]
+        val r = p.parse(argv[:])
+        assert(is_ok(r), "parses")
+        val parsed = unwrap(r)
+        assert(parsed.get_bool(a), "a set")
+        assert(parsed.get_bool(l), "l set")
+        assert(parsed.get_bool(h), "h set")
+
+
+### Int flags
+
+    #test
+    test_int_short_space() -> unit
+        var p = new_parser("test", "")
+        val port = p.int_flag("p", "port", 8080, "port")
+        val argv: [2]string = ["-p", "3000"]
+        val r = p.parse(argv[:])
+        assert(is_ok(r), "parses")
+        assert(unwrap(r).get_int(port) == 3000, "port 3000")
+
+    #test
+    test_int_long_equals() -> unit
+        var p = new_parser("test", "")
+        val port = p.int_flag("p", "port", 8080, "port")
+        val argv: [1]string = ["--port=3000"]
+        val r = p.parse(argv[:])
+        assert(is_ok(r), "parses")
+        assert(unwrap(r).get_int(port) == 3000, "port 3000")
+
+    #test
+    test_int_long_space() -> unit
+        var p = new_parser("test", "")
+        val port = p.int_flag("p", "port", 8080, "port")
+        val argv: [2]string = ["--port", "3000"]
+        val r = p.parse(argv[:])
+        assert(is_ok(r), "parses")
+        assert(unwrap(r).get_int(port) == 3000, "port 3000")
+
+    #test
+    test_int_default() -> unit
+        var p = new_parser("test", "")
+        val port = p.int_flag("p", "port", 8080, "port")
+        val argv: [0]string = []
+        val r = p.parse(argv[:])
+        assert(is_ok(r), "parses")
+        assert(unwrap(r).get_int(port) == 8080, "default 8080")
+
+
+### String flags
+
+    #test
+    test_str_short() -> unit
+        var p = new_parser("test", "")
+        val out = p.str_flag("o", "output", "", "output")
+        val argv: [2]string = ["-o", "file.txt"]
+        val r = p.parse(argv[:])
+        assert(is_ok(r), "parses")
+        assert(unwrap(r).get_str(out) == "file.txt", "file.txt")
+
+    #test
+    test_str_long_equals() -> unit
+        var p = new_parser("test", "")
+        val out = p.str_flag("o", "output", "", "output")
+        val argv: [1]string = ["--output=file.txt"]
+        val r = p.parse(argv[:])
+        assert(is_ok(r), "parses")
+        assert(unwrap(r).get_str(out) == "file.txt", "file.txt")
+
+    #test
+    test_str_attached_short() -> unit
+        var p = new_parser("test", "")
+        val out = p.str_flag("o", "output", "", "output")
+        val argv: [1]string = ["-ofile.txt"]
+        val r = p.parse(argv[:])
+        assert(is_ok(r), "parses")
+        assert(unwrap(r).get_str(out) == "file.txt", "attached")
+
+
+### Positional arguments
+
+    #test
+    test_positional_only() -> unit
+        var p = new_parser("test", "")
+        val argv: [2]string = ["foo", "bar"]
+        val r = p.parse(argv[:])
+        assert(is_ok(r), "parses")
+        val parsed = unwrap(r)
+        assert(parsed.arg_count() == 2, "2 args")
+        assert(parsed.args()[0] == "foo", "foo")
+        assert(parsed.args()[1] == "bar", "bar")
+
+    #test
+    test_mixed_flags_and_positional() -> unit
+        var p = new_parser("test", "")
+        val v = p.bool_flag("v", "verbose", "verbose")
+        val argv: [3]string = ["-v", "foo", "bar"]
+        val r = p.parse(argv[:])
+        assert(is_ok(r), "parses")
+        val parsed = unwrap(r)
+        assert(parsed.get_bool(v), "verbose")
+        assert(parsed.arg_count() == 2, "2 positional")
+        assert(parsed.args()[0] == "foo", "foo")
+
+    #test
+    test_double_dash_stops_flags() -> unit
+        var p = new_parser("test", "")
+        val v = p.bool_flag("v", "verbose", "verbose")
+        val argv: [3]string = ["--", "-v", "foo"]
+        val r = p.parse(argv[:])
+        assert(is_ok(r), "parses")
+        val parsed = unwrap(r)
+        assert(!parsed.get_bool(v), "v not set")
+        assert(parsed.arg_count() == 2, "2 positional")
+        assert(parsed.args()[0] == "-v", "-v as positional")
+
+
+### Error cases
+
+    #test
+    test_unknown_short() -> unit
+        var p = new_parser("test", "")
+        val argv: [1]string = ["-x"]
+        val r = p.parse(argv[:])
+        assert(is_err(r), "unknown flag")
+
+    #test
+    test_unknown_long() -> unit
+        var p = new_parser("test", "")
+        val argv: [1]string = ["--unknown"]
+        val r = p.parse(argv[:])
+        assert(is_err(r), "unknown flag")
+
+    #test
+    test_missing_value() -> unit
+        var p = new_parser("test", "")
+        val _ = p.str_flag("o", "output", "", "output")
+        val argv: [1]string = ["-o"]
+        val r = p.parse(argv[:])
+        assert(is_err(r), "missing value")
+
+    #test
+    test_invalid_int() -> unit
+        var p = new_parser("test", "")
+        val _ = p.int_flag("p", "port", 0, "port")
+        val argv: [2]string = ["-p", "abc"]
+        val r = p.parse(argv[:])
+        assert(is_err(r), "invalid int")
+
+
+### Help generation
+
+    #test
+    test_help_contains_flags() -> unit
+        var p = new_parser("myapp", "a tool")
+        val _ = p.bool_flag("v", "verbose", "be verbose")
+        val _ = p.int_flag("p", "port", 8080, "listen port")
+        val h = p.help()
+        assert(len(h) > 0, "non-empty help")
+
+
+Design notes
+------------
+
+**Index handles.** Flag registration returns an int index.
+The caller stores it in a `val` and uses it to retrieve
+the parsed value. This avoids generics, pointers, and
+dynamic dispatch — just array indexing.
+
+**Result on error.** Parse returns `Result[ParsedArgs, Error]`
+instead of panicking. Callers match or use `?` to propagate.
+
+**Combined short flags.** `-abc` sets all three bool flags.
+If a non-bool flag appears in a combined group, the rest
+of the argument is its value: `-p8080` sets port to 8080.
+
+**Fixed capacity.** 32 flags max per parser. Sufficient for
+any reasonable CLI tool. No dynamic allocation for the flag
+table.

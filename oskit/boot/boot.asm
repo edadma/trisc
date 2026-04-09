@@ -13,7 +13,7 @@
 ;
 ; ============================================================================
 
-STDOUT = 0x100000
+STDOUT = 0x800000
 
 ; ============================================================================
 ; Exception Vector Table
@@ -21,7 +21,7 @@ STDOUT = 0x100000
 
 segment vectors
 
-  dl 0x0FFFF8              ; Slot 0:  Initial SSP (kernel stack top, below devices)
+  dl 0x7FFFF8              ; Slot 0:  Initial SSP (kernel stack top, below devices)
   dl boot                  ; Slot 1:  Initial PC
   dl irq_handler           ; Slot 2:  Interrupt
   dl isr_insn_access       ; Slot 3:  InstructionAccess
@@ -104,7 +104,7 @@ do_schedule
   bne  r1, r0, restore_thread
 
   ; No threads ready — kernel idle with wfi
-  movi r7, 0x0FFFF8            ; clean kernel stack (below devices)
+  movi r7, 0x7FFFF8            ; clean kernel stack (below devices)
   movi r2, current_thread
   ldi  r1, -1                  ; mark no current thread
   stw  r1, r2, r0
@@ -133,7 +133,7 @@ timer_isr
 ; irq_handler — Generic Interrupt Dispatcher
 ; ============================================================================
 
-INTC_CLAIM = 0x100082    ; INTC base (0x100080) + offset 2
+INTC_CLAIM = 0x800082    ; INTC base (0x800080) + offset 2
 
 extern irq_handlers
 

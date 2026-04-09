@@ -3,8 +3,23 @@ package io.github.edadma.trisc
 import org.scalatest.freespec.AnyFreeSpec
 import org.scalatest.matchers.should.Matchers
 
+import java.io.{File, PrintWriter}
 import java.nio.file.{Files, Path}
 import scala.sys.process.*
+
+private object TestFileOps extends FileOps:
+  def readFile(path: String): String =
+    val source = scala.io.Source.fromFile(path)
+    try source.mkString finally source.close()
+  def writeFile(path: String, content: String): Unit =
+    val writer = new PrintWriter(path)
+    try writer.write(content) finally writer.close()
+  def exists(path: String): Boolean = new File(path).exists()
+  def isDirectory(path: String): Boolean = new File(path).isDirectory
+  def listFiles(path: String): Seq[String] = new File(path).listFiles().toSeq.map(_.getPath)
+  def fileName(path: String): String = new File(path).getName
+  def mkdirs(path: String): Unit = new File(path).mkdirs()
+  def joinPath(dir: String, name: String): String = new File(dir, name).getPath
 
 trait SyslLLVMTestHelpers extends AnyFreeSpec with Matchers {
 
@@ -19,8 +34,58 @@ trait SyslLLVMTestHelpers extends AnyFreeSpec with Matchers {
     val typed = (new SyslAnalyzer).analyze(ast)
     (new SyslLLVMCodegen).generate(typed)
 
-  def runLLVM(source: String): (Int, String) =
-    val ir = compileLLVM(source)
+  /** Compile multiple source files via SyslDriver, merge into single LLVM IR. */
+  def compileLLVMMulti(sources: Map[String, String]): String =
+    val driver = new SyslDriver()
+    val result = driver.compile(sources)
+    val merged = TProgram(result.units.flatMap(_.typed.decls))
+    (new SyslLLVMCodegen).generate(merged)
+
+  /** Compile a program with access to the std library.
+    * Recursively resolves all transitive std imports. */
+  def compileLLVMWithStd(source: String): String =
+    val tangler = (raw: String) => LiterateRenderer.tangle(new LiterateParser().parse(raw))
+    val collected = scala.collection.mutable.Map[String, String]()
+    val visited = scala.collection.mutable.Set[String]()
+
+    def collectStdModule(modPath: String): Unit =
+      if visited.contains(modPath) then return
+      visited += modPath
+      val dir = new File(modPath)
+      val sources: List[(String, String)] =
+        if dir.isDirectory then
+          dir.listFiles().toList.filter(_.getName.endsWith(".lsysl")).map { f =>
+            val key = modPath + "/" + f.getName.stripSuffix(".lsysl")
+            key -> tangler(TestFileOps.readFile(f.getPath))
+          }
+        else
+          val lf = new File(modPath + ".lsysl")
+          if lf.exists() then List(modPath -> tangler(TestFileOps.readFile(lf.getPath)))
+          else Nil
+      for (key, src) <- sources do
+        collected(key) = src
+        // Parse to find transitive imports
+        (new SyslParser).parseProgram(src) match
+          case Right(ast) =>
+            for case ImportDeclAST(path, _) <- ast.decls if path.startsWith("std/") do
+              collectStdModule(path)
+          case _ =>
+
+    // Parse user source for direct imports
+    val Right(ast) = (new SyslParser).parseProgram(source): @unchecked
+    for case ImportDeclAST(path, _) <- ast.decls if path.startsWith("std/") do
+      collectStdModule(path)
+
+    val allSources = collected.toMap + ("main" -> source)
+    val driver = new SyslDriver(Some(TestFileOps), List("."), tangler = Some(tangler))
+    val result = driver.compile(allSources)
+    val merged = TProgram(result.units.flatMap(u => u.typed.decls.filter {
+      case f: TFunDecl => !f.attributes.exists(_.name == "test")
+      case _ => true
+    }))
+    (new SyslLLVMCodegen).generate(merged)
+
+  private def runIR(ir: String): (Int, String) =
     withTempDir { dir =>
       val llFile = dir.resolve("test.ll")
       val exeFile = dir.resolve("test")
@@ -34,7 +99,21 @@ trait SyslLLVMTestHelpers extends AnyFreeSpec with Matchers {
       (exitCode, outBuf.toString.stripSuffix("\n"))
     }
 
+  def runLLVM(source: String): (Int, String) = runIR(compileLLVM(source))
+
+  def runLLVMMulti(sources: Map[String, String]): (Int, String) = runIR(compileLLVMMulti(sources))
+
+  def runLLVMWithStd(source: String): (Int, String) = runIR(compileLLVMWithStd(source))
+
   def llvmOutput(source: String): String = runLLVM(source)._2
 
   def llvmExit(source: String): Int = runLLVM(source)._1
+
+  def llvmOutputMulti(sources: Map[String, String]): String = runLLVMMulti(sources)._2
+
+  def llvmExitMulti(sources: Map[String, String]): Int = runLLVMMulti(sources)._1
+
+  def llvmOutputWithStd(source: String): String = runLLVMWithStd(source)._2
+
+  def llvmExitWithStd(source: String): Int = runLLVMWithStd(source)._1
 }

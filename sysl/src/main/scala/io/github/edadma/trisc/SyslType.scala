@@ -53,7 +53,7 @@ enum SyslType:
     case ArrayType(elem, size) => elem.sizeOf * size
     case DoubleType => 8
     case StringType => 16        // ptr(8) + len(8) — Go-style fat pointer
-    case SliceType(_) => 16      // ptr(8) + len(4) + cap(4)
+    case SliceType(_) => 24      // ptr(8) + len(4) + cap(4) + backref(8)
     case RefType(_) => 8         // pointer to heap object (refcount header + data)
     case st @ StructType(_, fields) =>
       var offset = 0L
@@ -169,8 +169,26 @@ enum SyslType:
     case _ => 0
 
 object SyslType:
+  /** Mangle a type into a valid identifier suffix for tuple/generic struct names. */
+  def mangleType(t: SyslType): String = t match
+    case IntType(w) => s"i$w"
+    case UIntType(w) => s"u$w"
+    case DoubleType => "f64"
+    case BoolType => "bool"
+    case VoidType => "void"
+    case StringType => "string"
+    case PtrType(inner) => s"p${mangleType(inner)}"
+    case RefType(inner) => s"r${mangleType(inner)}"
+    case SliceType(elem) => s"s${mangleType(elem)}"
+    case ArrayType(elem, size) => s"a${size}_${mangleType(elem)}"
+    case FuncType(params, ret) => s"fn${params.length}_${params.map(mangleType).mkString("_")}_${mangleType(ret)}"
+    case StructType(name, _) => name
+    case EnumType(name, _) => name
+    case InterfaceType(name, _) => name
+
   def tupleType(elemTypes: List[SyslType]): StructType =
-    StructType(s"_Tuple${elemTypes.length}", elemTypes.zipWithIndex.map((t, i) => (s"_$i", t)))
+    val suffix = elemTypes.map(mangleType).mkString("_")
+    StructType(s"_Tuple${elemTypes.length}_$suffix", elemTypes.zipWithIndex.map((t, i) => (s"_$i", t)))
 
   // Canonical type aliases — signed
   val I8: IntType = IntType(8)

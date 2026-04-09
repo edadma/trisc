@@ -14,6 +14,8 @@ class OSKitShellTests extends OSKitTestHelpers {
   private lazy val tfsSysl: String    = readLsysl("oskit/fs/tfs.lsysl")
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val shSysl: String     = readLsysl("oskit/apps/sh.lsysl")
+  private lazy val memSysl: String   = readLsysl("std/mem/mem.lsysl")
+  private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   // Cache the compiled+linked OS image — all shell tests use the same app source.
   // Uses inline init (no ttytab) since sh.lsysl is the legacy shell.
@@ -26,6 +28,8 @@ class OSKitShellTests extends OSKitTestHelpers {
       "oskit/sync/semaphore"     -> semaphoreSysl,
       "oskit/sync/mutex"         -> mutexSysl,
       "oskit/ipc/ipc"            -> ipcSysl,
+      "std/mem/mem"              -> memSysl,
+      "std/debug/debug"          -> debugSysl,
       "oskit/drivers/disk/disk"  -> diskSysl,
       "oskit/drivers/kbd/keyboard" -> kbdSysl,
       "oskit/drivers/tty/tty"    -> ttySysl,
@@ -46,16 +50,16 @@ import oskit.apps.shell
 import oskit.services.sleep
           |
           |init()
-          |    create_thread(disk_server, 0x80000, 0x80000, "disk")
+          |    create_thread(disk_server, 0x600000, 0x600000, "disk")
           |    sleep(5)
-          |    create_thread(tfs_server, 0x90000, 0x90000, "tfs")
-          |    create_thread(tty_server, 0xA0000, 0xA0000, "tty")
+          |    create_thread(tfs_server, 0x610000, 0x610000, "tfs")
+          |    create_thread(tty_server, 0x620000, 0x620000, "tty")
           |    sleep(5)
-          |    create_thread(shell, 0xB0000, 0xB0000, "sh")
+          |    create_thread(shell, 0x630000, 0x630000, "sh")
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(init, 0xC0000, 0xC0000, "init")
+          |    create_thread(init, 0x640000, 0x640000, "init")
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin,
@@ -95,17 +99,19 @@ import oskit.services.sleep
       Runtime.ramdiskAddress,
       ram,
       sectors = 64,
-      sectorSize = 512,
+      sectorSize = 4096,
       intc,
       irq = 3,
       prefill = prefill,
       maxInodes = 32,
     )
-    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, dma)
+    dma.mem = mem
     linked.load(mem)
 
     val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
-    val keyInjector: CPU => Unit = cpu => {
+    val keyInjector: Processor => Unit = cpu => {
       // Use CPU cycle count so key delivery is deterministic
       val cycle = cpu.cycles
       while pending.nonEmpty && cycle >= pending.head._1 do
@@ -119,7 +125,7 @@ import oskit.services.sleep
           metaDown = (mods & 8) != 0,
         )
     }
-    val ticks: Seq[CPU => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
+    val ticks: Seq[Processor => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
     val cpu                     = new CPU(mem, ticks) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()

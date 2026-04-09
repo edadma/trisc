@@ -55,6 +55,9 @@ class SyslLexical extends IndentationLexical(
       case sign ~ digits => (sign :: digits).mkString
     }
 
+  private def escapeHexDigit: Parser[Char] =
+    elem("hex digit", c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))
+
   private def escapeChar: Parser[Char] =
     '\\' ~> (
       elem('n') ^^^ '\n' |
@@ -63,7 +66,10 @@ class SyslLexical extends IndentationLexical(
       elem('0') ^^^ '\u0000' |
       elem('\\') ^^^ '\\' |
       elem('\'') ^^^ '\'' |
-      elem('"') ^^^ '"'
+      elem('"') ^^^ '"' |
+      elem('x') ~> escapeHexDigit ~ escapeHexDigit ^^ { case hi ~ lo =>
+        Integer.parseInt(s"$hi$lo", 16).toChar
+      }
     )
 
   // Interpolated string: s"..." — uses "s:" prefix in token value to mark it
@@ -110,7 +116,7 @@ class SyslLexical extends IndentationLexical(
     // Hex literal with optional type suffix: 0xFF, 0xFFu8, 0xFF_FF
     '0' ~> (elem('x') | elem('X')) ~> hexDigits1 ~ opt(typeSuffix) ^^ {
       case digits ~ suffix =>
-        val value = java.lang.Long.parseLong(digits.mkString, 16).toString
+        val value = java.lang.Long.parseUnsignedLong(digits.mkString, 16).toString
         suffix match
           case Some(s) => NumericLit(s"$value:$s")
           case None => NumericLit(value)
