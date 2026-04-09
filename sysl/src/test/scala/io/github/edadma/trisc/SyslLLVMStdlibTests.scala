@@ -209,10 +209,25 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 3
   }
 
-  // TODO: split returns []string but ref array is freed on return — string data lost
-  // Need to either: bump refcount for returned slices, or use immortal refs for slices
-  // "std.strings split output" — puts(parts[0]) returns empty
-  // "std.strings join" — join(parts, "-") returns just the separator
+  "std.strings split output" in {
+    llvmOutputWithStd(
+      """import std.strings.*
+        |
+        |main()
+        |    val parts = split("hello world", " ")
+        |    puts(parts[0])
+        |""".stripMargin) shouldBe "hello"
+  }
+
+  "std.strings join" in {
+    llvmOutputWithStd(
+      """import std.strings.*
+        |
+        |main()
+        |    val parts = split("hello world", " ")
+        |    puts(join(parts, "-"))
+        |""".stripMargin) shouldBe "hello-world"
+  }
 
   "std.strings fields" in {
     llvmExitWithStd(

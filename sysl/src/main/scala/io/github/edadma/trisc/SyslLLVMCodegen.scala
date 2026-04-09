@@ -132,8 +132,9 @@ class SyslLLVMCodegen:
 
     // String struct type: { ptr, len }
     emit("%struct.string = type { i8*, i32 }")
-    // Slice struct type: { ptr, len, cap }
-    emit("%struct.slice = type { i8*, i32, i32 }")
+    // Slice struct type: { ptr, len, cap, backref }
+    // backref: pointer to allocation base (refcount header) when slice borrows from a ref, null otherwise
+    emit("%struct.slice = type { i8*, i32, i32, i8* }")
     // Closure struct type: { func_ptr, env_ptr }
     emit("%struct.closure = type { i8*, i8* }")
     emit("")
@@ -1266,6 +1267,33 @@ class SyslLLVMCodegen:
         val capGep2 = newReg()
         emit(s"  $capGep2 = getelementptr %struct.slice, %struct.slice* $alloca, i32 0, i32 2")
         emit(s"  store i32 $newLen, i32* $capGep2") // cap = len for slicing
+        // Backref field (index 3): set to allocation base for ref-backed slices
+        val brGep = newReg()
+        emit(s"  $brGep = getelementptr %struct.slice, %struct.slice* $alloca, i32 0, i32 3")
+        array.typ match
+          case SyslType.RefType(SyslType.SliceType(_)) =>
+            // backref = dataPtr - 16 (allocation base with refcount header)
+            val allocBase = newReg()
+            emit(s"  $allocBase = getelementptr i8, i8* $base, i64 -16")
+            emit(s"  store i8* $allocBase, i8** $brGep")
+            // Increment refcount — slice now borrows the ref
+            val rcPtr = newReg()
+            emit(s"  $rcPtr = bitcast i8* $allocBase to i64*")
+            val rc = newReg()
+            emit(s"  $rc = load i64, i64* $rcPtr")
+            val newRc = newReg()
+            emit(s"  $newRc = add i64 $rc, 1")
+            emit(s"  store i64 $newRc, i64* $rcPtr")
+          case SyslType.SliceType(_) =>
+            // Inherit backref from source slice
+            val srcBrGep = newReg()
+            emit(s"  $srcBrGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 3")
+            val srcBr = newReg()
+            emit(s"  $srcBr = load i8*, i8** $srcBrGep")
+            emit(s"  store i8* $srcBr, i8** $brGep")
+            // TODO: increment backref if non-null (reslicing)
+          case _ =>
+            emit(s"  store i8* null, i8** $brGep")
         alloca
 
       case TAppend(slice, elem, SyslType.SliceType(elemType)) =>
@@ -1353,6 +1381,10 @@ class SyslLLVMCodegen:
         val rCapGep = newReg()
         emit(s"  $rCapGep = getelementptr %struct.slice, %struct.slice* $result, i32 0, i32 2")
         emit(s"  store i32 $finalCap, i32* $rCapGep")
+        // Backref: append allocates its own buffer, no ref backing
+        val rBrGep = newReg()
+        emit(s"  $rBrGep = getelementptr %struct.slice, %struct.slice* $result, i32 0, i32 3")
+        emit(s"  store i8* null, i8** $rBrGep")
         result
 
       // ===== Refs (heap allocation) =====
@@ -2020,7 +2052,7 @@ class SyslLLVMCodegen:
     case SyslType.RefType(_) => 8
     case SyslType.FuncType(_, _) => 16  // {i8*, i8*}
     case SyslType.BoolType => 1
-    case SyslType.SliceType(_) => 16  // {i8*, i32, i32}
+    case SyslType.SliceType(_) => 24  // {i8*, i32, i32, i8*}
     case SyslType.StructType(_, fields) =>
       // Use LLVM's struct layout (simplified — no padding calc, just sum field sizes aligned)
       fields.map(_._2).map(llvmSizeOf).sum // simplified
@@ -2121,9 +2153,67 @@ class SyslLLVMCodegen:
     emitLabel(skip)
 
   /** Decrement refcounts for all ref-typed locals before function exit. */
+  /** Emit backref increment for a slice: load backref field, if non-null increment refcount. */
+  private def emitSliceBackrefIncr(slicePtr: String): Unit =
+    val brGep = newReg()
+    emit(s"  $brGep = getelementptr %struct.slice, %struct.slice* $slicePtr, i32 0, i32 3")
+    val br = newReg()
+    emit(s"  $br = load i8*, i8** $brGep")
+    val isNull = newReg()
+    emit(s"  $isNull = icmp eq i8* $br, null")
+    val incrLabel = newLabel("br_incr")
+    val skipLabel = newLabel("br_skip")
+    emit(s"  br i1 $isNull, label %$skipLabel, label %$incrLabel")
+    emitLabel(incrLabel)
+    val rcPtr = newReg()
+    emit(s"  $rcPtr = bitcast i8* $br to i64*")
+    val rc = newReg()
+    emit(s"  $rc = load i64, i64* $rcPtr")
+    val newRc = newReg()
+    emit(s"  $newRc = add i64 $rc, 1")
+    emit(s"  store i64 $newRc, i64* $rcPtr")
+    emit(s"  br label %$skipLabel")
+    emitLabel(skipLabel)
+
+  /** Emit backref decrement for a slice: load backref field, if non-null decrement refcount, free at zero. */
+  private def emitSliceBackrefDecr(slicePtr: String): Unit =
+    val brGep = newReg()
+    emit(s"  $brGep = getelementptr %struct.slice, %struct.slice* $slicePtr, i32 0, i32 3")
+    val br = newReg()
+    emit(s"  $br = load i8*, i8** $brGep")
+    val isNull = newReg()
+    emit(s"  $isNull = icmp eq i8* $br, null")
+    val decrLabel = newLabel("br_decr")
+    val skipLabel = newLabel("br_skip")
+    emit(s"  br i1 $isNull, label %$skipLabel, label %$decrLabel")
+    emitLabel(decrLabel)
+    val rcPtr = newReg()
+    emit(s"  $rcPtr = bitcast i8* $br to i64*")
+    val rc = newReg()
+    emit(s"  $rc = load i64, i64* $rcPtr")
+    // Check immortal
+    val isImmortal = newReg()
+    emit(s"  $isImmortal = icmp eq i64 $rc, -1")
+    val doDecr = newLabel("br_do_decr")
+    emit(s"  br i1 $isImmortal, label %$skipLabel, label %$doDecr")
+    emitLabel(doDecr)
+    val newRc = newReg()
+    emit(s"  $newRc = sub i64 $rc, 1")
+    emit(s"  store i64 $newRc, i64* $rcPtr")
+    val isZero = newReg()
+    emit(s"  $isZero = icmp eq i64 $newRc, 0")
+    val freeLabel = newLabel("br_free")
+    emit(s"  br i1 $isZero, label %$freeLabel, label %$skipLabel")
+    emitLabel(freeLabel)
+    emit(s"  store i64 -1, i64* $rcPtr") // mark immortal before free to prevent double-free
+    emit(s"  call void @free(i8* $br)")
+    emit(s"  br label %$skipLabel")
+    emitLabel(skipLabel)
+
   private def emitReleaseRefs(): Unit =
     val hasRefs = locals.exists((_, l) => isRef(l.typ))
-    if hasRefs then
+    val hasSlices = locals.exists((_, l) => l.typ.isInstanceOf[SyslType.SliceType])
+    if hasRefs || hasSlices then
       // Flush stdout before deinit functions might write to it
       val flushIgnored = newReg()
       emit(s"  $flushIgnored = call i32 @fflush(i8* null)")
@@ -2132,6 +2222,8 @@ class SyslLLVMCodegen:
       val ptr = newReg()
       emit(s"  $ptr = load i8*, i8** ${local.reg}")
       emitRefDecr(ptr, hoff, deinitFor(local.typ))
+    for (_, local) <- locals if local.typ.isInstanceOf[SyslType.SliceType] do
+      emitSliceBackrefDecr(local.reg)
 
   /** Check if an expression is a TNew/TNewArray (already owns the ref, no incr needed). */
   private def isOwnedNew(expr: TExpr): Boolean = expr match
