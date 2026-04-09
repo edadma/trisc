@@ -23,6 +23,7 @@ class SyslSVMCodegen:
 
   // Current function
   private var currentFunction: TFunDecl = null
+  private var needsSpExtern: Boolean = false
 
   private def emit(s: String): Unit = out ++= s + "\n"
   private def newLabel(prefix: String): String =
@@ -64,6 +65,26 @@ class SyslSVMCodegen:
   private def isUnsigned(t: SyslType): Boolean = t.isInstanceOf[SyslType.UIntType]
   private def isFloat(t: SyslType): Boolean = t == SyslType.DoubleType
 
+  /** True if this type needs memory allocation (can't fit in a single 64-bit local slot). */
+  private def needsMemAlloc(t: SyslType): Boolean = t match
+    case _: SyslType.ArrayType => true
+    case _: SyslType.StructType => true
+    case _: SyslType.EnumType => true
+    case _ => false
+
+  /** Emit code to allocate `size` bytes on the memory stack. Leaves address on data stack. */
+  private def emitMemAlloc(size: Long): Unit =
+    // __sp -= size (aligned to 8); push __sp
+    emit("  push_i64 __sp")
+    emit("  dup")
+    emit("  load64")          // ( &__sp old_sp )
+    emitPushInt((size + 7) & ~7) // align to 8
+    emit("  sub")             // ( &__sp new_sp )
+    emit("  dup")             // ( &__sp new_sp new_sp )
+    emit("  rot")             // ( new_sp new_sp &__sp )
+    emit("  store64")         // write new_sp to __sp; ( new_sp ) remains
+    needsSpExtern = true
+
   private def allocLocal(name: String, typ: SyslType): Int =
     val idx = nextLocalIndex
     locals(name) = LocalInfo(idx, typ)
@@ -87,6 +108,7 @@ class SyslSVMCodegen:
     stringLiterals.clear()
     globals.clear()
     globalConstants.clear()
+    needsSpExtern = false
 
     modulePrefix = program.decls.collectFirst { case TModuleDecl(path) => path.mkString("_") }.getOrElse("")
 
@@ -164,6 +186,10 @@ class SyslSVMCodegen:
         emit(s"extern $name")
       case _ =>
 
+    // Emit __sp extern if memory stack was used
+    if needsSpExtern && !definedSymbols.contains("__sp") then
+      emit("extern __sp")
+
     out.toString
 
   // ========================================================================
@@ -224,8 +250,36 @@ class SyslSVMCodegen:
   private def genStmt(stmt: TStmt): Unit = stmt match
     case TVarStmt(name, typ, init) =>
       val idx = allocLocal(name, typ)
-      genExpr(init)
-      emit(s"  local_set $idx")
+      if needsMemAlloc(typ) then
+        // Allocate memory on the memory stack, store address in local
+        val size = typ.sizeOf
+        emitMemAlloc(size)
+        emit(s"  dup")
+        emit(s"  local_set $idx") // local holds the address
+        // Zero-initialize the memory
+        val aligned = ((size + 7) / 8 * 8).toInt
+        for i <- 0 until aligned by 8 do
+          emit("  dup")
+          if i > 0 then { emitPushInt(i); emit("  add") }
+          emit("  push_0")
+          emit("  swap")
+          emit("  store64")
+        emit("  drop")
+        // If init is an array literal, store elements
+        init match
+          case TArrayLit(elements, _) =>
+            val elemType = typ match { case SyslType.ArrayType(e, _) => e; case _ => SyslType.I64 }
+            for (elem, i) <- elements.zipWithIndex do
+              emit(s"  local_get $idx")
+              emitPushInt(i * elemType.sizeOf)
+              emit("  add")
+              genExpr(elem)
+              emit("  swap")
+              emitStore(elemType)
+          case _ => // TArrayDecl or TStructLit — already zeroed
+      else
+        genExpr(init)
+        emit(s"  local_set $idx")
 
     case TAssignStmt(target, value) =>
       genExpr(value)
@@ -413,11 +467,42 @@ class SyslSVMCodegen:
 
     case TAddrOf(name, _) =>
       locals.get(name) match
-        case Some(_) =>
-          // Can't take address of SVM local — would need to spill to memory
-          sys.error(s"cannot take address of local variable '$name' in SVM backend")
+        case Some(LocalInfo(idx, typ)) if needsMemAlloc(typ) =>
+          // Aggregate local: the local already holds the memory address
+          emit(s"  local_get $idx")
+        case Some(LocalInfo(idx, typ)) =>
+          // Scalar local: need to spill to memory stack, return address
+          emitMemAlloc(8)
+          emit("  dup")
+          emit(s"  local_get $idx")
+          emit("  swap")
+          emit("  store64")
+          // Note: the spilled address becomes the canonical location
         case None =>
           emit(s"  push_i64 $name")
+
+    case TAddrOfIndex(array, index, typ) =>
+      genExpr(array)
+      val elemType = array.typ match
+        case SyslType.ArrayType(e, _) => e
+        case SyslType.PtrType(e) => e
+        case _ => SyslType.I64
+      genExpr(index)
+      emitPushInt(elemType.sizeOf)
+      emit("  mul")
+      emit("  add")
+
+    case TAddrOfField(obj, fieldIndex, typ) =>
+      genStructAddr(obj)
+      val st = obj.typ match
+        case s: SyslType.StructType => s
+        case SyslType.RefType(s: SyslType.StructType) => s
+        case SyslType.PtrType(s: SyslType.StructType) => s
+        case _ => sys.error(s"field addr on non-struct: ${obj.typ}")
+      val off = fieldOffset(st, fieldIndex)
+      if off != 0 then
+        emitPushInt(off)
+        emit("  add")
 
     case TDeref(ptr, typ) =>
       genExpr(ptr)

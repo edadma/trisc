@@ -2,11 +2,15 @@ package io.github.edadma.trisc
 
 object SVMRuntime:
   val stdoutAddress = 0x100000L
+  val initialSP = stdoutAddress - 8 // memory stack grows down, below devices
 
   // Boot module — vector table + entry point.
   // SVM vector table: slot 0 = initial IP, slot 1 = interrupt handler.
   val bootSource: String =
     s"""extern main
+       |
+       |global _start, func
+       |global _fault, func
        |
        |; vector table (2 slots x 8 bytes = 16 bytes)
        |  dl _start
@@ -14,11 +18,21 @@ object SVMRuntime:
        |
        |entry _start
        |_start:
+       |  ; Initialize memory stack pointer
+       |  push_i64 $initialSP
+       |  push_i64 __sp
+       |  store64
        |  call main
        |  halt
        |
        |_fault:
        |  halt
+       |
+       |segment data
+       |  align 8
+       |global __sp, data, 8
+       |__sp:
+       |  dl 0
        |""".stripMargin
 
   // IO stubs using STDOUT device (memory-mapped, same as TRISC)
