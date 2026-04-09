@@ -849,7 +849,7 @@ class SyslLLVMCodegen:
         hasReturned = savedHasReturned
 
         emit(s"$mergeLabel:")
-        if !thenReturned && !elseReturned then
+        if !thenReturned && !elseReturned && t != "void" then
           val phi = newReg()
           emit(s"  $phi = phi $t [ $thenVal, %$thenLabel ], [ $elseVal, %$elseLabel ]")
           phi
@@ -1625,6 +1625,19 @@ class SyslLLVMCodegen:
             case _ =>
               emit(s"  $result = bitcast $fromLt $v to $toLt")
           result
+
+      case TPostInc(name, typ) =>
+        val lt = llvmType(typ)
+        val local = locals(name)
+        val oldVal = newReg()
+        emit(s"  $oldVal = load $lt, $lt* ${local.reg}")
+        val newVal = newReg()
+        if typ == SyslType.DoubleType then
+          emit(s"  $newVal = fadd $lt $oldVal, 1.0")
+        else
+          emit(s"  $newVal = add $lt $oldVal, 1")
+        emit(s"  store $lt $newVal, $lt* ${local.reg}")
+        oldVal
 
       case _ =>
         emit(s"  ; TODO: ${expr.getClass.getSimpleName}")
