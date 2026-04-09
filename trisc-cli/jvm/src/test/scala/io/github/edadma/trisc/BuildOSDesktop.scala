@@ -28,6 +28,7 @@ class BuildOSDesktop extends OSKitTestHelpers {
       "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "std/debug/debug" -> debugSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl,
       "oskit/drivers/mouse/mouse" -> mouseSysl, "oskit/drivers/display/display" -> displaySysl,
       "suit/suit" -> suitSysl, "app" -> appSysl,
+      "posix/unistd/sbrk" -> sbrkSysl, "posix/stdlib/alloc" -> posixAllocSysl, "posix/string/string" -> posixStringSysl, "posix/ctype/ctype" -> posixCtypeSysl,
     )
     val driver = new SyslDriver
     val result = driver.compile(allSources)
