@@ -122,7 +122,7 @@ parse_expr(input: string, pos: int) -> Result[int]
 eval_expr(s: string) -> int
     unwrap_or(parse_expr(s, 0), -1)
 
-// === Combinator-based parsers for testing ===
+// === Combinator-based parsers using def ===
 
 // Parse a digit using char_if + map
 is_digit(ch: int) -> bool = ch >= '0' && ch <= '9'
@@ -133,28 +133,19 @@ digit(input: string, pos: int) -> Result[int]
         Ok(ch, p2) -> Ok(to_digit(ch), p2)
         Fail(fp) -> Fail(fp)
 
-// Parse 'a' or 'b' using alt
+// Parse 'a' or 'b' using alt + def
 parse_a(input: string, pos: int) -> Result[int] = char_exact(int('a'), input, pos)
 parse_b(input: string, pos: int) -> Result[int] = char_exact(int('b'), input, pos)
+def parse_a_or_b = alt(parse_a, parse_b)
 
-parse_a_or_b(input: string, pos: int) -> Result[int]
-    val parser = alt(parse_a, parse_b)
-    parser(input, pos)
-
-// Parse number, negate with map
+// Parse number, negate with map + def
 negate(x: int) -> int = 0 - x
+def parse_neg = map(nat, negate)
 
-parse_neg(input: string, pos: int) -> Result[int]
-    val parser = map(nat, negate)
-    parser(input, pos)
-
-// Parse parenthesized expression using between
+// Parse parenthesized expression using between + def
 open_paren(input: string, pos: int) -> Result[int] = char_exact(int('('), input, pos)
 close_paren(input: string, pos: int) -> Result[int] = char_exact(int(')'), input, pos)
-
-parse_parens(input: string, pos: int) -> Result[int]
-    val parser = between(open_paren, nat, close_paren)
-    parser(input, pos)
+def parse_parens = between(open_paren, nat, close_paren)
 
 // === Tests ===
 

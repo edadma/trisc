@@ -2085,8 +2085,18 @@ class SyslAnalyzer:
         else if functions.contains(name) || builtinFunctions.contains(name) then
           warnDeprecated(name)
           val funInfo = lookupFun(name)
-          val checkedArgs = checkArgs(name, funInfo.params, tArgs)
-          TCall(funInfo.name, checkedArgs, funInfo.returnType)
+          if funInfo.isDef && funInfo.params.isEmpty && tArgs.nonEmpty then
+            // Auto-call def, then indirect-call the result with the provided args
+            val autoCall = TCall(funInfo.name, Nil, funInfo.returnType)
+            funInfo.returnType match
+              case FuncType(fParams, fRet) =>
+                val paramPairs = fParams.zipWithIndex.map((t, i) => (s"_p$i", t))
+                val checkedArgs = checkArgs(name, paramPairs, tArgs)
+                TIndirectCall(autoCall, checkedArgs, fRet)
+              case _ => throw AnalysisError(s"def '$name' returns ${funInfo.returnType}, not a callable type")
+          else
+            val checkedArgs = checkArgs(name, funInfo.params, tArgs)
+            TCall(funInfo.name, checkedArgs, funInfo.returnType)
         else if structTypes.contains(name) then
           // Struct constructor: Point(10, 20)
           val st = structTypes(name)
