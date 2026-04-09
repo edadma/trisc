@@ -147,6 +147,18 @@ open_paren(input: string, pos: int) -> Result[int] = char_exact(int('('), input,
 close_paren(input: string, pos: int) -> Result[int] = char_exact(int(')'), input, pos)
 def parse_parens = between(open_paren, nat, close_paren)
 
+// === Wrapper struct with methods for fluent chaining ===
+// BLOCKED: interpreter bug — self.field(args) doesn't work when field is a
+// function type, accessed via *Type self pointer. Direct field access (b.f(x))
+// works fine, but method bodies dereference self which returns PtrVal instead
+// of extracting the function value. Fix the interpreter, then uncomment.
+//
+// struct P
+//     run: Parser[int]
+// P.map_to(f: (int) -> int) -> P = P(map(self.run, f))
+// P.or(other: P) -> P = P(alt(self.run, other.run))
+// P.parse(input: string, pos: int) -> Result[int] = self.run(input, pos)
+
 // === Tests ===
 
 #test

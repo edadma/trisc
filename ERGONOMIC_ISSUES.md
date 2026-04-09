@@ -58,7 +58,7 @@ Function types require parens around params (`(string, int) -> Result[T]`), so `
 
 The `?` operator eliminates the boilerplate `Fail` propagation arm.
 
-## 7. No Method Syntax on Function Types
+## 7. No Method Syntax on Function Types — Blocked
 
 Would love:
 ```sysl
@@ -68,7 +68,13 @@ Instead of:
 ```sysl
 many(alt(map(parser, f), other))
 ```
-Needs extension methods or a wrapper struct with methods.
+**Approach:** Wrapper struct `P` with a `run: Parser[int]` field and methods
+(`.map_to()`, `.or()`, `.between()`, `.parse()`). The struct and methods
+compile, but **blocked by interpreter bug**: `self.field(args)` doesn't work
+when `field` is a function type accessed via `*Type` self pointer — the
+interpreter returns `PtrVal` instead of extracting the function value.
+Direct field access (`b.f(x)`) works fine; only method bodies are affected.
+See `parser.sysl` for the commented-out prototype.
 
 ## 8. No Pattern Matching in `if`
 
@@ -87,6 +93,6 @@ Instead of a full `match` block for simple Ok/Fail dispatch.
 | 3 | `?` on Result | ✅ Done |
 | 6 | Verbose match arms | ✅ Solved by #3 |
 | 4 | Mutual recursion / def | ✅ Done |
-| 7 | Method syntax on functions | Open — medium priority |
+| 7 | Method syntax on functions | Blocked — interpreter bug with func-type fields via self |
 | 8 | Pattern match in `if` | Open — low priority |
 | 5 | Expression-body ambiguity | ✅ Not an issue — parens make it unambiguous |
