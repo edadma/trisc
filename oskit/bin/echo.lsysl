@@ -1,0 +1,17 @@
+echo — echo arguments
+======================
+
+Reads the argument string and outputs it.
+Used to test argument passing to external programs.
+
+    module oskit.bin.echo
+
+    import oskit.ulib.{get_args, putc, exit, PROG_ARGS_ADDR}
+
+    main()
+        val args = get_args()
+        val p = *byte(args)
+        for var i = 0; i < len(args); i++
+            putc(int(p[i]))
+        putc('\n')
+        exit()

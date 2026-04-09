@@ -27,6 +27,7 @@ matching it against SYMBOL declarations.
 
     import std.strings.{has_prefix, index_byte, substring, trim_space}
     import oskit.servers.{fs_open, fs_read}
+    import posix.stdlib.{malloc, free}
 
 Error codes returned when loading fails.
 
@@ -179,15 +180,35 @@ and a write cursor within each segment.
 Load a TOF file from the filesystem. Returns the entry
 point address, or a negative error code.
 
+The file is read in a loop because `fs_read` returns at
+most ~507 bytes per IPC call. The buffer is heap-allocated
+since TOF executables can be large (tens of KB with
+statically linked libraries).
+
+    val LOAD_BUF_SIZE = 65536
+
     load_tof(path: string) -> i64
         val ino = fs_open(path)
         if ino < 0
             return LOAD_ERR_NOT_FOUND
 
-        // Read file into a buffer — TOF executables are small
-        var buf: [16384]byte
-        val nr = fs_read(ino, buf, 0, 16384)
-        if nr <= 0
+        val buf = malloc(LOAD_BUF_SIZE)
+        if i64(buf) == 0
             return LOAD_ERR_READ
 
-        load_tof_from_buf(buf, nr)
+        // Read entire file in a loop
+        var total = 0
+        var nr = fs_read(ino, buf + total, total, 507)
+        while nr > 0
+            total += nr
+            if total >= LOAD_BUF_SIZE
+                break
+            nr = fs_read(ino, buf + total, total, 507)
+
+        if total <= 0
+            free(buf)
+            return LOAD_ERR_READ
+
+        val result = load_tof_from_buf(buf, total)
+        free(buf)
+        result

@@ -1,0 +1,165 @@
+User Library — Runtime for external programs
+=============================================
+
+Provides the SLIX platform layer for standalone programs.
+External programs link against this to access OS services
+via IPC, following the Minix 3 model: all services are
+reached by sending messages to servers through the kernel's
+message-passing primitives.
+
+    module oskit.ulib
+
+The `syscall` function is provided by the boot assembly.
+External programs include their own copy of the trampoline
+(3 instructions: load arg, trap 0, return).
+
+    extern syscall(number: int, arg: i64) -> i64
+
+Syscall numbers — must match the kernel and IPC modules.
+
+    val SYS_SLEEP     = 0
+    val SYS_PUTC      = 1
+    val SYS_YIELD     = 2
+    val SYS_EXIT      = 3
+    val SYS_JOIN      = 4
+    val SYS_UPTIME    = 6
+    val SYS_IPC_SEND  = 32
+    val SYS_PORT_LOOKUP = 37
+
+Command bytes for TFS and TTY server protocols.
+
+    val FS_CMD_OPEN  = 1
+    val FS_CMD_READ  = 2
+    val FS_CMD_WRITE = 3
+    val TTY_CMD_PUTS = 3
+
+Big-endian message helpers — pack/unpack 32-bit integers
+in IPC message buffers.
+
+    msg_write_i32(buf: *byte, off: int, v: int)
+        buf[off]     = byte((v >> 24) & 0xFF)
+        buf[off + 1] = byte((v >> 16) & 0xFF)
+        buf[off + 2] = byte((v >> 8) & 0xFF)
+        buf[off + 3] = byte(v & 0xFF)
+
+    msg_read_i32(buf: *byte, off: int) -> int
+        ((buf[off] & 0xFF) << 24) | ((buf[off + 1] & 0xFF) << 16) | ((buf[off + 2] & 0xFF) << 8) | (buf[off + 3] & 0xFF)
+
+IPC — send a message to a server and receive a reply.
+
+    ipc_send(port: int, msg: *byte, msg_len: int, reply: *byte, reply_len: int) -> int
+        var args: [5]i64
+        args[0] = port
+        args[1] = i64(msg)
+        args[2] = msg_len
+        args[3] = i64(reply)
+        args[4] = reply_len
+        syscall(SYS_IPC_SEND, i64(&args[0]))
+
+Service discovery — look up a server port by name.
+
+    port_lookup(name: *byte) -> int
+        syscall(SYS_PORT_LOOKUP, i64(name))
+
+Process control.
+
+    exit()
+        syscall(SYS_EXIT, 0)
+
+    sleep(ticks: int)
+        syscall(SYS_SLEEP, ticks)
+
+    yield()
+        syscall(SYS_YIELD, 0)
+
+Single character output (fast-path syscall).
+
+    putc(ch: int)
+        syscall(SYS_PUTC, ch)
+
+Write a string to the TTY server.
+
+    puts(s: string)
+        var tty_name: [4]byte
+        tty_name[0] = byte('t')
+        tty_name[1] = byte('t')
+        tty_name[2] = byte('y')
+        tty_name[3] = 0
+        val port = port_lookup(&tty_name[0])
+        if port < 0
+            return
+        val n = len(s)
+        val p = *byte(s)
+        var msg: [128]byte
+        msg[0] = byte(TTY_CMD_PUTS)
+        msg[1] = 0
+        msg[2] = byte(n)
+        for var i = 0; i < n; i++
+            msg[i + 3] = p[i]
+        var reply: [1]byte
+        ipc_send(port, &msg[0], n + 3, &reply[0], 1)
+
+Open a file by path. Returns an inode number or -1 on error.
+
+    open(path: string) -> int
+        var fs_name: [3]byte
+        fs_name[0] = byte('f')
+        fs_name[1] = byte('s')
+        fs_name[2] = 0
+        val port = port_lookup(&fs_name[0])
+        if port < 0
+            return -1
+        val plen = len(path)
+        val p = *byte(path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_OPEN)
+        for var i = 0; i < plen; i++
+            msg[i + 1] = p[i]
+        var reply: [5]byte
+        ipc_send(port, &msg[0], plen + 1, &reply[0], 5)
+        if reply[0] != 0
+            return -1
+        msg_read_i32(&reply[0], 1)
+
+Read from an open file. Returns the number of bytes read,
+or -1 on error.
+
+    read(ino: int, buf: *byte, offset: int, count: int) -> int
+        var fs_name: [3]byte
+        fs_name[0] = byte('f')
+        fs_name[1] = byte('s')
+        fs_name[2] = 0
+        val port = port_lookup(&fs_name[0])
+        if port < 0
+            return -1
+        var msg: [13]byte
+        msg[0] = byte(FS_CMD_READ)
+        msg_write_i32(&msg[0], 1, ino)
+        msg_write_i32(&msg[0], 5, offset)
+        msg_write_i32(&msg[0], 9, count)
+        var reply: [512]byte
+        val result = ipc_send(port, &msg[0], 13, &reply[0], 512)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        val nr = msg_read_i32(&reply[0], 1)
+        for var i = 0; i < nr; i++
+            buf[i] = reply[i + 5]
+        nr
+
+Program arguments — stored at a well-known address by the
+shell before launching the program. This convention will be
+replaced by proper exec() argument passing when the MMU
+and process manager land.
+
+    val PROG_ARGS_ADDR = 0xCFF00
+
+    get_args() -> string
+        val p = *byte(PROG_ARGS_ADDR)
+        var n = 0
+        while p[n] != 0
+            n += 1
+        if n == 0
+            return ""
+        string(p, n)

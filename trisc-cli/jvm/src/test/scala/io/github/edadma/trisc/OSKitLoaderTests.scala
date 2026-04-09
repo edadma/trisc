@@ -7,6 +7,7 @@ class OSKitLoaderTests extends OSKitTestHelpers {
     val doc = new LiterateParser().parse(raw)
     LiterateRenderer.tangle(doc)
 
+  // --- OS modules ---
   private lazy val ipcSysl: String      = readLsysl("oskit/ipc/ipc.lsysl")
   private lazy val diskSysl: String     = readLsysl("oskit/drivers/disk/disk.lsysl")
   private lazy val kbdSysl: String      = readLsysl("oskit/drivers/kbd/keyboard.lsysl")
@@ -14,6 +15,14 @@ class OSKitLoaderTests extends OSKitTestHelpers {
   private lazy val tfsSysl: String      = readLsysl("oskit/fs/tfs.lsysl")
   private lazy val tfsSrvSysl: String   = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val loaderSysl: String   = readLsysl("oskit/loader/loader.lsysl")
+  private lazy val nshSysl: String      = readLsysl("oskit/apps/nsh.lsysl")
+  private lazy val initSysl: String     = readLsysl("oskit/apps/init.lsysl")
+  private lazy val loginSysl: String    = readLsysl("oskit/apps/login.lsysl")
+  private lazy val sha256Sysl: String   = readLsysl("std/crypto/sha256/sha256.lsysl")
+  private lazy val hmacSysl: String     = readLsysl("std/crypto/hmac/hmac.lsysl")
+  private lazy val pbkdf2Sysl: String   = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
+
+  // --- std lib ---
   private lazy val stringsSysl: String  = readLsysl("std/strings/strings.lsysl")
   private lazy val builderSysl: String  = readLsysl("std/builder/builder.lsysl")
   private lazy val strconvSysl: String  = readLsysl("std/strconv/strconv.lsysl")
@@ -24,45 +33,44 @@ class OSKitLoaderTests extends OSKitTestHelpers {
   private lazy val binarySysl: String   = readLsysl("std/encoding/binary/binary.lsysl")
   private lazy val utf8Sysl: String     = readLsysl("std/utf8/utf8.lsysl")
 
-  // Compile a standalone hello world program as an executable TOF.
-  // It writes "Hello" to STDOUT MMIO and halts.
-  private lazy val helloTofText: String =
-    val helloSource =
-      s"""val STDOUT = ${Runtime.stdoutAddress}
-         |main()
-         |    val out = *byte(STDOUT)
-         |    *out = byte('H')
-         |    *out = byte('e')
-         |    *out = byte('l')
-         |    *out = byte('l')
-         |    *out = byte('o')
-         |""".stripMargin
-    val helloDriver = new SyslDriver
-    val helloResult = helloDriver.compile(Map("main" -> helloSource))
-    val helloCodegen = new SyslTriscCodegen
-    val helloTofs = for unit <- helloResult.units yield
-      val asm = helloCodegen.generate(unit.typed)
+  // --- User library for external programs ---
+  private lazy val ulibSysl: String     = readLsysl("oskit/ulib/ulib.lsysl")
+  private lazy val helloSysl: String    = readLsysl("oskit/bin/hello.lsysl")
+
+  // Linker script for external programs — all load at same base address.
+  private lazy val progScript: LinkerScript = LinkerScriptParser.parse(
+    """SECTIONS
+      |    code: 0xD0000
+      |    rodata
+      |    data
+      |    bss
+      |ENTRY main
+      |""".stripMargin) match
+    case Right(s) => s
+    case Left(e) => throw new RuntimeException(s"Failed to parse linker script: $e")
+
+  // Compile an external program with the user library into an executable TOF.
+  private def compileProgram(progSources: Map[String, String]): String =
+    val syscallTof = assemble(
+      scala.io.Source.fromFile("oskit/ulib/syscall.asm").mkString,
+      relocatable = true,
+    )
+    val allSources = progSources + ("oskit/ulib/ulib" -> ulibSysl)
+    val driver = new SyslDriver
+    val result = driver.compile(allSources)
+    val codegen = new SyslTriscCodegen
+    val tofs = for unit <- result.units yield
+      val asm = codegen.generate(unit.typed)
       assemble(asm, relocatable = true)
-    // Link with a linker script that places code at 0xD0000
-    val helloScript = LinkerScriptParser.parse(
-      """SECTIONS
-        |    code: 0xD0000
-        |    rodata
-        |    data
-        |    bss
-        |ENTRY main
-        |""".stripMargin) match
-      case Right(s) => s
-      case Left(e) => throw new RuntimeException(s"Failed to parse linker script: $e")
-    val helloLinked = Linker.link(helloTofs, helloScript, 0)
-    helloLinked.serialize
+    val syslTof = Linker.link(tofs, relocatable = true)
+    val linked = Linker.link(Seq(syscallTof, syslTof), progScript, 0)
+    linked.serialize
 
-  // Escape TOF text for TFS prefill (double quotes and backslash-n for newlines)
-  private def tofToPrefill(tof: String): String =
-    tof.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+  private lazy val helloTofText: String =
+    compileProgram(Map("oskit/bin/hello/hello" -> helloSysl))
 
-  // Build OS with loader support
-  private lazy val loaderLinked: TOF =
+  // Build OS with nsh + loader + init
+  private lazy val osLinked: TOF =
     val bootTof = assemble(bootAsm, relocatable = true)
     val allSources = Map(
       "oskit/kernel/kernel"          -> kernelSysl,
@@ -89,39 +97,21 @@ class OSKitLoaderTests extends OSKitTestHelpers {
       "std/result/result"           -> resultSysl,
       "std/errors/errors"           -> errorsSysl,
       "std/utf8/utf8"               -> utf8Sysl,
+      "std/crypto/sha256/sha256"   -> sha256Sysl,
+      "std/crypto/hmac/hmac"       -> hmacSysl,
+      "std/crypto/pbkdf2/pbkdf2"   -> pbkdf2Sysl,
       "oskit/loader/loader"         -> loaderSysl,
+      "oskit/apps/nsh/nsh"          -> nshSysl,
+      "oskit/apps/init/init"        -> initSysl,
+      "oskit/apps/login/login"      -> loginSysl,
       "app" ->
         """import oskit.kernel.*
 import oskit.ipc.*
-import oskit.drivers.disk.disk_server
-import oskit.servers.tfs_server
-import oskit.drivers.tty.{tty_server, tty_puts}
-import oskit.loader.{load_tof}
-import oskit.services.sleep
-          |
-          |test_loader()
-          |    // Wait for servers to initialize
-          |    sleep(20)
-          |    // Load /bin/hello
-          |    val entry = load_tof("/bin/hello")
-          |    if entry > 0
-          |        // Create thread at the loaded entry point
-          |        create_thread(entry, 0xB8000, 0xB6000, "hello")
-          |    else
-          |        // Report error
-          |        var msg: [6]byte
-          |        msg[0] = byte('E')
-          |        msg[1] = byte('R')
-          |        msg[2] = byte('R')
-          |        msg[3] = byte('\n')
-          |        tty_puts(msg, 4)
+import oskit.apps.init.{init}
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(disk_server, 0x80000, 0x80000, "disk")
-          |    create_thread(tfs_server, 0x90000, 0x90000, "tfs")
-          |    create_thread(tty_server, 0xA0000, 0xA0000, "tty")
-          |    create_thread(test_loader, 0xB0000, 0xB0000, "loader")
+          |    create_thread(init, 0xC0000, 0xC0000, "init")
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin,
@@ -135,12 +125,35 @@ import oskit.services.sleep
     val syslTof = Linker.link(tofs, relocatable = true)
     Linker.link(Seq(bootTof, syslTof), linkerScript, 0)
 
-  def runLoader(
-      prefill: String,
-      maxCycles: Int = 15000000,
-  ): (CPU, String, RAM) =
-    val linked = loaderLinked
+  private val ttytab = "/etc/ttytab file \"tty0 nsh\"\n"
 
+  import java.awt.event.KeyEvent
+  private def charToVK(ch: Char): (Int, Int) = ch match
+    case c if c >= 'a' && c <= 'z' => (KeyEvent.VK_A + (c - 'a'), 0)
+    case c if c >= 'A' && c <= 'Z' => (KeyEvent.VK_A + (c - 'A'), 1)
+    case c if c >= '0' && c <= '9' => (KeyEvent.VK_0 + (c - '0'), 0)
+    case '\n'                      => (KeyEvent.VK_ENTER, 0)
+    case ' '                       => (KeyEvent.VK_SPACE, 0)
+    case '/'                       => (KeyEvent.VK_SLASH, 0)
+    case '-'                       => (KeyEvent.VK_MINUS, 0)
+    case '.'                       => (KeyEvent.VK_PERIOD, 0)
+    case _                         => (KeyEvent.VK_SPACE, 0)
+
+  def typeString(s: String, startTick: Int, spacing: Int = 2000): Seq[(Int, Int, Boolean, Int)] =
+    s.flatMap { ch =>
+      val (scancode, mods) = charToVK(ch)
+      Seq((0, scancode, true, mods), (0, scancode, false, mods))
+    }.zipWithIndex.map { case ((_, sc, press, mods), i) =>
+      (startTick + i * spacing, sc, press, mods)
+    }
+
+  def runWithKeys(
+      prefill: String,
+      scheduledKeys: Seq[(Int, Int, Boolean, Int)],
+      maxCycles: Int = 15000000,
+      files: Map[String, Array[Byte]] = Map.empty,
+  ): (CPU, String) =
+    val linked = osLinked
     val output = new StringBuilder
     val stdout = new Device with WriteOnlyAddressable {
       val name                                            = "stdout"
@@ -155,27 +168,39 @@ import oskit.services.sleep
     val ramSize = Runtime.stdoutAddress.toInt
     val ram     = new RAM(0, ramSize)
     val ramdisk = new Ramdisk(
-      Runtime.ramdiskAddress,
-      ram,
-      sectors = 256,
-      sectorSize = 512,
-      intc,
-      irq = 3,
-      prefill = prefill,
-      maxInodes = 32,
+      Runtime.ramdiskAddress, ram, sectors = 256, sectorSize = 512,
+      intc, irq = 3, prefill = ttytab + prefill, maxInodes = 32,
+      files = files,
     )
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)
     val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha)
     linked.load(mem)
-
-    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles }
+    val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
+    val keyInjector: CPU => Unit = cpu => {
+      val cycle = cpu.cycles
+      while pending.nonEmpty && cycle >= pending.head._1 do
+        val (_, vk, press, mods) = pending.dequeue()
+        kbd.enqueue(vk, press,
+          shiftDown = (mods & 1) != 0, ctrlDown = (mods & 2) != 0,
+          altDown = (mods & 4) != 0, metaDown = (mods & 8) != 0)
+    }
+    val ticks: Seq[CPU => Unit] = Seq(timer, intc, keyInjector)
+    val cpu = new CPU(mem, ticks) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
-    (cpu, output.toString, ram)
+    (cpu, output.toString)
 
-  "Loader: load and run hello world from filesystem" in {
-    val prefill = s"""/bin/hello file "${tofToPrefill(helloTofText)}"\n"""
-    val (_, output, _) = runLoader(prefill)
-    output should include("Hello")
+  "Loader: run hello from shell" in {
+    val keys = typeString("hello\n", startTick = 500000)
+    val (_, output) = runWithKeys("", keys, maxCycles = 30000000,
+      files = Map("/bin/hello" -> helloTofText.getBytes("UTF-8")))
+    val cleaned = output.filterNot(_ == '\n')
+    cleaned should include("Hello, world!")
+  }
+
+  "Loader: unknown program shows not found" in {
+    val keys = typeString("nosuchprog\n", startTick = 500000)
+    val (_, output) = runWithKeys("", keys)
+    output should include("not found")
   }
 }
