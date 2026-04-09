@@ -170,28 +170,19 @@ negate2(x: int) -> int = 0 - x
 
 #test
 test_fluent_map() -> unit
-    var p = p_nat
-    var p2 = p.map_to(triple)
-    p2.parse("14", 0) match
+    p_nat.map_to(triple).parse("14", 0) match
         Ok(v, _) -> assert(v == 42, "fluent map")
         Fail(_) -> panic("expected Ok")
 
 #test
 test_fluent_or() -> unit
-    var a = p_char(int('x'))
-    var b = p_char(int('y'))
-    var p = a.or(b)
-    p.parse("y!", 0) match
+    p_char(int('x')).or(p_char(int('y'))).parse("y!", 0) match
         Ok(v, _) -> assert(v == int('y'), "fluent or")
         Fail(_) -> panic("expected Ok")
 
 #test
 test_fluent_between() -> unit
-    var n = p_nat
-    var open = p_char(int('('))
-    var close = p_char(int(')'))
-    var p = n.between(open, close)
-    p.parse("(55)", 0) match
+    p_nat.between(p_char(int('(')), p_char(int(')'))).parse("(55)", 0) match
         Ok(v, p2) ->
             assert(v == 55, "fluent between value")
             assert(p2 == 4, "fluent between pos")
@@ -199,11 +190,7 @@ test_fluent_between() -> unit
 
 #test
 test_fluent_chain() -> unit
-    var n = p_nat
-    var neg = n.map_to(negate2)
-    var q = p_char(int('?'))
-    var p = neg.or(q)
-    p.parse("7", 0) match
+    p_nat.map_to(negate2).or(p_char(int('?'))).parse("7", 0) match
         Ok(v, _) -> assert(v == -7, "fluent chain")
         Fail(_) -> panic("expected Ok")
 

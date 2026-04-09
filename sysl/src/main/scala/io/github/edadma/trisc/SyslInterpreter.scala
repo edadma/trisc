@@ -637,6 +637,12 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TAddrOf(name, _) => PtrVal(CellPtr(lookupCell(name, env)))
 
+      case TTempAddr(expr, _) =>
+        // Evaluate expression, store in a temporary cell, return pointer to it
+        val value = evalAny(expr, env)
+        val cell = new Cell(value)
+        PtrVal(CellPtr(cell))
+
       case TAddrOfField(obj, fieldIndex, _) =>
         val ArrVal(cells, off) = evalAny(obj, env): @unchecked
         PtrVal(ArrayPtr(cells, off + fieldIndex))

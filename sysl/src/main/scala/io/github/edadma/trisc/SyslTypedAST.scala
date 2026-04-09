@@ -60,6 +60,7 @@ case class TVarRef(name: String, typ: SyslType) extends TExpr
 case class TAddrOf(name: String, typ: SyslType) extends TExpr
 case class TAddrOfIndex(array: TExpr, index: TExpr, typ: SyslType) extends TExpr
 case class TAddrOfField(obj: TExpr, fieldIndex: Int, typ: SyslType) extends TExpr
+case class TTempAddr(expr: TExpr, typ: SyslType) extends TExpr  // evaluate expr, store in temp, return pointer
 case class TDeref(expr: TExpr, typ: SyslType) extends TExpr
 case class TIndex(expr: TExpr, index: TExpr, typ: SyslType) extends TExpr
 case class TFieldAccess(obj: TExpr, fieldIndex: Int, typ: SyslType) extends TExpr

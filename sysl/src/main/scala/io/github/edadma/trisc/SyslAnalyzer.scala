@@ -2035,7 +2035,7 @@ class SyslAnalyzer:
                 case TVarRef(n, _) => TAddrOf(n, PtrType(st))
                 case TFieldAccess(innerObj, idx, _) => TAddrOfField(innerObj, idx, PtrType(st))
                 case TIndex(arr, idx, _) => TAddrOfIndex(arr, idx, PtrType(st))
-                case _ => throw AnalysisError(s"cannot take address of expression for method call")
+                case _ => TTempAddr(tObj, PtrType(st))  // method on temporary — copy into temp cell
             case _ => tObj // PtrType or RefType — already a pointer
           val funInfo = functions(funcName)
           val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs) // .tail skips self param
