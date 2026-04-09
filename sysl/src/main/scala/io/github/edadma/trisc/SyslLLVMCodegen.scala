@@ -216,9 +216,14 @@ class SyslLLVMCodegen:
           emit(s"  $loaded = load $retType, $retType* $result")
           loaded
         else if rt == "void" && retType != "void" then
-          val loaded = newReg()
-          emit(s"  $loaded = load $retType, $retType* $result")
-          loaded
+          // Match with VoidType used effectiveType fallback.
+          // For aggregates, result is an alloca pointer — load it.
+          // For scalars, result is already the loaded value.
+          if retType.startsWith("[") || retType.startsWith("%struct.") then
+            val loaded = newReg()
+            emit(s"  $loaded = load $retType, $retType* $result")
+            loaded
+          else result
         else emitSextIfNeeded(result, rt, retType)
         emitReleaseRefs()
         emitRet(retType, finalVal)
@@ -322,10 +327,11 @@ class SyslLLVMCodegen:
               loaded
             else if rt == "void" && retType != "void" then
               // Match/expression type is void (diverging arms) but function expects a value.
-              // The match with effectiveType fallback stored its result in an alloca — load from it.
-              val loaded = newReg()
-              emit(s"  $loaded = load $retType, $retType* $result")
-              loaded
+              if retType.startsWith("[") || retType.startsWith("%struct.") then
+                val loaded = newReg()
+                emit(s"  $loaded = load $retType, $retType* $result")
+                loaded
+              else result
             else emitSextIfNeeded(result, rt, retType)
             emitDefers()
             emitReleaseRefs()
@@ -1825,6 +1831,19 @@ class SyslLLVMCodegen:
           emit(s"  $newVal = fadd $lt $oldVal, 1.0")
         else
           emit(s"  $newVal = add $lt $oldVal, 1")
+        emit(s"  store $lt $newVal, $lt* ${local.reg}")
+        oldVal
+
+      case TPostDec(name, typ) =>
+        val lt = llvmType(typ)
+        val local = locals(name)
+        val oldVal = newReg()
+        emit(s"  $oldVal = load $lt, $lt* ${local.reg}")
+        val newVal = newReg()
+        if typ == SyslType.DoubleType then
+          emit(s"  $newVal = fsub $lt $oldVal, 1.0")
+        else
+          emit(s"  $newVal = sub $lt $oldVal, 1")
         emit(s"  store $lt $newVal, $lt* ${local.reg}")
         oldVal
 

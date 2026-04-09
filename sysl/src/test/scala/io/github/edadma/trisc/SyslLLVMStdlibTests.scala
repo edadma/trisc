@@ -85,4 +85,99 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    count("abcabc", "abc")
         |""".stripMargin) shouldBe 2
   }
+
+  "std.strings last_index" in {
+    llvmExitWithStd(
+      """import std.strings.*
+        |
+        |main() -> int
+        |    last_index("abcabc", "abc")
+        |""".stripMargin) shouldBe 3
+  }
+
+  "std.strings index_byte" in {
+    llvmExitWithStd(
+      """import std.strings.*
+        |
+        |main() -> int
+        |    index_byte("hello", byte('l'))
+        |""".stripMargin) shouldBe 2
+  }
+
+  "std.strings last_index_byte" in {
+    llvmExitWithStd(
+      """import std.strings.*
+        |
+        |main() -> int
+        |    last_index_byte("hello", byte('l'))
+        |""".stripMargin) shouldBe 3
+  }
+
+  "std.strings substring" in {
+    llvmOutputWithStd(
+      """import std.strings.*
+        |
+        |main()
+        |    puts(substring("hello world", 6, 11))
+        |""".stripMargin) shouldBe "world"
+  }
+
+  "std.strings trim_space" in {
+    llvmOutputWithStd(
+      """import std.strings.*
+        |
+        |main()
+        |    puts(trim_space("  hello  "))
+        |""".stripMargin) shouldBe "hello"
+  }
+
+  "std.strings trim" in {
+    llvmOutputWithStd(
+      """import std.strings.*
+        |
+        |main()
+        |    puts(trim("xxhelloxx", "x"))
+        |""".stripMargin) shouldBe "hello"
+  }
+
+  "std.strings to_upper" in {
+    llvmOutputWithStd(
+      """import std.strings.*
+        |
+        |main()
+        |    puts(to_upper("hello"))
+        |""".stripMargin) shouldBe "HELLO"
+  }
+
+  "std.strings to_lower" in {
+    llvmOutputWithStd(
+      """import std.strings.*
+        |
+        |main()
+        |    puts(to_lower("HELLO"))
+        |""".stripMargin) shouldBe "hello"
+  }
+
+  "std.strings repeat" in {
+    llvmOutputWithStd(
+      """import std.strings.*
+        |
+        |main()
+        |    puts(repeat("ab", 3))
+        |""".stripMargin) shouldBe "ababab"
+  }
+
+  "std.strings replace_all" in {
+    llvmOutputWithStd(
+      """import std.strings.*
+        |
+        |main()
+        |    puts(replace_all("aabaa", "a", "x"))
+        |""".stripMargin) shouldBe "xxbxx"
+  }
+
+  // TODO: split, join, fields — need TNewArray for string types + ref slice codegen
+  //  "std.strings split" in { ... }
+  //  "std.strings join" in { ... }
+  //  "std.strings fields" in { ... }
 }
