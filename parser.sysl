@@ -1,10 +1,56 @@
-// Parser combinator exercise — generic type aliases + generic combinators
+// Parser combinator exercise — builds an AST, then evaluates it
+//
+// Demonstrates: generic type aliases, generic combinators, def, closures,
+// fluent method chaining, if-is pattern matching, ? propagation, and
+// arena-allocated AST nodes.
+
+// === Core types ===
 
 enum Result[T]
     Ok(value: T, pos: int)
     Fail(pos: int)
 
 type Parser[T] = (string, int) -> Result[T]
+
+// === AST — arena-allocated node pool ===
+
+val ND_NUM = 0
+val ND_ADD = 1
+val ND_SUB = 2
+val ND_MUL = 3
+val ND_DIV = 4
+
+struct Node
+    tag: int
+    value: int      // for ND_NUM
+    left: int       // node index
+    right: int      // node index
+
+var pool: [256]Node
+var pool_size = 0
+
+mk_num(v: int) -> int
+    val idx = pool_size
+    pool[idx] = Node(ND_NUM, v, 0, 0)
+    pool_size++
+    idx
+
+mk_binop(tag: int, l: int, r: int) -> int
+    val idx = pool_size
+    pool[idx] = Node(tag, 0, l, r)
+    pool_size++
+    idx
+
+// === AST evaluation ===
+
+eval_node(idx: int) -> int
+    val n = pool[idx]
+    if n.tag == ND_NUM then n.value
+    elif n.tag == ND_ADD then eval_node(n.left) + eval_node(n.right)
+    elif n.tag == ND_SUB then eval_node(n.left) - eval_node(n.right)
+    elif n.tag == ND_MUL then eval_node(n.left) * eval_node(n.right)
+    elif n.tag == ND_DIV then eval_node(n.left) / eval_node(n.right)
+    else panic("bad node tag")
 
 // === Generic combinators ===
 
@@ -20,7 +66,6 @@ alt[A](p1: Parser[A], p2: Parser[A]) -> Parser[A]
             Ok(v, p2) -> Ok(v, p2)
             Fail(_) -> p2(input, pos)
 
-// skip_right: run two parsers, keep left result
 skip_right[A, B](p1: Parser[A], p2: Parser[B]) -> Parser[A]
     (input: string, pos: int) ->
         p1(input, pos) match
@@ -30,14 +75,12 @@ skip_right[A, B](p1: Parser[A], p2: Parser[B]) -> Parser[A]
                     Fail(fp) -> Fail(fp)
             Fail(fp) -> Fail(fp)
 
-// skip_left: run two parsers, keep right result
 skip_left[A, B](p1: Parser[A], p2: Parser[B]) -> Parser[B]
     (input: string, pos: int) ->
         p1(input, pos) match
             Ok(_, p2_pos) -> p2(input, p2_pos)
             Fail(fp) -> Fail(fp)
 
-// between: parse surrounded value (e.g., parenthesized expression)
 between[A](open: Parser[int], p: Parser[A], close: Parser[int]) -> Parser[A]
     (input: string, pos: int) ->
         open(input, pos) match
@@ -50,7 +93,6 @@ between[A](open: Parser[int], p: Parser[A], close: Parser[int]) -> Parser[A]
                     Fail(fp) -> Fail(fp)
             Fail(fp) -> Fail(fp)
 
-// unwrap_or: extract value or default
 unwrap_or[T](r: Result[T], default: T) -> T
     r match
         Ok(v, _) -> v
@@ -66,7 +108,7 @@ char_exact(ch: int, input: string, pos: int) -> Result[int]
     if pos < len(input) && input[pos] == ch then Ok(ch, pos + 1)
     else Fail(pos)
 
-// === Number parser ===
+// === Number parser — returns node index ===
 
 nat(input: string, pos: int) -> Result[int]
     var p = pos
@@ -76,76 +118,54 @@ nat(input: string, pos: int) -> Result[int]
         n = n * 10 + int(input[p]) - int('0')
         p++
         found = true
-    if found then Ok(n, p) else Fail(pos)
+    if found then Ok(mk_num(n), p) else Fail(pos)
 
-// === Expression parser using ? propagation ===
+// === Expression parser — builds AST, returns node index ===
 
 parse_factor(input: string, pos: int) -> Result[int]
     if pos < len(input) && input[pos] == '('
-        val v, p2 = parse_expr(input, pos + 1)?
+        val node, p2 = parse_expr(input, pos + 1)?
         if p2 < len(input) && input[p2] == ')'
-            Ok(v, p2 + 1)
+            Ok(node, p2 + 1)
         else Fail(p2)
     else
         nat(input, pos)
 
 parse_term(input: string, pos: int) -> Result[int]
-    var acc, cur = parse_factor(input, pos)?
+    var left, cur = parse_factor(input, pos)?
     var done = false
     while !done
         if cur < len(input) && input[cur] == '*'
             val right, p3 = parse_factor(input, cur + 1)?
-            acc = acc * right
+            left = mk_binop(ND_MUL, left, right)
             cur = p3
         elif cur < len(input) && input[cur] == '/'
             val right, p3 = parse_factor(input, cur + 1)?
-            acc = acc / right
+            left = mk_binop(ND_DIV, left, right)
             cur = p3
         else done = true
-    Ok(acc, cur)
+    Ok(left, cur)
 
 parse_expr(input: string, pos: int) -> Result[int]
-    var acc, cur = parse_term(input, pos)?
+    var left, cur = parse_term(input, pos)?
     var done = false
     while !done
         if cur < len(input) && input[cur] == '+'
             val right, p3 = parse_term(input, cur + 1)?
-            acc = acc + right
+            left = mk_binop(ND_ADD, left, right)
             cur = p3
         elif cur < len(input) && input[cur] == '-'
             val right, p3 = parse_term(input, cur + 1)?
-            acc = acc - right
+            left = mk_binop(ND_SUB, left, right)
             cur = p3
         else done = true
-    Ok(acc, cur)
+    Ok(left, cur)
 
-eval_expr(s: string) -> int
-    unwrap_or(parse_expr(s, 0), -1)
+// === High-level API ===
 
-// === Combinator-based parsers using def ===
-
-// Parse a digit using char_if + map
-is_digit(ch: int) -> bool = ch >= '0' && ch <= '9'
-to_digit(ch: int) -> int = ch - int('0')
-
-digit(input: string, pos: int) -> Result[int]
-    char_if(is_digit, input, pos) match
-        Ok(ch, p2) -> Ok(to_digit(ch), p2)
-        Fail(fp) -> Fail(fp)
-
-// Parse 'a' or 'b' using alt + def
-parse_a(input: string, pos: int) -> Result[int] = char_exact(int('a'), input, pos)
-parse_b(input: string, pos: int) -> Result[int] = char_exact(int('b'), input, pos)
-def parse_a_or_b = alt(parse_a, parse_b)
-
-// Parse number, negate with map + def
-negate(x: int) -> int = 0 - x
-def parse_neg = map(nat, negate)
-
-// Parse parenthesized expression using between + def
-open_paren(input: string, pos: int) -> Result[int] = char_exact(int('('), input, pos)
-close_paren(input: string, pos: int) -> Result[int] = char_exact(int(')'), input, pos)
-def parse_parens = between(open_paren, nat, close_paren)
+eval_str(s: string) -> int
+    pool_size = 0
+    if parse_expr(s, 0) is Ok(root, _) then eval_node(root) else -1
 
 // === Wrapper struct with methods for fluent chaining ===
 
@@ -159,74 +179,104 @@ P.skip_l(other: P) -> P = P(skip_left(self.run, other.run))
 P.between(open: P, close: P) -> P = P(between(open.run, self.run, close.run))
 P.parse(input: string, pos: int) -> Result[int] = self.run(input, pos)
 
-// Fluent constructors
 def p_nat = P(nat)
 def p_char(ch: int) -> P = P((input: string, pos: int) -> char_exact(ch, input, pos))
 
-// === Fluent API tests ===
-
-triple(x: int) -> int = x * 3
-negate2(x: int) -> int = 0 - x
+// === Tests: AST construction + evaluation ===
 
 #test
-test_fluent_map() -> unit
-    p_nat.map_to(triple).parse("14", 0) match
-        Ok(v, _) -> assert(v == 42, "fluent map")
-        Fail(_) -> panic("expected Ok")
+test_num() -> unit
+    assert(eval_str("42") == 42, "number")
 
 #test
-test_fluent_or() -> unit
-    p_char(int('x')).or(p_char(int('y'))).parse("y!", 0) match
-        Ok(v, _) -> assert(v == int('y'), "fluent or")
-        Fail(_) -> panic("expected Ok")
+test_add() -> unit
+    assert(eval_str("2+3") == 5, "addition")
 
 #test
-test_fluent_between() -> unit
-    p_nat.between(p_char(int('(')), p_char(int(')'))).parse("(55)", 0) match
-        Ok(v, p2) ->
-            assert(v == 55, "fluent between value")
-            assert(p2 == 4, "fluent between pos")
-        Fail(_) -> panic("expected Ok")
+test_precedence() -> unit
+    assert(eval_str("2+3*4") == 14, "mul before add")
 
 #test
-test_fluent_chain() -> unit
-    p_nat.map_to(negate2).or(p_char(int('?'))).parse("7", 0) match
-        Ok(v, _) -> assert(v == -7, "fluent chain")
-        Fail(_) -> panic("expected Ok")
-
-// === Tests ===
+test_parens() -> unit
+    assert(eval_str("(1+2)*3+4") == 13, "parens override precedence")
 
 #test
-test_eval_simple() -> unit
-    assert(eval_expr("42") == 42, "simple number")
+test_sub_div() -> unit
+    assert(eval_str("100-50/2") == 75, "sub and div")
 
 #test
-test_eval_add() -> unit
-    assert(eval_expr("2+3") == 5, "addition")
+test_nested_parens() -> unit
+    assert(eval_str("((2+3))") == 5, "nested parens")
 
 #test
-test_eval_precedence() -> unit
-    assert(eval_expr("2+3*4") == 14, "precedence")
+test_complex() -> unit
+    assert(eval_str("(2+3)*(4-1)") == 15, "complex expression")
 
 #test
-test_eval_parens() -> unit
-    assert(eval_expr("(1+2)*3+4") == 13, "parens")
+test_fail() -> unit
+    assert(eval_str("") == -1, "empty string fails")
+
+// === Tests: AST structure ===
 
 #test
-test_eval_sub_div() -> unit
-    assert(eval_expr("100-50/2") == 75, "sub and div")
+test_ast_num_node() -> unit
+    pool_size = 0
+    val idx = mk_num(7)
+    assert(pool[idx].tag == ND_NUM, "num tag")
+    assert(pool[idx].value == 7, "num value")
 
 #test
-test_eval_nested_parens() -> unit
-    assert(eval_expr("((2+3))") == 5, "nested parens")
+test_ast_binop_node() -> unit
+    pool_size = 0
+    val l = mk_num(3)
+    val r = mk_num(4)
+    val idx = mk_binop(ND_ADD, l, r)
+    assert(pool[idx].tag == ND_ADD, "add tag")
+    assert(pool[idx].left == l, "left child")
+    assert(pool[idx].right == r, "right child")
 
 #test
-test_eval_complex() -> unit
-    assert(eval_expr("(2+3)*(4-1)") == 15, "complex")
+test_ast_tree_eval() -> unit
+    pool_size = 0
+    // Build: (2 + 3) * 4
+    val two = mk_num(2)
+    val three = mk_num(3)
+    val sum = mk_binop(ND_ADD, two, three)
+    val four = mk_num(4)
+    val product = mk_binop(ND_MUL, sum, four)
+    assert(eval_node(product) == 20, "manual tree eval")
 
 #test
-test_eval_fail() -> unit
-    assert(eval_expr("") == -1, "empty string fails")
+test_pool_reset() -> unit
+    pool_size = 0
+    mk_num(1)
+    mk_num(2)
+    assert(pool_size == 2, "pool grew")
+    pool_size = 0
+    mk_num(99)
+    assert(pool_size == 1, "pool reset")
+    assert(pool[0].value == 99, "reused slot")
+
+// === Tests: combinator primitives ===
+
+is_digit(ch: int) -> bool = ch >= '0' && ch <= '9'
+to_digit(ch: int) -> int = ch - int('0')
+
+digit(input: string, pos: int) -> Result[int]
+    char_if(is_digit, input, pos) match
+        Ok(ch, p2) -> Ok(to_digit(ch), p2)
+        Fail(fp) -> Fail(fp)
+
+parse_a(input: string, pos: int) -> Result[int] = char_exact(int('a'), input, pos)
+parse_b(input: string, pos: int) -> Result[int] = char_exact(int('b'), input, pos)
+def parse_a_or_b = alt(parse_a, parse_b)
+
+negate_node(idx: int) -> int = mk_binop(ND_SUB, mk_num(0), idx)
+def parse_neg = map(nat, negate_node)
+
+open_paren(input: string, pos: int) -> Result[int] = char_exact(int('('), input, pos)
+close_paren(input: string, pos: int) -> Result[int] = char_exact(int(')'), input, pos)
+def parse_parens = between(open_paren, nat, close_paren)
 
 #test
 test_digit() -> unit
@@ -238,41 +288,38 @@ test_digit() -> unit
 
 #test
 test_alt_first() -> unit
-    parse_a_or_b("abc", 0) match
-        Ok(v, _) -> assert(v == int('a'), "alt picks first")
-        Fail(_) -> panic("expected Ok")
+    if parse_a_or_b("abc", 0) is Ok(v, _) then assert(v == int('a'), "alt first")
+    else panic("expected Ok")
 
 #test
 test_alt_second() -> unit
-    parse_a_or_b("bcd", 0) match
-        Ok(v, _) -> assert(v == int('b'), "alt picks second")
-        Fail(_) -> panic("expected Ok")
+    if parse_a_or_b("bcd", 0) is Ok(v, _) then assert(v == int('b'), "alt second")
+    else panic("expected Ok")
 
 #test
 test_alt_fail() -> unit
-    parse_a_or_b("xyz", 0) match
-        Ok(_, _) -> panic("expected Fail")
-        Fail(_) -> assert(true, "alt fails correctly")
+    if parse_a_or_b("xyz", 0) is Ok(_, _) then panic("expected Fail")
 
 #test
 test_map_negate() -> unit
-    parse_neg("42", 0) match
-        Ok(v, _) -> assert(v == -42, "map negates")
-        Fail(_) -> panic("expected Ok")
+    pool_size = 0
+    pool_size = 0
+    if parse_neg("42", 0) is Ok(idx, _) then assert(eval_node(idx) == -42, "map negate")
+    else panic("expected Ok")
 
 #test
 test_between_parens() -> unit
+    pool_size = 0
     parse_parens("(99)", 0) match
-        Ok(v, p) ->
-            assert(v == 99, "between value")
+        Ok(idx, p) ->
+            assert(eval_node(idx) == 99, "between value")
             assert(p == 4, "between consumed all")
         Fail(_) -> panic("expected Ok")
 
 #test
 test_between_missing_close() -> unit
-    parse_parens("(99", 0) match
-        Ok(_, _) -> panic("expected Fail")
-        Fail(_) -> assert(true, "between fails on missing close")
+    pool_size = 0
+    if parse_parens("(99", 0) is Ok(_, _) then panic("expected Fail")
 
 #test
 test_unwrap_or_ok() -> unit
@@ -284,8 +331,41 @@ test_unwrap_or_fail() -> unit
     val r: Result[int] = Fail(0)
     assert(unwrap_or(r, -1) == -1, "unwrap_or on Fail")
 
+// === Tests: fluent API ===
+
+double_node(idx: int) -> int = mk_binop(ND_ADD, idx, idx)
+
+#test
+test_fluent_map() -> unit
+    pool_size = 0
+    p_nat.map_to(double_node).parse("3", 0) match
+        Ok(idx, _) -> assert(eval_node(idx) == 6, "fluent map: 3+3=6")
+        Fail(_) -> panic("expected Ok")
+
+#test
+test_fluent_or() -> unit
+    p_char(int('x')).or(p_char(int('y'))).parse("y!", 0) match
+        Ok(v, _) -> assert(v == int('y'), "fluent or")
+        Fail(_) -> panic("expected Ok")
+
+#test
+test_fluent_between() -> unit
+    pool_size = 0
+    p_nat.between(p_char(int('(')), p_char(int(')'))).parse("(55)", 0) match
+        Ok(idx, p2) ->
+            assert(eval_node(idx) == 55, "fluent between value")
+            assert(p2 == 4, "fluent between pos")
+        Fail(_) -> panic("expected Ok")
+
+#test
+test_fluent_chain() -> unit
+    pool_size = 0
+    p_nat.map_to(negate_node).or(p_char(int('?'))).parse("7", 0) match
+        Ok(idx, _) -> assert(eval_node(idx) == -7, "fluent chain")
+        Fail(_) -> panic("expected Ok")
+
 main() -> int
-    val a = eval_expr("2+3*4")       // 14
-    val b = eval_expr("(1+2)*3+4")   // 13
-    val c = eval_expr("100-50/2")    // 75
+    val a = eval_str("2+3*4")       // 14
+    val b = eval_str("(1+2)*3+4")   // 13
+    val c = eval_str("100-50/2")    // 75
     a + b + c
