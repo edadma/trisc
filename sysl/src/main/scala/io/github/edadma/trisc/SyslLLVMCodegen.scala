@@ -49,8 +49,18 @@ class SyslLLVMCodegen:
         case _: TTypeAliasDecl => // type only
         case _: TInterfaceDecl => // type only
         case f: TFunDecl => genFunction(f)
-        case TVarDecl(name, typ, _, _) =>
-          emit(s"@$name = global ${llvmType(typ)} 0")
+        case TVarDecl(name, typ, init, _) =>
+          (typ, init) match
+            case (SyslType.ArrayType(SyslType.IntType(8) | SyslType.UIntType(8), size), TStringLit(s, _)) =>
+              // String literal initializer for byte array: emit as c"..." constant
+              val bytes = s.getBytes("UTF-8")
+              val escaped = bytes.map(b => f"\\${b & 0xff}%02X").mkString
+              val padded = if bytes.length < size then escaped + ("\\00" * (size - bytes.length)) else escaped
+              emit(s"""@$name = global [$size x i8] c"$padded"""")
+            case (SyslType.ArrayType(_, size), _) =>
+              emit(s"@$name = global ${llvmType(typ)} zeroinitializer")
+            case _ =>
+              emit(s"@$name = global ${llvmType(typ)} 0")
     emit("")
     val funcCode = out.toString
 
@@ -560,6 +570,7 @@ class SyslLLVMCodegen:
     case SyslType.VoidType => "void"
     case SyslType.StringType => "i8*"
     case SyslType.PtrType(_) => "i8*"
+    case SyslType.ArrayType(elem, size) => s"[$size x ${llvmType(elem)}]"
     case _ => "i64"
 
   private def emit(line: String): Unit =
