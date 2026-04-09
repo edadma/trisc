@@ -53,7 +53,7 @@ enum SyslType:
     case ArrayType(elem, size) => elem.sizeOf * size
     case DoubleType => 8
     case StringType => 16        // ptr(8) + len(8) — Go-style fat pointer
-    case SliceType(_) => 16      // ptr(8) + len(4) + cap(4)
+    case SliceType(_) => 24      // ptr(8) + len(4) + cap(4) + backref(8)
     case RefType(_) => 8         // pointer to heap object (refcount header + data)
     case st @ StructType(_, fields) =>
       var offset = 0L

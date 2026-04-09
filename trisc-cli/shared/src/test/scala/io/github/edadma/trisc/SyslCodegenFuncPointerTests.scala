@@ -132,6 +132,35 @@ class SyslCodegenFuncPointerTests extends SyslCodegenHelpers {
         |""".stripMargin) shouldBe 50
   }
 
+  // ===== def auto-call + indirect call =====
+
+  "def zero-arg returns function pointer, call with args" in {
+    compileAndRun(
+      """add1(x: int) -> int = x + 1
+        |def get_add1 = add1
+        |main() -> int = get_add1(41)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "def zero-arg returns function pointer, assign then call" in {
+    compileAndRun(
+      """dbl(x: int) -> int = x * 2
+        |def get_dbl = dbl
+        |main() -> int
+        |    val f = get_dbl
+        |    f(21)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "def zero-arg returns function pointer, pass to higher-order" in {
+    compileAndRun(
+      """inc(x: int) -> int = x + 1
+        |def get_inc = inc
+        |apply(f: (int) -> int, x: int) -> int = f(x)
+        |main() -> int = apply(get_inc, 41)
+        |""".stripMargin) shouldBe 42
+  }
+
   "select function pointer at runtime" in {
     compileAndRun(
       """dbl(x: int) -> int = x * 2

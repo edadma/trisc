@@ -24,6 +24,11 @@ class SyslTriscCodegen(addresses: Int = 4):
   private var closureCounter = 0
   private val pendingClosures = new mutable.ListBuffer[(String, TClosure)]
 
+  // Interface tables: (struct, interface) → itable label + method function names
+  // Collected during genExpr when TInterfaceBox is encountered, emitted in rodata
+  private val itables = new mutable.LinkedHashMap[String, List[String]] // itable label → list of function names
+  private var declaredFunctions = Set.empty[String] // all function names in this compilation unit
+
   def generate(program: TProgram): String =
     out.clear()
     labelCounter = 0
@@ -36,9 +41,13 @@ class SyslTriscCodegen(addresses: Int = 4):
     needsStrInt = false
     needsStrFloat = false
     globalConstants.clear()
+    itables.clear()
 
     // Extract module path for unique label prefixing
     modulePrefix = program.decls.collectFirst { case TModuleDecl(path) => path.mkString("_") }.getOrElse("")
+
+    // Collect all declared function names for itable resolution
+    declaredFunctions = program.decls.collect { case TFunDecl(name, _, _, _, _, _, _) => name }.toSet
 
     // Scan for deinit methods: functions named TypeName_deinit
     for decl <- program.decls do
@@ -93,9 +102,21 @@ class SyslTriscCodegen(addresses: Int = 4):
     // Emit __str_float helper if needed (float to string conversion)
     if needsStrFloat then emitStrFloatHelper()
 
-    // Emit rodata segment — string literals with immortal refcount headers
-    if stringLiterals.nonEmpty then
+    // Emit rodata segment — string literals and interface tables
+    if stringLiterals.nonEmpty || itables.nonEmpty then
       emit("segment rodata")
+
+    // Interface tables: each is an array of function pointers
+    for (label, funcNames) <- itables do
+      emit(s"global $label, data, ${funcNames.length * 8}")
+    for (label, funcNames) <- itables do
+      emit(s"  align 8")
+      emit(s"$label:")
+      for fn <- funcNames do
+        emit(s"  dl $fn")
+
+    // String literals with immortal refcount headers
+    if stringLiterals.nonEmpty then
       for (label, value) <- stringLiterals do
         val bytes = value.getBytes("UTF-8")
         // Total: 8 (refcount) + bytes + 1 (null terminator)
@@ -225,7 +246,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     case _ => None
 
   // Does this return type require a caller-allocated return slot?
-  private def returnsViaPointer(typ: SyslType): Boolean = typ.isInstanceOf[SyslType.StructType] || typ == SyslType.StringType || typ.isInstanceOf[SyslType.SliceType] || typ.isInstanceOf[SyslType.EnumType] || typ.isInstanceOf[SyslType.FuncType]
+  private def returnsViaPointer(typ: SyslType): Boolean = typ.isInstanceOf[SyslType.StructType] || typ == SyslType.StringType || typ.isInstanceOf[SyslType.SliceType] || typ.isInstanceOf[SyslType.EnumType] || typ.isInstanceOf[SyslType.FuncType] || typ.isInstanceOf[SyslType.InterfaceType]
 
   // Size of a type on the stack in bytes, rounded up to alignment
   private def stackSize(typ: SyslType): Int =
@@ -299,7 +320,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit(s"  sts r$srcReg, r$addrReg, r0")
       case SyslType.IntType(32) | SyslType.UIntType(32) =>
         emit(s"  stw r$srcReg, r$addrReg, r0")
-      case SyslType.StringType | SyslType.SliceType(_) | SyslType.FuncType(_, _) =>
+      case SyslType.StringType | SyslType.FuncType(_, _) | _: SyslType.InterfaceType =>
         // 16-byte copy: srcReg = source address, addrReg = dest address
         emit(s"  ldd r4, r$srcReg, r0")
         emit(s"  std r4, r$addrReg, r0")
@@ -307,6 +328,13 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  ldd r4, r4, r0")
         emitAddImm(3, addrReg, 8)
         emit("  std r4, r3, r0")
+      case SyslType.SliceType(_) =>
+        // 24-byte copy: {ptr(8), len+cap(8), backref(8)}
+        for i <- 0 until 24 by 8 do
+          emitAddImm(4, srcReg, i)
+          emit("  ldd r4, r4, r0")
+          emitAddImm(3, addrReg, i)
+          emit("  std r4, r3, r0")
       case st: SyslType.StructType =>
         // Struct copy: srcReg = source address, addrReg = dest address
         val size = stackSize(st)
@@ -402,6 +430,13 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  ldd r1, r1, r0")       // r1 = ptr field
           emitRefDecr(1, 8)
           emit("  popd r1")
+        case _: SyslType.SliceType =>
+          // Decrement backref (at slice offset +16) if non-null
+          emit("  pshd r1")
+          emitAddImm(1, 5, local.offset + 16)
+          emit("  ldd r1, r1, r0")       // r1 = backref
+          emitRefDecr(1, 0)              // refcount IS at *backref (offset 0)
+          emit("  popd r1")
         case _ =>
     // Decrement ref params (caller transferred ownership)
     for (name, rt) <- refParams do
@@ -474,7 +509,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       val callerOffset = 16 + (nRegPushed - 1 - regIndex) * 8
       locals(param.name) = LocalVar(param.name, callerOffset, SyslType.I64)
     // Stack params: those beyond register capacity
-    // String and slice params take 16 bytes on the caller stack, others take 8
+    // String params take 16 bytes, slice params 24 bytes, others 8
     val nUserStackStart = 1 - userParamRegStart
     var stackParamOffset = 16 + nRegPushed * 8
     for param <- fun.params.drop(nUserStackStart) do
@@ -483,7 +518,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         stackParamOffset += 16
       else if param.typ.isInstanceOf[SyslType.SliceType] then
         locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
-        stackParamOffset += 16
+        stackParamOffset += 24
       else
         locals(param.name) = LocalVar(param.name, stackParamOffset, SyslType.I64)
         stackParamOffset += 8
@@ -524,8 +559,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  std r2, r3, r0")        // store len at local+8
       locals(param.name) = strLocal
 
-    // Copy FuncType params into local 16-byte slots (same as strings).
-    for (param, i) <- fun.params.zipWithIndex if param.typ.isInstanceOf[SyslType.FuncType] do
+    // Copy FuncType/InterfaceType params into local 16-byte slots (same as strings).
+    for (param, i) <- fun.params.zipWithIndex if param.typ.isInstanceOf[SyslType.FuncType] || param.typ.isInstanceOf[SyslType.InterfaceType] do
       val srcLocal = locals(param.name)
       val isRegParam = i < (1 - userParamRegStart)
       emitAddImm(7, 7, -16)
@@ -618,8 +653,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         stackParamOffset += 16
       else if param.typ.isInstanceOf[SyslType.SliceType] then
         locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
-        stackParamOffset += 16
-      else if param.typ.isInstanceOf[SyslType.FuncType] then
+        stackParamOffset += 24
+      else if param.typ.isInstanceOf[SyslType.FuncType] || param.typ.isInstanceOf[SyslType.InterfaceType] then
         locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
         stackParamOffset += 16
       else
@@ -652,8 +687,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  std r2, r3, r0")
       locals(param.name) = strLocal
 
-    // Copy FuncType params into local slots
-    for (param, i) <- fun.params.zipWithIndex if param.typ.isInstanceOf[SyslType.FuncType] do
+    // Copy FuncType/InterfaceType params into local slots
+    for (param, i) <- fun.params.zipWithIndex if param.typ.isInstanceOf[SyslType.FuncType] || param.typ.isInstanceOf[SyslType.InterfaceType] do
       val srcLocal = locals(param.name)
       val isRegParam = i < (1 - userParamRegStart)
       emitAddImm(7, 7, -16)
@@ -688,7 +723,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         val size = stackSize(capType)
         capType match
           case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType |
-               _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType =>
+               _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
             // Aggregate: copy size bytes into a local slot
             val aligned = ((size + 7) & ~7).toInt
             emitAddImm(7, 7, -aligned)
@@ -820,7 +855,8 @@ class SyslTriscCodegen(addresses: Int = 4):
     val size = currentFunction.returnType match
       case st: SyslType.StructType => stackSize(st)
       case et: SyslType.EnumType => stackSize(et)
-      case SyslType.StringType | _: SyslType.FuncType => 16
+      case SyslType.StringType | _: SyslType.FuncType | _: SyslType.InterfaceType => 16
+      case _: SyslType.SliceType => 24
       case _ => 8
     val retLocal = locals("_ret_ptr")
     // r1 = source address; load _ret_ptr into r2
@@ -1349,7 +1385,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         if locals != null && locals.contains(name) then
           val local = locals(name)
           local.typ match
-            case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType =>
+            case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
               emitAddImm(1, 5, local.offset) // aggregates: address, not value
             case _ =>
               emitAddImm(2, 5, local.offset)
@@ -1358,7 +1394,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit(s"  movi r1, $name")
           val gt = globals.getOrElse(name, typ) // use AST type for cross-unit globals
           gt match
-            case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType =>
+            case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
               () // aggregates: address is the value
             case _ =>
               emitLoad(1, 1, gt)
@@ -1884,7 +1920,7 @@ class SyslTriscCodegen(addresses: Int = 4):
               val local = locals(name)
               typ match
                 case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType |
-                     _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType =>
+                     _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
                   // Aggregate: copy size bytes from local address
                   emitAddImm(3, 5, local.offset)
                   for i <- 0 until size.toInt by 8 do
@@ -1902,7 +1938,7 @@ class SyslTriscCodegen(addresses: Int = 4):
               emit(s"  movi r3, $name")
               typ match
                 case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType |
-                     _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType =>
+                     _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
                   for i <- 0 until size.toInt by 8 do
                     emitAddImm(4, 3, i)
                     emit("  ldd r4, r4, r0")
@@ -1923,6 +1959,120 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitAddImm(3, 7, 8)
           emit("  std r2, r3, r0")       // env_ptr at [sp+8]
           emit("  mov r1, r7")           // r1 = address of the pair
+
+      case TInterfaceBox(expr, iface) =>
+        // Box a concrete value into an interface: {itable_ptr, data_ptr}
+        val structName = expr.typ match
+          case SyslType.StructType(name, _) => name
+          case SyslType.PtrType(SyslType.StructType(name, _)) => name
+          case SyslType.RefType(SyslType.StructType(name, _)) => name
+          case other => throw new RuntimeException(s"cannot box $other into interface")
+
+        // Resolve itable label, registering it if first time for this (struct, interface) pair
+        val itableLabel = s"__itable_${structName}_${iface.name}"
+        if !itables.contains(itableLabel) then
+          val funcNames = iface.methods.map { (methodName, _, _) =>
+            val shortName = s"${structName}_$methodName"
+            if declaredFunctions.contains(shortName) then shortName
+            else declaredFunctions.find(_.endsWith(s"__$shortName")).getOrElse(shortName)
+          }
+          itables(itableLabel) = funcNames
+
+        expr.typ match
+          case st: SyslType.StructType =>
+            // Value type: heap-allocate a copy, data_ptr = heap address
+            val dataSize = stackSize(st)
+            needsAllocExtern = true
+            // Evaluate struct expression first — r1 = address of struct data
+            genExpr(expr)
+            emit("  pshd r1")               // save struct address
+            stackOffset -= 8
+            // Allocate heap space
+            emitLoadImm(1, dataSize.toInt)
+            emit("  movi r4, malloc")
+            emit("  jalr r6, r4")
+            // r1 = heap data_ptr, check for null
+            val allocOk = newLabel("ibox_alloc_ok")
+            emit(s"  bne r1, r0, $allocOk")
+            emit("  ldi r1, 2")             // error code: null pointer
+            emit("  trap 1")
+            emit(s"$allocOk:")
+            emit("  pshd r1")               // save data_ptr
+            stackOffset -= 8
+            // Copy struct data: src on stack below, dst = data_ptr in r1
+            emit("  mov r2, r1")            // r2 = dst (heap)
+            emitAddImm(3, 7, 8)             // r3 = src (original struct addr, pushed earlier)
+            emit("  ldd r3, r3, r0")        // r3 = actual src address
+            for i <- 0 until dataSize.toInt by 8 do
+              emitAddImm(4, 3, i)
+              emit("  ldd r4, r4, r0")
+              emitAddImm(1, 2, i)
+              emit("  std r4, r1, r0")
+            // Build {itable_ptr, data_ptr} pair on stack (16 bytes)
+            emit("  popd r2")               // r2 = data_ptr
+            stackOffset += 8
+            emit("  popd r3")               // discard saved struct addr
+            stackOffset += 8
+            emitAddImm(7, 7, -16)
+            stackOffset -= 16
+            emit(s"  movi r1, $itableLabel")
+            emit("  std r1, r7, r0")         // itable_ptr at [sp+0]
+            emitAddImm(3, 7, 8)
+            emit("  std r2, r3, r0")         // data_ptr at [sp+8]
+            emit("  mov r1, r7")             // r1 = address of the pair
+
+          case _: SyslType.PtrType | _: SyslType.RefType =>
+            // Pointer/ref type: data_ptr IS the pointer value itself
+            genExpr(expr)                    // r1 = pointer value
+            emit("  pshd r1")               // save data_ptr
+            stackOffset -= 8
+            emitAddImm(7, 7, -16)
+            stackOffset -= 16
+            emit(s"  movi r1, $itableLabel")
+            emit("  std r1, r7, r0")         // itable_ptr at [sp+0]
+            emitAddImm(2, 7, 8)
+            emit("  popd r3")               // r3 = data_ptr (from saved)
+            stackOffset += 8
+            emit("  std r3, r2, r0")         // data_ptr at [sp+8]
+            emit("  mov r1, r7")             // r1 = address of the pair
+
+          case other =>
+            throw new RuntimeException(s"TInterfaceBox: unsupported concrete type $other")
+
+      case TInterfaceDispatch(ifaceVal, methodIndex, args, retType) =>
+        // Dynamic dispatch: load itable + data from interface value, call method
+        // Interface layout: {itable_ptr: i64, data_ptr: i64}
+        // itable[methodIndex] = function pointer
+        // Method ABI: first arg (r1) = data_ptr (self), remaining args on stack
+
+        val savedOffset = stackOffset
+        val nRegArgs = (args.length + 1).min(1) // +1 for self; ABI: only 1 reg arg
+        val stackArgCount = args.length + 1 - nRegArgs // self + user args, minus reg args
+
+        // Push user args right-to-left onto stack (all go on stack since self takes r1)
+        for arg <- args.reverse do
+          genExpr(arg)
+          emit("  pshd r1")
+          stackOffset -= 8
+
+        // Evaluate interface value — r1 = address of {itable_ptr, data_ptr}
+        genExpr(ifaceVal)
+        // Load data_ptr and itable_ptr
+        emitAddImm(2, 1, 8)
+        emit("  ldd r2, r2, r0")          // r2 = data_ptr (self)
+        emit("  ldd r3, r1, r0")          // r3 = itable_ptr
+        // Load method pointer from itable
+        val methodOff = methodIndex * 8
+        if methodOff != 0 then emitAddImm(3, 3, methodOff)
+        emit("  ldd r4, r3, r0")          // r4 = method function pointer
+        // r1 = self (data_ptr), r4 = method to call
+        emit("  mov r1, r2")              // r1 = data_ptr (self)
+        emit("  jalr r6, r4")             // call method
+        // Clean up stack args
+        val stackArgBytes = args.length * 8
+        if stackArgBytes != 0 then
+          emitAddImm(7, 7, stackArgBytes)
+          stackOffset = savedOffset
 
       case TCall("abort", _, _) =>
         emit("  ldi r1, 3")           // error code: 3 = abort
@@ -1950,7 +2100,8 @@ class SyslTriscCodegen(addresses: Int = 4):
           val size = retType match
             case st: SyslType.StructType => stackSize(st)
             case et: SyslType.EnumType => stackSize(et)
-            case SyslType.StringType | _: SyslType.FuncType => 16
+            case SyslType.StringType | _: SyslType.FuncType | _: SyslType.InterfaceType => 16
+            case _: SyslType.SliceType => 24
             case _ => 8
           val aligned = (size + 7) & ~7
           emitAddImm(7, 7, -aligned)
@@ -2005,28 +2156,31 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  pshd r1")
             stackOffset -= 16
           else if arg.typ.isInstanceOf[SyslType.SliceType] then
-            // Slice stack arg: copy 16-byte {ptr, len+cap} inline, reclaim temp
-            emit("  ldd r2, r1, r0")       // r2 = data pointer (8 bytes)
+            // Slice stack arg: copy 24-byte {ptr, len+cap, backref} inline, reclaim temp
+            emit("  ldd r2, r1, r0")       // r2 = ptr (8 bytes)
             emit("  addi r3, r1, 8")
-            emit("  ldd r3, r3, r0")       // r3 = len(4)+cap(4) packed as 8 bytes
+            emit("  ldd r3, r3, r0")       // r3 = len+cap packed (8 bytes)
+            emit("  addi r4, r1, 16")
+            emit("  ldd r4, r4, r0")       // r4 = backref (8 bytes)
             val extra = preOffset - stackOffset
             if extra > 0 then
               emitAddImm(7, 7, extra)
               stackOffset = preOffset
+            emit("  pshd r4")              // push backref
             emit("  pshd r3")              // push len+cap
             emit("  pshd r2")              // push ptr
-            stackOffset -= 16
-          else if arg.typ.isInstanceOf[SyslType.FuncType] then
-            // FuncType arg: copy 16-byte {func_ptr, env_ptr} inline, reclaim temp
-            emit("  ldd r2, r1, r0")       // r2 = func_ptr
+            stackOffset -= 24
+          else if arg.typ.isInstanceOf[SyslType.FuncType] || arg.typ.isInstanceOf[SyslType.InterfaceType] then
+            // FuncType/InterfaceType arg: copy 16-byte pair inline, reclaim temp
+            emit("  ldd r2, r1, r0")       // r2 = first 8 bytes
             emit("  addi r3, r1, 8")
-            emit("  ldd r3, r3, r0")       // r3 = env_ptr
+            emit("  ldd r3, r3, r0")       // r3 = second 8 bytes
             val extra = preOffset - stackOffset
             if extra > 0 then
               emitAddImm(7, 7, extra)
               stackOffset = preOffset
-            emit("  pshd r3")              // push env_ptr
-            emit("  pshd r2")              // push func_ptr
+            emit("  pshd r3")              // push second 8 bytes
+            emit("  pshd r2")              // push first 8 bytes
             stackOffset -= 16
           else if arg.typ.isInstanceOf[SyslType.EnumType] || arg.typ.isInstanceOf[SyslType.StructType] then
             // Aggregate args: r1 is an address into our stack — do NOT reclaim the temp!
@@ -2072,24 +2226,26 @@ class SyslTriscCodegen(addresses: Int = 4):
             stackOffset -= 16
             regAggregateDataOffset = stackOffset
           else if arg.typ.isInstanceOf[SyslType.SliceType] then
-            // Pre-evaluate slice register arg: copy 16-byte struct to a known stack location.
-            // genExpr may return an address to a local (no stack alloc) or to temp data.
+            // Pre-evaluate slice register arg: copy 24-byte struct to a known stack location.
             val preOffset = stackOffset
             genExpr(arg)
-            // r1 = address of 16-byte slice struct
-            emit("  ldd r2, r1, r0")       // r2 = data pointer
+            // r1 = address of 24-byte slice struct
+            emit("  ldd r2, r1, r0")       // r2 = ptr
             emit("  addi r3, r1, 8")
             emit("  ldd r3, r3, r0")       // r3 = len+cap (8 bytes)
+            emit("  addi r4, r1, 16")
+            emit("  ldd r4, r4, r0")       // r4 = backref (8 bytes)
             val extra = preOffset - stackOffset
             if extra > 0 then
               emitAddImm(7, 7, extra)
               stackOffset = preOffset
+            emit("  pshd r4")              // push backref
             emit("  pshd r3")              // push len+cap
             emit("  pshd r2")              // push ptr
-            stackOffset -= 16
+            stackOffset -= 24
             regAggregateDataOffset = stackOffset
-          else if arg.typ.isInstanceOf[SyslType.FuncType] then
-            // Pre-evaluate func register arg: copy 16-byte {func_ptr, env_ptr}
+          else if arg.typ.isInstanceOf[SyslType.FuncType] || arg.typ.isInstanceOf[SyslType.InterfaceType] then
+            // Pre-evaluate 16-byte pair register arg
             val preOffset = stackOffset
             genExpr(arg)
             emit("  ldd r2, r1, r0")
@@ -2118,7 +2274,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           if arg.typ == SyslType.StringType then
             // Address of the pre-pushed 16-byte string data (above stack args)
             emitAddImm(1, 5, regAggregateDataOffset)
-          else if arg.typ.isInstanceOf[SyslType.SliceType] || arg.typ.isInstanceOf[SyslType.FuncType] then
+          else if arg.typ.isInstanceOf[SyslType.SliceType] || arg.typ.isInstanceOf[SyslType.FuncType] || arg.typ.isInstanceOf[SyslType.InterfaceType] then
             // Address of the pre-pushed 16-byte data (above stack args)
             emitAddImm(1, 5, regAggregateDataOffset)
           else if arg.typ.isInstanceOf[SyslType.StructType] || arg.typ.isInstanceOf[SyslType.EnumType] then
@@ -2232,7 +2388,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitStructAddr(obj)        // r1 = struct address
         if off != 0 then emitAddImm(1, 1, off)
         fieldType match
-          case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType =>
+          case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
             () // aggregate types: address is the value (don't dereference)
           case _ =>
             emitLoad(1, 1, fieldType) // scalar types: load the value
@@ -2296,7 +2452,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  mul r2, r2, r3")
         emit("  add r1, r1, r2")
         elemType match
-          case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType =>
+          case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
             () // address is the value for aggregates
           case _ => emitLoad(1, 1, elemType)
 
@@ -2326,7 +2482,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = element address
         elemType match
-          case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType =>
+          case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
             () // address is the value for aggregates
           case _ => emitLoad(1, 1, elemType)
 
@@ -2340,7 +2496,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = element address
         elemType match
-          case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType =>
+          case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
             () // address is the value for aggregates
           case _ => emitLoad(1, 1, elemType) // load scalar with proper width
 
@@ -2624,19 +2780,32 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TSliceExpr(array, low, high, SyslType.SliceType(elemType)) =>
         val elemSize = stackSize(elemType)
-        // Evaluate array and push {ptr, len, cap} onto stack
+        // Evaluate array and push {ptr, len, cap, backref} onto stack
         genExpr(array)
         array.typ match
           case SyslType.RefType(SyslType.SliceType(_)) =>
             // r1 = data pointer; len at [r1 - 8], cap = len
+            // backref = dataPtr - 16 (allocation base where refcount lives)
+            emitAddImm(2, 1, -16)
+            emit("  pshd r2")           // push backref
+            stackOffset -= 8
             emitAddImm(2, 1, -8)
             emit("  ldd r2, r2, r0")    // r2 = length
             emit("  pshd r2")           // push cap (== len)
             emit("  pshd r2")           // push len
             emit("  pshd r1")           // push ptr
             stackOffset -= 24
+            // Increment refcount at backref (refcount is at *backref directly)
+            emitAddImm(2, 7, 24)        // r2 = address of backref on stack
+            emit("  ldd r2, r2, r0")    // r2 = backref value
+            emitRefIncr(2, 0)
           case SyslType.SliceType(_) =>
-            // r1 = address of 16-byte slice struct {ptr(8), len(4), cap(4)}
+            // r1 = address of 24-byte slice struct {ptr(8), len(4), cap(4), backref(8)}
+            // Inherit backref from source
+            emit("  addi r2, r1, 16")
+            emit("  ldd r2, r2, r0")    // r2 = backref
+            emit("  pshd r2")           // push backref
+            stackOffset -= 8
             emit("  addi r2, r1, 12")
             emit("  ldw r2, r2, r0")    // r2 = cap (i32)
             emit("  pshd r2")
@@ -2646,15 +2815,21 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  ldd r2, r1, r0")    // r2 = ptr
             emit("  pshd r2")
             stackOffset -= 24
+            // Increment refcount at inherited backref (if non-null)
+            emitAddImm(2, 7, 24)        // r2 = address of backref on stack
+            emit("  ldd r2, r2, r0")    // r2 = backref value
+            emitRefIncr(2, 0)
           case SyslType.ArrayType(_, size) =>
-            // r1 = address of array
+            // r1 = address of array; backref = null (stack array)
+            emit("  pshd r0")           // push backref = 0
+            stackOffset -= 8
             emitLoadImm(2, size)
             emit("  pshd r2")           // cap
             emit("  pshd r2")           // len
             emit("  pshd r1")           // ptr
             stackOffset -= 24
           case _ => throw new RuntimeException(s"codegen: cannot sub-slice ${array.typ}")
-        // Stack (top to bottom): [ptr] [len] [cap]
+        // Stack (top to bottom): [ptr] [len] [cap] [backref]
 
         // Evaluate lo (default 0)
         low match
@@ -2662,7 +2837,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           case None => emit("  ldi r1, 0")
         emit("  pshd r1")              // push lo
         stackOffset -= 8
-        // Stack: [lo] [ptr] [len] [cap]
+        // Stack: [lo] [ptr] [len] [cap] [backref]
 
         // Evaluate hi (default len)
         high match
@@ -2673,13 +2848,13 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  ldd r1, r1, r0")
         emit("  pshd r1")              // push hi
         stackOffset -= 8
-        // Stack: [hi] [lo] [ptr] [len] [cap]
+        // Stack: [hi] [lo] [ptr] [len] [cap] [backref]
 
         // Load all values from stack into registers
         emit("  popd r1")              // r1 = hi
         emit("  popd r2")              // r2 = lo
         emit("  popd r3")              // r3 = ptr
-        // len and cap still on stack
+        // len, cap, backref still on stack
         stackOffset += 24
 
         // Bounds check: 0 <= lo <= hi <= len
@@ -2699,11 +2874,12 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  trap 1")
         emit(s"$okLabel")
 
-        // Pop len and cap
+        // Pop len and cap; backref stays on stack
         emit("  popd r4")              // r4 = len (unused now, needed only for bounds)
         stackOffset += 8
         emit("  popd r4")              // r4 = cap
         stackOffset += 8
+        // backref still on stack at sp+0
 
         // Compute result fields:
         // new_len = hi - lo (r1 = hi, r2 = lo)
@@ -2722,27 +2898,37 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  popd r1")            // restore new_len
           emit("  add r3, r3, r2")     // r3 = new_ptr
 
-        // Allocate 16-byte result on stack: {ptr(8), len(4), cap(4)}
-        emitAddImm(7, 7, -16)
-        stackOffset -= 16
+        // Pop backref into r2
+        emit("  popd r2")              // r2 = backref
+        stackOffset += 8
+
+        // Allocate 24-byte result on stack: {ptr(8), len(4), cap(4), backref(8)}
+        emitAddImm(7, 7, -24)
+        stackOffset -= 24
         emit("  std r3, r7, r0")       // result.ptr = new_ptr
-        emit("  addi r2, r7, 8")
-        emit("  stw r1, r2, r0")       // result.len = new_len (i32)
-        emit("  addi r2, r7, 12")
-        emit("  stw r4, r2, r0")       // result.cap = new_cap (i32)
+        emit("  addi r3, r7, 8")
+        emit("  stw r1, r3, r0")       // result.len = new_len (i32)
+        emit("  addi r3, r7, 12")
+        emit("  stw r4, r3, r0")       // result.cap = new_cap (i32)
+        emit("  addi r3, r7, 16")
+        emit("  std r2, r3, r0")       // result.backref = backref
         emit("  mov r1, r7")           // r1 = address of result
 
       case TAppend(sliceExpr, elemExpr, SyslType.SliceType(elemType)) =>
         val elemSize = stackSize(elemType)
         needsAllocExtern = true
 
-        // Pre-allocate 16-byte result slot
-        emitAddImm(7, 7, -16)
-        stackOffset -= 16
+        // Pre-allocate 24-byte result slot
+        emitAddImm(7, 7, -24)
+        stackOffset -= 24
         val resultOffset = stackOffset
 
-        // Evaluate slice → push ptr, len, cap onto stack
+        // Evaluate slice → push ptr, len, cap, backref onto stack
         genExpr(sliceExpr)
+        emit("  addi r2, r1, 16")
+        emit("  ldd r2, r2, r0")       // r2 = backref
+        emit("  pshd r2")              // [backref]
+        stackOffset -= 8
         emit("  ldd r2, r1, r0")       // ptr
         emit("  addi r3, r1, 8")
         emit("  ldw r3, r3, r0")       // len
@@ -2750,7 +2936,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  ldw r4, r4, r0")       // cap
         emit("  pshd r4")              // [cap]
         emit("  pshd r3")              // [len] [cap]
-        emit("  pshd r2")              // [ptr] [len] [cap]
+        emit("  pshd r2")              // [ptr] [len] [cap] [backref]
         stackOffset -= 24
 
         // Evaluate elem, push
@@ -2798,6 +2984,10 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  stw r3, r2, r0")       // result.len
         emit("  addi r2, r1, 12")
         emit("  stw r4, r2, r0")       // result.cap
+        // Inherit backref from source (still on stack)
+        emit("  ldd r2, r7, r0")       // r2 = backref (top of remaining stack)
+        emit("  addi r3, r1, 16")
+        emit("  std r2, r3, r0")       // result.backref
         emit(s"  bra $doneLabel")
 
         // === Grow: malloc, copy, write elem ===
@@ -2871,7 +3061,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitAddImm(4, 7, 32)
         emit("  ldd r4, r4, r0")       // r4 = elem
         emitStore(4, 1, elemType)      // store elem
-        // Build result: new_ptr, len+1, new_cap
+        // Build result: new_ptr, len+1, new_cap, backref=0
         emit("  popd r2")              // r2 = new_ptr
         emit("  popd r4")              // r4 = new_cap
         emit("  popd r3")              // r3 = len
@@ -2885,8 +3075,13 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  stw r3, r2, r0")       // result.len
         emit("  addi r2, r1, 12")
         emit("  stw r4, r2, r0")       // result.cap
+        emit("  addi r2, r1, 16")
+        emit("  std r0, r2, r0")       // result.backref = null (grow allocates new buffer)
 
         emit(s"$doneLabel")
+        // Pop the source backref from the stack (both paths leave it)
+        emitAddImm(7, 7, 8)
+        stackOffset += 8
         emitAddImm(1, 5, resultOffset) // r1 = address of result
 
       case TStringFromPtr(ptrExpr, lenExpr, _) =>

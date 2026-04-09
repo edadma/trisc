@@ -532,6 +532,46 @@ class SyslCodegenPointerTests extends SyslCodegenHelpers {
         |""".stripMargin) shouldBe 60
   }
 
+  // ===== TFieldAccess on pointer-to-struct =====
+
+  "read field through pointer" in {
+    compileAndRun(
+      """struct Point
+        |    x: int
+        |    y: int
+        |main() -> int
+        |    var pt = Point(10, 32)
+        |    val p: *Point = &pt
+        |    p.x + p.y
+        |""".stripMargin) shouldBe 42
+  }
+
+  "write field through pointer" in {
+    compileAndRun(
+      """struct Point
+        |    x: int
+        |    y: int
+        |main() -> int
+        |    var pt = Point(0, 0)
+        |    val p: *Point = &pt
+        |    p.x = 20
+        |    p.y = 22
+        |    pt.x + pt.y
+        |""".stripMargin) shouldBe 42
+  }
+
+  "pointer field access in function" in {
+    compileAndRun(
+      """struct Point
+        |    x: int
+        |    y: int
+        |sum_point(p: *Point) -> int = p.x + p.y
+        |main() -> int
+        |    var pt = Point(20, 22)
+        |    sum_point(&pt)
+        |""".stripMargin) shouldBe 42
+  }
+
   "pointer walk with *p++ in loop" in {
     compileAndRun(
       """main() -> int
