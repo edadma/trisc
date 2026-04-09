@@ -111,18 +111,21 @@ class DMATests extends TestHelpers {
 
   // ===== Completion =====
 
-  "ENABLE cleared on completion" in {
+  "ENABLE cleared on completion (instant transfer)" in {
     val (dma, _, ram) = mkDMA()
+    ram.writeByte(0x1000, 0xAA)
+    ram.writeByte(0x1001, 0xBB)
     dma.writeInt(ch(0, READ_ADDR), 0x1000)
     dma.writeInt(ch(0, WRITE_ADDR), 0x2000)
     dma.writeInt(ch(0, TRANS_COUNT), 2)
+    // Instant transfer completes on writeInt to CTRL_TRIG with ENABLE
     dma.writeInt(ch(0, CTRL_TRIG), SZ_BYTE | INCR_R | INCR_W | NO_CHAIN | ENABLE)
 
-    dma.apply(null)
-    (dma.readInt(ch(0, CTRL_TRIG)) & ENABLE) should not be 0 // still active
-
-    dma.apply(null) // completes
+    // Already completed — ENABLE should be cleared
     (dma.readInt(ch(0, CTRL_TRIG)) & ENABLE) shouldBe 0
+    // Data should be transferred
+    (ram.readByte(0x2000) & 0xFF) shouldBe 0xAA
+    (ram.readByte(0x2001) & 0xFF) shouldBe 0xBB
   }
 
   "does not transfer when disabled" in {
@@ -181,39 +184,32 @@ class DMATests extends TestHelpers {
 
   // ===== Channel chaining =====
 
-  "channel chain triggers next on completion" in {
+  "channel chain triggers next on completion (instant)" in {
     val (dma, _, ram) = mkDMA()
     // Source data
     for i <- 0 until 8 do ram.writeByte(0x1000 + i, (0xA0 + i).toByte)
     for i <- 0 until 8 do ram.writeByte(0x1100 + i, (0xB0 + i).toByte)
 
-    // Channel 0: copy 8 bytes from 0x1000 to 0x2000, chain to channel 1
-    dma.writeInt(ch(0, READ_ADDR), 0x1000)
-    dma.writeInt(ch(0, WRITE_ADDR), 0x2000)
-    dma.writeInt(ch(0, TRANS_COUNT), 8)
-    dma.writeInt(ch(0, CTRL_TRIG), SZ_BYTE | INCR_R | INCR_W | chainTo(1) | ENABLE)
-
-    // Channel 1: copy 8 bytes from 0x1100 to 0x2100, no chain
-    // Pre-configure but DON'T enable — chain will enable it
+    // Channel 1: pre-configure FIRST (chain target must be ready before trigger)
     dma.writeInt(ch(1, READ_ADDR), 0x1100)
     dma.writeInt(ch(1, WRITE_ADDR), 0x2100)
     dma.writeInt(ch(1, TRANS_COUNT), 8)
     dma.writeInt(ch(1, CTRL_TRIG), SZ_BYTE | INCR_R | INCR_W | NO_CHAIN) // no ENABLE
 
-    // Run channel 0 to completion
-    for _ <- 1 to 8 do dma.apply(null)
+    // Channel 0: copy 8 bytes, chain to channel 1 — both complete instantly
+    dma.writeInt(ch(0, READ_ADDR), 0x1000)
+    dma.writeInt(ch(0, WRITE_ADDR), 0x2000)
+    dma.writeInt(ch(0, TRANS_COUNT), 8)
+    dma.writeInt(ch(0, CTRL_TRIG), SZ_BYTE | INCR_R | INCR_W | chainTo(1) | ENABLE)
 
-    // Channel 1 should now be enabled by chain
-    (dma.readInt(ch(1, CTRL_TRIG)) & ENABLE) should not be 0
-
-    // Run channel 1 to completion
-    for _ <- 1 to 8 do dma.apply(null)
-
-    // Verify both copies
+    // Both channels completed instantly — verify both copies
     for i <- 0 until 8 do
       (ram.readByte(0x2000 + i) & 0xFF) shouldBe (0xA0 + i)
     for i <- 0 until 8 do
       (ram.readByte(0x2100 + i) & 0xFF) shouldBe (0xB0 + i)
+    // Both channels should be done
+    (dma.readInt(ch(0, CTRL_TRIG)) & ENABLE) shouldBe 0
+    (dma.readInt(ch(1, CTRL_TRIG)) & ENABLE) shouldBe 0
   }
 
   // ===== Multiple channels simultaneously =====
@@ -245,25 +241,20 @@ class DMATests extends TestHelpers {
 
   // ===== Abort =====
 
-  "abort stops transfer" in {
+  "abort clears enable and count" in {
     val (dma, _, ram) = mkDMA()
-    for i <- 0 until 100 do ram.writeByte(0x1000 + i, 0xFF.toByte)
-
+    // Configure but don't enable yet
     dma.writeInt(ch(0, READ_ADDR), 0x1000)
     dma.writeInt(ch(0, WRITE_ADDR), 0x2000)
     dma.writeInt(ch(0, TRANS_COUNT), 100)
-    dma.writeInt(ch(0, CTRL_TRIG), SZ_BYTE | INCR_R | INCR_W | NO_CHAIN | ENABLE)
+    dma.writeInt(ch(0, CTRL_TRIG), SZ_BYTE | INCR_R | INCR_W | NO_CHAIN) // no ENABLE
 
-    // Run 10 ticks then abort
-    for _ <- 1 to 10 do dma.apply(null)
+    // Abort before triggering
     dma.writeShort(BASE + 200, 0x01) // ABORT channel 0
 
-    // Run more ticks — should not transfer
-    for _ <- 1 to 50 do dma.apply(null)
-
-    // Only first 10 bytes should be copied
-    (ram.readByte(0x2009) & 0xFF) shouldBe 0xFF
-    ram.readByte(0x200A) shouldBe 0
+    // Count and enable should be cleared
+    dma.readInt(ch(0, TRANS_COUNT)) shouldBe 0
+    (dma.readInt(ch(0, CTRL_TRIG)) & ENABLE) shouldBe 0
   }
 
   // ===== Register readback =====
