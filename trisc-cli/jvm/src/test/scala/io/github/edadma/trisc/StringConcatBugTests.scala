@@ -818,7 +818,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
       Runtime.ramdiskAddress,
       ram,
       sectors = 64,
-      sectorSize = 512,
+      sectorSize = 4096,
       intc,
       irq = 3,
       prefill = "\n",
@@ -1176,7 +1176,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
     val ramSize = Runtime.stdoutAddress.toInt
     val ram     = new RAM(0, ramSize)
     val ramdisk = new Ramdisk(
-      Runtime.ramdiskAddress, ram, sectors = 64, sectorSize = 512,
+      Runtime.ramdiskAddress, ram, sectors = 64, sectorSize = 4096,
       intc, irq = 3, prefill = "/dev dir\n", maxInodes = 32,
     )
     val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk)
@@ -1207,7 +1207,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
       Runtime.ramdiskAddress,
       ram,
       sectors = 64,
-      sectorSize = 512,
+      sectorSize = 4096,
       intc,
       irq = 3,
       prefill = "/dev dir\n",

@@ -185,7 +185,7 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
       Runtime.ramdiskAddress,
       ram,
       sectors = sectors,
-      sectorSize = 512,
+      sectorSize = 4096,
       intc,
       irq = 3,
       prefill = prefill,

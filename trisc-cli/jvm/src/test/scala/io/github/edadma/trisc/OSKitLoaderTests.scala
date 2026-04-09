@@ -170,7 +170,7 @@ import oskit.apps.init.{init}
     val ramSize = Runtime.stdoutAddress.toInt
     val ram     = new RAM(0, ramSize)
     val ramdisk = new Ramdisk(
-      Runtime.ramdiskAddress, ram, sectors = 256, sectorSize = 512,
+      Runtime.ramdiskAddress, ram, sectors = 64, sectorSize = 4096,
       intc, irq = 3, prefill = ttytab + prefill, maxInodes = 32,
       files = files,
     )

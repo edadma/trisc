@@ -51,10 +51,10 @@ On-disk layout (block 0 = boot, block 1 = superblock):
     var sb_free_blocks  = 0
     var sb_free_inodes  = 0
 
-    // === Block buffers ===
+    // === Block buffers (4KB blocks) ===
 
-    var blkbuf: [512]byte       // general purpose (file data, superblock, dir blocks, inodes)
-    var blkbuf2: [512]byte      // secondary (bitmaps, indirect blocks)
+    var blkbuf: [4096]byte      // general purpose (file data, superblock, dir blocks, inodes)
+    var blkbuf2: [4096]byte     // secondary (bitmaps, indirect blocks)
 
     // === Big-endian read helpers ===
 

@@ -137,7 +137,7 @@ class OSKitDisplayTests extends OSKitTestHelpers {
     )
     // Include ramdisk like the GUI does
     val ram = new RAM(0, 0x100000)
-    val ramdisk = new Ramdisk(Runtime.ramdiskAddress, ram, sectors = 2048, sectorSize = 512, intc, irq = 3,
+    val ramdisk = new Ramdisk(Runtime.ramdiskAddress, ram, sectors = 256, sectorSize = 4096, intc, irq = 3,
       prefill = "/dev/tty0 char 0 0\n/dev/disk0 block 1 0\n/dev/null char 0 1\n")
     val blitter = new Blitter(Runtime.blitterAddress, memProxy, fb,
       () => displayCtrl.currentFBWidth, () => displayCtrl.currentFBHeight)

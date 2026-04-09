@@ -95,7 +95,7 @@ import oskit.services.sleep
       Runtime.ramdiskAddress,
       ram,
       sectors = 64,
-      sectorSize = 512,
+      sectorSize = 4096,
       intc,
       irq = 3,
       prefill = prefill,

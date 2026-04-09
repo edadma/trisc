@@ -2,27 +2,29 @@ package io.github.edadma.trisc
 
 /** Edge-case tests for TFS sysl-side filesystem operations.
   *
-  * Block size = 512 bytes. NUM_DIRECT = 6, so files > 3072 bytes
+  * Block size = 4096 bytes. NUM_DIRECT = 6, so files > 24576 bytes
   * use indirect blocks. These tests exercise the boundary between
   * direct and indirect block pointers, cross-block reads/writes,
   * and large file operations.
   */
 class TFSEdgeCaseTests extends TFSTestHelpers {
 
+  private val BS = 4096 // block size
+
   /** Prefill a file at /big with `size` bytes of repeated ASCII chars.
     * Each block gets a different letter so we can verify which block was read.
-    * Pattern: bytes 0..511 = 'A', 512..1023 = 'B', 1024..1535 = 'C', etc.
+    * Pattern: bytes 0..4095 = 'A', 4096..8191 = 'B', etc.
     */
   private def patternPrefill(size: Int): String =
     val sb = new StringBuilder
     for i <- 0 until size do
-      sb += ('A' + i / 512).toChar
+      sb += ('A' + i / BS).toChar
     s"""/big file "$sb"\n"""
 
-  // ===== Read: direct block boundary (6 blocks = 3072 bytes) =====
+  // ===== Read: direct block boundary (6 blocks = 24576 bytes) =====
 
   "tfs_read file filling all 6 direct blocks" in {
-    val prefill = patternPrefill(3072)
+    val prefill = patternPrefill(6 * BS)
     val (cpu, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
@@ -33,19 +35,19 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
          |    val bp: *byte = &buf
          |    tfs_read(ino, bp, 0, 1)
          |    putchar(bp[0])
-         |    tfs_read(ino, bp, 512, 1)
+         |    tfs_read(ino, bp, $BS, 1)
          |    putchar(bp[0])
-         |    tfs_read(ino, bp, 1024, 1)
+         |    tfs_read(ino, bp, ${2 * BS}, 1)
          |    putchar(bp[0])
-         |    tfs_read(ino, bp, 1536, 1)
+         |    tfs_read(ino, bp, ${3 * BS}, 1)
          |    putchar(bp[0])
-         |    tfs_read(ino, bp, 2048, 1)
+         |    tfs_read(ino, bp, ${4 * BS}, 1)
          |    putchar(bp[0])
-         |    tfs_read(ino, bp, 2560, 1)
+         |    tfs_read(ino, bp, ${5 * BS}, 1)
          |    putchar(bp[0])
          |    var stat: [7]int
          |    tfs_stat(ino, &stat)
-         |    if stat[4] == 3072
+         |    if stat[4] == ${6 * BS}
          |        putchar(33)
          |    0
          |""".stripMargin,
@@ -56,10 +58,10 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
     cpu.state shouldBe State.Halt
   }
 
-  // ===== Read: first indirect block (7 blocks = 3584 bytes) =====
+  // ===== Read: first indirect block (7 blocks) =====
 
   "tfs_read file with 7 blocks (first indirect)" in {
-    val prefill = patternPrefill(3584)
+    val prefill = patternPrefill(7 * BS)
     val (cpu, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
@@ -70,13 +72,13 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
          |    val bp: *byte = &buf
          |    tfs_read(ino, bp, 0, 1)
          |    putchar(bp[0])
-         |    tfs_read(ino, bp, 2560, 1)
+         |    tfs_read(ino, bp, ${5 * BS}, 1)
          |    putchar(bp[0])
-         |    tfs_read(ino, bp, 3072, 1)
+         |    tfs_read(ino, bp, ${6 * BS}, 1)
          |    putchar(bp[0])
          |    var stat: [7]int
          |    tfs_stat(ino, &stat)
-         |    if stat[4] == 3584
+         |    if stat[4] == ${7 * BS}
          |        putchar(33)
          |    0
          |""".stripMargin,
@@ -90,7 +92,7 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
   // ===== Read: multiple indirect blocks =====
 
   "tfs_read file with 10 blocks (4 indirect)" in {
-    val prefill = patternPrefill(5120)
+    val prefill = patternPrefill(10 * BS)
     val (cpu, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
@@ -101,15 +103,15 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
          |    val bp: *byte = &buf
          |    tfs_read(ino, bp, 0, 1)
          |    putchar(bp[0])
-         |    tfs_read(ino, bp, 2560, 1)
+         |    tfs_read(ino, bp, ${5 * BS}, 1)
          |    putchar(bp[0])
-         |    tfs_read(ino, bp, 3072, 1)
+         |    tfs_read(ino, bp, ${6 * BS}, 1)
          |    putchar(bp[0])
-         |    tfs_read(ino, bp, 4608, 1)
+         |    tfs_read(ino, bp, ${9 * BS}, 1)
          |    putchar(bp[0])
          |    var stat: [7]int
          |    tfs_stat(ino, &stat)
-         |    if stat[4] == 5120
+         |    if stat[4] == ${10 * BS}
          |        putchar(33)
          |    0
          |""".stripMargin,
@@ -123,7 +125,7 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
   // ===== Read: crossing block boundary =====
 
   "tfs_read crossing direct block boundary" in {
-    val prefill = patternPrefill(1024)
+    val prefill = patternPrefill(2 * BS)
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
@@ -131,7 +133,7 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
          |${syslBytes("p", "/big")}
          |    val ino = tfs_lookup(&p, p_len)
          |    var buf: [8]byte
-         |    val n = tfs_read(ino, &buf, 510, 4)
+         |    val n = tfs_read(ino, &buf, ${BS - 2}, 4)
          |    val bp: *byte = &buf
          |    putchar(bp[0])
          |    putchar(bp[1])
@@ -148,7 +150,7 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
   }
 
   "tfs_read crossing direct-to-indirect boundary" in {
-    val prefill = patternPrefill(3584)
+    val prefill = patternPrefill(7 * BS)
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
@@ -156,7 +158,7 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
          |${syslBytes("p", "/big")}
          |    val ino = tfs_lookup(&p, p_len)
          |    var buf: [8]byte
-         |    val n = tfs_read(ino, &buf, 3070, 4)
+         |    val n = tfs_read(ino, &buf, ${6 * BS - 2}, 4)
          |    val bp: *byte = &buf
          |    putchar(bp[0])
          |    putchar(bp[1])
@@ -173,7 +175,7 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
   }
 
   "tfs_read crossing indirect block boundaries" in {
-    val prefill = patternPrefill(4096)
+    val prefill = patternPrefill(8 * BS)
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
@@ -181,7 +183,7 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
          |${syslBytes("p", "/big")}
          |    val ino = tfs_lookup(&p, p_len)
          |    var buf: [8]byte
-         |    val n = tfs_read(ino, &buf, 3582, 4)
+         |    val n = tfs_read(ino, &buf, ${7 * BS - 2}, 4)
          |    val bp: *byte = &buf
          |    putchar(bp[0])
          |    putchar(bp[1])
@@ -200,7 +202,7 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
   // ===== Read: exact block boundary offset =====
 
   "tfs_read starting at exact block boundary" in {
-    val prefill = patternPrefill(1024)
+    val prefill = patternPrefill(2 * BS)
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
@@ -208,7 +210,7 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
          |${syslBytes("p", "/big")}
          |    val ino = tfs_lookup(&p, p_len)
          |    var buf: [4]byte
-         |    val n = tfs_read(ino, &buf, 512, 2)
+         |    val n = tfs_read(ino, &buf, $BS, 2)
          |    val bp: *byte = &buf
          |    putchar(bp[0])
          |    putchar(bp[1])
@@ -223,7 +225,7 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
   }
 
   "tfs_read starting at indirect block boundary" in {
-    val prefill = patternPrefill(3584)
+    val prefill = patternPrefill(7 * BS)
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
@@ -231,7 +233,7 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
          |${syslBytes("p", "/big")}
          |    val ino = tfs_lookup(&p, p_len)
          |    var buf: [4]byte
-         |    val n = tfs_read(ino, &buf, 3072, 2)
+         |    val n = tfs_read(ino, &buf, ${6 * BS}, 2)
          |    val bp: *byte = &buf
          |    putchar(bp[0])
          |    putchar(bp[1])
@@ -248,18 +250,18 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
   // ===== Read: full content verification =====
 
   "tfs_read full 7-block file in loop" in {
-    val prefill = patternPrefill(3584)
+    val prefill = patternPrefill(7 * BS)
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/big")}
          |    val ino = tfs_lookup(&p, p_len)
-         |    var buf: [512]byte
+         |    var buf: [4096]byte
          |    val bp: *byte = &buf
          |    var offset = 0
-         |    while offset < 3584
-         |        val n = tfs_read(ino, bp, offset, 512)
+         |    while offset < ${7 * BS}
+         |        val n = tfs_read(ino, bp, offset, $BS)
          |        if n <= 0
          |            putchar(63)
          |            return 1
@@ -277,7 +279,9 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
   // ===== Read: partial last block =====
 
   "tfs_read partial last block in indirect region" in {
-    val prefill = patternPrefill(3200)
+    // File is 6 full blocks + 128 bytes in block 7
+    val fileSize = 6 * BS + 128
+    val prefill = patternPrefill(fileSize)
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
@@ -286,11 +290,11 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
          |    val ino = tfs_lookup(&p, p_len)
          |    var stat: [7]int
          |    tfs_stat(ino, &stat)
-         |    if stat[4] == 3200
+         |    if stat[4] == $fileSize
          |        putchar(83)
-         |    var buf: [512]byte
+         |    var buf: [4096]byte
          |    val bp: *byte = &buf
-         |    val n = tfs_read(ino, bp, 3072, 512)
+         |    val n = tfs_read(ino, bp, ${6 * BS}, $BS)
          |    if n == 128
          |        putchar(78)
          |    putchar(bp[0])
@@ -305,7 +309,7 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
   // ===== Read: clamp and EOF in indirect region =====
 
   "tfs_read past EOF in indirect region returns 0" in {
-    val prefill = patternPrefill(3584)
+    val prefill = patternPrefill(7 * BS)
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
@@ -313,7 +317,7 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
          |${syslBytes("p", "/big")}
          |    val ino = tfs_lookup(&p, p_len)
          |    var buf: [4]byte
-         |    val n = tfs_read(ino, &buf, 4000, 10)
+         |    val n = tfs_read(ino, &buf, ${8 * BS}, 10)
          |    if n == 0
          |        putchar(89)
          |    else
@@ -327,16 +331,16 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
   }
 
   "tfs_read clamps at EOF in indirect region" in {
-    val prefill = patternPrefill(3584)
+    val prefill = patternPrefill(7 * BS)
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/big")}
          |    val ino = tfs_lookup(&p, p_len)
-         |    var buf: [1024]byte
-         |    val n = tfs_read(ino, &buf, 3072, 1024)
-         |    if n == 512
+         |    var buf: [4096]byte
+         |    val n = tfs_read(ino, &buf, ${6 * BS}, $BS)
+         |    if n == $BS
          |        putchar(89)
          |    else
          |        putchar(78)
@@ -357,32 +361,32 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
          |    tfs_init()
          |${syslBytes("name", "f")}
          |    val ino = tfs_create(1, &name, name_len, 1, 0x1A4)
-         |    var data: [512]byte
+         |    var data: [4096]byte
          |    val dp: *byte = &data
          |    var rbuf: [4]byte
          |    val rp: *byte = &rbuf
          |    var offset = 0
          |    var ch = 65
-         |    while offset < 3584
+         |    while offset < ${7 * BS}
          |        var j = 0
-         |        while j < 512
+         |        while j < $BS
          |            dp[j] = byte(ch)
          |            j += 1
-         |        var count = 512
-         |        if offset + count > 3584
-         |            count = 3584 - offset
+         |        var count = $BS
+         |        if offset + count > ${7 * BS}
+         |            count = ${7 * BS} - offset
          |        tfs_write(ino, dp, offset, count)
          |        offset += count
          |        ch += 1
          |    var stat: [7]int
          |    tfs_stat(ino, &stat)
-         |    if stat[4] == 3584
+         |    if stat[4] == ${7 * BS}
          |        putchar(83)
          |    tfs_read(ino, rp, 0, 1)
          |    putchar(rp[0])
-         |    tfs_read(ino, rp, 2560, 1)
+         |    tfs_read(ino, rp, ${5 * BS}, 1)
          |    putchar(rp[0])
-         |    tfs_read(ino, rp, 3072, 1)
+         |    tfs_read(ino, rp, ${6 * BS}, 1)
          |    putchar(rp[0])
          |    0
          |""".stripMargin,
@@ -400,26 +404,26 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
          |    tfs_init()
          |${syslBytes("name", "f")}
          |    val ino = tfs_create(1, &name, name_len, 1, 0x1A4)
-         |    var data: [512]byte
+         |    var data: [4096]byte
          |    val dp: *byte = &data
          |    var offset = 0
-         |    while offset < 3584
+         |    while offset < ${7 * BS}
          |        var j = 0
-         |        while j < 512
+         |        while j < $BS
          |            dp[j] = 65
          |            j += 1
-         |        var count = 512
-         |        if offset + count > 3584
-         |            count = 3584 - offset
+         |        var count = $BS
+         |        if offset + count > ${7 * BS}
+         |            count = ${7 * BS} - offset
          |        tfs_write(ino, dp, offset, count)
          |        offset += count
          |    dp[0] = 90
-         |    tfs_write(ino, dp, 3100, 1)
+         |    tfs_write(ino, dp, ${6 * BS + 100}, 1)
          |    var rbuf: [4]byte
          |    val rp: *byte = &rbuf
-         |    tfs_read(ino, rp, 3100, 1)
+         |    tfs_read(ino, rp, ${6 * BS + 100}, 1)
          |    putchar(rp[0])
-         |    tfs_read(ino, rp, 3099, 1)
+         |    tfs_read(ino, rp, ${6 * BS + 99}, 1)
          |    putchar(rp[0])
          |    0
          |""".stripMargin,
@@ -439,30 +443,30 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
          |    tfs_init()
          |${syslBytes("name", "f")}
          |    val ino = tfs_create(1, &name, name_len, 1, 0x1A4)
-         |    var data: [512]byte
+         |    var data: [4096]byte
          |    val dp: *byte = &data
          |    var j = 0
-         |    while j < 512
+         |    while j < $BS
          |        dp[j] = 65
          |        j += 1
          |    var offset = 0
-         |    while offset < 3072
-         |        tfs_write(ino, dp, offset, 512)
-         |        offset += 512
+         |    while offset < ${6 * BS}
+         |        tfs_write(ino, dp, offset, $BS)
+         |        offset += $BS
          |    j = 0
-         |    while j < 512
+         |    while j < $BS
          |        dp[j] = 90
          |        j += 1
-         |    tfs_write(ino, dp, 3072, 512)
+         |    tfs_write(ino, dp, ${6 * BS}, $BS)
          |    var rbuf: [4]byte
          |    val rp: *byte = &rbuf
-         |    tfs_read(ino, rp, 3071, 1)
+         |    tfs_read(ino, rp, ${6 * BS - 1}, 1)
          |    putchar(rp[0])
-         |    tfs_read(ino, rp, 3072, 1)
+         |    tfs_read(ino, rp, ${6 * BS}, 1)
          |    putchar(rp[0])
          |    var stat: [7]int
          |    tfs_stat(ino, &stat)
-         |    if stat[4] == 3584
+         |    if stat[4] == ${7 * BS}
          |        putchar(33)
          |    0
          |""".stripMargin,
@@ -476,25 +480,25 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
   // ===== Truncate with indirect blocks =====
 
   "tfs_truncate file with indirect blocks to direct-only size" in {
-    val prefill = patternPrefill(3584)
+    val prefill = patternPrefill(7 * BS)
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/big")}
          |    val ino = tfs_lookup(&p, p_len)
-         |    tfs_truncate(ino, 1024)
+         |    tfs_truncate(ino, ${2 * BS})
          |    var stat: [7]int
          |    tfs_stat(ino, &stat)
-         |    if stat[4] == 1024
+         |    if stat[4] == ${2 * BS}
          |        putchar(83)
          |    var buf: [4]byte
          |    val bp: *byte = &buf
          |    tfs_read(ino, bp, 0, 1)
          |    putchar(bp[0])
-         |    tfs_read(ino, bp, 512, 1)
+         |    tfs_read(ino, bp, $BS, 1)
          |    putchar(bp[0])
-         |    val n = tfs_read(ino, bp, 2000, 1)
+         |    val n = tfs_read(ino, bp, ${4 * BS}, 1)
          |    if n == 0
          |        putchar(33)
          |    0
@@ -506,7 +510,7 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
   }
 
   "tfs_truncate to zero on file with indirect blocks" in {
-    val prefill = patternPrefill(3584)
+    val prefill = patternPrefill(7 * BS)
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
@@ -533,7 +537,7 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
   // ===== Unlink with indirect blocks =====
 
   "tfs_unlink file with indirect blocks frees all blocks" in {
-    val prefill = patternPrefill(3584)
+    val prefill = patternPrefill(7 * BS)
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
@@ -613,8 +617,8 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
     output shouldBe "NZ"
   }
 
-  "tfs_read file of exactly 512 bytes (1 block)" in {
-    val content = "X" * 512
+  "tfs_read file of exactly one block" in {
+    val content = "X" * BS
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
@@ -623,15 +627,15 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
          |    val ino = tfs_lookup(&p, p_len)
          |    var stat: [7]int
          |    tfs_stat(ino, &stat)
-         |    if stat[4] == 512
+         |    if stat[4] == $BS
          |        putchar(83)
-         |    var buf: [512]byte
+         |    var buf: [4096]byte
          |    val bp: *byte = &buf
-         |    val n = tfs_read(ino, bp, 0, 512)
-         |    if n == 512
+         |    val n = tfs_read(ino, bp, 0, $BS)
+         |    if n == $BS
          |        putchar(78)
          |    putchar(bp[0])
-         |    putchar(bp[511])
+         |    putchar(bp[${BS - 1}])
          |    0
          |""".stripMargin,
       prefill = s"""/etc/x file "$content"\n""",
@@ -640,8 +644,8 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
     output shouldBe "SNXX"
   }
 
-  "tfs_read file of exactly 513 bytes (2 blocks)" in {
-    val content = "A" * 512 + "B"
+  "tfs_read file spanning two blocks" in {
+    val content = "A" * BS + "B"
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
@@ -650,11 +654,11 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
          |    val ino = tfs_lookup(&p, p_len)
          |    var stat: [7]int
          |    tfs_stat(ino, &stat)
-         |    if stat[4] == 513
+         |    if stat[4] == ${BS + 1}
          |        putchar(83)
          |    var buf: [4]byte
          |    val bp: *byte = &buf
-         |    tfs_read(ino, bp, 511, 2)
+         |    tfs_read(ino, bp, ${BS - 1}, 2)
          |    putchar(bp[0])
          |    putchar(bp[1])
          |    0
@@ -665,8 +669,8 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
     output shouldBe "SAB"
   }
 
-  "tfs_read file of exactly 3073 bytes (first byte in indirect)" in {
-    val content = "A" * 3072 + "Z"
+  "tfs_read file with first byte in indirect" in {
+    val content = "A" * (6 * BS) + "Z"
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
@@ -675,11 +679,11 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
          |    val ino = tfs_lookup(&p, p_len)
          |    var stat: [7]int
          |    tfs_stat(ino, &stat)
-         |    if stat[4] == 3073
+         |    if stat[4] == ${6 * BS + 1}
          |        putchar(83)
          |    var buf: [4]byte
          |    val bp: *byte = &buf
-         |    tfs_read(ino, bp, 3072, 1)
+         |    tfs_read(ino, bp, ${6 * BS}, 1)
          |    putchar(bp[0])
          |    0
          |""".stripMargin,
@@ -692,7 +696,7 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
   // ===== Multiple sequential reads across indirect boundary =====
 
   "tfs_read sequential reads across indirect boundary" in {
-    val prefill = patternPrefill(3584)
+    val prefill = patternPrefill(7 * BS)
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
@@ -701,13 +705,13 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
          |    val ino = tfs_lookup(&p, p_len)
          |    var buf: [4]byte
          |    val bp: *byte = &buf
-         |    tfs_read(ino, bp, 3000, 1)
+         |    tfs_read(ino, bp, ${6 * BS - 100}, 1)
          |    putchar(bp[0])
-         |    tfs_read(ino, bp, 3050, 1)
+         |    tfs_read(ino, bp, ${6 * BS - 50}, 1)
          |    putchar(bp[0])
-         |    tfs_read(ino, bp, 3100, 1)
+         |    tfs_read(ino, bp, ${6 * BS + 100}, 1)
          |    putchar(bp[0])
-         |    tfs_read(ino, bp, 3500, 1)
+         |    tfs_read(ino, bp, ${6 * BS + 200}, 1)
          |    putchar(bp[0])
          |    0
          |""".stripMargin,
@@ -768,18 +772,18 @@ class TFSEdgeCaseTests extends TFSTestHelpers {
   // ===== get_file_block regression: the missing-return fix =====
 
   "get_file_block returns correct block for indirect index (regression)" in {
-    val prefill = patternPrefill(3584)
+    val prefill = patternPrefill(7 * BS)
     val (cpu, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
          |    tfs_init()
          |${syslBytes("p", "/big")}
          |    val ino = tfs_lookup(&p, p_len)
-         |    var buf: [512]byte
+         |    var buf: [4096]byte
          |    val bp: *byte = &buf
          |    var blk = 0
          |    while blk < 7
-         |        val n = tfs_read(ino, bp, blk * 512, 1)
+         |        val n = tfs_read(ino, bp, blk * $BS, 1)
          |        if n != 1
          |            putchar(63)
          |            return 1

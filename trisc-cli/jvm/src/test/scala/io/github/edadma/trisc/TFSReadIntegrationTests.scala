@@ -17,7 +17,7 @@ class TFSReadIntegrationTests extends TFSTestHelpers {
         |
         |main() -> int
         |    tfs_init()
-        |    if sb_block_size == 512
+        |    if sb_block_size == 4096
         |        putchar(89)
         |    else
         |        putchar(78)
