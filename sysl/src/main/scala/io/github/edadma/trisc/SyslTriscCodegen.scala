@@ -202,7 +202,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   private def leaveScope(): Unit =
     val (savedLocals, savedOffset) = savedScopes.pop()
-    // Decrement refcounts for ref-typed locals leaving scope
+    // Decrement refcounts for ref-typed and string locals leaving scope
     // Skip params (positive offsets) — they are borrowed, not owned
     for (name, local) <- locals if !savedLocals.contains(name) && local.offset < 0 do
       local.typ match
@@ -212,6 +212,19 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitAddImm(1, 5, local.offset)
           emit("  ldd r1, r1, r0")
           emitRefDecr(1, hoff, deinitFor(rt))
+          emit("  popd r1")
+        case SyslType.StringType if needsAllocExtern =>
+          emit("  pshd r1")
+          emitAddImm(1, 5, local.offset)
+          emit("  ldd r1, r1, r0")       // r1 = ptr field
+          emitRefDecr(1, 8)
+          emit("  popd r1")
+        case _: SyslType.SliceType =>
+          // Decrement backref if non-null
+          emit("  pshd r1")
+          emitAddImm(1, 5, local.offset + 16)
+          emit("  ldd r1, r1, r0")       // r1 = backref
+          emitRefDecr(1, 0)
           emit("  popd r1")
         case _ =>
     locals.clear()
