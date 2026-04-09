@@ -38,7 +38,7 @@ the operation after all parameters are set.
         status:   byte    // +14: bit0=ready, bit1=error
         command:  byte    // +15: 1=read, 2=write (triggers op)
 
-    val RD_BASE = 0x100140
+    val RD_BASE = 0x800140
     val RD_CMD_READ  = 1
     val RD_CMD_WRITE = 2
 

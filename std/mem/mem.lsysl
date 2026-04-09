@@ -30,8 +30,6 @@ Design rules:
 
     module std.mem
 
-    import std.debug.{assert}
-
 
 copy
 ----
@@ -149,6 +147,78 @@ indexing operator.
             if s[i] == b then return i
 
         -1
+
+
+Raw pointer operations
+---------------------
+
+These operate on raw `*byte` pointers rather than slices. They
+are used by OS code (TFS, IPC, loaders) that works with raw
+memory addresses.
+
+Both `memcpy` and `memset` use the RP2040-style DMA controller
+for hardware-accelerated transfers. The DMA completes the entire
+transfer in a single cycle from the CPU's perspective. A static
+buffer is used as the fill source for `memset`.
+
+DMA channel 0 register map (at DMA_BASE = 0x8001C0):
+- +0  READ_ADDR  (4B) — source address
+- +4  WRITE_ADDR (4B) — destination address
+- +8  TRANS_COUNT (4B) — number of transfers
+- +12 CTRL_TRIG  (4B) — config + trigger (write ENABLE=1 to start)
+
+    val DMA_BASE: i64 = 0x8001C0
+
+Helper: write a 32-bit big-endian value to a memory-mapped
+register via 4 byte writes.
+
+    dma_write_reg(base: *byte, off: int, v: int)
+        base[off]     = byte((v >> 24) & 0xFF)
+        base[off + 1] = byte((v >> 16) & 0xFF)
+        base[off + 2] = byte((v >> 8) & 0xFF)
+        base[off + 3] = byte(v & 0xFF)
+
+### memcpy
+
+`memcpy(dst, src, n)` copies `n` bytes from `src` to `dst`
+using DMA channel 0. Does not handle overlapping regions.
+
+    memcpy(dst: *byte, src: *byte, n: int)
+        if n == 0
+            return
+        val regs = *byte(DMA_BASE)
+        dma_write_reg(regs, 0, int(i64(src)))   // READ_ADDR
+        dma_write_reg(regs, 4, int(i64(dst)))   // WRITE_ADDR
+        dma_write_reg(regs, 8, n)               // TRANS_COUNT
+        // CTRL_TRIG: write config with ENABLE=0, then set ENABLE to trigger.
+        // Value 0x1FC: DATA_SIZE=0(byte), INCR_READ=1, INCR_WRITE=1,
+        // CHAIN_TO=0xF(none), IRQ_QUIET=1, ENABLE=0
+        dma_write_reg(regs, 12, 0x1FC)
+        // Now set ENABLE (bit 9). In big-endian register layout, bit 9 is
+        // in byte offset 14 (bits 15:8). Value changes from 0x01 to 0x03.
+        // This 0→1 transition on ENABLE triggers the instant transfer.
+        regs[14] = byte(0x03)
+
+### memset
+
+`memset(dst, v, n)` fills `n` bytes at `dst` with `v`
+using DMA channel 0 with INCR_READ disabled (reads same byte).
+
+    var _memset_val: byte = 0
+
+    memset(dst: *byte, v: byte, n: int)
+        if n == 0
+            return
+        _memset_val = v
+        val regs = *byte(DMA_BASE)
+        dma_write_reg(regs, 0, int(i64(&_memset_val)))  // READ_ADDR (static byte)
+        dma_write_reg(regs, 4, int(i64(dst)))           // WRITE_ADDR
+        dma_write_reg(regs, 8, n)                       // TRANS_COUNT
+        // CTRL_TRIG: DATA_SIZE=0(byte), INCR_READ=0, INCR_WRITE=1,
+        // CHAIN_TO=0xF(none), IRQ_QUIET=1, ENABLE=0
+        dma_write_reg(regs, 12, 0x1F8)
+        // Set ENABLE to trigger
+        regs[14] = byte(0x03)
 
 
 Design notes

@@ -16,9 +16,16 @@ class OSKitNshTests extends OSKitTestHelpers {
   private lazy val nshSysl: String    = readLsysl("oskit/apps/nsh.lsysl")
   private lazy val initSysl: String   = readLsysl("oskit/apps/init.lsysl")
   private lazy val loginSysl: String  = readLsysl("oskit/apps/login.lsysl")
-  private lazy val debugSysl: String   = readLsysl("std/debug/debug.lsysl")
+  private lazy val debugSysl: String    = readLsysl("std/debug/debug.lsysl")
   private lazy val memSysl: String     = readLsysl("std/mem/mem.lsysl")
   private lazy val binarySysl: String  = readLsysl("std/encoding/binary/binary.lsysl")
+  private lazy val stringsSysl: String = readLsysl("std/strings/strings.lsysl")
+  private lazy val builderSysl: String = readLsysl("std/builder/builder.lsysl")
+  private lazy val strconvSysl: String = readLsysl("std/strconv/strconv.lsysl")
+  private lazy val resultSysl: String  = readLsysl("std/result/result.lsysl")
+  private lazy val errorsSysl: String  = readLsysl("std/errors/errors.lsysl")
+  private lazy val utf8Sysl: String    = readLsysl("std/utf8/utf8.lsysl")
+  private lazy val loaderSysl: String  = readLsysl("oskit/loader/loader.lsysl")
   private lazy val sha256Sysl: String  = readLsysl("std/crypto/sha256/sha256.lsysl")
   private lazy val hmacSysl: String   = readLsysl("std/crypto/hmac/hmac.lsysl")
   private lazy val pbkdf2Sysl: String = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
@@ -48,6 +55,13 @@ class OSKitNshTests extends OSKitTestHelpers {
       "std/crypto/sha256/sha256"   -> sha256Sysl,
       "std/crypto/hmac/hmac"       -> hmacSysl,
       "std/crypto/pbkdf2/pbkdf2"   -> pbkdf2Sysl,
+      "std/strings/strings"         -> stringsSysl,
+      "std/builder/builder"         -> builderSysl,
+      "std/strconv/strconv"         -> strconvSysl,
+      "std/result/result"           -> resultSysl,
+      "std/errors/errors"           -> errorsSysl,
+      "std/utf8/utf8"               -> utf8Sysl,
+      "oskit/loader/loader"         -> loaderSysl,
       "oskit/apps/nsh/nsh"           -> nshSysl,
       "oskit/apps/init/init"        -> initSysl,
       "oskit/apps/login/login"      -> loginSysl,
@@ -58,7 +72,7 @@ import oskit.apps.init.{init}
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(init, 0xC0000, 0xC0000, "init")
+          |    create_thread(init, 0x640000, 0x640000, "init")
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin,
@@ -101,14 +115,16 @@ import oskit.apps.init.{init}
       Runtime.ramdiskAddress,
       ram,
       sectors = 64,
-      sectorSize = 512,
+      sectorSize = 4096,
       intc,
       irq = 3,
       prefill = nshTtytab + prefill,
       maxInodes = 32,
     )
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)
-    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha, dma)
+    dma.mem = mem
     linked.load(mem)
 
     val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
@@ -267,14 +283,16 @@ import oskit.apps.init.{init}
       Runtime.ramdiskAddress,
       ram,
       sectors = 64,
-      sectorSize = 512,
+      sectorSize = 4096,
       intc,
       irq = 3,
       prefill = prefill,
       maxInodes = 32,
     )
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)
-    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha, dma)
+    dma.mem = mem
     linked.load(mem)
 
     val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)

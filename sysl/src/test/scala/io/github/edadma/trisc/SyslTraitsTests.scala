@@ -236,4 +236,78 @@ class SyslTraitsTests extends SyslTestHelpers {
         |main() -> int = Math.plus2(10)
         |""".stripMargin) shouldBe 12
   }
+
+  // ===== Cross-unit trait registration =====
+
+  "import trait and use existing impl" in {
+    evalWithLibs(
+      Map(
+        "mylib/cmp/cmp" ->
+          """module mylib.cmp
+            |
+            |trait Eq[T]
+            |    eq(a: T, b: T) -> bool
+            |
+            |impl Eq[int]
+            |    eq(a: int, b: int) -> bool = a == b
+            |""".stripMargin,
+      ),
+      """import mylib.cmp.*
+        |main() -> int
+        |    if Eq.eq(42, 42) then 1 else 0
+        |""".stripMargin
+    ) shouldBe 1
+  }
+
+  "import trait and write new impl" in {
+    evalWithLibs(
+      Map(
+        "mylib/cmp/cmp" ->
+          """module mylib.cmp
+            |
+            |trait Eq[T]
+            |    eq(a: T, b: T) -> bool
+            |""".stripMargin,
+      ),
+      """import mylib.cmp.*
+        |
+        |struct Point
+        |    x: int
+        |    y: int
+        |
+        |impl Eq[Point]
+        |    eq(a: Point, b: Point) -> bool = a.x == b.x && a.y == b.y
+        |
+        |main() -> int
+        |    var p1 = Point(1, 2)
+        |    var p2 = Point(1, 2)
+        |    if Eq.eq(p1, p2) then 1 else 0
+        |""".stripMargin
+    ) shouldBe 1
+  }
+
+  "import trait with defaults across modules" in {
+    evalWithLibs(
+      Map(
+        "mylib/ord/ord" ->
+          """module mylib.ord
+            |
+            |trait Ord[T]
+            |    cmp(a: T, b: T) -> int
+            |    lt(a: T, b: T) -> bool = cmp(a, b) < 0
+            |    gt(a: T, b: T) -> bool = cmp(a, b) > 0
+            |
+            |impl Ord[int]
+            |    cmp(a: int, b: int) -> int
+            |        if a < b then -1
+            |        elif a > b then 1
+            |        else 0
+            |""".stripMargin,
+      ),
+      """import mylib.ord.*
+        |main() -> int
+        |    if Ord.lt(3, 7) && Ord.gt(7, 3) then 42 else 0
+        |""".stripMargin
+    ) shouldBe 42
+  }
 }

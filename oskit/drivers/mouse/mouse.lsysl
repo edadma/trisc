@@ -15,7 +15,7 @@ Device registers (at 0x100090):
 
     import oskit.kernel.{register_irq, notify_send}
 
-    val MOUSE_BASE = 0x100090
+    val MOUSE_BASE = 0x800090
     val MOUSE_IRQ = 2
 
 Current mouse state, updated by the ISR. The display server

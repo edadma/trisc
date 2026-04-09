@@ -1,0 +1,439 @@
+std.math.bits — Bit manipulation
+=================================
+
+Bit counting, scanning, and rotation functions for
+integer values. Inspired by Go's `math/bits` package.
+
+Dependencies: none.
+
+
+    module std.math.bits
+
+    import std.debug.{assert}
+
+
+Counting
+--------
+
+### popcount
+
+`popcount(x)` returns the number of set bits in `x`.
+Uses the parallel bit-count algorithm.
+
+    popcount(x: u64) -> int
+        var v = x
+        v = (v & 0x5555555555555555u64) + ((v >> 1u64) & 0x5555555555555555u64)
+        v = (v & 0x3333333333333333u64) + ((v >> 2u64) & 0x3333333333333333u64)
+        v = (v & 0x0f0f0f0f0f0f0f0fu64) + ((v >> 4u64) & 0x0f0f0f0f0f0f0f0fu64)
+        v = (v & 0x00ff00ff00ff00ffu64) + ((v >> 8u64) & 0x00ff00ff00ff00ffu64)
+        v = (v & 0x0000ffff0000ffffu64) + ((v >> 16u64) & 0x0000ffff0000ffffu64)
+        v = (v & 0x00000000ffffffffu64) + ((v >> 32u64) & 0x00000000ffffffffu64)
+        return int(v)
+
+### popcount32
+
+    popcount32(x: u32) -> int
+        var v = x
+        v = (v & 0x55555555u32) + ((v >> 1u32) & 0x55555555u32)
+        v = (v & 0x33333333u32) + ((v >> 2u32) & 0x33333333u32)
+        v = (v & 0x0f0f0f0fu32) + ((v >> 4u32) & 0x0f0f0f0fu32)
+        v = (v & 0x00ff00ffu32) + ((v >> 8u32) & 0x00ff00ffu32)
+        v = (v & 0x0000ffffu32) + ((v >> 16u32) & 0x0000ffffu32)
+        return int(v)
+
+
+Leading and trailing zeros
+--------------------------
+
+### clz
+
+`clz(x)` returns the count of leading zero bits in a
+64-bit value. Returns 64 if `x` is 0.
+
+    clz(x: u64) -> int
+        if x == 0u64 then return 64
+
+        var n = 0
+        var v = x
+
+        if (v & 0xffffffff00000000u64) == 0u64
+            n += 32
+            v = v << 32u64
+        if (v & 0xffff000000000000u64) == 0u64
+            n += 16
+            v = v << 16u64
+        if (v & 0xff00000000000000u64) == 0u64
+            n += 8
+            v = v << 8u64
+        if (v & 0xf000000000000000u64) == 0u64
+            n += 4
+            v = v << 4u64
+        if (v & 0xc000000000000000u64) == 0u64
+            n += 2
+            v = v << 2u64
+        if (v & 0x8000000000000000u64) == 0u64
+            n += 1
+
+        return n
+
+### clz32
+
+    clz32(x: u32) -> int
+        if x == 0u32 then return 32
+
+        var n = 0
+        var v = x
+
+        if (v & 0xffff0000u32) == 0u32
+            n += 16
+            v = v << 16u32
+        if (v & 0xff000000u32) == 0u32
+            n += 8
+            v = v << 8u32
+        if (v & 0xf0000000u32) == 0u32
+            n += 4
+            v = v << 4u32
+        if (v & 0xc0000000u32) == 0u32
+            n += 2
+            v = v << 2u32
+        if (v & 0x80000000u32) == 0u32
+            n += 1
+
+        return n
+
+### ctz
+
+`ctz(x)` returns the count of trailing zero bits in a
+64-bit value. Returns 64 if `x` is 0.
+
+    ctz(x: u64) -> int
+        if x == 0u64 then return 64
+
+        var n = 0
+        var v = x
+
+        if (v & 0x00000000ffffffffu64) == 0u64
+            n += 32
+            v = v >> 32u64
+        if (v & 0x000000000000ffffu64) == 0u64
+            n += 16
+            v = v >> 16u64
+        if (v & 0x00000000000000ffu64) == 0u64
+            n += 8
+            v = v >> 8u64
+        if (v & 0x000000000000000fu64) == 0u64
+            n += 4
+            v = v >> 4u64
+        if (v & 0x0000000000000003u64) == 0u64
+            n += 2
+            v = v >> 2u64
+        if (v & 0x0000000000000001u64) == 0u64
+            n += 1
+
+        return n
+
+### ctz32
+
+    ctz32(x: u32) -> int
+        if x == 0u32 then return 32
+
+        var n = 0
+        var v = x
+
+        if (v & 0x0000ffffu32) == 0u32
+            n += 16
+            v = v >> 16u32
+        if (v & 0x000000ffu32) == 0u32
+            n += 8
+            v = v >> 8u32
+        if (v & 0x0000000fu32) == 0u32
+            n += 4
+            v = v >> 4u32
+        if (v & 0x00000003u32) == 0u32
+            n += 2
+            v = v >> 2u32
+        if (v & 0x00000001u32) == 0u32
+            n += 1
+
+        return n
+
+
+Bit length
+----------
+
+### bit_len
+
+`bit_len(x)` returns the minimum number of bits needed
+to represent `x`. Returns 0 if `x` is 0.
+
+    bit_len(x: u64) -> int = 64 - clz(x)
+
+### bit_len32
+
+    bit_len32(x: u32) -> int = 32 - clz32(x)
+
+
+Rotation
+--------
+
+### rotate_left
+
+`rotate_left(x, k)` rotates `x` left by `k` bits (64-bit).
+
+    rotate_left(x: u64, k: int) -> u64
+        val s = u64(k & 63)
+        if s == 0u64 then return x
+        return (x << s) | (x >> (64u64 - s))
+
+### rotate_right
+
+    rotate_right(x: u64, k: int) -> u64 = rotate_left(x, 64 - (k & 63))
+
+### rotate_left32
+
+    rotate_left32(x: u32, k: int) -> u32
+        val s = u32(k & 31)
+        if s == 0u32 then return x
+        return (x << s) | (x >> (32u32 - s))
+
+### rotate_right32
+
+    rotate_right32(x: u32, k: int) -> u32 = rotate_left32(x, 32 - (k & 31))
+
+
+Byte reversal
+-------------
+
+### reverse_bytes32
+
+`reverse_bytes32(x)` reverses the byte order of a u32.
+
+    reverse_bytes32(x: u32) -> u32
+        return ((x & 0x000000ffu32) << 24u32) | ((x & 0x0000ff00u32) << 8u32) | ((x & 0x00ff0000u32) >> 8u32) | ((x & 0xff000000u32) >> 24u32)
+
+
+Bit reversal
+------------
+
+### reverse32
+
+`reverse32(x)` reverses all 32 bits.
+
+    reverse32(x: u32) -> u32
+        var v = x
+        v = ((v & 0x55555555u32) << 1u32) | ((v & 0xaaaaaaaau32) >> 1u32)
+        v = ((v & 0x33333333u32) << 2u32) | ((v & 0xccccccccu32) >> 2u32)
+        v = ((v & 0x0f0f0f0fu32) << 4u32) | ((v & 0xf0f0f0f0u32) >> 4u32)
+        return reverse_bytes32(v)
+
+
+Power of two
+------------
+
+### is_power_of_two
+
+    is_power_of_two(x: i64) -> bool
+        return x > 0i64 && (x & (x - 1i64)) == 0i64
+
+### next_power_of_two
+
+`next_power_of_two(x)` returns the smallest power of 2
+that is >= x. Returns 1 for x <= 1.
+
+    next_power_of_two(x: i64) -> i64
+        if x <= 1i64 then return 1i64
+        return 1i64 << i64(bit_len(u64(x - 1i64)))
+
+
+Tests
+=====
+
+
+### popcount
+
+    #test
+    test_popcount_zero() -> unit
+        assert(popcount(0u64) == 0, "0")
+
+    #test
+    test_popcount_one() -> unit
+        assert(popcount(1u64) == 1, "1")
+
+    #test
+    test_popcount_all_ones_byte() -> unit
+        assert(popcount(0xffu64) == 8, "0xff")
+
+    #test
+    test_popcount_alternating() -> unit
+        assert(popcount(0x5555555555555555u64) == 32, "alternating")
+
+    #test
+    test_popcount_sparse() -> unit
+        assert(popcount(0x8000000000000001u64) == 2, "endpoints")
+
+    #test
+    test_popcount32_basic() -> unit
+        assert(popcount32(0xDEADBEEFu32) == 24, "deadbeef")
+
+
+### clz
+
+    #test
+    test_clz_zero() -> unit
+        assert(clz(0u64) == 64, "clz(0)")
+
+    #test
+    test_clz_one() -> unit
+        assert(clz(1u64) == 63, "clz(1)")
+
+    #test
+    test_clz_high_bit() -> unit
+        assert(clz(0x4000000000000000u64) == 1, "clz high")
+
+    #test
+    test_clz_byte() -> unit
+        assert(clz(0x80u64) == 56, "clz 0x80")
+
+    #test
+    test_clz32_zero() -> unit
+        assert(clz32(0u32) == 32, "clz32(0)")
+
+    #test
+    test_clz32_one() -> unit
+        assert(clz32(1u32) == 31, "clz32(1)")
+
+    #test
+    test_clz32_high() -> unit
+        assert(clz32(0x80000000u32) == 0, "clz32 high")
+
+
+### ctz
+
+    #test
+    test_ctz_zero() -> unit
+        assert(ctz(0u64) == 64, "ctz(0)")
+
+    #test
+    test_ctz_one() -> unit
+        assert(ctz(1u64) == 0, "ctz(1)")
+
+    #test
+    test_ctz_power_of_two() -> unit
+        assert(ctz(0x100u64) == 8, "ctz 0x100")
+
+    #test
+    test_ctz_high_bit() -> unit
+        assert(ctz(0x4000000000000000u64) == 62, "ctz high")
+
+    #test
+    test_ctz32_basic() -> unit
+        assert(ctz32(0x80u32) == 7, "ctz32 0x80")
+
+    #test
+    test_ctz32_zero() -> unit
+        assert(ctz32(0u32) == 32, "ctz32(0)")
+
+
+### bit_len
+
+    #test
+    test_bit_len_zero() -> unit
+        assert(bit_len(0u64) == 0, "bit_len(0)")
+
+    #test
+    test_bit_len_one() -> unit
+        assert(bit_len(1u64) == 1, "bit_len(1)")
+
+    #test
+    test_bit_len_255() -> unit
+        assert(bit_len(255u64) == 8, "bit_len(255)")
+
+    #test
+    test_bit_len_256() -> unit
+        assert(bit_len(256u64) == 9, "bit_len(256)")
+
+    #test
+    test_bit_len32() -> unit
+        assert(bit_len32(0xFFu32) == 8, "bit_len32 0xFF")
+
+
+### rotation
+
+    #test
+    test_rotate_left32() -> unit
+        assert(rotate_left32(1u32, 1) == 2u32, "1 << 1")
+
+    #test
+    test_rotate_left32_wrap() -> unit
+        assert(rotate_left32(0x80000000u32, 1) == 1u32, "wrap")
+
+    #test
+    test_rotate_right32() -> unit
+        assert(rotate_right32(2u32, 1) == 1u32, "2 >> 1")
+
+    #test
+    test_rotate_right32_wrap() -> unit
+        assert(rotate_right32(1u32, 1) == 0x80000000u32, "wrap")
+
+    #test
+    test_rotate_roundtrip() -> unit
+        val x = 0xDEADBEEFu32
+        assert(rotate_right32(rotate_left32(x, 13), 13) == x, "roundtrip")
+
+
+### byte/bit reversal
+
+    #test
+    test_reverse_bytes32() -> unit
+        assert(reverse_bytes32(0x01020304u32) == 0x04030201u32, "byte swap")
+
+    #test
+    test_reverse_bytes32_zero() -> unit
+        assert(reverse_bytes32(0u32) == 0u32, "zero")
+
+    #test
+    test_reverse32() -> unit
+        // 0x80000000 reversed = 0x00000001
+        assert(reverse32(0x80000000u32) == 0x00000001u32, "high to low")
+
+    #test
+    test_reverse32_roundtrip() -> unit
+        val x = 0xDEADBEEFu32
+        assert(reverse32(reverse32(x)) == x, "roundtrip")
+
+
+### power of two
+
+    #test
+    test_is_power_of_two() -> unit
+        assert(is_power_of_two(1i64), "1")
+        assert(is_power_of_two(2i64), "2")
+        assert(is_power_of_two(256i64), "256")
+        assert(!is_power_of_two(0i64), "0")
+        assert(!is_power_of_two(3i64), "3")
+        assert(!is_power_of_two(-1i64), "-1")
+
+    #test
+    test_next_power_of_two() -> unit
+        assert(next_power_of_two(0i64) == 1i64, "0 -> 1")
+        assert(next_power_of_two(1i64) == 1i64, "1 -> 1")
+        assert(next_power_of_two(3i64) == 4i64, "3 -> 4")
+        assert(next_power_of_two(5i64) == 8i64, "5 -> 8")
+        assert(next_power_of_two(256i64) == 256i64, "256 -> 256")
+        assert(next_power_of_two(257i64) == 512i64, "257 -> 512")
+
+
+Design notes
+------------
+
+**Binary search for clz/ctz.** Uses a cascade of mask-and-shift
+checks to find the leading/trailing zero count in O(log n) steps
+rather than a linear scan.
+
+**Parallel popcount.** The classic divide-and-conquer bit count
+algorithm, operating on pairs → nibbles → bytes → words.
+
+**Unsigned 64-bit operations.** The 64-bit popcount, clz, ctz,
+bit_len, and rotate functions use `u64` since they operate on
+bit patterns, not signed values. The power-of-two functions
+keep `i64` since they deal with logical magnitudes.

@@ -1,0 +1,31 @@
+cat — concatenate and print files
+==================================
+
+Reads a file and writes its contents to the terminal.
+
+    module oskit.bin.cat
+
+    import oskit.ulib.{get_args, open, read, puts, putc, exit}
+
+    main()
+        val path = get_args()
+        if len(path) == 0
+            puts("usage: cat <file>\n")
+            exit()
+            return
+        val ino = open(path)
+        if ino < 0
+            puts(path)
+            puts(": not found\n")
+            exit()
+            return
+        var buf: [128]byte
+        var offset = 0
+        var nr = read(ino, buf, offset, 128)
+        while nr > 0
+            for var i = 0; i < nr; i++
+                putc(int(buf[i]))
+            offset += nr
+            nr = read(ino, buf, offset, 128)
+        putc('\n')
+        exit()
