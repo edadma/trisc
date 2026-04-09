@@ -178,11 +178,12 @@ class SyslSVMCodegen:
       case TVarDecl(name, _, _, _) => Some(name)
       case _ => None
     }.toSet
+    val metaSymbols = meta.symbols.map(_.name).toSet
 
     for decl <- program.decls do decl match
-      case TExternFuncDecl(name, _, _) if !definedSymbols.contains(name) =>
+      case TExternFuncDecl(name, _, _) if !definedSymbols.contains(name) && !metaSymbols.contains(name) =>
         emit(s"extern $name")
-      case TExternVarDecl(name, _) if !definedSymbols.contains(name) =>
+      case TExternVarDecl(name, _) if !definedSymbols.contains(name) && !metaSymbols.contains(name) =>
         emit(s"extern $name")
       case _ =>
 
