@@ -79,13 +79,15 @@ p.parse("7", 0)  // Ok(-7, 1)
 Required fixing an interpreter bug: `TFieldAccess` on pointer-typed objects
 now auto-dereferences. See `parser.sysl` for full fluent API with tests.
 
-## 8. No Pattern Matching in `if`
+## ~~8. No Pattern Matching in `if`~~ ✅ DONE
 
-Would love:
+Works:
 ```sysl
-if p(input, pos) is Ok(v, p2) then ...
+if p(input, pos) is Ok(v, p2) then v else -1
 ```
-Instead of a full `match` block for simple Ok/Fail dispatch.
+Desugars to a `match` expression at parse time. Supports inline and block
+bodies, optional `else`, and all match pattern types (destructure, wildcard,
+value). `is` is a new keyword.
 
 ## Priority
 
@@ -97,5 +99,5 @@ Instead of a full `match` block for simple Ok/Fail dispatch.
 | 6 | Verbose match arms | ✅ Solved by #3 |
 | 4 | Mutual recursion / def | ✅ Done |
 | 7 | Method syntax on functions | ✅ Done — wrapper struct with methods |
-| 8 | Pattern match in `if` | Open — low priority |
+| 8 | Pattern match in `if` | ✅ Done — `if expr is Pattern then ...` |
 | 5 | Expression-body ambiguity | ✅ Not an issue — parens make it unambiguous |

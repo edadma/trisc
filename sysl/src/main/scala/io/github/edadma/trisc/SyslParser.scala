@@ -528,7 +528,15 @@ class SyslParser extends StandardTokenParsers {
 
   // --- Expressions ---
 
-  lazy val expr: Parser[ExpressionAST] = closureExpr | matchExpr | ifExpr | logicalOr
+  lazy val expr: Parser[ExpressionAST] = closureExpr | matchExpr | ifIsExpr | ifExpr | logicalOr
+
+  /** `if expr is Pattern then body [else elseBody]` — desugars to match. */
+  lazy val ifIsExpr: Parser[MatchExprAST] =
+    "if" ~> logicalOr ~ ("is" ~> matchPattern) ~ ("then" ~> thenBody) ^^ {
+      case scrutinee ~ pattern ~ ((thenStmts, elseStmts)) =>
+        val arm = MatchArmAST(List(pattern), None, thenStmts)
+        MatchExprAST(scrutinee, List(arm), elseStmts)
+    }
 
   lazy val closureExpr: Parser[ClosureAST] =
     // Zero params: () -> body

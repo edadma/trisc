@@ -872,6 +872,28 @@ x = if cond then a else b
 result = if x > 0 then x else -x
 ```
 
+### If-Is (Pattern Matching in If)
+
+`if expr is Pattern then ...` is sugar for a single-arm `match`. The pattern
+binds variables in the then-branch. Like Rust's `if let`.
+
+```sysl
+// Extract value or use default
+val v = if r is Ok(x) then x else -1
+
+// Guard with pattern
+if o is Some(x) then
+    process(x)
+
+// With block body and else
+if parse(s) is Ok(val, pos) then
+    handle(val, pos)
+else
+    report_error()
+```
+
+Desugars to `match` at parse time — no new analyzer or runtime machinery.
+
 ---
 
 ## Statements
