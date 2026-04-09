@@ -320,6 +320,44 @@ double(x: int) = x * 2
 getAnswer() -> int = 42
 ```
 
+### `def` — Auto-Call Functions
+
+`def` declares a zero-argument function that is automatically called when
+referenced by bare name. Unlike `val`, a `def` is re-evaluated on every
+reference, and supports forward references (enabling mutual recursion).
+
+```sysl
+var counter = 0
+def next_id = counter++      // return type inferred from body
+
+def pi -> int = 314           // explicit return type
+
+def greeting -> string        // block body
+    "hello"
+
+main() -> int
+    val a = next_id           // auto-called: returns 0
+    val b = next_id           // auto-called: returns 1
+    a + b + pi                // 0 + 1 + 314 = 315
+```
+
+**Function pointer:** `&name` gives the function pointer for a `def`:
+
+```sysl
+apply_thunk(f: () -> int) -> int = f()
+
+main() -> int
+    counter = 0
+    apply_thunk(&next_id)     // passes next_id as a function pointer
+```
+
+**On parametric functions:** `def` is also accepted before functions with
+parameters, where it is purely documentary (no behavior change):
+
+```sysl
+def add(a: int, b: int) -> int = a + b   // same as: add(a: int, b: int) -> int = a + b
+```
+
 ### Generic Functions
 
 Functions may declare type parameters in square brackets after the name, with

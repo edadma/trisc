@@ -42,7 +42,7 @@ class SyslParser extends StandardTokenParsers {
     }
 
   lazy val declBare: Parser[DeclAST] =
-    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | interfaceDecl | typeAliasDecl | "private" ~> declBody(true) | declBody(false)
+    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | interfaceDecl | typeAliasDecl | "private" ~> "def" ~> defDecl(true) | "private" ~> declBody(true) | "def" ~> defDecl(false) | declBody(false)
 
   // --- Attributes ---
 
@@ -243,6 +243,27 @@ class SyslParser extends StandardTokenParsers {
       opt(mutability) ~ ident ~ ("=" ~> expr) ^^ {
         case mut ~ name ~ e => VarDeclAST(name, None, e, priv, mut.getOrElse(true))
       }
+
+  /** `def name = expr` (zero-arg auto-call) or `def name(params) -> ret body` (documentary). */
+  def defDecl(priv: Boolean): Parser[FunDeclAST] =
+    // def name(params) -> ret body — parametric, isDef is documentary
+    ident ~ typeParamListWithBounds ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
+      case name ~ tps ~ params ~ ((rt, body)) =>
+        val names = tps.map(_._1)
+        val bounds = tps.collect { case (n, bs) if bs.nonEmpty => (n, bs) }.toMap
+        FunDeclAST(name, params, rt, body, priv, names, bounds, isDef = true)
+    } |
+    // def name -> RetType body — zero-arg with explicit return type
+    ident ~ ("->" ~> typeRef) ~ ("=" ~> bodyExprOrBlock) ^^ {
+      case name ~ rt ~ body => FunDeclAST(name, Nil, Some(rt), body, priv, isDef = true)
+    } |
+    ident ~ ("->" ~> typeRef) ~ block ^^ {
+      case name ~ rt ~ body => FunDeclAST(name, Nil, Some(rt), BlockBodyAST(body), priv, isDef = true)
+    } |
+    // def name = expr — zero-arg, inferred return type
+    ident ~ ("=" ~> bodyExprOrBlock) ^^ {
+      case name ~ body => FunDeclAST(name, Nil, None, body, priv, isDef = true)
+    }
 
   // Type parameter with optional trait bounds: T, T: Ord, T: Ord + Eq
   lazy val typeParamWithBounds: Parser[(String, List[String])] =

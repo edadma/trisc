@@ -34,18 +34,14 @@ parse_factor(input: string, pos: int) -> Result[int]
 ```
 `?` propagates the `Fail` variant automatically. Used throughout `parser.sysl`.
 
-## 4. Mutual Recursion Prevents Closure Composition
+## ~~4. Mutual Recursion Prevents Closure Composition~~ ✅ DONE
 
-`expr` ↔ `factor` recursion means these must be named functions, not closures stored in variables:
+Solved with `def` — zero-argument auto-call functions (like Scala's `def` without parens):
 ```sysl
-// Can't do this — factor references expr which isn't defined yet
-val expr = seq(term, many(seq(char('+'), term)))
-val factor = alt(nat(), between(char('('), expr, char(')')))
+def expr = seq(term, many(seq(char('+'), term)))
+def factor = alt(nat(), between(char('('), expr, char(')')))
 ```
-
-`val` initializers run top-to-bottom. Named functions work but lose composability.
-
-Fix: `lazy val`, or allow forward references to functions in closures.
+`def` functions are forward-declared like regular functions, so mutual recursion works. Bare `name` auto-calls; `&name` gives the function pointer. Return type is inferred from the expression body. `def` is also allowed (documentary) on functions with parameters.
 
 ## ~~5. Expression-Body Ambiguity with `->` in Return Type~~ ✅ Not an issue
 
@@ -90,7 +86,7 @@ Instead of a full `match` block for simple Ok/Fail dispatch.
 | 2 | Generic combinators | ✅ Done |
 | 3 | `?` on Result | ✅ Done |
 | 6 | Verbose match arms | ✅ Solved by #3 |
-| 4 | Mutual recursion / lazy val | Open — medium priority |
+| 4 | Mutual recursion / def | ✅ Done |
 | 7 | Method syntax on functions | Open — medium priority |
 | 8 | Pattern match in `if` | Open — low priority |
 | 5 | Expression-body ambiguity | ✅ Not an issue — parens make it unambiguous |
