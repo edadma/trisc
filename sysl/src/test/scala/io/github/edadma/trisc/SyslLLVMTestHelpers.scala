@@ -42,27 +42,41 @@ trait SyslLLVMTestHelpers extends AnyFreeSpec with Matchers {
     (new SyslLLVMCodegen).generate(merged)
 
   /** Compile a program with access to the std library.
-    * Resolves imports by including std source files in the compilation. */
+    * Recursively resolves all transitive std imports. */
   def compileLLVMWithStd(source: String): String =
     val tangler = (raw: String) => LiterateRenderer.tangle(new LiterateParser().parse(raw))
-    // First pass: parse to find imports
-    val Right(ast) = (new SyslParser).parseProgram(source): @unchecked
-    val stdImports = ast.decls.collect { case ImportDeclAST(path, _) if path.startsWith("std/") => path }
-    // Collect std source files for each import
-    val stdSources = stdImports.flatMap { modPath =>
+    val collected = scala.collection.mutable.Map[String, String]()
+    val visited = scala.collection.mutable.Set[String]()
+
+    def collectStdModule(modPath: String): Unit =
+      if visited.contains(modPath) then return
+      visited += modPath
       val dir = new File(modPath)
-      if dir.isDirectory then
-        dir.listFiles().filter(_.getName.endsWith(".lsysl")).map { f =>
-          val key = modPath + "/" + f.getName.stripSuffix(".lsysl")
-          key -> tangler(TestFileOps.readFile(f.getPath))
-        }.toList
-      else
-        val singleFile = modPath + ".lsysl"
-        if new File(singleFile).exists() then
-          List(modPath -> tangler(TestFileOps.readFile(singleFile)))
-        else Nil
-    }.toMap
-    val allSources = stdSources + ("main" -> source)
+      val sources: List[(String, String)] =
+        if dir.isDirectory then
+          dir.listFiles().toList.filter(_.getName.endsWith(".lsysl")).map { f =>
+            val key = modPath + "/" + f.getName.stripSuffix(".lsysl")
+            key -> tangler(TestFileOps.readFile(f.getPath))
+          }
+        else
+          val lf = new File(modPath + ".lsysl")
+          if lf.exists() then List(modPath -> tangler(TestFileOps.readFile(lf.getPath)))
+          else Nil
+      for (key, src) <- sources do
+        collected(key) = src
+        // Parse to find transitive imports
+        (new SyslParser).parseProgram(src) match
+          case Right(ast) =>
+            for case ImportDeclAST(path, _) <- ast.decls if path.startsWith("std/") do
+              collectStdModule(path)
+          case _ =>
+
+    // Parse user source for direct imports
+    val Right(ast) = (new SyslParser).parseProgram(source): @unchecked
+    for case ImportDeclAST(path, _) <- ast.decls if path.startsWith("std/") do
+      collectStdModule(path)
+
+    val allSources = collected.toMap + ("main" -> source)
     val driver = new SyslDriver(Some(TestFileOps), List("."), tangler = Some(tangler))
     val result = driver.compile(allSources)
     val merged = TProgram(result.units.flatMap(u => u.typed.decls.filter {

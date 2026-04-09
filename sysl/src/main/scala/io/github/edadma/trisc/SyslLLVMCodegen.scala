@@ -196,7 +196,7 @@ class SyslLLVMCodegen:
           loaded
         else emitSextIfNeeded(result, rt, retType)
         emitReleaseRefs()
-        emit(s"  ret $retType $finalVal")
+        emitRet(retType, finalVal)
       case TBlockBody(stmts) =>
         genBlock(stmts, retType)
 
@@ -257,7 +257,7 @@ class SyslLLVMCodegen:
           loaded
         else emitSextIfNeeded(result, rt, retLt)
         emitReleaseRefs()
-        emit(s"  ret $retLt $finalVal")
+        emitRet(retLt, finalVal)
       case TBlockBody(stmts) =>
         genBlock(stmts, retLt)
 
@@ -298,19 +298,19 @@ class SyslLLVMCodegen:
             else emitSextIfNeeded(result, rt, retType)
             emitDefers()
             emitReleaseRefs()
-            emit(s"  ret $retType $finalVal")
+            emitRet(retType, finalVal)
             hasReturned = true
           case other =>
             genStmt(other)
             if !hasReturned then
               emitDefers()
               emitReleaseRefs()
-              emit(s"  ret $retType 0")
+              emitRet(retType)
               hasReturned = true
     else
       emitDefers()
       emitReleaseRefs()
-      emit(s"  ret $retType 0")
+      emitRet(retType)
       hasReturned = true
 
   // Get LLVM type string for an expression based on its type
@@ -383,7 +383,7 @@ class SyslLLVMCodegen:
         else emitSextIfNeeded(v, vt, retType)
         emitDefers()
         emitReleaseRefs()
-        emit(s"  ret $retType $finalVal")
+        emitRet(retType, finalVal)
         hasReturned = true
 
       case TReturnStmt(None) =>
@@ -635,9 +635,28 @@ class SyslLLVMCodegen:
         alloca
 
       case TBinary(left, op, right, _) =>
-        val l = genExpr(left)
-        val r = genExpr(right)
-        val lt = exprType(left)
+        var l = genExpr(left)
+        var r = genExpr(right)
+        val leftLt = exprType(left)
+        val rightLt = exprType(right)
+        // Reconcile operand widths: extend narrower int to wider
+        val lt = if leftLt != rightLt && left.typ.isIntegral && right.typ.isIntegral then
+          val lw = leftLt.stripPrefix("i").toInt
+          val rw = rightLt.stripPrefix("i").toInt
+          if lw < rw then
+            val ext = newReg()
+            if left.typ.isSigned then emit(s"  $ext = sext $leftLt $l to $rightLt")
+            else emit(s"  $ext = zext $leftLt $l to $rightLt")
+            l = ext
+            rightLt
+          else if rw < lw then
+            val ext = newReg()
+            if right.typ.isSigned then emit(s"  $ext = sext $rightLt $r to $leftLt")
+            else emit(s"  $ext = zext $rightLt $r to $leftLt")
+            r = ext
+            leftLt
+          else leftLt
+        else leftLt
         val isFloat = left.typ == SyslType.DoubleType
         val isUnsigned = left.typ.isUnsigned
         val result = newReg()
@@ -1901,6 +1920,11 @@ class SyslLLVMCodegen:
   private def emit(line: String): Unit =
     out ++= line
     out += '\n'
+
+  /** Emit a return instruction, handling void vs value returns. */
+  private def emitRet(retType: String, value: String = "0"): Unit =
+    if retType == "void" then emit("  ret void")
+    else emit(s"  ret $retType $value")
 
   /** Emit a basic block label and track it as the current block. */
   private def emitLabel(label: String): Unit =
