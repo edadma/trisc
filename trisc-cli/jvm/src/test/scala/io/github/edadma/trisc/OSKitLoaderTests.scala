@@ -193,9 +193,11 @@ import oskit.apps.init.{init}
     (cpu, output.toString)
 
   "Loader: run hello from shell" in {
+    val tofBytes = helloTofText.getBytes("UTF-8")
+    info(s"Hello TOF size: ${tofBytes.length} bytes (${(tofBytes.length + 511) / 512} blocks)")
     val keys = typeString("hello\n", startTick = 500000)
     val (_, output) = runWithKeys("", keys, maxCycles = 30000000,
-      files = Map("/bin/hello" -> helloTofText.getBytes("UTF-8")))
+      files = Map("/bin/hello" -> tofBytes))
     val cleaned = output.filterNot(_ == '\n')
     cleaned should include("Hello, world!")
   }
@@ -206,4 +208,26 @@ import oskit.apps.init.{init}
     output should include("not found")
   }
 
+  // Pad the hello TOF with comment lines to inflate file size.
+  // The TOF parser skips lines starting with '#'.
+  private def padTof(tof: String, targetSize: Int): String =
+    val sb = new StringBuilder(tof)
+    val pad = "# padding comment line to inflate TOF file size for testing\n"
+    while sb.length < targetSize do
+      sb.append(pad)
+    sb.toString
+
+  private def testPaddedHello(size: Int, maxCycles: Int = 100000000): Unit =
+    val padded = padTof(helloTofText, size)
+    val tofBytes = padded.getBytes("UTF-8")
+    info(s"Padded TOF size: ${tofBytes.length} bytes (${(tofBytes.length + 511) / 512} blocks)")
+    val keys = typeString("hello\n", startTick = 500000)
+    val (cpu, output) = runWithKeys("", keys, maxCycles = maxCycles,
+      files = Map("/bin/hello" -> tofBytes))
+    info(s"CPU state: ${cpu.state}, cycles: ${cpu.cycles}, PC: 0x${cpu.pc.toHexString}")
+    info(s"Output: ${output.take(200)}")
+    val cleaned = output.filterNot(_ == '\n')
+    cleaned should include("Hello, world!")
+
+  "Loader: padded hello 62KB" in { testPaddedHello(62000) }
 }

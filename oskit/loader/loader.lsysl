@@ -108,9 +108,22 @@ and a write cursor within each segment.
                     break
                 eol += 1
 
-            // Build a string from this line
+            // Skip blank lines and comments without allocating strings
             val line_len = eol - pos
             if line_len > 0
+                // Skip leading whitespace to find first real char
+                var first = pos
+                while first < eol
+                    if buf[first] != ' '
+                        if buf[first] != '\t'
+                            break
+                    first += 1
+                // Skip comment lines (# ...) without string allocation
+                if first < eol
+                    if buf[first] == '#'
+                        pos = eol + 1
+                        continue
+
                 val line = trim_space(string(buf + pos, line_len))
 
                 if len(line) > 0
@@ -118,10 +131,6 @@ and a write cursor within each segment.
                         if !has_prefix(line, "TOF v")
                             return LOAD_ERR_FORMAT
                         header_seen = true
-                    else if has_prefix(line, "#")
-                        // Comment — skip
-                        pos = eol + 1
-                        continue
                     else if has_prefix(line, "SEGMENT:")
                         val rest = substring(line, 8, len(line))
                         val comma = index_byte(rest, byte(','))
