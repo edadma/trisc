@@ -179,16 +179,16 @@ import oskit.apps.init.{init}
     val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha, dma)
     dma.mem = mem
     linked.load(mem)
-    val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
-    val keyInjector: CPU => Unit = cpu => {
-      val cycle = cpu.cycles
+    val pending                       = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
+    val keyInjector: Processor => Unit = proc => {
+      val cycle = proc.cycles
       while pending.nonEmpty && cycle >= pending.head._1 do
         val (_, vk, press, mods) = pending.dequeue()
         kbd.enqueue(vk, press,
           shiftDown = (mods & 1) != 0, ctrlDown = (mods & 2) != 0,
           altDown = (mods & 4) != 0, metaDown = (mods & 8) != 0)
     }
-    val ticks: Seq[CPU => Unit] = Seq(timer, intc, keyInjector)
+    val ticks: Seq[Processor => Unit] = Seq(timer, intc, keyInjector)
     val cpu = new CPU(mem, ticks) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
