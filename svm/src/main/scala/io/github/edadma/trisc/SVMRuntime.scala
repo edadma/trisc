@@ -39,11 +39,13 @@ object SVMRuntime:
   val ioSource: String =
     s"""STDOUT = ${stdoutAddress}
        |
+       |global putchar, func
+       |global puts, func
+       |
        |; putchar: TOS = char, write to stdout device
        |putchar:
        |  push_i32 STDOUT
        |  store8
-       |  push_0
        |  ret
        |
        |; puts: TOS = address of {ptr, len} string struct
@@ -75,7 +77,6 @@ object SVMRuntime:
        |  local_set 2
        |  jump .puts_loop
        |.puts_done:
-       |  push_0
        |  ret
        |""".stripMargin
 

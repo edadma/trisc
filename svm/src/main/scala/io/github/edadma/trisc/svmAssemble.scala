@@ -233,7 +233,7 @@ def svmAssemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = 
       // defers all absolute references in relocatable mode.
       val sz = if relocatable then
         def hasSymbolRef: Boolean = operands.headOption match
-          case Some(ReferenceExprAST(_)) => true
+          case Some(ReferenceExprAST(ref)) => !symbols.get(ref).exists(_.isInstanceOf[EquateSymbol])
           case Some(LocalExprAST(_, ref)) if ref != null => true
           case _ => false
         mnemonic match

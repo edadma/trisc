@@ -667,15 +667,23 @@ class SyslSVMCodegen:
       emit(s"  local_set $idx")
 
     case TStringLit(value, _) =>
-      val label = newLabel("str")
+      labelCounter += 1
+      val label = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_$labelCounter" else s"__str_$labelCounter"
       stringLiterals += ((label, value))
       val bytes = value.getBytes("UTF-8")
-      // Push address of {ptr, len} — but strings are fat pointers.
-      // For now, push the raw data pointer and length.
-      // The string literal data is: [refcount(8)] [bytes...] [null]
-      // The label points past the refcount to the byte data.
-      emit(s"  push_i64 $label")
-      // TODO: proper fat pointer handling for strings
+      // String is a 16-byte fat pointer {ptr, len} allocated on memory stack.
+      // The label points past the refcount header to the byte data.
+      emitMemAlloc(16)
+      emit("  dup")
+      emit(s"  push_i64 $label") // ptr to byte data
+      emit("  swap")
+      emit("  store64")          // store ptr at offset 0
+      emit("  dup")
+      emitPushInt(8)
+      emit("  add")
+      emitPushInt(bytes.length)
+      emit("  swap")
+      emit("  store64")          // store len at offset 8
 
     case TAsmExpr(code, _) =>
       emit(s"  $code")
