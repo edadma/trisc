@@ -14,6 +14,8 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
   private lazy val posixStringSysl: String = scala.io.Source.fromFile("posix/string/string.sysl").mkString
   private lazy val posixCtypeSysl: String = scala.io.Source.fromFile("posix/ctype/ctype.sysl").mkString
   private lazy val posixAllocSysl: String = scala.io.Source.fromFile("posix/stdlib/alloc.sysl").mkString
+  private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
+  private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   // Inline sbrk for TFS tests — simple bump allocator in high RAM
   private val sbrk_inline: String =
@@ -59,7 +61,7 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
        |
        |segment vectors
        |
-       |  dl 0xFFF8
+       |  dl 0x7FFF8
        |  dl boot
        |  dl default_isr
        |  dl default_isr
@@ -109,7 +111,7 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
   // Library source keys — these never change between tests
   private val libSourceKeys = Set(
     "oskit/fs/tfs", "posix/string/string", "posix/ctype/ctype",
-    "posix/stdlib/alloc", "posix/unistd/sbrk", "ramdisk",
+    "posix/stdlib/alloc", "posix/unistd/sbrk", "ramdisk", "std/mem/mem", "std/debug/debug",
   )
 
   // Cache: boot TOF + compiled+assembled library TOFs (compiled once with dummy main)
@@ -131,6 +133,8 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
     "posix/stdlib/alloc" -> posixAllocSysl,
     "posix/unistd/sbrk" -> sbrk_inline,
     "ramdisk" -> ramdiskSource,
+    "std/mem/mem" -> memSysl,
+    "std/debug/debug" -> debugSysl,
   )
 
   private var _tracing = false

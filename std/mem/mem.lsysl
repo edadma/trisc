@@ -151,6 +151,32 @@ indexing operator.
         -1
 
 
+Raw pointer operations
+---------------------
+
+These operate on raw `*byte` pointers rather than slices. They
+are used by OS code (TFS, IPC, loaders) that works with raw
+memory addresses. On platforms with hardware acceleration (e.g.
+DMA), these can be replaced with fast-path implementations.
+
+### memcpy
+
+`memcpy(dst, src, n)` copies `n` bytes from `src` to `dst`.
+Does not handle overlapping regions.
+
+    memcpy(dst: *byte, src: *byte, n: int)
+        for var i = 0; i < n; i++
+            dst[i] = src[i]
+
+### memset
+
+`memset(dst, v, n)` fills `n` bytes at `dst` with `v`.
+
+    memset(dst: *byte, v: byte, n: int)
+        for var i = 0; i < n; i++
+            dst[i] = v
+
+
 Design notes
 ------------
 

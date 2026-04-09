@@ -52,13 +52,14 @@ class OSKitDisplayTests extends OSKitTestHelpers {
   private lazy val kbdSysl: String = readLsysl("oskit/drivers/kbd/keyboard.lsysl")
   private lazy val mouseSysl: String = readLsysl("oskit/drivers/mouse/mouse.lsysl")
   private lazy val displaySysl: String = readLsysl("oskit/drivers/display/display.lsysl")
+  private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
 
   def runDisplay(userSources: Map[String, String], maxCycles: Int = 10000000): (CPU, String) =
     val bootTof = assemble(bootAsm, relocatable = true)
     val allSources = Map(
       "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
       "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
-      "oskit/ipc/ipc" -> ipcSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl,
+      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl,
       "oskit/drivers/mouse/mouse" -> mouseSysl, "oskit/drivers/display/display" -> displaySysl,
     ) ++ userSources
     val driver = new SyslDriver

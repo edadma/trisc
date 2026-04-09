@@ -12,6 +12,7 @@ class OSKitTTYTests extends OSKitTestHelpers {
   private lazy val ipcSysl: String = readLsysl("oskit/ipc/ipc.lsysl")
   private lazy val kbdSysl: String = readLsysl("oskit/drivers/kbd/keyboard.lsysl")
   private lazy val ttySysl: String = readLsysl("oskit/drivers/tty/tty.lsysl")
+  private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
 
   // keyEvents: (vkCode, press, modifierBits) — pre-enqueued before CPU starts
   // scheduledKeys: (cycle, vkCode, press, modifierBits) — injected at specific cycle count
@@ -22,7 +23,7 @@ class OSKitTTYTests extends OSKitTestHelpers {
     val allSources = Map(
       "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
       "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
-      "oskit/ipc/ipc" -> ipcSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl, "oskit/drivers/tty/tty" -> ttySysl,
+      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl, "oskit/drivers/tty/tty" -> ttySysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)

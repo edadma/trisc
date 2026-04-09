@@ -11,6 +11,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
   private lazy val diskSysl: String = readLsysl("oskit/drivers/disk/disk.lsysl")
   private lazy val tfsSysl: String = readLsysl("oskit/fs/tfs.lsysl")
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
+  private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
 
   // Stack layout for 2-thread tests (disk server + client):
   //   disk:   USP=0x10000 SSP=0xE000
@@ -39,6 +40,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
       "posix/ctype/ctype" -> posixCtypeSysl,
       "posix/stdlib/alloc" -> posixAllocSysl,
       "posix/unistd/sbrk" -> sbrkSysl,
+      "std/mem/mem" -> memSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -98,6 +100,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
       "posix/stdlib/alloc" -> posixAllocSysl,
       "posix/unistd/sbrk" -> sbrkSysl,
       "oskit/servers/tfs" -> tfsSrvSysl,
+      "std/mem/mem" -> memSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
