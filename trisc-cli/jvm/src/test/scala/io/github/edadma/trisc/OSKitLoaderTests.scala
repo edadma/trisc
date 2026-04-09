@@ -266,6 +266,88 @@ import oskit.apps.init.{init}
       "posix/unistd/sbrk"       -> sbrkSysl,
     ))
 
+  // echo program — prints its arguments via get_args()
+  private val echoSysl: String =
+    """module oskit.bin.echo
+      |import oskit.ulib.{putc, get_args, exit}
+      |main()
+      |    val args = get_args()
+      |    val p = *byte(args)
+      |    for var i = 0; i < len(args); i++
+      |        putc(p[i])
+      |    putc('\n')
+      |    exit()
+      |""".stripMargin
+
+  private lazy val echoTofText: String =
+    compileProgram(Map("oskit/bin/echo/echo" -> echoSysl))
+
+  "Loader: arg passing works" in {
+    val tofBytes = echoTofText.getBytes("UTF-8")
+    val keys = typeString("echo foo bar\n", startTick = 500000)
+    val (_, output, _) = runWithKeys("", keys, maxCycles = 30000000,
+      files = Map("/bin/echo" -> tofBytes))
+    info(s"Output: ${output.take(200)}")
+    val cleaned = output.filterNot(_ == '\n')
+    cleaned should include("foo bar")
+  }
+
+  // KNOWN BUG: string temporaries passed as function args leak.
+  // The caller increments refcount before the call, the callee decrements on
+  // return, but the caller never decrements — leaving refcount=1 permanently.
+  // This test documents the bug: 50 iterations of string(ptr, 100) in a 32KB
+  // heap causes DoubleFault from heap exhaustion.
+  // When the codegen is fixed, change this to assert output includes "OK".
+  // TODO: un-ignore when codegen string temporary leak is fixed.
+  // The test should print "OK" but currently DoubleFaults from heap exhaustion.
+  "String temp leak: function arg temporaries" ignore {
+    val source =
+      """identity(s: string) -> int
+        |    len(s)
+        |
+        |main() -> int
+        |    var buf: [100]byte
+        |    for var i = 0; i < 100; i++
+        |        buf[i] = byte(65 + i % 26)
+        |    val p: *byte = &buf[0]
+        |    // Call identity with string(ptr, len) 50 times.
+        |    // string(p, 100) allocates ~108 bytes each time.
+        |    // If temporaries leak, 50 * 108 = 5.4KB leaked.
+        |    // With 32KB heap, ~300 leaks would exhaust it.
+        |    var total = 0
+        |    for var i = 0; i < 50; i++
+        |        total += identity(string(p, 100))
+        |    putchar(79)  // 'O'
+        |    putchar(75)  // 'K'
+        |    putchar(10)
+        |    0
+        |""".stripMargin
+
+    val inlineSbrk =
+      """module posix.unistd
+        |var _brk: *byte = *byte(0x8000)
+        |sbrk(increment: int) -> *byte
+        |    if increment == 0
+        |        return _brk
+        |    val old = _brk
+        |    _brk = _brk + increment
+        |    old
+        |""".stripMargin
+
+    val (cpu, output) = runWithBoot(Map(
+      "main" -> source,
+      "posix/stdlib/alloc" -> posixAllocSysl,
+      "posix/unistd/sbrk" -> inlineSbrk,
+      "posix/string/string" -> posixStringSysl,
+      "posix/ctype/ctype" -> posixCtypeSysl,
+    ), maxCycles = 500000)
+    info(s"Output: '${output.take(20)}'")
+    info(s"Output: '${output.take(20)}'")
+    info(s"CPU state: ${cpu.state}, cycles: ${cpu.cycles}")
+    output should not include "!"
+    output should include ("OK")
+  }
+
   "Loader: run fat hello (60KB with posix modules)" in {
     val tofBytes = fatHelloTofText.getBytes("UTF-8")
     info(s"Fat hello TOF size: ${tofBytes.length} bytes")

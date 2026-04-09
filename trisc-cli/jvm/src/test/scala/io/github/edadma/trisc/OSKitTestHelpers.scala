@@ -104,7 +104,7 @@ trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
 
   def runWithBoot(syslSource: String): (CPU, String) = runWithBoot(Map("main" -> syslSource))
 
-  def runWithBoot(sources: Map[String, String]): (CPU, String) =
+  def runWithBoot(sources: Map[String, String], maxCycles: Int = 100000): (CPU, String) =
     val bootTof = assemble(minimalBoot, relocatable = true)
     val driver = new SyslDriver
     val result = driver.compile(sources)
@@ -125,7 +125,7 @@ trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
     }
     val mem = new Memory("Memory", new RAM(0, 0x10000), stdout)
     linked.load(mem)
-    val cpu = new CPU(mem) { limit = 100000 }
+    val cpu = new CPU(mem) { limit = maxCycles }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)
