@@ -36,6 +36,7 @@ class SyslLLVMCodegen:
   private var locals: mutable.LinkedHashMap[String, LocalVar] = null
   private var currentFunction: TFunDecl = null
   private var hasReturned = false
+  private var currentBlock = "" // tracks the current basic block label for phi predecessors
   // Break/continue label stacks for loop codegen
   private val breakLabels = new mutable.Stack[String]
   private val continueLabels = new mutable.Stack[String]
@@ -171,7 +172,7 @@ class SyslLLVMCodegen:
     val params = fun.params.map(p => s"${llvmType(p.typ)} %${p.name}_arg").mkString(", ")
 
     emit(s"define $retType @${fun.name}($params) {")
-    emit("entry:")
+    emitLabel("entry")
 
     // Allocate and store parameters
     for param <- fun.params do
@@ -216,7 +217,7 @@ class SyslLLVMCodegen:
     val paramStrs = "i8* %env" +: closure.params.map(p => s"${llvmType(p.typ)} %${p.name}_arg")
 
     emit(s"define $retLt @$name(${paramStrs.mkString(", ")}) {")
-    emit("entry:")
+    emitLabel("entry")
 
     // Unpack captured variables from env
     var offset = 0L
@@ -270,7 +271,7 @@ class SyslLLVMCodegen:
     val paramNames = params.zipWithIndex.map((_, i) => s"%p$i")
     val paramStrs = "i8* %env" +: params.zip(paramNames).map((t, n) => s"${llvmType(t)} $n")
     emit(s"define $retLt @$wrapperName(${paramStrs.mkString(", ")}) {")
-    emit("entry:")
+    emitLabel("entry")
     val argStr = params.zip(paramNames).map((t, n) => s"${llvmType(t)} $n").mkString(", ")
     if retLt == "void" then
       emit(s"  call void @$origName($argStr)")
@@ -404,18 +405,18 @@ class SyslLLVMCodegen:
         breakLabels.push(endLabel)
         continueLabels.push(condLabel)
         emit(s"  br label %$condLabel")
-        emit(s"$condLabel:")
+        emitLabel(condLabel)
         val c = genExpr(cond)
         val ct = exprType(cond)
         val cBool = newReg()
         emit(s"  $cBool = icmp ne $ct $c, 0")
         emit(s"  br i1 $cBool, label %$bodyLabel, label %$endLabel")
-        emit(s"$bodyLabel:")
+        emitLabel(bodyLabel)
         val savedHR = hasReturned
         hasReturned = false
         for s <- body do if !hasReturned then genStmt(s)
         if !hasReturned then emit(s"  br label %$condLabel")
-        emit(s"$endLabel:")
+        emitLabel(endLabel)
         hasReturned = savedHR
         breakLabels.pop()
         continueLabels.pop()
@@ -429,21 +430,21 @@ class SyslLLVMCodegen:
         breakLabels.push(endLabel)
         continueLabels.push(updateLabel)
         emit(s"  br label %$condLabel")
-        emit(s"$condLabel:")
+        emitLabel(condLabel)
         val c = genExpr(cond)
         val ct = exprType(cond)
         val cBool = newReg()
         emit(s"  $cBool = icmp ne $ct $c, 0")
         emit(s"  br i1 $cBool, label %$bodyLabel, label %$endLabel")
-        emit(s"$bodyLabel:")
+        emitLabel(bodyLabel)
         val savedHR = hasReturned
         hasReturned = false
         for s <- body do if !hasReturned then genStmt(s)
         if !hasReturned then emit(s"  br label %$updateLabel")
-        emit(s"$updateLabel:")
+        emitLabel(updateLabel)
         if !hasReturned then genStmt(update)
         if !hasReturned then emit(s"  br label %$condLabel")
-        emit(s"$endLabel:")
+        emitLabel(endLabel)
         hasReturned = savedHR
         breakLabels.pop()
         continueLabels.pop()
@@ -455,19 +456,19 @@ class SyslLLVMCodegen:
         breakLabels.push(endLabel)
         continueLabels.push(condLabel)
         emit(s"  br label %$bodyLabel")
-        emit(s"$bodyLabel:")
+        emitLabel(bodyLabel)
         val savedHR = hasReturned
         hasReturned = false
         for s <- body do if !hasReturned then genStmt(s)
         if !hasReturned then emit(s"  br label %$condLabel")
-        emit(s"$condLabel:")
+        emitLabel(condLabel)
         if !hasReturned then
           val c = genExpr(cond)
           val ct = exprType(cond)
           val cBool = newReg()
           emit(s"  $cBool = icmp ne $ct $c, 0")
           emit(s"  br i1 $cBool, label %$bodyLabel, label %$endLabel")
-        emit(s"$endLabel:")
+        emitLabel(endLabel)
         hasReturned = savedHR
         breakLabels.pop()
         continueLabels.pop()
@@ -819,7 +820,7 @@ class SyslLLVMCodegen:
         val mergeLabel = newLabel("merge")
         emit(s"  br i1 $cBool, label %$thenLabel, label %$elseLabel")
 
-        emit(s"$thenLabel:")
+        emitLabel(thenLabel)
         val savedHasReturned = hasReturned
         hasReturned = false
         var thenVal = "0"
@@ -830,10 +831,11 @@ class SyslLLVMCodegen:
             case Some(other) => genStmt(other)
             case None =>
         val thenReturned = hasReturned
+        val thenExitBlock = currentBlock // may differ from thenLabel if nested if/else
         if !thenReturned then emit(s"  br label %$mergeLabel")
         hasReturned = savedHasReturned
 
-        emit(s"$elseLabel:")
+        emitLabel(elseLabel)
         var elseVal = "0"
         hasReturned = false
         elseBody.foreach { stmts =>
@@ -845,13 +847,14 @@ class SyslLLVMCodegen:
               case None =>
         }
         val elseReturned = hasReturned
+        val elseExitBlock = currentBlock // may differ from elseLabel if nested if/else
         if !elseReturned then emit(s"  br label %$mergeLabel")
         hasReturned = savedHasReturned
 
-        emit(s"$mergeLabel:")
+        emitLabel(mergeLabel)
         if !thenReturned && !elseReturned && t != "void" then
           val phi = newReg()
-          emit(s"  $phi = phi $t [ $thenVal, %$thenLabel ], [ $elseVal, %$elseLabel ]")
+          emit(s"  $phi = phi $t [ $thenVal, %$thenExitBlock ], [ $elseVal, %$elseExitBlock ]")
           phi
         else "0"
 
@@ -1112,7 +1115,7 @@ class SyslLLVMCodegen:
         val contLabel = newLabel("append_cont")
         emit(s"  br i1 $needGrow, label %$growLabel, label %$noGrowLabel")
         // Grow path
-        emit(s"$growLabel:")
+        emitLabel(growLabel)
         val isZero = newReg()
         emit(s"  $isZero = icmp eq i32 $curCap, 0")
         val newCap = newReg()
@@ -1134,10 +1137,10 @@ class SyslLLVMCodegen:
         emit(s"  $ignored = call i8* @memcpy(i8* $newBuf, i8* $curPtr, i64 $copySize)")
         emit(s"  br label %$contLabel")
         // No-grow path
-        emit(s"$noGrowLabel:")
+        emitLabel(noGrowLabel)
         emit(s"  br label %$contLabel")
         // Continue — phi for ptr and cap
-        emit(s"$contLabel:")
+        emitLabel(contLabel)
         val finalPtr = newReg()
         emit(s"  $finalPtr = phi i8* [ $newBuf, %$growLabel ], [ $curPtr, %$noGrowLabel ]")
         val finalCap = newReg()
@@ -1291,7 +1294,7 @@ class SyslLLVMCodegen:
         // Branch to first arm check
         emit(s"  br label %${if arms.nonEmpty then nextLabels(0) else defaultLabel}")
         for (arm, i) <- arms.zipWithIndex do
-          emit(s"${nextLabels(i)}:")
+          emitLabel(nextLabels(i))
           // Check patterns (OR — any pattern matching is enough)
           val matched = arm.patterns.map { pat =>
             pat match
@@ -1343,7 +1346,7 @@ class SyslLLVMCodegen:
               val guardLabel = newLabel("match_guard")
               val afterGuard = newLabel("match_after_guard")
               emit(s"  br i1 $finalCond, label %$guardLabel, label %${if i + 1 < arms.length then nextLabels(i + 1) else defaultLabel}")
-              emit(s"$guardLabel:")
+              emitLabel(guardLabel)
               val g = genExpr(guardExpr)
               val gBool = newReg()
               emit(s"  $gBool = icmp ne ${exprType(guardExpr)} $g, 0")
@@ -1360,7 +1363,7 @@ class SyslLLVMCodegen:
           else
             emit(s"  br i1 $guardedCond, label %${armLabels(i)}, label %${if i + 1 < arms.length then nextLabels(i + 1) else defaultLabel}")
           // Arm body
-          emit(s"${armLabels(i)}:")
+          emitLabel(armLabels(i))
           // Bind variant fields if this is a variant pattern
           arm.patterns.headOption match
             case Some(TVariantPattern(et, variantIdx, bindings, fieldTypes)) =>
@@ -1403,7 +1406,7 @@ class SyslLLVMCodegen:
           if !hasReturned then emit(s"  br label %$endLabel")
           hasReturned = savedHR
         // Default
-        emit(s"$defaultLabel:")
+        emitLabel(defaultLabel)
         default match
           case Some(stmts) if stmts.nonEmpty =>
             val savedHR = hasReturned
@@ -1420,7 +1423,7 @@ class SyslLLVMCodegen:
           case _ =>
             if resultLt != "void" then emit(s"  store $resultLt 0, $resultLt* $resultAlloca")
             emit(s"  br label %$endLabel")
-        emit(s"$endLabel:")
+        emitLabel(endLabel)
         if resultLt != "void" then
           val r = newReg()
           emit(s"  $r = load $resultLt, $resultLt* $resultAlloca")
@@ -1793,7 +1796,7 @@ class SyslLLVMCodegen:
     val isNull = newReg()
     emit(s"  $isNull = icmp eq i8* $ptr, null")
     emit(s"  br i1 $isNull, label %$skip, label %$doIncr")
-    emit(s"$doIncr:")
+    emitLabel(doIncr)
     // Get refcount pointer: ptr - headerOffset
     val base = newReg()
     emit(s"  $base = getelementptr i8, i8* $ptr, i64 -$headerOffset")
@@ -1806,12 +1809,12 @@ class SyslLLVMCodegen:
     emit(s"  $isImmortal = icmp eq i64 $rc, -1")
     val doStore = newLabel("rc_store")
     emit(s"  br i1 $isImmortal, label %$skip, label %$doStore")
-    emit(s"$doStore:")
+    emitLabel(doStore)
     val newRc = newReg()
     emit(s"  $newRc = add i64 $rc, 1")
     emit(s"  store i64 $newRc, i64* $rcPtr")
     emit(s"  br label %$skip")
-    emit(s"$skip:")
+    emitLabel(skip)
 
   /** Look up deinit function name for a RefType's inner type. */
   private def deinitFor(typ: SyslType): Option[String] = typ match
@@ -1828,7 +1831,7 @@ class SyslLLVMCodegen:
     val isNull = newReg()
     emit(s"  $isNull = icmp eq i8* $ptr, null")
     emit(s"  br i1 $isNull, label %$skip, label %$doDecr")
-    emit(s"$doDecr:")
+    emitLabel(doDecr)
     // Get refcount pointer
     val base = newReg()
     emit(s"  $base = getelementptr i8, i8* $ptr, i64 -$headerOffset")
@@ -1841,7 +1844,7 @@ class SyslLLVMCodegen:
     emit(s"  $isImmortal = icmp eq i64 $rc, -1")
     val doStore = newLabel("rcd_store")
     emit(s"  br i1 $isImmortal, label %$skip, label %$doStore")
-    emit(s"$doStore:")
+    emitLabel(doStore)
     val newRc = newReg()
     emit(s"  $newRc = sub i64 $rc, 1")
     emit(s"  store i64 $newRc, i64* $rcPtr")
@@ -1849,7 +1852,7 @@ class SyslLLVMCodegen:
     emit(s"  $isZero = icmp eq i64 $newRc, 0")
     val doFree = newLabel("rcd_free")
     emit(s"  br i1 $isZero, label %$doFree, label %$skip")
-    emit(s"$doFree:")
+    emitLabel(doFree)
     // Set refcount to IMMORTAL (-1) to prevent re-entrant deinit
     emit(s"  store i64 -1, i64* $rcPtr")
     // Call deinit if present (passes data pointer, not base)
@@ -1859,7 +1862,7 @@ class SyslLLVMCodegen:
     // Free the base allocation
     emit(s"  call void @free(i8* $base)")
     emit(s"  br label %$skip")
-    emit(s"$skip:")
+    emitLabel(skip)
 
   /** Decrement refcounts for all ref-typed locals before function exit. */
   private def emitReleaseRefs(): Unit =
@@ -1898,3 +1901,8 @@ class SyslLLVMCodegen:
   private def emit(line: String): Unit =
     out ++= line
     out += '\n'
+
+  /** Emit a basic block label and track it as the current block. */
+  private def emitLabel(label: String): Unit =
+    emit(s"$label:")
+    currentBlock = label
