@@ -55,6 +55,9 @@ class SyslLexical extends IndentationLexical(
       case sign ~ digits => (sign :: digits).mkString
     }
 
+  private def escapeHexDigit: Parser[Char] =
+    elem("hex digit", c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))
+
   private def escapeChar: Parser[Char] =
     '\\' ~> (
       elem('n') ^^^ '\n' |
@@ -63,7 +66,10 @@ class SyslLexical extends IndentationLexical(
       elem('0') ^^^ '\u0000' |
       elem('\\') ^^^ '\\' |
       elem('\'') ^^^ '\'' |
-      elem('"') ^^^ '"'
+      elem('"') ^^^ '"' |
+      elem('x') ~> escapeHexDigit ~ escapeHexDigit ^^ { case hi ~ lo =>
+        Integer.parseInt(s"$hi$lo", 16).toChar
+      }
     )
 
   // Interpolated string: s"..." — uses "s:" prefix in token value to mark it
