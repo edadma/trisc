@@ -1742,7 +1742,10 @@ class SyslLLVMCodegen:
     case SyslType.DoubleType => "double"
     case SyslType.VoidType => "void"
     case SyslType.StringType => "%struct.string"
-    case SyslType.StructType(name, _) => s"%struct.$name"
+    case st @ SyslType.StructType(name, _) =>
+      // Auto-register struct types encountered in signatures (e.g., built-in tuples)
+      if !structTypes.contains(name) then structTypes(name) = st
+      s"%struct.$name"
     case SyslType.ArrayType(elem, size) => s"[$size x ${llvmType(elem)}]"
     case et: SyslType.EnumType => s"[${et.sizeOf} x i8]" // opaque byte array for tagged union
     case SyslType.SliceType(_) => "%struct.slice"
