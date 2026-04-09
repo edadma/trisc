@@ -439,10 +439,9 @@ containing the escape sequence. No I/O is performed — the
 caller decides how to write it (puts, Writer, tty driver).
 This makes the module testable and composable.
 
-**Hex escape in ESC constant.** `val ESC = "\x1b"` requires
-the lexer to support `\x` hex escapes in string literals.
-This is the correct way to express the ESC byte — no
-workarounds.
+**Hex escape in ESC constant.** `val ESC = "\x1b"` uses
+the `\xNN` hex escape syntax in string literals to produce
+the ESC byte (0x1b = 27).
 
 **8-color model.** The basic 8 ANSI colors (0-7) cover
 all terminals. 256-color and true-color (24-bit) support
