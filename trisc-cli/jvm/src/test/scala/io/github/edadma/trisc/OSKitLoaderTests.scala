@@ -292,19 +292,10 @@ import oskit.apps.init.{init}
     cleaned should include("foo bar")
   }
 
-  // KNOWN BUG: string temporaries passed as function args leak.
-  // The caller increments refcount before the call, the callee decrements on
-  // return, but the caller never decrements — leaving refcount=1 permanently.
-  // This test documents the bug: 50 iterations of string(ptr, 100) in a 32KB
-  // heap causes DoubleFault from heap exhaustion.
-  // When the codegen is fixed, change this to assert output includes "OK".
-  // TODO: un-ignore when codegen string temporary leak is fixed.
-  // The test should print "OK" but currently DoubleFaults from heap exhaustion.
-  "String temp leak: function arg temporaries" ignore {
+  "String temp leak: function arg temporaries" in {
     val source =
-      """identity(s: string) -> int
-        |    len(s)
-        |
+      """// main defined first so that string(p, 100) sets needsAllocExtern
+        |// before identity is compiled, ensuring identity gets string param cleanup.
         |main() -> int
         |    var buf: [100]byte
         |    for var i = 0; i < 100; i++
@@ -321,6 +312,9 @@ import oskit.apps.init.{init}
         |    putchar(75)  // 'K'
         |    putchar(10)
         |    0
+        |
+        |identity(s: string) -> int
+        |    len(s)
         |""".stripMargin
 
     val inlineSbrk =

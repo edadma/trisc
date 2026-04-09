@@ -298,6 +298,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     case TBinary(left, "+", right, _) => for l <- constEval(left); r <- constEval(right) yield l + r
     case TBinary(left, "-", right, _) => for l <- constEval(left); r <- constEval(right) yield l - r
     case TBinary(left, "*", right, _) => for l <- constEval(left); r <- constEval(right) yield l * r
+    case TCast(inner, _) => constEval(inner) // pointer casts like *byte(0xC000)
     case _ => None
 
   // Emit load from [rBase + 0] into rDest, using width-appropriate instruction.
@@ -2138,6 +2139,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         val nRegArgs = allArgs.length.min(1)
         val stackArgs = allArgs.drop(1)
         val savedOffset = stackOffset
+        var stringArgPtrOffsets: List[Int] = Nil // fp-relative offsets of string arg ptrs needing refcount decrement
 
         def evalAndPush(arg: TExpr): Unit =
           val preOffset = stackOffset
@@ -2168,6 +2170,9 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  pshd r2")
             emit("  pshd r1")
             stackOffset -= 16
+            // Track ptr offset for post-call refcount decrement (matches refIncr conditions)
+            if needsAllocExtern && !arg.isInstanceOf[TBinary] then
+              stringArgPtrOffsets = stackOffset :: stringArgPtrOffsets
           else if arg.typ.isInstanceOf[SyslType.SliceType] then
             // Slice stack arg: copy 24-byte {ptr, len+cap, backref} inline, reclaim temp
             emit("  ldd r2, r1, r0")       // r2 = ptr (8 bytes)
@@ -2238,6 +2243,9 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  pshd r1")            // push ptr
             stackOffset -= 16
             regAggregateDataOffset = stackOffset
+            // Track ptr offset for post-call refcount decrement (matches refIncr conditions)
+            if needsAllocExtern && !arg.isInstanceOf[TBinary] then
+              stringArgPtrOffsets = stackOffset :: stringArgPtrOffsets
           else if arg.typ.isInstanceOf[SyslType.SliceType] then
             // Pre-evaluate slice register arg: copy 24-byte struct to a known stack location.
             val preOffset = stackOffset
@@ -2317,6 +2325,14 @@ class SyslTriscCodegen(addresses: Int = 4):
         // Call
         emit(s"  movi r4, $name")
         emit("  jalr r6, r4")
+        // Decrement refcounts for string arg temporaries (caller incremented before call,
+        // callee decremented its copy on return, but caller never decremented — leak fix)
+        for off <- stringArgPtrOffsets do
+          emit("  pshd r1")            // save return value
+          emitAddImm(1, 5, off)        // r1 = &ptr on stack (fp-relative)
+          emit("  ldd r1, r1, r0")     // r1 = ptr
+          emitRefDecr(1, 8)
+          emit("  popd r1")            // restore return value
         // Clean up stack args (NOT the return slot — caller needs it)
         val argsAllocated = savedOffset - stackOffset
         if argsAllocated != 0 then
