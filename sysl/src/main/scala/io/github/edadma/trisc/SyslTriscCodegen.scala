@@ -193,6 +193,8 @@ class SyslTriscCodegen(addresses: Int = 4):
   private val globals = new mutable.LinkedHashMap[String, SyslType]
   private var locals: mutable.LinkedHashMap[String, LocalVar] = null
   private var refParams: mutable.LinkedHashMap[String, SyslType.RefType] = null // ref-typed params for cleanup
+  /** String parameter names — borrowed from caller; do not decref in emitRefCleanup (caller incr/decr around the call). */
+  private var stringBorrowParams: Set[String] = Set.empty
   private var stackOffset: Int = 0
   private val savedScopes = new mutable.Stack[(Map[String, LocalVar], Int)]
   private val loopScopeOffsets = new mutable.Stack[Int]
@@ -428,7 +430,7 @@ class SyslTriscCodegen(addresses: Int = 4):
   // Decrement refcounts for all ref-typed and string-typed locals and params
   private def emitRefCleanup(): Unit =
     // Decrement owned locals (negative fp offsets)
-    for (_, local) <- locals if local.offset < 0 do
+    for (name, local) <- locals if local.offset < 0 do
       local.typ match
         case rt: SyslType.RefType =>
           val hoff = refHeaderOffset(rt)
@@ -438,12 +440,14 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitRefDecr(1, hoff, deinitFor(rt))
           emit("  popd r1")
         case SyslType.StringType if needsAllocExtern =>
-          // Only emit string cleanup when heap strings are possible (concat/allocation used)
-          emit("  pshd r1")
-          emitAddImm(1, 5, local.offset)
-          emit("  ldd r1, r1, r0")       // r1 = ptr field
-          emitRefDecr(1, 8)
-          emit("  popd r1")
+          // String params are borrowed (caller emitRefIncr before call, emitRefDecr after).
+          if stringBorrowParams.contains(name) then ()
+          else
+            emit("  pshd r1")
+            emitAddImm(1, 5, local.offset)
+            emit("  ldd r1, r1, r0")       // r1 = ptr field
+            emitRefDecr(1, 8)
+            emit("  popd r1")
         case _: SyslType.SliceType =>
           // Decrement backref (at slice offset +16) if non-null
           emit("  pshd r1")
@@ -461,9 +465,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       emit("  ldd r1, r1, r0")
       emitRefDecr(1, hoff, deinitFor(rt))
       emit("  popd r1")
-    // Note: string params are already handled by the locals loop above
-    // (string params are copied into locals during prologue, so they
-    // appear in the locals map with offset < 0 and get cleaned up there)
+    // String params: skipped in locals loop via stringBorrowParams (borrowed, not owned).
 
   // Allocate a local variable on the stack, return its offset from fp.
   // The variable is aligned to the greater of its natural alignment and 8
@@ -485,6 +487,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     currentFunction = fun
     locals = new mutable.LinkedHashMap
     refParams = new mutable.LinkedHashMap
+    stringBorrowParams = fun.params.collect { case p if p.typ == SyslType.StringType => p.name }.toSet
     stackOffset = 0
     deferStack.clear()
 
@@ -612,6 +615,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
     locals = null
     currentFunction = null
+    stringBorrowParams = Set.empty
 
   private def genClosureFunction(name: String, closure: TClosure): Unit =
     // Create a TFunDecl for the closure so we can reuse epilogue/return machinery
@@ -619,6 +623,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     currentFunction = fun
     locals = new mutable.LinkedHashMap
     refParams = new mutable.LinkedHashMap
+    stringBorrowParams = fun.params.collect { case p if p.typ == SyslType.StringType => p.name }.toSet
     stackOffset = 0
     deferStack.clear()
 
@@ -772,6 +777,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
     locals = null
     currentFunction = null
+    stringBorrowParams = Set.empty
 
   private def emitClosureEpilogue(nRegPushed: Int): Unit =
     emit("  mov r7, r5")

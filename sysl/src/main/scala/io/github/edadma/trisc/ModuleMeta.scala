@@ -39,6 +39,9 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
           buf ++= s"${vis}ENUM ${sym.name} ${et.toPrefix}\n"
         case SymbolMeta.Kind.Interface(it) =>
           buf ++= s"${vis}IFACE ${sym.name} ${it.toPrefix}\n"
+        case SymbolMeta.Kind.Impl(traitName, targetType, methods) =>
+          val m = methods.map((k, v) => s"$k=$v").mkString(" ")
+          buf ++= s"IMPL $traitName ${targetType.toPrefix} $m\n"
     // Emit generic enum instance mappings
     for inst <- genericEnumInstances do
       buf ++= s"GENINST ${inst.mangledName} ${inst.baseName} ${inst.typeArgs.length} ${inst.typeArgs.map(_.toPrefix).mkString(" ")}\n"
