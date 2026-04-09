@@ -561,6 +561,17 @@ class SyslSVMCodegen:
       emit("  push_1")
       emit(s"$endLabel:")
 
+    case TBinary(left, op @ ("+" | "-"), right, typ) if left.typ.isInstanceOf[SyslType.PtrType] =>
+      // Pointer arithmetic: scale the integer operand by pointee size
+      val pointee = left.typ.asInstanceOf[SyslType.PtrType].pointee
+      genExpr(left)
+      genExpr(right)
+      val elemSize = pointee.sizeOf
+      if elemSize != 1 then
+        emitPushInt(elemSize)
+        emit("  mul")
+      emitBinaryOp(op, SyslType.I64)
+
     case TBinary(left, op, right, typ) =>
       genExpr(left)
       genExpr(right)
