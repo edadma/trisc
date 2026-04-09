@@ -175,7 +175,7 @@ Tests
 ### equal
 
     #test
-    test_equal_same_contents() -> void
+    test_equal_same_contents() -> unit
         val a = new [3]int
         val b = new [3]int
 
@@ -189,7 +189,7 @@ Tests
         assert(equal(a[:], b[:]), "identical")
 
     #test
-    test_equal_different_values() -> void
+    test_equal_different_values() -> unit
         val a = new [3]int
         val b = new [3]int
 
@@ -203,7 +203,7 @@ Tests
         assert(!equal(a[:], b[:]), "last differs")
 
     #test
-    test_equal_different_lengths() -> void
+    test_equal_different_lengths() -> unit
         val a = new [2]int
         val b = new [3]int
 
@@ -216,7 +216,7 @@ Tests
         assert(!equal(a[:], b[:]), "length mismatch")
 
     #test
-    test_equal_empty() -> void
+    test_equal_empty() -> unit
         val a = new [0]int
         val b = new [0]int
 
@@ -226,7 +226,7 @@ Tests
 ### contains / index
 
     #test
-    test_contains_found() -> void
+    test_contains_found() -> unit
         val s = new [4]int
         s[0] = 10
         s[1] = 20
@@ -236,7 +236,7 @@ Tests
         assert(contains(s[:], 30), "found")
 
     #test
-    test_contains_not_found() -> void
+    test_contains_not_found() -> unit
         val s = new [3]int
         s[0] = 1
         s[1] = 2
@@ -245,12 +245,12 @@ Tests
         assert(!contains(s[:], 99), "missing")
 
     #test
-    test_contains_empty() -> void
+    test_contains_empty() -> unit
         val s = new [0]int
         assert(!contains(s[:], 1), "empty never contains")
 
     #test
-    test_index_first_occurrence() -> void
+    test_index_first_occurrence() -> unit
         val s = new [4]int
         s[0] = 1
         s[1] = 2
@@ -260,7 +260,7 @@ Tests
         assert(index(s[:], 2) == 1, "first 2")
 
     #test
-    test_index_not_found() -> void
+    test_index_not_found() -> unit
         val s = new [3]int
         s[0] = 1
         s[1] = 2
@@ -272,7 +272,7 @@ Tests
 ### clone
 
     #test
-    test_clone_independent() -> void
+    test_clone_independent() -> unit
         val src = new [3]int
         src[0] = 1
         src[1] = 2
@@ -288,7 +288,7 @@ Tests
         assert(c[2] == 3, "clone preserved byte 2")
 
     #test
-    test_clone_empty() -> void
+    test_clone_empty() -> unit
         val s = new [0]int
         val c = clone(s[:])
 
@@ -298,7 +298,7 @@ Tests
 ### reverse
 
     #test
-    test_reverse_odd_length() -> void
+    test_reverse_odd_length() -> unit
         val s = new [5]int
         s[0] = 1
         s[1] = 2
@@ -315,7 +315,7 @@ Tests
         assert(r[4] == 1, "fifth")
 
     #test
-    test_reverse_even_length() -> void
+    test_reverse_even_length() -> unit
         val s = new [4]int
         s[0] = 1
         s[1] = 2
@@ -328,7 +328,7 @@ Tests
         assert(r[3] == 1, "last")
 
     #test
-    test_reverse_single() -> void
+    test_reverse_single() -> unit
         val s = new [1]int
         s[0] = 42
 
@@ -337,7 +337,7 @@ Tests
         assert(r[0] == 42, "identity")
 
     #test
-    test_reverse_empty() -> void
+    test_reverse_empty() -> unit
         val s = new [0]int
         val r = reverse(s[:])
 
@@ -347,7 +347,7 @@ Tests
 ### fill
 
     #test
-    test_fill_replaces_all() -> void
+    test_fill_replaces_all() -> unit
         val s = new [4]int
         s[0] = 1
         s[1] = 2
@@ -362,7 +362,7 @@ Tests
         assert(s[3] == 99, "byte 3")
 
     #test
-    test_fill_empty_is_noop() -> void
+    test_fill_empty_is_noop() -> unit
         val s = new [0]int
         fill(s[:], 99)
 
@@ -370,7 +370,7 @@ Tests
 ### concat
 
     #test
-    test_concat_basic() -> void
+    test_concat_basic() -> unit
         val a = new [2]int
         val b = new [3]int
         a[0] = 1
@@ -389,7 +389,7 @@ Tests
         assert(c[4] == 5, "b[2]")
 
     #test
-    test_concat_empty_left() -> void
+    test_concat_empty_left() -> unit
         val a = new [0]int
         val b = new [2]int
         b[0] = 10
@@ -402,7 +402,7 @@ Tests
         assert(c[1] == 20, "b[1]")
 
     #test
-    test_concat_empty_right() -> void
+    test_concat_empty_right() -> unit
         val a = new [2]int
         val b = new [0]int
         a[0] = 10
@@ -415,7 +415,7 @@ Tests
         assert(c[1] == 20, "a[1]")
 
     #test
-    test_concat_both_empty() -> void
+    test_concat_both_empty() -> unit
         val a = new [0]int
         val b = new [0]int
 
@@ -427,7 +427,7 @@ Tests
 ### min / max
 
     #test
-    test_min_basic() -> void
+    test_min_basic() -> unit
         val s = new [4]int
         s[0] = 30
         s[1] = 10
@@ -437,14 +437,14 @@ Tests
         assert(min(s[:]) == 10, "smallest")
 
     #test
-    test_min_single() -> void
+    test_min_single() -> unit
         val s = new [1]int
         s[0] = 42
 
         assert(min(s[:]) == 42, "identity")
 
     #test
-    test_min_all_equal() -> void
+    test_min_all_equal() -> unit
         val s = new [3]int
         s[0] = 7
         s[1] = 7
@@ -453,7 +453,7 @@ Tests
         assert(min(s[:]) == 7, "all equal")
 
     #test
-    test_max_basic() -> void
+    test_max_basic() -> unit
         val s = new [4]int
         s[0] = 30
         s[1] = 10
@@ -463,19 +463,19 @@ Tests
         assert(max(s[:]) == 40, "largest")
 
     #test
-    test_max_single() -> void
+    test_max_single() -> unit
         val s = new [1]int
         s[0] = 42
 
         assert(max(s[:]) == 42, "identity")
 
     #test(should_panic: "empty slice")
-    test_min_empty_panics() -> void
+    test_min_empty_panics() -> unit
         val s = new [0]int
         val _ = min(s[:])
 
     #test(should_panic: "empty slice")
-    test_max_empty_panics() -> void
+    test_max_empty_panics() -> unit
         val s = new [0]int
         val _ = max(s[:])
 
@@ -483,7 +483,7 @@ Tests
 ### Generic instantiation — other types
 
     #test
-    test_contains_i64() -> void
+    test_contains_i64() -> unit
         val s = new [3]i64
         s[0] = 100i64
         s[1] = 200i64
@@ -493,7 +493,7 @@ Tests
         assert(!contains(s[:], 999i64), "missing i64")
 
     #test
-    test_clone_i64() -> void
+    test_clone_i64() -> unit
         val s = new [3]i64
         s[0] = 1i64
         s[1] = 2i64
@@ -506,7 +506,7 @@ Tests
         assert(c[2] == 3i64, "byte 2")
 
     #test
-    test_reverse_byte() -> void
+    test_reverse_byte() -> unit
         val s = new [3]byte
         s[0] = 10u8
         s[1] = 20u8

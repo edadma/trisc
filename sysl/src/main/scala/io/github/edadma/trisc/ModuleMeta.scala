@@ -6,12 +6,13 @@ case class SymbolMeta(name: String, typ: SymbolMeta.Kind, isPrivate: Boolean, is
 
 object SymbolMeta:
   enum Kind:
-    case Func(params: List[SyslType], returnType: SyslType)
+    case Func(params: List[SyslType], returnType: SyslType, isDef: Boolean = false)
     case Data(dataType: SyslType)
     case Struct(structType: SyslType.StructType)
     case Enum(enumType: SyslType.EnumType)
+    case Interface(ifaceType: SyslType.InterfaceType)
 
-class ModuleMeta(val symbols: List[SymbolMeta]):
+class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclAST] = Nil):
 
   def toSmeta: String =
     val buf = new StringBuilder
@@ -23,14 +24,23 @@ class ModuleMeta(val symbols: List[SymbolMeta]):
         currentSource = sym.sourceFile
       val vis = if sym.isPrivate then "PRIVATE " else ""
       sym.typ match
-        case SymbolMeta.Kind.Func(params, ret) =>
-          buf ++= s"${vis}FUNC ${sym.name} ${SyslType.funcSigToPrefix(params, ret)}\n"
+        case SymbolMeta.Kind.Func(params, ret, isDef) =>
+          val kw = if isDef then "DEFFUNC" else "FUNC"
+          buf ++= s"${vis}$kw ${sym.name} ${SyslType.funcSigToPrefix(params, ret)}\n"
         case SymbolMeta.Kind.Data(dataType) =>
           buf ++= s"${vis}DATA ${sym.name} ${dataType.toPrefix}\n"
         case SymbolMeta.Kind.Struct(st) =>
           buf ++= s"${vis}STRUCT ${sym.name} ${st.toPrefix}\n"
         case SymbolMeta.Kind.Enum(et) =>
           buf ++= s"${vis}ENUM ${sym.name} ${et.toPrefix}\n"
+        case SymbolMeta.Kind.Interface(it) =>
+          buf ++= s"${vis}IFACE ${sym.name} ${it.toPrefix}\n"
+    if genericTemplates.nonEmpty then
+      buf ++= "TEMPLATES\n"
+      for template <- genericTemplates do
+        buf ++= SyslPrettyPrinter.declToSource(template)
+        buf ++= "\n\n"
+      buf ++= "TEMPLATES_END\n"
     buf.toString
 
   def toAsmGlobals: String =
@@ -39,11 +49,11 @@ class ModuleMeta(val symbols: List[SymbolMeta]):
       if sym.isExtern then
         buf ++= s"extern ${sym.name}\n"
       else sym.typ match
-        case SymbolMeta.Kind.Func(params, ret) =>
+        case SymbolMeta.Kind.Func(params, ret, _) =>
           buf ++= s"global ${sym.name}, func, ${SyslType.funcSigToPrefix(params, ret)}\n"
         case SymbolMeta.Kind.Data(dataType) =>
           buf ++= s"global ${sym.name}, data, ${dataType.toPrefix}\n"
-        case SymbolMeta.Kind.Struct(_) | SymbolMeta.Kind.Enum(_) => // type-only, no asm global
+        case SymbolMeta.Kind.Struct(_) | SymbolMeta.Kind.Enum(_) | SymbolMeta.Kind.Interface(_) => // type-only, no asm global
     buf.toString
 
   def publicSymbols: List[SymbolMeta] =
@@ -59,7 +69,7 @@ class ModuleMeta(val symbols: List[SymbolMeta]):
   def merge(other: ModuleMeta): ModuleMeta =
     val replacedSources = other.symbols.flatMap(_.sourceFile).toSet
     val kept = symbols.filterNot(s => s.sourceFile.exists(replacedSources.contains))
-    new ModuleMeta(kept ++ other.symbols)
+    new ModuleMeta(kept ++ other.symbols, genericTemplates ++ other.genericTemplates)
 
   /** Get the set of source files that define the given symbol names. */
   def sourceFilesFor(names: Set[String]): Set[String] =
@@ -72,7 +82,7 @@ class ModuleMeta(val symbols: List[SymbolMeta]):
 object ModuleMeta:
 
   /** Bump this whenever the .smeta format changes. Stale files are silently ignored. */
-  val SMETA_VERSION = 2
+  val SMETA_VERSION = 5
 
   def fromProgram(program: TProgram, sourceFile: Option[String] = None): ModuleMeta =
     val syms = program.decls.collect {
@@ -85,12 +95,14 @@ object ModuleMeta:
         SymbolMeta(name, SymbolMeta.Kind.Enum(et), isPrivate = false, sourceFile = sourceFile)
       case TDataEnumDecl(name, et: SyslType.EnumType) =>
         SymbolMeta(name, SymbolMeta.Kind.Enum(et), isPrivate = false, sourceFile = sourceFile)
+      case TInterfaceDecl(name, ifaceType) =>
+        SymbolMeta(name, SymbolMeta.Kind.Interface(ifaceType), isPrivate = false, sourceFile = sourceFile)
       case TExternFuncDecl(name, params, returnType) =>
         SymbolMeta(name, SymbolMeta.Kind.Func(params, returnType), isPrivate = false, isExtern = true, sourceFile = sourceFile)
       case TExternVarDecl(name, typ) =>
         SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate = false, isExtern = true, sourceFile = sourceFile)
-      case TFunDecl(name, params, returnType, _, isPrivate, _) =>
-        SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType), isPrivate, sourceFile = sourceFile)
+      case TFunDecl(name, params, returnType, _, isPrivate, _, isDef) =>
+        SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType, isDef), isPrivate, sourceFile = sourceFile)
       case TVarDecl(name, typ, _, isPrivate) =>
         SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate, sourceFile = sourceFile)
     }
@@ -103,40 +115,69 @@ object ModuleMeta:
       var lineNum = 0
       var headerSeen = false
       var currentSource: Option[String] = None
+      var inTemplates = false
+      val templateBuf = new StringBuilder
 
       for rawLine <- source.linesIterator do
         lineNum += 1
-        val line = rawLine.trim
-        if line.nonEmpty then
-          if !headerSeen then
-            if !line.startsWith("SMETA") then break(None) // not a valid smeta file — treat as stale
-            val version = line.stripPrefix("SMETA").trim.stripPrefix("v").trim.toIntOption.getOrElse(0)
-            if version < SMETA_VERSION then break(None) // stale — caller should recompile from source
-            headerSeen = true
-          else if line.startsWith("SOURCE ") then
-            currentSource = Some(line.drop(7).trim)
+        if inTemplates then
+          if rawLine.trim == "TEMPLATES_END" then
+            inTemplates = false
           else
-            val (isPrivate, rest) = if line.startsWith("PRIVATE ") then (true, line.drop(8)) else (false, line)
-            val tokens = rest.split("\\s+").iterator
-            val kind = tokens.next()
-            val name = tokens.next()
-            kind match
-              case "FUNC" =>
-                val nparams = tokens.next().toInt
-                val params = (1 to nparams).map(_ => SyslType.parseType(tokens)).toList
-                val ret = SyslType.parseType(tokens)
-                syms += SymbolMeta(name, SymbolMeta.Kind.Func(params, ret), isPrivate, sourceFile = currentSource)
-              case "DATA" =>
-                val dataType = SyslType.parseType(tokens)
-                syms += SymbolMeta(name, SymbolMeta.Kind.Data(dataType), isPrivate, sourceFile = currentSource)
-              case "STRUCT" =>
-                val st = SyslType.parseType(tokens).asInstanceOf[SyslType.StructType]
-                syms += SymbolMeta(name, SymbolMeta.Kind.Struct(st), isPrivate, sourceFile = currentSource)
-              case "ENUM" =>
-                val et = SyslType.parseType(tokens).asInstanceOf[SyslType.EnumType]
-                syms += SymbolMeta(name, SymbolMeta.Kind.Enum(et), isPrivate, sourceFile = currentSource)
-              case other =>
-                throw IllegalArgumentException(s"line $lineNum: unknown symbol kind '$other'")
+            templateBuf ++= rawLine
+            templateBuf += '\n'
+        else
+          val line = rawLine.trim
+          if line.nonEmpty then
+            if !headerSeen then
+              if !line.startsWith("SMETA") then break(None) // not a valid smeta file — treat as stale
+              val version = line.stripPrefix("SMETA").trim.stripPrefix("v").trim.toIntOption.getOrElse(0)
+              if version < SMETA_VERSION then break(None) // stale — caller should recompile from source
+              headerSeen = true
+            else if line == "TEMPLATES" then
+              inTemplates = true
+            else if line.startsWith("SOURCE ") then
+              currentSource = Some(line.drop(7).trim)
+            else
+              val (isPrivate, rest) = if line.startsWith("PRIVATE ") then (true, line.drop(8)) else (false, line)
+              val tokens = rest.split("\\s+").iterator
+              val kind = tokens.next()
+              val name = tokens.next()
+              kind match
+                case "FUNC" | "DEFFUNC" =>
+                  val isDef = kind == "DEFFUNC"
+                  val nparams = tokens.next().toInt
+                  val params = (1 to nparams).map(_ => SyslType.parseType(tokens)).toList
+                  val ret = SyslType.parseType(tokens)
+                  syms += SymbolMeta(name, SymbolMeta.Kind.Func(params, ret, isDef), isPrivate, sourceFile = currentSource)
+                case "DATA" =>
+                  val dataType = SyslType.parseType(tokens)
+                  syms += SymbolMeta(name, SymbolMeta.Kind.Data(dataType), isPrivate, sourceFile = currentSource)
+                case "STRUCT" =>
+                  val st = SyslType.parseType(tokens).asInstanceOf[SyslType.StructType]
+                  syms += SymbolMeta(name, SymbolMeta.Kind.Struct(st), isPrivate, sourceFile = currentSource)
+                case "ENUM" =>
+                  val et = SyslType.parseType(tokens).asInstanceOf[SyslType.EnumType]
+                  syms += SymbolMeta(name, SymbolMeta.Kind.Enum(et), isPrivate, sourceFile = currentSource)
+                case "IFACE" =>
+                  val it = SyslType.parseType(tokens).asInstanceOf[SyslType.InterfaceType]
+                  syms += SymbolMeta(name, SymbolMeta.Kind.Interface(it), isPrivate, sourceFile = currentSource)
+                case other =>
+                  throw IllegalArgumentException(s"line $lineNum: unknown symbol kind '$other'")
 
       if !headerSeen then None
-      else Some(new ModuleMeta(syms.toList))
+      else
+        // Parse generic templates from the TEMPLATES section
+        val templates = if templateBuf.nonEmpty then
+          val parser = new SyslParser
+          parser.parseProgram(templateBuf.toString) match
+            case Right(ast) =>
+              ast.decls.filter {
+                case StructDeclAST(_, _, tps, _)           => tps.nonEmpty
+                case DataEnumDeclAST(_, _, tps, _)         => tps.nonEmpty
+                case FunDeclAST(_, _, _, _, _, tps, _, _, _) => tps.nonEmpty
+                case _                                      => false
+              }
+            case Left(_) => Nil // silently ignore parse failures in templates
+        else Nil
+        Some(new ModuleMeta(syms.toList, templates))

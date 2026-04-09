@@ -1,0 +1,35 @@
+std.process — Process control
+==============================
+
+Functions for process lifecycle and environment. All
+functions are `extern` — backed by the host runtime.
+
+    module std.process
+
+
+Functions
+---------
+
+### exit
+
+Terminate the process with the given exit code.
+
+    extern exit(code: int)
+
+### getenv
+
+Return the value of an environment variable.
+
+    extern getenv(name: string) -> string
+
+### argc
+
+Return the number of command-line arguments.
+
+    extern argc() -> int
+
+### argv
+
+Return the command-line argument at index `i`.
+
+    extern argv(i: int) -> string

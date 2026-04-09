@@ -1,0 +1,353 @@
+std.unicode — ASCII character classification and case conversion
+================================================================
+
+The `std.unicode` module provides character classification and
+case-conversion functions operating on runes (`int` values
+representing Unicode codepoints). All classification functions
+currently cover the ASCII range only; non-ASCII runes return
+`false` for classifiers and pass through unchanged for case
+conversion.
+
+The API is inspired by Go's `unicode` package, with a flat
+function namespace rather than lookup tables. A future version
+may extend coverage to the full Unicode range using generated
+tables.
+
+Dependencies: none.
+
+
+    module std.unicode
+
+
+Constants
+---------
+
+`MAX_ASCII` is the highest ASCII codepoint.
+`MAX_RUNE` is the highest valid Unicode codepoint.
+
+    val MAX_ASCII = 127
+    val MAX_RUNE = 1114111
+
+
+Classification
+--------------
+
+Every classifier takes a rune (`int`) and returns `bool`.
+
+### is_letter
+
+`is_letter(r)` returns `true` for ASCII letters a-z and A-Z.
+
+    is_letter(r: int) -> bool = (r >= 65 && r <= 90) || (r >= 97 && r <= 122)
+
+
+### is_digit
+
+`is_digit(r)` returns `true` for ASCII digits 0-9.
+
+    is_digit(r: int) -> bool = r >= 48 && r <= 57
+
+
+### is_upper
+
+`is_upper(r)` returns `true` for uppercase ASCII letters A-Z.
+
+    is_upper(r: int) -> bool = r >= 65 && r <= 90
+
+
+### is_lower
+
+`is_lower(r)` returns `true` for lowercase ASCII letters a-z.
+
+    is_lower(r: int) -> bool = r >= 97 && r <= 122
+
+
+### is_space
+
+`is_space(r)` returns `true` for ASCII whitespace: space (32),
+tab (9), newline (10), carriage return (13), form feed (12),
+and vertical tab (11).
+
+    is_space(r: int) -> bool = r == 32 || (r >= 9 && r <= 13)
+
+
+### is_alpha
+
+`is_alpha(r)` is an alias for `is_letter`.
+
+    is_alpha(r: int) -> bool = is_letter(r)
+
+
+### is_alnum
+
+`is_alnum(r)` returns `true` for ASCII letters and digits.
+
+    is_alnum(r: int) -> bool = is_letter(r) || is_digit(r)
+
+
+### is_punct
+
+`is_punct(r)` returns `true` for ASCII punctuation characters:
+`!` through `/` (33-47), `:` through `@` (58-64),
+`[` through backtick (91-96), and `{` through `~` (123-126).
+
+    is_punct(r: int) -> bool = (r >= 33 && r <= 47) || (r >= 58 && r <= 64) || (r >= 91 && r <= 96) || (r >= 123 && r <= 126)
+
+
+### is_print
+
+`is_print(r)` returns `true` for printable ASCII characters
+(space through tilde, 32-126).
+
+    is_print(r: int) -> bool = r >= 32 && r <= 126
+
+
+### is_control
+
+`is_control(r)` returns `true` for ASCII control characters
+(0-31 and 127).
+
+    is_control(r: int) -> bool = (r >= 0 && r <= 31) || r == 127
+
+
+### is_hex_digit
+
+`is_hex_digit(r)` returns `true` for hexadecimal digit
+characters: 0-9, a-f, A-F.
+
+    is_hex_digit(r: int) -> bool = (r >= 48 && r <= 57) || (r >= 65 && r <= 70) || (r >= 97 && r <= 102)
+
+
+Case conversion
+---------------
+
+### to_upper
+
+`to_upper(r)` converts a lowercase ASCII letter to uppercase.
+Non-lowercase runes pass through unchanged.
+
+    to_upper(r: int) -> int
+        if r >= 97 && r <= 122 then return r - 32
+        r
+
+
+### to_lower
+
+`to_lower(r)` converts an uppercase ASCII letter to lowercase.
+Non-uppercase runes pass through unchanged.
+
+    to_lower(r: int) -> int
+        if r >= 65 && r <= 90 then return r + 32
+        r
+
+
+Tests
+=====
+
+    import std.debug.{assert}
+
+
+### is_letter tests
+
+    #test
+    test_is_letter_upper() -> unit
+        assert(is_letter(65), "A is a letter")
+        assert(is_letter(90), "Z is a letter")
+
+    #test
+    test_is_letter_lower() -> unit
+        assert(is_letter(97), "a is a letter")
+        assert(is_letter(122), "z is a letter")
+
+    #test
+    test_is_letter_false() -> unit
+        assert(!is_letter(48), "0 is not a letter")
+        assert(!is_letter(32), "space is not a letter")
+        assert(!is_letter(64), "@ is not a letter")
+        assert(!is_letter(91), "[ is not a letter")
+
+
+### is_digit tests
+
+    #test
+    test_is_digit_true() -> unit
+        assert(is_digit(48), "0 is a digit")
+        assert(is_digit(57), "9 is a digit")
+        assert(is_digit(53), "5 is a digit")
+
+    #test
+    test_is_digit_false() -> unit
+        assert(!is_digit(65), "A is not a digit")
+        assert(!is_digit(47), "/ is not a digit")
+        assert(!is_digit(58), ": is not a digit")
+
+
+### is_upper / is_lower tests
+
+    #test
+    test_is_upper() -> unit
+        assert(is_upper(65), "A is upper")
+        assert(is_upper(90), "Z is upper")
+        assert(!is_upper(97), "a is not upper")
+        assert(!is_upper(48), "0 is not upper")
+
+    #test
+    test_is_lower() -> unit
+        assert(is_lower(97), "a is lower")
+        assert(is_lower(122), "z is lower")
+        assert(!is_lower(65), "A is not lower")
+        assert(!is_lower(48), "0 is not lower")
+
+
+### is_space tests
+
+    #test
+    test_is_space_common() -> unit
+        assert(is_space(32), "space")
+        assert(is_space(9), "tab")
+        assert(is_space(10), "newline")
+        assert(is_space(13), "carriage return")
+
+    #test
+    test_is_space_rare() -> unit
+        assert(is_space(12), "form feed")
+        assert(is_space(11), "vertical tab")
+
+    #test
+    test_is_space_false() -> unit
+        assert(!is_space(65), "A is not space")
+        assert(!is_space(48), "0 is not space")
+        assert(!is_space(0), "null is not space")
+
+
+### is_alnum tests
+
+    #test
+    test_is_alnum() -> unit
+        assert(is_alnum(65), "A is alnum")
+        assert(is_alnum(97), "a is alnum")
+        assert(is_alnum(48), "0 is alnum")
+        assert(!is_alnum(32), "space is not alnum")
+        assert(!is_alnum(33), "! is not alnum")
+
+
+### is_punct tests
+
+    #test
+    test_is_punct() -> unit
+        assert(is_punct(33), "! is punct")
+        assert(is_punct(46), ". is punct")
+        assert(is_punct(64), "@ is punct")
+        assert(is_punct(91), "[ is punct")
+        assert(is_punct(123), "{ is punct")
+        assert(is_punct(126), "~ is punct")
+        assert(!is_punct(65), "A is not punct")
+        assert(!is_punct(48), "0 is not punct")
+        assert(!is_punct(32), "space is not punct")
+
+
+### is_print tests
+
+    #test
+    test_is_print() -> unit
+        assert(is_print(32), "space is printable")
+        assert(is_print(126), "~ is printable")
+        assert(is_print(65), "A is printable")
+        assert(!is_print(31), "unit separator is not printable")
+        assert(!is_print(127), "DEL is not printable")
+        assert(!is_print(0), "null is not printable")
+
+
+### is_control tests
+
+    #test
+    test_is_control() -> unit
+        assert(is_control(0), "null is control")
+        assert(is_control(31), "unit separator is control")
+        assert(is_control(127), "DEL is control")
+        assert(!is_control(32), "space is not control")
+        assert(!is_control(65), "A is not control")
+
+
+### is_hex_digit tests
+
+    #test
+    test_is_hex_digit() -> unit
+        assert(is_hex_digit(48), "0 is hex")
+        assert(is_hex_digit(57), "9 is hex")
+        assert(is_hex_digit(65), "A is hex")
+        assert(is_hex_digit(70), "F is hex")
+        assert(is_hex_digit(97), "a is hex")
+        assert(is_hex_digit(102), "f is hex")
+        assert(!is_hex_digit(71), "G is not hex")
+        assert(!is_hex_digit(103), "g is not hex")
+        assert(!is_hex_digit(47), "/ is not hex")
+
+
+### Case conversion tests
+
+    #test
+    test_to_upper() -> unit
+        assert(to_upper(97) == 65, "a -> A")
+        assert(to_upper(122) == 90, "z -> Z")
+        assert(to_upper(109) == 77, "m -> M")
+
+    #test
+    test_to_upper_passthrough() -> unit
+        assert(to_upper(65) == 65, "A stays A")
+        assert(to_upper(48) == 48, "0 stays 0")
+        assert(to_upper(33) == 33, "! stays !")
+
+    #test
+    test_to_lower() -> unit
+        assert(to_lower(65) == 97, "A -> a")
+        assert(to_lower(90) == 122, "Z -> z")
+        assert(to_lower(77) == 109, "M -> m")
+
+    #test
+    test_to_lower_passthrough() -> unit
+        assert(to_lower(97) == 97, "a stays a")
+        assert(to_lower(48) == 48, "0 stays 0")
+        assert(to_lower(33) == 33, "! stays !")
+
+
+### Non-ASCII and boundary tests
+
+    #test
+    test_non_ascii_letter() -> unit
+        assert(!is_letter(233), "e-acute (0x00E9) is not ASCII letter")
+        assert(!is_letter(128), "128 is not ASCII letter")
+        assert(!is_letter(1114111), "MAX_RUNE is not ASCII letter")
+
+    #test
+    test_boundary_values() -> unit
+        assert(is_control(0), "0 is control")
+        assert(!is_letter(0), "0 is not letter")
+        assert(is_control(127), "127 is control")
+        assert(!is_print(127), "127 is not printable")
+        assert(!is_letter(128), "128 is not letter")
+        assert(!is_control(128), "128 is not control")
+
+    #test
+    test_non_ascii_case_passthrough() -> unit
+        assert(to_upper(233) == 233, "non-ASCII passes through to_upper")
+        assert(to_lower(233) == 233, "non-ASCII passes through to_lower")
+
+
+Design notes
+------------
+
+**ASCII only.** Full Unicode character classification requires
+large lookup tables generated from the Unicode Character
+Database. This module covers the ASCII subset, which is
+sufficient for lexers, parsers, and protocol handling. A future
+`std.unicode.tables` module can extend coverage using trie or
+bitmap-based lookup.
+
+**No locale.** Case conversion is locale-independent. The
+Turkish dotless-I problem and similar locale-sensitive
+mappings are out of scope.
+
+**Expression bodies.** Most classifiers are one-liners using
+expression-body syntax. This keeps the module concise and
+makes each function's logic immediately visible.

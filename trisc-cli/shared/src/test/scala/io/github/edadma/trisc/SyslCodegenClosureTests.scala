@@ -43,7 +43,7 @@ class SyslCodegenClosureTests extends SyslCodegenHelpers {
 
   "zero-capture closure" in {
     compileAndRun(
-      """apply(f: func(int) -> int, x: int) -> int = f(x)
+      """apply(f: (int) -> int, x: int) -> int = f(x)
         |
         |main() -> int = apply(x -> x + 1, 41)
         |""".stripMargin) shouldBe 42
@@ -51,7 +51,7 @@ class SyslCodegenClosureTests extends SyslCodegenHelpers {
 
   "multi-param closure" in {
     compileAndRun(
-      """apply2(f: func(int, int) -> int, a: int, b: int) -> int = f(a, b)
+      """apply2(f: (int, int) -> int, a: int, b: int) -> int = f(a, b)
         |
         |main() -> int = apply2((x, y) -> x + y, 20, 22)
         |""".stripMargin) shouldBe 42
@@ -59,7 +59,7 @@ class SyslCodegenClosureTests extends SyslCodegenHelpers {
 
   "zero-param closure" in {
     compileAndRun(
-      """call(f: func() -> int) -> int = f()
+      """call(f: () -> int) -> int = f()
         |
         |main() -> int = call(() -> 42)
         |""".stripMargin) shouldBe 42
@@ -68,7 +68,7 @@ class SyslCodegenClosureTests extends SyslCodegenHelpers {
   "closure assigned to variable" in {
     compileAndRun(
       """main() -> int
-        |    val f: func(int) -> int = x -> x * 2
+        |    val f: (int) -> int = x -> x * 2
         |    f(21)
         |""".stripMargin) shouldBe 42
   }
@@ -79,7 +79,7 @@ class SyslCodegenClosureTests extends SyslCodegenHelpers {
     compileMultiAndRun(allocSources(
       """import posix.stdlib.*
         |
-        |apply(f: func(int) -> int, x: int) -> int = f(x)
+        |apply(f: (int) -> int, x: int) -> int = f(x)
         |
         |main() -> int
         |    val a = 10
@@ -91,11 +91,11 @@ class SyslCodegenClosureTests extends SyslCodegenHelpers {
     compileMultiAndRun(allocSources(
       """import posix.stdlib.*
         |
-        |apply(f: func(int) -> int, x: int) -> int = f(x)
+        |apply(f: (int) -> int, x: int) -> int = f(x)
         |
         |main() -> int
         |    var a = 10
-        |    val f: func(int) -> int = x -> x + a
+        |    val f: (int) -> int = x -> x + a
         |    a = 100
         |    f(32)
         |""".stripMargin)) shouldBe 42
@@ -105,7 +105,7 @@ class SyslCodegenClosureTests extends SyslCodegenHelpers {
     compileMultiAndRun(allocSources(
       """import posix.stdlib.*
         |
-        |apply(f: func(int) -> int, x: int) -> int = f(x)
+        |apply(f: (int) -> int, x: int) -> int = f(x)
         |
         |main() -> int
         |    val a = 10
@@ -118,7 +118,7 @@ class SyslCodegenClosureTests extends SyslCodegenHelpers {
 
   "closure passed to higher-order function" in {
     compileAndRun(
-      """apply(f: func(int) -> int, x: int) -> int = f(x)
+      """apply(f: (int) -> int, x: int) -> int = f(x)
         |
         |main() -> int = apply(x -> x * 2, 21)
         |""".stripMargin) shouldBe 42
@@ -128,7 +128,7 @@ class SyslCodegenClosureTests extends SyslCodegenHelpers {
     compileMultiAndRun(allocSources(
       """import posix.stdlib.*
         |
-        |make_adder(n: int) -> func(int) -> int
+        |make_adder(n: int) -> (int) -> int
         |    val captured = n
         |    x -> x + captured
         |
@@ -142,7 +142,7 @@ class SyslCodegenClosureTests extends SyslCodegenHelpers {
 
   "closure with typed parameters" in {
     compileAndRun(
-      """apply(f: func(int) -> int, x: int) -> int = f(x)
+      """apply(f: (int) -> int, x: int) -> int = f(x)
         |
         |main() -> int = apply((x: int) -> x + 1, 41)
         |""".stripMargin) shouldBe 42
@@ -152,7 +152,7 @@ class SyslCodegenClosureTests extends SyslCodegenHelpers {
 
   "closure in arithmetic expression" in {
     compileAndRun(
-      """apply(f: func(int) -> int, x: int) -> int = f(x)
+      """apply(f: (int) -> int, x: int) -> int = f(x)
         |
         |main() -> int = apply(x -> x + 1, 20) + apply(x -> x + 1, 20)
         |""".stripMargin) shouldBe 42

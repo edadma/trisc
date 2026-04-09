@@ -1,0 +1,142 @@
+std.testing — Test helper functions
+====================================
+
+The `std.testing` module provides assertion helpers that
+reduce boilerplate in `#test` functions. Inspired by Go's
+`testing` package, each function compares a "got" value
+against a "want" value and panics with a descriptive message
+on mismatch.
+
+All assertions funnel through `std.debug.assert`, so they
+trigger the normal test-failure path under `sysl test` and
+the normal halt path under `sysl run`.
+
+Dependencies: `std.debug`.
+
+
+    module std.testing
+
+    import std.debug.{assert}
+
+
+Value assertions
+----------------
+
+`assert_eq` panics with "msg: got N, want M" when the two
+values differ. One overload per type because Sysl does not
+have ad-hoc polymorphism on parameter types.
+
+    assert_eq(got: int, want: int, msg: string) -> unit
+        assert(got == want, s"$msg: got $got, want $want")
+
+    assert_eq_i64(got: i64, want: i64, msg: string) -> unit
+        assert(got == want, s"$msg: got $got, want $want")
+
+    assert_eq_str(got: string, want: string, msg: string) -> unit
+        assert(got == want, s"$msg: got $got, want $want")
+
+`assert_eq_bool` formats bools manually because Sysl does
+not implicitly convert `bool` to `string` in interpolation.
+
+    assert_eq_bool(got: bool, want: bool, msg: string) -> unit
+        val g = if got then "true" else "false"
+        val w = if want then "true" else "false"
+        assert(got == want, s"$msg: got $g, want $w")
+
+`assert_eq_byte` casts to `int` for a readable message.
+
+    assert_eq_byte(got: byte, want: byte, msg: string) -> unit
+        assert(got == want, s"$msg: got ${int(got)}, want ${int(want)}")
+
+
+Slice assertions
+----------------
+
+`assert_slice_eq` first checks length, then compares
+element-by-element, reporting the index of the first
+mismatch.
+
+    assert_slice_eq(got: []byte, want: []byte, msg: string) -> unit
+        assert(len(got) == len(want), s"$msg: length mismatch: got ${len(got)}, want ${len(want)}")
+        for i in 0..<len(got)
+            assert(got[i] == want[i], s"$msg: byte $i: got ${int(got[i])}, want ${int(want[i])}")
+
+
+Inequality assertions
+---------------------
+
+`assert_ne` panics when two values *are* equal — the
+opposite of `assert_eq`.
+
+    assert_ne(got: int, want: int, msg: string) -> unit
+        assert(got != want, s"$msg: got $got, should not equal $want")
+
+    assert_ne_str(got: string, want: string, msg: string) -> unit
+        assert(got != want, s"$msg: got $got, should not equal $want")
+
+
+Range assertions
+----------------
+
+`assert_in_range` panics when `val_` falls outside the
+closed interval `[lo, hi]`.
+
+    assert_in_range(val_: int, lo: int, hi: int, msg: string) -> unit
+        assert(val_ >= lo, s"$msg: $val_ < lower bound $lo")
+        assert(val_ <= hi, s"$msg: $val_ > upper bound $hi")
+
+
+Tests
+=====
+
+    #test
+    test_assert_eq_passes() -> unit
+        assert_eq(42, 42, "int eq")
+
+    #test
+    test_assert_eq_i64_passes() -> unit
+        assert_eq_i64(100i64, 100i64, "i64 eq")
+
+    #test
+    test_assert_eq_str_passes() -> unit
+        assert_eq_str("hello", "hello", "str eq")
+
+    #test
+    test_assert_eq_bool_passes() -> unit
+        assert_eq_bool(true, true, "bool eq")
+
+    #test
+    test_assert_eq_byte_passes() -> unit
+        assert_eq_byte(byte(65), byte(65), "byte eq")
+
+    #test
+    test_assert_ne_passes() -> unit
+        assert_ne(1, 2, "int ne")
+
+    #test
+    test_assert_slice_eq_passes() -> unit
+        val a = [byte(1), byte(2), byte(3)]
+        val b = [byte(1), byte(2), byte(3)]
+        assert_slice_eq(a, b, "slice eq")
+
+    #test(should_panic)
+    test_assert_eq_panics_on_mismatch() -> unit
+        assert_eq(1, 2, "mismatch")
+
+    #test(should_panic)
+    test_assert_ne_panics_on_match() -> unit
+        assert_ne(5, 5, "matched")
+
+    #test(should_panic)
+    test_assert_slice_eq_panics_on_length() -> unit
+        val a = [byte(1), byte(2)]
+        val b = [byte(1)]
+        assert_slice_eq(a, b, "len")
+
+    #test
+    test_assert_in_range_passes() -> unit
+        assert_in_range(5, 1, 10, "range")
+
+    #test(should_panic)
+    test_assert_in_range_panics_below() -> unit
+        assert_in_range(0, 1, 10, "below")

@@ -62,7 +62,7 @@ class SyslCodegenByteSwapTests extends SyslCodegenHelpers {
         |        a[i] = b[i]
         |        b[i] = t
         |
-        |call_swap(base: *byte, i: int, j: int, size: int, swapper: func(*byte, *byte, int))
+        |call_swap(base: *byte, i: int, j: int, size: int, swapper: (*byte, *byte, int) -> unit)
         |    swapper(base + i * size, base + j * size, size)
         |
         |main() -> int

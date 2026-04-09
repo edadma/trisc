@@ -1,0 +1,376 @@
+std.path — Path manipulation
+=============================
+
+The `std.path` module provides functions for manipulating
+Unix-style slash-separated paths. It is inspired by Go's
+`path` and `path/filepath` packages but handles only forward
+slashes — there is no Windows backslash support.
+
+All functions treat paths as opaque byte strings. No
+filesystem access is performed; these are purely textual
+transformations.
+
+Dependencies: `std.builder` (for assembling result strings).
+
+
+    module std.path
+
+    import std.builder.*
+
+
+Queries
+-------
+
+### base
+
+`base(path)` returns the last element of the path. Trailing
+slashes are ignored. If the path is empty, `base` returns
+`"."`. If the path is just `"/"`, `base` returns `"/"`.
+
+    base(path: string) -> string
+        val n = len(path)
+
+        if n == 0 then return "."
+
+        // Strip trailing slashes
+        var hi = n
+
+        while hi> 1
+            if path[hi - 1] != byte('/') then break
+            hi--
+
+        // Root only
+        if hi== 1
+            if path[0] == byte('/') then return "/"
+
+        // Find last slash before hi
+        var i = hi- 1
+
+        while i >= 0
+            if path[i] == byte('/')
+                return substring(path, i + 1, hi)
+            i--
+
+        substring(path, 0, hi)
+
+
+### dir
+
+`dir(path)` returns all but the last element of the path —
+the directory portion. If the path contains no slashes, `dir`
+returns `"."`. Trailing slashes on the original path are
+ignored.
+
+    dir(path: string) -> string
+        val n = len(path)
+
+        if n == 0 then return "."
+
+        // Strip trailing slashes
+        var hi = n
+
+        while hi> 1
+            if path[hi - 1] != byte('/') then break
+            hi--
+
+        // Find last slash before hi
+        var i = hi- 1
+
+        while i >= 0
+            if path[i] == byte('/')
+                // Strip trailing slashes from dir part
+                var j = i
+
+                while j > 1
+                    if path[j - 1] != byte('/') then break
+                    j--
+
+                if j == 0 then return "/"
+
+                return substring(path, 0, j)
+
+            i--
+
+        "."
+
+
+### ext
+
+`ext(path)` returns the file extension, including the leading
+dot, of the last element in the path. If there is no dot in
+the base name, or the base name starts with a dot and has no
+other dot, it returns `""`.
+
+    ext(path: string) -> string
+        val n = len(path)
+
+        // Find the start of the base name (after last '/')
+        var base_start = 0
+        var i = n - 1
+
+        while i >= 0
+            if path[i] == byte('/')
+                base_start = i + 1
+                break
+            i--
+
+        // Find the last '.' in the base name
+        var dot = -1
+
+        i = n - 1
+
+        while i > base_start
+            if path[i] == byte('.')
+                dot = i
+                break
+            i--
+
+        if dot < 0 then return ""
+
+        substring(path, dot, n)
+
+
+### is_abs
+
+`is_abs(path)` returns `true` if the path begins with a
+slash.
+
+    is_abs(path: string) -> bool
+        if len(path) == 0 then return false
+
+        path[0] == byte('/')
+
+
+Helper: substring
+-----------------
+
+Extract `path[lo..hi]` as a new string via `StrBuilder`.
+
+    substring(s: string, lo: int, hi: int) -> string
+        var b = new_builder_cap(hi - lo)
+
+        for i in lo..<hi
+            b.write_byte(s[i])
+
+        b.to_str()
+
+
+Manipulation
+------------
+
+### join
+
+`join(a, b)` concatenates two path components with a single
+`/` between them. Leading slashes on `b` and trailing slashes
+on `a` are consumed so that the result never has doubled
+slashes at the join point. If either argument is empty, the
+other is returned unchanged.
+
+    join(a: string, b: string) -> string
+        if len(a) == 0 then return b
+        if len(b) == 0 then return a
+
+        // Strip trailing slashes from a
+        var a_end = len(a)
+
+        while a_end > 1
+            if a[a_end - 1] != byte('/') then break
+            a_end--
+
+        // Strip leading slashes from b
+        var b_start = 0
+
+        while b_start < len(b)
+            if b[b_start] != byte('/') then break
+            b_start++
+
+        var buf = new_builder_cap(a_end + 1 + len(b) - b_start)
+
+        for i in 0..<a_end
+            buf.write_byte(a[i])
+
+        buf.write_byte(byte('/'))
+
+        for i in b_start..<len(b)
+            buf.write_byte(b[i])
+
+        buf.to_str()
+
+
+### clean
+
+`clean(path)` returns a cleaned version of the path:
+duplicate slashes are collapsed to a single slash and
+trailing slashes are removed (except for the root `"/"`).
+An empty path returns `"."`.
+
+This version does not resolve `.` or `..` segments.
+
+    clean(path: string) -> string
+        val n = len(path)
+
+        if n == 0 then return "."
+
+        var buf = new_builder_cap(n)
+        var prev_slash = false
+
+        for i in 0..<n
+            val c = path[i]
+
+            if c == byte('/')
+                if !prev_slash
+                    buf.write_byte(c)
+
+                prev_slash = true
+            else
+                buf.write_byte(c)
+                prev_slash = false
+
+        // Remove trailing slash unless root
+        val result = buf.to_str()
+        val rn = len(result)
+
+        if rn > 1
+            if result[rn - 1] == byte('/')
+                return substring(result, 0, rn - 1)
+
+        result
+
+
+Tests
+=====
+
+### base
+
+    #test
+    test_base_multi() -> unit
+        assert(base("/a/b/c") == "c", "last element")
+
+    #test
+    test_base_root() -> unit
+        assert(base("/") == "/", "root")
+
+    #test
+    test_base_empty() -> unit
+        assert(base("") == ".", "empty path")
+
+    #test
+    test_base_single() -> unit
+        assert(base("a") == "a", "single element")
+
+    #test
+    test_base_abs_single() -> unit
+        assert(base("/a") == "a", "absolute single")
+
+
+### dir
+
+    #test
+    test_dir_multi() -> unit
+        assert(dir("/a/b/c") == "/a/b", "parent")
+
+    #test
+    test_dir_root() -> unit
+        assert(dir("/") == "/", "root")
+
+    #test
+    test_dir_empty() -> unit
+        assert(dir("") == ".", "empty path")
+
+    #test
+    test_dir_single() -> unit
+        assert(dir("a") == ".", "no slash")
+
+    #test
+    test_dir_abs_single() -> unit
+        assert(dir("/a") == "/", "root parent")
+
+
+### ext
+
+    #test
+    test_ext_txt() -> unit
+        assert(ext("foo.txt") == ".txt", "simple extension")
+
+    #test
+    test_ext_none() -> unit
+        assert(ext("foo") == "", "no extension")
+
+    #test
+    test_ext_multi_dot() -> unit
+        assert(ext("a/b.tar.gz") == ".gz", "last dot wins")
+
+    #test
+    test_ext_hidden() -> unit
+        assert(ext(".hidden") == "", "dotfile no ext")
+
+
+### is_abs
+
+    #test
+    test_is_abs_true() -> unit
+        assert(is_abs("/foo"), "starts with slash")
+
+    #test
+    test_is_abs_false() -> unit
+        assert(!is_abs("foo"), "relative")
+
+    #test
+    test_is_abs_empty() -> unit
+        assert(!is_abs(""), "empty")
+
+
+### join
+
+    #test
+    test_join_simple() -> unit
+        assert(join("a", "b") == "a/b", "basic join")
+
+    #test
+    test_join_slashes() -> unit
+        assert(join("/a/", "/b") == "/a/b", "strip extra slashes")
+
+    #test
+    test_join_empty_left() -> unit
+        assert(join("", "b") == "b", "empty left")
+
+    #test
+    test_join_empty_right() -> unit
+        assert(join("a", "") == "a", "empty right")
+
+
+### clean
+
+    #test
+    test_clean_double_slash() -> unit
+        assert(clean("a//b") == "a/b", "collapse slashes")
+
+    #test
+    test_clean_trailing() -> unit
+        assert(clean("/a/") == "/a", "remove trailing")
+
+    #test
+    test_clean_root() -> unit
+        assert(clean("/") == "/", "root unchanged")
+
+    #test
+    test_clean_empty() -> unit
+        assert(clean("") == ".", "empty becomes dot")
+
+
+Design notes
+------------
+
+**Unix-only.** This module uses `'/'` as the sole path
+separator. Windows support (backslash handling, drive
+letters, UNC paths) is out of scope; a future
+`std.path.windows` module can provide that if needed.
+
+**No `.` / `..` resolution.** The `clean` function currently
+only normalizes slashes. Resolving `.` and `..` requires
+careful handling of absolute vs relative paths and is
+deferred to a future enhancement.
+
+**No filesystem interaction.** These are pure string
+operations. Functions like `abs` (which resolves against the
+current working directory) belong in an OS-aware module.

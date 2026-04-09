@@ -40,7 +40,7 @@ at runtime, do not write it. Silently-disappearing checks are
 a common bug source and `std.debug.assert` does not introduce
 them.
 
-    assert(cond: bool, msg: string) -> void
+    assert(cond: bool, msg: string) -> unit
         if !cond then panic(msg)
 
 
@@ -54,7 +54,7 @@ the fall-through after a non-returning call. The message
 should explain *why* the programmer believes the path is
 unreachable.
 
-    unreachable(msg: string) -> void
+    unreachable(msg: string) -> unit
         panic("unreachable: " + msg)
 
 
@@ -70,7 +70,7 @@ to be done.
 `todo` is distinct from `unreachable` so that tooling can tell
 "not implemented yet" from "cannot happen".
 
-    todo(msg: string) -> void
+    todo(msg: string) -> unit
         panic("todo: " + msg)
 
 
@@ -78,19 +78,19 @@ Tests
 =====
 
     #test
-    test_assert_true_is_noop() -> void
+    test_assert_true_is_noop() -> unit
         assert(true, "should not fire")
 
     #test(should_panic: "math is broken")
-    test_assert_false_panics() -> void
+    test_assert_false_panics() -> unit
         assert(false, "math is broken")
 
     #test(should_panic: "unreachable: dead branch")
-    test_unreachable_panics_with_prefix() -> void
+    test_unreachable_panics_with_prefix() -> unit
         unreachable("dead branch")
 
     #test(should_panic: "todo: implement me")
-    test_todo_panics_with_prefix() -> void
+    test_todo_panics_with_prefix() -> unit
         todo("implement me")
 
 

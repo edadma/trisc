@@ -10,6 +10,8 @@ Dependencies: none.
 
     module std.crypto.sha256
 
+    import std.encoding.binary.{u32_be_at, put_u32_be_at}
+
 
 Constants
 ---------
@@ -66,8 +68,7 @@ Process a single 512-bit (64-byte) block, updating the
 
         // Load first 16 words (big-endian)
         for i in 0..<16
-            val j = off + i * 4
-            w[i] = (u32(block[j]) << 24u32) | (u32(block[j + 1]) << 16u32) | (u32(block[j + 2]) << 8u32) | u32(block[j + 3])
+            w[i] = u32_be_at(block, off + i * 4)
 
         // Expand to 64 words
         for i in 16..<64
@@ -174,11 +175,7 @@ digest to `out`.
 
         // Output state as big-endian bytes
         for i in 0..<8
-            val v = state[i]
-            out[i * 4]     = byte(v >> 24u32)
-            out[i * 4 + 1] = byte(v >> 16u32)
-            out[i * 4 + 2] = byte(v >> 8u32)
-            out[i * 4 + 3] = byte(v)
+            put_u32_be_at(out, i * 4, state[i])
 
 
 sha256_hw — hardware-accelerated path
@@ -198,8 +195,7 @@ MMIO writes (16 words instead of 64 bytes).
         val base = SHA_BASE
         // Write 16 big-endian words to SHA_TEXT[0..15]
         for i in 0..<16
-            val j = off + i * 4
-            val w = (u32(block[j]) << 24u32) | (u32(block[j + 1]) << 16u32) | (u32(block[j + 2]) << 8u32) | u32(block[j + 3])
+            val w = u32_be_at(block, off + i * 4)
             var p: *u32 = *u32(base + i * 4)
             *p = w
         // Trigger compression
@@ -217,11 +213,7 @@ registers into an output buffer.
         val base = SHA_BASE
         for i in 0..<8
             var p: *u32 = *u32(base + i * 4)
-            val v = *p
-            out[i * 4]     = byte(v >> 24u32)
-            out[i * 4 + 1] = byte(v >> 16u32)
-            out[i * 4 + 2] = byte(v >> 8u32)
-            out[i * 4 + 3] = byte(v)
+            put_u32_be_at(out, i * 4, *p)
 
 `sha256_hw(data, out)` — same interface as `sha256()` but
 uses the MMIO accelerator for the compression function.
@@ -275,7 +267,7 @@ Tests
 ### Sigma functions
 
     #test
-    test_small_sigma0() -> void
+    test_small_sigma0() -> unit
         // σ0(0x61626380) = rotr(x,7) ^ rotr(x,18) ^ (x >> 3)
         val x: u32 = 0x61626380u32
         val r = small_sigma0(x)
@@ -288,7 +280,7 @@ Tests
         assert(r == manual, s"sigma0 consistency: fn=${i64(r)} manual=${i64(manual)}")
 
     #test
-    test_message_schedule_w16() -> void
+    test_message_schedule_w16() -> unit
         // For "abc": w[0]=0x61626380, w[1..14]=0, w[15]=0x18
         // w[16] = σ1(w[14]) + w[9] + σ0(w[1]) + w[0]
         //       = σ1(0) + 0 + σ0(0) + 0x61626380
@@ -297,7 +289,7 @@ Tests
         assert(w16 == 0x61626380u32, s"w16: got ${i64(w16)}")
 
     #test
-    test_message_schedule_w17() -> void
+    test_message_schedule_w17() -> unit
         // w[17] = σ1(w[15]) + w[10] + σ0(w[2]) + w[1]
         //       = σ1(0x18) + 0 + σ0(0) + 0
         //       = σ1(0x18)
@@ -308,7 +300,7 @@ Tests
 ### K constants integrity
 
     #test
-    test_k_constants() -> void
+    test_k_constants() -> unit
         val expected: [64]u32 = [0x428a2f98u32, 0x71374491u32, 0xb5c0fbcfu32, 0xe9b5dba5u32, 0x3956c25bu32, 0x59f111f1u32, 0x923f82a4u32, 0xab1c5ed5u32, 0xd807aa98u32, 0x12835b01u32, 0x243185beu32, 0x550c7dc3u32, 0x72be5d74u32, 0x80deb1feu32, 0x9bdc06a7u32, 0xc19bf174u32, 0xe49b69c1u32, 0xefbe4786u32, 0x0fc19dc6u32, 0x240ca1ccu32, 0x2de92c6fu32, 0x4a7484aau32, 0x5cb0a9dcu32, 0x76f988dau32, 0x983e5152u32, 0xa831c66du32, 0xb00327c8u32, 0xbf597fc7u32, 0xc6e00bf3u32, 0xd5a79147u32, 0x06ca6351u32, 0x14292967u32, 0x27b70a85u32, 0x2e1b2138u32, 0x4d2c6dfcu32, 0x53380d13u32, 0x650a7354u32, 0x766a0abbu32, 0x81c2c92eu32, 0x92722c85u32, 0xa2bfe8a1u32, 0xa81a664bu32, 0xc24b8b70u32, 0xc76c51a3u32, 0xd192e819u32, 0xd6990624u32, 0xf40e3585u32, 0x106aa070u32, 0x19a4c116u32, 0x1e376c08u32, 0x2748774cu32, 0x34b0bcb5u32, 0x391c0cb3u32, 0x4ed8aa4au32, 0x5b9cca4fu32, 0x682e6ff3u32, 0x748f82eeu32, 0x78a5636fu32, 0x84c87814u32, 0x8cc70208u32, 0x90befffau32, 0xa4506cebu32, 0xbef9a3f7u32, 0xc67178f2u32]
         for i in 0..<64
             assert(K[i] == expected[i], s"K[$i]: got ${i64(K[i])} want ${i64(expected[i])}")
@@ -320,7 +312,7 @@ Expected:
 `e3b0c442 98fc1c14 9afbf4c8 996fb924 27ae41e4 649b934c a495991b 7852b855`
 
     #test
-    test_sha256_empty() -> void
+    test_sha256_empty() -> unit
         val empty: [0]byte = ""
         var out: [32]byte
         sha256(empty[:], out[:])
@@ -338,7 +330,7 @@ Expected:
 `ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad`
 
     #test
-    test_sha256_abc() -> void
+    test_sha256_abc() -> unit
         val msg: [3]byte = "abc"
         var out: [32]byte
         sha256(msg[:], out[:])
@@ -353,7 +345,7 @@ Expected:
 ### Block loading verification
 
     #test
-    test_block_loading_abc() -> void
+    test_block_loading_abc() -> unit
         var block: [128]byte = ""
         block[0] = byte('a')
         block[1] = byte('b')
@@ -396,7 +388,7 @@ Expected:
 ### SHA-256("a") — single byte
 
     #test
-    test_sha256_a() -> void
+    test_sha256_a() -> unit
         val msg: [1]byte = "a"
         var out: [32]byte
         sha256(msg[:], out[:])
@@ -411,7 +403,7 @@ Expected:
 ### Determinism
 
     #test
-    test_sha256_deterministic() -> void
+    test_sha256_deterministic() -> unit
         val msg: [5]byte = "hello"
 
         var out1: [32]byte
@@ -426,7 +418,7 @@ Expected:
 ### Different inputs produce different hashes
 
     #test
-    test_sha256_different_inputs() -> void
+    test_sha256_different_inputs() -> unit
         val msg1: [1]byte = "a"
         val msg2: [1]byte = "b"
 
@@ -446,7 +438,7 @@ Expected:
 ### SHA-256("hello") — full verification
 
     #test
-    test_sha256_hello() -> void
+    test_sha256_hello() -> unit
         val msg: [5]byte = "hello"
         var out: [32]byte
         sha256(msg[:], out[:])
@@ -464,7 +456,7 @@ The 448-bit test vector. The message is exactly 56 bytes,
 which forces the padding into a second block.
 
     #test
-    test_sha256_two_block() -> void
+    test_sha256_two_block() -> unit
         val msg: [56]byte = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
         var out: [32]byte
         sha256(msg[:], out[:])

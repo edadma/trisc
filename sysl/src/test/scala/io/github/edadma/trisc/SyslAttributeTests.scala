@@ -11,7 +11,7 @@ class SyslAttributeTests extends SyslTestHelpers {
     "flag attribute on function" in {
       val ast = parse(
         """#test
-          |foo() -> void = 0
+          |foo() -> unit = 0
           |""".stripMargin)
       val f = ast.decls.collect { case f: FunDeclAST => f }.head
       f.attributes.map(_.name) shouldBe List("test")
@@ -21,7 +21,7 @@ class SyslAttributeTests extends SyslTestHelpers {
     "string argument" in {
       val ast = parse(
         """#test("basic copy")
-          |foo() -> void = 0
+          |foo() -> unit = 0
           |""".stripMargin)
       val attr = ast.decls.collect { case f: FunDeclAST => f }.head.attributes.head
       attr.name shouldBe "test"
@@ -31,7 +31,7 @@ class SyslAttributeTests extends SyslTestHelpers {
     "bare identifier as flag arg" in {
       val ast = parse(
         """#test(should_panic)
-          |foo() -> void = 0
+          |foo() -> unit = 0
           |""".stripMargin)
       val attr = ast.decls.collect { case f: FunDeclAST => f }.head.attributes.head
       attr.args shouldBe List(AttrPositional(AttrLitIdent("should_panic")))
@@ -40,7 +40,7 @@ class SyslAttributeTests extends SyslTestHelpers {
     "named string argument" in {
       val ast = parse(
         """#test(should_panic: "bad input")
-          |foo() -> void = 0
+          |foo() -> unit = 0
           |""".stripMargin)
       val attr = ast.decls.collect { case f: FunDeclAST => f }.head.attributes.head
       attr.args shouldBe List(AttrNamed("should_panic", AttrLitString("bad input")))
@@ -50,7 +50,7 @@ class SyslAttributeTests extends SyslTestHelpers {
       val ast = parse(
         """#inline
           |#test
-          |foo() -> void = 0
+          |foo() -> unit = 0
           |""".stripMargin)
       val f = ast.decls.collect { case f: FunDeclAST => f }.head
       f.attributes.map(_.name) shouldBe List("inline", "test")
@@ -69,7 +69,7 @@ class SyslAttributeTests extends SyslTestHelpers {
     "unknown attribute name is stored as-is" in {
       val ast = parse(
         """#quirk(42, true)
-          |foo() -> void = 0
+          |foo() -> unit = 0
           |""".stripMargin)
       val f = ast.decls.collect { case f: FunDeclAST => f }.head
       f.attributes.head.name shouldBe "quirk"
@@ -100,23 +100,23 @@ class SyslAttributeTests extends SyslTestHelpers {
     "test function with params is rejected" in {
       val err = analyze(
         """#test
-          |bad(x: int) -> void = 0
+          |bad(x: int) -> unit = 0
           |""".stripMargin).left.toOption.get
       err should include ("zero parameters")
     }
 
-    "test function with non-void return is rejected" in {
+    "test function with non-unit return is rejected" in {
       val err = analyze(
         """#test
           |bad() -> int = 42
           |""".stripMargin).left.toOption.get
-      err should include ("void")
+      err should include ("unit")
     }
 
-    "valid zero-arg void test is accepted" in {
+    "valid zero-arg unit test is accepted" in {
       analyze(
         """#test
-          |good() -> void = 0
+          |good() -> unit = 0
           |
           |main() -> int = 0
           |""".stripMargin).isRight shouldBe true
@@ -216,7 +216,7 @@ class SyslAttributeTests extends SyslTestHelpers {
   "runNamed invocation" - {
     "calls a zero-arg function by name without invoking main" in {
       val Right(ast) = (new SyslParser).parseProgram(
-        """target() -> void
+        """target() -> unit
           |    panic("hit target")
           |
           |main() -> int = 0

@@ -10,11 +10,12 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
     val doc = new LiterateParser().parse(raw)
     LiterateRenderer.tangle(doc)
 
-  private lazy val debugSysl  = readLsysl("std/debug/debug.lsysl")
-  private lazy val memSysl    = readLsysl("std/mem/mem.lsysl")
-  private lazy val sha256Sysl = readLsysl("std/crypto/sha256/sha256.lsysl")
-  private lazy val hmacSysl   = readLsysl("std/crypto/hmac/hmac.lsysl")
-  private lazy val pbkdf2Sysl = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
+  private lazy val debugSysl   = readLsysl("std/debug/debug.lsysl")
+  private lazy val memSysl     = readLsysl("std/mem/mem.lsysl")
+  private lazy val binarySysl  = readLsysl("std/encoding/binary/binary.lsysl")
+  private lazy val sha256Sysl  = readLsysl("std/crypto/sha256/sha256.lsysl")
+  private lazy val hmacSysl    = readLsysl("std/crypto/hmac/hmac.lsysl")
+  private lazy val pbkdf2Sysl  = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
 
   private lazy val allocSource  = scala.io.Source.fromFile("posix/stdlib/alloc.sysl").mkString
   private lazy val stringSource = scala.io.Source.fromFile("posix/string/string.sysl").mkString
@@ -46,6 +47,7 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
     "posix/stdlib/alloc"         -> allocSource,
     "std/debug/debug"            -> debugSysl,
     "std/mem/mem"                -> memSysl,
+    "std/encoding/binary/binary" -> binarySysl,
     "std/crypto/sha256/sha256"   -> sha256Sysl,
     "std/crypto/hmac/hmac"       -> hmacSysl,
     "std/crypto/pbkdf2/pbkdf2"   -> pbkdf2Sysl,

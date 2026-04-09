@@ -156,4 +156,76 @@ class SyslCrossUnitTypeTests extends SyslTestHelpers {
         et.variants(1)._1 shouldBe "None"
       case _ => fail("expected Enum kind")
   }
+
+  // ===== Struct as field type across units =====
+
+  "imported struct used as field type (wildcard)" in {
+    evalWithLibs(
+      Map(
+        "mylib/types/types" ->
+          """module mylib.types
+            |struct Point
+            |    x: int
+            |    y: int
+            |""".stripMargin,
+      ),
+      """import mylib.types.*
+        |struct Line
+        |    start: Point
+        |    end_: Point
+        |
+        |main() -> int
+        |    var l: Line
+        |    l.start = Point(10, 20)
+        |    l.end_ = Point(30, 12)
+        |    l.start.x + l.end_.y
+        |""".stripMargin
+    ) shouldBe 22
+  }
+
+  "imported struct used as field type (named import)" in {
+    evalWithLibs(
+      Map(
+        "mylib/io/io" ->
+          """module mylib.io
+            |struct ByteReader
+            |    pos: int
+            |""".stripMargin,
+      ),
+      """import mylib.io.{ByteReader}
+        |struct BufReader
+        |    inner: ByteReader
+        |    count: int
+        |
+        |main() -> int
+        |    var br: BufReader
+        |    br.inner = ByteReader(0)
+        |    br.count = 42
+        |    br.inner.pos + br.count
+        |""".stripMargin
+    ) shouldBe 42
+  }
+
+  "imported struct as field type — module path matches source" in {
+    evalWithLibs(
+      Map(
+        "mylib/io/io" ->
+          """module mylib.io
+            |struct ByteReader
+            |    data: []byte
+            |    pos: int
+            |""".stripMargin,
+      ),
+      """import mylib.io.{ByteReader}
+        |struct BufReader
+        |    inner: ByteReader
+        |    count: int
+        |
+        |main() -> int
+        |    var br: BufReader
+        |    br.count = 42
+        |    br.count
+        |""".stripMargin
+    ) shouldBe 42
+  }
 }

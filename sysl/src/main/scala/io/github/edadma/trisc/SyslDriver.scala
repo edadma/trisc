@@ -19,7 +19,7 @@ case class CompilationResult(
     packageMetas: Map[String, ModuleMeta] = Map.empty,
 )
 
-class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, config: Map[String, String] = Map.empty):
+class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, config: Map[String, String] = Map.empty, tangler: Option[String => String] = None):
 
   case class DriverError(msg: String) extends RuntimeException(msg)
 
@@ -117,25 +117,47 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         }
 
       // Register imports from previously compiled modules (or stdlib)
-      for imp <- imports(name) do
-        if SyslStdlib.modules.contains(imp.modulePath) then
-          analyzer.registerImport(SyslStdlib.meta(imp.modulePath), imp.selectors)
+      for imp0 <- imports(name) do
+        // Resolve QualifiedImport ambiguity: import std.strings could be a qualified
+        // module import (access as strings.foo) or a single-symbol import (import "strings" from "std").
+        // Try full path as module first; if not found, fall back to last-segment-as-name.
+        val imp = imp0.selectors match
+          case List(QualifiedImport) =>
+            def isKnownModule(path: String): Boolean =
+              smetaCache.contains(path) ||
+                packageMetaCache.contains(path) || resolveExternalMeta(path).isDefined
+            if isKnownModule(imp0.modulePath) then imp0 // full path is a module → qualified import
+            else
+              // Fall back: treat last segment as a named import from parent path
+              val parts = imp0.modulePath.split("/")
+              if parts.length >= 2 then
+                ImportDeclAST(parts.init.mkString("/"), List(NamedImport(parts.last)))
+              else imp0
+          case _ => imp0
+        if packageMetaCache.contains(imp.modulePath) then
+          analyzer.registerImport(packageMetaCache(imp.modulePath), imp.selectors, imp.modulePath)
         else if smetaCache.contains(imp.modulePath) then
-          ModuleMeta.fromSmeta(smetaCache(imp.modulePath)).foreach(analyzer.registerImport(_, imp.selectors))
-        else if packageMetaCache.contains(imp.modulePath) then
-          analyzer.registerImport(packageMetaCache(imp.modulePath), imp.selectors)
+          ModuleMeta.fromSmeta(smetaCache(imp.modulePath)).foreach(analyzer.registerImport(_, imp.selectors, imp.modulePath))
         else
           // Try resolving from file system
           resolveExternalMeta(imp.modulePath) match
             case Some(meta) =>
               packageMetaCache(imp.modulePath) = meta
-              analyzer.registerImport(meta, imp.selectors)
+              analyzer.registerImport(meta, imp.selectors, imp.modulePath)
             case None =>
               throw DriverError(s"$name: import '${imp.modulePath}' not found (not in source set)")
 
       val typed = analyzer.analyze(ast)
       val modPath = modules.get(name)
-      val meta = ModuleMeta.fromProgram(typed, if modPath.isDefined then Some(s"$name.sysl") else None)
+      // Extract generic templates from the source AST for cross-module generic instantiation
+      val templates = ast.decls.filter {
+        case StructDeclAST(_, _, tps, _) => tps.nonEmpty
+        case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
+        case FunDeclAST(_, _, _, _, _, tps, _, _, _) => tps.nonEmpty
+        case _ => false
+      }
+      val baseMeta = ModuleMeta.fromProgram(typed, if modPath.isDefined then Some(s"$name.sysl") else None)
+      val meta = new ModuleMeta(baseMeta.symbols, templates)
       val smeta = meta.toSmeta
 
       modPath match
@@ -178,12 +200,24 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
     val visiting = new mutable.LinkedHashSet[String]
     val result = new mutable.ListBuffer[String]
 
+    // For QualifiedImport, the module path might be the full path (e.g., "posix/string/memset").
+    // Try the full path first; if not found, try parent path (e.g., "posix/string").
+    def resolveDepPath(imp: ImportDeclAST): String =
+      imp.selectors match
+        case List(QualifiedImport) =>
+          val path = imp.modulePath
+          if allNames.contains(path) || moduleToSources.contains(path) then path
+          else
+            val parts = path.split("/")
+            if parts.length >= 2 then parts.init.mkString("/") else path
+        case _ => imp.modulePath
+
     def visit(name: String): Unit =
       if visiting.contains(name) then
         throw DriverError(s"circular dependency involving '$name'")
       if !visited.contains(name) then
         visiting += name
-        for dep <- imports.getOrElse(name, Nil).map(_.modulePath).distinct do
+        for dep <- imports.getOrElse(name, Nil).map(resolveDepPath).distinct do
           if allNames.contains(dep) then
             visit(dep)
           else
@@ -199,7 +233,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
 
   def collectStdlibImports(units: List[CompilationUnit]): Set[String] =
     units.flatMap(_.typed.decls).collect {
-      case TImportDecl(path) if SyslStdlib.modules.contains(path) => path
+      case TImportDecl(path) if SyslStdlib.builtinModules.contains(path) => path
     }.toSet
 
   /** Resolve conditional compilation directives in a parsed AST. */
@@ -226,6 +260,32 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
       case CondEq(name, value) => config.get(name).contains(value)
       case CondNeq(name, value) => !config.get(name).contains(value)
 
+  private def compileExternalFile(source: String): Option[ModuleMeta] =
+    val parser = new SyslParser
+    parser.parseProgram(source) match
+      case Right(ast) =>
+        // Strip imports and test functions — we only need declarations for metadata.
+        // This allows .lsysl files that import test utilities to still provide metadata.
+        val stripped = ProgramAST(ast.decls.filter {
+          case _: ImportDeclAST  => false
+          case f: FunDeclAST     => !f.attributes.exists(_.name == "test")
+          case _                 => true
+        })
+        // Extract generic templates (structs, enums, functions with type params)
+        val templates = stripped.decls.filter {
+          case StructDeclAST(_, _, tps, _) => tps.nonEmpty
+          case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
+          case FunDeclAST(_, _, _, _, _, tps, _, _, _) => tps.nonEmpty
+          case _ => false
+        }
+        scala.util.Try {
+          val analyzer = new SyslAnalyzer
+          val typed = analyzer.analyze(stripped)
+          val meta = ModuleMeta.fromProgram(typed)
+          new ModuleMeta(meta.symbols, templates)
+        }.toOption
+      case Left(_) => None
+
   /** Try to resolve an import path from the file system by looking for a .smeta file. */
   private def resolveExternalMeta(modulePath: String): Option[ModuleMeta] =
     fileOps match
@@ -244,13 +304,22 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
             ModuleMeta.fromSmeta(io.readFile(smetaPath))
           else if io.exists(filePath) then
             // Single file module — compile it on demand
-            val source = io.readFile(filePath)
-            val parser = new SyslParser
-            parser.parseProgram(source) match
-              case Right(ast) =>
-                val analyzer = new SyslAnalyzer
-                val typed = analyzer.analyze(ast)
-                Some(ModuleMeta.fromProgram(typed))
-              case Left(_) => None
-          else None
+            compileExternalFile(io.readFile(filePath))
+          else
+            // Try .lsysl (literate source) — requires tangler
+            val lsyslPath = s"${io.joinPath(base, modulePath)}.lsysl"
+            if tangler.isDefined && io.exists(lsyslPath) then
+              compileExternalFile(tangler.get(io.readFile(lsyslPath)))
+            else
+              // Try directory with .lsysl files inside
+              if tangler.isDefined && io.exists(dirPath) && io.isDirectory(dirPath) then
+                val lsyslFiles = io.listFiles(dirPath).filter(_.endsWith(".lsysl"))
+                if lsyslFiles.nonEmpty then
+                  val metas = lsyslFiles.flatMap { f =>
+                    compileExternalFile(tangler.get(io.readFile(f)))
+                  }
+                  if metas.nonEmpty then Some(metas.reduce(_.merge(_)))
+                  else None
+                else None
+              else None
         }.nextOption()

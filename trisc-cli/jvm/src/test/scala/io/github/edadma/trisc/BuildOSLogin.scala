@@ -20,9 +20,10 @@ class BuildOSLogin extends OSKitTestHelpers {
   private lazy val nshSysl: String    = readLsysl("oskit/apps/nsh.lsysl")
   private lazy val initSysl: String   = readLsysl("oskit/apps/init.lsysl")
   private lazy val loginSysl: String  = readLsysl("oskit/apps/login.lsysl")
-  private lazy val debugSysl: String  = readLsysl("std/debug/debug.lsysl")
-  private lazy val memSysl: String    = readLsysl("std/mem/mem.lsysl")
-  private lazy val sha256Sysl: String = readLsysl("std/crypto/sha256/sha256.lsysl")
+  private lazy val debugSysl: String   = readLsysl("std/debug/debug.lsysl")
+  private lazy val memSysl: String     = readLsysl("std/mem/mem.lsysl")
+  private lazy val binarySysl: String  = readLsysl("std/encoding/binary/binary.lsysl")
+  private lazy val sha256Sysl: String  = readLsysl("std/crypto/sha256/sha256.lsysl")
   private lazy val hmacSysl: String   = readLsysl("std/crypto/hmac/hmac.lsysl")
   private lazy val pbkdf2Sysl: String = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
 
@@ -46,6 +47,7 @@ class BuildOSLogin extends OSKitTestHelpers {
       "posix/stdlib/alloc"         -> posixAllocSysl,
       "std/debug/debug"             -> debugSysl,
       "std/mem/mem"                 -> memSysl,
+      "std/encoding/binary/binary" -> binarySysl,
       "std/crypto/sha256/sha256"   -> sha256Sysl,
       "std/crypto/hmac/hmac"       -> hmacSysl,
       "std/crypto/pbkdf2/pbkdf2"   -> pbkdf2Sysl,

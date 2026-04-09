@@ -56,7 +56,7 @@ class SyslCodegenPointerCastTests extends SyslCodegenHelpers {
       """helper() -> int = 42
         |
         |main() -> int
-        |    val f: func() -> int = helper
+        |    val f: () -> int = helper
         |    if bool(f) then 1 else 0
         |""".stripMargin) shouldBe 1
   }

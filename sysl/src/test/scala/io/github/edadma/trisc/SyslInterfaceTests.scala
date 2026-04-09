@@ -159,4 +159,31 @@ class SyslInterfaceTests extends SyslTestHelpers {
         |    st.val_
         |""".stripMargin) shouldBe 42
   }
+
+  // ===== Cross-unit (module-mangled methods) =====
+
+  "interface works across compilation units" in {
+    evalWithLibs(
+      Map(
+        "mylib/io/io" ->
+          """module mylib.io
+            |
+            |interface Reader
+            |    read() -> int
+            |
+            |struct ByteReader
+            |    value: int
+            |
+            |ByteReader.read() -> int = self.value
+            |
+            |use_reader(r: Reader) -> int = r.read()
+            |""".stripMargin,
+      ),
+      """import mylib.io.*
+        |main() -> int
+        |    var br = ByteReader(42)
+        |    use_reader(br)
+        |""".stripMargin
+    ) shouldBe 42
+  }
 }

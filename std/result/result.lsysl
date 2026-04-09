@@ -123,13 +123,13 @@ distinct error types as the `E` in `Result[T, E]`.
 ### Construction and inspection
 
     #test
-    test_is_ok_on_ok() -> void
+    test_is_ok_on_ok() -> unit
         val r: Result[int, ParseErr] = Ok(42)
         assert(is_ok(r), "Ok is ok")
         assert(!is_err(r), "Ok is not err")
 
     #test
-    test_is_ok_on_err() -> void
+    test_is_ok_on_err() -> unit
         val r: Result[int, ParseErr] = Err(Empty)
         assert(!is_ok(r), "Err is not ok")
         assert(is_err(r), "Err is err")
@@ -138,12 +138,12 @@ distinct error types as the `E` in `Result[T, E]`.
 ### unwrap
 
     #test
-    test_unwrap_returns_ok_value() -> void
+    test_unwrap_returns_ok_value() -> unit
         val r: Result[int, ParseErr] = Ok(42)
         assert(unwrap(r) == 42, "gets value")
 
     #test(should_panic: "unwrap on Err")
-    test_unwrap_panics_on_err() -> void
+    test_unwrap_panics_on_err() -> unit
         val r: Result[int, ParseErr] = Err(BadInput(0))
         val _ = unwrap(r)
 
@@ -151,12 +151,12 @@ distinct error types as the `E` in `Result[T, E]`.
 ### expect
 
     #test
-    test_expect_returns_ok_value() -> void
+    test_expect_returns_ok_value() -> unit
         val r: Result[int, ParseErr] = Ok(99)
         assert(expect(r, "should exist") == 99, "gets value")
 
     #test(should_panic: "missing user record")
-    test_expect_panics_with_custom_message() -> void
+    test_expect_panics_with_custom_message() -> unit
         val r: Result[int, ParseErr] = Err(BadInput(0))
         val _ = expect(r, "missing user record")
 
@@ -164,12 +164,12 @@ distinct error types as the `E` in `Result[T, E]`.
 ### unwrap_or
 
     #test
-    test_unwrap_or_returns_value_on_ok() -> void
+    test_unwrap_or_returns_value_on_ok() -> unit
         val r: Result[int, ParseErr] = Ok(42)
         assert(unwrap_or(r, 0) == 42, "Ok")
 
     #test
-    test_unwrap_or_returns_default_on_err() -> void
+    test_unwrap_or_returns_default_on_err() -> unit
         val r: Result[int, ParseErr] = Err(Empty)
         assert(unwrap_or(r, 99) == 99, "default")
 
@@ -177,7 +177,7 @@ distinct error types as the `E` in `Result[T, E]`.
 ### unwrap_err
 
     #test
-    test_unwrap_err_returns_error() -> void
+    test_unwrap_err_returns_error() -> unit
         val r: Result[int, ParseErr] = Err(OutOfRange(999))
         val e = unwrap_err(r)
 
@@ -189,7 +189,7 @@ distinct error types as the `E` in `Result[T, E]`.
         assert(ok, "got OutOfRange with value 999")
 
     #test(should_panic: "unwrap_err on Ok")
-    test_unwrap_err_panics_on_ok() -> void
+    test_unwrap_err_panics_on_ok() -> unit
         val r: Result[int, ParseErr] = Ok(42)
         val _ = unwrap_err(r)
 
@@ -210,7 +210,7 @@ write in their own code.
         Ok(v * 2)
 
     #test
-    test_question_unwraps_ok() -> void
+    test_question_unwraps_ok() -> unit
         val r = double_positive(21)
 
         r match
@@ -218,7 +218,7 @@ write in their own code.
             Err(_) -> panic("expected Ok")
 
     #test
-    test_question_propagates_err() -> void
+    test_question_propagates_err() -> unit
         val r = double_positive(-5)
 
         val got_bad_input = r match
@@ -231,7 +231,7 @@ write in their own code.
         assert(got_bad_input, "got BadInput")
 
     #test
-    test_question_propagates_err_too_large() -> void
+    test_question_propagates_err_too_large() -> unit
         val r = double_positive(200)
 
         val got_out_of_range = r match
@@ -252,7 +252,7 @@ write in their own code.
         Ok(x + y)
 
     #test
-    test_chained_both_ok() -> void
+    test_chained_both_ok() -> unit
         val r = validate_sum(10, 32)
 
         r match
@@ -260,7 +260,7 @@ write in their own code.
             Err(_) -> panic("expected Ok")
 
     #test
-    test_chained_first_fails() -> void
+    test_chained_first_fails() -> unit
         val r = validate_sum(-1, 50)
 
         val got_bad_input = r match
@@ -273,7 +273,7 @@ write in their own code.
         assert(got_bad_input, "got BadInput from first arg")
 
     #test
-    test_chained_second_fails() -> void
+    test_chained_second_fails() -> unit
         val r = validate_sum(10, 500)
 
         val got_out_of_range = r match
@@ -289,7 +289,7 @@ write in their own code.
 ### Mixed with unwrap / unwrap_or
 
     #test
-    test_unwrap_or_pipeline() -> void
+    test_unwrap_or_pipeline() -> unit
         val sum = unwrap_or(validate_sum(10, 20), -1)
         assert(sum == 30, "success")
 

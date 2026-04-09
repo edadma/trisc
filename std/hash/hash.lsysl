@@ -1,0 +1,175 @@
+std.hash — Generic hash interface
+==================================
+
+Defines the `Hash` interface for cryptographic and
+non-cryptographic hash functions. Inspired by Go's
+`hash.Hash` interface.
+
+A `Hash` accumulates data via `write` and produces
+a digest via `sum`. Concrete implementations wrap
+specific algorithms (e.g., SHA-256).
+
+Dependencies: std.io (Writer interface).
+
+
+    module std.hash
+
+    import std.debug.{assert}
+    import std.io.{Writer}
+
+
+Interface
+---------
+
+`Hash` extends `Writer` — you feed data by calling
+`write(data)`, then call `sum(out)` to get the digest.
+
+    interface Hash
+        Writer
+        sum(out: []byte)
+        reset()
+        size() -> int
+        block_size() -> int
+
+
+Sha256Hash
+----------
+
+Wraps `std.crypto.sha256.sha256` in a `Hash`-compatible
+struct. Buffers all input and hashes on `sum`. Not
+streaming — suitable for small to medium inputs.
+
+    import std.crypto.sha256.{sha256}
+    import std.mem.{copy}
+
+    struct Sha256Hash
+        buf: []byte
+
+    new_sha256() -> Sha256Hash
+        return Sha256Hash((new [0]byte)[:0])
+
+    Sha256Hash.write(data: []byte) -> int
+        val n = len(data)
+        for i in 0..<n
+            self.buf = append(self.buf, data[i])
+        return n
+
+    Sha256Hash.sum(out: []byte)
+        sha256(self.buf, out)
+
+    Sha256Hash.reset()
+        self.buf = (new [0]byte)[:0]
+
+    Sha256Hash.size() -> int = 32
+
+    Sha256Hash.block_size() -> int = 64
+
+
+Utilities
+---------
+
+### hash_bytes
+
+`hash_bytes(h, data, out)` is a convenience that resets,
+writes, and sums in one call.
+
+    hash_bytes(h: Hash, data: []byte, out: []byte)
+        h.reset()
+        val _ = h.write(data)
+        h.sum(out)
+
+
+Tests
+=====
+
+
+### Sha256Hash direct
+
+    #test
+    test_sha256hash_empty() -> unit
+        var h = new_sha256()
+        var out: [32]byte
+        h.sum(out[:])
+        // e3b0c442...
+        assert(out[0] == 0xe3u8, s"byte 0: ${int(out[0])}")
+        assert(out[1] == 0xb0u8, s"byte 1: ${int(out[1])}")
+        assert(out[31] == 0x55u8, s"byte 31: ${int(out[31])}")
+
+    #test
+    test_sha256hash_abc() -> unit
+        var h = new_sha256()
+        val data: [3]byte = "abc"
+        val _ = h.write(data[:])
+        var out: [32]byte
+        h.sum(out[:])
+        assert(out[0] == 0xbau8, s"byte 0: ${int(out[0])}")
+        assert(out[3] == 0xbfu8, s"byte 3: ${int(out[3])}")
+
+    #test
+    test_sha256hash_incremental() -> unit
+        var h = new_sha256()
+        val d1: [2]byte = "ab"
+        val d2: [1]byte = "c"
+        val _ = h.write(d1[:])
+        val _ = h.write(d2[:])
+        var out: [32]byte
+        h.sum(out[:])
+        // Same as sha256("abc")
+        assert(out[0] == 0xbau8, "byte 0")
+        assert(out[3] == 0xbfu8, "byte 3")
+
+    #test
+    test_sha256hash_reset() -> unit
+        var h = new_sha256()
+        val data: [3]byte = "abc"
+        val _ = h.write(data[:])
+        h.reset()
+        var out: [32]byte
+        h.sum(out[:])
+        // After reset, should hash empty
+        assert(out[0] == 0xe3u8, "byte 0 after reset")
+
+    #test
+    test_sha256hash_size() -> unit
+        var h = new_sha256()
+        assert(h.size() == 32, "size")
+        assert(h.block_size() == 64, "block_size")
+
+
+### Hash interface dispatch
+
+    #test
+    test_hash_interface() -> unit
+        var h = new_sha256()
+        val data: [3]byte = "abc"
+        var out: [32]byte
+        hash_bytes(h, data[:], out[:])
+        assert(out[0] == 0xbau8, "byte 0 via interface")
+        assert(out[3] == 0xbfu8, "byte 3 via interface")
+
+    #test
+    test_hash_writer_interface() -> unit
+        var h = new_sha256()
+        val data: [5]byte = "hello"
+        // write via Writer interface (Hash embeds Writer)
+        val n = h.write(data[:])
+        assert(n == 5, "wrote 5")
+        var out: [32]byte
+        h.sum(out[:])
+        // sha256("hello") starts with 2c f2 4d ba
+        assert(out[0] == 0x2cu8, s"byte 0: ${int(out[0])}")
+        assert(out[1] == 0xf2u8, s"byte 1: ${int(out[1])}")
+
+
+Design notes
+------------
+
+**Buffered, not streaming.** `Sha256Hash` buffers all input
+and calls the one-shot `sha256()` on `sum`. A true streaming
+implementation would maintain the compression state and
+process blocks incrementally. This is deferred until there's
+a performance need.
+
+**Hash extends Writer.** This matches Go's `hash.Hash` which
+embeds `io.Writer`. Any function that accepts a `Writer` can
+write into a hash.

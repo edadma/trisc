@@ -89,7 +89,7 @@ Tests
 ### PBKDF2 c=1
 
     #test
-    test_pbkdf2_c1() -> void
+    test_pbkdf2_c1() -> unit
         val password: [8]byte = "password"
         val salt: [4]byte = "salt"
         var out: [32]byte
@@ -105,7 +105,7 @@ Tests
 ### PBKDF2 c=2
 
     #test
-    test_pbkdf2_c2() -> void
+    test_pbkdf2_c2() -> unit
         val password: [8]byte = "password"
         val salt: [4]byte = "salt"
         var out: [32]byte
@@ -121,7 +121,7 @@ Tests
 ### PBKDF2 short password and salt
 
     #test
-    test_pbkdf2_short() -> void
+    test_pbkdf2_short() -> unit
         val password: [4]byte = "pass"
         val salt: [2]byte = "sa"
         var out: [32]byte
@@ -137,7 +137,7 @@ Tests
 ### PBKDF2 c=100
 
     #test
-    test_pbkdf2_c100() -> void
+    test_pbkdf2_c100() -> unit
         val password: [8]byte = "password"
         val salt: [4]byte = "salt"
         var out: [32]byte
@@ -153,7 +153,7 @@ Tests
 ### Determinism
 
     #test
-    test_pbkdf2_deterministic() -> void
+    test_pbkdf2_deterministic() -> unit
         val password: [4]byte = "test"
         val salt: [4]byte = "salt"
         var out1: [32]byte

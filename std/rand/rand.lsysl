@@ -100,7 +100,7 @@ Tests
 =====
 
     #test
-    test_seed_produces_deterministic_sequence() -> void
+    test_seed_produces_deterministic_sequence() -> unit
         seed(42i64)
         val a = next()
         val b = next()
@@ -111,14 +111,14 @@ Tests
         assert(b == d, "second matches")
 
     #test
-    test_next_int_non_negative() -> void
+    test_next_int_non_negative() -> unit
         seed(123i64)
 
         for i in 0..<100
             assert(next_int() >= 0, "non-negative")
 
     #test
-    test_next_range_bounds() -> void
+    test_next_range_bounds() -> unit
         seed(456i64)
 
         for i in 0..<100
@@ -127,7 +127,7 @@ Tests
             assert(r < 20, "upper bound")
 
     #test
-    test_next_f64_bounds() -> void
+    test_next_f64_bounds() -> unit
         seed(789i64)
 
         for i in 0..<100
@@ -136,7 +136,7 @@ Tests
             assert(r < 1.0, "upper bound")
 
     #test
-    test_different_seeds_produce_different_sequences() -> void
+    test_different_seeds_produce_different_sequences() -> unit
         seed(1i64)
         val a = next()
         seed(2i64)
@@ -144,7 +144,7 @@ Tests
         assert(a != b, "different seeds differ")
 
     #test
-    test_seed_zero_treated_as_one() -> void
+    test_seed_zero_treated_as_one() -> unit
         seed(0i64)
         seed(1i64)
         val a = next()
@@ -153,7 +153,7 @@ Tests
         assert(a == b, "seed(0) == seed(1)")
 
     #test
-    test_shuffle_preserves_elements() -> void
+    test_shuffle_preserves_elements() -> unit
         seed(42i64)
         val s = new [5]int
         s[0] = 10
@@ -173,7 +173,7 @@ Tests
         assert(sum == 150, "sum preserved")
 
     #test
-    test_shuffle_changes_order() -> void
+    test_shuffle_changes_order() -> unit
         seed(42i64)
         val s = new [10]int
 

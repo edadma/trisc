@@ -6,7 +6,7 @@ class SyslClosureTests extends SyslTestHelpers {
 
   "zero-capture closure" in {
     eval(
-      """apply(f: func(int) -> int, x: int) -> int = f(x)
+      """apply(f: (int) -> int, x: int) -> int = f(x)
         |
         |main() -> int = apply(x -> x + 1, 41)
         |""".stripMargin) shouldBe 42
@@ -14,7 +14,7 @@ class SyslClosureTests extends SyslTestHelpers {
 
   "multi-param closure" in {
     eval(
-      """apply2(f: func(int, int) -> int, a: int, b: int) -> int = f(a, b)
+      """apply2(f: (int, int) -> int, a: int, b: int) -> int = f(a, b)
         |
         |main() -> int = apply2((x, y) -> x + y, 20, 22)
         |""".stripMargin) shouldBe 42
@@ -22,7 +22,7 @@ class SyslClosureTests extends SyslTestHelpers {
 
   "zero-param closure" in {
     eval(
-      """call(f: func() -> int) -> int = f()
+      """call(f: () -> int) -> int = f()
         |
         |main() -> int = call(() -> 42)
         |""".stripMargin) shouldBe 42
@@ -31,7 +31,7 @@ class SyslClosureTests extends SyslTestHelpers {
   "closure assigned to variable" in {
     eval(
       """main() -> int
-        |    val f: func(int) -> int = x -> x * 2
+        |    val f: (int) -> int = x -> x * 2
         |    f(21)
         |""".stripMargin) shouldBe 42
   }
@@ -40,7 +40,7 @@ class SyslClosureTests extends SyslTestHelpers {
 
   "capture local variable" in {
     eval(
-      """apply(f: func(int) -> int, x: int) -> int = f(x)
+      """apply(f: (int) -> int, x: int) -> int = f(x)
         |
         |main() -> int
         |    val a = 10
@@ -50,11 +50,11 @@ class SyslClosureTests extends SyslTestHelpers {
 
   "capture is frozen (by value)" in {
     eval(
-      """apply(f: func(int) -> int, x: int) -> int = f(x)
+      """apply(f: (int) -> int, x: int) -> int = f(x)
         |
         |main() -> int
         |    var a = 10
-        |    val f: func(int) -> int = x -> x + a
+        |    val f: (int) -> int = x -> x + a
         |    a = 100
         |    f(32)
         |""".stripMargin) shouldBe 42
@@ -62,7 +62,7 @@ class SyslClosureTests extends SyslTestHelpers {
 
   "capture multiple variables" in {
     eval(
-      """apply(f: func(int) -> int, x: int) -> int = f(x)
+      """apply(f: (int) -> int, x: int) -> int = f(x)
         |
         |main() -> int
         |    val a = 10
@@ -75,7 +75,7 @@ class SyslClosureTests extends SyslTestHelpers {
 
   "closure passed to higher-order function" in {
     eval(
-      """apply(f: func(int) -> int, x: int) -> int = f(x)
+      """apply(f: (int) -> int, x: int) -> int = f(x)
         |
         |main() -> int = apply(x -> x * 2, 21)
         |""".stripMargin) shouldBe 42
@@ -83,7 +83,7 @@ class SyslClosureTests extends SyslTestHelpers {
 
   "closure as return value" in {
     eval(
-      """make_adder(n: int) -> func(int) -> int
+      """make_adder(n: int) -> (int) -> int
         |    val captured = n
         |    x -> x + captured
         |
@@ -97,7 +97,7 @@ class SyslClosureTests extends SyslTestHelpers {
 
   "closure with typed parameters" in {
     eval(
-      """apply(f: func(int) -> int, x: int) -> int = f(x)
+      """apply(f: (int) -> int, x: int) -> int = f(x)
         |
         |main() -> int = apply((x: int) -> x + 1, 41)
         |""".stripMargin) shouldBe 42
@@ -107,7 +107,7 @@ class SyslClosureTests extends SyslTestHelpers {
 
   "closure in arithmetic expression" in {
     eval(
-      """apply(f: func(int) -> int, x: int) -> int = f(x)
+      """apply(f: (int) -> int, x: int) -> int = f(x)
         |
         |main() -> int = apply(x -> x + 1, 20) + apply(x -> x + 1, 20)
         |""".stripMargin) shouldBe 42

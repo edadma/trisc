@@ -80,6 +80,7 @@ class SyslLLVMCodegen:
         case _: TEnumDecl => // type only
         case _: TDataEnumDecl => // type only
         case _: TTypeAliasDecl => // type only
+        case _: TInterfaceDecl => // type only
         case f: TFunDecl => genFunction(f)
         case TVarDecl(name, typ, init, _) =>
           val initVal = constValue(init, typ)

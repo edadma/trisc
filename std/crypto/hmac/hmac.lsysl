@@ -115,7 +115,7 @@ Tests
 Key = 20 bytes of 0x0b, data = "Hi There".
 
     #test
-    test_hmac_rfc4231_tc1() -> void
+    test_hmac_rfc4231_tc1() -> unit
         var key: [20]byte
         for i in 0..<20
             key[i] = 0x0bu8
@@ -136,7 +136,7 @@ Key = 20 bytes of 0x0b, data = "Hi There".
 Key = "Jefe", data = "what do ya want for nothing?".
 
     #test
-    test_hmac_rfc4231_tc2() -> void
+    test_hmac_rfc4231_tc2() -> unit
         val key: [4]byte = "Jefe"
         val msg: [28]byte = "what do ya want for nothing?"
         var out: [32]byte
@@ -154,7 +154,7 @@ Key = "Jefe", data = "what do ya want for nothing?".
 Key = 20 bytes of 0xaa, data = 50 bytes of 0xdd.
 
     #test
-    test_hmac_rfc4231_tc3() -> void
+    test_hmac_rfc4231_tc3() -> unit
         var key: [20]byte
         for i in 0..<20
             key[i] = 0xaau8
@@ -176,7 +176,7 @@ Key = 20 bytes of 0xaa, data = 50 bytes of 0xdd.
 ### Short key and message
 
     #test
-    test_hmac_short() -> void
+    test_hmac_short() -> unit
         val key: [3]byte = "key"
         val msg: [3]byte = "msg"
         var out: [32]byte
@@ -192,7 +192,7 @@ Key = 20 bytes of 0xaa, data = 50 bytes of 0xdd.
 ### Empty message
 
     #test
-    test_hmac_empty_message() -> void
+    test_hmac_empty_message() -> unit
         val key: [6]byte = "secret"
         val empty: [0]byte = ""
         var out: [32]byte
@@ -208,7 +208,7 @@ Key = 20 bytes of 0xaa, data = 50 bytes of 0xdd.
 ### Determinism
 
     #test
-    test_hmac_deterministic() -> void
+    test_hmac_deterministic() -> unit
         val key: [4]byte = "test"
         val msg: [5]byte = "hello"
         var out1: [32]byte
