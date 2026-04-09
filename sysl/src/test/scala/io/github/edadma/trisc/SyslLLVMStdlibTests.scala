@@ -176,8 +176,51 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe "xxbxx"
   }
 
-  // TODO: split, join, fields — need TNewArray for string types + ref slice codegen
-  //  "std.strings split" in { ... }
-  //  "std.strings join" in { ... }
-  //  "std.strings fields" in { ... }
+  "new string array and slice" in {
+    llvmExit(
+      """main() -> int
+        |    val a = new [3]string
+        |    a[0] = "hello"
+        |    a[1] = "world"
+        |    a[2] = "!"
+        |    val s = a[:]
+        |    len(s)
+        |""".stripMargin) shouldBe 3
+  }
+
+  "read string from slice" in {
+    llvmOutput(
+      """main()
+        |    val a = new [2]string
+        |    a[0] = "hello"
+        |    a[1] = "world"
+        |    val s = a[:]
+        |    puts(s[0])
+        |""".stripMargin) shouldBe "hello"
+  }
+
+  "std.strings split" in {
+    llvmExitWithStd(
+      """import std.strings.*
+        |
+        |main() -> int
+        |    val parts = split("a,b,c", ",")
+        |    len(parts)
+        |""".stripMargin) shouldBe 3
+  }
+
+  // TODO: split returns []string but ref array is freed on return — string data lost
+  // Need to either: bump refcount for returned slices, or use immortal refs for slices
+  // "std.strings split output" — puts(parts[0]) returns empty
+  // "std.strings join" — join(parts, "-") returns just the separator
+
+  "std.strings fields" in {
+    llvmExitWithStd(
+      """import std.strings.*
+        |
+        |main() -> int
+        |    val parts = fields("  hello  world  ")
+        |    len(parts)
+        |""".stripMargin) shouldBe 2
+  }
 }
