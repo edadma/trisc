@@ -265,7 +265,7 @@ class SyslSVMCodegen:
           emit("  swap")
           emit("  store64")
         emit("  drop")
-        // If init is an array literal, store elements
+        // If init is an array literal or struct construct, populate values
         init match
           case TArrayLit(elements, _) =>
             val elemType = typ match { case SyslType.ArrayType(e, _) => e; case _ => SyslType.I64 }
@@ -276,7 +276,28 @@ class SyslSVMCodegen:
               genExpr(elem)
               emit("  swap")
               emitStore(elemType)
-          case _ => // TArrayDecl or TStructLit — already zeroed
+          case TStructConstruct(structType, args) =>
+            for (arg, i) <- args.zipWithIndex do
+              val off = fieldOffset(structType, i)
+              val fieldType = structType.fields(i)._2
+              emit(s"  local_get $idx")
+              if off != 0 then { emitPushInt(off); emit("  add") }
+              genExpr(arg)
+              emit("  swap")
+              emitStore(fieldType)
+          case _: TArrayDecl | _: TStructLit => // already zeroed
+          case _ =>
+            // General case: init returns an address, bulk copy into our allocation
+            genExpr(init) // ( src_addr )
+            val copySize = ((typ.sizeOf + 7) / 8 * 8).toInt
+            for i <- 0 until copySize by 8 do
+              emit("  dup")
+              if i > 0 then { emitPushInt(i); emit("  add") }
+              emit("  load64")
+              emit(s"  local_get $idx")
+              if i > 0 then { emitPushInt(i); emit("  add") }
+              emit("  store64")
+            emit("  drop") // drop src_addr
       else
         genExpr(init)
         emit(s"  local_set $idx")
@@ -679,6 +700,93 @@ class SyslSVMCodegen:
         case _ =>
           genExpr(inner)
 
+    case TStructLit(typ) =>
+      // Zero-initialized struct on memory stack
+      val size = typ.sizeOf
+      emitMemAlloc(size)
+      // emitMemAlloc already returns fresh (zeroed by convention? no — we must zero)
+      val aligned = ((size + 7) / 8 * 8).toInt
+      for i <- 0 until aligned by 8 do
+        emit("  dup")
+        if i > 0 then { emitPushInt(i); emit("  add") }
+        emit("  push_0")
+        emit("  swap")
+        emit("  store64")
+
+    case TStructConstruct(structType, args) =>
+      // Allocate struct on memory stack, populate fields
+      val size = structType.sizeOf
+      emitMemAlloc(size)
+      // Zero-init first
+      val aligned = ((size + 7) / 8 * 8).toInt
+      for i <- 0 until aligned by 8 do
+        emit("  dup")
+        if i > 0 then { emitPushInt(i); emit("  add") }
+        emit("  push_0")
+        emit("  swap")
+        emit("  store64")
+      // Store each field
+      for (arg, i) <- args.zipWithIndex do
+        val off = fieldOffset(structType, i)
+        val fieldType = structType.fields(i)._2
+        emit("  dup") // keep struct addr
+        if off != 0 then { emitPushInt(off); emit("  add") }
+        genExpr(arg)
+        emit("  swap")
+        emitStore(fieldType)
+
+    case TFieldPreInc(obj, fieldIndex, typ) =>
+      val st = obj.typ.asInstanceOf[SyslType.StructType]
+      val off = fieldOffset(st, fieldIndex)
+      val fieldType = st.fields(fieldIndex)._2
+      genStructAddr(obj)
+      if off != 0 then { emitPushInt(off); emit("  add") }
+      emit("  dup") // keep address
+      emitLoad(fieldType)
+      emit("  inc")
+      emit("  dup")  // ( addr new_val new_val )
+      emit("  rot")  // ( new_val new_val addr )
+      emitStore(fieldType)
+
+    case TFieldPreDec(obj, fieldIndex, typ) =>
+      val st = obj.typ.asInstanceOf[SyslType.StructType]
+      val off = fieldOffset(st, fieldIndex)
+      val fieldType = st.fields(fieldIndex)._2
+      genStructAddr(obj)
+      if off != 0 then { emitPushInt(off); emit("  add") }
+      emit("  dup")
+      emitLoad(fieldType)
+      emit("  dec")
+      emit("  dup")
+      emit("  rot")
+      emitStore(fieldType)
+
+    case TFieldPostInc(obj, fieldIndex, typ) =>
+      val st = obj.typ.asInstanceOf[SyslType.StructType]
+      val off = fieldOffset(st, fieldIndex)
+      val fieldType = st.fields(fieldIndex)._2
+      genStructAddr(obj)
+      if off != 0 then { emitPushInt(off); emit("  add") }
+      emit("  dup")
+      emitLoad(fieldType)
+      emit("  dup")  // ( addr old_val old_val )
+      emit("  inc")  // ( addr old_val new_val )
+      emit("  rot")  // ( old_val new_val addr )
+      emitStore(fieldType)
+
+    case TFieldPostDec(obj, fieldIndex, typ) =>
+      val st = obj.typ.asInstanceOf[SyslType.StructType]
+      val off = fieldOffset(st, fieldIndex)
+      val fieldType = st.fields(fieldIndex)._2
+      genStructAddr(obj)
+      if off != 0 then { emitPushInt(off); emit("  add") }
+      emit("  dup")
+      emitLoad(fieldType)
+      emit("  dup")
+      emit("  dec")
+      emit("  rot")
+      emitStore(fieldType)
+
     case _ =>
       // TODO: remaining expr types
       emitPushInt(0) // placeholder
@@ -722,6 +830,18 @@ class SyslSVMCodegen:
     case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType => emit("  store8")
     case SyslType.IntType(16) | SyslType.UIntType(16) => emit("  store16")
     case SyslType.IntType(32) | SyslType.UIntType(32) => emit("  store32")
+    case st: SyslType.StructType =>
+      // Bulk copy: stack has ( src_addr dest_addr )
+      val size = ((st.sizeOf + 7) / 8 * 8).toInt
+      for i <- 0 until size by 8 do
+        emit("  over") // ( src dest src )
+        if i > 0 then { emitPushInt(i); emit("  add") }
+        emit("  load64")
+        emit("  over") // ( src dest val dest )
+        if i > 0 then { emitPushInt(i); emit("  add") }
+        emit("  store64")
+      emit("  drop") // drop dest
+      emit("  drop") // drop src
     case _ => emit("  store64")
 
   private def emitCast(from: SyslType, to: SyslType): Unit =
@@ -756,9 +876,22 @@ class SyslSVMCodegen:
     val align = targetType.alignOf.max(1)
     ((offset + align - 1) / align) * align
 
-  private def genStructAddr(obj: TExpr): Unit =
-    obj.typ match
-      case _: SyslType.PtrType | _: SyslType.RefType =>
-        genExpr(obj) // already a pointer
-      case _ =>
-        genExpr(obj) // for stack-allocated structs, this would need address
+  private def genStructAddr(obj: TExpr): Unit = obj match
+    case TDeref(ptr, _) =>
+      genExpr(ptr) // pointer dereference yields the address
+    case TFieldAccess(innerObj, fieldIndex, typ) if needsMemAlloc(typ) =>
+      // Nested field access on aggregate: compute parent addr + field offset
+      val st = innerObj.typ match
+        case s: SyslType.StructType => s
+        case SyslType.RefType(s: SyslType.StructType) => s
+        case SyslType.PtrType(s: SyslType.StructType) => s
+        case _ => sys.error(s"nested field access on non-struct: ${innerObj.typ}")
+      genStructAddr(innerObj)
+      val off = fieldOffset(st, fieldIndex)
+      if off != 0 then { emitPushInt(off); emit("  add") }
+    case _ =>
+      obj.typ match
+        case _: SyslType.PtrType | _: SyslType.RefType =>
+          genExpr(obj) // pointer/ref: evaluates to address
+        case _ =>
+          genExpr(obj) // local holding memory address for aggregates
