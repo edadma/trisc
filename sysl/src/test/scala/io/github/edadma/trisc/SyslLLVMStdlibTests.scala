@@ -325,4 +325,81 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
 
   // TODO: encode_to_string needs string-to-byte-array global initializer for HEX_DIGITS
   // "std.encoding.hex encode_to_string" in { ... }
+
+  // ===== std.builder =====
+
+  "std.builder new_builder and write" in {
+    llvmOutputWithStd(
+      """import std.builder.*
+        |
+        |main()
+        |    var b = new_builder()
+        |    b.write("hello")
+        |    b.write(" ")
+        |    b.write("world")
+        |    puts(b.to_str())
+        |""".stripMargin) shouldBe "hello world"
+  }
+
+  "std.builder write_byte" in {
+    llvmOutputWithStd(
+      """import std.builder.*
+        |
+        |main()
+        |    var b = new_builder()
+        |    b.write_byte(byte('A'))
+        |    b.write_byte(byte('B'))
+        |    b.write_byte(byte('C'))
+        |    puts(b.to_str())
+        |""".stripMargin) shouldBe "ABC"
+  }
+
+  "std.builder write_int" in {
+    llvmOutputWithStd(
+      """import std.builder.*
+        |
+        |main()
+        |    var b = new_builder()
+        |    b.write("n=")
+        |    b.write_int(42)
+        |    puts(b.to_str())
+        |""".stripMargin) shouldBe "n=42"
+  }
+
+  "std.builder len" in {
+    llvmExitWithStd(
+      """import std.builder.*
+        |
+        |main() -> int
+        |    var b = new_builder()
+        |    b.write("hello")
+        |    b.len()
+        |""".stripMargin) shouldBe 5
+  }
+
+  "std.builder reset" in {
+    llvmOutputWithStd(
+      """import std.builder.*
+        |
+        |main()
+        |    var b = new_builder()
+        |    b.write("old")
+        |    b.reset()
+        |    b.write("new")
+        |    puts(b.to_str())
+        |""".stripMargin) shouldBe "new"
+  }
+
+  "std.builder write_bool" in {
+    llvmOutputWithStd(
+      """import std.builder.*
+        |
+        |main()
+        |    var b = new_builder()
+        |    b.write_bool(true)
+        |    b.write(" ")
+        |    b.write_bool(false)
+        |    puts(b.to_str())
+        |""".stripMargin) shouldBe "true false"
+  }
 }
