@@ -2287,6 +2287,11 @@ class SyslLLVMCodegen:
       val (label, byteLen) = internString(s)
       val strLen = byteLen - 1
       s"{ i8* getelementptr inbounds ([$byteLen x i8], [$byteLen x i8]* $label, i32 0, i32 0), i32 $strLen }"
+    case TArrayLit(elems, SyslType.ArrayType(SyslType.IntType(8) | SyslType.UIntType(8), size)) if elems.forall(_.isInstanceOf[TIntLit]) =>
+      // Byte array literal: emit as c"..." constant
+      val bytes = elems.map { case TIntLit(v, _) => (v & 0xff).toByte }
+      val escaped = bytes.map(b => f"\\${b & 0xff}%02X").mkString
+      s"""c"$escaped""""
     case _ =>
       typ match
         case SyslType.StringType => "{ i8* null, i32 0 }"

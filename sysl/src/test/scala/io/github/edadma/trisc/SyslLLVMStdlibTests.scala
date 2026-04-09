@@ -323,8 +323,18 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 6
   }
 
-  // TODO: encode_to_string needs string-to-byte-array global initializer for HEX_DIGITS
-  // "std.encoding.hex encode_to_string" in { ... }
+  "std.encoding.hex encode_to_string" in {
+    llvmOutputWithStd(
+      """import std.encoding.hex.*
+        |
+        |main()
+        |    val src = new [3]byte
+        |    src[0] = byte(0xDE)
+        |    src[1] = byte(0xAD)
+        |    src[2] = byte(0x42)
+        |    puts(encode_to_string(src[:]))
+        |""".stripMargin) shouldBe "dead42"
+  }
 
   // ===== std.builder =====
 
