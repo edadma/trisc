@@ -109,11 +109,14 @@ class SyslLLVMCodegen:
     emit("declare i8* @malloc(i64)")
     emit("declare i64 @strlen(i8*)")
     emit("declare i8* @memcpy(i8*, i8*, i64)")
+    emit("declare i32 @memcmp(i8*, i8*, i64)")
     emit("declare i8* @memset(i8*, i32, i64)")
     emit("declare void @free(i8*)")
     emit("declare void @llvm.memset.p0i8.i64(i8*, i8, i64, i1)")
     emit("declare i64 @write(i32, i8*, i64)")
     emit("declare i32 @fflush(i8*)")
+    emit("declare void @abort()")
+    emit("declare void @exit(i32)")
     emit("")
 
     // Format strings for print/println builtins
@@ -155,6 +158,24 @@ class SyslLLVMCodegen:
       emit(s"""$label = private unnamed_addr constant [$byteLen x i8] c"$escaped\\00"""")
     if stringConstants.nonEmpty then emit("")
 
+    // Built-in panic function: write message to stderr and abort
+    emit("@.str.panic_prefix = private unnamed_addr constant [8 x i8] c\"panic: \\00\"")
+    emit("")
+    emit("define void @panic(%struct.string %msg) {")
+    emit("entry:")
+    emit("  %prefix = getelementptr [8 x i8], [8 x i8]* @.str.panic_prefix, i32 0, i32 0")
+    emit("  %w1 = call i64 @write(i32 2, i8* %prefix, i64 7)")
+    emit("  %ptr = extractvalue %struct.string %msg, 0")
+    emit("  %len = extractvalue %struct.string %msg, 1")
+    emit("  %len64 = sext i32 %len to i64")
+    emit("  %w2 = call i64 @write(i32 2, i8* %ptr, i64 %len64)")
+    emit("  %nl = getelementptr [1 x i8], [1 x i8]* @.str.newline, i32 0, i32 0")
+    emit("  %w3 = call i64 @write(i32 2, i8* %nl, i64 1)")
+    emit("  call void @abort()")
+    emit("  unreachable")
+    emit("}")
+    emit("")
+
     // Append function code
     out ++= funcCode
 
@@ -191,6 +212,10 @@ class SyslLLVMCodegen:
         val result = genExpr(expr)
         val rt = exprType(expr)
         val finalVal = if isAggregate(expr.typ) then
+          val loaded = newReg()
+          emit(s"  $loaded = load $retType, $retType* $result")
+          loaded
+        else if rt == "void" && retType != "void" then
           val loaded = newReg()
           emit(s"  $loaded = load $retType, $retType* $result")
           loaded
@@ -292,6 +317,12 @@ class SyslLLVMCodegen:
             val result = genExpr(expr)
             val rt = exprType(expr)
             val finalVal = if isAggregate(expr.typ) then
+              val loaded = newReg()
+              emit(s"  $loaded = load $retType, $retType* $result")
+              loaded
+            else if rt == "void" && retType != "void" then
+              // Match/expression type is void (diverging arms) but function expects a value.
+              // The match with effectiveType fallback stored its result in an alloca — load from it.
               val loaded = newReg()
               emit(s"  $loaded = load $retType, $retType* $result")
               loaded
@@ -516,7 +547,12 @@ class SyslLLVMCodegen:
         emit(s"  $elemAddr = getelementptr i8, i8* $dataPtr, i64 $offset")
         val typedPtr = newReg()
         emit(s"  $typedPtr = bitcast i8* $elemAddr to $elt*")
-        emit(s"  store $elt $v, $elt* $typedPtr")
+        if isAggregate(elemType) then
+          val loaded = newReg()
+          emit(s"  $loaded = load $elt, $elt* $v")
+          emit(s"  store $elt $loaded, $elt* $typedPtr")
+        else
+          emit(s"  store $elt $v, $elt* $typedPtr")
 
       case TDerefAssignStmt(pointer, value) =>
         val ptr = genExpr(pointer)
@@ -528,17 +564,52 @@ class SyslLLVMCodegen:
         val pt = llvmType(pointeeType)
         val typedPtr = newReg()
         emit(s"  $typedPtr = bitcast i8* $ptr to $pt*")
-        emit(s"  store $pt $v, $pt* $typedPtr")
+        if isAggregate(pointeeType) then
+          val loaded = newReg()
+          emit(s"  $loaded = load $pt, $pt* $v")
+          emit(s"  store $pt $loaded, $pt* $typedPtr")
+        else
+          emit(s"  store $pt $v, $pt* $typedPtr")
 
       case TFieldAssignStmt(obj, fieldIndex, value) =>
         val st = obj.typ.asInstanceOf[SyslType.StructType]
         val structLt = llvmType(obj.typ)
-        val fieldType = llvmType(st.fields(fieldIndex)._2)
+        val ft = st.fields(fieldIndex)._2
+        val fieldType = llvmType(ft)
         val addr = genStructAddr(obj)
         val gep = newReg()
         emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
         val v = genExpr(value)
-        emit(s"  store $fieldType $v, $fieldType* $gep")
+        if isAggregate(ft) then
+          val loaded = newReg()
+          emit(s"  $loaded = load $fieldType, $fieldType* $v")
+          emit(s"  store $fieldType $loaded, $fieldType* $gep")
+        else
+          emit(s"  store $fieldType $v, $fieldType* $gep")
+
+      case TCompoundAssignStmt(target, op, value) =>
+        val local = locals(target)
+        val lt = llvmType(local.typ)
+        val cur = newReg()
+        emit(s"  $cur = load $lt, $lt* ${local.reg}")
+        val v = genExpr(value)
+        val vt = exprType(value)
+        val rv = emitSextIfNeeded(v, vt, lt)
+        val isFloat = local.typ == SyslType.DoubleType
+        val isUnsigned = local.typ.isUnsigned
+        val result = newReg()
+        op match
+          case "+" => emit(s"  $result = ${if isFloat then "fadd" else "add"} $lt $cur, $rv")
+          case "-" => emit(s"  $result = ${if isFloat then "fsub" else "sub"} $lt $cur, $rv")
+          case "*" => emit(s"  $result = ${if isFloat then "fmul" else "mul"} $lt $cur, $rv")
+          case "/" => emit(s"  $result = ${if isFloat then "fdiv" else if isUnsigned then "udiv" else "sdiv"} $lt $cur, $rv")
+          case "%" => emit(s"  $result = ${if isFloat then "frem" else if isUnsigned then "urem" else "srem"} $lt $cur, $rv")
+          case "&" => emit(s"  $result = and $lt $cur, $rv")
+          case "|" => emit(s"  $result = or $lt $cur, $rv")
+          case "^" => emit(s"  $result = xor $lt $cur, $rv")
+          case "<<" => emit(s"  $result = shl $lt $cur, $rv")
+          case ">>" => emit(s"  $result = ${if isUnsigned then "lshr" else "ashr"} $lt $cur, $rv")
+        emit(s"  store $lt $result, $lt* ${local.reg}")
 
       case _ =>
         emit(s"  ; TODO: ${stmt.getClass.getSimpleName}")
@@ -633,6 +704,57 @@ class SyslLLVMCodegen:
         emit(s"  $resLenGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 1")
         emit(s"  store i32 $totalLen, i32* $resLenGep")
         alloca
+
+      case TBinary(left, op @ ("==" | "!="), right, _) if left.typ == SyslType.StringType =>
+        val lp = genExpr(left)
+        val rp = genExpr(right)
+        // Extract len from both
+        val lLenGep = newReg()
+        emit(s"  $lLenGep = getelementptr %struct.string, %struct.string* $lp, i32 0, i32 1")
+        val lLen = newReg()
+        emit(s"  $lLen = load i32, i32* $lLenGep")
+        val rLenGep = newReg()
+        emit(s"  $rLenGep = getelementptr %struct.string, %struct.string* $rp, i32 0, i32 1")
+        val rLen = newReg()
+        emit(s"  $rLen = load i32, i32* $rLenGep")
+        // Compare lengths
+        val lenEq = newReg()
+        emit(s"  $lenEq = icmp eq i32 $lLen, $rLen")
+        val lenCheckBlock = currentBlock
+        val lenMatchLabel = newLabel("str_len_match")
+        val strCmpDone = newLabel("str_cmp_done")
+        emit(s"  br i1 $lenEq, label %$lenMatchLabel, label %$strCmpDone")
+        // Lengths match — compare bytes
+        emitLabel(lenMatchLabel)
+        val lPtrGep = newReg()
+        emit(s"  $lPtrGep = getelementptr %struct.string, %struct.string* $lp, i32 0, i32 0")
+        val lPtr = newReg()
+        emit(s"  $lPtr = load i8*, i8** $lPtrGep")
+        val rPtrGep = newReg()
+        emit(s"  $rPtrGep = getelementptr %struct.string, %struct.string* $rp, i32 0, i32 0")
+        val rPtr = newReg()
+        emit(s"  $rPtr = load i8*, i8** $rPtrGep")
+        val len64 = newReg()
+        emit(s"  $len64 = sext i32 $lLen to i64")
+        val cmpResult = newReg()
+        emit(s"  $cmpResult = call i32 @memcmp(i8* $lPtr, i8* $rPtr, i64 $len64)")
+        val bytesEq = newReg()
+        emit(s"  $bytesEq = icmp eq i32 $cmpResult, 0")
+        val lenMatchExit = currentBlock
+        emit(s"  br label %$strCmpDone")
+        // Merge
+        emitLabel(strCmpDone)
+        val eq = newReg()
+        emit(s"  $eq = phi i1 [ false, %$lenCheckBlock ], [ $bytesEq, %$lenMatchExit ]")
+        val result = newReg()
+        val t = llvmType(SyslType.BoolType)
+        if op == "==" then
+          emit(s"  $result = zext i1 $eq to $t")
+        else
+          val neq = newReg()
+          emit(s"  $neq = xor i1 $eq, true")
+          emit(s"  $result = zext i1 $neq to $t")
+        result
 
       case TBinary(left, op, right, _) =>
         var l = genExpr(left)
@@ -837,6 +959,11 @@ class SyslLLVMCodegen:
         val thenLabel = newLabel("then")
         val elseLabel = newLabel("else")
         val mergeLabel = newLabel("merge")
+        val aggResult = if isAggregate(typ) && t != "void" then
+          val a = newReg()
+          emit(s"  $a = alloca $t")
+          Some(a)
+        else None
         emit(s"  br i1 $cBool, label %$thenLabel, label %$elseLabel")
 
         emitLabel(thenLabel)
@@ -846,7 +973,14 @@ class SyslLLVMCodegen:
         for s <- thenBody.init do genStmt(s)
         if !hasReturned then
           thenBody.lastOption match
-            case Some(TExprStmt(e)) => thenVal = genExpr(e)
+            case Some(TExprStmt(e)) =>
+              val v = genExpr(e)
+              aggResult match
+                case Some(alloca) =>
+                  val loaded = newReg()
+                  emit(s"  $loaded = load $t, $t* $v")
+                  emit(s"  store $t $loaded, $t* $alloca")
+                case None => thenVal = v
             case Some(other) => genStmt(other)
             case None =>
         val thenReturned = hasReturned
@@ -861,7 +995,14 @@ class SyslLLVMCodegen:
           for s <- stmts.init do genStmt(s)
           if !hasReturned then
             stmts.lastOption match
-              case Some(TExprStmt(e)) => elseVal = genExpr(e)
+              case Some(TExprStmt(e)) =>
+                val v = genExpr(e)
+                aggResult match
+                  case Some(alloca) =>
+                    val loaded = newReg()
+                    emit(s"  $loaded = load $t, $t* $v")
+                    emit(s"  store $t $loaded, $t* $alloca")
+                  case None => elseVal = v
               case Some(other) => genStmt(other)
               case None =>
         }
@@ -871,11 +1012,14 @@ class SyslLLVMCodegen:
         hasReturned = savedHasReturned
 
         emitLabel(mergeLabel)
-        if !thenReturned && !elseReturned && t != "void" then
-          val phi = newReg()
-          emit(s"  $phi = phi $t [ $thenVal, %$thenExitBlock ], [ $elseVal, %$elseExitBlock ]")
-          phi
-        else "0"
+        aggResult match
+          case Some(alloca) => alloca // return pointer for aggregate types
+          case None =>
+            if !thenReturned && !elseReturned && t != "void" then
+              val phi = newReg()
+              emit(s"  $phi = phi $t [ $thenVal, %$thenExitBlock ], [ $elseVal, %$elseExitBlock ]")
+              phi
+            else "0"
 
       case TStructConstruct(st, args) =>
         // Alloca, zero-init, then fill fields
@@ -1174,7 +1318,12 @@ class SyslLLVMCodegen:
         emit(s"  $elemAddr = getelementptr i8, i8* $finalPtr, i64 $elemOffset")
         val typedElemPtr = newReg()
         emit(s"  $typedElemPtr = bitcast i8* $elemAddr to $elt*")
-        emit(s"  store $elt $v, $elt* $typedElemPtr")
+        if isAggregate(elemType) then
+          val loaded = newReg()
+          emit(s"  $loaded = load $elt, $elt* $v")
+          emit(s"  store $elt $loaded, $elt* $typedElemPtr")
+        else
+          emit(s"  store $elt $v, $elt* $typedElemPtr")
         // Build result slice
         val newLen = newReg()
         emit(s"  $newLen = add i32 $curLen, 1")
@@ -1303,7 +1452,11 @@ class SyslLLVMCodegen:
         val scrut = genExpr(scrutinee)
         val endLabel = newLabel("match_end")
         val resultAlloca = newReg()
-        val resultLt = llvmType(typ)
+        // Match type may be VoidType when one arm diverges (panic). Use function return type as fallback.
+        val effectiveType = if typ == SyslType.VoidType && currentFunction != null && currentFunction.returnType != SyslType.VoidType then
+          currentFunction.returnType
+        else typ
+        val resultLt = llvmType(effectiveType)
         if resultLt != "void" then
           emit(s"  $resultAlloca = alloca $resultLt")
         // For each arm, generate: check pattern, if match -> execute body, store result, br to end
@@ -1420,7 +1573,12 @@ class SyslLLVMCodegen:
               arm.body.last match
                 case TExprStmt(e) =>
                   val v = genExpr(e)
-                  if resultLt != "void" then emit(s"  store $resultLt $v, $resultLt* $resultAlloca")
+                  if resultLt != "void" && exprType(e) != "void" then
+                    if isAggregate(effectiveType) then
+                      val loaded = newReg()
+                      emit(s"  $loaded = load $resultLt, $resultLt* $v")
+                      emit(s"  store $resultLt $loaded, $resultLt* $resultAlloca")
+                    else emit(s"  store $resultLt $v, $resultLt* $resultAlloca")
                 case other => genStmt(other)
           if !hasReturned then emit(s"  br label %$endLabel")
           hasReturned = savedHR
@@ -1435,18 +1593,27 @@ class SyslLLVMCodegen:
               stmts.last match
                 case TExprStmt(e) =>
                   val v = genExpr(e)
-                  if resultLt != "void" then emit(s"  store $resultLt $v, $resultLt* $resultAlloca")
+                  if resultLt != "void" && exprType(e) != "void" then
+                    if isAggregate(effectiveType) then
+                      val loaded = newReg()
+                      emit(s"  $loaded = load $resultLt, $resultLt* $v")
+                      emit(s"  store $resultLt $loaded, $resultLt* $resultAlloca")
+                    else emit(s"  store $resultLt $v, $resultLt* $resultAlloca")
                 case other => genStmt(other)
             if !hasReturned then emit(s"  br label %$endLabel")
             hasReturned = savedHR
           case _ =>
-            if resultLt != "void" then emit(s"  store $resultLt 0, $resultLt* $resultAlloca")
+            if resultLt != "void" then
+              if isAggregate(effectiveType) then emit(s"  store $resultLt zeroinitializer, $resultLt* $resultAlloca")
+              else emit(s"  store $resultLt 0, $resultLt* $resultAlloca")
             emit(s"  br label %$endLabel")
         emitLabel(endLabel)
         if resultLt != "void" then
-          val r = newReg()
-          emit(s"  $r = load $resultLt, $resultLt* $resultAlloca")
-          r
+          if isAggregate(effectiveType) then resultAlloca // return pointer for aggregate types
+          else
+            val r = newReg()
+            emit(s"  $r = load $resultLt, $resultLt* $resultAlloca")
+            r
         else "0"
 
       // ===== Function pointers and closures =====
@@ -1660,6 +1827,48 @@ class SyslLLVMCodegen:
           emit(s"  $newVal = add $lt $oldVal, 1")
         emit(s"  store $lt $newVal, $lt* ${local.reg}")
         oldVal
+
+      case TStringFromSlice(sliceExpr, _) =>
+        val sp = genExpr(sliceExpr)
+        // Extract ptr and len from slice
+        val ptrGep = newReg()
+        emit(s"  $ptrGep = getelementptr %struct.slice, %struct.slice* $sp, i32 0, i32 0")
+        val srcPtr = newReg()
+        emit(s"  $srcPtr = load i8*, i8** $ptrGep")
+        val lenGep = newReg()
+        emit(s"  $lenGep = getelementptr %struct.slice, %struct.slice* $sp, i32 0, i32 1")
+        val len = newReg()
+        emit(s"  $len = load i32, i32* $lenGep")
+        // Allocate and copy bytes
+        val len64 = newReg()
+        emit(s"  $len64 = sext i32 $len to i64")
+        val buf = newReg()
+        emit(s"  $buf = call i8* @malloc(i64 $len64)")
+        val cp = newReg()
+        emit(s"  $cp = call i8* @memcpy(i8* $buf, i8* $srcPtr, i64 $len64)")
+        // Build %struct.string
+        val alloca = newReg()
+        emit(s"  $alloca = alloca %struct.string")
+        val resPtrGep = newReg()
+        emit(s"  $resPtrGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 0")
+        emit(s"  store i8* $buf, i8** $resPtrGep")
+        val resLenGep = newReg()
+        emit(s"  $resLenGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 1")
+        emit(s"  store i32 $len, i32* $resLenGep")
+        alloca
+
+      case TStringFromPtr(ptrExpr, lenExpr, _) =>
+        val ptr = genExpr(ptrExpr)
+        val len = genExpr(lenExpr)
+        val alloca = newReg()
+        emit(s"  $alloca = alloca %struct.string")
+        val ptrGep = newReg()
+        emit(s"  $ptrGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 0")
+        emit(s"  store i8* $ptr, i8** $ptrGep")
+        val lenGep = newReg()
+        emit(s"  $lenGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 1")
+        emit(s"  store i32 $len, i32* $lenGep")
+        alloca
 
       case _ =>
         emit(s"  ; TODO: ${expr.getClass.getSimpleName}")
