@@ -58,23 +58,26 @@ Function types require parens around params (`(string, int) -> Result[T]`), so `
 
 The `?` operator eliminates the boilerplate `Fail` propagation arm.
 
-## 7. No Method Syntax on Function Types — Blocked
+## ~~7. No Method Syntax on Function Types~~ ✅ DONE
 
-Would love:
+Works via wrapper struct with methods:
 ```sysl
-parser.map(f).or(other).many()
+struct P
+    run: Parser[int]
+
+P.map_to(f: (int) -> int) -> P = P(map(self.run, f))
+P.or(other: P) -> P = P(alt(self.run, other.run))
+P.parse(input: string, pos: int) -> Result[int] = self.run(input, pos)
+
+// Fluent chaining:
+var n = p_nat
+var neg = n.map_to(negate)
+var q = p_char(int('?'))
+var p = neg.or(q)
+p.parse("7", 0)  // Ok(-7, 1)
 ```
-Instead of:
-```sysl
-many(alt(map(parser, f), other))
-```
-**Approach:** Wrapper struct `P` with a `run: Parser[int]` field and methods
-(`.map_to()`, `.or()`, `.between()`, `.parse()`). The struct and methods
-compile, but **blocked by interpreter bug**: `self.field(args)` doesn't work
-when `field` is a function type accessed via `*Type` self pointer — the
-interpreter returns `PtrVal` instead of extracting the function value.
-Direct field access (`b.f(x)`) works fine; only method bodies are affected.
-See `parser.sysl` for the commented-out prototype.
+Required fixing an interpreter bug: `TFieldAccess` on pointer-typed objects
+now auto-dereferences. See `parser.sysl` for full fluent API with tests.
 
 ## 8. No Pattern Matching in `if`
 
@@ -93,6 +96,6 @@ Instead of a full `match` block for simple Ok/Fail dispatch.
 | 3 | `?` on Result | ✅ Done |
 | 6 | Verbose match arms | ✅ Solved by #3 |
 | 4 | Mutual recursion / def | ✅ Done |
-| 7 | Method syntax on functions | Blocked — interpreter bug with func-type fields via self |
+| 7 | Method syntax on functions | ✅ Done — wrapper struct with methods |
 | 8 | Pattern match in `if` | Open — low priority |
 | 5 | Expression-body ambiguity | ✅ Not an issue — parens make it unambiguous |

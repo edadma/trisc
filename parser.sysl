@@ -148,16 +148,64 @@ close_paren(input: string, pos: int) -> Result[int] = char_exact(int(')'), input
 def parse_parens = between(open_paren, nat, close_paren)
 
 // === Wrapper struct with methods for fluent chaining ===
-// BLOCKED: interpreter bug — self.field(args) doesn't work when field is a
-// function type, accessed via *Type self pointer. Direct field access (b.f(x))
-// works fine, but method bodies dereference self which returns PtrVal instead
-// of extracting the function value. Fix the interpreter, then uncomment.
-//
-// struct P
-//     run: Parser[int]
-// P.map_to(f: (int) -> int) -> P = P(map(self.run, f))
-// P.or(other: P) -> P = P(alt(self.run, other.run))
-// P.parse(input: string, pos: int) -> Result[int] = self.run(input, pos)
+
+struct P
+    run: Parser[int]
+
+P.map_to(f: (int) -> int) -> P = P(map(self.run, f))
+P.or(other: P) -> P = P(alt(self.run, other.run))
+P.skip_r(other: P) -> P = P(skip_right(self.run, other.run))
+P.skip_l(other: P) -> P = P(skip_left(self.run, other.run))
+P.between(open: P, close: P) -> P = P(between(open.run, self.run, close.run))
+P.parse(input: string, pos: int) -> Result[int] = self.run(input, pos)
+
+// Fluent constructors
+def p_nat = P(nat)
+def p_char(ch: int) -> P = P((input: string, pos: int) -> char_exact(ch, input, pos))
+
+// === Fluent API tests ===
+
+triple(x: int) -> int = x * 3
+negate2(x: int) -> int = 0 - x
+
+#test
+test_fluent_map() -> unit
+    var p = p_nat
+    var p2 = p.map_to(triple)
+    p2.parse("14", 0) match
+        Ok(v, _) -> assert(v == 42, "fluent map")
+        Fail(_) -> panic("expected Ok")
+
+#test
+test_fluent_or() -> unit
+    var a = p_char(int('x'))
+    var b = p_char(int('y'))
+    var p = a.or(b)
+    p.parse("y!", 0) match
+        Ok(v, _) -> assert(v == int('y'), "fluent or")
+        Fail(_) -> panic("expected Ok")
+
+#test
+test_fluent_between() -> unit
+    var n = p_nat
+    var open = p_char(int('('))
+    var close = p_char(int(')'))
+    var p = n.between(open, close)
+    p.parse("(55)", 0) match
+        Ok(v, p2) ->
+            assert(v == 55, "fluent between value")
+            assert(p2 == 4, "fluent between pos")
+        Fail(_) -> panic("expected Ok")
+
+#test
+test_fluent_chain() -> unit
+    var n = p_nat
+    var neg = n.map_to(negate2)
+    var q = p_char(int('?'))
+    var p = neg.or(q)
+    p.parse("7", 0) match
+        Ok(v, _) -> assert(v == -7, "fluent chain")
+        Fail(_) -> panic("expected Ok")
 
 // === Tests ===
 
