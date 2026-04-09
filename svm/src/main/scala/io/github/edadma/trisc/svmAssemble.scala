@@ -228,16 +228,17 @@ def svmAssemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = 
         case _ => problem(n, s"must be a positive integer up to 10 meg")
     case InstructionLineAST(mnemonic, operands) =>
       operands foreach locals
-      // For relocatable mode, some instructions may expand when referencing extern/unresolved symbols
+      // For relocatable mode, call/tail always expand to CALL_ABS (9 bytes) and
+      // push_i32 with symbol refs expands to push_i64 (9 bytes) because fold()
+      // defers all absolute references in relocatable mode.
       val sz = if relocatable then
-        def isUnresolved(ref: String): Boolean = declaredExterns.contains(ref) || !symbols.contains(ref)
-        def hasUnresolvedRef: Boolean = operands.headOption match
-          case Some(ReferenceExprAST(ref)) => isUnresolved(ref)
-          case Some(LocalExprAST(_, ref)) if ref != null => isUnresolved(ref)
+        def hasSymbolRef: Boolean = operands.headOption match
+          case Some(ReferenceExprAST(_)) => true
+          case Some(LocalExprAST(_, ref)) if ref != null => true
           case _ => false
         mnemonic match
-          case "call" | "tail" if hasUnresolvedRef => 9 // CALL_ABS
-          case "push_i32" if hasUnresolvedRef => 9 // promoted to push_i64 + reloc
+          case "call" | "tail" if hasSymbolRef => 9 // CALL_ABS
+          case "push_i32" if hasSymbolRef => 9 // promoted to push_i64 + reloc
           case _ => instrSize(mnemonic, operands)
       else instrSize(mnemonic, operands)
       segment.size += sz

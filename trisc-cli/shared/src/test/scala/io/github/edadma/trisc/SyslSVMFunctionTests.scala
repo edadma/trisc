@@ -42,7 +42,15 @@ class SyslSVMFunctionTests extends SyslSVMCodegenHelpers {
         |""".stripMargin, maxCycles = 500000) shouldBe 0
   }
 
-  "recursive factorial small" ignore {
+  "call helper then call it again" in {
+    compileAndRun(
+      """helper(x: int) -> int = x + 1
+        |
+        |main() -> int = helper(helper(20))
+        |""".stripMargin) shouldBe 22
+  }
+
+  "recursive factorial small" in {
     compileAndRun(
       """fact(n: int) -> int
         |    if n <= 1 then 1 else n * fact(n - 1)
@@ -51,13 +59,13 @@ class SyslSVMFunctionTests extends SyslSVMCodegenHelpers {
         |""".stripMargin, maxCycles = 500000) shouldBe 2
   }
 
-  "recursive factorial" ignore {
+  "recursive factorial" in {
     compileAndRun(
       """fact(n: int) -> int
         |    if n <= 1 then 1 else n * fact(n - 1)
         |
-        |main() -> int = fact(5)
-        |""".stripMargin, maxCycles = 500000) shouldBe 120
+        |main() -> int = fact(10)
+        |""".stripMargin, maxCycles = 500000) shouldBe 3628800
   }
 
   "void function" in {
