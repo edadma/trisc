@@ -1396,8 +1396,16 @@ class SyslAnalyzer:
 
       case ArrayLitAST(elements) =>
         val tElems = elements.map(analyzeExpr)
-        val elemType = tElems.head.typ
-        TArrayLit(tElems, SyslType.ArrayType(elemType, tElems.length))
+        if tElems.isEmpty then
+          // Empty array literal — element type comes from target context (e.g. [0]string = [])
+          val elemType = currentExpected.flatMap {
+            case SyslType.ArrayType(et, _) => Some(et)
+            case _ => None
+          }.getOrElse(throw AnalysisError("cannot infer element type for empty array literal []"))
+          TArrayLit(Nil, SyslType.ArrayType(elemType, 0))
+        else
+          val elemType = tElems.head.typ
+          TArrayLit(tElems, SyslType.ArrayType(elemType, tElems.length))
 
       case ClosureAST(params, body) =>
         // Infer parameter types from currentExpected (the target func type)
