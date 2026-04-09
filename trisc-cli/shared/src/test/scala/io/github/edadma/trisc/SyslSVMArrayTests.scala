@@ -58,15 +58,15 @@ class SyslSVMArrayTests extends SyslSVMCodegenHelpers {
         |""".stripMargin) shouldBe 15
   }
 
-  "array literal" ignore {
+  "array literal" in {
     compileAndRun(
       """main() -> i64
-        |    var arr = [3]i64 {10, 20, 12}
+        |    var arr = [10, 20, 12]
         |    arr[0] + arr[1] + arr[2]
         |""".stripMargin) shouldBe 42
   }
 
-  "array passed to function" ignore {
+  "array passed to function" in {
     compileAndRun(
       """sum(p: *i64, n: i64) -> i64
         |    var s: i64 = 0
