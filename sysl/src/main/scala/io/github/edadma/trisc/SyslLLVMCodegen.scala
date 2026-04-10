@@ -215,6 +215,9 @@ class SyslLLVMCodegen:
       // Increment refcount for ref-typed params (caller shares ownership)
       if isRef(param.typ) then
         emitRefIncr(s"%${param.name}_arg", refHeaderOffset(param.typ))
+      // Increment slice backref for slice params (callee holds a copy)
+      if isSliceType(param.typ) then
+        emitSliceBackrefIncr(alloca)
 
     // Switch to body buffer for the function body
     deferredAllocas.clear()
@@ -231,16 +234,13 @@ class SyslLLVMCodegen:
           emit(s"  $loaded = load $retType, $retType* $result")
           loaded
         else if rt == "void" && retType != "void" then
-          // Match with VoidType used effectiveType fallback.
-          // For aggregates, result is an alloca pointer — load it.
-          // For scalars, result is already the loaded value.
           if retType.startsWith("[") || retType.startsWith("%struct.") then
             val loaded = newReg()
             emit(s"  $loaded = load $retType, $retType* $result")
             loaded
           else result
         else emitSextIfNeeded(result, rt, retType)
-        emitReleaseRefs()
+        emitReleaseRefs(returnedSliceAlloca(expr))
         emitRet(retType, finalVal)
       case TBlockBody(stmts) =>
         genBlock(stmts, retType)
@@ -249,6 +249,9 @@ class SyslLLVMCodegen:
     activeOut = out
     for (reg, lt) <- deferredAllocas do
       emit(s"  $reg = alloca $lt")
+      // Zero-initialize slice allocas so backref field is null on unexecuted paths
+      if lt == "%struct.slice" then
+        emit(s"  store %struct.slice zeroinitializer, %struct.slice* $reg")
     out ++= bodyBuf
 
     emit("}")
@@ -296,6 +299,8 @@ class SyslLLVMCodegen:
       emit(s"  $alloca = alloca $lt")
       emit(s"  store $lt %${param.name}_arg, $lt* $alloca")
       locals(param.name) = LocalVar(param.name, alloca, param.typ)
+      if isSliceType(param.typ) then
+        emitSliceBackrefIncr(alloca)
 
     // Switch to body buffer
     deferredAllocas.clear()
@@ -312,7 +317,7 @@ class SyslLLVMCodegen:
           emit(s"  $loaded = load $retLt, $retLt* $result")
           loaded
         else emitSextIfNeeded(result, rt, retLt)
-        emitReleaseRefs()
+        emitReleaseRefs(returnedSliceAlloca(expr))
         emitRet(retLt, finalVal)
       case TBlockBody(stmts) =>
         genBlock(stmts, retLt)
@@ -321,6 +326,8 @@ class SyslLLVMCodegen:
     activeOut = out
     for (reg, lt) <- deferredAllocas do
       emit(s"  $reg = alloca $lt")
+      if lt == "%struct.slice" then
+        emit(s"  store %struct.slice zeroinitializer, %struct.slice* $reg")
     out ++= bodyBuf
 
     emit("}")
@@ -366,7 +373,7 @@ class SyslLLVMCodegen:
               else result
             else emitSextIfNeeded(result, rt, retType)
             emitDefers()
-            emitReleaseRefs()
+            emitReleaseRefs(returnedSliceAlloca(expr))
             emitRet(retType, finalVal)
             hasReturned = true
           case other =>
@@ -393,6 +400,9 @@ class SyslLLVMCodegen:
           // Aggregate variable: genExpr returns an alloca pointer — use it directly
           val ptr = genExpr(init)
           locals(name) = LocalVar(name, ptr, typ)
+          // Slice backref: increment if copying from a non-owned source
+          if isSliceType(typ) && !isSliceOwned(init) then
+            emitSliceBackrefIncr(ptr)
         else
             val alloca = deferAlloca(lt)
             val value = genExpr(init)
@@ -409,6 +419,8 @@ class SyslLLVMCodegen:
           // New aggregate variable: genExpr returns an alloca pointer — use it directly
           val ptr = genExpr(value)
           locals(target) = LocalVar(target, ptr, value.typ)
+          if isSliceType(value.typ) && !isSliceOwned(value) then
+            emitSliceBackrefIncr(ptr)
         else
           val v = genExpr(value)
           if locals.contains(target) then
@@ -419,11 +431,17 @@ class SyslLLVMCodegen:
               val oldVal = newReg()
               emit(s"  $oldVal = load $lt, $lt* ${local.reg}")
               emitRefDecr(oldVal, refHeaderOffset(local.typ), deinitFor(local.typ))
+            // Slice reassignment: decrement old backref before overwrite
+            if isSliceType(local.typ) then
+              emitSliceBackrefDecr(local.reg)
             if isAggregate(local.typ) then
               // Aggregate reassignment: load value from source, store to target
               val loaded = newReg()
               emit(s"  $loaded = load $lt, $lt* $v")
               emit(s"  store $lt $loaded, $lt* ${local.reg}")
+              // Slice reassignment: increment new backref if not owned
+              if isSliceType(local.typ) && !isSliceOwned(value) then
+                emitSliceBackrefIncr(local.reg)
             else
               val vt = exprType(value)
               val finalVal = emitSextIfNeeded(v, vt, lt)
@@ -449,7 +467,7 @@ class SyslLLVMCodegen:
           loaded
         else emitSextIfNeeded(v, vt, retType)
         emitDefers()
-        emitReleaseRefs()
+        emitReleaseRefs(returnedSliceAlloca(value))
         emitRet(retType, finalVal)
         hasReturned = true
 
@@ -1114,6 +1132,9 @@ class SyslLLVMCodegen:
             loaded
           else v
           emit(s"  store $fieldType $storeVal, $fieldType* $gep")
+          // Slice field in struct: increment backref for the copy
+          if isSliceType(fieldSyslType) && !isSliceOwned(arg) then
+            emitSliceBackrefIncr(gep)
         alloca
 
       case TStructLit(st @ SyslType.StructType(_, _)) =>
@@ -1354,7 +1375,8 @@ class SyslLLVMCodegen:
             val srcBr = newReg()
             emit(s"  $srcBr = load i8*, i8** $srcBrGep")
             emit(s"  store i8* $srcBr, i8** $brGep")
-            // TODO: increment backref if non-null (reslicing)
+            // Increment backref — new slice holds its own reference to the backing store
+            emitSliceBackrefIncr(alloca)
           case _ =>
             emit(s"  store i8* null, i8** $brGep")
         alloca
@@ -2124,6 +2146,26 @@ class SyslLLVMCodegen:
     case _: SyslType.RefType => true
     case _ => false
 
+  private def isSliceType(t: SyslType): Boolean = t match
+    case _: SyslType.SliceType => true
+    case _ => false
+
+  /** Returns true if the expression produces a slice with a fresh/null backref (no increment needed).
+    * Returns false if the expression borrows a backref from elsewhere (increment needed on copy). */
+  private def isSliceOwned(expr: TExpr): Boolean = expr match
+    case _: TAppend => true                              // malloc'd buffer, null backref
+    case _: TSliceExpr => true                           // all TSliceExpr paths produce owned backrefs
+    case _: TCall | _: TIndirectCall => true             // ownership transferred from callee
+    case _: TIfExpr | _: TMatchExpr => true              // branches handle their own RC
+    case _ => false
+
+  /** If expr is a direct variable reference to a slice local, return its alloca register.
+    * Used to skip decrementing the returned slice at function exit. */
+  private def returnedSliceAlloca(expr: TExpr): Option[String] = expr match
+    case TVarRef(name, typ) if isSliceType(typ) && locals != null && locals.contains(name) =>
+      Some(locals(name).reg)
+    case _ => None
+
   /** Header offset: bytes from data pointer back to refcount field. */
   private def refHeaderOffset(t: SyslType): Int = t match
     case SyslType.RefType(SyslType.SliceType(_)) => 16  // refcount(8) + len(4) + cap(4)
@@ -2264,7 +2306,7 @@ class SyslLLVMCodegen:
     emit(s"  br label %$skipLabel")
     emitLabel(skipLabel)
 
-  private def emitReleaseRefs(): Unit =
+  private def emitReleaseRefs(returnedSliceReg: Option[String] = None): Unit =
     val hasRefs = locals.exists((_, l) => isRef(l.typ))
     if hasRefs then
       // Flush stdout before deinit functions might write to it
@@ -2275,9 +2317,10 @@ class SyslLLVMCodegen:
       val ptr = newReg()
       emit(s"  $ptr = load i8*, i8** ${local.reg}")
       emitRefDecr(ptr, hoff, deinitFor(local.typ))
-    // TODO: slice backref cleanup needs scope-aware analysis to avoid freeing
-    // backing stores of returned slices. Deferred until scope tracking is implemented.
-    // All allocas are now in entry block, so the SSA dominance prerequisite is met.
+    // Slice backref cleanup: decrement all slice locals except the one being returned
+    for (_, local) <- locals if isSliceType(local.typ) do
+      if !returnedSliceReg.contains(local.reg) then
+        emitSliceBackrefDecr(local.reg)
 
   /** Check if an expression is a TNew/TNewArray (already owns the ref, no incr needed). */
   private def isOwnedNew(expr: TExpr): Boolean = expr match

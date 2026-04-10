@@ -217,4 +217,98 @@ class SyslLLVMAllocaTests extends SyslLLVMTestHelpers {
         |    total
         |""".stripMargin) shouldBe 8
   }
+
+  // ===== Slice backref RC tests =====
+
+  "slice returned from function (backref survives)" in {
+    llvmExit(
+      """make_slice() -> []int
+        |    val a = new [3]int
+        |    a[0] = 10
+        |    a[1] = 20
+        |    a[2] = 30
+        |    a[:]
+        |
+        |main() -> int
+        |    val s = make_slice()
+        |    s[0] + s[1] + s[2]
+        |""".stripMargin) shouldBe 60
+  }
+
+  "slice param backref (callee uses caller slice)" in {
+    llvmExit(
+      """sum_slice(s: []int) -> int
+        |    var total = 0
+        |    var i = 0
+        |    while i < len(s)
+        |        total = total + s[i]
+        |        i = i + 1
+        |    total
+        |
+        |main() -> int
+        |    val a = new [3]int
+        |    a[0] = 10
+        |    a[1] = 20
+        |    a[2] = 30
+        |    val s = a[:]
+        |    sum_slice(s)
+        |""".stripMargin) shouldBe 60
+  }
+
+  "slice reassignment (old backref decremented)" in {
+    llvmExit(
+      """main() -> int
+        |    val a = new [3]int
+        |    a[0] = 1
+        |    a[1] = 2
+        |    a[2] = 3
+        |    var s = a[:]
+        |    val b = new [2]int
+        |    b[0] = 10
+        |    b[1] = 20
+        |    s = b[:]
+        |    s[0] + s[1]
+        |""".stripMargin) shouldBe 30
+  }
+
+  "append replaces backref with null (no crash)" in {
+    llvmExit(
+      """main() -> int
+        |    val a = new [2]int
+        |    a[0] = 1
+        |    a[1] = 2
+        |    var s = a[:]
+        |    s = append(s, 3)
+        |    s[0] + s[1] + s[2]
+        |""".stripMargin) shouldBe 6
+  }
+
+  "tuple containing slice returned from function" in {
+    llvmExit(
+      """make_pair() -> ([]int, int)
+        |    val a = new [2]int
+        |    a[0] = 10
+        |    a[1] = 20
+        |    (a[:], 42)
+        |
+        |main() -> int
+        |    val s, n = make_pair()
+        |    s[0] + s[1] + n
+        |""".stripMargin) shouldBe 72
+  }
+
+  "reslice inherits and increments backref" in {
+    llvmExit(
+      """main() -> int
+        |    val a = new [5]int
+        |    a[0] = 1
+        |    a[1] = 2
+        |    a[2] = 3
+        |    a[3] = 4
+        |    a[4] = 5
+        |    val s1 = a[:]
+        |    val s2 = s1[1:4]
+        |    s2[0] + s2[1] + s2[2]
+        |""".stripMargin) shouldBe 9
+  }
 }
