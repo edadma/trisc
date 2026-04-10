@@ -572,6 +572,47 @@ class SyslCodegenPointerTests extends SyslCodegenHelpers {
         |""".stripMargin) shouldBe 42
   }
 
+  // ===== Narrow type deref store — memory corruption check =====
+
+  "i32 deref store does not corrupt adjacent field in struct" in {
+    compileAndRun(
+      """struct Pair32
+        |    a: i32
+        |    b: i32
+        |main() -> int
+        |    var s = Pair32(0, 99)
+        |    val p: *i32 = &s.a
+        |    *p = 42
+        |    s.b
+        |""".stripMargin) shouldBe 99
+  }
+
+  "i16 deref store does not corrupt adjacent field in struct" in {
+    compileAndRun(
+      """struct Pair16
+        |    a: i16
+        |    b: i16
+        |main() -> int
+        |    var s = Pair16(0, 99)
+        |    val p: *i16 = &s.a
+        |    *p = 42
+        |    s.b
+        |""".stripMargin) shouldBe 99
+  }
+
+  "i8 deref store does not corrupt adjacent field in struct" in {
+    compileAndRun(
+      """struct Pair8
+        |    a: i8
+        |    b: i8
+        |main() -> int
+        |    var s = Pair8(0, 99)
+        |    val p: *i8 = &s.a
+        |    *p = 42
+        |    s.b
+        |""".stripMargin) shouldBe 99
+  }
+
   "pointer walk with *p++ in loop" in {
     compileAndRun(
       """main() -> int
