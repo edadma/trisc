@@ -49,6 +49,8 @@ class SyslLLVMCodegen:
   // Break/continue label stacks for loop codegen
   private val breakLabels = new mutable.Stack[String]
   private val continueLabels = new mutable.Stack[String]
+  // Scope snapshots for loop body cleanup (parallel to break/continue stacks)
+  private val loopScopeSnapshots = new mutable.Stack[Set[String]]
   // Defer stack — LIFO execution before returns
   private val deferStack = new mutable.Stack[TStmt]
 
@@ -487,8 +489,10 @@ class SyslLLVMCodegen:
         val condLabel = newLabel("while_cond")
         val bodyLabel = newLabel("while_body")
         val endLabel = newLabel("while_end")
+        val preLoopLocals = locals.keySet.toSet
         breakLabels.push(endLabel)
         continueLabels.push(condLabel)
+        loopScopeSnapshots.push(preLoopLocals)
         emit(s"  br label %$condLabel")
         emitLabel(condLabel)
         val c = genExpr(cond)
@@ -500,11 +504,14 @@ class SyslLLVMCodegen:
         val savedHR = hasReturned
         hasReturned = false
         for s <- body do if !hasReturned then genStmt(s)
-        if !hasReturned then emit(s"  br label %$condLabel")
+        if !hasReturned then
+          emitScopeCleanup(preLoopLocals)
+          emit(s"  br label %$condLabel")
         emitLabel(endLabel)
         hasReturned = savedHR
         breakLabels.pop()
         continueLabels.pop()
+        loopScopeSnapshots.pop()
 
       case TForStmt(init, cond, update, body) =>
         genStmt(init)
@@ -512,8 +519,10 @@ class SyslLLVMCodegen:
         val bodyLabel = newLabel("for_body")
         val updateLabel = newLabel("for_update")
         val endLabel = newLabel("for_end")
+        val preLoopLocals = locals.keySet.toSet // after init, before body
         breakLabels.push(endLabel)
         continueLabels.push(updateLabel)
+        loopScopeSnapshots.push(preLoopLocals)
         emit(s"  br label %$condLabel")
         emitLabel(condLabel)
         val c = genExpr(cond)
@@ -525,7 +534,9 @@ class SyslLLVMCodegen:
         val savedHR = hasReturned
         hasReturned = false
         for s <- body do if !hasReturned then genStmt(s)
-        if !hasReturned then emit(s"  br label %$updateLabel")
+        if !hasReturned then
+          emitScopeCleanup(preLoopLocals)
+          emit(s"  br label %$updateLabel")
         emitLabel(updateLabel)
         if !hasReturned then genStmt(update)
         if !hasReturned then emit(s"  br label %$condLabel")
@@ -533,19 +544,24 @@ class SyslLLVMCodegen:
         hasReturned = savedHR
         breakLabels.pop()
         continueLabels.pop()
+        loopScopeSnapshots.pop()
 
       case TDoWhileStmt(cond, body) =>
         val bodyLabel = newLabel("dowhile_body")
         val condLabel = newLabel("dowhile_cond")
         val endLabel = newLabel("dowhile_end")
+        val preLoopLocals = locals.keySet.toSet
         breakLabels.push(endLabel)
         continueLabels.push(condLabel)
+        loopScopeSnapshots.push(preLoopLocals)
         emit(s"  br label %$bodyLabel")
         emitLabel(bodyLabel)
         val savedHR = hasReturned
         hasReturned = false
         for s <- body do if !hasReturned then genStmt(s)
-        if !hasReturned then emit(s"  br label %$condLabel")
+        if !hasReturned then
+          emitScopeCleanup(preLoopLocals)
+          emit(s"  br label %$condLabel")
         emitLabel(condLabel)
         if !hasReturned then
           val c = genExpr(cond)
@@ -557,12 +573,15 @@ class SyslLLVMCodegen:
         hasReturned = savedHR
         breakLabels.pop()
         continueLabels.pop()
+        loopScopeSnapshots.pop()
 
       case TBreakStmt =>
+        emitScopeCleanup(loopScopeSnapshots.top)
         emit(s"  br label %${breakLabels.top}")
         hasReturned = true // stop emitting after unconditional branch
 
       case TContinueStmt =>
+        emitScopeCleanup(loopScopeSnapshots.top)
         emit(s"  br label %${continueLabels.top}")
         hasReturned = true
 
@@ -1062,6 +1081,7 @@ class SyslLLVMCodegen:
         emitLabel(thenLabel)
         val savedHasReturned = hasReturned
         hasReturned = false
+        val preThenLocals = locals.keySet.toSet
         var thenVal = "0"
         for s <- thenBody.init do genStmt(s)
         if !hasReturned then
@@ -1073,17 +1093,22 @@ class SyslLLVMCodegen:
                   val loaded = newReg()
                   emit(s"  $loaded = load $t, $t* $v")
                   emit(s"  store $t $loaded, $t* $alloca")
+                  // Slice: increment aggResult copy (source will be cleaned up by scope cleanup)
+                  if isSliceType(typ) then emitSliceBackrefIncr(alloca)
                 case None => thenVal = v
             case Some(other) => genStmt(other)
             case None =>
         val thenReturned = hasReturned
-        val thenExitBlock = currentBlock // may differ from thenLabel if nested if/else
-        if !thenReturned then emit(s"  br label %$mergeLabel")
+        val thenExitBlock = currentBlock
+        if !thenReturned then
+          emitScopeCleanup(preThenLocals)
+          emit(s"  br label %$mergeLabel")
         hasReturned = savedHasReturned
 
         emitLabel(elseLabel)
         var elseVal = "0"
         hasReturned = false
+        val preElseLocals = locals.keySet.toSet
         elseBody.foreach { stmts =>
           for s <- stmts.init do genStmt(s)
           if !hasReturned then
@@ -1095,13 +1120,16 @@ class SyslLLVMCodegen:
                     val loaded = newReg()
                     emit(s"  $loaded = load $t, $t* $v")
                     emit(s"  store $t $loaded, $t* $alloca")
+                    if isSliceType(typ) then emitSliceBackrefIncr(alloca)
                   case None => elseVal = v
               case Some(other) => genStmt(other)
               case None =>
         }
         val elseReturned = hasReturned
-        val elseExitBlock = currentBlock // may differ from elseLabel if nested if/else
-        if !elseReturned then emit(s"  br label %$mergeLabel")
+        val elseExitBlock = currentBlock
+        if !elseReturned then
+          emitScopeCleanup(preElseLocals)
+          emit(s"  br label %$mergeLabel")
         hasReturned = savedHasReturned
 
         emitLabel(mergeLabel)
@@ -1694,6 +1722,7 @@ class SyslLLVMCodegen:
                 }
                 fOffset += ft.sizeOf
             case _ => // no bindings needed
+          val preArmLocals = locals.keySet.toSet
           val savedHR = hasReturned
           hasReturned = false
           if arm.body.nonEmpty then
@@ -1707,12 +1736,16 @@ class SyslLLVMCodegen:
                       val loaded = newReg()
                       emit(s"  $loaded = load $resultLt, $resultLt* $v")
                       emit(s"  store $resultLt $loaded, $resultLt* $resultAlloca")
+                      if isSliceType(effectiveType) then emitSliceBackrefIncr(resultAlloca)
                     else emit(s"  store $resultLt $v, $resultLt* $resultAlloca")
                 case other => genStmt(other)
-          if !hasReturned then emit(s"  br label %$endLabel")
+          if !hasReturned then
+            emitScopeCleanup(preArmLocals)
+            emit(s"  br label %$endLabel")
           hasReturned = savedHR
         // Default
         emitLabel(defaultLabel)
+        val preDefaultLocals = locals.keySet.toSet
         default match
           case Some(stmts) if stmts.nonEmpty =>
             val savedHR = hasReturned
@@ -1727,9 +1760,12 @@ class SyslLLVMCodegen:
                       val loaded = newReg()
                       emit(s"  $loaded = load $resultLt, $resultLt* $v")
                       emit(s"  store $resultLt $loaded, $resultLt* $resultAlloca")
+                      if isSliceType(effectiveType) then emitSliceBackrefIncr(resultAlloca)
                     else emit(s"  store $resultLt $v, $resultLt* $resultAlloca")
                 case other => genStmt(other)
-            if !hasReturned then emit(s"  br label %$endLabel")
+            if !hasReturned then
+              emitScopeCleanup(preDefaultLocals)
+              emit(s"  br label %$endLabel")
             hasReturned = savedHR
           case _ =>
             if resultLt != "void" then
@@ -2320,6 +2356,13 @@ class SyslLLVMCodegen:
     // Slice backref cleanup: decrement all slice locals except the one being returned
     for (_, local) <- locals if isSliceType(local.typ) do
       if !returnedSliceReg.contains(local.reg) then
+        emitSliceBackrefDecr(local.reg)
+
+  /** Decrement slice backrefs for locals introduced since a scope snapshot.
+    * Used at scope exits (end of if/else branch, loop iteration, match arm). */
+  private def emitScopeCleanup(preLocals: Set[String]): Unit =
+    for (name, local) <- locals if !preLocals.contains(name) do
+      if isSliceType(local.typ) then
         emitSliceBackrefDecr(local.reg)
 
   /** Check if an expression is a TNew/TNewArray (already owns the ref, no incr needed). */

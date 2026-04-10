@@ -311,4 +311,119 @@ class SyslLLVMAllocaTests extends SyslLLVMTestHelpers {
         |    s2[0] + s2[1] + s2[2]
         |""".stripMargin) shouldBe 9
   }
+
+  // ===== Scope-level cleanup tests =====
+
+  "slice created in loop body (cleanup each iteration)" in {
+    llvmExit(
+      """main() -> int
+        |    var total = 0
+        |    var i = 0
+        |    while i < 3
+        |        val a = new [2]int
+        |        a[0] = i
+        |        a[1] = i + 1
+        |        val s = a[:]
+        |        total = total + s[0] + s[1]
+        |        i = i + 1
+        |    total
+        |""".stripMargin) shouldBe 9
+  }
+
+  "slice in if branch (cleaned up at branch end)" in {
+    llvmExit(
+      """main() -> int
+        |    val a = new [3]int
+        |    a[0] = 10
+        |    a[1] = 20
+        |    a[2] = 30
+        |    var result = 0
+        |    if true
+        |        val s = a[:]
+        |        result = s[0] + s[1] + s[2]
+        |    result
+        |""".stripMargin) shouldBe 60
+  }
+
+  "slice in both if/else branches" in {
+    llvmExit(
+      """main() -> int
+        |    val a = new [2]int
+        |    a[0] = 10
+        |    a[1] = 20
+        |    val b = new [2]int
+        |    b[0] = 30
+        |    b[1] = 40
+        |    var result = 0
+        |    if true
+        |        val s = a[:]
+        |        result = s[0] + s[1]
+        |    else
+        |        val s = b[:]
+        |        result = s[0] + s[1]
+        |    result
+        |""".stripMargin) shouldBe 30
+  }
+
+  "break from loop with slice (cleanup before break)" in {
+    llvmExit(
+      """main() -> int
+        |    var result = 0
+        |    var i = 0
+        |    while i < 10
+        |        val a = new [2]int
+        |        a[0] = i
+        |        a[1] = i * 10
+        |        val s = a[:]
+        |        result = s[0] + s[1]
+        |        if i == 2
+        |            break
+        |        i = i + 1
+        |    result
+        |""".stripMargin) shouldBe 22
+  }
+
+  "continue from loop with slice (cleanup before continue)" in {
+    llvmExit(
+      """main() -> int
+        |    var total = 0
+        |    var i = 0
+        |    while i < 5
+        |        i = i + 1
+        |        if i == 3
+        |            continue
+        |        val a = new [1]int
+        |        a[0] = i
+        |        val s = a[:]
+        |        total = total + s[0]
+        |    total
+        |""".stripMargin) shouldBe 12
+  }
+
+  "for loop with slice in body" in {
+    llvmExit(
+      """main() -> int
+        |    var total = 0
+        |    for i in 0..<4
+        |        val a = new [1]int
+        |        a[0] = i * 10
+        |        val s = a[:]
+        |        total = total + s[0]
+        |    total
+        |""".stripMargin) shouldBe 60
+  }
+
+  "if expression returning slice" in {
+    llvmExit(
+      """main() -> int
+        |    val a = new [2]int
+        |    a[0] = 10
+        |    a[1] = 20
+        |    val b = new [2]int
+        |    b[0] = 30
+        |    b[1] = 40
+        |    val s = if true then a[:] else b[:]
+        |    s[0] + s[1]
+        |""".stripMargin) shouldBe 30
+  }
 }
