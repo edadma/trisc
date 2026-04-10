@@ -534,6 +534,8 @@ On notification, call notify_read() to get the value.
 
         // No IPC message — check for pending notification
         if threads[me].notify_pending == 1
+            // No message delivered — do not leave a stale actual_len from a prior recv.
+            ipc_ctx[me].actual_len = 0
             syscall_return(-2)
             ipc_continue_current()
             return

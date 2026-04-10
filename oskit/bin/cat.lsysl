@@ -3,29 +3,59 @@ cat — concatenate and print files
 
 Reads a file and writes its contents to the terminal.
 
+Builds the path from [[PROG_ARGS_ADDR]] into a stack buffer before [[open]],
+same idea as `/bin/echo`: avoids passing a `string` view tied to the shared
+args page through IPC (unreliable in the external-program bootstrap path).
+
+Read path matches the demo volume: ramdisk sectors and TFS `sb_block_size`
+are **4096** bytes (`TriscCli` ramdisk + `TFS.format`). Each `read(..., 4096)`
+lets `tfs_read` use full-block `rd_read` into this buffer when aligned.
+
+Output goes through [[puts]] in slices of at most **125** bytes — that is the
+payload cap enforced by [[oskit.ulib.puts]] (128-byte TTY IPC message minus
+the 3-byte header).
+
     module oskit.bin.cat
 
-    import oskit.ulib.{get_args, open, read, puts, putc, exit}
+    import oskit.ulib.{open, read, puts, exit, PROG_ARGS_ADDR}
+
+    val CAT_READ_CHUNK = 4096
+    val PUTS_PAYLOAD_MAX = 125
 
     main()
-        val path = get_args()
-        if len(path) == 0
+        val src = *byte(PROG_ARGS_ADDR)
+        var pathbuf: [240]byte
+        var n = 0
+        while n < 240
+            val c = src[n]
+            if c == 0
+                break
+            pathbuf[n] = c
+            n += 1
+        if n == 0
             puts("usage: cat <file>\n")
             exit()
             return
+        val path = string(&pathbuf[0], n)
         val ino = open(path)
         if ino < 0
             puts(path)
             puts(": not found\n")
             exit()
             return
-        var buf: [128]byte
+        var buf: [4096]byte
         var offset = 0
-        var nr = read(ino, buf, offset, 128)
+        var nr = read(ino, &buf[0], offset, CAT_READ_CHUNK)
         while nr > 0
-            for var i = 0; i < nr; i++
-                putc(int(buf[i]))
+            var sent = 0
+            while sent < nr
+                var k = nr - sent
+                if k > PUTS_PAYLOAD_MAX
+                    k = PUTS_PAYLOAD_MAX
+                puts(string(&buf[sent], k))
+                sent += k
             offset += nr
-            nr = read(ino, buf, offset, 128)
-        putc('\n')
+            nr = read(ino, &buf[0], offset, CAT_READ_CHUNK)
+        if nr < 0
+            puts("cat: read error\n")
         exit()

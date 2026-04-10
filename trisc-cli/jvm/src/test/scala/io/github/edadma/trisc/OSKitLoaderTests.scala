@@ -216,6 +216,20 @@ import oskit.apps.init.{init}
     cleaned should include("Hello, world!")
   }
 
+  // Regression: thread_count capped at MAX_THREADS; without reusing STATE_TERMINATED
+  // slots, the fourth /bin/hello would use idx 8 and corrupt memory past threads[7].
+  "Loader: hello six times reuses thread slots" in {
+    val trb = TriscBinary.serialize(TOF.deserialize(helloTofText))
+    val script = List.fill(6)("hello\n").mkString
+    // Wider spacing than default: puts()-based hello finishes a line much faster than
+    // 13× putc, so keys can outpace the shell unless we inject more slowly.
+    val keys   = typeString(script, startTick = 500000, spacing = 12000)
+    val (cpu, output, _) = runWithKeys("", keys, maxCycles = 200000000,
+      files = Map("/bin/hello" -> trb))
+    cpu.state shouldNot be(State.DoubleFault)
+    "Hello, world!".r.findAllIn(output).length should be >= 6
+  }
+
   "Loader: unknown program shows not found" in {
     val keys = typeString("nosuchprog\n", startTick = 500000)
     val (_, output, _) = runWithKeys("", keys)

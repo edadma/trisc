@@ -6,8 +6,9 @@ import scala.io.{Codec, Source}
 import scala.util.Try
 
 // TRB v1 binaries for the demo ramdisk /bin (hello, echo, cat).
-// Prefers classpath resources ramdisk/bin/<name>.trb. Falls back to ramdisk/bin/<name>.tof (UTF-8
-// text TOF for migration). If both missing, compiles from oskit/bin sources (emits TRB).
+// When oskit sources are available (typical: run sbt from the trisc repo root), compiles from
+// oskit/bin/*.lsysl so the demo tracks edits without a separate regen step. Otherwise loads
+// ramdisk/bin/<name>.trb (or legacy .tof) from the classpath for JAR-only use.
 object RamdiskBinPrograms:
 
   private val utf8 = StandardCharsets.UTF_8
@@ -41,14 +42,13 @@ object RamdiskBinPrograms:
     val doc = new LiterateParser().parse(raw)
     LiterateRenderer.tangle(doc)
 
-  private lazy val ulibTangled: String = tangledLsysl("oskit/ulib/ulib.lsysl")
-
   def compileExecutable(unitPath: String, lsyslRepoPath: String): Array[Byte] =
     val syscallAsm =
       Source.fromFile("oskit/ulib/syscall.asm")(using Codec.UTF8).mkString
     val syscallTof = assemble(syscallAsm, relocatable = true)
-    val source = tangledLsysl(lsyslRepoPath)
-    val allSources = Map(unitPath -> source, "oskit/ulib/ulib" -> ulibTangled)
+    val source     = tangledLsysl(lsyslRepoPath)
+    val ulibSource = tangledLsysl("oskit/ulib/ulib.lsysl")
+    val allSources = Map(unitPath -> source, "oskit/ulib/ulib" -> ulibSource)
     val driver = new SyslDriver
     val result = driver.compile(allSources)
     val codegen = new SyslTriscCodegen
@@ -84,6 +84,8 @@ object RamdiskBinPrograms:
         TriscBinary.serialize(linked)
       })
 
+  // Always compile from checkout when sources exist — no lazy cache (stale TRBs after ulib edits
+  // broke tests and misled the GUI until JVM restart).
   def loadForRamdisk(): Map[String, Array[Byte]] =
     val triples = Seq(
       ("hello", "oskit/bin/hello/hello", "oskit/bin/hello.lsysl"),
@@ -91,8 +93,8 @@ object RamdiskBinPrograms:
       ("cat", "oskit/bin/cat/cat", "oskit/bin/cat.lsysl"),
     )
     triples.flatMap { case (short, unitPath, lsysl) =>
-      loadResource(short)
-        .orElse(Try(compileExecutable(unitPath, lsysl)).toOption)
+      Try(compileExecutable(unitPath, lsysl)).toOption
+        .orElse(loadResource(short))
         .map(bytes => s"/bin/$short" -> bytes)
     }.toMap
 
