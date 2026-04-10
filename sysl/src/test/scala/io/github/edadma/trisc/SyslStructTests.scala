@@ -187,4 +187,19 @@ class SyslStructTests extends SyslTestHelpers {
         |    a.total
         |""".stripMargin) shouldBe 15
   }
+
+  "tangled list.lsysl parses ListNode with next prev anchor value" in {
+    val raw = scala.io.Source.fromFile("std/container/list/list.lsysl").mkString
+    val tangled = LiterateRenderer.tangle(new LiterateParser().parse(raw))
+    val Right(ast) = (new SyslParser).parseProgram(tangled): @unchecked
+    val ln = ast.decls.collect { case s: StructDeclAST if s.name == "ListNode" => s }.head
+    ln.fields.map(_._1) shouldBe List("next", "prev", "anchor", "value")
+  }
+
+  "tangled list.lsysl analyzes (recursive generic field assign)" in {
+    val raw = scala.io.Source.fromFile("std/container/list/list.lsysl").mkString
+    val tangled = LiterateRenderer.tangle(new LiterateParser().parse(raw))
+    val Right(ast) = (new SyslParser).parseProgram(tangled): @unchecked
+    (new SyslAnalyzer).analyze(ast)
+  }
 }
