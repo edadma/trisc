@@ -77,7 +77,8 @@ class OSKitTTYTests extends OSKitTestHelpers {
         injectedCount += 1
     }
     val ticks: Seq[Processor => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
-    val cpu = new CPU(mem, ticks) { this.limit = maxCycles }
+    val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
+    val cpu = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
     if false then println(s"  [debug] ticks=$tickCount injected=$injectedCount cycles=${cpu.cycles}")
