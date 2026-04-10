@@ -16,7 +16,7 @@ main() -> int
         val content = read_file(argv(i))
 
         if length(content) == 0 && !exists(argv(i))
-            puts(concat("wc: ", concat(argv(i), ": No such file or directory\n")))
+            puts(s"wc: ${argv(i)}: No such file or directory\n")
             return 1
 
         var lines = 0

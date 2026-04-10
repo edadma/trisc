@@ -21,11 +21,11 @@ main() -> int
         val content = read_file(argv(i))
 
         if length(content) == 0 && !exists(argv(i))
-            puts(concat("head: ", concat(argv(i), ": No such file or directory\n")))
+            puts(s"head: ${argv(i)}: No such file or directory\n")
             return 1
 
         if argc() - file_start > 1
-            puts(concat("==> ", concat(argv(i), " <==\n")))
+            puts(s"==> ${argv(i)} <==\n")
 
         var lines = 0
         var j = 0

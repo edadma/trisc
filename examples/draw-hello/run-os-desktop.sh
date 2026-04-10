@@ -4,7 +4,7 @@
 set -e
 
 echo "=== Building OS desktop TOF ==="
-sbt -error "triscCliJVM/testOnly *BuildOSDesktop*"
+sbt -error "triscCliJVM/runMain io.github.edadma.trisc.RegenOskitDemoMain desktop"
 
 echo "=== Running GUI ==="
 sbt -error "triscCliJVM/run run --gui /tmp/os-desktop.tof"

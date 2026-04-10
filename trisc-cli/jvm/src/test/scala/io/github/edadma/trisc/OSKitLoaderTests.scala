@@ -139,6 +139,7 @@ import oskit.apps.init.{init}
     case '/'                       => (KeyEvent.VK_SLASH, 0)
     case '-'                       => (KeyEvent.VK_MINUS, 0)
     case '.'                       => (KeyEvent.VK_PERIOD, 0)
+    case '!'                       => (KeyEvent.VK_1, 1)
     case _                         => (KeyEvent.VK_SPACE, 0)
 
   def typeString(s: String, startTick: Int, spacing: Int = 2000): Seq[(Int, Int, Boolean, Int)] =
@@ -179,9 +180,9 @@ import oskit.apps.init.{init}
     val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha, dma)
     dma.mem = mem
     linked.load(mem)
-    val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
-    val keyInjector: Processor => Unit = cpu => {
-      val cycle = cpu.cycles
+    val pending                       = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
+    val keyInjector: Processor => Unit = proc => {
+      val cycle = proc.cycles
       while pending.nonEmpty && cycle >= pending.head._1 do
         val (_, vk, press, mods) = pending.dequeue()
         kbd.enqueue(vk, press,
@@ -202,6 +203,31 @@ import oskit.apps.init.{init}
       files = Map("/bin/hello" -> tofBytes))
     val cleaned = output.filterNot(_ == '\n')
     cleaned should include("Hello, world!")
+  }
+
+  "Loader: run hello from shell (TRB v1)" in {
+    val linked = TOF.deserialize(helloTofText)
+    val trb = TriscBinary.serialize(linked)
+    info(s"Hello TRB size: ${trb.length} bytes")
+    val keys = typeString("hello\n", startTick = 500000)
+    val (_, output, _) = runWithKeys("", keys, maxCycles = 30000000,
+      files = Map("/bin/hello" -> trb))
+    val cleaned = output.filterNot(_ == '\n')
+    cleaned should include("Hello, world!")
+  }
+
+  // Regression: thread_count capped at MAX_THREADS; without reusing STATE_TERMINATED
+  // slots, the fourth /bin/hello would use idx 8 and corrupt memory past threads[7].
+  "Loader: hello six times reuses thread slots" in {
+    val trb = TriscBinary.serialize(TOF.deserialize(helloTofText))
+    val script = List.fill(6)("hello\n").mkString
+    // Wider spacing than default: puts()-based hello finishes a line much faster than
+    // 13× putc, so keys can outpace the shell unless we inject more slowly.
+    val keys   = typeString(script, startTick = 500000, spacing = 12000)
+    val (cpu, output, _) = runWithKeys("", keys, maxCycles = 200000000,
+      files = Map("/bin/hello" -> trb))
+    cpu.state shouldNot be(State.DoubleFault)
+    "Hello, world!".r.findAllIn(output).length should be >= 6
   }
 
   "Loader: unknown program shows not found" in {
@@ -284,12 +310,21 @@ import oskit.apps.init.{init}
 
   "Loader: arg passing works" in {
     val tofBytes = echoTofText.getBytes("UTF-8")
-    val keys = typeString("echo foo bar\n", startTick = 500000)
+    val keys = typeString("./echo foo bar\n", startTick = 500000)
     val (_, output, _) = runWithKeys("", keys, maxCycles = 30000000,
       files = Map("/bin/echo" -> tofBytes))
     info(s"Output: ${output.take(200)}")
     val cleaned = output.filterNot(_ == '\n')
     cleaned should include("foo bar")
+  }
+
+  "Loader: ./echo with punctuation (get_args)" in {
+    val tofBytes = echoTofText.getBytes("UTF-8")
+    val keys = typeString("./echo asdf!2\n", startTick = 500000)
+    val (_, output, _) = runWithKeys("", keys, maxCycles = 30000000,
+      files = Map("/bin/echo" -> tofBytes))
+    val cleaned = output.filterNot(_ == '\n')
+    cleaned should include("asdf!2")
   }
 
   "String temp leak: function arg temporaries" in {

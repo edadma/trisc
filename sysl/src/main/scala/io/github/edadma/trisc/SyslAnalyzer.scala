@@ -250,6 +250,10 @@ class SyslAnalyzer:
             if !enumToTemplate.contains(et.name) && !isMangledGenericInstance then
               for ((vname, _), idx) <- et.variants.zipWithIndex do
                 variantToEnum(vname) = (et, idx)
+        case SymbolMeta.Kind.Impl(traitName, targetType, methods) =>
+          val key = (traitName, targetType)
+          if !impls.contains(key) then
+            impls(key) = mutable.LinkedHashMap.from(methods)
 
     // Register generic templates from imported module (needed for cross-module generic instantiation)
     if meta.genericTemplates.nonEmpty then
@@ -1835,6 +1839,8 @@ class SyslAnalyzer:
           case SymbolMeta.Kind.Struct(st) => throw AnalysisError(s"'$nsName.$member' is a struct type, not a value")
           case SymbolMeta.Kind.Enum(_) => throw AnalysisError(s"'$nsName.$member' is an enum type, not a value")
           case SymbolMeta.Kind.Interface(_) => throw AnalysisError(s"'$nsName.$member' is an interface type, not a value")
+          case SymbolMeta.Kind.Impl(_, _, _) =>
+            throw AnalysisError(s"'$nsName.$member' is a trait implementation, not a value")
 
       case FieldAccessAST(VarRefAST(enumName), member) if enumTypes.contains(enumName) =>
         val members = enumTypes(enumName)

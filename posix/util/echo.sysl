@@ -5,7 +5,7 @@ main() -> int
     val n = argc()
     var first = true
 
-    for var i = 1; i < n; i++
+    for i in 1..<n
         if !first then putc(' ')
 
         puts(argv(i))

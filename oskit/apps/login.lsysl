@@ -66,6 +66,18 @@ If echo is false, characters are not echoed (for passwords).
                         login_putc(' ')
                         login_putc(8)
                         login_flush()
+            else if ch == 27
+                // ANSI escape (arrow keys, etc.) — consume without echoing or buffering.
+                // Without this, ESC is skipped but "[D" from CSI cursor-left is echoed as data.
+                val c2 = tty_getc()
+                if c2 == '['
+                    var cx = tty_getc()
+                    // Keep reading while not a CSI final: params/intermediates, or a
+                    // repeated '[' (0x5b is in 64..126 but must not stop before the real final).
+                    while cx >= 0 && (cx == '[' || cx < 64 || cx > 126)
+                        cx = tty_getc()
+                else if c2 == 'O'
+                    val _ss3 = tty_getc()
             else if ch >= ' '
                 buf[blen] = byte(ch)
                 blen += 1

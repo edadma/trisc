@@ -2,24 +2,13 @@ hello — print a greeting
 =========================
 
 A simple standalone program that prints a message and exits.
+Uses one [[puts]] to the TTY server so the line goes out as a single IPC
+payload (not one [[putc]] syscall per character).
 
     module oskit.bin.hello
 
-    import oskit.ulib.{putc, exit}
+    import oskit.ulib.{puts, exit}
 
     main()
-        putc('H')
-        putc('e')
-        putc('l')
-        putc('l')
-        putc('o')
-        putc(',')
-        putc(' ')
-        putc('w')
-        putc('o')
-        putc('r')
-        putc('l')
-        putc('d')
-        putc('!')
-        putc('\n')
+        puts("Hello, world!\n")
         exit()

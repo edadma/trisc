@@ -4,14 +4,19 @@ echo — echo arguments
 Reads the argument string and outputs it.
 Used to test argument passing to external programs.
 
+Reads directly from [[PROG_ARGS_ADDR]] like [[get_args]] but avoids constructing a
+`string` in `main` (safer for the external-program / thread bootstrap path).
+
     module oskit.bin.echo
 
-    import oskit.ulib.{get_args, putc, exit, PROG_ARGS_ADDR}
+    import oskit.ulib.{putc, exit, PROG_ARGS_ADDR}
 
     main()
-        val args = get_args()
-        val p = *byte(args)
-        for var i = 0; i < len(args); i++
+        val p = *byte(PROG_ARGS_ADDR)
+        var n = 0
+        while p[n] != 0
+            n += 1
+        for var i = 0; i < n; i++
             putc(int(p[i]))
         putc('\n')
         exit()

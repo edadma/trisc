@@ -89,15 +89,19 @@ Write a string to the TTY server.
         if port < 0
             return
         val n = len(s)
-        val p = *byte(s)
+        var m = n
+        if m < 0
+            m = 0
+        if m > 125
+            m = 125
         var msg: [128]byte
         msg[0] = byte(TTY_CMD_PUTS)
         msg[1] = 0
-        msg[2] = byte(n)
-        for var i = 0; i < n; i++
-            msg[i + 3] = p[i]
+        msg[2] = byte(m)
+        for var i = 0; i < m; i++
+            msg[i + 3] = byte(s[i])
         var reply: [1]byte
-        ipc_send(port, &msg[0], n + 3, &reply[0], 1)
+        ipc_send(port, &msg[0], m + 3, &reply[0], 1)
 
 Open a file by path. Returns an inode number or -1 on error.
 
@@ -110,13 +114,17 @@ Open a file by path. Returns an inode number or -1 on error.
         if port < 0
             return -1
         val plen = len(path)
-        val p = *byte(path)
+        var m = plen
+        if m < 0
+            m = 0
+        if m > 127
+            m = 127
         var msg: [128]byte
         msg[0] = byte(FS_CMD_OPEN)
-        for var i = 0; i < plen; i++
-            msg[i + 1] = p[i]
+        for var i = 0; i < m; i++
+            msg[i + 1] = byte(path[i])
         var reply: [5]byte
-        ipc_send(port, &msg[0], plen + 1, &reply[0], 5)
+        ipc_send(port, &msg[0], m + 1, &reply[0], 5)
         if reply[0] != 0
             return -1
         msg_read_i32(&reply[0], 1)
@@ -152,7 +160,7 @@ shell before launching the program. This convention will be
 replaced by proper exec() argument passing when the MMU
 and process manager land.
 
-    val PROG_ARGS_ADDR = 0xCFF00
+    val PROG_ARGS_ADDR = 0xBF000
 
     get_args() -> string
         val p = *byte(PROG_ARGS_ADDR)

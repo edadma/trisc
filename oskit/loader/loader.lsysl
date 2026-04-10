@@ -1,9 +1,8 @@
 TOF Loader — Load executable TOF files into memory
 ===================================================
 
-Parses the TOF text format and loads executable programs
-into memory. This is the OS-side equivalent of what the
-emulator's `TOF.load()` does on the JVM.
+Loads executables from either the TRB v1 binary format (magic `TRB` + 0x01) or the TOF text
+format. This is the OS-side equivalent of the emulator's `TOF.load()` / `TriscBinary` on the JVM.
 
 TOF text format (executable, fully linked):
 ```
@@ -32,6 +31,7 @@ pressure regardless of file size.
 
     import oskit.servers.{fs_open, fs_read}
     import posix.stdlib.{malloc, free}
+    import std.mem.{memcpy, memset}
 
 Error codes returned when loading fails.
 
@@ -123,10 +123,55 @@ The buffer contains the entire TOF file as text. We parse
 it line by line, tracking the current segment base address
 and a write cursor within each segment.
 
-Zero-allocation: all comparisons and hex decoding work
-directly on `buf` pointers. No strings are created.
+Zero-allocation for the text parser: comparisons and hex decoding work
+directly on `buf` pointers. TRB PROGBITS copies and TOF `RES` / TRB NOBITS
+zero-fill use `std.mem.memcpy` / `memset` (DMA-backed, one-shot in the emulator).
+
+Little-endian u32 at `p` (unsigned, returned as i64).
+
+    read_u32_le(p: *byte) -> i64
+        i64(p[0] & 0xff) | (i64(p[1] & 0xff) << 8) | (i64(p[2] & 0xff) << 16) | (i64(p[3] & 0xff) << 24)
+
+TRB v1 binary image: magic `TRB` + 0x01, u32 entry, u32 record count, then records
+(u32 org, u32 kind, u32 size [, size bytes if kind==0]). kind 0 = PROGBITS, 1 = NOBITS (zero-fill).
+
+    load_trb1_from_buf(buf: *byte, buflen: int) -> i64
+        if buflen < 12
+            return LOAD_ERR_FORMAT
+        val entry = read_u32_le(buf + 4)
+        val nrec = int(read_u32_le(buf + 8))
+        var pos = 12
+        var ri = 0
+        while ri < nrec
+            if pos + 12 > buflen
+                return LOAD_ERR_FORMAT
+            val hp = buf + pos
+            val org = read_u32_le(hp)
+            val kind = int(read_u32_le(hp + 4))
+            val sz = int(read_u32_le(hp + 8))
+            pos += 12
+            if kind == 0
+                if pos + sz > buflen
+                    return LOAD_ERR_FORMAT
+                memcpy(*byte(org), buf + pos, sz)
+                pos += sz
+            else if kind == 1
+                memset(*byte(org), byte(0), sz)
+            else
+                return LOAD_ERR_FORMAT
+            ri += 1
+        if pos != buflen
+            return LOAD_ERR_FORMAT
+        entry
 
     load_tof_from_buf(buf: *byte, buflen: int) -> i64
+        if buflen >= 4
+            if buf[0] == byte('T')
+                if buf[1] == byte('R')
+                    if buf[2] == byte('B')
+                        if buf[3] != byte(1)
+                            return LOAD_ERR_FORMAT
+                        return load_trb1_from_buf(buf, buflen)
         var pos = 0
         var seg_base: i64 = 0
         var seg_cursor: i64 = 0
@@ -238,8 +283,7 @@ directly on `buf` pointers. No strings are created.
                                             return LOAD_ERR_FORMAT
                                         val sz = int(sz64)
                                         val dest = *byte(seg_cursor)
-                                        for var i = 0; i < sz; i++
-                                            dest[i] = 0
+                                        memset(dest, byte(0), sz)
                                         seg_cursor = seg_cursor + i64(sz)
                                         pos = eol + 1
                                         continue
@@ -302,7 +346,7 @@ With grant-based I/O, `fs_read` writes directly to our
 buffer — no size limit per call. We still loop because
 `tfs_read` is limited by file size, not IPC buffer size.
 
-    val LOAD_BUF_SIZE = 65536
+    val LOAD_BUF_SIZE = 262144
 
     load_tof(path: string) -> i64
         val ino = fs_open(path)
