@@ -716,6 +716,11 @@ class SyslAnalyzer:
     case FuncTypeAST(params, ret) => FuncType(params.map(resolveType), resolveType(ret))
     case RefTypeAST(inner) => RefType(resolveType(inner))
 
+  /** Convert an expression AST to a type AST (for explicit type args parsed as index expressions). */
+  private def exprToTypeAST(expr: ExpressionAST): TypeAST = expr match
+    case VarRefAST(name) => NamedTypeAST(name)
+    case _ => throw AnalysisError(s"expected type argument, got expression")
+
   /** Look up a method function by struct name and method name, trying both unmangled and mangled forms. */
   private def lookupMethod(structName: String, methodName: String): Option[FunInfo] =
     val shortName = s"${structName}_$methodName"
@@ -2020,6 +2025,28 @@ class SyslAnalyzer:
         if !compatible(coerced.typ, elemType) then
           throw AnalysisError(s"cannot append ${coerced.typ} to []$elemType")
         TAppend(tSlice, coerced, SliceType(elemType))
+
+      // Generic struct/function constructor with explicit type args: Name[T](args)
+      // The parser sees this as IndirectCallAST(IndexAST(VarRefAST(name), typeExpr), args)
+      case IndirectCallAST(IndexAST(VarRefAST(name), typeExpr), args)
+        if genericStructs.contains(name) || genericTemplates.contains(name) =>
+        val typeArg = resolveType(exprToTypeAST(typeExpr))
+        val tArgs = args.map(analyzeExpr)
+        if genericStructs.contains(name) then
+          val st = instantiateGenericStruct(name, List(typeArg))
+          if tArgs.length != st.fields.length then
+            throw AnalysisError(s"struct '${st.name}' has ${st.fields.length} field(s), got ${tArgs.length} argument(s)")
+          val checkedArgs = tArgs.zip(st.fields).map { case (arg, (fieldName, fieldType)) =>
+            val coerced = coerceLiteral(arg, fieldType)
+            if !compatible(coerced.typ, fieldType) then
+              throw AnalysisError(s"field '$fieldName' of '${st.name}' expects $fieldType, got ${coerced.typ}")
+            coerced
+          }
+          TStructConstruct(st, checkedArgs)
+        else
+          val (mangled, funInfo) = instantiateGeneric(name, tArgs.map(_.typ))
+          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
+          TCall(mangled, checkedArgs, funInfo.returnType)
 
       case IndirectCallAST(callee, args) =>
         val tCallee = analyzeExpr(callee)
