@@ -119,7 +119,8 @@ import oskit.apps.init.{init}
       intc,
       irq = 3,
       prefill = nshTtytab + prefill,
-      maxInodes = 32,
+      maxInodes = 64,
+      files = RamdiskBinPrograms.loadForRamdisk(),
     )
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)
     val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
@@ -157,6 +158,7 @@ import oskit.apps.init.{init}
     case '/'                       => (KeyEvent.VK_SLASH, 0)
     case '-'                       => (KeyEvent.VK_MINUS, 0)
     case '.'                       => (KeyEvent.VK_PERIOD, 0)
+    case '!'                       => (KeyEvent.VK_1, 1)
     case _                         => (KeyEvent.VK_SPACE, 0)
 
   def typeString(s: String, startTick: Int, spacing: Int = 2000): Seq[(Int, Int, Boolean, Int)] =
@@ -188,15 +190,16 @@ import oskit.apps.init.{init}
   }
 
   "NSH: cat reads file" in {
-    val keys        = typeString("cat /hello\n", startTick = 500000)
-    val (_, output) = runNsh(scheduledKeys = keys, prefill = "/hello file \"world\"\n")
+    val keys =
+      typeString("touch /hello\nwrite /hello world\ncat /hello\n", startTick = 500000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 25000000)
     output should include("world")
   }
 
   "NSH: help command" in {
     val keys        = typeString("help\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys)
-    output should include("echo ls cat")
+    output should include("echo cat ls")
   }
 
   "NSH: whoami returns 0" in {
@@ -230,8 +233,9 @@ import oskit.apps.init.{init}
   }
 
   "NSH: mv renames file" in {
-    val keys        = typeString("mv /old /new\ncat /new\n", startTick = 500000)
-    val (_, output) = runNsh(scheduledKeys = keys, prefill = "/old file \"data\"\n", maxCycles = 10000000)
+    val keys =
+      typeString("touch /old\nwrite /old data\nmv /old /new\ncat /new\n", startTick = 500000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 30000000)
     output should include("data")
   }
 
@@ -287,7 +291,8 @@ import oskit.apps.init.{init}
       intc,
       irq = 3,
       prefill = prefill,
-      maxInodes = 32,
+      maxInodes = 64,
+      files = RamdiskBinPrograms.loadForRamdisk(),
     )
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)
     val dma = new DMA(Runtime.dmaAddress, null, intc, 4)

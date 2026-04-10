@@ -207,8 +207,8 @@ object TriscCli:
     val ramdisk = new Ramdisk(
       Runtime.ramdiskAddress,
       ram,
-      sectors = 2048,
-      sectorSize = 512,
+      sectors = 256,
+      sectorSize = 4096,
       intc,
       irq = 3,
       prefill = """

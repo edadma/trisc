@@ -15,7 +15,8 @@ Message format (byte layout):
 Commands: DISK_CMD_READ=1, DISK_CMD_WRITE=2, DISK_CMD_CAPACITY=3
 
 For DISK_CMD_CAPACITY, the reply is [status(1), capacity(4, big-endian)]
-where capacity is the number of 512-byte sectors.
+where capacity is the number of hardware sectors (bytes per sector match
+the ramdisk format — e.g. 4096 in the demo image).
 
     module oskit.drivers.disk
 
@@ -46,7 +47,7 @@ the operation after all parameters are set.
     var disk_name: [5]byte
 
 Perform a raw block read from the ramdisk hardware.
-Reads one 512-byte sector at the given LBA into addr.
+Reads one sector (`count` = 1) at the given LBA into addr.
 
     disk_hw_read(lba: int, addr: i64)
         var rd: *RamdiskRegs = *RamdiskRegs(RD_BASE)
@@ -56,7 +57,7 @@ Reads one 512-byte sector at the given LBA into addr.
         rd.command = RD_CMD_READ
 
 Perform a raw block write to the ramdisk hardware.
-Writes one 512-byte sector from addr to the given LBA.
+Writes one sector from addr to the given LBA.
 
     disk_hw_write(lba: int, addr: i64)
         var rd: *RamdiskRegs = *RamdiskRegs(RD_BASE)

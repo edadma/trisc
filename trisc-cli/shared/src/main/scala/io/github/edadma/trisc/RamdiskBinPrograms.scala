@@ -5,9 +5,9 @@ import java.nio.charset.StandardCharsets
 import scala.io.{Codec, Source}
 import scala.util.Try
 
-// TOF executables for the demo ramdisk /bin (hello, echo, cat).
-// Prefers classpath resources ramdisk/bin/<name>.tof (UTF-8 TOF text). If missing, compiles from
-// oskit/bin sources relative to the current working directory.
+// TRB v1 binaries for the demo ramdisk /bin (hello, echo, cat).
+// Prefers classpath resources ramdisk/bin/<name>.trb. Falls back to ramdisk/bin/<name>.tof (UTF-8
+// text TOF for migration). If both missing, compiles from oskit/bin sources (emits TRB).
 object RamdiskBinPrograms:
 
   private val utf8 = StandardCharsets.UTF_8
@@ -57,9 +57,9 @@ object RamdiskBinPrograms:
       assemble(asm, relocatable = true)
     val syslTof = Linker.link(tofs, relocatable = true)
     val linked = Linker.link(Seq(syscallTof, syslTof), progScript, 0)
-    linked.serialize.getBytes(utf8)
+    TriscBinary.serialize(linked)
 
-  // All demo /bin programs; for regenerating embedded ramdisk/bin TOF resources.
+  // All demo /bin programs; for regenerating embedded ramdisk/bin/*.trb resources.
   def compileAllEmbeddedBinaries(): Map[String, Array[Byte]] =
     Map(
       "/bin/hello" -> compileExecutable("oskit/bin/hello/hello", "oskit/bin/hello.lsysl"),
@@ -67,16 +67,22 @@ object RamdiskBinPrograms:
       "/bin/cat"   -> compileExecutable("oskit/bin/cat/cat", "oskit/bin/cat.lsysl"),
     )
 
-  private def loadResource(short: String): Option[Array[Byte]] =
-    val p = s"ramdisk/bin/$short.tof"
+  private def loadResourceStream(path: String): Option[Array[Byte]] =
     val inOpt =
-      Option(RamdiskBinPrograms.getClass.getResourceAsStream("/" + p))
-        .orElse(Option(RamdiskBinPrograms.getClass.getResourceAsStream(p)))
+      Option(RamdiskBinPrograms.getClass.getResourceAsStream("/" + path))
+        .orElse(Option(RamdiskBinPrograms.getClass.getResourceAsStream(path)))
     inOpt match
       case None => None
       case Some(in) =>
         try Some(readStreamFully(in))
         finally in.close()
+
+  private def loadResource(short: String): Option[Array[Byte]] =
+    loadResourceStream(s"ramdisk/bin/$short.trb")
+      .orElse(loadResourceStream(s"ramdisk/bin/$short.tof").map { textBytes =>
+        val linked = TOF.deserialize(String(textBytes, utf8))
+        TriscBinary.serialize(linked)
+      })
 
   def loadForRamdisk(): Map[String, Array[Byte]] =
     val triples = Seq(

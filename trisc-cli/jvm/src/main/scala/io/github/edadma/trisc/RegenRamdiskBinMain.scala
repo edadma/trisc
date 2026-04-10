@@ -2,7 +2,7 @@ package io.github.edadma.trisc
 
 import java.nio.file.{Files, Paths}
 
-// Regenerate trisc-cli/shared/src/main/resources/ramdisk/bin/*.tof from oskit sources.
+// Regenerate trisc-cli/shared/src/main/resources/ramdisk/bin/*.trb from oskit sources.
 // Run from the trisc repo root: sbt "triscCliJVM/runMain io.github.edadma.trisc.RegenRamdiskBinMain"
 object RegenRamdiskBinMain:
   def main(args: Array[String]): Unit =
@@ -11,7 +11,7 @@ object RegenRamdiskBinMain:
     Files.createDirectories(outDir)
     RamdiskBinPrograms.compileAllEmbeddedBinaries().foreach { case (abs, bytes) =>
       val short = abs.stripPrefix("/bin/")
-      val path = outDir.resolve(s"$short.tof")
+      val path = outDir.resolve(s"$short.trb")
       Files.write(path, bytes)
       System.err.println(s"wrote $path (${bytes.length} bytes)")
     }

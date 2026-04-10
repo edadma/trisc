@@ -299,14 +299,24 @@ Returns the parent inode and the basename as a string.
             return path
         string(*byte(path) + last_slash + 1, len(path) - last_slash - 1)
 
-Built-in commands.
+Strip leading `./` segments so `./echo` and `echo` resolve to the same basename.
 
-    cmd_echo(argc: int, argv: *string)
-        for var i = 1; i < argc; i++
-            if i > 1
-                nsh_putc(' ')
-            nsh_print(argv[i])
-        nsh_newline()
+    nsh_strip_dot_slash(path: string) -> string
+        var s = path
+        while len(s) >= 2
+            if s[0] == '.'
+                if s[1] == '/'
+                    s = string(*byte(s) + 2, len(s) - 2)
+                    continue
+            break
+        s
+
+Executable name for `/bin/<name>` lookup: `./echo` → `echo`, `/bin/echo` → `echo`.
+
+    nsh_external_bin_key(cmd: string) -> string
+        nsh_basename(nsh_strip_dot_slash(cmd))
+
+Built-in commands.
 
     cmd_ls(argc: int, argv: *string)
         var dir_ino = cwd_ino
@@ -334,25 +344,6 @@ Built-in commands.
                         nsh_print(name)
                         nsh_newline()
             idx += 1
-
-    cmd_cat(argc: int, argv: *string)
-        if argc < 2
-            nsh_print("usage: cat <file>\n")
-            return
-        val ino = nsh_resolve(argv[1])
-        if ino < 0
-            nsh_print(argv[1])
-            nsh_print(": not found\n")
-            return
-        var buf: [128]byte
-        var offset = 0
-        var nr = fs_read(ino, buf, offset, 128)
-        while nr > 0
-            for var i = 0; i < nr; i++
-                nsh_putc(int(buf[i]))
-            offset += nr
-            nr = fs_read(ino, buf, offset, 128)
-        nsh_newline()
 
     cmd_mkdir(argc: int, argv: *string)
         if argc < 2
@@ -577,8 +568,9 @@ Built-in commands.
         nsh_newline()
 
     cmd_help(argc: int, argv: *string)
-        nsh_print("echo ls cat touch write mkdir rm rmdir mv chmod\n")
+        nsh_print("echo cat ls touch write mkdir rm rmdir mv chmod\n")
         nsh_print("pwd cd stat ps uptime whoami help\n")
+        nsh_print("(echo and cat are /bin executables)\n")
 
 Command dispatch.
 
@@ -586,9 +578,7 @@ Command dispatch.
         if argc == 0
             return
         val cmd = argv[0]
-        if cmd == "echo"
-            cmd_echo(argc, argv)
-        else if cmd == "pwd"
+        if cmd == "pwd"
             cmd_pwd(argc, argv)
         else if cmd == "help"
             cmd_help(argc, argv)
@@ -596,8 +586,6 @@ Command dispatch.
             cmd_whoami(argc, argv)
         else if cmd == "ls"
             cmd_ls(argc, argv)
-        else if cmd == "cat"
-            cmd_cat(argc, argv)
         else if cmd == "touch"
             cmd_touch(argc, argv)
         else if cmd == "write"
@@ -627,14 +615,18 @@ Try to run an external command from `/bin/`. Writes the
 argument string to a well-known address, loads the program
 TOF, creates a thread, and waits for it to finish.
 
+Commands such as `echo` and `cat` are not built-ins — they load
+`/bin/echo`, `/bin/cat`, etc. (basename of argv[0] after stripping `./`).
+
     val PROG_ARGS_ADDR = 0xCFF00
+    val PROG_ARGS_MAX  = 240
     val PROG_BASE      = 0xD0000
     val PROG_USP       = 0xCE000
     val PROG_SSP       = 0xCC000
 
     nsh_try_external(argc: int, argv: *string)
         val cmd = argv[0]
-        val bin_path = "/bin/" + cmd
+        val bin_path = "/bin/" + nsh_external_bin_key(cmd)
         val entry = load_tof(bin_path)
         if entry < 0
             nsh_print(cmd)
@@ -644,12 +636,18 @@ TOF, creates a thread, and waits for it to finish.
         val args_buf = *byte(PROG_ARGS_ADDR)
         var pos = 0
         for var i = 1; i < argc; i++
+            if pos >= PROG_ARGS_MAX
+                break
             if i > 1
                 args_buf[pos] = byte(' ')
                 pos += 1
+                if pos >= PROG_ARGS_MAX
+                    break
             val arg = argv[i]
             val p = *byte(arg)
             for var j = 0; j < len(arg); j++
+                if pos >= PROG_ARGS_MAX
+                    break
                 args_buf[pos] = p[j]
                 pos += 1
         args_buf[pos] = 0

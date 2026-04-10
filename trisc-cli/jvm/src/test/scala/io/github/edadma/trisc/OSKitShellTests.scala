@@ -153,6 +153,7 @@ import oskit.services.sleep
     case '/'                       => (KeyEvent.VK_SLASH, 0)
     case '-'                       => (KeyEvent.VK_MINUS, 0)
     case '.'                       => (KeyEvent.VK_PERIOD, 0)
+    case '!'                       => (KeyEvent.VK_1, 1)
     case _                         => (KeyEvent.VK_SPACE, 0)
 
   // === Shell integration tests ===
