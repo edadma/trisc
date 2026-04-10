@@ -144,9 +144,10 @@ object Linker:
     for seg <- placed do
       for sym <- seg.symbols do
         val absAddr = seg.org + sym.offset
-        if globalSymbols.contains(sym.name) then
-          throw LinkerError(s"duplicate symbol: '${sym.name}'")
-        globalSymbols(sym.name) = (absAddr, sym)
+        if !globalSymbols.contains(sym.name) then
+          globalSymbols(sym.name) = (absAddr, sym)
+        // Silently use first definition for duplicates (e.g., generic instantiations
+        // emitted in multiple compilation units)
 
     // Phase 3b: resolve linker script SYMBOL definitions
     for symDef <- script.symbols do

@@ -481,12 +481,14 @@ Returns 0 on success, -1 on error, -2 on timeout.
             // Block sender with timeout (waiting for reply)
             threads[me].state = STATE_SEND_BLOCKED
             threads[me].wake_tick = ticks + timeout
+            sleepq_insert(me)
             return
 
         // Server not waiting — enqueue with timeout
         ipc_queue_push(port, me)
         threads[me].state = STATE_SEND_BLOCKED
         threads[me].wake_tick = ticks + timeout
+        sleepq_insert(me)
 
 Receive a message OR notification. Like ipc_recv but also
 wakes when a notification is sent to this thread.

@@ -1,0 +1,26 @@
+// Old O(n) wake scan from schedule() in oskit/kernel/kernel.lsysl
+// Replaced with MinHeap-based sleep queue.
+// Kept here in case a sorted-linked-list approach is needed for
+// embedded/bare-metal schedulers without heap allocation.
+
+// --- Original code (lines 389-407 of kernel.lsysl) ---
+
+// Wake threads whose sleep/timeout has expired
+var i = 0
+while i < thread_count
+    if threads[i].state == STATE_BLOCKED
+        if ticks >= threads[i].wake_tick
+            threads[i].state = STATE_READY
+            threads[i].quantum = DEFAULT_QUANTUM
+            enqueue(threads[i].priority, i)
+    // IPC send timeout: wake_tick > 0 means a deadline was set
+    if threads[i].state == STATE_SEND_BLOCKED
+        if threads[i].wake_tick > 0
+            if ticks >= threads[i].wake_tick
+                // Timeout expired — wake with -2 in saved r1
+                syscall_return_for(i, -2)
+                threads[i].state = STATE_READY
+                threads[i].quantum = DEFAULT_QUANTUM
+                threads[i].wake_tick = 0
+                enqueue(threads[i].priority, i)
+    i += 1
