@@ -21,7 +21,7 @@ object RamdiskBinPrograms:
         |    data
         |    bss
         |SYMBOL _heap_start = AFTER bss
-        |SYMBOL _heap_end = 0xCC000
+        |SYMBOL _heap_end = 0x100000
         |ENTRY main
         |""".stripMargin,
     ) match
@@ -48,7 +48,18 @@ object RamdiskBinPrograms:
     val syscallTof = assemble(syscallAsm, relocatable = true)
     val source     = tangledLsysl(lsyslRepoPath)
     val ulibSource = tangledLsysl("oskit/ulib/ulib.lsysl")
-    val allSources = Map(unitPath -> source, "oskit/ulib/ulib" -> ulibSource)
+    val sbrkSource = Source.fromFile("oskit/ulib/sbrk.sysl")(using Codec.UTF8).mkString
+    val allocSource = Source.fromFile("posix/stdlib/alloc.sysl")(using Codec.UTF8).mkString
+    val stringSource = Source.fromFile("posix/string/string.sysl")(using Codec.UTF8).mkString
+    val ctypeSource = Source.fromFile("posix/ctype/ctype.sysl")(using Codec.UTF8).mkString
+    val allSources = Map(
+      unitPath -> source,
+      "oskit/ulib/ulib" -> ulibSource,
+      "posix/unistd/sbrk" -> sbrkSource,
+      "posix/stdlib/alloc" -> allocSource,
+      "posix/string/string" -> stringSource,
+      "posix/ctype/ctype" -> ctypeSource,
+    )
     val driver = new SyslDriver
     val result = driver.compile(allSources)
     val codegen = new SyslTriscCodegen

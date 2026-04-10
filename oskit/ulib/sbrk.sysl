@@ -1,0 +1,26 @@
+module posix.unistd
+
+/*
+ * sbrk for external programs — uses linker-defined heap region.
+ * _heap_start and _heap_end are provided by the linker script
+ * (SYMBOL directives in the program linker script).
+ */
+
+extern _heap_start: byte
+extern _heap_end: byte
+
+var _brk: *byte = *byte(0)
+var _brk_initialized = false
+
+sbrk(increment: int) -> *byte
+    if !_brk_initialized
+        _brk = &_heap_start
+        _brk_initialized = true
+    if increment == 0
+        return _brk
+    val old_brk = _brk
+    val new_brk = old_brk + increment
+    if i64(new_brk) > i64(&_heap_end)
+        return *byte(-1)
+    _brk = new_brk
+    old_brk
