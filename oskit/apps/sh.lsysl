@@ -179,6 +179,10 @@ buffer and sends it with one tty_puts call.
                                     i += 1
                                 len -= 1
                                 sh_refresh_line(buf, len, cursor)
+                    else
+                        var cx = c3
+                        while cx >= 0 && (cx == '[' || cx < 64 || cx > 126)
+                            cx = tty_getc()
             else if ch >= ' '
                 // Printable character — insert at cursor
                 if len < maxlen - 1

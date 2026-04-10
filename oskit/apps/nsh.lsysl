@@ -239,6 +239,10 @@ Redraw the full line in a single batched write.
                                     i += 1
                                 blen -= 1
                                 nsh_refresh_line(buf, blen, cursor, prompt_len)
+                    else
+                        var cx = c3
+                        while cx >= 0 && (cx == '[' || cx < 64 || cx > 126)
+                            cx = tty_getc()
             else if ch >= ' '
                 if blen < maxlen - 1
                     var i = blen

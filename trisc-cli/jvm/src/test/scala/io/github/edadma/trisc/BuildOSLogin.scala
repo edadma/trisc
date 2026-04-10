@@ -1,8 +1,9 @@
 package io.github.edadma.trisc
 
 /** Compile the OS with login → nsh and write a TOF file.
-  * Build: sbt "triscCliJVM/testOnly *BuildOSLogin*"
-  * Run:   sbt "triscCliJVM/run run /tmp/os-login.tof"
+  * Build: sbt "triscCliJVM/testOnly io.github.edadma.trisc.BuildOSLogin"
+  * Run (GUI emulator): sbt "triscCliJVM/run run --gui /tmp/os-login.tof"
+  * Run (headless):     sbt "triscCliJVM/run run /tmp/os-login.tof"  (no window; prints guest stdout, then may print exit: <r1>)
   */
 class BuildOSLogin extends OSKitTestHelpers {
 

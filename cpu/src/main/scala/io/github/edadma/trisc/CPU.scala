@@ -286,12 +286,31 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
     // Capture T state before instruction — trace fires based on T at start of instruction (like 68k)
     val traceEnabled = test(Status.T)
 
+    val faultingPc = pc - 2
+    var memoryFaultDetail: Option[String] = None
     try decoded(this)
     catch
-      case _: RuntimeException =>
+      case ex: RuntimeException =>
         if state == State.Run then
-          log.warn(f"DataAccess fault at pc=${pc - 2}%04x", category = "CPU")
           state = State.DataAccess
+          memoryFaultDetail = Option(ex.getMessage).filter(_.nonEmpty).orElse(Some(ex.getClass.getSimpleName))
+
+    // Always print to stderr: CPU log defaults to LogLevel.OFF, so log.warn would not show.
+    if state == State.DataAccess then
+      val extra = memoryFaultDetail.map(m => s" memory: $m").getOrElse("")
+      val instLine =
+        try
+          val w = readShortUnsigned(faultingPc)
+          f" inst=${Decode(w).disassemble(this)}"
+        catch case _: Exception => ""
+      System.err.println(
+        f"[TRISC] DataAccess fault at pc=$faultingPc%04x faultAddr=${faultAddr}%08x cause=$faultCause$extra$instLine (ISR prints 'D' on stdout then halts)",
+      )
+      System.err.flush()
+      log.warn(
+        f"DataAccess at pc=$faultingPc%04x faultAddr=${faultAddr}%08x cause=$faultCause",
+        category = "CPU",
+      )
 
     val regs = (1 to 7).map(i => f"r$i=${r(i).read}%x").mkString(" ")
     log.trace(f"  $regs", category = "CPU")

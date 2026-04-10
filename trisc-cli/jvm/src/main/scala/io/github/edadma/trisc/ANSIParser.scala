@@ -168,6 +168,13 @@ class ANSIParser(terminal: TerminalEmulator):
         privateMode = '?'
       case '>' =>
         privateMode = '>'
+      case '[' =>
+        // '[' is in 0x40..0x7e but is not a meaningful CSI final for normal sequences.
+        // Treat as a nested introducer (e.g. malformed ESC [[ …) so the real final
+        // (e.g. 'D' for cursor-left) is not fed in Normal state and printed as text.
+        params = Nil
+        currentParam = 0
+        hasParam = false
       case b if b >= '0' && b <= '9' =>
         currentParam = currentParam * 10 + (b - '0')
         hasParam = true

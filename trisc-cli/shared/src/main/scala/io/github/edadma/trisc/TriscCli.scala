@@ -21,6 +21,8 @@ case class LinkCommand(
 ) extends TriscCommand
 case class DisasmCommand(
     input: String = "",
+    fromHex: Option[String] = None,
+    toHex: Option[String] = None,
 ) extends TriscCommand
 
 case class TriscConfig(
@@ -135,6 +137,22 @@ object TriscCli:
         .text("Disassemble a TOF file")
         .action((_, c) => c.copy(command = DisasmCommand()))
         .children(
+          opt[String]("from")
+            .text("Start address (hex, optional 0x) — list only [from, to)")
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case dc: DisasmCommand => dc.copy(fromHex = Some(v))
+                case other               => other
+              )
+            ),
+          opt[String]("to")
+            .text("End address (hex, exclusive). Default with --from: from+0x100")
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case dc: DisasmCommand => dc.copy(toHex = Some(v))
+                case other               => other
+              )
+            ),
           arg[String]("<file.tof>")
             .text("TOF file to disassemble")
             .action((v, c) =>
@@ -152,7 +170,7 @@ object TriscCli:
             failure("No input file specified for asm")
           case LinkCommand(inputs, _, _) if inputs.isEmpty =>
             failure("No input files specified for link")
-          case DisasmCommand(input) if input.isEmpty =>
+          case DisasmCommand(input, _, _) if input.isEmpty =>
             failure("No input file specified for disasm")
           case _ => success
       ),
@@ -206,7 +224,10 @@ object TriscCli:
       """,
     )
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)
-    val mem = new Memory("Memory", (Seq(ram, stdout, intc, timer, ramdisk, sha) ++ extraDevices)*)
+    // std.mem memcpy/memset program DMA at Runtime.dmaAddress — must be present or stores fault (DataAccess 'D').
+    val dma = new DMA(Runtime.dmaAddress, null, intc, irq = 4)
+    val mem = new Memory("Memory", (Seq(ram, stdout, intc, timer, ramdisk, sha, dma) ++ extraDevices)*)
+    dma.mem = mem
     linked.load(mem)
     val cpu = new CPU(mem, Seq(timer, intc))
     cpu.reset() // like 68000: reads SSP from vector[0], PC from vector[1], enters supervisor mode
@@ -250,6 +271,13 @@ object TriscCli:
     writeFile(outFile, linked.serialize)
     System.err.println(s"  -> $outFile")
 
+  private def parseHexAddr(label: String, s: String): Long =
+    val t = s.strip.replaceFirst("^0[xX]", "")
+    try java.lang.Long.parseLong(t, 16)
+    catch
+      case _: NumberFormatException =>
+        throw new IllegalArgumentException(s"disasm: invalid hex for $label: $s")
+
   private def executeDisasm(cmd: DisasmCommand): Unit =
     val tofStr = readFile(cmd.input)
     val tof = TOF.deserialize(tofStr)
@@ -257,19 +285,38 @@ object TriscCli:
       if tof.entryAddress.isDefined then tof
       else Linker.link(Seq(tof))
 
-    val ram = new RAM(0, 0x10000)
+    val ramSize = Runtime.stdoutAddress.toInt
+    val ram = new RAM(0, ramSize)
     val mem = new Memory("Memory", ram)
     linked.load(mem)
 
     val disasm = Disassembler.fromTOF(mem, linked)
-    // Disassemble all code segments
-    for seg <- linked.segments do
-      val end = seg.org + seg.chunks.map {
-        case TOF.DataChunk(d)  => d.length.toLong
-        case TOF.ResChunk(s)   => s
-        case TOF.CommentChunk(_) => 0L
-      }.sum
-      println(disasm.disassembleRange(seg.org, end))
+    (cmd.fromHex, cmd.toHex) match
+      case (Some(fh), Some(th)) =>
+        val from = parseHexAddr("--from", fh)
+        val to = parseHexAddr("--to", th)
+        if from < 0 || to > ramSize then
+          throw new IllegalArgumentException(
+            s"disasm: range [$from%04x, $to%04x) must lie within RAM [0, $ramSize%x)",
+          )
+        if from >= to then throw new IllegalArgumentException("disasm: --from must be < --to")
+        println(disasm.disassembleRange(from, to))
+      case (Some(fh), None) =>
+        val from = parseHexAddr("--from", fh)
+        val to = math.min(from + 0x100, ramSize.toLong)
+        if from < 0 || from >= ramSize then
+          throw new IllegalArgumentException(s"disasm: --from out of RAM bounds (ram ends at $ramSize%x)")
+        println(disasm.disassembleRange(from, to))
+      case (None, Some(_)) =>
+        throw new IllegalArgumentException("disasm: --to requires --from")
+      case (None, None) =>
+        for seg <- linked.segments do
+          val end = seg.org + seg.chunks.map {
+            case TOF.DataChunk(d)  => d.length.toLong
+            case TOF.ResChunk(s)   => s
+            case TOF.CommentChunk(_) => 0L
+          }.sum
+          println(disasm.disassembleRange(seg.org, end))
 
   private def readFile(path: String): String =
     val source = scala.io.Source.fromFile(path)
