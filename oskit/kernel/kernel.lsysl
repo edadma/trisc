@@ -216,7 +216,7 @@ Kernel L1 page table. Stored at a fixed physical address (0x600000),
 well below the kernel stack (0x7FFFF8) and above typical code/data.
 Each L1 entry is 4 bytes; 1024 entries = 4KB table.
 
-    val KERNEL_L1_BASE = 0x600000
+    val KERNEL_L1_BASE = 0x7FE000
 
     extern vm_set_ptbr(addr: int)
     extern vm_flush_tlb()
@@ -228,30 +228,9 @@ Build kernel identity page table using superpages (4MB each):
 - L1[1]: 0x400000-0x7FFFFF (RAM high) — supervisor RWX
 - L1[2]: 0x800000-0xBFFFFF (I/O + ramdisk) — supervisor RW (no execute)
 
-    vm_init()
-        val flags_rwx = PTE_V | PTE_R | PTE_W | PTE_X
-        val flags_rw  = PTE_V | PTE_R | PTE_W
-
-        // Zero the L1 table (1024 entries × 4 bytes = 4096 bytes)
-        var i = 0
-        while i < 1024
-            vm_write_pte(KERNEL_L1_BASE + i * 4, 0)
-            i += 1
-
-        // L1[0]: superpage PPN=0, maps 0x000000-0x3FFFFF
-        vm_write_pte(KERNEL_L1_BASE + 0, (0 << 10) | flags_rwx)
-
-        // L1[1]: superpage PPN=1, maps 0x400000-0x7FFFFF
-        vm_write_pte(KERNEL_L1_BASE + 4, (1 << 10) | flags_rwx)
-
-        // L1[2]: superpage PPN=2, maps 0x800000-0xBFFFFF
-        vm_write_pte(KERNEL_L1_BASE + 8, (2 << 10) | flags_rw)
-
-        // Enable the MMU — all addresses now go through translation
-        vm_set_ptbr(KERNEL_L1_BASE)
-
     kernel_init()
-        vm_init()
+        // MMU identity mapping is set up by vm_init_identity in boot.asm
+        // before kernel_init is called.
         register_syscall(0, sleep_current)
         register_syscall(2, yield_current)
         register_syscall(3, terminate_current)

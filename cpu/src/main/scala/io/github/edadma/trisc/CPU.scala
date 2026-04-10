@@ -188,6 +188,8 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
   private def enterException(): Unit =
     if inException then
       log.error(f"DoubleFault at pc=$pc%04x, original exception=$state", category = "CPU")
+      System.err.println(f"[TRISC] DoubleFault at pc=$pc%04x original=$state faultAddr=$faultAddr%08x faultCause=$faultCause")
+      System.err.println(f"  r1=${r(1).read}%x r2=${r(2).read}%x r3=${r(3).read}%x r4=${r(4).read}%x r5=${r(5).read}%x r6=${r(6).read}%x r7=${r(7).read}%x usp=$usp%x psr=$psr%x")
       logRegisters()
       state = State.DoubleFault
       return
@@ -227,7 +229,10 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
         set(Status.T, false)
         reservationValid = false
     catch
-      case _: RuntimeException =>
+      case e: RuntimeException =>
+        System.err.println(f"[TRISC] DoubleFault during exception entry at pc=$pc%04x state=$state faultAddr=$faultAddr%08x faultCause=$faultCause: ${e.getMessage}")
+        val regs = (1 to 7).map(i => f"r$i=${r(i).read}%x").mkString(" ")
+        System.err.println(f"  $regs usp=$usp%x psr=$psr%x")
         log.error(f"DoubleFault during exception entry at pc=$pc%04x", category = "CPU")
         state = State.DoubleFault
     finally

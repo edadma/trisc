@@ -12,8 +12,10 @@
 #   ...                Read-only data (string literals)
 #   ...                Initialized data (globals with values)
 #   ...                BSS (zero-initialized globals, arrays)
-#   ...     — 0x7FFFFF Heap / stack space
-#   0x800000+          Memory-mapped devices
+#   ...     — 0x7FDFFF Heap / stack space
+#   0x7FE000 — 0x7FEFFF Kernel L1 page table (4KB, reserved)
+#   0x7FF000 — 0x7FFFF8 Kernel boot stack (grows down)
+#   0x800000+            Memory-mapped devices
 #
 # ============================================================================
 
@@ -25,6 +27,6 @@ SECTIONS
     bss
 
 SYMBOL _heap_start = AFTER bss
-SYMBOL _heap_end = 0x800000
+SYMBOL _heap_end = 0x7FE000
 
 ENTRY boot

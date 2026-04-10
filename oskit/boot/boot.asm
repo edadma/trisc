@@ -56,6 +56,8 @@ global boot, func
 entry boot
 
 boot
+  movi r4, vm_init_identity
+  jalr r6, r4
   movi r4, kernel_init
   jalr r6, r4
   movi r4, kernel_main
@@ -851,6 +853,59 @@ global vm_write_pte, func
 vm_write_pte
   ldd  r2, r7, r0       ; load pte value from stack (second arg)
   stw  r2, r1, r0       ; store 32-bit PTE at addr
+  jalr r0, r6
+
+; vm_init_identity — Set up kernel identity page table and enable MMU.
+; Uses 3 superpages (4MB each) to identity-map all of RAM + I/O.
+; Called from boot before kernel_init — no sysl stack frame involved.
+;
+; L1 table at 0x600000 (1024 × 4 bytes = 4KB)
+; L1[0]: PPN=0, V|R|W|X (0x000000-0x3FFFFF, RAM low)
+; L1[1]: PPN=1, V|R|W|X (0x400000-0x7FFFFF, RAM high)
+; L1[2]: PPN=2, V|R|W   (0x800000-0xBFFFFF, I/O + ramdisk)
+;
+; PTE format: (PPN << 10) | flags
+; V=0x001 R=0x002 W=0x004 X=0x008
+
+KERNEL_L1_BASE = 0x7FE000
+
+global vm_init_identity, func
+
+vm_init_identity
+  pshd r6                ; save return address
+
+  ; Zero 4KB of L1 table
+  movi r1, KERNEL_L1_BASE
+  ldi  r2, 0
+  movi r3, 1024          ; 1024 entries
+.zero_loop
+  stw  r2, r1, r0        ; *r1 = 0 (32-bit)
+  addi r1, r1, 4
+  addi r3, r3, -1
+  bne  r3, r0, .zero_loop
+
+  ; L1[0]: superpage PPN=0, V|R|W|X = 0x00F
+  movi r1, KERNEL_L1_BASE
+  ldi  r2, 0x0F          ; (0 << 10) | 0x00F
+  stw  r2, r1, r0
+
+  ; L1[1]: superpage PPN=1, V|R|W|X = 0x40F
+  addi r1, r1, 4
+  ldi  r2, 0x04
+  sli  r2, 0x0F          ; r2 = 0x040F = (1 << 10) | 0x00F
+  stw  r2, r1, r0
+
+  ; L1[2]: superpage PPN=2, V|R|W = 0x807
+  addi r1, r1, 4
+  ldi  r2, 0x08
+  sli  r2, 0x07          ; r2 = 0x0807 = (2 << 10) | 0x007
+  stw  r2, r1, r0
+
+  ; Enable MMU
+  movi r1, KERNEL_L1_BASE
+  sptbr r1, r0
+
+  popd r6
   jalr r0, r6
 
 
