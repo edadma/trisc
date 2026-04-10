@@ -297,8 +297,15 @@ Blocks until a client sends a message.
         var sender = ipc_queue_pop(port)
         while sender != IPC_QUEUE_EMPTY
             if threads[sender].state == STATE_SEND_BLOCKED
-                // Found a valid sender — deliver their message
+                // Found a valid sender — deliver their message.
+                // Switch to sender's page table if needed, since the
+                // sender's message buffer may be in per-process pages.
+                val sender_ptbr = threads[sender].ptbr
+                if sender_ptbr != KERNEL_L1_BASE
+                    vm_set_ptbr(sender_ptbr)
                 ipc_deliver(me, sender, ipc_ctx[sender].buf, ipc_ctx[sender].len)
+                if sender_ptbr != KERNEL_L1_BASE
+                    vm_set_ptbr(KERNEL_L1_BASE)
 
                 // Return sender ID to the server
                 syscall_return(sender)
