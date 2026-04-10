@@ -109,7 +109,8 @@ class OSKitDisplayTests extends OSKitTestHelpers {
     dma.mem = mem
     memRef = mem
     linked.load(mem)
-    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles }
+    val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
+    val cpu = new CPU(mem, Seq(timer, intc), mmu = Some(testMmu)) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)
