@@ -221,16 +221,45 @@ Each L1 entry is 4 bytes; 1024 entries = 4KB table.
     extern vm_set_ptbr(addr: int)
     extern vm_flush_tlb()
     extern vm_get_ptbr() -> int
-    extern vm_write_pte(addr: int, pte: int)
 
 Build kernel identity page table using superpages (4MB each):
 - L1[0]: 0x000000-0x3FFFFF (RAM low) — supervisor RWX
 - L1[1]: 0x400000-0x7FFFFF (RAM high) — supervisor RWX
 - L1[2]: 0x800000-0xBFFFFF (I/O + ramdisk) — supervisor RW (no execute)
 
+Build kernel identity page table using superpages (4MB each):
+- L1[0]: 0x000000-0x3FFFFF (RAM low) — supervisor RWX
+- L1[1]: 0x400000-0x7FFFFF (RAM high) — supervisor RWX
+- L1[2]: 0x800000-0xBFFFFF (I/O + ramdisk) — supervisor RW (no execute)
+
+    vm_init()
+        val flags_rwx = PTE_V | PTE_R | PTE_W | PTE_X
+        val flags_rw  = PTE_V | PTE_R | PTE_W
+
+        // Zero the L1 table (1024 entries × 4 bytes = 4096 bytes)
+        var i = 0
+        while i < 1024
+            var p: *i32 = *i32(KERNEL_L1_BASE + i * 4)
+            *p = 0
+            i += 1
+
+        // L1[0]: superpage PPN=0, maps 0x000000-0x3FFFFF
+        var p0: *i32 = *i32(KERNEL_L1_BASE)
+        *p0 = i32((0 << 10) | flags_rwx)
+
+        // L1[1]: superpage PPN=1, maps 0x400000-0x7FFFFF
+        var p1: *i32 = *i32(KERNEL_L1_BASE + 4)
+        *p1 = i32((1 << 10) | flags_rwx)
+
+        // L1[2]: superpage PPN=2, maps 0x800000-0xBFFFFF
+        var p2: *i32 = *i32(KERNEL_L1_BASE + 8)
+        *p2 = i32((2 << 10) | flags_rw)
+
+        // Enable the MMU
+        vm_set_ptbr(KERNEL_L1_BASE)
+
     kernel_init()
-        // MMU identity mapping is set up by vm_init_identity in boot.asm
-        // before kernel_init is called.
+        vm_init()
         register_syscall(0, sleep_current)
         register_syscall(2, yield_current)
         register_syscall(3, terminate_current)
