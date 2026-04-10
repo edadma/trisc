@@ -4,6 +4,9 @@ import scala.collection.mutable
 
 class SyslLLVMCodegen:
   private val out = new StringBuilder
+  private var activeOut: StringBuilder = out // emit writes here; switches between out and bodyBuf
+  private val bodyBuf = new StringBuilder // body code buffer during function generation
+  private val deferredAllocas = new mutable.ListBuffer[(String, String)] // (reg, llvmType) — allocas deferred to entry block
   private val stringConstants = new mutable.LinkedHashMap[String, (String, Int)] // value -> (label, byte length including null)
   private val structTypes = new mutable.LinkedHashMap[String, SyslType.StructType] // name -> struct type
   private val deinitFunctions = new mutable.HashMap[String, String] // struct name -> deinit function name
@@ -22,6 +25,12 @@ class SyslLLVMCodegen:
   private def newLabel(prefix: String): String =
     labelCounter += 1
     s"${prefix}_$labelCounter"
+
+  /** Allocate in the entry block. Returns the register name. The actual alloca instruction is emitted later. */
+  private def deferAlloca(lt: String): String =
+    val reg = newReg()
+    deferredAllocas += ((reg, lt))
+    reg
 
   private def internString(s: String): (String, Int) =
     stringConstants.getOrElseUpdate(s, {
@@ -196,7 +205,7 @@ class SyslLLVMCodegen:
     emit(s"define $retType @${fun.name}($params) {")
     emitLabel("entry")
 
-    // Allocate and store parameters
+    // Allocate and store parameters (these stay in entry block directly)
     for param <- fun.params do
       val lt = llvmType(param.typ)
       val alloca = newReg()
@@ -206,6 +215,11 @@ class SyslLLVMCodegen:
       // Increment refcount for ref-typed params (caller shares ownership)
       if isRef(param.typ) then
         emitRefIncr(s"%${param.name}_arg", refHeaderOffset(param.typ))
+
+    // Switch to body buffer for the function body
+    deferredAllocas.clear()
+    bodyBuf.clear()
+    activeOut = bodyBuf
 
     // Generate body
     fun.body match
@@ -231,6 +245,12 @@ class SyslLLVMCodegen:
       case TBlockBody(stmts) =>
         genBlock(stmts, retType)
 
+    // Assemble: switch back to out, emit deferred allocas, then body
+    activeOut = out
+    for (reg, lt) <- deferredAllocas do
+      emit(s"  $reg = alloca $lt")
+    out ++= bodyBuf
+
     emit("}")
     emit("")
     locals = null
@@ -250,7 +270,7 @@ class SyslLLVMCodegen:
     emit(s"define $retLt @$name(${paramStrs.mkString(", ")}) {")
     emitLabel("entry")
 
-    // Unpack captured variables from env
+    // Unpack captured variables from env (stays in entry block)
     var offset = 0L
     for (capName, capType) <- closure.captures do
       val lt = llvmType(capType)
@@ -269,13 +289,18 @@ class SyslLLVMCodegen:
         locals(capName) = LocalVar(capName, alloca, capType)
       offset += llvmSizeOf(capType)
 
-    // Allocate and store regular parameters
+    // Allocate and store regular parameters (stays in entry block)
     for param <- closure.params do
       val lt = llvmType(param.typ)
       val alloca = newReg()
       emit(s"  $alloca = alloca $lt")
       emit(s"  store $lt %${param.name}_arg, $lt* $alloca")
       locals(param.name) = LocalVar(param.name, alloca, param.typ)
+
+    // Switch to body buffer
+    deferredAllocas.clear()
+    bodyBuf.clear()
+    activeOut = bodyBuf
 
     // Generate body
     closure.body match
@@ -291,6 +316,12 @@ class SyslLLVMCodegen:
         emitRet(retLt, finalVal)
       case TBlockBody(stmts) =>
         genBlock(stmts, retLt)
+
+    // Assemble: switch back to out, emit deferred allocas, then body
+    activeOut = out
+    for (reg, lt) <- deferredAllocas do
+      emit(s"  $reg = alloca $lt")
+    out ++= bodyBuf
 
     emit("}")
     emit("")
@@ -363,8 +394,7 @@ class SyslLLVMCodegen:
           val ptr = genExpr(init)
           locals(name) = LocalVar(name, ptr, typ)
         else
-            val alloca = newReg()
-            emit(s"  $alloca = alloca $lt")
+            val alloca = deferAlloca(lt)
             val value = genExpr(init)
             val vt = exprType(init)
             val finalVal = emitSextIfNeeded(value, vt, lt)
@@ -402,8 +432,7 @@ class SyslLLVMCodegen:
                 emitRefIncr(finalVal, refHeaderOffset(local.typ))
           else
             val lt = exprType(value)
-            val alloca = newReg()
-            emit(s"  $alloca = alloca $lt")
+            val alloca = deferAlloca(lt)
             emit(s"  store $lt $v, $lt* $alloca")
             locals(target) = LocalVar(target, alloca, value.typ)
             // New ref binding: increment unless owned
@@ -630,8 +659,7 @@ class SyslLLVMCodegen:
           if isAggregate(ft) then
             locals(name) = LocalVar(name, gep, ft)
           else
-            val alloca = newReg()
-            emit(s"  $alloca = alloca $flt")
+            val alloca = deferAlloca(flt)
             val loaded = newReg()
             emit(s"  $loaded = load $flt, $flt* $gep")
             emit(s"  store $flt $loaded, $flt* $alloca")
@@ -655,8 +683,7 @@ class SyslLLVMCodegen:
               emit(s"  $loaded = load $flt, $flt* $gep")
               emit(s"  store $flt $loaded, $flt* ${local.reg}")
             else
-              val alloca = newReg()
-              emit(s"  $alloca = alloca $flt")
+              val alloca = deferAlloca(flt)
               val loaded = newReg()
               emit(s"  $loaded = load $flt, $flt* $gep")
               emit(s"  store $flt $loaded, $flt* $alloca")
@@ -679,8 +706,7 @@ class SyslLLVMCodegen:
       case TStringLit(s, _) =>
         val (label, byteLen) = internString(s)
         val strLen = byteLen - 1 // exclude null terminator for fat string length
-        val alloca = newReg()
-        emit(s"  $alloca = alloca %struct.string")
+        val alloca = deferAlloca("%struct.string")
         val ptrGep = newReg()
         emit(s"  $ptrGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 0")
         val dataPtr = newReg()
@@ -748,8 +774,7 @@ class SyslLLVMCodegen:
         val cp2 = newReg()
         emit(s"  $cp2 = call i8* @memcpy(i8* $dest, i8* $rPtr, i64 $rLen64)")
         // Build result %struct.string
-        val alloca = newReg()
-        emit(s"  $alloca = alloca %struct.string")
+        val alloca = deferAlloca("%struct.string")
         val resPtrGep = newReg()
         emit(s"  $resPtrGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 0")
         emit(s"  store i8* $buf, i8** $resPtrGep")
@@ -998,8 +1023,7 @@ class SyslLLVMCodegen:
           emit(s"  $result = call $retType @$name($argStr)")
           // If the return type is aggregate, store into alloca so callers get a pointer
           if isAggregate(expr.typ) then
-            val alloca = newReg()
-            emit(s"  $alloca = alloca $retType")
+            val alloca = deferAlloca(retType)
             emit(s"  store $retType $result, $retType* $alloca")
             alloca
           else result
@@ -1013,9 +1037,7 @@ class SyslLLVMCodegen:
         val elseLabel = newLabel("else")
         val mergeLabel = newLabel("merge")
         val aggResult = if isAggregate(typ) && t != "void" then
-          val a = newReg()
-          emit(s"  $a = alloca $t")
-          Some(a)
+          Some(deferAlloca(t))
         else None
         emit(s"  br i1 $cBool, label %$thenLabel, label %$elseLabel")
 
@@ -1077,8 +1099,7 @@ class SyslLLVMCodegen:
       case TStructConstruct(st, args) =>
         // Alloca, zero-init, then fill fields
         val lt = llvmType(st)
-        val alloca = newReg()
-        emit(s"  $alloca = alloca $lt")
+        val alloca = deferAlloca(lt)
         emit(s"  store $lt zeroinitializer, $lt* $alloca")
         for (arg, i) <- args.zipWithIndex do
           val v = genExpr(arg)
@@ -1097,8 +1118,7 @@ class SyslLLVMCodegen:
 
       case TStructLit(st @ SyslType.StructType(_, _)) =>
         val lt = llvmType(st)
-        val alloca = newReg()
-        emit(s"  $alloca = alloca $lt")
+        val alloca = deferAlloca(lt)
         emit(s"  store $lt zeroinitializer, $lt* $alloca")
         alloca
 
@@ -1121,8 +1141,7 @@ class SyslLLVMCodegen:
       case TArrayLit(elements, SyslType.ArrayType(elemType, size)) =>
         val elt = llvmType(elemType)
         val arrType = s"[$size x $elt]"
-        val alloca = newReg()
-        emit(s"  $alloca = alloca $arrType")
+        val alloca = deferAlloca(arrType)
         // Zero-init
         val cast = newReg()
         emit(s"  $cast = bitcast $arrType* $alloca to i8*")
@@ -1144,8 +1163,7 @@ class SyslLLVMCodegen:
       case TArrayDecl(size, SyslType.ArrayType(elemType, _)) =>
         val elt = llvmType(elemType)
         val arrType = s"[$size x $elt]"
-        val alloca = newReg()
-        emit(s"  $alloca = alloca $arrType")
+        val alloca = deferAlloca(arrType)
         val cast = newReg()
         emit(s"  $cast = bitcast $arrType* $alloca to i8*")
         val byteSize = llvmSizeOf(elemType) * size
@@ -1302,8 +1320,7 @@ class SyslLLVMCodegen:
         val newLen = newReg()
         emit(s"  $newLen = sub i32 $hi, $lo")
         // Allocate slice struct on stack
-        val alloca = newReg()
-        emit(s"  $alloca = alloca %struct.slice")
+        val alloca = deferAlloca("%struct.slice")
         val ptrGep = newReg()
         emit(s"  $ptrGep = getelementptr %struct.slice, %struct.slice* $alloca, i32 0, i32 0")
         emit(s"  store i8* $newPtr, i8** $ptrGep")
@@ -1416,8 +1433,7 @@ class SyslLLVMCodegen:
         // Build result slice
         val newLen = newReg()
         emit(s"  $newLen = add i32 $curLen, 1")
-        val result = newReg()
-        emit(s"  $result = alloca %struct.slice")
+        val result = deferAlloca("%struct.slice")
         val rPtrGep = newReg()
         emit(s"  $rPtrGep = getelementptr %struct.slice, %struct.slice* $result, i32 0, i32 0")
         emit(s"  store i8* $finalPtr, i8** $rPtrGep")
@@ -1507,8 +1523,7 @@ class SyslLLVMCodegen:
       case TEnumConstruct(et, variantIndex, args) =>
         val totalSize = et.sizeOf
         val lt = llvmType(et)
-        val alloca = newReg()
-        emit(s"  $alloca = alloca $lt")
+        val alloca = deferAlloca(lt)
         // Zero-init
         val cast = newReg()
         emit(s"  $cast = bitcast $lt* $alloca to i8*")
@@ -1551,7 +1566,7 @@ class SyslLLVMCodegen:
         else typ
         val resultLt = llvmType(effectiveType)
         if resultLt != "void" then
-          emit(s"  $resultAlloca = alloca $resultLt")
+          deferredAllocas += ((resultAlloca, resultLt))
         // For each arm, generate: check pattern, if match -> execute body, store result, br to end
         val armLabels = arms.indices.map(_ => newLabel("match_arm"))
         val nextLabels = arms.indices.map(_ => newLabel("match_next"))
@@ -1649,8 +1664,7 @@ class SyslLLVMCodegen:
                   if isAggregate(ft) then
                     locals(bName) = LocalVar(bName, typedFAddr, ft)
                   else
-                    val alloc = newReg()
-                    emit(s"  $alloc = alloca $flt")
+                    val alloc = deferAlloca(flt)
                     val loaded = newReg()
                     emit(s"  $loaded = load $flt, $flt* $typedFAddr")
                     emit(s"  store $flt $loaded, $flt* $alloc")
@@ -1721,8 +1735,7 @@ class SyslLLVMCodegen:
             case _ =>
           wn
         })
-        val alloca = newReg()
-        emit(s"  $alloca = alloca %struct.closure")
+        val alloca = deferAlloca("%struct.closure")
         // Store func ptr
         val fpGep = newReg()
         emit(s"  $fpGep = getelementptr %struct.closure, %struct.closure* $alloca, i32 0, i32 0")
@@ -1779,8 +1792,7 @@ class SyslLLVMCodegen:
           ep
         else "null"
         // Build %struct.closure
-        val alloca = newReg()
-        emit(s"  $alloca = alloca %struct.closure")
+        val alloca = deferAlloca("%struct.closure")
         val fpGep = newReg()
         emit(s"  $fpGep = getelementptr %struct.closure, %struct.closure* $alloca, i32 0, i32 0")
         val retLt = llvmType(c.returnType)
@@ -1828,8 +1840,7 @@ class SyslLLVMCodegen:
               val result = newReg()
               emit(s"  $result = call $retLt $typedFp($allArgStr)")
               if isAggregate(typ) then
-                val ra = newReg()
-                emit(s"  $ra = alloca $retLt")
+                val ra = deferAlloca(retLt)
                 emit(s"  store $retLt $result, $retLt* $ra")
                 ra
               else result
@@ -1953,8 +1964,7 @@ class SyslLLVMCodegen:
         val cp = newReg()
         emit(s"  $cp = call i8* @memcpy(i8* $buf, i8* $srcPtr, i64 $len64)")
         // Build %struct.string
-        val alloca = newReg()
-        emit(s"  $alloca = alloca %struct.string")
+        val alloca = deferAlloca("%struct.string")
         val resPtrGep = newReg()
         emit(s"  $resPtrGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 0")
         emit(s"  store i8* $buf, i8** $resPtrGep")
@@ -1966,8 +1976,7 @@ class SyslLLVMCodegen:
       case TStringFromPtr(ptrExpr, lenExpr, _) =>
         val ptr = genExpr(ptrExpr)
         val len = genExpr(lenExpr)
-        val alloca = newReg()
-        emit(s"  $alloca = alloca %struct.string")
+        val alloca = deferAlloca("%struct.string")
         val ptrGep = newReg()
         emit(s"  $ptrGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 0")
         emit(s"  store i8* $ptr, i8** $ptrGep")
@@ -2038,8 +2047,7 @@ class SyslLLVMCodegen:
 
   /** Build a %struct.string from an i8* pointer and i32 length. Returns alloca pointer. */
   private def emitMakeString(ptr: String, len: String): String =
-    val alloca = newReg()
-    emit(s"  $alloca = alloca %struct.string")
+    val alloca = deferAlloca("%struct.string")
     val ptrGep = newReg()
     emit(s"  $ptrGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 0")
     emit(s"  store i8* $ptr, i8** $ptrGep")
@@ -2267,9 +2275,9 @@ class SyslLLVMCodegen:
       val ptr = newReg()
       emit(s"  $ptr = load i8*, i8** ${local.reg}")
       emitRefDecr(ptr, hoff, deinitFor(local.typ))
-    // Note: slice backref decrements are intentionally omitted here.
-    // The backref increment keeps the backing ref alive for the caller.
-    // Proper scope-aware cleanup would decrement non-returned slices.
+    // TODO: slice backref cleanup needs scope-aware analysis to avoid freeing
+    // backing stores of returned slices. Deferred until scope tracking is implemented.
+    // All allocas are now in entry block, so the SSA dominance prerequisite is met.
 
   /** Check if an expression is a TNew/TNewArray (already owns the ref, no incr needed). */
   private def isOwnedNew(expr: TExpr): Boolean = expr match
@@ -2299,8 +2307,8 @@ class SyslLLVMCodegen:
         case _ => "0"
 
   private def emit(line: String): Unit =
-    out ++= line
-    out += '\n'
+    activeOut ++= line
+    activeOut += '\n'
 
   /** Emit a return instruction, handling void vs value returns. */
   private def emitRet(retType: String, value: String = "0"): Unit =
