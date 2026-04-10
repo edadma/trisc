@@ -195,6 +195,7 @@ import oskit.apps.init.{init}
     output should include("Hello")
   }
 
+
   "NSH: cat prefilled /hello (short file)" in {
     val keys = typeString("cat /hello\n", startTick = 500000, spacing = 12000)
     val (cpu, output) =
@@ -376,6 +377,12 @@ import oskit.apps.init.{init}
     val keys        = loginAndType("cat /etc/ttytab\n")
     val (_, output) = runLogin(scheduledKeys = keys, maxCycles = 180000000)
     output should include("tty0 login")
+  }
+
+  "Login: hello after login" in {
+    val keys = loginAndType("hello\n")
+    val (_, output) = runLogin(scheduledKeys = keys, maxCycles = 180000000)
+    output should include("Hello")
   }
 
   "Login: user ed gets home /home/ed" in {
