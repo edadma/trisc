@@ -14,17 +14,6 @@ syscall
     trap 0               ; enter kernel: r1 = number, r2 = arg
     jalr r0, r6          ; return to caller (result in r1)
 
-; Minimal malloc/free stubs for programs that don't use the heap.
-; The codegen emits extern refs to these for any module with string
-; types. Programs needing a real allocator link against posix/stdlib.
-
-global malloc, func
-
-malloc
-    ldi  r1, 0          ; return null
-    jalr r0, r6
-
-global free, func
-
-free
-    jalr r0, r6          ; no-op
+; malloc/free are provided by posix/stdlib/alloc, linked into the
+; external program binary. The codegen emits extern refs to these
+; for any module with string types.
