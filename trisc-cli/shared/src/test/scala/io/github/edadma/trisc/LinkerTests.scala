@@ -146,12 +146,13 @@ class LinkerTests extends TestHelpers {
     ex.msg should include("nowhere")
   }
 
-  "link rejects duplicate symbol" in {
-    val a = assemble("foo\n  halt\n", relocatable = true)
-    val b = assemble("foo\n  halt\n", relocatable = true)
-    val ex = the[Linker.LinkerError] thrownBy Linker.link(Seq(a, b))
-    ex.msg should include("duplicate symbol")
-    ex.msg should include("foo")
+  "link uses first definition for duplicate symbols" in {
+    // Linker uses first-definition-wins to support generic instantiation
+    // duplicates across compilation units
+    val a = assemble("global foo, func\nfoo\n  ldi r1, 1\n  halt\n", relocatable = true)
+    val b = assemble("global foo, func\nfoo\n  ldi r1, 2\n  halt\n", relocatable = true)
+    // Should not throw — duplicates are silently accepted
+    noException should be thrownBy Linker.link(Seq(a, b))
   }
 
   // ===== Segment placement =====
