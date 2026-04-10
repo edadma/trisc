@@ -526,8 +526,12 @@ class SPTBR(a: Int, b: Int) extends RRInstruction(a, b):
   def apply(cpu: CPU): Unit =
     if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
     else cpu.mmu match
-      case Some(m) => m.setPtbr(cpu.r(a).read)
-      case None    => cpu.state = State.UnimplementedOpcode
+      case Some(m) =>
+        val v = cpu.r(a).read
+        m.setPtbr(v)
+        m.setEnabled(v != 0) // PTBR=0 disables MMU (bare mode)
+        m.tlbInvalidateAll()  // flush TLB on page table switch
+      case None => cpu.state = State.UnimplementedOpcode
 
 class GPTBR(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "gptbr"

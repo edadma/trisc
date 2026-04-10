@@ -819,6 +819,42 @@ atomic_inc
 
 
 ; ============================================================================
+; MMU helpers — called from kernel Sysl code
+; ============================================================================
+
+; vm_set_ptbr(addr: int) — set page table base register
+; Non-zero enables MMU; zero disables it (bare mode).
+global vm_set_ptbr, func
+
+vm_set_ptbr
+  sptbr r1, r0
+  jalr  r0, r6
+
+; vm_flush_tlb() — invalidate all TLB entries
+global vm_flush_tlb, func
+
+vm_flush_tlb
+  tlbia r0, r0
+  jalr  r0, r6
+
+; vm_get_ptbr() -> int — read current PTBR
+global vm_get_ptbr, func
+
+vm_get_ptbr
+  gptbr r1, r0
+  jalr  r0, r6
+
+; vm_write_pte(addr: int, pte: int) — write a 32-bit PTE at physical addr
+; r1 = address, stack[0] = pte value
+global vm_write_pte, func
+
+vm_write_pte
+  ldd  r2, r7, r0       ; load pte value from stack (second arg)
+  stw  r2, r1, r0       ; store 32-bit PTE at addr
+  jalr r0, r6
+
+
+; ============================================================================
 ; default_isr — Unhandled Exception Handler
 ; ============================================================================
 
