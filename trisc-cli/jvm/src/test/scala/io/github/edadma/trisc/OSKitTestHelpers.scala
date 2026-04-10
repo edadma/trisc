@@ -139,7 +139,7 @@ trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
       "oskit/sync/mutex" -> mutexSysl, "oskit/sync/condvar" -> condvarSysl, "oskit/sync/barrier" -> barrierSysl,
       "oskit/sync/rwlock" -> rwlockSysl, "oskit/sync/channel" -> channelSysl, "oskit/sync/mailbox" -> mailboxSysl,
       "oskit/sync/rmutex" -> rmutexSysl, "oskit/sync/qset" -> qsetSysl, "oskit/sync/pimutex" -> pimutexSysl,
-      "std/mem/mem" -> memSysl,
+      "std/mem/mem" -> OSKitTestData.memSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
