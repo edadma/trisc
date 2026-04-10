@@ -274,6 +274,83 @@ Heapsort on a subrange `s[lo..hi]`.
             r = largest
 
 
+Stable merge sort
+------------------
+
+### stable_sort_buf_by
+
+`stable_sort_buf_by(s, buf, cmp)` sorts `s` in-place using
+bottom-up merge sort. `buf` must be at least `len(s)`
+elements. This is the non-allocating variant for embedded
+use.
+
+    stable_sort_buf_by[T](s: []T, buf: []T, cmp: (T, T) -> int)
+        val n = len(s)
+
+        if n < 2 then return
+
+        // Bottom-up: merge runs of width 1, 2, 4, 8, ...
+        var width = 1
+
+        while width < n
+            var lo = 0
+
+            while lo < n
+                val mid = lo + width
+                var hi = lo + width * 2
+
+                if hi > n then hi = n
+                if mid >= n
+                    lo += width * 2
+                else
+                    merge(s, buf, lo, mid, hi, cmp)
+                    lo += width * 2
+
+            width = width * 2
+
+    merge[T](s: []T, buf: []T, lo: int, mid: int, hi: int, cmp: (T, T) -> int)
+        // Copy range to buf
+        for i in lo..<hi
+            buf[i] = s[i]
+
+        var i = lo
+        var j = mid
+        var k = lo
+
+        while i < mid && j < hi
+            if cmp(buf[i], buf[j]) <= 0
+                s[k] = buf[i]
+                i++
+            else
+                s[k] = buf[j]
+                j++
+            k++
+
+        // Copy remaining left
+        while i < mid
+            s[k] = buf[i]
+            i++
+            k++
+
+        // Right side already in place (in s)
+
+
+### stable_sort_by
+
+`stable_sort_by(s, cmp)` allocates a temp buffer and
+calls `stable_sort_buf_by`. Convenience wrapper for
+when allocation is acceptable.
+
+    stable_sort_by[T](s: []T, cmp: (T, T) -> int)
+        val n = len(s)
+
+        if n < 2 then return
+
+        val buf = (new [n]T)[:]
+
+        stable_sort_buf_by(s, buf, cmp)
+
+
 is_sorted
 ---------
 
@@ -312,6 +389,13 @@ Standard comparators for the common integer types.
     sort_int(s: []int) = sort_by(s, cmp_int)
 
     sort_i64(s: []i64) = sort_by(s, cmp_i64)
+
+
+### stable_sort_int / stable_sort_i64
+
+    stable_sort_int(s: []int) = stable_sort_by(s, cmp_int)
+
+    stable_sort_i64(s: []i64) = stable_sort_by(s, cmp_i64)
 
 
 Use `is_sorted(s, cmp_int)` or `is_sorted(s, cmp_i64)` to
@@ -770,6 +854,125 @@ Tests
         assert(is_sorted(s[:], cmp_int), "sorted via heapsort")
 
 
+### Stable sort tests
+
+    #test
+    test_stable_sort_basic() -> unit
+        val s = new [5]int
+        s[0] = 5
+        s[1] = 3
+        s[2] = 1
+        s[3] = 4
+        s[4] = 2
+
+        stable_sort_int(s[:])
+
+        assert(is_sorted(s[:], cmp_int), "sorted")
+        assert(s[0] == 1, "min")
+        assert(s[4] == 5, "max")
+
+    #test
+    test_stable_sort_already_sorted() -> unit
+        val s = new [4]int
+        s[0] = 1
+        s[1] = 2
+        s[2] = 3
+        s[3] = 4
+
+        stable_sort_int(s[:])
+
+        assert(is_sorted(s[:], cmp_int), "still sorted")
+
+    #test
+    test_stable_sort_reverse() -> unit
+        val s = new [5]int
+        s[0] = 5
+        s[1] = 4
+        s[2] = 3
+        s[3] = 2
+        s[4] = 1
+
+        stable_sort_int(s[:])
+
+        assert(is_sorted(s[:], cmp_int), "sorted")
+
+    #test
+    test_stable_sort_duplicates() -> unit
+        val s = new [6]int
+        s[0] = 3
+        s[1] = 1
+        s[2] = 4
+        s[3] = 1
+        s[4] = 5
+        s[5] = 9
+
+        stable_sort_int(s[:])
+
+        assert(is_sorted(s[:], cmp_int), "sorted")
+        assert(s[0] == 1, "min")
+        assert(s[5] == 9, "max")
+
+    #test
+    test_stable_sort_single() -> unit
+        val s = new [1]int
+        s[0] = 42
+
+        stable_sort_int(s[:])
+
+        assert(s[0] == 42, "unchanged")
+
+    #test
+    test_stable_sort_empty() -> unit
+        val s = new [0]int
+        stable_sort_int(s[:])
+
+    #test
+    test_stable_sort_buf() -> unit
+        // Non-allocating variant with caller-provided buffer
+        val s = new [5]int
+        s[0] = 5
+        s[1] = 3
+        s[2] = 1
+        s[3] = 4
+        s[4] = 2
+
+        val buf = new [5]int
+
+        stable_sort_buf_by(s[:], buf[:], cmp_int)
+
+        assert(is_sorted(s[:], cmp_int), "sorted")
+
+    #test
+    test_stable_sort_large() -> unit
+        val s = new [20]int
+        s[0] = 19
+        s[1] = 7
+        s[2] = 15
+        s[3] = 3
+        s[4] = 11
+        s[5] = 1
+        s[6] = 18
+        s[7] = 8
+        s[8] = 14
+        s[9] = 4
+        s[10] = 12
+        s[11] = 0
+        s[12] = 17
+        s[13] = 6
+        s[14] = 13
+        s[15] = 2
+        s[16] = 16
+        s[17] = 9
+        s[18] = 10
+        s[19] = 5
+
+        stable_sort_int(s[:])
+
+        assert(is_sorted(s[:], cmp_int), "sorted")
+        assert(s[0] == 0, "min")
+        assert(s[19] == 19, "max")
+
+
 Design notes
 ------------
 
@@ -792,5 +995,7 @@ overhead and good cache behavior outperform divide-and-conquer.
 `s[mid]`, `s[hi]` and uses the median. This avoids the O(n²)
 worst case on already-sorted or reverse-sorted input.
 
-**No stable sort.** Merge sort (stable, O(n log n)) requires
-O(n) auxiliary memory. Deferred until there's a clear need.
+**Stable merge sort.** `stable_sort_by` uses bottom-up merge
+sort — O(n log n), stable, iterative (no recursion). Requires
+O(n) auxiliary memory. `stable_sort_buf_by` takes a caller-
+provided buffer for embedded/no-alloc contexts.
