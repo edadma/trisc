@@ -37,7 +37,60 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
   }
 
   // ===== std.cmp =====
-  // TODO: traits from imported modules need cross-unit trait registration
+
+  "std.cmp Eq trait" in {
+    llvmExitWithStd(
+      """import std.cmp.*
+        |
+        |struct Vec2
+        |    x: int
+        |    y: int
+        |
+        |impl Eq[Vec2]
+        |    eq(a: Vec2, b: Vec2) -> bool = a.x == b.x && a.y == b.y
+        |
+        |main() -> int
+        |    val a = Vec2(1, 2)
+        |    val b = Vec2(1, 2)
+        |    val c = Vec2(3, 4)
+        |    if Eq.eq(a, b) && Eq.ne(a, c) then 42 else 0
+        |""".stripMargin) shouldBe 42
+  }
+
+  "std.cmp Ord trait" in {
+    llvmExitWithStd(
+      """import std.cmp.*
+        |
+        |struct Score
+        |    value: int
+        |
+        |impl Ord[Score]
+        |    cmp(a: Score, b: Score) -> int = a.value - b.value
+        |
+        |main() -> int
+        |    val a = Score(10)
+        |    val b = Score(20)
+        |    if Ord.lt(a, b) && Ord.ge(b, a) then 42 else 0
+        |""".stripMargin) shouldBe 42
+  }
+
+  "std.cmp Eq default ne" in {
+    llvmExitWithStd(
+      """import std.cmp.*
+        |
+        |struct Pair
+        |    a: int
+        |    b: int
+        |
+        |impl Eq[Pair]
+        |    eq(a: Pair, b: Pair) -> bool = a.a == b.a && a.b == b.b
+        |
+        |main() -> int
+        |    val x = Pair(1, 2)
+        |    val y = Pair(1, 3)
+        |    if Eq.ne(x, y) then 42 else 0
+        |""".stripMargin) shouldBe 42
+  }
 
   // ===== std.strings (pure functions, no builder dep) =====
 
