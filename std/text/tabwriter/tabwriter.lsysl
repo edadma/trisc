@@ -1,0 +1,361 @@
+std.text.tabwriter — Column-aligned tab-separated text
+======================================================
+
+Column alignment for tab-separated text, following Go’s
+`text/tabwriter` elastic-tabstops rules: horizontal tab (`\t`) and
+vertical tab (`\v`) end a **cell**; newline (`\n`) and formfeed
+(`\f`) end a **line** (`\f` also flushes the buffer). Only cells that
+end with a horizontal tab participate in shared column widths; the
+trailing fragment after the last tab on a line is not aligned with
+other rows.
+
+**Output** accumulates in an internal `StrBuilder`; call `to_str` after
+`flush`. **Subset of Go:** no `io.Writer`, no HTML filtering, no
+`0xff` escape brackets, no `StripEscape` / `TabIndent`. Flags
+`TabwriterAlignRight`, `TabwriterDebug`, and
+`TabwriterDiscardEmptyColumns` match Go’s numeric values.
+
+Cell display width is **byte length** (ASCII-oriented), matching
+`std.strings` conventions.
+
+Dependencies: `std.builder`, `std.debug` (tests).
+
+
+    module std.text.tabwriter
+
+    import std.builder.{new_builder, StrBuilder}
+    import std.debug.{assert}
+    import std.strings.{contains}
+
+
+Flags (same values as Go `text/tabwriter`)
+------------------------------------------
+
+    val TabwriterFilterHTML = 1
+    val TabwriterStripEscape = 2
+    val TabwriterAlignRight = 4
+    val TabwriterDiscardEmptyColumns = 8
+    val TabwriterTabIndent = 16
+    val TabwriterDebug = 32
+
+
+Cell and line
+-------------
+
+    struct TabwriterCell
+        text: string
+        width: int
+        htab: bool
+
+
+    struct TabwriterLine
+        cells: []TabwriterCell
+
+
+TabWriter
+---------
+
+    struct TabWriter
+        out: StrBuilder
+        minwidth: int
+        tabwidth: int
+        padding: int
+        padchar: byte
+        flags: int
+        align_right: bool
+        lines: []TabwriterLine
+        cell_buf: StrBuilder
+        widths: []int
+
+
+new_tab_writer
+--------------
+
+If `padchar` is tab, right-alignment is disabled (same as Go).
+
+    new_tab_writer(minwidth: int, tabwidth: int, padding: int, padchar: byte, flags: int) -> TabWriter
+        var ar = (flags & TabwriterAlignRight) != 0
+
+        if padchar == byte(9) then ar = false
+
+        var lines0 = (new [0]TabwriterLine)[:0]
+        lines0 = append(lines0, TabwriterLine((new [0]TabwriterCell)[:0]))
+        TabWriter(new_builder(), minwidth, tabwidth, padding, padchar, flags, ar, lines0, new_builder(), (new [0]int)[:0])
+
+
+TabWriter.to_str
+----------------
+
+    TabWriter.to_str() -> string
+        self.out.to_str()
+
+
+TabWriter.reset
+-----------------
+
+Clears formatted output and internal buffers.
+
+    TabWriter.reset()
+        self.out.reset()
+        self.cell_buf.reset()
+        self.widths = (new [0]int)[:0]
+        self.lines = (new [0]TabwriterLine)[:0]
+        self.lines = append(self.lines, TabwriterLine((new [0]TabwriterCell)[:0]))
+
+
+TabWriter.flush
+---------------
+
+Terminates any partial cell, formats buffered lines into `out`, then
+starts a fresh empty line for subsequent `write` calls.
+
+    TabWriter.flush()
+        tabwriter_flush_internal(self)
+
+
+TabWriter.write
+---------------
+
+Streams bytes into cells; delimiters are not stored in cell text.
+
+    TabWriter.write(s: string)
+        val n = len(s)
+        var i = 0
+
+        while i < n
+            val ch = s[i]
+
+            if ch == byte(9) || ch == byte(11) || ch == byte(10) || ch == byte(12)
+                tabwriter_terminate_cell_from_buf(self, ch == byte(9))
+                i += 1
+
+                if ch == byte(10) || ch == byte(12)
+                    val li0 = len(self.lines) - 1
+                    val ncells = len(self.lines[li0].cells)
+                    tabwriter_add_line(self)
+
+                    if ch == byte(12) || ncells == 1
+                        tabwriter_flush_internal(self)
+
+                continue
+
+            self.cell_buf.write_byte(ch)
+            i += 1
+
+
+TabWriter.write_byte
+----------------------
+
+Appends one raw byte into the current cell (same as writing a
+single-byte string without treating it as a delimiter).
+
+    TabWriter.write_byte(b: byte)
+        self.cell_buf.write_byte(b)
+
+
+Private implementation
+------------------------
+
+
+    private tabwriter_add_line(tw: *TabWriter)
+        var nl = TabwriterLine((new [0]TabwriterCell)[:0])
+        tw.lines = append(tw.lines, nl)
+
+
+    private tabwriter_terminate_cell_from_buf(tw: *TabWriter, htab: bool)
+        val txt = tw.cell_buf.to_str()
+        tw.cell_buf.reset()
+        val li = len(tw.lines) - 1
+        var ln = tw.lines[li]
+        val w = len(txt)
+        ln.cells = append(ln.cells, TabwriterCell(txt, w, htab))
+        tw.lines[li] = ln
+
+
+    private tabwriter_flush_internal(tw: *TabWriter)
+        if tw.cell_buf.len() > 0
+            tabwriter_terminate_cell_from_buf(tw, false)
+
+        tabwriter_format(tw, 0, len(tw.lines))
+        tabwriter_reset_lines(tw)
+
+
+    private tabwriter_reset_lines(tw: *TabWriter)
+        tw.lines = (new [0]TabwriterLine)[:0]
+        tw.lines = append(tw.lines, TabwriterLine((new [0]TabwriterCell)[:0]))
+        tw.cell_buf.reset()
+        tw.widths = (new [0]int)[:0]
+
+
+    private tabwriter_write_padding(tw: *TabWriter, textw: int, cellw: int, use_tabs: bool)
+        if tw.padchar == byte(9) || use_tabs
+            if tw.tabwidth <= 0 then return
+
+            var cw = cellw
+
+            while cw % tw.tabwidth != 0
+                cw += 1
+
+            var n = cw - textw
+
+            if n < 0 then return
+
+            val nt = (n + tw.tabwidth - 1) / tw.tabwidth
+
+            for k in 0..<nt
+                tw.out.write_byte(byte(9))
+        else
+            var n = cellw - textw
+
+            if n < 0 then return
+
+            for k in 0..<n
+                tw.out.write_byte(tw.padchar)
+
+
+    private tabwriter_write_lines(tw: *TabWriter, line0: int, line1: int)
+        var use_tabs = (tw.flags & TabwriterTabIndent) != 0
+
+        for i in line0..<line1
+            val line = tw.lines[i]
+
+            for j in 0..<len(line.cells)
+                val c = line.cells[j]
+
+                if j > 0 && (tw.flags & TabwriterDebug) != 0 then tw.out.write_byte(byte(124))
+
+                if len(c.text) == 0
+                    if j < len(tw.widths) then tabwriter_write_padding(tw, c.width, tw.widths[j], use_tabs)
+                else
+                    use_tabs = false
+
+                    if !tw.align_right
+                        tw.out.write(c.text)
+
+                        if j < len(tw.widths) then tabwriter_write_padding(tw, c.width, tw.widths[j], false)
+                    else
+                        if j < len(tw.widths) then tabwriter_write_padding(tw, c.width, tw.widths[j], false)
+
+                        tw.out.write(c.text)
+
+            if i + 1 != len(tw.lines) then tw.out.write_byte(byte(10))
+
+
+    private tabwriter_format(tw: *TabWriter, line0: int, line1: int)
+        val column = len(tw.widths)
+        var lo = line0
+        var scan = line0
+
+        while scan < line1
+            val line = tw.lines[scan]
+
+            if column >= len(line.cells) - 1
+                scan += 1
+                continue
+
+            tabwriter_write_lines(tw, lo, scan)
+            lo = scan
+            var width = tw.minwidth
+            var discardable = true
+            var run = scan
+
+            while run < line1
+                val ln = tw.lines[run]
+
+                if column >= len(ln.cells) - 1 then break
+
+                val c = ln.cells[column]
+                val w = c.width + tw.padding
+
+                if w > width then width = w
+
+                if c.width > 0 || c.htab then discardable = false
+
+                run += 1
+
+            if discardable && (tw.flags & TabwriterDiscardEmptyColumns) != 0 then width = 0
+
+            tw.widths = append(tw.widths, width)
+            tabwriter_format(tw, lo, run)
+            tw.widths = tw.widths[: len(tw.widths) - 1]
+            lo = run
+            scan = run
+
+        tabwriter_write_lines(tw, lo, line1)
+
+
+Tests
+=====
+
+
+    #test
+    test_tabwriter_basic_columns() -> unit
+        var w = new_tab_writer(0, 8, 0, byte(32), 0)
+
+        tabwriter_write_row_sample1(&w)
+        tabwriter_write_row_sample2(&w)
+        w.write_byte(byte(10))
+        w.flush()
+        val got = w.to_str()
+        assert(len(got) > 0, "nonempty")
+
+
+    private tabwriter_write_row_sample1(w: *TabWriter)
+        w.write("a")
+        w.write_byte(byte(9))
+        w.write("b")
+        w.write_byte(byte(9))
+        w.write("c")
+        w.write_byte(byte(9))
+        w.write("d")
+        w.write_byte(byte(9))
+        w.write(".")
+        w.write_byte(byte(10))
+
+
+    private tabwriter_write_row_sample2(w: *TabWriter)
+        w.write("123")
+        w.write_byte(byte(9))
+        w.write("12345")
+        w.write_byte(byte(9))
+        w.write("1234567")
+        w.write_byte(byte(9))
+        w.write("123456789")
+        w.write_byte(byte(9))
+        w.write(".")
+        w.write_byte(byte(10))
+
+
+    #test
+    test_tabwriter_align_right() -> unit
+        var w = new_tab_writer(5, 0, 1, byte(32), TabwriterAlignRight)
+
+        tabwriter_write_row_sample1(&w)
+        tabwriter_write_row_sample2(&w)
+        w.write_byte(byte(10))
+        w.flush()
+        val got = w.to_str()
+        assert(contains(got, "123"), "has num")
+
+
+    #test
+    test_tabwriter_debug_two_rows() -> unit
+        val dbg = TabwriterAlignRight | TabwriterDebug
+        var w = new_tab_writer(0, 0, 1, byte(46), dbg)
+
+        w.write("a")
+        w.write_byte(byte(9))
+        w.write("b")
+        w.write_byte(byte(9))
+        w.write("c")
+        w.write_byte(byte(10))
+        w.write("aa")
+        w.write_byte(byte(9))
+        w.write("bb")
+        w.write_byte(byte(9))
+        w.write("cc")
+        w.write_byte(byte(10))
+        w.flush()
+        val got = w.to_str()
+        assert(len(got) > 0, "debug nonempty")
+        assert(contains(got, "aa"), "row2")

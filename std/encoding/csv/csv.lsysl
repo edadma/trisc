@@ -1,0 +1,362 @@
+std.encoding.csv — Comma-separated values
+=========================================
+
+Read and write CSV records using a **Reader** / **Writer** shape
+common to standard library CSV packages: one logical record per
+line, RFC 4180–style double-quoted fields, escaped quotes as `""`,
+and a configurable field separator (`comma`, often `,`).
+
+**Reading:** `new_reader` wraps a `[]string` of lines (callers split
+input on newlines; embedded newlines inside quoted fields are not
+supported on a single line). `read` returns `Result[[]string, Error]`;
+when no lines remain it returns `Err` with message `"EOF"`. Comment
+lines (optional leading byte, e.g. `#`) and blank lines are skipped
+before parsing.
+
+**Writing:** `new_writer` builds one record at a time. Fields that
+contain the separator, quotes, ASCII whitespace at the ends, or
+CR/LF are enclosed in quotes; `"` inside a field is doubled.
+
+**Low-level:** `parse_record` and `write_record` work on a single
+line without a reader/writer.
+
+Dependencies: `std.builder`, `std.errors`, `std.result`, `std.strings`.
+
+
+    module std.encoding.csv
+
+    import std.builder.{new_builder, StrBuilder}
+    import std.errors.{Error, new_error}
+    import std.result.{Result, Ok, Err, unwrap, is_ok}
+    import std.strings.{substring, trim_space, is_ascii_space, split}
+
+
+CsvReader
+---------
+
+Holds remaining lines and options. `comment` is `byte(0)` to
+disable comment skipping; otherwise any non-blank line whose first
+byte equals `comment` is skipped. `trim_leading_line` runs
+`trim_space` on each line before comment detection and parsing.
+
+    struct CsvReader
+        lines: []string
+        pos: int
+        comma: byte
+        comment: byte
+        trim_leading_line: bool
+
+
+new_reader
+----------
+
+`new_reader(lines)` uses comma `,`, no comments, no line trim.
+
+    new_reader(lines: []string) -> CsvReader
+        CsvReader(lines, 0, byte(','), byte(0), false)
+
+
+new_reader_opts
+-----------------
+
+`comma` separates fields; `comment` is `byte(0)` to disable; when
+non-zero, lines starting with that byte are skipped.
+
+    new_reader_opts(lines: []string, comma: byte, comment: byte, trim_leading_line: bool) -> CsvReader
+        CsvReader(lines, 0, comma, comment, trim_leading_line)
+
+
+read
+----
+
+Returns the next parsed record or `Err(new_error("EOF"))` when
+exhausted.
+
+    CsvReader.read() -> Result[[]string, Error]
+        val nlines = len(self.lines)
+
+        while self.pos < nlines
+            var line = self.lines[self.pos]
+            self.pos += 1
+
+            if self.trim_leading_line then line = trim_space(line)
+
+            if len(line) == 0 then continue
+
+            if i64(self.comment) != 0 && line[0] == self.comment then continue
+
+            return parse_record(line, self.comma)
+
+        Err(new_error("EOF"))
+
+
+parse_record
+------------
+
+Parse one line into fields. Unquoted fields cannot contain `"`.
+Quoted fields use `""` for a literal quote. After a closing quote,
+only ASCII spaces may appear before the next comma or end of line.
+If the line ends with a separator, a trailing empty field is
+appended. The empty string line yields one empty field.
+
+    parse_record(line: string, comma: byte) -> Result[[]string, Error]
+        val n = len(line)
+        var fields = (new [0]string)[:0]
+
+        if n == 0
+            val one = new [1]string
+            one[0] = ""
+            return Ok(one[:])
+
+        var i = 0
+
+        while i < n
+            if line[i] == byte('"')
+                val q = csv_parse_quoted(line, i, n, comma)
+                q match
+                    Err(e) -> return Err(e)
+                    Ok(pair) ->
+                        fields = append(fields, pair.s)
+                        i = pair.after
+            else
+                val start = i
+                while i < n && line[i] != comma
+                    if line[i] == byte('"') then return Err(new_error("csv: stray quote in field"))
+                    i += 1
+                fields = append(fields, substring(line, start, i))
+
+            if i < n
+                if line[i] != comma then return Err(new_error("csv: expected comma between fields"))
+                i += 1
+
+        if n > 0 && line[n - 1] == comma
+            fields = append(fields, "")
+
+        Ok(fields)
+
+
+    struct CsvQuotedPair
+        after: int
+        s: string
+
+
+    private csv_parse_quoted(line: string, start: int, n: int, comma: byte) -> Result[CsvQuotedPair, Error]
+        var i = start + 1
+        var b = new_builder()
+
+        while i < n
+            if line[i] == byte('"')
+                if i + 1 < n && line[i + 1] == byte('"')
+                    b.write_byte(byte('"'))
+                    i += 2
+                else
+                    i += 1
+                    while i < n && is_ascii_space(line[i]) do i += 1
+                    if i < n && line[i] != comma then return Err(new_error("csv: extra data after quoted field"))
+                    return Ok(CsvQuotedPair(i, b.to_str()))
+            else
+                if line[i] == byte('\n') || line[i] == byte('\r') then return Err(new_error("csv: newline in quoted field"))
+                b.write_byte(line[i])
+                i += 1
+
+        Err(new_error("csv: unterminated quoted field"))
+
+
+field_needs_quotes
+------------------
+
+Returns `true` if `s` must be written quoted for `comma`.
+
+    field_needs_quotes(s: string, comma: byte) -> bool
+        val n = len(s)
+
+        if n == 0 then return false
+
+        if is_ascii_space(s[0]) || is_ascii_space(s[n - 1]) then return true
+
+        for j in 0..<n
+            val c = s[j]
+            if c == comma || c == byte('"') || c == byte('\r') || c == byte('\n') then return true
+
+        false
+
+
+write_record
+------------
+
+Format one record: fields separated by `comma`, quoting as needed.
+Returns `Err` only on impossible conditions (none today).
+
+    write_record(fields: []string, comma: byte) -> Result[string, Error]
+        var b = new_builder()
+        csv_append_record(&b, fields, comma)
+        Ok(b.to_str())
+
+
+CsvWriter
+---------
+
+Buffers serialized records. Call `write_record` per line, then
+`to_str` or use the buffer for further writes.
+
+    struct CsvWriter
+        buf: StrBuilder
+        comma: byte
+
+
+new_writer
+----------
+
+    new_writer() -> CsvWriter
+        CsvWriter(new_builder(), byte(','))
+
+
+new_writer_comma
+----------------
+
+    new_writer_comma(comma: byte) -> CsvWriter
+        CsvWriter(new_builder(), comma)
+
+
+write_record
+------------
+
+Appends one CSV line (no trailing newline) to the buffer.
+
+    CsvWriter.write_record(fields: []string)
+        csv_append_record(&self.buf, fields, self.comma)
+
+
+    private csv_append_record(b: *StrBuilder, fields: []string, comma: byte)
+        val nf = len(fields)
+
+        for fi in 0..<nf
+            if fi > 0 then b.write_byte(comma)
+
+            val s = fields[fi]
+
+            if field_needs_quotes(s, comma)
+                b.write_byte(byte('"'))
+                val n = len(s)
+                for j in 0..<n
+                    if s[j] == byte('"') then b.write_byte(byte('"'))
+                    b.write_byte(s[j])
+                b.write_byte(byte('"'))
+            else
+                b.write(s)
+
+
+to_str
+------
+
+    CsvWriter.to_str() -> string
+        self.buf.to_str()
+
+
+reset
+-----
+
+Clears the buffer for reuse.
+
+    CsvWriter.reset()
+        self.buf.reset()
+
+
+Tests
+=====
+
+    #test
+    test_parse_simple() -> unit
+        val r = parse_record("a,b,c", byte(','))
+        assert(is_ok(r), "ok")
+        val f = unwrap(r)
+        assert(len(f) == 3, "len")
+        assert(f[0] == "a", "a")
+        assert(f[1] == "b", "b")
+        assert(f[2] == "c", "c")
+
+
+    #test
+    test_parse_quoted_comma() -> unit
+        val r = parse_record("\"a,b\",c", byte(','))
+        assert(is_ok(r), "ok")
+        val f = unwrap(r)
+        assert(len(f) == 2, "len")
+        assert(f[0] == "a,b", "first")
+        assert(f[1] == "c", "second")
+
+
+    #test
+    test_parse_escaped_quote() -> unit
+        val r = parse_record("\"say \"\"hi\"\"\",x", byte(','))
+        assert(is_ok(r), "ok")
+        val f = unwrap(r)
+        assert(len(f) == 2, "len")
+        assert(f[0] == "say \"hi\"", "quoted")
+
+
+    #test
+    test_parse_trailing_comma() -> unit
+        val r = parse_record("a,b,", byte(','))
+        assert(is_ok(r), "ok")
+        val f = unwrap(r)
+        assert(len(f) == 3, "len")
+        assert(f[2] == "", "empty tail")
+
+
+    #test
+    test_parse_double_comma() -> unit
+        val r = parse_record(",,", byte(','))
+        assert(is_ok(r), "ok")
+        val f = unwrap(r)
+        assert(len(f) == 3, "len")
+
+
+    #test
+    test_reader_comment_and_eof() -> unit
+        val lines = new [3]string
+        lines[0] = "# skip"
+        lines[1] = "p,q"
+        lines[2] = ""
+        var r = new_reader_opts(lines[:], byte(','), byte('#'), false)
+        val a = r.read()
+        assert(is_ok(a), "row")
+        val u = unwrap(a)
+        assert(u[0] == "p", "p")
+        val b = r.read()
+        assert(!is_ok(b), "eof")
+
+
+    #test
+    test_write_roundtrip() -> unit
+        val fields = new [2]string
+        fields[0] = "x,y"
+        fields[1] = "z"
+        val w = write_record(fields[:], byte(','))
+        assert(is_ok(w), "wok")
+        val line = unwrap(w)
+        val r = parse_record(line, byte(','))
+        assert(is_ok(r), "rok")
+        val g = unwrap(r)
+        assert(len(g) == 2, "rlen")
+        assert(g[0] == "x,y", "g0")
+        assert(g[1] == "z", "g1")
+
+
+    #test
+    test_writer_buffer() -> unit
+        var w = new_writer()
+        val f1 = new [1]string
+        f1[0] = "a"
+        w.write_record(f1[:])
+        w.buf.write_byte(byte('\n'))
+        val f2 = new [1]string
+        f2[0] = "b"
+        w.write_record(f2[:])
+        val s = w.to_str()
+        val lines = split(s, "\n")
+        assert(len(lines) == 2, "2 lines")
+        val r0 = parse_record(lines[0], byte(','))
+        val r1 = parse_record(lines[1], byte(','))
+        assert(unwrap(r0)[0] == "a", "a")
+        assert(unwrap(r1)[0] == "b", "b")
