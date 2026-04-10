@@ -23,6 +23,7 @@ so the scheduler can reference them).
 
     import oskit.kernel.*
     import oskit.services.syscall
+    import oskit.kernel.{vm_set_ptbr, KERNEL_L1_BASE}
 
     val MAX_PORTS = 8
     val IPC_PORT_FREE = -1
@@ -339,16 +340,24 @@ The server continues running (no block).
             ipc_continue_current()
             return
 
-        // Copy reply to caller's reply buffer
+        // Copy reply to caller's reply buffer and write return value.
+        // If caller has a different page table, temporarily switch
+        // so both the reply copy AND the return value write go to
+        // the correct physical pages (caller's stack is per-process).
+        val caller_ptbr = threads[caller].ptbr
+        val need_switch = caller_ptbr != KERNEL_L1_BASE
+        if need_switch
+            vm_set_ptbr(caller_ptbr)
         val rply_len = ipc_ctx[caller].reply_len
         if msg_len > rply_len
             ipc_memcpy(ipc_ctx[caller].reply_buf, msg_ptr, rply_len)
         else
             ipc_memcpy(ipc_ctx[caller].reply_buf, msg_ptr, msg_len)
-
-        // Unblock the caller (return 0 = success, clear timeout)
+        // Write success return value to caller's saved context
         var caller_r1: *i64 = *i64(threads[caller].ssp + 48)
         *caller_r1 = 0
+        if need_switch
+            vm_set_ptbr(KERNEL_L1_BASE)
         threads[caller].state = STATE_READY
         threads[caller].quantum = DEFAULT_QUANTUM
         threads[caller].wake_tick = 0

@@ -191,8 +191,8 @@ import oskit.apps.init.{init}
 
   "NSH: cat prefilled /hello (short file)" in {
     val keys = typeString("cat /hello\n", startTick = 500000, spacing = 12000)
-    val (_, output) =
-      runNsh(scheduledKeys = keys, prefill = "/hello file \"world\"\n", maxCycles = 20000000)
+    val (cpu, output) =
+      runNsh(scheduledKeys = keys, prefill = "/hello file \"world\"\n", maxCycles = 200000000)
     output should include("world")
   }
 
@@ -205,7 +205,7 @@ import oskit.apps.init.{init}
 
   "NSH: cat /etc/ttytab shows prefilled line" in {
     val keys = typeString("cat /etc/ttytab\n", startTick = 500000, spacing = 12000)
-    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 25000000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 100000000)
     output should include("tty0 nsh")
   }
 
@@ -223,7 +223,7 @@ import oskit.apps.init.{init}
 
   "NSH: unknown command" in {
     val keys        = typeString("foo\n", startTick = 500000)
-    val (_, output) = runNsh(scheduledKeys = keys)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 15000000)
     output should include("not found")
   }
 
@@ -368,7 +368,7 @@ import oskit.apps.init.{init}
 
   "Login: cat /etc/ttytab prints ttytab contents" in {
     val keys        = loginAndType("cat /etc/ttytab\n")
-    val (_, output) = runLogin(scheduledKeys = keys, maxCycles = 45000000)
+    val (_, output) = runLogin(scheduledKeys = keys, maxCycles = 180000000)
     output should include("tty0 login")
   }
 

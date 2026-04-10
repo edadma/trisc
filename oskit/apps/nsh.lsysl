@@ -30,7 +30,7 @@ Built-in commands:
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
     import oskit.servers.{fs_open, fs_read, fs_write, fs_stat, fs_create, fs_unlink, fs_mkdir, fs_rmdir, fs_readdir, fs_chmod, fs_rename}
     import oskit.loader.load_tof
-    import oskit.kernel.{create_thread, vm_create_process_pt, vm_set_ptbr, kernel_set_thread_ptbr, KERNEL_L1_BASE}
+    import oskit.kernel.{create_thread, create_thread_vm, vm_create_process_pt, vm_set_ptbr, kernel_set_thread_ptbr, KERNEL_L1_BASE}
 
 Shell state.
 
@@ -674,8 +674,8 @@ Commands such as `echo` and `cat` are not built-ins — they load
                 pos += 1
         args_buf[pos] = 0
 
-        // Create thread (still in process address space for stack frame)
-        val tid = create_thread(entry, PROG_USP, PROG_SSP, *byte(cmd))
+        // Create thread with process page table (set atomically before enqueue)
+        val tid = create_thread_vm(entry, PROG_USP, PROG_SSP, *byte(cmd), proc_pt)
 
         // Restore nsh to kernel address space
         kernel_set_thread_ptbr(my_tid, KERNEL_L1_BASE)
@@ -683,7 +683,6 @@ Commands such as `echo` and `cat` are not built-ins — they load
 
         nsh_flush()
         if tid >= 0
-            kernel_set_thread_ptbr(tid, proc_pt)
             join(tid)
         else
             nsh_print("out of thread slots\n")
