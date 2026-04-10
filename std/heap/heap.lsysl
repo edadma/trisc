@@ -55,69 +55,69 @@ pre-allocated for `cap` elements, avoiding early reallocations.
 len / empty
 -----------
 
-    heap_len[T](h: *MinHeap[T]) -> int = len(h.data)
+    MinHeap[T].len() -> int = len(self.data)
 
-    heap_empty[T](h: *MinHeap[T]) -> bool = len(h.data) == 0
+    MinHeap[T].empty() -> bool = len(self.data) == 0
 
 
 peek
 ----
 
-`heap_peek` returns the minimum element without removing it.
+`peek` returns the minimum element without removing it.
 Panics if the heap is empty.
 
-    heap_peek[T](h: *MinHeap[T]) -> T
-        assert(len(h.data) > 0, "peek on empty heap")
-        h.data[0]
+    MinHeap[T].peek() -> T
+        assert(len(self.data) > 0, "peek on empty heap")
+        self.data[0]
 
 
 push
 ----
 
-`heap_push` appends an element and sifts it up to restore
+`push` appends an element and sifts it up to restore
 the heap invariant.
 
-    heap_push[T](h: *MinHeap[T], v: T)
-        h.data = append(h.data, v)
-        _sift_up(h, len(h.data) - 1)
+    MinHeap[T].push(v: T)
+        self.data = append(self.data, v)
+        self._sift_up(len(self.data) - 1)
 
 
 pop
 ---
 
-`heap_pop` removes and returns the minimum element. The last
+`pop` removes and returns the minimum element. The last
 element is moved to the root and sifted down. Panics if empty.
 
-    heap_pop[T](h: *MinHeap[T]) -> T
-        val n = len(h.data)
+    MinHeap[T].pop() -> T
+        val n = len(self.data)
         assert(n > 0, "pop on empty heap")
-        val min = h.data[0]
+        val min = self.data[0]
         val last = n - 1
-        h.data[0] = h.data[last]
-        h.data = h.data[:last]
+        self.data[0] = self.data[last]
+        self.data = self.data[:last]
         if last > 0
-            _sift_down(h, 0)
+            self._sift_down(0)
         min
 
 
 remove_at
 ---------
 
-`heap_remove_at` removes the element at the given index.
+`remove_at` removes the element at the given index.
 The last element replaces it, then sifts up or down as needed.
 
-    heap_remove_at[T](h: *MinHeap[T], index: int)
-        val n = len(h.data)
+    MinHeap[T].remove_at(index: int)
+        val n = len(self.data)
         assert(index >= 0 && index < n, "remove_at: index out of bounds")
         val last = n - 1
         if index == last
-            h.data = h.data[:last]
+            self.data = self.data[:last]
             return
-        h.data[index] = h.data[last]
-        h.data = h.data[:last]
+        self.data[index] = self.data[last]
+        self.data = self.data[:last]
         // The replacement might need to go up or down
-        _sift_up(h, index)
-        _sift_down(h, index)
+        self._sift_up(index)
+        self._sift_down(index)
 
 
 Internal helpers
@@ -126,14 +126,14 @@ Internal helpers
 `_sift_up` moves element at `i` upward until the heap
 invariant is restored.
 
-    private _sift_up[T](h: *MinHeap[T], i: int)
+    private MinHeap[T]._sift_up(i: int)
         var pos = i
         while pos > 0
             val parent = (pos - 1) / 2
-            if h.less(h.data[pos], h.data[parent])
-                val tmp = h.data[pos]
-                h.data[pos] = h.data[parent]
-                h.data[parent] = tmp
+            if self.less(self.data[pos], self.data[parent])
+                val tmp = self.data[pos]
+                self.data[pos] = self.data[parent]
+                self.data[parent] = tmp
                 pos = parent
             else
                 return
@@ -141,22 +141,22 @@ invariant is restored.
 `_sift_down` moves element at `i` downward until the heap
 invariant is restored.
 
-    private _sift_down[T](h: *MinHeap[T], i: int)
-        val n = len(h.data)
+    private MinHeap[T]._sift_down(i: int)
+        val n = len(self.data)
         var pos = i
         while true
             val left = 2 * pos + 1
             val right = 2 * pos + 2
             var smallest = pos
-            if left < n && h.less(h.data[left], h.data[smallest])
+            if left < n && self.less(self.data[left], self.data[smallest])
                 smallest = left
-            if right < n && h.less(h.data[right], h.data[smallest])
+            if right < n && self.less(self.data[right], self.data[smallest])
                 smallest = right
             if smallest == pos
                 return
-            val tmp = h.data[pos]
-            h.data[pos] = h.data[smallest]
-            h.data[smallest] = tmp
+            val tmp = self.data[pos]
+            self.data[pos] = self.data[smallest]
+            self.data[smallest] = tmp
             pos = smallest
 
 
@@ -166,138 +166,138 @@ Tests
     #test
     test_push_pop_single() -> unit
         var h = new_min_heap(int_less)
-        heap_push(&h, 42)
-        assert(heap_len(&h) == 1, "len after push")
-        assert(heap_peek(&h) == 42, "peek")
-        val v = heap_pop(&h)
+        h.push(42)
+        assert(h.len() == 1, "len after push")
+        assert(h.peek() == 42, "peek")
+        val v = h.pop()
         assert(v == 42, "pop value")
-        assert(heap_empty(&h), "empty after pop")
+        assert(h.empty(), "empty after pop")
 
     #test
     test_push_pop_ordered() -> unit
         var h = new_min_heap(int_less)
-        heap_push(&h, 1)
-        heap_push(&h, 2)
-        heap_push(&h, 3)
-        assert(heap_pop(&h) == 1, "first")
-        assert(heap_pop(&h) == 2, "second")
-        assert(heap_pop(&h) == 3, "third")
+        h.push(1)
+        h.push(2)
+        h.push(3)
+        assert(h.pop() == 1, "first")
+        assert(h.pop() == 2, "second")
+        assert(h.pop() == 3, "third")
 
     #test
     test_push_pop_reverse() -> unit
         var h = new_min_heap(int_less)
-        heap_push(&h, 3)
-        heap_push(&h, 2)
-        heap_push(&h, 1)
-        assert(heap_pop(&h) == 1, "min first")
-        assert(heap_pop(&h) == 2, "second")
-        assert(heap_pop(&h) == 3, "third")
+        h.push(3)
+        h.push(2)
+        h.push(1)
+        assert(h.pop() == 1, "min first")
+        assert(h.pop() == 2, "second")
+        assert(h.pop() == 3, "third")
 
     #test
     test_push_pop_interleaved() -> unit
         var h = new_min_heap(int_less)
-        heap_push(&h, 5)
-        heap_push(&h, 3)
-        assert(heap_pop(&h) == 3, "pop 3")
-        heap_push(&h, 1)
-        heap_push(&h, 4)
-        assert(heap_pop(&h) == 1, "pop 1")
-        assert(heap_pop(&h) == 4, "pop 4")
-        assert(heap_pop(&h) == 5, "pop 5")
+        h.push(5)
+        h.push(3)
+        assert(h.pop() == 3, "pop 3")
+        h.push(1)
+        h.push(4)
+        assert(h.pop() == 1, "pop 1")
+        assert(h.pop() == 4, "pop 4")
+        assert(h.pop() == 5, "pop 5")
 
     #test
     test_duplicates() -> unit
         var h = new_min_heap(int_less)
-        heap_push(&h, 3)
-        heap_push(&h, 1)
-        heap_push(&h, 3)
-        heap_push(&h, 1)
-        assert(heap_pop(&h) == 1, "first 1")
-        assert(heap_pop(&h) == 1, "second 1")
-        assert(heap_pop(&h) == 3, "first 3")
-        assert(heap_pop(&h) == 3, "second 3")
+        h.push(3)
+        h.push(1)
+        h.push(3)
+        h.push(1)
+        assert(h.pop() == 1, "first 1")
+        assert(h.pop() == 1, "second 1")
+        assert(h.pop() == 3, "first 3")
+        assert(h.pop() == 3, "second 3")
 
     #test
     test_remove_at_middle() -> unit
         var h = new_min_heap(int_less)
-        heap_push(&h, 1)
-        heap_push(&h, 3)
-        heap_push(&h, 2)
-        heap_push(&h, 5)
-        heap_push(&h, 4)
+        h.push(1)
+        h.push(3)
+        h.push(2)
+        h.push(5)
+        h.push(4)
         // Remove element at index 1 (could be 3 or 2 depending on heap shape)
         // After removal, all remaining elements should still come out sorted
-        heap_remove_at(&h, 1)
-        assert(heap_len(&h) == 4, "len after remove")
-        val a = heap_pop(&h)
-        val b = heap_pop(&h)
-        val c = heap_pop(&h)
-        val d = heap_pop(&h)
+        h.remove_at(1)
+        assert(h.len() == 4, "len after remove")
+        val a = h.pop()
+        val b = h.pop()
+        val c = h.pop()
+        val d = h.pop()
         assert(a <= b && b <= c && c <= d, "sorted after remove")
 
     #test
     test_remove_at_root() -> unit
         var h = new_min_heap(int_less)
-        heap_push(&h, 1)
-        heap_push(&h, 3)
-        heap_push(&h, 2)
-        heap_remove_at(&h, 0)
-        assert(heap_pop(&h) == 2, "new min after root removal")
-        assert(heap_pop(&h) == 3, "last")
+        h.push(1)
+        h.push(3)
+        h.push(2)
+        h.remove_at(0)
+        assert(h.pop() == 2, "new min after root removal")
+        assert(h.pop() == 3, "last")
 
     #test
     test_remove_at_last() -> unit
         var h = new_min_heap(int_less)
-        heap_push(&h, 1)
-        heap_push(&h, 2)
-        heap_push(&h, 3)
-        heap_remove_at(&h, 2)
-        assert(heap_len(&h) == 2, "len")
-        assert(heap_pop(&h) == 1, "first")
-        assert(heap_pop(&h) == 2, "second")
+        h.push(1)
+        h.push(2)
+        h.push(3)
+        h.remove_at(2)
+        assert(h.len() == 2, "len")
+        assert(h.pop() == 1, "first")
+        assert(h.pop() == 2, "second")
 
     #test
     test_many_elements() -> unit
         var h = new_min_heap(int_less)
         // Push 20 elements in scrambled order
-        heap_push(&h, 15)
-        heap_push(&h, 3)
-        heap_push(&h, 18)
-        heap_push(&h, 7)
-        heap_push(&h, 1)
-        heap_push(&h, 12)
-        heap_push(&h, 20)
-        heap_push(&h, 9)
-        heap_push(&h, 5)
-        heap_push(&h, 14)
-        heap_push(&h, 2)
-        heap_push(&h, 11)
-        heap_push(&h, 19)
-        heap_push(&h, 6)
-        heap_push(&h, 4)
-        heap_push(&h, 17)
-        heap_push(&h, 8)
-        heap_push(&h, 13)
-        heap_push(&h, 16)
-        heap_push(&h, 10)
-        assert(heap_len(&h) == 20, "len 20")
+        h.push(15)
+        h.push(3)
+        h.push(18)
+        h.push(7)
+        h.push(1)
+        h.push(12)
+        h.push(20)
+        h.push(9)
+        h.push(5)
+        h.push(14)
+        h.push(2)
+        h.push(11)
+        h.push(19)
+        h.push(6)
+        h.push(4)
+        h.push(17)
+        h.push(8)
+        h.push(13)
+        h.push(16)
+        h.push(10)
+        assert(h.len() == 20, "len 20")
         // Pop all — must come out in ascending order
-        var prev = heap_pop(&h)
+        var prev = h.pop()
         for var i = 1; i < 20; i++
-            val cur = heap_pop(&h)
+            val cur = h.pop()
             assert(cur >= prev, "ascending order")
             prev = cur
-        assert(heap_empty(&h), "empty at end")
+        assert(h.empty(), "empty at end")
 
     #test(should_panic: "pop on empty heap")
     test_pop_empty_panics() -> unit
         var h = new_min_heap(int_less)
-        val _ = heap_pop(&h)
+        val _ = h.pop()
 
     #test(should_panic: "peek on empty heap")
     test_peek_empty_panics() -> unit
         var h = new_min_heap(int_less)
-        val _ = heap_peek(&h)
+        val _ = h.peek()
 
 Test helper — simple integer comparator.
 

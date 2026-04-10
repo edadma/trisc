@@ -120,7 +120,7 @@ import oskit.apps.init.{init}
       irq = 3,
       prefill = nshTtytab + prefill,
       maxInodes = 64,
-      files = RamdiskBinPrograms.loadForRamdisk(),
+      files = RamdiskBinPrograms.loadEmbeddedBinaries(),
     )
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)
     val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
@@ -307,7 +307,7 @@ import oskit.apps.init.{init}
       irq = 3,
       prefill = prefill,
       maxInodes = 64,
-      files = RamdiskBinPrograms.loadForRamdisk(),
+      files = RamdiskBinPrograms.loadEmbeddedBinaries(),
     )
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)
     val dma = new DMA(Runtime.dmaAddress, null, intc, 4)

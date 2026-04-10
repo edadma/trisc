@@ -1129,6 +1129,9 @@ class SyslAnalyzer:
           pushScope()
           for (paramName, paramType) <- paramTypes do
             currentScope(paramName) = SymInfo(paramName, paramType, true)
+            // Auto-alias `self` -> `__self__` for generic methods
+            if paramName == "__self__" then
+              currentScope("self") = SymInfo(paramName, paramType, true)
           val savedExpectedInst = currentExpected
           // Use only the *result* R of `func(...) -> R`, not the full function type, so nested
           // closures still treat outer parameters (e.g. alt's `a`, `b`) as captures rather than
@@ -2120,6 +2123,25 @@ class SyslAnalyzer:
           val funInfo = functions(funcName)
           val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs) // .tail skips self param
           TCall(funInfo.name, selfArg :: checkedArgs, funInfo.returnType)
+        else if structToTemplate.contains(structName) && {
+          val (templateName, _) = structToTemplate(structName)
+          genericTemplates.contains(s"${templateName}_$method")
+        } then
+          // Generic struct method — instantiate from template
+          val (templateName, _) = structToTemplate(structName)
+          val templateFuncName = s"${templateName}_$method"
+          val selfArg = tObj.typ match
+            case st @ StructType(_, _) =>
+              tObj match
+                case TVarRef(n, _) => TAddrOf(n, PtrType(st))
+                case TFieldAccess(innerObj, idx, _) => TAddrOfField(innerObj, idx, PtrType(st))
+                case TIndex(arr, idx, _) => TAddrOfIndex(arr, idx, PtrType(st))
+                case _ => TTempAddr(tObj, PtrType(st))
+            case _ => tObj
+          val allArgTypes = selfArg.typ :: tArgs.map(_.typ)
+          val (mangled, funInfo) = instantiateGeneric(templateFuncName, allArgTypes)
+          val checkedArgs = checkArgs(mangled, funInfo.params.tail, tArgs)
+          TCall(mangled, selfArg :: checkedArgs, funInfo.returnType)
         else
           // Fall back to calling a function-typed field
           structType.fields.zipWithIndex.find(_._1._1 == method) match

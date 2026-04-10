@@ -210,14 +210,18 @@ class SyslParser extends StandardTokenParsers {
     "var" ^^^ true | "val" ^^^ false
 
   def declBody(priv: Boolean): Parser[DeclAST] =
-    ident ~ ("." ~> ident) ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
-      case typeName ~ methodName ~ params ~ ((rt, body)) =>
+    ident ~ typeParamListWithBounds ~ ("." ~> ident) ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
+      case typeName ~ tps ~ methodName ~ params ~ ((rt, body)) =>
         // Sem.wait(params) -> ret { body } desugars to Sem_wait(__self__: *Sem, params) -> ret { body }
+        // MinHeap[T].push(v: T) desugars to MinHeap_push[T](__self__: *MinHeap[T], v: T) -> ret { body }
         // The parameter is named `__self__` to avoid collisions with user-declared
         // params named `self`. The analyzer auto-aliases `self` -> `__self__` in
         // method bodies, so users still write `self.x`.
-        val selfParam = ParamAST("__self__", PtrTypeAST(NamedTypeAST(typeName)))
-        FunDeclAST(s"${typeName}_$methodName", selfParam :: params, rt, body, priv)
+        val names = tps.map(_._1)
+        val bounds = tps.collect { case (n, bs) if bs.nonEmpty => (n, bs) }.toMap
+        val typeArgs = names.map(n => NamedTypeAST(n): TypeAST)
+        val selfParam = ParamAST("__self__", PtrTypeAST(NamedTypeAST(typeName, typeArgs)))
+        FunDeclAST(s"${typeName}_$methodName", selfParam :: params, rt, body, priv, names, bounds)
     } |
     ident ~ typeParamListWithBounds ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
       case name ~ tps ~ params ~ ((rt, body)) =>
@@ -767,6 +771,8 @@ class SyslParser extends StandardTokenParsers {
       "string" ~> "(" ~> rep1sep(expr, ",") <~ ")" ^^ { args => CallAST("string", args) } |
       cast |
       ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |
+      // Scalar type keywords as expressions — used inside [] for generic type args: Box[int](42)
+      ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool") ^^ VarRefAST.apply |
       ident ^^ VarRefAST.apply |
       "(" ~> expr ~ rep("," ~> expr) <~ ")" ^^ {
         case first ~ Nil => first  // (expr) — parenthesized expression
