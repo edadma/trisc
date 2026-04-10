@@ -222,6 +222,7 @@ object TriscCli:
         /etc/shadow file "root:slix:3b1b8291c0bdb62febcd914f45884bca403ae1c42a4bb1c41755881f3886d158\ned:slix:c638d5b6e91f70b96934aac8d7be42363ce4ea5927f9a9bbbe2d64a8b51926b5"
         /etc/ttytab file "tty0 login"
       """,
+      files = RamdiskBinPrograms.loadForRamdisk(),
     )
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)
     // std.mem memcpy/memset program DMA at Runtime.dmaAddress — must be present or stores fault (DataAccess 'D').

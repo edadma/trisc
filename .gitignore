@@ -1,6 +1,7 @@
 *.class
 *.log
 *.tof
+!trisc-cli/shared/src/main/resources/ramdisk/bin/*.tof
 *.asm
 
 # sbt specific
