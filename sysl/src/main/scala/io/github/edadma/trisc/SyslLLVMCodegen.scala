@@ -652,11 +652,15 @@ class SyslLLVMCodegen:
         val addr = genStructAddr(obj)
         val gep = newReg()
         emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
+        // Slice field: decrement old backref before overwrite
+        if isSliceType(ft) then emitSliceBackrefDecr(gep)
         val v = genExpr(value)
         if isAggregate(ft) then
           val loaded = newReg()
           emit(s"  $loaded = load $fieldType, $fieldType* $v")
           emit(s"  store $fieldType $loaded, $fieldType* $gep")
+          // Slice field: increment new backref if not owned
+          if isSliceType(ft) && !isSliceOwned(value) then emitSliceBackrefIncr(gep)
         else
           emit(s"  store $fieldType $v, $fieldType* $gep")
 
@@ -693,7 +697,15 @@ class SyslLLVMCodegen:
           val flt = llvmType(ft)
           val gep = newReg()
           emit(s"  $gep = getelementptr $structLt, $structLt* $tuplePtr, i32 0, i32 $i")
-          if isAggregate(ft) then
+          if isSliceType(ft) then
+            // Copy slice into entry-block alloca so it dominates scope cleanup
+            val alloca = deferAlloca(flt)
+            val loaded = newReg()
+            emit(s"  $loaded = load $flt, $flt* $gep")
+            emit(s"  store $flt $loaded, $flt* $alloca")
+            locals(name) = LocalVar(name, alloca, ft)
+            emitSliceBackrefIncr(alloca)
+          else if isAggregate(ft) then
             locals(name) = LocalVar(name, gep, ft)
           else
             val alloca = deferAlloca(flt)
@@ -711,7 +723,14 @@ class SyslLLVMCodegen:
           val flt = llvmType(ft)
           val gep = newReg()
           emit(s"  $gep = getelementptr $structLt, $structLt* $tuplePtr, i32 0, i32 $i")
-          if isAggregate(ft) then
+          if isSliceType(ft) then
+            val alloca = deferAlloca(flt)
+            val loaded = newReg()
+            emit(s"  $loaded = load $flt, $flt* $gep")
+            emit(s"  store $flt $loaded, $flt* $alloca")
+            locals(name) = LocalVar(name, alloca, ft)
+            emitSliceBackrefIncr(alloca)
+          else if isAggregate(ft) then
             locals(name) = LocalVar(name, gep, ft)
           else
             if locals.contains(name) then

@@ -426,4 +426,55 @@ class SyslLLVMAllocaTests extends SyslLLVMTestHelpers {
         |    s[0] + s[1]
         |""".stripMargin) shouldBe 30
   }
+
+  // ===== Copy-on-store tests (Layer 3) =====
+
+  "destructure tuple with slice field" in {
+    llvmExit(
+      """make() -> ([]int, int)
+        |    val a = new [2]int
+        |    a[0] = 10
+        |    a[1] = 20
+        |    (a[:], 42)
+        |
+        |main() -> int
+        |    val s, n = make()
+        |    s[0] + s[1] + n
+        |""".stripMargin) shouldBe 72
+  }
+
+  "struct with slice field assignment" in {
+    llvmExit(
+      """struct Container
+        |    data: []int
+        |    tag: int
+        |
+        |main() -> int
+        |    val a = new [2]int
+        |    a[0] = 10
+        |    a[1] = 20
+        |    var c = Container(a[:], 1)
+        |    val b = new [2]int
+        |    b[0] = 30
+        |    b[1] = 40
+        |    c.data = b[:]
+        |    c.data[0] + c.data[1] + c.tag
+        |""".stripMargin) shouldBe 71
+  }
+
+  "destructure in loop with slice" in {
+    llvmExit(
+      """make(i: int) -> ([]int, int)
+        |    val a = new [1]int
+        |    a[0] = i * 10
+        |    (a[:], i)
+        |
+        |main() -> int
+        |    var total = 0
+        |    for i in 0..<3
+        |        val s, n = make(i)
+        |        total = total + s[0] + n
+        |    total
+        |""".stripMargin) shouldBe 33
+  }
 }
