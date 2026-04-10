@@ -818,32 +818,6 @@ atomic_inc
   jalr r0, r6
 
 
-; ============================================================================
-; MMU helpers — called from kernel Sysl code
-; ============================================================================
-
-; vm_set_ptbr(addr: int) — set page table base register
-; Non-zero enables MMU; zero disables it (bare mode).
-global vm_set_ptbr, func
-
-vm_set_ptbr
-  sptbr r1, r0
-  jalr  r0, r6
-
-; vm_flush_tlb() — invalidate all TLB entries
-global vm_flush_tlb, func
-
-vm_flush_tlb
-  tlbia r0, r0
-  jalr  r0, r6
-
-; vm_get_ptbr() -> int — read current PTBR
-global vm_get_ptbr, func
-
-vm_get_ptbr
-  gptbr r1, r0
-  jalr  r0, r6
-
 
 
 ; ============================================================================

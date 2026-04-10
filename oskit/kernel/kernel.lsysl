@@ -218,9 +218,15 @@ Each L1 entry is 4 bytes; 1024 entries = 4KB table.
 
     val KERNEL_L1_BASE = 0x7FE000
 
-    extern vm_set_ptbr(addr: int)
-    extern vm_flush_tlb()
-    extern vm_get_ptbr() -> int
+    vm_set_ptbr(addr: int)
+        asm("sptbr r1, r0")
+
+    vm_flush_tlb()
+        asm("tlbia r0, r0")
+
+    vm_get_ptbr() -> int
+        asm("gptbr r1, r0")
+        0
 
 Build kernel identity page table using superpages (4MB each):
 - L1[0]: 0x000000-0x3FFFFF (RAM low) — supervisor RWX
