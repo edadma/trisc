@@ -71,6 +71,7 @@ Statistics fields track per-thread performance:
         base_priority: int
         uid: int
         blocked_on: i64
+        ptbr: int
 
 Run queues: one FIFO queue per priority level. Each queue
 has a head and tail index. Enqueue appends to tail, dequeue
@@ -212,11 +213,13 @@ PTE flags: V=0x001, R=0x002, W=0x004, X=0x008, U=0x010, G=0x020
     val PTE_U = 0x010
     val PTE_G = 0x020
 
-Kernel L1 page table. Stored at a fixed physical address (0x600000),
-well below the kernel stack (0x7FFFF8) and above typical code/data.
-Each L1 entry is 4 bytes; 1024 entries = 4KB table.
+Kernel L1 page table at 0x7FE000, page pool at 0x620000-0x7FD000.
 
     val KERNEL_L1_BASE = 0x7FE000
+    val PAGE_SIZE      = 4096
+    val PAGE_POOL_BASE = 0x620000
+    val PAGE_POOL_END  = 0x7FD000
+    var page_pool_next = PAGE_POOL_BASE
 
     vm_set_ptbr(addr: int)
         asm("sptbr r1, r0")
@@ -227,11 +230,6 @@ Each L1 entry is 4 bytes; 1024 entries = 4KB table.
     vm_get_ptbr() -> int
         asm("gptbr r1, r0")
         0
-
-Build kernel identity page table using superpages (4MB each):
-- L1[0]: 0x000000-0x3FFFFF (RAM low) — supervisor RWX
-- L1[1]: 0x400000-0x7FFFFF (RAM high) — supervisor RWX
-- L1[2]: 0x800000-0xBFFFFF (I/O + ramdisk) — supervisor RW (no execute)
 
 Build kernel identity page table using superpages (4MB each):
 - L1[0]: 0x000000-0x3FFFFF (RAM low) — supervisor RWX
@@ -263,6 +261,131 @@ Build kernel identity page table using superpages (4MB each):
 
         // Enable the MMU
         vm_set_ptbr(KERNEL_L1_BASE)
+
+Physical page allocator — bump allocator from the page pool.
+Returns a zeroed 4KB page, or 0 on exhaustion.
+
+    page_alloc() -> int
+        if page_pool_next >= PAGE_POOL_END
+            return 0
+        val page = page_pool_next
+        page_pool_next += PAGE_SIZE
+        var i = 0
+        while i < PAGE_SIZE
+            var p: *i64 = *i64(page + i)
+            *p = 0
+            i += 8
+        page
+
+Write a 32-bit PTE at a given address.
+
+    vm_write_pte(addr: int, pte: int)
+        var p: *i32 = *i32(addr)
+        *p = i32(pte)
+
+Create a per-process page table. Allocates L1 + L2 tables and
+physical pages for the program region (0xC0000-0xFFFFF = 64 pages).
+Returns L1 base address, or 0 on failure.
+
+    vm_create_process_pt() -> int
+        val l1 = page_alloc()
+        if l1 == 0
+            return 0
+        val l2 = page_alloc()
+        if l2 == 0
+            return 0
+
+        val flags_rwx = PTE_V | PTE_R | PTE_W | PTE_X
+        val flags_rw  = PTE_V | PTE_R | PTE_W
+
+        // L1[0] = pointer to L2 (V-only, no R/W/X → non-superpage)
+        val l2_ppn = l2 / PAGE_SIZE
+        vm_write_pte(l1, (l2_ppn << 10) | PTE_V)
+
+        // L1[1] and L1[2] = copy kernel superpages
+        var k1: *i32 = *i32(KERNEL_L1_BASE + 4)
+        vm_write_pte(l1 + 4, *k1)
+        var k2: *i32 = *i32(KERNEL_L1_BASE + 8)
+        vm_write_pte(l1 + 8, *k2)
+
+        // L2[0x00-0xBF]: kernel region, identity-mapped supervisor RWX
+        var i = 0
+        while i < 0xC0
+            vm_write_pte(l2 + i * 4, (i << 10) | flags_rwx)
+            i += 1
+
+        // L2[0xC0-0xFF]: program region, fresh physical pages
+        while i < 0x100
+            val page = page_alloc()
+            if page == 0
+                return 0
+            val ppn = page / PAGE_SIZE
+            vm_write_pte(l2 + i * 4, (ppn << 10) | flags_rwx)
+            i += 1
+
+        // L2[0x100-0x3FF]: unmapped (already zeroed by page_alloc)
+        l1
+
+Software page table walk — translate a virtual address using
+the given page table. Used for cross-address-space copies.
+
+    vm_v2p(ptbr: int, vaddr: int) -> int
+        val l1_idx = (vaddr >> 22) & 0x3FF
+        val l2_idx = (vaddr >> 12) & 0x3FF
+        val offset = vaddr & 0xFFF
+
+        var l1e: *i32 = *i32(ptbr + l1_idx * 4)
+        val l1_pte = *l1e
+        val l1_flags = l1_pte & 0x3FF
+
+        // Superpage?
+        if (l1_flags & (PTE_R | PTE_W | PTE_X)) != 0
+            val ppn = (l1_pte >> 10) & 0xFFFFF
+            return (ppn << 22) | (vaddr & 0x3FFFFF)
+
+        // L2 walk
+        val l2_base = (l1_pte >> 10) << 12
+        var l2e: *i32 = *i32(l2_base + l2_idx * 4)
+        val l2_pte = *l2e
+        val ppn = (l2_pte >> 10) & 0xFFFFF
+        (ppn << 12) | offset
+
+Copy data into another address space. Temporarily switches
+PTBR with interrupts disabled.
+
+    vm_copy_to(dst_ptbr: int, dst_vaddr: int, src: *byte, len: int)
+        asm("cli")
+        vm_set_ptbr(dst_ptbr)
+        var i = 0
+        while i < len
+            var d: *byte = *byte(dst_vaddr + i)
+            *d = src[i]
+            i += 1
+        vm_set_ptbr(KERNEL_L1_BASE)
+        asm("sti")
+
+Copy data from another address space.
+
+    vm_copy_from(src_ptbr: int, src_vaddr: int, dst: *byte, len: int)
+        asm("cli")
+        vm_set_ptbr(src_ptbr)
+        var i = 0
+        while i < len
+            var s: *byte = *byte(src_vaddr + i)
+            dst[i] = *s
+            i += 1
+        vm_set_ptbr(KERNEL_L1_BASE)
+        asm("sti")
+
+Get a thread's page table base register.
+
+    kernel_get_thread_ptbr(tid: int) -> int
+        threads[tid].ptbr
+
+Set a thread's page table base register.
+
+    kernel_set_thread_ptbr(tid: int, ptbr: int)
+        threads[tid].ptbr = ptbr
 
     kernel_init()
         vm_init()
@@ -416,6 +539,7 @@ would monotonically bump thread_count and walk off the end of threads[].
         threads[idx].notify_pending = 0
         threads[idx].base_priority = priority
         threads[idx].blocked_on = 0
+        threads[idx].ptbr = KERNEL_L1_BASE
         if current_thread >= 0
             threads[idx].uid = threads[current_thread].uid
         else
@@ -562,11 +686,13 @@ Steps:
                     threads[next].state = STATE_RUNNING
                     threads[next].ctx_switches += 1
                     total_ctx_switches += 1
+                    //vm_set_ptbr(threads[next].ptbr)
                     return threads[next].ssp
             pri += 1
 
         // No ready threads — return 0 to signal idle
         current_thread = -1
+        //vm_set_ptbr(KERNEL_L1_BASE)
         0
 
 Called by boot.asm after kernel_main() returns, so boot can
@@ -584,6 +710,7 @@ highest-priority non-empty queue.
                     threads[next].state = STATE_RUNNING
                     threads[next].ctx_switches += 1
                     total_ctx_switches += 1
+                    //vm_set_ptbr(threads[next].ptbr)
                     return threads[next].ssp
             pri += 1
         0

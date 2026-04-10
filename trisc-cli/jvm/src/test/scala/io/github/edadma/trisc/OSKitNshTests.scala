@@ -143,7 +143,7 @@ import oskit.apps.init.{init}
         )
     }
     val ticks: Seq[Processor => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
-    val cpu                     = new CPU(mem, ticks) { this.limit = maxCycles }
+    val cpu                     = new CPU(mem, ticks, mmu = Some(new SimpleMMU(mem))) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)
@@ -328,7 +328,7 @@ import oskit.apps.init.{init}
         )
     }
     val ticks: Seq[Processor => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
-    val cpu                     = new CPU(mem, ticks) { this.limit = maxCycles }
+    val cpu                     = new CPU(mem, ticks, mmu = Some(new SimpleMMU(mem))) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)

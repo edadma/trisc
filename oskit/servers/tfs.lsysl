@@ -33,6 +33,7 @@ Commands:
     import oskit.fs.{tfs_init, tfs_lookup, tfs_read, tfs_write, tfs_create, tfs_unlink, tfs_stat, tfs_readdir, tfs_rmdir, tfs_chmod, tfs_rename, sync_superblock}
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv, ipc_reply, ipc_send, ipc_last_msg_len}
     import oskit.drivers.disk.{disk_read, disk_write}
+    import oskit.kernel.{kernel_get_thread_ptbr, vm_copy_to, vm_copy_from, KERNEL_L1_BASE}
 
     val TFS_CMD_OPEN    = 1
     val TFS_CMD_READ    = 2
@@ -99,8 +100,21 @@ Reply:   [status(1), bytes_read(4)]
         val ino = tfs_msg_read_i32(buf, 1)
         val offset = tfs_msg_read_i32(buf, 5)
         val len = tfs_msg_read_i32(buf, 9)
-        val buf_addr = *byte(tfs_msg_read_i32(buf, 13))
-        val nr = tfs_read(ino, buf_addr, offset, len)
+        val buf_addr = tfs_msg_read_i32(buf, 13)
+        val sender_ptbr = kernel_get_thread_ptbr(sender)
+        var nr = 0
+        if sender_ptbr == KERNEL_L1_BASE
+            // Same address space — direct write
+            nr = tfs_read(ino, *byte(buf_addr), offset, len)
+        else
+            // Cross-address-space: read to local buffer, copy to client
+            var local: [4096]byte
+            var rlen = len
+            if rlen > 4096
+                rlen = 4096
+            nr = tfs_read(ino, &local[0], offset, rlen)
+            if nr > 0
+                vm_copy_to(sender_ptbr, buf_addr, &local[0], nr)
         var reply: [5]byte
         reply[0] = 0
         tfs_msg_write_i32(&reply[0], 1, nr)
@@ -116,8 +130,20 @@ Reply:   [status(1), bytes_written(4)]
         val ino = tfs_msg_read_i32(buf, 1)
         val offset = tfs_msg_read_i32(buf, 5)
         val len = tfs_msg_read_i32(buf, 9)
-        val buf_addr = *byte(tfs_msg_read_i32(buf, 13))
-        val nw = tfs_write(ino, buf_addr, offset, len)
+        val buf_addr = tfs_msg_read_i32(buf, 13)
+        val sender_ptbr = kernel_get_thread_ptbr(sender)
+        var nw = 0
+        if sender_ptbr == KERNEL_L1_BASE
+            // Same address space — direct read
+            nw = tfs_write(ino, *byte(buf_addr), offset, len)
+        else
+            // Cross-address-space: copy from client, then write
+            var local: [4096]byte
+            var wlen = len
+            if wlen > 4096
+                wlen = 4096
+            vm_copy_from(sender_ptbr, buf_addr, &local[0], wlen)
+            nw = tfs_write(ino, &local[0], offset, wlen)
         var reply: [5]byte
         reply[0] = 0
         tfs_msg_write_i32(&reply[0], 1, nw)
