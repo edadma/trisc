@@ -189,6 +189,12 @@ import oskit.apps.init.{init}
     output should include("hello")
   }
 
+  "NSH: hello prints greeting" in {
+    val keys        = typeString("hello\n", startTick = 500000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 80000000)
+    output should include("Hello")
+  }
+
   "NSH: cat prefilled /hello (short file)" in {
     val keys = typeString("cat /hello\n", startTick = 500000, spacing = 12000)
     val (cpu, output) =

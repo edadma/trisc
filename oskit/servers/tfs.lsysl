@@ -33,8 +33,7 @@ Commands:
     import oskit.fs.{tfs_init, tfs_lookup, tfs_read, tfs_write, tfs_create, tfs_unlink, tfs_stat, tfs_readdir, tfs_rmdir, tfs_chmod, tfs_rename, sync_superblock}
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv, ipc_reply, ipc_send, ipc_last_msg_len}
     import oskit.drivers.disk.{disk_read, disk_write}
-    import oskit.kernel.{kernel_get_thread_ptbr, kernel_set_thread_ptbr, vm_set_ptbr, vm_copy_to, vm_copy_from, KERNEL_L1_BASE}
-    import oskit.services.thread_id
+    import oskit.kernel.{kernel_get_thread_ptbr, vm_copy_to, vm_copy_from, KERNEL_L1_BASE}
 
     val TFS_CMD_OPEN    = 1
     val TFS_CMD_READ    = 2
@@ -108,15 +107,14 @@ Reply:   [status(1), bytes_read(4)]
             // Same address space — direct write
             nr = tfs_read(ino, *byte(buf_addr), offset, len)
         else
-            // Cross-address-space: adopt client's page table so
-            // tfs_read writes directly to the client's buffer.
-            // Kernel data is identity-mapped in all page tables.
-            val my_tid = thread_id()
-            kernel_set_thread_ptbr(my_tid, sender_ptbr)
-            vm_set_ptbr(sender_ptbr)
-            nr = tfs_read(ino, *byte(buf_addr), offset, len)
-            kernel_set_thread_ptbr(my_tid, KERNEL_L1_BASE)
-            vm_set_ptbr(KERNEL_L1_BASE)
+            // Cross-address-space: read to local buffer, copy via physical addressing
+            var local: [512]byte
+            var rlen = len
+            if rlen > 512
+                rlen = 512
+            nr = tfs_read(ino, &local[0], offset, rlen)
+            if nr > 0
+                vm_copy_to(sender_ptbr, buf_addr, &local[0], nr)
         var reply: [5]byte
         reply[0] = 0
         tfs_msg_write_i32(&reply[0], 1, nr)
@@ -139,13 +137,13 @@ Reply:   [status(1), bytes_written(4)]
             // Same address space — direct read
             nw = tfs_write(ino, *byte(buf_addr), offset, len)
         else
-            // Cross-address-space: adopt client's page table
-            val my_tid = thread_id()
-            kernel_set_thread_ptbr(my_tid, sender_ptbr)
-            vm_set_ptbr(sender_ptbr)
-            nw = tfs_write(ino, *byte(buf_addr), offset, len)
-            kernel_set_thread_ptbr(my_tid, KERNEL_L1_BASE)
-            vm_set_ptbr(KERNEL_L1_BASE)
+            // Cross-address-space: copy from client via physical addressing, then write
+            var local: [512]byte
+            var wlen = len
+            if wlen > 512
+                wlen = 512
+            vm_copy_from(sender_ptbr, buf_addr, &local[0], wlen)
+            nw = tfs_write(ino, &local[0], offset, wlen)
         var reply: [5]byte
         reply[0] = 0
         tfs_msg_write_i32(&reply[0], 1, nw)

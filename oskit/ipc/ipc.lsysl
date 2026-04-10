@@ -23,7 +23,6 @@ so the scheduler can reference them).
 
     import oskit.kernel.*
     import oskit.services.syscall
-    import oskit.kernel.{vm_set_ptbr, KERNEL_L1_BASE}
 
     val MAX_PORTS = 8
     val IPC_PORT_FREE = -1
@@ -297,15 +296,8 @@ Blocks until a client sends a message.
         var sender = ipc_queue_pop(port)
         while sender != IPC_QUEUE_EMPTY
             if threads[sender].state == STATE_SEND_BLOCKED
-                // Found a valid sender — deliver their message.
-                // Switch to sender's page table if needed, since the
-                // sender's message buffer may be in per-process pages.
-                val sender_ptbr = threads[sender].ptbr
-                if sender_ptbr != KERNEL_L1_BASE
-                    vm_set_ptbr(sender_ptbr)
+                // Found a valid sender — deliver their message
                 ipc_deliver(me, sender, ipc_ctx[sender].buf, ipc_ctx[sender].len)
-                if sender_ptbr != KERNEL_L1_BASE
-                    vm_set_ptbr(KERNEL_L1_BASE)
 
                 // Return sender ID to the server
                 syscall_return(sender)
@@ -347,24 +339,16 @@ The server continues running (no block).
             ipc_continue_current()
             return
 
-        // Copy reply to caller's reply buffer and write return value.
-        // If caller has a different page table, temporarily switch
-        // so both the reply copy AND the return value write go to
-        // the correct physical pages (caller's stack is per-process).
-        val caller_ptbr = threads[caller].ptbr
-        val need_switch = caller_ptbr != KERNEL_L1_BASE
-        if need_switch
-            vm_set_ptbr(caller_ptbr)
+        // Copy reply to caller's reply buffer
         val rply_len = ipc_ctx[caller].reply_len
         if msg_len > rply_len
             ipc_memcpy(ipc_ctx[caller].reply_buf, msg_ptr, rply_len)
         else
             ipc_memcpy(ipc_ctx[caller].reply_buf, msg_ptr, msg_len)
-        // Write success return value to caller's saved context
+
+        // Unblock the caller (return 0 = success, clear timeout)
         var caller_r1: *i64 = *i64(threads[caller].ssp + 48)
         *caller_r1 = 0
-        if need_switch
-            vm_set_ptbr(KERNEL_L1_BASE)
         threads[caller].state = STATE_READY
         threads[caller].quantum = DEFAULT_QUANTUM
         threads[caller].wake_tick = 0
