@@ -1081,11 +1081,21 @@ class SyslAnalyzer:
         throw AnalysisError(s"trait method '$traitName.$methodName' resolved to '$mangled' but function not found")))
     (mangled, funInfo)
 
-  private def instantiateGeneric(name: String, argTypes: List[SyslType]): (String, FunInfo) =
+  private def instantiateGeneric(
+      name: String,
+      argTypes: List[SyslType],
+      explicitTypeArgs: List[SyslType] = Nil,
+  ): (String, FunInfo) =
     val template = genericTemplates(name)
     val typeParams = template.typeParams
-    // Infer type arguments
+    // Infer type arguments (explicit type args from `f[T](...)` pre-seed the env)
     val env = mutable.Map.empty[String, SyslType]
+    if explicitTypeArgs.nonEmpty then
+      if explicitTypeArgs.length != typeParams.length then
+        throw AnalysisError(
+          s"generic function '$name' expects ${typeParams.length} type argument(s), got ${explicitTypeArgs.length}",
+        )
+      for (tp, ty) <- typeParams.zip(explicitTypeArgs) do env(tp) = ty
     if template.params.length != argTypes.length then
       throw AnalysisError(s"generic function '$name' expects ${template.params.length} argument(s), got ${argTypes.length}")
     for (p, a) <- template.params.zip(argTypes) do
@@ -1794,6 +1804,8 @@ class SyslAnalyzer:
         val elemType = tArray.typ match
           case ArrayType(elem, _) => elem
           case PtrType(elem) => elem
+          case SliceType(elem) => elem
+          case RefType(SliceType(elem)) => elem
           case _ => throw AnalysisError(s"cannot take address of index on ${tArray.typ}")
         TAddrOfIndex(tArray, tIndex, PtrType(elemType))
 
@@ -2053,7 +2065,7 @@ class SyslAnalyzer:
           }
           TStructConstruct(st, checkedArgs)
         else
-          val (mangled, funInfo) = instantiateGeneric(name, tArgs.map(_.typ))
+          val (mangled, funInfo) = instantiateGeneric(name, tArgs.map(_.typ), List(typeArg))
           val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
           TCall(mangled, checkedArgs, funInfo.returnType)
 

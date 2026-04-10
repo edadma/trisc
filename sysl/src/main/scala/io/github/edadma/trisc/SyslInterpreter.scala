@@ -430,6 +430,29 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       cells(off + idx)
     case _ => throw RuntimeError("cannot index non-array")
 
+  /** Default value for `new [n]T` elements and struct field zero-init in the interpreter. */
+  private def zeroValueForType(typ: SyslType, env: Env): Value = typ match
+    case st: SyslType.StructType =>
+      val cells = st.fields.map((_, ft) => new Cell(zeroValueForType(ft, env))).toArray
+      ArrVal(cells, 0)
+    case SyslType.ArrayType(elem, size) =>
+      val cells = Array.fill(size)(new Cell(zeroValueForType(elem, env)))
+      ArrVal(cells, 0)
+    case SyslType.PtrType(_) =>
+      PtrVal(ArrayPtr(Array.empty[Cell], 0))
+    case SyslType.SliceType(_) =>
+      SliceVal(Array.empty[Cell], 0, 0, 0)
+    case SyslType.BoolType => IntVal(0)
+    case SyslType.StringType =>
+      RefStringVal(Array.empty, 0, new java.util.concurrent.atomic.AtomicInteger(1))
+    case _: SyslType.IntType | _: SyslType.UIntType => IntVal(0)
+    case SyslType.DoubleType => FloatVal(0.0)
+    case SyslType.VoidType | SyslType.FuncType(_, _) | SyslType.InterfaceType(_, _) => IntVal(0)
+    case SyslType.EnumType(_, _) => EnumVal(0, Array.empty)
+    case SyslType.RefType(inner) =>
+      // Uninitialized ref cell — represented as null-ish placeholder
+      zeroValueForType(SyslType.PtrType(inner), env)
+
   private def exec(stmt: TStmt, env: Env): Unit =
     stmt match
       case TVarStmt(name, _, init) =>
@@ -1052,13 +1075,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         IntVal(old)
 
       case TStructLit(SyslType.StructType(_, fields)) =>
-        def initField(typ: SyslType): Value = typ match
-          case st: SyslType.StructType => evalAny(TStructLit(st), env)
-          case SyslType.ArrayType(elem, size) =>
-            val cells = Array.fill(size)(new Cell(initField(elem)))
-            ArrVal(cells, 0)
-          case _ => IntVal(0)
-        val cells = fields.map((_, typ) => new Cell(initField(typ))).toArray
+        val cells = fields.map((_, typ) => new Cell(zeroValueForType(typ, env))).toArray
         ArrVal(cells, 0)
 
       case TNew(SyslType.StructType(name, fields), args) =>
@@ -1073,7 +1090,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TNewArray(elemType, sizeExpr) =>
         val n = toLong(evalAny(sizeExpr, env)).toInt
-        val cells = Array.fill(n)(new Cell(IntVal(0)))
+        val cells = Array.fill(n)(new Cell(zeroValueForType(elemType, env)))
         RefSliceVal(cells, n, new java.util.concurrent.atomic.AtomicInteger(1))
 
       case TStructConstruct(SyslType.StructType(_, fields), args) =>
