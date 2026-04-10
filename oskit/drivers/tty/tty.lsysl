@@ -375,12 +375,6 @@ initializes keyboard, then loops handling messages.
             tty_process_keyboard()
             tty_deliver_pending()
 
-            // Clear so short IPC copies do not leave stale len/payload bytes;
-            // combined with ipc_last_msg_len this avoids spurious output (e.g. "!2").
-            var wi = 0
-            while wi < 128
-                buf[wi] = 0
-                wi += 1
 
             val result = ipc_recv_notify(tty_port, &buf[0], 128)
             if result == -2

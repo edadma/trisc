@@ -89,6 +89,7 @@ Write a string to the TTY server.
         if port < 0
             return
         val n = len(s)
+        val p = *byte(s)
         var m = n
         if m < 0
             m = 0
@@ -99,7 +100,7 @@ Write a string to the TTY server.
         msg[1] = 0
         msg[2] = byte(m)
         for var i = 0; i < m; i++
-            msg[i + 3] = byte(s[i])
+            msg[i + 3] = p[i]
         var reply: [1]byte
         ipc_send(port, &msg[0], m + 3, &reply[0], 1)
 
@@ -114,6 +115,7 @@ Open a file by path. Returns an inode number or -1 on error.
         if port < 0
             return -1
         val plen = len(path)
+        val pp = *byte(path)
         var m = plen
         if m < 0
             m = 0
@@ -122,7 +124,7 @@ Open a file by path. Returns an inode number or -1 on error.
         var msg: [128]byte
         msg[0] = byte(FS_CMD_OPEN)
         for var i = 0; i < m; i++
-            msg[i + 1] = byte(path[i])
+            msg[i + 1] = pp[i]
         var reply: [5]byte
         ipc_send(port, &msg[0], m + 1, &reply[0], 5)
         if reply[0] != 0

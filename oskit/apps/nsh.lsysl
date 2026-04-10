@@ -67,11 +67,12 @@ round-trips.
         nsh_outpos += 1
 
     nsh_print(s: string)
+        val p = *byte(s)
         val n = len(s)
         for var i = 0; i < n; i++
             if nsh_outpos >= 120
                 nsh_flush()
-            nsh_out[nsh_outpos] = byte(s[i])
+            nsh_out[nsh_outpos] = p[i]
             nsh_outpos += 1
 
     nsh_newline()
@@ -170,9 +171,10 @@ Redraw the full line in a single batched write.
         nsh_out[p] = 13
         p += 1
         // Write prompt (cwd + "> ")
+        val pp = *byte(cwd)
         val plen = len(cwd)
         for var i = 0; i < plen; i++
-            nsh_out[p] = byte(cwd[i])
+            nsh_out[p] = pp[i]
             p += 1
         nsh_out[p] = '>'
         p += 1
@@ -647,10 +649,11 @@ Commands such as `echo` and `cat` are not built-ins — they load
                 if pos >= PROG_ARGS_MAX
                     break
             val arg = argv[i]
+            val ap = *byte(arg)
             for var j = 0; j < len(arg); j++
                 if pos >= PROG_ARGS_MAX
                     break
-                args_buf[pos] = byte(arg[j])
+                args_buf[pos] = ap[j]
                 pos += 1
         args_buf[pos] = 0
         // Create thread and wait for it to finish (tid from create_thread — reuses terminated slots)
