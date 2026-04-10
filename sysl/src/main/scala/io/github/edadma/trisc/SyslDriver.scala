@@ -23,7 +23,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
 
   case class DriverError(msg: String) extends RuntimeException(msg)
 
-  def compile(sources: Map[String, String]): CompilationResult =
+  def compile(sources: Map[String, String], keepTests: Boolean = false): CompilationResult =
     // Step 1: Parse all sources
     val parsedAsts = parseSources(sources)
 
@@ -100,11 +100,12 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
     val units = new mutable.ListBuffer[CompilationUnit]
 
     for name <- order do
-      // Strip #test functions — they are only for `sysl test`, not compiled code
-      val ast = ProgramAST(asts(name).decls.filter {
-        case f: FunDeclAST => !f.attributes.exists(_.name == "test")
-        case _ => true
-      })
+      // Strip #test functions unless keepTests is set (for test runner)
+      val ast = if keepTests then asts(name)
+        else ProgramAST(asts(name).decls.filter {
+          case f: FunDeclAST => !f.attributes.exists(_.name == "test")
+          case _ => true
+        })
       val analyzer = new SyslAnalyzer
 
       // Register extern names so they are never mangled (ABI-level symbols)

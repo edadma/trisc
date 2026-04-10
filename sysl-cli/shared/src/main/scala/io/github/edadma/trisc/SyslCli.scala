@@ -382,7 +382,7 @@ object SyslCli:
           List(resolveSource(p, ""))
       }.toMap
     val driver = new SyslDriver(Some(io), baseDirs, tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
-    val result = driver.compile(sources)
+    val result = driver.compile(sources, keepTests = true)
     val stdlibImports = driver.collectStdlibImports(result.units)
 
     // Build per-test scoped programs so that each test sees only the
