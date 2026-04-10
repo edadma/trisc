@@ -1,0 +1,271 @@
+std.container.ring — Circular ring
+==================================
+
+A fixed-size circular doubly-linked list of nodes, each holding a
+value of type `T`. The entry points are the generic factory
+`new_ring[T]` and methods on `*Ring[T]`: `next`, `prev`, `move`,
+`link`, `unlink`, `len`, and `each`.
+
+A ring is represented as `*Ring[T]`. Each node points to its
+successor and predecessor. `new_ring(n)` allocates `n` contiguous
+nodes (via `new [n]Ring[T]`), wires them into a circle, and returns
+a pointer to the first. For `n <= 0`, the result is a nil pointer.
+
+Single-node and lazily zeroed rings are supported: the first call
+to `next` or `prev` on an isolated node with nil links initializes
+that node as a one-element ring (points to itself).
+
+**API shape:** `Ring[T]` is a generic struct; all operations except
+`new_ring[T]` are methods on `*Ring[T]` (same pattern as `MinHeap[T]`
+in `std.heap`).
+
+**Complexity:** `len` and `each` are O(n) in the ring size.
+`next`, `prev`, `move`, `link`, and `unlink` are O(1) aside from
+`move`'s |n| steps.
+
+Dependencies: none.
+
+
+    module std.container.ring
+
+
+Ring
+----
+
+Each node carries a `value` and intrusive `next` / `prev` links.
+
+    struct Ring[T]
+        next: *Ring[T]
+        prev: *Ring[T]
+        value: T
+
+
+new_ring
+--------
+
+`new_ring[T](n)` allocates `n` contiguous `Ring[T]` values
+(`new [n]Ring[T]`), links them with `&s[i]` pointers into a circle,
+and returns `&s[0]`. Returns nil when `n <= 0`.
+
+    new_ring[T](n: int) -> *Ring[T]
+        if n <= 0
+            var z: *Ring[T]
+            return z
+
+        val s = (new [n]Ring[T])[:]
+        var i = 0
+
+        while i < n
+            val nx = (i + 1) % n
+            val pr = (i + n - 1) % n
+            s[i].next = &s[nx]
+            s[i].prev = &s[pr]
+            i += 1
+
+        &s[0]
+
+
+_lazy_init
+----------
+
+If `next` is nil, make this node a singleton ring.
+
+    private Ring[T]._lazy_init()
+        if i64(self.next) == 0
+            self.next = self
+            self.prev = self
+
+
+next / prev
+-----------
+
+`next` returns the successor node; `prev` returns the predecessor.
+Both ensure the node is initialized as a singleton when links are nil.
+
+    Ring[T].next() -> *Ring[T]
+        self._lazy_init()
+        self.next
+
+    Ring[T].prev() -> *Ring[T]
+        self._lazy_init()
+        self.prev
+
+
+move
+----
+
+`move(n)` returns the node reached by walking `n` steps forward
+(`n > 0`) or backward (`n < 0`), starting from this node. Does not
+mutate ring structure.
+
+    Ring[T].move(n: int) -> *Ring[T]
+        var cur = self
+        cur._lazy_init()
+
+        if n < 0
+            while n < 0
+                cur = cur.prev()
+                n += 1
+        else
+            while n > 0
+                cur = cur.next()
+                n -= 1
+
+        cur
+
+
+link
+----
+
+`link(s)` inserts the ring headed at `s` immediately after this
+node, and returns the node that was `this.next` before the splice
+(the former successor of this node). If `s` is nil, only
+`next` is advanced logically via the read — structure unchanged
+and the former successor pointer is returned.
+
+    Ring[T].link(s: *Ring[T]) -> *Ring[T]
+        val nxt = self.next()
+        if i64(s) != 0
+            val p = s.prev()
+            self.next = s
+            s.prev = self
+            nxt.prev = p
+            p.next = nxt
+        nxt
+
+
+unlink
+------
+
+`unlink(n)` removes `n` nodes from the ring starting after this
+node (`link(move(n + 1))`). Returns nil if `n <= 0`.
+
+    Ring[T].unlink(n: int) -> *Ring[T]
+        if n <= 0
+            var z: *Ring[T]
+            return z
+
+        self.link(self.move(n + 1))
+
+
+len
+---
+
+Number of nodes in the ring containing this node. Nil receiver
+yields 0. O(n).
+
+    Ring[T].len() -> int
+        if i64(self) == 0
+            return 0
+
+        self._lazy_init()
+        var n = 0
+        var p: *Ring[T] = self
+
+        while true
+            n += 1
+            p = p.next()
+            if p == self
+                break
+
+        n
+
+
+each
+----
+
+Invokes `f` on each `value` in forward order, starting at this
+node, until the ring is traversed once. No-op for nil receiver. For mutable accumulation
+across callbacks, capture a pointer to outer state (closures copy
+the pointer value; the pointee is shared).
+
+    Ring[T].each(f: (T) -> unit)
+        if i64(self) == 0
+            return
+
+        self._lazy_init()
+        var p: *Ring[T] = self
+
+        while true
+            f(p.value)
+            p = p.next()
+            if p == self
+                break
+
+
+Tests
+=====
+
+Helper struct for the `each` test (closure mutates through `*T`).
+
+    struct RingTestAcc
+        n: int
+
+
+    private ring_test_add(acc: *RingTestAcc, v: int) -> unit
+        acc.n = acc.n + v
+
+
+    #test
+    test_new_ring_zero_is_nil() -> unit
+        val r = new_ring[int](0)
+        assert(i64(r) == 0, "nil ring")
+
+    #test
+    test_new_ring_len() -> unit
+        val r = new_ring[int](5)
+        assert(r.len() == 5, "len 5")
+
+    #test
+    test_next_prev_round_trip() -> unit
+        val r = new_ring[int](3)
+        r.value = 1
+        val nx = r.next()
+        nx.value = 2
+        val pr = r.prev()
+        pr.value = 3
+        assert(r.next().next().next() == r, "full cycle")
+        assert(r.prev().prev().prev() == r, "reverse cycle")
+
+    #test
+    test_move() -> unit
+        val r = new_ring[int](4)
+        val two = r.next().next()
+        assert(r.move(4) == r, "move len")
+        assert(r.move(-1) == r.prev(), "move -1")
+        assert(r.move(2) == two, "move +2")
+
+    #test
+    test_link_merges() -> unit
+        val a = new_ring[int](2)
+        val b = new_ring[int](2)
+        a.value = 10
+        val a1 = a.next()
+        a1.value = 11
+        b.value = 20
+        val b1 = b.next()
+        b1.value = 21
+        val old_succ = a.link(b)
+        val expect_old = a.next().next().next()
+        assert(old_succ == expect_old, "link returns former successor")
+        assert(a.len() == 4, "merged len")
+
+    #test
+    test_unlink_returns_subring() -> unit
+        val r = new_ring[int](5)
+        val sub = r.unlink(2)
+        assert(r.len() == 3, "remainder")
+        assert(sub.len() == 2, "sub")
+
+    #test
+    test_each_sum() -> unit
+        var acc: RingTestAcc
+        val pa = &acc
+        val r = new_ring[int](3)
+        r.value = 1
+        val e1 = r.next()
+        e1.value = 2
+        val e2 = e1.next()
+        e2.value = 3
+        r.each((v: int) -> ring_test_add(pa, v))
+        assert(acc.n == 6, "sum 1+2+3")
