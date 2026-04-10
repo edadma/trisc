@@ -84,18 +84,11 @@ object RamdiskBinPrograms:
         TriscBinary.serialize(linked)
       })
 
-  // Always compile from checkout when sources exist — no lazy cache (stale TRBs after ulib edits
-  // broke tests and misled the GUI until JVM restart).
-  def loadForRamdisk(): Map[String, Array[Byte]] =
-    val triples = Seq(
-      ("hello", "oskit/bin/hello/hello", "oskit/bin/hello.lsysl"),
-      ("echo", "oskit/bin/echo/echo", "oskit/bin/echo.lsysl"),
-      ("cat", "oskit/bin/cat/cat", "oskit/bin/cat.lsysl"),
-    )
-    triples.flatMap { case (short, unitPath, lsysl) =>
-      Try(compileExecutable(unitPath, lsysl)).toOption
-        .orElse(loadResource(short))
-        .map(bytes => s"/bin/$short" -> bytes)
+  // Load pre-built .trb resources only (no compilation). Used by the emulator at runtime.
+  // Run RegenRamdiskBinMain to update embedded .trb files after editing oskit/bin or ulib.
+  def loadEmbeddedBinaries(): Map[String, Array[Byte]] =
+    Seq("hello", "echo", "cat").flatMap { short =>
+      loadResource(short).map(bytes => s"/bin/$short" -> bytes)
     }.toMap
 
 end RamdiskBinPrograms
