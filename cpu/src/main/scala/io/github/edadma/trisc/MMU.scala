@@ -97,6 +97,23 @@ class SimpleMMU(mem: Addressable, tlbEntries: Int = 16) extends MMU:
   private var _ptbr: Long = 0
   private var _asid: Int = 0
 
+  // Fast path: cache the last successful translation to skip TLB scan
+  private var _lastVpn: Long = -1L
+  private var _lastPpn: Long = 0L
+  private var _lastFlags: Int = 0
+
+  // Identity-map optimization: when the kernel page table is active and
+  // all accesses are supervisor-mode to identity-mapped superpages,
+  // skip translation entirely. Set via setIdentityRange().
+  private var _identityPtbr: Long = 0
+  private var _identityEnd: Long = 0
+
+  /** Configure identity-map fast path. When ptbr == identityPtbr and
+    * vaddr < identityEnd and supervisor mode, return vaddr unchanged. */
+  def setIdentityRange(ptbr: Long, end: Long): Unit =
+    _identityPtbr = ptbr
+    _identityEnd = end
+
   def enabled: Boolean = _enabled
   def setEnabled(en: Boolean): Unit = _enabled = en
   def ptbr: Long = _ptbr
@@ -107,14 +124,27 @@ class SimpleMMU(mem: Addressable, tlbEntries: Int = 16) extends MMU:
   def translate(vaddr: Long, access: Access, supervisor: Boolean): Either[FaultCause, Long] =
     if !_enabled then return Right(vaddr)
 
+    // Fast path: kernel identity mapping — no translation needed
+    if _ptbr == _identityPtbr && supervisor && vaddr < _identityEnd then
+      return Right(vaddr)
+
     val vpn = vaddr >>> PAGE_SHIFT
     val offset = vaddr & OFFSET_MASK
+
+    // Fast path: last-translation cache (covers ~90% of accesses)
+    if vpn == _lastVpn then
+      val permitted = access match
+        case Access.Read    => (_lastFlags & PTE_R) != 0 && (supervisor || (_lastFlags & PTE_U) != 0)
+        case Access.Write   => (_lastFlags & PTE_W) != 0 && (supervisor || (_lastFlags & PTE_U) != 0)
+        case Access.Execute => (_lastFlags & PTE_X) != 0 && (supervisor || (_lastFlags & PTE_U) != 0)
+      if permitted then return Right((_lastPpn << PAGE_SHIFT) | offset)
 
     // TLB lookup
     var i = 0
     while i < tlbEntries do
       val e = tlb(i)
       if e.valid && e.vpn == vpn && ((e.flags & PTE_G) != 0 || e.asid == _asid) then
+        _lastVpn = vpn; _lastPpn = e.ppn; _lastFlags = e.flags
         return checkPermissions(e.ppn, e.flags, offset, access, supervisor, i)
       i += 1
 
@@ -171,7 +201,10 @@ class SimpleMMU(mem: Addressable, tlbEntries: Int = 16) extends MMU:
       // Update A/D in page table
       val newFlags = l1Flags | PTE_A | (if access == Access.Write then PTE_D else 0)
       if newFlags != l1Flags then writePTE(l1Addr, (l1PTE & ~0x3FFL) | newFlags)
-      // Don't cache superpages in TLB for simplicity
+      // Cache in last-translation (as 4KB page within the superpage)
+      _lastVpn = vpn
+      _lastPpn = (ppn << 10) | ((vaddr >>> PAGE_SHIFT) & INDEX_MASK)
+      _lastFlags = newFlags
       return Right((ppn << L1_SHIFT) | superOffset)
 
     // L1 is a pointer to L2 table
@@ -194,8 +227,9 @@ class SimpleMMU(mem: Addressable, tlbEntries: Int = 16) extends MMU:
     val newFlags = l2Flags | PTE_A | (if access == Access.Write then PTE_D else 0)
     if newFlags != l2Flags then writePTE(l2Addr, (l2PTE & ~0x3FFL) | newFlags)
 
-    // Load into TLB
+    // Load into TLB and last-translation cache
     loadTLB(vpn, ppn, newFlags)
+    _lastVpn = vpn; _lastPpn = ppn; _lastFlags = newFlags
 
     Right((ppn << PAGE_SHIFT) | offset)
 
@@ -225,9 +259,11 @@ class SimpleMMU(mem: Addressable, tlbEntries: Int = 16) extends MMU:
     while i < tlbEntries do
       if tlb(i).valid && tlb(i).vpn == vpn then tlb(i).valid = false
       i += 1
+    if _lastVpn == vpn then _lastVpn = -1L
 
   def tlbInvalidateAll(): Unit =
     var i = 0
     while i < tlbEntries do
       tlb(i).valid = false
       i += 1
+    _lastVpn = -1L

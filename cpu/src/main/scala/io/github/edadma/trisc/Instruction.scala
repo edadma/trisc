@@ -528,9 +528,10 @@ class SPTBR(a: Int, b: Int) extends RRInstruction(a, b):
     else cpu.mmu match
       case Some(m) =>
         val v = cpu.r(a).read
+        val old = m.ptbr
         m.setPtbr(v)
         m.setEnabled(v != 0) // PTBR=0 disables MMU (bare mode)
-        m.tlbInvalidateAll()  // flush TLB on page table switch
+        if v != old then m.tlbInvalidateAll() // only flush on actual PTBR change
       case None => cpu.state = State.UnimplementedOpcode
 
 class GPTBR(a: Int, b: Int) extends RRInstruction(a, b):

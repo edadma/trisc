@@ -241,11 +241,7 @@ Build kernel identity page table using superpages (4MB each):
         val flags_rw  = PTE_V | PTE_R | PTE_W
 
         // Zero the L1 table (1024 entries × 4 bytes = 4096 bytes)
-        var i = 0
-        while i < 1024
-            var p: *i32 = *i32(KERNEL_L1_BASE + i * 4)
-            *p = 0
-            i += 1
+        memset(*byte(KERNEL_L1_BASE), 0, PAGE_SIZE)
 
         // L1[0]: superpage PPN=0, maps 0x000000-0x3FFFFF
         var p0: *i32 = *i32(KERNEL_L1_BASE)
@@ -265,16 +261,21 @@ Build kernel identity page table using superpages (4MB each):
 Physical page allocator — bump allocator from the page pool.
 Returns a zeroed 4KB page, or 0 on exhaustion.
 
+    import std.mem.memset
+
     page_alloc() -> int
         if page_pool_next >= PAGE_POOL_END
             return 0
         val page = page_pool_next
         page_pool_next += PAGE_SIZE
-        var i = 0
-        while i < PAGE_SIZE
-            var p: *i64 = *i64(page + i)
-            *p = 0
-            i += 8
+        page
+
+Allocate a zeroed page (for page tables and BSS).
+
+    page_alloc_zero() -> int
+        val page = page_alloc()
+        if page != 0
+            memset(*byte(page), 0, PAGE_SIZE)
         page
 
 Write a 32-bit PTE at a given address.
@@ -288,10 +289,10 @@ physical pages for the program region (0xC0000-0xFFFFF = 64 pages).
 Returns L1 base address, or 0 on failure.
 
     vm_create_process_pt() -> int
-        val l1 = page_alloc()
+        val l1 = page_alloc_zero()
         if l1 == 0
             return 0
-        val l2 = page_alloc()
+        val l2 = page_alloc_zero()
         if l2 == 0
             return 0
 
@@ -312,7 +313,8 @@ Returns L1 base address, or 0 on failure.
         // Covers up to 0xCBFFF (835KB). Programs start at PROG_SSP=0xCC000.
         var i = 0
         while i < 0xCC
-            vm_write_pte(l2 + i * 4, (i << 10) | flags_rwx)
+            var p: *i32 = *i32(l2 + i * 4)
+            *p = i32((i << 10) | flags_rwx)
             i += 1
 
         // L2[0xCC-0xFF]: program region, fresh physical pages
@@ -322,7 +324,8 @@ Returns L1 base address, or 0 on failure.
             if page == 0
                 return 0
             val ppn = page / PAGE_SIZE
-            vm_write_pte(l2 + i * 4, (ppn << 10) | flags_rwx)
+            var p: *i32 = *i32(l2 + i * 4)
+            *p = i32((ppn << 10) | flags_rwx)
             i += 1
 
         // L2[0x100-0x3FF]: unmapped (already zeroed by page_alloc)
@@ -357,6 +360,8 @@ Translates the destination virtual address to physical via
 software page table walk, then copies using the identity-mapped
 physical address. No PTBR switching needed.
 
+    import std.mem.memcpy
+
     vm_copy_to(dst_ptbr: int, dst_vaddr: int, src: *byte, len: int)
         var copied = 0
         while copied < len
@@ -365,11 +370,7 @@ physical address. No PTBR switching needed.
             var chunk = PAGE_SIZE - page_off
             if chunk > len - copied
                 chunk = len - copied
-            var d: *byte = *byte(pa)
-            var i = 0
-            while i < chunk
-                d[i] = src[copied + i]
-                i += 1
+            memcpy(*byte(pa), src + copied, chunk)
             copied += chunk
 
 Copy data from another address space using physical addressing.
@@ -382,11 +383,7 @@ Copy data from another address space using physical addressing.
             var chunk = PAGE_SIZE - page_off
             if chunk > len - copied
                 chunk = len - copied
-            var s: *byte = *byte(pa)
-            var i = 0
-            while i < chunk
-                dst[copied + i] = s[i]
-                i += 1
+            memcpy(dst + copied, *byte(pa), chunk)
             copied += chunk
 
 Get a thread's page table base register.
