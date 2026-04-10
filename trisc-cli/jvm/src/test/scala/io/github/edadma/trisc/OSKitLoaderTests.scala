@@ -34,8 +34,9 @@ class OSKitLoaderTests extends OSKitTestHelpers {
   private lazy val utf8Sysl: String     = readLsysl("std/utf8/utf8.lsysl")
 
   // --- User library for external programs ---
-  private lazy val ulibSysl: String     = readLsysl("oskit/ulib/ulib.lsysl")
-  private lazy val helloSysl: String    = readLsysl("oskit/bin/hello.lsysl")
+  private lazy val ulibSysl: String      = readLsysl("oskit/ulib/ulib.lsysl")
+  private lazy val ulibSbrkSysl: String  = scala.io.Source.fromFile("oskit/ulib/sbrk.sysl").mkString
+  private lazy val helloSysl: String     = readLsysl("oskit/bin/hello.lsysl")
 
   // Linker script for external programs — all load at same base address.
   private lazy val progScript: LinkerScript = LinkerScriptParser.parse(
@@ -45,7 +46,7 @@ class OSKitLoaderTests extends OSKitTestHelpers {
       |    data
       |    bss
       |SYMBOL _heap_start = AFTER bss
-      |SYMBOL _heap_end = 0xCC000
+      |SYMBOL _heap_end = 0x100000
       |ENTRY main
       |""".stripMargin) match
     case Right(s) => s
@@ -57,7 +58,13 @@ class OSKitLoaderTests extends OSKitTestHelpers {
       scala.io.Source.fromFile("oskit/ulib/syscall.asm").mkString,
       relocatable = true,
     )
-    val allSources = progSources + ("oskit/ulib/ulib" -> ulibSysl)
+    val allSources = progSources ++ Map(
+      "oskit/ulib/ulib" -> ulibSysl,
+      "posix/unistd/sbrk" -> ulibSbrkSysl,
+      "posix/stdlib/alloc" -> posixAllocSysl,
+      "posix/string/string" -> posixStringSysl,
+      "posix/ctype/ctype" -> posixCtypeSysl,
+    )
     val driver = new SyslDriver
     val result = driver.compile(allSources)
     val codegen = new SyslTriscCodegen
@@ -289,7 +296,7 @@ import oskit.apps.init.{init}
       "posix/string/string"     -> posixStringSysl,
       "posix/ctype/ctype"       -> posixCtypeSysl,
       "posix/stdlib/alloc"      -> posixAllocSysl,
-      "posix/unistd/sbrk"       -> sbrkSysl,
+      "posix/unistd/sbrk"       -> ulibSbrkSysl,
     ))
 
   // echo program — prints its arguments via get_args()
