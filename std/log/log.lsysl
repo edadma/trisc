@@ -1,0 +1,165 @@
+std.log — Line-oriented logging
+===============================
+
+Go-style `log` package subset: a `Logger` with optional prefix
+and output file descriptor via `std.io.write_str`. Package-level
+`print`, `println`, `fatalln`, and `panicln` default to **stderr**
+with an empty prefix.
+
+**Flag bits** match Go’s `log` package (`Ldate`, `Ltime`, etc.)
+for forward compatibility. Timestamp and source-file decoration
+are **not implemented** yet (no `std.time` or compile-time
+`__FILE__`); `Logger.flags` is stored and may be honored in a
+later revision.
+
+Dependencies: `std.builder`, `std.io`, `std.process` (`exit`).
+
+
+    module std.log
+
+    import std.builder.{new_builder, StrBuilder}
+    import std.debug.{assert}
+    import std.io.{write_str, STDERR, STDOUT}
+    import std.process.{exit}
+
+
+Flags (same numeric values as Go `log`)
+---------------------------------------
+
+    val Ldate = 1
+    val Ltime = 2
+    val Lmicroseconds = 4
+    val Llongfile = 8
+    val Lshortfile = 16
+    val LUTC = 32
+    val Lmsgprefix = 64
+
+
+`LstdFlags` is `Ldate | Ltime` (3), matching Go’s default logger
+flags. Decoration from those bits is not active until
+timestamps are wired up.
+
+    val LstdFlags = 3
+
+
+Logger
+------
+
+`out` is a file descriptor: `STDOUT`, `STDERR`, or another fd
+from `std.io.open`.
+
+    struct Logger
+        prefix: string
+        flags: int
+        out: int
+
+
+with_prefix
+-----------
+
+Concatenates `prefix` and `msg` when `prefix` is non-empty.
+
+    with_prefix(prefix: string, msg: string) -> string
+        if len(prefix) == 0 then return msg
+
+        prefix + msg
+
+
+Constructors
+------------
+
+    new_logger(out_fd: int) -> Logger
+        Logger("", 0, out_fd)
+
+
+    new_logger_prefix(out_fd: int, prefix: string) -> Logger
+        Logger(prefix, 0, out_fd)
+
+
+    new_logger_flags(prefix: string, flags: int, out_fd: int) -> Logger
+        Logger(prefix, flags, out_fd)
+
+
+Logger.print
+------------
+
+Writes `with_prefix(prefix, msg)` with no trailing newline.
+
+    Logger.print(msg: string)
+        val line = with_prefix(self.prefix, msg)
+        val _ = write_str(self.out, line)
+
+
+Logger.println
+----------------
+
+Appends a single newline (`byte(10)`) after the message.
+
+    Logger.println(msg: string)
+        var b = new_builder()
+        val body = with_prefix(self.prefix, msg)
+
+        b.write(body)
+        b.write_byte(byte(10))
+        val _ = write_str(self.out, b.to_str())
+
+
+Logger.fatalln
+----------------
+
+Logs one line then terminates the process with exit code `1`.
+
+    Logger.fatalln(msg: string)
+        self.println(msg)
+        exit(1)
+
+
+Logger.panicln
+----------------
+
+Logs one line then invokes the built-in `panic` with `msg`.
+
+    Logger.panicln(msg: string)
+        self.println(msg)
+        panic(msg)
+
+
+Package-level helpers (default: stderr, no prefix)
+--------------------------------------------------
+
+    private default_log() -> Logger
+        Logger("", 0, STDERR)
+
+
+    print(s: string)
+        default_log().print(s)
+
+
+    println(s: string)
+        default_log().println(s)
+
+
+    fatalln(s: string)
+        default_log().fatalln(s)
+
+
+    panicln(s: string)
+        default_log().panicln(s)
+
+
+Tests
+=====
+
+
+    #test
+    test_log_with_prefix() -> unit
+        assert(with_prefix("", "x") == "x", "empty prefix")
+        assert(with_prefix("app: ", "ok") == "app: ok", "prefixed")
+
+
+    #test
+    test_log_logger_smoke() -> unit
+        var lg = new_logger_prefix(STDOUT, "testlog: ")
+
+        lg.println("smoke")
+        assert(true, "println ok")
