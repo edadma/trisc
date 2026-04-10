@@ -1,0 +1,328 @@
+std.container.list — Doubly linked list
+=========================================
+
+A generic doubly linked list with O(1) insert and remove at known
+positions. A circular sentinel (`root`) anchors the chain: when the
+list is empty, `root.next` and `root.prev` both point to `root`.
+User-visible nodes are heap-allocated `ListNode[T]` values; `front`
+and `back` return nil for an empty list.
+
+Each data element stores `anchor`, a pointer equal to `&list.root`,
+so it can walk with `next_elem` / `prev_elem` without a circular
+`ListNode` / `List` type dependency. Unlinked nodes and the
+sentinel keep `anchor` nil.
+
+**API shape:** `new_list[T]()` constructs an empty list. Operations
+are methods on `*List[T]` and `*ListNode[T]` (`next_elem`, `prev_elem`
+for walking without crossing the sentinel).
+
+**Complexity:** `push_front`, `push_back`, `insert_after`,
+`insert_before`, `remove`, and the `move_*` operations are O(1) with
+a fixed number of pointer assignments. `len` is O(1). `each` is
+O(n).
+
+Dependencies: none.
+
+
+    module std.container.list
+
+
+ListNode
+--------
+
+Intrusive links, payload `value`, and `anchor` pointing at the
+embedding list's sentinel (`&list.root`) while the node is on that
+list; nil when unlinked or for the sentinel itself.
+
+    struct ListNode[T]
+        next: *ListNode[T]
+        prev: *ListNode[T]
+        anchor: *ListNode[T]
+        value: T
+
+
+List
+----
+
+The sentinel `root` is a `ListNode[T]` embedded in the list; it is
+not a user data node. Field `len` holds the element count.
+
+    struct List[T]
+        root: ListNode[T]
+        len: int
+
+
+new_list
+--------
+
+Returns a new empty list with the sentinel wired to itself. The
+list lives in a one-element heap slice so we avoid `new List(...)` on
+a generic struct (the analyzer does not resolve that form). The
+slice zero-initializes `root` and `len`; `_init_sentinel` links the
+sentinel to itself.
+
+    new_list[T]() -> *List[T]
+        val slot = (new [1]List[T])[:]
+        val l = &slot[0]
+        l._init_sentinel()
+        l
+
+
+    private List[T]._init_sentinel()
+        self.root.next = &self.root
+        self.root.prev = &self.root
+        self.len = 0
+
+
+    private List[T]._on_list(mark: *ListNode[T]) -> bool
+        i64(mark) != 0 && mark.anchor == &self.root && mark != &self.root
+
+
+len / front / back
+------------------
+
+    List[T].len() -> int = self.len
+
+    List[T].front() -> *ListNode[T]
+        if self.len == 0
+            var z: *ListNode[T]
+            return z
+        self.root.next
+
+    List[T].back() -> *ListNode[T]
+        if self.len == 0
+            var z: *ListNode[T]
+            return z
+        self.root.prev
+
+
+next_elem / prev_elem
+---------------------
+
+Walk from a user element toward the ends of the list. Unlinked
+elements and the sentinel yield nil. When the forward (or backward)
+neighbor would be the sentinel, the method returns nil.
+
+    ListNode[T].next_elem() -> *ListNode[T]
+        if i64(self.anchor) == 0
+            var z: *ListNode[T]
+            return z
+        if self.next == self.anchor
+            var z: *ListNode[T]
+            return z
+        self.next
+
+    ListNode[T].prev_elem() -> *ListNode[T]
+        if i64(self.anchor) == 0
+            var z: *ListNode[T]
+            return z
+        if self.prev == self.anchor
+            var z: *ListNode[T]
+            return z
+        self.prev
+
+
+push_front / push_back
+----------------------
+
+    List[T].push_front(v: T) -> *ListNode[T]
+        self._insert_after(&self.root, v)
+
+    List[T].push_back(v: T) -> *ListNode[T]
+        self._insert_after(self.root.prev, v)
+
+
+insert_after / insert_before
+----------------------------
+
+`mark` must be a data element on this list (not the sentinel).
+
+    List[T].insert_after(v: T, mark: *ListNode[T]) -> *ListNode[T]
+        assert(i64(mark) != 0, "list.insert_after: nil mark")
+        assert(self._on_list(mark), "list.insert_after: not on this list")
+        self._insert_after(mark, v)
+
+    List[T].insert_before(v: T, mark: *ListNode[T]) -> *ListNode[T]
+        assert(i64(mark) != 0, "list.insert_before: nil mark")
+        assert(self._on_list(mark), "list.insert_before: not on this list")
+        self._insert_after(mark.prev, v)
+
+
+    private List[T]._insert_after(mark: *ListNode[T], v: T) -> *ListNode[T]
+        val slot = (new [1]ListNode[T])[:]
+        val el = &slot[0]
+        el.next = mark.next
+        el.prev = mark
+        el.anchor = &self.root
+        el.value = v
+        mark.next.prev = el
+        mark.next = el
+        self.len += 1
+        el
+
+
+remove
+------
+
+Unlinks the element and returns its value. Panics if `e` is nil, the
+sentinel, or not on this list.
+
+    List[T].remove(e: *ListNode[T]) -> T
+        assert(i64(e) != 0, "list.remove: nil element")
+        assert(e != &self.root, "list.remove: sentinel")
+        assert(self._on_list(e), "list.remove: not on this list")
+        e.prev.next = e.next
+        e.next.prev = e.prev
+        var zn: *ListNode[T]
+        e.next = zn
+        e.prev = zn
+        e.anchor = zn
+        self.len -= 1
+        e.value
+
+
+move_to_front / move_to_back
+----------------------------
+
+Relink an existing element without allocating. No-op if `e` is nil,
+not on this list, or already in the requested position.
+
+    List[T].move_to_front(e: *ListNode[T])
+        if i64(e) == 0 || !self._on_list(e)
+            return
+        if self.root.next == e
+            return
+        self._unlink(e)
+        self._link_after(&self.root, e)
+
+    List[T].move_to_back(e: *ListNode[T])
+        if i64(e) == 0 || !self._on_list(e)
+            return
+        if self.root.prev == e
+            return
+        self._unlink(e)
+        self._link_after(self.root.prev, e)
+
+    List[T].move_before(e: *ListNode[T], mark: *ListNode[T])
+        if i64(e) == 0 || i64(mark) == 0
+            return
+        if !self._on_list(e) || !self._on_list(mark)
+            return
+        if e == mark
+            return
+        if e.next == mark
+            return
+        self._unlink(e)
+        self._link_after(mark.prev, e)
+
+    List[T].move_after(e: *ListNode[T], mark: *ListNode[T])
+        if i64(e) == 0 || i64(mark) == 0
+            return
+        if !self._on_list(e) || !self._on_list(mark)
+            return
+        if e == mark
+            return
+        if mark.next == e
+            return
+        self._unlink(e)
+        self._link_after(mark, e)
+
+
+    private List[T]._unlink(e: *ListNode[T])
+        e.prev.next = e.next
+        e.next.prev = e.prev
+
+    private List[T]._link_after(mark: *ListNode[T], e: *ListNode[T])
+        e.next = mark.next
+        e.prev = mark
+        mark.next.prev = e
+        mark.next = e
+        e.anchor = &self.root
+
+
+each
+----
+
+Invokes `f` on each value from front to back.
+
+    List[T].each(f: (T) -> unit)
+        var e = self.front()
+        while i64(e) != 0
+            f(e.value)
+            e = e.next_elem()
+
+
+Tests
+=====
+
+    struct ListTestAcc
+        n: int
+
+
+    private list_test_add(acc: *ListTestAcc, v: int) -> unit
+        acc.n = acc.n + v
+
+
+    #test
+    test_new_list_empty() -> unit
+        val l = new_list[int]()
+        assert(l.len() == 0, "empty len")
+        assert(i64(l.front()) == 0, "no front")
+        assert(i64(l.back()) == 0, "no back")
+
+    #test
+    test_push_front_back() -> unit
+        val l = new_list[int]()
+        val a = l.push_front(1)
+        val b = l.push_back(2)
+        assert(l.len() == 2, "len 2")
+        assert(l.front() == a, "front")
+        assert(l.back() == b, "back")
+        assert(a.value == 1, "a val")
+        assert(b.value == 2, "b val")
+        assert(a.next_elem() == b, "a next")
+        assert(b.prev_elem() == a, "b prev")
+
+    #test
+    test_remove() -> unit
+        val l = new_list[int]()
+        val x = l.push_back(10)
+        val y = l.push_back(20)
+        assert(l.remove(x) == 10, "removed 10")
+        assert(l.len() == 1, "len 1")
+        assert(l.front() == y, "only y")
+
+    #test
+    test_insert_before_after() -> unit
+        val l = new_list[int]()
+        val mid = l.push_back(2)
+        val lo = l.insert_before(1, mid)
+        val hi = l.insert_after(3, mid)
+        assert(l.len() == 3, "len 3")
+        assert(lo.value == 1, "lo")
+        assert(mid.value == 2, "mid")
+        assert(hi.value == 3, "hi")
+        assert(lo.next_elem() == mid, "link")
+        assert(mid.next_elem() == hi, "link2")
+
+    #test
+    test_move_to_front() -> unit
+        val l = new_list[int]()
+        val a = l.push_back(1)
+        val b = l.push_back(2)
+        val c = l.push_back(3)
+        l.move_to_front(c)
+        assert(l.front() == c, "c front")
+        assert(c.next_elem() == a, "c to a")
+        assert(l.back() == b, "back b")
+
+    #test
+    test_each_sum() -> unit
+        var acc: ListTestAcc
+        val pa = &acc
+        val l = new_list[int]()
+        l.push_back(1)
+        l.push_back(2)
+        l.push_back(3)
+        l.each((v: int) -> list_test_add(pa, v))
+        assert(acc.n == 6, "sum")

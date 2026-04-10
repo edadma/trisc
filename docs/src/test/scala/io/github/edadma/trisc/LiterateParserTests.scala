@@ -158,3 +158,15 @@ class LiterateParserTests extends AnyFreeSpec with Matchers:
     tangled should include("extern syscall")
     tangled should include("pimutex_unlock_sys")
   }
+
+  "std/container/list/list.lsysl tangled struct keeps all ListNode fields" in {
+    val path = "std/container/list/list.lsysl"
+    val source = scala.io.Source.fromFile(path).mkString
+    val doc = parser.parse(source)
+    val tangled = LiterateRenderer.tangle(doc)
+    tangled should include("struct ListNode[T]")
+    tangled should include("next: *ListNode[T]")
+    tangled should include("prev: *ListNode[T]")
+    tangled should include("anchor: *ListNode[T]")
+    tangled should include("value: T")
+  }

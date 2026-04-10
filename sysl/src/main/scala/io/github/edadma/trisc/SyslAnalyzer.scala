@@ -720,6 +720,10 @@ class SyslAnalyzer:
     case FuncTypeAST(params, ret) => FuncType(params.map(resolveType), resolveType(ret))
     case RefTypeAST(inner) => RefType(resolveType(inner))
 
+  /** `PtrType` / `RefType` may embed a recursive generic `StructType` placeholder (empty `fields`); use `structTypes`. */
+  private def latestStruct(st: SyslType.StructType): SyslType.StructType =
+    structTypes.getOrElse(st.name, st)
+
   /** Convert an expression AST to a type AST (for explicit type args parsed as index expressions). */
   private def exprToTypeAST(expr: ExpressionAST): TypeAST = expr match
     case VarRefAST(name) => NamedTypeAST(name)
@@ -1081,11 +1085,21 @@ class SyslAnalyzer:
         throw AnalysisError(s"trait method '$traitName.$methodName' resolved to '$mangled' but function not found")))
     (mangled, funInfo)
 
-  private def instantiateGeneric(name: String, argTypes: List[SyslType]): (String, FunInfo) =
+  private def instantiateGeneric(
+      name: String,
+      argTypes: List[SyslType],
+      explicitTypeArgs: List[SyslType] = Nil,
+  ): (String, FunInfo) =
     val template = genericTemplates(name)
     val typeParams = template.typeParams
-    // Infer type arguments
+    // Infer type arguments (explicit type args from `f[T](...)` pre-seed the env)
     val env = mutable.Map.empty[String, SyslType]
+    if explicitTypeArgs.nonEmpty then
+      if explicitTypeArgs.length != typeParams.length then
+        throw AnalysisError(
+          s"generic function '$name' expects ${typeParams.length} type argument(s), got ${explicitTypeArgs.length}",
+        )
+      for (tp, ty) <- typeParams.zip(explicitTypeArgs) do env(tp) = ty
     if template.params.length != argTypes.length then
       throw AnalysisError(s"generic function '$name' expects ${template.params.length} argument(s), got ${argTypes.length}")
     for (p, a) <- template.params.zip(argTypes) do
@@ -1256,11 +1270,12 @@ class SyslAnalyzer:
       case FieldAssignStmtAST(obj, field, value) =>
         val tObj = analyzeExpr(obj)
         val tValue = analyzeExpr(value)
-        val (resolvedObj, structType) = tObj.typ match
+        val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
           case PtrType(st: StructType) => (TDeref(tObj, st), st)
           case RefType(st: StructType) => (TDeref(tObj, st), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
+        val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
         TFieldAssignStmt(resolvedObj, idx, tValue)
@@ -1268,11 +1283,12 @@ class SyslAnalyzer:
       case FieldCompoundAssignStmtAST(obj, field, op, value) =>
         val tObj = analyzeExpr(obj)
         val tValue = analyzeExpr(value)
-        val (resolvedObj, structType) = tObj.typ match
+        val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
           case PtrType(st: StructType) => (TDeref(tObj, st), st)
           case RefType(st: StructType) => (TDeref(tObj, st), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
+        val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
         TFieldCompoundAssignStmt(resolvedObj, idx, op, tValue)
@@ -1630,44 +1646,48 @@ class SyslAnalyzer:
 
       case FieldPreIncAST(obj, field) =>
         val tObj = analyzeExpr(obj)
-        val (resolvedObj, structType) = tObj.typ match
+        val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
           case PtrType(st: StructType) => (TDeref(tObj, st), st)
           case RefType(st: StructType) => (TDeref(tObj, st), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
+        val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
         TFieldPreInc(resolvedObj, idx, structType.fields(idx)._2)
 
       case FieldPreDecAST(obj, field) =>
         val tObj = analyzeExpr(obj)
-        val (resolvedObj, structType) = tObj.typ match
+        val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
           case PtrType(st: StructType) => (TDeref(tObj, st), st)
           case RefType(st: StructType) => (TDeref(tObj, st), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
+        val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
         TFieldPreDec(resolvedObj, idx, structType.fields(idx)._2)
 
       case FieldPostIncAST(obj, field) =>
         val tObj = analyzeExpr(obj)
-        val (resolvedObj, structType) = tObj.typ match
+        val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
           case PtrType(st: StructType) => (TDeref(tObj, st), st)
           case RefType(st: StructType) => (TDeref(tObj, st), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
+        val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
         TFieldPostInc(resolvedObj, idx, structType.fields(idx)._2)
 
       case FieldPostDecAST(obj, field) =>
         val tObj = analyzeExpr(obj)
-        val (resolvedObj, structType) = tObj.typ match
+        val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
           case PtrType(st: StructType) => (TDeref(tObj, st), st)
           case RefType(st: StructType) => (TDeref(tObj, st), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
+        val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
         TFieldPostDec(resolvedObj, idx, structType.fields(idx)._2)
@@ -1780,10 +1800,11 @@ class SyslAnalyzer:
 
       case AddrOfFieldAST(obj, field) =>
         val tObj = analyzeExpr(obj)
-        val (resolvedObj, structType) = tObj.typ match
+        val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
           case PtrType(st: StructType) => (TDeref(tObj, st), st)
           case other => throw AnalysisError(s"cannot take address of field '$field' on $other")
+        val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
         TAddrOfField(resolvedObj, idx, PtrType(structType.fields(idx)._2))
@@ -1794,6 +1815,8 @@ class SyslAnalyzer:
         val elemType = tArray.typ match
           case ArrayType(elem, _) => elem
           case PtrType(elem) => elem
+          case SliceType(elem) => elem
+          case RefType(SliceType(elem)) => elem
           case _ => throw AnalysisError(s"cannot take address of index on ${tArray.typ}")
         TAddrOfIndex(tArray, tIndex, PtrType(elemType))
 
@@ -1864,9 +1887,7 @@ class SyslAnalyzer:
           case PtrType(st: StructType) => (TDeref(tObj, st), st)
           case RefType(st: StructType) => (TDeref(tObj, st), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
-        // Resolve through structTypes to get the latest definition — the inline
-        // StructType may be a stale placeholder from forward declaration.
-        val structType = structTypes.getOrElse(structType0.name, structType0)
+        val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
         TFieldAccess(resolvedObj, idx, structType.fields(idx)._2)
@@ -2053,7 +2074,7 @@ class SyslAnalyzer:
           }
           TStructConstruct(st, checkedArgs)
         else
-          val (mangled, funInfo) = instantiateGeneric(name, tArgs.map(_.typ))
+          val (mangled, funInfo) = instantiateGeneric(name, tArgs.map(_.typ), List(typeArg))
           val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
           TCall(mangled, checkedArgs, funInfo.returnType)
 

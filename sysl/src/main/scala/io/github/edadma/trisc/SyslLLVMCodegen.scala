@@ -188,6 +188,29 @@ class SyslLLVMCodegen:
     emit("}")
     emit("")
 
+    // Built-in assert function: if !cond then panic(msg)
+    emit("@.str.assert_prefix = private unnamed_addr constant [19 x i8] c\"assertion failed: \\00\"")
+    emit("")
+    emit("define void @assert(i8 %cond, %struct.string %msg) {")
+    emit("entry:")
+    emit("  %c = icmp ne i8 %cond, 0")
+    emit("  br i1 %c, label %ok, label %fail")
+    emit("ok:")
+    emit("  ret void")
+    emit("fail:")
+    emit("  %prefix = getelementptr [19 x i8], [19 x i8]* @.str.assert_prefix, i32 0, i32 0")
+    emit("  %w1 = call i64 @write(i32 2, i8* %prefix, i64 18)")
+    emit("  %ptr = extractvalue %struct.string %msg, 0")
+    emit("  %len = extractvalue %struct.string %msg, 1")
+    emit("  %len64 = sext i32 %len to i64")
+    emit("  %w2 = call i64 @write(i32 2, i8* %ptr, i64 %len64)")
+    emit("  %nl = getelementptr [1 x i8], [1 x i8]* @.str.newline, i32 0, i32 0")
+    emit("  %w3 = call i64 @write(i32 2, i8* %nl, i64 1)")
+    emit("  call void @abort()")
+    emit("  unreachable")
+    emit("}")
+    emit("")
+
     // Append function code
     out ++= funcCode
 
@@ -645,11 +668,21 @@ class SyslLLVMCodegen:
           emit(s"  store $pt $v, $pt* $typedPtr")
 
       case TFieldAssignStmt(obj, fieldIndex, value) =>
-        val st = obj.typ.asInstanceOf[SyslType.StructType]
-        val structLt = llvmType(obj.typ)
+        val (st, structLt, addr) = obj.typ match
+          case pt: SyslType.PtrType =>
+            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val slt = llvmType(inner)
+            val ptr = genExpr(obj)
+            val cast = newReg()
+            emit(s"  $cast = bitcast i8* $ptr to $slt*")
+            (inner, slt, cast)
+          case st: SyslType.StructType =>
+            (st, llvmType(obj.typ), genStructAddr(obj))
+          case other =>
+            throw new RuntimeException(s"TFieldAssignStmt on non-struct type: $other")
         val ft = st.fields(fieldIndex)._2
         val fieldType = llvmType(ft)
-        val addr = genStructAddr(obj)
+        // addr already resolved above
         val gep = newReg()
         emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
         // Slice field: decrement old backref before overwrite
@@ -1191,9 +1224,19 @@ class SyslLLVMCodegen:
         alloca
 
       case TFieldAccess(obj, fieldIndex, fieldType) =>
-        val st = obj.typ.asInstanceOf[SyslType.StructType]
-        val structLt = llvmType(obj.typ)
-        val addr = genStructAddr(obj)
+        val (st, structLt, addr) = obj.typ match
+          case pt: SyslType.PtrType =>
+            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val slt = llvmType(inner)
+            // Dereference pointer to struct
+            val ptr = genExpr(obj)
+            val cast = newReg()
+            emit(s"  $cast = bitcast i8* $ptr to $slt*")
+            (inner, slt, cast)
+          case st: SyslType.StructType =>
+            (st, llvmType(obj.typ), genStructAddr(obj))
+          case other =>
+            throw new RuntimeException(s"TFieldAccess on non-struct type: $other")
         val gep = newReg()
         emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
         if isAggregate(fieldType) then
@@ -2073,9 +2116,15 @@ class SyslLLVMCodegen:
         if locals.contains(name) then locals(name).reg
         else s"@$name"
       case TFieldAccess(innerObj, fieldIndex, _) =>
-        val st = innerObj.typ.asInstanceOf[SyslType.StructType]
-        val structLt = llvmType(innerObj.typ)
-        val addr = genStructAddr(innerObj)
+        val (structLt, addr) = innerObj.typ match
+          case pt: SyslType.PtrType =>
+            val slt = llvmType(pt.pointee.asInstanceOf[SyslType.StructType])
+            val ptr = genExpr(innerObj)
+            val cast = newReg()
+            emit(s"  $cast = bitcast i8* $ptr to $slt*")
+            (slt, cast)
+          case _ =>
+            (llvmType(innerObj.typ), genStructAddr(innerObj))
         val gep = newReg()
         emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
         gep

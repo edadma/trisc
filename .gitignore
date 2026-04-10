@@ -4,6 +4,7 @@
 *.trb
 !trisc-cli/shared/src/main/resources/ramdisk/bin/*.trb
 *.asm
+.smeta
 
 # sbt specific
 .cache/
