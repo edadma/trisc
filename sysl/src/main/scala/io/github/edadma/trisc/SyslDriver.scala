@@ -100,7 +100,11 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
     val units = new mutable.ListBuffer[CompilationUnit]
 
     for name <- order do
-      val ast = asts(name)
+      // Strip #test functions — they are only for `sysl test`, not compiled code
+      val ast = ProgramAST(asts(name).decls.filter {
+        case f: FunDeclAST => !f.attributes.exists(_.name == "test")
+        case _ => true
+      })
       val analyzer = new SyslAnalyzer
 
       // Register extern names so they are never mangled (ABI-level symbols)

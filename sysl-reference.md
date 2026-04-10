@@ -627,6 +627,35 @@ main() -> int
 Inside the method body, `self` is an alias for the implicit receiver — it
 has type `*StructName` (raw pointer to the instance).
 
+#### Methods on generic structs
+
+Generic structs can have methods too. Include the type parameters
+after the struct name:
+
+```sysl
+struct MinHeap[T]
+    data: []T
+    less: (T, T) -> bool
+
+MinHeap[T].len() -> int = len(self.data)
+
+MinHeap[T].push(v: T)
+    self.data = append(self.data, v)
+    self._sift_up(len(self.data) - 1)
+```
+
+The parser desugars `MinHeap[T].push(v: T)` into a generic function
+`MinHeap_push[T](__self__: *MinHeap[T], v: T)`. When you call `h.push(42)`
+on a `MinHeap[int]`, the compiler instantiates `MinHeap_i32_push` with
+`T = int` — the same monomorphization used for any generic function.
+
+Type parameter bounds work on generic methods just as on generic functions:
+
+```sysl
+MinHeap[T: Ord].sorted_push(v: T)
+    // T must implement the Ord trait
+```
+
 ### Deinit Blocks
 
 ```sysl

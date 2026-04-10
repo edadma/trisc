@@ -120,7 +120,7 @@ import oskit.apps.init.{init}
       irq = 3,
       prefill = nshTtytab + prefill,
       maxInodes = 64,
-      files = RamdiskBinPrograms.loadForRamdisk(),
+      files = RamdiskBinPrograms.loadEmbeddedBinaries(),
     )
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)
     val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
@@ -189,11 +189,24 @@ import oskit.apps.init.{init}
     output should include("hello")
   }
 
+  "NSH: cat prefilled /hello (short file)" in {
+    val keys = typeString("cat /hello\n", startTick = 500000, spacing = 12000)
+    val (_, output) =
+      runNsh(scheduledKeys = keys, prefill = "/hello file \"world\"\n", maxCycles = 20000000)
+    output should include("world")
+  }
+
   "NSH: cat reads file" in {
     val keys =
       typeString("touch /hello\nwrite /hello world\ncat /hello\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 25000000)
     output should include("world")
+  }
+
+  "NSH: cat /etc/ttytab shows prefilled line" in {
+    val keys = typeString("cat /etc/ttytab\n", startTick = 500000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 25000000)
+    output should include("tty0 nsh")
   }
 
   "NSH: help command" in {
@@ -292,7 +305,7 @@ import oskit.apps.init.{init}
       irq = 3,
       prefill = prefill,
       maxInodes = 64,
-      files = RamdiskBinPrograms.loadForRamdisk(),
+      files = RamdiskBinPrograms.loadEmbeddedBinaries(),
     )
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)
     val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
@@ -321,9 +334,11 @@ import oskit.apps.init.{init}
     (cpu, output.toString)
 
   private def loginAndType(cmd: String, startTick: Int = 800000): Seq[(Int, Int, Boolean, Int)] =
-    typeString("root\n", startTick = startTick) ++
-    typeString("toor\n", startTick = startTick + 40000) ++
-    typeString(cmd, startTick = startTick + 200000)
+    // Slower than default 2000: login + external cat need time for TTY/prompts (fast keys corrupt the line).
+    val sp = 12000
+    typeString("root\n", startTick = startTick, spacing = sp) ++
+    typeString("toor\n", startTick = startTick + 180000, spacing = sp) ++
+    typeString(cmd, startTick = startTick + 450000, spacing = sp)
 
   "Login: prompts for credentials" in {
     val keys        = typeString("root\n", startTick = 800000)
@@ -349,6 +364,12 @@ import oskit.apps.init.{init}
     val keys        = loginAndType("pwd\n")
     val (_, output) = runLogin(scheduledKeys = keys)
     output should include("/root")
+  }
+
+  "Login: cat /etc/ttytab prints ttytab contents" in {
+    val keys        = loginAndType("cat /etc/ttytab\n")
+    val (_, output) = runLogin(scheduledKeys = keys, maxCycles = 45000000)
+    output should include("tty0 login")
   }
 
   "Login: user ed gets home /home/ed" in {

@@ -2418,7 +2418,10 @@ class SyslTriscCodegen(addresses: Int = 4):
         // r1 = address of field (don't load — just the address)
 
       case TFieldAccess(obj, fieldIndex, fieldType) =>
-        val st = obj.typ.asInstanceOf[SyslType.StructType]
+        val st = obj.typ match
+          case s: SyslType.StructType => s
+          case SyslType.PtrType(s: SyslType.StructType) => s
+          case other => throw new RuntimeException(s"TFieldAccess: expected StructType, got $other")
         val off = fieldOffset(st, fieldIndex)
         emitStructAddr(obj)        // r1 = struct address
         if off != 0 then emitAddImm(1, 1, off)
@@ -3594,7 +3597,10 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TDeref(ptr, _) => genExpr(ptr) // pointer to struct — address is the pointer value
       case TFieldAccess(innerObj, fieldIndex, _) =>
         // Embedded struct — compute address of the field without loading
-        val st = innerObj.typ.asInstanceOf[SyslType.StructType]
+        val st = innerObj.typ match
+          case s: SyslType.StructType => s
+          case SyslType.PtrType(s: SyslType.StructType) => s
+          case other => throw new RuntimeException(s"emitStructAddr/TFieldAccess: expected StructType, got $other")
         val off = fieldOffset(st, fieldIndex)
         emitStructAddr(innerObj)  // r1 = parent struct address
         if off != 0 then emitAddImm(1, 1, off)

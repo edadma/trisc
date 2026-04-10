@@ -24,7 +24,9 @@ class KeyboardDevice(val base: Long, intc: InterruptController, irq: Int) extend
   private var currentModifiers: Int = 0
   private var ready: Boolean = false
 
-  private val MAX_QUEUE = 64
+  // Press+release per key → 2 slots per character. Long scripted input (e.g. tests
+  // typing many shell lines) must not overflow before the guest drains the queue.
+  private val MAX_QUEUE = 256
 
   def enqueue(vkCode: Int, press: Boolean, shiftDown: Boolean, ctrlDown: Boolean, altDown: Boolean, metaDown: Boolean): Unit =
     val scancode = KeyboardDevice.vkToHid(vkCode)

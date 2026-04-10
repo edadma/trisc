@@ -720,6 +720,11 @@ class SyslAnalyzer:
     case FuncTypeAST(params, ret) => FuncType(params.map(resolveType), resolveType(ret))
     case RefTypeAST(inner) => RefType(resolveType(inner))
 
+  /** Convert an expression AST to a type AST (for explicit type args parsed as index expressions). */
+  private def exprToTypeAST(expr: ExpressionAST): TypeAST = expr match
+    case VarRefAST(name) => NamedTypeAST(name)
+    case _ => throw AnalysisError(s"expected type argument, got expression")
+
   /** Look up a method function by struct name and method name, trying both unmangled and mangled forms. */
   private def lookupMethod(structName: String, methodName: String): Option[FunInfo] =
     val shortName = s"${structName}_$methodName"
@@ -1124,6 +1129,9 @@ class SyslAnalyzer:
           pushScope()
           for (paramName, paramType) <- paramTypes do
             currentScope(paramName) = SymInfo(paramName, paramType, true)
+            // Auto-alias `self` -> `__self__` for generic methods
+            if paramName == "__self__" then
+              currentScope("self") = SymInfo(paramName, paramType, true)
           val savedExpectedInst = currentExpected
           // Use only the *result* R of `func(...) -> R`, not the full function type, so nested
           // closures still treat outer parameters (e.g. alt's `a`, `b`) as captures rather than
@@ -2027,6 +2035,28 @@ class SyslAnalyzer:
           throw AnalysisError(s"cannot append ${coerced.typ} to []$elemType")
         TAppend(tSlice, coerced, SliceType(elemType))
 
+      // Generic struct/function constructor with explicit type args: Name[T](args)
+      // The parser sees this as IndirectCallAST(IndexAST(VarRefAST(name), typeExpr), args)
+      case IndirectCallAST(IndexAST(VarRefAST(name), typeExpr), args)
+        if genericStructs.contains(name) || genericTemplates.contains(name) =>
+        val typeArg = resolveType(exprToTypeAST(typeExpr))
+        val tArgs = args.map(analyzeExpr)
+        if genericStructs.contains(name) then
+          val st = instantiateGenericStruct(name, List(typeArg))
+          if tArgs.length != st.fields.length then
+            throw AnalysisError(s"struct '${st.name}' has ${st.fields.length} field(s), got ${tArgs.length} argument(s)")
+          val checkedArgs = tArgs.zip(st.fields).map { case (arg, (fieldName, fieldType)) =>
+            val coerced = coerceLiteral(arg, fieldType)
+            if !compatible(coerced.typ, fieldType) then
+              throw AnalysisError(s"field '$fieldName' of '${st.name}' expects $fieldType, got ${coerced.typ}")
+            coerced
+          }
+          TStructConstruct(st, checkedArgs)
+        else
+          val (mangled, funInfo) = instantiateGeneric(name, tArgs.map(_.typ))
+          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
+          TCall(mangled, checkedArgs, funInfo.returnType)
+
       case IndirectCallAST(callee, args) =>
         val tCallee = analyzeExpr(callee)
         val tArgs = args.map(analyzeExpr)
@@ -2093,6 +2123,25 @@ class SyslAnalyzer:
           val funInfo = functions(funcName)
           val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs) // .tail skips self param
           TCall(funInfo.name, selfArg :: checkedArgs, funInfo.returnType)
+        else if structToTemplate.contains(structName) && {
+          val (templateName, _) = structToTemplate(structName)
+          genericTemplates.contains(s"${templateName}_$method")
+        } then
+          // Generic struct method — instantiate from template
+          val (templateName, _) = structToTemplate(structName)
+          val templateFuncName = s"${templateName}_$method"
+          val selfArg = tObj.typ match
+            case st @ StructType(_, _) =>
+              tObj match
+                case TVarRef(n, _) => TAddrOf(n, PtrType(st))
+                case TFieldAccess(innerObj, idx, _) => TAddrOfField(innerObj, idx, PtrType(st))
+                case TIndex(arr, idx, _) => TAddrOfIndex(arr, idx, PtrType(st))
+                case _ => TTempAddr(tObj, PtrType(st))
+            case _ => tObj
+          val allArgTypes = selfArg.typ :: tArgs.map(_.typ)
+          val (mangled, funInfo) = instantiateGeneric(templateFuncName, allArgTypes)
+          val checkedArgs = checkArgs(mangled, funInfo.params.tail, tArgs)
+          TCall(mangled, selfArg :: checkedArgs, funInfo.returnType)
         else
           // Fall back to calling a function-typed field
           structType.fields.zipWithIndex.find(_._1._1 == method) match

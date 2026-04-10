@@ -4,6 +4,8 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 
 // Rebuild OS demo TOFs under /tmp (login shell demo and desktop GUI demo).
+// Ramdisk /bin utilities (hello, echo, cat) are built from oskit/bin when you run the CLI from the
+// repo; embedded .trb in the JAR is only a fallback.
 // Run from the trisc repo root:
 //   sbt "triscCliJVM/runMain io.github.edadma.trisc.RegenOskitDemoMain"
 //   sbt "triscCliJVM/runMain io.github.edadma.trisc.RegenOskitDemoMain login"

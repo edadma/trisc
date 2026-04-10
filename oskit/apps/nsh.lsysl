@@ -199,7 +199,10 @@ Redraw the full line in a single batched write.
         while blen < maxlen - 1
             val ch = tty_getc()
             if ch == '\n'
-                nsh_putc('\n')
+                // Must flush so the TTY cursor moves to the next line before
+                // an external (cat/echo) prints via putc/IPC; otherwise output
+                // appends to the edited command line (stale CSI column).
+                nsh_newline()
                 buf[blen] = 0
                 return blen
             else if ch == 8
@@ -618,7 +621,9 @@ TOF, creates a thread, and waits for it to finish.
 Commands such as `echo` and `cat` are not built-ins — they load
 `/bin/echo`, `/bin/cat`, etc. (basename of argv[0] after stripping `./`).
 
-    val PROG_ARGS_ADDR = 0xCFF00
+    // Below external-program stack buffers (USP 0xCE000, 4KiB locals reach up to ~0xCFFFF).
+    // 0xCFF00 used to overlap args with cat's read buffer — grant DMA then corrupted argv / prints "!2".
+    val PROG_ARGS_ADDR = 0xBF000
     val PROG_ARGS_MAX  = 240
     val PROG_BASE      = 0xD0000
     val PROG_USP       = 0xCE000
@@ -644,18 +649,20 @@ Commands such as `echo` and `cat` are not built-ins — they load
                 if pos >= PROG_ARGS_MAX
                     break
             val arg = argv[i]
-            val p = *byte(arg)
+            val ap = *byte(arg)
             for var j = 0; j < len(arg); j++
                 if pos >= PROG_ARGS_MAX
                     break
-                args_buf[pos] = p[j]
+                args_buf[pos] = ap[j]
                 pos += 1
         args_buf[pos] = 0
-        // Create thread and wait for it to finish
-        val tid = get_thread_count()
-        create_thread(entry, PROG_USP, PROG_SSP, *byte(cmd))
+        // Create thread and wait for it to finish (tid from create_thread — reuses terminated slots)
+        val tid = create_thread(entry, PROG_USP, PROG_SSP, *byte(cmd))
         nsh_flush()
-        join(tid)
+        if tid >= 0
+            join(tid)
+        else
+            nsh_print("out of thread slots\n")
 
 The shell main loop.
 

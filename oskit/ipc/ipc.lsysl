@@ -481,12 +481,14 @@ Returns 0 on success, -1 on error, -2 on timeout.
             // Block sender with timeout (waiting for reply)
             threads[me].state = STATE_SEND_BLOCKED
             threads[me].wake_tick = ticks + timeout
+            sleepq_insert(me)
             return
 
         // Server not waiting — enqueue with timeout
         ipc_queue_push(port, me)
         threads[me].state = STATE_SEND_BLOCKED
         threads[me].wake_tick = ticks + timeout
+        sleepq_insert(me)
 
 Receive a message OR notification. Like ipc_recv but also
 wakes when a notification is sent to this thread.
@@ -534,6 +536,8 @@ On notification, call notify_read() to get the value.
 
         // No IPC message — check for pending notification
         if threads[me].notify_pending == 1
+            // No message delivered — do not leave a stale actual_len from a prior recv.
+            ipc_ctx[me].actual_len = 0
             syscall_return(-2)
             ipc_continue_current()
             return

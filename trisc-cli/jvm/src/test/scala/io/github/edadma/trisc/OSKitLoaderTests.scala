@@ -34,8 +34,9 @@ class OSKitLoaderTests extends OSKitTestHelpers {
   private lazy val utf8Sysl: String     = readLsysl("std/utf8/utf8.lsysl")
 
   // --- User library for external programs ---
-  private lazy val ulibSysl: String     = readLsysl("oskit/ulib/ulib.lsysl")
-  private lazy val helloSysl: String    = readLsysl("oskit/bin/hello.lsysl")
+  private lazy val ulibSysl: String      = readLsysl("oskit/ulib/ulib.lsysl")
+  private lazy val ulibSbrkSysl: String  = scala.io.Source.fromFile("oskit/ulib/sbrk.sysl").mkString
+  private lazy val helloSysl: String     = readLsysl("oskit/bin/hello.lsysl")
 
   // Linker script for external programs — all load at same base address.
   private lazy val progScript: LinkerScript = LinkerScriptParser.parse(
@@ -45,7 +46,7 @@ class OSKitLoaderTests extends OSKitTestHelpers {
       |    data
       |    bss
       |SYMBOL _heap_start = AFTER bss
-      |SYMBOL _heap_end = 0xCC000
+      |SYMBOL _heap_end = 0x100000
       |ENTRY main
       |""".stripMargin) match
     case Right(s) => s
@@ -57,7 +58,13 @@ class OSKitLoaderTests extends OSKitTestHelpers {
       scala.io.Source.fromFile("oskit/ulib/syscall.asm").mkString,
       relocatable = true,
     )
-    val allSources = progSources + ("oskit/ulib/ulib" -> ulibSysl)
+    val allSources = progSources ++ Map(
+      "oskit/ulib/ulib" -> ulibSysl,
+      "posix/unistd/sbrk" -> ulibSbrkSysl,
+      "posix/stdlib/alloc" -> posixAllocSysl,
+      "posix/string/string" -> posixStringSysl,
+      "posix/ctype/ctype" -> posixCtypeSysl,
+    )
     val driver = new SyslDriver
     val result = driver.compile(allSources)
     val codegen = new SyslTriscCodegen
@@ -216,6 +223,20 @@ import oskit.apps.init.{init}
     cleaned should include("Hello, world!")
   }
 
+  // Regression: thread_count capped at MAX_THREADS; without reusing STATE_TERMINATED
+  // slots, the fourth /bin/hello would use idx 8 and corrupt memory past threads[7].
+  "Loader: hello six times reuses thread slots" in {
+    val trb = TriscBinary.serialize(TOF.deserialize(helloTofText))
+    val script = List.fill(6)("hello\n").mkString
+    // Wider spacing than default: puts()-based hello finishes a line much faster than
+    // 13× putc, so keys can outpace the shell unless we inject more slowly.
+    val keys   = typeString(script, startTick = 500000, spacing = 12000)
+    val (cpu, output, _) = runWithKeys("", keys, maxCycles = 200000000,
+      files = Map("/bin/hello" -> trb))
+    cpu.state shouldNot be(State.DoubleFault)
+    "Hello, world!".r.findAllIn(output).length should be >= 6
+  }
+
   "Loader: unknown program shows not found" in {
     val keys = typeString("nosuchprog\n", startTick = 500000)
     val (_, output, _) = runWithKeys("", keys)
@@ -275,7 +296,7 @@ import oskit.apps.init.{init}
       "posix/string/string"     -> posixStringSysl,
       "posix/ctype/ctype"       -> posixCtypeSysl,
       "posix/stdlib/alloc"      -> posixAllocSysl,
-      "posix/unistd/sbrk"       -> sbrkSysl,
+      "posix/unistd/sbrk"       -> ulibSbrkSysl,
     ))
 
   // echo program — prints its arguments via get_args()
