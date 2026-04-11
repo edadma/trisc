@@ -1470,7 +1470,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
 
   // ===== std.io =====
 
-  "std.io ByteReader basic" ignore { // TODO: clang compile error
+  "std.io ByteReader basic" in {
     llvmExitWithStd(
       """import std.io.*
         |
@@ -1488,7 +1488,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 1
   }
 
-  "std.io ByteReader eof" ignore { // TODO: clang compile error
+  "std.io ByteReader eof" in {
     llvmExitWithStd(
       """import std.io.*
         |
@@ -1505,7 +1505,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 1
   }
 
-  "std.io ByteWriter basic" ignore { // TODO: clang compile error
+  "std.io ByteWriter basic" in {
     llvmExitWithStd(
       """import std.io.*
         |
@@ -1523,7 +1523,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 1
   }
 
-  "std.io ByteWriter multiple writes" ignore { // TODO: clang compile error
+  "std.io ByteWriter multiple writes" in {
     llvmExitWithStd(
       """import std.io.*
         |
@@ -1545,7 +1545,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
 
   // ===== std.crypto.sha256 =====
 
-  "std.crypto.sha256 empty" ignore { // TODO: u32 wrapping arithmetic produces wrong hash
+  "std.crypto.sha256 empty" in {
     llvmOutputWithStd(
       """import std.crypto.sha256.*
         |import std.encoding.hex.*
@@ -1558,7 +1558,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   }
 
-  "std.crypto.sha256 abc" ignore { // TODO: u32 wrapping arithmetic produces wrong hash
+  "std.crypto.sha256 abc" in {
     llvmOutputWithStd(
       """import std.crypto.sha256.*
         |import std.encoding.hex.*
@@ -1612,7 +1612,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
 
   // ===== std.text.tabwriter =====
 
-  "std.text.tabwriter basic" ignore { // TODO: clang compile error — likely codegen issue
+  "std.text.tabwriter basic" in {
     llvmOutputWithStd(
       """import std.text.tabwriter.*
         |

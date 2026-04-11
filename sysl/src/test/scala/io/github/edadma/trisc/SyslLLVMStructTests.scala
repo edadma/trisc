@@ -97,4 +97,39 @@ class SyslLLVMStructTests extends SyslLLVMTestHelpers {
         |    o.a.v
         |""".stripMargin) shouldBe 42
   }
+
+  // ===== Method self-mutation =====
+
+  "method mutates self field" in {
+    llvmOutput(
+      """struct Counter
+        |    value: int
+        |
+        |Counter.inc()
+        |    self.value = self.value + 1
+        |
+        |main()
+        |    var c = Counter(0)
+        |    c.inc()
+        |    c.inc()
+        |    c.inc()
+        |    println(c.value)
+        |""".stripMargin) shouldBe "3"
+  }
+
+  "method compound assign self field" in {
+    llvmOutput(
+      """struct Counter
+        |    value: int
+        |
+        |Counter.add(n: int)
+        |    self.value += n
+        |
+        |main()
+        |    var c = Counter(10)
+        |    c.add(5)
+        |    c.add(3)
+        |    println(c.value)
+        |""".stripMargin) shouldBe "18"
+  }
 }
