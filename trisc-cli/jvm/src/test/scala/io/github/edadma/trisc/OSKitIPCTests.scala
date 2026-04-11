@@ -42,7 +42,7 @@ class OSKitIPCTests extends OSKitTestHelpers {
     dma.mem = mem
     linked.load(mem)
     val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
-    val cpu = new CPU(mem, Seq(timer, intc), mmu = Some(testMmu)) { this.limit = maxCycles }
+    val cpu = new CPU(mem, Seq(timer, intc), mmu = Some(testMmu)) { this.limit = maxCycles; quiet = true }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)

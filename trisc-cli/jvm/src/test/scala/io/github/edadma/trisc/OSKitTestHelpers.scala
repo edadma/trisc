@@ -134,7 +134,7 @@ trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
     }
     val mem = new Memory("Memory", new RAM(0, 0x10000), stdout)
     linked.load(mem)
-    val cpu = new CPU(mem) { limit = maxCycles }
+    val cpu = new CPU(mem) { limit = maxCycles; quiet = true }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)
@@ -176,7 +176,7 @@ trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
     linked.load(mem)
     val mmu = new SimpleMMU(mem); mmu.setIdentityRange(0x7FE000L, 0xC00000L)
     dma.mmu = Some(mmu)
-    val cpu = new CPU(mem, Seq(timer, intc), mmu = Some(mmu)) { this.limit = maxCycles }
+    val cpu = new CPU(mem, Seq(timer, intc), mmu = Some(mmu)) { this.limit = maxCycles; quiet = true }
     if maxCycles <= 1000 then
       cpu.log.setLogLevel(LogLevel.TRACE)
       cpu.log.setHandler(new FileHandler("/tmp/trisc_debug.log"))

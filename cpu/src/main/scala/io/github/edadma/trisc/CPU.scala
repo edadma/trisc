@@ -30,6 +30,8 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
   var faultAddr: Long = 0
   /** Cause of the last MMU fault. */
   var faultCause: FaultCause = FaultCause.None
+  /** Suppress diagnostic stderr output (for tests). */
+  var quiet: Boolean = false
 
   // PC ring buffer for crash diagnostics
   private val _pcRing = new Array[Long](20)
@@ -192,8 +194,9 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
   private def enterException(): Unit =
     if inException then
       log.error(f"DoubleFault at pc=$pc%04x, original exception=$state", category = "CPU")
-      System.err.println(f"[TRISC] DoubleFault at pc=$pc%04x original=$state faultAddr=$faultAddr%08x faultCause=$faultCause")
-      System.err.println(f"  r1=${r(1).read}%x r2=${r(2).read}%x r3=${r(3).read}%x r4=${r(4).read}%x r5=${r(5).read}%x r6=${r(6).read}%x r7=${r(7).read}%x usp=$usp%x psr=$psr%x")
+      if !quiet then
+        System.err.println(f"[TRISC] DoubleFault at pc=$pc%04x original=$state faultAddr=$faultAddr%08x faultCause=$faultCause")
+        System.err.println(f"  r1=${r(1).read}%x r2=${r(2).read}%x r3=${r(3).read}%x r4=${r(4).read}%x r5=${r(5).read}%x r6=${r(6).read}%x r7=${r(7).read}%x usp=$usp%x psr=$psr%x")
       logRegisters()
       state = State.DoubleFault
       return
@@ -236,9 +239,10 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
         reservationValid = false
     catch
       case e: RuntimeException =>
-        System.err.println(f"[TRISC] DoubleFault during exception entry at pc=$pc%04x state=$state faultAddr=$faultAddr%08x faultCause=$faultCause: ${e.getMessage}")
-        val regs = (1 to 7).map(i => f"r$i=${r(i).read}%x").mkString(" ")
-        System.err.println(f"  $regs usp=$usp%x psr=$psr%x")
+        if !quiet then
+          System.err.println(f"[TRISC] DoubleFault during exception entry at pc=$pc%04x state=$state faultAddr=$faultAddr%08x faultCause=$faultCause: ${e.getMessage}")
+          val regs = (1 to 7).map(i => f"r$i=${r(i).read}%x").mkString(" ")
+          System.err.println(f"  $regs usp=$usp%x psr=$psr%x")
         log.error(f"DoubleFault during exception entry at pc=$pc%04x", category = "CPU")
         state = State.DoubleFault
     finally
@@ -272,14 +276,14 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
           case Left(cause) =>
             faultAddr = pc
             faultCause = cause
-            System.err.println(f"[TRISC] InstructionAccess fault at pc=$pc%08x cause=$cause psr=$psr%x")
-            System.err.println(f"  r1=${r(1).read}%x r2=${r(2).read}%x r3=${r(3).read}%x r4=${r(4).read}%x r5=${r(5).read}%x r6=${r(6).read}%x r7=${r(7).read}%x usp=$usp%x")
-            // dump last 20 PCs
-            val buf = _pcRing; val pos = _pcPos; val len = _pcRing.length
-            System.err.println("  last PCs:")
-            for i <- 0 until len do
-              val idx = (pos - len + i + len * 2) % len
-              System.err.println(f"    ${buf(idx)}%08x")
+            if !quiet then
+              System.err.println(f"[TRISC] InstructionAccess fault at pc=$pc%08x cause=$cause psr=$psr%x")
+              System.err.println(f"  r1=${r(1).read}%x r2=${r(2).read}%x r3=${r(3).read}%x r4=${r(4).read}%x r5=${r(5).read}%x r6=${r(6).read}%x r7=${r(7).read}%x usp=$usp%x")
+              val buf = _pcRing; val pos = _pcPos; val len = _pcRing.length
+              System.err.println("  last PCs:")
+              for i <- 0 until len do
+                val idx = (pos - len + i + len * 2) % len
+                System.err.println(f"    ${buf(idx)}%08x")
             state = State.InstructionAccess
             return
       case None => pc
@@ -318,7 +322,7 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
           memoryFaultDetail = Option(ex.getMessage).filter(_.nonEmpty).orElse(Some(ex.getClass.getSimpleName))
 
     // Always print to stderr: CPU log defaults to LogLevel.OFF, so log.warn would not show.
-    if state == State.DataAccess then
+    if state == State.DataAccess && !quiet then
       val extra = memoryFaultDetail.map(m => s" memory: $m").getOrElse("")
       val instLine =
         try

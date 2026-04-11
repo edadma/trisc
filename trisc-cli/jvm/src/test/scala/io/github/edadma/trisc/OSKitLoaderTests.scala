@@ -204,7 +204,7 @@ import oskit.apps.init.{init}
     val ticks: Seq[Processor => Unit] = Seq(timer, intc, keyInjector)
     val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
     dma.mmu = Some(testMmu)
-    val cpu = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles }
+    val cpu = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles; quiet = true }
     cpu.reset()
     cpu.run()
     (cpu, output.toString, ram)

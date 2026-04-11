@@ -68,7 +68,7 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)
     val mem = new Memory("Memory", ram, stdout, sha)
     linked.load(mem)
-    val cpu = new CPU(mem) { this.limit = maxCycles }
+    val cpu = new CPU(mem) { this.limit = maxCycles; quiet = true }
     cpu.reset()
     cpu.run()
     (cpu.r(1).read, output.toString)

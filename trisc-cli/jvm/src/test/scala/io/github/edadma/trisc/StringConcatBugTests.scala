@@ -119,7 +119,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
     val mem = new Memory("Memory", ram, stdout, intc, dma)
     dma.mem = mem
     linked.load(mem)
-    val cpu = new CPU(mem) { this.limit = maxCycles }
+    val cpu = new CPU(mem) { this.limit = maxCycles; quiet = true }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)
@@ -838,7 +838,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
     dma.mem = mem
     linked.load(mem)
 
-    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = 5200000 }
+    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = 5200000; quiet = true }
     cpu.reset()
     cpu.run()
     output.toString should include("/dev")
@@ -1200,7 +1200,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
     val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, dma)
     dma.mem = mem
     linked.load(mem)
-    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = 5200000 }
+    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = 5200000; quiet = true }
     cpu.reset()
     cpu.run()
     output.toString should include("/dev")
@@ -1237,7 +1237,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
     dma.mem = mem
     linked.load(mem)
 
-    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = 5200000 }
+    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = 5200000; quiet = true }
     cpu.reset()
     cpu.run()
     output.toString should include("/dev")

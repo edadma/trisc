@@ -202,7 +202,7 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
     val mem = new Memory("Memory", ram, stdout, intc, timer, ramdisk, dma)
     dma.mem = mem
     linked.load(mem)
-    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles }
+    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles; quiet = true }
     if _tracing then
       cpu.log.setLogLevel(io.github.edadma.logger.LogLevel.TRACE)
       cpu.log.setHandler(new io.github.edadma.logger.FileHandler("/tmp/trisc_tfs_debug.log"))

@@ -274,7 +274,7 @@ class MMUTests extends TestHelpers {
          |halt
          |""".stripMargin)
     tof.load(rawMem)
-    val cpu = new CPU(rawMem, mmu = Some(mmu)) { limit = 10000 }
+    val cpu = new CPU(rawMem, mmu = Some(mmu)) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     output.toString shouldBe "OK"
@@ -312,7 +312,7 @@ class MMUTests extends TestHelpers {
         |  halt
         |""".stripMargin)
     tof.load(rawMem)
-    val cpu = new CPU(rawMem, mmu = Some(mmu)) { limit = 10000 }
+    val cpu = new CPU(rawMem, mmu = Some(mmu)) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     cpu.r(4).read shouldBe 0x2000 // faultAddr
@@ -341,7 +341,7 @@ class MMUTests extends TestHelpers {
          |halt
          |""".stripMargin)
     tof.load(rawMem)
-    val cpu = new CPU(rawMem, mmu = Some(mmu)) { limit = 10000 }
+    val cpu = new CPU(rawMem, mmu = Some(mmu)) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     cpu.r(1).read shouldBe 0x77
@@ -359,7 +359,7 @@ class MMUTests extends TestHelpers {
          |halt
          |""".stripMargin)
     tof.load(rawMem)
-    val cpu = new CPU(rawMem, mmu = Some(mmu)) { limit = 10000 }
+    val cpu = new CPU(rawMem, mmu = Some(mmu)) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     cpu.r(2).read shouldBe 0x8000
@@ -394,7 +394,7 @@ class MMUTests extends TestHelpers {
         |  halt
         |""".stripMargin)
     tof.load(rawMem)
-    val cpu = new CPU(rawMem, mmu = Some(mmu)) { limit = 10000 }
+    val cpu = new CPU(rawMem, mmu = Some(mmu)) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     cpu.r(3).read shouldBe 42
@@ -431,7 +431,7 @@ class MMUTests extends TestHelpers {
     // Enable MMU after page tables are loaded but before CPU runs
     mmu.setEnabled(true)
     mmu.setPtbr(0x8000)
-    val cpu = new CPU(rawMem, mmu = Some(mmu)) { limit = 10000 }
+    val cpu = new CPU(rawMem, mmu = Some(mmu)) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     (cpu.r(1).read & 0xFF) shouldBe 0xAB
