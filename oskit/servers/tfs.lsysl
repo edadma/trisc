@@ -104,14 +104,13 @@ Reply:   [status(1), bytes_read(4)]
         val sender_ptbr = kernel_get_thread_ptbr(sender)
         var nr = 0
         if sender_ptbr == KERNEL_L1_BASE
-            // Same address space — direct write
             nr = tfs_read(ino, *byte(buf_addr), offset, len)
         else
-            // Cross-address-space: read to local buffer, copy via physical addressing
-            var local: [512]byte
+            // Cross-address-space: read to local buffer, copy via vm_copy_to
+            var local: [4096]byte
             var rlen = len
-            if rlen > 512
-                rlen = 512
+            if rlen > 4096
+                rlen = 4096
             nr = tfs_read(ino, &local[0], offset, rlen)
             if nr > 0
                 vm_copy_to(sender_ptbr, buf_addr, &local[0], nr)
@@ -134,14 +133,13 @@ Reply:   [status(1), bytes_written(4)]
         val sender_ptbr = kernel_get_thread_ptbr(sender)
         var nw = 0
         if sender_ptbr == KERNEL_L1_BASE
-            // Same address space — direct read
             nw = tfs_write(ino, *byte(buf_addr), offset, len)
         else
-            // Cross-address-space: copy from client via physical addressing, then write
-            var local: [512]byte
+            // Cross-address-space: copy from client, then write
+            var local: [4096]byte
             var wlen = len
-            if wlen > 512
-                wlen = 512
+            if wlen > 4096
+                wlen = 4096
             vm_copy_from(sender_ptbr, buf_addr, &local[0], wlen)
             nw = tfs_write(ino, &local[0], offset, wlen)
         var reply: [5]byte

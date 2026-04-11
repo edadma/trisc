@@ -198,8 +198,7 @@ import oskit.apps.init.{init}
   }
 
 
-  // TODO: un-ignore when TFS prefilled file read is fixed
-  "NSH: cat prefilled /hello (short file)" ignore {
+  "NSH: cat prefilled /hello (short file)" in {
     val keys = typeString("cat /hello\n", startTick = 500000, spacing = 12000)
     val (cpu, output) =
       runNsh(scheduledKeys = keys, prefill = "/hello file \"world\"\n", maxCycles = 200000000)
@@ -213,8 +212,7 @@ import oskit.apps.init.{init}
     output should include("world")
   }
 
-  // TODO: un-ignore when TFS prefilled file read is fixed
-  "NSH: cat /etc/ttytab shows prefilled line" ignore {
+  "NSH: cat /etc/ttytab shows prefilled line" in {
     val keys = typeString("cat /etc/ttytab\n", startTick = 500000, spacing = 12000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 100000000)
     output should include("tty0 nsh")
@@ -372,8 +370,7 @@ import oskit.apps.init.{init}
     output should include("/root")
   }
 
-  // TODO: un-ignore when TFS prefilled file read is fixed
-  "Login: cat /etc/ttytab prints ttytab contents" ignore {
+  "Login: cat /etc/ttytab prints ttytab contents" in {
     val keys        = loginAndType("cat /etc/ttytab\n")
     val (_, output) = runLogin(scheduledKeys = keys, maxCycles = 180000000)
     output should include("tty0 login")
