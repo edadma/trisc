@@ -872,7 +872,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 60
   }
 
-  "std.slices reverse" ignore { // TODO: wrong result — logic bug in reverse or LLVM codegen
+  "std.slices reverse" in {
     llvmExitWithStd(
       """import std.slices.*
         |
@@ -883,7 +883,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    a[2] = 3
         |    val b = reverse(a[:])
         |    b[0] * 100 + b[1] * 10 + b[2]
-        |""".stripMargin) shouldBe 321
+        |""".stripMargin) shouldBe (321 % 256)
   }
 
   "std.slices fill" in {
@@ -898,7 +898,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 21
   }
 
-  "std.slices concat" ignore { // TODO: wrong result — logic bug in concat or LLVM codegen
+  "std.slices concat" in {
     llvmExitWithStd(
       """import std.slices.*
         |
@@ -909,7 +909,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    b[0] = 3; b[1] = 4; b[2] = 5
         |    val c = concat(a[:], b[:])
         |    len(c) * 100 + c[0] + c[4]
-        |""".stripMargin) shouldBe 506
+        |""".stripMargin) shouldBe (506 % 256)
   }
 
   "std.slices min/max" in {
@@ -925,7 +925,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
 
   // ===== std.sort =====
 
-  "std.sort sort_int basic" ignore { // TODO: sort produces wrong results
+  "std.sort sort_int basic" ignore { // TODO: off-by-one in sort — returns 58 not 57 (12346 vs 12345)
     llvmExitWithStd(
       """import std.sort.*
         |
@@ -934,7 +934,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    a[0] = 30; a[1] = 10; a[2] = 50; a[3] = 20; a[4] = 40
         |    sort_int(a[:])
         |    a[0] * 10000 + a[1] * 1000 + a[2] * 100 + a[3] * 10 + a[4]
-        |""".stripMargin) shouldBe 12345
+        |""".stripMargin) shouldBe (12345 % 256)
   }
 
   "std.sort sort_int already sorted" in {
@@ -951,7 +951,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 5
   }
 
-  "std.sort sort_int descending" ignore { // TODO: sort produces wrong results
+  "std.sort sort_int descending" in {
     llvmExitWithStd(
       """import std.sort.*
         |
@@ -962,7 +962,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    a[2] = 3; a[3] = 4
         |    sort_int_desc(a[:])
         |    a[0] * 1000 + a[1] * 100 + a[2] * 10 + a[3]
-        |""".stripMargin) shouldBe 4321
+        |""".stripMargin) shouldBe (4321 % 256)
   }
 
   "std.sort is_sorted" in {
@@ -993,10 +993,10 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    val desc: (int, int) -> int = (a, b) -> b - a
         |    sort_by(a[:], desc)
         |    a[0] * 1000 + a[1] * 100 + a[2] * 10 + a[3]
-        |""".stripMargin) shouldBe 40302010
+        |""".stripMargin) shouldBe (40302010 % 256)
   }
 
-  "std.sort sort_int duplicates" ignore { // TODO: sort produces wrong results
+  "std.sort sort_int duplicates" in {
     llvmExitWithStd(
       """import std.sort.*
         |
@@ -1005,6 +1005,6 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    a[0] = 3; a[1] = 1; a[2] = 3; a[3] = 2; a[4] = 1
         |    sort_int(a[:])
         |    a[0] * 10000 + a[1] * 1000 + a[2] * 100 + a[3] * 10 + a[4]
-        |""".stripMargin) shouldBe 11233
+        |""".stripMargin) shouldBe (11233 % 256)
   }
 }

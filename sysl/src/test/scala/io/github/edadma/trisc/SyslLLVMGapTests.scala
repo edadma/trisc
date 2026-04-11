@@ -246,4 +246,56 @@ class SyslLLVMGapTests extends SyslLLVMTestHelpers {
         |    if ok then x + a + b else 0
         |""".stripMargin) shouldBe 72
   }
+
+  // ===== Dynamic new + slice element access =====
+
+  "new [n]int store and load" in {
+    llvmExit(
+      """main() -> int
+        |    val a = new [3]int
+        |    a[0] = 100
+        |    a[1] = 200
+        |    a[2] = 300
+        |    a[0] + a[1] + a[2]
+        |""".stripMargin) shouldBe 600 % 256  // exit code is modulo 256
+  }
+
+  "generic reverse from another module" in {
+    val (exit, _) = runLLVMMulti(Map(
+      "mylib/util/util" ->
+        """module mylib.util
+          |
+          |reverse[T](s: []T) -> []T
+          |    val n = len(s)
+          |    val buf = new [n]T
+          |    for i in 0..<n
+          |        buf[i] = s[n - 1 - i]
+          |    buf[:]
+          |""".stripMargin,
+      "main" ->
+        """import mylib.util.*
+          |
+          |main() -> int
+          |    val a = new [3]int
+          |    a[0] = 1; a[1] = 2; a[2] = 3
+          |    val b = reverse(a[:])
+          |    b[0] * 100 + b[1] * 10 + b[2]
+          |""".stripMargin
+    ))
+    (exit % 256) shouldBe (321 % 256)
+  }
+
+  "new [n]int via slice reverse manual" in {
+    llvmExit(
+      """main() -> int
+        |    val a = new [3]int
+        |    a[0] = 1; a[1] = 2; a[2] = 3
+        |    val b = new [3]int
+        |    val s = a[:]
+        |    val n = len(s)
+        |    for i in 0..<n
+        |        b[i] = s[n - 1 - i]
+        |    b[0] * 100 + b[1] * 10 + b[2]
+        |""".stripMargin) shouldBe (321 % 256)
+  }
 }
