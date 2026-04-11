@@ -893,4 +893,41 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
     ))
     cpu.r(1).read shouldBe 42
   }
+
+  // ===== Compile-time constant folding =====
+
+  "constant folding: val derived from val" in {
+    val (cpu, _) = runWithBoot(Map(
+      "hw/regs" ->
+        """module hw
+          |val BASE = 0x1000
+          |val STATUS = BASE + 4
+          |val DATA = BASE + 8
+          |get_status() -> int = STATUS
+          |get_data() -> int = DATA
+          |""".stripMargin,
+      "main" ->
+        """import hw.*
+          |main() -> int = get_status() + get_data()
+          |""".stripMargin
+    ))
+    cpu.r(1).read shouldBe (0x1004 + 0x1008)
+  }
+
+  "constant folding: chained val expressions" in {
+    val (cpu, _) = runWithBoot(Map(
+      "consts/consts" ->
+        """module consts
+          |val A = 10
+          |val B = A * 2
+          |val C = A + B
+          |get() -> int = C
+          |""".stripMargin,
+      "main" ->
+        """import consts.*
+          |main() -> int = get()
+          |""".stripMargin
+    ))
+    cpu.r(1).read shouldBe 30
+  }
 }
