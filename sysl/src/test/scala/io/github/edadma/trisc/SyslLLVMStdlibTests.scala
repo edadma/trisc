@@ -812,7 +812,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
 
   // ===== std.slices =====
 
-  "std.slices equal" ignore { // TODO: generic instantiation collision with test section
+  "std.slices equal" in {
     llvmExitWithStd(
       """import std.slices.*
         |
@@ -832,7 +832,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 2
   }
 
-  "std.slices contains" ignore { // TODO: generic instantiation collision
+  "std.slices contains" in {
     llvmExitWithStd(
       """import std.slices.*
         |
@@ -846,7 +846,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 2
   }
 
-  "std.slices index" ignore { // TODO: generic instantiation collision
+  "std.slices index" in {
     llvmExitWithStd(
       """import std.slices.*
         |
@@ -860,7 +860,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 2
   }
 
-  "std.slices clone" ignore { // TODO: generic instantiation collision
+  "std.slices clone" in {
     llvmExitWithStd(
       """import std.slices.*
         |
@@ -872,7 +872,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 60
   }
 
-  "std.slices reverse" ignore { // TODO: generic instantiation collision
+  "std.slices reverse" ignore { // TODO: wrong result — generic codegen issue
     llvmExitWithStd(
       """import std.slices.*
         |
@@ -886,7 +886,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 321
   }
 
-  "std.slices fill" ignore { // TODO: generic instantiation collision
+  "std.slices fill" in {
     llvmExitWithStd(
       """import std.slices.*
         |
@@ -898,7 +898,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 21
   }
 
-  "std.slices concat" ignore { // TODO: generic instantiation collision
+  "std.slices concat" ignore { // TODO: wrong result — generic codegen issue
     llvmExitWithStd(
       """import std.slices.*
         |
@@ -912,7 +912,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 506
   }
 
-  "std.slices min/max" ignore { // TODO: generic instantiation collision
+  "std.slices min/max" in {
     llvmExitWithStd(
       """import std.slices.*
         |
@@ -983,7 +983,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 2
   }
 
-  "std.sort sort_by custom comparator" ignore { // TODO: generic instantiation collision
+  "std.sort sort_by custom comparator" ignore { // TODO: sort produces wrong results
     llvmExitWithStd(
       """import std.sort.*
         |
