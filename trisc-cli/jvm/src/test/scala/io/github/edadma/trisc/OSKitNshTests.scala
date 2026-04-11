@@ -30,6 +30,7 @@ class OSKitNshTests extends OSKitTestHelpers {
   private lazy val hmacSysl: String   = readLsysl("std/crypto/hmac/hmac.lsysl")
   private lazy val pbkdf2Sysl: String = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
   private lazy val pmSrvSysl: String = readLsysl("oskit/servers/pm.lsysl")
+  private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
 
   // Shared OS source set — init reads /etc/ttytab to decide what to spawn.
   private def buildOS(): TOF =
@@ -53,6 +54,7 @@ class OSKitNshTests extends OSKitTestHelpers {
       "posix/stdlib/alloc"         -> posixAllocSysl,
       "std/debug/debug"             -> debugSysl,
       "std/mem/mem"                 -> memSysl,
+      "oskit/hal/mem"              -> halMemSysl,
       "std/encoding/binary/binary" -> binarySysl,
       "std/crypto/sha256/sha256"   -> sha256Sysl,
       "std/crypto/hmac/hmac"       -> hmacSysl,

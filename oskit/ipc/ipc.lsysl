@@ -23,7 +23,7 @@ so the scheduler can reference them).
 
     import oskit.kernel.*
     import oskit.services.syscall
-    import std.mem.memcpy
+    import oskit.hal.memcpy
 
     val MAX_PORTS = 8
     val IPC_PORT_FREE = -1

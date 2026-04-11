@@ -28,6 +28,7 @@ class SyslAnalyzer:
   private val warnedDeprecations = new mutable.HashSet[String]
   private val externalSymbols = new mutable.LinkedHashSet[String]
   private var scopeStack: mutable.ArrayBuffer[mutable.LinkedHashMap[String, SymInfo]] = null
+  private val compileTimeConstants = new mutable.LinkedHashMap[String, Long] // val name → folded value (for constant propagation)
   private var loopDepth: Int = 0
   private var currentReturnType: SyslType = VoidType
 
@@ -692,7 +693,18 @@ class SyslAnalyzer:
         pushScope()
         val tInit0 = analyzeExpr(init)
         val declType = typOpt.map(resolveType).getOrElse(tInit0.typ)
-        val tInit = coerceLiteral(tInit0, declType)
+        val tInit1 = coerceLiteral(tInit0, declType)
+        // Constant folding: immutable vals with constant initializers become compile-time constants
+        val tInit = if !isMutable then
+          tryConstEval(tInit1) match
+            case Some(raw) =>
+              val n = maskToType(raw, declType)
+              val mangledName = if shouldMangle(name) then mangleName(name) else name
+              compileTimeConstants(name) = n
+              compileTimeConstants(mangledName) = n
+              TIntLit(n, declType)
+            case None => tInit1
+        else tInit1
         val mangledVarName = if shouldMangle(name) then mangleName(name) else name
         globalScope(name) = SymInfo(mangledVarName, declType, isMutable)
         scopeStack = null
@@ -869,6 +881,36 @@ class SyslAnalyzer:
       case (TIntLit(value, IntType(w)), _: UIntType) => TIntLit(value, UIntType(w))
       case (TIntLit(value, UIntType(w)), _: IntType) => TIntLit(value, IntType(w))
       case _ => expr
+
+  /** Truncate a value to fit the given integer type's width, with sign-extension for signed types. */
+  private def maskToType(value: Long, typ: SyslType): Long = typ match
+    case IntType(8) => (value << 56) >> 56 // sign-extend from 8 bits
+    case IntType(16) => (value << 48) >> 48
+    case IntType(32) => (value << 32) >> 32
+    case UIntType(8) => value & 0xFFL
+    case UIntType(16) => value & 0xFFFFL
+    case UIntType(32) => value & 0xFFFFFFFFL
+    case _ => value // i64/u64/bool — no truncation needed
+
+  /** Try to evaluate a typed expression as a compile-time integer constant. */
+  private def tryConstEval(expr: TExpr): Option[Long] = expr match
+    case TIntLit(n, _) => Some(n)
+    case TBoolLit(b, _) => Some(if b then 1 else 0)
+    case TVarRef(name, _) => compileTimeConstants.get(name)
+    case TUnary("-", operand, _) => tryConstEval(operand).map(-_)
+    case TUnary("~", operand, _) => tryConstEval(operand).map(~_)
+    case TBinary(left, "+", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield l + r
+    case TBinary(left, "-", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield l - r
+    case TBinary(left, "*", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield l * r
+    case TBinary(left, "/", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) if r != 0 yield l / r
+    case TBinary(left, "%", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) if r != 0 yield l % r
+    case TBinary(left, "<<", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield l << r.toInt
+    case TBinary(left, ">>", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield l >> r.toInt
+    case TBinary(left, "&", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield l & r
+    case TBinary(left, "|", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield l | r
+    case TBinary(left, "^", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield l ^ r
+    case TCast(inner, _) => tryConstEval(inner)
+    case _ => None
 
   private def lookup(name: String): SymInfo =
     if scopeStack != null then
@@ -1241,7 +1283,16 @@ class SyslAnalyzer:
         currentExpected = declared.orElse(currentExpected)
         val tInit0 = try analyzeExpr(init) finally currentExpected = savedExp
         val declType = declared.getOrElse(tInit0.typ)
-        val tInit = coerceLiteral(tInit0, declType)
+        val tInit1 = coerceLiteral(tInit0, declType)
+        // Constant folding for local immutable vals
+        val tInit = if !isMutable && declType.isIntegral then
+          tryConstEval(tInit1) match
+            case Some(raw) =>
+              val n = maskToType(raw, declType)
+              compileTimeConstants(name) = n
+              TIntLit(n, declType)
+            case None => tInit1
+        else tInit1
         if typOpt.isDefined && !compatible(tInit.typ, declType) then
           throw AnalysisError(s"cannot assign ${tInit.typ} to $declType variable '$name'")
         // Box concrete type into interface if needed
@@ -1805,7 +1856,11 @@ class SyslAnalyzer:
         else
           // Check for no-arg enum variant before falling through to variable lookup
           tryLookup(name) match
-            case Some(sym) => TVarRef(sym.name, sym.typ)
+            case Some(sym) =>
+              // Constant propagation: substitute compile-time constants with literals
+              compileTimeConstants.get(sym.name).orElse(compileTimeConstants.get(name)) match
+                case Some(n) => TIntLit(n, sym.typ)
+                case None => TVarRef(sym.name, sym.typ)
             case None =>
               if variantToEnum.contains(name) then
                 val (et, idx) = variantToEnum(name)

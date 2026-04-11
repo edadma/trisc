@@ -13,6 +13,7 @@ class OSKitTTYTests extends OSKitTestHelpers {
   private lazy val kbdSysl: String = readLsysl("oskit/drivers/kbd/keyboard.lsysl")
   private lazy val ttySysl: String = readLsysl("oskit/drivers/tty/tty.lsysl")
   private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
+  private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
   private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   // keyEvents: (vkCode, press, modifierBits) — pre-enqueued before CPU starts
@@ -24,7 +25,7 @@ class OSKitTTYTests extends OSKitTestHelpers {
     val allSources = Map(
       "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
       "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
-      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "std/debug/debug" -> debugSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl, "oskit/drivers/tty/tty" -> ttySysl,
+      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "std/debug/debug" -> debugSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl, "oskit/drivers/tty/tty" -> ttySysl,
       "posix/unistd/sbrk" -> sbrkSysl, "posix/stdlib/alloc" -> posixAllocSysl, "posix/string/string" -> posixStringSysl, "posix/ctype/ctype" -> posixCtypeSysl,
     ) ++ userSources
     val driver = new SyslDriver

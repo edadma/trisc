@@ -21,7 +21,7 @@ On-disk layout (block 0 = boot, block 1 = superblock):
 
     module oskit.fs
 
-    import std.mem.{memcpy}
+    import oskit.hal.{memcpy}
 
     // === Block I/O — provided by the environment ===
 

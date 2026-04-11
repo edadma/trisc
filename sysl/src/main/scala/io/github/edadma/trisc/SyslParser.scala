@@ -481,10 +481,13 @@ class SyslParser extends StandardTokenParsers {
         case init ~ cond ~ update ~ body => ForStmtAST(init, cond, update, body)
       } |
       "for" ~> ident ~ ("," ~> ident) ~ ("in" ~> logicalOr) ~ forBody ^^ {
-        case idxName ~ valName ~ arr ~ body => buildForGo(idxName, valName, arr, body)
+        case idxName ~ valName ~ arr ~ body => buildForIndexValue(idxName, valName, arr, body)
       } |
       "for" ~> ident ~ ("in" ~> logicalOr) ~ rangeOp ~ logicalOr ~ opt("step" ~> logicalOr) ~ forBody ^^ {
         case name ~ lo ~ op ~ hi ~ step ~ body => buildForRange(name, lo, op, hi, step, body)
+      } |
+      "for" ~> ident ~ ("in" ~> logicalOr) ~ forBody ^^ {
+        case valName ~ arr ~ body => buildForEach(valName, arr, body)
       }
 
   private def buildForRange(name: String, lo: ExpressionAST, op: String, hi: ExpressionAST, step: Option[ExpressionAST], body: List[StmtAST]): ForStmtAST =
@@ -502,7 +505,16 @@ class SyslParser extends StandardTokenParsers {
       body,
     )
 
-  private def buildForGo(idxName: String, valName: String, arr: ExpressionAST, body: List[StmtAST]): ForStmtAST =
+  private def buildForEach(valName: String, arr: ExpressionAST, body: List[StmtAST]): ForStmtAST =
+    val idxName = s"__foreach_idx_${valName}"
+    ForStmtAST(
+      VarStmtAST(idxName, None, IntLitAST(0)),
+      BinaryAST(VarRefAST(idxName), "<", CallAST("len", List(arr))),
+      ExprStmtAST(PostIncAST(idxName)),
+      VarStmtAST(valName, None, IndexAST(arr, VarRefAST(idxName))) :: body,
+    )
+
+  private def buildForIndexValue(idxName: String, valName: String, arr: ExpressionAST, body: List[StmtAST]): ForStmtAST =
     ForStmtAST(
       VarStmtAST(idxName, None, IntLitAST(0)),
       BinaryAST(VarRefAST(idxName), "<", CallAST("len", List(arr))),

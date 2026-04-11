@@ -15,6 +15,7 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
   private lazy val posixCtypeSysl: String = scala.io.Source.fromFile("posix/ctype/ctype.sysl").mkString
   private lazy val posixAllocSysl: String = scala.io.Source.fromFile("posix/stdlib/alloc.sysl").mkString
   private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
+  private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
   private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   // Inline sbrk for TFS tests — simple bump allocator in high RAM
@@ -134,6 +135,7 @@ trait TFSTestHelpers extends AnyFreeSpec with Matchers {
     "posix/unistd/sbrk" -> sbrk_inline,
     "ramdisk" -> ramdiskSource,
     "std/mem/mem" -> memSysl,
+    "oskit/hal/mem" -> halMemSysl,
     "std/debug/debug" -> debugSysl,
   )
 
