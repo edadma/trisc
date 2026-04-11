@@ -14,6 +14,7 @@ class SyslLLVMCodegen:
   private val pendingClosures = new mutable.ListBuffer[(String, TClosure)] // (name, closure)
   private val funcWrappers = new mutable.LinkedHashMap[String, String] // original name -> wrapper name
   private val pendingWrappers = new mutable.ListBuffer[(String, String, List[SyslType], SyslType)] // (wrapperName, origName, params, retType)
+  private val emittedFunctions = new mutable.HashSet[String] // track emitted function names to avoid duplicates
   private var stringCounter = 0
   private var regCounter = 0
   private var labelCounter = 0
@@ -62,6 +63,7 @@ class SyslLLVMCodegen:
     pendingClosures.clear()
     pendingWrappers.clear()
     funcWrappers.clear()
+    emittedFunctions.clear()
 
     // First pass: collect struct type definitions and deinit functions
     structTypes.clear()
@@ -93,7 +95,10 @@ class SyslLLVMCodegen:
         case _: TDataEnumDecl => // type only
         case _: TTypeAliasDecl => // type only
         case _: TInterfaceDecl => // type only
-        case f: TFunDecl => genFunction(f)
+        case f: TFunDecl =>
+          if !emittedFunctions.contains(f.name) then
+            emittedFunctions += f.name
+            genFunction(f)
         case TVarDecl(name, typ, init, _) =>
           val initVal = constValue(init, typ)
           emit(s"@$name = global ${llvmType(typ)} $initVal")
@@ -658,7 +663,18 @@ class SyslLLVMCodegen:
           emit(s"  $loaded = load $elt, $elt* $v")
           emit(s"  store $elt $loaded, $elt* $typedPtr")
         else
-          emit(s"  store $elt $v, $elt* $typedPtr")
+          // Truncate if value is wider than element (e.g., i32 into i8 byte slot)
+          val vLt = llvmType(value.typ)
+          val storeVal = if vLt != elt && value.typ.isIntegral && elemType.isIntegral then
+            val fromWidth = vLt.stripPrefix("i").toInt
+            val toWidth = elt.stripPrefix("i").toInt
+            if fromWidth > toWidth then
+              val tr = newReg()
+              emit(s"  $tr = trunc $vLt $v to $elt")
+              tr
+            else v
+          else v
+          emit(s"  store $elt $storeVal, $elt* $typedPtr")
 
       case TDerefAssignStmt(pointer, value) =>
         val ptr = genExpr(pointer)
@@ -1165,6 +1181,10 @@ class SyslLLVMCodegen:
         if !thenReturned then
           emitScopeCleanup(preThenLocals)
           emit(s"  br label %$mergeLabel")
+        else
+          // Remove locals introduced in the returning branch — their allocas are uninitialized on the other path
+          for key <- locals.keySet.toList if !preThenLocals.contains(key) do
+            locals.remove(key)
         hasReturned = savedHasReturned
 
         emitLabel(elseLabel)
@@ -1192,6 +1212,9 @@ class SyslLLVMCodegen:
         if !elseReturned then
           emitScopeCleanup(preElseLocals)
           emit(s"  br label %$mergeLabel")
+        else
+          for key <- locals.keySet.toList if !preElseLocals.contains(key) do
+            locals.remove(key)
         hasReturned = savedHasReturned
 
         emitLabel(mergeLabel)
@@ -1357,6 +1380,15 @@ class SyslLLVMCodegen:
             emit(s"  $lenGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 1")
             val len32 = newReg()
             emit(s"  $len32 = load i32, i32* $lenGep")
+            len32
+          case SyslType.RefType(SyslType.SliceType(_)) =>
+            val base = genExpr(array) // data pointer for ref-to-slice
+            val lenAddr = newReg()
+            emit(s"  $lenAddr = getelementptr i8, i8* $base, i64 -8")
+            val lenTyped = newReg()
+            emit(s"  $lenTyped = bitcast i8* $lenAddr to i32*")
+            val len32 = newReg()
+            emit(s"  $len32 = load i32, i32* $lenTyped")
             len32
           case SyslType.StringType =>
             val sp = genExpr(array) // alloca pointer to %struct.string

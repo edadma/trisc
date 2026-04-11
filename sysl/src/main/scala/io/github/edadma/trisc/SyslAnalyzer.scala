@@ -1164,13 +1164,12 @@ class SyslAnalyzer:
       case Some(mangled) => (mangled, functions(mangled))
       case None =>
         val mangled = mangleGenericName(name, inferredArgs)
-        if functions.contains(mangled) then
-          // If the existing function is an imported external, reuse it
-          if externalSymbols.contains(mangled) then
-            instantiations(cacheKey) = mangled
-            return (mangled, functions(mangled))
-          else
-            throw AnalysisError(s"generic instantiation '$mangled' collides with existing function")
+        if functions.contains(mangled) && !externalSymbols.contains(mangled) && !externalSymbols.contains(shortName(mangled)) then
+          // Already instantiated locally — reuse it
+          instantiations(cacheKey) = mangled
+          return (mangled, functions(mangled))
+        // If the function exists as an imported symbol, we still need to re-instantiate
+        // locally so the backend emits its body in this compilation unit.
         // Save and install typeEnv for this instantiation
         val savedEnv = typeEnv
         typeEnv = typeParams.zip(inferredArgs).toMap
