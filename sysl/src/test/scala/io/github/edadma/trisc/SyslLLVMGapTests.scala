@@ -330,4 +330,162 @@ class SyslLLVMGapTests extends SyslLLVMTestHelpers {
     llvmOutput(
       "main()\n    val x = 42\n    puts(f\"${x}%+d\")\n") shouldBe "+42"
   }
+
+  // ===== Dynamic array size =====
+
+  "dynamic new array size" in {
+    llvmExit(
+      """main() -> int
+        |    val n = 3
+        |    val a = new [n]int
+        |    a[0] = 10
+        |    a[1] = 20
+        |    a[2] = 30
+        |    a[0] + a[1] + a[2]
+        |""".stripMargin) shouldBe 60
+  }
+
+  "repeat-like nested loop with dynamic array" in {
+    llvmExit(
+      """main() -> int
+        |    val s = new [2]byte
+        |    s[0] = byte(65)
+        |    s[1] = byte(66)
+        |    val slen = 2
+        |    val n = 3
+        |    val buf = new [slen * n]byte
+        |    for k in 0..<n
+        |        for j in 0..<slen
+        |            buf[k * slen + j] = s[j]
+        |    int(buf[0]) + int(buf[5])
+        |""".stripMargin) shouldBe 131
+  }
+
+  "string from byte slice" in {
+    llvmOutput(
+      """main()
+        |    val a = new [5]byte
+        |    a[0] = byte(72)
+        |    a[1] = byte(69)
+        |    a[2] = byte(76)
+        |    a[3] = byte(76)
+        |    a[4] = byte(79)
+        |    val s = a[:]
+        |    puts(string(s))
+        |""".stripMargin) shouldBe "HELLO"
+  }
+
+  "string from returned byte slice" in {
+    llvmOutput(
+      """make() -> []byte
+        |    val a = new [5]byte
+        |    a[0] = byte(72)
+        |    a[1] = byte(69)
+        |    a[2] = byte(76)
+        |    a[3] = byte(76)
+        |    a[4] = byte(79)
+        |    a[:]
+        |
+        |main()
+        |    val result = make()
+        |    puts(string(result))
+        |""".stripMargin) shouldBe "HELLO"
+  }
+
+  "repeat function return len" in {
+    llvmExit(
+      """repeat(s: []byte, n: int) -> []byte
+        |    if n <= 0
+        |        val empty = new [0]byte
+        |        return empty[:]
+        |    val slen = len(s)
+        |    val buf = new [slen * n]byte
+        |    for k in 0..<n
+        |        for j in 0..<slen
+        |            buf[k * slen + j] = s[j]
+        |    buf[:]
+        |
+        |main() -> int
+        |    val src = new [2]byte
+        |    src[0] = byte(97)
+        |    src[1] = byte(98)
+        |    val result = repeat(src[:], 3)
+        |    len(result)
+        |""".stripMargin) shouldBe 6
+  }
+
+  "repeat no early return" in {
+    llvmOutput(
+      """repeat(s: []byte, n: int) -> []byte
+        |    val slen = len(s)
+        |    val buf = new [slen * n]byte
+        |    for k in 0..<n
+        |        for j in 0..<slen
+        |            buf[k * slen + j] = s[j]
+        |    buf[:]
+        |
+        |main()
+        |    val src = new [2]byte
+        |    src[0] = byte(97)
+        |    src[1] = byte(98)
+        |    val result = repeat(src[:], 3)
+        |    puts(string(result))
+        |""".stripMargin) shouldBe "ababab"
+  }
+
+  "repeat with early return debug" in {
+    llvmExit(
+      """repeat(s: []byte, n: int) -> []byte
+        |    if n <= 0
+        |        val empty = new [0]byte
+        |        return empty[:]
+        |    val slen = len(s)
+        |    val buf = new [slen * n]byte
+        |    for k in 0..<n
+        |        for j in 0..<slen
+        |            buf[k * slen + j] = s[j]
+        |    buf[:]
+        |
+        |main() -> int
+        |    val src = new [2]byte
+        |    src[0] = byte(97)
+        |    src[1] = byte(98)
+        |    val result = repeat(src[:], 3)
+        |    int(result[0])
+        |""".stripMargin) shouldBe 97
+  }
+
+  "repeat with early return" in {
+    llvmOutput(
+      """repeat(s: []byte, n: int) -> []byte
+        |    if n <= 0
+        |        val empty = new [0]byte
+        |        return empty[:]
+        |    val slen = len(s)
+        |    val buf = new [slen * n]byte
+        |    for k in 0..<n
+        |        for j in 0..<slen
+        |            buf[k * slen + j] = s[j]
+        |    buf[:]
+        |
+        |main()
+        |    val src = new [2]byte
+        |    src[0] = byte(97)
+        |    src[1] = byte(98)
+        |    val result = repeat(src[:], 3)
+        |    puts(string(result))
+        |""".stripMargin) shouldBe "ababab"
+  }
+
+  "dynamic new array with multiply" in {
+    llvmExit(
+      """main() -> int
+        |    val slen = 2
+        |    val n = 3
+        |    val buf = new [slen * n]byte
+        |    buf[0] = byte(65)
+        |    buf[5] = byte(70)
+        |    int(buf[0]) + int(buf[5])
+        |""".stripMargin) shouldBe 135
+  }
 }

@@ -696,7 +696,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 2
   }
 
-  "std.bytes repeat" ignore { // TODO: crashes (SIGBUS) — investigate dynamic-size new + nested loop
+  "std.bytes repeat" in {
     llvmExitWithStd(
       """import std.bytes.*
         |

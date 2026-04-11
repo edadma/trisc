@@ -274,9 +274,11 @@ class SyslLLVMCodegen:
     activeOut = out
     for (reg, lt) <- deferredAllocas do
       emit(s"  $reg = alloca $lt")
-      // Zero-initialize slice allocas so backref field is null on unexecuted paths
+      // Zero-initialize allocas that may be decremented on unexecuted paths
       if lt == "%struct.slice" then
         emit(s"  store %struct.slice zeroinitializer, %struct.slice* $reg")
+      else if lt == "i8*" then
+        emit(s"  store i8* null, i8** $reg")
     out ++= bodyBuf
 
     emit("}")
@@ -353,6 +355,8 @@ class SyslLLVMCodegen:
       emit(s"  $reg = alloca $lt")
       if lt == "%struct.slice" then
         emit(s"  store %struct.slice zeroinitializer, %struct.slice* $reg")
+      else if lt == "i8*" then
+        emit(s"  store i8* null, i8** $reg")
     out ++= bodyBuf
 
     emit("}")
