@@ -171,6 +171,7 @@ trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
     dma.mem = mem
     linked.load(mem)
     val mmu = new SimpleMMU(mem); mmu.setIdentityRange(0x7FE000L, 0xC00000L)
+    dma.mmu = Some(mmu)
     val cpu = new CPU(mem, Seq(timer, intc), mmu = Some(mmu)) { this.limit = maxCycles }
     if maxCycles <= 1000 then
       cpu.log.setLogLevel(LogLevel.TRACE)

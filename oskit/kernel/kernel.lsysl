@@ -702,13 +702,13 @@ Steps:
                     threads[next].state = STATE_RUNNING
                     threads[next].ctx_switches += 1
                     total_ctx_switches += 1
-                    //vm_set_ptbr(threads[next].ptbr)
+                    vm_set_ptbr(threads[next].ptbr)
                     return threads[next].ssp
             pri += 1
 
         // No ready threads — return 0 to signal idle
         current_thread = -1
-        //vm_set_ptbr(KERNEL_L1_BASE)
+        vm_set_ptbr(KERNEL_L1_BASE)
         0
 
 Called by boot.asm after kernel_main() returns, so boot can
@@ -726,7 +726,7 @@ highest-priority non-empty queue.
                     threads[next].state = STATE_RUNNING
                     threads[next].ctx_switches += 1
                     total_ctx_switches += 1
-                    //vm_set_ptbr(threads[next].ptbr)
+                    vm_set_ptbr(threads[next].ptbr)
                     return threads[next].ssp
             pri += 1
         0

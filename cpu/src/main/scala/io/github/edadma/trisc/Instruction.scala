@@ -509,7 +509,7 @@ class TLBI(a: Int, b: Int) extends RRInstruction(a, b):
     if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
     else cpu.mmu match
       case Some(m) => m.tlbInvalidate(cpu.r(a).read)
-      case None    => cpu.state = State.UnimplementedOpcode
+      case None    => () // no-op when MMU not present
 
 class TLBIA(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "tlbia"
@@ -518,7 +518,7 @@ class TLBIA(a: Int, b: Int) extends RRInstruction(a, b):
     if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
     else cpu.mmu match
       case Some(m) => m.tlbInvalidateAll()
-      case None    => cpu.state = State.UnimplementedOpcode
+      case None    => () // no-op when MMU not present
 
 class SPTBR(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "sptbr"
@@ -532,7 +532,7 @@ class SPTBR(a: Int, b: Int) extends RRInstruction(a, b):
         m.setPtbr(v)
         m.setEnabled(v != 0) // PTBR=0 disables MMU (bare mode)
         if v != old then m.tlbInvalidateAll() // only flush on actual PTBR change
-      case None => cpu.state = State.UnimplementedOpcode
+      case None => () // no-op when MMU not present
 
 class GPTBR(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "gptbr"
@@ -541,7 +541,7 @@ class GPTBR(a: Int, b: Int) extends RRInstruction(a, b):
     if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
     else cpu.mmu match
       case Some(m) => cpu.r(a).write(m.ptbr)
-      case None    => cpu.state = State.UnimplementedOpcode
+      case None    => cpu.r(a).write(0) // return 0 when MMU not present
 
 class GFAULT(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "gfault"
@@ -557,7 +557,7 @@ class SASID(a: Int, b: Int) extends RRInstruction(a, b):
     if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
     else cpu.mmu match
       case Some(m: SimpleMMU) => m.setAsid(cpu.r(a).read.toInt)
-      case _                  => cpu.state = State.UnimplementedOpcode
+      case _                  => () // no-op when MMU not present
 
 class GASID(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "gasid"
@@ -566,7 +566,7 @@ class GASID(a: Int, b: Int) extends RRInstruction(a, b):
     if !cpu.test(Status.Mode) then cpu.state = State.PrivilegeViolation
     else cpu.mmu match
       case Some(m: SimpleMMU) => cpu.r(a).write(m.asid)
-      case _                  => cpu.state = State.UnimplementedOpcode
+      case _                  => cpu.r(a).write(0) // return 0 when MMU not present
 
 class GFCAUSE(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "gfcause"

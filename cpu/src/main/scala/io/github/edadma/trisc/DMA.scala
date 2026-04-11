@@ -44,7 +44,7 @@ package io.github.edadma.trisc
  * @param intc  Interrupt controller
  * @param irq   IRQ line for DMA completion
  */
-class DMA(val base: Long, var mem: Addressable, intc: InterruptController, irq: Int)
+class DMA(val base: Long, var mem: Addressable, intc: InterruptController, irq: Int, var mmu: Option[MMU] = None)
     extends Device with (CPU => Unit):
   val name = "DMA"
   val size = 202
@@ -76,6 +76,16 @@ class DMA(val base: Long, var mem: Addressable, intc: InterruptController, irq: 
   private def dataSize(ch: Int): Int = 1 << (ctrl(ch) & DATA_SIZE_MASK) // 1, 2, 4, or 8
   private def chainTo(ch: Int): Int = (ctrl(ch) & CHAIN_TO_MASK) >> CHAIN_TO_SHIFT
   private def isEnabled(ch: Int): Boolean = (ctrl(ch) & ENABLE) != 0
+
+  /** Translate a virtual address through the MMU (if present and enabled).
+    * DMA uses supervisor mode since it's initiated by kernel code. */
+  private def xlat(addr: Long, access: Access): Long =
+    mmu match
+      case Some(m) if m.enabled =>
+        m.translate(addr, access, supervisor = true) match
+          case Right(phys) => phys
+          case Left(_)     => addr // fallback on fault (shouldn't happen with correct OS)
+      case _ => addr
 
   // ===== Register access =====
 
@@ -198,11 +208,13 @@ class DMA(val base: Long, var mem: Addressable, intc: InterruptController, irq: 
 
     var i = 0
     while i < count do
+      val rAddr = xlat(readAddr(ch), Access.Read)
+      val wAddr = xlat(writeAddr(ch), Access.Write)
       sz match
-        case 1 => mem.writeByte(writeAddr(ch), mem.readByte(readAddr(ch)))
-        case 2 => mem.writeShort(writeAddr(ch), mem.readShort(readAddr(ch)))
-        case 4 => mem.writeInt(writeAddr(ch), mem.readInt(readAddr(ch)))
-        case 8 => mem.writeLong(writeAddr(ch), mem.readLong(readAddr(ch)))
+        case 1 => mem.writeByte(wAddr, mem.readByte(rAddr))
+        case 2 => mem.writeShort(wAddr, mem.readShort(rAddr))
+        case 4 => mem.writeInt(wAddr, mem.readInt(rAddr))
+        case 8 => mem.writeLong(wAddr, mem.readLong(rAddr))
         case _ =>
       if incrRead then readAddr(ch) += sz
       if incrWrite then writeAddr(ch) += sz
@@ -236,19 +248,21 @@ class DMA(val base: Long, var mem: Addressable, intc: InterruptController, irq: 
         val sz = dataSize(ch)
 
         // Transfer one element
+        val rAddr = xlat(readAddr(ch), Access.Read)
+        val wAddr = xlat(writeAddr(ch), Access.Write)
         sz match
           case 1 =>
-            val b = mem.readByte(readAddr(ch))
-            mem.writeByte(writeAddr(ch), b)
+            val b = mem.readByte(rAddr)
+            mem.writeByte(wAddr, b)
           case 2 =>
-            val s = mem.readShort(readAddr(ch))
-            mem.writeShort(writeAddr(ch), s)
+            val s = mem.readShort(rAddr)
+            mem.writeShort(wAddr, s)
           case 4 =>
-            val w = mem.readInt(readAddr(ch))
-            mem.writeInt(writeAddr(ch), w)
+            val w = mem.readInt(rAddr)
+            mem.writeInt(wAddr, w)
           case 8 =>
-            val l = mem.readLong(readAddr(ch))
-            mem.writeLong(writeAddr(ch), l)
+            val l = mem.readLong(rAddr)
+            mem.writeLong(wAddr, l)
           case _ =>
 
         // Advance addresses
