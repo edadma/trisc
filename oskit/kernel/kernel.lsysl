@@ -728,6 +728,32 @@ process ID (0 for kernel threads).
     getpid_current() -> i64
         threads[current_thread].pid
 
+Kill a process by PID. Terminates its main thread and marks
+the process as zombie. Returns 0 on success, -1 on error.
+
+    kernel_kill_process(pid: int) -> int
+        if pid <= 0
+            return -1
+        if pid >= MAX_PROCESSES
+            return -1
+        if processes[pid].state != PROC_RUNNING
+            return -1
+
+        val tid = processes[pid].main_tid
+        threads[tid].state = STATE_TERMINATED
+        processes[pid].state = PROC_ZOMBIE
+
+        // Wake threads joining on this thread
+        var i = 0
+        while i < thread_count
+            if threads[i].state == STATE_JOINING
+                if threads[i].join_target == tid
+                    threads[i].state = STATE_READY
+                    threads[i].quantum = DEFAULT_QUANTUM
+                    enqueue(threads[i].priority, i)
+            i += 1
+        0
+
 Returns next thread's SSP, or 0 if no threads are READY.
 When 0 is returned, the assembly caller does wfi + retries.
 
