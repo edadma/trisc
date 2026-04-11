@@ -1,8 +1,10 @@
 package io.github.edadma.trisc
 
-class BenchmarkTests extends TestHelpers {
-
-  def runBenchmark(source: String, maxCycles: Int = 50_000_000): (CPU, Long) =
+/** Standalone benchmark runner for TRISC CPU performance measurement.
+  * Run: sbt "triscCliJVM/runMain io.github.edadma.trisc.BenchmarkMain"
+  */
+object BenchmarkMain:
+  private def runBenchmark(name: String, source: String, expected: Long, maxCycles: Int = 500_000_000): Unit =
     val bootSource =
       s"""segment vectors
          |  dl 0xFFF8
@@ -53,11 +55,20 @@ class BenchmarkTests extends TestHelpers {
     cpu.run()
     val elapsed = System.nanoTime() - startTime
 
-    (cpu, elapsed)
+    val cycles = cpu.cycles
+    val ms = elapsed / 1_000_000
+    val mips = if elapsed > 0 then cycles.toDouble / (elapsed / 1_000_000_000.0) / 1_000_000 else 0
+    val result_val = cpu.r(1).read
+    val pass = if result_val == expected && cpu.state == State.Halt then "PASS" else "FAIL"
 
-  "benchmark: bubble sort 500 elements" ignore {
-    val (cpu, elapsed) = runBenchmark(
-      """main() -> int
+    println(f"$pass  $name%-40s  $cycles%,12d cycles  ${ms}%,6d ms  $mips%.1f MIPS")
+
+  def main(args: Array[String]): Unit =
+    println(f"${""}%-6s ${"Benchmark"}%-40s  ${"Cycles"}%12s  ${"Time"}%6s  ${""}%s")
+    println("-" * 80)
+
+    runBenchmark("bubble sort 500 elements", expected = 1,
+      source = """main() -> int
         |    arr: [500]int
         |    for i = 0; i < 500; i++
         |        arr[i] = 500 - i
@@ -76,22 +87,10 @@ class BenchmarkTests extends TestHelpers {
         |    for i = 0; i < 499; i++
         |        if arr[i] > arr[i + 1] then ok = 0
         |    ok
-        |""".stripMargin,
-      maxCycles = 500_000_000
-    )
+        |""".stripMargin)
 
-    val cycles = cpu.cycles
-    val ms = elapsed / 1_000_000
-    val mips = if elapsed > 0 then cycles.toDouble / (elapsed / 1_000_000_000.0) / 1_000_000 else 0
-
-    info(f"Bubble sort 500: $cycles%,d cycles, ${ms}ms, $mips%.1f MIPS")
-    cpu.r(1).read shouldBe 1
-    cpu.state shouldBe State.Halt
-  }
-
-  "benchmark: sieve of eratosthenes 10000" ignore {
-    val (cpu, elapsed) = runBenchmark(
-      """main() -> int
+    runBenchmark("sieve of eratosthenes 10000", expected = 1229,
+      source = """main() -> int
         |    sieve: [10000]byte
         |    for i = 0; i < 10000; i++
         |        sieve[i] = 1
@@ -105,21 +104,10 @@ class BenchmarkTests extends TestHelpers {
         |    for i = 2; i < 10000; i++
         |        if sieve[i] == 1 then count += 1
         |    count
-        |""".stripMargin
-    )
+        |""".stripMargin)
 
-    val cycles = cpu.cycles
-    val ms = elapsed / 1_000_000
-    val mips = if elapsed > 0 then cycles.toDouble / (elapsed / 1_000_000_000.0) / 1_000_000 else 0
-
-    info(f"Sieve 10000: $cycles%,d cycles, ${ms}ms, $mips%.1f MIPS")
-    cpu.r(1).read shouldBe 1229
-    cpu.state shouldBe State.Halt
-  }
-
-  "benchmark: fibonacci iterative 10000 iterations" ignore {
-    val (cpu, elapsed) = runBenchmark(
-      """main() -> int
+    runBenchmark("fibonacci iterative 10000", expected = 1,
+      source = """main() -> int
         |    a = 0
         |    b = 1
         |    for i = 0; i < 10000; i++
@@ -128,36 +116,14 @@ class BenchmarkTests extends TestHelpers {
         |        b = tmp
         |    if b != 0 then 1
         |    else 0
-        |""".stripMargin
-    )
+        |""".stripMargin)
 
-    val cycles = cpu.cycles
-    val ms = elapsed / 1_000_000
-    val mips = if elapsed > 0 then cycles.toDouble / (elapsed / 1_000_000_000.0) / 1_000_000 else 0
-
-    info(f"Fibonacci 10000: $cycles%,d cycles, ${ms}ms, $mips%.1f MIPS")
-    cpu.r(1).read shouldBe 1
-    cpu.state shouldBe State.Halt
-  }
-
-  "benchmark: nested loop (compute-bound)" ignore {
-    val (cpu, elapsed) = runBenchmark(
-      """main() -> int
+    runBenchmark("nested loop 1000x1000", expected = 1,
+      source = """main() -> int
         |    sum = 0
         |    for i = 0; i < 1000; i++
         |        for j = 0; j < 1000; j++
         |            sum += i + j
         |    if sum != 0 then 1
         |    else 0
-        |""".stripMargin
-    )
-
-    val cycles = cpu.cycles
-    val ms = elapsed / 1_000_000
-    val mips = if elapsed > 0 then cycles.toDouble / (elapsed / 1_000_000_000.0) / 1_000_000 else 0
-
-    info(f"Nested loop 1000x1000: $cycles%,d cycles, ${ms}ms, $mips%.1f MIPS")
-    cpu.r(1).read shouldBe 1
-    cpu.state shouldBe State.Halt
-  }
-}
+        |""".stripMargin)
