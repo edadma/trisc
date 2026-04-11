@@ -218,10 +218,12 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
           usp = tmp
 
         // Push PSR then PC onto supervisor stack (8 bytes each)
-        r(7).write(r(7).read - 8)
-        mem.writeLong(r(7).read, psr)
-        r(7).write(r(7).read - 8)
-        mem.writeLong(r(7).read, pc)
+        // Must use CPU's writeLong (MMU-aware), not raw mem.writeLong
+        val preR7 = r(7).read
+        r(7).write(preR7 - 8)
+        writeLong(preR7 - 8, psr)
+        r(7).write(preR7 - 16)
+        writeLong(preR7 - 16, pc)
 
         // Load PC from vector table (offset by 1 since reset occupies slots 0 and 1)
         val vector = (state.ordinal + 1) * 8

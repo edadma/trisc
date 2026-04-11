@@ -409,7 +409,7 @@ import oskit.apps.init.{init}
       files = Map("/bin/count" -> countTrb, "/bin/ps" -> psTrb))
     info(s"Output: ${output.take(500)}")
     info(s"CPU state: ${cpu.state}")
-    // Should reach cycle limit (Wfi), not crash
-    output should not include "I"  // no InstructionAccess fault marker
+    // Should reach cycle limit (Wfi), not crash (Halt)
+    cpu.state.toString should be ("Wfi")
   }
 }
