@@ -928,6 +928,13 @@ Desugars to `match` at parse time — no new analyzer or runtime machinery.
 
 ## Statements
 
+Statements are separated by newlines. Semicolons (`;`) can also be used to place multiple statements on a single line:
+
+```sysl
+a[0] = 1; a[1] = 2; a[2] = 3
+val x = 10; val y = 20
+```
+
 ### Control Flow
 
 ```sysl

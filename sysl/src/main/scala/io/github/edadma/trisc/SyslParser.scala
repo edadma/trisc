@@ -332,8 +332,9 @@ class SyslParser extends StandardTokenParsers {
 
   // --- Statements ---
 
+  lazy val stmtSep: Parser[Any] = rep1(Newline) | ";"
   lazy val stmts: Parser[List[StmtAST]] =
-    rep1sep(stmt, rep1(Newline))
+    rep1sep(stmt, rep1(stmtSep))
 
   lazy val asmStmt: Parser[AsmStmtAST] =
     "asm" ~> "(" ~> stringLit <~ ")" ^^ AsmStmtAST.apply
