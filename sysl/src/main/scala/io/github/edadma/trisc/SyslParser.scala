@@ -696,7 +696,11 @@ class SyslParser extends StandardTokenParsers {
         val chain = fields.init.foldLeft(base)((e, f) => FieldAccessAST(e, f))
         AddrOfFieldAST(chain, fields.last)
       } |
-      "&" ~> ident ~ ("[" ~> expr <~ "]") ^^ { case name ~ idx => AddrOfIndexAST(VarRefAST(name), idx) } |
+      "&" ~> ident ~ rep1("[" ~> expr <~ "]") ^^ { case name ~ idxs =>
+        val base: ExpressionAST = VarRefAST(name)
+        val indexed = idxs.init.foldLeft(base)((e, idx) => IndexAST(e, idx))
+        AddrOfIndexAST(indexed, idxs.last)
+      } |
       "&" ~> ident ^^ AddrOfAST.apply |
       postfix
 
@@ -706,8 +710,13 @@ class SyslParser extends StandardTokenParsers {
       ident <~ "++" ^^ PostIncAST.apply |
       ident <~ "--" ^^ PostDecAST.apply |
       primary ~ rep(
-        ("[" ~> opt(expr) ~ (":" ~> opt(expr)) <~ "]") ^^ { case lo ~ hi => (4, null, "", List(lo.orNull, hi.orNull)) } |
-        ("[" ~> expr <~ "]") ^^ (idx => (0, idx, "", Nil: List[ExpressionAST])) |
+        ("[" ~> (
+          ":" ~> opt(expr) ^^ (hi => (4, null, "", List(null, hi.orNull): List[ExpressionAST])) |
+          expr ~ opt(":" ~> opt(expr)) ^^ {
+            case e ~ None => (0, e, "", Nil: List[ExpressionAST])
+            case lo ~ Some(hi) => (4, null, "", List(lo, hi.orNull): List[ExpressionAST])
+          }
+        ) <~ "]") |
         ("." ~> ident) ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case m ~ args => (2, null, m, args) } |
         ("." ~> numericLit) ^^ (n => (1, null, s"_${n.toInt}", Nil)) |
         ("." ~> ident) ^^ (f => (1, null, f, Nil)) |
