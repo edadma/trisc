@@ -559,9 +559,9 @@ class SyslLLVMGapTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 60
   }
 
-  "write ref array with compound read index" ignore { // TODO: SIGBUS writing between two ref arrays
-    llvmExit(
-      """main() -> int
+  "write ref array with compound read index" in {
+    llvmOutput(
+      """main()
         |    val a = new [3]int
         |    a[0] = 10
         |    a[1] = 20
@@ -570,13 +570,13 @@ class SyslLLVMGapTests extends SyslLLVMTestHelpers {
         |    buf[0] = a[2]
         |    buf[1] = a[1]
         |    buf[2] = a[0]
-        |    buf[0] * 100 + buf[1] * 10 + buf[2]
-        |""".stripMargin) shouldBe 302010
+        |    println(buf[0] * 100 + buf[1] * 10 + buf[2])
+        |""".stripMargin) shouldBe "3210"
   }
 
-  "write ref array in loop with compound index" ignore { // TODO: same ref array write bug
-    llvmExit(
-      """main() -> int
+  "write ref array in loop with compound index" in {
+    llvmOutput(
+      """main()
         |    val a = new [3]int
         |    a[0] = 1
         |    a[1] = 2
@@ -585,12 +585,12 @@ class SyslLLVMGapTests extends SyslLLVMTestHelpers {
         |    val buf = new [3]int
         |    for i in 0..<n
         |        buf[i] = a[n - 1 - i]
-        |    buf[0] * 100 + buf[1] * 10 + buf[2]
-        |""".stripMargin) shouldBe 321
+        |    println(buf[0] * 100 + buf[1] * 10 + buf[2])
+        |""".stripMargin) shouldBe "321"
   }
 
-  "generic reverse function" ignore { // TODO: ref array cross-write bug
-    llvmExit(
+  "generic reverse function" in {
+    llvmOutput(
       """reverse[T](s: []T) -> []T
         |    val n = len(s)
         |    val buf = new [n]T
@@ -598,18 +598,18 @@ class SyslLLVMGapTests extends SyslLLVMTestHelpers {
         |        buf[i] = s[n - 1 - i]
         |    buf[:]
         |
-        |main() -> int
+        |main()
         |    val a = new [3]int
         |    a[0] = 1
         |    a[1] = 2
         |    a[2] = 3
         |    val b = reverse(a[:])
-        |    b[0] * 100 + b[1] * 10 + b[2]
-        |""".stripMargin) shouldBe 321
+        |    println(b[0] * 100 + b[1] * 10 + b[2])
+        |""".stripMargin) shouldBe "321"
   }
 
-  "generic concat function" ignore { // TODO: ref array cross-write bug
-    llvmExit(
+  "generic concat function" in {
+    llvmOutput(
       """concat[T](a: []T, b: []T) -> []T
         |    val na = len(a)
         |    val nb = len(b)
@@ -620,7 +620,7 @@ class SyslLLVMGapTests extends SyslLLVMTestHelpers {
         |        buf[na + j] = b[j]
         |    buf[:]
         |
-        |main() -> int
+        |main()
         |    val a = new [2]int
         |    a[0] = 1
         |    a[1] = 2
@@ -629,7 +629,7 @@ class SyslLLVMGapTests extends SyslLLVMTestHelpers {
         |    b[1] = 4
         |    b[2] = 5
         |    val c = concat(a[:], b[:])
-        |    len(c) * 100 + c[0] + c[4]
-        |""".stripMargin) shouldBe 506
+        |    println(len(c) * 100 + c[0] + c[4])
+        |""".stripMargin) shouldBe "506"
   }
 }
