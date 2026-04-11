@@ -17,26 +17,18 @@ the 3-byte header).
 
     module oskit.bin.cat
 
-    import oskit.ulib.{open, read, puts, exit, PROG_ARGS_ADDR}
+    import oskit.ulib.{open, read, puts, exit, get_args, skip_arg0}
 
     val CAT_READ_CHUNK = 4096
     val PUTS_PAYLOAD_MAX = 125
 
     main()
-        val src = *byte(PROG_ARGS_ADDR)
-        var pathbuf: [240]byte
-        var n = 0
-        while n < 240
-            val c = src[n]
-            if c == 0
-                break
-            pathbuf[n] = c
-            n += 1
-        if n == 0
+        val args = get_args()
+        val path = skip_arg0(args)
+        if len(path) == 0
             puts("usage: cat <file>\n")
             exit()
             return
-        val path = string(&pathbuf[0], n)
         val ino = open(path)
         if ino < 0
             puts(path)

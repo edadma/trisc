@@ -1,0 +1,23 @@
+count — print incrementing counter every second
+=================================================
+
+Prints a count every 1000 ticks (1 second at default timer rate).
+Runs forever until killed. Useful for testing concurrent processes
+and process termination.
+
+    module oskit.bin.count
+
+    import oskit.ulib.{putc, puts, sleep, exit}
+
+    putint(n: int)
+        if n >= 10
+            putint(n / 10)
+        putc('0' + (n % 10))
+
+    main()
+        var n = 0
+        while 1 == 1
+            putint(n)
+            putc('\n')
+            sleep(1000)
+            n += 1

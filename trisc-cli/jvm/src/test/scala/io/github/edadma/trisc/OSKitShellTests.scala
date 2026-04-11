@@ -126,7 +126,9 @@ import oskit.services.sleep
         )
     }
     val ticks: Seq[Processor => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
-    val cpu                     = new CPU(mem, ticks) { this.limit = maxCycles }
+    val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
+    dma.mmu = Some(testMmu)
+    val cpu                     = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)

@@ -9,14 +9,10 @@ Reads directly from [[PROG_ARGS_ADDR]] like [[get_args]] but avoids constructing
 
     module oskit.bin.echo
 
-    import oskit.ulib.{putc, exit, PROG_ARGS_ADDR}
+    import oskit.ulib.{puts, exit, get_args, skip_arg0}
 
     main()
-        val p = *byte(PROG_ARGS_ADDR)
-        var n = 0
-        while p[n] != 0
-            n += 1
-        for var i = 0; i < n; i++
-            putc(int(p[i]))
-        putc('\n')
+        val args = skip_arg0(get_args())
+        puts(args)
+        puts("\n")
         exit()

@@ -8,27 +8,26 @@ Boot sequence:
 1. Disk server — owns block device hardware
 2. TFS server — filesystem, needs disk server
 3. TTY server — terminal, needs keyboard hardware
-4. Read `/etc/ttytab` — spawn login/shell per terminal
+4. PM server — process lifecycle management
+5. Read `/etc/ttytab` — spawn login/shell per terminal
 
 Minix 3-style: core servers are hardcoded because init can't
 read config files until the filesystem is up.
 
     module oskit.apps.init
 
-    import oskit.kernel.{create_thread}
+    import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp}
     import oskit.services.{sleep}
     import oskit.drivers.disk.{disk_server}
-    import oskit.servers.{tfs_server, fs_open, fs_read}
+    import oskit.servers.{tfs_server, fs_open, fs_read, pm_server}
     import oskit.drivers.tty.{tty_server}
     import oskit.apps.login.{login}
     import oskit.apps.nsh.{nsh}
 
-Stack addresses for spawned sessions. Each thread gets
-0x4000 (16KB) with user and system stacks separated by
-0x2000. Session slots start at 0x60C000.
+Stack slot counter. Init is slot 0 (created by kernel_main).
+Each server and session gets the next slot.
 
-    val SESSION_BASE = 0x60C000
-    val SESSION_STRIDE = 0x4000
+    var next_stack_slot = 1
 
 Parse `/etc/ttytab` and spawn a thread for each entry.
 Format: `terminal command` — one entry per line.
@@ -39,15 +38,18 @@ Supported commands: `login`, `nsh`.
         val ino = fs_open("/etc/ttytab")
         if ino < 0
             // No ttytab — fall back to single login
-            create_thread(login, SESSION_BASE, SESSION_BASE - 0x2000, "login")
+            val s = next_stack_slot
+            next_stack_slot += 1
+            create_thread(login, kernel_stack_usp(s), kernel_stack_ssp(s), "login")
             return
         val nr = fs_read(ino, buf, 0, 256)
         if nr <= 0
-            create_thread(login, SESSION_BASE, SESSION_BASE - 0x2000, "login")
+            val s = next_stack_slot
+            next_stack_slot += 1
+            create_thread(login, kernel_stack_usp(s), kernel_stack_ssp(s), "login")
             return
 
         var pos = 0
-        var slot = 0
 
         while pos < nr
             // Skip leading whitespace
@@ -114,31 +116,42 @@ Supported commands: `login`, `nsh`.
 
             // Spawn based on command
             if cmd_len > 0
-                val usp = SESSION_BASE + slot * SESSION_STRIDE
-                val ssp = usp - 0x2000
+                val s = next_stack_slot
+                next_stack_slot += 1
+                val usp = kernel_stack_usp(s)
+                val ssp = kernel_stack_ssp(s)
                 if cmd_len == 5
                     if buf[cmd_start] == 'l'
                         if buf[cmd_start + 1] == 'o'
                             if buf[cmd_start + 2] == 'g'
                                 if buf[cmd_start + 3] == 'i'
                                     if buf[cmd_start + 4] == 'n'
-                                        create_thread(login, i64(usp), i64(ssp), "login")
-                                        slot += 1
+                                        create_thread(login, usp, ssp, "login")
                 if cmd_len == 3
                     if buf[cmd_start] == 'n'
                         if buf[cmd_start + 1] == 's'
                             if buf[cmd_start + 2] == 'h'
-                                create_thread(nsh, i64(usp), i64(ssp), "nsh")
-                                slot += 1
+                                create_thread(nsh, usp, ssp, "nsh")
 
     init()
         // Start disk server first — TFS depends on it
-        create_thread(disk_server, 0x600000, 0x5FE000, "disk")
+        val disk_slot = next_stack_slot
+        next_stack_slot += 1
+        create_thread(disk_server, kernel_stack_usp(disk_slot), kernel_stack_ssp(disk_slot), "disk")
         sleep(5)
 
-        // Start TFS and TTY servers
-        create_thread(tfs_server, 0x604000, 0x602000, "tfs")
-        create_thread(tty_server, 0x608000, 0x606000, "tty")
+        // Start TFS, TTY, and PM servers
+        val tfs_slot = next_stack_slot
+        next_stack_slot += 1
+        create_thread(tfs_server, kernel_stack_usp(tfs_slot), kernel_stack_ssp(tfs_slot), "tfs")
+
+        val tty_slot = next_stack_slot
+        next_stack_slot += 1
+        create_thread(tty_server, kernel_stack_usp(tty_slot), kernel_stack_ssp(tty_slot), "tty")
+
+        val pm_slot = next_stack_slot
+        next_stack_slot += 1
+        create_thread(pm_server, kernel_stack_usp(pm_slot), kernel_stack_ssp(pm_slot), "pm")
 
         // Wait for servers to initialize and register ports
         sleep(5)

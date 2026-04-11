@@ -372,7 +372,7 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
   }
 
   // TODO: raw MMIO byte writes produce wrong hash — endianness or padding issue at 0x800160
-  "MMIO: SHA_START trigger" ignore {
+  "MMIO: SHA_START trigger" in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import posix.stdlib.*
         |
@@ -381,11 +381,11 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |    // word 0: 0x61626380
         |    var p: *byte = *byte(0x800160)
         |    *p = byte(0x61)
-        |    p = *byte(0x100161)
+        |    p = *byte(0x800161)
         |    *p = byte(0x62)
-        |    p = *byte(0x100162)
+        |    p = *byte(0x800162)
         |    *p = byte(0x63)
-        |    p = *byte(0x100163)
+        |    p = *byte(0x800163)
         |    *p = byte(0x80)
         |    // words 1..14 = 0 (already zero)
         |    // word 15: 0x00000018 (24 bits)

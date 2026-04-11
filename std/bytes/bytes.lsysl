@@ -372,12 +372,12 @@ Split and join
 the parts as `[][]byte`. If `sep` is empty, splits into
 individual bytes.
 
-    split(s: []byte, sep: []byte) -> []&[]byte
+    split(s: []byte, sep: []byte) -> [][]byte
         val m = len(sep)
 
         if m == 0
             val n = len(s)
-            val parts = new [n]&[]byte
+            val parts = new [n][]byte
 
             for i in 0..<n
                 parts[i] = subslice(s, i, i + 1)
@@ -385,7 +385,7 @@ individual bytes.
             return parts[:]
 
         val n = count(s, sep) + 1
-        val parts = new [n]&[]byte
+        val parts = new [n][]byte
         var start = 0
         var pi = 0
         val slen = len(s)
@@ -417,7 +417,7 @@ individual bytes.
 `join(parts, sep)` concatenates the byte slices in `parts`
 with `sep` between each pair.
 
-    join(parts: []&[]byte, sep: []byte) -> []byte
+    join(parts: [][]byte, sep: []byte) -> []byte
         val n = len(parts)
 
         if n == 0
@@ -706,7 +706,7 @@ Tests
 
     #test
     test_bytes_join_empty() -> unit
-        val parts = new [0]&[]byte
+        val parts = new [0][]byte
         val joined = join(parts[:], as_bytes(","))
         assert(len(joined) == 0, "empty")
 
@@ -736,6 +736,6 @@ the built-in slice expression `s[lo:hi]`.
 canonical way to move a `string` into the `[]byte` world.
 Going the other way, `string(b)` (the builtin) does the same.
 
-**`split` returns `[]&[]byte`.** Each part is a freshly
+**`split` returns `[][]byte`.** Each part is a freshly
 allocated byte slice (independent copy). `join` takes the
 same type and concatenates with a separator.

@@ -17,14 +17,21 @@ External programs include their own copy of the trampoline
 
 Syscall numbers — must match the kernel and IPC modules.
 
-    val SYS_SLEEP     = 0
-    val SYS_PUTC      = 1
-    val SYS_YIELD     = 2
-    val SYS_EXIT      = 3
-    val SYS_JOIN      = 4
-    val SYS_UPTIME    = 6
-    val SYS_IPC_SEND  = 32
-    val SYS_PORT_LOOKUP = 37
+    val SYS_SLEEP        = 0
+    val SYS_PUTC         = 1
+    val SYS_YIELD        = 2
+    val SYS_EXIT         = 3
+    val SYS_JOIN         = 4
+    val SYS_THREAD_ID    = 5
+    val SYS_UPTIME       = 6
+    val SYS_THREAD_COUNT = 7
+    val SYS_THREAD_STATE = 8
+    val SYS_THREAD_NAME  = 9
+    val SYS_IPC_SEND     = 32
+    val SYS_PORT_LOOKUP  = 37
+    val SYS_GETPID       = 41
+    val SYS_THREAD_PID   = 42
+    val SYS_THREAD_NAME_LEN = 43
 
 Command bytes for TFS and TTY server protocols.
 
@@ -60,6 +67,26 @@ Service discovery — look up a server port by name.
 
     port_lookup(name: *byte) -> int
         syscall(SYS_PORT_LOOKUP, i64(name))
+
+Thread and process queries.
+
+    get_thread_count() -> int
+        syscall(SYS_THREAD_COUNT, 0)
+
+    get_thread_state(id: int) -> int
+        syscall(SYS_THREAD_STATE, id)
+
+    get_thread_name(id: int) -> *byte
+        syscall(SYS_THREAD_NAME, id)
+
+    get_thread_name_len(id: int) -> int
+        syscall(SYS_THREAD_NAME_LEN, id)
+
+    get_thread_pid(id: int) -> int
+        syscall(SYS_THREAD_PID, id)
+
+    getpid() -> int
+        syscall(SYS_GETPID, 0)
 
 Process control.
 
@@ -172,3 +199,24 @@ and process manager land.
         if n == 0
             return ""
         string(p, n)
+
+Skip past argv[0] (the program name) and any following spaces.
+Returns the remaining arguments as a string, or "" if none.
+
+    skip_arg0(s: string) -> string
+        val p = *byte(s)
+        val n = len(s)
+        // Skip non-space (argv[0])
+        var i = 0
+        while i < n
+            if p[i] == byte(' ')
+                break
+            i += 1
+        // Skip spaces
+        while i < n
+            if p[i] != byte(' ')
+                break
+            i += 1
+        if i >= n
+            return ""
+        string(p + i, n - i)

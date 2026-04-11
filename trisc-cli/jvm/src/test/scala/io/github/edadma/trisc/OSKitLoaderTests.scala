@@ -21,6 +21,7 @@ class OSKitLoaderTests extends OSKitTestHelpers {
   private lazy val sha256Sysl: String   = readLsysl("std/crypto/sha256/sha256.lsysl")
   private lazy val hmacSysl: String     = readLsysl("std/crypto/hmac/hmac.lsysl")
   private lazy val pbkdf2Sysl: String   = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
+  private lazy val pmSrvSysl: String   = readLsysl("oskit/servers/pm.lsysl")
 
   // --- std lib ---
   private lazy val stringsSysl: String  = readLsysl("std/strings/strings.lsysl")
@@ -93,6 +94,7 @@ class OSKitLoaderTests extends OSKitTestHelpers {
       "oskit/drivers/tty/tty"        -> ttySysl,
       "oskit/fs/tfs"                 -> tfsSysl,
       "oskit/servers/tfs"            -> tfsSrvSysl,
+      "oskit/servers/pm"             -> pmSrvSysl,
       "posix/unistd/sbrk"           -> sbrkSysl,
       "posix/string/string"         -> posixStringSysl,
       "posix/ctype/ctype"           -> posixCtypeSysl,
@@ -120,7 +122,7 @@ import oskit.apps.init.{init}
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(init, 0x640000, 0x640000, "init")
+          |    create_thread(init, kernel_stack_usp(0), kernel_stack_ssp(0), "init")
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin,
@@ -147,6 +149,7 @@ import oskit.apps.init.{init}
     case '-'                       => (KeyEvent.VK_MINUS, 0)
     case '.'                       => (KeyEvent.VK_PERIOD, 0)
     case '!'                       => (KeyEvent.VK_1, 1)
+    case '&'                       => (KeyEvent.VK_7, 1)
     case _                         => (KeyEvent.VK_SPACE, 0)
 
   def typeString(s: String, startTick: Int, spacing: Int = 2000): Seq[(Int, Int, Boolean, Int)] =
@@ -197,16 +200,17 @@ import oskit.apps.init.{init}
           altDown = (mods & 4) != 0, metaDown = (mods & 8) != 0)
     }
     val ticks: Seq[Processor => Unit] = Seq(timer, intc, keyInjector)
-    val cpu = new CPU(mem, ticks) { this.limit = maxCycles }
+    val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
+    dma.mmu = Some(testMmu)
+    val cpu = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
     (cpu, output.toString, ram)
 
   "Loader: run hello from shell" in {
     val tofBytes = helloTofText.getBytes("UTF-8")
-    info(s"Hello TOF size: ${tofBytes.length} bytes (${(tofBytes.length + 511) / 512} blocks)")
     val keys = typeString("hello\n", startTick = 500000)
-    val (_, output, _) = runWithKeys("", keys, maxCycles = 30000000,
+    val (_, output, _) = runWithKeys("", keys, maxCycles = 100000000,
       files = Map("/bin/hello" -> tofBytes))
     val cleaned = output.filterNot(_ == '\n')
     cleaned should include("Hello, world!")
@@ -392,5 +396,22 @@ import oskit.apps.init.{init}
       files = Map("/bin/hello" -> tofBytes))
     val cleaned = output.filterNot(_ == '\n')
     cleaned should include("Hello, world!")
+  }
+
+  private lazy val countSysl: String = readLsysl("oskit/bin/count.lsysl")
+  private lazy val countTrb: Array[Byte] =
+    TriscBinary.serialize(TOF.deserialize(compileProgram(Map("oskit/bin/count/count" -> countSysl))))
+  private lazy val psSysl: String = readLsysl("oskit/bin/ps.lsysl")
+  private lazy val psTrb: Array[Byte] =
+    TriscBinary.serialize(TOF.deserialize(compileProgram(Map("oskit/bin/ps/ps" -> psSysl))))
+
+  "Loader: count & then ps does not crash" in {
+    val keys = typeString("count &\nps\n", startTick = 500000)
+    val (cpu, output, _) = runWithKeys("", keys, maxCycles = 100000000,
+      files = Map("/bin/count" -> countTrb, "/bin/ps" -> psTrb))
+    info(s"Output: ${output.take(500)}")
+    info(s"CPU state: ${cpu.state}")
+    // Should reach cycle limit (Wfi), not crash (Halt)
+    cpu.state.toString should be ("Wfi")
   }
 }

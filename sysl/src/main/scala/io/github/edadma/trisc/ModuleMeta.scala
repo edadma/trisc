@@ -96,7 +96,7 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
 object ModuleMeta:
 
   /** Bump this whenever the .smeta format changes. Stale files are silently ignored. */
-  val SMETA_VERSION = 6
+  val SMETA_VERSION = 7
 
   def fromProgram(program: TProgram, sourceFile: Option[String] = None): ModuleMeta =
     val syms = program.decls.collect {

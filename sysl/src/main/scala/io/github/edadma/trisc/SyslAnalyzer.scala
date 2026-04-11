@@ -47,13 +47,13 @@ class SyslAnalyzer:
     // OS kernel ABI (called from boot.asm):
     "kernel_init", "kernel_main", "schedule", "current_thread",
     "syscall_table", "syscall_ssp", "irq_handlers", "ticks",
-    "thread_count", "query_thread_state", "query_thread_name",
+    "thread_count", "query_thread_state", "query_thread_name", "query_thread_name_len",
     "sleep_until_current", "query_thread_ctx_switches", "query_thread_cpu_ticks",
     "query_total_ctx_switches", "kernel_set_watchdog", "kernel_panic",
     "check_stack_at", "suspend_thread", "resume_thread",
     "kernel_tls_set", "kernel_tls_get", "notify_send", "notify_wait_current",
     "notify_read", "event_wait_current", "event_set_bits", "event_clear_bits",
-    "terminate_current",
+    "terminate_current", "query_thread_pid",
   )
 
   private def shouldMangle(name: String): Boolean =
@@ -95,15 +95,55 @@ class SyslAnalyzer:
   // Expected type for bidirectional inference (used by generic variant constructors)
   private var currentExpected: Option[SyslType] = None
 
-  // Operator desugaring: operator → (trait name, method name). Requires user to define
-  // the traits and provide impls for their types.
-  private val operatorToTrait: Map[String, (String, String)] = Map(
+  // Built-in binary operator → (trait name, method name). Extensible via #operator("sym") on trait methods.
+  private val builtinBinaryOperatorTraits: Map[String, (String, String)] = Map(
     "<"  -> ("Ord", "lt"),  "<=" -> ("Ord", "le"),
     ">"  -> ("Ord", "gt"),  ">=" -> ("Ord", "ge"),
     "==" -> ("Eq",  "eq"),  "!=" -> ("Eq",  "ne"),
     "+"  -> ("Add", "add"), "-"  -> ("Sub", "sub"),
     "*"  -> ("Mul", "mul"), "/"  -> ("Div", "div"),
   )
+
+  private val customBinaryOperatorTraits = new mutable.LinkedHashMap[String, (String, String)]
+
+  private def lookupBinaryOperatorTrait(op: String): Option[(String, String)] =
+    customBinaryOperatorTraits.get(op).orElse(builtinBinaryOperatorTraits.get(op))
+
+  /** Register #operator / #op attributes from trait methods. */
+  private def registerTraitOperatorEntries(traitName: String, methods: List[TraitMethodAST], node: Any): Unit =
+    for m <- methods do
+      val opAttrs = m.attributes.filter(a => a.name == "operator" || a.name == "op")
+      if opAttrs.length > 1 then
+        throw AnalysisError(s"trait method '${m.name}' has multiple #operator / #op attributes", m)
+      opAttrs.headOption.foreach { attr =>
+        val sym = extractOperatorSymbol(attr, m)
+        if builtinBinaryOperatorTraits.contains(sym) then
+          throw AnalysisError(
+            s"operator '$sym' is reserved for built-in trait dispatch; use the standard trait (${builtinBinaryOperatorTraits(sym)._1}) instead of #operator",
+            m,
+          )
+        customBinaryOperatorTraits.get(sym) match
+          case Some((t, meth)) if t != traitName || meth != m.name =>
+            throw AnalysisError(
+              s"operator '$sym' is already bound to trait '$t' (method '$meth')",
+              m,
+            )
+          case _ => ()
+        if m.params.length != 2 then
+          throw AnalysisError(
+            s"trait method '${m.name}' with #operator(\"$sym\") must take exactly two parameters",
+            m,
+          )
+        customBinaryOperatorTraits(sym) = (traitName, m.name)
+      }
+
+  private def extractOperatorSymbol(attr: Attribute, at: Any): String =
+    attr.args match
+      case List(AttrPositional(AttrLitString(s))) if s.nonEmpty => s
+      case List(AttrNamed("sym", AttrLitString(s))) if s.nonEmpty => s
+      case List(AttrNamed("symbol", AttrLitString(s))) if s.nonEmpty => s
+      case _ =>
+        throw AnalysisError(s"#${attr.name} requires a non-empty string literal, e.g. #operator(\"~\")", at)
 
   // Trait / impl support
   private case class TraitInfo(name: String, typeParam: String, methods: List[TraitMethodAST])
@@ -270,6 +310,7 @@ class SyslAnalyzer:
         case TraitDeclAST(name, tparam, methods, _) =>
           if !traits.contains(name) then
             traits(name) = TraitInfo(name, tparam, methods)
+            registerTraitOperatorEntries(name, methods, template)
         case _ =>
 
     // Register trait impl mappings from imported module
@@ -490,6 +531,7 @@ class SyslAnalyzer:
           if methodNames.distinct.length != methodNames.length then
             throw AnalysisError(s"duplicate method names in trait '$name'")
           traits(name) = TraitInfo(name, tparam, methods)
+          registerTraitOperatorEntries(name, methods, decl)
         case InterfaceDeclAST(name, methodASTs, embeddedNames, _) =>
           if interfaceTypes.contains(name) then throw AnalysisError(s"duplicate interface: '$name'", decl)
           // Resolve embedded interfaces and flatten methods
@@ -960,7 +1002,7 @@ class SyslAnalyzer:
   // If an operator has a user-defined struct/enum operand, desugar to the corresponding trait call.
   // Returns None if no desugaring applies (use built-in dispatch).
   private def tryOperatorDispatch(op: String, tLeft: TExpr, tRight: TExpr): Option[TExpr] =
-    operatorToTrait.get(op) match
+    lookupBinaryOperatorTrait(op) match
       case None => None
       case Some((traitName, methodName)) =>
         val operandType = tLeft.typ
@@ -1122,8 +1164,12 @@ class SyslAnalyzer:
       case Some(mangled) => (mangled, functions(mangled))
       case None =>
         val mangled = mangleGenericName(name, inferredArgs)
-        if functions.contains(mangled) then
-          throw AnalysisError(s"generic instantiation '$mangled' collides with existing function")
+        if functions.contains(mangled) && !externalSymbols.contains(mangled) && !externalSymbols.contains(shortName(mangled)) then
+          // Already instantiated locally — reuse it
+          instantiations(cacheKey) = mangled
+          return (mangled, functions(mangled))
+        // If the function exists as an imported symbol, we still need to re-instantiate
+        // locally so the backend emits its body in this compilation unit.
         // Save and install typeEnv for this instantiation
         val savedEnv = typeEnv
         typeEnv = typeParams.zip(inferredArgs).toMap

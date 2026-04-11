@@ -8,13 +8,14 @@ class OSKitIPCTests extends OSKitTestHelpers {
     LiterateRenderer.tangle(doc)
 
   private lazy val ipcSysl: String = readLsysl("oskit/ipc/ipc.lsysl")
+  private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
 
   def runIPC(userSources: Map[String, String], maxCycles: Int = 2000000): (CPU, String) =
     val bootTof = assemble(bootAsm, relocatable = true)
     val allSources = Map(
       "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
       "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
-      "oskit/ipc/ipc" -> ipcSysl,
+      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -39,7 +40,8 @@ class OSKitIPCTests extends OSKitTestHelpers {
     val mem = new Memory("Memory", new RAM(0, Runtime.stdoutAddress.toInt), stdout, intc, timer, dma)
     dma.mem = mem
     linked.load(mem)
-    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles }
+    val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
+    val cpu = new CPU(mem, Seq(timer, intc), mmu = Some(testMmu)) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)

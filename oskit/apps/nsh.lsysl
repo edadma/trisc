@@ -18,7 +18,7 @@ Built-in commands:
 - cd [path]        — change directory
 - stat path        — show file info
 - write path text  — write text to file
-- ps               — list threads
+- kill pid         — terminate a process
 - uptime           — show system uptime
 - whoami           — print uid
 - help             — list commands
@@ -26,11 +26,11 @@ Built-in commands:
     module oskit.apps.nsh
 
     import oskit.fs.ROOT_INODE
-    import oskit.services.{sleep, join, getuid, uptime, thread_id, get_thread_count, get_thread_state, get_thread_name, get_cpu_ticks}
+    import oskit.services.{sleep, join, getuid, uptime, thread_id}
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
-    import oskit.servers.{fs_open, fs_read, fs_write, fs_stat, fs_create, fs_unlink, fs_mkdir, fs_rmdir, fs_readdir, fs_chmod, fs_rename}
+    import oskit.servers.{fs_open, fs_read, fs_write, fs_stat, fs_create, fs_unlink, fs_mkdir, fs_rmdir, fs_readdir, fs_chmod, fs_rename, pm_waitpid, pm_kill}
     import oskit.loader.load_tof
-    import oskit.kernel.{create_thread, create_thread_vm, vm_create_process_pt, vm_set_ptbr, kernel_set_thread_ptbr, KERNEL_L1_BASE}
+    import oskit.kernel.{create_thread, create_process, vm_create_process_pt, vm_set_ptbr, kernel_set_thread_ptbr, kernel_get_thread_pid, KERNEL_L1_BASE}
 
 Shell state.
 
@@ -38,6 +38,7 @@ Shell state.
     var cwd_ino = 1
     var nsh_home_buf: [128]byte
     var nsh_home_len = 0
+    var nsh_background = 0
 
 Set the initial home directory for the next nsh() call.
 Called by login before spawning the shell.
@@ -516,50 +517,6 @@ Built-in commands.
         if nw < 0
             nsh_print("error\n")
 
-    cmd_ps(argc: int, argv: *string)
-        nsh_print("  ID STATE    NAME\n")
-        val count = get_thread_count()
-        for var i = 0; i < count; i++
-            val state = get_thread_state(i)
-            if state != 3
-                // Print ID (right-aligned in 4 chars)
-                if i < 10
-                    nsh_print("   ")
-                else
-                    nsh_print("  ")
-                nsh_putint(i)
-                nsh_putc(' ')
-                // Print state
-                if state == 0
-                    nsh_print("ready   ")
-                else if state == 1
-                    nsh_print("running ")
-                else if state == 2
-                    nsh_print("blocked ")
-                else if state == 4
-                    nsh_print("joining ")
-                else if state == 5
-                    nsh_print("suspend ")
-                else if state == 10
-                    nsh_print("notify  ")
-                else if state == 11
-                    nsh_print("mutex   ")
-                else if state == 20
-                    nsh_print("sendblk ")
-                else if state == 21
-                    nsh_print("recvblk ")
-                else if state == 22
-                    nsh_print("rcvntfy ")
-                else
-                    nsh_print("unknown ")
-                // Print name
-                val np = get_thread_name(i)
-                var j = 0
-                while np[j] != 0
-                    nsh_putc(int(np[j]))
-                    j += 1
-                nsh_newline()
-
     cmd_uptime(argc: int, argv: *string)
         val ticks = uptime()
         nsh_print("up ")
@@ -570,49 +527,55 @@ Built-in commands.
         nsh_putint(getuid())
         nsh_newline()
 
+    cmd_kill(argc: int, argv: *string)
+        if argc < 2
+            nsh_print("usage: kill <pid>\n")
+            return
+        val arg = argv[1]
+        val p = *byte(arg)
+        var pid = 0
+        var i = 0
+        while i < len(arg)
+            val ch = int(p[i])
+            if ch < '0'
+                nsh_print("kill: invalid pid\n")
+                return
+            if ch > '9'
+                nsh_print("kill: invalid pid\n")
+                return
+            pid = pid * 10 + (ch - '0')
+            i += 1
+        val result = pm_kill(pid)
+        if result < 0
+            nsh_print("kill: no such process\n")
+
     cmd_help(argc: int, argv: *string)
         nsh_print("echo cat ls touch write mkdir rm rmdir mv chmod\n")
-        nsh_print("pwd cd stat ps uptime whoami help\n")
-        nsh_print("(echo and cat are /bin executables)\n")
+        nsh_print("pwd cd stat kill uptime whoami help\n")
+        nsh_print("(echo, cat, ps are /bin executables)\n")
 
 Command dispatch.
 
     nsh_dispatch(argc: int, argv: *string)
         if argc == 0
             return
-        val cmd = argv[0]
-        if cmd == "pwd"
-            cmd_pwd(argc, argv)
-        else if cmd == "help"
-            cmd_help(argc, argv)
-        else if cmd == "whoami"
-            cmd_whoami(argc, argv)
-        else if cmd == "ls"
-            cmd_ls(argc, argv)
-        else if cmd == "touch"
-            cmd_touch(argc, argv)
-        else if cmd == "write"
-            cmd_write(argc, argv)
-        else if cmd == "mkdir"
-            cmd_mkdir(argc, argv)
-        else if cmd == "rm"
-            cmd_rm(argc, argv)
-        else if cmd == "rmdir"
-            cmd_rmdir(argc, argv)
-        else if cmd == "mv"
-            cmd_mv(argc, argv)
-        else if cmd == "chmod"
-            cmd_chmod(argc, argv)
-        else if cmd == "cd"
-            cmd_cd(argc, argv)
-        else if cmd == "stat"
-            cmd_stat(argc, argv)
-        else if cmd == "ps"
-            cmd_ps(argc, argv)
-        else if cmd == "uptime"
-            cmd_uptime(argc, argv)
-        else
-            nsh_try_external(argc, argv)
+        argv[0] match
+            "pwd"    -> cmd_pwd(argc, argv)
+            "help"   -> cmd_help(argc, argv)
+            "whoami" -> cmd_whoami(argc, argv)
+            "ls"     -> cmd_ls(argc, argv)
+            "touch"  -> cmd_touch(argc, argv)
+            "write"  -> cmd_write(argc, argv)
+            "mkdir"  -> cmd_mkdir(argc, argv)
+            "rm"     -> cmd_rm(argc, argv)
+            "rmdir"  -> cmd_rmdir(argc, argv)
+            "mv"     -> cmd_mv(argc, argv)
+            "chmod"  -> cmd_chmod(argc, argv)
+            "cd"     -> cmd_cd(argc, argv)
+            "stat"   -> cmd_stat(argc, argv)
+            "kill"   -> cmd_kill(argc, argv)
+            "uptime" -> cmd_uptime(argc, argv)
+            else     -> nsh_try_external(argc, argv)
 
 Try to run an external command from `/bin/`. Writes the
 argument string to a well-known address, loads the program
@@ -626,8 +589,8 @@ Commands such as `echo` and `cat` are not built-ins — they load
     val PROG_ARGS_ADDR = 0xBF000
     val PROG_ARGS_MAX  = 240
     val PROG_BASE      = 0xD0000
-    val PROG_USP       = 0xCE000
-    val PROG_SSP       = 0xCC000
+    val PROG_USP       = 0xD0000
+    val PROG_SSP       = 0xCF000
 
     nsh_try_external(argc: int, argv: *string)
         val cmd = argv[0]
@@ -655,12 +618,13 @@ Commands such as `echo` and `cat` are not built-ins — they load
             return
 
         // Write arguments (in process address space)
+        // argv[0] is the command name (POSIX convention)
         val args_buf = *byte(PROG_ARGS_ADDR)
         var pos = 0
-        for var i = 1; i < argc; i++
+        for var i = 0; i < argc; i++
             if pos >= PROG_ARGS_MAX
                 break
-            if i > 1
+            if i > 0
                 args_buf[pos] = byte(' ')
                 pos += 1
                 if pos >= PROG_ARGS_MAX
@@ -674,18 +638,23 @@ Commands such as `echo` and `cat` are not built-ins — they load
                 pos += 1
         args_buf[pos] = 0
 
-        // Create thread with process page table (set atomically before enqueue)
-        val tid = create_thread_vm(entry, PROG_USP, PROG_SSP, *byte(cmd), proc_pt)
+        // Create process with its own page table
+        val pid = create_process(entry, PROG_USP, PROG_SSP, cmd, proc_pt)
 
         // Restore nsh to kernel address space
         kernel_set_thread_ptbr(my_tid, KERNEL_L1_BASE)
         vm_set_ptbr(KERNEL_L1_BASE)
 
         nsh_flush()
-        if tid >= 0
-            join(tid)
+        if pid >= 0
+            if nsh_background != 0
+                nsh_print("[")
+                nsh_putint(pid)
+                nsh_print("]\n")
+            else
+                pm_waitpid(pid)
         else
-            nsh_print("out of thread slots\n")
+            nsh_print("out of process slots\n")
 
 The shell main loop.
 
@@ -721,7 +690,14 @@ The shell main loop.
                 continue
 
             // Tokenize
-            val argc = tokenize(line, blen, argv)
+            var argc = tokenize(line, blen, argv)
+
+            // Check for trailing &
+            nsh_background = 0
+            if argc > 0
+                if argv[argc - 1] == "&"
+                    nsh_background = 1
+                    argc -= 1
 
             // Dispatch
             nsh_dispatch(argc, argv)

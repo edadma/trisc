@@ -831,7 +831,9 @@ class StringConcatBugTests extends OSKitTestHelpers {
       prefill = "\n",
       maxInodes = 32,
     )
-    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, dma)
+    dma.mem = mem
     linked.load(mem)
 
     val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = 5200000 }
@@ -1190,7 +1192,9 @@ class StringConcatBugTests extends OSKitTestHelpers {
       Runtime.ramdiskAddress, ram, sectors = 64, sectorSize = 4096,
       intc, irq = 3, prefill = "/dev dir\n", maxInodes = 32,
     )
-    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, dma)
+    dma.mem = mem
     linked.load(mem)
     val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = 5200000 }
     cpu.reset()
@@ -1224,7 +1228,9 @@ class StringConcatBugTests extends OSKitTestHelpers {
       prefill = "/dev dir\n",
       maxInodes = 32,
     )
-    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, dma)
+    dma.mem = mem
     linked.load(mem)
 
     val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = 5200000 }

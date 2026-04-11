@@ -2693,6 +2693,62 @@ class SyslTriscCodegen(addresses: Int = 4):
             pat match
               case TWildcard =>
                 emit(s"  bra $hitLabel")
+              case TValuePattern(v) if scrutinee.typ == SyslType.StringType =>
+                // String pattern: compare lengths then bytes
+                // Evaluate pattern string first (may allocate temps)
+                val prePatStr = stackOffset
+                genExpr(v)                          // r1 = addr of pattern string struct
+                emit("  ldd r2, r1, r0")           // r2 = pattern ptr
+                emit("  addi r3, r1, 8")
+                emit("  ldd r3, r3, r0")           // r3 = pattern len
+                val extraPatStr = prePatStr - stackOffset
+                if extraPatStr > 0 then
+                  emitAddImm(7, 7, extraPatStr)
+                  stackOffset = prePatStr
+                emit("  pshd r2")                  // save pattern ptr
+                emit("  pshd r3")                  // save pattern len
+                stackOffset -= 16
+                // Load scrutinee string {ptr, len}
+                emitAddImm(1, 5, scrutineeOffset)
+                emit("  ldd r1, r1, r0")           // r1 = addr of scrutinee string struct
+                emit("  ldd r4, r1, r0")           // r4 = scrutinee ptr
+                emit("  addi r1, r1, 8")
+                emit("  ldd r1, r1, r0")           // r1 = scrutinee len
+                // r1 = scrutinee len, r4 = scrutinee ptr
+                // Stack: sp+0 = pattern len, sp+8 = pattern ptr
+                // Compare lengths
+                emit("  ldd r2, r7, r0")           // r2 = pattern len
+                val strPatNext = newLabel("str_pat_next")
+                emit(s"  bne r1, r2, $strPatNext") // lengths differ → skip
+                // Lengths match — compare bytes (r1 = len as loop counter)
+                emitAddImm(2, 7, 8)
+                emit("  ldd r2, r2, r0")           // r2 = pattern ptr
+                // r4 = scrutinee ptr, r2 = pattern ptr, r1 = len
+                val cmpL = newLabel("str_pat_cmp")
+                val cmpMis = newLabel("str_pat_mis")
+                val strHit = newLabel("str_pat_hit")
+                emit(s"$cmpL")
+                emit(s"  beq r1, r0, $strHit")    // all bytes matched → hit
+                emit("  ldb r3, r4, r0")
+                emit("  pshd r1")
+                emit("  ldb r1, r2, r0")
+                emit(s"  bne r3, r1, $cmpMis")
+                emit("  popd r1")
+                emit("  addi r4, r4, 1")
+                emit("  addi r2, r2, 1")
+                emit("  addi r1, r1, -1")
+                emit(s"  bra $cmpL")
+                emit(s"$cmpMis")
+                emit("  popd r1")                  // clean saved counter
+                emit(s"$strPatNext")
+                // Clean up pattern ptr/len from stack (both paths converge here)
+                emitAddImm(7, 7, 16)
+                stackOffset += 16
+                emit(s"  bra $nextArm")            // no match, skip to next arm
+                emit(s"$strHit")
+                // Clean up pattern ptr/len, then jump to hit
+                emitAddImm(7, 7, 16)
+                emit(s"  bra $hitLabel")
               case TValuePattern(v) =>
                 genExpr(v)
                 emitAddImm(2, 5, scrutineeOffset)

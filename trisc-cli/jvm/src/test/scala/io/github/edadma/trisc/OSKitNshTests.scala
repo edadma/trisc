@@ -29,6 +29,7 @@ class OSKitNshTests extends OSKitTestHelpers {
   private lazy val sha256Sysl: String  = readLsysl("std/crypto/sha256/sha256.lsysl")
   private lazy val hmacSysl: String   = readLsysl("std/crypto/hmac/hmac.lsysl")
   private lazy val pbkdf2Sysl: String = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
+  private lazy val pmSrvSysl: String = readLsysl("oskit/servers/pm.lsysl")
 
   // Shared OS source set — init reads /etc/ttytab to decide what to spawn.
   private def buildOS(): TOF =
@@ -45,6 +46,7 @@ class OSKitNshTests extends OSKitTestHelpers {
       "oskit/drivers/tty/tty"       -> ttySysl,
       "oskit/fs/tfs"                -> tfsSysl,
       "oskit/servers/tfs"           -> tfsSrvSysl,
+      "oskit/servers/pm"            -> pmSrvSysl,
       "posix/unistd/sbrk"          -> sbrkSysl,
       "posix/string/string"        -> posixStringSysl,
       "posix/ctype/ctype"          -> posixCtypeSysl,
@@ -72,7 +74,7 @@ import oskit.apps.init.{init}
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(init, 0x640000, 0x640000, "init")
+          |    create_thread(init, kernel_stack_usp(0), kernel_stack_ssp(0), "init")
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin,
@@ -144,6 +146,7 @@ import oskit.apps.init.{init}
     }
     val ticks: Seq[Processor => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
     val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
+    dma.mmu = Some(testMmu)
     val cpu                     = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
@@ -260,13 +263,6 @@ import oskit.apps.init.{init}
     output should include("data")
   }
 
-  "NSH: ps shows threads" in {
-    val keys        = typeString("ps\n", startTick = 500000)
-    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 10000000)
-    output should include("nsh")
-    output should include("STATE")
-  }
-
   "NSH: uptime shows ticks" in {
     val keys        = typeString("uptime\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 10000000)
@@ -337,6 +333,7 @@ import oskit.apps.init.{init}
     }
     val ticks: Seq[Processor => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
     val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
+    dma.mmu = Some(testMmu)
     val cpu                     = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()

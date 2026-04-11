@@ -14,6 +14,7 @@ class SyslLLVMCodegen:
   private val pendingClosures = new mutable.ListBuffer[(String, TClosure)] // (name, closure)
   private val funcWrappers = new mutable.LinkedHashMap[String, String] // original name -> wrapper name
   private val pendingWrappers = new mutable.ListBuffer[(String, String, List[SyslType], SyslType)] // (wrapperName, origName, params, retType)
+  private val emittedFunctions = new mutable.HashSet[String] // track emitted function names to avoid duplicates
   private var stringCounter = 0
   private var regCounter = 0
   private var labelCounter = 0
@@ -62,6 +63,7 @@ class SyslLLVMCodegen:
     pendingClosures.clear()
     pendingWrappers.clear()
     funcWrappers.clear()
+    emittedFunctions.clear()
 
     // First pass: collect struct type definitions and deinit functions
     structTypes.clear()
@@ -93,7 +95,10 @@ class SyslLLVMCodegen:
         case _: TDataEnumDecl => // type only
         case _: TTypeAliasDecl => // type only
         case _: TInterfaceDecl => // type only
-        case f: TFunDecl => genFunction(f)
+        case f: TFunDecl =>
+          if !emittedFunctions.contains(f.name) then
+            emittedFunctions += f.name
+            genFunction(f)
         case TVarDecl(name, typ, init, _) =>
           val initVal = constValue(init, typ)
           emit(s"@$name = global ${llvmType(typ)} $initVal")
@@ -274,9 +279,11 @@ class SyslLLVMCodegen:
     activeOut = out
     for (reg, lt) <- deferredAllocas do
       emit(s"  $reg = alloca $lt")
-      // Zero-initialize slice allocas so backref field is null on unexecuted paths
+      // Zero-initialize allocas that may be decremented on unexecuted paths
       if lt == "%struct.slice" then
         emit(s"  store %struct.slice zeroinitializer, %struct.slice* $reg")
+      else if lt == "i8*" then
+        emit(s"  store i8* null, i8** $reg")
     out ++= bodyBuf
 
     emit("}")
@@ -353,6 +360,8 @@ class SyslLLVMCodegen:
       emit(s"  $reg = alloca $lt")
       if lt == "%struct.slice" then
         emit(s"  store %struct.slice zeroinitializer, %struct.slice* $reg")
+      else if lt == "i8*" then
+        emit(s"  store i8* null, i8** $reg")
     out ++= bodyBuf
 
     emit("}")
@@ -616,9 +625,12 @@ class SyslLLVMCodegen:
           case SyslType.ArrayType(elem, _) => elem
           case SyslType.SliceType(elem) => elem
           case SyslType.RefType(SyslType.SliceType(elem)) => elem
+          case SyslType.RefType(SyslType.ArrayType(elem, _)) => elem
           case _ => SyslType.IntType(8) // fallback for string indexing
-        val elt = llvmType(elemType)
-        val elemSize = llvmSizeOf(elemType)
+        // For RefType(SliceType(_)) elements, store as inline %struct.slice (24 bytes)
+        val (elt, elemSize) = elemType match
+          case SyslType.RefType(_: SyslType.SliceType) => ("%struct.slice", 24L)
+          case _ => (llvmType(elemType), llvmSizeOf(elemType))
         // Get data pointer
         val dataPtr = array.typ match
           case SyslType.ArrayType(_, _) =>
@@ -643,12 +655,26 @@ class SyslLLVMCodegen:
         emit(s"  $elemAddr = getelementptr i8, i8* $dataPtr, i64 $offset")
         val typedPtr = newReg()
         emit(s"  $typedPtr = bitcast i8* $elemAddr to $elt*")
-        if isAggregate(elemType) then
+        val treatAsAggregate = isAggregate(elemType) || (elemType match
+          case SyslType.RefType(_: SyslType.SliceType) => true
+          case _ => false)
+        if treatAsAggregate then
           val loaded = newReg()
           emit(s"  $loaded = load $elt, $elt* $v")
           emit(s"  store $elt $loaded, $elt* $typedPtr")
         else
-          emit(s"  store $elt $v, $elt* $typedPtr")
+          // Truncate if value is wider than element (e.g., i32 into i8 byte slot)
+          val vLt = llvmType(value.typ)
+          val storeVal = if vLt != elt && value.typ.isIntegral && elemType.isIntegral then
+            val fromWidth = vLt.stripPrefix("i").toInt
+            val toWidth = elt.stripPrefix("i").toInt
+            if fromWidth > toWidth then
+              val tr = newReg()
+              emit(s"  $tr = trunc $vLt $v to $elt")
+              tr
+            else v
+          else v
+          emit(s"  store $elt $storeVal, $elt* $typedPtr")
 
       case TDerefAssignStmt(pointer, value) =>
         val ptr = genExpr(pointer)
@@ -1155,6 +1181,10 @@ class SyslLLVMCodegen:
         if !thenReturned then
           emitScopeCleanup(preThenLocals)
           emit(s"  br label %$mergeLabel")
+        else
+          // Remove locals introduced in the returning branch — their allocas are uninitialized on the other path
+          for key <- locals.keySet.toList if !preThenLocals.contains(key) do
+            locals.remove(key)
         hasReturned = savedHasReturned
 
         emitLabel(elseLabel)
@@ -1182,6 +1212,9 @@ class SyslLLVMCodegen:
         if !elseReturned then
           emitScopeCleanup(preElseLocals)
           emit(s"  br label %$mergeLabel")
+        else
+          for key <- locals.keySet.toList if !preElseLocals.contains(key) do
+            locals.remove(key)
         hasReturned = savedHasReturned
 
         emitLabel(mergeLabel)
@@ -1308,19 +1341,31 @@ class SyslLLVMCodegen:
               r
           case _ =>
             // Slice or other — use byte arithmetic on data pointer
-            val dataPtr = emitSliceDataPtr(base, array.typ)
-            val elemSyslType = elemType match
-              case t => t
-            val elt = llvmType(elemSyslType)
+            // For RefType(SliceType) array type from aggregate TIndex, base is %struct.slice*
+            // — extract data pointer from field 0. Otherwise use emitSliceDataPtr.
+            val dataPtr = (array.typ, array) match
+              case (SyslType.RefType(SyslType.SliceType(_)), _: TIndex) =>
+                // base is %struct.slice* from inline slice element
+                val ptrGep = newReg()
+                emit(s"  $ptrGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 0")
+                val ptr = newReg()
+                emit(s"  $ptr = load i8*, i8** $ptrGep")
+                ptr
+              case _ =>
+                emitSliceDataPtr(base, array.typ)
+            // For RefType(SliceType(_)) elements, treat as inline %struct.slice (24 bytes)
+            val (elt, eSize, asAggregate) = elemType match
+              case SyslType.RefType(_: SyslType.SliceType) => ("%struct.slice", 24L, true)
+              case _ => (llvmType(elemType), llvmSizeOf(elemType), isAggregate(elemType))
             val idx64 = newReg()
             emit(s"  $idx64 = sext i32 $idx to i64")
             val offset = newReg()
-            emit(s"  $offset = mul i64 $idx64, ${llvmSizeOf(elemSyslType)}")
+            emit(s"  $offset = mul i64 $idx64, $eSize")
             val elemAddr = newReg()
             emit(s"  $elemAddr = getelementptr i8, i8* $dataPtr, i64 $offset")
             val typedPtr = newReg()
             emit(s"  $typedPtr = bitcast i8* $elemAddr to $elt*")
-            if isAggregate(elemSyslType) then typedPtr
+            if asAggregate then typedPtr
             else
               val r = newReg()
               emit(s"  $r = load $elt, $elt* $typedPtr")
@@ -1336,6 +1381,15 @@ class SyslLLVMCodegen:
             val len32 = newReg()
             emit(s"  $len32 = load i32, i32* $lenGep")
             len32
+          case SyslType.RefType(SyslType.SliceType(_)) =>
+            val base = genExpr(array) // data pointer for ref-to-slice
+            val lenAddr = newReg()
+            emit(s"  $lenAddr = getelementptr i8, i8* $base, i64 -8")
+            val lenTyped = newReg()
+            emit(s"  $lenTyped = bitcast i8* $lenAddr to i32*")
+            val len32 = newReg()
+            emit(s"  $len32 = load i32, i32* $lenTyped")
+            len32
           case SyslType.StringType =>
             val sp = genExpr(array) // alloca pointer to %struct.string
             val lenGep = newReg()
@@ -1343,6 +1397,26 @@ class SyslLLVMCodegen:
             val len32 = newReg()
             emit(s"  $len32 = load i32, i32* $lenGep")
             len32
+          case SyslType.RefType(_: SyslType.SliceType) =>
+            array match
+              case _: TIndex =>
+                // base is %struct.slice* (aggregate from TIndex into []&[]T)
+                val base = genExpr(array)
+                val lenGep = newReg()
+                emit(s"  $lenGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 1")
+                val len32 = newReg()
+                emit(s"  $len32 = load i32, i32* $lenGep")
+                len32
+              case _ =>
+                // base is i8* data pointer (from ref variable) — length at offset -8
+                val base = genExpr(array)
+                val lenAddr = newReg()
+                emit(s"  $lenAddr = getelementptr i8, i8* $base, i64 -8")
+                val lenPtr = newReg()
+                emit(s"  $lenPtr = bitcast i8* $lenAddr to i32*")
+                val len32 = newReg()
+                emit(s"  $len32 = load i32, i32* $lenPtr")
+                len32
           case _ =>
             emit(s"  ; TODO: len for ${array.typ}")
             "0"
@@ -1357,6 +1431,24 @@ class SyslLLVMCodegen:
             val cap32 = newReg()
             emit(s"  $cap32 = load i32, i32* $capGep")
             cap32
+          case SyslType.RefType(_: SyslType.SliceType) =>
+            array match
+              case _: TIndex =>
+                val base = genExpr(array)
+                val capGep = newReg()
+                emit(s"  $capGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 2")
+                val cap32 = newReg()
+                emit(s"  $cap32 = load i32, i32* $capGep")
+                cap32
+              case _ =>
+                val base = genExpr(array)
+                val capAddr = newReg()
+                emit(s"  $capAddr = getelementptr i8, i8* $base, i64 -4")
+                val capPtr = newReg()
+                emit(s"  $capPtr = bitcast i8* $capAddr to i32*")
+                val cap32 = newReg()
+                emit(s"  $cap32 = load i32, i32* $capPtr")
+                cap32
           case _ =>
             emit(s"  ; TODO: cap for ${array.typ}")
             "0"
@@ -2012,6 +2104,66 @@ class SyslLLVMCodegen:
             emit(s"  $dataPtr = getelementptr [$byteLen x i8], [$byteLen x i8]* $label, i32 0, i32 0")
             emitMakeString(dataPtr, s"${byteLen - 1}")
 
+      case TFmtStr(inner, spec) =>
+        val v = genExpr(inner)
+        // Build printf format string from FmtSpec
+        val fmt = new StringBuilder("%")
+        if spec.leftAlign then fmt += '-'
+        if spec.zeroPad then fmt += '0'
+        if spec.showSign then fmt += '+'
+        if spec.width > 0 then fmt ++= spec.width.toString
+        inner.typ match
+          case t if t.isIntegral =>
+            val verb = if spec.upperCase then spec.verb.toUpper else spec.verb
+            verb match
+              case 'x' | 'X' => fmt ++= (if t == SyslType.IntType(64) then "lx" else "x")
+              case 'o' => fmt ++= (if t == SyslType.IntType(64) then "lo" else "o")
+              case _ => fmt ++= (if t == SyslType.IntType(64) then "ld" else "d")
+            if spec.upperCase && (spec.verb == 'x') then
+              // snprintf %X handles uppercase directly
+              val fmtStr2 = fmt.toString.replace("x", "X").replace("lx", "lX")
+              val (label, byteLen) = internString(fmtStr2)
+              val vt = llvmType(inner.typ)
+              val arg = if vt == "i64" then s"i64 $v"
+                else if vt == "i32" then s"i32 $v"
+                else
+                  val ext = newReg()
+                  if t.isSigned then emit(s"  $ext = sext $vt $v to i32")
+                  else emit(s"  $ext = zext $vt $v to i32")
+                  s"i32 $ext"
+              emitSnprintfToString(label, byteLen, arg)
+            else
+              val fmtString = fmt.toString
+              val (label, byteLen) = internString(fmtString)
+              val vt = llvmType(inner.typ)
+              val arg = if vt == "i64" then s"i64 $v"
+                else if vt == "i32" then s"i32 $v"
+                else
+                  val ext = newReg()
+                  if t.isSigned then emit(s"  $ext = sext $vt $v to i32")
+                  else emit(s"  $ext = zext $vt $v to i32")
+                  s"i32 $ext"
+              emitSnprintfToString(label, byteLen, arg)
+          case SyslType.DoubleType =>
+            fmt += 'g'
+            val fmtString = fmt.toString
+            val (label, byteLen) = internString(fmtString)
+            emitSnprintfToString(label, byteLen, s"double $v")
+          case SyslType.StringType =>
+            // For string verb with width padding, use snprintf with %s
+            fmt += 's'
+            val fmtString = fmt.toString
+            val (label, byteLen) = internString(fmtString)
+            // Extract ptr from fat string
+            val ptr = newReg()
+            emit(s"  $ptr = getelementptr %struct.string, %struct.string* $v, i32 0, i32 0")
+            val sPtr = newReg()
+            emit(s"  $sPtr = load i8*, i8** $ptr")
+            emitSnprintfToString(label, byteLen, s"i8* $sPtr")
+          case _ =>
+            // Fallback: treat as TStr
+            genExpr(TStr(inner))
+
       case TCast(inner, targetType) =>
         val v = genExpr(inner)
         val fromLt = llvmType(inner.typ)
@@ -2229,6 +2381,7 @@ class SyslLLVMCodegen:
   private def llvmSizeOf(t: SyslType): Long = t match
     case SyslType.StringType => 16  // {i8*, i32} — matches Sysl's sizeOf
     case SyslType.PtrType(_) => 8
+    case SyslType.RefType(_: SyslType.SliceType) => 24  // inline %struct.slice
     case SyslType.RefType(_) => 8
     case SyslType.FuncType(_, _) => 16  // {i8*, i8*}
     case SyslType.BoolType => 1

@@ -98,6 +98,7 @@ context_switch
 
 do_schedule
   mov  r1, r7           ; r1 = current SSP (with saved context)
+  movi r7, 0x7FFFF8     ; switch to kernel stack (identity-mapped, safe across PTBR switch)
   movi r4, schedule
   jalr r6, r4           ; r1 = next thread's SSP (or 0 = idle)
 
@@ -260,6 +261,10 @@ trap_handler
   beq r1, r3, .sys_event_set    ; 27 = event_set(packed)
   ldi r3, 28
   beq r1, r3, .sys_event_clear  ; 28 = event_clear(packed)
+  ldi r3, 42
+  beq r1, r3, .sys_thread_pid   ; 42 = thread_pid(id)
+  ldi r3, 43
+  beq r1, r3, .sys_thread_name_len ; 43 = thread_name_len(id)
 
   ; Slow path: save full context for syscalls that context-switch
   pshr r6                       ; save user's r1-r6
@@ -713,6 +718,42 @@ extern event_clear_bits
   sti
   rte
 
+
+; thread_pid(id): return PID of thread r2
+extern query_thread_pid
+
+.sys_thread_pid
+  pshd r2
+  pshd r4
+  pshd r5
+  pshd r6
+  mov  r1, r2
+  movi r4, query_thread_pid
+  jalr r6, r4
+  popd r6
+  popd r5
+  popd r4
+  popd r2
+  sti
+  rte
+
+; thread_name_len(id): return name length of thread r2
+extern query_thread_name_len
+
+.sys_thread_name_len
+  pshd r2
+  pshd r4
+  pshd r5
+  pshd r6
+  mov  r1, r2
+  movi r4, query_thread_name_len
+  jalr r6, r4
+  popd r6
+  popd r5
+  popd r4
+  popd r2
+  sti
+  rte
 
 ; ============================================================================
 ; Syscall wrappers — called from user Sysl code

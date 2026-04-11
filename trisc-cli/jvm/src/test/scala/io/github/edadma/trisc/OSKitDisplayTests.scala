@@ -109,62 +109,12 @@ class OSKitDisplayTests extends OSKitTestHelpers {
     dma.mem = mem
     memRef = mem
     linked.load(mem)
-    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles }
+    val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
+    dma.mmu = Some(testMmu)
+    val cpu = new CPU(mem, Seq(timer, intc), mmu = Some(testMmu)) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)
-
-  "Display server: OS desktop from TOF file" ignore {
-    // Load the TOF file that the GUI would use
-    val tofStr = scala.io.Source.fromFile("/tmp/os-desktop.tof").mkString
-    val linked = TOF.deserialize(tofStr)
-    linked.tofType shouldBe TOFType.Executable
-
-    val output = new StringBuilder
-    val stdout = new Stdout(Runtime.stdoutAddress, s => output ++= s)
-    val intc = new InterruptController(Runtime.intcAddress)
-    val timer = new Timer(Runtime.timerAddress, intc, irq = 0)
-    val kbd = new KeyboardDevice(Runtime.keyboardAddress, intc, irq = 1)
-    val mouse = new MouseDevice(Runtime.mouseAddress, intc, irq = 2)
-    val fb = new FramebufferImage(Runtime.framebufferAddress, Runtime.framebufferMaxSize)
-    val displayCtrl = new HeadlessDisplayController(Runtime.displayCtrlAddress, fb)
-    var memRef: Addressable = null
-    val memProxy: Addressable = new Addressable {
-      val name = "memProxy"; val base = 0L; val size = 0L
-      def readByte(addr: Long): Int = memRef.readByte(addr)
-      def writeByte(addr: Long, data: Long): Unit = ()
-      def loadByte(addr: Long, data: Long): Unit = ()
-      override def readInt(addr: Long): Int = memRef.readInt(addr)
-    }
-    val drawEngine = new DrawEngine(
-      Runtime.drawEngineAddress, memProxy, fb,
-      () => displayCtrl.currentFBWidth, () => displayCtrl.currentFBHeight,
-    )
-    // Include ramdisk like the GUI does
-    val ram = new RAM(0, Runtime.stdoutAddress.toInt)
-    val ramdisk = new Ramdisk(Runtime.ramdiskAddress, ram, sectors = 256, sectorSize = 4096, intc, irq = 3,
-      prefill = "/dev/tty0 char 0 0\n/dev/disk0 block 1 0\n/dev/null char 0 1\n")
-    val blitter = new Blitter(Runtime.blitterAddress, memProxy, fb,
-      () => displayCtrl.currentFBWidth, () => displayCtrl.currentFBHeight)
-    val dma = new DMA(Runtime.dmaAddress, null, intc, 4)
-    val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, mouse, displayCtrl, fb, drawEngine, ramdisk, blitter, dma)
-    dma.mem = mem
-    memRef = mem
-    linked.load(mem)
-    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = 20000000 }
-    cpu.reset()
-    cpu.run()
-    output.toString should include("!")
-  }
-
-  "Display server: OS desktop demo" ignore {
-    val appSysl = scala.io.Source.fromFile("examples/draw-hello/os-desktop.sysl").mkString
-    val (cpu, output) = runDisplay(Map("app" -> appSysl), maxCycles = 20000000)
-    output should include("S")  // server started
-    output should include("A")  // app started
-    output should include("P")  // port found
-    output should include("!")  // completed
-  }
 
   "Display server: client creates a window" in {
     val (cpu, output) = runDisplay(Map(

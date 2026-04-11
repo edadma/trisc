@@ -80,6 +80,28 @@ class SyslOperatorSugarTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 1122
   }
 
+  // ===== Custom binary operators via #operator on trait methods =====
+
+  "binary ~ via #operator on trait method" in {
+    eval(
+      """struct Bits
+        |    v: int
+        |
+        |trait Fuse[T]
+        |    #operator("~")
+        |    fuse(a: T, b: T) -> T
+        |
+        |impl Fuse[Bits]
+        |    fuse(a: Bits, b: Bits) -> Bits = Bits(a.v | b.v)
+        |
+        |main() -> int
+        |    a = Bits(5)
+        |    b = Bits(10)
+        |    c = a ~ b
+        |    c.v
+        |""".stripMargin) shouldBe 15
+  }
+
   "arithmetic chain via traits" in {
     eval(
       """struct Money

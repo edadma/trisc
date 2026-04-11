@@ -153,12 +153,24 @@ Slot range: 0-3. Value range: 0 to 16777215.
 
     val SYS_PIMUTEX_LOCK   = 29
     val SYS_PIMUTEX_UNLOCK = 30
+    val SYS_WAITPID        = 40
+    val SYS_GETPID         = 41
+    val SYS_THREAD_PID     = 42
 
     pimutex_lock_sys(addr: i64)
         syscall(SYS_PIMUTEX_LOCK, addr)
 
     pimutex_unlock_sys(addr: i64)
         syscall(SYS_PIMUTEX_UNLOCK, addr)
+
+    waitpid(pid: int)
+        syscall(SYS_WAITPID, pid)
+
+    getpid() -> int
+        syscall(SYS_GETPID, 0)
+
+    get_thread_pid(id: int) -> int
+        syscall(SYS_THREAD_PID, id)
 
     getuid() -> int
         kernel_getuid()

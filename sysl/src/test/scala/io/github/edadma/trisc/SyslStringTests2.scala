@@ -266,4 +266,19 @@ class SyslStringTests2 extends SyslTestHelpers {
         |    0
         |""".stripMargin) shouldBe "hello"
   }
+
+  "formatted string plain" in {
+    output(
+      "main() -> int\n    puts(f\"hello\")\n    0\n") shouldBe "hello"
+  }
+
+  "formatted string hex interp braces" in {
+    output(
+      "main() -> int\n    val x = 255\n    puts(f\"hex: ${x}%x\")\n    0\n") shouldBe "hex: ff"
+  }
+
+  "formatted string hex interp bare" in {
+    output(
+      "main() -> int\n    val x = 255\n    puts(f\"hex: $x%x\")\n    0\n") shouldBe "hex: ff"
+  }
 }

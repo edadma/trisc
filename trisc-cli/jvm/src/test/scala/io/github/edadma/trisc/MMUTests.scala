@@ -350,6 +350,8 @@ class MMUTests extends TestHelpers {
   "SPTBR and GPTBR instructions work" in {
     val rawMem = new Memory("Memory", new RAM(0, 0x1000))
     val mmu = new SimpleMMU(rawMem)
+    // Setting PTBR auto-enables MMU, so use identity range to keep fetches working
+    mmu.setIdentityRange(0x8000L, 0x1000L)
     val tof = assemble(
       s"""${VECTORS}movi r1, 0x8000
          |sptbr r1, r0

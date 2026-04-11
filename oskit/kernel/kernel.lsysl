@@ -28,6 +28,30 @@ The trap handler in boot.asm dispatches based on r1:
     val NUM_PRIORITIES = 4
     val DEFAULT_QUANTUM = 5
 
+Kernel thread stacks. A static array in BSS, sized at compile
+time. Each thread gets THREAD_STACK_SIZE bytes, split evenly
+between user stack (lower half) and supervisor stack (upper
+half). Stacks grow downward, so USP and SSP point to the TOP
+of each half.
+
+Placing stacks in BSS guarantees they cannot be overwritten
+by sbrk (heap grows from _heap_start, which is after BSS).
+This follows the Minix 3 approach of static kernel task stacks.
+
+    val THREAD_STACK_SIZE = 0x4000
+    val THREAD_STACK_HALF = 0x2000
+    var kernel_stacks: [8][16384]byte
+
+Return (usp, ssp) for a thread slot. USP is the top of the
+lower half; SSP is the top of the upper half. The caller
+passes these to create_thread.
+
+    kernel_stack_usp(slot: int) -> i64
+        i64(&kernel_stacks[slot][0]) + THREAD_STACK_HALF
+
+    kernel_stack_ssp(slot: int) -> i64
+        i64(&kernel_stacks[slot][0]) + THREAD_STACK_SIZE
+
     val STATE_READY        = 0
     val STATE_RUNNING      = 1
     val STATE_BLOCKED      = 2
@@ -58,7 +82,7 @@ Statistics fields track per-thread performance:
         ssp: i64
         state: int
         wake_tick: int
-        name: *byte
+        name: string
         priority: int
         join_target: int
         quantum: int
@@ -72,6 +96,7 @@ Statistics fields track per-thread performance:
         uid: int
         blocked_on: i64
         ptbr: int
+        pid: int
 
 Run queues: one FIFO queue per priority level. Each queue
 has a head and tail index. Enqueue appends to tail, dequeue
@@ -90,6 +115,36 @@ from bit 0.
     var current_thread = -1
     var thread_count = 0
     var ticks = 0
+
+Process table. A process wraps one or more threads with an
+isolated address space (page table). PID 0 is the kernel;
+all kernel threads implicitly belong to it. External programs
+loaded by nsh each get their own process entry.
+
+    val PROC_FREE    = 0
+    val PROC_RUNNING = 1
+    val PROC_ZOMBIE  = 2
+
+    val MAX_PROCESSES = 16
+
+    struct Process
+        state: int
+        ptbr: int
+        parent_tid: int
+        exit_code: int
+        main_tid: int
+        name: string
+
+    var processes: [16]Process
+    var next_pid = 1
+
+PM registration. The PM server registers its thread ID so
+the kernel can send notifications on process exit.
+
+    var kernel_pm_tid = -1
+
+    kernel_register_pm(tid: int)
+        kernel_pm_tid = tid
 
 Watchdog configuration. When a thread uses max_consec_quanta
 consecutive full quanta without voluntarily yielding or sleeping,
@@ -258,17 +313,31 @@ Build kernel identity page table using superpages (4MB each):
         // Enable the MMU
         vm_set_ptbr(KERNEL_L1_BASE)
 
-Physical page allocator — bump allocator from the page pool.
-Returns a zeroed 4KB page, or 0 on exhaustion.
+Physical page allocator — bump allocator with free list.
+Freed pages are pushed onto a singly-linked list (next pointer
+stored in the first 8 bytes of each free page). page_alloc
+pops from the free list first, then falls back to bumping.
 
     import std.mem.memset
 
+    var page_free_list = 0
+
     page_alloc() -> int
+        if page_free_list != 0
+            val page = page_free_list
+            var next: *i64 = *i64(page)
+            page_free_list = int(*next)
+            return page
         if page_pool_next >= PAGE_POOL_END
             return 0
         val page = page_pool_next
         page_pool_next += PAGE_SIZE
         page
+
+    page_free(addr: int)
+        var p: *i64 = *i64(addr)
+        *p = i64(page_free_list)
+        page_free_list = addr
 
 Allocate a zeroed page (for page tables and BSS).
 
@@ -330,6 +399,38 @@ Returns L1 base address, or 0 on failure.
 
         // L2[0x100-0x3FF]: unmapped (already zeroed by page_alloc)
         l1
+
+Free all pages allocated for a process page table: the program
+region pages (L2 entries 0xCC-0xFF), the L2 table, and the L1
+table. Kernel identity-mapped pages (L2 entries 0x00-0xCB) are
+NOT freed — they point to shared kernel memory.
+
+    vm_free_process_pt(l1_addr: int)
+        if l1_addr == 0
+            return
+        if l1_addr == KERNEL_L1_BASE
+            return
+
+        // Read L1[0] to find the L2 table
+        var l1e: *i32 = *i32(l1_addr)
+        val l1_pte = *l1e
+        if (l1_pte & PTE_V) == 0
+            return
+        val l2_addr = ((l1_pte >> 10) & 0xFFFFF) << 12
+
+        // Free program pages (L2 entries 0xCC-0xFF)
+        var i = 0xCC
+        while i < 0x100
+            var p: *i32 = *i32(l2_addr + i * 4)
+            val pte = *p
+            if (pte & PTE_V) != 0
+                val phys = ((pte >> 10) & 0xFFFFF) << 12
+                page_free(phys)
+            i += 1
+
+        // Free the L2 and L1 tables themselves
+        page_free(l2_addr)
+        page_free(l1_addr)
 
 Software page table walk — translate a virtual address using
 the given page table. Used for cross-address-space copies.
@@ -396,6 +497,9 @@ Set a thread's page table base register.
     kernel_set_thread_ptbr(tid: int, ptbr: int)
         threads[tid].ptbr = ptbr
 
+    kernel_get_thread_pid(tid: int) -> int
+        threads[tid].pid
+
     kernel_init()
         vm_init()
         register_syscall(0, sleep_current)
@@ -405,6 +509,8 @@ Set a thread's page table base register.
         register_syscall(10, sleep_until_current)
         register_syscall(29, pimutex_lock_kernel)
         register_syscall(30, pimutex_unlock_kernel)
+        register_syscall(40, waitpid_current)
+        register_syscall(41, getpid_current)
 
 Thread-local storage. A flat 2D array indexed by [thread_id][slot].
 Each thread gets TLS_SLOTS slots of int-sized values. Access is
@@ -506,14 +612,14 @@ PSR, PC, r1-r6, USP (9 x 8 bytes, top to bottom)
         *(*i64(sp)) = usp               // USP
         sp
 
-    create_thread(entry_point: i64, usp: i64, ssp: i64, name: *byte) -> int =
+    create_thread(entry_point: i64, usp: i64, ssp: i64, name: string) -> int =
         create_thread_pri(entry_point, usp, ssp, name, 0, KERNEL_L1_BASE)
 
 Create a thread with a specific page table. The ptbr is set
 atomically before the thread is enqueued, preventing a race
 where the scheduler picks up the thread with the wrong ptbr.
 
-    create_thread_vm(entry_point: i64, usp: i64, ssp: i64, name: *byte, ptbr: int) -> int =
+    create_thread_vm(entry_point: i64, usp: i64, ssp: i64, name: string, ptbr: int) -> int =
         create_thread_pri(entry_point, usp, ssp, name, 0, ptbr)
 
 Lower priority number = higher priority. Priority 0 runs first.
@@ -523,7 +629,7 @@ otherwise appends at thread_count (if below MAX_THREADS). Returns the thread
 index, or -1 if every slot is in use. Without reuse, short-lived /bin programs
 would monotonically bump thread_count and walk off the end of threads[].
 
-    create_thread_pri(entry_point: i64, usp: i64, ssp: i64, name: *byte, priority: int, ptbr_val: int) -> int
+    create_thread_pri(entry_point: i64, usp: i64, ssp: i64, name: string, priority: int, ptbr_val: int) -> int
         asm("cli")
         ensure_queues_init()
         var idx = -1
@@ -556,13 +662,16 @@ would monotonically bump thread_count and walk off the end of threads[].
         threads[idx].base_priority = priority
         threads[idx].blocked_on = 0
         threads[idx].ptbr = ptbr_val
+        threads[idx].pid = 0
         if current_thread >= 0
             threads[idx].uid = threads[current_thread].uid
         else
             threads[idx].uid = 0
-        // Write stack canary at bottom of user stack
-        var canary_addr: *int = *int(usp)
-        *canary_addr = STACK_CANARY
+        // Write stack canary at bottom of user stack (skip for process threads
+        // where USP overlaps with code base)
+        if ptbr_val == KERNEL_L1_BASE
+            var canary_addr: *int = *int(usp)
+            *canary_addr = STACK_CANARY
         enqueue(priority, idx)
         asm("sti")
         idx
@@ -587,13 +696,19 @@ would monotonically bump thread_count and walk off the end of threads[].
         threads[id].state
 
     query_thread_name(id: int) -> *byte
-        threads[id].name
+        *byte(threads[id].name)
+
+    query_thread_name_len(id: int) -> int
+        len(threads[id].name)
 
     kernel_getuid() -> int
         threads[current_thread].uid
 
     kernel_setuid(uid: int)
         threads[current_thread].uid = uid
+
+    query_thread_pid(id: int) -> int
+        threads[id].pid
 
     query_thread_ctx_switches(id: int) -> int
         threads[id].ctx_switches
@@ -613,7 +728,16 @@ enqueueing them back into their priority run queue.
     terminate_current()
         threads[current_thread].state = STATE_TERMINATED
 
+        // If this thread belongs to a process, mark it as zombie
+        // and notify PM so it can handle reaping
+        val pid = threads[current_thread].pid
+        if pid > 0
+            processes[pid].state = PROC_ZOMBIE
+            if kernel_pm_tid >= 0
+                notify_send(kernel_pm_tid, pid)
+
         // Wake threads waiting to join on this thread
+        // (used for kernel threads; processes use PM)
         var i = 0
         while i < thread_count
             if threads[i].state == STATE_JOINING
@@ -633,6 +757,94 @@ target thread ID so terminate_current can wake us.
         threads[current_thread].state = STATE_JOINING
         threads[current_thread].join_target = target_id
         threads[current_thread].consec_quanta = 0
+
+Process management. create_process allocates a process table
+entry and creates a thread for it. waitpid blocks the caller
+until the process exits. getpid returns the current thread's
+process ID (0 for kernel threads).
+
+    create_process(entry_point: i64, usp: i64, ssp: i64, name: string, ptbr_val: int) -> int
+        // Allocate PID
+        var pid = -1
+        var i = 1
+        while i < MAX_PROCESSES
+            if processes[i].state == PROC_FREE
+                pid = i
+                break
+            i += 1
+        if pid < 0
+            return -1
+
+        // Create the thread
+        val tid = create_thread_pri(entry_point, usp, ssp, name, 0, ptbr_val)
+        if tid < 0
+            return -1
+
+        // Set up process entry
+        processes[pid].state = PROC_RUNNING
+        processes[pid].ptbr = ptbr_val
+        processes[pid].parent_tid = current_thread
+        processes[pid].exit_code = 0
+        processes[pid].main_tid = tid
+        processes[pid].name = name
+
+        // Link thread to process
+        threads[tid].pid = pid
+        pid
+
+    reap_process(pid: int)
+        vm_free_process_pt(processes[pid].ptbr)
+        processes[pid].state = PROC_FREE
+
+    waitpid_current(pid: int)
+        if pid < 0
+            return
+        if pid >= MAX_PROCESSES
+            return
+        if processes[pid].state == PROC_ZOMBIE
+            reap_process(pid)
+            return
+        if processes[pid].state == PROC_FREE
+            return
+        // Block on the process's main thread
+        val tid = processes[pid].main_tid
+        if threads[tid].state == STATE_TERMINATED
+            reap_process(pid)
+            return
+        threads[current_thread].state = STATE_JOINING
+        threads[current_thread].join_target = tid
+        threads[current_thread].consec_quanta = 0
+
+    getpid_current() -> i64
+        threads[current_thread].pid
+
+Kill a process by PID. Terminates its main thread and marks
+the process as zombie. Returns 0 on success, -1 on error.
+
+    kernel_kill_process(pid: int) -> int
+        if pid <= 0
+            return -1
+        if pid >= MAX_PROCESSES
+            return -1
+        if processes[pid].state != PROC_RUNNING
+            return -1
+
+        val tid = processes[pid].main_tid
+        threads[tid].state = STATE_TERMINATED
+
+        // Free pages and reap immediately
+        reap_process(pid)
+
+        // Wake threads joining on this thread
+        var i = 0
+        while i < thread_count
+            if threads[i].state == STATE_JOINING
+                if threads[i].join_target == tid
+                    threads[i].state = STATE_READY
+                    threads[i].quantum = DEFAULT_QUANTUM
+                    enqueue(threads[i].priority, i)
+            i += 1
+        0
 
 Returns next thread's SSP, or 0 if no threads are READY.
 When 0 is returned, the assembly caller does wfi + retries.
@@ -702,13 +914,13 @@ Steps:
                     threads[next].state = STATE_RUNNING
                     threads[next].ctx_switches += 1
                     total_ctx_switches += 1
-                    //vm_set_ptbr(threads[next].ptbr)
+                    vm_set_ptbr(threads[next].ptbr)
                     return threads[next].ssp
             pri += 1
 
         // No ready threads — return 0 to signal idle
         current_thread = -1
-        //vm_set_ptbr(KERNEL_L1_BASE)
+        vm_set_ptbr(KERNEL_L1_BASE)
         0
 
 Called by boot.asm after kernel_main() returns, so boot can
@@ -726,7 +938,7 @@ highest-priority non-empty queue.
                     threads[next].state = STATE_RUNNING
                     threads[next].ctx_switches += 1
                     total_ctx_switches += 1
-                    //vm_set_ptbr(threads[next].ptbr)
+                    vm_set_ptbr(threads[next].ptbr)
                     return threads[next].ssp
             pri += 1
         0
