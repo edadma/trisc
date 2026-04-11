@@ -1381,22 +1381,6 @@ class SyslLLVMCodegen:
             val len32 = newReg()
             emit(s"  $len32 = load i32, i32* $lenGep")
             len32
-          case SyslType.RefType(SyslType.SliceType(_)) =>
-            val base = genExpr(array) // data pointer for ref-to-slice
-            val lenAddr = newReg()
-            emit(s"  $lenAddr = getelementptr i8, i8* $base, i64 -8")
-            val lenTyped = newReg()
-            emit(s"  $lenTyped = bitcast i8* $lenAddr to i32*")
-            val len32 = newReg()
-            emit(s"  $len32 = load i32, i32* $lenTyped")
-            len32
-          case SyslType.StringType =>
-            val sp = genExpr(array) // alloca pointer to %struct.string
-            val lenGep = newReg()
-            emit(s"  $lenGep = getelementptr %struct.string, %struct.string* $sp, i32 0, i32 1")
-            val len32 = newReg()
-            emit(s"  $len32 = load i32, i32* $lenGep")
-            len32
           case SyslType.RefType(_: SyslType.SliceType) =>
             array match
               case _: TIndex =>
@@ -1417,6 +1401,13 @@ class SyslLLVMCodegen:
                 val len32 = newReg()
                 emit(s"  $len32 = load i32, i32* $lenPtr")
                 len32
+          case SyslType.StringType =>
+            val sp = genExpr(array) // alloca pointer to %struct.string
+            val lenGep = newReg()
+            emit(s"  $lenGep = getelementptr %struct.string, %struct.string* $sp, i32 0, i32 1")
+            val len32 = newReg()
+            emit(s"  $len32 = load i32, i32* $lenGep")
+            len32
           case _ =>
             emit(s"  ; TODO: len for ${array.typ}")
             "0"
