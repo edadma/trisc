@@ -726,7 +726,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 3
   }
 
-  "std.bytes join" ignore { // TODO: empty output — likely backref issue with []&[]byte in join
+  "std.bytes join" in {
     llvmOutputWithStd(
       """import std.bytes.*
         |

@@ -631,5 +631,4 @@ class SyslLLVMGapTests extends SyslLLVMTestHelpers {
         |    val c = concat(a[:], b[:])
         |    println(len(c) * 100 + c[0] + c[4])
         |""".stripMargin) shouldBe "506"
-  }
-}
+  }}
