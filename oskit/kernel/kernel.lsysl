@@ -72,6 +72,7 @@ Statistics fields track per-thread performance:
         uid: int
         blocked_on: i64
         ptbr: int
+        pid: int
 
 Run queues: one FIFO queue per priority level. Each queue
 has a head and tail index. Enqueue appends to tail, dequeue
@@ -90,6 +91,28 @@ from bit 0.
     var current_thread = -1
     var thread_count = 0
     var ticks = 0
+
+Process table. A process wraps one or more threads with an
+isolated address space (page table). PID 0 is the kernel;
+all kernel threads implicitly belong to it. External programs
+loaded by nsh each get their own process entry.
+
+    val PROC_FREE    = 0
+    val PROC_RUNNING = 1
+    val PROC_ZOMBIE  = 2
+
+    val MAX_PROCESSES = 16
+
+    struct Process
+        state: int
+        ptbr: int
+        parent_tid: int
+        exit_code: int
+        main_tid: int
+        name: *byte
+
+    var processes: [16]Process
+    var next_pid = 1
 
 Watchdog configuration. When a thread uses max_consec_quanta
 consecutive full quanta without voluntarily yielding or sleeping,
@@ -396,6 +419,9 @@ Set a thread's page table base register.
     kernel_set_thread_ptbr(tid: int, ptbr: int)
         threads[tid].ptbr = ptbr
 
+    kernel_get_thread_pid(tid: int) -> int
+        threads[tid].pid
+
     kernel_init()
         vm_init()
         register_syscall(0, sleep_current)
@@ -405,6 +431,8 @@ Set a thread's page table base register.
         register_syscall(10, sleep_until_current)
         register_syscall(29, pimutex_lock_kernel)
         register_syscall(30, pimutex_unlock_kernel)
+        register_syscall(31, waitpid_current)
+        register_syscall(32, getpid_current)
 
 Thread-local storage. A flat 2D array indexed by [thread_id][slot].
 Each thread gets TLS_SLOTS slots of int-sized values. Access is
@@ -556,6 +584,7 @@ would monotonically bump thread_count and walk off the end of threads[].
         threads[idx].base_priority = priority
         threads[idx].blocked_on = 0
         threads[idx].ptbr = ptbr_val
+        threads[idx].pid = 0
         if current_thread >= 0
             threads[idx].uid = threads[current_thread].uid
         else
@@ -613,6 +642,11 @@ enqueueing them back into their priority run queue.
     terminate_current()
         threads[current_thread].state = STATE_TERMINATED
 
+        // If this thread belongs to a process, mark it as zombie
+        val pid = threads[current_thread].pid
+        if pid > 0
+            processes[pid].state = PROC_ZOMBIE
+
         // Wake threads waiting to join on this thread
         var i = 0
         while i < thread_count
@@ -633,6 +667,63 @@ target thread ID so terminate_current can wake us.
         threads[current_thread].state = STATE_JOINING
         threads[current_thread].join_target = target_id
         threads[current_thread].consec_quanta = 0
+
+Process management. create_process allocates a process table
+entry and creates a thread for it. waitpid blocks the caller
+until the process exits. getpid returns the current thread's
+process ID (0 for kernel threads).
+
+    create_process(entry_point: i64, usp: i64, ssp: i64, name: *byte, ptbr_val: int) -> int
+        // Allocate PID
+        var pid = -1
+        var i = 1
+        while i < MAX_PROCESSES
+            if processes[i].state == PROC_FREE
+                pid = i
+                break
+            i += 1
+        if pid < 0
+            return -1
+
+        // Create the thread
+        val tid = create_thread_pri(entry_point, usp, ssp, name, 0, ptbr_val)
+        if tid < 0
+            return -1
+
+        // Set up process entry
+        processes[pid].state = PROC_RUNNING
+        processes[pid].ptbr = ptbr_val
+        processes[pid].parent_tid = current_thread
+        processes[pid].exit_code = 0
+        processes[pid].main_tid = tid
+        processes[pid].name = name
+
+        // Link thread to process
+        threads[tid].pid = pid
+        pid
+
+    waitpid_current(pid: int)
+        if pid < 0
+            return
+        if pid >= MAX_PROCESSES
+            return
+        if processes[pid].state == PROC_ZOMBIE
+            // Already exited — reap immediately
+            processes[pid].state = PROC_FREE
+            return
+        if processes[pid].state == PROC_FREE
+            return
+        // Block on the process's main thread
+        val tid = processes[pid].main_tid
+        if threads[tid].state == STATE_TERMINATED
+            processes[pid].state = PROC_FREE
+            return
+        threads[current_thread].state = STATE_JOINING
+        threads[current_thread].join_target = tid
+        threads[current_thread].consec_quanta = 0
+
+    getpid_current() -> i64
+        threads[current_thread].pid
 
 Returns next thread's SSP, or 0 if no threads are READY.
 When 0 is returned, the assembly caller does wfi + retries.
