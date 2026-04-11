@@ -281,17 +281,31 @@ Build kernel identity page table using superpages (4MB each):
         // Enable the MMU
         vm_set_ptbr(KERNEL_L1_BASE)
 
-Physical page allocator — bump allocator from the page pool.
-Returns a zeroed 4KB page, or 0 on exhaustion.
+Physical page allocator — bump allocator with free list.
+Freed pages are pushed onto a singly-linked list (next pointer
+stored in the first 8 bytes of each free page). page_alloc
+pops from the free list first, then falls back to bumping.
 
     import std.mem.memset
 
+    var page_free_list = 0
+
     page_alloc() -> int
+        if page_free_list != 0
+            val page = page_free_list
+            var next: *i64 = *i64(page)
+            page_free_list = int(*next)
+            return page
         if page_pool_next >= PAGE_POOL_END
             return 0
         val page = page_pool_next
         page_pool_next += PAGE_SIZE
         page
+
+    page_free(addr: int)
+        var p: *i64 = *i64(addr)
+        *p = i64(page_free_list)
+        page_free_list = addr
 
 Allocate a zeroed page (for page tables and BSS).
 
@@ -353,6 +367,38 @@ Returns L1 base address, or 0 on failure.
 
         // L2[0x100-0x3FF]: unmapped (already zeroed by page_alloc)
         l1
+
+Free all pages allocated for a process page table: the program
+region pages (L2 entries 0xCC-0xFF), the L2 table, and the L1
+table. Kernel identity-mapped pages (L2 entries 0x00-0xCB) are
+NOT freed — they point to shared kernel memory.
+
+    vm_free_process_pt(l1_addr: int)
+        if l1_addr == 0
+            return
+        if l1_addr == KERNEL_L1_BASE
+            return
+
+        // Read L1[0] to find the L2 table
+        var l1e: *i32 = *i32(l1_addr)
+        val l1_pte = *l1e
+        if (l1_pte & PTE_V) == 0
+            return
+        val l2_addr = ((l1_pte >> 10) & 0xFFFFF) << 12
+
+        // Free program pages (L2 entries 0xCC-0xFF)
+        var i = 0xCC
+        while i < 0x100
+            var p: *i32 = *i32(l2_addr + i * 4)
+            val pte = *p
+            if (pte & PTE_V) != 0
+                val phys = ((pte >> 10) & 0xFFFFF) << 12
+                page_free(phys)
+            i += 1
+
+        // Free the L2 and L1 tables themselves
+        page_free(l2_addr)
+        page_free(l1_addr)
 
 Software page table walk — translate a virtual address using
 the given page table. Used for cross-address-space copies.
@@ -705,21 +751,24 @@ process ID (0 for kernel threads).
         threads[tid].pid = pid
         pid
 
+    reap_process(pid: int)
+        vm_free_process_pt(processes[pid].ptbr)
+        processes[pid].state = PROC_FREE
+
     waitpid_current(pid: int)
         if pid < 0
             return
         if pid >= MAX_PROCESSES
             return
         if processes[pid].state == PROC_ZOMBIE
-            // Already exited — reap immediately
-            processes[pid].state = PROC_FREE
+            reap_process(pid)
             return
         if processes[pid].state == PROC_FREE
             return
         // Block on the process's main thread
         val tid = processes[pid].main_tid
         if threads[tid].state == STATE_TERMINATED
-            processes[pid].state = PROC_FREE
+            reap_process(pid)
             return
         threads[current_thread].state = STATE_JOINING
         threads[current_thread].join_target = tid
@@ -741,7 +790,9 @@ the process as zombie. Returns 0 on success, -1 on error.
 
         val tid = processes[pid].main_tid
         threads[tid].state = STATE_TERMINATED
-        processes[pid].state = PROC_ZOMBIE
+
+        // Free pages and reap immediately
+        reap_process(pid)
 
         // Wake threads joining on this thread
         var i = 0
