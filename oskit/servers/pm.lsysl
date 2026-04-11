@@ -1,0 +1,215 @@
+OSKit PM Server — Process Manager
+==================================
+
+Minix 3-style process manager. Handles process lifecycle:
+exit notifications, waitpid, kill, and zombie reaping.
+
+The kernel notifies PM when a process exits (via notification).
+PM tracks zombies and matches them to waiting parents. When a
+parent calls waitpid, PM either returns immediately (if child
+is already zombie) or blocks the parent until the child exits.
+
+PM runs in kernel address space and calls reap_process()
+directly to free process page tables.
+
+IPC commands:
+- PM_WAITPID (1): [cmd(1), pid(4)] → [status(1), exit_code(4)]
+- PM_KILL    (2): [cmd(1), pid(4)] → [status(1)]
+
+    module oskit.servers
+
+    import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
+    import oskit.kernel.{reap_process, kernel_kill_process, kernel_register_pm, processes, threads, current_thread, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING, MAX_PROCESSES}
+    import oskit.services.{notify_read_self}
+
+    val PM_CMD_WAITPID = 1
+    val PM_CMD_KILL    = 2
+
+Waitpid queue: tracks parents blocked waiting for a child.
+Each entry stores the waiting parent's thread ID (the IPC
+sender), the PID they're waiting for, and whether the slot
+is active.
+
+    val MAX_WAITERS = 8
+
+    struct PMWaiter
+        active: int
+        sender: int
+        pid: int
+
+    var waiters: [8]PMWaiter
+    var pm_tid = -1
+
+Big-endian message helpers (local to this server).
+
+    pm_msg_read_i32(buf: *byte, off: int) -> int
+        ((buf[off] & 0xFF) << 24) | ((buf[off + 1] & 0xFF) << 16) | ((buf[off + 2] & 0xFF) << 8) | (buf[off + 3] & 0xFF)
+
+    pm_msg_write_i32(buf: *byte, off: int, v: int)
+        buf[off] = (v >> 24) & 0xFF
+        buf[off + 1] = (v >> 16) & 0xFF
+        buf[off + 2] = (v >> 8) & 0xFF
+        buf[off + 3] = v & 0xFF
+
+Handle a process exit notification from the kernel.
+The notification value is the PID of the exited process.
+Check if any parent is waiting for this PID and reply to them.
+If no waiter, the zombie stays until waitpid is called.
+
+    pm_handle_exit(pid: int)
+        if pid <= 0
+            return
+        if pid >= MAX_PROCESSES
+            return
+        // Check if a parent is already waiting for this PID
+        var i = 0
+        while i < MAX_WAITERS
+            if waiters[i].active != 0
+                if waiters[i].pid == pid
+                    // Parent is waiting — reap and reply
+                    val exit_code = processes[pid].exit_code
+                    reap_process(pid)
+                    var reply: [5]byte
+                    reply[0] = 0
+                    pm_msg_write_i32(&reply[0], 1, exit_code)
+                    ipc_reply(waiters[i].sender, &reply[0], 5)
+                    waiters[i].active = 0
+                    return
+            i += 1
+        // No waiter — zombie stays until parent calls waitpid
+
+Handle PM_WAITPID: parent wants to wait for a child process.
+If the child is already a zombie, reap immediately and reply.
+If the child is still running, block the parent by deferring
+the IPC reply until the child exits.
+
+    pm_handle_waitpid(sender: int, buf: *byte)
+        val pid = pm_msg_read_i32(buf, 1)
+        if pid <= 0
+            var reply: [5]byte
+            reply[0] = byte(-1)
+            pm_msg_write_i32(&reply[0], 1, 0)
+            ipc_reply(sender, &reply[0], 5)
+            return
+        if pid >= MAX_PROCESSES
+            var reply: [5]byte
+            reply[0] = byte(-1)
+            pm_msg_write_i32(&reply[0], 1, 0)
+            ipc_reply(sender, &reply[0], 5)
+            return
+
+        // Already zombie? Reap immediately.
+        if processes[pid].state == PROC_ZOMBIE
+            val exit_code = processes[pid].exit_code
+            reap_process(pid)
+            var reply: [5]byte
+            reply[0] = 0
+            pm_msg_write_i32(&reply[0], 1, exit_code)
+            ipc_reply(sender, &reply[0], 5)
+            return
+
+        // Already free? Error.
+        if processes[pid].state == PROC_FREE
+            var reply: [5]byte
+            reply[0] = byte(-1)
+            pm_msg_write_i32(&reply[0], 1, 0)
+            ipc_reply(sender, &reply[0], 5)
+            return
+
+        // Child still running — defer reply until exit
+        var i = 0
+        while i < MAX_WAITERS
+            if waiters[i].active == 0
+                waiters[i].active = 1
+                waiters[i].sender = sender
+                waiters[i].pid = pid
+                // Don't reply now — sender stays blocked
+                return
+            i += 1
+
+        // Out of waiter slots
+        var reply: [5]byte
+        reply[0] = byte(-2)
+        pm_msg_write_i32(&reply[0], 1, 0)
+        ipc_reply(sender, &reply[0], 5)
+
+Handle PM_KILL: kill a process by PID.
+
+    pm_handle_kill(sender: int, buf: *byte)
+        val pid = pm_msg_read_i32(buf, 1)
+        val result = kernel_kill_process(pid)
+        var reply: [1]byte
+        if result < 0
+            reply[0] = byte(-1)
+        else
+            reply[0] = 0
+        ipc_reply(sender, &reply[0], 1)
+
+PM server main loop. Uses ipc_recv_notify to wait for either
+IPC messages (waitpid/kill from userspace) or notifications
+(exit events from the kernel).
+
+    pm_server()
+        pm_tid = current_thread
+        kernel_register_pm(pm_tid)
+        val port = port_create()
+        if port < 0
+            return
+        var name: [3]byte
+        name[0] = byte('p')
+        name[1] = byte('m')
+        name[2] = 0
+        port_register(port, &name[0])
+
+        var buf: [128]byte
+        while true
+            val result = ipc_recv_notify(port, &buf[0], 128)
+            if result == -2
+                // Notification: process exited
+                val pid = notify_read_self()
+                pm_handle_exit(pid)
+            else if result >= 0
+                // IPC message
+                val sender = result
+                val cmd = int(buf[0])
+                if cmd == PM_CMD_WAITPID
+                    pm_handle_waitpid(sender, &buf[0])
+                else if cmd == PM_CMD_KILL
+                    pm_handle_kill(sender, &buf[0])
+                else
+                    // Unknown command
+                    var reply: [1]byte
+                    reply[0] = byte(-1)
+                    ipc_reply(sender, &reply[0], 1)
+
+Client API — called by nsh and other programs to interact
+with PM via IPC.
+
+    pm_waitpid(pid: int)
+        var pm_name: [3]byte
+        pm_name[0] = byte('p')
+        pm_name[1] = byte('m')
+        pm_name[2] = 0
+        val port = port_lookup(&pm_name[0])
+        if port < 0
+            return
+        var msg: [5]byte
+        msg[0] = byte(PM_CMD_WAITPID)
+        pm_msg_write_i32(&msg[0], 1, pid)
+        var reply: [5]byte
+        ipc_send(port, &msg[0], 5, &reply[0], 5)
+
+    pm_kill(pid: int) -> int
+        var pm_name: [3]byte
+        pm_name[0] = byte('p')
+        pm_name[1] = byte('m')
+        pm_name[2] = 0
+        val port = port_lookup(&pm_name[0])
+        if port < 0
+            return -1
+        var msg: [5]byte
+        msg[0] = byte(PM_CMD_KILL)
+        pm_msg_write_i32(&msg[0], 1, pid)
+        var reply: [1]byte
+        ipc_send(port, &msg[0], 5, &reply[0], 1)
+        int(reply[0])

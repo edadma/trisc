@@ -18,7 +18,7 @@ read config files until the filesystem is up.
     import oskit.kernel.{create_thread}
     import oskit.services.{sleep}
     import oskit.drivers.disk.{disk_server}
-    import oskit.servers.{tfs_server, fs_open, fs_read}
+    import oskit.servers.{tfs_server, fs_open, fs_read, pm_server}
     import oskit.drivers.tty.{tty_server}
     import oskit.apps.login.{login}
     import oskit.apps.nsh.{nsh}
@@ -27,7 +27,7 @@ Stack addresses for spawned sessions. Each thread gets
 0x4000 (16KB) with user and system stacks separated by
 0x2000. Session slots start at 0x60C000.
 
-    val SESSION_BASE = 0x60C000
+    val SESSION_BASE = 0x610000
     val SESSION_STRIDE = 0x4000
 
 Parse `/etc/ttytab` and spawn a thread for each entry.
@@ -136,9 +136,10 @@ Supported commands: `login`, `nsh`.
         create_thread(disk_server, 0x600000, 0x5FE000, "disk")
         sleep(5)
 
-        // Start TFS and TTY servers
+        // Start TFS, TTY, and PM servers
         create_thread(tfs_server, 0x604000, 0x602000, "tfs")
         create_thread(tty_server, 0x608000, 0x606000, "tty")
+        create_thread(pm_server, 0x60C000, 0x60A000, "pm")
 
         // Wait for servers to initialize and register ports
         sleep(5)

@@ -114,6 +114,14 @@ loaded by nsh each get their own process entry.
     var processes: [16]Process
     var next_pid = 1
 
+PM registration. The PM server registers its thread ID so
+the kernel can send notifications on process exit.
+
+    var kernel_pm_tid = -1
+
+    kernel_register_pm(tid: int)
+        kernel_pm_tid = tid
+
 Watchdog configuration. When a thread uses max_consec_quanta
 consecutive full quanta without voluntarily yielding or sleeping,
 the watchdog terminates it. Set to 0 to disable.
@@ -697,11 +705,15 @@ enqueueing them back into their priority run queue.
         threads[current_thread].state = STATE_TERMINATED
 
         // If this thread belongs to a process, mark it as zombie
+        // and notify PM so it can handle reaping
         val pid = threads[current_thread].pid
         if pid > 0
             processes[pid].state = PROC_ZOMBIE
+            if kernel_pm_tid >= 0
+                notify_send(kernel_pm_tid, pid)
 
         // Wake threads waiting to join on this thread
+        // (used for kernel threads; processes use PM)
         var i = 0
         while i < thread_count
             if threads[i].state == STATE_JOINING

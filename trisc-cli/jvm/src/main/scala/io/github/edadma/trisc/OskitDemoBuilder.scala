@@ -41,6 +41,7 @@ object OskitDemoBuilder:
   private lazy val sha256Sysl: String    = readLsysl("std/crypto/sha256/sha256.lsysl")
   private lazy val hmacSysl: String      = readLsysl("std/crypto/hmac/hmac.lsysl")
   private lazy val pbkdf2Sysl: String    = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
+  private lazy val pmSrvSysl: String     = readLsysl("oskit/servers/pm.lsysl")
   private lazy val mouseSysl: String     = readLsysl("oskit/drivers/mouse/mouse.lsysl")
   private lazy val displaySysl: String   = readLsysl("oskit/drivers/display/display.lsysl")
   private lazy val suitSysl: String      = readLsysl("suit/suit.lsysl")
@@ -61,6 +62,7 @@ object OskitDemoBuilder:
         "oskit/drivers/tty/tty"       -> ttySysl,
         "oskit/fs/tfs"                -> tfsSysl,
         "oskit/servers/tfs"           -> tfsSrvSysl,
+        "oskit/servers/pm"            -> pmSrvSysl,
         "posix/unistd/sbrk"           -> sbrkSysl,
         "posix/string/string"         -> posixStringSysl,
         "posix/ctype/ctype"           -> posixCtypeSysl,

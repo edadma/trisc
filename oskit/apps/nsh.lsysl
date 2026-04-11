@@ -26,11 +26,11 @@ Built-in commands:
     module oskit.apps.nsh
 
     import oskit.fs.ROOT_INODE
-    import oskit.services.{sleep, join, waitpid, getuid, uptime, thread_id}
+    import oskit.services.{sleep, join, getuid, uptime, thread_id}
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
-    import oskit.servers.{fs_open, fs_read, fs_write, fs_stat, fs_create, fs_unlink, fs_mkdir, fs_rmdir, fs_readdir, fs_chmod, fs_rename}
+    import oskit.servers.{fs_open, fs_read, fs_write, fs_stat, fs_create, fs_unlink, fs_mkdir, fs_rmdir, fs_readdir, fs_chmod, fs_rename, pm_waitpid, pm_kill}
     import oskit.loader.load_tof
-    import oskit.kernel.{create_thread, create_process, vm_create_process_pt, vm_set_ptbr, kernel_set_thread_ptbr, kernel_get_thread_pid, kernel_kill_process, reap_process, KERNEL_L1_BASE}
+    import oskit.kernel.{create_thread, create_process, vm_create_process_pt, vm_set_ptbr, kernel_set_thread_ptbr, kernel_get_thread_pid, KERNEL_L1_BASE}
 
 Shell state.
 
@@ -545,7 +545,7 @@ Built-in commands.
                 return
             pid = pid * 10 + (ch - '0')
             i += 1
-        val result = kernel_kill_process(pid)
+        val result = pm_kill(pid)
         if result < 0
             nsh_print("kill: no such process\n")
 
@@ -652,8 +652,7 @@ Commands such as `echo` and `cat` are not built-ins — they load
                 nsh_putint(pid)
                 nsh_print("]\n")
             else
-                waitpid(pid)
-                reap_process(pid)
+                pm_waitpid(pid)
         else
             nsh_print("out of process slots\n")
 
