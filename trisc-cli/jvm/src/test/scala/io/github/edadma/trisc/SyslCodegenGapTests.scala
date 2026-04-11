@@ -625,4 +625,190 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
         |""".stripMargin)
     output shouldBe "D"
   }
+
+  // ===== match codegen tests =====
+
+  "match: int single arm" in {
+    val (cpu, _) = runWithBoot(
+      """main() -> int
+        |    val x = 2
+        |    x match
+        |        1 -> 10
+        |        2 -> 20
+        |        _ -> 30
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 20
+  }
+
+  "match: int wildcard" in {
+    val (cpu, _) = runWithBoot(
+      """main() -> int
+        |    val x = 99
+        |    x match
+        |        1 -> 10
+        |        2 -> 20
+        |        _ -> 30
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 30
+  }
+
+  "match: int as expression" in {
+    val (cpu, _) = runWithBoot(
+      """main() -> int
+        |    val x = 3
+        |    val y = x match
+        |        1 -> 100
+        |        2 -> 200
+        |        3 -> 300
+        |        else -> 0
+        |    y
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 300
+  }
+
+  "match: int first arm" in {
+    val (cpu, _) = runWithBoot(
+      """main() -> int
+        |    val x = 1
+        |    x match
+        |        1 -> 10
+        |        2 -> 20
+        |        3 -> 30
+        |        _ -> 0
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 10
+  }
+
+  "match: int last arm before wildcard" in {
+    val (cpu, _) = runWithBoot(
+      """main() -> int
+        |    val x = 3
+        |    x match
+        |        1 -> 10
+        |        2 -> 20
+        |        3 -> 30
+        |        _ -> 0
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 30
+  }
+
+  "match: int with block body" in {
+    val (_, output) = runWithBoot(
+      """extern putchar(ch: int)
+        |
+        |main() -> int
+        |    val x = 2
+        |    x match
+        |        1 ->
+        |            putchar('A')
+        |        2 ->
+        |            putchar('B')
+        |            putchar('!')
+        |        _ ->
+        |            putchar('C')
+        |    0
+        |""".stripMargin)
+    output shouldBe "B!"
+  }
+
+  // TODO: un-ignore when string match codegen is fixed
+  "match: string literal" ignore {
+    val (_, output) = runWithBoot(
+      """extern putchar(ch: int)
+        |
+        |main() -> int
+        |    val s = "hello"
+        |    s match
+        |        "hello" -> putchar('Y')
+        |        _ -> putchar('N')
+        |    0
+        |""".stripMargin)
+    output shouldBe "Y"
+  }
+
+  "match: string default" in {
+    val (_, output) = runWithBoot(
+      """extern putchar(ch: int)
+        |
+        |main() -> int
+        |    val s = "world"
+        |    s match
+        |        "hello" -> putchar('A')
+        |        "foo"   -> putchar('B')
+        |        _       -> putchar('C')
+        |    0
+        |""".stripMargin)
+    output shouldBe "C"
+  }
+
+  "match: string multiple arms" ignore {
+    val (_, output) = runWithBoot(
+      """extern putchar(ch: int)
+        |
+        |classify(s: string)
+        |    s match
+        |        "cat"  -> putchar('1')
+        |        "dog"  -> putchar('2')
+        |        "bird" -> putchar('3')
+        |        else   -> putchar('0')
+        |
+        |main() -> int
+        |    classify("dog")
+        |    classify("bird")
+        |    classify("cat")
+        |    classify("fish")
+        |    0
+        |""".stripMargin)
+    output shouldBe "2310"
+  }
+
+  "match: string as expression" ignore {
+    val (cpu, _) = runWithBoot(
+      """classify(s: string) -> int
+        |    s match
+        |        "foo" -> 1
+        |        "bar" -> 2
+        |        "baz" -> 3
+        |        _ -> 0
+        |
+        |main() -> int
+        |    classify("bar")
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 2
+  }
+
+  "match: string with block bodies" ignore {
+    val (_, output) = runWithBoot(
+      """extern putchar(ch: int)
+        |
+        |main() -> int
+        |    val cmd = "run"
+        |    cmd match
+        |        "help" ->
+        |            putchar('H')
+        |            putchar('!')
+        |        "run" ->
+        |            putchar('R')
+        |            putchar('!')
+        |        _ ->
+        |            putchar('?')
+        |    0
+        |""".stripMargin)
+    output shouldBe "R!"
+  }
+
+  "match: string empty string" ignore {
+    val (_, output) = runWithBoot(
+      """extern putchar(ch: int)
+        |
+        |main() -> int
+        |    val s = ""
+        |    s match
+        |        ""    -> putchar('E')
+        |        "foo" -> putchar('F')
+        |        _     -> putchar('X')
+        |    0
+        |""".stripMargin)
+    output shouldBe "E"
+  }
 }
