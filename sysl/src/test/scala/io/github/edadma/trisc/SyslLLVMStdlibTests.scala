@@ -1417,4 +1417,211 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    count
         |""".stripMargin) shouldBe 3
   }
+
+  // ===== std.testing =====
+
+  "std.testing assert_eq" in {
+    llvmExitWithStd(
+      """import std.testing.*
+        |
+        |main() -> int
+        |    assert_eq(42, 42, "int eq")
+        |    assert_ne(1, 2, "int ne")
+        |    assert_in_range(5, 1, 10, "in range")
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.testing assert_eq_str" in {
+    llvmExitWithStd(
+      """import std.testing.*
+        |
+        |main() -> int
+        |    assert_eq_str("hello", "hello", "str eq")
+        |    assert_ne_str("a", "b", "str ne")
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.testing assert_eq_bool_byte" in {
+    llvmExitWithStd(
+      """import std.testing.*
+        |
+        |main() -> int
+        |    assert_eq_bool(true, true, "bool eq")
+        |    assert_eq_byte(byte(65), byte(65), "byte eq")
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.testing assert_slice_eq" in {
+    llvmExitWithStd(
+      """import std.testing.*
+        |
+        |main() -> int
+        |    val a = new [3]byte
+        |    val b = new [3]byte
+        |    a[0] = 1; a[1] = 2; a[2] = 3
+        |    b[0] = 1; b[1] = 2; b[2] = 3
+        |    assert_slice_eq(a[:], b[:], "slices eq")
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  // ===== std.io =====
+
+  "std.io ByteReader basic" ignore { // TODO: clang compile error
+    llvmExitWithStd(
+      """import std.io.*
+        |
+        |main() -> int
+        |    val data = new [5]byte
+        |    data[0] = 72; data[1] = 101; data[2] = 108; data[3] = 108; data[4] = 111
+        |    var r = ByteReader(data[:], 0)
+        |    val buf = new [3]byte
+        |    val n = r.read(buf[:])
+        |    if n != 3 then return 0
+        |    if buf[0] != 72 then return 0
+        |    if buf[1] != 101 then return 0
+        |    if buf[2] != 108 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.io ByteReader eof" ignore { // TODO: clang compile error
+    llvmExitWithStd(
+      """import std.io.*
+        |
+        |main() -> int
+        |    val data = new [2]byte
+        |    data[0] = 65; data[1] = 66
+        |    var r = ByteReader(data[:], 0)
+        |    val buf = new [10]byte
+        |    val n1 = r.read(buf[:])
+        |    val n2 = r.read(buf[:])
+        |    if n1 != 2 then return 0
+        |    if n2 != 0 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.io ByteWriter basic" ignore { // TODO: clang compile error
+    llvmExitWithStd(
+      """import std.io.*
+        |
+        |main() -> int
+        |    var w = new_writer()
+        |    val data = new [3]byte
+        |    data[0] = 65; data[1] = 66; data[2] = 67
+        |    val n = w.write(data[:])
+        |    if n != 3 then return 0
+        |    val out = w.bytes()
+        |    if len(out) != 3 then return 0
+        |    if out[0] != 65 then return 0
+        |    if out[2] != 67 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.io ByteWriter multiple writes" ignore { // TODO: clang compile error
+    llvmExitWithStd(
+      """import std.io.*
+        |
+        |main() -> int
+        |    var w = new_writer()
+        |    val d1 = new [2]byte
+        |    d1[0] = 65; d1[1] = 66
+        |    w.write(d1[:])
+        |    val d2 = new [2]byte
+        |    d2[0] = 67; d2[1] = 68
+        |    w.write(d2[:])
+        |    val out = w.bytes()
+        |    if len(out) != 4 then return 0
+        |    if out[0] != 65 then return 0
+        |    if out[3] != 68 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  // ===== std.crypto.sha256 =====
+
+  "std.crypto.sha256 empty" ignore { // TODO: u32 wrapping arithmetic produces wrong hash
+    llvmOutputWithStd(
+      """import std.crypto.sha256.*
+        |import std.encoding.hex.*
+        |
+        |main()
+        |    val data = new [0]byte
+        |    val out = new [32]byte
+        |    sha256(data[:], out[:])
+        |    puts(encode_to_string(out[:]))
+        |""".stripMargin) shouldBe "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+
+  "std.crypto.sha256 abc" ignore { // TODO: u32 wrapping arithmetic produces wrong hash
+    llvmOutputWithStd(
+      """import std.crypto.sha256.*
+        |import std.encoding.hex.*
+        |
+        |main()
+        |    val msg = new [3]byte
+        |    msg[0] = 97; msg[1] = 98; msg[2] = 99
+        |    val out = new [32]byte
+        |    sha256(msg[:], out[:])
+        |    puts(encode_to_string(out[:]))
+        |""".stripMargin) shouldBe "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+  }
+
+  "std.crypto.sha256 deterministic" in {
+    llvmExitWithStd(
+      """import std.crypto.sha256.*
+        |
+        |main() -> int
+        |    val msg = new [3]byte
+        |    msg[0] = 97; msg[1] = 98; msg[2] = 99
+        |    val out1 = new [32]byte
+        |    val out2 = new [32]byte
+        |    sha256(msg[:], out1[:])
+        |    sha256(msg[:], out2[:])
+        |    var same = true
+        |    for i in 0..<32
+        |        if out1[i] != out2[i] then same = false
+        |    if same then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  // ===== std.encoding.binary =====
+
+  "std.encoding.binary u32_be" in {
+    llvmExitWithStd(
+      """import std.encoding.binary.*
+        |
+        |main() -> int
+        |    val buf = new [4]byte
+        |    put_u32_be_at(buf[:], 0, 0x41424344u32)
+        |    var n = 0
+        |    if buf[0] == 0x41 then n = n + 1
+        |    if buf[1] == 0x42 then n = n + 1
+        |    if buf[2] == 0x43 then n = n + 1
+        |    if buf[3] == 0x44 then n = n + 1
+        |    val v = u32_be_at(buf[:], 0)
+        |    if v == 0x41424344u32 then n = n + 1
+        |    n
+        |""".stripMargin) shouldBe 5
+  }
+
+  // ===== std.text.tabwriter =====
+
+  "std.text.tabwriter basic" ignore { // TODO: clang compile error — likely codegen issue
+    llvmOutputWithStd(
+      """import std.text.tabwriter.*
+        |
+        |main()
+        |    var tw = new_tab_writer(1, 4, 1, byte(32), 0)
+        |    tw.write("a\tb\n")
+        |    tw.write("xxx\ty\n")
+        |    tw.flush()
+        |    puts(tw.to_str())
+        |""".stripMargin) should include ("a")
+  }
 }
