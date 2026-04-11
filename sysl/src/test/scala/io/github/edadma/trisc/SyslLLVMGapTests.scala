@@ -298,4 +298,57 @@ class SyslLLVMGapTests extends SyslLLVMTestHelpers {
         |    b[0] * 100 + b[1] * 10 + b[2]
         |""".stripMargin) shouldBe (321 % 256)
   }
+
+  "slice of slices basic" in {
+    llvmExit(
+      """make_slice(v: int) -> []byte
+        |    val b = new [3]byte
+        |    b[0] = v; b[1] = v + 1; b[2] = v + 2
+        |    b[:]
+        |
+        |main() -> int
+        |    val parts = new [2][]byte
+        |    parts[0] = make_slice(10)
+        |    parts[1] = make_slice(20)
+        |    val s = parts[:]
+        |    len(s[0]) + len(s[1])
+        |""".stripMargin) shouldBe 6
+  }
+
+  "early return with aggregate cleans up locals" in {
+    llvmExitWithStd(
+      """import std.bytes.*
+        |
+        |my_join(parts: [][]byte, sep: []byte) -> []byte
+        |    val n = len(parts)
+        |    if n == 0
+        |        val empty = new [0]byte
+        |        return empty[:]
+        |    var total = 0
+        |    var i = 0
+        |    while i < n
+        |        total = total + len(parts[i])
+        |        i++
+        |    total = total + len(sep) * (n - 1)
+        |    val buf = new [total]byte
+        |    var pos = 0
+        |    i = 0
+        |    while i < n
+        |        if i > 0
+        |            for j in 0..<len(sep)
+        |                buf[pos] = sep[j]
+        |                pos++
+        |        val plen = len(parts[i])
+        |        for j in 0..<plen
+        |            buf[pos] = parts[i][j]
+        |            pos++
+        |        i++
+        |    buf[:]
+        |
+        |main() -> int
+        |    val parts = split(as_bytes("a,b,c"), as_bytes(","))
+        |    val joined = my_join(parts, as_bytes("-"))
+        |    len(joined)
+        |""".stripMargin) shouldBe 5
+  }
 }

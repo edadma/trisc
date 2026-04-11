@@ -726,7 +726,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 3
   }
 
-  "std.bytes join" ignore { // TODO: SIGSEGV — join takes []&[]byte, complex nested ref type
+  "std.bytes join" in {
     llvmExitWithStd(
       """import std.bytes.*
         |
@@ -739,7 +739,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
 
   // ===== std.heap =====
 
-  "std.heap push and pop" ignore { // TODO: SIGBUS in pop — likely method self-mutation codegen issue
+  "std.heap push and pop" in {
     llvmExitWithStd(
       """import std.heap.*
         |
@@ -753,7 +753,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    val b = h.pop()
         |    val c = h.pop()
         |    a + b * 10 + c * 100
-        |""".stripMargin) shouldBe 3210 // 10 + 200 + 3000
+        |""".stripMargin) shouldBe (3210 % 256) // 10 + 200 + 3000
   }
 
   "std.heap len and empty" in {
@@ -990,7 +990,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 2
   }
 
-  "std.sort sort_by custom comparator" ignore { // TODO: LLVM codegen error — closure/generic collision
+  "std.sort sort_by custom comparator" in {
     llvmExitWithStd(
       """import std.sort.*
         |
@@ -1000,7 +1000,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    val desc: (int, int) -> int = (a, b) -> b - a
         |    sort_by(a[:], desc)
         |    a[0] * 1000 + a[1] * 100 + a[2] * 10 + a[3]
-        |""".stripMargin) shouldBe (40302010 % 256)
+        |""".stripMargin) shouldBe (43210 % 256)
   }
 
   "std.sort sort_int duplicates" in {
