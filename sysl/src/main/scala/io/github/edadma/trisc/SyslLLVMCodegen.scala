@@ -15,6 +15,8 @@ class SyslLLVMCodegen:
   private val funcWrappers = new mutable.LinkedHashMap[String, String] // original name -> wrapper name
   private val pendingWrappers = new mutable.ListBuffer[(String, String, List[SyslType], SyslType)] // (wrapperName, origName, params, retType)
   private val emittedFunctions = new mutable.HashSet[String] // track emitted function names to avoid duplicates
+  // C library functions declared in the preamble — skip any extern decl with these names
+  private val preambleNames = Set("putchar", "printf", "snprintf", "malloc", "strlen", "memcpy", "memcmp", "memset", "free", "write", "fflush", "abort", "exit")
   private var stringCounter = 0
   private var regCounter = 0
   private var labelCounter = 0
@@ -86,8 +88,10 @@ class SyslLLVMCodegen:
         case _: TModuleDecl => // skip
         case _: TImportDecl => // skip
         case TExternFuncDecl(name, params, retType) =>
-          val paramStr = params.map(llvmType).mkString(", ")
-          emit(s"declare ${llvmType(retType)} @$name($paramStr)")
+          // Skip extern declarations that conflict with preamble C declarations
+          if !preambleNames.contains(name) then
+            val paramStr = params.map(llvmType).mkString(", ")
+            emit(s"declare ${llvmType(retType)} @$name($paramStr)")
         case TExternVarDecl(name, typ) =>
           emit(s"@$name = external global ${llvmType(typ)}")
         case _: TStructDecl => // skip (handled above)
@@ -746,6 +750,44 @@ class SyslLLVMCodegen:
           case "<<" => emit(s"  $result = shl $lt $cur, $rv")
           case ">>" => emit(s"  $result = ${if isUnsigned then "lshr" else "ashr"} $lt $cur, $rv")
         emit(s"  store $lt $result, $lt* ${local.reg}")
+
+      case TFieldCompoundAssignStmt(obj, fieldIndex, op, value) =>
+        val (st, structLt, addr) = obj.typ match
+          case pt: SyslType.PtrType =>
+            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val slt = llvmType(inner)
+            val ptr = genExpr(obj)
+            val cast = newReg()
+            emit(s"  $cast = bitcast i8* $ptr to $slt*")
+            (inner, slt, cast)
+          case st: SyslType.StructType =>
+            (st, llvmType(obj.typ), genStructAddr(obj))
+          case other =>
+            throw new RuntimeException(s"TFieldCompoundAssignStmt on non-struct type: $other")
+        val ft = st.fields(fieldIndex)._2
+        val fieldType = llvmType(ft)
+        val gep = newReg()
+        emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
+        val cur = newReg()
+        emit(s"  $cur = load $fieldType, $fieldType* $gep")
+        val v = genExpr(value)
+        val vt = exprType(value)
+        val rv = emitSextIfNeeded(v, vt, fieldType)
+        val isFloat = ft == SyslType.DoubleType
+        val isUnsigned = ft.isUnsigned
+        val result = newReg()
+        op match
+          case "+" => emit(s"  $result = ${if isFloat then "fadd" else "add"} $fieldType $cur, $rv")
+          case "-" => emit(s"  $result = ${if isFloat then "fsub" else "sub"} $fieldType $cur, $rv")
+          case "*" => emit(s"  $result = ${if isFloat then "fmul" else "mul"} $fieldType $cur, $rv")
+          case "/" => emit(s"  $result = ${if isFloat then "fdiv" else if isUnsigned then "udiv" else "sdiv"} $fieldType $cur, $rv")
+          case "%" => emit(s"  $result = ${if isFloat then "frem" else if isUnsigned then "urem" else "srem"} $fieldType $cur, $rv")
+          case "&" => emit(s"  $result = and $fieldType $cur, $rv")
+          case "|" => emit(s"  $result = or $fieldType $cur, $rv")
+          case "^" => emit(s"  $result = xor $fieldType $cur, $rv")
+          case "<<" => emit(s"  $result = shl $fieldType $cur, $rv")
+          case ">>" => emit(s"  $result = ${if isUnsigned then "lshr" else "ashr"} $fieldType $cur, $rv")
+        emit(s"  store $fieldType $result, $fieldType* $gep")
 
       case TDestructureStmt(names, types, init) =>
         val tuplePtr = genExpr(init) // returns alloca pointer to struct/tuple
@@ -1449,6 +1491,61 @@ class SyslLLVMCodegen:
       case TAddrOf(name, _) =>
         if locals.contains(name) then locals(name).reg
         else s"@$name"
+
+      case TAddrOfField(obj, fieldIndex, _) =>
+        // Get a pointer to a struct field — used for method calls on nested struct fields
+        val (st, structLt, addr) = obj.typ match
+          case pt: SyslType.PtrType =>
+            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val slt = llvmType(inner)
+            val ptr = genExpr(obj)
+            val cast = newReg()
+            emit(s"  $cast = bitcast i8* $ptr to $slt*")
+            (inner, slt, cast)
+          case st: SyslType.StructType =>
+            (st, llvmType(obj.typ), genStructAddr(obj))
+          case other =>
+            throw new RuntimeException(s"TAddrOfField on non-struct type: $other")
+        val gep = newReg()
+        emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
+        val cast = newReg()
+        emit(s"  $cast = bitcast ${llvmType(st.fields(fieldIndex)._2)}* $gep to i8*")
+        cast
+
+      case TAddrOfIndex(array, index, _) =>
+        // Get a pointer to an array/slice element — used for method calls on indexed elements
+        val base = genExpr(array)
+        val idx = genExpr(index)
+        val elemType = array.typ match
+          case SyslType.SliceType(inner) => inner
+          case SyslType.RefType(SyslType.SliceType(inner)) => inner
+          case _ => throw new RuntimeException(s"TAddrOfIndex on non-slice type: ${array.typ}")
+        val elt = llvmType(elemType)
+        val elemSize = llvmSizeOf(elemType)
+        val dataPtr = emitSliceDataPtr(base, array.typ)
+        val byteOff = newReg()
+        val idx64 = newReg()
+        emit(s"  $idx64 = sext i32 $idx to i64")
+        emit(s"  $byteOff = mul i64 $idx64, $elemSize")
+        val elemPtr = newReg()
+        emit(s"  $elemPtr = getelementptr i8, i8* $dataPtr, i64 $byteOff")
+        elemPtr
+
+      case TTempAddr(inner, _) =>
+        // Evaluate expression, store into a temporary alloca, return pointer
+        val v = genExpr(inner)
+        val lt = llvmType(inner.typ)
+        if isAggregate(inner.typ) then
+          // genExpr already returned an alloca pointer for aggregates
+          val cast = newReg()
+          emit(s"  $cast = bitcast $lt* $v to i8*")
+          cast
+        else
+          val alloca = deferAlloca(lt)
+          emit(s"  store $lt $v, $lt* $alloca")
+          val cast = newReg()
+          emit(s"  $cast = bitcast $lt* $alloca to i8*")
+          cast
 
       case TDeref(pointer, typ) =>
         val ptr = genExpr(pointer)
@@ -2212,6 +2309,60 @@ class SyslLLVMCodegen:
         emit(s"  store $lt $newVal, $lt* ${local.reg}")
         oldVal
 
+      case TFieldPostInc(obj, fieldIndex, typ) =>
+        val (st, structLt, addr) = obj.typ match
+          case pt: SyslType.PtrType =>
+            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val slt = llvmType(inner)
+            val ptr = genExpr(obj)
+            val cast = newReg()
+            emit(s"  $cast = bitcast i8* $ptr to $slt*")
+            (inner, slt, cast)
+          case st: SyslType.StructType =>
+            (st, llvmType(obj.typ), genStructAddr(obj))
+          case other =>
+            throw new RuntimeException(s"TFieldPostInc on non-struct type: $other")
+        val ft = st.fields(fieldIndex)._2
+        val fieldType = llvmType(ft)
+        val gep = newReg()
+        emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
+        val oldVal = newReg()
+        emit(s"  $oldVal = load $fieldType, $fieldType* $gep")
+        val newVal = newReg()
+        if ft == SyslType.DoubleType then
+          emit(s"  $newVal = fadd $fieldType $oldVal, 1.0")
+        else
+          emit(s"  $newVal = add $fieldType $oldVal, 1")
+        emit(s"  store $fieldType $newVal, $fieldType* $gep")
+        oldVal
+
+      case TFieldPostDec(obj, fieldIndex, typ) =>
+        val (st, structLt, addr) = obj.typ match
+          case pt: SyslType.PtrType =>
+            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val slt = llvmType(inner)
+            val ptr = genExpr(obj)
+            val cast = newReg()
+            emit(s"  $cast = bitcast i8* $ptr to $slt*")
+            (inner, slt, cast)
+          case st: SyslType.StructType =>
+            (st, llvmType(obj.typ), genStructAddr(obj))
+          case other =>
+            throw new RuntimeException(s"TFieldPostDec on non-struct type: $other")
+        val ft = st.fields(fieldIndex)._2
+        val fieldType = llvmType(ft)
+        val gep = newReg()
+        emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
+        val oldVal = newReg()
+        emit(s"  $oldVal = load $fieldType, $fieldType* $gep")
+        val newVal = newReg()
+        if ft == SyslType.DoubleType then
+          emit(s"  $newVal = fsub $fieldType $oldVal, 1.0")
+        else
+          emit(s"  $newVal = sub $fieldType $oldVal, 1")
+        emit(s"  store $fieldType $newVal, $fieldType* $gep")
+        oldVal
+
       case TStringFromSlice(sliceExpr, _) =>
         val sp = genExpr(sliceExpr)
         // Extract ptr and len from slice
@@ -2602,6 +2753,11 @@ class SyslLLVMCodegen:
       val bytes = elems.map { case TIntLit(v, _) => (v & 0xff).toByte }
       val escaped = bytes.map(b => f"\\${b & 0xff}%02X").mkString
       s"""c"$escaped""""
+    case TArrayLit(elems, at @ SyslType.ArrayType(elemType, _)) =>
+      // General array literal with constant elements
+      val elt = llvmType(elemType)
+      val vals = elems.map(e => s"$elt ${constValue(e, elemType)}")
+      s"[${vals.mkString(", ")}]"
     case _ =>
       typ match
         case SyslType.StringType => "{ i8* null, i32 0 }"
