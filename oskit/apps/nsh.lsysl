@@ -618,12 +618,13 @@ Commands such as `echo` and `cat` are not built-ins — they load
             return
 
         // Write arguments (in process address space)
+        // argv[0] is the command name (POSIX convention)
         val args_buf = *byte(PROG_ARGS_ADDR)
         var pos = 0
-        for var i = 1; i < argc; i++
+        for var i = 0; i < argc; i++
             if pos >= PROG_ARGS_MAX
                 break
-            if i > 1
+            if i > 0
                 args_buf[pos] = byte(' ')
                 pos += 1
                 if pos >= PROG_ARGS_MAX

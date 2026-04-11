@@ -199,3 +199,24 @@ and process manager land.
         if n == 0
             return ""
         string(p, n)
+
+Skip past argv[0] (the program name) and any following spaces.
+Returns the remaining arguments as a string, or "" if none.
+
+    skip_arg0(s: string) -> string
+        val p = *byte(s)
+        val n = len(s)
+        // Skip non-space (argv[0])
+        var i = 0
+        while i < n
+            if p[i] == byte(' ')
+                break
+            i += 1
+        // Skip spaces
+        while i < n
+            if p[i] != byte(' ')
+                break
+            i += 1
+        if i >= n
+            return ""
+        string(p + i, n - i)
