@@ -1,14 +1,11 @@
 ENTRY(_start)
 
 SECTIONS {
-    . = 0x40000000;
+    . = 0x100000;
 
+    .multiboot : { *(.multiboot) }
     .text : { *(.text) }
     .rodata : { *(.rodata) }
     .data : { *(.data) }
     .bss : { *(.bss) }
-
-    . = ALIGN(16);
-    . = . + 4096;
-    _stack_top = .;
 }
