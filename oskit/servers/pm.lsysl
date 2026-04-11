@@ -78,6 +78,16 @@ If no waiter, the zombie stays until waitpid is called.
             i += 1
         // No waiter — zombie stays until parent calls waitpid
 
+        // Reparent any children of the exiting process to init (thread 0).
+        // This ensures orphaned processes can still be reaped.
+        val exited_tid = processes[pid].main_tid
+        var j = 1
+        while j < MAX_PROCESSES
+            if processes[j].state == PROC_RUNNING
+                if processes[j].parent_tid == exited_tid
+                    processes[j].parent_tid = 0
+            j += 1
+
 Handle PM_WAITPID: parent wants to wait for a child process.
 If the child is already a zombie, reap immediately and reply.
 If the child is still running, block the parent by deferring
@@ -185,19 +195,22 @@ IPC messages (waitpid/kill from userspace) or notifications
 Client API — called by nsh and other programs to interact
 with PM via IPC.
 
-    pm_waitpid(pid: int)
+    pm_waitpid(pid: int) -> int
         var pm_name: [3]byte
         pm_name[0] = byte('p')
         pm_name[1] = byte('m')
         pm_name[2] = 0
         val port = port_lookup(&pm_name[0])
         if port < 0
-            return
+            return -1
         var msg: [5]byte
         msg[0] = byte(PM_CMD_WAITPID)
         pm_msg_write_i32(&msg[0], 1, pid)
         var reply: [5]byte
         ipc_send(port, &msg[0], 5, &reply[0], 5)
+        if reply[0] != 0
+            return -1
+        pm_msg_read_i32(&reply[0], 1)
 
     pm_kill(pid: int) -> int
         var pm_name: [3]byte

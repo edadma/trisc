@@ -93,6 +93,9 @@ Process control.
     exit()
         syscall(SYS_EXIT, 0)
 
+    exit_with(code: int)
+        syscall(SYS_EXIT, code)
+
     sleep(ticks: int)
         syscall(SYS_SLEEP, ticks)
 

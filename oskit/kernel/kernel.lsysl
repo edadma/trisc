@@ -725,13 +725,14 @@ would monotonically bump thread_count and walk off the end of threads[].
 Also wakes any threads that are joining on this thread,
 enqueueing them back into their priority run queue.
 
-    terminate_current()
+    terminate_current(exit_code: int)
         threads[current_thread].state = STATE_TERMINATED
 
         // If this thread belongs to a process, mark it as zombie
         // and notify PM so it can handle reaping
         val pid = threads[current_thread].pid
         if pid > 0
+            processes[pid].exit_code = exit_code
             processes[pid].state = PROC_ZOMBIE
             if kernel_pm_tid >= 0
                 notify_send(kernel_pm_tid, pid)
