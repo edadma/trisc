@@ -95,8 +95,8 @@ import oskit.drivers.kbd.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(tty_server, 0x10000, 0xF000, "tty")
-          |    create_thread(client, 0x14000, 0x13000, "cli")
+          |    create_thread(tty_server, 0x20000, 0x1F000, "tty")
+          |    create_thread(client, 0x24000, 0x23000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -130,8 +130,8 @@ import oskit.drivers.kbd.*
           |    hello[4] = 111
           |    hello[5] = 0
           |    ipc_init()
-          |    create_thread(tty_server, 0x10000, 0xF000, "tty")
-          |    create_thread(client, 0x14000, 0x13000, "cli")
+          |    create_thread(tty_server, 0x20000, 0x1F000, "tty")
+          |    create_thread(client, 0x24000, 0x23000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -155,9 +155,9 @@ import oskit.drivers.kbd.*
           |
           |kernel_main() -> int
           |    ipc_init()
-          |    create_thread(tty_server, 0x10000, 0xF000, "tty")
-          |    create_thread(clientA, 0x14000, 0x13000, "cA")
-          |    create_thread(clientB, 0x18000, 0x17000, "cB")
+          |    create_thread(tty_server, 0x20000, 0x1F000, "tty")
+          |    create_thread(clientA, 0x24000, 0x23000, "cA")
+          |    create_thread(clientB, 0x28000, 0x27000, "cB")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -197,8 +197,8 @@ import oskit.drivers.kbd.*
           |    tname[2] = 121
           |    tname[3] = 0
           |    ipc_init()
-          |    create_thread(tty_server, 0x10000, 0xF000, "tty")
-          |    create_thread(client, 0x14000, 0x13000, "cli")
+          |    create_thread(tty_server, 0x20000, 0x1F000, "tty")
+          |    create_thread(client, 0x24000, 0x23000, "cli")
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -227,8 +227,8 @@ import oskit.drivers.kbd.*
             |
             |kernel_main() -> int
             |    ipc_init()
-            |    create_thread(tty_server, 0x10000, 0xF000, "tty")
-            |    create_thread(client, 0x14000, 0x13000, "cli")
+            |    create_thread(tty_server, 0x20000, 0x1F000, "tty")
+            |    create_thread(client, 0x24000, 0x23000, "cli")
             |    timer_init(1000)
             |    first_thread_ssp()
             |
@@ -259,8 +259,8 @@ import oskit.drivers.kbd.*
             |
             |kernel_main() -> int
             |    ipc_init()
-            |    create_thread(tty_server, 0x10000, 0xF000, "tty")
-            |    create_thread(client, 0x14000, 0x13000, "cli")
+            |    create_thread(tty_server, 0x20000, 0x1F000, "tty")
+            |    create_thread(client, 0x24000, 0x23000, "cli")
             |    timer_init(1000)
             |    first_thread_ssp()
             |
@@ -290,8 +290,8 @@ import oskit.drivers.kbd.*
             |
             |kernel_main() -> int
             |    ipc_init()
-            |    create_thread(tty_server, 0x10000, 0xF000, "tty")
-            |    create_thread(client, 0x14000, 0x13000, "cli")
+            |    create_thread(tty_server, 0x20000, 0x1F000, "tty")
+            |    create_thread(client, 0x24000, 0x23000, "cli")
             |    timer_init(1000)
             |    first_thread_ssp()
             |
@@ -326,7 +326,7 @@ import oskit.drivers.kbd.*
             |
             |kernel_main() -> int
             |    ipc_init()
-            |    create_thread(server, 0x10000, 0xF000, "srv")
+            |    create_thread(server, 0x20000, 0x1F000, "srv")
             |    timer_init(1000)
             |    first_thread_ssp()
             |
@@ -368,8 +368,8 @@ import oskit.drivers.kbd.*
             |
             |kernel_main() -> int
             |    ipc_init()
-            |    create_thread(tty_server, 0x10000, 0xF000, "tty")
-            |    create_thread(reader, 0x14000, 0x13000, "rdr")
+            |    create_thread(tty_server, 0x20000, 0x1F000, "tty")
+            |    create_thread(reader, 0x24000, 0x23000, "rdr")
             |    timer_init(1000)
             |    first_thread_ssp()
             |
@@ -423,7 +423,7 @@ import oskit.drivers.kbd.*
             |
             |kernel_main() -> int
             |    ipc_init()
-            |    create_thread(waiter, 0x10000, 0xF000, "w")
+            |    create_thread(waiter, 0x20000, 0x1F000, "w")
             |    timer_init(1000)
             |    first_thread_ssp()
             |
@@ -466,8 +466,8 @@ import oskit.drivers.kbd.*
             |
             |kernel_main() -> int
             |    ipc_init()
-            |    create_thread(tty_server, 0x10000, 0xF000, "tty")
-            |    create_thread(client, 0x14000, 0x13000, "cli")
+            |    create_thread(tty_server, 0x20000, 0x1F000, "tty")
+            |    create_thread(client, 0x24000, 0x23000, "cli")
             |    timer_init(1000)
             |    first_thread_ssp()
             |
@@ -505,8 +505,8 @@ import oskit.drivers.kbd.*
             |
             |kernel_main() -> int
             |    ipc_init()
-            |    create_thread(tty_server, 0x10000, 0xF000, "tty")
-            |    create_thread(client, 0x14000, 0x13000, "cli")
+            |    create_thread(tty_server, 0x20000, 0x1F000, "tty")
+            |    create_thread(client, 0x24000, 0x23000, "cli")
             |    timer_init(1000)
             |    first_thread_ssp()
             |
