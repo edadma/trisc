@@ -712,7 +712,7 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
   }
 
   // TODO: un-ignore when string match codegen is fixed
-  "match: string literal" ignore {
+  "match: string literal" in {
     val (_, output) = runWithBoot(
       """extern putchar(ch: int)
         |
@@ -741,7 +741,7 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
     output shouldBe "C"
   }
 
-  "match: string multiple arms" ignore {
+  "match: string multiple arms" in {
     val (_, output) = runWithBoot(
       """extern putchar(ch: int)
         |
@@ -762,7 +762,7 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
     output shouldBe "2310"
   }
 
-  "match: string as expression" ignore {
+  "match: string as expression" in {
     val (cpu, _) = runWithBoot(
       """classify(s: string) -> int
         |    s match
@@ -777,7 +777,7 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
     cpu.r(1).read shouldBe 2
   }
 
-  "match: string with block bodies" ignore {
+  "match: string with block bodies" in {
     val (_, output) = runWithBoot(
       """extern putchar(ch: int)
         |
@@ -797,7 +797,7 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
     output shouldBe "R!"
   }
 
-  "match: string empty string" ignore {
+  "match: string empty string" in {
     val (_, output) = runWithBoot(
       """extern putchar(ch: int)
         |
