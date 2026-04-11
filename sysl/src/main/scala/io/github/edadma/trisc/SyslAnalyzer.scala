@@ -697,12 +697,12 @@ class SyslAnalyzer:
         // Constant folding: immutable vals with constant initializers become compile-time constants
         val tInit = if !isMutable then
           tryConstEval(tInit1) match
-            case Some(raw) =>
-              val n = maskToType(raw, declType)
+            case Some(n) =>
+              val masked = maskToType(n, declType)
               val mangledName = if shouldMangle(name) then mangleName(name) else name
-              compileTimeConstants(name) = n
-              compileTimeConstants(mangledName) = n
-              TIntLit(n, declType)
+              compileTimeConstants(name) = masked
+              compileTimeConstants(mangledName) = masked
+              TIntLit(masked, declType)
             case None => tInit1
         else tInit1
         val mangledVarName = if shouldMangle(name) then mangleName(name) else name
@@ -1287,10 +1287,10 @@ class SyslAnalyzer:
         // Constant folding for local immutable vals
         val tInit = if !isMutable && declType.isIntegral then
           tryConstEval(tInit1) match
-            case Some(raw) =>
-              val n = maskToType(raw, declType)
-              compileTimeConstants(name) = n
-              TIntLit(n, declType)
+            case Some(n) =>
+              val masked = maskToType(n, declType)
+              compileTimeConstants(name) = masked
+              TIntLit(masked, declType)
             case None => tInit1
         else tInit1
         if typOpt.isDefined && !compatible(tInit.typ, declType) then
@@ -1856,11 +1856,7 @@ class SyslAnalyzer:
         else
           // Check for no-arg enum variant before falling through to variable lookup
           tryLookup(name) match
-            case Some(sym) =>
-              // Constant propagation: substitute compile-time constants with literals
-              compileTimeConstants.get(sym.name).orElse(compileTimeConstants.get(name)) match
-                case Some(n) => TIntLit(n, sym.typ)
-                case None => TVarRef(sym.name, sym.typ)
+            case Some(sym) => TVarRef(sym.name, sym.typ)
             case None =>
               if variantToEnum.contains(name) then
                 val (et, idx) = variantToEnum(name)
