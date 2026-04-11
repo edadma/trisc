@@ -811,4 +811,86 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
         |""".stripMargin)
     output shouldBe "E"
   }
+
+  // ===== Closure codegen tests =====
+
+  "closure: zero-capture" in {
+    val (cpu, _) = runWithBoot(
+      """apply(f: (int) -> int, x: int) -> int = f(x)
+        |
+        |main() -> int = apply(x -> x + 1, 41)
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 42
+  }
+
+  "closure: capture local" in {
+    val (cpu, _) = runWithBoot(Map(
+      "alloc" ->
+        """var _heap: [4096]byte
+          |var _ptr: *byte = *byte(0)
+          |var _init = false
+          |malloc(size: int) -> *byte
+          |    if !_init
+          |        _ptr = &_heap[0]
+          |        _init = true
+          |    val p = _ptr
+          |    _ptr = _ptr + size
+          |    p
+          |""".stripMargin,
+      "main" ->
+        """apply(f: (int) -> int, x: int) -> int = f(x)
+          |
+          |main() -> int
+          |    val a = 10
+          |    apply(x -> x + a, 32)
+          |""".stripMargin
+    ))
+    cpu.r(1).read shouldBe 42
+  }
+
+  "closure: multi-param" in {
+    val (cpu, _) = runWithBoot(
+      """apply2(f: (int, int) -> int, a: int, b: int) -> int = f(a, b)
+        |
+        |main() -> int = apply2((x, y) -> x + y, 20, 22)
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 42
+  }
+
+  "closure: func ref as closure" in {
+    val (cpu, _) = runWithBoot(
+      """dbl(x: int) -> int = x * 2
+        |apply(f: (int) -> int, x: int) -> int = f(x)
+        |
+        |main() -> int = apply(dbl, 21)
+        |""".stripMargin)
+    cpu.r(1).read shouldBe 42
+  }
+
+  "closure: capture frozen by value" in {
+    val (cpu, _) = runWithBoot(Map(
+      "alloc" ->
+        """var _heap: [4096]byte
+          |var _ptr: *byte = *byte(0)
+          |var _init = false
+          |malloc(size: int) -> *byte
+          |    if !_init
+          |        _ptr = &_heap[0]
+          |        _init = true
+          |    val p = _ptr
+          |    _ptr = _ptr + size
+          |    p
+          |""".stripMargin,
+      "main" ->
+        """apply(f: (int) -> int, x: int) -> int = f(x)
+          |
+          |main() -> int
+          |    var a = 10
+          |    val f: (int) -> int = x -> x + a
+          |    a = 100
+          |    f(32)
+          |""".stripMargin
+    ))
+    cpu.r(1).read shouldBe 42
+  }
 }
