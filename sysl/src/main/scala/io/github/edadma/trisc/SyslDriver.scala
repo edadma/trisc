@@ -66,8 +66,40 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
     // Iteratively analyze module files to extract declarations. Each round
     // makes previously collected symbols available to unresolved files.
     // Converges when no new files succeed or all are resolved.
+    //
+    // Modules are processed in dependency order derived from the file-level
+    // topological sort, so cross-module imports are available during pre-collection.
     val packageMetaCache = new mutable.LinkedHashMap[String, ModuleMeta]
-    for (modPath, sourceNames) <- moduleToSources do
+    // Build module-level dependency graph: for each module, collect all modules
+    // imported by any of its files.
+    // Resolve an import's module path to a module key in moduleToSources,
+    // handling QualifiedImport where "std/mem/memset" should resolve to "std/mem".
+    def resolveImportToModule(imp: ImportDeclAST): String =
+      imp.selectors match
+        case List(QualifiedImport) =>
+          val path = imp.modulePath
+          if moduleToSources.contains(path) then path
+          else
+            val parts = path.split("/")
+            if parts.length >= 2 then parts.init.mkString("/") else path
+        case _ => imp.modulePath
+
+    val moduleDeps: Map[String, Set[String]] = moduleToSources.map { (modPath, srcNames) =>
+      val deps = srcNames.flatMap { name =>
+        imports.getOrElse(name, Nil).map(resolveImportToModule)
+      }.filter(p => moduleToSources.contains(p) && p != modPath)
+      (modPath, deps)
+    }
+    // Topological sort of modules
+    val moduleVisited = mutable.LinkedHashSet[String]()
+    def visitModule(mp: String): Unit =
+      if !moduleVisited.contains(mp) then
+        for depMod <- moduleDeps.getOrElse(mp, Set.empty) do visitModule(depMod)
+        moduleVisited += mp
+    for mp <- moduleToSources.keys do visitModule(mp)
+    val moduleOrder = moduleVisited.toList
+    for modPath <- moduleOrder do
+      val sourceNames = moduleToSources(modPath)
       var meta = new ModuleMeta(Nil)
       var remaining = sourceNames.toList
       var changed = true
@@ -84,6 +116,20 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
               analyzer.registerGenericTemplatesFrom(asts(src))
             val siblings = new ModuleMeta(meta.symbols.filter(s => !s.isExtern))
             analyzer.registerImport(siblings)
+            // Register cross-module imports from already-cached modules,
+            // applying the same QualifiedImport → NamedImport fallback as Step 5.
+            for imp0 <- imports.getOrElse(name, Nil) do
+              val imp = imp0.selectors match
+                case List(QualifiedImport) =>
+                  if packageMetaCache.contains(imp0.modulePath) then imp0
+                  else
+                    val parts = imp0.modulePath.split("/")
+                    if parts.length >= 2 then
+                      ImportDeclAST(parts.init.mkString("/"), List(NamedImport(parts.last)))
+                    else imp0
+                case _ => imp0
+              if packageMetaCache.contains(imp.modulePath) then
+                analyzer.registerImport(packageMetaCache(imp.modulePath), imp.selectors, imp.modulePath)
             val typed = analyzer.analyze(ast)
             ModuleMeta.fromProgram(typed, Some(s"$name.sysl"))
           } match

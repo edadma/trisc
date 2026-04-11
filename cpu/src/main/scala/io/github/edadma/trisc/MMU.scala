@@ -119,7 +119,10 @@ class SimpleMMU(mem: Addressable, tlbEntries: Int = 16) extends MMU:
   def ptbr: Long = _ptbr
   def setPtbr(base: Long): Unit = _ptbr = base
   def asid: Int = _asid
-  def setAsid(id: Int): Unit = _asid = id & 0xFF
+  def setAsid(id: Int): Unit =
+    val newAsid = id & 0xFF
+    if newAsid != _asid then _lastVpn = -1L
+    _asid = newAsid
 
   def translate(vaddr: Long, access: Access, supervisor: Boolean): Either[FaultCause, Long] =
     if !_enabled then return Right(vaddr)

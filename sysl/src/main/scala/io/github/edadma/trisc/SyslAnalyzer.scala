@@ -53,7 +53,7 @@ class SyslAnalyzer:
     "check_stack_at", "suspend_thread", "resume_thread",
     "kernel_tls_set", "kernel_tls_get", "notify_send", "notify_wait_current",
     "notify_read", "event_wait_current", "event_set_bits", "event_clear_bits",
-    "terminate_current",
+    "terminate_current", "query_thread_pid",
   )
 
   private def shouldMangle(name: String): Boolean =

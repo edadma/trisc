@@ -1,0 +1,71 @@
+ps — list threads and processes
+=================================
+
+Shows all active threads with their thread ID, PID, state,
+and name.
+
+    module oskit.bin.ps
+
+    import oskit.ulib.{putc, exit, get_thread_count, get_thread_state, get_thread_name, get_thread_pid}
+
+    putint(n: int)
+        if n >= 10
+            putint(n / 10)
+        putc('0' + (n % 10))
+
+    print(s: *byte)
+        var i = 0
+        while s[i] != 0
+            putc(int(s[i]))
+            i += 1
+
+    main()
+        print("  TID  PID STATE    NAME\n")
+        val count = get_thread_count()
+        for var i = 0; i < count; i++
+            val state = get_thread_state(i)
+            if state != 3
+                // Print TID (right-aligned in 4 chars)
+                if i < 10
+                    print("   ")
+                else
+                    print("  ")
+                putint(i)
+                // Print PID (right-aligned in 5 chars)
+                val pid = get_thread_pid(i)
+                if pid < 10
+                    print("    ")
+                else
+                    print("   ")
+                putint(pid)
+                putc(' ')
+                // Print state
+                if state == 0
+                    print("ready   ")
+                else if state == 1
+                    print("running ")
+                else if state == 2
+                    print("blocked ")
+                else if state == 4
+                    print("joining ")
+                else if state == 5
+                    print("suspend ")
+                else if state == 10
+                    print("notify  ")
+                else if state == 11
+                    print("mutex   ")
+                else if state == 20
+                    print("sendblk ")
+                else if state == 21
+                    print("recvblk ")
+                else if state == 22
+                    print("rcvntfy ")
+                else
+                    print("unknown ")
+                // Print name
+                val np = get_thread_name(i)
+                var j = 0
+                while np[j] != 0
+                    putc(int(np[j]))
+                    j += 1
+                putc('\n')

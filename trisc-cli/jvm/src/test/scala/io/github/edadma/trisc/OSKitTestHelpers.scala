@@ -95,6 +95,10 @@ object OSKitTestData {
 trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
   export OSKitTestData.*
 
+  private lazy val stdMemSysl: String =
+    val raw = scala.io.Source.fromFile("std/mem/mem.lsysl").mkString
+    LiterateRenderer.tangle(new LiterateParser().parse(raw))
+
   def compileSysl(source: String): TOF =
     val driver = new SyslDriver
     val result = driver.compile(Map("main" -> source))
@@ -139,6 +143,7 @@ trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
       "oskit/sync/mutex" -> mutexSysl, "oskit/sync/condvar" -> condvarSysl, "oskit/sync/barrier" -> barrierSysl,
       "oskit/sync/rwlock" -> rwlockSysl, "oskit/sync/channel" -> channelSysl, "oskit/sync/mailbox" -> mailboxSysl,
       "oskit/sync/rmutex" -> rmutexSysl, "oskit/sync/qset" -> qsetSysl, "oskit/sync/pimutex" -> pimutexSysl,
+      "std/mem/mem" -> stdMemSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -160,9 +165,14 @@ trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
     }
     val intc = new InterruptController(Runtime.intcAddress)
     val timer = new Timer(Runtime.timerAddress, intc, irq = 0)
-    val mem = new Memory("Memory", new RAM(0, Runtime.stdoutAddress.toInt), stdout, intc, timer)
+    val dma = new DMA(Runtime.dmaAddress, null, intc, irq = 4)
+    val ram = new RAM(0, Runtime.stdoutAddress.toInt)
+    val mem = new Memory("Memory", ram, stdout, intc, timer, dma)
+    dma.mem = mem
     linked.load(mem)
-    val cpu = new CPU(mem, Seq(timer, intc)) { this.limit = maxCycles }
+    val mmu = new SimpleMMU(mem); mmu.setIdentityRange(0x7FE000L, 0xC00000L)
+    dma.mmu = Some(mmu)
+    val cpu = new CPU(mem, Seq(timer, intc), mmu = Some(mmu)) { this.limit = maxCycles }
     if maxCycles <= 1000 then
       cpu.log.setLogLevel(LogLevel.TRACE)
       cpu.log.setHandler(new FileHandler("/tmp/trisc_debug.log"))

@@ -39,8 +39,8 @@ import oskit.services.*
 import oskit.services.*
           |
           |kernel_main() -> int
-          |    create_thread_pri(task_b, 0x14000, 0x13000, "b", 1)
-          |    create_thread_pri(task_a, 0x10000, 0xF000, "a", 0)
+          |    create_thread_pri(task_b, 0x14000, 0x13000, "b", 1, KERNEL_L1_BASE)
+          |    create_thread_pri(task_a, 0x10000, 0xF000, "a", 0, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -102,7 +102,7 @@ import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(high, 0x20000, 0x1F000, "high")
-          |    create_thread_pri(low, 0x22000, 0x21000, "low", 2)
+          |    create_thread_pri(low, 0x22000, 0x21000, "low", 2, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -162,9 +162,9 @@ import oskit.services.*
 import oskit.services.*
           |
           |kernel_main() -> int
-          |    create_thread_pri(high, 0x20000, 0x1F000, "high", 0)
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |    create_thread_pri(low, 0x24000, 0x23000, "low", 2)
+          |    create_thread_pri(high, 0x20000, 0x1F000, "high", 0, KERNEL_L1_BASE)
+          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1, KERNEL_L1_BASE)
+          |    create_thread_pri(low, 0x24000, 0x23000, "low", 2, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -227,7 +227,7 @@ import oskit.services.*
           |
           |kernel_main() -> int
           |    create_thread(high, 0x20000, 0x1F000, "high")
-          |    create_thread_pri(low, 0x22000, 0x21000, "low", 2)
+          |    create_thread_pri(low, 0x22000, 0x21000, "low", 2, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |

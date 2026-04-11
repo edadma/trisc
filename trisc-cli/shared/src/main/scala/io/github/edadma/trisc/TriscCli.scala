@@ -232,6 +232,7 @@ object TriscCli:
     linked.load(mem)
     val mmu = new SimpleMMU(mem)
     mmu.setIdentityRange(0x7FE000L, 0xC00000L) // kernel PTBR, identity-mapped up to 12MB
+    dma.mmu = Some(mmu)
     val cpu = new CPU(mem, Seq(timer, intc), mmu = Some(mmu))
     cpu.reset() // like 68000: reads SSP from vector[0], PC from vector[1], enters supervisor mode
     (cpu, mem)

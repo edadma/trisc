@@ -127,9 +127,9 @@ import oskit.services.*
 import oskit.services.*
           |
           |kernel_main() -> int
-          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0)
+          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2, KERNEL_L1_BASE)
+          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1, KERNEL_L1_BASE)
+          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -162,9 +162,9 @@ import oskit.services.*
 import oskit.services.*
           |
           |kernel_main() -> int
-          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0)
+          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2, KERNEL_L1_BASE)
+          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1, KERNEL_L1_BASE)
+          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -201,9 +201,9 @@ import oskit.sync.*
           |
           |kernel_main() -> int
           |    pimutex_init(&mtx)
-          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0)
+          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2, KERNEL_L1_BASE)
+          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1, KERNEL_L1_BASE)
+          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -240,9 +240,9 @@ import oskit.sync.*
           |
           |kernel_main() -> int
           |    pimutex_init(&mtx)
-          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0)
+          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2, KERNEL_L1_BASE)
+          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1, KERNEL_L1_BASE)
+          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -284,9 +284,9 @@ import oskit.sync.*
           |
           |kernel_main() -> int
           |    pimutex_init(&mtx)
-          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0)
+          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2, KERNEL_L1_BASE)
+          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1, KERNEL_L1_BASE)
+          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -325,9 +325,9 @@ import oskit.sync.*
           |
           |kernel_main() -> int
           |    pimutex_init(&mtx)
-          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0)
+          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2, KERNEL_L1_BASE)
+          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1, KERNEL_L1_BASE)
+          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -367,9 +367,9 @@ import oskit.sync.*
           |
           |kernel_main() -> int
           |    pimutex_init(&mtx)
-          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0)
+          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2, KERNEL_L1_BASE)
+          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1, KERNEL_L1_BASE)
+          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -408,9 +408,9 @@ import oskit.sync.*
           |
           |kernel_main() -> int
           |    pimutex_init(&mtx)
-          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0)
+          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2, KERNEL_L1_BASE)
+          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1, KERNEL_L1_BASE)
+          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -452,9 +452,9 @@ import oskit.sync.*
           |
           |kernel_main() -> int
           |    pimutex_init(&mtx)
-          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0)
+          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2, KERNEL_L1_BASE)
+          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1, KERNEL_L1_BASE)
+          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -493,9 +493,9 @@ import oskit.sync.*
           |
           |kernel_main() -> int
           |    pimutex_init(&mtx)
-          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0)
+          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2, KERNEL_L1_BASE)
+          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1, KERNEL_L1_BASE)
+          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -532,9 +532,9 @@ import oskit.sync.*
 import oskit.services.*
           |
           |kernel_main() -> int
-          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0)
+          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2, KERNEL_L1_BASE)
+          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1, KERNEL_L1_BASE)
+          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -577,9 +577,9 @@ import oskit.sync.*
           |
           |kernel_main() -> int
           |    pimutex_init(&mtx)
-          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0)
+          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2, KERNEL_L1_BASE)
+          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1, KERNEL_L1_BASE)
+          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -621,9 +621,9 @@ import oskit.sync.*
           |
           |kernel_main() -> int
           |    pimutex_init(&mtx)
-          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0)
+          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2, KERNEL_L1_BASE)
+          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1, KERNEL_L1_BASE)
+          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |
@@ -667,9 +667,9 @@ import oskit.sync.*
           |
           |kernel_main() -> int
           |    pimutex_init(&mtx)
-          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2)
-          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1)
-          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0)
+          |    create_thread_pri(low, 0x20000, 0x1F000, "low", 2, KERNEL_L1_BASE)
+          |    create_thread_pri(med, 0x22000, 0x21000, "med", 1, KERNEL_L1_BASE)
+          |    create_thread_pri(high, 0x24000, 0x23000, "high", 0, KERNEL_L1_BASE)
           |    timer_init(1000)
           |    first_thread_ssp()
           |

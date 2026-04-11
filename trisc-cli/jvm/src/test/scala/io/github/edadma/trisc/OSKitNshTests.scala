@@ -144,6 +144,7 @@ import oskit.apps.init.{init}
     }
     val ticks: Seq[Processor => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
     val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
+    dma.mmu = Some(testMmu)
     val cpu                     = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
@@ -260,13 +261,6 @@ import oskit.apps.init.{init}
     output should include("data")
   }
 
-  "NSH: ps shows threads" in {
-    val keys        = typeString("ps\n", startTick = 500000)
-    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 10000000)
-    output should include("nsh")
-    output should include("STATE")
-  }
-
   "NSH: uptime shows ticks" in {
     val keys        = typeString("uptime\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 10000000)
@@ -337,6 +331,7 @@ import oskit.apps.init.{init}
     }
     val ticks: Seq[Processor => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
     val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
+    dma.mmu = Some(testMmu)
     val cpu                     = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()

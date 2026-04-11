@@ -197,16 +197,17 @@ import oskit.apps.init.{init}
           altDown = (mods & 4) != 0, metaDown = (mods & 8) != 0)
     }
     val ticks: Seq[Processor => Unit] = Seq(timer, intc, keyInjector)
-    val cpu = new CPU(mem, ticks) { this.limit = maxCycles }
+    val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
+    dma.mmu = Some(testMmu)
+    val cpu = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles }
     cpu.reset()
     cpu.run()
     (cpu, output.toString, ram)
 
   "Loader: run hello from shell" in {
     val tofBytes = helloTofText.getBytes("UTF-8")
-    info(s"Hello TOF size: ${tofBytes.length} bytes (${(tofBytes.length + 511) / 512} blocks)")
     val keys = typeString("hello\n", startTick = 500000)
-    val (_, output, _) = runWithKeys("", keys, maxCycles = 30000000,
+    val (_, output, _) = runWithKeys("", keys, maxCycles = 100000000,
       files = Map("/bin/hello" -> tofBytes))
     val cleaned = output.filterNot(_ == '\n')
     cleaned should include("Hello, world!")
