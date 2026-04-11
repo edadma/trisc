@@ -620,6 +620,7 @@ class SyslLLVMCodegen:
           case SyslType.ArrayType(elem, _) => elem
           case SyslType.SliceType(elem) => elem
           case SyslType.RefType(SyslType.SliceType(elem)) => elem
+          case SyslType.RefType(SyslType.ArrayType(elem, _)) => elem
           case _ => SyslType.IntType(8) // fallback for string indexing
         val elt = llvmType(elemType)
         val elemSize = llvmSizeOf(elemType)
