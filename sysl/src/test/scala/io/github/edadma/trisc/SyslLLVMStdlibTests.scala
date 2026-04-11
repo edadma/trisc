@@ -1624,4 +1624,84 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    puts(tw.to_str())
         |""".stripMargin) should include ("a")
   }
+
+  // ===== std.bufio =====
+
+  "std.bufio read_byte" in {
+    llvmExitWithStd(
+      """import std.bufio.*
+        |
+        |main() -> int
+        |    val data = new [3]byte
+        |    data[0] = 97; data[1] = 98; data[2] = 99
+        |    var r = new_buf_reader(data[:])
+        |    val b1, ok1 = r.read_byte()
+        |    if !ok1 then return 0
+        |    if b1 != 97 then return 0
+        |    val b2, ok2 = r.read_byte()
+        |    if !ok2 then return 0
+        |    if b2 != 98 then return 0
+        |    val b3, ok3 = r.read_byte()
+        |    if !ok3 then return 0
+        |    if b3 != 99 then return 0
+        |    val _, ok4 = r.read_byte()
+        |    if ok4 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.bufio read_line" in {
+    llvmOutputWithStd(
+      """import std.bufio.*
+        |
+        |main()
+        |    val data = new [12]byte
+        |    val src = "foo\nbar\nbaz\n"
+        |    for i in 0..<12
+        |        data[i] = byte(src[i])
+        |    var r = new_buf_reader(data[:])
+        |    val l1, _ = r.read_line()
+        |    puts(l1)
+        |    val l2, _ = r.read_line()
+        |    puts(l2)
+        |    val l3, _ = r.read_line()
+        |    puts(l3)
+        |""".stripMargin) shouldBe "foo\nbar\nbaz"
+  }
+
+  "std.bufio peek" in {
+    llvmExitWithStd(
+      """import std.bufio.*
+        |
+        |main() -> int
+        |    val data = new [3]byte
+        |    data[0] = 97; data[1] = 98; data[2] = 99
+        |    var r = new_buf_reader(data[:])
+        |    val b1, _ = r.peek()
+        |    if b1 != 97 then return 0
+        |    val b2, _ = r.peek()
+        |    if b2 != 97 then return 0
+        |    val b3, _ = r.read_byte()
+        |    if b3 != 97 then return 0
+        |    val b4, _ = r.peek()
+        |    if b4 != 98 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.bufio at_eof" in {
+    llvmExitWithStd(
+      """import std.bufio.*
+        |
+        |main() -> int
+        |    val data = new [2]byte
+        |    data[0] = 65; data[1] = 66
+        |    var r = new_buf_reader(data[:])
+        |    if r.at_eof() then return 0
+        |    val _, _ = r.read_byte()
+        |    val _, _ = r.read_byte()
+        |    if !r.at_eof() then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
 }
