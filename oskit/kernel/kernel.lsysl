@@ -635,9 +635,11 @@ would monotonically bump thread_count and walk off the end of threads[].
             threads[idx].uid = threads[current_thread].uid
         else
             threads[idx].uid = 0
-        // Write stack canary at bottom of user stack
-        var canary_addr: *int = *int(usp)
-        *canary_addr = STACK_CANARY
+        // Write stack canary at bottom of user stack (skip for process threads
+        // where USP overlaps with code base)
+        if ptbr_val == KERNEL_L1_BASE
+            var canary_addr: *int = *int(usp)
+            *canary_addr = STACK_CANARY
         enqueue(priority, idx)
         asm("sti")
         idx

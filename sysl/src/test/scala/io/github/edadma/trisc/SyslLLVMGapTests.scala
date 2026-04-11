@@ -351,4 +351,88 @@ class SyslLLVMGapTests extends SyslLLVMTestHelpers {
         |    len(joined)
         |""".stripMargin) shouldBe 5
   }
+
+  // ===== String Interpolation =====
+
+  "basic string interpolation" in {
+    llvmOutput(
+      """main()
+        |    val name = "world"
+        |    puts(s"hello $name")
+        |""".stripMargin) shouldBe "hello world"
+  }
+
+  "interpolation with int" in {
+    llvmOutput(
+      """main()
+        |    val x = 42
+        |    puts(s"answer is $x")
+        |""".stripMargin) shouldBe "answer is 42"
+  }
+
+  "interpolation with expression" in {
+    llvmOutput(
+      """main()
+        |    val a = 10
+        |    val b = 20
+        |    puts(s"sum is ${a + b}")
+        |""".stripMargin) shouldBe "sum is 30"
+  }
+
+  "interpolation with bool" in {
+    llvmOutput(
+      """main()
+        |    val ok = true
+        |    puts(s"result: $ok")
+        |""".stripMargin) shouldBe "result: true"
+  }
+
+  "interpolation with multiple values" in {
+    llvmOutput(
+      """main()
+        |    val x = 1
+        |    val y = 2
+        |    val z = 3
+        |    puts(s"$x + $y = $z")
+        |""".stripMargin) shouldBe "1 + 2 = 3"
+  }
+
+  "interpolation with dollar escape" in {
+    llvmOutput(
+      """main()
+        |    puts(s"price: $$5")
+        |""".stripMargin) shouldBe "price: $5"
+  }
+
+  // ===== Formatted Strings =====
+
+  "formatted string hex" in {
+    llvmOutput(
+      "main()\n    val x = 255\n    puts(f\"hex: ${x}%x\")\n") shouldBe "hex: ff"
+  }
+
+  "formatted string zero-padded" in {
+    llvmOutput(
+      "main()\n    val x = 42\n    puts(f\"padded: ${x}%05d\")\n") shouldBe "padded: 00042"
+  }
+
+  "formatted string width right-aligned" in {
+    llvmOutput(
+      "main()\n    val x = 42\n    puts(f\"[${x}%5d]\")\n") shouldBe "[   42]"
+  }
+
+  "formatted string width left-aligned" in {
+    llvmOutput(
+      "main()\n    val x = 42\n    puts(f\"[${x}%-5d]\")\n") shouldBe "[42   ]"
+  }
+
+  "formatted string uppercase hex" in {
+    llvmOutput(
+      "main()\n    val x = 255\n    puts(f\"${x}%X\")\n") shouldBe "FF"
+  }
+
+  "formatted string with sign" in {
+    llvmOutput(
+      "main()\n    val x = 42\n    puts(f\"${x}%+d\")\n") shouldBe "+42"
+  }
 }

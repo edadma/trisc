@@ -98,6 +98,7 @@ context_switch
 
 do_schedule
   mov  r1, r7           ; r1 = current SSP (with saved context)
+  movi r7, 0x7FFFF8     ; switch to kernel stack (identity-mapped, safe across PTBR switch)
   movi r4, schedule
   jalr r6, r4           ; r1 = next thread's SSP (or 0 = idle)
 
