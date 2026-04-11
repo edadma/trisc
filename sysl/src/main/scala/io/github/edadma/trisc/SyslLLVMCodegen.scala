@@ -2012,6 +2012,66 @@ class SyslLLVMCodegen:
             emit(s"  $dataPtr = getelementptr [$byteLen x i8], [$byteLen x i8]* $label, i32 0, i32 0")
             emitMakeString(dataPtr, s"${byteLen - 1}")
 
+      case TFmtStr(inner, spec) =>
+        val v = genExpr(inner)
+        // Build printf format string from FmtSpec
+        val fmt = new StringBuilder("%")
+        if spec.leftAlign then fmt += '-'
+        if spec.zeroPad then fmt += '0'
+        if spec.showSign then fmt += '+'
+        if spec.width > 0 then fmt ++= spec.width.toString
+        inner.typ match
+          case t if t.isIntegral =>
+            val verb = if spec.upperCase then spec.verb.toUpper else spec.verb
+            verb match
+              case 'x' | 'X' => fmt ++= (if t == SyslType.IntType(64) then "lx" else "x")
+              case 'o' => fmt ++= (if t == SyslType.IntType(64) then "lo" else "o")
+              case _ => fmt ++= (if t == SyslType.IntType(64) then "ld" else "d")
+            if spec.upperCase && (spec.verb == 'x') then
+              // snprintf %X handles uppercase directly
+              val fmtStr2 = fmt.toString.replace("x", "X").replace("lx", "lX")
+              val (label, byteLen) = internString(fmtStr2)
+              val vt = llvmType(inner.typ)
+              val arg = if vt == "i64" then s"i64 $v"
+                else if vt == "i32" then s"i32 $v"
+                else
+                  val ext = newReg()
+                  if t.isSigned then emit(s"  $ext = sext $vt $v to i32")
+                  else emit(s"  $ext = zext $vt $v to i32")
+                  s"i32 $ext"
+              emitSnprintfToString(label, byteLen, arg)
+            else
+              val fmtString = fmt.toString
+              val (label, byteLen) = internString(fmtString)
+              val vt = llvmType(inner.typ)
+              val arg = if vt == "i64" then s"i64 $v"
+                else if vt == "i32" then s"i32 $v"
+                else
+                  val ext = newReg()
+                  if t.isSigned then emit(s"  $ext = sext $vt $v to i32")
+                  else emit(s"  $ext = zext $vt $v to i32")
+                  s"i32 $ext"
+              emitSnprintfToString(label, byteLen, arg)
+          case SyslType.DoubleType =>
+            fmt += 'g'
+            val fmtString = fmt.toString
+            val (label, byteLen) = internString(fmtString)
+            emitSnprintfToString(label, byteLen, s"double $v")
+          case SyslType.StringType =>
+            // For string verb with width padding, use snprintf with %s
+            fmt += 's'
+            val fmtString = fmt.toString
+            val (label, byteLen) = internString(fmtString)
+            // Extract ptr from fat string
+            val ptr = newReg()
+            emit(s"  $ptr = getelementptr %struct.string, %struct.string* $v, i32 0, i32 0")
+            val sPtr = newReg()
+            emit(s"  $sPtr = load i8*, i8** $ptr")
+            emitSnprintfToString(label, byteLen, s"i8* $sPtr")
+          case _ =>
+            // Fallback: treat as TStr
+            genExpr(TStr(inner))
+
       case TCast(inner, targetType) =>
         val v = genExpr(inner)
         val fromLt = llvmType(inner.typ)
