@@ -15,37 +15,57 @@ Concrete, ordered development plan. Each phase builds on the previous.
 
 ---
 
-## Phase 0a: Build system and HAL foundation
+## Phase 0a-1: HAL extraction
 
-**Problem:** The build is hardcoded in Scala (`OskitDemoBuilder.scala`) with a manual list of source files. There's no way to select target hardware, swap HAL modules, or set compile-time constants without editing Scala code. Hardware-specific code (DMA memcpy, timer device addresses, UART) is scattered through kernel and driver code.
+**Problem:** Hardware-specific code (DMA memcpy/memset, timer device addresses and registers, UART I/O) is scattered through kernel, driver, and std library code. Porting to a new target means editing these files.
 
-**Goal:** TOML-based build config that controls what gets compiled. HAL layer that isolates hardware-specific code behind stable interfaces.
+**Goal:** Move hardware-specific code into `oskit/hal/` modules behind stable interfaces. Pure refactoring — no new tools, no config files. Manually linked as before.
+
+**HAL structure:**
+```
+oskit/hal/
+  mem_dma.lsysl       # memcpy/memset via DMA (TRISC)
+  mem_cpu.lsysl       # memcpy/memset via CPU loops (generic)
+  timer_trisc.lsysl   # TRISC timer device
+  uart_trisc.lsysl    # TRISC MMIO UART
+```
+Each HAL module exports the same symbols (e.g., `memcpy`, `memset`, `timer_init`, `timer_ack`). The build includes whichever one is appropriate for the target.
+
+**What to do:**
+- Extract memcpy/memset from `std/mem/mem.lsysl` into `oskit/hal/mem_dma.lsysl`
+- Write `oskit/hal/mem_cpu.lsysl` with CPU-loop fallback
+- Extract timer init/ack from `oskit/kernel/timer.lsysl` into `oskit/hal/timer_trisc.lsysl`
+- Update imports — kernel/servers import from HAL, not directly from hardware
+- Tests and OskitDemoBuilder link the TRISC HAL modules explicitly (same as today, just different paths)
+
+**What works when done:** All hardware-specific code lives in `oskit/hal/`. Swapping `mem_dma` for `mem_cpu` in the source list is all it takes to change the memcpy implementation. No source changes needed in kernel or servers.
+
+---
+
+## Phase 0a-2: `sysl.toml` config module generation
+
+**Problem:** Kernel constants (MAX_THREADS, PAGE_SIZE, etc.) are hardcoded as `val` declarations scattered across source files. Changing them requires editing source.
+
+**Goal:** A `sysl.toml` file defines compile-time constants. A build tool generates a `config.lsysl` module. Source code uses `import config`.
 
 **Build config — `sysl.toml`:**
 ```toml
 [target]
-arch = "trisc"           # trisc, x86_64, arm
+arch = "trisc"
 
 [hal]
-mem = "oskit/hal/mem_dma"       # memcpy/memset implementation
-timer = "oskit/hal/timer_trisc" # timer device
-uart = "oskit/hal/uart_trisc"   # serial I/O
+mem = "oskit/hal/mem_dma"
+timer = "oskit/hal/timer_trisc"
+uart = "oskit/hal/uart_trisc"
 
 [kernel]
 max_threads = 8
 max_processes = 16
 page_size = 4096
 default_quantum = 5
-
-[servers]
-include = ["pm", "vfs", "tfs", "tty"]
-
-[drivers]
-include = ["disk", "keyboard"]
 ```
 
-**How values reach sysl code — generated config module:**
-The build tool reads `sysl.toml` and generates `config.lsysl`:
+**Generated `config.lsysl`:**
 ```
 module config
 val ARCH = "trisc"
@@ -53,34 +73,45 @@ val MAX_THREADS = 8
 val MAX_PROCESSES = 16
 val PAGE_SIZE = 4096
 val DEFAULT_QUANTUM = 5
-val HAS_DMA = 1
 ```
-Source code does `import config` and uses these as normal constants. No compiler changes needed.
 
-**HAL structure:**
-```
-oskit/hal/
-  mem_dma.lsysl       # memcpy/memset via DMA (TRISC)
-  mem_cpu.lsysl       # memcpy/memset via CPU loops (generic)
-  mem_x86.lsysl       # memcpy/memset via rep movsb (x86)
-  timer_trisc.lsysl   # TRISC timer device
-  timer_x86.lsysl     # x86 PIT/APIC
-  uart_trisc.lsysl    # TRISC MMIO UART
-  uart_x86.lsysl      # x86 COM1 port I/O
-```
-Each HAL module exports the same symbols (e.g., `memcpy`, `memset`, `timer_init`, `timer_ack`). The build system links the one specified in `sysl.toml`.
+Source code does `import config.{MAX_THREADS, PAGE_SIZE}` and uses these as normal constants. No compiler changes needed.
 
-**The build tool is optional.** The sysl compiler works standalone — pass it source files and it compiles them. The build tool is a convenience that reads `sysl.toml`, generates the config module, and assembles the file list. Unit tests keep working as they do today — they construct their own source maps in Scala. Someone compiling a single program doesn't need `sysl.toml` at all.
+**The build tool is optional.** A default `config.lsysl` with TRISC values ships in the repo. Tests and manual compilation work without `sysl.toml` — just include the default config module. The build tool only needs to run when you want different values.
 
 **What to do:**
-1. Define `sysl.toml` format
-2. Write build tool (Scala, reads TOML, generates config module, assembles source list)
-3. Extract hardware-specific memcpy/memset into `oskit/hal/mem_dma.lsysl`
-4. Extract timer device code into `oskit/hal/timer_trisc.lsysl`
-5. Provide a default `config.lsysl` with TRISC defaults so everything works without the build tool
-6. Existing `OskitDemoBuilder` and tests keep working as-is (they can optionally use the build tool or continue constructing source maps manually)
+- Define `sysl.toml` format
+- Write config generator (Scala, reads TOML, writes `config.lsysl`)
+- Ship default `config.lsysl` with TRISC defaults
+- Replace hardcoded constants in kernel with `import config` values
+- Tests include the default config module in their source maps
 
-**What works when done:** `sysl.toml` drives the full OS build. Changing `hal.mem` swaps the implementation with no source changes. Constants come from config module. But everything also works without the build tool — just pass the right files to the compiler manually.
+**What works when done:** Constants come from config, not hardcoded vals. Changing MAX_THREADS means editing `sysl.toml` and regenerating — no source changes.
+
+---
+
+## Phase 0a-3: Build tool assembles source list from `sysl.toml`
+
+**Problem:** `OskitDemoBuilder.scala` has a manual list of ~30 source files. Adding a new server or driver means editing Scala code.
+
+**Goal:** The `[hal]`, `[servers]`, `[drivers]` sections in `sysl.toml` control which files get compiled. The build tool assembles the source list automatically.
+
+**Extended `sysl.toml`:**
+```toml
+[servers]
+include = ["pm", "vfs", "tfs", "tty"]
+
+[drivers]
+include = ["disk", "keyboard"]
+```
+
+**What to do:**
+- Extend build tool to read `[hal]`, `[servers]`, `[drivers]` sections
+- Build tool resolves module names to file paths (convention-based: `pm` → `oskit/servers/pm.lsysl` or `slix/servers/pm.lsysl`)
+- Build tool outputs a complete source list or directly invokes the compiler
+- `OskitDemoBuilder` becomes a thin wrapper that calls the build tool (or remains for tests)
+
+**What works when done:** Adding a new server = add its name to `sysl.toml` and create the file. No Scala code changes. The build tool handles everything.
 
 ---
 
