@@ -139,8 +139,8 @@ class SyslParser extends StandardTokenParsers {
       }
 
   lazy val traitMethod: Parser[TraitMethodAST] =
-    ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ ("->" ~> typeRef) ~ opt(traitMethodBody) ^^ {
-      case name ~ params ~ rt ~ body => TraitMethodAST(name, params, rt, body)
+    rep(positioned(attribute) <~ rep1(Newline)) ~ ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ ("->" ~> typeRef) ~ opt(traitMethodBody) ^^ {
+      case attrs ~ name ~ params ~ rt ~ body => TraitMethodAST(name, params, rt, body, attrs)
     }
 
   lazy val traitMethodBody: Parser[FunBodyAST] =
@@ -656,8 +656,8 @@ class SyslParser extends StandardTokenParsers {
     }
 
   lazy val bitwiseXor: Parser[ExpressionAST] =
-    bitwiseAnd ~ rep("^" ~> bitwiseAnd) ^^ {
-      case first ~ rest => rest.foldLeft(first)((l, r) => BinaryAST(l, "^", r))
+    bitwiseAnd ~ rep(("^" | "~") ~ bitwiseAnd) ^^ {
+      case first ~ rest => rest.foldLeft(first) { case (l, op ~ r) => BinaryAST(l, op, r) }
     }
 
   lazy val bitwiseAnd: Parser[ExpressionAST] =

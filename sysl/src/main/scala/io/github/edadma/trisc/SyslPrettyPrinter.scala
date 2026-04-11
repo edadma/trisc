@@ -6,6 +6,24 @@ package io.github.edadma.trisc
 object SyslPrettyPrinter:
   private val IND = "    " // 4 spaces
 
+  def attrLiteralToSource(l: AttrLiteral): String = l match
+    case AttrLitString(s) => escapeString(s)
+    case AttrLitInt(v)    => v.toString
+    case AttrLitBool(b)   => if b then "true" else "false"
+    case AttrLitIdent(n)  => n
+
+  def attrArgToSource(a: AttrArg): String = a match
+    case AttrPositional(v)     => attrLiteralToSource(v)
+    case AttrNamed(k, v)       => s"$k: ${attrLiteralToSource(v)}"
+
+  def attributesBlockToSource(attrs: List[Attribute], indent: String): String =
+    attrs.map { at =>
+      val inner = at.args match
+        case Nil    => ""
+        case args => s"(${args.map(attrArgToSource).mkString(", ")})"
+      s"$indent#${at.name}$inner\n"
+    }.mkString
+
   // --- Types ---
 
   def typeToSource(t: TypeAST): String = t match
@@ -63,11 +81,13 @@ object SyslPrettyPrinter:
 
     case TraitDeclAST(name, typeParam, methods, _) =>
       val body = methods.map { m =>
+        val attrStr = attributesBlockToSource(m.attributes, IND)
         val paramStr = m.params.map(p => s"${p.name}: ${typeToSource(p.typ)}").mkString(", ")
         val retStr = s" -> ${typeToSource(m.returnType)}"
-        m.body match
-          case None => s"${IND}${m.name}($paramStr)$retStr"
-          case Some(b) => s"${IND}${m.name}($paramStr)$retStr${bodyToSource(b, 2)}"
+        val sig = m.body match
+          case None    => s"${m.name}($paramStr)$retStr"
+          case Some(b) => s"${m.name}($paramStr)$retStr${bodyToSource(b, 2)}"
+        s"$attrStr${IND}$sig"
       }.mkString("\n")
       s"trait $name[$typeParam]\n$body"
 
