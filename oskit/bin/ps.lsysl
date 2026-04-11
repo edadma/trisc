@@ -6,7 +6,7 @@ and name.
 
     module oskit.bin.ps
 
-    import oskit.ulib.{putc, exit, get_thread_count, get_thread_state, get_thread_name, get_thread_pid}
+    import oskit.ulib.{putc, exit, get_thread_count, get_thread_state, get_thread_name, get_thread_name_len, get_thread_pid}
 
     putint(n: int)
         if n >= 10
@@ -64,8 +64,7 @@ and name.
                     print("unknown ")
                 // Print name
                 val np = get_thread_name(i)
-                var j = 0
-                while np[j] != 0
+                val nlen = get_thread_name_len(i)
+                for var j = 0; j < nlen; j++
                     putc(int(np[j]))
-                    j += 1
                 putc('\n')

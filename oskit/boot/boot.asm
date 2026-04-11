@@ -263,6 +263,8 @@ trap_handler
   beq r1, r3, .sys_event_clear  ; 28 = event_clear(packed)
   ldi r3, 42
   beq r1, r3, .sys_thread_pid   ; 42 = thread_pid(id)
+  ldi r3, 43
+  beq r1, r3, .sys_thread_name_len ; 43 = thread_name_len(id)
 
   ; Slow path: save full context for syscalls that context-switch
   pshr r6                       ; save user's r1-r6
@@ -727,6 +729,24 @@ extern query_thread_pid
   pshd r6
   mov  r1, r2
   movi r4, query_thread_pid
+  jalr r6, r4
+  popd r6
+  popd r5
+  popd r4
+  popd r2
+  sti
+  rte
+
+; thread_name_len(id): return name length of thread r2
+extern query_thread_name_len
+
+.sys_thread_name_len
+  pshd r2
+  pshd r4
+  pshd r5
+  pshd r6
+  mov  r1, r2
+  movi r4, query_thread_name_len
   jalr r6, r4
   popd r6
   popd r5

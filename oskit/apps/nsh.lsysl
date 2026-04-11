@@ -638,7 +638,7 @@ Commands such as `echo` and `cat` are not built-ins — they load
         args_buf[pos] = 0
 
         // Create process with its own page table
-        val pid = create_process(entry, PROG_USP, PROG_SSP, *byte(cmd), proc_pt)
+        val pid = create_process(entry, PROG_USP, PROG_SSP, cmd, proc_pt)
 
         // Restore nsh to kernel address space
         kernel_set_thread_ptbr(my_tid, KERNEL_L1_BASE)

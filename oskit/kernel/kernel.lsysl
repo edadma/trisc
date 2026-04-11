@@ -58,7 +58,7 @@ Statistics fields track per-thread performance:
         ssp: i64
         state: int
         wake_tick: int
-        name: *byte
+        name: string
         priority: int
         join_target: int
         quantum: int
@@ -109,7 +109,7 @@ loaded by nsh each get their own process entry.
         parent_tid: int
         exit_code: int
         main_tid: int
-        name: *byte
+        name: string
 
     var processes: [16]Process
     var next_pid = 1
@@ -580,14 +580,14 @@ PSR, PC, r1-r6, USP (9 x 8 bytes, top to bottom)
         *(*i64(sp)) = usp               // USP
         sp
 
-    create_thread(entry_point: i64, usp: i64, ssp: i64, name: *byte) -> int =
+    create_thread(entry_point: i64, usp: i64, ssp: i64, name: string) -> int =
         create_thread_pri(entry_point, usp, ssp, name, 0, KERNEL_L1_BASE)
 
 Create a thread with a specific page table. The ptbr is set
 atomically before the thread is enqueued, preventing a race
 where the scheduler picks up the thread with the wrong ptbr.
 
-    create_thread_vm(entry_point: i64, usp: i64, ssp: i64, name: *byte, ptbr: int) -> int =
+    create_thread_vm(entry_point: i64, usp: i64, ssp: i64, name: string, ptbr: int) -> int =
         create_thread_pri(entry_point, usp, ssp, name, 0, ptbr)
 
 Lower priority number = higher priority. Priority 0 runs first.
@@ -597,7 +597,7 @@ otherwise appends at thread_count (if below MAX_THREADS). Returns the thread
 index, or -1 if every slot is in use. Without reuse, short-lived /bin programs
 would monotonically bump thread_count and walk off the end of threads[].
 
-    create_thread_pri(entry_point: i64, usp: i64, ssp: i64, name: *byte, priority: int, ptbr_val: int) -> int
+    create_thread_pri(entry_point: i64, usp: i64, ssp: i64, name: string, priority: int, ptbr_val: int) -> int
         asm("cli")
         ensure_queues_init()
         var idx = -1
@@ -664,7 +664,10 @@ would monotonically bump thread_count and walk off the end of threads[].
         threads[id].state
 
     query_thread_name(id: int) -> *byte
-        threads[id].name
+        *byte(threads[id].name)
+
+    query_thread_name_len(id: int) -> int
+        len(threads[id].name)
 
     kernel_getuid() -> int
         threads[current_thread].uid
@@ -724,7 +727,7 @@ entry and creates a thread for it. waitpid blocks the caller
 until the process exits. getpid returns the current thread's
 process ID (0 for kernel threads).
 
-    create_process(entry_point: i64, usp: i64, ssp: i64, name: *byte, ptbr_val: int) -> int
+    create_process(entry_point: i64, usp: i64, ssp: i64, name: string, ptbr_val: int) -> int
         // Allocate PID
         var pid = -1
         var i = 1

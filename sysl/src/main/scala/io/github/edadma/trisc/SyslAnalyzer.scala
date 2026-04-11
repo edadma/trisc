@@ -47,7 +47,7 @@ class SyslAnalyzer:
     // OS kernel ABI (called from boot.asm):
     "kernel_init", "kernel_main", "schedule", "current_thread",
     "syscall_table", "syscall_ssp", "irq_handlers", "ticks",
-    "thread_count", "query_thread_state", "query_thread_name",
+    "thread_count", "query_thread_state", "query_thread_name", "query_thread_name_len",
     "sleep_until_current", "query_thread_ctx_switches", "query_thread_cpu_ticks",
     "query_total_ctx_switches", "kernel_set_watchdog", "kernel_panic",
     "check_stack_at", "suspend_thread", "resume_thread",
