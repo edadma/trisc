@@ -1014,4 +1014,407 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    a[0] * 10000 + a[1] * 1000 + a[2] * 100 + a[3] * 10 + a[4]
         |""".stripMargin) shouldBe (11233 % 256)
   }
+
+  // ===== std.unicode =====
+
+  "std.unicode is_letter" in {
+    llvmExitWithStd(
+      """import std.unicode.*
+        |
+        |main() -> int
+        |    var n = 0
+        |    if is_letter(65) then n = n + 1
+        |    if is_letter(122) then n = n + 1
+        |    if !is_letter(48) then n = n + 1
+        |    if !is_letter(32) then n = n + 1
+        |    n
+        |""".stripMargin) shouldBe 4
+  }
+
+  "std.unicode is_digit" in {
+    llvmExitWithStd(
+      """import std.unicode.*
+        |
+        |main() -> int
+        |    var n = 0
+        |    if is_digit(48) then n = n + 1
+        |    if is_digit(57) then n = n + 1
+        |    if !is_digit(65) then n = n + 1
+        |    n
+        |""".stripMargin) shouldBe 3
+  }
+
+  "std.unicode is_space" in {
+    llvmExitWithStd(
+      """import std.unicode.*
+        |
+        |main() -> int
+        |    var n = 0
+        |    if is_space(32) then n = n + 1
+        |    if is_space(9) then n = n + 1
+        |    if is_space(10) then n = n + 1
+        |    if !is_space(65) then n = n + 1
+        |    n
+        |""".stripMargin) shouldBe 4
+  }
+
+  "std.unicode classification" in {
+    llvmExitWithStd(
+      """import std.unicode.*
+        |
+        |main() -> int
+        |    var n = 0
+        |    if is_upper(65) then n = n + 1
+        |    if is_lower(97) then n = n + 1
+        |    if is_alnum(48) then n = n + 1
+        |    if is_punct(33) then n = n + 1
+        |    if is_print(32) then n = n + 1
+        |    if is_control(0) then n = n + 1
+        |    if is_hex_digit(102) then n = n + 1
+        |    n
+        |""".stripMargin) shouldBe 7
+  }
+
+  "std.unicode case conversion" in {
+    llvmExitWithStd(
+      """import std.unicode.*
+        |
+        |main() -> int
+        |    var n = 0
+        |    if to_upper(97) == 65 then n = n + 1
+        |    if to_lower(65) == 97 then n = n + 1
+        |    if to_upper(48) == 48 then n = n + 1
+        |    n
+        |""".stripMargin) shouldBe 3
+  }
+
+  // ===== std.mem =====
+
+  "std.mem copy" in {
+    llvmExitWithStd(
+      """import std.mem.*
+        |
+        |main() -> int
+        |    val src = new [4]byte
+        |    val dst = new [4]byte
+        |    src[0] = 10; src[1] = 20; src[2] = 30; src[3] = 40
+        |    val n = copy(dst[:], src[:])
+        |    if n != 4 then return 0
+        |    if dst[0] != 10 then return 0
+        |    if dst[3] != 40 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.mem set and zero" in {
+    llvmExitWithStd(
+      """import std.mem.*
+        |
+        |main() -> int
+        |    val buf = new [4]byte
+        |    set(buf[:], 0x7F)
+        |    if buf[0] != 0x7F then return 0
+        |    if buf[3] != 0x7F then return 0
+        |    zero(buf[:])
+        |    if buf[0] != 0 then return 0
+        |    if buf[3] != 0 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.mem eq and cmp" in {
+    llvmExitWithStd(
+      """import std.mem.*
+        |
+        |main() -> int
+        |    val a = new [3]byte
+        |    val b = new [3]byte
+        |    a[0] = 1; a[1] = 2; a[2] = 3
+        |    b[0] = 1; b[1] = 2; b[2] = 3
+        |    var n = 0
+        |    if eq(a[:], b[:]) then n = n + 1
+        |    if cmp(a[:], b[:]) == 0 then n = n + 1
+        |    b[2] = 4
+        |    if !eq(a[:], b[:]) then n = n + 1
+        |    if cmp(a[:], b[:]) < 0 then n = n + 1
+        |    n
+        |""".stripMargin) shouldBe 4
+  }
+
+  "std.mem index_byte" in {
+    llvmExitWithStd(
+      """import std.mem.*
+        |
+        |main() -> int
+        |    val s = new [4]byte
+        |    s[0] = 1; s[1] = 2; s[2] = 1; s[3] = 2
+        |    var n = 0
+        |    if index_byte(s[:], 2) == 1 then n = n + 1
+        |    if index_byte(s[:], 99) == -1 then n = n + 1
+        |    n
+        |""".stripMargin) shouldBe 2
+  }
+
+  // ===== std.errors =====
+
+  "std.errors new and msg" in {
+    llvmOutputWithStd(
+      """import std.errors.*
+        |
+        |main()
+        |    val e = new_error("something failed")
+        |    puts(error_msg(e))
+        |""".stripMargin) shouldBe "something failed"
+  }
+
+  "std.errors equal and sentinels" in {
+    llvmExitWithStd(
+      """import std.errors.*
+        |
+        |main() -> int
+        |    var n = 0
+        |    val a = new_error("timeout")
+        |    val b = new_error("timeout")
+        |    val c = new_error("not found")
+        |    if errors_equal(a, b) then n = n + 1
+        |    if !errors_equal(a, c) then n = n + 1
+        |    if errors_equal(err_eof(), err_eof()) then n = n + 1
+        |    if !errors_equal(err_eof(), err_not_found()) then n = n + 1
+        |    n
+        |""".stripMargin) shouldBe 4
+  }
+
+  "std.errors sentinel messages" in {
+    llvmOutputWithStd(
+      """import std.errors.*
+        |
+        |main()
+        |    puts(error_msg(err_eof()))
+        |    puts(error_msg(err_not_found()))
+        |    puts(error_msg(err_permission()))
+        |""".stripMargin) shouldBe "EOF\nnot found\npermission denied"
+  }
+
+  // ===== std.path =====
+
+  "std.path base" in {
+    llvmOutputWithStd(
+      """import std.path.*
+        |
+        |main()
+        |    puts(base("/a/b/c"))
+        |    puts(base("/"))
+        |    puts(base(""))
+        |    puts(base("a"))
+        |""".stripMargin) shouldBe "c\n/\n.\na"
+  }
+
+  "std.path dir" in {
+    llvmOutputWithStd(
+      """import std.path.*
+        |
+        |main()
+        |    puts(dir("/a/b/c"))
+        |    puts(dir("/"))
+        |    puts(dir(""))
+        |    puts(dir("a"))
+        |""".stripMargin) shouldBe "/a/b\n/\n.\n."
+  }
+
+  "std.path ext" in {
+    llvmOutputWithStd(
+      """import std.path.*
+        |
+        |main()
+        |    puts(ext("foo.txt"))
+        |    puts(ext("foo"))
+        |    puts(ext("a/b.tar.gz"))
+        |""".stripMargin) shouldBe ".txt\n\n.gz"
+  }
+
+  "std.path is_abs" in {
+    llvmExitWithStd(
+      """import std.path.*
+        |
+        |main() -> int
+        |    var n = 0
+        |    if is_abs("/foo") then n = n + 1
+        |    if !is_abs("foo") then n = n + 1
+        |    if !is_abs("") then n = n + 1
+        |    n
+        |""".stripMargin) shouldBe 3
+  }
+
+  "std.path join" in {
+    llvmOutputWithStd(
+      """import std.path.*
+        |
+        |main()
+        |    puts(join("a", "b"))
+        |    puts(join("/a/", "/b"))
+        |    puts(join("", "b"))
+        |""".stripMargin) shouldBe "a/b\n/a/b\nb"
+  }
+
+  "std.path clean" in {
+    llvmOutputWithStd(
+      """import std.path.*
+        |
+        |main()
+        |    puts(clean("a//b"))
+        |    puts(clean("/a/"))
+        |    puts(clean("/"))
+        |    puts(clean(""))
+        |""".stripMargin) shouldBe "a/b\n/a\n/\n."
+  }
+
+  // ===== std.rand =====
+
+  "std.rand deterministic" in {
+    llvmExitWithStd(
+      """import std.rand.*
+        |
+        |main() -> int
+        |    seed(42i64)
+        |    val a = next()
+        |    val b = next()
+        |    seed(42i64)
+        |    val c = next()
+        |    val d = next()
+        |    var n = 0
+        |    if a == c then n = n + 1
+        |    if b == d then n = n + 1
+        |    n
+        |""".stripMargin) shouldBe 2
+  }
+
+  "std.rand next_range bounds" in {
+    llvmExitWithStd(
+      """import std.rand.*
+        |
+        |main() -> int
+        |    seed(456i64)
+        |    var ok = true
+        |    for i in 0..<100
+        |        val r = next_range(10, 20)
+        |        if r < 10 then ok = false
+        |        if r >= 20 then ok = false
+        |    if ok then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.rand shuffle preserves sum" in {
+    llvmExitWithStd(
+      """import std.rand.*
+        |
+        |main() -> int
+        |    seed(42i64)
+        |    val s = new [5]int
+        |    s[0] = 10; s[1] = 20; s[2] = 30; s[3] = 40; s[4] = 50
+        |    shuffle(s[:])
+        |    var sum = 0
+        |    for i in 0..<5
+        |        sum = sum + s[i]
+        |    sum
+        |""".stripMargin) shouldBe (150 % 256)
+  }
+
+  // ===== std.debug =====
+
+  "std.debug assert true" in {
+    llvmExitWithStd(
+      """import std.debug.*
+        |
+        |main() -> int
+        |    assert(true, "should not fire")
+        |    assert(1 + 1 == 2, "math works")
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  // ===== std.option =====
+
+  "std.option is_some and is_none" in {
+    llvmExitWithStd(
+      """import std.option.*
+        |
+        |main() -> int
+        |    val s: Option[int] = Some(42)
+        |    val n: Option[int] = None
+        |    var count = 0
+        |    if is_some(s) then count = count + 1
+        |    if !is_none(s) then count = count + 1
+        |    if is_none(n) then count = count + 1
+        |    if !is_some(n) then count = count + 1
+        |    count
+        |""".stripMargin) shouldBe 4
+  }
+
+  "std.option unwrap and unwrap_or" in {
+    llvmExitWithStd(
+      """import std.option.*
+        |
+        |main() -> int
+        |    val s: Option[int] = Some(42)
+        |    val n: Option[int] = None
+        |    var count = 0
+        |    if unwrap(s) == 42 then count = count + 1
+        |    if unwrap_or(s, 0) == 42 then count = count + 1
+        |    if unwrap_or(n, 99) == 99 then count = count + 1
+        |    count
+        |""".stripMargin) shouldBe 3
+  }
+
+  "std.option match" in {
+    llvmExitWithStd(
+      """import std.option.*
+        |
+        |main() -> int
+        |    val o: Option[int] = Some(7)
+        |    val doubled = o match
+        |        Some(v) -> v * 2
+        |        None -> 0
+        |    val n: Option[int] = None
+        |    val def_val = n match
+        |        Some(v) -> v
+        |        None -> -1
+        |    var count = 0
+        |    if doubled == 14 then count = count + 1
+        |    if def_val == -1 then count = count + 1
+        |    count
+        |""".stripMargin) shouldBe 2
+  }
+
+  // ===== std.result =====
+
+  "std.result is_ok and is_err" in {
+    llvmExitWithStd(
+      """import std.result.*
+        |
+        |main() -> int
+        |    val ok: Result[int, string] = Ok(42)
+        |    val er: Result[int, string] = Err("fail")
+        |    var count = 0
+        |    if is_ok(ok) then count = count + 1
+        |    if !is_err(ok) then count = count + 1
+        |    if is_err(er) then count = count + 1
+        |    if !is_ok(er) then count = count + 1
+        |    count
+        |""".stripMargin) shouldBe 4
+  }
+
+  "std.result unwrap and unwrap_or" in {
+    llvmExitWithStd(
+      """import std.result.*
+        |
+        |main() -> int
+        |    val ok: Result[int, string] = Ok(42)
+        |    val er: Result[int, string] = Err("fail")
+        |    var count = 0
+        |    if unwrap(ok) == 42 then count = count + 1
+        |    if unwrap_or(ok, 0) == 42 then count = count + 1
+        |    if unwrap_or(er, 99) == 99 then count = count + 1
+        |    count
+        |""".stripMargin) shouldBe 3
+  }
 }

@@ -1,0 +1,24 @@
+HAL — CPU-loop memory operations (generic)
+===========================================
+
+Software memcpy and memset using plain CPU loops. Works on
+any target without DMA hardware. Same interface as mem_dma.
+
+    module oskit.hal
+
+memcpy — copy n bytes from src to dst using a byte loop.
+Does not handle overlapping regions.
+
+    memcpy(dst: *byte, src: *byte, n: int)
+        var i = 0
+        while i < n
+            dst[i] = src[i]
+            i += 1
+
+memset — fill n bytes at dst with v using a byte loop.
+
+    memset(dst: *byte, v: byte, n: int)
+        var i = 0
+        while i < n
+            dst[i] = v
+            i += 1

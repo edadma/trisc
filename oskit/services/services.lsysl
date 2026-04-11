@@ -67,6 +67,9 @@ Syscall numbers:
     exit()
         syscall(SYS_EXIT, 0)
 
+    exit_with(code: int)
+        syscall(SYS_EXIT, code)
+
     join(id: int)
         syscall(SYS_JOIN, id)
 

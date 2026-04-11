@@ -99,6 +99,10 @@ trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
     val raw = scala.io.Source.fromFile("std/mem/mem.lsysl").mkString
     LiterateRenderer.tangle(new LiterateParser().parse(raw))
 
+  private lazy val halMemSysl: String =
+    val raw = scala.io.Source.fromFile("oskit/hal/mem_dma.lsysl").mkString
+    LiterateRenderer.tangle(new LiterateParser().parse(raw))
+
   def compileSysl(source: String): TOF =
     val driver = new SyslDriver
     val result = driver.compile(Map("main" -> source))
@@ -143,7 +147,7 @@ trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
       "oskit/sync/mutex" -> mutexSysl, "oskit/sync/condvar" -> condvarSysl, "oskit/sync/barrier" -> barrierSysl,
       "oskit/sync/rwlock" -> rwlockSysl, "oskit/sync/channel" -> channelSysl, "oskit/sync/mailbox" -> mailboxSysl,
       "oskit/sync/rmutex" -> rmutexSysl, "oskit/sync/qset" -> qsetSysl, "oskit/sync/pimutex" -> pimutexSysl,
-      "std/mem/mem" -> stdMemSysl,
+      "std/mem/mem" -> stdMemSysl, "oskit/hal/mem" -> halMemSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)

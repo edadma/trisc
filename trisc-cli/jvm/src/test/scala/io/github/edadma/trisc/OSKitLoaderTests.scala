@@ -22,6 +22,7 @@ class OSKitLoaderTests extends OSKitTestHelpers {
   private lazy val hmacSysl: String     = readLsysl("std/crypto/hmac/hmac.lsysl")
   private lazy val pbkdf2Sysl: String   = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
   private lazy val pmSrvSysl: String   = readLsysl("oskit/servers/pm.lsysl")
+  private lazy val halMemSysl: String  = readLsysl("oskit/hal/mem_dma.lsysl")
 
   // --- std lib ---
   private lazy val stringsSysl: String  = readLsysl("std/strings/strings.lsysl")
@@ -101,6 +102,7 @@ class OSKitLoaderTests extends OSKitTestHelpers {
       "posix/stdlib/alloc"          -> posixAllocSysl,
       "std/debug/debug"              -> debugSysl,
       "std/mem/mem"                  -> memSysl,
+      "oskit/hal/mem"               -> halMemSysl,
       "std/encoding/binary/binary"  -> binarySysl,
       "std/strings/strings"         -> stringsSysl,
       "std/builder/builder"         -> builderSysl,

@@ -652,7 +652,11 @@ Commands such as `echo` and `cat` are not built-ins — they load
                 nsh_putint(pid)
                 nsh_print("]\n")
             else
-                pm_waitpid(pid)
+                val exit_code = pm_waitpid(pid)
+                if exit_code != 0
+                    nsh_print("exit ")
+                    nsh_putint(exit_code)
+                    nsh_print("\n")
         else
             nsh_print("out of process slots\n")
 

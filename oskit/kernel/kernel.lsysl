@@ -318,7 +318,7 @@ Freed pages are pushed onto a singly-linked list (next pointer
 stored in the first 8 bytes of each free page). page_alloc
 pops from the free list first, then falls back to bumping.
 
-    import std.mem.memset
+    import oskit.hal.memset
 
     var page_free_list = 0
 
@@ -461,7 +461,7 @@ Translates the destination virtual address to physical via
 software page table walk, then copies using the identity-mapped
 physical address. No PTBR switching needed.
 
-    import std.mem.memcpy
+    import oskit.hal.memcpy
 
     vm_copy_to(dst_ptbr: int, dst_vaddr: int, src: *byte, len: int)
         var copied = 0
@@ -725,13 +725,14 @@ would monotonically bump thread_count and walk off the end of threads[].
 Also wakes any threads that are joining on this thread,
 enqueueing them back into their priority run queue.
 
-    terminate_current()
+    terminate_current(exit_code: int)
         threads[current_thread].state = STATE_TERMINATED
 
         // If this thread belongs to a process, mark it as zombie
         // and notify PM so it can handle reaping
         val pid = threads[current_thread].pid
         if pid > 0
+            processes[pid].exit_code = exit_code
             processes[pid].state = PROC_ZOMBIE
             if kernel_pm_tid >= 0
                 notify_send(kernel_pm_tid, pid)

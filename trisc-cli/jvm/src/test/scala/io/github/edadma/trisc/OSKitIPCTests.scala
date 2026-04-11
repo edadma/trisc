@@ -9,13 +9,14 @@ class OSKitIPCTests extends OSKitTestHelpers {
 
   private lazy val ipcSysl: String = readLsysl("oskit/ipc/ipc.lsysl")
   private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
+  private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
 
   def runIPC(userSources: Map[String, String], maxCycles: Int = 2000000): (CPU, String) =
     val bootTof = assemble(bootAsm, relocatable = true)
     val allSources = Map(
       "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
       "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
-      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl,
+      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
