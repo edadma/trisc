@@ -261,13 +261,6 @@ import oskit.apps.init.{init}
     output should include("data")
   }
 
-  "NSH: ps shows threads" in {
-    val keys        = typeString("ps\n", startTick = 500000)
-    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 10000000)
-    output should include("nsh")
-    output should include("STATE")
-  }
-
   "NSH: uptime shows ticks" in {
     val keys        = typeString("uptime\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 10000000)

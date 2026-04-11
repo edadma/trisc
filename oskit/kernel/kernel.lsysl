@@ -431,8 +431,8 @@ Set a thread's page table base register.
         register_syscall(10, sleep_until_current)
         register_syscall(29, pimutex_lock_kernel)
         register_syscall(30, pimutex_unlock_kernel)
-        register_syscall(31, waitpid_current)
-        register_syscall(32, getpid_current)
+        register_syscall(40, waitpid_current)
+        register_syscall(41, getpid_current)
 
 Thread-local storage. A flat 2D array indexed by [thread_id][slot].
 Each thread gets TLS_SLOTS slots of int-sized values. Access is
@@ -623,6 +623,9 @@ would monotonically bump thread_count and walk off the end of threads[].
 
     kernel_setuid(uid: int)
         threads[current_thread].uid = uid
+
+    query_thread_pid(id: int) -> int
+        threads[id].pid
 
     query_thread_ctx_switches(id: int) -> int
         threads[id].ctx_switches

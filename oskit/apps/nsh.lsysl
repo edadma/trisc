@@ -18,7 +18,6 @@ Built-in commands:
 - cd [path]        — change directory
 - stat path        — show file info
 - write path text  — write text to file
-- ps               — list threads
 - uptime           — show system uptime
 - whoami           — print uid
 - help             — list commands
@@ -26,7 +25,7 @@ Built-in commands:
     module oskit.apps.nsh
 
     import oskit.fs.ROOT_INODE
-    import oskit.services.{sleep, join, waitpid, getuid, uptime, thread_id, get_thread_count, get_thread_state, get_thread_name, get_cpu_ticks}
+    import oskit.services.{sleep, join, waitpid, getuid, uptime, thread_id}
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
     import oskit.servers.{fs_open, fs_read, fs_write, fs_stat, fs_create, fs_unlink, fs_mkdir, fs_rmdir, fs_readdir, fs_chmod, fs_rename}
     import oskit.loader.load_tof
@@ -516,50 +515,6 @@ Built-in commands.
         if nw < 0
             nsh_print("error\n")
 
-    cmd_ps(argc: int, argv: *string)
-        nsh_print("  ID STATE    NAME\n")
-        val count = get_thread_count()
-        for var i = 0; i < count; i++
-            val state = get_thread_state(i)
-            if state != 3
-                // Print ID (right-aligned in 4 chars)
-                if i < 10
-                    nsh_print("   ")
-                else
-                    nsh_print("  ")
-                nsh_putint(i)
-                nsh_putc(' ')
-                // Print state
-                if state == 0
-                    nsh_print("ready   ")
-                else if state == 1
-                    nsh_print("running ")
-                else if state == 2
-                    nsh_print("blocked ")
-                else if state == 4
-                    nsh_print("joining ")
-                else if state == 5
-                    nsh_print("suspend ")
-                else if state == 10
-                    nsh_print("notify  ")
-                else if state == 11
-                    nsh_print("mutex   ")
-                else if state == 20
-                    nsh_print("sendblk ")
-                else if state == 21
-                    nsh_print("recvblk ")
-                else if state == 22
-                    nsh_print("rcvntfy ")
-                else
-                    nsh_print("unknown ")
-                // Print name
-                val np = get_thread_name(i)
-                var j = 0
-                while np[j] != 0
-                    nsh_putc(int(np[j]))
-                    j += 1
-                nsh_newline()
-
     cmd_uptime(argc: int, argv: *string)
         val ticks = uptime()
         nsh_print("up ")
@@ -572,7 +527,7 @@ Built-in commands.
 
     cmd_help(argc: int, argv: *string)
         nsh_print("echo cat ls touch write mkdir rm rmdir mv chmod\n")
-        nsh_print("pwd cd stat ps uptime whoami help\n")
+        nsh_print("pwd cd stat uptime whoami help\n")
         nsh_print("(echo and cat are /bin executables)\n")
 
 Command dispatch.
@@ -607,8 +562,6 @@ Command dispatch.
             cmd_cd(argc, argv)
         else if cmd == "stat"
             cmd_stat(argc, argv)
-        else if cmd == "ps"
-            cmd_ps(argc, argv)
         else if cmd == "uptime"
             cmd_uptime(argc, argv)
         else
