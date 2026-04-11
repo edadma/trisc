@@ -353,7 +353,14 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
 
     tick.foreach(_(this))
 
-    if state == State.Wfi && limit < 0 then Thread.sleep(1)
+    if state == State.Wfi && limit < 0 then
+      // Batch-tick during WFI so background threads wake at a realistic rate.
+      // Without this, timer advances once per ~1ms sleep — far too slow.
+      var i = 0
+      while i < 999 && state == State.Wfi do
+        tick.foreach(_(this))
+        i += 1
+      if state == State.Wfi then Thread.sleep(1)
 
     if state != State.Halt && state != State.DoubleFault && limit != 0 then
       run()
