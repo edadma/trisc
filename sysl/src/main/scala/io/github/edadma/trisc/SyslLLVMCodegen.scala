@@ -2178,6 +2178,10 @@ class SyslLLVMCodegen:
                 else emit(s"  $result = zext $fromLt $v to $toLt")
               else
                 emit(s"  $result = trunc $fromLt $v to $toLt")
+            case _ if inner.typ.isIntegral && (targetType.isInstanceOf[SyslType.PtrType] || targetType.isInstanceOf[SyslType.RefType]) =>
+              emit(s"  $result = inttoptr $fromLt $v to $toLt")
+            case _ if (inner.typ.isInstanceOf[SyslType.PtrType] || inner.typ.isInstanceOf[SyslType.RefType]) && targetType.isIntegral =>
+              emit(s"  $result = ptrtoint $fromLt $v to $toLt")
             case _ =>
               emit(s"  $result = bitcast $fromLt $v to $toLt")
           result
