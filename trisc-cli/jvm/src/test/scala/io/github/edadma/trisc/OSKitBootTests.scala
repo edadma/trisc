@@ -26,10 +26,12 @@ class OSKitBootTests extends OSKitTestHelpers {
     // Step 2: Compile Sysl files together (kernel + demo)
     val driver = new SyslDriver
     val memSource = LiterateRenderer.tangle(new LiterateParser().parse(scala.io.Source.fromFile("std/mem/mem.lsysl").mkString))
+    val halMemSource = LiterateRenderer.tangle(new LiterateParser().parse(scala.io.Source.fromFile("oskit/hal/mem_dma.lsysl").mkString))
     val result = driver.compile(Map(
       "oskit/kernel/kernel" -> kernelSysl,
       "oskit/services/services" -> servicesSysl,
       "std/mem/mem" -> memSource,
+      "oskit/hal/mem" -> halMemSource,
       "tasks" -> tasksSysl,
       "main" -> mainSysl,
     ))

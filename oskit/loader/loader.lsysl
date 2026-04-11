@@ -31,7 +31,7 @@ pressure regardless of file size.
 
     import oskit.servers.{fs_open, fs_read}
     import posix.stdlib.{malloc, free}
-    import std.mem.{memcpy, memset}
+    import oskit.hal.{memcpy, memset}
 
 Error codes returned when loading fails.
 

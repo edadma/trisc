@@ -1,0 +1,58 @@
+HAL — DMA-accelerated memory operations (TRISC)
+=================================================
+
+Hardware-accelerated memcpy and memset using the RP2040-style
+DMA controller. The DMA completes the entire transfer in a
+single cycle from the CPU's perspective.
+
+This is the TRISC HAL implementation. For targets without DMA,
+use `mem_cpu.lsysl` which provides the same interface using
+CPU loops.
+
+DMA channel 0 register map (at DMA_BASE = 0x8001C0):
+- +0  READ_ADDR  (4B) — source address
+- +4  WRITE_ADDR (4B) — destination address
+- +8  TRANS_COUNT (4B) — number of transfers
+- +12 CTRL_TRIG  (4B) — config + trigger (write ENABLE=1 to start)
+
+    module oskit.hal
+
+    val DMA_BASE: i64 = 0x8001C0
+
+Helper: write a 32-bit big-endian value to a memory-mapped
+register via 4 byte writes.
+
+    dma_write_reg(base: *byte, off: int, v: int)
+        base[off]     = byte((v >> 24) & 0xFF)
+        base[off + 1] = byte((v >> 16) & 0xFF)
+        base[off + 2] = byte((v >> 8) & 0xFF)
+        base[off + 3] = byte(v & 0xFF)
+
+memcpy — copy n bytes from src to dst using DMA channel 0.
+Does not handle overlapping regions.
+
+    memcpy(dst: *byte, src: *byte, n: int)
+        if n == 0
+            return
+        val regs = *byte(DMA_BASE)
+        dma_write_reg(regs, 0, int(i64(src)))   // READ_ADDR
+        dma_write_reg(regs, 4, int(i64(dst)))   // WRITE_ADDR
+        dma_write_reg(regs, 8, n)               // TRANS_COUNT
+        dma_write_reg(regs, 12, 0x1FC)
+        regs[14] = byte(0x03)
+
+memset — fill n bytes at dst with v using DMA channel 0
+with INCR_READ disabled (reads same byte repeatedly).
+
+    var _memset_val: byte = 0
+
+    memset(dst: *byte, v: byte, n: int)
+        if n == 0
+            return
+        _memset_val = v
+        val regs = *byte(DMA_BASE)
+        dma_write_reg(regs, 0, int(i64(&_memset_val)))  // READ_ADDR (static byte)
+        dma_write_reg(regs, 4, int(i64(dst)))           // WRITE_ADDR
+        dma_write_reg(regs, 8, n)                       // TRANS_COUNT
+        dma_write_reg(regs, 12, 0x1F8)
+        regs[14] = byte(0x03)

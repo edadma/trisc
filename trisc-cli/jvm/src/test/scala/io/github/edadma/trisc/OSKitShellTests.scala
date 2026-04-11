@@ -15,6 +15,7 @@ class OSKitShellTests extends OSKitTestHelpers {
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val shSysl: String     = readLsysl("oskit/apps/sh.lsysl")
   private lazy val memSysl: String   = readLsysl("std/mem/mem.lsysl")
+  private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
   private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   // Cache the compiled+linked OS image — all shell tests use the same app source.
@@ -29,6 +30,7 @@ class OSKitShellTests extends OSKitTestHelpers {
       "oskit/sync/mutex"         -> mutexSysl,
       "oskit/ipc/ipc"            -> ipcSysl,
       "std/mem/mem"              -> memSysl,
+      "oskit/hal/mem"            -> halMemSysl,
       "std/debug/debug"          -> debugSysl,
       "oskit/drivers/disk/disk"  -> diskSysl,
       "oskit/drivers/kbd/keyboard" -> kbdSysl,
