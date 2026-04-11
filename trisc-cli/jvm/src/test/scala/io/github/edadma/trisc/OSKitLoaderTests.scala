@@ -147,6 +147,7 @@ import oskit.apps.init.{init}
     case '-'                       => (KeyEvent.VK_MINUS, 0)
     case '.'                       => (KeyEvent.VK_PERIOD, 0)
     case '!'                       => (KeyEvent.VK_1, 1)
+    case '&'                       => (KeyEvent.VK_7, 1)
     case _                         => (KeyEvent.VK_SPACE, 0)
 
   def typeString(s: String, startTick: Int, spacing: Int = 2000): Seq[(Int, Int, Boolean, Int)] =
@@ -393,5 +394,22 @@ import oskit.apps.init.{init}
       files = Map("/bin/hello" -> tofBytes))
     val cleaned = output.filterNot(_ == '\n')
     cleaned should include("Hello, world!")
+  }
+
+  private lazy val countSysl: String = readLsysl("oskit/bin/count.lsysl")
+  private lazy val countTrb: Array[Byte] =
+    TriscBinary.serialize(TOF.deserialize(compileProgram(Map("oskit/bin/count/count" -> countSysl))))
+  private lazy val psSysl: String = readLsysl("oskit/bin/ps.lsysl")
+  private lazy val psTrb: Array[Byte] =
+    TriscBinary.serialize(TOF.deserialize(compileProgram(Map("oskit/bin/ps/ps" -> psSysl))))
+
+  "Loader: count & then ps does not crash" in {
+    val keys = typeString("count &\nps\n", startTick = 500000)
+    val (cpu, output, _) = runWithKeys("", keys, maxCycles = 100000000,
+      files = Map("/bin/count" -> countTrb, "/bin/ps" -> psTrb))
+    info(s"Output: ${output.take(500)}")
+    info(s"CPU state: ${cpu.state}")
+    // Should reach cycle limit (Wfi), not crash
+    output should not include "I"  // no InstructionAccess fault marker
   }
 }

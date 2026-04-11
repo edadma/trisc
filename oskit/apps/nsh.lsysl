@@ -589,8 +589,8 @@ Commands such as `echo` and `cat` are not built-ins — they load
     val PROG_ARGS_ADDR = 0xBF000
     val PROG_ARGS_MAX  = 240
     val PROG_BASE      = 0xD0000
-    val PROG_USP       = 0xCE000
-    val PROG_SSP       = 0xCC000
+    val PROG_USP       = 0xD0000
+    val PROG_SSP       = 0xCF000
 
     nsh_try_external(argc: int, argv: *string)
         val cmd = argv[0]

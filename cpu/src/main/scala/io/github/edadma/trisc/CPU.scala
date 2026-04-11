@@ -31,6 +31,10 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
   /** Cause of the last MMU fault. */
   var faultCause: FaultCause = FaultCause.None
 
+  // PC ring buffer for crash diagnostics
+  private val _pcRing = new Array[Long](20)
+  private var _pcPos = 0
+
   private val mpuEnd: Long = mpuBase + mpu.map(_.registerSize).getOrElse(0)
 
   /** Returns true if access is denied by the MPU. */
@@ -246,6 +250,9 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
     if state.ordinal < State.Halt.ordinal then
       enterException()
       if state == State.DoubleFault then return
+    // Record PC in ring buffer
+    _pcRing(_pcPos % _pcRing.length) = pc
+    _pcPos += 1
 
     // Breakpoint check
     if breakpoints.nonEmpty && breakpoints.contains(pc) then
@@ -263,6 +270,14 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
           case Left(cause) =>
             faultAddr = pc
             faultCause = cause
+            System.err.println(f"[TRISC] InstructionAccess fault at pc=$pc%08x cause=$cause psr=$psr%x")
+            System.err.println(f"  r1=${r(1).read}%x r2=${r(2).read}%x r3=${r(3).read}%x r4=${r(4).read}%x r5=${r(5).read}%x r6=${r(6).read}%x r7=${r(7).read}%x usp=$usp%x")
+            // dump last 20 PCs
+            val buf = _pcRing; val pos = _pcPos; val len = _pcRing.length
+            System.err.println("  last PCs:")
+            for i <- 0 until len do
+              val idx = (pos - len + i + len * 2) % len
+              System.err.println(f"    ${buf(idx)}%08x")
             state = State.InstructionAccess
             return
       case None => pc
