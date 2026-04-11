@@ -108,7 +108,11 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         val stillFailing = new mutable.ListBuffer[String]
         for name <- remaining do
           scala.util.Try {
-            val ast = asts(name)
+            val ast = if keepTests then asts(name)
+              else ProgramAST(asts(name).decls.filter {
+                case f: FunDeclAST => !f.attributes.exists(_.name == "test")
+                case _ => true
+              })
             val analyzer = new SyslAnalyzer
             // Register extern names so they are never mangled (ABI-level symbols)
             analyzer.registerNoMangle(globalExternNames)
