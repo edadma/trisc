@@ -2029,7 +2029,20 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 1
   }
 
-  "std.regex anchored" ignore { // TODO: SIGBUS — likely alignment or memory issue in complex patterns
+  "std.regex two calls" ignore { // TODO: ref cleanup frees backing storage while returned slice still references it
+    llvmExitWithStd(
+      """import std.regex.*
+        |
+        |main() -> int
+        |    val m1 = match_regex("hello", "hello world")
+        |    if !m1.matched() then return 0
+        |    val m2 = match_regex("world", "hello world")
+        |    if !m2.matched() then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.regex anchored" ignore { // TODO: same ref cleanup issue — second match_regex call crashes
     llvmExitWithStd(
       """import std.regex.*
         |
@@ -2059,7 +2072,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 1
   }
 
-  "std.regex character class" ignore { // TODO: same as anchored
+  "std.regex character class" ignore { // TODO: same ref cleanup issue
     llvmExitWithStd(
       """import std.regex.*
         |
@@ -2073,7 +2086,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 1
   }
 
-  "std.regex quantifiers" ignore { // TODO: same as anchored
+  "std.regex quantifiers" ignore { // TODO: same ref cleanup issue
     llvmExitWithStd(
       """import std.regex.*
         |

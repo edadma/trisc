@@ -283,7 +283,7 @@ class SyslLLVMCodegen:
             loaded
           else result
         else emitSextIfNeeded(result, rt, retType)
-        emitReleaseRefs(returnedSliceAlloca(expr))
+        emitReleaseRefs(returnedSliceAllocas(expr))
         emitRet(retType, finalVal)
       case TBlockBody(stmts) =>
         genBlock(stmts, retType)
@@ -363,7 +363,7 @@ class SyslLLVMCodegen:
           emit(s"  $loaded = load $retLt, $retLt* $result")
           loaded
         else emitSextIfNeeded(result, rt, retLt)
-        emitReleaseRefs(returnedSliceAlloca(expr))
+        emitReleaseRefs(returnedSliceAllocas(expr))
         emitRet(retLt, finalVal)
       case TBlockBody(stmts) =>
         genBlock(stmts, retLt)
@@ -421,7 +421,7 @@ class SyslLLVMCodegen:
               else result
             else emitSextIfNeeded(result, rt, retType)
             emitDefers()
-            emitReleaseRefs(returnedSliceAlloca(expr))
+            emitReleaseRefs(returnedSliceAllocas(expr))
             emitRet(retType, finalVal)
             hasReturned = true
           case other =>
@@ -522,7 +522,7 @@ class SyslLLVMCodegen:
           loaded
         else emitSextIfNeeded(v, vt, retType)
         emitDefers()
-        emitReleaseRefs(returnedSliceAlloca(value))
+        emitReleaseRefs(returnedSliceAllocas(value))
         emitRet(retType, finalVal)
         hasReturned = true
 
@@ -2662,16 +2662,22 @@ class SyslLLVMCodegen:
     case _: TIfExpr | _: TMatchExpr => true              // branches handle their own RC
     case _ => false
 
-  /** If expr is a direct variable reference to a slice local, or a pointer
-    * derived from a slice element (&slot[i]), return the slice's alloca register.
-    * Used to skip decrementing the returned slice at function exit. */
-  private def returnedSliceAlloca(expr: TExpr): Option[String] = expr match
-    case TVarRef(name, typ) if isSliceType(typ) && locals != null && locals.contains(name) =>
-      Some(locals(name).reg)
-    case TVarRef(name, _) if derivedFromSlice != null && derivedFromSlice.contains(name) =>
-      val sliceName = derivedFromSlice(name)
-      if locals != null && locals.contains(sliceName) then Some(locals(sliceName).reg) else None
-    case _ => None
+  /** Identify all local slice allocas that should NOT be cleaned up because they
+    * are part of the returned expression (either directly or embedded in a struct).
+    * Returns a set of alloca registers to skip during emitReleaseRefs. */
+  private def returnedSliceAllocas(expr: TExpr): Set[String] =
+    if locals == null then return Set.empty
+    expr match
+      case TVarRef(name, typ) if isSliceType(typ) && locals.contains(name) =>
+        Set(locals(name).reg)
+      case TVarRef(name, _) if derivedFromSlice != null && derivedFromSlice.contains(name) =>
+        val sliceName = derivedFromSlice(name)
+        if locals.contains(sliceName) then Set(locals(sliceName).reg) else Set.empty
+      case TStructConstruct(_, args) =>
+        // Struct being returned — skip cleanup for any slice-typed args that are local VarRefs
+        args.flatMap(returnedSliceAllocas).toSet
+      case _ => Set.empty
+
 
   /** Header offset: bytes from data pointer back to refcount field. */
   private def refHeaderOffset(t: SyslType): Int = t match
@@ -2813,7 +2819,7 @@ class SyslLLVMCodegen:
     emit(s"  br label %$skipLabel")
     emitLabel(skipLabel)
 
-  private def emitReleaseRefs(returnedSliceReg: Option[String] = None): Unit =
+  private def emitReleaseRefs(skipSliceRegs: Set[String] = Set.empty): Unit =
     val hasRefs = locals.exists((_, l) => isRef(l.typ))
     if hasRefs then
       // Flush stdout before deinit functions might write to it
@@ -2824,9 +2830,9 @@ class SyslLLVMCodegen:
       val ptr = newReg()
       emit(s"  $ptr = load i8*, i8** ${local.reg}")
       emitRefDecr(ptr, hoff, deinitFor(local.typ))
-    // Slice backref cleanup: decrement all slice locals except the one being returned
+    // Slice backref cleanup: decrement all slice locals except those being returned
     for (_, local) <- locals if isSliceType(local.typ) do
-      if !returnedSliceReg.contains(local.reg) then
+      if !skipSliceRegs.contains(local.reg) then
         emitSliceBackrefDecr(local.reg)
 
   /** Decrement slice backrefs for locals introduced since a scope snapshot.
