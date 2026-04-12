@@ -28,7 +28,7 @@ Built-in commands:
     import oskit.fs.ROOT_INODE
     import oskit.services.{sleep, join, getuid, uptime, thread_id}
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
-    import oskit.fs.client.{fs_open, fs_read, fs_write, fs_stat, fs_create, fs_unlink, fs_mkdir, fs_rmdir, fs_readdir, fs_chmod, fs_rename}
+    import oskit.fs.{fs_open, fs_read, fs_write, fs_stat, fs_create, fs_unlink, fs_mkdir, fs_rmdir, fs_readdir, fs_chmod, fs_rename}
     import oskit.servers.{pm_waitpid, pm_kill}
     import oskit.loader.load_tof
     import oskit.kernel.{create_thread, create_process, vm_create_process_pt, vm_set_ptbr, kernel_set_thread_ptbr, kernel_get_thread_pid}

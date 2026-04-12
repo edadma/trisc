@@ -50,7 +50,7 @@ Commands:
     val TFS_CMD_RENAME  = 12
 
     var tfs_port = -1
-    var tfs_srv_name: [3]byte
+    var tfs_srv_name: [4]byte
 
 Block I/O bridge: provides the rd_read/rd_write that the TFS
 library externs expect, forwarding to the disk server via IPC.
@@ -314,10 +314,11 @@ The disk server must be running before this server starts,
 since tfs_init() reads the superblock via rd_read → disk_read.
 
     tfs_server()
-        // Set up name
-        tfs_srv_name[0] = 102  // f
-        tfs_srv_name[1] = 115  // s
-        tfs_srv_name[2] = 0
+        // Set up name — register as "tfs" (VFS owns "fs")
+        tfs_srv_name[0] = 116  // t
+        tfs_srv_name[1] = 102  // f
+        tfs_srv_name[2] = 115  // s
+        tfs_srv_name[3] = 0
 
         // Create and register port
         tfs_port = port_create()
@@ -364,6 +365,6 @@ since tfs_init() reads the superblock via rd_read → disk_read.
                     ipc_reply(sender, &reply[0], 1)
 
 The client-side wrappers (`fs_open`, `fs_read`, …) used to live
-here but have moved to `oskit/fs/client.lsysl` (`oskit.fs.client`)
+here but have moved to `oskit/fs/client.lsysl` (`oskit.fs`)
 so that clients don't drag in server code. Callers should
-`import oskit.fs.client.{fs_open, fs_read, …}` instead.
+`import oskit.fs.{fs_open, fs_read, …}` instead.

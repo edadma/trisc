@@ -43,6 +43,7 @@ object OskitDemoBuilder:
   private lazy val hmacSysl: String      = readLsysl("std/crypto/hmac/hmac.lsysl")
   private lazy val pbkdf2Sysl: String    = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
   private lazy val pmSrvSysl: String     = readLsysl("oskit/servers/pm.lsysl")
+  private lazy val vfsSrvSysl: String    = readLsysl("oskit/servers/vfs.lsysl")
   private lazy val halMemSysl: String   = readLsysl("oskit/hal/mem_dma.lsysl")
   private lazy val configSysl: String   = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
   private lazy val mouseSysl: String     = readLsysl("oskit/drivers/mouse/mouse.lsysl")
@@ -67,6 +68,7 @@ object OskitDemoBuilder:
         "oskit/fs/client"             -> fsClientSysl,
         "oskit/servers/tfs"           -> tfsSrvSysl,
         "oskit/servers/pm"            -> pmSrvSysl,
+        "oskit/servers/vfs"           -> vfsSrvSysl,
         "posix/unistd/sbrk"           -> sbrkSysl,
         "posix/string/string"         -> posixStringSysl,
         "posix/ctype/ctype"           -> posixCtypeSysl,

@@ -1,10 +1,9 @@
 OSKit FS Client Library
 =======================
 
-User-facing filesystem API. Talks to whatever server has
-registered port "fs" (currently `oskit/servers/tfs.lsysl`;
-once Phase 0c lands, VFS will register "fs" and route to TFS
-transparently).
+User-facing filesystem API. Talks to VFS (port "fs"), which
+routes requests to the appropriate backend filesystem server.
+The port is looked up lazily and cached.
 
 The port is looked up lazily on first use and cached, so
 each call after the first is a single IPC send — no per-call
@@ -17,7 +16,7 @@ The protocol command numbers and message layout duplicate the
 constants in `oskit/servers/tfs.lsysl` — they're the wire
 contract between client and server, so both sides own a copy.
 
-    module oskit.fs.client
+    module oskit.fs
 
     import oskit.ipc.{port_lookup, ipc_send}
 

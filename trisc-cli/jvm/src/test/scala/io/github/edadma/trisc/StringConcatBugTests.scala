@@ -646,6 +646,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
   private lazy val memSysl: String   = readLsysl("std/mem/mem.lsysl")
   private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
   private lazy val configSysl: String = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
+  private lazy val vfsSrvSysl: String = readLsysl("oskit/servers/vfs.lsysl")
   private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   private lazy val concatAppLinked: TOF =
@@ -667,6 +668,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/fs/tfs"                -> tfsSysl,
       "oskit/fs/client"             -> fsClientSysl,
       "oskit/servers/tfs"           -> tfsSrvSysl,
+      "oskit/servers/vfs"           -> vfsSrvSysl,
       "posix/unistd/sbrk"          -> sbrkSysl,
       "posix/string/string"        -> stringSource,
       "posix/ctype/ctype"          -> ctypeSource,
@@ -781,7 +783,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
         """import oskit.kernel.*
           |import oskit.ipc.*
           |import oskit.drivers.disk.disk_server
-          |import oskit.servers.tfs_server
+          |import oskit.servers.{tfs_server, vfs_server}
           |import oskit.drivers.tty.tty_server
           |import concatmod.concat_test
           |import oskit.services.sleep
@@ -791,8 +793,9 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |    sleep(5)
           |    create_thread(tfs_server, 0x90000, 0x90000, "tfs")
           |    create_thread(tty_server, 0xA0000, 0xA0000, "tty")
+          |    create_thread(vfs_server, 0xB0000, 0xB0000, "vfs")
           |    sleep(5)
-          |    create_thread(concat_test, 0xB0000, 0xB0000, "test")
+          |    create_thread(concat_test, 0xC0000, 0xC0000, "test")
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -869,6 +872,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/fs/tfs"                -> tfsSysl,
       "oskit/fs/client"             -> fsClientSysl,
       "oskit/servers/tfs"           -> tfsSrvSysl,
+      "oskit/servers/vfs"           -> vfsSrvSysl,
       "posix/unistd/sbrk"          -> sbrkSysl,
       "posix/string/string"        -> stringSource,
       "posix/ctype/ctype"          -> ctypeSource,
@@ -879,7 +883,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |import posix.stdlib.*
           |import oskit.fs.ROOT_INODE
           |import oskit.drivers.tty.{tty_putc, tty_puts}
-          |import oskit.servers.{fs_open, fs_stat}
+          |import oskit.fs.{fs_open, fs_stat}
           |
           |var cwd: string
           |var cwd_ino = 1
@@ -1003,7 +1007,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
         """import oskit.kernel.*
           |import oskit.ipc.*
           |import oskit.drivers.disk.disk_server
-          |import oskit.servers.tfs_server
+          |import oskit.servers.{tfs_server, vfs_server}
           |import oskit.drivers.tty.tty_server
           |import concatmod2.concat_test2
           |import oskit.services.sleep
@@ -1013,8 +1017,9 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |    sleep(5)
           |    create_thread(tfs_server, 0x90000, 0x90000, "tfs")
           |    create_thread(tty_server, 0xA0000, 0xA0000, "tty")
+          |    create_thread(vfs_server, 0xB0000, 0xB0000, "vfs")
           |    sleep(5)
-          |    create_thread(concat_test2, 0xB0000, 0xB0000, "test")
+          |    create_thread(concat_test2, 0xC0000, 0xC0000, "test")
           |
           |kernel_main() -> int
           |    ipc_init()
@@ -1053,6 +1058,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/fs/tfs"                -> tfsSysl,
       "oskit/fs/client"             -> fsClientSysl,
       "oskit/servers/tfs"           -> tfsSrvSysl,
+      "oskit/servers/vfs"           -> vfsSrvSysl,
       "posix/unistd/sbrk"          -> sbrkSysl,
       "posix/string/string"        -> stringSource,
       "posix/ctype/ctype"          -> ctypeSource,
@@ -1063,7 +1069,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |import posix.stdlib.*
           |import oskit.fs.ROOT_INODE
           |import oskit.drivers.tty.{tty_putc, tty_puts}
-          |import oskit.servers.fs_open
+          |import oskit.fs.fs_open
           |
           |var cwd: string
           |var cwd_ino = 1
@@ -1157,7 +1163,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
         """import oskit.kernel.*
           |import oskit.ipc.*
           |import oskit.drivers.disk.disk_server
-          |import oskit.servers.tfs_server
+          |import oskit.servers.{tfs_server, vfs_server}
           |import oskit.drivers.tty.tty_server
           |import concatmod3.concat_test3
           |import oskit.services.sleep
@@ -1167,8 +1173,9 @@ class StringConcatBugTests extends OSKitTestHelpers {
           |    sleep(5)
           |    create_thread(tfs_server, 0x90000, 0x90000, "tfs")
           |    create_thread(tty_server, 0xA0000, 0xA0000, "tty")
+          |    create_thread(vfs_server, 0xB0000, 0xB0000, "vfs")
           |    sleep(5)
-          |    create_thread(concat_test3, 0xB0000, 0xB0000, "test")
+          |    create_thread(concat_test3, 0xC0000, 0xC0000, "test")
           |
           |kernel_main() -> int
           |    ipc_init()

@@ -13,8 +13,7 @@ Passwords are hashed with PBKDF2-HMAC-SHA256 (c=1).
 
     import oskit.services.{sleep, setuid}
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
-    import oskit.fs.client.fs_open
-    import oskit.fs.client.fs_read
+    import oskit.fs.{fs_open, fs_read}
     import std.crypto.pbkdf2.{pbkdf2_hmac_sha256_hw}
     import oskit.apps.nsh.{nsh, nsh_set_home}
 

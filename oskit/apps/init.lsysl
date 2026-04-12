@@ -19,8 +19,8 @@ read config files until the filesystem is up.
     import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp}
     import oskit.services.{sleep}
     import oskit.drivers.disk.{disk_server}
-    import oskit.servers.{tfs_server, pm_server}
-    import oskit.fs.client.{fs_open, fs_read}
+    import oskit.servers.{tfs_server, pm_server, vfs_server}
+    import oskit.fs.{fs_open, fs_read}
     import oskit.drivers.tty.{tty_server}
     import oskit.apps.login.{login}
     import oskit.apps.nsh.{nsh}
@@ -153,6 +153,11 @@ Supported commands: `login`, `nsh`.
         val pm_slot = next_stack_slot
         next_stack_slot += 1
         create_thread(pm_server, kernel_stack_usp(pm_slot), kernel_stack_ssp(pm_slot), "pm")
+
+        // VFS server — registers as "fs", mounts root on TFS
+        val vfs_slot = next_stack_slot
+        next_stack_slot += 1
+        create_thread(vfs_server, kernel_stack_usp(vfs_slot), kernel_stack_ssp(vfs_slot), "vfs")
 
         // Wait for servers to initialize and register ports
         sleep(5)

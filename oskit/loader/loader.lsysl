@@ -29,7 +29,7 @@ pressure regardless of file size.
 
     module oskit.loader
 
-    import oskit.fs.client.{fs_open, fs_read}
+    import oskit.fs.{fs_open, fs_read}
     import posix.stdlib.{malloc, free}
     import oskit.hal.{memcpy, memset}
 
