@@ -78,6 +78,8 @@ object RamdiskBinPrograms:
       "/bin/cat"   -> compileExecutable("oskit/bin/cat/cat", "oskit/bin/cat.lsysl"),
       "/bin/ps"    -> compileExecutable("oskit/bin/ps/ps", "oskit/bin/ps.lsysl"),
       "/bin/count" -> compileExecutable("oskit/bin/count/count", "oskit/bin/count.lsysl"),
+      "/bin/grep"  -> compileExecutable("oskit/bin/grep/grep", "oskit/bin/grep.lsysl"),
+      "/bin/wc"    -> compileExecutable("oskit/bin/wc/wc", "oskit/bin/wc.lsysl"),
     )
 
   private def loadResourceStream(path: String): Option[Array[Byte]] =
@@ -100,7 +102,7 @@ object RamdiskBinPrograms:
   // Load pre-built .trb resources only (no compilation). Used by the emulator at runtime.
   // Run RegenRamdiskBinMain to update embedded .trb files after editing oskit/bin or ulib.
   def loadEmbeddedBinaries(): Map[String, Array[Byte]] =
-    Seq("hello", "echo", "cat", "ps", "count").flatMap { short =>
+    Seq("hello", "echo", "cat", "ps", "count", "grep", "wc").flatMap { short =>
       loadResource(short).map(bytes => s"/bin/$short" -> bytes)
     }.toMap
 
