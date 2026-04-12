@@ -1243,7 +1243,9 @@ class SyslLLVMCodegen:
                   emit(s"  store $t $loaded, $t* $alloca")
                   // Slice: increment aggResult copy (source will be cleaned up by scope cleanup)
                   if isSliceType(typ) then emitSliceBackrefIncr(alloca)
-                case None => thenVal = v
+                case None =>
+                  val vt = exprType(e)
+                  thenVal = if vt != t && e.typ.isIntegral then emitSextIfNeeded(v, vt, t) else v
             case Some(other) => genStmt(other)
             case None =>
         val thenReturned = hasReturned
@@ -1273,7 +1275,9 @@ class SyslLLVMCodegen:
                     emit(s"  $loaded = load $t, $t* $v")
                     emit(s"  store $t $loaded, $t* $alloca")
                     if isSliceType(typ) then emitSliceBackrefIncr(alloca)
-                  case None => elseVal = v
+                  case None =>
+                    val vt = exprType(e)
+                    elseVal = if vt != t && e.typ.isIntegral then emitSextIfNeeded(v, vt, t) else v
               case Some(other) => genStmt(other)
               case None =>
         }
@@ -2548,8 +2552,13 @@ class SyslLLVMCodegen:
     if fromType == toType then value
     else if toType == "void" then value // discarded — no cast needed
     else
+      val fromW = fromType.stripPrefix("i").toIntOption.getOrElse(0)
+      val toW = toType.stripPrefix("i").toIntOption.getOrElse(0)
       val cast = newReg()
-      emit(s"  $cast = sext $fromType $value to $toType")
+      if fromW > toW && toW > 0 then
+        emit(s"  $cast = trunc $fromType $value to $toType")
+      else
+        emit(s"  $cast = sext $fromType $value to $toType")
       cast
 
   private def llvmType(t: SyslType): String = t match

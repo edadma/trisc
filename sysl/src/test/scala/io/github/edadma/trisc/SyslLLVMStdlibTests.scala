@@ -1988,6 +1988,108 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
   // TODO: fix ownership model to support `&slice[i]` escapes, then un-ignore
   // the remaining tests.
 
+  // ===== std.regex =====
+
+  "std.regex literal match" ignore { // TODO: missing return path in match expr — `ret void` in Match-returning function
+    llvmExitWithStd(
+      """import std.regex.*
+        |
+        |main() -> int
+        |    val m = match_regex("hello", "say hello world")
+        |    if !m.matched() then return 0
+        |    val s, e = m.group(0)
+        |    if s != 4 then return 0
+        |    if e != 9 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.regex alternation" ignore { // TODO: same as literal match
+    llvmExitWithStd(
+      """import std.regex.*
+        |
+        |main() -> int
+        |    val m = match_regex("cat|dog", "the cat sat")
+        |    if !m.matched() then return 0
+        |    val s, e = m.group(0)
+        |    if s != 4 then return 0
+        |    if e != 7 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.regex no match" ignore { // TODO: same as literal match
+    llvmExitWithStd(
+      """import std.regex.*
+        |
+        |main() -> int
+        |    val m = match_regex("cat|dog", "the bird sat")
+        |    if m.matched() then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.regex anchored" ignore { // TODO: same as literal match
+    llvmExitWithStd(
+      """import std.regex.*
+        |
+        |main() -> int
+        |    val m1 = match_regex("^hello$", "hello")
+        |    if !m1.matched() then return 0
+        |    val m2 = match_regex("^hello$", "say hello")
+        |    if m2.matched() then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.regex capture groups" ignore { // TODO: same as literal match
+    llvmExitWithStd(
+      """import std.regex.*
+        |
+        |main() -> int
+        |    val m = match_regex("(hello) (world)", "say hello world")
+        |    if !m.matched() then return 0
+        |    val s1, e1 = m.group(1)
+        |    if s1 != 4 then return 0
+        |    if e1 != 9 then return 0
+        |    val s2, e2 = m.group(2)
+        |    if s2 != 10 then return 0
+        |    if e2 != 15 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.regex character class" ignore { // TODO: same as literal match
+    llvmExitWithStd(
+      """import std.regex.*
+        |
+        |main() -> int
+        |    val m = match_regex("[0-9]+", "abc123def")
+        |    if !m.matched() then return 0
+        |    val s, e = m.group(0)
+        |    if s != 3 then return 0
+        |    if e != 6 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.regex quantifiers" ignore { // TODO: same as literal match
+    llvmExitWithStd(
+      """import std.regex.*
+        |
+        |main() -> int
+        |    val m1 = match_regex("^ab+c$", "abbbbc")
+        |    if !m1.matched() then return 0
+        |    val m2 = match_regex("^ab?c$", "ac")
+        |    if !m2.matched() then return 0
+        |    val m3 = match_regex("^a{3}$", "aaa")
+        |    if !m3.matched() then return 0
+        |    val m4 = match_regex("^a{3}$", "aa")
+        |    if m4.matched() then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
   "std.container.list new and empty" in {
     llvmExitWithStd(
       """import std.container.list.*
