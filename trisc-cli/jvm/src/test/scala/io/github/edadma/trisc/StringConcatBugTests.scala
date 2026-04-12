@@ -641,6 +641,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
   private lazy val kbdSysl: String    = readLsysl("oskit/drivers/kbd/keyboard.lsysl")
   private lazy val ttySysl: String    = readLsysl("oskit/drivers/tty/tty.lsysl")
   private lazy val tfsSysl: String    = readLsysl("oskit/fs/tfs.lsysl")
+  private lazy val fsClientSysl: String = readLsysl("oskit/fs/client.lsysl")
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val memSysl: String   = readLsysl("std/mem/mem.lsysl")
   private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
@@ -664,6 +665,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/drivers/kbd/keyboard"  -> kbdSysl,
       "oskit/drivers/tty/tty"       -> ttySysl,
       "oskit/fs/tfs"                -> tfsSysl,
+      "oskit/fs/client"             -> fsClientSysl,
       "oskit/servers/tfs"           -> tfsSrvSysl,
       "posix/unistd/sbrk"          -> sbrkSysl,
       "posix/string/string"        -> stringSource,
@@ -865,6 +867,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/drivers/kbd/keyboard"  -> kbdSysl,
       "oskit/drivers/tty/tty"       -> ttySysl,
       "oskit/fs/tfs"                -> tfsSysl,
+      "oskit/fs/client"             -> fsClientSysl,
       "oskit/servers/tfs"           -> tfsSrvSysl,
       "posix/unistd/sbrk"          -> sbrkSysl,
       "posix/string/string"        -> stringSource,
@@ -1048,6 +1051,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/drivers/kbd/keyboard"  -> kbdSysl,
       "oskit/drivers/tty/tty"       -> ttySysl,
       "oskit/fs/tfs"                -> tfsSysl,
+      "oskit/fs/client"             -> fsClientSysl,
       "oskit/servers/tfs"           -> tfsSrvSysl,
       "posix/unistd/sbrk"          -> sbrkSysl,
       "posix/string/string"        -> stringSource,

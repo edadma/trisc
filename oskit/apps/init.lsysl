@@ -19,7 +19,8 @@ read config files until the filesystem is up.
     import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp}
     import oskit.services.{sleep}
     import oskit.drivers.disk.{disk_server}
-    import oskit.servers.{tfs_server, fs_open, fs_read, pm_server}
+    import oskit.servers.{tfs_server, pm_server}
+    import oskit.fs.client.{fs_open, fs_read}
     import oskit.drivers.tty.{tty_server}
     import oskit.apps.login.{login}
     import oskit.apps.nsh.{nsh}

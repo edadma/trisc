@@ -10,6 +10,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
   private lazy val ipcSysl: String = readLsysl("oskit/ipc/ipc.lsysl")
   private lazy val diskSysl: String = readLsysl("oskit/drivers/disk/disk.lsysl")
   private lazy val tfsSysl: String = readLsysl("oskit/fs/tfs.lsysl")
+  private lazy val fsClientSysl: String = readLsysl("oskit/fs/client.lsysl")
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
   private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
@@ -101,6 +102,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
       "oskit/ipc/ipc" -> ipcSysl,
       "oskit/drivers/disk/disk" -> diskSysl,
       "oskit/fs/tfs" -> tfsSysl,
+      "oskit/fs/client" -> fsClientSysl,
       "posix/string/string" -> posixStringSysl,
       "posix/ctype/ctype" -> posixCtypeSysl,
       "posix/stdlib/alloc" -> posixAllocSysl,

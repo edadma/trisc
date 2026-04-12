@@ -21,7 +21,7 @@ Built-in commands:
     import posix.string.{strlen, strcmp, strcpy, strcat, strtok}
     import oskit.services.{sleep}
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
-    import oskit.servers.{fs_open, fs_read, fs_write, fs_create, fs_unlink, fs_stat, fs_mkdir, fs_rmdir, fs_readdir}
+    import oskit.fs.client.{fs_open, fs_read, fs_write, fs_create, fs_unlink, fs_stat, fs_mkdir, fs_rmdir, fs_readdir}
 
 Shell state: current working directory as inode and path string.
 
