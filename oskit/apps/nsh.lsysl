@@ -28,7 +28,7 @@ Built-in commands:
     import oskit.fs.ROOT_INODE
     import oskit.services.{sleep, join, getuid, uptime, thread_id}
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
-    import oskit.fs.{fs_open, fs_read, fs_write, fs_stat, fs_create, fs_unlink, fs_mkdir, fs_rmdir, fs_readdir, fs_chmod, fs_rename}
+    import oskit.fs.{fs_open, fs_read, fs_write, fs_close, fs_last_ino, fs_stat, fs_create, fs_unlink, fs_mkdir, fs_rmdir, fs_readdir, fs_chmod, fs_rename}
     import oskit.servers.{pm_waitpid, pm_kill}
     import oskit.loader.load_tof
     import oskit.kernel.{create_thread, create_process, vm_create_process_pt, vm_set_ptbr, kernel_set_thread_ptbr, kernel_get_thread_pid}
@@ -272,9 +272,25 @@ Absolute paths start from root, relative paths prepend cwd.
     nsh_resolve(path: string) -> int
         if len(path) == 0
             return cwd_ino
+        var fid = -1
+        if path[0] == '/'
+            fid = fs_open(path)
+        else if len(cwd) > 1
+            fid = fs_open(cwd + "/" + path)
+        else
+            fid = fs_open(cwd + path)
+        if fid < 0
+            return -1
+        val ino = fs_last_ino
+        fs_close(fid)
+        ino
+
+Open a path and return the file ID (for read/write operations).
+Uses the same resolution logic as nsh_resolve.
+
+    nsh_open_path(path: string) -> int
         if path[0] == '/'
             return fs_open(path)
-        // Relative path — prepend cwd
         if len(cwd) > 1
             return fs_open(cwd + "/" + path)
         fs_open(cwd + path)
@@ -508,14 +524,15 @@ Built-in commands.
         if argc < 3
             nsh_print("usage: write <file> <text>\n")
             return
-        val ino = nsh_resolve(argv[1])
-        if ino < 0
+        val fid = nsh_open_path(argv[1])
+        if fid < 0
             nsh_print(argv[1])
             nsh_print(": not found\n")
             return
         val data = *byte(argv[2])
         val dlen = len(argv[2])
-        val nw = fs_write(ino, data, 0, dlen)
+        val nw = fs_write(fid, data, dlen)
+        fs_close(fid)
         if nw < 0
             nsh_print("error\n")
 
@@ -667,10 +684,13 @@ The shell main loop.
     nsh()
         if nsh_home_len > 0
             cwd = string(&nsh_home_buf[0], nsh_home_len)
-            cwd_ino = fs_open(cwd)
-            if cwd_ino < 0
+            val home_fid = fs_open(cwd)
+            if home_fid < 0
                 cwd = "/"
                 cwd_ino = 1
+            else
+                cwd_ino = fs_last_ino
+                fs_close(home_fid)
             nsh_home_len = 0
         else
             cwd = "/"

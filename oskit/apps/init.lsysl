@@ -20,7 +20,7 @@ read config files until the filesystem is up.
     import oskit.services.{sleep}
     import oskit.drivers.disk.{disk_server}
     import oskit.servers.{tfs_server, pm_server, vfs_server}
-    import oskit.fs.{fs_open, fs_read}
+    import oskit.fs.{fs_open, fs_read, fs_close}
     import oskit.drivers.tty.{tty_server}
     import oskit.apps.login.{login}
     import oskit.apps.nsh.{nsh}
@@ -36,14 +36,15 @@ Supported commands: `login`, `nsh`.
 
     spawn_sessions()
         var buf: [256]byte
-        val ino = fs_open("/etc/ttytab")
-        if ino < 0
+        val fid = fs_open("/etc/ttytab")
+        if fid < 0
             // No ttytab — fall back to single login
             val s = next_stack_slot
             next_stack_slot += 1
             create_thread(login, kernel_stack_usp(s), kernel_stack_ssp(s), "login")
             return
-        val nr = fs_read(ino, buf, 0, 256)
+        val nr = fs_read(fid, buf, 256)
+        fs_close(fid)
         if nr <= 0
             val s = next_stack_slot
             next_stack_slot += 1

@@ -29,7 +29,7 @@ pressure regardless of file size.
 
     module oskit.loader
 
-    import oskit.fs.{fs_open, fs_read}
+    import oskit.fs.{fs_open, fs_read, fs_close}
     import posix.stdlib.{malloc, free}
     import oskit.hal.{memcpy, memset}
 
@@ -349,22 +349,24 @@ buffer — no size limit per call. We still loop because
     val LOAD_BUF_SIZE = 262144
 
     load_tof(path: string) -> i64
-        val ino = fs_open(path)
-        if ino < 0
+        val fid = fs_open(path)
+        if fid < 0
             return LOAD_ERR_NOT_FOUND
 
         val buf = malloc(LOAD_BUF_SIZE)
         if i64(buf) == 0
+            fs_close(fid)
             return LOAD_ERR_READ
 
-        // Read entire file — grant-based I/O, no per-call size limit
+        // Read entire file — position advances automatically
         var total = 0
-        var nr = fs_read(ino, buf, 0, LOAD_BUF_SIZE)
+        var nr = fs_read(fid, buf, LOAD_BUF_SIZE)
         while nr > 0
             total += nr
             if total >= LOAD_BUF_SIZE
                 break
-            nr = fs_read(ino, buf + total, total, LOAD_BUF_SIZE - total)
+            nr = fs_read(fid, buf + total, LOAD_BUF_SIZE - total)
+        fs_close(fid)
 
         if total <= 0
             free(buf)

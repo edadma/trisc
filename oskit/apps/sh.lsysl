@@ -21,7 +21,7 @@ Built-in commands:
     import posix.string.{strlen, strcmp, strcpy, strcat, strtok}
     import oskit.services.{sleep}
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
-    import oskit.fs.{fs_open, fs_read, fs_write, fs_create, fs_unlink, fs_stat, fs_mkdir, fs_rmdir, fs_readdir}
+    import oskit.fs.{fs_open, fs_read, fs_write, fs_close, fs_last_ino, fs_create, fs_unlink, fs_stat, fs_mkdir, fs_rmdir, fs_readdir}
 
 Shell state: current working directory as inode and path string.
 
@@ -246,6 +246,14 @@ Absolute paths start with /. Relative paths are resolved
 from cwd by building an absolute path.
 
     sh_resolve_path(path: *byte) -> int
+        val fid = sh_open_path(path)
+        if fid < 0
+            return -1
+        val ino = fs_last_ino
+        fs_close(fid)
+        ino
+
+    sh_open_path(path: *byte) -> int
         if path[0] == '/'
             return fs_open(cstr(path))
         // Relative path — build absolute path
@@ -304,18 +312,17 @@ Built-in commands.
         if argc < 2
             sh_print("usage: cat <file>\n")
             return
-        val ino = sh_resolve_path(*byte(argv[1]))
-        if ino < 0
+        val fid = sh_open_path(*byte(argv[1]))
+        if fid < 0
             sh_not_found(*byte(argv[1]))
             return
         var buf: [128]byte
-        var offset = 0
-        var nr = fs_read(ino, buf, offset, 128)
+        var nr = fs_read(fid, buf, 128)
         while nr > 0
             for var i = 0; i < nr; i++
                 sh_putc(int(buf[i]))
-            offset += nr
-            nr = fs_read(ino, buf, offset, 128)
+            nr = fs_read(fid, buf, 128)
+        fs_close(fid)
         sh_newline()
 
     cmd_mkdir(argc: int, argv: *i64)

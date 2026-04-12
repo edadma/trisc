@@ -11,6 +11,38 @@ via the mount table. Currently only root ("/") is mounted on TFS.
     import oskit.kernel.{kernel_get_thread_ptbr, vm_copy_to, vm_copy_from}
     import oskit.config.KERNEL_L1_BASE
 
+Open file table. Each open file tracks inode, position, mount
+index, and reference count. A slot is free when refcount is 0.
+
+    val VFS_MAX_OPEN_FILES = 32
+
+    var oft_ino: [32]int
+    var oft_pos: [32]int
+    var oft_mount: [32]int
+    var oft_ref: [32]int
+
+Allocate an open file table entry. Returns the file ID (index),
+or -1 if the table is full.
+
+    vfs_oft_alloc(ino: int, mount_idx: int) -> int
+        var i = 0
+        while i < VFS_MAX_OPEN_FILES
+            if oft_ref[i] == 0
+                oft_ino[i] = ino
+                oft_pos[i] = 0
+                oft_mount[i] = mount_idx
+                oft_ref[i] = 1
+                return i
+            i += 1
+        -1
+
+Free an open file table entry.
+
+    vfs_oft_free(fid: int)
+        if fid >= 0
+            if fid < VFS_MAX_OPEN_FILES
+                oft_ref[fid] -= 1
+
 Mount table. Each entry maps a path prefix to a backend port.
 
     val VFS_MAX_MOUNTS = 8
@@ -97,12 +129,14 @@ reply is always 1 byte. On success, length depends on command.
     val VFS_CMD_SYNC    = 10
     val VFS_CMD_CHMOD   = 11
     val VFS_CMD_RENAME  = 12
+    val VFS_CMD_CLOSE   = 13
+    val VFS_CMD_SEEK    = 14
 
     vfs_reply_len(cmd: int, status: int) -> int
         if status != 0
             return 1
         if cmd == VFS_CMD_OPEN
-            return 5
+            return 9
         if cmd == VFS_CMD_READ
             return 5
         if cmd == VFS_CMD_WRITE
@@ -115,6 +149,8 @@ reply is always 1 byte. On success, length depends on command.
             return 5
         if cmd == VFS_CMD_READDIR
             return 19
+        if cmd == VFS_CMD_SEEK
+            return 5
         1
 
 Big-endian message helpers (local to VFS).
@@ -128,68 +164,238 @@ Big-endian message helpers (local to VFS).
         buf[off + 2] = (v >> 8) & 0xFF
         buf[off + 3] = v & 0xFF
 
-Handle READ with cross-address-space support.
-The client passes buf_addr in the message. If the client is in
-a different address space, VFS must copy data through a local
-buffer rather than letting TFS write to buf_addr directly.
+Handle OPEN: resolve path via TFS, allocate open file entry,
+return file ID and inode to client.
+Client request:  [cmd(1), path(N)]
+Client reply:    [status(1), fid(4), ino(4)]
+
+    vfs_handle_open(sender: int, buf: *byte, msg_len: int, backend: int)
+        // Forward OPEN to TFS to get inode
+        var be_reply: [64]byte
+        ipc_send(backend, buf, msg_len, &be_reply[0], 64)
+        if be_reply[0] != 0
+            // TFS returned error — relay it
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        val ino = vfs_msg_read_i32(&be_reply[0], 1)
+        // Allocate open file entry
+        val fid = vfs_oft_alloc(ino, 0)
+        if fid < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        // Reply with fid and ino
+        var reply: [9]byte
+        reply[0] = 0
+        vfs_msg_write_i32(&reply[0], 1, fid)
+        vfs_msg_write_i32(&reply[0], 5, ino)
+        ipc_reply(sender, &reply[0], 9)
+
+Handle READ with position tracking and cross-address-space support.
+Client request:  [cmd(1), fid(4), len(4), buf_addr(4)]  (13 bytes)
+VFS looks up inode and position from the open file table, forwards
+to TFS with full [cmd, ino, offset, len, buf_addr] message, then
+advances the position by bytes_read.
 
     vfs_handle_read(sender: int, buf: *byte, backend: int)
-        val client_buf_addr = vfs_msg_read_i32(buf, 13)
-        val len = vfs_msg_read_i32(buf, 9)
+        val fid = vfs_msg_read_i32(buf, 1)
+        val len = vfs_msg_read_i32(buf, 5)
+        val client_buf_addr = vfs_msg_read_i32(buf, 9)
+
+        // Validate fid
+        if fid < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        if fid >= VFS_MAX_OPEN_FILES
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        if oft_ref[fid] == 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+
+        val ino = oft_ino[fid]
+        val offset = oft_pos[fid]
+
+        // Build TFS-format message: [cmd(1), ino(4), offset(4), len(4), buf_addr(4)]
+        var tfs_msg: [17]byte
+        tfs_msg[0] = 2  // TFS_CMD_READ
+        vfs_msg_write_i32(&tfs_msg[0], 1, ino)
+        vfs_msg_write_i32(&tfs_msg[0], 5, offset)
+        vfs_msg_write_i32(&tfs_msg[0], 9, len)
+
         val sender_ptbr = kernel_get_thread_ptbr(sender)
 
         if sender_ptbr == KERNEL_L1_BASE
             // Same address space — forward directly
+            vfs_msg_write_i32(&tfs_msg[0], 13, client_buf_addr)
             var be_reply: [64]byte
-            ipc_send(backend, buf, 17, &be_reply[0], 64)
-            val rlen = vfs_reply_len(VFS_CMD_READ, int(be_reply[0]))
-            ipc_reply(sender, &be_reply[0], rlen)
+            ipc_send(backend, &tfs_msg[0], 17, &be_reply[0], 64)
+            if be_reply[0] == 0
+                val nr = vfs_msg_read_i32(&be_reply[0], 1)
+                oft_pos[fid] += nr
+            ipc_reply(sender, &be_reply[0], 5)
         else
             // Different address space — use local buffer
             var local: [4096]byte
             var rlen = len
             if rlen > 4096
                 rlen = 4096
-            // Replace buf_addr with our local buffer
-            vfs_msg_write_i32(buf, 13, int(i64(&local[0])))
-            vfs_msg_write_i32(buf, 9, rlen)
+            vfs_msg_write_i32(&tfs_msg[0], 9, rlen)
+            vfs_msg_write_i32(&tfs_msg[0], 13, int(i64(&local[0])))
             var be_reply: [64]byte
-            ipc_send(backend, buf, 17, &be_reply[0], 64)
-            // Copy data to client's address space
+            ipc_send(backend, &tfs_msg[0], 17, &be_reply[0], 64)
             if be_reply[0] == 0
                 val nr = vfs_msg_read_i32(&be_reply[0], 1)
                 if nr > 0
                     vm_copy_to(sender_ptbr, client_buf_addr, &local[0], nr)
-            val rl = vfs_reply_len(VFS_CMD_READ, int(be_reply[0]))
-            ipc_reply(sender, &be_reply[0], rl)
+                oft_pos[fid] += nr
+            ipc_reply(sender, &be_reply[0], 5)
 
-Handle WRITE with cross-address-space support.
+Handle WRITE with position tracking and cross-address-space support.
+Client request:  [cmd(1), fid(4), len(4), buf_addr(4)]  (13 bytes)
 
     vfs_handle_write(sender: int, buf: *byte, backend: int)
-        val client_buf_addr = vfs_msg_read_i32(buf, 13)
-        val len = vfs_msg_read_i32(buf, 9)
+        val fid = vfs_msg_read_i32(buf, 1)
+        val len = vfs_msg_read_i32(buf, 5)
+        val client_buf_addr = vfs_msg_read_i32(buf, 9)
+
+        // Validate fid
+        if fid < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        if fid >= VFS_MAX_OPEN_FILES
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        if oft_ref[fid] == 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+
+        val ino = oft_ino[fid]
+        val offset = oft_pos[fid]
+
+        // Build TFS-format message
+        var tfs_msg: [17]byte
+        tfs_msg[0] = 3  // TFS_CMD_WRITE
+        vfs_msg_write_i32(&tfs_msg[0], 1, ino)
+        vfs_msg_write_i32(&tfs_msg[0], 5, offset)
+        vfs_msg_write_i32(&tfs_msg[0], 9, len)
+
         val sender_ptbr = kernel_get_thread_ptbr(sender)
 
         if sender_ptbr == KERNEL_L1_BASE
-            // Same address space — forward directly
+            vfs_msg_write_i32(&tfs_msg[0], 13, client_buf_addr)
             var be_reply: [64]byte
-            ipc_send(backend, buf, 17, &be_reply[0], 64)
-            val rlen = vfs_reply_len(VFS_CMD_WRITE, int(be_reply[0]))
-            ipc_reply(sender, &be_reply[0], rlen)
+            ipc_send(backend, &tfs_msg[0], 17, &be_reply[0], 64)
+            if be_reply[0] == 0
+                val nw = vfs_msg_read_i32(&be_reply[0], 1)
+                oft_pos[fid] += nw
+            ipc_reply(sender, &be_reply[0], 5)
         else
-            // Different address space — copy from client first
             var local: [4096]byte
             var wlen = len
             if wlen > 4096
                 wlen = 4096
             vm_copy_from(sender_ptbr, client_buf_addr, &local[0], wlen)
-            // Replace buf_addr with our local buffer
-            vfs_msg_write_i32(buf, 13, int(i64(&local[0])))
-            vfs_msg_write_i32(buf, 9, wlen)
+            vfs_msg_write_i32(&tfs_msg[0], 9, wlen)
+            vfs_msg_write_i32(&tfs_msg[0], 13, int(i64(&local[0])))
             var be_reply: [64]byte
-            ipc_send(backend, buf, 17, &be_reply[0], 64)
-            val rl = vfs_reply_len(VFS_CMD_WRITE, int(be_reply[0]))
-            ipc_reply(sender, &be_reply[0], rl)
+            ipc_send(backend, &tfs_msg[0], 17, &be_reply[0], 64)
+            if be_reply[0] == 0
+                val nw = vfs_msg_read_i32(&be_reply[0], 1)
+                oft_pos[fid] += nw
+            ipc_reply(sender, &be_reply[0], 5)
+
+Handle CLOSE: decrement refcount, free entry when zero.
+Client request:  [cmd(1), fid(4)]
+Client reply:    [status(1)]
+
+    vfs_handle_close(sender: int, buf: *byte)
+        val fid = vfs_msg_read_i32(buf, 1)
+        var reply: [1]byte
+        if fid < 0
+            reply[0] = -1
+        else if fid >= VFS_MAX_OPEN_FILES
+            reply[0] = -1
+        else if oft_ref[fid] == 0
+            reply[0] = -1
+        else
+            vfs_oft_free(fid)
+            reply[0] = 0
+        ipc_reply(sender, &reply[0], 1)
+
+Handle SEEK: adjust file position.
+Client request:  [cmd(1), fid(4), offset(4), whence(1)]
+Client reply:    [status(1), position(4)]
+whence: 0 = SEEK_SET, 1 = SEEK_CUR, 2 = SEEK_END (not yet supported)
+
+    vfs_handle_seek(sender: int, buf: *byte)
+        val fid = vfs_msg_read_i32(buf, 1)
+        val offset = vfs_msg_read_i32(buf, 5)
+        val whence = int(buf[9])
+        var reply: [5]byte
+        if fid < 0
+            reply[0] = -1
+            ipc_reply(sender, &reply[0], 1)
+            return
+        if fid >= VFS_MAX_OPEN_FILES
+            reply[0] = -1
+            ipc_reply(sender, &reply[0], 1)
+            return
+        if oft_ref[fid] == 0
+            reply[0] = -1
+            ipc_reply(sender, &reply[0], 1)
+            return
+        if whence == 0
+            oft_pos[fid] = offset
+        else if whence == 1
+            oft_pos[fid] += offset
+        reply[0] = 0
+        vfs_msg_write_i32(&reply[0], 1, oft_pos[fid])
+        ipc_reply(sender, &reply[0], 5)
+
+Handle STAT: resolve fid to ino, forward to TFS.
+Client request:  [cmd(1), fid(4)]
+
+    vfs_handle_stat(sender: int, buf: *byte, backend: int)
+        val fid = vfs_msg_read_i32(buf, 1)
+        if fid < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        if fid >= VFS_MAX_OPEN_FILES
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        if oft_ref[fid] == 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        // Build TFS stat message with ino
+        var tfs_msg: [5]byte
+        tfs_msg[0] = 6  // TFS_CMD_STAT
+        vfs_msg_write_i32(&tfs_msg[0], 1, oft_ino[fid])
+        var be_reply: [64]byte
+        ipc_send(backend, &tfs_msg[0], 5, &be_reply[0], 64)
+        val rlen = vfs_reply_len(VFS_CMD_STAT, int(be_reply[0]))
+        ipc_reply(sender, &be_reply[0], rlen)
 
 The VFS server loop. Registers as "fs", waits for TFS to
 come up, mounts root on TFS, then proxies all requests to
@@ -228,10 +434,16 @@ the appropriate backend.
                     var err_reply: [1]byte
                     err_reply[0] = -1
                     ipc_reply(sender, &err_reply[0], 1)
+                else if cmd == VFS_CMD_OPEN
+                    vfs_handle_open(sender, &buf[0], msg_len, backend)
                 else if cmd == VFS_CMD_READ
                     vfs_handle_read(sender, &buf[0], backend)
                 else if cmd == VFS_CMD_WRITE
                     vfs_handle_write(sender, &buf[0], backend)
+                else if cmd == VFS_CMD_CLOSE
+                    vfs_handle_close(sender, &buf[0])
+                else if cmd == VFS_CMD_SEEK
+                    vfs_handle_seek(sender, &buf[0])
                 else
                     // All other commands: forward and relay
                     var be_reply: [64]byte
