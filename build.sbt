@@ -52,6 +52,9 @@ lazy val commonSettings = Seq(
   scalacOptions ++= commonScalacOptions,
   libraryDependencies += "org.scalatest" %%% "scalatest" % "3.2.19" % "test",
   Test / testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-oD", "-W", "30", "30", "-P18"),
+  // Exclude full-system integration tests tagged Slow from `sbt test` by default.
+  // Run them explicitly with: sbt testSlow  (or `sbt testAll` for everything)
+  Test / testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-l", "io.github.edadma.trisc.Slow"),
   publishMavenStyle      := true,
   Test / publishArtifact := false,
 )
@@ -262,5 +265,16 @@ commands ++= Seq(
     "utilsJS/test" :: "memJS/test" :: "tofJS/test" :: "asmJS/test" ::
     "cpuJS/test" :: "docsJS/test" :: "syslJS/test" ::
     "triscCliJS/test" :: "syslCliJS/test" :: state
+  },
+  // Run only tests tagged Slow (full-OS integration tests).
+  Command.command("testSlow") { state =>
+    """triscCliJVM/testOnly * -- -n io.github.edadma.trisc.Slow""" ::
+    """syslJVM/testOnly * -- -n io.github.edadma.trisc.Slow""" :: state
+  },
+  // Run all tests including Slow ones.
+  Command.command("testAll") { state =>
+    """set Test / testOptions in ThisBuild -= Tests.Argument(TestFrameworks.ScalaTest, "-l", "io.github.edadma.trisc.Slow")""" ::
+    "test" ::
+    """set Test / testOptions in ThisBuild += Tests.Argument(TestFrameworks.ScalaTest, "-l", "io.github.edadma.trisc.Slow")""" :: state
   },
 )
