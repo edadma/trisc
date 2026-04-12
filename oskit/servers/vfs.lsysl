@@ -15,16 +15,20 @@ Open file table. Each open file tracks inode, position, mount
 index, and reference count. A slot is free when refcount is 0.
 
     val VFS_MAX_OPEN_FILES = 32
+    val OFT_TYPE_FILE = 0
+    val OFT_TYPE_TTY  = 1
 
     var oft_ino: [32]int
     var oft_pos: [32]int
     var oft_mount: [32]int
     var oft_ref: [32]int
+    var oft_type: [32]int
+    var oft_console: [32]int
 
 Allocate an open file table entry. Returns the file ID (index),
 or -1 if the table is full.
 
-    vfs_oft_alloc(ino: int, mount_idx: int) -> int
+    vfs_oft_alloc(ino: int, mount_idx: int, ftype: int) -> int
         var i = 0
         while i < VFS_MAX_OPEN_FILES
             if oft_ref[i] == 0
@@ -32,6 +36,8 @@ or -1 if the table is full.
                 oft_pos[i] = 0
                 oft_mount[i] = mount_idx
                 oft_ref[i] = 1
+                oft_type[i] = ftype
+                oft_console[i] = 0
                 return i
             i += 1
         -1
@@ -299,7 +305,7 @@ Client reply:    [status(1), handle(4), ino(4)]
             return
         val ino = vfs_msg_read_i32(&be_reply[0], 1)
         // Allocate open file entry
-        val oft_idx = vfs_oft_alloc(ino, 0)
+        val oft_idx = vfs_oft_alloc(ino, 0, OFT_TYPE_FILE)
         if oft_idx < 0
             var err: [1]byte
             err[0] = -1
@@ -346,6 +352,14 @@ without a scheme default to the "vfs" (filesystem) handler.
             vfs_handle_open(sender, buf, msg_len, backend)
             return
 
+        // Check for "tty" scheme
+        if colon == 3
+            if name[0] == 116  // t
+                if name[1] == 116  // t
+                    if name[2] == 121  // y
+                        vfs_handle_connect_tty(sender, name, colon, name_len)
+                        return
+
         // Look up scheme handler
         val handler = vfs_lookup_scheme(name, colon)
         if handler < 0
@@ -354,18 +368,16 @@ without a scheme default to the "vfs" (filesystem) handler.
             ipc_reply(sender, &err[0], 1)
             return
 
-        if handler == backend
-            // Filesystem scheme — strip "vfs:" prefix, forward as OPEN
-            var open_msg: [128]byte
-            open_msg[0] = 1  // CMD_OPEN
-            val resource_len = name_len - colon - 1
-            i = 0
-            while i < resource_len
-                open_msg[1 + i] = name[colon + 1 + i]
-                i += 1
-            vfs_handle_open(sender, &open_msg[0], 1 + resource_len, backend)
-        else
-            // Non-filesystem scheme — forward OPEN to handler
+        // Filesystem scheme — strip prefix, forward as OPEN
+        var open_msg: [128]byte
+        open_msg[0] = 1  // CMD_OPEN
+        val resource_len = name_len - colon - 1
+        i = 0
+        while i < resource_len
+            open_msg[1 + i] = name[colon + 1 + i]
+            i += 1
+        vfs_handle_open(sender, &open_msg[0], 1 + resource_len, handler)
+
             var open_msg: [128]byte
             open_msg[0] = 1  // CMD_OPEN
             val resource_len = name_len - colon - 1
@@ -374,6 +386,136 @@ without a scheme default to the "vfs" (filesystem) handler.
                 open_msg[1 + i] = name[colon + 1 + i]
                 i += 1
             vfs_handle_open(sender, &open_msg[0], 1 + resource_len, handler)
+
+Handle connect("tty:N") — create a TTY-type open file entry.
+No backend OPEN needed; VFS manages TTY handles locally and
+forwards read/write to the TTY server.
+
+    vfs_handle_connect_tty(sender: int, name: *byte, colon: int, name_len: int)
+        val pid = kernel_get_thread_pid(sender)
+        // Parse console number (single digit after "tty:")
+        var console = 0
+        if name_len > colon + 1
+            console = int(name[colon + 1]) - 48  // '0'
+            if console < 0
+                console = 0
+            if console > 3
+                console = 0
+
+        // Allocate OFT entry (no inode for TTY)
+        val oft_idx = vfs_oft_alloc(0, 0, OFT_TYPE_TTY)
+        if oft_idx < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        oft_console[oft_idx] = console
+
+        // Allocate per-process handle
+        val handle = vfs_handle_alloc(pid, oft_idx)
+        if handle < 0
+            vfs_oft_free(oft_idx)
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+
+        // Reply with handle (ino=0 for TTY)
+        var reply: [9]byte
+        reply[0] = 0
+        vfs_msg_write_i32(&reply[0], 1, handle)
+        vfs_msg_write_i32(&reply[0], 5, 0)
+        ipc_reply(sender, &reply[0], 9)
+
+TTY server port (cached, looked up lazily).
+
+    var vfs_tty_port = -1
+    var vfs_tty_name: [4]byte
+
+    vfs_lookup_tty() -> int
+        if vfs_tty_port < 0
+            vfs_tty_name[0] = 116  // t
+            vfs_tty_name[1] = 116  // t
+            vfs_tty_name[2] = 121  // y
+            vfs_tty_name[3] = 0
+            vfs_tty_port = port_lookup(&vfs_tty_name[0])
+        vfs_tty_port
+
+Read from a TTY handle. Sends TTY_CMD_READ to the TTY server
+for one character, writes it to the client buffer. Returns 1
+byte read (or 0 on error).
+
+    vfs_tty_read(sender: int, fid: int, client_buf_addr: int, len: int)
+        val tty = vfs_lookup_tty()
+        if tty < 0
+            var reply: [5]byte
+            reply[0] = -1
+            ipc_reply(sender, &reply[0], 1)
+            return
+        val console = oft_console[fid]
+        // Read one character from TTY (blocking)
+        var tty_msg: [2]byte
+        tty_msg[0] = 2  // TTY_CMD_READ
+        tty_msg[1] = byte(console)
+        var tty_reply: [2]byte
+        ipc_send(tty, &tty_msg[0], 2, &tty_reply[0], 2)
+        // Write character to client buffer
+        val ch = tty_reply[1]
+        val sender_ptbr = kernel_get_thread_ptbr(sender)
+        if sender_ptbr == KERNEL_L1_BASE
+            var p: *byte = *byte(client_buf_addr)
+            p[0] = ch
+        else
+            var local: [1]byte
+            local[0] = ch
+            vm_copy_to(sender_ptbr, client_buf_addr, &local[0], 1)
+        // Reply: 1 byte read
+        var reply: [5]byte
+        reply[0] = 0
+        vfs_msg_write_i32(&reply[0], 1, 1)
+        ipc_reply(sender, &reply[0], 5)
+
+Write to a TTY handle. Sends TTY_CMD_PUTS to the TTY server
+with the data from the client buffer.
+
+    vfs_tty_write(sender: int, fid: int, client_buf_addr: int, len: int)
+        val tty = vfs_lookup_tty()
+        if tty < 0
+            var reply: [5]byte
+            reply[0] = -1
+            ipc_reply(sender, &reply[0], 1)
+            return
+        val console = oft_console[fid]
+        // Copy data from client (or read directly if same address space)
+        var local: [128]byte
+        var wlen = len
+        if wlen > 125
+            wlen = 125
+        val sender_ptbr = kernel_get_thread_ptbr(sender)
+        if sender_ptbr == KERNEL_L1_BASE
+            var src: *byte = *byte(client_buf_addr)
+            var i = 0
+            while i < wlen
+                local[i] = src[i]
+                i += 1
+        else
+            vm_copy_from(sender_ptbr, client_buf_addr, &local[0], wlen)
+        // Build TTY_CMD_PUTS message: [cmd(1), console(1), len(1), data...]
+        var tty_msg: [128]byte
+        tty_msg[0] = 3  // TTY_CMD_PUTS
+        tty_msg[1] = byte(console)
+        tty_msg[2] = byte(wlen)
+        var i = 0
+        while i < wlen
+            tty_msg[3 + i] = local[i]
+            i += 1
+        var tty_reply: [1]byte
+        ipc_send(tty, &tty_msg[0], 3 + wlen, &tty_reply[0], 1)
+        // Reply: bytes written
+        var reply: [5]byte
+        reply[0] = 0
+        vfs_msg_write_i32(&reply[0], 1, wlen)
+        ipc_reply(sender, &reply[0], 5)
 
 Handle READ with position tracking and cross-address-space support.
 Client request:  [cmd(1), handle(4), len(4), buf_addr(4)]  (13 bytes)
@@ -391,6 +533,10 @@ position, forwards to TFS, advances position by bytes_read.
             var err: [1]byte
             err[0] = -1
             ipc_reply(sender, &err[0], 1)
+            return
+
+        if oft_type[fid] == OFT_TYPE_TTY
+            vfs_tty_read(sender, fid, client_buf_addr, len)
             return
 
         val ino = oft_ino[fid]
@@ -445,6 +591,10 @@ Client request:  [cmd(1), fid(4), len(4), buf_addr(4)]  (13 bytes)
             var err: [1]byte
             err[0] = -1
             ipc_reply(sender, &err[0], 1)
+            return
+
+        if oft_type[fid] == OFT_TYPE_TTY
+            vfs_tty_write(sender, fid, client_buf_addr, len)
             return
 
         val ino = oft_ino[fid]
