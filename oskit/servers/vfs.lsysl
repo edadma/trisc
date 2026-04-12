@@ -110,6 +110,56 @@ Close all handles for a process (called on process exit).
                 handle_oft[base + i] = -1
             i += 1
 
+Scheme registry. Maps scheme names to handler ports. When a
+client calls connect("scheme:resource"), VFS looks up the scheme
+and forwards the OPEN to the handler. Paths without a scheme
+prefix (or with "vfs:") default to the filesystem.
+
+    val VFS_MAX_SCHEMES = 8
+
+    var scheme_port: [8]int
+    var scheme_name_len: [8]int
+    var scheme_names: [64]byte
+    var scheme_count = 0
+
+Register a scheme handler. The name is stored packed (8 bytes
+per entry) in scheme_names.
+
+    vfs_register_scheme(name: *byte, name_len: int, port: int) -> int
+        if scheme_count >= VFS_MAX_SCHEMES
+            return -1
+        val idx = scheme_count
+        scheme_port[idx] = port
+        scheme_name_len[idx] = name_len
+        val base = idx * 8
+        var i = 0
+        while i < name_len
+            if i >= 8
+                break
+            scheme_names[base + i] = name[i]
+            i += 1
+        scheme_count += 1
+        0
+
+Look up a scheme by name. Returns the handler port, or -1.
+
+    vfs_lookup_scheme(name: *byte, name_len: int) -> int
+        var i = 0
+        while i < scheme_count
+            if scheme_name_len[i] == name_len
+                val base = i * 8
+                var j = 0
+                var ok = 1
+                while j < name_len
+                    if name[j] != scheme_names[base + j]
+                        ok = 0
+                        break
+                    j += 1
+                if ok == 1
+                    return scheme_port[i]
+            i += 1
+        -1
+
 Mount table. Each entry maps a path prefix to a backend port.
 
     val VFS_MAX_MOUNTS = 8
@@ -198,6 +248,7 @@ reply is always 1 byte. On success, length depends on command.
     val VFS_CMD_RENAME  = 12
     val VFS_CMD_CLOSE   = 13
     val VFS_CMD_SEEK    = 14
+    val VFS_CMD_CONNECT = 15
 
     vfs_reply_len(cmd: int, status: int) -> int
         if status != 0
@@ -268,6 +319,61 @@ Client reply:    [status(1), handle(4), ino(4)]
         vfs_msg_write_i32(&reply[0], 1, handle)
         vfs_msg_write_i32(&reply[0], 5, ino)
         ipc_reply(sender, &reply[0], 9)
+
+Handle CONNECT: parse scheme prefix, route to handler.
+Client request:  [cmd(1), name(N)]
+Client reply:    [status(1), handle(4), ino(4)]
+
+If the name contains ":", the part before it is the scheme and
+the part after is the resource. Paths starting with "/" or names
+without a scheme default to the "vfs" (filesystem) handler.
+
+    vfs_handle_connect(sender: int, buf: *byte, msg_len: int, backend: int)
+        val name: *byte = buf + 1
+        val name_len = msg_len - 1
+
+        // Find scheme separator ":"
+        var colon = -1
+        var i = 0
+        while i < name_len
+            if name[i] == 58  // ':'
+                colon = i
+                break
+            i += 1
+
+        if colon <= 0
+            // No scheme or starts with "/" — default to filesystem open
+            vfs_handle_open(sender, buf, msg_len, backend)
+            return
+
+        // Look up scheme handler
+        val handler = vfs_lookup_scheme(name, colon)
+        if handler < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+
+        if handler == backend
+            // Filesystem scheme — strip "vfs:" prefix, forward as OPEN
+            var open_msg: [128]byte
+            open_msg[0] = 1  // CMD_OPEN
+            val resource_len = name_len - colon - 1
+            i = 0
+            while i < resource_len
+                open_msg[1 + i] = name[colon + 1 + i]
+                i += 1
+            vfs_handle_open(sender, &open_msg[0], 1 + resource_len, backend)
+        else
+            // Non-filesystem scheme — forward OPEN to handler
+            var open_msg: [128]byte
+            open_msg[0] = 1  // CMD_OPEN
+            val resource_len = name_len - colon - 1
+            i = 0
+            while i < resource_len
+                open_msg[1 + i] = name[colon + 1 + i]
+                i += 1
+            vfs_handle_open(sender, &open_msg[0], 1 + resource_len, handler)
 
 Handle READ with position tracking and cross-address-space support.
 Client request:  [cmd(1), handle(4), len(4), buf_addr(4)]  (13 bytes)
@@ -441,6 +547,14 @@ the appropriate backend.
         root_prefix[1] = 0
         vfs_mount(&root_prefix[0], 1, vfs_tfs_port)
 
+        // Register "vfs" scheme pointing to TFS backend
+        var vfs_scheme: [4]byte
+        vfs_scheme[0] = 118  // v
+        vfs_scheme[1] = 102  // f
+        vfs_scheme[2] = 115  // s
+        vfs_scheme[3] = 0
+        vfs_register_scheme(&vfs_scheme[0], 3, vfs_tfs_port)
+
         // Server loop: receive requests, forward to backend, relay reply
         var buf: [128]byte
         while 1 == 1
@@ -466,6 +580,8 @@ the appropriate backend.
                     vfs_do_close(sender, &buf[0])
                 else if cmd == VFS_CMD_SEEK
                     vfs_do_seek(sender, &buf[0])
+                else if cmd == VFS_CMD_CONNECT
+                    vfs_handle_connect(sender, &buf[0], msg_len, backend)
                 else
                     // All other commands: forward and relay
                     var be_reply: [64]byte

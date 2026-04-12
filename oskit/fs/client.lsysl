@@ -35,6 +35,7 @@ VFS protocol commands (must match oskit/servers/vfs.lsysl).
     val FS_CMD_RENAME  = 12
     val FS_CMD_CLOSE   = 13
     val FS_CMD_SEEK    = 14
+    val FS_CMD_CONNECT = 15
 
 Cached port id (-1 = not yet looked up / last lookup failed).
 `fs_srv_name` is a 3-byte null-terminated "fs" buffer; it's
@@ -84,6 +85,28 @@ need it (e.g., for directory operations). Returns -1 on error.
             msg[i + 1] = p[i]
         var reply: [9]byte
         ipc_send(port, &msg[0], plen + 1, &reply[0], 9)
+        if reply[0] != 0
+            return -1
+        fs_last_ino = fs_msg_read_i32(&reply[0], 5)
+        fs_msg_read_i32(&reply[0], 1)
+
+Connect to a named resource. Supports scheme-based routing:
+`connect("vfs:/etc/passwd")` or `connect("tty:0")`. Paths
+without a scheme (starting with "/") default to the filesystem.
+Returns a handle, or -1 on error.
+
+    fs_connect(name: string) -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        var msg: [128]byte
+        msg[0] = FS_CMD_CONNECT
+        val nlen = len(name)
+        val p: *byte = *byte(name)
+        for var i = 0; i < nlen; i++
+            msg[i + 1] = p[i]
+        var reply: [9]byte
+        ipc_send(port, &msg[0], nlen + 1, &reply[0], 9)
         if reply[0] != 0
             return -1
         fs_last_ino = fs_msg_read_i32(&reply[0], 5)
