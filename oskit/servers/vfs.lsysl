@@ -255,6 +255,7 @@ reply is always 1 byte. On success, length depends on command.
     val VFS_CMD_CLOSE   = 13
     val VFS_CMD_SEEK    = 14
     val VFS_CMD_CONNECT = 15
+    val VFS_CMD_INHERIT = 16
 
     vfs_reply_len(cmd: int, status: int) -> int
         if status != 0
@@ -377,15 +378,6 @@ without a scheme default to the "vfs" (filesystem) handler.
             open_msg[1 + i] = name[colon + 1 + i]
             i += 1
         vfs_handle_open(sender, &open_msg[0], 1 + resource_len, handler)
-
-            var open_msg: [128]byte
-            open_msg[0] = 1  // CMD_OPEN
-            val resource_len = name_len - colon - 1
-            i = 0
-            while i < resource_len
-                open_msg[1 + i] = name[colon + 1 + i]
-                i += 1
-            vfs_handle_open(sender, &open_msg[0], 1 + resource_len, handler)
 
 Handle connect("tty:N") — create a TTY-type open file entry.
 No backend OPEN needed; VFS manages TTY handles locally and
@@ -672,6 +664,31 @@ whence: 0 = SEEK_SET, 1 = SEEK_CUR
         vfs_msg_write_i32(&reply[0], 1, oft_pos[fid])
         ipc_reply(sender, &reply[0], 5)
 
+Handle INHERIT: copy handles from parent to child process.
+Called by PM after creating a child process.
+Request: [cmd(1), parent_pid(4), child_pid(4), num(1), pairs(N*2)]
+Each pair is (parent_handle, child_slot) as single bytes.
+Reply:   [status(1)]
+
+    vfs_handle_inherit(sender: int, buf: *byte)
+        val parent_pid = vfs_msg_read_i32(buf, 1)
+        val child_pid = vfs_msg_read_i32(buf, 5)
+        val num = int(buf[9])
+        var i = 0
+        while i < num
+            val parent_h = int(buf[10 + i * 2])
+            val child_slot = int(buf[11 + i * 2])
+            val oft_idx = vfs_handle_lookup(parent_pid, parent_h)
+            if oft_idx >= 0
+                if child_slot < VFS_MAX_HANDLES
+                    val slot = child_pid * VFS_MAX_HANDLES + child_slot
+                    handle_oft[slot] = oft_idx
+                    oft_ref[oft_idx] += 1
+            i += 1
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, &reply[0], 1)
+
 The VFS server loop. Registers as "fs", waits for TFS to
 come up, mounts root on TFS, then proxies all requests to
 the appropriate backend.
@@ -732,6 +749,8 @@ the appropriate backend.
                     vfs_do_seek(sender, &buf[0])
                 else if cmd == VFS_CMD_CONNECT
                     vfs_handle_connect(sender, &buf[0], msg_len, backend)
+                else if cmd == VFS_CMD_INHERIT
+                    vfs_handle_inherit(sender, &buf[0])
                 else
                     // All other commands: forward and relay
                     var be_reply: [64]byte

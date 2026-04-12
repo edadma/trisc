@@ -19,7 +19,7 @@ IPC commands:
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
-    import oskit.kernel.{reap_process, kernel_kill_process, kernel_register_pm, create_process, vm_create_process_pt, kernel_set_thread_ptbr, vm_set_ptbr, processes, threads, current_thread, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
+    import oskit.kernel.{reap_process, kernel_kill_process, kernel_register_pm, kernel_get_thread_pid, create_process, vm_create_process_pt, kernel_set_thread_ptbr, vm_set_ptbr, processes, threads, current_thread, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
     import oskit.config.{MAX_PROCESSES, MAX_WAITERS, KERNEL_L1_BASE}
     import oskit.services.{notify_read_self, thread_id}
     import oskit.loader.load_tof
@@ -157,11 +157,12 @@ Handle PM_KILL: kill a process by PID.
         ipc_reply(sender, &reply[0], 1)
 
 Handle SPAWN: create a new process from a binary path.
-Request: [cmd(1), path_len(1), args_len(1), path(N), args(M)]
+Request: [cmd(1), path_len(1), args_len(1), num_handles(1), path(N), args(M), handle_pairs(H*2)]
 Reply:   [status(1), pid(4)]
 
 PM creates page tables, loads the binary, writes args to the
-standard args address, creates the process, and returns the PID.
+standard args address, creates the process, tells VFS to copy
+handles from parent to child, and returns the PID.
 
     val SPAWN_PROG_ARGS_ADDR = 0xBF000
     val SPAWN_PROG_ARGS_MAX  = 240
@@ -171,9 +172,10 @@ standard args address, creates the process, and returns the PID.
     pm_handle_spawn(sender: int, buf: *byte)
         val path_len = int(buf[1])
         val args_len = int(buf[2])
+        val num_handles = int(buf[3])
 
         // Extract path as string
-        val path = string(buf + 3, path_len)
+        val path = string(buf + 4, path_len)
 
         // Create per-process page table
         val proc_pt = vm_create_process_pt()
@@ -203,12 +205,12 @@ standard args address, creates the process, and returns the PID.
         while i < args_len
             if i >= SPAWN_PROG_ARGS_MAX
                 break
-            args_buf[i] = buf[3 + path_len + i]
+            args_buf[i] = buf[4 + path_len + i]
             i += 1
         args_buf[i] = 0
 
         // Extract command name for thread name (first arg before space)
-        val cmd = string(buf + 3 + path_len, args_len)
+        val cmd = string(buf + 4 + path_len, args_len)
 
         // Create the process
         val pid = create_process(entry, SPAWN_PROG_USP, SPAWN_PROG_SSP, cmd, proc_pt)
@@ -222,9 +224,39 @@ standard args address, creates the process, and returns the PID.
             reply[0] = -1
             ipc_reply(sender, &reply[0], 1)
         else
+            // Copy handles from parent to child via VFS
+            if num_handles > 0
+                val sender_pid = kernel_get_thread_pid(sender)
+                pm_inherit_handles(sender_pid, pid, buf, path_len, args_len, num_handles)
             reply[0] = 0
             pm_msg_write_i32(&reply[0], 1, pid)
             ipc_reply(sender, &reply[0], 5)
+
+Send handle inheritance request to VFS.
+
+    pm_inherit_handles(parent_pid: int, child_pid: int, buf: *byte, path_len: int, args_len: int, num_handles: int)
+        // Look up VFS port
+        var fs_name: [3]byte
+        fs_name[0] = 102  // f
+        fs_name[1] = 115  // s
+        fs_name[2] = 0
+        val fs_port = port_lookup(&fs_name[0])
+        if fs_port < 0
+            return
+        // Build INHERIT message: [cmd(1), parent_pid(4), child_pid(4), num(1), pairs(N*2)]
+        var msg: [64]byte
+        msg[0] = 16  // VFS_CMD_INHERIT
+        pm_msg_write_i32(&msg[0], 1, parent_pid)
+        pm_msg_write_i32(&msg[0], 5, child_pid)
+        msg[9] = byte(num_handles)
+        // Copy handle pairs from spawn message
+        val pairs_offset = 4 + path_len + args_len
+        var i = 0
+        while i < num_handles * 2
+            msg[10 + i] = buf[pairs_offset + i]
+            i += 1
+        var vfs_reply: [1]byte
+        ipc_send(fs_port, &msg[0], 10 + num_handles * 2, &vfs_reply[0], 1)
 
 PM server main loop. Uses ipc_recv_notify to wait for either
 IPC messages (waitpid/kill from userspace) or notifications
@@ -286,6 +318,9 @@ with PM via IPC.
         pm_msg_read_i32(&reply[0], 1)
 
     pm_spawn(path: string, args: string) -> int
+        pm_spawn_handles(path, args, *byte(0), 0)
+
+    pm_spawn_handles(path: string, args: string, handle_pairs: *byte, num_handles: int) -> int
         var pm_name: [3]byte
         pm_name[0] = byte('p')
         pm_name[1] = byte('m')
@@ -299,18 +334,23 @@ with PM via IPC.
         msg[0] = byte(PM_CMD_SPAWN)
         msg[1] = byte(plen)
         msg[2] = byte(alen)
+        msg[3] = byte(num_handles)
         val pp = *byte(path)
         var i = 0
         while i < plen
-            msg[3 + i] = pp[i]
+            msg[4 + i] = pp[i]
             i += 1
         val ap = *byte(args)
         i = 0
         while i < alen
-            msg[3 + plen + i] = ap[i]
+            msg[4 + plen + i] = ap[i]
+            i += 1
+        i = 0
+        while i < num_handles * 2
+            msg[4 + plen + alen + i] = handle_pairs[i]
             i += 1
         var reply: [5]byte
-        ipc_send(port, &msg[0], 3 + plen + alen, &reply[0], 5)
+        ipc_send(port, &msg[0], 4 + plen + alen + num_handles * 2, &reply[0], 5)
         if reply[0] != 0
             return -1
         pm_msg_read_i32(&reply[0], 1)

@@ -36,6 +36,7 @@ VFS protocol commands (must match oskit/servers/vfs.lsysl).
     val FS_CMD_CLOSE   = 13
     val FS_CMD_SEEK    = 14
     val FS_CMD_CONNECT = 15
+    val FS_CMD_INHERIT = 16
 
 Cached port id (-1 = not yet looked up / last lookup failed).
 `fs_srv_name` is a 3-byte null-terminated "fs" buffer; it's

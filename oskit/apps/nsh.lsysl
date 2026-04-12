@@ -29,7 +29,7 @@ Built-in commands:
     import oskit.services.{sleep, join, getuid, uptime, thread_id}
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
     import oskit.fs.{fs_open, fs_read, fs_write, fs_close, fs_last_ino, fs_stat, fs_create, fs_unlink, fs_mkdir, fs_rmdir, fs_readdir, fs_chmod, fs_rename}
-    import oskit.servers.{pm_waitpid, pm_kill, pm_spawn}
+    import oskit.servers.{pm_waitpid, pm_kill, pm_spawn, pm_spawn_handles}
     import oskit.kernel.{create_thread, kernel_get_thread_pid}
 
 
