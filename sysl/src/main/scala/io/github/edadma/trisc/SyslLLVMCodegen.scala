@@ -991,6 +991,25 @@ class SyslLLVMCodegen:
           emit(s"  $result = zext i1 $neq to $t")
         result
 
+      case TBinary(left, op, right, _) if (op == "+" || op == "-") && (left.typ.isInstanceOf[SyslType.PtrType] || right.typ.isInstanceOf[SyslType.PtrType]) =>
+        // Pointer arithmetic: ptr + int or int + ptr → getelementptr
+        val (ptrExpr, idxExpr, isSub) = (left.typ, right.typ) match
+          case (_: SyslType.PtrType, _) => (left, right, op == "-")
+          case (_, _: SyslType.PtrType) => (right, left, op == "-")
+          case _ => throw new RuntimeException(s"Pointer arithmetic: unexpected types ${left.typ}, ${right.typ}")
+        val ptrVal = genExpr(ptrExpr)
+        val idxVal = genExpr(idxExpr)
+        val pointeeType = ptrExpr.typ.asInstanceOf[SyslType.PtrType].pointee
+        val elemSize = llvmSizeOf(pointeeType)
+        val idx64 = newReg()
+        emit(s"  $idx64 = sext i32 $idxVal to i64")
+        val byteOff = newReg()
+        if isSub then emit(s"  $byteOff = mul i64 $idx64, -$elemSize")
+        else emit(s"  $byteOff = mul i64 $idx64, $elemSize")
+        val result = newReg()
+        emit(s"  $result = getelementptr i8, i8* $ptrVal, i64 $byteOff")
+        result
+
       case TBinary(left, op, right, _) =>
         var l = genExpr(left)
         var r = genExpr(right)
@@ -1514,22 +1533,41 @@ class SyslLLVMCodegen:
 
       case TAddrOfIndex(array, index, _) =>
         // Get a pointer to an array/slice element — used for method calls on indexed elements
-        val base = genExpr(array)
         val idx = genExpr(index)
-        val elemType = array.typ match
-          case SyslType.SliceType(inner) => inner
-          case SyslType.RefType(SyslType.SliceType(inner)) => inner
-          case _ => throw new RuntimeException(s"TAddrOfIndex on non-slice type: ${array.typ}")
-        val elt = llvmType(elemType)
-        val elemSize = llvmSizeOf(elemType)
-        val dataPtr = emitSliceDataPtr(base, array.typ)
-        val byteOff = newReg()
-        val idx64 = newReg()
-        emit(s"  $idx64 = sext i32 $idx to i64")
-        emit(s"  $byteOff = mul i64 $idx64, $elemSize")
-        val elemPtr = newReg()
-        emit(s"  $elemPtr = getelementptr i8, i8* $dataPtr, i64 $byteOff")
-        elemPtr
+        array.typ match
+          case SyslType.ArrayType(elemType, _) =>
+            // Stack array: GEP into the array directly
+            val base = genExpr(array) // returns alloca pointer for aggregate
+            val arrLt = llvmType(array.typ)
+            val gep = newReg()
+            emit(s"  $gep = getelementptr $arrLt, $arrLt* $base, i32 0, i32 $idx")
+            val cast = newReg()
+            emit(s"  $cast = bitcast ${llvmType(elemType)}* $gep to i8*")
+            cast
+          case SyslType.SliceType(elemType) =>
+            val base = genExpr(array)
+            val elemSize = llvmSizeOf(elemType)
+            val dataPtr = emitSliceDataPtr(base, array.typ)
+            val byteOff = newReg()
+            val idx64 = newReg()
+            emit(s"  $idx64 = sext i32 $idx to i64")
+            emit(s"  $byteOff = mul i64 $idx64, $elemSize")
+            val elemPtr = newReg()
+            emit(s"  $elemPtr = getelementptr i8, i8* $dataPtr, i64 $byteOff")
+            elemPtr
+          case SyslType.RefType(SyslType.SliceType(elemType)) =>
+            val base = genExpr(array)
+            val elemSize = llvmSizeOf(elemType)
+            val dataPtr = emitSliceDataPtr(base, array.typ)
+            val byteOff = newReg()
+            val idx64 = newReg()
+            emit(s"  $idx64 = sext i32 $idx to i64")
+            emit(s"  $byteOff = mul i64 $idx64, $elemSize")
+            val elemPtr = newReg()
+            emit(s"  $elemPtr = getelementptr i8, i8* $dataPtr, i64 $byteOff")
+            elemPtr
+          case other =>
+            throw new RuntimeException(s"TAddrOfIndex on unsupported type: $other")
 
       case TTempAddr(inner, _) =>
         // Evaluate expression, store into a temporary alloca, return pointer
@@ -2499,6 +2537,7 @@ class SyslLLVMCodegen:
   // Emit sext only when fromType != toType; return the (possibly cast) register
   private def emitSextIfNeeded(value: String, fromType: String, toType: String): String =
     if fromType == toType then value
+    else if toType == "void" then value // discarded — no cast needed
     else
       val cast = newReg()
       emit(s"  $cast = sext $fromType $value to $toType")

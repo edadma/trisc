@@ -1704,4 +1704,134 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    1
         |""".stripMargin) shouldBe 1
   }
+
+  // ===== std.crypto.chacha20 =====
+
+  "std.crypto.chacha20 quarter_round" in {
+    llvmExitWithStd(
+      """import std.crypto.chacha20.*
+        |
+        |main() -> int
+        |    var a: u32 = 0x11111111u32
+        |    var b: u32 = 0x01020304u32
+        |    var c: u32 = 0x9b8d6f43u32
+        |    var d: u32 = 0x01234567u32
+        |    quarter_round(&a, &b, &c, &d)
+        |    if a != 0xea2a92f4u32 then return 0
+        |    if b != 0xcb1cf8ceu32 then return 0
+        |    if c != 0x4581472eu32 then return 0
+        |    if d != 0x5881c4bbu32 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.crypto.chacha20 block rfc7539" in {
+    llvmExitWithStd(
+      """import std.crypto.chacha20.*
+        |
+        |main() -> int
+        |    var key: [8]u32
+        |    for i in 0..<8
+        |        key[i] = 0u32
+        |    var nonce: [3]u32
+        |    nonce[0] = 0u32; nonce[1] = 0u32; nonce[2] = 0u32
+        |    var out: [64]byte
+        |    chacha20_block(&key[0], 0u32, &nonce[0], &out[0])
+        |    // Expected first 4 bytes: 76 b8 e0 ad
+        |    if out[0] != 0x76u8 then return 0
+        |    if out[1] != 0xb8u8 then return 0
+        |    if out[2] != 0xe0u8 then return 0
+        |    if out[3] != 0xadu8 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  // ===== std.crypto.hmac =====
+
+  "std.crypto.hmac rfc4231 tc1" in {
+    llvmExitWithStd(
+      """import std.crypto.hmac.*
+        |
+        |main() -> int
+        |    var key: [20]byte
+        |    for i in 0..<20
+        |        key[i] = 0x0bu8
+        |    val msg: [8]byte = "Hi There"
+        |    var out: [32]byte
+        |    hmac_sha256(key[:], msg[:], out[:])
+        |    // b0344c61d8db...
+        |    if out[0] != 0xb0u8 then return 0
+        |    if out[1] != 0x34u8 then return 0
+        |    if out[2] != 0x4cu8 then return 0
+        |    if out[3] != 0x61u8 then return 0
+        |    if out[31] != 0xf7u8 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  // ===== std.crypto.pbkdf2 =====
+
+  "std.crypto.pbkdf2 c1" in {
+    llvmExitWithStd(
+      """import std.crypto.pbkdf2.*
+        |
+        |main() -> int
+        |    val password: [8]byte = "password"
+        |    val salt: [4]byte = "salt"
+        |    var out: [32]byte
+        |    pbkdf2_hmac_sha256(password[:], salt[:], 1, out[:])
+        |    // 120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b
+        |    if out[0] != 0x12u8 then return 0
+        |    if out[1] != 0x0fu8 then return 0
+        |    if out[2] != 0xb6u8 then return 0
+        |    if out[3] != 0xcfu8 then return 0
+        |    if out[31] != 0x7bu8 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  // ===== std.crypto.aead (ChaCha20-Poly1305) =====
+
+  "std.crypto.aead poly1305" in {
+    llvmExitWithStd(
+      """import std.crypto.aead.*
+        |
+        |main() -> int
+        |    val key: [32]byte = [0x85, 0xd6, 0xbe, 0x78, 0x57, 0x55, 0x6d, 0x33, 0x7f, 0x44, 0x52, 0xfe, 0x42, 0xd5, 0x06, 0xa8, 0x01, 0x03, 0x80, 0x8a, 0xfb, 0x0d, 0xb2, 0xfd, 0x4a, 0xbf, 0xf6, 0xaf, 0x41, 0x49, 0xf5, 0x1b]
+        |    val msg: [34]byte = "Cryptographic Forum Research Group"
+        |    var tag: [16]byte
+        |    poly1305(tag[:], msg[:], key[:])
+        |    // a8061dc1305136c6c22b8baf0c0127a9
+        |    if tag[0] != 0xa8u8 then return 0
+        |    if tag[1] != 0x06u8 then return 0
+        |    if tag[2] != 0x1du8 then return 0
+        |    if tag[15] != 0xa9u8 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.crypto.aead roundtrip" in {
+    llvmExitWithStd(
+      """import std.crypto.aead.*
+        |
+        |main() -> int
+        |    var key: [32]byte
+        |    for i in 0..<32
+        |        key[i] = byte(i)
+        |    var nonce: [12]byte
+        |    for i in 0..<12
+        |        nonce[i] = byte(i)
+        |    val aad: [4]byte = "meta"
+        |    val pt: [5]byte = "hello"
+        |    var ct: [5]byte
+        |    var tag: [16]byte
+        |    seal(key[:], nonce[:], aad[:], pt[:], ct[:], tag[:])
+        |    var dec: [5]byte
+        |    val ok = open(key[:], nonce[:], aad[:], ct[:], tag[:], dec[:])
+        |    if !ok then return 0
+        |    for i in 0..<5
+        |        if dec[i] != pt[i] then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
 }
