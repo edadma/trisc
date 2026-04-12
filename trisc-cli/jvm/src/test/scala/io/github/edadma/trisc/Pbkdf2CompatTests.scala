@@ -36,13 +36,11 @@ class Pbkdf2CompatTests extends AnyFreeSpec with Matchers {
 
   "compute hash for default root password" in {
     val hash = jvmPbkdf2("toor", "slix", 1)
-    info(s"root hash: $hash")
     hash.length shouldBe 64
   }
 
   "compute hash for user ed" in {
     val hash = jvmPbkdf2("ed", "slix", 1)
-    info(s"ed hash: $hash")
     hash.length shouldBe 64
   }
 

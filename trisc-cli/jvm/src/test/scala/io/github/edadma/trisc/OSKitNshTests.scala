@@ -31,6 +31,7 @@ class OSKitNshTests extends OSKitTestHelpers {
   private lazy val pbkdf2Sysl: String = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
   private lazy val pmSrvSysl: String = readLsysl("oskit/servers/pm.lsysl")
   private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
+  private lazy val configSysl: String = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
 
   // Shared OS source set — init reads /etc/ttytab to decide what to spawn.
   private def buildOS(): TOF =
@@ -55,6 +56,7 @@ class OSKitNshTests extends OSKitTestHelpers {
       "std/debug/debug"             -> debugSysl,
       "std/mem/mem"                 -> memSysl,
       "oskit/hal/mem"              -> halMemSysl,
+      "oskit/config/config"        -> configSysl,
       "std/encoding/binary/binary" -> binarySysl,
       "std/crypto/sha256/sha256"   -> sha256Sysl,
       "std/crypto/hmac/hmac"       -> hmacSysl,
@@ -149,7 +151,7 @@ import oskit.apps.init.{init}
     val ticks: Seq[Processor => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
     val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
     dma.mmu = Some(testMmu)
-    val cpu                     = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles }
+    val cpu                     = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles; quiet = true }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)
@@ -177,95 +179,95 @@ import oskit.apps.init.{init}
 
   // === NSH integration tests ===
 
-  "NSH: pwd shows root" in {
+  "NSH: pwd shows root" taggedAs Slow in {
     val keys        = typeString("pwd\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys)
     output should include("/")
   }
 
-  "NSH: echo command" in {
+  "NSH: echo command" taggedAs Slow in {
     val keys        = typeString("echo hi\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys)
     output should include("hi")
   }
 
-  "NSH: ls on root with prefilled file" in {
+  "NSH: ls on root with prefilled file" taggedAs Slow in {
     val keys        = typeString("ls\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys, prefill = "/hello file \"world\"\n")
     output should include("hello")
   }
 
-  "NSH: hello prints greeting" in {
+  "NSH: hello prints greeting" taggedAs Slow in {
     val keys        = typeString("hello\n", startTick = 500000, spacing = 12000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 80000000)
     output should include("Hello")
   }
 
 
-  "NSH: cat prefilled /hello (short file)" in {
+  "NSH: cat prefilled /hello (short file)" taggedAs Slow in {
     val keys = typeString("cat /hello\n", startTick = 500000, spacing = 12000)
     val (cpu, output) =
       runNsh(scheduledKeys = keys, prefill = "/hello file \"world\"\n", maxCycles = 200000000)
     output should include("world")
   }
 
-  "NSH: cat reads file" in {
+  "NSH: cat reads file" taggedAs Slow in {
     val keys =
       typeString("touch /hello\nwrite /hello world\ncat /hello\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 25000000)
     output should include("world")
   }
 
-  "NSH: cat /etc/ttytab shows prefilled line" in {
+  "NSH: cat /etc/ttytab shows prefilled line" taggedAs Slow in {
     val keys = typeString("cat /etc/ttytab\n", startTick = 500000, spacing = 12000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 100000000)
     output should include("tty0 nsh")
   }
 
-  "NSH: help command" in {
+  "NSH: help command" taggedAs Slow in {
     val keys        = typeString("help\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys)
     output should include("echo cat ls")
   }
 
-  "NSH: whoami returns 0" in {
+  "NSH: whoami returns 0" taggedAs Slow in {
     val keys        = typeString("whoami\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 10000000)
     output should include("0")
   }
 
-  "NSH: unknown command" in {
+  "NSH: unknown command" taggedAs Slow in {
     val keys        = typeString("foo\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 15000000)
     output should include("not found")
   }
 
-  "NSH: cd dev then pwd" in {
+  "NSH: cd dev then pwd" taggedAs Slow in {
     val keys        = typeString("cd dev\npwd\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys, prefill = "/dev dir\n", maxCycles = 10000000)
     output should include("/dev")
   }
 
-  "NSH: touch creates file" in {
+  "NSH: touch creates file" taggedAs Slow in {
     val keys        = typeString("touch /hello\nls\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 10000000)
     output should include("hello")
   }
 
-  "NSH: write and cat" in {
+  "NSH: write and cat" taggedAs Slow in {
     val keys        = typeString("touch /msg\nwrite /msg hi\ncat /msg\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 15000000)
     output should include("hi")
   }
 
-  "NSH: mv renames file" in {
+  "NSH: mv renames file" taggedAs Slow in {
     val keys =
       typeString("touch /old\nwrite /old data\nmv /old /new\ncat /new\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 30000000)
     output should include("data")
   }
 
-  "NSH: uptime shows ticks" in {
+  "NSH: uptime shows ticks" taggedAs Slow in {
     val keys        = typeString("uptime\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 10000000)
     output should include("up ")
@@ -336,7 +338,7 @@ import oskit.apps.init.{init}
     val ticks: Seq[Processor => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
     val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
     dma.mmu = Some(testMmu)
-    val cpu                     = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles }
+    val cpu                     = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles; quiet = true }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)
@@ -348,13 +350,13 @@ import oskit.apps.init.{init}
     typeString("toor\n", startTick = startTick + 180000, spacing = sp) ++
     typeString(cmd, startTick = startTick + 450000, spacing = sp)
 
-  "Login: prompts for credentials" in {
+  "Login: prompts for credentials" taggedAs Slow in {
     val keys        = typeString("root\n", startTick = 800000)
     val (_, output) = runLogin(scheduledKeys = keys)
     output should include("login: ")
   }
 
-  "Login: successful login shows shell prompt in home dir" in {
+  "Login: successful login shows shell prompt in home dir" taggedAs Slow in {
     val keys        = loginAndType("")
     val (_, output) = runLogin(scheduledKeys = keys)
     output should include("login: ")
@@ -362,45 +364,45 @@ import oskit.apps.init.{init}
     output should include("/root> ")
   }
 
-  "Login: whoami returns 0 for root" in {
+  "Login: whoami returns 0 for root" taggedAs Slow in {
     val keys        = loginAndType("whoami\n")
     val (_, output) = runLogin(scheduledKeys = keys)
     output should include("0")
   }
 
-  "Login: pwd shows home directory" in {
+  "Login: pwd shows home directory" taggedAs Slow in {
     val keys        = loginAndType("pwd\n")
     val (_, output) = runLogin(scheduledKeys = keys)
     output should include("/root")
   }
 
-  "Login: cat /etc/ttytab prints ttytab contents" in {
+  "Login: cat /etc/ttytab prints ttytab contents" taggedAs Slow in {
     val keys        = loginAndType("cat /etc/ttytab\n")
     val (_, output) = runLogin(scheduledKeys = keys, maxCycles = 180000000)
     output should include("tty0 login")
   }
 
-  "Login: hello after login" in {
+  "Login: hello after login" taggedAs Slow in {
     val keys = loginAndType("hello\n")
     val (_, output) = runLogin(scheduledKeys = keys, maxCycles = 180000000)
     output should include("Hello")
   }
 
-  "Login: user ed gets home /home/ed" in {
+  "Login: user ed gets home /home/ed" taggedAs Slow in {
     val keys = typeString("ed\n", startTick = 800000) ++
                typeString("ed\n", startTick = 840000)
     val (_, output) = runLogin(scheduledKeys = keys)
     output should include("/home/ed> ")
   }
 
-  "Login: bad password rejected" in {
+  "Login: bad password rejected" taggedAs Slow in {
     val keys = typeString("root\n", startTick = 800000) ++
                typeString("wrong\n", startTick = 840000)
     val (_, output) = runLogin(scheduledKeys = keys)
     output should include("Login incorrect")
   }
 
-  "Login: bad username rejected" in {
+  "Login: bad username rejected" taggedAs Slow in {
     val keys = typeString("nobody\n", startTick = 800000) ++
                typeString("x\n", startTick = 840000)
     val (_, output) = runLogin(scheduledKeys = keys)

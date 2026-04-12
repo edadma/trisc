@@ -76,7 +76,7 @@ class SyslAsmTests extends AnyFreeSpec with Matchers {
     val linked = Linker.link(Seq(tof))
     val mem = new Memory("test", new RAM(0, 0x1000))
     linked.load(mem)
-    val cpu = new CPU(mem) { limit = 100000 }
+    val cpu = new CPU(mem) { limit = 100000; quiet = true }
     cpu.pc = linked.entryAddress.get
     cpu.state = State.Run
     cpu.r(7).write(0x1000 - 8)

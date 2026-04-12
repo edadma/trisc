@@ -24,9 +24,7 @@ The trap handler in boot.asm dispatches based on r1:
 
     module oskit.kernel
 
-    val MAX_THREADS    = 8
-    val NUM_PRIORITIES = 4
-    val DEFAULT_QUANTUM = 5
+    import oskit.config.{MAX_THREADS, NUM_PRIORITIES, DEFAULT_QUANTUM, THREAD_STACK_SIZE, THREAD_STACK_HALF, PAGE_SIZE, KERNEL_L1_BASE, PAGE_POOL_BASE, PAGE_POOL_END, MAX_SYSCALLS, TLS_SLOTS, MAX_TIMERS, MAX_IRQS, MAX_PROCESSES}
 
 Kernel thread stacks. A static array in BSS, sized at compile
 time. Each thread gets THREAD_STACK_SIZE bytes, split evenly
@@ -38,9 +36,7 @@ Placing stacks in BSS guarantees they cannot be overwritten
 by sbrk (heap grows from _heap_start, which is after BSS).
 This follows the Minix 3 approach of static kernel task stacks.
 
-    val THREAD_STACK_SIZE = 0x4000
-    val THREAD_STACK_HALF = 0x2000
-    var kernel_stacks: [8][16384]byte
+    var kernel_stacks: [8][16384]byte  // 8 = MAX_THREADS, 16384 = THREAD_STACK_SIZE
 
 Return (usp, ssp) for a thread slot. USP is the top of the
 lower half; SSP is the top of the upper half. The caller
@@ -125,8 +121,6 @@ loaded by nsh each get their own process entry.
     val PROC_RUNNING = 1
     val PROC_ZOMBIE  = 2
 
-    val MAX_PROCESSES = 16
-
     struct Process
         state: int
         ptbr: int
@@ -135,7 +129,7 @@ loaded by nsh each get their own process entry.
         main_tid: int
         name: string
 
-    var processes: [16]Process
+    var processes: [16]Process  // 16 = MAX_PROCESSES
     var next_pid = 1
 
 PM registration. The PM server registers its thread ID so
@@ -231,8 +225,7 @@ the handler returns, the scheduler runs.
 Modules register handlers via register_syscall(). Fast-path
 syscalls (putc, queries) remain hardcoded in boot.asm.
 
-    val MAX_SYSCALLS = 48
-    var syscall_table: [48]i64
+    var syscall_table: [48]i64  // 48 = MAX_SYSCALLS
     var syscall_ssp: i64
 
 Set the return value for the current syscall. Writes into
@@ -270,11 +263,10 @@ PTE flags: V=0x001, R=0x002, W=0x004, X=0x008, U=0x010, G=0x020
 
 Kernel L1 page table at 0x7FE000, page pool at 0x620000-0x7FD000.
 
-    val KERNEL_L1_BASE = 0x7FE000
-    val PAGE_SIZE      = 4096
-    val PAGE_POOL_BASE = 0x620000
-    val PAGE_POOL_END  = 0x7FD000
-    var page_pool_next = PAGE_POOL_BASE
+    // Initialized lazily in page_alloc() because sysl codegen cannot yet
+    // resolve cross-unit constants in module-level var initializers.
+    var page_pool_next: int = 0
+    var page_pool_init = false
 
     vm_set_ptbr(addr: int)
         asm("sptbr r1, r0")
@@ -323,6 +315,9 @@ pops from the free list first, then falls back to bumping.
     var page_free_list = 0
 
     page_alloc() -> int
+        if !page_pool_init
+            page_pool_next = PAGE_POOL_BASE
+            page_pool_init = true
         if page_free_list != 0
             val page = page_free_list
             var next: *i64 = *i64(page)
@@ -516,8 +511,7 @@ Thread-local storage. A flat 2D array indexed by [thread_id][slot].
 Each thread gets TLS_SLOTS slots of int-sized values. Access is
 O(1) via tls_set/tls_get kernel functions.
 
-    val TLS_SLOTS = 4
-    var tls: [32]int
+    var tls: [32]int  // 32 = MAX_THREADS * TLS_SLOTS
 
 Software timers. A fixed pool of one-shot timers that fire a
 callback function after a specified number of ticks. The timer
@@ -529,17 +523,13 @@ Each timer has:
 - callback: function pointer to call (unit -> unit)
 
 
-    val MAX_TIMERS = 8
-
     struct SoftTimer
         active: int
         fire_tick: int
         callback: i64
 
-    var timers: [8]SoftTimer
-
-    val MAX_IRQS = 8
-    var irq_handlers: [8]i64
+    var timers: [8]SoftTimer  // 8 = MAX_TIMERS
+    var irq_handlers: [8]i64  // 8 = MAX_IRQS
 
     extern thread_exit()
 

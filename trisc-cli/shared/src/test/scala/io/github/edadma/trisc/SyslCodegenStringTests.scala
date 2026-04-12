@@ -12,7 +12,7 @@ class SyslCodegenStringTests extends SyslCodegenHelpers {
     val ram = new RAM(0, Runtime.stdoutAddress.toInt)
     val mem = new Memory("Memory", ram, stdout)
     linked.load(mem)
-    val cpu = new CPU(mem) { limit = 100000 }
+    val cpu = new CPU(mem) { limit = 100000; quiet = true }
     cpu.reset()
     cpu.run()
     (cpu.r(1).read, output.toString)
@@ -238,7 +238,7 @@ class SyslCodegenStringTests extends SyslCodegenHelpers {
     val ram = new RAM(0, Runtime.stdoutAddress.toInt)
     val mem = new Memory("Memory", ram, stdout)
     linked.load(mem)
-    val cpu = new CPU(mem) { limit = 100000 }
+    val cpu = new CPU(mem) { limit = 100000; quiet = true }
     cpu.reset()
     cpu.run()
     (cpu.r(1).read, output.toString)

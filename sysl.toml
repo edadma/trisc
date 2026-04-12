@@ -1,0 +1,42 @@
+# SLIX build configuration.
+#
+# Values here are compiled into `oskit/config/config.sysl` by the
+# `GenerateConfigMain` build tool:
+#
+#     sbt "triscCliJVM/runMain io.github.edadma.trisc.GenerateConfigMain"
+#
+# The generated config module is also committed to the repo so that tests
+# and manual compilation work without having to run the build tool first.
+
+[target]
+arch = "trisc"
+
+[config]
+# Target module for the generated file. "oskit.config" produces
+# oskit/config/config.sysl with `module oskit.config` declared inside.
+# Omit this field to emit config.sysl at the repo root (no module decl).
+module = "oskit.config"
+
+[kernel]
+max_threads     = 8
+max_processes   = 16
+num_priorities  = 4
+default_quantum = 5
+tls_slots       = 4
+max_timers      = 8
+max_irqs        = 8
+max_syscalls    = 48
+
+[memory]
+page_size         = 4096
+thread_stack_size = 16384      # 0x4000, split half user / half supervisor
+thread_stack_half = 8192       # 0x2000
+kernel_l1_base    = 8380416    # 0x7FE000
+page_pool_base    = 6422528    # 0x620000
+page_pool_end     = 8376320    # 0x7FD000
+
+[ipc]
+max_ports = 8
+
+[pm]
+max_waiters = 8

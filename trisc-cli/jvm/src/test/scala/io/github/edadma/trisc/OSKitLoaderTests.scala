@@ -23,6 +23,7 @@ class OSKitLoaderTests extends OSKitTestHelpers {
   private lazy val pbkdf2Sysl: String   = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
   private lazy val pmSrvSysl: String   = readLsysl("oskit/servers/pm.lsysl")
   private lazy val halMemSysl: String  = readLsysl("oskit/hal/mem_dma.lsysl")
+  private lazy val configSysl: String = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
 
   // --- std lib ---
   private lazy val stringsSysl: String  = readLsysl("std/strings/strings.lsysl")
@@ -103,6 +104,7 @@ class OSKitLoaderTests extends OSKitTestHelpers {
       "std/debug/debug"              -> debugSysl,
       "std/mem/mem"                  -> memSysl,
       "oskit/hal/mem"               -> halMemSysl,
+      "oskit/config/config"         -> configSysl,
       "std/encoding/binary/binary"  -> binarySysl,
       "std/strings/strings"         -> stringsSysl,
       "std/builder/builder"         -> builderSysl,
@@ -204,12 +206,12 @@ import oskit.apps.init.{init}
     val ticks: Seq[Processor => Unit] = Seq(timer, intc, keyInjector)
     val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
     dma.mmu = Some(testMmu)
-    val cpu = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles }
+    val cpu = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles; quiet = true }
     cpu.reset()
     cpu.run()
     (cpu, output.toString, ram)
 
-  "Loader: run hello from shell" in {
+  "Loader: run hello from shell" taggedAs Slow in {
     val tofBytes = helloTofText.getBytes("UTF-8")
     val keys = typeString("hello\n", startTick = 500000)
     val (_, output, _) = runWithKeys("", keys, maxCycles = 100000000,
@@ -218,10 +220,9 @@ import oskit.apps.init.{init}
     cleaned should include("Hello, world!")
   }
 
-  "Loader: run hello from shell (TRB v1)" in {
+  "Loader: run hello from shell (TRB v1)" taggedAs Slow in {
     val linked = TOF.deserialize(helloTofText)
     val trb = TriscBinary.serialize(linked)
-    info(s"Hello TRB size: ${trb.length} bytes")
     val keys = typeString("hello\n", startTick = 500000)
     val (_, output, _) = runWithKeys("", keys, maxCycles = 30000000,
       files = Map("/bin/hello" -> trb))
@@ -231,7 +232,7 @@ import oskit.apps.init.{init}
 
   // Regression: thread_count capped at MAX_THREADS; without reusing STATE_TERMINATED
   // slots, the fourth /bin/hello would use idx 8 and corrupt memory past threads[7].
-  "Loader: hello six times reuses thread slots" in {
+  "Loader: hello six times reuses thread slots" taggedAs Slow in {
     val trb = TriscBinary.serialize(TOF.deserialize(helloTofText))
     val script = List.fill(6)("hello\n").mkString
     // Wider spacing than default: puts()-based hello finishes a line much faster than
@@ -243,7 +244,7 @@ import oskit.apps.init.{init}
     "Hello, world!".r.findAllIn(output).length should be >= 6
   }
 
-  "Loader: unknown program shows not found" in {
+  "Loader: unknown program shows not found" taggedAs Slow in {
     val keys = typeString("nosuchprog\n", startTick = 500000)
     val (_, output, _) = runWithKeys("", keys)
     output should include("not found")
@@ -261,16 +262,13 @@ import oskit.apps.init.{init}
   private def testPaddedHello(size: Int, maxCycles: Int = 100000000): Unit =
     val padded = padTof(helloTofText, size)
     val tofBytes = padded.getBytes("UTF-8")
-    info(s"Padded TOF size: ${tofBytes.length} bytes (${(tofBytes.length + 511) / 512} blocks)")
     val keys = typeString("hello\n", startTick = 500000)
     val (cpu, output, _) = runWithKeys("", keys, maxCycles = maxCycles,
       files = Map("/bin/hello" -> tofBytes))
-    info(s"CPU state: ${cpu.state}, cycles: ${cpu.cycles}, PC: 0x${cpu.pc.toHexString}")
-    info(s"Output: ${output.take(200)}")
     val cleaned = output.filterNot(_ == '\n')
     cleaned should include("Hello, world!")
 
-  "Loader: padded hello 62KB" in { testPaddedHello(62000) }
+  "Loader: padded hello 62KB" taggedAs Slow in { testPaddedHello(62000) }
 
   // Syscall trampoline without malloc/free stubs (for linking with real posix alloc).
   private val syscallOnlyAsm =
@@ -321,17 +319,16 @@ import oskit.apps.init.{init}
   private lazy val echoTofText: String =
     compileProgram(Map("oskit/bin/echo/echo" -> echoSysl))
 
-  "Loader: arg passing works" in {
+  "Loader: arg passing works" taggedAs Slow in {
     val tofBytes = echoTofText.getBytes("UTF-8")
     val keys = typeString("./echo foo bar\n", startTick = 500000)
     val (_, output, _) = runWithKeys("", keys, maxCycles = 30000000,
       files = Map("/bin/echo" -> tofBytes))
-    info(s"Output: ${output.take(200)}")
     val cleaned = output.filterNot(_ == '\n')
     cleaned should include("foo bar")
   }
 
-  "Loader: ./echo with punctuation (get_args)" in {
+  "Loader: ./echo with punctuation (get_args)" taggedAs Slow in {
     val tofBytes = echoTofText.getBytes("UTF-8")
     val keys = typeString("./echo asdf!2\n", startTick = 500000)
     val (_, output, _) = runWithKeys("", keys, maxCycles = 30000000,
@@ -383,16 +380,12 @@ import oskit.apps.init.{init}
       "posix/string/string" -> posixStringSysl,
       "posix/ctype/ctype" -> posixCtypeSysl,
     ), maxCycles = 500000)
-    info(s"Output: '${output.take(20)}'")
-    info(s"Output: '${output.take(20)}'")
-    info(s"CPU state: ${cpu.state}, cycles: ${cpu.cycles}")
     output should not include "!"
     output should include ("OK")
   }
 
-  "Loader: run fat hello (60KB with posix modules)" in {
+  "Loader: run fat hello (60KB with posix modules)" taggedAs Slow in {
     val tofBytes = fatHelloTofText.getBytes("UTF-8")
-    info(s"Fat hello TOF size: ${tofBytes.length} bytes")
     val keys = typeString("hello\n", startTick = 500000)
     val (_, output, _) = runWithKeys("", keys, maxCycles = 100000000,
       files = Map("/bin/hello" -> tofBytes))
@@ -407,12 +400,10 @@ import oskit.apps.init.{init}
   private lazy val psTrb: Array[Byte] =
     TriscBinary.serialize(TOF.deserialize(compileProgram(Map("oskit/bin/ps/ps" -> psSysl))))
 
-  "Loader: count & then ps does not crash" in {
+  "Loader: count & then ps does not crash" taggedAs Slow in {
     val keys = typeString("count &\nps\n", startTick = 500000)
     val (cpu, output, _) = runWithKeys("", keys, maxCycles = 100000000,
       files = Map("/bin/count" -> countTrb, "/bin/ps" -> psTrb))
-    info(s"Output: ${output.take(500)}")
-    info(s"CPU state: ${cpu.state}")
     // Should reach cycle limit (Wfi), not crash (Halt)
     cpu.state.toString should be ("Wfi")
   }

@@ -10,13 +10,14 @@ class OSKitIPCTests extends OSKitTestHelpers {
   private lazy val ipcSysl: String = readLsysl("oskit/ipc/ipc.lsysl")
   private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
   private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
+  private lazy val configSysl: String = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
 
   def runIPC(userSources: Map[String, String], maxCycles: Int = 2000000): (CPU, String) =
     val bootTof = assemble(bootAsm, relocatable = true)
     val allSources = Map(
       "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
       "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
-      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl,
+      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "oskit/config/config" -> configSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -42,12 +43,12 @@ class OSKitIPCTests extends OSKitTestHelpers {
     dma.mem = mem
     linked.load(mem)
     val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
-    val cpu = new CPU(mem, Seq(timer, intc), mmu = Some(testMmu)) { this.limit = maxCycles }
+    val cpu = new CPU(mem, Seq(timer, intc), mmu = Some(testMmu)) { this.limit = maxCycles; quiet = true }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)
 
-  "IPC: port_create returns port ID" in {
+  "IPC: port_create returns port ID" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -72,7 +73,7 @@ import oskit.ipc.*
     output should include("Y")
   }
 
-  "IPC: basic send and recv" in {
+  "IPC: basic send and recv" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -121,7 +122,7 @@ import oskit.ipc.*
     output should include("!")
   }
 
-  "IPC: multi-client FIFO ordering" in {
+  "IPC: multi-client FIFO ordering" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -180,7 +181,7 @@ import oskit.ipc.*
     output.indexOf('A') should be < output.indexOf('B')
   }
 
-  "IPC: send to invalid port returns error" in {
+  "IPC: send to invalid port returns error" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -208,7 +209,7 @@ import oskit.ipc.*
     output should include("E")
   }
 
-  "IPC: port_close wakes blocked senders" in {
+  "IPC: port_close wakes blocked senders" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -246,7 +247,7 @@ import oskit.ipc.*
     output should include("W")
   }
 
-  "IPC: recv on unowned port returns error" in {
+  "IPC: recv on unowned port returns error" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -278,7 +279,7 @@ import oskit.ipc.*
     output should include("E")
   }
 
-  "IPC: client blocks until server recvs" in {
+  "IPC: client blocks until server recvs" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -326,7 +327,7 @@ import oskit.ipc.*
     output.indexOf('D') should be < output.indexOf('E')
   }
 
-  "IPC: send to closed port returns error" in {
+  "IPC: send to closed port returns error" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -361,7 +362,7 @@ import oskit.ipc.*
     output should include("E")
   }
 
-  "IPC: reply to non-blocked thread returns error" in {
+  "IPC: reply to non-blocked thread returns error" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -391,7 +392,7 @@ import oskit.ipc.*
     output should include("D")
   }
 
-  "IPC: port_create at capacity returns -1" in {
+  "IPC: port_create at capacity returns -1" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -422,7 +423,7 @@ import oskit.ipc.*
     output should include("F")
   }
 
-  "IPC: message truncation when buf too small" in {
+  "IPC: message truncation when buf too small" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -470,7 +471,7 @@ import oskit.ipc.*
     output should include("!")
   }
 
-  "IPC: reply truncation when reply_buf too small" in {
+  "IPC: reply truncation when reply_buf too small" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -515,7 +516,7 @@ import oskit.ipc.*
     output should include("R")
   }
 
-  "IPC: full lifecycle — multi-client, handle all, close" in {
+  "IPC: full lifecycle — multi-client, handle all, close" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -576,7 +577,7 @@ import oskit.ipc.*
     output should include("X")
   }
 
-  "IPC: port register and lookup by name" in {
+  "IPC: port register and lookup by name" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -630,7 +631,7 @@ import oskit.ipc.*
     output should include("!")
   }
 
-  "IPC: lookup nonexistent name returns -1" in {
+  "IPC: lookup nonexistent name returns -1" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -661,7 +662,7 @@ import oskit.ipc.*
     output should include("N")
   }
 
-  "IPC: server loop handles multiple requests" in {
+  "IPC: server loop handles multiple requests" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -734,7 +735,7 @@ import oskit.ipc.*
     output should include("Q")
   }
 
-  "IPC: register on unowned port returns -1" in {
+  "IPC: register on unowned port returns -1" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -772,7 +773,7 @@ import oskit.ipc.*
     output should include("E")
   }
 
-  "IPC: lookup after port closed returns -1" in {
+  "IPC: lookup after port closed returns -1" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -811,7 +812,7 @@ import oskit.ipc.*
     output should include("G")
   }
 
-  "IPC: multiple named ports lookup correctly" in {
+  "IPC: multiple named ports lookup correctly" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -857,7 +858,7 @@ import oskit.ipc.*
     output should include("D")
   }
 
-  "IPC: send_timeout returns -2 when server never recvs" in {
+  "IPC: send_timeout returns -2 when server never recvs" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -892,7 +893,7 @@ import oskit.ipc.*
     output should include("T")
   }
 
-  "IPC: send_timeout succeeds when server replies in time" in {
+  "IPC: send_timeout succeeds when server replies in time" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -933,7 +934,7 @@ import oskit.ipc.*
     output should include("S")
   }
 
-  "IPC: send_timeout with server delayed but replies before deadline" in {
+  "IPC: send_timeout with server delayed but replies before deadline" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*
@@ -975,7 +976,7 @@ import oskit.ipc.*
     output should include("S")
   }
 
-  "IPC: re-register changes port name" in {
+  "IPC: re-register changes port name" taggedAs Slow in {
     val (_, output) = runIPC(Map(
       "app" ->
         """import oskit.kernel.*

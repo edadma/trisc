@@ -156,7 +156,7 @@ class MPUTests extends TestHelpers {
          |halt
          |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, mpu = Some(mpu), mpuBase = 0xF00) { limit = 10000 }
+    val cpu = new CPU(mem, mpu = Some(mpu), mpuBase = 0xF00) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     output.toString shouldBe "OK"
@@ -174,7 +174,7 @@ class MPUTests extends TestHelpers {
          |halt
          |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, mpu = Some(mpu), mpuBase = 0xF00) { limit = 10000 }
+    val cpu = new CPU(mem, mpu = Some(mpu), mpuBase = 0xF00) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     cpu.r(1).read shouldBe 0xAB
@@ -191,7 +191,7 @@ class MPUTests extends TestHelpers {
          |halt
          |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, mpu = Some(mpu), mpuBase = 0xF00) { limit = 10000 }
+    val cpu = new CPU(mem, mpu = Some(mpu), mpuBase = 0xF00) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     mpu.readRegister(2) shouldBe 0xCD
@@ -227,7 +227,7 @@ class MPUTests extends TestHelpers {
         |  halt
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, mpu = Some(mpu), mpuBase = 0xF00) { limit = 10000 }
+    val cpu = new CPU(mem, mpu = Some(mpu), mpuBase = 0xF00) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     cpu.r(2).read shouldBe 42
@@ -272,7 +272,7 @@ class MPUTests extends TestHelpers {
         |  halt
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, mpu = Some(mpu), mpuBase = 0xF00) { limit = 10000 }
+    val cpu = new CPU(mem, mpu = Some(mpu), mpuBase = 0xF00) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     cpu.r(2).read shouldBe 77
@@ -297,7 +297,7 @@ class MPUTests extends TestHelpers {
          |halt
          |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, mpu = Some(mpu), mpuBase = 0xF00) { limit = 10000 }
+    val cpu = new CPU(mem, mpu = Some(mpu), mpuBase = 0xF00) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     mem.readByte(0x800) shouldBe 0x42

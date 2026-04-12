@@ -295,6 +295,21 @@ main() -> int
     count
 ```
 
+### Compile-Time Constants
+
+Immutable `val` declarations with constant integer initializers are folded at compile time. References to such vals are replaced with their literal values — no variable is allocated, no load is generated.
+
+```sysl
+val BASE = 0x1000
+val STATUS = BASE + 4        // folded to 0x1004
+val DATA = BASE + 8          // folded to 0x1008
+val MASK = 0xFF & (1 << 4)   // folded to 0x10
+```
+
+Constant folding supports `+`, `-`, `*`, `/`, `%`, `<<`, `>>`, `&`, `|`, `^`, unary `-`/`~`, and casts. Chained references work: `val C = A + B` where `A` and `B` are themselves constant vals. Values are truncated to the target type's width (e.g., `u32` wraps at 2^32).
+
+This works for both module-level and local vals, across module boundaries.
+
 ---
 
 ## Functions
@@ -319,6 +334,31 @@ double(x: int) = x * 2
 // No parameters
 getAnswer() -> int = 42
 ```
+
+### Default Parameter Values
+
+Parameters can have default values, given with `= expr` after the type. Any
+parameter with a default must come at the end of the parameter list; once a
+parameter has a default, all later parameters must too.
+
+```sysl
+val BASE = 100
+
+greet(x: int, y: int = 10) -> int = x + y
+compute(x: int, k: int = BASE * 2) -> int = x + k
+
+main() -> int
+    greet(32)          // 42 — uses default y=10
+    greet(32, 100)     // 132 — explicit y=100
+    compute(42)        // 242 — k defaults to 200
+```
+
+Default expressions are evaluated at each call site (re-evaluated per call,
+not cached). They can reference module-level vals and constants, but not
+other parameters or local variables. Constant defaults are folded by the
+analyzer.
+
+Default values are not yet supported on generic functions.
 
 ### `def` — Auto-Call Functions
 
@@ -1033,9 +1073,13 @@ for i in 0..100 step 5          // 0, 5, 10, ..., 100
 for i in 0..<30 step 3          // 0, 3, 6, ..., 27
 for i in 20 downTo 0 step 4     // 20, 16, 12, 8, 4, 0
 
-// Go-style iteration over arrays/slices
-for i, x in arr
-    body                       // i = index, x = arr[i]
+// Iterate values over arrays/slices/strings
+for v in arr
+    body                       // v = each element
+
+// Iterate with index and value
+for i, v in arr
+    body                       // i = index, v = arr[i]
 
 // `in` as range membership operator
 x in 1..4                       // true if 1 <= x <= 4 (inclusive)
@@ -1118,6 +1162,19 @@ var msg: [3]byte = ['H', 'i', '!'] // char literals coerce to bytes
 // Array decays to pointer when passed to *T parameter
 sum(arr: *int, n: int) -> int = ...
 sum(myArr, 5)             // myArr decays to *int
+```
+
+### Chained Indexing
+
+Indexing is a repeatable postfix operator — `arr[i][j]` works on arrays of arrays, slices of slices, etc:
+
+```sysl
+val grid = new [3][]int     // array of int slices
+grid[0] = row0[:]
+val v = grid[1][2]          // chain: grid[1] returns []int, then [2] indexes it
+
+// Address-of with chained index
+val p = &stacks[slot][0]    // address of first element of stacks[slot]
 ```
 
 ### Dynamic Arrays (Heap)

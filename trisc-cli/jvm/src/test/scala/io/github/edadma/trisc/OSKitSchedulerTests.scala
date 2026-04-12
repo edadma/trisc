@@ -2,7 +2,7 @@ package io.github.edadma.trisc
 
 class OSKitSchedulerTests extends OSKitTestHelpers {
 
-  "Scheduler: three threads same priority" in {
+  "Scheduler: three threads same priority" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -26,16 +26,16 @@ import oskit.services.*
           |""".stripMargin
     ))
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("A")
     output should include("B")
     output should include("C")
   }
 
-  "Scheduler: basic two-priority smoke test" in {
+  "Scheduler: basic two-priority smoke test" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
           |
           |kernel_main() -> int
@@ -52,16 +52,14 @@ import oskit.services.*
           |""".stripMargin
     ))
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("A")
     output should include("B")
     // A (pri=0, higher) should run before B (pri=1, lower)
     // But verify they both actually printed
-    info(s"smoke output: '$output'")
     output.indexOf('A') should be < output.indexOf('B')
   }
 
-  "Scheduler: quantum expiry causes round-robin rotation" in {
+  "Scheduler: quantum expiry causes round-robin rotation" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -94,10 +92,11 @@ import oskit.services.*
     output.count(_ == 'B') shouldBe 4
   }
 
-  "Scheduler: high priority preempts low priority" in {
+  "Scheduler: high priority preempts low priority" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
           |
           |kernel_main() -> int
@@ -124,7 +123,7 @@ import oskit.services.*
     output.indexOf('H') should be < output.indexOf('L')
   }
 
-  "Scheduler: blocked thread removed from queue" in {
+  "Scheduler: blocked thread removed from queue" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -155,10 +154,11 @@ import oskit.services.*
     output.count(_ == 'R') shouldBe 2
   }
 
-  "Scheduler: three priority levels strict ordering" in {
+  "Scheduler: three priority levels strict ordering" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
           |
           |kernel_main() -> int
@@ -179,7 +179,6 @@ import oskit.services.*
           |""".stripMargin
     ))
 
-    info(s"output: '$output' state: ${cpu.state} pc: ${cpu.pc}")
     // Strict priority: H before M before L
     output should include("H")
     output should include("M")
@@ -191,7 +190,7 @@ import oskit.services.*
     m should be < l
   }
 
-  "Scheduler: yield moves to back of queue" in {
+  "Scheduler: yield moves to back of queue" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -219,10 +218,11 @@ import oskit.services.*
     output shouldBe "ABAB"
   }
 
-  "Scheduler: unblock higher priority preempts current" in {
+  "Scheduler: unblock higher priority preempts current" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
           |
           |kernel_main() -> int

@@ -92,7 +92,7 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
     }
     val mem = new Memory("Memory", new RAM(0, stdoutAddr.toInt), stdout)
     linked.load(mem)
-    val cpu = new CPU(mem) { limit = maxCycles }
+    val cpu = new CPU(mem) { limit = maxCycles; quiet = true }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)

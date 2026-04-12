@@ -68,7 +68,7 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
     val sha = new ShaAccelerator(Runtime.shaAccelAddress)
     val mem = new Memory("Memory", ram, stdout, sha)
     linked.load(mem)
-    val cpu = new CPU(mem) { this.limit = maxCycles }
+    val cpu = new CPU(mem) { this.limit = maxCycles; quiet = true }
     cpu.reset()
     cpu.run()
     (cpu.r(1).read, output.toString)
@@ -78,7 +78,7 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
     val hash = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).getEncoded
     hash.map(b => f"${b & 0xff}%02x").mkString
 
-  "basic: print before crypto call" in {
+  "basic: print before crypto call" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import posix.stdlib.*
         |
@@ -87,11 +87,10 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |    putchar(10)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "A\n"
   }
 
-  "basic: u32 rotr" in {
+  "basic: u32 rotr" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import std.crypto.sha256.*
         |import posix.stdlib.*
@@ -102,11 +101,10 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |    putchar(65)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     code shouldBe 0
   }
 
-  "basic: u32 array init and index" in {
+  "basic: u32 array init and index" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import posix.stdlib.*
         |
@@ -117,11 +115,10 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |        putchar(66)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out should include("AB")
   }
 
-  "basic: for-in range loop" in {
+  "basic: for-in range loop" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import posix.stdlib.*
         |
@@ -132,11 +129,10 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |    putchar(48 + sum)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "4"
   }
 
-  "basic: slice from array" in {
+  "basic: slice from array" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import posix.stdlib.*
         |
@@ -152,11 +148,10 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |    putchar(48 + result / 100)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     code shouldBe 0
   }
 
-  "basic: K table access" in {
+  "basic: K table access" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import std.crypto.sha256.*
         |import posix.stdlib.*
@@ -174,11 +169,10 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |        putchar(78)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "AB"
   }
 
-  "basic: large u32 local array" in {
+  "basic: large u32 local array" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import posix.stdlib.*
         |
@@ -192,11 +186,10 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |        putchar(66)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "AB"
   }
 
-  "basic: u32 wrapping add" in {
+  "basic: u32 wrapping add" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import posix.stdlib.*
         |
@@ -211,11 +204,10 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |        putchar(78)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "A"
   }
 
-  "basic: u32 byte assembly" in {
+  "basic: u32 byte assembly" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import posix.stdlib.*
         |
@@ -234,11 +226,10 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |        putchar(78)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "A"
   }
 
-  "basic: u32 slice write and read" in {
+  "basic: u32 slice write and read" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import posix.stdlib.*
         |
@@ -252,11 +243,10 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |        putchar(65)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "A"
   }
 
-  "basic: byte slice with offset param" in {
+  "basic: byte slice with offset param" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import posix.stdlib.*
         |
@@ -281,11 +271,10 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |        putchar(66)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "AB"
   }
 
-  "basic: process_block call" in {
+  "basic: process_block call" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import std.crypto.sha256.*
         |import posix.stdlib.*
@@ -311,11 +300,10 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |    putchar(51)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out should include("123")
   }
 
-  "local slice as first arg to second call in same function" in {
+  "local slice as first arg to second call in same function" taggedAs Slow in {
     // Regression test: when a local slice variable is passed as the first (register)
     // arg to a function, the pre-evaluation must copy the slice data to the stack
     // (not just record stackOffset, which doesn't change for local var references).
@@ -346,11 +334,10 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |        putchar(66)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "AB"
   }
 
-  "MMIO: write and read SHA_TEXT register" in {
+  "MMIO: write and read SHA_TEXT register" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import posix.stdlib.*
         |
@@ -367,12 +354,11 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |    putchar(48 + v / 16)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out should startWith("Y")
   }
 
   // TODO: raw MMIO byte writes produce wrong hash — endianness or padding issue at 0x800160
-  "MMIO: SHA_START trigger" in {
+  "MMIO: SHA_START trigger" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import posix.stdlib.*
         |
@@ -415,11 +401,10 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |            putchar(87 + lo)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "Y"
   }
 
-  "SHA-256 abc (hw) via process_block_hw" in {
+  "SHA-256 abc (hw) via process_block_hw" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import std.crypto.sha256.*
         |import posix.stdlib.*
@@ -453,11 +438,10 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |            putchar(87 + lo)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "ba7816bf"
   }
 
-  "SHA-256 abc" in {
+  "SHA-256 abc" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import std.crypto.sha256.*
         |import posix.stdlib.*
@@ -481,11 +465,10 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |            putchar(87 + lo)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "ba7816bf"  // First 4 bytes of SHA-256("abc")
   }
 
-  "HMAC-SHA256 basic" in {
+  "HMAC-SHA256 basic" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(maxCycles = 20000000, sources = cryptoSources(
       """import std.crypto.hmac.*
         |import posix.stdlib.*
@@ -509,12 +492,11 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |            putchar(87 + lo)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     // Expected first 4 bytes of HMAC-SHA256("key", "msg") = 2d93cbc1
     out shouldBe "2d93cbc1"
   }
 
-  "PBKDF2 c=1 matches JVM" in {
+  "PBKDF2 c=1 matches JVM" taggedAs Slow in {
     val (code, out) = compileMultiAndRunOutput(cryptoSources(
       """import std.crypto.pbkdf2.*
         |import posix.stdlib.*
@@ -539,7 +521,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |            putchar(87 + lo)
         |    0
         |""".stripMargin), maxCycles = 10000000)
-    info(s"Output: '$out'")
     out shouldBe jvmPbkdf2("password", "salt", 1)
   }
 }

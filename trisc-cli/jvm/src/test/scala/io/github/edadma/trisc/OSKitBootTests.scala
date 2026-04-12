@@ -32,6 +32,7 @@ class OSKitBootTests extends OSKitTestHelpers {
       "oskit/services/services" -> servicesSysl,
       "std/mem/mem" -> memSource,
       "oskit/hal/mem" -> halMemSource,
+      "oskit/config/config" -> scala.io.Source.fromFile("oskit/config/config.sysl").mkString,
       "tasks" -> tasksSysl,
       "main" -> mainSysl,
     ))

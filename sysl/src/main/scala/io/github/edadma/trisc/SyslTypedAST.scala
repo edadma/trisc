@@ -17,7 +17,7 @@ case class TDataEnumDecl(name: String, enumType: SyslType.EnumType) extends TDec
 case class TTypeAliasDecl(name: String, target: SyslType) extends TDecl
 case class TInterfaceDecl(name: String, ifaceType: SyslType.InterfaceType) extends TDecl
 
-case class TParam(name: String, typ: SyslType)
+case class TParam(name: String, typ: SyslType, default: Option[TExpr] = None)
 
 // Function body
 trait TFunBody

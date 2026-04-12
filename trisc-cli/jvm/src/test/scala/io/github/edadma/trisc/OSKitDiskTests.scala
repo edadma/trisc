@@ -13,6 +13,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
   private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
+  private lazy val configSysl: String = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
   private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   // Stack layout for 2-thread tests (disk server + client):
@@ -42,7 +43,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
       "posix/ctype/ctype" -> posixCtypeSysl,
       "posix/stdlib/alloc" -> posixAllocSysl,
       "posix/unistd/sbrk" -> sbrkSysl,
-      "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "std/debug/debug" -> debugSysl,
+      "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "oskit/config/config" -> configSysl, "std/debug/debug" -> debugSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -80,7 +81,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
     dma.mem = mem
     linked.load(mem)
     val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
-    val cpu = new CPU(mem, Seq(timer, intc), mmu = Some(testMmu)) { this.limit = maxCycles }
+    val cpu = new CPU(mem, Seq(timer, intc), mmu = Some(testMmu)) { this.limit = maxCycles; quiet = true }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)
@@ -105,7 +106,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
       "posix/stdlib/alloc" -> posixAllocSysl,
       "posix/unistd/sbrk" -> sbrkSysl,
       "oskit/servers/tfs" -> tfsSrvSysl,
-      "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "std/debug/debug" -> debugSysl,
+      "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "oskit/config/config" -> configSysl, "std/debug/debug" -> debugSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -143,14 +144,14 @@ class OSKitDiskTests extends OSKitTestHelpers {
     dma.mem = mem
     linked.load(mem)
     val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
-    val cpu = new CPU(mem, Seq(timer, intc), mmu = Some(testMmu)) { this.limit = maxCycles }
+    val cpu = new CPU(mem, Seq(timer, intc), mmu = Some(testMmu)) { this.limit = maxCycles; quiet = true }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)
 
   // --- Disk server tests ---
 
-  "Disk: server registers and client discovers port" in {
+  "Disk: server registers and client discovers port" taggedAs Slow in {
     val (_, output) = runDisk(Map(
       "app" ->
         """import oskit.kernel.*
@@ -183,7 +184,7 @@ import oskit.drivers.disk.*
     output should include("Y")
   }
 
-  "Disk: read block written by hardware" in {
+  "Disk: read block written by hardware" taggedAs Slow in {
     val (_, output) = runDisk(Map(
       "app" ->
         """import oskit.kernel.*
@@ -221,7 +222,7 @@ import oskit.drivers.disk.*
     output should include("Hello")
   }
 
-  "Disk: capacity returns sector count" in {
+  "Disk: capacity returns sector count" taggedAs Slow in {
     val (_, output) = runDisk(Map(
       "app" ->
         """import oskit.kernel.*
@@ -248,7 +249,7 @@ import oskit.drivers.disk.*
     output should include("Y")
   }
 
-  "Disk: multiple block read/write" in {
+  "Disk: multiple block read/write" taggedAs Slow in {
     val (_, output) = runDisk(Map(
       "app" ->
         """import oskit.kernel.*
@@ -286,7 +287,7 @@ import oskit.drivers.disk.*
 
   // --- TFS server tests ---
 
-  "FS: open root directory" in {
+  "FS: open root directory" taggedAs Slow in {
     val (_, output) = runFS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -315,7 +316,7 @@ import oskit.servers.*
     output should include("Y")
   }
 
-  "FS: create and open a file" in {
+  "FS: create and open a file" taggedAs Slow in {
     val (_, output) = runFS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -345,7 +346,7 @@ import oskit.servers.*
     output should include("CO")
   }
 
-  "FS: write and read file data" in {
+  "FS: write and read file data" taggedAs Slow in {
     val (_, output) = runFS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -385,7 +386,7 @@ import oskit.servers.*
     output should include("ABCD")
   }
 
-  "FS: stat returns file size after write" in {
+  "FS: stat returns file size after write" taggedAs Slow in {
     val (_, output) = runFS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -424,7 +425,7 @@ import oskit.servers.*
     output should include("Y")
   }
 
-  "FS: mkdir and readdir" in {
+  "FS: mkdir and readdir" taggedAs Slow in {
     val (_, output) = runFS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -464,7 +465,7 @@ import oskit.servers.*
     output should include("D.:S")
   }
 
-  "FS: unlink removes file" in {
+  "FS: unlink removes file" taggedAs Slow in {
     val (_, output) = runFS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -497,7 +498,7 @@ import oskit.servers.*
     output should include("CUG")
   }
 
-  "FS: open file from prefilled filesystem" in {
+  "FS: open file from prefilled filesystem" taggedAs Slow in {
     val (_, output) = runFS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -530,7 +531,7 @@ import oskit.servers.*
     output should include("FHello!")
   }
 
-  "FS: read file from prefilled nested path" in {
+  "FS: read file from prefilled nested path" taggedAs Slow in {
     val (_, output) = runFS(Map(
       "app" ->
         """import oskit.kernel.*

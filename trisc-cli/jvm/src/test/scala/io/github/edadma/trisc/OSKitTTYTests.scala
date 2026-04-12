@@ -14,6 +14,7 @@ class OSKitTTYTests extends OSKitTestHelpers {
   private lazy val ttySysl: String = readLsysl("oskit/drivers/tty/tty.lsysl")
   private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
   private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
+  private lazy val configSysl: String = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
   private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   // keyEvents: (vkCode, press, modifierBits) — pre-enqueued before CPU starts
@@ -25,7 +26,7 @@ class OSKitTTYTests extends OSKitTestHelpers {
     val allSources = Map(
       "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
       "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
-      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "std/debug/debug" -> debugSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl, "oskit/drivers/tty/tty" -> ttySysl,
+      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "oskit/config/config" -> configSysl, "std/debug/debug" -> debugSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl, "oskit/drivers/tty/tty" -> ttySysl,
       "posix/unistd/sbrk" -> sbrkSysl, "posix/stdlib/alloc" -> posixAllocSysl, "posix/string/string" -> posixStringSysl, "posix/ctype/ctype" -> posixCtypeSysl,
     ) ++ userSources
     val driver = new SyslDriver
@@ -79,13 +80,13 @@ class OSKitTTYTests extends OSKitTestHelpers {
     }
     val ticks: Seq[Processor => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
     val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
-    val cpu = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles }
+    val cpu = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles; quiet = true }
     cpu.reset()
     cpu.run()
     if false then println(s"  [debug] ticks=$tickCount injected=$injectedCount cycles=${cpu.cycles}")
     (cpu, output.toString)
 
-  "TTY: write single character via IPC" in {
+  "TTY: write single character via IPC" taggedAs Slow in {
     val (_, output) = runTTY(Map(
       "app" ->
         """import oskit.kernel.*
@@ -112,7 +113,7 @@ import oskit.drivers.kbd.*
     output should include("Hi")
   }
 
-  "TTY: write string via IPC" in {
+  "TTY: write string via IPC" taggedAs Slow in {
     val (_, output) = runTTY(Map(
       "app" ->
         """import oskit.kernel.*
@@ -145,7 +146,7 @@ import oskit.drivers.kbd.*
     output should include("Hello")
   }
 
-  "TTY: multiple clients write to same tty" in {
+  "TTY: multiple clients write to same tty" taggedAs Slow in {
     val (_, output) = runTTY(Map(
       "app" ->
         """import oskit.kernel.*
@@ -181,7 +182,7 @@ import oskit.drivers.kbd.*
     output should include("D")
   }
 
-  "TTY: client discovers tty port by name" in {
+  "TTY: client discovers tty port by name" taggedAs Slow in {
     val (_, output) = runTTY(Map(
       "app" ->
         """import oskit.kernel.*
@@ -216,7 +217,7 @@ import oskit.drivers.kbd.*
     output should include("F")
   }
 
-  "TTY: read single character from keyboard" in {
+  "TTY: read single character from keyboard" taggedAs Slow in {
     val (_, output) = runTTY(
       Map(
         "app" ->
@@ -248,7 +249,7 @@ import oskit.drivers.kbd.*
     output should include("h")
   }
 
-  "TTY: read shifted character (uppercase)" in {
+  "TTY: read shifted character (uppercase)" taggedAs Slow in {
     val (_, output) = runTTY(
       Map(
         "app" ->
@@ -279,7 +280,7 @@ import oskit.drivers.kbd.*
     output should include("H")
   }
 
-  "TTY: read multiple characters" in {
+  "TTY: read multiple characters" taggedAs Slow in {
     val (_, output) = runTTY(
       Map(
         "app" ->
@@ -315,7 +316,7 @@ import oskit.drivers.kbd.*
     output should include("abc")
   }
 
-  "TTY: ipc_recv_notify wakes on keyboard notification" in {
+  "TTY: ipc_recv_notify wakes on keyboard notification" taggedAs Slow in {
     val (_, output) = runTTY(
       Map(
         "app" ->
@@ -357,7 +358,7 @@ import oskit.drivers.kbd.*
     output should include("!")
   }
 
-  "TTY: recv_notify server loop with pending reader and delayed key" in {
+  "TTY: recv_notify server loop with pending reader and delayed key" taggedAs Slow in {
     val (_, output) = runTTY(
       Map(
         "app" ->
@@ -410,7 +411,7 @@ import oskit.drivers.kbd.*
     output should include("!")
   }
 
-  "TTY: keyboard ISR notifies blocked thread" in {
+  "TTY: keyboard ISR notifies blocked thread" taggedAs Slow in {
     val (_, output) = runTTY(
       Map(
         "app" ->
@@ -455,7 +456,7 @@ import oskit.drivers.kbd.*
     output should include("!")
   }
 
-  "TTY: blocking read — key arrives after client blocks" in {
+  "TTY: blocking read — key arrives after client blocks" taggedAs Slow in {
     val (_, output) = runTTY(
       Map(
         "app" ->
@@ -494,7 +495,7 @@ import oskit.drivers.kbd.*
     output should include("!")
   }
 
-  "TTY: blocking read — multiple keys arrive after client blocks" in {
+  "TTY: blocking read — multiple keys arrive after client blocks" taggedAs Slow in {
     val (_, output) = runTTY(
       Map(
         "app" ->

@@ -243,7 +243,7 @@ class LinkerScriptTests extends TestHelpers {
     val linked = Linker.link(Seq(main, helper), script, 0)
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     linked.load(mem)
-    val cpu = new CPU(mem) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     cpu.r(1).read shouldBe 99

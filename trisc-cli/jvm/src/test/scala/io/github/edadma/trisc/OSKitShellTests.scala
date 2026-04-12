@@ -16,6 +16,7 @@ class OSKitShellTests extends OSKitTestHelpers {
   private lazy val shSysl: String     = readLsysl("oskit/apps/sh.lsysl")
   private lazy val memSysl: String   = readLsysl("std/mem/mem.lsysl")
   private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
+  private lazy val configSysl: String = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
   private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   // Cache the compiled+linked OS image — all shell tests use the same app source.
@@ -31,6 +32,7 @@ class OSKitShellTests extends OSKitTestHelpers {
       "oskit/ipc/ipc"            -> ipcSysl,
       "std/mem/mem"              -> memSysl,
       "oskit/hal/mem"            -> halMemSysl,
+      "oskit/config/config"      -> configSysl,
       "std/debug/debug"          -> debugSysl,
       "oskit/drivers/disk/disk"  -> diskSysl,
       "oskit/drivers/kbd/keyboard" -> kbdSysl,
@@ -130,7 +132,7 @@ import oskit.services.sleep
     val ticks: Seq[Processor => Unit] = if scheduledKeys.nonEmpty then Seq(timer, intc, keyInjector) else Seq(timer, intc)
     val testMmu = new SimpleMMU(mem); testMmu.setIdentityRange(0x7FE000L, 0xC00000L)
     dma.mmu = Some(testMmu)
-    val cpu                     = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles }
+    val cpu                     = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles; quiet = true }
     cpu.reset()
     cpu.run()
     (cpu, output.toString)
@@ -162,25 +164,25 @@ import oskit.services.sleep
 
   // === Shell integration tests ===
 
-  "Shell: init boots system" in {
+  "Shell: init boots system" taggedAs Slow in {
     val keys          = typeString("pwd\n", startTick = 500000, spacing = 2000)
     val (cpu, output) = runShell(scheduledKeys = keys)
     output should include("/")
   }
 
-  "Shell: echo command via putc" in {
+  "Shell: echo command via putc" taggedAs Slow in {
     val keys          = typeString("echo hi\n", startTick = 500000, spacing = 2000)
     val (cpu, output) = runShell(scheduledKeys = keys)
     output should include("hi")
   }
 
-  "Shell: echo command" in {
+  "Shell: echo command" taggedAs Slow in {
     val keys        = typeString("echo hi\n", startTick = 500000, spacing = 2000)
     val (_, output) = runShell(scheduledKeys = keys)
     output should include("hi")
   }
 
-  "Shell: ls on root with prefilled file" in {
+  "Shell: ls on root with prefilled file" taggedAs Slow in {
     val keys        = typeString("ls\n", startTick = 500000, spacing = 2000)
     val (_, output) = runShell(
       prefill = """/hello file "world"""",
@@ -189,7 +191,7 @@ import oskit.services.sleep
     output should include("hello")
   }
 
-  "Shell: pwd shows root" in {
+  "Shell: pwd shows root" taggedAs Slow in {
     val keys        = typeString("pwd\n", startTick = 500000, spacing = 2000)
     val (_, output) = runShell(scheduledKeys = keys)
     // Output should show "/" from pwd
@@ -198,13 +200,13 @@ import oskit.services.sleep
     pwdLines.length should be >= 1
   }
 
-  "Shell: type 20 characters without crash" in {
+  "Shell: type 20 characters without crash" taggedAs Slow in {
     val keys        = typeString("echo abcdefghijklmn\n", startTick = 500000, spacing = 50000)
     val (_, output) = runShell(maxCycles = 20000000, scheduledKeys = keys)
     output should include("abcdefghijklmn")
   }
 
-  "Shell: keyboard buffer overflow drops keys gracefully" in {
+  "Shell: keyboard buffer overflow drops keys gracefully" taggedAs Slow in {
     // With KB_BUF_SIZE=16, burst 20 keypresses at the same tick to overflow the buffer.
     // The system must not crash — excess events are silently dropped.
     // Then type a normal command to prove the shell is still alive.

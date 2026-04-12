@@ -423,7 +423,7 @@ class DeviceTests extends TestHelpers {
         |halt
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     captured shouldBe List('X'.toByte, 'Y'.toByte)
@@ -519,7 +519,7 @@ class DeviceTests extends TestHelpers {
         |halt
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     dirtyPixels shouldBe List((0, 0xFF), (3, 0x80))
@@ -587,7 +587,7 @@ class DeviceTests extends TestHelpers {
         |halt
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     cpu.r(1).read shouldBe expected.nextInt(256)

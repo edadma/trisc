@@ -19,7 +19,8 @@ IPC commands:
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
-    import oskit.kernel.{reap_process, kernel_kill_process, kernel_register_pm, processes, threads, current_thread, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING, MAX_PROCESSES}
+    import oskit.kernel.{reap_process, kernel_kill_process, kernel_register_pm, processes, threads, current_thread, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
+    import oskit.config.{MAX_PROCESSES, MAX_WAITERS}
     import oskit.services.{notify_read_self}
 
     val PM_CMD_WAITPID = 1
@@ -30,14 +31,12 @@ Each entry stores the waiting parent's thread ID (the IPC
 sender), the PID they're waiting for, and whether the slot
 is active.
 
-    val MAX_WAITERS = 8
-
     struct PMWaiter
         active: int
         sender: int
         pid: int
 
-    var waiters: [8]PMWaiter
+    var waiters: [8]PMWaiter  // 8 = MAX_WAITERS
     var pm_tid = -1
 
 Big-endian message helpers (local to this server).

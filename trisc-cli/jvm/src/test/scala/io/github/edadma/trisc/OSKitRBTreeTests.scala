@@ -97,7 +97,6 @@ class OSKitRBTreeTests extends OSKitTestHelpers {
         |    putchar(48 + rb_count(&tree))
         |    0
         |""".stripMargin)
-    info(s"output: '$output' state: ${cpu.state}")
     output shouldBe "01234"
   }
 

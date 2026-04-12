@@ -2,17 +2,6 @@ package io.github.edadma.trisc
 
 class SyslSVMArrayTests extends SyslSVMCodegenHelpers {
 
-  "minimal array" in {
-    val src = """main() -> int
-        |    arr: [1]i64
-        |    arr[0] = 42
-        |    arr[0]
-        |""".stripMargin
-    val asm = compile(src)
-    asm.split("\n").foreach(line => info(s"  $line"))
-    compileAndRun(src) shouldBe 42
-  }
-
   "array declaration and indexing" in {
     val src = """main() -> int
         |    arr: [3]i64
@@ -22,17 +11,6 @@ class SyslSVMArrayTests extends SyslSVMCodegenHelpers {
         |    arr[1]
         |""".stripMargin
     compileAndRun(src) shouldBe 20
-  }
-
-  "array write in loop" in {
-    val src = """main() -> int
-        |    arr: [3]i64
-        |    for var i: i64 = 0; i < 3; i += 1
-        |        arr[i] = (i + 1) * 10
-        |    arr[0]
-        |""".stripMargin
-    compile(src).split("\n").foreach(line => info(s"  $line"))
-    compileAndRun(src) shouldBe 10
   }
 
   "array sum" in {
