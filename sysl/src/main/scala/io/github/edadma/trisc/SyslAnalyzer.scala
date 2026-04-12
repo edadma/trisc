@@ -11,6 +11,8 @@ class SyslAnalyzer:
 
   private val globalScope = new mutable.LinkedHashMap[String, SymInfo]
   private val functions = new mutable.LinkedHashMap[String, FunInfo]
+  // Default parameter expressions: function name → list of defaults (one per param, None if no default)
+  private val functionDefaults = new mutable.LinkedHashMap[String, List[Option[TExpr]]]
   private val structTypes = new mutable.LinkedHashMap[String, SyslType.StructType]
   private val enumTypes = new mutable.LinkedHashMap[String, Map[String, Long]]  // enum name → (member name → value)
   // Simple enums registered as EnumType so they can appear in type positions.
@@ -446,10 +448,21 @@ class SyslAnalyzer:
                 then "method '$name' already has an implicit 'self' parameter — remove the explicit 'self: *Type' declaration"
                 else s"duplicate parameter name '${p.name}' in function '$name'"
               throw AnalysisError(friendly, decl)
+          // Validate that any parameters with defaults come at the end (contiguous trailing).
+          val firstDefaultIdx = params.indexWhere(_.default.isDefined)
+          if firstDefaultIdx >= 0 then
+            for i <- (firstDefaultIdx + 1) until params.length do
+              if params(i).default.isEmpty then
+                throw AnalysisError(
+                  s"parameter '${params(i).name}' of '$name' must have a default value (all parameters after a defaulted parameter must also have defaults)",
+                  decl,
+                )
           if typeParams.nonEmpty then
             // Generic function: store as template, don't resolve types yet
             if genericTemplates.contains(name) || functions.contains(name) then
               throw AnalysisError(s"duplicate function: '$name'", decl)
+            if params.exists(_.default.isDefined) then
+              throw AnalysisError(s"generic function '$name' cannot have default parameter values (not yet supported)", decl)
             genericTemplates(name) = fd
           else
             val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
@@ -658,6 +671,25 @@ class SyslAnalyzer:
         scopeStack = new mutable.ArrayBuffer
         pushScope()
         val funInfo = functions(name)
+        // Analyze default parameter expressions now (globals and earlier-declared
+        // symbols are available; locals are not visible to defaults).
+        if params.exists(_.default.isDefined) then
+          val defaults = params.zip(funInfo.params).map { case (p, (_, pType)) =>
+            p.default.map { defaultExpr =>
+              val savedExp0 = currentExpected
+              currentExpected = Some(pType)
+              val tDefault0 = try analyzeExpr(defaultExpr) finally currentExpected = savedExp0
+              val tDefault = coerceLiteral(tDefault0, pType)
+              if !compatible(tDefault.typ, pType) then
+                throw AnalysisError(
+                  s"default value for parameter '${p.name}' of '$name' has type ${tDefault.typ}, expected $pType",
+                  fdAst,
+                )
+              tDefault
+            }
+          }
+          functionDefaults(name) = defaults
+          if funInfo.name != name then functionDefaults(funInfo.name) = defaults
         val savedReturnType = currentReturnType
         currentReturnType = funInfo.returnType
         for (paramName, paramType) <- funInfo.params do
@@ -1257,9 +1289,21 @@ class SyslAnalyzer:
           typeEnv = savedEnv
 
   private def checkArgs(name: String, params: List[(String, SyslType)], args: List[TExpr]): List[TExpr] =
-    if args.length != params.length then
+    // Try to fill missing trailing args with defaults registered for the function.
+    val filledArgs =
+      if args.length < params.length then
+        val defaults = functionDefaults.getOrElse(name, Nil)
+        val missing = params.length - args.length
+        val defaultsForMissing =
+          if defaults.length == params.length then defaults.drop(args.length)
+          else Nil
+        if defaultsForMissing.length == missing && defaultsForMissing.forall(_.isDefined) then
+          args ++ defaultsForMissing.map(_.get)
+        else args
+      else args
+    if filledArgs.length != params.length then
       throw AnalysisError(s"function '$name' expects ${params.length} argument(s), got ${args.length}")
-    args.zip(params).map { case (arg, (pName, pType)) =>
+    filledArgs.zip(params).map { case (arg, (pName, pType)) =>
       val coerced = coerceLiteral(arg, pType)
       if !compatible(coerced.typ, pType) then
         throw AnalysisError(s"argument '$pName' of '$name' expects $pType, got ${coerced.typ}")

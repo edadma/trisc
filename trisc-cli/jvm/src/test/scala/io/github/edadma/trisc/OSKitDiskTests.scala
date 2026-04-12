@@ -151,7 +151,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
 
   // --- Disk server tests ---
 
-  "Disk: server registers and client discovers port" in {
+  "Disk: server registers and client discovers port" taggedAs Slow in {
     val (_, output) = runDisk(Map(
       "app" ->
         """import oskit.kernel.*
@@ -184,7 +184,7 @@ import oskit.drivers.disk.*
     output should include("Y")
   }
 
-  "Disk: read block written by hardware" in {
+  "Disk: read block written by hardware" taggedAs Slow in {
     val (_, output) = runDisk(Map(
       "app" ->
         """import oskit.kernel.*
@@ -222,7 +222,7 @@ import oskit.drivers.disk.*
     output should include("Hello")
   }
 
-  "Disk: capacity returns sector count" in {
+  "Disk: capacity returns sector count" taggedAs Slow in {
     val (_, output) = runDisk(Map(
       "app" ->
         """import oskit.kernel.*
@@ -249,7 +249,7 @@ import oskit.drivers.disk.*
     output should include("Y")
   }
 
-  "Disk: multiple block read/write" in {
+  "Disk: multiple block read/write" taggedAs Slow in {
     val (_, output) = runDisk(Map(
       "app" ->
         """import oskit.kernel.*
@@ -287,7 +287,7 @@ import oskit.drivers.disk.*
 
   // --- TFS server tests ---
 
-  "FS: open root directory" in {
+  "FS: open root directory" taggedAs Slow in {
     val (_, output) = runFS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -316,7 +316,7 @@ import oskit.servers.*
     output should include("Y")
   }
 
-  "FS: create and open a file" in {
+  "FS: create and open a file" taggedAs Slow in {
     val (_, output) = runFS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -346,7 +346,7 @@ import oskit.servers.*
     output should include("CO")
   }
 
-  "FS: write and read file data" in {
+  "FS: write and read file data" taggedAs Slow in {
     val (_, output) = runFS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -386,7 +386,7 @@ import oskit.servers.*
     output should include("ABCD")
   }
 
-  "FS: stat returns file size after write" in {
+  "FS: stat returns file size after write" taggedAs Slow in {
     val (_, output) = runFS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -425,7 +425,7 @@ import oskit.servers.*
     output should include("Y")
   }
 
-  "FS: mkdir and readdir" in {
+  "FS: mkdir and readdir" taggedAs Slow in {
     val (_, output) = runFS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -465,7 +465,7 @@ import oskit.servers.*
     output should include("D.:S")
   }
 
-  "FS: unlink removes file" in {
+  "FS: unlink removes file" taggedAs Slow in {
     val (_, output) = runFS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -498,7 +498,7 @@ import oskit.servers.*
     output should include("CUG")
   }
 
-  "FS: open file from prefilled filesystem" in {
+  "FS: open file from prefilled filesystem" taggedAs Slow in {
     val (_, output) = runFS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -531,7 +531,7 @@ import oskit.servers.*
     output should include("FHello!")
   }
 
-  "FS: read file from prefilled nested path" in {
+  "FS: read file from prefilled nested path" taggedAs Slow in {
     val (_, output) = runFS(Map(
       "app" ->
         """import oskit.kernel.*

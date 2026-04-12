@@ -13,7 +13,7 @@ class OSKitExitBugTests extends OSKitTestHelpers {
 
   // === Baseline: single thread, implicit return ===
 
-  "Exit: single thread, no calls, implicit return" in {
+  "Exit: single thread, no calls, implicit return" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -32,7 +32,7 @@ import oskit.services.*
     output shouldBe "A"
   }
 
-  "Exit: single thread, sleep+putc, implicit return" in {
+  "Exit: single thread, sleep+putc, implicit return" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -54,7 +54,7 @@ import oskit.services.*
 
   // === Two threads, same priority, implicit return ===
 
-  "Exit: two threads, both sleep+putc, implicit return" in {
+  "Exit: two threads, both sleep+putc, implicit return" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -82,7 +82,7 @@ import oskit.services.*
 
   // === Three threads, same priority, implicit return ===
 
-  "Exit: three threads same priority, sleep+putc, implicit return" in {
+  "Exit: three threads same priority, sleep+putc, implicit return" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -116,7 +116,7 @@ import oskit.services.*
 
   // === Three threads, different priorities, implicit return ===
 
-  "Exit: three threads different priorities, sleep+putc, implicit return" in {
+  "Exit: three threads different priorities, sleep+putc, implicit return" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -151,7 +151,7 @@ import oskit.services.*
 
   // === Now add pimutex import — does that change behavior? ===
 
-  "Exit: three threads different priorities, sleep+putc, implicit return, pimutex imported" in {
+  "Exit: three threads different priorities, sleep+putc, implicit return, pimutex imported" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -186,7 +186,7 @@ import oskit.services.*
 
   // === Add PIMutex variable (changes BSS layout) ===
 
-  "Exit: three threads diff pri, sleep+putc, implicit return, pimutex var declared" in {
+  "Exit: three threads diff pri, sleep+putc, implicit return, pimutex var declared" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -225,7 +225,7 @@ import oskit.sync.*
 
   // === Use the mutex (low holds it, high blocks) — the original failing scenario ===
 
-  "Exit: PI scenario, med implicit return (original failing case)" in {
+  "Exit: PI scenario, med implicit return (original failing case)" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -269,7 +269,7 @@ import oskit.sync.*
 
   // === Vary med's function body to find the boundary ===
 
-  "Exit: PI scenario, med has only putc (no sleep), implicit return" in {
+  "Exit: PI scenario, med has only putc (no sleep), implicit return" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -310,7 +310,7 @@ import oskit.sync.*
     output should include("h")
   }
 
-  "Exit: PI scenario, med has putc+putc, implicit return" in {
+  "Exit: PI scenario, med has putc+putc, implicit return" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -352,7 +352,7 @@ import oskit.sync.*
     output should include("h")
   }
 
-  "Exit: PI scenario, med has sleep only (no putc), implicit return" in {
+  "Exit: PI scenario, med has sleep only (no putc), implicit return" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -393,7 +393,7 @@ import oskit.sync.*
     output should include("h")
   }
 
-  "Exit: PI scenario, med has yield+putc, implicit return" in {
+  "Exit: PI scenario, med has yield+putc, implicit return" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -437,7 +437,7 @@ import oskit.sync.*
 
   // === Isolate: is it slow+fast path, or slow+slow? ===
 
-  "Exit: PI scenario, med has sleep+yield (slow+slow), implicit return" in {
+  "Exit: PI scenario, med has sleep+yield (slow+slow), implicit return" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -478,7 +478,7 @@ import oskit.sync.*
     output should include("l")
   }
 
-  "Exit: PI scenario, med has sleep+sleep (slow+slow), implicit return" in {
+  "Exit: PI scenario, med has sleep+sleep (slow+slow), implicit return" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -521,7 +521,7 @@ import oskit.sync.*
 
   // === Does the bug happen WITHOUT pimutex, just with the right code shape? ===
 
-  "Exit: three threads diff pri, no mutex, med sleep+putc implicit return" in {
+  "Exit: three threads diff pri, no mutex, med sleep+putc implicit return" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -562,7 +562,7 @@ import oskit.services.*
 
   // === Vary which thread has implicit return ===
 
-  "Exit: PI scenario, LOW implicit return (instead of med)" in {
+  "Exit: PI scenario, LOW implicit return (instead of med)" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -606,7 +606,7 @@ import oskit.sync.*
     output should include("h")
   }
 
-  "Exit: PI scenario, HIGH implicit return (instead of med)" in {
+  "Exit: PI scenario, HIGH implicit return (instead of med)" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -652,7 +652,7 @@ import oskit.sync.*
 
   // === ALL three implicit return ===
 
-  "Exit: PI scenario, ALL threads implicit return" in {
+  "Exit: PI scenario, ALL threads implicit return" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*

@@ -2,7 +2,7 @@ package io.github.edadma.trisc
 
 class OSKitThreadTests extends OSKitTestHelpers {
 
-  "TOS: thread join waits for completion" in {
+  "TOS: thread join waits for completion" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -31,7 +31,7 @@ import oskit.services.*
     output.indexOf('W') should be < output.indexOf('J')
   }
 
-  "TOS: join on already-terminated thread returns immediately" in {
+  "TOS: join on already-terminated thread returns immediately" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -58,7 +58,7 @@ import oskit.services.*
     output should include("S")
   }
 
-  "TOS: higher priority thread runs first" in {
+  "TOS: higher priority thread runs first" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -85,7 +85,7 @@ import oskit.services.*
     output.indexOf('H') should be < output.indexOf('L')
   }
 
-  "TOS: equal priority threads round-robin" in {
+  "TOS: equal priority threads round-robin" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -119,7 +119,7 @@ import oskit.services.*
     output.count(_ == 'B') shouldBe 3
   }
 
-  "TOS: uptime returns a value" in {
+  "TOS: uptime returns a value" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -139,7 +139,7 @@ import oskit.services.*
     output should include("Y")
   }
 
-  "TOS: uptime increases after sleep" in {
+  "TOS: uptime increases after sleep" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -164,7 +164,7 @@ import oskit.services.*
     output should include("Y")
   }
 
-  "TOS: thread_id returns current thread index" in {
+  "TOS: thread_id returns current thread index" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -189,7 +189,7 @@ import oskit.services.*
     output should include("1")
   }
 
-  "TOS: get_thread_count returns number of threads" in {
+  "TOS: get_thread_count returns number of threads" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -217,7 +217,7 @@ import oskit.services.*
     output should include("3")
   }
 
-  "TOS: get_thread_state returns correct states" in {
+  "TOS: get_thread_state returns correct states" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -244,7 +244,7 @@ import oskit.services.*
     output should include("2")
   }
 
-  "TOS: sleep_until blocks until absolute tick" in {
+  "TOS: sleep_until blocks until absolute tick" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -271,7 +271,7 @@ import oskit.services.*
 
   // ===== Thread statistics =====
 
-  "TOS: context switch count increments" in {
+  "TOS: context switch count increments" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -297,7 +297,7 @@ import oskit.services.*
     output should include("Y")
   }
 
-  "TOS: cpu ticks accumulate" in {
+  "TOS: cpu ticks accumulate" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -321,7 +321,7 @@ import oskit.services.*
     output should include("Y")
   }
 
-  "TOS: total context switches tracks all threads" in {
+  "TOS: total context switches tracks all threads" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -357,7 +357,7 @@ import oskit.services.*
   // verifying consec_quanta increments and the termination path in
   // the scheduler. Re-enable when the emulator supports cycle skipping.
 
-  "TOS: watchdog terminates runaway thread" in {
+  "TOS: watchdog terminates runaway thread" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -391,7 +391,7 @@ import oskit.services.*
     output should include("K")
   }
 
-  "TOS: watchdog does not kill yielding thread" in {
+  "TOS: watchdog does not kill yielding thread" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -424,7 +424,7 @@ import oskit.services.*
 
   // ===== putstr =====
 
-  "TOS: putstr prints string" in {
+  "TOS: putstr prints string" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -446,7 +446,7 @@ import oskit.services.*
 
   // ===== Stack canary =====
 
-  "TOS: stack canary intact after normal execution" in {
+  "TOS: stack canary intact after normal execution" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -471,7 +471,7 @@ import oskit.services.*
 
   // ===== Suspend / Resume =====
 
-  "TOS: suspend and resume thread" in {
+  "TOS: suspend and resume thread" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -507,7 +507,7 @@ import oskit.services.*
     output should include("R")
   }
 
-  "TOS: suspended thread state is queryable" in {
+  "TOS: suspended thread state is queryable" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -540,7 +540,7 @@ import oskit.services.*
 
   // ===== Panic =====
 
-  "TOS: panic terminates all threads" in {
+  "TOS: panic terminates all threads" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -565,7 +565,7 @@ import oskit.services.*
 
   // ===== Thread-local storage =====
 
-  "TOS: tls_set and tls_get basic" in {
+  "TOS: tls_set and tls_get basic" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -592,7 +592,7 @@ import oskit.services.*
     output should include("B")
   }
 
-  "TOS: tls is per-thread" in {
+  "TOS: tls is per-thread" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -630,7 +630,7 @@ import oskit.services.*
     output should not include("N")
   }
 
-  "TOS: getuid returns current thread uid (default 0)" in {
+  "TOS: getuid returns current thread uid (default 0)" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -653,7 +653,7 @@ import oskit.services.*
     output should include("Z")
   }
 
-  "TOS: setuid sets uid, getuid returns new value" in {
+  "TOS: setuid sets uid, getuid returns new value" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -678,7 +678,7 @@ import oskit.services.*
     output should not include("N")
   }
 
-  "TOS: child thread inherits uid from parent" in {
+  "TOS: child thread inherits uid from parent" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*

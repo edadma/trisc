@@ -230,6 +230,22 @@ sbt test       # run tests
 sbt run        # run CLI
 ```
 
+### Slow tests
+
+Full-system integration tests that boot the OS, load programs, or run
+large workloads are tagged `io.github.edadma.trisc.Slow`. For a fast
+feedback loop, exclude them:
+
+```
+sbt "triscCliJVM/testOnly -- -l io.github.edadma.trisc.Slow"
+```
+
+Run only slow tests:
+
+```
+sbt "triscCliJVM/testOnly -- -n io.github.edadma.trisc.Slow"
+```
+
 ## License
 
 ISC

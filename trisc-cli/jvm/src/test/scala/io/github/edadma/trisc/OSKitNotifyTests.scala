@@ -4,7 +4,7 @@ class OSKitNotifyTests extends OSKitTestHelpers {
 
   // ===== Task notifications =====
 
-  "TOS: notify_send wakes waiting thread" in {
+  "TOS: notify_send wakes waiting thread" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -33,7 +33,7 @@ import oskit.services.*
     output should include("Y")
   }
 
-  "TOS: notification already pending skips wait" in {
+  "TOS: notification already pending skips wait" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -63,7 +63,7 @@ import oskit.services.*
 
   // ===== Event groups =====
 
-  "TOS: event_set wakes waiting thread" in {
+  "TOS: event_set wakes waiting thread" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -89,7 +89,7 @@ import oskit.services.*
     output should include("W")
   }
 
-  "TOS: event_wait all bits" in {
+  "TOS: event_wait all bits" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -119,7 +119,7 @@ import oskit.services.*
 
   // ===== Recursive mutex =====
 
-  "TOS: recursive mutex allows same-thread relock" in {
+  "TOS: recursive mutex allows same-thread relock" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "oskit/sync/rmutex" -> rmutexSysl,
       "app" ->
@@ -152,7 +152,7 @@ import oskit.sync.*
     output should include("B")
   }
 
-  "TOS: recursive mutex blocks other thread" in {
+  "TOS: recursive mutex blocks other thread" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "oskit/sync/rmutex" -> rmutexSysl,
       "app" ->
@@ -194,7 +194,7 @@ import oskit.sync.*
 
   // ===== Queue sets =====
 
-  "TOS: qset_wait returns ready slot" in {
+  "TOS: qset_wait returns ready slot" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -229,7 +229,7 @@ import oskit.sync.*
     output should include("Y")
   }
 
-  "TOS: qset_wait returns first ready of multiple" in {
+  "TOS: qset_wait returns first ready of multiple" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*

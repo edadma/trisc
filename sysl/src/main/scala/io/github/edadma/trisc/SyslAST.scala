@@ -67,7 +67,7 @@ case class CondNot(expr: CondExpr) extends CondExpr
 case class CondEq(name: String, value: String) extends CondExpr
 case class CondNeq(name: String, value: String) extends CondExpr
 
-case class ParamAST(name: String, typ: TypeAST) extends Positional
+case class ParamAST(name: String, typ: TypeAST, default: Option[ExpressionAST] = None) extends Positional
 
 // Function body
 trait FunBodyAST
