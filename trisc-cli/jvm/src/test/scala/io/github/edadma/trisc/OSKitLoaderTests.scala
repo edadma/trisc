@@ -221,7 +221,6 @@ import oskit.apps.init.{init}
   "Loader: run hello from shell (TRB v1)" in {
     val linked = TOF.deserialize(helloTofText)
     val trb = TriscBinary.serialize(linked)
-    info(s"Hello TRB size: ${trb.length} bytes")
     val keys = typeString("hello\n", startTick = 500000)
     val (_, output, _) = runWithKeys("", keys, maxCycles = 30000000,
       files = Map("/bin/hello" -> trb))
@@ -261,12 +260,9 @@ import oskit.apps.init.{init}
   private def testPaddedHello(size: Int, maxCycles: Int = 100000000): Unit =
     val padded = padTof(helloTofText, size)
     val tofBytes = padded.getBytes("UTF-8")
-    info(s"Padded TOF size: ${tofBytes.length} bytes (${(tofBytes.length + 511) / 512} blocks)")
     val keys = typeString("hello\n", startTick = 500000)
     val (cpu, output, _) = runWithKeys("", keys, maxCycles = maxCycles,
       files = Map("/bin/hello" -> tofBytes))
-    info(s"CPU state: ${cpu.state}, cycles: ${cpu.cycles}, PC: 0x${cpu.pc.toHexString}")
-    info(s"Output: ${output.take(200)}")
     val cleaned = output.filterNot(_ == '\n')
     cleaned should include("Hello, world!")
 
@@ -326,7 +322,6 @@ import oskit.apps.init.{init}
     val keys = typeString("./echo foo bar\n", startTick = 500000)
     val (_, output, _) = runWithKeys("", keys, maxCycles = 30000000,
       files = Map("/bin/echo" -> tofBytes))
-    info(s"Output: ${output.take(200)}")
     val cleaned = output.filterNot(_ == '\n')
     cleaned should include("foo bar")
   }
@@ -383,16 +378,12 @@ import oskit.apps.init.{init}
       "posix/string/string" -> posixStringSysl,
       "posix/ctype/ctype" -> posixCtypeSysl,
     ), maxCycles = 500000)
-    info(s"Output: '${output.take(20)}'")
-    info(s"Output: '${output.take(20)}'")
-    info(s"CPU state: ${cpu.state}, cycles: ${cpu.cycles}")
     output should not include "!"
     output should include ("OK")
   }
 
   "Loader: run fat hello (60KB with posix modules)" in {
     val tofBytes = fatHelloTofText.getBytes("UTF-8")
-    info(s"Fat hello TOF size: ${tofBytes.length} bytes")
     val keys = typeString("hello\n", startTick = 500000)
     val (_, output, _) = runWithKeys("", keys, maxCycles = 100000000,
       files = Map("/bin/hello" -> tofBytes))
@@ -411,8 +402,6 @@ import oskit.apps.init.{init}
     val keys = typeString("count &\nps\n", startTick = 500000)
     val (cpu, output, _) = runWithKeys("", keys, maxCycles = 100000000,
       files = Map("/bin/count" -> countTrb, "/bin/ps" -> psTrb))
-    info(s"Output: ${output.take(500)}")
-    info(s"CPU state: ${cpu.state}")
     // Should reach cycle limit (Wfi), not crash (Halt)
     cpu.state.toString should be ("Wfi")
   }

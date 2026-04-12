@@ -87,7 +87,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |    putchar(10)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "A\n"
   }
 
@@ -102,7 +101,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |    putchar(65)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     code shouldBe 0
   }
 
@@ -117,7 +115,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |        putchar(66)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out should include("AB")
   }
 
@@ -132,7 +129,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |    putchar(48 + sum)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "4"
   }
 
@@ -152,7 +148,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |    putchar(48 + result / 100)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     code shouldBe 0
   }
 
@@ -174,7 +169,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |        putchar(78)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "AB"
   }
 
@@ -192,7 +186,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |        putchar(66)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "AB"
   }
 
@@ -211,7 +204,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |        putchar(78)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "A"
   }
 
@@ -234,7 +226,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |        putchar(78)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "A"
   }
 
@@ -252,7 +243,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |        putchar(65)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "A"
   }
 
@@ -281,7 +271,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |        putchar(66)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "AB"
   }
 
@@ -311,7 +300,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |    putchar(51)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out should include("123")
   }
 
@@ -346,7 +334,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |        putchar(66)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "AB"
   }
 
@@ -367,7 +354,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |    putchar(48 + v / 16)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out should startWith("Y")
   }
 
@@ -415,7 +401,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |            putchar(87 + lo)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "Y"
   }
 
@@ -453,7 +438,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |            putchar(87 + lo)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "ba7816bf"
   }
 
@@ -481,7 +465,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |            putchar(87 + lo)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     out shouldBe "ba7816bf"  // First 4 bytes of SHA-256("abc")
   }
 
@@ -509,7 +492,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |            putchar(87 + lo)
         |    0
         |""".stripMargin))
-    info(s"Output: '$out', code: $code")
     // Expected first 4 bytes of HMAC-SHA256("key", "msg") = 2d93cbc1
     out shouldBe "2d93cbc1"
   }
@@ -539,7 +521,6 @@ class CryptoCodegenTests extends SyslCodegenHelpers {
         |            putchar(87 + lo)
         |    0
         |""".stripMargin), maxCycles = 10000000)
-    info(s"Output: '$out'")
     out shouldBe jvmPbkdf2("password", "salt", 1)
   }
 }

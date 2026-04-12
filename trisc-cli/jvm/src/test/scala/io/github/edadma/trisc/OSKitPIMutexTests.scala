@@ -108,7 +108,6 @@ import oskit.sync.*
           |""".stripMargin
     ))
 
-    info(s"contended output: '$output'")
     output should include("H")
     output should include("W")
     output should include("h")
@@ -151,7 +150,6 @@ import oskit.sync.*
           |""".stripMargin
     ))
 
-    info(s"diff-pri contended output: '$output'")
     output should include("L")
     output should include("H")
     output should include("l")
@@ -217,7 +215,6 @@ import oskit.sync.*
           |""".stripMargin
     ))
 
-    info(s"PI test output: '$output'")
     output should include("L")
     output should include("H")
     output should include("l")
@@ -275,7 +272,6 @@ import oskit.sync.*
           |""".stripMargin
     ))
 
-    info(s"Restore test output: '$output'")
     // After unlock: high runs (pri 0), then med (pri 1), then low (pri 2)
     output should include("H")
     output should include("M")
@@ -343,7 +339,6 @@ import oskit.sync.*
           |""".stripMargin
     ))
 
-    info(s"Transitive PI output: '$output'")
     // With transitive PI, low is boosted to pri 0 through the chain.
     // Low finishes critical section ('l') before bg ('B') runs.
     output should include("l")

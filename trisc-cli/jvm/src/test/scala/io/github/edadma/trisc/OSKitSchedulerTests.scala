@@ -26,7 +26,6 @@ import oskit.services.*
           |""".stripMargin
     ))
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("A")
     output should include("B")
     output should include("C")
@@ -52,12 +51,10 @@ import oskit.services.*
           |""".stripMargin
     ))
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("A")
     output should include("B")
     // A (pri=0, higher) should run before B (pri=1, lower)
     // But verify they both actually printed
-    info(s"smoke output: '$output'")
     output.indexOf('A') should be < output.indexOf('B')
   }
 
@@ -179,7 +176,6 @@ import oskit.services.*
           |""".stripMargin
     ))
 
-    info(s"output: '$output' state: ${cpu.state} pc: ${cpu.pc}")
     // Strict priority: H before M before L
     output should include("H")
     output should include("M")

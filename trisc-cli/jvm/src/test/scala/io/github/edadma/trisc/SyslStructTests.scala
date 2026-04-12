@@ -20,7 +20,6 @@ class SyslStructTests extends OSKitTestHelpers {
         |    0
         |""".stripMargin
     )
-    info(s"output: '$output'")
     output shouldBe "AB"
   }
 
@@ -49,7 +48,6 @@ class SyslStructTests extends OSKitTestHelpers {
         |    0
         |""".stripMargin
     )
-    info(s"output: '$output'")
     output shouldBe "ABC"
   }
 
@@ -81,7 +79,6 @@ class SyslStructTests extends OSKitTestHelpers {
         |    0
         |""".stripMargin
     )
-    info(s"output: '$output'")
     output shouldBe "ABC"
   }
 }

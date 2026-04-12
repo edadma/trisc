@@ -29,7 +29,6 @@ import oskit.services.*
           |""".stripMargin
     ), maxCycles = 200000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output shouldBe "A"
   }
 
@@ -50,7 +49,6 @@ import oskit.services.*
           |""".stripMargin
     ), maxCycles = 500000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output shouldBe "A"
   }
 
@@ -78,7 +76,6 @@ import oskit.services.*
           |""".stripMargin
     ), maxCycles = 500000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("A")
     output should include("B")
   }
@@ -112,7 +109,6 @@ import oskit.services.*
           |""".stripMargin
     ), maxCycles = 500000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("A")
     output should include("B")
     output should include("C")
@@ -147,7 +143,6 @@ import oskit.services.*
           |""".stripMargin
     ), maxCycles = 500000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("H")
     output should include("M")
     output should include("L")
@@ -182,7 +177,6 @@ import oskit.services.*
           |""".stripMargin
     ), maxCycles = 500000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("H")
     output should include("M")
     output should include("L")
@@ -221,7 +215,6 @@ import oskit.sync.*
           |""".stripMargin
     ), maxCycles = 500000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("H")
     output should include("M")
     output should include("L")
@@ -266,7 +259,6 @@ import oskit.sync.*
           |""".stripMargin
     ), maxCycles = 5000000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("l")
     output should include("h")
   }
@@ -309,7 +301,6 @@ import oskit.sync.*
           |""".stripMargin
     ), maxCycles = 5000000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("l")
     output should include("h")
   }
@@ -351,7 +342,6 @@ import oskit.sync.*
           |""".stripMargin
     ), maxCycles = 5000000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("l")
     output should include("h")
   }
@@ -392,7 +382,6 @@ import oskit.sync.*
           |""".stripMargin
     ), maxCycles = 5000000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("l")
     output should include("h")
   }
@@ -434,7 +423,6 @@ import oskit.sync.*
           |""".stripMargin
     ), maxCycles = 5000000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("l")
     output should include("h")
   }
@@ -478,7 +466,6 @@ import oskit.sync.*
           |""".stripMargin
     ), maxCycles = 5000000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("l")
   }
 
@@ -519,7 +506,6 @@ import oskit.sync.*
           |""".stripMargin
     ), maxCycles = 5000000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("l")
   }
 
@@ -556,7 +542,6 @@ import oskit.services.*
           |""".stripMargin
     ), maxCycles = 5000000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("L")
     output should include("M")
     output should include("H")
@@ -605,7 +590,6 @@ import oskit.sync.*
           |""".stripMargin
     ), maxCycles = 5000000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("l")
     output should include("h")
   }
@@ -649,7 +633,6 @@ import oskit.sync.*
           |""".stripMargin
     ), maxCycles = 5000000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("l")
     output should include("h")
   }
@@ -693,7 +676,6 @@ import oskit.sync.*
           |""".stripMargin
     ), maxCycles = 5000000)
 
-    info(s"output: '$output' state: ${cpu.state}")
     output should include("l")
     output should include("h")
   }

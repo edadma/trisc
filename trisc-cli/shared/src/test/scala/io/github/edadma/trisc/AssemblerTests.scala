@@ -265,10 +265,6 @@ class AssemblerTests extends TestHelpers {
     sym.size shouldBe Some(256)
   }
 
-  "global with const type on equate is not yet supported" in {
-    pending
-  }
-
   "global defaults to func type when no type specified" in {
     val tof = assemble(
       """global main
