@@ -85,7 +85,7 @@ class OSKitTTYTests extends OSKitTestHelpers {
     if false then println(s"  [debug] ticks=$tickCount injected=$injectedCount cycles=${cpu.cycles}")
     (cpu, output.toString)
 
-  "TTY: write single character via IPC" in {
+  "TTY: write single character via IPC" taggedAs Slow in {
     val (_, output) = runTTY(Map(
       "app" ->
         """import oskit.kernel.*
@@ -112,7 +112,7 @@ import oskit.drivers.kbd.*
     output should include("Hi")
   }
 
-  "TTY: write string via IPC" in {
+  "TTY: write string via IPC" taggedAs Slow in {
     val (_, output) = runTTY(Map(
       "app" ->
         """import oskit.kernel.*
@@ -145,7 +145,7 @@ import oskit.drivers.kbd.*
     output should include("Hello")
   }
 
-  "TTY: multiple clients write to same tty" in {
+  "TTY: multiple clients write to same tty" taggedAs Slow in {
     val (_, output) = runTTY(Map(
       "app" ->
         """import oskit.kernel.*
@@ -181,7 +181,7 @@ import oskit.drivers.kbd.*
     output should include("D")
   }
 
-  "TTY: client discovers tty port by name" in {
+  "TTY: client discovers tty port by name" taggedAs Slow in {
     val (_, output) = runTTY(Map(
       "app" ->
         """import oskit.kernel.*
@@ -216,7 +216,7 @@ import oskit.drivers.kbd.*
     output should include("F")
   }
 
-  "TTY: read single character from keyboard" in {
+  "TTY: read single character from keyboard" taggedAs Slow in {
     val (_, output) = runTTY(
       Map(
         "app" ->
@@ -248,7 +248,7 @@ import oskit.drivers.kbd.*
     output should include("h")
   }
 
-  "TTY: read shifted character (uppercase)" in {
+  "TTY: read shifted character (uppercase)" taggedAs Slow in {
     val (_, output) = runTTY(
       Map(
         "app" ->
@@ -279,7 +279,7 @@ import oskit.drivers.kbd.*
     output should include("H")
   }
 
-  "TTY: read multiple characters" in {
+  "TTY: read multiple characters" taggedAs Slow in {
     val (_, output) = runTTY(
       Map(
         "app" ->
@@ -315,7 +315,7 @@ import oskit.drivers.kbd.*
     output should include("abc")
   }
 
-  "TTY: ipc_recv_notify wakes on keyboard notification" in {
+  "TTY: ipc_recv_notify wakes on keyboard notification" taggedAs Slow in {
     val (_, output) = runTTY(
       Map(
         "app" ->
@@ -357,7 +357,7 @@ import oskit.drivers.kbd.*
     output should include("!")
   }
 
-  "TTY: recv_notify server loop with pending reader and delayed key" in {
+  "TTY: recv_notify server loop with pending reader and delayed key" taggedAs Slow in {
     val (_, output) = runTTY(
       Map(
         "app" ->
@@ -410,7 +410,7 @@ import oskit.drivers.kbd.*
     output should include("!")
   }
 
-  "TTY: keyboard ISR notifies blocked thread" in {
+  "TTY: keyboard ISR notifies blocked thread" taggedAs Slow in {
     val (_, output) = runTTY(
       Map(
         "app" ->
@@ -455,7 +455,7 @@ import oskit.drivers.kbd.*
     output should include("!")
   }
 
-  "TTY: blocking read — key arrives after client blocks" in {
+  "TTY: blocking read — key arrives after client blocks" taggedAs Slow in {
     val (_, output) = runTTY(
       Map(
         "app" ->
@@ -494,7 +494,7 @@ import oskit.drivers.kbd.*
     output should include("!")
   }
 
-  "TTY: blocking read — multiple keys arrive after client blocks" in {
+  "TTY: blocking read — multiple keys arrive after client blocks" taggedAs Slow in {
     val (_, output) = runTTY(
       Map(
         "app" ->

@@ -134,7 +134,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
 
   // ===== Level 1: Linker script + real sbrk, single unit =====
 
-  "L1: linker script concat to global" in {
+  "L1: linker script concat to global" taggedAs Slow in {
     val (_, out) = runWithLinkerScript(baseSources(
       """import posix.stdlib.*
         |
@@ -149,7 +149,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
     out shouldBe "/dev"
   }
 
-  "L1: linker script concat via function" in {
+  "L1: linker script concat via function" taggedAs Slow in {
     val (_, out) = runWithLinkerScript(baseSources(
       """import posix.stdlib.*
         |
@@ -170,7 +170,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
     out shouldBe "/dev"
   }
 
-  "L1: linker script concat via argv" in {
+  "L1: linker script concat via argv" taggedAs Slow in {
     val (_, out) = runWithLinkerScript(baseSources(
       """import posix.stdlib.*
         |
@@ -197,7 +197,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
 
   // ===== Level 2: Cross-module — cd function in separate module =====
 
-  "L2: cross-module concat" in {
+  "L2: cross-module concat" taggedAs Slow in {
     val (_, out) = runWithLinkerScript(Map(
       "posix/unistd/sbrk" -> sbrkSysl,
       "posix/string/string" -> stringSource,
@@ -241,7 +241,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
 
   // ===== Level 3: Cross-module + tokenizer (like nsh) =====
 
-  "L3: cross-module with tokenizer" in {
+  "L3: cross-module with tokenizer" taggedAs Slow in {
     val (_, out) = runWithLinkerScript(Map(
       "posix/unistd/sbrk" -> sbrkSysl,
       "posix/string/string" -> stringSource,
@@ -330,7 +330,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
 
   // ===== Level 4: Cross-module + many globals (bigger BSS) =====
 
-  "L4: cross-module with large BSS" in {
+  "L4: cross-module with large BSS" taggedAs Slow in {
     val (_, out) = runWithLinkerScript(Map(
       "posix/unistd/sbrk" -> sbrkSysl,
       "posix/string/string" -> stringSource,
@@ -440,7 +440,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
 
   // ===== Level 4b: Function-concat-then-concat (no OS, no interrupts) =====
 
-  "L4b: function concat then caller concat" in {
+  "L4b: function concat then caller concat" taggedAs Slow in {
     val (_, out) = runWithLinkerScript(baseSources(
       """import posix.stdlib.*
         |
@@ -461,7 +461,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
   }
 
   // L4c: Cross-module with tokenized args
-  "L4c: cross-module tokenized concat" in {
+  "L4c: cross-module tokenized concat" taggedAs Slow in {
     val (_, out) = runWithLinkerScript(Map(
       "posix/unistd/sbrk" -> sbrkSysl,
       "posix/string/string" -> stringSource,
@@ -543,7 +543,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
   }
 
   // L4d: Same as L6a's shell module but with linkerScript, no OS kernel
-  "L4d: L6a shell code without OS" in {
+  "L4d: L6a shell code without OS" taggedAs Slow in {
     val (_, out) = runWithLinkerScript(Map(
       "posix/unistd/sbrk" -> sbrkSysl,
       "posix/string/string" -> stringSource,
@@ -807,7 +807,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
     val syslTof = Linker.link(tofs, relocatable = true)
     Linker.link(Seq(bootTof, syslTof), linkerScript, 0)
 
-  "L5: full OS concat test" in {
+  "L5: full OS concat test" taggedAs Slow in {
     val linked = concatAppLinked
 
     val output = new StringBuilder
@@ -1028,7 +1028,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
     Linker.link(Seq(bootTof, syslTof), linkerScript, 0)
 
   // L6a: Only nsh_resolve (fs_open IPC), no fs_stat
-  "L6a: IPC fs_open only before concat" in {
+  "L6a: IPC fs_open only before concat" taggedAs Slow in {
     val bootTof    = assemble(bootAsm, relocatable = true)
     val allSources = Map(
       "oskit/kernel/kernel"         -> kernelSysl,
@@ -1206,7 +1206,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
     output.toString should include("/dev")
   }
 
-  "L6: full OS + IPC before concat" in {
+  "L6: full OS + IPC before concat" taggedAs Slow in {
     val linked = ipcConcatLinked
 
     val output = new StringBuilder

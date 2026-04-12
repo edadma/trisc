@@ -4,7 +4,7 @@ class OSKitCommTests extends OSKitTestHelpers {
 
   // ===== Channel tests =====
 
-  "TOS: channel send and receive" in {
+  "TOS: channel send and receive" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -36,7 +36,7 @@ import oskit.sync.*
     output should startWith("Hi\n")
   }
 
-  "TOS: channel blocks sender when full" in {
+  "TOS: channel blocks sender when full" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -76,7 +76,7 @@ import oskit.sync.*
 
   // ===== Mailbox tests =====
 
-  "TOS: mailbox send and receive" in {
+  "TOS: mailbox send and receive" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -106,7 +106,7 @@ import oskit.sync.*
     output should startWith("Hi\n")
   }
 
-  "TOS: mailbox blocks sender until receiver drains" in {
+  "TOS: mailbox blocks sender until receiver drains" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*

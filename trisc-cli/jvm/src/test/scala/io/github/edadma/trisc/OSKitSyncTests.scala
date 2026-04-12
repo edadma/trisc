@@ -4,7 +4,7 @@ class OSKitSyncTests extends OSKitTestHelpers {
 
   // ===== Semaphore tests =====
 
-  "TOS: sem_init and sem_wait/sem_post basic" in {
+  "TOS: sem_init and sem_wait/sem_post basic" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -31,7 +31,7 @@ import oskit.sync.*
     output should include("B")
   }
 
-  "TOS: semaphore enforces mutual exclusion between two tasks" in {
+  "TOS: semaphore enforces mutual exclusion between two tasks" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -77,7 +77,7 @@ import oskit.sync.*
     groups shouldBe 6
   }
 
-  "TOS: sem_trywait returns 0 when semaphore is zero" in {
+  "TOS: sem_trywait returns 0 when semaphore is zero" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -104,7 +104,7 @@ import oskit.sync.*
     output should include("N")
   }
 
-  "TOS: counting semaphore allows N concurrent permits" in {
+  "TOS: counting semaphore allows N concurrent permits" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -149,7 +149,7 @@ import oskit.sync.*
     output should include("C")
   }
 
-  "TOS: sem_wait blocks until sem_post from another thread" in {
+  "TOS: sem_wait blocks until sem_post from another thread" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -189,7 +189,7 @@ import oskit.sync.*
 
   // ===== Mutex tests =====
 
-  "TOS: mutex basic lock/unlock" in {
+  "TOS: mutex basic lock/unlock" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -216,7 +216,7 @@ import oskit.sync.*
     output should include("B")
   }
 
-  "TOS: mutex_trylock fails when locked" in {
+  "TOS: mutex_trylock fails when locked" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -254,7 +254,7 @@ import oskit.sync.*
 
   // ===== Condition variable tests =====
 
-  "TOS: condvar signal wakes one waiter" in {
+  "TOS: condvar signal wakes one waiter" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -294,7 +294,7 @@ import oskit.sync.*
     output should include("W")
   }
 
-  "TOS: condvar broadcast wakes all waiters" in {
+  "TOS: condvar broadcast wakes all waiters" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -343,7 +343,7 @@ import oskit.sync.*
 
   // ===== Barrier tests =====
 
-  "TOS: barrier synchronizes three threads" in {
+  "TOS: barrier synchronizes three threads" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -388,7 +388,7 @@ import oskit.sync.*
 
   // ===== Reader-writer lock tests =====
 
-  "TOS: rwlock allows concurrent readers" in {
+  "TOS: rwlock allows concurrent readers" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -427,7 +427,7 @@ import oskit.sync.*
     output should include("Y")
   }
 
-  "TOS: rwlock writer excludes readers" in {
+  "TOS: rwlock writer excludes readers" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*

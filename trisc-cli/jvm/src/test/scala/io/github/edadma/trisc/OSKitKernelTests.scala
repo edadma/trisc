@@ -2,7 +2,7 @@ package io.github.edadma.trisc
 
 class OSKitKernelTests extends OSKitTestHelpers {
 
-  "TOS: putc syscall prints character" in {
+  "TOS: putc syscall prints character" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -23,7 +23,7 @@ import oskit.services.*
     output should startWith("Hi\n")
   }
 
-  "TOS: thread exit works cleanly" in {
+  "TOS: thread exit works cleanly" taggedAs Slow in {
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -48,7 +48,7 @@ import oskit.services.*
     output should include("B")
   }
 
-  "TOS: sleep syscall delays output" in {
+  "TOS: sleep syscall delays output" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -71,7 +71,7 @@ import oskit.services.*
     output should startWith("ABC")
   }
 
-  "TOS: two tasks interleave with sleep" in {
+  "TOS: two tasks interleave with sleep" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "tasks" ->
         """import oskit.kernel.*

@@ -2,7 +2,7 @@ package io.github.edadma.trisc
 
 class OSKitPIMutexTests extends OSKitTestHelpers {
 
-  "PIMutex: basic lock/unlock" in {
+  "PIMutex: basic lock/unlock" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -29,7 +29,7 @@ import oskit.sync.*
     output should include("B")
   }
 
-  "PIMutex: mutual exclusion between two tasks" in {
+  "PIMutex: mutual exclusion between two tasks" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -73,7 +73,7 @@ import oskit.sync.*
     groups shouldBe 6
   }
 
-  "PIMutex: contended lock blocks and wakes" in {
+  "PIMutex: contended lock blocks and wakes" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -115,7 +115,7 @@ import oskit.sync.*
     output.indexOf('h') should be < output.indexOf('w')
   }
 
-  "PIMutex: contended lock with different priorities" in {
+  "PIMutex: contended lock with different priorities" taggedAs Slow in {
     val (_, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
@@ -157,7 +157,7 @@ import oskit.sync.*
     output.indexOf('l') should be < output.indexOf('h')
   }
 
-  "PIMutex: priority inheritance prevents inversion" in {
+  "PIMutex: priority inheritance prevents inversion" taggedAs Slow in {
     // Classic priority inversion scenario with active work (yield loop).
     //
     // Low (pri 2): locks mutex, actively works (yield loop)
@@ -226,7 +226,7 @@ import oskit.sync.*
     output.indexOf('h') should be > output.indexOf('l')
   }
 
-  "PIMutex: priority restored after unlock" in {
+  "PIMutex: priority restored after unlock" taggedAs Slow in {
     // After unlock, holder's priority reverts to base.
     // Low holds mutex, gets boosted to pri 0. After unlock, reverts to pri 2.
     // Med (pri 1) wakes DURING low's critical section (active yield loop).
@@ -280,7 +280,7 @@ import oskit.sync.*
     output.indexOf('M') should be < output.indexOf('L')
   }
 
-  "PIMutex: transitive inheritance (chain of two mutexes)" in {
+  "PIMutex: transitive inheritance (chain of two mutexes)" taggedAs Slow in {
     // Chain: high → mtx_b → mid → mtx_a → low
     // Transitive PI boosts low all the way to priority 0.
     // bg (priority 1) wakes but can't preempt boosted low.

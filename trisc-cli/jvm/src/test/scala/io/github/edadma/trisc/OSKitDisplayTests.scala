@@ -117,7 +117,7 @@ class OSKitDisplayTests extends OSKitTestHelpers {
     cpu.run()
     (cpu, output.toString)
 
-  "Display server: client creates a window" in {
+  "Display server: client creates a window" taggedAs Slow in {
     val (cpu, output) = runDisplay(Map(
       "app" ->
         """import oskit.kernel.*
