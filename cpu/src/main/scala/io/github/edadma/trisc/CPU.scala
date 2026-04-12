@@ -89,6 +89,7 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
 
   private def checkAlign(addr: Long, align: Int): Boolean =
     if (addr & (align - 1)) != 0 then
+      faultAddr = addr
       state = State.MisalignedAccess
       true
     else false
@@ -329,14 +330,39 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
           val w = readShortUnsigned(faultingPc)
           f" inst=${Decode(w).disassemble(this)}"
         catch case _: Exception => ""
+      val ptbrStr = mmu.map(m => f" ptbr=${m.ptbr}%08x").getOrElse("")
+      val regsStr = (1 to 7).map(i => f"r$i=${r(i).read}%x").mkString(" ")
       System.err.println(
-        f"[TRISC] DataAccess fault at pc=$faultingPc%04x faultAddr=${faultAddr}%08x cause=$faultCause$extra$instLine (ISR prints 'D' on stdout then halts)",
+        f"[TRISC] DataAccess fault at pc=$faultingPc%04x faultAddr=${faultAddr}%08x cause=$faultCause$extra$instLine$ptbrStr",
       )
+      System.err.println(f"  $regsStr usp=$usp%x psr=$psr%x")
+      System.err.println("  last PCs:")
+      for i <- 0 until _pcRing.length do
+        val idx = (_pcPos - _pcRing.length + i + _pcRing.length * 2) % _pcRing.length
+        System.err.println(f"    ${_pcRing(idx)}%08x")
       System.err.flush()
       log.warn(
         f"DataAccess at pc=$faultingPc%04x faultAddr=${faultAddr}%08x cause=$faultCause",
         category = "CPU",
       )
+
+    if state == State.MisalignedAccess && !quiet then
+      val instLine =
+        try
+          val w = readShortUnsigned(faultingPc)
+          f" inst=${Decode(w).disassemble(this)}"
+        catch case _: Exception => ""
+      val ptbrStr = mmu.map(m => f" ptbr=${m.ptbr}%08x").getOrElse("")
+      val regsStr = (1 to 7).map(i => f"r$i=${r(i).read}%x").mkString(" ")
+      System.err.println(
+        f"[TRISC] MisalignedAccess at pc=$faultingPc%04x faultAddr=${faultAddr}%08x$instLine$ptbrStr",
+      )
+      System.err.println(f"  $regsStr usp=$usp%x psr=$psr%x")
+      System.err.println("  last PCs:")
+      for i <- 0 until _pcRing.length do
+        val idx = (_pcPos - _pcRing.length + i + _pcRing.length * 2) % _pcRing.length
+        System.err.println(f"    ${_pcRing(idx)}%08x")
+      System.err.flush()
 
     val regs = (1 to 7).map(i => f"r$i=${r(i).read}%x").mkString(" ")
     log.trace(f"  $regs", category = "CPU")

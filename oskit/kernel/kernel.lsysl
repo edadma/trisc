@@ -268,8 +268,7 @@ Kernel L1 page table at 0x7FE000, page pool at 0x620000-0x7FD000.
     var page_pool_next: int = 0
     var page_pool_init = false
 
-    vm_set_ptbr(addr: int)
-        asm("sptbr r1, r0")
+    extern vm_set_ptbr(addr: int)
 
     vm_flush_tlb()
         asm("tlbia r0, r0")

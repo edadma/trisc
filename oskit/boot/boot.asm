@@ -77,6 +77,27 @@ start_first_thread
 
 
 ; ============================================================================
+; vm_set_ptbr — Set page table base register (no stack frame)
+; ============================================================================
+;
+; Written in assembly because the PTBR change remaps virtual addresses.
+; A compiler-generated prologue/epilogue would save r6 on the stack under
+; the OLD PTBR and try to restore it under the NEW PTBR — reading from a
+; different physical page and returning to a garbage address.
+;
+; Entry: r1 = new PTBR (physical address of L1 page table)
+; Clobbers: none (sptbr does not modify GPRs)
+;
+; ============================================================================
+
+global vm_set_ptbr, func
+
+vm_set_ptbr
+  sptbr r1, r0
+  jalr r0, r6
+
+
+; ============================================================================
 ; context_switch — Common save/schedule/restore sequence
 ; ============================================================================
 ;

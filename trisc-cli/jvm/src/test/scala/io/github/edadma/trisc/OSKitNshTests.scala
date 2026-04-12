@@ -388,10 +388,9 @@ import oskit.apps.init.{init}
     output should include("tty0 login")
   }
 
-  "Login: hello after login" in {
+  "Login: hello after login" taggedAs Slow in {
     val keys = loginAndType("hello\n")
     val (_, output, _) = runLogin(scheduledKeys = keys, maxCycles = 180000000)
-    println(s"LOGIN HELLO OUTPUT: [$output]")
     output should include("Hello")
   }
 
