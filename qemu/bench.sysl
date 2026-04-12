@@ -1,6 +1,7 @@
 // SHA-256 benchmark for x86_64 bare-metal (QEMU).
-// Hashes "abc" 100,000 times and prints the final digest as hex.
-// Use `time` on the host to measure wall-clock throughput.
+// Hashes "abc" N times, verifies the digest, prints results.
+// Use `time` on the host to measure wall-clock throughput:
+//   time bash qemu/run-bench.sh
 
 import std.crypto.sha256.sha256
 import std.encoding.binary.{u32_be_at, put_u32_be_at}
@@ -25,13 +26,39 @@ print_hash(out: *byte)
         i += 1
     uart_putc('\n')
 
+print_int(n: int)
+    if n >= 10
+        print_int(n / 10)
+    uart_putc(char('0' + n % 10))
+
 main() -> int
+    val iterations = 100000
     val msg: [3]byte = "abc"
     var out: [32]byte
 
-    sha256(msg[:], out[:])
+    uart_puts("SHA-256 benchmark: ")
+    print_int(iterations)
+    uart_puts(" iterations of sha256(\"abc\")\n")
+
+    var i = 0
+    while i < iterations
+        sha256(msg[:], out[:])
+        i += 1
 
     uart_puts("digest: ")
     print_hash(&out[0])
     uart_puts("expect: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n")
+
+    // Verify
+    val expected: [32]byte = [0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad]
+    var ok = 1
+    i = 0
+    while i < 32
+        if out[i] != expected[i]
+            ok = 0
+        i += 1
+    if ok == 1
+        uart_puts("PASS\n")
+    else
+        uart_puts("FAIL\n")
     0

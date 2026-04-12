@@ -63,6 +63,74 @@ object BenchmarkMain:
 
     println(f"$pass  $name%-40s  $cycles%,12d cycles  ${ms}%,6d ms  $mips%.1f MIPS")
 
+  private def readLsysl(path: String): String =
+    val raw = scala.io.Source.fromFile(path).mkString
+    val doc = new LiterateParser().parse(raw)
+    LiterateRenderer.tangle(doc)
+
+  private def runMultiModuleBenchmark(
+      name: String,
+      sources: Map[String, String],
+      expected: Long,
+      maxCycles: Int = 500_000_000,
+  ): Unit =
+    val bootSource =
+      s"""segment vectors
+         |  dl 0xFFF8
+         |  dl boot
+         |  dl default_isr
+         |  dl default_isr
+         |  dl default_isr
+         |  dl default_isr
+         |  dl default_isr
+         |  dl default_isr
+         |  dl default_isr
+         |  dl default_isr
+         |  dl default_isr
+         |  dl default_isr
+         |  dl default_isr
+         |  dl default_isr
+         |  dl default_isr
+         |  dl default_isr
+         |  dl default_isr
+         |  dl default_isr
+         |  dl default_isr
+         |segment code
+         |boot
+         |  movi r4, main
+         |  jalr r6, r4
+         |  halt
+         |default_isr
+         |  halt
+         |""".stripMargin
+
+    val bootTof = assemble(bootSource, relocatable = true)
+    val driver = new SyslDriver
+    val result = driver.compile(sources)
+    val codegen = new SyslTriscCodegen
+    val tofs = for unit <- result.units yield
+      val asm = codegen.generate(unit.typed)
+      assemble(asm, relocatable = true)
+    val progTof = Linker.link(tofs, relocatable = true)
+    val linked = Linker.link(Seq(bootTof, progTof))
+
+    val mem = new Memory("Memory", new RAM(0, Runtime.stdoutAddress.toInt))
+    linked.load(mem)
+    val cpu = new CPU(mem) { limit = maxCycles }
+    cpu.reset()
+
+    val startTime = System.nanoTime()
+    cpu.run()
+    val elapsed = System.nanoTime() - startTime
+
+    val cycles = cpu.cycles
+    val ms = elapsed / 1_000_000
+    val mips = if elapsed > 0 then cycles.toDouble / (elapsed / 1_000_000_000.0) / 1_000_000 else 0
+    val result_val = cpu.r(1).read
+    val pass = if result_val == expected && cpu.state == State.Halt then "PASS" else "FAIL"
+
+    println(f"$pass  $name%-40s  $cycles%,12d cycles  ${ms}%,6d ms  $mips%.1f MIPS")
+
   def main(args: Array[String]): Unit =
     println(f"${""}%-6s ${"Benchmark"}%-40s  ${"Cycles"}%12s  ${"Time"}%6s  ${""}%s")
     println("-" * 80)
@@ -127,3 +195,29 @@ object BenchmarkMain:
         |    if sum != 0 then 1
         |    else 0
         |""".stripMargin)
+
+    val sha256Sysl = readLsysl("std/crypto/sha256/sha256.lsysl")
+    val binarySysl = readLsysl("std/encoding/binary/binary.lsysl")
+    val debugSysl  = readLsysl("std/debug/debug.lsysl")
+
+    val n = args.headOption.map(_.toInt).getOrElse(100)
+
+    runMultiModuleBenchmark(s"sha256(abc) x $n", expected = 0xba,
+      maxCycles = Int.MaxValue,
+      sources = Map(
+        "bench/bench" ->
+          s"""import std.crypto.sha256.sha256
+            |import std.encoding.binary.{u32_be_at, put_u32_be_at}
+            |main() -> int
+            |    val msg: [3]byte = "abc"
+            |    var out: [32]byte
+            |    var i = 0
+            |    while i < $n
+            |        sha256(msg[:], out[:])
+            |        i += 1
+            |    int(out[0])
+            |""".stripMargin,
+        "std/encoding/binary/binary" -> binarySysl,
+        "std/crypto/sha256/sha256"   -> sha256Sysl,
+        "std/debug/debug"            -> debugSysl,
+      ))
