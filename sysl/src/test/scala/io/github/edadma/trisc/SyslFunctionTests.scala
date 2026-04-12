@@ -424,4 +424,40 @@ class SyslFunctionTests extends SyslTestHelpers {
         |""".stripMargin): @unchecked
     an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
   }
+
+  // ===== Statement bodies (non-expression single-line body) =====
+
+  "for loop as function body" in {
+    eval(
+      """sum_to(n: int) -> int
+        |    var total = 0
+        |    for i in 1..n
+        |        total += i
+        |    total
+        |
+        |main() -> int = sum_to(10)
+        |""".stripMargin) shouldBe 55
+  }
+
+  "inline for-do as function body (no return)" in {
+    eval(
+      """var counter = 0
+        |tick(n: int) = for i in 0..<n do counter += 1
+        |
+        |main() -> int
+        |    tick(5)
+        |    counter
+        |""".stripMargin) shouldBe 5
+  }
+
+  "inline while as function body" in {
+    eval(
+      """var k = 0
+        |countdown(n: int) = while k < n do k += 1
+        |
+        |main() -> int
+        |    countdown(7)
+        |    k
+        |""".stripMargin) shouldBe 7
+  }
 }

@@ -333,6 +333,11 @@ double(x: int) = x * 2
 
 // No parameters
 getAnswer() -> int = 42
+
+// Statement body — for/while/do-while loops can appear after `=`
+// as a single-line void body
+uart_puts(s: string) = for c in s do uart_putc(int(c))
+wait_ready() = while !ready() do noop()
 ```
 
 ### Default Parameter Values

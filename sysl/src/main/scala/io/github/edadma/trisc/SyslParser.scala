@@ -291,6 +291,9 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val bodyExprOrBlock: Parser[FunBodyAST] =
     Newline ~> Indent ~> stmts <~ opt(Newline) <~ Dedent ^^ (s => BlockBodyAST(s)) |
+      forStmt ^^ (s => BlockBodyAST(List(s))) |
+      whileStmt ^^ (s => BlockBodyAST(List(s))) |
+      doWhileStmt ^^ (s => BlockBodyAST(List(s))) |
       tupleExpr ^^ ExprBodyAST.apply
 
   lazy val param: Parser[ParamAST] =
