@@ -1834,4 +1834,144 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    1
         |""".stripMargin) shouldBe 1
   }
+
+  // ===== std.flag =====
+
+  "std.flag bool short" in {
+    llvmExitWithStd(
+      """import std.flag.*
+        |import std.result.{is_ok, unwrap}
+        |
+        |main() -> int
+        |    var p = new_parser("test", "")
+        |    val v = p.bool_flag("v", "verbose", "verbose")
+        |    val argv: [1]string = ["-v"]
+        |    val r = p.parse(argv[:])
+        |    if !is_ok(r) then return 0
+        |    if !unwrap(r).get_bool(v) then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.flag bool long" in {
+    llvmExitWithStd(
+      """import std.flag.*
+        |import std.result.{is_ok, unwrap}
+        |
+        |main() -> int
+        |    var p = new_parser("test", "")
+        |    val v = p.bool_flag("v", "verbose", "verbose")
+        |    val argv: [1]string = ["--verbose"]
+        |    val r = p.parse(argv[:])
+        |    if !is_ok(r) then return 0
+        |    if !unwrap(r).get_bool(v) then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.flag int short with space" in {
+    llvmExitWithStd(
+      """import std.flag.*
+        |import std.result.{is_ok, unwrap}
+        |
+        |main() -> int
+        |    var p = new_parser("test", "")
+        |    val port = p.int_flag("p", "port", 8080, "port")
+        |    val argv: [2]string = ["-p", "3000"]
+        |    val r = p.parse(argv[:])
+        |    if !is_ok(r) then return 0
+        |    if unwrap(r).get_int(port) != 3000 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.flag int long equals" in {
+    llvmExitWithStd(
+      """import std.flag.*
+        |import std.result.{is_ok, unwrap}
+        |
+        |main() -> int
+        |    var p = new_parser("test", "")
+        |    val port = p.int_flag("p", "port", 8080, "port")
+        |    val argv: [1]string = ["--port=3000"]
+        |    val r = p.parse(argv[:])
+        |    if !is_ok(r) then return 0
+        |    if unwrap(r).get_int(port) != 3000 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.flag int default" in {
+    llvmExitWithStd(
+      """import std.flag.*
+        |import std.result.{is_ok, unwrap}
+        |
+        |main() -> int
+        |    var p = new_parser("test", "")
+        |    val port = p.int_flag("p", "port", 8080, "port")
+        |    val argv: [0]string = []
+        |    val r = p.parse(argv[:])
+        |    if !is_ok(r) then return 0
+        |    if unwrap(r).get_int(port) != 8080 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.flag str flag" in {
+    llvmExitWithStd(
+      """import std.flag.*
+        |import std.result.{is_ok, unwrap}
+        |
+        |main() -> int
+        |    var p = new_parser("test", "")
+        |    val out = p.str_flag("o", "output", "", "output")
+        |    val argv: [2]string = ["-o", "result.txt"]
+        |    val r = p.parse(argv[:])
+        |    if !is_ok(r) then return 0
+        |    if unwrap(r).get_str(out) != "result.txt" then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.flag combined short bools" in {
+    llvmExitWithStd(
+      """import std.flag.*
+        |import std.result.{is_ok, unwrap}
+        |
+        |main() -> int
+        |    var p = new_parser("test", "")
+        |    val a = p.bool_flag("a", "all", "all")
+        |    val l = p.bool_flag("l", "long_flag", "long")
+        |    val h = p.bool_flag("h", "human", "human")
+        |    val argv: [1]string = ["-alh"]
+        |    val r = p.parse(argv[:])
+        |    if !is_ok(r) then return 0
+        |    val parsed = unwrap(r)
+        |    if !parsed.get_bool(a) then return 0
+        |    if !parsed.get_bool(l) then return 0
+        |    if !parsed.get_bool(h) then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.flag positional args" in {
+    llvmExitWithStd(
+      """import std.flag.*
+        |import std.result.{is_ok, unwrap}
+        |
+        |main() -> int
+        |    var p = new_parser("test", "")
+        |    val v = p.bool_flag("v", "verbose", "verbose")
+        |    val argv: [3]string = ["-v", "file1.txt", "file2.txt"]
+        |    val r = p.parse(argv[:])
+        |    if !is_ok(r) then return 0
+        |    val parsed = unwrap(r)
+        |    if !parsed.get_bool(v) then return 0
+        |    if parsed.arg_count() != 2 then return 0
+        |    val files = parsed.args()
+        |    if files[0] != "file1.txt" then return 0
+        |    if files[1] != "file2.txt" then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
 }
