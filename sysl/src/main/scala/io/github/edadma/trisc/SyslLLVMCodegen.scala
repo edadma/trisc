@@ -17,6 +17,9 @@ class SyslLLVMCodegen:
   private val emittedFunctions = new mutable.HashSet[String] // track emitted function names to avoid duplicates
   // C library functions declared in the preamble — skip any extern decl with these names
   private val preambleNames = Set("putchar", "printf", "snprintf", "malloc", "strlen", "memcpy", "memcmp", "memset", "free", "write", "fflush", "abort", "exit")
+  // Track pointer variables derived from slice element addresses (&slot[i])
+  // Maps pointer variable name → source slice variable name
+  private var derivedFromSlice: mutable.HashMap[String, String] = _
 
   /** Resolve a struct type to its canonical (field-populated) version from structTypes.
     * Handles stale placeholder StructType(_, Nil) references that can appear in expression types. */
@@ -233,6 +236,7 @@ class SyslLLVMCodegen:
   private def genFunction(fun: TFunDecl): Unit =
     currentFunction = fun
     locals = new mutable.LinkedHashMap
+    derivedFromSlice = new mutable.HashMap
     regCounter = 0
     labelCounter = 0
     hasReturned = false
@@ -303,6 +307,7 @@ class SyslLLVMCodegen:
   /** Generate a closure function with hidden env_ptr first parameter. */
   private def genClosureFunction(name: String, closure: TClosure): Unit =
     locals = new mutable.LinkedHashMap
+    derivedFromSlice = new mutable.HashMap
     regCounter = 0
     labelCounter = 0
     hasReturned = false
@@ -456,6 +461,13 @@ class SyslLLVMCodegen:
             // Ref init: increment unless we own it (TNew/TNewArray)
             if isRef(typ) && !isOwnedNew(init) then
               emitRefIncr(finalVal, refHeaderOffset(typ))
+            // Track pointer-from-slice derivation: &slot[i] produces a pointer whose
+            // backing storage is owned by the slice. If this pointer is returned,
+            // the slice's scope cleanup must be skipped to prevent use-after-free.
+            init match
+              case TAddrOfIndex(TVarRef(sliceName, _), _, _) if locals.contains(sliceName) && isSliceType(locals(sliceName).typ) =>
+                derivedFromSlice(name) = sliceName
+              case _ =>
 
       case TAssignStmt(target, value) =>
         if !locals.contains(target) && isAggregate(value.typ) then
@@ -2592,11 +2604,39 @@ class SyslLLVMCodegen:
     case SyslType.FuncType(_, _) => 16  // {i8*, i8*}
     case SyslType.BoolType => 1
     case SyslType.SliceType(_) => 24  // {i8*, i32, i32, i8*}
-    case SyslType.StructType(_, fields) =>
-      // Use LLVM's struct layout (simplified — no padding calc, just sum field sizes aligned)
-      fields.map(_._2).map(llvmSizeOf).sum // simplified
+    case SyslType.StructType(name, fields) =>
+      // Use LLVM's struct layout rules: each field aligned to its natural alignment,
+      // and the struct's total size rounded up to its alignment (max of all field alignments).
+      val resolved = canonicalStruct(SyslType.StructType(name, fields))
+      var offset = 0L
+      var maxAlign = 1L
+      for (_, ft) <- resolved.fields do
+        val fieldSize = llvmSizeOf(ft)
+        val fieldAlign = llvmAlignOf(ft)
+        maxAlign = math.max(maxAlign, fieldAlign)
+        offset = (offset + fieldAlign - 1) / fieldAlign * fieldAlign // align
+        offset += fieldSize
+      // Round up to struct alignment
+      if maxAlign > 1 then offset = (offset + maxAlign - 1) / maxAlign * maxAlign
+      offset
     case SyslType.ArrayType(elem, size) => llvmSizeOf(elem) * size
     case other => other.sizeOf
+
+  /** Alignment of a type in bytes, matching LLVM's natural alignment rules. */
+  private def llvmAlignOf(t: SyslType): Long = t match
+    case SyslType.PtrType(_) | SyslType.RefType(_) => 8
+    case SyslType.IntType(w) => math.min(w / 8, 8).toLong
+    case SyslType.UIntType(w) => math.min(w / 8, 8).toLong
+    case SyslType.BoolType => 1
+    case SyslType.DoubleType => 8
+    case SyslType.StringType => 8  // contains pointer
+    case SyslType.SliceType(_) => 8  // contains pointer
+    case SyslType.FuncType(_, _) => 8  // contains pointer
+    case SyslType.StructType(name, fields) =>
+      val resolved = canonicalStruct(SyslType.StructType(name, fields))
+      if resolved.fields.isEmpty then 1 else resolved.fields.map((_, ft) => llvmAlignOf(ft)).max
+    case SyslType.ArrayType(elem, _) => llvmAlignOf(elem)
+    case _ => 8
 
   // Types that are passed by pointer (alloca) rather than by value
   private def isAggregate(t: SyslType): Boolean = t match
@@ -2622,11 +2662,15 @@ class SyslLLVMCodegen:
     case _: TIfExpr | _: TMatchExpr => true              // branches handle their own RC
     case _ => false
 
-  /** If expr is a direct variable reference to a slice local, return its alloca register.
+  /** If expr is a direct variable reference to a slice local, or a pointer
+    * derived from a slice element (&slot[i]), return the slice's alloca register.
     * Used to skip decrementing the returned slice at function exit. */
   private def returnedSliceAlloca(expr: TExpr): Option[String] = expr match
     case TVarRef(name, typ) if isSliceType(typ) && locals != null && locals.contains(name) =>
       Some(locals(name).reg)
+    case TVarRef(name, _) if derivedFromSlice != null && derivedFromSlice.contains(name) =>
+      val sliceName = derivedFromSlice(name)
+      if locals != null && locals.contains(sliceName) then Some(locals(sliceName).reg) else None
     case _ => None
 
   /** Header offset: bytes from data pointer back to refcount field. */
