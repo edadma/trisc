@@ -22,10 +22,10 @@ so the scheduler can reference them).
     module oskit.ipc
 
     import oskit.kernel.*
+    import oskit.config.{MAX_PORTS, MAX_THREADS, KERNEL_L1_BASE, DEFAULT_QUANTUM}
     import oskit.services.syscall
     import oskit.hal.memcpy
 
-    val MAX_PORTS = 8
     val IPC_PORT_FREE = -1
     val IPC_QUEUE_EMPTY = -1
 
@@ -44,11 +44,11 @@ queues of blocked senders.
         actual_len: int
         wait_next: int
 
-    var ipc_ctx: [8]IPCContext
-    var port_owner: [8]int
-    var port_wait_head: [8]int
-    var port_wait_tail: [8]int
-    var port_name: [8]i64
+    var ipc_ctx: [8]IPCContext  // 8 = MAX_THREADS
+    var port_owner: [8]int  // 8 = MAX_PORTS
+    var port_wait_head: [8]int  // 8 = MAX_PORTS
+    var port_wait_tail: [8]int  // 8 = MAX_PORTS
+    var port_name: [8]i64  // 8 = MAX_PORTS
     var port_count = 0
 
 Syscall numbers for IPC (31-37).

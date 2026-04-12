@@ -23,6 +23,7 @@ class OSKitLoaderTests extends OSKitTestHelpers {
   private lazy val pbkdf2Sysl: String   = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
   private lazy val pmSrvSysl: String   = readLsysl("oskit/servers/pm.lsysl")
   private lazy val halMemSysl: String  = readLsysl("oskit/hal/mem_dma.lsysl")
+  private lazy val configSysl: String = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
 
   // --- std lib ---
   private lazy val stringsSysl: String  = readLsysl("std/strings/strings.lsysl")
@@ -103,6 +104,7 @@ class OSKitLoaderTests extends OSKitTestHelpers {
       "std/debug/debug"              -> debugSysl,
       "std/mem/mem"                  -> memSysl,
       "oskit/hal/mem"               -> halMemSysl,
+      "oskit/config/config"         -> configSysl,
       "std/encoding/binary/binary"  -> binarySysl,
       "std/strings/strings"         -> stringsSysl,
       "std/builder/builder"         -> builderSysl,

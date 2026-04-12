@@ -23,6 +23,7 @@ object OSKitTestData:
   lazy val pimutexSysl: String = readLsysl("oskit/sync/pimutex.lsysl")
   lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
   lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
+  lazy val configSysl: String = readSysl("oskit/config/config.sysl")
   private def readSysl(path: String): String = scala.io.Source.fromFile(path).mkString
 
   lazy val sbrkSysl: String = readSysl("oskit/lib/sbrk.sysl")
