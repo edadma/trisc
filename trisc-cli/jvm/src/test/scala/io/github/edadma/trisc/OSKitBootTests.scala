@@ -42,8 +42,8 @@ class OSKitBootTests extends OSKitTestHelpers {
       assemble(asm, relocatable = true)
     val syslTof = Linker.link(tofs, relocatable = true)
 
-    // Step 3: Link with boot
-    val linked = Linker.link(Seq(bootTof, syslTof))
+    // Step 3: Link with boot (using linker script for _heap_start etc.)
+    val linked = Linker.link(Seq(bootTof, syslTof), linkerScript, 0)
     linked.segments should not be empty
     linked.entryAddress shouldBe defined
   }
