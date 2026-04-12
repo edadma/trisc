@@ -329,11 +329,6 @@ grows beyond the configured PAGE_POOL_BASE.
                 base = aligned
             page_pool_next = base
             page_pool_init = true
-            // Debug: print pool base high byte
-            var dbg: *byte = *byte(0x800000)
-            *dbg = byte('P')
-            *dbg = byte('0') + byte((base >> 20) & 0xF)
-            *dbg = byte('0') + byte((base >> 16) & 0xF)
         if page_free_list != 0
             val page = page_free_list
             var next: *i64 = *i64(page)
