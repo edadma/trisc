@@ -412,4 +412,32 @@ import oskit.apps.init.{init}
     val (_, output) = runLogin(scheduledKeys = keys)
     output should include("Login incorrect")
   }
+
+  // --- wc tests ---
+
+  "NSH: wc counts bytes in prefilled file" taggedAs Slow in {
+    val keys = typeString("wc /hello\n", startTick = 2000000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, prefill = "/hello file \"abc\"\n", maxCycles = 200000000)
+    output should include("3")  // 3 bytes
+  }
+
+  "NSH: wc counts lines" taggedAs Slow in {
+    val keys = typeString("wc /data\n", startTick = 500000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, prefill = "/data file \"one\\ntwo\\n\"\n", maxCycles = 200000000)
+    output should include("2")  // 2 lines
+  }
+
+  // --- grep tests ---
+
+  "NSH: grep finds matching line" taggedAs Slow in {
+    val keys = typeString("grep root /etc/passwd\n", startTick = 500000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 200000000)
+    output should include("root")
+  }
+
+  "NSH: grep filters non-matching lines" taggedAs Slow in {
+    val keys = typeString("grep xyz /hello\n", startTick = 500000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, prefill = "/hello file \"abc\"\n", maxCycles = 200000000)
+    output should not include("abc")
+  }
 }

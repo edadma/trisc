@@ -160,8 +160,10 @@ Supported commands: `login`, `nsh`.
         next_stack_slot += 1
         create_thread(vfs_server, kernel_stack_usp(vfs_slot), kernel_stack_ssp(vfs_slot), "vfs")
 
-        // Wait for servers to initialize and register ports
-        sleep(5)
+        // Wait for servers to initialize and register ports.
+        // VFS needs time to find TFS and mount root; 5 ticks was
+        // too tight with the extra server thread.
+        sleep(500)
 
         // Read /etc/ttytab and spawn sessions
         spawn_sessions()
