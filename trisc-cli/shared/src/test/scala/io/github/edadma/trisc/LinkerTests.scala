@@ -33,7 +33,7 @@ class LinkerTests extends TestHelpers {
     // Execute it
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     linked.load(mem)
-    val cpu = new CPU(mem) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     cpu.r(2).read shouldBe 42
@@ -50,7 +50,7 @@ class LinkerTests extends TestHelpers {
 
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     linked.load(mem)
-    val cpu = new CPU(mem) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000; quiet = true }
     cpu.pc = 0
     cpu.state = State.Run
     cpu.run()
@@ -67,7 +67,7 @@ class LinkerTests extends TestHelpers {
 
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     linked.load(mem)
-    val cpu = new CPU(mem) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000; quiet = true }
     cpu.pc = 0
     cpu.state = State.Run
     cpu.run()
@@ -83,7 +83,7 @@ class LinkerTests extends TestHelpers {
 
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     linked.load(mem)
-    val cpu = new CPU(mem) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000; quiet = true }
     cpu.pc = 0
     cpu.state = State.Run
     cpu.run()
@@ -131,7 +131,7 @@ class LinkerTests extends TestHelpers {
 
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     linked.load(mem)
-    val cpu = new CPU(mem) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     cpu.r(1).read shouldBe 99
@@ -232,7 +232,7 @@ class LinkerTests extends TestHelpers {
 
     val mem = new Memory("Memory", new RAM(0, 0xFF8), stdout)
     linked.load(mem)
-    val cpu = new CPU(mem) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     output.toString shouldBe "AB"
@@ -276,7 +276,7 @@ class LinkerTests extends TestHelpers {
     // Load and run the reloaded TOF
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     reloaded.load(mem)
-    val cpu = new CPU(mem) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     cpu.r(1).read shouldBe 42
@@ -309,7 +309,7 @@ class LinkerTests extends TestHelpers {
     // main is at offset 4 in user segment = 0x14
     // movi r1, target starts at 0x14
     // After patching: first instr byte 1 should be 0x00, second instr byte 1 should be 0x10
-    val cpu = new CPU(mem) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     cpu.r(1).read shouldBe 0x10 // r1 = address of target
@@ -334,7 +334,7 @@ class LinkerTests extends TestHelpers {
     val ram1 = new RAM(0, Runtime.stdoutAddress.toInt)
     val mem1 = new Memory("Memory", ram1, stdout1)
     linked.load(mem1)
-    val cpu1 = new CPU(mem1) { limit = 100000 }
+    val cpu1 = new CPU(mem1) { limit = 100000; quiet = true }
     cpu1.reset()
     cpu1.run()
     cpu1.r(1).read shouldBe 42
@@ -346,7 +346,7 @@ class LinkerTests extends TestHelpers {
     val ram2 = new RAM(0, Runtime.stdoutAddress.toInt)
     val mem2 = new Memory("Memory", ram2, stdout2)
     reloaded.load(mem2)
-    val cpu2 = new CPU(mem2) { limit = 100000 }
+    val cpu2 = new CPU(mem2) { limit = 100000; quiet = true }
     cpu2.reset()
     cpu2.run()
     cpu2.r(1).read shouldBe 42
@@ -422,7 +422,7 @@ class LinkerTests extends TestHelpers {
     val linked = Linker.link(Seq(boot, prog), relocatable = true)
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     linked.load(mem) // load at link-time base (0)
-    val cpu = new CPU(mem) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     cpu.r(1).read shouldBe 42
@@ -452,7 +452,7 @@ class LinkerTests extends TestHelpers {
     val base = 0x200L
     val mem = new Memory("Memory", new RAM(0, 0x1000))
     linked.load(mem, base)
-    val cpu = new CPU(mem) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000; quiet = true }
     cpu.pc = linked.entryAddress(base).get
     cpu.psr = 0x02 // supervisor mode
     cpu.state = State.Run
@@ -621,7 +621,7 @@ class LinkerTests extends TestHelpers {
     val pc = mem.readLong(base + 8)
     pc should be >= base
 
-    val cpu = new CPU(mem) { limit = 10000 }
+    val cpu = new CPU(mem) { limit = 10000; quiet = true }
     cpu.pc = pc
     cpu.psr = 0x02 // supervisor mode, interrupts enabled
     cpu.state = State.Run

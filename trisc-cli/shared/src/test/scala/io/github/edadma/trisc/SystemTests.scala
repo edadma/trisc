@@ -73,7 +73,7 @@ class SystemTests extends TestHelpers {
         |halt
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem) { limit = 100 }
+    val cpu = new CPU(mem) { limit = 100; quiet = true }
     cpu.reset()
     cpu.run()
     // CPU should be stuck in Wfi state; r1 should still be 10
@@ -114,7 +114,7 @@ class SystemTests extends TestHelpers {
         |  rte
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, Seq(interruptSource)) { limit = 10000 }
+    val cpu = new CPU(mem, Seq(interruptSource)) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     // After wfi resumes via interrupt, isr writes 'W' to stdout and rte returns.
@@ -148,7 +148,7 @@ class SystemTests extends TestHelpers {
         |  rte
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, Seq(interruptSource)) { limit = 10000 }
+    val cpu = new CPU(mem, Seq(interruptSource)) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     // r3 should be 20 after resuming (not still 10)
@@ -450,7 +450,7 @@ class SystemTests extends TestHelpers {
         |  rte
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, Seq(interruptSource)) { limit = 10000 }
+    val cpu = new CPU(mem, Seq(interruptSource)) { limit = 10000; quiet = true }
     cpu.reset()
     cpu.run()
     cpu.r(1).read shouldBe 99
@@ -478,7 +478,7 @@ class SystemTests extends TestHelpers {
         |  rte
         |""".stripMargin)
     tof.load(mem)
-    val cpu = new CPU(mem, Seq(interruptSource)) { limit = 100 }
+    val cpu = new CPU(mem, Seq(interruptSource)) { limit = 100; quiet = true }
     cpu.reset()
     cpu.run()
     // Should exhaust the limit while stuck in Wfi
