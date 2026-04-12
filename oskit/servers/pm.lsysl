@@ -19,7 +19,7 @@ IPC commands:
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
-    import oskit.kernel.{reap_process, kernel_kill_process, kernel_register_pm, kernel_get_thread_pid, create_process, vm_create_process_pt, kernel_set_thread_ptbr, vm_set_ptbr, processes, threads, current_thread, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
+    import oskit.kernel.{reap_process, kernel_kill_process, kernel_register_pm, kernel_get_thread_pid, create_process, create_process_suspended, resume_process, vm_create_process_pt, kernel_set_thread_ptbr, vm_set_ptbr, processes, threads, current_thread, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
     import oskit.config.{MAX_PROCESSES, MAX_WAITERS, KERNEL_L1_BASE}
     import oskit.services.{notify_read_self, thread_id, rs_ready}
     import oskit.loader.load_tof
@@ -212,8 +212,8 @@ handles from parent to child, and returns the PID.
         // Extract command name for thread name (first arg before space)
         val cmd = string(buf + 4 + path_len, args_len)
 
-        // Create the process
-        val pid = create_process(entry, SPAWN_PROG_USP, SPAWN_PROG_SSP, cmd, proc_pt)
+        // Create the process suspended — it won't run until we resume it
+        val pid = create_process_suspended(entry, SPAWN_PROG_USP, SPAWN_PROG_SSP, cmd, proc_pt)
 
         // Restore PM to kernel address space
         kernel_set_thread_ptbr(my_tid, KERNEL_L1_BASE)
@@ -224,10 +224,12 @@ handles from parent to child, and returns the PID.
             reply[0] = -1
             ipc_reply(sender, &reply[0], 1)
         else
-            // Copy handles from parent to child via VFS
+            // Copy handles from parent to child via VFS (child is suspended)
             if num_handles > 0
                 val sender_pid = kernel_get_thread_pid(sender)
                 pm_inherit_handles(sender_pid, pid, buf, path_len, args_len, num_handles)
+            // Now resume the child — handles are set up
+            resume_process(pid)
             reply[0] = 0
             pm_msg_write_i32(&reply[0], 1, pid)
             ipc_reply(sender, &reply[0], 5)
