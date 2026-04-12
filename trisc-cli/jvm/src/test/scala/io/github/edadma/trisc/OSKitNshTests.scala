@@ -294,7 +294,7 @@ import oskit.apps.init.{init}
       maxCycles: Int = 15000000,
       prefill: String = passwdPrefill,
       scheduledKeys: Seq[(Int, Int, Boolean, Int)] = Seq.empty,
-  ): (CPU, String) =
+  ): (CPU, String, RAM) =
     val linked = osLinked
 
     val output = new StringBuilder
@@ -347,7 +347,7 @@ import oskit.apps.init.{init}
     val cpu                     = new CPU(mem, ticks, mmu = Some(testMmu)) { this.limit = maxCycles; quiet = true }
     cpu.reset()
     cpu.run()
-    (cpu, output.toString)
+    (cpu, output.toString, ram)
 
   private def loginAndType(cmd: String, startTick: Int = 800000): Seq[(Int, Int, Boolean, Int)] =
     // Slower than default 2000: login + external cat need time for TTY/prompts (fast keys corrupt the line).
@@ -358,13 +358,13 @@ import oskit.apps.init.{init}
 
   "Login: prompts for credentials" taggedAs Slow in {
     val keys        = typeString("root\n", startTick = 800000)
-    val (_, output) = runLogin(scheduledKeys = keys)
+    val (_, output, _) = runLogin(scheduledKeys = keys)
     output should include("login: ")
   }
 
   "Login: successful login shows shell prompt in home dir" taggedAs Slow in {
     val keys        = loginAndType("")
-    val (_, output) = runLogin(scheduledKeys = keys)
+    val (_, output, _) = runLogin(scheduledKeys = keys)
     output should include("login: ")
     output should include("password: ")
     output should include("/root> ")
@@ -372,52 +372,53 @@ import oskit.apps.init.{init}
 
   "Login: whoami returns 0 for root" taggedAs Slow in {
     val keys        = loginAndType("whoami\n")
-    val (_, output) = runLogin(scheduledKeys = keys)
+    val (_, output, _) = runLogin(scheduledKeys = keys)
     output should include("0")
   }
 
   "Login: pwd shows home directory" taggedAs Slow in {
     val keys        = loginAndType("pwd\n")
-    val (_, output) = runLogin(scheduledKeys = keys)
+    val (_, output, _) = runLogin(scheduledKeys = keys)
     output should include("/root")
   }
 
   "Login: cat /etc/ttytab prints ttytab contents" taggedAs Slow in {
     val keys        = loginAndType("cat /etc/ttytab\n")
-    val (_, output) = runLogin(scheduledKeys = keys, maxCycles = 180000000)
+    val (_, output, _) = runLogin(scheduledKeys = keys, maxCycles = 180000000)
     output should include("tty0 login")
   }
 
-  "Login: hello after login" taggedAs Slow in {
+  "Login: hello after login" in {
     val keys = loginAndType("hello\n")
-    val (_, output) = runLogin(scheduledKeys = keys, maxCycles = 180000000)
+    val (_, output, _) = runLogin(scheduledKeys = keys, maxCycles = 180000000)
+    println(s"LOGIN HELLO OUTPUT: [$output]")
     output should include("Hello")
   }
 
   "Login: echo after login" taggedAs Slow in {
     val keys = loginAndType("echo hi\n")
-    val (_, output) = runLogin(scheduledKeys = keys, maxCycles = 180000000)
+    val (_, output, _) = runLogin(scheduledKeys = keys, maxCycles = 180000000)
     output should include("hi")
   }
 
   "Login: user ed gets home /home/ed" taggedAs Slow in {
     val keys = typeString("ed\n", startTick = 800000) ++
                typeString("ed\n", startTick = 840000)
-    val (_, output) = runLogin(scheduledKeys = keys)
+    val (_, output, _) = runLogin(scheduledKeys = keys)
     output should include("/home/ed> ")
   }
 
   "Login: bad password rejected" taggedAs Slow in {
     val keys = typeString("root\n", startTick = 800000) ++
                typeString("wrong\n", startTick = 840000)
-    val (_, output) = runLogin(scheduledKeys = keys)
+    val (_, output, _) = runLogin(scheduledKeys = keys)
     output should include("Login incorrect")
   }
 
   "Login: bad username rejected" taggedAs Slow in {
     val keys = typeString("nobody\n", startTick = 800000) ++
                typeString("x\n", startTick = 840000)
-    val (_, output) = runLogin(scheduledKeys = keys)
+    val (_, output, _) = runLogin(scheduledKeys = keys)
     output should include("Login incorrect")
   }
 

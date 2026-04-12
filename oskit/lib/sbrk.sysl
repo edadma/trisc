@@ -8,7 +8,7 @@ module posix.unistd
 
 extern _heap_start: byte
 
-val HEAP_CEILING: i64 = 0x5FE000
+val HEAP_CEILING: i64 = 0x200000
 
 var _brk: *byte = *byte(0)
 var _brk_initialized = false

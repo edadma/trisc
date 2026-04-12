@@ -310,14 +310,31 @@ Freed pages are pushed onto a singly-linked list (next pointer
 stored in the first 8 bytes of each free page). page_alloc
 pops from the free list first, then falls back to bumping.
 
+The pool start is the greater of PAGE_POOL_BASE and the
+page-aligned address after BSS (_heap_start). This prevents
+the page pool from overlapping with kernel BSS when the binary
+grows beyond the configured PAGE_POOL_BASE.
+
     import oskit.hal.memset
+
+    extern _heap_start: byte
 
     var page_free_list = 0
 
     page_alloc() -> int
         if !page_pool_init
-            page_pool_next = PAGE_POOL_BASE
+            var base = PAGE_POOL_BASE
+            val bss_end = int(i64(&_heap_start))
+            val aligned = (bss_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)
+            if aligned > base
+                base = aligned
+            page_pool_next = base
             page_pool_init = true
+            // Debug: print pool base high byte
+            var dbg: *byte = *byte(0x800000)
+            *dbg = byte('P')
+            *dbg = byte('0') + byte((base >> 20) & 0xF)
+            *dbg = byte('0') + byte((base >> 16) & 0xF)
         if page_free_list != 0
             val page = page_free_list
             var next: *i64 = *i64(page)

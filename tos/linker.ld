@@ -27,6 +27,6 @@ SECTIONS
     bss
 
 SYMBOL _heap_start = AFTER bss
-SYMBOL _heap_end = 0x7FE000
+SYMBOL _heap_end = 0x200000
 
 ENTRY boot

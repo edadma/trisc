@@ -354,7 +354,7 @@ buffer — no size limit per call. We still loop because
             return LOAD_ERR_NOT_FOUND
 
         val buf = malloc(LOAD_BUF_SIZE)
-        if i64(buf) == 0
+        if i64(buf) <= 0
             fs_close(fid)
             return LOAD_ERR_READ
 
