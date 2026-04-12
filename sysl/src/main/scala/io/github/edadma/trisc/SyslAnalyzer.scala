@@ -1288,6 +1288,67 @@ class SyslAnalyzer:
         finally
           typeEnv = savedEnv
 
+  /** Build a typed positional arg list from a mix of positional and named args.
+    * Rules:
+    *   - Positional args must come before named args.
+    *   - Each named arg must match a parameter name (once).
+    *   - Missing slots are filled with typed defaults from `functionDefaults`.
+    *   - If a missing slot has no default, it is left uncovered — `checkArgs`
+    *     will error on the mismatched length.
+    *
+    * `paramTypes` provides expected types for type inference during analysis.
+    */
+  private def resolveNamedArgsTyped(
+    fnName: String,
+    paramNames: List[String],
+    paramTypes: List[SyslType],
+    args: List[ExpressionAST],
+  ): List[TExpr] =
+    // Validate ordering: no positional after named.
+    var seenNamed = false
+    for arg <- args do
+      arg match
+        case _: NamedArgAST => seenNamed = true
+        case _ =>
+          if seenNamed then
+            throw AnalysisError(s"positional argument after named argument in call to '$fnName'")
+
+    val slots = Array.fill[Option[TExpr]](paramNames.length)(None)
+    val namedSeen = mutable.HashSet[String]()
+    var pos = 0
+    for arg <- args do
+      arg match
+        case NamedArgAST(argName, value) =>
+          val idx = paramNames.indexOf(argName)
+          if idx < 0 then
+            throw AnalysisError(s"unknown parameter '$argName' in call to '$fnName'")
+          if slots(idx).isDefined then
+            throw AnalysisError(s"parameter '$argName' of '$fnName' already has a value (duplicate or positional conflict)")
+          if !namedSeen.add(argName) then
+            throw AnalysisError(s"duplicate named argument '$argName' in call to '$fnName'")
+          val savedExp = currentExpected
+          currentExpected = Some(paramTypes(idx))
+          slots(idx) = Some(try analyzeExpr(value) finally currentExpected = savedExp)
+        case other =>
+          if pos >= paramNames.length then
+            throw AnalysisError(s"too many positional arguments in call to '$fnName'")
+          val savedExp = currentExpected
+          currentExpected = Some(paramTypes(pos))
+          slots(pos) = Some(try analyzeExpr(other) finally currentExpected = savedExp)
+          pos += 1
+
+    // Fill missing slots from typed defaults.
+    val defaults = functionDefaults.getOrElse(fnName, Nil)
+    val result = new scala.collection.mutable.ListBuffer[TExpr]
+    for i <- paramNames.indices do
+      slots(i) match
+        case Some(e) => result += e
+        case None =>
+          if i < defaults.length && defaults(i).isDefined then
+            result += defaults(i).get
+          // else: leave unfilled — checkArgs will report an arity error
+    result.toList
+
   private def checkArgs(name: String, params: List[(String, SyslType)], args: List[TExpr]): List[TExpr] =
     // Try to fill missing trailing args with defaults registered for the function.
     val filledArgs =
@@ -2318,22 +2379,40 @@ class SyslAnalyzer:
               throw AnalysisError(s"struct $structName has no method or field '$method'")
 
       case CallAST(name, args) =>
-        // Determine expected types for args if callee has known concrete signature
-        val argExpected: List[Option[SyslType]] =
-          if traitCallRewrite.contains(name) then
-            val mangled = traitCallRewrite(name)
-            functions(mangled).params.map(p => Some(p._2))
-          else if functions.contains(name) || builtinFunctions.contains(name) then
-            lookupFun(name).params.map(p => Some(p._2))
-          else if structTypes.contains(name) then
-            structTypes(name).fields.map(f => Some(f._2))
+        // If any named args are present, resolve them via param-name lookup
+        // and type the resulting positional list. Otherwise, use the fast path.
+        val tArgs: List[TExpr] =
+          if args.exists(_.isInstanceOf[NamedArgAST]) then
+            val (paramNames, paramTypes): (List[String], List[SyslType]) =
+              if traitCallRewrite.contains(name) then
+                val p = functions(traitCallRewrite(name)).params
+                (p.map(_._1), p.map(_._2))
+              else if functions.contains(name) || builtinFunctions.contains(name) then
+                val p = lookupFun(name).params
+                (p.map(_._1), p.map(_._2))
+              else if structTypes.contains(name) then
+                val f = structTypes(name).fields
+                (f.map(_._1), f.map(_._2))
+              else
+                throw AnalysisError(s"named arguments are not supported for '$name'")
+            resolveNamedArgsTyped(name, paramNames, paramTypes, args)
           else
-            List.fill(args.length)(None)
-        val tArgs = args.zip(argExpected.padTo(args.length, None)).map { case (a, exp) =>
-          val saved = currentExpected
-          currentExpected = exp.orElse(saved)
-          try analyzeExpr(a) finally currentExpected = saved
-        }
+            // Determine expected types for args if callee has known concrete signature
+            val argExpected: List[Option[SyslType]] =
+              if traitCallRewrite.contains(name) then
+                val mangled = traitCallRewrite(name)
+                functions(mangled).params.map(p => Some(p._2))
+              else if functions.contains(name) || builtinFunctions.contains(name) then
+                lookupFun(name).params.map(p => Some(p._2))
+              else if structTypes.contains(name) then
+                structTypes(name).fields.map(f => Some(f._2))
+              else
+                List.fill(args.length)(None)
+            args.zip(argExpected.padTo(args.length, None)).map { case (a, exp) =>
+              val saved = currentExpected
+              currentExpected = exp.orElse(saved)
+              try analyzeExpr(a) finally currentExpected = saved
+            }
         // Check for trait-method-call rewrite (inside a synthesized default body)
         if traitCallRewrite.contains(name) then
           val mangled = traitCallRewrite(name)

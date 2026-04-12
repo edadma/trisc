@@ -355,4 +355,73 @@ class SyslFunctionTests extends SyslTestHelpers {
         |""".stripMargin): @unchecked
     an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
   }
+
+  // ===== Named arguments =====
+
+  "named arg: basic" in {
+    eval(
+      """greet(x: int, y: int) -> int = x * 10 + y
+        |main() -> int = greet(x = 4, y = 2)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "named arg: reorder" in {
+    eval(
+      """greet(x: int, y: int) -> int = x * 10 + y
+        |main() -> int = greet(y = 2, x = 4)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "named arg: mixed positional and named" in {
+    eval(
+      """greet(x: int, y: int, z: int) -> int = x * 100 + y * 10 + z
+        |main() -> int = greet(1, z = 3, y = 2)
+        |""".stripMargin) shouldBe 123
+  }
+
+  "named arg: with default skipped in middle" in {
+    eval(
+      """foo(a: int, b: int = 5, c: int = 10) -> int = a * 100 + b * 10 + c
+        |main() -> int = foo(1, c = 3)
+        |""".stripMargin) shouldBe 1 * 100 + 5 * 10 + 3
+  }
+
+  "named arg: with default override" in {
+    eval(
+      """foo(a: int, b: int = 5, c: int = 10) -> int = a * 100 + b * 10 + c
+        |main() -> int = foo(1, b = 9)
+        |""".stripMargin) shouldBe 1 * 100 + 9 * 10 + 10
+  }
+
+  "error: positional after named" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """foo(a: int, b: int) -> int = a + b
+        |main() -> int = foo(a = 1, 2)
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "error: unknown named parameter" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """foo(a: int, b: int) -> int = a + b
+        |main() -> int = foo(1, z = 2)
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "error: duplicate named argument" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """foo(a: int, b: int) -> int = a + b
+        |main() -> int = foo(a = 1, a = 2)
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "error: named conflicts with positional" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """foo(a: int, b: int) -> int = a + b
+        |main() -> int = foo(1, a = 2)
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
 }
