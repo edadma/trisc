@@ -13,6 +13,7 @@ class OSKitLoaderTests extends OSKitTestHelpers {
   private lazy val kbdSysl: String      = readLsysl("oskit/drivers/kbd/keyboard.lsysl")
   private lazy val ttySysl: String      = readLsysl("oskit/drivers/tty/tty.lsysl")
   private lazy val tfsSysl: String      = readLsysl("oskit/fs/tfs.lsysl")
+  private lazy val fsClientSysl: String = readLsysl("oskit/fs/client.lsysl")
   private lazy val tfsSrvSysl: String   = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val loaderSysl: String   = readLsysl("oskit/loader/loader.lsysl")
   private lazy val nshSysl: String      = readLsysl("oskit/apps/nsh.lsysl")
@@ -22,6 +23,7 @@ class OSKitLoaderTests extends OSKitTestHelpers {
   private lazy val hmacSysl: String     = readLsysl("std/crypto/hmac/hmac.lsysl")
   private lazy val pbkdf2Sysl: String   = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
   private lazy val pmSrvSysl: String   = readLsysl("oskit/servers/pm.lsysl")
+  private lazy val vfsSrvSysl: String  = readLsysl("oskit/servers/vfs.lsysl")
   private lazy val halMemSysl: String  = readLsysl("oskit/hal/mem_dma.lsysl")
   private lazy val configSysl: String = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
 
@@ -95,8 +97,10 @@ class OSKitLoaderTests extends OSKitTestHelpers {
       "oskit/drivers/kbd/keyboard"   -> kbdSysl,
       "oskit/drivers/tty/tty"        -> ttySysl,
       "oskit/fs/tfs"                 -> tfsSysl,
+      "oskit/fs/client"              -> fsClientSysl,
       "oskit/servers/tfs"            -> tfsSrvSysl,
       "oskit/servers/pm"             -> pmSrvSysl,
+      "oskit/servers/vfs"            -> vfsSrvSysl,
       "posix/unistd/sbrk"           -> sbrkSysl,
       "posix/string/string"         -> posixStringSysl,
       "posix/ctype/ctype"           -> posixCtypeSysl,

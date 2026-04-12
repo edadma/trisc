@@ -1,0 +1,361 @@
+OSKit FS Client Library
+=======================
+
+User-facing filesystem API. Talks to VFS (port "fs"), which
+routes requests to the appropriate backend filesystem server.
+
+The port is looked up lazily on first use and cached, so
+each call after the first is a single IPC send — no per-call
+`port_lookup`. If the lookup fails (server not yet registered)
+we retry on every call, which means clients that start before
+the fs server is up will just see -1 returns until it comes
+online.
+
+The protocol command numbers and message layout duplicate the
+constants in `oskit/servers/tfs.lsysl` — they're the wire
+contract between client and server, so both sides own a copy.
+
+    module oskit.fs
+
+    import oskit.ipc.{port_lookup, ipc_send}
+
+VFS protocol commands (must match oskit/servers/vfs.lsysl).
+
+    val FS_CMD_OPEN    = 1
+    val FS_CMD_READ    = 2
+    val FS_CMD_WRITE   = 3
+    val FS_CMD_CREATE  = 4
+    val FS_CMD_UNLINK  = 5
+    val FS_CMD_STAT    = 6
+    val FS_CMD_MKDIR   = 7
+    val FS_CMD_RMDIR   = 8
+    val FS_CMD_READDIR = 9
+    val FS_CMD_SYNC    = 10
+    val FS_CMD_CHMOD   = 11
+    val FS_CMD_RENAME  = 12
+    val FS_CMD_CLOSE   = 13
+    val FS_CMD_SEEK    = 14
+
+Cached port id (-1 = not yet looked up / last lookup failed).
+`fs_srv_name` is a 3-byte null-terminated "fs" buffer; it's
+initialized on first call to `fs_get_port`.
+
+`fs_last_ino` holds the inode from the most recent `fs_open` call,
+for callers that need the raw inode (e.g., for directory operations
+that still take inodes).
+
+    var fs_port = -1
+    var fs_srv_name: [3]byte
+    var fs_last_ino = -1
+
+    fs_get_port() -> int
+        if fs_port < 0
+            fs_srv_name[0] = 102  // f
+            fs_srv_name[1] = 115  // s
+            fs_srv_name[2] = 0
+            fs_port = port_lookup(&fs_srv_name[0])
+        fs_port
+
+Big-endian 16/32-bit helpers for the protocol message layout.
+Local to the client — the server has its own copy.
+
+    fs_msg_read_i32(buf: *byte, off: int) -> int
+        ((buf[off] & 0xFF) << 24) | ((buf[off + 1] & 0xFF) << 16) | ((buf[off + 2] & 0xFF) << 8) | (buf[off + 3] & 0xFF)
+
+    fs_msg_write_i32(buf: *byte, off: int, v: int)
+        buf[off] = (v >> 24) & 0xFF
+        buf[off + 1] = (v >> 16) & 0xFF
+        buf[off + 2] = (v >> 8) & 0xFF
+        buf[off + 3] = v & 0xFF
+
+Open a file by path. Returns a file ID (VFS open file table index).
+The underlying inode is stored in `fs_last_ino` for callers that
+need it (e.g., for directory operations). Returns -1 on error.
+
+    fs_open(path: string) -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        var msg: [128]byte
+        msg[0] = FS_CMD_OPEN
+        val plen = len(path)
+        val p: *byte = *byte(path)
+        for var i = 0; i < plen; i++
+            msg[i + 1] = p[i]
+        var reply: [9]byte
+        ipc_send(port, &msg[0], plen + 1, &reply[0], 9)
+        if reply[0] != 0
+            return -1
+        fs_last_ino = fs_msg_read_i32(&reply[0], 5)
+        fs_msg_read_i32(&reply[0], 1)
+
+Read up to `rlen` bytes from open file `fid` into `buf`.
+Position is tracked by VFS and advances automatically.
+Grant-based: passes buffer address to the server.
+Returns number of bytes read, or -1 on error.
+
+    fs_read(fid: int, buf: *byte, rlen: int) -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        var msg: [13]byte
+        msg[0] = FS_CMD_READ
+        fs_msg_write_i32(&msg[0], 1, fid)
+        fs_msg_write_i32(&msg[0], 5, rlen)
+        fs_msg_write_i32(&msg[0], 9, int(i64(buf)))
+        var reply: [5]byte
+        val result = ipc_send(port, &msg[0], 13, &reply[0], 5)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        fs_msg_read_i32(&reply[0], 1)
+
+Write `wlen` bytes from `data` to open file `fid`.
+Position is tracked by VFS and advances automatically.
+Returns number of bytes written, or -1 on error.
+
+    fs_write(fid: int, data: *byte, wlen: int) -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        var msg: [13]byte
+        msg[0] = FS_CMD_WRITE
+        fs_msg_write_i32(&msg[0], 1, fid)
+        fs_msg_write_i32(&msg[0], 5, wlen)
+        fs_msg_write_i32(&msg[0], 9, int(i64(data)))
+        var reply: [5]byte
+        val result = ipc_send(port, &msg[0], 13, &reply[0], 5)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        fs_msg_read_i32(&reply[0], 1)
+
+Close an open file. Frees the VFS open file table entry.
+
+    fs_close(fid: int) -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        var msg: [5]byte
+        msg[0] = FS_CMD_CLOSE
+        fs_msg_write_i32(&msg[0], 1, fid)
+        var reply: [1]byte
+        ipc_send(port, &msg[0], 5, &reply[0], 1)
+        int(reply[0])
+
+Seek to a position in an open file.
+whence: 0 = SET, 1 = CUR. Returns new position, or -1 on error.
+
+    fs_seek(fid: int, offset: int, whence: int) -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        var msg: [10]byte
+        msg[0] = FS_CMD_SEEK
+        fs_msg_write_i32(&msg[0], 1, fid)
+        fs_msg_write_i32(&msg[0], 5, offset)
+        msg[9] = byte(whence)
+        var reply: [5]byte
+        val result = ipc_send(port, &msg[0], 10, &reply[0], 5)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        fs_msg_read_i32(&reply[0], 1)
+
+Create a file or directory entry under `parent_ino`.
+`ftype`: 1 = file, 2 = directory. Returns new inode or -1.
+
+    fs_create(parent_ino: int, name: string, ftype: int, perm: int) -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        var msg: [128]byte
+        msg[0] = FS_CMD_CREATE
+        fs_msg_write_i32(&msg[0], 1, parent_ino)
+        msg[5] = byte(ftype)
+        msg[6] = (perm >> 8) & 0xFF
+        msg[7] = perm & 0xFF
+        val nlen = len(name)
+        val np: *byte = *byte(name)
+        for var i = 0; i < nlen; i++
+            msg[i + 8] = np[i]
+        var reply: [5]byte
+        val result = ipc_send(port, &msg[0], nlen + 8, &reply[0], 5)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        fs_msg_read_i32(&reply[0], 1)
+
+Unlink a file from its parent directory.
+
+    fs_unlink(parent_ino: int, name: string) -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        var msg: [128]byte
+        msg[0] = FS_CMD_UNLINK
+        fs_msg_write_i32(&msg[0], 1, parent_ino)
+        val nlen = len(name)
+        val np: *byte = *byte(name)
+        for var i = 0; i < nlen; i++
+            msg[i + 5] = np[i]
+        var reply: [1]byte
+        val result = ipc_send(port, &msg[0], nlen + 5, &reply[0], 1)
+        if result != 0
+            return -1
+        int(reply[0])
+
+Stat an inode. Fills `out[0..6]` with mode, nlinks, uid, gid,
+size, mtime, ctime. Returns 0 on success, -1 on error.
+
+    fs_stat(ino: int, out: *int) -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        var msg: [5]byte
+        msg[0] = FS_CMD_STAT
+        fs_msg_write_i32(&msg[0], 1, ino)
+        var reply: [29]byte
+        val result = ipc_send(port, &msg[0], 5, &reply[0], 29)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        out[0] = fs_msg_read_i32(&reply[0], 1)   // mode
+        out[1] = fs_msg_read_i32(&reply[0], 5)   // nlinks
+        out[2] = fs_msg_read_i32(&reply[0], 9)   // uid
+        out[3] = fs_msg_read_i32(&reply[0], 13)  // gid
+        out[4] = fs_msg_read_i32(&reply[0], 17)  // size
+        out[5] = fs_msg_read_i32(&reply[0], 21)  // mtime
+        out[6] = fs_msg_read_i32(&reply[0], 25)  // ctime
+        0
+
+Create a new directory under `parent_ino`.
+
+    fs_mkdir(parent_ino: int, name: string, perm: int) -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        var msg: [128]byte
+        msg[0] = FS_CMD_MKDIR
+        fs_msg_write_i32(&msg[0], 1, parent_ino)
+        msg[5] = (perm >> 8) & 0xFF
+        msg[6] = perm & 0xFF
+        val nlen = len(name)
+        val np: *byte = *byte(name)
+        for var i = 0; i < nlen; i++
+            msg[i + 7] = np[i]
+        var reply: [5]byte
+        val result = ipc_send(port, &msg[0], nlen + 7, &reply[0], 5)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        fs_msg_read_i32(&reply[0], 1)
+
+Remove a directory. Must be empty.
+
+    fs_rmdir(parent_ino: int, name: string) -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        var msg: [128]byte
+        msg[0] = FS_CMD_RMDIR
+        fs_msg_write_i32(&msg[0], 1, parent_ino)
+        val nlen = len(name)
+        val np: *byte = *byte(name)
+        for var i = 0; i < nlen; i++
+            msg[i + 5] = np[i]
+        var reply: [1]byte
+        val result = ipc_send(port, &msg[0], nlen + 5, &reply[0], 1)
+        if result != 0
+            return -1
+        int(reply[0])
+
+Read the `index`-th entry of `dir_ino`. Returns 0 on success,
+-1 when `index` is past the last entry.
+
+    fs_readdir(dir_ino: int, index: int, out_ino: *int, out_name: *byte) -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        var msg: [9]byte
+        msg[0] = FS_CMD_READDIR
+        fs_msg_write_i32(&msg[0], 1, dir_ino)
+        fs_msg_write_i32(&msg[0], 5, index)
+        var reply: [19]byte
+        val result = ipc_send(port, &msg[0], 9, &reply[0], 19)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        *out_ino = fs_msg_read_i32(&reply[0], 1)
+        var i = 0
+        while i < 14
+            out_name[i] = reply[i + 5]
+            i += 1
+        0
+
+Flush superblock to disk.
+
+    fs_sync() -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = FS_CMD_SYNC
+        var reply: [1]byte
+        val result = ipc_send(port, &msg[0], 1, &reply[0], 1)
+        if result != 0
+            return -1
+        int(reply[0])
+
+Change file permissions.
+
+    fs_chmod(ino: int, perm: int) -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        var msg: [7]byte
+        msg[0] = FS_CMD_CHMOD
+        fs_msg_write_i32(&msg[0], 1, ino)
+        msg[5] = (perm >> 8) & 0xFF
+        msg[6] = perm & 0xFF
+        var reply: [1]byte
+        val result = ipc_send(port, &msg[0], 7, &reply[0], 1)
+        if result != 0
+            return -1
+        int(reply[0])
+
+Rename/move a file entry from one parent to another.
+
+    fs_rename(old_parent: int, old_name: string, new_parent: int, new_name: string) -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        val onp = *byte(old_name)
+        val onl = len(old_name)
+        val nnp = *byte(new_name)
+        val nnl = len(new_name)
+        var msg: [128]byte
+        msg[0] = FS_CMD_RENAME
+        fs_msg_write_i32(&msg[0], 1, old_parent)
+        fs_msg_write_i32(&msg[0], 5, new_parent)
+        msg[9] = byte(onl)
+        var i = 0
+        while i < onl
+            msg[10 + i] = onp[i]
+            i += 1
+        i = 0
+        while i < nnl
+            msg[10 + onl + i] = nnp[i]
+            i += 1
+        var reply: [1]byte
+        val result = ipc_send(port, &msg[0], 10 + onl + nnl, &reply[0], 1)
+        if result != 0
+            return -1
+        int(reply[0])

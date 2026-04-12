@@ -19,12 +19,14 @@ IPC commands:
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
-    import oskit.kernel.{reap_process, kernel_kill_process, kernel_register_pm, processes, threads, current_thread, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
-    import oskit.config.{MAX_PROCESSES, MAX_WAITERS}
-    import oskit.services.{notify_read_self}
+    import oskit.kernel.{reap_process, kernel_kill_process, kernel_register_pm, create_process, vm_create_process_pt, kernel_set_thread_ptbr, vm_set_ptbr, processes, threads, current_thread, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
+    import oskit.config.{MAX_PROCESSES, MAX_WAITERS, KERNEL_L1_BASE}
+    import oskit.services.{notify_read_self, thread_id}
+    import oskit.loader.load_tof
 
     val PM_CMD_WAITPID = 1
     val PM_CMD_KILL    = 2
+    val PM_CMD_SPAWN   = 3
 
 Waitpid queue: tracks parents blocked waiting for a child.
 Each entry stores the waiting parent's thread ID (the IPC
@@ -154,6 +156,76 @@ Handle PM_KILL: kill a process by PID.
             reply[0] = 0
         ipc_reply(sender, &reply[0], 1)
 
+Handle SPAWN: create a new process from a binary path.
+Request: [cmd(1), path_len(1), args_len(1), path(N), args(M)]
+Reply:   [status(1), pid(4)]
+
+PM creates page tables, loads the binary, writes args to the
+standard args address, creates the process, and returns the PID.
+
+    val SPAWN_PROG_ARGS_ADDR = 0xBF000
+    val SPAWN_PROG_ARGS_MAX  = 240
+    val SPAWN_PROG_USP       = 0xD0000
+    val SPAWN_PROG_SSP       = 0xCF000
+
+    pm_handle_spawn(sender: int, buf: *byte)
+        val path_len = int(buf[1])
+        val args_len = int(buf[2])
+
+        // Extract path as string
+        val path = string(buf + 3, path_len)
+
+        // Create per-process page table
+        val proc_pt = vm_create_process_pt()
+        if proc_pt == 0
+            var reply: [1]byte
+            reply[0] = -1
+            ipc_reply(sender, &reply[0], 1)
+            return
+
+        // Switch PM's PTBR to load into process address space
+        val my_tid = thread_id()
+        kernel_set_thread_ptbr(my_tid, proc_pt)
+        vm_set_ptbr(proc_pt)
+
+        val entry = load_tof(path)
+        if entry < 0
+            kernel_set_thread_ptbr(my_tid, KERNEL_L1_BASE)
+            vm_set_ptbr(KERNEL_L1_BASE)
+            var reply: [1]byte
+            reply[0] = -1
+            ipc_reply(sender, &reply[0], 1)
+            return
+
+        // Write args to standard address (in process address space)
+        val args_buf = *byte(SPAWN_PROG_ARGS_ADDR)
+        var i = 0
+        while i < args_len
+            if i >= SPAWN_PROG_ARGS_MAX
+                break
+            args_buf[i] = buf[3 + path_len + i]
+            i += 1
+        args_buf[i] = 0
+
+        // Extract command name for thread name (first arg before space)
+        val cmd = string(buf + 3 + path_len, args_len)
+
+        // Create the process
+        val pid = create_process(entry, SPAWN_PROG_USP, SPAWN_PROG_SSP, cmd, proc_pt)
+
+        // Restore PM to kernel address space
+        kernel_set_thread_ptbr(my_tid, KERNEL_L1_BASE)
+        vm_set_ptbr(KERNEL_L1_BASE)
+
+        var reply: [5]byte
+        if pid < 0
+            reply[0] = -1
+            ipc_reply(sender, &reply[0], 1)
+        else
+            reply[0] = 0
+            pm_msg_write_i32(&reply[0], 1, pid)
+            ipc_reply(sender, &reply[0], 5)
+
 PM server main loop. Uses ipc_recv_notify to wait for either
 IPC messages (waitpid/kill from userspace) or notifications
 (exit events from the kernel).
@@ -185,6 +257,8 @@ IPC messages (waitpid/kill from userspace) or notifications
                     pm_handle_waitpid(sender, &buf[0])
                 else if cmd == PM_CMD_KILL
                     pm_handle_kill(sender, &buf[0])
+                else if cmd == PM_CMD_SPAWN
+                    pm_handle_spawn(sender, &buf[0])
                 else
                     // Unknown command
                     var reply: [1]byte
@@ -207,6 +281,36 @@ with PM via IPC.
         pm_msg_write_i32(&msg[0], 1, pid)
         var reply: [5]byte
         ipc_send(port, &msg[0], 5, &reply[0], 5)
+        if reply[0] != 0
+            return -1
+        pm_msg_read_i32(&reply[0], 1)
+
+    pm_spawn(path: string, args: string) -> int
+        var pm_name: [3]byte
+        pm_name[0] = byte('p')
+        pm_name[1] = byte('m')
+        pm_name[2] = 0
+        val port = port_lookup(&pm_name[0])
+        if port < 0
+            return -1
+        val plen = len(path)
+        val alen = len(args)
+        var msg: [128]byte
+        msg[0] = byte(PM_CMD_SPAWN)
+        msg[1] = byte(plen)
+        msg[2] = byte(alen)
+        val pp = *byte(path)
+        var i = 0
+        while i < plen
+            msg[3 + i] = pp[i]
+            i += 1
+        val ap = *byte(args)
+        i = 0
+        while i < alen
+            msg[3 + plen + i] = ap[i]
+            i += 1
+        var reply: [5]byte
+        ipc_send(port, &msg[0], 3 + plen + alen, &reply[0], 5)
         if reply[0] != 0
             return -1
         pm_msg_read_i32(&reply[0], 1)

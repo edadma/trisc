@@ -12,11 +12,13 @@ class OSKitShellTests extends OSKitTestHelpers {
   private lazy val kbdSysl: String    = readLsysl("oskit/drivers/kbd/keyboard.lsysl")
   private lazy val ttySysl: String    = readLsysl("oskit/drivers/tty/tty.lsysl")
   private lazy val tfsSysl: String    = readLsysl("oskit/fs/tfs.lsysl")
+  private lazy val fsClientSysl: String = readLsysl("oskit/fs/client.lsysl")
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val shSysl: String     = readLsysl("oskit/apps/sh.lsysl")
   private lazy val memSysl: String   = readLsysl("std/mem/mem.lsysl")
   private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
   private lazy val configSysl: String = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
+  private lazy val vfsSrvSysl: String = readLsysl("oskit/servers/vfs.lsysl")
   private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   // Cache the compiled+linked OS image — all shell tests use the same app source.
@@ -38,7 +40,9 @@ class OSKitShellTests extends OSKitTestHelpers {
       "oskit/drivers/kbd/keyboard" -> kbdSysl,
       "oskit/drivers/tty/tty"    -> ttySysl,
       "oskit/fs/tfs"             -> tfsSysl,
+      "oskit/fs/client"          -> fsClientSysl,
       "oskit/servers/tfs"        -> tfsSrvSysl,
+      "oskit/servers/vfs"        -> vfsSrvSysl,
       "posix/unistd/sbrk"        -> sbrkSysl,
       "posix/string/string"      -> posixStringSysl,
       "posix/ctype/ctype"        -> posixCtypeSysl,
@@ -48,7 +52,7 @@ class OSKitShellTests extends OSKitTestHelpers {
         """import oskit.kernel.*
 import oskit.ipc.*
 import oskit.drivers.disk.disk_server
-import oskit.servers.tfs_server
+import oskit.servers.{tfs_server, vfs_server}
 import oskit.drivers.tty.tty_server
 import oskit.apps.shell
 import oskit.services.sleep
@@ -58,8 +62,9 @@ import oskit.services.sleep
           |    sleep(5)
           |    create_thread(tfs_server, 0x610000, 0x610000, "tfs")
           |    create_thread(tty_server, 0x620000, 0x620000, "tty")
+          |    create_thread(vfs_server, 0x630000, 0x630000, "vfs")
           |    sleep(5)
-          |    create_thread(shell, 0x630000, 0x630000, "sh")
+          |    create_thread(shell, 0x640000, 0x640000, "sh")
           |
           |kernel_main() -> int
           |    ipc_init()

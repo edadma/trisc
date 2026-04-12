@@ -17,7 +17,7 @@ the 3-byte header).
 
     module oskit.bin.cat
 
-    import oskit.ulib.{open, read, puts, exit, get_args, skip_arg0}
+    import oskit.ulib.{open, read, close, puts, exit, get_args, skip_arg0}
 
     val CAT_READ_CHUNK = 4096
     val PUTS_PAYLOAD_MAX = 125
@@ -36,8 +36,7 @@ the 3-byte header).
             exit()
             return
         var buf: [4096]byte
-        var offset = 0
-        var nr = read(ino, &buf[0], offset, CAT_READ_CHUNK)
+        var nr = read(ino, &buf[0], CAT_READ_CHUNK)
         while nr > 0
             var sent = 0
             while sent < nr
@@ -46,8 +45,8 @@ the 3-byte header).
                     k = PUTS_PAYLOAD_MAX
                 puts(string(&buf[sent], k))
                 sent += k
-            offset += nr
-            nr = read(ino, &buf[0], offset, CAT_READ_CHUNK)
+            nr = read(ino, &buf[0], CAT_READ_CHUNK)
+        close(ino)
         if nr < 0
             puts("cat: read error\n")
         exit()

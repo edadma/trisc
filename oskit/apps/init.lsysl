@@ -19,7 +19,8 @@ read config files until the filesystem is up.
     import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp}
     import oskit.services.{sleep}
     import oskit.drivers.disk.{disk_server}
-    import oskit.servers.{tfs_server, fs_open, fs_read, pm_server}
+    import oskit.servers.{tfs_server, pm_server, vfs_server}
+    import oskit.fs.{fs_open, fs_read, fs_close}
     import oskit.drivers.tty.{tty_server}
     import oskit.apps.login.{login}
     import oskit.apps.nsh.{nsh}
@@ -35,14 +36,15 @@ Supported commands: `login`, `nsh`.
 
     spawn_sessions()
         var buf: [256]byte
-        val ino = fs_open("/etc/ttytab")
-        if ino < 0
+        val fid = fs_open("/etc/ttytab")
+        if fid < 0
             // No ttytab — fall back to single login
             val s = next_stack_slot
             next_stack_slot += 1
             create_thread(login, kernel_stack_usp(s), kernel_stack_ssp(s), "login")
             return
-        val nr = fs_read(ino, buf, 0, 256)
+        val nr = fs_read(fid, buf, 256)
+        fs_close(fid)
         if nr <= 0
             val s = next_stack_slot
             next_stack_slot += 1
@@ -152,6 +154,11 @@ Supported commands: `login`, `nsh`.
         val pm_slot = next_stack_slot
         next_stack_slot += 1
         create_thread(pm_server, kernel_stack_usp(pm_slot), kernel_stack_ssp(pm_slot), "pm")
+
+        // VFS server — registers as "fs", mounts root on TFS
+        val vfs_slot = next_stack_slot
+        next_stack_slot += 1
+        create_thread(vfs_server, kernel_stack_usp(vfs_slot), kernel_stack_ssp(vfs_slot), "vfs")
 
         // Wait for servers to initialize and register ports
         sleep(5)

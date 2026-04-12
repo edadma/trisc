@@ -83,7 +83,7 @@ entry64:
     movw %ax, %gs
 
     movabs $stack_top, %rsp
-    call main
+    call boot_entry
 
     hlt
     jmp . - 1

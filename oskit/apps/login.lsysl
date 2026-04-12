@@ -13,8 +13,7 @@ Passwords are hashed with PBKDF2-HMAC-SHA256 (c=1).
 
     import oskit.services.{sleep, setuid}
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
-    import oskit.servers.fs_open
-    import oskit.servers.fs_read
+    import oskit.fs.{fs_open, fs_read, fs_close}
     import std.crypto.pbkdf2.{pbkdf2_hmac_sha256_hw}
     import oskit.apps.nsh.{nsh, nsh_set_home}
 
@@ -100,13 +99,12 @@ Compare two byte buffers for equality.
 Read a file into a buffer. Returns bytes read.
 
     read_file(path: string, buf: *byte, maxlen: int) -> int
-        val ino = fs_open(path)
-        if ino < 0
+        val fid = fs_open(path)
+        if fid < 0
             return -1
-        var total = 0
-        var nr = fs_read(ino, buf, 0, maxlen)
-        total = nr
-        total
+        val nr = fs_read(fid, buf, maxlen)
+        fs_close(fid)
+        nr
 
 Parse a colon-delimited field from a line buffer.
 Sets field_start and field_len, returns position after

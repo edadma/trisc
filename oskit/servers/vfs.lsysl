@@ -1,0 +1,474 @@
+OSKit VFS Server — Virtual Filesystem Layer
+
+Minix 3-style VFS that owns the "fs" namespace. Clients talk to
+VFS; VFS routes requests to the appropriate filesystem backend
+via the mount table. Currently only root ("/") is mounted on TFS.
+
+    module oskit.servers
+
+    import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv, ipc_reply, ipc_send, ipc_last_msg_len}
+    import oskit.services.{sleep}
+    import oskit.kernel.{kernel_get_thread_ptbr, kernel_get_thread_pid, vm_copy_to, vm_copy_from}
+    import oskit.config.{KERNEL_L1_BASE, MAX_PROCESSES}
+
+Open file table. Each open file tracks inode, position, mount
+index, and reference count. A slot is free when refcount is 0.
+
+    val VFS_MAX_OPEN_FILES = 32
+
+    var oft_ino: [32]int
+    var oft_pos: [32]int
+    var oft_mount: [32]int
+    var oft_ref: [32]int
+
+Allocate an open file table entry. Returns the file ID (index),
+or -1 if the table is full.
+
+    vfs_oft_alloc(ino: int, mount_idx: int) -> int
+        var i = 0
+        while i < VFS_MAX_OPEN_FILES
+            if oft_ref[i] == 0
+                oft_ino[i] = ino
+                oft_pos[i] = 0
+                oft_mount[i] = mount_idx
+                oft_ref[i] = 1
+                return i
+            i += 1
+        -1
+
+Free an open file table entry.
+
+    vfs_oft_free(fid: int)
+        if fid >= 0
+            if fid < VFS_MAX_OPEN_FILES
+                oft_ref[fid] -= 1
+
+Per-process handle table. Each process has up to MAX_HANDLES
+entries. A handle maps to an open file table index. The table
+is stored as a flat array indexed by (pid * MAX_HANDLES + handle).
+Entries are initialized to -1 (unused) at server startup.
+
+    val VFS_MAX_HANDLES = 16
+
+    // 16 processes * 16 handles = 256 entries
+    var handle_oft: [256]int
+    var handle_inited = 0
+
+    vfs_handle_init()
+        var i = 0
+        while i < 256
+            handle_oft[i] = -1
+            i += 1
+        handle_inited = 1
+
+Allocate a handle for a process. Returns the handle number,
+or -1 if the table is full.
+
+    vfs_handle_alloc(pid: int, oft_idx: int) -> int
+        val base = pid * VFS_MAX_HANDLES
+        var i = 0
+        while i < VFS_MAX_HANDLES
+            if handle_oft[base + i] == -1
+                handle_oft[base + i] = oft_idx
+                oft_ref[oft_idx] += 1
+                return i
+            i += 1
+        -1
+
+Close a handle. Decrements the open file refcount and frees
+the handle slot.
+
+    vfs_handle_close(pid: int, handle: int)
+        if handle < 0
+            return
+        if handle >= VFS_MAX_HANDLES
+            return
+        val slot = pid * VFS_MAX_HANDLES + handle
+        val oft_idx = handle_oft[slot]
+        if oft_idx >= 0
+            vfs_oft_free(oft_idx)
+            handle_oft[slot] = -1
+
+Look up a handle. Returns the open file table index, or -1.
+
+    vfs_handle_lookup(pid: int, handle: int) -> int
+        if handle < 0
+            return -1
+        if handle >= VFS_MAX_HANDLES
+            return -1
+        handle_oft[pid * VFS_MAX_HANDLES + handle]
+
+Close all handles for a process (called on process exit).
+
+    vfs_handle_close_all(pid: int)
+        val base = pid * VFS_MAX_HANDLES
+        var i = 0
+        while i < VFS_MAX_HANDLES
+            val oft_idx = handle_oft[base + i]
+            if oft_idx >= 0
+                vfs_oft_free(oft_idx)
+                handle_oft[base + i] = -1
+            i += 1
+
+Mount table. Each entry maps a path prefix to a backend port.
+
+    val VFS_MAX_MOUNTS = 8
+
+    var mount_port: [8]int
+    var mount_prefix_len: [8]int
+    var mount_prefix: [256]byte
+    var mount_count = 0
+
+VFS port and name.
+
+    var vfs_port = -1
+    var vfs_srv_name: [3]byte
+
+TFS backend port (cached).
+
+    var vfs_tfs_port = -1
+    var vfs_tfs_name: [4]byte
+
+    vfs_lookup_tfs() -> int
+        if vfs_tfs_port < 0
+            vfs_tfs_name[0] = 116  // t
+            vfs_tfs_name[1] = 102  // f
+            vfs_tfs_name[2] = 115  // s
+            vfs_tfs_name[3] = 0
+            vfs_tfs_port = port_lookup(&vfs_tfs_name[0])
+        vfs_tfs_port
+
+Mount a filesystem backend at a path prefix. Prefix strings
+are packed 32 bytes apart in the `mount_prefix` array.
+
+    vfs_mount(prefix: *byte, prefix_len: int, port: int) -> int
+        if mount_count >= VFS_MAX_MOUNTS
+            return -1
+        val idx = mount_count
+        mount_port[idx] = port
+        mount_prefix_len[idx] = prefix_len
+        val base = idx * 32
+        var i = 0
+        while i < prefix_len
+            mount_prefix[base + i] = prefix[i]
+            i += 1
+        mount_prefix[base + prefix_len] = 0
+        mount_count += 1
+        0
+
+Resolve a path to a backend port. Returns the port of the
+longest-matching mount prefix, or -1 if no match.
+
+    vfs_resolve(path: *byte, path_len: int) -> int
+        var best_port = -1
+        var best_len = -1
+        var i = 0
+        while i < mount_count
+            val plen = mount_prefix_len[i]
+            if plen <= path_len
+                if plen > best_len
+                    val base = i * 32
+                    var j = 0
+                    var ok = 1
+                    while j < plen
+                        if path[j] != mount_prefix[base + j]
+                            ok = 0
+                            break
+                        j += 1
+                    if ok == 1
+                        best_port = mount_port[i]
+                        best_len = plen
+            i += 1
+        best_port
+
+Determine reply length for a command. On error (status != 0),
+reply is always 1 byte. On success, length depends on command.
+
+    val VFS_CMD_OPEN    = 1
+    val VFS_CMD_READ    = 2
+    val VFS_CMD_WRITE   = 3
+    val VFS_CMD_CREATE  = 4
+    val VFS_CMD_UNLINK  = 5
+    val VFS_CMD_STAT    = 6
+    val VFS_CMD_MKDIR   = 7
+    val VFS_CMD_RMDIR   = 8
+    val VFS_CMD_READDIR = 9
+    val VFS_CMD_SYNC    = 10
+    val VFS_CMD_CHMOD   = 11
+    val VFS_CMD_RENAME  = 12
+    val VFS_CMD_CLOSE   = 13
+    val VFS_CMD_SEEK    = 14
+
+    vfs_reply_len(cmd: int, status: int) -> int
+        if status != 0
+            return 1
+        if cmd == VFS_CMD_OPEN
+            return 9
+        if cmd == VFS_CMD_READ
+            return 5
+        if cmd == VFS_CMD_WRITE
+            return 5
+        if cmd == VFS_CMD_CREATE
+            return 5
+        if cmd == VFS_CMD_STAT
+            return 29
+        if cmd == VFS_CMD_MKDIR
+            return 5
+        if cmd == VFS_CMD_READDIR
+            return 19
+        if cmd == VFS_CMD_SEEK
+            return 5
+        1
+
+Big-endian message helpers (local to VFS).
+
+    vfs_msg_read_i32(buf: *byte, off: int) -> int
+        ((buf[off] & 0xFF) << 24) | ((buf[off + 1] & 0xFF) << 16) | ((buf[off + 2] & 0xFF) << 8) | (buf[off + 3] & 0xFF)
+
+    vfs_msg_write_i32(buf: *byte, off: int, v: int)
+        buf[off] = (v >> 24) & 0xFF
+        buf[off + 1] = (v >> 16) & 0xFF
+        buf[off + 2] = (v >> 8) & 0xFF
+        buf[off + 3] = v & 0xFF
+
+Handle OPEN: resolve path via TFS, allocate open file entry
+and per-process handle, return handle and inode to client.
+Client request:  [cmd(1), path(N)]
+Client reply:    [status(1), handle(4), ino(4)]
+
+    vfs_handle_open(sender: int, buf: *byte, msg_len: int, backend: int)
+        val pid = kernel_get_thread_pid(sender)
+        // Forward OPEN to TFS to get inode
+        var be_reply: [64]byte
+        ipc_send(backend, buf, msg_len, &be_reply[0], 64)
+        if be_reply[0] != 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        val ino = vfs_msg_read_i32(&be_reply[0], 1)
+        // Allocate open file entry
+        val oft_idx = vfs_oft_alloc(ino, 0)
+        if oft_idx < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        // Allocate per-process handle
+        val handle = vfs_handle_alloc(pid, oft_idx)
+        if handle < 0
+            vfs_oft_free(oft_idx)
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        // Reply with handle and ino
+        var reply: [9]byte
+        reply[0] = 0
+        vfs_msg_write_i32(&reply[0], 1, handle)
+        vfs_msg_write_i32(&reply[0], 5, ino)
+        ipc_reply(sender, &reply[0], 9)
+
+Handle READ with position tracking and cross-address-space support.
+Client request:  [cmd(1), handle(4), len(4), buf_addr(4)]  (13 bytes)
+VFS resolves handle → open file table entry, reads at current
+position, forwards to TFS, advances position by bytes_read.
+
+    vfs_handle_read(sender: int, buf: *byte, backend: int)
+        val handle = vfs_msg_read_i32(buf, 1)
+        val len = vfs_msg_read_i32(buf, 5)
+        val client_buf_addr = vfs_msg_read_i32(buf, 9)
+
+        val pid = kernel_get_thread_pid(sender)
+        val fid = vfs_handle_lookup(pid, handle)
+        if fid < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+
+        val ino = oft_ino[fid]
+        val offset = oft_pos[fid]
+
+        // Build TFS-format message: [cmd(1), ino(4), offset(4), len(4), buf_addr(4)]
+        var tfs_msg: [17]byte
+        tfs_msg[0] = 2  // TFS_CMD_READ
+        vfs_msg_write_i32(&tfs_msg[0], 1, ino)
+        vfs_msg_write_i32(&tfs_msg[0], 5, offset)
+        vfs_msg_write_i32(&tfs_msg[0], 9, len)
+
+        val sender_ptbr = kernel_get_thread_ptbr(sender)
+
+        if sender_ptbr == KERNEL_L1_BASE
+            // Same address space — forward directly
+            vfs_msg_write_i32(&tfs_msg[0], 13, client_buf_addr)
+            var be_reply: [64]byte
+            ipc_send(backend, &tfs_msg[0], 17, &be_reply[0], 64)
+            if be_reply[0] == 0
+                val nr = vfs_msg_read_i32(&be_reply[0], 1)
+                oft_pos[fid] += nr
+            ipc_reply(sender, &be_reply[0], 5)
+        else
+            // Different address space — use local buffer
+            var local: [4096]byte
+            var rlen = len
+            if rlen > 4096
+                rlen = 4096
+            vfs_msg_write_i32(&tfs_msg[0], 9, rlen)
+            vfs_msg_write_i32(&tfs_msg[0], 13, int(i64(&local[0])))
+            var be_reply: [64]byte
+            ipc_send(backend, &tfs_msg[0], 17, &be_reply[0], 64)
+            if be_reply[0] == 0
+                val nr = vfs_msg_read_i32(&be_reply[0], 1)
+                if nr > 0
+                    vm_copy_to(sender_ptbr, client_buf_addr, &local[0], nr)
+                oft_pos[fid] += nr
+            ipc_reply(sender, &be_reply[0], 5)
+
+Handle WRITE with position tracking and cross-address-space support.
+Client request:  [cmd(1), fid(4), len(4), buf_addr(4)]  (13 bytes)
+
+    vfs_handle_write(sender: int, buf: *byte, backend: int)
+        val handle = vfs_msg_read_i32(buf, 1)
+        val len = vfs_msg_read_i32(buf, 5)
+        val client_buf_addr = vfs_msg_read_i32(buf, 9)
+
+        val pid = kernel_get_thread_pid(sender)
+        val fid = vfs_handle_lookup(pid, handle)
+        if fid < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+
+        val ino = oft_ino[fid]
+        val offset = oft_pos[fid]
+
+        // Build TFS-format message
+        var tfs_msg: [17]byte
+        tfs_msg[0] = 3  // TFS_CMD_WRITE
+        vfs_msg_write_i32(&tfs_msg[0], 1, ino)
+        vfs_msg_write_i32(&tfs_msg[0], 5, offset)
+        vfs_msg_write_i32(&tfs_msg[0], 9, len)
+
+        val sender_ptbr = kernel_get_thread_ptbr(sender)
+
+        if sender_ptbr == KERNEL_L1_BASE
+            vfs_msg_write_i32(&tfs_msg[0], 13, client_buf_addr)
+            var be_reply: [64]byte
+            ipc_send(backend, &tfs_msg[0], 17, &be_reply[0], 64)
+            if be_reply[0] == 0
+                val nw = vfs_msg_read_i32(&be_reply[0], 1)
+                oft_pos[fid] += nw
+            ipc_reply(sender, &be_reply[0], 5)
+        else
+            var local: [4096]byte
+            var wlen = len
+            if wlen > 4096
+                wlen = 4096
+            vm_copy_from(sender_ptbr, client_buf_addr, &local[0], wlen)
+            vfs_msg_write_i32(&tfs_msg[0], 9, wlen)
+            vfs_msg_write_i32(&tfs_msg[0], 13, int(i64(&local[0])))
+            var be_reply: [64]byte
+            ipc_send(backend, &tfs_msg[0], 17, &be_reply[0], 64)
+            if be_reply[0] == 0
+                val nw = vfs_msg_read_i32(&be_reply[0], 1)
+                oft_pos[fid] += nw
+            ipc_reply(sender, &be_reply[0], 5)
+
+Handle CLOSE: resolve handle, free it and decrement oft refcount.
+Client request:  [cmd(1), handle(4)]
+Client reply:    [status(1)]
+
+    vfs_do_close(sender: int, buf: *byte)
+        val handle = vfs_msg_read_i32(buf, 1)
+        val pid = kernel_get_thread_pid(sender)
+        val fid = vfs_handle_lookup(pid, handle)
+        var reply: [1]byte
+        if fid < 0
+            reply[0] = -1
+        else
+            vfs_handle_close(pid, handle)
+            reply[0] = 0
+        ipc_reply(sender, &reply[0], 1)
+
+Handle SEEK: resolve handle, adjust file position.
+Client request:  [cmd(1), handle(4), offset(4), whence(1)]
+Client reply:    [status(1), position(4)]
+whence: 0 = SEEK_SET, 1 = SEEK_CUR
+
+    vfs_do_seek(sender: int, buf: *byte)
+        val handle = vfs_msg_read_i32(buf, 1)
+        val offset = vfs_msg_read_i32(buf, 5)
+        val whence = int(buf[9])
+        val pid = kernel_get_thread_pid(sender)
+        val fid = vfs_handle_lookup(pid, handle)
+        var reply: [5]byte
+        if fid < 0
+            reply[0] = -1
+            ipc_reply(sender, &reply[0], 1)
+            return
+        if whence == 0
+            oft_pos[fid] = offset
+        else if whence == 1
+            oft_pos[fid] += offset
+        reply[0] = 0
+        vfs_msg_write_i32(&reply[0], 1, oft_pos[fid])
+        ipc_reply(sender, &reply[0], 5)
+
+The VFS server loop. Registers as "fs", waits for TFS to
+come up, mounts root on TFS, then proxies all requests to
+the appropriate backend.
+
+    vfs_server()
+        // Initialize handle table
+        vfs_handle_init()
+
+        // Register as "fs"
+        vfs_srv_name[0] = 102  // f
+        vfs_srv_name[1] = 115  // s
+        vfs_srv_name[2] = 0
+        vfs_port = port_create()
+        port_register(vfs_port, &vfs_srv_name[0])
+
+        // Wait for TFS to register
+        while vfs_lookup_tfs() < 0
+            sleep(1)
+
+        // Mount root "/" on TFS
+        var root_prefix: [2]byte
+        root_prefix[0] = 47  // /
+        root_prefix[1] = 0
+        vfs_mount(&root_prefix[0], 1, vfs_tfs_port)
+
+        // Server loop: receive requests, forward to backend, relay reply
+        var buf: [128]byte
+        while 1 == 1
+            val sender = ipc_recv(vfs_port, &buf[0], 128)
+            if sender >= 0
+                val msg_len = ipc_last_msg_len()
+                val cmd = int(buf[0])
+
+                // Resolve backend (all inodes belong to root fs for now)
+                val backend = mount_port[0]
+
+                if backend < 0
+                    var err_reply: [1]byte
+                    err_reply[0] = -1
+                    ipc_reply(sender, &err_reply[0], 1)
+                else if cmd == VFS_CMD_OPEN
+                    vfs_handle_open(sender, &buf[0], msg_len, backend)
+                else if cmd == VFS_CMD_READ
+                    vfs_handle_read(sender, &buf[0], backend)
+                else if cmd == VFS_CMD_WRITE
+                    vfs_handle_write(sender, &buf[0], backend)
+                else if cmd == VFS_CMD_CLOSE
+                    vfs_do_close(sender, &buf[0])
+                else if cmd == VFS_CMD_SEEK
+                    vfs_do_seek(sender, &buf[0])
+                else
+                    // All other commands: forward and relay
+                    var be_reply: [64]byte
+                    ipc_send(backend, &buf[0], msg_len, &be_reply[0], 64)
+                    val rlen = vfs_reply_len(cmd, int(be_reply[0]))
+                    ipc_reply(sender, &be_reply[0], rlen)

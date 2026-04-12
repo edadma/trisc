@@ -38,6 +38,7 @@ Command bytes for TFS and TTY server protocols.
     val FS_CMD_OPEN  = 1
     val FS_CMD_READ  = 2
     val FS_CMD_WRITE = 3
+    val FS_CMD_CLOSE = 13
     val TTY_CMD_PUTS = 3
 
 Big-endian message helpers — pack/unpack 32-bit integers
@@ -134,7 +135,7 @@ Write a string to the TTY server.
         var reply: [1]byte
         ipc_send(port, &msg[0], m + 3, &reply[0], 1)
 
-Open a file by path. Returns an inode number or -1 on error.
+Open a file by path. Returns a file ID or -1 on error.
 
     open(path: string) -> int
         var fs_name: [3]byte
@@ -155,16 +156,16 @@ Open a file by path. Returns an inode number or -1 on error.
         msg[0] = byte(FS_CMD_OPEN)
         for var i = 0; i < m; i++
             msg[i + 1] = pp[i]
-        var reply: [5]byte
-        ipc_send(port, &msg[0], m + 1, &reply[0], 5)
+        var reply: [9]byte
+        ipc_send(port, &msg[0], m + 1, &reply[0], 9)
         if reply[0] != 0
             return -1
         msg_read_i32(&reply[0], 1)
 
-Read from an open file. Returns the number of bytes read,
-or -1 on error.
+Read from an open file. Position is tracked by VFS.
+Returns the number of bytes read, or -1 on error.
 
-    read(ino: int, buf: *byte, offset: int, count: int) -> int
+    read(fid: int, buf: *byte, count: int) -> int
         var fs_name: [3]byte
         fs_name[0] = byte('f')
         fs_name[1] = byte('s')
@@ -172,20 +173,34 @@ or -1 on error.
         val port = port_lookup(&fs_name[0])
         if port < 0
             return -1
-        // Grant-based: pass buffer address, server writes directly
-        var msg: [17]byte
+        var msg: [13]byte
         msg[0] = byte(FS_CMD_READ)
-        msg_write_i32(&msg[0], 1, ino)
-        msg_write_i32(&msg[0], 5, offset)
-        msg_write_i32(&msg[0], 9, count)
-        msg_write_i32(&msg[0], 13, int(i64(buf)))
+        msg_write_i32(&msg[0], 1, fid)
+        msg_write_i32(&msg[0], 5, count)
+        msg_write_i32(&msg[0], 9, int(i64(buf)))
         var reply: [5]byte
-        val result = ipc_send(port, &msg[0], 17, &reply[0], 5)
+        val result = ipc_send(port, &msg[0], 13, &reply[0], 5)
         if result != 0
             return -1
         if reply[0] != 0
             return -1
         msg_read_i32(&reply[0], 1)
+
+Close an open file.
+
+    close(fid: int)
+        var fs_name: [3]byte
+        fs_name[0] = byte('f')
+        fs_name[1] = byte('s')
+        fs_name[2] = 0
+        val port = port_lookup(&fs_name[0])
+        if port < 0
+            return
+        var msg: [5]byte
+        msg[0] = byte(FS_CMD_CLOSE)
+        msg_write_i32(&msg[0], 1, fid)
+        var reply: [1]byte
+        ipc_send(port, &msg[0], 5, &reply[0], 1)
 
 Program arguments — stored at a well-known address by the
 shell before launching the program. This convention will be
