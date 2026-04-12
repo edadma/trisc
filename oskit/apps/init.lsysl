@@ -17,18 +17,18 @@ read config files until the filesystem is up.
     module oskit.apps.init
 
     import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp}
-    import oskit.services.{sleep}
+    import oskit.servers.{rs_main, rs_alloc_slot, rs_add_server, tfs_server, pm_server, vfs_server}
     import oskit.drivers.disk.{disk_server}
-    import oskit.servers.{tfs_server, pm_server, vfs_server}
-    import oskit.fs.{fs_open, fs_read, fs_close}
     import oskit.drivers.tty.{tty_server}
+    import oskit.fs.{fs_open, fs_read, fs_close}
     import oskit.apps.login.{login}
     import oskit.apps.nsh.{nsh}
 
 Stack slot counter. Init is slot 0 (created by kernel_main).
 Each server and session gets the next slot.
 
-    var next_stack_slot = 1
+
+
 
 Parse `/etc/ttytab` and spawn a thread for each entry.
 Format: `terminal command` — one entry per line.
@@ -39,15 +39,13 @@ Supported commands: `login`, `nsh`.
         val fid = fs_open("/etc/ttytab")
         if fid < 0
             // No ttytab — fall back to single login
-            val s = next_stack_slot
-            next_stack_slot += 1
+            val s = rs_alloc_slot()
             create_thread(login, kernel_stack_usp(s), kernel_stack_ssp(s), "login")
             return
         val nr = fs_read(fid, buf, 256)
         fs_close(fid)
         if nr <= 0
-            val s = next_stack_slot
-            next_stack_slot += 1
+            val s = rs_alloc_slot()
             create_thread(login, kernel_stack_usp(s), kernel_stack_ssp(s), "login")
             return
 
@@ -118,8 +116,7 @@ Supported commands: `login`, `nsh`.
 
             // Spawn based on command
             if cmd_len > 0
-                val s = next_stack_slot
-                next_stack_slot += 1
+                val s = rs_alloc_slot()
                 val usp = kernel_stack_usp(s)
                 val ssp = kernel_stack_ssp(s)
                 if cmd_len == 5
@@ -136,34 +133,22 @@ Supported commands: `login`, `nsh`.
                                 create_thread(nsh, usp, ssp, "nsh")
 
     init()
-        // Start disk server first — TFS depends on it
-        val disk_slot = next_stack_slot
-        next_stack_slot += 1
-        create_thread(disk_server, kernel_stack_usp(disk_slot), kernel_stack_ssp(disk_slot), "disk")
-        sleep(5)
+        // Register servers for RS to start (dependency order)
+        var n: [5]byte
+        n[0] = 100; n[1] = 105; n[2] = 115; n[3] = 107; n[4] = 0  // disk
+        rs_add_server(i64(disk_server), &n[0], 4)
+        n[0] = 116; n[1] = 102; n[2] = 115; n[3] = 0  // tfs
+        rs_add_server(i64(tfs_server), &n[0], 3)
+        n[0] = 116; n[1] = 116; n[2] = 121; n[3] = 0  // tty
+        rs_add_server(i64(tty_server), &n[0], 3)
+        n[0] = 112; n[1] = 109; n[2] = 0  // pm
+        rs_add_server(i64(pm_server), &n[0], 2)
+        n[0] = 118; n[1] = 102; n[2] = 115; n[3] = 0  // vfs
+        rs_add_server(i64(vfs_server), &n[0], 3)
 
-        // Start TFS, TTY, and PM servers
-        val tfs_slot = next_stack_slot
-        next_stack_slot += 1
-        create_thread(tfs_server, kernel_stack_usp(tfs_slot), kernel_stack_ssp(tfs_slot), "tfs")
+        // Run RS inline — starts all servers with synchronous
+        // handshake, no sleeps, no extra thread
+        rs_main()
 
-        val tty_slot = next_stack_slot
-        next_stack_slot += 1
-        create_thread(tty_server, kernel_stack_usp(tty_slot), kernel_stack_ssp(tty_slot), "tty")
-
-        val pm_slot = next_stack_slot
-        next_stack_slot += 1
-        create_thread(pm_server, kernel_stack_usp(pm_slot), kernel_stack_ssp(pm_slot), "pm")
-
-        // VFS server — registers as "fs", mounts root on TFS
-        val vfs_slot = next_stack_slot
-        next_stack_slot += 1
-        create_thread(vfs_server, kernel_stack_usp(vfs_slot), kernel_stack_ssp(vfs_slot), "vfs")
-
-        // Wait for servers to initialize and register ports.
-        // VFS needs time to find TFS and mount root; 5 ticks was
-        // too tight with the extra server thread.
-        sleep(500)
-
-        // Read /etc/ttytab and spawn sessions
+        // All servers up — read /etc/ttytab and spawn sessions
         spawn_sessions()

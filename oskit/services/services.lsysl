@@ -145,6 +145,19 @@ Syscall numbers:
     event_clear(id: int, bits: int)
         syscall(SYS_EVENT_CLEAR, (id << 24) | (bits & 0xFFFFFF))
 
+RS (Restart Server) ready signal. Each server calls rs_ready()
+after completing initialization. The notification goes to the
+RS thread which waits for it before starting the next server.
+
+    var rs_tid = -1
+
+    rs_set_tid(tid: int)
+        rs_tid = tid
+
+    rs_ready()
+        if rs_tid >= 0
+            notify_send_to(rs_tid, 1)
+
 Packs slot (8 bits) and value (24 bits) into one syscall arg.
 Slot range: 0-3. Value range: 0 to 16777215.
 

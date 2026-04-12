@@ -21,6 +21,7 @@ the ramdisk format — e.g. 4096 in the demo image).
     module oskit.drivers.disk
 
     import oskit.ipc.*
+    import oskit.services.rs_ready
 
     val DISK_CMD_READ     = 1
     val DISK_CMD_WRITE    = 2
@@ -128,6 +129,9 @@ then loops handling block I/O requests.
         // Create and register port
         disk_port = port_create()
         port_register(disk_port, &disk_name[0])
+
+        // Signal RS that disk is ready
+        rs_ready()
 
         // Server loop
         var buf: [16]byte

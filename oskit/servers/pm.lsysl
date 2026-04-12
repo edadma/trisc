@@ -21,7 +21,7 @@ IPC commands:
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
     import oskit.kernel.{reap_process, kernel_kill_process, kernel_register_pm, kernel_get_thread_pid, create_process, vm_create_process_pt, kernel_set_thread_ptbr, vm_set_ptbr, processes, threads, current_thread, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
     import oskit.config.{MAX_PROCESSES, MAX_WAITERS, KERNEL_L1_BASE}
-    import oskit.services.{notify_read_self, thread_id}
+    import oskit.services.{notify_read_self, thread_id, rs_ready}
     import oskit.loader.load_tof
 
     val PM_CMD_WAITPID = 1
@@ -273,6 +273,9 @@ IPC messages (waitpid/kill from userspace) or notifications
         name[1] = byte('m')
         name[2] = 0
         port_register(port, &name[0])
+
+        // Signal RS that PM is ready
+        rs_ready()
 
         var buf: [128]byte
         while true

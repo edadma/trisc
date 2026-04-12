@@ -12,6 +12,7 @@ to the active console's input buffer.
     import oskit.services.{thread_id, putc}
     import oskit.ipc.*
     import oskit.drivers.kbd.*
+    import oskit.services.rs_ready
 
     val TTY_CMD_WRITE   = 1
     val TTY_CMD_READ    = 2
@@ -367,6 +368,9 @@ initializes keyboard, then loops handling messages.
         port_register(tty_port, &tty_name[0])
         tty_tid = thread_id()
         keyboard_set_notify(tty_tid)
+
+        // Signal RS that TTY is ready
+        rs_ready()
 
         // Server loop — waits for IPC messages OR keyboard notifications
         var buf: [128]byte

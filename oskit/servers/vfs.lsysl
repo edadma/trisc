@@ -7,7 +7,7 @@ via the mount table. Currently only root ("/") is mounted on TFS.
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv, ipc_reply, ipc_send, ipc_last_msg_len}
-    import oskit.services.{sleep}
+    import oskit.services.{sleep, rs_ready}
     import oskit.kernel.{kernel_get_thread_ptbr, kernel_get_thread_pid, vm_copy_to, vm_copy_from}
     import oskit.config.{KERNEL_L1_BASE, MAX_PROCESSES}
 
@@ -721,6 +721,9 @@ the appropriate backend.
         vfs_scheme[2] = 115  // s
         vfs_scheme[3] = 0
         vfs_register_scheme(&vfs_scheme[0], 3, vfs_tfs_port)
+
+        // Signal RS that VFS is ready
+        rs_ready()
 
         // Server loop: receive requests, forward to backend, relay reply
         var buf: [128]byte

@@ -35,6 +35,7 @@ Commands:
     import oskit.drivers.disk.{disk_read, disk_write}
     import oskit.kernel.{kernel_get_thread_ptbr, vm_copy_to, vm_copy_from}
     import oskit.config.KERNEL_L1_BASE
+    import oskit.services.rs_ready
 
     val TFS_CMD_OPEN    = 1
     val TFS_CMD_READ    = 2
@@ -326,6 +327,9 @@ since tfs_init() reads the superblock via rd_read → disk_read.
 
         // Initialize TFS (reads superblock from disk server)
         tfs_init()
+
+        // Signal RS that TFS is ready
+        rs_ready()
 
         // Server loop — 64-byte messages (Minix 3 style).
         // Bulk data uses grant-based I/O (buffer address in message).
