@@ -2,11 +2,7 @@ OSKit VFS Server — Virtual Filesystem Layer
 
 Minix 3-style VFS that owns the "fs" namespace. Clients talk to
 VFS; VFS routes requests to the appropriate filesystem backend
-via the mount table.
-
-Phase 0c: single mount (root → TFS). All requests are forwarded
-to TFS transparently. Multi-mount and path prefix stripping come
-in later phases.
+via the mount table. Currently only root ("/") is mounted on TFS.
 
     module oskit.servers
 
@@ -16,7 +12,6 @@ in later phases.
     import oskit.config.KERNEL_L1_BASE
 
 Mount table. Each entry maps a path prefix to a backend port.
-For Phase 0c only root ("/") is mounted.
 
     val VFS_MAX_MOUNTS = 8
 

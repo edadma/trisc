@@ -3,7 +3,6 @@ OSKit FS Client Library
 
 User-facing filesystem API. Talks to VFS (port "fs"), which
 routes requests to the appropriate backend filesystem server.
-The port is looked up lazily and cached.
 
 The port is looked up lazily on first use and cached, so
 each call after the first is a single IPC send — no per-call
