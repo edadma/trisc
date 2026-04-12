@@ -257,13 +257,81 @@ include = ["disk", "keyboard"]
 
 **What changes:**
 - `oskit/servers/vfs.lsysl` — scheme registry, connect routing
-- `oskit/drivers/tty/tty.lsysl` — register as "tty" scheme handler
-- `oskit/ulib/ulib.lsysl` — `connect()` function
+- `oskit/fs/client.lsysl` — `fs_connect()` function
 
 **What works when done:**
 - `connect("/etc/passwd")` → handle to file
-- `connect("tty:0")` → handle to terminal
+- `connect("vfs:/etc/passwd")` → same, explicit scheme
 - New servers can register new schemes without kernel changes
+
+---
+
+## Phase 3a: TTY as a VFS scheme handler
+
+**Goal:** `connect("tty:0")` returns a handle backed by the terminal. Read returns keyboard input, write sends to display.
+
+**Design:**
+- TTY server gains READ and WRITE IPC commands (currently only has PUTS and per-char I/O)
+- VFS registers "tty" scheme pointing to TTY server's port
+- VFS creates open file table entries of type "tty" (no TFS inode, no position)
+- Read/write on TTY handles forward to TTY server instead of TFS
+
+**What changes:**
+- `oskit/drivers/tty/tty.lsysl` — add TTY_CMD_READ (line-buffered), TTY_CMD_WRITE handlers
+- `oskit/servers/vfs.lsysl` — register "tty" scheme, route TTY-backed handles to TTY server
+- VFS open file table: add `oft_type` field (0=file, 1=tty) to distinguish backends
+
+**What works when done:**
+- `connect("tty:0")` → handle to terminal
+- `read(handle, buf, len)` on TTY handle → reads keyboard input
+- `write(handle, buf, len)` on TTY handle → writes to display
+
+---
+
+## Phase 3b: Handle inheritance in spawn
+
+**Goal:** Parent process passes handles to child via PM_SPAWN.
+
+**Design:**
+- PM_SPAWN gains a handle map: array of (parent_handle, child_slot) pairs
+- PM tells VFS to set up child's handle table by copying specified entries from parent
+- VFS gains a `VFS_CMD_INHERIT` command: given parent PID, child PID, and handle map, copies handles
+- No implicit inheritance — parent explicitly lists which handles to pass
+
+**What changes:**
+- `oskit/servers/pm.lsysl` — PM_SPAWN accepts handle map, sends VFS_CMD_INHERIT
+- `oskit/servers/vfs.lsysl` — VFS_CMD_INHERIT handler copies handles between processes
+- `oskit/servers/pm.lsysl` client — pm_spawn gains handle map parameter
+
+**What works when done:**
+- Parent opens a file, spawns child with that handle → child can read/write it
+- Foundation for stdin/stdout/stderr setup
+
+---
+
+## Phase 3c: Default stdin/stdout/stderr
+
+**Goal:** Every external program gets handles 0/1/2 (stdin/stdout/stderr) pointing to the terminal by default.
+
+**Design:**
+- Before spawning an external program, nsh opens `connect("tty:0")` three times to get TTY handles
+- nsh passes these as handles 0, 1, 2 in the spawn handle map
+- External programs use `read(0, ...)` for input and `write(1, ...)` for output
+- ulib replaces `puts()` with `write(1, ...)` and adds `getline()` via `read(0, ...)`
+
+**What changes:**
+- `oskit/apps/nsh.lsysl` — open TTY handles, pass in spawn handle map
+- `oskit/ulib/ulib.lsysl` — read/write use handle 0/1 instead of direct TTY IPC
+- `oskit/bin/*.lsysl` — use stdin/stdout handles (cat reads file handle, writes stdout; echo writes stdout)
+- NEW: `oskit/bin/grep.lsysl` — filter lines by substring match
+- NEW: `oskit/bin/wc.lsysl` — count lines/words/bytes
+
+**What works when done:**
+- `cat /etc/passwd` reads file, writes to stdout (TTY)
+- `echo hello` writes to stdout
+- `grep root /etc/passwd` filters lines containing "root"
+- `wc /etc/passwd` prints line/word/byte counts
+- All programs work identically whether stdout is TTY or (later) pipe
 
 ---
 
@@ -272,19 +340,21 @@ include = ["disk", "keyboard"]
 **Goal:** `create_pipe()` returns two handles. Shell can do `cmd1 | cmd2`.
 
 **Design:**
-- Pipe server manages byte buffers
-- `create_pipe()` → (read_handle, write_handle)
-- read blocks when empty, returns 0 (EOF) when write end closed
-- write blocks when full, fails when read end closed
-- Shell: `cmd1 | cmd2` → create pipe, spawn cmd1 with stdout=write_end, spawn cmd2 with stdin=read_end
+- Pipe buffers integrated into VFS (not a separate server)
+- `create_pipe()` → (read_handle, write_handle) via VFS IPC
+- Read blocks when empty, returns 0 (EOF) when write end closed
+- Write blocks when full, fails when read end closed
+- Shell: `cmd1 | cmd2` → create pipe, spawn cmd1 with stdout=pipe_write, spawn cmd2 with stdin=pipe_read
 
 **What changes:**
-- NEW: `oskit/servers/pipe.lsysl` (or integrated into VFS)
-- `oskit/apps/nsh.lsysl` — pipe syntax parsing, spawn with redirected handles
+- `oskit/servers/vfs.lsysl` — pipe buffer table, create_pipe, pipe-aware read/write
+- `oskit/apps/nsh.lsysl` — pipe syntax parsing (`|`), create pipe, spawn with redirected handles
+- `oskit/fs/client.lsysl` — `fs_create_pipe()` function
 
 **What works when done:**
 - `echo hello | cat` works
-- `cat /etc/passwd | grep root` works (once grep exists)
+- `cat /etc/passwd | grep root` works
+- `cat /etc/passwd | grep root | wc` works (multi-stage pipeline)
 
 ---
 
