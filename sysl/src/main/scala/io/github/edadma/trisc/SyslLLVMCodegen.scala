@@ -17,6 +17,11 @@ class SyslLLVMCodegen:
   private val emittedFunctions = new mutable.HashSet[String] // track emitted function names to avoid duplicates
   // C library functions declared in the preamble — skip any extern decl with these names
   private val preambleNames = Set("putchar", "printf", "snprintf", "malloc", "strlen", "memcpy", "memcmp", "memset", "free", "write", "fflush", "abort", "exit")
+
+  /** Resolve a struct type to its canonical (field-populated) version from structTypes.
+    * Handles stale placeholder StructType(_, Nil) references that can appear in expression types. */
+  private def canonicalStruct(st: SyslType.StructType): SyslType.StructType =
+    structTypes.getOrElse(st.name, st)
   private var stringCounter = 0
   private var regCounter = 0
   private var labelCounter = 0
@@ -700,14 +705,14 @@ class SyslLLVMCodegen:
       case TFieldAssignStmt(obj, fieldIndex, value) =>
         val (st, structLt, addr) = obj.typ match
           case pt: SyslType.PtrType =>
-            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val inner = canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType])
             val slt = llvmType(inner)
             val ptr = genExpr(obj)
             val cast = newReg()
             emit(s"  $cast = bitcast i8* $ptr to $slt*")
             (inner, slt, cast)
           case st: SyslType.StructType =>
-            (st, llvmType(obj.typ), genStructAddr(obj))
+            (canonicalStruct(st), llvmType(obj.typ), genStructAddr(obj))
           case other =>
             throw new RuntimeException(s"TFieldAssignStmt on non-struct type: $other")
         val ft = st.fields(fieldIndex)._2
@@ -754,14 +759,14 @@ class SyslLLVMCodegen:
       case TFieldCompoundAssignStmt(obj, fieldIndex, op, value) =>
         val (st, structLt, addr) = obj.typ match
           case pt: SyslType.PtrType =>
-            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val inner = canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType])
             val slt = llvmType(inner)
             val ptr = genExpr(obj)
             val cast = newReg()
             emit(s"  $cast = bitcast i8* $ptr to $slt*")
             (inner, slt, cast)
           case st: SyslType.StructType =>
-            (st, llvmType(obj.typ), genStructAddr(obj))
+            (canonicalStruct(st), llvmType(obj.typ), genStructAddr(obj))
           case other =>
             throw new RuntimeException(s"TFieldCompoundAssignStmt on non-struct type: $other")
         val ft = st.fields(fieldIndex)._2
@@ -852,7 +857,11 @@ class SyslLLVMCodegen:
   private def genExpr(expr: TExpr): String =
     val t = exprType(expr)
     expr match
-      case TIntLit(n, _) => n.toString
+      case TIntLit(n, typ) =>
+        // Pointer-typed integer literals (typically zero-init of *T) must use "null"
+        typ match
+          case _: SyslType.PtrType | _: SyslType.RefType if n == 0 => "null"
+          case _ => n.toString
       case TFloatLit(d, _) =>
         // Use LLVM hex format for exact representation
         val bits = java.lang.Double.doubleToRawLongBits(d)
@@ -1320,7 +1329,7 @@ class SyslLLVMCodegen:
       case TFieldAccess(obj, fieldIndex, fieldType) =>
         val (st, structLt, addr) = obj.typ match
           case pt: SyslType.PtrType =>
-            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val inner = canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType])
             val slt = llvmType(inner)
             // Dereference pointer to struct
             val ptr = genExpr(obj)
@@ -1328,7 +1337,7 @@ class SyslLLVMCodegen:
             emit(s"  $cast = bitcast i8* $ptr to $slt*")
             (inner, slt, cast)
           case st: SyslType.StructType =>
-            (st, llvmType(obj.typ), genStructAddr(obj))
+            (canonicalStruct(st), llvmType(obj.typ), genStructAddr(obj))
           case other =>
             throw new RuntimeException(s"TFieldAccess on non-struct type: $other")
         val gep = newReg()
@@ -1515,14 +1524,14 @@ class SyslLLVMCodegen:
         // Get a pointer to a struct field — used for method calls on nested struct fields
         val (st, structLt, addr) = obj.typ match
           case pt: SyslType.PtrType =>
-            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val inner = canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType])
             val slt = llvmType(inner)
             val ptr = genExpr(obj)
             val cast = newReg()
             emit(s"  $cast = bitcast i8* $ptr to $slt*")
             (inner, slt, cast)
           case st: SyslType.StructType =>
-            (st, llvmType(obj.typ), genStructAddr(obj))
+            (canonicalStruct(st), llvmType(obj.typ), genStructAddr(obj))
           case other =>
             throw new RuntimeException(s"TAddrOfField on non-struct type: $other")
         val gep = newReg()
@@ -2350,14 +2359,14 @@ class SyslLLVMCodegen:
       case TFieldPostInc(obj, fieldIndex, typ) =>
         val (st, structLt, addr) = obj.typ match
           case pt: SyslType.PtrType =>
-            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val inner = canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType])
             val slt = llvmType(inner)
             val ptr = genExpr(obj)
             val cast = newReg()
             emit(s"  $cast = bitcast i8* $ptr to $slt*")
             (inner, slt, cast)
           case st: SyslType.StructType =>
-            (st, llvmType(obj.typ), genStructAddr(obj))
+            (canonicalStruct(st), llvmType(obj.typ), genStructAddr(obj))
           case other =>
             throw new RuntimeException(s"TFieldPostInc on non-struct type: $other")
         val ft = st.fields(fieldIndex)._2
@@ -2377,14 +2386,14 @@ class SyslLLVMCodegen:
       case TFieldPostDec(obj, fieldIndex, typ) =>
         val (st, structLt, addr) = obj.typ match
           case pt: SyslType.PtrType =>
-            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val inner = canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType])
             val slt = llvmType(inner)
             val ptr = genExpr(obj)
             val cast = newReg()
             emit(s"  $cast = bitcast i8* $ptr to $slt*")
             (inner, slt, cast)
           case st: SyslType.StructType =>
-            (st, llvmType(obj.typ), genStructAddr(obj))
+            (canonicalStruct(st), llvmType(obj.typ), genStructAddr(obj))
           case other =>
             throw new RuntimeException(s"TFieldPostDec on non-struct type: $other")
         val ft = st.fields(fieldIndex)._2
@@ -2454,7 +2463,7 @@ class SyslLLVMCodegen:
       case TFieldAccess(innerObj, fieldIndex, _) =>
         val (structLt, addr) = innerObj.typ match
           case pt: SyslType.PtrType =>
-            val slt = llvmType(pt.pointee.asInstanceOf[SyslType.StructType])
+            val slt = llvmType(canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType]))
             val ptr = genExpr(innerObj)
             val cast = newReg()
             emit(s"  $cast = bitcast i8* $ptr to $slt*")
@@ -2550,9 +2559,10 @@ class SyslLLVMCodegen:
     case SyslType.DoubleType => "double"
     case SyslType.VoidType => "void"
     case SyslType.StringType => "%struct.string"
-    case st @ SyslType.StructType(name, _) =>
+    case SyslType.StructType(name, fields) =>
       // Auto-register struct types encountered in signatures (e.g., built-in tuples)
-      if !structTypes.contains(name) then structTypes(name) = st
+      if !structTypes.contains(name) && fields.nonEmpty then
+        structTypes(name) = SyslType.StructType(name, fields)
       s"%struct.$name"
     case SyslType.ArrayType(elem, size) => s"[$size x ${llvmType(elem)}]"
     case et: SyslType.EnumType => s"[${et.sizeOf} x i8]" // opaque byte array for tagged union

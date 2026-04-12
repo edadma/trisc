@@ -1974,4 +1974,100 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    1
         |""".stripMargin) shouldBe 1
   }
+
+  // ===== std.container.list =====
+  //
+  // The list module uses the `val slot = (new [1]T)[:]; &slot[0]` idiom to
+  // return heap-allocated pointers from functions. In the LLVM backend's
+  // current refcounting model, the local slice's scope-exit cleanup frees the
+  // backing storage before the caller can use the returned pointer — a
+  // use-after-free. Fixing this requires proper escape analysis or an
+  // alternate ownership model. For now, only the trivial "new and empty"
+  // case works (which doesn't trigger the bug).
+  //
+  // TODO: fix ownership model to support `&slice[i]` escapes, then un-ignore
+  // the remaining tests.
+
+  "std.container.list new and empty" in {
+    llvmExitWithStd(
+      """import std.container.list.*
+        |
+        |main() -> int
+        |    val l = new_list[int]()
+        |    if l.len() != 0 then return 0
+        |    if i64(l.front()) != 0 then return 0
+        |    if i64(l.back()) != 0 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.container.list push_front and push_back" ignore { // TODO: &slot[0] dangles after scope cleanup
+    llvmExitWithStd(
+      """import std.container.list.*
+        |
+        |main() -> int
+        |    val l = new_list[int]()
+        |    val a = l.push_front(1)
+        |    val b = l.push_back(2)
+        |    if l.len() != 2 then return 0
+        |    if l.front() != a then return 0
+        |    if l.back() != b then return 0
+        |    if a.value != 1 then return 0
+        |    if b.value != 2 then return 0
+        |    if a.next_elem() != b then return 0
+        |    if b.prev_elem() != a then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.container.list remove" ignore { // TODO: &slot[0] dangles after scope cleanup
+    llvmExitWithStd(
+      """import std.container.list.*
+        |
+        |main() -> int
+        |    val l = new_list[int]()
+        |    val x = l.push_back(10)
+        |    val y = l.push_back(20)
+        |    if l.remove(x) != 10 then return 0
+        |    if l.len() != 1 then return 0
+        |    if l.front() != y then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.container.list insert_before and after" ignore { // TODO: &slot[0] dangles after scope cleanup
+    llvmExitWithStd(
+      """import std.container.list.*
+        |
+        |main() -> int
+        |    val l = new_list[int]()
+        |    val mid = l.push_back(2)
+        |    val lo = l.insert_before(1, mid)
+        |    val hi = l.insert_after(3, mid)
+        |    if l.len() != 3 then return 0
+        |    if lo.value != 1 then return 0
+        |    if mid.value != 2 then return 0
+        |    if hi.value != 3 then return 0
+        |    if lo.next_elem() != mid then return 0
+        |    if mid.next_elem() != hi then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.container.list move_to_front" ignore { // TODO: &slot[0] dangles after scope cleanup
+    llvmExitWithStd(
+      """import std.container.list.*
+        |
+        |main() -> int
+        |    val l = new_list[int]()
+        |    val a = l.push_back(1)
+        |    val b = l.push_back(2)
+        |    val c = l.push_back(3)
+        |    l.move_to_front(c)
+        |    if l.front() != c then return 0
+        |    if c.next_elem() != a then return 0
+        |    if l.back() != b then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
 }
