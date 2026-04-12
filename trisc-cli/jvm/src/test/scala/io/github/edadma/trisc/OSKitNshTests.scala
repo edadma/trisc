@@ -206,7 +206,7 @@ import oskit.apps.init.{init}
   "NSH: hello prints greeting" taggedAs Slow in {
     val keys        = typeString("hello\n", startTick = 500000, spacing = 12000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 80000000)
-    output should include("Hello")
+    output should include("Hello, world!")
   }
 
 
@@ -313,7 +313,7 @@ import oskit.apps.init.{init}
     val ramdisk = new Ramdisk(
       Runtime.ramdiskAddress,
       ram,
-      sectors = 64,
+      sectors = 128,
       sectorSize = 4096,
       intc,
       irq = 3,
@@ -392,6 +392,12 @@ import oskit.apps.init.{init}
     val keys = loginAndType("hello\n")
     val (_, output) = runLogin(scheduledKeys = keys, maxCycles = 180000000)
     output should include("Hello")
+  }
+
+  "Login: echo after login" taggedAs Slow in {
+    val keys = loginAndType("echo hi\n")
+    val (_, output) = runLogin(scheduledKeys = keys, maxCycles = 180000000)
+    output should include("hi")
   }
 
   "Login: user ed gets home /home/ed" taggedAs Slow in {

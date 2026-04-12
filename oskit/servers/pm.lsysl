@@ -166,8 +166,8 @@ handles from parent to child, and returns the PID.
 
     val SPAWN_PROG_ARGS_ADDR = 0xBF000
     val SPAWN_PROG_ARGS_MAX  = 240
-    val SPAWN_PROG_USP       = 0xD0000
-    val SPAWN_PROG_SSP       = 0xCF000
+    val SPAWN_PROG_USP       = 0xFC000
+    val SPAWN_PROG_SSP       = 0xFE000
 
     pm_handle_spawn(sender: int, buf: *byte)
         val path_len = int(buf[1])

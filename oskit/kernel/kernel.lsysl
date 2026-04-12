@@ -635,7 +635,13 @@ would monotonically bump thread_count and walk off the end of threads[].
                 return -1
             idx = thread_count
             thread_count += 1
+        // Build stack frame with the child's PTBR so writes go to the
+        // correct physical pages (SSP is in program-mapped region)
+        if ptbr_val != KERNEL_L1_BASE
+            vm_set_ptbr(ptbr_val)
         val sp = build_stack_frame(entry_point, usp, ssp)
+        if ptbr_val != KERNEL_L1_BASE
+            vm_set_ptbr(KERNEL_L1_BASE)
         threads[idx].ssp = sp
         threads[idx].state = STATE_READY
         threads[idx].wake_tick = 0
@@ -815,7 +821,11 @@ Unlike create_process, the thread is never enqueued — no race.
                 return -1
             idx = thread_count
             thread_count += 1
+        // Build stack frame with the child's PTBR so writes go to the
+        // correct physical pages (SSP is in program-mapped region)
+        vm_set_ptbr(ptbr_val)
         val sp = build_stack_frame(entry_point, usp, ssp)
+        vm_set_ptbr(KERNEL_L1_BASE)
         threads[idx].ssp = sp
         threads[idx].state = STATE_SUSPENDED
         threads[idx].wake_tick = 0
