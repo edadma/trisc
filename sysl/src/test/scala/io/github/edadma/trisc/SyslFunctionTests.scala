@@ -278,4 +278,81 @@ class SyslFunctionTests extends SyslTestHelpers {
     val Right(ast) = (new SyslParser).parseProgram("main() -> int = unknown()\n"): @unchecked
     an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
   }
+
+  // ===== Default parameter values =====
+
+  "default value used when arg omitted" in {
+    eval(
+      """greet(x: int, y: int = 10) -> int = x + y
+        |main() -> int = greet(32)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "explicit arg overrides default" in {
+    eval(
+      """greet(x: int, y: int = 10) -> int = x + y
+        |main() -> int = greet(32, 100)
+        |""".stripMargin) shouldBe 132
+  }
+
+  "multiple defaults, all omitted" in {
+    eval(
+      """add(a: int = 1, b: int = 2) -> int = a + b
+        |main() -> int = add()
+        |""".stripMargin) shouldBe 3
+  }
+
+  "multiple defaults, partial omitted" in {
+    eval(
+      """mixed(a: int, b: int = 5, c: int = 10) -> int = a * 100 + b * 10 + c
+        |main() -> int = mixed(1)
+        |""".stripMargin) shouldBe 160
+    eval(
+      """mixed(a: int, b: int = 5, c: int = 10) -> int = a * 100 + b * 10 + c
+        |main() -> int = mixed(1, 2)
+        |""".stripMargin) shouldBe 130
+    eval(
+      """mixed(a: int, b: int = 5, c: int = 10) -> int = a * 100 + b * 10 + c
+        |main() -> int = mixed(1, 2, 3)
+        |""".stripMargin) shouldBe 123
+  }
+
+  "default references module-level val" in {
+    eval(
+      """val BASE = 100
+        |greet(x: int, y: int = BASE) -> int = x + y
+        |main() -> int = greet(42)
+        |""".stripMargin) shouldBe 142
+  }
+
+  "default with expression" in {
+    eval(
+      """compute(x: int, k: int = 2 * 3 + 4) -> int = x + k
+        |main() -> int = compute(32)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "error: default must come last" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """foo(a: int = 1, b: int) -> int = a + b
+        |main() -> int = foo(10, 20)
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "error: too few args when no defaults" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """foo(a: int, b: int) -> int = a + b
+        |main() -> int = foo(10)
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "error: default value type mismatch" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """foo(a: int, b: int = true) -> int = a + b
+        |main() -> int = foo(10)
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
 }

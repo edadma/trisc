@@ -294,7 +294,7 @@ class SyslParser extends StandardTokenParsers {
       tupleExpr ^^ ExprBodyAST.apply
 
   lazy val param: Parser[ParamAST] =
-    ident ~ (":" ~> typeRef) ^^ { case name ~ t => ParamAST(name, t) }
+    ident ~ (":" ~> typeRef) ~ opt("=" ~> expr) ^^ { case name ~ t ~ default => ParamAST(name, t, default) }
 
   // Optional type argument list for generic type references: [T], [T, U], or absent
   lazy val typeArgList: Parser[List[TypeAST]] =

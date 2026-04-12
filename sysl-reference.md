@@ -335,6 +335,31 @@ double(x: int) = x * 2
 getAnswer() -> int = 42
 ```
 
+### Default Parameter Values
+
+Parameters can have default values, given with `= expr` after the type. Any
+parameter with a default must come at the end of the parameter list; once a
+parameter has a default, all later parameters must too.
+
+```sysl
+val BASE = 100
+
+greet(x: int, y: int = 10) -> int = x + y
+compute(x: int, k: int = BASE * 2) -> int = x + k
+
+main() -> int
+    greet(32)          // 42 — uses default y=10
+    greet(32, 100)     // 132 — explicit y=100
+    compute(42)        // 242 — k defaults to 200
+```
+
+Default expressions are evaluated at each call site (re-evaluated per call,
+not cached). They can reference module-level vals and constants, but not
+other parameters or local variables. Constant defaults are folded by the
+analyzer.
+
+Default values are not yet supported on generic functions.
+
 ### `def` — Auto-Call Functions
 
 `def` declares a zero-argument function that is automatically called when
