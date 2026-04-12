@@ -17,6 +17,8 @@ class SyslLLVMCodegen:
   private val emittedFunctions = new mutable.HashSet[String] // track emitted function names to avoid duplicates
   // C library functions declared in the preamble — skip any extern decl with these names
   private val preambleNames = Set("putchar", "printf", "snprintf", "malloc", "strlen", "memcpy", "memcmp", "memset", "free", "write", "fflush", "abort", "exit")
+  // Function parameter types — used to widen arguments at call sites (e.g., i8 → i32 for char params)
+  private val funcParamTypes = new mutable.HashMap[String, List[String]]
   // Track pointer variables derived from slice element addresses (&slot[i])
   // Maps pointer variable name → source slice variable name
   private var derivedFromSlice: mutable.HashMap[String, String] = _
@@ -100,6 +102,7 @@ class SyslLLVMCodegen:
           if !preambleNames.contains(name) then
             val paramStr = params.map(llvmType).mkString(", ")
             emit(s"declare ${llvmType(retType)} @$name($paramStr)")
+          funcParamTypes(name) = params.map(llvmType)
         case TExternVarDecl(name, typ) =>
           emit(s"@$name = external global ${llvmType(typ)}")
         case _: TStructDecl => // skip (handled above)
@@ -108,6 +111,7 @@ class SyslLLVMCodegen:
         case _: TTypeAliasDecl => // type only
         case _: TInterfaceDecl => // type only
         case f: TFunDecl =>
+          funcParamTypes(f.name) = f.params.map(p => llvmType(p.typ))
           if !emittedFunctions.contains(f.name) then
             emittedFunctions += f.name
             genFunction(f)
@@ -1202,7 +1206,8 @@ class SyslLLVMCodegen:
         "0"
 
       case TCall(name, args, _) =>
-        val argVals = args.map { a =>
+        val declaredParams = funcParamTypes.getOrElse(name, Nil)
+        val argVals = args.zipWithIndex.map { (a, i) =>
           val v = genExpr(a)
           val vt = exprType(a)
           // For aggregate types, genExpr returns a pointer — load the value for pass-by-value
@@ -1210,7 +1215,11 @@ class SyslLLVMCodegen:
             val loaded = newReg()
             emit(s"  $loaded = load $vt, $vt* $v")
             (loaded, vt)
-          else (v, vt)
+          else
+            // Widen scalar arguments to match declared parameter type (e.g., i8 → i32 for char)
+            val expectedType = if i < declaredParams.length then declaredParams(i) else vt
+            val widened = emitSextIfNeeded(v, vt, expectedType)
+            (widened, expectedType)
         }
         val argStr = argVals.map((v, vt) => s"$vt $v").mkString(", ")
         val retType = llvmType(expr.typ)

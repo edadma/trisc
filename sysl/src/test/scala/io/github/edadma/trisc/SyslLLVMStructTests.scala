@@ -199,6 +199,26 @@ class SyslLLVMStructTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 1
   }
 
+  // ===== IR validity: argument types must match declarations =====
+
+  "string iteration byte passed to char param is widened" in {
+    // for c in s iterates as bytes (i8), but a char param is i32.
+    // The codegen must zext i8 -> i32 at the call site.
+    val ir = compileLLVM(
+      """extern my_putc(c: char)
+        |
+        |my_puts(s: string) = for c in s do my_putc(c)
+        |
+        |main() -> int
+        |    my_puts("hi")
+        |    0
+        |""".stripMargin)
+    // Verify: every call to @my_putc must pass i32, not i8
+    val calls = ir.linesIterator.filter(_.contains("call")).filter(_.contains("@my_putc")).toList
+    for line <- calls do
+      assert(!line.contains("i8 %"), s"my_putc called with i8 instead of i32: $line")
+  }
+
   "nested struct-with-slice in slice array" in {
     llvmExit(
       """struct Item

@@ -1590,6 +1590,19 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 1
   }
 
+  "std.crypto.sha256 stack arrays" in {
+    llvmOutputWithStd(
+      """import std.crypto.sha256.*
+        |import std.encoding.hex.*
+        |
+        |main()
+        |    val msg: [3]byte = "abc"
+        |    var out: [32]byte
+        |    sha256(msg[:], out[:])
+        |    puts(encode_to_string(out[:]))
+        |""".stripMargin) shouldBe "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+  }
+
   // ===== std.encoding.binary =====
 
   "std.encoding.binary u32_be" in {

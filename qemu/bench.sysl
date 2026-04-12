@@ -26,8 +26,6 @@ print_hash(out: *byte)
     uart_putc('\n')
 
 main() -> int
-    uart_puts("bench starting\n")
-
     val msg: [3]byte = "abc"
     var out: [32]byte
 
@@ -36,5 +34,4 @@ main() -> int
     uart_puts("digest: ")
     print_hash(&out[0])
     uart_puts("expect: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n")
-    uart_puts("done\n")
     0

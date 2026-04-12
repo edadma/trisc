@@ -45,8 +45,11 @@ _start:
     orl  $0x03, %eax
     movl %eax, pdpt
 
-    # PD[0] → 2MB identity page (PS bit = 0x80)
-    movl $0x83, pd
+    # PD[0..3] → identity-map first 8MB via 2MB pages (PS bit = 0x80)
+    movl $0x83, pd             # 0-2MB
+    movl $0x200083, pd + 8     # 2-4MB
+    movl $0x400083, pd + 16    # 4-6MB
+    movl $0x600083, pd + 24    # 6-8MB
 
     # CR3 = PML4
     movl $pml4, %eax
@@ -83,6 +86,18 @@ entry64:
     movw %ax, %gs
 
     movabs $stack_top, %rsp
+
+    # Enable SSE (required by LLVM-generated code for memset/memcpy)
+    # Clear CR0.EM (bit 2), set CR0.MP (bit 1)
+    movq %cr0, %rax
+    andq $~0x4, %rax
+    orq  $0x2, %rax
+    movq %rax, %cr0
+    # Set CR4.OSFXSR (bit 9) and CR4.OSXMMEXCPT (bit 10)
+    movq %cr4, %rax
+    orq  $0x600, %rax
+    movq %rax, %cr4
+
     call boot_entry
 
     hlt
