@@ -1,0 +1,40 @@
+// SHA-256 benchmark for x86_64 bare-metal (QEMU).
+// Hashes "abc" 100,000 times and prints the final digest as hex.
+// Use `time` on the host to measure wall-clock throughput.
+
+import std.crypto.sha256.sha256
+import std.encoding.binary.{u32_be_at, put_u32_be_at}
+
+extern uart_putc(c: char)
+
+uart_puts(s: string) = for c in s do uart_putc(c)
+
+hex_nibble(v: int) -> char
+    if v < 10
+        return char('0' + v)
+    char('a' + v - 10)
+
+print_hex_byte(b: int)
+    uart_putc(hex_nibble((b >> 4) & 0xF))
+    uart_putc(hex_nibble(b & 0xF))
+
+print_hash(out: *byte)
+    var i = 0
+    while i < 32
+        print_hex_byte(int(out[i]))
+        i += 1
+    uart_putc('\n')
+
+main() -> int
+    uart_puts("bench starting\n")
+
+    val msg: [3]byte = "abc"
+    var out: [32]byte
+
+    sha256(msg[:], out[:])
+
+    uart_puts("digest: ")
+    print_hash(&out[0])
+    uart_puts("expect: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n")
+    uart_puts("done\n")
+    0
