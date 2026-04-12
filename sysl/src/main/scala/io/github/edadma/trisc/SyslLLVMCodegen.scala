@@ -1733,6 +1733,11 @@ class SyslLLVMCodegen:
         emit(s"  $capGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 2")
         val curCap = newReg()
         emit(s"  $curCap = load i32, i32* $capGep")
+        // Load input slice's backref (preserved in no-grow path)
+        val inputBrGep = newReg()
+        emit(s"  $inputBrGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 3")
+        val inputBr = newReg()
+        emit(s"  $inputBr = load i8*, i8** $inputBrGep")
         // Check if we need to grow
         val needGrow = newReg()
         emit(s"  $needGrow = icmp eq i32 $curLen, $curCap")
@@ -1771,6 +1776,8 @@ class SyslLLVMCodegen:
         emit(s"  $finalPtr = phi i8* [ $newBuf, %$growLabel ], [ $curPtr, %$noGrowLabel ]")
         val finalCap = newReg()
         emit(s"  $finalCap = phi i32 [ $newCap, %$growLabel ], [ $curCap, %$noGrowLabel ]")
+        val finalBr = newReg()
+        emit(s"  $finalBr = phi i8* [ null, %$growLabel ], [ $inputBr, %$noGrowLabel ]")
         // Store new element
         val v = genExpr(elem)
         val len64 = newReg()
@@ -1800,10 +1807,10 @@ class SyslLLVMCodegen:
         val rCapGep = newReg()
         emit(s"  $rCapGep = getelementptr %struct.slice, %struct.slice* $result, i32 0, i32 2")
         emit(s"  store i32 $finalCap, i32* $rCapGep")
-        // Backref: append allocates its own buffer, no ref backing
+        // Backref: inherit from input in no-grow path, null in grow path
         val rBrGep = newReg()
         emit(s"  $rBrGep = getelementptr %struct.slice, %struct.slice* $result, i32 0, i32 3")
-        emit(s"  store i8* null, i8** $rBrGep")
+        emit(s"  store i8* $finalBr, i8** $rBrGep")
         result
 
       // ===== Refs (heap allocation) =====
@@ -2656,7 +2663,7 @@ class SyslLLVMCodegen:
   /** Returns true if the expression produces a slice with a fresh/null backref (no increment needed).
     * Returns false if the expression borrows a backref from elsewhere (increment needed on copy). */
   private def isSliceOwned(expr: TExpr): Boolean = expr match
-    case _: TAppend => true                              // malloc'd buffer, null backref
+    case _: TAppend => false                             // no-grow inherits input backref
     case _: TSliceExpr => true                           // all TSliceExpr paths produce owned backrefs
     case _: TCall | _: TIndirectCall => true             // ownership transferred from callee
     case _: TIfExpr | _: TMatchExpr => true              // branches handle their own RC
@@ -2675,6 +2682,14 @@ class SyslLLVMCodegen:
         if locals.contains(sliceName) then Set(locals(sliceName).reg) else Set.empty
       case TStructConstruct(_, args) =>
         // Struct being returned — skip cleanup for any slice-typed args that are local VarRefs
+        args.flatMap(returnedSliceAllocas).toSet
+      case TAppend(slice, _, _) =>
+        // Append may inherit input's backref — protect the source slice
+        returnedSliceAllocas(slice)
+      case TCall(_, args, typ) if isSliceType(typ) =>
+        // Slice-returning call may share backref with a slice argument — protect all slice args
+        args.flatMap(returnedSliceAllocas).toSet
+      case TIndirectCall(_, args, typ) if isSliceType(typ) =>
         args.flatMap(returnedSliceAllocas).toSet
       case _ => Set.empty
 
@@ -2835,12 +2850,17 @@ class SyslLLVMCodegen:
       if !skipSliceRegs.contains(local.reg) then
         emitSliceBackrefDecr(local.reg)
 
-  /** Decrement slice backrefs for locals introduced since a scope snapshot.
-    * Used at scope exits (end of if/else branch, loop iteration, match arm). */
+  /** Clean up locals introduced since a scope snapshot.
+    * Decrements slice backrefs then nulls them out to prevent double-decrement
+    * when outer scopes or function exit re-process the same local. */
   private def emitScopeCleanup(preLocals: Set[String]): Unit =
     for (name, local) <- locals if !preLocals.contains(name) do
       if isSliceType(local.typ) then
         emitSliceBackrefDecr(local.reg)
+        // Null out backref so it's not decremented again by outer scope or function exit
+        val brGep = newReg()
+        emit(s"  $brGep = getelementptr %struct.slice, %struct.slice* ${local.reg}, i32 0, i32 3")
+        emit(s"  store i8* null, i8** $brGep")
 
   /** Check if an expression is a TNew/TNewArray (already owns the ref, no incr needed). */
   private def isOwnedNew(expr: TExpr): Boolean = expr match

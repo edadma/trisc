@@ -2029,7 +2029,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 1
   }
 
-  "std.regex two calls" ignore { // TODO: ref cleanup frees backing storage while returned slice still references it
+  "std.regex two calls" in {
     llvmExitWithStd(
       """import std.regex.*
         |
@@ -2042,7 +2042,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 1
   }
 
-  "std.regex anchored" ignore { // TODO: same ref cleanup issue — second match_regex call crashes
+  "std.regex anchored" in {
     llvmExitWithStd(
       """import std.regex.*
         |
@@ -2072,7 +2072,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 1
   }
 
-  "std.regex character class" ignore { // TODO: same ref cleanup issue
+  "std.regex character class" in {
     llvmExitWithStd(
       """import std.regex.*
         |
@@ -2086,7 +2086,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 1
   }
 
-  "std.regex quantifiers" ignore { // TODO: same ref cleanup issue
+  "std.regex quantifiers" in {
     llvmExitWithStd(
       """import std.regex.*
         |
