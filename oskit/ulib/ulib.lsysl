@@ -108,32 +108,37 @@ Single character output (fast-path syscall).
     putc(ch: int)
         syscall(SYS_PUTC, ch)
 
-Write a string to the TTY server.
+Write a string to stdout (handle 1) via VFS.
+
+    val STDIN  = 0
+    val STDOUT = 1
+    val STDERR = 2
+
+    write_handle(handle: int, data: *byte, wlen: int) -> int
+        var fs_name: [3]byte
+        fs_name[0] = byte('f')
+        fs_name[1] = byte('s')
+        fs_name[2] = 0
+        val port = port_lookup(&fs_name[0])
+        if port < 0
+            return -1
+        var msg: [13]byte
+        msg[0] = byte(FS_CMD_WRITE)
+        msg_write_i32(&msg[0], 1, handle)
+        msg_write_i32(&msg[0], 5, wlen)
+        msg_write_i32(&msg[0], 9, int(i64(data)))
+        var reply: [5]byte
+        val result = ipc_send(port, &msg[0], 13, &reply[0], 5)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        msg_read_i32(&reply[0], 1)
 
     puts(s: string)
-        var tty_name: [4]byte
-        tty_name[0] = byte('t')
-        tty_name[1] = byte('t')
-        tty_name[2] = byte('y')
-        tty_name[3] = 0
-        val port = port_lookup(&tty_name[0])
-        if port < 0
-            return
         val n = len(s)
         val p = *byte(s)
-        var m = n
-        if m < 0
-            m = 0
-        if m > 125
-            m = 125
-        var msg: [128]byte
-        msg[0] = byte(TTY_CMD_PUTS)
-        msg[1] = 0
-        msg[2] = byte(m)
-        for var i = 0; i < m; i++
-            msg[i + 3] = p[i]
-        var reply: [1]byte
-        ipc_send(port, &msg[0], m + 3, &reply[0], 1)
+        write_handle(STDOUT, p, n)
 
 Open a file by path. Returns a file ID or -1 on error.
 

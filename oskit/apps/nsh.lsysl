@@ -28,7 +28,7 @@ Built-in commands:
     import oskit.fs.ROOT_INODE
     import oskit.services.{sleep, join, getuid, uptime, thread_id}
     import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
-    import oskit.fs.{fs_open, fs_read, fs_write, fs_close, fs_last_ino, fs_stat, fs_create, fs_unlink, fs_mkdir, fs_rmdir, fs_readdir, fs_chmod, fs_rename}
+    import oskit.fs.{fs_open, fs_read, fs_write, fs_close, fs_connect, fs_last_ino, fs_stat, fs_create, fs_unlink, fs_mkdir, fs_rmdir, fs_readdir, fs_chmod, fs_rename}
     import oskit.servers.{pm_waitpid, pm_kill, pm_spawn, pm_spawn_handles}
     import oskit.kernel.{create_thread, kernel_get_thread_pid}
 
@@ -623,7 +623,26 @@ Commands such as `echo` and `cat` are not built-ins — they load
                 pos += 1
         val args = string(&args_buf[0], pos)
 
-        val pid = pm_spawn(bin_path, args)
+        // Open TTY handles for stdin/stdout/stderr
+        val h_in = fs_connect("tty:0")
+        val h_out = fs_connect("tty:0")
+        val h_err = fs_connect("tty:0")
+
+        // Handle map: (parent_handle, child_slot) pairs
+        var hmap: [6]byte
+        hmap[0] = byte(h_in)
+        hmap[1] = 0  // child stdin
+        hmap[2] = byte(h_out)
+        hmap[3] = 1  // child stdout
+        hmap[4] = byte(h_err)
+        hmap[5] = 2  // child stderr
+
+        val pid = pm_spawn_handles(bin_path, args, &hmap[0], 3)
+
+        // Close parent's copies of the TTY handles
+        fs_close(h_in)
+        fs_close(h_out)
+        fs_close(h_err)
 
         nsh_flush()
         if pid >= 0
