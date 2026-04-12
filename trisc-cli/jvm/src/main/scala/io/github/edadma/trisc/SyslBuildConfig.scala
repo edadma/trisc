@@ -30,7 +30,6 @@ object SyslBuildConfig:
   def generate(tomlSource: String): Generated =
     val ast = toml.Toml.parse(tomlSource) match
       case Right(tbl: Value.Tbl) => tbl
-      case Right(other)          => throw Error(s"sysl.toml: expected a table at the top level, got $other")
       case Left((addr, msg))     => throw Error(s"sysl.toml: parse error at $addr: $msg")
 
     // [config] section — optional; controls module name / output path.
