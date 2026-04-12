@@ -268,9 +268,12 @@ commands ++= Seq(
     "triscCliJS/test" :: "syslCliJS/test" :: state
   },
   // Run only tests tagged Slow (full-OS integration tests).
+  // Must remove the default -l exclusion first, then add -n inclusion.
   Command.command("testSlow") { state =>
+    """set Test / testOptions in ThisBuild -= Tests.Argument(TestFrameworks.ScalaTest, "-l", "io.github.edadma.trisc.Slow")""" ::
     """triscCliJVM/testOnly * -- -n io.github.edadma.trisc.Slow""" ::
-    """syslJVM/testOnly * -- -n io.github.edadma.trisc.Slow""" :: state
+    """syslJVM/testOnly * -- -n io.github.edadma.trisc.Slow""" ::
+    """set Test / testOptions in ThisBuild += Tests.Argument(TestFrameworks.ScalaTest, "-l", "io.github.edadma.trisc.Slow")""" :: state
   },
   // Run all tests including Slow ones.
   Command.command("testAll") { state =>
