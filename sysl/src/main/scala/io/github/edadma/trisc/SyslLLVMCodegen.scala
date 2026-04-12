@@ -17,6 +17,16 @@ class SyslLLVMCodegen:
   private val emittedFunctions = new mutable.HashSet[String] // track emitted function names to avoid duplicates
   // C library functions declared in the preamble — skip any extern decl with these names
   private val preambleNames = Set("putchar", "printf", "snprintf", "malloc", "strlen", "memcpy", "memcmp", "memset", "free", "write", "fflush", "abort", "exit")
+  // Function parameter types — used to widen arguments at call sites (e.g., i8 → i32 for char params)
+  private val funcParamTypes = new mutable.HashMap[String, List[String]]
+  // Track pointer variables derived from slice element addresses (&slot[i])
+  // Maps pointer variable name → source slice variable name
+  private var derivedFromSlice: mutable.HashMap[String, String] = _
+
+  /** Resolve a struct type to its canonical (field-populated) version from structTypes.
+    * Handles stale placeholder StructType(_, Nil) references that can appear in expression types. */
+  private def canonicalStruct(st: SyslType.StructType): SyslType.StructType =
+    structTypes.getOrElse(st.name, st)
   private var stringCounter = 0
   private var regCounter = 0
   private var labelCounter = 0
@@ -92,6 +102,7 @@ class SyslLLVMCodegen:
           if !preambleNames.contains(name) then
             val paramStr = params.map(llvmType).mkString(", ")
             emit(s"declare ${llvmType(retType)} @$name($paramStr)")
+          funcParamTypes(name) = params.map(llvmType)
         case TExternVarDecl(name, typ) =>
           emit(s"@$name = external global ${llvmType(typ)}")
         case _: TStructDecl => // skip (handled above)
@@ -100,6 +111,7 @@ class SyslLLVMCodegen:
         case _: TTypeAliasDecl => // type only
         case _: TInterfaceDecl => // type only
         case f: TFunDecl =>
+          funcParamTypes(f.name) = f.params.map(p => llvmType(p.typ))
           if !emittedFunctions.contains(f.name) then
             emittedFunctions += f.name
             genFunction(f)
@@ -228,6 +240,7 @@ class SyslLLVMCodegen:
   private def genFunction(fun: TFunDecl): Unit =
     currentFunction = fun
     locals = new mutable.LinkedHashMap
+    derivedFromSlice = new mutable.HashMap
     regCounter = 0
     labelCounter = 0
     hasReturned = false
@@ -274,7 +287,7 @@ class SyslLLVMCodegen:
             loaded
           else result
         else emitSextIfNeeded(result, rt, retType)
-        emitReleaseRefs(returnedSliceAlloca(expr))
+        emitReleaseRefs(returnedSliceAllocas(expr))
         emitRet(retType, finalVal)
       case TBlockBody(stmts) =>
         genBlock(stmts, retType)
@@ -298,6 +311,7 @@ class SyslLLVMCodegen:
   /** Generate a closure function with hidden env_ptr first parameter. */
   private def genClosureFunction(name: String, closure: TClosure): Unit =
     locals = new mutable.LinkedHashMap
+    derivedFromSlice = new mutable.HashMap
     regCounter = 0
     labelCounter = 0
     hasReturned = false
@@ -353,7 +367,7 @@ class SyslLLVMCodegen:
           emit(s"  $loaded = load $retLt, $retLt* $result")
           loaded
         else emitSextIfNeeded(result, rt, retLt)
-        emitReleaseRefs(returnedSliceAlloca(expr))
+        emitReleaseRefs(returnedSliceAllocas(expr))
         emitRet(retLt, finalVal)
       case TBlockBody(stmts) =>
         genBlock(stmts, retLt)
@@ -411,7 +425,7 @@ class SyslLLVMCodegen:
               else result
             else emitSextIfNeeded(result, rt, retType)
             emitDefers()
-            emitReleaseRefs(returnedSliceAlloca(expr))
+            emitReleaseRefs(returnedSliceAllocas(expr))
             emitRet(retType, finalVal)
             hasReturned = true
           case other =>
@@ -451,6 +465,13 @@ class SyslLLVMCodegen:
             // Ref init: increment unless we own it (TNew/TNewArray)
             if isRef(typ) && !isOwnedNew(init) then
               emitRefIncr(finalVal, refHeaderOffset(typ))
+            // Track pointer-from-slice derivation: &slot[i] produces a pointer whose
+            // backing storage is owned by the slice. If this pointer is returned,
+            // the slice's scope cleanup must be skipped to prevent use-after-free.
+            init match
+              case TAddrOfIndex(TVarRef(sliceName, _), _, _) if locals.contains(sliceName) && isSliceType(locals(sliceName).typ) =>
+                derivedFromSlice(name) = sliceName
+              case _ =>
 
       case TAssignStmt(target, value) =>
         if !locals.contains(target) && isAggregate(value.typ) then
@@ -505,14 +526,16 @@ class SyslLLVMCodegen:
           loaded
         else emitSextIfNeeded(v, vt, retType)
         emitDefers()
-        emitReleaseRefs(returnedSliceAlloca(value))
+        emitReleaseRefs(returnedSliceAllocas(value))
         emitRet(retType, finalVal)
         hasReturned = true
 
       case TReturnStmt(None) =>
         emitDefers()
         emitReleaseRefs()
-        emit("  ret void")
+        val retType = llvmType(currentFunction.returnType)
+        if retType == "void" then emit("  ret void")
+        else emitRet(retType, "zeroinitializer")
         hasReturned = true
 
       case TDeferStmt(body) =>
@@ -700,14 +723,14 @@ class SyslLLVMCodegen:
       case TFieldAssignStmt(obj, fieldIndex, value) =>
         val (st, structLt, addr) = obj.typ match
           case pt: SyslType.PtrType =>
-            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val inner = canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType])
             val slt = llvmType(inner)
             val ptr = genExpr(obj)
             val cast = newReg()
             emit(s"  $cast = bitcast i8* $ptr to $slt*")
             (inner, slt, cast)
           case st: SyslType.StructType =>
-            (st, llvmType(obj.typ), genStructAddr(obj))
+            (canonicalStruct(st), llvmType(obj.typ), genStructAddr(obj))
           case other =>
             throw new RuntimeException(s"TFieldAssignStmt on non-struct type: $other")
         val ft = st.fields(fieldIndex)._2
@@ -754,14 +777,14 @@ class SyslLLVMCodegen:
       case TFieldCompoundAssignStmt(obj, fieldIndex, op, value) =>
         val (st, structLt, addr) = obj.typ match
           case pt: SyslType.PtrType =>
-            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val inner = canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType])
             val slt = llvmType(inner)
             val ptr = genExpr(obj)
             val cast = newReg()
             emit(s"  $cast = bitcast i8* $ptr to $slt*")
             (inner, slt, cast)
           case st: SyslType.StructType =>
-            (st, llvmType(obj.typ), genStructAddr(obj))
+            (canonicalStruct(st), llvmType(obj.typ), genStructAddr(obj))
           case other =>
             throw new RuntimeException(s"TFieldCompoundAssignStmt on non-struct type: $other")
         val ft = st.fields(fieldIndex)._2
@@ -852,7 +875,11 @@ class SyslLLVMCodegen:
   private def genExpr(expr: TExpr): String =
     val t = exprType(expr)
     expr match
-      case TIntLit(n, _) => n.toString
+      case TIntLit(n, typ) =>
+        // Pointer-typed integer literals (typically zero-init of *T) must use "null"
+        typ match
+          case _: SyslType.PtrType | _: SyslType.RefType if n == 0 => "null"
+          case _ => n.toString
       case TFloatLit(d, _) =>
         // Use LLVM hex format for exact representation
         val bits = java.lang.Double.doubleToRawLongBits(d)
@@ -1179,7 +1206,8 @@ class SyslLLVMCodegen:
         "0"
 
       case TCall(name, args, _) =>
-        val argVals = args.map { a =>
+        val declaredParams = funcParamTypes.getOrElse(name, Nil)
+        val argVals = args.zipWithIndex.map { (a, i) =>
           val v = genExpr(a)
           val vt = exprType(a)
           // For aggregate types, genExpr returns a pointer — load the value for pass-by-value
@@ -1187,7 +1215,11 @@ class SyslLLVMCodegen:
             val loaded = newReg()
             emit(s"  $loaded = load $vt, $vt* $v")
             (loaded, vt)
-          else (v, vt)
+          else
+            // Widen scalar arguments to match declared parameter type (e.g., i8 → i32 for char)
+            val expectedType = if i < declaredParams.length then declaredParams(i) else vt
+            val widened = emitSextIfNeeded(v, vt, expectedType)
+            (widened, expectedType)
         }
         val argStr = argVals.map((v, vt) => s"$vt $v").mkString(", ")
         val retType = llvmType(expr.typ)
@@ -1234,7 +1266,9 @@ class SyslLLVMCodegen:
                   emit(s"  store $t $loaded, $t* $alloca")
                   // Slice: increment aggResult copy (source will be cleaned up by scope cleanup)
                   if isSliceType(typ) then emitSliceBackrefIncr(alloca)
-                case None => thenVal = v
+                case None =>
+                  val vt = exprType(e)
+                  thenVal = if vt != t && e.typ.isIntegral then emitSextIfNeeded(v, vt, t) else v
             case Some(other) => genStmt(other)
             case None =>
         val thenReturned = hasReturned
@@ -1264,7 +1298,9 @@ class SyslLLVMCodegen:
                     emit(s"  $loaded = load $t, $t* $v")
                     emit(s"  store $t $loaded, $t* $alloca")
                     if isSliceType(typ) then emitSliceBackrefIncr(alloca)
-                  case None => elseVal = v
+                  case None =>
+                    val vt = exprType(e)
+                    elseVal = if vt != t && e.typ.isIntegral then emitSextIfNeeded(v, vt, t) else v
               case Some(other) => genStmt(other)
               case None =>
         }
@@ -1320,7 +1356,7 @@ class SyslLLVMCodegen:
       case TFieldAccess(obj, fieldIndex, fieldType) =>
         val (st, structLt, addr) = obj.typ match
           case pt: SyslType.PtrType =>
-            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val inner = canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType])
             val slt = llvmType(inner)
             // Dereference pointer to struct
             val ptr = genExpr(obj)
@@ -1328,7 +1364,7 @@ class SyslLLVMCodegen:
             emit(s"  $cast = bitcast i8* $ptr to $slt*")
             (inner, slt, cast)
           case st: SyslType.StructType =>
-            (st, llvmType(obj.typ), genStructAddr(obj))
+            (canonicalStruct(st), llvmType(obj.typ), genStructAddr(obj))
           case other =>
             throw new RuntimeException(s"TFieldAccess on non-struct type: $other")
         val gep = newReg()
@@ -1515,14 +1551,14 @@ class SyslLLVMCodegen:
         // Get a pointer to a struct field — used for method calls on nested struct fields
         val (st, structLt, addr) = obj.typ match
           case pt: SyslType.PtrType =>
-            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val inner = canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType])
             val slt = llvmType(inner)
             val ptr = genExpr(obj)
             val cast = newReg()
             emit(s"  $cast = bitcast i8* $ptr to $slt*")
             (inner, slt, cast)
           case st: SyslType.StructType =>
-            (st, llvmType(obj.typ), genStructAddr(obj))
+            (canonicalStruct(st), llvmType(obj.typ), genStructAddr(obj))
           case other =>
             throw new RuntimeException(s"TAddrOfField on non-struct type: $other")
         val gep = newReg()
@@ -1706,6 +1742,11 @@ class SyslLLVMCodegen:
         emit(s"  $capGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 2")
         val curCap = newReg()
         emit(s"  $curCap = load i32, i32* $capGep")
+        // Load input slice's backref (preserved in no-grow path)
+        val inputBrGep = newReg()
+        emit(s"  $inputBrGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 3")
+        val inputBr = newReg()
+        emit(s"  $inputBr = load i8*, i8** $inputBrGep")
         // Check if we need to grow
         val needGrow = newReg()
         emit(s"  $needGrow = icmp eq i32 $curLen, $curCap")
@@ -1744,6 +1785,8 @@ class SyslLLVMCodegen:
         emit(s"  $finalPtr = phi i8* [ $newBuf, %$growLabel ], [ $curPtr, %$noGrowLabel ]")
         val finalCap = newReg()
         emit(s"  $finalCap = phi i32 [ $newCap, %$growLabel ], [ $curCap, %$noGrowLabel ]")
+        val finalBr = newReg()
+        emit(s"  $finalBr = phi i8* [ null, %$growLabel ], [ $inputBr, %$noGrowLabel ]")
         // Store new element
         val v = genExpr(elem)
         val len64 = newReg()
@@ -1773,10 +1816,10 @@ class SyslLLVMCodegen:
         val rCapGep = newReg()
         emit(s"  $rCapGep = getelementptr %struct.slice, %struct.slice* $result, i32 0, i32 2")
         emit(s"  store i32 $finalCap, i32* $rCapGep")
-        // Backref: append allocates its own buffer, no ref backing
+        // Backref: inherit from input in no-grow path, null in grow path
         val rBrGep = newReg()
         emit(s"  $rBrGep = getelementptr %struct.slice, %struct.slice* $result, i32 0, i32 3")
-        emit(s"  store i8* null, i8** $rBrGep")
+        emit(s"  store i8* $finalBr, i8** $rBrGep")
         result
 
       // ===== Refs (heap allocation) =====
@@ -2350,14 +2393,14 @@ class SyslLLVMCodegen:
       case TFieldPostInc(obj, fieldIndex, typ) =>
         val (st, structLt, addr) = obj.typ match
           case pt: SyslType.PtrType =>
-            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val inner = canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType])
             val slt = llvmType(inner)
             val ptr = genExpr(obj)
             val cast = newReg()
             emit(s"  $cast = bitcast i8* $ptr to $slt*")
             (inner, slt, cast)
           case st: SyslType.StructType =>
-            (st, llvmType(obj.typ), genStructAddr(obj))
+            (canonicalStruct(st), llvmType(obj.typ), genStructAddr(obj))
           case other =>
             throw new RuntimeException(s"TFieldPostInc on non-struct type: $other")
         val ft = st.fields(fieldIndex)._2
@@ -2377,14 +2420,14 @@ class SyslLLVMCodegen:
       case TFieldPostDec(obj, fieldIndex, typ) =>
         val (st, structLt, addr) = obj.typ match
           case pt: SyslType.PtrType =>
-            val inner = pt.pointee.asInstanceOf[SyslType.StructType]
+            val inner = canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType])
             val slt = llvmType(inner)
             val ptr = genExpr(obj)
             val cast = newReg()
             emit(s"  $cast = bitcast i8* $ptr to $slt*")
             (inner, slt, cast)
           case st: SyslType.StructType =>
-            (st, llvmType(obj.typ), genStructAddr(obj))
+            (canonicalStruct(st), llvmType(obj.typ), genStructAddr(obj))
           case other =>
             throw new RuntimeException(s"TFieldPostDec on non-struct type: $other")
         val ft = st.fields(fieldIndex)._2
@@ -2454,7 +2497,7 @@ class SyslLLVMCodegen:
       case TFieldAccess(innerObj, fieldIndex, _) =>
         val (structLt, addr) = innerObj.typ match
           case pt: SyslType.PtrType =>
-            val slt = llvmType(pt.pointee.asInstanceOf[SyslType.StructType])
+            val slt = llvmType(canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType]))
             val ptr = genExpr(innerObj)
             val cast = newReg()
             emit(s"  $cast = bitcast i8* $ptr to $slt*")
@@ -2539,8 +2582,13 @@ class SyslLLVMCodegen:
     if fromType == toType then value
     else if toType == "void" then value // discarded — no cast needed
     else
+      val fromW = fromType.stripPrefix("i").toIntOption.getOrElse(0)
+      val toW = toType.stripPrefix("i").toIntOption.getOrElse(0)
       val cast = newReg()
-      emit(s"  $cast = sext $fromType $value to $toType")
+      if fromW > toW && toW > 0 then
+        emit(s"  $cast = trunc $fromType $value to $toType")
+      else
+        emit(s"  $cast = sext $fromType $value to $toType")
       cast
 
   private def llvmType(t: SyslType): String = t match
@@ -2550,9 +2598,10 @@ class SyslLLVMCodegen:
     case SyslType.DoubleType => "double"
     case SyslType.VoidType => "void"
     case SyslType.StringType => "%struct.string"
-    case st @ SyslType.StructType(name, _) =>
+    case SyslType.StructType(name, fields) =>
       // Auto-register struct types encountered in signatures (e.g., built-in tuples)
-      if !structTypes.contains(name) then structTypes(name) = st
+      if !structTypes.contains(name) && fields.nonEmpty then
+        structTypes(name) = SyslType.StructType(name, fields)
       s"%struct.$name"
     case SyslType.ArrayType(elem, size) => s"[$size x ${llvmType(elem)}]"
     case et: SyslType.EnumType => s"[${et.sizeOf} x i8]" // opaque byte array for tagged union
@@ -2571,11 +2620,39 @@ class SyslLLVMCodegen:
     case SyslType.FuncType(_, _) => 16  // {i8*, i8*}
     case SyslType.BoolType => 1
     case SyslType.SliceType(_) => 24  // {i8*, i32, i32, i8*}
-    case SyslType.StructType(_, fields) =>
-      // Use LLVM's struct layout (simplified — no padding calc, just sum field sizes aligned)
-      fields.map(_._2).map(llvmSizeOf).sum // simplified
+    case SyslType.StructType(name, fields) =>
+      // Use LLVM's struct layout rules: each field aligned to its natural alignment,
+      // and the struct's total size rounded up to its alignment (max of all field alignments).
+      val resolved = canonicalStruct(SyslType.StructType(name, fields))
+      var offset = 0L
+      var maxAlign = 1L
+      for (_, ft) <- resolved.fields do
+        val fieldSize = llvmSizeOf(ft)
+        val fieldAlign = llvmAlignOf(ft)
+        maxAlign = math.max(maxAlign, fieldAlign)
+        offset = (offset + fieldAlign - 1) / fieldAlign * fieldAlign // align
+        offset += fieldSize
+      // Round up to struct alignment
+      if maxAlign > 1 then offset = (offset + maxAlign - 1) / maxAlign * maxAlign
+      offset
     case SyslType.ArrayType(elem, size) => llvmSizeOf(elem) * size
     case other => other.sizeOf
+
+  /** Alignment of a type in bytes, matching LLVM's natural alignment rules. */
+  private def llvmAlignOf(t: SyslType): Long = t match
+    case SyslType.PtrType(_) | SyslType.RefType(_) => 8
+    case SyslType.IntType(w) => math.min(w / 8, 8).toLong
+    case SyslType.UIntType(w) => math.min(w / 8, 8).toLong
+    case SyslType.BoolType => 1
+    case SyslType.DoubleType => 8
+    case SyslType.StringType => 8  // contains pointer
+    case SyslType.SliceType(_) => 8  // contains pointer
+    case SyslType.FuncType(_, _) => 8  // contains pointer
+    case SyslType.StructType(name, fields) =>
+      val resolved = canonicalStruct(SyslType.StructType(name, fields))
+      if resolved.fields.isEmpty then 1 else resolved.fields.map((_, ft) => llvmAlignOf(ft)).max
+    case SyslType.ArrayType(elem, _) => llvmAlignOf(elem)
+    case _ => 8
 
   // Types that are passed by pointer (alloca) rather than by value
   private def isAggregate(t: SyslType): Boolean = t match
@@ -2595,18 +2672,36 @@ class SyslLLVMCodegen:
   /** Returns true if the expression produces a slice with a fresh/null backref (no increment needed).
     * Returns false if the expression borrows a backref from elsewhere (increment needed on copy). */
   private def isSliceOwned(expr: TExpr): Boolean = expr match
-    case _: TAppend => true                              // malloc'd buffer, null backref
+    case _: TAppend => false                             // no-grow inherits input backref
     case _: TSliceExpr => true                           // all TSliceExpr paths produce owned backrefs
     case _: TCall | _: TIndirectCall => true             // ownership transferred from callee
     case _: TIfExpr | _: TMatchExpr => true              // branches handle their own RC
     case _ => false
 
-  /** If expr is a direct variable reference to a slice local, return its alloca register.
-    * Used to skip decrementing the returned slice at function exit. */
-  private def returnedSliceAlloca(expr: TExpr): Option[String] = expr match
-    case TVarRef(name, typ) if isSliceType(typ) && locals != null && locals.contains(name) =>
-      Some(locals(name).reg)
-    case _ => None
+  /** Identify all local slice allocas that should NOT be cleaned up because they
+    * are part of the returned expression (either directly or embedded in a struct).
+    * Returns a set of alloca registers to skip during emitReleaseRefs. */
+  private def returnedSliceAllocas(expr: TExpr): Set[String] =
+    if locals == null then return Set.empty
+    expr match
+      case TVarRef(name, typ) if isSliceType(typ) && locals.contains(name) =>
+        Set(locals(name).reg)
+      case TVarRef(name, _) if derivedFromSlice != null && derivedFromSlice.contains(name) =>
+        val sliceName = derivedFromSlice(name)
+        if locals.contains(sliceName) then Set(locals(sliceName).reg) else Set.empty
+      case TStructConstruct(_, args) =>
+        // Struct being returned — skip cleanup for any slice-typed args that are local VarRefs
+        args.flatMap(returnedSliceAllocas).toSet
+      case TAppend(slice, _, _) =>
+        // Append may inherit input's backref — protect the source slice
+        returnedSliceAllocas(slice)
+      case TCall(_, args, typ) if isSliceType(typ) =>
+        // Slice-returning call may share backref with a slice argument — protect all slice args
+        args.flatMap(returnedSliceAllocas).toSet
+      case TIndirectCall(_, args, typ) if isSliceType(typ) =>
+        args.flatMap(returnedSliceAllocas).toSet
+      case _ => Set.empty
+
 
   /** Header offset: bytes from data pointer back to refcount field. */
   private def refHeaderOffset(t: SyslType): Int = t match
@@ -2748,7 +2843,7 @@ class SyslLLVMCodegen:
     emit(s"  br label %$skipLabel")
     emitLabel(skipLabel)
 
-  private def emitReleaseRefs(returnedSliceReg: Option[String] = None): Unit =
+  private def emitReleaseRefs(skipSliceRegs: Set[String] = Set.empty): Unit =
     val hasRefs = locals.exists((_, l) => isRef(l.typ))
     if hasRefs then
       // Flush stdout before deinit functions might write to it
@@ -2759,17 +2854,22 @@ class SyslLLVMCodegen:
       val ptr = newReg()
       emit(s"  $ptr = load i8*, i8** ${local.reg}")
       emitRefDecr(ptr, hoff, deinitFor(local.typ))
-    // Slice backref cleanup: decrement all slice locals except the one being returned
+    // Slice backref cleanup: decrement all slice locals except those being returned
     for (_, local) <- locals if isSliceType(local.typ) do
-      if !returnedSliceReg.contains(local.reg) then
+      if !skipSliceRegs.contains(local.reg) then
         emitSliceBackrefDecr(local.reg)
 
-  /** Decrement slice backrefs for locals introduced since a scope snapshot.
-    * Used at scope exits (end of if/else branch, loop iteration, match arm). */
+  /** Clean up locals introduced since a scope snapshot.
+    * Decrements slice backrefs then nulls them out to prevent double-decrement
+    * when outer scopes or function exit re-process the same local. */
   private def emitScopeCleanup(preLocals: Set[String]): Unit =
     for (name, local) <- locals if !preLocals.contains(name) do
       if isSliceType(local.typ) then
         emitSliceBackrefDecr(local.reg)
+        // Null out backref so it's not decremented again by outer scope or function exit
+        val brGep = newReg()
+        emit(s"  $brGep = getelementptr %struct.slice, %struct.slice* ${local.reg}, i32 0, i32 3")
+        emit(s"  store i8* null, i8** $brGep")
 
   /** Check if an expression is a TNew/TNewArray (already owns the ref, no incr needed). */
   private def isOwnedNew(expr: TExpr): Boolean = expr match

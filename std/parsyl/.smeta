@@ -1,3 +1,0 @@
-SMETA v1
-SOURCE std/parsyl/tmp_min.sysl
-FUNC std_parsyl__satisfy 1 func 1 i32 bool func 2 string i32 enum ParseMaybe_i32 2 Got 2 pos i32 value i32 Miss 0 

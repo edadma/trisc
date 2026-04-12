@@ -1590,6 +1590,19 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 1
   }
 
+  "std.crypto.sha256 stack arrays" in {
+    llvmOutputWithStd(
+      """import std.crypto.sha256.*
+        |import std.encoding.hex.*
+        |
+        |main()
+        |    val msg: [3]byte = "abc"
+        |    var out: [32]byte
+        |    sha256(msg[:], out[:])
+        |    puts(encode_to_string(out[:]))
+        |""".stripMargin) shouldBe "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+  }
+
   // ===== std.encoding.binary =====
 
   "std.encoding.binary u32_be" in {
@@ -1971,6 +1984,211 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
         |    val files = parsed.args()
         |    if files[0] != "file1.txt" then return 0
         |    if files[1] != "file2.txt" then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  // ===== std.container.list =====
+  //
+  // The list module uses the `val slot = (new [1]T)[:]; &slot[0]` idiom to
+  // return heap-allocated pointers from functions. In the LLVM backend's
+  // current refcounting model, the local slice's scope-exit cleanup frees the
+  // backing storage before the caller can use the returned pointer — a
+  // use-after-free. Fixing this requires proper escape analysis or an
+  // alternate ownership model. For now, only the trivial "new and empty"
+  // case works (which doesn't trigger the bug).
+  //
+  // TODO: fix ownership model to support `&slice[i]` escapes, then un-ignore
+  // the remaining tests.
+
+  // ===== std.regex =====
+
+  "std.regex literal match" in {
+    llvmExitWithStd(
+      """import std.regex.*
+        |
+        |main() -> int
+        |    val m = match_regex("hello", "say hello world")
+        |    if !m.matched() then return 0
+        |    val s, e = m.group(0)
+        |    if s != 4 then return 0
+        |    if e != 9 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.regex alternation" in {
+    llvmExitWithStd(
+      """import std.regex.*
+        |
+        |main() -> int
+        |    val m = match_regex("cat|dog", "the cat sat")
+        |    if !m.matched() then return 0
+        |    val s, e = m.group(0)
+        |    if s != 4 then return 0
+        |    if e != 7 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.regex no match" in {
+    llvmExitWithStd(
+      """import std.regex.*
+        |
+        |main() -> int
+        |    val m = match_regex("cat|dog", "the bird sat")
+        |    if m.matched() then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.regex two calls" in {
+    llvmExitWithStd(
+      """import std.regex.*
+        |
+        |main() -> int
+        |    val m1 = match_regex("hello", "hello world")
+        |    if !m1.matched() then return 0
+        |    val m2 = match_regex("world", "hello world")
+        |    if !m2.matched() then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.regex anchored" in {
+    llvmExitWithStd(
+      """import std.regex.*
+        |
+        |main() -> int
+        |    val m1 = match_regex("^hello$", "hello")
+        |    if !m1.matched() then return 0
+        |    val m2 = match_regex("^hello$", "say hello")
+        |    if m2.matched() then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.regex capture groups" in {
+    llvmExitWithStd(
+      """import std.regex.*
+        |
+        |main() -> int
+        |    val m = match_regex("(hello) (world)", "say hello world")
+        |    if !m.matched() then return 0
+        |    val s1, e1 = m.group(1)
+        |    if s1 != 4 then return 0
+        |    if e1 != 9 then return 0
+        |    val s2, e2 = m.group(2)
+        |    if s2 != 10 then return 0
+        |    if e2 != 15 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.regex character class" in {
+    llvmExitWithStd(
+      """import std.regex.*
+        |
+        |main() -> int
+        |    val m = match_regex("[0-9]+", "abc123def")
+        |    if !m.matched() then return 0
+        |    val s, e = m.group(0)
+        |    if s != 3 then return 0
+        |    if e != 6 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.regex quantifiers" in {
+    llvmExitWithStd(
+      """import std.regex.*
+        |
+        |main() -> int
+        |    val m1 = match_regex("^ab+c$", "abbbbc")
+        |    if !m1.matched() then return 0
+        |    val m2 = match_regex("^ab?c$", "ac")
+        |    if !m2.matched() then return 0
+        |    val m3 = match_regex("^a{3}$", "aaa")
+        |    if !m3.matched() then return 0
+        |    val m4 = match_regex("^a{3}$", "aa")
+        |    if m4.matched() then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.container.list new and empty" in {
+    llvmExitWithStd(
+      """import std.container.list.*
+        |
+        |main() -> int
+        |    val l = new_list[int]()
+        |    if l.len() != 0 then return 0
+        |    if i64(l.front()) != 0 then return 0
+        |    if i64(l.back()) != 0 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.container.list push_front and push_back" in {
+    llvmOutputWithStd(
+      """import std.container.list.*
+        |
+        |main()
+        |    val l = new_list[int]()
+        |    println(l.len())
+        |    val a = l.push_front(1)
+        |    println(l.len())
+        |    println(a.value)
+        |""".stripMargin) shouldBe "0\n1\n1"
+  }
+
+  "std.container.list remove" in {
+    llvmExitWithStd(
+      """import std.container.list.*
+        |
+        |main() -> int
+        |    val l = new_list[int]()
+        |    val x = l.push_back(10)
+        |    val y = l.push_back(20)
+        |    if l.remove(x) != 10 then return 0
+        |    if l.len() != 1 then return 0
+        |    if l.front() != y then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.container.list insert_before and after" in {
+    llvmExitWithStd(
+      """import std.container.list.*
+        |
+        |main() -> int
+        |    val l = new_list[int]()
+        |    val mid = l.push_back(2)
+        |    val lo = l.insert_before(1, mid)
+        |    val hi = l.insert_after(3, mid)
+        |    if l.len() != 3 then return 0
+        |    if lo.value != 1 then return 0
+        |    if mid.value != 2 then return 0
+        |    if hi.value != 3 then return 0
+        |    if lo.next_elem() != mid then return 0
+        |    if mid.next_elem() != hi then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "std.container.list move_to_front" in {
+    llvmExitWithStd(
+      """import std.container.list.*
+        |
+        |main() -> int
+        |    val l = new_list[int]()
+        |    val a = l.push_back(1)
+        |    val b = l.push_back(2)
+        |    val c = l.push_back(3)
+        |    l.move_to_front(c)
+        |    if l.front() != c then return 0
+        |    if c.next_elem() != a then return 0
+        |    if l.back() != b then return 0
         |    1
         |""".stripMargin) shouldBe 1
   }

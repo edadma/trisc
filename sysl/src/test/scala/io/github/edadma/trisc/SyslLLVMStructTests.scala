@@ -132,4 +132,120 @@ class SyslLLVMStructTests extends SyslLLVMTestHelpers {
         |    println(c.value)
         |""".stripMargin) shouldBe "18"
   }
+
+  // ===== Append backref preservation =====
+
+  "append preserves backref - no grow" in {
+    llvmExit(
+      """make_list() -> []int
+        |    val _a = new [16]int
+        |    var xs = _a[:0]
+        |    xs = append(xs, 10)
+        |    xs = append(xs, 20)
+        |    xs = append(xs, 30)
+        |    xs
+        |
+        |main() -> int
+        |    val xs = make_list()
+        |    if len(xs) != 3 then return 0
+        |    if xs[0] != 10 then return 0
+        |    if xs[1] != 20 then return 0
+        |    if xs[2] != 30 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "append preserves backref - two calls" in {
+    llvmExit(
+      """make_list(n: int) -> []int
+        |    val _a = new [16]int
+        |    var xs = _a[:0]
+        |    for var i = 0; i < n; i++
+        |        xs = append(xs, i * 10)
+        |    xs
+        |
+        |main() -> int
+        |    val a = make_list(3)
+        |    val b = make_list(2)
+        |    if a[0] != 0 then return 0
+        |    if a[2] != 20 then return 0
+        |    if b[0] != 0 then return 0
+        |    if b[1] != 10 then return 0
+        |    if len(a) != 3 then return 0
+        |    if len(b) != 2 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  "struct with slice field returned from function" in {
+    llvmExit(
+      """struct Container
+        |    items: []int
+        |    count: int
+        |
+        |make_container() -> Container
+        |    val _a = new [8]int
+        |    var items = _a[:0]
+        |    items = append(items, 42)
+        |    items = append(items, 99)
+        |    Container(items, 2)
+        |
+        |main() -> int
+        |    val c = make_container()
+        |    if c.count != 2 then return 0
+        |    if c.items[0] != 42 then return 0
+        |    if c.items[1] != 99 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
+
+  // ===== IR validity: argument types must match declarations =====
+
+  "string iteration byte passed to char param is widened" in {
+    // for c in s iterates as bytes (i8), but a char param is i32.
+    // The codegen must zext i8 -> i32 at the call site.
+    val ir = compileLLVM(
+      """extern my_putc(c: char)
+        |
+        |my_puts(s: string) = for c in s do my_putc(c)
+        |
+        |main() -> int
+        |    my_puts("hi")
+        |    0
+        |""".stripMargin)
+    // Verify: every call to @my_putc must pass i32, not i8
+    val calls = ir.linesIterator.filter(_.contains("call")).filter(_.contains("@my_putc")).toList
+    for line <- calls do
+      assert(!line.contains("i8 %"), s"my_putc called with i8 instead of i32: $line")
+  }
+
+  "nested struct-with-slice in slice array" in {
+    llvmExit(
+      """struct Item
+        |    tag: int
+        |    data: []int
+        |
+        |make_data(n: int) -> []int
+        |    val _d = new [8]int
+        |    var d = _d[:0]
+        |    for var i = 0; i < n; i++
+        |        d = append(d, i * 100)
+        |    d
+        |
+        |main() -> int
+        |    val _items = new [8]Item
+        |    var items = _items[:0]
+        |    val d1 = make_data(3)
+        |    items = append(items, Item(1, d1))
+        |    val d2 = make_data(2)
+        |    items = append(items, Item(2, d2))
+        |    if len(items) != 2 then return 0
+        |    if items[0].tag != 1 then return 0
+        |    if items[0].data[0] != 0 then return 0
+        |    if items[0].data[2] != 200 then return 0
+        |    if items[1].tag != 2 then return 0
+        |    if items[1].data[1] != 100 then return 0
+        |    1
+        |""".stripMargin) shouldBe 1
+  }
 }
