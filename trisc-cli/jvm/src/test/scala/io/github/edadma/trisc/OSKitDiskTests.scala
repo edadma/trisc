@@ -13,6 +13,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
   private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
+  private lazy val configSysl: String = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
   private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   // Stack layout for 2-thread tests (disk server + client):
@@ -42,7 +43,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
       "posix/ctype/ctype" -> posixCtypeSysl,
       "posix/stdlib/alloc" -> posixAllocSysl,
       "posix/unistd/sbrk" -> sbrkSysl,
-      "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "std/debug/debug" -> debugSysl,
+      "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "oskit/config/config" -> configSysl, "std/debug/debug" -> debugSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -105,7 +106,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
       "posix/stdlib/alloc" -> posixAllocSysl,
       "posix/unistd/sbrk" -> sbrkSysl,
       "oskit/servers/tfs" -> tfsSrvSysl,
-      "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "std/debug/debug" -> debugSysl,
+      "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "oskit/config/config" -> configSysl, "std/debug/debug" -> debugSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)

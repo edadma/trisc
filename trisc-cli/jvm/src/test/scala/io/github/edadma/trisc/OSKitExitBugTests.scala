@@ -120,6 +120,7 @@ import oskit.services.*
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
           |
           |kernel_main() -> int
@@ -154,6 +155,7 @@ import oskit.services.*
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
           |
           |kernel_main() -> int
@@ -188,6 +190,7 @@ import oskit.services.*
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
 import oskit.sync.*
           |
@@ -226,6 +229,7 @@ import oskit.sync.*
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
 import oskit.sync.*
           |
@@ -269,6 +273,7 @@ import oskit.sync.*
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
 import oskit.sync.*
           |
@@ -309,6 +314,7 @@ import oskit.sync.*
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
 import oskit.sync.*
           |
@@ -350,6 +356,7 @@ import oskit.sync.*
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
 import oskit.sync.*
           |
@@ -390,6 +397,7 @@ import oskit.sync.*
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
 import oskit.sync.*
           |
@@ -433,6 +441,7 @@ import oskit.sync.*
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
 import oskit.sync.*
           |
@@ -473,6 +482,7 @@ import oskit.sync.*
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
 import oskit.sync.*
           |
@@ -515,6 +525,7 @@ import oskit.sync.*
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
           |
           |kernel_main() -> int
@@ -555,6 +566,7 @@ import oskit.services.*
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
 import oskit.sync.*
           |
@@ -598,6 +610,7 @@ import oskit.sync.*
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
 import oskit.sync.*
           |
@@ -643,6 +656,7 @@ import oskit.sync.*
     val (cpu, output) = runTOS(Map(
       "app" ->
         """import oskit.kernel.*
+import oskit.config.*
 import oskit.services.*
 import oskit.sync.*
           |

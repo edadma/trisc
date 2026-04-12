@@ -33,7 +33,8 @@ Commands:
     import oskit.fs.{tfs_init, tfs_lookup, tfs_read, tfs_write, tfs_create, tfs_unlink, tfs_stat, tfs_readdir, tfs_rmdir, tfs_chmod, tfs_rename, sync_superblock}
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv, ipc_reply, ipc_send, ipc_last_msg_len}
     import oskit.drivers.disk.{disk_read, disk_write}
-    import oskit.kernel.{kernel_get_thread_ptbr, vm_copy_to, vm_copy_from, KERNEL_L1_BASE}
+    import oskit.kernel.{kernel_get_thread_ptbr, vm_copy_to, vm_copy_from}
+    import oskit.config.KERNEL_L1_BASE
 
     val TFS_CMD_OPEN    = 1
     val TFS_CMD_READ    = 2

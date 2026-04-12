@@ -14,6 +14,7 @@ object CheckThreadStruct:
       "oskit/ipc/ipc" -> readLsysl("oskit/ipc/ipc.lsysl"),
       "std/mem/mem" -> readLsysl("std/mem/mem.lsysl"),
       "oskit/hal/mem" -> readLsysl("oskit/hal/mem_dma.lsysl"),
+      "oskit/config/config" -> scala.io.Source.fromFile("oskit/config/config.sysl").mkString,
       "std/debug/debug" -> readLsysl("std/debug/debug.lsysl"),
       "oskit/drivers/kbd/keyboard" -> readLsysl("oskit/drivers/kbd/keyboard.lsysl"),
       "oskit/drivers/tty/tty" -> readLsysl("oskit/drivers/tty/tty.lsysl"),

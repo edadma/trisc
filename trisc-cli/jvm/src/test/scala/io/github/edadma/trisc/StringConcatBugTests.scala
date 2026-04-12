@@ -644,6 +644,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val memSysl: String   = readLsysl("std/mem/mem.lsysl")
   private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
+  private lazy val configSysl: String = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
   private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   private lazy val concatAppLinked: TOF =
@@ -657,6 +658,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/ipc/ipc"               -> ipcSysl,
       "std/mem/mem"                 -> memSysl,
       "oskit/hal/mem"               -> halMemSysl,
+      "oskit/config/config"         -> configSysl,
       "std/debug/debug"             -> debugSysl,
       "oskit/drivers/disk/disk"     -> diskSysl,
       "oskit/drivers/kbd/keyboard"  -> kbdSysl,
@@ -857,6 +859,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/ipc/ipc"               -> ipcSysl,
       "std/mem/mem"                 -> memSysl,
       "oskit/hal/mem"               -> halMemSysl,
+      "oskit/config/config"         -> configSysl,
       "std/debug/debug"             -> debugSysl,
       "oskit/drivers/disk/disk"     -> diskSysl,
       "oskit/drivers/kbd/keyboard"  -> kbdSysl,
@@ -1039,6 +1042,7 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/ipc/ipc"               -> ipcSysl,
       "std/mem/mem"                 -> memSysl,
       "oskit/hal/mem"               -> halMemSysl,
+      "oskit/config/config"         -> configSysl,
       "std/debug/debug"             -> debugSysl,
       "oskit/drivers/disk/disk"     -> diskSysl,
       "oskit/drivers/kbd/keyboard"  -> kbdSysl,

@@ -54,6 +54,7 @@ class OSKitDisplayTests extends OSKitTestHelpers {
   private lazy val displaySysl: String = readLsysl("oskit/drivers/display/display.lsysl")
   private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
   private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
+  private lazy val configSysl: String = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
   private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
 
   def runDisplay(userSources: Map[String, String], maxCycles: Int = 10000000): (CPU, String) =
@@ -61,7 +62,7 @@ class OSKitDisplayTests extends OSKitTestHelpers {
     val allSources = Map(
       "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
       "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
-      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "std/debug/debug" -> debugSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl,
+      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "oskit/config/config" -> configSysl, "std/debug/debug" -> debugSysl, "oskit/drivers/kbd/keyboard" -> kbdSysl,
       "oskit/drivers/mouse/mouse" -> mouseSysl, "oskit/drivers/display/display" -> displaySysl,
       "posix/unistd/sbrk" -> sbrkSysl, "posix/stdlib/alloc" -> posixAllocSysl, "posix/string/string" -> posixStringSysl, "posix/ctype/ctype" -> posixCtypeSysl,
     ) ++ userSources
