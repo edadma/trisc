@@ -248,12 +248,19 @@ truncation. Sets actual_len on the receiver's IPC context.
     ipc_deliver(receiver: int, sender: int, msg_ptr: i64, msg_len: int)
         val buf_ptr = ipc_ctx[receiver].buf
         val buf_len = ipc_ctx[receiver].len
+        // If sender has a per-process page table, switch PTBR so
+        // the memcpy reads from the sender's virtual address space.
+        val sender_ptbr = threads[sender].ptbr
+        if sender_ptbr != KERNEL_L1_BASE
+            vm_set_ptbr(sender_ptbr)
         if msg_len > buf_len
             ipc_memcpy(buf_ptr, msg_ptr, buf_len)
             ipc_ctx[receiver].actual_len = buf_len
         else
             ipc_memcpy(buf_ptr, msg_ptr, msg_len)
             ipc_ctx[receiver].actual_len = msg_len
+        if sender_ptbr != KERNEL_L1_BASE
+            vm_set_ptbr(KERNEL_L1_BASE)
         ipc_ctx[receiver].sender = sender
 
 Receive a message on a port. The arg is a pointer to a packed

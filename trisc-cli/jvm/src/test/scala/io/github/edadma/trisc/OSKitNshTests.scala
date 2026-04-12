@@ -193,8 +193,8 @@ import oskit.apps.init.{init}
 
   "NSH: echo command" taggedAs Slow in {
     val keys        = typeString("echo hi\n", startTick = 500000)
-    val (_, output) = runNsh(scheduledKeys = keys)
-    output should include("hi")
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 100000000)
+    output should include("\nhi\n")
   }
 
   "NSH: ls on root with prefilled file" taggedAs Slow in {
