@@ -333,6 +333,11 @@ double(x: int) = x * 2
 
 // No parameters
 getAnswer() -> int = 42
+
+// Statement body — for/while/do-while loops can appear after `=`
+// as a single-line void body
+uart_puts(s: string) = for c in s do uart_putc(int(c))
+wait_ready() = while !ready() do noop()
 ```
 
 ### Default Parameter Values
@@ -359,6 +364,34 @@ other parameters or local variables. Constant defaults are folded by the
 analyzer.
 
 Default values are not yet supported on generic functions.
+
+### Named Arguments
+
+Function call arguments can be passed by name using `name = expr`. Named
+arguments can appear in any order, can be mixed with positional arguments
+(positional must come first), and work with default values — including
+skipping middle defaults:
+
+```sysl
+greet(x: int, y: int, z: int = 0) -> int = x * 100 + y * 10 + z
+
+main() -> int
+    greet(1, 2, 3)                  // positional
+    greet(x = 1, y = 2, z = 3)      // all named
+    greet(y = 2, x = 1, z = 3)      // named, any order
+    greet(1, z = 3, y = 2)          // mixed: positional first, then named
+    greet(1, z = 3)                 // named skips middle — y uses default if it had one
+```
+
+Errors:
+- Positional argument after a named argument.
+- Unknown parameter name.
+- Duplicate named argument.
+- Named argument that conflicts with a positional one (same slot).
+
+Named arguments are currently supported for regular function calls,
+struct constructors, and builtins — not yet for generic function
+instantiation, method calls, or trait methods.
 
 ### `def` — Auto-Call Functions
 

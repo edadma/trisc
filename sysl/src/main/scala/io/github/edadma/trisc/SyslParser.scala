@@ -291,10 +291,19 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val bodyExprOrBlock: Parser[FunBodyAST] =
     Newline ~> Indent ~> stmts <~ opt(Newline) <~ Dedent ^^ (s => BlockBodyAST(s)) |
+      forStmt ^^ (s => BlockBodyAST(List(s))) |
+      whileStmt ^^ (s => BlockBodyAST(List(s))) |
+      doWhileStmt ^^ (s => BlockBodyAST(List(s))) |
       tupleExpr ^^ ExprBodyAST.apply
 
   lazy val param: Parser[ParamAST] =
     ident ~ (":" ~> typeRef) ~ opt("=" ~> expr) ^^ { case name ~ t ~ default => ParamAST(name, t, default) }
+
+  // Function call argument: `name = expr` (named) or `expr` (positional).
+  // The `ident ~ "="` lookahead must succeed only when both tokens are present.
+  lazy val callArg: Parser[ExpressionAST] =
+    ident ~ ("=" ~> expr) ^^ { case name ~ value => NamedArgAST(name, value) } |
+      expr
 
   // Optional type argument list for generic type references: [T], [T, U], or absent
   lazy val typeArgList: Parser[List[TypeAST]] =
@@ -729,10 +738,10 @@ class SyslParser extends StandardTokenParsers {
             case lo ~ Some(hi) => (4, null, "", List(lo, hi.orNull): List[ExpressionAST])
           }
         ) <~ "]") |
-        ("." ~> ident) ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case m ~ args => (2, null, m, args) } |
+        ("." ~> ident) ~ ("(" ~> repsep(callArg, ",") <~ ")") ^^ { case m ~ args => (2, null, m, args) } |
         ("." ~> numericLit) ^^ (n => (1, null, s"_${n.toInt}", Nil)) |
         ("." ~> ident) ^^ (f => (1, null, f, Nil)) |
-        ("(" ~> repsep(expr, ",") <~ ")") ^^ (args => (3, null, "", args)) |
+        ("(" ~> repsep(callArg, ",") <~ ")") ^^ (args => (3, null, "", args)) |
         "?" ^^^ ((5, null, "", Nil: List[ExpressionAST]))
       ) ^^ {
         case base ~ ops => ops.foldLeft(base) {
@@ -792,7 +801,7 @@ class SyslParser extends StandardTokenParsers {
       "new" ~> ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => NewExprAST(name, args) } |
       "string" ~> "(" ~> rep1sep(expr, ",") <~ ")" ^^ { args => CallAST("string", args) } |
       cast |
-      ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |
+      ident ~ ("(" ~> repsep(callArg, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |
       // Scalar type keywords as expressions — used inside [] for generic type args: Box[int](42)
       ("int" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "double" | "f64" | "bool") ^^ VarRefAST.apply |
       ident ^^ VarRefAST.apply |
