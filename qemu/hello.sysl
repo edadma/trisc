@@ -1,0 +1,11 @@
+// Minimal sysl program for x86_64 bare-metal hello world.
+//
+// Calls extern uart_putc provided by main.c. No kernel, no heap, no libc.
+
+extern uart_putc(c: char)
+
+uart_puts(s: string) = for c in s do uart_putc(c)
+
+main() -> int
+    uart_puts("SLIX on x86_64!\n")
+    0
