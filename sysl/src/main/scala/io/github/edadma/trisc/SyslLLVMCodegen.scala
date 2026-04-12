@@ -517,7 +517,9 @@ class SyslLLVMCodegen:
       case TReturnStmt(None) =>
         emitDefers()
         emitReleaseRefs()
-        emit("  ret void")
+        val retType = llvmType(currentFunction.returnType)
+        if retType == "void" then emit("  ret void")
+        else emitRet(retType, "zeroinitializer")
         hasReturned = true
 
       case TDeferStmt(body) =>

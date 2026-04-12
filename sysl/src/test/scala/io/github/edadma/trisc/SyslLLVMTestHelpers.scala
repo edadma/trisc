@@ -90,6 +90,7 @@ trait SyslLLVMTestHelpers extends AnyFreeSpec with Matchers {
       val llFile = dir.resolve("test.ll")
       val exeFile = dir.resolve("test")
       Files.writeString(llFile, ir)
+      // Files.writeString(java.nio.file.Paths.get(s"/tmp/test-${ir.length}.ll"), ir)
       val compileResult = Process(Seq("clang", "-w", llFile.toString, "-o", exeFile.toString)).!
       if compileResult != 0 then
         fail(s"clang failed with exit code $compileResult\n\nLLVM IR:\n$ir")

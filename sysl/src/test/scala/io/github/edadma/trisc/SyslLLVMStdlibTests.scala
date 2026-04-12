@@ -1990,7 +1990,7 @@ class SyslLLVMStdlibTests extends SyslLLVMTestHelpers {
 
   // ===== std.regex =====
 
-  "std.regex literal match" ignore { // TODO: missing return path in match expr — `ret void` in Match-returning function
+  "std.regex literal match" ignore { // TODO: SIGBUS crash at runtime — likely memory corruption in regex exec
     llvmExitWithStd(
       """import std.regex.*
         |
