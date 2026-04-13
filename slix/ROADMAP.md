@@ -51,7 +51,72 @@ Concrete, ordered development plan. Each phase builds on the previous.
 
 ---
 
-## Phase 4: Multi-Target Architecture
+## Phase 4: RS Refactor and Init Isolation (Minix 3 alignment)
+
+**Problem:** SLIX's RS is fire-and-forget -- it starts servers once during boot and exits. Minix 3's RS is the root of the server tree: it starts first, monitors all servers, and can restart crashed ones. This is Minix 3's headline reliability feature. Additionally, init is compiled into the kernel binary and runs as a kernel thread, unlike Minix 3 where init is a separate binary loaded as a boot module.
+
+### Current boot order (wrong)
+```
+kernel_main -> init -> RS -> {disk, tfs, tty, pm, vfs} -> init reads ttytab -> login
+```
+RS is started by init, which is backwards. RS should be more fundamental than init.
+
+### Target boot order (Minix 3-style)
+```
+kernel_main -> RS -> {disk, tfs, tty, pm, vfs, init} -> init reads ttytab -> login
+```
+Kernel starts RS directly. RS starts all servers including init. Init is a standalone .trb boot module, just like the other servers.
+
+### Init isolation
+
+Init is currently compiled into the kernel binary and runs as a kernel thread. It must become a standalone .trb boot module:
+
+- Compile init as a standalone binary (same pattern as other servers)
+- RS loads init from boot modules as the last server
+- Init reads `/etc/ttytab` and spawns login processes
+- Init is just another process that RS manages and can restart
+
+### RS responsibilities (current vs target)
+
+| Feature | Current | Target |
+|---------|---------|--------|
+| Start servers in order | Yes | Yes |
+| Handshake boot (wait for ready) | Yes | Yes |
+| Monitor server health | No | Yes -- heartbeat or IPC watchdog |
+| Restart crashed server | No | Yes -- detect exit, reload .trb, restart |
+| Start init | No (init starts RS) | Yes (RS starts init last) |
+| Privilege table | No | Yes -- restrict syscalls/IPC per server |
+
+### Crash recovery design
+
+1. RS keeps a server table: `{name, boot_module_idx, port, pid, state}`
+2. When a server process exits (RS gets notification from PM), RS checks if it was unexpected
+3. RS reloads the .trb from the boot module region (still in RAM), creates new page table, starts new process
+4. RS re-registers the server's port (or the server does on startup)
+5. Clients retry failed IPC calls -- servers are stateless or reconstruct state on restart
+
+**Stateless vs stateful servers:**
+- disk: stateless (just DMA, no internal state)
+- tty: nearly stateless (line buffer can be lost)
+- tfs: stateful (open file positions, dirty blocks) -- needs careful handling
+- vfs: stateful (open file table, handle tables) -- hardest to restart
+- pm: stateful (process table, waiters) -- also hard
+
+For now, crash recovery works well for stateless drivers. Stateful server recovery requires checkpointing or state reconstruction, which is a longer-term goal.
+
+### Privilege table design
+
+Each server entry specifies:
+- Allowed syscall bitmap (e.g., disk can't call svc_create_proc_susp)
+- Allowed IPC targets (e.g., TFS can only send to disk and VFS)
+- MMIO page grants (already implemented via vm_create_server_pt)
+- IRQ grants (which IRQs the server can register for)
+
+The kernel checks the privilege table on every syscall and IPC send. Violations are reported to RS, which can decide to restart or terminate the server.
+
+---
+
+## Phase 5: Multi-Target Architecture
 
 **Problem:** All arch-specific code (TRISC assembly, Sv32 page tables, MMIO device addresses, DMA, cli/sti) is mixed into kernel.lsysl and boot.asm. Porting to x86_64 means rewriting large portions of the kernel.
 
@@ -154,62 +219,6 @@ oskit/
 5. **Test on TRISC** -- pure refactor, everything must still work identically.
 
 6. **Create arch/x86/ stubs** -- implement the arch interface for x86_64, starting with boot.S (multiboot entry) and vm.lsysl (4-level page tables).
-
----
-
-## Phase 5: RS Refactor (Minix 3 alignment)
-
-**Problem:** SLIX's RS is fire-and-forget -- it starts servers once during boot and exits. Minix 3's RS is the root of the server tree: it starts first, monitors all servers, and can restart crashed ones. This is Minix 3's headline reliability feature.
-
-### Current boot order (wrong)
-```
-kernel_main -> init -> RS -> {disk, tfs, tty, pm, vfs} -> init reads ttytab -> login
-```
-RS is started by init, which is backwards. RS should be more fundamental than init.
-
-### Target boot order (Minix 3-style)
-```
-kernel_main -> RS -> {disk, tfs, tty, pm, vfs} -> init -> login
-```
-Kernel starts RS directly. RS starts all servers including init. Init is just another server that RS manages.
-
-### RS responsibilities (current vs target)
-
-| Feature | Current | Target |
-|---------|---------|--------|
-| Start servers in order | Yes | Yes |
-| Handshake boot (wait for ready) | Yes | Yes |
-| Monitor server health | No | Yes -- heartbeat or IPC watchdog |
-| Restart crashed server | No | Yes -- detect exit, reload .trb, restart |
-| Start init | No (init starts RS) | Yes (RS starts init last) |
-| Privilege table | No | Yes -- restrict syscalls/IPC per server |
-
-### Crash recovery design
-
-1. RS keeps a server table: `{name, boot_module_idx, port, pid, state}`
-2. When a server process exits (RS gets notification from PM), RS checks if it was unexpected
-3. RS reloads the .trb from the boot module region (still in RAM), creates new page table, starts new process
-4. RS re-registers the server's port (or the server does on startup)
-5. Clients retry failed IPC calls -- servers are stateless or reconstruct state on restart
-
-**Stateless vs stateful servers:**
-- disk: stateless (just DMA, no internal state)
-- tty: nearly stateless (line buffer can be lost)
-- tfs: stateful (open file positions, dirty blocks) -- needs careful handling
-- vfs: stateful (open file table, handle tables) -- hardest to restart
-- pm: stateful (process table, waiters) -- also hard
-
-For now, crash recovery works well for stateless drivers. Stateful server recovery requires checkpointing or state reconstruction, which is a longer-term goal.
-
-### Privilege table design
-
-Each server entry specifies:
-- Allowed syscall bitmap (e.g., disk can't call svc_create_proc_susp)
-- Allowed IPC targets (e.g., TFS can only send to disk and VFS)
-- MMIO page grants (already implemented via vm_create_server_pt)
-- IRQ grants (which IRQs the server can register for)
-
-The kernel checks the privilege table on every syscall and IPC send. Violations are reported to RS, which can decide to restart or terminate the server.
 
 ---
 
