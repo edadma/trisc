@@ -406,6 +406,70 @@ Returns L1 base address, or 0 on failure.
         // L2[0x100-0x3FF]: unmapped (already zeroed by page_alloc)
         l1
 
+Create a server page table with MMIO grant. Like vm_create_process_pt
+but L1[2] uses an L2 table instead of a superpage, and maps the
+specified I/O page with PTE_U so user-mode server code can access
+device registers. Other I/O pages remain supervisor-only.
+
+    vm_create_server_pt(io_page: int) -> int
+        val l1 = page_alloc_zero()
+        if l1 == 0
+            return 0
+        val l2 = page_alloc_zero()
+        if l2 == 0
+            return 0
+
+        val flags_rwx = PTE_V | PTE_R | PTE_W | PTE_X
+
+        // L1[0] = pointer to L2 (non-superpage)
+        val l2_ppn = l2 / PAGE_SIZE
+        vm_write_pte(l1, (l2_ppn << 10) | PTE_V)
+
+        // L1[1] = copy kernel superpage (0x400000-0x7FFFFF)
+        var k1: *i32 = *i32(KERNEL_L1_BASE + 4)
+        vm_write_pte(l1 + 4, *k1)
+
+        // L1[2] = L2 table for I/O region (non-superpage, with MMIO grant)
+        val l2_io = page_alloc_zero()
+        if l2_io == 0
+            return 0
+        val l2_io_ppn = l2_io / PAGE_SIZE
+        vm_write_pte(l1 + 8, (l2_io_ppn << 10) | PTE_V)
+
+        // Map all I/O pages as supervisor RW (identity-mapped)
+        val io_base_page = 0x800
+        var j = 0
+        while j < 0x400
+            val phys_page = io_base_page + j
+            val flags = PTE_V | PTE_R | PTE_W
+            vm_write_pte(l2_io + j * 4, (phys_page << 10) | flags)
+            j += 1
+
+        // Grant user access to the specified I/O page
+        val grant_idx = io_page - io_base_page
+        if grant_idx >= 0
+            if grant_idx < 0x400
+                vm_write_pte(l2_io + grant_idx * 4, (io_page << 10) | PTE_V | PTE_R | PTE_W | PTE_U)
+
+        // L2[0x00-0xCB]: kernel region, identity-mapped supervisor RWX
+        var i = 0
+        while i < 0xCC
+            var p: *i32 = *i32(l2 + i * 4)
+            *p = i32((i << 10) | flags_rwx)
+            i += 1
+
+        // L2[0xCC-0xFF]: program region, fresh physical pages
+        while i < 0x100
+            val page = page_alloc()
+            if page == 0
+                return 0
+            val ppn = page / PAGE_SIZE
+            var p: *i32 = *i32(l2 + i * 4)
+            *p = i32((ppn << 10) | flags_rwx)
+            i += 1
+
+        l1
+
 Free all pages allocated for a process page table: the program
 region pages (L2 entries 0xCC-0xFF), the L2 table, and the L1
 table. Kernel identity-mapped pages (L2 entries 0x00-0xCB) are
@@ -699,6 +763,12 @@ Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
         syscall_return(0)
         kernel_continue_current()
 
+    sys_vm_create_server_pt_handler(arg: int)
+        val io_page = int(i64(arg))
+        val result = vm_create_server_pt(io_page)
+        syscall_return(result)
+        kernel_continue_current()
+
     sys_getuid_handler(arg: int)
         syscall_return(threads[current_thread].uid)
         kernel_continue_current()
@@ -738,6 +808,7 @@ Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
         register_syscall(60, sys_proc_set_parent_tid_handler)
         register_syscall(61, sys_getuid_handler)
         register_syscall(62, sys_setuid_handler)
+        register_syscall(63, sys_vm_create_server_pt_handler)
 
 Thread-local storage. A flat 2D array indexed by [thread_id][slot].
 Each thread gets TLS_SLOTS slots of int-sized values. Access is

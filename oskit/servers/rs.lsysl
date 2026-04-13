@@ -21,8 +21,10 @@ starts the next server.
     module oskit.servers
 
     import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp}
-    import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid}
+    import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_set_thread_ptbr, svc_vm_set_ptbr}
     import oskit.ipc.{ipc_recv_notify, port_create}
+    import oskit.config.{BOOT_INFO_ADDR, KERNEL_L1_BASE}
+    import oskit.hal.memset
 
 Stack slot counter. Slot 0 is init (created by kernel_main).
 RS is slot 1. Servers start at slot 2.
@@ -85,22 +87,221 @@ creating the RS thread.
             i += 1
         rs_server_count += 1
 
+Boot info header parsing. The emulator writes a boot info
+struct at BOOT_INFO_ADDR with magic "SLIX", module count,
+and per-module entries (name, addr, size).
+
+    rs_read_u32_le(p: *byte) -> i64
+        i64(p[0] & 0xff) | (i64(p[1] & 0xff) << 8) | (i64(p[2] & 0xff) << 16) | (i64(p[3] & 0xff) << 24)
+
+    rs_read_i64_le(p: *byte) -> i64
+        rs_read_u32_le(p) | (rs_read_u32_le(p + 4) << 32)
+
+Check if boot info header is valid (magic = "SLIX").
+
+    rs_boot_info_valid() -> bool
+        val p = *byte(BOOT_INFO_ADDR)
+        if p[0] != byte('S')
+            return false
+        if p[1] != byte('L')
+            return false
+        if p[2] != byte('I')
+            return false
+        if p[3] != byte('X')
+            return false
+        true
+
+Get boot module count from boot info header.
+
+    rs_boot_module_count() -> int
+        val p = *byte(BOOT_INFO_ADDR + 4)
+        int(rs_read_u32_le(p))
+
+Find a boot module by name. Returns index or -1.
+
+    rs_find_boot_module(name: *byte, nlen: int) -> int
+        val count = rs_boot_module_count()
+        var i = 0
+        while i < count
+            val entry = *byte(BOOT_INFO_ADDR + 8 + i * 24)
+            // Compare name (first nlen bytes, NUL-padded)
+            var found = true
+            var j = 0
+            while j < nlen
+                if j >= 8
+                    break
+                if entry[j] != name[j]
+                    found = false
+                    break
+                j += 1
+            if found
+                // Check rest is NUL or end of name
+                if nlen < 8
+                    if entry[nlen] != 0
+                        found = false
+                if found
+                    return i
+            i += 1
+        -1
+
+Get a boot module's physical address and size.
+
+    rs_boot_module_addr(idx: int) -> i64
+        rs_read_i64_le(*byte(BOOT_INFO_ADDR + 8 + idx * 24 + 8))
+
+    rs_boot_module_size(idx: int) -> int
+        int(rs_read_i64_le(*byte(BOOT_INFO_ADDR + 8 + idx * 24 + 16)))
+
+Load a TRB v1 boot module into a process address space.
+Parses the TRB header from kernel-space RAM, copies PROGBITS
+segments into the target process via vm_copy_to, and zeroes
+NOBITS (BSS) segments. Returns entry point or -1 on error.
+
+    val RS_PROG_USP = 0xD0000
+    val RS_PROG_SSP = 0xCF000
+
+    rs_load_trb_module(buf: *byte, buflen: int, ptbr: int) -> i64
+        if buflen < 12
+            return -1
+        if buf[0] != byte('T')
+            return -1
+        if buf[1] != byte('R')
+            return -1
+        if buf[2] != byte('B')
+            return -1
+        if buf[3] != byte(1)
+            return -1
+
+        val entry = rs_read_u32_le(buf + 4)
+        val nrec = int(rs_read_u32_le(buf + 8))
+        var pos = 12
+        var ri = 0
+        while ri < nrec
+            if pos + 12 > buflen
+                return -1
+            val hp = buf + pos
+            val org = int(rs_read_u32_le(hp))
+            val kind = int(rs_read_u32_le(hp + 4))
+            val sz = int(rs_read_u32_le(hp + 8))
+            pos += 12
+            if kind == 0
+                // PROGBITS — copy from boot module to process address space
+                if pos + sz > buflen
+                    return -1
+                svc_vm_copy_to(ptbr, org, buf + pos, sz)
+                pos += sz
+            else if kind == 1
+                // NOBITS (BSS) — zero fill in process address space
+                rs_zero_fill_remote(ptbr, org, sz)
+            else
+                return -1
+            ri += 1
+        entry
+
+Zero-fill a region in another process's address space.
+Uses a local zero buffer and vm_copy_to in chunks.
+
+    rs_zero_fill_remote(ptbr: int, addr: int, sz: int)
+        val CHUNK = 1024
+        var zero_buf: [1024]byte
+        memset(&zero_buf[0], 0, CHUNK)
+        var remaining = sz
+        var dst = addr
+        while remaining > 0
+            var chunk = remaining
+            if chunk > CHUNK
+                chunk = CHUNK
+            svc_vm_copy_to(ptbr, dst, &zero_buf[0], chunk)
+            remaining -= chunk
+            dst += chunk
+
+Start a server from a boot module: create server page table,
+load TRB binary, create process, resume it.
+io_page = MMIO page to grant (e.g. 0x800 for ramdisk).
+Returns 1 on success, 0 on failure.
+
+    rs_start_from_module(mod_idx: int, name: *byte, nlen: int, io_page: int) -> int
+        val addr = rs_boot_module_addr(mod_idx)
+        val sz = rs_boot_module_size(mod_idx)
+        val buf = *byte(addr)
+
+        // Create server page table with MMIO grant
+        val ptbr = svc_vm_create_server_pt(io_page)
+        if ptbr == 0
+            return 0
+
+        // Load TRB into process address space (RS stays on kernel PTBR)
+        val entry = rs_load_trb_module(buf, sz, ptbr)
+        if entry < 0
+            return 0
+
+        // Switch to process's page table so create_process_suspended
+        // can write the initial stack frame at virtual addresses
+        // (0xCF000 etc.) that map to the process's physical pages.
+        val my_tid = thread_id()
+        svc_set_thread_ptbr(my_tid, ptbr)
+        svc_vm_set_ptbr(ptbr)
+
+        // Create process suspended
+        val sname = string(name, nlen)
+        val pid = svc_create_proc_susp(entry, RS_PROG_USP, RS_PROG_SSP, sname, ptbr)
+
+        // Switch back to kernel address space
+        svc_set_thread_ptbr(my_tid, KERNEL_L1_BASE)
+        svc_vm_set_ptbr(KERNEL_L1_BASE)
+
+        if pid < 0
+            return 0
+
+        // Write RS TID at 0xBF000 so server can call rs_set_tid on startup
+        var tid_buf: [8]byte
+        *(*i64(&tid_buf[0])) = i64(thread_id())
+        svc_vm_copy_to(ptbr, 0xBF000, &tid_buf[0], 8)
+
+        // Resume the process
+        svc_resume_proc(pid)
+        1
+
 The RS main function. Runs as its own thread. Starts all
 registered servers in order with synchronous handshake,
 printing boot messages for each. Terminates when done —
 init joins on this thread to know when boot is complete.
 
+For each server, RS first checks boot info for a matching
+boot module. If found, starts the server as an isolated
+process with its own page table. Otherwise falls back to
+creating a kernel thread from the function pointer.
+
+    val IO_PAGE_DEVICES = 0x800
+
     rs_main()
         rs_set_tid(thread_id())
 
+        val has_boot_info = rs_boot_info_valid()
+
         var i = 0
         while i < rs_server_count
-            val slot = rs_next_slot
-            rs_next_slot += 1
-            val name = string(&rs_names[i * 8], rs_name_len[i])
+            val name = &rs_names[i * 8]
+            val nlen = rs_name_len[i]
             rs_print("  ")
-            rs_print(name)
-            create_thread(rs_entries[i], kernel_stack_usp(slot), kernel_stack_ssp(slot), name)
+            rs_print(string(name, nlen))
+
+            var started = false
+
+            // Try boot module first
+            if has_boot_info
+                val mod_idx = rs_find_boot_module(name, nlen)
+                if mod_idx >= 0
+                    if rs_start_from_module(mod_idx, name, nlen, IO_PAGE_DEVICES) == 1
+                        started = true
+                        rs_print(" [mod]")
+
+            // Fall back to kernel thread
+            if !started
+                val slot = rs_next_slot
+                rs_next_slot += 1
+                create_thread(rs_entries[i], kernel_stack_usp(slot), kernel_stack_ssp(slot), string(name, nlen))
+
             rs_wait_ready()
             rs_print(" ok\n")
             i += 1

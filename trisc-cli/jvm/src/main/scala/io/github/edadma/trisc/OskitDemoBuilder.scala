@@ -180,8 +180,12 @@ import oskit.apps.init.{init}
 
     val wrapperSource =
       s"""import $serverModulePath.{$entryFn}
+         |import oskit.services.{rs_set_tid}
          |
          |main()
+         |    // RS writes its TID at 0xBF000 before resuming us
+         |    val rs_tid_ptr = *i64(0xBF000)
+         |    rs_set_tid(int(*rs_tid_ptr))
          |    $entryFn()
          |""".stripMargin
 

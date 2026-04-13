@@ -326,6 +326,7 @@ import oskit.apps.init.{init}
     val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha, dma)
     dma.mem = mem
     linked.load(mem)
+    TriscCli.writeBootInfo(mem, OskitDemoBuilder.compileBootModules())
 
     val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
     val keyInjector: Processor => Unit = cpu => {

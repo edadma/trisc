@@ -152,10 +152,17 @@ then loops handling block I/O requests.
                     ipc_reply(sender, &reply[0], 1)
 
 Userspace wrappers. Clients use these to talk to the disk server
-without building IPC messages manually.
+without building IPC messages manually. Port lookup uses a local
+name buffer (not disk_name module var) so clients work even when
+the disk server runs in a separate address space.
+
+    disk_lookup_port() -> int
+        var n: [5]byte
+        n[0] = 100; n[1] = 105; n[2] = 115; n[3] = 107; n[4] = 0
+        port_lookup(&n[0])
 
     disk_read(lba: int, addr: *byte) -> int
-        val port = port_lookup(&disk_name[0])
+        val port = disk_lookup_port()
         if port < 0
             return -1
         var msg: [9]byte
@@ -167,7 +174,7 @@ without building IPC messages manually.
         int(reply[0])
 
     disk_write(lba: int, addr: *byte) -> int
-        val port = port_lookup(&disk_name[0])
+        val port = disk_lookup_port()
         if port < 0
             return -1
         var msg: [9]byte
@@ -179,7 +186,7 @@ without building IPC messages manually.
         int(reply[0])
 
     disk_capacity() -> int
-        val port = port_lookup(&disk_name[0])
+        val port = disk_lookup_port()
         if port < 0
             return -1
         var msg: [1]byte

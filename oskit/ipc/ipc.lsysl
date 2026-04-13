@@ -235,10 +235,15 @@ Returns 1 if waiting (RECV_BLOCKED or RECV_NOTIFY_BLOCKED), 0 otherwise.
 Deliver a message from sender to server and wake the server.
 Used by send handlers when the server is already waiting.
 
+    ipc_write_saved_r1(tid: int, value: i64)
+        val vaddr = int(threads[tid].ssp + 48)
+        val paddr = vm_v2p(threads[tid].ptbr, vaddr)
+        var p: *i64 = *i64(paddr)
+        *p = value
+
     ipc_deliver_and_wake(owner: int, sender: int, msg_ptr: i64, msg_len: int)
         ipc_deliver(owner, sender, msg_ptr, msg_len)
-        var ssp_r1: *i64 = *i64(threads[owner].ssp + 48)
-        *ssp_r1 = sender
+        ipc_write_saved_r1(owner, sender)
         threads[owner].state = STATE_READY
         threads[owner].quantum = DEFAULT_QUANTUM
         enqueue(threads[owner].priority, owner)
@@ -249,23 +254,27 @@ truncation. Sets actual_len on the receiver's IPC context.
     ipc_deliver(receiver: int, sender: int, msg_ptr: i64, msg_len: int)
         val buf_ptr = ipc_ctx[receiver].buf
         val buf_len = ipc_ctx[receiver].len
-        // Switch PTBR to sender's page table so memcpy can read
-        // from the sender's virtual address space.  Restore to the
-        // *calling* thread's PTBR afterward — not always KERNEL_L1_BASE —
-        // because the caller's stack may be in per-process pages that
-        // are only mapped under its own PTBR.
+        val copy_len = if msg_len > buf_len then buf_len else msg_len
         val sender_ptbr = threads[sender].ptbr
-        val caller_ptbr = threads[current_thread].ptbr
-        if sender_ptbr != caller_ptbr
-            vm_set_ptbr(sender_ptbr)
-        if msg_len > buf_len
-            ipc_memcpy(buf_ptr, msg_ptr, buf_len)
-            ipc_ctx[receiver].actual_len = buf_len
+        val receiver_ptbr = threads[receiver].ptbr
+
+        if sender_ptbr == receiver_ptbr
+            // Same address space — direct memcpy (fast path)
+            ipc_memcpy(buf_ptr, msg_ptr, copy_len)
         else
-            ipc_memcpy(buf_ptr, msg_ptr, msg_len)
-            ipc_ctx[receiver].actual_len = msg_len
-        if sender_ptbr != caller_ptbr
-            vm_set_ptbr(caller_ptbr)
+            // Cross-address-space: read from sender via page walk,
+            // write to receiver via page walk, using kernel buffer.
+            var tmp: [256]byte
+            var copied = 0
+            while copied < copy_len
+                var chunk = copy_len - copied
+                if chunk > 256
+                    chunk = 256
+                vm_copy_from(sender_ptbr, int(msg_ptr) + copied, &tmp[0], chunk)
+                vm_copy_to(receiver_ptbr, int(buf_ptr) + copied, &tmp[0], chunk)
+                copied += chunk
+
+        ipc_ctx[receiver].actual_len = copy_len
         ipc_ctx[receiver].sender = sender
 
 Receive a message on a port. The arg is a pointer to a packed
@@ -347,22 +356,30 @@ The server continues running (no block).
             ipc_continue_current()
             return
 
-        // Copy reply to caller's reply buffer and set return value.
-        // If caller is in a different address space, switch PTBR so
-        // DMA translates the caller's addresses correctly.
+        // Copy reply from server (me) to caller's reply buffer.
+        // Handles cross-address-space copies via page table walks.
+        val server_ptbr = threads[me].ptbr
         val caller_ptbr = threads[caller].ptbr
-        if caller_ptbr != KERNEL_L1_BASE
-            vm_set_ptbr(caller_ptbr)
         val rply_len = ipc_ctx[caller].reply_len
-        if msg_len > rply_len
-            ipc_memcpy(ipc_ctx[caller].reply_buf, msg_ptr, rply_len)
+        val copy_len = if msg_len > rply_len then rply_len else msg_len
+
+        if server_ptbr == caller_ptbr
+            // Same address space — direct memcpy
+            ipc_memcpy(ipc_ctx[caller].reply_buf, msg_ptr, copy_len)
         else
-            ipc_memcpy(ipc_ctx[caller].reply_buf, msg_ptr, msg_len)
+            // Cross-address-space: server→kernel buffer→caller
+            var tmp: [256]byte
+            var copied = 0
+            while copied < copy_len
+                var chunk = copy_len - copied
+                if chunk > 256
+                    chunk = 256
+                vm_copy_from(server_ptbr, int(msg_ptr) + copied, &tmp[0], chunk)
+                vm_copy_to(caller_ptbr, int(ipc_ctx[caller].reply_buf) + copied, &tmp[0], chunk)
+                copied += chunk
+
         // Write return value to caller's saved r1 on its SSP
-        var caller_r1: *i64 = *i64(threads[caller].ssp + 48)
-        *caller_r1 = 0
-        if caller_ptbr != KERNEL_L1_BASE
-            vm_set_ptbr(KERNEL_L1_BASE)
+        ipc_write_saved_r1(caller, 0)
         threads[caller].state = STATE_READY
         threads[caller].quantum = DEFAULT_QUANTUM
         threads[caller].wake_tick = 0
@@ -395,8 +412,7 @@ Only the port owner can close it.
         // Wake all blocked senders with error
         var tid = ipc_queue_pop(port)
         while tid != IPC_QUEUE_EMPTY
-            var caller_r1: *i64 = *i64(threads[tid].ssp + 48)
-            *caller_r1 = -1
+            ipc_write_saved_r1(tid, -1)
             threads[tid].state = STATE_READY
             threads[tid].quantum = DEFAULT_QUANTUM
             enqueue(threads[tid].priority, tid)

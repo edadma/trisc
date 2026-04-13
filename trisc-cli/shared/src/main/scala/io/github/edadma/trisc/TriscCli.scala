@@ -213,7 +213,7 @@ object TriscCli:
     * after the header. They sit in RAM as unused data until RS
     * reads them in a later step.
     */
-  private def writeBootInfo(mem: Addressable, modules: Seq[(String, Array[Byte])]): Unit =
+  def writeBootInfo(mem: Addressable, modules: Seq[(String, Array[Byte])]): Unit =
     if modules.isEmpty then return
     val headerSize = 8 + modules.length * 24
     // Module blobs start at next page after the header
