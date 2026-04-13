@@ -28,10 +28,18 @@ starts the next server.
     import oskit.drivers.disk.{disk_server}
     import oskit.drivers.tty.{tty_server}
 
-Stack slot counter. Slot 0 is init (created by kernel_main).
-RS is slot 1. Servers start at slot 2.
+Stack slot counter. Slot 0 is RS (created by kernel_main).
+Servers start at slot 1.
 
-    var rs_next_slot = 2
+    var rs_next_slot = 1
+
+Init function pointer. Set by kernel_main before starting RS
+to avoid circular module dependency (RS → init → nsh → pm → RS).
+
+    var rs_init_fn: i64 = 0
+
+    rs_set_init_fn(fn: i64)
+        rs_init_fn = fn
 
     rs_alloc_slot() -> int
         val s = rs_next_slot
@@ -285,6 +293,8 @@ creating a kernel thread from the function pointer.
         rs_set_tid(thread_id())
         rs_init_boot_order()
 
+        rs_print("SLIX v0.0.1\nStarting servers:\n")
+
         val has_boot_info = rs_boot_info_valid()
 
         var i = 0
@@ -313,3 +323,12 @@ creating a kernel thread from the function pointer.
             rs_wait_ready()
             rs_print(" ok\n")
             i += 1
+
+        // Start init as the last process (kernel thread for now)
+        if rs_init_fn != 0
+            rs_print("  init")
+            val init_slot = rs_next_slot
+            rs_next_slot += 1
+            create_thread(rs_init_fn, kernel_stack_usp(init_slot), kernel_stack_ssp(init_slot), "init")
+            rs_wait_ready()
+            rs_print(" ok\n")

@@ -98,12 +98,14 @@ object OskitDemoBuilder:
           """import oskit.kernel.*
 import oskit.ipc.*
 import oskit.drivers.kbd.{keyboard_init}
+import oskit.servers.{rs_main, rs_set_init_fn}
 import oskit.apps.init.{init}
             |
             |kernel_main() -> int
             |    ipc_init()
             |    keyboard_init()
-            |    create_thread(init, kernel_stack_usp(0), kernel_stack_ssp(0), "init")
+            |    rs_set_init_fn(i64(init))
+            |    create_thread(rs_main, kernel_stack_usp(0), kernel_stack_ssp(0), "rs")
             |    timer_init(1000)
             |    first_thread_ssp()
             |""".stripMargin,

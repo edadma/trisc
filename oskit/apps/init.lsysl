@@ -1,34 +1,32 @@
 OSKit Init — System Initialization
 
-The first userspace process. Spawns RS (Restart Server) as a
-separate thread, waits for it to start all system servers,
-then reads `/etc/ttytab` to spawn login sessions.
+Started by RS as the last server. Reads `/etc/ttytab` to
+spawn login/shell sessions. Runs as a kernel thread (will
+be isolated as a boot module in a later step).
 
 Boot sequence:
-1. Init registers servers with RS
-2. Init spawns RS thread (Minix 3-style: RS is first)
-3. RS starts servers in order: disk, tfs, tty, pm, vfs
-4. RS terminates — init continues
-5. Init reads `/etc/ttytab` — spawns login/shell per terminal
-
-Minix 3-style: core servers are hardcoded because init can't
-read config files until the filesystem is up.
+1. kernel_main starts RS
+2. RS starts servers: disk, tfs, tty, pm, vfs
+3. RS starts init (last)
+4. Init reads `/etc/ttytab` — spawns login/shell per terminal
 
     module oskit.apps.init
 
     import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp}
-    import oskit.servers.{rs_main, rs_alloc_slot}
-    import oskit.drivers.tty.{tty_server}
-    import oskit.services.{putc, join, thread_id}
+    import oskit.services.{putc, rs_ready}
     import oskit.fs.{fs_open, fs_read, fs_close}
     import oskit.apps.login.{login}
     import oskit.apps.nsh.{nsh}
 
-Stack slot counter. Init is slot 0 (created by kernel_main).
-RS is slot 1. Servers and sessions use rs_alloc_slot().
+Stack slot counter for session threads. RS uses slots 0-6
+(RS=0, 5 servers=1-5, init=6). Sessions start at 7.
 
+    var init_next_slot = 7
 
-
+    init_alloc_slot() -> int
+        val s = init_next_slot
+        init_next_slot += 1
+        s
 
 Parse `/etc/ttytab` and spawn a thread for each entry.
 Format: `terminal command` — one entry per line.
@@ -39,13 +37,13 @@ Supported commands: `login`, `nsh`.
         val fid = fs_open("/etc/ttytab")
         if fid < 0
             // No ttytab — fall back to single login
-            val s = rs_alloc_slot()
+            val s = init_alloc_slot()
             create_thread(login, kernel_stack_usp(s), kernel_stack_ssp(s), "login")
             return
         val nr = fs_read(fid, buf, 256)
         fs_close(fid)
         if nr <= 0
-            val s = rs_alloc_slot()
+            val s = init_alloc_slot()
             create_thread(login, kernel_stack_usp(s), kernel_stack_ssp(s), "login")
             return
 
@@ -116,7 +114,7 @@ Supported commands: `login`, `nsh`.
 
             // Spawn based on command
             if cmd_len > 0
-                val s = rs_alloc_slot()
+                val s = init_alloc_slot()
                 val usp = kernel_stack_usp(s)
                 val ssp = kernel_stack_ssp(s)
                 if cmd_len == 5
@@ -141,14 +139,9 @@ Supported commands: `login`, `nsh`.
             i += 1
 
     init()
-        init_print("SLIX v0.0.1\nStarting servers:\n")
+        // Signal RS that init is ready (for handshake)
+        rs_ready()
 
-        // Spawn RS as a separate thread
-        val rs_tid = create_thread(rs_main, kernel_stack_usp(1), kernel_stack_ssp(1), "rs")
-
-        // Wait for RS to finish starting all servers
-        join(rs_tid)
-
-        // All servers up — read /etc/ttytab and spawn sessions
+        // All servers are up — read /etc/ttytab and spawn sessions
         init_print("Reading /etc/ttytab\n")
         spawn_sessions()
