@@ -48,7 +48,8 @@ queues of blocked senders.
     var port_owner: [8]int  // 8 = MAX_PORTS
     var port_wait_head: [8]int  // 8 = MAX_PORTS
     var port_wait_tail: [8]int  // 8 = MAX_PORTS
-    var port_name: [8]i64  // 8 = MAX_PORTS
+    var port_name_buf: [64]byte  // 8 ports * 8 bytes per name
+    var port_name_len: [8]int   // length of each name
     var port_count = 0
 
 Syscall numbers for IPC (31-37).
@@ -142,7 +143,7 @@ syscall handlers. Call from kernel_main before creating threads.
             port_owner[i] = IPC_PORT_FREE
             port_wait_head[i] = IPC_QUEUE_EMPTY
             port_wait_tail[i] = IPC_QUEUE_EMPTY
-            port_name[i] = 0
+            port_name_len[i] = 0
             i += 1
         register_syscall(SYS_PORT_CREATE, ipc_port_create_handler)
         register_syscall(SYS_IPC_SEND, ipc_send_handler)
@@ -429,7 +430,17 @@ register a name. Returns 0 on success, -1 on error.
             ipc_continue_current()
             return
 
-        port_name[port] = name_ptr
+        // Copy name bytes into kernel-owned buffer (safe across address spaces)
+        var src: *byte = *byte(name_ptr)
+        val base = port * 8
+        var nlen = 0
+        while nlen < 7
+            if src[nlen] == 0
+                break
+            port_name_buf[base + nlen] = src[nlen]
+            nlen += 1
+        port_name_buf[base + nlen] = 0
+        port_name_len[port] = nlen
         syscall_return(0)
         ipc_continue_current()
 
@@ -442,8 +453,8 @@ not found.
         var i = 0
         while i < port_count
             if port_owner[i] != IPC_PORT_FREE
-                if port_name[i] != 0
-                    if ipc_strcmp(name, *byte(port_name[i])) == 0
+                if port_name_len[i] > 0
+                    if ipc_strcmp(name, &port_name_buf[i * 8]) == 0
                         syscall_return(i)
                         ipc_continue_current()
                         return
