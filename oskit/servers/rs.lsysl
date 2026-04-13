@@ -25,6 +25,8 @@ starts the next server.
     import oskit.ipc.{ipc_recv_notify, port_create}
     import oskit.config.{BOOT_INFO_ADDR, KERNEL_L1_BASE}
     import oskit.hal.memset
+    import oskit.drivers.disk.{disk_server}
+    import oskit.drivers.tty.{tty_server}
 
 Stack slot counter. Slot 0 is init (created by kernel_main).
 RS is slot 1. Servers start at slot 2.
@@ -60,32 +62,37 @@ so it can use ipc_recv_notify to block for notifications.
         // result == -2 means notification received
         notify_read_self()
 
-Server entry points, set by init before starting RS.
-Stored as i64 function pointers to avoid circular imports.
+Hardcoded boot order. Each entry has a name, length, and
+function pointer (for kernel-thread fallback when no boot
+module is available).
 
-    val RS_MAX_SERVERS = 8
-    var rs_entries: [8]i64
-    var rs_names: [64]byte
-    var rs_name_len: [8]int
-    var rs_server_count = 0
+    val RS_NUM_SERVERS = 5
 
-Register a server to be started by RS. Called by init before
-creating the RS thread.
+    var rs_boot_names: [40]byte   // 5 servers * 8 bytes each
+    var rs_boot_nlen: [5]int
+    var rs_boot_fn: [5]i64
 
-    rs_add_server(entry: i64, name: *byte, nlen: int)
-        if rs_server_count >= RS_MAX_SERVERS
-            return
-        val idx = rs_server_count
-        rs_entries[idx] = entry
-        rs_name_len[idx] = nlen
-        val base = idx * 8
-        var i = 0
-        while i < nlen
-            if i >= 8
-                break
-            rs_names[base + i] = name[i]
-            i += 1
-        rs_server_count += 1
+    rs_init_boot_order()
+        // disk
+        rs_boot_names[0] = 'd'; rs_boot_names[1] = 'i'; rs_boot_names[2] = 's'; rs_boot_names[3] = 'k'; rs_boot_names[4] = 0
+        rs_boot_nlen[0] = 4
+        rs_boot_fn[0] = i64(disk_server)
+        // tfs
+        rs_boot_names[8] = 't'; rs_boot_names[9] = 'f'; rs_boot_names[10] = 's'; rs_boot_names[11] = 0
+        rs_boot_nlen[1] = 3
+        rs_boot_fn[1] = i64(tfs_server)
+        // tty
+        rs_boot_names[16] = 't'; rs_boot_names[17] = 't'; rs_boot_names[18] = 'y'; rs_boot_names[19] = 0
+        rs_boot_nlen[2] = 3
+        rs_boot_fn[2] = i64(tty_server)
+        // pm
+        rs_boot_names[24] = 'p'; rs_boot_names[25] = 'm'; rs_boot_names[26] = 0
+        rs_boot_nlen[3] = 2
+        rs_boot_fn[3] = i64(pm_server)
+        // vfs
+        rs_boot_names[32] = 'v'; rs_boot_names[33] = 'f'; rs_boot_names[34] = 's'; rs_boot_names[35] = 0
+        rs_boot_nlen[4] = 3
+        rs_boot_fn[4] = i64(vfs_server)
 
 Boot info header parsing. The emulator writes a boot info
 struct at BOOT_INFO_ADDR with magic "SLIX", module count,
@@ -276,13 +283,14 @@ creating a kernel thread from the function pointer.
 
     rs_main()
         rs_set_tid(thread_id())
+        rs_init_boot_order()
 
         val has_boot_info = rs_boot_info_valid()
 
         var i = 0
-        while i < rs_server_count
-            val name = &rs_names[i * 8]
-            val nlen = rs_name_len[i]
+        while i < RS_NUM_SERVERS
+            val name = &rs_boot_names[i * 8]
+            val nlen = rs_boot_nlen[i]
             rs_print("  ")
             rs_print(string(name, nlen))
 
@@ -300,7 +308,7 @@ creating a kernel thread from the function pointer.
             if !started
                 val slot = rs_next_slot
                 rs_next_slot += 1
-                create_thread(rs_entries[i], kernel_stack_usp(slot), kernel_stack_ssp(slot), string(name, nlen))
+                create_thread(rs_boot_fn[i], kernel_stack_usp(slot), kernel_stack_ssp(slot), string(name, nlen))
 
             rs_wait_ready()
             rs_print(" ok\n")

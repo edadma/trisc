@@ -97,10 +97,12 @@ object OskitDemoBuilder:
         "app" ->
           """import oskit.kernel.*
 import oskit.ipc.*
+import oskit.drivers.kbd.{keyboard_init}
 import oskit.apps.init.{init}
             |
             |kernel_main() -> int
             |    ipc_init()
+            |    keyboard_init()
             |    create_thread(init, kernel_stack_usp(0), kernel_stack_ssp(0), "init")
             |    timer_init(1000)
             |    first_thread_ssp()
