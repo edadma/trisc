@@ -794,6 +794,12 @@ Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
         syscall_return(0)
         kernel_continue_current()
 
+    sys_vm_v2p_handler(arg: int)
+        val vaddr = int(i64(arg))
+        val paddr = vm_v2p(threads[current_thread].ptbr, vaddr)
+        syscall_return(paddr)
+        kernel_continue_current()
+
     kernel_init()
         vm_init()
         register_syscall(0, sleep_current)
@@ -829,6 +835,7 @@ Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
         register_syscall(12, sys_getkey_handler)
         register_syscall(64, sys_kb_set_notify_handler)
         // syscall 65 (ipc_last_msg_len) is registered by ipc_init
+        register_syscall(66, sys_vm_v2p_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events

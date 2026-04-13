@@ -302,3 +302,11 @@ importing them directly.
         args[0] = pid
         args[1] = parent_tid
         syscall(SYS_PROC_SET_PARENT_TID, i64(&args[0]))
+
+Translate a virtual address to physical using the current
+thread's page table. Used by drivers that need DMA addresses.
+
+    val SYS_VM_V2P = 66
+
+    svc_vm_v2p(vaddr: int) -> int
+        syscall(SYS_VM_V2P, vaddr)

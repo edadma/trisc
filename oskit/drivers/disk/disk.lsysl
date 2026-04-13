@@ -21,7 +21,8 @@ the ramdisk format — e.g. 4096 in the demo image).
     module oskit.drivers.disk
 
     import oskit.ipc.*
-    import oskit.services.rs_ready
+    import oskit.services.{rs_ready, svc_get_thread_ptbr, svc_vm_copy_to, svc_vm_copy_from, svc_vm_v2p, thread_id}
+    import oskit.hal.memcpy
 
     val DISK_CMD_READ     = 1
     val DISK_CMD_WRITE    = 2
@@ -46,6 +47,21 @@ the operation after all parameters are set.
 
     var disk_port = -1
     var disk_name: [5]byte
+
+DMA bounce buffer. A page-aligned module-level buffer with
+its physical address cached at startup. DMA requires physical
+addresses, and when the disk server runs in a separate address
+space the virtual→physical mapping is not identity.
+Over-allocate to guarantee page alignment within the buffer.
+
+    var disk_dma_raw: [8192]byte
+    var disk_dma_vaddr = 0
+    var disk_dma_paddr = 0
+
+    disk_init_dma()
+        val raw = int(i64(&disk_dma_raw[0]))
+        disk_dma_vaddr = (raw + 4095) & -4096
+        disk_dma_paddr = svc_vm_v2p(disk_dma_vaddr)
 
 Perform a raw block read from the ramdisk hardware.
 Reads one sector (`count` = 1) at the given LBA into addr.
@@ -86,22 +102,40 @@ Write a 4-byte big-endian integer into a message buffer.
         buf[off + 2] = (v >> 8) & 0xFF
         buf[off + 3] = v & 0xFF
 
-Handle a READ request: read one block and reply.
+Handle a READ request: read one block via DMA into a local
+bounce buffer, then copy to the caller's address space.
+This works regardless of whether the caller is in the same
+address space or isolated (cross-address-space).
 
     disk_handle_read(sender: int, buf: *byte)
         val lba = disk_read_i32(buf, 1)
         val addr = disk_read_i32(buf, 5)
-        disk_hw_read(lba, i64(addr))
+        disk_hw_read(lba, i64(disk_dma_paddr))
+        val sender_ptbr = svc_get_thread_ptbr(sender)
+        val my_ptbr = svc_get_thread_ptbr(thread_id())
+        var bounce: *byte = *byte(disk_dma_vaddr)
+        if sender_ptbr == my_ptbr
+            memcpy(*byte(addr), bounce, 4096)
+        else
+            svc_vm_copy_to(sender_ptbr, addr, bounce, 4096)
         var reply: [1]byte
         reply[0] = 0
         ipc_reply(sender, &reply[0], 1)
 
-Handle a WRITE request: write one block and reply.
+Handle a WRITE request: copy data from the caller's address
+space into a local bounce buffer, then DMA-write to disk.
 
     disk_handle_write(sender: int, buf: *byte)
         val lba = disk_read_i32(buf, 1)
         val addr = disk_read_i32(buf, 5)
-        disk_hw_write(lba, i64(addr))
+        val sender_ptbr = svc_get_thread_ptbr(sender)
+        val my_ptbr = svc_get_thread_ptbr(thread_id())
+        var bounce: *byte = *byte(disk_dma_vaddr)
+        if sender_ptbr == my_ptbr
+            memcpy(bounce, *byte(addr), 4096)
+        else
+            svc_vm_copy_from(sender_ptbr, addr, bounce, 4096)
+        disk_hw_write(lba, i64(disk_dma_paddr))
         var reply: [1]byte
         reply[0] = 0
         ipc_reply(sender, &reply[0], 1)
@@ -119,6 +153,9 @@ The disk server loop. Creates port, registers as "disk",
 then loops handling block I/O requests.
 
     disk_server()
+        // Initialize DMA bounce buffer (translate virtual→physical)
+        disk_init_dma()
+
         // Set up name
         disk_name[0] = 100  // d
         disk_name[1] = 105  // i

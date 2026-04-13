@@ -173,6 +173,7 @@ import oskit.apps.init.{init}
       serverModulePath: String,
       serverSource: String,
       entryFn: String,
+      extraSources: Map[String, String] = Map.empty,
   ): Array[Byte] =
     val syscallAsm =
       scala.io.Source.fromFile("oskit/ulib/syscall.asm").mkString
@@ -198,7 +199,7 @@ import oskit.apps.init.{init}
       "posix/string/string" -> posixStringSysl,
       "posix/ctype/ctype"   -> posixCtypeSysl,
       "app"                -> wrapperSource,
-    )
+    ) ++ extraSources
 
     val driver  = new SyslDriver
     val result  = driver.compile(allSources)
@@ -215,8 +216,17 @@ import oskit.apps.init.{init}
     */
   def compileBootModules(): Seq[(String, Array[Byte])] =
     Seq(
-      "disk" -> compileServerTrb("oskit/drivers/disk/disk", "oskit.drivers.disk", diskSysl, "disk_server"),
+      "disk" -> compileServerTrb("oskit/drivers/disk/disk", "oskit.drivers.disk", diskSysl, "disk_server",
+        extraSources = Map(
+          "oskit/hal/mem" -> halMemSysl,
+        )),
       "tty"  -> compileServerTrb("oskit/drivers/tty/tty", "oskit.drivers.tty", ttySysl, "tty_server"),
+      "tfs"  -> compileServerTrb("oskit/servers/tfs", "oskit.servers", tfsSrvSysl, "tfs_server",
+        extraSources = Map(
+          "oskit/fs/tfs"           -> tfsSysl,
+          "oskit/drivers/disk/disk" -> diskSysl,
+          "oskit/hal/mem"          -> halMemSysl,
+        )),
     )
 
 end OskitDemoBuilder
