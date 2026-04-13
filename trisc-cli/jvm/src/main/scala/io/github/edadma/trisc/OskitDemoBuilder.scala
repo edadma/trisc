@@ -47,6 +47,7 @@ object OskitDemoBuilder:
   private lazy val rsSrvSysl: String     = readLsysl("oskit/servers/rs.lsysl")
   private lazy val halMemSysl: String   = readLsysl("oskit/hal/mem_dma.lsysl")
   private lazy val configSysl: String   = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
+  private lazy val ipcClientSysl: String = scala.io.Source.fromFile("oskit/ipc/ipc_client.sysl").mkString
   private lazy val mouseSysl: String     = readLsysl("oskit/drivers/mouse/mouse.lsysl")
   private lazy val displaySysl: String   = readLsysl("oskit/drivers/display/display.lsysl")
   private lazy val suitSysl: String      = readLsysl("suit/suit.lsysl")
@@ -130,6 +131,87 @@ import oskit.apps.init.{init}
         "oskit/hal/mem"              -> halMemSysl,
         "oskit/config/config"        -> configSysl,
       ),
+    )
+
+  // --- Boot module compilation (standalone server .trb binaries) ---
+
+  private lazy val serverProgScript: LinkerScript =
+    LinkerScriptParser.parse(
+      """SECTIONS
+        |    code: 0xD0000
+        |    rodata
+        |    data
+        |    bss
+        |SYMBOL _heap_start = AFTER bss
+        |SYMBOL _heap_end = 0x100000
+        |ENTRY main
+        |""".stripMargin,
+    ) match
+      case Right(s) => s
+      case Left(e)  => throw new RuntimeException(s"server linker script: $e")
+
+  private lazy val userSbrkSysl: String =
+    scala.io.Source.fromFile("oskit/ulib/sbrk.sysl").mkString
+
+  /** Compile a server as a standalone .trb binary suitable for loading as a
+    * boot module. The server gets its own copy of syscall.asm, the IPC client
+    * module (not the kernel-side handlers), and the services module.
+    *
+    * @param serverUnitPath
+    *   compilation unit path for the server source (e.g. "oskit/drivers/disk/disk")
+    * @param serverModulePath
+    *   module declaration path (e.g. "oskit.drivers.disk") — used for the import in the entry wrapper
+    * @param serverSource
+    *   tangled sysl source for the server
+    * @param entryFn
+    *   the server's entry function name (e.g. "disk_server")
+    * @return
+    *   serialized TRB v1 binary
+    */
+  private def compileServerTrb(
+      serverUnitPath: String,
+      serverModulePath: String,
+      serverSource: String,
+      entryFn: String,
+  ): Array[Byte] =
+    val syscallAsm =
+      scala.io.Source.fromFile("oskit/ulib/syscall.asm").mkString
+    val syscallTof = assemble(syscallAsm, relocatable = true)
+
+    val wrapperSource =
+      s"""import $serverModulePath.{$entryFn}
+         |
+         |main()
+         |    $entryFn()
+         |""".stripMargin
+
+    val allSources = Map(
+      serverUnitPath       -> serverSource,
+      "oskit/services/services" -> servicesSysl,
+      "oskit/ipc/ipc"      -> ipcClientSysl,
+      "posix/unistd/sbrk"  -> userSbrkSysl,
+      "posix/stdlib/alloc"  -> posixAllocSysl,
+      "posix/string/string" -> posixStringSysl,
+      "posix/ctype/ctype"   -> posixCtypeSysl,
+      "app"                -> wrapperSource,
+    )
+
+    val driver  = new SyslDriver
+    val result  = driver.compile(allSources)
+    val codegen = new SyslTriscCodegen
+    val tofs = for unit <- result.units yield
+      val asm = codegen.generate(unit.typed)
+      assemble(asm, relocatable = true)
+    val syslTof = Linker.link(tofs, relocatable = true)
+    val linked  = Linker.link(Seq(syscallTof, syslTof), serverProgScript, 0)
+    TriscBinary.serialize(linked)
+
+  /** Compile all boot module servers as standalone .trb binaries.
+    * Returns a list of (name, bytes) pairs in boot order.
+    */
+  def compileBootModules(): Seq[(String, Array[Byte])] =
+    Seq(
+      "disk" -> compileServerTrb("oskit/drivers/disk/disk", "oskit.drivers.disk", diskSysl, "disk_server"),
     )
 
 end OskitDemoBuilder

@@ -194,11 +194,78 @@ object TriscCli:
     val tof = TOF.deserialize(tofStr)
     if tof.tofType == TOFType.Executable then tof else Linker.link(Seq(Runtime.bootTof, tof, Runtime.ioTof))
 
+  /** Boot info header address — must match oskit/config BOOT_INFO_ADDR. */
+  private val BootInfoAddr = 0x600000L
+  /** Boot info magic: "SLIX" */
+  private val BootInfoMagic: Array[Byte] = Array(0x53, 0x4C, 0x49, 0x58).map(_.toByte)
+
+  /** Write boot info header and module blobs into RAM.
+    *
+    * Layout at BootInfoAddr:
+    *   +0: magic (4 bytes) = "SLIX"
+    *   +4: module_count (4 bytes, little-endian)
+    *   +8: per module (24 bytes each):
+    *     +0: name (8 bytes, NUL-padded)
+    *     +8: addr (8 bytes, little-endian i64)
+    *    +16: size (8 bytes, little-endian i64)
+    *
+    * Module blobs are placed at page-aligned addresses starting
+    * after the header. They sit in RAM as unused data until RS
+    * reads them in a later step.
+    */
+  private def writeBootInfo(mem: Addressable, modules: Seq[(String, Array[Byte])]): Unit =
+    if modules.isEmpty then return
+    val headerSize = 8 + modules.length * 24
+    // Module blobs start at next page after the header
+    var blobAddr = (BootInfoAddr + headerSize + 0xFFF) & ~0xFFF
+
+    // Compute module addresses and load blobs into RAM
+    val entries = modules.map { case (name, blob) =>
+      val addr = blobAddr
+      for (i <- blob.indices) mem.writeByte(addr + i, blob(i))
+      blobAddr = ((addr + blob.length) + 0xFFF) & ~0xFFF // page-align next
+      (name, addr, blob.length)
+    }
+
+    // Write header magic
+    for (i <- BootInfoMagic.indices)
+      mem.writeByte(BootInfoAddr + i, BootInfoMagic(i))
+
+    // Write module count (4 bytes, little-endian)
+    val count = modules.length
+    mem.writeByte(BootInfoAddr + 4, (count & 0xFF).toByte)
+    mem.writeByte(BootInfoAddr + 5, ((count >> 8) & 0xFF).toByte)
+    mem.writeByte(BootInfoAddr + 6, ((count >> 16) & 0xFF).toByte)
+    mem.writeByte(BootInfoAddr + 7, ((count >> 24) & 0xFF).toByte)
+
+    // Write module entries
+    for ((name, addr, size) <- entries.zipWithIndex.map { case ((n, a, s), _) => (n, a, s) }) do
+      val i = entries.indexWhere(_._1 == name)
+      val entryBase = BootInfoAddr + 8 + i * 24
+
+      // Name (8 bytes, NUL-padded)
+      val nameBytes = name.getBytes("UTF-8").take(7)
+      for (j <- nameBytes.indices) mem.writeByte(entryBase + j, nameBytes(j))
+      for (j <- nameBytes.length until 8) mem.writeByte(entryBase + j, 0)
+
+      // Addr (8 bytes, little-endian)
+      for (j <- 0 until 8)
+        mem.writeByte(entryBase + 8 + j, ((addr >> (j * 8)) & 0xFF).toByte)
+
+      // Size (8 bytes, little-endian)
+      for (j <- 0 until 8)
+        mem.writeByte(entryBase + 16 + j, ((size >> (j * 8)) & 0xFF).toByte)
+
+    System.err.println(s"boot info: ${modules.length} module(s) at 0x${BootInfoAddr.toHexString}")
+    for (name, addr, size) <- entries do
+      System.err.println(f"  $name%-8s @ 0x${addr}%06X ($size%d bytes)")
+
   def setupCpu(
       linked: TOF,
       outputFn: String => Unit = s => { print(s); System.out.flush() },
       extraDevices: Seq[Addressable] = Nil,
       intc: InterruptController = new InterruptController(Runtime.intcAddress),
+      bootModules: Seq[(String, Array[Byte])] = Nil,
   ): (CPU, Memory) =
     val stdout = new Stdout(Runtime.stdoutAddress, outputFn)
     val timer = new Timer(Runtime.timerAddress, intc, irq = 0)
@@ -230,6 +297,10 @@ object TriscCli:
     val mem = new Memory("Memory", (Seq(ram, stdout, intc, timer, ramdisk, sha, dma) ++ extraDevices)*)
     dma.mem = mem
     linked.load(mem)
+
+    // Load boot modules into RAM (unused data for now — RS will read them later)
+    writeBootInfo(mem, bootModules)
+
     val mmu = new SimpleMMU(mem)
     mmu.setIdentityRange(0x7FE000L, 0xC00000L) // kernel PTBR, identity-mapped up to 12MB
     dma.mmu = Some(mmu)

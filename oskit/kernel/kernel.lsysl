@@ -699,6 +699,15 @@ Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
         syscall_return(0)
         kernel_continue_current()
 
+    sys_getuid_handler(arg: int)
+        syscall_return(threads[current_thread].uid)
+        kernel_continue_current()
+
+    sys_setuid_handler(arg: int)
+        threads[current_thread].uid = int(i64(arg))
+        syscall_return(0)
+        kernel_continue_current()
+
     kernel_init()
         vm_init()
         register_syscall(0, sleep_current)
@@ -727,6 +736,8 @@ Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
         register_syscall(58, sys_proc_main_tid_handler)
         register_syscall(59, sys_proc_parent_tid_handler)
         register_syscall(60, sys_proc_set_parent_tid_handler)
+        register_syscall(61, sys_getuid_handler)
+        register_syscall(62, sys_setuid_handler)
 
 Thread-local storage. A flat 2D array indexed by [thread_id][slot].
 Each thread gets TLS_SLOTS slots of int-sized values. Access is

@@ -34,6 +34,7 @@ thread_stack_half = 8192       # 0x2000
 kernel_l1_base    = 8380416    # 0x7FE000
 page_pool_base    = 6422528    # 0x620000
 page_pool_end     = 8376320    # 0x7FD000
+boot_info_addr    = 6291456    # 0x600000
 
 [ipc]
 max_ports = 8

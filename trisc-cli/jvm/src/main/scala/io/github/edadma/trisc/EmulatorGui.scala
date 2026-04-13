@@ -97,7 +97,9 @@ object EmulatorGui:
 
       val guiDevices = Seq(keyboard, mouse, displayCtrl, fb, blitter, drawEngine)
 
-      var cpuState: (CPU, Memory) = TriscCli.setupCpu(linked, outputFn, guiDevices, intc)
+      // Compile boot modules (standalone server .trb binaries) — loaded into RAM as unused data for now
+      val bootModules = OskitDemoBuilder.compileBootModules()
+      var cpuState: (CPU, Memory) = TriscCli.setupCpu(linked, outputFn, guiDevices, intc, bootModules)
       memRef = cpuState._2
       var cpu = cpuState._1
       if cmd.limit > 0 then cpu.limit = cmd.limit
@@ -172,7 +174,7 @@ object EmulatorGui:
         drawEngine.reset() // clear all DrawEngine state (windows, surfaces, buffers)
         val layout = displayPanel.getLayout.asInstanceOf[CardLayout]
         layout.show(displayPanel, "terminal")
-        cpuState = TriscCli.setupCpu(linked, outputFn, guiDevices, intc)
+        cpuState = TriscCli.setupCpu(linked, outputFn, guiDevices, intc, bootModules)
         cpu = cpuState._1
         memRef = cpuState._2
         if cmd.limit > 0 then cpu.limit = cmd.limit

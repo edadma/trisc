@@ -21,7 +21,7 @@ Syscall numbers:
 
     module oskit.services
 
-    import oskit.kernel.{kernel_getuid, kernel_setuid}
+    // No kernel imports — all services go through syscalls
 
     extern syscall(number: int, arg: i64) -> i64
 
@@ -188,11 +188,14 @@ Slot range: 0-3. Value range: 0 to 16777215.
     get_thread_pid(id: int) -> int
         syscall(SYS_THREAD_PID, id)
 
+    val SYS_GETUID = 61
+    val SYS_SETUID = 62
+
     getuid() -> int
-        kernel_getuid()
+        syscall(SYS_GETUID, 0)
 
     setuid(uid: int)
-        kernel_setuid(uid)
+        syscall(SYS_SETUID, uid)
 
 Server isolation syscalls. These allow PM and VFS to call
 kernel functions through the syscall interface instead of
