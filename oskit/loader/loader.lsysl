@@ -423,7 +423,7 @@ Load a TOF file into a different address space. Reads the
 binary via VFS in the caller's address space, then copies
 into the target address space using `svc_vm_copy_to`.
 
-    val LOAD_CROSS_BUF_SIZE = 65536
+    val LOAD_CROSS_BUF_SIZE = 81920
 
     load_tof_to_ptbr(path: string, dst_ptbr: int) -> i64
         val fid = fs_open(path)

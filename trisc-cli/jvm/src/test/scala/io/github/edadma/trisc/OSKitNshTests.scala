@@ -126,7 +126,7 @@ import oskit.apps.init.{init}
     val ramdisk = new Ramdisk(
       Runtime.ramdiskAddress,
       ram,
-      sectors = 64,
+      sectors = 256,
       sectorSize = 4096,
       intc,
       irq = 3,
@@ -186,8 +186,8 @@ import oskit.apps.init.{init}
   // === NSH integration tests ===
 
   "NSH: pwd shows root" taggedAs Slow in {
-    val keys        = typeString("pwd\n", startTick = 500000)
-    val (_, output) = runNsh(scheduledKeys = keys)
+    val keys        = typeString("pwd\n", startTick = 5000000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 200000000)
     output should include("/")
   }
 
@@ -313,7 +313,7 @@ import oskit.apps.init.{init}
     val ramdisk = new Ramdisk(
       Runtime.ramdiskAddress,
       ram,
-      sectors = 128,
+      sectors = 256,
       sectorSize = 4096,
       intc,
       irq = 3,
@@ -350,12 +350,12 @@ import oskit.apps.init.{init}
     cpu.run()
     (cpu, output.toString, ram)
 
-  private def loginAndType(cmd: String, startTick: Int = 800000): Seq[(Int, Int, Boolean, Int)] =
-    // Slower than default 2000: login + external cat need time for TTY/prompts (fast keys corrupt the line).
+  private def loginAndType(cmd: String, startTick: Int = 5000000): Seq[(Int, Int, Boolean, Int)] =
+    // Login is now an external program — needs much more time to load and start.
     val sp = 12000
     typeString("root\n", startTick = startTick, spacing = sp) ++
-    typeString("toor\n", startTick = startTick + 180000, spacing = sp) ++
-    typeString(cmd, startTick = startTick + 450000, spacing = sp)
+    typeString("toor\n", startTick = startTick + 500000, spacing = sp) ++
+    typeString(cmd, startTick = startTick + 2000000, spacing = sp)
 
   "Login: prompts for credentials" taggedAs Slow in {
     val keys        = typeString("root\n", startTick = 800000)
@@ -365,7 +365,7 @@ import oskit.apps.init.{init}
 
   "Login: successful login shows shell prompt in home dir" taggedAs Slow in {
     val keys        = loginAndType("")
-    val (_, output, _) = runLogin(scheduledKeys = keys)
+    val (_, output, _) = runLogin(scheduledKeys = keys, maxCycles = 800000000)
     output should include("login: ")
     output should include("password: ")
     output should include("/root> ")

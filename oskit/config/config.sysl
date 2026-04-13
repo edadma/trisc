@@ -4,7 +4,7 @@
 module oskit.config
 
 // [kernel]
-val MAX_THREADS     = 8
+val MAX_THREADS     = 32
 val MAX_PROCESSES   = 16
 val NUM_PRIORITIES  = 4
 val DEFAULT_QUANTUM = 5
@@ -18,7 +18,7 @@ val PAGE_SIZE         = 4096
 val THREAD_STACK_SIZE = 16384
 val THREAD_STACK_HALF = 8192
 val KERNEL_L1_BASE    = 0x7FE000
-val PAGE_POOL_BASE    = 0x660000
+val PAGE_POOL_BASE    = 0x400000
 val PAGE_POOL_END     = 0x7FD000
 val BOOT_INFO_ADDR    = 0x600000
 

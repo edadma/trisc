@@ -18,7 +18,7 @@ arch = "trisc"
 module = "oskit.config"
 
 [kernel]
-max_threads     = 8
+max_threads     = 32
 max_processes   = 16
 num_priorities  = 4
 default_quantum = 5
@@ -32,7 +32,7 @@ page_size         = 4096
 thread_stack_size = 0x4000   # split half user / half supervisor
 thread_stack_half = 0x2000
 kernel_l1_base    = 0x7FE000
-page_pool_base    = 0x660000
+page_pool_base    = 0x400000
 page_pool_end     = 0x7FD000
 boot_info_addr    = 0x600000
 
