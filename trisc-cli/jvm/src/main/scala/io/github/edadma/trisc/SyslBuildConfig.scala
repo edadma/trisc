@@ -30,33 +30,20 @@ object SyslBuildConfig:
     */
   def generate(tomlSource: String): Generated =
     val doc = TomlParser.parse(tomlSource) match
-      case Right(d) => d
+      case Right(d)  => d
       case Left(msg) => throw Error(s"sysl.toml: parse error: $msg")
 
-    val root = doc.root
+    val module = doc.getString("config.module")
 
-    // [config] section — optional; controls module name / output path.
-    val configSection: Option[Map[String, TomlValue]] = root.get("config") match
-      case Some(Obj(v)) => Some(v)
-      case Some(other)  => throw Error(s"sysl.toml: [config] must be a table, got $other")
-      case None         => None
-
-    val module: Option[String] = configSection.flatMap(_.get("module")).map {
-      case Str(s) => s
-      case other  => throw Error(s"sysl.toml: [config].module must be a string, got $other")
-    }
-
-    // Collect (name, value, formatHint) triples from every other section.
-    // Sections besides [target] and [config] are treated as constant groups
-    // and their integer keys become vals in the generated file.
+    // Collect (name, value, formatHint) triples from every section
+    // besides [target] and [config].
     val excludedSections = Set("target", "config")
-    val groups: List[(String, List[(String, Long, ValueFormat)])] =
-      root.toList.flatMap {
-        case (name, _) if excludedSections.contains(name) => None
-        case (name, Obj(values))                          => Some(name -> extractInts(name, values))
-        case (name, other) =>
-          throw Error(s"sysl.toml: [$name] must be a table, got $other")
-      }
+    val groups = doc.root.toList.flatMap {
+      case (name, _) if excludedSections.contains(name) => None
+      case (name, Obj(values)) => Some(name -> extractInts(name, values))
+      case (name, other) =>
+        throw Error(s"sysl.toml: [$name] must be a table, got $other")
+    }
 
     // Build the generated source.
     val sb = new StringBuilder
@@ -69,16 +56,12 @@ object SyslBuildConfig:
 
     for (section, entries) <- groups if entries.nonEmpty do
       sb ++= s"// [$section]\n"
-      // Compute a column width so the `=` signs line up within each group.
       val maxNameWidth = entries.map(_._1.length).max
       for (name, value, fmt) <- entries do
         val padded = name.padTo(maxNameWidth, ' ')
         sb ++= s"val $padded = ${formatValue(value, fmt)}\n"
       sb ++= "\n"
 
-    // Derive the output path. If module is e.g. "oskit.config", the file
-    // goes at oskit/config/config.sysl. If no module, it goes at repo root
-    // as config.sysl.
     val outputPath = module match
       case Some(m) =>
         val parts = m.split('.')
@@ -92,15 +75,10 @@ object SyslBuildConfig:
     case Decimal
     case Hex
 
-  /** Extract integer keys from a TOML table, converting the key to
-    * UPPER_SNAKE_CASE. Non-integer values are rejected.
-    */
-  private def extractInts(section: String, values: Map[String, TomlValue]): List[(String, Long, ValueFormat)] =
+  private def extractInts(section: String, values: scala.collection.immutable.VectorMap[String, TomlValue]): List[(String, Long, ValueFormat)] =
     values.toList.map {
-      case (key, Integer(n)) =>
+      case (key, Num(n)) =>
         val name = key.toUpperCase
-        // Use hex format for any value above 0xFFFF to preserve readability
-        // for address-like constants.
         val fmt = if n >= 0x10000 || n < 0 then ValueFormat.Hex else ValueFormat.Decimal
         (name, n, fmt)
       case (key, other) =>

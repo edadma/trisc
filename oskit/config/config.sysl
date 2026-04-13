@@ -3,33 +3,33 @@
 
 module oskit.config
 
-// [pm]
-val MAX_WAITERS = 8
-
 // [kernel]
 val MAX_THREADS     = 8
-val DEFAULT_QUANTUM = 5
-val MAX_SYSCALLS    = 96
-val MAX_IRQS        = 8
-val MAX_TIMERS      = 8
-val TLS_SLOTS       = 4
-val NUM_PRIORITIES  = 4
 val MAX_PROCESSES   = 16
+val NUM_PRIORITIES  = 4
+val DEFAULT_QUANTUM = 5
+val TLS_SLOTS       = 4
+val MAX_TIMERS      = 8
+val MAX_IRQS        = 8
+val MAX_SYSCALLS    = 96
+
+// [memory]
+val PAGE_SIZE         = 4096
+val THREAD_STACK_SIZE = 16384
+val THREAD_STACK_HALF = 8192
+val KERNEL_L1_BASE    = 0x7FE000
+val PAGE_POOL_BASE    = 0x660000
+val PAGE_POOL_END     = 0x7FD000
+val BOOT_INFO_ADDR    = 0x600000
+
+// [ipc]
+val MAX_PORTS = 8
+
+// [pm]
+val MAX_WAITERS = 8
 
 // [process_states]
 val PROC_FREE    = 0
 val PROC_RUNNING = 1
 val PROC_ZOMBIE  = 2
-
-// [memory]
-val THREAD_STACK_HALF = 8192
-val PAGE_POOL_BASE    = 0x660000
-val THREAD_STACK_SIZE = 16384
-val PAGE_SIZE         = 4096
-val KERNEL_L1_BASE    = 0x7FE000
-val BOOT_INFO_ADDR    = 0x600000
-val PAGE_POOL_END     = 0x7FD000
-
-// [ipc]
-val MAX_PORTS = 8
 
