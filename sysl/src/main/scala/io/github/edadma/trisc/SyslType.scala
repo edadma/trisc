@@ -7,7 +7,7 @@ enum SyslType:
   case VoidType
   case PtrType(pointee: SyslType)
   case ArrayType(elem: SyslType, size: Int)
-  case FuncType(params: List[SyslType], returnType: SyslType)
+  case FuncType(params: List[SyslType], returnType: SyslType, escaping: Boolean = false)
   case StructType(name: String, fields: List[(String, SyslType)])
   case DoubleType
   case StringType
@@ -48,7 +48,7 @@ enum SyslType:
     case BoolType => 1
     case VoidType => 0
     case PtrType(_) => 8
-    case FuncType(_, _) => 16       // {func_ptr(8), env_ptr(8)} — closure-ready fat pointer
+    case _: FuncType => 16           // {func_ptr(8), env_ptr(8)} — closure-ready fat pointer
     case InterfaceType(_, _) => 16   // {itable_ptr(8), data_ptr(8)} — Go-style interface
     case ArrayType(elem, size) => elem.sizeOf * size
     case DoubleType => 8
@@ -85,7 +85,7 @@ enum SyslType:
     case BoolType => 1
     case VoidType => 1
     case PtrType(_) => 8
-    case FuncType(_, _) => 8
+    case _: FuncType => 8
     case InterfaceType(_, _) => 8
     case ArrayType(elem, _) => elem.alignOf
     case DoubleType => 8
@@ -122,7 +122,7 @@ enum SyslType:
     case VoidType => "unit"
     case PtrType(t) => s"*$t"
     case ArrayType(t, n) => s"[$n]$t"
-    case FuncType(params, ret) => s"(${params.mkString(", ")}) -> $ret"
+    case FuncType(params, ret, esc) => s"${if esc then "@escaping " else ""}(${params.mkString(", ")}) -> $ret"
     case StructType(name, _) => name
     case StringType => "string"
     case SliceType(t) => s"[]$t"
@@ -138,7 +138,7 @@ enum SyslType:
     case VoidType => "void"
     case PtrType(t) => s"ptr ${t.toPrefix}"
     case ArrayType(t, n) => s"arr $n ${t.toPrefix}"
-    case FuncType(params, ret) => s"func ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}"
+    case FuncType(params, ret, _) => s"func ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}"
     case StringType => "string"
     case SliceType(t) => s"slice ${t.toPrefix}"
     case RefType(t) => s"ref ${t.toPrefix}"
@@ -181,7 +181,7 @@ object SyslType:
     case RefType(inner) => s"r${mangleType(inner)}"
     case SliceType(elem) => s"s${mangleType(elem)}"
     case ArrayType(elem, size) => s"a${size}_${mangleType(elem)}"
-    case FuncType(params, ret) => s"fn${params.length}_${params.map(mangleType).mkString("_")}_${mangleType(ret)}"
+    case FuncType(params, ret, _) => s"fn${params.length}_${params.map(mangleType).mkString("_")}_${mangleType(ret)}"
     case StructType(name, _) => name
     case EnumType(name, _) => name
     case InterfaceType(name, _) => name

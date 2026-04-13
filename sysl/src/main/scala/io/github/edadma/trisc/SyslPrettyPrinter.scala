@@ -33,7 +33,7 @@ object SyslPrettyPrinter:
     case PtrTypeAST(inner)          => s"*${typeToSource(inner)}"
     case ArrayTypeAST(size, elem)   => s"[$size]${typeToSource(elem)}"
     case SliceTypeAST(elem)         => s"[]${typeToSource(elem)}"
-    case FuncTypeAST(params, ret)   => s"(${params.map(typeToSource).mkString(", ")}) -> ${typeToSource(ret)}"
+    case FuncTypeAST(params, ret, esc) => s"${if esc then "@escaping " else ""}(${params.map(typeToSource).mkString(", ")}) -> ${typeToSource(ret)}"
     case TupleTypeAST(elems)        => s"(${elems.map(typeToSource).mkString(", ")})"
     case RefTypeAST(inner)          => s"&${typeToSource(inner)}"
 

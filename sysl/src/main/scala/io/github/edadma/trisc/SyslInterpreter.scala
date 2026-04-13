@@ -447,7 +447,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       RefStringVal(Array.empty, 0, new java.util.concurrent.atomic.AtomicInteger(1))
     case _: SyslType.IntType | _: SyslType.UIntType => IntVal(0)
     case SyslType.DoubleType => FloatVal(0.0)
-    case SyslType.VoidType | SyslType.FuncType(_, _) | SyslType.InterfaceType(_, _) => IntVal(0)
+    case SyslType.VoidType | (_: SyslType.FuncType) | SyslType.InterfaceType(_, _) => IntVal(0)
     case SyslType.EnumType(_, _) => EnumVal(0, Array.empty)
     case SyslType.RefType(inner) =>
       // Uninitialized ref cell — represented as null-ish placeholder
@@ -1113,7 +1113,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TFuncRef(name, _) => FuncVal(name)
 
-      case TClosure(params, _, body, captures) =>
+      case TClosure(params, _, body, captures, _) =>
         // Capture current values by value (copy)
         val capturedEnv = new mutable.LinkedHashMap[String, Cell]
         for (varName, _) <- captures do

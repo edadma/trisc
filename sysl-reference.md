@@ -829,7 +829,19 @@ val f: (int) -> int = x -> x * 2
 f(21)                            // 42
 ```
 
-**Implementation:** All function values (including plain function pointers) are 16-byte fat pointers: `{func_ptr: i64, env_ptr: i64}`. Plain function pointers have `env_ptr = 0`. Closures with captures heap-allocate an environment struct and store captured values by copy. The `env_ptr` is passed to the closure function via register r3 in the TRISC calling convention.
+**Escaping closures:** Function parameters are **non-escaping by default** — the closure's captured environment is stack-allocated. Use `@escaping` to mark parameters where the callee may store the closure beyond the call's lifetime:
+
+```sysl
+// Non-escaping (default): env lives on caller's stack frame
+sort_by(arr: []int, cmp: (int, int) -> bool)
+
+// Escaping: env is heap-allocated via malloc
+on_click(handler: @escaping () -> unit)
+```
+
+Non-escaping closures are more efficient (no heap allocation) but the compiler trusts the annotation — storing a non-escaping closure into a global, struct field, or returning it is undefined behavior. Closures with no expected type context (e.g., `val f = x -> x + 1`) default to escaping.
+
+**Implementation:** All function values (including plain function pointers) are 16-byte fat pointers: `{func_ptr: i64, env_ptr: i64}`. Plain function pointers have `env_ptr = 0`. For escaping closures with captures, the environment struct is heap-allocated. For non-escaping closures, the environment is allocated on the caller's stack frame. The `env_ptr` is passed to the closure function via register r3 in the TRISC calling convention.
 
 ### Extern Declarations
 
