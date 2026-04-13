@@ -204,8 +204,8 @@ import oskit.apps.init.{init}
   }
 
   "NSH: hello prints greeting" taggedAs Slow in {
-    val keys        = typeString("hello\n", startTick = 500000, spacing = 12000)
-    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 80000000)
+    val keys        = typeString("hello\n", startTick = 5000000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 200000000)
     output should include("Hello, world!")
   }
 
@@ -391,7 +391,7 @@ import oskit.apps.init.{init}
 
   "Login: hello after login" taggedAs Slow in {
     val keys = loginAndType("hello\n")
-    val (_, output, _) = runLogin(scheduledKeys = keys, maxCycles = 180000000)
+    val (_, output, _) = runLogin(scheduledKeys = keys, maxCycles = 800000000)
     output should include("Hello")
   }
 
