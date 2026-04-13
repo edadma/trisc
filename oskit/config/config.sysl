@@ -28,3 +28,8 @@ val PAGE_POOL_END     = 0x7FD000
 // [ipc]
 val MAX_PORTS = 8
 
+// [process_states]
+val PROC_FREE    = 0
+val PROC_RUNNING = 1
+val PROC_ZOMBIE  = 2
+

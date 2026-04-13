@@ -231,6 +231,13 @@ import oskit.apps.init.{init}
         extraSources = Map(
           "oskit/config/config" -> configSysl,
         )),
+      "pm"   -> compileServerTrb("oskit/servers/pm", "oskit.servers", pmSrvSysl, "pm_server",
+        extraSources = Map(
+          "oskit/config/config"  -> configSysl,
+          "oskit/loader/loader"  -> readLsysl("oskit/loader/loader.lsysl"),
+          "oskit/fs/client"      -> fsClientSysl,
+          "oskit/hal/mem"        -> halMemSysl,
+        )),
     )
 
 end OskitDemoBuilder

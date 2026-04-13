@@ -32,6 +32,7 @@ pressure regardless of file size.
     import oskit.fs.{fs_open, fs_read, fs_close}
     import posix.stdlib.{malloc, free}
     import oskit.hal.{memcpy, memset}
+    import oskit.services.svc_vm_copy_to
 
 Error codes returned when loading fails.
 
@@ -373,5 +374,96 @@ buffer — no size limit per call. We still loop because
             return LOAD_ERR_READ
 
         val result = load_tof_from_buf(buf, total)
+        free(buf)
+        result
+
+Cross-address-space TRB loader. Like `load_trb1_from_buf` but
+uses `svc_vm_copy_to` to write PROGBITS/NOBITS into the target
+address space identified by `dst_ptbr`. Used by isolated PM to
+load binaries without switching its own PTBR.
+
+    load_trb1_to_ptbr(buf: *byte, buflen: int, dst_ptbr: int) -> i64
+        if buflen < 12
+            return LOAD_ERR_FORMAT
+        val entry = read_u32_le(buf + 4)
+        val nrec = int(read_u32_le(buf + 8))
+        var pos = 12
+        var ri = 0
+        while ri < nrec
+            if pos + 12 > buflen
+                return LOAD_ERR_FORMAT
+            val hp = buf + pos
+            val org = int(read_u32_le(hp))
+            val kind = int(read_u32_le(hp + 4))
+            val sz = int(read_u32_le(hp + 8))
+            pos += 12
+            if kind == 0
+                if pos + sz > buflen
+                    return LOAD_ERR_FORMAT
+                svc_vm_copy_to(dst_ptbr, org, buf + pos, sz)
+                pos += sz
+            else if kind == 1
+                // Zero-fill: use a local buffer for small chunks
+                var zeros: [4096]byte
+                var done = 0
+                while done < sz
+                    var chunk = sz - done
+                    if chunk > 4096
+                        chunk = 4096
+                    svc_vm_copy_to(dst_ptbr, org + done, &zeros[0], chunk)
+                    done += chunk
+            else
+                return LOAD_ERR_FORMAT
+            ri += 1
+        if pos != buflen
+            return LOAD_ERR_FORMAT
+        entry
+
+Load a TOF file into a different address space. Reads the
+binary via VFS in the caller's address space, then copies
+into the target address space using `svc_vm_copy_to`.
+
+    val LOAD_CROSS_BUF_SIZE = 65536
+
+    load_tof_to_ptbr(path: string, dst_ptbr: int) -> i64
+        val fid = fs_open(path)
+        if fid < 0
+            return LOAD_ERR_NOT_FOUND
+
+        val buf = malloc(LOAD_CROSS_BUF_SIZE)
+        if i64(buf) <= 0
+            fs_close(fid)
+            return LOAD_ERR_READ
+
+        var total = 0
+        var nr = fs_read(fid, buf, LOAD_CROSS_BUF_SIZE)
+        while nr > 0
+            total += nr
+            if total >= LOAD_CROSS_BUF_SIZE
+                break
+            nr = fs_read(fid, buf + total, LOAD_CROSS_BUF_SIZE - total)
+        fs_close(fid)
+
+        if total <= 0
+            free(buf)
+            return LOAD_ERR_READ
+
+        // Only TRB v1 supported for cross-address-space loading
+        if total < 4
+            free(buf)
+            return LOAD_ERR_FORMAT
+        if buf[0] != byte('T')
+            free(buf)
+            return LOAD_ERR_FORMAT
+        if buf[1] != byte('R')
+            free(buf)
+            return LOAD_ERR_FORMAT
+        if buf[2] != byte('B')
+            free(buf)
+            return LOAD_ERR_FORMAT
+        if buf[3] != byte(1)
+            free(buf)
+            return LOAD_ERR_FORMAT
+        val result = load_trb1_to_ptbr(buf, total, dst_ptbr)
         free(buf)
         result

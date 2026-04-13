@@ -19,10 +19,9 @@ IPC commands:
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
-    import oskit.kernel.{PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
-    import oskit.config.{MAX_PROCESSES, MAX_WAITERS, KERNEL_L1_BASE}
-    import oskit.services.{notify_read_self, thread_id, rs_ready, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_set_thread_ptbr, svc_vm_set_ptbr, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid}
-    import oskit.loader.load_tof
+    import oskit.config.{MAX_PROCESSES, MAX_WAITERS, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
+    import oskit.services.{notify_read_self, thread_id, rs_ready, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid}
+    import oskit.loader.load_tof_to_ptbr
 
     val PM_CMD_WAITPID = 1
     val PM_CMD_KILL    = 2
@@ -188,39 +187,30 @@ handles from parent to child, and returns the PID.
             ipc_reply(sender, &reply[0], 1)
             return
 
-        // Switch PM's PTBR to load into process address space
-        val my_tid = thread_id()
-        svc_set_thread_ptbr(my_tid, proc_pt)
-        svc_vm_set_ptbr(proc_pt)
-
-        val entry = load_tof(path)
+        // Load binary into child's address space via cross-address-space copy
+        val entry = load_tof_to_ptbr(path, proc_pt)
         if entry < 0
-            svc_set_thread_ptbr(my_tid, KERNEL_L1_BASE)
-            svc_vm_set_ptbr(KERNEL_L1_BASE)
             var reply: [1]byte
             reply[0] = -1
             ipc_reply(sender, &reply[0], 1)
             return
 
-        // Write args to standard address (in process address space)
-        val args_buf = *byte(SPAWN_PROG_ARGS_ADDR)
+        // Write args to child's standard args address via cross-address-space copy
+        var args_local: [256]byte
         var i = 0
         while i < args_len
             if i >= SPAWN_PROG_ARGS_MAX
                 break
-            args_buf[i] = buf[4 + path_len + i]
+            args_local[i] = buf[4 + path_len + i]
             i += 1
-        args_buf[i] = 0
+        args_local[i] = 0
+        svc_vm_copy_to(proc_pt, SPAWN_PROG_ARGS_ADDR, &args_local[0], i + 1)
 
         // Extract command name for thread name (first arg before space)
         val cmd = string(buf + 4 + path_len, args_len)
 
         // Create the process suspended — it won't run until we resume it
         val pid = svc_create_proc_susp(entry, SPAWN_PROG_USP, SPAWN_PROG_SSP, cmd, proc_pt)
-
-        // Restore PM to kernel address space
-        svc_set_thread_ptbr(my_tid, KERNEL_L1_BASE)
-        svc_vm_set_ptbr(KERNEL_L1_BASE)
 
         var reply: [5]byte
         if pid < 0

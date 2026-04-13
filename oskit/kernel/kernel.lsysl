@@ -1179,8 +1179,14 @@ Unlike create_process, the thread is never enqueued — no race.
                 return -1
             idx = thread_count
             thread_count += 1
-        val sp = build_stack_frame(entry_point, usp, ssp)
-        threads[idx].ssp = sp
+        // Build stack frame in a local buffer and copy to child's address
+        // space. Direct physical addressing fails at page boundaries (SSP
+        // = 0xCF000 straddles pages 0xCE/0xCF which aren't contiguous).
+        var frame_buf: [72]byte
+        val frame_ssp = i64(&frame_buf[0]) + 72
+        build_stack_frame(entry_point, usp, frame_ssp)
+        vm_copy_to(ptbr_val, int(ssp) - 72, &frame_buf[0], 72)
+        threads[idx].ssp = ssp - 72  // 9 fields × 8 bytes
         threads[idx].state = STATE_SUSPENDED
         threads[idx].wake_tick = 0
         threads[idx].name = name
