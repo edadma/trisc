@@ -1026,7 +1026,8 @@ would monotonically bump thread_count and walk off the end of threads[].
             var canary_addr: *int = *int(usp)
             *canary_addr = STACK_CANARY
         enqueue(priority, idx)
-        asm("sti")
+        // No sti here — callers are boot setup (no scheduler yet)
+        // or slow-path handlers (do_schedule does sti before rte)
         idx
 
     sleep_current(nticks: int)
@@ -1200,7 +1201,7 @@ Unlike create_process, the thread is never enqueued — no race.
             threads[idx].uid = threads[current_thread].uid
         else
             threads[idx].uid = 0
-        asm("sti")
+        // No sti — slow-path handler keeps cli; do_schedule does sti
         val tid = idx
 
         // Set up process entry
@@ -1276,7 +1277,7 @@ the process as zombie. Returns 0 on success, -1 on error.
                     threads[i].quantum = DEFAULT_QUANTUM
                     enqueue(threads[i].priority, i)
             i += 1
-        asm("sti")
+        // No sti — slow-path handler keeps cli; do_schedule does sti
         0
 
 Returns next thread's SSP, or 0 if no threads are READY.
@@ -1441,7 +1442,8 @@ stack or context -- it can be resumed exactly where it left off.
             threads[id].state = STATE_READY
             threads[id].quantum = DEFAULT_QUANTUM
             enqueue(threads[id].priority, id)
-        asm("sti")
+        // No sti — callers handle: fast-path does sti+rte,
+        // slow-path handler keeps cli until do_schedule
 
     kernel_tls_set(packed: int)
         val slot = (packed >> 24) & 0xFF
