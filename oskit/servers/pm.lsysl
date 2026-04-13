@@ -260,6 +260,22 @@ Send handle inheritance request to VFS.
         var vfs_reply: [1]byte
         ipc_send(fs_port, &msg[0], 10 + num_handles * 2, &vfs_reply[0], 1)
 
+Tell VFS to close all handles for a dead process.
+
+    pm_vfs_close_handles(pid: int)
+        var fs_name: [3]byte
+        fs_name[0] = 102  // f
+        fs_name[1] = 115  // s
+        fs_name[2] = 0
+        val fs_port = port_lookup(&fs_name[0])
+        if fs_port < 0
+            return
+        var msg: [5]byte
+        msg[0] = 17  // VFS_CMD_EXIT
+        pm_msg_write_i32(&msg[0], 1, pid)
+        var vfs_reply: [1]byte
+        ipc_send(fs_port, &msg[0], 5, &vfs_reply[0], 1)
+
 PM server main loop. Uses ipc_recv_notify to wait for either
 IPC messages (waitpid/kill from userspace) or notifications
 (exit events from the kernel).

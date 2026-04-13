@@ -394,6 +394,42 @@ import oskit.apps.init.{init}
     output should include("Hello")
   }
 
+  "Login: hello three times" in {
+    val sp = 12000
+    val keys = typeString("root\n", startTick = 800000, spacing = sp) ++
+      typeString("toor\n", startTick = 980000, spacing = sp) ++
+      typeString("hello\n", startTick = 1250000, spacing = sp) ++
+      typeString("hello\n", startTick = 8000000, spacing = sp)
+    val linked = osLinked
+    val (cpu, output, ram) = runLogin(scheduledKeys = keys, maxCycles = 200000000)
+    println(s"TWO HELLO OUTPUT: [$output]")
+    println(s"CPU state: ${cpu.state}  cycles: ${cpu.cycles}")
+    // Dump thread states
+    def ri(addr: Long): Int =
+      ((ram.readByte(addr) & 0xFF) << 24) | ((ram.readByte(addr+1) & 0xFF) << 16) |
+      ((ram.readByte(addr+2) & 0xFF) << 8) | (ram.readByte(addr+3) & 0xFF)
+    def rl(addr: Long): Long =
+      (ri(addr).toLong << 32) | (ri(addr+4).toLong & 0xFFFFFFFFL)
+    val THREADS_ADDR = 0x62678L
+    val THREAD_SIZE = 96
+    val THREAD_COUNT_ADDR = 0x62978L
+    val tc = ri(THREAD_COUNT_ADDR)
+    println(s"thread_count: $tc")
+    val stateNames = Map(0 -> "READY", 1 -> "RUNNING", 2 -> "BLOCKED", 3 -> "TERMINATED",
+      10 -> "SUSPENDED", 11 -> "SEND_BLOCKED", 12 -> "RECV_BLOCKED", 13 -> "RECV_NOTIFY_BLK",
+      14 -> "JOIN_BLOCKED")
+    for i <- 0 until tc do
+      val base = THREADS_ADDR + i * THREAD_SIZE
+      val ssp = rl(base)
+      val state = ri(base + 8)
+      val ptbr = ri(base + 88)
+      val pid = ri(base + 92)
+      val stateName = stateNames.getOrElse(state, s"?$state")
+      println(f"  T$i: state=$stateName%-18s ssp=$ssp%08x ptbr=$ptbr%08x pid=$pid")
+    val helloCount = "Hello, world!".r.findAllIn(output).length
+    helloCount shouldBe 2
+  }
+
   "Login: echo after login" taggedAs Slow in {
     val keys = loginAndType("echo hi\n")
     val (_, output, _) = runLogin(scheduledKeys = keys, maxCycles = 180000000)

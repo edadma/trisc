@@ -256,6 +256,7 @@ reply is always 1 byte. On success, length depends on command.
     val VFS_CMD_SEEK    = 14
     val VFS_CMD_CONNECT = 15
     val VFS_CMD_INHERIT = 16
+    val VFS_CMD_EXIT    = 17
 
     vfs_reply_len(cmd: int, status: int) -> int
         if status != 0
@@ -754,6 +755,13 @@ the appropriate backend.
                     vfs_handle_connect(sender, &buf[0], msg_len, backend)
                 else if cmd == VFS_CMD_INHERIT
                     vfs_handle_inherit(sender, &buf[0])
+                else if cmd == VFS_CMD_EXIT
+                    // Process exited — close all its handles
+                    val exit_pid = vfs_msg_read_i32(&buf[0], 1)
+                    vfs_handle_close_all(exit_pid)
+                    var exit_reply: [1]byte
+                    exit_reply[0] = 0
+                    ipc_reply(sender, &exit_reply[0], 1)
                 else
                     // All other commands: forward and relay
                     var be_reply: [64]byte
