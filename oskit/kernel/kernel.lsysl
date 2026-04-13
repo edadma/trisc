@@ -225,7 +225,7 @@ the handler returns, the scheduler runs.
 Modules register handlers via register_syscall(). Fast-path
 syscalls (putc, queries) remain hardcoded in boot.asm.
 
-    var syscall_table: [48]i64  // 48 = MAX_SYSCALLS
+    var syscall_table: [64]i64  // 64 = MAX_SYSCALLS
     var syscall_ssp: i64
 
 Set the return value for the current syscall. Writes into
@@ -506,6 +506,199 @@ Set a thread's page table base register.
     kernel_get_thread_pid(tid: int) -> int
         threads[tid].pid
 
+Re-enqueue the current thread so it keeps running after
+do_schedule. Used by syscall handlers that don't block.
+Must ensure interrupts are disabled since called functions
+like create_process_suspended and resume_thread may have
+re-enabled them via internal sti.
+
+    kernel_continue_current()
+        asm("cli")
+        threads[current_thread].state = STATE_READY
+        enqueue(threads[current_thread].priority, current_thread)
+
+Syscall handlers for server isolation. These wrap kernel
+functions so servers can call them via the syscall interface
+instead of importing kernel functions directly.
+
+SYS_VM_CREATE_PT (44): Create a per-process page table.
+No args. Returns L1 base address.
+
+    sys_vm_create_pt_handler(arg: int)
+        val result = vm_create_process_pt()
+        syscall_return(result)
+        kernel_continue_current()
+
+SYS_CREATE_PROC_SUSP (45): Create a process suspended.
+Arg = pointer to packed args: [entry(i64), usp(i64), ssp(i64), name(*byte), ptbr(i64)]
+
+    sys_create_proc_susp_handler(arg: int)
+        var args: *i64 = *i64(i64(arg))
+        val entry = args[0]
+        val usp = args[1]
+        val ssp = args[2]
+        val name_ptr = *byte(args[3])
+        val name_len = int(args[4])
+        val name = string(name_ptr, name_len)
+        val ptbr = int(args[5])
+        val result = create_process_suspended(entry, usp, ssp, name, ptbr)
+        syscall_return(result)
+        kernel_continue_current()
+
+SYS_RESUME_PROC (46): Resume a suspended process.
+Arg = pid.
+
+    sys_resume_proc_handler(arg: int)
+        resume_process(arg)
+        syscall_return(0)
+        kernel_continue_current()
+
+SYS_REAP_PROC (47): Reap a zombie process (free page tables).
+Arg = pid.
+
+    sys_reap_proc_handler(arg: int)
+        reap_process(arg)
+        syscall_return(0)
+        kernel_continue_current()
+
+SYS_KILL_PROC (48): Kill a process by PID.
+Arg = pid. Returns 0 on success, -1 on error.
+
+    sys_kill_proc_handler(arg: int)
+        val result = kernel_kill_process(arg)
+        syscall_return(result)
+        kernel_continue_current()
+
+SYS_REGISTER_PM (49): Register calling thread as the PM.
+Arg = tid.
+
+    sys_register_pm_handler(arg: int)
+        kernel_register_pm(arg)
+        syscall_return(0)
+        kernel_continue_current()
+
+SYS_SET_THREAD_PTBR (50): Set a thread's page table base.
+Arg = pointer to packed args: [tid(i64), ptbr(i64)]
+
+    sys_set_thread_ptbr_handler(arg: int)
+        var args: *i64 = *i64(i64(arg))
+        val tid = int(args[0])
+        val ptbr = int(args[1])
+        kernel_set_thread_ptbr(tid, ptbr)
+        syscall_return(0)
+        kernel_continue_current()
+
+SYS_VM_SET_PTBR (51): Set the hardware PTBR.
+Arg = address.
+
+    sys_vm_set_ptbr_handler(arg: int)
+        vm_set_ptbr(arg)
+        syscall_return(0)
+        kernel_continue_current()
+
+SYS_GET_THREAD_PID (52): Get the PID of a thread.
+Arg = tid. Returns pid.
+
+    sys_get_thread_pid_handler(arg: int)
+        val result = kernel_get_thread_pid(arg)
+        syscall_return(result)
+        kernel_continue_current()
+
+SYS_GET_THREAD_PTBR (53): Get a thread's page table base.
+Arg = tid. Returns ptbr.
+
+    sys_get_thread_ptbr_handler(arg: int)
+        val result = kernel_get_thread_ptbr(arg)
+        syscall_return(result)
+        kernel_continue_current()
+
+SYS_VM_COPY_TO (54): Copy data into another address space.
+Arg = pointer to packed args: [dst_ptbr(i64), dst_vaddr(i64), src(i64), len(i64)]
+
+    sys_vm_copy_to_handler(arg: int)
+        var args: *i64 = *i64(i64(arg))
+        val dst_ptbr = int(args[0])
+        val dst_vaddr = int(args[1])
+        val src = *byte(args[2])
+        val vlen = int(args[3])
+        vm_copy_to(dst_ptbr, dst_vaddr, src, vlen)
+        syscall_return(0)
+        kernel_continue_current()
+
+SYS_VM_COPY_FROM (55): Copy data from another address space.
+Arg = pointer to packed args: [src_ptbr(i64), src_vaddr(i64), dst(i64), len(i64)]
+
+    sys_vm_copy_from_handler(arg: int)
+        var args: *i64 = *i64(i64(arg))
+        val src_ptbr = int(args[0])
+        val src_vaddr = int(args[1])
+        val dst = *byte(args[2])
+        val vlen = int(args[3])
+        vm_copy_from(src_ptbr, src_vaddr, dst, vlen)
+        syscall_return(0)
+        kernel_continue_current()
+
+SYS_PROC_STATE (56): Get a process's state.
+Arg = pid. Returns state (PROC_FREE/PROC_RUNNING/PROC_ZOMBIE).
+
+    sys_proc_state_handler(arg: int)
+        if arg >= 0
+            if arg < MAX_PROCESSES
+                syscall_return(processes[arg].state)
+                kernel_continue_current()
+                return
+        syscall_return(-1)
+        kernel_continue_current()
+
+SYS_PROC_EXIT_CODE (57): Get a process's exit code.
+Arg = pid. Returns exit code.
+
+    sys_proc_exit_code_handler(arg: int)
+        if arg >= 0
+            if arg < MAX_PROCESSES
+                syscall_return(processes[arg].exit_code)
+                kernel_continue_current()
+                return
+        syscall_return(-1)
+        kernel_continue_current()
+
+SYS_PROC_MAIN_TID (58): Get a process's main thread ID.
+Arg = pid. Returns tid.
+
+    sys_proc_main_tid_handler(arg: int)
+        if arg >= 0
+            if arg < MAX_PROCESSES
+                syscall_return(processes[arg].main_tid)
+                kernel_continue_current()
+                return
+        syscall_return(-1)
+        kernel_continue_current()
+
+SYS_PROC_PARENT_TID (59): Get a process's parent thread ID.
+Arg = pid. Returns parent_tid.
+
+    sys_proc_parent_tid_handler(arg: int)
+        if arg >= 0
+            if arg < MAX_PROCESSES
+                syscall_return(processes[arg].parent_tid)
+                kernel_continue_current()
+                return
+        syscall_return(-1)
+        kernel_continue_current()
+
+SYS_PROC_SET_PARENT_TID (60): Set a process's parent thread ID.
+Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
+
+    sys_proc_set_parent_tid_handler(arg: int)
+        var args: *i64 = *i64(i64(arg))
+        val pid = int(args[0])
+        val parent_tid = int(args[1])
+        if pid >= 0
+            if pid < MAX_PROCESSES
+                processes[pid].parent_tid = parent_tid
+        syscall_return(0)
+        kernel_continue_current()
+
     kernel_init()
         vm_init()
         register_syscall(0, sleep_current)
@@ -517,6 +710,23 @@ Set a thread's page table base register.
         register_syscall(30, pimutex_unlock_kernel)
         register_syscall(40, waitpid_current)
         register_syscall(41, getpid_current)
+        register_syscall(44, sys_vm_create_pt_handler)
+        register_syscall(45, sys_create_proc_susp_handler)
+        register_syscall(46, sys_resume_proc_handler)
+        register_syscall(47, sys_reap_proc_handler)
+        register_syscall(48, sys_kill_proc_handler)
+        register_syscall(49, sys_register_pm_handler)
+        register_syscall(50, sys_set_thread_ptbr_handler)
+        register_syscall(51, sys_vm_set_ptbr_handler)
+        register_syscall(52, sys_get_thread_pid_handler)
+        register_syscall(53, sys_get_thread_ptbr_handler)
+        register_syscall(54, sys_vm_copy_to_handler)
+        register_syscall(55, sys_vm_copy_from_handler)
+        register_syscall(56, sys_proc_state_handler)
+        register_syscall(57, sys_proc_exit_code_handler)
+        register_syscall(58, sys_proc_main_tid_handler)
+        register_syscall(59, sys_proc_parent_tid_handler)
+        register_syscall(60, sys_proc_set_parent_tid_handler)
 
 Thread-local storage. A flat 2D array indexed by [thread_id][slot].
 Each thread gets TLS_SLOTS slots of int-sized values. Access is

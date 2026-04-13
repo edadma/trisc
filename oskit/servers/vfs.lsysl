@@ -7,8 +7,7 @@ via the mount table. Currently only root ("/") is mounted on TFS.
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv, ipc_reply, ipc_send, ipc_last_msg_len}
-    import oskit.services.{sleep, rs_ready}
-    import oskit.kernel.{kernel_get_thread_ptbr, kernel_get_thread_pid, vm_copy_to, vm_copy_from}
+    import oskit.services.{sleep, rs_ready, svc_get_thread_ptbr, svc_get_thread_pid, svc_vm_copy_to, svc_vm_copy_from}
     import oskit.config.{KERNEL_L1_BASE, MAX_PROCESSES}
 
 Open file table. Each open file tracks inode, position, mount
@@ -295,7 +294,7 @@ Client request:  [cmd(1), path(N)]
 Client reply:    [status(1), handle(4), ino(4)]
 
     vfs_handle_open(sender: int, buf: *byte, msg_len: int, backend: int)
-        val pid = kernel_get_thread_pid(sender)
+        val pid = svc_get_thread_pid(sender)
         // Forward OPEN to TFS to get inode
         var be_reply: [64]byte
         ipc_send(backend, buf, msg_len, &be_reply[0], 64)
@@ -384,7 +383,7 @@ No backend OPEN needed; VFS manages TTY handles locally and
 forwards read/write to the TTY server.
 
     vfs_handle_connect_tty(sender: int, name: *byte, colon: int, name_len: int)
-        val pid = kernel_get_thread_pid(sender)
+        val pid = svc_get_thread_pid(sender)
         // Parse console number (single digit after "tty:")
         var console = 0
         if name_len > colon + 1
@@ -453,14 +452,14 @@ byte read (or 0 on error).
         ipc_send(tty, &tty_msg[0], 2, &tty_reply[0], 2)
         // Write character to client buffer
         val ch = tty_reply[1]
-        val sender_ptbr = kernel_get_thread_ptbr(sender)
+        val sender_ptbr = svc_get_thread_ptbr(sender)
         if sender_ptbr == KERNEL_L1_BASE
             var p: *byte = *byte(client_buf_addr)
             p[0] = ch
         else
             var local: [1]byte
             local[0] = ch
-            vm_copy_to(sender_ptbr, client_buf_addr, &local[0], 1)
+            svc_vm_copy_to(sender_ptbr, client_buf_addr, &local[0], 1)
         // Reply: 1 byte read
         var reply: [5]byte
         reply[0] = 0
@@ -483,7 +482,7 @@ with the data from the client buffer.
         var wlen = len
         if wlen > 125
             wlen = 125
-        val sender_ptbr = kernel_get_thread_ptbr(sender)
+        val sender_ptbr = svc_get_thread_ptbr(sender)
         if sender_ptbr == KERNEL_L1_BASE
             var src: *byte = *byte(client_buf_addr)
             var i = 0
@@ -491,7 +490,7 @@ with the data from the client buffer.
                 local[i] = src[i]
                 i += 1
         else
-            vm_copy_from(sender_ptbr, client_buf_addr, &local[0], wlen)
+            svc_vm_copy_from(sender_ptbr, client_buf_addr, &local[0], wlen)
         // Build TTY_CMD_PUTS message: [cmd(1), console(1), len(1), data...]
         var tty_msg: [128]byte
         tty_msg[0] = 3  // TTY_CMD_PUTS
@@ -519,7 +518,7 @@ position, forwards to TFS, advances position by bytes_read.
         val len = vfs_msg_read_i32(buf, 5)
         val client_buf_addr = vfs_msg_read_i32(buf, 9)
 
-        val pid = kernel_get_thread_pid(sender)
+        val pid = svc_get_thread_pid(sender)
         val fid = vfs_handle_lookup(pid, handle)
         if fid < 0
             var err: [1]byte
@@ -541,7 +540,7 @@ position, forwards to TFS, advances position by bytes_read.
         vfs_msg_write_i32(&tfs_msg[0], 5, offset)
         vfs_msg_write_i32(&tfs_msg[0], 9, len)
 
-        val sender_ptbr = kernel_get_thread_ptbr(sender)
+        val sender_ptbr = svc_get_thread_ptbr(sender)
 
         if sender_ptbr == KERNEL_L1_BASE
             // Same address space — forward directly
@@ -565,7 +564,7 @@ position, forwards to TFS, advances position by bytes_read.
             if be_reply[0] == 0
                 val nr = vfs_msg_read_i32(&be_reply[0], 1)
                 if nr > 0
-                    vm_copy_to(sender_ptbr, client_buf_addr, &local[0], nr)
+                    svc_vm_copy_to(sender_ptbr, client_buf_addr, &local[0], nr)
                 oft_pos[fid] += nr
             ipc_reply(sender, &be_reply[0], 5)
 
@@ -577,7 +576,7 @@ Client request:  [cmd(1), fid(4), len(4), buf_addr(4)]  (13 bytes)
         val len = vfs_msg_read_i32(buf, 5)
         val client_buf_addr = vfs_msg_read_i32(buf, 9)
 
-        val pid = kernel_get_thread_pid(sender)
+        val pid = svc_get_thread_pid(sender)
         val fid = vfs_handle_lookup(pid, handle)
         if fid < 0
             var err: [1]byte
@@ -599,7 +598,7 @@ Client request:  [cmd(1), fid(4), len(4), buf_addr(4)]  (13 bytes)
         vfs_msg_write_i32(&tfs_msg[0], 5, offset)
         vfs_msg_write_i32(&tfs_msg[0], 9, len)
 
-        val sender_ptbr = kernel_get_thread_ptbr(sender)
+        val sender_ptbr = svc_get_thread_ptbr(sender)
 
         if sender_ptbr == KERNEL_L1_BASE
             vfs_msg_write_i32(&tfs_msg[0], 13, client_buf_addr)
@@ -614,7 +613,7 @@ Client request:  [cmd(1), fid(4), len(4), buf_addr(4)]  (13 bytes)
             var wlen = len
             if wlen > 4096
                 wlen = 4096
-            vm_copy_from(sender_ptbr, client_buf_addr, &local[0], wlen)
+            svc_vm_copy_from(sender_ptbr, client_buf_addr, &local[0], wlen)
             vfs_msg_write_i32(&tfs_msg[0], 9, wlen)
             vfs_msg_write_i32(&tfs_msg[0], 13, int(i64(&local[0])))
             var be_reply: [64]byte
@@ -630,7 +629,7 @@ Client reply:    [status(1)]
 
     vfs_do_close(sender: int, buf: *byte)
         val handle = vfs_msg_read_i32(buf, 1)
-        val pid = kernel_get_thread_pid(sender)
+        val pid = svc_get_thread_pid(sender)
         val fid = vfs_handle_lookup(pid, handle)
         var reply: [1]byte
         if fid < 0
@@ -649,7 +648,7 @@ whence: 0 = SEEK_SET, 1 = SEEK_CUR
         val handle = vfs_msg_read_i32(buf, 1)
         val offset = vfs_msg_read_i32(buf, 5)
         val whence = int(buf[9])
-        val pid = kernel_get_thread_pid(sender)
+        val pid = svc_get_thread_pid(sender)
         val fid = vfs_handle_lookup(pid, handle)
         var reply: [5]byte
         if fid < 0

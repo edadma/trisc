@@ -19,9 +19,9 @@ IPC commands:
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
-    import oskit.kernel.{reap_process, kernel_kill_process, kernel_register_pm, kernel_get_thread_pid, create_process, create_process_suspended, resume_process, vm_create_process_pt, kernel_set_thread_ptbr, vm_set_ptbr, processes, threads, current_thread, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
+    import oskit.kernel.{PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
     import oskit.config.{MAX_PROCESSES, MAX_WAITERS, KERNEL_L1_BASE}
-    import oskit.services.{notify_read_self, thread_id, rs_ready}
+    import oskit.services.{notify_read_self, thread_id, rs_ready, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_set_thread_ptbr, svc_vm_set_ptbr, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid}
     import oskit.loader.load_tof
 
     val PM_CMD_WAITPID = 1
@@ -71,8 +71,8 @@ If no waiter, the zombie stays until waitpid is called.
             if waiters[i].active != 0
                 if waiters[i].pid == pid
                     // Parent is waiting — reap and reply
-                    val exit_code = processes[pid].exit_code
-                    reap_process(pid)
+                    val exit_code = svc_proc_exit_code(pid)
+                    svc_reap_proc(pid)
                     var reply: [5]byte
                     reply[0] = 0
                     pm_msg_write_i32(&reply[0], 1, exit_code)
@@ -84,12 +84,12 @@ If no waiter, the zombie stays until waitpid is called.
 
         // Reparent any children of the exiting process to init (thread 0).
         // This ensures orphaned processes can still be reaped.
-        val exited_tid = processes[pid].main_tid
+        val exited_tid = svc_proc_main_tid(pid)
         var j = 1
         while j < MAX_PROCESSES
-            if processes[j].state == PROC_RUNNING
-                if processes[j].parent_tid == exited_tid
-                    processes[j].parent_tid = 0
+            if svc_proc_state(j) == PROC_RUNNING
+                if svc_proc_parent_tid(j) == exited_tid
+                    svc_proc_set_parent_tid(j, 0)
             j += 1
 
 Handle PM_WAITPID: parent wants to wait for a child process.
@@ -113,9 +113,9 @@ the IPC reply until the child exits.
             return
 
         // Already zombie? Reap immediately.
-        if processes[pid].state == PROC_ZOMBIE
-            val exit_code = processes[pid].exit_code
-            reap_process(pid)
+        if svc_proc_state(pid) == PROC_ZOMBIE
+            val exit_code = svc_proc_exit_code(pid)
+            svc_reap_proc(pid)
             var reply: [5]byte
             reply[0] = 0
             pm_msg_write_i32(&reply[0], 1, exit_code)
@@ -123,7 +123,7 @@ the IPC reply until the child exits.
             return
 
         // Already free? Error.
-        if processes[pid].state == PROC_FREE
+        if svc_proc_state(pid) == PROC_FREE
             var reply: [5]byte
             reply[0] = byte(-1)
             pm_msg_write_i32(&reply[0], 1, 0)
@@ -151,7 +151,7 @@ Handle PM_KILL: kill a process by PID.
 
     pm_handle_kill(sender: int, buf: *byte)
         val pid = pm_msg_read_i32(buf, 1)
-        val result = kernel_kill_process(pid)
+        val result = svc_kill_proc(pid)
         var reply: [1]byte
         if result < 0
             reply[0] = byte(-1)
@@ -181,7 +181,7 @@ handles from parent to child, and returns the PID.
         val path = string(buf + 4, path_len)
 
         // Create per-process page table
-        val proc_pt = vm_create_process_pt()
+        val proc_pt = svc_vm_create_pt()
         if proc_pt == 0
             var reply: [1]byte
             reply[0] = -1
@@ -190,13 +190,13 @@ handles from parent to child, and returns the PID.
 
         // Switch PM's PTBR to load into process address space
         val my_tid = thread_id()
-        kernel_set_thread_ptbr(my_tid, proc_pt)
-        vm_set_ptbr(proc_pt)
+        svc_set_thread_ptbr(my_tid, proc_pt)
+        svc_vm_set_ptbr(proc_pt)
 
         val entry = load_tof(path)
         if entry < 0
-            kernel_set_thread_ptbr(my_tid, KERNEL_L1_BASE)
-            vm_set_ptbr(KERNEL_L1_BASE)
+            svc_set_thread_ptbr(my_tid, KERNEL_L1_BASE)
+            svc_vm_set_ptbr(KERNEL_L1_BASE)
             var reply: [1]byte
             reply[0] = -1
             ipc_reply(sender, &reply[0], 1)
@@ -216,11 +216,11 @@ handles from parent to child, and returns the PID.
         val cmd = string(buf + 4 + path_len, args_len)
 
         // Create the process suspended — it won't run until we resume it
-        val pid = create_process_suspended(entry, SPAWN_PROG_USP, SPAWN_PROG_SSP, cmd, proc_pt)
+        val pid = svc_create_proc_susp(entry, SPAWN_PROG_USP, SPAWN_PROG_SSP, cmd, proc_pt)
 
         // Restore PM to kernel address space
-        kernel_set_thread_ptbr(my_tid, KERNEL_L1_BASE)
-        vm_set_ptbr(KERNEL_L1_BASE)
+        svc_set_thread_ptbr(my_tid, KERNEL_L1_BASE)
+        svc_vm_set_ptbr(KERNEL_L1_BASE)
 
         var reply: [5]byte
         if pid < 0
@@ -229,10 +229,10 @@ handles from parent to child, and returns the PID.
         else
             // Copy handles from parent to child via VFS (child is suspended)
             if num_handles > 0
-                val sender_pid = kernel_get_thread_pid(sender)
+                val sender_pid = svc_get_thread_pid(sender)
                 pm_inherit_handles(sender_pid, pid, buf, path_len, args_len, num_handles)
             // Now resume the child — handles are set up
-            resume_process(pid)
+            svc_resume_proc(pid)
             reply[0] = 0
             pm_msg_write_i32(&reply[0], 1, pid)
             ipc_reply(sender, &reply[0], 5)
@@ -284,8 +284,8 @@ IPC messages (waitpid/kill from userspace) or notifications
 (exit events from the kernel).
 
     pm_server()
-        pm_tid = current_thread
-        kernel_register_pm(pm_tid)
+        pm_tid = thread_id()
+        svc_register_pm(pm_tid)
         val port = port_create()
         if port < 0
             return

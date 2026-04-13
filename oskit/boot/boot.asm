@@ -303,7 +303,7 @@ trap_handler
 
   ; Table dispatch: handler = syscall_table[r1]
   ; Bounds check
-  ldi r4, 48
+  ldi r4, 64
   slt r4, r1, r4
   beq r4, r0, .bad_syscall     ; syscall >= 64
   slt r4, r1, r0
