@@ -41,6 +41,20 @@ Does not handle overlapping regions.
         dma_write_reg(regs, 12, 0x1FC)
         regs[14] = byte(0x03)
 
+memcpy_phys — copy n bytes using physical addresses (bypasses MMU).
+Used for cross-address-space copies where src/dst are physical
+addresses obtained from page table walks.
+
+    memcpy_phys(dst: *byte, src: *byte, n: int)
+        if n == 0
+            return
+        val regs = *byte(DMA_BASE)
+        dma_write_reg(regs, 0, int(i64(src)))   // READ_ADDR
+        dma_write_reg(regs, 4, int(i64(dst)))   // WRITE_ADDR
+        dma_write_reg(regs, 8, n)               // TRANS_COUNT
+        dma_write_reg(regs, 12, 0x9FC)          // PHYS_MODE | IRQ_QUIET | CHAIN=0xF | INCR_RW
+        regs[14] = byte(0x0B)                   // PHYS_MODE | ENABLE | IRQ_QUIET → trigger
+
 memset — fill n bytes at dst with v using DMA channel 0
 with INCR_READ disabled (reads same byte repeatedly).
 

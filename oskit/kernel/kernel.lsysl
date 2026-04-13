@@ -534,7 +534,7 @@ Translates the destination virtual address to physical via
 software page table walk, then copies using the identity-mapped
 physical address. No PTBR switching needed.
 
-    import oskit.hal.memcpy
+    import oskit.hal.{memcpy, memcpy_phys}
 
     vm_copy_to(dst_ptbr: int, dst_vaddr: int, src: *byte, len: int)
         var copied = 0
@@ -562,7 +562,8 @@ Copy data from another address space using physical addressing.
 
 Copy data directly between two address spaces. Translates
 both source and destination virtual addresses to physical,
-then DMA-copies between the physical pages. No bounce buffer.
+then DMA-copies between the physical pages using physical
+address mode (bypasses MMU). No bounce buffer needed.
 
     vm_copy_cross(src_ptbr: int, src_vaddr: int, dst_ptbr: int, dst_vaddr: int, len: int)
         var copied = 0
@@ -578,7 +579,7 @@ then DMA-copies between the physical pages. No bounce buffer.
                 chunk = dst_chunk
             if chunk > len - copied
                 chunk = len - copied
-            memcpy(*byte(dst_pa), *byte(src_pa), chunk)
+            memcpy_phys(*byte(dst_pa), *byte(src_pa), chunk)
             copied += chunk
 
 Get a thread's page table base register.
