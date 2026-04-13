@@ -277,10 +277,21 @@ Returns 1 on success, 0 on failure.
         svc_resume_proc(pid)
         1
 
+RS monitoring loop. Blocks on the notification port waiting
+for server crash notifications. When a notification arrives,
+RS logs it. Full crash recovery (restart from boot module)
+is future work.
+
+    rs_monitor()
+        while true
+            var buf: [1]byte
+            ipc_recv_notify(rs_port, &buf[0], 1)
+            notify_read_self()
+
 The RS main function. Runs as its own thread. Starts all
 registered servers in order with synchronous handshake,
-printing boot messages for each. Terminates when done —
-init joins on this thread to know when boot is complete.
+printing boot messages for each. After boot, RS stays alive
+in a monitoring loop waiting for server crash notifications.
 
 For each server, RS first checks boot info for a matching
 boot module. If found, starts the server as an isolated
@@ -324,11 +335,25 @@ creating a kernel thread from the function pointer.
             rs_print(" ok\n")
             i += 1
 
-        // Start init as the last process (kernel thread for now)
-        if rs_init_fn != 0
-            rs_print("  init")
-            val init_slot = rs_next_slot
-            rs_next_slot += 1
-            create_thread(rs_init_fn, kernel_stack_usp(init_slot), kernel_stack_ssp(init_slot), "init")
-            rs_wait_ready()
-            rs_print(" ok\n")
+        // Start init — try boot module first, fall back to kernel thread
+        rs_print("  init")
+        var init_started = false
+        var init_name: [8]byte
+        init_name[0] = 'i'; init_name[1] = 'n'; init_name[2] = 'i'; init_name[3] = 't'; init_name[4] = 0
+        if has_boot_info
+            val mod_idx = rs_find_boot_module(init_name, 4)
+            if mod_idx >= 0
+                if rs_start_from_module(mod_idx, init_name, 4, 0) == 1
+                    init_started = true
+                    rs_print(" [mod]")
+        if !init_started
+            if rs_init_fn != 0
+                val init_slot = rs_next_slot
+                rs_next_slot += 1
+                create_thread(rs_init_fn, kernel_stack_usp(init_slot), kernel_stack_ssp(init_slot), "init")
+        rs_wait_ready()
+        rs_print(" ok\n")
+
+        // RS stays alive — monitoring loop
+        rs_print("RS monitoring\n")
+        rs_monitor()

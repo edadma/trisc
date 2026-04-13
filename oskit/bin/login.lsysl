@@ -1,0 +1,300 @@
+Login — SLIX Login Program
+==========================
+
+Minix 3-style login. Reads /etc/passwd and /etc/shadow,
+authenticates the user, sets uid, then spawns the shell.
+
+Passwd format: username:x:uid:gid:gecos:home:shell
+Shadow format: username:salt:hash_hex
+
+Password field "x" in passwd means look up in shadow.
+Passwords are hashed with PBKDF2-HMAC-SHA256 (c=1).
+
+    module oskit.bin.login
+
+    import oskit.ulib.{write_handle, getc, open, read, close,
+        sleep, setuid, exit, connect, pm_spawn_handles, pm_waitpid,
+        STDOUT}
+    import std.crypto.pbkdf2.{pbkdf2_hmac_sha256}
+
+Buffered output.
+
+    var login_out: [140]byte
+    var login_outpos = 0
+
+    login_flush()
+        if login_outpos > 0
+            write_handle(STDOUT, &login_out[0], login_outpos)
+            login_outpos = 0
+
+    login_putc(ch: char)
+        if login_outpos >= 120
+            login_flush()
+        login_out[login_outpos] = byte(ch)
+        login_outpos += 1
+
+    login_print(s: string)
+        val p = *byte(s)
+        val n = len(s)
+        for var i = 0; i < n; i++
+            if login_outpos >= 120
+                login_flush()
+            login_out[login_outpos] = p[i]
+            login_outpos += 1
+
+    login_newline()
+        login_putc('\n')
+        login_flush()
+
+Read a line from stdin into buf. Returns length.
+If echo is false, characters are not echoed (for passwords).
+
+    login_readline(buf: *byte, maxlen: int, echo: int) -> int
+        var blen = 0
+        while blen < maxlen - 1
+            val ch = getc()
+            if ch == '\n'
+                login_newline()
+                buf[blen] = 0
+                return blen
+            else if ch == 8
+                if blen > 0
+                    blen -= 1
+                    if echo != 0
+                        login_putc(8)
+                        login_putc(' ')
+                        login_putc(8)
+                        login_flush()
+            else if ch == 27
+                val c2 = getc()
+                if c2 == '['
+                    var cx = getc()
+                    while cx >= 0
+                        if cx != '['
+                            if cx >= 64
+                                if cx <= 126
+                                    break
+                        cx = getc()
+                else if c2 == 'O'
+                    val _ss3 = getc()
+            else if ch >= ' '
+                buf[blen] = byte(ch)
+                blen += 1
+                if echo != 0
+                    login_putc(ch)
+                    login_flush()
+        buf[blen] = 0
+        blen
+
+Compare two byte buffers for equality.
+
+    bufcmp(a: *byte, alen: int, b: *byte, blen: int) -> int
+        if alen != blen
+            return 0
+        for var i = 0; i < alen; i++
+            if a[i] != b[i]
+                return 0
+        1
+
+Read a file into a buffer. Returns bytes read.
+
+    read_file(path: string, buf: *byte, maxlen: int) -> int
+        val fid = open(path)
+        if fid < 0
+            return -1
+        val nr = read(fid, buf, maxlen)
+        close(fid)
+        nr
+
+Parse a colon-delimited field from a line buffer.
+
+    parse_field(buf: *byte, pos: int, limit: int, field_start: *int, field_len: *int) -> int
+        *field_start = pos
+        var p = pos
+        while p < limit
+            if buf[p] == ':'
+                *field_len = p - pos
+                return p + 1
+            if buf[p] == '\n'
+                *field_len = p - pos
+                return p + 1
+            p += 1
+        *field_len = p - pos
+        p
+
+Find a line matching a username.
+
+    find_user_line(buf: *byte, buflen: int, user: *byte, userlen: int) -> int
+        var pos = 0
+        while pos < buflen
+            var eol = pos
+            while eol < buflen
+                if buf[eol] == '\n'
+                    break
+                eol += 1
+            var fstart: int
+            var flen: int
+            parse_field(buf, pos, eol, &fstart, &flen)
+            if bufcmp(buf + fstart, flen, user, userlen) != 0
+                return pos
+            pos = eol + 1
+        -1
+
+Parsed home directory from the last lookup_passwd call.
+
+    var login_home: [128]byte
+    var login_home_len = 0
+
+Look up a user in /etc/passwd. Returns uid or -1.
+
+    lookup_passwd(user: *byte, userlen: int) -> int
+        var filebuf: [4096]byte
+        val nr = read_file("/etc/passwd", filebuf, 4096)
+        if nr <= 0
+            return -1
+        val line = find_user_line(filebuf, nr, user, userlen)
+        if line < 0
+            return -1
+        var fstart: int
+        var flen: int
+        var pos = line
+        pos = parse_field(filebuf, pos, nr, &fstart, &flen)
+        pos = parse_field(filebuf, pos, nr, &fstart, &flen)
+        pos = parse_field(filebuf, pos, nr, &fstart, &flen)
+        var uid = 0
+        for var i = 0; i < flen; i++
+            uid = uid * 10 + int(filebuf[fstart + i]) - '0'
+        pos = parse_field(filebuf, pos, nr, &fstart, &flen)
+        pos = parse_field(filebuf, pos, nr, &fstart, &flen)
+        pos = parse_field(filebuf, pos, nr, &fstart, &flen)
+        login_home_len = flen
+        for var i = 0; i < flen; i++
+            login_home[i] = filebuf[fstart + i]
+        uid
+
+Convert a hex character to its nibble value.
+
+    hex_nibble(ch: int) -> int
+        if ch >= '0'
+            if ch <= '9'
+                return ch - '0'
+        if ch >= 'a'
+            if ch <= 'f'
+                return ch - 'a' + 10
+        if ch >= 'A'
+            if ch <= 'F'
+                return ch - 'A' + 10
+        -1
+
+Check password against /etc/shadow using PBKDF2-HMAC-SHA256.
+
+    check_shadow(user: *byte, userlen: int, pass: *byte, passlen: int) -> int
+        var filebuf: [4096]byte
+        val nr = read_file("/etc/shadow", filebuf, 4096)
+        if nr <= 0
+            return 0
+        val line = find_user_line(filebuf, nr, user, userlen)
+        if line < 0
+            return 0
+        var fstart: int
+        var flen: int
+        var pos = line
+        pos = parse_field(filebuf, pos, nr, &fstart, &flen)
+        pos = parse_field(filebuf, pos, nr, &fstart, &flen)
+        val salt_start = fstart
+        val salt_len = flen
+        parse_field(filebuf, pos, nr, &fstart, &flen)
+        val hash_start = fstart
+        val hash_len = flen
+        if hash_len != 64
+            return 0
+
+        var pass_buf: [64]byte
+        for var i = 0; i < passlen; i++
+            pass_buf[i] = byte(pass[i])
+        var salt_buf: [64]byte
+        for var i = 0; i < salt_len; i++
+            salt_buf[i] = byte(filebuf[salt_start + i])
+
+        var computed: [32]byte
+        pbkdf2_hmac_sha256(pass_buf[:passlen], salt_buf[:salt_len], 1, computed[:])
+
+        for var i = 0; i < 32; i++
+            val b = int(computed[i])
+            val hi = hex_nibble(int(filebuf[hash_start + i * 2]))
+            val lo = hex_nibble(int(filebuf[hash_start + i * 2 + 1]))
+            if hi < 0
+                return 0
+            if lo < 0
+                return 0
+            if b != hi * 16 + lo
+                return 0
+        1
+
+Spawn the shell with the user's home directory and inherited
+TTY handles for stdin/stdout/stderr.
+
+    spawn_shell(home: *byte, homelen: int)
+        val home_str = string(home, homelen)
+        val args = "nsh " + home_str
+
+        // Open TTY handles for the shell
+        val h_in = connect("tty:0")
+        val h_out = connect("tty:0")
+        val h_err = connect("tty:0")
+
+        var hmap: [6]byte
+        hmap[0] = byte(h_in)
+        hmap[1] = 0
+        hmap[2] = byte(h_out)
+        hmap[3] = 1
+        hmap[4] = byte(h_err)
+        hmap[5] = 2
+
+        val pid = pm_spawn_handles("/bin/nsh", args, &hmap[0], 3)
+
+        close(h_in)
+        close(h_out)
+        close(h_err)
+
+        if pid >= 0
+            pm_waitpid(pid)
+
+The login main loop.
+
+    main()
+        sleep(10)
+        var user: [64]byte
+        var pass: [64]byte
+        var first = 1
+
+        while 1 == 1
+            if first == 0
+                login_newline()
+            first = 0
+            login_print("login: ")
+            login_flush()
+            val ulen = login_readline(user, 64, 1)
+            if ulen == 0
+                continue
+            login_print("password: ")
+            login_flush()
+            val plen = login_readline(pass, 64, 0)
+
+            val uid = lookup_passwd(user, ulen)
+            if uid < 0
+                sleep(3)
+                login_print("Login incorrect\n")
+                login_flush()
+                continue
+
+            if check_shadow(user, ulen, pass, plen) == 0
+                sleep(3)
+                login_print("Login incorrect\n")
+                login_flush()
+                continue
+
+            // Authenticated — set uid and spawn shell
+            setuid(uid)
+            spawn_shell(login_home, login_home_len)
+            // Shell exited — loop back to login

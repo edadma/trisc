@@ -1,34 +1,23 @@
 OSKit Init — System Initialization
 
-Started by RS as the last server. Reads `/etc/ttytab` to
-spawn login/shell sessions. Runs as a kernel thread (will
-be isolated as a boot module in a later step).
+Started by RS as the last boot module. Reads `/etc/ttytab` to
+spawn login/shell sessions via PM. Runs as an isolated process
+with its own page table.
 
 Boot sequence:
 1. kernel_main starts RS
 2. RS starts servers: disk, tfs, tty, pm, vfs
-3. RS starts init (last)
+3. RS starts init (last, from boot module)
 4. Init reads `/etc/ttytab` — spawns login/shell per terminal
 
     module oskit.apps.init
 
-    import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp}
     import oskit.services.{putc, rs_ready}
-    import oskit.fs.{fs_open, fs_read, fs_close}
-    import oskit.apps.login.{login}
-    import oskit.apps.nsh.{nsh}
+    import oskit.fs.{fs_open, fs_read, fs_close, fs_connect}
+    import oskit.servers.{pm_spawn_handles}
+    import oskit.ipc.{ipc_send, port_lookup}
 
-Stack slot counter for session threads. RS uses slots 0-6
-(RS=0, 5 servers=1-5, init=6). Sessions start at 7.
-
-    var init_next_slot = 7
-
-    init_alloc_slot() -> int
-        val s = init_next_slot
-        init_next_slot += 1
-        s
-
-Parse `/etc/ttytab` and spawn a thread for each entry.
+Parse `/etc/ttytab` and spawn a process for each entry.
 Format: `terminal command` — one entry per line.
 Supported commands: `login`, `nsh`.
 
@@ -37,14 +26,12 @@ Supported commands: `login`, `nsh`.
         val fid = fs_open("/etc/ttytab")
         if fid < 0
             // No ttytab — fall back to single login
-            val s = init_alloc_slot()
-            create_thread(login, kernel_stack_usp(s), kernel_stack_ssp(s), "login")
+            spawn_program("/bin/login", "login")
             return
         val nr = fs_read(fid, buf, 256)
         fs_close(fid)
         if nr <= 0
-            val s = init_alloc_slot()
-            create_thread(login, kernel_stack_usp(s), kernel_stack_ssp(s), "login")
+            spawn_program("/bin/login", "login")
             return
 
         var pos = 0
@@ -114,21 +101,39 @@ Supported commands: `login`, `nsh`.
 
             // Spawn based on command
             if cmd_len > 0
-                val s = init_alloc_slot()
-                val usp = kernel_stack_usp(s)
-                val ssp = kernel_stack_ssp(s)
                 if cmd_len == 5
                     if buf[cmd_start] == 'l'
                         if buf[cmd_start + 1] == 'o'
                             if buf[cmd_start + 2] == 'g'
                                 if buf[cmd_start + 3] == 'i'
                                     if buf[cmd_start + 4] == 'n'
-                                        create_thread(login, usp, ssp, "login")
+                                        spawn_program("/bin/login", "login")
                 if cmd_len == 3
                     if buf[cmd_start] == 'n'
                         if buf[cmd_start + 1] == 's'
                             if buf[cmd_start + 2] == 'h'
-                                create_thread(nsh, usp, ssp, "nsh")
+                                spawn_program("/bin/nsh", "nsh")
+
+Spawn an external program with inherited TTY handles.
+
+    spawn_program(path: string, args: string)
+        val h_in = fs_connect("tty:0")
+        val h_out = fs_connect("tty:0")
+        val h_err = fs_connect("tty:0")
+
+        var hmap: [6]byte
+        hmap[0] = byte(h_in)
+        hmap[1] = 0
+        hmap[2] = byte(h_out)
+        hmap[3] = 1
+        hmap[4] = byte(h_err)
+        hmap[5] = 2
+
+        pm_spawn_handles(path, args, &hmap[0], 3)
+
+        fs_close(h_in)
+        fs_close(h_out)
+        fs_close(h_err)
 
     init_print(s: string)
         val p = *byte(s)

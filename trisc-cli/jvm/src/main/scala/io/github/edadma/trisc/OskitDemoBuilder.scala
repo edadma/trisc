@@ -26,9 +26,7 @@ object OskitDemoBuilder:
   private lazy val tfsSysl: String       = readLsysl("oskit/fs/tfs.lsysl")
   private lazy val fsClientSysl: String  = readLsysl("oskit/fs/client.lsysl")
   private lazy val tfsSrvSysl: String    = readLsysl("oskit/servers/tfs.lsysl")
-  private lazy val nshSysl: String       = readLsysl("oskit/apps/nsh.lsysl")
   private lazy val initSysl: String      = readLsysl("oskit/apps/init.lsysl")
-  private lazy val loginSysl: String     = readLsysl("oskit/apps/login.lsysl")
   private lazy val debugSysl: String     = readLsysl("std/debug/debug.lsysl")
   private lazy val memSysl: String       = readLsysl("std/mem/mem.lsysl")
   private lazy val binarySysl: String    = readLsysl("std/encoding/binary/binary.lsysl")
@@ -91,9 +89,7 @@ object OskitDemoBuilder:
         "std/crypto/sha256/sha256"    -> sha256Sysl,
         "std/crypto/hmac/hmac"        -> hmacSysl,
         "std/crypto/pbkdf2/pbkdf2"    -> pbkdf2Sysl,
-        "oskit/apps/nsh/nsh"          -> nshSysl,
         "oskit/apps/init/init"        -> initSysl,
-        "oskit/apps/login/login"      -> loginSysl,
         "app" ->
           """import oskit.kernel.*
 import oskit.ipc.*
@@ -241,6 +237,10 @@ import oskit.apps.init.{init}
           "oskit/loader/loader"  -> readLsysl("oskit/loader/loader.lsysl"),
           "oskit/fs/client"      -> fsClientSysl,
           "oskit/hal/mem"        -> halMemSysl,
+        )),
+      "init"  -> compileServerTrb("oskit/apps/init", "oskit.apps.init", initSysl, "init",
+        extraSources = Map(
+          "oskit/fs/client"      -> fsClientSysl,
         )),
     )
 

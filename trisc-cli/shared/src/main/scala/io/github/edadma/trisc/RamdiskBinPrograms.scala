@@ -91,7 +91,50 @@ object RamdiskBinPrograms:
       "/bin/stat"   -> compileExecutable("oskit/bin/stat/stat", "oskit/bin/stat.lsysl"),
       "/bin/uptime" -> compileExecutable("oskit/bin/uptime/uptime", "oskit/bin/uptime.lsysl"),
       "/bin/whoami" -> compileExecutable("oskit/bin/whoami/whoami", "oskit/bin/whoami.lsysl"),
+      "/bin/nsh"    -> compileExecutable("oskit/bin/nsh/nsh", "oskit/bin/nsh.lsysl"),
+      "/bin/login"  -> compileLoginExecutable(),
     )
+
+  /** Compile login with crypto libraries (sha256, hmac, pbkdf2). */
+  def compileLoginExecutable(): Array[Byte] =
+    val syscallAsm =
+      Source.fromFile("oskit/ulib/syscall.asm")(using Codec.UTF8).mkString
+    val syscallTof = assemble(syscallAsm, relocatable = true)
+    val source     = tangledLsysl("oskit/bin/login.lsysl")
+    val ulibSource = tangledLsysl("oskit/ulib/ulib.lsysl")
+    val sbrkSource = Source.fromFile("oskit/ulib/sbrk.sysl")(using Codec.UTF8).mkString
+    val allocSource = Source.fromFile("posix/stdlib/alloc.sysl")(using Codec.UTF8).mkString
+    val stringSource = Source.fromFile("posix/string/string.sysl")(using Codec.UTF8).mkString
+    val ctypeSource = Source.fromFile("posix/ctype/ctype.sysl")(using Codec.UTF8).mkString
+    val sha256Source = tangledLsysl("std/crypto/sha256/sha256.lsysl")
+    val hmacSource = tangledLsysl("std/crypto/hmac/hmac.lsysl")
+    val pbkdf2Source = tangledLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
+    val binarySource = tangledLsysl("std/encoding/binary/binary.lsysl")
+    val memSource = tangledLsysl("std/mem/mem.lsysl")
+    val debugSource = tangledLsysl("std/debug/debug.lsysl")
+    val allSources = Map(
+      "oskit/bin/login/login" -> source,
+      "oskit/ulib/ulib" -> ulibSource,
+      "posix/unistd/sbrk" -> sbrkSource,
+      "posix/stdlib/alloc" -> allocSource,
+      "posix/string/string" -> stringSource,
+      "posix/ctype/ctype" -> ctypeSource,
+      "std/crypto/sha256/sha256" -> sha256Source,
+      "std/crypto/hmac/hmac" -> hmacSource,
+      "std/crypto/pbkdf2/pbkdf2" -> pbkdf2Source,
+      "std/encoding/binary/binary" -> binarySource,
+      "std/mem/mem" -> memSource,
+      "std/debug/debug" -> debugSource,
+    )
+    val driver = new SyslDriver
+    val result = driver.compile(allSources)
+    val codegen = new SyslTriscCodegen
+    val tofs = for unit <- result.units yield
+      val asm = codegen.generate(unit.typed)
+      assemble(asm, relocatable = true)
+    val syslTof = Linker.link(tofs, relocatable = true)
+    val linked = Linker.link(Seq(syscallTof, syslTof), progScript, 0)
+    TriscBinary.serialize(linked)
 
   private def loadResourceStream(path: String): Option[Array[Byte]] =
     val inOpt =
@@ -113,7 +156,7 @@ object RamdiskBinPrograms:
   // Load pre-built .trb resources only (no compilation). Used by the emulator at runtime.
   // Run RegenRamdiskBinMain to update embedded .trb files after editing oskit/bin or ulib.
   def loadEmbeddedBinaries(): Map[String, Array[Byte]] =
-    Seq("hello", "echo", "cat", "ps", "count", "grep", "wc", "ls", "touch", "write", "mkdir", "rm", "rmdir", "mv", "chmod", "stat", "uptime", "whoami").flatMap { short =>
+    Seq("hello", "echo", "cat", "ps", "count", "grep", "wc", "ls", "touch", "write", "mkdir", "rm", "rmdir", "mv", "chmod", "stat", "uptime", "whoami", "nsh", "login").flatMap { short =>
       loadResource(short).map(bytes => s"/bin/$short" -> bytes)
     }.toMap
 

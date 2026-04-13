@@ -51,6 +51,11 @@ Command bytes for TFS and TTY server protocols.
     val TTY_CMD_PUTS   = 3
 
     val SYS_GETUID  = 61
+    val SYS_SETUID  = 62
+
+    val PM_CMD_WAITPID = 1
+    val PM_CMD_KILL    = 2
+    val PM_CMD_SPAWN   = 3
 
 Big-endian message helpers — pack/unpack 32-bit integers
 in IPC message buffers.
@@ -386,13 +391,129 @@ Rename/move a file by path.
         ipc_send(port, &msg[0], 2 + onlen + nnlen, &reply[0], 1)
         int(reply[0])
 
-System queries.
+System queries and control.
 
     uptime() -> int
         syscall(SYS_UPTIME, 0)
 
     getuid() -> int
         syscall(SYS_GETUID, 0)
+
+    setuid(uid: int)
+        syscall(SYS_SETUID, uid)
+
+Read one byte from stdin (handle 0). Blocks until data
+is available. Returns the byte value or -1 on error.
+
+    getc() -> int
+        var buf: [1]byte
+        val n = read(STDIN, &buf[0], 1)
+        if n <= 0
+            return -1
+        int(buf[0])
+
+Connect to a named resource via VFS. Supports scheme-based
+routing: `connect("tty:0")`, `connect("vfs:/etc/passwd")`.
+Returns a handle or -1 on error.
+
+    connect(name: string) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val pp = *byte(name)
+        val nlen = len(name)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_CONNECT)
+        for var i = 0; i < nlen; i++
+            msg[i + 1] = pp[i]
+        var reply: [9]byte
+        ipc_send(port, &msg[0], nlen + 1, &reply[0], 9)
+        if reply[0] != 0
+            return -1
+        msg_read_i32(&reply[0], 1)
+
+PM IPC — process management.
+
+Look up the PM server port (cached).
+
+    var pm_port_cache = -2
+
+    pm_port() -> int
+        if pm_port_cache == -2
+            var pm_name: [3]byte
+            pm_name[0] = byte('p')
+            pm_name[1] = byte('m')
+            pm_name[2] = 0
+            pm_port_cache = port_lookup(&pm_name[0])
+        pm_port_cache
+
+Wait for a child process to exit. Returns exit code or -1.
+
+    pm_waitpid(pid: int) -> int
+        val port = pm_port()
+        if port < 0
+            return -1
+        var msg: [5]byte
+        msg[0] = byte(PM_CMD_WAITPID)
+        msg_write_i32(&msg[0], 1, pid)
+        var reply: [5]byte
+        ipc_send(port, &msg[0], 5, &reply[0], 5)
+        if reply[0] != 0
+            return -1
+        msg_read_i32(&reply[0], 1)
+
+Kill a process by PID. Returns 0 on success.
+
+    pm_kill(pid: int) -> int
+        val port = pm_port()
+        if port < 0
+            return -1
+        var msg: [5]byte
+        msg[0] = byte(PM_CMD_KILL)
+        msg_write_i32(&msg[0], 1, pid)
+        var reply: [1]byte
+        ipc_send(port, &msg[0], 5, &reply[0], 1)
+        int(reply[0])
+
+Spawn a process with no handle inheritance.
+
+    pm_spawn(path: string, args: string) -> int
+        pm_spawn_handles(path, args, *byte(0), 0)
+
+Spawn a process with handle inheritance. handle_pairs is
+an array of (parent_handle, child_slot) byte pairs.
+Returns child PID or -1 on error.
+
+    pm_spawn_handles(path: string, args: string, handle_pairs: *byte, num_handles: int) -> int
+        val port = pm_port()
+        if port < 0
+            return -1
+        val plen = len(path)
+        val alen = len(args)
+        var msg: [128]byte
+        msg[0] = byte(PM_CMD_SPAWN)
+        msg[1] = byte(plen)
+        msg[2] = byte(alen)
+        msg[3] = byte(num_handles)
+        val pp = *byte(path)
+        var i = 0
+        while i < plen
+            msg[4 + i] = pp[i]
+            i += 1
+        val ap = *byte(args)
+        i = 0
+        while i < alen
+            msg[4 + plen + i] = ap[i]
+            i += 1
+        i = 0
+        while i < num_handles * 2
+            msg[4 + plen + alen + i] = handle_pairs[i]
+            i += 1
+        var reply: [5]byte
+        ipc_send(port, &msg[0], 4 + plen + alen + num_handles * 2, &reply[0], 5)
+        if reply[0] != 0
+            return -1
+        msg_read_i32(&reply[0], 1)
 
 Print an integer to stdout.
 
