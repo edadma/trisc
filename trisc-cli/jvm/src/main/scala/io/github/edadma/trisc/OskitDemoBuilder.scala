@@ -238,7 +238,7 @@ import oskit.apps.init.{init}
           "oskit/fs/client"      -> fsClientSysl,
           "oskit/hal/mem"        -> halMemSysl,
         )),
-      "init"  -> compileServerTrb("oskit/apps/init", "oskit.apps.init", initSysl, "init",
+      "init"  -> compileServerTrb("oskit/apps/init/init", "oskit.apps.init", initSysl, "init",
         extraSources = Map(
           "oskit/fs/client"      -> fsClientSysl,
         )),

@@ -560,6 +560,27 @@ Copy data from another address space using physical addressing.
             memcpy(dst + copied, *byte(pa), chunk)
             copied += chunk
 
+Copy data directly between two address spaces. Translates
+both source and destination virtual addresses to physical,
+then DMA-copies between the physical pages. No bounce buffer.
+
+    vm_copy_cross(src_ptbr: int, src_vaddr: int, dst_ptbr: int, dst_vaddr: int, len: int)
+        var copied = 0
+        while copied < len
+            val src_pa = vm_v2p(src_ptbr, src_vaddr + copied)
+            val dst_pa = vm_v2p(dst_ptbr, dst_vaddr + copied)
+            val src_off = (src_vaddr + copied) & 0xFFF
+            val dst_off = (dst_vaddr + copied) & 0xFFF
+            // Chunk is limited by both source and dest page boundaries
+            var chunk = PAGE_SIZE - src_off
+            val dst_chunk = PAGE_SIZE - dst_off
+            if dst_chunk < chunk
+                chunk = dst_chunk
+            if chunk > len - copied
+                chunk = len - copied
+            memcpy(*byte(dst_pa), *byte(src_pa), chunk)
+            copied += chunk
+
 Get a thread's page table base register.
 
     kernel_get_thread_ptbr(tid: int) -> int

@@ -267,17 +267,9 @@ truncation. Sets actual_len on the receiver's IPC context.
             // Same address space — direct memcpy (fast path)
             ipc_memcpy(buf_ptr, msg_ptr, copy_len)
         else
-            // Cross-address-space: read from sender via page walk,
-            // write to receiver via page walk, using kernel buffer.
-            var tmp: [256]byte
-            var copied = 0
-            while copied < copy_len
-                var chunk = copy_len - copied
-                if chunk > 256
-                    chunk = 256
-                vm_copy_from(sender_ptbr, int(msg_ptr) + copied, &tmp[0], chunk)
-                vm_copy_to(receiver_ptbr, int(buf_ptr) + copied, &tmp[0], chunk)
-                copied += chunk
+            // Cross-address-space: DMA directly between physical pages.
+            // No bounce buffer — translate both addresses and copy.
+            vm_copy_cross(sender_ptbr, int(msg_ptr), receiver_ptbr, int(buf_ptr), copy_len)
 
         ipc_ctx[receiver].actual_len = copy_len
         ipc_ctx[receiver].sender = sender
@@ -372,16 +364,8 @@ The server continues running (no block).
             // Same address space — direct memcpy
             ipc_memcpy(ipc_ctx[caller].reply_buf, msg_ptr, copy_len)
         else
-            // Cross-address-space: server→kernel buffer→caller
-            var tmp: [256]byte
-            var copied = 0
-            while copied < copy_len
-                var chunk = copy_len - copied
-                if chunk > 256
-                    chunk = 256
-                vm_copy_from(server_ptbr, int(msg_ptr) + copied, &tmp[0], chunk)
-                vm_copy_to(caller_ptbr, int(ipc_ctx[caller].reply_buf) + copied, &tmp[0], chunk)
-                copied += chunk
+            // Cross-address-space: DMA directly between physical pages.
+            vm_copy_cross(server_ptbr, int(msg_ptr), caller_ptbr, int(ipc_ctx[caller].reply_buf), copy_len)
 
         // Write return value to caller's saved r1 on its SSP
         ipc_write_saved_r1(caller, 0)
