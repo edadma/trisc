@@ -275,7 +275,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     case SyslType.UIntType(w) => (w / 8).min(8)
     case SyslType.BoolType => 1
     case SyslType.PtrType(_) => 8
-    case SyslType.FuncType(_, _) => 8
+    case _: SyslType.FuncType => 8
     case SyslType.ArrayType(elem, _) => stackAlign(elem)
     case SyslType.StructType(_, fields) => if fields.isEmpty then 1 else fields.map(f => stackAlign(f._2)).max
     case SyslType.EnumType(_, variants) =>
@@ -336,7 +336,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit(s"  sts r$srcReg, r$addrReg, r0")
       case SyslType.IntType(32) | SyslType.UIntType(32) =>
         emit(s"  stw r$srcReg, r$addrReg, r0")
-      case SyslType.StringType | SyslType.FuncType(_, _) | _: SyslType.InterfaceType =>
+      case SyslType.StringType | (_: SyslType.FuncType) | _: SyslType.InterfaceType =>
         // 16-byte copy: srcReg = source address, addrReg = dest address
         emit(s"  ldd r4, r$srcReg, r0")
         emit(s"  std r4, r$addrReg, r0")
@@ -471,7 +471,9 @@ class SyslTriscCodegen(addresses: Int = 4):
   // The variable is aligned to the greater of its natural alignment and 8
   // (pshd/popd require SP to stay 8-byte aligned).
   private def allocLocal(name: String, typ: SyslType): LocalVar =
-    val size = stackSize(typ)
+    allocLocal(name, typ, stackSize(typ))
+
+  private def allocLocal(name: String, typ: SyslType, size: Int): LocalVar =
     val align = stackAlign(typ).max(8) // type alignment, but at least 8 for SP
     val mask = ~(align - 1)
     val oldOffset = stackOffset
@@ -1894,13 +1896,13 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  std r0, r2, r0")       // env_ptr = null at [sp+8]
         emit("  mov r1, r7")           // r1 = address of the pair
 
-      case TClosure(params, returnType, body, captures) =>
+      case TClosure(params, returnType, body, captures, escapes) =>
         // Generate a unique name and defer the closure function body
         val closureName = if modulePrefix.nonEmpty then s"__closure_${modulePrefix}_$closureCounter"
                           else s"__closure_$closureCounter"
         closureCounter += 1
-        pendingClosures += ((closureName, TClosure(params, returnType, body, captures)))
-        needsAllocExtern = true
+        pendingClosures += ((closureName, TClosure(params, returnType, body, captures, escapes)))
+        if escapes then needsAllocExtern = true
 
         if captures.isEmpty then
           // No captures — same as TFuncRef with null env
@@ -1912,24 +1914,48 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  std r0, r2, r0")       // env_ptr = null
           emit("  mov r1, r7")
         else
-          // 1. Allocate env on heap: malloc(envSize)
           val envLayout = captures.map { (name, typ) =>
             val size = stackSize(typ)
             (name, typ, size)
           }
           val envSize = envLayout.map(_._3).sum
-          emitLoadImm(1, envSize)
-          emit("  pshd r1")             // save envSize (for potential use)
-          stackOffset -= 8
-          emit("  movi r4, malloc")
-          emit("  jalr r6, r4")
-          emit("  popd r2")             // discard envSize
-          stackOffset += 8
-          // r1 = env_ptr (heap allocated)
-          emit("  pshd r1")             // save env_ptr
-          stackOffset -= 8
 
-          // 2. Copy captured values into env
+          if escapes then
+            // Escaping closure: allocate env on heap
+            emitLoadImm(1, envSize)
+            emit("  pshd r1")             // save envSize (for potential use)
+            stackOffset -= 8
+            emit("  movi r4, malloc")
+            emit("  jalr r6, r4")
+            emit("  popd r2")             // discard envSize
+            stackOffset += 8
+            // r1 = env_ptr (heap allocated)
+            emit("  pshd r1")             // save env_ptr
+            stackOffset -= 8
+          else
+            // Non-escaping closure: use pre-allocated env local if available,
+            // otherwise fall back to heap allocation.
+            val envLocalName = s"__env_${closureCounter - 1}"
+            if locals.contains(envLocalName) then
+              // Env was pre-allocated as a local before expression evaluation
+              val envLocal = locals(envLocalName)
+              emitAddImm(1, 5, envLocal.offset)
+              emit("  pshd r1")              // save env_ptr
+              stackOffset -= 8
+            else
+              // Fallback: allocate on heap (e.g., closure in a non-call context)
+              needsAllocExtern = true
+              emitLoadImm(1, envSize)
+              emit("  pshd r1")
+              stackOffset -= 8
+              emit("  movi r4, malloc")
+              emit("  jalr r6, r4")
+              emit("  popd r2")
+              stackOffset += 8
+              emit("  pshd r1")
+              stackOffset -= 8
+
+          // Copy captured values into env
           var envOffset = 0
           for (name, typ, size) <- envLayout do
             // Load env_ptr into r2
@@ -1969,7 +1995,7 @@ class SyslTriscCodegen(addresses: Int = 4):
                   emitStore(3, 2, typ)
             envOffset += size.toInt
 
-          // 3. Build {func_ptr, env_ptr} pair on stack (16 bytes)
+          // Build {func_ptr, env_ptr} pair on stack (16 bytes)
           emit("  popd r2")             // r2 = env_ptr
           stackOffset += 8
           emitAddImm(7, 7, -16)
@@ -2144,6 +2170,20 @@ class SyslTriscCodegen(addresses: Int = 4):
         // r4 is reserved for the call address (movi r4, name)
         val nRegArgs = allArgs.length.min(1)
         val stackArgs = allArgs.drop(1)
+
+        // Pre-allocate stack envs for non-escaping closures in the argument list.
+        // This must happen before savedOffset is captured, so the env space
+        // is part of the permanent frame and won't be reclaimed by expression cleanup.
+        var envPreallocCounter = closureCounter
+        for arg <- allArgs do arg match
+          case c: TClosure if !c.escapes && c.captures.nonEmpty =>
+            val envLayout = c.captures.map((_, t) => stackSize(t))
+            val envSize = envLayout.sum
+            val alignedEnvSize = (envSize + 7) & ~7
+            allocLocal(s"__env_$envPreallocCounter", SyslType.IntType(64), alignedEnvSize)
+            envPreallocCounter += 1
+          case _ =>
+
         val savedOffset = stackOffset
         var stringArgPtrOffsets: List[Int] = Nil // fp-relative offsets of string arg ptrs needing refcount decrement
 

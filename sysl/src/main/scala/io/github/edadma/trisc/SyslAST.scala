@@ -11,7 +11,7 @@ case class NamedTypeAST(name: String, typeArgs: List[TypeAST] = Nil) extends Typ
 case class PtrTypeAST(inner: TypeAST) extends TypeAST
 case class ArrayTypeAST(size: Int, elem: TypeAST) extends TypeAST
 case class SliceTypeAST(elem: TypeAST) extends TypeAST
-case class FuncTypeAST(params: List[TypeAST], ret: TypeAST) extends TypeAST
+case class FuncTypeAST(params: List[TypeAST], ret: TypeAST, escaping: Boolean = false) extends TypeAST
 case class TupleTypeAST(elems: List[TypeAST]) extends TypeAST
 case class RefTypeAST(inner: TypeAST) extends TypeAST
 

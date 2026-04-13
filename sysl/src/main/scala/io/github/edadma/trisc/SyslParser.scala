@@ -314,12 +314,13 @@ class SyslParser extends StandardTokenParsers {
       "unit" ^^^ NamedTypeAST("void") |
       ident ~ typeArgList ^^ { case name ~ args => NamedTypeAST(name, args) }
 
-  // Full type reference: *int, **int, &Node, [5]int, []int (slice), func(int)->int, string, int, etc.
+  // Full type reference: *int, **int, &Node, [5]int, []int (slice), (int)->int, @escaping (int)->int, string, int, etc.
   lazy val typeRef: Parser[TypeAST] =
     "*" ~> typeRef ^^ PtrTypeAST.apply |
       "&" ~> typeRef ^^ RefTypeAST.apply |
       "[" ~> "]" ~> typeRef ^^ SliceTypeAST.apply |
       "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => ArrayTypeAST(n.toInt, t) } |
+      "@" ~> "escaping" ~> funcTypeRef ^^ { case FuncTypeAST(p, r, _) => FuncTypeAST(p, r, escaping = true); case t => t } |
       funcTypeRef |
       "(" ~> rep1sep(typeRef, ",") <~ ")" ^^ TupleTypeAST.apply |
       typeName

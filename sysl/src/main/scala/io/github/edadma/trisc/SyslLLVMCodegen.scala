@@ -2111,7 +2111,7 @@ class SyslLLVMCodegen:
         val wrapperName = funcWrappers.getOrElseUpdate(name, {
           val wn = s"__wrap_$name"
           typ match
-            case SyslType.FuncType(params, retType) =>
+            case SyslType.FuncType(params, retType, _) =>
               pendingWrappers += ((wn, name, params, retType))
             case _ =>
           wn
@@ -2122,7 +2122,7 @@ class SyslLLVMCodegen:
         emit(s"  $fpGep = getelementptr %struct.closure, %struct.closure* $alloca, i32 0, i32 0")
         val fpCast = newReg()
         typ match
-          case SyslType.FuncType(params, retType) =>
+          case SyslType.FuncType(params, retType, _) =>
             val paramStr = ("i8*" +: params.map(llvmType)).mkString(", ")
             emit(s"  $fpCast = bitcast ${llvmType(retType)} ($paramStr)* @$wrapperName to i8*")
           case _ =>
@@ -2139,11 +2139,20 @@ class SyslLLVMCodegen:
         closureCounter += 1
         val closureName = s"__closure_$closureCounter"
         pendingClosures += ((closureName, c))
-        // Build environment on heap
+        // Build environment
         val envSize = c.captures.map((_, t) => llvmSizeOf(t)).sum
         val envPtr = if c.captures.nonEmpty then
-          val ep = newReg()
-          emit(s"  $ep = call i8* @malloc(i64 $envSize)")
+          val ep = if c.escapes then
+            // Escaping closure: heap-allocate env
+            val r = newReg()
+            emit(s"  $r = call i8* @malloc(i64 $envSize)")
+            r
+          else
+            // Non-escaping closure: stack-allocate env
+            val r = deferAlloca(s"[$envSize x i8]")
+            val cast = newReg()
+            emit(s"  $cast = bitcast [$envSize x i8]* $r to i8*")
+            cast
           // Store captured values into environment
           var offset = 0L
           for (capName, capType) <- c.captures do
@@ -2198,7 +2207,7 @@ class SyslLLVMCodegen:
         val envPtr = newReg()
         emit(s"  $envPtr = load i8*, i8** $envGep")
         callee.typ match
-          case SyslType.FuncType(params, retType) =>
+          case SyslType.FuncType(params, retType, _) =>
             val paramTypes = params.map(llvmType)
             val argVals = args.zip(paramTypes).map { (a, pt) =>
               val v = genExpr(a)
@@ -2608,7 +2617,7 @@ class SyslLLVMCodegen:
     case SyslType.SliceType(_) => "%struct.slice"
     case SyslType.PtrType(_) => "i8*"
     case SyslType.RefType(_) => "i8*"
-    case SyslType.FuncType(_, _) => "%struct.closure"
+    case _: SyslType.FuncType => "%struct.closure"
     case _ => "i64"
 
   // LLVM-side size in bytes (may differ from Sysl's sizeOf for types like strings)
@@ -2617,7 +2626,7 @@ class SyslLLVMCodegen:
     case SyslType.PtrType(_) => 8
     case SyslType.RefType(_: SyslType.SliceType) => 24  // inline %struct.slice
     case SyslType.RefType(_) => 8
-    case SyslType.FuncType(_, _) => 16  // {i8*, i8*}
+    case _: SyslType.FuncType => 16  // {i8*, i8*}
     case SyslType.BoolType => 1
     case SyslType.SliceType(_) => 24  // {i8*, i32, i32, i8*}
     case SyslType.StructType(name, fields) =>
@@ -2647,7 +2656,7 @@ class SyslLLVMCodegen:
     case SyslType.DoubleType => 8
     case SyslType.StringType => 8  // contains pointer
     case SyslType.SliceType(_) => 8  // contains pointer
-    case SyslType.FuncType(_, _) => 8  // contains pointer
+    case _: SyslType.FuncType => 8  // contains pointer
     case SyslType.StructType(name, fields) =>
       val resolved = canonicalStruct(SyslType.StructType(name, fields))
       if resolved.fields.isEmpty then 1 else resolved.fields.map((_, ft) => llvmAlignOf(ft)).max

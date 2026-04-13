@@ -803,7 +803,7 @@ class SyslAnalyzer:
     case ArrayTypeAST(size, elem) => ArrayType(resolveType(elem), size)
     case SliceTypeAST(elem) => SliceType(resolveType(elem))
     case TupleTypeAST(elems) => SyslType.tupleType(elems.map(resolveType))
-    case FuncTypeAST(params, ret) => FuncType(params.map(resolveType), resolveType(ret))
+    case FuncTypeAST(params, ret, esc) => FuncType(params.map(resolveType), resolveType(ret), esc)
     case RefTypeAST(inner) => RefType(resolveType(inner))
 
   /** `PtrType` / `RefType` may embed a recursive generic `StructType` placeholder (empty `fields`); use `structTypes`. */
@@ -857,6 +857,9 @@ class SyslAnalyzer:
       case (DoubleType, _: UIntType) => true   // float → unsigned int (truncation)
       // bool and int are NOT compatible — use explicit casts
       // int ↔ pointer: NOT compatible — use explicit casts: int(ptr), *i8(addr)
+      // FuncType compatibility ignores escaping flag — escaping is an optimization hint, not a type distinction
+      case (FuncType(p1, r1, _), FuncType(p2, r2, _)) =>
+        p1.length == p2.length && p1.zip(p2).forall((a, b) => compatible(a, b)) && compatible(r1, r2)
       case (_: FuncType, IntType(64) | UIntType(64)) => true // function pointer → i64 (entry point address)
       case (PtrType(_), PtrType(_)) => true           // any pointer ↔ any pointer (like C's void*)
       case (ArrayType(_, _), PtrType(_)) => true          // array decays to any pointer
@@ -994,7 +997,7 @@ class SyslAnalyzer:
     case RefType(i)      => "ref" + typeToMangled(i)
     case ArrayType(e, n) => s"arr${n}${typeToMangled(e)}"
     case SliceType(e)    => "slice" + typeToMangled(e)
-    case FuncType(ps, r) => "fn" + ps.map(typeToMangled).mkString("") + "Ret" + typeToMangled(r)
+    case FuncType(ps, r, _) => "fn" + ps.map(typeToMangled).mkString("") + "Ret" + typeToMangled(r)
     case StructType(n, _)    => n
     case EnumType(n, _)      => n
     case InterfaceType(n, _) => n
@@ -1024,8 +1027,8 @@ class SyslAnalyzer:
       case SliceTypeAST(inner) => arg match
         case SliceType(a) => unifyTypes(inner, a, typeParams, env)
         case _ => ()
-      case FuncTypeAST(paramTypes, ret) => arg match
-        case FuncType(argParams, argRet) =>
+      case FuncTypeAST(paramTypes, ret, _) => arg match
+        case FuncType(argParams, argRet, _) =>
           if paramTypes.length == argParams.length then
             for (pt, at) <- paramTypes.zip(argParams) do unifyTypes(pt, at, typeParams, env)
           unifyTypes(ret, argRet, typeParams, env)
@@ -1067,7 +1070,7 @@ class SyslAnalyzer:
     case PtrTypeAST(inner) => PtrTypeAST(substituteTypeAST(inner, subst))
     case ArrayTypeAST(size, elem) => ArrayTypeAST(size, substituteTypeAST(elem, subst))
     case SliceTypeAST(elem) => SliceTypeAST(substituteTypeAST(elem, subst))
-    case FuncTypeAST(params, ret) => FuncTypeAST(params.map(substituteTypeAST(_, subst)), substituteTypeAST(ret, subst))
+    case FuncTypeAST(params, ret, esc) => FuncTypeAST(params.map(substituteTypeAST(_, subst)), substituteTypeAST(ret, subst), esc)
     case TupleTypeAST(elems) => TupleTypeAST(elems.map(substituteTypeAST(_, subst)))
     case RefTypeAST(inner) => RefTypeAST(substituteTypeAST(inner, subst))
 
@@ -1746,7 +1749,7 @@ class SyslAnalyzer:
           case TStringFromPtr(ptr, len, _) => scanCaptures(ptr, locals); scanCaptures(len, locals)
           case TStringFromSlice(slc, _) => scanCaptures(slc, locals)
           case TStr(e) => scanCaptures(e, locals)
-          case TClosure(innerParams, _, innerBody, _) =>
+          case TClosure(innerParams, _, innerBody, _, _) =>
             val innerLocals = locals ++ innerParams.map(_.name).toSet
             innerBody match
               case TExprBody(e) => scanCaptures(e, innerLocals)
@@ -1826,7 +1829,12 @@ class SyslAnalyzer:
             stmts.lastOption match
               case Some(TExprStmt(e)) => e.typ
               case _ => VoidType
-        TClosure(typedParams, actualRet, tBody, captures.toList)
+        // Determine if this closure escapes — it does if the expected type is @escaping,
+        // or if there is no expected type (e.g. assigned to a local with no annotation).
+        val escapesFlag = expectedFunc match
+          case Some(ft) => ft.escaping
+          case None => true  // conservative: no context → assume escaping
+        TClosure(typedParams, actualRet, tBody, captures.toList, escapesFlag)
 
       case AsmExprAST(code) =>
         TAsmExpr(code, currentReturnType)
@@ -2284,7 +2292,7 @@ class SyslAnalyzer:
         val tCallee = analyzeExpr(callee)
         val tArgs = args.map(analyzeExpr)
         tCallee.typ match
-          case FuncType(paramTypes, returnType) =>
+          case FuncType(paramTypes, returnType, _) =>
             val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
             val checkedArgs = checkArgs("<indirect>", params, tArgs)
             TIndirectCall(tCallee, checkedArgs, returnType)
@@ -2368,8 +2376,8 @@ class SyslAnalyzer:
         else
           // Fall back to calling a function-typed field
           structType.fields.zipWithIndex.find(_._1._1 == method) match
-            case Some(((_, FuncType(paramTypes, returnType)), idx)) =>
-              val fieldAccess = TFieldAccess(tObj, idx, FuncType(paramTypes, returnType))
+            case Some(((_, FuncType(paramTypes, returnType, esc)), idx)) =>
+              val fieldAccess = TFieldAccess(tObj, idx, FuncType(paramTypes, returnType, esc))
               val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
               val checkedArgs = checkArgs(s"$structName.$method", params, tArgs)
               TIndirectCall(fieldAccess, checkedArgs, returnType)
@@ -2432,7 +2440,7 @@ class SyslAnalyzer:
             // Auto-call def, then indirect-call the result with the provided args
             val autoCall = TCall(funInfo.name, Nil, funInfo.returnType)
             funInfo.returnType match
-              case FuncType(fParams, fRet) =>
+              case FuncType(fParams, fRet, _) =>
                 val paramPairs = fParams.zipWithIndex.map((t, i) => (s"_p$i", t))
                 val checkedArgs = checkArgs(name, paramPairs, tArgs)
                 TIndirectCall(autoCall, checkedArgs, fRet)
@@ -2519,7 +2527,7 @@ class SyslAnalyzer:
           // Try as a variable of FuncType
           val sym = lookup(name)
           sym.typ match
-            case FuncType(paramTypes, returnType) =>
+            case FuncType(paramTypes, returnType, _) =>
               val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
               val checkedArgs = checkArgs(name, params, tArgs)
               TIndirectCall(TVarRef(name, sym.typ), checkedArgs, returnType)
