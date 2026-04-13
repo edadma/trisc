@@ -62,6 +62,9 @@ If no waiter, the zombie stays until waitpid is called.
             return
         if pid >= MAX_PROCESSES
             return
+        // Close the dead process's VFS handles (stdin/stdout/stderr etc.)
+        // before reaping, so OFT slots are freed for reuse.
+        pm_vfs_close_handles(pid)
         // Check if a parent is already waiting for this PID
         var i = 0
         while i < MAX_WAITERS
