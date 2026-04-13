@@ -1078,11 +1078,10 @@ until resume_thread is called. Does not affect the thread's
 stack or context -- it can be resumed exactly where it left off.
 
     suspend_thread(id: int)
-        asm("cli")
+        // NOTE: caller must ensure interrupts are disabled (cli).
         if threads[id].state != STATE_TERMINATED
             if threads[id].state != STATE_SUSPENDED
                 threads[id].state = STATE_SUSPENDED
-        asm("sti")
 
     resume_thread(id: int)
         asm("cli")
@@ -1111,7 +1110,10 @@ If the target is waiting for a notification (STATE_NOTIFY_WAIT),
 it is woken and re-enqueued.
 
     notify_send(target_id: int, value: int)
-        asm("cli")
+        // NOTE: caller must ensure interrupts are disabled (cli).
+        // Called from terminate_current (syscall handler) and IRQ handlers,
+        // both of which already have cli. Adding sti here would prematurely
+        // re-enable interrupts inside those handlers.
         threads[target_id].notify_value = value
         threads[target_id].notify_pending = 1
         val st = threads[target_id].state
@@ -1125,7 +1127,6 @@ it is woken and re-enqueued.
             threads[target_id].state = STATE_READY
             threads[target_id].quantum = DEFAULT_QUANTUM
             enqueue(threads[target_id].priority, target_id)
-        asm("sti")
 
 If a notification is already pending, returns immediately.
 Otherwise sets state to STATE_NOTIFY_WAIT and the scheduler

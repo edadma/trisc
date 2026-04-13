@@ -76,7 +76,6 @@ or -1 if the table is full.
         while i < VFS_MAX_HANDLES
             if handle_oft[base + i] == -1
                 handle_oft[base + i] = oft_idx
-                oft_ref[oft_idx] += 1
                 return i
             i += 1
         -1
