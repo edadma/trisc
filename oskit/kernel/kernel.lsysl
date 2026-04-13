@@ -1081,10 +1081,12 @@ stack or context -- it can be resumed exactly where it left off.
                 threads[id].state = STATE_SUSPENDED
 
     resume_thread(id: int)
+        asm("cli")
         if threads[id].state == STATE_SUSPENDED
             threads[id].state = STATE_READY
             threads[id].quantum = DEFAULT_QUANTUM
             enqueue(threads[id].priority, id)
+        asm("sti")
 
     kernel_tls_set(packed: int)
         val slot = (packed >> 24) & 0xFF
