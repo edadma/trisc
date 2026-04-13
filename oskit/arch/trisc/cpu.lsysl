@@ -1,0 +1,19 @@
+OSKit Arch — TRISC CPU Primitives
+
+Architecture-specific CPU operations for TRISC: interrupt
+enable/disable. On x86, a parallel module would provide
+the same interface using x86 cli/sti instructions.
+
+    module oskit.arch.trisc
+
+Disable interrupts. Must be called before accessing
+shared kernel state (run queues, thread table, etc.).
+
+    arch_cli()
+        asm("cli")
+
+Enable interrupts. Called after kernel state updates
+are complete, allowing the timer and device IRQs to fire.
+
+    arch_sti()
+        asm("sti")

@@ -645,6 +645,8 @@ class StringConcatBugTests extends OSKitTestHelpers {
   private lazy val tfsSrvSysl: String = readLsysl("oskit/servers/tfs.lsysl")
   private lazy val memSysl: String   = readLsysl("std/mem/mem.lsysl")
   private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
+  private lazy val archVmSysl: String = readLsysl("oskit/arch/trisc/vm.lsysl")
+  private lazy val archCpuSysl: String = readLsysl("oskit/arch/trisc/cpu.lsysl")
   private lazy val configSysl: String = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
   private lazy val vfsSrvSysl: String = readLsysl("oskit/servers/vfs.lsysl")
   private lazy val debugSysl: String = readLsysl("std/debug/debug.lsysl")
@@ -660,6 +662,8 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/ipc/ipc"               -> ipcSysl,
       "std/mem/mem"                 -> memSysl,
       "oskit/hal/mem"               -> halMemSysl,
+      "oskit/arch/trisc/vm"         -> archVmSysl,
+      "oskit/arch/trisc/cpu"        -> archCpuSysl,
       "oskit/config/config"         -> configSysl,
       "std/debug/debug"             -> debugSysl,
       "oskit/drivers/disk/disk"     -> diskSysl,
@@ -864,6 +868,8 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/ipc/ipc"               -> ipcSysl,
       "std/mem/mem"                 -> memSysl,
       "oskit/hal/mem"               -> halMemSysl,
+      "oskit/arch/trisc/vm"         -> archVmSysl,
+      "oskit/arch/trisc/cpu"        -> archCpuSysl,
       "oskit/config/config"         -> configSysl,
       "std/debug/debug"             -> debugSysl,
       "oskit/drivers/disk/disk"     -> diskSysl,
@@ -1050,6 +1056,8 @@ class StringConcatBugTests extends OSKitTestHelpers {
       "oskit/ipc/ipc"               -> ipcSysl,
       "std/mem/mem"                 -> memSysl,
       "oskit/hal/mem"               -> halMemSysl,
+      "oskit/arch/trisc/vm"         -> archVmSysl,
+      "oskit/arch/trisc/cpu"        -> archCpuSysl,
       "oskit/config/config"         -> configSysl,
       "std/debug/debug"             -> debugSysl,
       "oskit/drivers/disk/disk"     -> diskSysl,

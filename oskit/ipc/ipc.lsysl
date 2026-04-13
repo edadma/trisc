@@ -22,6 +22,7 @@ so the scheduler can reference them).
     module oskit.ipc
 
     import oskit.kernel.*
+    import oskit.arch.trisc.{vm_v2p, vm_copy_cross}
     import oskit.config.{MAX_PORTS, MAX_THREADS, KERNEL_L1_BASE, DEFAULT_QUANTUM}
     import oskit.services.syscall
     import oskit.hal.memcpy

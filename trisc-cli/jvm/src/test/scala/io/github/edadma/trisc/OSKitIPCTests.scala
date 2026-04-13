@@ -10,6 +10,8 @@ class OSKitIPCTests extends OSKitTestHelpers {
   private lazy val ipcSysl: String = readLsysl("oskit/ipc/ipc.lsysl")
   private lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
   private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
+  private lazy val archVmSysl: String = readLsysl("oskit/arch/trisc/vm.lsysl")
+  private lazy val archCpuSysl: String = readLsysl("oskit/arch/trisc/cpu.lsysl")
   private lazy val configSysl: String = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
 
   def runIPC(userSources: Map[String, String], maxCycles: Int = 2000000): (CPU, String) =
@@ -17,7 +19,7 @@ class OSKitIPCTests extends OSKitTestHelpers {
     val allSources = Map(
       "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
       "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
-      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "oskit/config/config" -> configSysl,
+      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "oskit/arch/trisc/vm" -> archVmSysl, "oskit/arch/trisc/cpu" -> archCpuSysl, "oskit/config/config" -> configSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)

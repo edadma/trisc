@@ -1,0 +1,348 @@
+OSKit Arch — TRISC Sv32 Virtual Memory
+
+Two-level page tables with 4KB pages (Sv32).
+Superpages: an L1 entry with R/W/X bits maps 4MB directly.
+
+PTE format (32-bit): [PPN (20 bits) | reserved (2) | flags (10)]
+PTE flags: V=0x001, R=0x002, W=0x004, X=0x008, U=0x010, G=0x020
+
+This module provides the arch-specific VM interface used by
+the kernel. On x86, a parallel module would implement 4-level
+page tables with CR3 ops and invlpg.
+
+    module oskit.arch.trisc
+
+    import oskit.config.{PAGE_SIZE, KERNEL_L1_BASE, PAGE_POOL_BASE, PAGE_POOL_END}
+    import oskit.hal.{memcpy, memcpy_phys, memset}
+
+PTE flag constants.
+
+    val PTE_V = 0x001
+    val PTE_R = 0x002
+    val PTE_W = 0x004
+    val PTE_X = 0x008
+    val PTE_U = 0x010
+    val PTE_G = 0x020
+
+Page pool state. Initialized lazily in page_alloc() because
+sysl codegen cannot yet resolve cross-unit constants in
+module-level var initializers.
+
+    var page_pool_next: int = 0
+    var page_pool_init = false
+
+Set the hardware page table base register. Defined in
+boot.asm because the PTBR change remaps virtual addresses —
+a compiler-generated prologue/epilogue would corrupt the
+return address.
+
+    extern vm_set_ptbr(addr: int)
+
+Flush the entire TLB.
+
+    vm_flush_tlb()
+        asm("tlbia r0, r0")
+
+Read the current page table base register.
+
+    vm_get_ptbr() -> int
+        asm("gptbr r1, r0")
+        0
+
+Build kernel identity page table using superpages (4MB each):
+- L1[0]: 0x000000-0x3FFFFF (RAM low) — supervisor RWX
+- L1[1]: 0x400000-0x7FFFFF (RAM high) — supervisor RWX
+- L1[2]: 0x800000-0xBFFFFF (I/O + ramdisk) — supervisor RW (no execute)
+
+    vm_init()
+        val flags_rwx = PTE_V | PTE_R | PTE_W | PTE_X
+        val flags_rw  = PTE_V | PTE_R | PTE_W
+
+        // Zero the L1 table (1024 entries × 4 bytes = 4096 bytes)
+        memset(*byte(KERNEL_L1_BASE), 0, PAGE_SIZE)
+
+        // L1[0]: superpage PPN=0, maps 0x000000-0x3FFFFF
+        var p0: *i32 = *i32(KERNEL_L1_BASE)
+        *p0 = i32((0 << 10) | flags_rwx)
+
+        // L1[1]: superpage PPN=1, maps 0x400000-0x7FFFFF
+        var p1: *i32 = *i32(KERNEL_L1_BASE + 4)
+        *p1 = i32((1 << 10) | flags_rwx)
+
+        // L1[2]: superpage PPN=2, maps 0x800000-0xBFFFFF
+        var p2: *i32 = *i32(KERNEL_L1_BASE + 8)
+        *p2 = i32((2 << 10) | flags_rw)
+
+        // Enable the MMU
+        vm_set_ptbr(KERNEL_L1_BASE)
+
+Physical page allocator — bump allocator with free list.
+Freed pages are pushed onto a singly-linked list (next pointer
+stored in the first 8 bytes of each free page). page_alloc
+pops from the free list first, then falls back to bumping.
+
+The pool start is the greater of PAGE_POOL_BASE and the
+page-aligned address after BSS (_heap_start). This prevents
+the page pool from overlapping with kernel BSS when the binary
+grows beyond the configured PAGE_POOL_BASE.
+
+    extern _heap_start: byte
+
+    var page_free_list = 0
+
+    page_alloc() -> int
+        if !page_pool_init
+            var base = PAGE_POOL_BASE
+            val bss_end = int(i64(&_heap_start))
+            val aligned = (bss_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)
+            if aligned > base
+                base = aligned
+            page_pool_next = base
+            page_pool_init = true
+        if page_free_list != 0
+            val page = page_free_list
+            var next: *i64 = *i64(page)
+            page_free_list = int(*next)
+            return page
+        if page_pool_next >= PAGE_POOL_END
+            return 0
+        val page = page_pool_next
+        page_pool_next += PAGE_SIZE
+        page
+
+    page_free(addr: int)
+        var p: *i64 = *i64(addr)
+        *p = i64(page_free_list)
+        page_free_list = addr
+
+Allocate a zeroed page (for page tables and BSS).
+
+    page_alloc_zero() -> int
+        val page = page_alloc()
+        if page != 0
+            memset(*byte(page), 0, PAGE_SIZE)
+        page
+
+Write a 32-bit PTE at a given address.
+
+    vm_write_pte(addr: int, pte: int)
+        var p: *i32 = *i32(addr)
+        *p = i32(pte)
+
+Create a per-process page table. Allocates L1 + L2 tables and
+physical pages for the program region (0xC0000-0xFFFFF = 64 pages).
+Returns L1 base address, or 0 on failure.
+
+    vm_create_process_pt() -> int
+        val l1 = page_alloc_zero()
+        if l1 == 0
+            return 0
+        val l2 = page_alloc_zero()
+        if l2 == 0
+            return 0
+
+        val flags_rwx = PTE_V | PTE_R | PTE_W | PTE_X
+        val flags_rw  = PTE_V | PTE_R | PTE_W
+
+        // L1[0] = pointer to L2 (V-only, no R/W/X → non-superpage)
+        val l2_ppn = l2 / PAGE_SIZE
+        vm_write_pte(l1, (l2_ppn << 10) | PTE_V)
+
+        // L1[1] and L1[2] = copy kernel superpages
+        var k1: *i32 = *i32(KERNEL_L1_BASE + 4)
+        vm_write_pte(l1 + 4, *k1)
+        var k2: *i32 = *i32(KERNEL_L1_BASE + 8)
+        vm_write_pte(l1 + 8, *k2)
+
+        // L2[0x00-0xCB]: kernel region, identity-mapped supervisor RWX
+        // Covers up to 0xCBFFF (835KB). Programs start at PROG_SSP=0xCC000.
+        var i = 0
+        while i < 0xCC
+            var p: *i32 = *i32(l2 + i * 4)
+            *p = i32((i << 10) | flags_rwx)
+            i += 1
+
+        // L2[0xCC-0xFF]: program region, fresh physical pages
+        // Matches PROG_SSP=0xCC000, PROG_USP=0xCE000, PROG_BASE=0xD0000
+        while i < 0x100
+            val page = page_alloc()
+            if page == 0
+                return 0
+            val ppn = page / PAGE_SIZE
+            var p: *i32 = *i32(l2 + i * 4)
+            *p = i32((ppn << 10) | flags_rwx)
+            i += 1
+
+        // L2[0x100-0x3FF]: unmapped (already zeroed by page_alloc)
+        l1
+
+Create a server page table with MMIO grant. Like vm_create_process_pt
+but L1[2] uses an L2 table instead of a superpage, and maps the
+specified I/O page with PTE_U so user-mode server code can access
+device registers. Other I/O pages remain supervisor-only.
+
+    vm_create_server_pt(io_page: int) -> int
+        val l1 = page_alloc_zero()
+        if l1 == 0
+            return 0
+        val l2 = page_alloc_zero()
+        if l2 == 0
+            return 0
+
+        val flags_rwx = PTE_V | PTE_R | PTE_W | PTE_X
+
+        // L1[0] = pointer to L2 (non-superpage)
+        val l2_ppn = l2 / PAGE_SIZE
+        vm_write_pte(l1, (l2_ppn << 10) | PTE_V)
+
+        // L1[1] = copy kernel superpage (0x400000-0x7FFFFF)
+        var k1: *i32 = *i32(KERNEL_L1_BASE + 4)
+        vm_write_pte(l1 + 4, *k1)
+
+        // L1[2] = L2 table for I/O region (non-superpage, with MMIO grant)
+        val l2_io = page_alloc_zero()
+        if l2_io == 0
+            return 0
+        val l2_io_ppn = l2_io / PAGE_SIZE
+        vm_write_pte(l1 + 8, (l2_io_ppn << 10) | PTE_V)
+
+        // Map all I/O pages as supervisor RW (identity-mapped)
+        val io_base_page = 0x800
+        var j = 0
+        while j < 0x400
+            val phys_page = io_base_page + j
+            val flags = PTE_V | PTE_R | PTE_W
+            vm_write_pte(l2_io + j * 4, (phys_page << 10) | flags)
+            j += 1
+
+        // Grant user access to the specified I/O page
+        val grant_idx = io_page - io_base_page
+        if grant_idx >= 0
+            if grant_idx < 0x400
+                vm_write_pte(l2_io + grant_idx * 4, (io_page << 10) | PTE_V | PTE_R | PTE_W | PTE_U)
+
+        // L2[0x00-0xCB]: kernel region, identity-mapped supervisor RWX
+        var i = 0
+        while i < 0xCC
+            var p: *i32 = *i32(l2 + i * 4)
+            *p = i32((i << 10) | flags_rwx)
+            i += 1
+
+        // L2[0xCC-0xFF]: program region, fresh physical pages
+        while i < 0x100
+            val page = page_alloc()
+            if page == 0
+                return 0
+            val ppn = page / PAGE_SIZE
+            var p: *i32 = *i32(l2 + i * 4)
+            *p = i32((ppn << 10) | flags_rwx)
+            i += 1
+
+        l1
+
+Free all pages allocated for a process page table: the program
+region pages (L2 entries 0xCC-0xFF), the L2 table, and the L1
+table. Kernel identity-mapped pages (L2 entries 0x00-0xCB) are
+NOT freed — they point to shared kernel memory.
+
+    vm_free_process_pt(l1_addr: int)
+        if l1_addr == 0
+            return
+        if l1_addr == KERNEL_L1_BASE
+            return
+
+        // Read L1[0] to find the L2 table
+        var l1e: *i32 = *i32(l1_addr)
+        val l1_pte = *l1e
+        if (l1_pte & PTE_V) == 0
+            return
+        val l2_addr = ((l1_pte >> 10) & 0xFFFFF) << 12
+
+        // Free program pages (L2 entries 0xCC-0xFF)
+        var i = 0xCC
+        while i < 0x100
+            var p: *i32 = *i32(l2_addr + i * 4)
+            val pte = *p
+            if (pte & PTE_V) != 0
+                val phys = ((pte >> 10) & 0xFFFFF) << 12
+                page_free(phys)
+            i += 1
+
+        // Free the L2 and L1 tables themselves
+        page_free(l2_addr)
+        page_free(l1_addr)
+
+Software page table walk — translate a virtual address using
+the given page table. Used for cross-address-space copies.
+
+    vm_v2p(ptbr: int, vaddr: int) -> int
+        val l1_idx = (vaddr >> 22) & 0x3FF
+        val l2_idx = (vaddr >> 12) & 0x3FF
+        val offset = vaddr & 0xFFF
+
+        var l1e: *i32 = *i32(ptbr + l1_idx * 4)
+        val l1_pte = *l1e
+        val l1_flags = l1_pte & 0x3FF
+
+        // Superpage?
+        if (l1_flags & (PTE_R | PTE_W | PTE_X)) != 0
+            val ppn = (l1_pte >> 10) & 0xFFFFF
+            return (ppn << 22) | (vaddr & 0x3FFFFF)
+
+        // L2 walk
+        val l2_base = (l1_pte >> 10) << 12
+        var l2e: *i32 = *i32(l2_base + l2_idx * 4)
+        val l2_pte = *l2e
+        val ppn = (l2_pte >> 10) & 0xFFFFF
+        (ppn << 12) | offset
+
+Copy data into another address space using physical addressing.
+Translates the destination virtual address to physical via
+software page table walk, then copies using the identity-mapped
+physical address. No PTBR switching needed.
+
+    vm_copy_to(dst_ptbr: int, dst_vaddr: int, src: *byte, len: int)
+        var copied = 0
+        while copied < len
+            val pa = vm_v2p(dst_ptbr, dst_vaddr + copied)
+            val page_off = (dst_vaddr + copied) & 0xFFF
+            var chunk = PAGE_SIZE - page_off
+            if chunk > len - copied
+                chunk = len - copied
+            memcpy(*byte(pa), src + copied, chunk)
+            copied += chunk
+
+Copy data from another address space using physical addressing.
+
+    vm_copy_from(src_ptbr: int, src_vaddr: int, dst: *byte, len: int)
+        var copied = 0
+        while copied < len
+            val pa = vm_v2p(src_ptbr, src_vaddr + copied)
+            val page_off = (src_vaddr + copied) & 0xFFF
+            var chunk = PAGE_SIZE - page_off
+            if chunk > len - copied
+                chunk = len - copied
+            memcpy(dst + copied, *byte(pa), chunk)
+            copied += chunk
+
+Copy data directly between two address spaces. Translates
+both source and destination virtual addresses to physical,
+then DMA-copies between the physical pages using physical
+address mode (bypasses MMU). No bounce buffer needed.
+
+    vm_copy_cross(src_ptbr: int, src_vaddr: int, dst_ptbr: int, dst_vaddr: int, len: int)
+        var copied = 0
+        while copied < len
+            val src_pa = vm_v2p(src_ptbr, src_vaddr + copied)
+            val dst_pa = vm_v2p(dst_ptbr, dst_vaddr + copied)
+            val src_off = (src_vaddr + copied) & 0xFFF
+            val dst_off = (dst_vaddr + copied) & 0xFFF
+            // Chunk is limited by both source and dest page boundaries
+            var chunk = PAGE_SIZE - src_off
+            val dst_chunk = PAGE_SIZE - dst_off
+            if dst_chunk < chunk
+                chunk = dst_chunk
+            if chunk > len - copied
+                chunk = len - copied
+            memcpy_phys(*byte(dst_pa), *byte(src_pa), chunk)
+            copied += chunk
