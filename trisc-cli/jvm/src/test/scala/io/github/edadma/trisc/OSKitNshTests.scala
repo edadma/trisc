@@ -202,8 +202,8 @@ import oskit.apps.init.{init}
   }
 
   "NSH: ls on root with prefilled file" taggedAs Slow in {
-    val keys        = typeString("ls\n", startTick = 500000)
-    val (_, output) = runNsh(scheduledKeys = keys, prefill = "/hello file \"world\"\n")
+    val keys        = typeString("ls\n", startTick = 500000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, prefill = "/hello file \"world\"\n", maxCycles = 100000000)
     output should include("hello")
   }
 
@@ -237,12 +237,12 @@ import oskit.apps.init.{init}
   "NSH: help command" taggedAs Slow in {
     val keys        = typeString("help\n", startTick = 500000)
     val (_, output) = runNsh(scheduledKeys = keys)
-    output should include("echo cat ls")
+    output should include("builtins: pwd cd kill help")
   }
 
   "NSH: whoami returns 0" taggedAs Slow in {
-    val keys        = typeString("whoami\n", startTick = 500000)
-    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 10000000)
+    val keys        = typeString("whoami\n", startTick = 500000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 100000000)
     output should include("0")
   }
 
@@ -259,27 +259,27 @@ import oskit.apps.init.{init}
   }
 
   "NSH: touch creates file" taggedAs Slow in {
-    val keys        = typeString("touch /hello\nls\n", startTick = 500000)
-    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 10000000)
+    val keys        = typeString("touch /hello\nls\n", startTick = 500000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 200000000)
     output should include("hello")
   }
 
   "NSH: write and cat" taggedAs Slow in {
-    val keys        = typeString("touch /msg\nwrite /msg hi\ncat /msg\n", startTick = 500000)
-    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 15000000)
+    val keys        = typeString("touch /msg\nwrite /msg hi\ncat /msg\n", startTick = 500000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 300000000)
     output should include("hi")
   }
 
   "NSH: mv renames file" taggedAs Slow in {
     val keys =
-      typeString("touch /old\nwrite /old data\nmv /old /new\ncat /new\n", startTick = 500000)
-    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 30000000)
+      typeString("touch /old\nwrite /old data\nmv /old /new\ncat /new\n", startTick = 500000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 400000000)
     output should include("data")
   }
 
   "NSH: uptime shows ticks" taggedAs Slow in {
-    val keys        = typeString("uptime\n", startTick = 500000)
-    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 10000000)
+    val keys        = typeString("uptime\n", startTick = 500000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 100000000)
     output should include("up ")
     output should include("ticks")
   }

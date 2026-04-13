@@ -1,0 +1,19 @@
+touch — create an empty file
+============================
+
+Creates an empty regular file at the given path.
+
+    module oskit.bin.touch
+
+    import oskit.ulib.{puts, exit, get_args, skip_arg0, create}
+
+    main()
+        val path = skip_arg0(get_args())
+        if len(path) == 0
+            puts("usage: touch <file>\n")
+            exit()
+            return
+        val result = create(path, 1, 0x1FF)
+        if result < 0
+            puts("error\n")
+        exit()

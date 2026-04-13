@@ -1,0 +1,19 @@
+rm — remove a file
+==================
+
+Removes a file at the given path.
+
+    module oskit.bin.rm
+
+    import oskit.ulib.{puts, exit, get_args, skip_arg0, unlink}
+
+    main()
+        val path = skip_arg0(get_args())
+        if len(path) == 0
+            puts("usage: rm <file>\n")
+            exit()
+            return
+        val result = unlink(path)
+        if result != 0
+            puts("error\n")
+        exit()

@@ -1,0 +1,19 @@
+mkdir — create a directory
+=========================
+
+Creates a directory at the given path with default permissions.
+
+    module oskit.bin.mkdir
+
+    import oskit.ulib.{puts, exit, get_args, skip_arg0, mkdir}
+
+    main()
+        val path = skip_arg0(get_args())
+        if len(path) == 0
+            puts("usage: mkdir <path>\n")
+            exit()
+            return
+        val result = mkdir(path, 0x1FF)
+        if result < 0
+            puts("error\n")
+        exit()

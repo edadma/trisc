@@ -5,31 +5,21 @@ string type throughout. All path and name handling is
 length-based — no NUL-terminated strings in the API.
 
 Built-in commands:
-- echo [args...]   — print arguments
-- ls [path]        — list directory
-- cat path         — print file contents
-- mkdir path       — create directory
-- touch path       — create empty file
-- rm path          — remove file
-- rmdir path       — remove empty directory
-- mv src dst       — move/rename file
-- chmod mode path  — change permissions (octal)
 - pwd              — print working directory
 - cd [path]        — change directory
-- stat path        — show file info
-- write path text  — write text to file
 - kill pid         — terminate a process
-- uptime           — show system uptime
-- whoami           — print uid
 - help             — list commands
+
+All other commands (ls, cat, echo, touch, write, mkdir, rm,
+rmdir, mv, chmod, stat, uptime, whoami, ps, grep, wc) are
+external /bin/ programs loaded via PM spawn.
 
     module oskit.apps.nsh
 
-    import oskit.services.{sleep, join, getuid, uptime, thread_id}
-    import oskit.drivers.tty.{tty_putc, tty_puts, tty_getc}
-    import oskit.fs.{fs_open, fs_read, fs_write, fs_close, fs_connect, fs_last_ino, fs_stat, fs_create, fs_unlink, fs_mkdir, fs_rmdir, fs_readdir, fs_chmod, fs_rename}
-    import oskit.servers.{pm_waitpid, pm_kill, pm_spawn, pm_spawn_handles}
-    import oskit.kernel.{create_thread, kernel_get_thread_pid}
+    import oskit.services.sleep
+    import oskit.drivers.tty.{tty_puts, tty_getc}
+    import oskit.fs.{fs_open, fs_close, fs_connect, fs_last_ino, fs_stat}
+    import oskit.servers.{pm_waitpid, pm_kill, pm_spawn_handles}
 
 
 Shell state.
@@ -88,16 +78,6 @@ round-trips.
         if n >= 10
             nsh_putint(n / 10)
         nsh_putc('0' + (n % 10))
-
-Convert a NUL-padded byte buffer (e.g. dir entry name) to a string.
-
-    buf_to_str(buf: *byte, max: int) -> string
-        var n = 0
-        while n < max
-            if buf[n] == 0
-                break
-            n += 1
-        string(buf, n)
 
 Tokenizer. Splits a line buffer into string tokens separated
 by spaces. Returns the number of tokens found.
@@ -322,11 +302,6 @@ Redraw the full line in a single batched write.
         buf[blen] = 0
         blen
 
-Open a path and return the file ID (for read/write operations).
-
-    nsh_open_path(path: string) -> int
-        fs_open(nsh_full_path(path))
-
 Build a full absolute path from a possibly-relative argument.
 
     nsh_full_path(path: string) -> string
@@ -366,50 +341,6 @@ Executable name for `/bin/<name>` lookup: `./echo` → `echo`, `/bin/echo` → `
 
 Built-in commands.
 
-    cmd_ls(argc: int, argv: *string)
-        var dir_path = cwd
-        if argc > 1
-            dir_path = nsh_full_path(argv[1])
-        var entry_ino: int
-        var entry_name: [14]byte
-        var idx = 0
-        while fs_readdir(dir_path, idx, &entry_ino, entry_name) == 0
-            val name = buf_to_str(entry_name, 14)
-            // Skip . and ..
-            if len(name) > 0
-                if name[0] != '.'
-                    nsh_print(name)
-                    nsh_newline()
-                else if len(name) > 1
-                    if name[1] != '.'
-                        nsh_print(name)
-                        nsh_newline()
-                    else if len(name) > 2
-                        nsh_print(name)
-                        nsh_newline()
-            idx += 1
-
-    cmd_mkdir(argc: int, argv: *string)
-        if argc < 2
-            return
-        val result = fs_mkdir(nsh_full_path(argv[1]), 0x1FF)
-        if result < 0
-            nsh_print("error\n")
-
-    cmd_rm(argc: int, argv: *string)
-        if argc < 2
-            return
-        val result = fs_unlink(nsh_full_path(argv[1]))
-        if result < 0
-            nsh_print("error\n")
-
-    cmd_rmdir(argc: int, argv: *string)
-        if argc < 2
-            return
-        val result = fs_rmdir(nsh_full_path(argv[1]))
-        if result < 0
-            nsh_print("error\n")
-
     cmd_pwd(argc: int, argv: *string)
         nsh_print(cwd)
         nsh_newline()
@@ -438,90 +369,6 @@ Built-in commands.
             cwd_ino = fs_last_ino
             fs_close(fid)
 
-    cmd_stat(argc: int, argv: *string)
-        if argc < 2
-            return
-        val full = nsh_full_path(argv[1])
-        var st: [7]int
-        if fs_stat(full, st) < 0
-            nsh_print(argv[1])
-            nsh_print(": not found\n")
-            return
-        val ftype = (st[0] >> 12) & 0xF
-        nsh_print("type: ")
-        if ftype == 1
-            nsh_print("file")
-        else if ftype == 2
-            nsh_print("dir")
-        else
-            nsh_putint(ftype)
-        nsh_newline()
-        nsh_print("size: ")
-        nsh_putint(st[4])
-        nsh_newline()
-
-    cmd_touch(argc: int, argv: *string)
-        if argc < 2
-            nsh_print("usage: touch <file>\n")
-            return
-        val result = fs_create(nsh_full_path(argv[1]), 1, 0x1FF)
-        if result < 0
-            nsh_print("error\n")
-
-    cmd_mv(argc: int, argv: *string)
-        if argc < 3
-            nsh_print("usage: mv <src> <dst>\n")
-            return
-        val result = fs_rename(nsh_full_path(argv[1]), nsh_full_path(argv[2]))
-        if result < 0
-            nsh_print("error\n")
-
-    cmd_chmod(argc: int, argv: *string)
-        if argc < 3
-            nsh_print("usage: chmod <mode> <path>\n")
-            return
-        val mp = *byte(argv[1])
-        val ml = len(argv[1])
-        var mode = 0
-        for var i = 0; i < ml; i++
-            val d = int(mp[i]) - '0'
-            if d < 0
-                nsh_print("bad mode\n")
-                return
-            if d > 7
-                nsh_print("bad mode\n")
-                return
-            mode = mode * 8 + d
-        val result = fs_chmod(nsh_full_path(argv[2]), mode)
-        if result < 0
-            nsh_print("error\n")
-
-    cmd_write(argc: int, argv: *string)
-        if argc < 3
-            nsh_print("usage: write <file> <text>\n")
-            return
-        val fid = nsh_open_path(argv[1])
-        if fid < 0
-            nsh_print(argv[1])
-            nsh_print(": not found\n")
-            return
-        val data = *byte(argv[2])
-        val dlen = len(argv[2])
-        val nw = fs_write(fid, data, dlen)
-        fs_close(fid)
-        if nw < 0
-            nsh_print("error\n")
-
-    cmd_uptime(argc: int, argv: *string)
-        val ticks = uptime()
-        nsh_print("up ")
-        nsh_putint(ticks)
-        nsh_print(" ticks\n")
-
-    cmd_whoami(argc: int, argv: *string)
-        nsh_putint(getuid())
-        nsh_newline()
-
     cmd_kill(argc: int, argv: *string)
         if argc < 2
             nsh_print("usage: kill <pid>\n")
@@ -545,9 +392,9 @@ Built-in commands.
             nsh_print("kill: no such process\n")
 
     cmd_help(argc: int, argv: *string)
-        nsh_print("echo cat ls touch write mkdir rm rmdir mv chmod\n")
-        nsh_print("pwd cd stat kill uptime whoami help\n")
-        nsh_print("(echo, cat, ps are /bin executables)\n")
+        nsh_print("builtins: pwd cd kill help\n")
+        nsh_print("/bin: cat echo ls touch write mkdir rm rmdir\n")
+        nsh_print("      mv chmod stat uptime whoami ps grep wc\n")
 
 Command dispatch.
 
@@ -555,22 +402,11 @@ Command dispatch.
         if argc == 0
             return
         argv[0] match
-            "pwd"    -> cmd_pwd(argc, argv)
-            "help"   -> cmd_help(argc, argv)
-            "whoami" -> cmd_whoami(argc, argv)
-            "ls"     -> cmd_ls(argc, argv)
-            "touch"  -> cmd_touch(argc, argv)
-            "write"  -> cmd_write(argc, argv)
-            "mkdir"  -> cmd_mkdir(argc, argv)
-            "rm"     -> cmd_rm(argc, argv)
-            "rmdir"  -> cmd_rmdir(argc, argv)
-            "mv"     -> cmd_mv(argc, argv)
-            "chmod"  -> cmd_chmod(argc, argv)
-            "cd"     -> cmd_cd(argc, argv)
-            "stat"   -> cmd_stat(argc, argv)
-            "kill"   -> cmd_kill(argc, argv)
-            "uptime" -> cmd_uptime(argc, argv)
-            else     -> nsh_try_external(argc, argv)
+            "pwd"  -> cmd_pwd(argc, argv)
+            "cd"   -> cmd_cd(argc, argv)
+            "kill" -> cmd_kill(argc, argv)
+            "help" -> cmd_help(argc, argv)
+            else   -> nsh_try_external(argc, argv)
 
 Try to run an external command from `/bin/` via PM spawn.
 PM handles page table creation, binary loading, and arg setup.

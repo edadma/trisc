@@ -73,13 +73,24 @@ object RamdiskBinPrograms:
   // All demo /bin programs; for regenerating embedded ramdisk/bin/*.trb resources.
   def compileAllEmbeddedBinaries(): Map[String, Array[Byte]] =
     Map(
-      "/bin/hello" -> compileExecutable("oskit/bin/hello/hello", "oskit/bin/hello.lsysl"),
-      "/bin/echo"  -> compileExecutable("oskit/bin/echo/echo", "oskit/bin/echo.lsysl"),
-      "/bin/cat"   -> compileExecutable("oskit/bin/cat/cat", "oskit/bin/cat.lsysl"),
-      "/bin/ps"    -> compileExecutable("oskit/bin/ps/ps", "oskit/bin/ps.lsysl"),
-      "/bin/count" -> compileExecutable("oskit/bin/count/count", "oskit/bin/count.lsysl"),
-      "/bin/grep"  -> compileExecutable("oskit/bin/grep/grep", "oskit/bin/grep.lsysl"),
-      "/bin/wc"    -> compileExecutable("oskit/bin/wc/wc", "oskit/bin/wc.lsysl"),
+      "/bin/hello"  -> compileExecutable("oskit/bin/hello/hello", "oskit/bin/hello.lsysl"),
+      "/bin/echo"   -> compileExecutable("oskit/bin/echo/echo", "oskit/bin/echo.lsysl"),
+      "/bin/cat"    -> compileExecutable("oskit/bin/cat/cat", "oskit/bin/cat.lsysl"),
+      "/bin/ps"     -> compileExecutable("oskit/bin/ps/ps", "oskit/bin/ps.lsysl"),
+      "/bin/count"  -> compileExecutable("oskit/bin/count/count", "oskit/bin/count.lsysl"),
+      "/bin/grep"   -> compileExecutable("oskit/bin/grep/grep", "oskit/bin/grep.lsysl"),
+      "/bin/wc"     -> compileExecutable("oskit/bin/wc/wc", "oskit/bin/wc.lsysl"),
+      "/bin/ls"     -> compileExecutable("oskit/bin/ls/ls", "oskit/bin/ls.lsysl"),
+      "/bin/touch"  -> compileExecutable("oskit/bin/touch/touch", "oskit/bin/touch.lsysl"),
+      "/bin/write"  -> compileExecutable("oskit/bin/write/write", "oskit/bin/write.lsysl"),
+      "/bin/mkdir"  -> compileExecutable("oskit/bin/mkdir/mkdir", "oskit/bin/mkdir.lsysl"),
+      "/bin/rm"     -> compileExecutable("oskit/bin/rm/rm", "oskit/bin/rm.lsysl"),
+      "/bin/rmdir"  -> compileExecutable("oskit/bin/rmdir/rmdir", "oskit/bin/rmdir.lsysl"),
+      "/bin/mv"     -> compileExecutable("oskit/bin/mv/mv", "oskit/bin/mv.lsysl"),
+      "/bin/chmod"  -> compileExecutable("oskit/bin/chmod/chmod", "oskit/bin/chmod.lsysl"),
+      "/bin/stat"   -> compileExecutable("oskit/bin/stat/stat", "oskit/bin/stat.lsysl"),
+      "/bin/uptime" -> compileExecutable("oskit/bin/uptime/uptime", "oskit/bin/uptime.lsysl"),
+      "/bin/whoami" -> compileExecutable("oskit/bin/whoami/whoami", "oskit/bin/whoami.lsysl"),
     )
 
   private def loadResourceStream(path: String): Option[Array[Byte]] =
@@ -102,7 +113,7 @@ object RamdiskBinPrograms:
   // Load pre-built .trb resources only (no compilation). Used by the emulator at runtime.
   // Run RegenRamdiskBinMain to update embedded .trb files after editing oskit/bin or ulib.
   def loadEmbeddedBinaries(): Map[String, Array[Byte]] =
-    Seq("hello", "echo", "cat", "ps", "count", "grep", "wc").flatMap { short =>
+    Seq("hello", "echo", "cat", "ps", "count", "grep", "wc", "ls", "touch", "write", "mkdir", "rm", "rmdir", "mv", "chmod", "stat", "uptime", "whoami").flatMap { short =>
       loadResource(short).map(bytes => s"/bin/$short" -> bytes)
     }.toMap
 
