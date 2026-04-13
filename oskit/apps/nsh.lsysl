@@ -127,6 +127,43 @@ by spaces. Returns the number of tokens found.
                 argc += 1
         argc
 
+Command history. Circular buffer of recent commands for
+up/down arrow recall.
+
+    val HIST_MAX = 16
+    val HIST_LINE_MAX = 128
+    var hist_buf: [2048]byte  // 16 * 128
+    var hist_len: [16]int
+    var hist_count = 0
+    var hist_next = 0
+
+    hist_add(buf: *byte, blen: int)
+        if blen == 0
+            return
+        val slot = hist_next
+        val base = slot * HIST_LINE_MAX
+        var n = blen
+        if n > HIST_LINE_MAX - 1
+            n = HIST_LINE_MAX - 1
+        var i = 0
+        while i < n
+            hist_buf[base + i] = buf[i]
+            i += 1
+        hist_len[slot] = n
+        hist_next = (hist_next + 1) % HIST_MAX
+        if hist_count < HIST_MAX
+            hist_count += 1
+
+    hist_get(idx: int, buf: *byte) -> int
+        val slot = (hist_next - 1 - idx + HIST_MAX * 2) % HIST_MAX
+        val base = slot * HIST_LINE_MAX
+        val n = hist_len[slot]
+        var i = 0
+        while i < n
+            buf[i] = hist_buf[base + i]
+            i += 1
+        n
+
 Line editing. Reads a line from the TTY with arrow keys,
 Home/End, Delete, Backspace, and character insertion.
 
@@ -198,6 +235,7 @@ Redraw the full line in a single batched write.
     nsh_readline(buf: *byte, maxlen: int, prompt_len: int) -> int
         var blen = 0
         var cursor = 0
+        var hist_pos = -1
         while blen < maxlen - 1
             val ch = tty_getc()
             if ch == '\n'
@@ -206,6 +244,7 @@ Redraw the full line in a single batched write.
                 // appends to the edited command line (stale CSI column).
                 nsh_newline()
                 buf[blen] = 0
+                hist_add(buf, blen)
                 return blen
             else if ch == 8
                 if cursor > 0
@@ -220,7 +259,26 @@ Redraw the full line in a single batched write.
                 val c2 = tty_getc()
                 if c2 == '['
                     val c3 = tty_getc()
-                    if c3 == 'C'
+                    if c3 == 'A'
+                        // Up arrow — older history
+                        if hist_pos + 1 < hist_count
+                            hist_pos += 1
+                            blen = hist_get(hist_pos, buf)
+                            cursor = blen
+                            nsh_refresh_line(buf, blen, cursor, prompt_len)
+                    else if c3 == 'B'
+                        // Down arrow — newer history
+                        if hist_pos > 0
+                            hist_pos -= 1
+                            blen = hist_get(hist_pos, buf)
+                            cursor = blen
+                            nsh_refresh_line(buf, blen, cursor, prompt_len)
+                        else if hist_pos == 0
+                            hist_pos = -1
+                            blen = 0
+                            cursor = 0
+                            nsh_refresh_line(buf, blen, cursor, prompt_len)
+                    else if c3 == 'C'
                         if cursor < blen
                             cursor += 1
                             nsh_csi_num(prompt_len + cursor + 1, 'G')
