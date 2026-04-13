@@ -189,130 +189,137 @@ whence: 0 = SET, 1 = CUR. Returns new position, or -1 on error.
             return -1
         fs_msg_read_i32(&reply[0], 1)
 
-Create a file or directory entry under `parent_ino`.
-`ftype`: 1 = file, 2 = directory. Returns new inode or -1.
+Create a file at a path. `ftype`: 1 = file, 2 = directory.
+Returns new inode or -1. Path-based — VFS resolves the parent.
+Protocol: [cmd(1), type(1), mode_hi(1), mode_lo(1), path(N)]
 
-    fs_create(parent_ino: int, name: string, ftype: int, perm: int) -> int
+    fs_create(path: string, ftype: int, perm: int) -> int
         val port = fs_get_port()
         if port < 0
             return -1
         var msg: [128]byte
         msg[0] = FS_CMD_CREATE
-        fs_msg_write_i32(&msg[0], 1, parent_ino)
-        msg[5] = byte(ftype)
-        msg[6] = (perm >> 8) & 0xFF
-        msg[7] = perm & 0xFF
-        val nlen = len(name)
-        val np: *byte = *byte(name)
-        for var i = 0; i < nlen; i++
-            msg[i + 8] = np[i]
+        msg[1] = byte(ftype)
+        msg[2] = (perm >> 8) & 0xFF
+        msg[3] = perm & 0xFF
+        val plen = len(path)
+        val pp: *byte = *byte(path)
+        for var i = 0; i < plen; i++
+            msg[4 + i] = pp[i]
         var reply: [5]byte
-        val result = ipc_send(port, &msg[0], nlen + 8, &reply[0], 5)
+        val result = ipc_send(port, &msg[0], plen + 4, &reply[0], 5)
         if result != 0
             return -1
         if reply[0] != 0
             return -1
         fs_msg_read_i32(&reply[0], 1)
 
-Unlink a file from its parent directory.
+Unlink a file by path.
+Protocol: [cmd(1), path(N)]
 
-    fs_unlink(parent_ino: int, name: string) -> int
+    fs_unlink(path: string) -> int
         val port = fs_get_port()
         if port < 0
             return -1
         var msg: [128]byte
         msg[0] = FS_CMD_UNLINK
-        fs_msg_write_i32(&msg[0], 1, parent_ino)
-        val nlen = len(name)
-        val np: *byte = *byte(name)
-        for var i = 0; i < nlen; i++
-            msg[i + 5] = np[i]
+        val plen = len(path)
+        val pp: *byte = *byte(path)
+        for var i = 0; i < plen; i++
+            msg[1 + i] = pp[i]
         var reply: [1]byte
-        val result = ipc_send(port, &msg[0], nlen + 5, &reply[0], 1)
+        val result = ipc_send(port, &msg[0], plen + 1, &reply[0], 1)
         if result != 0
             return -1
         int(reply[0])
 
-Stat an inode. Fills `out[0..6]` with mode, nlinks, uid, gid,
+Stat a path. Fills `out[0..6]` with mode, nlinks, uid, gid,
 size, mtime, ctime. Returns 0 on success, -1 on error.
+Protocol: [cmd(1), path(N)]
 
-    fs_stat(ino: int, out: *int) -> int
+    fs_stat(path: string, out: *int) -> int
         val port = fs_get_port()
         if port < 0
             return -1
-        var msg: [5]byte
+        var msg: [128]byte
         msg[0] = FS_CMD_STAT
-        fs_msg_write_i32(&msg[0], 1, ino)
+        val plen = len(path)
+        val pp: *byte = *byte(path)
+        for var i = 0; i < plen; i++
+            msg[1 + i] = pp[i]
         var reply: [29]byte
-        val result = ipc_send(port, &msg[0], 5, &reply[0], 29)
+        val result = ipc_send(port, &msg[0], plen + 1, &reply[0], 29)
         if result != 0
             return -1
         if reply[0] != 0
             return -1
-        out[0] = fs_msg_read_i32(&reply[0], 1)   // mode
-        out[1] = fs_msg_read_i32(&reply[0], 5)   // nlinks
-        out[2] = fs_msg_read_i32(&reply[0], 9)   // uid
-        out[3] = fs_msg_read_i32(&reply[0], 13)  // gid
-        out[4] = fs_msg_read_i32(&reply[0], 17)  // size
-        out[5] = fs_msg_read_i32(&reply[0], 21)  // mtime
-        out[6] = fs_msg_read_i32(&reply[0], 25)  // ctime
+        out[0] = fs_msg_read_i32(&reply[0], 1)
+        out[1] = fs_msg_read_i32(&reply[0], 5)
+        out[2] = fs_msg_read_i32(&reply[0], 9)
+        out[3] = fs_msg_read_i32(&reply[0], 13)
+        out[4] = fs_msg_read_i32(&reply[0], 17)
+        out[5] = fs_msg_read_i32(&reply[0], 21)
+        out[6] = fs_msg_read_i32(&reply[0], 25)
         0
 
-Create a new directory under `parent_ino`.
+Create a directory at a path.
+Protocol: [cmd(1), mode_hi(1), mode_lo(1), path(N)]
 
-    fs_mkdir(parent_ino: int, name: string, perm: int) -> int
+    fs_mkdir(path: string, perm: int) -> int
         val port = fs_get_port()
         if port < 0
             return -1
         var msg: [128]byte
         msg[0] = FS_CMD_MKDIR
-        fs_msg_write_i32(&msg[0], 1, parent_ino)
-        msg[5] = (perm >> 8) & 0xFF
-        msg[6] = perm & 0xFF
-        val nlen = len(name)
-        val np: *byte = *byte(name)
-        for var i = 0; i < nlen; i++
-            msg[i + 7] = np[i]
+        msg[1] = (perm >> 8) & 0xFF
+        msg[2] = perm & 0xFF
+        val plen = len(path)
+        val pp: *byte = *byte(path)
+        for var i = 0; i < plen; i++
+            msg[3 + i] = pp[i]
         var reply: [5]byte
-        val result = ipc_send(port, &msg[0], nlen + 7, &reply[0], 5)
+        val result = ipc_send(port, &msg[0], plen + 3, &reply[0], 5)
         if result != 0
             return -1
         if reply[0] != 0
             return -1
         fs_msg_read_i32(&reply[0], 1)
 
-Remove a directory. Must be empty.
+Remove a directory by path. Must be empty.
+Protocol: [cmd(1), path(N)]
 
-    fs_rmdir(parent_ino: int, name: string) -> int
+    fs_rmdir(path: string) -> int
         val port = fs_get_port()
         if port < 0
             return -1
         var msg: [128]byte
         msg[0] = FS_CMD_RMDIR
-        fs_msg_write_i32(&msg[0], 1, parent_ino)
-        val nlen = len(name)
-        val np: *byte = *byte(name)
-        for var i = 0; i < nlen; i++
-            msg[i + 5] = np[i]
+        val plen = len(path)
+        val pp: *byte = *byte(path)
+        for var i = 0; i < plen; i++
+            msg[1 + i] = pp[i]
         var reply: [1]byte
-        val result = ipc_send(port, &msg[0], nlen + 5, &reply[0], 1)
+        val result = ipc_send(port, &msg[0], plen + 1, &reply[0], 1)
         if result != 0
             return -1
         int(reply[0])
 
-Read the `index`-th entry of `dir_ino`. Returns 0 on success,
--1 when `index` is past the last entry.
+Read a directory entry by path and index.
+Protocol: [cmd(1), index(4), path(N)]
 
-    fs_readdir(dir_ino: int, index: int, out_ino: *int, out_name: *byte) -> int
+    fs_readdir(path: string, index: int, out_ino: *int, out_name: *byte) -> int
         val port = fs_get_port()
         if port < 0
             return -1
-        var msg: [9]byte
+        var msg: [128]byte
         msg[0] = FS_CMD_READDIR
-        fs_msg_write_i32(&msg[0], 1, dir_ino)
-        fs_msg_write_i32(&msg[0], 5, index)
+        fs_msg_write_i32(&msg[0], 1, index)
+        val plen = len(path)
+        val pp: *byte = *byte(path)
+        for var i = 0; i < plen; i++
+            msg[5 + i] = pp[i]
         var reply: [19]byte
-        val result = ipc_send(port, &msg[0], 9, &reply[0], 19)
+        val result = ipc_send(port, &msg[0], plen + 5, &reply[0], 19)
         if result != 0
             return -1
         if reply[0] != 0
@@ -338,48 +345,51 @@ Flush superblock to disk.
             return -1
         int(reply[0])
 
-Change file permissions.
+Change file permissions by path.
+Protocol: [cmd(1), mode_hi(1), mode_lo(1), path(N)]
 
-    fs_chmod(ino: int, perm: int) -> int
+    fs_chmod(path: string, perm: int) -> int
         val port = fs_get_port()
         if port < 0
             return -1
-        var msg: [7]byte
+        var msg: [128]byte
         msg[0] = FS_CMD_CHMOD
-        fs_msg_write_i32(&msg[0], 1, ino)
-        msg[5] = (perm >> 8) & 0xFF
-        msg[6] = perm & 0xFF
+        msg[1] = (perm >> 8) & 0xFF
+        msg[2] = perm & 0xFF
+        val plen = len(path)
+        val pp: *byte = *byte(path)
+        for var i = 0; i < plen; i++
+            msg[3 + i] = pp[i]
         var reply: [1]byte
-        val result = ipc_send(port, &msg[0], 7, &reply[0], 1)
+        val result = ipc_send(port, &msg[0], plen + 3, &reply[0], 1)
         if result != 0
             return -1
         int(reply[0])
 
-Rename/move a file entry from one parent to another.
+Rename/move a file. Both paths are full paths.
+Protocol: [cmd(1), old_path_len(1), old_path(N), new_path(M)]
 
-    fs_rename(old_parent: int, old_name: string, new_parent: int, new_name: string) -> int
+    fs_rename(old_path: string, new_path: string) -> int
         val port = fs_get_port()
         if port < 0
             return -1
-        val onp = *byte(old_name)
-        val onl = len(old_name)
-        val nnp = *byte(new_name)
-        val nnl = len(new_name)
+        val onp = *byte(old_path)
+        val onl = len(old_path)
+        val nnp = *byte(new_path)
+        val nnl = len(new_path)
         var msg: [128]byte
         msg[0] = FS_CMD_RENAME
-        fs_msg_write_i32(&msg[0], 1, old_parent)
-        fs_msg_write_i32(&msg[0], 5, new_parent)
-        msg[9] = byte(onl)
+        msg[1] = byte(onl)
         var i = 0
         while i < onl
-            msg[10 + i] = onp[i]
+            msg[2 + i] = onp[i]
             i += 1
         i = 0
         while i < nnl
-            msg[10 + onl + i] = nnp[i]
+            msg[2 + onl + i] = nnp[i]
             i += 1
         var reply: [1]byte
-        val result = ipc_send(port, &msg[0], 10 + onl + nnl, &reply[0], 1)
+        val result = ipc_send(port, &msg[0], 2 + onl + nnl, &reply[0], 1)
         if result != 0
             return -1
         int(reply[0])

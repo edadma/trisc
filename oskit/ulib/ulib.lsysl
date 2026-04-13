@@ -35,11 +35,22 @@ Syscall numbers — must match the kernel and IPC modules.
 
 Command bytes for TFS and TTY server protocols.
 
-    val FS_CMD_OPEN  = 1
-    val FS_CMD_READ  = 2
-    val FS_CMD_WRITE = 3
-    val FS_CMD_CLOSE = 13
-    val TTY_CMD_PUTS = 3
+    val FS_CMD_OPEN    = 1
+    val FS_CMD_READ    = 2
+    val FS_CMD_WRITE   = 3
+    val FS_CMD_CREATE  = 4
+    val FS_CMD_UNLINK  = 5
+    val FS_CMD_STAT    = 6
+    val FS_CMD_MKDIR   = 7
+    val FS_CMD_RMDIR   = 8
+    val FS_CMD_READDIR = 9
+    val FS_CMD_CHMOD   = 11
+    val FS_CMD_RENAME  = 12
+    val FS_CMD_CLOSE   = 13
+    val FS_CMD_CONNECT = 15
+    val TTY_CMD_PUTS   = 3
+
+    val SYS_GETUID  = 61
 
 Big-endian message helpers — pack/unpack 32-bit integers
 in IPC message buffers.
@@ -206,6 +217,195 @@ Close an open file.
         msg_write_i32(&msg[0], 1, fid)
         var reply: [1]byte
         ipc_send(port, &msg[0], 5, &reply[0], 1)
+
+Get the filesystem server port (cached).
+
+    var fs_port_cache = -2
+
+    fs_port() -> int
+        if fs_port_cache == -2
+            var fs_name: [3]byte
+            fs_name[0] = byte('f')
+            fs_name[1] = byte('s')
+            fs_name[2] = 0
+            fs_port_cache = port_lookup(&fs_name[0])
+        fs_port_cache
+
+Create a file at a path. Returns inode or -1 on error.
+Protocol: [cmd(1), type(1), mode_hi(1), mode_lo(1), path(N)]
+
+    create(path: string, ftype: int, mode: int) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val pp = *byte(path)
+        val plen = len(path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_CREATE)
+        msg[1] = byte(ftype)
+        msg[2] = byte((mode >> 8) & 0xFF)
+        msg[3] = byte(mode & 0xFF)
+        for var i = 0; i < plen; i++
+            msg[4 + i] = pp[i]
+        var reply: [5]byte
+        ipc_send(port, &msg[0], 4 + plen, &reply[0], 5)
+        if reply[0] != 0
+            return -1
+        msg_read_i32(&reply[0], 1)
+
+Remove a file by path.
+
+    unlink(path: string) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val pp = *byte(path)
+        val plen = len(path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_UNLINK)
+        for var i = 0; i < plen; i++
+            msg[1 + i] = pp[i]
+        var reply: [1]byte
+        ipc_send(port, &msg[0], 1 + plen, &reply[0], 1)
+        int(reply[0])
+
+Create a directory at a path.
+
+    mkdir(path: string, mode: int) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val pp = *byte(path)
+        val plen = len(path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_MKDIR)
+        msg[1] = byte((mode >> 8) & 0xFF)
+        msg[2] = byte(mode & 0xFF)
+        for var i = 0; i < plen; i++
+            msg[3 + i] = pp[i]
+        var reply: [5]byte
+        ipc_send(port, &msg[0], 3 + plen, &reply[0], 5)
+        if reply[0] != 0
+            return -1
+        msg_read_i32(&reply[0], 1)
+
+Remove a directory by path.
+
+    rmdir(path: string) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val pp = *byte(path)
+        val plen = len(path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_RMDIR)
+        for var i = 0; i < plen; i++
+            msg[1 + i] = pp[i]
+        var reply: [1]byte
+        ipc_send(port, &msg[0], 1 + plen, &reply[0], 1)
+        int(reply[0])
+
+Read a directory entry by path and index. Returns 0 on success, -1 on end.
+
+    readdir(path: string, idx: int, entry_ino: *int, entry_name: *byte) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val pp = *byte(path)
+        val plen = len(path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_READDIR)
+        msg_write_i32(&msg[0], 1, idx)
+        for var i = 0; i < plen; i++
+            msg[5 + i] = pp[i]
+        var reply: [19]byte
+        ipc_send(port, &msg[0], 5 + plen, &reply[0], 19)
+        if reply[0] != 0
+            return -1
+        *entry_ino = msg_read_i32(&reply[0], 1)
+        for var i = 0; i < 14; i++
+            entry_name[i] = reply[5 + i]
+        0
+
+Get file status by path.
+
+    stat(path: string, st: *int) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val pp = *byte(path)
+        val plen = len(path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_STAT)
+        for var i = 0; i < plen; i++
+            msg[1 + i] = pp[i]
+        var reply: [29]byte
+        ipc_send(port, &msg[0], 1 + plen, &reply[0], 29)
+        if reply[0] != 0
+            return -1
+        for var i = 0; i < 7; i++
+            st[i] = msg_read_i32(&reply[0], 1 + i * 4)
+        0
+
+Change file permissions by path.
+
+    chmod(path: string, mode: int) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val pp = *byte(path)
+        val plen = len(path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_CHMOD)
+        msg[1] = byte((mode >> 8) & 0xFF)
+        msg[2] = byte(mode & 0xFF)
+        for var i = 0; i < plen; i++
+            msg[3 + i] = pp[i]
+        var reply: [1]byte
+        ipc_send(port, &msg[0], 3 + plen, &reply[0], 1)
+        int(reply[0])
+
+Rename/move a file by path.
+
+    rename(old_path: string, new_path: string) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val onp = *byte(old_path)
+        val onlen = len(old_path)
+        val nnp = *byte(new_path)
+        val nnlen = len(new_path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_RENAME)
+        msg[1] = byte(onlen)
+        for var i = 0; i < onlen; i++
+            msg[2 + i] = onp[i]
+        for var i = 0; i < nnlen; i++
+            msg[2 + onlen + i] = nnp[i]
+        var reply: [1]byte
+        ipc_send(port, &msg[0], 2 + onlen + nnlen, &reply[0], 1)
+        int(reply[0])
+
+System queries.
+
+    uptime() -> int
+        syscall(SYS_UPTIME, 0)
+
+    getuid() -> int
+        syscall(SYS_GETUID, 0)
+
+Print an integer to stdout.
+
+    putint(n: int)
+        if n < 0
+            puts("-")
+            putint(-n)
+            return
+        if n >= 10
+            putint(n / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + n % 10)
+        write_handle(STDOUT, &buf[0], 1)
 
 Program arguments — stored at a well-known address by the
 shell before launching the program. This convention will be

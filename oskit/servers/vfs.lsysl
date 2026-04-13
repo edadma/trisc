@@ -692,6 +692,288 @@ Reply:   [status(1)]
         reply[0] = 0
         ipc_reply(sender, &reply[0], 1)
 
+Resolve a path to an inode via TFS OPEN.
+Returns the inode or -1 on error.
+
+    vfs_resolve_path(backend: int, path: *byte, path_len: int) -> int
+        var open_msg: [128]byte
+        open_msg[0] = 1  // TFS_CMD_OPEN
+        var i = 0
+        while i < path_len
+            open_msg[1 + i] = path[i]
+            i += 1
+        var reply: [5]byte
+        ipc_send(backend, &open_msg[0], path_len + 1, &reply[0], 5)
+        if reply[0] != 0
+            return -1
+        vfs_msg_read_i32(&reply[0], 1)
+
+Split a path into parent directory path length and basename pointer.
+For "/etc/passwd": parent_len=4 ("/etc"), basename points to "passwd".
+For "/hello": parent_len=1 ("/"), basename points to "hello".
+For "hello": parent_len=0, basename points to "hello".
+
+    vfs_split_parent(path: *byte, path_len: int) -> int
+        var last_slash = -1
+        var i = 0
+        while i < path_len
+            if path[i] == 47  // '/'
+                last_slash = i
+            i += 1
+        if last_slash <= 0
+            return last_slash
+        last_slash
+
+Path-based CREATE: [cmd(1), type(1), mode_hi(1), mode_lo(1), path(N)]
+Reply: [status(1), ino(4)]
+
+    vfs_path_create(sender: int, buf: *byte, msg_len: int, backend: int)
+        val ftype = int(buf[1])
+        val perm = (int(buf[2]) << 8) | int(buf[3])
+        val path: *byte = buf + 4
+        val path_len = msg_len - 4
+        val slash = vfs_split_parent(path, path_len)
+        var parent_ino: int
+        if slash <= 0
+            parent_ino = vfs_resolve_path(backend, path, 0)
+            if parent_ino < 0
+                parent_ino = 1  // root inode
+        else
+            parent_ino = vfs_resolve_path(backend, path, slash)
+        if parent_ino < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        val name: *byte = path + slash + 1
+        val name_len = path_len - slash - 1
+        // Forward to TFS: [cmd(1), parent_ino(4), type(1), perm(2), name(N)]
+        var tfs_msg: [128]byte
+        tfs_msg[0] = 4  // TFS_CMD_CREATE
+        vfs_msg_write_i32(&tfs_msg[0], 1, parent_ino)
+        tfs_msg[5] = byte(ftype)
+        tfs_msg[6] = byte((perm >> 8) & 0xFF)
+        tfs_msg[7] = byte(perm & 0xFF)
+        var j = 0
+        while j < name_len
+            tfs_msg[8 + j] = name[j]
+            j += 1
+        var reply: [5]byte
+        ipc_send(backend, &tfs_msg[0], 8 + name_len, &reply[0], 5)
+        ipc_reply(sender, &reply[0], 5)
+
+Path-based UNLINK: [cmd(1), path(N)]
+Reply: [status(1)]
+
+    vfs_path_unlink(sender: int, buf: *byte, msg_len: int, backend: int)
+        val path: *byte = buf + 1
+        val path_len = msg_len - 1
+        val slash = vfs_split_parent(path, path_len)
+        var parent_ino: int
+        if slash <= 0
+            parent_ino = 1  // root
+        else
+            parent_ino = vfs_resolve_path(backend, path, slash)
+        if parent_ino < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        val name: *byte = path + slash + 1
+        val name_len = path_len - slash - 1
+        var tfs_msg: [128]byte
+        tfs_msg[0] = 5  // TFS_CMD_UNLINK
+        vfs_msg_write_i32(&tfs_msg[0], 1, parent_ino)
+        var j = 0
+        while j < name_len
+            tfs_msg[5 + j] = name[j]
+            j += 1
+        var reply: [1]byte
+        ipc_send(backend, &tfs_msg[0], 5 + name_len, &reply[0], 1)
+        ipc_reply(sender, &reply[0], 1)
+
+Path-based STAT: [cmd(1), path(N)]
+Reply: [status(1), mode(4), nlinks(4), uid(4), gid(4), size(4), mtime(4), ctime(4)]
+
+    vfs_path_stat(sender: int, buf: *byte, msg_len: int, backend: int)
+        val path: *byte = buf + 1
+        val path_len = msg_len - 1
+        val ino = vfs_resolve_path(backend, path, path_len)
+        if ino < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        var tfs_msg: [5]byte
+        tfs_msg[0] = 6  // TFS_CMD_STAT
+        vfs_msg_write_i32(&tfs_msg[0], 1, ino)
+        var reply: [29]byte
+        ipc_send(backend, &tfs_msg[0], 5, &reply[0], 29)
+        ipc_reply(sender, &reply[0], 29)
+
+Path-based MKDIR: [cmd(1), mode_hi(1), mode_lo(1), path(N)]
+Reply: [status(1), ino(4)]
+
+    vfs_path_mkdir(sender: int, buf: *byte, msg_len: int, backend: int)
+        val perm = (int(buf[1]) << 8) | int(buf[2])
+        val path: *byte = buf + 3
+        val path_len = msg_len - 3
+        val slash = vfs_split_parent(path, path_len)
+        var parent_ino: int
+        if slash <= 0
+            parent_ino = 1  // root
+        else
+            parent_ino = vfs_resolve_path(backend, path, slash)
+        if parent_ino < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        val name: *byte = path + slash + 1
+        val name_len = path_len - slash - 1
+        var tfs_msg: [128]byte
+        tfs_msg[0] = 7  // TFS_CMD_MKDIR
+        vfs_msg_write_i32(&tfs_msg[0], 1, parent_ino)
+        tfs_msg[5] = byte((perm >> 8) & 0xFF)
+        tfs_msg[6] = byte(perm & 0xFF)
+        var j = 0
+        while j < name_len
+            tfs_msg[7 + j] = name[j]
+            j += 1
+        var reply: [5]byte
+        ipc_send(backend, &tfs_msg[0], 7 + name_len, &reply[0], 5)
+        ipc_reply(sender, &reply[0], 5)
+
+Path-based RMDIR: [cmd(1), path(N)]
+Reply: [status(1)]
+
+    vfs_path_rmdir(sender: int, buf: *byte, msg_len: int, backend: int)
+        val path: *byte = buf + 1
+        val path_len = msg_len - 1
+        val slash = vfs_split_parent(path, path_len)
+        var parent_ino: int
+        if slash <= 0
+            parent_ino = 1  // root
+        else
+            parent_ino = vfs_resolve_path(backend, path, slash)
+        if parent_ino < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        val name: *byte = path + slash + 1
+        val name_len = path_len - slash - 1
+        var tfs_msg: [128]byte
+        tfs_msg[0] = 8  // TFS_CMD_RMDIR
+        vfs_msg_write_i32(&tfs_msg[0], 1, parent_ino)
+        var j = 0
+        while j < name_len
+            tfs_msg[5 + j] = name[j]
+            j += 1
+        var reply: [1]byte
+        ipc_send(backend, &tfs_msg[0], 5 + name_len, &reply[0], 1)
+        ipc_reply(sender, &reply[0], 1)
+
+Path-based READDIR: [cmd(1), index(4), path(N)]
+Reply: [status(1), ino(4), name(14)]
+
+    vfs_path_readdir(sender: int, buf: *byte, msg_len: int, backend: int)
+        val index = vfs_msg_read_i32(buf, 1)
+        val path: *byte = buf + 5
+        val path_len = msg_len - 5
+        val dir_ino = vfs_resolve_path(backend, path, path_len)
+        if dir_ino < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        var tfs_msg: [9]byte
+        tfs_msg[0] = 9  // TFS_CMD_READDIR
+        vfs_msg_write_i32(&tfs_msg[0], 1, dir_ino)
+        vfs_msg_write_i32(&tfs_msg[0], 5, index)
+        var reply: [19]byte
+        ipc_send(backend, &tfs_msg[0], 9, &reply[0], 19)
+        if reply[0] != 0
+            ipc_reply(sender, &reply[0], 1)
+        else
+            ipc_reply(sender, &reply[0], 19)
+
+Path-based CHMOD: [cmd(1), mode_hi(1), mode_lo(1), path(N)]
+Reply: [status(1)]
+
+    vfs_path_chmod(sender: int, buf: *byte, msg_len: int, backend: int)
+        val perm = (int(buf[1]) << 8) | int(buf[2])
+        val path: *byte = buf + 3
+        val path_len = msg_len - 3
+        val ino = vfs_resolve_path(backend, path, path_len)
+        if ino < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        var tfs_msg: [7]byte
+        tfs_msg[0] = 11  // TFS_CMD_CHMOD
+        vfs_msg_write_i32(&tfs_msg[0], 1, ino)
+        tfs_msg[5] = byte((perm >> 8) & 0xFF)
+        tfs_msg[6] = byte(perm & 0xFF)
+        var reply: [1]byte
+        ipc_send(backend, &tfs_msg[0], 7, &reply[0], 1)
+        ipc_reply(sender, &reply[0], 1)
+
+Path-based RENAME: [cmd(1), old_path_len(1), old_path(N), new_path(M)]
+Reply: [status(1)]
+
+    vfs_path_rename(sender: int, buf: *byte, msg_len: int, backend: int)
+        val old_path_len = int(buf[1])
+        val old_path: *byte = buf + 2
+        val new_path: *byte = buf + 2 + old_path_len
+        val new_path_len = msg_len - 2 - old_path_len
+        // Resolve old parent
+        val old_slash = vfs_split_parent(old_path, old_path_len)
+        var old_parent: int
+        if old_slash <= 0
+            old_parent = 1
+        else
+            old_parent = vfs_resolve_path(backend, old_path, old_slash)
+        if old_parent < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        // Resolve new parent
+        val new_slash = vfs_split_parent(new_path, new_path_len)
+        var new_parent: int
+        if new_slash <= 0
+            new_parent = 1
+        else
+            new_parent = vfs_resolve_path(backend, new_path, new_slash)
+        if new_parent < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, &err[0], 1)
+            return
+        val old_name: *byte = old_path + old_slash + 1
+        val old_name_len = old_path_len - old_slash - 1
+        val new_name: *byte = new_path + new_slash + 1
+        val new_name_len = new_path_len - new_slash - 1
+        // Forward to TFS: [cmd(1), old_parent(4), new_parent(4), old_name_len(1), old_name(N), new_name(M)]
+        var tfs_msg: [128]byte
+        tfs_msg[0] = 12  // TFS_CMD_RENAME
+        vfs_msg_write_i32(&tfs_msg[0], 1, old_parent)
+        vfs_msg_write_i32(&tfs_msg[0], 5, new_parent)
+        tfs_msg[9] = byte(old_name_len)
+        var j = 0
+        while j < old_name_len
+            tfs_msg[10 + j] = old_name[j]
+            j += 1
+        j = 0
+        while j < new_name_len
+            tfs_msg[10 + old_name_len + j] = new_name[j]
+            j += 1
+        var reply: [1]byte
+        ipc_send(backend, &tfs_msg[0], 10 + old_name_len + new_name_len, &reply[0], 1)
+        ipc_reply(sender, &reply[0], 1)
+
 The VFS server loop. Registers as "fs", waits for TFS to
 come up, mounts root on TFS, then proxies all requests to
 the appropriate backend.
@@ -764,8 +1046,24 @@ the appropriate backend.
                     var exit_reply: [1]byte
                     exit_reply[0] = 0
                     ipc_reply(sender, &exit_reply[0], 1)
+                else if cmd == VFS_CMD_CREATE
+                    vfs_path_create(sender, &buf[0], msg_len, backend)
+                else if cmd == VFS_CMD_UNLINK
+                    vfs_path_unlink(sender, &buf[0], msg_len, backend)
+                else if cmd == VFS_CMD_STAT
+                    vfs_path_stat(sender, &buf[0], msg_len, backend)
+                else if cmd == VFS_CMD_MKDIR
+                    vfs_path_mkdir(sender, &buf[0], msg_len, backend)
+                else if cmd == VFS_CMD_RMDIR
+                    vfs_path_rmdir(sender, &buf[0], msg_len, backend)
+                else if cmd == VFS_CMD_READDIR
+                    vfs_path_readdir(sender, &buf[0], msg_len, backend)
+                else if cmd == VFS_CMD_CHMOD
+                    vfs_path_chmod(sender, &buf[0], msg_len, backend)
+                else if cmd == VFS_CMD_RENAME
+                    vfs_path_rename(sender, &buf[0], msg_len, backend)
                 else
-                    // All other commands: forward and relay
+                    // Unknown command — forward and relay
                     var be_reply: [64]byte
                     ipc_send(backend, &buf[0], msg_len, &be_reply[0], 64)
                     val rlen = vfs_reply_len(cmd, int(be_reply[0]))
