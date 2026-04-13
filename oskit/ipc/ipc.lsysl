@@ -44,7 +44,7 @@ queues of blocked senders.
         actual_len: int
         wait_next: int
 
-    var ipc_ctx: [8]IPCContext  // 8 = MAX_THREADS
+    var ipc_ctx: [32]IPCContext  // 32 = MAX_THREADS
     var port_owner: [8]int  // 8 = MAX_PORTS
     var port_wait_head: [8]int  // 8 = MAX_PORTS
     var port_wait_tail: [8]int  // 8 = MAX_PORTS

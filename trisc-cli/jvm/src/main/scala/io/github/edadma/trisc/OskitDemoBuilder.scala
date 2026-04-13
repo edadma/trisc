@@ -241,6 +241,10 @@ import oskit.apps.init.{init}
       "init"  -> compileServerTrb("oskit/apps/init/init", "oskit.apps.init", initSysl, "init",
         extraSources = Map(
           "oskit/fs/client"      -> fsClientSysl,
+          "oskit/servers/pm"     -> pmSrvSysl,
+          "oskit/config/config"  -> configSysl,
+          "oskit/loader/loader"  -> loaderSysl,
+          "oskit/hal/mem"        -> halMemSysl,
         )),
     )
 
