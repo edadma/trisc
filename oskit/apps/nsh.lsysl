@@ -652,6 +652,10 @@ Commands such as `echo` and `cat` are not built-ins — they load
                 nsh_print("]\n")
             else
                 val exit_code = pm_waitpid(pid)
+                // Ensure prompt starts on a fresh line — if the program's
+                // last output had no trailing newline, CR in refresh_line
+                // would clobber whatever preceded the prompt on this line.
+                nsh_putc('\n')
                 if exit_code != 0
                     nsh_print("exit ")
                     nsh_putint(exit_code)

@@ -257,9 +257,12 @@ sets uid, and runs the shell. Loops on failure or when shell exits.
         sleep(10)
         var user: [64]byte
         var pass: [64]byte
+        var first = true
 
         while 1 == 1
-            login_newline()
+            if !first
+                login_newline()
+            first = false
             login_print("login: ")
             login_flush()
             val ulen = login_readline(user, 64, 1)
