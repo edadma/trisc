@@ -227,6 +227,10 @@ import oskit.apps.init.{init}
           "oskit/drivers/disk/disk" -> diskSysl,
           "oskit/hal/mem"          -> halMemSysl,
         )),
+      "vfs"  -> compileServerTrb("oskit/servers/vfs", "oskit.servers", vfsSrvSysl, "vfs_server",
+        extraSources = Map(
+          "oskit/config/config" -> configSysl,
+        )),
     )
 
 end OskitDemoBuilder

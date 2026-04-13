@@ -7,8 +7,8 @@ via the mount table. Currently only root ("/") is mounted on TFS.
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv, ipc_reply, ipc_send, ipc_last_msg_len}
-    import oskit.services.{sleep, rs_ready, svc_get_thread_ptbr, svc_get_thread_pid, svc_vm_copy_to, svc_vm_copy_from}
-    import oskit.config.{KERNEL_L1_BASE, MAX_PROCESSES}
+    import oskit.services.{sleep, rs_ready, svc_get_thread_ptbr, svc_get_thread_pid, svc_vm_copy_to, svc_vm_copy_from, thread_id}
+    import oskit.config.MAX_PROCESSES
 
 Open file table. Each open file tracks inode, position, mount
 index, and reference count. A slot is free when refcount is 0.
@@ -453,7 +453,8 @@ byte read (or 0 on error).
         // Write character to client buffer
         val ch = tty_reply[1]
         val sender_ptbr = svc_get_thread_ptbr(sender)
-        if sender_ptbr == KERNEL_L1_BASE
+        val my_ptbr = svc_get_thread_ptbr(thread_id())
+        if sender_ptbr == my_ptbr
             var p: *byte = *byte(client_buf_addr)
             p[0] = ch
         else
@@ -483,7 +484,8 @@ with the data from the client buffer.
         if wlen > 125
             wlen = 125
         val sender_ptbr = svc_get_thread_ptbr(sender)
-        if sender_ptbr == KERNEL_L1_BASE
+        val my_ptbr = svc_get_thread_ptbr(thread_id())
+        if sender_ptbr == my_ptbr
             var src: *byte = *byte(client_buf_addr)
             var i = 0
             while i < wlen
@@ -541,8 +543,9 @@ position, forwards to TFS, advances position by bytes_read.
         vfs_msg_write_i32(&tfs_msg[0], 9, len)
 
         val sender_ptbr = svc_get_thread_ptbr(sender)
+        val my_ptbr = svc_get_thread_ptbr(thread_id())
 
-        if sender_ptbr == KERNEL_L1_BASE
+        if sender_ptbr == my_ptbr
             // Same address space — forward directly
             vfs_msg_write_i32(&tfs_msg[0], 13, client_buf_addr)
             var be_reply: [64]byte
@@ -599,8 +602,9 @@ Client request:  [cmd(1), fid(4), len(4), buf_addr(4)]  (13 bytes)
         vfs_msg_write_i32(&tfs_msg[0], 9, len)
 
         val sender_ptbr = svc_get_thread_ptbr(sender)
+        val my_ptbr = svc_get_thread_ptbr(thread_id())
 
-        if sender_ptbr == KERNEL_L1_BASE
+        if sender_ptbr == my_ptbr
             vfs_msg_write_i32(&tfs_msg[0], 13, client_buf_addr)
             var be_reply: [64]byte
             ipc_send(backend, &tfs_msg[0], 17, &be_reply[0], 64)
