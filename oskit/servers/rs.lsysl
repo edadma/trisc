@@ -1,9 +1,11 @@
 OSKit RS — Restart Server
 ==========================
 
-Minix 3-style service manager. Starts system servers in
-dependency order, waits for each to signal ready before
-starting the next. No sleep-based timing — pure handshake.
+Minix 3-style service manager. Runs as its own thread, starts
+system servers in dependency order, waits for each to signal
+ready before starting the next. No sleep-based timing — pure
+handshake. Prints boot messages via putc (direct MMIO, works
+before any servers are up).
 
 Boot order:
 1. Disk server (no dependencies)
@@ -19,18 +21,28 @@ starts the next server.
     module oskit.servers
 
     import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp}
-    import oskit.services.{thread_id, notify_send_to, notify_read_self, rs_set_tid}
+    import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid}
     import oskit.ipc.{ipc_recv_notify, port_create}
 
 Stack slot counter. Slot 0 is init (created by kernel_main).
-Servers start at slot 1.
+RS is slot 1. Servers start at slot 2.
 
-    var rs_next_slot = 1
+    var rs_next_slot = 2
 
     rs_alloc_slot() -> int
         val s = rs_next_slot
         rs_next_slot += 1
         s
+
+Boot message helpers. putc goes straight to MMIO, no TTY needed.
+
+    rs_print(s: string)
+        val p = *byte(s)
+        val n = len(s)
+        var i = 0
+        while i < n
+            putc(p[i])
+            i += 1
 
 Wait for a server to signal ready. RS creates a dummy port
 so it can use ipc_recv_notify to block for notifications.
@@ -45,14 +57,6 @@ so it can use ipc_recv_notify to block for notifications.
         val result = ipc_recv_notify(rs_port, &buf[0], 1)
         // result == -2 means notification received
         notify_read_self()
-
-Init TID, stored before RS starts so RS can notify init
-when all servers are up.
-
-    var rs_init_tid = -1
-
-    rs_set_init_tid(tid: int)
-        rs_init_tid = tid
 
 Server entry points, set by init before starting RS.
 Stored as i64 function pointers to avoid circular imports.
@@ -81,8 +85,10 @@ creating the RS thread.
             i += 1
         rs_server_count += 1
 
-The RS main function. Starts all registered servers in order
-with synchronous handshake, then notifies init.
+The RS main function. Runs as its own thread. Starts all
+registered servers in order with synchronous handshake,
+printing boot messages for each. Terminates when done —
+init joins on this thread to know when boot is complete.
 
     rs_main()
         rs_set_tid(thread_id())
@@ -92,10 +98,9 @@ with synchronous handshake, then notifies init.
             val slot = rs_next_slot
             rs_next_slot += 1
             val name = string(&rs_names[i * 8], rs_name_len[i])
+            rs_print("  ")
+            rs_print(name)
             create_thread(rs_entries[i], kernel_stack_usp(slot), kernel_stack_ssp(slot), name)
             rs_wait_ready()
+            rs_print(" ok\n")
             i += 1
-
-        // All servers ready — return to caller (init).
-        // Future: RS stays alive as a separate thread to monitor
-        // and restart crashed servers.
