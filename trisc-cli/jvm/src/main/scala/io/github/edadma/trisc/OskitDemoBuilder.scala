@@ -216,6 +216,7 @@ import oskit.apps.init.{init}
   def compileBootModules(): Seq[(String, Array[Byte])] =
     Seq(
       "disk" -> compileServerTrb("oskit/drivers/disk/disk", "oskit.drivers.disk", diskSysl, "disk_server"),
+      "tty"  -> compileServerTrb("oskit/drivers/tty/tty", "oskit.drivers.tty", ttySysl, "tty_server"),
     )
 
 end OskitDemoBuilder

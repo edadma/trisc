@@ -13,23 +13,10 @@ Device registers:
 
     module oskit.drivers.kbd
 
-    import oskit.kernel.{register_irq, notify_send}
+    import oskit.kernel.{register_irq, notify_send, kb_enqueue, kb_notify_tid}
 
     val KB_BASE = 0x800004
     val KB_IRQ = 1
-
-Ring buffer for keyboard events. Each event is stored as a packed
-32-bit value: scancode(8) | flags(8) | modifiers(8) | reserved(8).
-
-    val KB_BUF_SIZE = 16
-    var kb_buf: [16]int
-    var kb_head = 0
-    var kb_tail = 0
-    var kb_count = 0
-    var kb_notify_tid = -1
-
-    keyboard_set_notify(tid: int)
-        kb_notify_tid = tid
 
     keyboard_init()
         register_irq(KB_IRQ, keyboard_handler)
@@ -38,7 +25,9 @@ Ring buffer for keyboard events. Each event is stored as a packed
 
 keyboard_handler -- Called by the generic IRQ dispatcher.
 
-Reads all pending events from the device and buffers them.
+Reads all pending events from the device and buffers them
+in the kernel's keyboard ring buffer. Sends a notification
+to the TTY server if events were buffered.
 Does NOT context-switch -- returns to the interrupted thread.
 
     keyboard_handler()
@@ -51,34 +40,9 @@ Does NOT context-switch -- returns to the interrupted thread.
             val sc = *scancode
             val fl = *flags
             val md = *mods
-            if kb_count < KB_BUF_SIZE
-                kb_buf[kb_tail] = (sc << 24) | (fl << 16) | (md << 8)
-                kb_tail = (kb_tail + 1) % KB_BUF_SIZE
-                kb_count += 1
-                got_events = 1
+            kb_enqueue((sc << 24) | (fl << 16) | (md << 8))
+            got_events = 1
         // Notify registered listener if events were buffered
         if got_events == 1
             if kb_notify_tid >= 0
                 notify_send(kb_notify_tid, 1)
-
-    kb_has_key() -> int
-        if kb_count > 0
-            return 1
-        0
-
-    kb_read_key() -> int
-        if kb_count == 0
-            return 0
-        val evt = kb_buf[kb_head]
-        kb_head = (kb_head + 1) % KB_BUF_SIZE
-        kb_count -= 1
-        evt
-
-    kb_scancode(evt: int) -> int
-        (evt >> 24) & 0xFF
-
-    kb_is_press(evt: int) -> int
-        (evt >> 16) & 1
-
-    kb_modifiers(evt: int) -> int
-        (evt >> 8) & 0xFF

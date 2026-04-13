@@ -246,10 +246,7 @@ trap_handler
   beq r1, r3, .sys_thread_name  ; 9 = thread_name(id)
   ldi r3, 10
   beq r1, r3, .sys_sleep_until  ; 10 = sleep_until(tick)
-  ldi r3, 11
-  beq r1, r3, .sys_kbhit        ; 11 = kbhit
-  ldi r3, 12
-  beq r1, r3, .sys_getkey       ; 12 = getkey
+  ; 11 (kbhit) and 12 (getkey) are slow-path — registered in kernel_init
   ldi r3, 13
   beq r1, r3, .sys_ctx_switches ; 13 = ctx_switches(id)
   ldi r3, 14
@@ -303,9 +300,9 @@ trap_handler
 
   ; Table dispatch: handler = syscall_table[r1]
   ; Bounds check
-  ldi r4, 64
+  ldi r4, 96
   slt r4, r1, r4
-  beq r4, r0, .bad_syscall     ; syscall >= 64
+  beq r4, r0, .bad_syscall     ; syscall >= 96
   slt r4, r1, r0
   bne r4, r0, .bad_syscall     ; syscall < 0
 

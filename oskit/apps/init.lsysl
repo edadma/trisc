@@ -19,6 +19,7 @@ read config files until the filesystem is up.
     import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp}
     import oskit.servers.{rs_main, rs_alloc_slot, rs_add_server, tfs_server, pm_server, vfs_server}
     import oskit.drivers.disk.{disk_server}
+    import oskit.drivers.kbd.{keyboard_init}
     import oskit.drivers.tty.{tty_server}
     import oskit.services.{putc, join, thread_id}
     import oskit.fs.{fs_open, fs_read, fs_close}
@@ -142,6 +143,9 @@ Supported commands: `login`, `nsh`.
             i += 1
 
     init()
+        // Init keyboard driver before servers (IRQ handler stays in kernel)
+        keyboard_init()
+
         init_print("SLIX v0.0.1\nStarting servers:\n")
 
         // Register servers for RS to start (dependency order)

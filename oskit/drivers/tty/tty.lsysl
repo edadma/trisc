@@ -8,11 +8,8 @@ to the active console's input buffer.
 
     module oskit.drivers.tty
 
-    import oskit.kernel.{notify_read}
-    import oskit.services.{thread_id, putc}
+    import oskit.services.{thread_id, putc, notify_read_self, rs_ready, kbhit, getkey, svc_kb_set_notify}
     import oskit.ipc.*
-    import oskit.drivers.kbd.*
-    import oskit.services.rs_ready
 
     val TTY_CMD_WRITE   = 1
     val TTY_CMD_READ    = 2
@@ -227,11 +224,11 @@ HID scancodes for special keys:
 - 0x4C = Delete        → ESC[3~
 
     tty_process_keyboard()
-        while kb_has_key() == 1
-            val evt = kb_read_key()
-            val sc = kb_scancode(evt)
-            val press = kb_is_press(evt)
-            val mods = kb_modifiers(evt)
+        while kbhit() == 1
+            val evt = getkey()
+            val sc = (evt >> 24) & 0xFF
+            val press = (evt >> 16) & 1
+            val mods = (evt >> 8) & 0xFF
             // Only process key presses, not releases
             if press == 1
                 // Arrow keys → ANSI escape sequences
@@ -360,14 +357,13 @@ initializes keyboard, then loops handling messages.
             tty_console_init(i)
             i += 1
 
-        // Init keyboard
-        keyboard_init()
+        // keyboard_init() is called by kernel_init — driver stays in kernel
 
         // Create and register port
         tty_port = port_create()
         port_register(tty_port, &tty_name[0])
         tty_tid = thread_id()
-        keyboard_set_notify(tty_tid)
+        svc_kb_set_notify(tty_tid)
 
         // Signal RS that TTY is ready
         rs_ready()
@@ -383,7 +379,7 @@ initializes keyboard, then loops handling messages.
             val result = ipc_recv_notify(tty_port, &buf[0], 128)
             if result == -2
                 // Notification: keyboard input arrived
-                notify_read(tty_tid)
+                notify_read_self()
                 tty_process_keyboard()
                 tty_deliver_pending()
             else if result >= 0
@@ -416,11 +412,24 @@ initializes keyboard, then loops handling messages.
                     reply[0] = -1
                     ipc_reply(sender, &reply[0], 1)
 
+Look up the TTY port using a local name buffer so it works
+whether TTY runs as a kernel thread or an isolated process
+(module-level tty_name may be uninitialized in the caller's
+address space when the server is isolated).
+
+    tty_lookup_port() -> int
+        var n: [4]byte
+        n[0] = 116  // t
+        n[1] = 116  // t
+        n[2] = 121  // y
+        n[3] = 0
+        port_lookup(&n[0])
+
 Userspace wrappers. These build IPC messages and send
 them to the TTY port.
 
     tty_putc(ch: char)
-        val port = port_lookup(&tty_name[0])
+        val port = tty_lookup_port()
         if port >= 0
             var msg: [3]byte
             msg[0] = TTY_CMD_WRITE
@@ -430,7 +439,7 @@ them to the TTY port.
             ipc_send(port, &msg[0], 3, &reply[0], 1)
 
     tty_puts(s: *byte, len: int)
-        val port = port_lookup(&tty_name[0])
+        val port = tty_lookup_port()
         if port >= 0
             var msg: [128]byte
             msg[0] = byte(TTY_CMD_PUTS)
@@ -444,7 +453,7 @@ them to the TTY port.
             ipc_send(port, &msg[0], len + 3, &reply[0], 1)
 
     tty_getc() -> int
-        val port = port_lookup(&tty_name[0])
+        val port = tty_lookup_port()
         if port >= 0
             var msg: [2]byte
             msg[0] = TTY_CMD_READ
@@ -455,7 +464,7 @@ them to the TTY port.
         -1
 
     tty_switch(console: int)
-        val port = port_lookup(&tty_name[0])
+        val port = tty_lookup_port()
         if port >= 0
             var msg: [2]byte
             msg[0] = byte(TTY_CMD_SWITCH)

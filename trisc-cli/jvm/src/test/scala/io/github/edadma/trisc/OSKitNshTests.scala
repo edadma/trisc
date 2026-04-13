@@ -400,9 +400,9 @@ import oskit.apps.init.{init}
     val keys = typeString("root\n", startTick = 800000, spacing = sp) ++
       typeString("toor\n", startTick = 980000, spacing = sp) ++
       typeString("hello\n", startTick = 1250000, spacing = sp) ++
-      typeString("hello\n", startTick = 8000000, spacing = sp) ++
-      typeString("hello\n", startTick = 16000000, spacing = sp)
-    val (cpu, output, _) = runLogin(scheduledKeys = keys, maxCycles = 200000000)
+      typeString("hello\n", startTick = 30000000, spacing = sp) ++
+      typeString("hello\n", startTick = 60000000, spacing = sp)
+    val (cpu, output, _) = runLogin(scheduledKeys = keys, maxCycles = 400000000)
     val helloCount = "Hello, world!".r.findAllIn(output).length
     helloCount shouldBe 3
   }

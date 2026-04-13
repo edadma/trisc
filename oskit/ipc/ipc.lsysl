@@ -154,6 +154,11 @@ syscall handlers. Call from kernel_main before creating threads.
         register_syscall(SYS_PORT_LOOKUP, ipc_port_lookup_handler)
         register_syscall(SYS_IPC_SEND_TIMED, ipc_send_timed_handler)
         register_syscall(SYS_IPC_RECV_NOTIFY, ipc_recv_notify_handler)
+        register_syscall(65, ipc_last_msg_len_handler)
+
+    ipc_last_msg_len_handler(arg: int)
+        syscall_return(ipc_ctx[current_thread].actual_len)
+        ipc_continue_current()
 
 Create a new port owned by the current thread.
 Returns the port ID, or -1 if no ports available.

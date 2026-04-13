@@ -9,7 +9,7 @@ val MAX_WAITERS = 8
 // [kernel]
 val MAX_THREADS     = 8
 val DEFAULT_QUANTUM = 5
-val MAX_SYSCALLS    = 64
+val MAX_SYSCALLS    = 96
 val MAX_IRQS        = 8
 val MAX_TIMERS      = 8
 val TLS_SLOTS       = 4

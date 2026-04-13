@@ -22,6 +22,7 @@ val SYS_PORT_REGISTER  = 36
 val SYS_PORT_LOOKUP    = 37
 val SYS_IPC_SEND_TIMED = 38
 val SYS_IPC_RECV_NOTIFY = 39
+val SYS_IPC_LAST_MSG_LEN = 65
 
 port_create() -> int
     syscall(SYS_PORT_CREATE, 0)
@@ -77,3 +78,6 @@ ipc_send_timeout(port: int, msg: *byte, msg_len: int, reply: *byte, reply_len: i
     args[4] = reply_len
     args[5] = timeout
     syscall(SYS_IPC_SEND_TIMED, i64(&args[0]))
+
+ipc_last_msg_len() -> int
+    syscall(SYS_IPC_LAST_MSG_LEN, 0)

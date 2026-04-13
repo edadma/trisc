@@ -25,6 +25,7 @@ The trap handler in boot.asm dispatches based on r1:
     module oskit.kernel
 
     import oskit.config.{MAX_THREADS, NUM_PRIORITIES, DEFAULT_QUANTUM, THREAD_STACK_SIZE, THREAD_STACK_HALF, PAGE_SIZE, KERNEL_L1_BASE, PAGE_POOL_BASE, PAGE_POOL_END, MAX_SYSCALLS, TLS_SLOTS, MAX_TIMERS, MAX_IRQS, MAX_PROCESSES}
+    // ipc_last_msg_len handler is registered by ipc_init (avoids circular import)
 
 Kernel thread stacks. A static array in BSS, sized at compile
 time. Each thread gets THREAD_STACK_SIZE bytes, split evenly
@@ -225,7 +226,7 @@ the handler returns, the scheduler runs.
 Modules register handlers via register_syscall(). Fast-path
 syscalls (putc, queries) remain hardcoded in boot.asm.
 
-    var syscall_table: [64]i64  // 64 = MAX_SYSCALLS
+    var syscall_table: [96]i64  // 96 = MAX_SYSCALLS
     var syscall_ssp: i64
 
 Set the return value for the current syscall. Writes into
@@ -240,7 +241,9 @@ Write a return value into a specific thread's saved context.
 Used by the scheduler for generic timeout wakeups.
 
     syscall_return_for(tid: int, value: i64)
-        var p: *i64 = *i64(threads[tid].ssp + 48)
+        val vaddr = int(threads[tid].ssp + 48)
+        val paddr = vm_v2p(threads[tid].ptbr, vaddr)
+        var p: *i64 = *i64(paddr)
         *p = value
 
     register_syscall(num: int, handler: i64)
@@ -778,6 +781,19 @@ Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
         syscall_return(0)
         kernel_continue_current()
 
+    sys_kbhit_handler(arg: int)
+        syscall_return(kb_has_key())
+        kernel_continue_current()
+
+    sys_getkey_handler(arg: int)
+        syscall_return(kb_read_key())
+        kernel_continue_current()
+
+    sys_kb_set_notify_handler(arg: int)
+        keyboard_set_notify(int(i64(arg)))
+        syscall_return(0)
+        kernel_continue_current()
+
     kernel_init()
         vm_init()
         register_syscall(0, sleep_current)
@@ -809,6 +825,43 @@ Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
         register_syscall(61, sys_getuid_handler)
         register_syscall(62, sys_setuid_handler)
         register_syscall(63, sys_vm_create_server_pt_handler)
+        register_syscall(11, sys_kbhit_handler)
+        register_syscall(12, sys_getkey_handler)
+        register_syscall(64, sys_kb_set_notify_handler)
+        // syscall 65 (ipc_last_msg_len) is registered by ipc_init
+
+Keyboard buffer. The keyboard ISR (in kbd module) writes events
+here via kernel-exported functions. The TTY server reads events
+via kbhit/getkey syscalls.
+
+    val KB_BUF_SIZE = 16
+    var kb_buf: [16]int
+    var kb_head = 0
+    var kb_tail = 0
+    var kb_count = 0
+    var kb_notify_tid = -1
+
+    keyboard_set_notify(tid: int)
+        kb_notify_tid = tid
+
+    kb_has_key() -> int
+        if kb_count > 0
+            return 1
+        0
+
+    kb_read_key() -> int
+        if kb_count == 0
+            return 0
+        val evt = kb_buf[kb_head]
+        kb_head = (kb_head + 1) % KB_BUF_SIZE
+        kb_count -= 1
+        evt
+
+    kb_enqueue(evt: int)
+        if kb_count < KB_BUF_SIZE
+            kb_buf[kb_tail] = evt
+            kb_tail = (kb_tail + 1) % KB_BUF_SIZE
+            kb_count += 1
 
 Thread-local storage. A flat 2D array indexed by [thread_id][slot].
 Each thread gets TLS_SLOTS slots of int-sized values. Access is
