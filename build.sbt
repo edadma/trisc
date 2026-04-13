@@ -195,7 +195,7 @@ lazy val triscCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
     libraryDependencies ++= Seq(
       "com.github.scopt" %%% "scopt" % "4.1.0",
       "com.lihaoyi" %%% "pprint" % "0.9.0",
-      "com.indoorvivants" %%% "toml" % "0.3.0",
+      "io.github.edadma" %%% "toml" % "0.0.4",
     ),
   )
   .dependsOn(cpu, asm, svm, sysl)

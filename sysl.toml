@@ -29,15 +29,20 @@ max_syscalls    = 96
 
 [memory]
 page_size         = 4096
-thread_stack_size = 16384      # 0x4000, split half user / half supervisor
-thread_stack_half = 8192       # 0x2000
-kernel_l1_base    = 8380416    # 0x7FE000
-page_pool_base    = 6684672    # 0x660000
-page_pool_end     = 8376320    # 0x7FD000
-boot_info_addr    = 6291456    # 0x600000
+thread_stack_size = 0x4000   # split half user / half supervisor
+thread_stack_half = 0x2000
+kernel_l1_base    = 0x7FE000
+page_pool_base    = 0x660000
+page_pool_end     = 0x7FD000
+boot_info_addr    = 0x600000
 
 [ipc]
 max_ports = 8
 
 [pm]
 max_waiters = 8
+
+[process_states]
+proc_free    = 0
+proc_running = 1
+proc_zombie  = 2

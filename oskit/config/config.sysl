@@ -16,6 +16,11 @@ val TLS_SLOTS       = 4
 val NUM_PRIORITIES  = 4
 val MAX_PROCESSES   = 16
 
+// [process_states]
+val PROC_FREE    = 0
+val PROC_RUNNING = 1
+val PROC_ZOMBIE  = 2
+
 // [memory]
 val THREAD_STACK_HALF = 8192
 val PAGE_POOL_BASE    = 0x660000
@@ -27,9 +32,4 @@ val PAGE_POOL_END     = 0x7FD000
 
 // [ipc]
 val MAX_PORTS = 8
-
-// [process_states]
-val PROC_FREE    = 0
-val PROC_RUNNING = 1
-val PROC_ZOMBIE  = 2
 

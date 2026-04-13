@@ -1,6 +1,7 @@
 package io.github.edadma.trisc
 
-import toml.Value
+import io.github.edadma.toml.{TomlParser, TomlValue}
+import TomlValue.*
 
 /** SLIX build configuration.
   *
@@ -28,19 +29,21 @@ object SyslBuildConfig:
     * file path and content.
     */
   def generate(tomlSource: String): Generated =
-    val ast = toml.Toml.parse(tomlSource) match
-      case Right(tbl: Value.Tbl) => tbl
-      case Left((addr, msg))     => throw Error(s"sysl.toml: parse error at $addr: $msg")
+    val doc = TomlParser.parse(tomlSource) match
+      case Right(d) => d
+      case Left(msg) => throw Error(s"sysl.toml: parse error: $msg")
+
+    val root = doc.root
 
     // [config] section — optional; controls module name / output path.
-    val configSection: Option[Map[String, Value]] = ast.values.get("config") match
-      case Some(Value.Tbl(v)) => Some(v)
-      case Some(other)        => throw Error(s"sysl.toml: [config] must be a table, got $other")
-      case None               => None
+    val configSection: Option[Map[String, TomlValue]] = root.get("config") match
+      case Some(Obj(v)) => Some(v)
+      case Some(other)  => throw Error(s"sysl.toml: [config] must be a table, got $other")
+      case None         => None
 
     val module: Option[String] = configSection.flatMap(_.get("module")).map {
-      case Value.Str(s) => s
-      case other        => throw Error(s"sysl.toml: [config].module must be a string, got $other")
+      case Str(s) => s
+      case other  => throw Error(s"sysl.toml: [config].module must be a string, got $other")
     }
 
     // Collect (name, value, formatHint) triples from every other section.
@@ -48,9 +51,9 @@ object SyslBuildConfig:
     // and their integer keys become vals in the generated file.
     val excludedSections = Set("target", "config")
     val groups: List[(String, List[(String, Long, ValueFormat)])] =
-      ast.values.toList.flatMap {
+      root.toList.flatMap {
         case (name, _) if excludedSections.contains(name) => None
-        case (name, Value.Tbl(values))                    => Some(name -> extractInts(name, values))
+        case (name, Obj(values))                          => Some(name -> extractInts(name, values))
         case (name, other) =>
           throw Error(s"sysl.toml: [$name] must be a table, got $other")
       }
@@ -92,9 +95,9 @@ object SyslBuildConfig:
   /** Extract integer keys from a TOML table, converting the key to
     * UPPER_SNAKE_CASE. Non-integer values are rejected.
     */
-  private def extractInts(section: String, values: Map[String, Value]): List[(String, Long, ValueFormat)] =
+  private def extractInts(section: String, values: Map[String, TomlValue]): List[(String, Long, ValueFormat)] =
     values.toList.map {
-      case (key, Value.Num(n)) =>
+      case (key, Integer(n)) =>
         val name = key.toUpperCase
         // Use hex format for any value above 0xFFFF to preserve readability
         // for address-like constants.
