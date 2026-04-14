@@ -2397,6 +2397,17 @@ class SyslLLVMCodegen:
               emit(s"  $result = inttoptr $fromLt $v to $toLt")
             case _ if (inner.typ.isInstanceOf[SyslType.PtrType] || inner.typ.isInstanceOf[SyslType.RefType]) && targetType.isIntegral =>
               emit(s"  $result = ptrtoint $fromLt $v to $toLt")
+            case (_: SyslType.FuncType, _) if targetType.isIntegral =>
+              // Closure-to-integer: extract function pointer and convert to int.
+              // The closure is a %struct.closure* alloca; load the func_ptr field.
+              val fpGep = newReg()
+              emit(s"  $fpGep = getelementptr %struct.closure, %struct.closure* $v, i32 0, i32 0")
+              val fp = newReg()
+              emit(s"  $fp = load i8*, i8** $fpGep")
+              emit(s"  $result = ptrtoint i8* $fp to $toLt")
+            case _ if isAggregate(inner.typ) =>
+              // Aggregate types: genExpr returns a pointer, so bitcast the pointer
+              emit(s"  $result = bitcast $fromLt* $v to $toLt")
             case _ =>
               emit(s"  $result = bitcast $fromLt $v to $toLt")
           result

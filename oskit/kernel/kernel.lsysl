@@ -586,8 +586,6 @@ Each timer has:
     var timers: [8]SoftTimer  // 8 = MAX_TIMERS
     var irq_handlers: [8]i64  // 8 = MAX_IRQS
 
-    extern thread_exit()
-
     register_irq(irq: int, handler: i64)
         irq_handlers[irq] = handler
 
