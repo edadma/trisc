@@ -1,52 +1,86 @@
 #!/bin/bash
-# Build SLIX x86_64 kernel — multiboot ELF for QEMU
+# Build and optionally run SLIX on x86_64 QEMU.
 #
-# Usage: ./build.sh [test_kernel.sysl]
-#   Default builds with test_kernel.sysl (minimal boot test).
-#   Pass a different .sysl to build the real kernel.
+# Usage:
+#   ./build.sh                  # build app_nsh
+#   ./build.sh run              # build + run QEMU (interactive, Ctrl-A X to quit)
+#   ./build.sh app_hello        # build a different app
+#   ./build.sh app_serial run   # build app_serial + run
 #
-# Produces: kernel.elf (ELF32 multiboot image)
-# Run:      qemu-system-x86_64 -kernel kernel.elf -serial stdio -no-reboot -display none
+# The APP argument selects oskit/arch/x86_64/APP.sysl.
+# Default: app_nsh
 
 set -e
-cd "$(dirname "$0")"
 
-CROSS=x86_64-elf-
-SYSL_SRC="${1:-test_kernel.sysl}"
-REPO_ROOT="../../../"
+ARCH_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$ARCH_DIR/../../.." && pwd)"
+OUT=/tmp/slix-x86_64
+mkdir -p "$OUT"
 
-echo "=== SLIX x86_64 build ==="
-echo "  Sysl source: $SYSL_SRC"
+APP=app_nsh
+RUN=""
 
-# 1. Compile Sysl -> LLVM IR
-echo "[1/5] sysl -> LLVM IR"
-(cd "$REPO_ROOT" && sbt --client "syslCliJVM/run compile --emit llvm oskit/arch/x86_64/$SYSL_SRC -o oskit/arch/x86_64/kernel.ll")
+for arg in "$@"; do
+    case "$arg" in
+        run) RUN=run ;;
+        *) APP="$arg" ;;
+    esac
+done
 
-# 2. Compile LLVM IR -> x86_64 object
-echo "[2/5] LLVM IR -> x86_64 object"
-clang \
-    -target x86_64-unknown-none-elf \
-    -ffreestanding \
-    -nostdlib \
-    -mcmodel=kernel \
-    -mno-red-zone \
-    -fno-pic \
-    -fno-pie \
-    -c -o kernel.o kernel.ll
+# Source files — base kernel + arch
+SYSL_FILES=(
+    oskit/kernel/kernel.lsysl
+    oskit/arch/x86_64/cpu.lsysl
+    oskit/arch/x86_64/vm.lsysl
+    oskit/arch/x86_64/runtime.lsysl
+    oskit/config/config.sysl
+    oskit/hal/mem_cpu.lsysl
+    oskit/ipc/ipc.lsysl
+    oskit/services/services.lsysl
+)
 
-# 3. Assemble boot.s
-echo "[3/5] boot.s -> object"
-${CROSS}as --64 -o boot.o boot.s
+# App-specific extra modules
+case "$APP" in
+    app_nsh)
+        SYSL_FILES+=(
+            oskit/drivers/tty/tty.lsysl
+            oskit/fs/client.lsysl
+            oskit/servers/pm_stubs_x86.sysl
+            oskit/apps/nsh.lsysl
+        )
+        ;;
+    app_serial)
+        SYSL_FILES+=(oskit/drivers/tty/tty.lsysl)
+        ;;
+esac
 
-# 4. Compile runtime.c
-echo "[4/5] runtime.c -> object"
-${CROSS}gcc -m64 -ffreestanding -nostdlib -mcmodel=kernel -mno-red-zone -fno-pic -c -o runtime.o runtime.c
+SYSL_FILES+=("oskit/arch/x86_64/${APP}.sysl")
 
-# 5. Link and produce multiboot ELF
-echo "[5/5] link -> kernel.elf"
-${CROSS}ld -T link.ld -o kernel64.elf boot.o runtime.o kernel.o
-${CROSS}objcopy -O elf32-i386 kernel64.elf kernel.elf
+echo "=== Sysl → LLVM IR ==="
+cd "$REPO_ROOT"
+sbt "syslCliJVM/run compile --emit llvm ${SYSL_FILES[*]} -o $OUT/kernel.ll" 2>&1 | tail -1
 
-echo ""
-echo "Built kernel.elf"
-echo "Run: qemu-system-x86_64 -kernel kernel.elf -serial stdio -no-reboot -display none"
+echo "=== LLVM IR → object ==="
+clang -target x86_64-unknown-none-elf -ffreestanding -nostdlib \
+    -mcmodel=kernel -mno-red-zone -fno-pic -fno-pie -w \
+    -c -o "$OUT/kernel.o" "$OUT/kernel.ll"
+
+echo "=== Assemble boot.s ==="
+x86_64-elf-as --64 -o "$OUT/boot.o" "$ARCH_DIR/boot.s"
+
+echo "=== Compile stubs.c ==="
+x86_64-elf-gcc -ffreestanding -nostdlib -mcmodel=kernel -mno-red-zone \
+    -fno-pic -fno-pie -c -o "$OUT/stubs.o" "$ARCH_DIR/stubs.c"
+
+echo "=== Link ==="
+x86_64-elf-ld -T "$ARCH_DIR/link.ld" \
+    -o "$OUT/kernel64.elf" "$OUT/boot.o" "$OUT/stubs.o" "$OUT/kernel.o" 2>&1 \
+    | grep -v "missing .note.GNU-stack" | grep -v "deprecated" | grep -v "RWX permissions" || true
+x86_64-elf-objcopy -O elf32-i386 "$OUT/kernel64.elf" "$OUT/kernel.elf"
+
+echo "=== Built: $OUT/kernel.elf ($APP) ==="
+
+if [ "$RUN" = "run" ]; then
+    echo "=== QEMU (Ctrl-A X to quit) ==="
+    exec qemu-system-x86_64 -kernel "$OUT/kernel.elf" -serial stdio -no-reboot -display none
+fi
