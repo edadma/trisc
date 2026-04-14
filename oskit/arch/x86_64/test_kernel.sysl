@@ -1,18 +1,12 @@
 // Minimal test kernel for x86_64 boot.
-//
-// Provides kernel_init() and kernel_main() that boot.s expects.
-// Just prints a message via UART and halts (no threads yet).
 
 extern uart_putc(c: char)
 
 uart_puts(s: string) = for c in s do uart_putc(c)
 
-// kernel_init — called by boot.s first
 kernel_init()
     uart_puts("kernel_init: ok\n")
 
-// kernel_main — called by boot.s after kernel_init
-// Returns first thread SSP (0 = no threads, go to idle loop)
 kernel_main() -> i64
-    uart_puts("kernel_main: SLIX is alive on x86_64!\n")
-    i64(0)  // no threads — just idle
+    uart_puts("kernel_main: SLIX alive on x86_64!\n")
+    i64(0)

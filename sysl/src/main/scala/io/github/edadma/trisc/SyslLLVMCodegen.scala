@@ -428,6 +428,14 @@ class SyslLLVMCodegen:
             emitReleaseRefs(returnedSliceAllocas(expr))
             emitRet(retType, finalVal)
             hasReturned = true
+          case TAsmStmt(code) =>
+            // asm as last statement in a function body
+            val escaped = code.replace("\\n", "\n").replace("\"", "\\22")
+            emit(s"""  call void asm sideeffect "$escaped", ""()""")
+            emitDefers()
+            emitReleaseRefs()
+            emitRet(retType)
+            hasReturned = true
           case other =>
             genStmt(other)
             if !hasReturned then
@@ -543,6 +551,11 @@ class SyslLLVMCodegen:
 
       case TExprStmt(expr) =>
         genExpr(expr)
+
+      case TAsmStmt(code) =>
+        // Emit LLVM inline assembly — bare instruction(s), no inputs/outputs
+        val escaped = code.replace("\\n", "\n").replace("\"", "\\22")
+        emit(s"""  call void asm sideeffect "$escaped", ""()""")
 
       case TWhileStmt(cond, body) =>
         val condLabel = newLabel("while_cond")
@@ -2492,6 +2505,14 @@ class SyslLLVMCodegen:
         emit(s"  $lenGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 1")
         emit(s"  store i32 $len, i32* $lenGep")
         alloca
+
+      case TAsmExpr(code, typ) =>
+        // Inline asm expression — returns a value via the asm block
+        val escaped = code.replace("\\n", "\n").replace("\"", "\\22")
+        val retLt = llvmType(typ)
+        val result = newReg()
+        emit(s"""  $result = call $retLt asm sideeffect "$escaped", "=r"()""")
+        result
 
       case _ =>
         emit(s"  ; TODO: ${expr.getClass.getSimpleName}")

@@ -173,6 +173,7 @@ idle_loop:
 
 # ============================================================================
 # arch_cli / arch_sti — called from Sysl kernel code
+# Bare instruction + ret, no frame setup overhead.
 # ============================================================================
 
 .global arch_cli

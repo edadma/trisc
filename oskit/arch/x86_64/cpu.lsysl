@@ -3,8 +3,8 @@ OSKit Arch -- x86_64 CPU Primitives
 Architecture-specific CPU operations for x86_64: interrupt
 enable/disable, and thread stack frame construction.
 
-Extern functions are provided by boot.s / runtime.c since
-the LLVM backend doesn't support inline asm.
+cli/sti are extern (provided by boot.s as bare instruction
++ ret) to avoid Sysl function prologue/epilogue overhead.
 
     module oskit.arch
 
@@ -20,8 +20,8 @@ Build a fake interrupt frame on the supervisor stack so
 that restore_context in boot.s can pop it and iretq into
 the new thread. x86_64 layout (20 fields, bottom to top):
 
-    15 GP regs: R15..R14..R13..R12..R11..R10..R9..R8..RBP..RDI..RSI..RDX..RCX..RBX..RAX
-    iretq frame: RIP, CS, RFLAGS, RSP, SS
+15 GP regs: R15..R14..R13..R12..R11..R10..R9..R8..RBP..RDI..RSI..RDX..RCX..RBX..RAX
+iretq frame: RIP, CS, RFLAGS, RSP, SS
 
 The thread's user stack gets thread_exit as a return address
 so that a thread function returning normally lands in the

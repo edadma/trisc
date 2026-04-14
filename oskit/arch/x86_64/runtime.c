@@ -235,6 +235,17 @@ int64_t syscall_dispatch(int64_t num, int64_t arg1, int64_t arg2, void *ctx) {
 }
 
 /* ============================================================================
+ * Kernel stubs — real kernel provides these; stubbed for test_kernel
+ * ============================================================================ */
+
+int current_thread = -1;
+
+int64_t schedule(int64_t current_ssp) {
+    (void)current_ssp;
+    return 0;
+}
+
+/* ============================================================================
  * libc stubs — needed by LLVM-generated code
  * ============================================================================ */
 
