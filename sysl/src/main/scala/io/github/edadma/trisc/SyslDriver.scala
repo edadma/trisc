@@ -46,7 +46,8 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         case i => name.substring(0, i)
       val expectedModPath = dirPath.replace('/', '.')
       val actualModPath = modPath.replace("/", ".")
-      if actualModPath != expectedModPath && !expectedModPath.startsWith(actualModPath) then
+      val fullFilePath = name.replace('/', '.')
+      if actualModPath != expectedModPath && !expectedModPath.startsWith(actualModPath) && actualModPath != fullFilePath then
         throw DriverError(
           s"$name: module declaration 'module $actualModPath' does not match directory path" +
             (if expectedModPath.isEmpty then " (expected no module declaration for top-level file)"

@@ -485,7 +485,7 @@ class SyslLLVMCodegen:
               case _ =>
 
       case TAssignStmt(target, value) =>
-        if !locals.contains(target) && isAggregate(value.typ) then
+        if !locals.contains(target) && !globalVarTypes.contains(target) && isAggregate(value.typ) then
           // New aggregate variable: genExpr returns an alloca pointer — use it directly
           val ptr = genExpr(value)
           locals(target) = LocalVar(target, ptr, value.typ)
@@ -522,9 +522,14 @@ class SyslLLVMCodegen:
             // Assignment to a module-level global variable
             val gt = globalVarTypes(target)
             val lt = llvmType(gt)
-            val vt = exprType(value)
-            val finalVal = emitSextIfNeeded(v, vt, lt)
-            emit(s"  store $lt $finalVal, $lt* @$target")
+            if isAggregate(gt) then
+              val loaded = newReg()
+              emit(s"  $loaded = load $lt, $lt* $v")
+              emit(s"  store $lt $loaded, $lt* @$target")
+            else
+              val vt = exprType(value)
+              val finalVal = emitSextIfNeeded(v, vt, lt)
+              emit(s"  store $lt $finalVal, $lt* @$target")
           else
             val lt = exprType(value)
             val alloca = deferAlloca(lt)
@@ -676,6 +681,7 @@ class SyslLLVMCodegen:
           case SyslType.SliceType(elem) => elem
           case SyslType.RefType(SyslType.SliceType(elem)) => elem
           case SyslType.RefType(SyslType.ArrayType(elem, _)) => elem
+          case SyslType.PtrType(elem) => elem
           case _ => SyslType.IntType(8) // fallback for string indexing
         // For RefType(SliceType(_)) elements, store as inline %struct.slice (24 bytes)
         val (elt, elemSize) = elemType match
@@ -715,7 +721,7 @@ class SyslLLVMCodegen:
         else
           // Widen or truncate if value width differs from element width
           val vLt = llvmType(value.typ)
-          val storeVal = emitSextIfNeeded(v, vLt, elt)
+          val storeVal = if vLt != elt then emitSextIfNeeded(v, vLt, elt) else v
           emit(s"  store $elt $storeVal, $elt* $typedPtr")
 
       case TDerefAssignStmt(pointer, value) =>
@@ -1230,14 +1236,21 @@ class SyslLLVMCodegen:
         val argVals = args.zipWithIndex.map { (a, i) =>
           val v = genExpr(a)
           val vt = exprType(a)
-          // For aggregate types, genExpr returns a pointer — load the value for pass-by-value
+          val expectedType = if i < declaredParams.length then declaredParams(i) else vt
+          // For aggregate types, genExpr returns a pointer — load for pass-by-value,
+          // but if the parameter expects a pointer, pass the address instead
           if isAggregate(a.typ) then
-            val loaded = newReg()
-            emit(s"  $loaded = load $vt, $vt* $v")
-            (loaded, vt)
+            if expectedType.endsWith("*") then
+              // Parameter expects a pointer — bitcast the alloca address
+              val cast = newReg()
+              emit(s"  $cast = bitcast $vt* $v to $expectedType")
+              (cast, expectedType)
+            else
+              val loaded = newReg()
+              emit(s"  $loaded = load $vt, $vt* $v")
+              (loaded, vt)
           else
             // Widen scalar arguments to match declared parameter type (e.g., i8 → i32 for char)
-            val expectedType = if i < declaredParams.length then declaredParams(i) else vt
             val widened = emitSextIfNeeded(v, vt, expectedType)
             (widened, expectedType)
         }
@@ -1973,10 +1986,48 @@ class SyslLLVMCodegen:
             pat match
               case TValuePattern(expr) =>
                 val patVal = genExpr(expr)
-                val cmp = newReg()
-                val st = exprType(scrutinee)
-                emit(s"  $cmp = icmp eq $st $scrut, $patVal")
-                cmp
+                if scrutinee.typ == SyslType.StringType then
+                  // String comparison: check lengths, then memcmp
+                  val lLenGep = newReg()
+                  emit(s"  $lLenGep = getelementptr %struct.string, %struct.string* $scrut, i32 0, i32 1")
+                  val lLen = newReg()
+                  emit(s"  $lLen = load i32, i32* $lLenGep")
+                  val rLenGep = newReg()
+                  emit(s"  $rLenGep = getelementptr %struct.string, %struct.string* $patVal, i32 0, i32 1")
+                  val rLen = newReg()
+                  emit(s"  $rLen = load i32, i32* $rLenGep")
+                  val lenEq = newReg()
+                  emit(s"  $lenEq = icmp eq i32 $lLen, $rLen")
+                  val lenBlock = currentBlock
+                  val lenMatchLbl = newLabel("match_str_len")
+                  val strDoneLbl = newLabel("match_str_done")
+                  emit(s"  br i1 $lenEq, label %$lenMatchLbl, label %$strDoneLbl")
+                  emitLabel(lenMatchLbl)
+                  val lPtrGep = newReg()
+                  emit(s"  $lPtrGep = getelementptr %struct.string, %struct.string* $scrut, i32 0, i32 0")
+                  val lPtr = newReg()
+                  emit(s"  $lPtr = load i8*, i8** $lPtrGep")
+                  val rPtrGep = newReg()
+                  emit(s"  $rPtrGep = getelementptr %struct.string, %struct.string* $patVal, i32 0, i32 0")
+                  val rPtr = newReg()
+                  emit(s"  $rPtr = load i8*, i8** $rPtrGep")
+                  val len64 = newReg()
+                  emit(s"  $len64 = sext i32 $lLen to i64")
+                  val cmpResult = newReg()
+                  emit(s"  $cmpResult = call i32 @memcmp(i8* $lPtr, i8* $rPtr, i64 $len64)")
+                  val bytesEq = newReg()
+                  emit(s"  $bytesEq = icmp eq i32 $cmpResult, 0")
+                  val matchBlock = currentBlock
+                  emit(s"  br label %$strDoneLbl")
+                  emitLabel(strDoneLbl)
+                  val cmp = newReg()
+                  emit(s"  $cmp = phi i1 [ false, %$lenBlock ], [ $bytesEq, %$matchBlock ]")
+                  cmp
+                else
+                  val cmp = newReg()
+                  val st = exprType(scrutinee)
+                  emit(s"  $cmp = icmp eq $st $scrut, $patVal")
+                  cmp
               case TRangePattern(low, high) =>
                 val lo = genExpr(low)
                 val hi = genExpr(high)
@@ -2933,6 +2984,7 @@ class SyslLLVMCodegen:
 
   /** Convert a TExpr to an LLVM constant initializer for global variables. */
   private def constValue(expr: TExpr, typ: SyslType): String = expr match
+    case TIntLit(0, _) if isAggregate(typ) || typ == SyslType.StringType => "zeroinitializer"
     case TIntLit(v, _) => v.toString
     case TFloatLit(v, _) =>
       val bits = java.lang.Double.doubleToRawLongBits(v)

@@ -1,0 +1,16 @@
+// NSH on x86_64 QEMU — interactive shell via serial console.
+// Runs TTY driver + nsh as kernel threads. No VFS/PM/disk servers —
+// fs/pm calls fail gracefully (port_lookup returns -1).
+
+import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp, first_thread_ssp}
+import oskit.drivers.tty.tty_server
+import oskit.apps.nsh.nsh
+import oskit.arch.x86_64.uart_puts
+import oskit.ipc.ipc_init
+
+kernel_main() -> i64
+    ipc_init()
+    create_thread(i64(tty_server), kernel_stack_usp(0), kernel_stack_ssp(0), "tty")
+    create_thread(i64(nsh), kernel_stack_usp(1), kernel_stack_ssp(1), "nsh")
+    uart_puts("[kernel_main] tty + nsh threads created\n")
+    first_thread_ssp()
