@@ -857,6 +857,12 @@ Unlike create_process, the thread is never enqueued — no race.
         val frame_ssp = i64(&frame_buf[0]) + STACK_FRAME_SIZE
         build_stack_frame(entry_point, usp, frame_ssp)
         vm_copy_to(ptbr_val, int(ssp) - STACK_FRAME_SIZE, &frame_buf[0], STACK_FRAME_SIZE)
+        // build_stack_frame writes thread_exit to usp-8 in the CURRENT
+        // address space. For child processes with separate page tables,
+        // we must also write it into the child's address space so that
+        // returning from main() lands in the exit trampoline.
+        var exit_addr: i64 = i64(&thread_exit)
+        vm_copy_to(ptbr_val, int(usp) - 8, *byte(&exit_addr), 8)
         threads[idx].ssp = ssp - STACK_FRAME_SIZE
         threads[idx].state = STATE_SUSPENDED
         threads[idx].wake_tick = 0
