@@ -8,6 +8,13 @@ cli/sti are extern (provided by boot.s as bare instruction
 
     module oskit.arch
 
+Offset from saved SSP to the return-value register (RAX)
+in the context frame. Used by syscall_return to write the
+result where restore_context will pop it into RAX.
+x86_64 layout: R15(0)..RBX(104)..RAX(112)..RIP(120)..
+
+    val SYSCALL_RETURN_OFFSET = 112
+
 Disable interrupts (x86 cli instruction).
 
     extern arch_cli()

@@ -22,7 +22,7 @@ so the scheduler can reference them).
     module oskit.ipc
 
     import oskit.kernel.*
-    import oskit.arch.{vm_v2p, vm_copy_cross}
+    import oskit.arch.{vm_v2p, vm_copy_cross, SYSCALL_RETURN_OFFSET}
     import oskit.config.{MAX_PORTS, MAX_THREADS, KERNEL_L1_BASE, DEFAULT_QUANTUM}
     import oskit.services.syscall
     import oskit.hal.memcpy
@@ -242,7 +242,7 @@ Deliver a message from sender to server and wake the server.
 Used by send handlers when the server is already waiting.
 
     ipc_write_saved_r1(tid: int, value: i64)
-        val vaddr = int(threads[tid].ssp + 48)
+        val vaddr = int(threads[tid].ssp + SYSCALL_RETURN_OFFSET)
         val paddr = vm_v2p(threads[tid].ptbr, vaddr)
         var p: *i64 = *i64(paddr)
         *p = value

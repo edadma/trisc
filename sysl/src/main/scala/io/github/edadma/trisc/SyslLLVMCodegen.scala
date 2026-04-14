@@ -713,17 +713,9 @@ class SyslLLVMCodegen:
           emit(s"  $loaded = load $elt, $elt* $v")
           emit(s"  store $elt $loaded, $elt* $typedPtr")
         else
-          // Truncate if value is wider than element (e.g., i32 into i8 byte slot)
+          // Widen or truncate if value width differs from element width
           val vLt = llvmType(value.typ)
-          val storeVal = if vLt != elt && value.typ.isIntegral && elemType.isIntegral then
-            val fromWidth = vLt.stripPrefix("i").toInt
-            val toWidth = elt.stripPrefix("i").toInt
-            if fromWidth > toWidth then
-              val tr = newReg()
-              emit(s"  $tr = trunc $vLt $v to $elt")
-              tr
-            else v
-          else v
+          val storeVal = emitSextIfNeeded(v, vLt, elt)
           emit(s"  store $elt $storeVal, $elt* $typedPtr")
 
       case TDerefAssignStmt(pointer, value) =>
@@ -2638,13 +2630,20 @@ class SyslLLVMCodegen:
     if fromType == toType then value
     else if toType == "void" then value // discarded — no cast needed
     else
-      val fromW = fromType.stripPrefix("i").toIntOption.getOrElse(0)
-      val toW = toType.stripPrefix("i").toIntOption.getOrElse(0)
+      val fromIsPtr = fromType.endsWith("*")
+      val toIsPtr = toType.endsWith("*")
       val cast = newReg()
-      if fromW > toW && toW > 0 then
-        emit(s"  $cast = trunc $fromType $value to $toType")
+      if !fromIsPtr && toIsPtr then
+        emit(s"  $cast = inttoptr $fromType $value to $toType")
+      else if fromIsPtr && !toIsPtr then
+        emit(s"  $cast = ptrtoint $fromType $value to $toType")
       else
-        emit(s"  $cast = sext $fromType $value to $toType")
+        val fromW = fromType.stripPrefix("i").toIntOption.getOrElse(0)
+        val toW = toType.stripPrefix("i").toIntOption.getOrElse(0)
+        if fromW > toW && toW > 0 then
+          emit(s"  $cast = trunc $fromType $value to $toType")
+        else
+          emit(s"  $cast = sext $fromType $value to $toType")
       cast
 
   private def llvmType(t: SyslType): String = t match

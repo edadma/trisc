@@ -1,0 +1,21 @@
+// Serial input test — reads characters via TTY and echoes them.
+// Tests the full path: COM1 ISR → kb_enqueue → TTY server → tty_getc.
+
+import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp, first_thread_ssp}
+import oskit.drivers.tty.{tty_server, tty_putc, tty_getc}
+import oskit.arch.x86_64.uart_puts
+import oskit.ipc.ipc_init
+
+echo_thread()
+    uart_puts("Type something (echo via TTY):\n")
+    while 1 == 1
+        val ch = tty_getc()
+        if ch >= 0
+            tty_putc(char(ch))
+
+kernel_main() -> i64
+    ipc_init()
+    create_thread(i64(tty_server), kernel_stack_usp(0), kernel_stack_ssp(0), "tty")
+    create_thread(i64(echo_thread), kernel_stack_usp(1), kernel_stack_ssp(1), "echo")
+    uart_puts("[kernel_main] tty + echo threads created\n")
+    first_thread_ssp()

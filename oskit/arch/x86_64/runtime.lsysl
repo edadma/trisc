@@ -25,6 +25,7 @@ Interrupt handler addresses (provided by boot.s).
     extern exc_gpf: byte
     extern exc_page_fault: byte
     extern exc_generic: byte
+    extern serial_isr_entry: byte
 
 
 UART -- COM1 serial port at 0x3F8.
@@ -32,13 +33,14 @@ UART -- COM1 serial port at 0x3F8.
     val COM1 = 0x3F8
 
     uart_init()
-        outb(COM1 + 1, byte(0x00))
-        outb(COM1 + 3, byte(0x80))
-        outb(COM1 + 0, byte(0x01))
-        outb(COM1 + 1, byte(0x00))
-        outb(COM1 + 3, byte(0x03))
-        outb(COM1 + 2, byte(0x00))
-        outb(COM1 + 4, byte(0x00))
+        outb(COM1 + 1, byte(0x00))    // disable all interrupts
+        outb(COM1 + 3, byte(0x80))    // enable DLAB
+        outb(COM1 + 0, byte(0x01))    // baud divisor lo (115200)
+        outb(COM1 + 1, byte(0x00))    // baud divisor hi
+        outb(COM1 + 3, byte(0x03))    // 8N1, disable DLAB
+        outb(COM1 + 2, byte(0xC7))    // enable FIFO, clear, 14-byte threshold
+        outb(COM1 + 4, byte(0x0B))    // DTR + RTS + OUT2 (OUT2 gates IRQ)
+        outb(COM1 + 1, byte(0x01))    // enable receive data interrupt (IER bit 0)
 
     uart_putc(c: int)
         var ready = inb(COM1 + 5) & 0x20
@@ -74,8 +76,8 @@ Remap IRQs 0-7 to vectors 32-39, IRQs 8-15 to vectors 40-47.
         io_wait()
         outb(0xA1, byte(0x01))
         io_wait()
-        // Mask all except IRQ0 (timer)
-        outb(0x21, byte(0xFE))
+        // Mask all except IRQ0 (timer) and IRQ4 (serial COM1)
+        outb(0x21, byte(0xEE))
         outb(0xA1, byte(0xFF))
 
 
@@ -143,6 +145,8 @@ Write one IDT gate entry. Each entry is 16 bytes:
         idt_set_gate(14, i64(&exc_page_fault),   0x8E)
         // Timer IRQ (vector 32)
         idt_set_gate(32, i64(&timer_isr_entry), 0x8E)
+        // Serial IRQ (vector 36 = IRQ4)
+        idt_set_gate(36, i64(&serial_isr_entry), 0x8E)
         // Syscall (int 0x80, DPL=3)
         idt_set_gate(0x80, i64(&syscall_entry), 0xEE)
         // Load IDT
@@ -161,6 +165,31 @@ Main entry point, called by boot.s before kernel_init.
         idt_init()
         uart_puts("SLIX x86_64: IDT ok\n")
         uart_puts("SLIX x86_64: runtime ready\n")
+
+
+Serial receive handler (called from boot.s serial_isr_entry).
+Reads characters from COM1 and pushes them into the kernel's
+keyboard buffer as raw ASCII events. The TTY server picks them
+up via kbhit/getkey syscalls.
+
+Event format: (ascii << 24) | (1 << 17) | (1 << 16)
+- Bits 31-24: ASCII character
+- Bit 17: raw ASCII flag (TTY skips scancode translation)
+- Bit 16: press flag (1 = key press)
+
+    import oskit.kernel.{kb_enqueue, kb_notify_tid, notify_send}
+
+    serial_handler()
+        var lsr = inb(0x3FD)
+        var got = 0
+        while (lsr & 1) != 0
+            val ch = inb(0x3F8)
+            kb_enqueue((ch << 24) | (1 << 17) | (1 << 16))
+            got = 1
+            lsr = inb(0x3FD)
+        if got == 1
+            if kb_notify_tid >= 0
+                notify_send(kb_notify_tid, 1)
 
 
 Exception handler (called from boot.s stubs).

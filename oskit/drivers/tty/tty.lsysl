@@ -229,8 +229,13 @@ HID scancodes for special keys:
             val sc = (evt >> 24) & 0xFF
             val press = (evt >> 16) & 1
             val mods = (evt >> 8) & 0xFF
+            // Raw ASCII from serial input (bit 17 set) — skip scancode translation
+            val raw = (evt >> 17) & 1
+            if raw == 1
+                if sc != 0
+                    tty_console_push(active_console, byte(sc))
             // Only process key presses, not releases
-            if press == 1
+            else if press == 1
                 // Arrow keys → ANSI escape sequences
                 if sc == 0x4F
                     tty_push_escape(67)       // Right → ESC[C

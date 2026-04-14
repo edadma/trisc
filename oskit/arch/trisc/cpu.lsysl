@@ -5,6 +5,18 @@ enable/disable and thread stack frame construction.
 
     module oskit.arch
 
+Offset from saved SSP to the return-value register (r1)
+in the context frame. Used by syscall_return to write the
+result where restore_thread will pop it into r1.
+TRISC layout: PSR(0), PC(8), r1(16), ... so offset=16.
+
+Wait, let me verify. The TRISC context frame is saved
+in boot.asm as: USP, r6, r5, r4, r3, r2, r1, PC, PSR
+(pushed in that order, so PSR is at top/lowest address).
+SSP points at PSR. r1 is at SSP + 6*8 = 48.
+
+    val SYSCALL_RETURN_OFFSET = 48
+
 Disable interrupts. Must be called before accessing
 shared kernel state (run queues, thread table, etc.).
 

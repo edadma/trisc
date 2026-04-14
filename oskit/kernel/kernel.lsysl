@@ -231,18 +231,19 @@ syscalls (putc, queries) remain hardcoded in boot.asm.
     var syscall_ssp: i64
 
 Set the return value for the current syscall. Writes into
-the saved r1 slot on the SSP so the caller sees it after
-context restore.
+the saved return register slot on the SSP so the caller
+sees it after context restore. The offset is arch-specific:
+TRISC r1 = 48, x86_64 RAX = 112.
 
     syscall_return(value: i64)
-        var p: *i64 = *i64(syscall_ssp + 48)
+        var p: *i64 = *i64(syscall_ssp + SYSCALL_RETURN_OFFSET)
         *p = value
 
 Write a return value into a specific thread's saved context.
 Used by the scheduler for generic timeout wakeups.
 
     syscall_return_for(tid: int, value: i64)
-        val vaddr = int(threads[tid].ssp + 48)
+        val vaddr = int(threads[tid].ssp + SYSCALL_RETURN_OFFSET)
         val paddr = vm_v2p(threads[tid].ptbr, vaddr)
         var p: *i64 = *i64(paddr)
         *p = value
