@@ -430,6 +430,22 @@ syscall_entry:
     jmp restore_context
 .not_putc:
 
+    # --- Fast path: thread_id (syscall 5) ---
+    cmpq $5, %rbx
+    jne .not_thread_id
+    movq current_thread(%rip), %rax
+    movq %rax, 14*8(%rsp)     # write to saved RAX
+    jmp restore_context
+.not_thread_id:
+
+    # --- Fast path: uptime (syscall 6) ---
+    cmpq $6, %rbx
+    jne .not_uptime
+    movq ticks(%rip), %rax
+    movq %rax, 14*8(%rsp)     # write to saved RAX
+    jmp restore_context
+.not_uptime:
+
     # --- Slow path: table dispatch ---
     # Bounds check
     cmpq $96, %rbx             # MAX_SYSCALLS
