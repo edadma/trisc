@@ -9,14 +9,32 @@ typedef unsigned char uint8_t;
 /* uart_putc is provided by Sysl runtime — forward declare */
 extern void oskit_arch_x86_64__uart_putc(int c);
 
-static char heap[1024 * 1024];
-static size_t heap_offset = 0;
+/* sbrk — extend heap for std.alloc's Sysl allocator.
+ * Uses a static BSS array to avoid overlapping with the page
+ * allocator (which starts at _heap_start after BSS). */
+static char sbrk_heap[4 * 1024 * 1024];
+static char *sbrk_cur = sbrk_heap;
+
+void *sbrk(int incr) {
+    if (incr == 0) return sbrk_cur;
+    char *old = sbrk_cur;
+    if (sbrk_cur + incr > sbrk_heap + sizeof(sbrk_heap))
+        return (void *)-1;
+    sbrk_cur += incr;
+    return old;
+}
+
+/* malloc/free — C stubs that forward to Sysl's std.alloc via sbrk.
+ * These are only used by LLVM preamble declarations (string concat etc.).
+ * The real allocator is std.alloc.malloc in Sysl. */
+static char c_heap[1024 * 1024];
+static size_t c_heap_offset = 0;
 
 void *malloc(size_t size) {
-    heap_offset = (heap_offset + 15) & ~(size_t)15;
-    if (heap_offset + size > sizeof(heap)) return (void *)0;
-    void *p = &heap[heap_offset];
-    heap_offset += size;
+    c_heap_offset = (c_heap_offset + 15) & ~(size_t)15;
+    if (c_heap_offset + size > sizeof(c_heap)) return (void *)0;
+    void *p = &c_heap[c_heap_offset];
+    c_heap_offset += size;
     return p;
 }
 
