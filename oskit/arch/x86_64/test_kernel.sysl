@@ -1,8 +1,7 @@
 // Minimal test kernel for x86_64 boot.
+// Uses the Sysl runtime for UART output.
 
-extern uart_putc(c: char)
-
-uart_puts(s: string) = for c in s do uart_putc(c)
+import oskit.arch.x86_64.uart_puts
 
 kernel_init()
     uart_puts("kernel_init: ok\n")

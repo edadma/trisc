@@ -152,7 +152,7 @@ entry64:
     movq %rax, %cr4
 
     # Initialize UART, PIC, PIT, IDT
-    call runtime_init
+    call oskit_arch_x86_64__runtime_init
 
     # Call kernel
     call kernel_init
@@ -184,6 +184,46 @@ arch_cli:
 .global arch_sti
 arch_sti:
     sti
+    retq
+
+# ============================================================================
+# outb / inb — x86 port I/O, System V calling convention
+# ============================================================================
+# outb(port: int, val: byte)  — rdi = port, sil = val
+# inb(port: int) -> int       — rdi = port, returns in eax
+
+.global outb
+outb:
+    movl %edi, %edx
+    movb %sil, %al
+    outb %al, %dx
+    retq
+
+.global inb
+inb:
+    movl %edi, %edx
+    xorl %eax, %eax
+    inb %dx, %al
+    retq
+
+.global io_wait
+io_wait:
+    outb %al, $0x80
+    retq
+
+# ============================================================================
+# load_idt — Load IDT register
+# ============================================================================
+# rdi = idt table base, esi = limit (e.g. 4095)
+# Builds the 10-byte IDTR descriptor on the stack and loads it.
+
+.global load_idt
+load_idt:
+    subq $16, %rsp
+    movw %si, (%rsp)       # limit (16-bit)
+    movq %rdi, 2(%rsp)     # base  (64-bit)
+    lidt (%rsp)
+    addq $16, %rsp
     retq
 
 # ============================================================================
@@ -376,7 +416,7 @@ syscall_entry:
     movq 5*8(%rsp), %rdx      # saved RDX (arg2)
     movq %rsp, %rcx            # arg4 = saved context pointer
 
-    call syscall_dispatch      # in runtime.c
+    call oskit_arch_x86_64__syscall_dispatch      # in runtime.c
 
     # rax: 0 = fast path (just return), 1 = needs reschedule
     testq %rax, %rax
@@ -393,7 +433,7 @@ syscall_entry:
 exc_divide_error:
     cli
     movq $0, %rdi          # exception number
-    call exception_handler
+    call oskit_arch_x86_64__exception_handler
     hlt
 
 .global exc_gpf
@@ -402,7 +442,7 @@ exc_gpf:
     # Error code was pushed by CPU
     popq %rsi              # error code
     movq $13, %rdi         # GPF = exception 13
-    call exception_handler
+    call oskit_arch_x86_64__exception_handler
     hlt
 
 .global exc_page_fault
@@ -411,7 +451,7 @@ exc_page_fault:
     popq %rsi              # error code
     movq %cr2, %rdx        # faulting address
     movq $14, %rdi         # PF = exception 14
-    call exception_handler
+    call oskit_arch_x86_64__exception_handler
     hlt
 
 .global exc_double_fault
@@ -419,14 +459,14 @@ exc_double_fault:
     cli
     popq %rsi              # error code (always 0)
     movq $8, %rdi
-    call exception_handler
+    call oskit_arch_x86_64__exception_handler
     hlt
 
 # Generic exception stub (no error code)
 .global exc_generic
 exc_generic:
     cli
-    call exception_handler
+    call oskit_arch_x86_64__exception_handler
     hlt
 
 # ============================================================================
