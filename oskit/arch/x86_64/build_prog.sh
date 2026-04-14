@@ -34,6 +34,20 @@ build_one() {
         std/alloc/alloc.lsysl
     )
 
+    # Per-program extra dependencies
+    case "$NAME" in
+        login)
+            SYSL_FILES+=(
+                std/crypto/pbkdf2/pbkdf2.lsysl
+                std/crypto/hmac/hmac.lsysl
+                std/crypto/sha256/sha256.lsysl
+                std/encoding/binary/binary.lsysl
+                std/mem/mem.lsysl
+                std/debug/debug.lsysl
+            )
+            ;;
+    esac
+
     # Compile Sysl → LLVM IR
     cd "$REPO_ROOT"
     sbt "syslCliJVM/run compile --emit llvm ${SYSL_FILES[*]} -o $OUT/prog_${NAME}.ll" > /tmp/sbt-prog-${NAME}.txt 2>&1
