@@ -93,6 +93,9 @@ class SyslLLVMCodegen:
           deinitFunctions(structName) = name
         case _ =>
 
+    // Collect all function names that will be defined in this compilation unit
+    val definedFuncNames = program.decls.collect { case TFunDecl(name, _, _, _, _, _, _) => name }.toSet
+
     // Generate functions into a buffer so string constants are collected first
     out.clear()
     for decl <- program.decls do
@@ -101,7 +104,8 @@ class SyslLLVMCodegen:
         case _: TImportDecl => // skip
         case TExternFuncDecl(name, params, retType) =>
           // Skip extern declarations that conflict with preamble C declarations
-          if !preambleNames.contains(name) then
+          // or that are defined later in this compilation unit
+          if !preambleNames.contains(name) && !definedFuncNames.contains(name) then
             val paramStr = params.map(llvmType).mkString(", ")
             emit(s"declare ${llvmType(retType)} @$name($paramStr)")
           funcParamTypes(name) = params.map(llvmType)
@@ -137,21 +141,25 @@ class SyslLLVMCodegen:
     // Now build final output with string constants at the top
     out.clear()
 
-    // Declare external C functions
-    emit("declare i32 @putchar(i32)")
-    emit("declare i32 @printf(i8*, ...)")
-    emit("declare i32 @snprintf(i8*, i64, i8*, ...)")
-    emit("declare i8* @malloc(i64)")
-    emit("declare i64 @strlen(i8*)")
-    emit("declare i8* @memcpy(i8*, i8*, i64)")
-    emit("declare i32 @memcmp(i8*, i8*, i64)")
-    emit("declare i8* @memset(i8*, i32, i64)")
-    emit("declare void @free(i8*)")
+    // Declare external C functions (skip any that are defined by Sysl code)
+    val definePattern = """(?m)^define [^@]*@(\w+)\(""".r
+    val definedNames = definePattern.findAllMatchIn(funcCode).map(_.group(1)).toSet
+    def declareIfNotDefined(decl: String, name: String): Unit =
+      if !definedNames.contains(name) then emit(decl)
+    declareIfNotDefined("declare i32 @putchar(i32)", "putchar")
+    declareIfNotDefined("declare i32 @printf(i8*, ...)", "printf")
+    declareIfNotDefined("declare i32 @snprintf(i8*, i64, i8*, ...)", "snprintf")
+    declareIfNotDefined("declare i8* @malloc(i64)", "malloc")
+    declareIfNotDefined("declare i64 @strlen(i8*)", "strlen")
+    declareIfNotDefined("declare i8* @memcpy(i8*, i8*, i64)", "memcpy")
+    declareIfNotDefined("declare i32 @memcmp(i8*, i8*, i64)", "memcmp")
+    declareIfNotDefined("declare i8* @memset(i8*, i32, i64)", "memset")
+    declareIfNotDefined("declare void @free(i8*)", "free")
     emit("declare void @llvm.memset.p0i8.i64(i8*, i8, i64, i1)")
-    emit("declare i64 @write(i32, i8*, i64)")
-    emit("declare i32 @fflush(i8*)")
-    emit("declare void @abort()")
-    emit("declare void @exit(i32)")
+    declareIfNotDefined("declare i64 @write(i32, i8*, i64)", "write")
+    declareIfNotDefined("declare i32 @fflush(i8*)", "fflush")
+    declareIfNotDefined("declare void @abort()", "abort")
+    declareIfNotDefined("declare void @exit(i32)", "exit")
     emit("")
 
     // Format strings for print/println builtins
@@ -726,7 +734,7 @@ class SyslLLVMCodegen:
 
       case TDerefAssignStmt(pointer, value) =>
         val ptr = genExpr(pointer)
-        val v = genExpr(value)
+        var v = genExpr(value)
         val pointeeType = pointer.typ match
           case SyslType.PtrType(inner) => inner
           case SyslType.RefType(inner) => inner
@@ -739,6 +747,16 @@ class SyslLLVMCodegen:
           emit(s"  $loaded = load $pt, $pt* $v")
           emit(s"  store $pt $loaded, $pt* $typedPtr")
         else
+          // Truncate wider value to narrower pointee type (e.g., i32 → i8 for byte stores)
+          val vt = exprType(value)
+          if vt != pt && pt == "i8" && (vt == "i32" || vt == "i64") then
+            val trunc = newReg()
+            emit(s"  $trunc = trunc $vt $v to $pt")
+            v = trunc
+          else if vt != pt && pt == "i16" && (vt == "i32" || vt == "i64") then
+            val trunc = newReg()
+            emit(s"  $trunc = trunc $vt $v to $pt")
+            v = trunc
           emit(s"  store $pt $v, $pt* $typedPtr")
 
       case TFieldAssignStmt(obj, fieldIndex, value) =>
@@ -1044,18 +1062,33 @@ class SyslLLVMCodegen:
           emit(s"  $result = zext i1 $neq to $t")
         result
 
-      case TBinary(left, op, right, _) if (op == "+" || op == "-") && (left.typ.isInstanceOf[SyslType.PtrType] || right.typ.isInstanceOf[SyslType.PtrType]) =>
+      case TBinary(left, op, right, _) if (op == "+" || op == "-") && (left.typ.isInstanceOf[SyslType.PtrType] || right.typ.isInstanceOf[SyslType.PtrType] || left.typ.isInstanceOf[SyslType.ArrayType] || right.typ.isInstanceOf[SyslType.ArrayType]) =>
         // Pointer arithmetic: ptr + int or int + ptr → getelementptr
+        // Also handles array + int (array-to-pointer decay for arithmetic)
         val (ptrExpr, idxExpr, isSub) = (left.typ, right.typ) match
-          case (_: SyslType.PtrType, _) => (left, right, op == "-")
-          case (_, _: SyslType.PtrType) => (right, left, op == "-")
+          case (_: SyslType.PtrType, _)  => (left, right, op == "-")
+          case (_, _: SyslType.PtrType)  => (right, left, op == "-")
+          case (_: SyslType.ArrayType, _) => (left, right, op == "-")
+          case (_, _: SyslType.ArrayType) => (right, left, op == "-")
           case _ => throw new RuntimeException(s"Pointer arithmetic: unexpected types ${left.typ}, ${right.typ}")
-        val ptrVal = genExpr(ptrExpr)
+        var ptrVal = genExpr(ptrExpr)
         val idxVal = genExpr(idxExpr)
-        val pointeeType = ptrExpr.typ.asInstanceOf[SyslType.PtrType].pointee
-        val elemSize = llvmSizeOf(pointeeType)
-        val idx64 = newReg()
-        emit(s"  $idx64 = sext i32 $idxVal to i64")
+        val (pointeeType, elemSize) = ptrExpr.typ match
+          case SyslType.PtrType(p) => (p, llvmSizeOf(p))
+          case SyslType.ArrayType(elem, _) =>
+            // Array decay: bitcast [N x T]* to i8*
+            val arrLt = llvmType(ptrExpr.typ)
+            val bc = newReg()
+            emit(s"  $bc = bitcast $arrLt* $ptrVal to i8*")
+            ptrVal = bc
+            (elem, llvmSizeOf(elem))
+          case _ => throw new RuntimeException(s"Pointer arithmetic: unexpected type ${ptrExpr.typ}")
+        val idxLt = exprType(idxExpr)
+        val idx64 = if idxLt == "i64" then idxVal
+        else
+          val r = newReg()
+          emit(s"  $r = sext $idxLt $idxVal to i64")
+          r
         val byteOff = newReg()
         if isSub then emit(s"  $byteOff = mul i64 $idx64, -$elemSize")
         else emit(s"  $byteOff = mul i64 $idx64, $elemSize")
@@ -2992,6 +3025,7 @@ class SyslLLVMCodegen:
   /** Convert a TExpr to an LLVM constant initializer for global variables. */
   private def constValue(expr: TExpr, typ: SyslType): String = expr match
     case TIntLit(0, _) if isAggregate(typ) || typ == SyslType.StringType => "zeroinitializer"
+    case TIntLit(0, _) if typ.isInstanceOf[SyslType.PtrType] => "null"
     case TIntLit(v, _) => v.toString
     case TFloatLit(v, _) =>
       val bits = java.lang.Double.doubleToRawLongBits(v)
@@ -3015,6 +3049,7 @@ class SyslLLVMCodegen:
       typ match
         case SyslType.StringType => "{ i8* null, i32 0 }"
         case _ if isAggregate(typ) => "zeroinitializer"
+        case _: SyslType.PtrType => "null"
         case _ => "0"
 
   private def emit(line: String): Unit =

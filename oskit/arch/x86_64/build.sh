@@ -44,8 +44,15 @@ case "$APP" in
     app_nsh)
         SYSL_FILES+=(
             oskit/drivers/tty/tty.lsysl
+            oskit/drivers/disk/disk_x86.lsysl
+            oskit/fs/tfs.lsysl
             oskit/fs/client.lsysl
-            oskit/servers/pm_stubs_x86.sysl
+            oskit/servers/tfs.lsysl
+            oskit/servers/vfs.lsysl
+            oskit/servers/pm.lsysl
+            oskit/servers/rs.lsysl
+            oskit/loader/loader.lsysl
+            std/alloc/alloc.lsysl
             oskit/apps/nsh.lsysl
         )
         ;;
@@ -82,5 +89,11 @@ echo "=== Built: $OUT/kernel.elf ($APP) ==="
 
 if [ "$RUN" = "run" ]; then
     echo "=== QEMU (Ctrl-A X to quit) ==="
-    exec qemu-system-x86_64 -kernel "$OUT/kernel.elf" -serial stdio -no-reboot -display none
+    QEMU_ARGS="-kernel $OUT/kernel.elf -serial stdio -no-reboot -display none"
+    # Load ramdisk as multiboot module if it exists
+    if [ -f "$OUT/ramdisk.img" ]; then
+        QEMU_ARGS="$QEMU_ARGS -initrd $OUT/ramdisk.img"
+        echo "    (with ramdisk module)"
+    fi
+    exec qemu-system-x86_64 $QEMU_ARGS
 fi

@@ -1,16 +1,23 @@
-// NSH on x86_64 QEMU — interactive shell via serial console.
-// Runs TTY driver + nsh as kernel threads. No VFS/PM/disk servers —
-// fs/pm calls fail gracefully (port_lookup returns -1).
+// NSH on x86_64 QEMU — interactive shell with full server stack.
+// RS starts all servers (disk, tfs, tty, pm, vfs), then starts
+// init which runs nsh. External commands go through PM → loader.
 
 import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp, first_thread_ssp}
-import oskit.drivers.tty.tty_server
+import oskit.servers.{rs_main, rs_set_init_fn}
 import oskit.apps.nsh.nsh
+import oskit.services.rs_ready
 import oskit.arch.x86_64.uart_puts
 import oskit.ipc.ipc_init
 
+// Init function for x86_64: signal RS that init is ready, then run nsh.
+// RS creates this as the last kernel thread after all servers are up.
+x86_init()
+    rs_ready()
+    nsh()
+
 kernel_main() -> i64
     ipc_init()
-    create_thread(i64(tty_server), kernel_stack_usp(0), kernel_stack_ssp(0), "tty")
-    create_thread(i64(nsh), kernel_stack_usp(1), kernel_stack_ssp(1), "nsh")
-    uart_puts("[kernel_main] tty + nsh threads created\n")
+    rs_set_init_fn(i64(x86_init))
+    create_thread(i64(rs_main), kernel_stack_usp(0), kernel_stack_ssp(0), "rs")
+    uart_puts("[kernel_main] RS thread created\n")
     first_thread_ssp()

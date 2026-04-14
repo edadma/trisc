@@ -24,21 +24,8 @@ void *sbrk(int incr) {
     return old;
 }
 
-/* malloc/free — C stubs that forward to Sysl's std.alloc via sbrk.
- * These are only used by LLVM preamble declarations (string concat etc.).
- * The real allocator is std.alloc.malloc in Sysl. */
-static char c_heap[1024 * 1024];
-static size_t c_heap_offset = 0;
-
-void *malloc(size_t size) {
-    c_heap_offset = (c_heap_offset + 15) & ~(size_t)15;
-    if (c_heap_offset + size > sizeof(c_heap)) return (void *)0;
-    void *p = &c_heap[c_heap_offset];
-    c_heap_offset += size;
-    return p;
-}
-
-void free(void *p) { (void)p; }
+/* malloc/free — provided by std.alloc in Sysl.
+ * No C stubs needed when std.alloc is compiled in. */
 
 void *memcpy(void *dst, const void *src, size_t n) {
     uint8_t *d = dst; const uint8_t *s = src;

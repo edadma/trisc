@@ -66,6 +66,12 @@ stack_top:
 .align 16
 idt:    .skip 4096
 
+# Multiboot module info (filled by boot code)
+.global mboot_mod_start
+.global mboot_mod_end
+mboot_mod_start: .skip 8    # physical address of first module
+mboot_mod_end:   .skip 8    # end address of first module
+
 # ============================================================================
 # 32-bit entry point
 # ============================================================================
@@ -77,6 +83,9 @@ idt:    .skip 4096
 _start:
     cli
     movl $stack_top, %esp
+
+    # Save multiboot info pointer (EBX) before it gets clobbered
+    movl %ebx, %esi            # ESI = multiboot info pointer (preserved)
 
     # --- Set up identity-map page tables ---
 
@@ -150,6 +159,27 @@ entry64:
     movq %cr4, %rax
     orq  $0x600, %rax         # CR4.OSFXSR + CR4.OSXMMEXCPT
     movq %rax, %cr4
+
+    # --- Parse multiboot module info ---
+    # ESI (preserved from 32-bit) = multiboot info pointer
+    # Multiboot info flags at offset 0: bit 3 = modules present
+    # Offset 20 = mods_count (u32), Offset 24 = mods_addr (u32)
+    # Each module entry: mod_start(u32), mod_end(u32), string(u32), reserved(u32)
+    movl %esi, %eax            # zero-extend ESI to RAX
+    testl %eax, %eax
+    jz .no_modules
+    movl (%rax), %ecx          # flags
+    testl $8, %ecx             # bit 3 = modules present?
+    jz .no_modules
+    movl 20(%rax), %ecx        # mods_count
+    testl %ecx, %ecx
+    jz .no_modules
+    movl 24(%rax), %edx        # mods_addr (pointer to module array)
+    movl (%rdx), %ecx          # mod_start (first module)
+    movl 4(%rdx), %ebx         # mod_end
+    movq %rcx, mboot_mod_start(%rip)
+    movq %rbx, mboot_mod_end(%rip)
+.no_modules:
 
     # Initialize UART, PIC, PIT, IDT
     call oskit_arch_x86_64__runtime_init
@@ -593,6 +623,20 @@ thread_exit:
     movq $0, %rsi
     int $0x80
     hlt                    # should never reach here
+
+# ============================================================================
+# Multiboot module info accessors
+# ============================================================================
+
+.global get_mboot_mod_start
+get_mboot_mod_start:
+    movq mboot_mod_start(%rip), %rax
+    retq
+
+.global get_mboot_mod_end
+get_mboot_mod_end:
+    movq mboot_mod_end(%rip), %rax
+    retq
 
 # ============================================================================
 # GDT
