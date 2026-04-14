@@ -6,9 +6,12 @@
 .section .text
 .code64
 
-# Entry point: call main() then exit
+# Entry point: align stack for ABI, call main() then exit.
+# iretq sets RSP to usp-8 (mod 16 = 8), but call main needs
+# RSP mod 16 = 0 so that at main's entry RSP mod 16 = 8.
 .global _start
 _start:
+    andq $-16, %rsp
     call main
     movq $3, %rdi          # SYS_EXIT
     movq $0, %rsi          # exit code 0

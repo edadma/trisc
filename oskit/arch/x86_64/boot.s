@@ -563,16 +563,16 @@ exc_divide_error:
     cli
     movq $0, %rdi
     xorq %rsi, %rsi
-    xorq %rdx, %rdx
+    movq (%rsp), %rdx      # faulting RIP (no error code for #DE)
     call oskit_arch_x86_64__exception_handler
     jmp exc_idle
 
 .global exc_gpf
 exc_gpf:
     cli
-    popq %rsi
+    popq %rsi              # error code
+    movq (%rsp), %rdx      # faulting RIP (from iretq frame on stack)
     movq $13, %rdi
-    xorq %rdx, %rdx
     call oskit_arch_x86_64__exception_handler
     jmp exc_idle
 
@@ -599,7 +599,7 @@ exc_generic:
     cli
     xorq %rdi, %rdi
     xorq %rsi, %rsi
-    xorq %rdx, %rdx
+    movq (%rsp), %rdx      # faulting RIP (no error code)
     call oskit_arch_x86_64__exception_handler
     jmp exc_idle
 
