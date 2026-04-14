@@ -164,6 +164,11 @@ Main entry point, called by boot.s before kernel_init.
         uart_puts("SLIX x86_64: PIT ok\n")
         idt_init()
         uart_puts("SLIX x86_64: IDT ok\n")
+        // Drain any bytes QEMU buffered in COM1 FIFO before ISR was registered
+        var drain = inb(COM1 + 5) & 1
+        while drain != 0
+            inb(COM1)
+            drain = inb(COM1 + 5) & 1
         uart_puts("SLIX x86_64: runtime ready\n")
 
 
