@@ -47,7 +47,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
       "posix/ctype/ctype" -> posixCtypeSysl,
       "posix/stdlib/alloc" -> posixAllocSysl,
       "posix/unistd/sbrk" -> sbrkSysl,
-      "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "oskit/arch/trisc/vm" -> archVmSysl, "oskit/arch/trisc/cpu" -> archCpuSysl, "oskit/config/config" -> configSysl, "std/debug/debug" -> debugSysl,
+      "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "oskit/arch/vm" -> archVmSysl, "oskit/arch/cpu" -> archCpuSysl, "oskit/config/config" -> configSysl, "std/debug/debug" -> debugSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -112,7 +112,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
       "posix/unistd/sbrk" -> sbrkSysl,
       "oskit/servers/tfs" -> tfsSrvSysl,
       "oskit/servers/vfs" -> vfsSrvSysl,
-      "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "oskit/arch/trisc/vm" -> archVmSysl, "oskit/arch/trisc/cpu" -> archCpuSysl, "oskit/config/config" -> configSysl, "std/debug/debug" -> debugSysl,
+      "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "oskit/arch/vm" -> archVmSysl, "oskit/arch/cpu" -> archCpuSysl, "oskit/config/config" -> configSysl, "std/debug/debug" -> debugSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)

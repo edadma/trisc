@@ -25,7 +25,7 @@ The trap handler in boot.asm dispatches based on r1:
     module oskit.kernel
 
     import oskit.config.{MAX_THREADS, NUM_PRIORITIES, DEFAULT_QUANTUM, THREAD_STACK_SIZE, THREAD_STACK_HALF, PAGE_SIZE, KERNEL_L1_BASE, MAX_SYSCALLS, TLS_SLOTS, MAX_TIMERS, MAX_IRQS, MAX_PROCESSES}
-    import oskit.arch.trisc.*
+    import oskit.arch.*
     // ipc_last_msg_len handler is registered by ipc_init (avoids circular import)
 
 Kernel thread stacks. A static array in BSS, sized at compile
@@ -630,32 +630,6 @@ These maintain the ready_mask invariant.
             queue_tail[i] = QUEUE_EMPTY
             i += 1
         ready_mask = 0
-
-build_stack_frame -- Build the initial context frame for a new thread.
-The frame must match the layout that boot.asm expects:
-PSR, PC, r1-r6, USP (9 x 8 bytes, top to bottom)
-
-    build_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64
-        var sp = ssp
-        sp -= 8
-        *(*i64(sp)) = 2                 // PSR: Mode=1 (supervisor), Ind=0 (interrupts on)
-        sp -= 8
-        *(*i64(sp)) = entry_point       // PC
-        sp -= 8
-        *(*i64(sp)) = 0                 // r1
-        sp -= 8
-        *(*i64(sp)) = 0                 // r2
-        sp -= 8
-        *(*i64(sp)) = 0                 // r3
-        sp -= 8
-        *(*i64(sp)) = 0                 // r4
-        sp -= 8
-        *(*i64(sp)) = 0                 // r5
-        sp -= 8
-        *(*i64(sp)) = thread_exit       // r6 = return address (exit trampoline)
-        sp -= 8
-        *(*i64(sp)) = usp               // USP
-        sp
 
     create_thread(entry_point: i64, usp: i64, ssp: i64, name: string) -> int =
         create_thread_pri(entry_point, usp, ssp, name, 0, KERNEL_L1_BASE)

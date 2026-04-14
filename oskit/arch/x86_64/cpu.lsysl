@@ -1,0 +1,55 @@
+OSKit Arch -- x86_64 CPU Primitives
+
+Architecture-specific CPU operations for x86_64: interrupt
+enable/disable, and thread stack frame construction.
+
+Extern functions are provided by boot.s / runtime.c since
+the LLVM backend doesn't support inline asm.
+
+    module oskit.arch
+
+Disable interrupts (x86 cli instruction).
+
+    extern arch_cli()
+
+Enable interrupts (x86 sti instruction).
+
+    extern arch_sti()
+
+Build a fake interrupt frame on the supervisor stack so
+that restore_context in boot.s can pop it and iretq into
+the new thread. x86_64 layout (20 fields, bottom to top):
+
+    15 GP regs: R15..R14..R13..R12..R11..R10..R9..R8..RBP..RDI..RSI..RDX..RCX..RBX..RAX
+    iretq frame: RIP, CS, RFLAGS, RSP, SS
+
+The thread's user stack gets thread_exit as a return address
+so that a thread function returning normally lands in the
+exit trampoline.
+
+    extern thread_exit: byte
+
+    build_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64
+        // Place thread_exit as return address on user stack
+        val ret_sp = usp - 8
+        *(*i64(ret_sp)) = i64(&thread_exit)
+
+        var sp = ssp
+        // iretq frame (what the CPU would push on interrupt)
+        sp -= 8
+        *(*i64(sp)) = i64(0x10)         // SS  (kernel data segment)
+        sp -= 8
+        *(*i64(sp)) = ret_sp            // RSP (user stack, with return addr)
+        sp -= 8
+        *(*i64(sp)) = i64(0x202)        // RFLAGS (IF=1, reserved bit 1)
+        sp -= 8
+        *(*i64(sp)) = i64(0x08)         // CS  (kernel code segment)
+        sp -= 8
+        *(*i64(sp)) = entry_point       // RIP
+        // 15 GP registers (all zero)
+        var i = 0
+        while i < 15
+            sp -= 8
+            *(*i64(sp)) = i64(0)
+            i += 1
+        sp

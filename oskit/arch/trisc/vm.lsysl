@@ -10,7 +10,7 @@ This module provides the arch-specific VM interface used by
 the kernel. On x86, a parallel module would implement 4-level
 page tables with CR3 ops and invlpg.
 
-    module oskit.arch.trisc
+    module oskit.arch
 
     import oskit.config.{PAGE_SIZE, KERNEL_L1_BASE, PAGE_POOL_BASE, PAGE_POOL_END}
     import oskit.hal.{memcpy, memcpy_phys, memset}

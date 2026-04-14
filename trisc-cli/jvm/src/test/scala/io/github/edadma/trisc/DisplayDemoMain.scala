@@ -21,7 +21,7 @@ object DisplayDemoMain:
       "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl,
       "oskit/kernel/timer" -> timerSysl, "oskit/sync/semaphore" -> semaphoreSysl,
       "oskit/sync/mutex" -> mutexSysl, "oskit/ipc/ipc" -> readLsysl("oskit/ipc/ipc.lsysl"),
-      "std/mem/mem" -> readLsysl("std/mem/mem.lsysl"), "oskit/hal/mem" -> readLsysl("oskit/hal/mem_dma.lsysl"), "oskit/arch/trisc/vm" -> readLsysl("oskit/arch/trisc/vm.lsysl"), "oskit/arch/trisc/cpu" -> readLsysl("oskit/arch/trisc/cpu.lsysl"), "oskit/config/config" -> scala.io.Source.fromFile("oskit/config/config.sysl").mkString, "std/debug/debug" -> readLsysl("std/debug/debug.lsysl"),
+      "std/mem/mem" -> readLsysl("std/mem/mem.lsysl"), "oskit/hal/mem" -> readLsysl("oskit/hal/mem_dma.lsysl"), "oskit/arch/vm" -> readLsysl("oskit/arch/trisc/vm.lsysl"), "oskit/arch/cpu" -> readLsysl("oskit/arch/trisc/cpu.lsysl"), "oskit/config/config" -> scala.io.Source.fromFile("oskit/config/config.sysl").mkString, "std/debug/debug" -> readLsysl("std/debug/debug.lsysl"),
       "oskit/drivers/kbd/keyboard" -> readLsysl("oskit/drivers/kbd/keyboard.lsysl"),
       "oskit/drivers/mouse/mouse" -> readLsysl("oskit/drivers/mouse/mouse.lsysl"),
       "oskit/drivers/display/display" -> readLsysl("oskit/drivers/display/display.lsysl"),

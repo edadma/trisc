@@ -1,10 +1,9 @@
 OSKit Arch — TRISC CPU Primitives
 
 Architecture-specific CPU operations for TRISC: interrupt
-enable/disable. On x86, a parallel module would provide
-the same interface using x86 cli/sti instructions.
+enable/disable and thread stack frame construction.
 
-    module oskit.arch.trisc
+    module oskit.arch
 
 Disable interrupts. Must be called before accessing
 shared kernel state (run queues, thread table, etc.).
@@ -17,3 +16,32 @@ are complete, allowing the timer and device IRQs to fire.
 
     arch_sti()
         asm("sti")
+
+Build a fake context frame on the supervisor stack so
+that restore_thread in boot.asm can pop it and RTE into
+the new thread. TRISC layout (9 fields, top to bottom):
+PSR, PC, r1, r2, r3, r4, r5, r6, USP
+
+    extern thread_exit: byte
+
+    build_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64
+        var sp = ssp
+        sp -= 8
+        *(*i64(sp)) = 2                 // PSR: Mode=1 (supervisor), Ind=0 (interrupts on)
+        sp -= 8
+        *(*i64(sp)) = entry_point       // PC
+        sp -= 8
+        *(*i64(sp)) = 0                 // r1
+        sp -= 8
+        *(*i64(sp)) = 0                 // r2
+        sp -= 8
+        *(*i64(sp)) = 0                 // r3
+        sp -= 8
+        *(*i64(sp)) = 0                 // r4
+        sp -= 8
+        *(*i64(sp)) = 0                 // r5
+        sp -= 8
+        *(*i64(sp)) = i64(&thread_exit) // r6 = return address (exit trampoline)
+        sp -= 8
+        *(*i64(sp)) = usp               // USP
+        sp

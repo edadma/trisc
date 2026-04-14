@@ -19,7 +19,7 @@ class OSKitIPCTests extends OSKitTestHelpers {
     val allSources = Map(
       "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
       "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
-      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "oskit/arch/trisc/vm" -> archVmSysl, "oskit/arch/trisc/cpu" -> archCpuSysl, "oskit/config/config" -> configSysl,
+      "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "oskit/arch/vm" -> archVmSysl, "oskit/arch/cpu" -> archCpuSysl, "oskit/config/config" -> configSysl,
     ) ++ userSources
     val driver = new SyslDriver
     val result = driver.compile(allSources)
