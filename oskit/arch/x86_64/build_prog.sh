@@ -1,12 +1,12 @@
 #!/bin/bash
-# Build a standalone x86_64 SLIX program as a TRB binary.
+# Build a standalone x86_64 SLIX program as an ELF binary.
 #
 # Usage:
-#   ./build_prog.sh echo        # builds oskit/bin/echo.lsysl → /tmp/slix-x86_64/bin/echo.trb
-#   ./build_prog.sh hello       # builds oskit/bin/hello.lsysl → /tmp/slix-x86_64/bin/hello.trb
+#   ./build_prog.sh echo        # builds oskit/bin/echo.lsysl → /tmp/slix-x86_64/bin/echo
+#   ./build_prog.sh hello       # builds oskit/bin/hello.lsysl → /tmp/slix-x86_64/bin/hello
 #   ./build_prog.sh all         # builds all programs in oskit/bin/
 #
-# Output: /tmp/slix-x86_64/bin/<name>.trb
+# Output: /tmp/slix-x86_64/bin/<name> (ELF64)
 
 set -e
 
@@ -57,18 +57,12 @@ build_one() {
     x86_64-elf-gcc -ffreestanding -nostdlib -mcmodel=kernel -mno-red-zone \
         -fno-pic -fno-pie -c -o "$OUT/prog_stubs.o" "$ARCH_DIR/prog_stubs.c"
 
-    # Link
+    # Link → ELF (final output, no objcopy/mktrb needed)
     x86_64-elf-ld -T "$ARCH_DIR/prog.ld" \
-        -o "$OUT/prog_${NAME}.elf" \
+        -o "$BIN_OUT/${NAME}" \
         "$OUT/prog_start.o" "$OUT/prog_stubs.o" "$OUT/prog_${NAME}.o" 2>&1 \
         | grep -v "missing .note.GNU-stack" | grep -v "deprecated" | grep -v "RWX permissions" || true
-    echo "  Link ok"
-
-    # ELF → flat binary
-    x86_64-elf-objcopy -O binary "$OUT/prog_${NAME}.elf" "$OUT/prog_${NAME}.bin"
-
-    # Flat binary → TRB
-    python3 "$ARCH_DIR/mktrb.py" "$OUT/prog_${NAME}.bin" 0xD0000 "$BIN_OUT/${NAME}.trb"
+    echo "  Link ok ($(wc -c < "$BIN_OUT/${NAME}" | tr -d ' ') bytes)"
 }
 
 if [ "$1" = "all" ]; then

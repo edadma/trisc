@@ -419,9 +419,77 @@ load binaries without switching its own PTBR.
             return LOAD_ERR_FORMAT
         entry
 
-Load a TOF file into a different address space. Reads the
-binary via VFS in the caller's address space, then copies
-into the target address space using `svc_vm_copy_to`.
+ELF64 cross-address-space loader. Parses ELF program headers
+and copies PT_LOAD segments into the target address space.
+
+    val ELF_PT_LOAD = 1
+
+    read_u16_le(p: *byte) -> int
+        (int(p[0]) & 0xFF) | ((int(p[1]) & 0xFF) << 8)
+
+    read_u64_le(p: *byte) -> i64
+        i64(p[0] & 0xFF) | (i64(p[1] & 0xFF) << 8) | (i64(p[2] & 0xFF) << 16) | (i64(p[3] & 0xFF) << 24) | (i64(p[4] & 0xFF) << 32) | (i64(p[5] & 0xFF) << 40) | (i64(p[6] & 0xFF) << 48) | (i64(p[7] & 0xFF) << 56)
+
+    load_elf64_to_ptbr(buf: *byte, buflen: int, dst_ptbr: int) -> i64
+        // Minimum ELF64 header is 64 bytes
+        if buflen < 64
+            return LOAD_ERR_FORMAT
+        // Verify ELF magic, class (64-bit), endian (little)
+        if buf[0] != 0x7F
+            return LOAD_ERR_FORMAT
+        if buf[1] != byte('E')
+            return LOAD_ERR_FORMAT
+        if buf[2] != byte('L')
+            return LOAD_ERR_FORMAT
+        if buf[3] != byte('F')
+            return LOAD_ERR_FORMAT
+        if buf[4] != 2   // ELFCLASS64
+            return LOAD_ERR_FORMAT
+        if buf[5] != 1   // ELFDATA2LSB (little-endian)
+            return LOAD_ERR_FORMAT
+
+        val entry = read_u64_le(buf + 24)
+        val phoff = int(read_u64_le(buf + 32))
+        val phentsize = read_u16_le(buf + 54)
+        val phnum = read_u16_le(buf + 56)
+
+        if phoff + phnum * phentsize > buflen
+            return LOAD_ERR_FORMAT
+
+        // Process PT_LOAD segments
+        var i = 0
+        while i < phnum
+            val ph = buf + phoff + i * phentsize
+            val p_type = int(read_u32_le(ph))
+            if p_type == ELF_PT_LOAD
+                val p_offset = int(read_u64_le(ph + 8))
+                val p_vaddr = int(read_u64_le(ph + 16))
+                val p_filesz = int(read_u64_le(ph + 32))
+                val p_memsz = int(read_u64_le(ph + 40))
+                // Copy file data (PROGBITS)
+                if p_filesz > 0
+                    if p_offset + p_filesz > buflen
+                        return LOAD_ERR_FORMAT
+                    svc_vm_copy_to(dst_ptbr, p_vaddr, buf + p_offset, p_filesz)
+                // Zero-fill BSS (memsz > filesz)
+                if p_memsz > p_filesz
+                    var zeros: [4096]byte
+                    var done = p_filesz
+                    while done < p_memsz
+                        var chunk = p_memsz - done
+                        if chunk > 4096
+                            chunk = 4096
+                        svc_vm_copy_to(dst_ptbr, p_vaddr + done, &zeros[0], chunk)
+                        done += chunk
+            i += 1
+
+        if entry <= 0
+            return LOAD_ERR_NO_ENTRY
+        entry
+
+Load a binary file into a different address space. Reads the
+file via VFS, detects format from magic bytes (ELF or TRB),
+and copies segments into the target address space.
 
     val LOAD_CROSS_BUF_SIZE = 81920
 
@@ -448,22 +516,24 @@ into the target address space using `svc_vm_copy_to`.
             free(buf)
             return LOAD_ERR_READ
 
-        // Only TRB v1 supported for cross-address-space loading
         if total < 4
             free(buf)
             return LOAD_ERR_FORMAT
-        if buf[0] != byte('T')
-            free(buf)
-            return LOAD_ERR_FORMAT
-        if buf[1] != byte('R')
-            free(buf)
-            return LOAD_ERR_FORMAT
-        if buf[2] != byte('B')
-            free(buf)
-            return LOAD_ERR_FORMAT
-        if buf[3] != byte(1)
-            free(buf)
-            return LOAD_ERR_FORMAT
-        val result = load_trb1_to_ptbr(buf, total, dst_ptbr)
+
+        var result: i64 = LOAD_ERR_FORMAT
+
+        // Detect format from magic bytes
+        if buf[0] == 0x7F
+            if buf[1] == byte('E')
+                if buf[2] == byte('L')
+                    if buf[3] == byte('F')
+                        result = load_elf64_to_ptbr(buf, total, dst_ptbr)
+        if result == LOAD_ERR_FORMAT
+            if buf[0] == byte('T')
+                if buf[1] == byte('R')
+                    if buf[2] == byte('B')
+                        if buf[3] == byte(1)
+                            result = load_trb1_to_ptbr(buf, total, dst_ptbr)
+
         free(buf)
         result

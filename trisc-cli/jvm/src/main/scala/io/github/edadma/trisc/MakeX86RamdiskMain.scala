@@ -3,23 +3,28 @@ package io.github.edadma.trisc
 import java.nio.file.{Files, Paths, Path}
 
 // Create a TFS ramdisk image for x86_64 QEMU.
-// Includes any .trb binaries found in /tmp/slix-x86_64/bin/ as /bin/<name>.
+// Includes ELF binaries found in /tmp/slix-x86_64/bin/ as /bin/<name>.
+// Binaries are detected by ELF magic (\x7fELF), not file extension.
 // Run: sbt "triscCliJVM/runMain io.github.edadma.trisc.MakeX86RamdiskMain"
 object MakeX86RamdiskMain:
+  private def isELF(path: Path): Boolean =
+    val bytes = Files.readAllBytes(path)
+    bytes.length >= 4 && bytes(0) == 0x7f && bytes(1) == 'E' && bytes(2) == 'L' && bytes(3) == 'F'
+
   def main(args: Array[String]): Unit =
     val outDir = Paths.get("/tmp/slix-x86_64")
     Files.createDirectories(outDir)
     val outPath = outDir.resolve("ramdisk.img")
     val binDir = outDir.resolve("bin")
 
-    // Collect pre-built TRB binaries
+    // Collect pre-built ELF binaries (no extension)
     val files: Map[String, Array[Byte]] =
       if Files.isDirectory(binDir) then
         import scala.jdk.CollectionConverters.*
         Files.list(binDir).iterator().asScala
-          .filter(_.toString.endsWith(".trb"))
+          .filter(p => !p.getFileName.toString.contains(".") && isELF(p))
           .map { p =>
-            val name = p.getFileName.toString.stripSuffix(".trb")
+            val name = p.getFileName.toString
             val path = s"/bin/$name"
             System.err.println(s"  including $path (${Files.size(p)} bytes)")
             path -> Files.readAllBytes(p)
