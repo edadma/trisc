@@ -2448,6 +2448,13 @@ class SyslLLVMCodegen:
               val fp = newReg()
               emit(s"  $fp = load i8*, i8** $fpGep")
               emit(s"  $result = ptrtoint i8* $fp to $toLt")
+            case (SyslType.StringType, _: SyslType.PtrType) =>
+              // String-to-pointer: extract the data pointer field (field 0)
+              val ptrGep = newReg()
+              emit(s"  $ptrGep = getelementptr %struct.string, %struct.string* $v, i32 0, i32 0")
+              val ptr = newReg()
+              emit(s"  $ptr = load i8*, i8** $ptrGep")
+              emit(s"  $result = bitcast i8* $ptr to $toLt")
             case _ if isAggregate(inner.typ) =>
               // Aggregate types: genExpr returns a pointer, so bitcast the pointer
               emit(s"  $result = bitcast $fromLt* $v to $toLt")
