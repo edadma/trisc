@@ -1,20 +1,29 @@
-// Minimal app for x86_64 SLIX boot — one thread prints hello.
+// Two threads printing alternately — tests real kernel scheduler
+// with timer preemption on x86_64.
 
 import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp, first_thread_ssp}
 import oskit.arch.x86_64.{uart_puts, uart_putc}
 
-hello_thread()
-    uart_puts("Hello from SLIX thread on x86_64!\n")
+thread_a()
+    var i = 0
+    while i < 20
+        uart_putc(65)  // 'A'
+        var j = 0
+        while j < 500000
+            j += 1
+        i += 1
+
+thread_b()
+    var i = 0
+    while i < 20
+        uart_putc(66)  // 'B'
+        var j = 0
+        while j < 500000
+            j += 1
+        i += 1
 
 kernel_main() -> i64
-    uart_puts("[kernel_main] creating thread...\n")
-    val tid = create_thread(i64(hello_thread), kernel_stack_usp(0), kernel_stack_ssp(0), "hello")
-    uart_putc(48 + tid)  // print tid as digit
-    uart_putc(10)        // newline
-    val ssp = first_thread_ssp()
-    uart_puts("[kernel_main] ssp=")
-    if ssp == i64(0)
-        uart_puts("0 (no threads!)\n")
-    else
-        uart_puts("ok\n")
-    ssp
+    create_thread(i64(thread_a), kernel_stack_usp(0), kernel_stack_ssp(0), "A")
+    create_thread(i64(thread_b), kernel_stack_usp(1), kernel_stack_ssp(1), "B")
+    uart_puts("[kernel_main] two threads created\n")
+    first_thread_ssp()
