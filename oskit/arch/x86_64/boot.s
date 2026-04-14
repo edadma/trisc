@@ -233,7 +233,8 @@ load_idt:
 
 .global vm_set_ptbr
 vm_set_ptbr:
-    movq %rdi, %cr3
+    # No-op for now — identity-mapped, TRISC KERNEL_L1_BASE is not a valid
+    # x86_64 PML4. Real x86_64 paging will replace this.
     retq
 
 # ============================================================================

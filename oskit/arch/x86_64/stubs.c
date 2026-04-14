@@ -56,6 +56,3 @@ int fflush(void *stream) { (void)stream; return 0; }
 void exit(int status) { (void)status; for (;;) __asm__ volatile ("hlt"); }
 void abort(void) { for (;;) __asm__ volatile ("hlt"); }
 
-/* Kernel stubs for test_kernel (real kernel provides these) */
-int current_thread = -1;
-long schedule(long current_ssp) { (void)current_ssp; return 0; }

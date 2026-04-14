@@ -1,0 +1,20 @@
+// Minimal app for x86_64 SLIX boot — one thread prints hello.
+
+import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp, first_thread_ssp}
+import oskit.arch.x86_64.{uart_puts, uart_putc}
+
+hello_thread()
+    uart_puts("Hello from SLIX thread on x86_64!\n")
+
+kernel_main() -> i64
+    uart_puts("[kernel_main] creating thread...\n")
+    val tid = create_thread(i64(hello_thread), kernel_stack_usp(0), kernel_stack_ssp(0), "hello")
+    uart_putc(48 + tid)  // print tid as digit
+    uart_putc(10)        // newline
+    val ssp = first_thread_ssp()
+    uart_puts("[kernel_main] ssp=")
+    if ssp == i64(0)
+        uart_puts("0 (no threads!)\n")
+    else
+        uart_puts("ok\n")
+    ssp
