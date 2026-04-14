@@ -56,6 +56,20 @@ case "$APP" in
             oskit/apps/nsh.lsysl
         )
         ;;
+    app_test_spawn)
+        SYSL_FILES+=(
+            oskit/drivers/tty/tty.lsysl
+            oskit/drivers/disk/disk_x86.lsysl
+            oskit/fs/tfs.lsysl
+            oskit/fs/client.lsysl
+            oskit/servers/tfs.lsysl
+            oskit/servers/vfs.lsysl
+            oskit/servers/pm.lsysl
+            oskit/servers/rs.lsysl
+            oskit/loader/loader.lsysl
+            std/alloc/alloc.lsysl
+        )
+        ;;
     app_serial)
         SYSL_FILES+=(oskit/drivers/tty/tty.lsysl)
         ;;
