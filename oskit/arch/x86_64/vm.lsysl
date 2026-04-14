@@ -1,23 +1,42 @@
-OSKit Arch -- x86_64 Virtual Memory (stubs)
+OSKit Arch -- x86_64 Virtual Memory (Four-Level Paging)
 
-Stub VM module for initial x86_64 bringup. Provides the same
-interface as the TRISC Sv32 VM module but with minimal
-implementations. Real x86_64 four-level paging (PML4) will
-replace these stubs.
+x86_64 four-level page tables: PML4 → PDPT → PD → PT.
+Each table is 4KB with 512 × 8-byte entries.
+
+PTE format (64-bit):
+  Bit 0: Present (P)
+  Bit 1: Read/Write (R/W)
+  Bit 2: User/Supervisor (U/S)
+  Bit 7: Page Size (PS) — 2MB page (PD level only)
+  Bits 12-51: Physical address (4KB aligned)
+
+Boot.s identity-maps first 32MB using 2MB pages. vm_init splits
+PD[0] into 4KB pages so the program region (0xCC000-0xFFFFF) can
+be remapped per-process.
 
     module oskit.arch
 
     import oskit.config.{PAGE_SIZE, KERNEL_L1_BASE, PAGE_POOL_BASE, PAGE_POOL_END}
     import oskit.hal.{memcpy, memset}
 
-PTE flags (matching TRISC for now — kernel code references these).
+x86_64 PTE flags.
 
-    val PTE_V = 0x001
-    val PTE_R = 0x002
-    val PTE_W = 0x004
-    val PTE_X = 0x008
-    val PTE_U = 0x010
-    val PTE_G = 0x020
+    val PTE_P  = 1       // present
+    val PTE_W  = 2       // writable
+    val PTE_U  = 4       // user accessible
+    val PTE_PS = 0x80    // 2MB page size (PD level)
+
+Mask for extracting physical address from a PTE (bits 12-51).
+
+    val PTE_ADDR_MASK = 0x000FFFFFFFFFF000
+
+Legacy TRISC PTE flag names (used by kernel for nothing, but
+keep exports stable).
+
+    val PTE_V = 1
+    val PTE_R = 2
+    val PTE_X = 0
+    val PTE_G = 0
 
 Page pool state.
 
@@ -25,19 +44,71 @@ Page pool state.
     var page_pool_init = false
     var page_free_list = 0
 
+Hardware page table operations (boot.s).
+
     extern vm_set_ptbr(addr: int)
     extern vm_flush_tlb()
     extern vm_get_ptbr() -> int
 
-vm_init -- No-op for now. x86_64 boots with identity-mapped
-pages set up by boot.s (first 32MB via 2MB pages).
+Kernel PML4 address, recorded at boot.
+
+    var kernel_pml4 = 0
+
+Return the kernel page table base address. Used by the kernel
+instead of the TRISC-specific KERNEL_L1_BASE constant.
+
+    kernel_ptbr() -> int
+        kernel_pml4
+
+Write a 64-bit PTE at a given address.
+
+    vm_write_pte64(addr: int, pte: i64)
+        var p: *i64 = *i64(addr)
+        *p = pte
+
+Read a 64-bit PTE from a given address.
+
+    vm_read_pte64(addr: int) -> i64
+        var p: *i64 = *i64(addr)
+        *p
+
+Legacy 32-bit PTE write (unused on x86_64 but kept for interface).
+
+    vm_write_pte(addr: int, pte: int)
+        vm_write_pte64(addr, i64(pte))
+
+
+vm_init -- Split PD[0] from a 2MB superpage into 512 × 4KB
+page table entries. This gives fine-grained control for the
+program region while keeping PD[1..15] as 2MB superpages.
 
     vm_init()
-        var _dummy = 0
+        kernel_pml4 = vm_get_ptbr()
 
-    extern _heap_start: byte
+        // Walk PML4[0] → PDPT → PD to find the PD address
+        val pdpt_addr = int(vm_read_pte64(kernel_pml4) & PTE_ADDR_MASK)
+        val pd_addr = int(vm_read_pte64(pdpt_addr) & PTE_ADDR_MASK)
+
+        // Allocate a PT for the first 2MB (replaces the 2MB superpage at PD[0])
+        val pt = page_alloc_zero()
+        if pt == 0
+            return
+
+        // Fill PT[0..511] with identity-mapped 4KB entries (present + writable)
+        var i = 0
+        while i < 512
+            val phys = i64(i * PAGE_SIZE)
+            vm_write_pte64(pt + i * 8, phys | PTE_P | PTE_W)
+            i += 1
+
+        // Replace PD[0] with pointer to PT (remove PS bit → 4KB pages)
+        vm_write_pte64(pd_addr, i64(pt) | PTE_P | PTE_W)
+        vm_flush_tlb()
+
 
 Physical page allocator -- same bump + free list as TRISC.
+
+    extern _heap_start: byte
 
     page_alloc() -> int
         if !page_pool_init
@@ -70,35 +141,190 @@ Physical page allocator -- same bump + free list as TRISC.
             memset(*byte(page), 0, PAGE_SIZE)
         page
 
-    vm_write_pte(addr: int, pte: int)
-        var p: *i32 = *i32(addr)
-        *p = i32(pte)
 
-Stub process page table functions -- return KERNEL_L1_BASE
-(identity map) for now. Real x86_64 paging will allocate
-PML4/PDPT/PD/PT structures.
+Create a per-process page table. Allocates PML4 + PDPT + PD + PT
+and fresh physical pages for the program region (0xCC000-0xFFFFF).
+Kernel pages (first 2MB except program region) are identity-mapped.
+PD[1..15] use 2MB superpages copied from the kernel PD.
+Returns PML4 address, or 0 on failure.
 
     vm_create_process_pt() -> int
-        KERNEL_L1_BASE
+        val pml4 = page_alloc_zero()
+        if pml4 == 0
+            return 0
+        val pdpt = page_alloc_zero()
+        if pdpt == 0
+            return 0
+        val pd = page_alloc_zero()
+        if pd == 0
+            return 0
+        val pt = page_alloc_zero()
+        if pt == 0
+            return 0
+
+        // PML4[0] → PDPT
+        vm_write_pte64(pml4, i64(pdpt) | PTE_P | PTE_W | PTE_U)
+
+        // PDPT[0] → PD
+        vm_write_pte64(pdpt, i64(pd) | PTE_P | PTE_W | PTE_U)
+
+        // PD[0] → PT (4KB pages)
+        vm_write_pte64(pd, i64(pt) | PTE_P | PTE_W | PTE_U)
+
+        // PD[1..15]: copy 2MB superpages from kernel PD
+        val k_pdpt = int(vm_read_pte64(kernel_pml4) & PTE_ADDR_MASK)
+        val k_pd = int(vm_read_pte64(k_pdpt) & PTE_ADDR_MASK)
+        var j = 1
+        while j < 16
+            val k_pde = vm_read_pte64(k_pd + j * 8)
+            vm_write_pte64(pd + j * 8, k_pde)
+            j += 1
+
+        // PT[0x00..0xCB]: kernel region, identity-mapped (present + writable)
+        var i = 0
+        while i < 0xCC
+            vm_write_pte64(pt + i * 8, i64(i * PAGE_SIZE) | PTE_P | PTE_W)
+            i += 1
+
+        // PT[0xCC..0xFF]: program region, fresh physical pages (present + writable + user)
+        while i < 0x100
+            val page = page_alloc()
+            if page == 0
+                return 0
+            vm_write_pte64(pt + i * 8, i64(page) | PTE_P | PTE_W | PTE_U)
+            i += 1
+
+        // PT[0x100..0x1FF]: unmapped (already zeroed)
+        pml4
+
+
+Create a server page table with MMIO grant. Like
+vm_create_process_pt but additionally maps the first 32MB I/O
+region and grants user access to one specified I/O page.
+
+Note: x86_64 doesn't have TRISC's fixed 0x800000 I/O region.
+This is a placeholder — real x86_64 I/O uses port I/O (already
+in boot.s) not MMIO. Stubbed for interface compatibility.
 
     vm_create_server_pt(io_page: int) -> int
-        KERNEL_L1_BASE
+        vm_create_process_pt()
+
+
+Free all pages allocated for a process page table.
 
     vm_free_process_pt(l1_addr: int)
-        var _dummy = 0
+        if l1_addr == 0
+            return
+        if l1_addr == kernel_pml4
+            return
 
-Software page table walk -- identity map stub (vaddr = paddr).
+        // Walk PML4[0] → PDPT[0] → PD[0] → PT
+        val pdpt = int(vm_read_pte64(l1_addr) & PTE_ADDR_MASK)
+        if pdpt == 0
+            return
+        val pd = int(vm_read_pte64(pdpt) & PTE_ADDR_MASK)
+        if pd == 0
+            return
+        val pt = int(vm_read_pte64(pd) & PTE_ADDR_MASK)
+        if pt == 0
+            return
+
+        // Free program pages (PT entries 0xCC-0xFF)
+        var i = 0xCC
+        while i < 0x100
+            val pte = vm_read_pte64(pt + i * 8)
+            if (int(pte) & PTE_P) != 0
+                val phys = int(pte & PTE_ADDR_MASK)
+                page_free(phys)
+            i += 1
+
+        // Free the page table structures
+        page_free(pt)
+        page_free(pd)
+        page_free(pdpt)
+        page_free(l1_addr)
+
+
+Software four-level page table walk. Translates a virtual
+address to physical using the given PML4.
 
     vm_v2p(ptbr: int, vaddr: int) -> int
-        vaddr
+        val pml4_idx = (vaddr >> 39) & 0x1FF
+        val pdpt_idx = (vaddr >> 30) & 0x1FF
+        val pd_idx   = (vaddr >> 21) & 0x1FF
+        val pt_idx   = (vaddr >> 12) & 0x1FF
+        val offset   = vaddr & 0xFFF
 
-Cross-address-space copies -- identity map means direct memcpy.
+        // PML4 → PDPT
+        val pml4e = vm_read_pte64(ptbr + pml4_idx * 8)
+        if (int(pml4e) & PTE_P) == 0
+            return 0
+        val pdpt_addr = int(pml4e & PTE_ADDR_MASK)
+
+        // PDPT → PD (1GB pages not used)
+        val pdpte = vm_read_pte64(pdpt_addr + pdpt_idx * 8)
+        if (int(pdpte) & PTE_P) == 0
+            return 0
+        val pd_addr = int(pdpte & PTE_ADDR_MASK)
+
+        // PD → check for 2MB page (PS bit)
+        val pde = vm_read_pte64(pd_addr + pd_idx * 8)
+        if (int(pde) & PTE_P) == 0
+            return 0
+        if (int(pde) & PTE_PS) != 0
+            // 2MB superpage
+            val base = int(pde & PTE_ADDR_MASK)
+            return base | (vaddr & 0x1FFFFF)
+
+        // PT → 4KB page
+        val pt_addr = int(pde & PTE_ADDR_MASK)
+        val pte = vm_read_pte64(pt_addr + pt_idx * 8)
+        if (int(pte) & PTE_P) == 0
+            return 0
+        val page = int(pte & PTE_ADDR_MASK)
+        page | offset
+
+
+Copy data into another address space using physical addressing.
 
     vm_copy_to(dst_ptbr: int, dst_vaddr: int, src: *byte, len: int)
-        memcpy(*byte(dst_vaddr), src, len)
+        var copied = 0
+        while copied < len
+            val pa = vm_v2p(dst_ptbr, dst_vaddr + copied)
+            val page_off = (dst_vaddr + copied) & 0xFFF
+            var chunk = PAGE_SIZE - page_off
+            if chunk > len - copied
+                chunk = len - copied
+            memcpy(*byte(pa), src + copied, chunk)
+            copied += chunk
+
+Copy data from another address space using physical addressing.
 
     vm_copy_from(src_ptbr: int, src_vaddr: int, dst: *byte, len: int)
-        memcpy(dst, *byte(src_vaddr), len)
+        var copied = 0
+        while copied < len
+            val pa = vm_v2p(src_ptbr, src_vaddr + copied)
+            val page_off = (src_vaddr + copied) & 0xFFF
+            var chunk = PAGE_SIZE - page_off
+            if chunk > len - copied
+                chunk = len - copied
+            memcpy(dst + copied, *byte(pa), chunk)
+            copied += chunk
+
+Copy data between two address spaces via physical addresses.
 
     vm_copy_cross(src_ptbr: int, src_vaddr: int, dst_ptbr: int, dst_vaddr: int, len: int)
-        memcpy(*byte(dst_vaddr), *byte(src_vaddr), len)
+        var copied = 0
+        while copied < len
+            val src_pa = vm_v2p(src_ptbr, src_vaddr + copied)
+            val dst_pa = vm_v2p(dst_ptbr, dst_vaddr + copied)
+            val src_off = (src_vaddr + copied) & 0xFFF
+            val dst_off = (dst_vaddr + copied) & 0xFFF
+            var chunk = PAGE_SIZE - src_off
+            val dst_chunk = PAGE_SIZE - dst_off
+            if dst_chunk < chunk
+                chunk = dst_chunk
+            if chunk > len - copied
+                chunk = len - copied
+            memcpy(*byte(dst_pa), *byte(src_pa), chunk)
+            copied += chunk

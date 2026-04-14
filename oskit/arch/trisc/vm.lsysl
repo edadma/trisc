@@ -38,6 +38,11 @@ return address.
 
     extern vm_set_ptbr(addr: int)
 
+Return the kernel page table base address.
+
+    kernel_ptbr() -> int
+        KERNEL_L1_BASE
+
 Flush the entire TLB.
 
     vm_flush_tlb()
