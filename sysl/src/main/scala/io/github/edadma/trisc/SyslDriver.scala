@@ -35,13 +35,18 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
     val modules = extractModules(asts)
 
     // Step 3b: Validate module declarations match file paths
+    // Relaxed: allows a module to declare a shorter path that is a prefix of the
+    // directory path (e.g. oskit/arch/x86_64/cpu declaring "module oskit.arch").
+    // This supports arch modules that declare a platform-neutral module path so
+    // the kernel can import from oskit.arch.* regardless of which platform's
+    // directory is compiled. TODO: revisit — may want a proper module-map flag.
     for (name, modPath) <- modules do
       val dirPath = name.lastIndexOf('/') match
         case -1 => ""
         case i => name.substring(0, i)
       val expectedModPath = dirPath.replace('/', '.')
       val actualModPath = modPath.replace("/", ".")
-      if actualModPath != expectedModPath then
+      if actualModPath != expectedModPath && !expectedModPath.startsWith(actualModPath) then
         throw DriverError(
           s"$name: module declaration 'module $actualModPath' does not match directory path" +
             (if expectedModPath.isEmpty then " (expected no module declaration for top-level file)"

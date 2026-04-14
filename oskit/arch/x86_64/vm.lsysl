@@ -1,0 +1,104 @@
+OSKit Arch -- x86_64 Virtual Memory (stubs)
+
+Stub VM module for initial x86_64 bringup. Provides the same
+interface as the TRISC Sv32 VM module but with minimal
+implementations. Real x86_64 four-level paging (PML4) will
+replace these stubs.
+
+    module oskit.arch
+
+    import oskit.config.{PAGE_SIZE, KERNEL_L1_BASE, PAGE_POOL_BASE, PAGE_POOL_END}
+    import oskit.hal.{memcpy, memset}
+
+PTE flags (matching TRISC for now — kernel code references these).
+
+    val PTE_V = 0x001
+    val PTE_R = 0x002
+    val PTE_W = 0x004
+    val PTE_X = 0x008
+    val PTE_U = 0x010
+    val PTE_G = 0x020
+
+Page pool state.
+
+    var page_pool_next: int = 0
+    var page_pool_init = false
+    var page_free_list = 0
+
+    extern vm_set_ptbr(addr: int)
+    extern vm_flush_tlb()
+    extern vm_get_ptbr() -> int
+
+vm_init -- No-op for now. x86_64 boots with identity-mapped
+pages set up by boot.s (first 32MB via 2MB pages).
+
+    vm_init()
+        var _dummy = 0
+
+    extern _heap_start: byte
+
+Physical page allocator -- same bump + free list as TRISC.
+
+    page_alloc() -> int
+        if !page_pool_init
+            var base = PAGE_POOL_BASE
+            val bss_end = int(i64(&_heap_start))
+            val aligned = (bss_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)
+            if aligned > base
+                base = aligned
+            page_pool_next = base
+            page_pool_init = true
+        if page_free_list != 0
+            val page = page_free_list
+            var next: *i64 = *i64(page)
+            page_free_list = int(*next)
+            return page
+        if page_pool_next >= PAGE_POOL_END
+            return 0
+        val page = page_pool_next
+        page_pool_next += PAGE_SIZE
+        page
+
+    page_free(addr: int)
+        var p: *i64 = *i64(addr)
+        *p = i64(page_free_list)
+        page_free_list = addr
+
+    page_alloc_zero() -> int
+        val page = page_alloc()
+        if page != 0
+            memset(*byte(page), 0, PAGE_SIZE)
+        page
+
+    vm_write_pte(addr: int, pte: int)
+        var p: *i32 = *i32(addr)
+        *p = i32(pte)
+
+Stub process page table functions -- return KERNEL_L1_BASE
+(identity map) for now. Real x86_64 paging will allocate
+PML4/PDPT/PD/PT structures.
+
+    vm_create_process_pt() -> int
+        KERNEL_L1_BASE
+
+    vm_create_server_pt(io_page: int) -> int
+        KERNEL_L1_BASE
+
+    vm_free_process_pt(l1_addr: int)
+        var _dummy = 0
+
+Software page table walk -- identity map stub (vaddr = paddr).
+
+    vm_v2p(ptbr: int, vaddr: int) -> int
+        vaddr
+
+Cross-address-space copies -- identity map means direct memcpy.
+
+    vm_copy_to(dst_ptbr: int, dst_vaddr: int, src: *byte, len: int)
+        memcpy(*byte(dst_vaddr), src, len)
+
+    vm_copy_from(src_ptbr: int, src_vaddr: int, dst: *byte, len: int)
+        memcpy(dst, *byte(src_vaddr), len)
+
+    vm_copy_cross(src_ptbr: int, src_vaddr: int, dst_ptbr: int, dst_vaddr: int, len: int)
+        memcpy(*byte(dst_vaddr), *byte(src_vaddr), len)

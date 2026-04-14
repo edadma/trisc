@@ -22,6 +22,8 @@ class SyslLLVMCodegen:
   // Track pointer variables derived from slice element addresses (&slot[i])
   // Maps pointer variable name → source slice variable name
   private var derivedFromSlice: mutable.HashMap[String, String] = _
+  // Module-level global variable types — needed for compound assignment on globals
+  private val globalVarTypes = new mutable.HashMap[String, SyslType]
 
   /** Resolve a struct type to its canonical (field-populated) version from structTypes.
     * Handles stale placeholder StructType(_, Nil) references that can appear in expression types. */
@@ -118,6 +120,7 @@ class SyslLLVMCodegen:
         case TVarDecl(name, typ, init, _) =>
           val initVal = constValue(init, typ)
           emit(s"@$name = global ${llvmType(typ)} $initVal")
+          globalVarTypes(name) = typ
     emit("")
     // Generate pending closure functions and wrappers
     while pendingClosures.nonEmpty || pendingWrappers.nonEmpty do
@@ -515,6 +518,13 @@ class SyslLLVMCodegen:
               emit(s"  store $lt $finalVal, $lt* ${local.reg}")
               if isRef(local.typ) && !isOwnedNew(value) then
                 emitRefIncr(finalVal, refHeaderOffset(local.typ))
+          else if globalVarTypes.contains(target) then
+            // Assignment to a module-level global variable
+            val gt = globalVarTypes(target)
+            val lt = llvmType(gt)
+            val vt = exprType(value)
+            val finalVal = emitSextIfNeeded(v, vt, lt)
+            emit(s"  store $lt $finalVal, $lt* @$target")
           else
             val lt = exprType(value)
             val alloca = deferAlloca(lt)
@@ -764,15 +774,20 @@ class SyslLLVMCodegen:
           emit(s"  store $fieldType $v, $fieldType* $gep")
 
       case TCompoundAssignStmt(target, op, value) =>
-        val local = locals(target)
-        val lt = llvmType(local.typ)
+        val (varType, varReg) = if locals.contains(target) then
+          val local = locals(target)
+          (local.typ, local.reg)
+        else
+          // Global variable
+          (globalVarTypes(target), s"@$target")
+        val lt = llvmType(varType)
         val cur = newReg()
-        emit(s"  $cur = load $lt, $lt* ${local.reg}")
+        emit(s"  $cur = load $lt, $lt* $varReg")
         val v = genExpr(value)
         val vt = exprType(value)
         val rv = emitSextIfNeeded(v, vt, lt)
-        val isFloat = local.typ == SyslType.DoubleType
-        val isUnsigned = local.typ.isUnsigned
+        val isFloat = varType == SyslType.DoubleType
+        val isUnsigned = varType.isUnsigned
         val result = newReg()
         op match
           case "+" => emit(s"  $result = ${if isFloat then "fadd" else "add"} $lt $cur, $rv")
@@ -785,7 +800,7 @@ class SyslLLVMCodegen:
           case "^" => emit(s"  $result = xor $lt $cur, $rv")
           case "<<" => emit(s"  $result = shl $lt $cur, $rv")
           case ">>" => emit(s"  $result = ${if isUnsigned then "lshr" else "ashr"} $lt $cur, $rv")
-        emit(s"  store $lt $result, $lt* ${local.reg}")
+        emit(s"  store $lt $result, $lt* $varReg")
 
       case TFieldCompoundAssignStmt(obj, fieldIndex, op, value) =>
         val (st, structLt, addr) = obj.typ match
