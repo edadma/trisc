@@ -93,7 +93,7 @@ import oskit.apps.init.{init}
           |    first_thread_ssp()
           |""".stripMargin,
     )
-    val driver  = new SyslDriver
+    val driver  = new SyslDriver(Some(JvmTestFileOps), List("."), tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
     val result  = driver.compile(allSources)
     val codegen = new SyslTriscCodegen
     val tofs    =

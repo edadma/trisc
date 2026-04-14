@@ -114,7 +114,7 @@ trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
   private lazy val configSysl: String = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
 
   def compileSysl(source: String): TOF =
-    val driver = new SyslDriver
+    val driver = new SyslDriver(Some(JvmTestFileOps), List("."), tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
     val result = driver.compile(Map("main" -> source))
     val unit = result.units.head
     val codegen = new SyslTriscCodegen()
@@ -125,7 +125,7 @@ trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
 
   def runWithBoot(sources: Map[String, String], maxCycles: Int = 100000): (CPU, String) =
     val bootTof = assemble(minimalBoot, relocatable = true)
-    val driver = new SyslDriver
+    val driver = new SyslDriver(Some(JvmTestFileOps), List("."), tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
     val result = driver.compile(sources)
     val codegen = new SyslTriscCodegen
     val tofs = for unit <- result.units yield
@@ -159,7 +159,7 @@ trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
       "oskit/sync/rmutex" -> rmutexSysl, "oskit/sync/qset" -> qsetSysl, "oskit/sync/pimutex" -> pimutexSysl,
       "std/mem/mem" -> stdMemSysl, "oskit/hal/mem" -> halMemSysl, "oskit/arch/vm" -> archVmSysl, "oskit/arch/cpu" -> archCpuSysl, "oskit/config/config" -> configSysl,
     ) ++ userSources
-    val driver = new SyslDriver
+    val driver = new SyslDriver(Some(JvmTestFileOps), List("."), tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
     val result = driver.compile(allSources)
     val codegen = new SyslTriscCodegen
     val tofs = for unit <- result.units yield
