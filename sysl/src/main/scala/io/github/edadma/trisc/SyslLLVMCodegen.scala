@@ -257,7 +257,7 @@ class SyslLLVMCodegen:
     hasReturned = false
     deferStack.clear()
 
-    val retType = if fun.name == "main" then "i64" else llvmType(fun.returnType)
+    val retType = llvmType(fun.returnType)
     val params = fun.params.map(p => s"${llvmType(p.typ)} %${p.name}_arg").mkString(", ")
 
     emit(s"define $retType @${fun.name}($params) {")
@@ -549,7 +549,7 @@ class SyslLLVMCodegen:
 
       case TReturnStmt(Some(value)) =>
         val v = genExpr(value)
-        val retType = if currentFunction.name == "main" then "i64" else llvmType(currentFunction.returnType)
+        val retType = llvmType(currentFunction.returnType)
         val vt = exprType(value)
         val finalVal = if isAggregate(value.typ) then
           val loaded = newReg()
