@@ -500,6 +500,12 @@ Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
         register_syscall(3, terminate_current)
         register_syscall(4, join_current)
         register_syscall(10, sleep_until_current)
+        register_syscall(23, sys_notify_send_handler)
+        register_syscall(24, sys_notify_wait_handler)
+        register_syscall(25, sys_notify_read_handler)
+        register_syscall(26, sys_event_wait_handler)
+        register_syscall(27, sys_event_set_handler)
+        register_syscall(28, sys_event_clear_handler)
         register_syscall(29, pimutex_lock_kernel)
         register_syscall(30, pimutex_unlock_kernel)
         register_syscall(40, waitpid_current)
@@ -1162,6 +1168,41 @@ will skip this thread until notify_send wakes it.
             return
         threads[current_thread].state = STATE_NOTIFY_WAIT
         threads[current_thread].consec_quanta = 0
+
+Syscall handlers for the notification system. The services layer
+packs target_id and value into a single i64 argument:
+notify_send: (id << 24) | (value & 0xFFFFFF)
+
+    sys_notify_send_handler(arg: int)
+        val target = (arg >> 24) & 0xFF
+        val value = arg & 0xFFFFFF
+        notify_send(target, value)
+        kernel_continue_current()
+
+    sys_notify_wait_handler(arg: int)
+        notify_wait_current()
+
+    sys_notify_read_handler(arg: int)
+        val v = notify_read(current_thread)
+        syscall_return(v)
+        kernel_continue_current()
+
+    sys_event_wait_handler(arg: int)
+        val wait_all = (arg >> 24) & 0xFF
+        val mask = arg & 0xFFFFFF
+        event_wait_current(mask, wait_all)
+
+    sys_event_set_handler(arg: int)
+        val target = (arg >> 24) & 0xFF
+        val bits = arg & 0xFFFFFF
+        notify_send(target, bits)
+        kernel_continue_current()
+
+    sys_event_clear_handler(arg: int)
+        val target = (arg >> 24) & 0xFF
+        val bits = arg & 0xFFFFFF
+        threads[target].notify_value = threads[target].notify_value & ~bits
+        kernel_continue_current()
 
     notify_read(id: int) -> int
         val v = threads[id].notify_value

@@ -3027,6 +3027,7 @@ class SyslLLVMCodegen:
     case TIntLit(0, _) if isAggregate(typ) || typ == SyslType.StringType => "zeroinitializer"
     case TIntLit(0, _) if typ.isInstanceOf[SyslType.PtrType] => "null"
     case TIntLit(v, _) => v.toString
+    case TUnary("-", TIntLit(v, _), _) => (-v).toString
     case TFloatLit(v, _) =>
       val bits = java.lang.Double.doubleToRawLongBits(v)
       s"0x${bits.toHexString.toUpperCase}"

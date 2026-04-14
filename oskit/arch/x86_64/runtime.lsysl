@@ -200,6 +200,24 @@ Event format: (ascii << 24) | (1 << 17) | (1 << 16)
 Exception handler (called from boot.s stubs).
 
     exception_handler(exc_num: i64, error_code: i64, addr: i64)
-        uart_puts("\n!!! EXCEPTION !!!\n")
+        uart_puts("\n!!! EXCEPTION vec=")
+        val hex = "0123456789ABCDEF"
+        val hp = *byte(hex)
+        var en = int(exc_num)
+        uart_putc(int(hp[(en >> 4) & 0xF]))
+        uart_putc(int(hp[en & 0xF]))
+        uart_puts(" err=")
+        var ec = int(error_code)
+        uart_putc(int(hp[(ec >> 12) & 0xF]))
+        uart_putc(int(hp[(ec >> 8) & 0xF]))
+        uart_putc(int(hp[(ec >> 4) & 0xF]))
+        uart_putc(int(hp[ec & 0xF]))
+        uart_puts(" rip=")
+        var a = int(addr)
+        var s2 = 28
+        while s2 >= 0
+            uart_putc(int(hp[(a >> s2) & 0xF]))
+            s2 -= 4
+        uart_puts(" !!!\n")
 
 

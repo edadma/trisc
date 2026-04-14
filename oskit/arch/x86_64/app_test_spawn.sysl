@@ -4,9 +4,8 @@
 import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp, first_thread_ssp}
 import oskit.servers.{rs_main, rs_set_init_fn, pm_spawn_handles, pm_waitpid}
 import oskit.services.{rs_ready, putc}
-import oskit.fs.{fs_connect, fs_open, fs_read, fs_close, fs_get_port}
+import oskit.fs.{fs_connect, fs_open, fs_read, fs_close}
 import oskit.arch.x86_64.uart_puts
-import oskit.drivers.disk.{get_mboot_mod_start, get_mboot_mod_end, disk_capacity}
 import oskit.ipc.ipc_init
 
 // Simple hex printer for debug
@@ -24,33 +23,7 @@ x86_test_init()
     rs_ready()
     uart_puts("[init] servers ready, spawning /bin/test_putc\n")
 
-    // Debug: show multiboot module info
-    val mod_start = get_mboot_mod_start()
-    val mod_end = get_mboot_mod_end()
-    uart_puts("[init] ramdisk: start=")
-    print_hex(mod_start)
-    uart_puts(" end=")
-    print_hex(mod_end)
-    uart_puts(" size=")
-    print_hex(mod_end - mod_start)
-    putc(byte('\n'))
-
-    // Debug: check disk capacity
-    val cap = disk_capacity()
-    uart_puts("[init] disk capacity=")
-    print_hex(cap)
-    putc(byte('\n'))
-
-    // Debug: check if VFS port is accessible
-    val fs_port = fs_get_port()
-    uart_puts("[init] fs port=")
-    if fs_port >= 0
-        putc(byte('0') + fs_port)
-    else
-        uart_puts("FAIL")
-    putc(byte('\n'))
-
-    // Debug: try opening a file
+    // Open /etc/ttytab to verify TFS works
     val fid = fs_open("/etc/ttytab")
     uart_puts("[init] open /etc/ttytab fid=")
     if fid >= 0
