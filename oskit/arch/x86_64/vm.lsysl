@@ -194,7 +194,14 @@ Returns PML4 address, or 0 on failure.
             vm_write_pte64(pt + i * 8, i64(page) | PTE_P | PTE_W | PTE_U)
             i += 1
 
-        // PT[0x100..0x1FF]: unmapped (already zeroed)
+        // PT[0x100..0x1FF]: kernel code/data/BSS region, identity-mapped
+        // The kernel loads at 0x100000 (page 0x100). ISR handlers, syscall
+        // entry, and all kernel functions live here. Without this mapping,
+        // int $0x80 from a child process would triple-fault.
+        while i < 0x200
+            vm_write_pte64(pt + i * 8, i64(i * PAGE_SIZE) | PTE_P | PTE_W)
+            i += 1
+
         pml4
 
 

@@ -34,6 +34,8 @@ that restore_thread in boot.asm can pop it and RTE into
 the new thread. TRISC layout (9 fields, top to bottom):
 PSR, PC, r1, r2, r3, r4, r5, r6, USP
 
+    val STACK_FRAME_SIZE = 72        // 9 fields × 8 bytes (PSR, PC, r1-r6, USP)
+
     extern thread_exit: byte
 
     build_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64

@@ -14,6 +14,7 @@ result where restore_context will pop it into RAX.
 x86_64 layout: R15(0)..RBX(104)..RAX(112)..RIP(120)..
 
     val SYSCALL_RETURN_OFFSET = 112
+    val STACK_FRAME_SIZE = 160       // 20 fields × 8 bytes (15 GP regs + 5 iretq)
 
 Disable interrupts (x86 cli instruction).
 

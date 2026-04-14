@@ -556,45 +556,63 @@ serial_isr_entry:
 # Exception stubs
 # ============================================================================
 
+# After printing the exception, switch to kernel stack and idle
+# with interrupts enabled so the timer can still schedule other threads.
 .global exc_divide_error
 exc_divide_error:
     cli
-    movq $0, %rdi          # exception number
+    movq $0, %rdi
+    xorq %rsi, %rsi
+    xorq %rdx, %rdx
     call oskit_arch_x86_64__exception_handler
-    hlt
+    jmp exc_idle
 
 .global exc_gpf
 exc_gpf:
     cli
-    # Error code was pushed by CPU
-    popq %rsi              # error code
-    movq $13, %rdi         # GPF = exception 13
+    popq %rsi
+    movq $13, %rdi
+    xorq %rdx, %rdx
     call oskit_arch_x86_64__exception_handler
-    hlt
+    jmp exc_idle
 
 .global exc_page_fault
 exc_page_fault:
     cli
-    popq %rsi              # error code
-    movq %cr2, %rdx        # faulting address
-    movq $14, %rdi         # PF = exception 14
+    popq %rsi
+    movq %cr2, %rdx
+    movq $14, %rdi
     call oskit_arch_x86_64__exception_handler
-    hlt
+    jmp exc_idle
 
 .global exc_double_fault
 exc_double_fault:
     cli
-    popq %rsi              # error code (always 0)
+    popq %rsi
     movq $8, %rdi
+    xorq %rdx, %rdx
     call oskit_arch_x86_64__exception_handler
     hlt
 
-# Generic exception stub (no error code)
 .global exc_generic
 exc_generic:
     cli
+    xorq %rdi, %rdi
+    xorq %rsi, %rsi
+    xorq %rdx, %rdx
     call oskit_arch_x86_64__exception_handler
+    jmp exc_idle
+
+# Switch to kernel stack and idle with interrupts on.
+# The timer ISR will fire and schedule other threads.
+exc_idle:
+    movabs $stack_top, %rsp
+    movabs $current_thread, %rdi
+    movq $-1, (%rdi)
+    sti
+.exc_idle_spin:
     hlt
+    jmp .exc_idle_spin
 
 # ============================================================================
 # syscall wrapper — called from user Sysl code
