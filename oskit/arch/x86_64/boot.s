@@ -379,20 +379,28 @@ timer_isr_entry:
 # Syscall entry — int 0x80
 # ============================================================================
 #
-# Convention (matching TRISC):
+# Convention:
 #   rdi = syscall number
 #   rsi = arg1
 #   rdx = arg2
 #
-# For fast-path syscalls, we don't save full context.
-# For slow-path (context-switching), we save and go through schedule.
+# Fast-path syscalls (putc, thread_id, uptime) are handled inline
+# and return via iretq without rescheduling.
+#
+# Slow-path syscalls are dispatched through the kernel's syscall_table
+# and always go through do_schedule afterward.
+#
+# Saved register layout (after 15 pushes, RSP-relative):
+#   +0:R15 +8:R14 +16:R13 +24:R12 +32:R11 +40:R10 +48:R9 +56:R8
+#   +64:RBP +72:RDI +80:RSI +88:RDX +96:RCX +104:RBX +112:RAX
+#   +120:RIP +128:CS +136:RFLAGS +144:RSP +152:SS
 # ============================================================================
 
 .global syscall_entry
 syscall_entry:
     cli
 
-    # Save all registers (slow path needs it; fast path will just iretq)
+    # Save all registers
     pushq %rax
     pushq %rbx
     pushq %rcx
@@ -409,21 +417,46 @@ syscall_entry:
     pushq %r14
     pushq %r15
 
-    # Dispatch to C handler
-    # rdi = syscall number (already there from caller)
-    # Load from saved context: rdi was pushed, reload it
-    movq 8*8(%rsp), %rdi      # saved RDI (syscall number)
-    movq 7*8(%rsp), %rsi      # saved RSI (arg1)
-    movq 5*8(%rsp), %rdx      # saved RDX (arg2)
-    movq %rsp, %rcx            # arg4 = saved context pointer
+    # Reload syscall number and args from saved context
+    movq 9*8(%rsp), %rbx      # saved RDI = syscall number
+    movq 10*8(%rsp), %r12     # saved RSI = arg1
+    movq 11*8(%rsp), %r13     # saved RDX = arg2
 
-    call oskit_arch_x86_64__syscall_dispatch      # in runtime.c
+    # --- Fast path: putc (syscall 1) ---
+    cmpq $1, %rbx
+    jne .not_putc
+    movq %r12, %rdi            # arg = char
+    call oskit_arch_x86_64__uart_putc
+    jmp restore_context
+.not_putc:
 
-    # rax: 0 = fast path (just return), 1 = needs reschedule
+    # --- Slow path: table dispatch ---
+    # Bounds check
+    cmpq $96, %rbx             # MAX_SYSCALLS
+    jge .bad_syscall
+    cmpq $0, %rbx
+    jl .bad_syscall
+
+    # Look up handler: syscall_table[num] (array of i64)
+    leaq syscall_table(%rip), %rax
+    movq (%rax,%rbx,8), %rax  # rax = handler (function pointer)
     testq %rax, %rax
-    jnz do_schedule
+    jz .bad_syscall
 
-    # Fast path: restore and return
+    # Save SSP so kernel handlers can write return values
+    leaq syscall_ssp(%rip), %rcx
+    movq %rsp, (%rcx)
+
+    # Call handler: rdi = arg1 (env=null for non-capturing wrappers)
+    # The handlers are __wrap_* functions: (i8* env, i32 arg)
+    xorq %rdi, %rdi            # env = null
+    movl %r12d, %esi           # arg1 (i32)
+    call *%rax
+
+    jmp do_schedule
+
+.bad_syscall:
+    # Unknown syscall — just return
     jmp restore_context
 
 # ============================================================================

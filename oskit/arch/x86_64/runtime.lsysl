@@ -169,10 +169,3 @@ Exception handler (called from boot.s stubs).
         uart_puts("\n!!! EXCEPTION !!!\n")
 
 
-Syscall dispatch (called from boot.s).
-Returns 0 for fast path, 1 for reschedule.
-
-    syscall_dispatch(num: i64, arg1: i64, arg2: i64, ctx: *byte) -> i64
-        if num == 1
-            uart_putc(int(arg1))
-        i64(0)
