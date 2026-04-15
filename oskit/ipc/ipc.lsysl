@@ -156,15 +156,47 @@ syscall handlers. Call from kernel_main before creating threads.
         register_syscall(SYS_IPC_SEND_TIMED, ipc_send_timed_handler)
         register_syscall(SYS_IPC_RECV_NOTIFY, ipc_recv_notify_handler)
         register_syscall(65, ipc_last_msg_len_handler)
+        register_syscall(68, ipc_port_transfer_handler)
 
     ipc_last_msg_len_handler(arg: int)
         syscall_return(ipc_ctx[current_thread].actual_len)
         ipc_continue_current()
 
-Create a new port owned by the current thread.
-Returns the port ID, or -1 if no ports available.
+Transfer port ownership to another thread. Used by RS to hand
+a dead server's port to the restarted replacement. Clients with
+cached port IDs continue to work transparently.
+
+    ipc_port_transfer_handler(arg: int)
+        var args: *i64 = *i64(i64(arg))
+        val port = int(args[0])
+        val new_owner = int(args[1])
+        if port < 0
+            syscall_return(-1)
+            ipc_continue_current()
+            return
+        if port >= port_count
+            syscall_return(-1)
+            ipc_continue_current()
+            return
+        port_owner[port] = new_owner
+        syscall_return(0)
+        ipc_continue_current()
+
+Create a new port owned by the current thread. If the current
+thread already owns a port (e.g. transferred by RS before
+startup), returns that existing port instead of allocating a
+new one. This makes server restart transparent — the server
+calls port_create as normal and gets the pre-assigned port.
 
     ipc_port_create_handler(arg: int)
+        // Check if this thread already owns a port (transferred by RS)
+        var i = 0
+        while i < port_count
+            if port_owner[i] == current_thread
+                syscall_return(i)
+                ipc_continue_current()
+                return
+            i += 1
         if port_count >= MAX_PORTS
             syscall_return(-1)
             ipc_continue_current()

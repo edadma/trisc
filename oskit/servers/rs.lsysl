@@ -29,8 +29,8 @@ starts the next server.
 
     module oskit.servers
 
-    import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_phys_read}
-    import oskit.ipc.{ipc_recv_notify, port_create}
+    import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_phys_read, svc_port_transfer, svc_proc_main_tid}
+    import oskit.ipc.{ipc_recv_notify, port_create, port_lookup}
     import oskit.hal.memset
 
 Server tracking. PIDs and MMIO page grants for each server
@@ -40,6 +40,7 @@ Used by crash recovery to restart a dead server.
     val RS_TOTAL_SERVERS = 6
     var rs_server_pids: [6]int
     var rs_server_io_page: [6]int
+    var rs_server_ports: [6]int
 
 Ramdisk info, read from info page at startup.
 
@@ -380,6 +381,15 @@ restart it from the boot module, and update tracking.
             rs_print("RS: restart failed\n")
             return
 
+        // Transfer the old port to the new server's thread so clients
+        // with cached port IDs keep working transparently. The server
+        // hasn't run yet (RS is higher priority), so when it calls
+        // port_create(), it will get this port back.
+        val old_port = rs_server_ports[srv_idx]
+        if old_port >= 0
+            val new_tid = svc_proc_main_tid(new_pid)
+            svc_port_transfer(old_port, new_tid)
+
         rs_server_pids[srv_idx] = new_pid
         rs_wait_ready()
         rs_print("RS: ")
@@ -448,6 +458,8 @@ After boot, RS stays alive in a monitoring loop.
 
             rs_print(" [mod]")
             rs_wait_ready()
+            // Record server's port for transparent restart
+            rs_server_ports[i] = port_lookup(name)
             rs_print(" ok\n")
             i += 1
 

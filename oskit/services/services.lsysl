@@ -311,6 +311,14 @@ thread's page table. Used by drivers that need DMA addresses.
     svc_vm_v2p(vaddr: int) -> int
         syscall(SYS_VM_V2P, vaddr)
 
+    val SYS_PORT_TRANSFER = 68
+
+    svc_port_transfer(port: int, new_owner_tid: int)
+        var args: [2]i64
+        args[0] = port
+        args[1] = new_owner_tid
+        syscall(SYS_PORT_TRANSFER, i64(&args[0]))
+
     val SYS_PHYS_READ = 67
 
     svc_phys_read(src_phys: int, dst: *byte, vlen: int)

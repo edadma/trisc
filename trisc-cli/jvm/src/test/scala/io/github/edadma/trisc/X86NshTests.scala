@@ -107,8 +107,13 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     killOutput should include("RS: restarting tfs")
     killOutput should include("RS: tfs restarted ok")
 
-    // TODO: post-restart commands hang because VFS caches the old
-    // TFS port. Need port cache invalidation for full transparent
-    // recovery. For now, just verify RS detects and restarts.
+    // Verify system is fully functional after restart —
+    // port transfer means clients keep working transparently
+    Thread.sleep(200)
+    val psAfter = qemu.command("ps")
+    psAfter should include("tfs")
+
+    val after = qemu.command("cat /etc/ttytab")
+    after should include("tty0 login")
   }
 }
