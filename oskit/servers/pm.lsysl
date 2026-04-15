@@ -20,7 +20,7 @@ IPC commands:
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
     import oskit.config.{MAX_PROCESSES, MAX_WAITERS, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
-    import oskit.services.{notify_read_self, thread_id, rs_ready, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid}
+    import oskit.services.{notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid}
     import oskit.loader.load_tof_to_ptbr
 
     val PM_CMD_WAITPID = 1
@@ -61,6 +61,8 @@ If no waiter, the zombie stays until waitpid is called.
             return
         if pid >= MAX_PROCESSES
             return
+        // Save parent TID before any reaping (reap clears process entry)
+        val dead_parent_tid = svc_proc_parent_tid(pid)
         // Close the dead process's VFS handles (stdin/stdout/stderr etc.)
         // before reaping, so OFT slots are freed for reuse.
         pm_vfs_close_handles(pid)
@@ -90,6 +92,12 @@ If no waiter, the zombie stays until waitpid is called.
                 if svc_proc_parent_tid(j) == exited_tid
                     svc_proc_set_parent_tid(j, 0)
             j += 1
+
+        // Notify RS if this was one of its children (a server).
+        // RS will restart the dead server from its boot module.
+        if rs_tid >= 0
+            if dead_parent_tid == rs_tid
+                notify_send_to(rs_tid, pid)
 
 Handle PM_WAITPID: parent wants to wait for a child process.
 If the child is already a zombie, reap immediately and reply.

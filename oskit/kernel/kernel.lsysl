@@ -1040,8 +1040,12 @@ the process as zombie. Returns 0 on success, -1 on error.
         val tid = processes[pid].main_tid
         threads[tid].state = STATE_TERMINATED
 
-        // Free pages and reap immediately
-        reap_process(pid)
+        // Mark as zombie and notify PM (like terminate_current).
+        // PM handles VFS cleanup, waitpid, reparenting, and RS notification.
+        processes[pid].exit_code = -1
+        processes[pid].state = PROC_ZOMBIE
+        if kernel_pm_tid >= 0
+            notify_send(kernel_pm_tid, pid)
 
         // Wake threads joining on this thread
         var i = 0

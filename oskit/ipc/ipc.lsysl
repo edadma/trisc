@@ -436,8 +436,32 @@ register a name. Returns 0 on success, -1 on error.
             ipc_continue_current()
             return
 
-        // Copy name bytes into kernel-owned buffer (safe across address spaces)
+        // Clear any existing port with the same name (handles stale ports
+        // from dead servers so the new registration wins in lookups)
         var src: *byte = *byte(name_ptr)
+        var ci = 0
+        while ci < port_count
+            if ci != port
+                if port_name_len[ci] > 0
+                    val cb = ci * 8
+                    var same = true
+                    var cj = 0
+                    while cj < 7
+                        val sc = src[cj]
+                        val pc = port_name_buf[cb + cj]
+                        if sc == 0
+                            if pc != 0
+                                same = false
+                            break
+                        if sc != pc
+                            same = false
+                            break
+                        cj += 1
+                    if same
+                        port_name_len[ci] = 0
+            ci += 1
+
+        // Copy name bytes into kernel-owned buffer (safe across address spaces)
         val base = port * 8
         var nlen = 0
         while nlen < 7

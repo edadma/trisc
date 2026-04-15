@@ -33,6 +33,14 @@ starts the next server.
     import oskit.ipc.{ipc_recv_notify, port_create}
     import oskit.hal.memset
 
+Server tracking. PIDs and MMIO page grants for each server
+in boot order (0=disk, 1=tfs, 2=tty, 3=pm, 4=vfs, 5=init).
+Used by crash recovery to restart a dead server.
+
+    val RS_TOTAL_SERVERS = 6
+    var rs_server_pids: [6]int
+    var rs_server_io_page: [6]int
+
 Ramdisk info, read from info page at startup.
 
     var rs_ramdisk_base = 0
@@ -274,7 +282,7 @@ Start a server from a boot module: create server page table,
 copy module data via svc_phys_read, load TRB/ELF binary,
 create process, resume it.
 io_page = MMIO page to grant (e.g. 0x800 for ramdisk).
-Returns 1 on success, 0 on failure.
+Returns the PID on success, 0 on failure.
 
     rs_start_from_module(mod_idx: int, name: *byte, nlen: int, io_page: int) -> int
         val addr = rs_boot_module_addr(mod_idx)
@@ -323,18 +331,60 @@ Returns 1 on success, 0 on failure.
 
         // Resume the process
         svc_resume_proc(pid)
-        1
+        pid
 
-RS monitoring loop. Blocks on the notification port waiting
-for server crash notifications. When a notification arrives,
-RS logs it. Full crash recovery (restart from boot module)
-is future work.
+RS monitoring loop. Blocks waiting for notifications from PM
+about dead server processes. When a server dies, RS restarts
+it from its boot module.
 
     rs_monitor()
         while true
             var buf: [1]byte
             ipc_recv_notify(rs_port, &buf[0], 1)
-            notify_read_self()
+            val dead_pid = notify_read_self()
+            if dead_pid > 0
+                rs_handle_crash(dead_pid)
+
+Handle a server crash. Find which server had this PID,
+restart it from the boot module, and update tracking.
+
+    rs_handle_crash(dead_pid: int)
+        // Find which server had this PID
+        var srv_idx = -1
+        var i = 0
+        while i < RS_TOTAL_SERVERS
+            if rs_server_pids[i] == dead_pid
+                srv_idx = i
+                break
+            i += 1
+        if srv_idx < 0
+            return
+
+        // Don't restart init (index 5)
+        if srv_idx == 5
+            return
+
+        val name = &rs_boot_names[srv_idx * 8]
+        val nlen = rs_boot_nlen[srv_idx]
+        rs_print("RS: restarting ")
+        rs_print(string(name, nlen))
+        rs_print("\n")
+
+        val mod_idx = rs_find_boot_module(name, nlen)
+        if mod_idx < 0
+            rs_print("RS: module not found\n")
+            return
+
+        val new_pid = rs_start_from_module(mod_idx, name, nlen, rs_server_io_page[srv_idx])
+        if new_pid <= 0
+            rs_print("RS: restart failed\n")
+            return
+
+        rs_server_pids[srv_idx] = new_pid
+        rs_wait_ready()
+        rs_print("RS: ")
+        rs_print(string(name, nlen))
+        rs_print(" restarted ok\n")
 
 The RS main function. Runs as the first userspace process.
 Reads config from info page at 0xBF000, then starts all
@@ -389,9 +439,12 @@ After boot, RS stays alive in a monitoring loop.
             var io_page = IO_PAGE_DEVICES
             if i >= 3
                 io_page = 0
-            if rs_start_from_module(mod_idx, name, nlen, io_page) != 1
+            val pid = rs_start_from_module(mod_idx, name, nlen, io_page)
+            if pid <= 0
                 rs_print(" FAILED\n")
                 return
+            rs_server_pids[i] = pid
+            rs_server_io_page[i] = io_page
 
             rs_print(" [mod]")
             rs_wait_ready()
