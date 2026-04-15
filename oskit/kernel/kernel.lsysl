@@ -493,6 +493,29 @@ Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
         syscall_return(paddr)
         kernel_continue_current()
 
+Thread info query handlers (syscalls 7-9, 42-43).
+Used by ps and other user programs via ulib.
+
+    sys_thread_count_handler(arg: int)
+        syscall_return(thread_count)
+        kernel_continue_current()
+
+    sys_thread_state_handler(arg: int)
+        syscall_return(query_thread_state(arg))
+        kernel_continue_current()
+
+    sys_thread_name_handler(arg: int)
+        syscall_return(i64(query_thread_name(arg)))
+        kernel_continue_current()
+
+    sys_thread_pid_handler(arg: int)
+        syscall_return(query_thread_pid(arg))
+        kernel_continue_current()
+
+    sys_thread_name_len_handler(arg: int)
+        syscall_return(query_thread_name_len(arg))
+        kernel_continue_current()
+
     kernel_init()
         vm_init()
         register_syscall(0, sleep_current)
@@ -530,6 +553,11 @@ Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
         register_syscall(61, sys_getuid_handler)
         register_syscall(62, sys_setuid_handler)
         register_syscall(63, sys_vm_create_server_pt_handler)
+        register_syscall(7, sys_thread_count_handler)
+        register_syscall(8, sys_thread_state_handler)
+        register_syscall(9, sys_thread_name_handler)
+        register_syscall(42, sys_thread_pid_handler)
+        register_syscall(43, sys_thread_name_len_handler)
         register_syscall(11, sys_kbhit_handler)
         register_syscall(12, sys_getkey_handler)
         register_syscall(64, sys_kb_set_notify_handler)

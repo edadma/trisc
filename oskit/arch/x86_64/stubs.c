@@ -12,7 +12,7 @@ extern void oskit_arch_x86_64__uart_putc(int c);
 /* sbrk — extend heap for std.alloc's Sysl allocator.
  * Uses a static BSS array to avoid overlapping with the page
  * allocator (which starts at _heap_start after BSS). */
-static char sbrk_heap[4 * 1024 * 1024];
+static char sbrk_heap[2 * 1024 * 1024];
 static char *sbrk_cur = sbrk_heap;
 
 void *sbrk(int incr) {
