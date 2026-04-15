@@ -14,6 +14,7 @@ object Runtime:
   val ramdiskAddress = 0x800140L
   val shaAccelAddress = 0x800160L // 80 bytes: ESP32-style SHA-256 accelerator
   val dmaAddress = 0x8001C0L     // 202 bytes: RP2040-style DMA controller
+  val ipiBaseAddress = 0x800300L // 16 bytes per core: IPI device (inter-processor interrupt)
   val framebufferAddress = 0x900000L // 9MB — framebuffer pixel data
   val framebufferMaxSize: Long = 1920 * 1080 * 4
   val initialSSP: Long = stdoutAddress - 8 // stack grows down, below devices

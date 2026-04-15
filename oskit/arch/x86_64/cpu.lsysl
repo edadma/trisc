@@ -24,6 +24,18 @@ Enable interrupts (x86 sti instruction).
 
     extern arch_sti()
 
+Spinlock acquire. Spins using lock cmpxchg until the lock
+is obtained, then disables interrupts. Lock is 0=free, 1=held.
+x86 calling convention: rdi = first arg (lock pointer).
+
+    arch_spinlock_acquire(lock: *i64)
+        asm("movq $1, %rsi\n.spin_acq:\nxorq %rax, %rax\nlock cmpxchgq %rsi, (%rdi)\njnz .spin_acq\ncli")
+
+Spinlock release. Enables interrupts, then stores 0 to lock.
+
+    arch_spinlock_release(lock: *i64)
+        asm("sti\nmovq $0, (%rdi)")
+
 Build a fake interrupt frame on the supervisor stack so
 that restore_context in boot.s can pop it and iretq into
 the new thread. x86_64 layout (20 fields, bottom to top):

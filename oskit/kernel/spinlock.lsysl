@@ -1,0 +1,33 @@
+Kernel Spinlock
+
+CAS-based spinlock for multi-core synchronization.
+Wraps architecture-specific spinlock primitives.
+
+A spinlock is a single i64 word: 0 = free, 1 = held.
+Acquiring disables interrupts (after lock obtained).
+Releasing re-enables interrupts (before lock released).
+
+On single-core systems, these degrade gracefully:
+the CAS always succeeds immediately, so the cost is
+just the CAS instruction + cli/sti — same as before.
+
+    module oskit.kernel
+
+    import oskit.arch.{arch_spinlock_acquire, arch_spinlock_release}
+
+Initialize a spinlock to the unlocked state.
+
+    spinlock_init(lock: *i64)
+        *lock = i64(0)
+
+Acquire the spinlock. Spins until the lock is free,
+then atomically claims it and disables interrupts.
+
+    spinlock_acquire(lock: *i64)
+        arch_spinlock_acquire(lock)
+
+Release the spinlock. Re-enables interrupts and
+stores 0 to the lock word.
+
+    spinlock_release(lock: *i64)
+        arch_spinlock_release(lock)

@@ -164,8 +164,7 @@ class CAS(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
 
   def apply(cpu: CPU): Unit =
     val addr = cpu.r(a).read
-    val old = cpu.readLong(addr)
-    if old == cpu.r(d).read then cpu.writeLong(addr, cpu.r(b).read)
+    val old = cpu.atomicCAS(addr, cpu.r(d).read, cpu.r(b).read)
     cpu.r(d).write(old)
 
 class AND(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
@@ -583,20 +582,18 @@ class LL(a: Int, b: Int) extends RRInstruction(a, b):
   def apply(cpu: CPU): Unit =
     val addr = cpu.r(b).read
     cpu.r(a).write(cpu.readLong(addr))
-    cpu.reservationAddr = addr
-    cpu.reservationValid = true
+    cpu.setReservation(addr)
 
 class SC(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "sc"
 
   def apply(cpu: CPU): Unit =
     val addr = cpu.r(b).read
-    if cpu.reservationValid && cpu.reservationAddr == addr then
+    if cpu.checkAndClearReservation(addr) then
       cpu.writeLong(addr, cpu.r(a).read)
       cpu.r(a).write(1)
     else
       cpu.r(a).write(0)
-    cpu.reservationValid = false
 
 // Bit counting (RR 110 block)
 

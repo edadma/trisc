@@ -29,6 +29,20 @@ are complete, allowing the timer and device IRQs to fire.
     arch_sti()
         asm("sti")
 
+Spinlock acquire. Spins using atomic CAS until the lock
+is obtained, then disables interrupts. The lock word is 0
+when free, 1 when held. r1 = lock address (from param).
+Uses r2 (expected=0) and r3 (new=1) as scratch.
+
+    arch_spinlock_acquire(lock: *i64)
+        asm("ldi r3, 1\n_spin_acq\nldi r2, 0\ncas r2, r1, r3\nbne r2, r0, _spin_acq\ncli")
+
+Spinlock release. Enables interrupts, then stores 0 to
+the lock word (8-byte store). r1 = lock address (from param).
+
+    arch_spinlock_release(lock: *i64)
+        asm("sti\nstd r0, r1, r0")
+
 Build a fake context frame on the supervisor stack so
 that restore_thread in boot.asm can pop it and RTE into
 the new thread. TRISC layout (9 fields, top to bottom):
