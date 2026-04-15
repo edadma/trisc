@@ -193,6 +193,24 @@ entry64:
     movq %rcx, mboot_mod1_start(%rip)
     movq %rbx, mboot_mod1_end(%rip)
 .no_mod1:
+    # Set page pool minimum above highest module end so page_alloc
+    # doesn't hand out pages containing multiboot module data.
+    # Uses the last stored module end (mod1_end if 2 modules, mod_end if 1).
+    movq mboot_mod1_end(%rip), %rax
+    testq %rax, %rax
+    jz .use_mod0_end
+    # Page-align mod1_end upward: (addr + 0xFFF) & ~0xFFF
+    addq $0xFFF, %rax
+    andq $-0x1000, %rax
+    movq %rax, oskit_arch__page_pool_min_addr(%rip)
+    jmp .no_modules
+.use_mod0_end:
+    movq mboot_mod_end(%rip), %rax
+    testq %rax, %rax
+    jz .no_modules
+    addq $0xFFF, %rax
+    andq $-0x1000, %rax
+    movq %rax, oskit_arch__page_pool_min_addr(%rip)
 .no_modules:
 
     # Initialize UART, PIC, PIT, IDT
@@ -578,6 +596,7 @@ exc_divide_error:
     movq $0, %rdi
     xorq %rsi, %rsi
     movq (%rsp), %rdx      # faulting RIP (no error code for #DE)
+    movq %cr3, %rcx
     call oskit_arch_x86_64__exception_handler
     jmp exc_idle
 
@@ -587,6 +606,7 @@ exc_gpf:
     popq %rsi              # error code
     movq (%rsp), %rdx      # faulting RIP (from iretq frame on stack)
     movq $13, %rdi
+    movq %cr3, %rcx
     call oskit_arch_x86_64__exception_handler
     jmp exc_idle
 
@@ -596,6 +616,7 @@ exc_page_fault:
     popq %rsi
     movq %cr2, %rdx
     movq $14, %rdi
+    movq %cr3, %rcx
     call oskit_arch_x86_64__exception_handler
     jmp exc_idle
 
@@ -605,17 +626,67 @@ exc_double_fault:
     popq %rsi
     movq $8, %rdi
     xorq %rdx, %rdx
+    movq %cr3, %rcx
     call oskit_arch_x86_64__exception_handler
     hlt
 
-.global exc_generic
-exc_generic:
+# Per-vector exception stubs (no error code)
+.macro exc_no_errcode vec
+.global exc_stub_\vec
+exc_stub_\vec:
     cli
-    xorq %rdi, %rdi
+    movq $\vec, %rdi
     xorq %rsi, %rsi
-    movq (%rsp), %rdx      # faulting RIP (no error code)
+    movq (%rsp), %rdx
+    movq %cr3, %rcx
     call oskit_arch_x86_64__exception_handler
     jmp exc_idle
+.endm
+
+# Per-vector exception stubs (with error code)
+.macro exc_with_errcode vec
+.global exc_stub_\vec
+exc_stub_\vec:
+    cli
+    popq %rsi
+    movq $\vec, %rdi
+    movq (%rsp), %rdx
+    movq %cr3, %rcx
+    call oskit_arch_x86_64__exception_handler
+    jmp exc_idle
+.endm
+
+# Generate stubs for all exception vectors not already handled
+# Vectors WITHOUT error codes: 1-7, 9, 15, 16, 18-20, 22-31
+exc_no_errcode 1
+exc_no_errcode 2
+exc_no_errcode 3
+exc_no_errcode 4
+exc_no_errcode 5
+exc_no_errcode 6
+exc_no_errcode 7
+exc_no_errcode 9
+exc_no_errcode 15
+exc_no_errcode 16
+exc_no_errcode 18
+exc_no_errcode 19
+exc_no_errcode 20
+exc_no_errcode 22
+exc_no_errcode 23
+exc_no_errcode 24
+exc_no_errcode 25
+exc_no_errcode 26
+exc_no_errcode 27
+exc_no_errcode 28
+exc_no_errcode 29
+exc_no_errcode 30
+exc_no_errcode 31
+# Vectors WITH error codes: 10, 11, 12, 17, 21
+exc_with_errcode 10
+exc_with_errcode 11
+exc_with_errcode 12
+exc_with_errcode 17
+exc_with_errcode 21
 
 # Switch to kernel stack and idle with interrupts on.
 # The timer ISR will fire and schedule other threads.

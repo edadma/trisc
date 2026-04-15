@@ -107,8 +107,12 @@ program region while keeping PD[1..15] as 2MB superpages.
 
 
 Physical page allocator -- same bump + free list as TRISC.
+Page pool must start after kernel BSS AND after any multiboot
+modules (ramdisk, boot info) to avoid overwriting them.
+Boot.s sets page_pool_min_addr before kernel_init runs.
 
     extern _heap_start: byte
+    var page_pool_min_addr = 0
 
     page_alloc() -> int
         if !page_pool_init
@@ -117,6 +121,8 @@ Physical page allocator -- same bump + free list as TRISC.
             val aligned = (bss_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)
             if aligned > base
                 base = aligned
+            if page_pool_min_addr > base
+                base = page_pool_min_addr
             page_pool_next = base
             page_pool_init = true
         if page_free_list != 0

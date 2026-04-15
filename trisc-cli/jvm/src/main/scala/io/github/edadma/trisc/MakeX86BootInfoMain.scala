@@ -25,8 +25,7 @@ import java.nio.file.{Files, Paths, Path}
   */
 object MakeX86BootInfoMain:
   // Boot order must match RS expectations
-  // TODO: add "pm" and "vfs" back once their isolation bugs are fixed
-  private val serverNames = Seq("disk", "tfs", "tty")
+  private val serverNames = Seq("disk", "tfs", "tty", "pm", "vfs")
 
   def main(args: Array[String]): Unit =
     val srvDir = Paths.get("/tmp/slix-x86_64/servers")

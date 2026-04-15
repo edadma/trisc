@@ -24,7 +24,34 @@ Interrupt handler addresses (provided by boot.s).
     extern exc_double_fault: byte
     extern exc_gpf: byte
     extern exc_page_fault: byte
-    extern exc_generic: byte
+    extern exc_stub_1: byte
+    extern exc_stub_2: byte
+    extern exc_stub_3: byte
+    extern exc_stub_4: byte
+    extern exc_stub_5: byte
+    extern exc_stub_6: byte
+    extern exc_stub_7: byte
+    extern exc_stub_9: byte
+    extern exc_stub_10: byte
+    extern exc_stub_11: byte
+    extern exc_stub_12: byte
+    extern exc_stub_15: byte
+    extern exc_stub_16: byte
+    extern exc_stub_17: byte
+    extern exc_stub_18: byte
+    extern exc_stub_19: byte
+    extern exc_stub_20: byte
+    extern exc_stub_21: byte
+    extern exc_stub_22: byte
+    extern exc_stub_23: byte
+    extern exc_stub_24: byte
+    extern exc_stub_25: byte
+    extern exc_stub_26: byte
+    extern exc_stub_27: byte
+    extern exc_stub_28: byte
+    extern exc_stub_29: byte
+    extern exc_stub_30: byte
+    extern exc_stub_31: byte
     extern serial_isr_entry: byte
 
 
@@ -133,16 +160,39 @@ Write one IDT gate entry. Each entry is 16 bytes:
         base[15] = byte(0)
 
     idt_init()
-        // Fill all 256 entries with generic handler
-        var i = 0
-        while i < 256
-            idt_set_gate(i, i64(&exc_generic), 0x8E)
-            i += 1
-        // CPU exceptions
+        // CPU exceptions (per-vector stubs with correct vec number + error code handling)
         idt_set_gate(0,  i64(&exc_divide_error), 0x8E)
+        idt_set_gate(1,  i64(&exc_stub_1),  0x8E)
+        idt_set_gate(2,  i64(&exc_stub_2),  0x8E)
+        idt_set_gate(3,  i64(&exc_stub_3),  0x8E)
+        idt_set_gate(4,  i64(&exc_stub_4),  0x8E)
+        idt_set_gate(5,  i64(&exc_stub_5),  0x8E)
+        idt_set_gate(6,  i64(&exc_stub_6),  0x8E)
+        idt_set_gate(7,  i64(&exc_stub_7),  0x8E)
         idt_set_gate(8,  i64(&exc_double_fault), 0x8E)
+        idt_set_gate(9,  i64(&exc_stub_9),  0x8E)
+        idt_set_gate(10, i64(&exc_stub_10), 0x8E)
+        idt_set_gate(11, i64(&exc_stub_11), 0x8E)
+        idt_set_gate(12, i64(&exc_stub_12), 0x8E)
         idt_set_gate(13, i64(&exc_gpf),          0x8E)
         idt_set_gate(14, i64(&exc_page_fault),   0x8E)
+        idt_set_gate(15, i64(&exc_stub_15), 0x8E)
+        idt_set_gate(16, i64(&exc_stub_16), 0x8E)
+        idt_set_gate(17, i64(&exc_stub_17), 0x8E)
+        idt_set_gate(18, i64(&exc_stub_18), 0x8E)
+        idt_set_gate(19, i64(&exc_stub_19), 0x8E)
+        idt_set_gate(20, i64(&exc_stub_20), 0x8E)
+        idt_set_gate(21, i64(&exc_stub_21), 0x8E)
+        idt_set_gate(22, i64(&exc_stub_22), 0x8E)
+        idt_set_gate(23, i64(&exc_stub_23), 0x8E)
+        idt_set_gate(24, i64(&exc_stub_24), 0x8E)
+        idt_set_gate(25, i64(&exc_stub_25), 0x8E)
+        idt_set_gate(26, i64(&exc_stub_26), 0x8E)
+        idt_set_gate(27, i64(&exc_stub_27), 0x8E)
+        idt_set_gate(28, i64(&exc_stub_28), 0x8E)
+        idt_set_gate(29, i64(&exc_stub_29), 0x8E)
+        idt_set_gate(30, i64(&exc_stub_30), 0x8E)
+        idt_set_gate(31, i64(&exc_stub_31), 0x8E)
         // Timer IRQ (vector 32)
         idt_set_gate(32, i64(&timer_isr_entry), 0x8E)
         // Serial IRQ (vector 36 = IRQ4)
@@ -199,7 +249,7 @@ Event format: (ascii << 24) | (1 << 17) | (1 << 16)
 
 Exception handler (called from boot.s stubs).
 
-    exception_handler(exc_num: i64, error_code: i64, addr: i64)
+    exception_handler(exc_num: i64, error_code: i64, addr: i64, cr3_val: i64)
         uart_puts("\n!!! EXCEPTION vec=")
         val hex = "0123456789ABCDEF"
         val hp = *byte(hex)
@@ -217,6 +267,12 @@ Exception handler (called from boot.s stubs).
         var s2 = 28
         while s2 >= 0
             uart_putc(int(hp[(a >> s2) & 0xF]))
+            s2 -= 4
+        uart_puts(" cr3=")
+        var c = int(cr3_val)
+        s2 = 28
+        while s2 >= 0
+            uart_putc(int(hp[(c >> s2) & 0xF]))
             s2 -= 4
         uart_puts(" !!!\n")
 
