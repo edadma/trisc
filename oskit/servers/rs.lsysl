@@ -29,7 +29,7 @@ starts the next server.
 
     module oskit.servers
 
-    import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_phys_read, svc_port_transfer, svc_proc_main_tid, svc_set_priv}
+    import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_phys_read, svc_port_transfer, svc_proc_main_tid, svc_set_priv, svc_set_ipc_mask}
     import oskit.ipc.{ipc_recv_notify, port_create, port_lookup}
     import oskit.hal.memset
 
@@ -87,6 +87,9 @@ created but before it is resumed.
         // Use inline literals — val globals read wrong on x86 bare metal
         var lo: i64 = i64(0x20000FFFFFE0007F)  // PRIV_COMMON_LO
         var hi: i64 = i64(2)                    // PRIV_COMMON_HI (bit 1 = ipc_last_msg_len)
+        // IPC mask set to 0xFF during boot (all allowed).
+        // Tightened after all servers are up via rs_set_ipc_masks().
+        var ipc = 0xFF
         if idx == 0
             // disk: needs vm_v2p(66) for DMA
             hi = hi | i64(4)
@@ -97,7 +100,30 @@ created but before it is resumed.
         else if idx == 3
             // pm: needs process management syscalls (44-60, 62)
             lo = lo | i64(0x5FFFF00000000000)
-        svc_set_priv(pid, lo, hi)
+        svc_set_priv(pid, lo, hi, ipc)
+
+Tighten IPC send masks after all servers are booted and port
+IDs are known. Each server can only send to the ports it needs.
+Port IDs are stored in rs_server_ports[] (looked up by name).
+
+    rs_set_ipc_masks()
+        val disk_port = rs_server_ports[0]
+        val tfs_port = rs_server_ports[1]
+        val tty_port = rs_server_ports[2]
+        val pm_port = rs_server_ports[3]
+        val vfs_port = rs_server_ports[4]
+        // disk: no IPC sends
+        svc_set_ipc_mask(rs_server_pids[0], 0)
+        // tfs: sends to disk
+        svc_set_ipc_mask(rs_server_pids[1], 1 << disk_port)
+        // tty: no IPC sends
+        svc_set_ipc_mask(rs_server_pids[2], 0)
+        // pm: sends to vfs
+        svc_set_ipc_mask(rs_server_pids[3], 1 << vfs_port)
+        // vfs: sends to tfs
+        svc_set_ipc_mask(rs_server_pids[4], 1 << tfs_port)
+        // init: sends to pm, vfs
+        svc_set_ipc_mask(rs_server_pids[5], (1 << pm_port) | (1 << vfs_port))
 
 Ramdisk info, read from info page at startup.
 
@@ -523,6 +549,9 @@ After boot, RS stays alive in a monitoring loop.
             rs_server_ports[i] = port_lookup(name)
             rs_print(" ok\n")
             i += 1
+
+        // Tighten IPC masks now that all port IDs are known
+        rs_set_ipc_masks()
 
         // RS stays alive — monitoring loop
         rs_print("RS monitoring\n")

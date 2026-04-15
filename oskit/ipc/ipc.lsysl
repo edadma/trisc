@@ -235,6 +235,11 @@ Returns 0 on success, -1 on error (invalid port, port closed).
             ipc_continue_current()
             return
 
+        // TODO: IPC send permission check (per-process bitmask).
+        // Infrastructure is in place (Process.ipc_send_mask, rs_set_ipc_masks,
+        // svc_set_ipc_mask syscall 70) but enforcement in the send handler
+        // causes a crash on x86 — needs debugging in a fresh session.
+
         // Store sender's IPC context
         ipc_ctx[me].buf = msg_ptr
         ipc_ctx[me].len = msg_len
@@ -552,6 +557,11 @@ Returns 0 on success, -1 on error, -2 on timeout.
             syscall_return(-1)
             ipc_continue_current()
             return
+
+        // TODO: IPC send permission check (per-process bitmask).
+        // Infrastructure is in place (Process.ipc_send_mask, rs_set_ipc_masks,
+        // svc_set_ipc_mask syscall 70) but enforcement in the send handler
+        // causes a crash on x86 — needs debugging in a fresh session.
 
         // Store sender's IPC context
         ipc_ctx[me].buf = msg_ptr

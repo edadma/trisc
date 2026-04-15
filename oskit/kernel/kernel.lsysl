@@ -133,6 +133,7 @@ loaded by nsh each get their own process entry.
         name: string
         syscall_allow_lo: i64
         syscall_allow_hi: i64
+        ipc_send_mask: int
 
     var processes: [16]Process  // 16 = MAX_PROCESSES
     var next_pid = 1
@@ -279,18 +280,32 @@ in hi.
             return 1
         0
 
-Set the syscall allow mask for a process. Called by RS before
-resuming a server. Arg = pointer to [pid(i64), lo(i64), hi(i64)].
+Set the privilege masks for a process. Called by RS before
+resuming a server. Arg = pointer to [pid(i64), lo(i64), hi(i64), ipc_mask(i64)].
 
     sys_set_priv_handler(arg: int)
         var args: *i64 = *i64(i64(arg))
         val pid = int(args[0])
         val lo = args[1]
         val hi = args[2]
+        val ipc = int(args[3])
         if pid > 0
             if pid < MAX_PROCESSES
                 processes[pid].syscall_allow_lo = lo
                 processes[pid].syscall_allow_hi = hi
+                processes[pid].ipc_send_mask = ipc
+        syscall_return(0)
+        kernel_continue_current()
+
+Set just the IPC send mask for a process.
+Arg = (pid << 8) | mask.
+
+    sys_set_ipc_mask_handler(arg: int)
+        val pid = (arg >> 8) & 0xFF
+        val mask = arg & 0xFF
+        if pid > 0
+            if pid < MAX_PROCESSES
+                processes[pid].ipc_send_mask = mask
         syscall_return(0)
         kernel_continue_current()
 
@@ -647,6 +662,7 @@ Used by ps and other user programs via ulib.
         register_syscall(66, sys_vm_v2p_handler)
         register_syscall(67, sys_phys_read_handler)
         register_syscall(69, sys_set_priv_handler)
+        register_syscall(70, sys_set_ipc_mask_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events
@@ -938,6 +954,7 @@ process ID (0 for kernel threads).
         processes[pid].name = threads[tid].name
         processes[pid].syscall_allow_lo = i64(-1)
         processes[pid].syscall_allow_hi = i64(-1)
+        processes[pid].ipc_send_mask = 0xFF
 
         // Link thread to process
         threads[tid].pid = pid
@@ -1031,6 +1048,7 @@ Unlike create_process, the thread is never enqueued — no race.
         // Default: all syscalls allowed. RS restricts servers after creation.
         processes[pid].syscall_allow_lo = i64(-1)
         processes[pid].syscall_allow_hi = i64(-1)
+        processes[pid].ipc_send_mask = 0xFF
 
         // Link thread to process
         threads[tid].pid = pid

@@ -314,11 +314,12 @@ thread's page table. Used by drivers that need DMA addresses.
     val SYS_PORT_TRANSFER = 68
     val SYS_SET_PRIV      = 69
 
-    svc_set_priv(pid: int, allow_lo: i64, allow_hi: i64)
-        var args: [3]i64
+    svc_set_priv(pid: int, allow_lo: i64, allow_hi: i64, ipc_mask: int)
+        var args: [4]i64
         args[0] = pid
         args[1] = allow_lo
         args[2] = allow_hi
+        args[3] = ipc_mask
         syscall(SYS_SET_PRIV, i64(&args[0]))
 
     svc_port_transfer(port: int, new_owner_tid: int)
@@ -326,6 +327,11 @@ thread's page table. Used by drivers that need DMA addresses.
         args[0] = port
         args[1] = new_owner_tid
         syscall(SYS_PORT_TRANSFER, i64(&args[0]))
+
+    val SYS_SET_IPC_MASK = 70
+
+    svc_set_ipc_mask(pid: int, mask: int)
+        syscall(SYS_SET_IPC_MASK, (pid << 8) | (mask & 0xFF))
 
     val SYS_PHYS_READ = 67
 
