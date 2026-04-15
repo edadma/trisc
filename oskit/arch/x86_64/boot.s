@@ -524,6 +524,14 @@ syscall_entry:
     leaq syscall_ssp(%rip), %rcx
     movq %rsp, (%rcx)
 
+    # Privilege check: is this syscall allowed for the current process?
+    pushq %rax                 # save handler pointer
+    movl %ebx, %edi            # arg = syscall number
+    call oskit_kernel__syscall_check_allowed
+    testl %eax, %eax
+    popq %rax                  # restore handler pointer
+    jz .denied_syscall
+
     # Call handler: rdi = arg1 (env=null for non-capturing wrappers)
     # The handlers are __wrap_* functions: (i8* env, i32 arg)
     xorq %rdi, %rdi            # env = null
@@ -531,6 +539,11 @@ syscall_entry:
     call *%rax
 
     jmp do_schedule
+
+.denied_syscall:
+    # Permission denied — return -1 to caller
+    movq $-1, 14*8(%rsp)      # write -1 to saved RAX
+    jmp restore_context
 
 .bad_syscall:
     # Unknown syscall — just return
