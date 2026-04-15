@@ -99,10 +99,24 @@ object EmulatorGui:
 
       // Compile boot modules (standalone server .trb binaries) — loaded into RAM as unused data for now
       val bootModules = OskitDemoBuilder.compileBootModules()
-      var cpuState: (CPU, Memory) = TriscCli.setupCpu(linked, outputFn, guiDevices, intc, bootModules)
-      memRef = cpuState._2
-      var cpu = cpuState._1
-      if cmd.limit > 0 then cpu.limit = cmd.limit
+
+      // Multi-core or single-core setup
+      var multiCore: MultiCore = null
+      var cpuState: (CPU, Memory) = null
+
+      if cmd.smp > 1 then
+        val (mc, mem) = TriscCli.setupMultiCore(linked, cmd.smp, outputFn, guiDevices, bootModules)
+        multiCore = mc
+        memRef = mem
+      else
+        cpuState = TriscCli.setupCpu(linked, outputFn, guiDevices, intc, bootModules)
+        memRef = cpuState._2
+
+      // Primary CPU — core 0 in both modes
+      var cpu = if multiCore != null then multiCore.core(0) else cpuState._1
+      if cmd.limit > 0 then
+        if multiCore != null then multiCore.cores.foreach(_.limit = cmd.limit)
+        else cpu.limit = cmd.limit
 
       // Keyboard input — on the frame, independent of display mode
       frame.addKeyListener(new KeyListener {
@@ -149,7 +163,8 @@ object EmulatorGui:
         stepBtn.setEnabled(false)
         frame.requestFocusInWindow()
         new Thread(() => {
-          cpu.run()
+          if multiCore != null then multiCore.runAll()
+          else cpu.run()
           SwingUtilities.invokeLater(() => {
             updateStatus()
             runBtn.setEnabled(true)
@@ -167,17 +182,26 @@ object EmulatorGui:
 
       // Reset
       resetBtn.addActionListener(_ => {
-        cpu.state = State.Halt // stop the old CPU thread's run() loop
+        // Stop all cores
+        if multiCore != null then multiCore.cores.foreach(_.state = State.Halt)
+        else cpu.state = State.Halt
         terminal.clear(Color.GREEN, Color.BLACK)
         parser.reset()
-        fb.clear() // clear framebuffer so stale content doesn't flash
-        drawEngine.reset() // clear all DrawEngine state (windows, surfaces, buffers)
+        fb.clear()
+        drawEngine.reset()
         val layout = displayPanel.getLayout.asInstanceOf[CardLayout]
         layout.show(displayPanel, "terminal")
-        cpuState = TriscCli.setupCpu(linked, outputFn, guiDevices, intc, bootModules)
-        cpu = cpuState._1
-        memRef = cpuState._2
-        if cmd.limit > 0 then cpu.limit = cmd.limit
+        if cmd.smp > 1 then
+          val (mc, mem) = TriscCli.setupMultiCore(linked, cmd.smp, outputFn, guiDevices, bootModules)
+          multiCore = mc
+          memRef = mem
+          cpu = mc.core(0)
+          if cmd.limit > 0 then mc.cores.foreach(_.limit = cmd.limit)
+        else
+          cpuState = TriscCli.setupCpu(linked, outputFn, guiDevices, intc, bootModules)
+          cpu = cpuState._1
+          memRef = cpuState._2
+          if cmd.limit > 0 then cpu.limit = cmd.limit
         updateStatus()
         frame.pack()
       })

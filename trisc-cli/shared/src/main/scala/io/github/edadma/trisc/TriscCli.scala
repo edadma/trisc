@@ -9,6 +9,7 @@ case class RunCommand(
     limit: Int = 0,
     trace: Boolean = false,
     gui: Boolean = false,
+    smp: Int = 1,
 ) extends TriscCommand
 case class AsmCommand(
     input: String = "",
@@ -70,6 +71,14 @@ object TriscCli:
             .action((_, c) =>
               c.copy(command = c.command match
                 case rc: RunCommand => rc.copy(gui = true)
+                case other          => other
+              )
+            ),
+          opt[Int]("smp")
+            .text("Number of CPU cores (default 1)")
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case rc: RunCommand => rc.copy(smp = v.max(1).min(8))
                 case other          => other
               )
             ),
@@ -308,6 +317,81 @@ object TriscCli:
     cpu.reset() // like 68000: reads SSP from vector[0], PC from vector[1], enters supervisor mode
     (cpu, mem)
 
+  /** Set up a multi-core system. Returns the MultiCore runner and shared memory.
+    *
+    * Each core gets its own INTC (at intcAddress + coreId * 16) and IPI device
+    * (at ipiBaseAddress + coreId * 16). Core 0 gets the timer in its tick sequence.
+    * All cores share the same Memory.
+    */
+  def setupMultiCore(
+      linked: TOF,
+      numCores: Int,
+      outputFn: String => Unit = s => { print(s); System.out.flush() },
+      extraDevices: Seq[Addressable] = Nil,
+      bootModules: Seq[(String, Array[Byte])] = Nil,
+  ): (MultiCore, Memory) =
+    val stdout = new Stdout(Runtime.stdoutAddress, outputFn)
+    val ramSize = Runtime.stdoutAddress.toInt
+    val ram = new RAM(0, ramSize)
+
+    // Per-core interrupt controllers (spaced 16 bytes apart)
+    val intcs = Array.tabulate(numCores)(i =>
+      new InterruptController(Runtime.intcAddress + i * 16))
+
+    // Per-core IPI devices (spaced 16 bytes apart)
+    val ipis = Array.tabulate(numCores)(i =>
+      new IPI(Runtime.ipiBaseAddress + i * 16, selfCoreId = i, intcs))
+
+    // Timer on core 0's INTC
+    val timer = new Timer(Runtime.timerAddress, intcs(0), irq = 0)
+
+    val ramdisk = new Ramdisk(
+      Runtime.ramdiskAddress, ram, sectors = 256, sectorSize = 4096,
+      intcs(0), irq = 3,
+      prefill = """
+        /dev/tty0 char 0 0
+        /dev/disk0 block 1 0
+        /dev/null char 0 1
+        /root dir
+        /home dir
+        /home/ed dir
+        /etc/passwd file "root:x:0:0:root:/root:/nsh\ned:x:1000:1000:ed:/home/ed:/nsh"
+        /etc/shadow file "root:slix:3b1b8291c0bdb62febcd914f45884bca403ae1c42a4bb1c41755881f3886d158\ned:slix:c638d5b6e91f70b96934aac8d7be42363ce4ea5927f9a9bbbe2d64a8b51926b5"
+        /etc/ttytab file "tty0 login"
+      """,
+      files = RamdiskBinPrograms.loadEmbeddedBinaries(),
+    )
+    val sha = new ShaAccelerator(Runtime.shaAccelAddress)
+    val dma = new DMA(Runtime.dmaAddress, null, intcs(0), irq = 4)
+    val allDevices: Seq[Addressable] = Seq(ram, stdout, timer, ramdisk, sha, dma) ++
+      intcs.toSeq ++ ipis.toSeq ++ extraDevices
+    val mem = new Memory("Memory", allDevices*)
+    dma.mem = mem
+    linked.load(mem)
+    writeBootInfo(mem, bootModules)
+
+    val mmu0 = new SimpleMMU(mem)
+    mmu0.setIdentityRange(0x7FE000L, 0xC00000L)
+    dma.mmu = Some(mmu0)
+
+    val mc = new MultiCore(mem, numCores, coreFactory = (m, id, mon) => {
+      val mmuN = if id == 0 then mmu0 else {
+        val mm = new SimpleMMU(mem)
+        mm.setIdentityRange(0x7FE000L, 0xC00000L)
+        mm
+      }
+      new CPU(m, coreId = id, reservationMonitor = Some(mon), mmu = Some(mmuN))
+    })
+
+    // Core 0: timer + its INTC. Other cores: only their INTC.
+    mc.core(0).tick = Seq(timer, intcs(0))
+    for i <- 1 until numCores do
+      mc.core(i).tick = Seq(intcs(i))
+
+    mc.resetAll()
+    System.err.println(s"SMP: $numCores core(s), per-core INTC + IPI")
+    (mc, mem)
+
   private def executeRun(cmd: RunCommand): Unit =
     val linked = loadTof(cmd)
 
@@ -317,6 +401,14 @@ object TriscCli:
         case None =>
           System.err.println("error: --gui not available on this platform")
           return
+
+    else if cmd.smp > 1 then
+      val (mc, _) = setupMultiCore(linked, cmd.smp)
+      if cmd.trace then mc.core(0).trace = true
+      if cmd.limit > 0 then mc.cores.foreach(_.limit = cmd.limit)
+      mc.runAll()
+      val result = mc.core(0).r(1).read
+      if result != 0 then System.err.println(s"exit: $result")
 
     else
       val (cpu, _) = setupCpu(linked)
