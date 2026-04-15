@@ -233,7 +233,13 @@ HID scancodes for special keys:
             val raw = (evt >> 17) & 1
             if raw == 1
                 if sc != 0
-                    tty_console_push(active_console, byte(sc))
+                    // Translate CR→LF and DEL→BS for terminal compatibility
+                    var rch = sc
+                    if rch == 13
+                        rch = 10
+                    else if rch == 127
+                        rch = 8
+                    tty_console_push(active_console, byte(rch))
             // Only process key presses, not releases
             else if press == 1
                 // Arrow keys → ANSI escape sequences

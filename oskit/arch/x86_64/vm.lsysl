@@ -187,9 +187,17 @@ Returns PML4 address, or 0 on failure.
             j += 1
 
         // PT[0x00..0xCB]: kernel region, identity-mapped (present + writable)
+        // Exception: page 0xBF (PROG_ARGS_ADDR) gets a fresh page so each
+        // process has its own args area (prevents parent/child corruption).
         var i = 0
         while i < 0xCC
-            vm_write_pte64(pt + i * 8, i64(i * PAGE_SIZE) | PTE_P | PTE_W)
+            if i == 0xBF
+                val args_page = page_alloc_zero()
+                if args_page == 0
+                    return 0
+                vm_write_pte64(pt + i * 8, i64(args_page) | PTE_P | PTE_W | PTE_U)
+            else
+                vm_write_pte64(pt + i * 8, i64(i * PAGE_SIZE) | PTE_P | PTE_W)
             i += 1
 
         // PT[0xCC..0xFF]: program region, fresh physical pages (present + writable + user)

@@ -69,11 +69,17 @@ UART -- COM1 serial port at 0x3F8.
         outb(COM1 + 4, byte(0x0B))    // DTR + RTS + OUT2 (OUT2 gates IRQ)
         outb(COM1 + 1, byte(0x01))    // enable receive data interrupt (IER bit 0)
 
-    uart_putc(c: int)
+    uart_putc_raw(c: int)
         var ready = inb(COM1 + 5) & 0x20
         while ready == 0
             ready = inb(COM1 + 5) & 0x20
         outb(COM1, byte(c))
+
+    uart_putc(c: int)
+        // Translate LF → CR+LF for serial terminal
+        if c == 10
+            uart_putc_raw(13)
+        uart_putc_raw(c)
 
     uart_puts(s: string)
         for c in s do uart_putc(int(c))
