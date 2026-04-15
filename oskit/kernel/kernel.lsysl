@@ -131,6 +131,8 @@ loaded by nsh each get their own process entry.
         exit_code: int
         main_tid: int
         name: string
+        syscall_allow_lo: i64
+        syscall_allow_hi: i64
 
     var processes: [16]Process  // 16 = MAX_PROCESSES
     var next_pid = 1
@@ -253,6 +255,44 @@ Used by the scheduler for generic timeout wakeups.
         if num >= 0
             if num < MAX_SYSCALLS
                 syscall_table[num] = handler
+
+Syscall privilege check. Called from the assembly slow-path
+dispatcher before invoking the handler. Returns 1 if allowed,
+0 if denied. Kernel threads (PID 0) and processes with the bit
+set in their allow mask are permitted. Bits 0-63 in lo, 64-95
+in hi.
+
+    syscall_check_allowed(num: int) -> int
+        if current_thread < 0
+            return 1
+        val pid = threads[current_thread].pid
+        if pid <= 0
+            return 1
+        if num < 64
+            val mask = processes[pid].syscall_allow_lo
+            if (mask & (i64(1) << num)) != 0
+                return 1
+            return 0
+        val bit = num - 64
+        val mask = processes[pid].syscall_allow_hi
+        if (mask & (i64(1) << bit)) != 0
+            return 1
+        0
+
+Set the syscall allow mask for a process. Called by RS before
+resuming a server. Arg = pointer to [pid(i64), lo(i64), hi(i64)].
+
+    sys_set_priv_handler(arg: int)
+        var args: *i64 = *i64(i64(arg))
+        val pid = int(args[0])
+        val lo = args[1]
+        val hi = args[2]
+        if pid > 0
+            if pid < MAX_PROCESSES
+                processes[pid].syscall_allow_lo = lo
+                processes[pid].syscall_allow_hi = hi
+        syscall_return(0)
+        kernel_continue_current()
 
 Get a thread's page table base register.
 
@@ -606,6 +646,7 @@ Used by ps and other user programs via ulib.
         // syscall 65 (ipc_last_msg_len) is registered by ipc_init
         register_syscall(66, sys_vm_v2p_handler)
         register_syscall(67, sys_phys_read_handler)
+        register_syscall(69, sys_set_priv_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events
@@ -895,6 +936,8 @@ process ID (0 for kernel threads).
         processes[pid].exit_code = 0
         processes[pid].main_tid = tid
         processes[pid].name = threads[tid].name
+        processes[pid].syscall_allow_lo = i64(-1)
+        processes[pid].syscall_allow_hi = i64(-1)
 
         // Link thread to process
         threads[tid].pid = pid
@@ -985,6 +1028,9 @@ Unlike create_process, the thread is never enqueued — no race.
         processes[pid].exit_code = 0
         processes[pid].main_tid = tid
         processes[pid].name = threads[tid].name
+        // Default: all syscalls allowed. RS restricts servers after creation.
+        processes[pid].syscall_allow_lo = i64(-1)
+        processes[pid].syscall_allow_hi = i64(-1)
 
         // Link thread to process
         threads[tid].pid = pid
