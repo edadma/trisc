@@ -1033,7 +1033,7 @@ the process as zombie. Returns 0 on success, -1 on error.
             return -1
         if pid >= MAX_PROCESSES
             return -1
-        if processes[pid].state != PROC_RUNNING
+        if processes[pid].state != 1
             return -1
 
         arch_cli()
