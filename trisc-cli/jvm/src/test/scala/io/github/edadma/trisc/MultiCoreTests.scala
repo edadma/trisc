@@ -227,6 +227,84 @@ class MultiCoreTests extends TestHelpers {
     (intc1.readByte(0x10300) & (1 << 7)) shouldBe (1 << 7)
   }
 
+  "CAS acquires lock and counter increments (single core)" in {
+    // Minimal test: CAS to acquire lock, increment counter, release, halt
+    val prog = assemble(
+      s"""${VECTORS}
+         |movi r1, 0x2000
+         |movi r2, 0x2008
+         |; acquire: CAS(lock, 0, 1)
+         |ldi r3, 0
+         |ldi r4, 1
+         |cas r3, r2, r4
+         |; r3 should be 0 (old value, lock was free)
+         |; lock should now be 1
+         |; increment counter
+         |ldd r3, r1, r0
+         |addi r3, r3, 1
+         |std r3, r1, r0
+         |; release: store 0 to lock
+         |std r0, r2, r0
+         |halt
+         |""".stripMargin)
+
+    val ram = new RAM(0, 0x10000)
+    val mem = new Memory("mem", ram)
+    prog.load(mem)
+    mem.writeLong(0x2000, 0)
+    mem.writeLong(0x2008, 0)
+
+    val cpu = new CPU(mem) { limit = 10000; quiet = true }
+    cpu.reset()
+    cpu.run()
+    cpu.state shouldBe State.Halt
+    mem.readLong(0x2000) shouldBe 1
+    mem.readLong(0x2008) shouldBe 0 // lock released
+  }
+
+  "spinlock protects shared counter across two cores" in {
+    // Both cores increment counter at 0x2000 by 1, 100 times each.
+    // Lock word at 0x2008. Final counter should be 200.
+    val prog = assemble(
+      s"""${VECTORS}
+         |movi r1, 0x2000
+         |movi r2, 0x2008
+         |ldi r3, 100
+         |_loop
+         |  _spin
+         |    ldi r4, 0
+         |    ldi r5, 1
+         |    cas r4, r2, r5
+         |    bne r4, r0, _spin
+         |  ldd r4, r1, r0
+         |  addi r4, r4, 1
+         |  std r4, r1, r0
+         |  std r0, r2, r0
+         |  addi r3, r3, -1
+         |  bne r3, r0, _loop
+         |halt
+         |""".stripMargin)
+
+    val ram = new RAM(0, 0x10000)
+    val mem = new Memory("mem", ram)
+    prog.load(mem)
+    // counter = 0, lock = 0
+    mem.writeLong(0x2000, 0)
+    mem.writeLong(0x2008, 0)
+
+    val mc = new MultiCore(mem, numCores = 2)
+    mc.core(0).limit = 1000000
+    mc.core(0).quiet = true
+    mc.core(1).limit = 1000000
+    mc.core(1).quiet = true
+    mc.resetAll()
+    mc.runAll()
+
+    mc.core(0).state shouldBe State.Halt
+    mc.core(1).state shouldBe State.Halt
+    mem.readLong(0x2000) shouldBe 200
+  }
+
   "IPI SELF_ID readable from each core's device" in {
     val intcs = Array(new InterruptController(0x10200), new InterruptController(0x10300))
     val ipi0 = new IPI(0x10400, selfCoreId = 0, intcs)
