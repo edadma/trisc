@@ -19,14 +19,16 @@ info structure. Sector size is 4096 bytes (matches TFS).
 
     val SECTOR_SIZE = 4096
 
-Multiboot module address getters (defined in boot.s).
-
-    extern get_mboot_mod_start() -> int
-    extern get_mboot_mod_end() -> int
-
     var disk_port = -1
     var disk_base = 0
     var disk_size = 0
+
+Set ramdisk base address and size. Called before disk_server()
+by the wrapper (kernel thread or isolated process).
+
+    disk_set_ramdisk(base: int, size: int)
+        disk_base = base
+        disk_size = size
 
 Parse a 4-byte big-endian integer from a message buffer.
 
@@ -100,8 +102,8 @@ The disk server loop. Reads module addresses from boot globals,
 creates port, then loops handling block I/O requests.
 
     disk_server()
-        disk_base = get_mboot_mod_start()
-        disk_size = get_mboot_mod_end() - disk_base
+        // disk_base and disk_size must be set via disk_set_ramdisk()
+        // before calling this function.
 
         // Create and register port
         var name: [5]byte

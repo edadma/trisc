@@ -104,10 +104,15 @@ echo "=== Built: $OUT/kernel.elf ($APP) ==="
 if [ "$RUN" = "run" ]; then
     echo "=== QEMU (Ctrl-A X to quit) ==="
     QEMU_ARGS="-kernel $OUT/kernel.elf -serial stdio -no-reboot -display none"
-    # Load ramdisk as multiboot module if it exists
+    # Load ramdisk (module 0) and boot info (module 1) as multiboot modules
     if [ -f "$OUT/ramdisk.img" ]; then
-        QEMU_ARGS="$QEMU_ARGS -initrd $OUT/ramdisk.img"
-        echo "    (with ramdisk module)"
+        if [ -f "$OUT/bootinfo.img" ]; then
+            QEMU_ARGS="$QEMU_ARGS -initrd $OUT/ramdisk.img,$OUT/bootinfo.img"
+            echo "    (with ramdisk + boot info modules)"
+        else
+            QEMU_ARGS="$QEMU_ARGS -initrd $OUT/ramdisk.img"
+            echo "    (with ramdisk module)"
+        fi
     fi
     exec qemu-system-x86_64 $QEMU_ARGS
 fi

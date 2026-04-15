@@ -214,7 +214,17 @@ This is a placeholder — real x86_64 I/O uses port I/O (already
 in boot.s) not MMIO. Stubbed for interface compatibility.
 
     vm_create_server_pt(io_page: int) -> int
-        vm_create_process_pt()
+        val pml4 = vm_create_process_pt()
+        if pml4 == 0
+            return 0
+        // Grant user access to page 0xBF (0xBF000) for RS info page
+        // (RS TID, ramdisk base/size written before server starts)
+        val pdpt = int(vm_read_pte64(pml4) & PTE_ADDR_MASK)
+        val pd = int(vm_read_pte64(pdpt) & PTE_ADDR_MASK)
+        val pt = int(vm_read_pte64(pd) & PTE_ADDR_MASK)
+        val old_pte = vm_read_pte64(pt + 0xBF * 8)
+        vm_write_pte64(pt + 0xBF * 8, old_pte | PTE_U)
+        pml4
 
 
 Free all pages allocated for a process page table.

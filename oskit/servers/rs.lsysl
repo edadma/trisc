@@ -23,9 +23,11 @@ starts the next server.
     import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp}
     import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_set_thread_ptbr, svc_vm_set_ptbr}
     import oskit.ipc.{ipc_recv_notify, port_create}
-    import oskit.config.{BOOT_INFO_ADDR, KERNEL_L1_BASE}
+    import oskit.config.{BOOT_INFO_ADDR}
+    import oskit.arch.kernel_ptbr
     import oskit.hal.memset
-    import oskit.drivers.disk.{disk_server}
+    import oskit.loader.load_elf64_to_ptbr
+    import oskit.drivers.disk.{disk_server, disk_set_ramdisk}
     import oskit.drivers.tty.{tty_server}
 
 Stack slot counter. Slot 0 is RS (created by kernel_main).
@@ -37,9 +39,21 @@ Init function pointer. Set by kernel_main before starting RS
 to avoid circular module dependency (RS → init → nsh → pm → RS).
 
     var rs_init_fn: i64 = 0
+    var rs_boot_info_addr = BOOT_INFO_ADDR
+    var rs_boot_info_relative = 0  // 1 if addrs in header are offsets from base
+    var rs_ramdisk_base = 0
+    var rs_ramdisk_size = 0
 
     rs_set_init_fn(fn: i64)
         rs_init_fn = fn
+
+    rs_set_boot_info_base(addr: int)
+        rs_boot_info_addr = addr
+        rs_boot_info_relative = 1
+
+    rs_set_ramdisk_info(base: int, size: int)
+        rs_ramdisk_base = base
+        rs_ramdisk_size = size
 
     rs_alloc_slot() -> int
         val s = rs_next_slot
@@ -115,7 +129,7 @@ and per-module entries (name, addr, size).
 Check if boot info header is valid (magic = "SLIX").
 
     rs_boot_info_valid() -> bool
-        val p = *byte(BOOT_INFO_ADDR)
+        val p = *byte(rs_boot_info_addr)
         if p[0] != byte('S')
             return false
         if p[1] != byte('L')
@@ -129,7 +143,7 @@ Check if boot info header is valid (magic = "SLIX").
 Get boot module count from boot info header.
 
     rs_boot_module_count() -> int
-        val p = *byte(BOOT_INFO_ADDR + 4)
+        val p = *byte(rs_boot_info_addr + 4)
         int(rs_read_u32_le(p))
 
 Find a boot module by name. Returns index or -1.
@@ -138,7 +152,7 @@ Find a boot module by name. Returns index or -1.
         val count = rs_boot_module_count()
         var i = 0
         while i < count
-            val entry = *byte(BOOT_INFO_ADDR + 8 + i * 24)
+            val entry = *byte(rs_boot_info_addr + 8 + i * 24)
             // Compare name (first nlen bytes, NUL-padded)
             var found = true
             var j = 0
@@ -162,10 +176,14 @@ Find a boot module by name. Returns index or -1.
 Get a boot module's physical address and size.
 
     rs_boot_module_addr(idx: int) -> i64
-        rs_read_i64_le(*byte(BOOT_INFO_ADDR + 8 + idx * 24 + 8))
+        val raw = rs_read_i64_le(*byte(rs_boot_info_addr + 8 + idx * 24 + 8))
+        if rs_boot_info_relative == 1
+            raw + i64(rs_boot_info_addr)
+        else
+            raw
 
     rs_boot_module_size(idx: int) -> int
-        int(rs_read_i64_le(*byte(BOOT_INFO_ADDR + 8 + idx * 24 + 16)))
+        int(rs_read_i64_le(*byte(rs_boot_info_addr + 8 + idx * 24 + 16)))
 
 Load a TRB v1 boot module into a process address space.
 Parses the TRB header from kernel-space RAM, copies PROGBITS
@@ -245,8 +263,15 @@ Returns 1 on success, 0 on failure.
         if ptbr == 0
             return 0
 
-        // Load TRB into process address space (RS stays on kernel PTBR)
-        val entry = rs_load_trb_module(buf, sz, ptbr)
+        // Detect format and load binary into process address space
+        var entry: i64 = -1
+        if buf[0] == 0x7F
+            if buf[1] == byte('E')
+                // ELF64 format (x86_64)
+                entry = load_elf64_to_ptbr(buf, sz, ptbr)
+        if entry < 0
+            // Try TRB format (TRISC)
+            entry = rs_load_trb_module(buf, sz, ptbr)
         if entry < 0
             return 0
 
@@ -262,16 +287,22 @@ Returns 1 on success, 0 on failure.
         val pid = svc_create_proc_susp(entry, RS_PROG_USP, RS_PROG_SSP, sname, ptbr)
 
         // Switch back to kernel address space
-        svc_set_thread_ptbr(my_tid, KERNEL_L1_BASE)
-        svc_vm_set_ptbr(KERNEL_L1_BASE)
+        svc_set_thread_ptbr(my_tid, kernel_ptbr())
+        svc_vm_set_ptbr(kernel_ptbr())
 
         if pid < 0
             return 0
 
-        // Write RS TID at 0xBF000 so server can call rs_set_tid on startup
-        var tid_buf: [8]byte
-        *(*i64(&tid_buf[0])) = i64(thread_id())
-        svc_vm_copy_to(ptbr, 0xBF000, &tid_buf[0], 8)
+        // Write RS info page at 0xBF000:
+        //   +0: RS TID (i64)
+        //   +8: ramdisk base (i64) — used by disk server
+        //  +16: ramdisk size (i64) — used by disk server
+        var info_buf: [24]byte
+        var ip: *i64 = *i64(&info_buf[0])
+        ip[0] = i64(thread_id())
+        ip[1] = i64(rs_ramdisk_base)
+        ip[2] = i64(rs_ramdisk_size)
+        svc_vm_copy_to(ptbr, 0xBF000, &info_buf[0], 24)
 
         // Resume the process
         svc_resume_proc(pid)

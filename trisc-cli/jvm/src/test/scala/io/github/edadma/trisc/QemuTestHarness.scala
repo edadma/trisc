@@ -31,8 +31,12 @@ class QemuTestHarness(
     cmd.add("-display")
     cmd.add("none")
     if new java.io.File(ramdiskPath).exists() then
+      val bootInfoPath = ramdiskPath.replace("ramdisk.img", "bootinfo.img")
       cmd.add("-initrd")
-      cmd.add(ramdiskPath)
+      if new java.io.File(bootInfoPath).exists() then
+        cmd.add(s"$ramdiskPath,$bootInfoPath")
+      else
+        cmd.add(ramdiskPath)
 
     val pb = new ProcessBuilder(cmd)
     pb.redirectErrorStream(true)

@@ -69,8 +69,12 @@ idt:    .skip 4096
 # Multiboot module info (filled by boot code)
 .global mboot_mod_start
 .global mboot_mod_end
-mboot_mod_start: .skip 8    # physical address of first module
+mboot_mod_start: .skip 8    # physical address of first module (ramdisk)
 mboot_mod_end:   .skip 8    # end address of first module
+.global mboot_mod1_start
+.global mboot_mod1_end
+mboot_mod1_start: .skip 8   # physical address of second module (boot info)
+mboot_mod1_end:   .skip 8   # end address of second module
 
 # ============================================================================
 # 32-bit entry point
@@ -175,10 +179,20 @@ entry64:
     testl %ecx, %ecx
     jz .no_modules
     movl 24(%rax), %edx        # mods_addr (pointer to module array)
+    # Module 0 (ramdisk)
     movl (%rdx), %ecx          # mod_start (first module)
     movl 4(%rdx), %ebx         # mod_end
     movq %rcx, mboot_mod_start(%rip)
     movq %rbx, mboot_mod_end(%rip)
+    # Module 1 (boot info) — each entry is 16 bytes
+    movl 20(%rax), %ecx        # reload mods_count
+    cmpl $2, %ecx
+    jl .no_mod1
+    movl 16(%rdx), %ecx        # mod1_start (second entry at offset 16)
+    movl 20(%rdx), %ebx        # mod1_end
+    movq %rcx, mboot_mod1_start(%rip)
+    movq %rbx, mboot_mod1_end(%rip)
+.no_mod1:
 .no_modules:
 
     # Initialize UART, PIC, PIT, IDT
@@ -654,6 +668,16 @@ get_mboot_mod_start:
 .global get_mboot_mod_end
 get_mboot_mod_end:
     movq mboot_mod_end(%rip), %rax
+    retq
+
+.global get_mboot_mod1_start
+get_mboot_mod1_start:
+    movq mboot_mod1_start(%rip), %rax
+    retq
+
+.global get_mboot_mod1_end
+get_mboot_mod1_end:
+    movq mboot_mod1_end(%rip), %rax
     retq
 
 # ============================================================================

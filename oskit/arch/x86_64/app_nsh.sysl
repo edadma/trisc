@@ -3,11 +3,16 @@
 // init which runs nsh. External commands go through PM → loader.
 
 import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp, first_thread_ssp}
-import oskit.servers.{rs_main, rs_set_init_fn}
+import oskit.servers.{rs_main, rs_set_init_fn, rs_set_boot_info_base, rs_set_ramdisk_info}
+import oskit.drivers.disk.disk_set_ramdisk
 import oskit.apps.nsh.nsh
 import oskit.services.rs_ready
 import oskit.arch.x86_64.uart_puts
 import oskit.ipc.ipc_init
+
+extern get_mboot_mod_start() -> int
+extern get_mboot_mod_end() -> int
+extern get_mboot_mod1_start() -> int
 
 // Init function for x86_64: signal RS that init is ready, then run nsh.
 // RS creates this as the last kernel thread after all servers are up.
@@ -17,6 +22,18 @@ x86_init()
 
 kernel_main() -> i64
     ipc_init()
+
+    // Set ramdisk address for disk server (both kernel-thread and isolated modes)
+    val rd_base = get_mboot_mod_start()
+    val rd_size = get_mboot_mod_end() - rd_base
+    disk_set_ramdisk(rd_base, rd_size)
+    rs_set_ramdisk_info(rd_base, rd_size)
+
+    // If boot info module exists (second multiboot module), tell RS
+    val boot_info = get_mboot_mod1_start()
+    if boot_info != 0
+        rs_set_boot_info_base(boot_info)
+
     rs_set_init_fn(i64(x86_init))
     create_thread(i64(rs_main), kernel_stack_usp(0), kernel_stack_ssp(0), "rs")
     uart_puts("[kernel_main] RS thread created\n")
