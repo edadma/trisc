@@ -81,6 +81,7 @@ Statistics fields track per-thread performance:
         state: int
         wake_tick: int
         name: string
+        name_buf: [16]byte
         priority: int
         join_target: int
         quantum: int
@@ -292,14 +293,27 @@ No args. Returns L1 base address.
 SYS_CREATE_PROC_SUSP (45): Create a process suspended.
 Arg = pointer to packed args: [entry(i64), usp(i64), ssp(i64), name(*byte), ptbr(i64)]
 
+    var syscall_name_tmp: [16]byte
+
     sys_create_proc_susp_handler(arg: int)
         var args: *i64 = *i64(i64(arg))
         val entry = args[0]
         val usp = args[1]
         val ssp = args[2]
         val name_ptr = *byte(args[3])
-        val name_len = int(args[4])
-        val name = string(name_ptr, name_len)
+        var name_len = int(args[4])
+        if name_len > 15
+            name_len = 15
+        // Copy name from caller's address space into kernel buffer
+        // (caller's PTBR is active now; create_process_suspended
+        // runs with cli and the name pointer may not be accessible
+        // from the kernel's identity-mapped pages)
+        var ni = 0
+        while ni < name_len
+            syscall_name_tmp[ni] = name_ptr[ni]
+            ni += 1
+        syscall_name_tmp[ni] = 0
+        val name = string(&syscall_name_tmp[0], name_len)
         val ptbr = int(args[5])
         val result = create_process_suspended(entry, usp, ssp, name, ptbr)
         syscall_return(result)
@@ -505,7 +519,17 @@ Used by ps and other user programs via ulib.
         kernel_continue_current()
 
     sys_thread_name_handler(arg: int)
-        syscall_return(i64(query_thread_name(arg)))
+        // Copy name to caller's args page (0xBF000) so user processes
+        // can read it — kernel BSS has no PTE_U on x86_64.
+        val src = query_thread_name(arg)
+        val nlen = query_thread_name_len(arg)
+        val dst = *byte(0xBF100)  // past args area in user page
+        var ni = 0
+        while ni < nlen
+            dst[ni] = src[ni]
+            ni += 1
+        dst[ni] = 0
+        syscall_return(i64(dst))
         kernel_continue_current()
 
     sys_thread_pid_handler(arg: int)
@@ -701,7 +725,18 @@ would monotonically bump thread_count and walk off the end of threads[].
         threads[idx].ssp = sp
         threads[idx].state = STATE_READY
         threads[idx].wake_tick = 0
-        threads[idx].name = name
+        // Copy name into kernel-owned buffer (caller's pointer may be
+        // in an isolated server's address space and become invalid)
+        val np = *byte(name)
+        var nlen = len(name)
+        if nlen > 15
+            nlen = 15
+        var ni = 0
+        while ni < nlen
+            threads[idx].name_buf[ni] = np[ni]
+            ni += 1
+        threads[idx].name_buf[ni] = 0
+        threads[idx].name = string(threads[idx].name_buf[:nlen])
         threads[idx].priority = priority
         threads[idx].join_target = -1
         threads[idx].quantum = DEFAULT_QUANTUM
@@ -834,13 +869,13 @@ process ID (0 for kernel threads).
         if tid < 0
             return -1
 
-        // Set up process entry
+        // Set up process entry (use thread's kernel-owned name copy)
         processes[pid].state = PROC_RUNNING
         processes[pid].ptbr = ptbr_val
         processes[pid].parent_tid = current_thread
         processes[pid].exit_code = 0
         processes[pid].main_tid = tid
-        processes[pid].name = name
+        processes[pid].name = threads[tid].name
 
         // Link thread to process
         threads[tid].pid = pid
@@ -894,7 +929,16 @@ Unlike create_process, the thread is never enqueued — no race.
         threads[idx].ssp = ssp - STACK_FRAME_SIZE
         threads[idx].state = STATE_SUSPENDED
         threads[idx].wake_tick = 0
-        threads[idx].name = name
+        val np2 = *byte(name)
+        var nlen2 = len(name)
+        if nlen2 > 15
+            nlen2 = 15
+        var ni2 = 0
+        while ni2 < nlen2
+            threads[idx].name_buf[ni2] = np2[ni2]
+            ni2 += 1
+        threads[idx].name_buf[ni2] = 0
+        threads[idx].name = string(threads[idx].name_buf[:nlen2])
         threads[idx].priority = 0
         threads[idx].join_target = -1
         threads[idx].quantum = DEFAULT_QUANTUM
@@ -915,13 +959,13 @@ Unlike create_process, the thread is never enqueued — no race.
         // No sti — slow-path handler keeps cli; do_schedule does sti
         val tid = idx
 
-        // Set up process entry
+        // Set up process entry (use thread's kernel-owned name copy)
         processes[pid].state = PROC_RUNNING
         processes[pid].ptbr = ptbr_val
         processes[pid].parent_tid = current_thread
         processes[pid].exit_code = 0
         processes[pid].main_tid = tid
-        processes[pid].name = name
+        processes[pid].name = threads[tid].name
 
         // Link thread to process
         threads[tid].pid = pid
