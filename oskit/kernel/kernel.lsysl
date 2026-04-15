@@ -280,6 +280,23 @@ in hi.
             return 1
         0
 
+IPC send permission check. Called from IPC send handlers.
+Returns 1 if the current process is allowed to send to the
+given port, 0 if denied. Kernel threads (PID 0) always pass.
+
+    ipc_check_send_allowed(port: int) -> int
+        if current_thread < 0
+            return 1
+        val pid = threads[current_thread].pid
+        if pid <= 0
+            return 1
+        val mask = processes[pid].ipc_send_mask
+        val bit = 1 << port
+        val result = mask & bit
+        if result != 0
+            return 1
+        0
+
 Set the privilege masks for a process. Called by RS before
 resuming a server. Arg = pointer to [pid(i64), lo(i64), hi(i64), ipc_mask(i64)].
 

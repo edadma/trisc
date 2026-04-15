@@ -120,8 +120,8 @@ Port IDs are stored in rs_server_ports[] (looked up by name).
         svc_set_ipc_mask(rs_server_pids[2], 0)
         // pm: sends to vfs
         svc_set_ipc_mask(rs_server_pids[3], 1 << vfs_port)
-        // vfs: sends to tfs
-        svc_set_ipc_mask(rs_server_pids[4], 1 << tfs_port)
+        // vfs: sends to tfs and tty
+        svc_set_ipc_mask(rs_server_pids[4], (1 << tfs_port) | (1 << tty_port))
         // init: sends to pm, vfs
         svc_set_ipc_mask(rs_server_pids[5], (1 << pm_port) | (1 << vfs_port))
 
@@ -545,8 +545,16 @@ After boot, RS stays alive in a monitoring loop.
 
             rs_print(" [mod]")
             rs_wait_ready()
-            // Record server's port for transparent restart
-            rs_server_ports[i] = port_lookup(name)
+            // Record server's port for transparent restart.
+            // VFS registers as "fs" (not "vfs") — use correct port name.
+            if i == 4
+                var fs_name: [3]byte
+                fs_name[0] = 102  // f
+                fs_name[1] = 115  // s
+                fs_name[2] = 0
+                rs_server_ports[i] = port_lookup(&fs_name[0])
+            else
+                rs_server_ports[i] = port_lookup(name)
             rs_print(" ok\n")
             i += 1
 
