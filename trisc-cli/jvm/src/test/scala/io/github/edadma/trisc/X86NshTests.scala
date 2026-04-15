@@ -69,6 +69,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("tty0 nsh")
   }
 
+
   "x86 nsh: whoami" taggedAs Slow in {
     val output = qemu.command("whoami")
     // root user prints "0" or "root"

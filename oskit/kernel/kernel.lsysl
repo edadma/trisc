@@ -930,8 +930,9 @@ Resume a suspended process (created with create_process_suspended).
         threads[current_thread].join_target = tid
         threads[current_thread].consec_quanta = 0
 
-    getpid_current() -> i64
-        threads[current_thread].pid
+    getpid_current(arg: int)
+        syscall_return(threads[current_thread].pid)
+        kernel_continue_current()
 
 Kill a process by PID. Terminates its main thread and marks
 the process as zombie. Returns 0 on success, -1 on error.
