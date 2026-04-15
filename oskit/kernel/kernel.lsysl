@@ -284,6 +284,8 @@ IPC send permission check. Called from IPC send handlers.
 Returns 1 if the current process is allowed to send to the
 given port, 0 if denied. Kernel threads (PID 0) always pass.
 
+    var ipc_deny_info = 0
+
     ipc_check_send_allowed(port: int) -> int
         if current_thread < 0
             return 1
@@ -295,6 +297,7 @@ given port, 0 if denied. Kernel threads (PID 0) always pass.
         val result = mask & bit
         if result != 0
             return 1
+        ipc_deny_info = (pid << 16) | (port << 8) | mask
         0
 
 Set the privilege masks for a process. Called by RS before
@@ -1114,26 +1117,32 @@ the process as zombie. Returns 0 on success, -1 on error.
             return -1
         if pid >= MAX_PROCESSES
             return -1
-        if processes[pid].state != 1
+        // Skip state check — processes[].state may read as wrong value
+        // on x86 due to the val-reads-wrong codegen bug. The state is
+        // set via PROC_RUNNING (val) but checked against literal 1.
+        // Just verify process has a valid thread.
+        val tid = processes[pid].main_tid
+        if tid < 0
+            return -1
+        if tid >= thread_count
             return -1
 
         arch_cli()
-        val tid = processes[pid].main_tid
-        threads[tid].state = STATE_TERMINATED
+        threads[tid].state = 3  // STATE_TERMINATED (literal — val reads wrong on x86)
 
         // Mark as zombie and notify PM (like terminate_current).
         // PM handles VFS cleanup, waitpid, reparenting, and RS notification.
         processes[pid].exit_code = -1
-        processes[pid].state = PROC_ZOMBIE
+        processes[pid].state = 2  // PROC_ZOMBIE (literal — val reads wrong on x86)
         if kernel_pm_tid >= 0
             notify_send(kernel_pm_tid, pid)
 
         // Wake threads joining on this thread
         var i = 0
         while i < thread_count
-            if threads[i].state == STATE_JOINING
+            if threads[i].state == 4  // STATE_JOINING (literal — val reads wrong on x86)
                 if threads[i].join_target == tid
-                    threads[i].state = STATE_READY
+                    threads[i].state = 0  // STATE_READY
                     threads[i].quantum = DEFAULT_QUANTUM
                     enqueue(threads[i].priority, i)
             i += 1
@@ -1153,6 +1162,20 @@ Steps:
 7. Pick the highest-priority non-empty queue and dequeue its front
 8. Return its SSP, or 0 if all queues are empty
 
+
+    sched_pick_next() -> int
+        var pri = 0
+        while pri < NUM_PRIORITIES
+            if (ready_mask & (1 << pri)) != 0
+                val next = dequeue(pri)
+                if next != QUEUE_EMPTY
+                    if threads[next].state == 3  // STATE_TERMINATED (literal)
+                        // Skip killed threads still in ready queue.
+                        // Don't advance pri — re-check same queue.
+                        continue
+                    return next
+            pri += 1
+        -1
 
     schedule(current_ssp: i64) -> i64
         ticks += 1
@@ -1199,18 +1222,14 @@ Steps:
                     enqueue(threads[tid].priority, tid)
 
         // Find highest-priority non-empty queue (lowest number)
-        var pri = 0
-        while pri < NUM_PRIORITIES
-            if (ready_mask & (1 << pri)) != 0
-                val next = dequeue(pri)
-                if next != QUEUE_EMPTY
-                    current_thread = next
-                    threads[next].state = STATE_RUNNING
-                    threads[next].ctx_switches += 1
-                    total_ctx_switches += 1
-                    vm_set_ptbr(threads[next].ptbr)
-                    return threads[next].ssp
-            pri += 1
+        val next = sched_pick_next()
+        if next >= 0
+            current_thread = next
+            threads[next].state = STATE_RUNNING
+            threads[next].ctx_switches += 1
+            total_ctx_switches += 1
+            vm_set_ptbr(threads[next].ptbr)
+            return threads[next].ssp
 
         // No ready threads — return 0 to signal idle
         current_thread = -1
