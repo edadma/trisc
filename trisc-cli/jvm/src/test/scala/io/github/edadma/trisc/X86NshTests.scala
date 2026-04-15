@@ -92,4 +92,29 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     val output = qemu.command("echo second")
     output should include("second")
   }
+
+  "x86 crash recovery: kill tfs and restart" in {
+    // Verify tfs works
+    val before = qemu.command("cat /etc/ttytab")
+    before should include("tty0 login")
+
+    // Find tfs PID from ps output
+    val psOut = qemu.command("ps")
+    // Parse ps output to find tfs PID (format: "  <tid> <pid> <state> <name>")
+    val tfsLine = psOut.split('\n').find(_.contains("tfs"))
+    tfsLine shouldBe defined
+    // Extract PID (second number on the line)
+    val nums = tfsLine.get.trim.split("\\s+")
+    val tfsPid = nums(1) // PID is second column
+
+    // Kill tfs
+    qemu.command(s"kill $tfsPid")
+
+    // Wait for RS restart message
+    Thread.sleep(500)
+
+    // Verify tfs works again after restart
+    val after = qemu.command("cat /etc/ttytab")
+    after should include("tty0 login")
+  }
 }
