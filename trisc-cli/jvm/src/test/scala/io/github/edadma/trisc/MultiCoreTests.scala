@@ -203,4 +203,36 @@ class MultiCoreTests extends TestHelpers {
     mc.core(0).tick.length shouldBe 2
     mc.core(1).tick.length shouldBe 1
   }
+
+  // ===== IPI device =====
+
+  "IPI device: core 0 sends IPI to core 1 via INTC" in {
+    // Per-core INTCs
+    val intc0 = new InterruptController(0x10200)
+    val intc1 = new InterruptController(0x10300)
+    val intcs = Array(intc0, intc1)
+
+    // IPI devices (one per core, at different offsets)
+    val ipi0 = new IPI(0x10400, selfCoreId = 0, intcs)
+    val ipi1 = new IPI(0x10410, selfCoreId = 1, intcs)
+
+    val ram = new RAM(0, 0x10000)
+    val mem = new Memory("mem", ram, intc0, intc1, ipi0, ipi1)
+
+    // Core 0 writes target=1, then sends IPI
+    ipi0.writeInt(0x10400, 1)      // TARGET = core 1
+    ipi0.writeByte(0x10400 + 8, 1) // COMMAND = send
+
+    // Core 1's INTC should have IRQ 7 pending
+    (intc1.readByte(0x10300) & (1 << 7)) shouldBe (1 << 7)
+  }
+
+  "IPI SELF_ID readable from each core's device" in {
+    val intcs = Array(new InterruptController(0x10200), new InterruptController(0x10300))
+    val ipi0 = new IPI(0x10400, selfCoreId = 0, intcs)
+    val ipi1 = new IPI(0x10410, selfCoreId = 1, intcs)
+
+    ipi0.readInt(0x10400 + 12) shouldBe 0
+    ipi1.readInt(0x10410 + 12) shouldBe 1
+  }
 }
