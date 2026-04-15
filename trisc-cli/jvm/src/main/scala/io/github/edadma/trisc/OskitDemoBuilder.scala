@@ -64,50 +64,157 @@ object OskitDemoBuilder:
         "oskit/sync/semaphore"        -> semaphoreSysl,
         "oskit/sync/mutex"            -> mutexSysl,
         "oskit/ipc/ipc"               -> ipcSysl,
-        "oskit/drivers/disk/disk"     -> diskSysl,
         "oskit/drivers/kbd/keyboard"  -> kbdSysl,
-        "oskit/drivers/tty/tty"       -> ttySysl,
-        "oskit/fs/tfs"                -> tfsSysl,
-        "oskit/fs/client"             -> fsClientSysl,
-        "oskit/servers/tfs"           -> tfsSrvSysl,
-        "oskit/servers/pm"            -> pmSrvSysl,
-        "oskit/servers/vfs"           -> vfsSrvSysl,
-        "oskit/servers/rs"            -> rsSrvSysl,
         "posix/unistd/sbrk"           -> sbrkSysl,
         "posix/string/string"         -> posixStringSysl,
         "posix/ctype/ctype"           -> posixCtypeSysl,
         "posix/stdlib/alloc"          -> posixAllocSysl,
-        "std/debug/debug"             -> debugSysl,
-        "std/mem/mem"                 -> memSysl,
         "oskit/hal/mem"               -> halMemSysl,
-        "oskit/arch/vm"         -> archVmSysl,
-        "oskit/arch/cpu"        -> archCpuSysl,
+        "oskit/arch/vm"               -> archVmSysl,
+        "oskit/arch/cpu"              -> archCpuSysl,
         "oskit/config/config"         -> configSysl,
-        "std/encoding/binary/binary"  -> binarySysl,
-        "std/strings/strings"         -> stringsSysl,
-        "std/builder/builder"         -> builderSysl,
-        "std/strconv/strconv"         -> strconvSysl,
-        "std/result/result"           -> resultSysl,
-        "std/errors/errors"           -> errorsSysl,
-        "std/utf8/utf8"               -> utf8Sysl,
-        "oskit/loader/loader"         -> loaderSysl,
-        "std/alloc/alloc"             -> stdAllocSysl,
-        "std/crypto/sha256/sha256"    -> sha256Sysl,
-        "std/crypto/hmac/hmac"        -> hmacSysl,
-        "std/crypto/pbkdf2/pbkdf2"    -> pbkdf2Sysl,
-        "oskit/apps/init/init"        -> initSysl,
         "app" ->
           """import oskit.kernel.*
 import oskit.ipc.*
 import oskit.drivers.kbd.{keyboard_init}
-import oskit.servers.{rs_main, rs_set_init_fn}
-import oskit.apps.init.{init}
+import oskit.config.{BOOT_INFO_ADDR}
+import oskit.arch.{vm_copy_to, vm_create_server_pt}
+import oskit.hal.memset
+            |
+            |// Read little-endian u32 from byte pointer
+            |k_read_u32(p: *byte) -> i64
+            |    i64(p[0] & 0xff) | (i64(p[1] & 0xff) << 8) | (i64(p[2] & 0xff) << 16) | (i64(p[3] & 0xff) << 24)
+            |
+            |k_read_i64(p: *byte) -> i64
+            |    k_read_u32(p) | (k_read_u32(p + 4) << 32)
+            |
+            |// Write little-endian i64 to byte pointer
+            |k_write_i64(p: *byte, v: i64)
+            |    p[0] = byte(v)
+            |    p[1] = byte(v >> 8)
+            |    p[2] = byte(v >> 16)
+            |    p[3] = byte(v >> 24)
+            |    p[4] = byte(v >> 32)
+            |    p[5] = byte(v >> 40)
+            |    p[6] = byte(v >> 48)
+            |    p[7] = byte(v >> 56)
+            |
+            |// Load TRB v1 binary from memory into a target page table.
+            |// Returns entry point or -1 on error.
+            |k_load_trb(buf: *byte, buflen: int, ptbr: int) -> i64
+            |    if buflen < 12
+            |        return -1
+            |    if buf[0] != byte('T')
+            |        return -1
+            |    if buf[1] != byte('R')
+            |        return -1
+            |    if buf[2] != byte('B')
+            |        return -1
+            |    if buf[3] != byte(1)
+            |        return -1
+            |    val entry = k_read_u32(buf + 4)
+            |    val nrec = int(k_read_u32(buf + 8))
+            |    var pos = 12
+            |    var ri = 0
+            |    while ri < nrec
+            |        if pos + 12 > buflen
+            |            return -1
+            |        val hp = buf + pos
+            |        val org = int(k_read_u32(hp))
+            |        val kind = int(k_read_u32(hp + 4))
+            |        val sz = int(k_read_u32(hp + 8))
+            |        pos += 12
+            |        if kind == 0
+            |            if pos + sz > buflen
+            |                return -1
+            |            vm_copy_to(ptbr, org, buf + pos, sz)
+            |            pos += sz
+            |        else if kind == 1
+            |            var zero_buf: [1024]byte
+            |            memset(&zero_buf[0], 0, 1024)
+            |            var rem = sz
+            |            var dst = org
+            |            while rem > 0
+            |                var chunk = rem
+            |                if chunk > 1024
+            |                    chunk = 1024
+            |                vm_copy_to(ptbr, dst, &zero_buf[0], chunk)
+            |                rem -= chunk
+            |                dst += chunk
+            |        else
+            |            return -1
+            |        ri += 1
+            |    entry
             |
             |kernel_main() -> int
             |    ipc_init()
             |    keyboard_init()
-            |    rs_set_init_fn(i64(init))
-            |    create_thread(rs_main, kernel_stack_usp(0), kernel_stack_ssp(0), "rs")
+            |
+            |    // --- Bootstrap RS from boot info ---
+            |    val bi = *byte(BOOT_INFO_ADDR)
+            |    // Verify SLIX magic
+            |    if bi[0] != byte('S')
+            |        return -1
+            |    if bi[1] != byte('L')
+            |        return -1
+            |    if bi[2] != byte('I')
+            |        return -1
+            |    if bi[3] != byte('X')
+            |        return -1
+            |
+            |    // Find "rs" module in boot info
+            |    val mod_count = int(k_read_u32(bi + 4))
+            |    var rs_idx = -1
+            |    var mi = 0
+            |    while mi < mod_count
+            |        val entry = bi + 8 + mi * 24
+            |        if entry[0] == byte('r')
+            |            if entry[1] == byte('s')
+            |                if entry[2] == 0
+            |                    rs_idx = mi
+            |        mi += 1
+            |    if rs_idx < 0
+            |        return -1
+            |
+            |    // Get RS module address and size
+            |    val rs_entry = bi + 8 + rs_idx * 24
+            |    val rs_addr = int(k_read_i64(rs_entry + 8))
+            |    val rs_size = int(k_read_i64(rs_entry + 16))
+            |
+            |    // Create page table for RS (no MMIO needed)
+            |    val rs_ptbr = vm_create_server_pt(0)
+            |    if rs_ptbr == 0
+            |        return -1
+            |
+            |    // Load RS TRB binary into its page table
+            |    val rs_entry_pt = k_load_trb(*byte(rs_addr), rs_size, rs_ptbr)
+            |    if rs_entry_pt < 0
+            |        return -1
+            |
+            |    // Write info page at 0xBF000 in RS's address space:
+            |    //   +0: RS TID placeholder (i64) — RS sets its own
+            |    //   +8: ramdisk base (i64) — 0 on TRISC (MMIO device)
+            |    //  +16: ramdisk size (i64) — 0 on TRISC
+            |    //  +24: boot info header copy
+            |    var info_page: [256]byte
+            |    memset(&info_page[0], 0, 256)
+            |    // ramdisk base/size = 0 (TRISC disk uses MMIO)
+            |    // Copy boot info header at offset 24
+            |    val bi_copy_len = 8 + mod_count * 24
+            |    var ci = 0
+            |    while ci < bi_copy_len
+            |        if ci + 24 >= 256
+            |            break
+            |        info_page[ci + 24] = bi[ci]
+            |        ci += 1
+            |    vm_copy_to(rs_ptbr, 0xBF000, &info_page[0], 256)
+            |
+            |    // Create RS process (suspended) and resume it
+            |    val rs_pid = create_process_suspended(rs_entry_pt, 0xD0000, 0xCF000, "rs", rs_ptbr)
+            |    if rs_pid < 0
+            |        return -1
+            |    resume_process(rs_pid)
+            |
             |    timer_init(1000)
             |    first_thread_ssp()
             |""".stripMargin,
@@ -224,6 +331,10 @@ import oskit.apps.init.{init}
     */
   def compileBootModules(): Seq[(String, Array[Byte])] =
     Seq(
+      "rs"   -> compileServerTrb("oskit/servers/rs", "oskit.servers", rsSrvSysl, "rs_main",
+        extraSources = Map(
+          "oskit/hal/mem" -> halMemSysl,
+        )),
       "disk" -> compileServerTrb("oskit/drivers/disk/disk", "oskit.drivers.disk", diskSysl, "disk_server",
         extraSources = Map(
           "oskit/hal/mem" -> halMemSysl,

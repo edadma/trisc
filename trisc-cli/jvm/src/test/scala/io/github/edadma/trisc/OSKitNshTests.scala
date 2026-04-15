@@ -47,50 +47,132 @@ class OSKitNshTests extends OSKitTestHelpers {
       "oskit/sync/semaphore"        -> semaphoreSysl,
       "oskit/sync/mutex"            -> mutexSysl,
       "oskit/ipc/ipc"               -> ipcSysl,
-      "oskit/drivers/disk/disk"     -> diskSysl,
       "oskit/drivers/kbd/keyboard"  -> kbdSysl,
-      "oskit/drivers/tty/tty"       -> ttySysl,
-      "oskit/fs/tfs"                -> tfsSysl,
-      "oskit/fs/client"             -> fsClientSysl,
-      "oskit/servers/tfs"           -> tfsSrvSysl,
-      "oskit/servers/pm"            -> pmSrvSysl,
-      "oskit/servers/vfs"           -> vfsSrvSysl,
-      "oskit/servers/rs"            -> rsSrvSysl,
       "posix/unistd/sbrk"          -> sbrkSysl,
       "posix/string/string"        -> posixStringSysl,
       "posix/ctype/ctype"          -> posixCtypeSysl,
       "posix/stdlib/alloc"         -> posixAllocSysl,
-      "std/debug/debug"             -> debugSysl,
-      "std/mem/mem"                 -> memSysl,
       "oskit/hal/mem"              -> halMemSysl,
       "oskit/arch/vm"              -> archVmSysl,
       "oskit/arch/cpu"             -> archCpuSysl,
       "oskit/config/config"        -> configSysl,
-      "std/encoding/binary/binary" -> binarySysl,
-      "std/crypto/sha256/sha256"   -> sha256Sysl,
-      "std/crypto/hmac/hmac"       -> hmacSysl,
-      "std/crypto/pbkdf2/pbkdf2"   -> pbkdf2Sysl,
-      "std/strings/strings"         -> stringsSysl,
-      "std/builder/builder"         -> builderSysl,
-      "std/strconv/strconv"         -> strconvSysl,
-      "std/result/result"           -> resultSysl,
-      "std/errors/errors"           -> errorsSysl,
-      "std/utf8/utf8"               -> utf8Sysl,
-      "oskit/loader/loader"         -> loaderSysl,
-      "std/alloc/alloc"             -> stdAllocSysl,
-      "oskit/apps/init/init"        -> initSysl,
       "app" ->
         """import oskit.kernel.*
 import oskit.ipc.*
 import oskit.drivers.kbd.{keyboard_init}
-import oskit.servers.{rs_main, rs_set_init_fn}
-import oskit.apps.init.{init}
+import oskit.config.{BOOT_INFO_ADDR}
+import oskit.arch.{vm_copy_to, vm_create_server_pt}
+import oskit.hal.memset
+          |
+          |// Read little-endian u32 from byte pointer
+          |k_read_u32(p: *byte) -> i64
+          |    i64(p[0] & 0xff) | (i64(p[1] & 0xff) << 8) | (i64(p[2] & 0xff) << 16) | (i64(p[3] & 0xff) << 24)
+          |
+          |k_read_i64(p: *byte) -> i64
+          |    k_read_u32(p) | (k_read_u32(p + 4) << 32)
+          |
+          |// Load TRB v1 binary from memory into a target page table.
+          |k_load_trb(buf: *byte, buflen: int, ptbr: int) -> i64
+          |    if buflen < 12
+          |        return -1
+          |    if buf[0] != byte('T')
+          |        return -1
+          |    if buf[1] != byte('R')
+          |        return -1
+          |    if buf[2] != byte('B')
+          |        return -1
+          |    if buf[3] != byte(1)
+          |        return -1
+          |    val entry = k_read_u32(buf + 4)
+          |    val nrec = int(k_read_u32(buf + 8))
+          |    var pos = 12
+          |    var ri = 0
+          |    while ri < nrec
+          |        if pos + 12 > buflen
+          |            return -1
+          |        val hp = buf + pos
+          |        val org = int(k_read_u32(hp))
+          |        val kind = int(k_read_u32(hp + 4))
+          |        val sz = int(k_read_u32(hp + 8))
+          |        pos += 12
+          |        if kind == 0
+          |            if pos + sz > buflen
+          |                return -1
+          |            vm_copy_to(ptbr, org, buf + pos, sz)
+          |            pos += sz
+          |        else if kind == 1
+          |            var zero_buf: [1024]byte
+          |            memset(&zero_buf[0], 0, 1024)
+          |            var rem = sz
+          |            var dst = org
+          |            while rem > 0
+          |                var chunk = rem
+          |                if chunk > 1024
+          |                    chunk = 1024
+          |                vm_copy_to(ptbr, dst, &zero_buf[0], chunk)
+          |                rem -= chunk
+          |                dst += chunk
+          |        else
+          |            return -1
+          |        ri += 1
+          |    entry
           |
           |kernel_main() -> int
           |    ipc_init()
           |    keyboard_init()
-          |    rs_set_init_fn(i64(init))
-          |    create_thread(rs_main, kernel_stack_usp(0), kernel_stack_ssp(0), "rs")
+          |
+          |    // --- Bootstrap RS from boot info ---
+          |    val bi = *byte(BOOT_INFO_ADDR)
+          |    if bi[0] != byte('S')
+          |        return -1
+          |    if bi[1] != byte('L')
+          |        return -1
+          |    if bi[2] != byte('I')
+          |        return -1
+          |    if bi[3] != byte('X')
+          |        return -1
+          |
+          |    val mod_count = int(k_read_u32(bi + 4))
+          |    var rs_idx = -1
+          |    var mi = 0
+          |    while mi < mod_count
+          |        val entry_p = bi + 8 + mi * 24
+          |        if entry_p[0] == byte('r')
+          |            if entry_p[1] == byte('s')
+          |                if entry_p[2] == 0
+          |                    rs_idx = mi
+          |        mi += 1
+          |    if rs_idx < 0
+          |        return -1
+          |
+          |    val rs_entry_p = bi + 8 + rs_idx * 24
+          |    val rs_addr = int(k_read_i64(rs_entry_p + 8))
+          |    val rs_size = int(k_read_i64(rs_entry_p + 16))
+          |
+          |    val rs_ptbr = vm_create_server_pt(0)
+          |    if rs_ptbr == 0
+          |        return -1
+          |
+          |    val rs_entry_pt = k_load_trb(*byte(rs_addr), rs_size, rs_ptbr)
+          |    if rs_entry_pt < 0
+          |        return -1
+          |
+          |    var info_page: [256]byte
+          |    memset(&info_page[0], 0, 256)
+          |    val bi_copy_len = 8 + mod_count * 24
+          |    var ci = 0
+          |    while ci < bi_copy_len
+          |        if ci + 24 >= 256
+          |            break
+          |        info_page[ci + 24] = bi[ci]
+          |        ci += 1
+          |    vm_copy_to(rs_ptbr, 0xBF000, &info_page[0], 256)
+          |
+          |    val rs_pid = create_process_suspended(rs_entry_pt, 0xD0000, 0xCF000, "rs", rs_ptbr)
+          |    if rs_pid < 0
+          |        return -1
+          |    resume_process(rs_pid)
+          |
           |    timer_init(1000)
           |    first_thread_ssp()
           |""".stripMargin,
@@ -110,7 +192,7 @@ import oskit.apps.init.{init}
   private val nshTtytab = "/etc/ttytab file \"tty0 nsh\"\n"
 
   def runNsh(
-      maxCycles: Int = 5200000,
+      maxCycles: Int = 30000000,
       prefill: String = "\n",
       scheduledKeys: Seq[(Int, Int, Boolean, Int)] = Seq.empty,
   ): (CPU, String) =
@@ -145,6 +227,7 @@ import oskit.apps.init.{init}
     val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha, dma)
     dma.mem = mem
     linked.load(mem)
+    TriscCli.writeBootInfo(mem, OskitDemoBuilder.compileBootModules())
 
     val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
     val keyInjector: Processor => Unit = cpu => {
@@ -192,32 +275,32 @@ import oskit.apps.init.{init}
   // === NSH integration tests ===
 
   "NSH: pwd shows root" taggedAs Slow in {
-    val keys        = typeString("pwd\n", startTick = 5000000, spacing = 12000)
+    val keys        = typeString("pwd\n", startTick = 2000000, spacing = 12000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 200000000)
     output should include("/")
   }
 
   "NSH: echo command" taggedAs Slow in {
-    val keys        = typeString("echo hi\n", startTick = 500000)
+    val keys        = typeString("echo hi\n", startTick = 2000000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 100000000)
     output should include("\nhi\n")
   }
 
   "NSH: ls on root with prefilled file" taggedAs Slow in {
-    val keys        = typeString("ls\n", startTick = 500000, spacing = 12000)
+    val keys        = typeString("ls\n", startTick = 2000000, spacing = 12000)
     val (_, output) = runNsh(scheduledKeys = keys, prefill = "/hello file \"world\"\n", maxCycles = 100000000)
     output should include("hello")
   }
 
   "NSH: hello prints greeting" taggedAs Slow in {
-    val keys        = typeString("hello\n", startTick = 5000000, spacing = 12000)
+    val keys        = typeString("hello\n", startTick = 2000000, spacing = 12000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 200000000)
     output should include("Hello, world!")
   }
 
 
   "NSH: cat prefilled /hello (short file)" taggedAs Slow in {
-    val keys = typeString("cat /hello\n", startTick = 500000, spacing = 12000)
+    val keys = typeString("cat /hello\n", startTick = 2000000, spacing = 12000)
     val (cpu, output) =
       runNsh(scheduledKeys = keys, prefill = "/hello file \"world\"\n", maxCycles = 200000000)
     output should include("world")
@@ -225,62 +308,62 @@ import oskit.apps.init.{init}
 
   "NSH: cat reads file" taggedAs Slow in {
     val keys =
-      typeString("touch /hello\nwrite /hello world\ncat /hello\n", startTick = 500000)
-    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 25000000)
+      typeString("touch /hello\nwrite /hello world\ncat /hello\n", startTick = 2000000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 200000000)
     output should include("world")
   }
 
   "NSH: cat /etc/ttytab shows prefilled line" taggedAs Slow in {
-    val keys = typeString("cat /etc/ttytab\n", startTick = 500000, spacing = 12000)
+    val keys = typeString("cat /etc/ttytab\n", startTick = 2000000, spacing = 12000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 100000000)
     output should include("tty0 nsh")
   }
 
   "NSH: help command" taggedAs Slow in {
-    val keys        = typeString("help\n", startTick = 500000)
+    val keys        = typeString("help\n", startTick = 2000000)
     val (_, output) = runNsh(scheduledKeys = keys)
     output should include("builtins: pwd cd kill help")
   }
 
   "NSH: whoami returns 0" taggedAs Slow in {
-    val keys        = typeString("whoami\n", startTick = 500000, spacing = 12000)
+    val keys        = typeString("whoami\n", startTick = 2000000, spacing = 12000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 100000000)
     output should include("0")
   }
 
   "NSH: unknown command" taggedAs Slow in {
-    val keys        = typeString("foo\n", startTick = 500000)
-    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 15000000)
+    val keys        = typeString("foo\n", startTick = 2000000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 100000000)
     output should include("not found")
   }
 
   "NSH: cd dev then pwd" taggedAs Slow in {
-    val keys        = typeString("cd dev\npwd\n", startTick = 500000)
-    val (_, output) = runNsh(scheduledKeys = keys, prefill = "/dev dir\n", maxCycles = 10000000)
+    val keys        = typeString("cd dev\npwd\n", startTick = 2000000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, prefill = "/dev dir\n", maxCycles = 100000000)
     output should include("/dev")
   }
 
   "NSH: touch creates file" taggedAs Slow in {
-    val keys        = typeString("touch /hello\nls\n", startTick = 500000, spacing = 12000)
+    val keys        = typeString("touch /hello\nls\n", startTick = 2000000, spacing = 12000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 200000000)
     output should include("hello")
   }
 
   "NSH: write and cat" taggedAs Slow in {
-    val keys        = typeString("touch /msg\nwrite /msg hi\ncat /msg\n", startTick = 500000, spacing = 12000)
+    val keys        = typeString("touch /msg\nwrite /msg hi\ncat /msg\n", startTick = 2000000, spacing = 12000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 300000000)
     output should include("hi")
   }
 
   "NSH: mv renames file" taggedAs Slow in {
     val keys =
-      typeString("touch /old\nwrite /old data\nmv /old /new\ncat /new\n", startTick = 500000, spacing = 12000)
+      typeString("touch /old\nwrite /old data\nmv /old /new\ncat /new\n", startTick = 2000000, spacing = 12000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 400000000)
     output should include("data")
   }
 
   "NSH: uptime shows ticks" taggedAs Slow in {
-    val keys        = typeString("uptime\n", startTick = 500000, spacing = 12000)
+    val keys        = typeString("uptime\n", startTick = 2000000, spacing = 12000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 100000000)
     output should include("up ")
     output should include("ticks")
@@ -297,7 +380,7 @@ import oskit.apps.init.{init}
     "/etc/shadow file \"root:slix:3b1b8291c0bdb62febcd914f45884bca403ae1c42a4bb1c41755881f3886d158\\ned:slix:c638d5b6e91f70b96934aac8d7be42363ce4ea5927f9a9bbbe2d64a8b51926b5\"\n"
 
   def runLogin(
-      maxCycles: Int = 15000000,
+      maxCycles: Int = 50000000,
       prefill: String = passwdPrefill,
       scheduledKeys: Seq[(Int, Int, Boolean, Int)] = Seq.empty,
   ): (CPU, String, RAM) =
@@ -356,7 +439,7 @@ import oskit.apps.init.{init}
     cpu.run()
     (cpu, output.toString, ram)
 
-  private def loginAndType(cmd: String, startTick: Int = 5000000): Seq[(Int, Int, Boolean, Int)] =
+  private def loginAndType(cmd: String, startTick: Int = 2000000): Seq[(Int, Int, Boolean, Int)] =
     // Login is now an external program — needs much more time to load and start.
     val sp = 12000
     typeString("root\n", startTick = startTick, spacing = sp) ++
@@ -364,7 +447,7 @@ import oskit.apps.init.{init}
     typeString(cmd, startTick = startTick + 2000000, spacing = sp)
 
   "Login: prompts for credentials" taggedAs Slow in {
-    val keys        = typeString("root\n", startTick = 800000)
+    val keys        = typeString("root\n", startTick = 2000000)
     val (_, output, _) = runLogin(scheduledKeys = keys)
     output should include("login: ")
   }
@@ -403,9 +486,9 @@ import oskit.apps.init.{init}
 
   "Login: hello three times" taggedAs Slow in {
     val sp = 12000
-    val keys = typeString("root\n", startTick = 800000, spacing = sp) ++
-      typeString("toor\n", startTick = 980000, spacing = sp) ++
-      typeString("hello\n", startTick = 1250000, spacing = sp) ++
+    val keys = typeString("root\n", startTick = 2000000, spacing = sp) ++
+      typeString("toor\n", startTick = 2500000, spacing = sp) ++
+      typeString("hello\n", startTick = 4000000, spacing = sp) ++
       typeString("hello\n", startTick = 30000000, spacing = sp) ++
       typeString("hello\n", startTick = 60000000, spacing = sp)
     val (cpu, output, _) = runLogin(scheduledKeys = keys, maxCycles = 400000000)
@@ -420,22 +503,22 @@ import oskit.apps.init.{init}
   }
 
   "Login: user ed gets home /home/ed" taggedAs Slow in {
-    val keys = typeString("ed\n", startTick = 800000) ++
-               typeString("ed\n", startTick = 840000)
+    val keys = typeString("ed\n", startTick = 2000000, spacing = 12000) ++
+               typeString("ed\n", startTick = 2500000, spacing = 12000)
     val (_, output, _) = runLogin(scheduledKeys = keys)
     output should include("/home/ed> ")
   }
 
   "Login: bad password rejected" taggedAs Slow in {
-    val keys = typeString("root\n", startTick = 800000) ++
-               typeString("wrong\n", startTick = 840000)
+    val keys = typeString("root\n", startTick = 2000000, spacing = 12000) ++
+               typeString("wrong\n", startTick = 2500000, spacing = 12000)
     val (_, output, _) = runLogin(scheduledKeys = keys)
     output should include("Login incorrect")
   }
 
   "Login: bad username rejected" taggedAs Slow in {
-    val keys = typeString("nobody\n", startTick = 800000) ++
-               typeString("x\n", startTick = 840000)
+    val keys = typeString("nobody\n", startTick = 2000000, spacing = 12000) ++
+               typeString("x\n", startTick = 2500000, spacing = 12000)
     val (_, output, _) = runLogin(scheduledKeys = keys)
     output should include("Login incorrect")
   }
@@ -449,7 +532,7 @@ import oskit.apps.init.{init}
   }
 
   "NSH: wc counts lines" taggedAs Slow in {
-    val keys = typeString("wc /data\n", startTick = 500000, spacing = 12000)
+    val keys = typeString("wc /data\n", startTick = 2000000, spacing = 12000)
     val (_, output) = runNsh(scheduledKeys = keys, prefill = "/data file \"one\\ntwo\\n\"\n", maxCycles = 200000000)
     output should include("2")  // 2 lines
   }
@@ -457,13 +540,13 @@ import oskit.apps.init.{init}
   // --- grep tests ---
 
   "NSH: grep finds matching line" taggedAs Slow in {
-    val keys = typeString("grep root /etc/passwd\n", startTick = 500000, spacing = 12000)
+    val keys = typeString("grep root /etc/passwd\n", startTick = 2000000, spacing = 12000)
     val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 200000000)
     output should include("root")
   }
 
   "NSH: grep filters non-matching lines" taggedAs Slow in {
-    val keys = typeString("grep xyz /hello\n", startTick = 500000, spacing = 12000)
+    val keys = typeString("grep xyz /hello\n", startTick = 2000000, spacing = 12000)
     val (_, output) = runNsh(scheduledKeys = keys, prefill = "/hello file \"abc\"\n", maxCycles = 200000000)
     output should not include("abc")
   }

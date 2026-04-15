@@ -310,3 +310,12 @@ thread's page table. Used by drivers that need DMA addresses.
 
     svc_vm_v2p(vaddr: int) -> int
         syscall(SYS_VM_V2P, vaddr)
+
+    val SYS_PHYS_READ = 67
+
+    svc_phys_read(src_phys: int, dst: *byte, vlen: int)
+        var args: [3]i64
+        args[0] = src_phys
+        args[1] = i64(dst)
+        args[2] = vlen
+        syscall(SYS_PHYS_READ, i64(&args[0]))

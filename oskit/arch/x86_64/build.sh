@@ -37,38 +37,16 @@ SYSL_FILES=(
     oskit/hal/mem_cpu.lsysl
     oskit/ipc/ipc.lsysl
     oskit/services/services.lsysl
+    std/alloc/alloc.lsysl
 )
 
 # App-specific extra modules
 case "$APP" in
     app_nsh)
-        SYSL_FILES+=(
-            oskit/drivers/tty/tty.lsysl
-            oskit/drivers/disk/disk_x86.lsysl
-            oskit/fs/tfs.lsysl
-            oskit/fs/client.lsysl
-            oskit/servers/tfs.lsysl
-            oskit/servers/vfs.lsysl
-            oskit/servers/pm.lsysl
-            oskit/servers/rs.lsysl
-            oskit/loader/loader.lsysl
-            std/alloc/alloc.lsysl
-            oskit/apps/nsh.lsysl
-        )
+        # All servers are boot modules — kernel only needs base modules
         ;;
     app_test_spawn)
-        SYSL_FILES+=(
-            oskit/drivers/tty/tty.lsysl
-            oskit/drivers/disk/disk_x86.lsysl
-            oskit/fs/tfs.lsysl
-            oskit/fs/client.lsysl
-            oskit/servers/tfs.lsysl
-            oskit/servers/vfs.lsysl
-            oskit/servers/pm.lsysl
-            oskit/servers/rs.lsysl
-            oskit/loader/loader.lsysl
-            std/alloc/alloc.lsysl
-        )
+        # All servers are boot modules — kernel only needs base modules
         ;;
     app_serial)
         SYSL_FILES+=(oskit/drivers/tty/tty.lsysl)

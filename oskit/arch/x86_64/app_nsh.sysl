@@ -1,40 +1,162 @@
 // NSH on x86_64 QEMU — interactive shell with full server stack.
-// RS starts all servers (disk, tfs, tty, pm, vfs), then starts
-// init which runs nsh. External commands go through PM → loader.
+// Kernel bootstraps RS from boot info. RS starts all servers
+// (disk, tfs, tty, pm, vfs) then init which runs nsh.
 
-import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp, first_thread_ssp}
-import oskit.servers.{rs_main, rs_set_init_fn, rs_set_boot_info_base, rs_set_ramdisk_info}
-import oskit.drivers.disk.disk_set_ramdisk
-import oskit.apps.nsh.nsh
-import oskit.services.rs_ready
+import oskit.kernel.{create_process_suspended, resume_process, first_thread_ssp}
+import oskit.arch.{vm_create_server_pt, vm_copy_to}
 import oskit.arch.x86_64.uart_puts
 import oskit.ipc.ipc_init
+import oskit.hal.memset
 
 extern get_mboot_mod_start() -> int
 extern get_mboot_mod_end() -> int
 extern get_mboot_mod1_start() -> int
 
-// Init function for x86_64: signal RS that init is ready, then run nsh.
-// RS creates this as the last kernel thread after all servers are up.
-x86_init()
-    rs_ready()
-    nsh()
+// Read little-endian u32 from byte pointer
+k_read_u32(p: *byte) -> i64
+    i64(p[0] & 0xff) | (i64(p[1] & 0xff) << 8) | (i64(p[2] & 0xff) << 16) | (i64(p[3] & 0xff) << 24)
+
+k_read_i64(p: *byte) -> i64
+    k_read_u32(p) | (k_read_u32(p + 4) << 32)
+
+// Load ELF64 binary from memory into a target page table.
+// Returns entry point or -1 on error.
+k_load_elf64(buf: *byte, buflen: int, ptbr: int) -> i64
+    if buflen < 64
+        return -1
+    if buf[0] != 0x7F
+        return -1
+    if buf[1] != byte('E')
+        return -1
+    if buf[2] != byte('L')
+        return -1
+    if buf[3] != byte('F')
+        return -1
+    val entry = k_read_i64(buf + 24)
+    val phoff = int(k_read_i64(buf + 32))
+    val phentsize = int(k_read_u32(buf + 54) & 0xFFFF)
+    val phnum = int(k_read_u32(buf + 56) & 0xFFFF)
+    var i = 0
+    while i < phnum
+        val ph = buf + phoff + i * phentsize
+        val ptype = int(k_read_u32(ph))
+        if ptype == 1
+            val offset = int(k_read_i64(ph + 8))
+            val vaddr = int(k_read_i64(ph + 16))
+            val filesz = int(k_read_i64(ph + 32))
+            val memsz = int(k_read_i64(ph + 40))
+            if offset + filesz > buflen
+                return -1
+            if filesz > 0
+                vm_copy_to(ptbr, vaddr, buf + offset, filesz)
+            if memsz > filesz
+                var zero_buf: [1024]byte
+                memset(&zero_buf[0], 0, 1024)
+                var rem = memsz - filesz
+                var dst = vaddr + filesz
+                while rem > 0
+                    var chunk = rem
+                    if chunk > 1024
+                        chunk = 1024
+                    vm_copy_to(ptbr, dst, &zero_buf[0], chunk)
+                    rem -= chunk
+                    dst += chunk
+        i += 1
+    entry
 
 kernel_main() -> i64
     ipc_init()
 
-    // Set ramdisk address for disk server (both kernel-thread and isolated modes)
+    // Get ramdisk (first multiboot module)
     val rd_base = get_mboot_mod_start()
     val rd_size = get_mboot_mod_end() - rd_base
-    disk_set_ramdisk(rd_base, rd_size)
-    rs_set_ramdisk_info(rd_base, rd_size)
 
-    // If boot info module exists (second multiboot module), tell RS
+    // Get boot info (second multiboot module)
     val boot_info = get_mboot_mod1_start()
-    if boot_info != 0
-        rs_set_boot_info_base(boot_info)
+    if boot_info == 0
+        uart_puts("[kernel_main] ERROR: no boot info module\n")
+        return -1
 
-    rs_set_init_fn(i64(x86_init))
-    create_thread(i64(rs_main), kernel_stack_usp(0), kernel_stack_ssp(0), "rs")
-    uart_puts("[kernel_main] RS thread created\n")
+    // Boot info uses offsets relative to image base
+    val bi = *byte(boot_info)
+    // Verify SLIX magic
+    if bi[0] != byte('S')
+        return -1
+    if bi[1] != byte('L')
+        return -1
+    if bi[2] != byte('I')
+        return -1
+    if bi[3] != byte('X')
+        return -1
+
+    // Find "rs" module in boot info
+    val mod_count = int(k_read_u32(bi + 4))
+    var rs_idx = -1
+    var mi = 0
+    while mi < mod_count
+        val entry_p = bi + 8 + mi * 24
+        if entry_p[0] == byte('r')
+            if entry_p[1] == byte('s')
+                if entry_p[2] == 0
+                    rs_idx = mi
+        mi += 1
+    if rs_idx < 0
+        uart_puts("[kernel_main] ERROR: rs module not found\n")
+        return -1
+
+    // Get RS module address (offset relative to boot info base) and size
+    val rs_entry_p = bi + 8 + rs_idx * 24
+    val rs_offset = int(k_read_i64(rs_entry_p + 8))
+    val rs_addr = boot_info + rs_offset
+    val rs_size = int(k_read_i64(rs_entry_p + 16))
+
+    // Create page table for RS (no MMIO needed)
+    val rs_ptbr = vm_create_server_pt(0)
+    if rs_ptbr == 0
+        return -1
+
+    // Load RS ELF64 binary into its page table
+    val rs_entry_pt = k_load_elf64(*byte(rs_addr), rs_size, rs_ptbr)
+    if rs_entry_pt < 0
+        uart_puts("[kernel_main] ERROR: failed to load RS\n")
+        return -1
+
+    // Write info page at 0xBF000 in RS's address space:
+    //   +0: RS TID placeholder (i64) — RS sets its own
+    //   +8: ramdisk base (i64)
+    //  +16: ramdisk size (i64)
+    //  +24: boot info header copy (offsets converted to absolute addresses)
+    var info_page: [512]byte
+    memset(&info_page[0], 0, 512)
+    // Write ramdisk info
+    var ip: *i64 = *i64(&info_page[8])
+    *ip = i64(rd_base)
+    ip = *i64(&info_page[16])
+    *ip = i64(rd_size)
+    // Copy boot info header at offset 24, converting offsets to absolute
+    val bi_copy_len = 8 + mod_count * 24
+    var ci = 0
+    while ci < bi_copy_len
+        if ci + 24 >= 512
+            break
+        info_page[ci + 24] = bi[ci]
+        ci += 1
+    // Convert module address offsets to absolute physical addresses
+    var fi = 0
+    while fi < mod_count
+        val addr_off = 24 + 8 + fi * 24 + 8  // info_page offset to addr field
+        val orig_offset = k_read_i64(&info_page[addr_off])
+        val abs_addr = i64(boot_info) + orig_offset
+        var ip2: *i64 = *i64(&info_page[addr_off])
+        *ip2 = abs_addr
+        fi += 1
+    vm_copy_to(rs_ptbr, 0xBF000, &info_page[0], 512)
+
+    // Create RS process (suspended) and resume it
+    val rs_pid = create_process_suspended(rs_entry_pt, 0xD0000, 0xCF000, "rs", rs_ptbr)
+    if rs_pid < 0
+        return -1
+    resume_process(rs_pid)
+
+    uart_puts("[kernel_main] RS process started\n")
     first_thread_ssp()

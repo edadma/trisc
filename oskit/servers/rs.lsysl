@@ -1,11 +1,19 @@
-OSKit RS — Restart Server
-==========================
+OSKit RS — Restart Server (userspace)
+======================================
 
-Minix 3-style service manager. Runs as its own thread, starts
-system servers in dependency order, waits for each to signal
-ready before starting the next. No sleep-based timing — pure
-handshake. Prints boot messages via putc (direct MMIO, works
-before any servers are up).
+Minix 3-style service manager. Runs as the first userspace
+process — the kernel loads RS from a boot module, then RS
+loads all other servers and init.
+
+RS reads its configuration from an info page at 0xBF000
+written by the kernel before RS starts:
+  +0:  RS TID (unused — RS sets its own)
+  +8:  ramdisk base physical address (i64)
+  +16: ramdisk size (i64)
+  +24: boot info header copy (SLIX magic + module entries)
+
+Boot module data lives in physical memory. RS uses
+svc_phys_read to copy it into its own address space.
 
 Boot order:
 1. Disk server (no dependencies)
@@ -13,6 +21,7 @@ Boot order:
 3. TTY server (no dependencies, but after disk)
 4. PM server (no dependencies)
 5. VFS server (depends on TFS)
+6. Init (depends on VFS)
 
 Each server calls `rs_ready()` after initialization to notify
 the RS thread. RS blocks until the notification arrives, then
@@ -20,45 +29,25 @@ starts the next server.
 
     module oskit.servers
 
-    import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp}
-    import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_set_thread_ptbr, svc_vm_set_ptbr}
+    import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_phys_read}
     import oskit.ipc.{ipc_recv_notify, port_create}
-    import oskit.config.{BOOT_INFO_ADDR}
-    import oskit.arch.kernel_ptbr
     import oskit.hal.memset
-    import oskit.loader.load_elf64_to_ptbr
-    import oskit.drivers.disk.{disk_server, disk_set_ramdisk}
-    import oskit.drivers.tty.{tty_server}
 
-Stack slot counter. Slot 0 is RS (created by kernel_main).
-Servers start at slot 1.
+Ramdisk info, read from info page at startup.
 
-    var rs_next_slot = 1
-
-Init function pointer. Set by kernel_main before starting RS
-to avoid circular module dependency (RS → init → nsh → pm → RS).
-
-    var rs_init_fn: i64 = 0
-    var rs_boot_info_addr = BOOT_INFO_ADDR
-    var rs_boot_info_relative = 0  // 1 if addrs in header are offsets from base
     var rs_ramdisk_base = 0
     var rs_ramdisk_size = 0
 
-    rs_set_init_fn(fn: i64)
-        rs_init_fn = fn
+Boot info, copied from info page at startup.
+Max 256 bytes covers header + plenty of module entries.
 
-    rs_set_boot_info_base(addr: int)
-        rs_boot_info_addr = addr
-        rs_boot_info_relative = 1
+    var rs_boot_info: [256]byte
+    var rs_boot_info_len = 0
 
-    rs_set_ramdisk_info(base: int, size: int)
-        rs_ramdisk_base = base
-        rs_ramdisk_size = size
+Module loading buffer (128 KB). Boot module TRB/ELF data
+is copied here via svc_phys_read before parsing.
 
-    rs_alloc_slot() -> int
-        val s = rs_next_slot
-        rs_next_slot += 1
-        s
+    var rs_mod_buf: [131072]byte
 
 Boot message helpers. putc goes straight to MMIO, no TTY needed.
 
@@ -84,41 +73,35 @@ so it can use ipc_recv_notify to block for notifications.
         // result == -2 means notification received
         notify_read_self()
 
-Hardcoded boot order. Each entry has a name, length, and
-function pointer (for kernel-thread fallback when no boot
-module is available).
+Hardcoded boot order. Each entry has a name and length.
 
     val RS_NUM_SERVERS = 5
 
-    var rs_boot_names: [40]byte   // 5 servers * 8 bytes each
-    var rs_boot_nlen: [5]int
-    var rs_boot_fn: [5]i64
+    var rs_boot_names: [48]byte   // 6 entries * 8 bytes each
+    var rs_boot_nlen: [6]int
 
     rs_init_boot_order()
         // disk
         rs_boot_names[0] = 'd'; rs_boot_names[1] = 'i'; rs_boot_names[2] = 's'; rs_boot_names[3] = 'k'; rs_boot_names[4] = 0
         rs_boot_nlen[0] = 4
-        rs_boot_fn[0] = i64(disk_server)
         // tfs
         rs_boot_names[8] = 't'; rs_boot_names[9] = 'f'; rs_boot_names[10] = 's'; rs_boot_names[11] = 0
         rs_boot_nlen[1] = 3
-        rs_boot_fn[1] = i64(tfs_server)
         // tty
         rs_boot_names[16] = 't'; rs_boot_names[17] = 't'; rs_boot_names[18] = 'y'; rs_boot_names[19] = 0
         rs_boot_nlen[2] = 3
-        rs_boot_fn[2] = i64(tty_server)
         // pm
         rs_boot_names[24] = 'p'; rs_boot_names[25] = 'm'; rs_boot_names[26] = 0
         rs_boot_nlen[3] = 2
-        rs_boot_fn[3] = i64(pm_server)
         // vfs
         rs_boot_names[32] = 'v'; rs_boot_names[33] = 'f'; rs_boot_names[34] = 's'; rs_boot_names[35] = 0
         rs_boot_nlen[4] = 3
-        rs_boot_fn[4] = i64(vfs_server)
+        // init
+        rs_boot_names[40] = 'i'; rs_boot_names[41] = 'n'; rs_boot_names[42] = 'i'; rs_boot_names[43] = 't'; rs_boot_names[44] = 0
+        rs_boot_nlen[5] = 4
 
-Boot info header parsing. The emulator writes a boot info
-struct at BOOT_INFO_ADDR with magic "SLIX", module count,
-and per-module entries (name, addr, size).
+Boot info parsing. RS reads a copy of the boot info header
+from its info page at 0xBF000+24.
 
     rs_read_u32_le(p: *byte) -> i64
         i64(p[0] & 0xff) | (i64(p[1] & 0xff) << 8) | (i64(p[2] & 0xff) << 16) | (i64(p[3] & 0xff) << 24)
@@ -129,7 +112,7 @@ and per-module entries (name, addr, size).
 Check if boot info header is valid (magic = "SLIX").
 
     rs_boot_info_valid() -> bool
-        val p = *byte(rs_boot_info_addr)
+        val p = &rs_boot_info[0]
         if p[0] != byte('S')
             return false
         if p[1] != byte('L')
@@ -143,7 +126,7 @@ Check if boot info header is valid (magic = "SLIX").
 Get boot module count from boot info header.
 
     rs_boot_module_count() -> int
-        val p = *byte(rs_boot_info_addr + 4)
+        val p = &rs_boot_info[4]
         int(rs_read_u32_le(p))
 
 Find a boot module by name. Returns index or -1.
@@ -152,7 +135,7 @@ Find a boot module by name. Returns index or -1.
         val count = rs_boot_module_count()
         var i = 0
         while i < count
-            val entry = *byte(rs_boot_info_addr + 8 + i * 24)
+            val entry = &rs_boot_info[8 + i * 24]
             // Compare name (first nlen bytes, NUL-padded)
             var found = true
             var j = 0
@@ -176,19 +159,16 @@ Find a boot module by name. Returns index or -1.
 Get a boot module's physical address and size.
 
     rs_boot_module_addr(idx: int) -> i64
-        val raw = rs_read_i64_le(*byte(rs_boot_info_addr + 8 + idx * 24 + 8))
-        if rs_boot_info_relative == 1
-            raw + i64(rs_boot_info_addr)
-        else
-            raw
+        rs_read_i64_le(&rs_boot_info[8 + idx * 24 + 8])
 
     rs_boot_module_size(idx: int) -> int
-        int(rs_read_i64_le(*byte(rs_boot_info_addr + 8 + idx * 24 + 16)))
+        int(rs_read_i64_le(&rs_boot_info[8 + idx * 24 + 16]))
 
 Load a TRB v1 boot module into a process address space.
-Parses the TRB header from kernel-space RAM, copies PROGBITS
-segments into the target process via vm_copy_to, and zeroes
-NOBITS (BSS) segments. Returns entry point or -1 on error.
+Parses the TRB header from rs_mod_buf (already copied via
+svc_phys_read), copies PROGBITS segments into the target
+process via vm_copy_to, and zeroes NOBITS (BSS) segments.
+Returns entry point or -1 on error.
 
     val RS_PROG_USP = 0xD0000
     val RS_PROG_SSP = 0xCF000
@@ -231,6 +211,48 @@ NOBITS (BSS) segments. Returns entry point or -1 on error.
             ri += 1
         entry
 
+Load an ELF64 boot module into a process address space.
+Parses program headers from rs_mod_buf, copies LOAD segments
+into the target process via vm_copy_to. Returns entry point
+or -1 on error.
+
+    rs_load_elf64_module(buf: *byte, buflen: int, ptbr: int) -> i64
+        if buflen < 64
+            return -1
+        // Check ELF magic
+        if buf[0] != 0x7F
+            return -1
+        if buf[1] != byte('E')
+            return -1
+        if buf[2] != byte('L')
+            return -1
+        if buf[3] != byte('F')
+            return -1
+
+        val entry = rs_read_i64_le(buf + 24)
+        val phoff = int(rs_read_i64_le(buf + 32))
+        val phentsize = int(rs_read_u32_le(buf + 54) & 0xFFFF)
+        val phnum = int(rs_read_u32_le(buf + 56) & 0xFFFF)
+
+        var i = 0
+        while i < phnum
+            val ph = buf + phoff + i * phentsize
+            val ptype = int(rs_read_u32_le(ph))
+            if ptype == 1
+                // PT_LOAD
+                val offset = int(rs_read_i64_le(ph + 8))
+                val vaddr = int(rs_read_i64_le(ph + 16))
+                val filesz = int(rs_read_i64_le(ph + 32))
+                val memsz = int(rs_read_i64_le(ph + 40))
+                if offset + filesz > buflen
+                    return -1
+                if filesz > 0
+                    svc_vm_copy_to(ptbr, vaddr, buf + offset, filesz)
+                if memsz > filesz
+                    rs_zero_fill_remote(ptbr, vaddr + filesz, memsz - filesz)
+            i += 1
+        entry
+
 Zero-fill a region in another process's address space.
 Uses a local zero buffer and vm_copy_to in chunks.
 
@@ -249,14 +271,20 @@ Uses a local zero buffer and vm_copy_to in chunks.
             dst += chunk
 
 Start a server from a boot module: create server page table,
-load TRB binary, create process, resume it.
+copy module data via svc_phys_read, load TRB/ELF binary,
+create process, resume it.
 io_page = MMIO page to grant (e.g. 0x800 for ramdisk).
 Returns 1 on success, 0 on failure.
 
     rs_start_from_module(mod_idx: int, name: *byte, nlen: int, io_page: int) -> int
         val addr = rs_boot_module_addr(mod_idx)
         val sz = rs_boot_module_size(mod_idx)
-        val buf = *byte(addr)
+
+        // Copy boot module data from physical memory into our buffer
+        if sz > 131072
+            return 0
+        svc_phys_read(int(addr), &rs_mod_buf[0], sz)
+        val buf = &rs_mod_buf[0]
 
         // Create server page table with MMIO grant
         val ptbr = svc_vm_create_server_pt(io_page)
@@ -268,28 +296,17 @@ Returns 1 on success, 0 on failure.
         if buf[0] == 0x7F
             if buf[1] == byte('E')
                 // ELF64 format (x86_64)
-                entry = load_elf64_to_ptbr(buf, sz, ptbr)
+                entry = rs_load_elf64_module(buf, sz, ptbr)
         if entry < 0
             // Try TRB format (TRISC)
             entry = rs_load_trb_module(buf, sz, ptbr)
         if entry < 0
             return 0
 
-        // Switch to process's page table so create_process_suspended
-        // can write the initial stack frame at virtual addresses
-        // (0xCF000 etc.) that map to the process's physical pages.
-        val my_tid = thread_id()
-        svc_set_thread_ptbr(my_tid, ptbr)
-        svc_vm_set_ptbr(ptbr)
-
-        // Create process suspended
+        // Create process suspended — no PTBR switch needed;
+        // create_process_suspended uses vm_copy_to for the stack frame
         val sname = string(name, nlen)
         val pid = svc_create_proc_susp(entry, RS_PROG_USP, RS_PROG_SSP, sname, ptbr)
-
-        // Switch back to kernel address space
-        svc_set_thread_ptbr(my_tid, kernel_ptbr())
-        svc_vm_set_ptbr(kernel_ptbr())
-
         if pid < 0
             return 0
 
@@ -319,71 +336,67 @@ is future work.
             ipc_recv_notify(rs_port, &buf[0], 1)
             notify_read_self()
 
-The RS main function. Runs as its own thread. Starts all
-registered servers in order with synchronous handshake,
-printing boot messages for each. After boot, RS stays alive
-in a monitoring loop waiting for server crash notifications.
-
-For each server, RS first checks boot info for a matching
-boot module. If found, starts the server as an isolated
-process with its own page table. Otherwise falls back to
-creating a kernel thread from the function pointer.
+The RS main function. Runs as the first userspace process.
+Reads config from info page at 0xBF000, then starts all
+servers from boot modules in order with synchronous handshake.
+After boot, RS stays alive in a monitoring loop.
 
     val IO_PAGE_DEVICES = 0x800
 
     rs_main()
         rs_set_tid(thread_id())
+
+        // Read info page at 0xBF000
+        val info = *i64(0xBF000)
+        rs_ramdisk_base = int(info[1])
+        rs_ramdisk_size = int(info[2])
+
+        // Copy boot info header from info page (+24)
+        val bi_src = *byte(0xBF018)
+        // Read module count to determine copy size
+        val mod_count = int(rs_read_u32_le(bi_src + 4))
+        rs_boot_info_len = 8 + mod_count * 24
+        if rs_boot_info_len > 256
+            rs_boot_info_len = 256
+        var ci = 0
+        while ci < rs_boot_info_len
+            rs_boot_info[ci] = bi_src[ci]
+            ci += 1
+
         rs_init_boot_order()
 
         rs_print("SLIX v0.0.1\nStarting servers:\n")
 
-        val has_boot_info = rs_boot_info_valid()
+        if !rs_boot_info_valid()
+            rs_print("ERROR: invalid boot info\n")
+            return
 
+        // Start the 5 servers + init from boot modules
+        // Servers that need MMIO get IO_PAGE_DEVICES; others get 0
         var i = 0
-        while i < RS_NUM_SERVERS
+        while i <= RS_NUM_SERVERS
             val name = &rs_boot_names[i * 8]
             val nlen = rs_boot_nlen[i]
             rs_print("  ")
             rs_print(string(name, nlen))
 
-            var started = false
+            val mod_idx = rs_find_boot_module(name, nlen)
+            if mod_idx < 0
+                rs_print(" MISSING\n")
+                return
 
-            // Try boot module first
-            if has_boot_info
-                val mod_idx = rs_find_boot_module(name, nlen)
-                if mod_idx >= 0
-                    if rs_start_from_module(mod_idx, name, nlen, IO_PAGE_DEVICES) == 1
-                        started = true
-                        rs_print(" [mod]")
+            // pm, vfs, init don't need MMIO
+            var io_page = IO_PAGE_DEVICES
+            if i >= 3
+                io_page = 0
+            if rs_start_from_module(mod_idx, name, nlen, io_page) != 1
+                rs_print(" FAILED\n")
+                return
 
-            // Fall back to kernel thread
-            if !started
-                val slot = rs_next_slot
-                rs_next_slot += 1
-                create_thread(rs_boot_fn[i], kernel_stack_usp(slot), kernel_stack_ssp(slot), string(name, nlen))
-
+            rs_print(" [mod]")
             rs_wait_ready()
             rs_print(" ok\n")
             i += 1
-
-        // Start init — try boot module first, fall back to kernel thread
-        rs_print("  init")
-        var init_started = false
-        var init_name: [8]byte
-        init_name[0] = 'i'; init_name[1] = 'n'; init_name[2] = 'i'; init_name[3] = 't'; init_name[4] = 0
-        if has_boot_info
-            val mod_idx = rs_find_boot_module(init_name, 4)
-            if mod_idx >= 0
-                if rs_start_from_module(mod_idx, init_name, 4, 0) == 1
-                    init_started = true
-                    rs_print(" [mod]")
-        if !init_started
-            if rs_init_fn != 0
-                val init_slot = rs_next_slot
-                rs_next_slot += 1
-                create_thread(rs_init_fn, kernel_stack_usp(init_slot), kernel_stack_ssp(init_slot), "init")
-        rs_wait_ready()
-        rs_print(" ok\n")
 
         // RS stays alive — monitoring loop
         rs_print("RS monitoring\n")

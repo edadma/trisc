@@ -507,6 +507,24 @@ Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
         syscall_return(paddr)
         kernel_continue_current()
 
+SYS_PHYS_READ (67): Copy from physical address into caller's address space.
+Arg = pointer to packed args: [src_phys(i64), dst_vaddr(i64), len(i64)]
+Used by userspace RS to read boot module data from physical memory.
+
+Both source (physical RAM) and destination are accessible under the
+caller's PTBR: server page tables identity-map the kernel and page
+pool regions (TRISC L1[1] superpage, x86_64 PD[1..15] superpages).
+vm_copy_to translates the destination vaddr via page walk and copies.
+
+    sys_phys_read_handler(arg: int)
+        var args: *i64 = *i64(i64(arg))
+        val src_phys = int(args[0])
+        val dst_vaddr = int(args[1])
+        val vlen = int(args[2])
+        vm_copy_to(threads[current_thread].ptbr, dst_vaddr, *byte(src_phys), vlen)
+        syscall_return(0)
+        kernel_continue_current()
+
 Thread info query handlers (syscalls 7-9, 42-43).
 Used by ps and other user programs via ulib.
 
@@ -587,6 +605,7 @@ Used by ps and other user programs via ulib.
         register_syscall(64, sys_kb_set_notify_handler)
         // syscall 65 (ipc_last_msg_len) is registered by ipc_init
         register_syscall(66, sys_vm_v2p_handler)
+        register_syscall(67, sys_phys_read_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events

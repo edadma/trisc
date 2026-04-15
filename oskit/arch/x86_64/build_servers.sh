@@ -185,18 +185,27 @@ build_init() {
         oskit/hal/mem_cpu.lsysl
 }
 
+build_rs() {
+    build_server rs rs_main \
+        "import oskit.servers.{rs_main}" \
+        oskit/servers/rs.lsysl \
+        oskit/hal/mem_cpu.lsysl
+}
+
 if [ -n "$1" ]; then
     case "$1" in
+        rs)   build_rs ;;
         disk) build_disk ;;
         tfs)  build_tfs ;;
         tty)  build_tty ;;
         pm)   build_pm ;;
         vfs)  build_vfs ;;
         init) build_init ;;
-        all)  build_disk; build_tfs; build_tty; build_pm; build_vfs; build_init ;;
+        all)  build_rs; build_disk; build_tfs; build_tty; build_pm; build_vfs; build_init ;;
         *)    echo "Unknown server: $1" >&2; exit 1 ;;
     esac
 else
+    build_rs
     build_disk
     build_tfs
     build_tty
