@@ -19,5 +19,5 @@ and process termination.
         while 1 == 1
             putint(n)
             putc('\n')
-            sleep(1000)
+            sleep(100)
             n += 1
