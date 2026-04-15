@@ -37,6 +37,7 @@ object OskitDemoBuilder:
   private lazy val errorsSysl: String    = readLsysl("std/errors/errors.lsysl")
   private lazy val utf8Sysl: String      = readLsysl("std/utf8/utf8.lsysl")
   private lazy val loaderSysl: String    = readLsysl("oskit/loader/loader.lsysl")
+  private lazy val stdAllocSysl: String  = readLsysl("std/alloc/alloc.lsysl")
   private lazy val sha256Sysl: String    = readLsysl("std/crypto/sha256/sha256.lsysl")
   private lazy val hmacSysl: String      = readLsysl("std/crypto/hmac/hmac.lsysl")
   private lazy val pbkdf2Sysl: String    = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
@@ -90,6 +91,7 @@ object OskitDemoBuilder:
         "std/errors/errors"           -> errorsSysl,
         "std/utf8/utf8"               -> utf8Sysl,
         "oskit/loader/loader"         -> loaderSysl,
+        "std/alloc/alloc"             -> stdAllocSysl,
         "std/crypto/sha256/sha256"    -> sha256Sysl,
         "std/crypto/hmac/hmac"        -> hmacSysl,
         "std/crypto/pbkdf2/pbkdf2"    -> pbkdf2Sysl,
@@ -241,6 +243,7 @@ import oskit.apps.init.{init}
         extraSources = Map(
           "oskit/config/config"  -> configSysl,
           "oskit/loader/loader"  -> readLsysl("oskit/loader/loader.lsysl"),
+          "std/alloc/alloc"      -> stdAllocSysl,
           "oskit/fs/client"      -> fsClientSysl,
           "oskit/hal/mem"        -> halMemSysl,
         )),
@@ -250,6 +253,7 @@ import oskit.apps.init.{init}
           "oskit/servers/pm"     -> pmSrvSysl,
           "oskit/config/config"  -> configSysl,
           "oskit/loader/loader"  -> loaderSysl,
+          "std/alloc/alloc"      -> stdAllocSysl,
           "oskit/hal/mem"        -> halMemSysl,
         )),
     )
