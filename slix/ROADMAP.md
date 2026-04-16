@@ -49,9 +49,22 @@ Concrete, ordered development plan. Each phase builds on the previous.
 - PM loads binaries via cross-address-space copy (load_tof_to_ptbr)
 - 17 new kernel syscalls for server isolation (44-66)
 
+### Phase 4: RS Refactor and Init Isolation (Minix 3 alignment)
+- RS as first userspace process (kernel only starts RS)
+- RS starts all servers + init from boot modules in order
+- Handshake boot with synchronous ready notifications
+- Init isolated as standalone boot module
+
+### Phase 5: Minix 3 Boot Parity
+- **Crash recovery:** PM notifies RS on server death, RS restarts from boot module, port_transfer for transparent restart (clients keep working)
+- **Per-process syscall privilege table:** 128-bit bitmask per process, enforced in assembly slow-path dispatcher (both TRISC and x86_64)
+- **Per-process IPC send restrictions:** bitmask of allowed destination ports, enforced in both send handlers, re-tightened after restart
+- **Kill fix:** scheduler skips terminated threads left in ready queue
+- Both TRISC and x86_64 targets working, 12/12 x86 tests pass
+
 ---
 
-## Phase 4: RS Refactor and Init Isolation (Minix 3 alignment)
+## ~~Phase 4: RS Refactor and Init Isolation (Minix 3 alignment)~~ DONE
 
 **Problem:** SLIX's RS is fire-and-forget -- it starts servers once during boot and exits. Minix 3's RS is the root of the server tree: it starts first, monitors all servers, and can restart crashed ones. This is Minix 3's headline reliability feature. Additionally, init is compiled into the kernel binary and runs as a kernel thread, unlike Minix 3 where init is a separate binary loaded as a boot module.
 
@@ -337,10 +350,11 @@ Already achieved (sysl -> LLVM -> x86_64 bare-metal hello in QEMU). Next: boot w
 
 ## Not on this roadmap (future)
 
+- **DS (Data Store) server** — Minix 3-style key-value service for sharing dynamic configuration between servers. SLIX already handles service discovery via port_lookup/port_register (kernel-level), so DS is only needed for arbitrary config sharing between many servers.
+- **SMP (multi-core)** — TRISC multi-core support is done on a separate branch. Kernel needs per-CPU run queues, IPI for cross-core scheduling, and atomic operations for shared data structures.
 - Networking (TCP/IP stack, socket server)
 - Shared memory / mmap
 - Dynamic linking / shared libraries
-- SMP (multi-core)
 - GUI / window system on x86
 - Package manager
 - Grant-based IPC (zero-copy memory grants, avoiding bounce buffers)

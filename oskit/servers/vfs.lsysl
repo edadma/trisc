@@ -16,6 +16,7 @@ index, and reference count. A slot is free when refcount is 0.
     val VFS_MAX_OPEN_FILES = 32
     val OFT_TYPE_FILE = 0
     val OFT_TYPE_TTY  = 1
+    val OFT_TYPE_PIPE = 2
 
     var oft_ino: [32]int
     var oft_pos: [32]int
@@ -23,6 +24,27 @@ index, and reference count. A slot is free when refcount is 0.
     var oft_ref: [32]int
     var oft_type: [32]int
     var oft_console: [32]int
+    var oft_pipe_id: [32]int
+    var oft_pipe_write: [32]int
+
+Pipe infrastructure. Each pipe is a 512-byte circular buffer
+managed entirely within VFS. Deferred-reply pattern: when a
+reader reads from an empty pipe, VFS saves its TID and does
+not reply until a writer provides data (or write end closes).
+
+    val MAX_PIPES = 4
+    val PIPE_BUF_SIZE = 512
+
+    var pipe_buf: [4][512]byte
+    var pipe_head: [4]int
+    var pipe_tail: [4]int
+    var pipe_count: [4]int
+    var pipe_read_oft: [4]int
+    var pipe_write_oft: [4]int
+    var pipe_reader_tid: [4]int
+    var pipe_reader_buf: [4]int
+    var pipe_reader_len: [4]int
+    var pipe_reader_ptbr: [4]int
 
 Allocate an open file table entry. Returns the file ID (index),
 or -1 if the table is full.
@@ -41,12 +63,16 @@ or -1 if the table is full.
             i += 1
         -1
 
-Free an open file table entry.
+Free an open file table entry. When a pipe end's refcount
+reaches 0, mark that end as closed and wake blocked readers.
 
     vfs_oft_free(fid: int)
         if fid >= 0
             if fid < VFS_MAX_OPEN_FILES
                 oft_ref[fid] -= 1
+                if oft_ref[fid] <= 0
+                    if oft_type[fid] == OFT_TYPE_PIPE
+                        vfs_pipe_close_end(fid)
 
 Per-process handle table. Each process has up to MAX_HANDLES
 entries. A handle maps to an open file table index. The table
@@ -113,6 +139,219 @@ Close all handles for a process (called on process exit).
                 vfs_oft_free(oft_idx)
                 handle_oft[base + i] = -1
             i += 1
+
+Initialize pipe state at startup.
+
+    vfs_pipe_init()
+        var i = 0
+        while i < MAX_PIPES
+            pipe_read_oft[i] = -1
+            pipe_write_oft[i] = -1
+            pipe_reader_tid[i] = -1
+            i += 1
+
+Allocate a pipe slot. Returns pipe index or -1 if full.
+
+    vfs_pipe_alloc() -> int
+        var i = 0
+        while i < MAX_PIPES
+            if pipe_read_oft[i] == -1
+                if pipe_write_oft[i] == -1
+                    return i
+            i += 1
+        -1
+
+Handle VFS_CMD_PIPE: create a pipe and return two handles.
+Request: [cmd(1)]. Response: [status(1), read_handle(4), write_handle(4)].
+
+    vfs_handle_pipe(sender: int)
+        val pid = svc_get_thread_pid(sender)
+        val pipe_id = vfs_pipe_alloc()
+        if pipe_id < 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, &err[0], 1)
+            return
+
+        val read_oft = vfs_oft_alloc(pipe_id, 0, OFT_TYPE_PIPE)
+        if read_oft < 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, &err[0], 1)
+            return
+        val write_oft = vfs_oft_alloc(pipe_id, 0, OFT_TYPE_PIPE)
+        if write_oft < 0
+            vfs_oft_free(read_oft)
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, &err[0], 1)
+            return
+
+        oft_pipe_id[read_oft] = pipe_id
+        oft_pipe_write[read_oft] = 0
+        oft_pipe_id[write_oft] = pipe_id
+        oft_pipe_write[write_oft] = 1
+
+        pipe_head[pipe_id] = 0
+        pipe_tail[pipe_id] = 0
+        pipe_count[pipe_id] = 0
+        pipe_read_oft[pipe_id] = read_oft
+        pipe_write_oft[pipe_id] = write_oft
+        pipe_reader_tid[pipe_id] = -1
+
+        val rh = vfs_handle_alloc(pid, read_oft)
+        val wh = vfs_handle_alloc(pid, write_oft)
+
+        var reply: [9]byte
+        reply[0] = 0
+        vfs_msg_write_i32(&reply[0], 1, rh)
+        vfs_msg_write_i32(&reply[0], 5, wh)
+        ipc_reply(sender, &reply[0], 9)
+
+Read from a pipe. Blocks if empty and write end open.
+
+    vfs_pipe_read(sender: int, fid: int, client_buf_addr: int, req_len: int)
+        val pipe_id = oft_pipe_id[fid]
+        val avail = pipe_count[pipe_id]
+
+        if avail > 0
+            var n = req_len
+            if n > avail
+                n = avail
+            if n > PIPE_BUF_SIZE
+                n = PIPE_BUF_SIZE
+
+            var local: [512]byte
+            val head = pipe_head[pipe_id]
+            var copied = 0
+            while copied < n
+                local[copied] = pipe_buf[pipe_id][(head + copied) & (PIPE_BUF_SIZE - 1)]
+                copied += 1
+            pipe_head[pipe_id] = (head + n) & (PIPE_BUF_SIZE - 1)
+            pipe_count[pipe_id] = avail - n
+
+            val sender_ptbr = svc_get_thread_ptbr(sender)
+            val my_ptbr = svc_get_thread_ptbr(thread_id())
+            if sender_ptbr != my_ptbr
+                svc_vm_copy_to(sender_ptbr, client_buf_addr, &local[0], n)
+            else
+                var dst = *byte(i64(client_buf_addr))
+                var j = 0
+                while j < n
+                    dst[j] = local[j]
+                    j += 1
+
+            var reply: [5]byte
+            reply[0] = 0
+            vfs_msg_write_i32(&reply[0], 1, n)
+            ipc_reply(sender, &reply[0], 5)
+            return
+
+        if pipe_write_oft[pipe_id] == -1
+            var reply: [5]byte
+            reply[0] = 0
+            vfs_msg_write_i32(&reply[0], 1, 0)
+            ipc_reply(sender, &reply[0], 5)
+            return
+
+        pipe_reader_tid[pipe_id] = sender
+        pipe_reader_buf[pipe_id] = client_buf_addr
+        pipe_reader_len[pipe_id] = req_len
+        pipe_reader_ptbr[pipe_id] = svc_get_thread_ptbr(sender)
+
+Write to a pipe. Wakes any deferred reader.
+
+    vfs_pipe_write(sender: int, fid: int, client_buf_addr: int, req_len: int)
+        val pipe_id = oft_pipe_id[fid]
+
+        if pipe_read_oft[pipe_id] == -1
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, &err[0], 1)
+            return
+
+        val space = PIPE_BUF_SIZE - pipe_count[pipe_id]
+        var n = req_len
+        if n > space
+            n = space
+        if n > PIPE_BUF_SIZE
+            n = PIPE_BUF_SIZE
+
+        var local: [512]byte
+        val sender_ptbr = svc_get_thread_ptbr(sender)
+        val my_ptbr = svc_get_thread_ptbr(thread_id())
+        if sender_ptbr != my_ptbr
+            svc_vm_copy_from(sender_ptbr, client_buf_addr, &local[0], n)
+        else
+            var src = *byte(i64(client_buf_addr))
+            var j = 0
+            while j < n
+                local[j] = src[j]
+                j += 1
+
+        val tail = pipe_tail[pipe_id]
+        var copied = 0
+        while copied < n
+            pipe_buf[pipe_id][(tail + copied) & (PIPE_BUF_SIZE - 1)] = local[copied]
+            copied += 1
+        pipe_tail[pipe_id] = (tail + n) & (PIPE_BUF_SIZE - 1)
+        pipe_count[pipe_id] += n
+
+        if pipe_reader_tid[pipe_id] >= 0
+            vfs_pipe_wake_reader(pipe_id)
+
+        var reply: [5]byte
+        reply[0] = 0
+        vfs_msg_write_i32(&reply[0], 1, n)
+        ipc_reply(sender, &reply[0], 5)
+
+Wake a deferred reader.
+
+    vfs_pipe_wake_reader(pipe_id: int)
+        val avail = pipe_count[pipe_id]
+        if avail <= 0
+            return
+        val reader = pipe_reader_tid[pipe_id]
+        if reader < 0
+            return
+
+        var n = pipe_reader_len[pipe_id]
+        if n > avail
+            n = avail
+        if n > PIPE_BUF_SIZE
+            n = PIPE_BUF_SIZE
+
+        var local: [512]byte
+        val head = pipe_head[pipe_id]
+        var copied = 0
+        while copied < n
+            local[copied] = pipe_buf[pipe_id][(head + copied) & (PIPE_BUF_SIZE - 1)]
+            copied += 1
+        pipe_head[pipe_id] = (head + n) & (PIPE_BUF_SIZE - 1)
+        pipe_count[pipe_id] -= n
+
+        svc_vm_copy_to(pipe_reader_ptbr[pipe_id], pipe_reader_buf[pipe_id], &local[0], n)
+
+        var reply: [5]byte
+        reply[0] = 0
+        vfs_msg_write_i32(&reply[0], 1, n)
+        ipc_reply(reader, &reply[0], 5)
+        pipe_reader_tid[pipe_id] = -1
+
+Handle pipe end close.
+
+    vfs_pipe_close_end(fid: int)
+        val pipe_id = oft_pipe_id[fid]
+        if oft_pipe_write[fid] == 1
+            pipe_write_oft[pipe_id] = -1
+            if pipe_reader_tid[pipe_id] >= 0
+                var reply: [5]byte
+                reply[0] = 0
+                vfs_msg_write_i32(&reply[0], 1, 0)
+                ipc_reply(pipe_reader_tid[pipe_id], &reply[0], 5)
+                pipe_reader_tid[pipe_id] = -1
+        else
+            pipe_read_oft[pipe_id] = -1
 
 Scheme registry. Maps scheme names to handler ports. When a
 client calls connect("scheme:resource"), VFS looks up the scheme
@@ -255,6 +494,7 @@ reply is always 1 byte. On success, length depends on command.
     val VFS_CMD_CONNECT = 15
     val VFS_CMD_INHERIT = 16
     val VFS_CMD_EXIT    = 17
+    val VFS_CMD_PIPE    = 18
 
     vfs_reply_len(cmd: int, status: int) -> int
         if status != 0
@@ -275,6 +515,8 @@ reply is always 1 byte. On success, length depends on command.
             return 19
         if cmd == VFS_CMD_SEEK
             return 5
+        if cmd == VFS_CMD_PIPE
+            return 9
         1
 
 Big-endian message helpers (local to VFS).
@@ -532,6 +774,10 @@ position, forwards to TFS, advances position by bytes_read.
             vfs_tty_read(sender, fid, client_buf_addr, len)
             return
 
+        if oft_type[fid] == OFT_TYPE_PIPE
+            vfs_pipe_read(sender, fid, client_buf_addr, len)
+            return
+
         val ino = oft_ino[fid]
         val offset = oft_pos[fid]
 
@@ -589,6 +835,10 @@ Client request:  [cmd(1), fid(4), len(4), buf_addr(4)]  (13 bytes)
 
         if oft_type[fid] == OFT_TYPE_TTY
             vfs_tty_write(sender, fid, client_buf_addr, len)
+            return
+
+        if oft_type[fid] == OFT_TYPE_PIPE
+            vfs_pipe_write(sender, fid, client_buf_addr, len)
             return
 
         val ino = oft_ino[fid]
@@ -979,8 +1229,9 @@ come up, mounts root on TFS, then proxies all requests to
 the appropriate backend.
 
     vfs_server()
-        // Initialize handle table
+        // Initialize handle table and pipe state
         vfs_handle_init()
+        vfs_pipe_init()
 
         // Register as "fs"
         vfs_srv_name[0] = 102  // f
@@ -1039,6 +1290,8 @@ the appropriate backend.
                     vfs_handle_connect(sender, &buf[0], msg_len, backend)
                 else if cmd == VFS_CMD_INHERIT
                     vfs_handle_inherit(sender, &buf[0])
+                else if cmd == VFS_CMD_PIPE
+                    vfs_handle_pipe(sender)
                 else if cmd == VFS_CMD_EXIT
                     // Process exited — close all its handles
                     val exit_pid = vfs_msg_read_i32(&buf[0], 1)

@@ -235,6 +235,12 @@ Returns 0 on success, -1 on error (invalid port, port closed).
             ipc_continue_current()
             return
 
+        // IPC send permission check
+        if ipc_check_send_allowed(port) == 0
+            syscall_return(-1)
+            ipc_continue_current()
+            return
+
         // Store sender's IPC context
         ipc_ctx[me].buf = msg_ptr
         ipc_ctx[me].len = msg_len
@@ -549,6 +555,12 @@ Returns 0 on success, -1 on error, -2 on timeout.
             ipc_continue_current()
             return
         if port_owner[port] == IPC_PORT_FREE
+            syscall_return(-1)
+            ipc_continue_current()
+            return
+
+        // IPC send permission check
+        if ipc_check_send_allowed(port) == 0
             syscall_return(-1)
             ipc_continue_current()
             return

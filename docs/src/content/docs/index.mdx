@@ -1,0 +1,46 @@
+---
+title: TRISC
+description: A 64-bit RISC CPU for teaching computer systems from assembly to operating systems.
+template: splash
+hero:
+  tagline: A 64-bit RISC CPU designed for teaching computer systems — from bare-metal assembly to a full microkernel OS.
+  actions:
+    - text: Get Started
+      link: /getting-started/introduction/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/edadma/trisc
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Why TRISC?
+
+<CardGrid>
+	<Card title="Simple by design" icon="puzzle">
+		8 registers, 16-bit fixed-width instructions, one argument register. Students can hold the entire architecture in their head.
+	</Card>
+	<Card title="Full OS stack" icon="laptop">
+		SLIX — a Minix 3-style microkernel with IPC, virtual memory, process isolation, and a shell — runs on the emulator and on real x86_64 hardware.
+	</Card>
+	<Card title="Runs everywhere" icon="rocket">
+		The emulator compiles to JVM, JavaScript, and native executables. Run it in a browser, on a server, or on bare metal.
+	</Card>
+	<Card title="Real peripherals" icon="setting">
+		Timer, DMA, MMU, GPIO, UART, interrupt controller, ramdisk, framebuffer, sound chip, network socket — modeled after real hardware (STM32, RP2040, ARM PL011, RISC-V Sv32).
+	</Card>
+</CardGrid>
+
+## At a glance
+
+| Feature | Detail |
+|---------|--------|
+| Word size | 16-bit instructions, 64-bit registers |
+| Registers | r0-r7 (r0 hardwired to zero) |
+| Endianness | Big-endian |
+| Exception model | 68000-style vector table (20 slots) |
+| MMU | RISC-V Sv32-style hardware page table walk |
+| Multi-core | SMP with per-core INTC, IPI, spinlocks |
+| Target platforms | JVM, JavaScript (Scala.js), Native (Scala Native), x86_64 (LLVM) |
