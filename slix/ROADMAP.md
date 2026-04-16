@@ -292,7 +292,40 @@ oskit/
 
 ---
 
-## Phase 9: Data Store (DS) Server
+## Phase 9: Grant-based IPC
+
+**Goal:** Zero-copy data transfer between processes via kernel memory grants, eliminating bounce buffers.
+
+**Problem:** VFS currently copies data twice for cross-address-space I/O — client buffer → server bounce buffer → TFS (and back). For a 4KB read, that's 8KB of memcpy through `svc_vm_copy_to/from`. Grants let the kernel temporarily map client pages into the server's address space, enabling direct access.
+
+**Design (Minix 3 style):**
+- **Grant table** per process: fixed-size array of grant descriptors
+- Each grant: `{ granter_pid, vaddr, len, flags }` — describes a region the granter allows access to
+- Flags: `GRANT_READ`, `GRANT_WRITE`, `GRANT_READWRITE`
+- Kernel syscalls: `grant_create(vaddr, len, flags) -> grant_id`, `grant_revoke(grant_id)`
+- Server syscall: `grant_copy(grant_id, offset, local_buf, len, direction)` — kernel resolves granter's physical pages and copies directly (no bounce buffer)
+- Later optimization: `grant_map(grant_id)` — kernel maps granter's pages into server's page table for true zero-copy (requires TLB flush on revoke)
+
+**Phases:**
+1. **grant_copy** — kernel-mediated copy using grant descriptors (replaces `svc_vm_copy_to/from`). Still copies, but validates access and is the standard API.
+2. **grant_map** — true zero-copy page mapping (optimization, can defer)
+
+**What changes:**
+- Client creates grant before IPC send: `gid = grant_create(&buf, len, GRANT_WRITE)`
+- Client passes `gid` in IPC message instead of raw buffer address
+- Server calls `grant_copy(gid, ...)` instead of `svc_vm_copy_from/to`
+- VFS read/write paths updated to use grants
+- Eliminates need for server-side bounce buffers (`var local: [4096]byte`)
+
+**What works when done:**
+- VFS file read/write uses grants — no bounce buffers
+- Pipe read/write uses grants
+- TTY read/write uses grants
+- Foundation for future zero-copy networking
+
+---
+
+## Phase 10: Data Store (DS) Server
 
 **Goal:** Minix 3-style key-value service for sharing dynamic configuration between servers.
 
@@ -318,7 +351,7 @@ oskit/
 
 ---
 
-## Phase 10: x86_64 Target
+## Phase 11: x86_64 Target
 
 **Goal:** SLIX boots in QEMU on x86_64 using the multi-target architecture from Phase 4.
 
@@ -359,7 +392,7 @@ Already achieved (sysl -> LLVM -> x86_64 bare-metal hello in QEMU). Next: boot w
 
 ---
 
-## Phase 11: POSIX compatibility layer
+## Phase 12: POSIX compatibility layer
 
 **Goal:** Enough POSIX that standard C programs can be compiled and run.
 
@@ -374,7 +407,7 @@ Already achieved (sysl -> LLVM -> x86_64 bare-metal hello in QEMU). Next: boot w
 
 ---
 
-## Phase 12: Networking
+## Phase 13: Networking
 
 **Goal:** SLIX can access the internet — TCP/IP stack, DNS resolution, basic network utilities.
 
@@ -400,7 +433,7 @@ Already achieved (sysl -> LLVM -> x86_64 bare-metal hello in QEMU). Next: boot w
 
 ---
 
-## Phase 13: Genix Package Manager
+## Phase 14: Genix Package Manager
 
 **Goal:** Nix-inspired but simpler package manager. "Gen" for generations — each install/update creates a new generation that can be atomically switched to or rolled back from.
 
@@ -442,5 +475,4 @@ Already achieved (sysl -> LLVM -> x86_64 bare-metal hello in QEMU). Next: boot w
 - Shared memory / mmap
 - Dynamic linking / shared libraries
 - GUI / window system on x86
-- Grant-based IPC (zero-copy memory grants, avoiding bounce buffers)
 - Stateful server crash recovery (checkpointing, state reconstruction)
