@@ -114,6 +114,16 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     psAfter should not include ("count")
   }
 
+  "x86 pipe: echo hello | cat" in {
+    val output = qemu.command("echo hello | cat")
+    output should include("hello")
+  }
+
+  "x86 pipe: echo hello | cat | cat" in {
+    val output = qemu.command("echo hello | cat | cat")
+    output should include("hello")
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")
