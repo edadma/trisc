@@ -7,7 +7,7 @@ via the mount table. Currently only root ("/") is mounted on TFS.
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv, ipc_reply, ipc_send, ipc_last_msg_len}
-    import oskit.services.{sleep, rs_ready, svc_get_thread_ptbr, svc_get_thread_pid, svc_vm_copy_to, svc_vm_copy_from, thread_id}
+    import oskit.services.{sleep, rs_ready, svc_get_thread_pid, svc_grant_copy, thread_id}
     import oskit.config.MAX_PROCESSES
 
 Open file table. Each open file tracks inode, position, mount
@@ -44,7 +44,7 @@ not reply until a writer provides data (or write end closes).
     var pipe_reader_tid: [4]int
     var pipe_reader_buf: [4]int
     var pipe_reader_len: [4]int
-    var pipe_reader_ptbr: [4]int
+    var pipe_reader_grant: [4]int
 
 Allocate an open file table entry. Returns the file ID (index),
 or -1 if the table is full.
@@ -210,7 +210,7 @@ Request: [cmd(1)]. Response: [status(1), read_handle(4), write_handle(4)].
 
 Read from a pipe. Blocks if empty and write end open.
 
-    vfs_pipe_read(sender: int, fid: int, client_buf_addr: int, req_len: int)
+    vfs_pipe_read(sender: int, fid: int, grant_id: int, req_len: int)
         val pipe_id = oft_pipe_id[fid]
         val avail = pipe_count[pipe_id]
 
@@ -230,16 +230,7 @@ Read from a pipe. Blocks if empty and write end open.
             pipe_head[pipe_id] = (head + n) & (PIPE_BUF_SIZE - 1)
             pipe_count[pipe_id] = avail - n
 
-            val sender_ptbr = svc_get_thread_ptbr(sender)
-            val my_ptbr = svc_get_thread_ptbr(thread_id())
-            if sender_ptbr != my_ptbr
-                svc_vm_copy_to(sender_ptbr, client_buf_addr, local, n)
-            else
-                var dst = *byte(i64(client_buf_addr))
-                var j = 0
-                while j < n
-                    dst[j] = local[j]
-                    j += 1
+            svc_grant_copy(grant_id, 0, local, n, 1)
 
             var reply: [5]byte
             reply[0] = 0
@@ -255,13 +246,13 @@ Read from a pipe. Blocks if empty and write end open.
             return
 
         pipe_reader_tid[pipe_id] = sender
-        pipe_reader_buf[pipe_id] = client_buf_addr
+        pipe_reader_buf[pipe_id] = 0
         pipe_reader_len[pipe_id] = req_len
-        pipe_reader_ptbr[pipe_id] = svc_get_thread_ptbr(sender)
+        pipe_reader_grant[pipe_id] = grant_id
 
 Write to a pipe. Wakes any deferred reader.
 
-    vfs_pipe_write(sender: int, fid: int, client_buf_addr: int, req_len: int)
+    vfs_pipe_write(sender: int, fid: int, grant_id: int, req_len: int)
         val pipe_id = oft_pipe_id[fid]
 
         if pipe_read_oft[pipe_id] == -1
@@ -278,16 +269,7 @@ Write to a pipe. Wakes any deferred reader.
             n = PIPE_BUF_SIZE
 
         var local: [512]byte
-        val sender_ptbr = svc_get_thread_ptbr(sender)
-        val my_ptbr = svc_get_thread_ptbr(thread_id())
-        if sender_ptbr != my_ptbr
-            svc_vm_copy_from(sender_ptbr, client_buf_addr, local, n)
-        else
-            var src = *byte(i64(client_buf_addr))
-            var j = 0
-            while j < n
-                local[j] = src[j]
-                j += 1
+        svc_grant_copy(grant_id, 0, local, n, 0)
 
         val tail = pipe_tail[pipe_id]
         var copied = 0
@@ -330,7 +312,7 @@ Wake a deferred reader.
         pipe_head[pipe_id] = (head + n) & (PIPE_BUF_SIZE - 1)
         pipe_count[pipe_id] -= n
 
-        svc_vm_copy_to(pipe_reader_ptbr[pipe_id], pipe_reader_buf[pipe_id], local, n)
+        svc_grant_copy(pipe_reader_grant[pipe_id], pipe_reader_buf[pipe_id], local, n, 1)
 
         var reply: [5]byte
         reply[0] = 0
@@ -667,7 +649,7 @@ Read from a TTY handle. Sends TTY_CMD_READ to the TTY server
 for one character, writes it to the client buffer. Returns 1
 byte read (or 0 on error).
 
-    vfs_tty_read(sender: int, fid: int, client_buf_addr: int, len: int)
+    vfs_tty_read(sender: int, fid: int, grant_id: int, len: int)
         val tty = vfs_lookup_tty()
         if tty < 0
             var reply: [5]byte
@@ -683,15 +665,9 @@ byte read (or 0 on error).
         ipc_send(tty, tty_msg, 2, tty_reply, 2)
         // Write character to client buffer
         val ch = tty_reply[1]
-        val sender_ptbr = svc_get_thread_ptbr(sender)
-        val my_ptbr = svc_get_thread_ptbr(thread_id())
-        if sender_ptbr == my_ptbr
-            var p: *byte = *byte(client_buf_addr)
-            p[0] = ch
-        else
-            var local: [1]byte
-            local[0] = ch
-            svc_vm_copy_to(sender_ptbr, client_buf_addr, local, 1)
+        var local: [1]byte
+        local[0] = ch
+        svc_grant_copy(grant_id, 0, local, 1, 1)
         // Reply: 1 byte read
         var reply: [5]byte
         reply[0] = 0
@@ -701,7 +677,7 @@ byte read (or 0 on error).
 Write to a TTY handle. Sends TTY_CMD_PUTS to the TTY server
 with the data from the client buffer.
 
-    vfs_tty_write(sender: int, fid: int, client_buf_addr: int, len: int)
+    vfs_tty_write(sender: int, fid: int, grant_id: int, len: int)
         val tty = vfs_lookup_tty()
         if tty < 0
             var reply: [5]byte
@@ -709,21 +685,12 @@ with the data from the client buffer.
             ipc_reply(sender, reply, 1)
             return
         val console = oft_console[fid]
-        // Copy data from client (or read directly if same address space)
+        // Copy data from client via grant
         var local: [128]byte
         var wlen = len
         if wlen > 125
             wlen = 125
-        val sender_ptbr = svc_get_thread_ptbr(sender)
-        val my_ptbr = svc_get_thread_ptbr(thread_id())
-        if sender_ptbr == my_ptbr
-            var src: *byte = *byte(client_buf_addr)
-            var i = 0
-            while i < wlen
-                local[i] = src[i]
-                i += 1
-        else
-            svc_vm_copy_from(sender_ptbr, client_buf_addr, local, wlen)
+        svc_grant_copy(grant_id, 0, local, wlen, 0)
         // Build TTY_CMD_PUTS message: [cmd(1), console(1), len(1), data...]
         var tty_msg: [128]byte
         tty_msg[0] = 3  // TTY_CMD_PUTS
@@ -749,7 +716,7 @@ position, forwards to TFS, advances position by bytes_read.
     vfs_handle_read(sender: int, buf: *byte, backend: int)
         val handle = vfs_msg_read_i32(buf, 1)
         val len = vfs_msg_read_i32(buf, 5)
-        val client_buf_addr = vfs_msg_read_i32(buf, 9)
+        val grant_id = vfs_msg_read_i32(buf, 9)
 
         val pid = svc_get_thread_pid(sender)
         val fid = vfs_handle_lookup(pid, handle)
@@ -760,51 +727,30 @@ position, forwards to TFS, advances position by bytes_read.
             return
 
         if oft_type[fid] == OFT_TYPE_TTY
-            vfs_tty_read(sender, fid, client_buf_addr, len)
+            vfs_tty_read(sender, fid, grant_id, len)
             return
 
         if oft_type[fid] == OFT_TYPE_PIPE
-            vfs_pipe_read(sender, fid, client_buf_addr, len)
+            vfs_pipe_read(sender, fid, grant_id, len)
             return
 
         val ino = oft_ino[fid]
         val offset = oft_pos[fid]
 
-        // Build TFS-format message: [cmd(1), ino(4), offset(4), len(4), buf_addr(4)]
+        // Build TFS-format message: [cmd(1), ino(4), offset(4), len(4), grant_id(4)]
         var tfs_msg: [17]byte
         tfs_msg[0] = 2  // TFS_CMD_READ
         vfs_msg_write_i32(tfs_msg, 1, ino)
         vfs_msg_write_i32(tfs_msg, 5, offset)
         vfs_msg_write_i32(tfs_msg, 9, len)
+        vfs_msg_write_i32(tfs_msg, 13, grant_id)
 
-        val sender_ptbr = svc_get_thread_ptbr(sender)
-        val my_ptbr = svc_get_thread_ptbr(thread_id())
-
-        if sender_ptbr == my_ptbr
-            // Same address space — forward directly
-            vfs_msg_write_i32(tfs_msg, 13, client_buf_addr)
-            var be_reply: [64]byte
-            ipc_send(backend, tfs_msg, 17, be_reply, 64)
-            if be_reply[0] == 0
-                val nr = vfs_msg_read_i32(be_reply, 1)
-                oft_pos[fid] += nr
-            ipc_reply(sender, be_reply, 5)
-        else
-            // Different address space — use local buffer
-            var local: [4096]byte
-            var rlen = len
-            if rlen > 4096
-                rlen = 4096
-            vfs_msg_write_i32(tfs_msg, 9, rlen)
-            vfs_msg_write_i32(tfs_msg, 13, int(i64(local)))
-            var be_reply: [64]byte
-            ipc_send(backend, tfs_msg, 17, be_reply, 64)
-            if be_reply[0] == 0
-                val nr = vfs_msg_read_i32(be_reply, 1)
-                if nr > 0
-                    svc_vm_copy_to(sender_ptbr, client_buf_addr, local, nr)
-                oft_pos[fid] += nr
-            ipc_reply(sender, be_reply, 5)
+        var be_reply: [64]byte
+        ipc_send(backend, tfs_msg, 17, be_reply, 64)
+        if be_reply[0] == 0
+            val nr = vfs_msg_read_i32(be_reply, 1)
+            oft_pos[fid] += nr
+        ipc_reply(sender, be_reply, 5)
 
 Handle WRITE with position tracking and cross-address-space support.
 Client request:  [cmd(1), fid(4), len(4), buf_addr(4)]  (13 bytes)
@@ -812,7 +758,7 @@ Client request:  [cmd(1), fid(4), len(4), buf_addr(4)]  (13 bytes)
     vfs_handle_write(sender: int, buf: *byte, backend: int)
         val handle = vfs_msg_read_i32(buf, 1)
         val len = vfs_msg_read_i32(buf, 5)
-        val client_buf_addr = vfs_msg_read_i32(buf, 9)
+        val grant_id = vfs_msg_read_i32(buf, 9)
 
         val pid = svc_get_thread_pid(sender)
         val fid = vfs_handle_lookup(pid, handle)
@@ -823,48 +769,30 @@ Client request:  [cmd(1), fid(4), len(4), buf_addr(4)]  (13 bytes)
             return
 
         if oft_type[fid] == OFT_TYPE_TTY
-            vfs_tty_write(sender, fid, client_buf_addr, len)
+            vfs_tty_write(sender, fid, grant_id, len)
             return
 
         if oft_type[fid] == OFT_TYPE_PIPE
-            vfs_pipe_write(sender, fid, client_buf_addr, len)
+            vfs_pipe_write(sender, fid, grant_id, len)
             return
 
         val ino = oft_ino[fid]
         val offset = oft_pos[fid]
 
-        // Build TFS-format message
+        // Build TFS-format message: [cmd(1), ino(4), offset(4), len(4), grant_id(4)]
         var tfs_msg: [17]byte
         tfs_msg[0] = 3  // TFS_CMD_WRITE
         vfs_msg_write_i32(tfs_msg, 1, ino)
         vfs_msg_write_i32(tfs_msg, 5, offset)
         vfs_msg_write_i32(tfs_msg, 9, len)
+        vfs_msg_write_i32(tfs_msg, 13, grant_id)
 
-        val sender_ptbr = svc_get_thread_ptbr(sender)
-        val my_ptbr = svc_get_thread_ptbr(thread_id())
-
-        if sender_ptbr == my_ptbr
-            vfs_msg_write_i32(tfs_msg, 13, client_buf_addr)
-            var be_reply: [64]byte
-            ipc_send(backend, tfs_msg, 17, be_reply, 64)
-            if be_reply[0] == 0
-                val nw = vfs_msg_read_i32(be_reply, 1)
-                oft_pos[fid] += nw
-            ipc_reply(sender, be_reply, 5)
-        else
-            var local: [4096]byte
-            var wlen = len
-            if wlen > 4096
-                wlen = 4096
-            svc_vm_copy_from(sender_ptbr, client_buf_addr, local, wlen)
-            vfs_msg_write_i32(tfs_msg, 9, wlen)
-            vfs_msg_write_i32(tfs_msg, 13, int(i64(local)))
-            var be_reply: [64]byte
-            ipc_send(backend, tfs_msg, 17, be_reply, 64)
-            if be_reply[0] == 0
-                val nw = vfs_msg_read_i32(be_reply, 1)
-                oft_pos[fid] += nw
-            ipc_reply(sender, be_reply, 5)
+        var be_reply: [64]byte
+        ipc_send(backend, tfs_msg, 17, be_reply, 64)
+        if be_reply[0] == 0
+            val nw = vfs_msg_read_i32(be_reply, 1)
+            oft_pos[fid] += nw
+        ipc_reply(sender, be_reply, 5)
 
 Handle CLOSE: resolve handle, free it and decrement oft refcount.
 Client request:  [cmd(1), handle(4)]

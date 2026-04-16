@@ -138,6 +138,23 @@ loaded by nsh each get their own process entry.
     var processes: [16]Process  // 16 = MAX_PROCESSES
     var next_pid = 1
 
+Grant table for grant-based IPC. Clients create grants to
+allow servers to access their memory regions. The kernel
+mediates copies via grant_copy, validating access rights.
+
+    struct Grant
+        granter_pid: int
+        vaddr: int
+        len: int
+        flags: int
+        in_use: int
+
+    val GRANT_READ  = 1
+    val GRANT_WRITE = 2
+    val GRANT_RW    = 3
+    val MAX_GRANTS  = 128
+    var grant_table: [128]Grant
+
 PM registration. The PM server registers its thread ID so
 the kernel can send notifications on process exit.
 
@@ -328,6 +345,115 @@ Arg = (pid << 8) | mask.
                 processes[pid].ipc_send_mask = mask
         syscall_return(0)
         kernel_continue_current()
+
+SYS_GRANT_CREATE (71): Create a memory grant.
+Arg = pointer to [vaddr(i64), len(i64), flags(i64)].
+Returns grant_id or -1 if table full.
+
+    sys_grant_create_handler(arg: int)
+        var args: *i64 = *i64(i64(arg))
+        val vaddr = int(args[0])
+        val len = int(args[1])
+        val flags = int(args[2])
+        val pid = threads[current_thread].pid
+        var i = 0
+        while i < MAX_GRANTS
+            if grant_table[i].in_use == 0
+                grant_table[i].granter_pid = pid
+                grant_table[i].vaddr = vaddr
+                grant_table[i].len = len
+                grant_table[i].flags = flags
+                grant_table[i].in_use = 1
+                syscall_return(i)
+                kernel_continue_current()
+                return
+            i += 1
+        syscall_return(-1)
+        kernel_continue_current()
+
+SYS_GRANT_REVOKE (72): Revoke a grant.
+Arg = grant_id. Returns 0 on success, -1 on error.
+
+    sys_grant_revoke_handler(arg: int)
+        val gid = arg
+        if gid < 0
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if gid >= MAX_GRANTS
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if grant_table[gid].in_use == 0
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        val pid = threads[current_thread].pid
+        if grant_table[gid].granter_pid != pid
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        grant_table[gid].in_use = 0
+        syscall_return(0)
+        kernel_continue_current()
+
+SYS_GRANT_COPY (73): Copy data using a grant.
+Arg = pointer to [grant_id(i64), offset(i64), local_buf(i64), len(i64), direction(i64)].
+Direction: 0 = from granter to caller, 1 = from caller to granter.
+Returns bytes copied or -1 on error.
+
+    sys_grant_copy_handler(arg: int)
+        var args: *i64 = *i64(i64(arg))
+        val gid = int(args[0])
+        val offset = int(args[1])
+        val local_buf = *byte(args[2])
+        val len = int(args[3])
+        val direction = int(args[4])
+        if gid < 0
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if gid >= MAX_GRANTS
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if grant_table[gid].in_use == 0
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if offset + len > grant_table[gid].len
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        // Validate direction against grant flags
+        if direction == 0
+            if (grant_table[gid].flags & GRANT_READ) == 0
+                syscall_return(-1)
+                kernel_continue_current()
+                return
+        else
+            if (grant_table[gid].flags & GRANT_WRITE) == 0
+                syscall_return(-1)
+                kernel_continue_current()
+                return
+        val granter_ptbr = processes[grant_table[gid].granter_pid].ptbr
+        val remote_addr = grant_table[gid].vaddr + offset
+        if direction == 0
+            vm_copy_from(granter_ptbr, remote_addr, local_buf, len)
+        else
+            vm_copy_to(granter_ptbr, remote_addr, local_buf, len)
+        syscall_return(len)
+        kernel_continue_current()
+
+Revoke all grants for a process. Called on process reap.
+
+    grant_revoke_all(pid: int)
+        var i = 0
+        while i < MAX_GRANTS
+            if grant_table[i].in_use == 1
+                if grant_table[i].granter_pid == pid
+                    grant_table[i].in_use = 0
+            i += 1
 
 Get a thread's page table base register.
 
@@ -683,6 +809,9 @@ Used by ps and other user programs via ulib.
         register_syscall(67, sys_phys_read_handler)
         register_syscall(69, sys_set_priv_handler)
         register_syscall(70, sys_set_ipc_mask_handler)
+        register_syscall(71, sys_grant_create_handler)
+        register_syscall(72, sys_grant_revoke_handler)
+        register_syscall(73, sys_grant_copy_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events
@@ -1083,6 +1212,7 @@ Resume a suspended process (created with create_process_suspended).
                 resume_thread(tid)
 
     reap_process(pid: int)
+        grant_revoke_all(pid)
         vm_free_process_pt(processes[pid].ptbr)
         processes[pid].state = PROC_FREE
 

@@ -18,6 +18,7 @@ contract between client and server, so both sides own a copy.
     module oskit.fs
 
     import oskit.ipc.{port_lookup, ipc_send}
+    import oskit.services.{svc_grant_create, svc_grant_revoke, GRANT_READ, GRANT_WRITE}
 
 VFS protocol commands (must match oskit/servers/vfs.lsysl).
 
@@ -119,13 +120,17 @@ Returns number of bytes read, or -1 on error.
         val port = fs_get_port()
         if port < 0
             return -1
+        val gid = svc_grant_create(int(i64(buf)), rlen, GRANT_WRITE)
+        if gid < 0
+            return -1
         var msg: [13]byte
         msg[0] = FS_CMD_READ
         fs_msg_write_i32(msg, 1, fid)
         fs_msg_write_i32(msg, 5, rlen)
-        fs_msg_write_i32(msg, 9, int(i64(buf)))
+        fs_msg_write_i32(msg, 9, gid)
         var reply: [5]byte
         val result = ipc_send(port, msg, 13, reply, 5)
+        svc_grant_revoke(gid)
         if result != 0
             return -1
         if reply[0] != 0
@@ -140,13 +145,17 @@ Returns number of bytes written, or -1 on error.
         val port = fs_get_port()
         if port < 0
             return -1
+        val gid = svc_grant_create(int(i64(data)), wlen, GRANT_READ)
+        if gid < 0
+            return -1
         var msg: [13]byte
         msg[0] = FS_CMD_WRITE
         fs_msg_write_i32(msg, 1, fid)
         fs_msg_write_i32(msg, 5, wlen)
-        fs_msg_write_i32(msg, 9, int(i64(data)))
+        fs_msg_write_i32(msg, 9, gid)
         var reply: [5]byte
         val result = ipc_send(port, msg, 13, reply, 5)
+        svc_grant_revoke(gid)
         if result != 0
             return -1
         if reply[0] != 0

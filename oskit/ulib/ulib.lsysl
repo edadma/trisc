@@ -55,6 +55,23 @@ Command bytes for TFS and TTY server protocols.
     val SYS_GETUID  = 61
     val SYS_SETUID  = 62
 
+    val SYS_GRANT_CREATE = 71
+    val SYS_GRANT_REVOKE = 72
+
+    val GRANT_READ  = 1
+    val GRANT_WRITE = 2
+    val GRANT_RW    = 3
+
+    grant_create(vaddr: int, len: int, flags: int) -> int
+        var args: [3]i64
+        args[0] = vaddr
+        args[1] = len
+        args[2] = flags
+        int(syscall(SYS_GRANT_CREATE, i64(args)))
+
+    grant_revoke(grant_id: int)
+        syscall(SYS_GRANT_REVOKE, i64(grant_id))
+
     val PM_CMD_WAITPID = 1
     val PM_CMD_KILL    = 2
     val PM_CMD_SPAWN   = 3
@@ -139,13 +156,17 @@ Write a string to stdout (handle 1) via VFS.
         val port = fs_port()
         if port < 0
             return -1
+        val gid = grant_create(int(i64(data)), wlen, GRANT_READ)
+        if gid < 0
+            return -1
         var msg: [13]byte
         msg[0] = byte(FS_CMD_WRITE)
         msg_write_i32(msg, 1, handle)
         msg_write_i32(msg, 5, wlen)
-        msg_write_i32(msg, 9, int(i64(data)))
+        msg_write_i32(msg, 9, gid)
         var reply: [5]byte
         val result = ipc_send(port, msg, 13, reply, 5)
+        grant_revoke(gid)
         if result != 0
             return -1
         if reply[0] != 0
@@ -187,13 +208,17 @@ Returns the number of bytes read, or -1 on error.
         val port = fs_port()
         if port < 0
             return -1
+        val gid = grant_create(int(i64(buf)), count, GRANT_WRITE)
+        if gid < 0
+            return -1
         var msg: [13]byte
         msg[0] = byte(FS_CMD_READ)
         msg_write_i32(msg, 1, fid)
         msg_write_i32(msg, 5, count)
-        msg_write_i32(msg, 9, int(i64(buf)))
+        msg_write_i32(msg, 9, gid)
         var reply: [5]byte
         val result = ipc_send(port, msg, 13, reply, 5)
+        grant_revoke(gid)
         if result != 0
             return -1
         if reply[0] != 0

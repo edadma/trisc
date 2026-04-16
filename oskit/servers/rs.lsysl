@@ -58,9 +58,9 @@ Common bits (lo): sleep(0), putc(1), yield(2), exit(3), join(4),
 
     val PRIV_COMMON_LO: i64 = i64(0x20000FFFFFE0007F)
 
-Common bits (hi): ipc_last_msg_len(65)
+Common bits (hi): ipc_last_msg_len(65), grant_create(71), grant_revoke(72)
 
-    val PRIV_COMMON_HI: i64 = i64(1) << 1
+    val PRIV_COMMON_HI: i64 = i64(0x182)
 
 PM extra bits (lo): vm_create_pt(44), create_proc_susp(45),
   resume_proc(46), reap_proc(47), kill_proc(48), register_pm(49),
@@ -85,13 +85,16 @@ created but before it is resumed.
 
     rs_set_server_priv(pid: int, idx: int)
         var lo: i64 = i64(0x20000FFFFFE0007F)  // PRIV_COMMON_LO
-        var hi: i64 = i64(2)                    // PRIV_COMMON_HI
+        var hi: i64 = i64(0x182)                // PRIV_COMMON_HI
         // IPC mask set to 0xFF during boot (all allowed).
         // Tightened after all servers are up via rs_set_ipc_masks().
         var ipc = 0xFF
         if idx == 0
             // disk: needs vm_v2p(66) for DMA
             hi = hi | i64(4)
+        else if idx == 1
+            // tfs: needs grant_copy(73)
+            hi = hi | i64(0x200)
         else if idx == 2
             // tty: needs kbhit(11), getkey(12), kb_set_notify(64)
             lo = lo | i64(0x1800)
@@ -99,6 +102,9 @@ created but before it is resumed.
         else if idx == 3
             // pm: needs process management syscalls (44-60, 62)
             lo = lo | i64(0x5FFFF00000000000)
+        else if idx == 4
+            // vfs: needs grant_copy(73)
+            hi = hi | i64(0x200)
         svc_set_priv(pid, lo, hi, ipc)
 
 Tighten IPC send masks after all servers are booted and port

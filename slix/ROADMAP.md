@@ -62,6 +62,22 @@ Concrete, ordered development plan. Each phase builds on the previous.
 - **Kill fix:** scheduler skips terminated threads left in ready queue
 - Both TRISC and x86_64 targets working, 12/12 x86 tests pass
 
+### Phase 6: Pipes
+- `create_pipe()` returns read/write handle pair via VFS IPC
+- Pipe buffers in VFS with blocking read/write and EOF on close
+- Shell pipes: `cmd1 | cmd2`, multi-stage `cmd1 | cmd2 | cmd3`
+
+### Phase 7: Redirects and job control
+- Output redirect (`>`, `>>`), input redirect (`<`)
+- Background jobs (`&`), `jobs`, `fg`, `kill` builtins
+- `head` and `tail` utilities
+
+### Phase 8: Signals
+- PM signal infrastructure: SIG_TERM, SIG_KILL, SIG_CHILD, SIG_INT, SIG_PIPE
+- TTY ^C interception sends PM_CMD_SIGINT to PM
+- PM tracks foreground PID per console, kills on SIGINT
+- nsh sets/clears foreground PID around waitpid
+
 ---
 
 ## ~~Phase 4: RS Refactor and Init Isolation (Minix 3 alignment)~~ DONE
@@ -235,7 +251,7 @@ oskit/
 
 ---
 
-## Phase 6: Pipes
+## ~~Phase 6: Pipes~~ DONE
 
 **Goal:** `create_pipe()` returns two handles. Shell can do `cmd1 | cmd2`.
 
@@ -253,7 +269,7 @@ oskit/
 
 ---
 
-## Phase 7: Redirects and job control
+## ~~Phase 7: Redirects and job control~~ DONE
 
 **Goal:** Shell supports `>`, `<`, `>>`, `&`, `jobs`, `fg`, `bg`.
 
@@ -270,7 +286,7 @@ oskit/
 
 ---
 
-## Phase 8: Signals
+## ~~Phase 8: Signals~~ DONE
 
 **Goal:** Processes can receive and handle async events.
 

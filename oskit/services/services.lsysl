@@ -341,3 +341,33 @@ thread's page table. Used by drivers that need DMA addresses.
         args[1] = i64(dst)
         args[2] = vlen
         syscall(SYS_PHYS_READ, i64(args))
+
+Grant-based IPC. Clients create grants to allow servers
+to access their memory. The kernel mediates copies.
+
+    val SYS_GRANT_CREATE = 71
+    val SYS_GRANT_REVOKE = 72
+    val SYS_GRANT_COPY   = 73
+
+    val GRANT_READ  = 1
+    val GRANT_WRITE = 2
+    val GRANT_RW    = 3
+
+    svc_grant_create(vaddr: int, len: int, flags: int) -> int
+        var args: [3]i64
+        args[0] = vaddr
+        args[1] = len
+        args[2] = flags
+        syscall(SYS_GRANT_CREATE, i64(args))
+
+    svc_grant_revoke(grant_id: int)
+        syscall(SYS_GRANT_REVOKE, grant_id)
+
+    svc_grant_copy(grant_id: int, offset: int, local_buf: *byte, len: int, direction: int) -> int
+        var args: [5]i64
+        args[0] = grant_id
+        args[1] = offset
+        args[2] = i64(local_buf)
+        args[3] = len
+        args[4] = direction
+        syscall(SYS_GRANT_COPY, i64(args))
