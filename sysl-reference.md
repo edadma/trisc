@@ -238,7 +238,7 @@ The same struct definition supports three usage modes at the use site:
 - `ref -> ptr`: `&r` (unsafe, no refcount change)
 - `ptr -> ref`: **always an error** (can't manufacture a refcount)
 - `value -> ptr`: `&v` (address-of)
-- `ptr -> value`: `*p` (dereference)
+- `ptr -> value`: `*p` (dereference); implicit for struct function arguments
 
 ---
 
@@ -1495,6 +1495,36 @@ var y: int = big + 1     // ERROR: u32 doesn't fit in i32
 - `string` -> `*u8` or `*i8`
 - `&T` -> `*U` (ref decays to raw pointer)
 - Any `*T` -> any `*U` (permissive pointer casting)
+
+### Auto-Deref for Function Arguments
+
+When a function parameter expects a struct by value (`T`) and the caller
+passes a pointer to that struct (`*T`), the compiler implicitly dereferences
+the pointer, copying the value through:
+
+```sysl
+struct Point
+    x: int
+    y: int
+
+sum(p: Point) -> int = p.x + p.y
+
+main() -> int
+    var p = Point(20, 22)
+    val ptr: *Point = &p
+    sum(ptr)               // auto-deref: sum(*ptr), callee gets a copy
+```
+
+This is safe because the callee receives a copy — the caller's original is
+not affected. The same auto-deref applies to `self` inside methods, which
+has type `*StructName`:
+
+```sysl
+Point.total() -> int = sum(self)   // self is *Point, sum expects Point
+```
+
+Only `*T` -> `T` is implicit (deref to copy). The reverse (`T` -> `*T`) is
+**not** implicit because it would create a dangling pointer to a temporary.
 
 ### Explicit Casts Required
 
