@@ -1668,6 +1668,16 @@ class SyslLLVMCodegen:
             val elemPtr = newReg()
             emit(s"  $elemPtr = getelementptr i8, i8* $dataPtr, i64 $byteOff")
             elemPtr
+          case SyslType.PtrType(elemType) =>
+            val base = genExpr(array)
+            val elt = llvmType(elemType)
+            val idx64 = newReg()
+            emit(s"  $idx64 = sext i32 $idx to i64")
+            val gep = newReg()
+            emit(s"  $gep = getelementptr $elt, $elt* $base, i64 $idx64")
+            val cast = newReg()
+            emit(s"  $cast = bitcast $elt* $gep to i8*")
+            cast
           case other =>
             throw new RuntimeException(s"TAddrOfIndex on unsupported type: $other")
 
