@@ -355,6 +355,11 @@ Executable name for `/bin/<name>` lookup: `./echo` → `echo`, `/bin/echo` → `
 
 Built-in commands.
 
+    var nsh_should_exit = 0
+
+    cmd_exit(argc: int, argv: *string)
+        nsh_should_exit = 1
+
     cmd_pwd(argc: int, argv: *string)
         nsh_print(cwd)
         nsh_newline()
@@ -445,7 +450,7 @@ Built-in commands.
         job_count -= 1
 
     cmd_help(argc: int, argv: *string)
-        nsh_print("builtins: pwd cd kill jobs fg help\n")
+        nsh_print("builtins: exit pwd cd kill jobs fg help\n")
         nsh_print("/bin: cat echo ls touch write mkdir rm rmdir\n")
         nsh_print("      mv chmod stat uptime whoami ps grep wc\n")
 
@@ -455,6 +460,7 @@ Command dispatch.
         if argc == 0
             return
         argv[0] match
+            "exit" -> cmd_exit(argc, argv)
             "pwd"  -> cmd_pwd(argc, argv)
             "cd"   -> cmd_cd(argc, argv)
             "kill" -> cmd_kill(argc, argv)
@@ -868,3 +874,5 @@ The shell main loop.
             else
                 nsh_dispatch(argc, argv)
             nsh_flush()
+            if nsh_should_exit == 1
+                return

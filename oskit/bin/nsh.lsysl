@@ -342,6 +342,20 @@ Executable name for `/bin/<name>` lookup: `./echo` → `echo`, `/bin/echo` → `
 
 Built-in commands.
 
+    cmd_exit(argc: int, argv: *string)
+        var code = 0
+        if argc > 1
+            val arg = argv[1]
+            val p = *byte(arg)
+            var i = 0
+            while i < len(arg)
+                val ch = int(p[i])
+                if ch >= '0'
+                    if ch <= '9'
+                        code = code * 10 + (ch - '0')
+                i += 1
+        exit_with(code)
+
     cmd_pwd(argc: int, argv: *string)
         nsh_print(cwd)
         nsh_newline()
@@ -423,7 +437,7 @@ Built-in commands.
         job_count -= 1
 
     cmd_help(argc: int, argv: *string)
-        nsh_print("builtins: pwd cd kill jobs fg help\n")
+        nsh_print("builtins: exit pwd cd kill jobs fg help\n")
         nsh_print("/bin: cat echo grep head tail wc ls mkdir rm\n")
         nsh_print("      rmdir touch write mv chmod stat uptime\n")
         nsh_print("      whoami ps\n")
@@ -526,6 +540,7 @@ Command dispatch.
         if argc == 0
             return
         argv[0] match
+            "exit" -> cmd_exit(argc, argv)
             "pwd"  -> cmd_pwd(argc, argv)
             "cd"   -> cmd_cd(argc, argv)
             "kill" -> cmd_kill(argc, argv)
