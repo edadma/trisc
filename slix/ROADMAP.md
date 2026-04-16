@@ -292,7 +292,33 @@ oskit/
 
 ---
 
-## Phase 9: x86_64 Target
+## Phase 9: Data Store (DS) Server
+
+**Goal:** Minix 3-style key-value service for sharing dynamic configuration between servers.
+
+**Prerequisites:** Clean up sysl tech debt first — eliminate null-terminated string APIs (port_lookup, port_register, etc.) in favor of native sysl `string` throughout the syscall layer.
+
+**Design:**
+- DS is an isolated userspace server (boot module), like PM/VFS
+- Key-value store with `string` keys, `int` and `string` values
+- Subscribe/notify: processes subscribe to key prefixes, get async notification on change
+- Uses heap allocation (`std.alloc`) for variable-length data
+- Fixed max entries (e.g., 64 slots) but dynamic key/value content
+
+**API (DS IPC commands):**
+- `ds_publish(key, value)` — store or update a key-value pair
+- `ds_retrieve(key)` — fetch value by key
+- `ds_delete(key)` — remove entry
+- `ds_subscribe(prefix)` — get notified when matching keys change
+
+**What works when done:**
+- Servers publish config: `ds_publish("net/mtu", 1500)`
+- Other servers retrieve: `ds_retrieve("net/mtu")`
+- Subscribers notified on changes without polling
+
+---
+
+## Phase 10: x86_64 Target
 
 **Goal:** SLIX boots in QEMU on x86_64 using the multi-target architecture from Phase 4.
 
@@ -333,7 +359,7 @@ Already achieved (sysl -> LLVM -> x86_64 bare-metal hello in QEMU). Next: boot w
 
 ---
 
-## Phase 10: POSIX compatibility layer
+## Phase 11: POSIX compatibility layer
 
 **Goal:** Enough POSIX that standard C programs can be compiled and run.
 
@@ -348,14 +374,73 @@ Already achieved (sysl -> LLVM -> x86_64 bare-metal hello in QEMU). Next: boot w
 
 ---
 
+## Phase 12: Networking
+
+**Goal:** SLIX can access the internet — TCP/IP stack, DNS resolution, basic network utilities.
+
+**Architecture (Minix 3 style):**
+- **INET server** — userspace TCP/IP stack (isolated process)
+- **Network driver** — virtio-net (QEMU) or e1000 as boot module
+- **Socket API** — IPC-based, exposed through VFS or dedicated INET port
+- Driver does DMA to/from NIC, passes frames to INET via IPC
+- INET handles ARP, IP, ICMP, UDP, TCP state machines
+- Applications talk to INET for socket operations
+
+**Layers:**
+1. NIC driver (virtio-net for QEMU, simplest) — handles interrupts, DMA, frame send/recv
+2. INET server — Ethernet framing, ARP, IPv4, ICMP (ping), UDP, TCP
+3. Socket interface — connect, send, recv, bind, listen, accept
+4. DNS resolver — UDP-based, `/etc/resolv.conf`
+5. User utilities — `ping`, `wget`/`fetch`, `nc` (netcat)
+
+**What works when done:**
+- `ping 8.8.8.8` sends ICMP echo and gets reply
+- `fetch http://example.com` downloads a web page
+- Programs can open TCP connections to internet hosts
+
+---
+
+## Phase 13: Genix Package Manager
+
+**Goal:** Nix-inspired but simpler package manager. "Gen" for generations — each install/update creates a new generation that can be atomically switched to or rolled back from.
+
+**Design principles:**
+- Content-addressed store: packages identified by hash of inputs (source + deps + build config)
+- Immutable packages: `/pkg/<hash>-<name>/` — never modified after install
+- Profiles: symlink trees that compose a user's visible environment (`/usr/bin/` etc.)
+- Declarative config: system configuration describes desired packages, manager converges
+- Build from source or fetch pre-built binaries (binary cache)
+- No global mutable state — multiple versions coexist, atomic upgrades/rollbacks
+
+**Differences from Nix:**
+- No Nix expression language — use sysl or a simple TOML-based package description
+- Simpler dependency model — flat deps, no closures/thunks
+- No sandboxed builds initially (trust the build scripts)
+- Single-user to start (no multi-user daemon)
+
+**Components:**
+1. **Package store** (`/pkg/`) — content-addressed directory of installed packages
+2. **Package descriptions** — TOML files: name, version, source URL, deps, build commands
+3. **Builder** — downloads source, builds, installs to `/pkg/<hash>-<name>/`
+4. **Profile manager** — creates/updates symlink trees from package selections
+5. **Repository** — remote index of available packages + binary cache
+6. **CLI** — `genix install <name>`, `genix remove <name>`, `genix update`, `genix list`
+
+**Prerequisites:** Networking (Phase 12), filesystem with symlinks, proper user environment
+
+**What works when done:**
+- `genix install curl` fetches and installs curl + dependencies
+- `genix update` upgrades all packages atomically
+- `genix rollback` reverts to previous profile state
+- Multiple package versions coexist without conflict
+
+---
+
 ## Not on this roadmap (future)
 
-- **DS (Data Store) server** — Minix 3-style key-value service for sharing dynamic configuration between servers. SLIX already handles service discovery via port_lookup/port_register (kernel-level), so DS is only needed for arbitrary config sharing between many servers.
 - **SMP (multi-core)** — TRISC multi-core support is done on a separate branch. Kernel needs per-CPU run queues, IPI for cross-core scheduling, and atomic operations for shared data structures.
-- Networking (TCP/IP stack, socket server)
 - Shared memory / mmap
 - Dynamic linking / shared libraries
 - GUI / window system on x86
-- Package manager
 - Grant-based IPC (zero-copy memory grants, avoiding bounce buffers)
 - Stateful server crash recovery (checkpointing, state reconstruction)
