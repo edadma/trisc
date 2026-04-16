@@ -154,6 +154,18 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("piped")
   }
 
+  "x86 signal: ctrl-c kills foreground process" ignore {
+    // TODO: QEMU serial pipe may not forward 0x03 (Ctrl-C) to guest.
+    // Signal infrastructure is in place (PM_CMD_SIGNAL, PM_CMD_SET_FG,
+    // TTY ^C interception, PM_CMD_SIGINT). Test manually via GUI.
+    qemu.send("count\n")
+    Thread.sleep(2000)
+    qemu.send("\u0003")
+    qemu.waitFor(rootPrompt)
+    val ps = qemu.command("ps")
+    ps should not include "count"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")

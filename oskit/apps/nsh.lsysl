@@ -18,8 +18,9 @@ external /bin/ programs loaded via PM spawn.
 
     import oskit.services.sleep
     import oskit.drivers.tty.{tty_puts, tty_getc}
-    import oskit.fs.{fs_open, fs_close, fs_connect, fs_last_ino, fs_stat, fs_pipe, fs_create, fs_unlink, fs_seek}
+    import oskit.fs.{fs_open, fs_close, fs_connect, fs_last_ino, fs_stat, fs_pipe, fs_create, fs_unlink, fs_seek, fs_msg_write_i32}
     import oskit.servers.{pm_waitpid, pm_kill, pm_spawn_handles}
+    import oskit.ipc.{port_lookup, ipc_send}
 
 
 Shell state.
@@ -555,6 +556,27 @@ redir_append. Returns new argc.
             i += 1
         dst
 
+Set/clear foreground PID on PM for Ctrl-C signal delivery.
+
+    val PM_CMD_SET_FG = 5
+    var nsh_pm_port = -2
+
+    nsh_set_fg(console: int, pid: int)
+        if nsh_pm_port == -2
+            var n: [3]byte
+            n[0] = byte('p')
+            n[1] = byte('m')
+            n[2] = 0
+            nsh_pm_port = port_lookup(&n[0])
+        if nsh_pm_port < 0
+            return
+        var msg: [6]byte
+        msg[0] = byte(PM_CMD_SET_FG)
+        msg[1] = byte(console)
+        fs_msg_write_i32(&msg[0], 2, pid)
+        var reply: [1]byte
+        ipc_send(nsh_pm_port, &msg[0], 6, &reply[0], 1)
+
 Try to run an external command from `/bin/` via PM spawn.
 PM handles page table creation, binary loading, and arg setup.
 
@@ -634,7 +656,9 @@ Commands such as `echo` and `cat` are not built-ins — they load
                 nsh_putint(pid)
                 nsh_putc('\n')
             else
+                nsh_set_fg(0, pid)
                 val exit_code = pm_waitpid(pid)
+                nsh_set_fg(0, -1)
                 // Ensure prompt starts on a fresh line — if the program's
                 // last output had no trailing newline, CR in refresh_line
                 // would clobber whatever preceded the prompt on this line.
@@ -768,13 +792,16 @@ the appropriate stdin/stdout handles, then waits for all.
         fs_close(tty_out)
         fs_close(tty_err)
 
-        // Wait for all children
+        // Wait for all children — set fg to last command for Ctrl-C
         nsh_flush()
+        if pids[num_cmds - 1] >= 0
+            nsh_set_fg(0, pids[num_cmds - 1])
         seg = 0
         while seg < num_cmds
             if pids[seg] >= 0
                 pm_waitpid(pids[seg])
             seg += 1
+        nsh_set_fg(0, -1)
         nsh_putc('\n')
 
 The shell main loop.

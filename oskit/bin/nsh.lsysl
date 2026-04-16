@@ -17,7 +17,8 @@ All other commands are external /bin/ programs loaded via PM spawn.
     import oskit.ulib.{write_handle, getc, open, close, read, stat,
         connect, pm_waitpid, pm_kill, pm_spawn_handles,
         sleep, exit, get_args, skip_arg0, STDOUT,
-        create, unlink, seek, pipe}
+        create, unlink, seek, pipe,
+        pm_port, ipc_send, msg_write_i32}
 
 
 Shell state.
@@ -532,6 +533,21 @@ Command dispatch.
             "help" -> cmd_help(argc, argv)
             else   -> nsh_try_external(argc, argv)
 
+Set/clear foreground PID on PM for Ctrl-C signal delivery.
+
+    val PM_CMD_SET_FG = 5
+
+    nsh_set_fg(console: int, pid: int)
+        val port = pm_port()
+        if port < 0
+            return
+        var msg: [6]byte
+        msg[0] = byte(PM_CMD_SET_FG)
+        msg[1] = byte(console)
+        msg_write_i32(&msg[0], 2, pid)
+        var reply: [1]byte
+        ipc_send(port, &msg[0], 6, &reply[0], 1)
+
 Try to run an external command from `/bin/` via PM spawn.
 
     nsh_try_external(argc: int, argv: *string)
@@ -607,7 +623,9 @@ Try to run an external command from `/bin/` via PM spawn.
                 nsh_putint(pid)
                 nsh_putc('\n')
             else
+                nsh_set_fg(0, pid)
                 val exit_code = pm_waitpid(pid)
+                nsh_set_fg(0, -1)
                 // Ensure prompt starts on a fresh line
                 nsh_putc('\n')
                 if exit_code != 0
@@ -735,13 +753,16 @@ the appropriate stdin/stdout handles, then waits for all.
         close(tty_out)
         close(tty_err)
 
-        // Wait for all children
+        // Wait for all children — set fg to last command for Ctrl-C
         nsh_flush()
+        if pids[num_cmds - 1] >= 0
+            nsh_set_fg(0, pids[num_cmds - 1])
         seg = 0
         while seg < num_cmds
             if pids[seg] >= 0
                 pm_waitpid(pids[seg])
             seg += 1
+        nsh_set_fg(0, -1)
         nsh_putc('\n')
 
 The shell entry point. Home directory is passed via args

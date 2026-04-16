@@ -15,6 +15,7 @@ to the active console's input buffer.
     val TTY_CMD_READ    = 2
     val TTY_CMD_PUTS    = 3
     val TTY_CMD_SWITCH  = 4
+    // TTY_CMD_SET_FG removed — foreground tracking moved to PM
 
     val MAX_CONSOLES    = 4
     val TTY_INPUT_SIZE  = 64
@@ -40,6 +41,10 @@ and tracks pending read requests.
     var active_console = 0
     var tty_port = -1
     var tty_tid = -1
+
+PM port cache for Ctrl-C signal delivery.
+
+    var tty_pm_port = -2
 
 HID scancode to ASCII translation table (US layout, lowercase).
 Covers basic printable characters. Shift handling uses a
@@ -223,6 +228,29 @@ HID scancodes for special keys:
 - 0x4D = End           → ESC[F
 - 0x4C = Delete        → ESC[3~
 
+Handle Ctrl-C: tell PM to kill foreground process on this console.
+
+    val PM_CMD_SIGINT = 6
+
+    tty_handle_ctrl_c()
+        // Look up PM port (cached)
+        if tty_pm_port == -2
+            var n: [3]byte
+            n[0] = byte('p')
+            n[1] = byte('m')
+            n[2] = 0
+            tty_pm_port = port_lookup(&n[0])
+        if tty_pm_port < 0
+            // Can't reach PM — push ^C to buffer as fallback
+            tty_console_push(active_console, byte(3))
+            return
+        // Send PM_CMD_SIGINT(console)
+        var msg: [2]byte
+        msg[0] = byte(PM_CMD_SIGINT)
+        msg[1] = byte(active_console)
+        var reply: [1]byte
+        ipc_send(tty_pm_port, &msg[0], 2, &reply[0], 1)
+
     tty_process_keyboard()
         while kbhit() == 1
             val evt = getkey()
@@ -233,6 +261,10 @@ HID scancodes for special keys:
             val raw = (evt >> 17) & 1
             if raw == 1
                 if sc != 0
+                    // Ctrl-C (ASCII 3) — signal foreground process
+                    if sc == 3
+                        tty_handle_ctrl_c()
+                        continue
                     // Translate CR→LF and DEL→BS for terminal compatibility
                     var rch = sc
                     if rch == 13

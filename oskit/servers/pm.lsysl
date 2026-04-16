@@ -26,6 +26,22 @@ IPC commands:
     val PM_CMD_WAITPID = 1
     val PM_CMD_KILL    = 2
     val PM_CMD_SPAWN   = 3
+    val PM_CMD_SIGNAL  = 4
+    val PM_CMD_SET_FG  = 5
+    val PM_CMD_SIGINT  = 6
+
+Signal numbers (SLIX-native, not POSIX).
+
+    val SIG_TERM  = 1
+    val SIG_KILL  = 2
+    val SIG_CHILD = 3
+    val SIG_INT   = 4
+    val SIG_PIPE  = 5
+
+Per-console foreground PID for Ctrl-C signal delivery.
+
+    val PM_MAX_CONSOLES = 4
+    var fg_pid: [4]int
 
 Waitpid queue: tracks parents blocked waiting for a child.
 Each entry stores the waiting parent's thread ID (the IPC
@@ -166,6 +182,60 @@ Handle PM_KILL: kill a process by PID.
             reply[0] = 0
         ipc_reply(sender, &reply[0], 1)
 
+Handle PM_SIGNAL: deliver a signal to a process.
+Request: [cmd(1), pid(4), sig(1)]
+Reply:   [status(1)]
+
+    pm_handle_signal(sender: int, buf: *byte)
+        val pid = pm_msg_read_i32(buf, 1)
+        val sig = int(buf[5])
+        var reply: [1]byte
+        if sig == SIG_CHILD
+            // Default action: ignore
+            reply[0] = 0
+        else if sig == SIG_KILL
+            svc_kill_proc(pid)
+            reply[0] = 0
+        else if sig == SIG_TERM
+            svc_kill_proc(pid)
+            reply[0] = 0
+        else if sig == SIG_INT
+            svc_kill_proc(pid)
+            reply[0] = 0
+        else if sig == SIG_PIPE
+            svc_kill_proc(pid)
+            reply[0] = 0
+        else
+            reply[0] = byte(-1)
+        ipc_reply(sender, &reply[0], 1)
+
+Handle PM_SET_FG: set foreground PID for a console.
+Request: [cmd(1), console(1), pid(4)]
+
+    pm_handle_set_fg(sender: int, buf: *byte)
+        val console = int(buf[1])
+        if console >= 0
+            if console < PM_MAX_CONSOLES
+                fg_pid[console] = pm_msg_read_i32(buf, 2)
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, &reply[0], 1)
+
+Handle PM_SIGINT: Ctrl-C on a console. Kill foreground process.
+Request: [cmd(1), console(1)]
+
+    pm_handle_sigint(sender: int, buf: *byte)
+        val console = int(buf[1])
+        var reply: [1]byte
+        reply[0] = 0
+        if console >= 0
+            if console < PM_MAX_CONSOLES
+                val pid = fg_pid[console]
+                if pid >= 0
+                    svc_kill_proc(pid)
+                    fg_pid[console] = -1
+        ipc_reply(sender, &reply[0], 1)
+
 Handle SPAWN: create a new process from a binary path.
 Request: [cmd(1), path_len(1), args_len(1), num_handles(1), path(N), args(M), handle_pairs(H*2)]
 Reply:   [status(1), pid(4)]
@@ -284,6 +354,11 @@ IPC messages (waitpid/kill from userspace) or notifications
     pm_server()
         pm_tid = thread_id()
         svc_register_pm(pm_tid)
+        // Init foreground PID table
+        var fi = 0
+        while fi < PM_MAX_CONSOLES
+            fg_pid[fi] = -1
+            fi += 1
         val port = port_create()
         if port < 0
             return
@@ -313,6 +388,12 @@ IPC messages (waitpid/kill from userspace) or notifications
                     pm_handle_kill(sender, &buf[0])
                 else if cmd == PM_CMD_SPAWN
                     pm_handle_spawn(sender, &buf[0])
+                else if cmd == PM_CMD_SIGNAL
+                    pm_handle_signal(sender, &buf[0])
+                else if cmd == PM_CMD_SET_FG
+                    pm_handle_set_fg(sender, &buf[0])
+                else if cmd == PM_CMD_SIGINT
+                    pm_handle_sigint(sender, &buf[0])
                 else
                     // Unknown command
                     var reply: [1]byte
