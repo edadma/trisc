@@ -256,6 +256,7 @@ import oskit.hal.memset
     case c if c >= 'a' && c <= 'z' => (KeyEvent.VK_A + (c - 'a'), 0)
     case c if c >= 'A' && c <= 'Z' => (KeyEvent.VK_A + (c - 'A'), 1)
     case c if c >= '0' && c <= '9' => (KeyEvent.VK_0 + (c - '0'), 0)
+    case '\u0003'                  => (KeyEvent.VK_C, 2) // Ctrl-C (mods: ctrl=2)
     case '\n'                      => (KeyEvent.VK_ENTER, 0)
     case ' '                       => (KeyEvent.VK_SPACE, 0)
     case '/'                       => (KeyEvent.VK_SLASH, 0)

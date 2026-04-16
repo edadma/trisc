@@ -261,8 +261,11 @@ Handle Ctrl-C: tell PM to kill foreground process on this console.
             val raw = (evt >> 17) & 1
             if raw == 1
                 if sc != 0
-                    // Ctrl-C (ASCII 3) — signal foreground process
+                    // Ctrl-C (ASCII 3) or Ctrl-\ (ASCII 28) — signal foreground
                     if sc == 3
+                        tty_handle_ctrl_c()
+                        continue
+                    if sc == 28
                         tty_handle_ctrl_c()
                         continue
                     // Translate CR→LF and DEL→BS for terminal compatibility
@@ -298,7 +301,19 @@ Handle Ctrl-C: tell PM to kill foreground process on this console.
                         tty_console_push(active_console, byte(8))
                 else if sc < 128
                     var ch: byte = 0
-                    if (mods & 1) != 0
+                    if (mods & 2) != 0
+                        // Ctrl held — convert letter to control char
+                        ch = sc_to_ascii[sc]
+                        if ch >= byte('a')
+                            if ch <= byte('z')
+                                val ctrl = int(ch) - int('a') + 1
+                                if ctrl == 3
+                                    // Ctrl-C → signal
+                                    tty_handle_ctrl_c()
+                                    continue
+                                tty_console_push(active_console, byte(ctrl))
+                                continue
+                    else if (mods & 1) != 0
                         // Shift held
                         ch = sc_to_ascii_shift[sc]
                     else

@@ -189,12 +189,11 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
   }
 
   "x86 signal: ctrl-c kills foreground process" ignore {
-    // TODO: QEMU serial pipe may not forward 0x03 (Ctrl-C) to guest.
-    // Signal infrastructure is in place (PM_CMD_SIGNAL, PM_CMD_SET_FG,
-    // TTY ^C interception, PM_CMD_SIGINT). Test manually via GUI.
+    // TODO: Control characters (0x03, 0x1C) don't pass through QEMU serial pipe.
+    // Test via TRISC emulator headless test or GUI emulator manually.
     qemu.send("count\n")
     Thread.sleep(2000)
-    qemu.send("\u0003")
+    qemu.send("\u001c")
     qemu.waitFor(rootPrompt)
     val ps = qemu.command("ps")
     ps should not include "count"
