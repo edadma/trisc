@@ -46,6 +46,7 @@ export default defineConfig({
 					items: [
 						{ label: 'Assembler Guide', slug: 'assembly/guide' },
 						{ label: 'Calling Convention', slug: 'assembly/abi' },
+						{ label: 'TOF Object Format', slug: 'assembly/tof' },
 					],
 				},
 				{
