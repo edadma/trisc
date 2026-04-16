@@ -125,4 +125,88 @@ class SyslLLVMTests extends SyslLLVMTestHelpers {
   "equality false" in {
     llvmExit("main() -> int\n  if 42 == 43\n    1\n  else\n    0\n") shouldBe 0
   }
+
+  // ===== Regression: val initializers with non-sequential values =====
+
+  "val with non-sequential values" in {
+    llvmOutput(
+      """val A = 0
+        |val B = 2
+        |val C = 5
+        |val D = 9
+        |
+        |main() -> int
+        |  println(A)
+        |  println(B)
+        |  println(C)
+        |  println(D)
+        |  0
+        |""".stripMargin
+    ) shouldBe "0\n2\n5\n9"
+  }
+
+  "val with non-sequential values cross-unit" in {
+    llvmOutputMulti(Map(
+      "consts/consts" ->
+        """module consts
+          |
+          |val STATE_READY = 0
+          |val STATE_RUNNING = 2
+          |val STATE_TERMINATED = 3
+          |val STATE_BLOCKED = 5
+          |val STATE_SUSPENDED = 9
+          |""".stripMargin,
+      "main" ->
+        """import consts.*
+          |
+          |main() -> int
+          |  println(STATE_READY)
+          |  println(STATE_RUNNING)
+          |  println(STATE_TERMINATED)
+          |  println(STATE_BLOCKED)
+          |  println(STATE_SUSPENDED)
+          |  0
+          |""".stripMargin
+    )) shouldBe "0\n2\n3\n5\n9"
+  }
+
+  // ===== Regression: void calls before final return expression =====
+
+  "void call after if-return not dropped" in {
+    llvmOutput(
+      """foo(x: int) -> int
+        |  if x > 0
+        |    return 1
+        |  puts("tail")
+        |  0
+        |
+        |main() -> int
+        |  foo(0)
+        |  0
+        |""".stripMargin
+    ) shouldBe "tail"
+  }
+
+  "void call after multiple if-returns not dropped" in {
+    llvmOutput(
+      """var flag: int
+        |
+        |set_flag(v: int)
+        |  flag = v
+        |
+        |check(a: int, b: int) -> int
+        |  if a > 10
+        |    return 1
+        |  if b > 10
+        |    return 2
+        |  set_flag(99)
+        |  0
+        |
+        |main() -> int
+        |  println(check(0, 0))
+        |  println(flag)
+        |  0
+        |""".stripMargin
+    ) shouldBe "0\n99"
+  }
 }
