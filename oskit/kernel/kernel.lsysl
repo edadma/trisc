@@ -148,6 +148,9 @@ mediates copies via grant_copy, validating access rights.
         len: int
         flags: int
         in_use: int
+        mapped_vaddr: int
+        mapped_pages: int
+        mapper_ptbr: int
 
     val GRANT_READ  = 1
     val GRANT_WRITE = 2
@@ -393,6 +396,7 @@ Arg = grant_id. Returns 0 on success, -1 on error.
             syscall_return(-1)
             kernel_continue_current()
             return
+        grant_unmap_if_mapped(gid)
         grant_table[gid].in_use = 0
         syscall_return(0)
         kernel_continue_current()
@@ -445,6 +449,102 @@ Returns bytes copied or -1 on error.
         syscall_return(len)
         kernel_continue_current()
 
+SYS_GRANT_MAP (74): Map granter's pages into caller's address space.
+Arg = pointer to [grant_id(i64), offset(i64), len(i64)].
+Returns mapped virtual address or -1 on error.
+
+    sys_grant_map_handler(arg: int)
+        var args: *i64 = *i64(i64(arg))
+        val gid = int(args[0])
+        val offset = int(args[1])
+        val len = int(args[2])
+        if gid < 0
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if gid >= MAX_GRANTS
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if grant_table[gid].in_use == 0
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if offset + len > grant_table[gid].len
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if grant_table[gid].mapped_vaddr != 0
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        val granter_ptbr = processes[grant_table[gid].granter_pid].ptbr
+        val granter_vaddr = grant_table[gid].vaddr + offset
+        val page_offset = granter_vaddr & 0xFFF
+        val page_count = (page_offset + len + 4095) / 4096
+        val caller_ptbr = threads[current_thread].ptbr
+        val base_vaddr = vm_grant_find_free(caller_ptbr, page_count)
+        if base_vaddr == 0
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        val writable = grant_table[gid].flags & GRANT_WRITE
+        var i = 0
+        while i < page_count
+            val src_va = (granter_vaddr & ~0xFFF) + i * 4096
+            val paddr = vm_v2p(granter_ptbr, src_va)
+            if paddr == 0
+                // Granter page not present — unmap what we did so far
+                vm_grant_unmap_pages(caller_ptbr, base_vaddr, i)
+                syscall_return(-1)
+                kernel_continue_current()
+                return
+            vm_grant_map_page(caller_ptbr, base_vaddr + i * 4096, paddr & ~0xFFF, writable)
+            i += 1
+        vm_flush_tlb()
+        grant_table[gid].mapped_vaddr = base_vaddr
+        grant_table[gid].mapped_pages = page_count
+        grant_table[gid].mapper_ptbr = caller_ptbr
+        syscall_return(base_vaddr + page_offset)
+        kernel_continue_current()
+
+SYS_GRANT_UNMAP (75): Unmap a previously mapped grant.
+Arg = grant_id. Returns 0 on success, -1 on error.
+
+    sys_grant_unmap_handler(arg: int)
+        val gid = arg
+        if gid < 0
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if gid >= MAX_GRANTS
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if grant_table[gid].in_use == 0
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if grant_table[gid].mapped_vaddr == 0
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        vm_grant_unmap_pages(grant_table[gid].mapper_ptbr, grant_table[gid].mapped_vaddr, grant_table[gid].mapped_pages)
+        grant_table[gid].mapped_vaddr = 0
+        grant_table[gid].mapped_pages = 0
+        grant_table[gid].mapper_ptbr = 0
+        syscall_return(0)
+        kernel_continue_current()
+
+Unmap a grant if it's currently mapped. Used by revoke and cleanup.
+
+    grant_unmap_if_mapped(gid: int)
+        if grant_table[gid].mapped_vaddr != 0
+            vm_grant_unmap_pages(grant_table[gid].mapper_ptbr, grant_table[gid].mapped_vaddr, grant_table[gid].mapped_pages)
+            grant_table[gid].mapped_vaddr = 0
+            grant_table[gid].mapped_pages = 0
+            grant_table[gid].mapper_ptbr = 0
+
 Revoke all grants for a process. Called on process reap.
 
     grant_revoke_all(pid: int)
@@ -452,6 +552,7 @@ Revoke all grants for a process. Called on process reap.
         while i < MAX_GRANTS
             if grant_table[i].in_use == 1
                 if grant_table[i].granter_pid == pid
+                    grant_unmap_if_mapped(i)
                     grant_table[i].in_use = 0
             i += 1
 
@@ -812,6 +913,8 @@ Used by ps and other user programs via ulib.
         register_syscall(71, sys_grant_create_handler)
         register_syscall(72, sys_grant_revoke_handler)
         register_syscall(73, sys_grant_copy_handler)
+        register_syscall(74, sys_grant_map_handler)
+        register_syscall(75, sys_grant_unmap_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events

@@ -7,7 +7,7 @@ via the mount table. Currently only root ("/") is mounted on TFS.
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv, ipc_reply, ipc_send, ipc_last_msg_len}
-    import oskit.services.{sleep, rs_ready, svc_get_thread_pid, svc_grant_copy, thread_id}
+    import oskit.services.{sleep, rs_ready, svc_get_thread_pid, svc_grant_map, svc_grant_unmap, thread_id}
     import oskit.config.MAX_PROCESSES
 
 Open file table. Each open file tracks inode, position, mount
@@ -221,16 +221,17 @@ Read from a pipe. Blocks if empty and write end open.
             if n > PIPE_BUF_SIZE
                 n = PIPE_BUF_SIZE
 
-            var local: [512]byte
-            val head = pipe_head[pipe_id]
-            var copied = 0
-            while copied < n
-                local[copied] = pipe_buf[pipe_id][(head + copied) & (PIPE_BUF_SIZE - 1)]
-                copied += 1
-            pipe_head[pipe_id] = (head + n) & (PIPE_BUF_SIZE - 1)
-            pipe_count[pipe_id] = avail - n
-
-            svc_grant_copy(grant_id, 0, local, n, 1)
+            val mapped = svc_grant_map(grant_id, 0, n)
+            if mapped > 0
+                var dst: *byte = *byte(mapped)
+                val head = pipe_head[pipe_id]
+                var copied = 0
+                while copied < n
+                    dst[copied] = pipe_buf[pipe_id][(head + copied) & (PIPE_BUF_SIZE - 1)]
+                    copied += 1
+                pipe_head[pipe_id] = (head + n) & (PIPE_BUF_SIZE - 1)
+                pipe_count[pipe_id] = avail - n
+                svc_grant_unmap(grant_id)
 
             var reply: [5]byte
             reply[0] = 0
@@ -268,14 +269,19 @@ Write to a pipe. Wakes any deferred reader.
         if n > PIPE_BUF_SIZE
             n = PIPE_BUF_SIZE
 
-        var local: [512]byte
-        svc_grant_copy(grant_id, 0, local, n, 0)
-
+        val mapped = svc_grant_map(grant_id, 0, n)
+        if mapped <= 0
+            var reply: [5]byte
+            reply[0] = -1
+            ipc_reply(sender, reply, 5)
+            return
+        var src: *byte = *byte(mapped)
         val tail = pipe_tail[pipe_id]
         var copied = 0
         while copied < n
-            pipe_buf[pipe_id][(tail + copied) & (PIPE_BUF_SIZE - 1)] = local[copied]
+            pipe_buf[pipe_id][(tail + copied) & (PIPE_BUF_SIZE - 1)] = src[copied]
             copied += 1
+        svc_grant_unmap(grant_id)
         pipe_tail[pipe_id] = (tail + n) & (PIPE_BUF_SIZE - 1)
         pipe_count[pipe_id] += n
 
@@ -303,16 +309,17 @@ Wake a deferred reader.
         if n > PIPE_BUF_SIZE
             n = PIPE_BUF_SIZE
 
-        var local: [512]byte
-        val head = pipe_head[pipe_id]
-        var copied = 0
-        while copied < n
-            local[copied] = pipe_buf[pipe_id][(head + copied) & (PIPE_BUF_SIZE - 1)]
-            copied += 1
-        pipe_head[pipe_id] = (head + n) & (PIPE_BUF_SIZE - 1)
-        pipe_count[pipe_id] -= n
-
-        svc_grant_copy(pipe_reader_grant[pipe_id], pipe_reader_buf[pipe_id], local, n, 1)
+        val mapped = svc_grant_map(pipe_reader_grant[pipe_id], pipe_reader_buf[pipe_id], n)
+        if mapped > 0
+            var dst: *byte = *byte(mapped)
+            val head = pipe_head[pipe_id]
+            var copied = 0
+            while copied < n
+                dst[copied] = pipe_buf[pipe_id][(head + copied) & (PIPE_BUF_SIZE - 1)]
+                copied += 1
+            pipe_head[pipe_id] = (head + n) & (PIPE_BUF_SIZE - 1)
+            pipe_count[pipe_id] -= n
+            svc_grant_unmap(pipe_reader_grant[pipe_id])
 
         var reply: [5]byte
         reply[0] = 0
@@ -665,9 +672,11 @@ byte read (or 0 on error).
         ipc_send(tty, tty_msg, 2, tty_reply, 2)
         // Write character to client buffer
         val ch = tty_reply[1]
-        var local: [1]byte
-        local[0] = ch
-        svc_grant_copy(grant_id, 0, local, 1, 1)
+        val mapped = svc_grant_map(grant_id, 0, 1)
+        if mapped > 0
+            var dst: *byte = *byte(mapped)
+            dst[0] = ch
+            svc_grant_unmap(grant_id)
         // Reply: 1 byte read
         var reply: [5]byte
         reply[0] = 0
@@ -685,12 +694,17 @@ with the data from the client buffer.
             ipc_reply(sender, reply, 1)
             return
         val console = oft_console[fid]
-        // Copy data from client via grant
-        var local: [128]byte
+        // Map client buffer via grant
         var wlen = len
         if wlen > 125
             wlen = 125
-        svc_grant_copy(grant_id, 0, local, wlen, 0)
+        val mapped = svc_grant_map(grant_id, 0, wlen)
+        if mapped <= 0
+            var reply: [5]byte
+            reply[0] = -1
+            ipc_reply(sender, reply, 5)
+            return
+        var src: *byte = *byte(mapped)
         // Build TTY_CMD_PUTS message: [cmd(1), console(1), len(1), data...]
         var tty_msg: [128]byte
         tty_msg[0] = 3  // TTY_CMD_PUTS
@@ -698,8 +712,9 @@ with the data from the client buffer.
         tty_msg[2] = byte(wlen)
         var i = 0
         while i < wlen
-            tty_msg[3 + i] = local[i]
+            tty_msg[3 + i] = src[i]
             i += 1
+        svc_grant_unmap(grant_id)
         var tty_reply: [1]byte
         ipc_send(tty, tty_msg, 3 + wlen, tty_reply, 1)
         // Reply: bytes written

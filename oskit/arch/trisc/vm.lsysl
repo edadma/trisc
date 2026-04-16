@@ -245,6 +245,67 @@ device registers. Other I/O pages remain supervisor-only.
 
         l1
 
+Grant region constants. The grant region lives in L2 entries
+0x100-0x1FF of L1[0]'s L2 table (virtual 0x100000-0x1FFFFF).
+Used for zero-copy IPC mappings.
+
+    val GRANT_REGION_BASE = 0x100000
+    val GRANT_REGION_PAGES = 256
+    val GRANT_L2_START = 0x100
+
+Find `count` contiguous free (non-valid) entries in the grant
+region of the given page table. Returns the virtual address
+of the first page, or 0 if no space found.
+
+    vm_grant_find_free(ptbr: int, count: int) -> int
+        // L1[0] points to the L2 table
+        var l1e: *i32 = *i32(ptbr)
+        val l2 = ((*l1e >> 10) & 0xFFFFF) << 12
+        var run = 0
+        var start = 0
+        var i = 0
+        while i < GRANT_REGION_PAGES
+            var p: *i32 = *i32(l2 + (GRANT_L2_START + i) * 4)
+            val pte = *p
+            if (pte & PTE_V) == 0
+                if run == 0
+                    start = i
+                run += 1
+                if run >= count
+                    return GRANT_REGION_BASE + start * 4096
+            else
+                run = 0
+            i += 1
+        0
+
+Map a single physical page at a specific virtual address in
+the grant region.
+
+    vm_grant_map_page(ptbr: int, vaddr: int, paddr: int, writable: int)
+        var l1e: *i32 = *i32(ptbr)
+        val l2 = ((*l1e >> 10) & 0xFFFFF) << 12
+        val idx = (vaddr - GRANT_REGION_BASE) / 4096
+        val ppn = paddr / 4096
+        var flags = PTE_V | PTE_R | PTE_U
+        if writable != 0
+            flags = flags | PTE_W
+        var p: *i32 = *i32(l2 + (GRANT_L2_START + idx) * 4)
+        *p = i32((ppn << 10) | flags)
+
+Clear PTEs for `count` pages starting at `vaddr` in the
+grant region, then flush the TLB.
+
+    vm_grant_unmap_pages(ptbr: int, vaddr: int, count: int)
+        var l1e: *i32 = *i32(ptbr)
+        val l2 = ((*l1e >> 10) & 0xFFFFF) << 12
+        val start_idx = (vaddr - GRANT_REGION_BASE) / 4096
+        var i = 0
+        while i < count
+            var p: *i32 = *i32(l2 + (GRANT_L2_START + start_idx + i) * 4)
+            *p = i32(0)
+            i += 1
+        vm_flush_tlb()
+
 Free all pages allocated for a process page table: the program
 region pages (L2 entries 0xCC-0xFF), the L2 table, and the L1
 table. Kernel identity-mapped pages (L2 entries 0x00-0xCB) are

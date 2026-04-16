@@ -371,3 +371,16 @@ to access their memory. The kernel mediates copies.
         args[3] = len
         args[4] = direction
         syscall(SYS_GRANT_COPY, i64(args))
+
+    val SYS_GRANT_MAP   = 74
+    val SYS_GRANT_UNMAP = 75
+
+    svc_grant_map(grant_id: int, offset: int, len: int) -> int
+        var args: [3]i64
+        args[0] = grant_id
+        args[1] = offset
+        args[2] = len
+        syscall(SYS_GRANT_MAP, i64(args))
+
+    svc_grant_unmap(grant_id: int)
+        syscall(SYS_GRANT_UNMAP, grant_id)

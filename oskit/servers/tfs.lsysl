@@ -33,7 +33,7 @@ Commands:
     import oskit.fs.{tfs_init, tfs_lookup, tfs_read, tfs_write, tfs_create, tfs_unlink, tfs_stat, tfs_readdir, tfs_rmdir, tfs_chmod, tfs_rename, sync_superblock}
     import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply, ipc_last_msg_len}
     import oskit.drivers.disk.{disk_read, disk_write}
-    import oskit.services.{rs_ready, svc_grant_copy}
+    import oskit.services.{rs_ready, svc_grant_map, svc_grant_unmap}
 
     val TFS_CMD_OPEN    = 1
     val TFS_CMD_READ    = 2
@@ -100,13 +100,14 @@ Reply:   [status(1), bytes_read(4)]
         val offset = tfs_msg_read_i32(buf, 5)
         val len = tfs_msg_read_i32(buf, 9)
         val grant_id = tfs_msg_read_i32(buf, 13)
-        var local: [4096]byte
         var rlen = len
         if rlen > 4096
             rlen = 4096
-        var nr = tfs_read(ino, local, offset, rlen)
-        if nr > 0
-            svc_grant_copy(grant_id, 0, local, nr, 1)
+        val ptr = svc_grant_map(grant_id, 0, rlen)
+        var nr = 0
+        if ptr > 0
+            nr = tfs_read(ino, *byte(ptr), offset, rlen)
+            svc_grant_unmap(grant_id)
         var reply: [5]byte
         reply[0] = 0
         tfs_msg_write_i32(reply, 1, nr)
@@ -123,12 +124,14 @@ Reply:   [status(1), bytes_written(4)]
         val offset = tfs_msg_read_i32(buf, 5)
         val len = tfs_msg_read_i32(buf, 9)
         val grant_id = tfs_msg_read_i32(buf, 13)
-        var local: [4096]byte
         var wlen = len
         if wlen > 4096
             wlen = 4096
-        svc_grant_copy(grant_id, 0, local, wlen, 0)
-        var nw = tfs_write(ino, local, offset, wlen)
+        val ptr = svc_grant_map(grant_id, 0, wlen)
+        var nw = 0
+        if ptr > 0
+            nw = tfs_write(ino, *byte(ptr), offset, wlen)
+            svc_grant_unmap(grant_id)
         var reply: [5]byte
         reply[0] = 0
         tfs_msg_write_i32(reply, 1, nw)

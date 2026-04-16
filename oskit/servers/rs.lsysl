@@ -93,8 +93,8 @@ created but before it is resumed.
             // disk: needs vm_v2p(66) for DMA
             hi = hi | i64(4)
         else if idx == 1
-            // tfs: needs grant_copy(73)
-            hi = hi | i64(0x200)
+            // tfs: needs grant_copy(73), grant_map(74), grant_unmap(75)
+            hi = hi | i64(0xE00)
         else if idx == 2
             // tty: needs kbhit(11), getkey(12), kb_set_notify(64)
             lo = lo | i64(0x1800)
@@ -103,8 +103,8 @@ created but before it is resumed.
             // pm: needs process management syscalls (44-60, 62)
             lo = lo | i64(0x5FFFF00000000000)
         else if idx == 4
-            // vfs: needs grant_copy(73)
-            hi = hi | i64(0x200)
+            // vfs: needs grant_copy(73), grant_map(74), grant_unmap(75)
+            hi = hi | i64(0xE00)
         svc_set_priv(pid, lo, hi, ipc)
 
 Tighten IPC send masks after all servers are booted and port

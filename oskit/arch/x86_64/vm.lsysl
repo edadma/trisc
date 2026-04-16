@@ -241,6 +241,88 @@ in boot.s) not MMIO. Stubbed for interface compatibility.
         pml4
 
 
+Grant mapping region for zero-copy IPC.
+PD[16] maps virtual addresses starting at 0x2000000 (32MB).
+
+    val GRANT_PD_IDX = 16
+    val GRANT_REGION_BASE = 0x2000000
+    val GRANT_REGION_PAGES = 512
+
+
+Ensure a page table exists at PD[16] for the grant mapping
+region. If not present, allocates one. Returns PT address or 0.
+
+    vm_grant_ensure_pt(ptbr: int) -> int
+        // Walk PML4 → PDPT → PD to find PD[16]
+        val pml4e = vm_read_pte64(ptbr)
+        val pdpt = int(pml4e & PTE_ADDR_MASK)
+        val pdpte = vm_read_pte64(pdpt)
+        val pd = int(pdpte & PTE_ADDR_MASK)
+        val pde = vm_read_pte64(pd + GRANT_PD_IDX * 8)
+        if (int(pde) & PTE_P) != 0
+            // PT already exists
+            return int(pde & PTE_ADDR_MASK)
+        // Allocate new PT
+        val pt = page_alloc_zero()
+        if pt == 0
+            return 0
+        vm_write_pte64(pd + GRANT_PD_IDX * 8, i64(pt) | PTE_P | PTE_W | PTE_U)
+        pt
+
+
+Scan the grant region PT for `count` contiguous free (non-present)
+entries. Returns the starting virtual address or 0 if not found.
+
+    vm_grant_find_free(ptbr: int, count: int) -> int
+        val pt = vm_grant_ensure_pt(ptbr)
+        if pt == 0
+            return 0
+        var run = 0
+        var start = 0
+        var i = 0
+        while i < GRANT_REGION_PAGES
+            val pte = vm_read_pte64(pt + i * 8)
+            if (int(pte) & PTE_P) == 0
+                if run == 0
+                    start = i
+                run += 1
+                if run >= count
+                    return GRANT_REGION_BASE + start * 4096
+            else
+                run = 0
+            i += 1
+        0
+
+
+Map a single physical page at a specific virtual address in the
+grant region.
+
+    vm_grant_map_page(ptbr: int, vaddr: int, paddr: int, writable: int)
+        val pt = vm_grant_ensure_pt(ptbr)
+        if pt == 0
+            return
+        val idx = (vaddr - GRANT_REGION_BASE) / 4096
+        var flags = PTE_P | PTE_U
+        if writable != 0
+            flags = flags | PTE_W
+        vm_write_pte64(pt + idx * 8, i64(paddr) | i64(flags))
+
+
+Clear PTEs for `count` pages starting at `vaddr` in the grant
+region. Flushes TLB after unmapping.
+
+    vm_grant_unmap_pages(ptbr: int, vaddr: int, count: int)
+        val pt = vm_grant_ensure_pt(ptbr)
+        if pt == 0
+            return
+        val start_idx = (vaddr - GRANT_REGION_BASE) / 4096
+        var i = 0
+        while i < count
+            vm_write_pte64(pt + (start_idx + i) * 8, i64(0))
+            i += 1
+        vm_flush_tlb()
+
+
 Free all pages allocated for a process page table.
 
     vm_free_process_pt(l1_addr: int)
