@@ -736,4 +736,160 @@ class SyslLLVMGapTests extends SyslLLVMTestHelpers {
         |    val c = concat(a[:], b[:])
         |    println(len(c) * 100 + c[0] + c[4])
         |""".stripMargin) shouldBe "506"
-  }}
+  }
+
+  // ===== Bug: val initializer values wrong for non-sequential constants =====
+
+  "val with gaps single file" in {
+    llvmOutput(
+      """val A = 0
+        |val B = 2
+        |val C = 3
+        |val D = 5
+        |val E = 9
+        |
+        |main()
+        |    println(A)
+        |    println(B)
+        |    println(C)
+        |    println(D)
+        |    println(E)
+        |""".stripMargin) shouldBe "0\n2\n3\n5\n9"
+  }
+
+  "val with gaps cross module" in {
+    llvmOutputMulti(Map(
+      "mylib/consts/consts" ->
+        """module mylib.consts
+          |
+          |val A = 0
+          |val B = 2
+          |val C = 3
+          |val D = 5
+          |val E = 9
+          |""".stripMargin,
+      "main" ->
+        """import mylib.consts.*
+          |
+          |main()
+          |    println(A)
+          |    println(B)
+          |    println(C)
+          |    println(D)
+          |    println(E)
+          |""".stripMargin
+    )) shouldBe "0\n2\n3\n5\n9"
+  }
+
+  "val with gaps IR check" in {
+    val ir = compileLLVM(
+      """val A = 0
+        |val B = 2
+        |val C = 3
+        |val D = 5
+        |val E = 9
+        |
+        |main() -> int
+        |    A + B + C + D + E
+        |""".stripMargin)
+    ir should include("@A = global i32 0")
+    ir should include("@B = global i32 2")
+    ir should include("@C = global i32 3")
+    ir should include("@D = global i32 5")
+    ir should include("@E = global i32 9")
+  }
+
+  "val with gaps cross module IR check" in {
+    val ir = compileLLVMMulti(Map(
+      "mylib/consts/consts" ->
+        """module mylib.consts
+          |
+          |val A = 0
+          |val B = 2
+          |val C = 3
+          |val D = 5
+          |val E = 9
+          |""".stripMargin,
+      "main" ->
+        """import mylib.consts.*
+          |
+          |main() -> int
+          |    A + B + C + D + E
+          |""".stripMargin
+    ))
+    ir should include("@mylib_consts__A = global i32 0")
+    ir should include("@mylib_consts__B = global i32 2")
+    ir should include("@mylib_consts__C = global i32 3")
+    ir should include("@mylib_consts__D = global i32 5")
+    ir should include("@mylib_consts__E = global i32 9")
+  }
+
+  // ===== Bug: void function calls before final return expression are dropped =====
+
+  "void call before return expression" in {
+    llvmOutput(
+      """foo() -> int
+        |    puts("hello")
+        |    0
+        |
+        |main()
+        |    foo()
+        |""".stripMargin) shouldBe "hello"
+  }
+
+  "multiple void calls before return expression" in {
+    llvmOutput(
+      """foo() -> int
+        |    puts("A")
+        |    puts("B")
+        |    puts("C")
+        |    0
+        |
+        |main()
+        |    foo()
+        |""".stripMargin) shouldBe "A\nB\nC"
+  }
+
+  "user-defined void call before return" in {
+    llvmOutput(
+      """greet()
+        |    puts("hi")
+        |
+        |foo() -> int
+        |    greet()
+        |    42
+        |
+        |main()
+        |    println(foo())
+        |""".stripMargin) shouldBe "hi\n42"
+  }
+
+  "void call before return IR check" in {
+    val ir = compileLLVM(
+      """extern uart_putc_raw(c: int)
+        |
+        |foo() -> int
+        |    uart_putc_raw(68)
+        |    0
+        |""".stripMargin)
+    ir should include("call void @uart_putc_raw")
+  }
+
+  "void call in expr body dropped" in {
+    // ExprBody form: foo() -> int = bar(); 0
+    // The semicolon produces a sequence expr — check if void call survives
+    val ir = compileLLVM(
+      """side_effect(x: int)
+        |    puts("side")
+        |
+        |foo() -> int
+        |    side_effect(1)
+        |    0
+        |
+        |main() -> int
+        |    foo()
+        |""".stripMargin)
+    // The call to side_effect should appear in foo's body
+    ir should include("call void @side_effect")
+  }
+}
