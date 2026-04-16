@@ -44,6 +44,7 @@ object OskitDemoBuilder:
   private lazy val pmSrvSysl: String     = readLsysl("oskit/servers/pm.lsysl")
   private lazy val vfsSrvSysl: String    = readLsysl("oskit/servers/vfs.lsysl")
   private lazy val rsSrvSysl: String     = readLsysl("oskit/servers/rs.lsysl")
+  private lazy val dsSrvSysl: String     = readLsysl("oskit/servers/ds.lsysl")
   private lazy val halMemSysl: String   = readLsysl("oskit/hal/mem_dma.lsysl")
   private lazy val archVmSysl: String   = readLsysl("oskit/arch/trisc/vm.lsysl")
   private lazy val archCpuSysl: String  = readLsysl("oskit/arch/trisc/cpu.lsysl")
@@ -358,6 +359,7 @@ import oskit.hal.memset
           "oskit/fs/client"      -> fsClientSysl,
           "oskit/hal/mem"        -> halMemSysl,
         )),
+      "ds"   -> compileServerTrb("oskit/servers/ds", "oskit.servers", dsSrvSysl, "ds_server"),
       "init"  -> compileServerTrb("oskit/apps/init/init", "oskit.apps.init", initSysl, "init",
         extraSources = Map(
           "oskit/fs/client"      -> fsClientSysl,

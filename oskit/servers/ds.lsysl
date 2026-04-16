@@ -1,0 +1,308 @@
+OSKit DS Server — Data Store Service
+
+Minix 3-style key-value store for sharing dynamic configuration
+between servers. Servers publish key-value pairs; other servers
+retrieve them. Subscribers get async notifications when matching
+keys change.
+
+Keys are strings (max 32 bytes). Values are either integers
+(4 bytes big-endian) or strings (max 64 bytes).
+
+    module oskit.servers
+
+    import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply}
+    import oskit.services.{rs_ready, notify_send, svc_get_thread_pid, thread_id}
+
+    val DS_CMD_PUBLISH   = 1
+    val DS_CMD_RETRIEVE  = 2
+    val DS_CMD_DELETE    = 3
+    val DS_CMD_SUBSCRIBE = 4
+
+    val DS_TYPE_INT = 1
+    val DS_TYPE_STR = 2
+
+    val DS_MAX_ENTRIES = 64
+    val DS_MAX_KEY_LEN = 32
+    val DS_MAX_VAL_LEN = 64
+    val DS_MAX_SUBS    = 16
+
+Entry table. Each entry holds a key, value, and metadata.
+
+    struct DSEntry
+        key: [32]byte
+        key_len: int
+        val_buf: [64]byte
+        val_len: int
+        val_type: int
+        in_use: int
+        publisher_pid: int
+
+    var ds_entries: [64]DSEntry
+
+Subscription table. Each subscription watches a key prefix
+and gets a notification when matching keys change.
+
+    struct DSSub
+        prefix: [32]byte
+        prefix_len: int
+        subscriber_tid: int
+        in_use: int
+
+    var ds_subs: [16]DSSub
+
+    var ds_port = -1
+
+Big-endian message helpers.
+
+    ds_msg_read_i32(buf: *byte, off: int) -> int
+        ((buf[off] & 0xFF) << 24) | ((buf[off + 1] & 0xFF) << 16) | ((buf[off + 2] & 0xFF) << 8) | (buf[off + 3] & 0xFF)
+
+    ds_msg_write_i32(buf: *byte, off: int, v: int)
+        buf[off]     = byte((v >> 24) & 0xFF)
+        buf[off + 1] = byte((v >> 16) & 0xFF)
+        buf[off + 2] = byte((v >> 8) & 0xFF)
+        buf[off + 3] = byte(v & 0xFF)
+
+Compare two byte arrays of given lengths.
+
+    ds_key_eq(a: *byte, a_len: int, b: *byte, b_len: int) -> int
+        if a_len != b_len
+            return 0
+        var i = 0
+        while i < a_len
+            if a[i] != b[i]
+                return 0
+            i += 1
+        1
+
+Check if key starts with prefix.
+
+    ds_key_starts_with(key: *byte, key_len: int, prefix: *byte, prefix_len: int) -> int
+        if key_len < prefix_len
+            return 0
+        var i = 0
+        while i < prefix_len
+            if key[i] != prefix[i]
+                return 0
+            i += 1
+        1
+
+Find an entry by key. Returns index or -1.
+
+    ds_find(key: *byte, key_len: int) -> int
+        var i = 0
+        while i < DS_MAX_ENTRIES
+            if ds_entries[i].in_use == 1
+                if ds_key_eq(ds_entries[i].key, ds_entries[i].key_len, key, key_len) == 1
+                    return i
+            i += 1
+        -1
+
+Find a free entry slot. Returns index or -1.
+
+    ds_find_free() -> int
+        var i = 0
+        while i < DS_MAX_ENTRIES
+            if ds_entries[i].in_use == 0
+                return i
+            i += 1
+        -1
+
+Notify subscribers whose prefix matches the given key.
+
+    ds_notify_subscribers(key: *byte, key_len: int)
+        var i = 0
+        while i < DS_MAX_SUBS
+            if ds_subs[i].in_use == 1
+                if ds_key_starts_with(key, key_len, ds_subs[i].prefix, ds_subs[i].prefix_len) == 1
+                    notify_send(ds_subs[i].subscriber_tid)
+            i += 1
+
+Handle PUBLISH: store or update a key-value pair.
+Message: [cmd(1), type(1), key_len(1), key(N), value...]
+For DS_TYPE_INT: value is 4 bytes big-endian after key.
+For DS_TYPE_STR: value is val_len(1) + val_data(N) after key.
+
+    ds_handle_publish(sender: int, buf: *byte, msg_len: int)
+        val vtype = int(buf[1])
+        val klen = int(buf[2]) & 0xFF
+        if klen <= 0
+            var reply: [1]byte
+            reply[0] = -1
+            ipc_reply(sender, reply, 1)
+            return
+        if klen > DS_MAX_KEY_LEN
+            var reply: [1]byte
+            reply[0] = -1
+            ipc_reply(sender, reply, 1)
+            return
+        var key: *byte = *byte(i64(buf) + 3)
+        val val_off = 3 + klen
+
+        // Find existing or allocate new slot
+        var idx = ds_find(key, klen)
+        if idx < 0
+            idx = ds_find_free()
+            if idx < 0
+                var reply: [1]byte
+                reply[0] = -1
+                ipc_reply(sender, reply, 1)
+                return
+            // Copy key
+            var ki = 0
+            while ki < klen
+                ds_entries[idx].key[ki] = key[ki]
+                ki += 1
+            ds_entries[idx].key_len = klen
+            ds_entries[idx].in_use = 1
+            ds_entries[idx].publisher_pid = svc_get_thread_pid(sender)
+
+        // Store value
+        ds_entries[idx].val_type = vtype
+        if vtype == DS_TYPE_INT
+            var vi = 0
+            while vi < 4
+                ds_entries[idx].val_buf[vi] = buf[val_off + vi]
+                vi += 1
+            ds_entries[idx].val_len = 4
+        else
+            val vlen = int(buf[val_off]) & 0xFF
+            var vl = vlen
+            if vl > DS_MAX_VAL_LEN
+                vl = DS_MAX_VAL_LEN
+            var vi = 0
+            while vi < vl
+                ds_entries[idx].val_buf[vi] = buf[val_off + 1 + vi]
+                vi += 1
+            ds_entries[idx].val_len = vl
+
+        // Notify subscribers
+        ds_notify_subscribers(key, klen)
+
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+Handle RETRIEVE: fetch value by key.
+Message: [cmd(1), key_len(1), key(N)]
+Reply:   [status(1), type(1), val_len(1), value(N)]
+For DS_TYPE_INT: value is 4 bytes.
+
+    ds_handle_retrieve(sender: int, buf: *byte)
+        val klen = int(buf[1]) & 0xFF
+        if klen <= 0
+            var reply: [1]byte
+            reply[0] = -1
+            ipc_reply(sender, reply, 1)
+            return
+        if klen > DS_MAX_KEY_LEN
+            var reply: [1]byte
+            reply[0] = -1
+            ipc_reply(sender, reply, 1)
+            return
+        var key: *byte = *byte(i64(buf) + 2)
+        val idx = ds_find(key, klen)
+        if idx < 0
+            var reply: [1]byte
+            reply[0] = -1
+            ipc_reply(sender, reply, 1)
+            return
+        // Build reply: [status(1), type(1), val_len(1), value(N)]
+        val vlen = ds_entries[idx].val_len
+        var reply: [68]byte
+        reply[0] = 0
+        reply[1] = byte(ds_entries[idx].val_type)
+        reply[2] = byte(vlen)
+        var i = 0
+        while i < vlen
+            reply[3 + i] = ds_entries[idx].val_buf[i]
+            i += 1
+        ipc_reply(sender, reply, 3 + vlen)
+
+Handle DELETE: remove an entry by key.
+Message: [cmd(1), key_len(1), key(N)]
+
+    ds_handle_delete(sender: int, buf: *byte)
+        val klen = int(buf[1]) & 0xFF
+        if klen <= 0
+            var reply: [1]byte
+            reply[0] = -1
+            ipc_reply(sender, reply, 1)
+            return
+        var key: *byte = *byte(i64(buf) + 2)
+        val idx = ds_find(key, klen)
+        if idx < 0
+            var reply: [1]byte
+            reply[0] = -1
+            ipc_reply(sender, reply, 1)
+            return
+        ds_entries[idx].in_use = 0
+        ds_notify_subscribers(key, klen)
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+Handle SUBSCRIBE: register for notifications on key prefix.
+Message: [cmd(1), prefix_len(1), prefix(N)]
+
+    ds_handle_subscribe(sender: int, buf: *byte)
+        val plen = int(buf[1]) & 0xFF
+        if plen <= 0
+            var reply: [1]byte
+            reply[0] = -1
+            ipc_reply(sender, reply, 1)
+            return
+        if plen > DS_MAX_KEY_LEN
+            var reply: [1]byte
+            reply[0] = -1
+            ipc_reply(sender, reply, 1)
+            return
+        // Find free subscription slot
+        var idx = -1
+        var i = 0
+        while i < DS_MAX_SUBS
+            if ds_subs[i].in_use == 0
+                idx = i
+                i = DS_MAX_SUBS
+            i += 1
+        if idx < 0
+            var reply: [1]byte
+            reply[0] = -1
+            ipc_reply(sender, reply, 1)
+            return
+        var prefix: *byte = *byte(i64(buf) + 2)
+        var pi = 0
+        while pi < plen
+            ds_subs[idx].prefix[pi] = prefix[pi]
+            pi += 1
+        ds_subs[idx].prefix_len = plen
+        ds_subs[idx].subscriber_tid = sender
+        ds_subs[idx].in_use = 1
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+DS server main loop.
+
+    ds_server()
+        ds_port = port_create()
+        port_register(ds_port, "ds")
+        rs_ready()
+
+        var buf: [128]byte
+        while 1 == 1
+            val sender = ipc_recv(ds_port, buf, 128)
+            if sender >= 0
+                val cmd = int(buf[0])
+                if cmd == DS_CMD_PUBLISH
+                    ds_handle_publish(sender, buf, 128)
+                else if cmd == DS_CMD_RETRIEVE
+                    ds_handle_retrieve(sender, buf)
+                else if cmd == DS_CMD_DELETE
+                    ds_handle_delete(sender, buf)
+                else if cmd == DS_CMD_SUBSCRIBE
+                    ds_handle_subscribe(sender, buf)
+                else
+                    var reply: [1]byte
+                    reply[0] = -1
+                    ipc_reply(sender, reply, 1)

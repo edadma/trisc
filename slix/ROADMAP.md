@@ -308,7 +308,7 @@ oskit/
 
 ---
 
-## Phase 9: Grant-based IPC
+## ~~Phase 9: Grant-based IPC~~ DONE
 
 **Goal:** Zero-copy data transfer between processes via kernel memory grants, eliminating bounce buffers.
 

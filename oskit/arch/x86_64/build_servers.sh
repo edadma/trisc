@@ -174,6 +174,12 @@ build_vfs() {
         oskit/config/config.sysl
 }
 
+build_ds() {
+    build_server ds ds_server \
+        "import oskit.servers.{ds_server}" \
+        oskit/servers/ds.lsysl
+}
+
 build_init() {
     build_server init init \
         "import oskit.apps.init.{init}" \
@@ -200,8 +206,9 @@ if [ -n "$1" ]; then
         tty)  build_tty ;;
         pm)   build_pm ;;
         vfs)  build_vfs ;;
+        ds)   build_ds ;;
         init) build_init ;;
-        all)  build_rs; build_disk; build_tfs; build_tty; build_pm; build_vfs; build_init ;;
+        all)  build_rs; build_disk; build_tfs; build_tty; build_pm; build_vfs; build_ds; build_init ;;
         *)    echo "Unknown server: $1" >&2; exit 1 ;;
     esac
 else
@@ -211,5 +218,6 @@ else
     build_tty
     build_pm
     build_vfs
+    build_ds
     build_init
 fi

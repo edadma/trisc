@@ -37,10 +37,10 @@ Server tracking. PIDs and MMIO page grants for each server
 in boot order (0=disk, 1=tfs, 2=tty, 3=pm, 4=vfs, 5=init).
 Used by crash recovery to restart a dead server.
 
-    val RS_TOTAL_SERVERS = 6
-    var rs_server_pids: [6]int
-    var rs_server_io_page: [6]int
-    var rs_server_ports: [6]int
+    val RS_TOTAL_SERVERS = 7
+    var rs_server_pids: [7]int
+    var rs_server_io_page: [7]int
+    var rs_server_ports: [7]int
 
 Syscall privilege masks. Each server gets a bitmask (lo=bits 0-63,
 hi=bits 64-95) specifying which syscalls it may call. The kernel
@@ -127,8 +127,10 @@ Port IDs are stored in rs_server_ports[] (looked up by name).
         svc_set_ipc_mask(rs_server_pids[3], 1 << vfs_port)
         // vfs: sends to tfs and tty
         svc_set_ipc_mask(rs_server_pids[4], (1 << tfs_port) | (1 << tty_port))
+        // ds: no IPC sends (pure receiver)
+        svc_set_ipc_mask(rs_server_pids[5], 0)
         // init: sends to pm, vfs
-        svc_set_ipc_mask(rs_server_pids[5], (1 << pm_port) | (1 << vfs_port))
+        svc_set_ipc_mask(rs_server_pids[6], (1 << pm_port) | (1 << vfs_port))
 
 Set IPC mask for a single server by index. Used after restart
 to re-tighten the mask (rs_set_server_priv sets 0xFF default).
@@ -150,7 +152,9 @@ to re-tighten the mask (rs_set_server_priv sets 0xFF default).
         else if idx == 4
             svc_set_ipc_mask(rs_server_pids[4], (1 << tfs_port) | (1 << tty_port))
         else if idx == 5
-            svc_set_ipc_mask(rs_server_pids[5], (1 << pm_port) | (1 << vfs_port))
+            svc_set_ipc_mask(rs_server_pids[5], 0)
+        else if idx == 6
+            svc_set_ipc_mask(rs_server_pids[6], (1 << pm_port) | (1 << vfs_port))
 
 Ramdisk info, read from info page at startup.
 
@@ -194,10 +198,10 @@ so it can use ipc_recv_notify to block for notifications.
 
 Hardcoded boot order. Each entry has a name and length.
 
-    val RS_NUM_SERVERS = 5
+    val RS_NUM_SERVERS = 6
 
-    var rs_boot_names: [48]byte   // 6 entries * 8 bytes each
-    var rs_boot_nlen: [6]int
+    var rs_boot_names: [56]byte   // 7 entries * 8 bytes each
+    var rs_boot_nlen: [7]int
 
     rs_init_boot_order()
         // disk
@@ -215,9 +219,12 @@ Hardcoded boot order. Each entry has a name and length.
         // vfs
         rs_boot_names[32] = 'v'; rs_boot_names[33] = 'f'; rs_boot_names[34] = 's'; rs_boot_names[35] = 0
         rs_boot_nlen[4] = 3
+        // ds
+        rs_boot_names[40] = 'd'; rs_boot_names[41] = 's'; rs_boot_names[42] = 0
+        rs_boot_nlen[5] = 2
         // init
-        rs_boot_names[40] = 'i'; rs_boot_names[41] = 'n'; rs_boot_names[42] = 'i'; rs_boot_names[43] = 't'; rs_boot_names[44] = 0
-        rs_boot_nlen[5] = 4
+        rs_boot_names[48] = 'i'; rs_boot_names[49] = 'n'; rs_boot_names[50] = 'i'; rs_boot_names[51] = 't'; rs_boot_names[52] = 0
+        rs_boot_nlen[6] = 4
 
 Boot info parsing. RS reads a copy of the boot info header
 from its info page at 0xBF000+24.
