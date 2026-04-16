@@ -93,6 +93,37 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("second")
   }
 
+  "x86 kill: background process" in {
+    // Start count in background
+    qemu.send("count &\n")
+    qemu.waitFor("> ")
+    Thread.sleep(2000)
+
+    // Find count PID from ps
+    val psOut = qemu.command("ps")
+    val countLine = psOut.split('\n').find(_.contains("count"))
+    countLine shouldBe defined
+    val countPid = countLine.get.trim.split("\\s+")(1)
+
+    // Kill it
+    qemu.command(s"kill $countPid")
+    Thread.sleep(1000)
+
+    // Verify count is gone
+    val psAfter = qemu.command("ps")
+    psAfter should not include ("count")
+  }
+
+  "x86 pipe: echo hello | cat" in {
+    val output = qemu.command("echo hello | cat")
+    output should include("hello")
+  }
+
+  "x86 pipe: echo hello | cat | cat" in {
+    val output = qemu.command("echo hello | cat | cat")
+    output should include("hello")
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")

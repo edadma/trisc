@@ -18,7 +18,7 @@ external /bin/ programs loaded via PM spawn.
 
     import oskit.services.sleep
     import oskit.drivers.tty.{tty_puts, tty_getc}
-    import oskit.fs.{fs_open, fs_close, fs_connect, fs_last_ino, fs_stat}
+    import oskit.fs.{fs_open, fs_close, fs_connect, fs_last_ino, fs_stat, fs_pipe}
     import oskit.servers.{pm_waitpid, pm_kill, pm_spawn_handles}
 
 
@@ -477,6 +477,107 @@ Commands such as `echo` and `cat` are not built-ins — they load
             nsh_print(cmd)
             nsh_print(": not found\n")
 
+Run a pipeline: cmd1 | cmd2 | ... | cmdN.
+Creates pipes between adjacent commands, spawns each with
+the appropriate stdin/stdout handles, then waits for all.
+
+    nsh_run_pipeline(argc: int, argv: *string, pipe_pos: *int, num_pipes: int)
+        // Create pipe pairs
+        var rd: [8]int
+        var wr: [8]int
+        var i = 0
+        while i < num_pipes
+            fs_pipe(&rd[i], &wr[i])
+            i += 1
+
+        // Open TTY handles for first stdin and last stdout/stderr
+        val tty_in = fs_connect("tty:0")
+        val tty_out = fs_connect("tty:0")
+        val tty_err = fs_connect("tty:0")
+
+        // Spawn each segment
+        val num_cmds = num_pipes + 1
+        var pids: [9]int
+        var seg = 0
+        while seg < num_cmds
+            // argv range for this segment
+            var seg_start = 0
+            if seg > 0
+                seg_start = pipe_pos[seg - 1] + 1
+            var seg_end = argc
+            if seg < num_pipes
+                seg_end = pipe_pos[seg]
+
+            val seg_argc = seg_end - seg_start
+            if seg_argc <= 0
+                pids[seg] = -1
+                seg += 1
+                continue
+
+            // Build command name and args
+            val cmd = argv[seg_start]
+            val bin_path = "/bin/" + nsh_external_bin_key(cmd)
+
+            var args_buf: [256]byte
+            var pos = 0
+            var ai = seg_start
+            while ai < seg_end
+                if pos >= 240
+                    break
+                if ai > seg_start
+                    args_buf[pos] = byte(' ')
+                    pos += 1
+                val arg = argv[ai]
+                val ap = *byte(arg)
+                var aj = 0
+                while aj < len(arg)
+                    if pos >= 240
+                        break
+                    args_buf[pos] = ap[aj]
+                    pos += 1
+                    aj += 1
+                ai += 1
+            val args = string(&args_buf[0], pos)
+
+            // Determine handles for this segment
+            var h_in = tty_in
+            if seg > 0
+                h_in = rd[seg - 1]
+            var h_out = tty_out
+            if seg < num_pipes
+                h_out = wr[seg]
+            val h_err = tty_err
+
+            var hmap: [6]byte
+            hmap[0] = byte(h_in)
+            hmap[1] = 0
+            hmap[2] = byte(h_out)
+            hmap[3] = 1
+            hmap[4] = byte(h_err)
+            hmap[5] = 2
+
+            pids[seg] = pm_spawn_handles(bin_path, args, &hmap[0], 3)
+            seg += 1
+
+        // Close all pipe handles in parent
+        i = 0
+        while i < num_pipes
+            fs_close(rd[i])
+            fs_close(wr[i])
+            i += 1
+        fs_close(tty_in)
+        fs_close(tty_out)
+        fs_close(tty_err)
+
+        // Wait for all children
+        nsh_flush()
+        seg = 0
+        while seg < num_cmds
+            if pids[seg] >= 0
+                pm_waitpid(pids[seg])
+            seg += 1
+        nsh_putc('\n')
+
 The shell main loop.
 
     nsh()
@@ -523,6 +624,20 @@ The shell main loop.
                     nsh_background = 1
                     argc -= 1
 
+            // Check for pipes
+            var pipe_pos: [8]int
+            var num_pipes = 0
+            var pi = 0
+            while pi < argc
+                if argv[pi] == "|"
+                    if num_pipes < 8
+                        pipe_pos[num_pipes] = pi
+                        num_pipes += 1
+                pi += 1
+
             // Dispatch
-            nsh_dispatch(argc, argv)
+            if num_pipes > 0
+                nsh_run_pipeline(argc, &argv[0], &pipe_pos[0], num_pipes)
+            else
+                nsh_dispatch(argc, argv)
             nsh_flush()

@@ -17,7 +17,7 @@ the 3-byte header).
 
     module oskit.bin.cat
 
-    import oskit.ulib.{open, read, close, puts, exit, get_args, skip_arg0}
+    import oskit.ulib.{open, read, close, puts, exit, get_args, skip_arg0, STDIN}
 
     val CAT_READ_CHUNK = 4096
     val PUTS_PAYLOAD_MAX = 125
@@ -25,18 +25,21 @@ the 3-byte header).
     main()
         val args = get_args()
         val path = skip_arg0(args)
-        if len(path) == 0
-            puts("usage: cat <file>\n")
-            exit()
-            return
-        val ino = open(path)
-        if ino < 0
-            puts(path)
-            puts(": not found\n")
-            exit()
-            return
         var buf: [4096]byte
-        var nr = read(ino, &buf[0], CAT_READ_CHUNK)
+        var fid = -1
+
+        if len(path) == 0
+            // No file argument — read from stdin (for pipes)
+            fid = STDIN
+        else
+            fid = open(path)
+            if fid < 0
+                puts(path)
+                puts(": not found\n")
+                exit()
+                return
+
+        var nr = read(fid, &buf[0], CAT_READ_CHUNK)
         while nr > 0
             var sent = 0
             while sent < nr
@@ -45,8 +48,9 @@ the 3-byte header).
                     k = PUTS_PAYLOAD_MAX
                 puts(string(&buf[sent], k))
                 sent += k
-            nr = read(ino, &buf[0], CAT_READ_CHUNK)
-        close(ino)
+            nr = read(fid, &buf[0], CAT_READ_CHUNK)
+        if fid != STDIN
+            close(fid)
         if nr < 0
             puts("cat: read error\n")
         exit()

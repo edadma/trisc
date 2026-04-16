@@ -736,4 +736,248 @@ class SyslLLVMGapTests extends SyslLLVMTestHelpers {
         |    val c = concat(a[:], b[:])
         |    println(len(c) * 100 + c[0] + c[4])
         |""".stripMargin) shouldBe "506"
-  }}
+  }
+
+  // ===== Bug: val initializer values wrong for non-sequential constants =====
+
+  "val with gaps single file" in {
+    llvmOutput(
+      """val A = 0
+        |val B = 2
+        |val C = 3
+        |val D = 5
+        |val E = 9
+        |
+        |main()
+        |    println(A)
+        |    println(B)
+        |    println(C)
+        |    println(D)
+        |    println(E)
+        |""".stripMargin) shouldBe "0\n2\n3\n5\n9"
+  }
+
+  "val with gaps cross module" in {
+    llvmOutputMulti(Map(
+      "mylib/consts/consts" ->
+        """module mylib.consts
+          |
+          |val A = 0
+          |val B = 2
+          |val C = 3
+          |val D = 5
+          |val E = 9
+          |""".stripMargin,
+      "main" ->
+        """import mylib.consts.*
+          |
+          |main()
+          |    println(A)
+          |    println(B)
+          |    println(C)
+          |    println(D)
+          |    println(E)
+          |""".stripMargin
+    )) shouldBe "0\n2\n3\n5\n9"
+  }
+
+  "val with gaps IR check" in {
+    val ir = compileLLVM(
+      """val A = 0
+        |val B = 2
+        |val C = 3
+        |val D = 5
+        |val E = 9
+        |
+        |main() -> int
+        |    A + B + C + D + E
+        |""".stripMargin)
+    ir should include("@A = global i32 0")
+    ir should include("@B = global i32 2")
+    ir should include("@C = global i32 3")
+    ir should include("@D = global i32 5")
+    ir should include("@E = global i32 9")
+  }
+
+  "val with gaps cross module IR check" in {
+    val ir = compileLLVMMulti(Map(
+      "mylib/consts/consts" ->
+        """module mylib.consts
+          |
+          |val A = 0
+          |val B = 2
+          |val C = 3
+          |val D = 5
+          |val E = 9
+          |""".stripMargin,
+      "main" ->
+        """import mylib.consts.*
+          |
+          |main() -> int
+          |    A + B + C + D + E
+          |""".stripMargin
+    ))
+    ir should include("@mylib_consts__A = global i32 0")
+    ir should include("@mylib_consts__B = global i32 2")
+    ir should include("@mylib_consts__C = global i32 3")
+    ir should include("@mylib_consts__D = global i32 5")
+    ir should include("@mylib_consts__E = global i32 9")
+  }
+
+  // ===== Bug: void function calls before final return expression are dropped =====
+
+  "void call before return expression" in {
+    llvmOutput(
+      """foo() -> int
+        |    puts("hello")
+        |    0
+        |
+        |main()
+        |    foo()
+        |""".stripMargin) shouldBe "hello"
+  }
+
+  "multiple void calls before return expression" in {
+    llvmOutput(
+      """foo() -> int
+        |    puts("A")
+        |    puts("B")
+        |    puts("C")
+        |    0
+        |
+        |main()
+        |    foo()
+        |""".stripMargin) shouldBe "A\nB\nC"
+  }
+
+  "user-defined void call before return" in {
+    llvmOutput(
+      """greet()
+        |    puts("hi")
+        |
+        |foo() -> int
+        |    greet()
+        |    42
+        |
+        |main()
+        |    println(foo())
+        |""".stripMargin) shouldBe "hi\n42"
+  }
+
+  "void call before return IR check" in {
+    val ir = compileLLVM(
+      """extern uart_putc_raw(c: int)
+        |
+        |foo() -> int
+        |    uart_putc_raw(68)
+        |    0
+        |""".stripMargin)
+    ir should include("call void @uart_putc_raw")
+  }
+
+  "void call in expr body dropped" in {
+    // ExprBody form: foo() -> int = bar(); 0
+    // The semicolon produces a sequence expr — check if void call survives
+    val ir = compileLLVM(
+      """side_effect(x: int)
+        |    puts("side")
+        |
+        |foo() -> int
+        |    side_effect(1)
+        |    0
+        |
+        |main() -> int
+        |    foo()
+        |""".stripMargin)
+    // The call to side_effect should appear in foo's body
+    ir should include("call void @side_effect")
+  }
+
+  // ===== Bug 3: TAddrOfIndex on *byte parameter =====
+
+  "addr of index on *byte parameter" in {
+    // Taking &buf[i] where buf is a *byte parameter should compile and work
+    llvmExit(
+      """get_at(buf: *byte, i: int) -> int
+        |    val p: *byte = &buf[i]
+        |    int(*p)
+        |
+        |main() -> int
+        |    var data: [4]byte
+        |    data[0] = 10
+        |    data[1] = 20
+        |    data[2] = 42
+        |    data[3] = 99
+        |    get_at(&data[0], 2)
+        |""".stripMargin) shouldBe 42
+  }
+
+  // ===== Bug 2: Void call after if-return dropped =====
+
+  "void call between if-return and trailing expression" in {
+    // void call after 'if ... return' but before final expression was being dropped
+    llvmOutput(
+      """foo(flag: int) -> int
+        |    if flag > 0
+        |        return 1
+        |    puts("side-effect")
+        |    0
+        |
+        |main() -> int
+        |    foo(0)
+        |""".stripMargin) should include("side-effect")
+  }
+
+  // ===== Bug 1: Multi-unit val initializer values =====
+
+  "multi-unit val constants preserve declared values" in {
+    // Val declarations with non-sequential values should keep their declared values
+    val ir = compileLLVMMulti(Map(
+      "defs/defs" ->
+        """module defs
+          |
+          |val STATE_READY      = 0
+          |val STATE_RUNNING    = 2
+          |val STATE_TERMINATED = 3
+          |val STATE_BLOCKED    = 5
+          |val STATE_SUSPENDED  = 9
+          |""".stripMargin,
+      "main" ->
+        """import defs.*
+          |
+          |main() -> int
+          |    STATE_RUNNING + STATE_BLOCKED + STATE_SUSPENDED
+          |""".stripMargin
+    ))
+    // Check the val globals have correct initializer values
+    ir should include("@defs__STATE_RUNNING = global i32 2")
+    ir should include("@defs__STATE_BLOCKED = global i32 5")
+    ir should include("@defs__STATE_SUSPENDED = global i32 9")
+  }
+
+  // ===== Bug: i64 literal cast truncates to i32 =====
+
+  // TODO: un-ignore when i64 cast truncation is fixed. The fix is straightforward
+  // but changes RS binary layout which triggers an unrelated boot crash.
+  "i64 cast of large literal preserves value" ignore {
+    // i64(0x20000FFFFFE0007F) was generating sext i32 <truncated> to i64
+    val ir = compileLLVM(
+      """main() -> int
+        |    var x: i64 = i64(0x20000FFFFFE0007F)
+        |    int(x >> 32)
+        |""".stripMargin)
+    // Should NOT contain sext i32 ... to i64 for this literal
+    ir should not include ("sext i32 2305860601397641343")
+    // Should contain the literal directly as i64
+    ir should include("2305860601397641343")
+  }
+
+  "i64 cast of small literal" in {
+    // Small values that fit in i32 should still work
+    llvmExit(
+      """main() -> int
+        |    var x: i64 = i64(42)
+        |    int(x)
+        |""".stripMargin) shouldBe 42
+  }
+}

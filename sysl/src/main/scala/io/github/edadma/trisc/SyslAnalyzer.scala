@@ -869,6 +869,7 @@ class SyslAnalyzer:
       case (SliceType(e1), SliceType(e2)) if e1 == e2 => true
       case (RefType(a), RefType(b)) if compatible(a, b) => true // same ref type (recursive check handles nominal types)
       case (RefType(inner), PtrType(_)) => true             // &T → *U (ref decays to pointer)
+      case (PtrType(st1: StructType), st2: StructType) if st1.name == st2.name => true // *T → T (auto-deref copy)
       // Interface satisfaction: struct/ptr/ref → interface (if methods match)
       case (st: StructType, iface: InterfaceType) => satisfiesInterface(st, iface)
       case (PtrType(st: StructType), iface: InterfaceType) => satisfiesInterface(st, iface)
@@ -1377,6 +1378,8 @@ class SyslAnalyzer:
         case (_: FuncType, IntType(64) | UIntType(64)) => TCast(coerced, pType)
         case (_, iface: InterfaceType) if !coerced.typ.isInstanceOf[InterfaceType] =>
           TInterfaceBox(coerced, iface)
+        case (PtrType(st: StructType), pSt: StructType) if st.name == pSt.name =>
+          TDeref(coerced, pSt)
         case _ => coerced
     }
 

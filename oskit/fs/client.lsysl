@@ -37,6 +37,7 @@ VFS protocol commands (must match oskit/servers/vfs.lsysl).
     val FS_CMD_SEEK    = 14
     val FS_CMD_CONNECT = 15
     val FS_CMD_INHERIT = 16
+    val FS_CMD_PIPE    = 18
 
 Cached port id (-1 = not yet looked up / last lookup failed).
 `fs_srv_name` is a 3-byte null-terminated "fs" buffer; it's
@@ -393,3 +394,23 @@ Protocol: [cmd(1), old_path_len(1), old_path(N), new_path(M)]
         if result != 0
             return -1
         int(reply[0])
+
+Create a pipe. Returns 0 on success, -1 on error.
+On success, writes the read handle to *read_h and the
+write handle to *write_h.
+
+    fs_pipe(read_h: *int, write_h: *int) -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = FS_CMD_PIPE
+        var reply: [9]byte
+        val result = ipc_send(port, &msg[0], 1, &reply[0], 9)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        *read_h = fs_msg_read_i32(&reply[0], 1)
+        *write_h = fs_msg_read_i32(&reply[0], 5)
+        0
