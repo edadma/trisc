@@ -47,7 +47,9 @@ Command bytes for TFS and TTY server protocols.
     val FS_CMD_CHMOD   = 11
     val FS_CMD_RENAME  = 12
     val FS_CMD_CLOSE   = 13
+    val FS_CMD_SEEK    = 14
     val FS_CMD_CONNECT = 15
+    val FS_CMD_PIPE    = 18
     val TTY_CMD_PUTS   = 3
 
     val SYS_GETUID  = 61
@@ -431,6 +433,43 @@ Returns a handle or -1 on error.
         if reply[0] != 0
             return -1
         msg_read_i32(&reply[0], 1)
+
+Seek to a position in an open file.
+whence: 0 = SET, 1 = CUR. Returns new position, or -1.
+
+    seek(fid: int, offset: int, whence: int) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        var msg: [10]byte
+        msg[0] = byte(FS_CMD_SEEK)
+        msg_write_i32(&msg[0], 1, fid)
+        msg_write_i32(&msg[0], 5, offset)
+        msg[9] = byte(whence)
+        var reply: [5]byte
+        ipc_send(port, &msg[0], 10, &reply[0], 5)
+        if reply[0] != 0
+            return -1
+        msg_read_i32(&reply[0], 1)
+
+Create a pipe. Writes read/write handles to pointers.
+Returns 0 on success, -1 on error.
+
+    pipe(read_h: *int, write_h: *int) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(FS_CMD_PIPE)
+        var reply: [9]byte
+        val result = ipc_send(port, &msg[0], 1, &reply[0], 9)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        *read_h = msg_read_i32(&reply[0], 1)
+        *write_h = msg_read_i32(&reply[0], 5)
+        0
 
 PM IPC — process management.
 

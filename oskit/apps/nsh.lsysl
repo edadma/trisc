@@ -18,7 +18,7 @@ external /bin/ programs loaded via PM spawn.
 
     import oskit.services.sleep
     import oskit.drivers.tty.{tty_puts, tty_getc}
-    import oskit.fs.{fs_open, fs_close, fs_connect, fs_last_ino, fs_stat, fs_pipe}
+    import oskit.fs.{fs_open, fs_close, fs_connect, fs_last_ino, fs_stat, fs_pipe, fs_create, fs_unlink, fs_seek}
     import oskit.servers.{pm_waitpid, pm_kill, pm_spawn_handles}
 
 
@@ -29,6 +29,19 @@ Shell state.
     var nsh_home_buf: [128]byte
     var nsh_home_len = 0
     var nsh_background = 0
+
+Redirect state. Set during argv parsing, consumed by
+nsh_try_external / nsh_run_pipeline, then reset.
+
+    var redir_out: string
+    var redir_in: string
+    var redir_append = 0
+
+Job table. Tracks background process PIDs for jobs/fg.
+
+    val MAX_JOBS = 8
+    var job_pid: [8]int
+    var job_count = 0
 
 Set the initial home directory for the next nsh() call.
 Called by login before spawning the shell.
@@ -391,8 +404,47 @@ Built-in commands.
         if result < 0
             nsh_print("kill: no such process\n")
 
+    cmd_jobs(argc: int, argv: *string)
+        if job_count == 0
+            nsh_print("no jobs\n")
+            return
+        var i = 0
+        while i < job_count
+            nsh_print("[")
+            nsh_putint(i + 1)
+            nsh_print("] ")
+            nsh_putint(job_pid[i])
+            nsh_putc('\n')
+            i += 1
+
+    cmd_fg(argc: int, argv: *string)
+        if job_count == 0
+            nsh_print("fg: no jobs\n")
+            return
+        // Default to last job, or parse job number
+        var idx = job_count - 1
+        if argc >= 2
+            val arg = argv[1]
+            val ap = *byte(arg)
+            idx = int(ap[0]) - int('1')
+        if idx < 0
+            nsh_print("fg: invalid job\n")
+            return
+        if idx >= job_count
+            nsh_print("fg: invalid job\n")
+            return
+        val pid = job_pid[idx]
+        nsh_flush()
+        pm_waitpid(pid)
+        nsh_putc('\n')
+        // Remove job from table by shifting
+        while idx < job_count - 1
+            job_pid[idx] = job_pid[idx + 1]
+            idx += 1
+        job_count -= 1
+
     cmd_help(argc: int, argv: *string)
-        nsh_print("builtins: pwd cd kill help\n")
+        nsh_print("builtins: pwd cd kill jobs fg help\n")
         nsh_print("/bin: cat echo ls touch write mkdir rm rmdir\n")
         nsh_print("      mv chmod stat uptime whoami ps grep wc\n")
 
@@ -405,8 +457,103 @@ Command dispatch.
             "pwd"  -> cmd_pwd(argc, argv)
             "cd"   -> cmd_cd(argc, argv)
             "kill" -> cmd_kill(argc, argv)
+            "jobs" -> cmd_jobs(argc, argv)
+            "fg"   -> cmd_fg(argc, argv)
             "help" -> cmd_help(argc, argv)
             else   -> nsh_try_external(argc, argv)
+
+Redirect helpers. Open a file for output redirect (> or >>)
+or input redirect (<). Returns a handle or -1 on error.
+
+    nsh_open_redir_out(path: string) -> int
+        val full = nsh_full_path(path)
+        fs_unlink(full)
+        val ino = fs_create(full, 1, 0)
+        if ino < 0
+            nsh_print("nsh: cannot create ")
+            nsh_print(path)
+            nsh_putc('\n')
+            return -1
+        val h = fs_open(full)
+        if h < 0
+            nsh_print("nsh: cannot open ")
+            nsh_print(path)
+            nsh_putc('\n')
+        h
+
+    nsh_open_redir_append(path: string) -> int
+        val full = nsh_full_path(path)
+        var h = fs_open(full)
+        if h < 0
+            val ino = fs_create(full, 1, 0)
+            if ino < 0
+                nsh_print("nsh: cannot create ")
+                nsh_print(path)
+                nsh_putc('\n')
+                return -1
+            h = fs_open(full)
+            if h < 0
+                nsh_print("nsh: cannot open ")
+                nsh_print(path)
+                nsh_putc('\n')
+                return -1
+        // Seek to end using stat to get file size
+        var st: [7]int
+        val sr = fs_stat(full, &st[0])
+        if sr == 0
+            fs_seek(h, st[4], 0)
+        h
+
+    nsh_open_redir_in(path: string) -> int
+        val full = nsh_full_path(path)
+        val h = fs_open(full)
+        if h < 0
+            nsh_print("nsh: ")
+            nsh_print(path)
+            nsh_print(": no such file\n")
+        h
+
+Parse redirect operators from argv. Removes >, >>, < and their
+filename arguments from argv, setting redir_out, redir_in, and
+redir_append. Returns new argc.
+
+    nsh_parse_redirects(argc: int, argv: *string) -> int
+        redir_out = ""
+        redir_in = ""
+        redir_append = 0
+        var dst = 0
+        var i = 0
+        while i < argc
+            if argv[i] == ">"
+                if i + 1 < argc
+                    redir_out = argv[i + 1]
+                    redir_append = 0
+                    i += 2
+                    continue
+                else
+                    nsh_print("nsh: syntax error near >\n")
+                    return -1
+            else if argv[i] == ">>"
+                if i + 1 < argc
+                    redir_out = argv[i + 1]
+                    redir_append = 1
+                    i += 2
+                    continue
+                else
+                    nsh_print("nsh: syntax error near >>\n")
+                    return -1
+            else if argv[i] == "<"
+                if i + 1 < argc
+                    redir_in = argv[i + 1]
+                    i += 2
+                    continue
+                else
+                    nsh_print("nsh: syntax error near <\n")
+                    return -1
+            argv[dst] = argv[i]
+            dst += 1
+            i += 1
+        dst
 
 Try to run an external command from `/bin/` via PM spawn.
 PM handles page table creation, binary loading, and arg setup.
@@ -436,9 +583,27 @@ Commands such as `echo` and `cat` are not built-ins — they load
                 pos += 1
         val args = string(&args_buf[0], pos)
 
-        // Open TTY handles for stdin/stdout/stderr
-        val h_in = fs_connect("tty:0")
-        val h_out = fs_connect("tty:0")
+        // Open handles — use redirect file handles if set, else TTY
+        var h_in = -1
+        if len(redir_in) > 0
+            h_in = nsh_open_redir_in(redir_in)
+            if h_in < 0
+                return
+        else
+            h_in = fs_connect("tty:0")
+
+        var h_out = -1
+        if len(redir_out) > 0
+            if redir_append != 0
+                h_out = nsh_open_redir_append(redir_out)
+            else
+                h_out = nsh_open_redir_out(redir_out)
+            if h_out < 0
+                fs_close(h_in)
+                return
+        else
+            h_out = fs_connect("tty:0")
+
         val h_err = fs_connect("tty:0")
 
         // Handle map: (parent_handle, child_slot) pairs
@@ -452,7 +617,7 @@ Commands such as `echo` and `cat` are not built-ins — they load
 
         val pid = pm_spawn_handles(bin_path, args, &hmap[0], 3)
 
-        // Close parent's copies of the TTY handles
+        // Close parent's copies of handles
         fs_close(h_in)
         fs_close(h_out)
         fs_close(h_err)
@@ -460,9 +625,14 @@ Commands such as `echo` and `cat` are not built-ins — they load
         nsh_flush()
         if pid >= 0
             if nsh_background != 0
+                if job_count < MAX_JOBS
+                    job_pid[job_count] = pid
+                    job_count += 1
                 nsh_print("[")
+                nsh_putint(job_count)
+                nsh_print("] ")
                 nsh_putint(pid)
-                nsh_print("]\n")
+                nsh_putc('\n')
             else
                 val exit_code = pm_waitpid(pid)
                 // Ensure prompt starts on a fresh line — if the program's
@@ -490,9 +660,38 @@ the appropriate stdin/stdout handles, then waits for all.
             fs_pipe(&rd[i], &wr[i])
             i += 1
 
-        // Open TTY handles for first stdin and last stdout/stderr
-        val tty_in = fs_connect("tty:0")
-        val tty_out = fs_connect("tty:0")
+        // Open handles — use redirect files for first stdin / last stdout
+        var tty_in = -1
+        if len(redir_in) > 0
+            tty_in = nsh_open_redir_in(redir_in)
+            if tty_in < 0
+                // Close pipes and bail
+                i = 0
+                while i < num_pipes
+                    fs_close(rd[i])
+                    fs_close(wr[i])
+                    i += 1
+                return
+        else
+            tty_in = fs_connect("tty:0")
+
+        var tty_out = -1
+        if len(redir_out) > 0
+            if redir_append != 0
+                tty_out = nsh_open_redir_append(redir_out)
+            else
+                tty_out = nsh_open_redir_out(redir_out)
+            if tty_out < 0
+                fs_close(tty_in)
+                i = 0
+                while i < num_pipes
+                    fs_close(rd[i])
+                    fs_close(wr[i])
+                    i += 1
+                return
+        else
+            tty_out = fs_connect("tty:0")
+
         val tty_err = fs_connect("tty:0")
 
         // Spawn each segment
@@ -624,6 +823,11 @@ The shell main loop.
                     nsh_background = 1
                     argc -= 1
 
+            // Parse redirects (>, >>, <) — removes them from argv
+            argc = nsh_parse_redirects(argc, &argv[0])
+            if argc < 0
+                continue
+
             // Check for pipes
             var pipe_pos: [8]int
             var num_pipes = 0
@@ -639,5 +843,5 @@ The shell main loop.
             if num_pipes > 0
                 nsh_run_pipeline(argc, &argv[0], &pipe_pos[0], num_pipes)
             else
-                nsh_dispatch(argc, argv)
+                nsh_dispatch(argc, &argv[0])
             nsh_flush()

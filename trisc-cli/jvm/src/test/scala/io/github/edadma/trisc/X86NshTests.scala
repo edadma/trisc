@@ -124,6 +124,36 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("hello")
   }
 
+  // Redirect tests use "/root> " as prompt to avoid matching ">" in commands
+  private val rootPrompt = "/root> "
+
+  "x86 redirect: echo hello > /tmp/out" in {
+    qemu.command("echo hello > /tmp/out", rootPrompt)
+    val output = qemu.command("cat /tmp/out")
+    output should include("hello")
+  }
+
+  "x86 redirect: echo append >>" in {
+    qemu.command("echo line1 > /tmp/app", rootPrompt)
+    qemu.command("echo line2 >> /tmp/app", rootPrompt)
+    val output = qemu.command("cat /tmp/app")
+    output should include("line1")
+    output should include("line2")
+  }
+
+  "x86 redirect: cat < /tmp/in" in {
+    qemu.command("echo inputdata > /tmp/in", rootPrompt)
+    val output = qemu.command("cat < /tmp/in")
+    output should include("inputdata")
+  }
+
+  "x86 redirect: pipe with output redirect" in {
+    qemu.command("echo piped > /tmp/p1", rootPrompt)
+    qemu.command("cat /tmp/p1 | cat > /tmp/p2", rootPrompt)
+    val output = qemu.command("cat /tmp/p2")
+    output should include("piped")
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")
