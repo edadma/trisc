@@ -154,6 +154,40 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("piped")
   }
 
+  "x86 head: first 3 lines from pipe" in {
+    val output = qemu.command("echo aaa | head -3")
+    output should include("aaa")
+  }
+
+  "x86 head: first 2 lines of file" in {
+    qemu.command("echo line1 > /tmp/hf", rootPrompt)
+    qemu.command("echo line2 >> /tmp/hf", rootPrompt)
+    qemu.command("echo line3 >> /tmp/hf", rootPrompt)
+    val output = qemu.command("head -2 /tmp/hf")
+    output should include("line1")
+    output should include("line2")
+    output should not include "line3"
+  }
+
+  "x86 tail: last 2 lines of file" in {
+    qemu.command("echo aaa > /tmp/tf", rootPrompt)
+    qemu.command("echo bbb >> /tmp/tf", rootPrompt)
+    qemu.command("echo ccc >> /tmp/tf", rootPrompt)
+    val output = qemu.command("tail -2 /tmp/tf")
+    output should not include "aaa"
+    output should include("bbb")
+    output should include("ccc")
+  }
+
+  "x86 tail: pipe from cat" in {
+    qemu.command("echo first > /tmp/tp", rootPrompt)
+    qemu.command("echo second >> /tmp/tp", rootPrompt)
+    qemu.command("echo third >> /tmp/tp", rootPrompt)
+    val output = qemu.command("cat /tmp/tp | tail -1")
+    output should not include "first"
+    output should include("third")
+  }
+
   "x86 signal: ctrl-c kills foreground process" ignore {
     // TODO: QEMU serial pipe may not forward 0x03 (Ctrl-C) to guest.
     // Signal infrastructure is in place (PM_CMD_SIGNAL, PM_CMD_SET_FG,

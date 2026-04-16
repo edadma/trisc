@@ -424,8 +424,9 @@ Built-in commands.
 
     cmd_help(argc: int, argv: *string)
         nsh_print("builtins: pwd cd kill jobs fg help\n")
-        nsh_print("/bin: cat echo ls touch write mkdir rm rmdir\n")
-        nsh_print("      mv chmod stat uptime whoami ps grep wc\n")
+        nsh_print("/bin: cat echo grep head tail wc ls mkdir rm\n")
+        nsh_print("      rmdir touch write mv chmod stat uptime\n")
+        nsh_print("      whoami ps\n")
 
 Redirect helpers. Open a file for output redirect (> or >>)
 or input redirect (<). Returns a handle or -1 on error.

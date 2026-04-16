@@ -1,0 +1,165 @@
+tail — output the last N lines
+================================
+
+Usage: `tail [-n N] [file]`
+- Default: 10 lines.
+- Reads from stdin if no file argument.
+
+Uses a circular buffer of line start/end offsets into a flat
+byte buffer. When the buffer fills, old content is overwritten.
+
+    module oskit.bin.tail
+
+    import oskit.ulib.{open, read, close, puts, exit, get_args, skip_arg0, write_handle, STDIN, STDOUT}
+
+    val TAIL_BUF = 4096
+    val TAIL_MAX_LINES = 64
+    val TAIL_DATA_SIZE = 8192
+
+Parse a decimal integer from a byte pointer.
+
+    parse_int(p: *byte, plen: int) -> int
+        var v = 0
+        var i = 0
+        while i < plen
+            val ch = int(p[i])
+            if ch < '0'
+                break
+            if ch > '9'
+                break
+            v = v * 10 + (ch - '0')
+            i += 1
+        v
+
+Line ring buffer. Stores lines as (start, len) pairs into a
+flat data buffer. The ring overwrites old entries when full.
+
+    var data: [8192]byte
+    var data_pos = 0
+    var line_start: [64]int
+    var line_len: [64]int
+    var line_head = 0
+    var line_count = 0
+
+Store a complete line into the ring buffer.
+
+    store_line(buf: *byte, blen: int)
+        // Wrap data position if needed
+        var dlen = blen
+        if dlen > TAIL_DATA_SIZE
+            dlen = TAIL_DATA_SIZE
+        if data_pos + dlen > TAIL_DATA_SIZE
+            data_pos = 0
+        // Copy line data
+        var i = 0
+        while i < dlen
+            data[data_pos + i] = buf[i]
+            i += 1
+        // Record in ring
+        val slot = (line_head + line_count) % TAIL_MAX_LINES
+        if line_count >= TAIL_MAX_LINES
+            // Overwrite oldest
+            line_head = (line_head + 1) % TAIL_MAX_LINES
+        else
+            line_count += 1
+        line_start[slot] = data_pos
+        line_len[slot] = dlen
+        data_pos += dlen
+
+    main()
+        val args = get_args()
+        var rest = skip_arg0(args)
+        var count = 10
+
+        // Parse -n N or -N
+        val rp = *byte(rest)
+        val rlen = len(rest)
+        if rlen > 1
+            if rp[0] == byte('-')
+                if rp[1] == byte('n')
+                    var i = 2
+                    while i < rlen
+                        if rp[i] != byte(' ')
+                            break
+                        i += 1
+                    count = parse_int(rp + i, rlen - i)
+                    while i < rlen
+                        if rp[i] == byte(' ')
+                            break
+                        i += 1
+                    while i < rlen
+                        if rp[i] != byte(' ')
+                            break
+                        i += 1
+                    rest = string(rp + i, rlen - i)
+                else
+                    count = parse_int(rp + 1, rlen - 1)
+                    var i = 1
+                    while i < rlen
+                        if rp[i] == byte(' ')
+                            break
+                        i += 1
+                    while i < rlen
+                        if rp[i] != byte(' ')
+                            break
+                        i += 1
+                    rest = string(rp + i, rlen - i)
+
+        if count <= 0
+            exit()
+            return
+        if count > TAIL_MAX_LINES
+            count = TAIL_MAX_LINES
+
+        // Open file or stdin
+        var fid = -1
+        if len(rest) > 0
+            fid = open(rest)
+            if fid < 0
+                puts(rest)
+                puts(": not found\n")
+                exit()
+                return
+        else
+            fid = STDIN
+
+        // Read all input, buffering lines in ring
+        var buf: [4096]byte
+        var line_buf: [512]byte
+        var lb_len = 0
+        var nr = read(fid, &buf[0], TAIL_BUF)
+        while nr > 0
+            var i = 0
+            while i < nr
+                if buf[i] == byte('\n')
+                    // Complete line — store with newline
+                    if lb_len < 511
+                        line_buf[lb_len] = byte('\n')
+                        lb_len += 1
+                    store_line(&line_buf[0], lb_len)
+                    lb_len = 0
+                else
+                    if lb_len < 511
+                        line_buf[lb_len] = buf[i]
+                        lb_len += 1
+                i += 1
+            nr = read(fid, &buf[0], TAIL_BUF)
+
+        // Store final partial line if any
+        if lb_len > 0
+            store_line(&line_buf[0], lb_len)
+
+        if fid != STDIN
+            close(fid)
+
+        // Output last `count` lines from ring
+        var n = count
+        if n > line_count
+            n = line_count
+        var start = (line_head + line_count - n) % TAIL_MAX_LINES
+        var i = 0
+        while i < n
+            val slot = (start + i) % TAIL_MAX_LINES
+            write_handle(STDOUT, &data[line_start[slot]], line_len[slot])
+            i += 1
+        exit()
