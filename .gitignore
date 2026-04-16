@@ -8,6 +8,7 @@
 .smeta
 
 # sbt specific
+node_modules/
 .cache/
 .history/
 .lib/
