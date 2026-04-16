@@ -240,7 +240,7 @@ importing them directly.
         args[3] = i64(*byte(name))
         args[4] = len(name)
         args[5] = ptbr
-        syscall(SYS_CREATE_PROC_SUSP, i64(&args[0]))
+        syscall(SYS_CREATE_PROC_SUSP, i64(args))
 
     svc_resume_proc(pid: int)
         syscall(SYS_RESUME_PROC, pid)
@@ -258,7 +258,7 @@ importing them directly.
         var args: [2]i64
         args[0] = tid
         args[1] = ptbr
-        syscall(SYS_SET_THREAD_PTBR, i64(&args[0]))
+        syscall(SYS_SET_THREAD_PTBR, i64(args))
 
     svc_vm_set_ptbr(addr: int)
         syscall(SYS_VM_SET_PTBR_SC, addr)
@@ -275,7 +275,7 @@ importing them directly.
         args[1] = dst_vaddr
         args[2] = i64(src)
         args[3] = vlen
-        syscall(SYS_VM_COPY_TO, i64(&args[0]))
+        syscall(SYS_VM_COPY_TO, i64(args))
 
     svc_vm_copy_from(src_ptbr: int, src_vaddr: int, dst: *byte, vlen: int)
         var args: [4]i64
@@ -283,7 +283,7 @@ importing them directly.
         args[1] = src_vaddr
         args[2] = i64(dst)
         args[3] = vlen
-        syscall(SYS_VM_COPY_FROM, i64(&args[0]))
+        syscall(SYS_VM_COPY_FROM, i64(args))
 
     svc_proc_state(pid: int) -> int
         syscall(SYS_PROC_STATE, pid)
@@ -301,7 +301,7 @@ importing them directly.
         var args: [2]i64
         args[0] = pid
         args[1] = parent_tid
-        syscall(SYS_PROC_SET_PARENT_TID, i64(&args[0]))
+        syscall(SYS_PROC_SET_PARENT_TID, i64(args))
 
 Translate a virtual address to physical using the current
 thread's page table. Used by drivers that need DMA addresses.
@@ -320,13 +320,13 @@ thread's page table. Used by drivers that need DMA addresses.
         args[1] = allow_lo
         args[2] = allow_hi
         args[3] = ipc_mask
-        syscall(SYS_SET_PRIV, i64(&args[0]))
+        syscall(SYS_SET_PRIV, i64(args))
 
     svc_port_transfer(port: int, new_owner_tid: int)
         var args: [2]i64
         args[0] = port
         args[1] = new_owner_tid
-        syscall(SYS_PORT_TRANSFER, i64(&args[0]))
+        syscall(SYS_PORT_TRANSFER, i64(args))
 
     val SYS_SET_IPC_MASK = 70
 
@@ -340,4 +340,4 @@ thread's page table. Used by drivers that need DMA addresses.
         args[0] = src_phys
         args[1] = i64(dst)
         args[2] = vlen
-        syscall(SYS_PHYS_READ, i64(&args[0]))
+        syscall(SYS_PHYS_READ, i64(args))

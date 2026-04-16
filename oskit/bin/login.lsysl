@@ -24,7 +24,7 @@ Buffered output.
 
     login_flush()
         if login_outpos > 0
-            write_handle(STDOUT, &login_out[0], login_outpos)
+            write_handle(STDOUT, login_out, login_outpos)
             login_outpos = 0
 
     login_putc(ch: char)
@@ -251,7 +251,7 @@ TTY handles for stdin/stdout/stderr.
         hmap[4] = byte(h_err)
         hmap[5] = 2
 
-        val pid = pm_spawn_handles("/bin/nsh", args, &hmap[0], 3)
+        val pid = pm_spawn_handles("/bin/nsh", args, hmap, 3)
 
         close(h_in)
         close(h_out)

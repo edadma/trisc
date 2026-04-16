@@ -39,7 +39,7 @@ the 3-byte header).
                 exit()
                 return
 
-        var nr = read(fid, &buf[0], CAT_READ_CHUNK)
+        var nr = read(fid, buf, CAT_READ_CHUNK)
         while nr > 0
             var sent = 0
             while sent < nr
@@ -48,7 +48,7 @@ the 3-byte header).
                     k = PUTS_PAYLOAD_MAX
                 puts(string(&buf[sent], k))
                 sent += k
-            nr = read(fid, &buf[0], CAT_READ_CHUNK)
+            nr = read(fid, buf, CAT_READ_CHUNK)
         if fid != STDIN
             close(fid)
         if nr < 0

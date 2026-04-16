@@ -82,11 +82,11 @@ need it (e.g., for directory operations). Returns -1 on error.
         for var i = 0; i < plen; i++
             msg[i + 1] = p[i]
         var reply: [9]byte
-        ipc_send(port, &msg[0], plen + 1, &reply[0], 9)
+        ipc_send(port, msg, plen + 1, reply, 9)
         if reply[0] != 0
             return -1
-        fs_last_ino = fs_msg_read_i32(&reply[0], 5)
-        fs_msg_read_i32(&reply[0], 1)
+        fs_last_ino = fs_msg_read_i32(reply, 5)
+        fs_msg_read_i32(reply, 1)
 
 Connect to a named resource. Supports scheme-based routing:
 `connect("vfs:/etc/passwd")` or `connect("tty:0")`. Paths
@@ -104,11 +104,11 @@ Returns a handle, or -1 on error.
         for var i = 0; i < nlen; i++
             msg[i + 1] = p[i]
         var reply: [9]byte
-        ipc_send(port, &msg[0], nlen + 1, &reply[0], 9)
+        ipc_send(port, msg, nlen + 1, reply, 9)
         if reply[0] != 0
             return -1
-        fs_last_ino = fs_msg_read_i32(&reply[0], 5)
-        fs_msg_read_i32(&reply[0], 1)
+        fs_last_ino = fs_msg_read_i32(reply, 5)
+        fs_msg_read_i32(reply, 1)
 
 Read up to `rlen` bytes from open file `fid` into `buf`.
 Position is tracked by VFS and advances automatically.
@@ -121,16 +121,16 @@ Returns number of bytes read, or -1 on error.
             return -1
         var msg: [13]byte
         msg[0] = FS_CMD_READ
-        fs_msg_write_i32(&msg[0], 1, fid)
-        fs_msg_write_i32(&msg[0], 5, rlen)
-        fs_msg_write_i32(&msg[0], 9, int(i64(buf)))
+        fs_msg_write_i32(msg, 1, fid)
+        fs_msg_write_i32(msg, 5, rlen)
+        fs_msg_write_i32(msg, 9, int(i64(buf)))
         var reply: [5]byte
-        val result = ipc_send(port, &msg[0], 13, &reply[0], 5)
+        val result = ipc_send(port, msg, 13, reply, 5)
         if result != 0
             return -1
         if reply[0] != 0
             return -1
-        fs_msg_read_i32(&reply[0], 1)
+        fs_msg_read_i32(reply, 1)
 
 Write `wlen` bytes from `data` to open file `fid`.
 Position is tracked by VFS and advances automatically.
@@ -142,16 +142,16 @@ Returns number of bytes written, or -1 on error.
             return -1
         var msg: [13]byte
         msg[0] = FS_CMD_WRITE
-        fs_msg_write_i32(&msg[0], 1, fid)
-        fs_msg_write_i32(&msg[0], 5, wlen)
-        fs_msg_write_i32(&msg[0], 9, int(i64(data)))
+        fs_msg_write_i32(msg, 1, fid)
+        fs_msg_write_i32(msg, 5, wlen)
+        fs_msg_write_i32(msg, 9, int(i64(data)))
         var reply: [5]byte
-        val result = ipc_send(port, &msg[0], 13, &reply[0], 5)
+        val result = ipc_send(port, msg, 13, reply, 5)
         if result != 0
             return -1
         if reply[0] != 0
             return -1
-        fs_msg_read_i32(&reply[0], 1)
+        fs_msg_read_i32(reply, 1)
 
 Close an open file. Frees the VFS open file table entry.
 
@@ -161,9 +161,9 @@ Close an open file. Frees the VFS open file table entry.
             return -1
         var msg: [5]byte
         msg[0] = FS_CMD_CLOSE
-        fs_msg_write_i32(&msg[0], 1, fid)
+        fs_msg_write_i32(msg, 1, fid)
         var reply: [1]byte
-        ipc_send(port, &msg[0], 5, &reply[0], 1)
+        ipc_send(port, msg, 5, reply, 1)
         int(reply[0])
 
 Seek to a position in an open file.
@@ -175,16 +175,16 @@ whence: 0 = SET, 1 = CUR. Returns new position, or -1 on error.
             return -1
         var msg: [10]byte
         msg[0] = FS_CMD_SEEK
-        fs_msg_write_i32(&msg[0], 1, fid)
-        fs_msg_write_i32(&msg[0], 5, offset)
+        fs_msg_write_i32(msg, 1, fid)
+        fs_msg_write_i32(msg, 5, offset)
         msg[9] = byte(whence)
         var reply: [5]byte
-        val result = ipc_send(port, &msg[0], 10, &reply[0], 5)
+        val result = ipc_send(port, msg, 10, reply, 5)
         if result != 0
             return -1
         if reply[0] != 0
             return -1
-        fs_msg_read_i32(&reply[0], 1)
+        fs_msg_read_i32(reply, 1)
 
 Create a file at a path. `ftype`: 1 = file, 2 = directory.
 Returns new inode or -1. Path-based — VFS resolves the parent.
@@ -204,12 +204,12 @@ Protocol: [cmd(1), type(1), mode_hi(1), mode_lo(1), path(N)]
         for var i = 0; i < plen; i++
             msg[4 + i] = pp[i]
         var reply: [5]byte
-        val result = ipc_send(port, &msg[0], plen + 4, &reply[0], 5)
+        val result = ipc_send(port, msg, plen + 4, reply, 5)
         if result != 0
             return -1
         if reply[0] != 0
             return -1
-        fs_msg_read_i32(&reply[0], 1)
+        fs_msg_read_i32(reply, 1)
 
 Unlink a file by path.
 Protocol: [cmd(1), path(N)]
@@ -225,7 +225,7 @@ Protocol: [cmd(1), path(N)]
         for var i = 0; i < plen; i++
             msg[1 + i] = pp[i]
         var reply: [1]byte
-        val result = ipc_send(port, &msg[0], plen + 1, &reply[0], 1)
+        val result = ipc_send(port, msg, plen + 1, reply, 1)
         if result != 0
             return -1
         int(reply[0])
@@ -245,18 +245,18 @@ Protocol: [cmd(1), path(N)]
         for var i = 0; i < plen; i++
             msg[1 + i] = pp[i]
         var reply: [29]byte
-        val result = ipc_send(port, &msg[0], plen + 1, &reply[0], 29)
+        val result = ipc_send(port, msg, plen + 1, reply, 29)
         if result != 0
             return -1
         if reply[0] != 0
             return -1
-        out[0] = fs_msg_read_i32(&reply[0], 1)
-        out[1] = fs_msg_read_i32(&reply[0], 5)
-        out[2] = fs_msg_read_i32(&reply[0], 9)
-        out[3] = fs_msg_read_i32(&reply[0], 13)
-        out[4] = fs_msg_read_i32(&reply[0], 17)
-        out[5] = fs_msg_read_i32(&reply[0], 21)
-        out[6] = fs_msg_read_i32(&reply[0], 25)
+        out[0] = fs_msg_read_i32(reply, 1)
+        out[1] = fs_msg_read_i32(reply, 5)
+        out[2] = fs_msg_read_i32(reply, 9)
+        out[3] = fs_msg_read_i32(reply, 13)
+        out[4] = fs_msg_read_i32(reply, 17)
+        out[5] = fs_msg_read_i32(reply, 21)
+        out[6] = fs_msg_read_i32(reply, 25)
         0
 
 Create a directory at a path.
@@ -275,12 +275,12 @@ Protocol: [cmd(1), mode_hi(1), mode_lo(1), path(N)]
         for var i = 0; i < plen; i++
             msg[3 + i] = pp[i]
         var reply: [5]byte
-        val result = ipc_send(port, &msg[0], plen + 3, &reply[0], 5)
+        val result = ipc_send(port, msg, plen + 3, reply, 5)
         if result != 0
             return -1
         if reply[0] != 0
             return -1
-        fs_msg_read_i32(&reply[0], 1)
+        fs_msg_read_i32(reply, 1)
 
 Remove a directory by path. Must be empty.
 Protocol: [cmd(1), path(N)]
@@ -296,7 +296,7 @@ Protocol: [cmd(1), path(N)]
         for var i = 0; i < plen; i++
             msg[1 + i] = pp[i]
         var reply: [1]byte
-        val result = ipc_send(port, &msg[0], plen + 1, &reply[0], 1)
+        val result = ipc_send(port, msg, plen + 1, reply, 1)
         if result != 0
             return -1
         int(reply[0])
@@ -310,18 +310,18 @@ Protocol: [cmd(1), index(4), path(N)]
             return -1
         var msg: [128]byte
         msg[0] = FS_CMD_READDIR
-        fs_msg_write_i32(&msg[0], 1, index)
+        fs_msg_write_i32(msg, 1, index)
         val plen = len(path)
         val pp: *byte = *byte(path)
         for var i = 0; i < plen; i++
             msg[5 + i] = pp[i]
         var reply: [19]byte
-        val result = ipc_send(port, &msg[0], plen + 5, &reply[0], 19)
+        val result = ipc_send(port, msg, plen + 5, reply, 19)
         if result != 0
             return -1
         if reply[0] != 0
             return -1
-        *out_ino = fs_msg_read_i32(&reply[0], 1)
+        *out_ino = fs_msg_read_i32(reply, 1)
         var i = 0
         while i < 14
             out_name[i] = reply[i + 5]
@@ -337,7 +337,7 @@ Flush superblock to disk.
         var msg: [1]byte
         msg[0] = FS_CMD_SYNC
         var reply: [1]byte
-        val result = ipc_send(port, &msg[0], 1, &reply[0], 1)
+        val result = ipc_send(port, msg, 1, reply, 1)
         if result != 0
             return -1
         int(reply[0])
@@ -358,7 +358,7 @@ Protocol: [cmd(1), mode_hi(1), mode_lo(1), path(N)]
         for var i = 0; i < plen; i++
             msg[3 + i] = pp[i]
         var reply: [1]byte
-        val result = ipc_send(port, &msg[0], plen + 3, &reply[0], 1)
+        val result = ipc_send(port, msg, plen + 3, reply, 1)
         if result != 0
             return -1
         int(reply[0])
@@ -386,7 +386,7 @@ Protocol: [cmd(1), old_path_len(1), old_path(N), new_path(M)]
             msg[2 + onl + i] = nnp[i]
             i += 1
         var reply: [1]byte
-        val result = ipc_send(port, &msg[0], 2 + onl + nnl, &reply[0], 1)
+        val result = ipc_send(port, msg, 2 + onl + nnl, reply, 1)
         if result != 0
             return -1
         int(reply[0])
@@ -402,11 +402,11 @@ write handle to *write_h.
         var msg: [1]byte
         msg[0] = FS_CMD_PIPE
         var reply: [9]byte
-        val result = ipc_send(port, &msg[0], 1, &reply[0], 9)
+        val result = ipc_send(port, msg, 1, reply, 9)
         if result != 0
             return -1
         if reply[0] != 0
             return -1
-        *read_h = fs_msg_read_i32(&reply[0], 1)
-        *write_h = fs_msg_read_i32(&reply[0], 5)
+        *read_h = fs_msg_read_i32(reply, 1)
+        *write_h = fs_msg_read_i32(reply, 5)
         0

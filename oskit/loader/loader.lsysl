@@ -225,7 +225,7 @@ TRB v1 binary image: magic `TRB` + 0x01, u32 entry, u32 record count, then recor
                     tof_v[2] = byte('F')
                     tof_v[3] = byte(' ')
                     tof_v[4] = byte('v')
-                    if !buf_has_prefix(p, trimmed_len, &tof_v[0], 5)
+                    if !buf_has_prefix(p, trimmed_len, tof_v, 5)
                         return LOAD_ERR_FORMAT
                     header_seen = true
                 else if trimmed_len >= 8
@@ -239,7 +239,7 @@ TRB v1 binary image: magic `TRB` + 0x01, u32 entry, u32 record count, then recor
                     seg_pfx[5] = byte('N')
                     seg_pfx[6] = byte('T')
                     seg_pfx[7] = byte(':')
-                    if buf_has_prefix(p, trimmed_len, &seg_pfx[0], 8)
+                    if buf_has_prefix(p, trimmed_len, seg_pfx, 8)
                         // Find comma after segment name
                         val rest = p + 8
                         val rest_len = trimmed_len - 8
@@ -262,7 +262,7 @@ TRB v1 binary image: magic `TRB` + 0x01, u32 entry, u32 record count, then recor
                     data_pfx[3] = byte('A')
                     data_pfx[4] = byte(':')
                     if header_seen
-                        if buf_has_prefix(p, trimmed_len, &data_pfx[0], 5)
+                        if buf_has_prefix(p, trimmed_len, data_pfx, 5)
                             val hex_start = p + 5
                             val hex_len = trimmed_len - 5
                             val n = hex_decode_buf(hex_start, hex_len, *byte(seg_cursor))
@@ -410,7 +410,7 @@ load binaries without switching its own PTBR.
                     var chunk = sz - done
                     if chunk > 4096
                         chunk = 4096
-                    svc_vm_copy_to(dst_ptbr, org + done, &zeros[0], chunk)
+                    svc_vm_copy_to(dst_ptbr, org + done, zeros, chunk)
                     done += chunk
             else
                 return LOAD_ERR_FORMAT
@@ -479,7 +479,7 @@ and copies PT_LOAD segments into the target address space.
                         var chunk = p_memsz - done
                         if chunk > 4096
                             chunk = 4096
-                        svc_vm_copy_to(dst_ptbr, p_vaddr + done, &zeros[0], chunk)
+                        svc_vm_copy_to(dst_ptbr, p_vaddr + done, zeros, chunk)
                         done += chunk
             i += 1
 

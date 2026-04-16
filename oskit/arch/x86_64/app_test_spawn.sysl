@@ -70,7 +70,7 @@ x86_test_init()
     hmap[4] = byte(h_err)
     hmap[5] = 2
 
-    val pid = pm_spawn_handles("/bin/test_putc", "test_putc", &hmap[0], 3)
+    val pid = pm_spawn_handles("/bin/test_putc", "test_putc", hmap, 3)
     uart_puts("[init] spawn returned pid=")
     if pid >= 0
         putc(byte('0') + pid)

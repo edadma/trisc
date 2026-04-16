@@ -239,14 +239,14 @@ the message buffer and translated to DrawEngine operations.
             val surf_id = ds_read8(DE_TARGET)
             reply[1] = byte(win_id)
             reply[2] = byte(surf_id)
-            ipc_reply(sender, &reply[0], 3)
+            ipc_reply(sender, reply, 3)
             ds_exec(CMD_COMPOSITE)
             return
 
         if cmd == DS_DESTROY_WINDOW
             ds_write8(DE_WIN_ID, int(buf[1]) & 0xFF)
             ds_exec(CMD_DESTROY_WINDOW)
-            ipc_reply(sender, &reply[0], 1)
+            ipc_reply(sender, reply, 1)
             ds_exec(CMD_COMPOSITE)
             return
 
@@ -254,7 +254,7 @@ the message buffer and translated to DrawEngine operations.
             // buf: [cmd, r, g, b, a]
             ds_color(int(buf[1]) & 0xFF, int(buf[2]) & 0xFF,
                      int(buf[3]) & 0xFF, int(buf[4]) & 0xFF)
-            ipc_reply(sender, &reply[0], 1)
+            ipc_reply(sender, reply, 1)
             return
 
         if cmd == DS_FILL_RECT
@@ -267,7 +267,7 @@ the message buffer and translated to DrawEngine operations.
             ds_pos(x, y)
             ds_size(w, h)
             ds_exec(CMD_FILL_RECT)
-            ipc_reply(sender, &reply[0], 1)
+            ipc_reply(sender, reply, 1)
             return
 
         if cmd == DS_DRAW_TEXT
@@ -284,20 +284,20 @@ the message buffer and translated to DrawEngine operations.
                 ds_set_text_buf(&buf[9], text_len)
             ds_pos(x, y)
             ds_exec(CMD_DRAW_TEXT)
-            ipc_reply(sender, &reply[0], 1)
+            ipc_reply(sender, reply, 1)
             return
 
         if cmd == DS_CLEAR
             // buf: [cmd, surf_id]
             ds_write8(DE_TARGET, int(buf[1]) & 0xFF)
             ds_exec(CMD_CLEAR)
-            ipc_reply(sender, &reply[0], 1)
+            ipc_reply(sender, reply, 1)
             return
 
         if cmd == DS_RAISE_WINDOW
             ds_write8(DE_WIN_ID, int(buf[1]) & 0xFF)
             ds_exec(CMD_RAISE_WINDOW)
-            ipc_reply(sender, &reply[0], 1)
+            ipc_reply(sender, reply, 1)
             ds_exec(CMD_COMPOSITE)
             return
 
@@ -311,7 +311,7 @@ the message buffer and translated to DrawEngine operations.
             ds_pos(x1, y1)
             ds_size(x2, y2)
             ds_exec(CMD_DRAW_LINE)
-            ipc_reply(sender, &reply[0], 1)
+            ipc_reply(sender, reply, 1)
             return
 
         if cmd == DS_FILL_RRECT
@@ -325,7 +325,7 @@ the message buffer and translated to DrawEngine operations.
             ds_pos(x, y)
             ds_size(w, h)
             ds_exec(CMD_FILL_RRECT)
-            ipc_reply(sender, &reply[0], 1)
+            ipc_reply(sender, reply, 1)
             return
 
         if cmd == DS_GET_KEY
@@ -336,18 +336,18 @@ the message buffer and translated to DrawEngine operations.
             reply[2] = byte((key >> 16) & 0xFF)
             reply[3] = byte((key >> 8) & 0xFF)
             reply[4] = byte(key & 0xFF)
-            ipc_reply(sender, &reply[0], 5)
+            ipc_reply(sender, reply, 5)
             return
 
         if cmd == DS_COMPOSITE
             ds_exec(CMD_COMPOSITE)
             ds_mouse_composite = 1
-            ipc_reply(sender, &reply[0], 1)
+            ipc_reply(sender, reply, 1)
             return
 
         // Unknown command
         reply[0] = byte(-1)
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 The main display server entry point. Call this from a dedicated
 thread. Initializes the framebuffer, creates the IPC port, sets
@@ -407,7 +407,7 @@ up the wallpaper, and enters the event loop.
         // Event loop
         var buf: [128]byte
         while true
-            val result = ipc_recv_notify(ds_port, &buf[0], 128)
+            val result = ipc_recv_notify(ds_port, buf, 128)
             if result == -2
                 // Notification — check source and handle
                 val nval = notify_read(ds_tid)
@@ -417,7 +417,7 @@ up the wallpaper, and enters the event loop.
                     ds_handle_mouse()
             elif result >= 0
                 // IPC message from client
-                ds_handle_message(result, &buf[0], 128)
+                ds_handle_message(result, buf, 128)
 
 Userspace client library. Apps call these to interact with the
 display server without knowing the IPC protocol details.
@@ -449,7 +449,7 @@ display server without knowing the IPC protocol details.
             msg[10 + i] = title[i]
             i += 1
         var reply: [4]byte
-        ipc_send(port, &msg[0], 10 + i, &reply[0], 4)
+        ipc_send(port, msg, 10 + i, reply, 4)
         int(reply[2]) & 0xFF  // surf_id (used for drawing into the window)
 
     ds_set_color(r: int, g: int, b: int, a: int)
@@ -462,7 +462,7 @@ display server without knowing the IPC protocol details.
         msg[3] = byte(b)
         msg[4] = byte(a)
         var reply: [2]byte
-        ipc_send(port, &msg[0], 5, &reply[0], 2)
+        ipc_send(port, msg, 5, reply, 2)
 
     ds_fill_rect(surf: int, x: int, y: int, w: int, h: int)
         val port = ds_connect()
@@ -479,7 +479,7 @@ display server without knowing the IPC protocol details.
         msg[8] = byte(h >> 8)
         msg[9] = byte(h & 0xFF)
         var reply: [2]byte
-        ipc_send(port, &msg[0], 10, &reply[0], 2)
+        ipc_send(port, msg, 10, reply, 2)
 
     ds_draw_text(surf: int, x: int, y: int, size: int, style: int, text: *byte, text_len: int)
         val port = ds_connect()
@@ -500,7 +500,7 @@ display server without knowing the IPC protocol details.
             msg[9 + i] = text[i]
             i += 1
         var reply: [2]byte
-        ipc_send(port, &msg[0], 9 + i, &reply[0], 2)
+        ipc_send(port, msg, 9 + i, reply, 2)
 
     ds_clear(surf: int)
         val port = ds_connect()
@@ -509,7 +509,7 @@ display server without knowing the IPC protocol details.
         msg[0] = byte(DS_CLEAR)
         msg[1] = byte(surf)
         var reply: [2]byte
-        ipc_send(port, &msg[0], 2, &reply[0], 2)
+        ipc_send(port, msg, 2, reply, 2)
 
     ds_composite()
         val port = ds_connect()
@@ -517,7 +517,7 @@ display server without knowing the IPC protocol details.
         var msg: [2]byte
         msg[0] = byte(DS_COMPOSITE)
         var reply: [2]byte
-        ipc_send(port, &msg[0], 1, &reply[0], 2)
+        ipc_send(port, msg, 1, reply, 2)
 
     ds_get_key() -> int
         val port = ds_connect()
@@ -525,5 +525,5 @@ display server without knowing the IPC protocol details.
         var msg: [2]byte
         msg[0] = byte(DS_GET_KEY)
         var reply: [8]byte
-        ipc_send(port, &msg[0], 1, &reply[0], 5)
+        ipc_send(port, msg, 1, reply, 5)
         ((int(reply[1]) & 0xFF) << 24) | ((int(reply[2]) & 0xFF) << 16) | ((int(reply[3]) & 0xFF) << 8) | (int(reply[4]) & 0xFF)

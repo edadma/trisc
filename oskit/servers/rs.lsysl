@@ -182,7 +182,7 @@ so it can use ipc_recv_notify to block for notifications.
             rs_port = port_create()
         // Block until notification arrives (result == -2)
         var buf: [1]byte
-        val result = ipc_recv_notify(rs_port, &buf[0], 1)
+        val result = ipc_recv_notify(rs_port, buf, 1)
         // result == -2 means notification received
         notify_read_self()
 
@@ -225,7 +225,7 @@ from its info page at 0xBF000+24.
 Check if boot info header is valid (magic = "SLIX").
 
     rs_boot_info_valid() -> bool
-        val p = &rs_boot_info[0]
+        val p = rs_boot_info
         if p[0] != byte('S')
             return false
         if p[1] != byte('L')
@@ -372,14 +372,14 @@ Uses a local zero buffer and vm_copy_to in chunks.
     rs_zero_fill_remote(ptbr: int, addr: int, sz: int)
         val CHUNK = 1024
         var zero_buf: [1024]byte
-        memset(&zero_buf[0], 0, CHUNK)
+        memset(zero_buf, 0, CHUNK)
         var remaining = sz
         var dst = addr
         while remaining > 0
             var chunk = remaining
             if chunk > CHUNK
                 chunk = CHUNK
-            svc_vm_copy_to(ptbr, dst, &zero_buf[0], chunk)
+            svc_vm_copy_to(ptbr, dst, zero_buf, chunk)
             remaining -= chunk
             dst += chunk
 
@@ -396,8 +396,8 @@ Returns the PID on success, 0 on failure.
         // Copy boot module data from physical memory into our buffer
         if sz > 131072
             return 0
-        svc_phys_read(int(addr), &rs_mod_buf[0], sz)
-        val buf = &rs_mod_buf[0]
+        svc_phys_read(int(addr), rs_mod_buf, sz)
+        val buf = rs_mod_buf
 
         // Create server page table with MMIO grant
         val ptbr = svc_vm_create_server_pt(io_page)
@@ -428,11 +428,11 @@ Returns the PID on success, 0 on failure.
         //   +8: ramdisk base (i64) — used by disk server
         //  +16: ramdisk size (i64) — used by disk server
         var info_buf: [24]byte
-        var ip: *i64 = *i64(&info_buf[0])
+        var ip: *i64 = *i64(info_buf)
         ip[0] = i64(thread_id())
         ip[1] = i64(rs_ramdisk_base)
         ip[2] = i64(rs_ramdisk_size)
-        svc_vm_copy_to(ptbr, 0xBF000, &info_buf[0], 24)
+        svc_vm_copy_to(ptbr, 0xBF000, info_buf, 24)
 
         // Resume the process
         svc_resume_proc(pid)
@@ -445,7 +445,7 @@ it from its boot module.
     rs_monitor()
         while true
             var buf: [1]byte
-            ipc_recv_notify(rs_port, &buf[0], 1)
+            ipc_recv_notify(rs_port, buf, 1)
             val dead_pid = notify_read_self()
             if dead_pid > 0
                 rs_handle_crash(dead_pid)

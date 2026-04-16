@@ -500,7 +500,7 @@ or input redirect (<). Returns a handle or -1 on error.
                 return -1
         // Seek to end using stat to get file size
         var st: [7]int
-        val sr = fs_stat(full, &st[0])
+        val sr = fs_stat(full, st)
         if sr == 0
             fs_seek(h, st[4], 0)
         h
@@ -569,9 +569,9 @@ Set/clear foreground PID on PM for Ctrl-C signal delivery.
         var msg: [6]byte
         msg[0] = byte(PM_CMD_SET_FG)
         msg[1] = byte(console)
-        fs_msg_write_i32(&msg[0], 2, pid)
+        fs_msg_write_i32(msg, 2, pid)
         var reply: [1]byte
-        ipc_send(nsh_pm_port, &msg[0], 6, &reply[0], 1)
+        ipc_send(nsh_pm_port, msg, 6, reply, 1)
 
 Try to run an external command from `/bin/` via PM spawn.
 PM handles page table creation, binary loading, and arg setup.
@@ -599,7 +599,7 @@ Commands such as `echo` and `cat` are not built-ins — they load
                     break
                 args_buf[pos] = ap[j]
                 pos += 1
-        val args = string(&args_buf[0], pos)
+        val args = string(args_buf, pos)
 
         // Open handles — use redirect file handles if set, else TTY
         var h_in = -1
@@ -633,7 +633,7 @@ Commands such as `echo` and `cat` are not built-ins — they load
         hmap[4] = byte(h_err)
         hmap[5] = 2  // child stderr
 
-        val pid = pm_spawn_handles(bin_path, args, &hmap[0], 3)
+        val pid = pm_spawn_handles(bin_path, args, hmap, 3)
 
         // Close parent's copies of handles
         fs_close(h_in)
@@ -756,7 +756,7 @@ the appropriate stdin/stdout handles, then waits for all.
                     pos += 1
                     aj += 1
                 ai += 1
-            val args = string(&args_buf[0], pos)
+            val args = string(args_buf, pos)
 
             // Determine handles for this segment
             var h_in = tty_in
@@ -775,7 +775,7 @@ the appropriate stdin/stdout handles, then waits for all.
             hmap[4] = byte(h_err)
             hmap[5] = 2
 
-            pids[seg] = pm_spawn_handles(bin_path, args, &hmap[0], 3)
+            pids[seg] = pm_spawn_handles(bin_path, args, hmap, 3)
             seg += 1
 
         // Close all pipe handles in parent
@@ -804,7 +804,7 @@ The shell main loop.
 
     nsh()
         if nsh_home_len > 0
-            cwd = string(&nsh_home_buf[0], nsh_home_len)
+            cwd = string(nsh_home_buf, nsh_home_len)
             val home_fid = fs_open(cwd)
             if home_fid < 0
                 cwd = "/"
@@ -847,7 +847,7 @@ The shell main loop.
                     argc -= 1
 
             // Parse redirects (>, >>, <) — removes them from argv
-            argc = nsh_parse_redirects(argc, &argv[0])
+            argc = nsh_parse_redirects(argc, argv)
             if argc < 0
                 continue
 
@@ -864,7 +864,7 @@ The shell main loop.
 
             // Dispatch
             if num_pipes > 0
-                nsh_run_pipeline(argc, &argv[0], &pipe_pos[0], num_pipes)
+                nsh_run_pipeline(argc, argv, pipe_pos, num_pipes)
             else
-                nsh_dispatch(argc, &argv[0])
+                nsh_dispatch(argc, argv)
             nsh_flush()

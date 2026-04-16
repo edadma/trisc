@@ -92,8 +92,8 @@ If no waiter, the zombie stays until waitpid is called.
                     svc_reap_proc(pid)
                     var reply: [5]byte
                     reply[0] = 0
-                    pm_msg_write_i32(&reply[0], 1, exit_code)
-                    ipc_reply(waiters[i].sender, &reply[0], 5)
+                    pm_msg_write_i32(reply, 1, exit_code)
+                    ipc_reply(waiters[i].sender, reply, 5)
                     waiters[i].active = 0
                     return
             i += 1
@@ -125,14 +125,14 @@ the IPC reply until the child exits.
         if pid <= 0
             var reply: [5]byte
             reply[0] = byte(-1)
-            pm_msg_write_i32(&reply[0], 1, 0)
-            ipc_reply(sender, &reply[0], 5)
+            pm_msg_write_i32(reply, 1, 0)
+            ipc_reply(sender, reply, 5)
             return
         if pid >= MAX_PROCESSES
             var reply: [5]byte
             reply[0] = byte(-1)
-            pm_msg_write_i32(&reply[0], 1, 0)
-            ipc_reply(sender, &reply[0], 5)
+            pm_msg_write_i32(reply, 1, 0)
+            ipc_reply(sender, reply, 5)
             return
 
         // Already zombie? Reap immediately.
@@ -141,16 +141,16 @@ the IPC reply until the child exits.
             svc_reap_proc(pid)
             var reply: [5]byte
             reply[0] = 0
-            pm_msg_write_i32(&reply[0], 1, exit_code)
-            ipc_reply(sender, &reply[0], 5)
+            pm_msg_write_i32(reply, 1, exit_code)
+            ipc_reply(sender, reply, 5)
             return
 
         // Already free? Error.
         if svc_proc_state(pid) == PROC_FREE
             var reply: [5]byte
             reply[0] = byte(-1)
-            pm_msg_write_i32(&reply[0], 1, 0)
-            ipc_reply(sender, &reply[0], 5)
+            pm_msg_write_i32(reply, 1, 0)
+            ipc_reply(sender, reply, 5)
             return
 
         // Child still running — defer reply until exit
@@ -167,8 +167,8 @@ the IPC reply until the child exits.
         // Out of waiter slots
         var reply: [5]byte
         reply[0] = byte(-2)
-        pm_msg_write_i32(&reply[0], 1, 0)
-        ipc_reply(sender, &reply[0], 5)
+        pm_msg_write_i32(reply, 1, 0)
+        ipc_reply(sender, reply, 5)
 
 Handle PM_KILL: kill a process by PID.
 
@@ -180,7 +180,7 @@ Handle PM_KILL: kill a process by PID.
             reply[0] = byte(-1)
         else
             reply[0] = 0
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 Handle PM_SIGNAL: deliver a signal to a process.
 Request: [cmd(1), pid(4), sig(1)]
@@ -207,7 +207,7 @@ Reply:   [status(1)]
             reply[0] = 0
         else
             reply[0] = byte(-1)
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 Handle PM_SET_FG: set foreground PID for a console.
 Request: [cmd(1), console(1), pid(4)]
@@ -219,7 +219,7 @@ Request: [cmd(1), console(1), pid(4)]
                 fg_pid[console] = pm_msg_read_i32(buf, 2)
         var reply: [1]byte
         reply[0] = 0
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 Handle PM_SIGINT: Ctrl-C on a console. Kill foreground process.
 Request: [cmd(1), console(1)]
@@ -234,7 +234,7 @@ Request: [cmd(1), console(1)]
                 if pid >= 0
                     svc_kill_proc(pid)
                     fg_pid[console] = -1
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 Handle SPAWN: create a new process from a binary path.
 Request: [cmd(1), path_len(1), args_len(1), num_handles(1), path(N), args(M), handle_pairs(H*2)]
@@ -262,7 +262,7 @@ handles from parent to child, and returns the PID.
         if proc_pt == 0
             var reply: [1]byte
             reply[0] = -1
-            ipc_reply(sender, &reply[0], 1)
+            ipc_reply(sender, reply, 1)
             return
 
         // Load binary into child's address space via cross-address-space copy
@@ -270,7 +270,7 @@ handles from parent to child, and returns the PID.
         if entry < 0
             var reply: [1]byte
             reply[0] = -1
-            ipc_reply(sender, &reply[0], 1)
+            ipc_reply(sender, reply, 1)
             return
 
         // Write args to child's standard args address via cross-address-space copy
@@ -282,7 +282,7 @@ handles from parent to child, and returns the PID.
             args_local[i] = buf[4 + path_len + i]
             i += 1
         args_local[i] = 0
-        svc_vm_copy_to(proc_pt, SPAWN_PROG_ARGS_ADDR, &args_local[0], i + 1)
+        svc_vm_copy_to(proc_pt, SPAWN_PROG_ARGS_ADDR, args_local, i + 1)
 
         // Extract command name for thread name (first arg before space)
         val cmd = string(buf + 4 + path_len, args_len)
@@ -293,7 +293,7 @@ handles from parent to child, and returns the PID.
         var reply: [5]byte
         if pid < 0
             reply[0] = -1
-            ipc_reply(sender, &reply[0], 1)
+            ipc_reply(sender, reply, 1)
         else
             // Copy handles from parent to child via VFS (child is suspended)
             if num_handles > 0
@@ -302,8 +302,8 @@ handles from parent to child, and returns the PID.
             // Now resume the child — handles are set up
             svc_resume_proc(pid)
             reply[0] = 0
-            pm_msg_write_i32(&reply[0], 1, pid)
-            ipc_reply(sender, &reply[0], 5)
+            pm_msg_write_i32(reply, 1, pid)
+            ipc_reply(sender, reply, 5)
 
 Send handle inheritance request to VFS.
 
@@ -315,8 +315,8 @@ Send handle inheritance request to VFS.
         // Build INHERIT message: [cmd(1), parent_pid(4), child_pid(4), num(1), pairs(N*2)]
         var msg: [64]byte
         msg[0] = 16  // VFS_CMD_INHERIT
-        pm_msg_write_i32(&msg[0], 1, parent_pid)
-        pm_msg_write_i32(&msg[0], 5, child_pid)
+        pm_msg_write_i32(msg, 1, parent_pid)
+        pm_msg_write_i32(msg, 5, child_pid)
         msg[9] = byte(num_handles)
         // Copy handle pairs from spawn message
         val pairs_offset = 4 + path_len + args_len
@@ -325,7 +325,7 @@ Send handle inheritance request to VFS.
             msg[10 + i] = buf[pairs_offset + i]
             i += 1
         var vfs_reply: [1]byte
-        ipc_send(fs_port, &msg[0], 10 + num_handles * 2, &vfs_reply[0], 1)
+        ipc_send(fs_port, msg, 10 + num_handles * 2, vfs_reply, 1)
 
 Tell VFS to close all handles for a dead process.
 
@@ -335,9 +335,9 @@ Tell VFS to close all handles for a dead process.
             return
         var msg: [5]byte
         msg[0] = 17  // VFS_CMD_EXIT
-        pm_msg_write_i32(&msg[0], 1, pid)
+        pm_msg_write_i32(msg, 1, pid)
         var vfs_reply: [1]byte
-        ipc_send(fs_port, &msg[0], 5, &vfs_reply[0], 1)
+        ipc_send(fs_port, msg, 5, vfs_reply, 1)
 
 PM server main loop. Uses ipc_recv_notify to wait for either
 IPC messages (waitpid/kill from userspace) or notifications
@@ -361,7 +361,7 @@ IPC messages (waitpid/kill from userspace) or notifications
 
         var buf: [128]byte
         while true
-            val result = ipc_recv_notify(port, &buf[0], 128)
+            val result = ipc_recv_notify(port, buf, 128)
             if result == -2
                 // Notification: process exited
                 val pid = notify_read_self()
@@ -371,22 +371,22 @@ IPC messages (waitpid/kill from userspace) or notifications
                 val sender = result
                 val cmd = int(buf[0])
                 if cmd == PM_CMD_WAITPID
-                    pm_handle_waitpid(sender, &buf[0])
+                    pm_handle_waitpid(sender, buf)
                 else if cmd == PM_CMD_KILL
-                    pm_handle_kill(sender, &buf[0])
+                    pm_handle_kill(sender, buf)
                 else if cmd == PM_CMD_SPAWN
-                    pm_handle_spawn(sender, &buf[0])
+                    pm_handle_spawn(sender, buf)
                 else if cmd == PM_CMD_SIGNAL
-                    pm_handle_signal(sender, &buf[0])
+                    pm_handle_signal(sender, buf)
                 else if cmd == PM_CMD_SET_FG
-                    pm_handle_set_fg(sender, &buf[0])
+                    pm_handle_set_fg(sender, buf)
                 else if cmd == PM_CMD_SIGINT
-                    pm_handle_sigint(sender, &buf[0])
+                    pm_handle_sigint(sender, buf)
                 else
                     // Unknown command
                     var reply: [1]byte
                     reply[0] = byte(-1)
-                    ipc_reply(sender, &reply[0], 1)
+                    ipc_reply(sender, reply, 1)
 
 Client API — called by nsh and other programs to interact
 with PM via IPC.
@@ -397,12 +397,12 @@ with PM via IPC.
             return -1
         var msg: [5]byte
         msg[0] = byte(PM_CMD_WAITPID)
-        pm_msg_write_i32(&msg[0], 1, pid)
+        pm_msg_write_i32(msg, 1, pid)
         var reply: [5]byte
-        ipc_send(port, &msg[0], 5, &reply[0], 5)
+        ipc_send(port, msg, 5, reply, 5)
         if reply[0] != 0
             return -1
-        pm_msg_read_i32(&reply[0], 1)
+        pm_msg_read_i32(reply, 1)
 
     pm_spawn(path: string, args: string) -> int
         pm_spawn_handles(path, args, *byte(0), 0)
@@ -433,10 +433,10 @@ with PM via IPC.
             msg[4 + plen + alen + i] = handle_pairs[i]
             i += 1
         var reply: [5]byte
-        ipc_send(port, &msg[0], 4 + plen + alen + num_handles * 2, &reply[0], 5)
+        ipc_send(port, msg, 4 + plen + alen + num_handles * 2, reply, 5)
         if reply[0] != 0
             return -1
-        pm_msg_read_i32(&reply[0], 1)
+        pm_msg_read_i32(reply, 1)
 
     pm_kill(pid: int) -> int
         val port = port_lookup("pm")
@@ -444,7 +444,7 @@ with PM via IPC.
             return -1
         var msg: [5]byte
         msg[0] = byte(PM_CMD_KILL)
-        pm_msg_write_i32(&msg[0], 1, pid)
+        pm_msg_write_i32(msg, 1, pid)
         var reply: [1]byte
-        ipc_send(port, &msg[0], 5, &reply[0], 1)
+        ipc_send(port, msg, 5, reply, 1)
         int(reply[0])

@@ -129,7 +129,7 @@ Spawn an external program with inherited TTY handles.
         hmap[4] = byte(h_err)
         hmap[5] = 2
 
-        pm_spawn_handles(path, args, &hmap[0], 3)
+        pm_spawn_handles(path, args, hmap, 3)
 
         fs_close(h_in)
         fs_close(h_out)

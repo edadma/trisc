@@ -51,14 +51,14 @@ k_load_elf64(buf: *byte, buflen: int, ptbr: int) -> i64
                 vm_copy_to(ptbr, vaddr, buf + offset, filesz)
             if memsz > filesz
                 var zero_buf: [1024]byte
-                memset(&zero_buf[0], 0, 1024)
+                memset(zero_buf, 0, 1024)
                 var rem = memsz - filesz
                 var dst = vaddr + filesz
                 while rem > 0
                     var chunk = rem
                     if chunk > 1024
                         chunk = 1024
-                    vm_copy_to(ptbr, dst, &zero_buf[0], chunk)
+                    vm_copy_to(ptbr, dst, zero_buf, chunk)
                     rem -= chunk
                     dst += chunk
         i += 1
@@ -127,7 +127,7 @@ kernel_main() -> i64
     //  +16: ramdisk size (i64)
     //  +24: boot info header copy (offsets converted to absolute addresses)
     var info_page: [512]byte
-    memset(&info_page[0], 0, 512)
+    memset(info_page, 0, 512)
     // Write ramdisk info
     var ip: *i64 = *i64(&info_page[8])
     *ip = i64(rd_base)
@@ -150,7 +150,7 @@ kernel_main() -> i64
         var ip2: *i64 = *i64(&info_page[addr_off])
         *ip2 = abs_addr
         fi += 1
-    vm_copy_to(rs_ptbr, 0xBF000, &info_page[0], 512)
+    vm_copy_to(rs_ptbr, 0xBF000, info_page, 512)
 
     // Create RS process (suspended) and resume it
     val rs_pid = create_process_suspended(rs_entry_pt, 0xD0000, 0xCF000, "rs", rs_ptbr)

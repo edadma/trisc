@@ -94,9 +94,9 @@ last unprocessed bytes.
 
         // Read and grep
         var buf: [4096]byte
-        var nr = read(fid, &buf[0], GREP_BUF_SIZE)
+        var nr = read(fid, buf, GREP_BUF_SIZE)
         while nr > 0
-            val consumed = grep_buf(&buf[0], nr, pattern, plen)
+            val consumed = grep_buf(buf, nr, pattern, plen)
             // Move leftover bytes to start
             var leftover = nr - consumed
             var j = 0
@@ -108,8 +108,8 @@ last unprocessed bytes.
                 nr += leftover
             else if leftover > 0
                 // Process final partial line
-                if contains(&buf[0], leftover, pattern, plen) == 1
-                    write_handle(STDOUT, &buf[0], leftover)
+                if contains(buf, leftover, pattern, plen) == 1
+                    write_handle(STDOUT, buf, leftover)
                     write_handle(STDOUT, *byte("\n"), 1)
 
         if fid != STDIN

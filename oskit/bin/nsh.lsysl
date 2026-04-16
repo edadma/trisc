@@ -48,7 +48,7 @@ output to reduce IPC round-trips.
 
     nsh_flush()
         if nsh_outpos > 0
-            write_handle(STDOUT, &nsh_out[0], nsh_outpos)
+            write_handle(STDOUT, nsh_out, nsh_outpos)
             nsh_outpos = 0
 
     nsh_putc(ch: char)
@@ -201,7 +201,7 @@ Redraw the full line in a single batched write.
         // Copy line content
         for var i = 0; i < blen; i++
             if p >= 120
-                write_handle(STDOUT, &nsh_out[0], p)
+                write_handle(STDOUT, nsh_out, p)
                 p = 0
             nsh_out[p] = buf[i]
             p += 1
@@ -209,7 +209,7 @@ Redraw the full line in a single batched write.
         p = nsh_append_csi(nsh_out, p, 0, byte('K'))
         // ESC[nG — cursor to column (1-based)
         p = nsh_append_csi(nsh_out, p, prompt_len + cursor + 1, byte('G'))
-        write_handle(STDOUT, &nsh_out[0], p)
+        write_handle(STDOUT, nsh_out, p)
 
     nsh_readline(buf: *byte, maxlen: int, prompt_len: int) -> int
         var blen = 0
@@ -464,7 +464,7 @@ or input redirect (<). Returns a handle or -1 on error.
                 nsh_putc('\n')
                 return -1
         var st: [7]int
-        val sr = stat(full, &st[0])
+        val sr = stat(full, st)
         if sr == 0
             seek(h, st[4], 0)
         h
@@ -545,9 +545,9 @@ Set/clear foreground PID on PM for Ctrl-C signal delivery.
         var msg: [6]byte
         msg[0] = byte(PM_CMD_SET_FG)
         msg[1] = byte(console)
-        msg_write_i32(&msg[0], 2, pid)
+        msg_write_i32(msg, 2, pid)
         var reply: [1]byte
-        ipc_send(port, &msg[0], 6, &reply[0], 1)
+        ipc_send(port, msg, 6, reply, 1)
 
 Try to run an external command from `/bin/` via PM spawn.
 
@@ -571,7 +571,7 @@ Try to run an external command from `/bin/` via PM spawn.
                     break
                 args_buf[pos] = ap[j]
                 pos += 1
-        val args = string(&args_buf[0], pos)
+        val args = string(args_buf, pos)
 
         // Open handles — use redirect file handles if set, else TTY
         var h_in = -1
@@ -605,7 +605,7 @@ Try to run an external command from `/bin/` via PM spawn.
         hmap[4] = byte(h_err)
         hmap[5] = 2  // child stderr
 
-        val pid = pm_spawn_handles(bin_path, args, &hmap[0], 3)
+        val pid = pm_spawn_handles(bin_path, args, hmap, 3)
 
         // Close parent's copies of handles
         close(h_in)
@@ -723,7 +723,7 @@ the appropriate stdin/stdout handles, then waits for all.
                     pos += 1
                     aj += 1
                 ai += 1
-            val args = string(&args_buf[0], pos)
+            val args = string(args_buf, pos)
 
             var h_in = tty_in
             if seg > 0
@@ -741,7 +741,7 @@ the appropriate stdin/stdout handles, then waits for all.
             hmap[4] = byte(h_err)
             hmap[5] = 2
 
-            pids[seg] = pm_spawn_handles(bin_path, args, &hmap[0], 3)
+            pids[seg] = pm_spawn_handles(bin_path, args, hmap, 3)
             seg += 1
 
         // Close all pipe handles in parent
@@ -810,7 +810,7 @@ The shell entry point. Home directory is passed via args
                     argc -= 1
 
             // Parse redirects (>, >>, <) — removes them from argv
-            argc = nsh_parse_redirects(argc, &argv[0])
+            argc = nsh_parse_redirects(argc, argv)
             if argc < 0
                 continue
 
@@ -827,7 +827,7 @@ The shell entry point. Home directory is passed via args
 
             // Dispatch
             if num_pipes > 0
-                nsh_run_pipeline(argc, &argv[0], &pipe_pos[0], num_pipes)
+                nsh_run_pipeline(argc, argv, pipe_pos, num_pipes)
             else
-                nsh_dispatch(argc, &argv[0])
+                nsh_dispatch(argc, argv)
             nsh_flush()

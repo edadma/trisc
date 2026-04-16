@@ -88,7 +88,7 @@ Parse a decimal integer from a byte pointer. Returns the value.
         // Read and output lines until count reached
         var lines = 0
         var buf: [4096]byte
-        var nr = read(fid, &buf[0], HEAD_BUF)
+        var nr = read(fid, buf, HEAD_BUF)
         while nr > 0
             var i = 0
             while i < nr
@@ -111,7 +111,7 @@ Parse a decimal integer from a byte pointer. Returns the value.
                     i = eol
             if lines >= count
                 break
-            nr = read(fid, &buf[0], HEAD_BUF)
+            nr = read(fid, buf, HEAD_BUF)
 
         if fid != STDIN
             close(fid)

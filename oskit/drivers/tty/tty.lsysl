@@ -245,7 +245,7 @@ Handle Ctrl-C: tell PM to kill foreground process on this console.
         msg[0] = byte(PM_CMD_SIGINT)
         msg[1] = byte(active_console)
         var reply: [1]byte
-        ipc_send(tty_pm_port, &msg[0], 2, &reply[0], 1)
+        ipc_send(tty_pm_port, msg, 2, reply, 1)
 
     tty_process_keyboard()
         while kbhit() == 1
@@ -330,7 +330,7 @@ all consoles.
                     var reply: [2]byte
                     reply[0] = 0
                     reply[1] = byte(ch)
-                    ipc_reply(reader, &reply[0], 2)
+                    ipc_reply(reader, reply, 2)
                     consoles[con].pending_reader = -1
             con += 1
 
@@ -340,7 +340,7 @@ Handle a WRITE command: output a character.
         putc(ch)
         var reply: [1]byte
         reply[0] = 0
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 Handle a PUTS command: output a string.
 Message format: [cmd, console, len, chars...]
@@ -363,7 +363,7 @@ server prints garbage (e.g. two stray characters before the next prompt).
             i += 1
         var reply: [1]byte
         reply[0] = 0
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 Handle a READ command: return next character from input buffer.
 If no character available, save as pending (will be replied
@@ -375,7 +375,7 @@ when keyboard input arrives).
             var reply: [2]byte
             reply[0] = 0
             reply[1] = byte(ch)
-            ipc_reply(sender, &reply[0], 2)
+            ipc_reply(sender, reply, 2)
         else
             // No input — save pending request.
             // The server will reply when keyboard input arrives
@@ -390,7 +390,7 @@ Handle a SWITCH command: change active console.
                 active_console = console
         var reply: [1]byte
         reply[0] = 0
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 The TTY server loop. Creates port, registers as "tty",
 initializes keyboard, then loops handling messages.
@@ -418,7 +418,7 @@ initializes keyboard, then loops handling messages.
             tty_deliver_pending()
 
 
-            val result = ipc_recv_notify(tty_port, &buf[0], 128)
+            val result = ipc_recv_notify(tty_port, buf, 128)
             if result == -2
                 // Notification: keyboard input arrived
                 notify_read_self()
@@ -436,9 +436,9 @@ initializes keyboard, then loops handling messages.
                     else
                         var reply: [1]byte
                         reply[0] = -1
-                        ipc_reply(sender, &reply[0], 1)
+                        ipc_reply(sender, reply, 1)
                 else if cmd == TTY_CMD_PUTS
-                    tty_handle_puts(sender, console, &buf[0])
+                    tty_handle_puts(sender, console, buf)
                 else if cmd == TTY_CMD_READ
                     tty_handle_read(sender, console)
                 else if cmd == TTY_CMD_SWITCH
@@ -447,12 +447,12 @@ initializes keyboard, then loops handling messages.
                     else
                         var reply_sw: [1]byte
                         reply_sw[0] = -1
-                        ipc_reply(sender, &reply_sw[0], 1)
+                        ipc_reply(sender, reply_sw, 1)
                 else
                     // Unknown command — reply with error
                     var reply: [1]byte
                     reply[0] = -1
-                    ipc_reply(sender, &reply[0], 1)
+                    ipc_reply(sender, reply, 1)
 
     tty_lookup_port() -> int
         port_lookup("tty")
@@ -468,7 +468,7 @@ them to the TTY port.
             msg[1] = 0
             msg[2] = byte(ch)
             var reply: [1]byte
-            ipc_send(port, &msg[0], 3, &reply[0], 1)
+            ipc_send(port, msg, 3, reply, 1)
 
     tty_puts(s: *byte, len: int)
         val port = tty_lookup_port()
@@ -482,7 +482,7 @@ them to the TTY port.
                 msg[i + 3] = s[i]
                 i += 1
             var reply: [1]byte
-            ipc_send(port, &msg[0], len + 3, &reply[0], 1)
+            ipc_send(port, msg, len + 3, reply, 1)
 
     tty_getc() -> int
         val port = tty_lookup_port()
@@ -491,7 +491,7 @@ them to the TTY port.
             msg[0] = TTY_CMD_READ
             msg[1] = 0
             var reply: [2]byte
-            ipc_send(port, &msg[0], 2, &reply[0], 2)
+            ipc_send(port, msg, 2, reply, 2)
             return int(reply[1])
         -1
 
@@ -502,4 +502,4 @@ them to the TTY port.
             msg[0] = byte(TTY_CMD_SWITCH)
             msg[1] = byte(console)
             var reply: [1]byte
-            ipc_send(port, &msg[0], 2, &reply[0], 1)
+            ipc_send(port, msg, 2, reply, 1)

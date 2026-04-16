@@ -127,7 +127,7 @@ Store a complete line into the ring buffer.
         var buf: [4096]byte
         var line_buf: [512]byte
         var lb_len = 0
-        var nr = read(fid, &buf[0], TAIL_BUF)
+        var nr = read(fid, buf, TAIL_BUF)
         while nr > 0
             var i = 0
             while i < nr
@@ -136,18 +136,18 @@ Store a complete line into the ring buffer.
                     if lb_len < 511
                         line_buf[lb_len] = byte('\n')
                         lb_len += 1
-                    store_line(&line_buf[0], lb_len)
+                    store_line(line_buf, lb_len)
                     lb_len = 0
                 else
                     if lb_len < 511
                         line_buf[lb_len] = buf[i]
                         lb_len += 1
                 i += 1
-            nr = read(fid, &buf[0], TAIL_BUF)
+            nr = read(fid, buf, TAIL_BUF)
 
         // Store final partial line if any
         if lb_len > 0
-            store_line(&line_buf[0], lb_len)
+            store_line(line_buf, lb_len)
 
         if fid != STDIN
             close(fid)

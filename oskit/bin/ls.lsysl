@@ -32,7 +32,7 @@ Lists the contents of a directory, skipping `.` and `..`.
                         if n == 2
                             skip = 1
                 if skip == 0
-                    puts(string(&entry_name[0], n))
+                    puts(string(entry_name, n))
                     puts("\n")
             idx += 1
         exit()

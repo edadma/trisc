@@ -34,7 +34,7 @@ test_open — test file open from spawned process
         for var i = 0; i < plen; i++
             msg[i + 1] = pp[i]
         var reply: [9]byte
-        val rc = ipc_send(port, &msg[0], plen + 1, &reply[0], 9)
+        val rc = ipc_send(port, msg, plen + 1, reply, 9)
         putc(byte('R'))
         putc(byte('='))
         // Print all 9 reply bytes as hex

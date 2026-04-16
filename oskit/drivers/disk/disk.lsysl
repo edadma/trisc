@@ -59,7 +59,7 @@ Over-allocate to guarantee page alignment within the buffer.
     var disk_dma_paddr = 0
 
     disk_init_dma()
-        val raw = int(i64(&disk_dma_raw[0]))
+        val raw = int(i64(disk_dma_raw))
         disk_dma_vaddr = (raw + 4095) & -4096
         disk_dma_paddr = svc_vm_v2p(disk_dma_vaddr)
 
@@ -120,7 +120,7 @@ address space or isolated (cross-address-space).
             svc_vm_copy_to(sender_ptbr, addr, bounce, 4096)
         var reply: [1]byte
         reply[0] = 0
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 Handle a WRITE request: copy data from the caller's address
 space into a local bounce buffer, then DMA-write to disk.
@@ -138,7 +138,7 @@ space into a local bounce buffer, then DMA-write to disk.
         disk_hw_write(lba, i64(disk_dma_paddr))
         var reply: [1]byte
         reply[0] = 0
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 Handle a CAPACITY request: return sector count.
 
@@ -146,8 +146,8 @@ Handle a CAPACITY request: return sector count.
         val cap = disk_hw_capacity()
         var reply: [5]byte
         reply[0] = 0
-        disk_write_i32(&reply[0], 1, cap)
-        ipc_reply(sender, &reply[0], 5)
+        disk_write_i32(reply, 1, cap)
+        ipc_reply(sender, reply, 5)
 
 The disk server loop. Creates port, registers as "disk",
 then loops handling block I/O requests.
@@ -166,20 +166,20 @@ then loops handling block I/O requests.
         // Server loop
         var buf: [16]byte
         while 1 == 1
-            val sender = ipc_recv(disk_port, &buf[0], 16)
+            val sender = ipc_recv(disk_port, buf, 16)
             if sender >= 0
                 val cmd = int(buf[0])
                 if cmd == DISK_CMD_READ
-                    disk_handle_read(sender, &buf[0])
+                    disk_handle_read(sender, buf)
                 else if cmd == DISK_CMD_WRITE
-                    disk_handle_write(sender, &buf[0])
+                    disk_handle_write(sender, buf)
                 else if cmd == DISK_CMD_CAPACITY
                     disk_handle_capacity(sender)
                 else
                     // Unknown command — reply with error
                     var reply: [1]byte
                     reply[0] = -1
-                    ipc_reply(sender, &reply[0], 1)
+                    ipc_reply(sender, reply, 1)
 
 Userspace wrappers. Clients use these to talk to the disk server
 without building IPC messages manually. Port lookup uses a local
@@ -195,10 +195,10 @@ the disk server runs in a separate address space.
             return -1
         var msg: [9]byte
         msg[0] = DISK_CMD_READ
-        disk_write_i32(&msg[0], 1, lba)
-        disk_write_i32(&msg[0], 5, int(i64(addr)))
+        disk_write_i32(msg, 1, lba)
+        disk_write_i32(msg, 5, int(i64(addr)))
         var reply: [1]byte
-        ipc_send(port, &msg[0], 9, &reply[0], 1)
+        ipc_send(port, msg, 9, reply, 1)
         int(reply[0])
 
     disk_write(lba: int, addr: *byte) -> int
@@ -207,10 +207,10 @@ the disk server runs in a separate address space.
             return -1
         var msg: [9]byte
         msg[0] = DISK_CMD_WRITE
-        disk_write_i32(&msg[0], 1, lba)
-        disk_write_i32(&msg[0], 5, int(i64(addr)))
+        disk_write_i32(msg, 1, lba)
+        disk_write_i32(msg, 5, int(i64(addr)))
         var reply: [1]byte
-        ipc_send(port, &msg[0], 9, &reply[0], 1)
+        ipc_send(port, msg, 9, reply, 1)
         int(reply[0])
 
     disk_capacity() -> int
@@ -220,8 +220,8 @@ the disk server runs in a separate address space.
         var msg: [1]byte
         msg[0] = DISK_CMD_CAPACITY
         var reply: [5]byte
-        ipc_send(port, &msg[0], 1, &reply[0], 5)
+        ipc_send(port, msg, 1, reply, 5)
         if reply[0] != 0
             return -1
-        disk_read_i32(&reply[0], 1)
+        disk_read_i32(reply, 1)
 

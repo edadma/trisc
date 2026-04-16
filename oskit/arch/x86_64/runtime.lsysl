@@ -206,7 +206,7 @@ Write one IDT gate entry. Each entry is 16 bytes:
         // Syscall (int 0x80, DPL=3)
         idt_set_gate(0x80, i64(&syscall_entry), 0xEE)
         // Load IDT
-        load_idt(&idt_table[0], 4095)
+        load_idt(idt_table, 4095)
 
 
 Main entry point, called by boot.s before kernel_init.
