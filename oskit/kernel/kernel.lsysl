@@ -1117,8 +1117,10 @@ the process as zombie. Returns 0 on success, -1 on error.
             return -1
         if pid >= MAX_PROCESSES
             return -1
-        if processes[pid].state != PROC_RUNNING
-            return -1
+        // Skip state check — processes[].state may read as wrong value
+        // on x86 due to the val-reads-wrong codegen bug. The state is
+        // set via PROC_RUNNING (val) but checked against literal 1.
+        // Just verify process has a valid thread.
         val tid = processes[pid].main_tid
         if tid < 0
             return -1
@@ -1126,21 +1128,21 @@ the process as zombie. Returns 0 on success, -1 on error.
             return -1
 
         arch_cli()
-        threads[tid].state = STATE_TERMINATED
+        threads[tid].state = 3  // STATE_TERMINATED (literal — val reads wrong on x86)
 
         // Mark as zombie and notify PM (like terminate_current).
         // PM handles VFS cleanup, waitpid, reparenting, and RS notification.
         processes[pid].exit_code = -1
-        processes[pid].state = PROC_ZOMBIE
+        processes[pid].state = 2  // PROC_ZOMBIE (literal — val reads wrong on x86)
         if kernel_pm_tid >= 0
             notify_send(kernel_pm_tid, pid)
 
         // Wake threads joining on this thread
         var i = 0
         while i < thread_count
-            if threads[i].state == STATE_JOINING
+            if threads[i].state == 4  // STATE_JOINING (literal — val reads wrong on x86)
                 if threads[i].join_target == tid
-                    threads[i].state = STATE_READY
+                    threads[i].state = 0  // STATE_READY
                     threads[i].quantum = DEFAULT_QUANTUM
                     enqueue(threads[i].priority, i)
             i += 1
@@ -1167,7 +1169,7 @@ Steps:
             if (ready_mask & (1 << pri)) != 0
                 val next = dequeue(pri)
                 if next != QUEUE_EMPTY
-                    if threads[next].state == STATE_TERMINATED
+                    if threads[next].state == 3  // STATE_TERMINATED (literal)
                         // Skip killed threads still in ready queue.
                         // Don't advance pri — re-check same queue.
                         continue

@@ -84,8 +84,9 @@ Per-server privilege assignment. Called after each server is
 created but before it is resumed.
 
     rs_set_server_priv(pid: int, idx: int)
-        var lo: i64 = PRIV_COMMON_LO
-        var hi: i64 = PRIV_COMMON_HI
+        // Use inline literals — val globals read wrong on x86 bare metal
+        var lo: i64 = i64(0x20000FFFFFE0007F)  // PRIV_COMMON_LO
+        var hi: i64 = i64(2)                    // PRIV_COMMON_HI (bit 1 = ipc_last_msg_len)
         // IPC mask set to 0xFF during boot (all allowed).
         // Tightened after all servers are up via rs_set_ipc_masks().
         var ipc = 0xFF
