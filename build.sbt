@@ -158,7 +158,7 @@ lazy val cpu = crossProject(JSPlatform, JVMPlatform, NativePlatform)
 
 lazy val docs = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .crossType(CrossType.Pure)
-  .in(file("docs"))
+  .in(file("docs-cli"))
   .settings(commonSettings)
   .settings(
     name := "trisc-docs",
