@@ -92,15 +92,18 @@ object RamdiskBinPrograms:
       "/bin/uptime" -> compileExecutable("oskit/bin/uptime/uptime", "oskit/bin/uptime.lsysl"),
       "/bin/whoami" -> compileExecutable("oskit/bin/whoami/whoami", "oskit/bin/whoami.lsysl"),
       "/bin/nsh"    -> compileExecutable("oskit/bin/nsh/nsh", "oskit/bin/nsh.lsysl"),
+      "/bin/head"   -> compileExecutable("oskit/bin/head/head", "oskit/bin/head.lsysl"),
+      "/bin/tail"   -> compileExecutable("oskit/bin/tail/tail", "oskit/bin/tail.lsysl"),
       "/bin/login"  -> compileLoginExecutable(),
+      "/bin/su"     -> compileCryptoExecutable("oskit/bin/su/su", "oskit/bin/su.lsysl"),
     )
 
-  /** Compile login with crypto libraries (sha256, hmac, pbkdf2). */
-  def compileLoginExecutable(): Array[Byte] =
+  /** Compile a program that needs crypto libraries (sha256, hmac, pbkdf2). */
+  def compileCryptoExecutable(unitPath: String, lsyslRepoPath: String): Array[Byte] =
     val syscallAsm =
       Source.fromFile("oskit/ulib/syscall.asm")(using Codec.UTF8).mkString
     val syscallTof = assemble(syscallAsm, relocatable = true)
-    val source     = tangledLsysl("oskit/bin/login.lsysl")
+    val source     = tangledLsysl(lsyslRepoPath)
     val ulibSource = tangledLsysl("oskit/ulib/ulib.lsysl")
     val sbrkSource = Source.fromFile("oskit/ulib/sbrk.sysl")(using Codec.UTF8).mkString
     val allocSource = Source.fromFile("posix/stdlib/alloc.sysl")(using Codec.UTF8).mkString
@@ -113,7 +116,7 @@ object RamdiskBinPrograms:
     val memSource = tangledLsysl("std/mem/mem.lsysl")
     val debugSource = tangledLsysl("std/debug/debug.lsysl")
     val allSources = Map(
-      "oskit/bin/login/login" -> source,
+      unitPath -> source,
       "oskit/ulib/ulib" -> ulibSource,
       "posix/unistd/sbrk" -> sbrkSource,
       "posix/stdlib/alloc" -> allocSource,
@@ -136,6 +139,9 @@ object RamdiskBinPrograms:
     val linked = Linker.link(Seq(syscallTof, syslTof), progScript, 0)
     TriscBinary.serialize(linked)
 
+  def compileLoginExecutable(): Array[Byte] =
+    compileCryptoExecutable("oskit/bin/login/login", "oskit/bin/login.lsysl")
+
   private def loadResourceStream(path: String): Option[Array[Byte]] =
     val inOpt =
       Option(RamdiskBinPrograms.getClass.getResourceAsStream("/" + path))
@@ -156,7 +162,7 @@ object RamdiskBinPrograms:
   // Load pre-built .trb resources only (no compilation). Used by the emulator at runtime.
   // Run RegenRamdiskBinMain to update embedded .trb files after editing oskit/bin or ulib.
   def loadEmbeddedBinaries(): Map[String, Array[Byte]] =
-    Seq("hello", "echo", "cat", "ps", "count", "grep", "wc", "ls", "touch", "write", "mkdir", "rm", "rmdir", "mv", "chmod", "stat", "uptime", "whoami", "nsh", "login").flatMap { short =>
+    Seq("hello", "echo", "cat", "ps", "count", "grep", "wc", "ls", "touch", "write", "mkdir", "rm", "rmdir", "mv", "chmod", "stat", "uptime", "whoami", "nsh", "head", "tail", "login", "su").flatMap { short =>
       loadResource(short).map(bytes => s"/bin/$short" -> bytes)
     }.toMap
 

@@ -1,21 +1,31 @@
 OSKit Init — System Initialization
 
 Started by RS as the last boot module. Reads `/etc/ttytab` to
-spawn login/shell sessions via PM. Runs as an isolated process
-with its own page table.
+spawn login/shell sessions via PM. When a session exits, init
+respawns it so the terminal stays active.
 
 Boot sequence:
 1. kernel_main starts RS
-2. RS starts servers: disk, tfs, tty, pm, vfs
+2. RS starts servers: disk, tfs, tty, pm, vfs, ds
 3. RS starts init (last, from boot module)
 4. Init reads `/etc/ttytab` — spawns login/shell per terminal
+5. Init loops, waiting for children and respawning
 
     module oskit.apps.init
 
     import oskit.services.{putc, rs_ready}
     import oskit.fs.{fs_open, fs_read, fs_close, fs_connect}
-    import oskit.servers.{pm_spawn_handles}
+    import oskit.servers.{pm_spawn_handles, pm_waitpid}
     import oskit.ipc.{ipc_send, port_lookup}
+
+Session table. Each entry records the program path and
+the PID of the currently running session.
+
+    val MAX_SESSIONS = 4
+
+    var session_path: [4]string
+    var session_pid: [4]int
+    var session_count = 0
 
 Parse `/etc/ttytab` and spawn a process for each entry.
 Format: `terminal command` — one entry per line.
@@ -26,12 +36,12 @@ Supported commands: `login`, `nsh`.
         val fid = fs_open("/etc/ttytab")
         if fid < 0
             // No ttytab — fall back to single login
-            spawn_program("/bin/login", "login")
+            start_session("/bin/login")
             return
         val nr = fs_read(fid, buf, 256)
         fs_close(fid)
         if nr <= 0
-            spawn_program("/bin/login", "login")
+            start_session("/bin/login")
             return
 
         var pos = 0
@@ -107,16 +117,28 @@ Supported commands: `login`, `nsh`.
                             if buf[cmd_start + 2] == 'g'
                                 if buf[cmd_start + 3] == 'i'
                                     if buf[cmd_start + 4] == 'n'
-                                        spawn_program("/bin/login", "login")
+                                        start_session("/bin/login")
                 if cmd_len == 3
                     if buf[cmd_start] == 'n'
                         if buf[cmd_start + 1] == 's'
                             if buf[cmd_start + 2] == 'h'
-                                spawn_program("/bin/nsh", "nsh")
+                                start_session("/bin/nsh")
+
+Start a session — spawn program and record in session table.
+
+    start_session(path: string)
+        if session_count >= MAX_SESSIONS
+            return
+        val pid = spawn_program(path)
+        if pid > 0
+            session_path[session_count] = path
+            session_pid[session_count] = pid
+            session_count += 1
 
 Spawn an external program with inherited TTY handles.
+Returns child PID or -1 on error.
 
-    spawn_program(path: string, args: string)
+    spawn_program(path: string) -> int
         val h_in = fs_connect("tty:0")
         val h_out = fs_connect("tty:0")
         val h_err = fs_connect("tty:0")
@@ -129,11 +151,33 @@ Spawn an external program with inherited TTY handles.
         hmap[4] = byte(h_err)
         hmap[5] = 2
 
-        pm_spawn_handles(path, args, hmap, 3)
+        val pid = pm_spawn_handles(path, "", hmap, 3)
 
         fs_close(h_in)
         fs_close(h_out)
         fs_close(h_err)
+        pid
+
+Respawn loop. Wait for any child to exit, then respawn
+the corresponding session.
+
+    respawn_loop()
+        while 1 == 1
+            // Wait for any session to exit
+            var i = 0
+            var found = 0
+            while i < session_count
+                if session_pid[i] > 0
+                    val code = pm_waitpid(session_pid[i])
+                    // Child exited — respawn
+                    val pid = spawn_program(session_path[i])
+                    if pid > 0
+                        session_pid[i] = pid
+                    else
+                        session_pid[i] = -1
+                    found = 1
+                    i = session_count
+                i += 1
 
     init_print(s: string)
         val p = *byte(s)
@@ -150,3 +194,6 @@ Spawn an external program with inherited TTY handles.
         // All servers are up — read /etc/ttytab and spawn sessions
         init_print("Reading /etc/ttytab\n")
         spawn_sessions()
+
+        // Wait for sessions to exit and respawn them
+        respawn_loop()

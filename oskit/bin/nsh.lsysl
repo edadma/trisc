@@ -438,7 +438,7 @@ Built-in commands.
 
     cmd_help(argc: int, argv: *string)
         nsh_print("builtins: exit pwd cd kill jobs fg help\n")
-        nsh_print("/bin: cat echo grep head tail wc ls mkdir rm\n")
+        nsh_print("/bin: cat echo grep head tail wc ls mkdir rm su\n")
         nsh_print("      rmdir touch write mv chmod stat uptime\n")
         nsh_print("      whoami ps\n")
 
