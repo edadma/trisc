@@ -86,9 +86,7 @@ of a single i64 nanosecond counter.
         return self.nano < other.nano
 
     Instant.after(other: Instant) -> bool
-        if self.seconds > other.seconds then return true
-        if self.seconds < other.seconds then return false
-        return self.nano > other.nano
+        return other.before(self)
 
     Instant.equals(other: Instant) -> bool
         return self.seconds == other.seconds && self.nano == other.nano
@@ -513,8 +511,7 @@ Zero-pad an integer to 4 digits.
 Convenience method.
 
     DateTime.format(pattern: string) -> string
-        val dt = DateTime(self.year, self.month, self.day, self.hour, self.minute, self.second, self.nano, self.offset_minutes)
-        return format_datetime(dt, pattern)
+        return format_datetime(self, pattern)
 
 ### to_iso_string
 
