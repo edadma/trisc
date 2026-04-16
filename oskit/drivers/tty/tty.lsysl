@@ -235,11 +235,7 @@ Handle Ctrl-C: tell PM to kill foreground process on this console.
     tty_handle_ctrl_c()
         // Look up PM port (cached)
         if tty_pm_port == -2
-            var n: [3]byte
-            n[0] = byte('p')
-            n[1] = byte('m')
-            n[2] = 0
-            tty_pm_port = port_lookup(&n[0])
+            tty_pm_port = port_lookup("pm")
         if tty_pm_port < 0
             // Can't reach PM — push ^C to buffer as fallback
             tty_console_push(active_console, byte(3))
@@ -399,27 +395,15 @@ Handle a SWITCH command: change active console.
 The TTY server loop. Creates port, registers as "tty",
 initializes keyboard, then loops handling messages.
 
-    var tty_name: [4]byte
-
     tty_server()
-        // Set up name
-        tty_name[0] = 116  // t
-        tty_name[1] = 116  // t
-        tty_name[2] = 121  // y
-        tty_name[3] = 0
-
-        // Init tables and consoles
         tty_init_tables()
         var i = 0
         while i < MAX_CONSOLES
             tty_console_init(i)
             i += 1
 
-        // keyboard_init() is called by kernel_init — driver stays in kernel
-
-        // Create and register port
         tty_port = port_create()
-        port_register(tty_port, &tty_name[0])
+        port_register(tty_port, "tty")
         tty_tid = thread_id()
         svc_kb_set_notify(tty_tid)
 
@@ -470,18 +454,8 @@ initializes keyboard, then loops handling messages.
                     reply[0] = -1
                     ipc_reply(sender, &reply[0], 1)
 
-Look up the TTY port using a local name buffer so it works
-whether TTY runs as a kernel thread or an isolated process
-(module-level tty_name may be uninitialized in the caller's
-address space when the server is isolated).
-
     tty_lookup_port() -> int
-        var n: [4]byte
-        n[0] = 116  // t
-        n[1] = 116  // t
-        n[2] = 121  // y
-        n[3] = 0
-        port_lookup(&n[0])
+        port_lookup("tty")
 
 Userspace wrappers. These build IPC messages and send
 them to the TTY port.

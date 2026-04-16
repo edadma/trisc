@@ -30,14 +30,18 @@ port_create() -> int
 port_close(port: int) -> int
     syscall(SYS_PORT_CLOSE, port)
 
-port_register(port: int, name: *byte) -> int
-    var args: [2]i64
+port_register(port: int, name: string) -> int
+    var args: [3]i64
     args[0] = port
-    args[1] = i64(name)
+    args[1] = i64(*byte(name))
+    args[2] = len(name)
     syscall(SYS_PORT_REGISTER, i64(&args[0]))
 
-port_lookup(name: *byte) -> int
-    syscall(SYS_PORT_LOOKUP, i64(name))
+port_lookup(name: string) -> int
+    var args: [2]i64
+    args[0] = i64(*byte(name))
+    args[1] = len(name)
+    syscall(SYS_PORT_LOOKUP, i64(&args[0]))
 
 ipc_send(port: int, msg: *byte, msg_len: int, reply: *byte, reply_len: int) -> int
     var args: [5]i64

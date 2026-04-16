@@ -84,8 +84,11 @@ IPC — send a message to a server and receive a reply.
 
 Service discovery — look up a server port by name.
 
-    port_lookup(name: *byte) -> int
-        syscall(SYS_PORT_LOOKUP, i64(name))
+    port_lookup(name: string) -> int
+        var args: [2]i64
+        args[0] = i64(*byte(name))
+        args[1] = len(name)
+        syscall(SYS_PORT_LOOKUP, i64(&args[0]))
 
 Thread and process queries.
 
@@ -133,11 +136,7 @@ Write a string to stdout (handle 1) via VFS.
     val STDERR = 2
 
     write_handle(handle: int, data: *byte, wlen: int) -> int
-        var fs_name: [3]byte
-        fs_name[0] = byte('f')
-        fs_name[1] = byte('s')
-        fs_name[2] = 0
-        val port = port_lookup(&fs_name[0])
+        val port = fs_port()
         if port < 0
             return -1
         var msg: [13]byte
@@ -161,11 +160,7 @@ Write a string to stdout (handle 1) via VFS.
 Open a file by path. Returns a file ID or -1 on error.
 
     open(path: string) -> int
-        var fs_name: [3]byte
-        fs_name[0] = byte('f')
-        fs_name[1] = byte('s')
-        fs_name[2] = 0
-        val port = port_lookup(&fs_name[0])
+        val port = fs_port()
         if port < 0
             return -1
         val plen = len(path)
@@ -189,11 +184,7 @@ Read from an open file. Position is tracked by VFS.
 Returns the number of bytes read, or -1 on error.
 
     read(fid: int, buf: *byte, count: int) -> int
-        var fs_name: [3]byte
-        fs_name[0] = byte('f')
-        fs_name[1] = byte('s')
-        fs_name[2] = 0
-        val port = port_lookup(&fs_name[0])
+        val port = fs_port()
         if port < 0
             return -1
         var msg: [13]byte
@@ -212,11 +203,7 @@ Returns the number of bytes read, or -1 on error.
 Close an open file.
 
     close(fid: int)
-        var fs_name: [3]byte
-        fs_name[0] = byte('f')
-        fs_name[1] = byte('s')
-        fs_name[2] = 0
-        val port = port_lookup(&fs_name[0])
+        val port = fs_port()
         if port < 0
             return
         var msg: [5]byte
@@ -231,11 +218,7 @@ Get the filesystem server port (cached).
 
     fs_port() -> int
         if fs_port_cache == -2
-            var fs_name: [3]byte
-            fs_name[0] = byte('f')
-            fs_name[1] = byte('s')
-            fs_name[2] = 0
-            fs_port_cache = port_lookup(&fs_name[0])
+            fs_port_cache = port_lookup("fs")
         fs_port_cache
 
 Create a file at a path. Returns inode or -1 on error.
@@ -479,11 +462,7 @@ Look up the PM server port (cached).
 
     pm_port() -> int
         if pm_port_cache == -2
-            var pm_name: [3]byte
-            pm_name[0] = byte('p')
-            pm_name[1] = byte('m')
-            pm_name[2] = 0
-            pm_port_cache = port_lookup(&pm_name[0])
+            pm_port_cache = port_lookup("pm")
         pm_port_cache
 
 Wait for a child process to exit. Returns exit code or -1.

@@ -572,13 +572,9 @@ After boot, RS stays alive in a monitoring loop.
             // Record server's port for transparent restart.
             // VFS registers as "fs" (not "vfs") — use correct port name.
             if i == 4
-                var fs_name: [3]byte
-                fs_name[0] = 102  // f
-                fs_name[1] = 115  // s
-                fs_name[2] = 0
-                rs_server_ports[i] = port_lookup(&fs_name[0])
+                rs_server_ports[i] = port_lookup("fs")
             else
-                rs_server_ports[i] = port_lookup(name)
+                rs_server_ports[i] = port_lookup(string(name, nlen))
             rs_print(" ok\n")
             i += 1
 

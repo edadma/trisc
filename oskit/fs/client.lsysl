@@ -48,15 +48,11 @@ for callers that need the raw inode (e.g., for directory operations
 that still take inodes).
 
     var fs_port = -1
-    var fs_srv_name: [3]byte
     var fs_last_ino = -1
 
     fs_get_port() -> int
         if fs_port < 0
-            fs_srv_name[0] = 102  // f
-            fs_srv_name[1] = 115  // s
-            fs_srv_name[2] = 0
-            fs_port = port_lookup(&fs_srv_name[0])
+            fs_port = port_lookup("fs")
         fs_port
 
 Big-endian 16/32-bit helpers for the protocol message layout.

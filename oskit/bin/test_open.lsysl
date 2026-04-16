@@ -8,11 +8,7 @@ test_open — test file open from spawned process
 
     main()
         // Test port_lookup for "fs"
-        var fs_name: [3]byte
-        fs_name[0] = byte('f')
-        fs_name[1] = byte('s')
-        fs_name[2] = 0
-        val port = port_lookup(&fs_name[0])
+        val port = port_lookup("fs")
         putc(byte('P'))
         putc(byte('='))
         if port >= 0

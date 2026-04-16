@@ -309,11 +309,7 @@ Send handle inheritance request to VFS.
 
     pm_inherit_handles(parent_pid: int, child_pid: int, buf: *byte, path_len: int, args_len: int, num_handles: int)
         // Look up VFS port
-        var fs_name: [3]byte
-        fs_name[0] = 102  // f
-        fs_name[1] = 115  // s
-        fs_name[2] = 0
-        val fs_port = port_lookup(&fs_name[0])
+        val fs_port = port_lookup("fs")
         if fs_port < 0
             return
         // Build INHERIT message: [cmd(1), parent_pid(4), child_pid(4), num(1), pairs(N*2)]
@@ -334,11 +330,7 @@ Send handle inheritance request to VFS.
 Tell VFS to close all handles for a dead process.
 
     pm_vfs_close_handles(pid: int)
-        var fs_name: [3]byte
-        fs_name[0] = 102  // f
-        fs_name[1] = 115  // s
-        fs_name[2] = 0
-        val fs_port = port_lookup(&fs_name[0])
+        val fs_port = port_lookup("fs")
         if fs_port < 0
             return
         var msg: [5]byte
@@ -362,11 +354,7 @@ IPC messages (waitpid/kill from userspace) or notifications
         val port = port_create()
         if port < 0
             return
-        var name: [3]byte
-        name[0] = byte('p')
-        name[1] = byte('m')
-        name[2] = 0
-        port_register(port, &name[0])
+        port_register(port, "pm")
 
         // Signal RS that PM is ready
         rs_ready()
@@ -404,11 +392,7 @@ Client API — called by nsh and other programs to interact
 with PM via IPC.
 
     pm_waitpid(pid: int) -> int
-        var pm_name: [3]byte
-        pm_name[0] = byte('p')
-        pm_name[1] = byte('m')
-        pm_name[2] = 0
-        val port = port_lookup(&pm_name[0])
+        val port = port_lookup("pm")
         if port < 0
             return -1
         var msg: [5]byte
@@ -424,11 +408,7 @@ with PM via IPC.
         pm_spawn_handles(path, args, *byte(0), 0)
 
     pm_spawn_handles(path: string, args: string, handle_pairs: *byte, num_handles: int) -> int
-        var pm_name: [3]byte
-        pm_name[0] = byte('p')
-        pm_name[1] = byte('m')
-        pm_name[2] = 0
-        val port = port_lookup(&pm_name[0])
+        val port = port_lookup("pm")
         if port < 0
             return -1
         val plen = len(path)
@@ -459,11 +439,7 @@ with PM via IPC.
         pm_msg_read_i32(&reply[0], 1)
 
     pm_kill(pid: int) -> int
-        var pm_name: [3]byte
-        pm_name[0] = byte('p')
-        pm_name[1] = byte('m')
-        pm_name[2] = 0
-        val port = port_lookup(&pm_name[0])
+        val port = port_lookup("pm")
         if port < 0
             return -1
         var msg: [5]byte

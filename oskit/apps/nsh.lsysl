@@ -563,11 +563,7 @@ Set/clear foreground PID on PM for Ctrl-C signal delivery.
 
     nsh_set_fg(console: int, pid: int)
         if nsh_pm_port == -2
-            var n: [3]byte
-            n[0] = byte('p')
-            n[1] = byte('m')
-            n[2] = 0
-            nsh_pm_port = port_lookup(&n[0])
+            nsh_pm_port = port_lookup("pm")
         if nsh_pm_port < 0
             return
         var msg: [6]byte

@@ -106,14 +106,8 @@ creates port, then loops handling block I/O requests.
         // before calling this function.
 
         // Create and register port
-        var name: [5]byte
-        name[0] = 100  // d
-        name[1] = 105  // i
-        name[2] = 115  // s
-        name[3] = 107  // k
-        name[4] = 0
         disk_port = port_create()
-        port_register(disk_port, &name[0])
+        port_register(disk_port, "disk")
 
         // Signal RS that disk is ready
         rs_ready()
@@ -139,9 +133,7 @@ Userspace wrappers. Clients use these to talk to the disk server
 via IPC. Same API as the TRISC disk driver.
 
     disk_lookup_port() -> int
-        var n: [5]byte
-        n[0] = 100; n[1] = 105; n[2] = 115; n[3] = 107; n[4] = 0
-        port_lookup(&n[0])
+        port_lookup("disk")
 
     disk_read(lba: int, addr: *byte) -> int
         val port = disk_lookup_port()

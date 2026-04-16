@@ -415,20 +415,14 @@ Mount table. Each entry maps a path prefix to a backend port.
 VFS port and name.
 
     var vfs_port = -1
-    var vfs_srv_name: [3]byte
 
 TFS backend port (cached).
 
     var vfs_tfs_port = -1
-    var vfs_tfs_name: [4]byte
 
     vfs_lookup_tfs() -> int
         if vfs_tfs_port < 0
-            vfs_tfs_name[0] = 116  // t
-            vfs_tfs_name[1] = 102  // f
-            vfs_tfs_name[2] = 115  // s
-            vfs_tfs_name[3] = 0
-            vfs_tfs_port = port_lookup(&vfs_tfs_name[0])
+            vfs_tfs_port = port_lookup("tfs")
         vfs_tfs_port
 
 Mount a filesystem backend at a path prefix. Prefix strings
@@ -663,15 +657,10 @@ forwards read/write to the TTY server.
 TTY server port (cached, looked up lazily).
 
     var vfs_tty_port = -1
-    var vfs_tty_name: [4]byte
 
     vfs_lookup_tty() -> int
         if vfs_tty_port < 0
-            vfs_tty_name[0] = 116  // t
-            vfs_tty_name[1] = 116  // t
-            vfs_tty_name[2] = 121  // y
-            vfs_tty_name[3] = 0
-            vfs_tty_port = port_lookup(&vfs_tty_name[0])
+            vfs_tty_port = port_lookup("tty")
         vfs_tty_port
 
 Read from a TTY handle. Sends TTY_CMD_READ to the TTY server
@@ -1234,11 +1223,8 @@ the appropriate backend.
         vfs_pipe_init()
 
         // Register as "fs"
-        vfs_srv_name[0] = 102  // f
-        vfs_srv_name[1] = 115  // s
-        vfs_srv_name[2] = 0
         vfs_port = port_create()
-        port_register(vfs_port, &vfs_srv_name[0])
+        port_register(vfs_port, "fs")
 
         // Wait for TFS to register
         while vfs_lookup_tfs() < 0

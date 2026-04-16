@@ -46,7 +46,7 @@ the operation after all parameters are set.
     val RD_CMD_WRITE = 2
 
     var disk_port = -1
-    var disk_name: [5]byte
+    // disk_name removed — using string literal with port_register
 
 DMA bounce buffer. A page-aligned module-level buffer with
 its physical address cached at startup. DMA requires physical
@@ -157,15 +157,8 @@ then loops handling block I/O requests.
         disk_init_dma()
 
         // Set up name
-        disk_name[0] = 100  // d
-        disk_name[1] = 105  // i
-        disk_name[2] = 115  // s
-        disk_name[3] = 107  // k
-        disk_name[4] = 0
-
-        // Create and register port
         disk_port = port_create()
-        port_register(disk_port, &disk_name[0])
+        port_register(disk_port, "disk")
 
         // Signal RS that disk is ready
         rs_ready()
@@ -194,9 +187,7 @@ name buffer (not disk_name module var) so clients work even when
 the disk server runs in a separate address space.
 
     disk_lookup_port() -> int
-        var n: [5]byte
-        n[0] = 100; n[1] = 105; n[2] = 115; n[3] = 107; n[4] = 0
-        port_lookup(&n[0])
+        port_lookup("disk")
 
     disk_read(lba: int, addr: *byte) -> int
         val port = disk_lookup_port()

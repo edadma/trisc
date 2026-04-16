@@ -74,14 +74,14 @@ Copy bytes between memory addresses.
 
 Compare two null-terminated strings. Returns 0 if equal.
 
-    ipc_strcmp(a: *byte, b: *byte) -> int
+    ipc_strcmp(a: *byte, alen: int, b: *byte, blen: int) -> int
+        if alen != blen
+            return 1
         var i = 0
-        while a[i] != 0
+        while i < alen
             if a[i] != b[i]
                 return 1
             i += 1
-        if b[i] != 0
-            return 1
         0
 
 Per-port FIFO queue operations for blocked senders.
@@ -452,13 +452,14 @@ Only the port owner can close it.
         ipc_continue_current()
 
 Register a name for a port. The arg is a pointer to a packed
-argument block: [port, name_ptr]. Only the port owner can
-register a name. Returns 0 on success, -1 on error.
+argument block: [port, name_ptr, name_len]. Only the port owner
+can register a name. Returns 0 on success, -1 on error.
 
     ipc_port_register_handler(arg: int)
         var args: *i64 = *i64(i64(arg))
         val port = int(args[0])
-        val name_ptr = args[1]
+        val src: *byte = *byte(args[1])
+        val slen = int(args[2])
         val me = current_thread
 
         if port < 0
@@ -476,53 +477,40 @@ register a name. Returns 0 on success, -1 on error.
 
         // Clear any existing port with the same name (handles stale ports
         // from dead servers so the new registration wins in lookups)
-        var src: *byte = *byte(name_ptr)
         var ci = 0
         while ci < port_count
             if ci != port
                 if port_name_len[ci] > 0
-                    val cb = ci * 8
-                    var same = true
-                    var cj = 0
-                    while cj < 7
-                        val sc = src[cj]
-                        val pc = port_name_buf[cb + cj]
-                        if sc == 0
-                            if pc != 0
-                                same = false
-                            break
-                        if sc != pc
-                            same = false
-                            break
-                        cj += 1
-                    if same
+                    if ipc_strcmp(src, slen, &port_name_buf[ci * 8], port_name_len[ci]) == 0
                         port_name_len[ci] = 0
             ci += 1
 
         // Copy name bytes into kernel-owned buffer (safe across address spaces)
         val base = port * 8
-        var nlen = 0
-        while nlen < 7
-            if src[nlen] == 0
-                break
-            port_name_buf[base + nlen] = src[nlen]
-            nlen += 1
-        port_name_buf[base + nlen] = 0
+        var nlen = slen
+        if nlen > 7
+            nlen = 7
+        var ni = 0
+        while ni < nlen
+            port_name_buf[base + ni] = src[ni]
+            ni += 1
         port_name_len[port] = nlen
         syscall_return(0)
         ipc_continue_current()
 
-Look up a port by name. The arg is a pointer to a
-null-terminated name string. Returns port ID, or -1 if
-not found.
+Look up a port by name. The arg is a pointer to a packed
+argument block: [name_ptr, name_len]. Returns port ID, or
+-1 if not found.
 
     ipc_port_lookup_handler(arg: int)
-        var name: *byte = *byte(i64(arg))
+        var args: *i64 = *i64(i64(arg))
+        val name: *byte = *byte(args[0])
+        val nlen = int(args[1])
         var i = 0
         while i < port_count
             if port_owner[i] != IPC_PORT_FREE
                 if port_name_len[i] > 0
-                    if ipc_strcmp(name, &port_name_buf[i * 8]) == 0
+                    if ipc_strcmp(name, nlen, &port_name_buf[i * 8], port_name_len[i]) == 0
                         syscall_return(i)
                         ipc_continue_current()
                         return
@@ -657,14 +645,18 @@ Userspace wrappers. These pack arguments and invoke syscalls.
     port_close(port: int) -> int
         syscall(SYS_PORT_CLOSE, port)
 
-    port_register(port: int, name: *byte) -> int
-        var args: [2]i64
+    port_register(port: int, name: string) -> int
+        var args: [3]i64
         args[0] = port
-        args[1] = i64(name)
+        args[1] = i64(*byte(name))
+        args[2] = len(name)
         syscall(SYS_PORT_REGISTER, i64(&args[0]))
 
-    port_lookup(name: *byte) -> int
-        syscall(SYS_PORT_LOOKUP, i64(name))
+    port_lookup(name: string) -> int
+        var args: [2]i64
+        args[0] = i64(*byte(name))
+        args[1] = len(name)
+        syscall(SYS_PORT_LOOKUP, i64(&args[0]))
 
     ipc_send(port: int, msg: *byte, msg_len: int, reply: *byte, reply_len: int) -> int
         var args: [5]i64
