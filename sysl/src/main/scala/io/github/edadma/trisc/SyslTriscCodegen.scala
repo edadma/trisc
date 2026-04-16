@@ -1824,6 +1824,21 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitAddImm(7, 7, 16)
         stackOffset += 16
 
+      case TCast(inner, target) if inner.typ.isInstanceOf[SyslType.ArrayType] =>
+        // Array decay: genExpr returns address of array in r1, which is address of element 0
+        genExpr(inner)
+        // r1 already holds the address — for both ptr and int targets this is the right value
+        // Apply width truncation/extension if target is a sub-64-bit integer
+        import SyslType.*
+        target match
+          case IntType(8) => emit("  seb r1, r1")
+          case IntType(16) => emit("  ses r1, r1")
+          case IntType(32) => emit("  sew r1, r1")
+          case UIntType(8) => emit("  zeb r1, r1")
+          case UIntType(16) => emit("  zes r1, r1")
+          case UIntType(32) => emit("  zew r1, r1")
+          case _ => // i64, u64, *T — no-op, r1 is already the address
+
       case TCast(inner, target) =>
         genExpr(inner)
         import SyslType.*

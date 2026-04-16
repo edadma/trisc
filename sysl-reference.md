@@ -969,6 +969,12 @@ bool(ptr)         // pointer -> bool (null = false)
 // Function pointers
 i64(funcPtr)      // func -> int (address)
 bool(funcPtr)     // func -> bool (non-null = true)
+
+// Array decay (address of first element)
+*byte(arr)        // [N]T -> *byte
+*i64(arr)         // [N]T -> *i64
+i64(arr)          // [N]T -> i64 (address as integer)
+string(arr, len)  // [N]byte + len -> string
 ```
 
 ### sizeof

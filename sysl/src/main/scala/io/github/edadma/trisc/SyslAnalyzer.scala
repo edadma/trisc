@@ -2210,6 +2210,9 @@ class SyslAnalyzer:
           // func conversions
           case (_: FuncType, to) if to.isIntegral => // func to integer (address)
           case (_: FuncType, _: PtrType) => // func to pointer
+          // array decay conversions
+          case (ArrayType(_, _), _: PtrType) => // array decays to pointer (address of first element)
+          case (ArrayType(_, _), to) if to.isIntegral => // array to integer (address of first element as int)
           case (from, to) => throw AnalysisError(s"cannot cast $from to $to")
         TCast(tInner, target)
 
@@ -2227,8 +2230,8 @@ class SyslAnalyzer:
             // string(ptr, len) — construct string from *byte + length
             val tPtr = analyzeExpr(args(0))
             val tLen = analyzeExpr(args(1))
-            if !tPtr.typ.isInstanceOf[PtrType] then
-              throw AnalysisError(s"string() first argument must be a pointer, got ${tPtr.typ}")
+            if !tPtr.typ.isInstanceOf[PtrType] && !tPtr.typ.isInstanceOf[ArrayType] then
+              throw AnalysisError(s"string() first argument must be a pointer or array, got ${tPtr.typ}")
             if !tLen.typ.isIntegral then
               throw AnalysisError(s"string() second argument must be an integer, got ${tLen.typ}")
             TStringFromPtr(tPtr, tLen, StringType)

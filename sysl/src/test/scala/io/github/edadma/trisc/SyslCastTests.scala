@@ -146,4 +146,53 @@ class SyslCastTests extends SyslTestHelpers {
         |    count
         |""".stripMargin) shouldBe 1
   }
+
+  // ===== array decay in casts =====
+
+  "i64 cast of array decays to address" in {
+    // i64(arr) should get the address of the first element, not try to cast the array value
+    eval("""
+        |main() -> int
+        |    var arr: [4]i64
+        |    arr[0] = 42
+        |    var p: *i64 = *i64(i64(arr))
+        |    int(p[0])
+        |""".stripMargin) shouldBe 42
+  }
+
+  "*byte cast of array decays to pointer" in {
+    eval("""
+        |main() -> int
+        |    var arr: [4]byte
+        |    arr[0] = 65
+        |    arr[1] = 66
+        |    var p: *byte = *byte(arr)
+        |    int(p[0]) + int(p[1])
+        |""".stripMargin) shouldBe (65 + 66)
+  }
+
+  "*i64 cast of array decays to pointer" in {
+    eval("""
+        |main() -> int
+        |    var arr: [4]i64
+        |    arr[0] = 100
+        |    arr[1] = 200
+        |    var p: *i64 = *i64(arr)
+        |    int(p[0] + p[1])
+        |""".stripMargin) shouldBe 300
+  }
+
+  "string from array" in {
+    output("""
+        |main()
+        |    var buf: [5]byte
+        |    buf[0] = 72
+        |    buf[1] = 101
+        |    buf[2] = 108
+        |    buf[3] = 108
+        |    buf[4] = 111
+        |    val s = string(buf, 5)
+        |    puts(s)
+        |""".stripMargin) shouldBe "Hello"
+  }
 }

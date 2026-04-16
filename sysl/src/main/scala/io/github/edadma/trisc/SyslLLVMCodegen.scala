@@ -2498,6 +2498,18 @@ class SyslLLVMCodegen:
               val ptr = newReg()
               emit(s"  $ptr = load i8*, i8** $ptrGep")
               emit(s"  $result = bitcast i8* $ptr to $toLt")
+            case (SyslType.ArrayType(_, _), _: SyslType.PtrType) =>
+              // Array decay to pointer: GEP to element 0, then bitcast
+              val arrLt = llvmType(inner.typ)
+              val gep = newReg()
+              emit(s"  $gep = getelementptr $arrLt, $arrLt* $v, i32 0, i32 0")
+              emit(s"  $result = bitcast ${llvmType(inner.typ.asInstanceOf[SyslType.ArrayType].elem)}* $gep to $toLt")
+            case (SyslType.ArrayType(_, _), _) if targetType.isIntegral =>
+              // Array decay to integer: GEP to element 0, then ptrtoint
+              val arrLt = llvmType(inner.typ)
+              val gep = newReg()
+              emit(s"  $gep = getelementptr $arrLt, $arrLt* $v, i32 0, i32 0")
+              emit(s"  $result = ptrtoint ${llvmType(inner.typ.asInstanceOf[SyslType.ArrayType].elem)}* $gep to $toLt")
             case _ if isAggregate(inner.typ) =>
               // Aggregate types: genExpr returns a pointer, so bitcast the pointer
               emit(s"  $result = bitcast $fromLt* $v to $toLt")
@@ -2614,8 +2626,18 @@ class SyslLLVMCodegen:
         alloca
 
       case TStringFromPtr(ptrExpr, lenExpr, _) =>
-        val ptr = genExpr(ptrExpr)
+        val rawPtr = genExpr(ptrExpr)
         val len = genExpr(lenExpr)
+        // If ptrExpr is an array, decay to i8* via GEP + bitcast
+        val ptr = ptrExpr.typ match
+          case SyslType.ArrayType(elem, _) =>
+            val arrLt = llvmType(ptrExpr.typ)
+            val gep = newReg()
+            emit(s"  $gep = getelementptr $arrLt, $arrLt* $rawPtr, i32 0, i32 0")
+            val bc = newReg()
+            emit(s"  $bc = bitcast ${llvmType(elem)}* $gep to i8*")
+            bc
+          case _ => rawPtr
         val alloca = deferAlloca("%struct.string")
         val ptrGep = newReg()
         emit(s"  $ptrGep = getelementptr %struct.string, %struct.string* $alloca, i32 0, i32 0")
