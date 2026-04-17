@@ -35,6 +35,7 @@ class OSKitNshTests extends OSKitTestHelpers {
   private lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
   private lazy val archVmSysl: String = readLsysl("oskit/arch/trisc/vm.lsysl")
   private lazy val archCpuSysl: String = readLsysl("oskit/arch/trisc/cpu.lsysl")
+  private lazy val archProgConfigSysl: String = scala.io.Source.fromFile("oskit/arch/trisc/prog_config.sysl").mkString
   private lazy val configSysl: String = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
 
   // Shared OS source set — init reads /etc/ttytab to decide what to spawn.
@@ -55,6 +56,7 @@ class OSKitNshTests extends OSKitTestHelpers {
       "oskit/hal/mem"              -> halMemSysl,
       "oskit/arch/vm"              -> archVmSysl,
       "oskit/arch/cpu"             -> archCpuSysl,
+      "oskit/arch/prog_config"     -> archProgConfigSysl,
       "oskit/config/config"        -> configSysl,
       "app" ->
         """import oskit.kernel.*

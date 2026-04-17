@@ -48,6 +48,7 @@ object OskitDemoBuilder:
   private lazy val halMemSysl: String   = readLsysl("oskit/hal/mem_dma.lsysl")
   private lazy val archVmSysl: String   = readLsysl("oskit/arch/trisc/vm.lsysl")
   private lazy val archCpuSysl: String  = readLsysl("oskit/arch/trisc/cpu.lsysl")
+  private lazy val archProgConfigSysl: String = scala.io.Source.fromFile("oskit/arch/trisc/prog_config.sysl").mkString
   private lazy val configSysl: String   = scala.io.Source.fromFile("oskit/config/config.sysl").mkString
   private lazy val ipcClientSysl: String = scala.io.Source.fromFile("oskit/ipc/ipc_client.sysl").mkString
   private lazy val mouseSysl: String     = readLsysl("oskit/drivers/mouse/mouse.lsysl")
@@ -73,6 +74,7 @@ object OskitDemoBuilder:
         "oskit/hal/mem"               -> halMemSysl,
         "oskit/arch/vm"               -> archVmSysl,
         "oskit/arch/cpu"              -> archCpuSysl,
+        "oskit/arch/prog_config"      -> archProgConfigSysl,
         "oskit/config/config"         -> configSysl,
         "app" ->
           """import oskit.kernel.*
@@ -245,6 +247,7 @@ import oskit.hal.memset
         "oskit/hal/mem"              -> halMemSysl,
         "oskit/arch/vm"        -> archVmSysl,
         "oskit/arch/cpu"       -> archCpuSysl,
+        "oskit/arch/prog_config" -> archProgConfigSysl,
         "oskit/config/config"        -> configSysl,
       ),
     )
@@ -310,6 +313,7 @@ import oskit.hal.memset
       serverUnitPath       -> serverSource,
       "oskit/services/services" -> servicesSysl,
       "oskit/ipc/ipc"      -> ipcClientSysl,
+      "oskit/arch/prog_config" -> archProgConfigSysl,
       "posix/unistd/sbrk"  -> userSbrkSysl,
       "posix/stdlib/alloc"  -> posixAllocSysl,
       "posix/string/string" -> posixStringSysl,

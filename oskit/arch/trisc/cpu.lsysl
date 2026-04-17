@@ -16,6 +16,7 @@ in boot.asm as: USP, r6, r5, r4, r3, r2, r1, PC, PSR
 SSP points at PSR. r1 is at SSP + 6*8 = 48.
 
     val SYSCALL_RETURN_OFFSET = 48
+    val USE_KSTACK = 0               // TRISC uses hardware USP/SSP — no per-process kernel stacks
 
 Disable interrupts. Must be called before accessing
 shared kernel state (run queues, thread table, etc.).
@@ -50,6 +51,11 @@ PSR, PC, r1, r2, r3, r4, r5, r6, USP
 
     val STACK_FRAME_SIZE = 72        // 9 fields × 8 bytes (PSR, PC, r1-r6, USP)
 
+No TSS on TRISC — no-op for interface compatibility with x86.
+
+    tss_set_rsp0(rsp0: i64)
+        return
+
     extern thread_exit: byte
 
     build_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64
@@ -73,3 +79,9 @@ PSR, PC, r1, r2, r3, r4, r5, r6, USP
         sp -= 8
         *(*i64(sp)) = usp               // USP
         sp
+
+TRISC build_user_stack_frame — same as build_stack_frame.
+TRISC doesn't distinguish ring 0/3 in the context frame.
+
+    build_user_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64 =
+        build_stack_frame(entry_point, usp, ssp)

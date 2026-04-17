@@ -15,6 +15,7 @@ x86_64 layout: R15(0)..RBX(104)..RAX(112)..RIP(120)..
 
     val SYSCALL_RETURN_OFFSET = 112
     val STACK_FRAME_SIZE = 160       // 20 fields × 8 bytes (15 GP regs + 5 iretq)
+    val USE_KSTACK = 1               // ring 3: per-process kernel stacks via TSS.RSP0
 
 Disable interrupts (x86 cli instruction).
 
@@ -35,6 +36,11 @@ Spinlock release. Enables interrupts, then stores 0 to lock.
 
     arch_spinlock_release(lock: *i64)
         asm("sti\nmovq $$0, (%rdi)")
+
+Update TSS.RSP0 for the next ring 3 thread. Called by the
+scheduler on context switch. Provided by boot.s.
+
+    extern tss_set_rsp0(rsp0: i64)
 
 Build a fake interrupt frame on the supervisor stack so
 that restore_context in boot.s can pop it and iretq into
@@ -67,6 +73,34 @@ exit trampoline.
         sp -= 8
         *(*i64(sp)) = entry_point       // RIP
         // 15 GP registers (all zero)
+        var i = 0
+        while i < 15
+            sp -= 8
+            *(*i64(sp)) = i64(0)
+            i += 1
+        sp
+
+Build a ring 3 stack frame on the per-process kernel stack.
+Used by create_process_suspended for user processes. The frame
+is built directly on the kernel stack (identity-mapped), not
+in the child's address space. Does NOT write thread_exit to
+usp — the caller handles that via vm_copy_to.
+
+On iretq, the CPU detects CS RPL=3 and switches to ring 3,
+loading SS:RSP from the frame (user stack).
+
+    build_user_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64
+        var sp = ssp
+        sp -= 8
+        *(*i64(sp)) = i64(0x23)         // SS  (user data, RPL=3)
+        sp -= 8
+        *(*i64(sp)) = usp - 8           // RSP (user stack)
+        sp -= 8
+        *(*i64(sp)) = i64(0x202)        // RFLAGS (IF=1)
+        sp -= 8
+        *(*i64(sp)) = i64(0x1B)         // CS  (user code, RPL=3)
+        sp -= 8
+        *(*i64(sp)) = entry_point       // RIP
         var i = 0
         while i < 15
             sp -= 8

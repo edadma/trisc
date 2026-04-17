@@ -66,6 +66,12 @@ stack_top:
 .align 16
 idt:    .skip 4096
 
+# TSS: 64-bit Task State Segment (104 bytes)
+# RSP0 at offset 4 is loaded by CPU on ring 3 → ring 0 transitions.
+.align 16
+.global tss
+tss:    .skip 104
+
 # Multiboot module info (filled by boot code)
 .global mboot_mod_start
 .global mboot_mod_end
@@ -164,6 +170,34 @@ entry64:
     orq  $0x600, %rax         # CR4.OSFXSR + CR4.OSXMMEXCPT
     movq %rax, %cr4
 
+    # --- TSS setup ---
+    # Set RSP0 = stack_top (default kernel stack for ring 3 → ring 0 transitions)
+    movabs $tss, %rdi
+    movabs $stack_top, %rax
+    movq %rax, 4(%rdi)         # TSS.RSP0 at offset 4
+    # Set I/O Map Base = 104 (>= TSS limit → no IOPB → all ring 3 port I/O denied)
+    movw $104, 102(%rdi)
+
+    # Write TSS descriptor into GDT at offset 0x28
+    # TSS base address is in BSS (identity-mapped, < 4GB)
+    movabs $gdt64 + 0x28, %rdi
+    movabs $tss, %rbx
+    movw $0x67, (%rdi)         # limit[15:0] = 103
+    movw %bx, 2(%rdi)          # base[15:0]
+    movq %rbx, %rax
+    shrq $16, %rax
+    movb %al, 4(%rdi)          # base[23:16]
+    movb $0x89, 5(%rdi)        # access: present, DPL=0, 64-bit TSS available
+    movb $0x00, 6(%rdi)        # limit[19:16]=0, flags=0
+    shrq $8, %rax              # rax was (base>>16), now (base>>24)
+    movb %al, 7(%rdi)          # base[31:24]
+    movl $0, 8(%rdi)           # base[63:32] = 0
+    movl $0, 12(%rdi)          # reserved = 0
+
+    # Load task register
+    movw $0x28, %ax
+    ltr %ax
+
     # --- Parse multiboot module info ---
     # ESI (preserved from 32-bit) = multiboot info pointer
     # Multiboot info flags at offset 0: bit 3 = modules present
@@ -246,6 +280,17 @@ arch_cli:
 .global arch_sti
 arch_sti:
     sti
+    retq
+
+# ============================================================================
+# tss_set_rsp0 — Update TSS.RSP0 (kernel stack for ring 3 → ring 0)
+# ============================================================================
+# rdi = new RSP0 value (top of per-process kernel stack)
+
+.global tss_set_rsp0
+tss_set_rsp0:
+    movabs $tss, %rax
+    movq %rdi, 4(%rax)
     retq
 
 # ============================================================================
@@ -767,13 +812,18 @@ get_mboot_mod1_end:
 # ============================================================================
 # GDT
 # ============================================================================
+# Must be in .data (not .rodata) — TSS descriptor is filled at runtime.
 
-.section .rodata
+.section .data
 .align 16
 gdt64:
-    .quad 0x0000000000000000   # null
-    .quad 0x00AF9A000000FFFF   # 64-bit code: present, executable, readable
-    .quad 0x00AF92000000FFFF   # 64-bit data: present, writable
+    .quad 0x0000000000000000   # 0x00: null
+    .quad 0x00AF9A000000FFFF   # 0x08: kernel code (DPL=0)
+    .quad 0x00AF92000000FFFF   # 0x10: kernel data (DPL=0)
+    .quad 0x00AFFA000000FFFF   # 0x18: user code   (DPL=3)
+    .quad 0x00AFF2000000FFFF   # 0x20: user data   (DPL=3)
+    .quad 0                    # 0x28: TSS descriptor lo (filled at runtime)
+    .quad 0                    # 0x30: TSS descriptor hi (filled at runtime)
 gdt64_ptr:
     .word gdt64_ptr - gdt64 - 1
     .long gdt64

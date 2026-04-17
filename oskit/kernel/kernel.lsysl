@@ -96,6 +96,7 @@ Statistics fields track per-thread performance:
         blocked_on: i64
         ptbr: int
         pid: int
+        kstack_top: i64
 
 Run queues: one FIFO queue per priority level. Each queue
 has a head and tail index. Enqueue appends to tail, dequeue
@@ -1078,6 +1079,7 @@ would monotonically bump thread_count and walk off the end of threads[].
         threads[idx].blocked_on = 0
         threads[idx].ptbr = ptbr_val
         threads[idx].pid = 0
+        threads[idx].kstack_top = 0
         if current_thread >= 0
             threads[idx].uid = threads[current_thread].uid
         else
@@ -1244,20 +1246,30 @@ Unlike create_process, the thread is never enqueued — no race.
                 return -1
             idx = thread_count
             thread_count += 1
-        // Build stack frame in a local buffer and copy to child's address
-        // space. Direct physical addressing fails at page boundaries (SSP
-        // straddles non-contiguous physical pages).
-        var frame_buf: [160]byte
-        val frame_ssp = i64(frame_buf) + STACK_FRAME_SIZE
-        build_stack_frame(entry_point, usp, frame_ssp)
-        vm_copy_to(ptbr_val, int(ssp) - STACK_FRAME_SIZE, frame_buf, STACK_FRAME_SIZE)
-        // build_stack_frame writes thread_exit to usp-8 in the CURRENT
-        // address space. For child processes with separate page tables,
-        // we must also write it into the child's address space so that
-        // returning from main() lands in the exit trampoline.
+        if USE_KSTACK != 0
+            // x86 ring 3: allocate a dedicated kernel stack page. The CPU
+            // switches to this stack (via TSS.RSP0) on ring 3 → ring 0
+            // transitions. The initial context frame is built directly on
+            // the kernel stack with ring 3 CS/SS so iretq enters user mode.
+            val kstack_page = page_alloc_zero()
+            if kstack_page == 0
+                arch_sti()
+                return -1
+            val kstack_top_val = i64(kstack_page + PAGE_SIZE)
+            build_user_stack_frame(entry_point, usp, kstack_top_val)
+            threads[idx].ssp = kstack_top_val - STACK_FRAME_SIZE
+            threads[idx].kstack_top = kstack_top_val
+        else
+            // TRISC: build frame in buffer and copy to child's SSP
+            var frame_buf: [160]byte
+            val frame_ssp = i64(frame_buf) + STACK_FRAME_SIZE
+            build_stack_frame(entry_point, usp, frame_ssp)
+            vm_copy_to(ptbr_val, int(ssp) - STACK_FRAME_SIZE, frame_buf, STACK_FRAME_SIZE)
+            threads[idx].ssp = ssp - STACK_FRAME_SIZE
+            threads[idx].kstack_top = 0
+        // Write thread_exit return address into child's user stack
         var exit_addr: i64 = i64(&thread_exit)
         vm_copy_to(ptbr_val, int(usp) - 8, *byte(&exit_addr), 8)
-        threads[idx].ssp = ssp - STACK_FRAME_SIZE
         threads[idx].state = STATE_SUSPENDED
         threads[idx].wake_tick = 0
         val np2 = *byte(name)
@@ -1316,6 +1328,11 @@ Resume a suspended process (created with create_process_suspended).
 
     reap_process(pid: int)
         grant_revoke_all(pid)
+        // Free per-process kernel stack (allocated for ring 3 threads)
+        val rtid = processes[pid].main_tid
+        if threads[rtid].kstack_top != 0
+            page_free(int(threads[rtid].kstack_top) - PAGE_SIZE)
+            threads[rtid].kstack_top = 0
         vm_free_process_pt(processes[pid].ptbr)
         processes[pid].state = PROC_FREE
 
@@ -1462,6 +1479,10 @@ Steps:
             threads[next].ctx_switches += 1
             total_ctx_switches += 1
             vm_set_ptbr(threads[next].ptbr)
+            // Update TSS.RSP0 so next ring 3 → ring 0 transition uses
+            // this thread's kernel stack (no-op for kernel threads)
+            if threads[next].kstack_top != 0
+                tss_set_rsp0(threads[next].kstack_top)
             return threads[next].ssp
 
         // No ready threads — return 0 to signal idle
@@ -1485,6 +1506,8 @@ highest-priority non-empty queue.
                     threads[next].ctx_switches += 1
                     total_ctx_switches += 1
                     vm_set_ptbr(threads[next].ptbr)
+                    if threads[next].kstack_top != 0
+                        tss_set_rsp0(threads[next].kstack_top)
                     return threads[next].ssp
             pri += 1
         0
