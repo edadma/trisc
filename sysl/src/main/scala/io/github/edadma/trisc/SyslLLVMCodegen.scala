@@ -96,6 +96,18 @@ class SyslLLVMCodegen:
     // Collect all function names that will be defined in this compilation unit
     val definedFuncNames = program.decls.collect { case TFunDecl(name, _, _, _, _, _, _) => name }.toSet
 
+    // Pre-populate funcParamTypes for ALL functions before generating any code.
+    // Without this, calls to functions defined later in the file would not know
+    // the parameter types, causing aggregate arguments (arrays, structs) to be
+    // passed by value instead of by pointer — a silent ABI mismatch.
+    for decl <- program.decls do
+      decl match
+        case TExternFuncDecl(name, params, _) =>
+          funcParamTypes(name) = params.map(llvmType)
+        case f: TFunDecl =>
+          funcParamTypes(f.name) = f.params.map(p => llvmType(p.typ))
+        case _ =>
+
     // Generate functions into a buffer so string constants are collected first
     out.clear()
     for decl <- program.decls do
@@ -108,7 +120,6 @@ class SyslLLVMCodegen:
           if !preambleNames.contains(name) && !definedFuncNames.contains(name) then
             val paramStr = params.map(llvmType).mkString(", ")
             emit(s"declare ${llvmType(retType)} @$name($paramStr)")
-          funcParamTypes(name) = params.map(llvmType)
         case TExternVarDecl(name, typ) =>
           emit(s"@$name = external global ${llvmType(typ)}")
         case _: TStructDecl => // skip (handled above)
@@ -117,7 +128,6 @@ class SyslLLVMCodegen:
         case _: TTypeAliasDecl => // type only
         case _: TInterfaceDecl => // type only
         case f: TFunDecl =>
-          funcParamTypes(f.name) = f.params.map(p => llvmType(p.typ))
           if !emittedFunctions.contains(f.name) then
             emittedFunctions += f.name
             genFunction(f)

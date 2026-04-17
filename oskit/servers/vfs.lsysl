@@ -202,17 +202,10 @@ Request: [cmd(1)]. Response: [status(1), read_handle(4), write_handle(4)].
         val rh = vfs_handle_alloc(pid, read_oft)
         val wh = vfs_handle_alloc(pid, write_oft)
 
-        // Reply with hardcoded values to bypass vfs_msg_write_i32
         var reply: [9]byte
         reply[0] = 0
-        reply[1] = 0
-        reply[2] = 0
-        reply[3] = 0
-        reply[4] = byte(rh)
-        reply[5] = 0
-        reply[6] = 0
-        reply[7] = 0
-        reply[8] = byte(wh)
+        vfs_msg_write_i32(reply, 1, rh)
+        vfs_msg_write_i32(reply, 5, wh)
         ipc_reply(sender, reply, 9)
 
 Read from a pipe. Blocks if empty and write end open.
