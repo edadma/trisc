@@ -264,6 +264,12 @@ TRISC r1 = 48, x86_64 RAX = 112.
         var p: *i64 = *i64(syscall_ssp + SYSCALL_RETURN_OFFSET)
         *p = value
 
+Called by boot.asm when a syscall is denied by privilege check.
+Written as a helper so the assembly doesn't need to call vm_v2p.
+
+    syscall_return_denied()
+        syscall_return(-1)
+
 Write a return value into a specific thread's saved context.
 Used by the scheduler for generic timeout wakeups.
 
@@ -1246,27 +1252,16 @@ Unlike create_process, the thread is never enqueued — no race.
                 return -1
             idx = thread_count
             thread_count += 1
-        if USE_KSTACK != 0
-            // x86 ring 3: allocate a dedicated kernel stack page. The CPU
-            // switches to this stack (via TSS.RSP0) on ring 3 → ring 0
-            // transitions. The initial context frame is built directly on
-            // the kernel stack with ring 3 CS/SS so iretq enters user mode.
-            val kstack_page = page_alloc_zero()
-            if kstack_page == 0
-                arch_sti()
-                return -1
-            val kstack_top_val = i64(kstack_page + PAGE_SIZE)
-            build_user_stack_frame(entry_point, usp, kstack_top_val)
-            threads[idx].ssp = kstack_top_val - STACK_FRAME_SIZE
-            threads[idx].kstack_top = kstack_top_val
-        else
-            // TRISC: build frame in buffer and copy to child's SSP
-            var frame_buf: [160]byte
-            val frame_ssp = i64(frame_buf) + STACK_FRAME_SIZE
-            build_stack_frame(entry_point, usp, frame_ssp)
-            vm_copy_to(ptbr_val, int(ssp) - STACK_FRAME_SIZE, frame_buf, STACK_FRAME_SIZE)
-            threads[idx].ssp = ssp - STACK_FRAME_SIZE
-            threads[idx].kstack_top = 0
+        // Allocate per-process kernel stack page
+        val kstack_page = page_alloc_zero()
+        if kstack_page == 0
+            arch_sti()
+            return -1
+        val kstack_top_val = i64(kstack_page + PAGE_SIZE)
+        threads[idx].kstack_top = kstack_top_val
+        // Build context frame (arch-specific: x86 builds on kernel stack,
+        // TRISC builds in buffer and copies to child's SSP)
+        threads[idx].ssp = arch_setup_process_frame(entry_point, usp, ssp, kstack_top_val, ptbr_val)
         // Write thread_exit return address into child's user stack
         var exit_addr: i64 = i64(&thread_exit)
         vm_copy_to(ptbr_val, int(usp) - 8, *byte(&exit_addr), 8)
@@ -1479,10 +1474,7 @@ Steps:
             threads[next].ctx_switches += 1
             total_ctx_switches += 1
             vm_set_ptbr(threads[next].ptbr)
-            // Update TSS.RSP0 so next ring 3 → ring 0 transition uses
-            // this thread's kernel stack (no-op for kernel threads)
-            if threads[next].kstack_top != 0
-                tss_set_rsp0(threads[next].kstack_top)
+            tss_set_rsp0(threads[next].kstack_top)
             return threads[next].ssp
 
         // No ready threads — return 0 to signal idle
@@ -1506,8 +1498,7 @@ highest-priority non-empty queue.
                     threads[next].ctx_switches += 1
                     total_ctx_switches += 1
                     vm_set_ptbr(threads[next].ptbr)
-                    if threads[next].kstack_top != 0
-                        tss_set_rsp0(threads[next].kstack_top)
+                    tss_set_rsp0(threads[next].kstack_top)
                     return threads[next].ssp
             pri += 1
         0

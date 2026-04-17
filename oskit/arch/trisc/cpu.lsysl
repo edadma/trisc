@@ -8,15 +8,13 @@ enable/disable and thread stack frame construction.
 Offset from saved SSP to the return-value register (r1)
 in the context frame. Used by syscall_return to write the
 result where restore_thread will pop it into r1.
-TRISC layout: PSR(0), PC(8), r1(16), ... so offset=16.
 
-Wait, let me verify. The TRISC context frame is saved
-in boot.asm as: USP, r6, r5, r4, r3, r2, r1, PC, PSR
-(pushed in that order, so PSR is at top/lowest address).
-SSP points at PSR. r1 is at SSP + 6*8 = 48.
+The TRISC context frame is saved in boot.asm as:
+USP, r6, r5, r4, r3, r2, r1, PC, PSR
+(pushed in that order, so PSR is at lowest address).
+SSP points at USP (bottom). r1 is at SSP + 6*8 = 48.
 
     val SYSCALL_RETURN_OFFSET = 48
-    val USE_KSTACK = 0               // TRISC uses hardware USP/SSP — no per-process kernel stacks
 
 Disable interrupts. Must be called before accessing
 shared kernel state (run queues, thread table, etc.).
@@ -51,10 +49,14 @@ PSR, PC, r1, r2, r3, r4, r5, r6, USP
 
     val STACK_FRAME_SIZE = 72        // 9 fields × 8 bytes (PSR, PC, r1-r6, USP)
 
-No TSS on TRISC — no-op for interface compatibility with x86.
+Per-process kernel stack top. Updated by tss_set_rsp0 on
+context switch. The trap handler reads this to switch to the
+kernel stack before calling slow-path syscall handlers.
+
+    var current_kstack_top: i64 = 0
 
     tss_set_rsp0(rsp0: i64)
-        return
+        current_kstack_top = rsp0
 
     extern thread_exit: byte
 
@@ -85,3 +87,15 @@ TRISC doesn't distinguish ring 0/3 in the context frame.
 
     build_user_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64 =
         build_stack_frame(entry_point, usp, ssp)
+
+Set up the initial context frame for a new process. On TRISC,
+the context frame lives on the process's SSP (because the hardware
+pushes PC+PSR there on trap). Build in a temp buffer and copy
+to the child's address space. Returns the SSP value for the thread.
+
+    arch_setup_process_frame(entry_point: i64, usp: i64, ssp: i64, kstack_top_val: i64, ptbr_val: int) -> i64
+        var frame_buf: [72]byte
+        val frame_ssp = i64(&frame_buf[0]) + STACK_FRAME_SIZE
+        build_stack_frame(entry_point, usp, frame_ssp)
+        vm_copy_to(ptbr_val, int(ssp) - STACK_FRAME_SIZE, &frame_buf[0], STACK_FRAME_SIZE)
+        ssp - STACK_FRAME_SIZE
