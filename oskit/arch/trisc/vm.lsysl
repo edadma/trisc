@@ -168,7 +168,7 @@ Returns L1 base address, or 0 on failure.
             i += 1
 
         // L2[0xCC-0xFF]: program region, fresh physical pages
-        // Matches PROG_SSP=0xCC000, PROG_USP=0xCE000, PROG_BASE=0xD0000
+        // Matches PROG_SSP=0xCF000, PROG_USP=0xD0000, code loads at 0xD0000
         while i < 0x100
             val page = page_alloc()
             if page == 0

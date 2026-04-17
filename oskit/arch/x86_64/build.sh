@@ -31,6 +31,7 @@ done
 SYSL_FILES=(
     oskit/kernel/kernel.lsysl
     oskit/arch/x86_64/cpu.lsysl
+    oskit/arch/x86_64/prog_config.sysl
     oskit/arch/x86_64/vm.lsysl
     oskit/arch/x86_64/runtime.lsysl
     oskit/config/config.sysl

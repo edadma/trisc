@@ -32,6 +32,7 @@ starts the next server.
     import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_phys_read, svc_port_transfer, svc_proc_main_tid, svc_set_priv, svc_set_ipc_mask}
     import oskit.ipc.{ipc_recv_notify, port_create, port_lookup}
     import oskit.hal.memset
+    import oskit.arch.{SRV_USP, SRV_SSP}
 
 Server tracking. PIDs and MMIO page grants for each server
 in boot order (0=disk, 1=tfs, 2=tty, 3=pm, 4=vfs, 5=init).
@@ -296,8 +297,7 @@ svc_phys_read), copies PROGBITS segments into the target
 process via vm_copy_to, and zeroes NOBITS (BSS) segments.
 Returns entry point or -1 on error.
 
-    val RS_PROG_USP = 0xD0000
-    val RS_PROG_SSP = 0xCF000
+    // Program USP/SSP imported from oskit.arch (target-specific)
 
     rs_load_trb_module(buf: *byte, buflen: int, ptbr: int) -> i64
         if buflen < 12
@@ -432,7 +432,7 @@ Returns the PID on success, 0 on failure.
         // Create process suspended — no PTBR switch needed;
         // create_process_suspended uses vm_copy_to for the stack frame
         val sname = string(name, nlen)
-        val pid = svc_create_proc_susp(entry, RS_PROG_USP, RS_PROG_SSP, sname, ptbr)
+        val pid = svc_create_proc_susp(entry, SRV_USP, SRV_SSP, sname, ptbr)
         if pid < 0
             return 0
 

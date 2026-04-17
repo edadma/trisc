@@ -1,0 +1,10 @@
+// Address layout for TRISC user programs and servers.
+// Both use the same addresses. TRISC has separate user/supervisor
+// stacks via hardware ring support.
+
+module oskit.arch
+
+val PROG_USP = 0xD0000
+val PROG_SSP = 0xCF000
+val SRV_USP  = 0xD0000
+val SRV_SSP  = 0xCF000

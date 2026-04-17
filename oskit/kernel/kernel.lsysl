@@ -1246,7 +1246,7 @@ Unlike create_process, the thread is never enqueued — no race.
             thread_count += 1
         // Build stack frame in a local buffer and copy to child's address
         // space. Direct physical addressing fails at page boundaries (SSP
-        // = 0xCF000 straddles pages 0xCE/0xCF which aren't contiguous).
+        // straddles non-contiguous physical pages).
         var frame_buf: [160]byte
         val frame_ssp = i64(frame_buf) + STACK_FRAME_SIZE
         build_stack_frame(entry_point, usp, frame_ssp)

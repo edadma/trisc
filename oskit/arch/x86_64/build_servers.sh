@@ -26,6 +26,7 @@ mkdir -p "$SRV_OUT"
 COMMON_SRCS=(
     oskit/ipc/ipc_client.sysl
     oskit/services/services.lsysl
+    oskit/arch/x86_64/prog_config.sysl
     std/alloc/alloc.lsysl
 )
 
@@ -84,7 +85,7 @@ WRAPPER_EOF
         -fno-pic -fno-pie -c -o "$OUT/prog_stubs.o" "$ARCH_DIR/prog_stubs.c"
 
     # Link → ELF
-    x86_64-elf-ld -T "$ARCH_DIR/prog.ld" \
+    x86_64-elf-ld -T "$ARCH_DIR/server.ld" \
         -o "$SRV_OUT/${NAME}" \
         "$OUT/prog_start.o" "$OUT/prog_stubs.o" "$OUT/srv_${NAME}.o" 2>&1 \
         | grep -v "missing .note.GNU-stack" | grep -v "deprecated" | grep -v "RWX permissions" || true
