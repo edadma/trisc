@@ -36,7 +36,7 @@ build_one() {
 
     # Per-program extra dependencies
     case "$NAME" in
-        login)
+        login|su)
             SYSL_FILES+=(
                 std/crypto/pbkdf2/pbkdf2.lsysl
                 std/crypto/hmac/hmac.lsysl
