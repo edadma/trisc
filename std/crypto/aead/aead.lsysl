@@ -199,7 +199,7 @@ The key is 32 bytes, nonce is 12 bytes.
         while pos < n
             // Generate 64 bytes of keystream
             var block: [64]byte
-            chacha20_block(&key_words[0], ctr, &nonce_words[0], &block[0])
+            chacha20_block(key_words, ctr, nonce_words, block)
 
             // XOR with input
             val remaining = n - pos
@@ -230,7 +230,7 @@ authenticates. `ct` must be the same length as `pt`.
         for i in 0..<3
             nonce_words[i] = u32_le_at(nonce, i * 4)
         var block0: [64]byte
-        chacha20_block(&key_words[0], 0u32, &nonce_words[0], &block0[0])
+        chacha20_block(key_words, 0u32, nonce_words, block0)
         for i in 0..<32
             poly_key[i] = block0[i]
 
@@ -287,7 +287,7 @@ Returns `true` if the tag is valid, `false` otherwise.
         for i in 0..<3
             nonce_words[i] = u32_le_at(nonce, i * 4)
         var block0: [64]byte
-        chacha20_block(&key_words[0], 0u32, &nonce_words[0], &block0[0])
+        chacha20_block(key_words, 0u32, nonce_words, block0)
         for i in 0..<32
             poly_key[i] = block0[i]
 
