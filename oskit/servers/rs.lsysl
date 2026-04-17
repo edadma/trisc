@@ -239,14 +239,13 @@ from its info page at 0xBF000+24.
 Check if boot info header is valid (magic = "SLIX").
 
     rs_boot_info_valid() -> bool
-        val p = rs_boot_info
-        if p[0] != byte('S')
+        if rs_boot_info[0] != byte('S')
             return false
-        if p[1] != byte('L')
+        if rs_boot_info[1] != byte('L')
             return false
-        if p[2] != byte('I')
+        if rs_boot_info[2] != byte('I')
             return false
-        if p[3] != byte('X')
+        if rs_boot_info[3] != byte('X')
             return false
         true
 
@@ -409,8 +408,8 @@ Returns the PID on success, 0 on failure.
         // Copy boot module data from physical memory into our buffer
         if sz > 131072
             return 0
-        svc_phys_read(int(addr), rs_mod_buf, sz)
-        val buf = rs_mod_buf
+        svc_phys_read(int(addr), &rs_mod_buf[0], sz)
+        val buf = &rs_mod_buf[0]
 
         // Create server page table with MMIO grant
         val ptbr = svc_vm_create_server_pt(io_page)
