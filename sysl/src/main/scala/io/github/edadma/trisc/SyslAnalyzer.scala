@@ -781,15 +781,15 @@ class SyslAnalyzer:
     case NamedTypeAST(name, _) if typeEnv.contains(name) => typeEnv(name)
     case NamedTypeAST(name, _) => name match
       case "int" | "i32" => I32
+      case "uint" | "u32" => U32
+      case "long" | "i64" => I64
+      case "ulong" | "u64" => U64
       case "char" => U32
-      case "i64" => I64
       case "double" | "f64" => DoubleType
       case "byte" | "u8"  => U8
       case "i8"  => I8
       case "i16"  => I16
       case "u16"  => U16
-      case "u32"  => U32
-      case "u64"  => U64
       case "bool" => BoolType
       case "void" => VoidType
       case "string" => StringType
@@ -1623,7 +1623,12 @@ class SyslAnalyzer:
 
   private def analyzeExpr(expr: ExpressionAST): TExpr =
     expr match
-      case IntLitAST(n) => TIntLit(n, I32)
+      case IntLitAST(n) =>
+        // Promote to i64 if value doesn't fit in any 32-bit type.
+        // Values up to 0xFFFFFFFF fit in u32, and negative values down to
+        // -0x80000000 fit in i32, so only values outside that range need i64.
+        if n > 0xFFFFFFFFL || n < -0x80000000L then TIntLit(n, I64)
+        else TIntLit(n, I32)
       case TypedIntLitAST(n, typeName) => TIntLit(n, resolveType(NamedTypeAST(typeName)))
       case FloatLitAST(d) => TFloatLit(d, DoubleType)
       case CharLitAST(c) => TIntLit(c.toLong, U32)

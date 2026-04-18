@@ -223,6 +223,9 @@ object SyslType:
       case "f64" | "double" => DoubleType
       // Legacy prefix names for backward compatibility
       case "int"  => I32
+      case "uint" => U32
+      case "long" => I64
+      case "ulong" => U64
       case "char" => U32
       case "byte" => U8
       case "string" => StringType
