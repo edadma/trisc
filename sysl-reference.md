@@ -56,11 +56,11 @@ Source code always uses the short name — the compiler resolves it to the mangl
 | `i8` | | 1 byte | signed 8-bit integer |
 | `i16` | | 2 bytes | signed 16-bit integer |
 | `i32` | `int` | 4 bytes | signed 32-bit integer |
-| `i64` | | 8 bytes | signed 64-bit integer |
+| `i64` | `long` | 8 bytes | signed 64-bit integer |
 | `u8` | `byte` | 1 byte | unsigned 8-bit integer |
 | `u16` | | 2 bytes | unsigned 16-bit integer |
-| `u32` | `char` | 4 bytes | unsigned 32-bit integer (Unicode codepoint) |
-| `u64` | | 8 bytes | unsigned 64-bit integer |
+| `u32` | `char`, `uint` | 4 bytes | unsigned 32-bit integer (Unicode codepoint) |
+| `u64` | `ulong` | 8 bytes | unsigned 64-bit integer |
 | `f64` | `double` | 8 bytes | 64-bit floating point |
 | `bool` | | 1 byte | `true` or `false` |
 | `unit` | | 0 bytes | no value |

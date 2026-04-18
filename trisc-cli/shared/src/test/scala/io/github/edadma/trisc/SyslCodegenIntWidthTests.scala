@@ -216,4 +216,46 @@ class SyslCodegenIntWidthTests extends SyslCodegenHelpers {
         |    arr[1]
         |""".stripMargin) shouldBe 142
   }
+
+  // ===== long / ulong / uint aliases =====
+
+  "long variable" in {
+    compileAndRun("main() -> int\n    var x: long = 100000\n    x\n") shouldBe 100000
+  }
+
+  "long is alias for i64" in {
+    compileAndRun("main() -> int\n    var x: long = 42\n    var y: i64 = x\n    y\n") shouldBe 42
+  }
+
+  "ulong variable" in {
+    compileAndRun("main() -> int\n    var x: ulong = 100000\n    x\n") shouldBe 100000
+  }
+
+  "ulong is alias for u64" in {
+    compileAndRun("main() -> int\n    var x: ulong = 42\n    var y: u64 = x\n    y\n") shouldBe 42
+  }
+
+  "uint variable" in {
+    compileAndRun("main() -> int\n    var x: uint = 42\n    var y: u32 = x\n    y\n") shouldBe 42
+  }
+
+  "uint is alias for u32" in {
+    compileAndRun("main() -> int\n    var x: u32 = 99\n    var y: uint = x\n    y\n") shouldBe 99
+  }
+
+  "long parameter" in {
+    compileAndRun("id(x: long) -> long = x\nmain() -> int = id(42)\n") shouldBe 42
+  }
+
+  "uint parameter" in {
+    compileAndRun("id(x: uint) -> int = x\nmain() -> int = id(42)\n") shouldBe 42
+  }
+
+  "sizeof(long)" in { compileAndRun("main() -> int = sizeof(long)\n") shouldBe 8 }
+  "sizeof(ulong)" in { compileAndRun("main() -> int = sizeof(ulong)\n") shouldBe 8 }
+  "sizeof(uint)" in { compileAndRun("main() -> int = sizeof(uint)\n") shouldBe 4 }
+
+  "long cast" in { compileAndRun("main() -> int = long(42)\n") shouldBe 42 }
+  "ulong cast" in { compileAndRun("main() -> int = ulong(42)\n") shouldBe 42 }
+  "uint cast" in { compileAndRun("main() -> int = uint(42)\n") shouldBe 42 }
 }
