@@ -156,7 +156,6 @@ then loops handling block I/O requests.
         // Initialize DMA bounce buffer (translate virtual→physical)
         disk_init_dma()
 
-        // Set up name
         disk_port = port_create()
         port_register(disk_port, "disk")
 

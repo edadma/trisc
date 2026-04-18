@@ -84,8 +84,23 @@ Disk extra bits: vm_v2p(66) for DMA
 Per-server privilege assignment. Called after each server is
 created but before it is resumed.
 
+Build PRIV_COMMON_LO from small constants to work around
+TRISC codegen bug with large 64-bit literals in standalone
+binaries (ldc constant pool generates wrong values).
+
+    rs_build_common_lo() -> i64
+        // Bits 0-6: sleep(0), putc(1), yield(2), exit(3), join(4), thread_id(5), uptime(6)
+        var lo: i64 = i64(0x7F)
+        // Bits 21-23: tls_set(21), tls_get(22), notify_send(23)
+        lo = lo | (i64(7) << 21)
+        // Bits 24-43: notify_wait(24)..thread_name_len(43) = 20 bits
+        lo = lo | (i64(0xFFFFF) << 24)
+        // Bit 61: getuid
+        lo = lo | (i64(1) << 61)
+        lo
+
     rs_set_server_priv(pid: int, idx: int)
-        var lo: i64 = i64(0x20000FFFFFE0007F)  // PRIV_COMMON_LO
+        var lo: i64 = rs_build_common_lo()
         var hi: i64 = i64(0x182)                // PRIV_COMMON_HI
         // IPC mask set to 0xFF during boot (all allowed).
         // Tightened after all servers are up via rs_set_ipc_masks().
@@ -102,7 +117,7 @@ created but before it is resumed.
             hi = hi | i64(1)
         else if idx == 3
             // pm: needs process management syscalls (44-60, 62)
-            lo = lo | i64(0x5FFFF00000000000)
+            lo = lo | (i64(0x5FFFF) << 44)
         else if idx == 4
             // vfs: needs grant_copy(73), grant_map(74), grant_unmap(75)
             hi = hi | i64(0xE00)
