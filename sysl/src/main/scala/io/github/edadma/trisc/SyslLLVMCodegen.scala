@@ -3,7 +3,7 @@ package io.github.edadma.trisc
 import scala.collection.mutable
 import scala.compiletime.uninitialized
 
-class SyslLLVMCodegen:
+class SyslLLVMCodegen(target: String = "x86_64"):
   private val out = new StringBuilder
   private var activeOut: StringBuilder = out // emit writes here; switches between out and bodyBuf
   private val bodyBuf = new StringBuilder // body code buffer during function generation
@@ -151,6 +151,20 @@ class SyslLLVMCodegen:
 
     // Now build final output with string constants at the top
     out.clear()
+
+    // Target datalayout and triple — required for LLVM to compute correct struct layout
+    target match
+      case "x86_64" =>
+        emit("""target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"""")
+        emit("""target triple = "x86_64-apple-macosx"""")
+      case "x86_64-linux" =>
+        emit("""target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"""")
+        emit("""target triple = "x86_64-unknown-linux-gnu"""")
+      case "x86_64-elf" =>
+        emit("""target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"""")
+        emit("""target triple = "x86_64-unknown-elf"""")
+      case _ => // no target declarations for unknown targets
+    emit("")
 
     // Declare external C functions (skip any that are defined by Sysl code)
     val definePattern = """(?m)^define [^@]*@(\w+)\(""".r
