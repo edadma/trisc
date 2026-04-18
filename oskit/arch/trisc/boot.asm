@@ -361,7 +361,7 @@ trap_handler
 .denied_syscall
   ; Permission denied — return -1 to caller via saved r1
   addi r5, r7, 48              ; offset to saved r1 on stack
-  ldi r1, -1
+  addi r1, r0, -1              ; r1 = -1 (addi sign-extends; ldi does not)
   std r1, r5, r0               ; write -1 to saved r1
   mov  r1, r7                  ; r1 = process SSP
   bra do_schedule
