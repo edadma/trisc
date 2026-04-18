@@ -93,8 +93,12 @@ binaries (ldc constant pool generates wrong values).
         var lo: i64 = i64(0x7F)
         // Bits 21-23: tls_set(21), tls_get(22), notify_send(23)
         lo = lo | (i64(7) << 21)
-        // Bits 24-43: notify_wait(24)..thread_name_len(43) = 20 bits
-        lo = lo | (i64(0xFFFFF) << 24)
+        // Bits 24-55: notify_wait(24)..vm_copy_from(55) = 32 bits
+        // Includes IPC (31-39), process queries (40-43),
+        // VM/process management (44-55): vm_create_pt, create/resume/reap/kill proc,
+        // register_pm, set/get thread ptbr, vm_set_ptbr, get_thread_pid,
+        // vm_copy_to, vm_copy_from
+        lo = lo | (i64(0xFFFFFFFF) << 24)
         // Bit 61: getuid
         lo = lo | (i64(1) << 61)
         lo
