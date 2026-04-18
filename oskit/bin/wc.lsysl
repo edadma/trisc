@@ -18,31 +18,31 @@ Outputs: `  lines  words  bytes`
 Print a right-justified integer in a field of width 6.
 
     wc_print_num(n: int)
-        var buf: [12]byte
+        var digits: [12]byte
         var pos = 0
         var v = n
         if v == 0
-            buf[0] = 48  // '0'
+            digits[0] = 48
             pos = 1
         else
             while v > 0
-                buf[pos] = byte(48 + v % 10)
+                digits[pos] = byte(48 + v % 10)
                 pos += 1
                 v /= 10
-        // Right-justify in 6 chars
+        // Build output: right-justified in 6 chars
+        var out: [6]byte
         var pad = 6 - pos
-        var spaces: [6]byte
         var i = 0
         while i < pad
-            spaces[i] = 32  // space
+            out[i] = 32
             i += 1
-        if pad > 0
-            write_handle(STDOUT, spaces, pad)
-        // Print digits in reverse
-        i = pos - 1
-        while i >= 0
-            write_handle(STDOUT, &buf[i], 1)
-            i -= 1
+        // Digits in reverse
+        var j = pos - 1
+        while j >= 0
+            out[i] = digits[j]
+            i += 1
+            j -= 1
+        puts(string(out, 6))
 
     main()
         val args = get_args()

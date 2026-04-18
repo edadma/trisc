@@ -187,6 +187,26 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("third")
   }
 
+  "x86 wc: count from file" in {
+    qemu.command("echo hello > /tmp/wcf", rootPrompt)
+    val output = qemu.command("wc /tmp/wcf")
+    output should include("1")
+  }
+
+  // TODO: wc hangs after pipe read — nsh never resumes from pm_waitpid.
+  // wc produces correct output (all 3 numbers) but exit doesn't complete.
+  // File mode works (wc /tmp/file), pipe mode doesn't (echo x | wc).
+  // Pre-existing bug, not related to codegen.
+  "x86 wc: echo piped to wc" ignore {
+    val output = qemu.command("echo asdf | wc")
+    output should include("1")
+  }
+
+  "x86 pipe: echo piped to tail" in {
+    val output = qemu.command("echo asdf | tail -1")
+    output should include("asdf")
+  }
+
   "x86 signal: ctrl-c kills foreground process" ignore {
     // TODO: Control characters (0x03, 0x1C) don't pass through QEMU serial pipe.
     // Test via TRISC emulator headless test or GUI emulator manually.
