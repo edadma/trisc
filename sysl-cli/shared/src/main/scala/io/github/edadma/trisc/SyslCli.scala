@@ -279,12 +279,13 @@ object SyslCli:
       case _ => System.err.println(s"Unknown emit format: ${cmd.emit}")
 
   private def executeRun(cmd: RunCommand): Unit =
-    val sources = resolveSources(cmd.inputs)
+    val initialSources = resolveSources(cmd.inputs)
     val argv = cmd.programArgs.toArray
 
     val baseDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList match
       case Nil => List(".")
       case dirs => dirs
+    val sources = resolveTransitiveSources(initialSources, baseDirs)
     val driver = new SyslDriver(Some(io), baseDirs, tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
     val result = driver.compile(sources)
     val stdlibImports = driver.collectStdlibImports(result.units)
@@ -373,7 +374,7 @@ object SyslCli:
     // e.g. std/regex/regex.lsysl → key "std/regex/regex" → module "std.regex"
     // This works regardless of input depth (std/, std/regex/, std/regex/regex.lsysl).
     val baseDirs = List(".")
-    val sources: Map[String, String] =
+    val initialSources: Map[String, String] =
       cmd.inputs.flatMap { p =>
         if !io.exists(p) then fail(s"error: file not found: $p")
         if io.isDirectory(p) then
@@ -381,6 +382,7 @@ object SyslCli:
         else
           List(resolveSource(p, ""))
       }.toMap
+    val sources = resolveTransitiveSources(initialSources, baseDirs)
     val driver = new SyslDriver(Some(io), baseDirs, tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
     val result = driver.compile(sources, keepTests = true)
     val stdlibImports = driver.collectStdlibImports(result.units)
@@ -550,6 +552,57 @@ object SyslCli:
           fail(s"error: file not found: $path")
         resolveSource(path, "")
       }.toMap
+
+  /** Expand a source map by resolving transitive in-tree imports from the file system.
+    * Parses each source to extract imports, looks for matching .sysl/.lsysl files on disk,
+    * and repeats until no new sources are discovered. Skips JVM builtin modules.
+    */
+  private def resolveTransitiveSources(initial: Map[String, String], baseDirs: List[String]): Map[String, String] =
+    val sources = scala.collection.mutable.LinkedHashMap[String, String]() ++= initial
+    val processed = scala.collection.mutable.Set[String]()
+    val parser = new SyslParser
+    val dirs = if baseDirs.isEmpty then List(".") else baseDirs
+
+    // Extract import module paths from a source string
+    def extractImportPaths(source: String): Seq[String] =
+      parser.parseProgram(source) match
+        case Right(ast) => ast.decls.collect { case imp: ImportDeclAST => imp.modulePath }
+        case Left(_) => Seq.empty
+
+    // Try to resolve a module path to source files on disk
+    def resolveModuleSources(modPath: String): Seq[(String, String)] =
+      dirs.iterator.flatMap { base =>
+        val basePrefix = if base == "." then "./" else if base.endsWith("/") then base else base + "/"
+        val dirPath = io.joinPath(base, modPath)
+        val syslPath = s"${io.joinPath(base, modPath)}.sysl"
+        val lsyslPath = s"${io.joinPath(base, modPath)}.lsysl"
+
+        if io.exists(syslPath) then
+          Seq(resolveSource(syslPath, basePrefix))
+        else if io.exists(lsyslPath) then
+          Seq(resolveSource(lsyslPath, basePrefix))
+        else if io.exists(dirPath) && io.isDirectory(dirPath) then
+          collectSyslFiles(dirPath).map(f => resolveSource(f, basePrefix))
+        else
+          Seq.empty
+      }.toSeq
+
+    var changed = true
+    while changed do
+      changed = false
+      val currentKeys = sources.keys.toList
+      for key <- currentKeys if !processed(key) do
+        processed += key
+        val importPaths = extractImportPaths(sources(key))
+        for modPath <- importPaths do
+          if !SyslStdlib.builtinModules.contains(modPath) then
+            val resolved = resolveModuleSources(modPath)
+            for (rKey, rSource) <- resolved do
+              if !sources.contains(rKey) then
+                sources(rKey) = rSource
+                changed = true
+
+    sources.toMap
 
   /** Recursively collect all .sysl/.lsysl files under a directory. */
   private def collectSyslFiles(dir: String): Seq[String] =

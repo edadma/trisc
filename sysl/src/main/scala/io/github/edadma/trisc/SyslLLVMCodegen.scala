@@ -1,6 +1,7 @@
 package io.github.edadma.trisc
 
 import scala.collection.mutable
+import scala.compiletime.uninitialized
 
 class SyslLLVMCodegen:
   private val out = new StringBuilder
@@ -21,7 +22,7 @@ class SyslLLVMCodegen:
   private val funcParamTypes = new mutable.HashMap[String, List[String]]
   // Track pointer variables derived from slice element addresses (&slot[i])
   // Maps pointer variable name → source slice variable name
-  private var derivedFromSlice: mutable.HashMap[String, String] = _
+  private var derivedFromSlice: mutable.HashMap[String, String] = uninitialized
   // Module-level global variable types — needed for compound assignment on globals
   private val globalVarTypes = new mutable.HashMap[String, SyslType]
 
