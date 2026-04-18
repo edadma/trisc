@@ -142,7 +142,7 @@ class SyslTriscCodegen(addresses: Int = 4):
               case TArrayLit(elements, _) =>
                 val declElemType = typ match
                   case SyslType.ArrayType(e, _) => e
-                  case _ => SyslType.I64
+                  case other => throw new RuntimeException(s"global array literal: expected ArrayType, got $other")
                 val elemDir = emitDataDirective(declElemType)
                 for elem <- elements do
                   constEval(elem) match
@@ -331,8 +331,11 @@ class SyslTriscCodegen(addresses: Int = 4):
       case SyslType.UIntType(32) =>
         emit(s"  ldw r$destReg, r$addrReg, r0")
         emit(s"  zew r$destReg, r$destReg")
-      case _ =>
+      case SyslType.IntType(64) | SyslType.UIntType(64) | SyslType.DoubleType |
+           _: SyslType.PtrType | _: SyslType.RefType =>
         emit(s"  ldd r$destReg, r$addrReg, r0")
+      case other =>
+        throw new RuntimeException(s"emitLoad: unexpected type $other")
 
   // Emit store from rSrc to [rBase + 0], using width-appropriate instruction
   private def emitStore(srcReg: Int, addrReg: Int, typ: SyslType): Unit =
@@ -374,8 +377,11 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  ldd r4, r4, r0")
           emitAddImm(3, addrReg, i)
           emit("  std r4, r3, r0")
-      case _ =>
+      case SyslType.IntType(64) | SyslType.UIntType(64) | SyslType.DoubleType |
+           _: SyslType.PtrType | _: SyslType.RefType =>
         emit(s"  std r$srcReg, r$addrReg, r0")
+      case other =>
+        throw new RuntimeException(s"emitStore: unexpected type $other")
 
   // Refcount header offset: refcount is at [ptr - headerOffset]
   // Structs: 8 (just refcount), Slices: 16 (refcount + length), Strings: 8 (just refcount, length in fat pointer)
@@ -527,7 +533,10 @@ class SyslTriscCodegen(addresses: Int = 4):
       off
     else -1
 
-    // Map user params to their stack locations
+    // Map user params to their stack locations.
+    // Scalar params use I64 because the ABI passes all scalars as 8-byte values
+    // (via pshd/register), and TRISC is big-endian so ldw at the slot base would
+    // read the wrong half. The 8-byte slot matches the 8-byte load.
     val userParamRegStart = if structReturn then 1 else 0
     val userRegParams = fun.params.length.min(1 - userParamRegStart)
     for (param, i) <- fun.params.take(userRegParams).zipWithIndex do
@@ -1324,7 +1333,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         // Store with width matching pointee type
         pointer.typ match
           case SyslType.PtrType(pointee) => emitStore(2, 1, pointee)
-          case _ => emit("  std r2, r1, r0")
+          case other => throw new RuntimeException(s"TDerefAssignStmt: expected PtrType, got $other")
 
       case TIndexAssignStmt(array, index, value) =>
         val elemType = array.typ match
@@ -1332,7 +1341,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           case SyslType.PtrType(e) => e
           case SyslType.SliceType(e) => e
           case SyslType.RefType(SyslType.SliceType(e)) => e
-          case _ => SyslType.I64
+          case other => throw new RuntimeException(s"TIndexAssignStmt: expected indexable type, got $other")
         val elemSize = stackSize(elemType)
         val isSlice = array.typ.isInstanceOf[SyslType.SliceType]
         genExpr(value)           // r1 = value
@@ -2604,7 +2613,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         // Allocate array on stack with proper element size, rounded up to 8
         val elemType = typ match
           case SyslType.ArrayType(e, _) => e
-          case _ => SyslType.I64
+          case other => throw new RuntimeException(s"TArrayDecl: expected ArrayType, got $other")
         val rawBytes = size * stackSize(elemType)
         val totalBytes = (rawBytes + 7) & ~7 // keep SP 8-byte aligned
         emitAddImm(7, 7, -totalBytes)
@@ -3730,7 +3739,8 @@ class SyslTriscCodegen(addresses: Int = 4):
     case SyslType.IntType(16) | SyslType.UIntType(16) => "ds"
     case SyslType.IntType(32) | SyslType.UIntType(32) => "dw"
     case SyslType.DoubleType => "dd"
-    case _ => "dl"
+    case SyslType.IntType(64) | SyslType.UIntType(64) | _: SyslType.PtrType | _: SyslType.RefType => "dl"
+    case other => throw new RuntimeException(s"emitDataDirective: unexpected type $other")
 
   // Emit address of local variable into target register
   private def emitLocalAddr(name: String, reg: Int): Unit =
