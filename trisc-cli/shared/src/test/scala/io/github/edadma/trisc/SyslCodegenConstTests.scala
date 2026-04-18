@@ -66,4 +66,82 @@ class SyslCodegenConstTests extends SyslCodegenHelpers {
         |main() -> int = A + B
         |""".stripMargin) shouldBe -142
   }
+
+  "large i64 constant high bits via ldc" in {
+    compileAndRun(
+      """main() -> int
+        |    val x: i64 = i64(0x20000FFFFFE0007F)
+        |    int((x >> 32) & i64(0xFFFFFFFF))
+        |""".stripMargin) shouldBe 0x20000FFFL
+  }
+
+  "large i64 constant bit test via ldc" in {
+    compileAndRun(
+      """main() -> int
+        |    val mask: i64 = i64(0x20000FFFFFE0007F)
+        |    if (mask & (i64(1) << 31)) != 0
+        |        1
+        |    else
+        |        0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "large i64 constant cross-module via ldc" in {
+    compileMultiAndRun(Map(
+      "lib" ->
+        """module lib
+          |get_mask() -> i64
+          |    i64(0x20000FFFFFE0007F)
+          |""".stripMargin,
+      "app" ->
+        """import lib.get_mask
+          |main() -> int
+          |    val mask = get_mask()
+          |    if (mask & (i64(1) << 31)) != 0
+          |        1
+          |    else
+          |        0
+          |""".stripMargin,
+    )) shouldBe 1
+  }
+
+  "large i64 constant survives two-pass link" in {
+    // Replicate the two-pass linking used by compileServerTrb
+    val driver = new SyslDriver
+    val result = driver.compile(Map(
+      "lib" ->
+        """module lib
+          |
+          |get_mask() -> i64
+          |    i64(0x20000FFFFFE0007F)
+          |""".stripMargin,
+      "app" ->
+        """import lib.get_mask
+          |
+          |main() -> int
+          |    val mask = get_mask()
+          |    if (mask & (i64(1) << 31)) != 0
+          |        1
+          |    else
+          |        0
+          |""".stripMargin,
+    ))
+    val codegen = new SyslTriscCodegen
+    val tofs = for unit <- result.units yield
+      val asm = codegen.generate(unit.typed)
+      assemble(asm, relocatable = true)
+    // Pass 1: merge into relocatable
+    val merged = Linker.link(tofs, relocatable = true)
+    // Pass 2: link with boot TOF (simulates syscallTof + syslTof link)
+    val linked = Linker.link(Seq(Runtime.bootTof, merged, Runtime.ioTof))
+
+    val stdout = new Stdout(Runtime.stdoutAddress)
+    val ram = new RAM(0, Runtime.stdoutAddress.toInt)
+    val mem = new Memory("Memory", ram, stdout)
+    linked.load(mem)
+    val cpu = new CPU(mem) { limit = 100000; quiet = true }
+    cpu.reset()
+    cpu.run()
+    cpu.r(1).read shouldBe 1
+  }
 }
