@@ -94,19 +94,18 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
   }
 
   "x86 kill: background process" in {
-    // Start count in background
+    // Start count in background — nsh prints "[1] PID"
     qemu.send("count &\n")
-    qemu.waitFor("> ")
+    val bgOutput = qemu.waitFor("> ")
     Thread.sleep(2000)
 
-    // Find count PID from ps
-    val psOut = qemu.command("ps")
-    val countLine = psOut.split('\n').find(_.contains("count"))
-    countLine shouldBe defined
-    val countPid = countLine.get.trim.split("\\s+")(1)
+    // Extract PID from nsh's "[N] PID" output
+    val pidPattern = """\[\d+\]\s+(\d+)""".r
+    val countPid = pidPattern.findFirstMatchIn(bgOutput).map(_.group(1))
+    countPid shouldBe defined
 
     // Kill it
-    qemu.command(s"kill $countPid")
+    qemu.command(s"kill ${countPid.get}")
     Thread.sleep(1000)
 
     // Verify count is gone
