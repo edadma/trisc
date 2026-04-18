@@ -2471,6 +2471,7 @@ class SyslLLVMCodegen:
         val fromLt = llvmType(inner.typ)
         val toLt = llvmType(targetType)
         if fromLt == toLt then v
+        else if inner.isInstanceOf[TIntLit] && targetType.isIntegral then v // literal at target width directly
         else
           val result = newReg()
           (inner.typ, targetType) match
