@@ -94,6 +94,20 @@ class SyslSVMCodegen:
   private def constEval(e: TExpr): Option[Long] = e match
     case TIntLit(n, _) => Some(n)
     case TBoolLit(v, _) => Some(if v then 1 else 0)
+    case TVarRef(name, _) => globalConstants.get(name)
+    case TUnary("-", operand, _) => constEval(operand).map(-_)
+    case TUnary("~", operand, _) => constEval(operand).map(~_)
+    case TBinary(left, "+", right, _) => for l <- constEval(left); r <- constEval(right) yield l + r
+    case TBinary(left, "-", right, _) => for l <- constEval(left); r <- constEval(right) yield l - r
+    case TBinary(left, "*", right, _) => for l <- constEval(left); r <- constEval(right) yield l * r
+    case TBinary(left, "/", right, _) => for l <- constEval(left); r <- constEval(right) if r != 0 yield l / r
+    case TBinary(left, "%", right, _) => for l <- constEval(left); r <- constEval(right) if r != 0 yield l % r
+    case TBinary(left, "|", right, _) => for l <- constEval(left); r <- constEval(right) yield l | r
+    case TBinary(left, "&", right, _) => for l <- constEval(left); r <- constEval(right) yield l & r
+    case TBinary(left, "^", right, _) => for l <- constEval(left); r <- constEval(right) yield l ^ r
+    case TBinary(left, "<<", right, _) => for l <- constEval(left); r <- constEval(right) yield l << r.toInt
+    case TBinary(left, ">>", right, _) => for l <- constEval(left); r <- constEval(right) yield l >> r.toInt
+    case TCast(inner, _) => constEval(inner)
     case _ => None
 
   private def isZeroInit(typ: SyslType, init: TExpr): Boolean =

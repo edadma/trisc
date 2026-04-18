@@ -300,6 +300,13 @@ class SyslTriscCodegen(addresses: Int = 4):
     case TBinary(left, "+", right, _) => for l <- constEval(left); r <- constEval(right) yield l + r
     case TBinary(left, "-", right, _) => for l <- constEval(left); r <- constEval(right) yield l - r
     case TBinary(left, "*", right, _) => for l <- constEval(left); r <- constEval(right) yield l * r
+    case TBinary(left, "/", right, _) => for l <- constEval(left); r <- constEval(right) if r != 0 yield l / r
+    case TBinary(left, "%", right, _) => for l <- constEval(left); r <- constEval(right) if r != 0 yield l % r
+    case TBinary(left, "|", right, _) => for l <- constEval(left); r <- constEval(right) yield l | r
+    case TBinary(left, "&", right, _) => for l <- constEval(left); r <- constEval(right) yield l & r
+    case TBinary(left, "^", right, _) => for l <- constEval(left); r <- constEval(right) yield l ^ r
+    case TBinary(left, "<<", right, _) => for l <- constEval(left); r <- constEval(right) yield l << r.toInt
+    case TBinary(left, ">>", right, _) => for l <- constEval(left); r <- constEval(right) yield l >> r.toInt
     case TCast(inner, _) => constEval(inner) // pointer casts like *byte(0xC000)
     case _ => None
 

@@ -57,7 +57,7 @@ Common bits (lo): sleep(0), putc(1), yield(2), exit(3), join(4),
   ipc_send_timed(38), ipc_recv_notify(39), waitpid(40),
   getpid(41), thread_pid(42), thread_name_len(43), getuid(61)
 
-    val PRIV_COMMON_LO: i64 = i64(0x20000FFFFFE0007F)
+    val PRIV_COMMON_LO: i64 = i64(0x7F) | (i64(7) << 21) | (i64(0xFFFFFFFF) << 24) | (i64(1) << 61)
 
 Common bits (hi): ipc_last_msg_len(65), grant_create(71), grant_revoke(72)
 
@@ -84,27 +84,8 @@ Disk extra bits: vm_v2p(66) for DMA
 Per-server privilege assignment. Called after each server is
 created but before it is resumed.
 
-Build PRIV_COMMON_LO from small constants to work around
-TRISC codegen bug with large 64-bit literals in standalone
-binaries (ldc constant pool generates wrong values).
-
-    rs_build_common_lo() -> i64
-        // Bits 0-6: sleep(0), putc(1), yield(2), exit(3), join(4), thread_id(5), uptime(6)
-        var lo: i64 = i64(0x7F)
-        // Bits 21-23: tls_set(21), tls_get(22), notify_send(23)
-        lo = lo | (i64(7) << 21)
-        // Bits 24-55: notify_wait(24)..vm_copy_from(55) = 32 bits
-        // Includes IPC (31-39), process queries (40-43),
-        // VM/process management (44-55): vm_create_pt, create/resume/reap/kill proc,
-        // register_pm, set/get thread ptbr, vm_set_ptbr, get_thread_pid,
-        // vm_copy_to, vm_copy_from
-        lo = lo | (i64(0xFFFFFFFF) << 24)
-        // Bit 61: getuid
-        lo = lo | (i64(1) << 61)
-        lo
-
     rs_set_server_priv(pid: int, idx: int)
-        var lo: i64 = rs_build_common_lo()
+        var lo: i64 = PRIV_COMMON_LO
         var hi: i64 = i64(0x182)                // PRIV_COMMON_HI
         // IPC mask set to 0xFF during boot (all allowed).
         // Tightened after all servers are up via rs_set_ipc_masks().
