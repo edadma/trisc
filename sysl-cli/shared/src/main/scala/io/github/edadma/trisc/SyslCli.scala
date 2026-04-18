@@ -7,6 +7,7 @@ case class CompileCommand(
     inputs: Seq[String] = Seq.empty,
     output: Option[String] = None,
     emit: String = "asm", // asm, tof, llvm
+    target: String = "host", // host, x86_64-elf, x86_64-linux
 ) extends SyslCommand
 case class RunCommand(
     inputs: Seq[String] = Seq.empty,
@@ -58,6 +59,14 @@ object SyslCli:
             .action((v, c) =>
               c.copy(command = c.command match
                 case cc: CompileCommand => cc.copy(emit = v)
+                case other              => other
+              )
+            ),
+          opt[String]("target")
+            .text("Target: host (default), x86_64-elf, x86_64-linux")
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case cc: CompileCommand => cc.copy(target = v)
                 case other              => other
               )
             ),
@@ -189,7 +198,7 @@ object SyslCli:
         ),
       checkConfig(c =>
         c.command match
-          case CompileCommand(inputs, _, _) if inputs.isEmpty =>
+          case CompileCommand(inputs, _, _, _) if inputs.isEmpty =>
             failure("No input files specified")
           case RunCommand(inputs, _) if inputs.isEmpty =>
             failure("No input files specified for run")
@@ -269,7 +278,7 @@ object SyslCli:
         System.err.println(s"  -> $outFile")
 
       case "llvm" =>
-        val codegen = new SyslLLVMCodegen
+        val codegen = new SyslLLVMCodegen(cmd.target)
         val merged = stripTestDecls(TProgram(result.units.flatMap(_.typed.decls)))
         val ir = codegen.generate(merged)
         val outFile = cmd.output.getOrElse(result.units.head.name + ".ll")
