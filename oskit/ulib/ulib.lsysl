@@ -135,6 +135,9 @@ Process control.
     exit_with(code: int)
         syscall(SYS_EXIT, code)
 
+    ulib_putc(ch: int)
+        syscall(SYS_PUTC, ch)
+
     sleep(ticks: int)
         syscall(SYS_SLEEP, ticks)
 

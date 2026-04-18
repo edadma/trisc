@@ -216,7 +216,7 @@ import oskit.hal.memset
     val ramdisk = new Ramdisk(
       Runtime.ramdiskAddress,
       ram,
-      sectors = 256,
+      sectors = 512,
       sectorSize = 4096,
       intc,
       irq = 3,
@@ -405,7 +405,7 @@ import oskit.hal.memset
     val ramdisk = new Ramdisk(
       Runtime.ramdiskAddress,
       ram,
-      sectors = 256,
+      sectors = 512,
       sectorSize = 4096,
       intc,
       irq = 3,
