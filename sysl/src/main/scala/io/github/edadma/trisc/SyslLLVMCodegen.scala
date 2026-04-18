@@ -703,33 +703,45 @@ class SyslLLVMCodegen:
           case SyslType.PtrType(elem) => elem
           case _ => SyslType.IntType(8) // fallback for string indexing
         // For RefType(SliceType(_)) elements, store as inline %struct.slice (24 bytes)
-        val (elt, elemSize) = elemType match
-          case SyslType.RefType(_: SyslType.SliceType) => ("%struct.slice", 24L)
-          case _ => (llvmType(elemType), llvmSizeOf(elemType))
-        // Get data pointer
-        val dataPtr = array.typ match
-          case SyslType.ArrayType(_, _) =>
-            val cast = newReg()
-            emit(s"  $cast = bitcast ${llvmType(array.typ)}* $base to i8*")
-            cast
-          case SyslType.SliceType(_) =>
-            // Slice struct: ptr at offset 0
-            val ptrGep = newReg()
-            emit(s"  $ptrGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 0")
-            val ptr = newReg()
-            emit(s"  $ptr = load i8*, i8** $ptrGep")
-            ptr
+        val elt = elemType match
+          case SyslType.RefType(_: SyslType.SliceType) => "%struct.slice"
+          case _ => llvmType(elemType)
+        // Compute element pointer — use GEP for arrays and pointers (LLVM calculates stride),
+        // manual byte arithmetic only for slices (untyped i8* data pointer).
+        val typedPtr: String = array.typ match
+          case SyslType.ArrayType(_, size) =>
+            val arrType = s"[$size x $elt]"
+            val gep = newReg()
+            emit(s"  $gep = getelementptr $arrType, $arrType* $base, i32 0, i32 $idx")
+            gep
+          case SyslType.PtrType(_) =>
+            val idx64 = newReg()
+            emit(s"  $idx64 = sext i32 $idx to i64")
+            val gep = newReg()
+            emit(s"  $gep = getelementptr $elt, $elt* $base, i64 $idx64")
+            gep
           case _ =>
-            base // pointer type — already a data pointer
-        // Compute element address
-        val idx64 = newReg()
-        emit(s"  $idx64 = sext i32 $idx to i64")
-        val offset = newReg()
-        emit(s"  $offset = mul i64 $idx64, $elemSize")
-        val elemAddr = newReg()
-        emit(s"  $elemAddr = getelementptr i8, i8* $dataPtr, i64 $offset")
-        val typedPtr = newReg()
-        emit(s"  $typedPtr = bitcast i8* $elemAddr to $elt*")
+            // Slice or ref-slice: use byte arithmetic on data pointer
+            val elemSize = elemType match
+              case SyslType.RefType(_: SyslType.SliceType) => 24L
+              case _ => llvmSizeOf(elemType)
+            val dataPtr = array.typ match
+              case SyslType.SliceType(_) =>
+                val ptrGep = newReg()
+                emit(s"  $ptrGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 0")
+                val ptr = newReg()
+                emit(s"  $ptr = load i8*, i8** $ptrGep")
+                ptr
+              case _ => base
+            val idx64 = newReg()
+            emit(s"  $idx64 = sext i32 $idx to i64")
+            val offset = newReg()
+            emit(s"  $offset = mul i64 $idx64, $elemSize")
+            val elemAddr = newReg()
+            emit(s"  $elemAddr = getelementptr i8, i8* $dataPtr, i64 $offset")
+            val cast = newReg()
+            emit(s"  $cast = bitcast i8* $elemAddr to $elt*")
+            cast
         val treatAsAggregate = isAggregate(elemType) || (elemType match
           case SyslType.RefType(_: SyslType.SliceType) => true
           case _ => false)
