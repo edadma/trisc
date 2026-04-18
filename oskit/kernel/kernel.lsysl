@@ -727,9 +727,23 @@ Arg = pid. Returns state (PROC_FREE/PROC_RUNNING/PROC_ZOMBIE).
     sys_proc_state_handler(arg: int)
         if arg >= 0
             if arg < MAX_PROCESSES
-                syscall_return(processes[arg].state)
+                val st = processes[arg].state
+                // DEBUG: trace proc_state for PIDs >= 10
+                if arg >= 10
+                    debug_char('(')
+                    debug_hex4(arg)
+                    debug_char('=')
+                    debug_hex4(st)
+                    debug_char(')')
+                syscall_return(st)
                 kernel_continue_current()
                 return
+        // DEBUG: trace invalid PID
+        if arg >= 10
+            debug_char('(')
+            debug_hex4(arg)
+            debug_char('!')
+            debug_char(')')
         syscall_return(-1)
         kernel_continue_current()
 

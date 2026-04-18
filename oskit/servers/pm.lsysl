@@ -20,7 +20,7 @@ IPC commands:
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
     import oskit.config.{MAX_PROCESSES, MAX_WAITERS, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
-    import oskit.services.{notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid}
+    import oskit.services.{putc, notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid}
     import oskit.loader.load_tof_to_ptbr
     import oskit.arch.{PROG_USP, PROG_SSP}
 
@@ -68,12 +68,27 @@ Big-endian message helpers (local to this server).
         buf[off + 2] = (v >> 8) & 0xFF
         buf[off + 3] = v & 0xFF
 
+Debug: print a hex nibble.
+
+    pm_hex(v: int)
+        val d = v & 0xF
+        if d < 10
+            putc('0' + d)
+        else
+            putc('a' + d - 10)
+
 Handle a process exit notification from the kernel.
 The notification value is the PID of the exited process.
 Check if any parent is waiting for this PID and reply to them.
 If no waiter, the zombie stays until waitpid is called.
 
     pm_handle_exit(pid: int)
+        // DEBUG: trace exit notification
+        putc('<')
+        putc('E')
+        pm_hex(pid >> 4)
+        pm_hex(pid)
+        putc('>')
         if pid <= 0
             return
         if pid >= MAX_PROCESSES
@@ -123,21 +138,36 @@ the IPC reply until the child exits.
 
     pm_handle_waitpid(sender: int, buf: *byte)
         val pid = pm_msg_read_i32(buf, 1)
+        // DEBUG: trace waitpid request
+        putc('<')
+        putc('W')
+        pm_hex(pid >> 4)
+        pm_hex(pid)
+        putc(':')
         if pid <= 0
+            putc('?')
+            putc('>')
             var reply: [5]byte
             reply[0] = byte(-1)
             pm_msg_write_i32(reply, 1, 0)
             ipc_reply(sender, reply, 5)
             return
         if pid >= MAX_PROCESSES
+            putc('?')
+            putc('>')
             var reply: [5]byte
             reply[0] = byte(-1)
             pm_msg_write_i32(reply, 1, 0)
             ipc_reply(sender, reply, 5)
             return
 
+        val st = svc_proc_state(pid)
+        pm_hex(st >> 4)
+        pm_hex(st)
+
         // Already zombie? Reap immediately.
-        if svc_proc_state(pid) == PROC_ZOMBIE
+        if st == PROC_ZOMBIE
+            putc('>')
             val exit_code = svc_proc_exit_code(pid)
             svc_reap_proc(pid)
             var reply: [5]byte
@@ -147,7 +177,9 @@ the IPC reply until the child exits.
             return
 
         // Already free? Error.
-        if svc_proc_state(pid) == PROC_FREE
+        if st == PROC_FREE
+            putc('!')
+            putc('>')
             var reply: [5]byte
             reply[0] = byte(-1)
             pm_msg_write_i32(reply, 1, 0)
@@ -155,6 +187,8 @@ the IPC reply until the child exits.
             return
 
         // Child still running — defer reply until exit
+        putc('D')
+        putc('>')
         var i = 0
         while i < MAX_WAITERS
             if waiters[i].active == 0

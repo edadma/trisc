@@ -112,6 +112,6 @@ the context frame is built directly on the per-process kernel
 stack (identity-mapped). The CPU switches to this stack via
 TSS.RSP0 on ring 3 to ring 0 transitions. Returns the SSP value.
 
-    arch_setup_process_frame(entry_point: i64, usp: i64, ssp: i64, kstack_top_val: i64, ptbr_val: int) -> i64
+    arch_setup_process_frame(entry_point: i64, usp: i64, ssp: i64, kstack_top_val: i64, ptbr_val: u64) -> i64
         build_user_stack_frame(entry_point, usp, kstack_top_val)
         kstack_top_val - STACK_FRAME_SIZE

@@ -193,8 +193,23 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("1")
   }
 
-  "x86 pipe: echo to test_pipe 4 writes" in {
-    val output = qemu.command("echo hello | test_pipe")
+  "x86 pipe: test_pipe 1 write" in {
+    val output = qemu.command("echo x | test_pipe 1")
+    output should include("A")
+  }
+
+  "x86 pipe: test_pipe 2 writes" in {
+    val output = qemu.command("echo x | test_pipe 2")
+    output should include("B")
+  }
+
+  "x86 pipe: test_pipe 3 writes" in {
+    val output = qemu.command("echo x | test_pipe 3")
+    output should include("C")
+  }
+
+  "x86 pipe: test_pipe 4 writes" in {
+    val output = qemu.command("echo x | test_pipe 4")
     output should include("D")
   }
 
