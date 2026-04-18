@@ -71,7 +71,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
     for decl <- program.decls do
       decl match
-        case v @ TVarDecl(_, typ, init, _) =>
+        case v @ TVarDecl(_, typ, init, _, _) =>
           globals(v.name) = typ
           // Track constant values for cross-reference in other global initializers
           constEval(init).foreach(n => globalConstants(v.name) = n)
@@ -133,7 +133,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       emit("segment data")
       for decl <- dataGlobals do
         decl match
-          case TVarDecl(name, typ, init, _) =>
+          case TVarDecl(name, typ, init, _, _) =>
             val align = stackAlign(typ)
             if align > 1 then emit(s"  align $align")
             emit(s"# global: $name")
@@ -163,7 +163,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       emit("segment bss")
       for decl <- bssGlobals do
         decl match
-          case TVarDecl(name, typ, _, _) =>
+          case TVarDecl(name, typ, _, _, _) =>
             val align = stackAlign(typ)
             if align > 1 then emit(s"  align $align")
             emit(s"# global: $name")
@@ -181,7 +181,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     val generated = out.toString
     val definedSymbols = (for decl <- program.decls yield decl match
       case TFunDecl(name, _, _, _, _, _, _) => Some(name)
-      case TVarDecl(name, _, _, _) => Some(name)
+      case TVarDecl(name, _, _, _, _) => Some(name)
       case _ => None).flatten.toSet
     if generated.contains("movi r4, malloc") && !definedSymbols.contains("malloc") then emit("extern malloc")
     if generated.contains("movi r4, free") && !definedSymbols.contains("free") then emit("extern free")
@@ -277,7 +277,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     case SyslType.PtrType(_) => 8
     case _: SyslType.FuncType => 8
     case SyslType.ArrayType(elem, _) => stackAlign(elem)
-    case SyslType.StructType(_, fields) => if fields.isEmpty then 1 else fields.map(f => stackAlign(f._2)).max
+    case SyslType.StructType(_, fields, _) => if fields.isEmpty then 1 else fields.map(f => stackAlign(f._2)).max
     case SyslType.EnumType(_, variants) =>
       val fieldAligns = variants.flatMap(_._2.map(f => stackAlign(f._2)))
       if fieldAligns.isEmpty then 4 else fieldAligns.max.max(4)
@@ -392,7 +392,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   // Get deinit function name for a ref type, if one exists
   private def deinitFor(typ: SyslType): Option[String] = typ match
-    case SyslType.RefType(SyslType.StructType(name, _)) if deinitFunctions.contains(name) =>
+    case SyslType.RefType(SyslType.StructType(name, _, _)) if deinitFunctions.contains(name) =>
       Some(deinitFunctions(name))
     case _ => None
 
@@ -941,7 +941,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   private def genStmt(stmt: TStmt): Unit =
     stmt match
-      case TVarStmt(name, typ, init) =>
+      case TVarStmt(name, typ, init, _) =>
         init match
           case TArrayLit(elements, SyslType.ArrayType(elemType, size)) =>
             // Allocate array inline on stack (same layout as TArrayDecl)
@@ -970,7 +970,7 @@ class SyslTriscCodegen(addresses: Int = 4):
             for i <- 0 until totalBytes by 8 do
               emitAddImm(2, 1, i)
               emit("  std r0, r2, r0")
-          case TStructLit(st @ SyslType.StructType(_, _)) =>
+          case TStructLit(st @ SyslType.StructType(_, _, _)) =>
             // Allocate struct on stack and zero-initialize
             val totalSize = stackSize(st)
             val aligned = (totalSize + 7) & ~7
@@ -1177,7 +1177,7 @@ class SyslTriscCodegen(addresses: Int = 4):
                 val off = local.offset + i * stackSize(elemType)
                 emitAddImm(2, 5, off)
                 emitStore(1, 2, elemType)
-            case TStructLit(st @ SyslType.StructType(_, _)) =>
+            case TStructLit(st @ SyslType.StructType(_, _, _)) =>
               val totalSize = stackSize(st)
               val aligned = (totalSize + 7) & ~7
               emitAddImm(7, 7, -aligned)
@@ -2040,9 +2040,9 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TInterfaceBox(expr, iface) =>
         // Box a concrete value into an interface: {itable_ptr, data_ptr}
         val structName = expr.typ match
-          case SyslType.StructType(name, _) => name
-          case SyslType.PtrType(SyslType.StructType(name, _)) => name
-          case SyslType.RefType(SyslType.StructType(name, _)) => name
+          case SyslType.StructType(name, _, _) => name
+          case SyslType.PtrType(SyslType.StructType(name, _, _)) => name
+          case SyslType.RefType(SyslType.StructType(name, _, _)) => name
           case other => throw new RuntimeException(s"cannot box $other into interface")
 
         // Resolve itable label, registering it if first time for this (struct, interface) pair
@@ -3379,7 +3379,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TSizeof(size, _) =>
         emitLoadImm(1, size.toInt)
 
-      case TStructLit(st @ SyslType.StructType(_, fields)) =>
+      case TStructLit(st @ SyslType.StructType(_, fields, _)) =>
         val totalSize = stackSize(st)
         val aligned = (totalSize + 7) & ~7
         emitAddImm(7, 7, -aligned)
