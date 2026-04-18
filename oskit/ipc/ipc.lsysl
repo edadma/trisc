@@ -280,7 +280,7 @@ Deliver a message from sender to server and wake the server.
 Used by send handlers when the server is already waiting.
 
     ipc_write_saved_r1(tid: int, value: i64)
-        val vaddr = int(threads[tid].ssp + SYSCALL_RETURN_OFFSET)
+        val vaddr = u64(threads[tid].ssp + i64(SYSCALL_RETURN_OFFSET))
         val paddr = vm_v2p(threads[tid].ptbr, vaddr)
         var p: *i64 = *i64(paddr)
         *p = value
@@ -308,7 +308,7 @@ truncation. Sets actual_len on the receiver's IPC context.
         else
             // Cross-address-space: DMA with physical address mode
             // (translates both sides via page table, then DMA bypasses MMU)
-            vm_copy_cross(sender_ptbr, int(msg_ptr), receiver_ptbr, int(buf_ptr), copy_len)
+            vm_copy_cross(sender_ptbr, u64(msg_ptr), receiver_ptbr, u64(buf_ptr), copy_len)
 
         ipc_ctx[receiver].actual_len = copy_len
         ipc_ctx[receiver].sender = sender
@@ -404,7 +404,7 @@ The server continues running (no block).
             ipc_memcpy(ipc_ctx[caller].reply_buf, msg_ptr, copy_len)
         else
             // Cross-address-space: DMA with physical address mode
-            vm_copy_cross(server_ptbr, int(msg_ptr), caller_ptbr, int(ipc_ctx[caller].reply_buf), copy_len)
+            vm_copy_cross(server_ptbr, u64(msg_ptr), caller_ptbr, u64(ipc_ctx[caller].reply_buf), copy_len)
 
         // Write return value to caller's saved r1 on its SSP
         ipc_write_saved_r1(caller, 0)

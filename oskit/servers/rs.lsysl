@@ -298,7 +298,7 @@ Returns entry point or -1 on error.
 
     // Program USP/SSP imported from oskit.arch (target-specific)
 
-    rs_load_trb_module(buf: *byte, buflen: int, ptbr: int) -> i64
+    rs_load_trb_module(buf: *byte, buflen: int, ptbr: u64) -> i64
         if buflen < 12
             return -1
         if buf[0] != byte('T')
@@ -318,7 +318,7 @@ Returns entry point or -1 on error.
             if pos + 12 > buflen
                 return -1
             val hp = buf + pos
-            val org = int(rs_read_u32_le(hp))
+            val org = u64(rs_read_u32_le(hp))
             val kind = int(rs_read_u32_le(hp + 4))
             val sz = int(rs_read_u32_le(hp + 8))
             pos += 12
@@ -341,7 +341,7 @@ Parses program headers from rs_mod_buf, copies LOAD segments
 into the target process via vm_copy_to. Returns entry point
 or -1 on error.
 
-    rs_load_elf64_module(buf: *byte, buflen: int, ptbr: int) -> i64
+    rs_load_elf64_module(buf: *byte, buflen: int, ptbr: u64) -> i64
         if buflen < 64
             return -1
         // Check ELF magic
@@ -366,7 +366,7 @@ or -1 on error.
             if ptype == 1
                 // PT_LOAD
                 val offset = int(rs_read_i64_le(ph + 8))
-                val vaddr = int(rs_read_i64_le(ph + 16))
+                val vaddr = u64(rs_read_i64_le(ph + 16))
                 val filesz = int(rs_read_i64_le(ph + 32))
                 val memsz = int(rs_read_i64_le(ph + 40))
                 if offset + filesz > buflen
@@ -374,14 +374,14 @@ or -1 on error.
                 if filesz > 0
                     svc_vm_copy_to(ptbr, vaddr, buf + offset, filesz)
                 if memsz > filesz
-                    rs_zero_fill_remote(ptbr, vaddr + filesz, memsz - filesz)
+                    rs_zero_fill_remote(ptbr, vaddr + u64(filesz), memsz - filesz)
             i += 1
         entry
 
 Zero-fill a region in another process's address space.
 Uses a local zero buffer and vm_copy_to in chunks.
 
-    rs_zero_fill_remote(ptbr: int, addr: int, sz: int)
+    rs_zero_fill_remote(ptbr: u64, addr: u64, sz: int)
         val CHUNK = 1024
         var zero_buf: [1024]byte
         memset(zero_buf, 0, CHUNK)
@@ -393,7 +393,7 @@ Uses a local zero buffer and vm_copy_to in chunks.
                 chunk = CHUNK
             svc_vm_copy_to(ptbr, dst, zero_buf, chunk)
             remaining -= chunk
-            dst += chunk
+            dst += u64(chunk)
 
 Start a server from a boot module: create server page table,
 copy module data via svc_phys_read, load TRB/ELF binary,
@@ -408,7 +408,7 @@ Returns the PID on success, 0 on failure.
         // Copy boot module data from physical memory into our buffer
         if sz > 131072
             return 0
-        svc_phys_read(int(addr), &rs_mod_buf[0], sz)
+        svc_phys_read(u64(addr), &rs_mod_buf[0], sz)
         val buf = &rs_mod_buf[0]
 
         // Create server page table with MMIO grant
