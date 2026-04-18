@@ -10,8 +10,8 @@ case class TImportDecl(path: String) extends TDecl
 case class TExternFuncDecl(name: String, params: List[SyslType], returnType: SyslType) extends TDecl
 case class TExternVarDecl(name: String, typ: SyslType) extends TDecl
 case class TFunDecl(name: String, params: List[TParam], returnType: SyslType, body: TFunBody, isPrivate: Boolean = false, attributes: List[Attribute] = Nil, isDef: Boolean = false) extends TDecl
-case class TVarDecl(name: String, typ: SyslType, init: TExpr, isPrivate: Boolean = false) extends TDecl
-case class TStructDecl(name: String, fields: List[(String, SyslType)]) extends TDecl
+case class TVarDecl(name: String, typ: SyslType, init: TExpr, isPrivate: Boolean = false, isVolatile: Boolean = false) extends TDecl
+case class TStructDecl(name: String, fields: List[(String, SyslType)], volatileFields: Set[Int] = Set.empty) extends TDecl
 case class TEnumDecl(name: String, members: List[(String, Long)]) extends TDecl
 case class TDataEnumDecl(name: String, enumType: SyslType.EnumType) extends TDecl
 case class TTypeAliasDecl(name: String, target: SyslType) extends TDecl
@@ -26,7 +26,7 @@ case class TBlockBody(stmts: List[TStmt]) extends TFunBody
 
 // Statements
 trait TStmt
-case class TVarStmt(name: String, typ: SyslType, init: TExpr) extends TStmt
+case class TVarStmt(name: String, typ: SyslType, init: TExpr, isVolatile: Boolean = false) extends TStmt
 case class TDestructureStmt(names: List[String], types: List[SyslType], init: TExpr) extends TStmt
 case class TDestructureAssignStmt(names: List[String], types: List[SyslType], init: TExpr) extends TStmt
 case class TAssignStmt(target: String, value: TExpr) extends TStmt

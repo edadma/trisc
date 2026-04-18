@@ -262,7 +262,31 @@ var p: *Node
 // Inferred type (mutable by default in blocks)
 x = 42               // inferred as int
 name = "hello"       // inferred as string
+
+// Volatile — prevents load/store optimization (MMIO, shared memory)
+volatile var status: u32 = 0
+volatile var flag: int
 ```
+
+### Volatile
+
+The `volatile` qualifier prevents the compiler from optimizing away, reordering, or coalescing loads and stores. Use it for memory-mapped I/O registers and shared-memory variables.
+
+Variables:
+```sysl
+volatile var mmio_status: u32 = 0
+volatile var shared_flag: int
+```
+
+Struct fields:
+```sysl
+struct UartRegs
+    volatile status: u32
+    volatile data: u32
+    baud: int            // non-volatile, normal optimization allowed
+```
+
+In the LLVM backend, `volatile` emits `load volatile` and `store volatile` instructions. The TRISC backend is unaffected (it does not optimize loads/stores).
 
 ### Discard Binding (`_`)
 

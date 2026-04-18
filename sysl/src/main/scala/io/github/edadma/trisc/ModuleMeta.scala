@@ -100,7 +100,7 @@ object ModuleMeta:
 
   def fromProgram(program: TProgram, sourceFile: Option[String] = None): ModuleMeta =
     val syms = program.decls.collect {
-      case TStructDecl(name, fields) =>
+      case TStructDecl(name, fields, _) =>
         SymbolMeta(name, SymbolMeta.Kind.Struct(SyslType.StructType(name, fields)), isPrivate = false, sourceFile = sourceFile)
       case TEnumDecl(name, members) =>
         // Simple enum: convert to EnumType with empty variant fields for serialization
@@ -117,7 +117,7 @@ object ModuleMeta:
         SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate = false, isExtern = true, sourceFile = sourceFile)
       case TFunDecl(name, params, returnType, _, isPrivate, _, isDef) =>
         SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType, isDef), isPrivate, sourceFile = sourceFile)
-      case TVarDecl(name, typ, _, isPrivate) =>
+      case TVarDecl(name, typ, _, isPrivate, _) =>
         SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate, sourceFile = sourceFile)
     }
     new ModuleMeta(syms)

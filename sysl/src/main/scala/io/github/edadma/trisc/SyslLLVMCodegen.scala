@@ -56,9 +56,10 @@ class SyslLLVMCodegen(target: String = "host"):
       (label, byteLen)
     })
 
-  private case class LocalVar(name: String, reg: String, typ: SyslType)
+  private case class LocalVar(name: String, reg: String, typ: SyslType, isVolatile: Boolean = false)
 
   private var locals: mutable.LinkedHashMap[String, LocalVar] = null
+  private val volatileGlobals = new mutable.HashSet[String] // global variable names that are volatile
   private var currentFunction: TFunDecl = null
   private var hasReturned = false
   private var currentBlock = "" // tracks the current basic block label for phi predecessors
@@ -85,8 +86,8 @@ class SyslLLVMCodegen(target: String = "host"):
     deinitFunctions.clear()
     for decl <- program.decls do
       decl match
-        case TStructDecl(name, fields) =>
-          structTypes(name) = SyslType.StructType(name, fields)
+        case TStructDecl(name, fields, volFields) =>
+          structTypes(name) = SyslType.StructType(name, fields, volFields)
         case TFunDecl(name, _, _, _, _, _, _) if name.endsWith("_deinit") =>
           val structName = name.indexOf("__") match
             case -1 => name.dropRight(7) // "Point_deinit" -> "Point"
@@ -132,10 +133,11 @@ class SyslLLVMCodegen(target: String = "host"):
           if !emittedFunctions.contains(f.name) then
             emittedFunctions += f.name
             genFunction(f)
-        case TVarDecl(name, typ, init, _) =>
+        case TVarDecl(name, typ, init, _, isVolatile) =>
           val initVal = constValue(init, typ)
           emit(s"@$name = global ${llvmType(typ)} $initVal")
           globalVarTypes(name) = typ
+          if isVolatile then volatileGlobals += name
     emit("")
     // Generate pending closure functions and wrappers
     while pendingClosures.nonEmpty || pendingWrappers.nonEmpty do
@@ -487,12 +489,12 @@ class SyslLLVMCodegen(target: String = "host"):
 
   private def genStmt(stmt: TStmt): Unit =
     stmt match
-      case TVarStmt(name, typ, init) =>
+      case TVarStmt(name, typ, init, isVolatile) =>
         val lt = llvmType(typ)
         if isAggregate(typ) then
           // Aggregate variable: genExpr returns an alloca pointer — use it directly
           val ptr = genExpr(init)
-          locals(name) = LocalVar(name, ptr, typ)
+          locals(name) = LocalVar(name, ptr, typ, isVolatile)
           // Slice backref: increment if copying from a non-owned source
           if isSliceType(typ) && !isSliceOwned(init) then
             emitSliceBackrefIncr(ptr)
@@ -502,7 +504,7 @@ class SyslLLVMCodegen(target: String = "host"):
             val vt = exprType(init)
             val finalVal = emitSextIfNeeded(value, vt, lt)
             emit(s"  store $lt $finalVal, $lt* $alloca")
-            locals(name) = LocalVar(name, alloca, typ)
+            locals(name) = LocalVar(name, alloca, typ, isVolatile)
             // Ref init: increment unless we own it (TNew/TNewArray)
             if isRef(typ) && !isOwnedNew(init) then
               emitRefIncr(finalVal, refHeaderOffset(typ))
@@ -545,21 +547,23 @@ class SyslLLVMCodegen(target: String = "host"):
             else
               val vt = exprType(value)
               val finalVal = emitSextIfNeeded(v, vt, lt)
-              emit(s"  store $lt $finalVal, $lt* ${local.reg}")
+              val vol = if local.isVolatile then " volatile" else ""
+              emit(s"  store$vol $lt $finalVal, $lt* ${local.reg}")
               if isRef(local.typ) && !isOwnedNew(value) then
                 emitRefIncr(finalVal, refHeaderOffset(local.typ))
           else if globalVarTypes.contains(target) then
             // Assignment to a module-level global variable
             val gt = globalVarTypes(target)
             val lt = llvmType(gt)
+            val vol = if volatileGlobals.contains(target) then " volatile" else ""
             if isAggregate(gt) then
               val loaded = newReg()
               emit(s"  $loaded = load $lt, $lt* $v")
-              emit(s"  store $lt $loaded, $lt* @$target")
+              emit(s"  store$vol $lt $loaded, $lt* @$target")
             else
               val vt = exprType(value)
               val finalVal = emitSextIfNeeded(v, vt, lt)
-              emit(s"  store $lt $finalVal, $lt* @$target")
+              emit(s"  store$vol $lt $finalVal, $lt* @$target")
           else
             val lt = exprType(value)
             val alloca = deferAlloca(lt)
@@ -814,14 +818,15 @@ class SyslLLVMCodegen(target: String = "host"):
         // Slice field: decrement old backref before overwrite
         if isSliceType(ft) then emitSliceBackrefDecr(gep)
         val v = genExpr(value)
+        val vol = if st.volatileFields.contains(fieldIndex) then " volatile" else ""
         if isAggregate(ft) then
           val loaded = newReg()
           emit(s"  $loaded = load $fieldType, $fieldType* $v")
-          emit(s"  store $fieldType $loaded, $fieldType* $gep")
+          emit(s"  store$vol $fieldType $loaded, $fieldType* $gep")
           // Slice field: increment new backref if not owned
           if isSliceType(ft) && !isSliceOwned(value) then emitSliceBackrefIncr(gep)
         else
-          emit(s"  store $fieldType $v, $fieldType* $gep")
+          emit(s"  store$vol $fieldType $v, $fieldType* $gep")
 
       case TCompoundAssignStmt(target, op, value) =>
         val (varType, varReg) = if locals.contains(target) then
@@ -987,13 +992,15 @@ class SyslLLVMCodegen(target: String = "host"):
           else
             val lt = llvmType(local.typ)
             val r = newReg()
-            emit(s"  $r = load $lt, $lt* ${local.reg}")
+            val vol = if local.isVolatile then " volatile" else ""
+            emit(s"  $r = load$vol $lt, $lt* ${local.reg}")
             r
         else if isAggregate(typ) then
           s"@$name" // aggregate global: return address, don't load
         else
           val r = newReg()
-          emit(s"  $r = load $t, $t* @$name")
+          val vol = if volatileGlobals.contains(name) then " volatile" else ""
+          emit(s"  $r = load$vol $t, $t* @$name")
           r
 
       // String concatenation
@@ -1447,7 +1454,7 @@ class SyslLLVMCodegen(target: String = "host"):
             emitSliceBackrefIncr(gep)
         alloca
 
-      case TStructLit(st @ SyslType.StructType(_, _)) =>
+      case TStructLit(st @ SyslType.StructType(_, _, _)) =>
         val lt = llvmType(st)
         val alloca = deferAlloca(lt)
         emit(s"  store $lt zeroinitializer, $lt* $alloca")
@@ -1474,7 +1481,8 @@ class SyslLLVMCodegen(target: String = "host"):
         else
           val ft = llvmType(fieldType)
           val r = newReg()
-          emit(s"  $r = load $ft, $ft* $gep")
+          val vol = if st.volatileFields.contains(fieldIndex) then " volatile" else ""
+          emit(s"  $r = load$vol $ft, $ft* $gep")
           r
 
       // ===== Arrays =====
@@ -2811,7 +2819,7 @@ class SyslLLVMCodegen(target: String = "host"):
     case SyslType.DoubleType => "double"
     case SyslType.VoidType => "void"
     case SyslType.StringType => "%struct.string"
-    case SyslType.StructType(name, fields) =>
+    case SyslType.StructType(name, fields, _) =>
       // Auto-register struct types encountered in signatures (e.g., built-in tuples)
       if !structTypes.contains(name) && fields.nonEmpty then
         structTypes(name) = SyslType.StructType(name, fields)
@@ -2833,7 +2841,7 @@ class SyslLLVMCodegen(target: String = "host"):
     case _: SyslType.FuncType => 16  // {i8*, i8*}
     case SyslType.BoolType => 1
     case SyslType.SliceType(_) => 24  // {i8*, i32, i32, i8*}
-    case SyslType.StructType(name, fields) =>
+    case SyslType.StructType(name, fields, _) =>
       // Use LLVM's struct layout rules: each field aligned to its natural alignment,
       // and the struct's total size rounded up to its alignment (max of all field alignments).
       val resolved = canonicalStruct(SyslType.StructType(name, fields))
@@ -2861,7 +2869,7 @@ class SyslLLVMCodegen(target: String = "host"):
     case SyslType.StringType => 8  // contains pointer
     case SyslType.SliceType(_) => 8  // contains pointer
     case _: SyslType.FuncType => 8  // contains pointer
-    case SyslType.StructType(name, fields) =>
+    case SyslType.StructType(name, fields, _) =>
       val resolved = canonicalStruct(SyslType.StructType(name, fields))
       if resolved.fields.isEmpty then 1 else resolved.fields.map((_, ft) => llvmAlignOf(ft)).max
     case SyslType.ArrayType(elem, _) => llvmAlignOf(elem)
@@ -2952,7 +2960,7 @@ class SyslLLVMCodegen(target: String = "host"):
 
   /** Look up deinit function name for a RefType's inner type. */
   private def deinitFor(typ: SyslType): Option[String] = typ match
-    case SyslType.RefType(SyslType.StructType(name, _)) => deinitFunctions.get(name)
+    case SyslType.RefType(SyslType.StructType(name, _, _)) => deinitFunctions.get(name)
     case _ => None
 
   /** Emit inline refcount decrement + free when count reaches 0.
