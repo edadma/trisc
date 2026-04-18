@@ -62,9 +62,9 @@ Command bytes for TFS and TTY server protocols.
     val GRANT_WRITE = 2
     val GRANT_RW    = 3
 
-    grant_create(vaddr: int, len: int, flags: int) -> int
+    grant_create(vaddr: u64, len: int, flags: int) -> int
         var args: [3]i64
-        args[0] = vaddr
+        args[0] = i64(vaddr)
         args[1] = len
         args[2] = flags
         int(syscall(SYS_GRANT_CREATE, i64(args)))
@@ -159,7 +159,7 @@ Write a string to stdout (handle 1) via VFS.
         val port = fs_port()
         if port < 0
             return -1
-        val gid = grant_create(int(i64(data)), wlen, GRANT_READ)
+        val gid = grant_create(u64(data), wlen, GRANT_READ)
         if gid < 0
             return -1
         var msg: [13]byte
@@ -211,7 +211,7 @@ Returns the number of bytes read, or -1 on error.
         val port = fs_port()
         if port < 0
             return -1
-        val gid = grant_create(int(i64(buf)), count, GRANT_WRITE)
+        val gid = grant_create(u64(buf), count, GRANT_WRITE)
         if gid < 0
             return -1
         var msg: [13]byte

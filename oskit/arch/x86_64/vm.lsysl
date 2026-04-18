@@ -19,16 +19,16 @@ be remapped per-process.
     import oskit.config.{PAGE_SIZE, KERNEL_L1_BASE, PAGE_POOL_BASE, PAGE_POOL_END}
     import oskit.hal.{memcpy, memset}
 
-x86_64 PTE flags.
+x86_64 PTE flags (i64 — PTEs are 64-bit on x86_64).
 
-    val PTE_P  = 1       // present
-    val PTE_W  = 2       // writable
-    val PTE_U  = 4       // user accessible
-    val PTE_PS = 0x80    // 2MB page size (PD level)
+    val PTE_P:  i64 = 1       // present
+    val PTE_W:  i64 = 2       // writable
+    val PTE_U:  i64 = 4       // user accessible
+    val PTE_PS: i64 = 0x80    // 2MB page size (PD level)
 
 Mask for extracting physical address from a PTE (bits 12-51).
 
-    val PTE_ADDR_MASK = 0x000FFFFFFFFFF000
+    val PTE_ADDR_MASK: i64 = 0x000FFFFFFFFFF000
 
 Legacy TRISC PTE flag names (used by kernel for nothing, but
 keep exports stable).
@@ -40,43 +40,43 @@ keep exports stable).
 
 Page pool state.
 
-    var page_pool_next: int = 0
+    var page_pool_next: u64 = 0
     var page_pool_init = false
-    var page_free_list = 0
+    var page_free_list: u64 = 0
 
 Hardware page table operations (boot.s).
 
-    extern vm_set_ptbr(addr: int)
+    extern vm_set_ptbr(addr: u64)
     extern vm_flush_tlb()
-    extern vm_get_ptbr() -> int
+    extern vm_get_ptbr() -> u64
     extern debug_char(c: int)
     extern debug_hex4(v: int)
 
 Kernel PML4 address, recorded at boot.
 
-    var kernel_pml4 = 0
+    var kernel_pml4: u64 = 0
 
 Return the kernel page table base address. Used by the kernel
 instead of the TRISC-specific KERNEL_L1_BASE constant.
 
-    kernel_ptbr() -> int
+    kernel_ptbr() -> u64
         kernel_pml4
 
 Write a 64-bit PTE at a given address.
 
-    vm_write_pte64(addr: int, pte: i64)
+    vm_write_pte64(addr: u64, pte: i64)
         var p: *i64 = *i64(addr)
         *p = pte
 
 Read a 64-bit PTE from a given address.
 
-    vm_read_pte64(addr: int) -> i64
+    vm_read_pte64(addr: u64) -> i64
         var p: *i64 = *i64(addr)
         *p
 
 Legacy 32-bit PTE write (unused on x86_64 but kept for interface).
 
-    vm_write_pte(addr: int, pte: int)
+    vm_write_pte(addr: u64, pte: int)
         vm_write_pte64(addr, i64(pte))
 
 
@@ -88,8 +88,8 @@ program region while keeping PD[1..15] as 2MB superpages.
         kernel_pml4 = vm_get_ptbr()
 
         // Walk PML4[0] → PDPT → PD to find the PD address
-        val pdpt_addr = int(vm_read_pte64(kernel_pml4) & PTE_ADDR_MASK)
-        val pd_addr = int(vm_read_pte64(pdpt_addr) & PTE_ADDR_MASK)
+        val pdpt_addr = u64(vm_read_pte64(kernel_pml4) & PTE_ADDR_MASK)
+        val pd_addr = u64(vm_read_pte64(pdpt_addr) & PTE_ADDR_MASK)
 
         // Allocate a PT for the first 2MB (replaces the 2MB superpage at PD[0])
         val pt = page_alloc_zero()
@@ -99,8 +99,8 @@ program region while keeping PD[1..15] as 2MB superpages.
         // Fill PT[0..511] with identity-mapped 4KB entries (present + writable)
         var i = 0
         while i < 512
-            val phys = i64(i * PAGE_SIZE)
-            vm_write_pte64(pt + i * 8, phys | PTE_P | PTE_W)
+            val phys = i64(u64(i) * u64(PAGE_SIZE))
+            vm_write_pte64(pt + u64(i) * 8, phys | PTE_P | PTE_W)
             i += 1
 
         // Replace PD[0] with pointer to PT (remove PS bit → 4KB pages)
@@ -114,13 +114,13 @@ modules (ramdisk, boot info) to avoid overwriting them.
 Boot.s sets page_pool_min_addr before kernel_init runs.
 
     extern _heap_start: byte
-    var page_pool_min_addr = 0
+    var page_pool_min_addr: u64 = 0
 
-    page_alloc() -> int
+    page_alloc() -> u64
         if !page_pool_init
-            var base = PAGE_POOL_BASE
-            val bss_end = int(i64(&_heap_start))
-            val aligned = (bss_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)
+            var base = u64(PAGE_POOL_BASE)
+            val bss_end = u64(&_heap_start)
+            val aligned = (bss_end + u64(PAGE_SIZE - 1)) & ~u64(PAGE_SIZE - 1)
             if aligned > base
                 base = aligned
             if page_pool_min_addr > base
@@ -130,20 +130,20 @@ Boot.s sets page_pool_min_addr before kernel_init runs.
         if page_free_list != 0
             val page = page_free_list
             var next: *i64 = *i64(page)
-            page_free_list = int(*next)
+            page_free_list = u64(*next)
             return page
-        if page_pool_next >= PAGE_POOL_END
+        if page_pool_next >= u64(PAGE_POOL_END)
             return 0
         val page = page_pool_next
-        page_pool_next += PAGE_SIZE
+        page_pool_next += u64(PAGE_SIZE)
         page
 
-    page_free(addr: int)
+    page_free(addr: u64)
         var p: *i64 = *i64(addr)
         *p = i64(page_free_list)
         page_free_list = addr
 
-    page_alloc_zero() -> int
+    page_alloc_zero() -> u64
         val page = page_alloc()
         if page != 0
             memset(*byte(page), 0, PAGE_SIZE)
@@ -156,7 +156,7 @@ Kernel pages (first 2MB except program region) are identity-mapped.
 PD[1..15] use 2MB superpages copied from the kernel PD.
 Returns PML4 address, or 0 on failure.
 
-    vm_create_process_pt() -> int
+    vm_create_process_pt() -> u64
         val pml4 = page_alloc_zero()
         if pml4 == 0
             return 0
@@ -180,12 +180,12 @@ Returns PML4 address, or 0 on failure.
         vm_write_pte64(pd, i64(pt) | PTE_P | PTE_W | PTE_U)
 
         // PD[1..15]: copy 2MB superpages from kernel PD
-        val k_pdpt = int(vm_read_pte64(kernel_pml4) & PTE_ADDR_MASK)
-        val k_pd = int(vm_read_pte64(k_pdpt) & PTE_ADDR_MASK)
+        val k_pdpt = u64(vm_read_pte64(kernel_pml4) & PTE_ADDR_MASK)
+        val k_pd = u64(vm_read_pte64(k_pdpt) & PTE_ADDR_MASK)
         var j = 1
         while j < 16
-            val k_pde = vm_read_pte64(k_pd + j * 8)
-            vm_write_pte64(pd + j * 8, k_pde)
+            val k_pde = vm_read_pte64(k_pd + u64(j) * 8)
+            vm_write_pte64(pd + u64(j) * 8, k_pde)
             j += 1
 
         // PT[0x00..0xCB]: kernel region, identity-mapped (present + writable)
@@ -197,9 +197,9 @@ Returns PML4 address, or 0 on failure.
                 val args_page = page_alloc_zero()
                 if args_page == 0
                     return 0
-                vm_write_pte64(pt + i * 8, i64(args_page) | PTE_P | PTE_W | PTE_U)
+                vm_write_pte64(pt + u64(i) * 8, i64(args_page) | PTE_P | PTE_W | PTE_U)
             else
-                vm_write_pte64(pt + i * 8, i64(i * PAGE_SIZE) | PTE_P | PTE_W)
+                vm_write_pte64(pt + u64(i) * 8, i64(u64(i) * u64(PAGE_SIZE)) | PTE_P | PTE_W)
             i += 1
 
         // PT[0xCC..0xFF]: program region, fresh physical pages (present + writable + user)
@@ -207,7 +207,7 @@ Returns PML4 address, or 0 on failure.
             val page = page_alloc()
             if page == 0
                 return 0
-            vm_write_pte64(pt + i * 8, i64(page) | PTE_P | PTE_W | PTE_U)
+            vm_write_pte64(pt + u64(i) * 8, i64(page) | PTE_P | PTE_W | PTE_U)
             i += 1
 
         // PT[0x100..0x1FF]: kernel code/data/BSS region, identity-mapped
@@ -215,7 +215,7 @@ Returns PML4 address, or 0 on failure.
         // entry, and all kernel functions live here. Without this mapping,
         // int $0x80 from a child process would triple-fault.
         while i < 0x200
-            vm_write_pte64(pt + i * 8, i64(i * PAGE_SIZE) | PTE_P | PTE_W)
+            vm_write_pte64(pt + u64(i) * 8, i64(u64(i) * u64(PAGE_SIZE)) | PTE_P | PTE_W)
             i += 1
 
         pml4
@@ -229,17 +229,17 @@ Note: x86_64 doesn't have TRISC's fixed 0x800000 I/O region.
 This is a placeholder — real x86_64 I/O uses port I/O (already
 in boot.s) not MMIO. Stubbed for interface compatibility.
 
-    vm_create_server_pt(io_page: int) -> int
+    vm_create_server_pt(io_page: int) -> u64
         val pml4 = vm_create_process_pt()
         if pml4 == 0
             return 0
         // Grant user access to page 0xBF (0xBF000) for RS info page
         // (RS TID, ramdisk base/size written before server starts)
-        val pdpt = int(vm_read_pte64(pml4) & PTE_ADDR_MASK)
-        val pd = int(vm_read_pte64(pdpt) & PTE_ADDR_MASK)
-        val pt = int(vm_read_pte64(pd) & PTE_ADDR_MASK)
-        val old_pte = vm_read_pte64(pt + 0xBF * 8)
-        vm_write_pte64(pt + 0xBF * 8, old_pte | PTE_U)
+        val pdpt = u64(vm_read_pte64(pml4) & PTE_ADDR_MASK)
+        val pd = u64(vm_read_pte64(pdpt) & PTE_ADDR_MASK)
+        val pt = u64(vm_read_pte64(pd) & PTE_ADDR_MASK)
+        val old_pte = vm_read_pte64(pt + u64(0xBF) * 8)
+        vm_write_pte64(pt + u64(0xBF) * 8, old_pte | PTE_U)
         pml4
 
 
@@ -247,35 +247,35 @@ Grant mapping region for zero-copy IPC.
 PD[16] maps virtual addresses starting at 0x2000000 (32MB).
 
     val GRANT_PD_IDX = 16
-    val GRANT_REGION_BASE = 0x2000000
+    val GRANT_REGION_BASE: u64 = 0x2000000
     val GRANT_REGION_PAGES = 512
 
 
 Ensure a page table exists at PD[16] for the grant mapping
 region. If not present, allocates one. Returns PT address or 0.
 
-    vm_grant_ensure_pt(ptbr: int) -> int
+    vm_grant_ensure_pt(ptbr: u64) -> u64
         // Walk PML4 → PDPT → PD to find PD[16]
         val pml4e = vm_read_pte64(ptbr)
-        val pdpt = int(pml4e & PTE_ADDR_MASK)
+        val pdpt = u64(pml4e & PTE_ADDR_MASK)
         val pdpte = vm_read_pte64(pdpt)
-        val pd = int(pdpte & PTE_ADDR_MASK)
-        val pde = vm_read_pte64(pd + GRANT_PD_IDX * 8)
-        if (int(pde) & PTE_P) != 0
+        val pd = u64(pdpte & PTE_ADDR_MASK)
+        val pde = vm_read_pte64(pd + u64(GRANT_PD_IDX) * 8)
+        if (pde & PTE_P) != 0
             // PT already exists
-            return int(pde & PTE_ADDR_MASK)
+            return u64(pde & PTE_ADDR_MASK)
         // Allocate new PT
         val pt = page_alloc_zero()
         if pt == 0
             return 0
-        vm_write_pte64(pd + GRANT_PD_IDX * 8, i64(pt) | PTE_P | PTE_W | PTE_U)
+        vm_write_pte64(pd + u64(GRANT_PD_IDX) * 8, i64(pt) | PTE_P | PTE_W | PTE_U)
         pt
 
 
 Scan the grant region PT for `count` contiguous free (non-present)
 entries. Returns the starting virtual address or 0 if not found.
 
-    vm_grant_find_free(ptbr: int, count: int) -> int
+    vm_grant_find_free(ptbr: u64, count: int) -> u64
         val pt = vm_grant_ensure_pt(ptbr)
         if pt == 0
             return 0
@@ -283,13 +283,13 @@ entries. Returns the starting virtual address or 0 if not found.
         var start = 0
         var i = 0
         while i < GRANT_REGION_PAGES
-            val pte = vm_read_pte64(pt + i * 8)
-            if (int(pte) & PTE_P) == 0
+            val pte = vm_read_pte64(pt + u64(i) * 8)
+            if (pte & PTE_P) == 0
                 if run == 0
                     start = i
                 run += 1
                 if run >= count
-                    return GRANT_REGION_BASE + start * 4096
+                    return GRANT_REGION_BASE + u64(start) * 4096
             else
                 run = 0
             i += 1
@@ -299,7 +299,7 @@ entries. Returns the starting virtual address or 0 if not found.
 Map a single physical page at a specific virtual address in the
 grant region.
 
-    vm_grant_map_page(ptbr: int, vaddr: int, paddr: int, writable: int)
+    vm_grant_map_page(ptbr: u64, vaddr: u64, paddr: u64, writable: int)
         val pt = vm_grant_ensure_pt(ptbr)
         if pt == 0
             return
@@ -307,49 +307,49 @@ grant region.
         var flags = PTE_P | PTE_U
         if writable != 0
             flags = flags | PTE_W
-        vm_write_pte64(pt + idx * 8, i64(paddr) | i64(flags))
+        vm_write_pte64(pt + idx * 8, i64(paddr) | flags)
 
 
 Clear PTEs for `count` pages starting at `vaddr` in the grant
 region. Flushes TLB after unmapping.
 
-    vm_grant_unmap_pages(ptbr: int, vaddr: int, count: int)
+    vm_grant_unmap_pages(ptbr: u64, vaddr: u64, count: int)
         val pt = vm_grant_ensure_pt(ptbr)
         if pt == 0
             return
         val start_idx = (vaddr - GRANT_REGION_BASE) / 4096
         var i = 0
         while i < count
-            vm_write_pte64(pt + (start_idx + i) * 8, i64(0))
+            vm_write_pte64(pt + (start_idx + u64(i)) * 8, i64(0))
             i += 1
         vm_flush_tlb()
 
 
 Free all pages allocated for a process page table.
 
-    vm_free_process_pt(l1_addr: int)
+    vm_free_process_pt(l1_addr: u64)
         if l1_addr == 0
             return
         if l1_addr == kernel_pml4
             return
 
         // Walk PML4[0] → PDPT[0] → PD[0] → PT
-        val pdpt = int(vm_read_pte64(l1_addr) & PTE_ADDR_MASK)
+        val pdpt = u64(vm_read_pte64(l1_addr) & PTE_ADDR_MASK)
         if pdpt == 0
             return
-        val pd = int(vm_read_pte64(pdpt) & PTE_ADDR_MASK)
+        val pd = u64(vm_read_pte64(pdpt) & PTE_ADDR_MASK)
         if pd == 0
             return
-        val pt = int(vm_read_pte64(pd) & PTE_ADDR_MASK)
+        val pt = u64(vm_read_pte64(pd) & PTE_ADDR_MASK)
         if pt == 0
             return
 
         // Free program pages (PT entries 0xCC-0xFF)
         var i = 0xCC
         while i < 0x100
-            val pte = vm_read_pte64(pt + i * 8)
-            if (int(pte) & PTE_P) != 0
-                val phys = int(pte & PTE_ADDR_MASK)
+            val pte = vm_read_pte64(pt + u64(i) * 8)
+            if (pte & PTE_P) != 0
+                val phys = u64(pte & PTE_ADDR_MASK)
                 page_free(phys)
             i += 1
 
@@ -363,50 +363,50 @@ Free all pages allocated for a process page table.
 Software four-level page table walk. Translates a virtual
 address to physical using the given PML4.
 
-    vm_v2p(ptbr: int, vaddr: int) -> int
-        val pml4_idx = (vaddr >> 39) & 0x1FF
-        val pdpt_idx = (vaddr >> 30) & 0x1FF
-        val pd_idx   = (vaddr >> 21) & 0x1FF
-        val pt_idx   = (vaddr >> 12) & 0x1FF
-        val offset   = vaddr & 0xFFF
+    vm_v2p(ptbr: u64, vaddr: u64) -> u64
+        val pml4_idx = (vaddr >> 39) & u64(0x1FF)
+        val pdpt_idx = (vaddr >> 30) & u64(0x1FF)
+        val pd_idx   = (vaddr >> 21) & u64(0x1FF)
+        val pt_idx   = (vaddr >> 12) & u64(0x1FF)
+        val offset   = vaddr & u64(0xFFF)
 
         // PML4 → PDPT
         val pml4e = vm_read_pte64(ptbr + pml4_idx * 8)
-        if (int(pml4e) & PTE_P) == 0
+        if (pml4e & PTE_P) == 0
             return 0
-        val pdpt_addr = int(pml4e & PTE_ADDR_MASK)
+        val pdpt_addr = u64(pml4e & PTE_ADDR_MASK)
 
         // PDPT → PD (1GB pages not used)
         val pdpte = vm_read_pte64(pdpt_addr + pdpt_idx * 8)
-        if (int(pdpte) & PTE_P) == 0
+        if (pdpte & PTE_P) == 0
             return 0
-        val pd_addr = int(pdpte & PTE_ADDR_MASK)
+        val pd_addr = u64(pdpte & PTE_ADDR_MASK)
 
         // PD → check for 2MB page (PS bit)
         val pde = vm_read_pte64(pd_addr + pd_idx * 8)
-        if (int(pde) & PTE_P) == 0
+        if (pde & PTE_P) == 0
             return 0
-        if (int(pde) & PTE_PS) != 0
+        if (pde & PTE_PS) != 0
             // 2MB superpage
-            val base = int(pde & PTE_ADDR_MASK)
-            return base | (vaddr & 0x1FFFFF)
+            val base = u64(pde & PTE_ADDR_MASK)
+            return base | (vaddr & u64(0x1FFFFF))
 
         // PT → 4KB page
-        val pt_addr = int(pde & PTE_ADDR_MASK)
+        val pt_addr = u64(pde & PTE_ADDR_MASK)
         val pte = vm_read_pte64(pt_addr + pt_idx * 8)
-        if (int(pte) & PTE_P) == 0
+        if (pte & PTE_P) == 0
             return 0
-        val page = int(pte & PTE_ADDR_MASK)
+        val page = u64(pte & PTE_ADDR_MASK)
         page | offset
 
 
 Copy data into another address space using physical addressing.
 
-    vm_copy_to(dst_ptbr: int, dst_vaddr: int, src: *byte, len: int)
+    vm_copy_to(dst_ptbr: u64, dst_vaddr: u64, src: *byte, len: int)
         var copied = 0
         while copied < len
-            val pa = vm_v2p(dst_ptbr, dst_vaddr + copied)
-            val page_off = (dst_vaddr + copied) & 0xFFF
+            val pa = vm_v2p(dst_ptbr, dst_vaddr + u64(copied))
+            val page_off = int((dst_vaddr + u64(copied)) & u64(0xFFF))
             var chunk = PAGE_SIZE - page_off
             if chunk > len - copied
                 chunk = len - copied
@@ -415,11 +415,11 @@ Copy data into another address space using physical addressing.
 
 Copy data from another address space using physical addressing.
 
-    vm_copy_from(src_ptbr: int, src_vaddr: int, dst: *byte, len: int)
+    vm_copy_from(src_ptbr: u64, src_vaddr: u64, dst: *byte, len: int)
         var copied = 0
         while copied < len
-            val pa = vm_v2p(src_ptbr, src_vaddr + copied)
-            val page_off = (src_vaddr + copied) & 0xFFF
+            val pa = vm_v2p(src_ptbr, src_vaddr + u64(copied))
+            val page_off = int((src_vaddr + u64(copied)) & u64(0xFFF))
             var chunk = PAGE_SIZE - page_off
             if chunk > len - copied
                 chunk = len - copied
@@ -428,13 +428,13 @@ Copy data from another address space using physical addressing.
 
 Copy data between two address spaces via physical addresses.
 
-    vm_copy_cross(src_ptbr: int, src_vaddr: int, dst_ptbr: int, dst_vaddr: int, len: int)
+    vm_copy_cross(src_ptbr: u64, src_vaddr: u64, dst_ptbr: u64, dst_vaddr: u64, len: int)
         var copied = 0
         while copied < len
-            val src_pa = vm_v2p(src_ptbr, src_vaddr + copied)
-            val dst_pa = vm_v2p(dst_ptbr, dst_vaddr + copied)
-            val src_off = (src_vaddr + copied) & 0xFFF
-            val dst_off = (dst_vaddr + copied) & 0xFFF
+            val src_pa = vm_v2p(src_ptbr, src_vaddr + u64(copied))
+            val dst_pa = vm_v2p(dst_ptbr, dst_vaddr + u64(copied))
+            val src_off = int((src_vaddr + u64(copied)) & u64(0xFFF))
+            val dst_off = int((dst_vaddr + u64(copied)) & u64(0xFFF))
             var chunk = PAGE_SIZE - src_off
             val dst_chunk = PAGE_SIZE - dst_off
             if dst_chunk < chunk
