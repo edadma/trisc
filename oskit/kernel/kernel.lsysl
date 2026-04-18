@@ -1156,6 +1156,13 @@ enqueueing them back into their priority run queue.
         // and notify PM so it can handle reaping
         val pid = threads[current_thread].pid
         if pid > 0
+            // DEBUG: trace process exit (tid:pid)
+            debug_char('{')
+            debug_char('X')
+            debug_hex4(current_thread)
+            debug_char(':')
+            debug_hex4(pid)
+            debug_char('}')
             processes[pid].exit_code = exit_code
             processes[pid].state = PROC_ZOMBIE
             if kernel_pm_tid >= 0

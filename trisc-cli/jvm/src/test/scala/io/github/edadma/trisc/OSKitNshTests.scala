@@ -540,6 +540,12 @@ import oskit.hal.memset
     output should include("2")  // 2 lines
   }
 
+  "NSH: wc counts from pipe" in {
+    val keys = typeString("echo asdf | wc\n", startTick = 2000000, spacing = 12000)
+    val (_, output) = runNsh(scheduledKeys = keys, maxCycles = 200000000)
+    output should include("1")
+  }
+
   // --- grep tests ---
 
   "NSH: grep finds matching line" taggedAs Slow in {

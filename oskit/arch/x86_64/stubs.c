@@ -55,6 +55,16 @@ ssize_t write(int fd, const void *buf, size_t len) {
 }
 
 int putchar(int c) { oskit_arch_x86_64__uart_putc(c); return c; }
+
+/* Debug output for kernel tracing — uses existing uart_putc */
+void debug_char(int c) { oskit_arch_x86_64__uart_putc(c); }
+void debug_hex4(int v) {
+    const char *h = "0123456789ABCDEF";
+    debug_char(h[(v >> 12) & 0xF]);
+    debug_char(h[(v >> 8) & 0xF]);
+    debug_char(h[(v >> 4) & 0xF]);
+    debug_char(h[v & 0xF]);
+}
 int printf(const char *fmt, ...) { (void)fmt; return 0; }
 int snprintf(char *buf, size_t n, const char *fmt, ...) { (void)buf; (void)n; (void)fmt; return 0; }
 int fflush(void *stream) { (void)stream; return 0; }

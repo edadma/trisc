@@ -18,7 +18,7 @@ All other commands are external /bin/ programs loaded via PM spawn.
         connect, pm_waitpid, pm_kill, pm_spawn_handles,
         sleep, exit, exit_with, get_args, skip_arg0, STDOUT,
         create, unlink, seek, pipe,
-        pm_port, ipc_send, msg_write_i32}
+        pm_port, ipc_send, msg_write_i32, ulib_putc}
 
 
 Shell state.
@@ -773,11 +773,22 @@ the appropriate stdin/stdout handles, then waits for all.
         nsh_flush()
         if pids[num_cmds - 1] >= 0
             nsh_set_fg(0, pids[num_cmds - 1])
+        // DEBUG: trace pipeline PIDs and wait
+        ulib_putc('[')
+        seg = 0
+        while seg < num_cmds
+            // Print PID for this segment
+            ulib_putc('0' + pids[seg] % 10)
+            seg += 1
+        ulib_putc('|')
         seg = 0
         while seg < num_cmds
             if pids[seg] >= 0
+                ulib_putc('w')
                 pm_waitpid(pids[seg])
+                ulib_putc('d')
             seg += 1
+        ulib_putc(']')
         nsh_set_fg(0, -1)
         nsh_putc('\n')
 
@@ -785,6 +796,10 @@ The shell entry point. Home directory is passed via args
 (e.g. "nsh /root"). If no args, defaults to "/".
 
     main()
+        // DEBUG: trace nsh startup
+        ulib_putc('{')
+        ulib_putc('N')
+        ulib_putc('}')
         val args = skip_arg0(get_args())
         if len(args) > 0
             cwd = args

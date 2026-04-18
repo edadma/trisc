@@ -193,11 +193,12 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("1")
   }
 
-  // TODO: wc hangs after pipe read — nsh never resumes from pm_waitpid.
-  // wc produces correct output (all 3 numbers) but exit doesn't complete.
-  // File mode works (wc /tmp/file), pipe mode doesn't (echo x | wc).
-  // Pre-existing bug, not related to codegen.
-  "x86 wc: echo piped to wc" ignore {
+  "x86 pipe: echo to test_pipe 4 writes" in {
+    val output = qemu.command("echo hello | test_pipe")
+    output should include("D")
+  }
+
+  "x86 wc: echo piped to wc" in {
     val output = qemu.command("echo asdf | wc")
     output should include("1")
   }

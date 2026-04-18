@@ -1,22 +1,23 @@
-test_pipe — minimal pipe test
-==============================
+test_pipe — minimal pipeline write test
+========================================
+
+Reads stdin to EOF, then does N writes to stdout, then exits.
+Used to test the x86 pipe hang with multiple writes.
 
     module oskit.bin.test_pipe
 
-    import oskit.ulib.{putc, pipe, close, exit}
+    import oskit.ulib.{read, write_handle, puts, exit, STDIN, STDOUT}
 
     main()
-        putc('1')
-        var rd = 0
-        var wr = 0
-        putc('2')
-        val r = pipe(&rd, &wr)
-        putc('3')
-        if r == 0
-            putc('Y')
-            close(rd)
-            close(wr)
-        else
-            putc('N')
-        putc('\n')
+        // Drain stdin
+        var buf: [256]byte
+        var nr = read(STDIN, buf, 256)
+        while nr > 0
+            nr = read(STDIN, buf, 256)
+
+        // Do 4 writes
+        puts("A\n")
+        puts("B\n")
+        puts("C\n")
+        puts("D\n")
         exit()

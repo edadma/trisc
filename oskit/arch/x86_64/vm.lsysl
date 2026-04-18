@@ -49,6 +49,8 @@ Hardware page table operations (boot.s).
     extern vm_set_ptbr(addr: int)
     extern vm_flush_tlb()
     extern vm_get_ptbr() -> int
+    extern debug_char(c: int)
+    extern debug_hex4(v: int)
 
 Kernel PML4 address, recorded at boot.
 
