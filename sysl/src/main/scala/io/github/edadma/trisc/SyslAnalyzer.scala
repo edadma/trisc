@@ -1623,7 +1623,12 @@ class SyslAnalyzer:
 
   private def analyzeExpr(expr: ExpressionAST): TExpr =
     expr match
-      case IntLitAST(n) => TIntLit(n, I32)
+      case IntLitAST(n) =>
+        // Promote to i64 if value doesn't fit in any 32-bit type.
+        // Values up to 0xFFFFFFFF fit in u32, and negative values down to
+        // -0x80000000 fit in i32, so only values outside that range need i64.
+        if n > 0xFFFFFFFFL || n < -0x80000000L then TIntLit(n, I64)
+        else TIntLit(n, I32)
       case TypedIntLitAST(n, typeName) => TIntLit(n, resolveType(NamedTypeAST(typeName)))
       case FloatLitAST(d) => TFloatLit(d, DoubleType)
       case CharLitAST(c) => TIntLit(c.toLong, U32)

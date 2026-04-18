@@ -258,4 +258,25 @@ class SyslCodegenIntWidthTests extends SyslCodegenHelpers {
   "long cast" in { compileAndRun("main() -> int = long(42)\n") shouldBe 42 }
   "ulong cast" in { compileAndRun("main() -> int = ulong(42)\n") shouldBe 42 }
   "uint cast" in { compileAndRun("main() -> int = uint(42)\n") shouldBe 42 }
+
+  // ===== u64 struct field (value > 2^32) =====
+
+  "u64 struct field stores and reads value > 2^32" in {
+    compileAndRun(
+      """struct W
+        |    v: u64
+        |
+        |main() -> i64
+        |    w = W(0x1_0000_0000)
+        |    w.v
+        |""".stripMargin) shouldBe 0x100000000L
+  }
+
+  "i64 literal auto-promoted" in {
+    compileAndRun(
+      """main() -> i64
+        |    var x: i64 = 0x1_0000_0000
+        |    x
+        |""".stripMargin) shouldBe 0x100000000L
+  }
 }
