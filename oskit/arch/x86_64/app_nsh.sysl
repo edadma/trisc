@@ -153,7 +153,7 @@ kernel_main() -> i64
     vm_copy_to(rs_ptbr, 0xBF000, info_page, 512)
 
     // Create RS process (suspended) and resume it
-    val rs_pid = create_process_suspended(rs_entry_pt, 0xD0000, 0xCF000, "rs", rs_ptbr)
+    val rs_pid = create_process_suspended(rs_entry_pt, 0xD4000, 0xD3000, "rs", rs_ptbr)
     if rs_pid < 0
         return -1
     resume_process(rs_pid)
