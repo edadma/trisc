@@ -122,8 +122,8 @@ Port IDs are stored in rs_server_ports[] (looked up by name).
         svc_set_ipc_mask(rs_server_pids[0], 0)
         // tfs: sends to disk
         svc_set_ipc_mask(rs_server_pids[1], 1 << disk_port)
-        // tty: no IPC sends
-        svc_set_ipc_mask(rs_server_pids[2], 0)
+        // tty: sends to pm (Ctrl-C → PM_CMD_SIGINT)
+        svc_set_ipc_mask(rs_server_pids[2], 1 << pm_port)
         // pm: sends to vfs
         svc_set_ipc_mask(rs_server_pids[3], 1 << vfs_port)
         // vfs: sends to tfs and tty
@@ -147,7 +147,7 @@ to re-tighten the mask (rs_set_server_priv sets 0xFF default).
         else if idx == 1
             svc_set_ipc_mask(rs_server_pids[1], 1 << disk_port)
         else if idx == 2
-            svc_set_ipc_mask(rs_server_pids[2], 0)
+            svc_set_ipc_mask(rs_server_pids[2], 1 << pm_port)
         else if idx == 3
             svc_set_ipc_mask(rs_server_pids[3], 1 << vfs_port)
         else if idx == 4

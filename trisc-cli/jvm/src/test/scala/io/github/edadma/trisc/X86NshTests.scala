@@ -223,12 +223,12 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("asdf")
   }
 
-  "x86 signal: ctrl-c kills foreground process" ignore {
-    // TODO: Control characters (0x03, 0x1C) don't pass through QEMU serial pipe.
-    // Test via TRISC emulator headless test or GUI emulator manually.
+  "x86 signal: ctrl-c kills foreground process" in {
+    // Byte 0x03 passes through -chardev stdio,signal=off directly to COM1,
+    // since Java's process pipe bypasses the host terminal.
     qemu.send("count\n")
     Thread.sleep(2000)
-    qemu.send("\u001c")
+    qemu.send("\u0003")
     qemu.waitFor(rootPrompt)
     val ps = qemu.command("ps")
     ps should not include "count"
