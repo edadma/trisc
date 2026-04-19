@@ -85,6 +85,17 @@ syscall:
     svc #0
     ret
 
+// arch_syscall_call(arg: i64, handler: i64)
+//   Tail-call a syscall handler whose address came from syscall_table.
+//   Handlers take a single i64 (the caller's x0) and return nothing
+//   — they write the return value into the saved frame via
+//   syscall_return(). AAPCS64: x0 is the arg (already in place),
+//   x1 is the handler address — br tail-jumps, handler rets to our
+//   caller.
+.global arch_syscall_call
+arch_syscall_call:
+    br  x1
+
 // user_svc_test — tiny EL0 entry used to sanity-check the EL1->EL0
 // transition. Issues `svc #0x42` so the exception reporter in
 // vectors.s fires `low64_sync` (V=8) with ESR_EL1 carrying EC=0x15

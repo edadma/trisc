@@ -259,6 +259,13 @@ syscalls (putc, queries) remain hardcoded in boot.asm.
     var syscall_table: [96]i64  // 96 = MAX_SYSCALLS
     var syscall_ssp: i64
 
+Platform dispatch uses this to hand the saved frame pointer to
+syscall_return. Imported module-level vars are read-only, so go
+through a setter when the arch layer needs to write it.
+
+    syscall_ssp_set(v: i64)
+        syscall_ssp = v
+
 Set the return value for the current syscall. Writes into
 the saved return register slot on the SSP so the caller
 sees it after context restore. The offset is arch-specific:

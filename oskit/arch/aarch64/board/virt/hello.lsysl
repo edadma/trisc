@@ -27,8 +27,12 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         build_stack_frame, arch_resume_process,
         STACK_FRAME_SIZE, arch_cli, arch_sti}
     import oskit.kernel.{kernel_init, create_thread, first_thread_ssp,
-        kernel_stack_usp, kernel_stack_ssp, schedule}
+        kernel_stack_usp, kernel_stack_ssp, schedule,
+        syscall_table, syscall_ssp_set, syscall_check_allowed}
     import oskit.ipc.ipc_init
+    import oskit.services.{get_thread_count, uptime}
+
+    extern arch_syscall_call(arg: i64, handler: i64)
 
     val DEMO_MODE = 0             // 0=kernel, 1=ad-hoc, 2=EL0
 
@@ -169,31 +173,64 @@ Scheduler hook. Three shapes:
             return kt_ssp[next]
         ssp
 
-Minimal SVC dispatcher for the EL0 demo.
+SVC dispatcher. Looks up the kernel's registered handler in
+syscall_table[num], runs the privilege check, and tail-calls the
+handler via the arch_syscall_call asm helper. Handlers write
+their return value into the saved frame by calling syscall_return
+(which reads syscall_ssp).
+
+DEMO_MODE == 2 keeps the old EL0 demo behavior (SYS_EXIT=93 halts,
+SYS_PUTHEX=1 prints) so legacy output still works when the shared
+kernel isn't in play.
 
     syscall_dispatch(frame: u64)
         var fp: *i64 = *i64(frame)
-        val num = u64(fp[8])
-        val a0 = u64(fp[0])
-        if num == u64(1)
-            uart_puts("[EL0 says ")
-            uart_puthex(a0)
-            uart_puts("]\n")
-            fp[0] = i64(0)
-        else if num == u64(93)
-            uart_puts("[EL0 exited, code=")
-            uart_puthex(a0)
-            uart_puts("]\n")
-            abort()
-        else
-            uart_puts("[unknown syscall num=")
-            uart_puthex(num)
-            uart_puts("]\n")
-            fp[0] = i64(-1)
+        val num = int(fp[8])
+        val a0 = fp[0]
 
-Kernel-thread entries for the kernel-integrated demo.
+        if DEMO_MODE == 2
+            if num == 1
+                uart_puts("[EL0 says ")
+                uart_puthex(u64(a0))
+                uart_puts("]\n")
+                fp[0] = i64(0)
+                return
+            if num == 93
+                uart_puts("[EL0 exited, code=")
+                uart_puthex(u64(a0))
+                uart_puts("]\n")
+                abort()
+
+        if num < 0 || num >= 96
+            fp[0] = i64(-1)
+            return
+
+        val handler = syscall_table[num]
+        if handler == i64(0)
+            fp[0] = i64(-1)
+            return
+
+        syscall_ssp_set(i64(frame))
+
+        if syscall_check_allowed(num) == 0
+            fp[0] = i64(-1)
+            return
+
+        arch_syscall_call(a0, handler)
+
+Kernel-thread entries for the kernel-integrated demo. kentry_a
+also exercises the SVC path by calling syscall() via services —
+on first tick it prints get_thread_count() and uptime() to prove
+that the kernel syscall table + dispatcher round-trip works.
 
     kentry_a()
+        val tc = get_thread_count()
+        val up = uptime()
+        uart_puts("[kern A] thread_count=")
+        uart_puthex(u64(tc))
+        uart_puts(" uptime=")
+        uart_puthex(u64(up))
+        uart_puts("\n")
         while true
             uart_puts("[kern A]\n")
             arch_wfi()
