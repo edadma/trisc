@@ -104,3 +104,40 @@ between the kernel image and the top of our 1GB identity map.
                 p[i] = 0
                 i += 1
         page
+
+Create a per-process page table that mirrors the kernel map. At
+this stage every process sees the same 1GB Device / 1GB Normal
+blocks we established in `mmu.s`; future work will carve a smaller
+EL0-accessible region out of the RAM block so user code can be
+isolated from kernel globals.
+
+Returns the physical address of the new L0 table, or 0 on failure.
+The L0 has a single table descriptor at index 0 pointing at a
+fresh L1; the L1 is populated by copying L1[0] and L1[1] from the
+kernel's L1. That's enough for kernel code and UART MMIO to remain
+mapped after `vm_set_ptbr(new_pt)`.
+
+    extern l1_table: byte
+
+    vm_create_process_pt() -> u64
+        val new_l0 = page_alloc_zero()
+        if new_l0 == 0
+            return 0
+        val new_l1 = page_alloc_zero()
+        if new_l1 == 0
+            page_free(new_l0)
+            return 0
+
+        // L0[0] -> new_l1 (table descriptor: addr | valid | table)
+        vm_write_pte64(new_l0, i64(new_l1) | PTE_VALID | PTE_TABLE)
+
+        // Copy the kernel's L1[0] (Device) and L1[1] (Normal) blocks.
+        // Everything above 2GB is left zero for now; we only need the
+        // two regions set up by mmu.s.
+        val kernel_l1 = u64(i64(&l1_table))
+        val device_block = vm_read_pte64(kernel_l1)
+        val ram_block    = vm_read_pte64(kernel_l1 + u64(8))
+        vm_write_pte64(new_l1,          device_block)
+        vm_write_pte64(new_l1 + u64(8), ram_block)
+
+        new_l0
