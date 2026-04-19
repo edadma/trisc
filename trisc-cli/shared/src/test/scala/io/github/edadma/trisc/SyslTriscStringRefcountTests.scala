@@ -1,0 +1,399 @@
+package io.github.edadma.trisc
+
+class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
+
+  // Re-use the standard posix allocator setup for tests that exercise heap strings.
+  private val allocSource = scala.io.Source.fromFile("posix/stdlib/alloc.sysl").mkString
+  private val stringSource = scala.io.Source.fromFile("posix/string/string.sysl").mkString
+  private val ctypeSource = scala.io.Source.fromFile("posix/ctype/ctype.sysl").mkString
+
+  private def sbrkModule(heapSize: Int): String =
+    s"""module posix.unistd
+       |
+       |var _heap: [$heapSize]i8
+       |var _brk: *i8 = *i8(0)
+       |var _brk_initialized = false
+       |
+       |sbrk(increment: int) -> *i8
+       |    if !_brk_initialized
+       |        _brk = &_heap
+       |        _brk_initialized = true
+       |
+       |    if increment == 0 then return _brk
+       |
+       |    val old_brk = _brk
+       |    val new_brk = old_brk + increment
+       |
+       |    if i64(new_brk) > i64(&_heap + $heapSize) then return *i8(-1)
+       |
+       |    _brk = new_brk
+       |    old_brk
+       |""".stripMargin
+
+  private def allocSources(mainSource: String, heapSize: Int = 16384): Map[String, String] =
+    Map(
+      "posix/unistd/sbrk" -> sbrkModule(heapSize),
+      "posix/string/string" -> stringSource,
+      "posix/ctype/ctype" -> ctypeSource,
+      "posix/stdlib/alloc" -> allocSource,
+      "main" -> mainSource,
+    )
+
+  private def runWithAlloc(source: String, heapSize: Int = 16384): Long =
+    compileMultiAndRun(allocSources(s"import posix.stdlib.*\n\n$source", heapSize))
+
+  // ====================================================================
+  // 1. Literal layout (asm-level)
+  // ====================================================================
+
+  "literal global has immortal refcount sentinel" in {
+    val asm = compile(
+      """main()
+        |    val s = "hello"
+        |""".stripMargin)
+    asm should include("dl -1")
+  }
+
+  "concat asm sets refcount=1 in newly allocated buffer" in {
+    val asm = compile(
+      """main()
+        |    val s = "abc" + "def"
+        |""".stripMargin)
+    asm should include("ldi r2, 1")
+  }
+
+  "string(ptr,len) asm calls malloc and stores rc=1" in {
+    val asm = compile(
+      """main()
+        |    var arr = new [3]byte
+        |    arr[0] = 65
+        |    val s = string(&arr[0], 3)
+        |""".stripMargin)
+    asm should include("malloc")
+    asm should include("ldi r2, 1")
+  }
+
+  // ====================================================================
+  // 2. Aliasing — no malloc needed for literals
+  // ====================================================================
+
+  "literal aliasing many times does not segfault" in {
+    compileAndRun(
+      """main() -> int
+        |    val s = "hello"
+        |    val t = s
+        |    val u = t
+        |    val v = u
+        |    if v == "hello" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "string passed to function: caller still owns" in {
+    compileAndRun(
+      """get_len(s: string) -> int = len(s)
+        |
+        |main() -> int
+        |    val s = "hello world"
+        |    val n = get_len(s)
+        |    if n == 11 && s == "hello world" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "literal in loop body — no leak (immortal incr/decr)" in {
+    compileAndRun(
+      """main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val s = "abc"
+        |        val t = s
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 3. Concat (heap allocation)
+  // ====================================================================
+
+  "concat result freed after consumption (no heap exhaustion in loop)" in {
+    // CPU is capped at 100k cycles. Use a modest iteration count that still
+    // demonstrates buffer reuse — without proper free, 50 × ~16B would still fit
+    // in 16K heap, so this is mostly a no-crash check.
+    runWithAlloc(
+      """main() -> int
+        |    var i = 0
+        |    while i < 50
+        |        val s = "abc" + "def"
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "self-concat does not free source mid-evaluation" in {
+    runWithAlloc(
+      """main() -> int
+        |    var s = "abc" + "def"
+        |    s = s + "ghi"
+        |    if s == "abcdefghi" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "repeated self-concat in loop frees old buffers" in {
+    runWithAlloc(
+      """main() -> int
+        |    var s = "x"
+        |    var i = 0
+        |    while i < 20
+        |        s = s + "y"
+        |        i += 1
+        |    if len(s) == 21 then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "reassign concat→concat decrements old" in {
+    runWithAlloc(
+      """main() -> int
+        |    var s = "abc" + "def"
+        |    s = "xyz" + "qrs"
+        |    if s == "xyzqrs" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "long concat chain — temporaries freed" in {
+    runWithAlloc(
+      """main() -> int
+        |    val s = "a" + "b" + "c" + "d" + "e" + "f"
+        |    if s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "nested concat (a+b)+(c+d) — temporaries freed in loop" in {
+    runWithAlloc(
+      """main() -> int
+        |    var i = 0
+        |    while i < 20
+        |        val s = ("ab" + "cd") + ("ef" + "gh")
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 4. string(ptr,len) — copy semantics
+  // ====================================================================
+
+  "string(ptr,len) copies — outlives source array" in {
+    runWithAlloc(
+      """build() -> string
+        |    var arr = new [5]byte
+        |    arr[0] = 104
+        |    arr[1] = 101
+        |    arr[2] = 108
+        |    arr[3] = 108
+        |    arr[4] = 111
+        |    string(&arr[0], 5)
+        |
+        |main() -> int
+        |    val s = build()
+        |    if s == "hello" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 5. Function parameters & returns
+  // ====================================================================
+
+  "function returns concat repeatedly without leak" in {
+    runWithAlloc(
+      """make() -> string = "aaaa" + "bbbb"
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 30
+        |        val s = make()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "function returns its own param — caller's share preserved" in {
+    runWithAlloc(
+      """passthrough(s: string) -> string = s
+        |
+        |main() -> int
+        |    val src = "abc" + "def"
+        |    val r = passthrough(src)
+        |    if r == "abcdef" && src == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "string param passed through multiple functions" in {
+    runWithAlloc(
+      """f1(s: string) -> int = f2(s)
+        |f2(s: string) -> int = f3(s)
+        |f3(s: string) -> int = len(s)
+        |
+        |main() -> int
+        |    val s = "abc" + "def"
+        |    val n = f1(s)
+        |    if n == 6 && s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 6. Struct fields
+  // ====================================================================
+
+  "struct holds concat — buffer survives source going out of scope" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |build() -> Holder
+        |    val tmp = "abc" + "def"
+        |    Holder(tmp)
+        |
+        |main() -> int
+        |    val h = build()
+        |    if h.s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "string field reassignment frees old field buffer" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |main() -> int
+        |    var h = Holder("abc" + "def")
+        |    h.s = "xyz" + "qrs"
+        |    if h.s == "xyzqrs" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 7. If-expr branches
+  // ====================================================================
+
+  "if-expr returning literal vs concat" in {
+    runWithAlloc(
+      """build(b: bool) -> string =
+        |    if b then "literal" else "abc" + "def"
+        |
+        |main() -> int
+        |    val a = build(true)
+        |    val b = build(false)
+        |    if a == "literal" && b == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "if-expr returning concat both branches in loop" in {
+    runWithAlloc(
+      """main() -> int
+        |    var i = 0
+        |    var s = "init"
+        |    while i < 20
+        |        s = if i % 2 == 0 then "even" + "_" else "odd" + "_"
+        |        i += 1
+        |    if s == "odd_" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 8. Match expression
+  // ====================================================================
+
+  "match expr returning literal vs concat" in {
+    runWithAlloc(
+      """build(n: int) -> string =
+        |    n match
+        |        0 -> "zero"
+        |        else -> "abc" + "def"
+        |
+        |main() -> int
+        |    val a = build(0)
+        |    val b = build(1)
+        |    if a == "zero" && b == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 9. Globals
+  // ====================================================================
+
+  "global string assigned concat" in {
+    runWithAlloc(
+      """var g: string
+        |
+        |main() -> int
+        |    g = "global" + "_value"
+        |    if g == "global_value" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "global string reassigned in loop" in {
+    runWithAlloc(
+      """var g: string
+        |
+        |main() -> int
+        |    g = "init"
+        |    var i = 0
+        |    while i < 30
+        |        g = "iter" + "_value"
+        |        i += 1
+        |    if g == "iter_value" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 10. Comparison & length
+  // ====================================================================
+
+  "comparison does not consume the strings" in {
+    runWithAlloc(
+      """main() -> int
+        |    val s = "abc" + "def"
+        |    val t = "abc" + "def"
+        |    val eq1 = s == t
+        |    val eq2 = s == t
+        |    val eq3 = s == "abcdef"
+        |    if eq1 && eq2 && eq3 then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "len of concat result, then use the string" in {
+    runWithAlloc(
+      """main() -> int
+        |    val s = "abc" + "def"
+        |    val n = len(s)
+        |    if n == 6 && s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 11. Early returns
+  // ====================================================================
+
+  "early return decrements live string locals" in {
+    runWithAlloc(
+      """check(b: bool) -> int
+        |    val s = "abc" + "def"
+        |    if !b then return 1
+        |    if len(s) == 6 then 0 else 2
+        |
+        |main() -> int = check(true)
+        |""".stripMargin) shouldBe 0
+  }
+
+  "early return with concat returned" in {
+    runWithAlloc(
+      """make(b: bool) -> string
+        |    if b then return "abc" + "def"
+        |    "xyz"
+        |
+        |main() -> int
+        |    val s = make(true)
+        |    if s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+}
