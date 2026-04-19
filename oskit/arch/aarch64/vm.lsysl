@@ -130,12 +130,24 @@ small sub-region to AP=01/UXN=0 for EL0 user code later (without
 breaking kernel execute, which the implicit-PXN rule would do if
 we flipped AP on the 1GB block itself).
 
+User region layout (128KB total, 32 pages in L3[0..31] of L2[256]):
+  VA 0x60000000..0x6000FFFF — code region, 16 × 4KB pages (L3[0..15])
+                              AP=01 (EL0 RW), UXN=0 (EL0 execute)
+  VA 0x60010000..0x6001FFFF — stack region, 16 × 4KB pages (L3[16..31])
+                              AP=01, UXN=1. USP grows down from 0x60020000.
+Implicit-PXN forces PXN=1 on all user pages, which is what we want
+(EL1 never fetches from them). AP=01 means EL1 can still read/write.
+
 Returns the physical address of the new L0 table, or 0 on failure.
 Also sets `last_user_code_page` / `last_user_stack_page` to the
-physical addresses of the two L3 user pages so the caller can
-populate them via kernel (identity-mapped) accesses before
-`vm_set_ptbr` + ERET. Valid until the next `vm_create_process_pt`
-call; caller should capture them immediately.
+physical address of the FIRST code / stack page respectively, for
+DEMO_MODE=2 (EL0 demo) convenience. Real loaders should use
+`vm_copy_to` under the new process PTBR instead of poking these
+directly — only the first page is exposed this way.
+
+    val USER_CODE_PAGES  = 16
+    val USER_STACK_PAGES = 16
+    val USER_STACK_L3_START = 16
 
     var last_user_code_page: u64 = 0
     var last_user_stack_page: u64 = 0
@@ -185,29 +197,10 @@ call; caller should capture them immediately.
 
         // L3 carve-out: replace L2[256] (VA 0x60000000..0x601FFFFF)
         // with a table descriptor pointing at a fresh L3 populated
-        // with two user pages:
-        //   L3[0] -> user code page at VA 0x60000000 (AP=01, UXN=0)
-        //   L3[1] -> user stack page at VA 0x60001000 (AP=01, UXN=1)
-        // Implicit-PXN forces PXN=1 on both; that's fine because the
-        // kernel never fetches from these pages. The kernel *can*
-        // still read/write them (AP=01 is EL1+EL0 RW).
+        // with 32 user pages (see USER_CODE_PAGES / USER_STACK_PAGES
+        // at the top of this section).
         val new_l3 = page_alloc_zero()
         if new_l3 == 0
-            page_free(new_l2)
-            page_free(new_l1)
-            page_free(new_l0)
-            return 0
-        val code_pa = page_alloc_zero()
-        if code_pa == 0
-            page_free(new_l3)
-            page_free(new_l2)
-            page_free(new_l1)
-            page_free(new_l0)
-            return 0
-        val stack_pa = page_alloc_zero()
-        if stack_pa == 0
-            page_free(code_pa)
-            page_free(new_l3)
             page_free(new_l2)
             page_free(new_l1)
             page_free(new_l0)
@@ -217,14 +210,39 @@ call; caller should capture them immediately.
         vm_write_pte64(new_l2 + u64(256 * 8),
             i64(new_l3) | PTE_VALID | PTE_TABLE)
 
-        // L3 entries. Page encoding needs bit 1 = 1 (PTE_PAGE) unlike
-        // the block form, so we mask that bit off of ram_attrs first.
+        // Page encoding needs bit 1 = 1 (PTE_PAGE) unlike the block
+        // form, so mask that bit off ram_attrs first. AP=01 makes the
+        // page EL0-accessible; stack pages additionally set UXN to
+        // prevent EL0 execution from the stack.
         val base_user_attrs = (ram_attrs & ~i64(2)) | PTE_PAGE | PTE_AP_EL0
-        vm_write_pte64(new_l3,          i64(code_pa)  | base_user_attrs)
-        vm_write_pte64(new_l3 + u64(8), i64(stack_pa) | base_user_attrs | PTE_UXN)
 
-        last_user_code_page = code_pa
-        last_user_stack_page = stack_pa
+        var total_pages = USER_CODE_PAGES + USER_STACK_PAGES
+        var p = 0
+        while p < total_pages
+            val pa = page_alloc_zero()
+            if pa == 0
+                // Unwind: free every user page we wrote, then the L3
+                // and the higher tables. Simpler than trying to recover.
+                var q = 0
+                while q < p
+                    val pte = vm_read_pte64(new_l3 + u64(q * 8))
+                    if (pte & i64(3)) == i64(3)
+                        page_free(u64(pte & PTE_ADDR_MASK))
+                    q += 1
+                page_free(new_l3)
+                page_free(new_l2)
+                page_free(new_l1)
+                page_free(new_l0)
+                return 0
+            var attrs = base_user_attrs
+            if p >= USER_STACK_L3_START
+                attrs = attrs | PTE_UXN
+            vm_write_pte64(new_l3 + u64(p * 8), i64(pa) | attrs)
+            if p == 0
+                last_user_code_page = pa
+            if p == USER_STACK_L3_START
+                last_user_stack_page = pa
+            p += 1
 
         new_l0
 

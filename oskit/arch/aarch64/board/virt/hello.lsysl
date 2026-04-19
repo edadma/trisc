@@ -304,5 +304,5 @@ Legacy EL0 demo.
         uart_puts("gic + timer initialised\n")
 
         uart_puts("dropping to EL0...\n")
-        drop_to_el0(i64(0x60000000), i64(0x60002000))
+        drop_to_el0(i64(0x60000000), i64(0x60020000))
         uart_puts("unexpected return from EL0 drop\n")

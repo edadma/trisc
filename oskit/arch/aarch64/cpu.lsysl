@@ -20,15 +20,19 @@ our 272-byte exception frame stores x0 at offset 0 (`[sp, #0x000]`).
     val STACK_FRAME_SIZE = 272        // 0x110 — matches vectors.s save/restore
 
 Program + server address layout. User programs execute in the
-per-process L3 carve-out at VA 0x60000000..0x601FFFFF (2MB); for
-now we keep a small 4KB code + 4KB stack footprint to mirror the
-two-page layout vm_create_process_pt currently carves. Sized up
-later when `vm_create_process_pt` grows a real program region.
+per-process L3 carve-out at VA 0x60000000..0x6001FFFF (128KB):
+  code  0x60000000..0x6000FFFF  (16 pages, 64KB)
+  stack 0x60010000..0x6001FFFF  (16 pages, 64KB)
+PROG_USP is the initial user-stack pointer (exclusive top, so the
+first push lands on page 0x6001F000). PROG_SSP is vestigial on
+aarch64 — create_process_suspended allocates a per-process kernel
+stack and ignores the ssp parameter in arch_setup_process_frame —
+but keep it in sync so the layout stays legible when we port pm/rs.
 
-    val PROG_USP = 0x60002000
-    val PROG_SSP = 0x60001000
-    val SRV_USP  = 0x60002000
-    val SRV_SSP  = 0x60001000
+    val PROG_USP = 0x60020000
+    val PROG_SSP = 0x60010000
+    val SRV_USP  = 0x60020000
+    val SRV_SSP  = 0x60010000
 
 Mask async exceptions (IRQ, FIQ, SError). Runs one instruction
 plus the return; safe to call with interrupts already masked.
