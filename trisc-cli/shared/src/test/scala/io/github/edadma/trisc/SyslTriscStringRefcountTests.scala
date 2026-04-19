@@ -612,4 +612,135 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |    if n == 6 && h.s == "abcdef" then 0 else 1
         |""".stripMargin) shouldBe 0
   }
+
+  // ====================================================================
+  // 14. Indirect calls (function pointers / closures) with aggregate args
+  // ====================================================================
+
+  "function pointer with string arg" in {
+    runWithAlloc(
+      """get_len(s: string) -> int = len(s)
+        |
+        |main() -> int
+        |    val f = get_len
+        |    val s = "abc" + "def"
+        |    val n = f(s)
+        |    if n == 6 && s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "function pointer with value-struct arg" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |get_len(h: Holder) -> int = len(h.s)
+        |
+        |main() -> int
+        |    val f = get_len
+        |    var h = Holder("abc" + "def")
+        |    val n = f(h)
+        |    if n == 6 && h.s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "function pointer returning value-struct" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |make() -> Holder = Holder("abc" + "def")
+        |
+        |main() -> int
+        |    val f = make
+        |    val h = f()
+        |    if h.s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "function pointer mutation via value-struct param does not leak to caller" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |mutate(h: Holder) -> int
+        |    h.s = "mutated"
+        |    len(h.s)
+        |
+        |main() -> int
+        |    val f = mutate
+        |    var h = Holder("orig" + "inal")
+        |    val n = f(h)
+        |    if h.s == "original" && n == 7 then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 15. Interface dispatch with aggregate args
+  // ====================================================================
+
+  "interface method with string arg" in {
+    runWithAlloc(
+      """interface Sizer
+        |    size(s: string) -> int
+        |
+        |struct Counter
+        |    n: int
+        |
+        |Counter.size(s: string) -> int = len(s) + self.n
+        |
+        |main() -> int
+        |    var c = Counter(10)
+        |    val sz: Sizer = c
+        |    val s = "abc" + "def"
+        |    val n = sz.size(s)
+        |    if n == 16 && s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "interface method with value-struct arg" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |interface Inspector
+        |    check(h: Holder) -> int
+        |
+        |struct Probe
+        |    n: int
+        |
+        |Probe.check(h: Holder) -> int = len(h.s)
+        |
+        |main() -> int
+        |    var p = Probe(0)
+        |    val ins: Inspector = p
+        |    var h = Holder("abc" + "def")
+        |    val n = ins.check(h)
+        |    if n == 6 && h.s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "interface method mutation via value-struct param does not leak to caller" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |interface Mutator
+        |    mutate(h: Holder) -> int
+        |
+        |struct Doer
+        |    n: int
+        |
+        |Doer.mutate(h: Holder) -> int
+        |    h.s = "mutated"
+        |    len(h.s)
+        |
+        |main() -> int
+        |    var d = Doer(0)
+        |    val m: Mutator = d
+        |    var h = Holder("orig" + "inal")
+        |    val n = m.mutate(h)
+        |    if h.s == "original" && n == 7 then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
 }
