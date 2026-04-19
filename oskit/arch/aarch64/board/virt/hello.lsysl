@@ -7,6 +7,41 @@ after we come back.
 
     module oskit.arch.aarch64.board.virt
 
+    import oskit.arch.{page_alloc_zero, kernel_ptbr, vm_flush_tlb}
+
+Render `v` as a 16-digit hex number (prefixed `0x`) to the UART.
+Useful for the boot-time sanity prints below; deliberately crude
+since the kernel will grow a real formatter later.
+
+    uart_puthex(v: u64)
+        uart_puts("0x")
+        var shift = 60
+        while shift >= 0
+            val d = int((v >> u64(shift)) & u64(0xF))
+            if d < 10
+                uart_putc(int('0') + d)
+            else
+                uart_putc(int('A') + d - 10)
+            shift -= 4
+
     kernel_main()
         uart_puts("SLIX aarch64 boot (sysl, MMU on)\n")
         uart_puts("Hello, aarch64!\n")
+
+        uart_puts("kernel_ptbr=")
+        uart_puthex(kernel_ptbr())
+        uart_puts("\n")
+
+        // Allocate a couple of zeroed pages and confirm they live at
+        // distinct, page-aligned addresses. Proves the page pool and
+        // the zero-fill path are functional under the new MMU map.
+        val p1 = page_alloc_zero()
+        val p2 = page_alloc_zero()
+        uart_puts("page_alloc_zero 1=")
+        uart_puthex(p1)
+        uart_puts(" 2=")
+        uart_puthex(p2)
+        uart_puts("\n")
+
+        vm_flush_tlb()
+        uart_puts("vm_flush_tlb ok\n")

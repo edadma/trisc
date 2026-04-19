@@ -1,0 +1,106 @@
+OSKit Arch — aarch64 Virtual Memory
+===================================
+
+aarch64 page-table helpers and the physical page allocator. Pairs
+with `mmu.s` (identity map + MMU enable at boot) and `vm_asm.s`
+(TTBR0 / TLB wrappers). The interface mirrors
+`oskit/arch/x86_64/vm.lsysl` so kernel code can import from
+`oskit.arch` regardless of target.
+
+At boot the MMU is already on with a 1GB/1GB identity map covering
+RAM and the MMIO region; this module provides the read/write
+primitives for future per-process page tables.
+
+    module oskit.arch
+
+    import oskit.config.{PAGE_SIZE}
+
+Page tables emitted by `mmu.s`.
+
+    extern l0_table: byte
+
+Hardware page-table operations (vm_asm.s).
+
+    extern vm_set_ptbr(addr: u64)
+    extern vm_flush_tlb()
+    extern vm_get_ptbr() -> u64
+
+Kernel page-table base, captured on first call so later code can
+route around it (e.g. building per-process tables that clone a
+kernel-half range). On aarch64 this is simply the TTBR0 we set up
+in `mmu_init`.
+
+    var kernel_ttbr0: u64 = 0
+
+    kernel_ptbr() -> u64
+        if kernel_ttbr0 == 0
+            kernel_ttbr0 = u64(i64(&l0_table))
+        kernel_ttbr0
+
+aarch64 descriptor encoding bits we'll need repeatedly.
+
+    val PTE_VALID: i64 = 1          // bit 0 — valid
+    val PTE_TABLE: i64 = 2          // bit 1 — table (vs block/page)
+    val PTE_PAGE:  i64 = 2          // bit 1 — page (at L3)
+    val PTE_AF:    i64 = 0x400      // bit 10 — access flag
+
+Mask for extracting the output address from a level 1/2/3 descriptor.
+
+    val PTE_ADDR_MASK: i64 = 0x0000FFFFFFFFF000
+
+Raw 64-bit entry read/write. All aarch64 descriptors are 64-bit.
+
+    vm_write_pte64(addr: u64, pte: i64)
+        var p: *i64 = *i64(addr)
+        *p = pte
+
+    vm_read_pte64(addr: u64) -> i64
+        var p: *i64 = *i64(addr)
+        *p
+
+Physical page allocator — bump + free list, same shape as the
+x86_64 version. RAM starts at 0x40000000 on QEMU virt; pool sits
+between the kernel image and the top of our 1GB identity map.
+
+    val PAGE_POOL_END: u64 = 0x80000000
+
+    extern _heap_start: byte
+
+    var page_pool_next: u64 = 0
+    var page_pool_init = false
+    var page_free_list: u64 = 0
+
+    page_alloc() -> u64
+        if !page_pool_init
+            var base = u64(i64(&_heap_start))
+            val aligned = (base + u64(PAGE_SIZE - 1)) & ~u64(PAGE_SIZE - 1)
+            page_pool_next = aligned
+            page_pool_init = true
+        if page_free_list != 0
+            val page = page_free_list
+            var next: *i64 = *i64(page)
+            page_free_list = u64(*next)
+            return page
+        if page_pool_next >= PAGE_POOL_END
+            return 0
+        val page = page_pool_next
+        page_pool_next += u64(PAGE_SIZE)
+        page
+
+    page_free(addr: u64)
+        var p: *i64 = *i64(addr)
+        *p = i64(page_free_list)
+        page_free_list = addr
+
+    page_alloc_zero() -> u64
+        val page = page_alloc()
+        if page != 0
+            // Clear the freshly-allocated page byte-by-byte. Slow but
+            // one-line; replace with a memset/DC ZVA helper once the
+            // arch has a proper memset.
+            var p: *byte = *byte(page)
+            var i = 0
+            while i < PAGE_SIZE
+                p[i] = 0
+                i += 1
+        page

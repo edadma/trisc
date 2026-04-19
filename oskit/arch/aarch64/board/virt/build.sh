@@ -23,7 +23,9 @@ done
 ARCH_DIR="$REPO_ROOT/oskit/arch/aarch64"
 
 SYSL_FILES=(
+    oskit/config/config.sysl
     oskit/arch/aarch64/cpu.lsysl
+    oskit/arch/aarch64/vm.lsysl
     oskit/arch/aarch64/board/virt/uart.lsysl
     oskit/arch/aarch64/board/virt/hello.lsysl
 )
@@ -54,6 +56,9 @@ aarch64-elf-as -o "$OUT/cpu_asm.o" "$ARCH_DIR/cpu_asm.s"
 echo "=== Assemble mmu.s ==="
 aarch64-elf-as -o "$OUT/mmu.o" "$ARCH_DIR/mmu.s"
 
+echo "=== Assemble vm_asm.s ==="
+aarch64-elf-as -o "$OUT/vm_asm.o" "$ARCH_DIR/vm_asm.s"
+
 echo "=== Compile stubs.c ==="
 aarch64-elf-gcc -ffreestanding -nostdlib -mcmodel=large \
     -fno-pic -fno-pie -c -o "$OUT/stubs.o" "$BOARD_DIR/stubs.c"
@@ -61,7 +66,7 @@ aarch64-elf-gcc -ffreestanding -nostdlib -mcmodel=large \
 echo "=== Link ==="
 aarch64-elf-ld -T "$BOARD_DIR/link.ld" \
     -o "$OUT/kernel.elf" \
-    "$OUT/boot.o" "$OUT/vectors.o" "$OUT/cpu_asm.o" "$OUT/mmu.o" "$OUT/stubs.o" "$OUT/kernel.o" 2>&1 \
+    "$OUT/boot.o" "$OUT/vectors.o" "$OUT/cpu_asm.o" "$OUT/mmu.o" "$OUT/vm_asm.o" "$OUT/stubs.o" "$OUT/kernel.o" 2>&1 \
     | grep -v "has a LOAD segment with RWX permissions" || true
 
 echo "=== Built: $OUT/kernel.elf ==="

@@ -26,8 +26,12 @@ SECTIONS
     . = ALIGN(8);
     __bss_start = .;
     .bss    : { *(.bss*) *(COMMON) }
-    . = ALIGN(8);
+    . = ALIGN(4096);
     __bss_end = .;
+
+    /* Page pool starts here. The symbol is emitted page-aligned so
+     * vm.lsysl doesn't need to round up at runtime. */
+    _heap_start = .;
 
     /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) *(.ARM.*) }
 }
