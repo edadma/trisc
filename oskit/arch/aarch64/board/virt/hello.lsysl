@@ -8,7 +8,9 @@ after we come back.
     module oskit.arch.aarch64.board.virt
 
     import oskit.arch.{page_alloc_zero, kernel_ptbr, vm_flush_tlb,
-        vm_create_process_pt, vm_set_ptbr, read_sctlr_el1}
+        vm_create_process_pt, vm_set_ptbr, read_sctlr_el1,
+        last_user_code_page, last_user_stack_page, drop_to_el0,
+        sync_icache_line}
 
 Render `v` as a 16-digit hex number (prefixed `0x`) to the UART.
 Useful for the boot-time sanity prints below; deliberately crude
@@ -63,20 +65,36 @@ since the kernel will grow a real formatter later.
         uart_puthex(new_pt)
         uart_puts("\n")
 
+        // Capture the L3 user page physical addresses before any
+        // later call to vm_create_process_pt can clobber them.
+        val code_pa = last_user_code_page
+        val stack_pa = last_user_stack_page
+        uart_puts("user code_pa=")
+        uart_puthex(code_pa)
+        uart_puts(" stack_pa=")
+        uart_puthex(stack_pa)
+        uart_puts("\n")
+
+        // Write a tiny EL0 program into the code page. aarch64 is
+        // little-endian, so the instruction words are stored as-is.
+        //   svc #0x42          0xD4000841   (imm16=0x42 in bits [20:5],
+        //                                    opcode bits [4:0]=00001)
+        //   b   .              0x14000000   (fallback infinite loop)
+        var code_word: *i32 = *i32(code_pa)
+        code_word[0] = i32(0xD4000841)
+        code_word[1] = i32(0x14000000)
+
+        // A72 has split I/D caches on — the store lands in D-cache;
+        // the I-cache must be made to see it before we try to execute.
+        sync_icache_line(i64(code_pa))
+
         vm_set_ptbr(new_pt)
         uart_puts("after vm_set_ptbr: still alive\n")
 
-        // The process PT carves out an L3 user page at VA 0x60000000
-        // with AP=01 + UXN=1 (EL0 RW, no EL0 exec). Write-then-read
-        // from the kernel at EL1 to confirm the full L0→L1→L2→L3 walk
-        // lands somewhere and the page is actually mapped.
-        var up: *i64 = *i64(u64(0x60000000))
-        *up = i64(0xDEADBEEFCAFEBABE)
-        uart_puts("el0 page readback=")
-        uart_puthex(u64(*up))
-        uart_puts("\n")
-
-        // Swap back to the kernel map so subsequent boot work (once
-        // it exists) doesn't need to worry about which table is live.
-        vm_set_ptbr(kernel_ptbr())
-        uart_puts("restored kernel ptbr\n")
+        // Drop to EL0 with user code at VA 0x60000000 and user stack
+        // top at VA 0x60002000 (the stack page covers 0x60001000..
+        // 0x60001FFF). SVC #0x42 from EL0 must vector to low64_sync
+        // (VBAR+0x400, V=8) with ESR_EL1 EC=0x15, ISS[15:0]=0x42.
+        uart_puts("dropping to EL0...\n")
+        drop_to_el0(i64(0x60000000), i64(0x60002000))
+        uart_puts("unexpected return from EL0 drop\n")

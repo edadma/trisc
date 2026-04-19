@@ -126,6 +126,14 @@ breaking kernel execute, which the implicit-PXN rule would do if
 we flipped AP on the 1GB block itself).
 
 Returns the physical address of the new L0 table, or 0 on failure.
+Also sets `last_user_code_page` / `last_user_stack_page` to the
+physical addresses of the two L3 user pages so the caller can
+populate them via kernel (identity-mapped) accesses before
+`vm_set_ptbr` + ERET. Valid until the next `vm_create_process_pt`
+call; caller should capture them immediately.
+
+    var last_user_code_page: u64 = 0
+    var last_user_stack_page: u64 = 0
 
     extern l1_table: byte
 
@@ -171,19 +179,29 @@ Returns the physical address of the new L0 table, or 0 on failure.
             i += 1
 
         // L3 carve-out: replace L2[256] (VA 0x60000000..0x601FFFFF)
-        // with a table descriptor pointing at a fresh L3. The first
-        // L3 entry maps a fresh 4KB page with AP=01 + UXN=1 (EL0 RW,
-        // no EL0 execute — this page will be user data). The
-        // implicit-PXN rule forces PXN=1 regardless, but that's fine
-        // because the kernel never fetches from VA 0x60000000.
+        // with a table descriptor pointing at a fresh L3 populated
+        // with two user pages:
+        //   L3[0] -> user code page at VA 0x60000000 (AP=01, UXN=0)
+        //   L3[1] -> user stack page at VA 0x60001000 (AP=01, UXN=1)
+        // Implicit-PXN forces PXN=1 on both; that's fine because the
+        // kernel never fetches from these pages. The kernel *can*
+        // still read/write them (AP=01 is EL1+EL0 RW).
         val new_l3 = page_alloc_zero()
         if new_l3 == 0
             page_free(new_l2)
             page_free(new_l1)
             page_free(new_l0)
             return 0
-        val user_page = page_alloc_zero()
-        if user_page == 0
+        val code_pa = page_alloc_zero()
+        if code_pa == 0
+            page_free(new_l3)
+            page_free(new_l2)
+            page_free(new_l1)
+            page_free(new_l0)
+            return 0
+        val stack_pa = page_alloc_zero()
+        if stack_pa == 0
+            page_free(code_pa)
             page_free(new_l3)
             page_free(new_l2)
             page_free(new_l1)
@@ -194,10 +212,13 @@ Returns the physical address of the new L0 table, or 0 on failure.
         vm_write_pte64(new_l2 + u64(256 * 8),
             i64(new_l3) | PTE_VALID | PTE_TABLE)
 
-        // L3[0] -> user_page, AP=01 + UXN=1, inheriting Normal WBWA
-        // attrs from the kernel block. Page encoding needs bit 1 = 1
-        // (PTE_PAGE) unlike the block form.
-        val user_attrs = (ram_attrs & ~i64(2)) | PTE_PAGE | PTE_AP_EL0 | PTE_UXN
-        vm_write_pte64(new_l3, i64(user_page) | user_attrs)
+        // L3 entries. Page encoding needs bit 1 = 1 (PTE_PAGE) unlike
+        // the block form, so we mask that bit off of ram_attrs first.
+        val base_user_attrs = (ram_attrs & ~i64(2)) | PTE_PAGE | PTE_AP_EL0
+        vm_write_pte64(new_l3,          i64(code_pa)  | base_user_attrs)
+        vm_write_pte64(new_l3 + u64(8), i64(stack_pa) | base_user_attrs | PTE_UXN)
+
+        last_user_code_page = code_pa
+        last_user_stack_page = stack_pa
 
         new_l0

@@ -27,3 +27,10 @@ way out. Caller must ensure the active page table maps both the
 entry point and the user stack EL0-accessible.
 
     extern drop_to_el0(entry: i64, sp: i64)
+
+Clean the D-cache line containing `addr` to PoU, then invalidate
+the I-cache and ISB. Required after writing instruction bytes via
+data stores so subsequent instruction fetch sees the new code.
+Short form — fine for a single cache line (64B on A72).
+
+    extern sync_icache_line(addr: i64)

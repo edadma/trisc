@@ -21,6 +21,22 @@ arch_sti:
     msr daifclr, #0x7
     ret
 
+// sync_icache_line(addr: i64)
+//   Clean the D-cache line containing `addr` to Point of Unification,
+//   invalidate the entire I-cache, then ISB. This is the short form
+//   of the architecture's "data side wrote, instruction side needs to
+//   see it" dance — good enough when the modified region fits in one
+//   cache line (A72 = 64B). For larger writes, loop dc cvau / ic ivau
+//   over each line before the final dsb/isb.
+.global sync_icache_line
+sync_icache_line:
+    dc  cvau, x0
+    dsb ish
+    ic  iallu
+    dsb ish
+    isb
+    ret
+
 // drop_to_el0(entry: i64, sp: i64)
 //   Transition from EL1 to EL0 and start executing at `entry` with
 //   SP_EL0 = `sp`. Does not return. The caller is responsible for
