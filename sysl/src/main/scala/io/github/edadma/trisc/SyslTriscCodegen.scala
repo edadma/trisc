@@ -228,6 +228,8 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  ldd r1, r1, r0")       // r1 = backref
           emitRefDecr(1, 0)
           emit("  popd r1")
+        case st: SyslType.StructType if structHasStringFields(st) =>
+          emitStructStringFieldsRC(5, local.offset, st, incr = false)
         case _ =>
     locals.clear()
     locals ++= savedLocals
@@ -449,6 +451,49 @@ class SyslTriscCodegen(addresses: Int = 4):
     emit(s"$noFree")
     emit(s"$skip")
 
+  // True if a value struct (recursively) holds any string fields whose buffers need RC.
+  // Stops at refs/pointers/slices (handled by their own paths).
+  private def structHasStringFields(t: SyslType): Boolean = t match
+    case st: SyslType.StructType =>
+      st.fields.exists((_, ft) => ft == SyslType.StringType || structHasStringFields(ft))
+    case _ => false
+
+  // Expressions that produce a freshly-owned string buffer (rc=1 or immortal).
+  private def isOwnedStringExpr(expr: TExpr): Boolean = expr match
+    case _: TStringLit => true
+    case TBinary(_, "+", _, SyslType.StringType) => true
+    case _: TStringFromPtr | _: TStringFromSlice => true
+    case _: TCall | _: TIndirectCall => true
+    case _: TIfExpr | _: TMatchExpr => true
+    case _ => false
+
+  // Expressions that produce a freshly-constructed value struct (string fields
+  // already owned by the new struct — no copy-incr needed).
+  private def isOwnedStructExpr(expr: TExpr): Boolean = expr match
+    case _: TStructConstruct => true
+    case _: TCall | _: TIndirectCall => true
+    case _: TIfExpr | _: TMatchExpr => true
+    case _ => false
+
+  // Increment or decrement the RC of every string field (recursively into nested
+  // value-struct fields) inside a struct at [r{baseReg} + baseOff]. Clobbers r3, r4
+  // (via emitRefIncr/Decr) and uses r1 for the field ptr. baseReg is preserved if it
+  // is not r1 (callers should use r5/fp for locals).
+  private def emitStructStringFieldsRC(baseReg: Int, baseOff: Int, st: SyslType.StructType, incr: Boolean): Unit =
+    if !needsAllocExtern then return
+    for case ((_, ft), i) <- st.fields.zipWithIndex do
+      val foff = baseOff + fieldOffset(st, i)
+      ft match
+        case SyslType.StringType =>
+          emit("  pshd r1")
+          emitAddImm(1, baseReg, foff)
+          emit("  ldd r1, r1, r0")  // r1 = ptr field
+          if incr then emitRefIncr(1, 8) else emitRefDecr(1, 8)
+          emit("  popd r1")
+        case nested: SyslType.StructType if structHasStringFields(nested) =>
+          emitStructStringFieldsRC(baseReg, foff, nested, incr)
+        case _ =>
+
   // Decrement refcounts for all ref-typed and string-typed locals and params
   private def emitRefCleanup(): Unit =
     // Decrement owned locals (negative fp offsets)
@@ -477,6 +522,8 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  ldd r1, r1, r0")       // r1 = backref
           emitRefDecr(1, 0)              // refcount IS at *backref (offset 0)
           emit("  popd r1")
+        case st: SyslType.StructType if structHasStringFields(st) =>
+          emitStructStringFieldsRC(5, local.offset, st, incr = false)
         case _ =>
     // Decrement ref params (caller transferred ownership)
     for (name, rt) <- refParams do
@@ -919,6 +966,13 @@ class SyslTriscCodegen(addresses: Int = 4):
       emit("  std r4, r1, r0")
     // r1 = _ret_ptr (for the caller)
     emit("  mov r1, r2")
+    // Increment string fields in the destination so the source local can be
+    // safely freed by emitRefCleanup. r2 holds destination address; emitRefIncr
+    // only clobbers r3/r4 so r2 is preserved across iterations.
+    currentFunction.returnType match
+      case st: SyslType.StructType if structHasStringFields(st) =>
+        emitStructStringFieldsRC(2, 0, st, incr = true)
+      case _ =>
 
   private def emitDefers(): Unit =
     if deferStack.nonEmpty then
@@ -1012,6 +1066,17 @@ class SyslTriscCodegen(addresses: Int = 4):
               genExpr(arg)                              // r1 = field value
               emitAddImm(2, 5, local.offset + off)     // r2 = field address (via fp)
               emitStore(1, 2, fieldType)
+              // Borrowed string field: incr the buffer (caller still owns its copy)
+              fieldType match
+                case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
+                  emit("  pshd r1")
+                  emitAddImm(1, 5, local.offset + off)
+                  emit("  ldd r1, r1, r0")
+                  emitRefIncr(1, 8)
+                  emit("  popd r1")
+                case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+                  emitStructStringFieldsRC(5, local.offset + off, nested, incr = true)
+                case _ =>
           case TEnumConstruct(et, variantIndex, args) =>
             // Allocate enum on stack, zero-initialize, set tag + fields
             val totalSize = stackSize(et)
@@ -1144,6 +1209,15 @@ class SyslTriscCodegen(addresses: Int = 4):
                     emit("  popd r1")
               emitAddImm(2, 5, local.offset)
               emitStore(1, 2, local.typ)
+            case st: SyslType.StructType if structHasStringFields(st) =>
+              // Decrement old struct's string fields before overwrite
+              emitStructStringFieldsRC(5, local.offset, st, incr = false)
+              genExpr(value)              // r1 = source struct address
+              emitAddImm(2, 5, local.offset)
+              emitStore(1, 2, local.typ)  // copy struct bytes
+              // Incr new struct's string fields if borrowed (owned source already at rc=1)
+              if !isOwnedStructExpr(value) then
+                emitStructStringFieldsRC(5, local.offset, st, incr = true)
             case _ =>
               genExpr(value)
               emitAddImm(2, 5, local.offset)
@@ -3661,6 +3735,17 @@ class SyslTriscCodegen(addresses: Int = 4):
           genExpr(arg)                                    // r1 = field value
           emitAddImm(2, 5, structBaseOffset + off)       // r2 = field address (fp-relative)
           emitStore(1, 2, fieldType)
+          // Borrowed string field: incr the buffer (caller still owns its copy)
+          fieldType match
+            case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
+              emit("  pshd r1")
+              emitAddImm(1, 5, structBaseOffset + off)
+              emit("  ldd r1, r1, r0")
+              emitRefIncr(1, 8)
+              emit("  popd r1")
+            case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+              emitStructStringFieldsRC(5, structBaseOffset + off, nested, incr = true)
+            case _ =>
         // r1 = struct base address (fp-relative, stable)
         emitAddImm(1, 5, structBaseOffset)
 

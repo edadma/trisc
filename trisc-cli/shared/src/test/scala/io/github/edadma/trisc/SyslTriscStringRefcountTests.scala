@@ -396,4 +396,125 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |    if s == "abcdef" then 0 else 1
         |""".stripMargin) shouldBe 0
   }
+
+  // ====================================================================
+  // 12. Value-struct cleanup — string fields decremented on scope exit
+  // ====================================================================
+
+  "value-struct local with string field freed on scope exit" in {
+    // 16K heap, ~24B per allocation (8 hdr + 6 data + padding) — without per-field
+    // decrement, ~600 iterations would exhaust the heap. 100 iterations is plenty
+    // to prove the leak is gone within 100k cycle budget.
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        var h = Holder("abc" + "def")
+        |        if h.s != "abcdef" then return 1
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct reassignment frees old string field" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |main() -> int
+        |    var h = Holder("abc" + "def")
+        |    var i = 0
+        |    while i < 50
+        |        h = Holder("xyz" + "qrs")
+        |        i += 1
+        |    if h.s == "xyzqrs" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct returned from function — string field survives" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |build() -> Holder
+        |    var h = Holder("part" + "_one")
+        |    h
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 50
+        |        var h = build()
+        |        if h.s != "part_one" then return 1
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct with two string fields freed on exit" in {
+    runWithAlloc(
+      """struct Pair
+        |    a: string
+        |    b: string
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 20
+        |        var p = Pair("first" + "_a", "second" + "_b")
+        |        if p.a != "first_a" || p.b != "second_b" then return 1
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "nested value-struct with string field freed on exit" in {
+    runWithAlloc(
+      """struct Inner
+        |    s: string
+        |
+        |struct Outer
+        |    inner: Inner
+        |    label: string
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 30
+        |        var o = Outer(Inner("deep" + "_str"), "top" + "_str")
+        |        if o.inner.s != "deep_str" || o.label != "top_str" then return 1
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct holding borrowed string field — caller's local survives" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |main() -> int
+        |    var msg = "abc" + "def"
+        |    var i = 0
+        |    while i < 50
+        |        var h = Holder(msg)
+        |        if h.s != "abcdef" then return 1
+        |        i += 1
+        |    if msg == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "early return with value-struct local — fields freed" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |check(b: bool) -> int
+        |    var h = Holder("abc" + "def")
+        |    if !b then return 1
+        |    if len(h.s) == 6 then 0 else 2
+        |
+        |main() -> int = check(true)
+        |""".stripMargin) shouldBe 0
+  }
 }
