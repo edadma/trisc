@@ -335,7 +335,9 @@ class SyslTriscCodegen(addresses: Int = 4):
            _: SyslType.PtrType | _: SyslType.RefType =>
         emit(s"  ldd r$destReg, r$addrReg, r0")
       case SyslType.FloatType(32) =>
-        throw new RuntimeException("f32 is not yet supported in the TRISC backend (TRISC float ops are 64-bit). Use f64 or target the LLVM backend.")
+        // f32 stored as 4 bytes; widen to f64 in register so arithmetic uses native fadd/fsub/etc.
+        emit(s"  ldw r$destReg, r$addrReg, r0")
+        emit(s"  f32tof64 r$destReg, r$destReg")
       case other =>
         throw new RuntimeException(s"emitLoad: unexpected type $other")
 
@@ -383,7 +385,10 @@ class SyslTriscCodegen(addresses: Int = 4):
            _: SyslType.PtrType | _: SyslType.RefType =>
         emit(s"  std r$srcReg, r$addrReg, r0")
       case SyslType.FloatType(32) =>
-        throw new RuntimeException("f32 is not yet supported in the TRISC backend. Use f64 or target the LLVM backend.")
+        // Source register holds f64; narrow to f32 bit pattern (lower 32 bits) and store 4 bytes.
+        // Use r4 as scratch to preserve srcReg.
+        emit(s"  f64tof32 r4, r$srcReg")
+        emit(s"  stw r4, r$addrReg, r0")
       case other =>
         throw new RuntimeException(s"emitStore: unexpected type $other")
 
@@ -1868,11 +1873,14 @@ class SyslTriscCodegen(addresses: Int = 4):
         if srcIsFloat && !tgtIsFloat then emit("  fint r1, r1")
         // Int → float: convert integer value to float bits
         else if !srcIsFloat && tgtIsFloat then emit("  cvt r1, r1")
-        // f32 not supported on TRISC — guard the float arms below
-        if (target == FloatType(32)) || (inner.typ == FloatType(32)) then
-          throw new RuntimeException("f32 is not yet supported in the TRISC backend. Use f64 or target the LLVM backend.")
+        // Explicit f64 → f32 rounds to single precision (then re-widens for register use).
+        // f32 → f64 is a no-op since f32 values already live as f64 in registers.
+        if srcIsFloat && tgtIsFloat && inner.typ == FloatType(64) && target == FloatType(32) then
+          emit("  f64tof32 r1, r1")
+          emit("  f32tof64 r1, r1")
         target match
-          case _: FloatType => // cvt already emitted above (or no-op if src is already float)
+          case _: FloatType => // float→float handled above; int→float handled by cvt above
+
           case BoolType =>
             // nonzero → 1, zero → 0
             val isZero = newLabel("iszero")
@@ -3745,9 +3753,8 @@ class SyslTriscCodegen(addresses: Int = 4):
     case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType => "db"
     case SyslType.IntType(16) | SyslType.UIntType(16) => "ds"
     case SyslType.IntType(32) | SyslType.UIntType(32) => "dw"
+    case SyslType.FloatType(32) => "dw"   // f32 stored as 4 bytes (IEEE-754 single bit pattern)
     case SyslType.FloatType(64) => "dd"
-    case SyslType.FloatType(32) =>
-      throw new RuntimeException("f32 is not yet supported in the TRISC backend.")
     case SyslType.IntType(64) | SyslType.UIntType(64) | _: SyslType.PtrType | _: SyslType.RefType => "dl"
     case other => throw new RuntimeException(s"emitDataDirective: unexpected type $other")
 
