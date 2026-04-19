@@ -48,6 +48,7 @@ object RamdiskBinPrograms:
     val syscallTof = assemble(syscallAsm, relocatable = true)
     val source     = tangledLsysl(lsyslRepoPath)
     val ulibSource = tangledLsysl("oskit/ulib/ulib.lsysl")
+    val srt0Source = tangledLsysl("oskit/ulib/srt0.lsysl")
     val sbrkSource = Source.fromFile("oskit/ulib/sbrk.sysl")(using Codec.UTF8).mkString
     val allocSource = Source.fromFile("posix/stdlib/alloc.sysl")(using Codec.UTF8).mkString
     val stringSource = Source.fromFile("posix/string/string.sysl")(using Codec.UTF8).mkString
@@ -56,6 +57,7 @@ object RamdiskBinPrograms:
     val allSources = Map(
       unitPath -> source,
       "oskit/ulib/ulib" -> ulibSource,
+      "oskit/ulib/srt0" -> srt0Source,
       "posix/unistd/sbrk" -> sbrkSource,
       "posix/stdlib/alloc" -> allocSource,
       "posix/string/string" -> stringSource,
@@ -107,6 +109,7 @@ object RamdiskBinPrograms:
     val syscallTof = assemble(syscallAsm, relocatable = true)
     val source     = tangledLsysl(lsyslRepoPath)
     val ulibSource = tangledLsysl("oskit/ulib/ulib.lsysl")
+    val srt0Source = tangledLsysl("oskit/ulib/srt0.lsysl")
     val sbrkSource = Source.fromFile("oskit/ulib/sbrk.sysl")(using Codec.UTF8).mkString
     val allocSource = Source.fromFile("posix/stdlib/alloc.sysl")(using Codec.UTF8).mkString
     val stringSource = Source.fromFile("posix/string/string.sysl")(using Codec.UTF8).mkString
@@ -120,6 +123,7 @@ object RamdiskBinPrograms:
     val allSources = Map(
       unitPath -> source,
       "oskit/ulib/ulib" -> ulibSource,
+      "oskit/ulib/srt0" -> srt0Source,
       "posix/unistd/sbrk" -> sbrkSource,
       "posix/stdlib/alloc" -> allocSource,
       "posix/string/string" -> stringSource,

@@ -644,38 +644,3 @@ Print an integer to stdout.
         buf[0] = byte('0' + n % 10)
         write_handle(STDOUT, buf, 1)
 
-Program arguments — POSIX-style layout at a well-known address.
-
-Layout at PROG_ARGS_ADDR (written by PM during spawn):
-    +0    argc (i32)
-    +4    padding (i32, zero)
-    +8    argv[0] pointer (i64, absolute — baked by nsh since base is fixed)
-    +16   argv[1] pointer
-    ...
-    +8+8*argc  NULL terminator (i64, = 0)
-    +16+8*argc NUL-separated string data (argv[i] points into this region)
-
-Pointers are absolute because nsh bakes in PROG_ARGS_ADDR as the base.
-
-Sysl entry stub. Called by _start with argc and argv (C-style).
-Walks argv, wraps each arg as a sysl `string`, and calls the
-program's `main(argv: []string)`.
-
-    val ARG_MAX_ARGS = 64
-    var prog_argv_strings: [64]string
-
-    extern main(argv: []string)
-
-    sysl_start(argc: int, cargv: **byte)
-        var i = 0
-        while i < argc
-            if i >= ARG_MAX_ARGS
-                break
-            val p = cargv[i]
-            var n = 0
-            while p[n] != 0
-                n += 1
-            prog_argv_strings[i] = string(p, n)
-            i += 1
-        main(prog_argv_strings[:i])
-        exit()

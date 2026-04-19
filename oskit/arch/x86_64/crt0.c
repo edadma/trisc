@@ -7,9 +7,9 @@
  *
  * The arch-specific _start in prog_start.s reads the argv blob from
  * PROG_ARGS_ADDR and calls oskit_ulib__sysl_start(argc, argv). Sysl
- * programs pull that symbol from oskit/ulib/ulib.lsysl; C programs
- * get it from this file instead (link against c_crt0.o instead of
- * ulib.o).
+ * programs pull that symbol from oskit/ulib/srt0.lsysl; C programs
+ * get it from this file instead (link against crt0.o instead of
+ * srt0.o).
  */
 
 extern int main(int argc, char **argv);

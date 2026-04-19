@@ -4,7 +4,7 @@
 # Usage:
 #   ./build_prog_c.sh test_c   # builds oskit/bin_c/test_c.c -> /tmp/slix-x86_64/bin/test_c
 #
-# Uses c_crt0.c (POSIX->Sysl crt0 bridge) + prog_stubs.c (sbrk, exit,
+# Uses crt0.c (POSIX->Sysl crt0 bridge) + prog_stubs.c (sbrk, exit,
 # putchar, etc.) + prog_start.s (arch _start). Output ELF has the same
 # layout as the sysl-compiled programs and is loadable via the normal
 # PM spawn path.
@@ -45,10 +45,10 @@ x86_64-elf-gcc -ffreestanding -nostdlib -mcmodel=kernel -mno-red-zone \
     -fno-pic -fno-pie -c -o "$OUT/prog_stubs.o" "$ARCH_DIR/prog_stubs.c"
 
 x86_64-elf-gcc -ffreestanding -nostdlib -mcmodel=kernel -mno-red-zone \
-    -fno-pic -fno-pie -c -o "$OUT/c_crt0.o" "$ARCH_DIR/c_crt0.c"
+    -fno-pic -fno-pie -c -o "$OUT/crt0.o" "$ARCH_DIR/crt0.c"
 
 x86_64-elf-ld -T "$ARCH_DIR/prog.ld" \
     -o "$BIN_OUT/${NAME}" \
-    "$OUT/prog_start.o" "$OUT/c_crt0.o" "$OUT/prog_stubs.o" "$OUT/prog_${NAME}.o" 2>&1 \
+    "$OUT/prog_start.o" "$OUT/crt0.o" "$OUT/prog_stubs.o" "$OUT/prog_${NAME}.o" 2>&1 \
     | grep -v "missing .note.GNU-stack" | grep -v "deprecated" | grep -v "RWX permissions" || true
 echo "  Link ok ($(wc -c < "$BIN_OUT/${NAME}" | tr -d ' ') bytes)"
