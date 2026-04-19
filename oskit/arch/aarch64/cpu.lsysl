@@ -12,6 +12,24 @@ instructions without paying for a sysl function prologue.
 
     module oskit.arch
 
+Offset from the saved SP_EL1 to the syscall return register (x0).
+On aarch64 the Linux syscall ABI puts the return value in x0, and
+our 272-byte exception frame stores x0 at offset 0 (`[sp, #0x000]`).
+
+    val SYSCALL_RETURN_OFFSET = 0
+    val STACK_FRAME_SIZE = 272        // 0x110 — matches vectors.s save/restore
+
+Program + server address layout. User programs execute in the
+per-process L3 carve-out at VA 0x60000000..0x601FFFFF (2MB); for
+now we keep a small 4KB code + 4KB stack footprint to mirror the
+two-page layout vm_create_process_pt currently carves. Sized up
+later when `vm_create_process_pt` grows a real program region.
+
+    val PROG_USP = 0x60002000
+    val PROG_SSP = 0x60001000
+    val SRV_USP  = 0x60002000
+    val SRV_SSP  = 0x60001000
+
 Mask async exceptions (IRQ, FIQ, SError). Runs one instruction
 plus the return; safe to call with interrupts already masked.
 
@@ -34,3 +52,103 @@ data stores so subsequent instruction fetch sees the new code.
 Short form — fine for a single cache line (64B on A72).
 
     extern sync_icache_line(addr: i64)
+
+Spinlock acquire/release (LDXR/STXR exclusive monitor). `acquire`
+blocks until it wins the exclusive store and masks async exceptions
+on success; `release` drops the word back to zero and unmasks.
+
+    extern arch_spinlock_acquire(lock: *i64)
+    extern arch_spinlock_release(lock: *i64)
+
+Restore a 272-byte EL0 exception frame at SP_EL1 = `frame_sp`, then
+ERET. Matches the save layout in `vectors.s`. Does not return.
+
+    extern arch_resume_process(frame_sp: i64)
+
+The exit trampoline every new thread initially returns into; on
+aarch64 it's a simple jump into `thread_exit` from boot assembly
+once the kernel defines it. Referenced by `build_stack_frame` so
+that a kernel thread's entry function can simply "return" and end
+up inside the exit trampoline.
+
+    extern thread_exit: byte
+
+Per-CPU kernel stack top pointer. On aarch64 the CPU does not auto-
+swap SP_EL1 on EL0→EL1 — after an ERET the current SP_EL1 remains
+the one we set before the eret. That's exactly what we want for the
+next trap. So we store the value the scheduler last picked and make
+`tss_set_rsp0` a no-op write that future SMP work can re-use.
+
+    var current_kstack_top: i64 = 0
+
+    tss_set_rsp0(rsp0: i64)
+        current_kstack_top = rsp0
+
+Build a fake EL1→EL1 exception frame on the supervisor stack so
+that `arch_resume_process` can restore it and ERET into a fresh
+kernel thread. Layout matches vectors.s (272 bytes):
+
+  [0x000] x0, x1           [0x080] x16, x17
+  [0x010] x2, x3           [0x090] x18, x19
+  [0x020] x4, x5           [0x0A0] x20, x21
+  [0x030] x6, x7           [0x0B0] x22, x23
+  [0x040] x8, x9           [0x0C0] x24, x25
+  [0x050] x10, x11         [0x0D0] x26, x27
+  [0x060] x12, x13         [0x0E0] x28, x29
+  [0x070] x14, x15         [0x0F0] x30, SP_EL0
+                           [0x100] SPSR_EL1, ELR_EL1
+
+`x30` is pre-loaded with `thread_exit` so a thread that `ret`s
+from its entry function drops into the exit trampoline. SPSR_EL1
+is set to `0x5` (M=EL1h, DAIF clear) so ERET stays at EL1 with
+interrupts enabled; ELR_EL1 = entry_point.
+
+    build_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64
+        val frame = ssp - STACK_FRAME_SIZE
+        var i = 0
+        while i < STACK_FRAME_SIZE
+            var b: *byte = *byte(frame + i64(i))
+            *b = byte(0)
+            i += 1
+        var x30_p: *i64 = *i64(frame + i64(0xF0))
+        *x30_p = i64(&thread_exit)
+        var sp0_p: *i64 = *i64(frame + i64(0xF8))
+        *sp0_p = usp
+        var spsr_p: *i64 = *i64(frame + i64(0x100))
+        *spsr_p = i64(0x5)           // M=EL1h, DAIF clear
+        var elr_p: *i64 = *i64(frame + i64(0x108))
+        *elr_p = entry_point
+        frame
+
+Same shape as build_stack_frame but the frame targets EL0 on ERET:
+SPSR_EL1 = 0 (M=EL0t, DAIF clear), SP_EL0 = usp. The exit trampoline
+is NOT written to x30; user code that "returns" from its entry point
+should instead issue the SYS_EXIT syscall. Caller (create_process_
+suspended) handles thread_exit placement separately.
+
+    build_user_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64
+        val frame = ssp - STACK_FRAME_SIZE
+        var i = 0
+        while i < STACK_FRAME_SIZE
+            var b: *byte = *byte(frame + i64(i))
+            *b = byte(0)
+            i += 1
+        var sp0_p: *i64 = *i64(frame + i64(0xF8))
+        *sp0_p = usp
+        var spsr_p: *i64 = *i64(frame + i64(0x100))
+        *spsr_p = i64(0)             // M=EL0t, DAIF clear
+        var elr_p: *i64 = *i64(frame + i64(0x108))
+        *elr_p = entry_point
+        frame
+
+Set up the initial context frame for a new user process. On aarch64
+the per-process kernel stack is identity-mapped (lives in the
+Normal RAM block so it's reachable under any PT that mirrors the
+kernel's L1[1] carve-out). Build the frame directly on `kstack_top_val`
+— no cross-address-space copy needed. Returns the SSP value (frame
+base) the scheduler will use as SP_EL1 on resume.
+
+    arch_setup_process_frame(entry_point: i64, usp: i64, ssp: i64,
+                             kstack_top_val: i64, ptbr_val: u64) -> i64
+        build_user_stack_frame(entry_point, usp, kstack_top_val)
+        kstack_top_val - i64(STACK_FRAME_SIZE)

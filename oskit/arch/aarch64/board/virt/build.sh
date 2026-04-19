@@ -26,6 +26,7 @@ SYSL_FILES=(
     oskit/config/config.sysl
     oskit/arch/aarch64/cpu.lsysl
     oskit/arch/aarch64/vm.lsysl
+    oskit/arch/aarch64/exc.lsysl
     oskit/arch/aarch64/board/virt/uart.lsysl
     oskit/arch/aarch64/board/virt/hello.lsysl
 )

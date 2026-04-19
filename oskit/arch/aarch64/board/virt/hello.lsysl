@@ -1,9 +1,24 @@
 hello — aarch64 sysl kernel entry (QEMU virt)
 =============================================
 
-Minimal `kernel_main` for the QEMU virt board. Prints greetings
-via the PL011 UART module and returns; `boot.s` halts in wfi
-after we come back.
+Boot path for the QEMU virt board. Provides the platform-side
+implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
+`arch_schedule_after_exc`, then drives two distinct demos depending
+on whether the kernel-thread path or the EL0 path was selected.
+
+Default (kernel-thread) demo: build two kernel-thread context
+frames via `build_stack_frame`, kick off the first with
+`arch_resume_process`, and let the generic timer's preemption
+rotate between them. Each thread prints a tick + its id and
+wfis until the next timer fires. Validates:
+  - build_stack_frame
+  - arch_resume_process
+  - low64_irq save/restore
+  - arch_schedule_after_exc swap
+
+Legacy (EL0) demo: run a `b .` program at EL0 and let timer
+preemption count ticks in hex. Kept under the `DEMO_EL0` val for
+quick flip.
 
     module oskit.arch.aarch64.board.virt
 
@@ -12,11 +27,13 @@ after we come back.
         read_esr_el1, abort,
         last_user_code_page, last_user_stack_page, drop_to_el0,
         sync_icache_line, vm_v2p, vm_copy_to, vm_copy_from,
-        cntfrq_el0, cntp_tval_set, cntp_ctl_set}
+        cntfrq_el0, cntp_tval_set, cntp_ctl_set,
+        build_stack_frame, arch_resume_process,
+        STACK_FRAME_SIZE, arch_cli, arch_sti}
+
+    val DEMO_EL0 = false          // flip to true to run the EL0 demo
 
 Render `v` as a 16-digit hex number (prefixed `0x`) to the UART.
-Useful for the boot-time sanity prints below; deliberately crude
-since the kernel will grow a real formatter later.
 
     uart_puthex(v: u64)
         uart_puts("0x")
@@ -30,10 +47,7 @@ since the kernel will grow a real formatter later.
             shift -= 4
 
 GICv2 programming — QEMU virt wires the distributor at 0x08000000
-and the per-CPU CPU interface at 0x08010000. We only enable what
-the generic timer needs: distributor Group 0 on, IRQ 30 (EL1 phys
-timer PPI) enabled at a below-IRQ-mask priority, CPU interface
-enabled, PMR open to all priorities.
+and the per-CPU CPU interface at 0x08010000.
 
     val GICD_CTLR:       u64 = u64(0x08000000)
     val GICD_ISENABLER0: u64 = u64(0x08000100)
@@ -42,22 +56,15 @@ enabled, PMR open to all priorities.
     val GICC_PMR:        u64 = u64(0x08010004)
     val GICC_IAR:        u64 = u64(0x0801000C)
     val GICC_EOIR:       u64 = u64(0x08010010)
-    val IRQ_TIMER: int = 30   // EL1 phys timer is PPI 14 = IRQ 30
+    val IRQ_TIMER: int = 30
 
     gic_init()
-        // Distributor: enable Group 0. Group 0 is fine for a single
-        // non-secure kernel that routes everything through FIQ-less
-        // IRQ delivery.
         var dctl: *i32 = *i32(GICD_CTLR)
         *dctl = i32(1)
-        // Enable IRQ 30 (timer) by setting ISENABLER0 bit 30.
         var isen: *i32 = *i32(GICD_ISENABLER0)
         *isen = i32(0x40000000)
-        // Priority byte for IRQ 30 = 0xA0 (lower number = higher
-        // priority; we just need it below PMR = 0xFF).
         var prio: *byte = *byte(GICD_IPRIORITYR + u64(30))
         *prio = byte(0xA0)
-        // CPU interface: accept priorities lower than 0xFF, enable.
         var pmr: *i32 = *i32(GICC_PMR)
         *pmr = i32(0xFF)
         var cctl: *i32 = *i32(GICC_CTLR)
@@ -71,54 +78,96 @@ enabled, PMR open to all priorities.
         var eoip: *i32 = *i32(GICC_EOIR)
         *eoip = i32(irq)
 
-Generic timer — set a one-shot compare, arm with ENABLE=1 / IMASK=0.
-The timer raises IRQ 30 when CNTPCT_EL0 >= CVAL; reload with a new
-TVAL from inside the IRQ handler to make it periodic.
-
     timer_init_periodic(interval_ticks: u64)
         cntp_tval_set(interval_ticks)
-        cntp_ctl_set(u64(1))    // ENABLE=1, IMASK=0
+        cntp_ctl_set(u64(1))
 
     var tick_count: int = 0
 
-    handle_irq(frame: u64)
-        val irq = gic_ack()
-        if irq == IRQ_TIMER
-            tick_count += 1
-            uart_puts("[tick ")
-            uart_puthex(u64(tick_count))
-            uart_puts("]\n")
-            // Reload for a ~200ms period so we see a handful of
-            // ticks in the 3s QEMU window.
-            cntp_tval_set(cntfrq_el0() / u64(5))
-        gic_eoi(irq)
+Kernel-thread demo state. Two kernel threads round-robin on timer
+tick. Each thread has its own kernel stack (MAX_KT_STACKS slots of
+4KB each, allocated in BSS), and its current saved SSP is kept in
+`kt_ssp[]`. `current_thread` is the thread that was just running
+when the IRQ fired.
 
-Synchronous exception handler for lower EL (EL0). Called from the
-`low64_sync` stub in `vectors.s` after it has saved the full EL0
-register state. `frame` points to the saved frame on the kernel
-stack; the first 31 i64 slots are x0..x30 in order, so `fp[0]` is
-x0, `fp[8]` is x8, etc. (Linux aarch64 calling convention: x8 is
-the syscall number, x0..x5 are args, return goes back in x0.)
+    val MAX_KT = 2
+    val KT_STACK_BYTES = 4096
 
-SVC (EC=0x15) dispatches through `syscall_dispatch`. Anything else
-is fatal at this stage.
+    var kt_stacks: [2][4096]byte     // [MAX_KT][KT_STACK_BYTES]
+    var kt_ssp: [2]i64               // saved SP_EL1 for each thread
+    var kt_current: int = -1         // which thread is running, -1 = idle
+    var kt_active: int = 0           // number of threads actually set up
 
-    handle_sync_lower(frame: u64)
-        val esr = read_esr_el1()
+Kernel thread 0: prints "A" on each scheduler pass and wfis.
+
+    kthread_a()
+        while true
+            uart_puts("[kt A tick]\n")
+            arch_wfi()
+
+Kernel thread 1: prints "B" on each scheduler pass and wfis.
+
+    kthread_b()
+        while true
+            uart_puts("[kt B tick]\n")
+            arch_wfi()
+
+    extern arch_wfi()
+
+Initialize a new kernel thread: zero its stack, build an initial
+EL1 frame with `entry` as ELR, and record the resulting SSP in
+`kt_ssp[slot]`.
+
+    kt_init(slot: int, entry: i64)
+        var i = 0
+        while i < KT_STACK_BYTES
+            kt_stacks[slot][i] = 0
+            i += 1
+        val top = i64(&kt_stacks[slot][0]) + i64(KT_STACK_BYTES)
+        kt_ssp[slot] = build_stack_frame(entry, top, top)
+
+Sync dispatcher — the platform side of arch_dispatch_sync. Decodes
+ESR and routes SVC to the syscall dispatcher. Anything else aborts.
+
+    arch_dispatch_sync(esr: u64, frame: u64)
         val ec = int((esr >> u64(26)) & u64(0x3F))
         if ec == 0x15
             syscall_dispatch(frame)
         else
-            uart_puts("[unhandled sync from EL0, ESR=")
+            uart_puts("[unhandled sync from EL0/EL1, ESR=")
             uart_puthex(esr)
             uart_puts("]\n")
             abort()
 
-Tiny syscall table. Numbers mirror Linux's aarch64 convention where
-it makes sense (exit=93); our custom calls sit below that.
+IRQ dispatcher — GIC ack, handle, EOI.
 
-  SYS_PUTHEX(1, u64 v)  — print `v` as 16-digit hex, return 0
-  SYS_EXIT(93, int code) — print exit code and halt the CPU
+    arch_dispatch_irq(frame: u64)
+        val irq = gic_ack()
+        if irq == IRQ_TIMER
+            tick_count += 1
+            if DEMO_EL0
+                uart_puts("[tick ")
+                uart_puthex(u64(tick_count))
+                uart_puts("]\n")
+            cntp_tval_set(cntfrq_el0() / u64(5))
+        gic_eoi(irq)
+
+Scheduler — for the kernel-thread demo, rotate among the
+registered threads. Save the current thread's SP_EL1 into
+`kt_ssp[kt_current]`, pick the next one round-robin, and return
+its stored SSP so the asm path resumes it. If no threads are
+registered (EL0 demo), return the caller's SSP unchanged.
+
+    arch_schedule_after_exc(ssp: i64) -> i64
+        if kt_active <= 0
+            return ssp
+        if kt_current >= 0
+            kt_ssp[kt_current] = ssp
+        val next = (kt_current + 1) % kt_active
+        kt_current = next
+        kt_ssp[next]
+
+Minimal SVC dispatcher for the EL0 demo.
 
     syscall_dispatch(frame: u64)
         var fp: *i64 = *i64(frame)
@@ -140,6 +189,8 @@ it makes sense (exit=93); our custom calls sit below that.
             uart_puts("]\n")
             fp[0] = i64(-1)
 
+Entry point — boot.s calls this after mmu_init.
+
     kernel_main()
         uart_puts("SLIX aarch64 boot (sysl, MMU on)\n")
         uart_puts("Hello, aarch64!\n")
@@ -148,17 +199,45 @@ it makes sense (exit=93); our custom calls sit below that.
         uart_puthex(kernel_ptbr())
         uart_puts("\n")
 
-        // Dump SCTLR_EL1 so we can inspect which control bits the
-        // boot path left set. Bit 19 (WXN) in particular would make
-        // any EL0-writable mapping execute-never at EL1 — i.e. the
-        // kernel would fault as soon as we flip AP[1] on RAM.
+        if DEMO_EL0
+            kernel_main_el0()
+        else
+            kernel_main_kt()
+
+Kernel-thread demo: build two kernel threads, arm the timer, and
+kick off the first via arch_resume_process. The timer IRQ vectors
+into low64_irq, which saves the frame, calls arch_dispatch_irq
+(increments tick_count, reloads timer, EOIs), then calls
+arch_schedule_after_exc which rotates to the other thread and
+returns its SSP; arch_resume_process restores into that thread.
+
+    kernel_main_kt()
+        uart_puts("[kt] initialising two kernel threads\n")
+        kt_init(0, i64(&kthread_a))
+        kt_init(1, i64(&kthread_b))
+        kt_active = 2
+
+        gic_init()
+        timer_init_periodic(cntfrq_el0() / u64(5))
+        uart_puts("gic + timer initialised\n")
+
+        // Pick thread 0 as the initial runner. Its frame's SPSR=EL1h
+        // means arch_resume_process will ERET back to EL1, onto the
+        // thread's own stack. Mask IRQs until we resume so we don't
+        // race against our own timer before the resume lands.
+        arch_cli()
+        kt_current = 0
+        uart_puts("[kt] resuming thread 0\n")
+        arch_resume_process(kt_ssp[0])
+        uart_puts("unexpected return from arch_resume_process\n")
+
+Legacy EL0 demo — keep for regression testing.
+
+    kernel_main_el0()
         uart_puts("sctlr_el1=")
         uart_puthex(read_sctlr_el1())
         uart_puts("\n")
 
-        // Allocate a couple of zeroed pages and confirm they live at
-        // distinct, page-aligned addresses. Proves the page pool and
-        // the zero-fill path are functional under the new MMU map.
         val p1 = page_alloc_zero()
         val p2 = page_alloc_zero()
         uart_puts("page_alloc_zero 1=")
@@ -170,16 +249,11 @@ it makes sense (exit=93); our custom calls sit below that.
         vm_flush_tlb()
         uart_puts("vm_flush_tlb ok\n")
 
-        // Create a per-process page table (a clone of the kernel map
-        // at this stage) and switch TTBR0 to it. If the kernel keeps
-        // running and the UART still works, the switch landed.
         val new_pt = vm_create_process_pt()
         uart_puts("new_pt=")
         uart_puthex(new_pt)
         uart_puts("\n")
 
-        // Capture the L3 user page physical addresses before any
-        // later call to vm_create_process_pt can clobber them.
         val code_pa = last_user_code_page
         val stack_pa = last_user_stack_page
         uart_puts("user code_pa=")
@@ -188,41 +262,17 @@ it makes sense (exit=93); our custom calls sit below that.
         uart_puthex(stack_pa)
         uart_puts("\n")
 
-        // Write a trivial EL0 program: just loop forever. The timer
-        // IRQ will preempt it roughly every 200ms and we'll see tick
-        // counters on the UART.
-        //   b .               0x14000000
         var code_word: *i32 = *i32(code_pa)
         code_word[0] = i32(0x14000000)
-
-        // A72 has split I/D caches on — the stores land in D-cache;
-        // the I-cache must be made to see them before we try to
-        // execute. All instructions fit in one 64B cache line (they
-        // start at a page boundary), so one sync is sufficient.
         sync_icache_line(i64(code_pa))
-
-        // Sanity-check vm_v2p against what we know: VA 0x60000000
-        // under new_pt should translate to code_pa, and VA 0x60001000
-        // to stack_pa.
-        uart_puts("vm_v2p(new_pt, 0x60000000)=")
-        uart_puthex(vm_v2p(new_pt, u64(0x60000000)))
-        uart_puts("\nvm_v2p(new_pt, 0x60001000)=")
-        uart_puthex(vm_v2p(new_pt, u64(0x60001000)))
-        uart_puts("\n")
 
         vm_set_ptbr(new_pt)
         uart_puts("after vm_set_ptbr: still alive\n")
 
-        // GIC + generic timer bring-up. Once EL0 starts, IRQs unmask
-        // (SPSR=0 → DAIF all clear), and the timer will preempt it.
         gic_init()
         timer_init_periodic(cntfrq_el0() / u64(5))
         uart_puts("gic + timer initialised\n")
 
-        // Drop to EL0 with user code at VA 0x60000000 and user stack
-        // top at VA 0x60002000 (the stack page covers 0x60001000..
-        // 0x60001FFF). SVC #0x42 from EL0 must vector to low64_sync
-        // (VBAR+0x400, V=8) with ESR_EL1 EC=0x15, ISS[15:0]=0x42.
         uart_puts("dropping to EL0...\n")
         drop_to_el0(i64(0x60000000), i64(0x60002000))
         uart_puts("unexpected return from EL0 drop\n")

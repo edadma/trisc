@@ -1,0 +1,52 @@
+Arch-level exception handlers for aarch64
+=========================================
+
+Lives in `module oskit.arch` so the assembly in `vectors.s` can call
+a fixed symbol (`oskit_arch__handle_sync_lower`,
+`oskit_arch__handle_irq`) regardless of which board is underneath.
+
+Dispatch out of these handlers happens through a small, fixed-name
+extern ABI that the board/kernel implementations fulfil:
+
+  arch_dispatch_sync(esr: u64, frame: u64)   — called on every EL0
+      sync exception. Handler decides if it's an SVC via esr and
+      dispatches accordingly. On unhandled exceptions it's expected
+      to abort (or at least not return to a bad state).
+
+  arch_dispatch_irq(frame: u64)              — called on every EL0
+      IRQ. Handler ack/EOIs at the platform IRQ controller and
+      dispatches to the appropriate IRQ-number handler internally.
+
+  arch_schedule_after_exc(ssp: i64) -> i64   — called after the
+      handler returns. Lets the scheduler pick a different thread
+      (returning its SSP) or keep the current one (returning `ssp`
+      unchanged). The asm path tail-jumps to `arch_resume_process`
+      with this value as the new SP_EL1.
+
+Using direct externs instead of module-level function-pointer vars
+avoids a sysl codegen bug (variable name mangling is not applied on
+the load side when the type is a closure). The bug is noted in memory
+so a follow-up can revisit once it's fixed.
+
+    module oskit.arch
+
+    extern read_esr_el1() -> u64
+
+    extern arch_dispatch_sync(esr: u64, frame: u64)
+    extern arch_dispatch_irq(frame: u64)
+    extern arch_schedule_after_exc(ssp: i64) -> i64
+
+Synchronous exception from EL0. Read ESR, hand off to the platform's
+sync dispatcher, then consult the scheduler.
+
+    handle_sync_lower(frame: u64) -> i64
+        val esr = read_esr_el1()
+        arch_dispatch_sync(esr, frame)
+        arch_schedule_after_exc(i64(frame))
+
+Async IRQ from EL0. Hand off to the platform's IRQ dispatcher, then
+consult the scheduler.
+
+    handle_irq(frame: u64) -> i64
+        arch_dispatch_irq(frame)
+        arch_schedule_after_exc(i64(frame))
