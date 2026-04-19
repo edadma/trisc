@@ -8,7 +8,7 @@ after we come back.
     module oskit.arch.aarch64.board.virt
 
     import oskit.arch.{page_alloc_zero, kernel_ptbr, vm_flush_tlb,
-        vm_create_process_pt, vm_set_ptbr}
+        vm_create_process_pt, vm_set_ptbr, read_sctlr_el1}
 
 Render `v` as a 16-digit hex number (prefixed `0x`) to the UART.
 Useful for the boot-time sanity prints below; deliberately crude
@@ -31,6 +31,14 @@ since the kernel will grow a real formatter later.
 
         uart_puts("kernel_ptbr=")
         uart_puthex(kernel_ptbr())
+        uart_puts("\n")
+
+        // Dump SCTLR_EL1 so we can inspect which control bits the
+        // boot path left set. Bit 19 (WXN) in particular would make
+        // any EL0-writable mapping execute-never at EL1 — i.e. the
+        // kernel would fault as soon as we flip AP[1] on RAM.
+        uart_puts("sctlr_el1=")
+        uart_puthex(read_sctlr_el1())
         uart_puts("\n")
 
         // Allocate a couple of zeroed pages and confirm they live at

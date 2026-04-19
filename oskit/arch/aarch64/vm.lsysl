@@ -24,6 +24,7 @@ Hardware page-table operations (vm_asm.s).
     extern vm_set_ptbr(addr: u64)
     extern vm_flush_tlb()
     extern vm_get_ptbr() -> u64
+    extern read_sctlr_el1() -> u64
 
 Kernel page-table base, captured on first call so later code can
 route around it (e.g. building per-process tables that clone a
@@ -39,10 +40,18 @@ in `mmu_init`.
 
 aarch64 descriptor encoding bits we'll need repeatedly.
 
+Important architectural rule (see ARM ARM + Arm Community forum):
+if AP[1] = 1 (EL0 write permitted), the descriptor's PXN is treated as
+1 regardless of its explicit value — i.e. EL1 cannot execute from any
+page that is EL0-writable. This is a deliberate security measure and
+means we cannot flip AP[1] on the 1GB RAM block that holds kernel text;
+per-process mappings must carve out a smaller user region at L2/L3.
+
     val PTE_VALID: i64 = 1          // bit 0 — valid
     val PTE_TABLE: i64 = 2          // bit 1 — table (vs block/page)
     val PTE_PAGE:  i64 = 2          // bit 1 — page (at L3)
     val PTE_AF:    i64 = 0x400      // bit 10 — access flag
+    val PTE_AP_EL0: i64 = 0x40      // bit 6 — AP[1]: 1 = EL0 accessible
 
 Mask for extracting the output address from a level 1/2/3 descriptor.
 

@@ -37,3 +37,11 @@ vm_flush_tlb:
     dsb  ish
     isb
     ret
+
+// read_sctlr_el1() -> u64
+//   Returns current SCTLR_EL1. Handy for one-off diagnostics (e.g.
+//   confirming WXN / UWXN bits before flipping page-table AP).
+.global read_sctlr_el1
+read_sctlr_el1:
+    mrs x0, sctlr_el1
+    ret
