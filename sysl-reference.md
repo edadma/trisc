@@ -916,9 +916,10 @@ Float literals (`3.14`, `1e5`) default to `f64`, but coerce to `f32` when the
 context demands it (`var x: f32 = 1.5` works without a cast). Mixed-width float
 arithmetic widens to the wider operand; `f64 -> f32` requires explicit `f32(x)`.
 
-> **Backend note:** the TRISC backend currently emits 64-bit float instructions
-> only — `f32` is rejected by `--backend=trisc`. Use `f32` with the LLVM backend
-> (the typical embedded target).
+> **Backend note:** TRISC stores `f32` as 4 bytes in memory but works with it as
+> `f64` in registers (using `f32tof64`/`f64tof32` at memory boundaries). LLVM
+> uses native `float` throughout. Both backends are correct; TRISC's approach
+> trades 4 bytes per `f32` register slot for simpler arithmetic codegen.
 
 **Escape sequences** in string and char literals:
 
