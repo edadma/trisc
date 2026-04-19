@@ -14,7 +14,7 @@ and process termination.
             putint(n / 10)
         putc('0' + (n % 10))
 
-    main()
+    main(argv: []string)
         var n = 0
         while 1 == 1
             putint(n)

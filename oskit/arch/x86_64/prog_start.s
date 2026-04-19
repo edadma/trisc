@@ -22,7 +22,7 @@ _start:
     movabs $PROG_ARGS_ADDR, %rax
     movl (%rax), %edi              # argc → rdi
     leaq 8(%rax), %rsi             # &argv[0] → rsi
-    call sysl_start
+    call oskit_ulib__sysl_start
     movq $3, %rdi                  # SYS_EXIT
     movq $0, %rsi                  # (sysl_start exits itself; fallback 0)
     int $0x80

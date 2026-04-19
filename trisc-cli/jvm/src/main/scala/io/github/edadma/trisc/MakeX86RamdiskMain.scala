@@ -52,8 +52,8 @@ object MakeX86RamdiskMain:
 
     val disk = TFS.format(
       blockSize = 4096,
-      totalBlocks = 256,   // 1 MB
-      maxInodes = 128,
+      totalBlocks = 512,   // 2 MB
+      maxInodes = 256,
       prefill = prefill,
       files = files,
     )

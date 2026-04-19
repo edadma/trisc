@@ -1,44 +1,29 @@
 write — write text to a file
 ============================
 
-Opens a file and writes text to it.
+Opens a file and writes the remaining arguments (joined with spaces) to it.
+
+Usage: `write <file> <text...>`
 
     module oskit.bin.write
 
-    import oskit.ulib.{puts, exit, get_args, skip_arg0, open, write_handle, close}
+    import oskit.ulib.{puts, exit, open, write_handle, close}
 
-    main()
-        val raw = skip_arg0(get_args())
-        // Split into path and text at first space
-        val p = *byte(raw)
-        val n = len(raw)
-        var sp = 0
-        while sp < n
-            if p[sp] == byte(' ')
-                break
-            sp += 1
-        if sp == 0
+    main(argv: []string)
+        val n = len(argv)
+        if n < 3
             puts("usage: write <file> <text>\n")
-            exit()
             return
-        if sp >= n
-            puts("usage: write <file> <text>\n")
-            exit()
-            return
-        val path = string(p, sp)
-        // Skip spaces after path
-        var ts = sp
-        while ts < n
-            if p[ts] != byte(' ')
-                break
-            ts += 1
-        val text = string(p + ts, n - ts)
+        val path = argv[1]
         val fid = open(path)
         if fid < 0
             puts(path)
             puts(": not found\n")
-            exit()
             return
-        write_handle(fid, *byte(text), len(text))
+        val sp = " "
+        for var i = 2; i < n; i++
+            if i > 2
+                write_handle(fid, *byte(sp), 1)
+            val a = argv[i]
+            write_handle(fid, *byte(a), len(a))
         close(fid)
-        exit()

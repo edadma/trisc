@@ -259,8 +259,6 @@ to the child's SPAWN_PROG_ARGS_ADDR. The thread name comes from
         // Extract path as string
         val path = string(buf + 5, path_len)
 
-
-
         // Create per-process page table
         val proc_pt = svc_vm_create_pt()
         if proc_pt == 0
@@ -268,8 +266,6 @@ to the child's SPAWN_PROG_ARGS_ADDR. The thread name comes from
             reply[0] = -1
             ipc_reply(sender, reply, 1)
             return
-
-
 
         // Load binary into child's address space via cross-address-space copy
         val entry = load_tof_to_ptbr(path, proc_pt)

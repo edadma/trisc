@@ -151,7 +151,9 @@ Returns child PID or -1 on error.
         hmap[4] = byte(h_err)
         hmap[5] = 2
 
-        val pid = pm_spawn_handles(path, "", &hmap[0], 3)
+        var argv: [1]string
+        argv[0] = path
+        val pid = pm_spawn_handles(path, argv, 1, &hmap[0], 3)
 
         fs_close(h_in)
         fs_close(h_out)

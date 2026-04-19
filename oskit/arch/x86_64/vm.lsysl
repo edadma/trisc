@@ -16,7 +16,12 @@ be remapped per-process.
 
     module oskit.arch
 
-    import oskit.config.{PAGE_SIZE, KERNEL_L1_BASE, PAGE_POOL_BASE, PAGE_POOL_END}
+    import oskit.config.{PAGE_SIZE, KERNEL_L1_BASE, PAGE_POOL_BASE}
+
+    // x86_64 has more RAM than TRISC; page pool can extend up to 32MB
+    // (QEMU default is 128MB). This overrides oskit.config.PAGE_POOL_END
+    // which is constrained to 0x7FD000 by TRISC's 8MB device boundary.
+    val PAGE_POOL_END: u64 = 0x2000000
     import oskit.hal.{memcpy, memset}
 
 x86_64 PTE flags (i64 — PTEs are 64-bit on x86_64).

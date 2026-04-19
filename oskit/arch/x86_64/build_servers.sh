@@ -78,7 +78,7 @@ WRAPPER_EOF
     echo "  LLVM IR → object ok"
 
     # Assemble startup
-    x86_64-elf-as --64 -o "$OUT/prog_start.o" "$ARCH_DIR/prog_start.s"
+    x86_64-elf-as --64 -o "$OUT/srv_start.o" "$ARCH_DIR/srv_start.s"
 
     # Compile C stubs
     x86_64-elf-gcc -ffreestanding -nostdlib -mcmodel=kernel -mno-red-zone \
@@ -87,7 +87,7 @@ WRAPPER_EOF
     # Link → ELF
     x86_64-elf-ld -T "$ARCH_DIR/server.ld" \
         -o "$SRV_OUT/${NAME}" \
-        "$OUT/prog_start.o" "$OUT/prog_stubs.o" "$OUT/srv_${NAME}.o" 2>&1 \
+        "$OUT/srv_start.o" "$OUT/prog_stubs.o" "$OUT/srv_${NAME}.o" 2>&1 \
         | grep -v "missing .note.GNU-stack" | grep -v "deprecated" | grep -v "RWX permissions" || true
     echo "  Link ok ($(wc -c < "$SRV_OUT/${NAME}" | tr -d ' ') bytes)"
 }
@@ -132,13 +132,13 @@ DISKEOF
         -c -o "$OUT/srv_disk.o" "$OUT/srv_disk.ll"
     echo "  LLVM IR → object ok"
 
-    x86_64-elf-as --64 -o "$OUT/prog_start.o" "$ARCH_DIR/prog_start.s"
+    x86_64-elf-as --64 -o "$OUT/srv_start.o" "$ARCH_DIR/srv_start.s"
     x86_64-elf-gcc -ffreestanding -nostdlib -mcmodel=kernel -mno-red-zone \
         -fno-pic -fno-pie -c -o "$OUT/prog_stubs.o" "$ARCH_DIR/prog_stubs.c"
 
     x86_64-elf-ld -T "$ARCH_DIR/prog.ld" \
         -o "$SRV_OUT/disk" \
-        "$OUT/prog_start.o" "$OUT/prog_stubs.o" "$OUT/srv_disk.o" 2>&1 \
+        "$OUT/srv_start.o" "$OUT/prog_stubs.o" "$OUT/srv_disk.o" 2>&1 \
         | grep -v "missing .note.GNU-stack" | grep -v "deprecated" | grep -v "RWX permissions" || true
     echo "  Link ok ($(wc -c < "$SRV_OUT/disk" | tr -d ' ') bytes)"
 }

@@ -5,19 +5,17 @@ Displays type and size of a file or directory.
 
     module oskit.bin.stat
 
-    import oskit.ulib.{puts, putint, exit, get_args, skip_arg0, stat}
+    import oskit.ulib.{puts, putint, exit, stat}
 
-    main()
-        val path = skip_arg0(get_args())
-        if len(path) == 0
+    main(argv: []string)
+        if len(argv) < 2
             puts("usage: stat <path>\n")
-            exit()
             return
+        val path = argv[1]
         var st: [7]int
         if stat(path, st) < 0
             puts(path)
             puts(": not found\n")
-            exit()
             return
         val ftype = (st[0] >> 12) & 0xF
         puts("type: ")
@@ -31,4 +29,3 @@ Displays type and size of a file or directory.
         puts("size: ")
         putint(st[4])
         puts("\n")
-        exit()

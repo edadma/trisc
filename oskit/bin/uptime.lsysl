@@ -7,7 +7,7 @@ Prints the system uptime in ticks.
 
     import oskit.ulib.{puts, putint, exit, uptime}
 
-    main()
+    main(argv: []string)
         puts("up ")
         putint(uptime())
         puts(" ticks\n")

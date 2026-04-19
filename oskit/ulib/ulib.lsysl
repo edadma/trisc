@@ -525,11 +525,13 @@ Build a POSIX argv blob from an argv slice. Writes to `blob`
 starting at offset 0. Returns the total blob size, or -1 if
 it wouldn't fit in `cap` bytes.
 
-Layout (see PROG_ARGS_ADDR in ulib for the spec):
+Layout (see PROG_ARGS_ADDR below for the spec):
     [argc(4)] [pad(4)] [argv[0](8)] ... [NULL(8)] [string data]
 
 Pointers are baked as absolute addresses = PROG_ARGS_ADDR + offset,
 since PM always copies the blob to PROG_ARGS_ADDR in the child.
+
+    val PROG_ARGS_ADDR = 0xBF000
 
     build_argv_blob(argv: *string, argc: int, blob: *byte, cap: int) -> int
         val ptrs_size = (argc + 1) * 8
@@ -654,8 +656,6 @@ Layout at PROG_ARGS_ADDR (written by PM during spawn):
     +16+8*argc NUL-separated string data (argv[i] points into this region)
 
 Pointers are absolute because nsh bakes in PROG_ARGS_ADDR as the base.
-
-    val PROG_ARGS_ADDR = 0xBF000
 
 Sysl entry stub. Called by _start with argc and argv (C-style).
 Walks argv, wraps each arg as a sysl `string`, and calls the

@@ -5,7 +5,7 @@ test_ipc — test IPC to VFS
 
     import oskit.ulib.{putc, connect, close, exit}
 
-    main()
+    main(argv: []string)
         putc('A')
         val h = connect("tty:0")
         putc('B')

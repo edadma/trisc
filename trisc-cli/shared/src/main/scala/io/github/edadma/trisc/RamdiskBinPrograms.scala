@@ -22,7 +22,7 @@ object RamdiskBinPrograms:
         |    bss
         |SYMBOL _heap_start = AFTER bss
         |SYMBOL _heap_end = 0x100000
-        |ENTRY main
+        |ENTRY _start
         |""".stripMargin,
     ) match
       case Right(s) => s
