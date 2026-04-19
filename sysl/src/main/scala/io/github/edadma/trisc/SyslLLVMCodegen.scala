@@ -162,6 +162,12 @@ class SyslLLVMCodegen(target: String = "host"):
       case "x86_64-linux" =>
         emit("""target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"""")
         emit("""target triple = "x86_64-unknown-linux-gnu"""")
+      case "aarch64" | "aarch64-elf" =>
+        emit("""target datalayout = "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128"""")
+        emit("""target triple = "aarch64-unknown-elf"""")
+      case "aarch64-linux" =>
+        emit("""target datalayout = "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128"""")
+        emit("""target triple = "aarch64-unknown-linux-gnu"""")
       case _ => // no target declarations for unknown targets
     emit("")
 
@@ -180,6 +186,14 @@ class SyslLLVMCodegen(target: String = "host"):
     declareIfNotDefined("declare i8* @memset(i8*, i32, i64)", "memset")
     declareIfNotDefined("declare void @free(i8*)", "free")
     emit("declare void @llvm.memset.p0i8.i64(i8*, i8, i64, i1)")
+    // Saturating arithmetic intrinsics for wrapping_*/saturating_* builtins.
+    for w <- Seq(8, 16, 32, 64) do
+      emit(s"declare i$w @llvm.sadd.sat.i$w(i$w, i$w)")
+      emit(s"declare i$w @llvm.uadd.sat.i$w(i$w, i$w)")
+      emit(s"declare i$w @llvm.ssub.sat.i$w(i$w, i$w)")
+      emit(s"declare i$w @llvm.usub.sat.i$w(i$w, i$w)")
+      emit(s"declare {i$w, i1} @llvm.smul.with.overflow.i$w(i$w, i$w)")
+      emit(s"declare {i$w, i1} @llvm.umul.with.overflow.i$w(i$w, i$w)")
     declareIfNotDefined("declare i64 @write(i32, i8*, i64)", "write")
     declareIfNotDefined("declare i32 @fflush(i8*)", "fflush")
     declareIfNotDefined("declare void @abort()", "abort")
@@ -1586,6 +1600,50 @@ class SyslLLVMCodegen(target: String = "host"):
               val r = newReg()
               emit(s"  $r = load $elt, $elt* $typedPtr")
               r
+
+      case TIntrinsicCall(name, args, typ) =>
+        val a = genExpr(args(0))
+        val b = genExpr(args(1))
+        val lt = llvmType(typ)
+        val width = typ.bitWidth
+        val signed = typ.isSigned
+        val r = newReg()
+        name match
+          case "wrapping_add" => emit(s"  $r = add $lt $a, $b")
+          case "wrapping_sub" => emit(s"  $r = sub $lt $a, $b")
+          case "wrapping_mul" => emit(s"  $r = mul $lt $a, $b")
+          case "saturating_add" =>
+            val intr = if signed then "sadd.sat" else "uadd.sat"
+            emit(s"  $r = call $lt @llvm.$intr.i$width($lt $a, $lt $b)")
+          case "saturating_sub" =>
+            val intr = if signed then "ssub.sat" else "usub.sat"
+            emit(s"  $r = call $lt @llvm.$intr.i$width($lt $a, $lt $b)")
+          case "saturating_mul" =>
+            // No native llvm.smul.sat; emulate via with.overflow + clamp.
+            val intr = if signed then "smul.with.overflow" else "umul.with.overflow"
+            val pair = newReg()
+            emit(s"  $pair = call {$lt, i1} @llvm.$intr.i$width($lt $a, $lt $b)")
+            val v = newReg()
+            val ov = newReg()
+            emit(s"  $v = extractvalue {$lt, i1} $pair, 0")
+            emit(s"  $ov = extractvalue {$lt, i1} $pair, 1")
+            val sat: String =
+              if !signed then
+                if width == 64 then "-1" else ((1L << width) - 1).toString
+              else
+                // signed: pick MIN (sign bits differ) or MAX (sign bits same)
+                val xor = newReg()
+                emit(s"  $xor = xor $lt $a, $b")
+                val isNeg = newReg()
+                emit(s"  $isNeg = icmp slt $lt $xor, 0")
+                val sel = newReg()
+                val minStr = (-(1L << (width - 1))).toString
+                val maxStr = ((1L << (width - 1)) - 1).toString
+                emit(s"  $sel = select i1 $isNeg, $lt $minStr, $lt $maxStr")
+                sel
+            emit(s"  $r = select i1 $ov, $lt $sat, $lt $v")
+          case other => throw new RuntimeException(s"unknown intrinsic: $other")
+        r
 
       case TLen(array, _) =>
         array.typ match

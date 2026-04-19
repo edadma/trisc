@@ -1048,6 +1048,35 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case RefSliceVal(_, length, _) => IntVal(length.toLong)
           case _ => throw RuntimeError("cap: unsupported type")
 
+      case TIntrinsicCall(name, args, typ) =>
+        val a = toLong(evalAny(args(0), env))
+        val b = toLong(evalAny(args(1), env))
+        val width = typ.bitWidth
+        val signed = typ.isSigned
+        val (minV, maxV) =
+          if signed then (-(1L << (width - 1)), (1L << (width - 1)) - 1)
+          else (0L, if width == 64 then -1L else (1L << width) - 1)  // unsigned: -1L = max u64
+        def mask(v: Long): Long = truncateNarrow(v, typ)
+        def saturate(v: java.math.BigInteger): Long =
+          val mn = java.math.BigInteger.valueOf(minV)
+          val mx =
+            if !signed && width == 64 then
+              new java.math.BigInteger("FFFFFFFFFFFFFFFF", 16)
+            else java.math.BigInteger.valueOf(maxV)
+          if v.compareTo(mn) < 0 then minV
+          else if v.compareTo(mx) > 0 then if !signed && width == 64 then -1L else maxV
+          else v.longValue()
+        val ba = java.math.BigInteger.valueOf(a)
+        val bb = java.math.BigInteger.valueOf(b)
+        name match
+          case "wrapping_add" => IntVal(mask(a + b))
+          case "wrapping_sub" => IntVal(mask(a - b))
+          case "wrapping_mul" => IntVal(mask(a * b))
+          case "saturating_add" => IntVal(saturate(ba.add(bb)))
+          case "saturating_sub" => IntVal(saturate(ba.subtract(bb)))
+          case "saturating_mul" => IntVal(saturate(ba.multiply(bb)))
+          case other => throw RuntimeError(s"unknown intrinsic: $other")
+
       case TFieldPreInc(obj, fieldIndex, _) =>
         val ArrVal(cells, off) = evalAny(obj, env): @unchecked
         val cell = cells(off + fieldIndex)

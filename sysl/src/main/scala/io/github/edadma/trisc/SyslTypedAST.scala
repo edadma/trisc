@@ -115,3 +115,5 @@ case class TInterfaceBox(expr: TExpr, iface: SyslType.InterfaceType) extends TEx
 case class TInterfaceDispatch(ifaceVal: TExpr, methodIndex: Int, args: List[TExpr], retType: SyslType) extends TExpr {
   def typ: SyslType = retType
 }
+// Compiler intrinsic call (wrapping_add, saturating_add, etc.). Polymorphic per integer width.
+case class TIntrinsicCall(name: String, args: List[TExpr], typ: SyslType) extends TExpr

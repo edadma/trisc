@@ -7,7 +7,7 @@ case class CompileCommand(
     inputs: Seq[String] = Seq.empty,
     output: Option[String] = None,
     emit: String = "asm", // asm, tof, llvm
-    target: String = "host", // host, x86_64-elf, x86_64-linux
+    target: String = "host", // host, x86_64-elf, x86_64-linux, aarch64-elf, aarch64-linux
 ) extends SyslCommand
 case class RunCommand(
     inputs: Seq[String] = Seq.empty,
@@ -63,7 +63,7 @@ object SyslCli:
               )
             ),
           opt[String]("target")
-            .text("Target: host (default), x86_64-elf, x86_64-linux")
+            .text("Target: host (default), x86_64-elf, x86_64-linux, aarch64-elf, aarch64-linux")
             .action((v, c) =>
               c.copy(command = c.command match
                 case cc: CompileCommand => cc.copy(target = v)
