@@ -652,24 +652,6 @@ Try to run an external command from `/bin/` via PM spawn.
         val cmd = argv[0]
         val bin_path = "/bin/" + nsh_external_bin_key(cmd)
 
-        // Build args string: "cmd arg1 arg2 ..."
-        var args_buf: [256]byte
-        var pos = 0
-        for var i = 0; i < argc; i++
-            if pos >= 240
-                break
-            if i > 0
-                args_buf[pos] = byte(' ')
-                pos += 1
-            val arg = argv[i]
-            val ap = *byte(arg)
-            for var j = 0; j < len(arg); j++
-                if pos >= 240
-                    break
-                args_buf[pos] = ap[j]
-                pos += 1
-        val args = string(args_buf, pos)
-
         // Open handles — use redirect file handles if set, else TTY
         var h_in = -1
         if len(redir_in) > 0
@@ -702,7 +684,7 @@ Try to run an external command from `/bin/` via PM spawn.
         hmap[4] = byte(h_err)
         hmap[5] = 2  // child stderr
 
-        val pid = pm_spawn_handles(bin_path, args, hmap, 3)
+        val pid = pm_spawn_handles(bin_path, argv, argc, hmap, 3)
 
         // Close parent's copies of handles
         close(h_in)
@@ -801,27 +783,6 @@ the appropriate stdin/stdout handles, then waits for all.
             val cmd = argv[seg_start]
             val bin_path = "/bin/" + nsh_external_bin_key(cmd)
 
-            var args_buf: [256]byte
-            var pos = 0
-            var ai = seg_start
-            while ai < seg_end
-                if pos >= 240
-                    break
-                if ai > seg_start
-                    args_buf[pos] = byte(' ')
-                    pos += 1
-                val arg = argv[ai]
-                val ap = *byte(arg)
-                var aj = 0
-                while aj < len(arg)
-                    if pos >= 240
-                        break
-                    args_buf[pos] = ap[aj]
-                    pos += 1
-                    aj += 1
-                ai += 1
-            val args = string(args_buf, pos)
-
             var h_in = tty_in
             if seg > 0
                 h_in = rd[seg - 1]
@@ -838,7 +799,7 @@ the appropriate stdin/stdout handles, then waits for all.
             hmap[4] = byte(h_err)
             hmap[5] = 2
 
-            pids[seg] = pm_spawn_handles(bin_path, args, hmap, 3)
+            pids[seg] = pm_spawn_handles(bin_path, argv + seg_start, seg_argc, hmap, 3)
             seg += 1
 
         // Close all pipe handles in parent

@@ -9,5 +9,5 @@ pm_waitpid(pid: int) -> int
 pm_kill(pid: int) -> int
     -1
 
-pm_spawn_handles(path: string, args: string, hmap: *byte, num: int) -> int
+pm_spawn_handles(path: string, argv: *string, argc: int, hmap: *byte, num: int) -> int
     -1

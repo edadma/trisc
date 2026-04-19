@@ -236,7 +236,9 @@ TTY handles for stdin/stdout/stderr.
 
     spawn_shell(home: *byte, homelen: int)
         val home_str = string(home, homelen)
-        val args = "nsh " + home_str
+        var argv: [2]string
+        argv[0] = "nsh"
+        argv[1] = home_str
 
         // Open TTY handles for the shell
         val h_in = connect("tty:0")
@@ -251,7 +253,7 @@ TTY handles for stdin/stdout/stderr.
         hmap[4] = byte(h_err)
         hmap[5] = 2
 
-        val pid = pm_spawn_handles("/bin/nsh", args, hmap, 3)
+        val pid = pm_spawn_handles("/bin/nsh", argv, 2, hmap, 3)
 
         close(h_in)
         close(h_out)
