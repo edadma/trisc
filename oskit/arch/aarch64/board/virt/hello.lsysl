@@ -1,0 +1,48 @@
+hello — minimal aarch64 sysl kernel (QEMU virt)
+===============================================
+
+Rewrites the C hello milestone in sysl so the aarch64 port runs
+through the same toolchain as x86_64 (sysl -> LLVM IR ->
+clang -> aarch64 ELF). UART access is direct MMIO writes to the
+PL011 at `0x09000000`; QEMU's firmware leaves the UART already
+initialised, so we only poll the busy flag and stuff bytes.
+
+    module oskit.arch.aarch64.board.virt
+
+PL011 register addresses on the QEMU virt machine.
+
+    val UART0_DR: i64 = 0x09000000
+    val UART0_FR: i64 = 0x09000018
+    val UARTFR_TXFF = 0x20
+
+Write one byte to the UART data register, waiting for the TX FIFO
+to drain first. `volatile` keeps the read of the flag register from
+being hoisted out of the busy-wait loop.
+
+    uart_putc(c: int)
+        volatile var fr: *i32 = *i32(UART0_FR)
+        var busy = 1
+        while busy != 0
+            busy = int(*fr) & UARTFR_TXFF
+        var dr: *i32 = *i32(UART0_DR)
+        *dr = i32(c)
+
+Write a NUL-terminated sysl string, translating `'\n'` into CRLF
+for terminal emulators that expect carriage returns.
+
+    uart_puts(s: string)
+        val p = *byte(s)
+        val n = len(s)
+        for var i = 0; i < n; i++
+            val ch = int(p[i])
+            if ch == 10
+                uart_putc(13)
+            uart_putc(ch)
+
+Entry point invoked by `boot.s`. Currently just prints greetings;
+it will grow into the real kernel initialisation as the aarch64
+port matures.
+
+    kernel_main()
+        uart_puts("SLIX aarch64 boot (sysl)\n")
+        uart_puts("Hello, aarch64!\n")
