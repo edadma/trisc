@@ -3,22 +3,18 @@ hello — aarch64 sysl kernel entry (QEMU virt)
 
 Boot path for the QEMU virt board. Provides the platform-side
 implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
-`arch_schedule_after_exc`, then drives two distinct demos depending
-on whether the kernel-thread path or the EL0 path was selected.
+`arch_schedule_after_exc`, then drives one of three demos:
 
-Default (kernel-thread) demo: build two kernel-thread context
-frames via `build_stack_frame`, kick off the first with
-`arch_resume_process`, and let the generic timer's preemption
-rotate between them. Each thread prints a tick + its id and
-wfis until the next timer fires. Validates:
-  - build_stack_frame
-  - arch_resume_process
-  - low64_irq save/restore
-  - arch_schedule_after_exc swap
-
-Legacy (EL0) demo: run a `b .` program at EL0 and let timer
-preemption count ticks in hex. Kept under the `DEMO_EL0` val for
-quick flip.
+  DEMO_MODE = 0   — kernel-integrated: create two kernel threads
+                    via `create_thread`, then `first_thread_ssp()` +
+                    `arch_resume_process()` to kick off the first.
+                    Timer IRQ flows through the real `schedule()`.
+  DEMO_MODE = 1   — ad-hoc: own two-thread scheduler (no kernel).
+                    Useful for regression testing the context-switch
+                    asm without dragging in the full kernel.
+  DEMO_MODE = 2   — EL0 demo: drop to EL0 with a `b .` program and
+                    watch timer preemption count ticks. Predates
+                    everything else; kept as a sanity check.
 
     module oskit.arch.aarch64.board.virt
 
@@ -30,8 +26,10 @@ quick flip.
         cntfrq_el0, cntp_tval_set, cntp_ctl_set,
         build_stack_frame, arch_resume_process,
         STACK_FRAME_SIZE, arch_cli, arch_sti}
+    import oskit.kernel.{kernel_init, create_thread, first_thread_ssp,
+        kernel_stack_usp, kernel_stack_ssp, schedule}
 
-    val DEMO_EL0 = false          // flip to true to run the EL0 demo
+    val DEMO_MODE = 0             // 0=kernel, 1=ad-hoc, 2=EL0
 
 Render `v` as a 16-digit hex number (prefixed `0x`) to the UART.
 
@@ -84,28 +82,20 @@ and the per-CPU CPU interface at 0x08010000.
 
     var tick_count: int = 0
 
-Kernel-thread demo state. Two kernel threads round-robin on timer
-tick. Each thread has its own kernel stack (MAX_KT_STACKS slots of
-4KB each, allocated in BSS), and its current saved SSP is kept in
-`kt_ssp[]`. `current_thread` is the thread that was just running
-when the IRQ fired.
+Ad-hoc kernel-thread demo state (DEMO_MODE = 1).
 
     val MAX_KT = 2
     val KT_STACK_BYTES = 4096
 
-    var kt_stacks: [2][4096]byte     // [MAX_KT][KT_STACK_BYTES]
-    var kt_ssp: [2]i64               // saved SP_EL1 for each thread
-    var kt_current: int = -1         // which thread is running, -1 = idle
-    var kt_active: int = 0           // number of threads actually set up
-
-Kernel thread 0: prints "A" on each scheduler pass and wfis.
+    var kt_stacks: [2][4096]byte
+    var kt_ssp: [2]i64
+    var kt_current: int = -1
+    var kt_active: int = 0
 
     kthread_a()
         while true
             uart_puts("[kt A tick]\n")
             arch_wfi()
-
-Kernel thread 1: prints "B" on each scheduler pass and wfis.
 
     kthread_b()
         while true
@@ -113,10 +103,6 @@ Kernel thread 1: prints "B" on each scheduler pass and wfis.
             arch_wfi()
 
     extern arch_wfi()
-
-Initialize a new kernel thread: zero its stack, build an initial
-EL1 frame with `entry` as ELR, and record the resulting SSP in
-`kt_ssp[slot]`.
 
     kt_init(slot: int, entry: i64)
         var i = 0
@@ -126,46 +112,61 @@ EL1 frame with `entry` as ELR, and record the resulting SSP in
         val top = i64(&kt_stacks[slot][0]) + i64(KT_STACK_BYTES)
         kt_ssp[slot] = build_stack_frame(entry, top, top)
 
-Sync dispatcher — the platform side of arch_dispatch_sync. Decodes
-ESR and routes SVC to the syscall dispatcher. Anything else aborts.
+Sync dispatcher — decode ESR and route.
+
+    extern read_far_el1() -> u64
 
     arch_dispatch_sync(esr: u64, frame: u64)
         val ec = int((esr >> u64(26)) & u64(0x3F))
         if ec == 0x15
             syscall_dispatch(frame)
         else
-            uart_puts("[unhandled sync from EL0/EL1, ESR=")
+            uart_puts("[unhandled sync, ESR=")
             uart_puthex(esr)
+            uart_puts(" FAR=")
+            uart_puthex(read_far_el1())
+            uart_puts(" ELR=")
+            var fp: *i64 = *i64(frame)
+            var elr_p: *i64 = *i64(frame + u64(0x108))
+            uart_puthex(u64(*elr_p))
             uart_puts("]\n")
             abort()
 
-IRQ dispatcher — GIC ack, handle, EOI.
+IRQ dispatcher — GIC ack, handle, EOI. Any printing is conditional
+on DEMO_MODE because in DEMO_MODE=0 every timer tick drives a real
+scheduler pass and the kernel threads themselves produce output.
 
     arch_dispatch_irq(frame: u64)
         val irq = gic_ack()
         if irq == IRQ_TIMER
             tick_count += 1
-            if DEMO_EL0
+            if DEMO_MODE == 2
                 uart_puts("[tick ")
                 uart_puthex(u64(tick_count))
                 uart_puts("]\n")
             cntp_tval_set(cntfrq_el0() / u64(5))
         gic_eoi(irq)
 
-Scheduler — for the kernel-thread demo, rotate among the
-registered threads. Save the current thread's SP_EL1 into
-`kt_ssp[kt_current]`, pick the next one round-robin, and return
-its stored SSP so the asm path resumes it. If no threads are
-registered (EL0 demo), return the caller's SSP unchanged.
+Scheduler hook. Three shapes:
+  DEMO_MODE == 0 → delegate to the kernel's real schedule(ssp)
+  DEMO_MODE == 1 → ad-hoc round-robin across kt_ssp[]
+  DEMO_MODE == 2 → identity (EL0 demo has nothing to schedule)
 
     arch_schedule_after_exc(ssp: i64) -> i64
-        if kt_active <= 0
-            return ssp
-        if kt_current >= 0
-            kt_ssp[kt_current] = ssp
-        val next = (kt_current + 1) % kt_active
-        kt_current = next
-        kt_ssp[next]
+        if DEMO_MODE == 0
+            val next = schedule(ssp)
+            if next == i64(0)
+                return ssp
+            return next
+        if DEMO_MODE == 1
+            if kt_active <= 0
+                return ssp
+            if kt_current >= 0
+                kt_ssp[kt_current] = ssp
+            val next = (kt_current + 1) % kt_active
+            kt_current = next
+            return kt_ssp[next]
+        ssp
 
 Minimal SVC dispatcher for the EL0 demo.
 
@@ -189,7 +190,17 @@ Minimal SVC dispatcher for the EL0 demo.
             uart_puts("]\n")
             fp[0] = i64(-1)
 
-Entry point — boot.s calls this after mmu_init.
+Kernel-thread entries for the kernel-integrated demo.
+
+    kentry_a()
+        while true
+            uart_puts("[kern A]\n")
+            arch_wfi()
+
+    kentry_b()
+        while true
+            uart_puts("[kern B]\n")
+            arch_wfi()
 
     kernel_main()
         uart_puts("SLIX aarch64 boot (sysl, MMU on)\n")
@@ -199,17 +210,43 @@ Entry point — boot.s calls this after mmu_init.
         uart_puthex(kernel_ptbr())
         uart_puts("\n")
 
-        if DEMO_EL0
-            kernel_main_el0()
-        else
+        if DEMO_MODE == 0
+            kernel_main_kern()
+        else if DEMO_MODE == 1
             kernel_main_kt()
+        else
+            kernel_main_el0()
 
-Kernel-thread demo: build two kernel threads, arm the timer, and
-kick off the first via arch_resume_process. The timer IRQ vectors
-into low64_irq, which saves the frame, calls arch_dispatch_irq
-(increments tick_count, reloads timer, EOIs), then calls
-arch_schedule_after_exc which rotates to the other thread and
-returns its SSP; arch_resume_process restores into that thread.
+Kernel-integrated boot path. Uses the shared oskit/kernel scheduler,
+create_thread, and first_thread_ssp. The timer IRQ routes through
+the real schedule(), which picks the next thread from the run
+queue. Both kernel threads print on every scheduler pass.
+
+    kernel_main_kern()
+        uart_puts("[kern] kernel_init...\n")
+        kernel_init()
+
+        uart_puts("[kern] creating threads\n")
+        create_thread(i64(&kentry_a), kernel_stack_usp(0),
+            kernel_stack_ssp(0), "kA")
+        create_thread(i64(&kentry_b), kernel_stack_usp(1),
+            kernel_stack_ssp(1), "kB")
+
+        gic_init()
+        timer_init_periodic(cntfrq_el0() / u64(5))
+        uart_puts("[kern] gic + timer initialised\n")
+
+        arch_cli()
+        val first = first_thread_ssp()
+        if first == i64(0)
+            uart_puts("[kern] first_thread_ssp returned 0\n")
+            abort()
+        uart_puts("[kern] resuming first thread\n")
+        arch_resume_process(first)
+        uart_puts("unexpected return from arch_resume_process\n")
+
+Ad-hoc two-thread demo (no kernel dependency). Used as a smoke
+test for the context-switch asm.
 
     kernel_main_kt()
         uart_puts("[kt] initialising two kernel threads\n")
@@ -221,17 +258,13 @@ returns its SSP; arch_resume_process restores into that thread.
         timer_init_periodic(cntfrq_el0() / u64(5))
         uart_puts("gic + timer initialised\n")
 
-        // Pick thread 0 as the initial runner. Its frame's SPSR=EL1h
-        // means arch_resume_process will ERET back to EL1, onto the
-        // thread's own stack. Mask IRQs until we resume so we don't
-        // race against our own timer before the resume lands.
         arch_cli()
         kt_current = 0
         uart_puts("[kt] resuming thread 0\n")
         arch_resume_process(kt_ssp[0])
         uart_puts("unexpected return from arch_resume_process\n")
 
-Legacy EL0 demo — keep for regression testing.
+Legacy EL0 demo.
 
     kernel_main_el0()
         uart_puts("sctlr_el1=")
@@ -255,11 +288,8 @@ Legacy EL0 demo — keep for regression testing.
         uart_puts("\n")
 
         val code_pa = last_user_code_page
-        val stack_pa = last_user_stack_page
         uart_puts("user code_pa=")
         uart_puthex(code_pa)
-        uart_puts(" stack_pa=")
-        uart_puthex(stack_pa)
         uart_puts("\n")
 
         var code_word: *i32 = *i32(code_pa)

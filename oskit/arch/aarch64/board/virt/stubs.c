@@ -40,3 +40,47 @@ __attribute__((noreturn)) void abort(void) {
 void free(void *p) {
     (void)p;
 }
+
+/* Bump allocator backing malloc for the bare-metal kernel. The sysl
+ * string runtime calls malloc when it needs to heap-allocate a new
+ * string buffer (e.g. on process name assignment). A simple bump
+ * allocator is sufficient until we wire std.alloc + sbrk properly.
+ *
+ * QEMU virt default RAM is 128MB starting at 0x40000000, so the top
+ * of RAM is 0x47FFFFFF. Reserve the top 16MB for this bump allocator;
+ * the page allocator in vm.lsysl grows up from _heap_start and won't
+ * reach that far for a long time. */
+static unsigned long heap_cursor = 0;
+#define HEAP_BUMP_BASE 0x47000000UL
+#define HEAP_BUMP_END  0x48000000UL
+
+void *malloc(size_t len) {
+    if (heap_cursor == 0)
+        heap_cursor = HEAP_BUMP_BASE;
+    /* 8-byte align */
+    len = (len + 7UL) & ~7UL;
+    if (heap_cursor + len > HEAP_BUMP_END)
+        return (void *)0;
+    void *p = (void *)heap_cursor;
+    heap_cursor += len;
+    return p;
+}
+
+/* Byte-wise memcpy. Not called on hot paths — the kernel's own
+ * memcpy from oskit/hal/memcpy.sysl is word-at-a-time and is what
+ * the kernel prefers; this stub just satisfies LLVM's implicit
+ * memcpy lowering for struct copies. */
+void *memcpy(void *dst, const void *src, size_t n) {
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+    for (size_t i = 0; i < n; i++)
+        d[i] = s[i];
+    return dst;
+}
+
+void *memset(void *dst, int c, size_t n) {
+    unsigned char *d = (unsigned char *)dst;
+    for (size_t i = 0; i < n; i++)
+        d[i] = (unsigned char)c;
+    return dst;
+}

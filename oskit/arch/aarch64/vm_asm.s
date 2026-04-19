@@ -53,3 +53,11 @@ read_sctlr_el1:
 read_esr_el1:
     mrs x0, esr_el1
     ret
+
+// read_far_el1() -> u64
+//   Returns current FAR_EL1. Useful for decoding data/instruction
+//   aborts (FAR holds the faulting virtual address).
+.global read_far_el1
+read_far_el1:
+    mrs x0, far_el1
+    ret

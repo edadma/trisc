@@ -276,29 +276,27 @@ Copy `len` bytes from a kernel-side source into `dst_vaddr` under
 `dst_ptbr`. Walks the target page table per byte (slow but simple;
 easy to optimize later by striding one page at a time).
 
-    vm_copy_to(dst_ptbr: u64, dst_vaddr: u64, src: u64, len: int)
-        var src_p: *byte = *byte(src)
+    vm_copy_to(dst_ptbr: u64, dst_vaddr: u64, src: *byte, len: int)
         var i = 0
         while i < len
             val pa = vm_v2p(dst_ptbr, dst_vaddr + u64(i))
             if pa == u64(0)
                 return
             var dst_p: *byte = *byte(pa)
-            dst_p[0] = src_p[i]
+            dst_p[0] = src[i]
             i += 1
 
 Copy `len` bytes from `src_vaddr` under `src_ptbr` into a kernel-
 side destination.
 
-    vm_copy_from(src_ptbr: u64, src_vaddr: u64, dst: u64, len: int)
-        var dst_p: *byte = *byte(dst)
+    vm_copy_from(src_ptbr: u64, src_vaddr: u64, dst: *byte, len: int)
         var i = 0
         while i < len
             val pa = vm_v2p(src_ptbr, src_vaddr + u64(i))
             if pa == u64(0)
                 return
             var src_p: *byte = *byte(pa)
-            dst_p[i] = src_p[0]
+            dst[i] = src_p[0]
             i += 1
 
 Cross-address-space copy: bounce one byte at a time through the
