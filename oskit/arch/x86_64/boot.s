@@ -461,7 +461,7 @@ do_schedule:
     movabs $stack_top, %rsp
     # Mark no current thread (current_thread = -1)
     movabs $current_thread, %rdi
-    movq $-1, (%rdi)
+    movl $-1, (%rdi)
     sti
 .idle_spin:
     hlt
@@ -793,7 +793,7 @@ exc_with_errcode 21
 exc_idle:
     movabs $stack_top, %rsp
     movabs $current_thread, %rdi
-    movq $-1, (%rdi)
+    movl $-1, (%rdi)
     sti
 .exc_idle_spin:
     hlt

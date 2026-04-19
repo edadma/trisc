@@ -65,6 +65,17 @@ void debug_hex4(int v) {
     debug_char(h[(v >> 4) & 0xF]);
     debug_char(h[v & 0xF]);
 }
+void debug_hex8(int v) {
+    const char *h = "0123456789ABCDEF";
+    debug_char(h[(v >> 28) & 0xF]);
+    debug_char(h[(v >> 24) & 0xF]);
+    debug_char(h[(v >> 20) & 0xF]);
+    debug_char(h[(v >> 16) & 0xF]);
+    debug_char(h[(v >> 12) & 0xF]);
+    debug_char(h[(v >> 8) & 0xF]);
+    debug_char(h[(v >> 4) & 0xF]);
+    debug_char(h[v & 0xF]);
+}
 int printf(const char *fmt, ...) { (void)fmt; return 0; }
 int snprintf(char *buf, size_t n, const char *fmt, ...) { (void)buf; (void)n; (void)fmt; return 0; }
 int fflush(void *stream) { (void)stream; return 0; }
