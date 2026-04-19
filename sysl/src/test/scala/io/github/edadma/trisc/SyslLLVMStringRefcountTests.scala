@@ -634,6 +634,22 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 0
   }
 
+  "value-struct mutation in callee does not leak to caller (true value semantics)" in {
+    llvmExit(
+      """struct Holder
+        |    s: string
+        |
+        |mutate(h: Holder) -> int
+        |    h.s = "mutated"
+        |    len(h.s)
+        |
+        |main() -> int
+        |    var h = Holder("orig" + "inal")
+        |    var n = mutate(h)
+        |    if h.s == "original" && n == 7 then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
   "value-struct copy via var p = q — both live independently" in {
     llvmExit(
       """struct Holder

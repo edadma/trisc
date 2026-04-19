@@ -517,4 +517,99 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |main() -> int = check(true)
         |""".stripMargin) shouldBe 0
   }
+
+  // ====================================================================
+  // 13. Value-struct param ABI — true pass-by-value semantics
+  // ====================================================================
+
+  "value-struct param: field read works" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |get_len(h: Holder) -> int = len(h.s)
+        |
+        |main() -> int
+        |    var h = Holder("abc" + "def")
+        |    val n = get_len(h)
+        |    if n == 6 && h.s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct param: callee mutation does not leak to caller" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |mutate(h: Holder) -> int
+        |    h.s = "mutated"
+        |    len(h.s)
+        |
+        |main() -> int
+        |    var h = Holder("orig" + "inal")
+        |    val n = mutate(h)
+        |    if h.s == "original" && n == 7 then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct param passed in loop — no heap leak" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |inspect(h: Holder) -> int = len(h.s)
+        |
+        |main() -> int
+        |    var h = Holder("abc" + "def")
+        |    var i = 0
+        |    while i < 30
+        |        if inspect(h) != 6 then return 1
+        |        i += 1
+        |    if h.s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct returned from function taking same struct as param" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |passthrough(h: Holder) -> Holder = h
+        |
+        |main() -> int
+        |    var h = Holder("abc" + "def")
+        |    val r = passthrough(h)
+        |    if r.s == "abcdef" && h.s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "two value-struct params (second is stack-passed)" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |concat_lens(a: Holder, b: Holder) -> int = len(a.s) + len(b.s)
+        |
+        |main() -> int
+        |    var x = Holder("first" + "_a")
+        |    var y = Holder("second" + "_b")
+        |    val n = concat_lens(x, y)
+        |    if n == 15 && x.s == "first_a" && y.s == "second_b" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct param chained through two function calls" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |inner(h: Holder) -> int = len(h.s)
+        |outer(h: Holder) -> int = inner(h)
+        |
+        |main() -> int
+        |    var h = Holder("abc" + "def")
+        |    val n = outer(h)
+        |    if n == 6 && h.s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
 }

@@ -600,7 +600,8 @@ class SyslTriscCodegen(addresses: Int = 4):
       val callerOffset = 16 + (nRegPushed - 1 - regIndex) * 8
       locals(param.name) = LocalVar(param.name, callerOffset, SyslType.I64)
     // Stack params: those beyond register capacity
-    // String params take 16 bytes, slice params 24 bytes, others 8
+    // String params take 16 bytes, slice params 24 bytes, struct/enum params take their
+    // aligned size (caller pushed full bytes), others 8.
     val nUserStackStart = 1 - userParamRegStart
     var stackParamOffset = 16 + nRegPushed * 8
     for param <- fun.params.drop(nUserStackStart) do
@@ -610,6 +611,10 @@ class SyslTriscCodegen(addresses: Int = 4):
       else if param.typ.isInstanceOf[SyslType.SliceType] then
         locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
         stackParamOffset += 24
+      else if param.typ.isInstanceOf[SyslType.StructType] || param.typ.isInstanceOf[SyslType.EnumType] then
+        val aligned = (stackSize(param.typ) + 7) & ~7
+        locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
+        stackParamOffset += aligned
       else
         locals(param.name) = LocalVar(param.name, stackParamOffset, SyslType.I64)
         stackParamOffset += 8
@@ -675,6 +680,40 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitAddImm(3, 7, 8)
         emit("  std r2, r3, r0")
       locals(param.name) = funcLocal
+
+    // Copy struct/enum params into local frame slots so mutation by the callee is
+    // contained and string-field rcs can be cleaned up uniformly via emitRefCleanup.
+    // Register struct params: srcLocal holds an 8-byte address → dereference and copy.
+    // Stack struct params: bytes are already at fp+srcLocal.offset → copy directly.
+    for (param, i) <- fun.params.zipWithIndex if param.typ.isInstanceOf[SyslType.StructType] || param.typ.isInstanceOf[SyslType.EnumType] do
+      val srcLocal = locals(param.name)
+      val isRegParam = i < (1 - userParamRegStart)
+      val aligned = (stackSize(param.typ) + 7) & ~7
+      emitAddImm(7, 7, -aligned)
+      stackOffset -= aligned
+      val newLocal = LocalVar(param.name, stackOffset, param.typ)
+      if isRegParam then
+        // Register param: srcLocal holds an 8-byte address → load it into r1 first
+        emitAddImm(1, 5, srcLocal.offset)
+        emit("  ldd r1, r1, r0")        // r1 = caller's struct address
+        for off <- 0 until aligned by 8 do
+          emitAddImm(2, 1, off)
+          emit("  ldd r2, r2, r0")
+          emitAddImm(3, 7, off)
+          emit("  std r2, r3, r0")
+      else
+        // Stack param: bytes directly at fp+srcLocal.offset
+        for off <- 0 until aligned by 8 do
+          emitAddImm(2, 5, srcLocal.offset + off)
+          emit("  ldd r2, r2, r0")
+          emitAddImm(3, 7, off)
+          emit("  std r2, r3, r0")
+      locals(param.name) = newLocal
+      // Incr string fields of the local copy (callee owns its share of each field's buffer)
+      param.typ match
+        case st: SyslType.StructType if structHasStringFields(st) =>
+          emitStructStringFieldsRC(5, newLocal.offset, st, incr = true)
+        case _ =>
 
     // Generate body
     fun.body match
@@ -750,6 +789,10 @@ class SyslTriscCodegen(addresses: Int = 4):
       else if param.typ.isInstanceOf[SyslType.FuncType] || param.typ.isInstanceOf[SyslType.InterfaceType] then
         locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
         stackParamOffset += 16
+      else if param.typ.isInstanceOf[SyslType.StructType] || param.typ.isInstanceOf[SyslType.EnumType] then
+        val aligned = (stackSize(param.typ) + 7) & ~7
+        locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
+        stackParamOffset += aligned
       else
         locals(param.name) = LocalVar(param.name, stackParamOffset, SyslType.I64)
         stackParamOffset += 8
@@ -805,6 +848,34 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitAddImm(3, 7, 8)
         emit("  std r2, r3, r0")
       locals(param.name) = funcLocal
+
+    // Copy struct/enum params into local frame slots (mirrors genFunction).
+    for (param, i) <- fun.params.zipWithIndex if param.typ.isInstanceOf[SyslType.StructType] || param.typ.isInstanceOf[SyslType.EnumType] do
+      val srcLocal = locals(param.name)
+      val isRegParam = i < (1 - userParamRegStart)
+      val aligned = (stackSize(param.typ) + 7) & ~7
+      emitAddImm(7, 7, -aligned)
+      stackOffset -= aligned
+      val newLocal = LocalVar(param.name, stackOffset, param.typ)
+      if isRegParam then
+        emitAddImm(1, 5, srcLocal.offset)
+        emit("  ldd r1, r1, r0")
+        for off <- 0 until aligned by 8 do
+          emitAddImm(2, 1, off)
+          emit("  ldd r2, r2, r0")
+          emitAddImm(3, 7, off)
+          emit("  std r2, r3, r0")
+      else
+        for off <- 0 until aligned by 8 do
+          emitAddImm(2, 5, srcLocal.offset + off)
+          emit("  ldd r2, r2, r0")
+          emitAddImm(3, 7, off)
+          emit("  std r2, r3, r0")
+      locals(param.name) = newLocal
+      param.typ match
+        case st: SyslType.StructType if structHasStringFields(st) =>
+          emitStructStringFieldsRC(5, newLocal.offset, st, incr = true)
+        case _ =>
 
     // Load captured variables from env into locals
     if closure.captures.nonEmpty then
@@ -2425,9 +2496,18 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  pshd r2")              // push first 8 bytes
             stackOffset -= 16
           else if arg.typ.isInstanceOf[SyslType.EnumType] || arg.typ.isInstanceOf[SyslType.StructType] then
-            // Aggregate args: r1 is an address into our stack — do NOT reclaim the temp!
-            emit("  pshd r1")
-            stackOffset -= 8
+            // Aggregate args: copy the struct bytes onto the stack so the callee receives
+            // a true value-type copy (not a pointer into our frame). r1 = source address;
+            // r3/r4 are scratch for the memcpy and don't clobber r1. Source temp (if any)
+            // stays in place — it'll be reclaimed by the post-call savedOffset cleanup.
+            val aligned = (stackSize(arg.typ) + 7) & ~7
+            emitAddImm(7, 7, -aligned)
+            stackOffset -= aligned
+            for off <- 0 until aligned by 8 do
+              emitAddImm(3, 1, off)
+              emit("  ldd r3, r3, r0")
+              emitAddImm(4, 7, off)
+              emit("  std r3, r4, r0")
           else
             // Scalar args: clean up temps, push 8 bytes
             val extra = preOffset - stackOffset
@@ -2505,10 +2585,18 @@ class SyslTriscCodegen(addresses: Int = 4):
             stackOffset -= 16
             regAggregateDataOffset = stackOffset
           else if arg.typ.isInstanceOf[SyslType.StructType] || arg.typ.isInstanceOf[SyslType.EnumType] then
-            // Pre-evaluate other aggregates: save the address on the stack.
+            // Pre-evaluate aggregate register arg: copy bytes to stack at known offset.
+            // The callee gets the address (passed in r1 below) and copies bytes into its
+            // own local frame slot at function entry — true pass-by-value.
             genExpr(arg)
-            emit("  pshd r1")
-            stackOffset -= 8
+            val aligned = (stackSize(arg.typ) + 7) & ~7
+            emitAddImm(7, 7, -aligned)
+            stackOffset -= aligned
+            for off <- 0 until aligned by 8 do
+              emitAddImm(3, 1, off)
+              emit("  ldd r3, r3, r0")
+              emitAddImm(4, 7, off)
+              emit("  std r3, r4, r0")
             regAggregateDataOffset = stackOffset
         }
         // Push stack args (1+) right-to-left
@@ -2523,9 +2611,8 @@ class SyslTriscCodegen(addresses: Int = 4):
             // Address of the pre-pushed 16-byte data (above stack args)
             emitAddImm(1, 5, regAggregateDataOffset)
           else if arg.typ.isInstanceOf[SyslType.StructType] || arg.typ.isInstanceOf[SyslType.EnumType] then
-            // Load the saved address from the stack (pushed as 8-byte pointer)
-            emitAddImm(2, 5, regAggregateDataOffset)
-            emit("  ldd r1, r2, r0")
+            // r1 = address of the pre-pushed struct bytes (above stack args)
+            emitAddImm(1, 5, regAggregateDataOffset)
           else
             val preOffset = stackOffset
             arg match
