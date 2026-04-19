@@ -1612,12 +1612,65 @@ class SyslTriscCodegen(addresses: Int = 4):
         val st = obj.typ.asInstanceOf[SyslType.StructType]
         val off = fieldOffset(st, fieldIndex)
         val fieldType = st.fields(fieldIndex)._2
-        genExpr(value)             // r1 = value
-        emit("  pshd r1")
-        emitStructAddr(obj)        // r1 = struct address
-        if off != 0 then emitAddImm(1, 1, off)
-        emit("  popd r2")          // r2 = value
-        emitStore(2, 1, fieldType)
+
+        // Refcounted field types need decr-old/incr-new bracketing on overwrite.
+        val needsRC = (fieldType == SyslType.StringType && needsAllocExtern) ||
+                      fieldType.isInstanceOf[SyslType.RefType] ||
+                      (fieldType match
+                        case s: SyslType.StructType => structHasStringFields(s) && needsAllocExtern
+                        case _ => false)
+
+        if !needsRC then
+          genExpr(value)             // r1 = value
+          emit("  pshd r1")
+          emitStructAddr(obj)        // r1 = struct address
+          if off != 0 then emitAddImm(1, 1, off)
+          emit("  popd r2")          // r2 = value
+          emitStore(2, 1, fieldType)
+        else
+          // Compute field address; save in a scratch slot that survives the
+          // genExpr below (which may push its result descriptor onto the stack —
+          // breaking pshd/popd LIFO ordering, so we use fp-relative addressing).
+          emitStructAddr(obj)
+          if off != 0 then emitAddImm(1, 1, off)
+          emit("  pshd r1")
+          stackOffset -= 8
+          val saveOff = stackOffset
+          // Decrement the old field value (r1 still = field address)
+          fieldType match
+            case SyslType.StringType =>
+              emit("  ldd r1, r1, r0")  // r1 = old ptr
+              emitRefDecr(1, 8)
+            case rt: SyslType.RefType =>
+              emit("  ldd r1, r1, r0")  // r1 = old ref
+              emitRefDecr(1, refHeaderOffset(rt), deinitFor(rt))
+            case s: SyslType.StructType =>
+              emitStructStringFieldsRC(1, 0, s, incr = false)
+            case _ =>
+          // Compute new value (clobbers everything; may push its descriptor)
+          genExpr(value)              // r1 = new value
+          // Reload field address from the saved fp-relative slot
+          emitAddImm(2, 5, saveOff)
+          emit("  ldd r2, r2, r0")    // r2 = field address
+          emitStore(1, 2, fieldType)
+          // Increment the new value if it's a borrowed (non-owned) reference
+          fieldType match
+            case SyslType.StringType =>
+              value match
+                case _: TBinary => // concat result already at rc=1
+                case _ =>
+                  emit("  ldd r1, r2, r0")  // r1 = new ptr just stored at field
+                  emitRefIncr(1, 8)
+            case rt: SyslType.RefType =>
+              value match
+                case _: TNew | _: TNewArray | _: TNewEnum => // owned, no incr
+                case _ =>
+                  emit("  ldd r1, r2, r0")
+                  emitRefIncr(1, refHeaderOffset(rt))
+            case s: SyslType.StructType =>
+              if !isOwnedStructExpr(value) then
+                emitStructStringFieldsRC(2, 0, s, incr = true)
+            case _ =>
 
       case TFieldCompoundAssignStmt(obj, fieldIndex, op, value) =>
         val st = obj.typ.asInstanceOf[SyslType.StructType]

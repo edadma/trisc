@@ -271,6 +271,59 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |""".stripMargin) shouldBe 0
   }
 
+  "string field reassignment in loop — old buffers freed (heap pressure test)" in {
+    // Tiny 256-byte heap. Each iteration leaks ~24 bytes if h.s = ... doesn't
+    // decr the old buffer's rc. ~10 iterations would exhaust the heap; we run 50.
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |main() -> int
+        |    var h = Holder("abc" + "def")
+        |    var i = 0
+        |    while i < 50
+        |        h.s = "iter" + "_data"
+        |        i += 1
+        |    if h.s == "iter_data" then 0 else 1
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "field-assign with borrowed string source — incr applied" in {
+    // Source string borrowed from a local var; field-assign should incr to
+    // claim a share. Both source and field point at the same buffer; both
+    // get decremented (caller scope exit + field cleanup) → balanced.
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |main() -> int
+        |    var h = Holder("init" + "_v")
+        |    var src = "abc" + "def"
+        |    h.s = src
+        |    if h.s == "abcdef" && src == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "nested-struct field reassignment frees inner string buffers (heap pressure)" in {
+    // Outer struct has a nested struct with a string field. Field-assign of the
+    // outer's nested-struct field should recursively decr inner string buffers.
+    runWithAlloc(
+      """struct Inner
+        |    s: string
+        |
+        |struct Outer
+        |    inner: Inner
+        |
+        |main() -> int
+        |    var o = Outer(Inner("init" + "_v"))
+        |    var i = 0
+        |    while i < 30
+        |        o.inner = Inner("iter" + "_data")
+        |        i += 1
+        |    if o.inner.s == "iter_data" then 0 else 1
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
   // ====================================================================
   // 7. If-expr branches
   // ====================================================================
