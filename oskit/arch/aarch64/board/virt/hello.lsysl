@@ -8,5 +8,5 @@ after we come back.
     module oskit.arch.aarch64.board.virt
 
     kernel_main()
-        uart_puts("SLIX aarch64 boot (sysl)\n")
+        uart_puts("SLIX aarch64 boot (sysl, MMU on)\n")
         uart_puts("Hello, aarch64!\n")
