@@ -234,6 +234,23 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     ps should not include "count"
   }
 
+  "x86 ds: publish, retrieve, delete int and string" in {
+    // Int round-trip
+    qemu.command("ds set answer 42")
+    val getAnswer = qemu.command("ds get answer")
+    getAnswer should include("42")
+
+    // String round-trip
+    qemu.command("ds set greeting hello")
+    val getGreeting = qemu.command("ds get greeting")
+    getGreeting should include("hello")
+
+    // Delete + retrieve should miss
+    qemu.command("ds del answer")
+    val afterDel = qemu.command("ds get answer")
+    afterDel should include("not found")
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")
