@@ -195,8 +195,13 @@ Returns PML4 address, or 0 on failure.
             j += 1
 
         // PT[0x00..0xCB]: kernel region, identity-mapped (present + writable)
-        // Exception: page 0xBF (PROG_ARGS_ADDR) gets a fresh page so each
-        // process has its own args area (prevents parent/child corruption).
+        // Exceptions:
+        //   0xBF (PROG_ARGS_ADDR): fresh per-process page so parent and
+        //        child don't share argv data (written by PM during spawn).
+        //   0xCB: guard page — left non-present so stack overflow past the
+        //        bottom of the program stack region (0xCC000) traps instead
+        //        of silently corrupting low memory. Safe to drop here since
+        //        x86 kernel loads at 0x100000 and doesn't use this area.
         var i = 0
         while i < 0xCC
             if i == 0xBF
@@ -204,6 +209,9 @@ Returns PML4 address, or 0 on failure.
                 if args_page == 0
                     return 0
                 vm_write_pte64(pt + u64(i) * 8, i64(args_page) | PTE_P | PTE_W | PTE_U)
+            else if i == 0xCB
+                // Guard page: non-present (PTE = 0)
+                vm_write_pte64(pt + u64(i) * 8, i64(0))
             else
                 vm_write_pte64(pt + u64(i) * 8, i64(u64(i) * u64(PAGE_SIZE)) | PTE_P | PTE_W)
             i += 1
