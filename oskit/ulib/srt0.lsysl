@@ -1,0 +1,40 @@
+srt0 — Sysl runtime crt0
+========================
+
+The arch-specific `_start` (in `prog_start.s` on x86_64, in
+`syscall.asm` on TRISC) reads argc/argv from the POSIX blob at
+`PROG_ARGS_ADDR` and calls [[sysl_start]]. This module walks the
+C-style argv, wraps each entry as a sysl `string`, and invokes the
+program's `main(argv: []string)`. When main returns, srt0 exits
+via syscall.
+
+C programs link against `crt0.c` instead — same ABI on the inside
+(`oskit_ulib__sysl_start`), but forwards argc/argv straight to a
+C `int main(int argc, char **argv)` without the `[]string` wrap.
+
+Layout at `PROG_ARGS_ADDR` (written by PM during spawn): 4-byte
+argc at offset 0, 4 zero padding, then an array of argc 8-byte
+absolute pointers (baked by the sender since `PROG_ARGS_ADDR` is
+fixed across processes), followed by an 8-byte NULL terminator
+and the NUL-separated string data that each argv entry points at.
+
+    module oskit.ulib
+
+    val ARG_MAX_ARGS = 64
+    var prog_argv_strings: [64]string
+
+    extern main(argv: []string)
+
+    sysl_start(argc: int, cargv: **byte)
+        var i = 0
+        while i < argc
+            if i >= ARG_MAX_ARGS
+                break
+            val p = cargv[i]
+            var n = 0
+            while p[n] != 0
+                n += 1
+            prog_argv_strings[i] = string(p, n)
+            i += 1
+        main(prog_argv_strings[:i])
+        exit()

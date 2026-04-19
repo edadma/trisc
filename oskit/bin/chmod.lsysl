@@ -3,53 +3,29 @@ chmod — change file permissions
 
 Changes the permission mode of a file. Mode is octal (e.g. 755).
 
+Usage: `chmod <mode> <path>`
+
     module oskit.bin.chmod
 
-    import oskit.ulib.{puts, exit, get_args, skip_arg0, chmod}
+    import oskit.ulib.{puts, exit, chmod}
 
-    main()
-        val raw = skip_arg0(get_args())
-        // Split into mode and path at first space
-        val p = *byte(raw)
-        val n = len(raw)
-        var sp = 0
-        while sp < n
-            if p[sp] == byte(' ')
-                break
-            sp += 1
-        if sp == 0
+    main(argv: []string)
+        if len(argv) < 3
             puts("usage: chmod <mode> <path>\n")
-            exit()
             return
-        if sp >= n
-            puts("usage: chmod <mode> <path>\n")
-            exit()
-            return
-        // Parse octal mode
+        val mstr = argv[1]
+        val mp = *byte(mstr)
+        val mn = len(mstr)
         var mode = 0
-        for var i = 0; i < sp; i++
-            val d = int(p[i]) - '0'
+        for var i = 0; i < mn; i++
+            val d = int(mp[i]) - '0'
             if d < 0
                 puts("bad mode\n")
-                exit()
                 return
             if d > 7
                 puts("bad mode\n")
-                exit()
                 return
             mode = mode * 8 + d
-        // Skip spaces after mode
-        var ps = sp
-        while ps < n
-            if p[ps] != byte(' ')
-                break
-            ps += 1
-        if ps >= n
-            puts("usage: chmod <mode> <path>\n")
-            exit()
-            return
-        val path = string(p + ps, n - ps)
-        val result = chmod(path, mode)
+        val result = chmod(argv[2], mode)
         if result != 0
             puts("error\n")
-        exit()

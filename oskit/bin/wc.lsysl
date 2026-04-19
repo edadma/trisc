@@ -11,7 +11,7 @@ Outputs: `  lines  words  bytes`
 
     module oskit.bin.wc
 
-    import oskit.ulib.{open, read, close, puts, exit, get_args, skip_arg0, write_handle, STDIN, STDOUT}
+    import oskit.ulib.{open, read, close, puts, exit, write_handle, STDIN, STDOUT}
 
     val WC_BUF_SIZE = 4096
 
@@ -44,27 +44,14 @@ Print a right-justified integer in a field of width 6.
             j -= 1
         puts(string(out, 6))
 
-    main()
-        val args = get_args()
-        val rest = skip_arg0(args)
-        val rp = *byte(rest)
-        val rlen = len(rest)
-
-        // Skip leading spaces to find file argument
-        var file_start = 0
-        while file_start < rlen
-            if rp[file_start] != 32
-                break
-            file_start += 1
-
+    main(argv: []string)
         var fid = -1
-        if file_start < rlen
-            val file_path = string(rp + file_start, rlen - file_start)
+        if len(argv) > 1
+            val file_path = argv[1]
             fid = open(file_path)
             if fid < 0
                 puts(file_path)
                 puts(": not found\n")
-                exit()
                 return
         else
             fid = STDIN

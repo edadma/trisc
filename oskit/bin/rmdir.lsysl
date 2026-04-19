@@ -5,15 +5,12 @@ Removes an empty directory at the given path.
 
     module oskit.bin.rmdir
 
-    import oskit.ulib.{puts, exit, get_args, skip_arg0, rmdir}
+    import oskit.ulib.{puts, exit, rmdir}
 
-    main()
-        val path = skip_arg0(get_args())
-        if len(path) == 0
+    main(argv: []string)
+        if len(argv) < 2
             puts("usage: rmdir <path>\n")
-            exit()
             return
-        val result = rmdir(path)
+        val result = rmdir(argv[1])
         if result != 0
             puts("error\n")
-        exit()

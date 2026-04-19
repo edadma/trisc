@@ -7,13 +7,15 @@ Usage: `head [-n N] [file]`
 
     module oskit.bin.head
 
-    import oskit.ulib.{open, read, close, puts, exit, get_args, skip_arg0, write_handle, STDIN, STDOUT}
+    import oskit.ulib.{open, read, close, puts, exit, write_handle, STDIN, STDOUT}
 
     val HEAD_BUF = 4096
 
-Parse a decimal integer from a byte pointer. Returns the value.
+Parse a decimal integer from a string.
 
-    parse_int(p: *byte, plen: int) -> int
+    parse_int(s: string) -> int
+        val p = *byte(s)
+        val plen = len(s)
         var v = 0
         var i = 0
         while i < plen
@@ -26,61 +28,49 @@ Parse a decimal integer from a byte pointer. Returns the value.
             i += 1
         v
 
-    main()
-        val args = get_args()
-        var rest = skip_arg0(args)
+    main(argv: []string)
+        val nargs = len(argv)
         var count = 10
+        var file_idx = 1
 
         // Parse -n N or -N
-        val rp = *byte(rest)
-        val rlen = len(rest)
-        if rlen > 1
-            if rp[0] == byte('-')
-                if rp[1] == byte('n')
-                    // Skip "-n "
-                    var i = 2
-                    while i < rlen
-                        if rp[i] != byte(' ')
-                            break
-                        i += 1
-                    // Parse number
-                    count = parse_int(rp + i, rlen - i)
-                    // Skip past number and spaces to find file
-                    while i < rlen
-                        if rp[i] == byte(' ')
-                            break
-                        i += 1
-                    while i < rlen
-                        if rp[i] != byte(' ')
-                            break
-                        i += 1
-                    rest = string(rp + i, rlen - i)
-                else
-                    // -N shorthand
-                    count = parse_int(rp + 1, rlen - 1)
-                    var i = 1
-                    while i < rlen
-                        if rp[i] == byte(' ')
-                            break
-                        i += 1
-                    while i < rlen
-                        if rp[i] != byte(' ')
-                            break
-                        i += 1
-                    rest = string(rp + i, rlen - i)
+        if nargs > 1
+            val a1 = argv[1]
+            val p = *byte(a1)
+            val alen = len(a1)
+            if alen >= 1
+                if p[0] == byte('-')
+                    if alen == 2
+                        if p[1] == byte('n')
+                            // "-n N" form
+                            if nargs > 2
+                                count = parse_int(argv[2])
+                                file_idx = 3
+                            else
+                                file_idx = 2
+                        else
+                            // "-N" single-char, probably digit
+                            count = parse_int(string(p + 1, alen - 1))
+                            file_idx = 2
+                    else
+                        // "-nN" or "-N..."
+                        if p[1] == byte('n')
+                            count = parse_int(string(p + 2, alen - 2))
+                        else
+                            count = parse_int(string(p + 1, alen - 1))
+                        file_idx = 2
 
         if count <= 0
-            exit()
             return
 
         // Open file or stdin
         var fid = -1
-        if len(rest) > 0
-            fid = open(rest)
+        if file_idx < nargs
+            val path = argv[file_idx]
+            fid = open(path)
             if fid < 0
-                puts(rest)
+                puts(path)
                 puts(": not found\n")
-                exit()
                 return
         else
             fid = STDIN
@@ -115,4 +105,3 @@ Parse a decimal integer from a byte pointer. Returns the value.
 
         if fid != STDIN
             close(fid)
-        exit()

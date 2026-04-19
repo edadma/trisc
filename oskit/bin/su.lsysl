@@ -215,7 +215,9 @@ Spawn a shell as the target user.
 
     su_spawn_shell()
         val home_str = string(su_home, su_home_len)
-        val args = "nsh " + home_str
+        var argv: [2]string
+        argv[0] = "nsh"
+        argv[1] = home_str
         val h_in = connect("tty:0")
         val h_out = connect("tty:0")
         val h_err = connect("tty:0")
@@ -226,23 +228,23 @@ Spawn a shell as the target user.
         hmap[3] = 1
         hmap[4] = byte(h_err)
         hmap[5] = 2
-        val pid = pm_spawn_handles("/bin/nsh", args, hmap, 3)
+        val pid = pm_spawn_handles("/bin/nsh", argv, 2, hmap, 3)
         close(h_in)
         close(h_out)
         close(h_err)
         if pid >= 0
             pm_waitpid(pid)
 
-    main()
+    main(argv: []string)
         // Parse argument — default to "root"
         var user: [64]byte
         var userlen = 4
         user[0] = 'r'; user[1] = 'o'; user[2] = 'o'; user[3] = 't'
 
-        val args = skip_arg0(get_args())
-        if len(args) > 0
-            val p = *byte(args)
-            userlen = len(args)
+        if len(argv) > 1
+            val arg = argv[1]
+            val p = *byte(arg)
+            userlen = len(arg)
             if userlen > 63
                 userlen = 63
             var i = 0

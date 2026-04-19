@@ -19,7 +19,7 @@ and name.
             putc(int(s[i]))
             i += 1
 
-    main()
+    main(argv: []string)
         print("  TID  PID STATE    NAME\n")
         val count = get_thread_count()
         for var i = 0; i < count; i++

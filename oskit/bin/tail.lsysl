@@ -10,15 +10,17 @@ byte buffer. When the buffer fills, old content is overwritten.
 
     module oskit.bin.tail
 
-    import oskit.ulib.{open, read, close, puts, exit, get_args, skip_arg0, write_handle, STDIN, STDOUT}
+    import oskit.ulib.{open, read, close, puts, exit, write_handle, STDIN, STDOUT}
 
     val TAIL_BUF = 4096
     val TAIL_MAX_LINES = 64
     val TAIL_DATA_SIZE = 8192
 
-Parse a decimal integer from a byte pointer.
+Parse a decimal integer from a string.
 
-    parse_int(p: *byte, plen: int) -> int
+    parse_int(s: string) -> int
+        val p = *byte(s)
+        val plen = len(s)
         var v = 0
         var i = 0
         while i < plen
@@ -66,59 +68,48 @@ Store a complete line into the ring buffer.
         line_len[slot] = dlen
         data_pos += dlen
 
-    main()
-        val args = get_args()
-        var rest = skip_arg0(args)
+    main(argv: []string)
+        val nargs = len(argv)
         var count = 10
+        var file_idx = 1
 
         // Parse -n N or -N
-        val rp = *byte(rest)
-        val rlen = len(rest)
-        if rlen > 1
-            if rp[0] == byte('-')
-                if rp[1] == byte('n')
-                    var i = 2
-                    while i < rlen
-                        if rp[i] != byte(' ')
-                            break
-                        i += 1
-                    count = parse_int(rp + i, rlen - i)
-                    while i < rlen
-                        if rp[i] == byte(' ')
-                            break
-                        i += 1
-                    while i < rlen
-                        if rp[i] != byte(' ')
-                            break
-                        i += 1
-                    rest = string(rp + i, rlen - i)
-                else
-                    count = parse_int(rp + 1, rlen - 1)
-                    var i = 1
-                    while i < rlen
-                        if rp[i] == byte(' ')
-                            break
-                        i += 1
-                    while i < rlen
-                        if rp[i] != byte(' ')
-                            break
-                        i += 1
-                    rest = string(rp + i, rlen - i)
+        if nargs > 1
+            val a1 = argv[1]
+            val p = *byte(a1)
+            val alen = len(a1)
+            if alen >= 1
+                if p[0] == byte('-')
+                    if alen == 2
+                        if p[1] == byte('n')
+                            if nargs > 2
+                                count = parse_int(argv[2])
+                                file_idx = 3
+                            else
+                                file_idx = 2
+                        else
+                            count = parse_int(string(p + 1, alen - 1))
+                            file_idx = 2
+                    else
+                        if p[1] == byte('n')
+                            count = parse_int(string(p + 2, alen - 2))
+                        else
+                            count = parse_int(string(p + 1, alen - 1))
+                        file_idx = 2
 
         if count <= 0
-            exit()
             return
         if count > TAIL_MAX_LINES
             count = TAIL_MAX_LINES
 
         // Open file or stdin
         var fid = -1
-        if len(rest) > 0
-            fid = open(rest)
+        if file_idx < nargs
+            val path = argv[file_idx]
+            fid = open(path)
             if fid < 0
-                puts(rest)
+                puts(path)
                 puts(": not found\n")
-                exit()
                 return
         else
             fid = STDIN
@@ -162,4 +153,3 @@ Store a complete line into the ring buffer.
             val slot = (start + i) % TAIL_MAX_LINES
             write_handle(STDOUT, &data[line_start[slot]], line_len[slot])
             i += 1
-        exit()

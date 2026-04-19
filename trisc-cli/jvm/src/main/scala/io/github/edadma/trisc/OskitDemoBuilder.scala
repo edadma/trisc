@@ -295,7 +295,7 @@ import oskit.hal.memset
       extraSources: Map[String, String] = Map.empty,
   ): Array[Byte] =
     val syscallAsm =
-      scala.io.Source.fromFile("oskit/ulib/syscall.asm").mkString
+      scala.io.Source.fromFile("oskit/ulib/srv_syscall.asm").mkString
     val syscallTof = assemble(syscallAsm, relocatable = true)
 
     val wrapperSource =

@@ -240,25 +240,24 @@ Request: [cmd(1), console(1)]
         ipc_reply(sender, reply, 1)
 
 Handle SPAWN: create a new process from a binary path.
-Request: [cmd(1), path_len(1), args_len(1), num_handles(1), path(N), args(M), handle_pairs(H*2)]
+Request: [cmd(1), path_len(1), blob_len_lo(1), blob_len_hi(1), num_handles(1), path(N), blob(M), handle_pairs(H*2)]
 Reply:   [status(1), pid(4)]
 
-PM creates page tables, loads the binary, writes args to the
-standard args address, creates the process, tells VFS to copy
-handles from parent to child, and returns the PID.
+The `blob` is an opaque POSIX argv image (see ulib's
+PROG_ARGS_ADDR). PM doesn't parse it — just copies it verbatim
+to the child's SPAWN_PROG_ARGS_ADDR. The thread name comes from
+`path`, not argv.
 
     val SPAWN_PROG_ARGS_ADDR = 0xBF000
-    val SPAWN_PROG_ARGS_MAX  = 240
+    val SPAWN_PROG_ARGS_MAX  = 4096
 
     pm_handle_spawn(sender: int, buf: *byte)
         val path_len = int(buf[1])
-        val args_len = int(buf[2])
-        val num_handles = int(buf[3])
+        val blob_len = (int(buf[2]) & 0xFF) | ((int(buf[3]) & 0xFF) << 8)
+        val num_handles = int(buf[4])
 
         // Extract path as string
-        val path = string(buf + 4, path_len)
-
-
+        val path = string(buf + 5, path_len)
 
         // Create per-process page table
         val proc_pt = svc_vm_create_pt()
@@ -267,8 +266,6 @@ handles from parent to child, and returns the PID.
             reply[0] = -1
             ipc_reply(sender, reply, 1)
             return
-
-
 
         // Load binary into child's address space via cross-address-space copy
         val entry = load_tof_to_ptbr(path, proc_pt)
@@ -280,24 +277,15 @@ handles from parent to child, and returns the PID.
 
 
 
-        // Write args to child's standard args address via cross-address-space copy
-        var args_local: [256]byte
-        var i = 0
-        while i < args_len
-            if i >= SPAWN_PROG_ARGS_MAX
-                break
-            args_local[i] = buf[4 + path_len + i]
-            i += 1
-        args_local[i] = 0
-        svc_vm_copy_to(proc_pt, SPAWN_PROG_ARGS_ADDR, args_local, i + 1)
+        // Copy argv blob verbatim to child's args address
+        if blob_len > 0
+            val blob_src: *byte = buf + 5 + path_len
+            svc_vm_copy_to(proc_pt, SPAWN_PROG_ARGS_ADDR, blob_src, blob_len)
 
 
-
-        // Extract command name for thread name (first arg before space)
-        val cmd = string(buf + 4 + path_len, args_len)
 
         // Create the process suspended — it won't run until we resume it
-        val pid = svc_create_proc_susp(entry, PROG_USP, PROG_SSP, cmd, proc_pt)
+        val pid = svc_create_proc_susp(entry, PROG_USP, PROG_SSP, path, proc_pt)
 
 
 
@@ -309,7 +297,7 @@ handles from parent to child, and returns the PID.
             // Copy handles from parent to child via VFS (child is suspended)
             if num_handles > 0
                 val sender_pid = svc_get_thread_pid(sender)
-                pm_inherit_handles(sender_pid, pid, buf, path_len, args_len, num_handles)
+                pm_inherit_handles(sender_pid, pid, buf, path_len, blob_len, num_handles)
             // Now resume the child — handles are set up
             svc_resume_proc(pid)
             reply[0] = 0
@@ -318,7 +306,7 @@ handles from parent to child, and returns the PID.
 
 Send handle inheritance request to VFS.
 
-    pm_inherit_handles(parent_pid: int, child_pid: int, buf: *byte, path_len: int, args_len: int, num_handles: int)
+    pm_inherit_handles(parent_pid: int, child_pid: int, buf: *byte, path_len: int, blob_len: int, num_handles: int)
         // Look up VFS port
         val fs_port = port_lookup("fs")
         if fs_port < 0
@@ -330,7 +318,7 @@ Send handle inheritance request to VFS.
         pm_msg_write_i32(msg, 5, child_pid)
         msg[9] = byte(num_handles)
         // Copy handle pairs from spawn message
-        val pairs_offset = 4 + path_len + args_len
+        val pairs_offset = 5 + path_len + blob_len
         var i = 0
         while i < num_handles * 2
             msg[10 + i] = buf[pairs_offset + i]
@@ -370,9 +358,9 @@ IPC messages (waitpid/kill from userspace) or notifications
         // Signal RS that PM is ready
         rs_ready()
 
-        var buf: [128]byte
+        var buf: [512]byte
         while true
-            val result = ipc_recv_notify(port, buf, 128)
+            val result = ipc_recv_notify(port, buf, 512)
             if result == -2
                 // Notification: process exited
                 val pid = notify_read_self()
@@ -415,36 +403,83 @@ with PM via IPC.
             return -1
         pm_msg_read_i32(reply, 1)
 
-    pm_spawn(path: string, args: string) -> int
-        pm_spawn_handles(path, args, *byte(0), 0)
+Build the POSIX argv blob. See ulib.build_argv_blob for format.
 
-    pm_spawn_handles(path: string, args: string, handle_pairs: *byte, num_handles: int) -> int
+    pm_build_argv_blob(argv: *string, argc: int, blob: *byte, cap: int) -> int
+        val ptrs_size = (argc + 1) * 8
+        var str_off = 8 + ptrs_size
+        if str_off > cap
+            return -1
+        blob[0] = byte(argc & 0xFF)
+        blob[1] = byte((argc >> 8) & 0xFF)
+        blob[2] = byte((argc >> 16) & 0xFF)
+        blob[3] = byte((argc >> 24) & 0xFF)
+        blob[4] = 0
+        blob[5] = 0
+        blob[6] = 0
+        blob[7] = 0
+        var pos = str_off
+        var i = 0
+        while i < argc
+            val arg = argv[i]
+            val alen = len(arg)
+            if pos + alen + 1 > cap
+                return -1
+            val ptr: i64 = i64(SPAWN_PROG_ARGS_ADDR) + i64(pos)
+            val pbase = 8 + i * 8
+            blob[pbase]     = byte(ptr & i64(0xFF))
+            blob[pbase + 1] = byte((ptr >> 8) & i64(0xFF))
+            blob[pbase + 2] = byte((ptr >> 16) & i64(0xFF))
+            blob[pbase + 3] = byte((ptr >> 24) & i64(0xFF))
+            blob[pbase + 4] = byte((ptr >> 32) & i64(0xFF))
+            blob[pbase + 5] = byte((ptr >> 40) & i64(0xFF))
+            blob[pbase + 6] = byte((ptr >> 48) & i64(0xFF))
+            blob[pbase + 7] = byte((ptr >> 56) & i64(0xFF))
+            val ap = *byte(arg)
+            var j = 0
+            while j < alen
+                blob[pos + j] = ap[j]
+                j += 1
+            blob[pos + alen] = 0
+            pos = pos + alen + 1
+            i += 1
+        val nbase = 8 + argc * 8
+        var z = 0
+        while z < 8
+            blob[nbase + z] = 0
+            z += 1
+        pos
+
+    pm_spawn(path: string, argv: *string, argc: int) -> int
+        pm_spawn_handles(path, argv, argc, *byte(0), 0)
+
+    pm_spawn_handles(path: string, argv: *string, argc: int, handle_pairs: *byte, num_handles: int) -> int
         val port = port_lookup("pm")
         if port < 0
             return -1
         val plen = len(path)
-        val alen = len(args)
-        var msg: [128]byte
+        var msg: [512]byte
+        val blob_off = 5 + plen
+        val cap = 512 - blob_off - num_handles * 2
+        val blob_len = pm_build_argv_blob(argv, argc, &msg[blob_off], cap)
+        if blob_len < 0
+            return -1
         msg[0] = byte(PM_CMD_SPAWN)
         msg[1] = byte(plen)
-        msg[2] = byte(alen)
-        msg[3] = byte(num_handles)
+        msg[2] = byte(blob_len & 0xFF)
+        msg[3] = byte((blob_len >> 8) & 0xFF)
+        msg[4] = byte(num_handles)
         val pp = *byte(path)
         var i = 0
         while i < plen
-            msg[4 + i] = pp[i]
-            i += 1
-        val ap = *byte(args)
-        i = 0
-        while i < alen
-            msg[4 + plen + i] = ap[i]
+            msg[5 + i] = pp[i]
             i += 1
         i = 0
         while i < num_handles * 2
-            msg[4 + plen + alen + i] = handle_pairs[i]
+            msg[blob_off + blob_len + i] = handle_pairs[i]
             i += 1
         var reply: [5]byte
-        ipc_send(port, msg, 4 + plen + alen + num_handles * 2, reply, 5)
+        ipc_send(port, msg, blob_off + blob_len + num_handles * 2, reply, 5)
         if reply[0] != 0
             return -1
         pm_msg_read_i32(reply, 1)

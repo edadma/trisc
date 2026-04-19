@@ -8,7 +8,7 @@ the problem is in IPC/VFS handle path.
 
     import oskit.ulib.{putc, exit}
 
-    main()
+    main(argv: []string)
         putc('O')
         putc('K')
         putc('\n')

@@ -31,6 +31,7 @@ build_one() {
     local SYSL_FILES=(
         "$SRC"
         oskit/ulib/ulib.lsysl
+        oskit/ulib/srt0.lsysl
         oskit/ds/client.lsysl
         std/alloc/alloc.lsysl
     )

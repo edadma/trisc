@@ -7,7 +7,7 @@ Prints the UID of the current process.
 
     import oskit.ulib.{puts, putint, exit, getuid}
 
-    main()
+    main(argv: []string)
         putint(getuid())
         puts("\n")
         exit()

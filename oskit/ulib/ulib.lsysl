@@ -521,45 +521,115 @@ Kill a process by PID. Returns 0 on success.
         ipc_send(port, msg, 5, reply, 1)
         int(reply[0])
 
-Spawn a process with no handle inheritance.
+Build a POSIX argv blob from an argv slice. Writes to `blob`
+starting at offset 0. Returns the total blob size, or -1 if
+it wouldn't fit in `cap` bytes.
 
-    pm_spawn(path: string, args: string) -> int
-        pm_spawn_handles(path, args, *byte(0), 0)
+Layout (see PROG_ARGS_ADDR below for the spec):
+    [argc(4)] [pad(4)] [argv[0](8)] ... [NULL(8)] [string data]
 
-Spawn a process with handle inheritance. handle_pairs is
-an array of (parent_handle, child_slot) byte pairs.
-Returns child PID or -1 on error.
+Pointers are baked as absolute addresses = PROG_ARGS_ADDR + offset,
+since PM always copies the blob to PROG_ARGS_ADDR in the child.
 
-    pm_spawn_handles(path: string, args: string, handle_pairs: *byte, num_handles: int) -> int
+    val PROG_ARGS_ADDR = 0xBF000
+
+    build_argv_blob(argv: *string, argc: int, blob: *byte, cap: int) -> int
+        val ptrs_size = (argc + 1) * 8
+        var str_off = 8 + ptrs_size
+        if str_off > cap
+            return -1
+        // argc (little-endian i32) + padding zeros
+        blob[0] = byte(argc & 0xFF)
+        blob[1] = byte((argc >> 8) & 0xFF)
+        blob[2] = byte((argc >> 16) & 0xFF)
+        blob[3] = byte((argc >> 24) & 0xFF)
+        blob[4] = 0
+        blob[5] = 0
+        blob[6] = 0
+        blob[7] = 0
+        var pos = str_off
+        var i = 0
+        while i < argc
+            val arg = argv[i]
+            val alen = len(arg)
+            if pos + alen + 1 > cap
+                return -1
+            // Write argv[i] pointer at offset 8 + i*8 (absolute)
+            val ptr: i64 = i64(PROG_ARGS_ADDR) + i64(pos)
+            val pbase = 8 + i * 8
+            blob[pbase]     = byte(ptr & i64(0xFF))
+            blob[pbase + 1] = byte((ptr >> 8) & i64(0xFF))
+            blob[pbase + 2] = byte((ptr >> 16) & i64(0xFF))
+            blob[pbase + 3] = byte((ptr >> 24) & i64(0xFF))
+            blob[pbase + 4] = byte((ptr >> 32) & i64(0xFF))
+            blob[pbase + 5] = byte((ptr >> 40) & i64(0xFF))
+            blob[pbase + 6] = byte((ptr >> 48) & i64(0xFF))
+            blob[pbase + 7] = byte((ptr >> 56) & i64(0xFF))
+            // Copy string bytes + NUL terminator
+            val ap = *byte(arg)
+            var j = 0
+            while j < alen
+                blob[pos + j] = ap[j]
+                j += 1
+            blob[pos + alen] = 0
+            pos = pos + alen + 1
+            i += 1
+        // NULL terminator at argv[argc]
+        val nbase = 8 + argc * 8
+        var z = 0
+        while z < 8
+            blob[nbase + z] = 0
+            z += 1
+        pos
+
+Spawn a process with handle inheritance. handle_pairs is an
+array of (parent_handle, child_slot) byte pairs. argv is an
+array of argc strings; argv[0] is conventionally the program
+name. Returns child PID or -1 on error.
+
+    pm_spawn_handles(path: string, argv: *string, argc: int, handle_pairs: *byte, num_handles: int) -> int
         val port = pm_port()
         if port < 0
             return -1
         val plen = len(path)
-        val alen = len(args)
-        var msg: [128]byte
+        var msg: [512]byte
+        // Reserve header bytes; fill in after computing blob size:
+        //   [0]    cmd
+        //   [1]    path_len
+        //   [2-3]  blob_len (little-endian u16)
+        //   [4]    num_handles
+        //   [5..]  path
+        //   [5+plen..]  blob
+        //   [5+plen+blob_len..] handle_pairs
+        val blob_off = 5 + plen
+        val cap = 512 - blob_off - num_handles * 2
+        val blob_len = build_argv_blob(argv, argc, &msg[blob_off], cap)
+        if blob_len < 0
+            return -1
         msg[0] = byte(PM_CMD_SPAWN)
         msg[1] = byte(plen)
-        msg[2] = byte(alen)
-        msg[3] = byte(num_handles)
+        msg[2] = byte(blob_len & 0xFF)
+        msg[3] = byte((blob_len >> 8) & 0xFF)
+        msg[4] = byte(num_handles)
         val pp = *byte(path)
         var i = 0
         while i < plen
-            msg[4 + i] = pp[i]
-            i += 1
-        val ap = *byte(args)
-        i = 0
-        while i < alen
-            msg[4 + plen + i] = ap[i]
+            msg[5 + i] = pp[i]
             i += 1
         i = 0
         while i < num_handles * 2
-            msg[4 + plen + alen + i] = handle_pairs[i]
+            msg[blob_off + blob_len + i] = handle_pairs[i]
             i += 1
         var reply: [5]byte
-        ipc_send(port, msg, 4 + plen + alen + num_handles * 2, reply, 5)
+        ipc_send(port, msg, blob_off + blob_len + num_handles * 2, reply, 5)
         if reply[0] != 0
             return -1
         msg_read_i32(reply, 1)
+
+Spawn a process with no handle inheritance.
+
+    pm_spawn(path: string, argv: *string, argc: int) -> int
+        pm_spawn_handles(path, argv, argc, *byte(0), 0)
 
 Print an integer to stdout.
 
@@ -574,39 +644,3 @@ Print an integer to stdout.
         buf[0] = byte('0' + n % 10)
         write_handle(STDOUT, buf, 1)
 
-Program arguments — stored at a well-known address by the
-shell before launching the program. This convention will be
-replaced by proper exec() argument passing when the MMU
-and process manager land.
-
-    val PROG_ARGS_ADDR = 0xBF000
-
-    get_args() -> string
-        val p = *byte(PROG_ARGS_ADDR)
-        var n = 0
-        while p[n] != 0
-            n += 1
-        if n == 0
-            return ""
-        string(p, n)
-
-Skip past argv[0] (the program name) and any following spaces.
-Returns the remaining arguments as a string, or "" if none.
-
-    skip_arg0(s: string) -> string
-        val p = *byte(s)
-        val n = len(s)
-        // Skip non-space (argv[0])
-        var i = 0
-        while i < n
-            if p[i] == byte(' ')
-                break
-            i += 1
-        // Skip spaces
-        while i < n
-            if p[i] != byte(' ')
-                break
-            i += 1
-        if i >= n
-            return ""
-        string(p + i, n - i)

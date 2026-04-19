@@ -5,13 +5,12 @@ Lists the contents of a directory, skipping `.` and `..`.
 
     module oskit.bin.ls
 
-    import oskit.ulib.{puts, exit, get_args, skip_arg0, readdir}
+    import oskit.ulib.{puts, exit, readdir}
 
-    main()
-        val args = skip_arg0(get_args())
+    main(argv: []string)
         var dir = "/"
-        if len(args) > 0
-            dir = args
+        if len(argv) > 1
+            dir = argv[1]
         var entry_ino: int
         var entry_name: [14]byte
         var idx = 0
@@ -35,4 +34,3 @@ Lists the contents of a directory, skipping `.` and `..`.
                     puts(string(entry_name, n))
                     puts("\n")
             idx += 1
-        exit()
