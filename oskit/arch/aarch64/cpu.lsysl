@@ -20,3 +20,10 @@ plus the return; safe to call with interrupts already masked.
 Unmask async exceptions.
 
     extern arch_sti()
+
+Transition from EL1 to EL0 and start executing at `entry` with
+`SP_EL0 = sp`. Does not return — an exception back to EL1 is the
+way out. Caller must ensure the active page table maps both the
+entry point and the user stack EL0-accessible.
+
+    extern drop_to_el0(entry: i64, sp: i64)
