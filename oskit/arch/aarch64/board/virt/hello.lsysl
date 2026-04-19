@@ -31,24 +31,49 @@ since the kernel will grow a real formatter later.
 Synchronous exception handler for lower EL (EL0). Called from the
 `low64_sync` stub in `vectors.s` after it has saved the full EL0
 register state. `frame` points to the saved frame on the kernel
-stack; we don't use it yet, but future syscall dispatch will read
-x0..x7 and write return values back through it.
+stack; the first 31 i64 slots are x0..x30 in order, so `fp[0]` is
+x0, `fp[8]` is x8, etc. (Linux aarch64 calling convention: x8 is
+the syscall number, x0..x5 are args, return goes back in x0.)
 
-At this stage we only recognise SVC (EC=0x15) and print the 16-bit
-immediate. Unhandled synchronous exceptions from EL0 halt via abort.
+SVC (EC=0x15) dispatches through `syscall_dispatch`. Anything else
+is fatal at this stage.
 
     handle_sync_lower(frame: u64)
         val esr = read_esr_el1()
         val ec = int((esr >> u64(26)) & u64(0x3F))
         if ec == 0x15
-            uart_puts("[SVC imm=")
-            uart_puthex(esr & u64(0xFFFF))
-            uart_puts("]\n")
+            syscall_dispatch(frame)
         else
             uart_puts("[unhandled sync from EL0, ESR=")
             uart_puthex(esr)
             uart_puts("]\n")
             abort()
+
+Tiny syscall table. Numbers mirror Linux's aarch64 convention where
+it makes sense (exit=93); our custom calls sit below that.
+
+  SYS_PUTHEX(1, u64 v)  — print `v` as 16-digit hex, return 0
+  SYS_EXIT(93, int code) — print exit code and halt the CPU
+
+    syscall_dispatch(frame: u64)
+        var fp: *i64 = *i64(frame)
+        val num = u64(fp[8])
+        val a0 = u64(fp[0])
+        if num == u64(1)
+            uart_puts("[EL0 says ")
+            uart_puthex(a0)
+            uart_puts("]\n")
+            fp[0] = i64(0)
+        else if num == u64(93)
+            uart_puts("[EL0 exited, code=")
+            uart_puthex(a0)
+            uart_puts("]\n")
+            abort()
+        else
+            uart_puts("[unknown syscall num=")
+            uart_puthex(num)
+            uart_puts("]\n")
+            fp[0] = i64(-1)
 
     kernel_main()
         uart_puts("SLIX aarch64 boot (sysl, MMU on)\n")
@@ -98,19 +123,28 @@ immediate. Unhandled synchronous exceptions from EL0 halt via abort.
         uart_puthex(stack_pa)
         uart_puts("\n")
 
-        // Write a tiny EL0 program into the code page. aarch64 is
-        // little-endian, so the instruction words are stored as-is.
-        // Encoding for SVC: 0xD4000001 | (imm16 << 5).
-        //   svc #0x42          0xD4000841
-        //   svc #0x43          0xD4000861
-        //   b   .              0x14000000   (infinite loop at the end)
-        // Two SVCs prove that ERET landed back in EL0 and EL0 actually
-        // executed the next instruction; the second SVC takes us to
-        // the kernel again, which prints imm=0x43 and ERETs.
+        // Write a tiny EL0 "user program" into the code page. Uses
+        // movz (0xD2800000 | (imm16 << 5) | Rd) and svc (0xD4000001)
+        // directly so we don't need to link user code.
+        //   mov x0, #0xAA      0xD2801540
+        //   mov x8, #1         0xD2800028   (SYS_PUTHEX)
+        //   svc #0             0xD4000001
+        //   mov x0, #0xBB      0xD2801760
+        //   svc #0             0xD4000001   (reuses x8=1)
+        //   mov x0, #1         0xD2800020   (exit code)
+        //   mov x8, #93        0xD2800BA8   (SYS_EXIT)
+        //   svc #0             0xD4000001
+        //   b .                0x14000000   (should never be reached)
         var code_word: *i32 = *i32(code_pa)
-        code_word[0] = i32(0xD4000841)
-        code_word[1] = i32(0xD4000861)
-        code_word[2] = i32(0x14000000)
+        code_word[0] = i32(0xD2801540)
+        code_word[1] = i32(0xD2800028)
+        code_word[2] = i32(0xD4000001)
+        code_word[3] = i32(0xD2801760)
+        code_word[4] = i32(0xD4000001)
+        code_word[5] = i32(0xD2800020)
+        code_word[6] = i32(0xD2800BA8)
+        code_word[7] = i32(0xD4000001)
+        code_word[8] = i32(0x14000000)
 
         // A72 has split I/D caches on — the stores land in D-cache;
         // the I-cache must be made to see them before we try to
