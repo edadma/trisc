@@ -79,6 +79,33 @@ To avoid wrapping, widen operands explicitly before arithmetic: `int(a) + int(b)
 
 This matches Go, Rust, and Swift. C-style implicit integer promotion is not used.
 
+### Overflow Intrinsics
+
+When you want explicit, intent-marked overflow behavior, use the polymorphic
+intrinsics. All take two operands of the same integer type and return the
+same integer type:
+
+| Intrinsic | Behavior |
+|-----------|----------|
+| `wrapping_add(a, b)` | Two's-complement wrap on overflow (current default for `+`) |
+| `wrapping_sub(a, b)` | Two's-complement wrap on underflow |
+| `wrapping_mul(a, b)` | Low bits of the true product |
+| `saturating_add(a, b)` | Clamp to the type's MAX (or MIN for signed underflow) |
+| `saturating_sub(a, b)` | Clamp to the type's MIN (0 for unsigned) |
+| `saturating_mul(a, b)` | Clamp to the type's MAX/MIN on overflow |
+
+```sysl
+var a: u8 = 200
+var b: u8 = 100
+wrapping_add(a, b)     // 44   (300 & 0xFF)
+saturating_add(a, b)   // 255  (clamped to u8 MAX)
+saturating_sub(b, a)   // 0    (clamped to u8 MIN, would have been -100)
+```
+
+> **TRISC backend:** `saturating_*` on 64-bit types and `saturating_mul` on
+> `u32` are not yet supported (would require explicit overflow detection or
+> 128-bit intermediate). LLVM backend supports all widths.
+
 ### Composite Types
 
 ```sysl

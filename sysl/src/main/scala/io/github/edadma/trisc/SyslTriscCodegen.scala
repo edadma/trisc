@@ -1658,6 +1658,64 @@ class SyslTriscCodegen(addresses: Int = 4):
         if op == "+" then emit("  add r1, r2, r1")
         else emit("  sub r1, r2, r1")
 
+      case TIntrinsicCall(name, args, typ) =>
+        // Eval args into r1 (left) and r2 (right), same protocol as TBinary.
+        genExpr(args(0))
+        emit("  pshd r1")
+        stackOffset -= 8
+        genExpr(args(1))
+        emit("  mov r2, r1")
+        emit("  popd r1")
+        stackOffset += 8
+        val unsigned = typ.isUnsigned
+        val width = typ.bitWidth
+        // Helper: load 64-bit constant. movi loads 32 bits ZERO-extended (no sign extension),
+        // so use ldc (constant pool) for negative values to get the correct 64-bit value.
+        def loadImm(reg: Int, v: Long): Unit =
+          if v >= 0 && v <= 255 then emit(s"  ldi r$reg, $v")
+          else if v >= 0 && v <= 0xFFFFFFFFL then emit(s"  movi r$reg, $v")
+          else emit(s"  ldc r$reg, $v")
+        name match
+          // wrapping_*: ordinary add/sub/mul, then narrow to width bits to discard high bits.
+          case "wrapping_add" =>
+            emit("  add r1, r1, r2"); emitNarrow(1, typ)
+          case "wrapping_sub" =>
+            emit("  sub r1, r1, r2"); emitNarrow(1, typ)
+          case "wrapping_mul" =>
+            emit(if unsigned then "  mulu r1, r1, r2" else "  mul r1, r1, r2")
+            emitNarrow(1, typ)
+          case "saturating_add" | "saturating_sub" | "saturating_mul" =>
+            if width >= 64 then
+              throw new RuntimeException(s"$name on 64-bit types is not yet supported in the TRISC backend")
+            if name == "saturating_mul" && unsigned && width == 32 then
+              throw new RuntimeException("saturating_mul on u32 is not yet supported in the TRISC backend (would overflow signed i64)")
+            // Compute in 64-bit; for narrow widths the intermediate fits in signed i64.
+            // Then signed-clamp to [minV, maxV]. For unsigned types maxV is set to the
+            // unsigned max, but we still use signed slt because the intermediate is in signed range.
+            name match
+              case "saturating_add" => emit("  add r1, r1, r2")
+              case "saturating_sub" => emit("  sub r1, r1, r2")
+              case "saturating_mul" => emit(if unsigned then "  mulu r1, r1, r2" else "  mul r1, r1, r2")
+              case _ =>
+            val (minV, maxV) =
+              if unsigned then (0L, (1L << width) - 1)
+              else (-(1L << (width - 1)), (1L << (width - 1)) - 1)
+            // Clamp HIGH: if r1 > maxV then r1 = maxV  (signed compare)
+            loadImm(3, maxV)
+            emit("  slt r4, r3, r1")       // r4 = (max < r1)
+            val noHi = newLabel("nohi")
+            emit(s"  beq r4, r0, $noHi")
+            emit("  mov r1, r3")
+            emit(s"$noHi")
+            // Clamp LOW: if r1 < minV then r1 = minV  (signed compare)
+            loadImm(3, minV)
+            emit("  slt r4, r1, r3")       // r4 = (r1 < min)
+            val noLo = newLabel("nolo")
+            emit(s"  beq r4, r0, $noLo")
+            emit("  mov r1, r3")
+            emit(s"$noLo")
+          case other => throw new RuntimeException(s"unknown intrinsic: $other")
+
       case TBinary(left, op, right, resultType) =>
         genExpr(left)        // r1 = left
         emit("  pshd r1")   // save left on stack

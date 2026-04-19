@@ -185,6 +185,14 @@ class SyslAnalyzer:
   private def currentScope: mutable.LinkedHashMap[String, SymInfo] =
     scopeStack.last
 
+  // Polymorphic integer arithmetic intrinsics. Currently: wrapping_* (relabels current
+  // wrapping behavior, future-proofs against an overflow-checked default) and saturating_*
+  // (clamps at MIN/MAX on overflow). Both signatures: (a: T, b: T) -> T for any integer T.
+  private val integerArithIntrinsics: Set[String] = Set(
+    "wrapping_add", "wrapping_sub", "wrapping_mul",
+    "saturating_add", "saturating_sub", "saturating_mul",
+  )
+
   private val builtinFunctions = Map(
     "putchar" -> FunInfo("putchar", List("c" -> U32), U32),
     "print" -> FunInfo("print", List("n" -> I32), VoidType),
@@ -2235,6 +2243,14 @@ class SyslAnalyzer:
           case (ArrayType(_, _), to) if to.isIntegral => // array to integer (address of first element as int)
           case (from, to) => throw AnalysisError(s"cannot cast $from to $to")
         TCast(tInner, target)
+
+      case CallAST(name, args) if integerArithIntrinsics.contains(name) =>
+        if args.size != 2 then throw AnalysisError(s"$name() takes exactly 2 arguments")
+        val tA = analyzeExpr(args(0))
+        val tB = analyzeExpr(args(1))
+        if !tA.typ.isIntegral then throw AnalysisError(s"$name() requires integer arguments, got ${tA.typ}")
+        if tA.typ != tB.typ then throw AnalysisError(s"$name() requires both arguments to have the same type, got ${tA.typ} and ${tB.typ}")
+        TIntrinsicCall(name, List(tA, tB), tA.typ)
 
       case CallAST("str", args) =>
         if args.size != 1 then throw AnalysisError("str() takes exactly 1 argument")
