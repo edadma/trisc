@@ -34,3 +34,9 @@ __attribute__((noreturn)) void abort(void) {
     for (;;)
         __asm__ volatile("wfi");
 }
+
+/* sysl's runtime emits free() calls when refcounted strings go out of
+ * scope. Bare-metal has no malloc; let the strings leak. */
+void free(void *p) {
+    (void)p;
+}

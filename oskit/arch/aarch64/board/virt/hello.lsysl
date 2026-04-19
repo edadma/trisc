@@ -66,6 +66,16 @@ since the kernel will grow a real formatter later.
         vm_set_ptbr(new_pt)
         uart_puts("after vm_set_ptbr: still alive\n")
 
+        // The process PT carves out an L3 user page at VA 0x60000000
+        // with AP=01 + UXN=1 (EL0 RW, no EL0 exec). Write-then-read
+        // from the kernel at EL1 to confirm the full L0→L1→L2→L3 walk
+        // lands somewhere and the page is actually mapped.
+        var up: *i64 = *i64(u64(0x60000000))
+        *up = i64(0xDEADBEEFCAFEBABE)
+        uart_puts("el0 page readback=")
+        uart_puthex(u64(*up))
+        uart_puts("\n")
+
         // Swap back to the kernel map so subsequent boot work (once
         // it exists) doesn't need to worry about which table is live.
         vm_set_ptbr(kernel_ptbr())

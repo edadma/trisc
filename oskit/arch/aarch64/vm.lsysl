@@ -52,6 +52,7 @@ per-process mappings must carve out a smaller user region at L2/L3.
     val PTE_PAGE:  i64 = 2          // bit 1 — page (at L3)
     val PTE_AF:    i64 = 0x400      // bit 10 — access flag
     val PTE_AP_EL0: i64 = 0x40      // bit 6 — AP[1]: 1 = EL0 accessible
+    val PTE_UXN:   i64 = 0x40000000000000  // bit 54 — EL0 execute-never
 
 Mask for extracting the output address from a level 1/2/3 descriptor.
 
@@ -114,17 +115,17 @@ between the kernel image and the top of our 1GB identity map.
                 i += 1
         page
 
-Create a per-process page table that mirrors the kernel map. At
-this stage every process sees the same 1GB Device / 1GB Normal
-blocks we established in `mmu.s`; future work will carve a smaller
-EL0-accessible region out of the RAM block so user code can be
-isolated from kernel globals.
+Create a per-process page table. L1[0] (Device MMIO) is copied
+verbatim from the kernel's map. L1[1] (the 1GB RAM block) is
+split into 512 × 2MB L2 block entries that each mirror the
+kernel's attributes (AP=00, Normal WBWA). The carve-out is a
+no-op at this stage — the process sees the same memory the
+kernel sees — but it sets up the structure we need to flip a
+small sub-region to AP=01/UXN=0 for EL0 user code later (without
+breaking kernel execute, which the implicit-PXN rule would do if
+we flipped AP on the 1GB block itself).
 
 Returns the physical address of the new L0 table, or 0 on failure.
-The L0 has a single table descriptor at index 0 pointing at a
-fresh L1; the L1 is populated by copying L1[0] and L1[1] from the
-kernel's L1. That's enough for kernel code and UART MMIO to remain
-mapped after `vm_set_ptbr(new_pt)`.
 
     extern l1_table: byte
 
@@ -136,17 +137,67 @@ mapped after `vm_set_ptbr(new_pt)`.
         if new_l1 == 0
             page_free(new_l0)
             return 0
+        val new_l2 = page_alloc_zero()
+        if new_l2 == 0
+            page_free(new_l1)
+            page_free(new_l0)
+            return 0
 
-        // L0[0] -> new_l1 (table descriptor: addr | valid | table)
+        // L0[0] -> new_l1 (table descriptor)
         vm_write_pte64(new_l0, i64(new_l1) | PTE_VALID | PTE_TABLE)
 
-        // Copy the kernel's L1[0] (Device) and L1[1] (Normal) blocks.
-        // Everything above 2GB is left zero for now; we only need the
-        // two regions set up by mmu.s.
+        // L1[0] mirrors the kernel's Device mapping byte-for-byte.
         val kernel_l1 = u64(i64(&l1_table))
         val device_block = vm_read_pte64(kernel_l1)
-        val ram_block    = vm_read_pte64(kernel_l1 + u64(8))
-        vm_write_pte64(new_l1,          device_block)
-        vm_write_pte64(new_l1 + u64(8), ram_block)
+        vm_write_pte64(new_l1, device_block)
+
+        // L1[1] -> new_l2 table. This replaces the kernel's 1GB Normal
+        // block with a finer L2 carve-out.
+        vm_write_pte64(new_l1 + u64(8), i64(new_l2) | PTE_VALID | PTE_TABLE)
+
+        // Populate new_l2[0..511] as 2MB block descriptors covering
+        // 0x40000000..0x7FFFFFFF. We inherit the kernel block's lower
+        // attributes (AttrIdx, SH, AF, AP=00, UXN=0, PXN=0) so every
+        // 2MB region is indistinguishable from the kernel's mapping.
+        // At L2 a block uses the same bit-1=0 encoding as at L1, so
+        // the low-12 attr bits transfer directly.
+        val ram_attrs = vm_read_pte64(kernel_l1 + u64(8)) & ~PTE_ADDR_MASK
+        var addr = new_l2
+        var i = 0
+        while i < 512
+            val pa = i64(0x40000000) + i64(i) * i64(0x200000)
+            vm_write_pte64(addr, pa | ram_attrs)
+            addr += u64(8)
+            i += 1
+
+        // L3 carve-out: replace L2[256] (VA 0x60000000..0x601FFFFF)
+        // with a table descriptor pointing at a fresh L3. The first
+        // L3 entry maps a fresh 4KB page with AP=01 + UXN=1 (EL0 RW,
+        // no EL0 execute — this page will be user data). The
+        // implicit-PXN rule forces PXN=1 regardless, but that's fine
+        // because the kernel never fetches from VA 0x60000000.
+        val new_l3 = page_alloc_zero()
+        if new_l3 == 0
+            page_free(new_l2)
+            page_free(new_l1)
+            page_free(new_l0)
+            return 0
+        val user_page = page_alloc_zero()
+        if user_page == 0
+            page_free(new_l3)
+            page_free(new_l2)
+            page_free(new_l1)
+            page_free(new_l0)
+            return 0
+
+        // L2[256] -> new_l3 table
+        vm_write_pte64(new_l2 + u64(256 * 8),
+            i64(new_l3) | PTE_VALID | PTE_TABLE)
+
+        // L3[0] -> user_page, AP=01 + UXN=1, inheriting Normal WBWA
+        // attrs from the kernel block. Page encoding needs bit 1 = 1
+        // (PTE_PAGE) unlike the block form.
+        val user_attrs = (ram_attrs & ~i64(2)) | PTE_PAGE | PTE_AP_EL0 | PTE_UXN
+        vm_write_pte64(new_l3, i64(user_page) | user_attrs)
 
         new_l0
