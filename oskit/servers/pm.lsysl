@@ -312,7 +312,9 @@ handles from parent to child, and returns the PID.
                 pm_inherit_handles(sender_pid, pid, buf, path_len, args_len, num_handles)
             // Now resume the child — handles are set up
             svc_resume_proc(pid)
-
+            reply[0] = 0
+            pm_msg_write_i32(reply, 1, pid)
+            ipc_reply(sender, reply, 5)
 
 Send handle inheritance request to VFS.
 
