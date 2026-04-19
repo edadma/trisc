@@ -224,3 +224,93 @@ call; caller should capture them immediately.
         last_user_stack_page = stack_pa
 
         new_l0
+
+Translate a virtual address under `ptbr` to its physical address
+by walking the 4-level page table. Returns 0 if any descriptor
+along the walk is invalid (unmapped region).
+
+Descriptor encoding recap (for aarch64 4KB granule):
+  bits [1:0] = 00 or 10  → invalid
+  bits [1:0] = 01        → block (at L1 = 1GB, at L2 = 2MB)
+  bits [1:0] = 11        → table (L0/L1/L2) or page (L3)
+The "block" encoding only appears at L1/L2; at L3 the low two bits
+must be 11 for a valid page, and we compute the final PA by OR-ing
+the low 12 bits of the VA as the page offset.
+
+    vm_v2p(ptbr: u64, vaddr: u64) -> u64
+        val l0_idx = int((vaddr >> u64(39)) & u64(0x1FF))
+        val l1_idx = int((vaddr >> u64(30)) & u64(0x1FF))
+        val l2_idx = int((vaddr >> u64(21)) & u64(0x1FF))
+        val l3_idx = int((vaddr >> u64(12)) & u64(0x1FF))
+
+        val l0_entry = vm_read_pte64(ptbr + u64(l0_idx * 8))
+        if (l0_entry & i64(3)) != i64(3)
+            return u64(0)
+        val l1_base = u64(l0_entry & PTE_ADDR_MASK)
+
+        val l1_entry = vm_read_pte64(l1_base + u64(l1_idx * 8))
+        val l1_low = l1_entry & i64(3)
+        if l1_low == i64(1)
+            return u64(l1_entry & PTE_ADDR_MASK) + (vaddr & u64(0x3FFFFFFF))
+        if l1_low != i64(3)
+            return u64(0)
+        val l2_base = u64(l1_entry & PTE_ADDR_MASK)
+
+        val l2_entry = vm_read_pte64(l2_base + u64(l2_idx * 8))
+        val l2_low = l2_entry & i64(3)
+        if l2_low == i64(1)
+            return u64(l2_entry & PTE_ADDR_MASK) + (vaddr & u64(0x1FFFFF))
+        if l2_low != i64(3)
+            return u64(0)
+        val l3_base = u64(l2_entry & PTE_ADDR_MASK)
+
+        val l3_entry = vm_read_pte64(l3_base + u64(l3_idx * 8))
+        if (l3_entry & i64(3)) != i64(3)
+            return u64(0)
+        u64(l3_entry & PTE_ADDR_MASK) + (vaddr & u64(0xFFF))
+
+Copy `len` bytes from a kernel-side source into `dst_vaddr` under
+`dst_ptbr`. Walks the target page table per byte (slow but simple;
+easy to optimize later by striding one page at a time).
+
+    vm_copy_to(dst_ptbr: u64, dst_vaddr: u64, src: u64, len: int)
+        var src_p: *byte = *byte(src)
+        var i = 0
+        while i < len
+            val pa = vm_v2p(dst_ptbr, dst_vaddr + u64(i))
+            if pa == u64(0)
+                return
+            var dst_p: *byte = *byte(pa)
+            dst_p[0] = src_p[i]
+            i += 1
+
+Copy `len` bytes from `src_vaddr` under `src_ptbr` into a kernel-
+side destination.
+
+    vm_copy_from(src_ptbr: u64, src_vaddr: u64, dst: u64, len: int)
+        var dst_p: *byte = *byte(dst)
+        var i = 0
+        while i < len
+            val pa = vm_v2p(src_ptbr, src_vaddr + u64(i))
+            if pa == u64(0)
+                return
+            var src_p: *byte = *byte(pa)
+            dst_p[i] = src_p[0]
+            i += 1
+
+Cross-address-space copy: bounce one byte at a time through the
+kernel. Used by IPC / grant paths when both endpoints live in
+different page tables.
+
+    vm_copy_cross(src_ptbr: u64, src_vaddr: u64,
+                  dst_ptbr: u64, dst_vaddr: u64, len: int)
+        var i = 0
+        while i < len
+            val src_pa = vm_v2p(src_ptbr, src_vaddr + u64(i))
+            val dst_pa = vm_v2p(dst_ptbr, dst_vaddr + u64(i))
+            if src_pa == u64(0) || dst_pa == u64(0)
+                return
+            var src_p: *byte = *byte(src_pa)
+            var dst_p: *byte = *byte(dst_pa)
+            dst_p[0] = src_p[0]
+            i += 1

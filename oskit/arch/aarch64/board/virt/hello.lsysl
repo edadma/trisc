@@ -11,7 +11,7 @@ after we come back.
         vm_create_process_pt, vm_set_ptbr, read_sctlr_el1,
         read_esr_el1, abort,
         last_user_code_page, last_user_stack_page, drop_to_el0,
-        sync_icache_line}
+        sync_icache_line, vm_v2p, vm_copy_to, vm_copy_from}
 
 Render `v` as a 16-digit hex number (prefixed `0x`) to the UART.
 Useful for the boot-time sanity prints below; deliberately crude
@@ -148,9 +148,18 @@ it makes sense (exit=93); our custom calls sit below that.
 
         // A72 has split I/D caches on — the stores land in D-cache;
         // the I-cache must be made to see them before we try to
-        // execute. All three instructions fit in one 64B cache line
-        // (they start at a page boundary), so one sync is sufficient.
+        // execute. All instructions fit in one 64B cache line (they
+        // start at a page boundary), so one sync is sufficient.
         sync_icache_line(i64(code_pa))
+
+        // Sanity-check vm_v2p against what we know: VA 0x60000000
+        // under new_pt should translate to code_pa, and VA 0x60001000
+        // to stack_pa.
+        uart_puts("vm_v2p(new_pt, 0x60000000)=")
+        uart_puthex(vm_v2p(new_pt, u64(0x60000000)))
+        uart_puts("\nvm_v2p(new_pt, 0x60001000)=")
+        uart_puthex(vm_v2p(new_pt, u64(0x60001000)))
+        uart_puts("\n")
 
         vm_set_ptbr(new_pt)
         uart_puts("after vm_set_ptbr: still alive\n")
