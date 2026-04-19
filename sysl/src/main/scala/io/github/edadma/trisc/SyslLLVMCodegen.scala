@@ -321,7 +321,7 @@ class SyslLLVMCodegen(target: String = "host"):
             emit(s"  $loaded = load $retType, $retType* $result")
             loaded
           else result
-        else emitSextIfNeeded(result, rt, retType)
+        else emitSextIfNeeded(result, rt, retType, expr.typ.isSigned)
         emitReleaseRefs(returnedSliceAllocas(expr))
         emitRet(retType, finalVal)
       case TBlockBody(stmts) =>
@@ -401,7 +401,7 @@ class SyslLLVMCodegen(target: String = "host"):
           val loaded = newReg()
           emit(s"  $loaded = load $retLt, $retLt* $result")
           loaded
-        else emitSextIfNeeded(result, rt, retLt)
+        else emitSextIfNeeded(result, rt, retLt, expr.typ.isSigned)
         emitReleaseRefs(returnedSliceAllocas(expr))
         emitRet(retLt, finalVal)
       case TBlockBody(stmts) =>
@@ -458,7 +458,7 @@ class SyslLLVMCodegen(target: String = "host"):
                 emit(s"  $loaded = load $retType, $retType* $result")
                 loaded
               else result
-            else emitSextIfNeeded(result, rt, retType)
+            else emitSextIfNeeded(result, rt, retType, expr.typ.isSigned)
             emitDefers()
             emitReleaseRefs(returnedSliceAllocas(expr))
             emitRet(retType, finalVal)
@@ -502,7 +502,7 @@ class SyslLLVMCodegen(target: String = "host"):
             val alloca = deferAlloca(lt)
             val value = genExpr(init)
             val vt = exprType(init)
-            val finalVal = emitSextIfNeeded(value, vt, lt)
+            val finalVal = emitSextIfNeeded(value, vt, lt, init.typ.isSigned)
             emit(s"  store $lt $finalVal, $lt* $alloca")
             locals(name) = LocalVar(name, alloca, typ, isVolatile)
             // Ref init: increment unless we own it (TNew/TNewArray)
@@ -546,7 +546,7 @@ class SyslLLVMCodegen(target: String = "host"):
                 emitSliceBackrefIncr(local.reg)
             else
               val vt = exprType(value)
-              val finalVal = emitSextIfNeeded(v, vt, lt)
+              val finalVal = emitSextIfNeeded(v, vt, lt, value.typ.isSigned)
               val vol = if local.isVolatile then " volatile" else ""
               emit(s"  store$vol $lt $finalVal, $lt* ${local.reg}")
               if isRef(local.typ) && !isOwnedNew(value) then
@@ -562,7 +562,7 @@ class SyslLLVMCodegen(target: String = "host"):
               emit(s"  store$vol $lt $loaded, $lt* @$target")
             else
               val vt = exprType(value)
-              val finalVal = emitSextIfNeeded(v, vt, lt)
+              val finalVal = emitSextIfNeeded(v, vt, lt, value.typ.isSigned)
               emit(s"  store$vol $lt $finalVal, $lt* @$target")
           else
             val lt = exprType(value)
@@ -581,7 +581,7 @@ class SyslLLVMCodegen(target: String = "host"):
           val loaded = newReg()
           emit(s"  $loaded = load $retType, $retType* $v")
           loaded
-        else emitSextIfNeeded(v, vt, retType)
+        else emitSextIfNeeded(v, vt, retType, value.typ.isSigned)
         emitDefers()
         emitReleaseRefs(returnedSliceAllocas(value))
         emitRet(retType, finalVal)
@@ -767,7 +767,7 @@ class SyslLLVMCodegen(target: String = "host"):
         else
           // Widen or truncate if value width differs from element width
           val vLt = llvmType(value.typ)
-          val storeVal = if vLt != elt then emitSextIfNeeded(v, vLt, elt) else v
+          val storeVal = if vLt != elt then emitSextIfNeeded(v, vLt, elt, value.typ.isSigned) else v
           emit(s"  store $elt $storeVal, $elt* $typedPtr")
 
       case TDerefAssignStmt(pointer, value) =>
@@ -840,7 +840,7 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  $cur = load $lt, $lt* $varReg")
         val v = genExpr(value)
         val vt = exprType(value)
-        val rv = emitSextIfNeeded(v, vt, lt)
+        val rv = emitSextIfNeeded(v, vt, lt, value.typ.isSigned)
         val isFloat = varType == SyslType.DoubleType
         val isUnsigned = varType.isUnsigned
         val result = newReg()
@@ -878,7 +878,7 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  $cur = load $fieldType, $fieldType* $gep")
         val v = genExpr(value)
         val vt = exprType(value)
-        val rv = emitSextIfNeeded(v, vt, fieldType)
+        val rv = emitSextIfNeeded(v, vt, fieldType, value.typ.isSigned)
         val isFloat = ft == SyslType.DoubleType
         val isUnsigned = ft.isUnsigned
         val result = newReg()
@@ -969,6 +969,7 @@ class SyslLLVMCodegen(target: String = "host"):
         s"0x${bits.toHexString.toUpperCase}"
       case TBoolLit(true, _) => "1"
       case TBoolLit(false, _) => "0"
+      case TSizeof(size, _) => size.toString
 
       case TStringLit(s, _) =>
         val (label, byteLen) = internString(s)
@@ -1325,7 +1326,7 @@ class SyslLLVMCodegen(target: String = "host"):
               (loaded, vt)
           else
             // Widen scalar arguments to match declared parameter type (e.g., i8 → i32 for char)
-            val widened = emitSextIfNeeded(v, vt, expectedType)
+            val widened = emitSextIfNeeded(v, vt, expectedType, a.typ.isSigned)
             (widened, expectedType)
         }
         val argStr = argVals.map((v, vt) => s"$vt $v").mkString(", ")
@@ -1375,7 +1376,7 @@ class SyslLLVMCodegen(target: String = "host"):
                   if isSliceType(typ) then emitSliceBackrefIncr(alloca)
                 case None =>
                   val vt = exprType(e)
-                  thenVal = if vt != t && e.typ.isIntegral then emitSextIfNeeded(v, vt, t) else v
+                  thenVal = if vt != t && e.typ.isIntegral then emitSextIfNeeded(v, vt, t, e.typ.isSigned) else v
             case Some(other) => genStmt(other)
             case None =>
         val thenReturned = hasReturned
@@ -1407,7 +1408,7 @@ class SyslLLVMCodegen(target: String = "host"):
                     if isSliceType(typ) then emitSliceBackrefIncr(alloca)
                   case None =>
                     val vt = exprType(e)
-                    elseVal = if vt != t && e.typ.isIntegral then emitSextIfNeeded(v, vt, t) else v
+                    elseVal = if vt != t && e.typ.isIntegral then emitSextIfNeeded(v, vt, t, e.typ.isSigned) else v
               case Some(other) => genStmt(other)
               case None =>
         }
@@ -2560,6 +2561,32 @@ class SyslLLVMCodegen(target: String = "host"):
               emit(s"  $result = bitcast $fromLt $v to $toLt")
           result
 
+      case TPreInc(name, typ) =>
+        val lt = llvmType(typ)
+        val local = locals(name)
+        val oldVal = newReg()
+        emit(s"  $oldVal = load $lt, $lt* ${local.reg}")
+        val newVal = newReg()
+        if typ == SyslType.DoubleType then
+          emit(s"  $newVal = fadd $lt $oldVal, 1.0")
+        else
+          emit(s"  $newVal = add $lt $oldVal, 1")
+        emit(s"  store $lt $newVal, $lt* ${local.reg}")
+        newVal // pre-increment returns the NEW value
+
+      case TPreDec(name, typ) =>
+        val lt = llvmType(typ)
+        val local = locals(name)
+        val oldVal = newReg()
+        emit(s"  $oldVal = load $lt, $lt* ${local.reg}")
+        val newVal = newReg()
+        if typ == SyslType.DoubleType then
+          emit(s"  $newVal = fsub $lt $oldVal, 1.0")
+        else
+          emit(s"  $newVal = sub $lt $oldVal, 1")
+        emit(s"  store $lt $newVal, $lt* ${local.reg}")
+        newVal // pre-decrement returns the NEW value
+
       case TPostInc(name, typ) =>
         val lt = llvmType(typ)
         val local = locals(name)
@@ -2791,8 +2818,9 @@ class SyslLLVMCodegen(target: String = "host"):
     emit(s"  $ignored = call i32 (i8*, i64, i8*, ...) @snprintf(i8* $buf, i64 $size, i8* $fmtPtr, $typedArg)")
     emitMakeString(buf, len)
 
-  // Emit sext only when fromType != toType; return the (possibly cast) register
-  private def emitSextIfNeeded(value: String, fromType: String, toType: String): String =
+  // Emit widening/narrowing cast when fromType != toType; return the (possibly cast) register.
+  // signed: whether the SOURCE value is signed — controls sext vs zext for integer widening.
+  private def emitSextIfNeeded(value: String, fromType: String, toType: String, signed: Boolean = true): String =
     if fromType == toType then value
     else if toType == "void" then value // discarded — no cast needed
     else
@@ -2808,8 +2836,10 @@ class SyslLLVMCodegen(target: String = "host"):
         val toW = toType.stripPrefix("i").toIntOption.getOrElse(0)
         if fromW > toW && toW > 0 then
           emit(s"  $cast = trunc $fromType $value to $toType")
-        else
+        else if signed then
           emit(s"  $cast = sext $fromType $value to $toType")
+        else
+          emit(s"  $cast = zext $fromType $value to $toType")
       cast
 
   private def llvmType(t: SyslType): String = t match
