@@ -251,6 +251,15 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     afterDel should include("not found")
   }
 
+  "x86 C program: test_c receives argc and argv" in {
+    // test_c is written in C and linked with c_crt0.c (the POSIX->Sysl
+    // crt0 bridge). It prints argc and joined argv[1..], returning argc
+    // as exit code — exercises the C side of the POSIX argv contract.
+    val output = qemu.command("test_c hello world")
+    output should include("argc=3")
+    output should include("hello world")
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")
