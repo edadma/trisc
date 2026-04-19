@@ -38,7 +38,11 @@ Placing stacks in BSS guarantees they cannot be overwritten
 by sbrk (heap grows from _heap_start, which is after BSS).
 This follows the Minix 3 approach of static kernel task stacks.
 
-    var kernel_stacks: [8][16384]byte  // 8 slots for kernel threads, 16384 = THREAD_STACK_SIZE
+Sized to MAX_THREADS × THREAD_STACK_SIZE. Sysl's array-bound
+grammar requires integer literals, so the dimensions here are
+hardcoded and MUST be kept in sync with `config.sysl`.
+
+    var kernel_stacks: [32][16384]byte  // MAX_THREADS × THREAD_STACK_SIZE
 
 Return (usp, ssp) for a thread slot. USP is the top of the
 lower half; SSP is the top of the upper half. The caller
