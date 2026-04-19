@@ -27,6 +27,10 @@ Hardware page-table operations (vm_asm.s).
     extern read_sctlr_el1() -> u64
     extern read_esr_el1() -> u64
     extern abort()
+    extern cntfrq_el0() -> u64
+    extern cntpct_el0() -> u64
+    extern cntp_tval_set(tval: u64)
+    extern cntp_ctl_set(v: u64)
 
 Kernel page-table base, captured on first call so later code can
 route around it (e.g. building per-process tables that clone a

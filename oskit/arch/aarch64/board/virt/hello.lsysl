@@ -11,7 +11,8 @@ after we come back.
         vm_create_process_pt, vm_set_ptbr, read_sctlr_el1,
         read_esr_el1, abort,
         last_user_code_page, last_user_stack_page, drop_to_el0,
-        sync_icache_line, vm_v2p, vm_copy_to, vm_copy_from}
+        sync_icache_line, vm_v2p, vm_copy_to, vm_copy_from,
+        cntfrq_el0, cntp_tval_set, cntp_ctl_set}
 
 Render `v` as a 16-digit hex number (prefixed `0x`) to the UART.
 Useful for the boot-time sanity prints below; deliberately crude
@@ -27,6 +28,70 @@ since the kernel will grow a real formatter later.
             else
                 uart_putc(int('A') + d - 10)
             shift -= 4
+
+GICv2 programming — QEMU virt wires the distributor at 0x08000000
+and the per-CPU CPU interface at 0x08010000. We only enable what
+the generic timer needs: distributor Group 0 on, IRQ 30 (EL1 phys
+timer PPI) enabled at a below-IRQ-mask priority, CPU interface
+enabled, PMR open to all priorities.
+
+    val GICD_CTLR:       u64 = u64(0x08000000)
+    val GICD_ISENABLER0: u64 = u64(0x08000100)
+    val GICD_IPRIORITYR: u64 = u64(0x08000400)
+    val GICC_CTLR:       u64 = u64(0x08010000)
+    val GICC_PMR:        u64 = u64(0x08010004)
+    val GICC_IAR:        u64 = u64(0x0801000C)
+    val GICC_EOIR:       u64 = u64(0x08010010)
+    val IRQ_TIMER: int = 30   // EL1 phys timer is PPI 14 = IRQ 30
+
+    gic_init()
+        // Distributor: enable Group 0. Group 0 is fine for a single
+        // non-secure kernel that routes everything through FIQ-less
+        // IRQ delivery.
+        var dctl: *i32 = *i32(GICD_CTLR)
+        *dctl = i32(1)
+        // Enable IRQ 30 (timer) by setting ISENABLER0 bit 30.
+        var isen: *i32 = *i32(GICD_ISENABLER0)
+        *isen = i32(0x40000000)
+        // Priority byte for IRQ 30 = 0xA0 (lower number = higher
+        // priority; we just need it below PMR = 0xFF).
+        var prio: *byte = *byte(GICD_IPRIORITYR + u64(30))
+        *prio = byte(0xA0)
+        // CPU interface: accept priorities lower than 0xFF, enable.
+        var pmr: *i32 = *i32(GICC_PMR)
+        *pmr = i32(0xFF)
+        var cctl: *i32 = *i32(GICC_CTLR)
+        *cctl = i32(1)
+
+    gic_ack() -> int
+        var iarp: *i32 = *i32(GICC_IAR)
+        int(*iarp) & 0x3FF
+
+    gic_eoi(irq: int)
+        var eoip: *i32 = *i32(GICC_EOIR)
+        *eoip = i32(irq)
+
+Generic timer — set a one-shot compare, arm with ENABLE=1 / IMASK=0.
+The timer raises IRQ 30 when CNTPCT_EL0 >= CVAL; reload with a new
+TVAL from inside the IRQ handler to make it periodic.
+
+    timer_init_periodic(interval_ticks: u64)
+        cntp_tval_set(interval_ticks)
+        cntp_ctl_set(u64(1))    // ENABLE=1, IMASK=0
+
+    var tick_count: int = 0
+
+    handle_irq(frame: u64)
+        val irq = gic_ack()
+        if irq == IRQ_TIMER
+            tick_count += 1
+            uart_puts("[tick ")
+            uart_puthex(u64(tick_count))
+            uart_puts("]\n")
+            // Reload for a ~200ms period so we see a handful of
+            // ticks in the 3s QEMU window.
+            cntp_tval_set(cntfrq_el0() / u64(5))
+        gic_eoi(irq)
 
 Synchronous exception handler for lower EL (EL0). Called from the
 `low64_sync` stub in `vectors.s` after it has saved the full EL0
@@ -123,28 +188,12 @@ it makes sense (exit=93); our custom calls sit below that.
         uart_puthex(stack_pa)
         uart_puts("\n")
 
-        // Write a tiny EL0 "user program" into the code page. Uses
-        // movz (0xD2800000 | (imm16 << 5) | Rd) and svc (0xD4000001)
-        // directly so we don't need to link user code.
-        //   mov x0, #0xAA      0xD2801540
-        //   mov x8, #1         0xD2800028   (SYS_PUTHEX)
-        //   svc #0             0xD4000001
-        //   mov x0, #0xBB      0xD2801760
-        //   svc #0             0xD4000001   (reuses x8=1)
-        //   mov x0, #1         0xD2800020   (exit code)
-        //   mov x8, #93        0xD2800BA8   (SYS_EXIT)
-        //   svc #0             0xD4000001
-        //   b .                0x14000000   (should never be reached)
+        // Write a trivial EL0 program: just loop forever. The timer
+        // IRQ will preempt it roughly every 200ms and we'll see tick
+        // counters on the UART.
+        //   b .               0x14000000
         var code_word: *i32 = *i32(code_pa)
-        code_word[0] = i32(0xD2801540)
-        code_word[1] = i32(0xD2800028)
-        code_word[2] = i32(0xD4000001)
-        code_word[3] = i32(0xD2801760)
-        code_word[4] = i32(0xD4000001)
-        code_word[5] = i32(0xD2800020)
-        code_word[6] = i32(0xD2800BA8)
-        code_word[7] = i32(0xD4000001)
-        code_word[8] = i32(0x14000000)
+        code_word[0] = i32(0x14000000)
 
         // A72 has split I/D caches on — the stores land in D-cache;
         // the I-cache must be made to see them before we try to
@@ -163,6 +212,12 @@ it makes sense (exit=93); our custom calls sit below that.
 
         vm_set_ptbr(new_pt)
         uart_puts("after vm_set_ptbr: still alive\n")
+
+        // GIC + generic timer bring-up. Once EL0 starts, IRQs unmask
+        // (SPSR=0 → DAIF all clear), and the timer will preempt it.
+        gic_init()
+        timer_init_periodic(cntfrq_el0() / u64(5))
+        uart_puts("gic + timer initialised\n")
 
         // Drop to EL0 with user code at VA 0x60000000 and user stack
         // top at VA 0x60002000 (the stack page covers 0x60001000..

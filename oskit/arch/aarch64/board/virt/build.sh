@@ -59,6 +59,9 @@ aarch64-elf-as -o "$OUT/mmu.o" "$ARCH_DIR/mmu.s"
 echo "=== Assemble vm_asm.s ==="
 aarch64-elf-as -o "$OUT/vm_asm.o" "$ARCH_DIR/vm_asm.s"
 
+echo "=== Assemble irq_asm.s ==="
+aarch64-elf-as -o "$OUT/irq_asm.o" "$ARCH_DIR/irq_asm.s"
+
 echo "=== Compile stubs.c ==="
 aarch64-elf-gcc -ffreestanding -nostdlib -mcmodel=large \
     -fno-pic -fno-pie -c -o "$OUT/stubs.o" "$BOARD_DIR/stubs.c"
@@ -66,7 +69,7 @@ aarch64-elf-gcc -ffreestanding -nostdlib -mcmodel=large \
 echo "=== Link ==="
 aarch64-elf-ld -T "$BOARD_DIR/link.ld" \
     -o "$OUT/kernel.elf" \
-    "$OUT/boot.o" "$OUT/vectors.o" "$OUT/cpu_asm.o" "$OUT/mmu.o" "$OUT/vm_asm.o" "$OUT/stubs.o" "$OUT/kernel.o" 2>&1 \
+    "$OUT/boot.o" "$OUT/vectors.o" "$OUT/cpu_asm.o" "$OUT/mmu.o" "$OUT/vm_asm.o" "$OUT/irq_asm.o" "$OUT/stubs.o" "$OUT/kernel.o" 2>&1 \
     | grep -v "has a LOAD segment with RWX permissions" || true
 
 echo "=== Built: $OUT/kernel.elf ==="
