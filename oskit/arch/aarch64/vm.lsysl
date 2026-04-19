@@ -25,6 +25,8 @@ Hardware page-table operations (vm_asm.s).
     extern vm_flush_tlb()
     extern vm_get_ptbr() -> u64
     extern read_sctlr_el1() -> u64
+    extern read_esr_el1() -> u64
+    extern abort()
 
 Kernel page-table base, captured on first call so later code can
 route around it (e.g. building per-process tables that clone a

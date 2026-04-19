@@ -45,3 +45,11 @@ vm_flush_tlb:
 read_sctlr_el1:
     mrs x0, sctlr_el1
     ret
+
+// read_esr_el1() -> u64
+//   Returns current ESR_EL1. Used by synchronous exception handlers
+//   to decode exception class (EC) and instruction-specific syndrome.
+.global read_esr_el1
+read_esr_el1:
+    mrs x0, esr_el1
+    ret

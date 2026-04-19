@@ -9,6 +9,7 @@ after we come back.
 
     import oskit.arch.{page_alloc_zero, kernel_ptbr, vm_flush_tlb,
         vm_create_process_pt, vm_set_ptbr, read_sctlr_el1,
+        read_esr_el1, abort,
         last_user_code_page, last_user_stack_page, drop_to_el0,
         sync_icache_line}
 
@@ -26,6 +27,28 @@ since the kernel will grow a real formatter later.
             else
                 uart_putc(int('A') + d - 10)
             shift -= 4
+
+Synchronous exception handler for lower EL (EL0). Called from the
+`low64_sync` stub in `vectors.s` after it has saved the full EL0
+register state. `frame` points to the saved frame on the kernel
+stack; we don't use it yet, but future syscall dispatch will read
+x0..x7 and write return values back through it.
+
+At this stage we only recognise SVC (EC=0x15) and print the 16-bit
+immediate. Unhandled synchronous exceptions from EL0 halt via abort.
+
+    handle_sync_lower(frame: u64)
+        val esr = read_esr_el1()
+        val ec = int((esr >> u64(26)) & u64(0x3F))
+        if ec == 0x15
+            uart_puts("[SVC imm=")
+            uart_puthex(esr & u64(0xFFFF))
+            uart_puts("]\n")
+        else
+            uart_puts("[unhandled sync from EL0, ESR=")
+            uart_puthex(esr)
+            uart_puts("]\n")
+            abort()
 
     kernel_main()
         uart_puts("SLIX aarch64 boot (sysl, MMU on)\n")
@@ -77,15 +100,22 @@ since the kernel will grow a real formatter later.
 
         // Write a tiny EL0 program into the code page. aarch64 is
         // little-endian, so the instruction words are stored as-is.
-        //   svc #0x42          0xD4000841   (imm16=0x42 in bits [20:5],
-        //                                    opcode bits [4:0]=00001)
-        //   b   .              0x14000000   (fallback infinite loop)
+        // Encoding for SVC: 0xD4000001 | (imm16 << 5).
+        //   svc #0x42          0xD4000841
+        //   svc #0x43          0xD4000861
+        //   b   .              0x14000000   (infinite loop at the end)
+        // Two SVCs prove that ERET landed back in EL0 and EL0 actually
+        // executed the next instruction; the second SVC takes us to
+        // the kernel again, which prints imm=0x43 and ERETs.
         var code_word: *i32 = *i32(code_pa)
         code_word[0] = i32(0xD4000841)
-        code_word[1] = i32(0x14000000)
+        code_word[1] = i32(0xD4000861)
+        code_word[2] = i32(0x14000000)
 
-        // A72 has split I/D caches on — the store lands in D-cache;
-        // the I-cache must be made to see it before we try to execute.
+        // A72 has split I/D caches on — the stores land in D-cache;
+        // the I-cache must be made to see them before we try to
+        // execute. All three instructions fit in one 64B cache line
+        // (they start at a page boundary), so one sync is sufficient.
         sync_icache_line(i64(code_pa))
 
         vm_set_ptbr(new_pt)
