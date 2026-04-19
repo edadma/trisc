@@ -285,4 +285,57 @@ class SyslLLVMCodegenAuditTests extends SyslLLVMTestHelpers {
     if ir.contains("sext i32") && !ir.contains("zext i32") then
       fail(s"IR uses sext instead of zext for u32→i64 widening:\n$ir")
   }
+
+  // =============================================================================
+  // Issue 6: int must be 32-bit — overflow wrapping and sizeof
+  // =============================================================================
+
+  "int overflow wraps at 32 bits" in {
+    llvmExit(
+      """main() -> int
+        |    var x: int = 2147483647
+        |    x = x + 1
+        |    if x == -2147483648 then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "int multiplication wraps at 32 bits" in {
+    llvmExit(
+      """main() -> int
+        |    var x: int = 100000
+        |    var y: int = 100000
+        |    var z: int = x * y
+        |    if z != i64(10000000000) then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "sizeof int is 4 in LLVM" in {
+    llvmExit(
+      """main() -> int
+        |    sizeof(int)
+        |""".stripMargin) shouldBe 4
+  }
+
+  "int array stride is 4 bytes" in {
+    llvmExit(
+      """main() -> int
+        |    var arr: [3]int
+        |    arr[0] = 1
+        |    arr[1] = 2
+        |    arr[2] = 3
+        |    val total = arr[0] + arr[1] + arr[2]
+        |    if total == 6 then sizeof([3]int) else -1
+        |""".stripMargin) shouldBe 12
+  }
+
+  "int struct field is 4 bytes" in {
+    llvmExit(
+      """struct TwoInts
+        |    a: int
+        |    b: int
+        |
+        |main() -> int
+        |    sizeof(TwoInts)
+        |""".stripMargin) shouldBe 8
+  }
 }
