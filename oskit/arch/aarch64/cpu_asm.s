@@ -72,6 +72,19 @@ thread_exit:
 1:  wfi
     b    1b
 
+// syscall(number: int, arg: i64) -> i64
+//   User-facing syscall wrapper matching x86_64/TRISC ABI.
+//   AAPCS64 passes number in x0 and arg in x1; the aarch64 SLIX
+//   syscall dispatcher reads x8 for the syscall number and x0 for
+//   the single argument. Shuffle, SVC, return — x0 already carries
+//   the kernel's return value on resume.
+.global syscall
+syscall:
+    mov x8, x0
+    mov x0, x1
+    svc #0
+    ret
+
 // user_svc_test — tiny EL0 entry used to sanity-check the EL1->EL0
 // transition. Issues `svc #0x42` so the exception reporter in
 // vectors.s fires `low64_sync` (V=8) with ESR_EL1 carrying EC=0x15

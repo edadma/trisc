@@ -28,6 +28,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         STACK_FRAME_SIZE, arch_cli, arch_sti}
     import oskit.kernel.{kernel_init, create_thread, first_thread_ssp,
         kernel_stack_usp, kernel_stack_ssp, schedule}
+    import oskit.ipc.ipc_init
 
     val DEMO_MODE = 0             // 0=kernel, 1=ad-hoc, 2=EL0
 
@@ -225,6 +226,7 @@ queue. Both kernel threads print on every scheduler pass.
     kernel_main_kern()
         uart_puts("[kern] kernel_init...\n")
         kernel_init()
+        ipc_init()
 
         uart_puts("[kern] creating threads\n")
         create_thread(i64(&kentry_a), kernel_stack_usp(0),
