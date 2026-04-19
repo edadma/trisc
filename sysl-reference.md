@@ -61,7 +61,8 @@ Source code always uses the short name — the compiler resolves it to the mangl
 | `u16` | | 2 bytes | unsigned 16-bit integer |
 | `u32` | `char`, `uint` | 4 bytes | unsigned 32-bit integer (Unicode codepoint) |
 | `u64` | `ulong` | 8 bytes | unsigned 64-bit integer |
-| `f64` | `double` | 8 bytes | 64-bit floating point |
+| `f32` | `float` | 4 bytes | IEEE-754 single-precision floating point |
+| `f64` | `double` | 8 bytes | IEEE-754 double-precision floating point |
 | `bool` | | 1 byte | `true` or `false` |
 | `unit` | | 0 bytes | no value |
 | `string` | | 16 bytes | fat pointer: `{ptr: *u8, len: i64}` |
@@ -911,7 +912,14 @@ true, false           // bool
 0xFFu64               // u64
 ```
 
-Float literals (`3.14`, `1e5`) are always `f64`. There is no `f32` type.
+Float literals (`3.14`, `1e5`) default to `f64`, but coerce to `f32` when the
+context demands it (`var x: f32 = 1.5` works without a cast). Mixed-width float
+arithmetic widens to the wider operand; `f64 -> f32` requires explicit `f32(x)`.
+
+> **Backend note:** TRISC stores `f32` as 4 bytes in memory but works with it as
+> `f64` in registers (using `f32tof64`/`f64tof32` at memory boundaries). LLVM
+> uses native `float` throughout. Both backends are correct; TRISC's approach
+> trades 4 bytes per `f32` register slot for simpler arithmetic codegen.
 
 **Escape sequences** in string and char literals:
 
@@ -979,6 +987,8 @@ bool(42)          // int -> bool: true (nonzero)
 byte(0x1FF)       // truncate to u8: 255
 char(65)          // int -> u32: 65
 i64(3.14)         // float -> int: 3
+f32(3.14)         // f64 -> f32 (precision narrowing)
+f64(x: f32)       // f32 -> f64 (lossless widening, also implicit)
 
 // Pointer / int conversions
 *i8(address)      // int -> pointer
@@ -1381,7 +1391,7 @@ puts(s"cost is $$5")        // prints "cost is $5" ($$ = literal $)
 
 Plain strings (`"..."`) are never interpolated — `$` is just a regular character.
 
-Non-string expressions are automatically converted via `str()`. Integer, boolean, and float (`f64`) types are supported.
+Non-string expressions are automatically converted via `str()`. Integer, boolean, and float (`f32`/`f64`) types are supported.
 
 ### Format Strings (f-strings)
 
@@ -1504,7 +1514,8 @@ User-defined functions shadow builtins of the same name.
 - Signed: `i8` -> `i16` -> `i32` -> `i64`
 - Unsigned: `u8` -> `u16` -> `u32` -> `u64`
 - Cross-sign: `u8` -> `i16` (unsigned fits in wider signed)
-- Int to float: any integer -> `f64`
+- Float: `f32` -> `f64`
+- Int to float: any integer -> `f32` or `f64`
 
 ### Mixed Signed/Unsigned Rules
 
@@ -1526,11 +1537,12 @@ var y: int = big + 1     // ERROR: u32 doesn't fit in i32
 - `&T` -> `*U` (ref decays to raw pointer)
 - Any `*T` -> any `*U` (permissive pointer casting)
 
-### Auto-Deref for Function Arguments
+### Pointer Dereference Is Explicit
 
-When a function parameter expects a struct by value (`T`) and the caller
-passes a pointer to that struct (`*T`), the compiler implicitly dereferences
-the pointer, copying the value through:
+Passing `*T` to a function parameter of type `T` is a **type error**. Implicit
+deref-and-copy was removed because it hides cost: a pointer-passing site that
+*looks* like pass-by-reference silently becomes a `memcpy` of the entire pointee.
+For a small struct that's free; for a 4 KB packet it isn't. Write the deref:
 
 ```sysl
 struct Point
@@ -1542,19 +1554,26 @@ sum(p: Point) -> int = p.x + p.y
 main() -> int
     var p = Point(20, 22)
     val ptr: *Point = &p
-    sum(ptr)               // auto-deref: sum(*ptr), callee gets a copy
+    sum(*ptr)              // explicit: sum receives a copy of *ptr
 ```
 
-This is safe because the callee receives a copy — the caller's original is
-not affected. The same auto-deref applies to `self` inside methods, which
-has type `*StructName`:
+Equivalently, take the pointer's pointee directly: `sum(p)` (no `&`/`*` at all).
+
+The reverse direction (`T` -> `*T`) is also not implicit — it would create
+a dangling pointer to a temporary.
+
+### Exception: `self` In Methods
+
+Inside a method body `self` has type `*StructName`. Passing `self` to a function
+that expects the value type auto-derefs, because the method-call sugar already
+hides the pointer:
 
 ```sysl
-Point.total() -> int = sum(self)   // self is *Point, sum expects Point
+Point.total() -> int = sum(self)   // self is *Point; sum gets a copy of *self
 ```
 
-Only `*T` -> `T` is implicit (deref to copy). The reverse (`T` -> `*T`) is
-**not** implicit because it would create a dangling pointer to a temporary.
+This is the **only** implicit `*T -> T` allowed. Local variables of pointer
+type, function parameters, struct fields — all require explicit `*ptr`.
 
 ### Explicit Casts Required
 

@@ -9,7 +9,7 @@ enum SyslType:
   case ArrayType(elem: SyslType, size: Int)
   case FuncType(params: List[SyslType], returnType: SyslType, escaping: Boolean = false)
   case StructType(name: String, fields: List[(String, SyslType)], volatileFields: Set[Int] = Set.empty)
-  case DoubleType
+  case FloatType(width: Int)   // f32 (single-precision), f64 (double-precision)
   case StringType
   case SliceType(elem: SyslType)
   case RefType(inner: SyslType)  // &T — ref-counted heap reference
@@ -18,11 +18,15 @@ enum SyslType:
 
   def isNumeric: Boolean = this match
     case _: IntType | _: UIntType => true
-    case DoubleType => true
+    case _: FloatType => true
     case _ => false
 
   def isIntegral: Boolean = this match
     case _: IntType | _: UIntType => true
+    case _ => false
+
+  def isFloat: Boolean = this match
+    case _: FloatType => true
     case _ => false
 
   def isSigned: Boolean = this match
@@ -34,7 +38,8 @@ enum SyslType:
     case _ => false
 
   def isBoolOrNumeric: Boolean = this match
-    case _: IntType | _: UIntType | BoolType | DoubleType => true
+    case _: IntType | _: UIntType | BoolType => true
+    case _: FloatType => true
     case _ => false
 
   def isPointerLike: Boolean = this match
@@ -51,7 +56,7 @@ enum SyslType:
     case _: FuncType => 16           // {func_ptr(8), env_ptr(8)} — closure-ready fat pointer
     case InterfaceType(_, _) => 16   // {itable_ptr(8), data_ptr(8)} — Go-style interface
     case ArrayType(elem, size) => elem.sizeOf * size
-    case DoubleType => 8
+    case FloatType(w) => w / 8
     case StringType => 16        // ptr(8) + len(8) — Go-style fat pointer
     case SliceType(_) => 24      // ptr(8) + len(4) + cap(4) + backref(8)
     case RefType(_) => 8         // pointer to heap object (refcount header + data)
@@ -88,7 +93,7 @@ enum SyslType:
     case _: FuncType => 8
     case InterfaceType(_, _) => 8
     case ArrayType(elem, _) => elem.alignOf
-    case DoubleType => 8
+    case FloatType(w) => (w / 8).toLong.min(8)
     case StringType => 8
     case SliceType(_) => 8
     case RefType(_) => 8
@@ -101,7 +106,7 @@ enum SyslType:
   def bitWidth: Int = this match
     case IntType(w) => w
     case UIntType(w) => w
-    case DoubleType => 64
+    case FloatType(w) => w
     case BoolType => 8
     case PtrType(_) => 64
     case _ => 64
@@ -117,7 +122,7 @@ enum SyslType:
     case UIntType(32) => "u32"
     case UIntType(64) => "u64"
     case UIntType(w) => s"u$w"
-    case DoubleType => "f64"
+    case FloatType(w) => s"f$w"
     case BoolType => "bool"
     case VoidType => "unit"
     case PtrType(t) => s"*$t"
@@ -133,7 +138,7 @@ enum SyslType:
   def toPrefix: String = this match
     case IntType(w) => s"i$w"
     case UIntType(w) => s"u$w"
-    case DoubleType => "f64"
+    case FloatType(w) => s"f$w"
     case BoolType => "bool"
     case VoidType => "void"
     case PtrType(t) => s"ptr ${t.toPrefix}"
@@ -173,7 +178,7 @@ object SyslType:
   def mangleType(t: SyslType): String = t match
     case IntType(w) => s"i$w"
     case UIntType(w) => s"u$w"
-    case DoubleType => "f64"
+    case FloatType(w) => s"f$w"
     case BoolType => "bool"
     case VoidType => "void"
     case StringType => "string"
@@ -202,11 +207,16 @@ object SyslType:
   val U32: UIntType = UIntType(32)
   val U64: UIntType = UIntType(64)
 
+  // Canonical type aliases — floating-point
+  val F32: FloatType = FloatType(32)
+  val F64: FloatType = FloatType(64)
+
   // Source-level aliases
   val Byte: UIntType = U8
   val Char: UIntType = U32
   val Int: IntType = I32
-  val Double: DoubleType.type = DoubleType
+  val Float: FloatType = F32
+  val Double: FloatType = F64
 
   def fromPrefix(s: String): SyslType =
     val tokens = s.split("\\s+").iterator
@@ -220,7 +230,10 @@ object SyslType:
         UIntType(s.drop(1).toInt)
       case s if s.startsWith("i") && s.drop(1).forall(_.isDigit) =>
         IntType(s.drop(1).toInt)
-      case "f64" | "double" => DoubleType
+      case s if s.startsWith("f") && s.drop(1).forall(_.isDigit) =>
+        FloatType(s.drop(1).toInt)
+      case "double" => F64
+      case "float"  => F32
       // Legacy prefix names for backward compatibility
       case "int"  => I32
       case "uint" => U32

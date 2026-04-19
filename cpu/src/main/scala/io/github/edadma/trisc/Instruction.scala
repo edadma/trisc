@@ -499,6 +499,27 @@ class FLOG(a: Int, b: Int) extends RRInstruction(a, b):
 
   def apply(cpu: CPU): Unit = cpu.r(a).write(math.log(cpu.r(b).readf))
 
+// Single/double precision float conversion.
+// Single-precision floats live in the low 32 bits of a register,
+// upper 32 bits zero, matching the IEEE 754 bit pattern that
+// ldw/stw naturally load and store.
+
+class F32TOF64(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "f32tof64"
+
+  def apply(cpu: CPU): Unit =
+    val bits = (cpu.r(b).read & 0xFFFFFFFFL).toInt
+    val single = java.lang.Float.intBitsToFloat(bits)
+    cpu.r(a).write(single.toDouble)
+
+class F64TOF32(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "f64tof32"
+
+  def apply(cpu: CPU): Unit =
+    val single = cpu.r(b).readf.toFloat
+    val bits = java.lang.Float.floatToIntBits(single)
+    cpu.r(a).write(bits.toLong & 0xFFFFFFFFL)
+
 // MMU instructions (RR 01 sub-format, supervisor only)
 
 class TLBI(a: Int, b: Int) extends RRInstruction(a, b):

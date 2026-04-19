@@ -156,9 +156,9 @@ class SyslMethodTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 42
   }
 
-  // ===== Auto-deref *T → T for function arguments =====
+  // ===== Pointer-to-struct as struct arg requires explicit deref; self is the only exception =====
 
-  "auto-deref pointer arg to value param" in {
+  "explicit *ptr passes struct by value" in {
     eval(
       """struct Point
         |    x: int
@@ -169,11 +169,27 @@ class SyslMethodTests extends SyslTestHelpers {
         |main() -> int
         |    p = Point(20, 22)
         |    val ptr: *Point = &p
-        |    sum(ptr)
+        |    sum(*ptr)
         |""".stripMargin) shouldBe 42
   }
 
-  "auto-deref self in method calling standalone function" in {
+  "passing *ptr to struct param without deref is rejected" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |sum(p: Point) -> int = p.x + p.y
+        |
+        |main() -> int
+        |    p = Point(20, 22)
+        |    val ptr: *Point = &p
+        |    sum(ptr)
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "self auto-derefs in method calling standalone function" in {
     eval(
       """struct Point
         |    x: int
@@ -189,7 +205,7 @@ class SyslMethodTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 42
   }
 
-  "auto-deref with multiple struct args" in {
+  "explicit *ptr with multiple struct args" in {
     eval(
       """struct Point
         |    x: int
@@ -200,7 +216,7 @@ class SyslMethodTests extends SyslTestHelpers {
         |main() -> int
         |    a = Point(20, 0)
         |    b = Point(0, 22)
-        |    add(&a, &b)
+        |    add(*&a, *&b)
         |""".stripMargin) shouldBe 42
   }
 

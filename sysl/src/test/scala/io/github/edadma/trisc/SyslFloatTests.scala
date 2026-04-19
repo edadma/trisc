@@ -270,4 +270,113 @@ class SyslFloatTests extends SyslTestHelpers {
         |    return 0
         |""".stripMargin) shouldBe "3.14159\n"
   }
+
+  // ===== f32 (single precision) — interpreter =====
+
+  "f32 variable holds value" in {
+    eval(
+      """main() -> int
+        |    x: f32 = 2.5
+        |    int(x * 2.0)
+        |""".stripMargin) shouldBe 5
+  }
+
+  "float alias resolves to f32" in {
+    eval(
+      """main() -> int
+        |    x: float = 1.5
+        |    y: f32 = x
+        |    int(y * 4.0)
+        |""".stripMargin) shouldBe 6
+  }
+
+  "double alias resolves to f64" in {
+    eval(
+      """main() -> int
+        |    x: double = 1.5
+        |    y: f64 = x
+        |    int(y * 4.0)
+        |""".stripMargin) shouldBe 6
+  }
+
+  "f32 widens to f64 implicitly" in {
+    eval(
+      """main() -> int
+        |    a: f32 = 1.5
+        |    b: f64 = a
+        |    int(b * 4.0)
+        |""".stripMargin) shouldBe 6
+  }
+
+  "f64 to f32 narrowing requires explicit cast" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """main() -> int
+        |    a: f64 = 1.5
+        |    b: f32 = a
+        |    0
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "f64 to f32 with explicit cast works" in {
+    eval(
+      """main() -> int
+        |    a: f64 = 1.5
+        |    b: f32 = f32(a)
+        |    int(b * 4.0)
+        |""".stripMargin) shouldBe 6
+  }
+
+  "sizeof f32 is 4" in {
+    eval("main() -> int = sizeof(f32)\n") shouldBe 4
+  }
+
+  "sizeof float equals sizeof f32" in {
+    eval("main() -> int = sizeof(float) == sizeof(f32)\n") shouldBe 1
+  }
+
+  "sizeof f64 is 8" in {
+    eval("main() -> int = sizeof(f64)\n") shouldBe 8
+  }
+
+  "sizeof double equals sizeof f64" in {
+    eval("main() -> int = sizeof(double) == sizeof(f64)\n") shouldBe 1
+  }
+
+  "f32 in struct has 4-byte field" in {
+    eval(
+      """struct Pair
+        |    a: f32
+        |    b: f32
+        |
+        |main() -> int = sizeof(Pair)
+        |""".stripMargin) shouldBe 8
+  }
+
+  "i16 to f32 conversion is allowed" in {
+    eval(
+      """main() -> int
+        |    n: i16 = 7
+        |    x: f32 = n
+        |    int(x)
+        |""".stripMargin) shouldBe 7
+  }
+
+  // ===== Prefix round-trip =====
+
+  "f32 prefix round-trip" in {
+    SyslType.fromPrefix("f32") shouldBe SyslType.FloatType(32)
+  }
+
+  "f64 prefix round-trip" in {
+    SyslType.fromPrefix("f64") shouldBe SyslType.FloatType(64)
+  }
+
+  "double prefix maps to f64" in {
+    SyslType.fromPrefix("double") shouldBe SyslType.FloatType(64)
+  }
+
+  "float prefix maps to f32" in {
+    SyslType.fromPrefix("float") shouldBe SyslType.FloatType(32)
+  }
 }

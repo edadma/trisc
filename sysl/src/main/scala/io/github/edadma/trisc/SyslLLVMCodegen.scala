@@ -841,7 +841,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val v = genExpr(value)
         val vt = exprType(value)
         val rv = emitSextIfNeeded(v, vt, lt, value.typ.isSigned)
-        val isFloat = varType == SyslType.DoubleType
+        val isFloat = varType.isFloat
         val isUnsigned = varType.isUnsigned
         val result = newReg()
         op match
@@ -879,7 +879,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val v = genExpr(value)
         val vt = exprType(value)
         val rv = emitSextIfNeeded(v, vt, fieldType, value.typ.isSigned)
-        val isFloat = ft == SyslType.DoubleType
+        val isFloat = ft.isFloat
         val isUnsigned = ft.isUnsigned
         val result = newReg()
         op match
@@ -1161,7 +1161,7 @@ class SyslLLVMCodegen(target: String = "host"):
             leftLt
           else leftLt
         else leftLt
-        val isFloat = left.typ == SyslType.DoubleType
+        val isFloat = left.typ.isFloat
         val isUnsigned = left.typ.isUnsigned
         val result = newReg()
         op match
@@ -1227,7 +1227,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val v = genExpr(operand)
         val vt = exprType(operand)
         val result = newReg()
-        if operand.typ == SyslType.DoubleType then emit(s"  $result = fneg double $v")
+        if operand.typ.isFloat then emit(s"  $result = fneg $vt $v")
         else emit(s"  $result = sub $vt 0, $v")
         result
 
@@ -1266,11 +1266,16 @@ class SyslLLVMCodegen(target: String = "host"):
             emitWriteString(sp)
             "0"
           case _ =>
-            val v = genExpr(arg)
-            val vt = exprType(arg)
-            val (fmtName, fmtLen) = arg.typ match
-              case SyslType.DoubleType => ("@.fmt_f", 3)
-              case _                   => ("@.fmt_d", 3)
+            val v0 = genExpr(arg)
+            val vt0 = exprType(arg)
+            val (fmtName, fmtLen, vt, v) = arg.typ match
+              case _: SyslType.FloatType =>
+                val vd = if arg.typ == SyslType.F64 then v0 else
+                  val r = newReg()
+                  emit(s"  $r = fpext $vt0 $v0 to double")
+                  r
+                ("@.fmt_f", 3, "double", vd)
+              case _ => ("@.fmt_d", 3, vt0, v0)
             val result = newReg()
             emit(s"""  $result = call i32 (i8*, ...) @printf(i8* getelementptr ([$fmtLen x i8], [$fmtLen x i8]* $fmtName, i32 0, i32 0), $vt $v)""")
             "0"
@@ -1287,11 +1292,16 @@ class SyslLLVMCodegen(target: String = "host"):
             emit(s"  $ignored = call i64 @write(i32 1, i8* $nlPtr, i64 1)")
             "0"
           case _ =>
-            val v = genExpr(arg)
-            val vt = exprType(arg)
-            val (fmtName, fmtLen) = arg.typ match
-              case SyslType.DoubleType => ("@.fmt_fn", 4)
-              case _                   => ("@.fmt_dn", 4)
+            val v0 = genExpr(arg)
+            val vt0 = exprType(arg)
+            val (fmtName, fmtLen, vt, v) = arg.typ match
+              case _: SyslType.FloatType =>
+                val vd = if arg.typ == SyslType.F64 then v0 else
+                  val r = newReg()
+                  emit(s"  $r = fpext $vt0 $v0 to double")
+                  r
+                ("@.fmt_fn", 4, "double", vd)
+              case _ => ("@.fmt_dn", 4, vt0, v0)
             val result = newReg()
             emit(s"""  $result = call i32 (i8*, ...) @printf(i8* getelementptr ([$fmtLen x i8], [$fmtLen x i8]* $fmtName, i32 0, i32 0), $vt $v)""")
             "0"
@@ -2414,9 +2424,13 @@ class SyslLLVMCodegen(target: String = "host"):
             val selLen = newReg()
             emit(s"  $selLen = select i1 $cmp, i32 4, i32 5")
             emitMakeString(selPtr, selLen)
-          case SyslType.DoubleType =>
-            val v = genExpr(inner)
-            // double → string via snprintf with %g
+          case _: SyslType.FloatType =>
+            val v0 = genExpr(inner)
+            // Always promote to double for snprintf %g
+            val v = if inner.typ == SyslType.F64 then v0 else
+              val r = newReg()
+              emit(s"  $r = fpext ${llvmType(inner.typ)} $v0 to double")
+              r
             emitSnprintfToString("@.fmt_f", 3, s"double $v")
           case t if t.isIntegral =>
             val v = genExpr(inner)
@@ -2479,11 +2493,15 @@ class SyslLLVMCodegen(target: String = "host"):
                   else emit(s"  $ext = zext $vt $v to i32")
                   s"i32 $ext"
               emitSnprintfToString(label, byteLen, arg)
-          case SyslType.DoubleType =>
+          case _: SyslType.FloatType =>
             fmt += 'g'
             val fmtString = fmt.toString
             val (label, byteLen) = internString(fmtString)
-            emitSnprintfToString(label, byteLen, s"double $v")
+            val vd = if inner.typ == SyslType.F64 then v else
+              val r = newReg()
+              emit(s"  $r = fpext ${llvmType(inner.typ)} $v to double")
+              r
+            emitSnprintfToString(label, byteLen, s"double $vd")
           case SyslType.StringType =>
             // For string verb with width padding, use snprintf with %s
             fmt += 's'
@@ -2508,13 +2526,16 @@ class SyslLLVMCodegen(target: String = "host"):
         else
           val result = newReg()
           (inner.typ, targetType) match
-            case (_: SyslType.IntType, SyslType.DoubleType) | (_: SyslType.UIntType, SyslType.DoubleType) =>
-              if inner.typ.isSigned then emit(s"  $result = sitofp $fromLt $v to double")
-              else emit(s"  $result = uitofp $fromLt $v to double")
-            case (SyslType.DoubleType, _: SyslType.IntType) =>
-              emit(s"  $result = fptosi double $v to $toLt")
-            case (SyslType.DoubleType, _: SyslType.UIntType) =>
-              emit(s"  $result = fptoui double $v to $toLt")
+            case (_: SyslType.IntType, _: SyslType.FloatType) | (_: SyslType.UIntType, _: SyslType.FloatType) =>
+              if inner.typ.isSigned then emit(s"  $result = sitofp $fromLt $v to $toLt")
+              else emit(s"  $result = uitofp $fromLt $v to $toLt")
+            case (_: SyslType.FloatType, _: SyslType.IntType) =>
+              emit(s"  $result = fptosi $fromLt $v to $toLt")
+            case (_: SyslType.FloatType, _: SyslType.UIntType) =>
+              emit(s"  $result = fptoui $fromLt $v to $toLt")
+            case (SyslType.FloatType(a), SyslType.FloatType(b)) =>
+              if b > a then emit(s"  $result = fpext $fromLt $v to $toLt")
+              else emit(s"  $result = fptrunc $fromLt $v to $toLt")
             case _ if inner.typ.isIntegral && targetType.isIntegral =>
               val fromWidth = fromLt.stripPrefix("i").toInt
               val toWidth = toLt.stripPrefix("i").toInt
@@ -2567,7 +2588,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val oldVal = newReg()
         emit(s"  $oldVal = load $lt, $lt* ${local.reg}")
         val newVal = newReg()
-        if typ == SyslType.DoubleType then
+        if typ.isFloat then
           emit(s"  $newVal = fadd $lt $oldVal, 1.0")
         else
           emit(s"  $newVal = add $lt $oldVal, 1")
@@ -2580,7 +2601,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val oldVal = newReg()
         emit(s"  $oldVal = load $lt, $lt* ${local.reg}")
         val newVal = newReg()
-        if typ == SyslType.DoubleType then
+        if typ.isFloat then
           emit(s"  $newVal = fsub $lt $oldVal, 1.0")
         else
           emit(s"  $newVal = sub $lt $oldVal, 1")
@@ -2593,7 +2614,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val oldVal = newReg()
         emit(s"  $oldVal = load $lt, $lt* ${local.reg}")
         val newVal = newReg()
-        if typ == SyslType.DoubleType then
+        if typ.isFloat then
           emit(s"  $newVal = fadd $lt $oldVal, 1.0")
         else
           emit(s"  $newVal = add $lt $oldVal, 1")
@@ -2606,7 +2627,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val oldVal = newReg()
         emit(s"  $oldVal = load $lt, $lt* ${local.reg}")
         val newVal = newReg()
-        if typ == SyslType.DoubleType then
+        if typ.isFloat then
           emit(s"  $newVal = fsub $lt $oldVal, 1.0")
         else
           emit(s"  $newVal = sub $lt $oldVal, 1")
@@ -2633,7 +2654,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val oldVal = newReg()
         emit(s"  $oldVal = load $fieldType, $fieldType* $gep")
         val newVal = newReg()
-        if ft == SyslType.DoubleType then
+        if ft.isFloat then
           emit(s"  $newVal = fadd $fieldType $oldVal, 1.0")
         else
           emit(s"  $newVal = add $fieldType $oldVal, 1")
@@ -2660,7 +2681,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val oldVal = newReg()
         emit(s"  $oldVal = load $fieldType, $fieldType* $gep")
         val newVal = newReg()
-        if ft == SyslType.DoubleType then
+        if ft.isFloat then
           emit(s"  $newVal = fsub $fieldType $oldVal, 1.0")
         else
           emit(s"  $newVal = sub $fieldType $oldVal, 1")
@@ -2826,11 +2847,18 @@ class SyslLLVMCodegen(target: String = "host"):
     else
       val fromIsPtr = fromType.endsWith("*")
       val toIsPtr = toType.endsWith("*")
+      val fromIsFloat = fromType == "float" || fromType == "double"
+      val toIsFloat = toType == "float" || toType == "double"
       val cast = newReg()
       if !fromIsPtr && toIsPtr then
         emit(s"  $cast = inttoptr $fromType $value to $toType")
       else if fromIsPtr && !toIsPtr then
         emit(s"  $cast = ptrtoint $fromType $value to $toType")
+      else if fromIsFloat && toIsFloat then
+        if fromType == "float" && toType == "double" then
+          emit(s"  $cast = fpext float $value to double")
+        else
+          emit(s"  $cast = fptrunc double $value to float")
       else
         val fromW = fromType.stripPrefix("i").toIntOption.getOrElse(0)
         val toW = toType.stripPrefix("i").toIntOption.getOrElse(0)
@@ -2846,7 +2874,9 @@ class SyslLLVMCodegen(target: String = "host"):
     case SyslType.IntType(w) => s"i$w"
     case SyslType.UIntType(w) => s"i$w"
     case SyslType.BoolType => "i8"
-    case SyslType.DoubleType => "double"
+    case SyslType.FloatType(32) => "float"
+    case SyslType.FloatType(64) => "double"
+    case SyslType.FloatType(w) => throw new RuntimeException(s"unsupported float width: $w")
     case SyslType.VoidType => "void"
     case SyslType.StringType => "%struct.string"
     case SyslType.StructType(name, fields, _) =>
@@ -2895,7 +2925,7 @@ class SyslLLVMCodegen(target: String = "host"):
     case SyslType.IntType(w) => math.min(w / 8, 8).toLong
     case SyslType.UIntType(w) => math.min(w / 8, 8).toLong
     case SyslType.BoolType => 1
-    case SyslType.DoubleType => 8
+    case SyslType.FloatType(w) => math.min(w / 8, 8).toLong
     case SyslType.StringType => 8  // contains pointer
     case SyslType.SliceType(_) => 8  // contains pointer
     case _: SyslType.FuncType => 8  // contains pointer
