@@ -36,7 +36,7 @@ class SyslSVMCodegen:
     var count = 0
     def scanStmts(stmts: List[TStmt]): Unit = stmts.foreach(scanStmt)
     def scanStmt(s: TStmt): Unit = s match
-      case TVarStmt(_, _, _) => count += 1
+      case TVarStmt(_, _, _, _) => count += 1
       case TWhileStmt(_, body) => scanStmts(body)
       case TForStmt(init, _, update, body) => scanStmt(init); scanStmt(update); scanStmts(body)
       case TDoWhileStmt(_, body) => scanStmts(body)
@@ -94,6 +94,20 @@ class SyslSVMCodegen:
   private def constEval(e: TExpr): Option[Long] = e match
     case TIntLit(n, _) => Some(n)
     case TBoolLit(v, _) => Some(if v then 1 else 0)
+    case TVarRef(name, _) => globalConstants.get(name)
+    case TUnary("-", operand, _) => constEval(operand).map(-_)
+    case TUnary("~", operand, _) => constEval(operand).map(~_)
+    case TBinary(left, "+", right, _) => for l <- constEval(left); r <- constEval(right) yield l + r
+    case TBinary(left, "-", right, _) => for l <- constEval(left); r <- constEval(right) yield l - r
+    case TBinary(left, "*", right, _) => for l <- constEval(left); r <- constEval(right) yield l * r
+    case TBinary(left, "/", right, _) => for l <- constEval(left); r <- constEval(right) if r != 0 yield l / r
+    case TBinary(left, "%", right, _) => for l <- constEval(left); r <- constEval(right) if r != 0 yield l % r
+    case TBinary(left, "|", right, _) => for l <- constEval(left); r <- constEval(right) yield l | r
+    case TBinary(left, "&", right, _) => for l <- constEval(left); r <- constEval(right) yield l & r
+    case TBinary(left, "^", right, _) => for l <- constEval(left); r <- constEval(right) yield l ^ r
+    case TBinary(left, "<<", right, _) => for l <- constEval(left); r <- constEval(right) yield l << r.toInt
+    case TBinary(left, ">>", right, _) => for l <- constEval(left); r <- constEval(right) yield l >> r.toInt
+    case TCast(inner, _) => constEval(inner)
     case _ => None
 
   private def isZeroInit(typ: SyslType, init: TExpr): Boolean =
@@ -123,7 +137,7 @@ class SyslSVMCodegen:
     val bssGlobals = new mutable.ListBuffer[TDecl]
 
     for decl <- program.decls do decl match
-      case v @ TVarDecl(_, typ, init, _) =>
+      case v @ TVarDecl(_, typ, init, _, _) =>
         globals(v.name) = typ
         constEval(init).foreach(n => globalConstants(v.name) = n)
         if isZeroInit(typ, init) then bssGlobals += v
@@ -153,7 +167,7 @@ class SyslSVMCodegen:
     if dataGlobals.nonEmpty then
       emit("segment data")
       for decl <- dataGlobals do decl match
-        case TVarDecl(name, typ, init, _) =>
+        case TVarDecl(name, typ, init, _, _) =>
           emit(s"  align 8")
           emit(s"$name:")
           constEval(init) match
@@ -165,7 +179,7 @@ class SyslSVMCodegen:
     if bssGlobals.nonEmpty then
       emit("segment bss")
       for decl <- bssGlobals do decl match
-        case TVarDecl(name, typ, _, _) =>
+        case TVarDecl(name, typ, _, _, _) =>
           emit(s"  align 8")
           emit(s"$name:")
           emit(s"  rl ${typ.sizeOf.max(8) / 8}")
@@ -175,7 +189,7 @@ class SyslSVMCodegen:
     val generated = out.toString
     val definedSymbols = program.decls.flatMap {
       case TFunDecl(name, _, _, _, _, _, _) => Some(name)
-      case TVarDecl(name, _, _, _) => Some(name)
+      case TVarDecl(name, _, _, _, _) => Some(name)
       case _ => None
     }.toSet
     val metaSymbols = meta.symbols.map(_.name).toSet
@@ -249,7 +263,7 @@ class SyslSVMCodegen:
         case other => genStmt(other); emitPushInt(0)
 
   private def genStmt(stmt: TStmt): Unit = stmt match
-    case TVarStmt(name, typ, init) =>
+    case TVarStmt(name, typ, init, _) =>
       val idx = allocLocal(name, typ)
       if needsMemAlloc(typ) then
         // Allocate memory on the memory stack, store address in local

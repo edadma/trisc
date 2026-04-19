@@ -20,8 +20,9 @@ IPC commands:
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
     import oskit.config.{MAX_PROCESSES, MAX_WAITERS, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
-    import oskit.services.{notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid}
+    import oskit.services.{putc, notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid}
     import oskit.loader.load_tof_to_ptbr
+    import oskit.arch.{PROG_USP, PROG_SSP}
 
     val PM_CMD_WAITPID = 1
     val PM_CMD_KILL    = 2
@@ -135,8 +136,10 @@ the IPC reply until the child exits.
             ipc_reply(sender, reply, 5)
             return
 
+        val st = svc_proc_state(pid)
+
         // Already zombie? Reap immediately.
-        if svc_proc_state(pid) == PROC_ZOMBIE
+        if st == PROC_ZOMBIE
             val exit_code = svc_proc_exit_code(pid)
             svc_reap_proc(pid)
             var reply: [5]byte
@@ -146,7 +149,7 @@ the IPC reply until the child exits.
             return
 
         // Already free? Error.
-        if svc_proc_state(pid) == PROC_FREE
+        if st == PROC_FREE
             var reply: [5]byte
             reply[0] = byte(-1)
             pm_msg_write_i32(reply, 1, 0)
@@ -246,8 +249,6 @@ handles from parent to child, and returns the PID.
 
     val SPAWN_PROG_ARGS_ADDR = 0xBF000
     val SPAWN_PROG_ARGS_MAX  = 240
-    val SPAWN_PROG_USP       = 0xD0000
-    val SPAWN_PROG_SSP       = 0xCF000
 
     pm_handle_spawn(sender: int, buf: *byte)
         val path_len = int(buf[1])
@@ -257,6 +258,8 @@ handles from parent to child, and returns the PID.
         // Extract path as string
         val path = string(buf + 4, path_len)
 
+
+
         // Create per-process page table
         val proc_pt = svc_vm_create_pt()
         if proc_pt == 0
@@ -265,6 +268,8 @@ handles from parent to child, and returns the PID.
             ipc_reply(sender, reply, 1)
             return
 
+
+
         // Load binary into child's address space via cross-address-space copy
         val entry = load_tof_to_ptbr(path, proc_pt)
         if entry < 0
@@ -272,6 +277,8 @@ handles from parent to child, and returns the PID.
             reply[0] = -1
             ipc_reply(sender, reply, 1)
             return
+
+
 
         // Write args to child's standard args address via cross-address-space copy
         var args_local: [256]byte
@@ -284,11 +291,15 @@ handles from parent to child, and returns the PID.
         args_local[i] = 0
         svc_vm_copy_to(proc_pt, SPAWN_PROG_ARGS_ADDR, args_local, i + 1)
 
+
+
         // Extract command name for thread name (first arg before space)
         val cmd = string(buf + 4 + path_len, args_len)
 
         // Create the process suspended — it won't run until we resume it
-        val pid = svc_create_proc_susp(entry, SPAWN_PROG_USP, SPAWN_PROG_SSP, cmd, proc_pt)
+        val pid = svc_create_proc_susp(entry, PROG_USP, PROG_SSP, cmd, proc_pt)
+
+
 
         var reply: [5]byte
         if pid < 0

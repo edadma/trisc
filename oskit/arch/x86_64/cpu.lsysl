@@ -24,6 +24,11 @@ Enable interrupts (x86 sti instruction).
 
     extern arch_sti()
 
+Set x86 hardware watchpoint on a 4-byte address (uses DR0).
+CPU raises #DB on any write to the watched address.
+
+    extern set_hw_watchpoint(addr: u64)
+
 Spinlock acquire. Spins using lock cmpxchg until the lock
 is obtained, then disables interrupts. Lock is 0=free, 1=held.
 x86 calling convention: rdi = first arg (lock pointer).
@@ -35,6 +40,11 @@ Spinlock release. Enables interrupts, then stores 0 to lock.
 
     arch_spinlock_release(lock: *i64)
         asm("sti\nmovq $$0, (%rdi)")
+
+Update TSS.RSP0 for the next ring 3 thread. Called by the
+scheduler on context switch. Provided by boot.s.
+
+    extern tss_set_rsp0(rsp0: i64)
 
 Build a fake interrupt frame on the supervisor stack so
 that restore_context in boot.s can pop it and iretq into
@@ -73,3 +83,40 @@ exit trampoline.
             *(*i64(sp)) = i64(0)
             i += 1
         sp
+
+Build a ring 3 stack frame on the per-process kernel stack.
+Used by create_process_suspended for user processes. The frame
+is built directly on the kernel stack (identity-mapped), not
+in the child's address space. Does NOT write thread_exit to
+usp — the caller handles that via vm_copy_to.
+
+On iretq, the CPU detects CS RPL=3 and switches to ring 3,
+loading SS:RSP from the frame (user stack).
+
+    build_user_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64
+        var sp = ssp
+        sp -= 8
+        *(*i64(sp)) = i64(0x23)         // SS  (user data, RPL=3)
+        sp -= 8
+        *(*i64(sp)) = usp - 8           // RSP (user stack)
+        sp -= 8
+        *(*i64(sp)) = i64(0x202)        // RFLAGS (IF=1)
+        sp -= 8
+        *(*i64(sp)) = i64(0x1B)         // CS  (user code, RPL=3)
+        sp -= 8
+        *(*i64(sp)) = entry_point       // RIP
+        var i = 0
+        while i < 15
+            sp -= 8
+            *(*i64(sp)) = i64(0)
+            i += 1
+        sp
+
+Set up the initial context frame for a new process. On x86_64,
+the context frame is built directly on the per-process kernel
+stack (identity-mapped). The CPU switches to this stack via
+TSS.RSP0 on ring 3 to ring 0 transitions. Returns the SSP value.
+
+    arch_setup_process_frame(entry_point: i64, usp: i64, ssp: i64, kstack_top_val: i64, ptbr_val: u64) -> i64
+        build_user_stack_frame(entry_point, usp, kstack_top_val)
+        kstack_top_val - STACK_FRAME_SIZE

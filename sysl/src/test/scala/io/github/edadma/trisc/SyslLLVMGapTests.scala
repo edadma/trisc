@@ -957,9 +957,7 @@ class SyslLLVMGapTests extends SyslLLVMTestHelpers {
 
   // ===== Bug: i64 literal cast truncates to i32 =====
 
-  // TODO: un-ignore when i64 cast truncation is fixed. The fix is straightforward
-  // but changes RS binary layout which triggers an unrelated boot crash.
-  "i64 cast of large literal preserves value" ignore {
+  "i64 cast of large literal preserves value" in {
     // i64(0x20000FFFFFE0007F) was generating sext i32 <truncated> to i64
     val ir = compileLLVM(
       """main() -> int

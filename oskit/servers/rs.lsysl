@@ -32,6 +32,7 @@ starts the next server.
     import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_phys_read, svc_port_transfer, svc_proc_main_tid, svc_set_priv, svc_set_ipc_mask}
     import oskit.ipc.{ipc_recv_notify, port_create, port_lookup}
     import oskit.hal.memset
+    import oskit.arch.{SRV_USP, SRV_SSP}
 
 Server tracking. PIDs and MMIO page grants for each server
 in boot order (0=disk, 1=tfs, 2=tty, 3=pm, 4=vfs, 5=init).
@@ -56,7 +57,7 @@ Common bits (lo): sleep(0), putc(1), yield(2), exit(3), join(4),
   ipc_send_timed(38), ipc_recv_notify(39), waitpid(40),
   getpid(41), thread_pid(42), thread_name_len(43), getuid(61)
 
-    val PRIV_COMMON_LO: i64 = i64(0x20000FFFFFE0007F)
+    val PRIV_COMMON_LO: i64 = i64(0x7F) | (i64(7) << 21) | (i64(0xFFFFFFFF) << 24) | (i64(1) << 61)
 
 Common bits (hi): ipc_last_msg_len(65), grant_create(71), grant_revoke(72)
 
@@ -84,7 +85,7 @@ Per-server privilege assignment. Called after each server is
 created but before it is resumed.
 
     rs_set_server_priv(pid: int, idx: int)
-        var lo: i64 = i64(0x20000FFFFFE0007F)  // PRIV_COMMON_LO
+        var lo: i64 = PRIV_COMMON_LO
         var hi: i64 = i64(0x182)                // PRIV_COMMON_HI
         // IPC mask set to 0xFF during boot (all allowed).
         // Tightened after all servers are up via rs_set_ipc_masks().
@@ -101,60 +102,55 @@ created but before it is resumed.
             hi = hi | i64(1)
         else if idx == 3
             // pm: needs process management syscalls (44-60, 62)
-            lo = lo | i64(0x5FFFF00000000000)
+            lo = lo | (i64(0x5FFFF) << 44)
         else if idx == 4
             // vfs: needs grant_copy(73), grant_map(74), grant_unmap(75)
             hi = hi | i64(0xE00)
         svc_set_priv(pid, lo, hi, ipc)
 
-Tighten IPC send masks after all servers are booted and port
-IDs are known. Each server can only send to the ports it needs.
-Port IDs are stored in rs_server_ports[] (looked up by name).
+Per-server IPC send mask. Single source of truth — consulted
+both at boot (rs_set_ipc_masks) and after a restart
+(rs_set_ipc_mask_for). A mask of 0 means the server is a pure
+receiver. Servers not listed fall through to 0.
 
-    rs_set_ipc_masks()
+    rs_ipc_mask_for_idx(idx: int) -> int
         val disk_port = rs_server_ports[0]
         val tfs_port = rs_server_ports[1]
         val tty_port = rs_server_ports[2]
         val pm_port = rs_server_ports[3]
         val vfs_port = rs_server_ports[4]
-        // disk: no IPC sends
-        svc_set_ipc_mask(rs_server_pids[0], 0)
-        // tfs: sends to disk
-        svc_set_ipc_mask(rs_server_pids[1], 1 << disk_port)
-        // tty: no IPC sends
-        svc_set_ipc_mask(rs_server_pids[2], 0)
-        // pm: sends to vfs
-        svc_set_ipc_mask(rs_server_pids[3], 1 << vfs_port)
-        // vfs: sends to tfs and tty
-        svc_set_ipc_mask(rs_server_pids[4], (1 << tfs_port) | (1 << tty_port))
-        // ds: no IPC sends (pure receiver)
-        svc_set_ipc_mask(rs_server_pids[5], 0)
-        // init: sends to pm, vfs
-        svc_set_ipc_mask(rs_server_pids[6], (1 << pm_port) | (1 << vfs_port))
+        // idx 0 (disk) and 5 (ds) are pure receivers → 0.
+        if idx == 1
+            // tfs: sends to disk
+            return 1 << disk_port
+        else if idx == 2
+            // tty: sends to pm (Ctrl-C → PM_CMD_SIGINT)
+            return 1 << pm_port
+        else if idx == 3
+            // pm: sends to vfs
+            return 1 << vfs_port
+        else if idx == 4
+            // vfs: sends to tfs and tty
+            return (1 << tfs_port) | (1 << tty_port)
+        else if idx == 6
+            // init: sends to pm, vfs
+            return (1 << pm_port) | (1 << vfs_port)
+        return 0
+
+Tighten IPC send masks after all servers are booted and port
+IDs are known.
+
+    rs_set_ipc_masks()
+        var i = 0
+        while i < RS_TOTAL_SERVERS
+            svc_set_ipc_mask(rs_server_pids[i], rs_ipc_mask_for_idx(i))
+            i += 1
 
 Set IPC mask for a single server by index. Used after restart
 to re-tighten the mask (rs_set_server_priv sets 0xFF default).
 
     rs_set_ipc_mask_for(idx: int)
-        val disk_port = rs_server_ports[0]
-        val tfs_port = rs_server_ports[1]
-        val tty_port = rs_server_ports[2]
-        val pm_port = rs_server_ports[3]
-        val vfs_port = rs_server_ports[4]
-        if idx == 0
-            svc_set_ipc_mask(rs_server_pids[0], 0)
-        else if idx == 1
-            svc_set_ipc_mask(rs_server_pids[1], 1 << disk_port)
-        else if idx == 2
-            svc_set_ipc_mask(rs_server_pids[2], 0)
-        else if idx == 3
-            svc_set_ipc_mask(rs_server_pids[3], 1 << vfs_port)
-        else if idx == 4
-            svc_set_ipc_mask(rs_server_pids[4], (1 << tfs_port) | (1 << tty_port))
-        else if idx == 5
-            svc_set_ipc_mask(rs_server_pids[5], 0)
-        else if idx == 6
-            svc_set_ipc_mask(rs_server_pids[6], (1 << pm_port) | (1 << vfs_port))
+        svc_set_ipc_mask(rs_server_pids[idx], rs_ipc_mask_for_idx(idx))
 
 Ramdisk info, read from info page at startup.
 
@@ -238,14 +234,13 @@ from its info page at 0xBF000+24.
 Check if boot info header is valid (magic = "SLIX").
 
     rs_boot_info_valid() -> bool
-        val p = rs_boot_info
-        if p[0] != byte('S')
+        if rs_boot_info[0] != byte('S')
             return false
-        if p[1] != byte('L')
+        if rs_boot_info[1] != byte('L')
             return false
-        if p[2] != byte('I')
+        if rs_boot_info[2] != byte('I')
             return false
-        if p[3] != byte('X')
+        if rs_boot_info[3] != byte('X')
             return false
         true
 
@@ -296,10 +291,9 @@ svc_phys_read), copies PROGBITS segments into the target
 process via vm_copy_to, and zeroes NOBITS (BSS) segments.
 Returns entry point or -1 on error.
 
-    val RS_PROG_USP = 0xD0000
-    val RS_PROG_SSP = 0xCF000
+    // Program USP/SSP imported from oskit.arch (target-specific)
 
-    rs_load_trb_module(buf: *byte, buflen: int, ptbr: int) -> i64
+    rs_load_trb_module(buf: *byte, buflen: int, ptbr: u64) -> i64
         if buflen < 12
             return -1
         if buf[0] != byte('T')
@@ -319,7 +313,7 @@ Returns entry point or -1 on error.
             if pos + 12 > buflen
                 return -1
             val hp = buf + pos
-            val org = int(rs_read_u32_le(hp))
+            val org = u64(rs_read_u32_le(hp))
             val kind = int(rs_read_u32_le(hp + 4))
             val sz = int(rs_read_u32_le(hp + 8))
             pos += 12
@@ -342,7 +336,7 @@ Parses program headers from rs_mod_buf, copies LOAD segments
 into the target process via vm_copy_to. Returns entry point
 or -1 on error.
 
-    rs_load_elf64_module(buf: *byte, buflen: int, ptbr: int) -> i64
+    rs_load_elf64_module(buf: *byte, buflen: int, ptbr: u64) -> i64
         if buflen < 64
             return -1
         // Check ELF magic
@@ -367,7 +361,7 @@ or -1 on error.
             if ptype == 1
                 // PT_LOAD
                 val offset = int(rs_read_i64_le(ph + 8))
-                val vaddr = int(rs_read_i64_le(ph + 16))
+                val vaddr = u64(rs_read_i64_le(ph + 16))
                 val filesz = int(rs_read_i64_le(ph + 32))
                 val memsz = int(rs_read_i64_le(ph + 40))
                 if offset + filesz > buflen
@@ -375,14 +369,14 @@ or -1 on error.
                 if filesz > 0
                     svc_vm_copy_to(ptbr, vaddr, buf + offset, filesz)
                 if memsz > filesz
-                    rs_zero_fill_remote(ptbr, vaddr + filesz, memsz - filesz)
+                    rs_zero_fill_remote(ptbr, vaddr + u64(filesz), memsz - filesz)
             i += 1
         entry
 
 Zero-fill a region in another process's address space.
 Uses a local zero buffer and vm_copy_to in chunks.
 
-    rs_zero_fill_remote(ptbr: int, addr: int, sz: int)
+    rs_zero_fill_remote(ptbr: u64, addr: u64, sz: int)
         val CHUNK = 1024
         var zero_buf: [1024]byte
         memset(zero_buf, 0, CHUNK)
@@ -394,7 +388,7 @@ Uses a local zero buffer and vm_copy_to in chunks.
                 chunk = CHUNK
             svc_vm_copy_to(ptbr, dst, zero_buf, chunk)
             remaining -= chunk
-            dst += chunk
+            dst += u64(chunk)
 
 Start a server from a boot module: create server page table,
 copy module data via svc_phys_read, load TRB/ELF binary,
@@ -409,8 +403,8 @@ Returns the PID on success, 0 on failure.
         // Copy boot module data from physical memory into our buffer
         if sz > 131072
             return 0
-        svc_phys_read(int(addr), rs_mod_buf, sz)
-        val buf = rs_mod_buf
+        svc_phys_read(u64(addr), &rs_mod_buf[0], sz)
+        val buf = &rs_mod_buf[0]
 
         // Create server page table with MMIO grant
         val ptbr = svc_vm_create_server_pt(io_page)
@@ -432,7 +426,7 @@ Returns the PID on success, 0 on failure.
         // Create process suspended — no PTBR switch needed;
         // create_process_suspended uses vm_copy_to for the stack frame
         val sname = string(name, nlen)
-        val pid = svc_create_proc_susp(entry, RS_PROG_USP, RS_PROG_SSP, sname, ptbr)
+        val pid = svc_create_proc_susp(entry, SRV_USP, SRV_SSP, sname, ptbr)
         if pid < 0
             return 0
 

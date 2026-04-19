@@ -8,7 +8,7 @@ enum SyslType:
   case PtrType(pointee: SyslType)
   case ArrayType(elem: SyslType, size: Int)
   case FuncType(params: List[SyslType], returnType: SyslType, escaping: Boolean = false)
-  case StructType(name: String, fields: List[(String, SyslType)])
+  case StructType(name: String, fields: List[(String, SyslType)], volatileFields: Set[Int] = Set.empty)
   case DoubleType
   case StringType
   case SliceType(elem: SyslType)
@@ -55,7 +55,7 @@ enum SyslType:
     case StringType => 16        // ptr(8) + len(8) — Go-style fat pointer
     case SliceType(_) => 24      // ptr(8) + len(4) + cap(4) + backref(8)
     case RefType(_) => 8         // pointer to heap object (refcount header + data)
-    case st @ StructType(_, fields) =>
+    case st @ StructType(_, fields, _) =>
       var offset = 0L
       for (_, typ) <- fields do
         val align = typ.alignOf
@@ -92,7 +92,7 @@ enum SyslType:
     case StringType => 8
     case SliceType(_) => 8
     case RefType(_) => 8
-    case StructType(_, fields) => if fields.isEmpty then 1 else fields.map(_._2.alignOf).max
+    case StructType(_, fields, _) => if fields.isEmpty then 1 else fields.map(_._2.alignOf).max
     case EnumType(_, variants) =>
       val fieldAligns = variants.flatMap(_._2.map(_._2.alignOf))
       if fieldAligns.isEmpty then 4 else fieldAligns.max.max(4)  // at least 4 for tag
@@ -123,7 +123,7 @@ enum SyslType:
     case PtrType(t) => s"*$t"
     case ArrayType(t, n) => s"[$n]$t"
     case FuncType(params, ret, esc) => s"${if esc then "@escaping " else ""}(${params.mkString(", ")}) -> $ret"
-    case StructType(name, _) => name
+    case StructType(name, _, _) => name
     case StringType => "string"
     case SliceType(t) => s"[]$t"
     case RefType(t) => s"&$t"
@@ -142,7 +142,7 @@ enum SyslType:
     case StringType => "string"
     case SliceType(t) => s"slice ${t.toPrefix}"
     case RefType(t) => s"ref ${t.toPrefix}"
-    case StructType(name, fields) => s"struct $name ${fields.size} ${fields.map((n, t) => s"$n ${t.toPrefix}").mkString(" ")}"
+    case StructType(name, fields, _) => s"struct $name ${fields.size} ${fields.map((n, t) => s"$n ${t.toPrefix}").mkString(" ")}"
     case EnumType(name, variants) =>
       val vs = variants.map { (vn, fields) => s"$vn ${fields.size} ${fields.map((n, t) => s"$n ${t.toPrefix}").mkString(" ")}" }.mkString(" ")
       s"enum $name ${variants.size} $vs"
@@ -151,7 +151,7 @@ enum SyslType:
       s"iface $name ${methods.size} $ms"
 
   def isTuple: Boolean = this match
-    case StructType(name, _) => name.startsWith("_Tuple")
+    case StructType(name, _, _) => name.startsWith("_Tuple")
     case _ => false
 
   // For EnumType: alignment of the data portion (excluding tag)
@@ -182,7 +182,7 @@ object SyslType:
     case SliceType(elem) => s"s${mangleType(elem)}"
     case ArrayType(elem, size) => s"a${size}_${mangleType(elem)}"
     case FuncType(params, ret, _) => s"fn${params.length}_${params.map(mangleType).mkString("_")}_${mangleType(ret)}"
-    case StructType(name, _) => name
+    case StructType(name, _, _) => name
     case EnumType(name, _) => name
     case InterfaceType(name, _) => name
 
@@ -223,6 +223,9 @@ object SyslType:
       case "f64" | "double" => DoubleType
       // Legacy prefix names for backward compatibility
       case "int"  => I32
+      case "uint" => U32
+      case "long" => I64
+      case "ulong" => U64
       case "char" => U32
       case "byte" => U8
       case "string" => StringType

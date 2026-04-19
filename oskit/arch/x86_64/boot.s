@@ -66,6 +66,12 @@ stack_top:
 .align 16
 idt:    .skip 4096
 
+# TSS: 64-bit Task State Segment (104 bytes)
+# RSP0 at offset 4 is loaded by CPU on ring 3 → ring 0 transitions.
+.align 16
+.global tss
+tss:    .skip 104
+
 # Multiboot module info (filled by boot code)
 .global mboot_mod_start
 .global mboot_mod_end
@@ -164,6 +170,34 @@ entry64:
     orq  $0x600, %rax         # CR4.OSFXSR + CR4.OSXMMEXCPT
     movq %rax, %cr4
 
+    # --- TSS setup ---
+    # Set RSP0 = stack_top (default kernel stack for ring 3 → ring 0 transitions)
+    movabs $tss, %rdi
+    movabs $stack_top, %rax
+    movq %rax, 4(%rdi)         # TSS.RSP0 at offset 4
+    # Set I/O Map Base = 104 (>= TSS limit → no IOPB → all ring 3 port I/O denied)
+    movw $104, 102(%rdi)
+
+    # Write TSS descriptor into GDT at offset 0x28
+    # TSS base address is in BSS (identity-mapped, < 4GB)
+    movabs $gdt64 + 0x28, %rdi
+    movabs $tss, %rbx
+    movw $0x67, (%rdi)         # limit[15:0] = 103
+    movw %bx, 2(%rdi)          # base[15:0]
+    movq %rbx, %rax
+    shrq $16, %rax
+    movb %al, 4(%rdi)          # base[23:16]
+    movb $0x89, 5(%rdi)        # access: present, DPL=0, 64-bit TSS available
+    movb $0x00, 6(%rdi)        # limit[19:16]=0, flags=0
+    shrq $8, %rax              # rax was (base>>16), now (base>>24)
+    movb %al, 7(%rdi)          # base[31:24]
+    movl $0, 8(%rdi)           # base[63:32] = 0
+    movl $0, 12(%rdi)          # reserved = 0
+
+    # Load task register
+    movw $0x28, %ax
+    ltr %ax
+
     # --- Parse multiboot module info ---
     # ESI (preserved from 32-bit) = multiboot info pointer
     # Multiboot info flags at offset 0: bit 3 = modules present
@@ -249,6 +283,17 @@ arch_sti:
     retq
 
 # ============================================================================
+# tss_set_rsp0 — Update TSS.RSP0 (kernel stack for ring 3 → ring 0)
+# ============================================================================
+# rdi = new RSP0 value (top of per-process kernel stack)
+
+.global tss_set_rsp0
+tss_set_rsp0:
+    movabs $tss, %rax
+    movq %rdi, 4(%rax)
+    retq
+
+# ============================================================================
 # outb / inb — x86 port I/O, System V calling convention
 # ============================================================================
 # outb(port: int, val: byte)  — rdi = port, sil = val
@@ -315,6 +360,22 @@ vm_flush_tlb:
 .global vm_get_ptbr
 vm_get_ptbr:
     movq %cr3, %rax
+    retq
+
+# ============================================================================
+# set_hw_watchpoint — Set DR0 hardware write watchpoint (4 bytes)
+# ============================================================================
+# rdi = address to watch
+# Sets DR0 to the address, DR7 to enable 4-byte write-only breakpoint on DR0.
+# The CPU will raise #DB (vector 1) on any write to the watched address.
+
+.global set_hw_watchpoint
+set_hw_watchpoint:
+    movq %rdi, %dr0
+    # DR7: L0=1, G0=1, LE=1, R/W0=01 (write), LEN0=11 (4 bytes)
+    # = (3 << 18) | (1 << 16) | (1 << 8) | 3 = 0xD0103
+    movq $0xD0103, %rax
+    movq %rax, %dr7
     retq
 
 # ============================================================================
@@ -400,7 +461,7 @@ do_schedule:
     movabs $stack_top, %rsp
     # Mark no current thread (current_thread = -1)
     movabs $current_thread, %rdi
-    movq $-1, (%rdi)
+    movl $-1, (%rdi)
     sti
 .idle_spin:
     hlt
@@ -670,8 +731,34 @@ exc_stub_\vec:
 .endm
 
 # Generate stubs for all exception vectors not already handled
-# Vectors WITHOUT error codes: 1-7, 9, 15, 16, 18-20, 22-31
-exc_no_errcode 1
+# Vector 1 (#DB) — Debug exception (hardware watchpoint)
+# Print faulting RIP and DR6 (debug status), then clear DR7 and continue
+.global exc_stub_1
+exc_stub_1:
+    cli
+    # Save registers we'll use
+    pushq %rax
+    pushq %rdi
+    # Print marker
+    movq $0x57, %rdi          # 'W' for watchpoint
+    call debug_char
+    movq $0x3A, %rdi          # ':'
+    call debug_char
+    # Print faulting RIP (at offset +16 on stack: rdi, rax, RIP)
+    movq 16(%rsp), %rdi       # faulting RIP
+    shrq $16, %rdi
+    call debug_hex4
+    movq 16(%rsp), %rdi
+    call debug_hex4
+    movq $0x0A, %rdi          # newline
+    call debug_char
+    # Clear DR6 (debug status) so the exception doesn't re-fire
+    xorq %rax, %rax
+    movq %rax, %dr6
+    # Restore and return to faulting instruction (it already wrote)
+    popq %rdi
+    popq %rax
+    iretq
 exc_no_errcode 2
 exc_no_errcode 3
 exc_no_errcode 4
@@ -706,7 +793,7 @@ exc_with_errcode 21
 exc_idle:
     movabs $stack_top, %rsp
     movabs $current_thread, %rdi
-    movq $-1, (%rdi)
+    movl $-1, (%rdi)
     sti
 .exc_idle_spin:
     hlt
@@ -767,13 +854,18 @@ get_mboot_mod1_end:
 # ============================================================================
 # GDT
 # ============================================================================
+# Must be in .data (not .rodata) — TSS descriptor is filled at runtime.
 
-.section .rodata
+.section .data
 .align 16
 gdt64:
-    .quad 0x0000000000000000   # null
-    .quad 0x00AF9A000000FFFF   # 64-bit code: present, executable, readable
-    .quad 0x00AF92000000FFFF   # 64-bit data: present, writable
+    .quad 0x0000000000000000   # 0x00: null
+    .quad 0x00AF9A000000FFFF   # 0x08: kernel code (DPL=0)
+    .quad 0x00AF92000000FFFF   # 0x10: kernel data (DPL=0)
+    .quad 0x00AFFA000000FFFF   # 0x18: user code   (DPL=3)
+    .quad 0x00AFF2000000FFFF   # 0x20: user data   (DPL=3)
+    .quad 0                    # 0x28: TSS descriptor lo (filled at runtime)
+    .quad 0                    # 0x30: TSS descriptor hi (filled at runtime)
 gdt64_ptr:
     .word gdt64_ptr - gdt64 - 1
     .long gdt64

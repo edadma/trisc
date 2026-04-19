@@ -1,0 +1,18 @@
+test_ipc — test IPC to VFS
+===========================
+
+    module oskit.bin.test_ipc
+
+    import oskit.ulib.{putc, connect, close, exit}
+
+    main()
+        putc('A')
+        val h = connect("tty:0")
+        putc('B')
+        if h >= 0
+            putc('Y')
+            close(h)
+        else
+            putc('N')
+        putc('\n')
+        exit()

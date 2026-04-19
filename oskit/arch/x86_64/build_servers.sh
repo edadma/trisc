@@ -26,6 +26,7 @@ mkdir -p "$SRV_OUT"
 COMMON_SRCS=(
     oskit/ipc/ipc_client.sysl
     oskit/services/services.lsysl
+    oskit/arch/x86_64/prog_config.sysl
     std/alloc/alloc.lsysl
 )
 
@@ -62,7 +63,7 @@ WRAPPER_EOF
 
     # Compile Sysl → LLVM IR
     cd "$REPO_ROOT"
-    sbt "syslCliJVM/run compile --emit llvm ${SYSL_FILES[*]} -o $OUT/srv_${NAME}.ll" > /tmp/sbt-srv-${NAME}.txt 2>&1
+    sbt "syslCliJVM/run compile --emit llvm --target=x86_64-elf ${SYSL_FILES[*]} -o $OUT/srv_${NAME}.ll" > /tmp/sbt-srv-${NAME}.txt 2>&1
     if [ $? -ne 0 ]; then
         echo "  Sysl compile failed:" >&2
         tail -10 /tmp/sbt-srv-${NAME}.txt >&2
@@ -84,7 +85,7 @@ WRAPPER_EOF
         -fno-pic -fno-pie -c -o "$OUT/prog_stubs.o" "$ARCH_DIR/prog_stubs.c"
 
     # Link → ELF
-    x86_64-elf-ld -T "$ARCH_DIR/prog.ld" \
+    x86_64-elf-ld -T "$ARCH_DIR/server.ld" \
         -o "$SRV_OUT/${NAME}" \
         "$OUT/prog_start.o" "$OUT/prog_stubs.o" "$OUT/srv_${NAME}.o" 2>&1 \
         | grep -v "missing .note.GNU-stack" | grep -v "deprecated" | grep -v "RWX permissions" || true
@@ -118,7 +119,7 @@ DISKEOF
     )
 
     cd "$REPO_ROOT"
-    sbt "syslCliJVM/run compile --emit llvm ${SYSL_FILES[*]} -o $OUT/srv_disk.ll" > /tmp/sbt-srv-disk.txt 2>&1
+    sbt "syslCliJVM/run compile --emit llvm --target=x86_64-elf ${SYSL_FILES[*]} -o $OUT/srv_disk.ll" > /tmp/sbt-srv-disk.txt 2>&1
     if [ $? -ne 0 ]; then
         echo "  Sysl compile failed:" >&2
         tail -10 /tmp/sbt-srv-disk.txt >&2

@@ -436,9 +436,10 @@ class SyslAnalyzer:
             genericStructs(name) = sd
           else
             if genericStructs.contains(name) then throw AnalysisError(s"duplicate struct: '$name'", decl)
-            val resolvedFields = fields.map((n, t) => (n, resolveType(t)))
+            val resolvedFields = fields.map((n, t, _) => (n, resolveType(t)))
+            val volSet = fields.zipWithIndex.collect { case ((_, _, true), i) => i }.toSet
             // Update the placeholder with resolved fields
-            structTypes(name) = SyslType.StructType(name, resolvedFields)
+            structTypes(name) = SyslType.StructType(name, resolvedFields, volSet)
         case fd @ FunDeclAST(name, params, returnType, _, _, typeParams, _, _, isDef) =>
           // Duplicate-parameter-name check.
           val seenParams = mutable.HashSet[String]()
@@ -566,7 +567,7 @@ class SyslAnalyzer:
         case ImplDeclAST(_, _, _, _) =>
           // Deferred to registerImpls after all traits are known
           ()
-        case VarDeclAST(name, _, _, _, _, _) =>
+        case VarDeclAST(name, _, _, _, _, _, _) =>
           if globalScope.contains(name) then
             throw AnalysisError(s"duplicate global: '$name'", decl)
 
@@ -654,7 +655,7 @@ class SyslAnalyzer:
 
       case StructDeclAST(name, _, _, _) =>
         val st = structTypes(name)
-        TStructDecl(name, st.fields)
+        TStructDecl(name, st.fields, st.volatileFields)
 
       case EnumDeclAST(name, _, _) =>
         val members = enumTypes(name).toList.sortBy(_._2)
@@ -720,7 +721,7 @@ class SyslAnalyzer:
         validateTestAttr(fdAst, funInfo)
         TFunDecl(funInfo.name, tParams, retType, tBody, isPrivate, attrs, funInfo.isDef)
 
-      case VarDeclAST(name, typOpt, init, isPrivate, isMutable, _) =>
+      case VarDeclAST(name, typOpt, init, isPrivate, isMutable, _, isVolatile) =>
         scopeStack = new mutable.ArrayBuffer
         pushScope()
         val tInit0 = analyzeExpr(init)
@@ -740,7 +741,7 @@ class SyslAnalyzer:
         val mangledVarName = if shouldMangle(name) then mangleName(name) else name
         globalScope(name) = SymInfo(mangledVarName, declType, isMutable)
         scopeStack = null
-        TVarDecl(mangledVarName, declType, tInit, isPrivate)
+        TVarDecl(mangledVarName, declType, tInit, isPrivate, isVolatile)
 
   private def warnDeprecated(name: String): Unit =
     if deprecations.contains(name) && !warnedDeprecations.contains(name) then
@@ -781,15 +782,15 @@ class SyslAnalyzer:
     case NamedTypeAST(name, _) if typeEnv.contains(name) => typeEnv(name)
     case NamedTypeAST(name, _) => name match
       case "int" | "i32" => I32
+      case "uint" | "u32" => U32
+      case "long" | "i64" => I64
+      case "ulong" | "u64" => U64
       case "char" => U32
-      case "i64" => I64
       case "double" | "f64" => DoubleType
       case "byte" | "u8"  => U8
       case "i8"  => I8
       case "i16"  => I16
       case "u16"  => U16
-      case "u32"  => U32
-      case "u64"  => U64
       case "bool" => BoolType
       case "void" => VoidType
       case "string" => StringType
@@ -844,7 +845,7 @@ class SyslAnalyzer:
       // Name-based equality for nominal types — handles stale placeholders from
       // forward declarations where two StructType/EnumType with the same name
       // have different field/variant lists.
-      case (StructType(n1, _), StructType(n2, _)) if n1 == n2 => true
+      case (StructType(n1, _, _), StructType(n2, _, _)) if n1 == n2 => true
       case (EnumType(n1, _), EnumType(n2, _)) if n1 == n2 => true
       case (IntType(a), IntType(b)) if a <= b => true    // signed widening
       case (UIntType(a), UIntType(b)) if a <= b => true  // unsigned widening
@@ -999,7 +1000,7 @@ class SyslAnalyzer:
     case ArrayType(e, n) => s"arr${n}${typeToMangled(e)}"
     case SliceType(e)    => "slice" + typeToMangled(e)
     case FuncType(ps, r, _) => "fn" + ps.map(typeToMangled).mkString("") + "Ret" + typeToMangled(r)
-    case StructType(n, _)    => n
+    case StructType(n, _, _)    => n
     case EnumType(n, _)      => n
     case InterfaceType(n, _) => n
 
@@ -1035,7 +1036,7 @@ class SyslAnalyzer:
           unifyTypes(ret, argRet, typeParams, env)
         case _ => ()
       case TupleTypeAST(elems) => arg match
-        case StructType(_, fields) if elems.length == fields.length =>
+        case StructType(_, fields, _) if elems.length == fields.length =>
           for (e, (_, ft)) <- elems.zip(fields) do unifyTypes(e, ft, typeParams, env)
         case _ => ()
       case NamedTypeAST(name, tArgs) if tArgs.nonEmpty =>
@@ -1051,7 +1052,7 @@ class SyslAnalyzer:
             val expanded = substituteTypeAST(target, subst)
             unifyTypes(expanded, arg, typeParams, env)
         else arg match
-          case SyslType.StructType(argName, _) =>
+          case SyslType.StructType(argName, _, _) =>
             structToTemplate.get(argName) match
               case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
                 for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
@@ -1117,7 +1118,7 @@ class SyslAnalyzer:
         val savedEnv = typeEnv
         typeEnv = typeEnv ++ template.typeParams.zip(typeArgs).toMap
         try
-          val resolvedFields = template.fields.map((n, t) => (n, resolveType(t)))
+          val resolvedFields = template.fields.map((n, t, _) => (n, resolveType(t)))
           val st: SyslType.StructType = SyslType.StructType(mangled, resolvedFields)
           genericStructInstantiations(cacheKey) = st
           structTypes(mangled) = st
@@ -1388,7 +1389,7 @@ class SyslAnalyzer:
 
   private def analyzeStmt(stmt: StmtAST): TStmt =
     stmt match
-      case VarStmtAST(name, typOpt, init, isMutable) =>
+      case VarStmtAST(name, typOpt, init, isMutable, isVolatile) =>
         val declared = typOpt.map(resolveType)
         val savedExp = currentExpected
         currentExpected = declared.orElse(currentExpected)
@@ -1418,7 +1419,7 @@ class SyslAnalyzer:
         else
           if scopeStack != null then
             currentScope(name) = SymInfo(name, declType, isMutable)
-          TVarStmt(name, declType, tInitFinal)
+          TVarStmt(name, declType, tInitFinal, isVolatile)
 
       case DestructureStmtAST(names, init, isMutable) =>
         val tInit = analyzeExpr(init)
@@ -1623,7 +1624,12 @@ class SyslAnalyzer:
 
   private def analyzeExpr(expr: ExpressionAST): TExpr =
     expr match
-      case IntLitAST(n) => TIntLit(n, I32)
+      case IntLitAST(n) =>
+        // Promote to i64 if value doesn't fit in any 32-bit type.
+        // Values up to 0xFFFFFFFF fit in u32, and negative values down to
+        // -0x80000000 fit in i32, so only values outside that range need i64.
+        if n > 0xFFFFFFFFL || n < -0x80000000L then TIntLit(n, I64)
+        else TIntLit(n, I32)
       case TypedIntLitAST(n, typeName) => TIntLit(n, resolveType(NamedTypeAST(typeName)))
       case FloatLitAST(d) => TFloatLit(d, DoubleType)
       case CharLitAST(c) => TIntLit(c.toLong, U32)
@@ -1763,7 +1769,7 @@ class SyslAnalyzer:
           var L = startLocals
           for stmt <- stmts do L = scanStmtInSeq(stmt, L)
         def scanStmtInSeq(stmt: TStmt, locals: Set[String]): Set[String] = stmt match
-          case TVarStmt(name, _, init) =>
+          case TVarStmt(name, _, init, _) =>
             scanCaptures(init, locals)
             if name == "_" then locals else locals + name
           case TDestructureStmt(names, _, init) =>
@@ -2350,7 +2356,7 @@ class SyslAnalyzer:
         if functions.contains(funcName) then
           // It's a real method — build self argument (need address for value structs)
           val selfArg = tObj.typ match
-            case st @ StructType(_, _) =>
+            case st @ StructType(_, _, _) =>
               tObj match
                 case TVarRef(n, _) => TAddrOf(n, PtrType(st))
                 case TFieldAccess(innerObj, idx, _) => TAddrOfField(innerObj, idx, PtrType(st))
@@ -2368,7 +2374,7 @@ class SyslAnalyzer:
           val (templateName, _) = structToTemplate(structName)
           val templateFuncName = s"${templateName}_$method"
           val selfArg = tObj.typ match
-            case st @ StructType(_, _) =>
+            case st @ StructType(_, _, _) =>
               tObj match
                 case TVarRef(n, _) => TAddrOf(n, PtrType(st))
                 case TFieldAccess(innerObj, idx, _) => TAddrOfField(innerObj, idx, PtrType(st))
@@ -2472,7 +2478,7 @@ class SyslAnalyzer:
           if tArgs.length != template.fields.length then
             throw AnalysisError(s"generic struct '$name' has ${template.fields.length} field(s), got ${tArgs.length} argument(s)")
           val env = mutable.Map.empty[String, SyslType]
-          for ((_, ftype), arg) <- template.fields.zip(tArgs) do
+          for ((_, ftype, _), arg) <- template.fields.zip(tArgs) do
             unifyTypes(ftype, arg.typ, template.typeParams.toSet, env)
           for tp <- template.typeParams if !env.contains(tp) do
             throw AnalysisError(s"cannot infer type parameter '$tp' for generic struct '$name'")

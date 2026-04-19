@@ -1,0 +1,233 @@
+OSKit DS Client Library
+=======================
+
+User-facing data-store API. Talks to DS (port "ds"), which
+stores key-value pairs and delivers async notifications to
+prefix subscribers.
+
+The port is looked up lazily and cached — first call pays the
+lookup, later calls are a single IPC send.
+
+Wire protocol constants duplicate the ones in
+`oskit/servers/ds.lsysl`; both sides own a copy.
+
+    module oskit.ds
+
+    import oskit.ulib.{port_lookup, ipc_send}
+
+DS protocol commands (must match oskit/servers/ds.lsysl).
+
+    val DS_CMD_PUBLISH   = 1
+    val DS_CMD_RETRIEVE  = 2
+    val DS_CMD_DELETE    = 3
+    val DS_CMD_SUBSCRIBE = 4
+
+    val DS_TYPE_INT = 1
+    val DS_TYPE_STR = 2
+
+    val DS_MAX_KEY_LEN = 32
+    val DS_MAX_VAL_LEN = 64
+
+Cached port id (-1 = not yet looked up / last lookup failed).
+
+    var ds_port = -1
+
+    ds_get_port() -> int
+        if ds_port < 0
+            ds_port = port_lookup("ds")
+        ds_port
+
+Big-endian 32-bit helpers for int values on the wire.
+
+    ds_msg_read_i32(buf: *byte, off: int) -> int
+        ((buf[off] & 0xFF) << 24) | ((buf[off + 1] & 0xFF) << 16) | ((buf[off + 2] & 0xFF) << 8) | (buf[off + 3] & 0xFF)
+
+    ds_msg_write_i32(buf: *byte, off: int, v: int)
+        buf[off]     = byte((v >> 24) & 0xFF)
+        buf[off + 1] = byte((v >> 16) & 0xFF)
+        buf[off + 2] = byte((v >> 8) & 0xFF)
+        buf[off + 3] = byte(v & 0xFF)
+
+Publish an integer value.
+Returns 0 on success, -1 on error.
+
+    ds_publish_int(key: string, value: int) -> int
+        val port = ds_get_port()
+        if port < 0
+            return -1
+        val klen = len(key)
+        if klen <= 0
+            return -1
+        if klen > DS_MAX_KEY_LEN
+            return -1
+        var msg: [80]byte
+        msg[0] = byte(DS_CMD_PUBLISH)
+        msg[1] = byte(DS_TYPE_INT)
+        msg[2] = byte(klen)
+        val kp: *byte = *byte(key)
+        var i = 0
+        while i < klen
+            msg[3 + i] = kp[i]
+            i += 1
+        ds_msg_write_i32(msg, 3 + klen, value)
+        var reply: [1]byte
+        ipc_send(port, msg, 3 + klen + 4, reply, 1)
+        if reply[0] == 0
+            return 0
+        -1
+
+Publish a string value.
+Returns 0 on success, -1 on error.
+
+    ds_publish_str(key: string, value: string) -> int
+        val port = ds_get_port()
+        if port < 0
+            return -1
+        val klen = len(key)
+        val vlen = len(value)
+        if klen <= 0
+            return -1
+        if klen > DS_MAX_KEY_LEN
+            return -1
+        if vlen > DS_MAX_VAL_LEN
+            return -1
+        var msg: [128]byte
+        msg[0] = byte(DS_CMD_PUBLISH)
+        msg[1] = byte(DS_TYPE_STR)
+        msg[2] = byte(klen)
+        val kp: *byte = *byte(key)
+        var i = 0
+        while i < klen
+            msg[3 + i] = kp[i]
+            i += 1
+        msg[3 + klen] = byte(vlen)
+        val vp: *byte = *byte(value)
+        var j = 0
+        while j < vlen
+            msg[3 + klen + 1 + j] = vp[j]
+            j += 1
+        var reply: [1]byte
+        ipc_send(port, msg, 3 + klen + 1 + vlen, reply, 1)
+        if reply[0] == 0
+            return 0
+        -1
+
+Retrieve an integer value.
+Returns 0 on success (value written to *out), -1 on error.
+
+    ds_retrieve_int(key: string, out: *int) -> int
+        val port = ds_get_port()
+        if port < 0
+            return -1
+        val klen = len(key)
+        if klen <= 0
+            return -1
+        if klen > DS_MAX_KEY_LEN
+            return -1
+        var msg: [48]byte
+        msg[0] = byte(DS_CMD_RETRIEVE)
+        msg[1] = byte(klen)
+        val kp: *byte = *byte(key)
+        var i = 0
+        while i < klen
+            msg[2 + i] = kp[i]
+            i += 1
+        var reply: [68]byte
+        ipc_send(port, msg, 2 + klen, reply, 68)
+        if reply[0] != 0
+            return -1
+        if int(reply[1]) != DS_TYPE_INT
+            return -1
+        out[0] = ds_msg_read_i32(reply, 3)
+        0
+
+Retrieve a string value. Writes up to `buf_len` bytes into
+`buf`, returns the actual stored length (may exceed buf_len
+if truncated). Returns -1 on error.
+
+    ds_retrieve_str(key: string, buf: *byte, buf_len: int) -> int
+        val port = ds_get_port()
+        if port < 0
+            return -1
+        val klen = len(key)
+        if klen <= 0
+            return -1
+        if klen > DS_MAX_KEY_LEN
+            return -1
+        var msg: [48]byte
+        msg[0] = byte(DS_CMD_RETRIEVE)
+        msg[1] = byte(klen)
+        val kp: *byte = *byte(key)
+        var i = 0
+        while i < klen
+            msg[2 + i] = kp[i]
+            i += 1
+        var reply: [68]byte
+        ipc_send(port, msg, 2 + klen, reply, 68)
+        if reply[0] != 0
+            return -1
+        if int(reply[1]) != DS_TYPE_STR
+            return -1
+        val vlen = int(reply[2]) & 0xFF
+        var copy_len = vlen
+        if copy_len > buf_len
+            copy_len = buf_len
+        var j = 0
+        while j < copy_len
+            buf[j] = reply[3 + j]
+            j += 1
+        vlen
+
+Delete an entry by key. Returns 0 on success, -1 on error.
+
+    ds_delete(key: string) -> int
+        val port = ds_get_port()
+        if port < 0
+            return -1
+        val klen = len(key)
+        if klen <= 0
+            return -1
+        if klen > DS_MAX_KEY_LEN
+            return -1
+        var msg: [48]byte
+        msg[0] = byte(DS_CMD_DELETE)
+        msg[1] = byte(klen)
+        val kp: *byte = *byte(key)
+        var i = 0
+        while i < klen
+            msg[2 + i] = kp[i]
+            i += 1
+        var reply: [1]byte
+        ipc_send(port, msg, 2 + klen, reply, 1)
+        if reply[0] == 0
+            return 0
+        -1
+
+Subscribe to a key prefix. The calling thread will receive an
+async notify (notify kind 1) whenever a matching key is
+published or deleted.
+
+Returns 0 on success, -1 on error.
+
+    ds_subscribe(prefix: string) -> int
+        val port = ds_get_port()
+        if port < 0
+            return -1
+        val plen = len(prefix)
+        if plen <= 0
+            return -1
+        if plen > DS_MAX_KEY_LEN
+            return -1
+        var msg: [48]byte
+        msg[0] = byte(DS_CMD_SUBSCRIBE)
+        msg[1] = byte(plen)
+        val pp: *byte = *byte(prefix)
+        var i = 0
+        while i < plen
+            msg[2 + i] = pp[i]
+            i += 1
+        var reply: [1]byte
+        ipc_send(port, msg, 2 + plen, reply, 1)
+        if reply[0] == 0
+            return 0
+        -1

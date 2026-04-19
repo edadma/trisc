@@ -50,7 +50,7 @@ object SyslPrettyPrinter:
 
     case StructDeclAST(name, fields, tps, _) =>
       val tpStr = if tps.nonEmpty then s"[${tps.mkString(", ")}]" else ""
-      val body = fields.map((n, t) => s"${IND}$n: ${typeToSource(t)}").mkString("\n")
+      val body = fields.map((n, t, _) => s"${IND}$n: ${typeToSource(t)}").mkString("\n")
       s"struct $name$tpStr\n$body"
 
     case FunDeclAST(name, params, returnType, body, isPrivate, typeParams, typeBounds, _, isDef) =>
@@ -104,7 +104,7 @@ object SyslPrettyPrinter:
   // --- Statements ---
 
   private def stmtToSource(s: StmtAST, depth: Int): String = s match
-    case VarStmtAST(name, typ, init, isMutable) =>
+    case VarStmtAST(name, typ, init, isMutable, _) =>
       val kw = if isMutable then "var" else "val"
       val typStr = typ.map(t => s": ${typeToSource(t)}").getOrElse("")
       init match

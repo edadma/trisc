@@ -286,7 +286,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case -1 => f.name.dropRight(7)
               case i  => f.name.substring(i + 2).dropRight(7)
             deinitMap(structName) = f.name
-        case TVarDecl(name, _, init, _) =>
+        case TVarDecl(name, _, init, _, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
     functions.get("main") match
@@ -313,7 +313,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case -1 => f.name.dropRight(7)
               case i  => f.name.substring(i + 2).dropRight(7)
             deinitMap(structName) = f.name
-        case TVarDecl(name, _, init, _) =>
+        case TVarDecl(name, _, init, _, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
   /** Invoke a zero-arg function by name. Throws RuntimeError on panic. */
@@ -455,7 +455,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
   private def exec(stmt: TStmt, env: Env): Unit =
     stmt match
-      case TVarStmt(name, _, init) =>
+      case TVarStmt(name, _, init, _) =>
         val v = evalAny(init, env)
         // Increment refcount for copies only — TNew/TNewArray already set refcount=1
         init match
@@ -1074,11 +1074,11 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         cell.value = IntVal(old - 1)
         IntVal(old)
 
-      case TStructLit(SyslType.StructType(_, fields)) =>
+      case TStructLit(SyslType.StructType(_, fields, _)) =>
         val cells = fields.map((_, typ) => new Cell(zeroValueForType(typ, env))).toArray
         ArrVal(cells, 0)
 
-      case TNew(SyslType.StructType(name, fields), args) =>
+      case TNew(SyslType.StructType(name, fields, _), args) =>
         val cells = fields.zip(args).map { case ((_, _), arg) =>
           new Cell(evalAny(arg, env))
         }.toArray
@@ -1093,7 +1093,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val cells = Array.fill(n)(new Cell(zeroValueForType(elemType, env)))
         RefSliceVal(cells, n, new java.util.concurrent.atomic.AtomicInteger(1))
 
-      case TStructConstruct(SyslType.StructType(_, fields), args) =>
+      case TStructConstruct(SyslType.StructType(_, fields, _), args) =>
         val cells = fields.zip(args).map { case ((_, typ), arg) =>
           val value = evalAny(arg, env)
           new Cell(value)
@@ -1125,9 +1125,9 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val dataVal = evalAny(expr, env)
         // Build method map: interface method name → actual registered function name
         val structName = expr.typ match
-          case SyslType.StructType(name, _) => name
-          case SyslType.PtrType(SyslType.StructType(name, _)) => name
-          case SyslType.RefType(SyslType.StructType(name, _)) => name
+          case SyslType.StructType(name, _, _) => name
+          case SyslType.PtrType(SyslType.StructType(name, _, _)) => name
+          case SyslType.RefType(SyslType.StructType(name, _, _)) => name
           case other => throw RuntimeError(s"cannot box $other into interface")
         val methodMap = iface.methods.map { (mname, _, _) =>
           val shortKey = s"${structName}_$mname"

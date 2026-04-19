@@ -14,6 +14,7 @@
 ; ============================================================================
 
 STDOUT = 0x800000
+KERNEL_PTBR = 0x7FE000
 
 ; ============================================================================
 ; Exception Vector Table
@@ -116,10 +117,14 @@ context_switch
   pshr r6               ; save r1-r6
   gusp r1               ; get user stack pointer
   pshd r1               ; save USP
+  mov  r1, r7           ; r1 = process SSP (context saved here)
+  bra  do_schedule
 
+; do_schedule — enter scheduler with r1 = current thread's saved SSP
+; Switches to kernel boot stack before calling schedule().
 do_schedule
-  mov  r1, r7           ; r1 = current SSP (with saved context)
-  movi r7, 0x7FFFF8     ; switch to kernel stack (identity-mapped, safe across PTBR switch)
+  movi r7, 0x7FFFF8     ; switch to kernel boot stack (identity-mapped)
+
   movi r4, schedule
   jalr r6, r4           ; r1 = next thread's SSP (or 0 = idle)
 
@@ -135,6 +140,7 @@ idle_spin
   wfi                          ; halt until timer fires
   bra idle_spin                ; timer ISR will context_switch to a woken thread
 
+; restore_thread — schedule() already switched PTBR to next thread's ptbr
 restore_thread
   mov  r7, r1           ; switch to next thread's stack
   popd r1               ; restore USP
@@ -205,7 +211,11 @@ irq_handler
 
 .irq_done
   ; If timer was among the handled IRQs, do context switch
-  bne  r5, r0, do_schedule
+  beq  r5, r0, .irq_restore
+
+  ; Timer fired — context switch via do_schedule
+  mov  r1, r7            ; r1 = process SSP (context already saved)
+  bra  do_schedule
 
   ; No timer — just restore and return
 .irq_restore
@@ -222,6 +232,10 @@ irq_handler
 ;
 ; Entry: r1 = syscall number, r2 = arg1
 ; Hardware has pushed PC and PSR onto supervisor stack.
+;
+; Fast-path syscalls return directly via rte (no context switch).
+; Slow-path syscalls save full context, switch to kernel boot stack
+; and kernel PTBR, then dispatch through the syscall table.
 ;
 ; ============================================================================
 
@@ -284,7 +298,7 @@ trap_handler
   ldi r3, 43
   beq r1, r3, .sys_thread_name_len ; 43 = thread_name_len(id)
 
-  ; Slow path: save full context for syscalls that context-switch
+  ; Slow path: save full context on process SSP
   pshr r6                       ; save user's r1-r6
   gusp r1
   pshd r1                       ; save USP
@@ -296,7 +310,7 @@ trap_handler
   addi r3, r7, 40
   ldd r2, r3, r0               ; r2 = saved r2 (arg1)
   addi r3, r7, 32
-  ldd r3, r3, r0               ; r3 = saved r3 (arg2, for multi-arg syscalls)
+  ldd r3, r3, r0               ; r3 = saved r3 (arg2)
 
   ; Table dispatch: handler = syscall_table[r1]
   ; Bounds check
@@ -334,19 +348,22 @@ trap_handler
   popd r4                      ; restore handler pointer
   beq r1, r0, .denied_syscall
 
-  ; Call handler: r1 = arg1 (from saved r2), stack = arg2 (from saved r3)
-  ; r1-only ABI: first arg in r1, second arg on stack
+  ; Call handler: r1 = arg1, stack = arg2 (r1-only ABI)
+  ; Handler runs under PROCESS PTBR so it can access caller's args.
+  ; syscall_return uses vm_v2p to write return value safely.
   pshd r3                      ; push second arg on stack
   mov r1, r2                   ; r1 = first arg
   jalr r6, r4                  ; call handler
   addi r7, r7, 8               ; clean up stack arg
+  mov  r1, r7                  ; r1 = process SSP
   bra do_schedule
 
 .denied_syscall
   ; Permission denied — return -1 to caller via saved r1
   addi r5, r7, 48              ; offset to saved r1 on stack
-  ldi r1, -1
+  addi r1, r0, -1              ; r1 = -1 (addi sign-extends; ldi does not)
   std r1, r5, r0               ; write -1 to saved r1
+  mov  r1, r7                  ; r1 = process SSP
   bra do_schedule
 
 .bad_syscall
@@ -452,6 +469,7 @@ extern sleep_until_current
   ldd r1, r3, r0               ; r1 = saved r2 (target tick)
   movi r4, sleep_until_current
   jalr r6, r4
+  mov  r1, r7                  ; r1 = process SSP
   bra do_schedule
 
 ; ctx_switches(id): return context switch count for thread r2
@@ -532,6 +550,7 @@ extern kernel_panic
   pshd r1
   movi r4, kernel_panic
   jalr r6, r4
+  mov  r1, r7                  ; r1 = process SSP
   bra do_schedule
 
 ; check_stack(addr): check canary at address r2
@@ -563,6 +582,7 @@ extern suspend_thread
   ldd r1, r3, r0
   movi r4, suspend_thread
   jalr r6, r4
+  mov  r1, r7                  ; r1 = process SSP
   bra do_schedule
 
 ; resume(id): resume suspended thread r2
@@ -656,6 +676,7 @@ extern notify_wait_current
   pshd r1
   movi r4, notify_wait_current
   jalr r6, r4
+  mov  r1, r7                  ; r1 = process SSP
   bra do_schedule
 
 ; notify_read: read and clear own notification — fast path
@@ -700,6 +721,7 @@ extern event_wait_current
   movi r4, event_wait_current
   jalr r6, r4
   addi r7, r7, 8             ; clean up stack arg
+  mov  r1, r7                  ; r1 = process SSP
   bra do_schedule
 
 ; event_set(packed): set bits on target — fast path
@@ -854,6 +876,7 @@ trap1_fault
   pshd r1                       ; save USP
   movi r4, terminate_current
   jalr r6, r4
+  mov  r1, r7                  ; r1 = process SSP
   bra do_schedule
 
 

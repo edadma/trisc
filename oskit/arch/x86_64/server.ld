@@ -1,12 +1,13 @@
-/* Linker script for standalone x86_64 SLIX programs.
- * Load address 0xE0000 — gives 80KB stack (0xCC000..0xDFFFF).
- * Heap from end of BSS to 0x100000. */
+/* Linker script for standalone x86_64 SLIX servers.
+ * Load address 0xD4000 — servers have large BSS (RS ~128KB)
+ * and need ~176KB to 0x100000.
+ * Stack: 32KB (0xCC000..0xD3FFF). */
 
 ENTRY(_start)
 
 SECTIONS
 {
-    . = 0xE0000;
+    . = 0xD4000;
 
     .text : { *(.text) }
     .rodata : { *(.rodata*) }

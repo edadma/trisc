@@ -94,8 +94,9 @@ Statistics fields track per-thread performance:
         base_priority: int
         uid: int
         blocked_on: i64
-        ptbr: int
+        ptbr: u64
         pid: int
+        kstack_top: i64
 
 Run queues: one FIFO queue per priority level. Each queue
 has a head and tail index. Enqueue appends to tail, dequeue
@@ -125,8 +126,8 @@ loaded by nsh each get their own process entry.
     val PROC_ZOMBIE  = 2
 
     struct Process
-        state: int
-        ptbr: int
+        volatile state: int
+        ptbr: u64
         parent_tid: int
         exit_code: int
         main_tid: int
@@ -144,13 +145,13 @@ mediates copies via grant_copy, validating access rights.
 
     struct Grant
         granter_pid: int
-        vaddr: int
+        vaddr: u64
         len: int
         flags: int
         in_use: int
-        mapped_vaddr: int
+        mapped_vaddr: u64
         mapped_pages: int
-        mapper_ptbr: int
+        mapper_ptbr: u64
 
     val GRANT_READ  = 1
     val GRANT_WRITE = 2
@@ -263,11 +264,17 @@ TRISC r1 = 48, x86_64 RAX = 112.
         var p: *i64 = *i64(syscall_ssp + SYSCALL_RETURN_OFFSET)
         *p = value
 
+Called by boot.asm when a syscall is denied by privilege check.
+Written as a helper so the assembly doesn't need to call vm_v2p.
+
+    syscall_return_denied()
+        syscall_return(-1)
+
 Write a return value into a specific thread's saved context.
 Used by the scheduler for generic timeout wakeups.
 
     syscall_return_for(tid: int, value: i64)
-        val vaddr = int(threads[tid].ssp + SYSCALL_RETURN_OFFSET)
+        val vaddr = u64(threads[tid].ssp + i64(SYSCALL_RETURN_OFFSET))
         val paddr = vm_v2p(threads[tid].ptbr, vaddr)
         var p: *i64 = *i64(paddr)
         *p = value
@@ -355,7 +362,7 @@ Returns grant_id or -1 if table full.
 
     sys_grant_create_handler(arg: int)
         var args: *i64 = *i64(i64(arg))
-        val vaddr = int(args[0])
+        val vaddr = u64(args[0])
         val len = int(args[1])
         val flags = int(args[2])
         val pid = threads[current_thread].pid
@@ -441,7 +448,7 @@ Returns bytes copied or -1 on error.
                 kernel_continue_current()
                 return
         val granter_ptbr = processes[grant_table[gid].granter_pid].ptbr
-        val remote_addr = grant_table[gid].vaddr + offset
+        val remote_addr = grant_table[gid].vaddr + u64(offset)
         if direction == 0
             vm_copy_from(granter_ptbr, remote_addr, local_buf, len)
         else
@@ -479,9 +486,9 @@ Returns mapped virtual address or -1 on error.
             kernel_continue_current()
             return
         val granter_ptbr = processes[grant_table[gid].granter_pid].ptbr
-        val granter_vaddr = grant_table[gid].vaddr + offset
-        val page_offset = granter_vaddr & 0xFFF
-        val page_count = (page_offset + len + 4095) / 4096
+        val granter_vaddr = grant_table[gid].vaddr + u64(offset)
+        val page_offset = granter_vaddr & u64(0xFFF)
+        val page_count = int((page_offset + u64(len) + u64(4095)) / u64(4096))
         val caller_ptbr = threads[current_thread].ptbr
         val base_vaddr = vm_grant_find_free(caller_ptbr, page_count)
         if base_vaddr == 0
@@ -491,7 +498,7 @@ Returns mapped virtual address or -1 on error.
         val writable = grant_table[gid].flags & GRANT_WRITE
         var i = 0
         while i < page_count
-            val src_va = (granter_vaddr & ~0xFFF) + i * 4096
+            val src_va = (granter_vaddr & ~u64(0xFFF)) + u64(i) * u64(4096)
             val paddr = vm_v2p(granter_ptbr, src_va)
             if paddr == 0
                 // Granter page not present — unmap what we did so far
@@ -499,13 +506,13 @@ Returns mapped virtual address or -1 on error.
                 syscall_return(-1)
                 kernel_continue_current()
                 return
-            vm_grant_map_page(caller_ptbr, base_vaddr + i * 4096, paddr & ~0xFFF, writable)
+            vm_grant_map_page(caller_ptbr, base_vaddr + u64(i) * u64(4096), paddr & ~u64(0xFFF), writable)
             i += 1
         vm_flush_tlb()
         grant_table[gid].mapped_vaddr = base_vaddr
         grant_table[gid].mapped_pages = page_count
         grant_table[gid].mapper_ptbr = caller_ptbr
-        syscall_return(base_vaddr + page_offset)
+        syscall_return(i64(base_vaddr + page_offset))
         kernel_continue_current()
 
 SYS_GRANT_UNMAP (75): Unmap a previously mapped grant.
@@ -558,12 +565,12 @@ Revoke all grants for a process. Called on process reap.
 
 Get a thread's page table base register.
 
-    kernel_get_thread_ptbr(tid: int) -> int
+    kernel_get_thread_ptbr(tid: int) -> u64
         threads[tid].ptbr
 
 Set a thread's page table base register.
 
-    kernel_set_thread_ptbr(tid: int, ptbr: int)
+    kernel_set_thread_ptbr(tid: int, ptbr: u64)
         threads[tid].ptbr = ptbr
 
     kernel_get_thread_pid(tid: int) -> int
@@ -589,7 +596,7 @@ No args. Returns L1 base address.
 
     sys_vm_create_pt_handler(arg: int)
         val result = vm_create_process_pt()
-        syscall_return(result)
+        syscall_return(i64(result))
         kernel_continue_current()
 
 SYS_CREATE_PROC_SUSP (45): Create a process suspended.
@@ -616,7 +623,7 @@ Arg = pointer to packed args: [entry(i64), usp(i64), ssp(i64), name(*byte), ptbr
             ni += 1
         syscall_name_tmp[ni] = 0
         val name = string(syscall_name_tmp, name_len)
-        val ptbr = int(args[5])
+        val ptbr = u64(args[5])
         val result = create_process_suspended(entry, usp, ssp, name, ptbr)
         syscall_return(result)
         kernel_continue_current()
@@ -659,7 +666,7 @@ Arg = pointer to packed args: [tid(i64), ptbr(i64)]
     sys_set_thread_ptbr_handler(arg: int)
         var args: *i64 = *i64(i64(arg))
         val tid = int(args[0])
-        val ptbr = int(args[1])
+        val ptbr = u64(args[1])
         kernel_set_thread_ptbr(tid, ptbr)
         syscall_return(0)
         kernel_continue_current()
@@ -668,7 +675,7 @@ SYS_VM_SET_PTBR (51): Set the hardware PTBR.
 Arg = address.
 
     sys_vm_set_ptbr_handler(arg: int)
-        vm_set_ptbr(arg)
+        vm_set_ptbr(u64(arg))
         syscall_return(0)
         kernel_continue_current()
 
@@ -685,7 +692,7 @@ Arg = tid. Returns ptbr.
 
     sys_get_thread_ptbr_handler(arg: int)
         val result = kernel_get_thread_ptbr(arg)
-        syscall_return(result)
+        syscall_return(i64(result))
         kernel_continue_current()
 
 SYS_VM_COPY_TO (54): Copy data into another address space.
@@ -693,8 +700,8 @@ Arg = pointer to packed args: [dst_ptbr(i64), dst_vaddr(i64), src(i64), len(i64)
 
     sys_vm_copy_to_handler(arg: int)
         var args: *i64 = *i64(i64(arg))
-        val dst_ptbr = int(args[0])
-        val dst_vaddr = int(args[1])
+        val dst_ptbr = u64(args[0])
+        val dst_vaddr = u64(args[1])
         val src = *byte(args[2])
         val vlen = int(args[3])
         vm_copy_to(dst_ptbr, dst_vaddr, src, vlen)
@@ -706,8 +713,8 @@ Arg = pointer to packed args: [src_ptbr(i64), src_vaddr(i64), dst(i64), len(i64)
 
     sys_vm_copy_from_handler(arg: int)
         var args: *i64 = *i64(i64(arg))
-        val src_ptbr = int(args[0])
-        val src_vaddr = int(args[1])
+        val src_ptbr = u64(args[0])
+        val src_vaddr = u64(args[1])
         val dst = *byte(args[2])
         val vlen = int(args[3])
         vm_copy_from(src_ptbr, src_vaddr, dst, vlen)
@@ -720,7 +727,8 @@ Arg = pid. Returns state (PROC_FREE/PROC_RUNNING/PROC_ZOMBIE).
     sys_proc_state_handler(arg: int)
         if arg >= 0
             if arg < MAX_PROCESSES
-                syscall_return(processes[arg].state)
+                val st = processes[arg].state
+                syscall_return(st)
                 kernel_continue_current()
                 return
         syscall_return(-1)
@@ -778,7 +786,7 @@ Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
     sys_vm_create_server_pt_handler(arg: int)
         val io_page = int(i64(arg))
         val result = vm_create_server_pt(io_page)
-        syscall_return(result)
+        syscall_return(i64(result))
         kernel_continue_current()
 
     sys_getuid_handler(arg: int)
@@ -804,9 +812,9 @@ Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
         kernel_continue_current()
 
     sys_vm_v2p_handler(arg: int)
-        val vaddr = int(i64(arg))
+        val vaddr = u64(arg)
         val paddr = vm_v2p(threads[current_thread].ptbr, vaddr)
-        syscall_return(paddr)
+        syscall_return(i64(paddr))
         kernel_continue_current()
 
 SYS_PHYS_READ (67): Copy from physical address into caller's address space.
@@ -820,8 +828,8 @@ vm_copy_to translates the destination vaddr via page walk and copies.
 
     sys_phys_read_handler(arg: int)
         var args: *i64 = *i64(i64(arg))
-        val src_phys = int(args[0])
-        val dst_vaddr = int(args[1])
+        val src_phys = u64(args[0])
+        val dst_vaddr = u64(args[1])
         val vlen = int(args[2])
         vm_copy_to(threads[current_thread].ptbr, dst_vaddr, *byte(src_phys), vlen)
         syscall_return(0)
@@ -1023,7 +1031,7 @@ Create a thread with a specific page table. The ptbr is set
 atomically before the thread is enqueued, preventing a race
 where the scheduler picks up the thread with the wrong ptbr.
 
-    create_thread_vm(entry_point: i64, usp: i64, ssp: i64, name: string, ptbr: int) -> int =
+    create_thread_vm(entry_point: i64, usp: i64, ssp: i64, name: string, ptbr: u64) -> int =
         create_thread_pri(entry_point, usp, ssp, name, 0, ptbr)
 
 Lower priority number = higher priority. Priority 0 runs first.
@@ -1033,7 +1041,7 @@ otherwise appends at thread_count (if below MAX_THREADS). Returns the thread
 index, or -1 if every slot is in use. Without reuse, short-lived /bin programs
 would monotonically bump thread_count and walk off the end of threads[].
 
-    create_thread_pri(entry_point: i64, usp: i64, ssp: i64, name: string, priority: int, ptbr_val: int) -> int
+    create_thread_pri(entry_point: i64, usp: i64, ssp: i64, name: string, priority: int, ptbr_val: u64) -> int
         arch_cli()
         ensure_queues_init()
         var idx = -1
@@ -1078,6 +1086,7 @@ would monotonically bump thread_count and walk off the end of threads[].
         threads[idx].blocked_on = 0
         threads[idx].ptbr = ptbr_val
         threads[idx].pid = 0
+        threads[idx].kstack_top = 0
         if current_thread >= 0
             threads[idx].uid = threads[current_thread].uid
         else
@@ -1180,7 +1189,7 @@ entry and creates a thread for it. waitpid blocks the caller
 until the process exits. getpid returns the current thread's
 process ID (0 for kernel threads).
 
-    create_process(entry_point: i64, usp: i64, ssp: i64, name: string, ptbr_val: int) -> int
+    create_process(entry_point: i64, usp: i64, ssp: i64, name: string, ptbr_val: u64) -> int
         // Allocate PID
         var pid = -1
         var i = 1
@@ -1216,7 +1225,9 @@ Create a process but leave its thread suspended (STATE_SUSPENDED).
 The caller must call resume_process(pid) after setup is complete.
 Unlike create_process, the thread is never enqueued — no race.
 
-    create_process_suspended(entry_point: i64, usp: i64, ssp: i64, name: string, ptbr_val: int) -> int
+    // (p10_watch removed — Process.state is now volatile)
+
+    create_process_suspended(entry_point: i64, usp: i64, ssp: i64, name: string, ptbr_val: u64) -> int
         // Allocate PID
         var pid = -1
         var i = 1
@@ -1244,20 +1255,25 @@ Unlike create_process, the thread is never enqueued — no race.
                 return -1
             idx = thread_count
             thread_count += 1
-        // Build stack frame in a local buffer and copy to child's address
-        // space. Direct physical addressing fails at page boundaries (SSP
-        // = 0xCF000 straddles pages 0xCE/0xCF which aren't contiguous).
-        var frame_buf: [160]byte
-        val frame_ssp = i64(frame_buf) + STACK_FRAME_SIZE
-        build_stack_frame(entry_point, usp, frame_ssp)
-        vm_copy_to(ptbr_val, int(ssp) - STACK_FRAME_SIZE, frame_buf, STACK_FRAME_SIZE)
-        // build_stack_frame writes thread_exit to usp-8 in the CURRENT
-        // address space. For child processes with separate page tables,
-        // we must also write it into the child's address space so that
-        // returning from main() lands in the exit trampoline.
+
+        // Allocate per-process kernel stack (2 pages = 8KB)
+        val kstack_page = page_alloc_zero()
+        if kstack_page == 0
+            arch_sti()
+            return -1
+        val kstack_page2 = page_alloc_zero()
+        if kstack_page2 == 0
+            page_free(kstack_page)
+            arch_sti()
+            return -1
+        val kstack_top_val = i64(kstack_page + u64(2 * PAGE_SIZE))
+        threads[idx].kstack_top = kstack_top_val
+        // Build context frame (arch-specific: x86 builds on kernel stack,
+        // TRISC builds in buffer and copies to child's SSP)
+        threads[idx].ssp = arch_setup_process_frame(entry_point, usp, ssp, kstack_top_val, ptbr_val)
+        // Write thread_exit return address into child's user stack
         var exit_addr: i64 = i64(&thread_exit)
-        vm_copy_to(ptbr_val, int(usp) - 8, *byte(&exit_addr), 8)
-        threads[idx].ssp = ssp - STACK_FRAME_SIZE
+        vm_copy_to(ptbr_val, u64(usp - i64(8)), *byte(&exit_addr), 8)
         threads[idx].state = STATE_SUSPENDED
         threads[idx].wake_tick = 0
         val np2 = *byte(name)
@@ -1290,14 +1306,14 @@ Unlike create_process, the thread is never enqueued — no race.
         // No sti — slow-path handler keeps cli; do_schedule does sti
         val tid = idx
 
-        // Set up process entry (use thread's kernel-owned name copy)
+        // Set up process entry
+
         processes[pid].state = PROC_RUNNING
         processes[pid].ptbr = ptbr_val
         processes[pid].parent_tid = current_thread
         processes[pid].exit_code = 0
         processes[pid].main_tid = tid
         processes[pid].name = threads[tid].name
-        // Default: all syscalls allowed. RS restricts servers after creation.
         processes[pid].syscall_allow_lo = i64(-1)
         processes[pid].syscall_allow_hi = i64(-1)
         processes[pid].ipc_send_mask = 0xFF
@@ -1316,6 +1332,15 @@ Resume a suspended process (created with create_process_suspended).
 
     reap_process(pid: int)
         grant_revoke_all(pid)
+        // Free per-process kernel stack (2 pages, allocated for ring 3 threads)
+        // Guard: only free if the thread slot still belongs to this process.
+        // Thread slots can be reused by create_process_suspended before reap runs.
+        val rtid = processes[pid].main_tid
+        if threads[rtid].pid == pid
+            if threads[rtid].kstack_top != 0
+                page_free(u64(threads[rtid].kstack_top - i64(PAGE_SIZE)))
+                page_free(u64(threads[rtid].kstack_top - i64(2 * PAGE_SIZE)))
+                threads[rtid].kstack_top = 0
         vm_free_process_pt(processes[pid].ptbr)
         processes[pid].state = PROC_FREE
 
@@ -1462,6 +1487,7 @@ Steps:
             threads[next].ctx_switches += 1
             total_ctx_switches += 1
             vm_set_ptbr(threads[next].ptbr)
+            tss_set_rsp0(threads[next].kstack_top)
             return threads[next].ssp
 
         // No ready threads — return 0 to signal idle
@@ -1485,6 +1511,7 @@ highest-priority non-empty queue.
                     threads[next].ctx_switches += 1
                     total_ctx_switches += 1
                     vm_set_ptbr(threads[next].ptbr)
+                    tss_set_rsp0(threads[next].kstack_top)
                     return threads[next].ssp
             pri += 1
         0

@@ -1,0 +1,39 @@
+test_pipe — minimal pipeline write test
+========================================
+
+Reads stdin to EOF, then does N writes to stdout based on
+first arg: "1", "2", "3", or "4" (default 4).
+Used to test the x86 pipe hang with multiple writes.
+
+    module oskit.bin.test_pipe
+
+    import oskit.ulib.{read, puts, exit, get_args, skip_arg0, STDIN}
+
+    main()
+        // Drain stdin
+        var buf: [256]byte
+        var nr = read(STDIN, buf, 256)
+        while nr > 0
+            nr = read(STDIN, buf, 256)
+
+        // Parse count from args (default 4)
+        val args = skip_arg0(get_args())
+        val p = *byte(args)
+        var count = 4
+        if len(args) > 0
+            if p[0] == byte('1')
+                count = 1
+            else if p[0] == byte('2')
+                count = 2
+            else if p[0] == byte('3')
+                count = 3
+
+        if count >= 1
+            puts("A\n")
+        if count >= 2
+            puts("B\n")
+        if count >= 3
+            puts("C\n")
+        if count >= 4
+            puts("D\n")
+        exit()

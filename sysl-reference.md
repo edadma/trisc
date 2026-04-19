@@ -56,11 +56,11 @@ Source code always uses the short name — the compiler resolves it to the mangl
 | `i8` | | 1 byte | signed 8-bit integer |
 | `i16` | | 2 bytes | signed 16-bit integer |
 | `i32` | `int` | 4 bytes | signed 32-bit integer |
-| `i64` | | 8 bytes | signed 64-bit integer |
+| `i64` | `long` | 8 bytes | signed 64-bit integer |
 | `u8` | `byte` | 1 byte | unsigned 8-bit integer |
 | `u16` | | 2 bytes | unsigned 16-bit integer |
-| `u32` | `char` | 4 bytes | unsigned 32-bit integer (Unicode codepoint) |
-| `u64` | | 8 bytes | unsigned 64-bit integer |
+| `u32` | `char`, `uint` | 4 bytes | unsigned 32-bit integer (Unicode codepoint) |
+| `u64` | `ulong` | 8 bytes | unsigned 64-bit integer |
 | `f64` | `double` | 8 bytes | 64-bit floating point |
 | `bool` | | 1 byte | `true` or `false` |
 | `unit` | | 0 bytes | no value |
@@ -262,7 +262,31 @@ var p: *Node
 // Inferred type (mutable by default in blocks)
 x = 42               // inferred as int
 name = "hello"       // inferred as string
+
+// Volatile — prevents load/store optimization (MMIO, shared memory)
+volatile var status: u32 = 0
+volatile var flag: int
 ```
+
+### Volatile
+
+The `volatile` qualifier prevents the compiler from optimizing away, reordering, or coalescing loads and stores. Use it for memory-mapped I/O registers and shared-memory variables.
+
+Variables:
+```sysl
+volatile var mmio_status: u32 = 0
+volatile var shared_flag: int
+```
+
+Struct fields:
+```sysl
+struct UartRegs
+    volatile status: u32
+    volatile data: u32
+    baud: int            // non-volatile, normal optimization allowed
+```
+
+In the LLVM backend, `volatile` emits `load volatile` and `store volatile` instructions. The TRISC backend is unaffected (it does not optimize loads/stores).
 
 ### Discard Binding (`_`)
 

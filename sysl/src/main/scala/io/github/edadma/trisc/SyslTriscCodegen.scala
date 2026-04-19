@@ -71,7 +71,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
     for decl <- program.decls do
       decl match
-        case v @ TVarDecl(_, typ, init, _) =>
+        case v @ TVarDecl(_, typ, init, _, _) =>
           globals(v.name) = typ
           // Track constant values for cross-reference in other global initializers
           constEval(init).foreach(n => globalConstants(v.name) = n)
@@ -133,7 +133,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       emit("segment data")
       for decl <- dataGlobals do
         decl match
-          case TVarDecl(name, typ, init, _) =>
+          case TVarDecl(name, typ, init, _, _) =>
             val align = stackAlign(typ)
             if align > 1 then emit(s"  align $align")
             emit(s"# global: $name")
@@ -142,7 +142,7 @@ class SyslTriscCodegen(addresses: Int = 4):
               case TArrayLit(elements, _) =>
                 val declElemType = typ match
                   case SyslType.ArrayType(e, _) => e
-                  case _ => SyslType.I64
+                  case other => throw new RuntimeException(s"global array literal: expected ArrayType, got $other")
                 val elemDir = emitDataDirective(declElemType)
                 for elem <- elements do
                   constEval(elem) match
@@ -163,7 +163,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       emit("segment bss")
       for decl <- bssGlobals do
         decl match
-          case TVarDecl(name, typ, _, _) =>
+          case TVarDecl(name, typ, _, _, _) =>
             val align = stackAlign(typ)
             if align > 1 then emit(s"  align $align")
             emit(s"# global: $name")
@@ -181,7 +181,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     val generated = out.toString
     val definedSymbols = (for decl <- program.decls yield decl match
       case TFunDecl(name, _, _, _, _, _, _) => Some(name)
-      case TVarDecl(name, _, _, _) => Some(name)
+      case TVarDecl(name, _, _, _, _) => Some(name)
       case _ => None).flatten.toSet
     if generated.contains("movi r4, malloc") && !definedSymbols.contains("malloc") then emit("extern malloc")
     if generated.contains("movi r4, free") && !definedSymbols.contains("free") then emit("extern free")
@@ -277,7 +277,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     case SyslType.PtrType(_) => 8
     case _: SyslType.FuncType => 8
     case SyslType.ArrayType(elem, _) => stackAlign(elem)
-    case SyslType.StructType(_, fields) => if fields.isEmpty then 1 else fields.map(f => stackAlign(f._2)).max
+    case SyslType.StructType(_, fields, _) => if fields.isEmpty then 1 else fields.map(f => stackAlign(f._2)).max
     case SyslType.EnumType(_, variants) =>
       val fieldAligns = variants.flatMap(_._2.map(f => stackAlign(f._2)))
       if fieldAligns.isEmpty then 4 else fieldAligns.max.max(4)
@@ -300,6 +300,13 @@ class SyslTriscCodegen(addresses: Int = 4):
     case TBinary(left, "+", right, _) => for l <- constEval(left); r <- constEval(right) yield l + r
     case TBinary(left, "-", right, _) => for l <- constEval(left); r <- constEval(right) yield l - r
     case TBinary(left, "*", right, _) => for l <- constEval(left); r <- constEval(right) yield l * r
+    case TBinary(left, "/", right, _) => for l <- constEval(left); r <- constEval(right) if r != 0 yield l / r
+    case TBinary(left, "%", right, _) => for l <- constEval(left); r <- constEval(right) if r != 0 yield l % r
+    case TBinary(left, "|", right, _) => for l <- constEval(left); r <- constEval(right) yield l | r
+    case TBinary(left, "&", right, _) => for l <- constEval(left); r <- constEval(right) yield l & r
+    case TBinary(left, "^", right, _) => for l <- constEval(left); r <- constEval(right) yield l ^ r
+    case TBinary(left, "<<", right, _) => for l <- constEval(left); r <- constEval(right) yield l << r.toInt
+    case TBinary(left, ">>", right, _) => for l <- constEval(left); r <- constEval(right) yield l >> r.toInt
     case TCast(inner, _) => constEval(inner) // pointer casts like *byte(0xC000)
     case _ => None
 
@@ -324,8 +331,11 @@ class SyslTriscCodegen(addresses: Int = 4):
       case SyslType.UIntType(32) =>
         emit(s"  ldw r$destReg, r$addrReg, r0")
         emit(s"  zew r$destReg, r$destReg")
-      case _ =>
+      case SyslType.IntType(64) | SyslType.UIntType(64) | SyslType.DoubleType |
+           _: SyslType.PtrType | _: SyslType.RefType =>
         emit(s"  ldd r$destReg, r$addrReg, r0")
+      case other =>
+        throw new RuntimeException(s"emitLoad: unexpected type $other")
 
   // Emit store from rSrc to [rBase + 0], using width-appropriate instruction
   private def emitStore(srcReg: Int, addrReg: Int, typ: SyslType): Unit =
@@ -367,8 +377,11 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  ldd r4, r4, r0")
           emitAddImm(3, addrReg, i)
           emit("  std r4, r3, r0")
-      case _ =>
+      case SyslType.IntType(64) | SyslType.UIntType(64) | SyslType.DoubleType |
+           _: SyslType.PtrType | _: SyslType.RefType =>
         emit(s"  std r$srcReg, r$addrReg, r0")
+      case other =>
+        throw new RuntimeException(s"emitStore: unexpected type $other")
 
   // Refcount header offset: refcount is at [ptr - headerOffset]
   // Structs: 8 (just refcount), Slices: 16 (refcount + length), Strings: 8 (just refcount, length in fat pointer)
@@ -379,7 +392,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   // Get deinit function name for a ref type, if one exists
   private def deinitFor(typ: SyslType): Option[String] = typ match
-    case SyslType.RefType(SyslType.StructType(name, _)) if deinitFunctions.contains(name) =>
+    case SyslType.RefType(SyslType.StructType(name, _, _)) if deinitFunctions.contains(name) =>
       Some(deinitFunctions(name))
     case _ => None
 
@@ -520,7 +533,10 @@ class SyslTriscCodegen(addresses: Int = 4):
       off
     else -1
 
-    // Map user params to their stack locations
+    // Map user params to their stack locations.
+    // Scalar params use I64 because the ABI passes all scalars as 8-byte values
+    // (via pshd/register), and TRISC is big-endian so ldw at the slot base would
+    // read the wrong half. The 8-byte slot matches the 8-byte load.
     val userParamRegStart = if structReturn then 1 else 0
     val userRegParams = fun.params.length.min(1 - userParamRegStart)
     for (param, i) <- fun.params.take(userRegParams).zipWithIndex do
@@ -925,7 +941,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   private def genStmt(stmt: TStmt): Unit =
     stmt match
-      case TVarStmt(name, typ, init) =>
+      case TVarStmt(name, typ, init, _) =>
         init match
           case TArrayLit(elements, SyslType.ArrayType(elemType, size)) =>
             // Allocate array inline on stack (same layout as TArrayDecl)
@@ -954,7 +970,7 @@ class SyslTriscCodegen(addresses: Int = 4):
             for i <- 0 until totalBytes by 8 do
               emitAddImm(2, 1, i)
               emit("  std r0, r2, r0")
-          case TStructLit(st @ SyslType.StructType(_, _)) =>
+          case TStructLit(st @ SyslType.StructType(_, _, _)) =>
             // Allocate struct on stack and zero-initialize
             val totalSize = stackSize(st)
             val aligned = (totalSize + 7) & ~7
@@ -1161,7 +1177,7 @@ class SyslTriscCodegen(addresses: Int = 4):
                 val off = local.offset + i * stackSize(elemType)
                 emitAddImm(2, 5, off)
                 emitStore(1, 2, elemType)
-            case TStructLit(st @ SyslType.StructType(_, _)) =>
+            case TStructLit(st @ SyslType.StructType(_, _, _)) =>
               val totalSize = stackSize(st)
               val aligned = (totalSize + 7) & ~7
               emitAddImm(7, 7, -aligned)
@@ -1317,7 +1333,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         // Store with width matching pointee type
         pointer.typ match
           case SyslType.PtrType(pointee) => emitStore(2, 1, pointee)
-          case _ => emit("  std r2, r1, r0")
+          case other => throw new RuntimeException(s"TDerefAssignStmt: expected PtrType, got $other")
 
       case TIndexAssignStmt(array, index, value) =>
         val elemType = array.typ match
@@ -1325,7 +1341,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           case SyslType.PtrType(e) => e
           case SyslType.SliceType(e) => e
           case SyslType.RefType(SyslType.SliceType(e)) => e
-          case _ => SyslType.I64
+          case other => throw new RuntimeException(s"TIndexAssignStmt: expected indexable type, got $other")
         val elemSize = stackSize(elemType)
         val isSlice = array.typ.isInstanceOf[SyslType.SliceType]
         genExpr(value)           // r1 = value
@@ -2024,9 +2040,9 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TInterfaceBox(expr, iface) =>
         // Box a concrete value into an interface: {itable_ptr, data_ptr}
         val structName = expr.typ match
-          case SyslType.StructType(name, _) => name
-          case SyslType.PtrType(SyslType.StructType(name, _)) => name
-          case SyslType.RefType(SyslType.StructType(name, _)) => name
+          case SyslType.StructType(name, _, _) => name
+          case SyslType.PtrType(SyslType.StructType(name, _, _)) => name
+          case SyslType.RefType(SyslType.StructType(name, _, _)) => name
           case other => throw new RuntimeException(s"cannot box $other into interface")
 
         // Resolve itable label, registering it if first time for this (struct, interface) pair
@@ -2597,7 +2613,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         // Allocate array on stack with proper element size, rounded up to 8
         val elemType = typ match
           case SyslType.ArrayType(e, _) => e
-          case _ => SyslType.I64
+          case other => throw new RuntimeException(s"TArrayDecl: expected ArrayType, got $other")
         val rawBytes = size * stackSize(elemType)
         val totalBytes = (rawBytes + 7) & ~7 // keep SP 8-byte aligned
         emitAddImm(7, 7, -totalBytes)
@@ -3363,7 +3379,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TSizeof(size, _) =>
         emitLoadImm(1, size.toInt)
 
-      case TStructLit(st @ SyslType.StructType(_, fields)) =>
+      case TStructLit(st @ SyslType.StructType(_, fields, _)) =>
         val totalSize = stackSize(st)
         val aligned = (totalSize + 7) & ~7
         emitAddImm(7, 7, -aligned)
@@ -3723,7 +3739,8 @@ class SyslTriscCodegen(addresses: Int = 4):
     case SyslType.IntType(16) | SyslType.UIntType(16) => "ds"
     case SyslType.IntType(32) | SyslType.UIntType(32) => "dw"
     case SyslType.DoubleType => "dd"
-    case _ => "dl"
+    case SyslType.IntType(64) | SyslType.UIntType(64) | _: SyslType.PtrType | _: SyslType.RefType => "dl"
+    case other => throw new RuntimeException(s"emitDataDirective: unexpected type $other")
 
   // Emit address of local variable into target register
   private def emitLocalAddr(name: String, reg: Int): Unit =

@@ -11,7 +11,7 @@ Keys are strings (max 32 bytes). Values are either integers
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply}
-    import oskit.services.{rs_ready, notify_send, svc_get_thread_pid, thread_id}
+    import oskit.services.{rs_ready, notify_send_to, svc_get_thread_pid, thread_id}
 
     val DS_CMD_PUBLISH   = 1
     val DS_CMD_RETRIEVE  = 2
@@ -115,7 +115,7 @@ Notify subscribers whose prefix matches the given key.
         while i < DS_MAX_SUBS
             if ds_subs[i].in_use == 1
                 if ds_key_starts_with(key, key_len, ds_subs[i].prefix, ds_subs[i].prefix_len) == 1
-                    notify_send(ds_subs[i].subscriber_tid)
+                    notify_send_to(ds_subs[i].subscriber_tid, 1)
             i += 1
 
 Handle PUBLISH: store or update a key-value pair.
