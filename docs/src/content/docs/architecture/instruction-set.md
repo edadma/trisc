@@ -111,6 +111,8 @@ Two registers with a 5-bit opcode. The `xx` field selects the sub-block.
 | 01111 | `sasid` | Set address space ID |
 | 10000 | `gasid` | Get address space ID |
 | 10001 | `gfcause` | Get fault cause |
+| 10010 | `f32tof64` | Convert single-precision to double-precision |
+| 10011 | `f64tof32` | Convert double-precision to single-precision |
 
 ### Load/Store with offset
 

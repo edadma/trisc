@@ -193,8 +193,23 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("1")
   }
 
-  "x86 pipe: echo to test_pipe 4 writes" in {
-    val output = qemu.command("echo hello | test_pipe")
+  "x86 pipe: test_pipe 1 write" in {
+    val output = qemu.command("echo x | test_pipe 1")
+    output should include("A")
+  }
+
+  "x86 pipe: test_pipe 2 writes" in {
+    val output = qemu.command("echo x | test_pipe 2")
+    output should include("B")
+  }
+
+  "x86 pipe: test_pipe 3 writes" in {
+    val output = qemu.command("echo x | test_pipe 3")
+    output should include("C")
+  }
+
+  "x86 pipe: test_pipe 4 writes" in {
+    val output = qemu.command("echo x | test_pipe 4")
     output should include("D")
   }
 
@@ -208,15 +223,32 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("asdf")
   }
 
-  "x86 signal: ctrl-c kills foreground process" ignore {
-    // TODO: Control characters (0x03, 0x1C) don't pass through QEMU serial pipe.
-    // Test via TRISC emulator headless test or GUI emulator manually.
+  "x86 signal: ctrl-c kills foreground process" in {
+    // Byte 0x03 passes through -chardev stdio,signal=off directly to COM1,
+    // since Java's process pipe bypasses the host terminal.
     qemu.send("count\n")
     Thread.sleep(2000)
-    qemu.send("\u001c")
+    qemu.send("\u0003")
     qemu.waitFor(rootPrompt)
     val ps = qemu.command("ps")
     ps should not include "count"
+  }
+
+  "x86 ds: publish, retrieve, delete int and string" in {
+    // Int round-trip
+    qemu.command("ds set answer 42")
+    val getAnswer = qemu.command("ds get answer")
+    getAnswer should include("42")
+
+    // String round-trip
+    qemu.command("ds set greeting hello")
+    val getGreeting = qemu.command("ds get greeting")
+    getGreeting should include("hello")
+
+    // Delete + retrieve should miss
+    qemu.command("ds del answer")
+    val afterDel = qemu.command("ds get answer")
+    afterDel should include("not found")
   }
 
   "x86 crash recovery: kill tfs and restart" in {

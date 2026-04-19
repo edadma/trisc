@@ -52,6 +52,7 @@ object RamdiskBinPrograms:
     val allocSource = Source.fromFile("posix/stdlib/alloc.sysl")(using Codec.UTF8).mkString
     val stringSource = Source.fromFile("posix/string/string.sysl")(using Codec.UTF8).mkString
     val ctypeSource = Source.fromFile("posix/ctype/ctype.sysl")(using Codec.UTF8).mkString
+    val dsClientSource = tangledLsysl("oskit/ds/client.lsysl")
     val allSources = Map(
       unitPath -> source,
       "oskit/ulib/ulib" -> ulibSource,
@@ -59,6 +60,7 @@ object RamdiskBinPrograms:
       "posix/stdlib/alloc" -> allocSource,
       "posix/string/string" -> stringSource,
       "posix/ctype/ctype" -> ctypeSource,
+      "oskit/ds/client" -> dsClientSource,
     )
     val driver = new SyslDriver
     val result = driver.compile(allSources)

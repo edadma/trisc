@@ -104,7 +104,7 @@ import oskit.hal.memset
             |
             |// Load TRB v1 binary from memory into a target page table.
             |// Returns entry point or -1 on error.
-            |k_load_trb(buf: *byte, buflen: int, ptbr: int) -> i64
+            |k_load_trb(buf: *byte, buflen: int, ptbr: u64) -> i64
             |    if buflen < 12
             |        return -1
             |    if buf[0] != byte('T')
@@ -130,7 +130,7 @@ import oskit.hal.memset
             |        if kind == 0
             |            if pos + sz > buflen
             |                return -1
-            |            vm_copy_to(ptbr, org, buf + pos, sz)
+            |            vm_copy_to(ptbr, u64(org), buf + pos, sz)
             |            pos += sz
             |        else if kind == 1
             |            var zero_buf: [1024]byte
@@ -141,7 +141,7 @@ import oskit.hal.memset
             |                var chunk = rem
             |                if chunk > 1024
             |                    chunk = 1024
-            |                vm_copy_to(ptbr, dst, &zero_buf[0], chunk)
+            |                vm_copy_to(ptbr, u64(dst), &zero_buf[0], chunk)
             |                rem -= chunk
             |                dst += chunk
             |        else
@@ -210,7 +210,7 @@ import oskit.hal.memset
             |            break
             |        info_page[ci + 24] = bi[ci]
             |        ci += 1
-            |    vm_copy_to(rs_ptbr, 0xBF000, &info_page[0], 256)
+            |    vm_copy_to(rs_ptbr, u64(0xBF000), &info_page[0], 256)
             |
             |    // Create RS process (suspended) and resume it
             |    val rs_pid = create_process_suspended(rs_entry_pt, 0xD0000, 0xCF000, "rs", rs_ptbr)

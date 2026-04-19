@@ -771,27 +771,29 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o2, "expected register as second operand")
 
       addInstruction(3 -> 6, 3 -> reg1, 3 -> reg2, 2 -> 0, 5 -> opcode)
-    case InstructionLineAST(mnemonic @ ("fpow" | "fsin" | "fcos" | "ftan" | "fasin" | "facos" | "fatan" | "fatan2" | "fexp" | "flog" | "tlbi" | "tlbia" | "sptbr" | "gptbr" | "gfault" | "sasid" | "gasid" | "gfcause"), Seq(o1, o2)) =>
+    case InstructionLineAST(mnemonic @ ("fpow" | "fsin" | "fcos" | "ftan" | "fasin" | "facos" | "fatan" | "fatan2" | "fexp" | "flog" | "f32tof64" | "f64tof32" | "tlbi" | "tlbia" | "sptbr" | "gptbr" | "gfault" | "sasid" | "gasid" | "gfcause"), Seq(o1, o2)) =>
       val opcode =
         mnemonic match
-          case "fpow"    => 0
-          case "fsin"    => 9
-          case "fcos"    => 10
-          case "ftan"    => 11
-          case "fasin"   => 12
-          case "facos"   => 13
-          case "fatan"   => 14
-          case "fatan2"  => 15
-          case "fexp"    => 16
-          case "flog"    => 17
-          case "tlbi"    => 1
-          case "tlbia"   => 2
-          case "sptbr"   => 3
-          case "gptbr"   => 4
-          case "gfault"  => 5
-          case "sasid"   => 6
-          case "gasid"   => 7
-          case "gfcause" => 8
+          case "fpow"     => 0
+          case "fsin"     => 9
+          case "fcos"     => 10
+          case "ftan"     => 11
+          case "fasin"    => 12
+          case "facos"    => 13
+          case "fatan"    => 14
+          case "fatan2"   => 15
+          case "fexp"     => 16
+          case "flog"     => 17
+          case "f32tof64" => 18
+          case "f64tof32" => 19
+          case "tlbi"     => 1
+          case "tlbia"    => 2
+          case "sptbr"    => 3
+          case "gptbr"    => 4
+          case "gfault"   => 5
+          case "sasid"    => 6
+          case "gasid"    => 7
+          case "gfcause"  => 8
       val reg1 =
         fold(o1) match
           case RegisterExprAST(reg) => reg

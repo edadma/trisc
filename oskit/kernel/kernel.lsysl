@@ -126,7 +126,7 @@ loaded by nsh each get their own process entry.
     val PROC_ZOMBIE  = 2
 
     struct Process
-        state: int
+        volatile state: int
         ptbr: u64
         parent_tid: int
         exit_code: int
@@ -727,7 +727,8 @@ Arg = pid. Returns state (PROC_FREE/PROC_RUNNING/PROC_ZOMBIE).
     sys_proc_state_handler(arg: int)
         if arg >= 0
             if arg < MAX_PROCESSES
-                syscall_return(processes[arg].state)
+                val st = processes[arg].state
+                syscall_return(st)
                 kernel_continue_current()
                 return
         syscall_return(-1)
@@ -1156,13 +1157,6 @@ enqueueing them back into their priority run queue.
         // and notify PM so it can handle reaping
         val pid = threads[current_thread].pid
         if pid > 0
-            // DEBUG: trace process exit (tid:pid)
-            debug_char('{')
-            debug_char('X')
-            debug_hex4(current_thread)
-            debug_char(':')
-            debug_hex4(pid)
-            debug_char('}')
             processes[pid].exit_code = exit_code
             processes[pid].state = PROC_ZOMBIE
             if kernel_pm_tid >= 0
@@ -1231,6 +1225,8 @@ Create a process but leave its thread suspended (STATE_SUSPENDED).
 The caller must call resume_process(pid) after setup is complete.
 Unlike create_process, the thread is never enqueued — no race.
 
+    // (p10_watch removed — Process.state is now volatile)
+
     create_process_suspended(entry_point: i64, usp: i64, ssp: i64, name: string, ptbr_val: u64) -> int
         // Allocate PID
         var pid = -1
@@ -1259,12 +1255,18 @@ Unlike create_process, the thread is never enqueued — no race.
                 return -1
             idx = thread_count
             thread_count += 1
-        // Allocate per-process kernel stack page
+
+        // Allocate per-process kernel stack (2 pages = 8KB)
         val kstack_page = page_alloc_zero()
         if kstack_page == 0
             arch_sti()
             return -1
-        val kstack_top_val = i64(kstack_page + u64(PAGE_SIZE))
+        val kstack_page2 = page_alloc_zero()
+        if kstack_page2 == 0
+            page_free(kstack_page)
+            arch_sti()
+            return -1
+        val kstack_top_val = i64(kstack_page + u64(2 * PAGE_SIZE))
         threads[idx].kstack_top = kstack_top_val
         // Build context frame (arch-specific: x86 builds on kernel stack,
         // TRISC builds in buffer and copies to child's SSP)
@@ -1304,14 +1306,14 @@ Unlike create_process, the thread is never enqueued — no race.
         // No sti — slow-path handler keeps cli; do_schedule does sti
         val tid = idx
 
-        // Set up process entry (use thread's kernel-owned name copy)
+        // Set up process entry
+
         processes[pid].state = PROC_RUNNING
         processes[pid].ptbr = ptbr_val
         processes[pid].parent_tid = current_thread
         processes[pid].exit_code = 0
         processes[pid].main_tid = tid
         processes[pid].name = threads[tid].name
-        // Default: all syscalls allowed. RS restricts servers after creation.
         processes[pid].syscall_allow_lo = i64(-1)
         processes[pid].syscall_allow_hi = i64(-1)
         processes[pid].ipc_send_mask = 0xFF
@@ -1330,11 +1332,15 @@ Resume a suspended process (created with create_process_suspended).
 
     reap_process(pid: int)
         grant_revoke_all(pid)
-        // Free per-process kernel stack (allocated for ring 3 threads)
+        // Free per-process kernel stack (2 pages, allocated for ring 3 threads)
+        // Guard: only free if the thread slot still belongs to this process.
+        // Thread slots can be reused by create_process_suspended before reap runs.
         val rtid = processes[pid].main_tid
-        if threads[rtid].kstack_top != 0
-            page_free(u64(threads[rtid].kstack_top - i64(PAGE_SIZE)))
-            threads[rtid].kstack_top = 0
+        if threads[rtid].pid == pid
+            if threads[rtid].kstack_top != 0
+                page_free(u64(threads[rtid].kstack_top - i64(PAGE_SIZE)))
+                page_free(u64(threads[rtid].kstack_top - i64(2 * PAGE_SIZE)))
+                threads[rtid].kstack_top = 0
         vm_free_process_pt(processes[pid].ptbr)
         processes[pid].state = PROC_FREE
 

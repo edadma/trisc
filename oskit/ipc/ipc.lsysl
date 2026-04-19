@@ -22,7 +22,7 @@ so the scheduler can reference them).
     module oskit.ipc
 
     import oskit.kernel.*
-    import oskit.arch.{vm_v2p, vm_copy_cross, SYSCALL_RETURN_OFFSET, debug_char, debug_hex4}
+    import oskit.arch.{vm_v2p, vm_copy_cross, SYSCALL_RETURN_OFFSET}
     import oskit.config.{MAX_PORTS, MAX_THREADS, KERNEL_L1_BASE, DEFAULT_QUANTUM}
     import oskit.services.syscall
     import oskit.hal.memcpy
@@ -612,25 +612,12 @@ On notification, call notify_read() to get the value.
         var sender = ipc_queue_pop(port)
         while sender != IPC_QUEUE_EMPTY
             if threads[sender].state == STATE_SEND_BLOCKED
-                // DEBUG: receiver found queued sender (me←sender)
-                debug_char('{')
-                debug_hex4(me)
-                debug_char('<')
-                debug_hex4(sender)
-                debug_char('}')
                 ipc_deliver(me, sender, ipc_ctx[sender].buf, ipc_ctx[sender].len)
                 syscall_return(sender)
                 threads[me].state = STATE_READY
                 threads[me].quantum = DEFAULT_QUANTUM
                 enqueue(threads[me].priority, me)
                 return
-            // DEBUG: popped non-SEND_BLOCKED sender — state mismatch
-            debug_char('{')
-            debug_char('!')
-            debug_hex4(sender)
-            debug_char(':')
-            debug_hex4(threads[sender].state)
-            debug_char('}')
             sender = ipc_queue_pop(port)
 
         // No IPC message — check for pending notification

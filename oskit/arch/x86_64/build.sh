@@ -58,7 +58,7 @@ SYSL_FILES+=("oskit/arch/x86_64/${APP}.sysl")
 
 echo "=== Sysl → LLVM IR ==="
 cd "$REPO_ROOT"
-sbt "syslCliJVM/run compile --emit llvm ${SYSL_FILES[*]} -o $OUT/kernel.ll" 2>&1 | tail -1
+sbt "syslCliJVM/run compile --emit llvm --target=x86_64-elf ${SYSL_FILES[*]} -o $OUT/kernel.ll" 2>&1 | tail -1
 
 echo "=== LLVM IR → object ==="
 clang -target x86_64-unknown-none-elf -ffreestanding -nostdlib \

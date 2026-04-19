@@ -529,6 +529,9 @@ object Decode:
         "110 aaa bbb 01 01111" -> ((args: Map[Char, Int]) => new FATAN2(args('a'), args('b'))),
         "110 aaa bbb 01 10000" -> ((args: Map[Char, Int]) => new FEXP(args('a'), args('b'))),
         "110 aaa bbb 01 10001" -> ((args: Map[Char, Int]) => new FLOG(args('a'), args('b'))),
+        // Single/double precision float conversion
+        "110 aaa bbb 01 10010" -> ((args: Map[Char, Int]) => new F32TOF64(args('a'), args('b'))),
+        "110 aaa bbb 01 10011" -> ((args: Map[Char, Int]) => new F64TOF32(args('a'), args('b'))),
         // MMU instructions
         "110 aaa bbb 01 00001" -> ((args: Map[Char, Int]) => new TLBI(args('a'), args('b'))),
         "110 aaa bbb 01 00010" -> ((args: Map[Char, Int]) => new TLBIA(args('a'), args('b'))),

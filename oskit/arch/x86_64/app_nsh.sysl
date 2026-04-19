@@ -21,7 +21,7 @@ k_read_i64(p: *byte) -> i64
 
 // Load ELF64 binary from memory into a target page table.
 // Returns entry point or -1 on error.
-k_load_elf64(buf: *byte, buflen: int, ptbr: int) -> i64
+k_load_elf64(buf: *byte, buflen: int, ptbr: u64) -> i64
     if buflen < 64
         return -1
     if buf[0] != 0x7F
@@ -42,7 +42,7 @@ k_load_elf64(buf: *byte, buflen: int, ptbr: int) -> i64
         val ptype = int(k_read_u32(ph))
         if ptype == 1
             val offset = int(k_read_i64(ph + 8))
-            val vaddr = int(k_read_i64(ph + 16))
+            val vaddr = u64(k_read_i64(ph + 16))
             val filesz = int(k_read_i64(ph + 32))
             val memsz = int(k_read_i64(ph + 40))
             if offset + filesz > buflen
@@ -53,14 +53,14 @@ k_load_elf64(buf: *byte, buflen: int, ptbr: int) -> i64
                 var zero_buf: [1024]byte
                 memset(zero_buf, 0, 1024)
                 var rem = memsz - filesz
-                var dst = vaddr + filesz
+                var dst = vaddr + u64(filesz)
                 while rem > 0
                     var chunk = rem
                     if chunk > 1024
                         chunk = 1024
                     vm_copy_to(ptbr, dst, zero_buf, chunk)
                     rem -= chunk
-                    dst += chunk
+                    dst += u64(chunk)
         i += 1
     entry
 
@@ -153,7 +153,7 @@ kernel_main() -> i64
     vm_copy_to(rs_ptbr, 0xBF000, info_page, 512)
 
     // Create RS process (suspended) and resume it
-    val rs_pid = create_process_suspended(rs_entry_pt, 0xD0000, 0xCF000, "rs", rs_ptbr)
+    val rs_pid = create_process_suspended(rs_entry_pt, 0xD4000, 0xD3000, "rs", rs_ptbr)
     if rs_pid < 0
         return -1
     resume_process(rs_pid)

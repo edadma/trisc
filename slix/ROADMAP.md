@@ -78,6 +78,23 @@ Concrete, ordered development plan. Each phase builds on the previous.
 - PM tracks foreground PID per console, kills on SIGINT
 - nsh sets/clears foreground PID around waitpid
 
+### Phase 9: Grant-based IPC
+- `grant_create`/`grant_revoke`/`grant_copy`/`grant_map`/`grant_unmap` syscalls
+- VFS + TFS use grants for zero-copy file I/O
+- Foundation for future zero-copy networking
+
+### Phase 10: Data Store (DS) Server
+- Isolated key-value server, boot module at index 5
+- DS_CMD_PUBLISH/RETRIEVE/DELETE/SUBSCRIBE
+- 64 entries, 16 subscriptions, no heap
+- Async notifications to subscribers on matching key changes
+
+### Phase 11: x86_64 Target
+- SLIX boots in QEMU on x86_64 via multiboot
+- Full server stack: disk, tfs, tty, pm, vfs, ds, rs, init
+- Ring 0/Ring 3 separation with per-process kernel stacks
+- 30 x86_64 integration tests pass (login, shell, pipes, redirects, signals, crash recovery)
+
 ---
 
 ## ~~Phase 4: RS Refactor and Init Isolation (Minix 3 alignment)~~ DONE
@@ -308,106 +325,6 @@ oskit/
 
 ---
 
-## ~~Phase 9: Grant-based IPC~~ DONE
-
-**Goal:** Zero-copy data transfer between processes via kernel memory grants, eliminating bounce buffers.
-
-**Problem:** VFS currently copies data twice for cross-address-space I/O — client buffer → server bounce buffer → TFS (and back). For a 4KB read, that's 8KB of memcpy through `svc_vm_copy_to/from`. Grants let the kernel temporarily map client pages into the server's address space, enabling direct access.
-
-**Design (Minix 3 style):**
-- **Grant table** per process: fixed-size array of grant descriptors
-- Each grant: `{ granter_pid, vaddr, len, flags }` — describes a region the granter allows access to
-- Flags: `GRANT_READ`, `GRANT_WRITE`, `GRANT_READWRITE`
-- Kernel syscalls: `grant_create(vaddr, len, flags) -> grant_id`, `grant_revoke(grant_id)`
-- Server syscall: `grant_copy(grant_id, offset, local_buf, len, direction)` — kernel resolves granter's physical pages and copies directly (no bounce buffer)
-- Later optimization: `grant_map(grant_id)` — kernel maps granter's pages into server's page table for true zero-copy (requires TLB flush on revoke)
-
-**Phases:**
-1. **grant_copy** — kernel-mediated copy using grant descriptors (replaces `svc_vm_copy_to/from`). Still copies, but validates access and is the standard API.
-2. **grant_map** — true zero-copy page mapping (optimization, can defer)
-
-**What changes:**
-- Client creates grant before IPC send: `gid = grant_create(&buf, len, GRANT_WRITE)`
-- Client passes `gid` in IPC message instead of raw buffer address
-- Server calls `grant_copy(gid, ...)` instead of `svc_vm_copy_from/to`
-- VFS read/write paths updated to use grants
-- Eliminates need for server-side bounce buffers (`var local: [4096]byte`)
-
-**What works when done:**
-- VFS file read/write uses grants — no bounce buffers
-- Pipe read/write uses grants
-- TTY read/write uses grants
-- Foundation for future zero-copy networking
-
----
-
-## Phase 10: Data Store (DS) Server
-
-**Goal:** Minix 3-style key-value service for sharing dynamic configuration between servers.
-
-**Prerequisites:** Clean up sysl tech debt first — eliminate null-terminated string APIs (port_lookup, port_register, etc.) in favor of native sysl `string` throughout the syscall layer.
-
-**Design:**
-- DS is an isolated userspace server (boot module), like PM/VFS
-- Key-value store with `string` keys, `int` and `string` values
-- Subscribe/notify: processes subscribe to key prefixes, get async notification on change
-- Uses heap allocation (`std.alloc`) for variable-length data
-- Fixed max entries (e.g., 64 slots) but dynamic key/value content
-
-**API (DS IPC commands):**
-- `ds_publish(key, value)` — store or update a key-value pair
-- `ds_retrieve(key)` — fetch value by key
-- `ds_delete(key)` — remove entry
-- `ds_subscribe(prefix)` — get notified when matching keys change
-
-**What works when done:**
-- Servers publish config: `ds_publish("net/mtu", 1500)`
-- Other servers retrieve: `ds_retrieve("net/mtu")`
-- Subscribers notified on changes without polling
-
----
-
-## Phase 11: x86_64 Target
-
-**Goal:** SLIX boots in QEMU on x86_64 using the multi-target architecture from Phase 4.
-
-**Prerequisites:** Phase 4 (arch/ refactor) complete, LLVM backend handles all oskit code.
-
-### Boot path
-- GRUB loads kernel ELF + server binaries as multiboot2 modules
-- boot.S: set up GDT, IDT, enable paging (identity-map + higher-half)
-- boot.S: set up syscall MSR (LSTAR, STAR, SFMASK)
-- boot.S: call kernel_main
-
-### Key differences from TRISC
-- **Page tables:** 4-level (PML4 -> PDPT -> PD -> PT), 4KB pages, NX bit
-- **Syscalls:** `syscall` instruction (not trap), LSTAR points to entry
-- **Context switch:** push/pop all GPRs, swapgs for per-CPU data
-- **Interrupts:** IOAPIC for device routing, LAPIC for timer, IDT for vectors
-- **I/O:** Port I/O (`in`/`out`) for legacy, MMIO for modern devices
-- **DMA:** Not needed for ramdisk (use memcpy); real disk uses AHCI DMA
-
-### Device drivers needed
-- PIT or LAPIC timer (simplest first)
-- PS/2 keyboard (port I/O at 0x60/0x64)
-- Serial port (port I/O at 0x3F8) -- for headless testing
-- VGA text mode (MMIO at 0xB8000) -- for display
-- Later: AHCI disk, virtio-blk, USB
-
-### Build pipeline
-```
-sysl sources -> LLVM IR -> clang/llc -> .o files
-boot.S -> nasm/gas -> boot.o
-ld -> kernel.elf
-grub-mkrescue -> bootable ISO
-qemu-system-x86_64 -cdrom slix.iso
-```
-
-### Milestone: bare-metal hello
-Already achieved (sysl -> LLVM -> x86_64 bare-metal hello in QEMU). Next: boot with page tables + syscall entry + scheduler.
-
----
-
 ## Phase 12: POSIX compatibility layer
 
 **Goal:** Enough POSIX that standard C programs can be compiled and run.
@@ -446,42 +363,6 @@ Already achieved (sysl -> LLVM -> x86_64 bare-metal hello in QEMU). Next: boot w
 - `ping 8.8.8.8` sends ICMP echo and gets reply
 - `fetch http://example.com` downloads a web page
 - Programs can open TCP connections to internet hosts
-
----
-
-## Phase 14: Genix Package Manager
-
-**Goal:** Nix-inspired but simpler package manager. "Gen" for generations — each install/update creates a new generation that can be atomically switched to or rolled back from.
-
-**Design principles:**
-- Content-addressed store: packages identified by hash of inputs (source + deps + build config)
-- Immutable packages: `/pkg/<hash>-<name>/` — never modified after install
-- Profiles: symlink trees that compose a user's visible environment (`/usr/bin/` etc.)
-- Declarative config: system configuration describes desired packages, manager converges
-- Build from source or fetch pre-built binaries (binary cache)
-- No global mutable state — multiple versions coexist, atomic upgrades/rollbacks
-
-**Differences from Nix:**
-- No Nix expression language — use sysl or a simple TOML-based package description
-- Simpler dependency model — flat deps, no closures/thunks
-- No sandboxed builds initially (trust the build scripts)
-- Single-user to start (no multi-user daemon)
-
-**Components:**
-1. **Package store** (`/pkg/`) — content-addressed directory of installed packages
-2. **Package descriptions** — TOML files: name, version, source URL, deps, build commands
-3. **Builder** — downloads source, builds, installs to `/pkg/<hash>-<name>/`
-4. **Profile manager** — creates/updates symlink trees from package selections
-5. **Repository** — remote index of available packages + binary cache
-6. **CLI** — `genix install <name>`, `genix remove <name>`, `genix update`, `genix list`
-
-**Prerequisites:** Networking (Phase 12), filesystem with symlinks, proper user environment
-
-**What works when done:**
-- `genix install curl` fetches and installs curl + dependencies
-- `genix update` upgrades all packages atomically
-- `genix rollback` reverts to previous profile state
-- Multiple package versions coexist without conflict
 
 ---
 

@@ -19,6 +19,8 @@ All other commands are external /bin/ programs loaded via PM spawn.
         sleep, exit, exit_with, get_args, skip_arg0, STDOUT,
         create, unlink, seek, pipe,
         pm_port, ipc_send, msg_write_i32, ulib_putc}
+    import oskit.ds.{ds_publish_int, ds_publish_str, ds_retrieve_int,
+        ds_retrieve_str, ds_delete}
 
 
 Shell state.
@@ -437,10 +439,89 @@ Built-in commands.
         job_count -= 1
 
     cmd_help(argc: int, argv: *string)
-        nsh_print("builtins: exit pwd cd kill jobs fg help\n")
+        nsh_print("builtins: exit pwd cd kill jobs fg ds help\n")
         nsh_print("/bin: cat echo grep head tail wc ls mkdir rm su\n")
         nsh_print("      rmdir touch write mv chmod stat uptime\n")
         nsh_print("      whoami ps\n")
+
+DS (data store) builtin.
+Usage:
+  ds get <key>            — retrieve (tries int, then str)
+  ds set <key> <value>    — publish; int if value is all digits, else str
+  ds del <key>            — delete
+
+    nsh_parse_int(s: string, out: *int) -> int
+        val p = *byte(s)
+        val n = len(s)
+        if n == 0
+            return -1
+        var i = 0
+        var neg = 0
+        if int(p[0]) == int('-')
+            neg = 1
+            i = 1
+        if i >= n
+            return -1
+        var v = 0
+        while i < n
+            val ch = int(p[i])
+            if ch < int('0')
+                return -1
+            if ch > int('9')
+                return -1
+            v = v * 10 + (ch - int('0'))
+            i += 1
+        if neg == 1
+            v = -v
+        out[0] = v
+        0
+
+    cmd_ds(argc: int, argv: *string)
+        if argc < 2
+            nsh_print("usage: ds get|set|del ...\n")
+            return
+        argv[1] match
+            "get" ->
+                if argc < 3
+                    nsh_print("usage: ds get <key>\n")
+                    return
+                var iv = 0
+                if ds_retrieve_int(argv[2], &iv) == 0
+                    nsh_putint(iv)
+                    nsh_putc('\n')
+                    return
+                var sbuf: [64]byte
+                val n = ds_retrieve_str(argv[2], sbuf, 64)
+                if n < 0
+                    nsh_print("ds: not found\n")
+                    return
+                var lim = n
+                if lim > 64
+                    lim = 64
+                var i = 0
+                while i < lim
+                    nsh_putc(char(sbuf[i]))
+                    i += 1
+                nsh_putc('\n')
+            "set" ->
+                if argc < 4
+                    nsh_print("usage: ds set <key> <value>\n")
+                    return
+                var iv = 0
+                if nsh_parse_int(argv[3], &iv) == 0
+                    if ds_publish_int(argv[2], iv) < 0
+                        nsh_print("ds: publish failed\n")
+                else
+                    if ds_publish_str(argv[2], argv[3]) < 0
+                        nsh_print("ds: publish failed\n")
+            "del" ->
+                if argc < 3
+                    nsh_print("usage: ds del <key>\n")
+                    return
+                if ds_delete(argv[2]) < 0
+                    nsh_print("ds: not found\n")
+            else ->
+                nsh_print("usage: ds get|set|del ...\n")
 
 Redirect helpers. Open a file for output redirect (> or >>)
 or input redirect (<). Returns a handle or -1 on error.
@@ -546,6 +627,7 @@ Command dispatch.
             "kill" -> cmd_kill(argc, argv)
             "jobs" -> cmd_jobs(argc, argv)
             "fg"   -> cmd_fg(argc, argv)
+            "ds"   -> cmd_ds(argc, argv)
             "help" -> cmd_help(argc, argv)
             else   -> nsh_try_external(argc, argv)
 
@@ -773,22 +855,11 @@ the appropriate stdin/stdout handles, then waits for all.
         nsh_flush()
         if pids[num_cmds - 1] >= 0
             nsh_set_fg(0, pids[num_cmds - 1])
-        // DEBUG: trace pipeline PIDs and wait
-        ulib_putc('[')
-        seg = 0
-        while seg < num_cmds
-            // Print PID for this segment
-            ulib_putc('0' + pids[seg] % 10)
-            seg += 1
-        ulib_putc('|')
         seg = 0
         while seg < num_cmds
             if pids[seg] >= 0
-                ulib_putc('w')
                 pm_waitpid(pids[seg])
-                ulib_putc('d')
             seg += 1
-        ulib_putc(']')
         nsh_set_fg(0, -1)
         nsh_putc('\n')
 
@@ -796,10 +867,6 @@ The shell entry point. Home directory is passed via args
 (e.g. "nsh /root"). If no args, defaults to "/".
 
     main()
-        // DEBUG: trace nsh startup
-        ulib_putc('{')
-        ulib_putc('N')
-        ulib_putc('}')
         val args = skip_arg0(get_args())
         if len(args) > 0
             cwd = args

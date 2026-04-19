@@ -222,7 +222,7 @@ object TriscCli:
     * after the header. They sit in RAM as unused data until RS
     * reads them in a later step.
     */
-  def writeBootInfo(mem: Addressable, modules: Seq[(String, Array[Byte])]): Unit =
+  def writeBootInfo(mem: Addressable, modules: Seq[(String, Array[Byte])], verbose: Boolean = true): Unit =
     if modules.isEmpty then return
     val headerSize = 8 + modules.length * 24
     // Module blobs start at next page after the header
@@ -265,9 +265,10 @@ object TriscCli:
       for (j <- 0 until 8)
         mem.writeByte(entryBase + 16 + j, ((size >> (j * 8)) & 0xFF).toByte)
 
-    System.err.println(s"boot info: ${modules.length} module(s) at 0x${BootInfoAddr.toHexString}")
-    for (name, addr, size) <- entries do
-      System.err.println(f"  $name%-8s @ 0x${addr}%06X ($size%d bytes)")
+    if verbose then
+      System.err.println(s"boot info: ${modules.length} module(s) at 0x${BootInfoAddr.toHexString}")
+      for (name, addr, size) <- entries do
+        System.err.println(f"  $name%-8s @ 0x${addr}%06X ($size%d bytes)")
 
   def setupCpu(
       linked: TOF,

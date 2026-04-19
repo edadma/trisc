@@ -4,12 +4,12 @@
 // On x86 everything runs in ring 0, so syscall handlers share the
 // program stack; generous stack space is essential.
 //
-// Servers: code at 0xD0000, 16KB stack. Servers have large BSS
-// (RS ~128KB) and need the full 192KB region to 0x100000.
+// Servers: code at 0xD4000, 32KB stack. Servers have large BSS
+// (RS ~128KB) and need ~176KB to 0x100000.
 
 module oskit.arch
 
 val PROG_USP = 0xE0000
 val PROG_SSP = 0xDF000
-val SRV_USP  = 0xD0000
-val SRV_SSP  = 0xCF000
+val SRV_USP  = 0xD4000
+val SRV_SSP  = 0xD3000
