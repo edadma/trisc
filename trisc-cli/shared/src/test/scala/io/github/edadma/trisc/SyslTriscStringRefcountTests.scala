@@ -796,4 +796,65 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |    if h.s == "original" && n == 7 then 0 else 1
         |""".stripMargin) shouldBe 0
   }
+
+  // ====================================================================
+  // 16. Sibling assign paths — globals, *p, arr[i]
+  // ====================================================================
+
+  "global string reassignment in loop — old buffers freed (heap pressure)" in {
+    runWithAlloc(
+      """var g: string
+        |
+        |main() -> int
+        |    g = "init" + "_v"
+        |    var i = 0
+        |    while i < 50
+        |        g = "iter" + "_data"
+        |        i += 1
+        |    if g == "iter_data" then 0 else 1
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "global struct-with-string field assignment in loop (heap pressure)" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |var g: Holder
+        |
+        |main() -> int
+        |    g = Holder("init" + "_v")
+        |    var i = 0
+        |    while i < 30
+        |        g = Holder("iter" + "_data")
+        |        i += 1
+        |    if g.s == "iter_data" then 0 else 1
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "*p = string in loop — old buffers freed (heap pressure)" in {
+    runWithAlloc(
+      """main() -> int
+        |    var s = "init" + "_v"
+        |    var p: *string = &s
+        |    var i = 0
+        |    while i < 50
+        |        *p = "iter" + "_data"
+        |        i += 1
+        |    if s == "iter_data" then 0 else 1
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "arr[i] = string in loop — old buffers freed (heap pressure)" in {
+    runWithAlloc(
+      """main() -> int
+        |    var arr: [4]string
+        |    arr[0] = "init"
+        |    var i = 0
+        |    while i < 30
+        |        arr[0] = "iter" + "_data"
+        |        i += 1
+        |    if arr[0] == "iter_data" then 0 else 1
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
 }
