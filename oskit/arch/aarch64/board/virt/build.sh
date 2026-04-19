@@ -23,6 +23,9 @@ done
 echo "=== Assemble boot.s ==="
 aarch64-elf-as -o "$OUT/boot.o" "$BOARD_DIR/boot.s"
 
+echo "=== Assemble vectors.s ==="
+aarch64-elf-as -o "$OUT/vectors.o" "$BOARD_DIR/vectors.s"
+
 echo "=== Compile hello.c ==="
 aarch64-elf-gcc -ffreestanding -nostdlib -mcmodel=large \
     -fno-pic -fno-pie -Wall -Wextra -Werror -O1 \
@@ -31,7 +34,7 @@ aarch64-elf-gcc -ffreestanding -nostdlib -mcmodel=large \
 echo "=== Link ==="
 aarch64-elf-ld -T "$BOARD_DIR/link.ld" \
     -o "$OUT/kernel.elf" \
-    "$OUT/boot.o" "$OUT/hello.o"
+    "$OUT/boot.o" "$OUT/vectors.o" "$OUT/hello.o"
 
 echo "=== Built: $OUT/kernel.elf ==="
 

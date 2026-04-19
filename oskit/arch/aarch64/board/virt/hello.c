@@ -27,4 +27,9 @@ static void uart_puts(const char *s) {
 void kernel_main(void) {
     uart_puts("SLIX aarch64 boot\n");
     uart_puts("Hello, aarch64!\n");
+    /* Returning here falls through to the halt loop in boot.s.
+     * To verify the exception reporter is active, temporarily
+     * dereference an invalid pointer:
+     *     *(volatile unsigned long *)0xDEAD0000UL;
+     * The vector_table stub prints "EXC V=<n> ESR=... FAR=..." and halts. */
 }

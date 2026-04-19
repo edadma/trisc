@@ -25,6 +25,14 @@ _start:
     add  x1, x1, #:lo12:stack_top
     mov  sp, x1
 
+    // Install the exception vector table. Any fault, IRQ or FIQ
+    // from here on routes through `exception_report` in vectors.s
+    // instead of silently jumping to whatever was at VBAR_EL1 reset.
+    adrp x1, vector_table
+    add  x1, x1, #:lo12:vector_table
+    msr  vbar_el1, x1
+    isb
+
     // Zero BSS: memset(&__bss_start, 0, __bss_end - __bss_start).
     adrp x1, __bss_start
     add  x1, x1, #:lo12:__bss_start
