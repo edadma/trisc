@@ -229,7 +229,7 @@ import oskit.hal.memset
     val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha, dma)
     dma.mem = mem
     linked.load(mem)
-    TriscCli.writeBootInfo(mem, OskitDemoBuilder.compileBootModules())
+    TriscCli.writeBootInfo(mem, OskitDemoBuilder.compileBootModules(), verbose = false)
 
     val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
     val keyInjector: Processor => Unit = cpu => {
@@ -418,7 +418,7 @@ import oskit.hal.memset
     val mem = new Memory("Memory", ram, stdout, intc, timer, kbd, ramdisk, sha, dma)
     dma.mem = mem
     linked.load(mem)
-    TriscCli.writeBootInfo(mem, OskitDemoBuilder.compileBootModules())
+    TriscCli.writeBootInfo(mem, OskitDemoBuilder.compileBootModules(), verbose = false)
 
     val pending                  = scheduledKeys.sortBy(_._1).to(scala.collection.mutable.Queue)
     val keyInjector: Processor => Unit = cpu => {
