@@ -344,7 +344,8 @@ class SyslAnalyzer:
         case "bool" => Some(SyslType.BoolType)
         case "string" => Some(SyslType.StringType)
         case "void" => Some(SyslType.VoidType)
-        case "f64" => Some(SyslType.DoubleType)
+        case "f32" | "float" => Some(SyslType.F32)
+        case "f64" | "double" => Some(SyslType.F64)
         case _ => None
 
   /** Link mangled imported enum names to generic templates for `unifyTypes` only. Do not call `instantiateGenericEnum` here — it would overwrite `variantToEnum` for shared variant names like `Got`/`Miss`. */
@@ -786,7 +787,8 @@ class SyslAnalyzer:
       case "long" | "i64" => I64
       case "ulong" | "u64" => U64
       case "char" => U32
-      case "double" | "f64" => DoubleType
+      case "double" | "f64" => F64
+      case "float" | "f32"  => F32
       case "byte" | "u8"  => U8
       case "i8"  => I8
       case "i16"  => I16
@@ -851,11 +853,11 @@ class SyslAnalyzer:
       case (UIntType(a), UIntType(b)) if a <= b => true  // unsigned widening
       case (IntType(a), UIntType(b)) if a <= b => true   // signed → unsigned widening
       case (UIntType(a), IntType(b)) if a <= b => true   // unsigned → signed widening
-      case (DoubleType, DoubleType) => true
-      case (_: IntType, DoubleType) => true    // signed int → float promotion
-      case (_: UIntType, DoubleType) => true   // unsigned int → float promotion
-      case (DoubleType, _: IntType) => true    // float → signed int (truncation)
-      case (DoubleType, _: UIntType) => true   // float → unsigned int (truncation)
+      case (FloatType(a), FloatType(b)) if a <= b => true  // f32 → f64 widening
+      case (_: IntType, _: FloatType) => true    // signed int → float promotion
+      case (_: UIntType, _: FloatType) => true   // unsigned int → float promotion
+      case (_: FloatType, _: IntType) => true    // float → signed int (truncation)
+      case (_: FloatType, _: UIntType) => true   // float → unsigned int (truncation)
       // bool and int are NOT compatible — use explicit casts
       // int ↔ pointer: NOT compatible — use explicit casts: int(ptr), *i8(addr)
       // FuncType compatibility ignores escaping flag — escaping is an optimization hint, not a type distinction
@@ -886,6 +888,8 @@ class SyslAnalyzer:
     expr match
       case TIntLit(value, _) if target.isIntegral => TIntLit(value, target)
       case TIntLit(0, _) if target.isInstanceOf[PtrType] => TIntLit(0, target) // null pointer
+      // Float literal → narrower float type (untyped float literal coercion)
+      case TFloatLit(value, _) if target.isFloat => TFloatLit(value, target)
       // String literal → byte array: "hello" initializing [n]byte
       case TStringLit(s, _) if target.isInstanceOf[ArrayType] =>
         val ArrayType(elemType, size) = target: @unchecked
@@ -993,7 +997,7 @@ class SyslAnalyzer:
     case IntType(w)      => s"i$w"
     case UIntType(w)     => s"u$w"
     case BoolType        => "bool"
-    case DoubleType      => "f64"
+    case FloatType(w)    => s"f$w"
     case StringType      => "string"
     case VoidType        => "void"
     case PtrType(i)      => "ptr" + typeToMangled(i)
@@ -1638,7 +1642,7 @@ class SyslAnalyzer:
         if n > 0xFFFFFFFFL || n < -0x80000000L then TIntLit(n, I64)
         else TIntLit(n, I32)
       case TypedIntLitAST(n, typeName) => TIntLit(n, resolveType(NamedTypeAST(typeName)))
-      case FloatLitAST(d) => TFloatLit(d, DoubleType)
+      case FloatLitAST(d) => TFloatLit(d, F64)
       case CharLitAST(c) => TIntLit(c.toLong, U32)
       case BoolLitAST(b) => TBoolLit(b, BoolType)
       case StringLitAST(s) => TStringLit(s, StringType)
@@ -2159,7 +2163,9 @@ class SyslAnalyzer:
               throw AnalysisError(s"operator $op requires numeric types, got ${tLeft.typ} $op ${tRight.typ}")
             // Promote to wider type; float wins over int; no mixed signed/unsigned
             (tLeft.typ, tRight.typ) match
-              case (DoubleType, _) | (_, DoubleType) => DoubleType
+              case (FloatType(a), FloatType(b)) => FloatType(a max b)
+              case (_: FloatType, _) => tLeft.typ
+              case (_, _: FloatType) => tRight.typ
               case (IntType(a), IntType(b)) => IntType(a max b)
               case (UIntType(a), UIntType(b)) => UIntType(a max b)
               case (UIntType(a), IntType(b)) if a < b => IntType(b)   // unsigned fits in signed
@@ -2192,9 +2198,9 @@ class SyslAnalyzer:
             if tRight.typ != BoolType then throw AnalysisError(s"$op requires bool operands, got ${tRight.typ}")
             BoolType
           case _ => throw AnalysisError(s"unknown operator: $op")
-        // Insert implicit int→float promotion casts for mixed operands
-        val promotedLeft = if resultType == DoubleType && tLeft.typ.isIntegral then TCast(tLeft, DoubleType) else tLeft
-        val promotedRight = if resultType == DoubleType && tRight.typ.isIntegral then TCast(tRight, DoubleType) else tRight
+        // Insert implicit int→float promotion / float-width casts for mixed operands
+        val promotedLeft  = if resultType.isFloat && tLeft.typ  != resultType then TCast(tLeft,  resultType) else tLeft
+        val promotedRight = if resultType.isFloat && tRight.typ != resultType then TCast(tRight, resultType) else tRight
         TBinary(promotedLeft, op, promotedRight, resultType)
 
       case CastAST(targetTypeAST, inner) =>
@@ -2208,8 +2214,9 @@ class SyslAnalyzer:
           case (BoolType, to) if to.isNumeric => // bool to numeric: true=1, false=0
           case (_: PtrType | _: RefType | _: FuncType, BoolType) => // pointer/ref/func to bool: null check
           // float conversions
-          case (from, DoubleType) if from.isIntegral => // int to float (cvt)
-          case (DoubleType, to) if to.isIntegral => // float to int (fint)
+          case (from, _: FloatType) if from.isIntegral => // int to float (cvt)
+          case (_: FloatType, to) if to.isIntegral => // float to int (fint)
+          case (_: FloatType, _: FloatType) => // float ↔ float (fpext / fptrunc)
           // integer conversions
           case (from, to) if from.isIntegral && to.isIntegral => // int ↔ int (signed/unsigned, any width)
           // pointer conversions
@@ -2234,7 +2241,7 @@ class SyslAnalyzer:
         val tArg = analyzeExpr(args.head)
         tArg.typ match
           case StringType => tArg // identity — already a string
-          case t if t.isNumeric || t == BoolType || t == DoubleType => TStr(tArg)
+          case t if t.isNumeric || t == BoolType => TStr(tArg)
           case t => throw AnalysisError(s"str() not supported on $t")
 
       case CallAST("string", args) =>
@@ -2688,7 +2695,7 @@ class SyslAnalyzer:
             val analyzed = analyzeExpr(ast)
             analyzed.typ match
               case SyslType.StringType => analyzed
-              case t if t.isNumeric || t == SyslType.BoolType || t == SyslType.DoubleType => TStr(analyzed)
+              case t if t.isNumeric || t == SyslType.BoolType => TStr(analyzed)
               case t => throw AnalysisError(s"cannot interpolate value of type $t into string")
           case Left(err) => throw AnalysisError(s"parse error in string interpolation: $err")
     }
@@ -2782,7 +2789,7 @@ class SyslAnalyzer:
       case 's' =>
         if expr.typ == SyslType.StringType then
           if spec.width == 0 && !spec.leftAlign then expr else TFmtStr(expr, spec)
-        else if expr.typ.isNumeric || expr.typ == SyslType.BoolType || expr.typ == SyslType.DoubleType then
+        else if expr.typ.isNumeric || expr.typ == SyslType.BoolType then
           if spec.width == 0 && !spec.leftAlign then TStr(expr) else TFmtStr(TStr(expr), spec)
         else throw AnalysisError(s"cannot format value of type ${expr.typ} with %s")
       case 'c' =>

@@ -63,7 +63,7 @@ class SyslSVMCodegen:
       case v => emit(s"  push_i64 $v")
 
   private def isUnsigned(t: SyslType): Boolean = t.isInstanceOf[SyslType.UIntType]
-  private def isFloat(t: SyslType): Boolean = t == SyslType.DoubleType
+  private def isFloat(t: SyslType): Boolean = t.isFloat
 
   /** True if this type needs memory allocation (can't fit in a single 64-bit local slot). */
   private def needsMemAlloc(t: SyslType): Boolean = t match
@@ -869,8 +869,8 @@ class SyslSVMCodegen:
 
   private def emitCast(from: SyslType, to: SyslType): Unit =
     import SyslType.*
-    val srcFloat = from == DoubleType
-    val tgtFloat = to == DoubleType
+    val srcFloat = from.isFloat
+    val tgtFloat = to.isFloat
     if srcFloat && !tgtFloat then emit("  f2i")
     else if !srcFloat && tgtFloat then emit("  i2f")
     else to match

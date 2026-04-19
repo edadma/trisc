@@ -138,6 +138,6 @@ class SyslTypePrefixTests extends AnyFreeSpec with Matchers {
   // ===== Error handling =====
 
   "fromPrefix rejects unknown token" in {
-    an[IllegalArgumentException] should be thrownBy SyslType.fromPrefix("float")
+    an[IllegalArgumentException] should be thrownBy SyslType.fromPrefix("nonsense")
   }
 }

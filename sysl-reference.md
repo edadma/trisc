@@ -61,7 +61,8 @@ Source code always uses the short name — the compiler resolves it to the mangl
 | `u16` | | 2 bytes | unsigned 16-bit integer |
 | `u32` | `char`, `uint` | 4 bytes | unsigned 32-bit integer (Unicode codepoint) |
 | `u64` | `ulong` | 8 bytes | unsigned 64-bit integer |
-| `f64` | `double` | 8 bytes | 64-bit floating point |
+| `f32` | `float` | 4 bytes | IEEE-754 single-precision floating point |
+| `f64` | `double` | 8 bytes | IEEE-754 double-precision floating point |
 | `bool` | | 1 byte | `true` or `false` |
 | `unit` | | 0 bytes | no value |
 | `string` | | 16 bytes | fat pointer: `{ptr: *u8, len: i64}` |
@@ -911,7 +912,13 @@ true, false           // bool
 0xFFu64               // u64
 ```
 
-Float literals (`3.14`, `1e5`) are always `f64`. There is no `f32` type.
+Float literals (`3.14`, `1e5`) default to `f64`, but coerce to `f32` when the
+context demands it (`var x: f32 = 1.5` works without a cast). Mixed-width float
+arithmetic widens to the wider operand; `f64 -> f32` requires explicit `f32(x)`.
+
+> **Backend note:** the TRISC backend currently emits 64-bit float instructions
+> only — `f32` is rejected by `--backend=trisc`. Use `f32` with the LLVM backend
+> (the typical embedded target).
 
 **Escape sequences** in string and char literals:
 
@@ -979,6 +986,8 @@ bool(42)          // int -> bool: true (nonzero)
 byte(0x1FF)       // truncate to u8: 255
 char(65)          // int -> u32: 65
 i64(3.14)         // float -> int: 3
+f32(3.14)         // f64 -> f32 (precision narrowing)
+f64(x: f32)       // f32 -> f64 (lossless widening, also implicit)
 
 // Pointer / int conversions
 *i8(address)      // int -> pointer
@@ -1381,7 +1390,7 @@ puts(s"cost is $$5")        // prints "cost is $5" ($$ = literal $)
 
 Plain strings (`"..."`) are never interpolated — `$` is just a regular character.
 
-Non-string expressions are automatically converted via `str()`. Integer, boolean, and float (`f64`) types are supported.
+Non-string expressions are automatically converted via `str()`. Integer, boolean, and float (`f32`/`f64`) types are supported.
 
 ### Format Strings (f-strings)
 
@@ -1504,7 +1513,8 @@ User-defined functions shadow builtins of the same name.
 - Signed: `i8` -> `i16` -> `i32` -> `i64`
 - Unsigned: `u8` -> `u16` -> `u32` -> `u64`
 - Cross-sign: `u8` -> `i16` (unsigned fits in wider signed)
-- Int to float: any integer -> `f64`
+- Float: `f32` -> `f64`
+- Int to float: any integer -> `f32` or `f64`
 
 ### Mixed Signed/Unsigned Rules
 

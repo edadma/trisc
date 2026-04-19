@@ -331,9 +331,11 @@ class SyslTriscCodegen(addresses: Int = 4):
       case SyslType.UIntType(32) =>
         emit(s"  ldw r$destReg, r$addrReg, r0")
         emit(s"  zew r$destReg, r$destReg")
-      case SyslType.IntType(64) | SyslType.UIntType(64) | SyslType.DoubleType |
+      case SyslType.IntType(64) | SyslType.UIntType(64) | SyslType.FloatType(64) |
            _: SyslType.PtrType | _: SyslType.RefType =>
         emit(s"  ldd r$destReg, r$addrReg, r0")
+      case SyslType.FloatType(32) =>
+        throw new RuntimeException("f32 is not yet supported in the TRISC backend (TRISC float ops are 64-bit). Use f64 or target the LLVM backend.")
       case other =>
         throw new RuntimeException(s"emitLoad: unexpected type $other")
 
@@ -377,9 +379,11 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  ldd r4, r4, r0")
           emitAddImm(3, addrReg, i)
           emit("  std r4, r3, r0")
-      case SyslType.IntType(64) | SyslType.UIntType(64) | SyslType.DoubleType |
+      case SyslType.IntType(64) | SyslType.UIntType(64) | SyslType.FloatType(64) |
            _: SyslType.PtrType | _: SyslType.RefType =>
         emit(s"  std r$srcReg, r$addrReg, r0")
+      case SyslType.FloatType(32) =>
+        throw new RuntimeException("f32 is not yet supported in the TRISC backend. Use f64 or target the LLVM backend.")
       case other =>
         throw new RuntimeException(s"emitStore: unexpected type $other")
 
@@ -1657,7 +1661,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  mov r2, r1") // r2 = right
         emit("  popd r1")   // r1 = left
         stackOffset += 8
-        val isFloat = left.typ == SyslType.DoubleType
+        val isFloat = left.typ.isFloat
         val unsigned = left.typ.isUnsigned
         if isFloat then
           op match
@@ -1858,14 +1862,17 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TCast(inner, target) =>
         genExpr(inner)
         import SyslType.*
-        val srcIsFloat = inner.typ == DoubleType
-        val tgtIsFloat = target == DoubleType
+        val srcIsFloat = inner.typ.isFloat
+        val tgtIsFloat = target.isFloat
         // Float → int: convert float bits to integer value first
         if srcIsFloat && !tgtIsFloat then emit("  fint r1, r1")
         // Int → float: convert integer value to float bits
         else if !srcIsFloat && tgtIsFloat then emit("  cvt r1, r1")
+        // f32 not supported on TRISC — guard the float arms below
+        if (target == FloatType(32)) || (inner.typ == FloatType(32)) then
+          throw new RuntimeException("f32 is not yet supported in the TRISC backend. Use f64 or target the LLVM backend.")
         target match
-          case DoubleType => // cvt already emitted above (or no-op if src is already float)
+          case _: FloatType => // cvt already emitted above (or no-op if src is already float)
           case BoolType =>
             // nonzero → 1, zero → 0
             val isZero = newLabel("iszero")
@@ -1896,7 +1903,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TUnary("-", operand, resultType) =>
         genExpr(operand)
-        if operand.typ == SyslType.DoubleType then emit("  fneg r1, r1")
+        if operand.typ.isFloat then emit("  fneg r1, r1")
         else
           emit("  neg r1, r1")
           emitNarrow(1, resultType)
@@ -2664,7 +2671,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         // Convert value to string — dispatch on type.
         // __str_int handles integers/bool (bits interpreted as signed i64);
         // __str_float handles f64 values.
-        val isFloat = inner.typ == SyslType.DoubleType
+        val isFloat = inner.typ.isFloat
         genExpr(inner) // r1 = value (integer bits or f64 bits)
         if isFloat then needsStrFloat = true
         else needsStrInt = true
@@ -3738,7 +3745,9 @@ class SyslTriscCodegen(addresses: Int = 4):
     case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType => "db"
     case SyslType.IntType(16) | SyslType.UIntType(16) => "ds"
     case SyslType.IntType(32) | SyslType.UIntType(32) => "dw"
-    case SyslType.DoubleType => "dd"
+    case SyslType.FloatType(64) => "dd"
+    case SyslType.FloatType(32) =>
+      throw new RuntimeException("f32 is not yet supported in the TRISC backend.")
     case SyslType.IntType(64) | SyslType.UIntType(64) | _: SyslType.PtrType | _: SyslType.RefType => "dl"
     case other => throw new RuntimeException(s"emitDataDirective: unexpected type $other")
 

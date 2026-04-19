@@ -446,7 +446,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case SyslType.StringType =>
       RefStringVal(Array.empty, 0, new java.util.concurrent.atomic.AtomicInteger(1))
     case _: SyslType.IntType | _: SyslType.UIntType => IntVal(0)
-    case SyslType.DoubleType => FloatVal(0.0)
+    case _: SyslType.FloatType => FloatVal(0.0)
     case SyslType.VoidType | (_: SyslType.FuncType) | SyslType.InterfaceType(_, _) => IntVal(0)
     case SyslType.EnumType(_, _) => EnumVal(0, Array.empty)
     case SyslType.RefType(inner) =>
@@ -1002,7 +1002,9 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val v = evalAny(inner, env)
         import SyslType.*
         target match
-          case DoubleType  => FloatVal(toDouble(v))
+          case FloatType(32) => FloatVal(toDouble(v).toFloat.toDouble)  // narrow to f32 precision
+          case FloatType(64) => FloatVal(toDouble(v))
+          case _: FloatType  => FloatVal(toDouble(v))
           case BoolType => v match
             case FuncVal(_) => IntVal(1L) // function references are always non-null
             case RefVal(_, _, _) | RefEnumVal(_, _, _) | RefSliceVal(_, _, _) | RefStringVal(_, _, _) => IntVal(1L)
