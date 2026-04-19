@@ -63,7 +63,7 @@ WRAPPER_EOF
 
     # Compile Sysl → LLVM IR
     cd "$REPO_ROOT"
-    sbt "syslCliJVM/run compile --emit llvm ${SYSL_FILES[*]} -o $OUT/srv_${NAME}.ll" > /tmp/sbt-srv-${NAME}.txt 2>&1
+    sbt "syslCliJVM/run compile --emit llvm --target=x86_64-elf ${SYSL_FILES[*]} -o $OUT/srv_${NAME}.ll" > /tmp/sbt-srv-${NAME}.txt 2>&1
     if [ $? -ne 0 ]; then
         echo "  Sysl compile failed:" >&2
         tail -10 /tmp/sbt-srv-${NAME}.txt >&2
@@ -119,7 +119,7 @@ DISKEOF
     )
 
     cd "$REPO_ROOT"
-    sbt "syslCliJVM/run compile --emit llvm ${SYSL_FILES[*]} -o $OUT/srv_disk.ll" > /tmp/sbt-srv-disk.txt 2>&1
+    sbt "syslCliJVM/run compile --emit llvm --target=x86_64-elf ${SYSL_FILES[*]} -o $OUT/srv_disk.ll" > /tmp/sbt-srv-disk.txt 2>&1
     if [ $? -ne 0 ]; then
         echo "  Sysl compile failed:" >&2
         tail -10 /tmp/sbt-srv-disk.txt >&2

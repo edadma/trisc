@@ -93,9 +93,9 @@ the context frame lives on the process's SSP (because the hardware
 pushes PC+PSR there on trap). Build in a temp buffer and copy
 to the child's address space. Returns the SSP value for the thread.
 
-    arch_setup_process_frame(entry_point: i64, usp: i64, ssp: i64, kstack_top_val: i64, ptbr_val: int) -> i64
+    arch_setup_process_frame(entry_point: i64, usp: i64, ssp: i64, kstack_top_val: i64, ptbr_val: u64) -> i64
         var frame_buf: [72]byte
         val frame_ssp = i64(&frame_buf[0]) + STACK_FRAME_SIZE
         build_stack_frame(entry_point, usp, frame_ssp)
-        vm_copy_to(ptbr_val, int(ssp) - STACK_FRAME_SIZE, &frame_buf[0], STACK_FRAME_SIZE)
+        vm_copy_to(ptbr_val, u64(ssp) - u64(STACK_FRAME_SIZE), &frame_buf[0], STACK_FRAME_SIZE)
         ssp - STACK_FRAME_SIZE

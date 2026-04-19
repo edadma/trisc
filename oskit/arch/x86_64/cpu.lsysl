@@ -24,6 +24,11 @@ Enable interrupts (x86 sti instruction).
 
     extern arch_sti()
 
+Set x86 hardware watchpoint on a 4-byte address (uses DR0).
+CPU raises #DB on any write to the watched address.
+
+    extern set_hw_watchpoint(addr: u64)
+
 Spinlock acquire. Spins using lock cmpxchg until the lock
 is obtained, then disables interrupts. Lock is 0=free, 1=held.
 x86 calling convention: rdi = first arg (lock pointer).

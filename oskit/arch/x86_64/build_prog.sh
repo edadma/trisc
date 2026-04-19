@@ -50,7 +50,7 @@ build_one() {
 
     # Compile Sysl → LLVM IR
     cd "$REPO_ROOT"
-    sbt "syslCliJVM/run compile --emit llvm ${SYSL_FILES[*]} -o $OUT/prog_${NAME}.ll" > /tmp/sbt-prog-${NAME}.txt 2>&1
+    sbt "syslCliJVM/run compile --emit llvm --target=x86_64-elf ${SYSL_FILES[*]} -o $OUT/prog_${NAME}.ll" > /tmp/sbt-prog-${NAME}.txt 2>&1
     if [ $? -ne 0 ]; then
         echo "  Sysl compile failed:" >&2
         tail -5 /tmp/sbt-prog-${NAME}.txt >&2

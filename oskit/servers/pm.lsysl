@@ -68,27 +68,12 @@ Big-endian message helpers (local to this server).
         buf[off + 2] = (v >> 8) & 0xFF
         buf[off + 3] = v & 0xFF
 
-Debug: print a hex nibble.
-
-    pm_hex(v: int)
-        val d = v & 0xF
-        if d < 10
-            putc('0' + d)
-        else
-            putc('a' + d - 10)
-
 Handle a process exit notification from the kernel.
 The notification value is the PID of the exited process.
 Check if any parent is waiting for this PID and reply to them.
 If no waiter, the zombie stays until waitpid is called.
 
     pm_handle_exit(pid: int)
-        // DEBUG: trace exit notification
-        putc('<')
-        putc('E')
-        pm_hex(pid >> 4)
-        pm_hex(pid)
-        putc('>')
         if pid <= 0
             return
         if pid >= MAX_PROCESSES
@@ -138,23 +123,13 @@ the IPC reply until the child exits.
 
     pm_handle_waitpid(sender: int, buf: *byte)
         val pid = pm_msg_read_i32(buf, 1)
-        // DEBUG: trace waitpid request
-        putc('<')
-        putc('W')
-        pm_hex(pid >> 4)
-        pm_hex(pid)
-        putc(':')
         if pid <= 0
-            putc('?')
-            putc('>')
             var reply: [5]byte
             reply[0] = byte(-1)
             pm_msg_write_i32(reply, 1, 0)
             ipc_reply(sender, reply, 5)
             return
         if pid >= MAX_PROCESSES
-            putc('?')
-            putc('>')
             var reply: [5]byte
             reply[0] = byte(-1)
             pm_msg_write_i32(reply, 1, 0)
@@ -162,12 +137,9 @@ the IPC reply until the child exits.
             return
 
         val st = svc_proc_state(pid)
-        pm_hex(st >> 4)
-        pm_hex(st)
 
         // Already zombie? Reap immediately.
         if st == PROC_ZOMBIE
-            putc('>')
             val exit_code = svc_proc_exit_code(pid)
             svc_reap_proc(pid)
             var reply: [5]byte
@@ -178,8 +150,6 @@ the IPC reply until the child exits.
 
         // Already free? Error.
         if st == PROC_FREE
-            putc('!')
-            putc('>')
             var reply: [5]byte
             reply[0] = byte(-1)
             pm_msg_write_i32(reply, 1, 0)
@@ -187,8 +157,6 @@ the IPC reply until the child exits.
             return
 
         // Child still running — defer reply until exit
-        putc('D')
-        putc('>')
         var i = 0
         while i < MAX_WAITERS
             if waiters[i].active == 0
@@ -290,6 +258,8 @@ handles from parent to child, and returns the PID.
         // Extract path as string
         val path = string(buf + 4, path_len)
 
+
+
         // Create per-process page table
         val proc_pt = svc_vm_create_pt()
         if proc_pt == 0
@@ -298,6 +268,8 @@ handles from parent to child, and returns the PID.
             ipc_reply(sender, reply, 1)
             return
 
+
+
         // Load binary into child's address space via cross-address-space copy
         val entry = load_tof_to_ptbr(path, proc_pt)
         if entry < 0
@@ -305,6 +277,8 @@ handles from parent to child, and returns the PID.
             reply[0] = -1
             ipc_reply(sender, reply, 1)
             return
+
+
 
         // Write args to child's standard args address via cross-address-space copy
         var args_local: [256]byte
@@ -317,11 +291,15 @@ handles from parent to child, and returns the PID.
         args_local[i] = 0
         svc_vm_copy_to(proc_pt, SPAWN_PROG_ARGS_ADDR, args_local, i + 1)
 
+
+
         // Extract command name for thread name (first arg before space)
         val cmd = string(buf + 4 + path_len, args_len)
 
         // Create the process suspended — it won't run until we resume it
         val pid = svc_create_proc_susp(entry, PROG_USP, PROG_SSP, cmd, proc_pt)
+
+
 
         var reply: [5]byte
         if pid < 0
@@ -334,9 +312,7 @@ handles from parent to child, and returns the PID.
                 pm_inherit_handles(sender_pid, pid, buf, path_len, args_len, num_handles)
             // Now resume the child — handles are set up
             svc_resume_proc(pid)
-            reply[0] = 0
-            pm_msg_write_i32(reply, 1, pid)
-            ipc_reply(sender, reply, 5)
+
 
 Send handle inheritance request to VFS.
 

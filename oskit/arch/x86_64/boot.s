@@ -363,6 +363,22 @@ vm_get_ptbr:
     retq
 
 # ============================================================================
+# set_hw_watchpoint — Set DR0 hardware write watchpoint (4 bytes)
+# ============================================================================
+# rdi = address to watch
+# Sets DR0 to the address, DR7 to enable 4-byte write-only breakpoint on DR0.
+# The CPU will raise #DB (vector 1) on any write to the watched address.
+
+.global set_hw_watchpoint
+set_hw_watchpoint:
+    movq %rdi, %dr0
+    # DR7: L0=1, G0=1, LE=1, R/W0=01 (write), LEN0=11 (4 bytes)
+    # = (3 << 18) | (1 << 16) | (1 << 8) | 3 = 0xD0103
+    movq $0xD0103, %rax
+    movq %rax, %dr7
+    retq
+
+# ============================================================================
 # Context Switch
 # ============================================================================
 #
@@ -715,8 +731,34 @@ exc_stub_\vec:
 .endm
 
 # Generate stubs for all exception vectors not already handled
-# Vectors WITHOUT error codes: 1-7, 9, 15, 16, 18-20, 22-31
-exc_no_errcode 1
+# Vector 1 (#DB) — Debug exception (hardware watchpoint)
+# Print faulting RIP and DR6 (debug status), then clear DR7 and continue
+.global exc_stub_1
+exc_stub_1:
+    cli
+    # Save registers we'll use
+    pushq %rax
+    pushq %rdi
+    # Print marker
+    movq $0x57, %rdi          # 'W' for watchpoint
+    call debug_char
+    movq $0x3A, %rdi          # ':'
+    call debug_char
+    # Print faulting RIP (at offset +16 on stack: rdi, rax, RIP)
+    movq 16(%rsp), %rdi       # faulting RIP
+    shrq $16, %rdi
+    call debug_hex4
+    movq 16(%rsp), %rdi
+    call debug_hex4
+    movq $0x0A, %rdi          # newline
+    call debug_char
+    # Clear DR6 (debug status) so the exception doesn't re-fire
+    xorq %rax, %rax
+    movq %rax, %dr6
+    # Restore and return to faulting instruction (it already wrote)
+    popq %rdi
+    popq %rax
+    iretq
 exc_no_errcode 2
 exc_no_errcode 3
 exc_no_errcode 4
