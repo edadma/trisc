@@ -249,9 +249,9 @@ class SyslLLVMStructTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 1
   }
 
-  // ===== Auto-deref *T → T for function arguments =====
+  // ===== Explicit *ptr to pass struct by value; self is the only implicit deref =====
 
-  "auto-deref pointer to struct for function arg" in {
+  "explicit *ptr passes struct by value" in {
     llvmExit(
       """struct Point
         |    x: int
@@ -262,11 +262,11 @@ class SyslLLVMStructTests extends SyslLLVMTestHelpers {
         |main() -> int
         |    var p = Point(20, 22)
         |    val ptr: *Point = &p
-        |    sum(ptr)
+        |    sum(*ptr)
         |""".stripMargin) shouldBe 42
   }
 
-  "auto-deref self in method calling standalone function" in {
+  "self auto-derefs in method calling standalone function" in {
     llvmExit(
       """struct Point
         |    x: int
@@ -282,7 +282,7 @@ class SyslLLVMStructTests extends SyslLLVMTestHelpers {
         |""".stripMargin) shouldBe 42
   }
 
-  "auto-deref produces a copy" in {
+  "explicit *ptr produces a copy of pointee" in {
     llvmExit(
       """struct Point
         |    x: int
@@ -293,7 +293,7 @@ class SyslLLVMStructTests extends SyslLLVMTestHelpers {
         |main() -> int
         |    var p = Point(20, 22)
         |    val ptr: *Point = &p
-        |    sum(ptr)
+        |    sum(*ptr)
         |""".stripMargin) shouldBe 42
   }
 }

@@ -1526,11 +1526,12 @@ var y: int = big + 1     // ERROR: u32 doesn't fit in i32
 - `&T` -> `*U` (ref decays to raw pointer)
 - Any `*T` -> any `*U` (permissive pointer casting)
 
-### Auto-Deref for Function Arguments
+### Pointer Dereference Is Explicit
 
-When a function parameter expects a struct by value (`T`) and the caller
-passes a pointer to that struct (`*T`), the compiler implicitly dereferences
-the pointer, copying the value through:
+Passing `*T` to a function parameter of type `T` is a **type error**. Implicit
+deref-and-copy was removed because it hides cost: a pointer-passing site that
+*looks* like pass-by-reference silently becomes a `memcpy` of the entire pointee.
+For a small struct that's free; for a 4 KB packet it isn't. Write the deref:
 
 ```sysl
 struct Point
@@ -1542,19 +1543,26 @@ sum(p: Point) -> int = p.x + p.y
 main() -> int
     var p = Point(20, 22)
     val ptr: *Point = &p
-    sum(ptr)               // auto-deref: sum(*ptr), callee gets a copy
+    sum(*ptr)              // explicit: sum receives a copy of *ptr
 ```
 
-This is safe because the callee receives a copy — the caller's original is
-not affected. The same auto-deref applies to `self` inside methods, which
-has type `*StructName`:
+Equivalently, take the pointer's pointee directly: `sum(p)` (no `&`/`*` at all).
+
+The reverse direction (`T` -> `*T`) is also not implicit — it would create
+a dangling pointer to a temporary.
+
+### Exception: `self` In Methods
+
+Inside a method body `self` has type `*StructName`. Passing `self` to a function
+that expects the value type auto-derefs, because the method-call sugar already
+hides the pointer:
 
 ```sysl
-Point.total() -> int = sum(self)   // self is *Point, sum expects Point
+Point.total() -> int = sum(self)   // self is *Point; sum gets a copy of *self
 ```
 
-Only `*T` -> `T` is implicit (deref to copy). The reverse (`T` -> `*T`) is
-**not** implicit because it would create a dangling pointer to a temporary.
+This is the **only** implicit `*T -> T` allowed. Local variables of pointer
+type, function parameters, struct fields — all require explicit `*ptr`.
 
 ### Explicit Casts Required
 

@@ -870,7 +870,8 @@ class SyslAnalyzer:
       case (SliceType(e1), SliceType(e2)) if e1 == e2 => true
       case (RefType(a), RefType(b)) if compatible(a, b) => true // same ref type (recursive check handles nominal types)
       case (RefType(inner), PtrType(_)) => true             // &T → *U (ref decays to pointer)
-      case (PtrType(st1: StructType), st2: StructType) if st1.name == st2.name => true // *T → T (auto-deref copy)
+      // Note: *T → T is NOT compatible. Implicit deref-and-copy hides cost (memcpy of pointee).
+      // Write *ptr explicitly. Exception: `self` in methods (handled in checkArgs).
       // Interface satisfaction: struct/ptr/ref → interface (if methods match)
       case (st: StructType, iface: InterfaceType) => satisfiesInterface(st, iface)
       case (PtrType(st: StructType), iface: InterfaceType) => satisfiesInterface(st, iface)
@@ -1371,17 +1372,23 @@ class SyslAnalyzer:
       throw AnalysisError(s"function '$name' expects ${params.length} argument(s), got ${args.length}")
     filledArgs.zip(params).map { case (arg, (pName, pType)) =>
       val coerced = coerceLiteral(arg, pType)
-      if !compatible(coerced.typ, pType) then
+      // Special case: `self` (always *T inside methods, mangled as __self__) auto-derefs
+      // when passed to a T param. This is the ONLY implicit *T → T allowed; elsewhere write `*ptr`.
+      val selfDeref = (coerced, pType) match
+        case (TVarRef("__self__", PtrType(st: StructType)), pSt: StructType) if st.name == pSt.name =>
+          Some(TDeref(coerced, pSt))
+        case _ => None
+      if selfDeref.isEmpty && !compatible(coerced.typ, pType) then
         throw AnalysisError(s"argument '$pName' of '$name' expects $pType, got ${coerced.typ}")
       // Insert explicit conversions for codegen
-      (coerced.typ, pType) match
-        case (StringType, PtrType(I8 | U8)) => TCast(coerced, pType)
-        case (_: FuncType, IntType(64) | UIntType(64)) => TCast(coerced, pType)
-        case (_, iface: InterfaceType) if !coerced.typ.isInstanceOf[InterfaceType] =>
-          TInterfaceBox(coerced, iface)
-        case (PtrType(st: StructType), pSt: StructType) if st.name == pSt.name =>
-          TDeref(coerced, pSt)
-        case _ => coerced
+      selfDeref.getOrElse {
+        (coerced.typ, pType) match
+          case (StringType, PtrType(I8 | U8)) => TCast(coerced, pType)
+          case (_: FuncType, IntType(64) | UIntType(64)) => TCast(coerced, pType)
+          case (_, iface: InterfaceType) if !coerced.typ.isInstanceOf[InterfaceType] =>
+            TInterfaceBox(coerced, iface)
+          case _ => coerced
+      }
     }
 
   private def analyzeBlock(stmts: List[StmtAST]): List[TStmt] =
