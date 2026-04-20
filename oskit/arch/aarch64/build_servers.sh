@@ -108,6 +108,15 @@ build_rs() {
         oskit/hal/mem_cpu.lsysl
 }
 
+build_tfs() {
+    build_server tfs tfs_server \
+        "import oskit.servers.{tfs_server}" \
+        oskit/servers/tfs.lsysl \
+        oskit/fs/tfs.lsysl \
+        oskit/drivers/disk/disk_x86.lsysl \
+        oskit/hal/mem_cpu.lsysl
+}
+
 build_disk() {
     # Disk server needs a custom wrapper that reads ramdisk base/size
     # from the info page (+8, +16) in addition to the RS TID (+0).
@@ -170,10 +179,12 @@ if [ -n "$1" ]; then
     case "$1" in
         rs)   build_rs ;;
         disk) build_disk ;;
-        all)  build_rs; build_disk ;;
+        tfs)  build_tfs ;;
+        all)  build_rs; build_disk; build_tfs ;;
         *)    echo "Unknown server: $1" >&2; exit 1 ;;
     esac
 else
     build_rs
     build_disk
+    build_tfs
 fi

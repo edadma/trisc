@@ -16,6 +16,7 @@ RAMDISK="${RAMDISK:-/tmp/slix-aarch64/ramdisk.img}"
 QEMU_ARGS=(
     -machine virt,gic-version=2
     -cpu cortex-a72
+    -m 512M
     -nographic
     -no-reboot
     -kernel "$KERNEL"
