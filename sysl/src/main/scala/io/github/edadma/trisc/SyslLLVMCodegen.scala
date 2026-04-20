@@ -12,6 +12,12 @@ class SyslLLVMCodegen(target: String = "host"):
   private val cStringConstants = new mutable.LinkedHashMap[String, (String, Int)] // value -> (label, byte length including null) — raw C strings (for printf format strings, etc.)
   private val structTypes = new mutable.LinkedHashMap[String, SyslType.StructType] // name -> struct type
   private val deinitFunctions = new mutable.HashMap[String, String] // struct name -> deinit function name
+
+  // Slice deinit functions to emit (for &[]T where T contains rc data). Generated
+  // on demand when a slice with rc-content elements is freed; emitted after all
+  // user functions. Each takes the data pointer (past the 16-byte rc/len header)
+  // and decrs every element before returning.
+  private val sliceElemDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType] // deinit name -> elem type
   private var closureCounter = 0
   private val pendingClosures = new mutable.ListBuffer[(String, TClosure)] // (name, closure)
   private val funcWrappers = new mutable.LinkedHashMap[String, String] // original name -> wrapper name
@@ -103,6 +109,7 @@ class SyslLLVMCodegen(target: String = "host"):
     // First pass: collect struct type definitions and deinit functions
     structTypes.clear()
     deinitFunctions.clear()
+    sliceElemDeinitsNeeded.clear()
     for decl <- program.decls do
       decl match
         case TStructDecl(name, fields, volFields) =>
@@ -168,6 +175,14 @@ class SyslLLVMCodegen(target: String = "host"):
       pendingWrappers.clear()
       for (wn, origName, params, retType) <- wrapperBatch do
         emitFuncWrapper(wn, origName, params, retType)
+    // Emit slice element deinit functions (registered when freeing slices of
+    // rc-content elements). Iterating may register more types, so drain a worklist.
+    val emittedSliceDeinits = mutable.Set.empty[String]
+    while sliceElemDeinitsNeeded.exists((n, _) => !emittedSliceDeinits.contains(n)) do
+      val pending = sliceElemDeinitsNeeded.filterNot((n, _) => emittedSliceDeinits.contains(n)).toList
+      for (name, elem) <- pending do
+        emittedSliceDeinits += name
+        emitSliceDeinit(name, elem)
     val funcCode = out.toString
 
     // Now build final output with string constants at the top
@@ -342,6 +357,11 @@ class SyslLLVMCodegen(target: String = "host"):
       // Increment string buffer refcount for string params (callee holds a copy)
       if param.typ == SyslType.StringType then
         emitStringDescrIncr(alloca)
+      // Value-struct params containing strings: incr string fields (callee holds a copy)
+      param.typ match
+        case st: SyslType.StructType if structHasStringFields(st) =>
+          emitStructStringFieldsIncr(alloca, st)
+        case _ =>
 
     // Switch to body buffer for the function body
     deferredAllocas.clear()
@@ -546,12 +566,23 @@ class SyslLLVMCodegen(target: String = "host"):
           locals(name) = LocalVar(name, alloca, typ, isVolatile)
           if !isOwnedString(init) then emitStringDescrIncr(alloca)
         else if isAggregate(typ) then
-          // Aggregate variable: genExpr returns an alloca pointer — use it directly
-          val ptr = genExpr(init)
-          locals(name) = LocalVar(name, ptr, typ, isVolatile)
-          // Slice backref: increment if copying from a non-owned source
-          if isSliceType(typ) && !isSliceOwned(init) then
-            emitSliceBackrefIncr(ptr)
+          typ match
+            case st: SyslType.StructType if structHasStringFields(st) && !isOwnedStruct(init) =>
+              // Borrowed value struct: copy bytes into a fresh alloca, then incr string fields
+              val src = genExpr(init)
+              val alloca = deferAlloca(lt)
+              val loaded = newReg()
+              emit(s"  $loaded = load $lt, $lt* $src")
+              emit(s"  store $lt $loaded, $lt* $alloca")
+              locals(name) = LocalVar(name, alloca, typ, isVolatile)
+              emitStructStringFieldsIncr(alloca, st)
+            case _ =>
+              // Aggregate variable: genExpr returns an alloca pointer — use it directly
+              val ptr = genExpr(init)
+              locals(name) = LocalVar(name, ptr, typ, isVolatile)
+              // Slice backref: increment if copying from a non-owned source
+              if isSliceType(typ) && !isSliceOwned(init) then
+                emitSliceBackrefIncr(ptr)
         else
             val alloca = deferAlloca(lt)
             val value = genExpr(init)
@@ -598,10 +629,15 @@ class SyslLLVMCodegen(target: String = "host"):
               emitRefDecr(oldVal, refHeaderOffset(local.typ), deinitFor(local.typ))
             // Slice reassignment: decrement old backref before overwrite
             if isSliceType(local.typ) then
-              emitSliceBackrefDecr(local.reg)
+              emitSliceBackrefDecr(local.reg, local.typ)
             // String reassignment: decrement old buffer refcount before overwrite
             if isStringType(local.typ) then
               emitStringDescrDecr(local.reg)
+            // Value-struct reassignment: decrement old struct's string fields before overwrite
+            local.typ match
+              case st: SyslType.StructType if structHasStringFields(st) =>
+                emitStructStringFieldsDecr(local.reg, st)
+              case _ =>
             if isAggregate(local.typ) then
               // Aggregate reassignment: load value from source, store to target
               val loaded = newReg()
@@ -613,6 +649,11 @@ class SyslLLVMCodegen(target: String = "host"):
               // String reassignment: increment new buffer refcount if not owned
               if isStringType(local.typ) && !isOwnedString(value) then
                 emitStringDescrIncr(local.reg)
+              // Value-struct reassignment: increment new struct's string fields if borrowed
+              local.typ match
+                case st: SyslType.StructType if structHasStringFields(st) && !isOwnedStruct(value) =>
+                  emitStructStringFieldsIncr(local.reg, st)
+                case _ =>
             else
               val vt = exprType(value)
               val finalVal = emitSextIfNeeded(v, vt, lt, value.typ.isSigned)
@@ -885,7 +926,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val gep = newReg()
         emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
         // Slice field: decrement old backref before overwrite
-        if isSliceType(ft) then emitSliceBackrefDecr(gep)
+        if isSliceType(ft) then emitSliceBackrefDecr(gep, ft)
         // String field: decrement old buffer refcount before overwrite
         if isStringType(ft) then emitStringDescrDecr(gep)
         val v = genExpr(value)
@@ -1449,6 +1490,10 @@ class SyslLLVMCodegen(target: String = "host"):
                   // Slice: increment aggResult copy (source will be cleaned up by scope cleanup)
                   if isSliceType(typ) then emitSliceBackrefIncr(alloca)
                   if isStringType(typ) then emitStringDescrIncr(alloca)
+                  typ match
+                    case st: SyslType.StructType if structHasStringFields(st) =>
+                      emitStructStringFieldsIncr(alloca, st)
+                    case _ =>
                 case None =>
                   val vt = exprType(e)
                   thenVal = if vt != t && e.typ.isIntegral then emitSextIfNeeded(v, vt, t, e.typ.isSigned) else v
@@ -1485,6 +1530,10 @@ class SyslLLVMCodegen(target: String = "host"):
                     emit(s"  store $t $loaded, $t* $alloca")
                     if isSliceType(typ) then emitSliceBackrefIncr(alloca)
                     if isStringType(typ) then emitStringDescrIncr(alloca)
+                    typ match
+                      case st: SyslType.StructType if structHasStringFields(st) =>
+                        emitStructStringFieldsIncr(alloca, st)
+                      case _ =>
                   case None =>
                     val vt = exprType(e)
                     elseVal = if vt != t && e.typ.isIntegral then emitSextIfNeeded(v, vt, t, e.typ.isSigned) else v
@@ -1536,6 +1585,11 @@ class SyslLLVMCodegen(target: String = "host"):
           // String field in struct: increment buffer refcount for the copy
           if isStringType(fieldSyslType) && !isOwnedString(arg) then
             emitStringDescrIncr(gep)
+          // Nested value-struct field: recursively increment string fields if borrowed
+          fieldSyslType match
+            case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStruct(arg) =>
+              emitStructStringFieldsIncr(gep, nested)
+            case _ =>
         alloca
 
       case TStructLit(st @ SyslType.StructType(_, _, _)) =>
@@ -2347,6 +2401,10 @@ class SyslLLVMCodegen(target: String = "host"):
                       emit(s"  store $resultLt $loaded, $resultLt* $resultAlloca")
                       if isSliceType(effectiveType) then emitSliceBackrefIncr(resultAlloca)
                       if isStringType(effectiveType) then emitStringDescrIncr(resultAlloca)
+                      effectiveType match
+                        case st: SyslType.StructType if structHasStringFields(st) =>
+                          emitStructStringFieldsIncr(resultAlloca, st)
+                        case _ =>
                     else emit(s"  store $resultLt $v, $resultLt* $resultAlloca")
                 case other => genStmt(other)
           if !hasReturned then
@@ -2377,6 +2435,10 @@ class SyslLLVMCodegen(target: String = "host"):
                       emit(s"  store $resultLt $loaded, $resultLt* $resultAlloca")
                       if isSliceType(effectiveType) then emitSliceBackrefIncr(resultAlloca)
                       if isStringType(effectiveType) then emitStringDescrIncr(resultAlloca)
+                      effectiveType match
+                        case st: SyslType.StructType if structHasStringFields(st) =>
+                          emitStructStringFieldsIncr(resultAlloca, st)
+                        case _ =>
                     else emit(s"  store $resultLt $v, $resultLt* $resultAlloca")
                 case other => genStmt(other)
             if !hasReturned then
@@ -3070,6 +3132,143 @@ class SyslLLVMCodegen(target: String = "host"):
 
   private def isStringType(t: SyslType): Boolean = t == SyslType.StringType
 
+  /** True if a value type (recursively) contains any string buffers needing rc.
+    * Recurses through value-struct fields and value-array elements. Stops at
+    * refs/pointers/slices (handled separately). */
+  private def structHasStringFields(t: SyslType): Boolean = t match
+    case _ if isStringType(t) => true
+    case st: SyslType.StructType =>
+      val resolved = canonicalStruct(st)
+      resolved.fields.exists((_, ft) => structHasStringFields(ft))
+    case SyslType.ArrayType(elem, _) => structHasStringFields(elem)
+    case _ => false
+
+  /** Decrement rc of every string buffer (recursively into nested value-struct fields
+    * and value-array elements) at `structAddr`. */
+  private def emitStructStringFieldsDecr(structAddr: String, st: SyslType.StructType): Unit =
+    val resolved = canonicalStruct(st)
+    val structLt = llvmType(resolved)
+    for case ((_, ft), i) <- resolved.fields.zipWithIndex do
+      if structHasStringFields(ft) then
+        val gep = newReg()
+        emit(s"  $gep = getelementptr $structLt, $structLt* $structAddr, i32 0, i32 $i")
+        emitValueRC(gep, ft, incr = false)
+
+  /** Increment rc of every string buffer (recursively) inside a value struct.
+    * Used when copying a borrowed struct so the destination owns its share. */
+  private def emitStructStringFieldsIncr(structAddr: String, st: SyslType.StructType): Unit =
+    val resolved = canonicalStruct(st)
+    val structLt = llvmType(resolved)
+    for case ((_, ft), i) <- resolved.fields.zipWithIndex do
+      if structHasStringFields(ft) then
+        val gep = newReg()
+        emit(s"  $gep = getelementptr $structLt, $structLt* $structAddr, i32 0, i32 $i")
+        emitValueRC(gep, ft, incr = true)
+
+  /** Null out every string descriptor's data pointer (recursively) so a later cleanup
+    * pass sees an already-released field and skips the decrement (null check). */
+  private def emitStructStringFieldsNull(structAddr: String, st: SyslType.StructType): Unit =
+    val resolved = canonicalStruct(st)
+    val structLt = llvmType(resolved)
+    for case ((_, ft), i) <- resolved.fields.zipWithIndex do
+      if structHasStringFields(ft) then
+        val gep = newReg()
+        emit(s"  $gep = getelementptr $structLt, $structLt* $structAddr, i32 0, i32 $i")
+        emitValueNull(gep, ft)
+
+  /** Emit a per-elem-type slice deinit function. Called when freeing a `&[]T`
+    * whose elements carry rc content. Slice block layout:
+    * [rc:8 | len:8 | data...]. The function receives the data pointer (past the
+    * 16-byte header), reads len from data-8, and decrs every element. Length
+    * field is 8 bytes (i64) — the layout matches what TNewArray emits.
+    *
+    * Returns i32 (matches deinitFunctions ABI) but the value is unused. */
+  private def emitSliceDeinit(name: String, elem: SyslType): Unit =
+    val elemLt = llvmType(elem)
+    // Fresh register/label namespace for this synthesized function
+    regCounter = 0
+    labelCounter = 0
+    emit(s"; slice element deinit: $name")
+    emit(s"define i32 @$name(i8* %data) {")
+    emit("entry:")
+    // Slice block layout (per TNewArray): rc:i64@0, len:i32@8, cap:i32@12, data@16.
+    // We're called with data ptr, so length is at data-8 as i32.
+    val lenAddr = newReg()
+    emit(s"  $lenAddr = getelementptr i8, i8* %data, i64 -8")
+    val lenAddrPtr = newReg()
+    emit(s"  $lenAddrPtr = bitcast i8* $lenAddr to i32*")
+    val len32 = newReg()
+    emit(s"  $len32 = load i32, i32* $lenAddrPtr")
+    val len = newReg()
+    emit(s"  $len = sext i32 $len32 to i64")
+    // Cast data ptr to elem ptr for indexing
+    val basePtr = newReg()
+    emit(s"  $basePtr = bitcast i8* %data to $elemLt*")
+    // Use an alloca for the counter — emitValueRC may create sub-blocks
+    // (for null-checks etc.) so the back-edge predecessor isn't a single
+    // known block, defeating a simple phi.
+    val iSlot = newReg()
+    emit(s"  $iSlot = alloca i64")
+    emit(s"  store i64 0, i64* $iSlot")
+    val loopEntry = newLabel(s"sd_${name}_loop")
+    val loopBody = newLabel(s"sd_${name}_body")
+    val loopExit = newLabel(s"sd_${name}_done")
+    emit(s"  br label %$loopEntry")
+    emitLabel(loopEntry)
+    val iVal = newReg()
+    emit(s"  $iVal = load i64, i64* $iSlot")
+    val cond = newReg()
+    emit(s"  $cond = icmp ult i64 $iVal, $len")
+    emit(s"  br i1 $cond, label %$loopBody, label %$loopExit")
+    emitLabel(loopBody)
+    val elemPtr = newReg()
+    emit(s"  $elemPtr = getelementptr $elemLt, $elemLt* $basePtr, i64 $iVal")
+    emitValueRC(elemPtr, elem, incr = false)
+    val nextI = newReg()
+    emit(s"  $nextI = add i64 $iVal, 1")
+    emit(s"  store i64 $nextI, i64* $iSlot")
+    emit(s"  br label %$loopEntry")
+    emitLabel(loopExit)
+    emit("  ret i32 0")
+    emit("}")
+    emit("")
+
+  /** Generalized rc walker for any value type at `addr`. Handles strings,
+    * value structs (recurses), and value arrays (loops over elements). No-op
+    * for any type without string content. */
+  private def emitValueRC(addr: String, t: SyslType, incr: Boolean): Unit =
+    if !structHasStringFields(t) then return
+    if isStringType(t) then
+      if incr then emitStringDescrIncr(addr) else emitStringDescrDecr(addr)
+    else t match
+      case st: SyslType.StructType =>
+        if incr then emitStructStringFieldsIncr(addr, st) else emitStructStringFieldsDecr(addr, st)
+      case SyslType.ArrayType(elem, count) =>
+        val elemLt = llvmType(elem)
+        for i <- 0 until count do
+          val gep = newReg()
+          emit(s"  $gep = getelementptr [$count x $elemLt], [$count x $elemLt]* $addr, i32 0, i32 $i")
+          emitValueRC(gep, elem, incr)
+      case _ =>
+
+  /** Null out string descriptor data ptrs in a value type (recurses through structs/arrays). */
+  private def emitValueNull(addr: String, t: SyslType): Unit =
+    if !structHasStringFields(t) then return
+    if isStringType(t) then
+      val pgep = newReg()
+      emit(s"  $pgep = getelementptr %struct.string, %struct.string* $addr, i32 0, i32 0")
+      emit(s"  store i8* null, i8** $pgep")
+    else t match
+      case st: SyslType.StructType =>
+        emitStructStringFieldsNull(addr, st)
+      case SyslType.ArrayType(elem, count) =>
+        val elemLt = llvmType(elem)
+        for i <- 0 until count do
+          val gep = newReg()
+          emit(s"  $gep = getelementptr [$count x $elemLt], [$count x $elemLt]* $addr, i32 0, i32 $i")
+          emitValueNull(gep, elem)
+      case _ =>
+
   /** True for expressions that produce a freshly-owned string buffer (refcount = 1 or immortal).
     * No incr is needed when binding such a value to a fresh local. */
   private def isOwnedString(expr: TExpr): Boolean = expr match
@@ -3078,6 +3277,14 @@ class SyslLLVMCodegen(target: String = "host"):
     case TBinary(_, "+", _, SyslType.StringType) => true
     case _: TCall | _: TIndirectCall => true            // ownership transferred from callee
     case _: TIfExpr | _: TMatchExpr => true             // branches handle their own RC
+    case _ => false
+
+  /** True for expressions that produce a freshly-constructed/transferred-ownership value struct.
+    * No incr is needed when binding such a value to a fresh local. */
+  private def isOwnedStruct(expr: TExpr): Boolean = expr match
+    case _: TStructConstruct => true
+    case _: TCall | _: TIndirectCall => true
+    case _: TIfExpr | _: TMatchExpr => true
     case _ => false
 
   /** Returns true if the expression produces a slice with a fresh/null backref (no increment needed).
@@ -3098,6 +3305,8 @@ class SyslLLVMCodegen(target: String = "host"):
       case TVarRef(name, typ) if isSliceType(typ) && locals.contains(name) =>
         Set(locals(name).reg)
       case TVarRef(name, typ) if isStringType(typ) && locals.contains(name) =>
+        Set(locals(name).reg)
+      case TVarRef(name, typ) if structHasStringFields(typ) && locals.contains(name) =>
         Set(locals(name).reg)
       case TVarRef(name, _) if derivedFromSlice != null && derivedFromSlice.contains(name) =>
         val sliceName = derivedFromSlice(name)
@@ -3185,7 +3394,37 @@ class SyslLLVMCodegen(target: String = "host"):
   /** Look up deinit function name for a RefType's inner type. */
   private def deinitFor(typ: SyslType): Option[String] = typ match
     case SyslType.RefType(SyslType.StructType(name, _, _)) => deinitFunctions.get(name)
+    case SyslType.RefType(SyslType.SliceType(elem)) => sliceDeinitFor(elem)
     case _ => None
+
+  /** True if a slice element type carries refcounted content that must be
+    * decr'd before the backing buffer is freed. */
+  private def sliceElemNeedsDeinit(elem: SyslType): Boolean = elem match
+    case _ if isStringType(elem) => true
+    case _: SyslType.RefType => true
+    case st: SyslType.StructType => structHasStringFields(st)
+    case SyslType.ArrayType(e, _) => sliceElemNeedsDeinit(e)
+    case _ => false
+
+  /** Mangled name for a per-elem-type slice deinit function (no `@` prefix —
+    * call sites add it themselves, matching deinitFunctions convention).
+    * Registers the type so the function body is emitted at the end of generate().
+    * Returns None for elem types that hold no rc content. */
+  private def sliceDeinitFor(elem: SyslType): Option[String] =
+    if !sliceElemNeedsDeinit(elem) then None
+    else
+      val tag = mangleType(elem)
+      val name = s"__slice_deinit_$tag"
+      sliceElemDeinitsNeeded(name) = elem
+      Some(name)
+
+  /** Stable, llvm-safe tag for a type, used to mangle slice deinit names. */
+  private def mangleType(t: SyslType): String = t match
+    case _ if isStringType(t) => "string"
+    case SyslType.RefType(inner) => s"ref_${mangleType(inner)}"
+    case SyslType.StructType(n, _, _) => s"struct_$n"
+    case SyslType.ArrayType(e, n) => s"arr${n}_${mangleType(e)}"
+    case other => other.getClass.getSimpleName.toLowerCase
 
   /** Emit inline refcount decrement + free when count reaches 0.
     * ptr is the data pointer (past header).
@@ -3253,8 +3492,13 @@ class SyslLLVMCodegen(target: String = "host"):
     emit(s"  br label %$skipLabel")
     emitLabel(skipLabel)
 
-  /** Emit backref decrement for a slice: load backref field, if non-null decrement refcount, free at zero. */
-  private def emitSliceBackrefDecr(slicePtr: String): Unit =
+  /** Emit backref decrement for a slice: load backref field, if non-null decrement refcount,
+    * call elem deinit (if any), free at zero. `sliceType` is the slice's value type
+    * (`SyslType.SliceType(elem)`); needed to dispatch the per-elem-type deinit. */
+  private def emitSliceBackrefDecr(slicePtr: String, sliceType: SyslType = SyslType.VoidType): Unit =
+    val deinit = sliceType match
+      case SyslType.SliceType(elem) => sliceDeinitFor(elem)
+      case _ => None
     val brGep = newReg()
     emit(s"  $brGep = getelementptr %struct.slice, %struct.slice* $slicePtr, i32 0, i32 3")
     val br = newReg()
@@ -3284,6 +3528,12 @@ class SyslLLVMCodegen(target: String = "host"):
     emit(s"  br i1 $isZero, label %$freeLabel, label %$skipLabel")
     emitLabel(freeLabel)
     emit(s"  store i64 -1, i64* $rcPtr") // mark immortal before free to prevent double-free
+    deinit.foreach { name =>
+      // Call elem deinit with data ptr (= br + 16, past the rc/len header)
+      val dataPtr = newReg()
+      emit(s"  $dataPtr = getelementptr i8, i8* $br, i64 16")
+      emit(s"  call i32 @$name(i8* $dataPtr)")
+    }
     emit(s"  call void @free(i8* $br)")
     emit(s"  br label %$skipLabel")
     emitLabel(skipLabel)
@@ -3302,11 +3552,19 @@ class SyslLLVMCodegen(target: String = "host"):
     // Slice backref cleanup: decrement all slice locals except those being returned
     for (_, local) <- locals if isSliceType(local.typ) do
       if !skipSliceRegs.contains(local.reg) then
-        emitSliceBackrefDecr(local.reg)
+        emitSliceBackrefDecr(local.reg, local.typ)
     // String buffer cleanup: decrement all string locals except those being returned
     for (_, local) <- locals if isStringType(local.typ) do
       if !skipSliceRegs.contains(local.reg) then
         emitStringDescrDecr(local.reg)
+    // Value-struct string-field cleanup: decrement string fields of struct locals
+    for (_, local) <- locals do
+      local.typ match
+        case st: SyslType.StructType if structHasStringFields(st) && !skipSliceRegs.contains(local.reg) =>
+          emitStructStringFieldsDecr(local.reg, st)
+        case SyslType.ArrayType(elem, _) if structHasStringFields(elem) && !skipSliceRegs.contains(local.reg) =>
+          emitValueRC(local.reg, local.typ, incr = false)
+        case _ =>
 
   /** Clean up locals introduced since a scope snapshot.
     * Decrements slice backrefs then nulls them out to prevent double-decrement
@@ -3314,7 +3572,7 @@ class SyslLLVMCodegen(target: String = "host"):
   private def emitScopeCleanup(preLocals: Set[String]): Unit =
     for (name, local) <- locals if !preLocals.contains(name) do
       if isSliceType(local.typ) then
-        emitSliceBackrefDecr(local.reg)
+        emitSliceBackrefDecr(local.reg, local.typ)
         // Null out backref so it's not decremented again by outer scope or function exit
         val brGep = newReg()
         emit(s"  $brGep = getelementptr %struct.slice, %struct.slice* ${local.reg}, i32 0, i32 3")
@@ -3325,6 +3583,15 @@ class SyslLLVMCodegen(target: String = "host"):
         val ptrGep = newReg()
         emit(s"  $ptrGep = getelementptr %struct.string, %struct.string* ${local.reg}, i32 0, i32 0")
         emit(s"  store i8* null, i8** $ptrGep")
+      local.typ match
+        case st: SyslType.StructType if structHasStringFields(st) =>
+          emitStructStringFieldsDecr(local.reg, st)
+          emitStructStringFieldsNull(local.reg, st)
+        case SyslType.ArrayType(elem, _) if structHasStringFields(elem) =>
+          emitValueRC(local.reg, local.typ, incr = false)
+          emitValueNull(local.reg, local.typ)
+        case _ =>
+
 
   /** Check if an expression is a TNew/TNewArray (already owns the ref, no incr needed). */
   private def isOwnedNew(expr: TExpr): Boolean = expr match

@@ -271,6 +271,59 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |""".stripMargin) shouldBe 0
   }
 
+  "string field reassignment in loop — old buffers freed (heap pressure test)" in {
+    // Tiny 256-byte heap. Each iteration leaks ~24 bytes if h.s = ... doesn't
+    // decr the old buffer's rc. ~10 iterations would exhaust the heap; we run 50.
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |main() -> int
+        |    var h = Holder("abc" + "def")
+        |    var i = 0
+        |    while i < 50
+        |        h.s = "iter" + "_data"
+        |        i += 1
+        |    if h.s == "iter_data" then 0 else 1
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "field-assign with borrowed string source — incr applied" in {
+    // Source string borrowed from a local var; field-assign should incr to
+    // claim a share. Both source and field point at the same buffer; both
+    // get decremented (caller scope exit + field cleanup) → balanced.
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |main() -> int
+        |    var h = Holder("init" + "_v")
+        |    var src = "abc" + "def"
+        |    h.s = src
+        |    if h.s == "abcdef" && src == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "nested-struct field reassignment frees inner string buffers (heap pressure)" in {
+    // Outer struct has a nested struct with a string field. Field-assign of the
+    // outer's nested-struct field should recursively decr inner string buffers.
+    runWithAlloc(
+      """struct Inner
+        |    s: string
+        |
+        |struct Outer
+        |    inner: Inner
+        |
+        |main() -> int
+        |    var o = Outer(Inner("init" + "_v"))
+        |    var i = 0
+        |    while i < 30
+        |        o.inner = Inner("iter" + "_data")
+        |        i += 1
+        |    if o.inner.s == "iter_data" then 0 else 1
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
   // ====================================================================
   // 7. If-expr branches
   // ====================================================================
@@ -394,6 +447,530 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |main() -> int
         |    val s = make(true)
         |    if s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 12. Value-struct cleanup — string fields decremented on scope exit
+  // ====================================================================
+
+  "value-struct local with string field freed on scope exit" in {
+    // 16K heap, ~24B per allocation (8 hdr + 6 data + padding) — without per-field
+    // decrement, ~600 iterations would exhaust the heap. 100 iterations is plenty
+    // to prove the leak is gone within 100k cycle budget.
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        var h = Holder("abc" + "def")
+        |        if h.s != "abcdef" then return 1
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct reassignment frees old string field" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |main() -> int
+        |    var h = Holder("abc" + "def")
+        |    var i = 0
+        |    while i < 50
+        |        h = Holder("xyz" + "qrs")
+        |        i += 1
+        |    if h.s == "xyzqrs" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct returned from function — string field survives" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |build() -> Holder
+        |    var h = Holder("part" + "_one")
+        |    h
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 50
+        |        var h = build()
+        |        if h.s != "part_one" then return 1
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct with two string fields freed on exit" in {
+    runWithAlloc(
+      """struct Pair
+        |    a: string
+        |    b: string
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 20
+        |        var p = Pair("first" + "_a", "second" + "_b")
+        |        if p.a != "first_a" || p.b != "second_b" then return 1
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "nested value-struct with string field freed on exit" in {
+    runWithAlloc(
+      """struct Inner
+        |    s: string
+        |
+        |struct Outer
+        |    inner: Inner
+        |    label: string
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 30
+        |        var o = Outer(Inner("deep" + "_str"), "top" + "_str")
+        |        if o.inner.s != "deep_str" || o.label != "top_str" then return 1
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct holding borrowed string field — caller's local survives" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |main() -> int
+        |    var msg = "abc" + "def"
+        |    var i = 0
+        |    while i < 50
+        |        var h = Holder(msg)
+        |        if h.s != "abcdef" then return 1
+        |        i += 1
+        |    if msg == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "early return with value-struct local — fields freed" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |check(b: bool) -> int
+        |    var h = Holder("abc" + "def")
+        |    if !b then return 1
+        |    if len(h.s) == 6 then 0 else 2
+        |
+        |main() -> int = check(true)
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 13. Value-struct param ABI — true pass-by-value semantics
+  // ====================================================================
+
+  "value-struct param: field read works" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |get_len(h: Holder) -> int = len(h.s)
+        |
+        |main() -> int
+        |    var h = Holder("abc" + "def")
+        |    val n = get_len(h)
+        |    if n == 6 && h.s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct param: callee mutation does not leak to caller" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |mutate(h: Holder) -> int
+        |    h.s = "mutated"
+        |    len(h.s)
+        |
+        |main() -> int
+        |    var h = Holder("orig" + "inal")
+        |    val n = mutate(h)
+        |    if h.s == "original" && n == 7 then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct param passed in loop — no heap leak" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |inspect(h: Holder) -> int = len(h.s)
+        |
+        |main() -> int
+        |    var h = Holder("abc" + "def")
+        |    var i = 0
+        |    while i < 30
+        |        if inspect(h) != 6 then return 1
+        |        i += 1
+        |    if h.s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct returned from function taking same struct as param" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |passthrough(h: Holder) -> Holder = h
+        |
+        |main() -> int
+        |    var h = Holder("abc" + "def")
+        |    val r = passthrough(h)
+        |    if r.s == "abcdef" && h.s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "two value-struct params (second is stack-passed)" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |concat_lens(a: Holder, b: Holder) -> int = len(a.s) + len(b.s)
+        |
+        |main() -> int
+        |    var x = Holder("first" + "_a")
+        |    var y = Holder("second" + "_b")
+        |    val n = concat_lens(x, y)
+        |    if n == 15 && x.s == "first_a" && y.s == "second_b" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct param chained through two function calls" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |inner(h: Holder) -> int = len(h.s)
+        |outer(h: Holder) -> int = inner(h)
+        |
+        |main() -> int
+        |    var h = Holder("abc" + "def")
+        |    val n = outer(h)
+        |    if n == 6 && h.s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 14. Indirect calls (function pointers / closures) with aggregate args
+  // ====================================================================
+
+  "function pointer with string arg" in {
+    runWithAlloc(
+      """get_len(s: string) -> int = len(s)
+        |
+        |main() -> int
+        |    val f = get_len
+        |    val s = "abc" + "def"
+        |    val n = f(s)
+        |    if n == 6 && s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "function pointer with value-struct arg" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |get_len(h: Holder) -> int = len(h.s)
+        |
+        |main() -> int
+        |    val f = get_len
+        |    var h = Holder("abc" + "def")
+        |    val n = f(h)
+        |    if n == 6 && h.s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "function pointer returning value-struct" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |make() -> Holder = Holder("abc" + "def")
+        |
+        |main() -> int
+        |    val f = make
+        |    val h = f()
+        |    if h.s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "function pointer mutation via value-struct param does not leak to caller" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |mutate(h: Holder) -> int
+        |    h.s = "mutated"
+        |    len(h.s)
+        |
+        |main() -> int
+        |    val f = mutate
+        |    var h = Holder("orig" + "inal")
+        |    val n = f(h)
+        |    if h.s == "original" && n == 7 then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 15. Interface dispatch with aggregate args
+  // ====================================================================
+
+  "interface method with string arg" in {
+    runWithAlloc(
+      """interface Sizer
+        |    size(s: string) -> int
+        |
+        |struct Counter
+        |    n: int
+        |
+        |Counter.size(s: string) -> int = len(s) + self.n
+        |
+        |main() -> int
+        |    var c = Counter(10)
+        |    val sz: Sizer = c
+        |    val s = "abc" + "def"
+        |    val n = sz.size(s)
+        |    if n == 16 && s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "interface method with value-struct arg" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |interface Inspector
+        |    check(h: Holder) -> int
+        |
+        |struct Probe
+        |    n: int
+        |
+        |Probe.check(h: Holder) -> int = len(h.s)
+        |
+        |main() -> int
+        |    var p = Probe(0)
+        |    val ins: Inspector = p
+        |    var h = Holder("abc" + "def")
+        |    val n = ins.check(h)
+        |    if n == 6 && h.s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "interface method mutation via value-struct param does not leak to caller" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |interface Mutator
+        |    mutate(h: Holder) -> int
+        |
+        |struct Doer
+        |    n: int
+        |
+        |Doer.mutate(h: Holder) -> int
+        |    h.s = "mutated"
+        |    len(h.s)
+        |
+        |main() -> int
+        |    var d = Doer(0)
+        |    val m: Mutator = d
+        |    var h = Holder("orig" + "inal")
+        |    val n = m.mutate(h)
+        |    if h.s == "original" && n == 7 then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 16. Sibling assign paths — globals, *p, arr[i]
+  // ====================================================================
+
+  "global string reassignment in loop — old buffers freed (heap pressure)" in {
+    runWithAlloc(
+      """var g: string
+        |
+        |main() -> int
+        |    g = "init" + "_v"
+        |    var i = 0
+        |    while i < 50
+        |        g = "iter" + "_data"
+        |        i += 1
+        |    if g == "iter_data" then 0 else 1
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "global struct-with-string field assignment in loop (heap pressure)" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |var g: Holder
+        |
+        |main() -> int
+        |    g = Holder("init" + "_v")
+        |    var i = 0
+        |    while i < 30
+        |        g = Holder("iter" + "_data")
+        |        i += 1
+        |    if g.s == "iter_data" then 0 else 1
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "*p = string in loop — old buffers freed (heap pressure)" in {
+    runWithAlloc(
+      """main() -> int
+        |    var s = "init" + "_v"
+        |    var p: *string = &s
+        |    var i = 0
+        |    while i < 50
+        |        *p = "iter" + "_data"
+        |        i += 1
+        |    if s == "iter_data" then 0 else 1
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "arr[i] = string in loop — old buffers freed (heap pressure)" in {
+    runWithAlloc(
+      """main() -> int
+        |    var arr: [4]string
+        |    arr[0] = "init"
+        |    var i = 0
+        |    while i < 30
+        |        arr[0] = "iter" + "_data"
+        |        i += 1
+        |    if arr[0] == "iter_data" then 0 else 1
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  // ====================================================================
+  // 17. [N]string scope-exit element decr (stack arrays of strings)
+  // ====================================================================
+
+  "[N]string scope exit decrs each element (heap pressure)" in {
+    // fill() populates all 4 slots with fresh buffers and returns. If scope
+    // cleanup misses any slot, that buffer leaks. 10 iters × 4 buffers ×
+    // ~24 bytes = ~960 B; on a 256-byte heap this would trap.
+    runWithAlloc(
+      """fill()
+        |    var arr: [4]string
+        |    arr[0] = "a" + "_v"
+        |    arr[1] = "b" + "_v"
+        |    arr[2] = "c" + "_v"
+        |    arr[3] = "d" + "_v"
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "[N]struct-with-string scope exit decrs each element (heap pressure)" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |fill()
+        |    var arr: [3]Holder
+        |    arr[0] = Holder("a" + "_v")
+        |    arr[1] = Holder("b" + "_v")
+        |    arr[2] = Holder("c" + "_v")
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  // ====================================================================
+  // 18. &[]string element rc (heap slices of strings)
+  // ====================================================================
+
+  "&[]string scope exit decrs each element (heap pressure)" in {
+    runWithAlloc(
+      """fill()
+        |    val arr = new [4]string
+        |    arr[0] = "a" + "_v"
+        |    arr[1] = "b" + "_v"
+        |    arr[2] = "c" + "_v"
+        |    arr[3] = "d" + "_v"
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "slice[i] = string in loop — old buffers freed (heap pressure)" in {
+    runWithAlloc(
+      """main() -> int
+        |    val arr = new [4]string
+        |    arr[0] = "init"
+        |    var i = 0
+        |    while i < 10
+        |        arr[0] = "iter" + "_data"
+        |        i += 1
+        |    if arr[0] == "iter_data" then 0 else 1
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "&[]struct-with-string scope exit decrs each element (heap pressure)" in {
+    // Slice of structs containing strings: deinit must recurse through struct fields.
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |fill()
+        |    val arr = new [3]Holder
+        |    arr[0] = Holder("a" + "_v")
+        |    arr[1] = Holder("b" + "_v")
+        |    arr[2] = Holder("c" + "_v")
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "&[]string element preserved across scope exit when returned" in {
+    // The slice escapes via the function return; caller-owned, no scope-exit decr in callee.
+    runWithAlloc(
+      """make() -> &[]string
+        |    val arr = new [2]string
+        |    arr[0] = "hello" + "_world"
+        |    arr[1] = "a" + "b"
+        |    arr
+        |
+        |main() -> int
+        |    val s = make()
+        |    if s[0] == "hello_world" && s[1] == "ab" then 0 else 1
         |""".stripMargin) shouldBe 0
   }
 }

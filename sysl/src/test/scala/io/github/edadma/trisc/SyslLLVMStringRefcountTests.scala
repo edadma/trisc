@@ -549,4 +549,332 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
         |    if greet == "hello, world" then 0 else 1
         |""".stripMargin) shouldBe 0
   }
+
+  // ====================================================================
+  // 14. Value-struct cleanup — string fields decremented on scope exit
+  // ====================================================================
+
+  "value-struct local with string field — IR contains decrement on exit" in {
+    val ir = compileLLVM(
+      """struct Holder
+        |    s: string
+        |
+        |main()
+        |    var h = Holder("abc" + "def")
+        |""".stripMargin)
+    // Expect a getelementptr to field 0 of %struct.Holder followed by string descrement path
+    ir should include("getelementptr %struct.Holder, %struct.Holder*")
+  }
+
+  "value-struct local with string field freed on scope exit (loop stress)" in {
+    // Without per-field decrement, each iteration leaks the heap buffer for h.s.
+    // 1000 iterations × ~16B would exceed any reasonable test heap if leaked.
+    llvmExit(
+      """struct Holder
+        |    s: string
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 1000
+        |        var h = Holder("abc" + "def")
+        |        if h.s != "abcdef" then return 1
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct reassignment frees old string field" in {
+    llvmExit(
+      """struct Holder
+        |    s: string
+        |
+        |main() -> int
+        |    var h = Holder("abc" + "def")
+        |    var i = 0
+        |    while i < 500
+        |        h = Holder("xyz" + "qrs")
+        |        i += 1
+        |    if h.s == "xyzqrs" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct returned from function — string field survives" in {
+    llvmExit(
+      """struct Holder
+        |    s: string
+        |
+        |build(n: int) -> Holder
+        |    var h = Holder("part" + "_one")
+        |    h
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 200
+        |        var h = build(i)
+        |        if h.s != "part_one" then return 1
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct passed by value to function — caller copy survives" in {
+    llvmExit(
+      """struct Holder
+        |    s: string
+        |
+        |inspect(h: Holder) -> int = len(h.s)
+        |
+        |main() -> int
+        |    var h = Holder("abc" + "def")
+        |    var i = 0
+        |    while i < 200
+        |        if inspect(h) != 6 then return 1
+        |        i += 1
+        |    if h.s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct mutation in callee does not leak to caller (true value semantics)" in {
+    llvmExit(
+      """struct Holder
+        |    s: string
+        |
+        |mutate(h: Holder) -> int
+        |    h.s = "mutated"
+        |    len(h.s)
+        |
+        |main() -> int
+        |    var h = Holder("orig" + "inal")
+        |    var n = mutate(h)
+        |    if h.s == "original" && n == 7 then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct copy via var p = q — both live independently" in {
+    llvmExit(
+      """struct Holder
+        |    s: string
+        |
+        |main() -> int
+        |    var q = Holder("abc" + "def")
+        |    var p = q
+        |    if p.s == "abcdef" && q.s == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct with two string fields freed on exit" in {
+    llvmExit(
+      """struct Pair
+        |    a: string
+        |    b: string
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 500
+        |        var p = Pair("first" + "_a", "second" + "_b")
+        |        if p.a != "first_a" || p.b != "second_b" then return 1
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "nested value-struct with string field freed on exit" in {
+    llvmExit(
+      """struct Inner
+        |    s: string
+        |
+        |struct Outer
+        |    inner: Inner
+        |    label: string
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 500
+        |        var o = Outer(Inner("deep" + "_str"), "top" + "_str")
+        |        if o.inner.s != "deep_str" || o.label != "top_str" then return 1
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct holding borrowed string field — caller's local survives" in {
+    llvmExit(
+      """struct Holder
+        |    s: string
+        |
+        |main() -> int
+        |    var msg = "abc" + "def"
+        |    var i = 0
+        |    while i < 300
+        |        var h = Holder(msg)
+        |        if h.s != "abcdef" then return 1
+        |        i += 1
+        |    if msg == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct reassigned with borrowed source string" in {
+    llvmExit(
+      """struct Holder
+        |    s: string
+        |
+        |main() -> int
+        |    var src = "abc" + "def"
+        |    var h = Holder("init" + "_str")
+        |    var i = 0
+        |    while i < 300
+        |        h = Holder(src)
+        |        i += 1
+        |    if h.s == "abcdef" && src == "abcdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "if-expr returning struct with string field — both branches" in {
+    llvmExit(
+      """struct Holder
+        |    s: string
+        |
+        |build(b: bool) -> Holder =
+        |    if b then Holder("true" + "_path") else Holder("false" + "_path")
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 200
+        |        var h = build(i % 2 == 0)
+        |        if h.s != "true_path" && h.s != "false_path" then return 1
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "match expr returning struct with string field" in {
+    llvmExit(
+      """struct Holder
+        |    s: string
+        |
+        |build(n: int) -> Holder =
+        |    n match
+        |        0 -> Holder("zero" + "_str")
+        |        else -> Holder("other" + "_str")
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 200
+        |        var h = build(i)
+        |        if h.s == "" then return 1
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "value-struct in if-stmt scope freed on block exit" in {
+    llvmExit(
+      """struct Holder
+        |    s: string
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 500
+        |        if i % 2 == 0
+        |            var h = Holder("even" + "_str")
+        |            if h.s != "even_str" then return 1
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "early return with value-struct local — fields freed" in {
+    llvmExit(
+      """struct Holder
+        |    s: string
+        |
+        |check(b: bool) -> int
+        |    var h = Holder("abc" + "def")
+        |    if !b then return 1
+        |    if len(h.s) == 6 then 0 else 2
+        |
+        |main() -> int = check(true)
+        |""".stripMargin) shouldBe 0
+  }
+
+  "global value-struct with string field" in {
+    // Globals don't get scope-cleanup but assignment should still rebalance refcounts.
+    llvmExit(
+      """struct Holder
+        |    s: string
+        |
+        |var g: Holder
+        |
+        |main() -> int
+        |    g = Holder("global" + "_str")
+        |    if g.s == "global_str" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 16. Arrays/slices of strings — element rc on scope exit / slice free
+  // ====================================================================
+
+  "[N]string scope exit emits per-element decrement IR" in {
+    val ir = compileLLVM(
+      """fill()
+        |    var arr: [4]string
+        |    arr[0] = "a" + "_v"
+        |    arr[1] = "b" + "_v"
+        |    arr[2] = "c" + "_v"
+        |    arr[3] = "d" + "_v"
+        |""".stripMargin)
+    // Per-element string-buffer decrement should appear in fill() body.
+    // 4 elements × 1 string descriptor each → at least 4 free calls before ret void.
+    val freeCount = "call void @free".r.findAllIn(ir).length
+    freeCount should be >= 4
+  }
+
+  "&[]string scope exit emits slice deinit + free" in {
+    val ir = compileLLVM(
+      """main() -> int
+        |    val arr = new [2]string
+        |    arr[0] = "a" + "x"
+        |    arr[1] = "b" + "y"
+        |    0
+        |""".stripMargin)
+    ir should include("define i32 @__slice_deinit_string(i8* %data)")
+    ir should include("call i32 @__slice_deinit_string")
+  }
+
+  "[N]string scope exit (functional check)" in {
+    llvmExit(
+      """fill()
+        |    var arr: [4]string
+        |    arr[0] = "a" + "_v"
+        |    arr[1] = "b" + "_v"
+        |    arr[2] = "c" + "_v"
+        |    arr[3] = "d" + "_v"
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 50
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "&[]string scope exit (functional check)" in {
+    llvmExit(
+      """fill()
+        |    val arr = new [4]string
+        |    arr[0] = "a" + "_v"
+        |    arr[1] = "b" + "_v"
+        |    arr[2] = "c" + "_v"
+        |    arr[3] = "d" + "_v"
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 50
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
 }
