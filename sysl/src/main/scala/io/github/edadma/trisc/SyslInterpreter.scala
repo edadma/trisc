@@ -274,6 +274,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TEnumDecl => // type only, no runtime effect
         case _: TDataEnumDecl => // type only, no runtime effect
         case _: TTypeAliasDecl => // type only, no runtime effect
+        case _: TConstDecl => // const is fully folded at analyzer level
         case _: TInterfaceDecl => // type only, no runtime effect
         case f: TFunDecl =>
           functions(f.name) = f
@@ -301,6 +302,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TEnumDecl => // type only
         case _: TDataEnumDecl => // type only
         case _: TTypeAliasDecl => // type only
+        case _: TConstDecl => // const is fully folded at analyzer level
         case _: TInterfaceDecl => // type only
         case f: TFunDecl =>
           functions(f.name) = f

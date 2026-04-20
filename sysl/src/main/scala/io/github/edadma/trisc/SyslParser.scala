@@ -213,8 +213,9 @@ class SyslParser extends StandardTokenParsers {
         case name ~ t => ExternVarDeclAST(name, t)
       }
 
-  private def mutability: Parser[Boolean] =
-    "var" ^^^ true | "val" ^^^ false
+  private case class Mut(isMutable: Boolean, isConst: Boolean)
+  private def mutability: Parser[Mut] =
+    "var" ^^^ Mut(true, false) | "val" ^^^ Mut(false, false) | "const" ^^^ Mut(false, true)
 
   def declBody(priv: Boolean): Parser[DeclAST] =
     ident ~ typeParamListWithBounds ~ ("." ~> ident) ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
@@ -237,22 +238,30 @@ class SyslParser extends StandardTokenParsers {
         FunDeclAST(name, params, rt, body, priv, names, bounds)
     } |
       opt("volatile") ~ opt(mutability) ~ ident ~ (":" ~> typeExpr) ~ ("=" ~> expr) ^^ {
-        case vol ~ mut ~ name ~ t ~ e => VarDeclAST(name, Some(t), e, priv, mut.getOrElse(true), isVolatile = vol.isDefined)
+        case vol ~ mut ~ name ~ t ~ e =>
+          val m = mut.getOrElse(Mut(true, false))
+          VarDeclAST(name, Some(t), e, priv, m.isMutable, isVolatile = vol.isDefined, isConst = m.isConst)
       } |
       opt("volatile") ~ opt(mutability) ~ ident ~ (":" ~> typeExpr) ^^ {
         case vol ~ mut ~ name ~ t =>
+          val m = mut.getOrElse(Mut(true, false))
           val size = t match { case ArrayTypeAST(s, _) => s; case _ => 0 }
-          VarDeclAST(name, Some(t), ArrayDeclAST(size, t), priv, mut.getOrElse(true), isVolatile = vol.isDefined)
+          VarDeclAST(name, Some(t), ArrayDeclAST(size, t), priv, m.isMutable, isVolatile = vol.isDefined, isConst = m.isConst)
       } |
       opt("volatile") ~ opt(mutability) ~ ident ~ (":" ~> typeRef) ~ not("=") ^^ {
         case vol ~ mut ~ name ~ t ~ _ =>
-          VarDeclAST(name, Some(t), UninitDeclAST(t), priv, mut.getOrElse(true), isVolatile = vol.isDefined)
+          val m = mut.getOrElse(Mut(true, false))
+          VarDeclAST(name, Some(t), UninitDeclAST(t), priv, m.isMutable, isVolatile = vol.isDefined, isConst = m.isConst)
       } |
       opt("volatile") ~ opt(mutability) ~ ident ~ (":" ~> typeRef) ~ ("=" ~> expr) ^^ {
-        case vol ~ mut ~ name ~ t ~ e => VarDeclAST(name, Some(t), e, priv, mut.getOrElse(true), isVolatile = vol.isDefined)
+        case vol ~ mut ~ name ~ t ~ e =>
+          val m = mut.getOrElse(Mut(true, false))
+          VarDeclAST(name, Some(t), e, priv, m.isMutable, isVolatile = vol.isDefined, isConst = m.isConst)
       } |
       opt("volatile") ~ opt(mutability) ~ ident ~ ("=" ~> expr) ^^ {
-        case vol ~ mut ~ name ~ e => VarDeclAST(name, None, e, priv, mut.getOrElse(true), isVolatile = vol.isDefined)
+        case vol ~ mut ~ name ~ e =>
+          val m = mut.getOrElse(Mut(true, false))
+          VarDeclAST(name, None, e, priv, m.isMutable, isVolatile = vol.isDefined, isConst = m.isConst)
       }
 
   /** `def name = expr` (zero-arg auto-call) or `def name(params) -> ret body` (documentary). */
@@ -360,9 +369,9 @@ class SyslParser extends StandardTokenParsers {
     asmStmt | forStmt | doWhileStmt | whileStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
 
   lazy val destructureStmt: Parser[DestructureStmtAST] =
-    mutability ~ ("(" ~> rep1sep(bindName, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case mut ~ names ~ init => DestructureStmtAST(names, init, mut) } |
+    mutability ~ ("(" ~> rep1sep(bindName, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case mut ~ names ~ init => DestructureStmtAST(names, init, mut.isMutable) } |
       ("(" ~> rep1sep(bindName, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case names ~ init => DestructureStmtAST(names, init) } |
-      mutability ~ bindName ~ ("," ~> rep1sep(bindName, ",")) ~ ("=" ~> tupleExpr) ^^ { case mut ~ first ~ rest ~ init => DestructureStmtAST(first :: rest, init, mut) } |
+      mutability ~ bindName ~ ("," ~> rep1sep(bindName, ",")) ~ ("=" ~> tupleExpr) ^^ { case mut ~ first ~ rest ~ init => DestructureStmtAST(first :: rest, init, mut.isMutable) } |
       "_" ~ ("," ~> rep1sep(bindName, ",")) ~ ("=" ~> tupleExpr) ^^ { case _ ~ rest ~ init => DestructureStmtAST("_" :: rest, init) } |
       ident ~ ("," ~> rep1sep(bindName, ",")) ~ ("=" ~> tupleExpr) ^^ { case first ~ rest ~ init => DestructureStmtAST(first :: rest, init) }
 
@@ -417,16 +426,16 @@ class SyslParser extends StandardTokenParsers {
   lazy val bindName: Parser[String] = ident | "_"
 
   lazy val identStmt: Parser[StmtAST] =
-    opt("volatile") ~ mutability ~ bindName ~ (":" ~> typeExpr) ~ ("=" ~> tupleExpr) ^^ { case vol ~ mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut, vol.isDefined) } |
+    opt("volatile") ~ mutability ~ bindName ~ (":" ~> typeExpr) ~ ("=" ~> tupleExpr) ^^ { case vol ~ mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut.isMutable, vol.isDefined, mut.isConst) } |
       opt("volatile") ~ mutability ~ ident ~ (":" ~> typeExpr) ^^ { case vol ~ mut ~ name ~ t =>
         val size = t match { case ArrayTypeAST(s, _) => s; case _ => 0 }
-        VarStmtAST(name, Some(t), ArrayDeclAST(size, t), mut, vol.isDefined)
+        VarStmtAST(name, Some(t), ArrayDeclAST(size, t), mut.isMutable, vol.isDefined, mut.isConst)
       } |
       opt("volatile") ~ mutability ~ ident ~ (":" ~> typeRef) ~ not("=") ^^ { case vol ~ mut ~ name ~ t ~ _ =>
-        VarStmtAST(name, Some(t), UninitDeclAST(t), mut, vol.isDefined)
+        VarStmtAST(name, Some(t), UninitDeclAST(t), mut.isMutable, vol.isDefined, mut.isConst)
       } |
-      opt("volatile") ~ mutability ~ bindName ~ (":" ~> typeRef) ~ ("=" ~> tupleExpr) ^^ { case vol ~ mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut, vol.isDefined) } |
-      opt("volatile") ~ mutability ~ bindName ~ ("=" ~> tupleExpr) ^^ { case vol ~ mut ~ name ~ e => VarStmtAST(name, None, e, mut, vol.isDefined) } |
+      opt("volatile") ~ mutability ~ bindName ~ (":" ~> typeRef) ~ ("=" ~> tupleExpr) ^^ { case vol ~ mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut.isMutable, vol.isDefined, mut.isConst) } |
+      opt("volatile") ~ mutability ~ bindName ~ ("=" ~> tupleExpr) ^^ { case vol ~ mut ~ name ~ e => VarStmtAST(name, None, e, mut.isMutable, vol.isDefined, mut.isConst) } |
       ident ~ (":" ~> typeExpr) ~ ("=" ~> tupleExpr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ (":" ~> typeExpr) ^^ { case name ~ t =>
         val size = t match { case ArrayTypeAST(s, _) => s; case _ => 0 }

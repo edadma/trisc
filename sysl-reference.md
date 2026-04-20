@@ -386,18 +386,29 @@ main() -> int
 
 ### Compile-Time Constants
 
-Immutable `val` declarations with constant integer initializers are folded at compile time. References to such vals are replaced with their literal values — no variable is allocated, no load is generated.
+Use `const` to declare a compile-time integer constant. The initializer must be evaluable at
+compile time; the declaration emits no storage and references are replaced with the folded
+literal value.
 
 ```sysl
-val BASE = 0x1000
-val STATUS = BASE + 4        // folded to 0x1004
-val DATA = BASE + 8          // folded to 0x1008
-val MASK = 0xFF & (1 << 4)   // folded to 0x10
+const BASE = 0x1000
+const STATUS = BASE + 4        // folded to 0x1004
+const DATA = BASE + 8          // folded to 0x1008
+const MASK = 0xFF & (1 << 4)   // folded to 0x10
+
+type Age = int within 0..MAX_AGE   // const can be used in `within` bounds
 ```
 
-Constant folding supports `+`, `-`, `*`, `/`, `%`, `<<`, `>>`, `&`, `|`, `^`, unary `-`/`~`, and casts. Chained references work: `val C = A + B` where `A` and `B` are themselves constant vals. Values are truncated to the target type's width (e.g., `u32` wraps at 2^32).
+Supported in initializers: `+`, `-`, `*`, `/`, `%`, `<<`, `>>`, `&`, `|`, `^`, unary `-`/`~`,
+numeric/char/bool literals, and references to other `const` names. An initializer that
+cannot be folded is a compile error. Values are truncated to the target type's width.
 
-This works for both module-level and local vals, across module boundaries.
+`const` is valid at both module and function scope. Currently only integer types are
+supported — `const PI: f64 = 3.14` is not yet accepted.
+
+Note: `val` is also folded when the initializer happens to be constant, but unlike `const`
+it additionally allocates storage (and accepts non-const initializers). Prefer `const` when
+you want the guarantee and zero-storage behaviour.
 
 ---
 
