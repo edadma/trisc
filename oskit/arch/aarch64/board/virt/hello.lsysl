@@ -32,7 +32,8 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         syscall_table, syscall_ssp_set, syscall_check_allowed,
         create_process_suspended, resume_process,
         register_syscall, syscall_return,
-        kb_enqueue, kb_notify_tid, notify_send}
+        kb_enqueue, kb_notify_tid, notify_send,
+        current_thread, ticks}
     import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
         ipc_send, ipc_recv, ipc_reply}
     import oskit.services.{get_thread_count, uptime, sleep, yield}
@@ -205,7 +206,18 @@ When the kernel's schedule() returns 0, there are no ready threads.
 arch_resume_process(0) would trash SP_EL1; instead we spin on wfi
 so the VM halts cleanly (or waits for an interrupt in richer setups).
 
+    // Fast-path skip flag. Set by `syscall_dispatch` when a short
+    // syscall (putc/thread_id/uptime) completes entirely in dispatch
+    // and doesn't want the scheduler to re-evaluate (which would
+    // FIFO-swap the thread with any peer at equal priority — the
+    // visible symptom is per-byte interleave of boot banners).
+    // Matches x86 boot.s's fast-path-then-iretq pattern.
+    var skip_schedule = false
+
     arch_schedule_after_exc(ssp: i64) -> i64
+        if skip_schedule
+            skip_schedule = false
+            return ssp
         if DEMO_MODE == 0 || DEMO_MODE == 3 || DEMO_MODE == 4 || DEMO_MODE == 5
             val next = schedule(ssp)
             if next == i64(0)
@@ -262,6 +274,27 @@ kernel isn't in play.
 
         if num < 0 || num >= 96
             fp[0] = i64(-1)
+            return
+
+        // Fast path: putc/thread_id/uptime don't touch scheduler state
+        // and are the common case for boot-time printing. Handle
+        // inline, set skip_schedule so arch_schedule_after_exc returns
+        // the current ssp directly. Matches the x86 fast-path in
+        // boot.s that jumps to restore_context without touching
+        // syscall_table. Without this, every putc FIFO-swaps two
+        // printing threads, interleaving each byte.
+        if num == 1
+            uart_putc(int(a0) & 0xFF)
+            fp[0] = i64(0)
+            skip_schedule = true
+            return
+        if num == 5
+            fp[0] = i64(current_thread)
+            skip_schedule = true
+            return
+        if num == 6
+            fp[0] = i64(ticks)
+            skip_schedule = true
             return
 
         val handler = syscall_table[num]
