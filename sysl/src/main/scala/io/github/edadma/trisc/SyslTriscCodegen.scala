@@ -26,6 +26,12 @@ class SyslTriscCodegen(addresses: Int = 4):
   // +8, data at +16) and decrs each element before returning.
   private val sliceElemDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType] // deinit name → elem type
 
+  // Enum deinit functions to emit (for &MyEnum where the enum has string-bearing
+  // variants). Generated on demand when an enum ref is freed; emitted after all
+  // user functions. Each takes r1 = data ptr (past the rc header) and walks the
+  // active variant's strings before returning.
+  private val enumDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType.EnumType] // deinit name → enum type
+
   // Pending closure functions to generate after all regular functions
   private var closureCounter = 0
   private val pendingClosures = new mutable.ListBuffer[(String, TClosure)]
@@ -95,6 +101,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     stringLiterals.clear()
     deinitFunctions.clear()
     sliceElemDeinitsNeeded.clear()
+    enumDeinitsNeeded.clear()
     needsAllocExtern = scanNeedsAlloc(program)  // pre-scan so rc-bracket gates are correct from the start
     needsFreeExtern = false
     // Extract module prefix for unique symbol names across compilation units
@@ -168,6 +175,15 @@ class SyslTriscCodegen(addresses: Int = 4):
       for (name, elem) <- pending do
         emittedSliceDeinits += name
         emitSliceDeinit(name, elem)
+
+    // Emit per-enum-type deinit functions (registered when freeing an enum ref
+    // whose active variant carries rc content).
+    val emittedEnumDeinits = mutable.Set.empty[String]
+    while enumDeinitsNeeded.exists((n, _) => !emittedEnumDeinits.contains(n)) do
+      val pending = enumDeinitsNeeded.filterNot((n, _) => emittedEnumDeinits.contains(n)).toList
+      for (name, et) <- pending do
+        emittedEnumDeinits += name
+        emitEnumDeinit(name, et)
 
     // Emit per-closure-id env deinit functions (walk captures to decr rc content)
     for (name, closure) <- closureEnvDeinitsNeeded do
@@ -509,7 +525,19 @@ class SyslTriscCodegen(addresses: Int = 4):
       Some(deinitFunctions(name))
     case SyslType.RefType(SyslType.SliceType(elem)) =>
       sliceDeinitFor(elem)
+    case SyslType.RefType(et: SyslType.EnumType) =>
+      enumDeinitFor(et)
     case _ => None
+
+  // Mangled name for a per-enum-type deinit function. Registers the type so the
+  // function body is emitted at the end of generate(). Returns None if no
+  // variant carries rc content (no walk needed; the buffer is just freed).
+  private def enumDeinitFor(et: SyslType.EnumType): Option[String] =
+    if !structHasStringFields(et) then None
+    else
+      val name = s"__enum_deinit_${modulePrefix}_${et.name}".replace("__", "_")
+      enumDeinitsNeeded(name) = et
+      Some(name)
 
   // True if a slice element type carries refcounted content that must be decr'd
   // before the backing buffer is freed.
@@ -802,6 +830,36 @@ class SyslTriscCodegen(addresses: Int = 4):
     emit("  addi r3, r3, -1")
     emit(s"  bra $loop")
     emit(s"$done")
+    emit("  mov r7, r5")
+    emit("  popd r5")
+    emit("  popd r6")
+    emit("  jalr r0, r6")
+
+  /** Per-enum-type deinit function. Called when freeing a `&MyEnum` whose
+    * active variant carries rc content (string fields, nested struct/enum/array
+    * with strings). r1 = data ptr (past the 8-byte rc header). Walks the active
+    * variant via emitEnumStringFieldsRC (tag-dispatched), then returns. Buffer
+    * itself is freed by emitRefDecr's free() call after this returns.
+    */
+  private def emitEnumDeinit(name: String, et: SyslType.EnumType): Unit =
+    emit(s"# enum deinit: $name")
+    emit(s"global $name, func, 1 i64 i64")
+    emit(s"$name:")
+    emit("  pshd r6")
+    emit("  pshd r5")
+    emit("  mov r5, r7")
+    // r1 = data ptr (input). emitEnumStringFieldsRC(baseReg=1, baseOff=0)
+    // reads tag from [r1] and walks the matching variant. emitValueRC saves
+    // and restores r1 around inner decr's, so r1 is preserved across inner
+    // calls — but emitRefDecr's free path may clobber it after the popd.
+    // Save data ptr at fp-8 and use that copy to keep things simple.
+    emit("  pshd r1")                    // save data ptr at fp-8 (r5-8)
+    // Reload r1 from saved slot — emitEnumStringFieldsRC will pshd/popd r1
+    // around each inner decr, but emitRefDecr inside that decr does not
+    // touch r1's saved slot at fp-8.
+    emitAddImm(1, 5, -8)
+    emit("  ldd r1, r1, r0")             // r1 = data ptr (refreshed)
+    emitEnumStringFieldsRC(1, 0, et, incr = false)
     emit("  mov r7, r5")
     emit("  popd r5")
     emit("  popd r6")
@@ -4935,6 +4993,26 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  ldd r3, r3, r0")          // r3 = malloc result
           emitAddImm(2, 3, 8 + dataOff + fieldOff) // r2 = field address (past header + data offset)
           emitStore(1, 2, fieldType)
+          // Borrowed string field: incr the buffer (caller still owns its copy)
+          fieldType match
+            case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
+              emit("  pshd r1")
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitAddImm(1, 3, 8 + dataOff + fieldOff)
+              emit("  ldd r1, r1, r0")
+              emitRefIncr(1, 8)
+              emit("  popd r1")
+            case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+              // r3 = malloc result; field address = r3 + 8 + dataOff + fieldOff
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitStructStringFieldsRC(3, 8 + dataOff + fieldOff, nested, incr = true)
+            case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitEnumStringFieldsRC(3, 8 + dataOff + fieldOff, nested, incr = true)
+            case _ =>
           fieldOff += fieldType.sizeOf.toInt
         // r1 = data pointer (past refcount header)
         emitAddImm(1, 5, ptrOffset)

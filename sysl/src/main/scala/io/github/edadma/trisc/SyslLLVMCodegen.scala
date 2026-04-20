@@ -18,6 +18,12 @@ class SyslLLVMCodegen(target: String = "host"):
   // user functions. Each takes the data pointer (past the 16-byte rc/len header)
   // and decrs every element before returning.
   private val sliceElemDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType] // deinit name -> elem type
+
+  // Per-enum-type deinit functions to emit (for &MyEnum where the enum has
+  // string-bearing variants). Generated on demand when an enum ref is freed;
+  // each takes the data ptr (past the rc header) and walks the active
+  // variant's strings via emitEnumStringFieldsDecr.
+  private val enumDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType.EnumType] // deinit name -> enum type
   private var closureCounter = 0
   private val pendingClosures = new mutable.ListBuffer[(String, TClosure)] // (name, closure)
   // Per-closure-id env deinit functions to emit (only for closures whose captures carry rc content).
@@ -142,6 +148,7 @@ class SyslLLVMCodegen(target: String = "host"):
     structTypes.clear()
     deinitFunctions.clear()
     sliceElemDeinitsNeeded.clear()
+    enumDeinitsNeeded.clear()
     for decl <- program.decls do
       decl match
         case TStructDecl(name, fields, volFields) =>
@@ -216,6 +223,13 @@ class SyslLLVMCodegen(target: String = "host"):
       for (name, elem) <- pending do
         emittedSliceDeinits += name
         emitSliceDeinit(name, elem)
+    // Per-enum-type deinit functions (for &MyEnum with rc-bearing variants)
+    val emittedEnumDeinits = mutable.Set.empty[String]
+    while enumDeinitsNeeded.exists((n, _) => !emittedEnumDeinits.contains(n)) do
+      val pending = enumDeinitsNeeded.filterNot((n, _) => emittedEnumDeinits.contains(n)).toList
+      for (name, et) <- pending do
+        emittedEnumDeinits += name
+        emitEnumDeinit(name, et)
     // Per-closure-id env deinit functions
     for (name, closure) <- closureEnvDeinitsNeeded do
       emitClosureEnvDeinit(name, closure)
@@ -2358,6 +2372,58 @@ class SyslLLVMCodegen(target: String = "host"):
 
       // ===== Enums =====
 
+      case TNewEnum(et, variantIndex, args) =>
+        // Heap-allocated ref-counted enum: [refcount_i64 | tag_i32 | padding | variant_data...].
+        // Layout matches TEnumConstruct's value form, but in malloc'd memory with an
+        // 8-byte rc header. Returns a data pointer (past the rc header) — same convention
+        // as TNew. RefType(EnumType) deinit walks the active variant before free.
+        val dataSize = et.sizeOf
+        val totalSize = dataSize + 8
+        val buf = newReg()
+        emit(s"  $buf = call i8* @malloc(i64 $totalSize)")
+        val rcPtr = newReg()
+        emit(s"  $rcPtr = bitcast i8* $buf to i64*")
+        emit(s"  store i64 1, i64* $rcPtr")
+        val dataPtr = newReg()
+        emit(s"  $dataPtr = getelementptr i8, i8* $buf, i64 8")
+        emit(s"  call void @llvm.memset.p0i8.i64(i8* $dataPtr, i8 0, i64 $dataSize, i1 false)")
+        // Store tag at data offset 0
+        val tagPtr = newReg()
+        emit(s"  $tagPtr = bitcast i8* $dataPtr to i32*")
+        emit(s"  store i32 $variantIndex, i32* $tagPtr")
+        // Store variant fields at data + dataOffset
+        if args.nonEmpty then
+          val dataOffset = et.dataOffset
+          val variantFields = et.variants(variantIndex)._2
+          var fieldOffset = 0L
+          for (arg, i) <- args.zipWithIndex do
+            val (_, fieldType) = variantFields(i)
+            val align = fieldType.alignOf
+            fieldOffset = ((fieldOffset + align - 1) / align) * align
+            val v = genExpr(arg)
+            val ft = llvmType(fieldType)
+            val fieldAddr = newReg()
+            emit(s"  $fieldAddr = getelementptr i8, i8* $dataPtr, i64 ${dataOffset + fieldOffset}")
+            val typedAddr = newReg()
+            emit(s"  $typedAddr = bitcast i8* $fieldAddr to $ft*")
+            val storeVal = if isAggregate(fieldType) then
+              val loaded = newReg()
+              emit(s"  $loaded = load $ft, $ft* $v")
+              loaded
+            else v
+            emit(s"  store $ft $storeVal, $ft* $typedAddr")
+            // Borrowed string field: incr buffer (caller still owns its copy)
+            if isStringType(fieldType) && !isOwnedString(arg) then
+              emitStringDescrIncr(typedAddr)
+            fieldType match
+              case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStruct(arg) =>
+                emitStructStringFieldsIncr(typedAddr, nested)
+              case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStruct(arg) =>
+                emitEnumStringFieldsIncr(typedAddr, nested)
+              case _ =>
+            fieldOffset += fieldType.sizeOf
+        dataPtr // return ptr to data (past rc header) — same convention as TNew
+
       case TEnumConstruct(et, variantIndex, args) =>
         val totalSize = et.sizeOf
         val lt = llvmType(et)
@@ -3531,6 +3597,24 @@ class SyslLLVMCodegen(target: String = "host"):
     emit("}")
     emit("")
 
+  /** Per-enum-type deinit. Called when freeing a `&MyEnum` whose active variant
+    * carries rc content. Receives the enum's data ptr (past the rc header) and
+    * walks the active variant's strings via emitEnumStringFieldsDecr. The buffer
+    * itself is freed by the caller's emitRefDecr after this returns. */
+  private def emitEnumDeinit(name: String, et: SyslType.EnumType): Unit =
+    val enumLt = llvmType(et)
+    regCounter = 0
+    labelCounter = 0
+    emit(s"; enum deinit: $name")
+    emit(s"define i32 @$name(i8* %data) {")
+    emit("entry:")
+    val typed = newReg()
+    emit(s"  $typed = bitcast i8* %data to $enumLt*")
+    emitEnumStringFieldsDecr(typed, et)
+    emit("  ret i32 0")
+    emit("}")
+    emit("")
+
   /** Generalized rc walker for any value type at `addr`. Handles strings,
     * value structs (recurses), value arrays (loops over elements), and value
     * enums (runtime tag-dispatch). No-op for any type without string content. */
@@ -3757,7 +3841,18 @@ class SyslLLVMCodegen(target: String = "host"):
   private def deinitFor(typ: SyslType): Option[String] = typ match
     case SyslType.RefType(SyslType.StructType(name, _, _)) => deinitFunctions.get(name)
     case SyslType.RefType(SyslType.SliceType(elem)) => sliceDeinitFor(elem)
+    case SyslType.RefType(et: SyslType.EnumType) => enumDeinitFor(et)
     case _ => None
+
+  /** Mangled name for a per-enum-type deinit function. Registers the type so
+    * the function body is emitted at the end of generate(). Returns None if no
+    * variant carries rc content (no walk needed; just free). */
+  private def enumDeinitFor(et: SyslType.EnumType): Option[String] =
+    if !structHasStringFields(et) then None
+    else
+      val name = s"__enum_deinit_${et.name}"
+      enumDeinitsNeeded(name) = et
+      Some(name)
 
   /** True if a slice element type carries refcounted content that must be
     * decr'd before the backing buffer is freed. */

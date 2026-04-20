@@ -1491,4 +1491,83 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
         |    0
         |""".stripMargin) shouldBe 0
   }
+
+  // ====================================================================
+  // &MyEnum (RefType(EnumType)) — TNewEnum + per-enum deinit
+  // ====================================================================
+
+  "new MyEnum(string) — heap enum reaches rc=0 walks active variant strings" in {
+    llvmExit(
+      """enum E
+        |    Wrap(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val e = new Wrap("iter" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "new MyEnum reassignment in loop — old enum's strings freed" in {
+    llvmExit(
+      """enum E
+        |    Wrap(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var e = new Wrap("init" + "_v")
+        |    var i = 0
+        |    while i < 100
+        |        e = new Wrap("iter" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "new MyEnum with multi-string variant" in {
+    llvmExit(
+      """enum E
+        |    Two(a: string, b: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val e = new Two("aa" + "_v", "bb" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "new MyEnum with empty variant — no spurious decr" in {
+    llvmExit(
+      """enum E
+        |    Wrap(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val e = new Empty()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "enum deinit IR emits __enum_deinit_<name>" in {
+    val ir = compileLLVM(
+      """enum E
+        |    Wrap(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    val e = new Wrap("hi" + "!")
+        |    0
+        |""".stripMargin)
+    ir should include("define i32 @__enum_deinit_E")
+    ir should include("call i32 @__enum_deinit_E")
+  }
 }

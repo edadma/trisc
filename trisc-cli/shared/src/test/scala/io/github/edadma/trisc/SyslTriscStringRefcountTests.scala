@@ -1630,4 +1630,69 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |    0
         |""".stripMargin, heapSize = 256) shouldBe 0
   }
+
+  // ====================================================================
+  // 16. &MyEnum (RefType(EnumType)) deinit
+  // ====================================================================
+
+  "new MyEnum(string) — heap enum reaches rc=0 walks active variant strings (heap pressure)" in {
+    runWithAlloc(
+      """enum E
+        |    Wrap(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 30
+        |        val e = new Wrap("iter" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "new MyEnum reassignment in loop — old enum's strings freed (heap pressure)" in {
+    runWithAlloc(
+      """enum E
+        |    Wrap(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var e = new Wrap("init" + "_v")
+        |    var i = 0
+        |    while i < 30
+        |        e = new Wrap("iter" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "new MyEnum with multi-string variant (heap pressure)" in {
+    runWithAlloc(
+      """enum E
+        |    Two(a: string, b: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 20
+        |        val e = new Two("aa" + "_v", "bb" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "new MyEnum with empty variant — no spurious decr (heap pressure)" in {
+    runWithAlloc(
+      """enum E
+        |    Wrap(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val e = new Empty()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
 }
