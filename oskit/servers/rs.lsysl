@@ -373,6 +373,26 @@ or -1 on error.
             i += 1
         entry
 
+Load a flat binary boot module (no header) into a process address
+space. Used on aarch64 where servers are built as raw .bin files
+via `aarch64-elf-objcopy -O binary` (see
+`oskit/arch/aarch64/build_servers.sh`). The binary's load address
+matches the arch's server VA — for aarch64 the linker script puts
+.text + .rodata + .data at SRV_USP's carve-out base, so the entry
+point is just that base (we use SRV_SSP as a proxy that sits at
+the same arch-specific low end of the user carve-out on aarch64).
+
+On x86/TRISC this path isn't reached because ELF/TRB magic matches
+first — flat is the final fallback.
+
+    val FLAT_LOAD_VA: u64 = u64(0x60000000)
+
+    rs_load_flat_module(buf: *byte, buflen: int, ptbr: u64) -> i64
+        if buflen <= 0
+            return -1
+        svc_vm_copy_to(ptbr, FLAT_LOAD_VA, buf, buflen)
+        i64(FLAT_LOAD_VA)
+
 Zero-fill a region in another process's address space.
 Uses a local zero buffer and vm_copy_to in chunks.
 
@@ -411,15 +431,16 @@ Returns the PID on success, 0 on failure.
         if ptbr == 0
             return 0
 
-        // Detect format and load binary into process address space
+        // Detect format and load binary into process address space.
+        // ELF (x86_64) → TRB (TRISC) → flat binary (aarch64) fallback.
         var entry: i64 = -1
         if buf[0] == 0x7F
             if buf[1] == byte('E')
-                // ELF64 format (x86_64)
                 entry = rs_load_elf64_module(buf, sz, ptbr)
         if entry < 0
-            // Try TRB format (TRISC)
             entry = rs_load_trb_module(buf, sz, ptbr)
+        if entry < 0
+            entry = rs_load_flat_module(buf, sz, ptbr)
         if entry < 0
             return 0
 
