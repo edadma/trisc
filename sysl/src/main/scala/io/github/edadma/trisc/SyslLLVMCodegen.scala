@@ -633,10 +633,12 @@ class SyslLLVMCodegen(target: String = "host"):
             // String reassignment: decrement old buffer refcount before overwrite
             if isStringType(local.typ) then
               emitStringDescrDecr(local.reg)
-            // Value-struct reassignment: decrement old struct's string fields before overwrite
+            // Value-struct/enum reassignment: decrement old's string fields before overwrite
             local.typ match
               case st: SyslType.StructType if structHasStringFields(st) =>
                 emitStructStringFieldsDecr(local.reg, st)
+              case et: SyslType.EnumType if structHasStringFields(et) =>
+                emitEnumStringFieldsDecr(local.reg, et)
               case _ =>
             if isAggregate(local.typ) then
               // Aggregate reassignment: load value from source, store to target
@@ -649,10 +651,12 @@ class SyslLLVMCodegen(target: String = "host"):
               // String reassignment: increment new buffer refcount if not owned
               if isStringType(local.typ) && !isOwnedString(value) then
                 emitStringDescrIncr(local.reg)
-              // Value-struct reassignment: increment new struct's string fields if borrowed
+              // Value-struct/enum reassignment: increment new aggregate's string fields if borrowed
               local.typ match
                 case st: SyslType.StructType if structHasStringFields(st) && !isOwnedStruct(value) =>
                   emitStructStringFieldsIncr(local.reg, st)
+                case et: SyslType.EnumType if structHasStringFields(et) && !isOwnedStruct(value) =>
+                  emitEnumStringFieldsIncr(local.reg, et)
                 case _ =>
             else
               val vt = exprType(value)
@@ -1942,6 +1946,53 @@ class SyslLLVMCodegen(target: String = "host"):
 
       // ===== Slices =====
 
+      case TSliceExpr(array, low, high, SyslType.StringType) =>
+        // Substring s[lo:hi]: allocate new rc'd buffer, memcpy hi-lo bytes.
+        val sp = genExpr(array)
+        val srcPtrGep = newReg()
+        emit(s"  $srcPtrGep = getelementptr %struct.string, %struct.string* $sp, i32 0, i32 0")
+        val srcPtr = newReg()
+        emit(s"  $srcPtr = load i8*, i8** $srcPtrGep")
+        val srcLenGep = newReg()
+        emit(s"  $srcLenGep = getelementptr %struct.string, %struct.string* $sp, i32 0, i32 1")
+        val srcLen = newReg()
+        emit(s"  $srcLen = load i32, i32* $srcLenGep")
+        val lo = low.map(genExpr).getOrElse("0")
+        val hi = high.map(genExpr).getOrElse(srcLen)
+        // Bounds check: 0 <= lo <= hi <= src_len → branch to abort otherwise
+        val okLabel = newLabel("substr_ok")
+        val failLabel = newLabel("substr_fail")
+        val loCheck = newReg()
+        emit(s"  $loCheck = icmp slt i32 $lo, 0")
+        val checkHi = newLabel("substr_chk_hi")
+        emit(s"  br i1 $loCheck, label %$failLabel, label %$checkHi")
+        emitLabel(checkHi)
+        val hiLoCheck = newReg()
+        emit(s"  $hiLoCheck = icmp slt i32 $hi, $lo")
+        val checkLen = newLabel("substr_chk_len")
+        emit(s"  br i1 $hiLoCheck, label %$failLabel, label %$checkLen")
+        emitLabel(checkLen)
+        val hiLenCheck = newReg()
+        emit(s"  $hiLenCheck = icmp sgt i32 $hi, $srcLen")
+        emit(s"  br i1 $hiLenCheck, label %$failLabel, label %$okLabel")
+        emitLabel(failLabel)
+        emit(s"  call void @abort()")
+        emit(s"  unreachable")
+        emitLabel(okLabel)
+        // Compute new_len = hi - lo, allocate buffer, memcpy
+        val newLen = newReg()
+        emit(s"  $newLen = sub i32 $hi, $lo")
+        val newLen64 = newReg()
+        emit(s"  $newLen64 = sext i32 $newLen to i64")
+        val dataPtr = emitStringBufferAlloc(newLen64)
+        val lo64 = newReg()
+        emit(s"  $lo64 = sext i32 $lo to i64")
+        val srcStart = newReg()
+        emit(s"  $srcStart = getelementptr i8, i8* $srcPtr, i64 $lo64")
+        val cp = newReg()
+        emit(s"  $cp = call i8* @memcpy(i8* $dataPtr, i8* $srcStart, i64 $newLen64)")
+        emitMakeString(dataPtr, newLen)
+
       case TSliceExpr(array, low, high, SyslType.SliceType(elemType)) =>
         val base = genExpr(array)
         val elt = llvmType(elemType)
@@ -2226,6 +2277,16 @@ class SyslLLVMCodegen(target: String = "host"):
               loaded
             else v
             emit(s"  store $ft $storeVal, $ft* $typedAddr")
+            // Borrowed string field: incr buffer (caller still owns its copy)
+            if isStringType(fieldType) && !isOwnedString(arg) then
+              emitStringDescrIncr(typedAddr)
+            // Borrowed nested struct/enum with strings: walk + incr
+            fieldType match
+              case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStruct(arg) =>
+                emitStructStringFieldsIncr(typedAddr, nested)
+              case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStruct(arg) =>
+                emitEnumStringFieldsIncr(typedAddr, nested)
+              case _ =>
             fieldOffset += fieldType.sizeOf
         alloca
 
@@ -3133,15 +3194,21 @@ class SyslLLVMCodegen(target: String = "host"):
   private def isStringType(t: SyslType): Boolean = t == SyslType.StringType
 
   /** True if a value type (recursively) contains any string buffers needing rc.
-    * Recurses through value-struct fields and value-array elements. Stops at
-    * refs/pointers/slices (handled separately). */
+    * Recurses through value-struct fields, value-array elements, and enum
+    * variant fields. Stops at refs/pointers/slices (handled separately). */
   private def structHasStringFields(t: SyslType): Boolean = t match
     case _ if isStringType(t) => true
     case st: SyslType.StructType =>
       val resolved = canonicalStruct(st)
       resolved.fields.exists((_, ft) => structHasStringFields(ft))
     case SyslType.ArrayType(elem, _) => structHasStringFields(elem)
+    case et: SyslType.EnumType =>
+      et.variants.exists((_, fields) => fields.exists((_, ft) => structHasStringFields(ft)))
     case _ => false
+
+  /** True if any field of an enum variant carries string content. */
+  private def variantHasStringFields(fields: List[(String, SyslType)]): Boolean =
+    fields.exists((_, ft) => structHasStringFields(ft))
 
   /** Decrement rc of every string buffer (recursively into nested value-struct fields
     * and value-array elements) at `structAddr`. */
@@ -3234,8 +3301,8 @@ class SyslLLVMCodegen(target: String = "host"):
     emit("")
 
   /** Generalized rc walker for any value type at `addr`. Handles strings,
-    * value structs (recurses), and value arrays (loops over elements). No-op
-    * for any type without string content. */
+    * value structs (recurses), value arrays (loops over elements), and value
+    * enums (runtime tag-dispatch). No-op for any type without string content. */
   private def emitValueRC(addr: String, t: SyslType, incr: Boolean): Unit =
     if !structHasStringFields(t) then return
     if isStringType(t) then
@@ -3249,9 +3316,11 @@ class SyslLLVMCodegen(target: String = "host"):
           val gep = newReg()
           emit(s"  $gep = getelementptr [$count x $elemLt], [$count x $elemLt]* $addr, i32 0, i32 $i")
           emitValueRC(gep, elem, incr)
+      case et: SyslType.EnumType =>
+        if incr then emitEnumStringFieldsIncr(addr, et) else emitEnumStringFieldsDecr(addr, et)
       case _ =>
 
-  /** Null out string descriptor data ptrs in a value type (recurses through structs/arrays). */
+  /** Null out string descriptor data ptrs in a value type (recurses through structs/arrays/enums). */
   private def emitValueNull(addr: String, t: SyslType): Unit =
     if !structHasStringFields(t) then return
     if isStringType(t) then
@@ -3267,7 +3336,67 @@ class SyslLLVMCodegen(target: String = "host"):
           val gep = newReg()
           emit(s"  $gep = getelementptr [$count x $elemLt], [$count x $elemLt]* $addr, i32 0, i32 $i")
           emitValueNull(gep, elem)
+      case et: SyslType.EnumType =>
+        emitEnumStringFieldsNull(addr, et)
       case _ =>
+
+  /** Decrement rc of every string in the active variant of an enum at `addr`.
+    * Loads tag (i32 @ 0), then chained icmp/br per variant carrying string
+    * content; variants with no strings are skipped. Each match block walks
+    * the variant's fields (computing offsets via stride) and branches to end. */
+  private def emitEnumStringFieldsDecr(addr: String, et: SyslType.EnumType): Unit =
+    emitEnumStringFieldsWalk(addr, et, mode = "decr")
+
+  /** Increment rc of every string in the active variant. Used when copying a
+    * borrowed enum (e.g., field of a struct constructed from a borrowed source). */
+  private def emitEnumStringFieldsIncr(addr: String, et: SyslType.EnumType): Unit =
+    emitEnumStringFieldsWalk(addr, et, mode = "incr")
+
+  /** Null out string descriptor ptrs in the active variant. Used after scope
+    * cleanup decr to prevent double-decrement when an outer scope re-walks. */
+  private def emitEnumStringFieldsNull(addr: String, et: SyslType.EnumType): Unit =
+    emitEnumStringFieldsWalk(addr, et, mode = "null")
+
+  private def emitEnumStringFieldsWalk(addr: String, et: SyslType.EnumType, mode: String): Unit =
+    val variantsWithStrings = et.variants.zipWithIndex.collect {
+      case ((_, fields), idx) if variantHasStringFields(fields) => (fields, idx)
+    }
+    if variantsWithStrings.isEmpty then return
+    val lt = llvmType(et)
+    val byteAddr = newReg()
+    emit(s"  $byteAddr = bitcast $lt* $addr to i8*")
+    val tagPtr = newReg()
+    emit(s"  $tagPtr = bitcast i8* $byteAddr to i32*")
+    val tag = newReg()
+    emit(s"  $tag = load i32, i32* $tagPtr")
+    val endLabel = newLabel("enum_rc_end")
+    val dataOff = et.dataOffset
+    for (fields, idx) <- variantsWithStrings do
+      val matchLbl = newLabel("enum_rc_match")
+      val nextLbl = newLabel("enum_rc_next")
+      val cmp = newReg()
+      emit(s"  $cmp = icmp eq i32 $tag, $idx")
+      emit(s"  br i1 $cmp, label %$matchLbl, label %$nextLbl")
+      emitLabel(matchLbl)
+      var fieldOffset = 0L
+      for (_, ft) <- fields do
+        val align = ft.alignOf
+        fieldOffset = ((fieldOffset + align - 1) / align) * align
+        if structHasStringFields(ft) then
+          val fieldByteAddr = newReg()
+          emit(s"  $fieldByteAddr = getelementptr i8, i8* $byteAddr, i64 ${dataOff + fieldOffset}")
+          val flt = llvmType(ft)
+          val fieldTypedAddr = newReg()
+          emit(s"  $fieldTypedAddr = bitcast i8* $fieldByteAddr to $flt*")
+          mode match
+            case "decr" => emitValueRC(fieldTypedAddr, ft, incr = false)
+            case "incr" => emitValueRC(fieldTypedAddr, ft, incr = true)
+            case "null" => emitValueNull(fieldTypedAddr, ft)
+        fieldOffset += ft.sizeOf
+      emit(s"  br label %$endLabel")
+      emitLabel(nextLbl)
+    emit(s"  br label %$endLabel")
+    emitLabel(endLabel)
 
   /** True for expressions that produce a freshly-owned string buffer (refcount = 1 or immortal).
     * No incr is needed when binding such a value to a fresh local. */
@@ -3275,14 +3404,16 @@ class SyslLLVMCodegen(target: String = "host"):
     case _: TStringLit => true                          // immortal sentinel — incr is a no-op anyway
     case _: TStringFromPtr | _: TStringFromSlice => true
     case TBinary(_, "+", _, SyslType.StringType) => true
+    case TSliceExpr(_, _, _, SyslType.StringType) => true
     case _: TCall | _: TIndirectCall => true            // ownership transferred from callee
     case _: TIfExpr | _: TMatchExpr => true             // branches handle their own RC
     case _ => false
 
-  /** True for expressions that produce a freshly-constructed/transferred-ownership value struct.
-    * No incr is needed when binding such a value to a fresh local. */
+  /** True for expressions that produce a freshly-constructed/transferred-ownership
+    * value struct or enum. No incr is needed when binding such a value to a fresh local. */
   private def isOwnedStruct(expr: TExpr): Boolean = expr match
     case _: TStructConstruct => true
+    case _: TEnumConstruct => true
     case _: TCall | _: TIndirectCall => true
     case _: TIfExpr | _: TMatchExpr => true
     case _ => false
@@ -3403,6 +3534,7 @@ class SyslLLVMCodegen(target: String = "host"):
     case _ if isStringType(elem) => true
     case _: SyslType.RefType => true
     case st: SyslType.StructType => structHasStringFields(st)
+    case et: SyslType.EnumType => structHasStringFields(et)
     case SyslType.ArrayType(e, _) => sliceElemNeedsDeinit(e)
     case _ => false
 
@@ -3423,6 +3555,7 @@ class SyslLLVMCodegen(target: String = "host"):
     case _ if isStringType(t) => "string"
     case SyslType.RefType(inner) => s"ref_${mangleType(inner)}"
     case SyslType.StructType(n, _, _) => s"struct_$n"
+    case SyslType.EnumType(n, _) => s"enum_$n"
     case SyslType.ArrayType(e, n) => s"arr${n}_${mangleType(e)}"
     case other => other.getClass.getSimpleName.toLowerCase
 
@@ -3564,6 +3697,8 @@ class SyslLLVMCodegen(target: String = "host"):
           emitStructStringFieldsDecr(local.reg, st)
         case SyslType.ArrayType(elem, _) if structHasStringFields(elem) && !skipSliceRegs.contains(local.reg) =>
           emitValueRC(local.reg, local.typ, incr = false)
+        case et: SyslType.EnumType if structHasStringFields(et) && !skipSliceRegs.contains(local.reg) =>
+          emitEnumStringFieldsDecr(local.reg, et)
         case _ =>
 
   /** Clean up locals introduced since a scope snapshot.
@@ -3590,6 +3725,9 @@ class SyslLLVMCodegen(target: String = "host"):
         case SyslType.ArrayType(elem, _) if structHasStringFields(elem) =>
           emitValueRC(local.reg, local.typ, incr = false)
           emitValueNull(local.reg, local.typ)
+        case et: SyslType.EnumType if structHasStringFields(et) =>
+          emitEnumStringFieldsDecr(local.reg, et)
+          emitEnumStringFieldsNull(local.reg, et)
         case _ =>
 
 
