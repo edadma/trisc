@@ -32,6 +32,12 @@ class SyslTriscCodegen(addresses: Int = 4):
   // active variant's strings before returning.
   private val enumDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType.EnumType] // deinit name → enum type
 
+  // Auto-synthesized struct deinit functions (for &MyStruct where the struct has
+  // string-bearing fields AND the user hasn't defined `TypeName.deinit`). Called
+  // by emitRefDecr at rc=0 before free(). Takes r1 = data ptr (past rc header)
+  // and walks string fields to decr them.
+  private val structDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType.StructType] // deinit name → struct type
+
   // Pending closure functions to generate after all regular functions
   private var closureCounter = 0
   private val pendingClosures = new mutable.ListBuffer[(String, TClosure)]
@@ -102,6 +108,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     deinitFunctions.clear()
     sliceElemDeinitsNeeded.clear()
     enumDeinitsNeeded.clear()
+    structDeinitsNeeded.clear()
     needsAllocExtern = scanNeedsAlloc(program)  // pre-scan so rc-bracket gates are correct from the start
     needsFreeExtern = false
     // Extract module prefix for unique symbol names across compilation units
@@ -184,6 +191,15 @@ class SyslTriscCodegen(addresses: Int = 4):
       for (name, et) <- pending do
         emittedEnumDeinits += name
         emitEnumDeinit(name, et)
+
+    // Emit auto-synthesized struct deinit functions (registered when freeing a
+    // struct ref whose fields carry rc content and no user deinit exists).
+    val emittedStructDeinits = mutable.Set.empty[String]
+    while structDeinitsNeeded.exists((n, _) => !emittedStructDeinits.contains(n)) do
+      val pending = structDeinitsNeeded.filterNot((n, _) => emittedStructDeinits.contains(n)).toList
+      for (name, st) <- pending do
+        emittedStructDeinits += name
+        emitStructDeinit(name, st)
 
     // Emit per-closure-id env deinit functions (walk captures to decr rc content)
     for (name, closure) <- closureEnvDeinitsNeeded do
@@ -521,8 +537,10 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   // Get deinit function name for a ref type, if one exists
   private def deinitFor(typ: SyslType): Option[String] = typ match
-    case SyslType.RefType(SyslType.StructType(name, _, _)) if deinitFunctions.contains(name) =>
+    case SyslType.RefType(st @ SyslType.StructType(name, _, _)) if deinitFunctions.contains(name) =>
       Some(deinitFunctions(name))
+    case SyslType.RefType(st: SyslType.StructType) =>
+      structDeinitFor(st)
     case SyslType.RefType(SyslType.SliceType(elem)) =>
       sliceDeinitFor(elem)
     case SyslType.RefType(et: SyslType.EnumType) =>
@@ -537,6 +555,16 @@ class SyslTriscCodegen(addresses: Int = 4):
     else
       val name = s"__enum_deinit_${modulePrefix}_${et.name}".replace("__", "_")
       enumDeinitsNeeded(name) = et
+      Some(name)
+
+  // Auto-synthesized struct deinit: walks string fields before free. Only
+  // registered for structs with no user-defined deinit; if the user writes
+  // `TypeName.deinit(...)` that takes precedence via `deinitFunctions`.
+  private def structDeinitFor(st: SyslType.StructType): Option[String] =
+    if !structHasStringFields(st) then None
+    else
+      val name = s"__struct_deinit_${modulePrefix}_${st.name}".replace("__", "_")
+      structDeinitsNeeded(name) = st
       Some(name)
 
   // True if a slice element type carries refcounted content that must be decr'd
@@ -830,6 +858,30 @@ class SyslTriscCodegen(addresses: Int = 4):
     emit("  addi r3, r3, -1")
     emit(s"  bra $loop")
     emit(s"$done")
+    emit("  mov r7, r5")
+    emit("  popd r5")
+    emit("  popd r6")
+    emit("  jalr r0, r6")
+
+  /** Auto-synthesized per-struct-type deinit. Called when freeing a `&MyStruct`
+    * whose fields carry rc content and the user hasn't defined a custom
+    * `TypeName.deinit`. r1 = data ptr (past the 8-byte rc header). Walks string
+    * fields via emitStructStringFieldsRC and returns. Buffer itself is freed by
+    * emitRefDecr's free() call after this returns.
+    */
+  private def emitStructDeinit(name: String, st: SyslType.StructType): Unit =
+    emit(s"# struct deinit: $name")
+    emit(s"global $name, func, 1 i64 i64")
+    emit(s"$name:")
+    emit("  pshd r6")
+    emit("  pshd r5")
+    emit("  mov r5, r7")
+    // Save data ptr at fp-8; reload before the walk so inner free's don't
+    // clobber it (same protection as the enum deinit uses).
+    emit("  pshd r1")
+    emitAddImm(1, 5, -8)
+    emit("  ldd r1, r1, r0")
+    emitStructStringFieldsRC(1, 0, st, incr = false)
     emit("  mov r7, r5")
     emit("  popd r5")
     emit("  popd r6")
@@ -4934,6 +4986,25 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  ldd r3, r3, r0") // r3 = malloc result
           emitAddImm(2, 3, 8 + off) // r2 = field address (past header)
           emitStore(1, 2, fieldType)
+          // Borrowed rc-bearing field: incr the buffer (caller still owns its copy)
+          fieldType match
+            case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
+              emit("  pshd r1")
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitAddImm(1, 3, 8 + off)
+              emit("  ldd r1, r1, r0")
+              emitRefIncr(1, 8)
+              emit("  popd r1")
+            case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitStructStringFieldsRC(3, 8 + off, nested, incr = true)
+            case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitEnumStringFieldsRC(3, 8 + off, nested, incr = true)
+            case _ =>
         // r1 = data pointer (past refcount header)
         emitAddImm(1, 5, ptrOffset)
         emit("  ldd r1, r1, r0")

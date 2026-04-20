@@ -1570,4 +1570,66 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
     ir should include("define i32 @__enum_deinit_E")
     ir should include("call i32 @__enum_deinit_E")
   }
+
+  // ====================================================================
+  // &MyStruct (RefType(StructType)) auto-deinit
+  // ====================================================================
+
+  "new MyStruct(string) — heap struct reaches rc=0 walks string fields" in {
+    llvmExit(
+      """struct Holder
+        |    name: string
+        |    n: int
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val h = new Holder("iter" + "_v", i)
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "new MyStruct reassignment in loop — old struct's strings freed" in {
+    llvmExit(
+      """struct Holder
+        |    name: string
+        |
+        |main() -> int
+        |    var h = new Holder("init" + "_v")
+        |    var i = 0
+        |    while i < 100
+        |        h = new Holder("iter" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "new MyStruct with multi-string field" in {
+    llvmExit(
+      """struct Pair
+        |    a: string
+        |    b: string
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val p = new Pair("aa" + "_v", "bb" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "struct deinit IR emits __struct_deinit_<name>" in {
+    val ir = compileLLVM(
+      """struct Holder
+        |    name: string
+        |
+        |main() -> int
+        |    val h = new Holder("hi" + "!")
+        |    0
+        |""".stripMargin)
+    ir should include("define i32 @__struct_deinit_Holder")
+    ir should include("call i32 @__struct_deinit_Holder")
+  }
 }

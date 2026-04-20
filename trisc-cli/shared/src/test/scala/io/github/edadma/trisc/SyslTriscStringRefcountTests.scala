@@ -1695,4 +1695,67 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |    0
         |""".stripMargin) shouldBe 0
   }
+
+  // ====================================================================
+  // 17. &MyStruct (RefType(StructType)) auto-deinit
+  // ====================================================================
+
+  "new MyStruct(string) — heap struct reaches rc=0 walks string fields (heap pressure)" in {
+    runWithAlloc(
+      """struct Holder
+        |    name: string
+        |    n: int
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 30
+        |        val h = new Holder("iter" + "_v", i)
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "new MyStruct reassignment in loop — old struct's strings freed (heap pressure)" in {
+    runWithAlloc(
+      """struct Holder
+        |    name: string
+        |
+        |main() -> int
+        |    var h = new Holder("init" + "_v")
+        |    var i = 0
+        |    while i < 30
+        |        h = new Holder("iter" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "new MyStruct with multi-string field (heap pressure)" in {
+    runWithAlloc(
+      """struct Pair
+        |    a: string
+        |    b: string
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 20
+        |        val p = new Pair("aa" + "_v", "bb" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "new MyStruct with no rc-bearing fields — no spurious decr (heap pressure)" in {
+    runWithAlloc(
+      """struct Counter
+        |    n: int
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val c = new Counter(i)
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
 }

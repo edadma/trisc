@@ -24,6 +24,11 @@ class SyslLLVMCodegen(target: String = "host"):
   // each takes the data ptr (past the rc header) and walks the active
   // variant's strings via emitEnumStringFieldsDecr.
   private val enumDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType.EnumType] // deinit name -> enum type
+
+  // Auto-synthesized struct deinit functions (for &MyStruct where the struct
+  // has string-bearing fields and the user hasn't defined `TypeName.deinit`).
+  // Called by emitRefDecr at rc=0 before free().
+  private val structDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType.StructType] // deinit name -> struct type
   private var closureCounter = 0
   private val pendingClosures = new mutable.ListBuffer[(String, TClosure)] // (name, closure)
   // Per-closure-id env deinit functions to emit (only for closures whose captures carry rc content).
@@ -149,6 +154,7 @@ class SyslLLVMCodegen(target: String = "host"):
     deinitFunctions.clear()
     sliceElemDeinitsNeeded.clear()
     enumDeinitsNeeded.clear()
+    structDeinitsNeeded.clear()
     for decl <- program.decls do
       decl match
         case TStructDecl(name, fields, volFields) =>
@@ -230,6 +236,15 @@ class SyslLLVMCodegen(target: String = "host"):
       for (name, et) <- pending do
         emittedEnumDeinits += name
         emitEnumDeinit(name, et)
+
+    // Auto-synthesized per-struct-type deinit functions (for &MyStruct with
+    // rc-bearing fields and no user `TypeName.deinit`).
+    val emittedStructDeinits = mutable.Set.empty[String]
+    while structDeinitsNeeded.exists((n, _) => !emittedStructDeinits.contains(n)) do
+      val pending = structDeinitsNeeded.filterNot((n, _) => emittedStructDeinits.contains(n)).toList
+      for (name, st) <- pending do
+        emittedStructDeinits += name
+        emitStructDeinit(name, st)
     // Per-closure-id env deinit functions
     for (name, closure) <- closureEnvDeinitsNeeded do
       emitClosureEnvDeinit(name, closure)
@@ -2324,15 +2339,25 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  $typedData = bitcast i8* $dataPtr to $structLt*")
         for (arg, i) <- args.zipWithIndex do
           val v = genExpr(arg)
-          val fieldType = llvmType(st.fields(i)._2)
+          val rawFieldType = st.fields(i)._2
+          val fieldType = llvmType(rawFieldType)
           val gep = newReg()
           emit(s"  $gep = getelementptr $structLt, $structLt* $typedData, i32 0, i32 $i")
-          val storeVal = if isAggregate(st.fields(i)._2) then
+          val storeVal = if isAggregate(rawFieldType) then
             val loaded = newReg()
             emit(s"  $loaded = load $fieldType, $fieldType* $v")
             loaded
           else v
           emit(s"  store $fieldType $storeVal, $fieldType* $gep")
+          // Borrowed string field: incr the buffer (caller still owns its copy)
+          if isStringType(rawFieldType) && !isOwnedString(arg) then
+            emitStringDescrIncr(gep)
+          rawFieldType match
+            case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStruct(arg) =>
+              emitStructStringFieldsIncr(gep, nested)
+            case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStruct(arg) =>
+              emitEnumStringFieldsIncr(gep, nested)
+            case _ =>
         dataPtr // return pointer to data (past refcount)
 
       case TNewArray(elemType, size) =>
@@ -3597,6 +3622,25 @@ class SyslLLVMCodegen(target: String = "host"):
     emit("}")
     emit("")
 
+  /** Auto-synthesized per-struct-type deinit. Called when freeing a `&MyStruct`
+    * whose fields carry rc content and the user hasn't defined
+    * `TypeName.deinit`. Receives the struct's data ptr (past the rc header)
+    * and decrs each string-bearing field. Buffer itself is freed by the
+    * caller's emitRefDecr after this returns. */
+  private def emitStructDeinit(name: String, st: SyslType.StructType): Unit =
+    val structLt = llvmType(st)
+    regCounter = 0
+    labelCounter = 0
+    emit(s"; struct deinit: $name")
+    emit(s"define i32 @$name(i8* %data) {")
+    emit("entry:")
+    val typed = newReg()
+    emit(s"  $typed = bitcast i8* %data to $structLt*")
+    emitStructStringFieldsDecr(typed, st)
+    emit("  ret i32 0")
+    emit("}")
+    emit("")
+
   /** Per-enum-type deinit. Called when freeing a `&MyEnum` whose active variant
     * carries rc content. Receives the enum's data ptr (past the rc header) and
     * walks the active variant's strings via emitEnumStringFieldsDecr. The buffer
@@ -3839,7 +3883,8 @@ class SyslLLVMCodegen(target: String = "host"):
 
   /** Look up deinit function name for a RefType's inner type. */
   private def deinitFor(typ: SyslType): Option[String] = typ match
-    case SyslType.RefType(SyslType.StructType(name, _, _)) => deinitFunctions.get(name)
+    case SyslType.RefType(st @ SyslType.StructType(name, _, _)) =>
+      deinitFunctions.get(name).orElse(structDeinitFor(st))
     case SyslType.RefType(SyslType.SliceType(elem)) => sliceDeinitFor(elem)
     case SyslType.RefType(et: SyslType.EnumType) => enumDeinitFor(et)
     case _ => None
@@ -3852,6 +3897,16 @@ class SyslLLVMCodegen(target: String = "host"):
     else
       val name = s"__enum_deinit_${et.name}"
       enumDeinitsNeeded(name) = et
+      Some(name)
+
+  /** Auto-synthesized struct deinit: walks string fields before free. Only
+    * registered for structs with rc-bearing fields and no user-defined
+    * `TypeName.deinit` (which takes precedence via `deinitFunctions`). */
+  private def structDeinitFor(st: SyslType.StructType): Option[String] =
+    if !structHasStringFields(st) then None
+    else
+      val name = s"__struct_deinit_${st.name}"
+      structDeinitsNeeded(name) = st
       Some(name)
 
   /** True if a slice element type carries refcounted content that must be
