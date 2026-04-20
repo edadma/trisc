@@ -151,7 +151,7 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val traitMethodBody: Parser[FunBodyAST] =
     "=" ~> bodyExprOrBlock |
-      block ^^ (stmts => BlockBodyAST(stmts))
+      funBlockBody
 
   lazy val implDecl: Parser[ImplDeclAST] =
     "impl" ~> ident ~ ("[" ~> typeRef <~ "]") ~
@@ -277,8 +277,8 @@ class SyslParser extends StandardTokenParsers {
     ident ~ ("->" ~> typeRef) ~ ("=" ~> bodyExprOrBlock) ^^ {
       case name ~ rt ~ body => FunDeclAST(name, Nil, Some(rt), body, priv, isDef = true)
     } |
-    ident ~ ("->" ~> typeRef) ~ block ^^ {
-      case name ~ rt ~ body => FunDeclAST(name, Nil, Some(rt), BlockBodyAST(body), priv, isDef = true)
+    ident ~ ("->" ~> typeRef) ~ funBlockBody ^^ {
+      case name ~ rt ~ body => FunDeclAST(name, Nil, Some(rt), body, priv, isDef = true)
     } |
     // def name = expr — zero-arg, inferred return type
     ident ~ ("=" ~> bodyExprOrBlock) ^^ {
@@ -301,12 +301,24 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val funRest: Parser[(Option[TypeAST], FunBodyAST)] =
     "->" ~> typeRef ~ ("=" ~> bodyExprOrBlock) ^^ { case rt ~ body => (Some(rt), body) } |
-      "->" ~> typeRef ~ block ^^ { case rt ~ body => (Some(rt), BlockBodyAST(body)) } |
+      "->" ~> typeRef ~ funBlockBody ^^ { case rt ~ body => (Some(rt), body) } |
       "=" ~> bodyExprOrBlock ^^ { body => (None, body) } |
-      block ^^ { body => (None, BlockBodyAST(body)) }
+      funBlockBody ^^ { body => (None, body) }
+
+  lazy val contractClause: Parser[ContractClauseAST] =
+    "require" ~> expr ^^ (e => ContractClauseAST(ContractRequire, e)) |
+    "ensure" ~> expr ^^ (e => ContractClauseAST(ContractEnsure, e))
+
+  /** A function block body: zero or more contract clauses at the top, followed by statements. */
+  lazy val funBlockBody: Parser[BlockBodyAST] =
+    Newline ~> Indent ~> rep(contractClause <~ rep1(stmtSep)) ~ stmts <~ opt(Newline) <~ Dedent ^^ {
+      case contracts ~ stmts => BlockBodyAST(stmts, contracts)
+    }
 
   lazy val bodyExprOrBlock: Parser[FunBodyAST] =
-    Newline ~> Indent ~> stmts <~ opt(Newline) <~ Dedent ^^ (s => BlockBodyAST(s)) |
+    Newline ~> Indent ~> rep(contractClause <~ rep1(stmtSep)) ~ stmts <~ opt(Newline) <~ Dedent ^^ {
+      case contracts ~ stmts => BlockBodyAST(stmts, contracts)
+    } |
       forStmt ^^ (s => BlockBodyAST(List(s))) |
       whileStmt ^^ (s => BlockBodyAST(List(s))) |
       doWhileStmt ^^ (s => BlockBodyAST(List(s))) |
@@ -597,7 +609,7 @@ class SyslParser extends StandardTokenParsers {
     ident ~ opt(":" ~> typeRef) ^^ { case name ~ typ => ClosureParamAST(name, typ) }
 
   lazy val closureBody: Parser[FunBodyAST] =
-    block ^^ BlockBodyAST.apply |
+    block ^^ (stmts => BlockBodyAST(stmts)) |
     logicalOr ^^ ExprBodyAST.apply
 
   lazy val matchExpr: Parser[MatchExprAST] =

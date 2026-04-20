@@ -440,6 +440,35 @@ uart_puts(s: string) = for c in s do uart_putc(int(c))
 wait_ready() = while !ready() do noop()
 ```
 
+### Design by Contract — `require` / `ensure`
+
+A block-body function can declare preconditions and postconditions at the top of its body:
+
+```sysl
+sqrt(x: f64) -> f64
+    require x >= 0.0
+    ensure result >= 0.0
+    ensure result * result <= x + 1.0e-6
+    var r = x / 2.0
+    for _ in 0 downTo 20 step 1 do r = 0.5 * (r + x / r)
+    r
+```
+
+- **`require <bool>`** — evaluated once on function entry. Traps if false.
+- **`ensure <bool>`** — evaluated before every return site (including the implicit fall-through
+  return of a trailing expression). Traps if false.
+- Multiple `require` and `ensure` clauses are allowed, in any order. All clauses must appear
+  before the first regular statement.
+- Both run-time checks go through the standard trap path (same as range checks).
+
+**`result` in `ensure` clauses.** Inside an `ensure` expression, the identifier `result`
+refers to the function's return value. Outside `ensure` — in `require` or in the body —
+`result` is just a normal identifier and may be used for your own variables. The analyzer
+aliases `result` → `__result__` only while typechecking ensure expressions (same pattern
+used for `self` → `__self__` in methods).
+
+Contracts are not yet supported on expression-body functions or on closures.
+
 ### Default Parameter Values
 
 Parameters can have default values, given with `= expr` after the type. Any
