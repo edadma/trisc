@@ -1,0 +1,18 @@
+// Address layout for aarch64 user programs and servers.
+//
+// Programs live in the L3 carve-out at VA 0x60000000..0x60080000
+// (128 pages of code/data/bss/heap), stack at 0x60080000..0x6008FFFF
+// (16 pages, USP grows down from 0x60090000), info page at
+// 0x60090000 (one page — RS bring-up info / PM argv blob).
+//
+// Mirrors the structure of oskit/arch/x86_64/prog_config.sysl: just
+// the cross-target constants a standalone user program needs, none
+// of the kernel-side externs that live in cpu.lsysl/vm.lsysl/exc.lsysl.
+
+module oskit.arch
+
+val PROG_USP = 0x60090000
+val PROG_SSP = 0x60080000
+val SRV_USP  = 0x60090000
+val SRV_SSP  = 0x60080000
+val INFO_PAGE_VA: i64 = 0x60090000

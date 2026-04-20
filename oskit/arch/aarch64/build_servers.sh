@@ -28,7 +28,7 @@ mkdir -p "$SRV_OUT"
 COMMON_SRCS=(
     oskit/ipc/ipc_client.sysl
     oskit/services/services.lsysl
-    oskit/arch/aarch64/cpu.lsysl
+    oskit/arch/aarch64/prog_config.sysl
     std/alloc/alloc.lsysl
 )
 

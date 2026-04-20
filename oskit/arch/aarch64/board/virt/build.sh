@@ -30,6 +30,7 @@ ARCH_DIR="$REPO_ROOT/oskit/arch/aarch64"
 
 SYSL_FILES=(
     oskit/config/config.sysl
+    oskit/arch/aarch64/prog_config.sysl
     oskit/arch/aarch64/cpu.lsysl
     oskit/arch/aarch64/vm.lsysl
     oskit/arch/aarch64/exc.lsysl
@@ -87,13 +88,17 @@ if [ ! -f "$OUT/bin/$USER_PROG.bin" ]; then
     exit 1
 fi
 
-echo "=== Build ramdisk apps (login, nsh) ==="
-for app in login nsh; do
+echo "=== Build ramdisk apps ==="
+# Core login/shell + everything a useful nsh session needs. Anything
+# that fails to build is listed but doesn't abort the whole build —
+# this is a bring-up harness, not a release. MakeAarch64RamdiskMain
+# picks up whatever ELFs actually land in /tmp/slix-aarch64/bin/.
+APPS=(login nsh su ls cat echo whoami uptime ps stat touch mkdir rmdir rm mv chmod head tail wc grep hello count write)
+for app in "${APPS[@]}"; do
     bash "$ARCH_DIR/build_prog.sh" "$app" > "$OUT/build-$app.log" 2>&1
     if [ ! -f "$OUT/bin/$app" ]; then
-        echo "  $app build failed:" >&2
-        tail -10 "$OUT/build-$app.log" >&2
-        exit 1
+        echo "  WARN: $app build failed; tail of log:" >&2
+        tail -5 "$OUT/build-$app.log" >&2
     fi
 done
 

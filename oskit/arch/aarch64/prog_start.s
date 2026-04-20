@@ -1,14 +1,14 @@
 // aarch64 program startup — entry point for standalone SLIX binaries.
 //
 // Mirrors oskit/arch/x86_64/prog_start.s. Reads argc/argv from the
-// POSIX blob PM writes at PROG_ARGS_ADDR (once PM lands on aarch64;
-// for the bare-metal test we pass argc=0 / cargv=null), calls
+// POSIX blob PM writes to the info page at INFO_PAGE_VA
+// (0x60090000 on aarch64, matching oskit.arch.INFO_PAGE_VA), calls
 // `oskit_ulib__sysl_start`, and exits via SYS_EXIT.
 
 .section .text
 .global _start
 
-.set PROG_ARGS_ADDR, 0xBF000
+.set PROG_ARGS_ADDR, 0x60090000
 
 // Entry point. Layout at PROG_ARGS_ADDR:
 //   +0   argc (i32)
@@ -18,17 +18,15 @@
 //   +8+8*argc  NULL
 //   +16+8*argc string data
 //
-// On QEMU virt bring-up there's no PM yet, so PROG_ARGS_ADDR isn't
-// mapped in the user PT. Guard: if the region is unmapped we pass
-// argc=0 and a null cargv so sysl_start falls through to main with
-// an empty []string. Once PM lands, swap in the real read.
+// PM copies this blob into the child's page table before resuming.
+// When no PM has run (kernel-direct spawn for bring-up tests), the
+// page is still mapped but zero-filled, so argc=0 and sysl_start
+// falls through to main() with an empty []string.
 _start:
-    // For now, bypass PROG_ARGS_ADDR read and call with empty argv.
-    // (The carve-out at 0x60000000 doesn't include 0xBF000; until
-    // the ramdisk loader / PM writes real args, just zero them.)
-    mov x0, #0
-    mov x1, #0
-    bl  oskit_ulib__sysl_start
+    ldr  x2, =PROG_ARGS_ADDR
+    ldr  w0, [x2]                // argc (i32)
+    add  x1, x2, #8              // &argv[0]
+    bl   oskit_ulib__sysl_start
 
     // sysl_start normally exits via syscall(SYS_EXIT, 0). If it
     // returns anyway, issue our own SYS_EXIT to halt cleanly.

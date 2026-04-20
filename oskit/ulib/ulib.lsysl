@@ -9,6 +9,8 @@ message-passing primitives.
 
     module oskit.ulib
 
+    import oskit.arch.{INFO_PAGE_VA}
+
 The `syscall` function is provided by the boot assembly.
 External programs include their own copy of the trampoline
 (3 instructions: load arg, trap 0, return).
@@ -528,10 +530,10 @@ it wouldn't fit in `cap` bytes.
 Layout (see PROG_ARGS_ADDR below for the spec):
     [argc(4)] [pad(4)] [argv[0](8)] ... [NULL(8)] [string data]
 
-Pointers are baked as absolute addresses = PROG_ARGS_ADDR + offset,
-since PM always copies the blob to PROG_ARGS_ADDR in the child.
-
-    val PROG_ARGS_ADDR = 0xBF000
+Pointers are baked as absolute addresses = INFO_PAGE_VA + offset,
+since PM always copies the blob to INFO_PAGE_VA in the child.
+INFO_PAGE_VA is arch-specific (0xBF000 on x86/TRISC, 0x60090000 on
+aarch64).
 
     build_argv_blob(argv: *string, argc: int, blob: *byte, cap: int) -> int
         val ptrs_size = (argc + 1) * 8
@@ -555,7 +557,7 @@ since PM always copies the blob to PROG_ARGS_ADDR in the child.
             if pos + alen + 1 > cap
                 return -1
             // Write argv[i] pointer at offset 8 + i*8 (absolute)
-            val ptr: i64 = i64(PROG_ARGS_ADDR) + i64(pos)
+            val ptr: i64 = INFO_PAGE_VA + i64(pos)
             val pbase = 8 + i * 8
             blob[pbase]     = byte(ptr & i64(0xFF))
             blob[pbase + 1] = byte((ptr >> 8) & i64(0xFF))

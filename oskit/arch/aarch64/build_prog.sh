@@ -32,6 +32,7 @@ build_one() {
         oskit/ulib/ulib.lsysl
         oskit/ulib/srt0.lsysl
         oskit/ds/client.lsysl
+        oskit/arch/aarch64/prog_config.sysl
         std/alloc/alloc.lsysl
     )
 
