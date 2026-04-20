@@ -1303,4 +1303,136 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
     asm should include("ldw r3")     // tag load in emitEnumStringFieldsRC
     asm should include regex """bne r3, r4, .*enum_rc_next""" // per-variant compare
   }
+
+  // ====================================================================
+  // 12. Closures capturing strings — env rc bracketing
+  // ====================================================================
+
+  "closure with single string capture: scope exit releases env (heap pressure)" in {
+    // Without rc bracketing the captured string into env + freeing the env, the
+    // 256-byte heap fills up after a few iterations and malloc returns null →
+    // sbrk-backed allocator returns -1 → trap. With proper bracketing the env
+    // (and its captured string) are reclaimed each iteration.
+    runWithAlloc(
+      """fill()
+        |    val s = "abc" + "_v"
+        |    val f = (x: int) -> x + len(s)
+        |    val r = f(0)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 30
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "closure constructed but body never called: still releases env on scope exit" in {
+    runWithAlloc(
+      """fill()
+        |    val s = "ab" + "cd"
+        |    val f = (x: int) -> x + len(s)
+        |    // f is never called
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 30
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "closure with multiple string captures" in {
+    runWithAlloc(
+      """fill()
+        |    val a = "x" + "y"
+        |    val b = "p" + "q"
+        |    val f = (n: int) -> n + len(a) + len(b)
+        |    val r = f(1)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 20
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+
+  "closure body uses captured string (computed result is correct)" in {
+    runWithAlloc(
+      """main() -> int
+        |    val s = "ab" + "cd"
+        |    val f = (n: int) -> n + len(s)
+        |    f(38)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "closure construction asm emits rc=1 + deinit_ptr in env header" in {
+    val asm = compile(
+      """main()
+        |    val s = "abc" + "_v"
+        |    val f = (x: int) -> x + len(s)
+        |""".stripMargin)
+    // env layout: malloc(envSize+16), then rc=1 (ldi r2, 1; std r2, r1, r0)
+    asm should include regex """movi r4, malloc"""
+    asm should include regex """ldi r2, 1"""
+    // deinit_ptr is the per-closure-id env deinit
+    asm should include regex """movi r2, __closure_env_deinit___closure_"""
+    // Dispatch shim is generated
+    asm should include("__closure_env_dispatch:")
+  }
+
+  "closure with no rc-bearing captures: deinit_ptr is null (no walk needed)" in {
+    val asm = compile(
+      """main()
+        |    val a = 10
+        |    val f = (x: int) -> x + a
+        |""".stripMargin)
+    // Still mallocs (always-heap), but deinit is null
+    asm should include("movi r4, malloc")
+    asm should not include "__closure_env_deinit_"  // no per-id deinit registered
+  }
+
+  "closure capturing struct-with-string field: env deinit walks struct" in {
+    runWithAlloc(
+      """struct Wrap
+        |    s: string
+        |
+        |fill()
+        |    val w = Wrap("ab" + "cd")
+        |    val f = (n: int) -> n + len(w.s)
+        |    val r = f(1)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 20
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "closure used inside higher-order function (descriptor passed by value)" in {
+    // Descriptor is passed as a borrowed FuncType param. Caller still owns env's rc.
+    runWithAlloc(
+      """apply(f: (int) -> int, x: int) -> int = f(x)
+        |
+        |fill()
+        |    val s = "ab" + "cd"
+        |    val r = apply(n -> n + len(s), 0)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 5
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+
 }

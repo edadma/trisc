@@ -20,6 +20,14 @@ class SyslLLVMCodegen(target: String = "host"):
   private val sliceElemDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType] // deinit name -> elem type
   private var closureCounter = 0
   private val pendingClosures = new mutable.ListBuffer[(String, TClosure)] // (name, closure)
+  // Per-closure-id env deinit functions to emit (only for closures whose captures carry rc content).
+  // Maps closure name → its TClosure (for capture layout).
+  private val closureEnvDeinitsNeeded = new mutable.LinkedHashMap[String, TClosure]
+  private var closureEnvDispatchNeeded = false
+  // Borrowed-capture local names in a closure body (skip rc cleanup — env owns the buffers)
+  private var captureBorrows: Set[String] = Set.empty
+  // FuncType/InterfaceType param names in current function — borrowed; do not decr env on exit
+  private var funcBorrowParams: Set[String] = Set.empty
   private val funcWrappers = new mutable.LinkedHashMap[String, String] // original name -> wrapper name
   private val pendingWrappers = new mutable.ListBuffer[(String, String, List[SyslType], SyslType)] // (wrapperName, origName, params, retType)
   private val emittedFunctions = new mutable.HashSet[String] // track emitted function names to avoid duplicates
@@ -102,6 +110,8 @@ class SyslLLVMCodegen(target: String = "host"):
     stringCounter = 0
     closureCounter = 0
     pendingClosures.clear()
+    closureEnvDeinitsNeeded.clear()
+    closureEnvDispatchNeeded = false
     pendingWrappers.clear()
     funcWrappers.clear()
     emittedFunctions.clear()
@@ -183,6 +193,10 @@ class SyslLLVMCodegen(target: String = "host"):
       for (name, elem) <- pending do
         emittedSliceDeinits += name
         emitSliceDeinit(name, elem)
+    // Per-closure-id env deinit functions
+    for (name, closure) <- closureEnvDeinitsNeeded do
+      emitClosureEnvDeinit(name, closure)
+    if closureEnvDispatchNeeded then emitClosureEnvDispatch()
     val funcCode = out.toString
 
     // Now build final output with string constants at the top
@@ -349,6 +363,9 @@ class SyslLLVMCodegen(target: String = "host"):
     labelCounter = 0
     hasReturned = false
     deferStack.clear()
+    funcBorrowParams = fun.params.collect {
+      case p if p.typ.isInstanceOf[SyslType.FuncType] || p.typ.isInstanceOf[SyslType.InterfaceType] => p.name
+    }.toSet
 
     val retType = llvmType(fun.returnType)
     val params = fun.params.map(p => s"${llvmType(p.typ)} %${p.name}_arg").mkString(", ")
@@ -419,6 +436,7 @@ class SyslLLVMCodegen(target: String = "host"):
     emit("")
     locals = null
     currentFunction = null
+    funcBorrowParams = Set.empty
 
   /** Generate a closure function with hidden env_ptr first parameter. */
   private def genClosureFunction(name: String, closure: TClosure): Unit =
@@ -428,6 +446,10 @@ class SyslLLVMCodegen(target: String = "host"):
     labelCounter = 0
     hasReturned = false
     deferStack.clear()
+    captureBorrows = closure.captures.map(_._1).toSet
+    funcBorrowParams = closure.params.collect {
+      case p if p.typ.isInstanceOf[SyslType.FuncType] || p.typ.isInstanceOf[SyslType.InterfaceType] => p.name
+    }.toSet
 
     val retLt = llvmType(closure.returnType)
     val paramStrs = "i8* %env" +: closure.params.map(p => s"${llvmType(p.typ)} %${p.name}_arg")
@@ -497,6 +519,8 @@ class SyslLLVMCodegen(target: String = "host"):
     emit("}")
     emit("")
     locals = null
+    captureBorrows = Set.empty
+    funcBorrowParams = Set.empty
 
   /** Generate a wrapper function that adapts a plain function to the closure ABI (env as first param). */
   private def emitFuncWrapper(wrapperName: String, origName: String, params: List[SyslType], retType: SyslType): Unit =
@@ -2570,21 +2594,35 @@ class SyslLLVMCodegen(target: String = "host"):
         closureCounter += 1
         val closureName = s"__closure_$closureCounter"
         pendingClosures += ((closureName, c))
-        // Build environment
+        // Build environment — always heap (with +16 header) when captures present.
+        // Layout: [rc:i64 @ -16 | deinit_ptr:i8* @ -8 | data]. env_ptr points to data.
         val envSize = c.captures.map((_, t) => llvmSizeOf(t)).sum
         val envPtr = if c.captures.nonEmpty then
-          val ep = if c.escapes then
-            // Escaping closure: heap-allocate env
-            val r = newReg()
-            emit(s"  $r = call i8* @malloc(i64 $envSize)")
-            r
-          else
-            // Non-escaping closure: stack-allocate env
-            val r = deferAlloca(s"[$envSize x i8]")
-            val cast = newReg()
-            emit(s"  $cast = bitcast [$envSize x i8]* $r to i8*")
-            cast
-          // Store captured values into environment
+          val totalSize = envSize + 16
+          val deinitOpt = closureEnvDeinitFor(closureName, c)
+          // malloc(totalSize); base = result
+          val base = newReg()
+          emit(s"  $base = call i8* @malloc(i64 $totalSize)")
+          // Write rc=1 at base+0
+          val rcPtr = newReg()
+          emit(s"  $rcPtr = bitcast i8* $base to i64*")
+          emit(s"  store i64 1, i64* $rcPtr")
+          // Write deinit_ptr at base+8
+          val deinitGep = newReg()
+          emit(s"  $deinitGep = getelementptr i8, i8* $base, i64 8")
+          val deinitPtrPtr = newReg()
+          emit(s"  $deinitPtrPtr = bitcast i8* $deinitGep to i8**")
+          deinitOpt match
+            case Some(deinitName) =>
+              val fnCast = newReg()
+              emit(s"  $fnCast = bitcast i32 (i8*)* @$deinitName to i8*")
+              emit(s"  store i8* $fnCast, i8** $deinitPtrPtr")
+            case None =>
+              emit(s"  store i8* null, i8** $deinitPtrPtr")
+          // env_ptr = base + 16 (data area)
+          val ep = newReg()
+          emit(s"  $ep = getelementptr i8, i8* $base, i64 16")
+          // Store captured values into environment, then Phase A: incr borrowed rc-bearing captures.
           var offset = 0L
           for (capName, capType) <- c.captures do
             val lt = llvmType(capType)
@@ -2609,6 +2647,9 @@ class SyslLLVMCodegen(target: String = "host"):
               emit(s"  store $lt $loaded, $lt* $typedEnvPtr")
             else
               emit(s"  store $lt $v, $lt* $typedEnvPtr")
+            // Phase A: incr rc-bearing captures (always borrowed — captures are TVarRef).
+            if structHasStringFields(capType) then
+              emitValueRC(typedEnvPtr, capType, incr = true)
             offset += llvmSizeOf(capType)
           ep
         else "null"
@@ -3617,6 +3658,84 @@ class SyslLLVMCodegen(target: String = "host"):
     case SyslType.ArrayType(e, n) => s"arr${n}_${mangleType(e)}"
     case other => other.getClass.getSimpleName.toLowerCase
 
+  /** Closure env layout (heap):
+    *   [rc:i64 @ -16 | deinit_ptr:i8* @ -8 | data...]
+    * env_ptr is an i8* pointing to data. envSize+16 is malloc'd; rc=1 written;
+    * deinit_ptr is the per-closure-id deinit (or null if no rc captures).
+    *
+    * __closure_env_dispatch is a thin shim called when env's rc hits zero. It
+    * loads the runtime deinit_ptr from env-8 and tail-calls it. Lets emitRefDecr
+    * handle envs uniformly without per-closure-id static deinit linkage at scope
+    * cleanup sites.
+    */
+  private def emitClosureEnvDispatch(): Unit =
+    emit("define i32 @__closure_env_dispatch(i8* %env) {")
+    emitLabel("entry")
+    val deinitGep = newReg()
+    emit(s"  $deinitGep = getelementptr i8, i8* %env, i64 -8")
+    val deinitPtrPtr = newReg()
+    emit(s"  $deinitPtrPtr = bitcast i8* $deinitGep to i8**")
+    val deinitPtr = newReg()
+    emit(s"  $deinitPtr = load i8*, i8** $deinitPtrPtr")
+    val isNull = newReg()
+    emit(s"  $isNull = icmp eq i8* $deinitPtr, null")
+    val callLbl = newLabel("dispatch_call")
+    val skipLbl = newLabel("dispatch_skip")
+    emit(s"  br i1 $isNull, label %$skipLbl, label %$callLbl")
+    emitLabel(callLbl)
+    val typedFn = newReg()
+    emit(s"  $typedFn = bitcast i8* $deinitPtr to i32 (i8*)*")
+    val r = newReg()
+    emit(s"  $r = call i32 $typedFn(i8* %env)")
+    emit(s"  br label %$skipLbl")
+    emitLabel(skipLbl)
+    emit("  ret i32 0")
+    emit("}")
+    emit("")
+
+  /** Per-closure-id env deinit: walks the closure's captures (known layout) and
+    * decr's rc-bearing entries via emitValueRC. Receives `i8* %env` (data ptr).
+    * Only registered for closures with at least one rc-bearing capture; closures
+    * with none use deinit_ptr=null and the dispatch shim no-ops.
+    */
+  private def emitClosureEnvDeinit(name: String, closure: TClosure): Unit =
+    emit(s"define i32 @$name(i8* %env) {")
+    emitLabel("entry")
+    var offset = 0L
+    for (_, capType) <- closure.captures do
+      if structHasStringFields(capType) then
+        val byteAddr = newReg()
+        emit(s"  $byteAddr = getelementptr i8, i8* %env, i64 $offset")
+        val lt = llvmType(capType)
+        val typedAddr = newReg()
+        emit(s"  $typedAddr = bitcast i8* $byteAddr to $lt*")
+        emitValueRC(typedAddr, capType, incr = false)
+      offset += llvmSizeOf(capType)
+    emit("  ret i32 0")
+    emit("}")
+    emit("")
+
+  /** Register a per-closure-id env deinit if the closure has rc-bearing
+    * captures. Returns the deinit function name, or None for scalar-only captures. */
+  private def closureEnvDeinitFor(name: String, closure: TClosure): Option[String] =
+    val hasRcCaptures = closure.captures.exists((_, t) => structHasStringFields(t) || t.isInstanceOf[SyslType.RefType])
+    if !hasRcCaptures then None
+    else
+      val deinitName = s"__closure_env_deinit_$name"
+      closureEnvDeinitsNeeded(deinitName) = closure
+      Some(deinitName)
+
+  /** Decrement env's rc via the descriptor's env_ptr (field 1 in %struct.closure).
+    * Loads env_ptr; if non-null, calls emitRefDecr with headerOff=16 and the
+    * generic dispatch deinit. */
+  private def emitClosureDescrDecr(descrAlloca: String): Unit =
+    closureEnvDispatchNeeded = true
+    val envGep = newReg()
+    emit(s"  $envGep = getelementptr %struct.closure, %struct.closure* $descrAlloca, i32 0, i32 1")
+    val envPtr = newReg()
+    emit(s"  $envPtr = load i8*, i8** $envGep")
+    emitRefDecr(envPtr, 16, Some("__closure_env_dispatch"))
+
   /** Emit inline refcount decrement + free when count reaches 0.
     * ptr is the data pointer (past header).
     * deinit is an optional function to call before freeing. */
@@ -3735,58 +3854,70 @@ class SyslLLVMCodegen(target: String = "host"):
       // Flush stdout before deinit functions might write to it
       val flushIgnored = newReg()
       emit(s"  $flushIgnored = call i32 @fflush(i8* null)")
-    for (_, local) <- locals if isRef(local.typ) do
-      val hoff = refHeaderOffset(local.typ)
-      val ptr = newReg()
-      emit(s"  $ptr = load i8*, i8** ${local.reg}")
-      emitRefDecr(ptr, hoff, deinitFor(local.typ))
+    for (name, local) <- locals if isRef(local.typ) do
+      if !captureBorrows.contains(name) then
+        val hoff = refHeaderOffset(local.typ)
+        val ptr = newReg()
+        emit(s"  $ptr = load i8*, i8** ${local.reg}")
+        emitRefDecr(ptr, hoff, deinitFor(local.typ))
     // Slice backref cleanup: decrement all slice locals except those being returned
-    for (_, local) <- locals if isSliceType(local.typ) do
-      if !skipSliceRegs.contains(local.reg) then
+    for (name, local) <- locals if isSliceType(local.typ) do
+      if !skipSliceRegs.contains(local.reg) && !captureBorrows.contains(name) then
         emitSliceBackrefDecr(local.reg, local.typ)
     // String buffer cleanup: decrement all string locals except those being returned
-    for (_, local) <- locals if isStringType(local.typ) do
-      if !skipSliceRegs.contains(local.reg) then
+    for (name, local) <- locals if isStringType(local.typ) do
+      if !skipSliceRegs.contains(local.reg) && !captureBorrows.contains(name) then
         emitStringDescrDecr(local.reg)
     // Value-struct string-field cleanup: decrement string fields of struct locals
-    for (_, local) <- locals do
-      local.typ match
-        case st: SyslType.StructType if structHasStringFields(st) && !skipSliceRegs.contains(local.reg) =>
-          emitStructStringFieldsDecr(local.reg, st)
-        case SyslType.ArrayType(elem, _) if structHasStringFields(elem) && !skipSliceRegs.contains(local.reg) =>
-          emitValueRC(local.reg, local.typ, incr = false)
-        case et: SyslType.EnumType if structHasStringFields(et) && !skipSliceRegs.contains(local.reg) =>
-          emitEnumStringFieldsDecr(local.reg, et)
-        case _ =>
+    for (name, local) <- locals do
+      if !captureBorrows.contains(name) then
+        local.typ match
+          case st: SyslType.StructType if structHasStringFields(st) && !skipSliceRegs.contains(local.reg) =>
+            emitStructStringFieldsDecr(local.reg, st)
+          case SyslType.ArrayType(elem, _) if structHasStringFields(elem) && !skipSliceRegs.contains(local.reg) =>
+            emitValueRC(local.reg, local.typ, incr = false)
+          case et: SyslType.EnumType if structHasStringFields(et) && !skipSliceRegs.contains(local.reg) =>
+            emitEnumStringFieldsDecr(local.reg, et)
+          case _: SyslType.FuncType if !skipSliceRegs.contains(local.reg) && !funcBorrowParams.contains(name) =>
+            emitClosureDescrDecr(local.reg)
+          case _ =>
 
   /** Clean up locals introduced since a scope snapshot.
     * Decrements slice backrefs then nulls them out to prevent double-decrement
     * when outer scopes or function exit re-process the same local. */
   private def emitScopeCleanup(preLocals: Set[String]): Unit =
     for (name, local) <- locals if !preLocals.contains(name) do
-      if isSliceType(local.typ) then
-        emitSliceBackrefDecr(local.reg, local.typ)
-        // Null out backref so it's not decremented again by outer scope or function exit
-        val brGep = newReg()
-        emit(s"  $brGep = getelementptr %struct.slice, %struct.slice* ${local.reg}, i32 0, i32 3")
-        emit(s"  store i8* null, i8** $brGep")
-      if isStringType(local.typ) then
-        emitStringDescrDecr(local.reg)
-        // Null out the data pointer so the buffer is not decremented again by outer scope or function exit
-        val ptrGep = newReg()
-        emit(s"  $ptrGep = getelementptr %struct.string, %struct.string* ${local.reg}, i32 0, i32 0")
-        emit(s"  store i8* null, i8** $ptrGep")
-      local.typ match
-        case st: SyslType.StructType if structHasStringFields(st) =>
-          emitStructStringFieldsDecr(local.reg, st)
-          emitStructStringFieldsNull(local.reg, st)
-        case SyslType.ArrayType(elem, _) if structHasStringFields(elem) =>
-          emitValueRC(local.reg, local.typ, incr = false)
-          emitValueNull(local.reg, local.typ)
-        case et: SyslType.EnumType if structHasStringFields(et) =>
-          emitEnumStringFieldsDecr(local.reg, et)
-          emitEnumStringFieldsNull(local.reg, et)
-        case _ =>
+      if captureBorrows.contains(name) then ()
+      else
+        if isSliceType(local.typ) then
+          emitSliceBackrefDecr(local.reg, local.typ)
+          // Null out backref so it's not decremented again by outer scope or function exit
+          val brGep = newReg()
+          emit(s"  $brGep = getelementptr %struct.slice, %struct.slice* ${local.reg}, i32 0, i32 3")
+          emit(s"  store i8* null, i8** $brGep")
+        if isStringType(local.typ) then
+          emitStringDescrDecr(local.reg)
+          // Null out the data pointer so the buffer is not decremented again by outer scope or function exit
+          val ptrGep = newReg()
+          emit(s"  $ptrGep = getelementptr %struct.string, %struct.string* ${local.reg}, i32 0, i32 0")
+          emit(s"  store i8* null, i8** $ptrGep")
+        local.typ match
+          case st: SyslType.StructType if structHasStringFields(st) =>
+            emitStructStringFieldsDecr(local.reg, st)
+            emitStructStringFieldsNull(local.reg, st)
+          case SyslType.ArrayType(elem, _) if structHasStringFields(elem) =>
+            emitValueRC(local.reg, local.typ, incr = false)
+            emitValueNull(local.reg, local.typ)
+          case et: SyslType.EnumType if structHasStringFields(et) =>
+            emitEnumStringFieldsDecr(local.reg, et)
+            emitEnumStringFieldsNull(local.reg, et)
+          case _: SyslType.FuncType if !funcBorrowParams.contains(name) =>
+            emitClosureDescrDecr(local.reg)
+            // Null out env_ptr so the descr decr is not re-run if outer scope re-processes
+            val envGep = newReg()
+            emit(s"  $envGep = getelementptr %struct.closure, %struct.closure* ${local.reg}, i32 0, i32 1")
+            emit(s"  store i8* null, i8** $envGep")
+          case _ =>
 
 
   /** Check if an expression is a TNew/TNewArray (already owns the ref, no incr needed). */
