@@ -33,14 +33,23 @@ object MakeAarch64BootInfoMain:
       System.err.println("usage: MakeAarch64BootInfoMain <module> [<module> ...]")
       System.exit(1)
 
+    // Servers live under /tmp/slix-aarch64/servers/<name>.bin; user
+    // programs under /tmp/slix-aarch64/bin/<name>.bin. Prefer servers/,
+    // fall back to bin/.
+    val srvDir  = Paths.get("/tmp/slix-aarch64/servers")
     val binDir  = Paths.get("/tmp/slix-aarch64/bin")
     val outPath = Paths.get("/tmp/slix-aarch64/bootinfo.img")
 
     val modules: Seq[(String, Array[Byte])] = args.toSeq.map { name =>
-      val path = binDir.resolve(s"$name.bin")
-      if !Files.exists(path) then
-        System.err.println(s"error: $path not found")
-        System.exit(1)
+      val srvPath = srvDir.resolve(s"$name.bin")
+      val binPath = binDir.resolve(s"$name.bin")
+      val path =
+        if Files.exists(srvPath) then srvPath
+        else if Files.exists(binPath) then binPath
+        else
+          System.err.println(s"error: neither $srvPath nor $binPath found")
+          System.exit(1)
+          null // unreachable
       val data = Files.readAllBytes(path)
       System.err.println(f"  $name: ${data.length}%d bytes")
       name -> data

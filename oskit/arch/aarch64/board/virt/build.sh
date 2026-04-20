@@ -86,12 +86,20 @@ if [ ! -f "$OUT/bin/$USER_PROG.bin" ]; then
     exit 1
 fi
 
-echo "=== Pack boot info (user=$USER_PROG.bin) ==="
-# Copy to stable name "user.bin" so the kernel always looks up
-# bi_find("user") regardless of which test program was selected.
+echo "=== Build RS server ==="
+bash "$ARCH_DIR/build_servers.sh" rs > "$OUT/build-rs.log" 2>&1
+if [ ! -f "$OUT/servers/rs.bin" ]; then
+    echo "  RS build failed:" >&2
+    tail -30 "$OUT/build-rs.log" >&2
+    exit 1
+fi
+
+echo "=== Pack boot info (user=$USER_PROG.bin, rs=$OUT/servers/rs.bin) ==="
+# Copy the chosen user program to stable name "user.bin" so bi_find("user")
+# resolves consistently regardless of which test program was selected.
 cp "$OUT/bin/$USER_PROG.bin" "$OUT/bin/user.bin"
 cd "$REPO_ROOT"
-sbt "triscCliJVM/runMain io.github.edadma.trisc.MakeAarch64BootInfoMain user" > "$OUT/sbt-bootinfo.log" 2>&1
+sbt "triscCliJVM/runMain io.github.edadma.trisc.MakeAarch64BootInfoMain user rs" > "$OUT/sbt-bootinfo.log" 2>&1
 if [ ! -f "$OUT/bootinfo.img" ]; then
     echo "  bootinfo.img build failed:" >&2
     tail -20 "$OUT/sbt-bootinfo.log" >&2

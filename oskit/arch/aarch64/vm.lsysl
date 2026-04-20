@@ -130,11 +130,14 @@ small sub-region to AP=01/UXN=0 for EL0 user code later (without
 breaking kernel execute, which the implicit-PXN rule would do if
 we flipped AP on the 1GB block itself).
 
-User region layout (128KB total, 32 pages in L3[0..31] of L2[256]):
-  VA 0x60000000..0x6000FFFF — code region, 16 × 4KB pages (L3[0..15])
+User region layout (580KB total, 145 pages in L3[0..144] of L2[256]):
+  VA 0x60000000..0x6007FFFF — code region, 128 × 4KB pages (L3[0..127])
                               AP=01 (EL0 RW), UXN=0 (EL0 execute)
-  VA 0x60010000..0x6001FFFF — stack region, 16 × 4KB pages (L3[16..31])
-                              AP=01, UXN=1. USP grows down from 0x60020000.
+  VA 0x60080000..0x6008FFFF — stack region, 16 × 4KB pages (L3[128..143])
+                              AP=01, UXN=1. USP grows down from 0x60090000.
+  VA 0x60090000..0x60090FFF — info page,    1 × 4KB page  (L3[144])
+                              AP=01, UXN=1. Mirrors x86's 0xBF000
+                              scratch page — RS bring-up info + argv.
 Implicit-PXN forces PXN=1 on all user pages, which is what we want
 (EL1 never fetches from them). AP=01 means EL1 can still read/write.
 
@@ -145,9 +148,10 @@ DEMO_MODE=2 (EL0 demo) convenience. Real loaders should use
 `vm_copy_to` under the new process PTBR instead of poking these
 directly — only the first page is exposed this way.
 
-    val USER_CODE_PAGES  = 16
+    val USER_CODE_PAGES  = 128
     val USER_STACK_PAGES = 16
-    val USER_STACK_L3_START = 16
+    val USER_STACK_L3_START = 128
+    val USER_INFO_L3_IDX = 144
 
     var last_user_code_page: u64 = 0
     var last_user_stack_page: u64 = 0
@@ -216,7 +220,7 @@ directly — only the first page is exposed this way.
         // prevent EL0 execution from the stack.
         val base_user_attrs = (ram_attrs & ~i64(2)) | PTE_PAGE | PTE_AP_EL0
 
-        var total_pages = USER_CODE_PAGES + USER_STACK_PAGES
+        var total_pages = USER_CODE_PAGES + USER_STACK_PAGES + 1
         var p = 0
         while p < total_pages
             val pa = page_alloc_zero()
@@ -235,9 +239,13 @@ directly — only the first page is exposed this way.
                 page_free(new_l0)
                 return 0
             var attrs = base_user_attrs
+            // Code pages (L3[0..127]) are EL0 R/W/X. Stack and info pages
+            // (L3[128..144]) are EL0 R/W but set UXN to block EL0 execute.
             if p >= USER_STACK_L3_START
                 attrs = attrs | PTE_UXN
-            vm_write_pte64(new_l3 + u64(p * 8), i64(pa) | attrs)
+            // Slot 144 is the info page (VA 0x60090000).
+            val l3_slot = p
+            vm_write_pte64(new_l3 + u64(l3_slot * 8), i64(pa) | attrs)
             if p == 0
                 last_user_code_page = pa
             if p == USER_STACK_L3_START

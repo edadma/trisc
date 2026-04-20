@@ -849,6 +849,14 @@ vm_copy_to translates the destination vaddr via page walk and copies.
 Thread info query handlers (syscalls 7-9, 42-43).
 Used by ps and other user programs via ulib.
 
+    sys_thread_id_handler(arg: int)
+        syscall_return(i64(current_thread))
+        kernel_continue_current()
+
+    sys_uptime_handler(arg: int)
+        syscall_return(i64(ticks))
+        kernel_continue_current()
+
     sys_thread_count_handler(arg: int)
         syscall_return(thread_count)
         kernel_continue_current()
@@ -916,6 +924,8 @@ Used by ps and other user programs via ulib.
         register_syscall(61, sys_getuid_handler)
         register_syscall(62, sys_setuid_handler)
         register_syscall(63, sys_vm_create_server_pt_handler)
+        register_syscall(5, sys_thread_id_handler)
+        register_syscall(6, sys_uptime_handler)
         register_syscall(7, sys_thread_count_handler)
         register_syscall(8, sys_thread_state_handler)
         register_syscall(9, sys_thread_name_handler)

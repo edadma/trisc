@@ -32,7 +32,7 @@ starts the next server.
     import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_phys_read, svc_port_transfer, svc_proc_main_tid, svc_set_priv, svc_set_ipc_mask}
     import oskit.ipc.{ipc_recv_notify, port_create, port_lookup}
     import oskit.hal.memset
-    import oskit.arch.{SRV_USP, SRV_SSP}
+    import oskit.arch.{SRV_USP, SRV_SSP, INFO_PAGE_VA}
 
 Server tracking. PIDs and MMIO page grants for each server
 in boot order (0=disk, 1=tfs, 2=tty, 3=pm, 4=vfs, 5=init).
@@ -430,7 +430,8 @@ Returns the PID on success, 0 on failure.
         if pid < 0
             return 0
 
-        // Write RS info page at 0xBF000:
+        // Write RS info page (arch-specific — x86/TRISC 0xBF000,
+        // aarch64 0x60090000). Layout:
         //   +0: RS TID (i64)
         //   +8: ramdisk base (i64) — used by disk server
         //  +16: ramdisk size (i64) — used by disk server
@@ -439,7 +440,7 @@ Returns the PID on success, 0 on failure.
         ip[0] = i64(thread_id())
         ip[1] = i64(rs_ramdisk_base)
         ip[2] = i64(rs_ramdisk_size)
-        svc_vm_copy_to(ptbr, 0xBF000, info_buf, 24)
+        svc_vm_copy_to(ptbr, u64(INFO_PAGE_VA), info_buf, 24)
 
         // Resume the process
         svc_resume_proc(pid)
@@ -523,13 +524,13 @@ After boot, RS stays alive in a monitoring loop.
     rs_main()
         rs_set_tid(thread_id())
 
-        // Read info page at 0xBF000
-        val info = *i64(0xBF000)
+        // Read info page (x86/TRISC 0xBF000, aarch64 0x60090000)
+        val info = *i64(INFO_PAGE_VA)
         rs_ramdisk_base = int(info[1])
         rs_ramdisk_size = int(info[2])
 
         // Copy boot info header from info page (+24)
-        val bi_src = *byte(0xBF018)
+        val bi_src = *byte(INFO_PAGE_VA + i64(24))
         // Read module count to determine copy size
         val mod_count = int(rs_read_u32_le(bi_src + 4))
         rs_boot_info_len = 8 + mod_count * 24
