@@ -14,6 +14,7 @@ primitives for future per-process page tables.
     module oskit.arch
 
     import oskit.config.{PAGE_SIZE}
+    import oskit.hal.memcpy
 
 Page tables emitted by `mmu.s`.
 
@@ -299,48 +300,64 @@ the low 12 bits of the VA as the page offset.
         u64(l3_entry & PTE_ADDR_MASK) + (vaddr & u64(0xFFF))
 
 Copy `len` bytes from a kernel-side source into `dst_vaddr` under
-`dst_ptbr`. Walks the target page table per byte (slow but simple;
-easy to optimize later by striding one page at a time).
+`dst_ptbr`. Strides one page at a time: translate VA→PA once per
+page, then memcpy the chunk that fits inside that page. The memcpy
+call is the HAL's `oskit.hal.memcpy`, which on boards with a DMA
+engine (e.g. rp2040) is free to route through it.
 
     vm_copy_to(dst_ptbr: u64, dst_vaddr: u64, src: *byte, len: int)
-        var i = 0
-        while i < len
-            val pa = vm_v2p(dst_ptbr, dst_vaddr + u64(i))
+        var copied = 0
+        while copied < len
+            val pa = vm_v2p(dst_ptbr, dst_vaddr + u64(copied))
             if pa == u64(0)
                 return
-            var dst_p: *byte = *byte(pa)
-            dst_p[0] = src[i]
-            i += 1
+            val page_off = int((dst_vaddr + u64(copied)) & u64(0xFFF))
+            var chunk = PAGE_SIZE - page_off
+            if chunk > len - copied
+                chunk = len - copied
+            memcpy(*byte(pa), src + copied, chunk)
+            copied += chunk
 
 Copy `len` bytes from `src_vaddr` under `src_ptbr` into a kernel-
-side destination.
+side destination. Same stride-per-page + memcpy pattern as
+`vm_copy_to`.
 
     vm_copy_from(src_ptbr: u64, src_vaddr: u64, dst: *byte, len: int)
-        var i = 0
-        while i < len
-            val pa = vm_v2p(src_ptbr, src_vaddr + u64(i))
+        var copied = 0
+        while copied < len
+            val pa = vm_v2p(src_ptbr, src_vaddr + u64(copied))
             if pa == u64(0)
                 return
-            var src_p: *byte = *byte(pa)
-            dst[i] = src_p[0]
-            i += 1
+            val page_off = int((src_vaddr + u64(copied)) & u64(0xFFF))
+            var chunk = PAGE_SIZE - page_off
+            if chunk > len - copied
+                chunk = len - copied
+            memcpy(dst + copied, *byte(pa), chunk)
+            copied += chunk
 
-Cross-address-space copy: bounce one byte at a time through the
-kernel. Used by IPC / grant paths when both endpoints live in
-different page tables.
+Cross-address-space copy between two different page tables. Strides
+by the SMALLER of the two page-remainders so a single memcpy always
+sits inside a source page and a destination page. Used by IPC /
+grant paths when both endpoints live in different address spaces.
 
     vm_copy_cross(src_ptbr: u64, src_vaddr: u64,
                   dst_ptbr: u64, dst_vaddr: u64, len: int)
-        var i = 0
-        while i < len
-            val src_pa = vm_v2p(src_ptbr, src_vaddr + u64(i))
-            val dst_pa = vm_v2p(dst_ptbr, dst_vaddr + u64(i))
+        var copied = 0
+        while copied < len
+            val src_pa = vm_v2p(src_ptbr, src_vaddr + u64(copied))
+            val dst_pa = vm_v2p(dst_ptbr, dst_vaddr + u64(copied))
             if src_pa == u64(0) || dst_pa == u64(0)
                 return
-            var src_p: *byte = *byte(src_pa)
-            var dst_p: *byte = *byte(dst_pa)
-            dst_p[0] = src_p[0]
-            i += 1
+            val src_off = int((src_vaddr + u64(copied)) & u64(0xFFF))
+            val dst_off = int((dst_vaddr + u64(copied)) & u64(0xFFF))
+            var chunk = PAGE_SIZE - src_off
+            val dst_chunk = PAGE_SIZE - dst_off
+            if dst_chunk < chunk
+                chunk = dst_chunk
+            if chunk > len - copied
+                chunk = len - copied
+            memcpy(*byte(dst_pa), *byte(src_pa), chunk)
+            copied += chunk
 
 Placeholder for the kernel's arch init hook. The MMU is already on
 when sysl gets control (mmu_init ran from boot.s), so on aarch64
