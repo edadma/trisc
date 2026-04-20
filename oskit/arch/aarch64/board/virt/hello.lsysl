@@ -371,8 +371,66 @@ DEMO_MODE=4 is the same idea plus a kernel-thread echo server
 (kentry_a) spawned first, so the user program can validate
 cross-address-space IPC by doing port_lookup("echo") + ipc_send.
 
-    extern _binary_user_prog_bin_start: byte
-    extern _binary_user_prog_bin_end: byte
+User binaries no longer live inside the kernel ELF. Instead the
+build packs them into bootinfo.img (see MakeAarch64BootInfoMain),
+which QEMU loads at BOOT_INFO_PA via `-device loader,file=...,
+addr=0x44000000`. The kernel parses the SLIX header on demand and
+copies the requested module's payload into the new process.
+
+    val BOOT_INFO_PA: u64 = u64(0x44000000)
+
+Little-endian readers — boot info uses the same encoding as x86.
+
+    bi_read_u32(p: *byte) -> i64
+        i64(p[0] & 0xff) | (i64(p[1] & 0xff) << 8) | (i64(p[2] & 0xff) << 16) | (i64(p[3] & 0xff) << 24)
+
+    bi_read_i64(p: *byte) -> i64
+        bi_read_u32(p) | (bi_read_u32(p + 4) << 32)
+
+Validate magic + return module count; -1 if header is bad.
+
+    bi_module_count() -> int
+        var p: *byte = *byte(BOOT_INFO_PA)
+        if p[0] != byte('S')
+            return -1
+        if p[1] != byte('L')
+            return -1
+        if p[2] != byte('I')
+            return -1
+        if p[3] != byte('X')
+            return -1
+        int(bi_read_u32(p + 4))
+
+Look up a module by name. Returns physical addr (0 if not found)
+and writes the size to *size_out.
+
+    bi_find(name: string, size_out: *int) -> i64
+        val count = bi_module_count()
+        if count < 0
+            return i64(0)
+        val nb: *byte = *byte(name)
+        val nl = len(name)
+        var i = 0
+        while i < count
+            val entry: *byte = *byte(BOOT_INFO_PA + u64(8 + i * 24))
+            // Compare name (NUL-padded to 8)
+            var j = 0
+            var matched = true
+            while j < nl && j < 8
+                if entry[j] != nb[j]
+                    matched = false
+                    break
+                j += 1
+            if matched
+                if nl < 8 && entry[nl] != 0
+                    matched = false
+            if matched
+                val off = bi_read_i64(entry + 8)
+                val sz  = bi_read_i64(entry + 16)
+                *size_out = int(sz)
+                return i64(BOOT_INFO_PA) + off
+            i += 1
+        i64(0)
 
 SYS_PUTC handler: write a single byte to the PL011 UART. Registered
 into syscall_table so user programs can print via ulib.putc().
@@ -432,10 +490,12 @@ line per 64 bytes of code.
             uart_puts("[user] vm_create_process_pt failed\n")
             abort()
 
-        val blob_start = i64(&_binary_user_prog_bin_start)
-        val blob_end   = i64(&_binary_user_prog_bin_end)
-        val blob_len   = int(blob_end - blob_start)
-        uart_puts("[user] loading test_putc blob=")
+        var blob_len = 0
+        val blob_start = bi_find("user", &blob_len)
+        if blob_start == i64(0) || blob_len <= 0
+            uart_puts("[user] boot module 'user' not found\n")
+            abort()
+        uart_puts("[user] loading user blob=")
         uart_puthex(u64(blob_start))
         uart_puts(" len=")
         uart_puthex(u64(blob_len))
@@ -495,9 +555,11 @@ ipc_write_saved_r1 / syscall_return_for PTBR-awareness.
             uart_puts("[uipc] vm_create_process_pt failed\n")
             abort()
 
-        val blob_start = i64(&_binary_user_prog_bin_start)
-        val blob_end   = i64(&_binary_user_prog_bin_end)
-        val blob_len   = int(blob_end - blob_start)
+        var blob_len = 0
+        val blob_start = bi_find("user", &blob_len)
+        if blob_start == i64(0) || blob_len <= 0
+            uart_puts("[uipc] boot module 'user' not found\n")
+            abort()
         uart_puts("[uipc] loading user_prog len=")
         uart_puthex(u64(blob_len))
         uart_puts("\n")

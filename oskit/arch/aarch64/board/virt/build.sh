@@ -86,19 +86,22 @@ if [ ! -f "$OUT/bin/$USER_PROG.bin" ]; then
     exit 1
 fi
 
-echo "=== Embed $USER_PROG.bin as user_prog.bin into kernel ==="
-# Copy to a stable name so the embedded symbol is always
-# _binary_user_prog_bin_start/_end/_size regardless of USER_PROG.
-cp "$OUT/bin/$USER_PROG.bin" "$OUT/bin/user_prog.bin"
-(cd "$OUT/bin" && aarch64-elf-objcopy \
-    -I binary -O elf64-littleaarch64 -B aarch64 \
-    --rename-section .data=.rodata,alloc,load,readonly,data,contents \
-    user_prog.bin "$OUT/user_blob.o")
+echo "=== Pack boot info (user=$USER_PROG.bin) ==="
+# Copy to stable name "user.bin" so the kernel always looks up
+# bi_find("user") regardless of which test program was selected.
+cp "$OUT/bin/$USER_PROG.bin" "$OUT/bin/user.bin"
+cd "$REPO_ROOT"
+sbt "triscCliJVM/runMain io.github.edadma.trisc.MakeAarch64BootInfoMain user" > "$OUT/sbt-bootinfo.log" 2>&1
+if [ ! -f "$OUT/bootinfo.img" ]; then
+    echo "  bootinfo.img build failed:" >&2
+    tail -20 "$OUT/sbt-bootinfo.log" >&2
+    exit 1
+fi
 
 echo "=== Link ==="
 aarch64-elf-ld -T "$BOARD_DIR/link.ld" \
     -o "$OUT/kernel.elf" \
-    "$OUT/boot.o" "$OUT/vectors.o" "$OUT/cpu_asm.o" "$OUT/mmu.o" "$OUT/vm_asm.o" "$OUT/irq_asm.o" "$OUT/stubs.o" "$OUT/kernel.o" "$OUT/user_blob.o" 2>&1 \
+    "$OUT/boot.o" "$OUT/vectors.o" "$OUT/cpu_asm.o" "$OUT/mmu.o" "$OUT/vm_asm.o" "$OUT/irq_asm.o" "$OUT/stubs.o" "$OUT/kernel.o" 2>&1 \
     | grep -v "has a LOAD segment with RWX permissions" || true
 
 echo "=== Built: $OUT/kernel.elf ==="
@@ -110,5 +113,6 @@ if [ "$RUN" = "run" ]; then
         -cpu cortex-a72 \
         -nographic \
         -no-reboot \
-        -kernel "$OUT/kernel.elf"
+        -kernel "$OUT/kernel.elf" \
+        -device loader,file="$OUT/bootinfo.img",addr=0x44000000
 fi
