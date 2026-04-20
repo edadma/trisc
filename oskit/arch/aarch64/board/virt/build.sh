@@ -38,6 +38,7 @@ SYSL_FILES=(
     oskit/kernel/spinlock.lsysl
     oskit/services/services.lsysl
     oskit/ipc/ipc.lsysl
+    std/alloc/alloc.lsysl
     oskit/arch/aarch64/board/virt/uart.lsysl
     oskit/arch/aarch64/board/virt/hello.lsysl
 )

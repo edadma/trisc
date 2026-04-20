@@ -35,36 +35,25 @@ __attribute__((noreturn)) void abort(void) {
         __asm__ volatile("wfi");
 }
 
-/* sysl's runtime emits free() calls when refcounted strings go out of
- * scope. Bare-metal has no malloc; let the strings leak. */
-void free(void *p) {
-    (void)p;
+/* sbrk — extend heap for std.alloc's Sysl allocator.
+ * Static BSS array keeps the heap safely inside the linked kernel
+ * image and out of the page allocator's way (page_alloc starts at
+ * _heap_start, past all BSS). 2MB matches x86/stubs.c. */
+static char sbrk_heap[2 * 1024 * 1024];
+static char *sbrk_cur = sbrk_heap;
+
+void *sbrk(int incr) {
+    if (incr == 0) return sbrk_cur;
+    char *old = sbrk_cur;
+    if (sbrk_cur + incr > sbrk_heap + sizeof(sbrk_heap))
+        return (void *)-1;
+    sbrk_cur += incr;
+    return old;
 }
 
-/* Bump allocator backing malloc for the bare-metal kernel. The sysl
- * string runtime calls malloc when it needs to heap-allocate a new
- * string buffer (e.g. on process name assignment). A simple bump
- * allocator is sufficient until we wire std.alloc + sbrk properly.
- *
- * QEMU virt default RAM is 128MB starting at 0x40000000, so the top
- * of RAM is 0x47FFFFFF. Reserve the top 16MB for this bump allocator;
- * the page allocator in vm.lsysl grows up from _heap_start and won't
- * reach that far for a long time. */
-static unsigned long heap_cursor = 0;
-#define HEAP_BUMP_BASE 0x47000000UL
-#define HEAP_BUMP_END  0x48000000UL
-
-void *malloc(size_t len) {
-    if (heap_cursor == 0)
-        heap_cursor = HEAP_BUMP_BASE;
-    /* 8-byte align */
-    len = (len + 7UL) & ~7UL;
-    if (heap_cursor + len > HEAP_BUMP_END)
-        return (void *)0;
-    void *p = (void *)heap_cursor;
-    heap_cursor += len;
-    return p;
-}
+/* malloc/free — provided by std.alloc in Sysl (now compiled into the
+ * kernel via board/virt/build.sh's SYSL_FILES list). No C stubs
+ * needed. */
 
 /* Byte-wise memcpy. Not called on hot paths — the kernel's own
  * memcpy from oskit/hal/memcpy.sysl is word-at-a-time and is what
