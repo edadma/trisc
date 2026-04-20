@@ -815,6 +815,33 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
   // 16. Arrays/slices of strings — element rc on scope exit / slice free
   // ====================================================================
 
+  "[N]string scope exit emits per-element decrement IR" in {
+    val ir = compileLLVM(
+      """fill()
+        |    var arr: [4]string
+        |    arr[0] = "a" + "_v"
+        |    arr[1] = "b" + "_v"
+        |    arr[2] = "c" + "_v"
+        |    arr[3] = "d" + "_v"
+        |""".stripMargin)
+    // Per-element string-buffer decrement should appear in fill() body.
+    // 4 elements × 1 string descriptor each → at least 4 free calls before ret void.
+    val freeCount = "call void @free".r.findAllIn(ir).length
+    freeCount should be >= 4
+  }
+
+  "&[]string scope exit emits slice deinit + free" in {
+    val ir = compileLLVM(
+      """main() -> int
+        |    val arr = new [2]string
+        |    arr[0] = "a" + "x"
+        |    arr[1] = "b" + "y"
+        |    0
+        |""".stripMargin)
+    ir should include("define i32 @__slice_deinit_string(i8* %data)")
+    ir should include("call i32 @__slice_deinit_string")
+  }
+
   "[N]string scope exit (functional check)" in {
     llvmExit(
       """fill()
