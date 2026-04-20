@@ -81,6 +81,51 @@ output to reduce IPC round-trips.
             nsh_putint(n / 10)
         nsh_putc('0' + (n % 10))
 
+Shell operator splitter. Walks the raw line buffer and rewrites
+it so `>`, `>>`, `<`, `|` are surrounded by spaces regardless of
+whether the user typed a space around them. Runs before tokenize
+so the tokenizer stays a simple whitespace-splitter and downstream
+redirect/pipe parsing just does string compares against argv.
+
+    nsh_split_operators(src: *byte, src_len: int, dst: *byte, dst_cap: int) -> int
+        var dpos = 0
+        var spos = 0
+        while spos < src_len
+            val c = src[spos]
+            if c == '>'
+                if dpos + 4 > dst_cap
+                    break
+                dst[dpos] = ' '
+                dpos += 1
+                dst[dpos] = '>'
+                dpos += 1
+                if spos + 1 < src_len && src[spos + 1] == '>'
+                    dst[dpos] = '>'
+                    dpos += 1
+                    spos += 2
+                else
+                    spos += 1
+                dst[dpos] = ' '
+                dpos += 1
+                continue
+            if c == '<' || c == '|'
+                if dpos + 3 > dst_cap
+                    break
+                dst[dpos] = ' '
+                dpos += 1
+                dst[dpos] = c
+                dpos += 1
+                dst[dpos] = ' '
+                dpos += 1
+                spos += 1
+                continue
+            if dpos >= dst_cap
+                break
+            dst[dpos] = c
+            dpos += 1
+            spos += 1
+        dpos
+
 Tokenizer. Splits a line buffer into string tokens separated
 by spaces. Returns the number of tokens found.
 
@@ -839,6 +884,7 @@ The shell entry point. Home directory is passed via args
         sleep(5)
 
         var line: [256]byte
+        var parsed: [512]byte
         var argv: [16]string
 
         while 1 == 1
@@ -856,8 +902,14 @@ The shell entry point. Home directory is passed via args
             if blen == 0
                 continue
 
+            // Parse: pad operators (>, >>, <, |) with spaces so the
+            // tokenizer stays a pure whitespace splitter. Runs on the
+            // raw line before tokenize; downstream redirect/pipe
+            // handling then matches argv[i] == ">" etc. cleanly.
+            val plen = nsh_split_operators(line, blen, parsed, 512)
+
             // Tokenize
-            var argc = tokenize(line, blen, argv)
+            var argc = tokenize(parsed, plen, argv)
 
             // Check for trailing &
             nsh_background = 0

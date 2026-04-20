@@ -110,6 +110,17 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("inputdata")
   }
 
+  "aarch64 redirect: no space after >" in {
+    qemu.command("echo spaceless >/tmp/ns", rootPrompt)
+    val output = qemu.command("cat /tmp/ns")
+    output should include("spaceless")
+  }
+
+  "aarch64 pipe: no spaces around |" in {
+    val output = qemu.command("echo piped|cat")
+    output should include("piped")
+  }
+
   "aarch64 head: first 2 lines of file" in {
     qemu.command("echo line1 > /tmp/hf", rootPrompt)
     qemu.command("echo line2 >> /tmp/hf", rootPrompt)

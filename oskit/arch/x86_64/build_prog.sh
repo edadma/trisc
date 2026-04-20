@@ -30,6 +30,7 @@ build_one() {
     # Sysl source files for standalone programs
     local SYSL_FILES=(
         "$SRC"
+        oskit/arch/x86_64/prog_config.sysl
         oskit/ulib/ulib.lsysl
         oskit/ulib/srt0.lsysl
         oskit/ds/client.lsysl
