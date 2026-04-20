@@ -1534,4 +1534,100 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |    0
         |""".stripMargin, heapSize = 256) shouldBe 0
   }
+
+  // ====================================================================
+  // 14. Destructure pattern bindings (TDestructurePattern)
+  // ====================================================================
+
+  "destructure struct with string field extracts value" in {
+    runWithAlloc(
+      """struct Pair
+        |    name: string
+        |    n: int
+        |
+        |main() -> int
+        |    p = Pair("hi" + "!", 42)
+        |    p match
+        |        Pair(_, n) -> n
+        |""".stripMargin) shouldBe 42
+  }
+
+  "destructure bound string field usable in arm body" in {
+    runWithAlloc(
+      """struct Pair
+        |    name: string
+        |    n: int
+        |
+        |main() -> int
+        |    p = Pair("ho" + "ld", 1)
+        |    p match
+        |        Pair(s, _) -> if s == "hold" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "destructure with string field in loop — no heap leak" in {
+    runWithAlloc(
+      """struct Pair
+        |    name: string
+        |    n: int
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 40
+        |        val p = Pair("iter" + "_v", i)
+        |        val sum = p match
+        |            Pair(_, n) -> n
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  // ====================================================================
+  // 15. Closure descriptor copy (var g = f)
+  // ====================================================================
+
+  "closure descriptor copy (var g = f) does not double-decr heap env" in {
+    runWithAlloc(
+      """make() -> (int) -> int
+        |    val cap = "ab" + "cd"
+        |    (x: int) -> x + len(cap)
+        |
+        |main() -> int
+        |    val f = make()
+        |    val g = f
+        |    f(0) - g(0)
+        |""".stripMargin) shouldBe 0
+  }
+
+  "closure descriptor copy in loop — no use-after-free (heap pressure)" in {
+    runWithAlloc(
+      """make(i: int) -> (int) -> int
+        |    val cap = "iter" + "_v"
+        |    (x: int) -> x + len(cap) + i
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 30
+        |        val f = make(i)
+        |        val g = f
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 512) shouldBe 0
+  }
+
+  "closure descriptor reassignment in loop — no leak (heap pressure)" in {
+    runWithAlloc(
+      """make(i: int) -> (int) -> int
+        |    val cap = "iter" + "_v"
+        |    (x: int) -> x + len(cap) + i
+        |
+        |main() -> int
+        |    var f = make(0)
+        |    var i = 1
+        |    while i < 40
+        |        f = make(i)
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
 }

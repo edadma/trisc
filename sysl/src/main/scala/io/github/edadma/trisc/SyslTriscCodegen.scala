@@ -1747,7 +1747,14 @@ class SyslTriscCodegen(addresses: Int = 4):
             emitAddImm(2, 5, local.offset)
             emitStore(1, 2, typ)
             // Record kind for scope-cleanup gating.
-            closureLocalKind(name) = funcKindOfExpr(init)
+            val rhsKind = funcKindOfExpr(init)
+            closureLocalKind(name) = rhsKind
+            // Descriptor copy (var g = f) shares env_ptr with source — incr env
+            // rc so each descriptor's scope-exit decr is balanced.
+            init match
+              case _: TVarRef if rhsKind == FuncKind.HeapEnv =>
+                emitClosureDescrIncr(5, local.offset)
+              case _ =>
           case _ =>
             genExpr(init) // result in r1
             // Increment refcount for copies (not for new — TNew already sets refcount=1)
@@ -1858,6 +1865,20 @@ class SyslTriscCodegen(addresses: Int = 4):
               // Incr new enum's variant strings if borrowed
               if !isOwnedStructExpr(value) then
                 emitEnumStringFieldsRC(5, local.offset, et, incr = true)
+            case _: SyslType.FuncType =>
+              // Decr old env if HeapEnv; store new bytes; incr new env if RHS is
+              // a borrowed descriptor copy (TVarRef whose kind is HeapEnv).
+              if closureLocalKind.get(target).contains(FuncKind.HeapEnv) then
+                emitClosureDescrDecr(5, local.offset)
+              genExpr(value)
+              emitAddImm(2, 5, local.offset)
+              emitStore(1, 2, local.typ)
+              val rhsKind = funcKindOfExpr(value)
+              closureLocalKind(target) = rhsKind
+              value match
+                case _: TVarRef if rhsKind == FuncKind.HeapEnv =>
+                  emitClosureDescrIncr(5, local.offset)
+                case _ =>
             case _ =>
               genExpr(value)
               emitAddImm(2, 5, local.offset)
@@ -4059,16 +4080,37 @@ class SyslTriscCodegen(addresses: Int = 4):
             pat match
               case TDestructurePattern(st, bindings, fieldTypes) =>
                 for (binding, i) <- bindings.zipWithIndex do
+                  val fieldType = fieldTypes(i)
                   binding.foreach { name =>
                     val off = fieldOffset(st, i)
-                    // Reload scrutinee address each time (allocLocal may move sp)
+                    // Allocate the binding's local first (allocLocal moves sp), then
+                    // recompute the scrutinee field address — that address is in
+                    // physical memory (fp-relative), so post-allocation it's stable.
+                    val local = allocLocal(name, fieldType)
                     emitAddImm(1, 5, scrutineeOffset)
                     emit("  ldd r1, r1, r0")  // r1 = scrutinee address
                     if off != 0 then emitAddImm(1, 1, off)
-                    emitLoad(1, 1, fieldTypes(i))
-                    val local = allocLocal(name, fieldTypes(i))
-                    emitAddImm(2, 5, local.offset)
-                    emitStore(1, 2, fieldTypes(i))
+                    fieldType match
+                      case SyslType.StringType | _: SyslType.StructType | _: SyslType.EnumType =>
+                        // Aggregate: r1 = field address (src), copy bytes to local.
+                        emitAddImm(2, 5, local.offset)
+                        emitStore(1, 2, fieldType)
+                        // Binding is borrowed: incr the buffer/strings (scope exit
+                        // path will decr to balance).
+                        fieldType match
+                          case SyslType.StringType if needsAllocExtern =>
+                            emitAddImm(1, 5, local.offset)
+                            emit("  ldd r1, r1, r0")
+                            emitRefIncr(1, 8)
+                          case st2: SyslType.StructType if structHasStringFields(st2) =>
+                            emitStructStringFieldsRC(5, local.offset, st2, incr = true)
+                          case et2: SyslType.EnumType if structHasStringFields(et2) =>
+                            emitEnumStringFieldsRC(5, local.offset, et2, incr = true)
+                          case _ =>
+                      case _ =>
+                        emitLoad(1, 1, fieldType)
+                        emitAddImm(2, 5, local.offset)
+                        emitStore(1, 2, fieldType)
                   }
               case TVariantPattern(et, variantIndex, bindings, fieldTypes) =>
                 val dataOff = et.dataOffset.toInt

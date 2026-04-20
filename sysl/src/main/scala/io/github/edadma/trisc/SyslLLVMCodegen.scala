@@ -640,6 +640,24 @@ class SyslLLVMCodegen(target: String = "host"):
               emit(s"  store $lt $loaded, $lt* $alloca")
               locals(name) = LocalVar(name, alloca, typ, isVolatile)
               emitStructStringFieldsIncr(alloca, st)
+            case _: SyslType.FuncType =>
+              // Closure descriptor: copy bytes into a fresh alloca so `var g = f`
+              // doesn't alias f's storage (which would cause double-decr at scope
+              // exit and shared-mutation through one binding to the other).
+              val src = genExpr(init)
+              val alloca = deferAlloca(lt)
+              val loaded = newReg()
+              emit(s"  $loaded = load $lt, $lt* $src")
+              emit(s"  store $lt $loaded, $lt* $alloca")
+              locals(name) = LocalVar(name, alloca, typ, isVolatile)
+              val rhsKind = funcKindOfExpr(init)
+              closureLocalKind(name) = rhsKind
+              // Descriptor copy (var g = f) shares env_ptr with source — incr env
+              // rc so each descriptor's scope-exit decr is balanced.
+              init match
+                case _: TVarRef if rhsKind == FuncKind.HeapEnv =>
+                  emitClosureDescrIncr(alloca)
+                case _ =>
             case _ =>
               // Aggregate variable: genExpr returns an alloca pointer — use it directly
               val ptr = genExpr(init)
@@ -647,9 +665,6 @@ class SyslLLVMCodegen(target: String = "host"):
               // Slice backref: increment if copying from a non-owned source
               if isSliceType(typ) && !isSliceOwned(init) then
                 emitSliceBackrefIncr(ptr)
-              // Closure descriptor: record env kind so scope-cleanup gates emitClosureDescrDecr.
-              if typ.isInstanceOf[SyslType.FuncType] then
-                closureLocalKind(name) = funcKindOfExpr(init)
         else
             val alloca = deferAlloca(lt)
             val value = genExpr(init)
@@ -707,6 +722,10 @@ class SyslLLVMCodegen(target: String = "host"):
               case et: SyslType.EnumType if structHasStringFields(et) =>
                 emitEnumStringFieldsDecr(local.reg, et)
               case _ =>
+            // Closure descriptor reassignment: decr old env before overwrite
+            if local.typ.isInstanceOf[SyslType.FuncType]
+              && closureLocalKind.get(target).contains(FuncKind.HeapEnv) then
+              emitClosureDescrDecr(local.reg)
             if isAggregate(local.typ) then
               // Aggregate reassignment: load value from source, store to target
               val loaded = newReg()
@@ -725,6 +744,14 @@ class SyslLLVMCodegen(target: String = "host"):
                 case et: SyslType.EnumType if structHasStringFields(et) && !isOwnedStruct(value) =>
                   emitEnumStringFieldsIncr(local.reg, et)
                 case _ =>
+              // Closure descriptor reassignment: track new kind, incr if borrowed copy
+              if local.typ.isInstanceOf[SyslType.FuncType] then
+                val rhsKind = funcKindOfExpr(value)
+                closureLocalKind(target) = rhsKind
+                value match
+                  case _: TVarRef if rhsKind == FuncKind.HeapEnv =>
+                    emitClosureDescrIncr(local.reg)
+                  case _ =>
             else
               val vt = exprType(value)
               val finalVal = emitSextIfNeeded(v, vt, lt, value.typ.isSigned)
@@ -2465,6 +2492,8 @@ class SyslLLVMCodegen(target: String = "host"):
                 val cmp = newReg()
                 emit(s"  $cmp = icmp eq i32 $tag, $variantIdx")
                 cmp
+              case _: TDestructurePattern =>
+                "true" // destructure always matches
               case _ =>
                 emit(s"  ; TODO: match pattern ${pat.getClass.getSimpleName}")
                 "true"
@@ -2506,7 +2535,7 @@ class SyslLLVMCodegen(target: String = "host"):
           // Snapshot pre-arm locals BEFORE binding variant fields, so the bindings
           // are treated as arm-scoped and removed when the arm exits.
           val preArmLocals = locals.keySet.toSet
-          // Bind variant fields if this is a variant pattern
+          // Bind variant/destructure fields if this is a binding pattern
           arm.patterns.headOption match
             case Some(TVariantPattern(et, variantIdx, bindings, fieldTypes)) =>
               val dataOffset = et.dataOffset
@@ -2533,6 +2562,24 @@ class SyslLLVMCodegen(target: String = "host"):
                     locals(bName) = LocalVar(bName, alloc, ft)
                 }
                 fOffset += ft.sizeOf
+            case Some(TDestructurePattern(st, bindings, fieldTypes)) =>
+              val cst = canonicalStruct(st)
+              val structLt = llvmType(cst)
+              for (binding, j) <- bindings.zipWithIndex do
+                val ft = fieldTypes(j)
+                binding.foreach { bName =>
+                  val flt = llvmType(ft)
+                  val fAddr = newReg()
+                  emit(s"  $fAddr = getelementptr $structLt, $structLt* $scrut, i32 0, i32 $j")
+                  if isAggregate(ft) then
+                    locals(bName) = LocalVar(bName, fAddr, ft)
+                  else
+                    val alloc = deferAlloca(flt)
+                    val loaded = newReg()
+                    emit(s"  $loaded = load $flt, $flt* $fAddr")
+                    emit(s"  store $flt $loaded, $flt* $alloc")
+                    locals(bName) = LocalVar(bName, alloc, ft)
+                }
             case _ => // no bindings needed
           val savedHR = hasReturned
           hasReturned = false
@@ -3820,6 +3867,15 @@ class SyslLLVMCodegen(target: String = "host"):
     val envPtr = newReg()
     emit(s"  $envPtr = load i8*, i8** $envGep")
     emitRefDecr(envPtr, 16, Some("__closure_env_dispatch"))
+
+  /** Increment env's rc via descriptor's env_ptr. Used when copying a
+    * descriptor (var g = f) so both descriptors share the env. */
+  private def emitClosureDescrIncr(descrAlloca: String): Unit =
+    val envGep = newReg()
+    emit(s"  $envGep = getelementptr %struct.closure, %struct.closure* $descrAlloca, i32 0, i32 1")
+    val envPtr = newReg()
+    emit(s"  $envPtr = load i8*, i8** $envGep")
+    emitRefIncr(envPtr, 16)
 
   /** Emit inline refcount decrement + free when count reaches 0.
     * ptr is the data pointer (past header).
