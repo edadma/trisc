@@ -25,17 +25,19 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         sync_icache_line, vm_v2p, vm_copy_to, vm_copy_from,
         cntfrq_el0, cntp_tval_set, cntp_ctl_set,
         build_stack_frame, arch_resume_process,
-        STACK_FRAME_SIZE, arch_cli, arch_sti}
+        STACK_FRAME_SIZE, arch_cli, arch_sti,
+        PROG_USP, PROG_SSP}
     import oskit.kernel.{kernel_init, create_thread, first_thread_ssp,
         kernel_stack_usp, kernel_stack_ssp, schedule,
-        syscall_table, syscall_ssp_set, syscall_check_allowed}
+        syscall_table, syscall_ssp_set, syscall_check_allowed,
+        create_process_suspended, resume_process}
     import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
         ipc_send, ipc_recv, ipc_reply}
     import oskit.services.{get_thread_count, uptime, sleep, yield}
 
     extern arch_syscall_call(arg: i64, handler: i64)
 
-    val DEMO_MODE = 0             // 0=kernel, 1=ad-hoc, 2=EL0
+    val DEMO_MODE = 0             // 0=kernel+IPC, 1=ad-hoc, 2=EL0 legacy, 3=user proc
 
 Render `v` as a 16-digit hex number (prefixed `0x`) to the UART.
 
@@ -153,16 +155,24 @@ scheduler pass and the kernel threads themselves produce output.
             cntp_tval_set(cntfrq_el0() / u64(5))
         gic_eoi(irq)
 
-Scheduler hook. Three shapes:
+Scheduler hook. Four shapes:
   DEMO_MODE == 0 → delegate to the kernel's real schedule(ssp)
   DEMO_MODE == 1 → ad-hoc round-robin across kt_ssp[]
   DEMO_MODE == 2 → identity (EL0 demo has nothing to schedule)
+  DEMO_MODE == 3 → same as 0, but idle=halt so the user-proc test
+                   terminates cleanly after the sole process exits
+
+When the kernel's schedule() returns 0, there are no ready threads.
+arch_resume_process(0) would trash SP_EL1; instead we spin on wfi
+so the VM halts cleanly (or waits for an interrupt in richer setups).
 
     arch_schedule_after_exc(ssp: i64) -> i64
-        if DEMO_MODE == 0
+        if DEMO_MODE == 0 || DEMO_MODE == 3
             val next = schedule(ssp)
             if next == i64(0)
-                return ssp
+                uart_puts("[kern] idle — no ready threads, halting\n")
+                while true
+                    arch_wfi()
             return next
         if DEMO_MODE == 1
             if kt_active <= 0
@@ -291,6 +301,8 @@ a handful of messages, and prints each reply before wfi-ing out.
             kernel_main_kern()
         else if DEMO_MODE == 1
             kernel_main_kt()
+        else if DEMO_MODE == 3
+            kernel_main_user()
         else
             kernel_main_el0()
 
@@ -341,6 +353,65 @@ test for the context-switch asm.
         uart_puts("[kt] resuming thread 0\n")
         arch_resume_process(kt_ssp[0])
         uart_puts("unexpected return from arch_resume_process\n")
+
+User-process demo (DEMO_MODE=3). Boots a single EL0 user process
+through the shared kernel's create_process_suspended + resume_process
+path. The user program is three instructions (hand-assembled into
+user_exit_code): mov x8, #93 (SYS_EXIT); mov x0, #0x42 (code); svc #0.
+When the kernel handles that SVC via the syscall_table path, the
+running thread transitions to STATE_TERMINATED and the scheduler
+runs out of ready threads — expected behavior for a one-shot test.
+
+    val USER_EXIT_MOV_X8:   u32 = u32(0xD2800068)   // mov x8, #3  (SYS_EXIT)
+    val USER_EXIT_MOV_X0:   u32 = u32(0xD2800840)   // mov x0, #0x42
+    val USER_EXIT_SVC_ZERO: u32 = u32(0xD4000001)   // svc #0
+
+    kernel_main_user()
+        uart_puts("[user] kernel_init...\n")
+        kernel_init()
+        ipc_init()
+
+        uart_puts("[user] creating process PT\n")
+        val new_pt = vm_create_process_pt()
+        if new_pt == 0
+            uart_puts("[user] vm_create_process_pt failed\n")
+            abort()
+        val code_pa = last_user_code_page
+
+        uart_puts("[user] writing program at PA=")
+        uart_puthex(code_pa)
+        uart_puts("\n")
+        var w: *u32 = *u32(code_pa)
+        w[0] = USER_EXIT_MOV_X8
+        w[1] = USER_EXIT_MOV_X0
+        w[2] = USER_EXIT_SVC_ZERO
+        sync_icache_line(i64(code_pa))
+
+        val pid = create_process_suspended(
+            i64(0x60000000), i64(PROG_USP), i64(PROG_SSP),
+            "user1", new_pt)
+        if pid <= 0
+            uart_puts("[user] create_process_suspended failed pid=")
+            uart_puthex(u64(pid))
+            uart_puts("\n")
+            abort()
+        uart_puts("[user] created pid=")
+        uart_puthex(u64(pid))
+        uart_puts("\n")
+
+        resume_process(pid)
+
+        gic_init()
+        timer_init_periodic(cntfrq_el0() / u64(5))
+        uart_puts("[user] gic + timer initialised\n")
+
+        arch_cli()
+        val first = first_thread_ssp()
+        if first == i64(0)
+            uart_puts("[user] no ready thread\n")
+            abort()
+        uart_puts("[user] resuming first thread\n")
+        arch_resume_process(first)
 
 Legacy EL0 demo.
 
