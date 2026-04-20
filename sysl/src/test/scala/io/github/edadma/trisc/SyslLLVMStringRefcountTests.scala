@@ -1632,4 +1632,38 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
     ir should include("define i32 @__struct_deinit_Holder")
     ir should include("call i32 @__struct_deinit_Holder")
   }
+
+  // ====================================================================
+  // TCall returning heap-env closure — caller decr's at scope exit
+  // (funcKindOfExpr now defaults TCall to HeapEnv)
+  // ====================================================================
+
+  "val h = make_heap_closure() — caller decr's at scope exit" in {
+    llvmExit(
+      """make() -> (int) -> int
+        |    val cap = "ab" + "cd"
+        |    (x: int) -> x + len(cap)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val h = make()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "TCall return IR emits emitClosureDescrDecr (env_ptr load + dispatch)" in {
+    val ir = compileLLVM(
+      """make() -> (int) -> int
+        |    val cap = "ab" + "cd"
+        |    (x: int) -> x + len(cap)
+        |
+        |main() -> int
+        |    val h = make()
+        |    0
+        |""".stripMargin)
+    // Caller's scope cleanup must decr h's env via __closure_env_dispatch
+    ir should include("@__closure_env_dispatch")
+  }
 }

@@ -56,10 +56,17 @@ class SyslLLVMCodegen(target: String = "host"):
     else if c.escapes || c.captures.exists((_, t) => captureNeedsRc(t)) then FuncKind.HeapEnv
     else FuncKind.StackEnv
 
+  /** TCall / TIndirectCall return: assume HeapEnv. The callee can't return a
+    * StackEnv (its stack is gone after return), so the value is either NullEnv
+    * (env_ptr=null — dispatch's null-check skips) or HeapEnv (decr properly).
+    * Defaulting to HeapEnv closes the cross-function heap-env return leak with
+    * a tiny runtime null-check cost on NullEnv returns. LLVM unconditionally
+    * declares malloc/free in the preamble so there's no spurious-symbol concern. */
   private def funcKindOfExpr(e: TExpr): FuncKind = e match
     case c: TClosure => closureKindOf(c)
     case _: TFuncRef => FuncKind.NullEnv
     case TVarRef(name, _) => closureLocalKind.getOrElse(name, FuncKind.NullEnv)
+    case _: TCall | _: TIndirectCall | _: TInterfaceDispatch => FuncKind.HeapEnv
     case _ => FuncKind.NullEnv
   private val funcWrappers = new mutable.LinkedHashMap[String, String] // original name -> wrapper name
   private val pendingWrappers = new mutable.ListBuffer[(String, String, List[SyslType], SyslType)] // (wrapperName, origName, params, retType)

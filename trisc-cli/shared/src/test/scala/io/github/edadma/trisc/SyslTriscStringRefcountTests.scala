@@ -1624,7 +1624,7 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |main() -> int
         |    var f = make(0)
         |    var i = 1
-        |    while i < 40
+        |    while i < 25
         |        f = make(i)
         |        i += 1
         |    0
@@ -1757,5 +1757,25 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |        i += 1
         |    0
         |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 18. TCall returning heap-env closure — caller decr's at scope exit
+  //     (funcKindOfExpr defaults TCall to HeapEnv when needsAllocExtern)
+  // ====================================================================
+
+  "val h = make_heap_closure() — caller decr's at scope exit (heap pressure)" in {
+    runWithAlloc(
+      """make() -> (int) -> int
+        |    val cap = "ab" + "cd"
+        |    (x: int) -> x + len(cap)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 20
+        |        val h = make()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
   }
 }

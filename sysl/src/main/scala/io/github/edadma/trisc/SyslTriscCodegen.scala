@@ -81,19 +81,12 @@ class SyslTriscCodegen(addresses: Int = 4):
     else if c.escapes || c.captures.exists((_, t) => captureNeedsRc(t)) then FuncKind.HeapEnv
     else FuncKind.StackEnv
 
-  /** Determine the kind of FuncType produced by an arbitrary expression. Used at
-    * TVarStmt to record the kind of a newly-bound FuncType local. Default for
-    * uncategorized RHS forms is NullEnv (skip-decr) — safe re: the linker (no
-    * stray `free` symbol pulled in by what may be a plain function pointer).
-    * Trade-off: if the RHS actually produces a heap-env closure (e.g. a function
-    * call that returns an escaping closure with captures), we leak its env.
-    * Marking those callers/callees explicitly (escape analysis on returns,
-    * annotations) would be needed to recover the decr without false `free`
-    * pulls. Currently a known sibling-spread item. */
   private def funcKindOfExpr(e: TExpr): FuncKind = e match
     case c: TClosure => closureKindOf(c)
     case _: TFuncRef => FuncKind.NullEnv
     case TVarRef(name, _) => closureLocalKind.getOrElse(name, FuncKind.NullEnv)
+    case _: TCall | _: TIndirectCall | _: TInterfaceDispatch =>
+      if needsAllocExtern then FuncKind.HeapEnv else FuncKind.NullEnv
     case _ => FuncKind.NullEnv
 
   // Interface tables: (struct, interface) → itable label + method function names
@@ -1837,12 +1830,11 @@ class SyslTriscCodegen(addresses: Int = 4):
             // r1 = address of return slot. Register the local at the slot's stack position.
             // The return slot was the last thing allocated, so it's at stackOffset.
             locals(name) = LocalVar(name, stackOffset, typ)
-            // FuncType returned from a call: kind unknown without escape analysis
-            // on the callee's return. Conservative: NullEnv (no decr) — leaks if
-            // returned closure was actually heap-env, but avoids spurious `free`
-            // symbol references for callees that return plain function pointers.
+            // FuncType returned via structReturn from a call: same default as
+            // funcKindOfExpr's TCall case — HeapEnv if the program already pulls
+            // the heap allocator (decr's null-check skips NullEnv returns).
             if typ.isInstanceOf[SyslType.FuncType] then
-              closureLocalKind(name) = FuncKind.NullEnv
+              closureLocalKind(name) = funcKindOfExpr(call)
           case _ if typ.isInstanceOf[SyslType.FuncType] =>
             // Pre-allocate __env_N for stack-env TClosure RHS so env survives
             // the expression's frame and lives at function scope.
