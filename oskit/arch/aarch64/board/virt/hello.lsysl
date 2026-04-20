@@ -190,7 +190,7 @@ scheduler pass and the kernel threads themselves produce output.
                 uart_puts("[tick ")
                 uart_puthex(u64(tick_count))
                 uart_puts("]\n")
-            cntp_tval_set(cntfrq_el0() / u64(5))
+            cntp_tval_set(cntfrq_el0() / u64(100))
         else if irq == IRQ_UART
             serial_handler()
         gic_eoi(irq)
@@ -424,7 +424,7 @@ queue. Both kernel threads print on every scheduler pass.
             kernel_stack_ssp(1), "kB")
 
         gic_init()
-        timer_init_periodic(cntfrq_el0() / u64(5))
+        timer_init_periodic(cntfrq_el0() / u64(100))
         uart_puts("[kern] gic + timer initialised\n")
 
         arch_cli()
@@ -446,7 +446,7 @@ test for the context-switch asm.
         kt_active = 2
 
         gic_init()
-        timer_init_periodic(cntfrq_el0() / u64(5))
+        timer_init_periodic(cntfrq_el0() / u64(100))
         uart_puts("gic + timer initialised\n")
 
         arch_cli()
@@ -615,7 +615,7 @@ line per 64 bytes of code.
         resume_process(pid)
 
         gic_init()
-        timer_init_periodic(cntfrq_el0() / u64(5))
+        timer_init_periodic(cntfrq_el0() / u64(100))
         uart_puts("[user] gic + timer initialised\n")
 
         arch_cli()
@@ -676,7 +676,7 @@ ipc_write_saved_r1 / syscall_return_for PTBR-awareness.
         resume_process(pid)
 
         gic_init()
-        timer_init_periodic(cntfrq_el0() / u64(5))
+        timer_init_periodic(cntfrq_el0() / u64(100))
         uart_puts("[uipc] gic + timer initialised\n")
 
         arch_cli()
@@ -788,7 +788,7 @@ which is the baseline we want for this commit).
         resume_process(pid)
 
         gic_init()
-        timer_init_periodic(cntfrq_el0() / u64(5))
+        timer_init_periodic(cntfrq_el0() / u64(100))
         uart_puts("[rs] gic + timer initialised\n")
 
         arch_cli()
@@ -835,7 +835,7 @@ Legacy EL0 demo.
         uart_puts("after vm_set_ptbr: still alive\n")
 
         gic_init()
-        timer_init_periodic(cntfrq_el0() / u64(5))
+        timer_init_periodic(cntfrq_el0() / u64(100))
         uart_puts("gic + timer initialised\n")
 
         uart_puts("dropping to EL0...\n")
