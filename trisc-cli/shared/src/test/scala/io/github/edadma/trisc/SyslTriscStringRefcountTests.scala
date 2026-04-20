@@ -857,4 +857,120 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |    if arr[0] == "iter_data" then 0 else 1
         |""".stripMargin, heapSize = 256) shouldBe 0
   }
+
+  // ====================================================================
+  // 17. [N]string scope-exit element decr (stack arrays of strings)
+  // ====================================================================
+
+  "[N]string scope exit decrs each element (heap pressure)" in {
+    // fill() populates all 4 slots with fresh buffers and returns. If scope
+    // cleanup misses any slot, that buffer leaks. 10 iters × 4 buffers ×
+    // ~24 bytes = ~960 B; on a 256-byte heap this would trap.
+    runWithAlloc(
+      """fill()
+        |    var arr: [4]string
+        |    arr[0] = "a" + "_v"
+        |    arr[1] = "b" + "_v"
+        |    arr[2] = "c" + "_v"
+        |    arr[3] = "d" + "_v"
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "[N]struct-with-string scope exit decrs each element (heap pressure)" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |fill()
+        |    var arr: [3]Holder
+        |    arr[0] = Holder("a" + "_v")
+        |    arr[1] = Holder("b" + "_v")
+        |    arr[2] = Holder("c" + "_v")
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  // ====================================================================
+  // 18. &[]string element rc (heap slices of strings)
+  // ====================================================================
+
+  "&[]string scope exit decrs each element (heap pressure)" in {
+    runWithAlloc(
+      """fill()
+        |    val arr = new [4]string
+        |    arr[0] = "a" + "_v"
+        |    arr[1] = "b" + "_v"
+        |    arr[2] = "c" + "_v"
+        |    arr[3] = "d" + "_v"
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "slice[i] = string in loop — old buffers freed (heap pressure)" in {
+    runWithAlloc(
+      """main() -> int
+        |    val arr = new [4]string
+        |    arr[0] = "init"
+        |    var i = 0
+        |    while i < 10
+        |        arr[0] = "iter" + "_data"
+        |        i += 1
+        |    if arr[0] == "iter_data" then 0 else 1
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "&[]struct-with-string scope exit decrs each element (heap pressure)" in {
+    // Slice of structs containing strings: deinit must recurse through struct fields.
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |fill()
+        |    val arr = new [3]Holder
+        |    arr[0] = Holder("a" + "_v")
+        |    arr[1] = Holder("b" + "_v")
+        |    arr[2] = Holder("c" + "_v")
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "&[]string element preserved across scope exit when returned" in {
+    // The slice escapes via the function return; caller-owned, no scope-exit decr in callee.
+    runWithAlloc(
+      """make() -> &[]string
+        |    val arr = new [2]string
+        |    arr[0] = "hello" + "_world"
+        |    arr[1] = "a" + "b"
+        |    arr
+        |
+        |main() -> int
+        |    val s = make()
+        |    if s[0] == "hello_world" && s[1] == "ab" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
 }

@@ -810,4 +810,44 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
         |    if g.s == "global_str" then 0 else 1
         |""".stripMargin) shouldBe 0
   }
+
+  // ====================================================================
+  // 16. Arrays/slices of strings — element rc on scope exit / slice free
+  // ====================================================================
+
+  "[N]string scope exit (functional check)" in {
+    llvmExit(
+      """fill()
+        |    var arr: [4]string
+        |    arr[0] = "a" + "_v"
+        |    arr[1] = "b" + "_v"
+        |    arr[2] = "c" + "_v"
+        |    arr[3] = "d" + "_v"
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 50
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "&[]string scope exit (functional check)" in {
+    llvmExit(
+      """fill()
+        |    val arr = new [4]string
+        |    arr[0] = "a" + "_v"
+        |    arr[1] = "b" + "_v"
+        |    arr[2] = "c" + "_v"
+        |    arr[3] = "d" + "_v"
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 50
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
 }

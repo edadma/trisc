@@ -20,6 +20,12 @@ class SyslTriscCodegen(addresses: Int = 4):
   // Struct types that have a deinit method (populated during generate)
   private val deinitFunctions = new mutable.HashMap[String, String] // struct name → deinit function name
 
+  // Slice deinit functions to emit (for &[]T where T contains rc data). Generated
+  // on demand when a slice with rc-content elements is freed; emitted after all
+  // user functions. Each takes r1 = base of slice block (rc header at +0, len at
+  // +8, data at +16) and decrs each element before returning.
+  private val sliceElemDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType] // deinit name → elem type
+
   // Pending closure functions to generate after all regular functions
   private var closureCounter = 0
   private val pendingClosures = new mutable.ListBuffer[(String, TClosure)]
@@ -34,6 +40,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     labelCounter = 0
     stringLiterals.clear()
     deinitFunctions.clear()
+    sliceElemDeinitsNeeded.clear()
     needsAllocExtern = scanNeedsAlloc(program)  // pre-scan so rc-bracket gates are correct from the start
     needsFreeExtern = false
     // Extract module prefix for unique symbol names across compilation units
@@ -95,6 +102,16 @@ class SyslTriscCodegen(addresses: Int = 4):
       pendingClosures.clear()
       for (name, closure) <- batch do
         genClosureFunction(name, closure)
+
+    // Emit slice element deinit functions (registered when freeing slices of
+    // rc-content elements). Iterating may register more types via emitValueRC
+    // (e.g. nested slices), so drain a worklist.
+    val emittedSliceDeinits = mutable.Set.empty[String]
+    while sliceElemDeinitsNeeded.exists((n, _) => !emittedSliceDeinits.contains(n)) do
+      val pending = sliceElemDeinitsNeeded.filterNot((n, _) => emittedSliceDeinits.contains(n)).toList
+      for (name, elem) <- pending do
+        emittedSliceDeinits += name
+        emitSliceDeinit(name, elem)
 
     // Emit __str_int helper if needed (integer to string conversion)
     if needsStrInt then emitStrIntHelper()
@@ -221,15 +238,25 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  ldd r1, r1, r0")       // r1 = ptr field
           emitRefDecr(1, 8)
           emit("  popd r1")
-        case _: SyslType.SliceType =>
-          // Decrement backref if non-null
+        case SyslType.SliceType(elem) =>
+          // Decrement backref if non-null. If elements need deinit, supply a
+          // per-elem-type deinit function. Normalize the deinit's convention
+          // to r1 = data ptr (past 16-byte rc/len header) by adding 16 and
+          // passing headerOff=16 (so rc/free still target the original base).
           emit("  pshd r1")
           emitAddImm(1, 5, local.offset + 16)
-          emit("  ldd r1, r1, r0")       // r1 = backref
-          emitRefDecr(1, 0)
+          emit("  ldd r1, r1, r0")       // r1 = backref (= base)
+          val deinit = sliceDeinitFor(elem)
+          if deinit.isDefined then
+            emitAddImm(1, 1, 16)         // r1 = data ptr
+            emitRefDecr(1, 16, deinit)
+          else
+            emitRefDecr(1, 0)
           emit("  popd r1")
         case st: SyslType.StructType if structHasStringFields(st) =>
           emitStructStringFieldsRC(5, local.offset, st, incr = false)
+        case SyslType.ArrayType(elem, _) if structHasStringFields(elem) =>
+          emitValueRC(5, local.offset, local.typ, incr = false)
         case _ =>
     locals.clear()
     locals ++= savedLocals
@@ -405,7 +432,37 @@ class SyslTriscCodegen(addresses: Int = 4):
   private def deinitFor(typ: SyslType): Option[String] = typ match
     case SyslType.RefType(SyslType.StructType(name, _, _)) if deinitFunctions.contains(name) =>
       Some(deinitFunctions(name))
+    case SyslType.RefType(SyslType.SliceType(elem)) =>
+      sliceDeinitFor(elem)
     case _ => None
+
+  // True if a slice element type carries refcounted content that must be decr'd
+  // before the backing buffer is freed.
+  private def sliceElemNeedsDeinit(elem: SyslType): Boolean = elem match
+    case SyslType.StringType => true
+    case _: SyslType.RefType => true
+    case st: SyslType.StructType => structHasStringFields(st)
+    case SyslType.ArrayType(e, _) => sliceElemNeedsDeinit(e)
+    case _ => false
+
+  // Mangled name for a per-elem-type slice deinit function. Registers the type so
+  // the function body is emitted at the end of generate(). Returns None for elem
+  // types that hold no rc content.
+  private def sliceDeinitFor(elem: SyslType): Option[String] =
+    if !sliceElemNeedsDeinit(elem) then None
+    else
+      val tag = mangleType(elem)
+      val name = s"__slice_deinit_${modulePrefix}_$tag".replace("__", "_")
+      sliceElemDeinitsNeeded(name) = elem
+      Some(name)
+
+  // Stable, asm-safe tag for a type. Used to mangle slice deinit names.
+  private def mangleType(t: SyslType): String = t match
+    case SyslType.StringType => "string"
+    case SyslType.RefType(inner) => s"ref_${mangleType(inner)}"
+    case SyslType.StructType(n, _, _) => s"struct_$n"
+    case SyslType.ArrayType(e, n) => s"arr${n}_${mangleType(e)}"
+    case other => other.getClass.getSimpleName.toLowerCase
 
   // Emit refcount increment: ptr in rPtr, refcount is at [rPtr - headerOffset]
   // Clobbers r3, r4. Skips if rPtr == 0 (null).
@@ -439,10 +496,13 @@ class SyslTriscCodegen(addresses: Int = 4):
     // refcount == 0 → call deinit then free(base)
     emit("  pshd r1")                 // save r1
     deinitFunc.foreach { name =>
-      // Call deinit(dataPtr) — dataPtr is ptrReg (past header)
+      // Call deinit(dataPtr) — dataPtr is ptrReg (past header). r3 holds the
+      // base ptr we'll need for free(); the deinit may clobber r3, so save it.
+      emit("  pshd r3")
       emit(s"  mov r1, r$ptrReg")     // r1 = data pointer (self)
       emit(s"  movi r4, $name")
       emit("  jalr r6, r4")
+      emit("  popd r3")
     }
     emit("  mov r1, r3")              // r1 = base pointer (for free)
     emit("  movi r4, free")
@@ -522,11 +582,14 @@ class SyslTriscCodegen(addresses: Int = 4):
       case _ => false
     }
 
-  // True if a value struct (recursively) holds any string fields whose buffers need RC.
-  // Stops at refs/pointers/slices (handled by their own paths).
+  // True if a value type (recursively) holds any string fields whose buffers need RC.
+  // Stops at refs/pointers/slices (handled by their own paths). Recurses through
+  // value-struct fields and value-array elements.
   private def structHasStringFields(t: SyslType): Boolean = t match
+    case SyslType.StringType => true
     case st: SyslType.StructType =>
-      st.fields.exists((_, ft) => ft == SyslType.StringType || structHasStringFields(ft))
+      st.fields.exists((_, ft) => structHasStringFields(ft))
+    case SyslType.ArrayType(elem, _) => structHasStringFields(elem)
     case _ => false
 
   // Expressions that produce a freshly-owned string buffer (rc=1 or immortal).
@@ -547,23 +610,75 @@ class SyslTriscCodegen(addresses: Int = 4):
     case _ => false
 
   // Increment or decrement the RC of every string field (recursively into nested
-  // value-struct fields) inside a struct at [r{baseReg} + baseOff]. Clobbers r3, r4
-  // (via emitRefIncr/Decr) and uses r1 for the field ptr. baseReg is preserved if it
-  // is not r1 (callers should use r5/fp for locals).
+  // value-struct fields and value-array elements) inside a struct at [r{baseReg} + baseOff].
+  // Clobbers r3, r4 (via emitRefIncr/Decr) and uses r1 for the field ptr. baseReg
+  // is preserved if it is not r1 (callers should use r5/fp for locals).
   private def emitStructStringFieldsRC(baseReg: Int, baseOff: Int, st: SyslType.StructType, incr: Boolean): Unit =
     if !needsAllocExtern then return
     for case ((_, ft), i) <- st.fields.zipWithIndex do
       val foff = baseOff + fieldOffset(st, i)
-      ft match
-        case SyslType.StringType =>
-          emit("  pshd r1")
-          emitAddImm(1, baseReg, foff)
-          emit("  ldd r1, r1, r0")  // r1 = ptr field
-          if incr then emitRefIncr(1, 8) else emitRefDecr(1, 8)
-          emit("  popd r1")
-        case nested: SyslType.StructType if structHasStringFields(nested) =>
-          emitStructStringFieldsRC(baseReg, foff, nested, incr)
-        case _ =>
+      emitValueRC(baseReg, foff, ft, incr)
+
+  // Generalized RC walker for any value type at [r{baseReg} + baseOff]. Handles
+  // strings, value structs (recurses), and value arrays (loops over elements).
+  // No-op for any type without string content.
+  private def emitValueRC(baseReg: Int, baseOff: Int, t: SyslType, incr: Boolean): Unit =
+    if !needsAllocExtern then return
+    t match
+      case SyslType.StringType =>
+        emit("  pshd r1")
+        emitAddImm(1, baseReg, baseOff)
+        emit("  ldd r1, r1, r0")
+        if incr then emitRefIncr(1, 8) else emitRefDecr(1, 8)
+        emit("  popd r1")
+      case nested: SyslType.StructType if structHasStringFields(nested) =>
+        emitStructStringFieldsRC(baseReg, baseOff, nested, incr)
+      case SyslType.ArrayType(elem, count) if structHasStringFields(elem) =>
+        val es = stackSize(elem)
+        for i <- 0 until count do
+          emitValueRC(baseReg, baseOff + i * es, elem, incr)
+      case _ =>
+
+  /** Emit a per-elem-type slice deinit function. Called when freeing a
+    * `&[]T` whose elements carry rc content. Slice block layout:
+    * [rc:8 | len:8 | data...]. The function receives r1 = data ptr (past the
+    * 16-byte header), decrs every element, then returns. Length is read from
+    * [r1-8]; element[i] sits at [r1 + i*elemSize].
+    *
+    * r2 holds the current element address across iterations and is preserved
+    * by emitValueRC. r3 (loop counter) is clobbered by emitRefDecr's free path
+    * so it gets pushed/popped around the per-element decr.
+    */
+  private def emitSliceDeinit(name: String, elem: SyslType): Unit =
+    val es = stackSize(elem)
+    val loop = newLabel("slice_deinit_loop")
+    val done = newLabel("slice_deinit_done")
+    emit(s"# slice element deinit: $name")
+    emit(s"global $name, func, 1 i64 i64")
+    emit(s"$name:")
+    emit("  pshd r6")
+    emit("  pshd r5")
+    emit("  mov r5, r7")
+    // r2 = current element addr = data ptr = r1
+    emit("  mov r2, r1")
+    // r3 = remaining count = *(r1 - 8)
+    emitAddImm(3, 1, -8)
+    emit("  ldd r3, r3, r0")
+    emit(s"$loop")
+    emit(s"  beq r3, r0, $done")
+    emit("  pshd r3")              // save count (emitRefDecr clobbers r3)
+    emit("  pshd r2")              // save addr
+    emitValueRC(2, 0, elem, incr = false)
+    emit("  popd r2")
+    emit("  popd r3")
+    emitAddImm(2, 2, es)
+    emit("  addi r3, r3, -1")
+    emit(s"  bra $loop")
+    emit(s"$done")
+    emit("  mov r7, r5")
+    emit("  popd r5")
+    emit("  popd r6")
+    emit("  jalr r0, r6")
 
   /** Evaluate `arg` and push its full byte representation onto the stack as a
     * call argument. Handles ref/string borrow incr; appends to `stringPtrOffsets`
@@ -682,15 +797,23 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  ldd r1, r1, r0")       // r1 = ptr field
             emitRefDecr(1, 8)
             emit("  popd r1")
-        case _: SyslType.SliceType =>
-          // Decrement backref (at slice offset +16) if non-null
+        case SyslType.SliceType(elem) =>
+          // Decrement backref (at slice offset +16) if non-null. See the
+          // matching block in leaveScope for the convention details.
           emit("  pshd r1")
           emitAddImm(1, 5, local.offset + 16)
-          emit("  ldd r1, r1, r0")       // r1 = backref
-          emitRefDecr(1, 0)              // refcount IS at *backref (offset 0)
+          emit("  ldd r1, r1, r0")       // r1 = backref (= base)
+          val deinit = sliceDeinitFor(elem)
+          if deinit.isDefined then
+            emitAddImm(1, 1, 16)         // r1 = data ptr
+            emitRefDecr(1, 16, deinit)
+          else
+            emitRefDecr(1, 0)
           emit("  popd r1")
         case st: SyslType.StructType if structHasStringFields(st) =>
           emitStructStringFieldsRC(5, local.offset, st, incr = false)
+        case SyslType.ArrayType(elem, _) if structHasStringFields(elem) =>
+          emitValueRC(5, local.offset, local.typ, incr = false)
         case _ =>
     // Decrement ref params (caller transferred ownership)
     for (name, rt) <- refParams do
