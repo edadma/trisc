@@ -38,7 +38,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
 
     extern arch_syscall_call(arg: i64, handler: i64)
 
-    val DEMO_MODE = 0             // 0=kernel+IPC, 1=ad-hoc, 2=EL0 legacy, 3=user proc
+    val DEMO_MODE = 0             // 0=kernel+IPC, 1=ad-hoc, 2=EL0 legacy, 3=user proc, 4=user+kern IPC
 
 Render `v` as a 16-digit hex number (prefixed `0x`) to the UART.
 
@@ -156,19 +156,21 @@ scheduler pass and the kernel threads themselves produce output.
             cntp_tval_set(cntfrq_el0() / u64(5))
         gic_eoi(irq)
 
-Scheduler hook. Four shapes:
+Scheduler hook. Five shapes:
   DEMO_MODE == 0 → delegate to the kernel's real schedule(ssp)
   DEMO_MODE == 1 → ad-hoc round-robin across kt_ssp[]
   DEMO_MODE == 2 → identity (EL0 demo has nothing to schedule)
   DEMO_MODE == 3 → same as 0, but idle=halt so the user-proc test
                    terminates cleanly after the sole process exits
+  DEMO_MODE == 4 → same as 3 (user process + kernel echo server,
+                   both go through schedule(); idle halts)
 
 When the kernel's schedule() returns 0, there are no ready threads.
 arch_resume_process(0) would trash SP_EL1; instead we spin on wfi
 so the VM halts cleanly (or waits for an interrupt in richer setups).
 
     arch_schedule_after_exc(ssp: i64) -> i64
-        if DEMO_MODE == 0 || DEMO_MODE == 3
+        if DEMO_MODE == 0 || DEMO_MODE == 3 || DEMO_MODE == 4
             val next = schedule(ssp)
             if next == i64(0)
                 uart_puts("[kern] idle — no ready threads, halting\n")
@@ -304,6 +306,8 @@ a handful of messages, and prints each reply before wfi-ing out.
             kernel_main_kt()
         else if DEMO_MODE == 3
             kernel_main_user()
+        else if DEMO_MODE == 4
+            kernel_main_user_ipc()
         else
             kernel_main_el0()
 
@@ -355,15 +359,20 @@ test for the context-switch asm.
         arch_resume_process(kt_ssp[0])
         uart_puts("unexpected return from arch_resume_process\n")
 
-User-process demo (DEMO_MODE=3). Loads the embedded test_putc
-binary (compiled from oskit/bin/test_putc.lsysl via build_prog.sh,
-embedded as _binary_test_putc_bin_* symbols by objcopy -I binary)
-into a fresh process page table and resumes. test_putc's main()
-calls putc('O'), putc('K'), putc('\n'), exit() — so we expect
-"OK\n" on the UART then a clean halt.
+User-process demo (DEMO_MODE=3). Loads the embedded user program
+(compiled from oskit/bin/<USER_PROG>.lsysl via build_prog.sh,
+copied to user_prog.bin, embedded as _binary_user_prog_bin_*
+symbols by objcopy -I binary) into a fresh process page table
+and resumes. Default USER_PROG=test_putc calls putc('O'),
+putc('K'), putc('\n'), exit() — so we expect "OK\n" on the UART
+then a clean halt. Other USER_PROG binaries plug in here.
 
-    extern _binary_test_putc_bin_start: byte
-    extern _binary_test_putc_bin_end: byte
+DEMO_MODE=4 is the same idea plus a kernel-thread echo server
+(kentry_a) spawned first, so the user program can validate
+cross-address-space IPC by doing port_lookup("echo") + ipc_send.
+
+    extern _binary_user_prog_bin_start: byte
+    extern _binary_user_prog_bin_end: byte
 
 SYS_PUTC handler: write a single byte to the PL011 UART. Registered
 into syscall_table so user programs can print via ulib.putc().
@@ -423,8 +432,8 @@ line per 64 bytes of code.
             uart_puts("[user] vm_create_process_pt failed\n")
             abort()
 
-        val blob_start = i64(&_binary_test_putc_bin_start)
-        val blob_end   = i64(&_binary_test_putc_bin_end)
+        val blob_start = i64(&_binary_user_prog_bin_start)
+        val blob_end   = i64(&_binary_user_prog_bin_end)
         val blob_len   = int(blob_end - blob_start)
         uart_puts("[user] loading test_putc blob=")
         uart_puthex(u64(blob_start))
@@ -459,6 +468,65 @@ line per 64 bytes of code.
             uart_puts("[user] no ready thread\n")
             abort()
         uart_puts("[user] resuming first thread\n")
+        arch_resume_process(first)
+
+Cross-AS IPC demo (DEMO_MODE=4). Spawns kentry_a as a kernel-
+thread echo server, then loads the embedded user program into
+its own page table and resumes. If USER_PROG is a test that
+does port_lookup("echo") + ipc_send, this round-trips a message
+from the user process (its own PTBR) through the kernel's IPC
+machinery to kentry_a (kernel PTBR) and back. Validates
+ipc_deliver's cross-address-space vm_copy_cross path plus
+ipc_write_saved_r1 / syscall_return_for PTBR-awareness.
+
+    kernel_main_user_ipc()
+        uart_puts("[uipc] kernel_init...\n")
+        kernel_init()
+        ipc_init()
+        register_syscall(1, sys_putc_handler)
+
+        uart_puts("[uipc] creating echo server thread\n")
+        create_thread(i64(&kentry_a), kernel_stack_usp(0),
+            kernel_stack_ssp(0), "kA")
+
+        uart_puts("[uipc] creating process PT\n")
+        val new_pt = vm_create_process_pt()
+        if new_pt == 0
+            uart_puts("[uipc] vm_create_process_pt failed\n")
+            abort()
+
+        val blob_start = i64(&_binary_user_prog_bin_start)
+        val blob_end   = i64(&_binary_user_prog_bin_end)
+        val blob_len   = int(blob_end - blob_start)
+        uart_puts("[uipc] loading user_prog len=")
+        uart_puthex(u64(blob_len))
+        uart_puts("\n")
+
+        user_load_program(new_pt, blob_start, blob_len)
+        user_sync_icache(new_pt, blob_len)
+
+        val pid = create_process_suspended(
+            i64(0x60000000), i64(PROG_USP), i64(PROG_SSP),
+            "user1", new_pt)
+        if pid <= 0
+            uart_puts("[uipc] create_process_suspended failed\n")
+            abort()
+        uart_puts("[uipc] created pid=")
+        uart_puthex(u64(pid))
+        uart_puts("\n")
+
+        resume_process(pid)
+
+        gic_init()
+        timer_init_periodic(cntfrq_el0() / u64(5))
+        uart_puts("[uipc] gic + timer initialised\n")
+
+        arch_cli()
+        val first = first_thread_ssp()
+        if first == i64(0)
+            uart_puts("[uipc] no ready thread\n")
+            abort()
+        uart_puts("[uipc] resuming first thread\n")
         arch_resume_process(first)
 
 Legacy EL0 demo.

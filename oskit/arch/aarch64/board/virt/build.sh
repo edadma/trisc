@@ -13,10 +13,16 @@ REPO_ROOT="$(cd "$BOARD_DIR/../../../../.." && pwd)"
 OUT=/tmp/slix-aarch64
 mkdir -p "$OUT"
 
+# USER_PROG selects which test binary gets embedded as user_prog.bin
+# into the kernel image. Default: test_putc. Override via first positional
+# argument or USER_PROG env var.
+USER_PROG="${USER_PROG:-test_putc}"
+
 RUN=""
 for arg in "$@"; do
     case "$arg" in
         run) RUN=run ;;
+        *)   USER_PROG="$arg" ;;
     esac
 done
 
@@ -72,21 +78,22 @@ echo "=== Compile stubs.c ==="
 aarch64-elf-gcc -ffreestanding -nostdlib -mcmodel=large \
     -fno-pic -fno-pie -c -o "$OUT/stubs.o" "$BOARD_DIR/stubs.c"
 
-echo "=== Build user program test_putc ==="
-bash "$ARCH_DIR/build_prog.sh" test_putc > "$OUT/build-prog.log" 2>&1
-if [ ! -f "$OUT/bin/test_putc.bin" ]; then
-    echo "  test_putc build failed:" >&2
+echo "=== Build user program $USER_PROG ==="
+bash "$ARCH_DIR/build_prog.sh" "$USER_PROG" > "$OUT/build-prog.log" 2>&1
+if [ ! -f "$OUT/bin/$USER_PROG.bin" ]; then
+    echo "  $USER_PROG build failed:" >&2
     tail -10 "$OUT/build-prog.log" >&2
     exit 1
 fi
 
-echo "=== Embed test_putc.bin into kernel ==="
-# objcopy -I binary produces _binary_<path>_start/_end/_size symbols.
-# Run from $OUT/bin so the symbol becomes _binary_test_putc_bin_start.
+echo "=== Embed $USER_PROG.bin as user_prog.bin into kernel ==="
+# Copy to a stable name so the embedded symbol is always
+# _binary_user_prog_bin_start/_end/_size regardless of USER_PROG.
+cp "$OUT/bin/$USER_PROG.bin" "$OUT/bin/user_prog.bin"
 (cd "$OUT/bin" && aarch64-elf-objcopy \
     -I binary -O elf64-littleaarch64 -B aarch64 \
     --rename-section .data=.rodata,alloc,load,readonly,data,contents \
-    test_putc.bin "$OUT/user_blob.o")
+    user_prog.bin "$OUT/user_blob.o")
 
 echo "=== Link ==="
 aarch64-elf-ld -T "$BOARD_DIR/link.ld" \
