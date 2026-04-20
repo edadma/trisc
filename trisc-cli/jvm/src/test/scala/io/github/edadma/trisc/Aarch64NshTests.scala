@@ -135,4 +135,24 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     val output = qemu.command("wc /tmp/wcf")
     output should include("1")
   }
+
+  "aarch64 crash recovery: kill tfs and restart" in {
+    val psOut = qemu.command("ps")
+    val tfsLine = psOut.split('\n').find(_.contains("tfs"))
+    tfsLine shouldBe defined
+    val nums = tfsLine.get.trim.split("\\s+")
+    val tfsPid = nums(1)
+
+    qemu.send(s"kill $tfsPid\n")
+    val killOutput = qemu.waitFor("restarted ok")
+    killOutput should include("RS: restarting tfs")
+    killOutput should include("RS: tfs restarted ok")
+
+    Thread.sleep(200)
+    val psAfter = qemu.command("ps")
+    psAfter should include("tfs")
+
+    val after = qemu.command("cat /etc/ttytab")
+    after should include("tty0 login")
+  }
 }
