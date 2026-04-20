@@ -117,6 +117,46 @@ build_tfs() {
         oskit/hal/mem_cpu.lsysl
 }
 
+build_tty() {
+    build_server tty tty_server \
+        "import oskit.drivers.tty.{tty_server}" \
+        oskit/drivers/tty/tty.lsysl
+}
+
+build_pm() {
+    build_server pm pm_server \
+        "import oskit.servers.{pm_server}" \
+        oskit/servers/pm.lsysl \
+        oskit/config/config.sysl \
+        oskit/loader/loader.lsysl \
+        oskit/fs/client.lsysl \
+        oskit/hal/mem_cpu.lsysl
+}
+
+build_vfs() {
+    build_server vfs vfs_server \
+        "import oskit.servers.{vfs_server}" \
+        oskit/servers/vfs.lsysl \
+        oskit/config/config.sysl
+}
+
+build_ds() {
+    build_server ds ds_server \
+        "import oskit.servers.{ds_server}" \
+        oskit/servers/ds.lsysl
+}
+
+build_init() {
+    build_server init init \
+        "import oskit.apps.init.{init}" \
+        oskit/apps/init.lsysl \
+        oskit/fs/client.lsysl \
+        oskit/servers/pm.lsysl \
+        oskit/config/config.sysl \
+        oskit/loader/loader.lsysl \
+        oskit/hal/mem_cpu.lsysl
+}
+
 build_disk() {
     # Disk server needs a custom wrapper that reads ramdisk base/size
     # from the info page (+8, +16) in addition to the RS TID (+0).
@@ -180,11 +220,21 @@ if [ -n "$1" ]; then
         rs)   build_rs ;;
         disk) build_disk ;;
         tfs)  build_tfs ;;
-        all)  build_rs; build_disk; build_tfs ;;
+        tty)  build_tty ;;
+        pm)   build_pm ;;
+        vfs)  build_vfs ;;
+        ds)   build_ds ;;
+        init) build_init ;;
+        all)  build_rs; build_disk; build_tfs; build_tty; build_pm; build_vfs; build_ds; build_init ;;
         *)    echo "Unknown server: $1" >&2; exit 1 ;;
     esac
 else
     build_rs
     build_disk
     build_tfs
+    build_tty
+    build_pm
+    build_vfs
+    build_ds
+    build_init
 fi

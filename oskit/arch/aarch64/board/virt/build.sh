@@ -86,25 +86,15 @@ if [ ! -f "$OUT/bin/$USER_PROG.bin" ]; then
     exit 1
 fi
 
-echo "=== Build servers (rs, disk, tfs) ==="
-bash "$ARCH_DIR/build_servers.sh" rs > "$OUT/build-rs.log" 2>&1
-if [ ! -f "$OUT/servers/rs.bin" ]; then
-    echo "  RS build failed:" >&2
-    tail -30 "$OUT/build-rs.log" >&2
-    exit 1
-fi
-bash "$ARCH_DIR/build_servers.sh" disk > "$OUT/build-disk.log" 2>&1
-if [ ! -f "$OUT/servers/disk.bin" ]; then
-    echo "  disk server build failed:" >&2
-    tail -30 "$OUT/build-disk.log" >&2
-    exit 1
-fi
-bash "$ARCH_DIR/build_servers.sh" tfs > "$OUT/build-tfs.log" 2>&1
-if [ ! -f "$OUT/servers/tfs.bin" ]; then
-    echo "  tfs server build failed:" >&2
-    tail -30 "$OUT/build-tfs.log" >&2
-    exit 1
-fi
+echo "=== Build servers ==="
+for srv in rs disk tfs tty pm vfs ds init; do
+    bash "$ARCH_DIR/build_servers.sh" "$srv" > "$OUT/build-$srv.log" 2>&1
+    if [ ! -f "$OUT/servers/$srv.bin" ]; then
+        echo "  $srv server build failed:" >&2
+        tail -30 "$OUT/build-$srv.log" >&2
+        exit 1
+    fi
+done
 
 echo "=== Build ramdisk ==="
 cd "$REPO_ROOT"
@@ -120,7 +110,7 @@ echo "=== Pack boot info (user=$USER_PROG.bin, rs, disk, tfs) ==="
 # resolves consistently regardless of which test program was selected.
 cp "$OUT/bin/$USER_PROG.bin" "$OUT/bin/user.bin"
 cd "$REPO_ROOT"
-sbt "triscCliJVM/runMain io.github.edadma.trisc.MakeAarch64BootInfoMain user rs disk tfs" > "$OUT/sbt-bootinfo.log" 2>&1
+sbt "triscCliJVM/runMain io.github.edadma.trisc.MakeAarch64BootInfoMain user rs disk tfs tty pm vfs ds init" > "$OUT/sbt-bootinfo.log" 2>&1
 if [ ! -f "$OUT/bootinfo.img" ]; then
     echo "  bootinfo.img build failed:" >&2
     tail -20 "$OUT/sbt-bootinfo.log" >&2
