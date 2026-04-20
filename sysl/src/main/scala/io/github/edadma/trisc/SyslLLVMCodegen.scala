@@ -1942,6 +1942,53 @@ class SyslLLVMCodegen(target: String = "host"):
 
       // ===== Slices =====
 
+      case TSliceExpr(array, low, high, SyslType.StringType) =>
+        // Substring s[lo:hi]: allocate new rc'd buffer, memcpy hi-lo bytes.
+        val sp = genExpr(array)
+        val srcPtrGep = newReg()
+        emit(s"  $srcPtrGep = getelementptr %struct.string, %struct.string* $sp, i32 0, i32 0")
+        val srcPtr = newReg()
+        emit(s"  $srcPtr = load i8*, i8** $srcPtrGep")
+        val srcLenGep = newReg()
+        emit(s"  $srcLenGep = getelementptr %struct.string, %struct.string* $sp, i32 0, i32 1")
+        val srcLen = newReg()
+        emit(s"  $srcLen = load i32, i32* $srcLenGep")
+        val lo = low.map(genExpr).getOrElse("0")
+        val hi = high.map(genExpr).getOrElse(srcLen)
+        // Bounds check: 0 <= lo <= hi <= src_len → branch to abort otherwise
+        val okLabel = newLabel("substr_ok")
+        val failLabel = newLabel("substr_fail")
+        val loCheck = newReg()
+        emit(s"  $loCheck = icmp slt i32 $lo, 0")
+        val checkHi = newLabel("substr_chk_hi")
+        emit(s"  br i1 $loCheck, label %$failLabel, label %$checkHi")
+        emitLabel(checkHi)
+        val hiLoCheck = newReg()
+        emit(s"  $hiLoCheck = icmp slt i32 $hi, $lo")
+        val checkLen = newLabel("substr_chk_len")
+        emit(s"  br i1 $hiLoCheck, label %$failLabel, label %$checkLen")
+        emitLabel(checkLen)
+        val hiLenCheck = newReg()
+        emit(s"  $hiLenCheck = icmp sgt i32 $hi, $srcLen")
+        emit(s"  br i1 $hiLenCheck, label %$failLabel, label %$okLabel")
+        emitLabel(failLabel)
+        emit(s"  call void @abort()")
+        emit(s"  unreachable")
+        emitLabel(okLabel)
+        // Compute new_len = hi - lo, allocate buffer, memcpy
+        val newLen = newReg()
+        emit(s"  $newLen = sub i32 $hi, $lo")
+        val newLen64 = newReg()
+        emit(s"  $newLen64 = sext i32 $newLen to i64")
+        val dataPtr = emitStringBufferAlloc(newLen64)
+        val lo64 = newReg()
+        emit(s"  $lo64 = sext i32 $lo to i64")
+        val srcStart = newReg()
+        emit(s"  $srcStart = getelementptr i8, i8* $srcPtr, i64 $lo64")
+        val cp = newReg()
+        emit(s"  $cp = call i8* @memcpy(i8* $dataPtr, i8* $srcStart, i64 $newLen64)")
+        emitMakeString(dataPtr, newLen)
+
       case TSliceExpr(array, low, high, SyslType.SliceType(elemType)) =>
         val base = genExpr(array)
         val elt = llvmType(elemType)
@@ -3275,6 +3322,7 @@ class SyslLLVMCodegen(target: String = "host"):
     case _: TStringLit => true                          // immortal sentinel — incr is a no-op anyway
     case _: TStringFromPtr | _: TStringFromSlice => true
     case TBinary(_, "+", _, SyslType.StringType) => true
+    case TSliceExpr(_, _, _, SyslType.StringType) => true
     case _: TCall | _: TIndirectCall => true            // ownership transferred from callee
     case _: TIfExpr | _: TMatchExpr => true             // branches handle their own RC
     case _ => false

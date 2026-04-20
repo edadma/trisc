@@ -877,4 +877,118 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
         |    0
         |""".stripMargin) shouldBe 0
   }
+
+  // ====================================================================
+  // 12. Substring s[a:b] (option A: copy semantics)
+  // ====================================================================
+
+  "substring IR allocates and copies via memcpy" in {
+    val ir = compileLLVM(
+      """main()
+        |    val s = "hello"
+        |    val t = s[1:4]
+        |""".stripMargin)
+    // Substring path: malloc + memcpy + emitMakeString
+    ir should include("call i8* @malloc")
+    ir should include("call i8* @memcpy")
+  }
+
+  "substring out-of-bounds emits abort branch" in {
+    val ir = compileLLVM(
+      """main()
+        |    val s = "hi"
+        |    val t = s[0:5]
+        |""".stripMargin)
+    ir should include("call void @abort()")
+  }
+
+  "substring of literal yields correct bytes" in {
+    llvmExit(
+      """main() -> int
+        |    val s = "hello"
+        |    val t = s[1:4]
+        |    if t == "ell" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "substring with default lo (s[:k])" in {
+    llvmExit(
+      """main() -> int
+        |    val s = "abcdef"
+        |    val t = s[:3]
+        |    if t == "abc" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "substring with default hi (s[k:])" in {
+    llvmExit(
+      """main() -> int
+        |    val s = "abcdef"
+        |    val t = s[2:]
+        |    if t == "cdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "substring full copy (s[:]) equals original" in {
+    llvmExit(
+      """main() -> int
+        |    val s = "hello"
+        |    val t = s[:]
+        |    if t == "hello" && len(t) == 5 then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "empty substring (s[k:k])" in {
+    llvmExit(
+      """main() -> int
+        |    val s = "hello"
+        |    val t = s[2:2]
+        |    if len(t) == 0 then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "substring of concat result" in {
+    llvmExit(
+      """main() -> int
+        |    val s = "ab" + "cdef"
+        |    val t = s[1:5]
+        |    if t == "bcde" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "substring returned from function" in {
+    llvmExit(
+      """take(s: string, lo: int, hi: int) -> string = s[lo:hi]
+        |
+        |main() -> int
+        |    val s = "hello world"
+        |    val t = take(s, 6, 11)
+        |    if t == "world" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "substring of substring" in {
+    llvmExit(
+      """main() -> int
+        |    val s = "abcdefgh"
+        |    val t = s[1:7]
+        |    val u = t[1:4]
+        |    if u == "cde" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "substring in loop (functional check)" in {
+    llvmExit(
+      """fill()
+        |    val s = "abcdefgh"
+        |    val t = s[0:8]
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 50
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
 }

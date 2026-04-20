@@ -751,6 +751,12 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TSliceExpr(arr, low, high, _) =>
         val arrVal = evalAny(arr, env)
         arrVal match
+          case StringVal(bytes) =>
+            val lo = low.map(l => toLong(evalAny(l, env)).toInt).getOrElse(0)
+            val hi = high.map(h => toLong(evalAny(h, env)).toInt).getOrElse(bytes.length)
+            if lo < 0 || hi < lo || hi > bytes.length then
+              throw RuntimeError(s"string slice bounds out of range [$lo:$hi] with length ${bytes.length}")
+            StringVal(bytes.slice(lo, hi))
           case SliceVal(cells, off, len, cap) =>
             val lo = low.map(l => toLong(evalAny(l, env)).toInt).getOrElse(0)
             val hi = high.map(h => toLong(evalAny(h, env)).toInt).getOrElse(len)

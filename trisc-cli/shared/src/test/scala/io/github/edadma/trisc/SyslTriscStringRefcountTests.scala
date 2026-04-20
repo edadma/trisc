@@ -973,4 +973,120 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |    if s[0] == "hello_world" && s[1] == "ab" then 0 else 1
         |""".stripMargin) shouldBe 0
   }
+
+  // ====================================================================
+  // 12. Substring s[a:b] (option A: copy semantics)
+  // ====================================================================
+
+  "substring asm calls malloc and stores rc=1" in {
+    val asm = compile(
+      """main()
+        |    val s = "hello"
+        |    val t = s[1:4]
+        |""".stripMargin)
+    asm should include("malloc")
+    asm should include("ldi r2, 1")
+  }
+
+  "substring of literal yields correct bytes" in {
+    runWithAlloc(
+      """main() -> int
+        |    val s = "hello"
+        |    val t = s[1:4]
+        |    if t == "ell" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "substring with default lo (s[:k])" in {
+    runWithAlloc(
+      """main() -> int
+        |    val s = "abcdef"
+        |    val t = s[:3]
+        |    if t == "abc" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "substring with default hi (s[k:])" in {
+    runWithAlloc(
+      """main() -> int
+        |    val s = "abcdef"
+        |    val t = s[2:]
+        |    if t == "cdef" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "substring full copy (s[:]) equals original" in {
+    runWithAlloc(
+      """main() -> int
+        |    val s = "hello"
+        |    val t = s[:]
+        |    if t == "hello" && len(t) == 5 then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "empty substring (s[k:k])" in {
+    runWithAlloc(
+      """main() -> int
+        |    val s = "hello"
+        |    val t = s[2:2]
+        |    if len(t) == 0 then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "substring of concat result" in {
+    runWithAlloc(
+      """main() -> int
+        |    val s = "ab" + "cdef"
+        |    val t = s[1:5]
+        |    if t == "bcde" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "substring in loop — old buffers freed (heap pressure)" in {
+    // Loop-stress: each iteration mallocs a fresh substring buffer; scope exit
+    // must decr it. Without proper free, the 256-byte heap will exhaust → trap.
+    runWithAlloc(
+      """fill()
+        |    val s = "abcdefgh"
+        |    val t = s[0:8]
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "substring returned from function" in {
+    runWithAlloc(
+      """take(s: string, lo: int, hi: int) -> string = s[lo:hi]
+        |
+        |main() -> int
+        |    val s = "hello world"
+        |    val t = take(s, 6, 11)
+        |    if t == "world" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "substring of substring" in {
+    runWithAlloc(
+      """main() -> int
+        |    val s = "abcdefgh"
+        |    val t = s[1:7]
+        |    val u = t[1:4]
+        |    if u == "cde" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "substring out-of-bounds traps with r1 = 1" in {
+    // Trap halts the CPU; r1 holds error code (1 = out-of-bounds).
+    runWithAlloc(
+      """main() -> int
+        |    val s = "hi"
+        |    val t = s[0:10]
+        |    0
+        |""".stripMargin) shouldBe 1
+  }
 }

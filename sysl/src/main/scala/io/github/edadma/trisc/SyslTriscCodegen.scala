@@ -545,6 +545,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TFieldPostInc(obj, _, _) => scanE(obj)
       case TFieldPostDec(obj, _, _) => scanE(obj)
       case TIndex(arr, idx, _) => scanE(arr) || scanE(idx)
+      case TSliceExpr(_, _, _, SyslType.StringType) => true   // substring allocates new buffer
       case TSliceExpr(arr, lo, hi, _) => scanE(arr) || lo.exists(scanE) || hi.exists(scanE)
       case TAppend(slice, elem, _) => scanE(slice) || scanE(elem)
       case TDeref(p, _) => scanE(p)
@@ -596,6 +597,7 @@ class SyslTriscCodegen(addresses: Int = 4):
   private def isOwnedStringExpr(expr: TExpr): Boolean = expr match
     case _: TStringLit => true
     case TBinary(_, "+", _, SyslType.StringType) => true
+    case TSliceExpr(_, _, _, SyslType.StringType) => true
     case _: TStringFromPtr | _: TStringFromSlice => true
     case _: TCall | _: TIndirectCall => true
     case _: TIfExpr | _: TMatchExpr => true
@@ -1481,7 +1483,7 @@ class SyslTriscCodegen(addresses: Int = 4):
             (typ, init) match
               case (rt: SyslType.RefType, _: TNew | _: TNewArray | _: TNewEnum) => // owned, no incr needed
               case (rt: SyslType.RefType, _) => emitRefIncr(1, refHeaderOffset(rt))
-              case (SyslType.StringType, _: TBinary) => // concat result already has refcount=1
+              case (SyslType.StringType, e) if isOwnedStringExpr(e) => // owned (concat/substring/literal)
               case (SyslType.StringType, _) if needsAllocExtern =>
                 // Incr refcount of the ptr field (only when heap strings exist)
                 emit("  pshd r1")           // save string struct address
@@ -1559,15 +1561,12 @@ class SyslTriscCodegen(addresses: Int = 4):
                 emit("  ldd r1, r1, r0")    // r1 = old ptr field
                 emitRefDecr(1, 8)
               genExpr(value)              // r1 = address of new {ptr, len}
-              // Increment new string's refcount (skip for concat results)
-              if needsAllocExtern then
-                value match
-                  case _: TBinary => // concat already has refcount=1
-                  case _ =>
-                    emit("  pshd r1")
-                    emit("  ldd r1, r1, r0")
-                    emitRefIncr(1, 8)
-                    emit("  popd r1")
+              // Increment new string's refcount (skip for owned: concat/substring/literal)
+              if needsAllocExtern && !isOwnedStringExpr(value) then
+                emit("  pshd r1")
+                emit("  ldd r1, r1, r0")
+                emitRefIncr(1, 8)
+                emit("  popd r1")
               emitAddImm(2, 5, local.offset)
               emitStore(1, 2, local.typ)
             case st: SyslType.StructType if structHasStringFields(st) =>
@@ -1609,13 +1608,10 @@ class SyslTriscCodegen(addresses: Int = 4):
               genExpr(value)                // r1 = new descriptor address
               emit(s"  movi r2, $target")   // r2 = global address
               emitStore(1, 2, gtyp)         // copy 16 bytes
-              if needsAllocExtern then
-                value match
-                  case _: TBinary => // concat already at rc=1
-                  case _ =>
-                    emit(s"  movi r1, $target")
-                    emit("  ldd r1, r1, r0")  // r1 = new ptr (just stored)
-                    emitRefIncr(1, 8)
+              if needsAllocExtern && !isOwnedStringExpr(value) then
+                emit(s"  movi r1, $target")
+                emit("  ldd r1, r1, r0")  // r1 = new ptr (just stored)
+                emitRefIncr(1, 8)
             case st: SyslType.StructType if structHasStringFields(st) && needsAllocExtern =>
               // Decr old struct's string fields (baseReg=1 = global address; preserved
               // across emitRefDecr via the helper's pshd/popd r1)
@@ -1986,11 +1982,9 @@ class SyslTriscCodegen(addresses: Int = 4):
           // Increment the new value if it's a borrowed (non-owned) reference
           fieldType match
             case SyslType.StringType =>
-              value match
-                case _: TBinary => // concat result already at rc=1
-                case _ =>
-                  emit("  ldd r1, r2, r0")  // r1 = new ptr just stored at field
-                  emitRefIncr(1, 8)
+              if !isOwnedStringExpr(value) then
+                emit("  ldd r1, r2, r0")  // r1 = new ptr just stored at field
+                emitRefIncr(1, 8)
             case rt: SyslType.RefType =>
               value match
                 case _: TNew | _: TNewArray | _: TNewEnum => // owned, no incr
@@ -3732,6 +3726,117 @@ class SyslTriscCodegen(addresses: Int = 4):
             emitLoadImm(1, size) // cap == size for fixed arrays
           case other =>
             throw new RuntimeException(s"codegen: cap() not supported on ${other}")
+
+      case TSliceExpr(array, low, high, SyslType.StringType) =>
+        // Substring s[lo:hi]: allocate new rc'd buffer, memcpy hi-lo bytes.
+        // Result is an owned {ptr, len} with rc=1.
+        needsAllocExtern = true
+        // Eval source string; push ptr(8) and len(8). Reclaim genExpr temps first.
+        val pre = stackOffset
+        genExpr(array)                       // r1 = addr of {ptr, len}
+        emit("  ldd r2, r1, r0")             // r2 = src_ptr
+        emit("  addi r3, r1, 8")
+        emit("  ldd r3, r3, r0")             // r3 = src_len (i64)
+        val extra = pre - stackOffset
+        if extra > 0 then
+          emitAddImm(7, 7, extra)
+          stackOffset = pre
+        emit("  pshd r2")                    // [src_ptr]
+        emit("  pshd r3")                    // [src_len] [src_ptr]
+        stackOffset -= 16
+        // Eval lo (default 0)
+        low match
+          case Some(loExpr) => genExpr(loExpr)
+          case None         => emit("  ldi r1, 0")
+        emit("  pshd r1")                    // [lo] [src_len] [src_ptr]
+        stackOffset -= 8
+        // Eval hi (default src_len at sp+8)
+        high match
+          case Some(hiExpr) => genExpr(hiExpr)
+          case None =>
+            emitAddImm(1, 7, 8)
+            emit("  ldd r1, r1, r0")         // r1 = src_len
+        emit("  pshd r1")                    // [hi] [lo] [src_len] [src_ptr]
+        stackOffset -= 8
+        // Pop hi/lo into r1/r2; src_len stays at sp+0, src_ptr at sp+8
+        emit("  popd r1")                    // r1 = hi
+        emit("  popd r2")                    // r2 = lo
+        stackOffset += 16
+        // Bounds check: 0 <= lo <= hi <= src_len
+        val errLabel = newLabel("substr_err")
+        val okLabel  = newLabel("substr_ok")
+        emit("  slt r4, r2, r0")             // lo < 0?
+        emit(s"  bne r4, r0, $errLabel")
+        emit("  slt r4, r1, r2")             // hi < lo?
+        emit(s"  bne r4, r0, $errLabel")
+        emit("  ldd r4, r7, r0")             // r4 = src_len
+        emit("  slt r4, r4, r1")             // src_len < hi?
+        emit(s"  bne r4, r0, $errLabel")
+        emit(s"  bra $okLabel")
+        emit(s"$errLabel")
+        emit("  ldi r1, 1")                  // out-of-bounds
+        emit("  trap 1")
+        emit(s"$okLabel")
+        // Compute new_len = hi - lo. Save lo and new_len on stack.
+        emit("  sub r3, r1, r2")             // r3 = new_len
+        emit("  pshd r2")                    // [lo] [src_len] [src_ptr]
+        emit("  pshd r3")                    // [new_len] [lo] [src_len] [src_ptr]
+        stackOffset -= 16
+        // malloc(new_len + 8)
+        emit("  addi r1, r3, 8")
+        emit("  pshd r1")                    // [arg] [new_len] [lo] [src_len] [src_ptr]
+        stackOffset -= 8
+        emit("  movi r4, malloc")
+        emit("  jalr r6, r4")
+        emit("  popd r3")                    // pop malloc arg
+        stackOffset += 8
+        // Null check
+        val allocOk = newLabel("substr_alloc_ok")
+        emit(s"  bne r1, r0, $allocOk")
+        emit("  ldi r1, 2")
+        emit("  trap 1")
+        emit(s"$allocOk")
+        // r1 = base; rc=1 at [base]
+        emit("  ldi r2, 1")
+        emit("  std r2, r1, r0")
+        // Stack: sp+0 = new_len, sp+8 = lo, sp+16 = src_len, sp+24 = src_ptr
+        // dest = base + 8
+        emit("  addi r1, r1, 8")
+        // src = src_ptr + lo
+        emitAddImm(2, 7, 24)
+        emit("  ldd r2, r2, r0")             // r2 = src_ptr
+        emitAddImm(3, 7, 8)
+        emit("  ldd r3, r3, r0")             // r3 = lo
+        emit("  add r2, r2, r3")             // r2 = src_ptr + lo
+        // Copy new_len bytes
+        emit("  ldd r3, r7, r0")             // r3 = new_len (counter)
+        val copyLoop = newLabel("substr_copy")
+        val copyDone = newLabel("substr_copy_done")
+        emit(s"$copyLoop")
+        emit(s"  beq r3, r0, $copyDone")
+        emit("  ldb r4, r2, r0")
+        emit("  stb r4, r1, r0")
+        emit("  addi r1, r1, 1")
+        emit("  addi r2, r2, 1")
+        emit("  addi r3, r3, -1")
+        emit(s"  bra $copyLoop")
+        emit(s"$copyDone")
+        // Build result {ptr, len}: data = base+8 (recompute from r1 - new_len),
+        // but easier to recompute base from saved state. Use base via re-derivation:
+        // We have r1 = base + 8 + new_len. Subtract new_len → base + 8 = data ptr.
+        emit("  ldd r3, r7, r0")             // r3 = new_len
+        emit("  sub r1, r1, r3")             // r1 = base + 8 = data ptr
+        emit("  mov r2, r3")                 // r2 = new_len (also goes to result)
+        // Pop saved values: new_len(8) + lo(8) + src_len(8) + src_ptr(8) = 32 bytes
+        emitAddImm(7, 7, 32)
+        stackOffset += 32
+        // Allocate 16-byte result {ptr, len}
+        emitAddImm(7, 7, -16)
+        stackOffset -= 16
+        emit("  std r1, r7, r0")
+        emitAddImm(3, 7, 8)
+        emit("  std r2, r3, r0")
+        emit("  mov r1, r7")
 
       case TSliceExpr(array, low, high, SyslType.SliceType(elemType)) =>
         val elemSize = stackSize(elemType)

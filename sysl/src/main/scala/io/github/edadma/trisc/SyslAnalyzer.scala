@@ -2085,12 +2085,16 @@ class SyslAnalyzer:
         val tArr = analyzeExpr(arr)
         val tLow = low.map(analyzeExpr)
         val tHigh = high.map(analyzeExpr)
-        val elemType = tArr.typ match
-          case SliceType(elem) => elem
-          case RefType(SliceType(elem)) => elem
-          case ArrayType(elem, _) => elem
+        tArr.typ match
+          case StringType =>
+            TSliceExpr(tArr, tLow, tHigh, StringType)
+          case SliceType(elem) =>
+            TSliceExpr(tArr, tLow, tHigh, SliceType(elem))
+          case RefType(SliceType(elem)) =>
+            TSliceExpr(tArr, tLow, tHigh, SliceType(elem))
+          case ArrayType(elem, _) =>
+            TSliceExpr(tArr, tLow, tHigh, SliceType(elem))
           case t => throw AnalysisError(s"cannot sub-slice $t")
-        TSliceExpr(tArr, tLow, tHigh, SliceType(elemType))
 
       case FieldAccessAST(VarRefAST(nsName), member) if moduleNamespaces.contains(nsName) =>
         // Qualified import access: strings.MAX_LEN
