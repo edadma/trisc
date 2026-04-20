@@ -741,7 +741,8 @@ class SyslAnalyzer:
             // Apply return-type range check for expression-body functions.
             val checked = if funInfo.returnType != VoidType then applyTargetType(tExpr, funInfo.returnType) else tExpr
             TExprBody(checked)
-          case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
+          case BlockBodyAST(stmts, contracts) =>
+            analyzeBlockWithContracts(stmts, contracts, funInfo.returnType)
         finally currentExpected = savedExp
         // For def functions with no explicit return type, infer from body
         val retType = if funInfo.isDef && funInfo.returnType == VoidType then
@@ -1335,7 +1336,7 @@ class SyslAnalyzer:
           currentScope(paramName) = SymInfo(paramName, paramType, true)
         val tBody = info.body match
           case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
-          case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
+          case BlockBodyAST(stmts, _) => TBlockBody(analyzeBlock(stmts))
         val tParams = info.paramTypes.map((n, t) => TParam(n, t))
         scopeStack = null
         TFunDecl(info.mangled, tParams, info.retType, tBody, isPrivate = false)
@@ -1442,7 +1443,7 @@ class SyslAnalyzer:
           val tBody = try
             template.body match
               case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
-              case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
+              case BlockBodyAST(stmts, _) => TBlockBody(analyzeBlock(stmts))
           finally
             currentExpected = savedExpectedInst
           scopeStack = savedScopeStack
@@ -1553,6 +1554,97 @@ class SyslAnalyzer:
 
   private def analyzeBlock(stmts: List[StmtAST]): List[TStmt] =
     stmts.map(analyzeStmt)
+
+  /** Analyze a function block body together with its `require` / `ensure` contract clauses.
+   * Generates require checks at entry, injects a `__result__` local, and rewrites every
+   * `return v` so it stores v into `__result__`, runs ensure checks, then returns. */
+  private def analyzeBlockWithContracts(stmts: List[StmtAST], contracts: List[ContractClauseAST], returnType: SyslType): TFunBody =
+    if contracts.isEmpty then return TBlockBody(analyzeBlock(stmts))
+    // Pre-declare __result__ in the function scope so that `result` aliased to it resolves
+    // during ensure analysis, and later references inside the injected rewrite work.
+    val hasResult = returnType != VoidType
+    if hasResult then
+      currentScope("__result__") = SymInfo("__result__", returnType, mutable = true)
+      currentScope("result") = SymInfo("__result__", returnType, mutable = false)
+    val requireChecks: List[TStmt] = contracts.collect { case ContractClauseAST(ContractRequire, e) =>
+      val te = analyzeExpr(e)
+      if te.typ != BoolType then throw AnalysisError(s"require expression must be bool, got ${te.typ}")
+      TContractCheck("precondition", te, "precondition")
+    }
+    val ensureChecks: List[TStmt] = contracts.collect { case ContractClauseAST(ContractEnsure, e) =>
+      val te = analyzeExpr(e)
+      if te.typ != BoolType then throw AnalysisError(s"ensure expression must be bool, got ${te.typ}")
+      TContractCheck("postcondition", te, "postcondition")
+    }
+    // Drop the `result` alias so user code in the body cannot pick it up unintentionally.
+    // `__result__` stays in scope — the body rewrite references it.
+    if hasResult then currentScope.remove("result")
+    val tStmts = analyzeBlock(stmts)
+    val rewritten = rewriteReturnsForEnsure(tStmts, returnType, ensureChecks)
+    val finalized = finalizeFallThroughReturn(rewritten, returnType, ensureChecks)
+    val resultDecl: List[TStmt] =
+      if hasResult then List(TVarStmt("__result__", returnType, zeroExprFor(returnType)))
+      else Nil
+    TBlockBody(resultDecl ++ requireChecks ++ finalized)
+
+  /** Zero-value expression for a scalar/pointer return type. */
+  private def zeroExprFor(t: SyslType): TExpr = t.underlying match
+    case _: FloatType => TFloatLit(0.0, t)
+    case BoolType     => TBoolLit(false, t)
+    case _            => TIntLit(0, t)
+
+  /** Recursively rewrite every `return v` inside a stmt list so that `v` is stored into
+   * __result__, then the ensure checks fire, then `return __result__` runs. For void
+   * functions, the assignment step is skipped. */
+  private def rewriteReturnsForEnsure(stmts: List[TStmt], returnType: SyslType, ensureChecks: List[TStmt]): List[TStmt] =
+    stmts.map(s => rewriteStmtForEnsure(s, returnType, ensureChecks))
+
+  private def rewriteStmtForEnsure(stmt: TStmt, returnType: SyslType, ensureChecks: List[TStmt]): TStmt = stmt match
+    case TReturnStmt(Some(v)) if returnType != VoidType =>
+      TMultiStmt(List(TAssignStmt("__result__", v)) ++ ensureChecks ++
+        List(TReturnStmt(Some(TVarRef("__result__", returnType)))))
+    case TReturnStmt(None) =>
+      TMultiStmt(ensureChecks ++ List(TReturnStmt(None)))
+    case TReturnStmt(_) => stmt // void return with value — already rejected upstream
+    case TWhileStmt(c, body)          => TWhileStmt(c, rewriteReturnsForEnsure(body, returnType, ensureChecks))
+    case TForStmt(init, c, upd, body) => TForStmt(init, c, upd, rewriteReturnsForEnsure(body, returnType, ensureChecks))
+    case TDoWhileStmt(c, body)        => TDoWhileStmt(c, rewriteReturnsForEnsure(body, returnType, ensureChecks))
+    case TDeferStmt(inner)            => TDeferStmt(rewriteStmtForEnsure(inner, returnType, ensureChecks))
+    case TMultiStmt(xs)               => TMultiStmt(xs.map(x => rewriteStmtForEnsure(x, returnType, ensureChecks)))
+    case TExprStmt(e)                 => TExprStmt(rewriteExprForEnsure(e, returnType, ensureChecks))
+    case other => other
+
+  private def rewriteExprForEnsure(expr: TExpr, returnType: SyslType, ensureChecks: List[TStmt]): TExpr = expr match
+    case TIfExpr(c, tb, eb, t) =>
+      TIfExpr(c, rewriteReturnsForEnsure(tb, returnType, ensureChecks),
+              eb.map(stmts => rewriteReturnsForEnsure(stmts, returnType, ensureChecks)), t)
+    case TMatchExpr(e, arms, default, t) =>
+      val newArms = arms.map(a => TMatchArm(a.patterns, a.guard, rewriteReturnsForEnsure(a.body, returnType, ensureChecks)))
+      TMatchExpr(e, newArms, default.map(stmts => rewriteReturnsForEnsure(stmts, returnType, ensureChecks)), t)
+    case other => other
+
+  /** If the rewritten body lacks a trailing explicit return, append one so ensure runs
+   * at the implicit fall-through point. The last TExprStmt (if any) becomes the return value. */
+  private def finalizeFallThroughReturn(stmts: List[TStmt], returnType: SyslType, ensureChecks: List[TStmt]): List[TStmt] =
+    if returnType == VoidType then
+      // Append bare ensure + return at the end unless the last stmt is already a return
+      if stmts.lastOption.exists(isTerminalReturn) then stmts
+      else stmts ++ ensureChecks :+ TReturnStmt(None)
+    else
+      stmts.lastOption match
+        case Some(s) if isTerminalReturn(s) => stmts
+        case Some(TExprStmt(e)) if compatible(e.typ, returnType) =>
+          stmts.init :+ TMultiStmt(List(TAssignStmt("__result__", e)) ++ ensureChecks ++
+            List(TReturnStmt(Some(TVarRef("__result__", returnType)))))
+        case _ =>
+          // No trailing expression producing the return value; treat as void-ish or
+          // let downstream catch the type mismatch. Fall back: return __result__ with zero.
+          stmts ++ ensureChecks :+ TReturnStmt(Some(TVarRef("__result__", returnType)))
+
+  private def isTerminalReturn(s: TStmt): Boolean = s match
+    case _: TReturnStmt => true
+    case TMultiStmt(xs) => xs.lastOption.exists(isTerminalReturn)
+    case _ => false
 
   private def analyzeStmt(stmt: StmtAST): TStmt =
     stmt match
@@ -1877,7 +1969,7 @@ class SyslAnalyzer:
         currentExpected = if expectedRet == VoidType then None else Some(expectedRet)
         val tBody = try body match
           case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
-          case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
+          case BlockBodyAST(stmts, _) => TBlockBody(analyzeBlock(stmts))
         finally currentExpected = savedExp
         popScope()
         // Detect captures: variables referenced from enclosing scope (not globals, not params).

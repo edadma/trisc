@@ -752,6 +752,26 @@ class SyslLLVMCodegen(target: String = "host"):
       case TDeferStmt(body) =>
         deferStack.push(body)
 
+      case TMultiStmt(children) =>
+        children.foreach(genStmt)
+
+      case TContractCheck(kind, expr, _) =>
+        val v = genExpr(expr)
+        val lt = llvmType(expr.typ)
+        val cmp = newReg()
+        emit(s"  $cmp = icmp ne $lt $v, 0")
+        val failLbl = s"contract_fail_${labelCounter}"
+        val passLbl = s"contract_pass_${labelCounter}"
+        labelCounter += 1
+        emit(s"  br i1 $cmp, label %$passLbl, label %$failLbl")
+        emit(s"$failLbl:")
+        val (nameLbl, nameLen) = internCString(kind)
+        emit(s"  %${failLbl}_name = getelementptr [$nameLen x i8], [$nameLen x i8]* $nameLbl, i32 0, i32 0")
+        emit(s"  call void @__range_fail(i8* %${failLbl}_name, i64 ${nameLen - 1})")
+        emit(s"  unreachable")
+        emit(s"$passLbl:")
+        currentBlock = passLbl
+
       case TExprStmt(expr) =>
         genExpr(expr)
 

@@ -1915,6 +1915,17 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TDeferStmt(body) =>
         deferStack += body
 
+      case TMultiStmt(children) =>
+        children.foreach(genStmt)
+
+      case TContractCheck(_, expr, _) =>
+        genExpr(expr) // r1 = cond
+        val pass = newLabel("contract_pass")
+        emit(s"  bne r1, r0, $pass")
+        emit("  ldi r1, 6") // error code 6 = contract violation
+        emit("  trap 1")
+        emit(s"$pass:")
+
       case TExprStmt(expr) =>
         genExpr(expr) // result in r1, discarded
 
