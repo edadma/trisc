@@ -164,6 +164,7 @@ class SyslLLVMCodegen(target: String = "host"):
         case _: TEnumDecl => // type only
         case _: TDataEnumDecl => // type only
         case _: TTypeAliasDecl => // type only
+        case _: TConstDecl => // const is fully folded at analyzer level
         case _: TInterfaceDecl => // type only
         case f: TFunDecl =>
           if !emittedFunctions.contains(f.name) then
