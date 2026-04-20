@@ -29,8 +29,9 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
     import oskit.kernel.{kernel_init, create_thread, first_thread_ssp,
         kernel_stack_usp, kernel_stack_ssp, schedule,
         syscall_table, syscall_ssp_set, syscall_check_allowed}
-    import oskit.ipc.ipc_init
-    import oskit.services.{get_thread_count, uptime}
+    import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
+        ipc_send, ipc_recv, ipc_reply}
+    import oskit.services.{get_thread_count, uptime, sleep, yield}
 
     extern arch_syscall_call(arg: i64, handler: i64)
 
@@ -219,25 +220,63 @@ kernel isn't in play.
         arch_syscall_call(a0, handler)
 
 Kernel-thread entries for the kernel-integrated demo. kentry_a
-also exercises the SVC path by calling syscall() via services —
-on first tick it prints get_thread_count() and uptime() to prove
-that the kernel syscall table + dispatcher round-trip works.
+is the echo server: creates a port, registers "echo", then
+loops on ipc_recv and echoes each message back. kentry_b is
+the client: yields once so A registers, looks up "echo", sends
+a handful of messages, and prints each reply before wfi-ing out.
+
+    var kt_reply_buf: [32]byte
+    var kt_send_buf:  [32]byte
 
     kentry_a()
-        val tc = get_thread_count()
-        val up = uptime()
-        uart_puts("[kern A] thread_count=")
-        uart_puthex(u64(tc))
-        uart_puts(" uptime=")
-        uart_puthex(u64(up))
+        uart_puts("[kern A] starting echo server\n")
+        val port = port_create()
+        if port < 0
+            uart_puts("[kern A] port_create failed\n")
+            while true
+                arch_wfi()
+        val reg = port_register(port, "echo")
+        if reg < 0
+            uart_puts("[kern A] port_register failed\n")
+            while true
+                arch_wfi()
+        uart_puts("[kern A] echo server ready on port ")
+        uart_puthex(u64(port))
         uart_puts("\n")
         while true
-            uart_puts("[kern A]\n")
-            arch_wfi()
+            val sender = ipc_recv(port, *byte(kt_reply_buf), 32)
+            if sender < 0
+                uart_puts("[kern A] ipc_recv failed\n")
+                arch_wfi()
+            else
+                uart_puts("[kern A] got msg from tid=")
+                uart_puthex(u64(sender))
+                uart_puts("\n")
+                ipc_reply(sender, *byte(kt_reply_buf), 1)
 
     kentry_b()
+        yield()
+        uart_puts("[kern B] looking up echo\n")
+        val port = port_lookup("echo")
+        if port < 0
+            uart_puts("[kern B] port_lookup failed\n")
+            while true
+                arch_wfi()
+        uart_puts("[kern B] found port ")
+        uart_puthex(u64(port))
+        uart_puts("\n")
+        var seq = 0
+        while seq < 3
+            kt_send_buf[0] = byte('A' + seq)
+            val r = ipc_send(port, *byte(kt_send_buf), 1,
+                *byte(kt_reply_buf), 1)
+            uart_puts("[kern B] reply=")
+            uart_putc(int(kt_reply_buf[0]))
+            uart_puts(" r=")
+            uart_puthex(u64(r))
+            uart_puts("\n")
+            seq += 1
         while true
-            uart_puts("[kern B]\n")
             arch_wfi()
 
     kernel_main()

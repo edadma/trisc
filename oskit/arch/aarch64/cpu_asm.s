@@ -87,14 +87,16 @@ syscall:
 
 // arch_syscall_call(arg: i64, handler: i64)
 //   Tail-call a syscall handler whose address came from syscall_table.
-//   Handlers take a single i64 (the caller's x0) and return nothing
-//   — they write the return value into the saved frame via
-//   syscall_return(). AAPCS64: x0 is the arg (already in place),
-//   x1 is the handler address — br tail-jumps, handler rets to our
-//   caller.
+//   register_syscall stores the address of a __wrap_ trampoline
+//   that expects the closure ABI: x0 = env pointer, x1 = real arg.
+//   AAPCS64 call-site gives us x0 = arg, x1 = handler, so we must
+//   shuffle: move handler to x2, arg to x1, zero x0, then br.
 .global arch_syscall_call
 arch_syscall_call:
-    br  x1
+    mov x2, x1
+    mov x1, x0
+    mov x0, #0
+    br  x2
 
 // user_svc_test — tiny EL0 entry used to sanity-check the EL1->EL0
 // transition. Issues `svc #0x42` so the exception reporter in
