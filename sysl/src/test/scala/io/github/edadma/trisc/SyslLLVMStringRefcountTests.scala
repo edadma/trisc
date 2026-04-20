@@ -1306,4 +1306,76 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
     // No per-id deinit registered
     ir should not include "@__closure_env_deinit_"
   }
+
+  // ====================================================================
+  // 13. *string parameters
+  //
+  // LLVM was already correct (TDeref uses isAggregate which includes
+  // StringType). TRISC needed a one-line fix to its TDeref aggregate-case.
+  // These tests assert end-to-end correctness on LLVM as a sanity check.
+  // ====================================================================
+
+  "*string param: read len through deref" in {
+    llvmExit(
+      """take(p: *string) -> int = len(*p)
+        |
+        |main() -> int
+        |    val s = "ab" + "cd"
+        |    take(&s)
+        |""".stripMargin) shouldBe 4
+  }
+
+  "*string param: heap-pressure" in {
+    llvmExit(
+      """take(p: *string) -> int = len(*p)
+        |
+        |fill()
+        |    val s = "ab" + "cd"
+        |    val n = take(&s)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "*string param: val s = *p copies descriptor (borrowed-source rc)" in {
+    llvmExit(
+      """take(p: *string) -> int
+        |    val s = *p
+        |    len(s)
+        |
+        |fill()
+        |    val s = "ab" + "cd"
+        |    val n = take(&s)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "*p = new_string assigns through pointer" in {
+    llvmExit(
+      """write(p: *string)
+        |    *p = "x" + "y"
+        |
+        |fill()
+        |    var s = "ab" + "cd"
+        |    write(&s)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
 }
