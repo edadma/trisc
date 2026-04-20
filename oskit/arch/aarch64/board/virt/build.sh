@@ -72,10 +72,26 @@ echo "=== Compile stubs.c ==="
 aarch64-elf-gcc -ffreestanding -nostdlib -mcmodel=large \
     -fno-pic -fno-pie -c -o "$OUT/stubs.o" "$BOARD_DIR/stubs.c"
 
+echo "=== Build user program test_putc ==="
+bash "$ARCH_DIR/build_prog.sh" test_putc > "$OUT/build-prog.log" 2>&1
+if [ ! -f "$OUT/bin/test_putc.bin" ]; then
+    echo "  test_putc build failed:" >&2
+    tail -10 "$OUT/build-prog.log" >&2
+    exit 1
+fi
+
+echo "=== Embed test_putc.bin into kernel ==="
+# objcopy -I binary produces _binary_<path>_start/_end/_size symbols.
+# Run from $OUT/bin so the symbol becomes _binary_test_putc_bin_start.
+(cd "$OUT/bin" && aarch64-elf-objcopy \
+    -I binary -O elf64-littleaarch64 -B aarch64 \
+    --rename-section .data=.rodata,alloc,load,readonly,data,contents \
+    test_putc.bin "$OUT/user_blob.o")
+
 echo "=== Link ==="
 aarch64-elf-ld -T "$BOARD_DIR/link.ld" \
     -o "$OUT/kernel.elf" \
-    "$OUT/boot.o" "$OUT/vectors.o" "$OUT/cpu_asm.o" "$OUT/mmu.o" "$OUT/vm_asm.o" "$OUT/irq_asm.o" "$OUT/stubs.o" "$OUT/kernel.o" 2>&1 \
+    "$OUT/boot.o" "$OUT/vectors.o" "$OUT/cpu_asm.o" "$OUT/mmu.o" "$OUT/vm_asm.o" "$OUT/irq_asm.o" "$OUT/stubs.o" "$OUT/kernel.o" "$OUT/user_blob.o" 2>&1 \
     | grep -v "has a LOAD segment with RWX permissions" || true
 
 echo "=== Built: $OUT/kernel.elf ==="

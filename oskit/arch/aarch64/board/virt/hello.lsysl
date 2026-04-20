@@ -355,30 +355,61 @@ test for the context-switch asm.
         arch_resume_process(kt_ssp[0])
         uart_puts("unexpected return from arch_resume_process\n")
 
-User-process demo (DEMO_MODE=3). Boots a single EL0 user process
-through the shared kernel's create_process_suspended + resume_process
-path. The user program is 8 instructions (hand-assembled into the
-user page):
-  mov x8, #1   (SYS_PUTC); mov x0, #'U'; svc #0
-  mov x0, #'X'; svc #0
-  mov x8, #3   (SYS_EXIT); mov x0, #0x42; svc #0
-Proves the syscall path handles multiple round-trips with different
-syscall numbers and arg values. We see "UX" printed to UART, then
-the process exits cleanly and the scheduler halts.
+User-process demo (DEMO_MODE=3). Loads the embedded test_putc
+binary (compiled from oskit/bin/test_putc.lsysl via build_prog.sh,
+embedded as _binary_test_putc_bin_* symbols by objcopy -I binary)
+into a fresh process page table and resumes. test_putc's main()
+calls putc('O'), putc('K'), putc('\n'), exit() — so we expect
+"OK\n" on the UART then a clean halt.
 
-    val UINS_MOV_X8_1:    u32 = u32(0xD2800028)   // mov x8, #1
-    val UINS_MOV_X0_U:    u32 = u32(0xD2800AA0)   // mov x0, #'U' (0x55)
-    val UINS_SVC0:        u32 = u32(0xD4000001)   // svc #0
-    val UINS_MOV_X0_X:    u32 = u32(0xD2800B00)   // mov x0, #'X' (0x58)
-    val UINS_MOV_X8_3:    u32 = u32(0xD2800068)   // mov x8, #3
-    val UINS_MOV_X0_42:   u32 = u32(0xD2800840)   // mov x0, #0x42
+    extern _binary_test_putc_bin_start: byte
+    extern _binary_test_putc_bin_end: byte
 
 SYS_PUTC handler: write a single byte to the PL011 UART. Registered
-into syscall_table so user programs can print via services.putc().
+into syscall_table so user programs can print via ulib.putc().
 
     sys_putc_handler(arg: int)
         uart_putc(arg & 0xFF)
         syscall_return(i64(0))
+
+Load `len` bytes from `src` into the process's user code region,
+walking its L3 entries so the binary spans multiple 4KB pages.
+VA 0x60000000..0x6000FFFF is identity-mapped in the user PT from
+vm_create_process_pt; since we're still under the kernel PTBR when
+this runs we reach each physical page directly.
+
+    user_load_program(ptbr: u64, src_va: i64, len: int)
+        // src_va points at the kernel-side blob; iterate one byte
+        // at a time walking the user PT to find each destination
+        // physical address. Slow but simple; replace with a stride-
+        // per-page memcpy once we have a real block copy.
+        var i = 0
+        while i < len
+            val user_va = u64(0x60000000) + u64(i)
+            val dst_pa = vm_v2p(ptbr, user_va)
+            if dst_pa == u64(0)
+                uart_puts("[user] load: unmapped VA at offset ")
+                uart_puthex(u64(i))
+                uart_puts("\n")
+                abort()
+            var dst: *byte = *byte(dst_pa)
+            var sp: *byte = *byte(src_va + i64(i))
+            dst[0] = sp[0]
+            i += 1
+
+Flush the I-cache for every line covering `len` bytes starting at
+the user code region's first physical page. We walk the L3 entries
+again to get each page's PA, then clean + invalidate one cache
+line per 64 bytes of code.
+
+    user_sync_icache(ptbr: u64, len: int)
+        var off = 0
+        while off < len
+            val user_va = u64(0x60000000) + u64(off)
+            val pa = vm_v2p(ptbr, user_va)
+            if pa != u64(0)
+                sync_icache_line(i64(pa))
+            off += 64
 
     kernel_main_user()
         uart_puts("[user] kernel_init...\n")
@@ -391,21 +422,18 @@ into syscall_table so user programs can print via services.putc().
         if new_pt == 0
             uart_puts("[user] vm_create_process_pt failed\n")
             abort()
-        val code_pa = last_user_code_page
 
-        uart_puts("[user] writing program at PA=")
-        uart_puthex(code_pa)
+        val blob_start = i64(&_binary_test_putc_bin_start)
+        val blob_end   = i64(&_binary_test_putc_bin_end)
+        val blob_len   = int(blob_end - blob_start)
+        uart_puts("[user] loading test_putc blob=")
+        uart_puthex(u64(blob_start))
+        uart_puts(" len=")
+        uart_puthex(u64(blob_len))
         uart_puts("\n")
-        var w: *u32 = *u32(code_pa)
-        w[0] = UINS_MOV_X8_1         // mov x8, #1 (SYS_PUTC)
-        w[1] = UINS_MOV_X0_U         // mov x0, #'U'
-        w[2] = UINS_SVC0
-        w[3] = UINS_MOV_X0_X         // mov x0, #'X'  (x8 still 1)
-        w[4] = UINS_SVC0
-        w[5] = UINS_MOV_X8_3         // mov x8, #3 (SYS_EXIT)
-        w[6] = UINS_MOV_X0_42        // mov x0, #0x42
-        w[7] = UINS_SVC0
-        sync_icache_line(i64(code_pa))
+
+        user_load_program(new_pt, blob_start, blob_len)
+        user_sync_icache(new_pt, blob_len)
 
         val pid = create_process_suspended(
             i64(0x60000000), i64(PROG_USP), i64(PROG_SSP),
