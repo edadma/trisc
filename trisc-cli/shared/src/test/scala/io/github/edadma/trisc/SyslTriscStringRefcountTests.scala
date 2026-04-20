@@ -1089,4 +1089,218 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |    0
         |""".stripMargin) shouldBe 1
   }
+
+  // ====================================================================
+  // 13. Enum-with-string variant rc (tag-dispatch decr on scope exit)
+  // ====================================================================
+
+  "enum variant with string field — scope exit decr (heap pressure)" in {
+    // Construct an enum holding a heap-allocated string each iteration.
+    // Without tag-dispatch decr at scope exit, the 256-byte heap exhausts.
+    runWithAlloc(
+      """enum E
+        |    OneStr(s: string)
+        |    Empty
+        |
+        |fill()
+        |    val e = OneStr("ab" + "cd")
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "enum variant with borrowed-string field — incr+decr balance (heap pressure)" in {
+    // Source string lives in scope; storing it into the enum field must incr,
+    // and tag-dispatch decr on scope exit must release the share.
+    runWithAlloc(
+      """enum E
+        |    OneStr(s: string)
+        |    Empty
+        |
+        |fill()
+        |    val s = "ab" + "cd"
+        |    val e = OneStr(s)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "enum variant with multiple string fields (heap pressure)" in {
+    runWithAlloc(
+      """enum E
+        |    Two(a: string, b: string)
+        |    Empty
+        |
+        |fill()
+        |    val e = Two("a" + "1", "b" + "2")
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "enum variant with nested struct-with-string field (heap pressure)" in {
+    runWithAlloc(
+      """struct Holder
+        |    s: string
+        |
+        |enum E
+        |    Wrap(h: Holder)
+        |    Empty
+        |
+        |fill()
+        |    val e = Wrap(Holder("ab" + "cd"))
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "enum reassignment frees old variant strings (heap pressure)" in {
+    // Reassigning the enum local must decr the old active variant's strings
+    // before the new value's bytes overwrite the slot.
+    runWithAlloc(
+      """enum E
+        |    OneStr(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var e = OneStr("init" + "_v")
+        |    var i = 0
+        |    while i < 10
+        |        e = OneStr("iter" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "enum returned from function — string field survives" in {
+    runWithAlloc(
+      """enum E
+        |    Wrap(s: string)
+        |    Empty
+        |
+        |make() -> E = Wrap("hello" + "_world")
+        |
+        |main() -> int
+        |    val e = make()
+        |    e match
+        |        Wrap(s) -> if s == "hello_world" then 0 else 1
+        |        Empty -> 2
+        |""".stripMargin) shouldBe 0
+  }
+
+  "enum match correctly extracts string field" in {
+    runWithAlloc(
+      """enum E
+        |    OneStr(s: string)
+        |    Two(a: string, b: string)
+        |
+        |main() -> int
+        |    val e = Two("foo" + "1", "bar" + "2")
+        |    e match
+        |        OneStr(s) -> 1
+        |        Two(a, b) -> if a == "foo1" && b == "bar2" then 0 else 2
+        |""".stripMargin) shouldBe 0
+  }
+
+  "enum with no-string variant — no spurious decr (heap pressure)" in {
+    // Active variant is the no-string one; tag-dispatch must skip it cleanly
+    // (no walk, no decr). Borrowed string outside the enum still decrs normally.
+    runWithAlloc(
+      """enum E
+        |    OneStr(s: string)
+        |    Empty
+        |
+        |fill()
+        |    val s = "ab" + "cd"
+        |    val e = Empty
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "[N]Enum scope exit decrs each element (heap pressure)" in {
+    // Array of enums-with-strings: scope exit must walk every element via the
+    // tag-dispatch helper.
+    runWithAlloc(
+      """enum E
+        |    OneStr(s: string)
+        |    Empty
+        |
+        |fill()
+        |    var arr: [3]E
+        |    arr[0] = OneStr("a" + "_v")
+        |    arr[1] = OneStr("b" + "_v")
+        |    arr[2] = OneStr("c" + "_v")
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "&[]Enum scope exit decrs each element (heap pressure)" in {
+    // Heap slice of enums-with-strings: per-elem deinit synthesized for the
+    // enum element type, and that deinit must run tag-dispatch decr per element.
+    runWithAlloc(
+      """enum E
+        |    OneStr(s: string)
+        |    Empty
+        |
+        |fill()
+        |    val arr = new [3]E
+        |    arr[0] = OneStr("a" + "_v")
+        |    arr[1] = OneStr("b" + "_v")
+        |    arr[2] = OneStr("c" + "_v")
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "enum scope-exit asm reads tag and chains compares" in {
+    // Sanity check on emitted shape: tag load (ldw) + per-variant compare (bne).
+    val asm = compile(
+      """enum E
+        |    OneStr(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    val e = OneStr("ab" + "cd")
+        |    0
+        |""".stripMargin)
+    asm should include("ldw r3")     // tag load in emitEnumStringFieldsRC
+    asm should include regex """bne r3, r4, .*enum_rc_next""" // per-variant compare
+  }
 }

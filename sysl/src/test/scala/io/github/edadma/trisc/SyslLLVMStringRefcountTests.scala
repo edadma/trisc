@@ -991,4 +991,190 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
         |    0
         |""".stripMargin) shouldBe 0
   }
+
+  // ====================================================================
+  // 13. Enum-with-string variant rc (tag-dispatch decr on scope exit)
+  // ====================================================================
+
+  "enum scope-exit IR loads tag and chains compares" in {
+    val ir = compileLLVM(
+      """enum E
+        |    OneStr(s: string)
+        |    Empty
+        |
+        |fill()
+        |    val e = OneStr("ab" + "cd")
+        |
+        |main() -> int
+        |    fill()
+        |    0
+        |""".stripMargin)
+    // Tag load (i32) appears in fill's scope-cleanup path
+    ir should include regex """%\S+ = load i32, i32\* %\S+"""
+    // Per-variant compare against tag value
+    ir should include regex """icmp eq i32 %\S+, 0"""
+  }
+
+  "&[]Enum slice deinit synthesized" in {
+    val ir = compileLLVM(
+      """enum E
+        |    OneStr(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    val arr = new [2]E
+        |    arr[0] = OneStr("ab" + "cd")
+        |    arr[1] = OneStr("ef" + "gh")
+        |    0
+        |""".stripMargin)
+    // Per-elem deinit fn synthesized for the enum element type
+    ir should include("define i32 @__slice_deinit_enum_E(i8* %data)")
+  }
+
+  "enum variant with string field — scope exit (functional)" in {
+    llvmExit(
+      """enum E
+        |    OneStr(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    val e = OneStr("ab" + "cd")
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "enum variant with borrowed-string field — incr+decr balance" in {
+    llvmExit(
+      """enum E
+        |    OneStr(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    val s = "ab" + "cd"
+        |    val e = OneStr(s)
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "enum variant with multiple string fields" in {
+    llvmExit(
+      """enum E
+        |    Two(a: string, b: string)
+        |    Empty
+        |
+        |main() -> int
+        |    val e = Two("foo" + "1", "bar" + "2")
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "enum variant with nested struct-with-string field" in {
+    llvmExit(
+      """struct Holder
+        |    s: string
+        |
+        |enum E
+        |    Wrap(h: Holder)
+        |    Empty
+        |
+        |main() -> int
+        |    val e = Wrap(Holder("ab" + "cd"))
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "enum reassignment frees old variant strings" in {
+    llvmExit(
+      """enum E
+        |    OneStr(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var e = OneStr("init" + "_v")
+        |    var i = 0
+        |    while i < 10
+        |        e = OneStr("iter" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "enum returned from function — string field survives" in {
+    llvmExit(
+      """enum E
+        |    Wrap(s: string)
+        |    Empty
+        |
+        |make() -> E = Wrap("hello" + "_world")
+        |
+        |main() -> int
+        |    val e = make()
+        |    e match
+        |        Wrap(s) -> if s == "hello_world" then 0 else 1
+        |        Empty -> 2
+        |""".stripMargin) shouldBe 0
+  }
+
+  "enum match correctly extracts string field" in {
+    llvmExit(
+      """enum E
+        |    OneStr(s: string)
+        |    Two(a: string, b: string)
+        |
+        |main() -> int
+        |    val e = Two("foo" + "1", "bar" + "2")
+        |    e match
+        |        OneStr(s) -> 1
+        |        Two(a, b) -> if a == "foo1" && b == "bar2" then 0 else 2
+        |""".stripMargin) shouldBe 0
+  }
+
+  "enum with no-string variant — no spurious decr" in {
+    llvmExit(
+      """enum E
+        |    OneStr(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    val s = "ab" + "cd"
+        |    val e = Empty
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "[N]Enum scope exit decrs each element" in {
+    llvmExit(
+      """enum E
+        |    OneStr(s: string)
+        |    Empty
+        |
+        |fill()
+        |    var arr: [3]E
+        |    arr[0] = OneStr("a" + "_v")
+        |    arr[1] = OneStr("b" + "_v")
+        |    arr[2] = OneStr("c" + "_v")
+        |
+        |main() -> int
+        |    fill()
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "&[]Enum scope exit decrs each element" in {
+    llvmExit(
+      """enum E
+        |    OneStr(s: string)
+        |    Empty
+        |
+        |fill()
+        |    val arr = new [3]E
+        |    arr[0] = OneStr("a" + "_v")
+        |    arr[1] = OneStr("b" + "_v")
+        |    arr[2] = OneStr("c" + "_v")
+        |
+        |main() -> int
+        |    fill()
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
 }
