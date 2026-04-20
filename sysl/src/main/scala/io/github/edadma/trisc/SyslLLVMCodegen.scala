@@ -298,6 +298,21 @@ class SyslLLVMCodegen(target: String = "host"):
     emit("}")
     emit("")
 
+    // Built-in range-check failure helper: write "range check failed: <alias>\n" to stderr, abort.
+    emit("@.str.range_prefix = private unnamed_addr constant [21 x i8] c\"range check failed: \\00\"")
+    emit("")
+    emit("define void @__range_fail(i8* %name, i64 %len) {")
+    emit("entry:")
+    emit("  %prefix = getelementptr [21 x i8], [21 x i8]* @.str.range_prefix, i32 0, i32 0")
+    emit("  %w1 = call i64 @write(i32 2, i8* %prefix, i64 20)")
+    emit("  %w2 = call i64 @write(i32 2, i8* %name, i64 %len)")
+    emit("  %nl = getelementptr [1 x i8], [1 x i8]* @.str.newline, i32 0, i32 0")
+    emit("  %w3 = call i64 @write(i32 2, i8* %nl, i64 1)")
+    emit("  call void @abort()")
+    emit("  unreachable")
+    emit("}")
+    emit("")
+
     // Built-in assert function: if !cond then panic(msg)
     emit("@.str.assert_prefix = private unnamed_addr constant [19 x i8] c\"assertion failed: \\00\"")
     emit("")
@@ -2766,6 +2781,45 @@ class SyslLLVMCodegen(target: String = "host"):
             // Fallback: treat as TStr
             genExpr(TStr(inner))
 
+      case TRangeCheck(inner, range, aliasName, targetType) =>
+        val v = genExpr(inner)
+        val innerLt = llvmType(inner.typ)
+        val targetLt = llvmType(targetType)
+        val lowOk = newReg()
+        val highOk = newReg()
+        val ok = newReg()
+        val failLbl = s"range_fail_${labelCounter}"
+        val passLbl = s"range_pass_${labelCounter}"
+        labelCounter += 1
+        val isFloat = inner.typ.underlying.isFloat
+        val isUnsigned = inner.typ.underlying.isUnsigned
+        // Format numeric bound as an LLVM literal (decimal for int, hex for double)
+        def intLit(n: Long): String = n.toString
+        def floatLit(d: Double): String = s"0x${java.lang.Double.doubleToRawLongBits(d).toHexString.toUpperCase}"
+        range match
+          case IntRange(lo, hi, excl) =>
+            val (low, high) = (intLit(lo), intLit(hi))
+            val (lowOp, highOp) =
+              if isUnsigned then ("uge", if excl then "ult" else "ule")
+              else ("sge", if excl then "slt" else "sle")
+            emit(s"  $lowOk = icmp $lowOp $innerLt $v, $low")
+            emit(s"  $highOk = icmp $highOp $innerLt $v, $high")
+          case FloatRange(lo, hi, excl) =>
+            val (low, high) = (floatLit(lo), floatLit(hi))
+            emit(s"  $lowOk = fcmp oge $innerLt $v, $low")
+            emit(s"  $highOk = fcmp ${if excl then "olt" else "ole"} $innerLt $v, $high")
+        emit(s"  $ok = and i1 $lowOk, $highOk")
+        emit(s"  br i1 $ok, label %$passLbl, label %$failLbl")
+        emit(s"$failLbl:")
+        val (nameLbl, nameLen) = internCString(aliasName)
+        emit(s"  %${failLbl}_name = getelementptr [$nameLen x i8], [$nameLen x i8]* $nameLbl, i32 0, i32 0")
+        emit(s"  call void @__range_fail(i8* %${failLbl}_name, i64 ${nameLen - 1})")
+        emit(s"  unreachable")
+        emit(s"$passLbl:")
+        currentBlock = passLbl
+        // Value passes through — relabel to target if needed (NamedType is same LLVM type as base)
+        v
+
       case TCast(inner, targetType) =>
         val v = genExpr(inner)
         val fromLt = llvmType(inner.typ)
@@ -3131,6 +3185,8 @@ class SyslLLVMCodegen(target: String = "host"):
     case SyslType.PtrType(_) => "i8*"
     case SyslType.RefType(_) => "i8*"
     case _: SyslType.FuncType => "%struct.closure"
+    // Named/derived types are erased to their base at the LLVM layer.
+    case SyslType.NamedType(_, base, _, _) => llvmType(base)
     case _ => "i64"
 
   // LLVM-side size in bytes (may differ from Sysl's sizeOf for types like strings)
@@ -3174,11 +3230,13 @@ class SyslLLVMCodegen(target: String = "host"):
       val resolved = canonicalStruct(SyslType.StructType(name, fields))
       if resolved.fields.isEmpty then 1 else resolved.fields.map((_, ft) => llvmAlignOf(ft)).max
     case SyslType.ArrayType(elem, _) => llvmAlignOf(elem)
+    case SyslType.NamedType(_, base, _, _) => llvmAlignOf(base)
     case _ => 8
 
   // Types that are passed by pointer (alloca) rather than by value
   private def isAggregate(t: SyslType): Boolean = t match
     case _: SyslType.StructType | _: SyslType.ArrayType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | SyslType.StringType => true
+    case SyslType.NamedType(_, base, _, _) => isAggregate(base)
     case _ => false
 
   // ===== Refcounting helpers =====

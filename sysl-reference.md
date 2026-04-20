@@ -240,7 +240,44 @@ enum Tree
 
 **Memory layout:** `{tag: i32, padding, data: union of variant fields}`. The tag is a small integer (0, 1, 2...) identifying the variant. Data is overlapping storage sized to the largest variant. `sizeof(Shape)` returns the total size including tag and padding.
 
+### Type Declarations
+
+Two orthogonal modifiers compose into four forms:
+
+```sysl
+type Callback = (int) -> int            // plain alias (transparent)
+type Age      = int within 0..150        // subtype: base-compatible, range-checked
+type Meters   = new f64                  // derived: nominally distinct, no cast mixing
+type SafeAge  = new int within 0..150    // derived + constrained
+```
+
+| Form                              | Base-compatible? | Range-checked? |
+|-----------------------------------|------------------|----------------|
+| `type A = B`                      | yes              | no             |
+| `type A = B within r`             | yes              | yes            |
+| `type A = new B`                  | no               | no             |
+| `type A = new B within r`         | no               | yes            |
+
+**Range syntax.** Bounds must be numeric literals (including `char`, which is `u32`); optional
+unary sign is allowed.
+
+| Syntax     | Meaning                     | Example                                     |
+|------------|-----------------------------|---------------------------------------------|
+| `lo..hi`   | Inclusive: `[lo, hi]`        | `type Age = int within 0..150`              |
+| `lo..<hi`  | Exclusive upper: `[lo, hi)`  | `type Prob = f64 within 0.0..<1.0`          |
+
+**Compatibility.** Subtypes (without `new`) are transparently compatible with their base; no
+cast is needed, and a runtime range check fires on each assignment, parameter bind, return, or
+explicit cast that produces a value of the constrained type. Derived types (with `new`) are
+nominally distinct from both their base and other derived types over the same base — mixing
+them with the base in arithmetic or assignment is a compile error; use an explicit cast
+(`Meters(3.0)` to wrap, `f64(m)` to unwrap). Arithmetic between two values of the same derived
+type yields that derived type. Out-of-range literal bounds are caught at compile time; any
+runtime violation traps.
+
 ### Type Aliases
+
+Plain aliases are the first form above — a transparent name for a type:
 
 ```sysl
 type IntPtr = *int

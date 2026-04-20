@@ -117,3 +117,6 @@ case class TInterfaceDispatch(ifaceVal: TExpr, methodIndex: Int, args: List[TExp
 }
 // Compiler intrinsic call (wrapping_add, saturating_add, etc.). Polymorphic per integer width.
 case class TIntrinsicCall(name: String, args: List[TExpr], typ: SyslType) extends TExpr
+// Runtime range check for `within` constrained types. Evaluates `expr`, traps if out of range,
+// returns the value typed as `typ` (typically the NamedType). `aliasName` is used for error text.
+case class TRangeCheck(expr: TExpr, range: TypeRange, aliasName: String, typ: SyslType) extends TExpr

@@ -292,7 +292,9 @@ class SyslTriscCodegen(addresses: Int = 4):
     case _ => None
 
   // Does this return type require a caller-allocated return slot?
-  private def returnsViaPointer(typ: SyslType): Boolean = typ.isInstanceOf[SyslType.StructType] || typ == SyslType.StringType || typ.isInstanceOf[SyslType.SliceType] || typ.isInstanceOf[SyslType.EnumType] || typ.isInstanceOf[SyslType.FuncType] || typ.isInstanceOf[SyslType.InterfaceType]
+  private def returnsViaPointer(typ0: SyslType): Boolean =
+    val typ = typ0.underlying
+    typ.isInstanceOf[SyslType.StructType] || typ == SyslType.StringType || typ.isInstanceOf[SyslType.SliceType] || typ.isInstanceOf[SyslType.EnumType] || typ.isInstanceOf[SyslType.FuncType] || typ.isInstanceOf[SyslType.InterfaceType]
 
   // Size of a type on the stack in bytes, rounded up to alignment
   private def stackSize(typ: SyslType): Int =
@@ -300,8 +302,8 @@ class SyslTriscCodegen(addresses: Int = 4):
     val align = stackAlign(typ)
     ((raw + align - 1) / align) * align
 
-  // Natural alignment for a type
-  private def stackAlign(typ: SyslType): Int = typ match
+  // Natural alignment for a type. NamedType (derived/constrained) delegates to its base.
+  private def stackAlign(typ: SyslType): Int = typ.underlying match
     case SyslType.IntType(w) => (w / 8).min(8)
     case SyslType.UIntType(w) => (w / 8).min(8)
     case SyslType.BoolType => 1
@@ -346,7 +348,7 @@ class SyslTriscCodegen(addresses: Int = 4):
   // so no explicit sext is needed for signed types.
   // For unsigned types, load + zero-extend to clear sign-extended bits.
   private def emitLoad(destReg: Int, addrReg: Int, typ: SyslType): Unit =
-    typ match
+    typ.underlying match
       case SyslType.IntType(8) | SyslType.BoolType =>
         emit(s"  ldb r$destReg, r$addrReg, r0")
       case SyslType.IntType(16) =>
@@ -374,7 +376,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   // Emit store from rSrc to [rBase + 0], using width-appropriate instruction
   private def emitStore(srcReg: Int, addrReg: Int, typ: SyslType): Unit =
-    typ match
+    typ.underlying match
       case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType =>
         emit(s"  stb r$srcReg, r$addrReg, r0")
       case SyslType.IntType(16) | SyslType.UIntType(16) =>
@@ -2574,6 +2576,49 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitNarrow(3, typ)
           emit(s"  movi r2, $name")
           emitStore(3, 2, typ)
+
+      case TRangeCheck(inner, range, _, _) =>
+        genExpr(inner) // value in r1
+        val failLbl = newLabel("range_fail")
+        val passLbl = newLabel("range_pass")
+        val isFloat = inner.typ.underlying.isFloat
+        val isUnsigned = inner.typ.underlying.isUnsigned
+        def loadImm(reg: Int, v: Long): Unit =
+          if v >= 0 && v <= 255 then emit(s"  ldi r$reg, $v")
+          else if v >= 0 && v <= 0xFFFFFFFFL then emit(s"  movi r$reg, $v")
+          else emit(s"  ldc r$reg, $v")
+        range match
+          case IntRange(lo, hi, excl) =>
+            // low bound check: fail if val < lo
+            loadImm(2, lo)
+            emit(s"  ${if isUnsigned then "sltu" else "slt"} r3, r1, r2") // r3 = (val < lo)
+            emit(s"  bne r3, r0, $failLbl")
+            // high bound check
+            loadImm(2, hi)
+            if excl then
+              // exclusive: fail if !(val < hi)
+              emit(s"  ${if isUnsigned then "sltu" else "slt"} r3, r1, r2") // r3 = (val < hi)
+              emit(s"  beq r3, r0, $failLbl")
+            else
+              // inclusive: fail if hi < val
+              emit(s"  ${if isUnsigned then "sltu" else "slt"} r3, r2, r1") // r3 = (hi < val)
+              emit(s"  bne r3, r0, $failLbl")
+          case FloatRange(lo, hi, excl) =>
+            emit(s"  ldc r2, $lo")
+            emit(s"  fslt r3, r1, r2") // r3 = (val < lo)
+            emit(s"  bne r3, r0, $failLbl")
+            emit(s"  ldc r2, $hi")
+            if excl then
+              emit(s"  fslt r3, r1, r2")
+              emit(s"  beq r3, r0, $failLbl")
+            else
+              emit(s"  fslt r3, r2, r1")
+              emit(s"  bne r3, r0, $failLbl")
+        emit(s"  bra $passLbl")
+        emit(s"$failLbl:")
+        emit("  ldi r1, 5")  // error code: range check
+        emit("  trap 1")
+        emit(s"$passLbl:")
 
       case TCast(TStringLit(value, _), target) if target.isInstanceOf[SyslType.PtrType] =>
         // String literal → *i8 decay: emit data pointer directly, no fat pointer needed

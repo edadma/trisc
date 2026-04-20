@@ -445,6 +445,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case SyslType.RefType(inner) =>
       // Uninitialized ref cell — represented as null-ish placeholder
       zeroValueForType(SyslType.PtrType(inner), env)
+    case SyslType.NamedType(_, base, _, _) => zeroValueForType(base, env)
 
   private def exec(stmt: TStmt, env: Env): Unit =
     stmt match
@@ -993,10 +994,24 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case _   => throw RuntimeError(s"unknown unary operator: $op")
             IntVal(truncateNarrow(raw, resultType))
 
+      case TRangeCheck(inner, range, aliasName, _) =>
+        val v = evalAny(inner, env)
+        import SyslType.*
+        range match
+          case IntRange(lo, hi, excl) =>
+            val n = toLong(v)
+            val ok = if excl then n >= lo && n < hi else n >= lo && n <= hi
+            if !ok then throw RuntimeError(s"range check failed: $aliasName (value $n out of range ${lo}..${if excl then "<" else ""}${hi})")
+          case FloatRange(lo, hi, excl) =>
+            val d = toDouble(v)
+            val ok = if excl then d >= lo && d < hi else d >= lo && d <= hi
+            if !ok then throw RuntimeError(s"range check failed: $aliasName (value $d out of range ${lo}..${if excl then "<" else ""}${hi})")
+        v
+
       case TCast(inner, target) =>
         val v = evalAny(inner, env)
         import SyslType.*
-        target match
+        target.underlying match
           case FloatType(32) => FloatVal(toDouble(v).toFloat.toDouble)  // narrow to f32 precision
           case FloatType(64) => FloatVal(toDouble(v))
           case _: FloatType  => FloatVal(toDouble(v))

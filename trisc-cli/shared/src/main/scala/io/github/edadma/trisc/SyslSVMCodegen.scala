@@ -626,6 +626,44 @@ class SyslSVMCodegen:
       genExpr(operand)
       emit("  not")
 
+    case TRangeCheck(inner, range, _, _) =>
+      genExpr(inner) // stack: [val]
+      val failLbl = newLabel("range_fail")
+      val passLbl = newLabel("range_pass")
+      val u = inner.typ.underlying.isUnsigned
+      val f = inner.typ.underlying.isFloat
+      def pushNum(n: Any): Unit = n match
+        case v: Long => emitPushInt(v)
+        case v: Double =>
+          val bits = java.lang.Double.doubleToRawLongBits(v)
+          emit(s"  push_i64 $bits")
+      def geOp(): String = if f then "fge" else if u then "geu" else "ge"
+      def ltOp(): String = if f then "flt" else if u then "ltu" else "lt"
+      def leOp(): String = if f then "fle" else if u then "leu" else "le"
+      range match
+        case IntRange(lo, hi, excl) =>
+          emit("  dup")
+          pushNum(lo)
+          emit(s"  ${geOp()}")
+          emit(s"  jumpz $failLbl")
+          emit("  dup")
+          pushNum(hi)
+          emit(s"  ${if excl then ltOp() else leOp()}")
+          emit(s"  jumpz $failLbl")
+        case FloatRange(lo, hi, excl) =>
+          emit("  dup")
+          pushNum(lo)
+          emit(s"  ${geOp()}")
+          emit(s"  jumpz $failLbl")
+          emit("  dup")
+          pushNum(hi)
+          emit(s"  ${if excl then ltOp() else leOp()}")
+          emit(s"  jumpz $failLbl")
+      emit(s"  jump $passLbl")
+      emit(s"$failLbl:")
+      emit("  halt")
+      emit(s"$passLbl:")
+
     case TCast(inner, target) =>
       genExpr(inner)
       emitCast(inner.typ, target)
