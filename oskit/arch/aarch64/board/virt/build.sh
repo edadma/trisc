@@ -86,6 +86,16 @@ if [ ! -f "$OUT/bin/$USER_PROG.bin" ]; then
     exit 1
 fi
 
+echo "=== Build ramdisk apps (login, nsh) ==="
+for app in login nsh; do
+    bash "$ARCH_DIR/build_prog.sh" "$app" > "$OUT/build-$app.log" 2>&1
+    if [ ! -f "$OUT/bin/$app" ]; then
+        echo "  $app build failed:" >&2
+        tail -10 "$OUT/build-$app.log" >&2
+        exit 1
+    fi
+done
+
 echo "=== Build servers ==="
 for srv in rs disk tfs tty pm vfs ds init; do
     bash "$ARCH_DIR/build_servers.sh" "$srv" > "$OUT/build-$srv.log" 2>&1

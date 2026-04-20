@@ -35,6 +35,20 @@ build_one() {
         std/alloc/alloc.lsysl
     )
 
+    # Per-program extra dependencies (mirror oskit/arch/x86_64/build_prog.sh)
+    case "$NAME" in
+        login|su)
+            SYSL_FILES+=(
+                std/crypto/pbkdf2/pbkdf2.lsysl
+                std/crypto/hmac/hmac.lsysl
+                std/crypto/sha256/sha256.lsysl
+                std/encoding/binary/binary.lsysl
+                std/mem/mem.lsysl
+                std/debug/debug.lsysl
+            )
+            ;;
+    esac
+
     cd "$REPO_ROOT"
     sbt "syslCliJVM/run compile --emit llvm --target=aarch64-elf ${SYSL_FILES[*]} -o $OUT/prog_${NAME}.ll" > /tmp/sbt-aa-prog-${NAME}.log 2>&1
     if ! grep -q "success" "/tmp/sbt-aa-prog-${NAME}.log"; then
@@ -54,7 +68,11 @@ build_one() {
     aarch64-elf-gcc -ffreestanding -nostdlib \
         -fno-pic -fno-pie -c -o "$OUT/prog_stubs.o" "$ARCH_DIR/prog_stubs.c"
 
+    # -z max-page-size=0x1000 drops aarch64-elf-ld's default 64KB page
+    # alignment, which otherwise leaves ~60KB of padding before .text
+    # in the output ELF and blows past the loader's LOAD_CROSS_BUF_SIZE.
     aarch64-elf-ld -T "$ARCH_DIR/prog.ld" \
+        -z max-page-size=0x1000 \
         -o "$BIN_OUT/${NAME}" \
         "$OUT/prog_start.o" "$OUT/prog_stubs.o" "$OUT/prog_${NAME}.o" 2>&1 \
         | grep -v "missing .note.GNU-stack" \

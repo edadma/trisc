@@ -10,9 +10,13 @@ TX-FIFO-full flag in `UARTFR` and stuff bytes into `UARTDR`.
 
 PL011 register addresses.
 
-    val UART0_DR: i64 = 0x09000000
-    val UART0_FR: i64 = 0x09000018
-    val UARTFR_TXFF = 0x20
+    val UART0_DR:   i64 = 0x09000000
+    val UART0_FR:   i64 = 0x09000018
+    val UART0_IMSC: i64 = 0x09000038  // interrupt mask set/clear
+    val UART0_ICR:  i64 = 0x09000044  // interrupt clear
+    val UARTFR_TXFF = 0x20            // bit 5: TX FIFO full
+    val UARTFR_RXFE = 0x10            // bit 4: RX FIFO empty
+    val UART_RXIM   = 0x10            // IMSC bit 4: receive interrupt mask
 
 Write one byte to the data register, waiting for the TX FIFO to
 drain first. `volatile` on the flag pointer keeps the read from
@@ -37,3 +41,32 @@ for terminal emulators that expect carriage returns.
             if ch == 10
                 uart_putc(13)
             uart_putc(ch)
+
+Poll the RX FIFO. Returns 1 if empty (no data available), 0 if
+a byte can be read. Used by the IRQ handler to drain all pending
+characters when a receive interrupt fires.
+
+    uart_rx_empty() -> int
+        volatile var fr: *i32 = *i32(UART0_FR)
+        (int(*fr) & UARTFR_RXFE) >> 4
+
+Read one byte from the RX FIFO. Caller must check `uart_rx_empty()`
+first; reading an empty FIFO returns stale data.
+
+    uart_rx_read() -> int
+        var dr: *i32 = *i32(UART0_DR)
+        int(*dr) & 0xFF
+
+Enable the receive interrupt — the GIC needs to have IRQ 33 (SPI 1)
+enabled separately. Call once during init after the GIC is live.
+
+    uart_enable_rx_irq()
+        var imsc: *i32 = *i32(UART0_IMSC)
+        *imsc = i32(UART_RXIM)
+
+Acknowledge the RX interrupt by clearing the RXIC bit. Call at the
+end of the IRQ handler; the GIC EOI still has to be written too.
+
+    uart_ack_rx_irq()
+        var icr: *i32 = *i32(UART0_ICR)
+        *icr = i32(UART_RXIM)

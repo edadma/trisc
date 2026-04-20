@@ -491,7 +491,7 @@ Load a binary file into a different address space. Reads the
 file via VFS, detects format from magic bytes (ELF or TRB),
 and copies segments into the target address space.
 
-    val LOAD_CROSS_BUF_SIZE = 81920
+    val LOAD_CROSS_BUF_SIZE = 262144
 
     load_tof_to_ptbr(path: string, dst_ptbr: i64) -> i64
         val fid = fs_open(path)

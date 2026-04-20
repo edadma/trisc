@@ -31,7 +31,8 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         kernel_stack_usp, kernel_stack_ssp, schedule,
         syscall_table, syscall_ssp_set, syscall_check_allowed,
         create_process_suspended, resume_process,
-        register_syscall, syscall_return}
+        register_syscall, syscall_return,
+        kb_enqueue, kb_notify_tid, notify_send}
     import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
         ipc_send, ipc_recv, ipc_reply}
     import oskit.services.{get_thread_count, uptime, sleep, yield}
@@ -57,26 +58,40 @@ Render `v` as a 16-digit hex number (prefixed `0x`) to the UART.
 GICv2 programming — QEMU virt wires the distributor at 0x08000000
 and the per-CPU CPU interface at 0x08010000.
 
-    val GICD_CTLR:       u64 = u64(0x08000000)
-    val GICD_ISENABLER0: u64 = u64(0x08000100)
-    val GICD_IPRIORITYR: u64 = u64(0x08000400)
-    val GICC_CTLR:       u64 = u64(0x08010000)
-    val GICC_PMR:        u64 = u64(0x08010004)
-    val GICC_IAR:        u64 = u64(0x0801000C)
-    val GICC_EOIR:       u64 = u64(0x08010010)
-    val IRQ_TIMER: int = 30
+    val GICD_CTLR:        u64 = u64(0x08000000)
+    val GICD_ISENABLER0:  u64 = u64(0x08000100)
+    val GICD_ISENABLER1:  u64 = u64(0x08000104)  // SPIs 32..63
+    val GICD_IPRIORITYR:  u64 = u64(0x08000400)  // 1 byte per IRQ
+    val GICD_ITARGETSR:   u64 = u64(0x08000800)  // 1 byte per IRQ (SPIs only)
+    val GICC_CTLR:        u64 = u64(0x08010000)
+    val GICC_PMR:         u64 = u64(0x08010004)
+    val GICC_IAR:         u64 = u64(0x0801000C)
+    val GICC_EOIR:        u64 = u64(0x08010010)
+    val IRQ_TIMER: int = 30                // EL1 phys timer (PPI 14)
+    val IRQ_UART:  int = 33                // PL011 on QEMU virt (SPI 1)
 
     gic_init()
         var dctl: *i32 = *i32(GICD_CTLR)
         *dctl = i32(1)
-        var isen: *i32 = *i32(GICD_ISENABLER0)
-        *isen = i32(0x40000000)
-        var prio: *byte = *byte(GICD_IPRIORITYR + u64(30))
-        *prio = byte(0xA0)
+        // Enable IRQ 30 (timer, PPI) in ISENABLER0.
+        var isen0: *i32 = *i32(GICD_ISENABLER0)
+        *isen0 = i32(0x40000000)
+        var prio_timer: *byte = *byte(GICD_IPRIORITYR + u64(IRQ_TIMER))
+        *prio_timer = byte(0xA0)
+        // Enable IRQ 33 (PL011, SPI 1) in ISENABLER1, route to CPU 0,
+        // priority 0xA0 matching the timer.
+        var isen1: *i32 = *i32(GICD_ISENABLER1)
+        *isen1 = i32(1 << 1)               // bit 1 = IRQ 33
+        var prio_uart: *byte = *byte(GICD_IPRIORITYR + u64(IRQ_UART))
+        *prio_uart = byte(0xA0)
+        var target_uart: *byte = *byte(GICD_ITARGETSR + u64(IRQ_UART))
+        *target_uart = byte(1)             // CPU 0
         var pmr: *i32 = *i32(GICC_PMR)
         *pmr = i32(0xFF)
         var cctl: *i32 = *i32(GICC_CTLR)
         *cctl = i32(1)
+        // Unmask PL011 RX at the UART itself.
+        uart_enable_rx_irq()
 
     gic_ack() -> int
         var iarp: *i32 = *i32(GICC_IAR)
@@ -85,6 +100,24 @@ and the per-CPU CPU interface at 0x08010000.
     gic_eoi(irq: int)
         var eoip: *i32 = *i32(GICC_EOIR)
         *eoip = i32(irq)
+
+Serial RX handler. Drains all pending PL011 bytes into the kernel's
+keyboard buffer as raw-ASCII events (bit 17 = raw flag, bit 16 =
+press flag, bits 31..24 = ASCII), matching x86 runtime.lsysl's
+serial_handler format. TTY server's tty_process_keyboard picks
+them up via kbhit/getkey and skips scancode translation on the
+raw-ASCII path. Acks the PL011 interrupt before GIC EOI.
+
+    serial_handler()
+        var got = 0
+        while uart_rx_empty() == 0
+            val ch = uart_rx_read()
+            kb_enqueue((ch << 24) | 0x30000)   // raw(17) | press(16)
+            got = 1
+        uart_ack_rx_irq()
+        if got == 1
+            if kb_notify_tid >= 0
+                notify_send(kb_notify_tid, 1)
 
     timer_init_periodic(interval_ticks: u64)
         cntp_tval_set(interval_ticks)
@@ -155,6 +188,8 @@ scheduler pass and the kernel threads themselves produce output.
                 uart_puthex(u64(tick_count))
                 uart_puts("]\n")
             cntp_tval_set(cntfrq_el0() / u64(5))
+        else if irq == IRQ_UART
+            serial_handler()
         gic_eoi(irq)
 
 Scheduler hook. Five shapes:
@@ -174,7 +209,16 @@ so the VM halts cleanly (or waits for an interrupt in richer setups).
         if DEMO_MODE == 0 || DEMO_MODE == 3 || DEMO_MODE == 4 || DEMO_MODE == 5
             val next = schedule(ssp)
             if next == i64(0)
-                uart_puts("[kern] idle — no ready threads, halting\n")
+                // No ready thread. Unmask interrupts before wfi so a
+                // pending IRQ (timer, PL011 RX) can wake us. The IRQ
+                // handler runs recursively, runs schedule() again,
+                // finds a ready thread (e.g. tty unblocked by
+                // kb_notify_tid), and does arch_resume_process —
+                // never returning through this loop. The outer frame
+                // leaks a few hundred bytes on the last-active thread's
+                // kernel stack, which is harmless since that thread
+                // always resumes via its own saved ssp.
+                arch_sti()
                 while true
                     arch_wfi()
             return next
