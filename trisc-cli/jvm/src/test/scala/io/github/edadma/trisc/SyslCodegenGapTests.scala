@@ -880,6 +880,7 @@ class SyslCodegenGapTests extends AnyFreeSpec with Matchers {
           |    val p = _ptr
           |    _ptr = _ptr + size
           |    p
+          |free(p: *byte) -> i32 = 0
           |""".stripMargin,
       "main" ->
         """apply(f: (int) -> int, x: int) -> int = f(x)

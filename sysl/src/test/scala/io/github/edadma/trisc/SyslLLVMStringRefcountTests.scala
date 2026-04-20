@@ -1177,4 +1177,133 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
         |    0
         |""".stripMargin) shouldBe 0
   }
+
+  // ====================================================================
+  // 12. Closures capturing strings — env rc bracketing
+  // ====================================================================
+
+  "closure with single string capture: scope exit releases env" in {
+    llvmExit(
+      """fill()
+        |    val s = "abc" + "_v"
+        |    val f = (x: int) -> x + len(s)
+        |    val r = f(0)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "closure constructed but body never called: still releases env" in {
+    llvmExit(
+      """fill()
+        |    val s = "ab" + "cd"
+        |    val f = (x: int) -> x + len(s)
+        |    // f is never called
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "closure with multiple string captures" in {
+    llvmExit(
+      """fill()
+        |    val a = "x" + "y"
+        |    val b = "p" + "q"
+        |    val f = (n: int) -> n + len(a) + len(b)
+        |    val r = f(1)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "closure body uses captured string (computed result is correct)" in {
+    llvmExit(
+      """main() -> int
+        |    val s = "ab" + "cd"
+        |    val f = (n: int) -> n + len(s)
+        |    f(38)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "closure capturing struct-with-string field" in {
+    llvmExit(
+      """struct Wrap
+        |    s: string
+        |
+        |fill()
+        |    val w = Wrap("ab" + "cd")
+        |    val f = (n: int) -> n + len(w.s)
+        |    val r = f(1)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 50
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "closure used inside higher-order function (descriptor passed by value)" in {
+    llvmExit(
+      """apply(f: (int) -> int, x: int) -> int = f(x)
+        |
+        |fill()
+        |    val s = "ab" + "cd"
+        |    val r = apply(n -> n + len(s), 0)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "closure construction IR emits +16 byte env (rc + deinit_ptr) and dispatch decl" in {
+    val ir = compileLLVM(
+      """main()
+        |    val s = "abc" + "_v"
+        |    val f = (x: int) -> x + len(s)
+        |""".stripMargin)
+    // env malloc'd with envSize+16 (single 16-byte string capture → 16+16=32)
+    ir should include regex """call i8\* @malloc\(i64 32\)"""
+    // rc = 1 stored in header
+    ir should include regex """store i64 1, i64\*"""
+    // deinit_ptr cast (per-closure-id env deinit)
+    ir should include regex """bitcast i32 \(i8\*\)\* @__closure_env_deinit___closure_"""
+    // Dispatch shim is generated
+    ir should include("define i32 @__closure_env_dispatch")
+    // Per-closure-id deinit is generated
+    ir should include regex """define i32 @__closure_env_deinit___closure_"""
+  }
+
+  "closure with no rc-bearing captures: deinit_ptr is null (no per-id deinit)" in {
+    val ir = compileLLVM(
+      """main()
+        |    val a = 10
+        |    val f = (x: int) -> x + a
+        |""".stripMargin)
+    // Always heap, but deinit_ptr stored as null
+    ir should include("call i8* @malloc")
+    ir should include regex """store i8\* null, i8\*\*"""
+    // No per-id deinit registered
+    ir should not include "@__closure_env_deinit_"
+  }
 }

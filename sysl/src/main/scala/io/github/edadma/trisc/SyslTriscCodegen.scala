@@ -30,6 +30,14 @@ class SyslTriscCodegen(addresses: Int = 4):
   private var closureCounter = 0
   private val pendingClosures = new mutable.ListBuffer[(String, TClosure)]
 
+  // Per-closure-id env deinit functions to emit (only for closures whose captures carry rc content).
+  // Maps closure name → its TClosure (for capture layout). The deinit walks captures decr'ing each.
+  private val closureEnvDeinitsNeeded = new mutable.LinkedHashMap[String, TClosure]
+  // True if any closure has captures (need __closure_env_dispatch + needsFreeExtern)
+  private var closureEnvDispatchNeeded = false
+  // Borrowed-capture local names in a closure body (skip rc cleanup — env owns the buffers)
+  private var captureBorrows: Set[String] = Set.empty
+
   // Interface tables: (struct, interface) → itable label + method function names
   // Collected during genExpr when TInterfaceBox is encountered, emitted in rodata
   private val itables = new mutable.LinkedHashMap[String, List[String]] // itable label → list of function names
@@ -90,6 +98,8 @@ class SyslTriscCodegen(addresses: Int = 4):
     // Emit code segment — functions
     emit("segment code")
     pendingClosures.clear()
+    closureEnvDeinitsNeeded.clear()
+    closureEnvDispatchNeeded = false
     closureCounter = 0
     for decl <- program.decls do
       decl match
@@ -112,6 +122,13 @@ class SyslTriscCodegen(addresses: Int = 4):
       for (name, elem) <- pending do
         emittedSliceDeinits += name
         emitSliceDeinit(name, elem)
+
+    // Emit per-closure-id env deinit functions (walk captures to decr rc content)
+    for (name, closure) <- closureEnvDeinitsNeeded do
+      emitClosureEnvDeinit(name, closure)
+
+    // Emit __closure_env_dispatch (loads runtime deinit_ptr from env-8 and calls it)
+    if closureEnvDispatchNeeded then emitClosureEnvDispatch()
 
     // Emit __str_int helper if needed (integer to string conversion)
     if needsStrInt then emitStrIntHelper()
@@ -212,6 +229,8 @@ class SyslTriscCodegen(addresses: Int = 4):
   private var refParams: mutable.LinkedHashMap[String, SyslType.RefType] = null // ref-typed params for cleanup
   /** String parameter names — borrowed from caller; do not decref in emitRefCleanup (caller incr/decr around the call). */
   private var stringBorrowParams: Set[String] = Set.empty
+  /** FuncType/InterfaceType parameter names — borrowed; caller still owns the descriptor's env. */
+  private var funcBorrowParams: Set[String] = Set.empty
   private var stackOffset: Int = 0
   private val savedScopes = new mutable.Stack[(Map[String, LocalVar], Int)]
   private val loopScopeOffsets = new mutable.Stack[Int]
@@ -224,7 +243,9 @@ class SyslTriscCodegen(addresses: Int = 4):
     // Decrement refcounts for ref-typed and string locals leaving scope
     // Skip params (positive offsets) — they are borrowed, not owned
     for (name, local) <- locals if !savedLocals.contains(name) && local.offset < 0 do
-      local.typ match
+      // Captured-into-body locals are borrowed; env owns the buffers.
+      if captureBorrows.contains(name) then ()
+      else local.typ match
         case rt: SyslType.RefType =>
           val hoff = refHeaderOffset(rt)
           emit("  pshd r1")
@@ -259,6 +280,8 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitValueRC(5, local.offset, local.typ, incr = false)
         case et: SyslType.EnumType if structHasStringFields(et) =>
           emitEnumStringFieldsRC(5, local.offset, et, incr = false)
+        case _: SyslType.FuncType if needsAllocExtern && !funcBorrowParams.contains(name) =>
+          emitClosureDescrDecr(5, local.offset)
         case _ =>
     locals.clear()
     locals ++= savedLocals
@@ -526,7 +549,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TBinary(_, "+", _, SyslType.StringType) => true
       case _: TStringFromPtr | _: TStringFromSlice | _: TStr | _: TFmtStr => true
       case _: TNew | _: TNewArray | _: TNewEnum => true
-      case TClosure(_, _, body, _, escapes) => escapes || (body match
+      case TClosure(_, _, body, captures, _) => captures.nonEmpty || (body match
         case TExprBody(ex) => scanE(ex)
         case TBlockBody(ss) => ss.exists(scanS))
       case TBinary(l, _, r, _) => scanE(l) || scanE(r)
@@ -729,6 +752,96 @@ class SyslTriscCodegen(addresses: Int = 4):
     emit("  popd r6")
     emit("  jalr r0, r6")
 
+  /** Closure env layout (heap):
+    *   [rc:8 @ base+0 | deinit_ptr:8 @ base+8 | capture_data...]
+    *   env_ptr = base + 16
+    * So env_ptr-16 is &rc and base for free; env_ptr-8 is &deinit_ptr.
+    *
+    * __closure_env_dispatch: thin shim called when env's rc hits zero. Loads
+    * the runtime deinit_ptr from env_ptr-8 and tail-calls it. Lets emitRefDecr
+    * handle envs uniformly (one named deinit) without per-closure-id static
+    * deinit linkage on the call site. r1 = env_ptr (data ptr) on entry.
+    */
+  private def emitClosureEnvDispatch(): Unit =
+    emit("# closure env dispatch (loads deinit_ptr from env-8 and calls it)")
+    emit("global __closure_env_dispatch, func, 1 i64 i64")
+    emit("__closure_env_dispatch:")
+    val noCall = newLabel("dispatch_no_call")
+    emit("  pshd r6")                  // save caller's return addr
+    emit("  addi r3, r1, -8")
+    emit("  ldd r3, r3, r0")           // r3 = deinit_ptr
+    emit(s"  beq r3, r0, $noCall")
+    emit("  jalr r6, r3")              // call deinit(env_ptr); r1 already env_ptr
+    emit(s"$noCall")
+    emit("  popd r6")
+    emit("  jalr r0, r6")
+
+  /** Per-closure-id env deinit: walks the closure's captures (known layout) and
+    * decr's any rc-bearing entry via emitValueRC. r1 = env_ptr (data ptr; env-8
+    * may still hold this fn's address — irrelevant). Only registered for
+    * closures with at least one rc-bearing capture; closures with none use
+    * deinit_ptr=null and the dispatch shim no-ops.
+    *
+    * env_ptr is saved at fp-8 and reloaded into r2 BEFORE each per-capture
+    * emitValueRC call, because emitValueRC may transitively call free which
+    * clobbers r2 (caller-saved). Without the reload, the second capture's base
+    * address would be garbage, corrupting the heap.
+    */
+  private def emitClosureEnvDeinit(name: String, closure: TClosure): Unit =
+    emit(s"# closure env deinit: $name")
+    emit(s"global $name, func, 1 i64 i64")
+    emit(s"$name:")
+    emit("  pshd r6")
+    emit("  pshd r5")
+    emit("  mov r5, r7")
+    emit("  pshd r1")                  // save env_ptr at fp-8 (r5-8)
+    var envOffset = 0
+    for (_, capType) <- closure.captures do
+      if structHasStringFields(capType) then
+        emitAddImm(2, 5, -8)            // r2 = &saved env_ptr
+        emit("  ldd r2, r2, r0")        // r2 = env_ptr
+        emitValueRC(2, envOffset, capType, incr = false)
+      envOffset += stackSize(capType).toInt
+    emit("  mov r7, r5")
+    emit("  popd r5")
+    emit("  popd r6")
+    emit("  jalr r0, r6")
+
+  /** Register a per-closure-id env deinit if the closure has rc-bearing
+    * captures. Returns the deinit function name, or None if all captures are
+    * scalar/raw (no walk needed).
+    */
+  private def closureEnvDeinitFor(name: String, closure: TClosure): Option[String] =
+    val hasRcCaptures = closure.captures.exists((_, t) => structHasStringFields(t) || t.isInstanceOf[SyslType.RefType])
+    if !hasRcCaptures then None
+    else
+      val deinitName = s"__closure_env_deinit_$name"
+      closureEnvDeinitsNeeded(deinitName) = closure
+      Some(deinitName)
+
+  /** Decrement env's rc via the descriptor's env_ptr (offset +8 in descriptor).
+    * descrAddr is the descriptor's address (16 bytes: fp at +0, env_ptr at +8).
+    * Loads env_ptr; if non-null, calls emitRefDecr with headerOff=16 and the
+    * generic dispatch deinit.
+    */
+  private def emitClosureDescrDecr(descBaseReg: Int, descBaseOff: Int): Unit =
+    closureEnvDispatchNeeded = true
+    needsFreeExtern = true
+    emit("  pshd r1")
+    emitAddImm(1, descBaseReg, descBaseOff + 8)  // r1 = &env_ptr
+    emit("  ldd r1, r1, r0")                     // r1 = env_ptr
+    emitRefDecr(1, 16, Some("__closure_env_dispatch"))
+    emit("  popd r1")
+
+  /** Increment env's rc via descriptor's env_ptr. Used when copying a
+    * descriptor (var g = f) so both descriptors share the env. */
+  private def emitClosureDescrIncr(descBaseReg: Int, descBaseOff: Int): Unit =
+    emit("  pshd r1")
+    emitAddImm(1, descBaseReg, descBaseOff + 8)
+    emit("  ldd r1, r1, r0")
+    emitRefIncr(1, 16)
+    emit("  popd r1")
+
   /** Evaluate `arg` and push its full byte representation onto the stack as a
     * call argument. Handles ref/string borrow incr; appends to `stringPtrOffsets`
     * the fp-relative offset of each pushed string ptr that needs a post-call decr.
@@ -829,7 +942,9 @@ class SyslTriscCodegen(addresses: Int = 4):
   private def emitRefCleanup(): Unit =
     // Decrement owned locals (negative fp offsets)
     for (name, local) <- locals if local.offset < 0 do
-      local.typ match
+      // Captured-into-body locals are borrowed views into the env — skip rc work.
+      if captureBorrows.contains(name) then ()
+      else local.typ match
         case rt: SyslType.RefType =>
           val hoff = refHeaderOffset(rt)
           emit("  pshd r1")
@@ -865,6 +980,12 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitValueRC(5, local.offset, local.typ, incr = false)
         case et: SyslType.EnumType if structHasStringFields(et) =>
           emitEnumStringFieldsRC(5, local.offset, et, incr = false)
+        case _: SyslType.FuncType if needsAllocExtern && !funcBorrowParams.contains(name) =>
+          // Closure descriptor: decr env's rc (env_ptr at descriptor+8). Null env
+          // (TFuncRef / no-capture closure) is skipped by emitRefDecr's null check.
+          // Gate on needsAllocExtern so programs without any closure captures don't
+          // pull in free as an extern unnecessarily.
+          emitClosureDescrDecr(5, local.offset)
         case _ =>
     // Decrement ref params (caller transferred ownership)
     for (name, rt) <- refParams do
@@ -900,6 +1021,9 @@ class SyslTriscCodegen(addresses: Int = 4):
     locals = new mutable.LinkedHashMap
     refParams = new mutable.LinkedHashMap
     stringBorrowParams = fun.params.collect { case p if p.typ == SyslType.StringType => p.name }.toSet
+    funcBorrowParams = fun.params.collect {
+      case p if p.typ.isInstanceOf[SyslType.FuncType] || p.typ.isInstanceOf[SyslType.InterfaceType] => p.name
+    }.toSet
     stackOffset = 0
     deferStack.clear()
 
@@ -1070,6 +1194,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     locals = null
     currentFunction = null
     stringBorrowParams = Set.empty
+    funcBorrowParams = Set.empty
 
   private def genClosureFunction(name: String, closure: TClosure): Unit =
     // Create a TFunDecl for the closure so we can reuse epilogue/return machinery
@@ -1078,6 +1203,10 @@ class SyslTriscCodegen(addresses: Int = 4):
     locals = new mutable.LinkedHashMap
     refParams = new mutable.LinkedHashMap
     stringBorrowParams = fun.params.collect { case p if p.typ == SyslType.StringType => p.name }.toSet
+    funcBorrowParams = fun.params.collect {
+      case p if p.typ.isInstanceOf[SyslType.FuncType] || p.typ.isInstanceOf[SyslType.InterfaceType] => p.name
+    }.toSet
+    captureBorrows = closure.captures.map(_._1).toSet
     stackOffset = 0
     deferStack.clear()
 
@@ -1264,6 +1393,8 @@ class SyslTriscCodegen(addresses: Int = 4):
     locals = null
     currentFunction = null
     stringBorrowParams = Set.empty
+    funcBorrowParams = Set.empty
+    captureBorrows = Set.empty
 
   private def emitClosureEpilogue(nRegPushed: Int): Unit =
     emit("  mov r7, r5")
@@ -2695,7 +2826,6 @@ class SyslTriscCodegen(addresses: Int = 4):
                           else s"__closure_$closureCounter"
         closureCounter += 1
         pendingClosures += ((closureName, TClosure(params, returnType, body, captures, escapes)))
-        if escapes then needsAllocExtern = true
 
         if captures.isEmpty then
           // No captures — same as TFuncRef with null env
@@ -2707,48 +2837,38 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  std r0, r2, r0")       // env_ptr = null
           emit("  mov r1, r7")
         else
+          // Always-heap env. Layout: [rc:8 @ base+0 | deinit_ptr:8 @ base+8 | data].
+          // env_ptr = base + 16. Pre-register the deinit name so the malloc result
+          // can carry a deinit_ptr in the header (or null if no rc captures).
+          needsAllocExtern = true
+          val deinitOpt = closureEnvDeinitFor(closureName, TClosure(params, returnType, body, captures, escapes))
           val envLayout = captures.map { (name, typ) =>
             val size = stackSize(typ)
             (name, typ, size)
           }
           val envSize = envLayout.map(_._3).sum
+          val totalSize = envSize + 16
 
-          if escapes then
-            // Escaping closure: allocate env on heap
-            emitLoadImm(1, envSize)
-            emit("  pshd r1")             // save envSize (for potential use)
-            stackOffset -= 8
-            emit("  movi r4, malloc")
-            emit("  jalr r6, r4")
-            emit("  popd r2")             // discard envSize
-            stackOffset += 8
-            // r1 = env_ptr (heap allocated)
-            emit("  pshd r1")             // save env_ptr
-            stackOffset -= 8
-          else
-            // Non-escaping closure: use pre-allocated env local if available,
-            // otherwise fall back to heap allocation.
-            val envLocalName = s"__env_${closureCounter - 1}"
-            if locals.contains(envLocalName) then
-              // Env was pre-allocated as a local before expression evaluation
-              val envLocal = locals(envLocalName)
-              emitAddImm(1, 5, envLocal.offset)
-              emit("  pshd r1")              // save env_ptr
-              stackOffset -= 8
-            else
-              // Fallback: allocate on heap (e.g., closure in a non-call context)
-              needsAllocExtern = true
-              emitLoadImm(1, envSize)
-              emit("  pshd r1")
-              stackOffset -= 8
-              emit("  movi r4, malloc")
-              emit("  jalr r6, r4")
-              emit("  popd r2")
-              stackOffset += 8
-              emit("  pshd r1")
-              stackOffset -= 8
+          // malloc(totalSize)
+          emitLoadImm(1, totalSize)
+          emit("  movi r4, malloc")
+          emit("  jalr r6, r4")
+          // r1 = base of env block. Write rc=1 at base+0, deinit_ptr at base+8.
+          emit("  ldi r2, 1")
+          emit("  std r2, r1, r0")          // rc = 1
+          deinitOpt match
+            case Some(deinitName) =>
+              emit(s"  movi r2, $deinitName")
+              emitAddImm(3, 1, 8)
+              emit("  std r2, r3, r0")      // deinit_ptr
+            case None =>
+              emitAddImm(3, 1, 8)
+              emit("  std r0, r3, r0")      // deinit_ptr = null
+          emitAddImm(1, 1, 16)              // r1 = env_ptr (data)
+          emit("  pshd r1")                 // save env_ptr (top of stack)
+          stackOffset -= 8
 
-          // Copy captured values into env
+          // Copy captured values into env (and Phase A: incr borrowed rc-bearing captures)
           var envOffset = 0
           for (name, typ, size) <- envLayout do
             // Load env_ptr into r2
@@ -2786,6 +2906,12 @@ class SyslTriscCodegen(addresses: Int = 4):
                 case _ =>
                   emitLoad(3, 3, typ)
                   emitStore(3, 2, typ)
+            // Phase A: incr rc-bearing captures (always borrowed — captures are TVarRef
+            // of locals/globals, never freshly-owned). emitValueRC reads env_ptr from
+            // top-of-stack, so reload it into r2 first as base register.
+            if structHasStringFields(typ) then
+              emit("  ldd r2, r7, r0")
+              emitValueRC(2, envOffset, typ, incr = true)
             envOffset += size.toInt
 
           // Build {func_ptr, env_ptr} pair on stack (16 bytes)
@@ -2993,19 +3119,6 @@ class SyslTriscCodegen(addresses: Int = 4):
         // r4 is reserved for the call address (movi r4, name)
         val nRegArgs = allArgs.length.min(1)
         val stackArgs = allArgs.drop(1)
-
-        // Pre-allocate stack envs for non-escaping closures in the argument list.
-        // This must happen before savedOffset is captured, so the env space
-        // is part of the permanent frame and won't be reclaimed by expression cleanup.
-        var envPreallocCounter = closureCounter
-        for arg <- allArgs do arg match
-          case c: TClosure if !c.escapes && c.captures.nonEmpty =>
-            val envLayout = c.captures.map((_, t) => stackSize(t))
-            val envSize = envLayout.sum
-            val alignedEnvSize = (envSize + 7) & ~7
-            allocLocal(s"__env_$envPreallocCounter", SyslType.IntType(64), alignedEnvSize)
-            envPreallocCounter += 1
-          case _ =>
 
         val savedOffset = stackOffset
         val stringArgPtrOffsets = mutable.ListBuffer[Int]()  // fp-relative ptrs needing post-call decr
