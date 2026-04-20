@@ -23,8 +23,12 @@ class SyslAnalyzer:
   private val variantToEnum = new mutable.LinkedHashMap[String, (SyslType.EnumType, Int)]  // variant name → (enum type, variant index)
   private val interfaceTypes = new mutable.LinkedHashMap[String, SyslType.InterfaceType]  // interface name → InterfaceType
   private val moduleNamespaces = new mutable.LinkedHashMap[String, ModuleMeta]  // short name → module meta (for qualified imports)
-  private val typeAliases = new mutable.LinkedHashMap[String, TypeAST]  // alias name → target type AST
+  // alias name → (target type AST, isNew flag, optional within-range)
+  private val typeAliases = new mutable.LinkedHashMap[String, (TypeAST, Boolean, Option[RangeAST])]
   private val genericTypeAliases = new mutable.LinkedHashMap[String, (List[String], TypeAST)]  // name → (type params, target)
+  // Memoized resolved form of a named/derived/constrained alias. Plain transparent aliases
+  // do not appear here — they resolve directly to their base.
+  private val resolvedNamedTypes = new mutable.LinkedHashMap[String, SyslType]
   private val methods = new mutable.LinkedHashMap[String, mutable.Set[String]]  // struct name → set of method names
   private val deprecations = new mutable.LinkedHashMap[String, Option[String]]  // name → optional reason
   private val warnedDeprecations = new mutable.HashSet[String]
@@ -541,13 +545,15 @@ class SyslAnalyzer:
             dataEnumTypes(name) = et
             for ((vname, _), idx) <- resolvedVariants.zipWithIndex do
               variantToEnum(vname) = (et, idx)
-        case TypeAliasDeclAST(name, target, tparams, _) =>
+        case TypeAliasDeclAST(name, target, tparams, _, isNew, range) =>
           if typeAliases.contains(name) || genericTypeAliases.contains(name) then
             throw AnalysisError(s"duplicate type alias: '$name'", decl)
           if tparams.nonEmpty then
+            if isNew || range.nonEmpty then
+              throw AnalysisError(s"generic type aliases cannot use 'new' or 'within': '$name'", decl)
             genericTypeAliases(name) = (tparams, target)
           else
-            typeAliases(name) = target
+            typeAliases(name) = (target, isNew, range)
         case TraitDeclAST(name, tparam, methods, _) =>
           if traits.contains(name) then throw AnalysisError(s"duplicate trait: '$name'", decl)
           // Check no duplicate method names within the trait
@@ -673,9 +679,9 @@ class SyslAnalyzer:
       case DataEnumDeclAST(name, _, _, _) =>
         TDataEnumDecl(name, dataEnumTypes(name))
 
-      case TypeAliasDeclAST(name, target, tparams, _) =>
+      case TypeAliasDeclAST(name, _, tparams, _, _, _) =>
         if tparams.nonEmpty then TTypeAliasDecl(name, VoidType) // generic alias: type-only, no codegen
-        else TTypeAliasDecl(name, resolveType(target))
+        else TTypeAliasDecl(name, resolveType(NamedTypeAST(name))) // force resolution (and range validation)
 
       case fdAst @ FunDeclAST(name, params, _, body, isPrivate, _, _, attrs, _) =>
         scopeStack = new mutable.ArrayBuffer
@@ -712,7 +718,11 @@ class SyslAnalyzer:
         val savedExp = currentExpected
         currentExpected = if funInfo.returnType == VoidType then None else Some(funInfo.returnType)
         val tBody = try body match
-          case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
+          case ExprBodyAST(expr) =>
+            val tExpr = analyzeExpr(expr)
+            // Apply return-type range check for expression-body functions.
+            val checked = if funInfo.returnType != VoidType then applyTargetType(tExpr, funInfo.returnType) else tExpr
+            TExprBody(checked)
           case BlockBodyAST(stmts) => TBlockBody(analyzeBlock(stmts))
         finally currentExpected = savedExp
         // For def functions with no explicit return type, infer from body
@@ -804,7 +814,14 @@ class SyslAnalyzer:
       case "bool" => BoolType
       case "void" => VoidType
       case "string" => StringType
-      case name if typeAliases.contains(name) => resolveType(typeAliases(name))
+      case name if typeAliases.contains(name) =>
+        resolvedNamedTypes.getOrElseUpdate(name, {
+          val (target, isNew, rangeAst) = typeAliases(name)
+          val base = resolveType(target)
+          val tr = rangeAst.map(ra => evalRangeBound(name, ra, base))
+          if isNew || tr.nonEmpty then NamedType(name, base, isNew, tr)
+          else base
+        })
       case name if structTypes.contains(name) => structTypes(name)
       case name if dataEnumTypes.contains(name) => dataEnumTypes(name)
       case name if simpleEnumTypes.contains(name) => simpleEnumTypes(name)
@@ -816,6 +833,39 @@ class SyslAnalyzer:
     case TupleTypeAST(elems) => SyslType.tupleType(elems.map(resolveType))
     case FuncTypeAST(params, ret, esc) => FuncType(params.map(resolveType), resolveType(ret), esc)
     case RefTypeAST(inner) => RefType(resolveType(inner))
+
+  /** Evaluate a `within` range bound as a compile-time literal against the base numeric type.
+   * Only supports literal numeric constants with optional unary sign; extend later for const vars. */
+  private def evalRangeBound(aliasName: String, ra: RangeAST, base: SyslType): TypeRange =
+    def evalInt(e: ExpressionAST, sign: Long = 1): Long = e match
+      case IntLitAST(v)         => sign * v
+      case TypedIntLitAST(v, _) => sign * v
+      case CharLitAST(c)        => sign * c.toLong
+      case UnaryAST("-", inner) => evalInt(inner, -sign)
+      case UnaryAST("+", inner) => evalInt(inner, sign)
+      case _ => throw AnalysisError(s"range bound for '$aliasName' must be an integer literal")
+    def evalFloat(e: ExpressionAST, sign: Double = 1.0): Double = e match
+      case FloatLitAST(v)       => sign * v
+      case IntLitAST(v)         => sign * v.toDouble
+      case TypedIntLitAST(v, _) => sign * v.toDouble
+      case UnaryAST("-", inner) => evalFloat(inner, -sign)
+      case UnaryAST("+", inner) => evalFloat(inner, sign)
+      case _ => throw AnalysisError(s"range bound for '$aliasName' must be a numeric literal")
+    base.underlying match
+      case _: IntType | _: UIntType =>
+        val lo = evalInt(ra.lo)
+        val hi = evalInt(ra.hi)
+        if lo > hi || (lo == hi && ra.exclusiveHi) then
+          throw AnalysisError(s"empty range in type '$aliasName': $lo..${if ra.exclusiveHi then "<" else ""}$hi")
+        IntRange(lo, hi, ra.exclusiveHi)
+      case _: FloatType =>
+        val lo = evalFloat(ra.lo)
+        val hi = evalFloat(ra.hi)
+        if lo > hi || (lo == hi && ra.exclusiveHi) then
+          throw AnalysisError(s"empty range in type '$aliasName': $lo..${if ra.exclusiveHi then "<" else ""}$hi")
+        FloatRange(lo, hi, ra.exclusiveHi)
+      case other =>
+        throw AnalysisError(s"'within' requires a numeric base type, but '$aliasName' has base $other")
 
   /** `PtrType` / `RefType` may embed a recursive generic `StructType` placeholder (empty `fields`); use `structTypes`. */
   private def latestStruct(st: SyslType.StructType): SyslType.StructType =
@@ -857,6 +907,13 @@ class SyslAnalyzer:
       // have different field/variant lists.
       case (StructType(n1, _, _), StructType(n2, _, _)) if n1 == n2 => true
       case (EnumType(n1, _), EnumType(n2, _)) if n1 == n2 => true
+      // Named/derived types:
+      //   - same-name NamedType ↔ NamedType: compatible
+      //   - non-nominal (subtype) NamedType ↔ base: compatible (range checked at assignment)
+      //   - nominal (derived) NamedType ↔ base: NOT compatible (explicit cast required)
+      case (NamedType(n1, _, _, _), NamedType(n2, _, _, _)) if n1 == n2 => true
+      case (NamedType(_, b, false, _), other) => compatible(b, other)
+      case (other, NamedType(_, b, false, _)) => compatible(other, b)
       case (IntType(a), IntType(b)) if a <= b => true    // signed widening
       case (UIntType(a), UIntType(b)) if a <= b => true  // unsigned widening
       case (IntType(a), UIntType(b)) if a <= b => true   // signed → unsigned widening
@@ -893,6 +950,10 @@ class SyslAnalyzer:
 
   // Coerce integer literals to the target type (like Rust's untyped integer literals)
   private def coerceLiteral(expr: TExpr, target: SyslType): TExpr =
+    // Don't auto-promote an untyped literal to a nominal NamedType — a cast is required.
+    target match
+      case NamedType(_, _, true, _) => return expr
+      case _ =>
     expr match
       case TIntLit(value, _) if target.isIntegral => TIntLit(value, target)
       case TIntLit(0, _) if target.isInstanceOf[PtrType] => TIntLit(0, target) // null pointer
@@ -923,6 +984,30 @@ class SyslAnalyzer:
           val padded = coerced ++ List.fill(size - elems.length)(TIntLit(0L, elemType))
           TArrayLit(padded, target)
         else expr
+      case _ => expr
+
+  // Apply a target type at a produce-site (var init, assign, param bind, return, cast).
+  // For a NamedType target with a `within` range, validates literal values at compile-time and
+  // inserts a runtime TRangeCheck for non-literal values. Also re-wraps static type so downstream
+  // code sees the NamedType.
+  private def applyTargetType(expr: TExpr, target: SyslType): TExpr =
+    target match
+      case nt @ NamedType(aliasName, _, _, Some(range)) =>
+        // Compile-time literal validation short-circuits the runtime check.
+        val literalChecked: Option[TExpr] = (expr, range) match
+          case (TIntLit(v, _), IntRange(lo, hi, excl)) =>
+            val ok = if excl then v >= lo && v < hi else v >= lo && v <= hi
+            if !ok then throw AnalysisError(s"value $v is out of range for type '$aliasName' (${lo}..${if excl then "<" else ""}${hi})")
+            Some(if expr.typ == nt then expr else TCast(expr, nt))
+          case (TFloatLit(v, _), FloatRange(lo, hi, excl)) =>
+            val ok = if excl then v >= lo && v < hi else v >= lo && v <= hi
+            if !ok then throw AnalysisError(s"value $v is out of range for type '$aliasName' (${lo}..${if excl then "<" else ""}${hi})")
+            Some(if expr.typ == nt then expr else TCast(expr, nt))
+          case _ => None
+        literalChecked.getOrElse(TRangeCheck(expr, range, aliasName, nt))
+      case nt: NamedType if expr.typ != nt =>
+        // Nominal re-wrap without a range check.
+        TCast(expr, nt)
       case _ => expr
 
   // Coerce integer literals to match the target's signedness only (preserving original width)
@@ -1393,7 +1478,7 @@ class SyslAnalyzer:
       if selfDeref.isEmpty && !compatible(coerced.typ, pType) then
         throw AnalysisError(s"argument '$pName' of '$name' expects $pType, got ${coerced.typ}")
       // Insert explicit conversions for codegen
-      selfDeref.getOrElse {
+      val converted = selfDeref.getOrElse {
         (coerced.typ, pType) match
           case (StringType, PtrType(I8 | U8)) => TCast(coerced, pType)
           case (_: FuncType, IntType(64) | UIntType(64)) => TCast(coerced, pType)
@@ -1401,6 +1486,7 @@ class SyslAnalyzer:
             TInterfaceBox(coerced, iface)
           case _ => coerced
       }
+      applyTargetType(converted, pType)
     }
 
   private def analyzeBlock(stmts: List[StmtAST]): List[TStmt] =
@@ -1427,10 +1513,12 @@ class SyslAnalyzer:
         if typOpt.isDefined && !compatible(tInit.typ, declType) then
           throw AnalysisError(s"cannot assign ${tInit.typ} to $declType variable '$name'")
         // Box concrete type into interface if needed
-        val tInitFinal = (tInit.typ, declType) match
+        val tInitBoxed = (tInit.typ, declType) match
           case (_, iface: InterfaceType) if !tInit.typ.isInstanceOf[InterfaceType] =>
             TInterfaceBox(tInit, iface)
           case _ => tInit
+        // Apply target type for named/constrained types (range checks + re-wrapping)
+        val tInitFinal = applyTargetType(tInitBoxed, declType)
         // `_` is a discard binding: evaluate the initializer for its side effects
         // but don't bind any name. Multiple `_`s in the same scope don't collide.
         if name == "_" then
@@ -1469,9 +1557,10 @@ class SyslAnalyzer:
           throw AnalysisError(s"cannot mix declared and undeclared names in destructuring")
 
       case AssignStmtAST(target, value) =>
-        val tValue = analyzeExpr(value)
-        val sym = lookupOrCreate(target, tValue.typ)
+        val tValue0 = analyzeExpr(value)
+        val sym = lookupOrCreate(target, tValue0.typ)
         if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$target'")
+        val tValue = applyTargetType(tValue0, sym.typ)
         TAssignStmt(sym.name, tValue)
 
       case CompoundAssignStmtAST(target, op, value) =>
@@ -1522,7 +1611,10 @@ class SyslAnalyzer:
         TFieldCompoundAssignStmt(resolvedObj, idx, op, tValue)
 
       case ReturnStmtAST(value) =>
-        TReturnStmt(value.map(analyzeExpr))
+        TReturnStmt(value.map { v =>
+          val tv = analyzeExpr(v)
+          applyTargetType(tv, currentReturnType)
+        })
 
       case ForStmtAST(init, cond, update, body) =>
         pushScope()
@@ -2152,8 +2244,25 @@ class SyslAnalyzer:
         TUnary(op, tOperand, resultType)
 
       case BinaryAST(left, op, right) =>
-        val tLeft0 = analyzeExpr(left)
-        val tRight0 = analyzeExpr(right)
+        val tLeft00 = analyzeExpr(left)
+        val tRight00 = analyzeExpr(right)
+        // Handle NamedType operands:
+        //   nominal + nominal (same name)  → result keeps that nominal type
+        //   nominal + anything else         → error (explicit cast required)
+        //   non-nominal (subtype) wrappers  → unwrapped to the base for arithmetic
+        val isCmp = Set("==", "!=", "<", ">", "<=", ">=").contains(op)
+        val nominalResult: Option[SyslType] = (tLeft00.typ, tRight00.typ) match
+          case (l @ NamedType(n1, _, true, _), r @ NamedType(n2, _, true, _)) =>
+            if n1 != n2 then
+              throw AnalysisError(s"cannot apply '$op' between nominal types $n1 and $n2; cast explicitly")
+            if isCmp then None else Some(l)
+          case (NamedType(n, _, true, _), other) =>
+            throw AnalysisError(s"cannot apply '$op' between nominal type $n and ${other}; cast explicitly")
+          case (other, NamedType(n, _, true, _)) =>
+            throw AnalysisError(s"cannot apply '$op' between ${other} and nominal type $n; cast explicitly")
+          case _ => None
+        val tLeft0 = if tLeft00.typ.isInstanceOf[NamedType] then TCast(tLeft00, tLeft00.typ.underlying) else tLeft00
+        val tRight0 = if tRight00.typ.isInstanceOf[NamedType] then TCast(tRight00, tRight00.typ.underlying) else tRight00
         // Coerce integer literal signedness to match the other operand (preserve width)
         val tLeft = if tRight0.typ.isIntegral then coerceSignedness(tLeft0, tRight0.typ) else tLeft0
         val tRight = if tLeft.typ.isIntegral then coerceSignedness(tRight0, tLeft.typ) else tRight0
@@ -2213,13 +2322,16 @@ class SyslAnalyzer:
         // Insert implicit int→float promotion / float-width casts for mixed operands
         val promotedLeft  = if resultType.isFloat && tLeft.typ  != resultType then TCast(tLeft,  resultType) else tLeft
         val promotedRight = if resultType.isFloat && tRight.typ != resultType then TCast(tRight, resultType) else tRight
-        TBinary(promotedLeft, op, promotedRight, resultType)
+        val finalResultType = nominalResult.getOrElse(resultType)
+        val binExpr = TBinary(promotedLeft, op, promotedRight, resultType)
+        if nominalResult.isDefined then TCast(binExpr, finalResultType) else binExpr
 
       case CastAST(targetTypeAST, inner) =>
         val tInner = analyzeExpr(inner)
         val target = resolveType(targetTypeAST)
-        // Validate cast is possible
-        (tInner.typ, target) match
+        // Validate cast is possible. NamedTypes unwrap to their bases for the validity check —
+        // wrapping/unwrapping into named is always allowed when the bases are cast-compatible.
+        (tInner.typ.underlying, target.underlying) match
           case (from, to) if from == to => // no-op cast
           // bool conversions
           case (from, BoolType) if from.isNumeric => // numeric to bool: != 0
@@ -2245,8 +2357,14 @@ class SyslAnalyzer:
           // array decay conversions
           case (ArrayType(_, _), _: PtrType) => // array decays to pointer (address of first element)
           case (ArrayType(_, _), to) if to.isIntegral => // array to integer (address of first element as int)
-          case (from, to) => throw AnalysisError(s"cannot cast $from to $to")
-        TCast(tInner, target)
+          case (_, _) => throw AnalysisError(s"cannot cast ${tInner.typ} to $target")
+        // If the target is a constrained NamedType, emit a range check (compile- or run-time)
+        // instead of a plain cast. The check takes the cast-to-underlying value, not the raw input.
+        target match
+          case nt @ NamedType(_, base, _, Some(_)) =>
+            val coreCast = if tInner.typ.underlying == base then tInner else TCast(tInner, base)
+            applyTargetType(coreCast, nt)
+          case _ => TCast(tInner, target)
 
       case CallAST(name, args) if integerArithIntrinsics.contains(name) =>
         if args.size != 2 then throw AnalysisError(s"$name() takes exactly 2 arguments")
@@ -2494,6 +2612,18 @@ class SyslAnalyzer:
           else
             val checkedArgs = checkArgs(name, funInfo.params, tArgs)
             TCall(funInfo.name, checkedArgs, funInfo.returnType)
+        else if typeAliases.contains(name) then
+          // Named-type cast: Meters(3), SafeAge(x). Resolves to a TCast whose target is the
+          // NamedType — for constrained variants this is further wrapped in a TRangeCheck by
+          // the downstream applyTargetType call via CastAST handling logic.
+          if tArgs.length != 1 then
+            throw AnalysisError(s"cast '$name' expects exactly 1 argument, got ${tArgs.length}")
+          val target = resolveType(NamedTypeAST(name))
+          val coreCast = if tArgs.head.typ.underlying == target.underlying then tArgs.head
+                        else TCast(tArgs.head, target.underlying)
+          applyTargetType(coreCast, target) match
+            case e if e.typ == target => e
+            case e => TCast(e, target)
         else if structTypes.contains(name) then
           // Struct constructor: Point(10, 20)
           val st = structTypes(name)
