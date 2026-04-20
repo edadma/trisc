@@ -27,13 +27,15 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         build_stack_frame, arch_resume_process,
         STACK_FRAME_SIZE, arch_cli, arch_sti,
         PROG_USP, PROG_SSP}
-    import oskit.kernel.{kernel_init, create_thread, first_thread_ssp,
+    import oskit.kernel.{kernel_init, create_thread, create_thread_pri,
+        first_thread_ssp,
         kernel_stack_usp, kernel_stack_ssp, schedule,
         syscall_table, syscall_ssp_set, syscall_check_allowed,
         create_process_suspended, resume_process,
         register_syscall, syscall_return,
         kb_enqueue, kb_notify_tid, notify_send,
         current_thread, ticks}
+    import oskit.config.{NUM_PRIORITIES}
     import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
         ipc_send, ipc_recv, ipc_reply}
     import oskit.services.{get_thread_count, uptime, sleep, yield}
@@ -221,15 +223,11 @@ so the VM halts cleanly (or waits for an interrupt in richer setups).
         if DEMO_MODE == 0 || DEMO_MODE == 3 || DEMO_MODE == 4 || DEMO_MODE == 5
             val next = schedule(ssp)
             if next == i64(0)
-                // No ready thread. Unmask interrupts before wfi so a
-                // pending IRQ (timer, PL011 RX) can wake us. The IRQ
-                // handler runs recursively, runs schedule() again,
-                // finds a ready thread (e.g. tty unblocked by
-                // kb_notify_tid), and does arch_resume_process —
-                // never returning through this loop. The outer frame
-                // leaks a few hundred bytes on the last-active thread's
-                // kernel stack, which is harmless since that thread
-                // always resumes via its own saved ssp.
+                // The idle thread (created in kernel_main_rs) is always
+                // READY at priority NUM_PRIORITIES-1, so schedule() should
+                // never come back with 0 once it's been registered.
+                // Keep a wfi spin as a last-resort safety net for modes
+                // that don't spawn an idle thread.
                 arch_sti()
                 while true
                     arch_wfi()
@@ -243,6 +241,24 @@ so the VM halts cleanly (or waits for an interrupt in richer setups).
             kt_current = next
             return kt_ssp[next]
         ssp
+
+Idle thread body. Sits at NUM_PRIORITIES-1 (lowest) so
+`sched_pick_next` only picks it when no other thread is ready.
+Runs on its own kernel stack (slot 0), so we avoid the previous
+problem of arch_schedule_after_exc entering an infinite wfi loop
+inside a caller's stack frame and leaking that frame every time
+we idle. Unlike the old inline loop, every "idle, wake, run real
+thread, idle again" cycle cleanly resets this thread's ssp via
+the standard schedule() save/restore path.
+
+arch_sti is redundant on entry (SPSR = 0x5 already clears DAIF at
+ERET), but keeps the invariant explicit for readers who find this
+via grep.
+
+    idle_thread_body()
+        arch_sti()
+        while true
+            arch_wfi()
 
 SVC dispatcher. Looks up the kernel's registered handler in
 syscall_table[num], runs the privilege check, and tail-calls the
@@ -686,6 +702,17 @@ which is the baseline we want for this commit).
         kernel_init()
         ipc_init()
         register_syscall(1, sys_putc_handler)
+
+        // Create the idle thread at the lowest priority. It runs
+        // `arch_sti(); wfi()` in a loop on its own kernel stack
+        // (slot 0), so when every real thread is blocked the
+        // scheduler picks the idle thread instead of bouncing
+        // through the recursive-wfi path in arch_schedule_after_exc
+        // (which leaked a frame on the last-active thread's kstack
+        // every time through).
+        create_thread_pri(i64(&idle_thread_body),
+            kernel_stack_usp(0), kernel_stack_ssp(0),
+            "idle", NUM_PRIORITIES - 1, kernel_ptbr())
 
         uart_puts("[rs] creating process PT\n")
         val new_pt = vm_create_process_pt()
