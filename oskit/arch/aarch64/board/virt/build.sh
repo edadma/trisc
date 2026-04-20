@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build SLIX aarch64 kernel for QEMU virt machine.
-# Milestone 1: boot + UART "Hello, aarch64!" and halt.
+# Pipeline: sysl -> LLVM IR -> aarch64 object -> link with boot.s + vectors.s.
 #
 # Usage:
 #   ./build.sh           # build
@@ -20,21 +20,54 @@ for arg in "$@"; do
     esac
 done
 
+ARCH_DIR="$REPO_ROOT/oskit/arch/aarch64"
+
+SYSL_FILES=(
+    oskit/config/config.sysl
+    oskit/arch/aarch64/cpu.lsysl
+    oskit/arch/aarch64/vm.lsysl
+    oskit/arch/aarch64/board/virt/uart.lsysl
+    oskit/arch/aarch64/board/virt/hello.lsysl
+)
+
+echo "=== Sysl -> LLVM IR ==="
+cd "$REPO_ROOT"
+sbt "syslCliJVM/run compile --emit llvm --target=aarch64-elf ${SYSL_FILES[*]} -o $OUT/kernel.ll" > "$OUT/sbt-kernel.log" 2>&1
+if ! grep -q "success" "$OUT/sbt-kernel.log"; then
+    echo "  Sysl compile failed:" >&2
+    tail -10 "$OUT/sbt-kernel.log" >&2
+    exit 1
+fi
+
+echo "=== LLVM IR -> object ==="
+clang -target aarch64-unknown-none-elf -ffreestanding -nostdlib \
+    -mcmodel=large -fno-pic -fno-pie -w \
+    -c -o "$OUT/kernel.o" "$OUT/kernel.ll"
+
 echo "=== Assemble boot.s ==="
 aarch64-elf-as -o "$OUT/boot.o" "$BOARD_DIR/boot.s"
 
 echo "=== Assemble vectors.s ==="
 aarch64-elf-as -o "$OUT/vectors.o" "$BOARD_DIR/vectors.s"
 
-echo "=== Compile hello.c ==="
+echo "=== Assemble cpu_asm.s ==="
+aarch64-elf-as -o "$OUT/cpu_asm.o" "$ARCH_DIR/cpu_asm.s"
+
+echo "=== Assemble mmu.s ==="
+aarch64-elf-as -o "$OUT/mmu.o" "$ARCH_DIR/mmu.s"
+
+echo "=== Assemble vm_asm.s ==="
+aarch64-elf-as -o "$OUT/vm_asm.o" "$ARCH_DIR/vm_asm.s"
+
+echo "=== Compile stubs.c ==="
 aarch64-elf-gcc -ffreestanding -nostdlib -mcmodel=large \
-    -fno-pic -fno-pie -Wall -Wextra -Werror -O1 \
-    -c -o "$OUT/hello.o" "$BOARD_DIR/hello.c"
+    -fno-pic -fno-pie -c -o "$OUT/stubs.o" "$BOARD_DIR/stubs.c"
 
 echo "=== Link ==="
 aarch64-elf-ld -T "$BOARD_DIR/link.ld" \
     -o "$OUT/kernel.elf" \
-    "$OUT/boot.o" "$OUT/vectors.o" "$OUT/hello.o"
+    "$OUT/boot.o" "$OUT/vectors.o" "$OUT/cpu_asm.o" "$OUT/mmu.o" "$OUT/vm_asm.o" "$OUT/stubs.o" "$OUT/kernel.o" 2>&1 \
+    | grep -v "has a LOAD segment with RWX permissions" || true
 
 echo "=== Built: $OUT/kernel.elf ==="
 

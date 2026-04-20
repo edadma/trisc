@@ -1,0 +1,39 @@
+PL011 UART — QEMU virt console
+==============================
+
+The QEMU virt machine wires a PrimeCell PL011 UART at `0x09000000`
+as its primary console. QEMU's firmware leaves the device already
+initialised, so this module only needs the bare minimum: poll the
+TX-FIFO-full flag in `UARTFR` and stuff bytes into `UARTDR`.
+
+    module oskit.arch.aarch64.board.virt
+
+PL011 register addresses.
+
+    val UART0_DR: i64 = 0x09000000
+    val UART0_FR: i64 = 0x09000018
+    val UARTFR_TXFF = 0x20
+
+Write one byte to the data register, waiting for the TX FIFO to
+drain first. `volatile` on the flag pointer keeps the read from
+being hoisted out of the busy-wait loop by the optimiser.
+
+    uart_putc(c: int)
+        volatile var fr: *i32 = *i32(UART0_FR)
+        var busy = 1
+        while busy != 0
+            busy = int(*fr) & UARTFR_TXFF
+        var dr: *i32 = *i32(UART0_DR)
+        *dr = i32(c)
+
+Write a NUL-terminated sysl string, translating `'\n'` into CRLF
+for terminal emulators that expect carriage returns.
+
+    uart_puts(s: string)
+        val p = *byte(s)
+        val n = len(s)
+        for var i = 0; i < n; i++
+            val ch = int(p[i])
+            if ch == 10
+                uart_putc(13)
+            uart_putc(ch)

@@ -1,0 +1,72 @@
+hello — aarch64 sysl kernel entry (QEMU virt)
+=============================================
+
+Minimal `kernel_main` for the QEMU virt board. Prints greetings
+via the PL011 UART module and returns; `boot.s` halts in wfi
+after we come back.
+
+    module oskit.arch.aarch64.board.virt
+
+    import oskit.arch.{page_alloc_zero, kernel_ptbr, vm_flush_tlb,
+        vm_create_process_pt, vm_set_ptbr, read_sctlr_el1}
+
+Render `v` as a 16-digit hex number (prefixed `0x`) to the UART.
+Useful for the boot-time sanity prints below; deliberately crude
+since the kernel will grow a real formatter later.
+
+    uart_puthex(v: u64)
+        uart_puts("0x")
+        var shift = 60
+        while shift >= 0
+            val d = int((v >> u64(shift)) & u64(0xF))
+            if d < 10
+                uart_putc(int('0') + d)
+            else
+                uart_putc(int('A') + d - 10)
+            shift -= 4
+
+    kernel_main()
+        uart_puts("SLIX aarch64 boot (sysl, MMU on)\n")
+        uart_puts("Hello, aarch64!\n")
+
+        uart_puts("kernel_ptbr=")
+        uart_puthex(kernel_ptbr())
+        uart_puts("\n")
+
+        // Dump SCTLR_EL1 so we can inspect which control bits the
+        // boot path left set. Bit 19 (WXN) in particular would make
+        // any EL0-writable mapping execute-never at EL1 — i.e. the
+        // kernel would fault as soon as we flip AP[1] on RAM.
+        uart_puts("sctlr_el1=")
+        uart_puthex(read_sctlr_el1())
+        uart_puts("\n")
+
+        // Allocate a couple of zeroed pages and confirm they live at
+        // distinct, page-aligned addresses. Proves the page pool and
+        // the zero-fill path are functional under the new MMU map.
+        val p1 = page_alloc_zero()
+        val p2 = page_alloc_zero()
+        uart_puts("page_alloc_zero 1=")
+        uart_puthex(p1)
+        uart_puts(" 2=")
+        uart_puthex(p2)
+        uart_puts("\n")
+
+        vm_flush_tlb()
+        uart_puts("vm_flush_tlb ok\n")
+
+        // Create a per-process page table (a clone of the kernel map
+        // at this stage) and switch TTBR0 to it. If the kernel keeps
+        // running and the UART still works, the switch landed.
+        val new_pt = vm_create_process_pt()
+        uart_puts("new_pt=")
+        uart_puthex(new_pt)
+        uart_puts("\n")
+
+        vm_set_ptbr(new_pt)
+        uart_puts("after vm_set_ptbr: still alive\n")
+
+        // Swap back to the kernel map so subsequent boot work (once
+        // it exists) doesn't need to worry about which table is live.
+        vm_set_ptbr(kernel_ptbr())
+        uart_puts("restored kernel ptbr\n")

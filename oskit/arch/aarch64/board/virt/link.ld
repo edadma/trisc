@@ -16,13 +16,22 @@ SECTIONS
     }
 
     .rodata : { *(.rodata*) }
+
+    /* Page tables (l0_table, l1_table) need 4KB alignment — emitted
+     * in .data via `.balign 4096` in mmu.s. Force the section itself
+     * onto a page boundary so the per-symbol alignment holds. */
+    . = ALIGN(4096);
     .data   : { *(.data*) }
 
     . = ALIGN(8);
     __bss_start = .;
     .bss    : { *(.bss*) *(COMMON) }
-    . = ALIGN(8);
+    . = ALIGN(4096);
     __bss_end = .;
+
+    /* Page pool starts here. The symbol is emitted page-aligned so
+     * vm.lsysl doesn't need to round up at runtime. */
+    _heap_start = .;
 
     /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) *(.ARM.*) }
 }

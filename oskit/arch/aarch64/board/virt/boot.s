@@ -45,6 +45,11 @@ _start:
     b    1b
 2:
 
+    // Turn the MMU on with an identity map before handing off to
+    // sysl. After mmu_init the CPU is running cached Normal memory
+    // at 0x40000000+ and Device memory for the MMIO region below.
+    bl   mmu_init
+
     bl   kernel_main
 
 halt:
