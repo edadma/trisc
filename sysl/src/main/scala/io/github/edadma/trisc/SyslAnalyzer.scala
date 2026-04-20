@@ -6,7 +6,7 @@ import SyslType.*
 class SyslAnalyzer:
   case class AnalysisError(msg: String, node: Any = null) extends RuntimeException(msg)
 
-  private case class SymInfo(name: String, typ: SyslType, mutable: Boolean)
+  private case class SymInfo(name: String, typ: SyslType, mutable: Boolean, isConst: Boolean = false)
   private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false)
 
   private val globalScope = new mutable.LinkedHashMap[String, SymInfo]
@@ -582,9 +582,27 @@ class SyslAnalyzer:
         case ImplDeclAST(_, _, _, _) =>
           // Deferred to registerImpls after all traits are known
           ()
-        case VarDeclAST(name, _, _, _, _, _, _) =>
+        case VarDeclAST(name, _, _, _, _, _, _, _) =>
           if globalScope.contains(name) then
             throw AnalysisError(s"duplicate global: '$name'", decl)
+
+    // Pre-pass: evaluate module-level `const` initializers eagerly so they are available
+    // to `within` range bounds and other contexts that resolve types before function bodies.
+    for decl <- program.decls do
+      decl match
+        case VarDeclAST(name, typOpt, init, _, _, _, _, true) =>
+          val declType = typOpt.map(resolveType).getOrElse(I32)
+          if !declType.isIntegral then
+            throw AnalysisError(s"const '$name' must have an integer type (found $declType); float/string/aggregate const is not yet supported", decl)
+          evalConstExprAST(init) match
+            case Some(v) =>
+              val masked = maskToType(v, declType)
+              compileTimeConstants(name) = masked
+              val mangled = if shouldMangle(name) then mangleName(name) else name
+              compileTimeConstants(mangled) = masked
+            case None =>
+              throw AnalysisError(s"const '$name' initializer is not compile-time evaluable", decl)
+        case _ =>
 
     // Intermediate pass: register impl blocks (traits now known; signatures may reference traits)
     for decl <- program.decls do
@@ -740,12 +758,24 @@ class SyslAnalyzer:
         validateTestAttr(fdAst, funInfo)
         TFunDecl(funInfo.name, tParams, retType, tBody, isPrivate, attrs, funInfo.isDef)
 
-      case VarDeclAST(name, typOpt, init, isPrivate, isMutable, _, isVolatile) =>
+      case VarDeclAST(name, typOpt, init, isPrivate, isMutable, _, isVolatile, isConst) =>
         scopeStack = new mutable.ArrayBuffer
         pushScope()
         val tInit0 = analyzeExpr(init)
         val declType = typOpt.map(resolveType).getOrElse(tInit0.typ)
         val tInit1 = coerceLiteral(tInit0, declType)
+        // `const` requires a compile-time-evaluable initializer.
+        if isConst then
+          if !declType.isIntegral then
+            throw AnalysisError(s"const '$name' must have an integer type (found $declType); float/string/aggregate const is not yet supported")
+          tryConstEval(tInit1) match
+            case Some(n) =>
+              val masked = maskToType(n, declType)
+              val mangledName = if shouldMangle(name) then mangleName(name) else name
+              compileTimeConstants(name) = masked
+              compileTimeConstants(mangledName) = masked
+            case None =>
+              throw AnalysisError(s"const '$name' initializer is not compile-time evaluable")
         // Constant folding: immutable vals with constant initializers become compile-time constants
         val tInit = if !isMutable then
           tryConstEval(tInit1) match
@@ -758,9 +788,12 @@ class SyslAnalyzer:
             case None => tInit1
         else tInit1
         val mangledVarName = if shouldMangle(name) then mangleName(name) else name
-        globalScope(name) = SymInfo(mangledVarName, declType, isMutable)
+        globalScope(name) = SymInfo(mangledVarName, declType, isMutable, isConst = isConst)
         scopeStack = null
-        TVarDecl(mangledVarName, declType, tInit, isPrivate, isVolatile)
+        // `const` declarations do not generate a storage slot — callers inline the folded value
+        // via compileTimeConstants lookup during VarRef analysis.
+        if isConst then TConstDecl(mangledVarName, declType)
+        else TVarDecl(mangledVarName, declType, tInit, isPrivate, isVolatile)
 
   private def warnDeprecated(name: String): Unit =
     if deprecations.contains(name) && !warnedDeprecations.contains(name) then
@@ -834,8 +867,35 @@ class SyslAnalyzer:
     case FuncTypeAST(params, ret, esc) => FuncType(params.map(resolveType), resolveType(ret), esc)
     case RefTypeAST(inner) => RefType(resolveType(inner))
 
+  /** AST-level constant evaluation for pre-pass const-initializer folding. Handles numeric
+   * literals, unary/binary arithmetic on ints, and references to already-folded consts. */
+  private def evalConstExprAST(e: ExpressionAST): Option[Long] = e match
+    case IntLitAST(v)         => Some(v)
+    case TypedIntLitAST(v, _) => Some(v)
+    case CharLitAST(c)        => Some(c.toLong)
+    case BoolLitAST(b)        => Some(if b then 1L else 0L)
+    case UnaryAST("-", inner) => evalConstExprAST(inner).map(-_)
+    case UnaryAST("+", inner) => evalConstExprAST(inner)
+    case UnaryAST("~", inner) => evalConstExprAST(inner).map(~_)
+    case UnaryAST("!", inner) => evalConstExprAST(inner).map(v => if v == 0 then 1L else 0L)
+    case BinaryAST(l, op, r) =>
+      for a <- evalConstExprAST(l); b <- evalConstExprAST(r) yield op match
+        case "+"  => a + b
+        case "-"  => a - b
+        case "*"  => a * b
+        case "/"  => if b == 0 then return None else a / b
+        case "%"  => if b == 0 then return None else a % b
+        case "&"  => a & b
+        case "|"  => a | b
+        case "^"  => a ^ b
+        case "<<" => a << b.toInt
+        case ">>" => a >> b.toInt
+        case _    => return None
+    case VarRefAST(n) if compileTimeConstants.contains(n) => Some(compileTimeConstants(n))
+    case _ => None
+
   /** Evaluate a `within` range bound as a compile-time literal against the base numeric type.
-   * Only supports literal numeric constants with optional unary sign; extend later for const vars. */
+   * Supports numeric literals with optional unary sign and references to `const` names. */
   private def evalRangeBound(aliasName: String, ra: RangeAST, base: SyslType): TypeRange =
     def evalInt(e: ExpressionAST, sign: Long = 1): Long = e match
       case IntLitAST(v)         => sign * v
@@ -843,14 +903,16 @@ class SyslAnalyzer:
       case CharLitAST(c)        => sign * c.toLong
       case UnaryAST("-", inner) => evalInt(inner, -sign)
       case UnaryAST("+", inner) => evalInt(inner, sign)
-      case _ => throw AnalysisError(s"range bound for '$aliasName' must be an integer literal")
+      case VarRefAST(n) if compileTimeConstants.contains(n) => sign * compileTimeConstants(n)
+      case _ => throw AnalysisError(s"range bound for '$aliasName' must be an integer literal or const")
     def evalFloat(e: ExpressionAST, sign: Double = 1.0): Double = e match
       case FloatLitAST(v)       => sign * v
       case IntLitAST(v)         => sign * v.toDouble
       case TypedIntLitAST(v, _) => sign * v.toDouble
       case UnaryAST("-", inner) => evalFloat(inner, -sign)
       case UnaryAST("+", inner) => evalFloat(inner, sign)
-      case _ => throw AnalysisError(s"range bound for '$aliasName' must be a numeric literal")
+      case VarRefAST(n) if compileTimeConstants.contains(n) => sign * compileTimeConstants(n).toDouble
+      case _ => throw AnalysisError(s"range bound for '$aliasName' must be a numeric literal or const")
     base.underlying match
       case _: IntType | _: UIntType =>
         val lo = evalInt(ra.lo)
@@ -1494,13 +1556,26 @@ class SyslAnalyzer:
 
   private def analyzeStmt(stmt: StmtAST): TStmt =
     stmt match
-      case VarStmtAST(name, typOpt, init, isMutable, isVolatile) =>
+      case VarStmtAST(name, typOpt, init, isMutable, isVolatile, isConst) =>
         val declared = typOpt.map(resolveType)
         val savedExp = currentExpected
         currentExpected = declared.orElse(currentExpected)
         val tInit0 = try analyzeExpr(init) finally currentExpected = savedExp
         val declType = declared.getOrElse(tInit0.typ)
         val tInit1 = coerceLiteral(tInit0, declType)
+        // `const`: initializer must be compile-time-evaluable; no storage is emitted.
+        if isConst then
+          if !declType.isIntegral then
+            throw AnalysisError(s"const '$name' must have an integer type (found $declType); float/string/aggregate const is not yet supported")
+          tryConstEval(tInit1) match
+            case Some(n) =>
+              val masked = maskToType(n, declType)
+              compileTimeConstants(name) = masked
+              if scopeStack != null then
+                currentScope(name) = SymInfo(name, declType, false, isConst = true)
+              return TExprStmt(TIntLit(masked, declType)) // no-op placeholder, dropped by codegen
+            case None =>
+              throw AnalysisError(s"const '$name' initializer is not compile-time evaluable")
         // Constant folding for local immutable vals
         val tInit = if !isMutable && declType.isIntegral then
           tryConstEval(tInit1) match
@@ -2089,6 +2164,12 @@ class SyslAnalyzer:
         else
           // Check for no-arg enum variant before falling through to variable lookup
           tryLookup(name) match
+            case Some(sym) if sym.isConst =>
+              // Inline compile-time constant — no load, no storage reference.
+              val v = compileTimeConstants.getOrElse(sym.name,
+                compileTimeConstants.getOrElse(name,
+                  throw AnalysisError(s"const '$name' missing folded value")))
+              TIntLit(v, sym.typ)
             case Some(sym) => TVarRef(sym.name, sym.typ)
             case None =>
               if variantToEnum.contains(name) then

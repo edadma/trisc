@@ -41,7 +41,7 @@ case class ImportDeclAST(modulePath: String, selectors: List[ImportSelector]) ex
 case class ExternFuncDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST], attributes: List[Attribute] = Nil) extends DeclAST
 case class ExternVarDeclAST(name: String, typ: TypeAST, attributes: List[Attribute] = Nil) extends DeclAST
 case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST], body: FunBodyAST, isPrivate: Boolean = false, typeParams: List[String] = Nil, typeBounds: Map[String, List[String]] = Map.empty, attributes: List[Attribute] = Nil, isDef: Boolean = false) extends DeclAST
-case class VarDeclAST(name: String, typ: Option[TypeAST], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true, attributes: List[Attribute] = Nil, isVolatile: Boolean = false) extends DeclAST
+case class VarDeclAST(name: String, typ: Option[TypeAST], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true, attributes: List[Attribute] = Nil, isVolatile: Boolean = false, isConst: Boolean = false) extends DeclAST
 case class StructDeclAST(name: String, fields: List[(String, TypeAST, Boolean)], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil) extends DeclAST
 case class EnumDeclAST(name: String, members: List[(String, Option[Long])], attributes: List[Attribute] = Nil) extends DeclAST
 case class DataEnumDeclAST(name: String, variants: List[EnumVariantAST], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil) extends DeclAST
@@ -79,7 +79,7 @@ case class BlockBodyAST(stmts: List[StmtAST]) extends FunBodyAST
 
 // Statements
 trait StmtAST extends Positional
-case class VarStmtAST(name: String, typ: Option[TypeAST], init: ExpressionAST, isMutable: Boolean = true, isVolatile: Boolean = false) extends StmtAST
+case class VarStmtAST(name: String, typ: Option[TypeAST], init: ExpressionAST, isMutable: Boolean = true, isVolatile: Boolean = false, isConst: Boolean = false) extends StmtAST
 case class DestructureStmtAST(names: List[String], init: ExpressionAST, isMutable: Boolean = false) extends StmtAST
 case class AssignStmtAST(target: String, value: ExpressionAST) extends StmtAST
 case class CompoundAssignStmtAST(target: String, op: String, value: ExpressionAST) extends StmtAST
