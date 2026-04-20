@@ -62,13 +62,18 @@ arch_wfi:
 
 // thread_exit — entry label a kernel thread "returns" into when its
 // entry function executes `ret`. `build_stack_frame` pre-loads x30
-// with this address. On TRISC/x86 the kernel patches this to a real
-// trampoline that issues SYS_EXIT; until the aarch64 port wires the
-// same logic in kernel.lsysl, this is a plain wfi loop so an errant
-// return is visible as "thread is alive but wedged" rather than a
-// silent fault.
+// with this address, so a thread can simply return and end up here.
+// Issue SYS_EXIT (3) so the scheduler terminates this thread
+// cleanly and frees its slot. The trailing branch is a safety net
+// that should never run (terminate_current never returns its
+// caller); leaving it as a wfi loop instead of an undefined
+// instruction means a corrupted SVC is visible as "wedged" rather
+// than a fault storm.
 .global thread_exit
 thread_exit:
+    mov  x8, #3                  // SYS_EXIT
+    mov  x0, #0
+    svc  #0
 1:  wfi
     b    1b
 
