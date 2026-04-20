@@ -30,7 +30,8 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
     import oskit.kernel.{kernel_init, create_thread, first_thread_ssp,
         kernel_stack_usp, kernel_stack_ssp, schedule,
         syscall_table, syscall_ssp_set, syscall_check_allowed,
-        create_process_suspended, resume_process}
+        create_process_suspended, resume_process,
+        register_syscall, syscall_return}
     import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
         ipc_send, ipc_recv, ipc_reply}
     import oskit.services.{get_thread_count, uptime, sleep, yield}
@@ -356,20 +357,34 @@ test for the context-switch asm.
 
 User-process demo (DEMO_MODE=3). Boots a single EL0 user process
 through the shared kernel's create_process_suspended + resume_process
-path. The user program is three instructions (hand-assembled into
-user_exit_code): mov x8, #93 (SYS_EXIT); mov x0, #0x42 (code); svc #0.
-When the kernel handles that SVC via the syscall_table path, the
-running thread transitions to STATE_TERMINATED and the scheduler
-runs out of ready threads — expected behavior for a one-shot test.
+path. The user program is 8 instructions (hand-assembled into the
+user page):
+  mov x8, #1   (SYS_PUTC); mov x0, #'U'; svc #0
+  mov x0, #'X'; svc #0
+  mov x8, #3   (SYS_EXIT); mov x0, #0x42; svc #0
+Proves the syscall path handles multiple round-trips with different
+syscall numbers and arg values. We see "UX" printed to UART, then
+the process exits cleanly and the scheduler halts.
 
-    val USER_EXIT_MOV_X8:   u32 = u32(0xD2800068)   // mov x8, #3  (SYS_EXIT)
-    val USER_EXIT_MOV_X0:   u32 = u32(0xD2800840)   // mov x0, #0x42
-    val USER_EXIT_SVC_ZERO: u32 = u32(0xD4000001)   // svc #0
+    val UINS_MOV_X8_1:    u32 = u32(0xD2800028)   // mov x8, #1
+    val UINS_MOV_X0_U:    u32 = u32(0xD2800AA0)   // mov x0, #'U' (0x55)
+    val UINS_SVC0:        u32 = u32(0xD4000001)   // svc #0
+    val UINS_MOV_X0_X:    u32 = u32(0xD2800B00)   // mov x0, #'X' (0x58)
+    val UINS_MOV_X8_3:    u32 = u32(0xD2800068)   // mov x8, #3
+    val UINS_MOV_X0_42:   u32 = u32(0xD2800840)   // mov x0, #0x42
+
+SYS_PUTC handler: write a single byte to the PL011 UART. Registered
+into syscall_table so user programs can print via services.putc().
+
+    sys_putc_handler(arg: int)
+        uart_putc(arg & 0xFF)
+        syscall_return(i64(0))
 
     kernel_main_user()
         uart_puts("[user] kernel_init...\n")
         kernel_init()
         ipc_init()
+        register_syscall(1, sys_putc_handler)
 
         uart_puts("[user] creating process PT\n")
         val new_pt = vm_create_process_pt()
@@ -382,9 +397,14 @@ runs out of ready threads — expected behavior for a one-shot test.
         uart_puthex(code_pa)
         uart_puts("\n")
         var w: *u32 = *u32(code_pa)
-        w[0] = USER_EXIT_MOV_X8
-        w[1] = USER_EXIT_MOV_X0
-        w[2] = USER_EXIT_SVC_ZERO
+        w[0] = UINS_MOV_X8_1         // mov x8, #1 (SYS_PUTC)
+        w[1] = UINS_MOV_X0_U         // mov x0, #'U'
+        w[2] = UINS_SVC0
+        w[3] = UINS_MOV_X0_X         // mov x0, #'X'  (x8 still 1)
+        w[4] = UINS_SVC0
+        w[5] = UINS_MOV_X8_3         // mov x8, #3 (SYS_EXIT)
+        w[6] = UINS_MOV_X0_42        // mov x0, #0x42
+        w[7] = UINS_SVC0
         sync_icache_line(i64(code_pa))
 
         val pid = create_process_suspended(
