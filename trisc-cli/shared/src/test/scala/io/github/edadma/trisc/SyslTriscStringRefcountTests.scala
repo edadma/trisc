@@ -1387,14 +1387,32 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
   }
 
   "closure with no rc-bearing captures: deinit_ptr is null (no walk needed)" in {
+    // `val f = ...` (no expected type) defaults to escaping per analyzer convention.
+    // → HeapEnv path → malloc. deinit_ptr=null since captures are non-rc-bearing.
     val asm = compile(
       """main()
         |    val a = 10
         |    val f = (x: int) -> x + a
         |""".stripMargin)
-    // Still mallocs (always-heap), but deinit is null
     asm should include("movi r4, malloc")
     asm should not include "__closure_env_deinit_"  // no per-id deinit registered
+  }
+
+  "stack-env optimization: closure as call arg with int capture has no malloc" in {
+    // Non-escaping context (closure passed to `apply(f: (int) -> int, ...)`) +
+    // non-rc-bearing captures → StackEnv → no malloc, no free, no dispatch.
+    // This is what makes closures usable in no-allocator (kernel/bare-metal) builds.
+    val asm = compile(
+      """apply(f: (int) -> int, x: int) -> int = f(x)
+        |
+        |main() -> int
+        |    val a = 10
+        |    apply(x -> x + a, 32)
+        |""".stripMargin)
+    asm should not include "movi r4, malloc"
+    asm should not include "movi r4, free"
+    asm should not include "__closure_env_dispatch"
+    asm should not include "__closure_env_deinit_"
   }
 
   "closure capturing struct-with-string field: env deinit walks struct" in {

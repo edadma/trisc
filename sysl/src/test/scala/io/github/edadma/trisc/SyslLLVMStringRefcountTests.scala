@@ -1295,16 +1295,33 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
   }
 
   "closure with no rc-bearing captures: deinit_ptr is null (no per-id deinit)" in {
+    // `val f = ...` (no expected type) defaults to escaping per analyzer convention.
+    // → HeapEnv path → malloc. deinit_ptr=null since captures are non-rc-bearing.
     val ir = compileLLVM(
       """main()
         |    val a = 10
         |    val f = (x: int) -> x + a
         |""".stripMargin)
-    // Always heap, but deinit_ptr stored as null
     ir should include("call i8* @malloc")
     ir should include regex """store i8\* null, i8\*\*"""
     // No per-id deinit registered
     ir should not include "@__closure_env_deinit_"
+  }
+
+  "stack-env optimization: closure as call arg with int capture has no malloc" in {
+    // Non-escaping context (closure passed to `apply(f: (int) -> int, ...)`) +
+    // non-rc-bearing captures → StackEnv → alloca, no malloc, no free.
+    val ir = compileLLVM(
+      """apply(f: (int) -> int, x: int) -> int = f(x)
+        |
+        |main() -> int
+        |    val a = 10
+        |    apply(x -> x + a, 32)
+        |""".stripMargin)
+    // No malloc/free for the closure env
+    ir should not include "call i8* @malloc"
+    ir should not include "@__closure_env_deinit_"
+    ir should not include "@__closure_env_dispatch"
   }
 
   // ====================================================================
