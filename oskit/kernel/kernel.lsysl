@@ -866,11 +866,11 @@ Used by ps and other user programs via ulib.
         kernel_continue_current()
 
     sys_thread_name_handler(arg: int)
-        // Copy name to caller's args page (0xBF000) so user processes
+        // Copy name to caller's info page so user processes
         // can read it — kernel BSS has no PTE_U on x86_64.
         val src = query_thread_name(arg)
         val nlen = query_thread_name_len(arg)
-        val dst = *byte(0xBF100)  // past args area in user page
+        val dst = *byte(INFO_PAGE_VA + 0x100)  // past args area in user page
         var ni = 0
         while ni < nlen
             dst[ni] = src[ni]
