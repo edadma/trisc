@@ -1534,4 +1534,363 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |    0
         |""".stripMargin, heapSize = 256) shouldBe 0
   }
+
+  // ====================================================================
+  // 14. Destructure pattern bindings (TDestructurePattern)
+  // ====================================================================
+
+  "destructure struct with string field extracts value" in {
+    runWithAlloc(
+      """struct Pair
+        |    name: string
+        |    n: int
+        |
+        |main() -> int
+        |    p = Pair("hi" + "!", 42)
+        |    p match
+        |        Pair(_, n) -> n
+        |""".stripMargin) shouldBe 42
+  }
+
+  "destructure bound string field usable in arm body" in {
+    runWithAlloc(
+      """struct Pair
+        |    name: string
+        |    n: int
+        |
+        |main() -> int
+        |    p = Pair("ho" + "ld", 1)
+        |    p match
+        |        Pair(s, _) -> if s == "hold" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "destructure with string field in loop — no heap leak" in {
+    runWithAlloc(
+      """struct Pair
+        |    name: string
+        |    n: int
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 40
+        |        val p = Pair("iter" + "_v", i)
+        |        val sum = p match
+        |            Pair(_, n) -> n
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  // ====================================================================
+  // 15. Closure descriptor copy (var g = f)
+  // ====================================================================
+
+  "closure descriptor copy (var g = f) does not double-decr heap env" in {
+    runWithAlloc(
+      """make() -> (int) -> int
+        |    val cap = "ab" + "cd"
+        |    (x: int) -> x + len(cap)
+        |
+        |main() -> int
+        |    val f = make()
+        |    val g = f
+        |    f(0) - g(0)
+        |""".stripMargin) shouldBe 0
+  }
+
+  "closure descriptor copy in loop — no use-after-free (heap pressure)" in {
+    runWithAlloc(
+      """make(i: int) -> (int) -> int
+        |    val cap = "iter" + "_v"
+        |    (x: int) -> x + len(cap) + i
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 30
+        |        val f = make(i)
+        |        val g = f
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 512) shouldBe 0
+  }
+
+  "closure descriptor reassignment in loop — no leak (heap pressure)" in {
+    runWithAlloc(
+      """make(i: int) -> (int) -> int
+        |    val cap = "iter" + "_v"
+        |    (x: int) -> x + len(cap) + i
+        |
+        |main() -> int
+        |    var f = make(0)
+        |    var i = 1
+        |    while i < 25
+        |        f = make(i)
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  // ====================================================================
+  // 16. &MyEnum (RefType(EnumType)) deinit
+  // ====================================================================
+
+  "new MyEnum(string) — heap enum reaches rc=0 walks active variant strings (heap pressure)" in {
+    runWithAlloc(
+      """enum E
+        |    Wrap(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 30
+        |        val e = new Wrap("iter" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "new MyEnum reassignment in loop — old enum's strings freed (heap pressure)" in {
+    runWithAlloc(
+      """enum E
+        |    Wrap(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var e = new Wrap("init" + "_v")
+        |    var i = 0
+        |    while i < 30
+        |        e = new Wrap("iter" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "new MyEnum with multi-string variant (heap pressure)" in {
+    runWithAlloc(
+      """enum E
+        |    Two(a: string, b: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 20
+        |        val e = new Two("aa" + "_v", "bb" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "new MyEnum with empty variant — no spurious decr (heap pressure)" in {
+    runWithAlloc(
+      """enum E
+        |    Wrap(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val e = new Empty()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 17. &MyStruct (RefType(StructType)) auto-deinit
+  // ====================================================================
+
+  "new MyStruct(string) — heap struct reaches rc=0 walks string fields (heap pressure)" in {
+    runWithAlloc(
+      """struct Holder
+        |    name: string
+        |    n: int
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 30
+        |        val h = new Holder("iter" + "_v", i)
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "new MyStruct reassignment in loop — old struct's strings freed (heap pressure)" in {
+    runWithAlloc(
+      """struct Holder
+        |    name: string
+        |
+        |main() -> int
+        |    var h = new Holder("init" + "_v")
+        |    var i = 0
+        |    while i < 30
+        |        h = new Holder("iter" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "new MyStruct with multi-string field (heap pressure)" in {
+    runWithAlloc(
+      """struct Pair
+        |    a: string
+        |    b: string
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 20
+        |        val p = new Pair("aa" + "_v", "bb" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "new MyStruct with no rc-bearing fields — no spurious decr (heap pressure)" in {
+    runWithAlloc(
+      """struct Counter
+        |    n: int
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val c = new Counter(i)
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // 18. TCall returning heap-env closure — caller decr's at scope exit
+  //     (funcKindOfExpr defaults TCall to HeapEnv when needsAllocExtern)
+  // ====================================================================
+
+  "val h = make_heap_closure() — caller decr's at scope exit (heap pressure)" in {
+    runWithAlloc(
+      """make() -> (int) -> int
+        |    val cap = "ab" + "cd"
+        |    (x: int) -> x + len(cap)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 20
+        |        val h = make()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "passthrough(closure) — callee returns borrowed funcparam, caller balances" in {
+    runWithAlloc(
+      """make() -> (int) -> int
+        |    val cap = "ab" + "cd"
+        |    (x: int) -> x + len(cap)
+        |
+        |passthrough(g: (int) -> int) -> (int) -> int = g
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 15
+        |        val original = make()
+        |        val passthru = passthrough(original)
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "if-expr returning closure — caller decr's at scope exit (heap pressure)" in {
+    runWithAlloc(
+      """make_a() -> (int) -> int
+        |    val cap = "aa" + "bb"
+        |    (x: int) -> x + len(cap)
+        |
+        |make_b() -> (int) -> int
+        |    val cap = "cc" + "dd"
+        |    (x: int) -> x * len(cap)
+        |
+        |choose(b: bool) -> (int) -> int =
+        |    if b then make_a() else make_b()
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 15
+        |        val f = choose(i % 2 == 0)
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "match-expr returning closure — caller decr's at scope exit (heap pressure)" in {
+    runWithAlloc(
+      """make_a() -> (int) -> int
+        |    val cap = "aa" + "bb"
+        |    (x: int) -> x + len(cap)
+        |
+        |make_b() -> (int) -> int
+        |    val cap = "cc" + "dd"
+        |    (x: int) -> x * len(cap)
+        |
+        |choose(n: int) -> (int) -> int =
+        |    n match
+        |        0 -> make_a()
+        |        else -> make_b()
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 15
+        |        val f = choose(i % 3)
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "closure stored in struct field — auto-deinit decrs env (heap pressure)" in {
+    runWithAlloc(
+      """struct Holder
+        |    cb: (int) -> int
+        |    name: string
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 12
+        |        val cap = "aa" + "bb"
+        |        val h = new Holder((x: int) -> x + len(cap), "h" + "h")
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "closure stored in enum variant — auto-deinit decrs env (heap pressure)" in {
+    runWithAlloc(
+      """enum Tagged
+        |    Some(cb: (int) -> int)
+        |    None
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 12
+        |        val cap = "xx" + "yy"
+        |        val h = new Some((x: int) -> x + len(cap))
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "closure field reassignment — old env decr'd, new env incr'd (heap pressure)" in {
+    runWithAlloc(
+      """struct Holder
+        |    cb: (int) -> int
+        |
+        |make() -> (int) -> int
+        |    val cap = "aa" + "bb"
+        |    (x: int) -> x + len(cap)
+        |
+        |main() -> int
+        |    var h = Holder(make())
+        |    var i = 0
+        |    while i < 10
+        |        h.cb = make()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
 }

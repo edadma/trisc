@@ -18,6 +18,17 @@ class SyslLLVMCodegen(target: String = "host"):
   // user functions. Each takes the data pointer (past the 16-byte rc/len header)
   // and decrs every element before returning.
   private val sliceElemDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType] // deinit name -> elem type
+
+  // Per-enum-type deinit functions to emit (for &MyEnum where the enum has
+  // string-bearing variants). Generated on demand when an enum ref is freed;
+  // each takes the data ptr (past the rc header) and walks the active
+  // variant's strings via emitEnumStringFieldsDecr.
+  private val enumDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType.EnumType] // deinit name -> enum type
+
+  // Auto-synthesized struct deinit functions (for &MyStruct where the struct
+  // has string-bearing fields and the user hasn't defined `TypeName.deinit`).
+  // Called by emitRefDecr at rc=0 before free().
+  private val structDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType.StructType] // deinit name -> struct type
   private var closureCounter = 0
   private val pendingClosures = new mutable.ListBuffer[(String, TClosure)] // (name, closure)
   // Per-closure-id env deinit functions to emit (only for closures whose captures carry rc content).
@@ -45,10 +56,23 @@ class SyslLLVMCodegen(target: String = "host"):
     else if c.escapes || c.captures.exists((_, t) => captureNeedsRc(t)) then FuncKind.HeapEnv
     else FuncKind.StackEnv
 
+  /** TCall / TIndirectCall return: assume HeapEnv. The callee can't return a
+    * StackEnv (its stack is gone after return), so the value is either NullEnv
+    * (env_ptr=null — dispatch's null-check skips) or HeapEnv (decr properly).
+    * Defaulting to HeapEnv closes the cross-function heap-env return leak with
+    * a tiny runtime null-check cost on NullEnv returns. LLVM unconditionally
+    * declares malloc/free in the preamble so there's no spurious-symbol concern. */
   private def funcKindOfExpr(e: TExpr): FuncKind = e match
     case c: TClosure => closureKindOf(c)
     case _: TFuncRef => FuncKind.NullEnv
+    case TVarRef(name, _) if funcBorrowParams.contains(name) =>
+      // FuncType params are borrowed from the caller — treat as HeapEnv (could
+      // be NullEnv at runtime; dispatch's null-check handles that). Lets the
+      // copy/return paths emit the right incr to balance shared ownership.
+      FuncKind.HeapEnv
     case TVarRef(name, _) => closureLocalKind.getOrElse(name, FuncKind.NullEnv)
+    case _: TCall | _: TIndirectCall | _: TInterfaceDispatch => FuncKind.HeapEnv
+    case _: TIfExpr | _: TMatchExpr => FuncKind.HeapEnv
     case _ => FuncKind.NullEnv
   private val funcWrappers = new mutable.LinkedHashMap[String, String] // original name -> wrapper name
   private val pendingWrappers = new mutable.ListBuffer[(String, String, List[SyslType], SyslType)] // (wrapperName, origName, params, retType)
@@ -142,6 +166,8 @@ class SyslLLVMCodegen(target: String = "host"):
     structTypes.clear()
     deinitFunctions.clear()
     sliceElemDeinitsNeeded.clear()
+    enumDeinitsNeeded.clear()
+    structDeinitsNeeded.clear()
     for decl <- program.decls do
       decl match
         case TStructDecl(name, fields, volFields) =>
@@ -216,6 +242,22 @@ class SyslLLVMCodegen(target: String = "host"):
       for (name, elem) <- pending do
         emittedSliceDeinits += name
         emitSliceDeinit(name, elem)
+    // Per-enum-type deinit functions (for &MyEnum with rc-bearing variants)
+    val emittedEnumDeinits = mutable.Set.empty[String]
+    while enumDeinitsNeeded.exists((n, _) => !emittedEnumDeinits.contains(n)) do
+      val pending = enumDeinitsNeeded.filterNot((n, _) => emittedEnumDeinits.contains(n)).toList
+      for (name, et) <- pending do
+        emittedEnumDeinits += name
+        emitEnumDeinit(name, et)
+
+    // Auto-synthesized per-struct-type deinit functions (for &MyStruct with
+    // rc-bearing fields and no user `TypeName.deinit`).
+    val emittedStructDeinits = mutable.Set.empty[String]
+    while structDeinitsNeeded.exists((n, _) => !emittedStructDeinits.contains(n)) do
+      val pending = structDeinitsNeeded.filterNot((n, _) => emittedStructDeinits.contains(n)).toList
+      for (name, st) <- pending do
+        emittedStructDeinits += name
+        emitStructDeinit(name, st)
     // Per-closure-id env deinit functions
     for (name, closure) <- closureEnvDeinitsNeeded do
       emitClosureEnvDeinit(name, closure)
@@ -428,6 +470,7 @@ class SyslLLVMCodegen(target: String = "host"):
     fun.body match
       case TExprBody(expr) =>
         val result = genExpr(expr)
+        emitFuncReturnIncrIfBorrowed(expr, result)
         val rt = exprType(expr)
         val finalVal = if isAggregate(expr.typ) then
           val loaded = newReg()
@@ -520,6 +563,7 @@ class SyslLLVMCodegen(target: String = "host"):
     closure.body match
       case TExprBody(expr) =>
         val result = genExpr(expr)
+        emitFuncReturnIncrIfBorrowed(expr, result)
         val rt = exprType(expr)
         val finalVal = if isAggregate(expr.typ) then
           val loaded = newReg()
@@ -640,6 +684,24 @@ class SyslLLVMCodegen(target: String = "host"):
               emit(s"  store $lt $loaded, $lt* $alloca")
               locals(name) = LocalVar(name, alloca, typ, isVolatile)
               emitStructStringFieldsIncr(alloca, st)
+            case _: SyslType.FuncType =>
+              // Closure descriptor: copy bytes into a fresh alloca so `var g = f`
+              // doesn't alias f's storage (which would cause double-decr at scope
+              // exit and shared-mutation through one binding to the other).
+              val src = genExpr(init)
+              val alloca = deferAlloca(lt)
+              val loaded = newReg()
+              emit(s"  $loaded = load $lt, $lt* $src")
+              emit(s"  store $lt $loaded, $lt* $alloca")
+              locals(name) = LocalVar(name, alloca, typ, isVolatile)
+              val rhsKind = funcKindOfExpr(init)
+              closureLocalKind(name) = rhsKind
+              // Descriptor copy (var g = f) shares env_ptr with source — incr env
+              // rc so each descriptor's scope-exit decr is balanced.
+              init match
+                case _: TVarRef if rhsKind == FuncKind.HeapEnv =>
+                  emitClosureDescrIncr(alloca)
+                case _ =>
             case _ =>
               // Aggregate variable: genExpr returns an alloca pointer — use it directly
               val ptr = genExpr(init)
@@ -647,9 +709,6 @@ class SyslLLVMCodegen(target: String = "host"):
               // Slice backref: increment if copying from a non-owned source
               if isSliceType(typ) && !isSliceOwned(init) then
                 emitSliceBackrefIncr(ptr)
-              // Closure descriptor: record env kind so scope-cleanup gates emitClosureDescrDecr.
-              if typ.isInstanceOf[SyslType.FuncType] then
-                closureLocalKind(name) = funcKindOfExpr(init)
         else
             val alloca = deferAlloca(lt)
             val value = genExpr(init)
@@ -707,6 +766,10 @@ class SyslLLVMCodegen(target: String = "host"):
               case et: SyslType.EnumType if structHasStringFields(et) =>
                 emitEnumStringFieldsDecr(local.reg, et)
               case _ =>
+            // Closure descriptor reassignment: decr old env before overwrite
+            if local.typ.isInstanceOf[SyslType.FuncType]
+              && closureLocalKind.get(target).contains(FuncKind.HeapEnv) then
+              emitClosureDescrDecr(local.reg)
             if isAggregate(local.typ) then
               // Aggregate reassignment: load value from source, store to target
               val loaded = newReg()
@@ -725,6 +788,14 @@ class SyslLLVMCodegen(target: String = "host"):
                 case et: SyslType.EnumType if structHasStringFields(et) && !isOwnedStruct(value) =>
                   emitEnumStringFieldsIncr(local.reg, et)
                 case _ =>
+              // Closure descriptor reassignment: track new kind, incr if borrowed copy
+              if local.typ.isInstanceOf[SyslType.FuncType] then
+                val rhsKind = funcKindOfExpr(value)
+                closureLocalKind(target) = rhsKind
+                value match
+                  case _: TVarRef if rhsKind == FuncKind.HeapEnv =>
+                    emitClosureDescrIncr(local.reg)
+                  case _ =>
             else
               val vt = exprType(value)
               val finalVal = emitSextIfNeeded(v, vt, lt, value.typ.isSigned)
@@ -756,6 +827,7 @@ class SyslLLVMCodegen(target: String = "host"):
 
       case TReturnStmt(Some(value)) =>
         val v = genExpr(value)
+        emitFuncReturnIncrIfBorrowed(value, v)
         val retType = llvmType(currentFunction.returnType)
         val vt = exprType(value)
         val finalVal = if isAggregate(value.typ) then
@@ -1020,6 +1092,10 @@ class SyslLLVMCodegen(target: String = "host"):
         if isSliceType(ft) then emitSliceBackrefDecr(gep, ft)
         // String field: decrement old buffer refcount before overwrite
         if isStringType(ft) then emitStringDescrDecr(gep)
+        // Closure field: decrement old env's rc before overwrite
+        ft match
+          case _: SyslType.FuncType => emitClosureDescrDecr(gep)
+          case _ =>
         val v = genExpr(value)
         val vol = if st.volatileFields.contains(fieldIndex) then " volatile" else ""
         if isAggregate(ft) then
@@ -1030,6 +1106,10 @@ class SyslLLVMCodegen(target: String = "host"):
           if isSliceType(ft) && !isSliceOwned(value) then emitSliceBackrefIncr(gep)
           // String field: increment new buffer refcount if not owned
           if isStringType(ft) && !isOwnedString(value) then emitStringDescrIncr(gep)
+          // Closure field: increment new env's rc if borrowed source
+          ft match
+            case _: SyslType.FuncType if !isOwnedClosure(value) => emitClosureDescrIncr(gep)
+            case _ =>
         else
           emit(s"  store$vol $fieldType $v, $fieldType* $gep")
 
@@ -1680,6 +1760,8 @@ class SyslLLVMCodegen(target: String = "host"):
           fieldSyslType match
             case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStruct(arg) =>
               emitStructStringFieldsIncr(gep, nested)
+            case _: SyslType.FuncType if !isOwnedClosure(arg) =>
+              emitClosureDescrIncr(gep)
             case _ =>
         alloca
 
@@ -2283,15 +2365,27 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  $typedData = bitcast i8* $dataPtr to $structLt*")
         for (arg, i) <- args.zipWithIndex do
           val v = genExpr(arg)
-          val fieldType = llvmType(st.fields(i)._2)
+          val rawFieldType = st.fields(i)._2
+          val fieldType = llvmType(rawFieldType)
           val gep = newReg()
           emit(s"  $gep = getelementptr $structLt, $structLt* $typedData, i32 0, i32 $i")
-          val storeVal = if isAggregate(st.fields(i)._2) then
+          val storeVal = if isAggregate(rawFieldType) then
             val loaded = newReg()
             emit(s"  $loaded = load $fieldType, $fieldType* $v")
             loaded
           else v
           emit(s"  store $fieldType $storeVal, $fieldType* $gep")
+          // Borrowed string field: incr the buffer (caller still owns its copy)
+          if isStringType(rawFieldType) && !isOwnedString(arg) then
+            emitStringDescrIncr(gep)
+          rawFieldType match
+            case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStruct(arg) =>
+              emitStructStringFieldsIncr(gep, nested)
+            case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStruct(arg) =>
+              emitEnumStringFieldsIncr(gep, nested)
+            case _: SyslType.FuncType if !isOwnedClosure(arg) =>
+              emitClosureDescrIncr(gep)
+            case _ =>
         dataPtr // return pointer to data (past refcount)
 
       case TNewArray(elemType, size) =>
@@ -2330,6 +2424,60 @@ class SyslLLVMCodegen(target: String = "host"):
         dataPtr
 
       // ===== Enums =====
+
+      case TNewEnum(et, variantIndex, args) =>
+        // Heap-allocated ref-counted enum: [refcount_i64 | tag_i32 | padding | variant_data...].
+        // Layout matches TEnumConstruct's value form, but in malloc'd memory with an
+        // 8-byte rc header. Returns a data pointer (past the rc header) — same convention
+        // as TNew. RefType(EnumType) deinit walks the active variant before free.
+        val dataSize = et.sizeOf
+        val totalSize = dataSize + 8
+        val buf = newReg()
+        emit(s"  $buf = call i8* @malloc(i64 $totalSize)")
+        val rcPtr = newReg()
+        emit(s"  $rcPtr = bitcast i8* $buf to i64*")
+        emit(s"  store i64 1, i64* $rcPtr")
+        val dataPtr = newReg()
+        emit(s"  $dataPtr = getelementptr i8, i8* $buf, i64 8")
+        emit(s"  call void @llvm.memset.p0i8.i64(i8* $dataPtr, i8 0, i64 $dataSize, i1 false)")
+        // Store tag at data offset 0
+        val tagPtr = newReg()
+        emit(s"  $tagPtr = bitcast i8* $dataPtr to i32*")
+        emit(s"  store i32 $variantIndex, i32* $tagPtr")
+        // Store variant fields at data + dataOffset
+        if args.nonEmpty then
+          val dataOffset = et.dataOffset
+          val variantFields = et.variants(variantIndex)._2
+          var fieldOffset = 0L
+          for (arg, i) <- args.zipWithIndex do
+            val (_, fieldType) = variantFields(i)
+            val align = fieldType.alignOf
+            fieldOffset = ((fieldOffset + align - 1) / align) * align
+            val v = genExpr(arg)
+            val ft = llvmType(fieldType)
+            val fieldAddr = newReg()
+            emit(s"  $fieldAddr = getelementptr i8, i8* $dataPtr, i64 ${dataOffset + fieldOffset}")
+            val typedAddr = newReg()
+            emit(s"  $typedAddr = bitcast i8* $fieldAddr to $ft*")
+            val storeVal = if isAggregate(fieldType) then
+              val loaded = newReg()
+              emit(s"  $loaded = load $ft, $ft* $v")
+              loaded
+            else v
+            emit(s"  store $ft $storeVal, $ft* $typedAddr")
+            // Borrowed string field: incr buffer (caller still owns its copy)
+            if isStringType(fieldType) && !isOwnedString(arg) then
+              emitStringDescrIncr(typedAddr)
+            fieldType match
+              case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStruct(arg) =>
+                emitStructStringFieldsIncr(typedAddr, nested)
+              case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStruct(arg) =>
+                emitEnumStringFieldsIncr(typedAddr, nested)
+              case _: SyslType.FuncType if !isOwnedClosure(arg) =>
+                emitClosureDescrIncr(typedAddr)
+              case _ =>
+            fieldOffset += fieldType.sizeOf
+        dataPtr // return ptr to data (past rc header) — same convention as TNew
 
       case TEnumConstruct(et, variantIndex, args) =>
         val totalSize = et.sizeOf
@@ -2373,6 +2521,8 @@ class SyslLLVMCodegen(target: String = "host"):
                 emitStructStringFieldsIncr(typedAddr, nested)
               case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStruct(arg) =>
                 emitEnumStringFieldsIncr(typedAddr, nested)
+              case _: SyslType.FuncType if !isOwnedClosure(arg) =>
+                emitClosureDescrIncr(typedAddr)
               case _ =>
             fieldOffset += fieldType.sizeOf
         alloca
@@ -2465,6 +2615,8 @@ class SyslLLVMCodegen(target: String = "host"):
                 val cmp = newReg()
                 emit(s"  $cmp = icmp eq i32 $tag, $variantIdx")
                 cmp
+              case _: TDestructurePattern =>
+                "true" // destructure always matches
               case _ =>
                 emit(s"  ; TODO: match pattern ${pat.getClass.getSimpleName}")
                 "true"
@@ -2506,7 +2658,7 @@ class SyslLLVMCodegen(target: String = "host"):
           // Snapshot pre-arm locals BEFORE binding variant fields, so the bindings
           // are treated as arm-scoped and removed when the arm exits.
           val preArmLocals = locals.keySet.toSet
-          // Bind variant fields if this is a variant pattern
+          // Bind variant/destructure fields if this is a binding pattern
           arm.patterns.headOption match
             case Some(TVariantPattern(et, variantIdx, bindings, fieldTypes)) =>
               val dataOffset = et.dataOffset
@@ -2533,6 +2685,24 @@ class SyslLLVMCodegen(target: String = "host"):
                     locals(bName) = LocalVar(bName, alloc, ft)
                 }
                 fOffset += ft.sizeOf
+            case Some(TDestructurePattern(st, bindings, fieldTypes)) =>
+              val cst = canonicalStruct(st)
+              val structLt = llvmType(cst)
+              for (binding, j) <- bindings.zipWithIndex do
+                val ft = fieldTypes(j)
+                binding.foreach { bName =>
+                  val flt = llvmType(ft)
+                  val fAddr = newReg()
+                  emit(s"  $fAddr = getelementptr $structLt, $structLt* $scrut, i32 0, i32 $j")
+                  if isAggregate(ft) then
+                    locals(bName) = LocalVar(bName, fAddr, ft)
+                  else
+                    val alloc = deferAlloca(flt)
+                    val loaded = newReg()
+                    emit(s"  $loaded = load $flt, $flt* $fAddr")
+                    emit(s"  store $flt $loaded, $flt* $alloc")
+                    locals(bName) = LocalVar(bName, alloc, ft)
+                }
             case _ => // no bindings needed
           val savedHR = hasReturned
           hasReturned = false
@@ -3377,11 +3547,15 @@ class SyslLLVMCodegen(target: String = "host"):
 
   private def isStringType(t: SyslType): Boolean = t == SyslType.StringType
 
-  /** True if a value type (recursively) contains any string buffers needing rc.
-    * Recurses through value-struct fields, value-array elements, and enum
-    * variant fields. Stops at refs/pointers/slices (handled separately). */
+  /** True if a value type (recursively) contains any rc-bearing content: string
+    * buffers or closure descriptors with heap envs. Recurses through value-struct
+    * fields, value-array elements, and enum variant fields. Stops at refs/pointers/
+    * slices (handled separately). FuncType is included because closure descriptors
+    * carry an env_ptr that may point to a heap env; the runtime null-check in
+    * emitRefDecr makes always-decr safe for NullEnv descriptors too. */
   private def structHasStringFields(t: SyslType): Boolean = t match
     case _ if isStringType(t) => true
+    case _: SyslType.FuncType => true
     case st: SyslType.StructType =>
       val resolved = canonicalStruct(st)
       resolved.fields.exists((_, ft) => structHasStringFields(ft))
@@ -3484,14 +3658,56 @@ class SyslLLVMCodegen(target: String = "host"):
     emit("}")
     emit("")
 
+  /** Auto-synthesized per-struct-type deinit. Called when freeing a `&MyStruct`
+    * whose fields carry rc content and the user hasn't defined
+    * `TypeName.deinit`. Receives the struct's data ptr (past the rc header)
+    * and decrs each string-bearing field. Buffer itself is freed by the
+    * caller's emitRefDecr after this returns. */
+  private def emitStructDeinit(name: String, st: SyslType.StructType): Unit =
+    val structLt = llvmType(st)
+    regCounter = 0
+    labelCounter = 0
+    emit(s"; struct deinit: $name")
+    emit(s"define i32 @$name(i8* %data) {")
+    emit("entry:")
+    val typed = newReg()
+    emit(s"  $typed = bitcast i8* %data to $structLt*")
+    emitStructStringFieldsDecr(typed, st)
+    emit("  ret i32 0")
+    emit("}")
+    emit("")
+
+  /** Per-enum-type deinit. Called when freeing a `&MyEnum` whose active variant
+    * carries rc content. Receives the enum's data ptr (past the rc header) and
+    * walks the active variant's strings via emitEnumStringFieldsDecr. The buffer
+    * itself is freed by the caller's emitRefDecr after this returns. */
+  private def emitEnumDeinit(name: String, et: SyslType.EnumType): Unit =
+    val enumLt = llvmType(et)
+    regCounter = 0
+    labelCounter = 0
+    emit(s"; enum deinit: $name")
+    emit(s"define i32 @$name(i8* %data) {")
+    emit("entry:")
+    val typed = newReg()
+    emit(s"  $typed = bitcast i8* %data to $enumLt*")
+    emitEnumStringFieldsDecr(typed, et)
+    emit("  ret i32 0")
+    emit("}")
+    emit("")
+
   /** Generalized rc walker for any value type at `addr`. Handles strings,
-    * value structs (recurses), value arrays (loops over elements), and value
-    * enums (runtime tag-dispatch). No-op for any type without string content. */
+    * closure descriptors (heap env decr), value structs (recurses), value arrays
+    * (loops over elements), and value enums (runtime tag-dispatch). No-op for any
+    * type without string content. */
   private def emitValueRC(addr: String, t: SyslType, incr: Boolean): Unit =
     if !structHasStringFields(t) then return
     if isStringType(t) then
       if incr then emitStringDescrIncr(addr) else emitStringDescrDecr(addr)
     else t match
+      case _: SyslType.FuncType =>
+        // Closure descriptor at addr (16 bytes {func_ptr, env_ptr}). env_ptr is null
+        // for NullEnv closures; the null-check inside emitRefDecr makes always-walk safe.
+        if incr then emitClosureDescrIncr(addr) else emitClosureDescrDecr(addr)
       case st: SyslType.StructType =>
         if incr then emitStructStringFieldsIncr(addr, st) else emitStructStringFieldsDecr(addr, st)
       case SyslType.ArrayType(elem, count) =>
@@ -3504,7 +3720,9 @@ class SyslLLVMCodegen(target: String = "host"):
         if incr then emitEnumStringFieldsIncr(addr, et) else emitEnumStringFieldsDecr(addr, et)
       case _ =>
 
-  /** Null out string descriptor data ptrs in a value type (recurses through structs/arrays/enums). */
+  /** Null out string descriptor data ptrs (and closure env_ptr) in a value type
+    * so a later cleanup pass sees null and skips the decrement. Recurses through
+    * structs/arrays/enums. */
   private def emitValueNull(addr: String, t: SyslType): Unit =
     if !structHasStringFields(t) then return
     if isStringType(t) then
@@ -3512,6 +3730,11 @@ class SyslLLVMCodegen(target: String = "host"):
       emit(s"  $pgep = getelementptr %struct.string, %struct.string* $addr, i32 0, i32 0")
       emit(s"  store i8* null, i8** $pgep")
     else t match
+      case _: SyslType.FuncType =>
+        // Null env_ptr field (index 1) so a later emitClosureDescrDecr's null-check skips.
+        val envGep = newReg()
+        emit(s"  $envGep = getelementptr %struct.closure, %struct.closure* $addr, i32 0, i32 1")
+        emit(s"  store i8* null, i8** $envGep")
       case st: SyslType.StructType =>
         emitStructStringFieldsNull(addr, st)
       case SyslType.ArrayType(elem, count) =>
@@ -3599,6 +3822,16 @@ class SyslLLVMCodegen(target: String = "host"):
     case _: TStructConstruct => true
     case _: TEnumConstruct => true
     case _: TCall | _: TIndirectCall => true
+    case _: TIfExpr | _: TMatchExpr => true
+    case _ => false
+
+  /** True for expressions that produce a freshly-owned closure descriptor — caller
+    * has the only share of the env (no copy-incr needed when storing into a struct/
+    * enum field). TVarRef/TFieldAccess fall through as borrowed. */
+  private def isOwnedClosure(expr: TExpr): Boolean = expr match
+    case _: TClosure => true       // fresh env (rc=1) or NullEnv
+    case _: TFuncRef => true       // NullEnv
+    case _: TCall | _: TIndirectCall | _: TInterfaceDispatch => true
     case _: TIfExpr | _: TMatchExpr => true
     case _ => false
 
@@ -3708,9 +3941,31 @@ class SyslLLVMCodegen(target: String = "host"):
 
   /** Look up deinit function name for a RefType's inner type. */
   private def deinitFor(typ: SyslType): Option[String] = typ match
-    case SyslType.RefType(SyslType.StructType(name, _, _)) => deinitFunctions.get(name)
+    case SyslType.RefType(st @ SyslType.StructType(name, _, _)) =>
+      deinitFunctions.get(name).orElse(structDeinitFor(st))
     case SyslType.RefType(SyslType.SliceType(elem)) => sliceDeinitFor(elem)
+    case SyslType.RefType(et: SyslType.EnumType) => enumDeinitFor(et)
     case _ => None
+
+  /** Mangled name for a per-enum-type deinit function. Registers the type so
+    * the function body is emitted at the end of generate(). Returns None if no
+    * variant carries rc content (no walk needed; just free). */
+  private def enumDeinitFor(et: SyslType.EnumType): Option[String] =
+    if !structHasStringFields(et) then None
+    else
+      val name = s"__enum_deinit_${et.name}"
+      enumDeinitsNeeded(name) = et
+      Some(name)
+
+  /** Auto-synthesized struct deinit: walks string fields before free. Only
+    * registered for structs with rc-bearing fields and no user-defined
+    * `TypeName.deinit` (which takes precedence via `deinitFunctions`). */
+  private def structDeinitFor(st: SyslType.StructType): Option[String] =
+    if !structHasStringFields(st) then None
+    else
+      val name = s"__struct_deinit_${st.name}"
+      structDeinitsNeeded(name) = st
+      Some(name)
 
   /** True if a slice element type carries refcounted content that must be
     * decr'd before the backing buffer is freed. */
@@ -3820,6 +4075,26 @@ class SyslLLVMCodegen(target: String = "host"):
     val envPtr = newReg()
     emit(s"  $envPtr = load i8*, i8** $envGep")
     emitRefDecr(envPtr, 16, Some("__closure_env_dispatch"))
+
+  /** Increment env's rc via descriptor's env_ptr. Used when copying a
+    * descriptor (var g = f) so both descriptors share the env. */
+  private def emitClosureDescrIncr(descrAlloca: String): Unit =
+    val envGep = newReg()
+    emit(s"  $envGep = getelementptr %struct.closure, %struct.closure* $descrAlloca, i32 0, i32 1")
+    val envPtr = newReg()
+    emit(s"  $envPtr = load i8*, i8** $envGep")
+    emitRefIncr(envPtr, 16)
+
+  /** When a function returns a borrowed FuncType local (param OR HeapEnv local),
+    * incr the env so the caller's TCall=HeapEnv decr balances. `descAlloca` is
+    * the descriptor pointer (genExpr's result for an aggregate). No-op for any
+    * other expression. */
+  private def emitFuncReturnIncrIfBorrowed(value: TExpr, descAlloca: String): Unit =
+    value match
+      case TVarRef(_, t) if t.isInstanceOf[SyslType.FuncType]
+        && funcKindOfExpr(value) == FuncKind.HeapEnv =>
+        emitClosureDescrIncr(descAlloca)
+      case _ =>
 
   /** Emit inline refcount decrement + free when count reaches 0.
     * ptr is the data pointer (past header).

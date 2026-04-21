@@ -869,8 +869,8 @@ class SyslAnalyzer:
       case "float" | "f32"  => F32
       case "byte" | "u8"  => U8
       case "i8"  => I8
-      case "i16"  => I16
-      case "u16"  => U16
+      case "short" | "i16"  => I16
+      case "ushort" | "u16"  => U16
       case "bool" => BoolType
       case "void" => VoidType
       case "string" => StringType

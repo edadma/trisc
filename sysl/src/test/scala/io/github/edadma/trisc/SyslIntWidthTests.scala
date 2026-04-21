@@ -58,6 +58,24 @@ class SyslIntWidthTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 42
   }
 
+  "short is alias for i16" in {
+    eval(
+      """main() -> int
+        |    var x: short = 1000
+        |    var y: i16 = x
+        |    int(y)
+        |""".stripMargin) shouldBe 1000
+  }
+
+  "ushort is alias for u16" in {
+    eval(
+      """main() -> int
+        |    var x: ushort = 50000
+        |    var y: u16 = x
+        |    int(y)
+        |""".stripMargin) shouldBe 50000
+  }
+
   "char is alias for u32" in {
     eval(
       """main() -> int

@@ -26,6 +26,18 @@ class SyslTriscCodegen(addresses: Int = 4):
   // +8, data at +16) and decrs each element before returning.
   private val sliceElemDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType] // deinit name → elem type
 
+  // Enum deinit functions to emit (for &MyEnum where the enum has string-bearing
+  // variants). Generated on demand when an enum ref is freed; emitted after all
+  // user functions. Each takes r1 = data ptr (past the rc header) and walks the
+  // active variant's strings before returning.
+  private val enumDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType.EnumType] // deinit name → enum type
+
+  // Auto-synthesized struct deinit functions (for &MyStruct where the struct has
+  // string-bearing fields AND the user hasn't defined `TypeName.deinit`). Called
+  // by emitRefDecr at rc=0 before free(). Takes r1 = data ptr (past rc header)
+  // and walks string fields to decr them.
+  private val structDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType.StructType] // deinit name → struct type
+
   // Pending closure functions to generate after all regular functions
   private var closureCounter = 0
   private val pendingClosures = new mutable.ListBuffer[(String, TClosure)]
@@ -69,19 +81,19 @@ class SyslTriscCodegen(addresses: Int = 4):
     else if c.escapes || c.captures.exists((_, t) => captureNeedsRc(t)) then FuncKind.HeapEnv
     else FuncKind.StackEnv
 
-  /** Determine the kind of FuncType produced by an arbitrary expression. Used at
-    * TVarStmt to record the kind of a newly-bound FuncType local. Default for
-    * uncategorized RHS forms is NullEnv (skip-decr) — safe re: the linker (no
-    * stray `free` symbol pulled in by what may be a plain function pointer).
-    * Trade-off: if the RHS actually produces a heap-env closure (e.g. a function
-    * call that returns an escaping closure with captures), we leak its env.
-    * Marking those callers/callees explicitly (escape analysis on returns,
-    * annotations) would be needed to recover the decr without false `free`
-    * pulls. Currently a known sibling-spread item. */
   private def funcKindOfExpr(e: TExpr): FuncKind = e match
     case c: TClosure => closureKindOf(c)
     case _: TFuncRef => FuncKind.NullEnv
+    case TVarRef(name, _) if funcBorrowParams.contains(name) =>
+      // FuncType params are borrowed from the caller — treat as HeapEnv (could
+      // be NullEnv at runtime; dispatch's null-check handles that). Lets the
+      // copy/return paths emit the right incr to balance shared ownership.
+      FuncKind.HeapEnv
     case TVarRef(name, _) => closureLocalKind.getOrElse(name, FuncKind.NullEnv)
+    case _: TCall | _: TIndirectCall | _: TInterfaceDispatch =>
+      if needsAllocExtern then FuncKind.HeapEnv else FuncKind.NullEnv
+    case _: TIfExpr | _: TMatchExpr =>
+      if needsAllocExtern then FuncKind.HeapEnv else FuncKind.NullEnv
     case _ => FuncKind.NullEnv
 
   // Interface tables: (struct, interface) → itable label + method function names
@@ -95,6 +107,8 @@ class SyslTriscCodegen(addresses: Int = 4):
     stringLiterals.clear()
     deinitFunctions.clear()
     sliceElemDeinitsNeeded.clear()
+    enumDeinitsNeeded.clear()
+    structDeinitsNeeded.clear()
     needsAllocExtern = scanNeedsAlloc(program)  // pre-scan so rc-bracket gates are correct from the start
     needsFreeExtern = false
     // Extract module prefix for unique symbol names across compilation units
@@ -168,6 +182,24 @@ class SyslTriscCodegen(addresses: Int = 4):
       for (name, elem) <- pending do
         emittedSliceDeinits += name
         emitSliceDeinit(name, elem)
+
+    // Emit per-enum-type deinit functions (registered when freeing an enum ref
+    // whose active variant carries rc content).
+    val emittedEnumDeinits = mutable.Set.empty[String]
+    while enumDeinitsNeeded.exists((n, _) => !emittedEnumDeinits.contains(n)) do
+      val pending = enumDeinitsNeeded.filterNot((n, _) => emittedEnumDeinits.contains(n)).toList
+      for (name, et) <- pending do
+        emittedEnumDeinits += name
+        emitEnumDeinit(name, et)
+
+    // Emit auto-synthesized struct deinit functions (registered when freeing a
+    // struct ref whose fields carry rc content and no user deinit exists).
+    val emittedStructDeinits = mutable.Set.empty[String]
+    while structDeinitsNeeded.exists((n, _) => !emittedStructDeinits.contains(n)) do
+      val pending = structDeinitsNeeded.filterNot((n, _) => emittedStructDeinits.contains(n)).toList
+      for (name, st) <- pending do
+        emittedStructDeinits += name
+        emitStructDeinit(name, st)
 
     // Emit per-closure-id env deinit functions (walk captures to decr rc content)
     for (name, closure) <- closureEnvDeinitsNeeded do
@@ -505,11 +537,35 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   // Get deinit function name for a ref type, if one exists
   private def deinitFor(typ: SyslType): Option[String] = typ match
-    case SyslType.RefType(SyslType.StructType(name, _, _)) if deinitFunctions.contains(name) =>
+    case SyslType.RefType(st @ SyslType.StructType(name, _, _)) if deinitFunctions.contains(name) =>
       Some(deinitFunctions(name))
+    case SyslType.RefType(st: SyslType.StructType) =>
+      structDeinitFor(st)
     case SyslType.RefType(SyslType.SliceType(elem)) =>
       sliceDeinitFor(elem)
+    case SyslType.RefType(et: SyslType.EnumType) =>
+      enumDeinitFor(et)
     case _ => None
+
+  // Mangled name for a per-enum-type deinit function. Registers the type so the
+  // function body is emitted at the end of generate(). Returns None if no
+  // variant carries rc content (no walk needed; the buffer is just freed).
+  private def enumDeinitFor(et: SyslType.EnumType): Option[String] =
+    if !structHasStringFields(et) then None
+    else
+      val name = s"__enum_deinit_${modulePrefix}_${et.name}".replace("__", "_")
+      enumDeinitsNeeded(name) = et
+      Some(name)
+
+  // Auto-synthesized struct deinit: walks string fields before free. Only
+  // registered for structs with no user-defined deinit; if the user writes
+  // `TypeName.deinit(...)` that takes precedence via `deinitFunctions`.
+  private def structDeinitFor(st: SyslType.StructType): Option[String] =
+    if !structHasStringFields(st) then None
+    else
+      val name = s"__struct_deinit_${modulePrefix}_${st.name}".replace("__", "_")
+      structDeinitsNeeded(name) = st
+      Some(name)
 
   // True if a slice element type carries refcounted content that must be decr'd
   // before the backing buffer is freed.
@@ -665,11 +721,15 @@ class SyslTriscCodegen(addresses: Int = 4):
       case _ => false
     }
 
-  // True if a value type (recursively) holds any string fields whose buffers need RC.
-  // Stops at refs/pointers/slices (handled by their own paths). Recurses through
-  // value-struct fields, value-array elements, and enum variant fields.
+  // True if a value type (recursively) holds any rc-bearing content: string buffers
+  // or closure descriptors with heap envs. Stops at refs/pointers/slices (handled by
+  // their own paths). Recurses through value-struct fields, value-array elements,
+  // and enum variant fields. FuncType is included because closure descriptors carry
+  // an env_ptr that may point to a heap-allocated env (rc-tracked); the runtime
+  // null-check in emitRefDecr makes always-decr safe for NullEnv descriptors too.
   private def structHasStringFields(t: SyslType): Boolean = t match
     case SyslType.StringType => true
+    case _: SyslType.FuncType => true
     case st: SyslType.StructType =>
       st.fields.exists((_, ft) => structHasStringFields(ft))
     case SyslType.ArrayType(elem, _) => structHasStringFields(elem)
@@ -700,6 +760,16 @@ class SyslTriscCodegen(addresses: Int = 4):
     case _: TIfExpr | _: TMatchExpr => true
     case _ => false
 
+  // Expressions that produce a freshly-owned closure descriptor (caller has the only
+  // share of the env — no copy-incr needed when storing into a struct/enum field).
+  // TVarRef and TFieldAccess fall through as "borrowed" — incr needed.
+  private def isOwnedClosureExpr(expr: TExpr): Boolean = expr match
+    case _: TClosure => true       // fresh env (rc=1 from malloc) or NullEnv
+    case _: TFuncRef => true       // NullEnv (no env to track)
+    case _: TCall | _: TIndirectCall | _: TInterfaceDispatch => true
+    case _: TIfExpr | _: TMatchExpr => true
+    case _ => false
+
   // Increment or decrement the RC of every string field (recursively into nested
   // value-struct fields and value-array elements) inside a struct at [r{baseReg} + baseOff].
   // Clobbers r3, r4 (via emitRefIncr/Decr) and uses r1 for the field ptr. baseReg
@@ -722,6 +792,13 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  ldd r1, r1, r0")
         if incr then emitRefIncr(1, 8) else emitRefDecr(1, 8)
         emit("  popd r1")
+      case _: SyslType.FuncType =>
+        // Closure descriptor at [baseReg+baseOff] is 16 bytes {func_ptr, env_ptr}.
+        // env_ptr is null for NullEnv closures (descr just literal func ptr) — the
+        // null-check inside emitRefDecr makes always-walk safe. emitClosureDescr*
+        // operates on the descriptor's address.
+        if incr then emitClosureDescrIncr(baseReg, baseOff)
+        else emitClosureDescrDecr(baseReg, baseOff)
       case nested: SyslType.StructType if structHasStringFields(nested) =>
         emitStructStringFieldsRC(baseReg, baseOff, nested, incr)
       case SyslType.ArrayType(elem, count) if structHasStringFields(elem) =>
@@ -802,6 +879,60 @@ class SyslTriscCodegen(addresses: Int = 4):
     emit("  addi r3, r3, -1")
     emit(s"  bra $loop")
     emit(s"$done")
+    emit("  mov r7, r5")
+    emit("  popd r5")
+    emit("  popd r6")
+    emit("  jalr r0, r6")
+
+  /** Auto-synthesized per-struct-type deinit. Called when freeing a `&MyStruct`
+    * whose fields carry rc content and the user hasn't defined a custom
+    * `TypeName.deinit`. r1 = data ptr (past the 8-byte rc header). Walks string
+    * fields via emitStructStringFieldsRC and returns. Buffer itself is freed by
+    * emitRefDecr's free() call after this returns.
+    */
+  private def emitStructDeinit(name: String, st: SyslType.StructType): Unit =
+    emit(s"# struct deinit: $name")
+    emit(s"global $name, func, 1 i64 i64")
+    emit(s"$name:")
+    emit("  pshd r6")
+    emit("  pshd r5")
+    emit("  mov r5, r7")
+    // Save data ptr at fp-8; reload before the walk so inner free's don't
+    // clobber it (same protection as the enum deinit uses).
+    emit("  pshd r1")
+    emitAddImm(1, 5, -8)
+    emit("  ldd r1, r1, r0")
+    emitStructStringFieldsRC(1, 0, st, incr = false)
+    emit("  mov r7, r5")
+    emit("  popd r5")
+    emit("  popd r6")
+    emit("  jalr r0, r6")
+
+  /** Per-enum-type deinit function. Called when freeing a `&MyEnum` whose
+    * active variant carries rc content (string fields, nested struct/enum/array
+    * with strings). r1 = data ptr (past the 8-byte rc header). Walks the active
+    * variant via emitEnumStringFieldsRC (tag-dispatched), then returns. Buffer
+    * itself is freed by emitRefDecr's free() call after this returns.
+    */
+  private def emitEnumDeinit(name: String, et: SyslType.EnumType): Unit =
+    emit(s"# enum deinit: $name")
+    emit(s"global $name, func, 1 i64 i64")
+    emit(s"$name:")
+    emit("  pshd r6")
+    emit("  pshd r5")
+    emit("  mov r5, r7")
+    // r1 = data ptr (input). emitEnumStringFieldsRC(baseReg=1, baseOff=0)
+    // reads tag from [r1] and walks the matching variant. emitValueRC saves
+    // and restores r1 around inner decr's, so r1 is preserved across inner
+    // calls — but emitRefDecr's free path may clobber it after the popd.
+    // Save data ptr at fp-8 and use that copy to keep things simple.
+    emit("  pshd r1")                    // save data ptr at fp-8 (r5-8)
+    // Reload r1 from saved slot — emitEnumStringFieldsRC will pshd/popd r1
+    // around each inner decr, but emitRefDecr inside that decr does not
+    // touch r1's saved slot at fp-8.
+    emitAddImm(1, 5, -8)
+    emit("  ldd r1, r1, r0")             // r1 = data ptr (refreshed)
+    emitEnumStringFieldsRC(1, 0, et, incr = false)
     emit("  mov r7, r5")
     emit("  popd r5")
     emit("  popd r6")
@@ -1240,6 +1371,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     fun.body match
       case TExprBody(expr) =>
         genExpr(expr) // result in r1
+        emitFuncReturnIncrIfBorrowed(expr)
         if structReturn then emitStructReturn()
         emitDefers()
         emitRefCleanup()
@@ -1251,6 +1383,16 @@ class SyslTriscCodegen(addresses: Int = 4):
     currentFunction = null
     stringBorrowParams = Set.empty
     funcBorrowParams = Set.empty
+
+  /** When the function returns a borrowed FuncType local (param OR HeapEnv
+    * local), incr the env so the caller's TCall=HeapEnv decr balances. r1 must
+    * hold the descriptor address at call time. No-op for any other expression. */
+  private def emitFuncReturnIncrIfBorrowed(value: TExpr): Unit =
+    value match
+      case TVarRef(_, t) if t.isInstanceOf[SyslType.FuncType]
+        && funcKindOfExpr(value) == FuncKind.HeapEnv =>
+        emitClosureDescrIncr(1, 0)
+      case _ =>
 
   private def genClosureFunction(name: String, closure: TClosure): Unit =
     // Create a TFunDecl for the closure so we can reuse epilogue/return machinery
@@ -1440,6 +1582,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     fun.body match
       case TExprBody(expr) =>
         genExpr(expr)
+        emitFuncReturnIncrIfBorrowed(expr)
         if structReturn then emitStructReturn()
         emitDefers()
         emitRefCleanup()
@@ -1676,6 +1819,8 @@ class SyslTriscCodegen(addresses: Int = 4):
                   emit("  popd r1")
                 case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
                   emitStructStringFieldsRC(5, local.offset + off, nested, incr = true)
+                case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+                  emitClosureDescrIncr(5, local.offset + off)
                 case _ =>
           case TEnumConstruct(et, variantIndex, args) =>
             // Allocate enum on stack, zero-initialize, set tag + fields
@@ -1705,7 +1850,7 @@ class SyslTriscCodegen(addresses: Int = 4):
               genExpr(arg)
               emitAddImm(2, 5, local.offset + dataOff + fieldOff)
               emitStore(1, 2, fieldType)
-              // Borrowed string/struct/enum field: incr the buffer (caller still owns its copy)
+              // Borrowed string/struct/enum/closure field: incr (caller still owns its copy)
               fieldType match
                 case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
                   emit("  pshd r1")
@@ -1717,6 +1862,8 @@ class SyslTriscCodegen(addresses: Int = 4):
                   emitStructStringFieldsRC(5, local.offset + dataOff + fieldOff, nested, incr = true)
                 case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
                   emitEnumStringFieldsRC(5, local.offset + dataOff + fieldOff, nested, incr = true)
+                case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+                  emitClosureDescrIncr(5, local.offset + dataOff + fieldOff)
                 case _ =>
               fieldOff += fieldType.sizeOf.toInt
           case call @ TCall(_, _, retType) if returnsViaPointer(retType) =>
@@ -1727,12 +1874,11 @@ class SyslTriscCodegen(addresses: Int = 4):
             // r1 = address of return slot. Register the local at the slot's stack position.
             // The return slot was the last thing allocated, so it's at stackOffset.
             locals(name) = LocalVar(name, stackOffset, typ)
-            // FuncType returned from a call: kind unknown without escape analysis
-            // on the callee's return. Conservative: NullEnv (no decr) — leaks if
-            // returned closure was actually heap-env, but avoids spurious `free`
-            // symbol references for callees that return plain function pointers.
+            // FuncType returned via structReturn from a call: same default as
+            // funcKindOfExpr's TCall case — HeapEnv if the program already pulls
+            // the heap allocator (decr's null-check skips NullEnv returns).
             if typ.isInstanceOf[SyslType.FuncType] then
-              closureLocalKind(name) = FuncKind.NullEnv
+              closureLocalKind(name) = funcKindOfExpr(call)
           case _ if typ.isInstanceOf[SyslType.FuncType] =>
             // Pre-allocate __env_N for stack-env TClosure RHS so env survives
             // the expression's frame and lives at function scope.
@@ -1747,7 +1893,14 @@ class SyslTriscCodegen(addresses: Int = 4):
             emitAddImm(2, 5, local.offset)
             emitStore(1, 2, typ)
             // Record kind for scope-cleanup gating.
-            closureLocalKind(name) = funcKindOfExpr(init)
+            val rhsKind = funcKindOfExpr(init)
+            closureLocalKind(name) = rhsKind
+            // Descriptor copy (var g = f) shares env_ptr with source — incr env
+            // rc so each descriptor's scope-exit decr is balanced.
+            init match
+              case _: TVarRef if rhsKind == FuncKind.HeapEnv =>
+                emitClosureDescrIncr(5, local.offset)
+              case _ =>
           case _ =>
             genExpr(init) // result in r1
             // Increment refcount for copies (not for new — TNew already sets refcount=1)
@@ -1858,6 +2011,20 @@ class SyslTriscCodegen(addresses: Int = 4):
               // Incr new enum's variant strings if borrowed
               if !isOwnedStructExpr(value) then
                 emitEnumStringFieldsRC(5, local.offset, et, incr = true)
+            case _: SyslType.FuncType =>
+              // Decr old env if HeapEnv; store new bytes; incr new env if RHS is
+              // a borrowed descriptor copy (TVarRef whose kind is HeapEnv).
+              if closureLocalKind.get(target).contains(FuncKind.HeapEnv) then
+                emitClosureDescrDecr(5, local.offset)
+              genExpr(value)
+              emitAddImm(2, 5, local.offset)
+              emitStore(1, 2, local.typ)
+              val rhsKind = funcKindOfExpr(value)
+              closureLocalKind(target) = rhsKind
+              value match
+                case _: TVarRef if rhsKind == FuncKind.HeapEnv =>
+                  emitClosureDescrIncr(5, local.offset)
+                case _ =>
             case _ =>
               genExpr(value)
               emitAddImm(2, 5, local.offset)
@@ -1976,6 +2143,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TReturnStmt(Some(value)) =>
         genExpr(value) // result in r1
+        emitFuncReturnIncrIfBorrowed(value)
         if currentFunction != null && returnsViaPointer(currentFunction.returnType) then
           emitStructReturn()
         emitDefers()
@@ -2235,6 +2403,7 @@ class SyslTriscCodegen(addresses: Int = 4):
                       fieldType.isInstanceOf[SyslType.RefType] ||
                       (fieldType match
                         case s: SyslType.StructType => structHasStringFields(s) && needsAllocExtern
+                        case _: SyslType.FuncType => needsAllocExtern
                         case _ => false)
 
         if !needsRC then
@@ -2263,6 +2432,9 @@ class SyslTriscCodegen(addresses: Int = 4):
               emitRefDecr(1, refHeaderOffset(rt), deinitFor(rt))
             case s: SyslType.StructType =>
               emitStructStringFieldsRC(1, 0, s, incr = false)
+            case _: SyslType.FuncType =>
+              // r1 = field address — descriptor is at [r1+0]; decr its env_ptr.
+              emitClosureDescrDecr(1, 0)
             case _ =>
           // Compute new value (clobbers everything; may push its descriptor)
           genExpr(value)              // r1 = new value
@@ -2285,6 +2457,9 @@ class SyslTriscCodegen(addresses: Int = 4):
             case s: SyslType.StructType =>
               if !isOwnedStructExpr(value) then
                 emitStructStringFieldsRC(2, 0, s, incr = true)
+            case _: SyslType.FuncType =>
+              if !isOwnedClosureExpr(value) then
+                emitClosureDescrIncr(2, 0)
             case _ =>
 
       case TFieldCompoundAssignStmt(obj, fieldIndex, op, value) =>
@@ -3897,7 +4072,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         val elseLabel = newLabel("else")
         val endLabel = newLabel("endif")
         val isString = typ == SyslType.StringType
-        val isAggregate = typ.isInstanceOf[SyslType.EnumType] || typ.isInstanceOf[SyslType.StructType] || typ.isInstanceOf[SyslType.SliceType]
+        val isAggregate = typ.isInstanceOf[SyslType.EnumType] || typ.isInstanceOf[SyslType.StructType] || typ.isInstanceOf[SyslType.SliceType] || typ.isInstanceOf[SyslType.FuncType] || typ.isInstanceOf[SyslType.InterfaceType]
         val aggregateSize = if isAggregate then stackSize(typ) else 0
         // For string/aggregate results: pre-allocate a result slot BEFORE the if/else
         val resultSlotOffset = if isString then
@@ -4059,16 +4234,37 @@ class SyslTriscCodegen(addresses: Int = 4):
             pat match
               case TDestructurePattern(st, bindings, fieldTypes) =>
                 for (binding, i) <- bindings.zipWithIndex do
+                  val fieldType = fieldTypes(i)
                   binding.foreach { name =>
                     val off = fieldOffset(st, i)
-                    // Reload scrutinee address each time (allocLocal may move sp)
+                    // Allocate the binding's local first (allocLocal moves sp), then
+                    // recompute the scrutinee field address — that address is in
+                    // physical memory (fp-relative), so post-allocation it's stable.
+                    val local = allocLocal(name, fieldType)
                     emitAddImm(1, 5, scrutineeOffset)
                     emit("  ldd r1, r1, r0")  // r1 = scrutinee address
                     if off != 0 then emitAddImm(1, 1, off)
-                    emitLoad(1, 1, fieldTypes(i))
-                    val local = allocLocal(name, fieldTypes(i))
-                    emitAddImm(2, 5, local.offset)
-                    emitStore(1, 2, fieldTypes(i))
+                    fieldType match
+                      case SyslType.StringType | _: SyslType.StructType | _: SyslType.EnumType =>
+                        // Aggregate: r1 = field address (src), copy bytes to local.
+                        emitAddImm(2, 5, local.offset)
+                        emitStore(1, 2, fieldType)
+                        // Binding is borrowed: incr the buffer/strings (scope exit
+                        // path will decr to balance).
+                        fieldType match
+                          case SyslType.StringType if needsAllocExtern =>
+                            emitAddImm(1, 5, local.offset)
+                            emit("  ldd r1, r1, r0")
+                            emitRefIncr(1, 8)
+                          case st2: SyslType.StructType if structHasStringFields(st2) =>
+                            emitStructStringFieldsRC(5, local.offset, st2, incr = true)
+                          case et2: SyslType.EnumType if structHasStringFields(et2) =>
+                            emitEnumStringFieldsRC(5, local.offset, et2, incr = true)
+                          case _ =>
+                      case _ =>
+                        emitLoad(1, 1, fieldType)
+                        emitAddImm(2, 5, local.offset)
+                        emitStore(1, 2, fieldType)
                   }
               case TVariantPattern(et, variantIndex, bindings, fieldTypes) =>
                 val dataOff = et.dataOffset.toInt
@@ -4834,6 +5030,29 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  ldd r3, r3, r0") // r3 = malloc result
           emitAddImm(2, 3, 8 + off) // r2 = field address (past header)
           emitStore(1, 2, fieldType)
+          // Borrowed rc-bearing field: incr the buffer (caller still owns its copy)
+          fieldType match
+            case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
+              emit("  pshd r1")
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitAddImm(1, 3, 8 + off)
+              emit("  ldd r1, r1, r0")
+              emitRefIncr(1, 8)
+              emit("  popd r1")
+            case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitStructStringFieldsRC(3, 8 + off, nested, incr = true)
+            case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitEnumStringFieldsRC(3, 8 + off, nested, incr = true)
+            case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitClosureDescrIncr(3, 8 + off)
+            case _ =>
         // r1 = data pointer (past refcount header)
         emitAddImm(1, 5, ptrOffset)
         emit("  ldd r1, r1, r0")
@@ -4893,6 +5112,30 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  ldd r3, r3, r0")          // r3 = malloc result
           emitAddImm(2, 3, 8 + dataOff + fieldOff) // r2 = field address (past header + data offset)
           emitStore(1, 2, fieldType)
+          // Borrowed string field: incr the buffer (caller still owns its copy)
+          fieldType match
+            case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
+              emit("  pshd r1")
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitAddImm(1, 3, 8 + dataOff + fieldOff)
+              emit("  ldd r1, r1, r0")
+              emitRefIncr(1, 8)
+              emit("  popd r1")
+            case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+              // r3 = malloc result; field address = r3 + 8 + dataOff + fieldOff
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitStructStringFieldsRC(3, 8 + dataOff + fieldOff, nested, incr = true)
+            case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitEnumStringFieldsRC(3, 8 + dataOff + fieldOff, nested, incr = true)
+            case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitClosureDescrIncr(3, 8 + dataOff + fieldOff)
+            case _ =>
           fieldOff += fieldType.sizeOf.toInt
         // r1 = data pointer (past refcount header)
         emitAddImm(1, 5, ptrOffset)
@@ -4921,7 +5164,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           genExpr(arg)                                    // r1 = field value
           emitAddImm(2, 5, structBaseOffset + off)       // r2 = field address (fp-relative)
           emitStore(1, 2, fieldType)
-          // Borrowed string field: incr the buffer (caller still owns its copy)
+          // Borrowed string/closure field: incr (caller still owns its copy)
           fieldType match
             case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
               emit("  pshd r1")
@@ -4931,6 +5174,8 @@ class SyslTriscCodegen(addresses: Int = 4):
               emit("  popd r1")
             case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
               emitStructStringFieldsRC(5, structBaseOffset + off, nested, incr = true)
+            case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+              emitClosureDescrIncr(5, structBaseOffset + off)
             case _ =>
         // r1 = struct base address (fp-relative, stable)
         emitAddImm(1, 5, structBaseOffset)
@@ -4962,7 +5207,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           genExpr(arg) // r1 = field value
           emitAddImm(2, 5, enumBaseOffset + dataOff + fieldOff)
           emitStore(1, 2, fieldType)
-          // Borrowed string/struct/enum field: incr the buffer (caller still owns its copy)
+          // Borrowed string/struct/enum/closure field: incr (caller still owns its copy)
           fieldType match
             case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
               emit("  pshd r1")
@@ -4974,6 +5219,8 @@ class SyslTriscCodegen(addresses: Int = 4):
               emitStructStringFieldsRC(5, enumBaseOffset + dataOff + fieldOff, nested, incr = true)
             case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
               emitEnumStringFieldsRC(5, enumBaseOffset + dataOff + fieldOff, nested, incr = true)
+            case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+              emitClosureDescrIncr(5, enumBaseOffset + dataOff + fieldOff)
             case _ =>
           fieldOff += fieldType.sizeOf.toInt
         // r1 = enum base address
