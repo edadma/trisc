@@ -128,15 +128,18 @@ class SyslParser extends StandardTokenParsers {
       ident ^^ (name => Left((name, None)))
 
   lazy val typeAliasDecl: Parser[TypeAliasDeclAST] =
-    "type" ~> ident ~ opt("[" ~> rep1sep(ident, ",") <~ "]") ~ ("=" ~> opt("new")) ~ typeRef ~ opt(withinClause) ^^ {
-      case name ~ tparams ~ isNew ~ target ~ range =>
-        TypeAliasDeclAST(name, target, tparams.getOrElse(Nil), Nil, isNew.isDefined, range)
+    "type" ~> ident ~ opt("[" ~> rep1sep(ident, ",") <~ "]") ~ ("=" ~> opt("new")) ~ typeRef ~ opt(withinClause) ~ opt(whereClause) ^^ {
+      case name ~ tparams ~ isNew ~ target ~ range ~ predicate =>
+        TypeAliasDeclAST(name, target, tparams.getOrElse(Nil), Nil, isNew.isDefined, range, predicate)
     }
 
   lazy val withinClause: Parser[RangeAST] =
     "within" ~> unary ~ (("..<" | "..") ~ unary) ^^ {
       case lo ~ (op ~ hi) => RangeAST(lo, hi, op == "..<")
     }
+
+  lazy val whereClause: Parser[ExpressionAST] =
+    "where" ~> logicalOr
 
   lazy val traitDecl: Parser[TraitDeclAST] =
     "trait" ~> ident ~ ("[" ~> ident <~ "]") ~

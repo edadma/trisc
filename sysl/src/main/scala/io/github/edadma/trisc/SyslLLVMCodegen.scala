@@ -3312,7 +3312,7 @@ class SyslLLVMCodegen(target: String = "host"):
     case SyslType.RefType(_) => "i8*"
     case _: SyslType.FuncType => "%struct.closure"
     // Named/derived types are erased to their base at the LLVM layer.
-    case SyslType.NamedType(_, base, _, _) => llvmType(base)
+    case SyslType.NamedType(_, base, _, _, _) => llvmType(base)
     case _ => "i64"
 
   // LLVM-side size in bytes (may differ from Sysl's sizeOf for types like strings)
@@ -3356,13 +3356,13 @@ class SyslLLVMCodegen(target: String = "host"):
       val resolved = canonicalStruct(SyslType.StructType(name, fields))
       if resolved.fields.isEmpty then 1 else resolved.fields.map((_, ft) => llvmAlignOf(ft)).max
     case SyslType.ArrayType(elem, _) => llvmAlignOf(elem)
-    case SyslType.NamedType(_, base, _, _) => llvmAlignOf(base)
+    case SyslType.NamedType(_, base, _, _, _) => llvmAlignOf(base)
     case _ => 8
 
   // Types that are passed by pointer (alloca) rather than by value
   private def isAggregate(t: SyslType): Boolean = t match
     case _: SyslType.StructType | _: SyslType.ArrayType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | SyslType.StringType => true
-    case SyslType.NamedType(_, base, _, _) => isAggregate(base)
+    case SyslType.NamedType(_, base, _, _, _) => isAggregate(base)
     case _ => false
 
   // ===== Refcounting helpers =====
