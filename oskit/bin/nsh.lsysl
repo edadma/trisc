@@ -1,0 +1,890 @@
+NSH — Native SLIX Shell
+=======================
+
+Idiomatic sysl shell with no POSIX dependencies. Uses sysl
+string type throughout. Runs as an external `/bin/nsh` program.
+
+Built-in commands:
+- pwd              — print working directory
+- cd [path]        — change directory
+- kill pid         — terminate a process
+- help             — list commands
+
+All other commands are external /bin/ programs loaded via PM spawn.
+
+    module oskit.bin.nsh
+
+    import oskit.ulib.{write_handle, getc, open, close, read, stat,
+        connect, pm_waitpid, pm_kill, pm_spawn_handles,
+        sleep, exit, exit_with, STDOUT,
+        create, unlink, seek, pipe,
+        pm_port, ipc_send, msg_write_i32, ulib_putc}
+    import oskit.ds.{ds_publish_int, ds_publish_str, ds_retrieve_int,
+        ds_retrieve_str, ds_delete}
+
+
+Shell state.
+
+    var cwd: string
+    var nsh_background = 0
+
+Redirect state. Set during argv parsing, consumed by
+nsh_try_external / nsh_run_pipeline, then reset.
+
+    var redir_out: string
+    var redir_in: string
+    var redir_append = 0
+
+Job table. Tracks background process PIDs for jobs/fg.
+
+    val MAX_JOBS = 8
+    var job_pid: [8]int
+    var job_count = 0
+
+Buffered output. All output accumulates in nsh_out and is
+sent to stdout in a single write on flush. This batches
+output to reduce IPC round-trips.
+
+    var nsh_out: [140]byte
+    var nsh_outpos = 0
+
+    nsh_flush()
+        if nsh_outpos > 0
+            write_handle(STDOUT, nsh_out, nsh_outpos)
+            nsh_outpos = 0
+
+    nsh_putc(ch: char)
+        if nsh_outpos >= 120
+            nsh_flush()
+        nsh_out[nsh_outpos] = byte(ch)
+        nsh_outpos += 1
+
+    nsh_print(s: string)
+        val p = *byte(s)
+        val n = len(s)
+        for var i = 0; i < n; i++
+            if nsh_outpos >= 120
+                nsh_flush()
+            nsh_out[nsh_outpos] = p[i]
+            nsh_outpos += 1
+
+    nsh_newline()
+        nsh_putc('\n')
+        nsh_flush()
+
+    nsh_putint(n: int)
+        if n < 0
+            nsh_putc('-')
+            nsh_putint(-n)
+            return
+        if n >= 10
+            nsh_putint(n / 10)
+        nsh_putc('0' + (n % 10))
+
+Tokenizer. Splits a line buffer into string tokens separated
+by spaces. Returns the number of tokens found.
+
+    val MAX_ARGS = 16
+
+    tokenize(buf: *byte, buflen: int, argv: *string) -> int
+        var argc = 0
+        var pos = 0
+        while pos < buflen
+            // Skip spaces
+            while pos < buflen
+                if buf[pos] != ' '
+                    break
+                pos += 1
+            if pos >= buflen
+                break
+            // Start of token
+            val start = pos
+            while pos < buflen
+                if buf[pos] == ' '
+                    break
+                pos += 1
+            if argc < MAX_ARGS
+                argv[argc] = string(buf + start, pos - start)
+                argc += 1
+        argc
+
+Command history. Circular buffer of recent commands for
+up/down arrow recall.
+
+    val HIST_MAX = 16
+    val HIST_LINE_MAX = 128
+    var hist_buf: [2048]byte  // 16 * 128
+    var hist_len: [16]int
+    var hist_count = 0
+    var hist_next = 0
+
+    hist_add(buf: *byte, blen: int)
+        if blen == 0
+            return
+        val slot = hist_next
+        val base = slot * HIST_LINE_MAX
+        var n = blen
+        if n > HIST_LINE_MAX - 1
+            n = HIST_LINE_MAX - 1
+        var i = 0
+        while i < n
+            hist_buf[base + i] = buf[i]
+            i += 1
+        hist_len[slot] = n
+        hist_next = (hist_next + 1) % HIST_MAX
+        if hist_count < HIST_MAX
+            hist_count += 1
+
+    hist_get(idx: int, buf: *byte) -> int
+        val slot = (hist_next - 1 - idx + HIST_MAX * 2) % HIST_MAX
+        val base = slot * HIST_LINE_MAX
+        val n = hist_len[slot]
+        var i = 0
+        while i < n
+            buf[i] = hist_buf[base + i]
+            i += 1
+        n
+
+Line editing. Reads a line from stdin with arrow keys,
+Home/End, Delete, Backspace, and character insertion.
+
+    val PROMPT_LEN = 2
+
+Append a CSI sequence with numeric parameter to a buffer.
+
+    nsh_append_csi(out: *byte, pos: int, n: int, ch: byte) -> int
+        var p = pos
+        out[p] = 27
+        p += 1
+        out[p] = '['
+        p += 1
+        if n >= 100
+            out[p] = byte('0' + n / 100)
+            p += 1
+        if n >= 10
+            out[p] = byte('0' + (n / 10) % 10)
+            p += 1
+        out[p] = byte('0' + n % 10)
+        p += 1
+        out[p] = ch
+        p += 1
+        p
+
+Emit a CSI sequence directly.
+
+    nsh_csi_num(n: int, ch: char)
+        nsh_putc(27)
+        nsh_putc('[')
+        if n >= 100
+            nsh_putc('0' + n / 100)
+        if n >= 10
+            nsh_putc('0' + (n / 10) % 10)
+        nsh_putc('0' + n % 10)
+        nsh_putc(ch)
+        nsh_flush()
+
+Redraw the full line in a single batched write.
+
+    nsh_refresh_line(buf: *byte, blen: int, cursor: int, prompt_len: int)
+        nsh_flush()
+        var p = 0
+        nsh_out[p] = 13
+        p += 1
+        // Write prompt (cwd + "> ")
+        val pp = *byte(cwd)
+        val plen = len(cwd)
+        for var i = 0; i < plen; i++
+            nsh_out[p] = pp[i]
+            p += 1
+        nsh_out[p] = '>'
+        p += 1
+        nsh_out[p] = ' '
+        p += 1
+        // Copy line content
+        for var i = 0; i < blen; i++
+            if p >= 120
+                write_handle(STDOUT, nsh_out, p)
+                p = 0
+            nsh_out[p] = buf[i]
+            p += 1
+        // ESC[K — clear to end of line
+        p = nsh_append_csi(nsh_out, p, 0, byte('K'))
+        // ESC[nG — cursor to column (1-based)
+        p = nsh_append_csi(nsh_out, p, prompt_len + cursor + 1, byte('G'))
+        write_handle(STDOUT, nsh_out, p)
+
+    nsh_readline(buf: *byte, maxlen: int, prompt_len: int) -> int
+        var blen = 0
+        var cursor = 0
+        var hist_pos = -1
+        while blen < maxlen - 1
+            val ch = getc()
+            if ch == '\n'
+                nsh_newline()
+                buf[blen] = 0
+                hist_add(buf, blen)
+                return blen
+            else if ch == 8
+                if cursor > 0
+                    var i = cursor - 1
+                    while i < blen - 1
+                        buf[i] = buf[i + 1]
+                        i += 1
+                    blen -= 1
+                    cursor -= 1
+                    nsh_refresh_line(buf, blen, cursor, prompt_len)
+            else if ch == 27
+                val c2 = getc()
+                if c2 == '['
+                    val c3 = getc()
+                    if c3 == 'A'
+                        // Up arrow — older history
+                        if hist_pos + 1 < hist_count
+                            hist_pos += 1
+                            blen = hist_get(hist_pos, buf)
+                            cursor = blen
+                            nsh_refresh_line(buf, blen, cursor, prompt_len)
+                    else if c3 == 'B'
+                        // Down arrow — newer history
+                        if hist_pos > 0
+                            hist_pos -= 1
+                            blen = hist_get(hist_pos, buf)
+                            cursor = blen
+                            nsh_refresh_line(buf, blen, cursor, prompt_len)
+                        else if hist_pos == 0
+                            hist_pos = -1
+                            blen = 0
+                            cursor = 0
+                            nsh_refresh_line(buf, blen, cursor, prompt_len)
+                    else if c3 == 'C'
+                        if cursor < blen
+                            cursor += 1
+                            nsh_csi_num(prompt_len + cursor + 1, 'G')
+                    else if c3 == 'D'
+                        if cursor > 0
+                            cursor -= 1
+                            nsh_csi_num(prompt_len + cursor + 1, 'G')
+                    else if c3 == 'H'
+                        cursor = 0
+                        nsh_csi_num(prompt_len + 1, 'G')
+                    else if c3 == 'F'
+                        cursor = blen
+                        nsh_csi_num(prompt_len + cursor + 1, 'G')
+                    else if c3 == '3'
+                        val c4 = getc()
+                        if c4 == '~'
+                            if cursor < blen
+                                var i = cursor
+                                while i < blen - 1
+                                    buf[i] = buf[i + 1]
+                                    i += 1
+                                blen -= 1
+                                nsh_refresh_line(buf, blen, cursor, prompt_len)
+                    else
+                        var cx = c3
+                        while cx >= 0
+                            if cx != '['
+                                if cx >= 64
+                                    if cx <= 126
+                                        break
+                            cx = getc()
+            else if ch >= ' '
+                if blen < maxlen - 1
+                    var i = blen
+                    while i > cursor
+                        buf[i] = buf[i - 1]
+                        i -= 1
+                    buf[cursor] = byte(ch)
+                    blen += 1
+                    cursor += 1
+                    if cursor == blen
+                        nsh_putc(ch)
+                        nsh_flush()
+                    else
+                        nsh_refresh_line(buf, blen, cursor, prompt_len)
+        buf[blen] = 0
+        blen
+
+Build a full absolute path from a possibly-relative argument.
+
+    nsh_full_path(path: string) -> string
+        if path[0] == '/'
+            return path
+        if len(cwd) > 1
+            return cwd + "/" + path
+        cwd + path
+
+Extract the basename from a path.
+
+    nsh_basename(path: string) -> string
+        var last_slash = -1
+        for var i = 0; i < len(path); i++
+            if path[i] == '/'
+                last_slash = i
+        if last_slash == -1
+            return path
+        string(*byte(path) + last_slash + 1, len(path) - last_slash - 1)
+
+Strip leading `./` segments so `./echo` and `echo` resolve to the same basename.
+
+    nsh_strip_dot_slash(path: string) -> string
+        var s = path
+        while len(s) >= 2
+            if s[0] == '.'
+                if s[1] == '/'
+                    s = string(*byte(s) + 2, len(s) - 2)
+                    continue
+            break
+        s
+
+Executable name for `/bin/<name>` lookup: `./echo` → `echo`, `/bin/echo` → `echo`.
+
+    nsh_external_bin_key(cmd: string) -> string
+        nsh_basename(nsh_strip_dot_slash(cmd))
+
+Built-in commands.
+
+    cmd_exit(argc: int, argv: *string)
+        var code = 0
+        if argc > 1
+            val arg = argv[1]
+            val p = *byte(arg)
+            var i = 0
+            while i < len(arg)
+                val ch = int(p[i])
+                if ch >= '0'
+                    if ch <= '9'
+                        code = code * 10 + (ch - '0')
+                i += 1
+        exit_with(code)
+
+    cmd_pwd(argc: int, argv: *string)
+        nsh_print(cwd)
+        nsh_newline()
+
+    cmd_cd(argc: int, argv: *string)
+        if argc < 2
+            cwd = "/"
+            return
+        val full = nsh_full_path(argv[1])
+        // Verify it exists and is a directory
+        var st: [7]int
+        if stat(full, st) < 0
+            nsh_print(argv[1])
+            nsh_print(": not found\n")
+            return
+        val ftype = (st[0] >> 12) & 0xF
+        if ftype != 2
+            nsh_print("not a directory\n")
+            return
+        cwd = full
+
+    cmd_kill(argc: int, argv: *string)
+        if argc < 2
+            nsh_print("usage: kill <pid>\n")
+            return
+        val arg = argv[1]
+        val p = *byte(arg)
+        var pid = 0
+        var i = 0
+        while i < len(arg)
+            val ch = int(p[i])
+            if ch < '0'
+                nsh_print("kill: invalid pid\n")
+                return
+            if ch > '9'
+                nsh_print("kill: invalid pid\n")
+                return
+            pid = pid * 10 + (ch - '0')
+            i += 1
+        val result = pm_kill(pid)
+        if result < 0
+            nsh_print("kill: no such process\n")
+
+    cmd_jobs(argc: int, argv: *string)
+        if job_count == 0
+            nsh_print("no jobs\n")
+            return
+        var i = 0
+        while i < job_count
+            nsh_print("[")
+            nsh_putint(i + 1)
+            nsh_print("] ")
+            nsh_putint(job_pid[i])
+            nsh_putc('\n')
+            i += 1
+
+    cmd_fg(argc: int, argv: *string)
+        if job_count == 0
+            nsh_print("fg: no jobs\n")
+            return
+        var idx = job_count - 1
+        if argc >= 2
+            val arg = argv[1]
+            val ap = *byte(arg)
+            idx = int(ap[0]) - int('1')
+        if idx < 0
+            nsh_print("fg: invalid job\n")
+            return
+        if idx >= job_count
+            nsh_print("fg: invalid job\n")
+            return
+        val pid = job_pid[idx]
+        nsh_flush()
+        pm_waitpid(pid)
+        nsh_putc('\n')
+        while idx < job_count - 1
+            job_pid[idx] = job_pid[idx + 1]
+            idx += 1
+        job_count -= 1
+
+    cmd_help(argc: int, argv: *string)
+        nsh_print("builtins: exit pwd cd kill jobs fg ds help\n")
+        nsh_print("/bin: cat echo grep head tail wc ls mkdir rm su\n")
+        nsh_print("      rmdir touch write mv chmod stat uptime\n")
+        nsh_print("      whoami ps\n")
+
+DS (data store) builtin.
+Usage:
+  ds get <key>            — retrieve (tries int, then str)
+  ds set <key> <value>    — publish; int if value is all digits, else str
+  ds del <key>            — delete
+
+    nsh_parse_int(s: string, out: *int) -> int
+        val p = *byte(s)
+        val n = len(s)
+        if n == 0
+            return -1
+        var i = 0
+        var neg = 0
+        if int(p[0]) == int('-')
+            neg = 1
+            i = 1
+        if i >= n
+            return -1
+        var v = 0
+        while i < n
+            val ch = int(p[i])
+            if ch < int('0')
+                return -1
+            if ch > int('9')
+                return -1
+            v = v * 10 + (ch - int('0'))
+            i += 1
+        if neg == 1
+            v = -v
+        out[0] = v
+        0
+
+    cmd_ds(argc: int, argv: *string)
+        if argc < 2
+            nsh_print("usage: ds get|set|del ...\n")
+            return
+        argv[1] match
+            "get" ->
+                if argc < 3
+                    nsh_print("usage: ds get <key>\n")
+                    return
+                var iv = 0
+                if ds_retrieve_int(argv[2], &iv) == 0
+                    nsh_putint(iv)
+                    nsh_putc('\n')
+                    return
+                var sbuf: [64]byte
+                val n = ds_retrieve_str(argv[2], sbuf, 64)
+                if n < 0
+                    nsh_print("ds: not found\n")
+                    return
+                var lim = n
+                if lim > 64
+                    lim = 64
+                var i = 0
+                while i < lim
+                    nsh_putc(char(sbuf[i]))
+                    i += 1
+                nsh_putc('\n')
+            "set" ->
+                if argc < 4
+                    nsh_print("usage: ds set <key> <value>\n")
+                    return
+                var iv = 0
+                if nsh_parse_int(argv[3], &iv) == 0
+                    if ds_publish_int(argv[2], iv) < 0
+                        nsh_print("ds: publish failed\n")
+                else
+                    if ds_publish_str(argv[2], argv[3]) < 0
+                        nsh_print("ds: publish failed\n")
+            "del" ->
+                if argc < 3
+                    nsh_print("usage: ds del <key>\n")
+                    return
+                if ds_delete(argv[2]) < 0
+                    nsh_print("ds: not found\n")
+            else ->
+                nsh_print("usage: ds get|set|del ...\n")
+
+Redirect helpers. Open a file for output redirect (> or >>)
+or input redirect (<). Returns a handle or -1 on error.
+
+    nsh_open_redir_out(path: string) -> int
+        val full = nsh_full_path(path)
+        unlink(full)
+        val ino = create(full, 1, 0)
+        if ino < 0
+            nsh_print("nsh: cannot create ")
+            nsh_print(path)
+            nsh_putc('\n')
+            return -1
+        val h = open(full)
+        if h < 0
+            nsh_print("nsh: cannot open ")
+            nsh_print(path)
+            nsh_putc('\n')
+        h
+
+    nsh_open_redir_append(path: string) -> int
+        val full = nsh_full_path(path)
+        var h = open(full)
+        if h < 0
+            val ino = create(full, 1, 0)
+            if ino < 0
+                nsh_print("nsh: cannot create ")
+                nsh_print(path)
+                nsh_putc('\n')
+                return -1
+            h = open(full)
+            if h < 0
+                nsh_print("nsh: cannot open ")
+                nsh_print(path)
+                nsh_putc('\n')
+                return -1
+        var st: [7]int
+        val sr = stat(full, st)
+        if sr == 0
+            seek(h, st[4], 0)
+        h
+
+    nsh_open_redir_in(path: string) -> int
+        val full = nsh_full_path(path)
+        val h = open(full)
+        if h < 0
+            nsh_print("nsh: ")
+            nsh_print(path)
+            nsh_print(": no such file\n")
+        h
+
+Parse redirect operators from argv. Removes >, >>, < and their
+filename arguments from argv, setting redir_out, redir_in, and
+redir_append. Returns new argc.
+
+    nsh_parse_redirects(argc: int, argv: *string) -> int
+        redir_out = ""
+        redir_in = ""
+        redir_append = 0
+        var dst = 0
+        var i = 0
+        while i < argc
+            if argv[i] == ">"
+                if i + 1 < argc
+                    redir_out = argv[i + 1]
+                    redir_append = 0
+                    i += 2
+                    continue
+                else
+                    nsh_print("nsh: syntax error near >\n")
+                    return -1
+            else if argv[i] == ">>"
+                if i + 1 < argc
+                    redir_out = argv[i + 1]
+                    redir_append = 1
+                    i += 2
+                    continue
+                else
+                    nsh_print("nsh: syntax error near >>\n")
+                    return -1
+            else if argv[i] == "<"
+                if i + 1 < argc
+                    redir_in = argv[i + 1]
+                    i += 2
+                    continue
+                else
+                    nsh_print("nsh: syntax error near <\n")
+                    return -1
+            argv[dst] = argv[i]
+            dst += 1
+            i += 1
+        dst
+
+Command dispatch.
+
+    nsh_dispatch(argc: int, argv: *string)
+        if argc == 0
+            return
+        argv[0] match
+            "exit" -> cmd_exit(argc, argv)
+            "pwd"  -> cmd_pwd(argc, argv)
+            "cd"   -> cmd_cd(argc, argv)
+            "kill" -> cmd_kill(argc, argv)
+            "jobs" -> cmd_jobs(argc, argv)
+            "fg"   -> cmd_fg(argc, argv)
+            "ds"   -> cmd_ds(argc, argv)
+            "help" -> cmd_help(argc, argv)
+            else   -> nsh_try_external(argc, argv)
+
+Set/clear foreground PID on PM for Ctrl-C signal delivery.
+
+    val PM_CMD_SET_FG = 5
+
+    nsh_set_fg(console: int, pid: int)
+        val port = pm_port()
+        if port < 0
+            return
+        var msg: [6]byte
+        msg[0] = byte(PM_CMD_SET_FG)
+        msg[1] = byte(console)
+        msg_write_i32(msg, 2, pid)
+        var reply: [1]byte
+        ipc_send(port, msg, 6, reply, 1)
+
+Try to run an external command from `/bin/` via PM spawn.
+
+    nsh_try_external(argc: int, argv: *string)
+        val cmd = argv[0]
+        val bin_path = "/bin/" + nsh_external_bin_key(cmd)
+
+        // Open handles — use redirect file handles if set, else TTY
+        var h_in = -1
+        if len(redir_in) > 0
+            h_in = nsh_open_redir_in(redir_in)
+            if h_in < 0
+                return
+        else
+            h_in = connect("tty:0")
+
+        var h_out = -1
+        if len(redir_out) > 0
+            if redir_append != 0
+                h_out = nsh_open_redir_append(redir_out)
+            else
+                h_out = nsh_open_redir_out(redir_out)
+            if h_out < 0
+                close(h_in)
+                return
+        else
+            h_out = connect("tty:0")
+
+        val h_err = connect("tty:0")
+
+        // Handle map: (parent_handle, child_slot) pairs
+        var hmap: [6]byte
+        hmap[0] = byte(h_in)
+        hmap[1] = 0  // child stdin
+        hmap[2] = byte(h_out)
+        hmap[3] = 1  // child stdout
+        hmap[4] = byte(h_err)
+        hmap[5] = 2  // child stderr
+
+        val pid = pm_spawn_handles(bin_path, argv, argc, hmap, 3)
+
+        // Close parent's copies of handles
+        close(h_in)
+        close(h_out)
+        close(h_err)
+
+        nsh_flush()
+        if pid >= 0
+            if nsh_background != 0
+                if job_count < MAX_JOBS
+                    job_pid[job_count] = pid
+                    job_count += 1
+                nsh_print("[")
+                nsh_putint(job_count)
+                nsh_print("] ")
+                nsh_putint(pid)
+                nsh_putc('\n')
+            else
+                nsh_set_fg(0, pid)
+                val exit_code = pm_waitpid(pid)
+                nsh_set_fg(0, -1)
+                // Ensure prompt starts on a fresh line
+                nsh_putc('\n')
+                if exit_code != 0
+                    nsh_print("exit ")
+                    nsh_putint(exit_code)
+                    nsh_print("\n")
+        else
+            nsh_print(cmd)
+            nsh_print(": not found\n")
+
+Run a pipeline: cmd1 | cmd2 | ... | cmdN.
+Creates pipes between adjacent commands, spawns each with
+the appropriate stdin/stdout handles, then waits for all.
+
+    nsh_run_pipeline(argc: int, argv: *string, pipe_pos: *int, num_pipes: int)
+        // Create pipe pairs
+        var rd: [8]int
+        var wr: [8]int
+        var i = 0
+        while i < num_pipes
+            pipe(&rd[i], &wr[i])
+            i += 1
+
+        // Open handles — use redirect files for first stdin / last stdout
+        var tty_in = -1
+        if len(redir_in) > 0
+            tty_in = nsh_open_redir_in(redir_in)
+            if tty_in < 0
+                i = 0
+                while i < num_pipes
+                    close(rd[i])
+                    close(wr[i])
+                    i += 1
+                return
+        else
+            tty_in = connect("tty:0")
+
+        var tty_out = -1
+        if len(redir_out) > 0
+            if redir_append != 0
+                tty_out = nsh_open_redir_append(redir_out)
+            else
+                tty_out = nsh_open_redir_out(redir_out)
+            if tty_out < 0
+                close(tty_in)
+                i = 0
+                while i < num_pipes
+                    close(rd[i])
+                    close(wr[i])
+                    i += 1
+                return
+        else
+            tty_out = connect("tty:0")
+
+        val tty_err = connect("tty:0")
+
+        // Spawn each segment
+        val num_cmds = num_pipes + 1
+        var pids: [9]int
+        var seg = 0
+        while seg < num_cmds
+            var seg_start = 0
+            if seg > 0
+                seg_start = pipe_pos[seg - 1] + 1
+            var seg_end = argc
+            if seg < num_pipes
+                seg_end = pipe_pos[seg]
+
+            val seg_argc = seg_end - seg_start
+            if seg_argc <= 0
+                pids[seg] = -1
+                seg += 1
+                continue
+
+            val cmd = argv[seg_start]
+            val bin_path = "/bin/" + nsh_external_bin_key(cmd)
+
+            var h_in = tty_in
+            if seg > 0
+                h_in = rd[seg - 1]
+            var h_out = tty_out
+            if seg < num_pipes
+                h_out = wr[seg]
+            val h_err = tty_err
+
+            var hmap: [6]byte
+            hmap[0] = byte(h_in)
+            hmap[1] = 0
+            hmap[2] = byte(h_out)
+            hmap[3] = 1
+            hmap[4] = byte(h_err)
+            hmap[5] = 2
+
+            pids[seg] = pm_spawn_handles(bin_path, argv + seg_start, seg_argc, hmap, 3)
+            seg += 1
+
+        // Close all pipe handles in parent
+        i = 0
+        while i < num_pipes
+            close(rd[i])
+            close(wr[i])
+            i += 1
+        close(tty_in)
+        close(tty_out)
+        close(tty_err)
+
+        // Wait for all children — set fg to last command for Ctrl-C
+        nsh_flush()
+        if pids[num_cmds - 1] >= 0
+            nsh_set_fg(0, pids[num_cmds - 1])
+        seg = 0
+        while seg < num_cmds
+            if pids[seg] >= 0
+                pm_waitpid(pids[seg])
+            seg += 1
+        nsh_set_fg(0, -1)
+        nsh_putc('\n')
+
+The shell entry point. Home directory is passed via args
+(e.g. "nsh /root"). If no args, defaults to "/".
+
+    main(av: []string)
+        if len(av) > 1
+            cwd = av[1]
+            // Verify home exists
+            var st: [7]int
+            if stat(cwd, st) < 0
+                cwd = "/"
+        else
+            cwd = "/"
+        sleep(5)
+
+        var line: [256]byte
+        var argv: [16]string
+
+        while 1 == 1
+            // Print prompt: "cwd> "
+            nsh_print(cwd)
+            nsh_putc('>')
+            nsh_putc(' ')
+            nsh_flush()
+
+            // Prompt length = cwd length + 2 ("> ")
+            val prompt_len = len(cwd) + 2
+
+            // Read a line
+            val blen = nsh_readline(line, 256, prompt_len)
+            if blen == 0
+                continue
+
+            // Tokenize
+            var argc = tokenize(line, blen, argv)
+
+            // Check for trailing &
+            nsh_background = 0
+            if argc > 0
+                if argv[argc - 1] == "&"
+                    nsh_background = 1
+                    argc -= 1
+
+            // Parse redirects (>, >>, <) — removes them from argv
+            argc = nsh_parse_redirects(argc, argv)
+            if argc < 0
+                continue
+
+            // Check for pipes
+            var pipe_pos: [8]int
+            var num_pipes = 0
+            var pi = 0
+            while pi < argc
+                if argv[pi] == "|"
+                    if num_pipes < 8
+                        pipe_pos[num_pipes] = pi
+                        num_pipes += 1
+                pi += 1
+
+            // Dispatch
+            if num_pipes > 0
+                nsh_run_pipeline(argc, argv, pipe_pos, num_pipes)
+            else
+                nsh_dispatch(argc, argv)
+            nsh_flush()

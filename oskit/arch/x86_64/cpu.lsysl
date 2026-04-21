@@ -1,0 +1,122 @@
+OSKit Arch -- x86_64 CPU Primitives
+
+Architecture-specific CPU operations for x86_64: interrupt
+enable/disable, and thread stack frame construction.
+
+cli/sti are extern (provided by boot.s as bare instruction
++ ret) to avoid Sysl function prologue/epilogue overhead.
+
+    module oskit.arch
+
+Offset from saved SSP to the return-value register (RAX)
+in the context frame. Used by syscall_return to write the
+result where restore_context will pop it into RAX.
+x86_64 layout: R15(0)..RBX(104)..RAX(112)..RIP(120)..
+
+    val SYSCALL_RETURN_OFFSET = 112
+    val STACK_FRAME_SIZE = 160       // 20 fields × 8 bytes (15 GP regs + 5 iretq)
+
+Disable interrupts (x86 cli instruction).
+
+    extern arch_cli()
+
+Enable interrupts (x86 sti instruction).
+
+    extern arch_sti()
+
+Set x86 hardware watchpoint on a 4-byte address (uses DR0).
+CPU raises #DB on any write to the watched address.
+
+    extern set_hw_watchpoint(addr: u64)
+
+Spinlock acquire. Spins using lock cmpxchg until the lock
+is obtained, then disables interrupts. Lock is 0=free, 1=held.
+x86 calling convention: rdi = first arg (lock pointer).
+
+    arch_spinlock_acquire(lock: *i64)
+        asm("movq $$1, %rsi\n.spin_acq:\nxorq %rax, %rax\nlock cmpxchgq %rsi, (%rdi)\njnz .spin_acq\ncli")
+
+Spinlock release. Enables interrupts, then stores 0 to lock.
+
+    arch_spinlock_release(lock: *i64)
+        asm("sti\nmovq $$0, (%rdi)")
+
+Update TSS.RSP0 for the next ring 3 thread. Called by the
+scheduler on context switch. Provided by boot.s.
+
+    extern tss_set_rsp0(rsp0: i64)
+
+Build a fake interrupt frame on the supervisor stack so
+that restore_context in boot.s can pop it and iretq into
+the new thread. x86_64 layout (20 fields, bottom to top):
+
+15 GP regs: R15..R14..R13..R12..R11..R10..R9..R8..RBP..RDI..RSI..RDX..RCX..RBX..RAX
+iretq frame: RIP, CS, RFLAGS, RSP, SS
+
+The thread's user stack gets thread_exit as a return address
+so that a thread function returning normally lands in the
+exit trampoline.
+
+    extern thread_exit: byte
+
+    build_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64
+        // Place thread_exit as return address on user stack
+        val ret_sp = usp - 8
+        *(*i64(ret_sp)) = i64(&thread_exit)
+
+        var sp = ssp
+        // iretq frame (what the CPU would push on interrupt)
+        sp -= 8
+        *(*i64(sp)) = i64(0x10)         // SS  (kernel data segment)
+        sp -= 8
+        *(*i64(sp)) = ret_sp            // RSP (user stack, with return addr)
+        sp -= 8
+        *(*i64(sp)) = i64(0x202)        // RFLAGS (IF=1, reserved bit 1)
+        sp -= 8
+        *(*i64(sp)) = i64(0x08)         // CS  (kernel code segment)
+        sp -= 8
+        *(*i64(sp)) = entry_point       // RIP
+        // 15 GP registers (all zero)
+        var i = 0
+        while i < 15
+            sp -= 8
+            *(*i64(sp)) = i64(0)
+            i += 1
+        sp
+
+Build a ring 3 stack frame on the per-process kernel stack.
+Used by create_process_suspended for user processes. The frame
+is built directly on the kernel stack (identity-mapped), not
+in the child's address space. Does NOT write thread_exit to
+usp — the caller handles that via vm_copy_to.
+
+On iretq, the CPU detects CS RPL=3 and switches to ring 3,
+loading SS:RSP from the frame (user stack).
+
+    build_user_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64
+        var sp = ssp
+        sp -= 8
+        *(*i64(sp)) = i64(0x23)         // SS  (user data, RPL=3)
+        sp -= 8
+        *(*i64(sp)) = usp - 8           // RSP (user stack)
+        sp -= 8
+        *(*i64(sp)) = i64(0x202)        // RFLAGS (IF=1)
+        sp -= 8
+        *(*i64(sp)) = i64(0x1B)         // CS  (user code, RPL=3)
+        sp -= 8
+        *(*i64(sp)) = entry_point       // RIP
+        var i = 0
+        while i < 15
+            sp -= 8
+            *(*i64(sp)) = i64(0)
+            i += 1
+        sp
+
+Set up the initial context frame for a new process. On x86_64,
+the context frame is built directly on the per-process kernel
+stack (identity-mapped). The CPU switches to this stack via
+TSS.RSP0 on ring 3 to ring 0 transitions. Returns the SSP value.
+
+    arch_setup_process_frame(entry_point: i64, usp: i64, ssp: i64, kstack_top_val: i64, ptbr_val: u64) -> i64
+        build_user_stack_frame(entry_point, usp, kstack_top_val)
+        kstack_top_val - STACK_FRAME_SIZE

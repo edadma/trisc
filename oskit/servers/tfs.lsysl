@@ -33,9 +33,7 @@ Commands:
     import oskit.fs.{tfs_init, tfs_lookup, tfs_read, tfs_write, tfs_create, tfs_unlink, tfs_stat, tfs_readdir, tfs_rmdir, tfs_chmod, tfs_rename, sync_superblock}
     import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply, ipc_last_msg_len}
     import oskit.drivers.disk.{disk_read, disk_write}
-    import oskit.kernel.{kernel_get_thread_ptbr, vm_copy_to, vm_copy_from}
-    import oskit.config.KERNEL_L1_BASE
-    import oskit.services.rs_ready
+    import oskit.services.{rs_ready, svc_grant_map, svc_grant_unmap}
 
     val TFS_CMD_OPEN    = 1
     val TFS_CMD_READ    = 2
@@ -51,7 +49,6 @@ Commands:
     val TFS_CMD_RENAME  = 12
 
     var tfs_port = -1
-    var tfs_srv_name: [4]byte
 
 Block I/O bridge: provides the rd_read/rd_write that the TFS
 library externs expect, forwarding to the disk server via IPC.
@@ -89,8 +86,8 @@ Reply:   [status(1), ino(4)]
             reply[0] = -1
         else
             reply[0] = 0
-            tfs_msg_write_i32(&reply[0], 1, ino)
-        ipc_reply(sender, &reply[0], 5)
+            tfs_msg_write_i32(reply, 1, ino)
+        ipc_reply(sender, reply, 5)
 
 Handle READ: read bytes from a file (grant-based).
 The client passes its buffer address in the message. The server
@@ -102,24 +99,19 @@ Reply:   [status(1), bytes_read(4)]
         val ino = tfs_msg_read_i32(buf, 1)
         val offset = tfs_msg_read_i32(buf, 5)
         val len = tfs_msg_read_i32(buf, 9)
-        val buf_addr = tfs_msg_read_i32(buf, 13)
-        val sender_ptbr = kernel_get_thread_ptbr(sender)
+        val grant_id = tfs_msg_read_i32(buf, 13)
+        var rlen = len
+        if rlen > 4096
+            rlen = 4096
+        val ptr = svc_grant_map(grant_id, 0, rlen)
         var nr = 0
-        if sender_ptbr == KERNEL_L1_BASE
-            nr = tfs_read(ino, *byte(buf_addr), offset, len)
-        else
-            // Cross-address-space: read to local buffer, copy via vm_copy_to
-            var local: [4096]byte
-            var rlen = len
-            if rlen > 4096
-                rlen = 4096
-            nr = tfs_read(ino, &local[0], offset, rlen)
-            if nr > 0
-                vm_copy_to(sender_ptbr, buf_addr, &local[0], nr)
+        if ptr > 0
+            nr = tfs_read(ino, *byte(ptr), offset, rlen)
+            svc_grant_unmap(grant_id)
         var reply: [5]byte
         reply[0] = 0
-        tfs_msg_write_i32(&reply[0], 1, nr)
-        ipc_reply(sender, &reply[0], 5)
+        tfs_msg_write_i32(reply, 1, nr)
+        ipc_reply(sender, reply, 5)
 
 Handle WRITE: write bytes to a file (grant-based).
 The client passes its buffer address in the message. The server
@@ -131,23 +123,19 @@ Reply:   [status(1), bytes_written(4)]
         val ino = tfs_msg_read_i32(buf, 1)
         val offset = tfs_msg_read_i32(buf, 5)
         val len = tfs_msg_read_i32(buf, 9)
-        val buf_addr = tfs_msg_read_i32(buf, 13)
-        val sender_ptbr = kernel_get_thread_ptbr(sender)
+        val grant_id = tfs_msg_read_i32(buf, 13)
+        var wlen = len
+        if wlen > 4096
+            wlen = 4096
+        val ptr = svc_grant_map(grant_id, 0, wlen)
         var nw = 0
-        if sender_ptbr == KERNEL_L1_BASE
-            nw = tfs_write(ino, *byte(buf_addr), offset, len)
-        else
-            // Cross-address-space: copy from client, then write
-            var local: [4096]byte
-            var wlen = len
-            if wlen > 4096
-                wlen = 4096
-            vm_copy_from(sender_ptbr, buf_addr, &local[0], wlen)
-            nw = tfs_write(ino, &local[0], offset, wlen)
+        if ptr > 0
+            nw = tfs_write(ino, *byte(ptr), offset, wlen)
+            svc_grant_unmap(grant_id)
         var reply: [5]byte
         reply[0] = 0
-        tfs_msg_write_i32(&reply[0], 1, nw)
-        ipc_reply(sender, &reply[0], 5)
+        tfs_msg_write_i32(reply, 1, nw)
+        ipc_reply(sender, reply, 5)
 
 Handle CREATE: create a file or directory entry.
 Request: [cmd(1), parent_ino(4), type(1), perm(2), name(N)]
@@ -165,8 +153,8 @@ Reply:   [status(1), ino(4)]
             reply[0] = -1
         else
             reply[0] = 0
-            tfs_msg_write_i32(&reply[0], 1, ino)
-        ipc_reply(sender, &reply[0], 5)
+            tfs_msg_write_i32(reply, 1, ino)
+        ipc_reply(sender, reply, 5)
 
 Handle UNLINK: remove a file.
 Request: [cmd(1), parent_ino(4), name(N)]
@@ -182,7 +170,7 @@ Reply:   [status(1)]
             reply[0] = -1
         else
             reply[0] = 0
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 Handle STAT: get file metadata.
 Request: [cmd(1), ino(4)]
@@ -191,21 +179,21 @@ Reply:   [status(1), mode(4), nlinks(4), uid(4), gid(4), size(4), mtime(4), ctim
     tfs_handle_stat(sender: int, buf: *byte)
         val ino = tfs_msg_read_i32(buf, 1)
         var out: [7]int
-        val result = tfs_stat(ino, &out[0])
+        val result = tfs_stat(ino, out)
         var reply: [29]byte
         if result != 0
             reply[0] = -1
-            ipc_reply(sender, &reply[0], 1)
+            ipc_reply(sender, reply, 1)
             return
         reply[0] = 0
-        tfs_msg_write_i32(&reply[0], 1, out[0])   // mode
-        tfs_msg_write_i32(&reply[0], 5, out[1])   // nlinks
-        tfs_msg_write_i32(&reply[0], 9, out[2])   // uid
-        tfs_msg_write_i32(&reply[0], 13, out[3])  // gid
-        tfs_msg_write_i32(&reply[0], 17, out[4])  // size
-        tfs_msg_write_i32(&reply[0], 21, out[5])  // mtime
-        tfs_msg_write_i32(&reply[0], 25, out[6])  // ctime
-        ipc_reply(sender, &reply[0], 29)
+        tfs_msg_write_i32(reply, 1, out[0])   // mode
+        tfs_msg_write_i32(reply, 5, out[1])   // nlinks
+        tfs_msg_write_i32(reply, 9, out[2])   // uid
+        tfs_msg_write_i32(reply, 13, out[3])  // gid
+        tfs_msg_write_i32(reply, 17, out[4])  // size
+        tfs_msg_write_i32(reply, 21, out[5])  // mtime
+        tfs_msg_write_i32(reply, 25, out[6])  // ctime
+        ipc_reply(sender, reply, 29)
 
 Handle MKDIR: create a directory.
 Request: [cmd(1), parent_ino(4), perm(2), name(N)]
@@ -222,8 +210,8 @@ Reply:   [status(1), ino(4)]
             reply[0] = -1
         else
             reply[0] = 0
-            tfs_msg_write_i32(&reply[0], 1, ino)
-        ipc_reply(sender, &reply[0], 5)
+            tfs_msg_write_i32(reply, 1, ino)
+        ipc_reply(sender, reply, 5)
 
 Handle RMDIR: remove a directory.
 Request: [cmd(1), parent_ino(4), name(N)]
@@ -239,7 +227,7 @@ Reply:   [status(1)]
             reply[0] = -1
         else
             reply[0] = 0
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 Handle READDIR: read a directory entry by index.
 Request: [cmd(1), dir_ino(4), index(4)]
@@ -250,19 +238,19 @@ Reply:   [status(1), ino(4), name(14)]
         val index = tfs_msg_read_i32(buf, 5)
         var out_ino: int
         var out_name: [14]byte
-        val result = tfs_readdir(dir_ino, index, &out_ino, &out_name[0])
+        val result = tfs_readdir(dir_ino, index, &out_ino, out_name)
         var reply: [19]byte
         if result == -1
             reply[0] = -1
-            ipc_reply(sender, &reply[0], 1)
+            ipc_reply(sender, reply, 1)
             return
         reply[0] = 0
-        tfs_msg_write_i32(&reply[0], 1, out_ino)
+        tfs_msg_write_i32(reply, 1, out_ino)
         var i = 0
         while i < 14
             reply[i + 5] = out_name[i]
             i += 1
-        ipc_reply(sender, &reply[0], 19)
+        ipc_reply(sender, reply, 19)
 
 Handle SYNC: flush superblock to disk.
 Request: [cmd(1)]
@@ -272,7 +260,7 @@ Reply:   [status(1)]
         sync_superblock()
         var reply: [1]byte
         reply[0] = 0
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 Handle CHMOD: change file permissions.
 Request: [cmd(1), ino(4), perm(2)]
@@ -287,7 +275,7 @@ Reply:   [status(1)]
             reply[0] = -1
         else
             reply[0] = 0
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 Handle RENAME: move/rename a file.
 Request: [cmd(1), old_parent(4), new_parent(4), old_name_len(1), old_name(N), new_name(M)]
@@ -306,7 +294,7 @@ Reply:   [status(1)]
             reply[0] = -1
         else
             reply[0] = 0
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 The TFS server loop. Creates port, registers as "fs",
 initializes TFS, then loops handling filesystem requests.
@@ -315,15 +303,8 @@ The disk server must be running before this server starts,
 since tfs_init() reads the superblock via rd_read → disk_read.
 
     tfs_server()
-        // Set up name — register as "tfs" (VFS owns "fs")
-        tfs_srv_name[0] = 116  // t
-        tfs_srv_name[1] = 102  // f
-        tfs_srv_name[2] = 115  // s
-        tfs_srv_name[3] = 0
-
-        // Create and register port
         tfs_port = port_create()
-        port_register(tfs_port, &tfs_srv_name[0])
+        port_register(tfs_port, "tfs")
 
         // Initialize TFS (reads superblock from disk server)
         tfs_init()
@@ -335,38 +316,38 @@ since tfs_init() reads the superblock via rd_read → disk_read.
         // Bulk data uses grant-based I/O (buffer address in message).
         var buf: [64]byte
         while 1 == 1
-            val sender = ipc_recv(tfs_port, &buf[0], 64)
+            val sender = ipc_recv(tfs_port, buf, 64)
             if sender >= 0
                 val msg_len = ipc_last_msg_len()
                 val cmd = int(buf[0])
                 if cmd == TFS_CMD_OPEN
-                    tfs_handle_open(sender, &buf[0], msg_len)
+                    tfs_handle_open(sender, buf, msg_len)
                 else if cmd == TFS_CMD_READ
-                    tfs_handle_read(sender, &buf[0])
+                    tfs_handle_read(sender, buf)
                 else if cmd == TFS_CMD_WRITE
-                    tfs_handle_write(sender, &buf[0])
+                    tfs_handle_write(sender, buf)
                 else if cmd == TFS_CMD_CREATE
-                    tfs_handle_create(sender, &buf[0], msg_len)
+                    tfs_handle_create(sender, buf, msg_len)
                 else if cmd == TFS_CMD_UNLINK
-                    tfs_handle_unlink(sender, &buf[0], msg_len)
+                    tfs_handle_unlink(sender, buf, msg_len)
                 else if cmd == TFS_CMD_STAT
-                    tfs_handle_stat(sender, &buf[0])
+                    tfs_handle_stat(sender, buf)
                 else if cmd == TFS_CMD_MKDIR
-                    tfs_handle_mkdir(sender, &buf[0], msg_len)
+                    tfs_handle_mkdir(sender, buf, msg_len)
                 else if cmd == TFS_CMD_RMDIR
-                    tfs_handle_rmdir(sender, &buf[0], msg_len)
+                    tfs_handle_rmdir(sender, buf, msg_len)
                 else if cmd == TFS_CMD_READDIR
-                    tfs_handle_readdir(sender, &buf[0])
+                    tfs_handle_readdir(sender, buf)
                 else if cmd == TFS_CMD_SYNC
                     tfs_handle_sync(sender)
                 else if cmd == TFS_CMD_CHMOD
-                    tfs_handle_chmod(sender, &buf[0])
+                    tfs_handle_chmod(sender, buf)
                 else if cmd == TFS_CMD_RENAME
-                    tfs_handle_rename(sender, &buf[0], msg_len)
+                    tfs_handle_rename(sender, buf, msg_len)
                 else
                     var reply: [1]byte
                     reply[0] = -1
-                    ipc_reply(sender, &reply[0], 1)
+                    ipc_reply(sender, reply, 1)
 
 The client-side wrappers (`fs_open`, `fs_read`, …) used to live
 here but have moved to `oskit/fs/client.lsysl` (`oskit.fs`)

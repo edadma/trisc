@@ -7,9 +7,8 @@ via the mount table. Currently only root ("/") is mounted on TFS.
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv, ipc_reply, ipc_send, ipc_last_msg_len}
-    import oskit.services.{sleep, rs_ready}
-    import oskit.kernel.{kernel_get_thread_ptbr, kernel_get_thread_pid, vm_copy_to, vm_copy_from}
-    import oskit.config.{KERNEL_L1_BASE, MAX_PROCESSES}
+    import oskit.services.{sleep, rs_ready, svc_get_thread_pid, svc_grant_map, svc_grant_unmap, thread_id}
+    import oskit.config.MAX_PROCESSES
 
 Open file table. Each open file tracks inode, position, mount
 index, and reference count. A slot is free when refcount is 0.
@@ -17,6 +16,7 @@ index, and reference count. A slot is free when refcount is 0.
     val VFS_MAX_OPEN_FILES = 32
     val OFT_TYPE_FILE = 0
     val OFT_TYPE_TTY  = 1
+    val OFT_TYPE_PIPE = 2
 
     var oft_ino: [32]int
     var oft_pos: [32]int
@@ -24,6 +24,27 @@ index, and reference count. A slot is free when refcount is 0.
     var oft_ref: [32]int
     var oft_type: [32]int
     var oft_console: [32]int
+    var oft_pipe_id: [32]int
+    var oft_pipe_write: [32]int
+
+Pipe infrastructure. Each pipe is a 512-byte circular buffer
+managed entirely within VFS. Deferred-reply pattern: when a
+reader reads from an empty pipe, VFS saves its TID and does
+not reply until a writer provides data (or write end closes).
+
+    val MAX_PIPES = 4
+    val PIPE_BUF_SIZE = 512
+
+    var pipe_buf: [4][512]byte
+    var pipe_head: [4]int
+    var pipe_tail: [4]int
+    var pipe_count: [4]int
+    var pipe_read_oft: [4]int
+    var pipe_write_oft: [4]int
+    var pipe_reader_tid: [4]int
+    var pipe_reader_buf: [4]int
+    var pipe_reader_len: [4]int
+    var pipe_reader_grant: [4]int
 
 Allocate an open file table entry. Returns the file ID (index),
 or -1 if the table is full.
@@ -42,12 +63,16 @@ or -1 if the table is full.
             i += 1
         -1
 
-Free an open file table entry.
+Free an open file table entry. When a pipe end's refcount
+reaches 0, mark that end as closed and wake blocked readers.
 
     vfs_oft_free(fid: int)
         if fid >= 0
             if fid < VFS_MAX_OPEN_FILES
                 oft_ref[fid] -= 1
+                if oft_ref[fid] <= 0
+                    if oft_type[fid] == OFT_TYPE_PIPE
+                        vfs_pipe_close_end(fid)
 
 Per-process handle table. Each process has up to MAX_HANDLES
 entries. A handle maps to an open file table index. The table
@@ -76,7 +101,6 @@ or -1 if the table is full.
         while i < VFS_MAX_HANDLES
             if handle_oft[base + i] == -1
                 handle_oft[base + i] = oft_idx
-                oft_ref[oft_idx] += 1
                 return i
             i += 1
         -1
@@ -115,6 +139,208 @@ Close all handles for a process (called on process exit).
                 vfs_oft_free(oft_idx)
                 handle_oft[base + i] = -1
             i += 1
+
+Initialize pipe state at startup.
+
+    vfs_pipe_init()
+        var i = 0
+        while i < MAX_PIPES
+            pipe_read_oft[i] = -1
+            pipe_write_oft[i] = -1
+            pipe_reader_tid[i] = -1
+            i += 1
+
+Allocate a pipe slot. Returns pipe index or -1 if full.
+
+    vfs_pipe_alloc() -> int
+        var i = 0
+        while i < MAX_PIPES
+            if pipe_read_oft[i] == -1
+                if pipe_write_oft[i] == -1
+                    return i
+            i += 1
+        -1
+
+Handle VFS_CMD_PIPE: create a pipe and return two handles.
+Request: [cmd(1)]. Response: [status(1), read_handle(4), write_handle(4)].
+
+    vfs_handle_pipe(sender: int)
+        val pid = svc_get_thread_pid(sender)
+        val pipe_id = vfs_pipe_alloc()
+        if pipe_id < 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+
+        val read_oft = vfs_oft_alloc(pipe_id, 0, OFT_TYPE_PIPE)
+        if read_oft < 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        val write_oft = vfs_oft_alloc(pipe_id, 0, OFT_TYPE_PIPE)
+        if write_oft < 0
+            vfs_oft_free(read_oft)
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+
+        oft_pipe_id[read_oft] = pipe_id
+        oft_pipe_write[read_oft] = 0
+        oft_pipe_id[write_oft] = pipe_id
+        oft_pipe_write[write_oft] = 1
+
+        pipe_head[pipe_id] = 0
+        pipe_tail[pipe_id] = 0
+        pipe_count[pipe_id] = 0
+        pipe_read_oft[pipe_id] = read_oft
+        pipe_write_oft[pipe_id] = write_oft
+        pipe_reader_tid[pipe_id] = -1
+
+        val rh = vfs_handle_alloc(pid, read_oft)
+        val wh = vfs_handle_alloc(pid, write_oft)
+
+        var reply: [9]byte
+        reply[0] = 0
+        vfs_msg_write_i32(reply, 1, rh)
+        vfs_msg_write_i32(reply, 5, wh)
+        ipc_reply(sender, reply, 9)
+
+Read from a pipe. Blocks if empty and write end open.
+
+    vfs_pipe_read(sender: int, fid: int, grant_id: int, req_len: int)
+        val pipe_id = oft_pipe_id[fid]
+        val avail = pipe_count[pipe_id]
+
+        if avail > 0
+            var n = req_len
+            if n > avail
+                n = avail
+            if n > PIPE_BUF_SIZE
+                n = PIPE_BUF_SIZE
+
+            val mapped = svc_grant_map(grant_id, 0, n)
+            if mapped > 0
+                var dst: *byte = *byte(mapped)
+                val head = pipe_head[pipe_id]
+                var copied = 0
+                while copied < n
+                    dst[copied] = pipe_buf[pipe_id][(head + copied) & (PIPE_BUF_SIZE - 1)]
+                    copied += 1
+                pipe_head[pipe_id] = (head + n) & (PIPE_BUF_SIZE - 1)
+                pipe_count[pipe_id] = avail - n
+                svc_grant_unmap(grant_id)
+
+            var reply: [5]byte
+            reply[0] = 0
+            vfs_msg_write_i32(reply, 1, n)
+            ipc_reply(sender, reply, 5)
+            return
+
+        if pipe_write_oft[pipe_id] == -1
+            var reply: [5]byte
+            reply[0] = 0
+            vfs_msg_write_i32(reply, 1, 0)
+            ipc_reply(sender, reply, 5)
+            return
+
+        pipe_reader_tid[pipe_id] = sender
+        pipe_reader_buf[pipe_id] = 0
+        pipe_reader_len[pipe_id] = req_len
+        pipe_reader_grant[pipe_id] = grant_id
+
+Write to a pipe. Wakes any deferred reader.
+
+    vfs_pipe_write(sender: int, fid: int, grant_id: int, req_len: int)
+        val pipe_id = oft_pipe_id[fid]
+
+        if pipe_read_oft[pipe_id] == -1
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+
+        val space = PIPE_BUF_SIZE - pipe_count[pipe_id]
+        var n = req_len
+        if n > space
+            n = space
+        if n > PIPE_BUF_SIZE
+            n = PIPE_BUF_SIZE
+
+        val mapped = svc_grant_map(grant_id, 0, n)
+        if mapped <= 0
+            var reply: [5]byte
+            reply[0] = -1
+            ipc_reply(sender, reply, 5)
+            return
+        var src: *byte = *byte(mapped)
+        val tail = pipe_tail[pipe_id]
+        var copied = 0
+        while copied < n
+            pipe_buf[pipe_id][(tail + copied) & (PIPE_BUF_SIZE - 1)] = src[copied]
+            copied += 1
+        svc_grant_unmap(grant_id)
+        pipe_tail[pipe_id] = (tail + n) & (PIPE_BUF_SIZE - 1)
+        pipe_count[pipe_id] += n
+
+        if pipe_reader_tid[pipe_id] >= 0
+            vfs_pipe_wake_reader(pipe_id)
+
+        var reply: [5]byte
+        reply[0] = 0
+        vfs_msg_write_i32(reply, 1, n)
+        ipc_reply(sender, reply, 5)
+
+Wake a deferred reader.
+
+    vfs_pipe_wake_reader(pipe_id: int)
+        val avail = pipe_count[pipe_id]
+        if avail <= 0
+            return
+        val reader = pipe_reader_tid[pipe_id]
+        if reader < 0
+            return
+
+        var n = pipe_reader_len[pipe_id]
+        if n > avail
+            n = avail
+        if n > PIPE_BUF_SIZE
+            n = PIPE_BUF_SIZE
+
+        val mapped = svc_grant_map(pipe_reader_grant[pipe_id], pipe_reader_buf[pipe_id], n)
+        if mapped > 0
+            var dst: *byte = *byte(mapped)
+            val head = pipe_head[pipe_id]
+            var copied = 0
+            while copied < n
+                dst[copied] = pipe_buf[pipe_id][(head + copied) & (PIPE_BUF_SIZE - 1)]
+                copied += 1
+            pipe_head[pipe_id] = (head + n) & (PIPE_BUF_SIZE - 1)
+            pipe_count[pipe_id] -= n
+            svc_grant_unmap(pipe_reader_grant[pipe_id])
+
+        var reply: [5]byte
+        reply[0] = 0
+        vfs_msg_write_i32(reply, 1, n)
+        ipc_reply(reader, reply, 5)
+        pipe_reader_tid[pipe_id] = -1
+
+Handle pipe end close.
+
+    vfs_pipe_close_end(fid: int)
+        val pipe_id = oft_pipe_id[fid]
+        if oft_pipe_write[fid] == 1
+            pipe_write_oft[pipe_id] = -1
+            if pipe_reader_tid[pipe_id] >= 0
+                var reply: [5]byte
+                reply[0] = 0
+                vfs_msg_write_i32(reply, 1, 0)
+                ipc_reply(pipe_reader_tid[pipe_id], reply, 5)
+                pipe_reader_tid[pipe_id] = -1
+        else
+            pipe_read_oft[pipe_id] = -1
 
 Scheme registry. Maps scheme names to handler ports. When a
 client calls connect("scheme:resource"), VFS looks up the scheme
@@ -178,20 +404,14 @@ Mount table. Each entry maps a path prefix to a backend port.
 VFS port and name.
 
     var vfs_port = -1
-    var vfs_srv_name: [3]byte
 
 TFS backend port (cached).
 
     var vfs_tfs_port = -1
-    var vfs_tfs_name: [4]byte
 
     vfs_lookup_tfs() -> int
         if vfs_tfs_port < 0
-            vfs_tfs_name[0] = 116  // t
-            vfs_tfs_name[1] = 102  // f
-            vfs_tfs_name[2] = 115  // s
-            vfs_tfs_name[3] = 0
-            vfs_tfs_port = port_lookup(&vfs_tfs_name[0])
+            vfs_tfs_port = port_lookup("tfs")
         vfs_tfs_port
 
 Mount a filesystem backend at a path prefix. Prefix strings
@@ -256,6 +476,8 @@ reply is always 1 byte. On success, length depends on command.
     val VFS_CMD_SEEK    = 14
     val VFS_CMD_CONNECT = 15
     val VFS_CMD_INHERIT = 16
+    val VFS_CMD_EXIT    = 17
+    val VFS_CMD_PIPE    = 18
 
     vfs_reply_len(cmd: int, status: int) -> int
         if status != 0
@@ -276,6 +498,8 @@ reply is always 1 byte. On success, length depends on command.
             return 19
         if cmd == VFS_CMD_SEEK
             return 5
+        if cmd == VFS_CMD_PIPE
+            return 9
         1
 
 Big-endian message helpers (local to VFS).
@@ -295,22 +519,22 @@ Client request:  [cmd(1), path(N)]
 Client reply:    [status(1), handle(4), ino(4)]
 
     vfs_handle_open(sender: int, buf: *byte, msg_len: int, backend: int)
-        val pid = kernel_get_thread_pid(sender)
+        val pid = svc_get_thread_pid(sender)
         // Forward OPEN to TFS to get inode
         var be_reply: [64]byte
-        ipc_send(backend, buf, msg_len, &be_reply[0], 64)
+        ipc_send(backend, buf, msg_len, be_reply, 64)
         if be_reply[0] != 0
             var err: [1]byte
             err[0] = -1
-            ipc_reply(sender, &err[0], 1)
+            ipc_reply(sender, err, 1)
             return
-        val ino = vfs_msg_read_i32(&be_reply[0], 1)
+        val ino = vfs_msg_read_i32(be_reply, 1)
         // Allocate open file entry
         val oft_idx = vfs_oft_alloc(ino, 0, OFT_TYPE_FILE)
         if oft_idx < 0
             var err: [1]byte
             err[0] = -1
-            ipc_reply(sender, &err[0], 1)
+            ipc_reply(sender, err, 1)
             return
         // Allocate per-process handle
         val handle = vfs_handle_alloc(pid, oft_idx)
@@ -318,14 +542,14 @@ Client reply:    [status(1), handle(4), ino(4)]
             vfs_oft_free(oft_idx)
             var err: [1]byte
             err[0] = -1
-            ipc_reply(sender, &err[0], 1)
+            ipc_reply(sender, err, 1)
             return
         // Reply with handle and ino
         var reply: [9]byte
         reply[0] = 0
-        vfs_msg_write_i32(&reply[0], 1, handle)
-        vfs_msg_write_i32(&reply[0], 5, ino)
-        ipc_reply(sender, &reply[0], 9)
+        vfs_msg_write_i32(reply, 1, handle)
+        vfs_msg_write_i32(reply, 5, ino)
+        ipc_reply(sender, reply, 9)
 
 Handle CONNECT: parse scheme prefix, route to handler.
 Client request:  [cmd(1), name(N)]
@@ -366,7 +590,7 @@ without a scheme default to the "vfs" (filesystem) handler.
         if handler < 0
             var err: [1]byte
             err[0] = -1
-            ipc_reply(sender, &err[0], 1)
+            ipc_reply(sender, err, 1)
             return
 
         // Filesystem scheme — strip prefix, forward as OPEN
@@ -377,14 +601,14 @@ without a scheme default to the "vfs" (filesystem) handler.
         while i < resource_len
             open_msg[1 + i] = name[colon + 1 + i]
             i += 1
-        vfs_handle_open(sender, &open_msg[0], 1 + resource_len, handler)
+        vfs_handle_open(sender, open_msg, 1 + resource_len, handler)
 
 Handle connect("tty:N") — create a TTY-type open file entry.
 No backend OPEN needed; VFS manages TTY handles locally and
 forwards read/write to the TTY server.
 
     vfs_handle_connect_tty(sender: int, name: *byte, colon: int, name_len: int)
-        val pid = kernel_get_thread_pid(sender)
+        val pid = svc_get_thread_pid(sender)
         // Parse console number (single digit after "tty:")
         var console = 0
         if name_len > colon + 1
@@ -399,7 +623,7 @@ forwards read/write to the TTY server.
         if oft_idx < 0
             var err: [1]byte
             err[0] = -1
-            ipc_reply(sender, &err[0], 1)
+            ipc_reply(sender, err, 1)
             return
         oft_console[oft_idx] = console
 
@@ -409,40 +633,35 @@ forwards read/write to the TTY server.
             vfs_oft_free(oft_idx)
             var err: [1]byte
             err[0] = -1
-            ipc_reply(sender, &err[0], 1)
+            ipc_reply(sender, err, 1)
             return
 
         // Reply with handle (ino=0 for TTY)
         var reply: [9]byte
         reply[0] = 0
-        vfs_msg_write_i32(&reply[0], 1, handle)
-        vfs_msg_write_i32(&reply[0], 5, 0)
-        ipc_reply(sender, &reply[0], 9)
+        vfs_msg_write_i32(reply, 1, handle)
+        vfs_msg_write_i32(reply, 5, 0)
+        ipc_reply(sender, reply, 9)
 
 TTY server port (cached, looked up lazily).
 
     var vfs_tty_port = -1
-    var vfs_tty_name: [4]byte
 
     vfs_lookup_tty() -> int
         if vfs_tty_port < 0
-            vfs_tty_name[0] = 116  // t
-            vfs_tty_name[1] = 116  // t
-            vfs_tty_name[2] = 121  // y
-            vfs_tty_name[3] = 0
-            vfs_tty_port = port_lookup(&vfs_tty_name[0])
+            vfs_tty_port = port_lookup("tty")
         vfs_tty_port
 
 Read from a TTY handle. Sends TTY_CMD_READ to the TTY server
 for one character, writes it to the client buffer. Returns 1
 byte read (or 0 on error).
 
-    vfs_tty_read(sender: int, fid: int, client_buf_addr: int, len: int)
+    vfs_tty_read(sender: int, fid: int, grant_id: int, len: int)
         val tty = vfs_lookup_tty()
         if tty < 0
             var reply: [5]byte
             reply[0] = -1
-            ipc_reply(sender, &reply[0], 1)
+            ipc_reply(sender, reply, 1)
             return
         val console = oft_console[fid]
         // Read one character from TTY (blocking)
@@ -450,48 +669,42 @@ byte read (or 0 on error).
         tty_msg[0] = 2  // TTY_CMD_READ
         tty_msg[1] = byte(console)
         var tty_reply: [2]byte
-        ipc_send(tty, &tty_msg[0], 2, &tty_reply[0], 2)
+        ipc_send(tty, tty_msg, 2, tty_reply, 2)
         // Write character to client buffer
         val ch = tty_reply[1]
-        val sender_ptbr = kernel_get_thread_ptbr(sender)
-        if sender_ptbr == KERNEL_L1_BASE
-            var p: *byte = *byte(client_buf_addr)
-            p[0] = ch
-        else
-            var local: [1]byte
-            local[0] = ch
-            vm_copy_to(sender_ptbr, client_buf_addr, &local[0], 1)
+        val mapped = svc_grant_map(grant_id, 0, 1)
+        if mapped > 0
+            var dst: *byte = *byte(mapped)
+            dst[0] = ch
+            svc_grant_unmap(grant_id)
         // Reply: 1 byte read
         var reply: [5]byte
         reply[0] = 0
-        vfs_msg_write_i32(&reply[0], 1, 1)
-        ipc_reply(sender, &reply[0], 5)
+        vfs_msg_write_i32(reply, 1, 1)
+        ipc_reply(sender, reply, 5)
 
 Write to a TTY handle. Sends TTY_CMD_PUTS to the TTY server
 with the data from the client buffer.
 
-    vfs_tty_write(sender: int, fid: int, client_buf_addr: int, len: int)
+    vfs_tty_write(sender: int, fid: int, grant_id: int, len: int)
         val tty = vfs_lookup_tty()
         if tty < 0
             var reply: [5]byte
             reply[0] = -1
-            ipc_reply(sender, &reply[0], 1)
+            ipc_reply(sender, reply, 1)
             return
         val console = oft_console[fid]
-        // Copy data from client (or read directly if same address space)
-        var local: [128]byte
+        // Map client buffer via grant
         var wlen = len
         if wlen > 125
             wlen = 125
-        val sender_ptbr = kernel_get_thread_ptbr(sender)
-        if sender_ptbr == KERNEL_L1_BASE
-            var src: *byte = *byte(client_buf_addr)
-            var i = 0
-            while i < wlen
-                local[i] = src[i]
-                i += 1
-        else
-            vm_copy_from(sender_ptbr, client_buf_addr, &local[0], wlen)
+        val mapped = svc_grant_map(grant_id, 0, wlen)
+        if mapped <= 0
+            var reply: [5]byte
+            reply[0] = -1
+            ipc_reply(sender, reply, 5)
+            return
+        var src: *byte = *byte(mapped)
         // Build TTY_CMD_PUTS message: [cmd(1), console(1), len(1), data...]
         var tty_msg: [128]byte
         tty_msg[0] = 3  // TTY_CMD_PUTS
@@ -499,15 +712,16 @@ with the data from the client buffer.
         tty_msg[2] = byte(wlen)
         var i = 0
         while i < wlen
-            tty_msg[3 + i] = local[i]
+            tty_msg[3 + i] = src[i]
             i += 1
+        svc_grant_unmap(grant_id)
         var tty_reply: [1]byte
-        ipc_send(tty, &tty_msg[0], 3 + wlen, &tty_reply[0], 1)
+        ipc_send(tty, tty_msg, 3 + wlen, tty_reply, 1)
         // Reply: bytes written
         var reply: [5]byte
         reply[0] = 0
-        vfs_msg_write_i32(&reply[0], 1, wlen)
-        ipc_reply(sender, &reply[0], 5)
+        vfs_msg_write_i32(reply, 1, wlen)
+        ipc_reply(sender, reply, 5)
 
 Handle READ with position tracking and cross-address-space support.
 Client request:  [cmd(1), handle(4), len(4), buf_addr(4)]  (13 bytes)
@@ -517,57 +731,41 @@ position, forwards to TFS, advances position by bytes_read.
     vfs_handle_read(sender: int, buf: *byte, backend: int)
         val handle = vfs_msg_read_i32(buf, 1)
         val len = vfs_msg_read_i32(buf, 5)
-        val client_buf_addr = vfs_msg_read_i32(buf, 9)
+        val grant_id = vfs_msg_read_i32(buf, 9)
 
-        val pid = kernel_get_thread_pid(sender)
+        val pid = svc_get_thread_pid(sender)
         val fid = vfs_handle_lookup(pid, handle)
         if fid < 0
             var err: [1]byte
             err[0] = -1
-            ipc_reply(sender, &err[0], 1)
+            ipc_reply(sender, err, 1)
             return
 
         if oft_type[fid] == OFT_TYPE_TTY
-            vfs_tty_read(sender, fid, client_buf_addr, len)
+            vfs_tty_read(sender, fid, grant_id, len)
+            return
+
+        if oft_type[fid] == OFT_TYPE_PIPE
+            vfs_pipe_read(sender, fid, grant_id, len)
             return
 
         val ino = oft_ino[fid]
         val offset = oft_pos[fid]
 
-        // Build TFS-format message: [cmd(1), ino(4), offset(4), len(4), buf_addr(4)]
+        // Build TFS-format message: [cmd(1), ino(4), offset(4), len(4), grant_id(4)]
         var tfs_msg: [17]byte
         tfs_msg[0] = 2  // TFS_CMD_READ
-        vfs_msg_write_i32(&tfs_msg[0], 1, ino)
-        vfs_msg_write_i32(&tfs_msg[0], 5, offset)
-        vfs_msg_write_i32(&tfs_msg[0], 9, len)
+        vfs_msg_write_i32(tfs_msg, 1, ino)
+        vfs_msg_write_i32(tfs_msg, 5, offset)
+        vfs_msg_write_i32(tfs_msg, 9, len)
+        vfs_msg_write_i32(tfs_msg, 13, grant_id)
 
-        val sender_ptbr = kernel_get_thread_ptbr(sender)
-
-        if sender_ptbr == KERNEL_L1_BASE
-            // Same address space — forward directly
-            vfs_msg_write_i32(&tfs_msg[0], 13, client_buf_addr)
-            var be_reply: [64]byte
-            ipc_send(backend, &tfs_msg[0], 17, &be_reply[0], 64)
-            if be_reply[0] == 0
-                val nr = vfs_msg_read_i32(&be_reply[0], 1)
-                oft_pos[fid] += nr
-            ipc_reply(sender, &be_reply[0], 5)
-        else
-            // Different address space — use local buffer
-            var local: [4096]byte
-            var rlen = len
-            if rlen > 4096
-                rlen = 4096
-            vfs_msg_write_i32(&tfs_msg[0], 9, rlen)
-            vfs_msg_write_i32(&tfs_msg[0], 13, int(i64(&local[0])))
-            var be_reply: [64]byte
-            ipc_send(backend, &tfs_msg[0], 17, &be_reply[0], 64)
-            if be_reply[0] == 0
-                val nr = vfs_msg_read_i32(&be_reply[0], 1)
-                if nr > 0
-                    vm_copy_to(sender_ptbr, client_buf_addr, &local[0], nr)
-                oft_pos[fid] += nr
-            ipc_reply(sender, &be_reply[0], 5)
+        var be_reply: [64]byte
+        ipc_send(backend, tfs_msg, 17, be_reply, 64)
+        if be_reply[0] == 0
+            val nr = vfs_msg_read_i32(be_reply, 1)
+            oft_pos[fid] += nr
+        ipc_reply(sender, be_reply, 5)
 
 Handle WRITE with position tracking and cross-address-space support.
 Client request:  [cmd(1), fid(4), len(4), buf_addr(4)]  (13 bytes)
@@ -575,54 +773,41 @@ Client request:  [cmd(1), fid(4), len(4), buf_addr(4)]  (13 bytes)
     vfs_handle_write(sender: int, buf: *byte, backend: int)
         val handle = vfs_msg_read_i32(buf, 1)
         val len = vfs_msg_read_i32(buf, 5)
-        val client_buf_addr = vfs_msg_read_i32(buf, 9)
+        val grant_id = vfs_msg_read_i32(buf, 9)
 
-        val pid = kernel_get_thread_pid(sender)
+        val pid = svc_get_thread_pid(sender)
         val fid = vfs_handle_lookup(pid, handle)
         if fid < 0
             var err: [1]byte
             err[0] = -1
-            ipc_reply(sender, &err[0], 1)
+            ipc_reply(sender, err, 1)
             return
 
         if oft_type[fid] == OFT_TYPE_TTY
-            vfs_tty_write(sender, fid, client_buf_addr, len)
+            vfs_tty_write(sender, fid, grant_id, len)
+            return
+
+        if oft_type[fid] == OFT_TYPE_PIPE
+            vfs_pipe_write(sender, fid, grant_id, len)
             return
 
         val ino = oft_ino[fid]
         val offset = oft_pos[fid]
 
-        // Build TFS-format message
+        // Build TFS-format message: [cmd(1), ino(4), offset(4), len(4), grant_id(4)]
         var tfs_msg: [17]byte
         tfs_msg[0] = 3  // TFS_CMD_WRITE
-        vfs_msg_write_i32(&tfs_msg[0], 1, ino)
-        vfs_msg_write_i32(&tfs_msg[0], 5, offset)
-        vfs_msg_write_i32(&tfs_msg[0], 9, len)
+        vfs_msg_write_i32(tfs_msg, 1, ino)
+        vfs_msg_write_i32(tfs_msg, 5, offset)
+        vfs_msg_write_i32(tfs_msg, 9, len)
+        vfs_msg_write_i32(tfs_msg, 13, grant_id)
 
-        val sender_ptbr = kernel_get_thread_ptbr(sender)
-
-        if sender_ptbr == KERNEL_L1_BASE
-            vfs_msg_write_i32(&tfs_msg[0], 13, client_buf_addr)
-            var be_reply: [64]byte
-            ipc_send(backend, &tfs_msg[0], 17, &be_reply[0], 64)
-            if be_reply[0] == 0
-                val nw = vfs_msg_read_i32(&be_reply[0], 1)
-                oft_pos[fid] += nw
-            ipc_reply(sender, &be_reply[0], 5)
-        else
-            var local: [4096]byte
-            var wlen = len
-            if wlen > 4096
-                wlen = 4096
-            vm_copy_from(sender_ptbr, client_buf_addr, &local[0], wlen)
-            vfs_msg_write_i32(&tfs_msg[0], 9, wlen)
-            vfs_msg_write_i32(&tfs_msg[0], 13, int(i64(&local[0])))
-            var be_reply: [64]byte
-            ipc_send(backend, &tfs_msg[0], 17, &be_reply[0], 64)
-            if be_reply[0] == 0
-                val nw = vfs_msg_read_i32(&be_reply[0], 1)
-                oft_pos[fid] += nw
-            ipc_reply(sender, &be_reply[0], 5)
+        var be_reply: [64]byte
+        ipc_send(backend, tfs_msg, 17, be_reply, 64)
+        if be_reply[0] == 0
+            val nw = vfs_msg_read_i32(be_reply, 1)
+            oft_pos[fid] += nw
+        ipc_reply(sender, be_reply, 5)
 
 Handle CLOSE: resolve handle, free it and decrement oft refcount.
 Client request:  [cmd(1), handle(4)]
@@ -630,7 +815,7 @@ Client reply:    [status(1)]
 
     vfs_do_close(sender: int, buf: *byte)
         val handle = vfs_msg_read_i32(buf, 1)
-        val pid = kernel_get_thread_pid(sender)
+        val pid = svc_get_thread_pid(sender)
         val fid = vfs_handle_lookup(pid, handle)
         var reply: [1]byte
         if fid < 0
@@ -638,7 +823,7 @@ Client reply:    [status(1)]
         else
             vfs_handle_close(pid, handle)
             reply[0] = 0
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 Handle SEEK: resolve handle, adjust file position.
 Client request:  [cmd(1), handle(4), offset(4), whence(1)]
@@ -649,20 +834,20 @@ whence: 0 = SEEK_SET, 1 = SEEK_CUR
         val handle = vfs_msg_read_i32(buf, 1)
         val offset = vfs_msg_read_i32(buf, 5)
         val whence = int(buf[9])
-        val pid = kernel_get_thread_pid(sender)
+        val pid = svc_get_thread_pid(sender)
         val fid = vfs_handle_lookup(pid, handle)
         var reply: [5]byte
         if fid < 0
             reply[0] = -1
-            ipc_reply(sender, &reply[0], 1)
+            ipc_reply(sender, reply, 1)
             return
         if whence == 0
             oft_pos[fid] = offset
         else if whence == 1
             oft_pos[fid] += offset
         reply[0] = 0
-        vfs_msg_write_i32(&reply[0], 1, oft_pos[fid])
-        ipc_reply(sender, &reply[0], 5)
+        vfs_msg_write_i32(reply, 1, oft_pos[fid])
+        ipc_reply(sender, reply, 5)
 
 Handle INHERIT: copy handles from parent to child process.
 Called by PM after creating a child process.
@@ -687,22 +872,302 @@ Reply:   [status(1)]
             i += 1
         var reply: [1]byte
         reply[0] = 0
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
+
+Resolve a path to an inode via TFS OPEN.
+Returns the inode or -1 on error.
+
+    vfs_resolve_path(backend: int, path: *byte, path_len: int) -> int
+        var open_msg: [128]byte
+        open_msg[0] = 1  // TFS_CMD_OPEN
+        var i = 0
+        while i < path_len
+            open_msg[1 + i] = path[i]
+            i += 1
+        var reply: [5]byte
+        ipc_send(backend, open_msg, path_len + 1, reply, 5)
+        if reply[0] != 0
+            return -1
+        vfs_msg_read_i32(reply, 1)
+
+Split a path into parent directory path length and basename pointer.
+For "/etc/passwd": parent_len=4 ("/etc"), basename points to "passwd".
+For "/hello": parent_len=1 ("/"), basename points to "hello".
+For "hello": parent_len=0, basename points to "hello".
+
+    vfs_split_parent(path: *byte, path_len: int) -> int
+        var last_slash = -1
+        var i = 0
+        while i < path_len
+            if path[i] == 47  // '/'
+                last_slash = i
+            i += 1
+        if last_slash <= 0
+            return last_slash
+        last_slash
+
+Path-based CREATE: [cmd(1), type(1), mode_hi(1), mode_lo(1), path(N)]
+Reply: [status(1), ino(4)]
+
+    vfs_path_create(sender: int, buf: *byte, msg_len: int, backend: int)
+        val ftype = int(buf[1])
+        val perm = (int(buf[2]) << 8) | int(buf[3])
+        val path: *byte = buf + 4
+        val path_len = msg_len - 4
+        val slash = vfs_split_parent(path, path_len)
+        var parent_ino: int
+        if slash <= 0
+            parent_ino = vfs_resolve_path(backend, path, 0)
+            if parent_ino < 0
+                parent_ino = 1  // root inode
+        else
+            parent_ino = vfs_resolve_path(backend, path, slash)
+        if parent_ino < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, err, 1)
+            return
+        val name: *byte = path + slash + 1
+        val name_len = path_len - slash - 1
+        // Forward to TFS: [cmd(1), parent_ino(4), type(1), perm(2), name(N)]
+        var tfs_msg: [128]byte
+        tfs_msg[0] = 4  // TFS_CMD_CREATE
+        vfs_msg_write_i32(tfs_msg, 1, parent_ino)
+        tfs_msg[5] = byte(ftype)
+        tfs_msg[6] = byte((perm >> 8) & 0xFF)
+        tfs_msg[7] = byte(perm & 0xFF)
+        var j = 0
+        while j < name_len
+            tfs_msg[8 + j] = name[j]
+            j += 1
+        var reply: [5]byte
+        ipc_send(backend, tfs_msg, 8 + name_len, reply, 5)
+        ipc_reply(sender, reply, 5)
+
+Path-based UNLINK: [cmd(1), path(N)]
+Reply: [status(1)]
+
+    vfs_path_unlink(sender: int, buf: *byte, msg_len: int, backend: int)
+        val path: *byte = buf + 1
+        val path_len = msg_len - 1
+        val slash = vfs_split_parent(path, path_len)
+        var parent_ino: int
+        if slash <= 0
+            parent_ino = 1  // root
+        else
+            parent_ino = vfs_resolve_path(backend, path, slash)
+        if parent_ino < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, err, 1)
+            return
+        val name: *byte = path + slash + 1
+        val name_len = path_len - slash - 1
+        var tfs_msg: [128]byte
+        tfs_msg[0] = 5  // TFS_CMD_UNLINK
+        vfs_msg_write_i32(tfs_msg, 1, parent_ino)
+        var j = 0
+        while j < name_len
+            tfs_msg[5 + j] = name[j]
+            j += 1
+        var reply: [1]byte
+        ipc_send(backend, tfs_msg, 5 + name_len, reply, 1)
+        ipc_reply(sender, reply, 1)
+
+Path-based STAT: [cmd(1), path(N)]
+Reply: [status(1), mode(4), nlinks(4), uid(4), gid(4), size(4), mtime(4), ctime(4)]
+
+    vfs_path_stat(sender: int, buf: *byte, msg_len: int, backend: int)
+        val path: *byte = buf + 1
+        val path_len = msg_len - 1
+        val ino = vfs_resolve_path(backend, path, path_len)
+        if ino < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, err, 1)
+            return
+        var tfs_msg: [5]byte
+        tfs_msg[0] = 6  // TFS_CMD_STAT
+        vfs_msg_write_i32(tfs_msg, 1, ino)
+        var reply: [29]byte
+        ipc_send(backend, tfs_msg, 5, reply, 29)
+        ipc_reply(sender, reply, 29)
+
+Path-based MKDIR: [cmd(1), mode_hi(1), mode_lo(1), path(N)]
+Reply: [status(1), ino(4)]
+
+    vfs_path_mkdir(sender: int, buf: *byte, msg_len: int, backend: int)
+        val perm = (int(buf[1]) << 8) | int(buf[2])
+        val path: *byte = buf + 3
+        val path_len = msg_len - 3
+        val slash = vfs_split_parent(path, path_len)
+        var parent_ino: int
+        if slash <= 0
+            parent_ino = 1  // root
+        else
+            parent_ino = vfs_resolve_path(backend, path, slash)
+        if parent_ino < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, err, 1)
+            return
+        val name: *byte = path + slash + 1
+        val name_len = path_len - slash - 1
+        var tfs_msg: [128]byte
+        tfs_msg[0] = 7  // TFS_CMD_MKDIR
+        vfs_msg_write_i32(tfs_msg, 1, parent_ino)
+        tfs_msg[5] = byte((perm >> 8) & 0xFF)
+        tfs_msg[6] = byte(perm & 0xFF)
+        var j = 0
+        while j < name_len
+            tfs_msg[7 + j] = name[j]
+            j += 1
+        var reply: [5]byte
+        ipc_send(backend, tfs_msg, 7 + name_len, reply, 5)
+        ipc_reply(sender, reply, 5)
+
+Path-based RMDIR: [cmd(1), path(N)]
+Reply: [status(1)]
+
+    vfs_path_rmdir(sender: int, buf: *byte, msg_len: int, backend: int)
+        val path: *byte = buf + 1
+        val path_len = msg_len - 1
+        val slash = vfs_split_parent(path, path_len)
+        var parent_ino: int
+        if slash <= 0
+            parent_ino = 1  // root
+        else
+            parent_ino = vfs_resolve_path(backend, path, slash)
+        if parent_ino < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, err, 1)
+            return
+        val name: *byte = path + slash + 1
+        val name_len = path_len - slash - 1
+        var tfs_msg: [128]byte
+        tfs_msg[0] = 8  // TFS_CMD_RMDIR
+        vfs_msg_write_i32(tfs_msg, 1, parent_ino)
+        var j = 0
+        while j < name_len
+            tfs_msg[5 + j] = name[j]
+            j += 1
+        var reply: [1]byte
+        ipc_send(backend, tfs_msg, 5 + name_len, reply, 1)
+        ipc_reply(sender, reply, 1)
+
+Path-based READDIR: [cmd(1), index(4), path(N)]
+Reply: [status(1), ino(4), name(14)]
+
+    vfs_path_readdir(sender: int, buf: *byte, msg_len: int, backend: int)
+        val index = vfs_msg_read_i32(buf, 1)
+        val path: *byte = buf + 5
+        val path_len = msg_len - 5
+        val dir_ino = vfs_resolve_path(backend, path, path_len)
+        if dir_ino < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, err, 1)
+            return
+        var tfs_msg: [9]byte
+        tfs_msg[0] = 9  // TFS_CMD_READDIR
+        vfs_msg_write_i32(tfs_msg, 1, dir_ino)
+        vfs_msg_write_i32(tfs_msg, 5, index)
+        var reply: [19]byte
+        ipc_send(backend, tfs_msg, 9, reply, 19)
+        if reply[0] != 0
+            ipc_reply(sender, reply, 1)
+        else
+            ipc_reply(sender, reply, 19)
+
+Path-based CHMOD: [cmd(1), mode_hi(1), mode_lo(1), path(N)]
+Reply: [status(1)]
+
+    vfs_path_chmod(sender: int, buf: *byte, msg_len: int, backend: int)
+        val perm = (int(buf[1]) << 8) | int(buf[2])
+        val path: *byte = buf + 3
+        val path_len = msg_len - 3
+        val ino = vfs_resolve_path(backend, path, path_len)
+        if ino < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, err, 1)
+            return
+        var tfs_msg: [7]byte
+        tfs_msg[0] = 11  // TFS_CMD_CHMOD
+        vfs_msg_write_i32(tfs_msg, 1, ino)
+        tfs_msg[5] = byte((perm >> 8) & 0xFF)
+        tfs_msg[6] = byte(perm & 0xFF)
+        var reply: [1]byte
+        ipc_send(backend, tfs_msg, 7, reply, 1)
+        ipc_reply(sender, reply, 1)
+
+Path-based RENAME: [cmd(1), old_path_len(1), old_path(N), new_path(M)]
+Reply: [status(1)]
+
+    vfs_path_rename(sender: int, buf: *byte, msg_len: int, backend: int)
+        val old_path_len = int(buf[1])
+        val old_path: *byte = buf + 2
+        val new_path: *byte = buf + 2 + old_path_len
+        val new_path_len = msg_len - 2 - old_path_len
+        // Resolve old parent
+        val old_slash = vfs_split_parent(old_path, old_path_len)
+        var old_parent: int
+        if old_slash <= 0
+            old_parent = 1
+        else
+            old_parent = vfs_resolve_path(backend, old_path, old_slash)
+        if old_parent < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, err, 1)
+            return
+        // Resolve new parent
+        val new_slash = vfs_split_parent(new_path, new_path_len)
+        var new_parent: int
+        if new_slash <= 0
+            new_parent = 1
+        else
+            new_parent = vfs_resolve_path(backend, new_path, new_slash)
+        if new_parent < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, err, 1)
+            return
+        val old_name: *byte = old_path + old_slash + 1
+        val old_name_len = old_path_len - old_slash - 1
+        val new_name: *byte = new_path + new_slash + 1
+        val new_name_len = new_path_len - new_slash - 1
+        // Forward to TFS: [cmd(1), old_parent(4), new_parent(4), old_name_len(1), old_name(N), new_name(M)]
+        var tfs_msg: [128]byte
+        tfs_msg[0] = 12  // TFS_CMD_RENAME
+        vfs_msg_write_i32(tfs_msg, 1, old_parent)
+        vfs_msg_write_i32(tfs_msg, 5, new_parent)
+        tfs_msg[9] = byte(old_name_len)
+        var j = 0
+        while j < old_name_len
+            tfs_msg[10 + j] = old_name[j]
+            j += 1
+        j = 0
+        while j < new_name_len
+            tfs_msg[10 + old_name_len + j] = new_name[j]
+            j += 1
+        var reply: [1]byte
+        ipc_send(backend, tfs_msg, 10 + old_name_len + new_name_len, reply, 1)
+        ipc_reply(sender, reply, 1)
 
 The VFS server loop. Registers as "fs", waits for TFS to
 come up, mounts root on TFS, then proxies all requests to
 the appropriate backend.
 
     vfs_server()
-        // Initialize handle table
+        // Initialize handle table and pipe state
         vfs_handle_init()
+        vfs_pipe_init()
 
         // Register as "fs"
-        vfs_srv_name[0] = 102  // f
-        vfs_srv_name[1] = 115  // s
-        vfs_srv_name[2] = 0
         vfs_port = port_create()
-        port_register(vfs_port, &vfs_srv_name[0])
+        port_register(vfs_port, "fs")
 
         // Wait for TFS to register
         while vfs_lookup_tfs() < 0
@@ -712,7 +1177,7 @@ the appropriate backend.
         var root_prefix: [2]byte
         root_prefix[0] = 47  // /
         root_prefix[1] = 0
-        vfs_mount(&root_prefix[0], 1, vfs_tfs_port)
+        vfs_mount(root_prefix, 1, vfs_tfs_port)
 
         // Register "vfs" scheme pointing to TFS backend
         var vfs_scheme: [4]byte
@@ -720,7 +1185,7 @@ the appropriate backend.
         vfs_scheme[1] = 102  // f
         vfs_scheme[2] = 115  // s
         vfs_scheme[3] = 0
-        vfs_register_scheme(&vfs_scheme[0], 3, vfs_tfs_port)
+        vfs_register_scheme(vfs_scheme, 3, vfs_tfs_port)
 
         // Signal RS that VFS is ready
         rs_ready()
@@ -728,7 +1193,7 @@ the appropriate backend.
         // Server loop: receive requests, forward to backend, relay reply
         var buf: [128]byte
         while 1 == 1
-            val sender = ipc_recv(vfs_port, &buf[0], 128)
+            val sender = ipc_recv(vfs_port, buf, 128)
             if sender >= 0
                 val msg_len = ipc_last_msg_len()
                 val cmd = int(buf[0])
@@ -739,24 +1204,49 @@ the appropriate backend.
                 if backend < 0
                     var err_reply: [1]byte
                     err_reply[0] = -1
-                    ipc_reply(sender, &err_reply[0], 1)
+                    ipc_reply(sender, err_reply, 1)
                 else if cmd == VFS_CMD_OPEN
-                    vfs_handle_open(sender, &buf[0], msg_len, backend)
+                    vfs_handle_open(sender, buf, msg_len, backend)
                 else if cmd == VFS_CMD_READ
-                    vfs_handle_read(sender, &buf[0], backend)
+                    vfs_handle_read(sender, buf, backend)
                 else if cmd == VFS_CMD_WRITE
-                    vfs_handle_write(sender, &buf[0], backend)
+                    vfs_handle_write(sender, buf, backend)
                 else if cmd == VFS_CMD_CLOSE
-                    vfs_do_close(sender, &buf[0])
+                    vfs_do_close(sender, buf)
                 else if cmd == VFS_CMD_SEEK
-                    vfs_do_seek(sender, &buf[0])
+                    vfs_do_seek(sender, buf)
                 else if cmd == VFS_CMD_CONNECT
-                    vfs_handle_connect(sender, &buf[0], msg_len, backend)
+                    vfs_handle_connect(sender, buf, msg_len, backend)
                 else if cmd == VFS_CMD_INHERIT
-                    vfs_handle_inherit(sender, &buf[0])
+                    vfs_handle_inherit(sender, buf)
+                else if cmd == VFS_CMD_PIPE
+                    vfs_handle_pipe(sender)
+                else if cmd == VFS_CMD_EXIT
+                    // Process exited — close all its handles
+                    val exit_pid = vfs_msg_read_i32(buf, 1)
+                    vfs_handle_close_all(exit_pid)
+                    var exit_reply: [1]byte
+                    exit_reply[0] = 0
+                    ipc_reply(sender, exit_reply, 1)
+                else if cmd == VFS_CMD_CREATE
+                    vfs_path_create(sender, buf, msg_len, backend)
+                else if cmd == VFS_CMD_UNLINK
+                    vfs_path_unlink(sender, buf, msg_len, backend)
+                else if cmd == VFS_CMD_STAT
+                    vfs_path_stat(sender, buf, msg_len, backend)
+                else if cmd == VFS_CMD_MKDIR
+                    vfs_path_mkdir(sender, buf, msg_len, backend)
+                else if cmd == VFS_CMD_RMDIR
+                    vfs_path_rmdir(sender, buf, msg_len, backend)
+                else if cmd == VFS_CMD_READDIR
+                    vfs_path_readdir(sender, buf, msg_len, backend)
+                else if cmd == VFS_CMD_CHMOD
+                    vfs_path_chmod(sender, buf, msg_len, backend)
+                else if cmd == VFS_CMD_RENAME
+                    vfs_path_rename(sender, buf, msg_len, backend)
                 else
-                    // All other commands: forward and relay
+                    // Unknown command — forward and relay
                     var be_reply: [64]byte
-                    ipc_send(backend, &buf[0], msg_len, &be_reply[0], 64)
+                    ipc_send(backend, buf, msg_len, be_reply, 64)
                     val rlen = vfs_reply_len(cmd, int(be_reply[0]))
-                    ipc_reply(sender, &be_reply[0], rlen)
+                    ipc_reply(sender, be_reply, rlen)

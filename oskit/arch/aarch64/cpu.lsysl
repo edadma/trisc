@@ -1,0 +1,29 @@
+OSKit Arch — aarch64 CPU Primitives
+===================================
+
+Architecture-specific CPU operations for aarch64: interrupt
+enable/disable, plus (eventually) spinlock helpers and stack-frame
+construction. Mirrors the shape of `oskit/arch/x86_64/cpu.lsysl`
+so the kernel can import from `oskit.arch` without caring which
+target is underneath.
+
+Implementations live in `cpu_asm.s` so we can emit bare `msr`
+instructions without paying for a sysl function prologue.
+
+    module oskit.arch
+
+Mask async exceptions (IRQ, FIQ, SError). Runs one instruction
+plus the return; safe to call with interrupts already masked.
+
+    extern arch_cli()
+
+Unmask async exceptions.
+
+    extern arch_sti()
+
+Transition from EL1 to EL0 and start executing at `entry` with
+`SP_EL0 = sp`. Does not return — an exception back to EL1 is the
+way out. Caller must ensure the active page table maps both the
+entry point and the user stack EL0-accessible.
+
+    extern drop_to_el0(entry: i64, sp: i64)

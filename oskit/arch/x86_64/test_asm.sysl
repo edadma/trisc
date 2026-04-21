@@ -1,0 +1,21 @@
+// Test inline asm support in LLVM backend.
+// Compiles cli/sti and outb to LLVM inline assembly.
+
+extern uart_putc(c: char)
+
+// x86 cli/sti via asm()
+disable_interrupts()
+    asm("cli")
+
+enable_interrupts()
+    asm("sti")
+
+// Port I/O via asm() — outb
+outb(port: int, v: byte)
+    asm("outb %al, %dx")
+
+main() -> int
+    disable_interrupts()
+    enable_interrupts()
+    uart_putc('!')
+    0

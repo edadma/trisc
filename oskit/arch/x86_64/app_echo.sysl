@@ -1,0 +1,8 @@
+// Serial echo test — type characters, see them echoed back.
+// The serial ISR handles echoing; kernel_main just idles.
+
+import oskit.arch.x86_64.uart_puts
+
+kernel_main() -> i64
+    uart_puts("SLIX echo test — type something:\n")
+    0  // return 0 → idle_loop (interrupts enabled, serial ISR echoes)

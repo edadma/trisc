@@ -1,0 +1,15 @@
+test_putc — minimal output test
+=================================
+
+Uses putc syscalls directly, no IPC. If this works but puts doesn't,
+the problem is in IPC/VFS handle path.
+
+    module oskit.bin.test_putc
+
+    import oskit.ulib.{putc, exit}
+
+    main(argv: []string)
+        putc('O')
+        putc('K')
+        putc('\n')
+        exit()

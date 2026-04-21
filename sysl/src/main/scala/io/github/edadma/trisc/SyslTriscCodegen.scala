@@ -20,9 +20,81 @@ class SyslTriscCodegen(addresses: Int = 4):
   // Struct types that have a deinit method (populated during generate)
   private val deinitFunctions = new mutable.HashMap[String, String] // struct name → deinit function name
 
+  // Slice deinit functions to emit (for &[]T where T contains rc data). Generated
+  // on demand when a slice with rc-content elements is freed; emitted after all
+  // user functions. Each takes r1 = base of slice block (rc header at +0, len at
+  // +8, data at +16) and decrs each element before returning.
+  private val sliceElemDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType] // deinit name → elem type
+
+  // Enum deinit functions to emit (for &MyEnum where the enum has string-bearing
+  // variants). Generated on demand when an enum ref is freed; emitted after all
+  // user functions. Each takes r1 = data ptr (past the rc header) and walks the
+  // active variant's strings before returning.
+  private val enumDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType.EnumType] // deinit name → enum type
+
+  // Auto-synthesized struct deinit functions (for &MyStruct where the struct has
+  // string-bearing fields AND the user hasn't defined `TypeName.deinit`). Called
+  // by emitRefDecr at rc=0 before free(). Takes r1 = data ptr (past rc header)
+  // and walks string fields to decr them.
+  private val structDeinitsNeeded = new mutable.LinkedHashMap[String, SyslType.StructType] // deinit name → struct type
+
   // Pending closure functions to generate after all regular functions
   private var closureCounter = 0
   private val pendingClosures = new mutable.ListBuffer[(String, TClosure)]
+
+  // Per-closure-id env deinit functions to emit (only for closures whose captures carry rc content).
+  // Maps closure name → its TClosure (for capture layout). The deinit walks captures decr'ing each.
+  private val closureEnvDeinitsNeeded = new mutable.LinkedHashMap[String, TClosure]
+  // True if any closure has captures (need __closure_env_dispatch + needsFreeExtern)
+  private var closureEnvDispatchNeeded = false
+  // Borrowed-capture local names in a closure body (skip rc cleanup — env owns the buffers)
+  private var captureBorrows: Set[String] = Set.empty
+
+  /** Kind of env backing a closure descriptor:
+    *  - NullEnv: env_ptr is null (no captures, or TFuncRef). Decr is no-op.
+    *  - StackEnv: env lives in caller's stack frame (no header, no rc, no free).
+    *    Used when captures are all non-rc-bearing AND the closure does not escape.
+    *  - HeapEnv: env malloc'd with [rc:8 | deinit_ptr:8 | data] header. Scope-exit
+    *    decr's env's rc; deinit walks rc-bearing captures; free reclaims env.
+    */
+  private enum FuncKind:
+    case NullEnv, StackEnv, HeapEnv
+
+  /** Per-local kind tracking for FuncType locals. Set at TVarStmt time based on
+    * RHS analysis; consulted at scope-exit to decide whether to emit
+    * emitClosureDescrDecr. Locals not in the map default to NullEnv (skip decr —
+    * safe for uninitialized var f: (...) -> T whose env_ptr starts as zero).
+    * Reset at the start of each genFunction / genClosureFunction. */
+  private val closureLocalKind = new mutable.HashMap[String, FuncKind]
+
+  /** A capture type counts as "rc-bearing" if its value-flow needs an incr/decr —
+    * any RefType, or any value type containing a String (directly or nested). */
+  private def captureNeedsRc(t: SyslType): Boolean =
+    t.isInstanceOf[SyslType.RefType] || structHasStringFields(t)
+
+  /** Decide the env kind for a freshly-constructed TClosure based on capture
+    * analysis. Stack env is only used for non-escaping closures whose captures
+    * are all non-rc-bearing — in that case no rc header / malloc / free is
+    * needed and the env can live on the constructing function's stack frame. */
+  private def closureKindOf(c: TClosure): FuncKind =
+    if c.captures.isEmpty then FuncKind.NullEnv
+    else if c.escapes || c.captures.exists((_, t) => captureNeedsRc(t)) then FuncKind.HeapEnv
+    else FuncKind.StackEnv
+
+  private def funcKindOfExpr(e: TExpr): FuncKind = e match
+    case c: TClosure => closureKindOf(c)
+    case _: TFuncRef => FuncKind.NullEnv
+    case TVarRef(name, _) if funcBorrowParams.contains(name) =>
+      // FuncType params are borrowed from the caller — treat as HeapEnv (could
+      // be NullEnv at runtime; dispatch's null-check handles that). Lets the
+      // copy/return paths emit the right incr to balance shared ownership.
+      FuncKind.HeapEnv
+    case TVarRef(name, _) => closureLocalKind.getOrElse(name, FuncKind.NullEnv)
+    case _: TCall | _: TIndirectCall | _: TInterfaceDispatch =>
+      if needsAllocExtern then FuncKind.HeapEnv else FuncKind.NullEnv
+    case _: TIfExpr | _: TMatchExpr =>
+      if needsAllocExtern then FuncKind.HeapEnv else FuncKind.NullEnv
+    case _ => FuncKind.NullEnv
 
   // Interface tables: (struct, interface) → itable label + method function names
   // Collected during genExpr when TInterfaceBox is encountered, emitted in rodata
@@ -34,7 +106,10 @@ class SyslTriscCodegen(addresses: Int = 4):
     labelCounter = 0
     stringLiterals.clear()
     deinitFunctions.clear()
-    needsAllocExtern = false
+    sliceElemDeinitsNeeded.clear()
+    enumDeinitsNeeded.clear()
+    structDeinitsNeeded.clear()
+    needsAllocExtern = scanNeedsAlloc(program)  // pre-scan so rc-bracket gates are correct from the start
     needsFreeExtern = false
     // Extract module prefix for unique symbol names across compilation units
     modulePrefix = program.decls.collectFirst { case TModuleDecl(path) => path.mkString("_") }.getOrElse("")
@@ -71,7 +146,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
     for decl <- program.decls do
       decl match
-        case v @ TVarDecl(_, typ, init, _) =>
+        case v @ TVarDecl(_, typ, init, _, _) =>
           globals(v.name) = typ
           // Track constant values for cross-reference in other global initializers
           constEval(init).foreach(n => globalConstants(v.name) = n)
@@ -83,6 +158,8 @@ class SyslTriscCodegen(addresses: Int = 4):
     // Emit code segment — functions
     emit("segment code")
     pendingClosures.clear()
+    closureEnvDeinitsNeeded.clear()
+    closureEnvDispatchNeeded = false
     closureCounter = 0
     for decl <- program.decls do
       decl match
@@ -95,6 +172,41 @@ class SyslTriscCodegen(addresses: Int = 4):
       pendingClosures.clear()
       for (name, closure) <- batch do
         genClosureFunction(name, closure)
+
+    // Emit slice element deinit functions (registered when freeing slices of
+    // rc-content elements). Iterating may register more types via emitValueRC
+    // (e.g. nested slices), so drain a worklist.
+    val emittedSliceDeinits = mutable.Set.empty[String]
+    while sliceElemDeinitsNeeded.exists((n, _) => !emittedSliceDeinits.contains(n)) do
+      val pending = sliceElemDeinitsNeeded.filterNot((n, _) => emittedSliceDeinits.contains(n)).toList
+      for (name, elem) <- pending do
+        emittedSliceDeinits += name
+        emitSliceDeinit(name, elem)
+
+    // Emit per-enum-type deinit functions (registered when freeing an enum ref
+    // whose active variant carries rc content).
+    val emittedEnumDeinits = mutable.Set.empty[String]
+    while enumDeinitsNeeded.exists((n, _) => !emittedEnumDeinits.contains(n)) do
+      val pending = enumDeinitsNeeded.filterNot((n, _) => emittedEnumDeinits.contains(n)).toList
+      for (name, et) <- pending do
+        emittedEnumDeinits += name
+        emitEnumDeinit(name, et)
+
+    // Emit auto-synthesized struct deinit functions (registered when freeing a
+    // struct ref whose fields carry rc content and no user deinit exists).
+    val emittedStructDeinits = mutable.Set.empty[String]
+    while structDeinitsNeeded.exists((n, _) => !emittedStructDeinits.contains(n)) do
+      val pending = structDeinitsNeeded.filterNot((n, _) => emittedStructDeinits.contains(n)).toList
+      for (name, st) <- pending do
+        emittedStructDeinits += name
+        emitStructDeinit(name, st)
+
+    // Emit per-closure-id env deinit functions (walk captures to decr rc content)
+    for (name, closure) <- closureEnvDeinitsNeeded do
+      emitClosureEnvDeinit(name, closure)
+
+    // Emit __closure_env_dispatch (loads runtime deinit_ptr from env-8 and calls it)
+    if closureEnvDispatchNeeded then emitClosureEnvDispatch()
 
     // Emit __str_int helper if needed (integer to string conversion)
     if needsStrInt then emitStrIntHelper()
@@ -133,7 +245,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       emit("segment data")
       for decl <- dataGlobals do
         decl match
-          case TVarDecl(name, typ, init, _) =>
+          case TVarDecl(name, typ, init, _, _) =>
             val align = stackAlign(typ)
             if align > 1 then emit(s"  align $align")
             emit(s"# global: $name")
@@ -142,7 +254,7 @@ class SyslTriscCodegen(addresses: Int = 4):
               case TArrayLit(elements, _) =>
                 val declElemType = typ match
                   case SyslType.ArrayType(e, _) => e
-                  case _ => SyslType.I64
+                  case other => throw new RuntimeException(s"global array literal: expected ArrayType, got $other")
                 val elemDir = emitDataDirective(declElemType)
                 for elem <- elements do
                   constEval(elem) match
@@ -163,7 +275,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       emit("segment bss")
       for decl <- bssGlobals do
         decl match
-          case TVarDecl(name, typ, _, _) =>
+          case TVarDecl(name, typ, _, _, _) =>
             val align = stackAlign(typ)
             if align > 1 then emit(s"  align $align")
             emit(s"# global: $name")
@@ -181,7 +293,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     val generated = out.toString
     val definedSymbols = (for decl <- program.decls yield decl match
       case TFunDecl(name, _, _, _, _, _, _) => Some(name)
-      case TVarDecl(name, _, _, _) => Some(name)
+      case TVarDecl(name, _, _, _, _) => Some(name)
       case _ => None).flatten.toSet
     if generated.contains("movi r4, malloc") && !definedSymbols.contains("malloc") then emit("extern malloc")
     if generated.contains("movi r4, free") && !definedSymbols.contains("free") then emit("extern free")
@@ -195,6 +307,8 @@ class SyslTriscCodegen(addresses: Int = 4):
   private var refParams: mutable.LinkedHashMap[String, SyslType.RefType] = null // ref-typed params for cleanup
   /** String parameter names — borrowed from caller; do not decref in emitRefCleanup (caller incr/decr around the call). */
   private var stringBorrowParams: Set[String] = Set.empty
+  /** FuncType/InterfaceType parameter names — borrowed; caller still owns the descriptor's env. */
+  private var funcBorrowParams: Set[String] = Set.empty
   private var stackOffset: Int = 0
   private val savedScopes = new mutable.Stack[(Map[String, LocalVar], Int)]
   private val loopScopeOffsets = new mutable.Stack[Int]
@@ -207,7 +321,9 @@ class SyslTriscCodegen(addresses: Int = 4):
     // Decrement refcounts for ref-typed and string locals leaving scope
     // Skip params (positive offsets) — they are borrowed, not owned
     for (name, local) <- locals if !savedLocals.contains(name) && local.offset < 0 do
-      local.typ match
+      // Captured-into-body locals are borrowed; env owns the buffers.
+      if captureBorrows.contains(name) then ()
+      else local.typ match
         case rt: SyslType.RefType =>
           val hoff = refHeaderOffset(rt)
           emit("  pshd r1")
@@ -221,13 +337,31 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  ldd r1, r1, r0")       // r1 = ptr field
           emitRefDecr(1, 8)
           emit("  popd r1")
-        case _: SyslType.SliceType =>
-          // Decrement backref if non-null
+        case SyslType.SliceType(elem) =>
+          // Decrement backref if non-null. If elements need deinit, supply a
+          // per-elem-type deinit function. Normalize the deinit's convention
+          // to r1 = data ptr (past 16-byte rc/len header) by adding 16 and
+          // passing headerOff=16 (so rc/free still target the original base).
           emit("  pshd r1")
           emitAddImm(1, 5, local.offset + 16)
-          emit("  ldd r1, r1, r0")       // r1 = backref
-          emitRefDecr(1, 0)
+          emit("  ldd r1, r1, r0")       // r1 = backref (= base)
+          val deinit = sliceDeinitFor(elem)
+          if deinit.isDefined then
+            emitAddImm(1, 1, 16)         // r1 = data ptr
+            emitRefDecr(1, 16, deinit)
+          else
+            emitRefDecr(1, 0)
           emit("  popd r1")
+        case st: SyslType.StructType if structHasStringFields(st) =>
+          emitStructStringFieldsRC(5, local.offset, st, incr = false)
+        case SyslType.ArrayType(elem, _) if structHasStringFields(elem) =>
+          emitValueRC(5, local.offset, local.typ, incr = false)
+        case et: SyslType.EnumType if structHasStringFields(et) =>
+          emitEnumStringFieldsRC(5, local.offset, et, incr = false)
+        case _: SyslType.FuncType
+            if !funcBorrowParams.contains(name)
+            && closureLocalKind.get(name).contains(FuncKind.HeapEnv) =>
+          emitClosureDescrDecr(5, local.offset)
         case _ =>
     locals.clear()
     locals ++= savedLocals
@@ -261,7 +395,9 @@ class SyslTriscCodegen(addresses: Int = 4):
     case _ => None
 
   // Does this return type require a caller-allocated return slot?
-  private def returnsViaPointer(typ: SyslType): Boolean = typ.isInstanceOf[SyslType.StructType] || typ == SyslType.StringType || typ.isInstanceOf[SyslType.SliceType] || typ.isInstanceOf[SyslType.EnumType] || typ.isInstanceOf[SyslType.FuncType] || typ.isInstanceOf[SyslType.InterfaceType]
+  private def returnsViaPointer(typ0: SyslType): Boolean =
+    val typ = typ0.underlying
+    typ.isInstanceOf[SyslType.StructType] || typ == SyslType.StringType || typ.isInstanceOf[SyslType.SliceType] || typ.isInstanceOf[SyslType.EnumType] || typ.isInstanceOf[SyslType.FuncType] || typ.isInstanceOf[SyslType.InterfaceType]
 
   // Size of a type on the stack in bytes, rounded up to alignment
   private def stackSize(typ: SyslType): Int =
@@ -269,15 +405,15 @@ class SyslTriscCodegen(addresses: Int = 4):
     val align = stackAlign(typ)
     ((raw + align - 1) / align) * align
 
-  // Natural alignment for a type
-  private def stackAlign(typ: SyslType): Int = typ match
+  // Natural alignment for a type. NamedType (derived/constrained) delegates to its base.
+  private def stackAlign(typ: SyslType): Int = typ.underlying match
     case SyslType.IntType(w) => (w / 8).min(8)
     case SyslType.UIntType(w) => (w / 8).min(8)
     case SyslType.BoolType => 1
     case SyslType.PtrType(_) => 8
-    case SyslType.FuncType(_, _) => 8
+    case _: SyslType.FuncType => 8
     case SyslType.ArrayType(elem, _) => stackAlign(elem)
-    case SyslType.StructType(_, fields) => if fields.isEmpty then 1 else fields.map(f => stackAlign(f._2)).max
+    case SyslType.StructType(_, fields, _) => if fields.isEmpty then 1 else fields.map(f => stackAlign(f._2)).max
     case SyslType.EnumType(_, variants) =>
       val fieldAligns = variants.flatMap(_._2.map(f => stackAlign(f._2)))
       if fieldAligns.isEmpty then 4 else fieldAligns.max.max(4)
@@ -300,6 +436,13 @@ class SyslTriscCodegen(addresses: Int = 4):
     case TBinary(left, "+", right, _) => for l <- constEval(left); r <- constEval(right) yield l + r
     case TBinary(left, "-", right, _) => for l <- constEval(left); r <- constEval(right) yield l - r
     case TBinary(left, "*", right, _) => for l <- constEval(left); r <- constEval(right) yield l * r
+    case TBinary(left, "/", right, _) => for l <- constEval(left); r <- constEval(right) if r != 0 yield l / r
+    case TBinary(left, "%", right, _) => for l <- constEval(left); r <- constEval(right) if r != 0 yield l % r
+    case TBinary(left, "|", right, _) => for l <- constEval(left); r <- constEval(right) yield l | r
+    case TBinary(left, "&", right, _) => for l <- constEval(left); r <- constEval(right) yield l & r
+    case TBinary(left, "^", right, _) => for l <- constEval(left); r <- constEval(right) yield l ^ r
+    case TBinary(left, "<<", right, _) => for l <- constEval(left); r <- constEval(right) yield l << r.toInt
+    case TBinary(left, ">>", right, _) => for l <- constEval(left); r <- constEval(right) yield l >> r.toInt
     case TCast(inner, _) => constEval(inner) // pointer casts like *byte(0xC000)
     case _ => None
 
@@ -308,7 +451,7 @@ class SyslTriscCodegen(addresses: Int = 4):
   // so no explicit sext is needed for signed types.
   // For unsigned types, load + zero-extend to clear sign-extended bits.
   private def emitLoad(destReg: Int, addrReg: Int, typ: SyslType): Unit =
-    typ match
+    typ.underlying match
       case SyslType.IntType(8) | SyslType.BoolType =>
         emit(s"  ldb r$destReg, r$addrReg, r0")
       case SyslType.IntType(16) =>
@@ -324,19 +467,26 @@ class SyslTriscCodegen(addresses: Int = 4):
       case SyslType.UIntType(32) =>
         emit(s"  ldw r$destReg, r$addrReg, r0")
         emit(s"  zew r$destReg, r$destReg")
-      case _ =>
+      case SyslType.IntType(64) | SyslType.UIntType(64) | SyslType.FloatType(64) |
+           _: SyslType.PtrType | _: SyslType.RefType =>
         emit(s"  ldd r$destReg, r$addrReg, r0")
+      case SyslType.FloatType(32) =>
+        // f32 stored as 4 bytes; widen to f64 in register so arithmetic uses native fadd/fsub/etc.
+        emit(s"  ldw r$destReg, r$addrReg, r0")
+        emit(s"  f32tof64 r$destReg, r$destReg")
+      case other =>
+        throw new RuntimeException(s"emitLoad: unexpected type $other")
 
   // Emit store from rSrc to [rBase + 0], using width-appropriate instruction
   private def emitStore(srcReg: Int, addrReg: Int, typ: SyslType): Unit =
-    typ match
+    typ.underlying match
       case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType =>
         emit(s"  stb r$srcReg, r$addrReg, r0")
       case SyslType.IntType(16) | SyslType.UIntType(16) =>
         emit(s"  sts r$srcReg, r$addrReg, r0")
       case SyslType.IntType(32) | SyslType.UIntType(32) =>
         emit(s"  stw r$srcReg, r$addrReg, r0")
-      case SyslType.StringType | SyslType.FuncType(_, _) | _: SyslType.InterfaceType =>
+      case SyslType.StringType | (_: SyslType.FuncType) | _: SyslType.InterfaceType =>
         // 16-byte copy: srcReg = source address, addrReg = dest address
         emit(s"  ldd r4, r$srcReg, r0")
         emit(s"  std r4, r$addrReg, r0")
@@ -367,8 +517,16 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  ldd r4, r4, r0")
           emitAddImm(3, addrReg, i)
           emit("  std r4, r3, r0")
-      case _ =>
+      case SyslType.IntType(64) | SyslType.UIntType(64) | SyslType.FloatType(64) |
+           _: SyslType.PtrType | _: SyslType.RefType =>
         emit(s"  std r$srcReg, r$addrReg, r0")
+      case SyslType.FloatType(32) =>
+        // Source register holds f64; narrow to f32 bit pattern (lower 32 bits) and store 4 bytes.
+        // Use r4 as scratch to preserve srcReg.
+        emit(s"  f64tof32 r4, r$srcReg")
+        emit(s"  stw r4, r$addrReg, r0")
+      case other =>
+        throw new RuntimeException(s"emitStore: unexpected type $other")
 
   // Refcount header offset: refcount is at [ptr - headerOffset]
   // Structs: 8 (just refcount), Slices: 16 (refcount + length), Strings: 8 (just refcount, length in fat pointer)
@@ -379,9 +537,65 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   // Get deinit function name for a ref type, if one exists
   private def deinitFor(typ: SyslType): Option[String] = typ match
-    case SyslType.RefType(SyslType.StructType(name, _)) if deinitFunctions.contains(name) =>
+    case SyslType.RefType(st @ SyslType.StructType(name, _, _)) if deinitFunctions.contains(name) =>
       Some(deinitFunctions(name))
+    case SyslType.RefType(st: SyslType.StructType) =>
+      structDeinitFor(st)
+    case SyslType.RefType(SyslType.SliceType(elem)) =>
+      sliceDeinitFor(elem)
+    case SyslType.RefType(et: SyslType.EnumType) =>
+      enumDeinitFor(et)
     case _ => None
+
+  // Mangled name for a per-enum-type deinit function. Registers the type so the
+  // function body is emitted at the end of generate(). Returns None if no
+  // variant carries rc content (no walk needed; the buffer is just freed).
+  private def enumDeinitFor(et: SyslType.EnumType): Option[String] =
+    if !structHasStringFields(et) then None
+    else
+      val name = s"__enum_deinit_${modulePrefix}_${et.name}".replace("__", "_")
+      enumDeinitsNeeded(name) = et
+      Some(name)
+
+  // Auto-synthesized struct deinit: walks string fields before free. Only
+  // registered for structs with no user-defined deinit; if the user writes
+  // `TypeName.deinit(...)` that takes precedence via `deinitFunctions`.
+  private def structDeinitFor(st: SyslType.StructType): Option[String] =
+    if !structHasStringFields(st) then None
+    else
+      val name = s"__struct_deinit_${modulePrefix}_${st.name}".replace("__", "_")
+      structDeinitsNeeded(name) = st
+      Some(name)
+
+  // True if a slice element type carries refcounted content that must be decr'd
+  // before the backing buffer is freed.
+  private def sliceElemNeedsDeinit(elem: SyslType): Boolean = elem match
+    case SyslType.StringType => true
+    case _: SyslType.RefType => true
+    case st: SyslType.StructType => structHasStringFields(st)
+    case et: SyslType.EnumType => structHasStringFields(et)
+    case SyslType.ArrayType(e, _) => sliceElemNeedsDeinit(e)
+    case _ => false
+
+  // Mangled name for a per-elem-type slice deinit function. Registers the type so
+  // the function body is emitted at the end of generate(). Returns None for elem
+  // types that hold no rc content.
+  private def sliceDeinitFor(elem: SyslType): Option[String] =
+    if !sliceElemNeedsDeinit(elem) then None
+    else
+      val tag = mangleType(elem)
+      val name = s"__slice_deinit_${modulePrefix}_$tag".replace("__", "_")
+      sliceElemDeinitsNeeded(name) = elem
+      Some(name)
+
+  // Stable, asm-safe tag for a type. Used to mangle slice deinit names.
+  private def mangleType(t: SyslType): String = t match
+    case SyslType.StringType => "string"
+    case SyslType.RefType(inner) => s"ref_${mangleType(inner)}"
+    case SyslType.StructType(n, _, _) => s"struct_$n"
+    case SyslType.EnumType(n, _) => s"enum_$n"
+    case SyslType.ArrayType(e, n) => s"arr${n}_${mangleType(e)}"
+    case other => other.getClass.getSimpleName.toLowerCase
 
   // Emit refcount increment: ptr in rPtr, refcount is at [rPtr - headerOffset]
   // Clobbers r3, r4. Skips if rPtr == 0 (null).
@@ -415,10 +629,13 @@ class SyslTriscCodegen(addresses: Int = 4):
     // refcount == 0 → call deinit then free(base)
     emit("  pshd r1")                 // save r1
     deinitFunc.foreach { name =>
-      // Call deinit(dataPtr) — dataPtr is ptrReg (past header)
+      // Call deinit(dataPtr) — dataPtr is ptrReg (past header). r3 holds the
+      // base ptr we'll need for free(); the deinit may clobber r3, so save it.
+      emit("  pshd r3")
       emit(s"  mov r1, r$ptrReg")     // r1 = data pointer (self)
       emit(s"  movi r4, $name")
       emit("  jalr r6, r4")
+      emit("  popd r3")
     }
     emit("  mov r1, r3")              // r1 = base pointer (for free)
     emit("  movi r4, free")
@@ -427,11 +644,509 @@ class SyslTriscCodegen(addresses: Int = 4):
     emit(s"$noFree")
     emit(s"$skip")
 
+  /** Scan the program for any expression that would require heap allocation at
+    * runtime (string concat, string(ptr,len), TStr/TFmtStr, new, escaping closure).
+    * Used to set needsAllocExtern upfront so rc-bracket gates are correct from
+    * the start of codegen — otherwise a leak: an assignment that needs decr-old
+    * runs before the value's expression flips needsAllocExtern, so the decr is
+    * skipped. Lazily-set flags + sequential codegen don't compose. */
+  private def scanNeedsAlloc(program: TProgram): Boolean =
+    // Names of functions declared in this unit — calls to anything NOT in this
+    // set are external (different compilation unit) and may return a heap-env
+    // closure we can't inspect. Used to flag TCall-returning-FuncType
+    // conservatively without over-pulling extern free for purely-local programs.
+    val localFuncs = program.decls.collect { case TFunDecl(n, _, _, _, _, _, _) => n }.toSet
+    def scanE(e: TExpr): Boolean = e match
+      case TBinary(_, "+", _, SyslType.StringType) => true
+      case _: TStringFromPtr | _: TStringFromSlice | _: TStr | _: TFmtStr => true
+      case _: TNew | _: TNewArray | _: TNewEnum => true
+      case c: TClosure =>
+        // Only a heap-env closure pulls in malloc/free. Stack-env closures
+        // (non-escaping, non-rc-bearing captures) live on the caller's frame.
+        val needsHeap = c.escapes || c.captures.exists((_, t) =>
+          t.isInstanceOf[SyslType.RefType] || structHasStringFields(t))
+        needsHeap || (c.body match
+          case TExprBody(ex) => scanE(ex)
+          case TBlockBody(ss) => ss.exists(scanS))
+      case TBinary(l, _, r, _) => scanE(l) || scanE(r)
+      case TUnary(_, op, _) => scanE(op)
+      // Cross-unit call returning FuncType: callee may be producing a heap-env
+      // closure we can't inspect. Without needsAllocExtern=true here, the caller
+      // would skip the scope-exit decr and leak the env. Local calls don't need
+      // this — if a local function returns a heap closure, scanNeedsAlloc already
+      // visits its body through the TFunDecl walk below.
+      case TCall(name, args, retType) =>
+        (retType.isInstanceOf[SyslType.FuncType] && !localFuncs.contains(name)) ||
+          args.exists(scanE)
+      // Indirect and interface calls always go through an opaque function pointer
+      // whose body we can't inspect — treat FuncType return as possibly heap-env.
+      case TIndirectCall(callee, args, retType) =>
+        retType.isInstanceOf[SyslType.FuncType] || scanE(callee) || args.exists(scanE)
+      case TInterfaceDispatch(obj, _, args, retType) =>
+        retType.isInstanceOf[SyslType.FuncType] || scanE(obj) || args.exists(scanE)
+      case TInterfaceBox(inner, _) => scanE(inner)
+      case TIntrinsicCall(_, args, _) => args.exists(scanE)
+      case TIfExpr(c, t, e, _) => scanE(c) || t.exists(scanS) || e.exists(_.exists(scanS))
+      case TMatchExpr(scr, arms, default, _) =>
+        scanE(scr) || arms.exists(a => a.guard.exists(scanE) || a.body.exists(scanS)) ||
+          default.exists(_.exists(scanS))
+      case TStructConstruct(_, args) => args.exists(scanE)
+      case TEnumConstruct(_, _, args) => args.exists(scanE)
+      case TArrayLit(elems, _) => elems.exists(scanE)
+      case TFieldAccess(obj, _, _) => scanE(obj)
+      case TFieldPreInc(obj, _, _) => scanE(obj)
+      case TFieldPreDec(obj, _, _) => scanE(obj)
+      case TFieldPostInc(obj, _, _) => scanE(obj)
+      case TFieldPostDec(obj, _, _) => scanE(obj)
+      case TIndex(arr, idx, _) => scanE(arr) || scanE(idx)
+      case TSliceExpr(_, _, _, SyslType.StringType) => true   // substring allocates new buffer
+      case TSliceExpr(arr, lo, hi, _) => scanE(arr) || lo.exists(scanE) || hi.exists(scanE)
+      case TAppend(slice, elem, _) => scanE(slice) || scanE(elem)
+      case TDeref(p, _) => scanE(p)
+      case TCast(inner, _) => scanE(inner)
+      case TLen(a, _) => scanE(a)
+      case TCap(a, _) => scanE(a)
+      case TTempAddr(inner, _) => scanE(inner)
+      case TAddrOfIndex(arr, idx, _) => scanE(arr) || scanE(idx)
+      case TAddrOfField(obj, _, _) => scanE(obj)
+      case _ => false
+
+    def scanS(s: TStmt): Boolean = s match
+      case TVarStmt(_, _, init, _) => scanE(init)
+      case TAssignStmt(_, value) => scanE(value)
+      case TFieldAssignStmt(obj, _, value) => scanE(obj) || scanE(value)
+      case TIndexAssignStmt(arr, idx, value) => scanE(arr) || scanE(idx) || scanE(value)
+      case TDerefAssignStmt(ptr, value) => scanE(ptr) || scanE(value)
+      case TCompoundAssignStmt(_, _, value) => scanE(value)
+      case TFieldCompoundAssignStmt(obj, _, _, value) => scanE(obj) || scanE(value)
+      case TExprStmt(e) => scanE(e)
+      case TReturnStmt(Some(e)) => scanE(e)
+      case TWhileStmt(c, body) => scanE(c) || body.exists(scanS)
+      case TDoWhileStmt(c, body) => scanE(c) || body.exists(scanS)
+      case TForStmt(init, c, upd, body) => scanS(init) || scanE(c) || scanS(upd) || body.exists(scanS)
+      case TDeferStmt(stmt) => scanS(stmt)
+      case TDestructureStmt(_, _, init) => scanE(init)
+      case TDestructureAssignStmt(_, _, init) => scanE(init)
+      case _ => false
+
+    program.decls.exists {
+      case TFunDecl(_, _, _, body, _, _, _) => body match
+        case TExprBody(e) => scanE(e)
+        case TBlockBody(stmts) => stmts.exists(scanS)
+      case TVarDecl(_, _, init, _, _) => scanE(init)
+      case _ => false
+    }
+
+  // True if a value type (recursively) holds any rc-bearing content: string buffers
+  // or closure descriptors with heap envs. Stops at refs/pointers/slices (handled by
+  // their own paths). Recurses through value-struct fields, value-array elements,
+  // and enum variant fields. FuncType is included because closure descriptors carry
+  // an env_ptr that may point to a heap-allocated env (rc-tracked); the runtime
+  // null-check in emitRefDecr makes always-decr safe for NullEnv descriptors too.
+  private def structHasStringFields(t: SyslType): Boolean = t match
+    case SyslType.StringType => true
+    case _: SyslType.FuncType => true
+    case st: SyslType.StructType =>
+      st.fields.exists((_, ft) => structHasStringFields(ft))
+    case SyslType.ArrayType(elem, _) => structHasStringFields(elem)
+    case et: SyslType.EnumType =>
+      et.variants.exists((_, fields) => fields.exists((_, ft) => structHasStringFields(ft)))
+    case _ => false
+
+  // True if an enum variant's field list carries any string content.
+  private def variantHasStringFields(fields: List[(String, SyslType)]): Boolean =
+    fields.exists((_, ft) => structHasStringFields(ft))
+
+  // Expressions that produce a freshly-owned string buffer (rc=1 or immortal).
+  private def isOwnedStringExpr(expr: TExpr): Boolean = expr match
+    case _: TStringLit => true
+    case TBinary(_, "+", _, SyslType.StringType) => true
+    case TSliceExpr(_, _, _, SyslType.StringType) => true
+    case _: TStringFromPtr | _: TStringFromSlice => true
+    case _: TCall | _: TIndirectCall => true
+    case _: TIfExpr | _: TMatchExpr => true
+    case _ => false
+
+  // Expressions that produce a freshly-constructed value struct or enum (string fields
+  // already owned by the new aggregate — no copy-incr needed).
+  private def isOwnedStructExpr(expr: TExpr): Boolean = expr match
+    case _: TStructConstruct => true
+    case _: TEnumConstruct => true
+    case _: TCall | _: TIndirectCall => true
+    case _: TIfExpr | _: TMatchExpr => true
+    case _ => false
+
+  // Expressions that produce a freshly-owned closure descriptor (caller has the only
+  // share of the env — no copy-incr needed when storing into a struct/enum field).
+  // TVarRef and TFieldAccess fall through as "borrowed" — incr needed.
+  private def isOwnedClosureExpr(expr: TExpr): Boolean = expr match
+    case _: TClosure => true       // fresh env (rc=1 from malloc) or NullEnv
+    case _: TFuncRef => true       // NullEnv (no env to track)
+    case _: TCall | _: TIndirectCall | _: TInterfaceDispatch => true
+    case _: TIfExpr | _: TMatchExpr => true
+    case _ => false
+
+  // Increment or decrement the RC of every string field (recursively into nested
+  // value-struct fields and value-array elements) inside a struct at [r{baseReg} + baseOff].
+  // Clobbers r3, r4 (via emitRefIncr/Decr) and uses r1 for the field ptr. baseReg
+  // is preserved if it is not r1 (callers should use r5/fp for locals).
+  private def emitStructStringFieldsRC(baseReg: Int, baseOff: Int, st: SyslType.StructType, incr: Boolean): Unit =
+    if !needsAllocExtern then return
+    for case ((_, ft), i) <- st.fields.zipWithIndex do
+      val foff = baseOff + fieldOffset(st, i)
+      emitValueRC(baseReg, foff, ft, incr)
+
+  // Generalized RC walker for any value type at [r{baseReg} + baseOff]. Handles
+  // strings, value structs (recurses), value arrays (loops over elements), and
+  // value enums (runtime tag-dispatch). No-op for any type without string content.
+  private def emitValueRC(baseReg: Int, baseOff: Int, t: SyslType, incr: Boolean): Unit =
+    if !needsAllocExtern then return
+    t match
+      case SyslType.StringType =>
+        emit("  pshd r1")
+        emitAddImm(1, baseReg, baseOff)
+        emit("  ldd r1, r1, r0")
+        if incr then emitRefIncr(1, 8) else emitRefDecr(1, 8)
+        emit("  popd r1")
+      case _: SyslType.FuncType =>
+        // Closure descriptor at [baseReg+baseOff] is 16 bytes {func_ptr, env_ptr}.
+        // env_ptr is null for NullEnv closures (descr just literal func ptr) — the
+        // null-check inside emitRefDecr makes always-walk safe. emitClosureDescr*
+        // operates on the descriptor's address.
+        if incr then emitClosureDescrIncr(baseReg, baseOff)
+        else emitClosureDescrDecr(baseReg, baseOff)
+      case nested: SyslType.StructType if structHasStringFields(nested) =>
+        emitStructStringFieldsRC(baseReg, baseOff, nested, incr)
+      case SyslType.ArrayType(elem, count) if structHasStringFields(elem) =>
+        val es = stackSize(elem)
+        for i <- 0 until count do
+          emitValueRC(baseReg, baseOff + i * es, elem, incr)
+      case et: SyslType.EnumType if structHasStringFields(et) =>
+        emitEnumStringFieldsRC(baseReg, baseOff, et, incr)
+      case _ =>
+
+  // Walk the active variant's string-bearing fields of an enum at
+  // [r{baseReg} + baseOff], inc/dec each via emitValueRC. Loads tag (i32 @ 0)
+  // then chained compare-branches per variant that carries strings; variants
+  // with no string content are skipped entirely. Uses r3 (tag) and r4 (cmp)
+  // as scratch — preserved across emitValueRC inner calls because we reload
+  // nothing after the per-variant branch is taken (each match falls through
+  // straight to the variant walk and then jumps to end).
+  private def emitEnumStringFieldsRC(baseReg: Int, baseOff: Int, et: SyslType.EnumType, incr: Boolean): Unit =
+    if !needsAllocExtern then return
+    val variantsWithStrings = et.variants.zipWithIndex.collect {
+      case ((_, fields), idx) if variantHasStringFields(fields) => (fields, idx)
+    }
+    if variantsWithStrings.isEmpty then return
+    val dataOff = et.dataOffset.toInt
+    val endLabel = newLabel("enum_rc_end")
+    // r3 = tag (sign-extended i32 load is fine; we only compare against small idx)
+    emitAddImm(3, baseReg, baseOff)
+    emit("  ldw r3, r3, r0")
+    for (fields, idx) <- variantsWithStrings do
+      val nextLabel = newLabel("enum_rc_next")
+      emitLoadImm(4, idx)
+      emit(s"  bne r3, r4, $nextLabel")
+      // Walk variant fields at correct offsets within et.dataOffset
+      var fieldOff = 0
+      for (_, fieldType) <- fields do
+        val align = stackAlign(fieldType)
+        fieldOff = ((fieldOff + align - 1) / align) * align
+        if structHasStringFields(fieldType) then
+          emitValueRC(baseReg, baseOff + dataOff + fieldOff, fieldType, incr)
+        fieldOff += fieldType.sizeOf.toInt
+      emit(s"  bra $endLabel")
+      emit(s"$nextLabel")
+    emit(s"$endLabel")
+
+  /** Emit a per-elem-type slice deinit function. Called when freeing a
+    * `&[]T` whose elements carry rc content. Slice block layout:
+    * [rc:8 | len:8 | data...]. The function receives r1 = data ptr (past the
+    * 16-byte header), decrs every element, then returns. Length is read from
+    * [r1-8]; element[i] sits at [r1 + i*elemSize].
+    *
+    * r2 holds the current element address across iterations and is preserved
+    * by emitValueRC. r3 (loop counter) is clobbered by emitRefDecr's free path
+    * so it gets pushed/popped around the per-element decr.
+    */
+  private def emitSliceDeinit(name: String, elem: SyslType): Unit =
+    val es = stackSize(elem)
+    val loop = newLabel("slice_deinit_loop")
+    val done = newLabel("slice_deinit_done")
+    emit(s"# slice element deinit: $name")
+    emit(s"global $name, func, 1 i64 i64")
+    emit(s"$name:")
+    emit("  pshd r6")
+    emit("  pshd r5")
+    emit("  mov r5, r7")
+    // r2 = current element addr = data ptr = r1
+    emit("  mov r2, r1")
+    // r3 = remaining count = *(r1 - 8)
+    emitAddImm(3, 1, -8)
+    emit("  ldd r3, r3, r0")
+    emit(s"$loop")
+    emit(s"  beq r3, r0, $done")
+    emit("  pshd r3")              // save count (emitRefDecr clobbers r3)
+    emit("  pshd r2")              // save addr
+    emitValueRC(2, 0, elem, incr = false)
+    emit("  popd r2")
+    emit("  popd r3")
+    emitAddImm(2, 2, es)
+    emit("  addi r3, r3, -1")
+    emit(s"  bra $loop")
+    emit(s"$done")
+    emit("  mov r7, r5")
+    emit("  popd r5")
+    emit("  popd r6")
+    emit("  jalr r0, r6")
+
+  /** Auto-synthesized per-struct-type deinit. Called when freeing a `&MyStruct`
+    * whose fields carry rc content and the user hasn't defined a custom
+    * `TypeName.deinit`. r1 = data ptr (past the 8-byte rc header). Walks string
+    * fields via emitStructStringFieldsRC and returns. Buffer itself is freed by
+    * emitRefDecr's free() call after this returns.
+    */
+  private def emitStructDeinit(name: String, st: SyslType.StructType): Unit =
+    emit(s"# struct deinit: $name")
+    emit(s"global $name, func, 1 i64 i64")
+    emit(s"$name:")
+    emit("  pshd r6")
+    emit("  pshd r5")
+    emit("  mov r5, r7")
+    // Save data ptr at fp-8; reload before the walk so inner free's don't
+    // clobber it (same protection as the enum deinit uses).
+    emit("  pshd r1")
+    emitAddImm(1, 5, -8)
+    emit("  ldd r1, r1, r0")
+    emitStructStringFieldsRC(1, 0, st, incr = false)
+    emit("  mov r7, r5")
+    emit("  popd r5")
+    emit("  popd r6")
+    emit("  jalr r0, r6")
+
+  /** Per-enum-type deinit function. Called when freeing a `&MyEnum` whose
+    * active variant carries rc content (string fields, nested struct/enum/array
+    * with strings). r1 = data ptr (past the 8-byte rc header). Walks the active
+    * variant via emitEnumStringFieldsRC (tag-dispatched), then returns. Buffer
+    * itself is freed by emitRefDecr's free() call after this returns.
+    */
+  private def emitEnumDeinit(name: String, et: SyslType.EnumType): Unit =
+    emit(s"# enum deinit: $name")
+    emit(s"global $name, func, 1 i64 i64")
+    emit(s"$name:")
+    emit("  pshd r6")
+    emit("  pshd r5")
+    emit("  mov r5, r7")
+    // r1 = data ptr (input). emitEnumStringFieldsRC(baseReg=1, baseOff=0)
+    // reads tag from [r1] and walks the matching variant. emitValueRC saves
+    // and restores r1 around inner decr's, so r1 is preserved across inner
+    // calls — but emitRefDecr's free path may clobber it after the popd.
+    // Save data ptr at fp-8 and use that copy to keep things simple.
+    emit("  pshd r1")                    // save data ptr at fp-8 (r5-8)
+    // Reload r1 from saved slot — emitEnumStringFieldsRC will pshd/popd r1
+    // around each inner decr, but emitRefDecr inside that decr does not
+    // touch r1's saved slot at fp-8.
+    emitAddImm(1, 5, -8)
+    emit("  ldd r1, r1, r0")             // r1 = data ptr (refreshed)
+    emitEnumStringFieldsRC(1, 0, et, incr = false)
+    emit("  mov r7, r5")
+    emit("  popd r5")
+    emit("  popd r6")
+    emit("  jalr r0, r6")
+
+  /** Closure env layout (heap):
+    *   [rc:8 @ base+0 | deinit_ptr:8 @ base+8 | capture_data...]
+    *   env_ptr = base + 16
+    * So env_ptr-16 is &rc and base for free; env_ptr-8 is &deinit_ptr.
+    *
+    * __closure_env_dispatch: thin shim called when env's rc hits zero. Loads
+    * the runtime deinit_ptr from env_ptr-8 and tail-calls it. Lets emitRefDecr
+    * handle envs uniformly (one named deinit) without per-closure-id static
+    * deinit linkage on the call site. r1 = env_ptr (data ptr) on entry.
+    */
+  private def emitClosureEnvDispatch(): Unit =
+    emit("# closure env dispatch (loads deinit_ptr from env-8 and calls it)")
+    emit("global __closure_env_dispatch, func, 1 i64 i64")
+    emit("__closure_env_dispatch:")
+    val noCall = newLabel("dispatch_no_call")
+    emit("  pshd r6")                  // save caller's return addr
+    emit("  addi r3, r1, -8")
+    emit("  ldd r3, r3, r0")           // r3 = deinit_ptr
+    emit(s"  beq r3, r0, $noCall")
+    emit("  jalr r6, r3")              // call deinit(env_ptr); r1 already env_ptr
+    emit(s"$noCall")
+    emit("  popd r6")
+    emit("  jalr r0, r6")
+
+  /** Per-closure-id env deinit: walks the closure's captures (known layout) and
+    * decr's any rc-bearing entry via emitValueRC. r1 = env_ptr (data ptr; env-8
+    * may still hold this fn's address — irrelevant). Only registered for
+    * closures with at least one rc-bearing capture; closures with none use
+    * deinit_ptr=null and the dispatch shim no-ops.
+    *
+    * env_ptr is saved at fp-8 and reloaded into r2 BEFORE each per-capture
+    * emitValueRC call, because emitValueRC may transitively call free which
+    * clobbers r2 (caller-saved). Without the reload, the second capture's base
+    * address would be garbage, corrupting the heap.
+    */
+  private def emitClosureEnvDeinit(name: String, closure: TClosure): Unit =
+    emit(s"# closure env deinit: $name")
+    emit(s"global $name, func, 1 i64 i64")
+    emit(s"$name:")
+    emit("  pshd r6")
+    emit("  pshd r5")
+    emit("  mov r5, r7")
+    emit("  pshd r1")                  // save env_ptr at fp-8 (r5-8)
+    var envOffset = 0
+    for (_, capType) <- closure.captures do
+      if structHasStringFields(capType) then
+        emitAddImm(2, 5, -8)            // r2 = &saved env_ptr
+        emit("  ldd r2, r2, r0")        // r2 = env_ptr
+        emitValueRC(2, envOffset, capType, incr = false)
+      envOffset += stackSize(capType).toInt
+    emit("  mov r7, r5")
+    emit("  popd r5")
+    emit("  popd r6")
+    emit("  jalr r0, r6")
+
+  /** Register a per-closure-id env deinit if the closure has rc-bearing
+    * captures. Returns the deinit function name, or None if all captures are
+    * scalar/raw (no walk needed).
+    */
+  private def closureEnvDeinitFor(name: String, closure: TClosure): Option[String] =
+    val hasRcCaptures = closure.captures.exists((_, t) => structHasStringFields(t) || t.isInstanceOf[SyslType.RefType])
+    if !hasRcCaptures then None
+    else
+      val deinitName = s"__closure_env_deinit_$name"
+      closureEnvDeinitsNeeded(deinitName) = closure
+      Some(deinitName)
+
+  /** Decrement env's rc via the descriptor's env_ptr (offset +8 in descriptor).
+    * descrAddr is the descriptor's address (16 bytes: fp at +0, env_ptr at +8).
+    * Loads env_ptr; if non-null, calls emitRefDecr with headerOff=16 and the
+    * generic dispatch deinit.
+    */
+  private def emitClosureDescrDecr(descBaseReg: Int, descBaseOff: Int): Unit =
+    closureEnvDispatchNeeded = true
+    needsFreeExtern = true
+    emit("  pshd r1")
+    emitAddImm(1, descBaseReg, descBaseOff + 8)  // r1 = &env_ptr
+    emit("  ldd r1, r1, r0")                     // r1 = env_ptr
+    emitRefDecr(1, 16, Some("__closure_env_dispatch"))
+    emit("  popd r1")
+
+  /** Increment env's rc via descriptor's env_ptr. Used when copying a
+    * descriptor (var g = f) so both descriptors share the env. */
+  private def emitClosureDescrIncr(descBaseReg: Int, descBaseOff: Int): Unit =
+    emit("  pshd r1")
+    emitAddImm(1, descBaseReg, descBaseOff + 8)
+    emit("  ldd r1, r1, r0")
+    emitRefIncr(1, 16)
+    emit("  popd r1")
+
+  /** Evaluate `arg` and push its full byte representation onto the stack as a
+    * call argument. Handles ref/string borrow incr; appends to `stringPtrOffsets`
+    * the fp-relative offset of each pushed string ptr that needs a post-call decr.
+    *
+    * Per-type byte sizes pushed:
+    *   string:   16  ({ptr, len})
+    *   slice:    24  ({ptr, len+cap, backref})
+    *   func/iface: 16  ({fn, env})
+    *   struct/enum: aligned(stackSize)  (full byte copy — true pass-by-value)
+    *   scalar:   8
+    *
+    * Note: struct args don't need caller incr/decr brackets — the callee copies
+    * bytes into its own local at function entry and incr's string fields there. */
+  private def evalAndPushArg(arg: TExpr, stringPtrOffsets: mutable.ListBuffer[Int]): Unit =
+    val preOffset = stackOffset
+    arg match
+      case TAddrLit(off) => emitAddImm(1, 5, off)
+      case _ => genExpr(arg)
+    // Borrow-incr for ref/string args (caller decr's after the call)
+    arg.typ match
+      case rt: SyslType.RefType => arg match
+        case _: TNew | _: TNewArray | _: TNewEnum =>
+        case _ => emitRefIncr(1, refHeaderOffset(rt))
+      case SyslType.StringType if needsAllocExtern => arg match
+        case _: TBinary =>
+        case _ =>
+          emit("  pshd r1")
+          emit("  ldd r1, r1, r0")
+          emitRefIncr(1, 8)
+          emit("  popd r1")
+      case _ =>
+    if arg.typ == SyslType.StringType then
+      emit("  addi r2, r1, 8")
+      emit("  ldd r2, r2, r0")     // r2 = len
+      emit("  ldd r1, r1, r0")     // r1 = ptr
+      val extra = preOffset - stackOffset
+      if extra > 0 then
+        emitAddImm(7, 7, extra)
+        stackOffset = preOffset
+      emit("  pshd r2")
+      emit("  pshd r1")
+      stackOffset -= 16
+      if needsAllocExtern && !arg.isInstanceOf[TBinary] then
+        stringPtrOffsets += stackOffset
+    else if arg.typ.isInstanceOf[SyslType.SliceType] then
+      emit("  ldd r2, r1, r0")
+      emit("  addi r3, r1, 8")
+      emit("  ldd r3, r3, r0")
+      emit("  addi r4, r1, 16")
+      emit("  ldd r4, r4, r0")
+      val extra = preOffset - stackOffset
+      if extra > 0 then
+        emitAddImm(7, 7, extra)
+        stackOffset = preOffset
+      emit("  pshd r4")
+      emit("  pshd r3")
+      emit("  pshd r2")
+      stackOffset -= 24
+    else if arg.typ.isInstanceOf[SyslType.FuncType] || arg.typ.isInstanceOf[SyslType.InterfaceType] then
+      emit("  ldd r2, r1, r0")
+      emit("  addi r3, r1, 8")
+      emit("  ldd r3, r3, r0")
+      val extra = preOffset - stackOffset
+      if extra > 0 then
+        emitAddImm(7, 7, extra)
+        stackOffset = preOffset
+      emit("  pshd r3")
+      emit("  pshd r2")
+      stackOffset -= 16
+    else if arg.typ.isInstanceOf[SyslType.EnumType] || arg.typ.isInstanceOf[SyslType.StructType] then
+      val aligned = (stackSize(arg.typ) + 7) & ~7
+      emitAddImm(7, 7, -aligned)
+      stackOffset -= aligned
+      for off <- 0 until aligned by 8 do
+        emitAddImm(3, 1, off)
+        emit("  ldd r3, r3, r0")
+        emitAddImm(4, 7, off)
+        emit("  std r3, r4, r0")
+    else
+      val extra = preOffset - stackOffset
+      if extra > 0 then
+        emitAddImm(7, 7, extra)
+        stackOffset = preOffset
+      emit("  pshd r1")
+      stackOffset -= 8
+
+  /** After a call returns, decrement the borrowed-string rcs whose ptrs were tracked
+    * during arg push. Uses r1 for the ptr; preserves the call's return value. */
+  private def emitStringArgDecr(stringPtrOffsets: List[Int]): Unit =
+    for off <- stringPtrOffsets do
+      emit("  pshd r1")            // save return value
+      emitAddImm(1, 5, off)        // r1 = &ptr on stack (fp-relative)
+      emit("  ldd r1, r1, r0")     // r1 = ptr
+      emitRefDecr(1, 8)
+      emit("  popd r1")            // restore return value
+
   // Decrement refcounts for all ref-typed and string-typed locals and params
   private def emitRefCleanup(): Unit =
     // Decrement owned locals (negative fp offsets)
     for (name, local) <- locals if local.offset < 0 do
-      local.typ match
+      // Captured-into-body locals are borrowed views into the env — skip rc work.
+      if captureBorrows.contains(name) then ()
+      else local.typ match
         case rt: SyslType.RefType =>
           val hoff = refHeaderOffset(rt)
           emit("  pshd r1")
@@ -448,13 +1163,31 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  ldd r1, r1, r0")       // r1 = ptr field
             emitRefDecr(1, 8)
             emit("  popd r1")
-        case _: SyslType.SliceType =>
-          // Decrement backref (at slice offset +16) if non-null
+        case SyslType.SliceType(elem) =>
+          // Decrement backref (at slice offset +16) if non-null. See the
+          // matching block in leaveScope for the convention details.
           emit("  pshd r1")
           emitAddImm(1, 5, local.offset + 16)
-          emit("  ldd r1, r1, r0")       // r1 = backref
-          emitRefDecr(1, 0)              // refcount IS at *backref (offset 0)
+          emit("  ldd r1, r1, r0")       // r1 = backref (= base)
+          val deinit = sliceDeinitFor(elem)
+          if deinit.isDefined then
+            emitAddImm(1, 1, 16)         // r1 = data ptr
+            emitRefDecr(1, 16, deinit)
+          else
+            emitRefDecr(1, 0)
           emit("  popd r1")
+        case st: SyslType.StructType if structHasStringFields(st) =>
+          emitStructStringFieldsRC(5, local.offset, st, incr = false)
+        case SyslType.ArrayType(elem, _) if structHasStringFields(elem) =>
+          emitValueRC(5, local.offset, local.typ, incr = false)
+        case et: SyslType.EnumType if structHasStringFields(et) =>
+          emitEnumStringFieldsRC(5, local.offset, et, incr = false)
+        case _: SyslType.FuncType
+            if !funcBorrowParams.contains(name)
+            && closureLocalKind.get(name).contains(FuncKind.HeapEnv) =>
+          // Closure descriptor with heap-allocated env: decr env's rc.
+          // Stack-env / null-env / unknown-kind locals skip — only HeapEnv needs free.
+          emitClosureDescrDecr(5, local.offset)
         case _ =>
     // Decrement ref params (caller transferred ownership)
     for (name, rt) <- refParams do
@@ -471,7 +1204,9 @@ class SyslTriscCodegen(addresses: Int = 4):
   // The variable is aligned to the greater of its natural alignment and 8
   // (pshd/popd require SP to stay 8-byte aligned).
   private def allocLocal(name: String, typ: SyslType): LocalVar =
-    val size = stackSize(typ)
+    allocLocal(name, typ, stackSize(typ))
+
+  private def allocLocal(name: String, typ: SyslType, size: Int): LocalVar =
     val align = stackAlign(typ).max(8) // type alignment, but at least 8 for SP
     val mask = ~(align - 1)
     val oldOffset = stackOffset
@@ -488,6 +1223,10 @@ class SyslTriscCodegen(addresses: Int = 4):
     locals = new mutable.LinkedHashMap
     refParams = new mutable.LinkedHashMap
     stringBorrowParams = fun.params.collect { case p if p.typ == SyslType.StringType => p.name }.toSet
+    funcBorrowParams = fun.params.collect {
+      case p if p.typ.isInstanceOf[SyslType.FuncType] || p.typ.isInstanceOf[SyslType.InterfaceType] => p.name
+    }.toSet
+    closureLocalKind.clear()
     stackOffset = 0
     deferStack.clear()
 
@@ -518,7 +1257,10 @@ class SyslTriscCodegen(addresses: Int = 4):
       off
     else -1
 
-    // Map user params to their stack locations
+    // Map user params to their stack locations.
+    // Scalar params use I64 because the ABI passes all scalars as 8-byte values
+    // (via pshd/register), and TRISC is big-endian so ldw at the slot base would
+    // read the wrong half. The 8-byte slot matches the 8-byte load.
     val userParamRegStart = if structReturn then 1 else 0
     val userRegParams = fun.params.length.min(1 - userParamRegStart)
     for (param, i) <- fun.params.take(userRegParams).zipWithIndex do
@@ -526,7 +1268,8 @@ class SyslTriscCodegen(addresses: Int = 4):
       val callerOffset = 16 + (nRegPushed - 1 - regIndex) * 8
       locals(param.name) = LocalVar(param.name, callerOffset, SyslType.I64)
     // Stack params: those beyond register capacity
-    // String params take 16 bytes, slice params 24 bytes, others 8
+    // String params take 16 bytes, slice params 24 bytes, struct/enum params take their
+    // aligned size (caller pushed full bytes), others 8.
     val nUserStackStart = 1 - userParamRegStart
     var stackParamOffset = 16 + nRegPushed * 8
     for param <- fun.params.drop(nUserStackStart) do
@@ -536,6 +1279,10 @@ class SyslTriscCodegen(addresses: Int = 4):
       else if param.typ.isInstanceOf[SyslType.SliceType] then
         locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
         stackParamOffset += 24
+      else if param.typ.isInstanceOf[SyslType.StructType] || param.typ.isInstanceOf[SyslType.EnumType] then
+        val aligned = (stackSize(param.typ) + 7) & ~7
+        locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
+        stackParamOffset += aligned
       else
         locals(param.name) = LocalVar(param.name, stackParamOffset, SyslType.I64)
         stackParamOffset += 8
@@ -602,10 +1349,45 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  std r2, r3, r0")
       locals(param.name) = funcLocal
 
+    // Copy struct/enum params into local frame slots so mutation by the callee is
+    // contained and string-field rcs can be cleaned up uniformly via emitRefCleanup.
+    // Register struct params: srcLocal holds an 8-byte address → dereference and copy.
+    // Stack struct params: bytes are already at fp+srcLocal.offset → copy directly.
+    for (param, i) <- fun.params.zipWithIndex if param.typ.isInstanceOf[SyslType.StructType] || param.typ.isInstanceOf[SyslType.EnumType] do
+      val srcLocal = locals(param.name)
+      val isRegParam = i < (1 - userParamRegStart)
+      val aligned = (stackSize(param.typ) + 7) & ~7
+      emitAddImm(7, 7, -aligned)
+      stackOffset -= aligned
+      val newLocal = LocalVar(param.name, stackOffset, param.typ)
+      if isRegParam then
+        // Register param: srcLocal holds an 8-byte address → load it into r1 first
+        emitAddImm(1, 5, srcLocal.offset)
+        emit("  ldd r1, r1, r0")        // r1 = caller's struct address
+        for off <- 0 until aligned by 8 do
+          emitAddImm(2, 1, off)
+          emit("  ldd r2, r2, r0")
+          emitAddImm(3, 7, off)
+          emit("  std r2, r3, r0")
+      else
+        // Stack param: bytes directly at fp+srcLocal.offset
+        for off <- 0 until aligned by 8 do
+          emitAddImm(2, 5, srcLocal.offset + off)
+          emit("  ldd r2, r2, r0")
+          emitAddImm(3, 7, off)
+          emit("  std r2, r3, r0")
+      locals(param.name) = newLocal
+      // Incr string fields of the local copy (callee owns its share of each field's buffer)
+      param.typ match
+        case st: SyslType.StructType if structHasStringFields(st) =>
+          emitStructStringFieldsRC(5, newLocal.offset, st, incr = true)
+        case _ =>
+
     // Generate body
     fun.body match
       case TExprBody(expr) =>
         genExpr(expr) // result in r1
+        emitFuncReturnIncrIfBorrowed(expr)
         if structReturn then emitStructReturn()
         emitDefers()
         emitRefCleanup()
@@ -616,6 +1398,17 @@ class SyslTriscCodegen(addresses: Int = 4):
     locals = null
     currentFunction = null
     stringBorrowParams = Set.empty
+    funcBorrowParams = Set.empty
+
+  /** When the function returns a borrowed FuncType local (param OR HeapEnv
+    * local), incr the env so the caller's TCall=HeapEnv decr balances. r1 must
+    * hold the descriptor address at call time. No-op for any other expression. */
+  private def emitFuncReturnIncrIfBorrowed(value: TExpr): Unit =
+    value match
+      case TVarRef(_, t) if t.isInstanceOf[SyslType.FuncType]
+        && funcKindOfExpr(value) == FuncKind.HeapEnv =>
+        emitClosureDescrIncr(1, 0)
+      case _ =>
 
   private def genClosureFunction(name: String, closure: TClosure): Unit =
     // Create a TFunDecl for the closure so we can reuse epilogue/return machinery
@@ -624,6 +1417,11 @@ class SyslTriscCodegen(addresses: Int = 4):
     locals = new mutable.LinkedHashMap
     refParams = new mutable.LinkedHashMap
     stringBorrowParams = fun.params.collect { case p if p.typ == SyslType.StringType => p.name }.toSet
+    funcBorrowParams = fun.params.collect {
+      case p if p.typ.isInstanceOf[SyslType.FuncType] || p.typ.isInstanceOf[SyslType.InterfaceType] => p.name
+    }.toSet
+    closureLocalKind.clear()
+    captureBorrows = closure.captures.map(_._1).toSet
     stackOffset = 0
     deferStack.clear()
 
@@ -676,6 +1474,10 @@ class SyslTriscCodegen(addresses: Int = 4):
       else if param.typ.isInstanceOf[SyslType.FuncType] || param.typ.isInstanceOf[SyslType.InterfaceType] then
         locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
         stackParamOffset += 16
+      else if param.typ.isInstanceOf[SyslType.StructType] || param.typ.isInstanceOf[SyslType.EnumType] then
+        val aligned = (stackSize(param.typ) + 7) & ~7
+        locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
+        stackParamOffset += aligned
       else
         locals(param.name) = LocalVar(param.name, stackParamOffset, SyslType.I64)
         stackParamOffset += 8
@@ -732,6 +1534,34 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  std r2, r3, r0")
       locals(param.name) = funcLocal
 
+    // Copy struct/enum params into local frame slots (mirrors genFunction).
+    for (param, i) <- fun.params.zipWithIndex if param.typ.isInstanceOf[SyslType.StructType] || param.typ.isInstanceOf[SyslType.EnumType] do
+      val srcLocal = locals(param.name)
+      val isRegParam = i < (1 - userParamRegStart)
+      val aligned = (stackSize(param.typ) + 7) & ~7
+      emitAddImm(7, 7, -aligned)
+      stackOffset -= aligned
+      val newLocal = LocalVar(param.name, stackOffset, param.typ)
+      if isRegParam then
+        emitAddImm(1, 5, srcLocal.offset)
+        emit("  ldd r1, r1, r0")
+        for off <- 0 until aligned by 8 do
+          emitAddImm(2, 1, off)
+          emit("  ldd r2, r2, r0")
+          emitAddImm(3, 7, off)
+          emit("  std r2, r3, r0")
+      else
+        for off <- 0 until aligned by 8 do
+          emitAddImm(2, 5, srcLocal.offset + off)
+          emit("  ldd r2, r2, r0")
+          emitAddImm(3, 7, off)
+          emit("  std r2, r3, r0")
+      locals(param.name) = newLocal
+      param.typ match
+        case st: SyslType.StructType if structHasStringFields(st) =>
+          emitStructStringFieldsRC(5, newLocal.offset, st, incr = true)
+        case _ =>
+
     // Load captured variables from env into locals
     if closure.captures.nonEmpty then
       // env_ptr is saved at [fp+16] (above saved r6 and r5)
@@ -768,6 +1598,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     fun.body match
       case TExprBody(expr) =>
         genExpr(expr)
+        emitFuncReturnIncrIfBorrowed(expr)
         if structReturn then emitStructReturn()
         emitDefers()
         emitRefCleanup()
@@ -778,6 +1609,8 @@ class SyslTriscCodegen(addresses: Int = 4):
     locals = null
     currentFunction = null
     stringBorrowParams = Set.empty
+    funcBorrowParams = Set.empty
+    captureBorrows = Set.empty
 
   private def emitClosureEpilogue(nRegPushed: Int): Unit =
     emit("  mov r7, r5")
@@ -892,6 +1725,13 @@ class SyslTriscCodegen(addresses: Int = 4):
       emit("  std r4, r1, r0")
     // r1 = _ret_ptr (for the caller)
     emit("  mov r1, r2")
+    // Increment string fields in the destination so the source local can be
+    // safely freed by emitRefCleanup. r2 holds destination address; emitRefIncr
+    // only clobbers r3/r4 so r2 is preserved across iterations.
+    currentFunction.returnType match
+      case st: SyslType.StructType if structHasStringFields(st) =>
+        emitStructStringFieldsRC(2, 0, st, incr = true)
+      case _ =>
 
   private def emitDefers(): Unit =
     if deferStack.nonEmpty then
@@ -923,7 +1763,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
   private def genStmt(stmt: TStmt): Unit =
     stmt match
-      case TVarStmt(name, typ, init) =>
+      case TVarStmt(name, typ, init, _) =>
         init match
           case TArrayLit(elements, SyslType.ArrayType(elemType, size)) =>
             // Allocate array inline on stack (same layout as TArrayDecl)
@@ -952,7 +1792,7 @@ class SyslTriscCodegen(addresses: Int = 4):
             for i <- 0 until totalBytes by 8 do
               emitAddImm(2, 1, i)
               emit("  std r0, r2, r0")
-          case TStructLit(st @ SyslType.StructType(_, _)) =>
+          case TStructLit(st @ SyslType.StructType(_, _, _)) =>
             // Allocate struct on stack and zero-initialize
             val totalSize = stackSize(st)
             val aligned = (totalSize + 7) & ~7
@@ -985,6 +1825,19 @@ class SyslTriscCodegen(addresses: Int = 4):
               genExpr(arg)                              // r1 = field value
               emitAddImm(2, 5, local.offset + off)     // r2 = field address (via fp)
               emitStore(1, 2, fieldType)
+              // Borrowed string field: incr the buffer (caller still owns its copy)
+              fieldType match
+                case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
+                  emit("  pshd r1")
+                  emitAddImm(1, 5, local.offset + off)
+                  emit("  ldd r1, r1, r0")
+                  emitRefIncr(1, 8)
+                  emit("  popd r1")
+                case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+                  emitStructStringFieldsRC(5, local.offset + off, nested, incr = true)
+                case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+                  emitClosureDescrIncr(5, local.offset + off)
+                case _ =>
           case TEnumConstruct(et, variantIndex, args) =>
             // Allocate enum on stack, zero-initialize, set tag + fields
             val totalSize = stackSize(et)
@@ -1013,6 +1866,21 @@ class SyslTriscCodegen(addresses: Int = 4):
               genExpr(arg)
               emitAddImm(2, 5, local.offset + dataOff + fieldOff)
               emitStore(1, 2, fieldType)
+              // Borrowed string/struct/enum/closure field: incr (caller still owns its copy)
+              fieldType match
+                case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
+                  emit("  pshd r1")
+                  emitAddImm(1, 5, local.offset + dataOff + fieldOff)
+                  emit("  ldd r1, r1, r0")
+                  emitRefIncr(1, 8)
+                  emit("  popd r1")
+                case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+                  emitStructStringFieldsRC(5, local.offset + dataOff + fieldOff, nested, incr = true)
+                case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+                  emitEnumStringFieldsRC(5, local.offset + dataOff + fieldOff, nested, incr = true)
+                case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+                  emitClosureDescrIncr(5, local.offset + dataOff + fieldOff)
+                case _ =>
               fieldOff += fieldType.sizeOf.toInt
           case call @ TCall(_, _, retType) if returnsViaPointer(retType) =>
             // Function returns struct via caller-allocated slot.
@@ -1022,13 +1890,40 @@ class SyslTriscCodegen(addresses: Int = 4):
             // r1 = address of return slot. Register the local at the slot's stack position.
             // The return slot was the last thing allocated, so it's at stackOffset.
             locals(name) = LocalVar(name, stackOffset, typ)
+            // FuncType returned via structReturn from a call: same default as
+            // funcKindOfExpr's TCall case — HeapEnv if the program already pulls
+            // the heap allocator (decr's null-check skips NullEnv returns).
+            if typ.isInstanceOf[SyslType.FuncType] then
+              closureLocalKind(name) = funcKindOfExpr(call)
+          case _ if typ.isInstanceOf[SyslType.FuncType] =>
+            // Pre-allocate __env_N for stack-env TClosure RHS so env survives
+            // the expression's frame and lives at function scope.
+            init match
+              case c: TClosure if closureKindOf(c) == FuncKind.StackEnv =>
+                val envSize = c.captures.map((_, t) => stackSize(t)).sum
+                val alignedEnvSize = (envSize + 7) & ~7
+                allocLocal(s"__env_$closureCounter", SyslType.IntType(64), alignedEnvSize)
+              case _ =>
+            genExpr(init) // r1 = descriptor address (16 bytes on expr stack)
+            val local = allocLocal(name, typ)
+            emitAddImm(2, 5, local.offset)
+            emitStore(1, 2, typ)
+            // Record kind for scope-cleanup gating.
+            val rhsKind = funcKindOfExpr(init)
+            closureLocalKind(name) = rhsKind
+            // Descriptor copy (var g = f) shares env_ptr with source — incr env
+            // rc so each descriptor's scope-exit decr is balanced.
+            init match
+              case _: TVarRef if rhsKind == FuncKind.HeapEnv =>
+                emitClosureDescrIncr(5, local.offset)
+              case _ =>
           case _ =>
             genExpr(init) // result in r1
             // Increment refcount for copies (not for new — TNew already sets refcount=1)
             (typ, init) match
               case (rt: SyslType.RefType, _: TNew | _: TNewArray | _: TNewEnum) => // owned, no incr needed
               case (rt: SyslType.RefType, _) => emitRefIncr(1, refHeaderOffset(rt))
-              case (SyslType.StringType, _: TBinary) => // concat result already has refcount=1
+              case (SyslType.StringType, e) if isOwnedStringExpr(e) => // owned (concat/substring/literal)
               case (SyslType.StringType, _) if needsAllocExtern =>
                 // Incr refcount of the ptr field (only when heap strings exist)
                 emit("  pshd r1")           // save string struct address
@@ -1106,17 +2001,46 @@ class SyslTriscCodegen(addresses: Int = 4):
                 emit("  ldd r1, r1, r0")    // r1 = old ptr field
                 emitRefDecr(1, 8)
               genExpr(value)              // r1 = address of new {ptr, len}
-              // Increment new string's refcount (skip for concat results)
-              if needsAllocExtern then
-                value match
-                  case _: TBinary => // concat already has refcount=1
-                  case _ =>
-                    emit("  pshd r1")
-                    emit("  ldd r1, r1, r0")
-                    emitRefIncr(1, 8)
-                    emit("  popd r1")
+              // Increment new string's refcount (skip for owned: concat/substring/literal)
+              if needsAllocExtern && !isOwnedStringExpr(value) then
+                emit("  pshd r1")
+                emit("  ldd r1, r1, r0")
+                emitRefIncr(1, 8)
+                emit("  popd r1")
               emitAddImm(2, 5, local.offset)
               emitStore(1, 2, local.typ)
+            case st: SyslType.StructType if structHasStringFields(st) =>
+              // Decrement old struct's string fields before overwrite
+              emitStructStringFieldsRC(5, local.offset, st, incr = false)
+              genExpr(value)              // r1 = source struct address
+              emitAddImm(2, 5, local.offset)
+              emitStore(1, 2, local.typ)  // copy struct bytes
+              // Incr new struct's string fields if borrowed (owned source already at rc=1)
+              if !isOwnedStructExpr(value) then
+                emitStructStringFieldsRC(5, local.offset, st, incr = true)
+            case et: SyslType.EnumType if structHasStringFields(et) =>
+              // Decrement old enum's active variant string fields before overwrite
+              emitEnumStringFieldsRC(5, local.offset, et, incr = false)
+              genExpr(value)              // r1 = source enum address
+              emitAddImm(2, 5, local.offset)
+              emitStore(1, 2, local.typ)  // copy enum bytes (incl new tag)
+              // Incr new enum's variant strings if borrowed
+              if !isOwnedStructExpr(value) then
+                emitEnumStringFieldsRC(5, local.offset, et, incr = true)
+            case _: SyslType.FuncType =>
+              // Decr old env if HeapEnv; store new bytes; incr new env if RHS is
+              // a borrowed descriptor copy (TVarRef whose kind is HeapEnv).
+              if closureLocalKind.get(target).contains(FuncKind.HeapEnv) then
+                emitClosureDescrDecr(5, local.offset)
+              genExpr(value)
+              emitAddImm(2, 5, local.offset)
+              emitStore(1, 2, local.typ)
+              val rhsKind = funcKindOfExpr(value)
+              closureLocalKind(target) = rhsKind
+              value match
+                case _: TVarRef if rhsKind == FuncKind.HeapEnv =>
+                  emitClosureDescrIncr(5, local.offset)
+                case _ =>
             case _ =>
               genExpr(value)
               emitAddImm(2, 5, local.offset)
@@ -1138,6 +2062,30 @@ class SyslTriscCodegen(addresses: Int = 4):
               emit(s"  movi r1, $target")
               emit("  popd r2")
               emitStore(2, 1, gtyp)
+            case SyslType.StringType =>
+              if needsAllocExtern then
+                // Decr old buffer
+                emit(s"  movi r1, $target")
+                emit("  ldd r1, r1, r0")    // r1 = old ptr
+                emitRefDecr(1, 8)
+              genExpr(value)                // r1 = new descriptor address
+              emit(s"  movi r2, $target")   // r2 = global address
+              emitStore(1, 2, gtyp)         // copy 16 bytes
+              if needsAllocExtern && !isOwnedStringExpr(value) then
+                emit(s"  movi r1, $target")
+                emit("  ldd r1, r1, r0")  // r1 = new ptr (just stored)
+                emitRefIncr(1, 8)
+            case st: SyslType.StructType if structHasStringFields(st) && needsAllocExtern =>
+              // Decr old struct's string fields (baseReg=1 = global address; preserved
+              // across emitRefDecr via the helper's pshd/popd r1)
+              emit(s"  movi r1, $target")
+              emitStructStringFieldsRC(1, 0, st, incr = false)
+              genExpr(value)                // r1 = source struct address
+              emit(s"  movi r2, $target")   // r2 = global address
+              emitStore(1, 2, gtyp)         // copy struct bytes
+              if !isOwnedStructExpr(value) then
+                emit(s"  movi r1, $target")
+                emitStructStringFieldsRC(1, 0, st, incr = true)
             case _ =>
               genExpr(value)
               emit(s"  pshd r1")
@@ -1159,7 +2107,7 @@ class SyslTriscCodegen(addresses: Int = 4):
                 val off = local.offset + i * stackSize(elemType)
                 emitAddImm(2, 5, off)
                 emitStore(1, 2, elemType)
-            case TStructLit(st @ SyslType.StructType(_, _)) =>
+            case TStructLit(st @ SyslType.StructType(_, _, _)) =>
               val totalSize = stackSize(st)
               val aligned = (totalSize + 7) & ~7
               emitAddImm(7, 7, -aligned)
@@ -1211,6 +2159,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TReturnStmt(Some(value)) =>
         genExpr(value) // result in r1
+        emitFuncReturnIncrIfBorrowed(value)
         if currentFunction != null && returnsViaPointer(currentFunction.returnType) then
           emitStructReturn()
         emitDefers()
@@ -1225,6 +2174,17 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TDeferStmt(body) =>
         deferStack += body
+
+      case TMultiStmt(children) =>
+        children.foreach(genStmt)
+
+      case TContractCheck(_, expr, _) =>
+        genExpr(expr) // r1 = cond
+        val pass = newLabel("contract_pass")
+        emit(s"  bne r1, r0, $pass")
+        emit("  ldi r1, 6") // error code 6 = contract violation
+        emit("  trap 1")
+        emit(s"$pass:")
 
       case TExprStmt(expr) =>
         genExpr(expr) // result in r1, discarded
@@ -1308,14 +2268,64 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit(s"  ${line.trim}")
 
       case TDerefAssignStmt(pointer, value) =>
-        genExpr(value)           // r1 = value to store
-        emit("  pshd r1")       // save as 64-bit temp
-        genExpr(pointer)         // r1 = address
-        emit("  popd r2")        // r2 = value
-        // Store with width matching pointee type
-        pointer.typ match
-          case SyslType.PtrType(pointee) => emitStore(2, 1, pointee)
-          case _ => emit("  std r2, r1, r0")
+        val pointee = pointer.typ match
+          case SyslType.PtrType(p) => p
+          case other => throw new RuntimeException(s"TDerefAssignStmt: expected PtrType, got $other")
+
+        val needsRC = (pointee == SyslType.StringType && needsAllocExtern) ||
+                      pointee.isInstanceOf[SyslType.RefType] ||
+                      (pointee match
+                        case s: SyslType.StructType => structHasStringFields(s) && needsAllocExtern
+                        case _ => false)
+
+        if !needsRC then
+          genExpr(value)           // r1 = value to store
+          emit("  pshd r1")       // save as 64-bit temp
+          genExpr(pointer)         // r1 = address
+          emit("  popd r2")        // r2 = value
+          emitStore(2, 1, pointee)
+        else
+          // Compute destination address (r1), save in fp-relative scratch slot
+          // (genExpr below may push its descriptor onto the stack, breaking pshd/popd LIFO)
+          genExpr(pointer)         // r1 = address
+          emit("  pshd r1")
+          stackOffset -= 8
+          val saveOff = stackOffset
+          // Decrement old value at the destination
+          pointee match
+            case SyslType.StringType =>
+              emit("  ldd r1, r1, r0")
+              emitRefDecr(1, 8)
+            case rt: SyslType.RefType =>
+              emit("  ldd r1, r1, r0")
+              emitRefDecr(1, refHeaderOffset(rt), deinitFor(rt))
+            case s: SyslType.StructType =>
+              emitStructStringFieldsRC(1, 0, s, incr = false)
+            case _ =>
+          // Compute new value (clobbers everything; may push descriptor)
+          genExpr(value)
+          // Reload destination address
+          emitAddImm(2, 5, saveOff)
+          emit("  ldd r2, r2, r0")
+          emitStore(1, 2, pointee)
+          // Increment new value if borrowed
+          pointee match
+            case SyslType.StringType =>
+              value match
+                case _: TBinary =>
+                case _ =>
+                  emit("  ldd r1, r2, r0")
+                  emitRefIncr(1, 8)
+            case rt: SyslType.RefType =>
+              value match
+                case _: TNew | _: TNewArray | _: TNewEnum =>
+                case _ =>
+                  emit("  ldd r1, r2, r0")
+                  emitRefIncr(1, refHeaderOffset(rt))
+            case s: SyslType.StructType =>
+              if !isOwnedStructExpr(value) then
+                emitStructStringFieldsRC(2, 0, s, incr = true)
+            case _ =>
 
       case TIndexAssignStmt(array, index, value) =>
         val elemType = array.typ match
@@ -1323,33 +2333,150 @@ class SyslTriscCodegen(addresses: Int = 4):
           case SyslType.PtrType(e) => e
           case SyslType.SliceType(e) => e
           case SyslType.RefType(SyslType.SliceType(e)) => e
-          case _ => SyslType.I64
+          case other => throw new RuntimeException(s"TIndexAssignStmt: expected indexable type, got $other")
         val elemSize = stackSize(elemType)
         val isSlice = array.typ.isInstanceOf[SyslType.SliceType]
-        genExpr(value)           // r1 = value
-        emit("  pshd r1")       // save as 64-bit temp
-        genExpr(index)           // r1 = index
-        emit("  pshd r1")
-        genExpr(array)           // r1 = array/slice address
-        if isSlice then
-          emit("  ldd r1, r1, r0") // r1 = data pointer (from slice struct)
-        emit("  popd r2")        // r2 = index
-        emitLoadImm(3, elemSize)
-        emit("  mul r2, r2, r3") // r2 = index * elemSize
-        emit("  add r1, r1, r2") // r1 = base + offset
-        emit("  popd r2")        // r2 = value
-        emitStore(2, 1, elemType)
+
+        val needsRC = (elemType == SyslType.StringType && needsAllocExtern) ||
+                      elemType.isInstanceOf[SyslType.RefType] ||
+                      (elemType match
+                        case s: SyslType.StructType => structHasStringFields(s) && needsAllocExtern
+                        case _ => false)
+
+        if !needsRC then
+          genExpr(value)           // r1 = value
+          emit("  pshd r1")       // save as 64-bit temp
+          genExpr(index)           // r1 = index
+          emit("  pshd r1")
+          genExpr(array)           // r1 = array/slice address
+          if isSlice then
+            emit("  ldd r1, r1, r0") // r1 = data pointer (from slice struct)
+          emit("  popd r2")        // r2 = index
+          emitLoadImm(3, elemSize)
+          emit("  mul r2, r2, r3") // r2 = index * elemSize
+          emit("  add r1, r1, r2") // r1 = base + offset
+          emit("  popd r2")        // r2 = value
+          emitStore(2, 1, elemType)
+        else
+          // Compute element address first, then bracket the store with rc decr/incr
+          genExpr(index)
+          emit("  pshd r1")        // save index temporarily
+          stackOffset -= 8
+          genExpr(array)           // r1 = array/slice address
+          if isSlice then
+            emit("  ldd r1, r1, r0") // r1 = data pointer
+          emit("  popd r2")        // r2 = index
+          stackOffset += 8
+          emitLoadImm(3, elemSize)
+          emit("  mul r2, r2, r3") // r2 = index * elemSize
+          emit("  add r1, r1, r2") // r1 = element address
+          // Save element address in fp-relative scratch (survives genExpr)
+          emit("  pshd r1")
+          stackOffset -= 8
+          val saveOff = stackOffset
+          // Decrement old element value
+          elemType match
+            case SyslType.StringType =>
+              emit("  ldd r1, r1, r0")
+              emitRefDecr(1, 8)
+            case rt: SyslType.RefType =>
+              emit("  ldd r1, r1, r0")
+              emitRefDecr(1, refHeaderOffset(rt), deinitFor(rt))
+            case s: SyslType.StructType =>
+              emitStructStringFieldsRC(1, 0, s, incr = false)
+            case _ =>
+          // Compute new value
+          genExpr(value)
+          emitAddImm(2, 5, saveOff)
+          emit("  ldd r2, r2, r0") // r2 = element address
+          emitStore(1, 2, elemType)
+          // Increment new value if borrowed
+          elemType match
+            case SyslType.StringType =>
+              value match
+                case _: TBinary =>
+                case _ =>
+                  emit("  ldd r1, r2, r0")
+                  emitRefIncr(1, 8)
+            case rt: SyslType.RefType =>
+              value match
+                case _: TNew | _: TNewArray | _: TNewEnum =>
+                case _ =>
+                  emit("  ldd r1, r2, r0")
+                  emitRefIncr(1, refHeaderOffset(rt))
+            case s: SyslType.StructType =>
+              if !isOwnedStructExpr(value) then
+                emitStructStringFieldsRC(2, 0, s, incr = true)
+            case _ =>
 
       case TFieldAssignStmt(obj, fieldIndex, value) =>
         val st = obj.typ.asInstanceOf[SyslType.StructType]
         val off = fieldOffset(st, fieldIndex)
         val fieldType = st.fields(fieldIndex)._2
-        genExpr(value)             // r1 = value
-        emit("  pshd r1")
-        emitStructAddr(obj)        // r1 = struct address
-        if off != 0 then emitAddImm(1, 1, off)
-        emit("  popd r2")          // r2 = value
-        emitStore(2, 1, fieldType)
+
+        // Refcounted field types need decr-old/incr-new bracketing on overwrite.
+        val needsRC = (fieldType == SyslType.StringType && needsAllocExtern) ||
+                      fieldType.isInstanceOf[SyslType.RefType] ||
+                      (fieldType match
+                        case s: SyslType.StructType => structHasStringFields(s) && needsAllocExtern
+                        case _: SyslType.FuncType => needsAllocExtern
+                        case _ => false)
+
+        if !needsRC then
+          genExpr(value)             // r1 = value
+          emit("  pshd r1")
+          emitStructAddr(obj)        // r1 = struct address
+          if off != 0 then emitAddImm(1, 1, off)
+          emit("  popd r2")          // r2 = value
+          emitStore(2, 1, fieldType)
+        else
+          // Compute field address; save in a scratch slot that survives the
+          // genExpr below (which may push its result descriptor onto the stack —
+          // breaking pshd/popd LIFO ordering, so we use fp-relative addressing).
+          emitStructAddr(obj)
+          if off != 0 then emitAddImm(1, 1, off)
+          emit("  pshd r1")
+          stackOffset -= 8
+          val saveOff = stackOffset
+          // Decrement the old field value (r1 still = field address)
+          fieldType match
+            case SyslType.StringType =>
+              emit("  ldd r1, r1, r0")  // r1 = old ptr
+              emitRefDecr(1, 8)
+            case rt: SyslType.RefType =>
+              emit("  ldd r1, r1, r0")  // r1 = old ref
+              emitRefDecr(1, refHeaderOffset(rt), deinitFor(rt))
+            case s: SyslType.StructType =>
+              emitStructStringFieldsRC(1, 0, s, incr = false)
+            case _: SyslType.FuncType =>
+              // r1 = field address — descriptor is at [r1+0]; decr its env_ptr.
+              emitClosureDescrDecr(1, 0)
+            case _ =>
+          // Compute new value (clobbers everything; may push its descriptor)
+          genExpr(value)              // r1 = new value
+          // Reload field address from the saved fp-relative slot
+          emitAddImm(2, 5, saveOff)
+          emit("  ldd r2, r2, r0")    // r2 = field address
+          emitStore(1, 2, fieldType)
+          // Increment the new value if it's a borrowed (non-owned) reference
+          fieldType match
+            case SyslType.StringType =>
+              if !isOwnedStringExpr(value) then
+                emit("  ldd r1, r2, r0")  // r1 = new ptr just stored at field
+                emitRefIncr(1, 8)
+            case rt: SyslType.RefType =>
+              value match
+                case _: TNew | _: TNewArray | _: TNewEnum => // owned, no incr
+                case _ =>
+                  emit("  ldd r1, r2, r0")
+                  emitRefIncr(1, refHeaderOffset(rt))
+            case s: SyslType.StructType =>
+              if !isOwnedStructExpr(value) then
+                emitStructStringFieldsRC(2, 0, s, incr = true)
+            case _: SyslType.FuncType =>
+              if !isOwnedClosureExpr(value) then
+                emitClosureDescrIncr(2, 0)
+            case _ =>
 
       case TFieldCompoundAssignStmt(obj, fieldIndex, op, value) =>
         val st = obj.typ.asInstanceOf[SyslType.StructType]
@@ -1631,6 +2758,64 @@ class SyslTriscCodegen(addresses: Int = 4):
         if op == "+" then emit("  add r1, r2, r1")
         else emit("  sub r1, r2, r1")
 
+      case TIntrinsicCall(name, args, typ) =>
+        // Eval args into r1 (left) and r2 (right), same protocol as TBinary.
+        genExpr(args(0))
+        emit("  pshd r1")
+        stackOffset -= 8
+        genExpr(args(1))
+        emit("  mov r2, r1")
+        emit("  popd r1")
+        stackOffset += 8
+        val unsigned = typ.isUnsigned
+        val width = typ.bitWidth
+        // Helper: load 64-bit constant. movi loads 32 bits ZERO-extended (no sign extension),
+        // so use ldc (constant pool) for negative values to get the correct 64-bit value.
+        def loadImm(reg: Int, v: Long): Unit =
+          if v >= 0 && v <= 255 then emit(s"  ldi r$reg, $v")
+          else if v >= 0 && v <= 0xFFFFFFFFL then emit(s"  movi r$reg, $v")
+          else emit(s"  ldc r$reg, $v")
+        name match
+          // wrapping_*: ordinary add/sub/mul, then narrow to width bits to discard high bits.
+          case "wrapping_add" =>
+            emit("  add r1, r1, r2"); emitNarrow(1, typ)
+          case "wrapping_sub" =>
+            emit("  sub r1, r1, r2"); emitNarrow(1, typ)
+          case "wrapping_mul" =>
+            emit(if unsigned then "  mulu r1, r1, r2" else "  mul r1, r1, r2")
+            emitNarrow(1, typ)
+          case "saturating_add" | "saturating_sub" | "saturating_mul" =>
+            if width >= 64 then
+              throw new RuntimeException(s"$name on 64-bit types is not yet supported in the TRISC backend")
+            if name == "saturating_mul" && unsigned && width == 32 then
+              throw new RuntimeException("saturating_mul on u32 is not yet supported in the TRISC backend (would overflow signed i64)")
+            // Compute in 64-bit; for narrow widths the intermediate fits in signed i64.
+            // Then signed-clamp to [minV, maxV]. For unsigned types maxV is set to the
+            // unsigned max, but we still use signed slt because the intermediate is in signed range.
+            name match
+              case "saturating_add" => emit("  add r1, r1, r2")
+              case "saturating_sub" => emit("  sub r1, r1, r2")
+              case "saturating_mul" => emit(if unsigned then "  mulu r1, r1, r2" else "  mul r1, r1, r2")
+              case _ =>
+            val (minV, maxV) =
+              if unsigned then (0L, (1L << width) - 1)
+              else (-(1L << (width - 1)), (1L << (width - 1)) - 1)
+            // Clamp HIGH: if r1 > maxV then r1 = maxV  (signed compare)
+            loadImm(3, maxV)
+            emit("  slt r4, r3, r1")       // r4 = (max < r1)
+            val noHi = newLabel("nohi")
+            emit(s"  beq r4, r0, $noHi")
+            emit("  mov r1, r3")
+            emit(s"$noHi")
+            // Clamp LOW: if r1 < minV then r1 = minV  (signed compare)
+            loadImm(3, minV)
+            emit("  slt r4, r1, r3")       // r4 = (r1 < min)
+            val noLo = newLabel("nolo")
+            emit(s"  beq r4, r0, $noLo")
+            emit("  mov r1, r3")
+            emit(s"$noLo")
+          case other => throw new RuntimeException(s"unknown intrinsic: $other")
+
       case TBinary(left, op, right, resultType) =>
         genExpr(left)        // r1 = left
         emit("  pshd r1")   // save left on stack
@@ -1639,7 +2824,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  mov r2, r1") // r2 = right
         emit("  popd r1")   // r1 = left
         stackOffset += 8
-        val isFloat = left.typ == SyslType.DoubleType
+        val isFloat = left.typ.isFloat
         val unsigned = left.typ.isUnsigned
         if isFloat then
           op match
@@ -1801,6 +2986,49 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit(s"  movi r2, $name")
           emitStore(3, 2, typ)
 
+      case TRangeCheck(inner, range, _, _) =>
+        genExpr(inner) // value in r1
+        val failLbl = newLabel("range_fail")
+        val passLbl = newLabel("range_pass")
+        val isFloat = inner.typ.underlying.isFloat
+        val isUnsigned = inner.typ.underlying.isUnsigned
+        def loadImm(reg: Int, v: Long): Unit =
+          if v >= 0 && v <= 255 then emit(s"  ldi r$reg, $v")
+          else if v >= 0 && v <= 0xFFFFFFFFL then emit(s"  movi r$reg, $v")
+          else emit(s"  ldc r$reg, $v")
+        range match
+          case IntRange(lo, hi, excl) =>
+            // low bound check: fail if val < lo
+            loadImm(2, lo)
+            emit(s"  ${if isUnsigned then "sltu" else "slt"} r3, r1, r2") // r3 = (val < lo)
+            emit(s"  bne r3, r0, $failLbl")
+            // high bound check
+            loadImm(2, hi)
+            if excl then
+              // exclusive: fail if !(val < hi)
+              emit(s"  ${if isUnsigned then "sltu" else "slt"} r3, r1, r2") // r3 = (val < hi)
+              emit(s"  beq r3, r0, $failLbl")
+            else
+              // inclusive: fail if hi < val
+              emit(s"  ${if isUnsigned then "sltu" else "slt"} r3, r2, r1") // r3 = (hi < val)
+              emit(s"  bne r3, r0, $failLbl")
+          case FloatRange(lo, hi, excl) =>
+            emit(s"  ldc r2, $lo")
+            emit(s"  fslt r3, r1, r2") // r3 = (val < lo)
+            emit(s"  bne r3, r0, $failLbl")
+            emit(s"  ldc r2, $hi")
+            if excl then
+              emit(s"  fslt r3, r1, r2")
+              emit(s"  beq r3, r0, $failLbl")
+            else
+              emit(s"  fslt r3, r2, r1")
+              emit(s"  bne r3, r0, $failLbl")
+        emit(s"  bra $passLbl")
+        emit(s"$failLbl:")
+        emit("  ldi r1, 5")  // error code: range check
+        emit("  trap 1")
+        emit(s"$passLbl:")
+
       case TCast(TStringLit(value, _), target) if target.isInstanceOf[SyslType.PtrType] =>
         // String literal → *i8 decay: emit data pointer directly, no fat pointer needed
         val bytes = value.getBytes("UTF-8")
@@ -1822,17 +3050,38 @@ class SyslTriscCodegen(addresses: Int = 4):
         emitAddImm(7, 7, 16)
         stackOffset += 16
 
+      case TCast(inner, target) if inner.typ.isInstanceOf[SyslType.ArrayType] =>
+        // Array decay: genExpr returns address of array in r1, which is address of element 0
+        genExpr(inner)
+        // r1 already holds the address — for both ptr and int targets this is the right value
+        // Apply width truncation/extension if target is a sub-64-bit integer
+        import SyslType.*
+        target match
+          case IntType(8) => emit("  seb r1, r1")
+          case IntType(16) => emit("  ses r1, r1")
+          case IntType(32) => emit("  sew r1, r1")
+          case UIntType(8) => emit("  zeb r1, r1")
+          case UIntType(16) => emit("  zes r1, r1")
+          case UIntType(32) => emit("  zew r1, r1")
+          case _ => // i64, u64, *T — no-op, r1 is already the address
+
       case TCast(inner, target) =>
         genExpr(inner)
         import SyslType.*
-        val srcIsFloat = inner.typ == DoubleType
-        val tgtIsFloat = target == DoubleType
+        val srcIsFloat = inner.typ.isFloat
+        val tgtIsFloat = target.isFloat
         // Float → int: convert float bits to integer value first
         if srcIsFloat && !tgtIsFloat then emit("  fint r1, r1")
         // Int → float: convert integer value to float bits
         else if !srcIsFloat && tgtIsFloat then emit("  cvt r1, r1")
+        // Explicit f64 → f32 rounds to single precision (then re-widens for register use).
+        // f32 → f64 is a no-op since f32 values already live as f64 in registers.
+        if srcIsFloat && tgtIsFloat && inner.typ == FloatType(64) && target == FloatType(32) then
+          emit("  f64tof32 r1, r1")
+          emit("  f32tof64 r1, r1")
         target match
-          case DoubleType => // cvt already emitted above (or no-op if src is already float)
+          case _: FloatType => // float→float handled above; int→float handled by cvt above
+
           case BoolType =>
             // nonzero → 1, zero → 0
             val isZero = newLabel("iszero")
@@ -1863,7 +3112,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TUnary("-", operand, resultType) =>
         genExpr(operand)
-        if operand.typ == SyslType.DoubleType then emit("  fneg r1, r1")
+        if operand.typ.isFloat then emit("  fneg r1, r1")
         else
           emit("  neg r1, r1")
           emitNarrow(1, resultType)
@@ -1894,98 +3143,183 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  std r0, r2, r0")       // env_ptr = null at [sp+8]
         emit("  mov r1, r7")           // r1 = address of the pair
 
-      case TClosure(params, returnType, body, captures) =>
+      case c @ TClosure(params, returnType, body, captures, escapes) =>
         // Generate a unique name and defer the closure function body
         val closureName = if modulePrefix.nonEmpty then s"__closure_${modulePrefix}_$closureCounter"
                           else s"__closure_$closureCounter"
         closureCounter += 1
-        pendingClosures += ((closureName, TClosure(params, returnType, body, captures)))
-        needsAllocExtern = true
+        pendingClosures += ((closureName, c))
 
-        if captures.isEmpty then
-          // No captures — same as TFuncRef with null env
-          emitAddImm(7, 7, -16)
-          stackOffset -= 16
-          emit(s"  movi r1, $closureName")
-          emit("  std r1, r7, r0")       // func_ptr
-          emitAddImm(2, 7, 8)
-          emit("  std r0, r2, r0")       // env_ptr = null
-          emit("  mov r1, r7")
-        else
-          // 1. Allocate env on heap: malloc(envSize)
-          val envLayout = captures.map { (name, typ) =>
-            val size = stackSize(typ)
-            (name, typ, size)
-          }
-          val envSize = envLayout.map(_._3).sum
-          emitLoadImm(1, envSize)
-          emit("  pshd r1")             // save envSize (for potential use)
-          stackOffset -= 8
-          emit("  movi r4, malloc")
-          emit("  jalr r6, r4")
-          emit("  popd r2")             // discard envSize
-          stackOffset += 8
-          // r1 = env_ptr (heap allocated)
-          emit("  pshd r1")             // save env_ptr
-          stackOffset -= 8
+        // Effective kind = preferred kind, but downgrade StackEnv to HeapEnv if
+        // the calling context did not pre-allocate __env_<N>. Contexts that
+        // pre-allocate: TCall args, TInterfaceDispatch args, TIndirectCall args,
+        // TVarStmt RHS for FuncType locals. Contexts that don't pre-allocate:
+        // returned-from-function, in arbitrary expressions, etc. — fallback to
+        // heap so the env outlives the construction-site frame.
+        val preferredKind = closureKindOf(c)
+        val envLocalName = s"__env_${closureCounter - 1}"
+        val effectiveKind =
+          if preferredKind == FuncKind.StackEnv && !locals.contains(envLocalName)
+          then FuncKind.HeapEnv
+          else preferredKind
+        effectiveKind match
+          case FuncKind.NullEnv =>
+            // No captures — same as TFuncRef with null env
+            emitAddImm(7, 7, -16)
+            stackOffset -= 16
+            emit(s"  movi r1, $closureName")
+            emit("  std r1, r7, r0")       // func_ptr
+            emitAddImm(2, 7, 8)
+            emit("  std r0, r2, r0")       // env_ptr = null
+            emit("  mov r1, r7")
 
-          // 2. Copy captured values into env
-          var envOffset = 0
-          for (name, typ, size) <- envLayout do
-            // Load env_ptr into r2
-            emit("  ldd r2, r7, r0")    // r2 = env_ptr (top of stack)
-            if envOffset != 0 then emitAddImm(2, 2, envOffset)
-            // Load captured value
-            if locals != null && locals.contains(name) then
-              val local = locals(name)
-              typ match
-                case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType |
-                     _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
-                  // Aggregate: copy size bytes from local address
-                  emitAddImm(3, 5, local.offset)
-                  for i <- 0 until size.toInt by 8 do
-                    emitAddImm(4, 3, i)
-                    emit("  ldd r4, r4, r0")
-                    emitAddImm(1, 2, i)
-                    emit("  std r4, r1, r0")
-                case _ =>
-                  // Scalar: load value, store into env
-                  emitAddImm(3, 5, local.offset)
-                  emitLoad(3, 3, typ)
-                  emitStore(3, 2, typ)
-            else
-              // Global variable
-              emit(s"  movi r3, $name")
-              typ match
-                case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType |
-                     _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
-                  for i <- 0 until size.toInt by 8 do
-                    emitAddImm(4, 3, i)
-                    emit("  ldd r4, r4, r0")
-                    emitAddImm(1, 2, i)
-                    emit("  std r4, r1, r0")
-                case _ =>
-                  emitLoad(3, 3, typ)
-                  emitStore(3, 2, typ)
-            envOffset += size.toInt
+          case FuncKind.StackEnv =>
+            // Non-escaping closure with all-non-rc-bearing captures: env lives on
+            // the constructing function's stack frame as a pre-allocated local
+            // `__env_<closureCounter-1>`. No malloc, no free, no rc header.
+            val envLocal = locals(envLocalName)
+            // r1 = address of env (= &__env_<n>)
+            emitAddImm(1, 5, envLocal.offset)
+            emit("  pshd r1")              // save env_ptr (top of stack)
+            stackOffset -= 8
 
-          // 3. Build {func_ptr, env_ptr} pair on stack (16 bytes)
-          emit("  popd r2")             // r2 = env_ptr
-          stackOffset += 8
-          emitAddImm(7, 7, -16)
-          stackOffset -= 16
-          emit(s"  movi r1, $closureName")
-          emit("  std r1, r7, r0")       // func_ptr at [sp+0]
-          emitAddImm(3, 7, 8)
-          emit("  std r2, r3, r0")       // env_ptr at [sp+8]
-          emit("  mov r1, r7")           // r1 = address of the pair
+            // Copy captures into env. No incr (StackEnv kind has no rc-bearing
+            // captures by construction — closureKindOf would have returned
+            // HeapEnv otherwise).
+            var envOffset = 0
+            for (name, typ) <- captures do
+              val size = stackSize(typ)
+              emit("  ldd r2, r7, r0")
+              if envOffset != 0 then emitAddImm(2, 2, envOffset)
+              if locals != null && locals.contains(name) then
+                val local = locals(name)
+                typ match
+                  case _: SyslType.StructType | _: SyslType.ArrayType |
+                       _: SyslType.SliceType | _: SyslType.EnumType |
+                       _: SyslType.FuncType | _: SyslType.InterfaceType |
+                       SyslType.StringType =>
+                    emitAddImm(3, 5, local.offset)
+                    for i <- 0 until size.toInt by 8 do
+                      emitAddImm(4, 3, i)
+                      emit("  ldd r4, r4, r0")
+                      emitAddImm(1, 2, i)
+                      emit("  std r4, r1, r0")
+                  case _ =>
+                    emitAddImm(3, 5, local.offset)
+                    emitLoad(3, 3, typ)
+                    emitStore(3, 2, typ)
+              else
+                emit(s"  movi r3, $name")
+                typ match
+                  case _: SyslType.ArrayType | _: SyslType.StructType |
+                       _: SyslType.SliceType | _: SyslType.EnumType |
+                       _: SyslType.FuncType | _: SyslType.InterfaceType |
+                       SyslType.StringType =>
+                    for i <- 0 until size.toInt by 8 do
+                      emitAddImm(4, 3, i)
+                      emit("  ldd r4, r4, r0")
+                      emitAddImm(1, 2, i)
+                      emit("  std r4, r1, r0")
+                  case _ =>
+                    emitLoad(3, 3, typ)
+                    emitStore(3, 2, typ)
+              envOffset += size.toInt
+
+            // Build {func_ptr, env_ptr} pair on stack (16 bytes)
+            emit("  popd r2")              // r2 = env_ptr
+            stackOffset += 8
+            emitAddImm(7, 7, -16)
+            stackOffset -= 16
+            emit(s"  movi r1, $closureName")
+            emit("  std r1, r7, r0")
+            emitAddImm(3, 7, 8)
+            emit("  std r2, r3, r0")
+            emit("  mov r1, r7")
+
+          case FuncKind.HeapEnv =>
+            // Escaping closure or any rc-bearing captures: heap env with
+            // [rc:8 | deinit_ptr:8 | data] header. env_ptr = base + 16.
+            needsAllocExtern = true
+            val deinitOpt = closureEnvDeinitFor(closureName, c)
+            val envLayout = captures.map { (name, typ) =>
+              val size = stackSize(typ)
+              (name, typ, size)
+            }
+            val envSize = envLayout.map(_._3).sum
+            val totalSize = envSize + 16
+
+            // malloc(totalSize)
+            emitLoadImm(1, totalSize)
+            emit("  movi r4, malloc")
+            emit("  jalr r6, r4")
+            emit("  ldi r2, 1")
+            emit("  std r2, r1, r0")          // rc = 1
+            deinitOpt match
+              case Some(deinitName) =>
+                emit(s"  movi r2, $deinitName")
+                emitAddImm(3, 1, 8)
+                emit("  std r2, r3, r0")      // deinit_ptr
+              case None =>
+                emitAddImm(3, 1, 8)
+                emit("  std r0, r3, r0")      // deinit_ptr = null
+            emitAddImm(1, 1, 16)              // r1 = env_ptr (data)
+            emit("  pshd r1")                 // save env_ptr (top of stack)
+            stackOffset -= 8
+
+            // Copy captures into env + Phase A: incr borrowed rc-bearing captures.
+            var envOffset = 0
+            for (name, typ, size) <- envLayout do
+              emit("  ldd r2, r7, r0")
+              if envOffset != 0 then emitAddImm(2, 2, envOffset)
+              if locals != null && locals.contains(name) then
+                val local = locals(name)
+                typ match
+                  case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType |
+                       _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
+                    emitAddImm(3, 5, local.offset)
+                    for i <- 0 until size.toInt by 8 do
+                      emitAddImm(4, 3, i)
+                      emit("  ldd r4, r4, r0")
+                      emitAddImm(1, 2, i)
+                      emit("  std r4, r1, r0")
+                  case _ =>
+                    emitAddImm(3, 5, local.offset)
+                    emitLoad(3, 3, typ)
+                    emitStore(3, 2, typ)
+              else
+                emit(s"  movi r3, $name")
+                typ match
+                  case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType |
+                       _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
+                    for i <- 0 until size.toInt by 8 do
+                      emitAddImm(4, 3, i)
+                      emit("  ldd r4, r4, r0")
+                      emitAddImm(1, 2, i)
+                      emit("  std r4, r1, r0")
+                  case _ =>
+                    emitLoad(3, 3, typ)
+                    emitStore(3, 2, typ)
+              if structHasStringFields(typ) then
+                emit("  ldd r2, r7, r0")
+                emitValueRC(2, envOffset, typ, incr = true)
+              envOffset += size.toInt
+
+            emit("  popd r2")             // r2 = env_ptr
+            stackOffset += 8
+            emitAddImm(7, 7, -16)
+            stackOffset -= 16
+            emit(s"  movi r1, $closureName")
+            emit("  std r1, r7, r0")
+            emitAddImm(3, 7, 8)
+            emit("  std r2, r3, r0")
+            emit("  mov r1, r7")
 
       case TInterfaceBox(expr, iface) =>
         // Box a concrete value into an interface: {itable_ptr, data_ptr}
         val structName = expr.typ match
-          case SyslType.StructType(name, _) => name
-          case SyslType.PtrType(SyslType.StructType(name, _)) => name
-          case SyslType.RefType(SyslType.StructType(name, _)) => name
+          case SyslType.StructType(name, _, _) => name
+          case SyslType.PtrType(SyslType.StructType(name, _, _)) => name
+          case SyslType.RefType(SyslType.StructType(name, _, _)) => name
           case other => throw new RuntimeException(s"cannot box $other into interface")
 
         // Resolve itable label, registering it if first time for this (struct, interface) pair
@@ -2063,36 +3397,76 @@ class SyslTriscCodegen(addresses: Int = 4):
         // Dynamic dispatch: load itable + data from interface value, call method
         // Interface layout: {itable_ptr: i64, data_ptr: i64}
         // itable[methodIndex] = function pointer
-        // Method ABI: first arg (r1) = data_ptr (self), remaining args on stack
+        // Method ABI: r1 = self (data_ptr) — or hidden return slot ptr if method returns
+        // via pointer, in which case all user args (including self) go on stack.
+
+        val callStructReturn = returnsViaPointer(retType)
+        val retSlotOffset = if callStructReturn then
+          val size = retType match
+            case st: SyslType.StructType => stackSize(st)
+            case et: SyslType.EnumType => stackSize(et)
+            case SyslType.StringType | _: SyslType.FuncType | _: SyslType.InterfaceType => 16
+            case _: SyslType.SliceType => 24
+            case _ => 8
+          val aligned = (size + 7) & ~7
+          emitAddImm(7, 7, -aligned)
+          stackOffset -= aligned
+          emit("  mov r1, r7")
+          for i <- 0 until aligned by 8 do
+            emitAddImm(2, 1, i)
+            emit("  std r0, r2, r0")
+          stackOffset
+        else 0
+
+        // Pre-allocate stack envs for non-escaping non-rc-bearing TClosure args.
+        var envPreallocCounter = closureCounter
+        for arg <- args do arg match
+          case c: TClosure if closureKindOf(c) == FuncKind.StackEnv =>
+            val envSize = c.captures.map((_, t) => stackSize(t)).sum
+            val alignedEnvSize = (envSize + 7) & ~7
+            allocLocal(s"__env_$envPreallocCounter", SyslType.IntType(64), alignedEnvSize)
+            envPreallocCounter += 1
+          case _ =>
 
         val savedOffset = stackOffset
-        val nRegArgs = (args.length + 1).min(1) // +1 for self; ABI: only 1 reg arg
-        val stackArgCount = args.length + 1 - nRegArgs // self + user args, minus reg args
+        val stringArgPtrOffsets = mutable.ListBuffer[Int]()
 
-        // Push user args right-to-left onto stack (all go on stack since self takes r1)
+        // Push user args right-to-left using the byte-aware pusher
         for arg <- args.reverse do
-          genExpr(arg)
-          emit("  pshd r1")
-          stackOffset -= 8
+          evalAndPushArg(arg, stringArgPtrOffsets)
 
         // Evaluate interface value — r1 = address of {itable_ptr, data_ptr}
+        val ifaceEvalPre = stackOffset
         genExpr(ifaceVal)
-        // Load data_ptr and itable_ptr
         emitAddImm(2, 1, 8)
         emit("  ldd r2, r2, r0")          // r2 = data_ptr (self)
         emit("  ldd r3, r1, r0")          // r3 = itable_ptr
-        // Load method pointer from itable
         val methodOff = methodIndex * 8
         if methodOff != 0 then emitAddImm(3, 3, methodOff)
         emit("  ldd r4, r3, r0")          // r4 = method function pointer
-        // r1 = self (data_ptr), r4 = method to call
-        emit("  mov r1, r2")              // r1 = data_ptr (self)
-        emit("  jalr r6, r4")             // call method
-        // Clean up stack args
-        val stackArgBytes = args.length * 8
-        if stackArgBytes != 0 then
-          emitAddImm(7, 7, stackArgBytes)
-          stackOffset = savedOffset
+        // Reclaim ifaceVal temp (preserve r2 = self, r4 = method)
+        val ifaceExtra = ifaceEvalPre - stackOffset
+        if ifaceExtra > 0 then
+          emitAddImm(7, 7, ifaceExtra)
+          stackOffset = ifaceEvalPre
+        if callStructReturn then
+          // Hidden return ptr in r1, self pushed as first stack arg below user args
+          // Push self onto stack (8 bytes) — methods receive self at fp+16+(stack args size)
+          emit("  pshd r2")
+          stackOffset -= 8
+          emitAddImm(1, 5, retSlotOffset)
+        else
+          emit("  mov r1, r2")            // r1 = self
+        emit("  jalr r6, r4")
+        emitStringArgDecr(stringArgPtrOffsets.toList)
+        // Clean up everything we pushed except the return slot (caller needs it)
+        val cleanupTo = if callStructReturn then retSlotOffset else savedOffset
+        val argsAllocated = cleanupTo - stackOffset
+        if argsAllocated != 0 then
+          emitAddImm(7, 7, argsAllocated)
+          stackOffset = cleanupTo
+        if callStructReturn then
+          emitAddImm(1, 5, retSlotOffset)
 
       case TCall("abort", _, _) =>
         emit("  ldi r1, 3")           // error code: 3 = abort
@@ -2144,80 +3518,26 @@ class SyslTriscCodegen(addresses: Int = 4):
         // r4 is reserved for the call address (movi r4, name)
         val nRegArgs = allArgs.length.min(1)
         val stackArgs = allArgs.drop(1)
-        val savedOffset = stackOffset
-        var stringArgPtrOffsets: List[Int] = Nil // fp-relative offsets of string arg ptrs needing refcount decrement
 
-        def evalAndPush(arg: TExpr): Unit =
-          val preOffset = stackOffset
-          arg match
-            case TAddrLit(off) => emitAddImm(1, 5, off)
-            case _ => genExpr(arg)
-          arg.typ match
-            case rt: SyslType.RefType => arg match
-              case _: TNew | _: TNewArray | _: TNewEnum =>
-              case _ => emitRefIncr(1, refHeaderOffset(rt))
-            case SyslType.StringType if needsAllocExtern => arg match
-              case _: TBinary =>
-              case _ =>
-                emit("  pshd r1")
-                emit("  ldd r1, r1, r0")
-                emitRefIncr(1, 8)
-                emit("  popd r1")
-            case _ =>
-          if arg.typ == SyslType.StringType then
-            // String stack args: extract ptr/len, clean up temps, push 16 bytes
-            emit("  addi r2, r1, 8")
-            emit("  ldd r2, r2, r0")     // r2 = len
-            emit("  ldd r1, r1, r0")     // r1 = ptr
-            val extra = preOffset - stackOffset
-            if extra > 0 then
-              emitAddImm(7, 7, extra)
-              stackOffset = preOffset
-            emit("  pshd r2")
-            emit("  pshd r1")
-            stackOffset -= 16
-            // Track ptr offset for post-call refcount decrement (matches refIncr conditions)
-            if needsAllocExtern && !arg.isInstanceOf[TBinary] then
-              stringArgPtrOffsets = stackOffset :: stringArgPtrOffsets
-          else if arg.typ.isInstanceOf[SyslType.SliceType] then
-            // Slice stack arg: copy 24-byte {ptr, len+cap, backref} inline, reclaim temp
-            emit("  ldd r2, r1, r0")       // r2 = ptr (8 bytes)
-            emit("  addi r3, r1, 8")
-            emit("  ldd r3, r3, r0")       // r3 = len+cap packed (8 bytes)
-            emit("  addi r4, r1, 16")
-            emit("  ldd r4, r4, r0")       // r4 = backref (8 bytes)
-            val extra = preOffset - stackOffset
-            if extra > 0 then
-              emitAddImm(7, 7, extra)
-              stackOffset = preOffset
-            emit("  pshd r4")              // push backref
-            emit("  pshd r3")              // push len+cap
-            emit("  pshd r2")              // push ptr
-            stackOffset -= 24
-          else if arg.typ.isInstanceOf[SyslType.FuncType] || arg.typ.isInstanceOf[SyslType.InterfaceType] then
-            // FuncType/InterfaceType arg: copy 16-byte pair inline, reclaim temp
-            emit("  ldd r2, r1, r0")       // r2 = first 8 bytes
-            emit("  addi r3, r1, 8")
-            emit("  ldd r3, r3, r0")       // r3 = second 8 bytes
-            val extra = preOffset - stackOffset
-            if extra > 0 then
-              emitAddImm(7, 7, extra)
-              stackOffset = preOffset
-            emit("  pshd r3")              // push second 8 bytes
-            emit("  pshd r2")              // push first 8 bytes
-            stackOffset -= 16
-          else if arg.typ.isInstanceOf[SyslType.EnumType] || arg.typ.isInstanceOf[SyslType.StructType] then
-            // Aggregate args: r1 is an address into our stack — do NOT reclaim the temp!
-            emit("  pshd r1")
-            stackOffset -= 8
-          else
-            // Scalar args: clean up temps, push 8 bytes
-            val extra = preOffset - stackOffset
-            if extra > 0 then
-              emitAddImm(7, 7, extra)
-              stackOffset = preOffset
-            emit("  pshd r1")
-            stackOffset -= 8
+        // Pre-allocate stack envs for non-escaping non-rc-bearing TClosure args.
+        // Must happen before savedOffset is captured so the env space is part of
+        // the permanent frame and outlives the call's expression cleanup. The
+        // TClosure construction site looks up `__env_<closureCounter>` and uses
+        // it as the env address. closureCounter at this point matches what each
+        // TClosure will see on its turn (counter is incremented per construction).
+        var envPreallocCounter = closureCounter
+        for arg <- allArgs do arg match
+          case c: TClosure if closureKindOf(c) == FuncKind.StackEnv =>
+            val envSize = c.captures.map((_, t) => stackSize(t)).sum
+            val alignedEnvSize = (envSize + 7) & ~7
+            allocLocal(s"__env_$envPreallocCounter", SyslType.IntType(64), alignedEnvSize)
+            envPreallocCounter += 1
+          case _ =>
+
+        val savedOffset = stackOffset
+        val stringArgPtrOffsets = mutable.ListBuffer[Int]()  // fp-relative ptrs needing post-call decr
+
+        def evalAndPush(arg: TExpr): Unit = evalAndPushArg(arg, stringArgPtrOffsets)
 
         // With r1-only ABI, there's at most one register arg.
         // If it's a string or slice: pre-evaluate it FIRST (pushing data above stack args),
@@ -2251,7 +3571,7 @@ class SyslTriscCodegen(addresses: Int = 4):
             regAggregateDataOffset = stackOffset
             // Track ptr offset for post-call refcount decrement (matches refIncr conditions)
             if needsAllocExtern && !arg.isInstanceOf[TBinary] then
-              stringArgPtrOffsets = stackOffset :: stringArgPtrOffsets
+              stringArgPtrOffsets += stackOffset
           else if arg.typ.isInstanceOf[SyslType.SliceType] then
             // Pre-evaluate slice register arg: copy 24-byte struct to a known stack location.
             val preOffset = stackOffset
@@ -2287,10 +3607,18 @@ class SyslTriscCodegen(addresses: Int = 4):
             stackOffset -= 16
             regAggregateDataOffset = stackOffset
           else if arg.typ.isInstanceOf[SyslType.StructType] || arg.typ.isInstanceOf[SyslType.EnumType] then
-            // Pre-evaluate other aggregates: save the address on the stack.
+            // Pre-evaluate aggregate register arg: copy bytes to stack at known offset.
+            // The callee gets the address (passed in r1 below) and copies bytes into its
+            // own local frame slot at function entry — true pass-by-value.
             genExpr(arg)
-            emit("  pshd r1")
-            stackOffset -= 8
+            val aligned = (stackSize(arg.typ) + 7) & ~7
+            emitAddImm(7, 7, -aligned)
+            stackOffset -= aligned
+            for off <- 0 until aligned by 8 do
+              emitAddImm(3, 1, off)
+              emit("  ldd r3, r3, r0")
+              emitAddImm(4, 7, off)
+              emit("  std r3, r4, r0")
             regAggregateDataOffset = stackOffset
         }
         // Push stack args (1+) right-to-left
@@ -2305,9 +3633,8 @@ class SyslTriscCodegen(addresses: Int = 4):
             // Address of the pre-pushed 16-byte data (above stack args)
             emitAddImm(1, 5, regAggregateDataOffset)
           else if arg.typ.isInstanceOf[SyslType.StructType] || arg.typ.isInstanceOf[SyslType.EnumType] then
-            // Load the saved address from the stack (pushed as 8-byte pointer)
-            emitAddImm(2, 5, regAggregateDataOffset)
-            emit("  ldd r1, r2, r0")
+            // r1 = address of the pre-pushed struct bytes (above stack args)
+            emitAddImm(1, 5, regAggregateDataOffset)
           else
             val preOffset = stackOffset
             arg match
@@ -2332,13 +3659,8 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit(s"  movi r4, $name")
         emit("  jalr r6, r4")
         // Decrement refcounts for string arg temporaries (caller incremented before call,
-        // callee decremented its copy on return, but caller never decremented — leak fix)
-        for off <- stringArgPtrOffsets do
-          emit("  pshd r1")            // save return value
-          emitAddImm(1, 5, off)        // r1 = &ptr on stack (fp-relative)
-          emit("  ldd r1, r1, r0")     // r1 = ptr
-          emitRefDecr(1, 8)
-          emit("  popd r1")            // restore return value
+        // callee uses borrowed ref; this rebalances)
+        emitStringArgDecr(stringArgPtrOffsets.toList)
         // Clean up stack args (NOT the return slot — caller needs it)
         val argsAllocated = savedOffset - stackOffset
         if argsAllocated != 0 then
@@ -2346,41 +3668,182 @@ class SyslTriscCodegen(addresses: Int = 4):
           stackOffset = savedOffset
         // For struct return, r1 = pointer to return slot (which is on our stack)
 
-      case TIndirectCall(callee, args, _) =>
-        // ABI: arg 0 in r1, args 1+ on stack, r3 = env_ptr (for closures)
-        val nRegArgs = args.length.min(1)
-        val stackArgs = args.drop(1)
+      case TIndirectCall(callee, args, retType) =>
+        // ABI: r1 = arg 0 (or hidden return ptr if returning via pointer), args 1+ on stack,
+        // r3 = env_ptr, r4 = func_ptr. Mirrors TCall but resolves the func ptr at runtime.
+        val callStructReturn = returnsViaPointer(retType)
+        val retSlotOffset = if callStructReturn then
+          val size = retType match
+            case st: SyslType.StructType => stackSize(st)
+            case et: SyslType.EnumType => stackSize(et)
+            case SyslType.StringType | _: SyslType.FuncType | _: SyslType.InterfaceType => 16
+            case _: SyslType.SliceType => 24
+            case _ => 8
+          val aligned = (size + 7) & ~7
+          emitAddImm(7, 7, -aligned)
+          stackOffset -= aligned
+          // Zero-init the return slot
+          emit("  mov r1, r7")
+          for i <- 0 until aligned by 8 do
+            emitAddImm(2, 1, i)
+            emit("  std r0, r2, r0")
+          stackOffset
+        else 0
+
+        val allArgs = if callStructReturn then TAddrLit(retSlotOffset) :: args else args
+        val nRegArgs = allArgs.length.min(1)
+        val stackArgs = allArgs.drop(1)
+
+        // Pre-allocate stack envs for non-escaping non-rc-bearing TClosure args.
+        var envPreallocCounter = closureCounter
+        for arg <- allArgs do arg match
+          case c: TClosure if closureKindOf(c) == FuncKind.StackEnv =>
+            val envSize = c.captures.map((_, t) => stackSize(t)).sum
+            val alignedEnvSize = (envSize + 7) & ~7
+            allocLocal(s"__env_$envPreallocCounter", SyslType.IntType(64), alignedEnvSize)
+            envPreallocCounter += 1
+          case _ =>
+
+        val savedOffset = stackOffset
+        val stringArgPtrOffsets = mutable.ListBuffer[Int]()
+
+        // Push stack args right-to-left using the shared byte-aware pusher
         for arg <- stackArgs.reverse do
-          genExpr(arg)
-          emit("  pshd r1")
-          stackOffset -= 8
-        // Evaluate register args in reverse, push as temporaries
-        for arg <- args.take(nRegArgs).reverse do
-          genExpr(arg)
-          emit("  pshd r1")
-          stackOffset -= 8
+          evalAndPushArg(arg, stringArgPtrOffsets)
+
+        // Pre-eval register arg (arg 0) — for aggregate types, push bytes ABOVE stack args
+        // and pass the address in r1 (matches TCall pattern).
+        val regArgOpt = allArgs.headOption.filter(_ => nRegArgs > 0)
+        var regAggregateDataOffset = 0
+        regArgOpt.foreach { arg =>
+          if arg.typ == SyslType.StringType then
+            val preOffset = stackOffset
+            arg match
+              case TAddrLit(off) => emitAddImm(1, 5, off)
+              case _ => genExpr(arg)
+            if needsAllocExtern then
+              arg match
+                case _: TBinary =>
+                case _ =>
+                  emit("  pshd r1")
+                  emit("  ldd r1, r1, r0")
+                  emitRefIncr(1, 8)
+                  emit("  popd r1")
+            emit("  addi r2, r1, 8")
+            emit("  ldd r2, r2, r0")
+            emit("  ldd r1, r1, r0")
+            val extra = preOffset - stackOffset
+            if extra > 0 then
+              emitAddImm(7, 7, extra)
+              stackOffset = preOffset
+            emit("  pshd r2")
+            emit("  pshd r1")
+            stackOffset -= 16
+            regAggregateDataOffset = stackOffset
+            if needsAllocExtern && !arg.isInstanceOf[TBinary] then
+              stringArgPtrOffsets += stackOffset
+          else if arg.typ.isInstanceOf[SyslType.SliceType] then
+            val preOffset = stackOffset
+            arg match
+              case TAddrLit(off) => emitAddImm(1, 5, off)
+              case _ => genExpr(arg)
+            emit("  ldd r2, r1, r0")
+            emit("  addi r3, r1, 8")
+            emit("  ldd r3, r3, r0")
+            emit("  addi r4, r1, 16")
+            emit("  ldd r4, r4, r0")
+            val extra = preOffset - stackOffset
+            if extra > 0 then
+              emitAddImm(7, 7, extra)
+              stackOffset = preOffset
+            emit("  pshd r4")
+            emit("  pshd r3")
+            emit("  pshd r2")
+            stackOffset -= 24
+            regAggregateDataOffset = stackOffset
+          else if arg.typ.isInstanceOf[SyslType.FuncType] || arg.typ.isInstanceOf[SyslType.InterfaceType] then
+            val preOffset = stackOffset
+            arg match
+              case TAddrLit(off) => emitAddImm(1, 5, off)
+              case _ => genExpr(arg)
+            emit("  ldd r2, r1, r0")
+            emit("  addi r3, r1, 8")
+            emit("  ldd r3, r3, r0")
+            val extra = preOffset - stackOffset
+            if extra > 0 then
+              emitAddImm(7, 7, extra)
+              stackOffset = preOffset
+            emit("  pshd r3")
+            emit("  pshd r2")
+            stackOffset -= 16
+            regAggregateDataOffset = stackOffset
+          else if arg.typ.isInstanceOf[SyslType.StructType] || arg.typ.isInstanceOf[SyslType.EnumType] then
+            arg match
+              case TAddrLit(off) => emitAddImm(1, 5, off)
+              case _ => genExpr(arg)
+            val aligned = (stackSize(arg.typ) + 7) & ~7
+            emitAddImm(7, 7, -aligned)
+            stackOffset -= aligned
+            for off <- 0 until aligned by 8 do
+              emitAddImm(3, 1, off)
+              emit("  ldd r3, r3, r0")
+              emitAddImm(4, 7, off)
+              emit("  std r3, r4, r0")
+            regAggregateDataOffset = stackOffset
+          else
+            // Scalar register arg: push 8 bytes
+            val preOffset = stackOffset
+            arg match
+              case TAddrLit(off) => emitAddImm(1, 5, off)
+              case _ => genExpr(arg)
+            arg.typ match
+              case rt: SyslType.RefType => arg match
+                case _: TNew | _: TNewArray | _: TNewEnum =>
+                case _ => emitRefIncr(1, refHeaderOffset(rt))
+              case _ =>
+            val extra = preOffset - stackOffset
+            if extra > 0 then
+              emitAddImm(7, 7, extra)
+              stackOffset = preOffset
+            emit("  pshd r1")
+            stackOffset -= 8
+        }
+        // Set r1 to register-arg value: address of pre-pushed bytes for aggregates,
+        // or pop the saved 8 bytes for scalars.
         val afterArgPush = stackOffset
         // Evaluate callee — r1 = address of {func_ptr, env_ptr} pair
         genExpr(callee)
-        // Load func_ptr and env_ptr directly from r1
         emitAddImm(3, 1, 8)
-        emit("  ldd r3, r3, r0")  // r3 = env_ptr (null for plain functions)
+        emit("  ldd r3, r3, r0")  // r3 = env_ptr
         emit("  ldd r4, r1, r0")  // r4 = func_ptr
-        // Reclaim any temp stack from callee evaluation (e.g., return slot)
         val calleeExtra = afterArgPush - stackOffset
         if calleeExtra > 0 then
           emitAddImm(7, 7, calleeExtra)
           stackOffset = afterArgPush
-        // Pop register args into r1-rN
-        for i <- 0 until nRegArgs do
-          emit(s"  popd r${i + 1}")
-          stackOffset += 8
+        // For aggregate register arg, r1 = address of pre-pushed bytes; for scalar, popd
+        regArgOpt.foreach { arg =>
+          if arg.typ == SyslType.StringType ||
+             arg.typ.isInstanceOf[SyslType.SliceType] ||
+             arg.typ.isInstanceOf[SyslType.FuncType] ||
+             arg.typ.isInstanceOf[SyslType.InterfaceType] ||
+             arg.typ.isInstanceOf[SyslType.StructType] ||
+             arg.typ.isInstanceOf[SyslType.EnumType] then
+            emitAddImm(1, 5, regAggregateDataOffset)
+          else
+            emit("  popd r1")
+            stackOffset += 8
+        }
         emit("  jalr r6, r4")
-        // Clean up stack args
-        if stackArgs.nonEmpty then
-          val stackArgBytes = stackArgs.length * 8
-          emitAddImm(7, 7, stackArgBytes)
-          stackOffset += stackArgBytes
+        emitStringArgDecr(stringArgPtrOffsets.toList)
+        // Clean up everything we pushed except the return slot (caller needs it)
+        val cleanupTo = if callStructReturn then retSlotOffset else savedOffset
+        val argsAllocated = cleanupTo - stackOffset
+        if argsAllocated != 0 then
+          emitAddImm(7, 7, argsAllocated)
+          stackOffset = cleanupTo
+        // For struct return, point r1 at the return slot (which is on our stack)
+        if callStructReturn then
+          emitAddImm(1, 5, retSlotOffset)
 
       case TAddrOf(name, _) =>
         if locals != null && locals.contains(name) then
@@ -2434,7 +3897,8 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TDeref(inner, typ) =>
         genExpr(inner)           // r1 = pointer address
         typ match
-          case _: SyslType.StructType | _: SyslType.EnumType | _: SyslType.ArrayType | _: SyslType.FuncType =>
+          case _: SyslType.StructType | _: SyslType.EnumType | _: SyslType.ArrayType |
+               _: SyslType.FuncType | _: SyslType.SliceType | SyslType.StringType =>
             () // aggregate: pointer IS the base address, don't load
           case _ =>
             emitLoad(1, 1, typ)  // scalar: load value at pointer
@@ -2542,7 +4006,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         // Allocate array on stack with proper element size, rounded up to 8
         val elemType = typ match
           case SyslType.ArrayType(e, _) => e
-          case _ => SyslType.I64
+          case other => throw new RuntimeException(s"TArrayDecl: expected ArrayType, got $other")
         val rawBytes = size * stackSize(elemType)
         val totalBytes = (rawBytes + 7) & ~7 // keep SP 8-byte aligned
         emitAddImm(7, 7, -totalBytes)
@@ -2593,7 +4057,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         // Convert value to string — dispatch on type.
         // __str_int handles integers/bool (bits interpreted as signed i64);
         // __str_float handles f64 values.
-        val isFloat = inner.typ == SyslType.DoubleType
+        val isFloat = inner.typ.isFloat
         genExpr(inner) // r1 = value (integer bits or f64 bits)
         if isFloat then needsStrFloat = true
         else needsStrInt = true
@@ -2624,7 +4088,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         val elseLabel = newLabel("else")
         val endLabel = newLabel("endif")
         val isString = typ == SyslType.StringType
-        val isAggregate = typ.isInstanceOf[SyslType.EnumType] || typ.isInstanceOf[SyslType.StructType] || typ.isInstanceOf[SyslType.SliceType]
+        val isAggregate = typ.isInstanceOf[SyslType.EnumType] || typ.isInstanceOf[SyslType.StructType] || typ.isInstanceOf[SyslType.SliceType] || typ.isInstanceOf[SyslType.FuncType] || typ.isInstanceOf[SyslType.InterfaceType]
         val aggregateSize = if isAggregate then stackSize(typ) else 0
         // For string/aggregate results: pre-allocate a result slot BEFORE the if/else
         val resultSlotOffset = if isString then
@@ -2786,16 +4250,37 @@ class SyslTriscCodegen(addresses: Int = 4):
             pat match
               case TDestructurePattern(st, bindings, fieldTypes) =>
                 for (binding, i) <- bindings.zipWithIndex do
+                  val fieldType = fieldTypes(i)
                   binding.foreach { name =>
                     val off = fieldOffset(st, i)
-                    // Reload scrutinee address each time (allocLocal may move sp)
+                    // Allocate the binding's local first (allocLocal moves sp), then
+                    // recompute the scrutinee field address — that address is in
+                    // physical memory (fp-relative), so post-allocation it's stable.
+                    val local = allocLocal(name, fieldType)
                     emitAddImm(1, 5, scrutineeOffset)
                     emit("  ldd r1, r1, r0")  // r1 = scrutinee address
                     if off != 0 then emitAddImm(1, 1, off)
-                    emitLoad(1, 1, fieldTypes(i))
-                    val local = allocLocal(name, fieldTypes(i))
-                    emitAddImm(2, 5, local.offset)
-                    emitStore(1, 2, fieldTypes(i))
+                    fieldType match
+                      case SyslType.StringType | _: SyslType.StructType | _: SyslType.EnumType =>
+                        // Aggregate: r1 = field address (src), copy bytes to local.
+                        emitAddImm(2, 5, local.offset)
+                        emitStore(1, 2, fieldType)
+                        // Binding is borrowed: incr the buffer/strings (scope exit
+                        // path will decr to balance).
+                        fieldType match
+                          case SyslType.StringType if needsAllocExtern =>
+                            emitAddImm(1, 5, local.offset)
+                            emit("  ldd r1, r1, r0")
+                            emitRefIncr(1, 8)
+                          case st2: SyslType.StructType if structHasStringFields(st2) =>
+                            emitStructStringFieldsRC(5, local.offset, st2, incr = true)
+                          case et2: SyslType.EnumType if structHasStringFields(et2) =>
+                            emitEnumStringFieldsRC(5, local.offset, et2, incr = true)
+                          case _ =>
+                      case _ =>
+                        emitLoad(1, 1, fieldType)
+                        emitAddImm(2, 5, local.offset)
+                        emitStore(1, 2, fieldType)
                   }
               case TVariantPattern(et, variantIndex, bindings, fieldTypes) =>
                 val dataOff = et.dataOffset.toInt
@@ -2806,14 +4291,34 @@ class SyslTriscCodegen(addresses: Int = 4):
                   val align = stackAlign(fieldType)
                   fieldOff = ((fieldOff + align - 1) / align) * align
                   binding.foreach { name =>
-                    // Reload scrutinee address each time (allocLocal may move sp)
+                    // Allocate the binding's local first (allocLocal moves sp), then
+                    // recompute the scrutinee field address — that address is in
+                    // physical memory (fp-relative), so post-allocation it's stable.
+                    val local = allocLocal(name, fieldType)
                     emitAddImm(1, 5, scrutineeOffset)
                     emit("  ldd r1, r1, r0")  // r1 = enum address
                     if dataOff + fieldOff != 0 then emitAddImm(1, 1, dataOff + fieldOff)
-                    emitLoad(1, 1, fieldType)
-                    val local = allocLocal(name, fieldType)
-                    emitAddImm(2, 5, local.offset)
-                    emitStore(1, 2, fieldType)
+                    fieldType match
+                      case SyslType.StringType | _: SyslType.StructType | _: SyslType.EnumType =>
+                        // Aggregate: r1 = field address (src), copy bytes to local.
+                        emitAddImm(2, 5, local.offset)
+                        emitStore(1, 2, fieldType)
+                        // Binding is borrowed: incr the buffer/strings (scope exit
+                        // path will decr to balance).
+                        fieldType match
+                          case SyslType.StringType if needsAllocExtern =>
+                            emitAddImm(1, 5, local.offset)
+                            emit("  ldd r1, r1, r0")
+                            emitRefIncr(1, 8)
+                          case st: SyslType.StructType if structHasStringFields(st) =>
+                            emitStructStringFieldsRC(5, local.offset, st, incr = true)
+                          case et2: SyslType.EnumType if structHasStringFields(et2) =>
+                            emitEnumStringFieldsRC(5, local.offset, et2, incr = true)
+                          case _ =>
+                      case _ =>
+                        emitLoad(1, 1, fieldType)
+                        emitAddImm(2, 5, local.offset)
+                        emitStore(1, 2, fieldType)
                   }
                   fieldOff += fieldType.sizeOf.toInt
               case _ =>
@@ -2871,6 +4376,117 @@ class SyslTriscCodegen(addresses: Int = 4):
             emitLoadImm(1, size) // cap == size for fixed arrays
           case other =>
             throw new RuntimeException(s"codegen: cap() not supported on ${other}")
+
+      case TSliceExpr(array, low, high, SyslType.StringType) =>
+        // Substring s[lo:hi]: allocate new rc'd buffer, memcpy hi-lo bytes.
+        // Result is an owned {ptr, len} with rc=1.
+        needsAllocExtern = true
+        // Eval source string; push ptr(8) and len(8). Reclaim genExpr temps first.
+        val pre = stackOffset
+        genExpr(array)                       // r1 = addr of {ptr, len}
+        emit("  ldd r2, r1, r0")             // r2 = src_ptr
+        emit("  addi r3, r1, 8")
+        emit("  ldd r3, r3, r0")             // r3 = src_len (i64)
+        val extra = pre - stackOffset
+        if extra > 0 then
+          emitAddImm(7, 7, extra)
+          stackOffset = pre
+        emit("  pshd r2")                    // [src_ptr]
+        emit("  pshd r3")                    // [src_len] [src_ptr]
+        stackOffset -= 16
+        // Eval lo (default 0)
+        low match
+          case Some(loExpr) => genExpr(loExpr)
+          case None         => emit("  ldi r1, 0")
+        emit("  pshd r1")                    // [lo] [src_len] [src_ptr]
+        stackOffset -= 8
+        // Eval hi (default src_len at sp+8)
+        high match
+          case Some(hiExpr) => genExpr(hiExpr)
+          case None =>
+            emitAddImm(1, 7, 8)
+            emit("  ldd r1, r1, r0")         // r1 = src_len
+        emit("  pshd r1")                    // [hi] [lo] [src_len] [src_ptr]
+        stackOffset -= 8
+        // Pop hi/lo into r1/r2; src_len stays at sp+0, src_ptr at sp+8
+        emit("  popd r1")                    // r1 = hi
+        emit("  popd r2")                    // r2 = lo
+        stackOffset += 16
+        // Bounds check: 0 <= lo <= hi <= src_len
+        val errLabel = newLabel("substr_err")
+        val okLabel  = newLabel("substr_ok")
+        emit("  slt r4, r2, r0")             // lo < 0?
+        emit(s"  bne r4, r0, $errLabel")
+        emit("  slt r4, r1, r2")             // hi < lo?
+        emit(s"  bne r4, r0, $errLabel")
+        emit("  ldd r4, r7, r0")             // r4 = src_len
+        emit("  slt r4, r4, r1")             // src_len < hi?
+        emit(s"  bne r4, r0, $errLabel")
+        emit(s"  bra $okLabel")
+        emit(s"$errLabel")
+        emit("  ldi r1, 1")                  // out-of-bounds
+        emit("  trap 1")
+        emit(s"$okLabel")
+        // Compute new_len = hi - lo. Save lo and new_len on stack.
+        emit("  sub r3, r1, r2")             // r3 = new_len
+        emit("  pshd r2")                    // [lo] [src_len] [src_ptr]
+        emit("  pshd r3")                    // [new_len] [lo] [src_len] [src_ptr]
+        stackOffset -= 16
+        // malloc(new_len + 8)
+        emit("  addi r1, r3, 8")
+        emit("  pshd r1")                    // [arg] [new_len] [lo] [src_len] [src_ptr]
+        stackOffset -= 8
+        emit("  movi r4, malloc")
+        emit("  jalr r6, r4")
+        emit("  popd r3")                    // pop malloc arg
+        stackOffset += 8
+        // Null check
+        val allocOk = newLabel("substr_alloc_ok")
+        emit(s"  bne r1, r0, $allocOk")
+        emit("  ldi r1, 2")
+        emit("  trap 1")
+        emit(s"$allocOk")
+        // r1 = base; rc=1 at [base]
+        emit("  ldi r2, 1")
+        emit("  std r2, r1, r0")
+        // Stack: sp+0 = new_len, sp+8 = lo, sp+16 = src_len, sp+24 = src_ptr
+        // dest = base + 8
+        emit("  addi r1, r1, 8")
+        // src = src_ptr + lo
+        emitAddImm(2, 7, 24)
+        emit("  ldd r2, r2, r0")             // r2 = src_ptr
+        emitAddImm(3, 7, 8)
+        emit("  ldd r3, r3, r0")             // r3 = lo
+        emit("  add r2, r2, r3")             // r2 = src_ptr + lo
+        // Copy new_len bytes
+        emit("  ldd r3, r7, r0")             // r3 = new_len (counter)
+        val copyLoop = newLabel("substr_copy")
+        val copyDone = newLabel("substr_copy_done")
+        emit(s"$copyLoop")
+        emit(s"  beq r3, r0, $copyDone")
+        emit("  ldb r4, r2, r0")
+        emit("  stb r4, r1, r0")
+        emit("  addi r1, r1, 1")
+        emit("  addi r2, r2, 1")
+        emit("  addi r3, r3, -1")
+        emit(s"  bra $copyLoop")
+        emit(s"$copyDone")
+        // Build result {ptr, len}: data = base+8 (recompute from r1 - new_len),
+        // but easier to recompute base from saved state. Use base via re-derivation:
+        // We have r1 = base + 8 + new_len. Subtract new_len → base + 8 = data ptr.
+        emit("  ldd r3, r7, r0")             // r3 = new_len
+        emit("  sub r1, r1, r3")             // r1 = base + 8 = data ptr
+        emit("  mov r2, r3")                 // r2 = new_len (also goes to result)
+        // Pop saved values: new_len(8) + lo(8) + src_len(8) + src_ptr(8) = 32 bytes
+        emitAddImm(7, 7, 32)
+        stackOffset += 32
+        // Allocate 16-byte result {ptr, len}
+        emitAddImm(7, 7, -16)
+        stackOffset -= 16
+        emit("  std r1, r7, r0")
+        emitAddImm(3, 7, 8)
+        emit("  std r2, r3, r0")
+        emit("  mov r1, r7")
 
       case TSliceExpr(array, low, high, SyslType.SliceType(elemType)) =>
         val elemSize = stackSize(elemType)
@@ -3308,7 +4924,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TSizeof(size, _) =>
         emitLoadImm(1, size.toInt)
 
-      case TStructLit(st @ SyslType.StructType(_, fields)) =>
+      case TStructLit(st @ SyslType.StructType(_, fields, _)) =>
         val totalSize = stackSize(st)
         val aligned = (totalSize + 7) & ~7
         emitAddImm(7, 7, -aligned)
@@ -3430,6 +5046,29 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  ldd r3, r3, r0") // r3 = malloc result
           emitAddImm(2, 3, 8 + off) // r2 = field address (past header)
           emitStore(1, 2, fieldType)
+          // Borrowed rc-bearing field: incr the buffer (caller still owns its copy)
+          fieldType match
+            case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
+              emit("  pshd r1")
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitAddImm(1, 3, 8 + off)
+              emit("  ldd r1, r1, r0")
+              emitRefIncr(1, 8)
+              emit("  popd r1")
+            case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitStructStringFieldsRC(3, 8 + off, nested, incr = true)
+            case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitEnumStringFieldsRC(3, 8 + off, nested, incr = true)
+            case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitClosureDescrIncr(3, 8 + off)
+            case _ =>
         // r1 = data pointer (past refcount header)
         emitAddImm(1, 5, ptrOffset)
         emit("  ldd r1, r1, r0")
@@ -3489,6 +5128,30 @@ class SyslTriscCodegen(addresses: Int = 4):
           emit("  ldd r3, r3, r0")          // r3 = malloc result
           emitAddImm(2, 3, 8 + dataOff + fieldOff) // r2 = field address (past header + data offset)
           emitStore(1, 2, fieldType)
+          // Borrowed string field: incr the buffer (caller still owns its copy)
+          fieldType match
+            case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
+              emit("  pshd r1")
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitAddImm(1, 3, 8 + dataOff + fieldOff)
+              emit("  ldd r1, r1, r0")
+              emitRefIncr(1, 8)
+              emit("  popd r1")
+            case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+              // r3 = malloc result; field address = r3 + 8 + dataOff + fieldOff
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitStructStringFieldsRC(3, 8 + dataOff + fieldOff, nested, incr = true)
+            case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitEnumStringFieldsRC(3, 8 + dataOff + fieldOff, nested, incr = true)
+            case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitClosureDescrIncr(3, 8 + dataOff + fieldOff)
+            case _ =>
           fieldOff += fieldType.sizeOf.toInt
         // r1 = data pointer (past refcount header)
         emitAddImm(1, 5, ptrOffset)
@@ -3517,6 +5180,19 @@ class SyslTriscCodegen(addresses: Int = 4):
           genExpr(arg)                                    // r1 = field value
           emitAddImm(2, 5, structBaseOffset + off)       // r2 = field address (fp-relative)
           emitStore(1, 2, fieldType)
+          // Borrowed string/closure field: incr (caller still owns its copy)
+          fieldType match
+            case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
+              emit("  pshd r1")
+              emitAddImm(1, 5, structBaseOffset + off)
+              emit("  ldd r1, r1, r0")
+              emitRefIncr(1, 8)
+              emit("  popd r1")
+            case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+              emitStructStringFieldsRC(5, structBaseOffset + off, nested, incr = true)
+            case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+              emitClosureDescrIncr(5, structBaseOffset + off)
+            case _ =>
         // r1 = struct base address (fp-relative, stable)
         emitAddImm(1, 5, structBaseOffset)
 
@@ -3547,6 +5223,21 @@ class SyslTriscCodegen(addresses: Int = 4):
           genExpr(arg) // r1 = field value
           emitAddImm(2, 5, enumBaseOffset + dataOff + fieldOff)
           emitStore(1, 2, fieldType)
+          // Borrowed string/struct/enum/closure field: incr (caller still owns its copy)
+          fieldType match
+            case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
+              emit("  pshd r1")
+              emitAddImm(1, 5, enumBaseOffset + dataOff + fieldOff)
+              emit("  ldd r1, r1, r0")
+              emitRefIncr(1, 8)
+              emit("  popd r1")
+            case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+              emitStructStringFieldsRC(5, enumBaseOffset + dataOff + fieldOff, nested, incr = true)
+            case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
+              emitEnumStringFieldsRC(5, enumBaseOffset + dataOff + fieldOff, nested, incr = true)
+            case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+              emitClosureDescrIncr(5, enumBaseOffset + dataOff + fieldOff)
+            case _ =>
           fieldOff += fieldType.sizeOf.toInt
         // r1 = enum base address
         emitAddImm(1, 5, enumBaseOffset)
@@ -3667,8 +5358,10 @@ class SyslTriscCodegen(addresses: Int = 4):
     case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType => "db"
     case SyslType.IntType(16) | SyslType.UIntType(16) => "ds"
     case SyslType.IntType(32) | SyslType.UIntType(32) => "dw"
-    case SyslType.DoubleType => "dd"
-    case _ => "dl"
+    case SyslType.FloatType(32) => "dw"   // f32 stored as 4 bytes (IEEE-754 single bit pattern)
+    case SyslType.FloatType(64) => "dd"
+    case SyslType.IntType(64) | SyslType.UIntType(64) | _: SyslType.PtrType | _: SyslType.RefType => "dl"
+    case other => throw new RuntimeException(s"emitDataDirective: unexpected type $other")
 
   // Emit address of local variable into target register
   private def emitLocalAddr(name: String, reg: Int): Unit =

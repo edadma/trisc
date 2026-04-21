@@ -158,7 +158,7 @@ lazy val cpu = crossProject(JSPlatform, JVMPlatform, NativePlatform)
 
 lazy val docs = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .crossType(CrossType.Pure)
-  .in(file("docs"))
+  .in(file("docs-cli"))
   .settings(commonSettings)
   .settings(
     name := "trisc-docs",
@@ -195,7 +195,7 @@ lazy val triscCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
     libraryDependencies ++= Seq(
       "com.github.scopt" %%% "scopt" % "4.1.0",
       "com.lihaoyi" %%% "pprint" % "0.9.0",
-      "com.indoorvivants" %%% "toml" % "0.3.0",
+      "io.github.edadma" %%% "toml" % "0.1.0",
     ),
   )
   .dependsOn(cpu, asm, svm, sysl)

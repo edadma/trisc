@@ -6,7 +6,7 @@ object OSKitTestData:
     val doc = new LiterateParser().parse(raw)
     LiterateRenderer.tangle(doc)
 
-  lazy val bootAsm: String = scala.io.Source.fromFile("oskit/boot/boot.asm").mkString
+  lazy val bootAsm: String = scala.io.Source.fromFile("oskit/arch/trisc/boot.asm").mkString
   lazy val kernelSysl: String = readLsysl("oskit/kernel/kernel.lsysl")
   lazy val servicesSysl: String = readLsysl("oskit/services/services.lsysl")
   lazy val semaphoreSysl: String = readLsysl("oskit/sync/semaphore.lsysl")
@@ -23,6 +23,8 @@ object OSKitTestData:
   lazy val pimutexSysl: String = readLsysl("oskit/sync/pimutex.lsysl")
   lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
   lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")
+  lazy val archVmSysl: String = readLsysl("oskit/arch/trisc/vm.lsysl")
+  lazy val archCpuSysl: String = readLsysl("oskit/arch/trisc/cpu.lsysl")
   lazy val configSysl: String = readSysl("oskit/config/config.sysl")
   private def readSysl(path: String): String = scala.io.Source.fromFile(path).mkString
 

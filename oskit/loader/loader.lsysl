@@ -30,8 +30,9 @@ pressure regardless of file size.
     module oskit.loader
 
     import oskit.fs.{fs_open, fs_read, fs_close}
-    import posix.stdlib.{malloc, free}
+    import std.alloc.{malloc, free}
     import oskit.hal.{memcpy, memset}
+    import oskit.services.svc_vm_copy_to
 
 Error codes returned when loading fails.
 
@@ -224,7 +225,7 @@ TRB v1 binary image: magic `TRB` + 0x01, u32 entry, u32 record count, then recor
                     tof_v[2] = byte('F')
                     tof_v[3] = byte(' ')
                     tof_v[4] = byte('v')
-                    if !buf_has_prefix(p, trimmed_len, &tof_v[0], 5)
+                    if !buf_has_prefix(p, trimmed_len, tof_v, 5)
                         return LOAD_ERR_FORMAT
                     header_seen = true
                 else if trimmed_len >= 8
@@ -238,7 +239,7 @@ TRB v1 binary image: magic `TRB` + 0x01, u32 entry, u32 record count, then recor
                     seg_pfx[5] = byte('N')
                     seg_pfx[6] = byte('T')
                     seg_pfx[7] = byte(':')
-                    if buf_has_prefix(p, trimmed_len, &seg_pfx[0], 8)
+                    if buf_has_prefix(p, trimmed_len, seg_pfx, 8)
                         // Find comma after segment name
                         val rest = p + 8
                         val rest_len = trimmed_len - 8
@@ -261,7 +262,7 @@ TRB v1 binary image: magic `TRB` + 0x01, u32 entry, u32 record count, then recor
                     data_pfx[3] = byte('A')
                     data_pfx[4] = byte(':')
                     if header_seen
-                        if buf_has_prefix(p, trimmed_len, &data_pfx[0], 5)
+                        if buf_has_prefix(p, trimmed_len, data_pfx, 5)
                             val hex_start = p + 5
                             val hex_len = trimmed_len - 5
                             val n = hex_decode_buf(hex_start, hex_len, *byte(seg_cursor))
@@ -373,5 +374,166 @@ buffer — no size limit per call. We still loop because
             return LOAD_ERR_READ
 
         val result = load_tof_from_buf(buf, total)
+        free(buf)
+        result
+
+Cross-address-space TRB loader. Like `load_trb1_from_buf` but
+uses `svc_vm_copy_to` to write PROGBITS/NOBITS into the target
+address space identified by `dst_ptbr`. Used by isolated PM to
+load binaries without switching its own PTBR.
+
+    load_trb1_to_ptbr(buf: *byte, buflen: int, dst_ptbr: u64) -> i64
+        if buflen < 12
+            return LOAD_ERR_FORMAT
+        val entry = read_u32_le(buf + 4)
+        val nrec = int(read_u32_le(buf + 8))
+        var pos = 12
+        var ri = 0
+        while ri < nrec
+            if pos + 12 > buflen
+                return LOAD_ERR_FORMAT
+            val hp = buf + pos
+            val org = u64(read_u32_le(hp))
+            val kind = int(read_u32_le(hp + 4))
+            val sz = int(read_u32_le(hp + 8))
+            pos += 12
+            if kind == 0
+                if pos + sz > buflen
+                    return LOAD_ERR_FORMAT
+                svc_vm_copy_to(dst_ptbr, org, buf + pos, sz)
+                pos += sz
+            else if kind == 1
+                // Zero-fill: use a local buffer for small chunks
+                var zeros: [4096]byte
+                var done = 0
+                while done < sz
+                    var chunk = sz - done
+                    if chunk > 4096
+                        chunk = 4096
+                    svc_vm_copy_to(dst_ptbr, org + u64(done), zeros, chunk)
+                    done += chunk
+            else
+                return LOAD_ERR_FORMAT
+            ri += 1
+        if pos != buflen
+            return LOAD_ERR_FORMAT
+        entry
+
+ELF64 cross-address-space loader. Parses ELF program headers
+and copies PT_LOAD segments into the target address space.
+
+    val ELF_PT_LOAD = 1
+
+    read_u16_le(p: *byte) -> int
+        (int(p[0]) & 0xFF) | ((int(p[1]) & 0xFF) << 8)
+
+    read_u64_le(p: *byte) -> i64
+        i64(p[0] & 0xFF) | (i64(p[1] & 0xFF) << 8) | (i64(p[2] & 0xFF) << 16) | (i64(p[3] & 0xFF) << 24) | (i64(p[4] & 0xFF) << 32) | (i64(p[5] & 0xFF) << 40) | (i64(p[6] & 0xFF) << 48) | (i64(p[7] & 0xFF) << 56)
+
+    load_elf64_to_ptbr(buf: *byte, buflen: int, dst_ptbr: i64) -> i64
+        // Minimum ELF64 header is 64 bytes
+        if buflen < 64
+            return LOAD_ERR_FORMAT
+        // Verify ELF magic, class (64-bit), endian (little)
+        if buf[0] != 0x7F
+            return LOAD_ERR_FORMAT
+        if buf[1] != byte('E')
+            return LOAD_ERR_FORMAT
+        if buf[2] != byte('L')
+            return LOAD_ERR_FORMAT
+        if buf[3] != byte('F')
+            return LOAD_ERR_FORMAT
+        if buf[4] != 2   // ELFCLASS64
+            return LOAD_ERR_FORMAT
+        if buf[5] != 1   // ELFDATA2LSB (little-endian)
+            return LOAD_ERR_FORMAT
+
+        val entry = read_u64_le(buf + 24)
+        val phoff = int(read_u64_le(buf + 32))
+        val phentsize = read_u16_le(buf + 54)
+        val phnum = read_u16_le(buf + 56)
+
+        if phoff + phnum * phentsize > buflen
+            return LOAD_ERR_FORMAT
+
+        // Process PT_LOAD segments
+        var i = 0
+        while i < phnum
+            val ph = buf + phoff + i * phentsize
+            val p_type = int(read_u32_le(ph))
+            if p_type == ELF_PT_LOAD
+                val p_offset = int(read_u64_le(ph + 8))
+                val p_vaddr = u64(read_u64_le(ph + 16))
+                val p_filesz = int(read_u64_le(ph + 32))
+                val p_memsz = int(read_u64_le(ph + 40))
+                // Copy file data (PROGBITS)
+                if p_filesz > 0
+                    if p_offset + p_filesz > buflen
+                        return LOAD_ERR_FORMAT
+                    svc_vm_copy_to(dst_ptbr, p_vaddr, buf + p_offset, p_filesz)
+                // Zero-fill BSS (memsz > filesz)
+                if p_memsz > p_filesz
+                    var zeros: [4096]byte
+                    var done = p_filesz
+                    while done < p_memsz
+                        var chunk = p_memsz - done
+                        if chunk > 4096
+                            chunk = 4096
+                        svc_vm_copy_to(dst_ptbr, p_vaddr + u64(done), zeros, chunk)
+                        done += chunk
+            i += 1
+
+        if entry <= 0
+            return LOAD_ERR_NO_ENTRY
+        entry
+
+Load a binary file into a different address space. Reads the
+file via VFS, detects format from magic bytes (ELF or TRB),
+and copies segments into the target address space.
+
+    val LOAD_CROSS_BUF_SIZE = 81920
+
+    load_tof_to_ptbr(path: string, dst_ptbr: i64) -> i64
+        val fid = fs_open(path)
+        if fid < 0
+            return LOAD_ERR_NOT_FOUND
+
+        val buf = malloc(LOAD_CROSS_BUF_SIZE)
+        if i64(buf) <= 0
+            fs_close(fid)
+            return LOAD_ERR_READ
+
+        var total = 0
+        var nr = fs_read(fid, buf, LOAD_CROSS_BUF_SIZE)
+        while nr > 0
+            total += nr
+            if total >= LOAD_CROSS_BUF_SIZE
+                break
+            nr = fs_read(fid, buf + total, LOAD_CROSS_BUF_SIZE - total)
+        fs_close(fid)
+
+        if total <= 0
+            free(buf)
+            return LOAD_ERR_READ
+
+        if total < 4
+            free(buf)
+            return LOAD_ERR_FORMAT
+
+        var result: i64 = LOAD_ERR_FORMAT
+
+        // Detect format from magic bytes
+        if buf[0] == 0x7F
+            if buf[1] == byte('E')
+                if buf[2] == byte('L')
+                    if buf[3] == byte('F')
+                        result = load_elf64_to_ptbr(buf, total, dst_ptbr)
+        if result == LOAD_ERR_FORMAT
+            if buf[0] == byte('T')
+                if buf[1] == byte('R')
+                    if buf[2] == byte('B')
+                        if buf[3] == byte(1)
+                            result = load_trb1_to_ptbr(buf, total, dst_ptbr)
+
         free(buf)
         result

@@ -1,0 +1,87 @@
+// IPC client module for standalone server binaries.
+//
+// Contains only the userspace IPC wrappers (syscall-based).
+// When compiling a server as a standalone .trb, this replaces
+// the full ipc.lsysl (which includes kernel-side handlers).
+//
+// Module path is oskit.ipc so that server code can use
+// `import oskit.ipc.*` without changes.
+
+module oskit.ipc
+
+import oskit.services.syscall
+
+val IPC_TIMEOUT = -2
+
+val SYS_PORT_CREATE    = 31
+val SYS_IPC_SEND       = 32
+val SYS_IPC_RECV       = 33
+val SYS_IPC_REPLY      = 34
+val SYS_PORT_CLOSE     = 35
+val SYS_PORT_REGISTER  = 36
+val SYS_PORT_LOOKUP    = 37
+val SYS_IPC_SEND_TIMED = 38
+val SYS_IPC_RECV_NOTIFY = 39
+val SYS_IPC_LAST_MSG_LEN = 65
+
+port_create() -> int
+    syscall(SYS_PORT_CREATE, 0)
+
+port_close(port: int) -> int
+    syscall(SYS_PORT_CLOSE, port)
+
+port_register(port: int, name: string) -> int
+    var args: [3]i64
+    args[0] = port
+    args[1] = i64(*byte(name))
+    args[2] = len(name)
+    syscall(SYS_PORT_REGISTER, i64(args))
+
+port_lookup(name: string) -> int
+    var args: [2]i64
+    args[0] = i64(*byte(name))
+    args[1] = len(name)
+    syscall(SYS_PORT_LOOKUP, i64(args))
+
+ipc_send(port: int, msg: *byte, msg_len: int, reply: *byte, reply_len: int) -> int
+    var args: [5]i64
+    args[0] = port
+    args[1] = i64(msg)
+    args[2] = msg_len
+    args[3] = i64(reply)
+    args[4] = reply_len
+    syscall(SYS_IPC_SEND, i64(args))
+
+ipc_recv(port: int, buf: *byte, buf_len: int) -> int
+    var args: [3]i64
+    args[0] = port
+    args[1] = i64(buf)
+    args[2] = buf_len
+    syscall(SYS_IPC_RECV, i64(args))
+
+ipc_reply(caller: int, msg: *byte, msg_len: int)
+    var args: [3]i64
+    args[0] = caller
+    args[1] = i64(msg)
+    args[2] = msg_len
+    syscall(SYS_IPC_REPLY, i64(args))
+
+ipc_recv_notify(port: int, buf: *byte, buf_len: int) -> int
+    var args: [3]i64
+    args[0] = port
+    args[1] = i64(buf)
+    args[2] = buf_len
+    syscall(SYS_IPC_RECV_NOTIFY, i64(args))
+
+ipc_send_timeout(port: int, msg: *byte, msg_len: int, reply: *byte, reply_len: int, timeout: int) -> int
+    var args: [6]i64
+    args[0] = port
+    args[1] = i64(msg)
+    args[2] = msg_len
+    args[3] = i64(reply)
+    args[4] = reply_len
+    args[5] = timeout
+    syscall(SYS_IPC_SEND_TIMED, i64(args))
+
+ipc_last_msg_len() -> int
+    syscall(SYS_IPC_LAST_MSG_LEN, 0)

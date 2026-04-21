@@ -8,348 +8,276 @@ Concrete, ordered development plan. Each phase builds on the previous.
 - **spawn(), not fork+exec.** Explicit process creation with explicit handle passing. No implicit inheritance.
 - **connect(), not open().** Scheme-based resource naming: `vfs:/etc/passwd`, `tty:0`, `dev:disk0`. Extensible.
 - **IPC is the kernel.** Synchronous send/recv/reply + async notifications. Already built.
-- **POSIX is a layer.** posix_spawn→spawn, fd→handle, open→connect, fork→COW-spawn (optional). Not in the kernel.
-- **sysl, not C.** Kernel, servers, and userspace all in sysl. x86 boot trampoline is the only assembly.
+- **POSIX is a layer.** posix_spawn->spawn, fd->handle, open->connect, fork->COW-spawn (optional). Not in the kernel.
+- **sysl, not C.** Kernel, servers, and userspace all in sysl. Boot trampoline is the only assembly.
 - **HAL for portability.** Hardware-specific code (memcpy, timers, UART) lives in swappable HAL modules. Same interface, different implementations per target. Kernel/servers never import hardware-specific code directly.
-- **TOML build config.** A `sysl.toml` selects target, HAL modules, servers, and compile-time constants. No conditional compilation in the language — the build system generates a `config` module and controls which files are linked.
+- **TOML build config.** A `sysl.toml` selects target, HAL modules, servers, and compile-time constants. No conditional compilation in the language -- the build system generates a `config` module and controls which files are linked.
+- **Minix 3 architecture.** Microkernel with isolated servers, IPC-based communication, RS-managed boot and recovery.
 
 ---
 
-## Phase 0a-1: HAL extraction
+## Completed
 
-**Problem:** Hardware-specific code (DMA memcpy/memset, timer device addresses and registers, UART I/O) is scattered through kernel, driver, and std library code. Porting to a new target means editing these files.
+### Phase 0a-0b: Foundation
+- HAL extraction (memcpy/memset via DMA or CPU loop)
+- sysl.toml config module generation
+- Build tool assembles source list from sysl.toml
+- FS client library separated from TFS server
 
-**Goal:** Move hardware-specific code into `oskit/hal/` modules behind stable interfaces. Pure refactoring — no new tools, no config files. Manually linked as before.
+### Phase 0c-0d: Filesystem layer
+- VFS server with namespace and mount table
+- Open file state tracking in VFS (position, refcount)
 
-**HAL structure:**
+### Phase 1: Per-process handle table
+- Handles 0/1/2 for stdin/stdout/stderr
+- VFS maintains per-process handle tables indexed by PID
+
+### Phase 2: spawn() with argv and handles
+- PM-based spawn with argv string and handle map
+- PM loads binary, sets up args, tells VFS to copy handles
+
+### Phase 3a-3c: TTY scheme, handle inheritance, stdio
+- connect("tty:N") returns TTY-backed handle
+- Handle inheritance via PM_SPAWN + VFS_CMD_INHERIT
+- Default stdin/stdout/stderr for all external programs
+
+### Server Isolation (Minix 3 architecture)
+- Boot module system: emulator loads .trb binaries, boot info header at 0x600000
+- RS reads boot info, loads servers as isolated processes with own page tables
+- All 5 servers isolated: disk, tty, tfs, vfs, pm
+- Cross-address-space IPC (vm_copy_to/from with bounce buffers)
+- PM loads binaries via cross-address-space copy (load_tof_to_ptbr)
+- 17 new kernel syscalls for server isolation (44-66)
+
+### Phase 4: RS Refactor and Init Isolation (Minix 3 alignment)
+- RS as first userspace process (kernel only starts RS)
+- RS starts all servers + init from boot modules in order
+- Handshake boot with synchronous ready notifications
+- Init isolated as standalone boot module
+
+### Phase 5: Minix 3 Boot Parity
+- **Crash recovery:** PM notifies RS on server death, RS restarts from boot module, port_transfer for transparent restart (clients keep working)
+- **Per-process syscall privilege table:** 128-bit bitmask per process, enforced in assembly slow-path dispatcher (both TRISC and x86_64)
+- **Per-process IPC send restrictions:** bitmask of allowed destination ports, enforced in both send handlers, re-tightened after restart
+- **Kill fix:** scheduler skips terminated threads left in ready queue
+- Both TRISC and x86_64 targets working, 12/12 x86 tests pass
+
+### Phase 6: Pipes
+- `create_pipe()` returns read/write handle pair via VFS IPC
+- Pipe buffers in VFS with blocking read/write and EOF on close
+- Shell pipes: `cmd1 | cmd2`, multi-stage `cmd1 | cmd2 | cmd3`
+
+### Phase 7: Redirects and job control
+- Output redirect (`>`, `>>`), input redirect (`<`)
+- Background jobs (`&`), `jobs`, `fg`, `kill` builtins
+- `head` and `tail` utilities
+
+### Phase 8: Signals
+- PM signal infrastructure: SIG_TERM, SIG_KILL, SIG_CHILD, SIG_INT, SIG_PIPE
+- TTY ^C interception sends PM_CMD_SIGINT to PM
+- PM tracks foreground PID per console, kills on SIGINT
+- nsh sets/clears foreground PID around waitpid
+
+### Phase 9: Grant-based IPC
+- `grant_create`/`grant_revoke`/`grant_copy`/`grant_map`/`grant_unmap` syscalls
+- VFS + TFS use grants for zero-copy file I/O
+- Foundation for future zero-copy networking
+
+### Phase 10: Data Store (DS) Server
+- Isolated key-value server, boot module at index 5
+- DS_CMD_PUBLISH/RETRIEVE/DELETE/SUBSCRIBE
+- 64 entries, 16 subscriptions, no heap
+- Async notifications to subscribers on matching key changes
+
+### Phase 11: x86_64 Target
+- SLIX boots in QEMU on x86_64 via multiboot
+- Full server stack: disk, tfs, tty, pm, vfs, ds, rs, init
+- Ring 0/Ring 3 separation with per-process kernel stacks
+- 30 x86_64 integration tests pass (login, shell, pipes, redirects, signals, crash recovery)
+
+---
+
+## ~~Phase 4: RS Refactor and Init Isolation (Minix 3 alignment)~~ DONE
+
+**Problem:** SLIX's RS is fire-and-forget -- it starts servers once during boot and exits. Minix 3's RS is the root of the server tree: it starts first, monitors all servers, and can restart crashed ones. This is Minix 3's headline reliability feature. Additionally, init is compiled into the kernel binary and runs as a kernel thread, unlike Minix 3 where init is a separate binary loaded as a boot module.
+
+### Current boot order (wrong)
 ```
-oskit/hal/
-  mem_dma.lsysl       # memcpy/memset via DMA (TRISC)
-  mem_cpu.lsysl       # memcpy/memset via CPU loops (generic)
-  timer_trisc.lsysl   # TRISC timer device
-  uart_trisc.lsysl    # TRISC MMIO UART
+kernel_main -> init -> RS -> {disk, tfs, tty, pm, vfs} -> init reads ttytab -> login
 ```
-Each HAL module exports the same symbols (e.g., `memcpy`, `memset`, `timer_init`, `timer_ack`). The build includes whichever one is appropriate for the target.
+RS is started by init, which is backwards. RS should be more fundamental than init.
 
-**What to do:**
-- Extract memcpy/memset from `std/mem/mem.lsysl` into `oskit/hal/mem_dma.lsysl`
-- Write `oskit/hal/mem_cpu.lsysl` with CPU-loop fallback
-- Extract timer init/ack from `oskit/kernel/timer.lsysl` into `oskit/hal/timer_trisc.lsysl`
-- Update imports — kernel/servers import from HAL, not directly from hardware
-- Tests and OskitDemoBuilder link the TRISC HAL modules explicitly (same as today, just different paths)
+### Target boot order (Minix 3-style)
+```
+kernel_main -> RS -> {disk, tfs, tty, pm, vfs, init} -> init reads ttytab -> login
+```
+Kernel starts RS directly. RS starts all servers including init. Init is a standalone .trb boot module, just like the other servers.
 
-**What works when done:** All hardware-specific code lives in `oskit/hal/`. Swapping `mem_dma` for `mem_cpu` in the source list is all it takes to change the memcpy implementation. No source changes needed in kernel or servers.
+### Init isolation
+
+Init is currently compiled into the kernel binary and runs as a kernel thread. It must become a standalone .trb boot module:
+
+- Compile init as a standalone binary (same pattern as other servers)
+- RS loads init from boot modules as the last server
+- Init reads `/etc/ttytab` and spawns login processes
+- Init is just another process that RS manages and can restart
+
+### RS responsibilities (current vs target)
+
+| Feature | Current | Target |
+|---------|---------|--------|
+| Start servers in order | Yes | Yes |
+| Handshake boot (wait for ready) | Yes | Yes |
+| Monitor server health | No | Yes -- heartbeat or IPC watchdog |
+| Restart crashed server | No | Yes -- detect exit, reload .trb, restart |
+| Start init | No (init starts RS) | Yes (RS starts init last) |
+| Privilege table | No | Yes -- restrict syscalls/IPC per server |
+
+### Crash recovery design
+
+1. RS keeps a server table: `{name, boot_module_idx, port, pid, state}`
+2. When a server process exits (RS gets notification from PM), RS checks if it was unexpected
+3. RS reloads the .trb from the boot module region (still in RAM), creates new page table, starts new process
+4. RS re-registers the server's port (or the server does on startup)
+5. Clients retry failed IPC calls -- servers are stateless or reconstruct state on restart
+
+**Stateless vs stateful servers:**
+- disk: stateless (just DMA, no internal state)
+- tty: nearly stateless (line buffer can be lost)
+- tfs: stateful (open file positions, dirty blocks) -- needs careful handling
+- vfs: stateful (open file table, handle tables) -- hardest to restart
+- pm: stateful (process table, waiters) -- also hard
+
+For now, crash recovery works well for stateless drivers. Stateful server recovery requires checkpointing or state reconstruction, which is a longer-term goal.
+
+### Privilege table design
+
+Each server entry specifies:
+- Allowed syscall bitmap (e.g., disk can't call svc_create_proc_susp)
+- Allowed IPC targets (e.g., TFS can only send to disk and VFS)
+- MMIO page grants (already implemented via vm_create_server_pt)
+- IRQ grants (which IRQs the server can register for)
+
+The kernel checks the privilege table on every syscall and IPC send. Violations are reported to RS, which can decide to restart or terminate the server.
 
 ---
 
-## Phase 0a-2: `sysl.toml` config module generation
+## Phase 5: Multi-Target Architecture
 
-**Problem:** Kernel constants (MAX_THREADS, PAGE_SIZE, etc.) are hardcoded as `val` declarations scattered across source files. Changing them requires editing source.
+**Problem:** All arch-specific code (TRISC assembly, Sv32 page tables, MMIO device addresses, DMA, cli/sti) is mixed into kernel.lsysl and boot.asm. Porting to x86_64 means rewriting large portions of the kernel.
 
-**Goal:** A `sysl.toml` file defines compile-time constants. A build tool generates a `config.lsysl` module. Source code uses `import config`.
+**Goal:** Factor arch-specific code into `oskit/arch/{target}/` modules behind stable interfaces. The kernel imports arch functions; the build system selects the target. Same pattern as Linux's `arch/` directory.
 
-**Build config — `sysl.toml`:**
-```toml
-[target]
-arch = "trisc"
+### What's arch-specific (must be in arch/)
 
-[hal]
-mem = "oskit/hal/mem_dma"
-timer = "oskit/hal/timer_trisc"
-uart = "oskit/hal/uart_trisc"
+| Component | TRISC | x86_64 |
+|-----------|-------|--------|
+| Boot entry | boot.asm (trap vectors, exception table) | boot.S (multiboot header, GDT, IDT) |
+| Syscall entry | `trap 0` dispatch table | `syscall` instruction via MSR |
+| Context switch | pshr/popr, susp/gusp, sptbr, rte | push/pop regs, swapgs, iretq |
+| Page tables | Sv32 2-level (10+10+12 bits) | x86_64 4-level (9+9+9+9+12 bits) |
+| PTBR management | gptbr/sptbr instructions | mov cr3 |
+| TLB flush | tlbia instruction | invlpg / mov cr3 |
+| Interrupts | cli/sti instructions | cli/sti (same mnemonics, different encoding) |
+| Atomics | ll/sc (load-linked/store-conditional) | lock cmpxchg |
+| Timer | MMIO timer device (0x800100) | PIT or LAPIC timer |
+| Interrupt controller | MMIO INTC (0x800080) | PIC/IOAPIC/LAPIC |
+| DMA/bulk copy | DMA controller (0x8001C0) | rep movsb (CPU) |
+| Keyboard | MMIO keyboard (0x800004) | PS/2 via port I/O |
+| Display | MMIO display (0x8000A0) | VGA framebuffer or serial |
+| Memory layout | KERNEL_L1_BASE=0x7FE000, pools at 0x660000 | Higher-half kernel, pools in physical memory |
 
-[kernel]
-max_threads = 8
-max_processes = 16
-page_size = 4096
-default_quantum = 5
+### What's arch-independent (stays in kernel/)
+
+- Scheduler (priority queues, round-robin, time quantum, sleep queue)
+- IPC (port management, message delivery, notifications, grants)
+- Process/thread management (create, kill, reap, waitpid, zombie/orphan)
+- Page allocator algorithm (bump allocator, free list)
+- Thread state machine (ready, blocked, suspended, terminated)
+- All 5 servers (pure IPC, fully portable)
+- Filesystem (TFS, VFS routing)
+- Shell and user programs
+
+### Arch interface contract
+
+Each `oskit/arch/{target}/` must export these functions:
+
+**VM subsystem (`arch/*/vm.lsysl`):**
+- `vm_init()` -- initialize kernel page table, enable MMU
+- `vm_create_process_pt() -> int` -- allocate process page table
+- `vm_create_server_pt(io_page: int) -> int` -- allocate server page table with MMIO grant
+- `vm_v2p(ptbr: int, vaddr: int) -> int` -- virtual-to-physical translation
+- `vm_copy_to(dst_ptbr, dst_vaddr, src, len)` -- cross-address-space write
+- `vm_copy_from(src_ptbr, src_vaddr, dst, len)` -- cross-address-space read
+- `vm_set_ptbr(addr: int)` -- set active page table
+- PTE constants (PTE_V, PTE_R, PTE_W, PTE_X, PTE_U)
+
+**CPU interface (`arch/*/cpu.lsysl`):**
+- `arch_cli()` / `arch_sti()` -- disable/enable interrupts
+- `build_stack_frame(entry, usp, ssp) -> i64` -- build initial context frame
+- Atomic primitives for synchronization
+
+**Boot (`arch/*/boot.asm` or `boot.S`):**
+- Exception/interrupt vector table
+- Syscall dispatch (fast-path and slow-path)
+- Context switch (save/restore all registers)
+- Timer ISR, keyboard ISR
+- Initial stack and entry point
+
+**Config (`arch/*/config.sysl`):**
+- Memory layout constants (page table base, pool base/end, stack addresses)
+- Device addresses (arch-specific MMIO or port I/O)
+
+### Proposed directory structure
+
+```
+oskit/
+  arch/
+    trisc/
+      boot.asm           # trap vectors, context switch, syscall dispatch
+      vm.lsysl           # Sv32 page tables, PTBR ops, TLB flush
+      cpu.lsysl          # cli/sti wrappers, build_stack_frame, atomics
+      config.sysl        # TRISC memory layout, device addresses
+      hal_mem.lsysl      # DMA-backed memcpy/memset
+    x86/
+      boot.S             # multiboot2 header, GDT, IDT, syscall MSR setup
+      vm.lsysl           # x86_64 4-level page tables, CR3 ops, invlpg
+      cpu.lsysl          # cli/sti, build_stack_frame (x86 register layout)
+      config.sysl        # x86 memory layout
+      hal_mem.lsysl      # rep movsb memcpy/memset
+  kernel/
+    kernel.lsysl         # scheduler, IPC, process mgmt (calls arch.* functions)
+  drivers/               # some arch-specific, some shared via HAL
+  servers/               # all portable (pure IPC)
+  services/              # syscall ABI wrappers (portable, trampoline is arch-specific)
 ```
 
-**Generated `config.lsysl`:**
-```
-module config
-val ARCH = "trisc"
-val MAX_THREADS = 8
-val MAX_PROCESSES = 16
-val PAGE_SIZE = 4096
-val DEFAULT_QUANTUM = 5
-```
+### Refactoring steps
 
-Source code does `import config.{MAX_THREADS, PAGE_SIZE}` and uses these as normal constants. No compiler changes needed.
+1. **Extract VM code from kernel.lsysl** into `arch/trisc/vm.lsysl`: vm_init, vm_v2p, vm_create_process_pt, vm_create_server_pt, vm_copy_to, vm_copy_from, vm_set_ptbr, PTE constants, page_alloc/page_alloc_zero (these use arch-specific pool addresses). Kernel imports from arch module.
 
-**The build tool is optional.** A default `config.lsysl` with TRISC values ships in the repo. Tests and manual compilation work without `sysl.toml` — just include the default config module. The build tool only needs to run when you want different values.
+2. **Replace asm("cli")/asm("sti") with arch_cli()/arch_sti()** throughout kernel.lsysl. Define in `arch/trisc/cpu.lsysl`.
 
-**What to do:**
-- Define `sysl.toml` format
-- Write config generator (Scala, reads TOML, writes `config.lsysl`)
-- Ship default `config.lsysl` with TRISC defaults
-- Replace hardcoded constants in kernel with `import config` values
-- Tests include the default config module in their source maps
+3. **Move build_stack_frame to arch/** -- register layout and context frame format are ISA-specific.
 
-**What works when done:** Constants come from config, not hardcoded vals. Changing MAX_THREADS means editing `sysl.toml` and regenerating — no source changes.
+4. **Move config.sysl to arch/** -- memory layout constants are arch-specific. Generic constants (MAX_THREADS, MAX_PROCESSES, etc.) stay in a shared config.
+
+5. **Test on TRISC** -- pure refactor, everything must still work identically.
+
+6. **Create arch/x86/ stubs** -- implement the arch interface for x86_64, starting with boot.S (multiboot entry) and vm.lsysl (4-level page tables).
 
 ---
 
-## Phase 0a-3: Build tool assembles source list from `sysl.toml`
-
-**Problem:** `OskitDemoBuilder.scala` has a manual list of ~30 source files. Adding a new server or driver means editing Scala code.
-
-**Goal:** The `[hal]`, `[servers]`, `[drivers]` sections in `sysl.toml` control which files get compiled. The build tool assembles the source list automatically.
-
-**Extended `sysl.toml`:**
-```toml
-[servers]
-include = ["pm", "vfs", "tfs", "tty"]
-
-[drivers]
-include = ["disk", "keyboard"]
-```
-
-**What to do:**
-- Extend build tool to read `[hal]`, `[servers]`, `[drivers]` sections
-- Build tool resolves module names to file paths (convention-based: `pm` → `oskit/servers/pm.lsysl` or `slix/servers/pm.lsysl`)
-- Build tool outputs a complete source list or directly invokes the compiler
-- `OskitDemoBuilder` becomes a thin wrapper that calls the build tool (or remains for tests)
-
-**What works when done:** Adding a new server = add its name to `sysl.toml` and create the file. No Scala code changes. The build tool handles everything.
-
----
-
-## Phase 0b: Separate fs client library from TFS server
-**Problem:** `oskit/servers/tfs.lsysl` contains both the TFS IPC server AND the `fs_open/fs_read/fs_write/...` client functions. Clients import `oskit.servers.{fs_open, fs_read}` which drags in the server code. The client functions also do `port_lookup("fs")` on every call.
-
-**Goal:** Clean separation: client library talks to whatever filesystem server is registered, server wraps the TFS implementation.
-
-**What to do:**
-- NEW: `oskit/fs/client.lsysl` — module `oskit.fs.client` with `fs_open`, `fs_read`, `fs_write`, `fs_stat`, `fs_create`, `fs_unlink`, `fs_mkdir`, `fs_rmdir`, `fs_readdir`, `fs_chmod`, `fs_rename`
-- Client caches the port on first use (not per-call lookup)
-- Remove client functions from `oskit/servers/tfs.lsysl`
-- Update all imports: init, nsh, login, ulib → import from `oskit.fs.client`
-
-**What works when done:** Same behavior, cleaner structure. Client code doesn't depend on server code.
-
----
-
-## Phase 0c: VFS server — namespace and mount table
-**Problem:** The TFS server registers as "fs" and handles all filesystem requests directly. There's no mount table, no way to have multiple filesystems, no namespace layer.
-
-**Goal:** VFS server owns the namespace. TFS becomes a backend that VFS delegates to.
-
-**Design:**
-- VFS server registers port "fs" (replaces TFS's registration)
-- TFS server registers port "tfs" (private, VFS talks to it)
-- VFS maintains a mount table: `[{path_prefix, backend_port}]`
-- Root "/" is mounted on TFS at boot
-- VFS receives client requests (open, read, write, ...), resolves path to mount point, forwards to backend
-- For now: single mount point (root → TFS). Multi-mount comes later.
-
-**What changes:**
-- NEW: `oskit/servers/vfs.lsysl` — mount table, path resolution, request forwarding
-- `oskit/servers/tfs.lsysl` — register as "tfs" instead of "fs"
-- `oskit/apps/init.lsysl` — start VFS server, VFS mounts root on TFS
-- `oskit/fs/client.lsysl` — talks to "fs" port (now VFS, transparent)
-
-**What works when done:** All file operations go through VFS → TFS. Same behavior, but VFS is in the path. Foundation for mount points and multiple filesystems.
-
----
-
-## Phase 0d: Open file state in VFS
-**Problem:** There's no concept of an open file with persistent state. Every `fs_read(ino, buf, offset, len)` passes the inode and offset explicitly. Callers track their own position. There are no per-process open file entries.
-
-**Goal:** VFS tracks open files with per-open-instance state (position, flags). Returns an opaque "file ID" (proto-handle) instead of a raw inode.
-
-**Design:**
-- VFS maintains a global open file table: `[{ino, position, flags, mount_idx, refcount}]`
-- `fs_open(path)` → VFS resolves path, creates open file entry, returns file ID
-- `fs_read(fid, buf, len)` → VFS looks up fid, reads at current position, advances position
-- `fs_write(fid, buf, len)` → same
-- `fs_close(fid)` → decrements refcount, frees entry when zero
-- `fs_seek(fid, offset, whence)` → adjusts position
-
-**What changes:**
-- `oskit/servers/vfs.lsysl` — open file table, position tracking
-- `oskit/fs/client.lsysl` — new API: `fs_read(fid, buf, len)` (no more offset/ino)
-- `oskit/apps/nsh.lsysl` — use new API (simpler: no offset tracking)
-- `oskit/bin/cat.lsysl` — use new API
-
-**What works when done:** Files have position state. `read` advances automatically. Multiple opens of the same file have independent positions. This is the foundation for handles.
-
----
-
-## Phase 1: Per-process handle table
-
-**Goal:** Every process has a handle table. Handles are the interface to all resources.
-
-**Design:**
-- VFS maintains per-process handle tables (indexed by PID)
-- Handle = index into per-process table (0, 1, 2, ...)
-- Each entry maps to an open file table entry (from Phase 0c)
-- Handle 0 = stdin, 1 = stdout, 2 = stderr (convention)
-- PM notifies VFS on process creation/exit so VFS can manage tables
-- `dup(handle)` → new handle pointing to same open file entry
-
-**New API (replaces fs_* functions):**
-- `open(path, flags) → handle`
-- `read(handle, buf, len) → bytes_read`
-- `write(handle, buf, len) → bytes_written`
-- `close(handle)`
-- `seek(handle, offset, whence) → position`
-- `dup(handle) → new_handle`
-
-**What changes:**
-- `oskit/servers/vfs.lsysl` — per-process handle tables, handle allocation
-- `oskit/servers/pm.lsysl` — notify VFS on process create/exit
-- `oskit/fs/client.lsysl` — handle-based API
-- `oskit/ulib/ulib.lsysl` — handle-based API for external programs
-- nsh, cat, echo, etc. — use handle-based I/O
-
-**What works when done:** Programs use `open/read/write/close` with handles. VFS routes to the right backend. Per-process isolation of handles.
-
----
-
-## Phase 2: spawn() with argv and handles
-
-**Goal:** Replace `create_process` + flat args string with proper `spawn(path, argv, handles)`.
-
-**Design:**
-- PM receives spawn request via IPC
-- PM loads binary (delegates to loader)
-- PM places argc/argv on process stack in POSIX layout:
-  ```
-  [strings]  "echo\0" "hello\0"
-  [NULL]
-  [argv[1]]  → "hello\0"
-  [argv[0]]  → "echo\0"
-  [argc = 2]
-  ← SP
-  ```
-- PM tells VFS to create child's handle table, copying specified handles from parent
-- No implicit handle inheritance — parent explicitly lists which handles to pass
-- Child's handle 0/1/2 are whatever the parent specifies
-
-**API (PM server IPC):**
-- `PM_SPAWN(path, argc, argv_data, handle_map)` → pid
-- handle_map: array of `(parent_handle, child_slot)` pairs
-
-**What changes:**
-- `oskit/servers/pm.lsysl` — PM_SPAWN handler, argv stack setup
-- `oskit/apps/nsh.lsysl` — build argv array, specify handle map
-- `oskit/ulib/ulib.lsysl` — remove PROG_ARGS_ADDR; argc/argv from stack
-- `oskit/bin/*.lsysl` — update all programs to use argc/argv
-- `oskit/kernel/kernel.lsysl` — remove create_process (PM owns this now)
-
-**What works when done:**
-- `echo hello world` → child gets `argc=3, argv=["echo","hello","world"]`
-- Child inherits only the handles parent explicitly passes
-- Programs have proper C-style entry point
-
----
-
-## Phase 3: connect() and scheme routing
-
-**Goal:** `connect("vfs:/etc/passwd")` returns a handle. Extensible naming.
-
-**Design:**
-- VFS maintains a scheme registry: `{ "vfs" → fs_port, "tty" → tty_port }`
-- Servers register schemes at startup
-- `connect(name)` parses scheme, looks up port, sends OPEN to that server, returns handle
-- Paths without scheme default to "vfs:" (so `connect("/etc/passwd")` works)
-
-**What changes:**
-- `oskit/servers/vfs.lsysl` — scheme registry, connect routing
-- `oskit/fs/client.lsysl` — `fs_connect()` function
-
-**What works when done:**
-- `connect("/etc/passwd")` → handle to file
-- `connect("vfs:/etc/passwd")` → same, explicit scheme
-- New servers can register new schemes without kernel changes
-
----
-
-## Phase 3a: TTY as a VFS scheme handler
-
-**Goal:** `connect("tty:0")` returns a handle backed by the terminal. Read returns keyboard input, write sends to display.
-
-**Design:**
-- TTY server gains READ and WRITE IPC commands (currently only has PUTS and per-char I/O)
-- VFS registers "tty" scheme pointing to TTY server's port
-- VFS creates open file table entries of type "tty" (no TFS inode, no position)
-- Read/write on TTY handles forward to TTY server instead of TFS
-
-**What changes:**
-- `oskit/drivers/tty/tty.lsysl` — add TTY_CMD_READ (line-buffered), TTY_CMD_WRITE handlers
-- `oskit/servers/vfs.lsysl` — register "tty" scheme, route TTY-backed handles to TTY server
-- VFS open file table: add `oft_type` field (0=file, 1=tty) to distinguish backends
-
-**What works when done:**
-- `connect("tty:0")` → handle to terminal
-- `read(handle, buf, len)` on TTY handle → reads keyboard input
-- `write(handle, buf, len)` on TTY handle → writes to display
-
----
-
-## Phase 3b: Handle inheritance in spawn
-
-**Goal:** Parent process passes handles to child via PM_SPAWN.
-
-**Design:**
-- PM_SPAWN gains a handle map: array of (parent_handle, child_slot) pairs
-- PM tells VFS to set up child's handle table by copying specified entries from parent
-- VFS gains a `VFS_CMD_INHERIT` command: given parent PID, child PID, and handle map, copies handles
-- No implicit inheritance — parent explicitly lists which handles to pass
-
-**What changes:**
-- `oskit/servers/pm.lsysl` — PM_SPAWN accepts handle map, sends VFS_CMD_INHERIT
-- `oskit/servers/vfs.lsysl` — VFS_CMD_INHERIT handler copies handles between processes
-- `oskit/servers/pm.lsysl` client — pm_spawn gains handle map parameter
-
-**What works when done:**
-- Parent opens a file, spawns child with that handle → child can read/write it
-- Foundation for stdin/stdout/stderr setup
-
----
-
-## Phase 3c: Default stdin/stdout/stderr
-
-**Goal:** Every external program gets handles 0/1/2 (stdin/stdout/stderr) pointing to the terminal by default.
-
-**Design:**
-- Before spawning an external program, nsh opens `connect("tty:0")` three times to get TTY handles
-- nsh passes these as handles 0, 1, 2 in the spawn handle map
-- External programs use `read(0, ...)` for input and `write(1, ...)` for output
-- ulib replaces `puts()` with `write(1, ...)` and adds `getline()` via `read(0, ...)`
-
-**What changes:**
-- `oskit/apps/nsh.lsysl` — open TTY handles, pass in spawn handle map
-- `oskit/ulib/ulib.lsysl` — read/write use handle 0/1 instead of direct TTY IPC
-- `oskit/bin/*.lsysl` — use stdin/stdout handles (cat reads file handle, writes stdout; echo writes stdout)
-- NEW: `oskit/bin/grep.lsysl` — filter lines by substring match
-- NEW: `oskit/bin/wc.lsysl` — count lines/words/bytes
-
-**What works when done:**
-- `cat /etc/passwd` reads file, writes to stdout (TTY)
-- `echo hello` writes to stdout
-- `grep root /etc/passwd` filters lines containing "root"
-- `wc /etc/passwd` prints line/word/byte counts
-- All programs work identically whether stdout is TTY or (later) pipe
-
----
-
-## Phase 4: Pipes
+## ~~Phase 6: Pipes~~ DONE
 
 **Goal:** `create_pipe()` returns two handles. Shell can do `cmd1 | cmd2`.
 
 **Design:**
 - Pipe buffers integrated into VFS (not a separate server)
-- `create_pipe()` → (read_handle, write_handle) via VFS IPC
+- `create_pipe()` -> (read_handle, write_handle) via VFS IPC
 - Read blocks when empty, returns 0 (EOF) when write end closed
 - Write blocks when full, fails when read end closed
-- Shell: `cmd1 | cmd2` → create pipe, spawn cmd1 with stdout=pipe_write, spawn cmd2 with stdin=pipe_read
-
-**What changes:**
-- `oskit/servers/vfs.lsysl` — pipe buffer table, create_pipe, pipe-aware read/write
-- `oskit/apps/nsh.lsysl` — pipe syntax parsing (`|`), create pipe, spawn with redirected handles
-- `oskit/fs/client.lsysl` — `fs_create_pipe()` function
+- Shell: `cmd1 | cmd2` -> create pipe, spawn cmd1 with stdout=pipe_write, spawn cmd2 with stdin=pipe_read
 
 **What works when done:**
 - `echo hello | cat` works
@@ -358,7 +286,7 @@ include = ["disk", "keyboard"]
 
 ---
 
-## Phase 5: Redirects and job control
+## ~~Phase 7: Redirects and job control~~ DONE
 
 **Goal:** Shell supports `>`, `<`, `>>`, `&`, `jobs`, `fg`, `bg`.
 
@@ -368,9 +296,6 @@ include = ["disk", "keyboard"]
 - Job table: nsh tracks background PIDs, prints status on completion
 - `fg <job>` brings job to foreground (waitpid on it)
 
-**What changes:**
-- `oskit/apps/nsh.lsysl` — redirect parsing, job table, fg/bg/jobs commands
-
 **What works when done:**
 - `echo hello > /tmp/out` writes to file
 - `cat < /tmp/out` reads from file
@@ -378,7 +303,7 @@ include = ["disk", "keyboard"]
 
 ---
 
-## Phase 6: Signals
+## ~~Phase 8: Signals~~ DONE
 
 **Goal:** Processes can receive and handle async events.
 
@@ -388,15 +313,10 @@ include = ["disk", "keyboard"]
 - Processes can register handlers via PM IPC
 - SIGCHLD sent to parent when child exits
 - SIGKILL is unblockable (PM terminates directly)
-- Ctrl-C → TTY sends SIGINT to foreground process group
+- Ctrl-C -> TTY sends SIGINT to foreground process group
 
 **SLIX signal numbers (not POSIX):**
 - SIG_TERM = 1, SIG_KILL = 2, SIG_CHILD = 3, SIG_INT = 4, SIG_PIPE = 5
-
-**What changes:**
-- `oskit/servers/pm.lsysl` — signal delivery, handler registration
-- `oskit/drivers/tty/tty.lsysl` — Ctrl-C sends SIG_INT via PM
-- `oskit/ulib/ulib.lsysl` — signal handler registration API
 
 **What works when done:**
 - Ctrl-C kills foreground process
@@ -405,42 +325,51 @@ include = ["disk", "keyboard"]
 
 ---
 
-## Phase 7: POSIX compatibility layer
+## Phase 12: POSIX compatibility layer
 
 **Goal:** Enough POSIX that standard C programs can be compiled and run.
 
 **Design:**
 - `libposix` maps POSIX calls to SLIX handles
 - fd = handle (same integer)
-- `open()` → `connect("vfs:" + path)`
-- `read(fd)` → `handle_read(fd)`
-- `posix_spawn()` → `pm_spawn()` (nearly 1:1)
-- `fork()` → COW spawn (optional, expensive)
-- Signal numbers mapped: SIGTERM→SIG_TERM, etc.
-
-**What changes:**
-- NEW: `posix/libposix.lsysl`
+- `open()` -> `connect("vfs:" + path)`
+- `read(fd)` -> `handle_read(fd)`
+- `posix_spawn()` -> `pm_spawn()` (nearly 1:1)
+- `fork()` -> COW spawn (optional, expensive)
+- Signal numbers mapped: SIGTERM->SIG_TERM, etc.
 
 ---
 
-## Phase 8: x86_64 native
+## Phase 13: Networking
 
-**Goal:** SLIX boots on real x86_64 hardware.
+**Goal:** SLIX can access the internet — TCP/IP stack, DNS resolution, basic network utilities.
 
-**Dependencies:** LLVM backend handles oskit code (inline asm, pointers, structs, modules).
+**Architecture (Minix 3 style):**
+- **INET server** — userspace TCP/IP stack (isolated process)
+- **Network driver** — virtio-net (QEMU) or e1000 as boot module
+- **Socket API** — IPC-based, exposed through VFS or dedicated INET port
+- Driver does DMA to/from NIC, passes frames to INET via IPC
+- INET handles ARP, IP, ICMP, UDP, TCP state machines
+- Applications talk to INET for socket operations
 
-**What to do:**
-- LLVM codegen for all oskit code
-- x86 device drivers (PCI, AHCI, VGA, PS/2, serial)
-- GRUB boot on real hardware
+**Layers:**
+1. NIC driver (virtio-net for QEMU, simplest) — handles interrupts, DMA, frame send/recv
+2. INET server — Ethernet framing, ARP, IPv4, ICMP (ping), UDP, TCP
+3. Socket interface — connect, send, recv, bind, listen, accept
+4. DNS resolver — UDP-based, `/etc/resolv.conf`
+5. User utilities — `ping`, `wget`/`fetch`, `nc` (netcat)
+
+**What works when done:**
+- `ping 8.8.8.8` sends ICMP echo and gets reply
+- `fetch http://example.com` downloads a web page
+- Programs can open TCP connections to internet hosts
 
 ---
 
 ## Not on this roadmap (future)
 
-- Networking (TCP/IP stack, socket server)
+- **SMP (multi-core)** — TRISC multi-core support is done on a separate branch. Kernel needs per-CPU run queues, IPI for cross-core scheduling, and atomic operations for shared data structures.
 - Shared memory / mmap
 - Dynamic linking / shared libraries
-- SMP (multi-core)
 - GUI / window system on x86
-- Package manager
+- Stateful server crash recovery (checkpointing, state reconstruction)

@@ -10,11 +10,13 @@ case class TImportDecl(path: String) extends TDecl
 case class TExternFuncDecl(name: String, params: List[SyslType], returnType: SyslType) extends TDecl
 case class TExternVarDecl(name: String, typ: SyslType) extends TDecl
 case class TFunDecl(name: String, params: List[TParam], returnType: SyslType, body: TFunBody, isPrivate: Boolean = false, attributes: List[Attribute] = Nil, isDef: Boolean = false) extends TDecl
-case class TVarDecl(name: String, typ: SyslType, init: TExpr, isPrivate: Boolean = false) extends TDecl
-case class TStructDecl(name: String, fields: List[(String, SyslType)]) extends TDecl
+case class TVarDecl(name: String, typ: SyslType, init: TExpr, isPrivate: Boolean = false, isVolatile: Boolean = false) extends TDecl
+case class TStructDecl(name: String, fields: List[(String, SyslType)], volatileFields: Set[Int] = Set.empty) extends TDecl
 case class TEnumDecl(name: String, members: List[(String, Long)]) extends TDecl
 case class TDataEnumDecl(name: String, enumType: SyslType.EnumType) extends TDecl
 case class TTypeAliasDecl(name: String, target: SyslType) extends TDecl
+// Compile-time constant — no storage, no symbol, fully folded at use sites by the analyzer.
+case class TConstDecl(name: String, typ: SyslType) extends TDecl
 case class TInterfaceDecl(name: String, ifaceType: SyslType.InterfaceType) extends TDecl
 
 case class TParam(name: String, typ: SyslType, default: Option[TExpr] = None)
@@ -26,7 +28,7 @@ case class TBlockBody(stmts: List[TStmt]) extends TFunBody
 
 // Statements
 trait TStmt
-case class TVarStmt(name: String, typ: SyslType, init: TExpr) extends TStmt
+case class TVarStmt(name: String, typ: SyslType, init: TExpr, isVolatile: Boolean = false) extends TStmt
 case class TDestructureStmt(names: List[String], types: List[SyslType], init: TExpr) extends TStmt
 case class TDestructureAssignStmt(names: List[String], types: List[SyslType], init: TExpr) extends TStmt
 case class TAssignStmt(target: String, value: TExpr) extends TStmt
@@ -43,6 +45,11 @@ case object TBreakStmt extends TStmt
 case object TContinueStmt extends TStmt
 case class TDeferStmt(body: TStmt) extends TStmt
 case class TAsmStmt(code: String) extends TStmt
+// Sequence of statements executed in order — used to splice multiple stmts into a single slot
+// (e.g. rewriting `return x` into `__result__ = x; <ensure checks>; return __result__`).
+case class TMultiStmt(stmts: List[TStmt]) extends TStmt
+// A contract runtime check. Evaluates expr; traps with the given message if it is false.
+case class TContractCheck(kind: String, expr: TExpr, message: String) extends TStmt
 case class TAsmExpr(code: String, typ: SyslType) extends TExpr
 case class TExprStmt(expr: TExpr) extends TStmt
 
@@ -106,7 +113,7 @@ case class TStringFromSlice(slice: TExpr, typ: SyslType) extends TExpr
 case class TStr(expr: TExpr) extends TExpr { def typ: SyslType = SyslType.StringType }
 case class FmtSpec(verb: Char, width: Int = 0, zeroPad: Boolean = false, leftAlign: Boolean = false, showSign: Boolean = false, upperCase: Boolean = false)
 case class TFmtStr(expr: TExpr, spec: FmtSpec) extends TExpr { def typ: SyslType = SyslType.StringType }
-case class TClosure(params: List[TParam], returnType: SyslType, body: TFunBody, captures: List[(String, SyslType)]) extends TExpr {
+case class TClosure(params: List[TParam], returnType: SyslType, body: TFunBody, captures: List[(String, SyslType)], escapes: Boolean = true) extends TExpr {
   def typ: SyslType = SyslType.FuncType(params.map(_.typ), returnType)
 }
 case class TInterfaceBox(expr: TExpr, iface: SyslType.InterfaceType) extends TExpr {
@@ -115,3 +122,8 @@ case class TInterfaceBox(expr: TExpr, iface: SyslType.InterfaceType) extends TEx
 case class TInterfaceDispatch(ifaceVal: TExpr, methodIndex: Int, args: List[TExpr], retType: SyslType) extends TExpr {
   def typ: SyslType = retType
 }
+// Compiler intrinsic call (wrapping_add, saturating_add, etc.). Polymorphic per integer width.
+case class TIntrinsicCall(name: String, args: List[TExpr], typ: SyslType) extends TExpr
+// Runtime range check for `within` constrained types. Evaluates `expr`, traps if out of range,
+// returns the value typed as `typ` (typically the NamedType). `aliasName` is used for error text.
+case class TRangeCheck(expr: TExpr, range: TypeRange, aliasName: String, typ: SyslType) extends TExpr

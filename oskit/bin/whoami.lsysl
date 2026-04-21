@@ -1,0 +1,13 @@
+whoami — print current user ID
+==============================
+
+Prints the UID of the current process.
+
+    module oskit.bin.whoami
+
+    import oskit.ulib.{puts, putint, exit, getuid}
+
+    main(argv: []string)
+        putint(getuid())
+        puts("\n")
+        exit()

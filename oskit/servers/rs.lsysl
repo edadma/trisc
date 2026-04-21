@@ -1,9 +1,19 @@
-OSKit RS — Restart Server
-==========================
+OSKit RS — Restart Server (userspace)
+======================================
 
-Minix 3-style service manager. Starts system servers in
-dependency order, waits for each to signal ready before
-starting the next. No sleep-based timing — pure handshake.
+Minix 3-style service manager. Runs as the first userspace
+process — the kernel loads RS from a boot module, then RS
+loads all other servers and init.
+
+RS reads its configuration from an info page at 0xBF000
+written by the kernel before RS starts:
+  +0:  RS TID (unused — RS sets its own)
+  +8:  ramdisk base physical address (i64)
+  +16: ramdisk size (i64)
+  +24: boot info header copy (SLIX magic + module entries)
+
+Boot module data lives in physical memory. RS uses
+svc_phys_read to copy it into its own address space.
 
 Boot order:
 1. Disk server (no dependencies)
@@ -11,6 +21,7 @@ Boot order:
 3. TTY server (no dependencies, but after disk)
 4. PM server (no dependencies)
 5. VFS server (depends on TFS)
+6. Init (depends on VFS)
 
 Each server calls `rs_ready()` after initialization to notify
 the RS thread. RS blocks until the notification arrives, then
@@ -18,19 +29,154 @@ starts the next server.
 
     module oskit.servers
 
-    import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp}
-    import oskit.services.{thread_id, notify_send_to, notify_read_self, rs_set_tid}
-    import oskit.ipc.{ipc_recv_notify, port_create}
+    import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_phys_read, svc_port_transfer, svc_proc_main_tid, svc_set_priv, svc_set_ipc_mask}
+    import oskit.ipc.{ipc_recv_notify, port_create, port_lookup}
+    import oskit.hal.memset
+    import oskit.arch.{SRV_USP, SRV_SSP}
 
-Stack slot counter. Slot 0 is init (created by kernel_main).
-Servers start at slot 1.
+Server tracking. PIDs and MMIO page grants for each server
+in boot order (0=disk, 1=tfs, 2=tty, 3=pm, 4=vfs, 5=init).
+Used by crash recovery to restart a dead server.
 
-    var rs_next_slot = 1
+    val RS_TOTAL_SERVERS = 7
+    var rs_server_pids: [7]int
+    var rs_server_io_page: [7]int
+    var rs_server_ports: [7]int
 
-    rs_alloc_slot() -> int
-        val s = rs_next_slot
-        rs_next_slot += 1
-        s
+Syscall privilege masks. Each server gets a bitmask (lo=bits 0-63,
+hi=bits 64-95) specifying which syscalls it may call. The kernel
+checks this before dispatching slow-path syscalls.
+
+Common bits (lo): sleep(0), putc(1), yield(2), exit(3), join(4),
+  thread_id(5), uptime(6), tls_set(21), tls_get(22),
+  notify_send(23), notify_wait(24), notify_read(25),
+  event_wait(26), event_set(27), event_clear(28),
+  pimutex_lock(29), pimutex_unlock(30),
+  port_create(31), ipc_send(32), ipc_recv(33), ipc_reply(34),
+  port_close(35), port_register(36), port_lookup(37),
+  ipc_send_timed(38), ipc_recv_notify(39), waitpid(40),
+  getpid(41), thread_pid(42), thread_name_len(43), getuid(61)
+
+    val PRIV_COMMON_LO: i64 = i64(0x7F) | (i64(7) << 21) | (i64(0xFFFFFFFF) << 24) | (i64(1) << 61)
+
+Common bits (hi): ipc_last_msg_len(65), grant_create(71), grant_revoke(72)
+
+    val PRIV_COMMON_HI: i64 = i64(0x182)
+
+PM extra bits (lo): vm_create_pt(44), create_proc_susp(45),
+  resume_proc(46), reap_proc(47), kill_proc(48), register_pm(49),
+  set_thread_ptbr(50), vm_set_ptbr(51), get_thread_pid(52),
+  get_thread_ptbr(53), vm_copy_to(54), vm_copy_from(55),
+  proc_state(56), proc_exit_code(57), proc_main_tid(58),
+  proc_parent_tid(59), proc_set_parent_tid(60), setuid(62)
+
+    val PRIV_PM_EXTRA_LO: i64 = i64(0x5FFFF00000000000)
+
+TTY extra bits: kbhit(11), getkey(12), kb_set_notify(64)
+
+    val PRIV_TTY_EXTRA_LO: i64 = i64(1) << 11 | i64(1) << 12
+    val PRIV_TTY_EXTRA_HI: i64 = i64(1)
+
+Disk extra bits: vm_v2p(66) for DMA
+
+    val PRIV_DISK_EXTRA_HI: i64 = i64(1) << 2
+
+Per-server privilege assignment. Called after each server is
+created but before it is resumed.
+
+    rs_set_server_priv(pid: int, idx: int)
+        var lo: i64 = PRIV_COMMON_LO
+        var hi: i64 = i64(0x182)                // PRIV_COMMON_HI
+        // IPC mask set to 0xFF during boot (all allowed).
+        // Tightened after all servers are up via rs_set_ipc_masks().
+        var ipc = 0xFF
+        if idx == 0
+            // disk: needs vm_v2p(66) for DMA
+            hi = hi | i64(4)
+        else if idx == 1
+            // tfs: needs grant_copy(73), grant_map(74), grant_unmap(75)
+            hi = hi | i64(0xE00)
+        else if idx == 2
+            // tty: needs kbhit(11), getkey(12), kb_set_notify(64)
+            lo = lo | i64(0x1800)
+            hi = hi | i64(1)
+        else if idx == 3
+            // pm: needs process management syscalls (44-60, 62)
+            lo = lo | (i64(0x5FFFF) << 44)
+        else if idx == 4
+            // vfs: needs grant_copy(73), grant_map(74), grant_unmap(75)
+            hi = hi | i64(0xE00)
+        svc_set_priv(pid, lo, hi, ipc)
+
+Per-server IPC send mask. Single source of truth — consulted
+both at boot (rs_set_ipc_masks) and after a restart
+(rs_set_ipc_mask_for). A mask of 0 means the server is a pure
+receiver. Servers not listed fall through to 0.
+
+    rs_ipc_mask_for_idx(idx: int) -> int
+        val disk_port = rs_server_ports[0]
+        val tfs_port = rs_server_ports[1]
+        val tty_port = rs_server_ports[2]
+        val pm_port = rs_server_ports[3]
+        val vfs_port = rs_server_ports[4]
+        // idx 0 (disk) and 5 (ds) are pure receivers → 0.
+        if idx == 1
+            // tfs: sends to disk
+            return 1 << disk_port
+        else if idx == 2
+            // tty: sends to pm (Ctrl-C → PM_CMD_SIGINT)
+            return 1 << pm_port
+        else if idx == 3
+            // pm: sends to vfs
+            return 1 << vfs_port
+        else if idx == 4
+            // vfs: sends to tfs and tty
+            return (1 << tfs_port) | (1 << tty_port)
+        else if idx == 6
+            // init: sends to pm, vfs
+            return (1 << pm_port) | (1 << vfs_port)
+        return 0
+
+Tighten IPC send masks after all servers are booted and port
+IDs are known.
+
+    rs_set_ipc_masks()
+        var i = 0
+        while i < RS_TOTAL_SERVERS
+            svc_set_ipc_mask(rs_server_pids[i], rs_ipc_mask_for_idx(i))
+            i += 1
+
+Set IPC mask for a single server by index. Used after restart
+to re-tighten the mask (rs_set_server_priv sets 0xFF default).
+
+    rs_set_ipc_mask_for(idx: int)
+        svc_set_ipc_mask(rs_server_pids[idx], rs_ipc_mask_for_idx(idx))
+
+Ramdisk info, read from info page at startup.
+
+    var rs_ramdisk_base = 0
+    var rs_ramdisk_size = 0
+
+Boot info, copied from info page at startup.
+Max 256 bytes covers header + plenty of module entries.
+
+    var rs_boot_info: [256]byte
+    var rs_boot_info_len = 0
+
+Module loading buffer (128 KB). Boot module TRB/ELF data
+is copied here via svc_phys_read before parsing.
+
+    var rs_mod_buf: [131072]byte
+
+Boot message helpers. putc goes straight to MMIO, no TTY needed.
+
+    rs_print(s: string)
+        val p = *byte(s)
+        val n = len(s)
+        var i = 0
+        while i < n
+            putc(p[i])
+            i += 1
 
 Wait for a server to signal ready. RS creates a dummy port
 so it can use ipc_recv_notify to block for notifications.
@@ -42,60 +188,406 @@ so it can use ipc_recv_notify to block for notifications.
             rs_port = port_create()
         // Block until notification arrives (result == -2)
         var buf: [1]byte
-        val result = ipc_recv_notify(rs_port, &buf[0], 1)
+        val result = ipc_recv_notify(rs_port, buf, 1)
         // result == -2 means notification received
         notify_read_self()
 
-Init TID, stored before RS starts so RS can notify init
-when all servers are up.
+Hardcoded boot order. Each entry has a name and length.
 
-    var rs_init_tid = -1
+    val RS_NUM_SERVERS = 6
 
-    rs_set_init_tid(tid: int)
-        rs_init_tid = tid
+    var rs_boot_names: [56]byte   // 7 entries * 8 bytes each
+    var rs_boot_nlen: [7]int
 
-Server entry points, set by init before starting RS.
-Stored as i64 function pointers to avoid circular imports.
+    rs_init_boot_order()
+        // disk
+        rs_boot_names[0] = 'd'; rs_boot_names[1] = 'i'; rs_boot_names[2] = 's'; rs_boot_names[3] = 'k'; rs_boot_names[4] = 0
+        rs_boot_nlen[0] = 4
+        // tfs
+        rs_boot_names[8] = 't'; rs_boot_names[9] = 'f'; rs_boot_names[10] = 's'; rs_boot_names[11] = 0
+        rs_boot_nlen[1] = 3
+        // tty
+        rs_boot_names[16] = 't'; rs_boot_names[17] = 't'; rs_boot_names[18] = 'y'; rs_boot_names[19] = 0
+        rs_boot_nlen[2] = 3
+        // pm
+        rs_boot_names[24] = 'p'; rs_boot_names[25] = 'm'; rs_boot_names[26] = 0
+        rs_boot_nlen[3] = 2
+        // vfs
+        rs_boot_names[32] = 'v'; rs_boot_names[33] = 'f'; rs_boot_names[34] = 's'; rs_boot_names[35] = 0
+        rs_boot_nlen[4] = 3
+        // ds
+        rs_boot_names[40] = 'd'; rs_boot_names[41] = 's'; rs_boot_names[42] = 0
+        rs_boot_nlen[5] = 2
+        // init
+        rs_boot_names[48] = 'i'; rs_boot_names[49] = 'n'; rs_boot_names[50] = 'i'; rs_boot_names[51] = 't'; rs_boot_names[52] = 0
+        rs_boot_nlen[6] = 4
 
-    val RS_MAX_SERVERS = 8
-    var rs_entries: [8]i64
-    var rs_names: [64]byte
-    var rs_name_len: [8]int
-    var rs_server_count = 0
+Boot info parsing. RS reads a copy of the boot info header
+from its info page at 0xBF000+24.
 
-Register a server to be started by RS. Called by init before
-creating the RS thread.
+    rs_read_u32_le(p: *byte) -> i64
+        i64(p[0] & 0xff) | (i64(p[1] & 0xff) << 8) | (i64(p[2] & 0xff) << 16) | (i64(p[3] & 0xff) << 24)
 
-    rs_add_server(entry: i64, name: *byte, nlen: int)
-        if rs_server_count >= RS_MAX_SERVERS
-            return
-        val idx = rs_server_count
-        rs_entries[idx] = entry
-        rs_name_len[idx] = nlen
-        val base = idx * 8
+    rs_read_i64_le(p: *byte) -> i64
+        rs_read_u32_le(p) | (rs_read_u32_le(p + 4) << 32)
+
+Check if boot info header is valid (magic = "SLIX").
+
+    rs_boot_info_valid() -> bool
+        if rs_boot_info[0] != byte('S')
+            return false
+        if rs_boot_info[1] != byte('L')
+            return false
+        if rs_boot_info[2] != byte('I')
+            return false
+        if rs_boot_info[3] != byte('X')
+            return false
+        true
+
+Get boot module count from boot info header.
+
+    rs_boot_module_count() -> int
+        val p = &rs_boot_info[4]
+        int(rs_read_u32_le(p))
+
+Find a boot module by name. Returns index or -1.
+
+    rs_find_boot_module(name: *byte, nlen: int) -> int
+        val count = rs_boot_module_count()
         var i = 0
-        while i < nlen
-            if i >= 8
-                break
-            rs_names[base + i] = name[i]
+        while i < count
+            val entry = &rs_boot_info[8 + i * 24]
+            // Compare name (first nlen bytes, NUL-padded)
+            var found = true
+            var j = 0
+            while j < nlen
+                if j >= 8
+                    break
+                if entry[j] != name[j]
+                    found = false
+                    break
+                j += 1
+            if found
+                // Check rest is NUL or end of name
+                if nlen < 8
+                    if entry[nlen] != 0
+                        found = false
+                if found
+                    return i
             i += 1
-        rs_server_count += 1
+        -1
 
-The RS main function. Starts all registered servers in order
-with synchronous handshake, then notifies init.
+Get a boot module's physical address and size.
+
+    rs_boot_module_addr(idx: int) -> i64
+        rs_read_i64_le(&rs_boot_info[8 + idx * 24 + 8])
+
+    rs_boot_module_size(idx: int) -> int
+        int(rs_read_i64_le(&rs_boot_info[8 + idx * 24 + 16]))
+
+Load a TRB v1 boot module into a process address space.
+Parses the TRB header from rs_mod_buf (already copied via
+svc_phys_read), copies PROGBITS segments into the target
+process via vm_copy_to, and zeroes NOBITS (BSS) segments.
+Returns entry point or -1 on error.
+
+    // Program USP/SSP imported from oskit.arch (target-specific)
+
+    rs_load_trb_module(buf: *byte, buflen: int, ptbr: u64) -> i64
+        if buflen < 12
+            return -1
+        if buf[0] != byte('T')
+            return -1
+        if buf[1] != byte('R')
+            return -1
+        if buf[2] != byte('B')
+            return -1
+        if buf[3] != byte(1)
+            return -1
+
+        val entry = rs_read_u32_le(buf + 4)
+        val nrec = int(rs_read_u32_le(buf + 8))
+        var pos = 12
+        var ri = 0
+        while ri < nrec
+            if pos + 12 > buflen
+                return -1
+            val hp = buf + pos
+            val org = u64(rs_read_u32_le(hp))
+            val kind = int(rs_read_u32_le(hp + 4))
+            val sz = int(rs_read_u32_le(hp + 8))
+            pos += 12
+            if kind == 0
+                // PROGBITS — copy from boot module to process address space
+                if pos + sz > buflen
+                    return -1
+                svc_vm_copy_to(ptbr, org, buf + pos, sz)
+                pos += sz
+            else if kind == 1
+                // NOBITS (BSS) — zero fill in process address space
+                rs_zero_fill_remote(ptbr, org, sz)
+            else
+                return -1
+            ri += 1
+        entry
+
+Load an ELF64 boot module into a process address space.
+Parses program headers from rs_mod_buf, copies LOAD segments
+into the target process via vm_copy_to. Returns entry point
+or -1 on error.
+
+    rs_load_elf64_module(buf: *byte, buflen: int, ptbr: u64) -> i64
+        if buflen < 64
+            return -1
+        // Check ELF magic
+        if buf[0] != 0x7F
+            return -1
+        if buf[1] != byte('E')
+            return -1
+        if buf[2] != byte('L')
+            return -1
+        if buf[3] != byte('F')
+            return -1
+
+        val entry = rs_read_i64_le(buf + 24)
+        val phoff = int(rs_read_i64_le(buf + 32))
+        val phentsize = int(rs_read_u32_le(buf + 54) & 0xFFFF)
+        val phnum = int(rs_read_u32_le(buf + 56) & 0xFFFF)
+
+        var i = 0
+        while i < phnum
+            val ph = buf + phoff + i * phentsize
+            val ptype = int(rs_read_u32_le(ph))
+            if ptype == 1
+                // PT_LOAD
+                val offset = int(rs_read_i64_le(ph + 8))
+                val vaddr = u64(rs_read_i64_le(ph + 16))
+                val filesz = int(rs_read_i64_le(ph + 32))
+                val memsz = int(rs_read_i64_le(ph + 40))
+                if offset + filesz > buflen
+                    return -1
+                if filesz > 0
+                    svc_vm_copy_to(ptbr, vaddr, buf + offset, filesz)
+                if memsz > filesz
+                    rs_zero_fill_remote(ptbr, vaddr + u64(filesz), memsz - filesz)
+            i += 1
+        entry
+
+Zero-fill a region in another process's address space.
+Uses a local zero buffer and vm_copy_to in chunks.
+
+    rs_zero_fill_remote(ptbr: u64, addr: u64, sz: int)
+        val CHUNK = 1024
+        var zero_buf: [1024]byte
+        memset(zero_buf, 0, CHUNK)
+        var remaining = sz
+        var dst = addr
+        while remaining > 0
+            var chunk = remaining
+            if chunk > CHUNK
+                chunk = CHUNK
+            svc_vm_copy_to(ptbr, dst, zero_buf, chunk)
+            remaining -= chunk
+            dst += u64(chunk)
+
+Start a server from a boot module: create server page table,
+copy module data via svc_phys_read, load TRB/ELF binary,
+create process, resume it.
+io_page = MMIO page to grant (e.g. 0x800 for ramdisk).
+Returns the PID on success, 0 on failure.
+
+    rs_start_from_module(mod_idx: int, name: *byte, nlen: int, io_page: int) -> int
+        val addr = rs_boot_module_addr(mod_idx)
+        val sz = rs_boot_module_size(mod_idx)
+
+        // Copy boot module data from physical memory into our buffer
+        if sz > 131072
+            return 0
+        svc_phys_read(u64(addr), &rs_mod_buf[0], sz)
+        val buf = &rs_mod_buf[0]
+
+        // Create server page table with MMIO grant
+        val ptbr = svc_vm_create_server_pt(io_page)
+        if ptbr == 0
+            return 0
+
+        // Detect format and load binary into process address space
+        var entry: i64 = -1
+        if buf[0] == 0x7F
+            if buf[1] == byte('E')
+                // ELF64 format (x86_64)
+                entry = rs_load_elf64_module(buf, sz, ptbr)
+        if entry < 0
+            // Try TRB format (TRISC)
+            entry = rs_load_trb_module(buf, sz, ptbr)
+        if entry < 0
+            return 0
+
+        // Create process suspended — no PTBR switch needed;
+        // create_process_suspended uses vm_copy_to for the stack frame
+        val sname = string(name, nlen)
+        val pid = svc_create_proc_susp(entry, SRV_USP, SRV_SSP, sname, ptbr)
+        if pid < 0
+            return 0
+
+        // Write RS info page at 0xBF000:
+        //   +0: RS TID (i64)
+        //   +8: ramdisk base (i64) — used by disk server
+        //  +16: ramdisk size (i64) — used by disk server
+        var info_buf: [24]byte
+        var ip: *i64 = *i64(info_buf)
+        ip[0] = i64(thread_id())
+        ip[1] = i64(rs_ramdisk_base)
+        ip[2] = i64(rs_ramdisk_size)
+        svc_vm_copy_to(ptbr, 0xBF000, info_buf, 24)
+
+        // Resume the process
+        svc_resume_proc(pid)
+        pid
+
+RS monitoring loop. Blocks waiting for notifications from PM
+about dead server processes. When a server dies, RS restarts
+it from its boot module.
+
+    rs_monitor()
+        while true
+            var buf: [1]byte
+            ipc_recv_notify(rs_port, buf, 1)
+            val dead_pid = notify_read_self()
+            if dead_pid > 0
+                rs_handle_crash(dead_pid)
+
+Handle a server crash. Find which server had this PID,
+restart it from the boot module, and update tracking.
+
+    rs_handle_crash(dead_pid: int)
+        // Find which server had this PID
+        var srv_idx = -1
+        var i = 0
+        while i < RS_TOTAL_SERVERS
+            if rs_server_pids[i] == dead_pid
+                srv_idx = i
+                break
+            i += 1
+        if srv_idx < 0
+            return
+
+        // Don't restart init (index 5)
+        if srv_idx == 5
+            return
+
+        val name = &rs_boot_names[srv_idx * 8]
+        val nlen = rs_boot_nlen[srv_idx]
+        rs_print("RS: restarting ")
+        rs_print(string(name, nlen))
+        rs_print("\n")
+
+        val mod_idx = rs_find_boot_module(name, nlen)
+        if mod_idx < 0
+            rs_print("RS: module not found\n")
+            return
+
+        val new_pid = rs_start_from_module(mod_idx, name, nlen, rs_server_io_page[srv_idx])
+        if new_pid <= 0
+            rs_print("RS: restart failed\n")
+            return
+
+        // Transfer the old port to the new server's thread so clients
+        // with cached port IDs keep working transparently. The server
+        // hasn't run yet (RS is higher priority), so when it calls
+        // port_create(), it will get this port back.
+        val old_port = rs_server_ports[srv_idx]
+        if old_port >= 0
+            val new_tid = svc_proc_main_tid(new_pid)
+            svc_port_transfer(old_port, new_tid)
+
+        // Set privilege mask (same restrictions as initial boot)
+        rs_set_server_priv(new_pid, srv_idx)
+
+        rs_server_pids[srv_idx] = new_pid
+        rs_wait_ready()
+
+        // Re-tighten IPC mask for the restarted server
+        rs_set_ipc_mask_for(srv_idx)
+        rs_print("RS: ")
+        rs_print(string(name, nlen))
+        rs_print(" restarted ok\n")
+
+The RS main function. Runs as the first userspace process.
+Reads config from info page at 0xBF000, then starts all
+servers from boot modules in order with synchronous handshake.
+After boot, RS stays alive in a monitoring loop.
+
+    val IO_PAGE_DEVICES = 0x800
 
     rs_main()
         rs_set_tid(thread_id())
 
+        // Read info page at 0xBF000
+        val info = *i64(0xBF000)
+        rs_ramdisk_base = int(info[1])
+        rs_ramdisk_size = int(info[2])
+
+        // Copy boot info header from info page (+24)
+        val bi_src = *byte(0xBF018)
+        // Read module count to determine copy size
+        val mod_count = int(rs_read_u32_le(bi_src + 4))
+        rs_boot_info_len = 8 + mod_count * 24
+        if rs_boot_info_len > 256
+            rs_boot_info_len = 256
+        var ci = 0
+        while ci < rs_boot_info_len
+            rs_boot_info[ci] = bi_src[ci]
+            ci += 1
+
+        rs_init_boot_order()
+
+        rs_print("SLIX v0.0.1\nStarting servers:\n")
+
+        if !rs_boot_info_valid()
+            rs_print("ERROR: invalid boot info\n")
+            return
+
+        // Start the 5 servers + init from boot modules
+        // Servers that need MMIO get IO_PAGE_DEVICES; others get 0
         var i = 0
-        while i < rs_server_count
-            val slot = rs_next_slot
-            rs_next_slot += 1
-            val name = string(&rs_names[i * 8], rs_name_len[i])
-            create_thread(rs_entries[i], kernel_stack_usp(slot), kernel_stack_ssp(slot), name)
+        while i <= RS_NUM_SERVERS
+            val name = &rs_boot_names[i * 8]
+            val nlen = rs_boot_nlen[i]
+            rs_print("  ")
+            rs_print(string(name, nlen))
+
+            val mod_idx = rs_find_boot_module(name, nlen)
+            if mod_idx < 0
+                rs_print(" MISSING\n")
+                return
+
+            // pm, vfs, init don't need MMIO
+            var io_page = IO_PAGE_DEVICES
+            if i >= 3
+                io_page = 0
+            val pid = rs_start_from_module(mod_idx, name, nlen, io_page)
+            if pid <= 0
+                rs_print(" FAILED\n")
+                return
+            rs_server_pids[i] = pid
+            rs_server_io_page[i] = io_page
+            rs_set_server_priv(pid, i)
+
+            rs_print(" [mod]")
             rs_wait_ready()
+            // Record server's port for transparent restart.
+            // VFS registers as "fs" (not "vfs") — use correct port name.
+            if i == 4
+                rs_server_ports[i] = port_lookup("fs")
+            else
+                rs_server_ports[i] = port_lookup(string(name, nlen))
+            rs_print(" ok\n")
             i += 1
 
-        // All servers ready — return to caller (init).
-        // Future: RS stays alive as a separate thread to monitor
-        // and restart crashed servers.
+        // Tighten IPC masks now that all port IDs are known
+        rs_set_ipc_masks()
+
+        // RS stays alive — monitoring loop
+        rs_print("RS monitoring\n")
+        rs_monitor()

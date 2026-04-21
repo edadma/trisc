@@ -1,0 +1,16 @@
+rmdir — remove an empty directory
+=================================
+
+Removes an empty directory at the given path.
+
+    module oskit.bin.rmdir
+
+    import oskit.ulib.{puts, exit, rmdir}
+
+    main(argv: []string)
+        if len(argv) < 2
+            puts("usage: rmdir <path>\n")
+            return
+        val result = rmdir(argv[1])
+        if result != 0
+            puts("error\n")

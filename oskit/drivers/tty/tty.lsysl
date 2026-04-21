@@ -8,16 +8,14 @@ to the active console's input buffer.
 
     module oskit.drivers.tty
 
-    import oskit.kernel.{notify_read}
-    import oskit.services.{thread_id, putc}
+    import oskit.services.{thread_id, putc, notify_read_self, rs_ready, kbhit, getkey, svc_kb_set_notify}
     import oskit.ipc.*
-    import oskit.drivers.kbd.*
-    import oskit.services.rs_ready
 
     val TTY_CMD_WRITE   = 1
     val TTY_CMD_READ    = 2
     val TTY_CMD_PUTS    = 3
     val TTY_CMD_SWITCH  = 4
+    // TTY_CMD_SET_FG removed — foreground tracking moved to PM
 
     val MAX_CONSOLES    = 4
     val TTY_INPUT_SIZE  = 64
@@ -43,6 +41,10 @@ and tracks pending read requests.
     var active_console = 0
     var tty_port = -1
     var tty_tid = -1
+
+PM port cache for Ctrl-C signal delivery.
+
+    var tty_pm_port = -2
 
 HID scancode to ASCII translation table (US layout, lowercase).
 Covers basic printable characters. Shift handling uses a
@@ -226,14 +228,51 @@ HID scancodes for special keys:
 - 0x4D = End           → ESC[F
 - 0x4C = Delete        → ESC[3~
 
+Handle Ctrl-C: tell PM to kill foreground process on this console.
+
+    val PM_CMD_SIGINT = 6
+
+    tty_handle_ctrl_c()
+        // Look up PM port (cached)
+        if tty_pm_port == -2
+            tty_pm_port = port_lookup("pm")
+        if tty_pm_port < 0
+            // Can't reach PM — push ^C to buffer as fallback
+            tty_console_push(active_console, byte(3))
+            return
+        // Send PM_CMD_SIGINT(console)
+        var msg: [2]byte
+        msg[0] = byte(PM_CMD_SIGINT)
+        msg[1] = byte(active_console)
+        var reply: [1]byte
+        ipc_send(tty_pm_port, msg, 2, reply, 1)
+
     tty_process_keyboard()
-        while kb_has_key() == 1
-            val evt = kb_read_key()
-            val sc = kb_scancode(evt)
-            val press = kb_is_press(evt)
-            val mods = kb_modifiers(evt)
+        while kbhit() == 1
+            val evt = getkey()
+            val sc = (evt >> 24) & 0xFF
+            val press = (evt >> 16) & 1
+            val mods = (evt >> 8) & 0xFF
+            // Raw ASCII from serial input (bit 17 set) — skip scancode translation
+            val raw = (evt >> 17) & 1
+            if raw == 1
+                if sc != 0
+                    // Ctrl-C (ASCII 3) or Ctrl-\ (ASCII 28) — signal foreground
+                    if sc == 3
+                        tty_handle_ctrl_c()
+                        continue
+                    if sc == 28
+                        tty_handle_ctrl_c()
+                        continue
+                    // Translate CR→LF and DEL→BS for terminal compatibility
+                    var rch = sc
+                    if rch == 13
+                        rch = 10
+                    else if rch == 127
+                        rch = 8
+                    tty_console_push(active_console, byte(rch))
             // Only process key presses, not releases
-            if press == 1
+            else if press == 1
                 // Arrow keys → ANSI escape sequences
                 if sc == 0x4F
                     tty_push_escape(67)       // Right → ESC[C
@@ -258,7 +297,19 @@ HID scancodes for special keys:
                         tty_console_push(active_console, byte(8))
                 else if sc < 128
                     var ch: byte = 0
-                    if (mods & 1) != 0
+                    if (mods & 2) != 0
+                        // Ctrl held — convert letter to control char
+                        ch = sc_to_ascii[sc]
+                        if ch >= byte('a')
+                            if ch <= byte('z')
+                                val ctrl = int(ch) - int('a') + 1
+                                if ctrl == 3
+                                    // Ctrl-C → signal
+                                    tty_handle_ctrl_c()
+                                    continue
+                                tty_console_push(active_console, byte(ctrl))
+                                continue
+                    else if (mods & 1) != 0
                         // Shift held
                         ch = sc_to_ascii_shift[sc]
                     else
@@ -279,7 +330,7 @@ all consoles.
                     var reply: [2]byte
                     reply[0] = 0
                     reply[1] = byte(ch)
-                    ipc_reply(reader, &reply[0], 2)
+                    ipc_reply(reader, reply, 2)
                     consoles[con].pending_reader = -1
             con += 1
 
@@ -289,7 +340,7 @@ Handle a WRITE command: output a character.
         putc(ch)
         var reply: [1]byte
         reply[0] = 0
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 Handle a PUTS command: output a string.
 Message format: [cmd, console, len, chars...]
@@ -312,7 +363,7 @@ server prints garbage (e.g. two stray characters before the next prompt).
             i += 1
         var reply: [1]byte
         reply[0] = 0
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 Handle a READ command: return next character from input buffer.
 If no character available, save as pending (will be replied
@@ -324,7 +375,7 @@ when keyboard input arrives).
             var reply: [2]byte
             reply[0] = 0
             reply[1] = byte(ch)
-            ipc_reply(sender, &reply[0], 2)
+            ipc_reply(sender, reply, 2)
         else
             // No input — save pending request.
             // The server will reply when keyboard input arrives
@@ -339,35 +390,22 @@ Handle a SWITCH command: change active console.
                 active_console = console
         var reply: [1]byte
         reply[0] = 0
-        ipc_reply(sender, &reply[0], 1)
+        ipc_reply(sender, reply, 1)
 
 The TTY server loop. Creates port, registers as "tty",
 initializes keyboard, then loops handling messages.
 
-    var tty_name: [4]byte
-
     tty_server()
-        // Set up name
-        tty_name[0] = 116  // t
-        tty_name[1] = 116  // t
-        tty_name[2] = 121  // y
-        tty_name[3] = 0
-
-        // Init tables and consoles
         tty_init_tables()
         var i = 0
         while i < MAX_CONSOLES
             tty_console_init(i)
             i += 1
 
-        // Init keyboard
-        keyboard_init()
-
-        // Create and register port
         tty_port = port_create()
-        port_register(tty_port, &tty_name[0])
+        port_register(tty_port, "tty")
         tty_tid = thread_id()
-        keyboard_set_notify(tty_tid)
+        svc_kb_set_notify(tty_tid)
 
         // Signal RS that TTY is ready
         rs_ready()
@@ -380,10 +418,10 @@ initializes keyboard, then loops handling messages.
             tty_deliver_pending()
 
 
-            val result = ipc_recv_notify(tty_port, &buf[0], 128)
+            val result = ipc_recv_notify(tty_port, buf, 128)
             if result == -2
                 // Notification: keyboard input arrived
-                notify_read(tty_tid)
+                notify_read_self()
                 tty_process_keyboard()
                 tty_deliver_pending()
             else if result >= 0
@@ -398,9 +436,9 @@ initializes keyboard, then loops handling messages.
                     else
                         var reply: [1]byte
                         reply[0] = -1
-                        ipc_reply(sender, &reply[0], 1)
+                        ipc_reply(sender, reply, 1)
                 else if cmd == TTY_CMD_PUTS
-                    tty_handle_puts(sender, console, &buf[0])
+                    tty_handle_puts(sender, console, buf)
                 else if cmd == TTY_CMD_READ
                     tty_handle_read(sender, console)
                 else if cmd == TTY_CMD_SWITCH
@@ -409,28 +447,31 @@ initializes keyboard, then loops handling messages.
                     else
                         var reply_sw: [1]byte
                         reply_sw[0] = -1
-                        ipc_reply(sender, &reply_sw[0], 1)
+                        ipc_reply(sender, reply_sw, 1)
                 else
                     // Unknown command — reply with error
                     var reply: [1]byte
                     reply[0] = -1
-                    ipc_reply(sender, &reply[0], 1)
+                    ipc_reply(sender, reply, 1)
+
+    tty_lookup_port() -> int
+        port_lookup("tty")
 
 Userspace wrappers. These build IPC messages and send
 them to the TTY port.
 
     tty_putc(ch: char)
-        val port = port_lookup(&tty_name[0])
+        val port = tty_lookup_port()
         if port >= 0
             var msg: [3]byte
             msg[0] = TTY_CMD_WRITE
             msg[1] = 0
             msg[2] = byte(ch)
             var reply: [1]byte
-            ipc_send(port, &msg[0], 3, &reply[0], 1)
+            ipc_send(port, msg, 3, reply, 1)
 
     tty_puts(s: *byte, len: int)
-        val port = port_lookup(&tty_name[0])
+        val port = tty_lookup_port()
         if port >= 0
             var msg: [128]byte
             msg[0] = byte(TTY_CMD_PUTS)
@@ -441,24 +482,24 @@ them to the TTY port.
                 msg[i + 3] = s[i]
                 i += 1
             var reply: [1]byte
-            ipc_send(port, &msg[0], len + 3, &reply[0], 1)
+            ipc_send(port, msg, len + 3, reply, 1)
 
     tty_getc() -> int
-        val port = port_lookup(&tty_name[0])
+        val port = tty_lookup_port()
         if port >= 0
             var msg: [2]byte
             msg[0] = TTY_CMD_READ
             msg[1] = 0
             var reply: [2]byte
-            ipc_send(port, &msg[0], 2, &reply[0], 2)
+            ipc_send(port, msg, 2, reply, 2)
             return int(reply[1])
         -1
 
     tty_switch(console: int)
-        val port = port_lookup(&tty_name[0])
+        val port = tty_lookup_port()
         if port >= 0
             var msg: [2]byte
             msg[0] = byte(TTY_CMD_SWITCH)
             msg[1] = byte(console)
             var reply: [1]byte
-            ipc_send(port, &msg[0], 2, &reply[0], 1)
+            ipc_send(port, msg, 2, reply, 1)

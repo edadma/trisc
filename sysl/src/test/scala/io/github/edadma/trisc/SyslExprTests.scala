@@ -525,4 +525,31 @@ class SyslExprTests extends SyslTestHelpers {
     an[Exception] should be thrownBy interp.run(typed)
   }
 
+  // ===== Large integer literal auto-promotion =====
+
+  "literal > 2^32 auto-promotes to i64" in {
+    eval("main() -> i64 = 0x1_0000_0000\n") shouldBe 0x100000000L
+  }
+
+  "u64 struct field with large literal" in {
+    eval(
+      """struct W
+        |    v: u64
+        |
+        |main() -> i64
+        |    w = W(0x1_0000_0000)
+        |    w.v
+        |""".stripMargin) shouldBe 0x100000000L
+  }
+
+  "u64 comparison with large literal" in {
+    eval(
+      """struct W
+        |    v: u64
+        |
+        |main() -> int
+        |    w = W(0x1_0000_0000)
+        |    if w.v == 0x1_0000_0000 then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
 }

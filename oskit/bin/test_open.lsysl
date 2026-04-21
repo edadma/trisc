@@ -1,0 +1,52 @@
+test_open — test file open from spawned process
+
+    module oskit.bin.test_open
+
+    import oskit.ulib.{putc, exit, port_lookup, getpid, ipc_send, msg_read_i32}
+
+    val FS_CMD_OPEN = 1
+
+    main(argv: []string)
+        // Test port_lookup for "fs"
+        val port = port_lookup("fs")
+        putc(byte('P'))
+        putc(byte('='))
+        if port >= 0
+            putc(byte('0') + port)
+        else
+            putc(byte('-'))
+            putc(byte('1'))
+        putc(byte('\n'))
+
+        // Test PID
+        val pid = getpid()
+        putc(byte('I'))
+        putc(byte('='))
+        putc(byte('0') + pid)
+        putc(byte('\n'))
+
+        // Test open — manual IPC to see raw reply
+        var plen = 0
+        var pp: *byte
+        if len(argv) > 1
+            val a = argv[1]
+            plen = len(a)
+            pp = *byte(a)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_OPEN)
+        for var i = 0; i < plen; i++
+            msg[i + 1] = pp[i]
+        var reply: [9]byte
+        val rc = ipc_send(port, msg, plen + 1, reply, 9)
+        putc(byte('R'))
+        putc(byte('='))
+        // Print all 9 reply bytes as hex
+        val hex = "0123456789ABCDEF"
+        val hp = *byte(hex)
+        for var i = 0; i < 9; i++
+            val b = int(reply[i]) & 0xFF
+            putc(hp[(b >> 4) & 0xF])
+            putc(hp[b & 0xF])
+            putc(byte(' '))
+        putc(byte('\n'))
+        exit()

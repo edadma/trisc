@@ -1,0 +1,107 @@
+head — output the first N lines
+=================================
+
+Usage: `head [-n N] [file]`
+- Default: 10 lines.
+- Reads from stdin if no file argument.
+
+    module oskit.bin.head
+
+    import oskit.ulib.{open, read, close, puts, exit, write_handle, STDIN, STDOUT}
+
+    val HEAD_BUF = 4096
+
+Parse a decimal integer from a string.
+
+    parse_int(s: string) -> int
+        val p = *byte(s)
+        val plen = len(s)
+        var v = 0
+        var i = 0
+        while i < plen
+            val ch = int(p[i])
+            if ch < '0'
+                break
+            if ch > '9'
+                break
+            v = v * 10 + (ch - '0')
+            i += 1
+        v
+
+    main(argv: []string)
+        val nargs = len(argv)
+        var count = 10
+        var file_idx = 1
+
+        // Parse -n N or -N
+        if nargs > 1
+            val a1 = argv[1]
+            val p = *byte(a1)
+            val alen = len(a1)
+            if alen >= 1
+                if p[0] == byte('-')
+                    if alen == 2
+                        if p[1] == byte('n')
+                            // "-n N" form
+                            if nargs > 2
+                                count = parse_int(argv[2])
+                                file_idx = 3
+                            else
+                                file_idx = 2
+                        else
+                            // "-N" single-char, probably digit
+                            count = parse_int(string(p + 1, alen - 1))
+                            file_idx = 2
+                    else
+                        // "-nN" or "-N..."
+                        if p[1] == byte('n')
+                            count = parse_int(string(p + 2, alen - 2))
+                        else
+                            count = parse_int(string(p + 1, alen - 1))
+                        file_idx = 2
+
+        if count <= 0
+            return
+
+        // Open file or stdin
+        var fid = -1
+        if file_idx < nargs
+            val path = argv[file_idx]
+            fid = open(path)
+            if fid < 0
+                puts(path)
+                puts(": not found\n")
+                return
+        else
+            fid = STDIN
+
+        // Read and output lines until count reached
+        var lines = 0
+        var buf: [4096]byte
+        var nr = read(fid, buf, HEAD_BUF)
+        while nr > 0
+            var i = 0
+            while i < nr
+                if lines >= count
+                    break
+                // Find end of line
+                var eol = i
+                while eol < nr
+                    if buf[eol] == byte('\n')
+                        break
+                    eol += 1
+                if eol < nr
+                    // Found newline — output line including newline
+                    write_handle(STDOUT, &buf[i], eol - i + 1)
+                    lines += 1
+                    i = eol + 1
+                else
+                    // Partial line at end of buffer — output what we have
+                    write_handle(STDOUT, &buf[i], eol - i)
+                    i = eol
+            if lines >= count
+                break
+            nr = read(fid, buf, HEAD_BUF)
+
+        if fid != STDIN
+            close(fid)

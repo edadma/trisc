@@ -36,7 +36,7 @@ class SyslSVMCodegen:
     var count = 0
     def scanStmts(stmts: List[TStmt]): Unit = stmts.foreach(scanStmt)
     def scanStmt(s: TStmt): Unit = s match
-      case TVarStmt(_, _, _) => count += 1
+      case TVarStmt(_, _, _, _) => count += 1
       case TWhileStmt(_, body) => scanStmts(body)
       case TForStmt(init, _, update, body) => scanStmt(init); scanStmt(update); scanStmts(body)
       case TDoWhileStmt(_, body) => scanStmts(body)
@@ -63,7 +63,7 @@ class SyslSVMCodegen:
       case v => emit(s"  push_i64 $v")
 
   private def isUnsigned(t: SyslType): Boolean = t.isInstanceOf[SyslType.UIntType]
-  private def isFloat(t: SyslType): Boolean = t == SyslType.DoubleType
+  private def isFloat(t: SyslType): Boolean = t.isFloat
 
   /** True if this type needs memory allocation (can't fit in a single 64-bit local slot). */
   private def needsMemAlloc(t: SyslType): Boolean = t match
@@ -94,6 +94,20 @@ class SyslSVMCodegen:
   private def constEval(e: TExpr): Option[Long] = e match
     case TIntLit(n, _) => Some(n)
     case TBoolLit(v, _) => Some(if v then 1 else 0)
+    case TVarRef(name, _) => globalConstants.get(name)
+    case TUnary("-", operand, _) => constEval(operand).map(-_)
+    case TUnary("~", operand, _) => constEval(operand).map(~_)
+    case TBinary(left, "+", right, _) => for l <- constEval(left); r <- constEval(right) yield l + r
+    case TBinary(left, "-", right, _) => for l <- constEval(left); r <- constEval(right) yield l - r
+    case TBinary(left, "*", right, _) => for l <- constEval(left); r <- constEval(right) yield l * r
+    case TBinary(left, "/", right, _) => for l <- constEval(left); r <- constEval(right) if r != 0 yield l / r
+    case TBinary(left, "%", right, _) => for l <- constEval(left); r <- constEval(right) if r != 0 yield l % r
+    case TBinary(left, "|", right, _) => for l <- constEval(left); r <- constEval(right) yield l | r
+    case TBinary(left, "&", right, _) => for l <- constEval(left); r <- constEval(right) yield l & r
+    case TBinary(left, "^", right, _) => for l <- constEval(left); r <- constEval(right) yield l ^ r
+    case TBinary(left, "<<", right, _) => for l <- constEval(left); r <- constEval(right) yield l << r.toInt
+    case TBinary(left, ">>", right, _) => for l <- constEval(left); r <- constEval(right) yield l >> r.toInt
+    case TCast(inner, _) => constEval(inner)
     case _ => None
 
   private def isZeroInit(typ: SyslType, init: TExpr): Boolean =
@@ -123,7 +137,7 @@ class SyslSVMCodegen:
     val bssGlobals = new mutable.ListBuffer[TDecl]
 
     for decl <- program.decls do decl match
-      case v @ TVarDecl(_, typ, init, _) =>
+      case v @ TVarDecl(_, typ, init, _, _) =>
         globals(v.name) = typ
         constEval(init).foreach(n => globalConstants(v.name) = n)
         if isZeroInit(typ, init) then bssGlobals += v
@@ -153,7 +167,7 @@ class SyslSVMCodegen:
     if dataGlobals.nonEmpty then
       emit("segment data")
       for decl <- dataGlobals do decl match
-        case TVarDecl(name, typ, init, _) =>
+        case TVarDecl(name, typ, init, _, _) =>
           emit(s"  align 8")
           emit(s"$name:")
           constEval(init) match
@@ -165,7 +179,7 @@ class SyslSVMCodegen:
     if bssGlobals.nonEmpty then
       emit("segment bss")
       for decl <- bssGlobals do decl match
-        case TVarDecl(name, typ, _, _) =>
+        case TVarDecl(name, typ, _, _, _) =>
           emit(s"  align 8")
           emit(s"$name:")
           emit(s"  rl ${typ.sizeOf.max(8) / 8}")
@@ -175,7 +189,7 @@ class SyslSVMCodegen:
     val generated = out.toString
     val definedSymbols = program.decls.flatMap {
       case TFunDecl(name, _, _, _, _, _, _) => Some(name)
-      case TVarDecl(name, _, _, _) => Some(name)
+      case TVarDecl(name, _, _, _, _) => Some(name)
       case _ => None
     }.toSet
     val metaSymbols = meta.symbols.map(_.name).toSet
@@ -249,7 +263,7 @@ class SyslSVMCodegen:
         case other => genStmt(other); emitPushInt(0)
 
   private def genStmt(stmt: TStmt): Unit = stmt match
-    case TVarStmt(name, typ, init) =>
+    case TVarStmt(name, typ, init, _) =>
       val idx = allocLocal(name, typ)
       if needsMemAlloc(typ) then
         // Allocate memory on the memory stack, store address in local
@@ -431,6 +445,16 @@ class SyslSVMCodegen:
       // TODO: defer support
       ()
 
+    case TMultiStmt(children) =>
+      children.foreach(genStmt)
+
+    case TContractCheck(_, expr, _) =>
+      genExpr(expr)
+      val pass = newLabel("contract_pass")
+      emit(s"  jumpnz $pass")
+      emit("  halt")
+      emit(s"$pass:")
+
     case TFieldCompoundAssignStmt(obj, fieldIndex, op, value) =>
       val st = obj.typ.asInstanceOf[SyslType.StructType]
       val off = fieldOffset(st, fieldIndex)
@@ -611,6 +635,44 @@ class SyslSVMCodegen:
     case TUnary("~", operand, _) =>
       genExpr(operand)
       emit("  not")
+
+    case TRangeCheck(inner, range, _, _) =>
+      genExpr(inner) // stack: [val]
+      val failLbl = newLabel("range_fail")
+      val passLbl = newLabel("range_pass")
+      val u = inner.typ.underlying.isUnsigned
+      val f = inner.typ.underlying.isFloat
+      def pushNum(n: Any): Unit = n match
+        case v: Long => emitPushInt(v)
+        case v: Double =>
+          val bits = java.lang.Double.doubleToRawLongBits(v)
+          emit(s"  push_i64 $bits")
+      def geOp(): String = if f then "fge" else if u then "geu" else "ge"
+      def ltOp(): String = if f then "flt" else if u then "ltu" else "lt"
+      def leOp(): String = if f then "fle" else if u then "leu" else "le"
+      range match
+        case IntRange(lo, hi, excl) =>
+          emit("  dup")
+          pushNum(lo)
+          emit(s"  ${geOp()}")
+          emit(s"  jumpz $failLbl")
+          emit("  dup")
+          pushNum(hi)
+          emit(s"  ${if excl then ltOp() else leOp()}")
+          emit(s"  jumpz $failLbl")
+        case FloatRange(lo, hi, excl) =>
+          emit("  dup")
+          pushNum(lo)
+          emit(s"  ${geOp()}")
+          emit(s"  jumpz $failLbl")
+          emit("  dup")
+          pushNum(hi)
+          emit(s"  ${if excl then ltOp() else leOp()}")
+          emit(s"  jumpz $failLbl")
+      emit(s"  jump $passLbl")
+      emit(s"$failLbl:")
+      emit("  halt")
+      emit(s"$passLbl:")
 
     case TCast(inner, target) =>
       genExpr(inner)
@@ -855,8 +917,8 @@ class SyslSVMCodegen:
 
   private def emitCast(from: SyslType, to: SyslType): Unit =
     import SyslType.*
-    val srcFloat = from == DoubleType
-    val tgtFloat = to == DoubleType
+    val srcFloat = from.isFloat
+    val tgtFloat = to.isFloat
     if srcFloat && !tgtFloat then emit("  f2i")
     else if !srcFloat && tgtFloat then emit("  i2f")
     else to match

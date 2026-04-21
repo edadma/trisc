@@ -156,6 +156,70 @@ class SyslMethodTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 42
   }
 
+  // ===== Pointer-to-struct as struct arg requires explicit deref; self is the only exception =====
+
+  "explicit *ptr passes struct by value" in {
+    eval(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |sum(p: Point) -> int = p.x + p.y
+        |
+        |main() -> int
+        |    p = Point(20, 22)
+        |    val ptr: *Point = &p
+        |    sum(*ptr)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "passing *ptr to struct param without deref is rejected" in {
+    val Right(ast) = (new SyslParser).parseProgram(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |sum(p: Point) -> int = p.x + p.y
+        |
+        |main() -> int
+        |    p = Point(20, 22)
+        |    val ptr: *Point = &p
+        |    sum(ptr)
+        |""".stripMargin): @unchecked
+    an[Exception] should be thrownBy (new SyslAnalyzer).analyze(ast)
+  }
+
+  "self auto-derefs in method calling standalone function" in {
+    eval(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |sum(p: Point) -> int = p.x + p.y
+        |
+        |Point.total() -> int = sum(self)
+        |
+        |main() -> int
+        |    p = Point(20, 22)
+        |    p.total()
+        |""".stripMargin) shouldBe 42
+  }
+
+  "explicit *ptr with multiple struct args" in {
+    eval(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |add(a: Point, b: Point) -> int = a.x + b.y
+        |
+        |main() -> int
+        |    a = Point(20, 0)
+        |    b = Point(0, 22)
+        |    add(*&a, *&b)
+        |""".stripMargin) shouldBe 42
+  }
+
   // ===== Error cases =====
 
   "calling nonexistent method is error" in {

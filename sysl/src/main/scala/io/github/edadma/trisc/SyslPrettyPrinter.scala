@@ -31,9 +31,10 @@ object SyslPrettyPrinter:
     case NamedTypeAST(name, Nil)    => name
     case NamedTypeAST(name, args)   => s"$name[${args.map(typeToSource).mkString(", ")}]"
     case PtrTypeAST(inner)          => s"*${typeToSource(inner)}"
+    case PtrNonNullTypeAST(inner)   => s"*${typeToSource(inner)} not null"
     case ArrayTypeAST(size, elem)   => s"[$size]${typeToSource(elem)}"
     case SliceTypeAST(elem)         => s"[]${typeToSource(elem)}"
-    case FuncTypeAST(params, ret)   => s"(${params.map(typeToSource).mkString(", ")}) -> ${typeToSource(ret)}"
+    case FuncTypeAST(params, ret, esc) => s"${if esc then "@escaping " else ""}(${params.map(typeToSource).mkString(", ")}) -> ${typeToSource(ret)}"
     case TupleTypeAST(elems)        => s"(${elems.map(typeToSource).mkString(", ")})"
     case RefTypeAST(inner)          => s"&${typeToSource(inner)}"
 
@@ -50,7 +51,7 @@ object SyslPrettyPrinter:
 
     case StructDeclAST(name, fields, tps, _) =>
       val tpStr = if tps.nonEmpty then s"[${tps.mkString(", ")}]" else ""
-      val body = fields.map((n, t) => s"${IND}$n: ${typeToSource(t)}").mkString("\n")
+      val body = fields.map((n, t, _) => s"${IND}$n: ${typeToSource(t)}").mkString("\n")
       s"struct $name$tpStr\n$body"
 
     case FunDeclAST(name, params, returnType, body, isPrivate, typeParams, typeBounds, _, isDef) =>
@@ -69,7 +70,7 @@ object SyslPrettyPrinter:
         val retStr = returnType.map(t => s" -> ${typeToSource(t)}").getOrElse("")
         val bodyStr = body match
           case ExprBodyAST(expr) => s" = ${exprToSource(expr)}"
-          case BlockBodyAST(stmts) =>
+          case BlockBodyAST(stmts, _) =>
             val b = stmts.map(s => s"${IND}${stmtToSource(s, 1)}").mkString("\n")
             s"\n$b"
         s"$priv${defKw}$name$retStr$bodyStr"
@@ -97,15 +98,15 @@ object SyslPrettyPrinter:
 
   private def bodyToSource(body: FunBodyAST, depth: Int): String = body match
     case ExprBodyAST(expr) => s" = ${exprToSource(expr, depth)}"
-    case BlockBodyAST(stmts) =>
+    case BlockBodyAST(stmts, _) =>
       val body = stmts.map(s => s"${IND * depth}${stmtToSource(s, depth)}").mkString("\n")
       s"\n$body"
 
   // --- Statements ---
 
   private def stmtToSource(s: StmtAST, depth: Int): String = s match
-    case VarStmtAST(name, typ, init, isMutable) =>
-      val kw = if isMutable then "var" else "val"
+    case VarStmtAST(name, typ, init, isMutable, _, isConst) =>
+      val kw = if isConst then "const" else if isMutable then "var" else "val"
       val typStr = typ.map(t => s": ${typeToSource(t)}").getOrElse("")
       init match
         case UninitDeclAST(t) => s"$kw $name: ${typeToSource(t)}"

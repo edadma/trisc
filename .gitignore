@@ -4,9 +4,11 @@
 *.trb
 !trisc-cli/shared/src/main/resources/ramdisk/bin/*.trb
 *.asm
+!**/boot.asm
 .smeta
 
 # sbt specific
+node_modules/
 .cache/
 .history/
 .lib/

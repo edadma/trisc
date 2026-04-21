@@ -1,0 +1,285 @@
+OSKit Arch -- x86_64 Hardware Runtime
+
+UART, PIC, PIT, and IDT initialization for x86_64 bare metal.
+Replaces runtime.c — all hardware setup in Sysl using port I/O
+primitives from boot.s.
+
+    module oskit.arch.x86_64
+
+Port I/O primitives (provided by boot.s).
+
+    extern outb(port: int, v: byte)
+    extern inb(port: int) -> int
+    extern io_wait()
+
+IDT load (provided by boot.s).
+
+    extern load_idt(base: *byte, limit: int)
+
+Interrupt handler addresses (provided by boot.s).
+
+    extern timer_isr_entry: byte
+    extern syscall_entry: byte
+    extern exc_divide_error: byte
+    extern exc_double_fault: byte
+    extern exc_gpf: byte
+    extern exc_page_fault: byte
+    extern exc_stub_1: byte
+    extern exc_stub_2: byte
+    extern exc_stub_3: byte
+    extern exc_stub_4: byte
+    extern exc_stub_5: byte
+    extern exc_stub_6: byte
+    extern exc_stub_7: byte
+    extern exc_stub_9: byte
+    extern exc_stub_10: byte
+    extern exc_stub_11: byte
+    extern exc_stub_12: byte
+    extern exc_stub_15: byte
+    extern exc_stub_16: byte
+    extern exc_stub_17: byte
+    extern exc_stub_18: byte
+    extern exc_stub_19: byte
+    extern exc_stub_20: byte
+    extern exc_stub_21: byte
+    extern exc_stub_22: byte
+    extern exc_stub_23: byte
+    extern exc_stub_24: byte
+    extern exc_stub_25: byte
+    extern exc_stub_26: byte
+    extern exc_stub_27: byte
+    extern exc_stub_28: byte
+    extern exc_stub_29: byte
+    extern exc_stub_30: byte
+    extern exc_stub_31: byte
+    extern serial_isr_entry: byte
+
+
+UART -- COM1 serial port at 0x3F8.
+
+    val COM1 = 0x3F8
+
+    uart_init()
+        outb(COM1 + 1, byte(0x00))    // disable all interrupts
+        outb(COM1 + 3, byte(0x80))    // enable DLAB
+        outb(COM1 + 0, byte(0x01))    // baud divisor lo (115200)
+        outb(COM1 + 1, byte(0x00))    // baud divisor hi
+        outb(COM1 + 3, byte(0x03))    // 8N1, disable DLAB
+        outb(COM1 + 2, byte(0xC7))    // enable FIFO, clear, 14-byte threshold
+        outb(COM1 + 4, byte(0x0B))    // DTR + RTS + OUT2 (OUT2 gates IRQ)
+        outb(COM1 + 1, byte(0x01))    // enable receive data interrupt (IER bit 0)
+
+    uart_putc_raw(c: int)
+        var ready = inb(COM1 + 5) & 0x20
+        while ready == 0
+            ready = inb(COM1 + 5) & 0x20
+        outb(COM1, byte(c))
+
+    uart_putc(c: int)
+        // Translate LF → CR+LF for serial terminal
+        if c == 10
+            uart_putc_raw(13)
+        uart_putc_raw(c)
+
+    uart_puts(s: string)
+        for c in s do uart_putc(int(c))
+
+
+PIC -- 8259 Programmable Interrupt Controller.
+Remap IRQs 0-7 to vectors 32-39, IRQs 8-15 to vectors 40-47.
+
+    pic_init()
+        // ICW1: start init, expect ICW4
+        outb(0x20, byte(0x11))
+        io_wait()
+        outb(0xA0, byte(0x11))
+        io_wait()
+        // ICW2: vector offsets
+        outb(0x21, byte(0x20))
+        io_wait()
+        outb(0xA1, byte(0x28))
+        io_wait()
+        // ICW3: cascading
+        outb(0x21, byte(0x04))
+        io_wait()
+        outb(0xA1, byte(0x02))
+        io_wait()
+        // ICW4: 8086 mode
+        outb(0x21, byte(0x01))
+        io_wait()
+        outb(0xA1, byte(0x01))
+        io_wait()
+        // Mask all except IRQ0 (timer) and IRQ4 (serial COM1)
+        outb(0x21, byte(0xEE))
+        outb(0xA1, byte(0xFF))
+
+
+PIT -- Programmable Interval Timer.
+Channel 0, rate generator, ~100 Hz (10ms ticks).
+
+    pit_init()
+        val div = 11932   // 1193182 / 100
+        outb(0x43, byte(0x36))
+        outb(0x40, byte(div & 0xFF))
+        outb(0x40, byte((div >> 8) & 0xFF))
+
+
+IDT -- Interrupt Descriptor Table.
+256 entries x 16 bytes = 4096 bytes, stored in a static array.
+
+    var idt_table: [4096]byte
+
+Write one IDT gate entry. Each entry is 16 bytes:
+  +0: offset_lo (u16)
+  +2: selector  (u16)
+  +4: ist       (u8)
+  +5: type_attr (u8)
+  +6: offset_mid (u16)
+  +8: offset_hi  (u32)
+  +12: reserved  (u32)
+
+    idt_set_gate(n: int, handler: i64, type_attr: int)
+        val base: *byte = &idt_table[n * 16]
+        val addr = handler
+        // offset_lo (bytes 0-1)
+        base[0] = byte(addr & 0xFF)
+        base[1] = byte((addr >> 8) & 0xFF)
+        // selector (bytes 2-3) = 0x08 (kernel code segment)
+        base[2] = byte(0x08)
+        base[3] = byte(0)
+        // ist (byte 4) = 0
+        base[4] = byte(0)
+        // type_attr (byte 5)
+        base[5] = byte(type_attr)
+        // offset_mid (bytes 6-7)
+        base[6] = byte((addr >> 16) & 0xFF)
+        base[7] = byte((addr >> 24) & 0xFF)
+        // offset_hi (bytes 8-11)
+        base[8]  = byte((addr >> 32) & 0xFF)
+        base[9]  = byte((addr >> 40) & 0xFF)
+        base[10] = byte((addr >> 48) & 0xFF)
+        base[11] = byte((addr >> 56) & 0xFF)
+        // reserved (bytes 12-15) = 0
+        base[12] = byte(0)
+        base[13] = byte(0)
+        base[14] = byte(0)
+        base[15] = byte(0)
+
+    idt_init()
+        // CPU exceptions (per-vector stubs with correct vec number + error code handling)
+        idt_set_gate(0,  i64(&exc_divide_error), 0x8E)
+        idt_set_gate(1,  i64(&exc_stub_1),  0x8E)
+        idt_set_gate(2,  i64(&exc_stub_2),  0x8E)
+        idt_set_gate(3,  i64(&exc_stub_3),  0x8E)
+        idt_set_gate(4,  i64(&exc_stub_4),  0x8E)
+        idt_set_gate(5,  i64(&exc_stub_5),  0x8E)
+        idt_set_gate(6,  i64(&exc_stub_6),  0x8E)
+        idt_set_gate(7,  i64(&exc_stub_7),  0x8E)
+        idt_set_gate(8,  i64(&exc_double_fault), 0x8E)
+        idt_set_gate(9,  i64(&exc_stub_9),  0x8E)
+        idt_set_gate(10, i64(&exc_stub_10), 0x8E)
+        idt_set_gate(11, i64(&exc_stub_11), 0x8E)
+        idt_set_gate(12, i64(&exc_stub_12), 0x8E)
+        idt_set_gate(13, i64(&exc_gpf),          0x8E)
+        idt_set_gate(14, i64(&exc_page_fault),   0x8E)
+        idt_set_gate(15, i64(&exc_stub_15), 0x8E)
+        idt_set_gate(16, i64(&exc_stub_16), 0x8E)
+        idt_set_gate(17, i64(&exc_stub_17), 0x8E)
+        idt_set_gate(18, i64(&exc_stub_18), 0x8E)
+        idt_set_gate(19, i64(&exc_stub_19), 0x8E)
+        idt_set_gate(20, i64(&exc_stub_20), 0x8E)
+        idt_set_gate(21, i64(&exc_stub_21), 0x8E)
+        idt_set_gate(22, i64(&exc_stub_22), 0x8E)
+        idt_set_gate(23, i64(&exc_stub_23), 0x8E)
+        idt_set_gate(24, i64(&exc_stub_24), 0x8E)
+        idt_set_gate(25, i64(&exc_stub_25), 0x8E)
+        idt_set_gate(26, i64(&exc_stub_26), 0x8E)
+        idt_set_gate(27, i64(&exc_stub_27), 0x8E)
+        idt_set_gate(28, i64(&exc_stub_28), 0x8E)
+        idt_set_gate(29, i64(&exc_stub_29), 0x8E)
+        idt_set_gate(30, i64(&exc_stub_30), 0x8E)
+        idt_set_gate(31, i64(&exc_stub_31), 0x8E)
+        // Timer IRQ (vector 32)
+        idt_set_gate(32, i64(&timer_isr_entry), 0x8E)
+        // Serial IRQ (vector 36 = IRQ4)
+        idt_set_gate(36, i64(&serial_isr_entry), 0x8E)
+        // Syscall (int 0x80, DPL=3)
+        idt_set_gate(0x80, i64(&syscall_entry), 0xEE)
+        // Load IDT
+        load_idt(idt_table, 4095)
+
+
+Main entry point, called by boot.s before kernel_init.
+
+    runtime_init()
+        uart_init()
+        uart_puts("SLIX x86_64: UART ok\n")
+        pic_init()
+        uart_puts("SLIX x86_64: PIC ok\n")
+        pit_init()
+        uart_puts("SLIX x86_64: PIT ok\n")
+        idt_init()
+        uart_puts("SLIX x86_64: IDT ok\n")
+        // Drain any bytes QEMU buffered in COM1 FIFO before ISR was registered
+        var drain = inb(COM1 + 5) & 1
+        while drain != 0
+            inb(COM1)
+            drain = inb(COM1 + 5) & 1
+        uart_puts("SLIX x86_64: runtime ready\n")
+
+
+Serial receive handler (called from boot.s serial_isr_entry).
+Reads characters from COM1 and pushes them into the kernel's
+keyboard buffer as raw ASCII events. The TTY server picks them
+up via kbhit/getkey syscalls.
+
+Event format: (ascii << 24) | (1 << 17) | (1 << 16)
+- Bits 31-24: ASCII character
+- Bit 17: raw ASCII flag (TTY skips scancode translation)
+- Bit 16: press flag (1 = key press)
+
+    import oskit.kernel.{kb_enqueue, kb_notify_tid, notify_send}
+
+    serial_handler()
+        var lsr = inb(0x3FD)
+        var got = 0
+        while (lsr & 1) != 0
+            val ch = inb(0x3F8)
+            kb_enqueue((ch << 24) | (1 << 17) | (1 << 16))
+            got = 1
+            lsr = inb(0x3FD)
+        if got == 1
+            if kb_notify_tid >= 0
+                notify_send(kb_notify_tid, 1)
+
+
+Exception handler (called from boot.s stubs).
+
+    exception_handler(exc_num: i64, error_code: i64, addr: i64, cr3_val: i64)
+        uart_puts("\n!!! EXCEPTION vec=")
+        val hex = "0123456789ABCDEF"
+        val hp = *byte(hex)
+        var en = int(exc_num)
+        uart_putc(int(hp[(en >> 4) & 0xF]))
+        uart_putc(int(hp[en & 0xF]))
+        uart_puts(" err=")
+        var ec = int(error_code)
+        uart_putc(int(hp[(ec >> 12) & 0xF]))
+        uart_putc(int(hp[(ec >> 8) & 0xF]))
+        uart_putc(int(hp[(ec >> 4) & 0xF]))
+        uart_putc(int(hp[ec & 0xF]))
+        uart_puts(" rip=")
+        var a = int(addr)
+        var s2 = 28
+        while s2 >= 0
+            uart_putc(int(hp[(a >> s2) & 0xF]))
+            s2 -= 4
+        uart_puts(" cr3=")
+        var c = int(cr3_val)
+        s2 = 28
+        while s2 >= 0
+            uart_putc(int(hp[(c >> s2) & 0xF]))
+            s2 -= 4
+        uart_puts(" !!!\n")
+
+

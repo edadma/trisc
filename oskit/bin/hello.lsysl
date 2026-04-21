@@ -9,6 +9,5 @@ payload (not one [[putc]] syscall per character).
 
     import oskit.ulib.{puts, exit}
 
-    main()
+    main(argv: []string)
         puts("Hello, world!\n")
-        exit()

@@ -35,11 +35,46 @@ Syscall numbers — must match the kernel and IPC modules.
 
 Command bytes for TFS and TTY server protocols.
 
-    val FS_CMD_OPEN  = 1
-    val FS_CMD_READ  = 2
-    val FS_CMD_WRITE = 3
-    val FS_CMD_CLOSE = 13
-    val TTY_CMD_PUTS = 3
+    val FS_CMD_OPEN    = 1
+    val FS_CMD_READ    = 2
+    val FS_CMD_WRITE   = 3
+    val FS_CMD_CREATE  = 4
+    val FS_CMD_UNLINK  = 5
+    val FS_CMD_STAT    = 6
+    val FS_CMD_MKDIR   = 7
+    val FS_CMD_RMDIR   = 8
+    val FS_CMD_READDIR = 9
+    val FS_CMD_CHMOD   = 11
+    val FS_CMD_RENAME  = 12
+    val FS_CMD_CLOSE   = 13
+    val FS_CMD_SEEK    = 14
+    val FS_CMD_CONNECT = 15
+    val FS_CMD_PIPE    = 18
+    val TTY_CMD_PUTS   = 3
+
+    val SYS_GETUID  = 61
+    val SYS_SETUID  = 62
+
+    val SYS_GRANT_CREATE = 71
+    val SYS_GRANT_REVOKE = 72
+
+    val GRANT_READ  = 1
+    val GRANT_WRITE = 2
+    val GRANT_RW    = 3
+
+    grant_create(vaddr: u64, len: int, flags: int) -> int
+        var args: [3]i64
+        args[0] = i64(vaddr)
+        args[1] = len
+        args[2] = flags
+        int(syscall(SYS_GRANT_CREATE, i64(args)))
+
+    grant_revoke(grant_id: int)
+        syscall(SYS_GRANT_REVOKE, i64(grant_id))
+
+    val PM_CMD_WAITPID = 1
+    val PM_CMD_KILL    = 2
+    val PM_CMD_SPAWN   = 3
 
 Big-endian message helpers — pack/unpack 32-bit integers
 in IPC message buffers.
@@ -62,12 +97,15 @@ IPC — send a message to a server and receive a reply.
         args[2] = msg_len
         args[3] = i64(reply)
         args[4] = reply_len
-        syscall(SYS_IPC_SEND, i64(&args[0]))
+        syscall(SYS_IPC_SEND, i64(args))
 
 Service discovery — look up a server port by name.
 
-    port_lookup(name: *byte) -> int
-        syscall(SYS_PORT_LOOKUP, i64(name))
+    port_lookup(name: string) -> int
+        var args: [2]i64
+        args[0] = i64(*byte(name))
+        args[1] = len(name)
+        syscall(SYS_PORT_LOOKUP, i64(args))
 
 Thread and process queries.
 
@@ -97,6 +135,9 @@ Process control.
     exit_with(code: int)
         syscall(SYS_EXIT, code)
 
+    ulib_putc(ch: int)
+        syscall(SYS_PUTC, ch)
+
     sleep(ticks: int)
         syscall(SYS_SLEEP, ticks)
 
@@ -115,25 +156,25 @@ Write a string to stdout (handle 1) via VFS.
     val STDERR = 2
 
     write_handle(handle: int, data: *byte, wlen: int) -> int
-        var fs_name: [3]byte
-        fs_name[0] = byte('f')
-        fs_name[1] = byte('s')
-        fs_name[2] = 0
-        val port = port_lookup(&fs_name[0])
+        val port = fs_port()
         if port < 0
+            return -1
+        val gid = grant_create(u64(data), wlen, GRANT_READ)
+        if gid < 0
             return -1
         var msg: [13]byte
         msg[0] = byte(FS_CMD_WRITE)
-        msg_write_i32(&msg[0], 1, handle)
-        msg_write_i32(&msg[0], 5, wlen)
-        msg_write_i32(&msg[0], 9, int(i64(data)))
+        msg_write_i32(msg, 1, handle)
+        msg_write_i32(msg, 5, wlen)
+        msg_write_i32(msg, 9, gid)
         var reply: [5]byte
-        val result = ipc_send(port, &msg[0], 13, &reply[0], 5)
+        val result = ipc_send(port, msg, 13, reply, 5)
+        grant_revoke(gid)
         if result != 0
             return -1
         if reply[0] != 0
             return -1
-        msg_read_i32(&reply[0], 1)
+        msg_read_i32(reply, 1)
 
     puts(s: string)
         val n = len(s)
@@ -143,11 +184,7 @@ Write a string to stdout (handle 1) via VFS.
 Open a file by path. Returns a file ID or -1 on error.
 
     open(path: string) -> int
-        var fs_name: [3]byte
-        fs_name[0] = byte('f')
-        fs_name[1] = byte('s')
-        fs_name[2] = 0
-        val port = port_lookup(&fs_name[0])
+        val port = fs_port()
         if port < 0
             return -1
         val plen = len(path)
@@ -162,84 +199,448 @@ Open a file by path. Returns a file ID or -1 on error.
         for var i = 0; i < m; i++
             msg[i + 1] = pp[i]
         var reply: [9]byte
-        ipc_send(port, &msg[0], m + 1, &reply[0], 9)
+        ipc_send(port, msg, m + 1, reply, 9)
         if reply[0] != 0
             return -1
-        msg_read_i32(&reply[0], 1)
+        msg_read_i32(reply, 1)
 
 Read from an open file. Position is tracked by VFS.
 Returns the number of bytes read, or -1 on error.
 
     read(fid: int, buf: *byte, count: int) -> int
-        var fs_name: [3]byte
-        fs_name[0] = byte('f')
-        fs_name[1] = byte('s')
-        fs_name[2] = 0
-        val port = port_lookup(&fs_name[0])
+        val port = fs_port()
         if port < 0
+            return -1
+        val gid = grant_create(u64(buf), count, GRANT_WRITE)
+        if gid < 0
             return -1
         var msg: [13]byte
         msg[0] = byte(FS_CMD_READ)
-        msg_write_i32(&msg[0], 1, fid)
-        msg_write_i32(&msg[0], 5, count)
-        msg_write_i32(&msg[0], 9, int(i64(buf)))
+        msg_write_i32(msg, 1, fid)
+        msg_write_i32(msg, 5, count)
+        msg_write_i32(msg, 9, gid)
         var reply: [5]byte
-        val result = ipc_send(port, &msg[0], 13, &reply[0], 5)
+        val result = ipc_send(port, msg, 13, reply, 5)
+        grant_revoke(gid)
         if result != 0
             return -1
         if reply[0] != 0
             return -1
-        msg_read_i32(&reply[0], 1)
+        msg_read_i32(reply, 1)
 
 Close an open file.
 
     close(fid: int)
-        var fs_name: [3]byte
-        fs_name[0] = byte('f')
-        fs_name[1] = byte('s')
-        fs_name[2] = 0
-        val port = port_lookup(&fs_name[0])
+        val port = fs_port()
         if port < 0
             return
         var msg: [5]byte
         msg[0] = byte(FS_CMD_CLOSE)
-        msg_write_i32(&msg[0], 1, fid)
+        msg_write_i32(msg, 1, fid)
         var reply: [1]byte
-        ipc_send(port, &msg[0], 5, &reply[0], 1)
+        ipc_send(port, msg, 5, reply, 1)
 
-Program arguments — stored at a well-known address by the
-shell before launching the program. This convention will be
-replaced by proper exec() argument passing when the MMU
-and process manager land.
+Get the filesystem server port (cached).
+
+    var fs_port_cache = -2
+
+    fs_port() -> int
+        if fs_port_cache == -2
+            fs_port_cache = port_lookup("fs")
+        fs_port_cache
+
+Create a file at a path. Returns inode or -1 on error.
+Protocol: [cmd(1), type(1), mode_hi(1), mode_lo(1), path(N)]
+
+    create(path: string, ftype: int, mode: int) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val pp = *byte(path)
+        val plen = len(path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_CREATE)
+        msg[1] = byte(ftype)
+        msg[2] = byte((mode >> 8) & 0xFF)
+        msg[3] = byte(mode & 0xFF)
+        for var i = 0; i < plen; i++
+            msg[4 + i] = pp[i]
+        var reply: [5]byte
+        ipc_send(port, msg, 4 + plen, reply, 5)
+        if reply[0] != 0
+            return -1
+        msg_read_i32(reply, 1)
+
+Remove a file by path.
+
+    unlink(path: string) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val pp = *byte(path)
+        val plen = len(path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_UNLINK)
+        for var i = 0; i < plen; i++
+            msg[1 + i] = pp[i]
+        var reply: [1]byte
+        ipc_send(port, msg, 1 + plen, reply, 1)
+        int(reply[0])
+
+Create a directory at a path.
+
+    mkdir(path: string, mode: int) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val pp = *byte(path)
+        val plen = len(path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_MKDIR)
+        msg[1] = byte((mode >> 8) & 0xFF)
+        msg[2] = byte(mode & 0xFF)
+        for var i = 0; i < plen; i++
+            msg[3 + i] = pp[i]
+        var reply: [5]byte
+        ipc_send(port, msg, 3 + plen, reply, 5)
+        if reply[0] != 0
+            return -1
+        msg_read_i32(reply, 1)
+
+Remove a directory by path.
+
+    rmdir(path: string) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val pp = *byte(path)
+        val plen = len(path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_RMDIR)
+        for var i = 0; i < plen; i++
+            msg[1 + i] = pp[i]
+        var reply: [1]byte
+        ipc_send(port, msg, 1 + plen, reply, 1)
+        int(reply[0])
+
+Read a directory entry by path and index. Returns 0 on success, -1 on end.
+
+    readdir(path: string, idx: int, entry_ino: *int, entry_name: *byte) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val pp = *byte(path)
+        val plen = len(path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_READDIR)
+        msg_write_i32(msg, 1, idx)
+        for var i = 0; i < plen; i++
+            msg[5 + i] = pp[i]
+        var reply: [19]byte
+        ipc_send(port, msg, 5 + plen, reply, 19)
+        if reply[0] != 0
+            return -1
+        *entry_ino = msg_read_i32(reply, 1)
+        for var i = 0; i < 14; i++
+            entry_name[i] = reply[5 + i]
+        0
+
+Get file status by path.
+
+    stat(path: string, st: *int) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val pp = *byte(path)
+        val plen = len(path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_STAT)
+        for var i = 0; i < plen; i++
+            msg[1 + i] = pp[i]
+        var reply: [29]byte
+        ipc_send(port, msg, 1 + plen, reply, 29)
+        if reply[0] != 0
+            return -1
+        for var i = 0; i < 7; i++
+            st[i] = msg_read_i32(reply, 1 + i * 4)
+        0
+
+Change file permissions by path.
+
+    chmod(path: string, mode: int) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val pp = *byte(path)
+        val plen = len(path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_CHMOD)
+        msg[1] = byte((mode >> 8) & 0xFF)
+        msg[2] = byte(mode & 0xFF)
+        for var i = 0; i < plen; i++
+            msg[3 + i] = pp[i]
+        var reply: [1]byte
+        ipc_send(port, msg, 3 + plen, reply, 1)
+        int(reply[0])
+
+Rename/move a file by path.
+
+    rename(old_path: string, new_path: string) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val onp = *byte(old_path)
+        val onlen = len(old_path)
+        val nnp = *byte(new_path)
+        val nnlen = len(new_path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_RENAME)
+        msg[1] = byte(onlen)
+        for var i = 0; i < onlen; i++
+            msg[2 + i] = onp[i]
+        for var i = 0; i < nnlen; i++
+            msg[2 + onlen + i] = nnp[i]
+        var reply: [1]byte
+        ipc_send(port, msg, 2 + onlen + nnlen, reply, 1)
+        int(reply[0])
+
+System queries and control.
+
+    uptime() -> int
+        syscall(SYS_UPTIME, 0)
+
+    getuid() -> int
+        syscall(SYS_GETUID, 0)
+
+    setuid(uid: int)
+        syscall(SYS_SETUID, uid)
+
+Read one byte from stdin (handle 0). Blocks until data
+is available. Returns the byte value or -1 on error.
+
+    getc() -> int
+        var buf: [1]byte
+        val n = read(STDIN, buf, 1)
+        if n <= 0
+            return -1
+        int(buf[0])
+
+Connect to a named resource via VFS. Supports scheme-based
+routing: `connect("tty:0")`, `connect("vfs:/etc/passwd")`.
+Returns a handle or -1 on error.
+
+    connect(name: string) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val pp = *byte(name)
+        val nlen = len(name)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_CONNECT)
+        for var i = 0; i < nlen; i++
+            msg[i + 1] = pp[i]
+        var reply: [9]byte
+        ipc_send(port, msg, nlen + 1, reply, 9)
+        if reply[0] != 0
+            return -1
+        msg_read_i32(reply, 1)
+
+Seek to a position in an open file.
+whence: 0 = SET, 1 = CUR. Returns new position, or -1.
+
+    seek(fid: int, offset: int, whence: int) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        var msg: [10]byte
+        msg[0] = byte(FS_CMD_SEEK)
+        msg_write_i32(msg, 1, fid)
+        msg_write_i32(msg, 5, offset)
+        msg[9] = byte(whence)
+        var reply: [5]byte
+        ipc_send(port, msg, 10, reply, 5)
+        if reply[0] != 0
+            return -1
+        msg_read_i32(reply, 1)
+
+Create a pipe. Writes read/write handles to pointers.
+Returns 0 on success, -1 on error.
+
+    pipe(read_h: *int, write_h: *int) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(FS_CMD_PIPE)
+        var reply: [9]byte
+        val result = ipc_send(port, msg, 1, reply, 9)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        *read_h = msg_read_i32(reply, 1)
+        *write_h = msg_read_i32(reply, 5)
+        0
+
+PM IPC — process management.
+
+Look up the PM server port (cached).
+
+    var pm_port_cache = -2
+
+    pm_port() -> int
+        if pm_port_cache == -2
+            pm_port_cache = port_lookup("pm")
+        pm_port_cache
+
+Wait for a child process to exit. Returns exit code or -1.
+
+    pm_waitpid(pid: int) -> int
+        val port = pm_port()
+        if port < 0
+            return -1
+        var msg: [5]byte
+        msg[0] = byte(PM_CMD_WAITPID)
+        msg_write_i32(msg, 1, pid)
+        var reply: [5]byte
+        ipc_send(port, msg, 5, reply, 5)
+        if reply[0] != 0
+            return -1
+        msg_read_i32(reply, 1)
+
+Kill a process by PID. Returns 0 on success.
+
+    pm_kill(pid: int) -> int
+        val port = pm_port()
+        if port < 0
+            return -1
+        var msg: [5]byte
+        msg[0] = byte(PM_CMD_KILL)
+        msg_write_i32(msg, 1, pid)
+        var reply: [1]byte
+        ipc_send(port, msg, 5, reply, 1)
+        int(reply[0])
+
+Build a POSIX argv blob from an argv slice. Writes to `blob`
+starting at offset 0. Returns the total blob size, or -1 if
+it wouldn't fit in `cap` bytes.
+
+Layout (see PROG_ARGS_ADDR below for the spec):
+    [argc(4)] [pad(4)] [argv[0](8)] ... [NULL(8)] [string data]
+
+Pointers are baked as absolute addresses = PROG_ARGS_ADDR + offset,
+since PM always copies the blob to PROG_ARGS_ADDR in the child.
 
     val PROG_ARGS_ADDR = 0xBF000
 
-    get_args() -> string
-        val p = *byte(PROG_ARGS_ADDR)
-        var n = 0
-        while p[n] != 0
-            n += 1
-        if n == 0
-            return ""
-        string(p, n)
-
-Skip past argv[0] (the program name) and any following spaces.
-Returns the remaining arguments as a string, or "" if none.
-
-    skip_arg0(s: string) -> string
-        val p = *byte(s)
-        val n = len(s)
-        // Skip non-space (argv[0])
+    build_argv_blob(argv: *string, argc: int, blob: *byte, cap: int) -> int
+        val ptrs_size = (argc + 1) * 8
+        var str_off = 8 + ptrs_size
+        if str_off > cap
+            return -1
+        // argc (little-endian i32) + padding zeros
+        blob[0] = byte(argc & 0xFF)
+        blob[1] = byte((argc >> 8) & 0xFF)
+        blob[2] = byte((argc >> 16) & 0xFF)
+        blob[3] = byte((argc >> 24) & 0xFF)
+        blob[4] = 0
+        blob[5] = 0
+        blob[6] = 0
+        blob[7] = 0
+        var pos = str_off
         var i = 0
-        while i < n
-            if p[i] == byte(' ')
-                break
+        while i < argc
+            val arg = argv[i]
+            val alen = len(arg)
+            if pos + alen + 1 > cap
+                return -1
+            // Write argv[i] pointer at offset 8 + i*8 (absolute)
+            val ptr: i64 = i64(PROG_ARGS_ADDR) + i64(pos)
+            val pbase = 8 + i * 8
+            blob[pbase]     = byte(ptr & i64(0xFF))
+            blob[pbase + 1] = byte((ptr >> 8) & i64(0xFF))
+            blob[pbase + 2] = byte((ptr >> 16) & i64(0xFF))
+            blob[pbase + 3] = byte((ptr >> 24) & i64(0xFF))
+            blob[pbase + 4] = byte((ptr >> 32) & i64(0xFF))
+            blob[pbase + 5] = byte((ptr >> 40) & i64(0xFF))
+            blob[pbase + 6] = byte((ptr >> 48) & i64(0xFF))
+            blob[pbase + 7] = byte((ptr >> 56) & i64(0xFF))
+            // Copy string bytes + NUL terminator
+            val ap = *byte(arg)
+            var j = 0
+            while j < alen
+                blob[pos + j] = ap[j]
+                j += 1
+            blob[pos + alen] = 0
+            pos = pos + alen + 1
             i += 1
-        // Skip spaces
-        while i < n
-            if p[i] != byte(' ')
-                break
+        // NULL terminator at argv[argc]
+        val nbase = 8 + argc * 8
+        var z = 0
+        while z < 8
+            blob[nbase + z] = 0
+            z += 1
+        pos
+
+Spawn a process with handle inheritance. handle_pairs is an
+array of (parent_handle, child_slot) byte pairs. argv is an
+array of argc strings; argv[0] is conventionally the program
+name. Returns child PID or -1 on error.
+
+    pm_spawn_handles(path: string, argv: *string, argc: int, handle_pairs: *byte, num_handles: int) -> int
+        val port = pm_port()
+        if port < 0
+            return -1
+        val plen = len(path)
+        var msg: [512]byte
+        // Reserve header bytes; fill in after computing blob size:
+        //   [0]    cmd
+        //   [1]    path_len
+        //   [2-3]  blob_len (little-endian u16)
+        //   [4]    num_handles
+        //   [5..]  path
+        //   [5+plen..]  blob
+        //   [5+plen+blob_len..] handle_pairs
+        val blob_off = 5 + plen
+        val cap = 512 - blob_off - num_handles * 2
+        val blob_len = build_argv_blob(argv, argc, &msg[blob_off], cap)
+        if blob_len < 0
+            return -1
+        msg[0] = byte(PM_CMD_SPAWN)
+        msg[1] = byte(plen)
+        msg[2] = byte(blob_len & 0xFF)
+        msg[3] = byte((blob_len >> 8) & 0xFF)
+        msg[4] = byte(num_handles)
+        val pp = *byte(path)
+        var i = 0
+        while i < plen
+            msg[5 + i] = pp[i]
             i += 1
-        if i >= n
-            return ""
-        string(p + i, n - i)
+        i = 0
+        while i < num_handles * 2
+            msg[blob_off + blob_len + i] = handle_pairs[i]
+            i += 1
+        var reply: [5]byte
+        ipc_send(port, msg, blob_off + blob_len + num_handles * 2, reply, 5)
+        if reply[0] != 0
+            return -1
+        msg_read_i32(reply, 1)
+
+Spawn a process with no handle inheritance.
+
+    pm_spawn(path: string, argv: *string, argc: int) -> int
+        pm_spawn_handles(path, argv, argc, *byte(0), 0)
+
+Print an integer to stdout.
+
+    putint(n: int)
+        if n < 0
+            puts("-")
+            putint(-n)
+            return
+        if n >= 10
+            putint(n / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + n % 10)
+        write_handle(STDOUT, buf, 1)
+

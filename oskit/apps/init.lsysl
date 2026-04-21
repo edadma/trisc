@@ -1,36 +1,33 @@
 OSKit Init — System Initialization
 
-The first userspace process. Starts core servers in hardcoded
-order (they must run before the filesystem is readable), then
-reads `/etc/ttytab` to spawn login sessions.
+Started by RS as the last boot module. Reads `/etc/ttytab` to
+spawn login/shell sessions via PM. When a session exits, init
+respawns it so the terminal stays active.
 
 Boot sequence:
-1. Disk server — owns block device hardware
-2. TFS server — filesystem, needs disk server
-3. TTY server — terminal, needs keyboard hardware
-4. PM server — process lifecycle management
-5. Read `/etc/ttytab` — spawn login/shell per terminal
-
-Minix 3-style: core servers are hardcoded because init can't
-read config files until the filesystem is up.
+1. kernel_main starts RS
+2. RS starts servers: disk, tfs, tty, pm, vfs, ds
+3. RS starts init (last, from boot module)
+4. Init reads `/etc/ttytab` — spawns login/shell per terminal
+5. Init loops, waiting for children and respawning
 
     module oskit.apps.init
 
-    import oskit.kernel.{create_thread, kernel_stack_usp, kernel_stack_ssp}
-    import oskit.servers.{rs_main, rs_alloc_slot, rs_add_server, tfs_server, pm_server, vfs_server}
-    import oskit.drivers.disk.{disk_server}
-    import oskit.drivers.tty.{tty_server}
-    import oskit.fs.{fs_open, fs_read, fs_close}
-    import oskit.apps.login.{login}
-    import oskit.apps.nsh.{nsh}
+    import oskit.services.{putc, rs_ready}
+    import oskit.fs.{fs_open, fs_read, fs_close, fs_connect}
+    import oskit.servers.{pm_spawn_handles, pm_waitpid}
+    import oskit.ipc.{ipc_send, port_lookup}
 
-Stack slot counter. Init is slot 0 (created by kernel_main).
-Each server and session gets the next slot.
+Session table. Each entry records the program path and
+the PID of the currently running session.
 
+    val MAX_SESSIONS = 4
 
+    var session_path: [4]string
+    var session_pid: [4]int
+    var session_count = 0
 
-
-Parse `/etc/ttytab` and spawn a thread for each entry.
+Parse `/etc/ttytab` and spawn a process for each entry.
 Format: `terminal command` — one entry per line.
 Supported commands: `login`, `nsh`.
 
@@ -39,14 +36,12 @@ Supported commands: `login`, `nsh`.
         val fid = fs_open("/etc/ttytab")
         if fid < 0
             // No ttytab — fall back to single login
-            val s = rs_alloc_slot()
-            create_thread(login, kernel_stack_usp(s), kernel_stack_ssp(s), "login")
+            start_session("/bin/login")
             return
-        val nr = fs_read(fid, buf, 256)
+        val nr = fs_read(fid, &buf[0], 256)
         fs_close(fid)
         if nr <= 0
-            val s = rs_alloc_slot()
-            create_thread(login, kernel_stack_usp(s), kernel_stack_ssp(s), "login")
+            start_session("/bin/login")
             return
 
         var pos = 0
@@ -116,39 +111,91 @@ Supported commands: `login`, `nsh`.
 
             // Spawn based on command
             if cmd_len > 0
-                val s = rs_alloc_slot()
-                val usp = kernel_stack_usp(s)
-                val ssp = kernel_stack_ssp(s)
                 if cmd_len == 5
                     if buf[cmd_start] == 'l'
                         if buf[cmd_start + 1] == 'o'
                             if buf[cmd_start + 2] == 'g'
                                 if buf[cmd_start + 3] == 'i'
                                     if buf[cmd_start + 4] == 'n'
-                                        create_thread(login, usp, ssp, "login")
+                                        start_session("/bin/login")
                 if cmd_len == 3
                     if buf[cmd_start] == 'n'
                         if buf[cmd_start + 1] == 's'
                             if buf[cmd_start + 2] == 'h'
-                                create_thread(nsh, usp, ssp, "nsh")
+                                start_session("/bin/nsh")
+
+Start a session — spawn program and record in session table.
+
+    start_session(path: string)
+        if session_count >= MAX_SESSIONS
+            return
+        val pid = spawn_program(path)
+        if pid > 0
+            session_path[session_count] = path
+            session_pid[session_count] = pid
+            session_count += 1
+
+Spawn an external program with inherited TTY handles.
+Returns child PID or -1 on error.
+
+    spawn_program(path: string) -> int
+        val h_in = fs_connect("tty:0")
+        val h_out = fs_connect("tty:0")
+        val h_err = fs_connect("tty:0")
+
+        var hmap: [6]byte
+        hmap[0] = byte(h_in)
+        hmap[1] = 0
+        hmap[2] = byte(h_out)
+        hmap[3] = 1
+        hmap[4] = byte(h_err)
+        hmap[5] = 2
+
+        var argv: [1]string
+        argv[0] = path
+        val pid = pm_spawn_handles(path, argv, 1, &hmap[0], 3)
+
+        fs_close(h_in)
+        fs_close(h_out)
+        fs_close(h_err)
+        pid
+
+Respawn loop. Wait for any child to exit, then respawn
+the corresponding session.
+
+    respawn_loop()
+        while 1 == 1
+            // Wait for any session to exit
+            var i = 0
+            var found = 0
+            while i < session_count
+                if session_pid[i] > 0
+                    val code = pm_waitpid(session_pid[i])
+                    // Child exited — respawn
+                    val pid = spawn_program(session_path[i])
+                    if pid > 0
+                        session_pid[i] = pid
+                    else
+                        session_pid[i] = -1
+                    found = 1
+                    i = session_count
+                i += 1
+
+    init_print(s: string)
+        val p = *byte(s)
+        val n = len(s)
+        var i = 0
+        while i < n
+            putc(p[i])
+            i += 1
 
     init()
-        // Register servers for RS to start (dependency order)
-        var n: [5]byte
-        n[0] = 100; n[1] = 105; n[2] = 115; n[3] = 107; n[4] = 0  // disk
-        rs_add_server(i64(disk_server), &n[0], 4)
-        n[0] = 116; n[1] = 102; n[2] = 115; n[3] = 0  // tfs
-        rs_add_server(i64(tfs_server), &n[0], 3)
-        n[0] = 116; n[1] = 116; n[2] = 121; n[3] = 0  // tty
-        rs_add_server(i64(tty_server), &n[0], 3)
-        n[0] = 112; n[1] = 109; n[2] = 0  // pm
-        rs_add_server(i64(pm_server), &n[0], 2)
-        n[0] = 118; n[1] = 102; n[2] = 115; n[3] = 0  // vfs
-        rs_add_server(i64(vfs_server), &n[0], 3)
+        // Signal RS that init is ready (for handshake)
+        rs_ready()
 
-        // Run RS inline — starts all servers with synchronous
-        // handshake, no sleeps, no extra thread
-        rs_main()
-
-        // All servers up — read /etc/ttytab and spawn sessions
+        // All servers are up — read /etc/ttytab and spawn sessions
+        init_print("Reading /etc/ttytab\n")
         spawn_sessions()
+
+        // Wait for sessions to exit and respawn them
+        respawn_loop()

@@ -86,7 +86,7 @@ object AssemblerParser extends RegexParsers:
     "chk", "cli", "clz", "cnt", "ctz", "cvt",
     "div", "divu",
     "exg",
-    "fabs", "facos", "fadd", "fasin", "fatan", "fatan2", "fcos", "fdiv", "fexp", "fence", "fint", "finv", "flog", "fmul", "fneg", "fpow", "fseq", "fsin", "fslt", "fsqrt", "fsub", "ftan",
+    "f32tof64", "f64tof32", "fabs", "facos", "fadd", "fasin", "fatan", "fatan2", "fcos", "fdiv", "fexp", "fence", "fint", "finv", "flog", "fmul", "fneg", "fpow", "fseq", "fsin", "fslt", "fsqrt", "fsub", "ftan",
     "gasid", "gfault", "gfcause", "gpsr", "gptbr", "gusp",
     "halt",
     "jalr",

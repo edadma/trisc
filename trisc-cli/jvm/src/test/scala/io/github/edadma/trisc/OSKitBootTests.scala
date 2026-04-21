@@ -32,7 +32,13 @@ class OSKitBootTests extends OSKitTestHelpers {
       "oskit/services/services" -> servicesSysl,
       "std/mem/mem" -> memSource,
       "oskit/hal/mem" -> halMemSource,
+      "oskit/arch/vm" -> LiterateRenderer.tangle(new LiterateParser().parse(scala.io.Source.fromFile("oskit/arch/trisc/vm.lsysl").mkString)),
+      "oskit/arch/cpu" -> LiterateRenderer.tangle(new LiterateParser().parse(scala.io.Source.fromFile("oskit/arch/trisc/cpu.lsysl").mkString)),
       "oskit/config/config" -> scala.io.Source.fromFile("oskit/config/config.sysl").mkString,
+      "posix/unistd/sbrk" -> sbrkSysl,
+      "posix/stdlib/alloc" -> posixAllocSysl,
+      "posix/string/string" -> posixStringSysl,
+      "posix/ctype/ctype" -> posixCtypeSysl,
       "tasks" -> tasksSysl,
       "main" -> mainSysl,
     ))

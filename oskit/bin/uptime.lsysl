@@ -1,0 +1,14 @@
+uptime — show system uptime
+===========================
+
+Prints the system uptime in ticks.
+
+    module oskit.bin.uptime
+
+    import oskit.ulib.{puts, putint, exit, uptime}
+
+    main(argv: []string)
+        puts("up ")
+        putint(uptime())
+        puts(" ticks\n")
+        exit()

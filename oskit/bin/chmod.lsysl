@@ -1,0 +1,31 @@
+chmod — change file permissions
+===============================
+
+Changes the permission mode of a file. Mode is octal (e.g. 755).
+
+Usage: `chmod <mode> <path>`
+
+    module oskit.bin.chmod
+
+    import oskit.ulib.{puts, exit, chmod}
+
+    main(argv: []string)
+        if len(argv) < 3
+            puts("usage: chmod <mode> <path>\n")
+            return
+        val mstr = argv[1]
+        val mp = *byte(mstr)
+        val mn = len(mstr)
+        var mode = 0
+        for var i = 0; i < mn; i++
+            val d = int(mp[i]) - '0'
+            if d < 0
+                puts("bad mode\n")
+                return
+            if d > 7
+                puts("bad mode\n")
+                return
+            mode = mode * 8 + d
+        val result = chmod(argv[2], mode)
+        if result != 0
+            puts("error\n")

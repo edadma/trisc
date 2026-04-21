@@ -1,0 +1,31 @@
+stat — show file information
+============================
+
+Displays type and size of a file or directory.
+
+    module oskit.bin.stat
+
+    import oskit.ulib.{puts, putint, exit, stat}
+
+    main(argv: []string)
+        if len(argv) < 2
+            puts("usage: stat <path>\n")
+            return
+        val path = argv[1]
+        var st: [7]int
+        if stat(path, st) < 0
+            puts(path)
+            puts(": not found\n")
+            return
+        val ftype = (st[0] >> 12) & 0xF
+        puts("type: ")
+        if ftype == 1
+            puts("file")
+        else if ftype == 2
+            puts("dir")
+        else
+            putint(ftype)
+        puts("\n")
+        puts("size: ")
+        putint(st[4])
+        puts("\n")

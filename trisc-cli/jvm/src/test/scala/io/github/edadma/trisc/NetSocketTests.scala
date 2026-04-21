@@ -238,4 +238,116 @@ class NetSocketTests extends TestHelpers {
     net.readByte(0x110) shouldBe 1
     net.readByte(0x111) shouldBe 100
   }
+
+  // ===== UDP =====
+
+  /** Read REMOTE_PORT register */
+  def getRemotePort(n: NetSocket): Int =
+    ((n.readByte(0x116) & 0xFF) << 8) | (n.readByte(0x117) & 0xFF)
+
+  /** Read REMOTE_IP register as packed int */
+  def getRemoteIp(n: NetSocket): (Int, Int, Int, Int) =
+    (n.readByte(0x118) & 0xFF, n.readByte(0x119) & 0xFF,
+     n.readByte(0x11A) & 0xFF, n.readByte(0x11B) & 0xFF)
+
+  "UDP bind and sendto/recvfrom loopback" in {
+    val (net, _, mem) = mkNet()
+
+    // Bind receiver on port 19200, slot 0
+    net.writeByte(0x102, 0) // CONN_ID = 0
+    net.writeByte(0x115, 1) // SOCK_TYPE = UDP
+    setPORT(net, 19200)
+    net.writeByte(0x100, 0x08) // CMD_BIND
+    net.readByte(0x113) shouldBe 0 // no error
+
+    // Bind sender on port 19201, slot 1
+    net.writeByte(0x102, 1)
+    setPORT(net, 19201)
+    net.writeByte(0x100, 0x08) // CMD_BIND
+    net.readByte(0x113) shouldBe 0
+
+    // Sender sends "hello" to 127.0.0.1:19200
+    val msg = "hello"
+    for i <- msg.indices do mem.writeByte(0x1000 + i, msg(i).toByte)
+    net.writeByte(0x102, 1) // slot 1 (sender)
+    setADDR(net, 0x1000)
+    setLEN(net, msg.length)
+    setIP(net, 127, 0, 0, 1)
+    setPORT(net, 19200)
+    net.writeByte(0x100, 0x09) // CMD_SENDTO
+    net.readByte(0x113) shouldBe 0
+    getResult(net) shouldBe msg.length
+
+    Thread.sleep(50)
+
+    // Receiver recvfrom on slot 0
+    net.writeByte(0x102, 0) // slot 0 (receiver)
+    setADDR(net, 0x2000)
+    setLEN(net, 256)
+    net.writeByte(0x100, 0x0A) // CMD_RECVFROM
+    net.readByte(0x113) shouldBe 0
+    val received = getResult(net)
+    received shouldBe msg.length
+
+    val buf = new StringBuilder
+    for i <- 0 until received do buf += (mem.readByte(0x2000 + i) & 0xFF).toChar
+    buf.toString shouldBe "hello"
+
+    // Check source address
+    getRemotePort(net) shouldBe 19201
+    val (a, b, c, d) = getRemoteIp(net)
+    a shouldBe 127
+    b shouldBe 0
+    c shouldBe 0
+    d shouldBe 1
+
+    net.closeAll()
+  }
+
+  "UDP conn status shows CS_UDP and CS_CONNECTED" in {
+    val (net, _, _) = mkNet()
+    net.writeByte(0x102, 0)
+    net.writeByte(0x115, 1) // SOCK_TYPE = UDP
+    setPORT(net, 19202)
+    net.writeByte(0x100, 0x08) // CMD_BIND
+    net.readByte(0x113) shouldBe 0
+
+    net.writeByte(0x102, 0)
+    val status = net.readByte(0x103)
+    (status & 0x40) should not be 0 // CS_UDP
+    (status & 0x01) should not be 0 // CS_CONNECTED (bound)
+
+    net.closeAll()
+  }
+
+  "UDP sendto on non-UDP slot sets ERR_WRONG_TYPE" in {
+    val (net, _, _) = mkNet()
+    net.writeByte(0x102, 0)
+    net.writeByte(0x100, 0x09) // CMD_SENDTO on empty slot
+    net.readByte(0x113) shouldBe 5 // ERR_WRONG_TYPE
+  }
+
+  "UDP close frees slot" in {
+    val (net, _, _) = mkNet()
+    net.writeByte(0x102, 0)
+    net.writeByte(0x115, 1)
+    setPORT(net, 19203)
+    net.writeByte(0x100, 0x08) // BIND
+
+    // Close
+    net.writeByte(0x102, 0)
+    net.writeByte(0x100, 0x06) // CMD_CLOSE
+
+    // Slot should be empty
+    net.writeByte(0x102, 0)
+    net.readByte(0x103) shouldBe 0
+  }
+
+  "SOCK_TYPE register readback" in {
+    val (net, _, _) = mkNet()
+    net.writeByte(0x115, 1)
+    net.readByte(0x115) shouldBe 1
+    net.writeByte(0x115, 0)
+    net.readByte(0x115) shouldBe 0
+  }
 }

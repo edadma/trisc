@@ -1,18 +1,16 @@
 echo — echo arguments
 ======================
 
-Reads the argument string and outputs it.
-Used to test argument passing to external programs.
-
-Reads directly from [[PROG_ARGS_ADDR]] like [[get_args]] but avoids constructing a
-`string` in `main` (safer for the external-program / thread bootstrap path).
+Prints each argument separated by a single space, followed by a newline.
 
     module oskit.bin.echo
 
-    import oskit.ulib.{puts, exit, get_args, skip_arg0}
+    import oskit.ulib.{puts, exit}
 
-    main()
-        val args = skip_arg0(get_args())
-        puts(args)
+    main(argv: []string)
+        val n = len(argv)
+        for var i = 1; i < n; i++
+            if i > 1
+                puts(" ")
+            puts(argv[i])
         puts("\n")
-        exit()

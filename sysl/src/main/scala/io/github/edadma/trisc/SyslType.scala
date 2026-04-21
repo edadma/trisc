@@ -1,5 +1,10 @@
 package io.github.edadma.trisc
 
+// Range constraint for `within lo..hi` / `within lo..<hi` on numeric named types.
+sealed trait TypeRange
+case class IntRange(lo: Long, hi: Long, exclusiveHi: Boolean) extends TypeRange
+case class FloatRange(lo: Double, hi: Double, exclusiveHi: Boolean) extends TypeRange
+
 enum SyslType:
   case IntType(width: Int)   // i8, i16, i32, i64
   case UIntType(width: Int)  // u8, u16, u32, u64
@@ -7,38 +12,59 @@ enum SyslType:
   case VoidType
   case PtrType(pointee: SyslType)
   case ArrayType(elem: SyslType, size: Int)
-  case FuncType(params: List[SyslType], returnType: SyslType)
-  case StructType(name: String, fields: List[(String, SyslType)])
-  case DoubleType
+  case FuncType(params: List[SyslType], returnType: SyslType, escaping: Boolean = false)
+  case StructType(name: String, fields: List[(String, SyslType)], volatileFields: Set[Int] = Set.empty)
+  case FloatType(width: Int)   // f32 (single-precision), f64 (double-precision)
   case StringType
   case SliceType(elem: SyslType)
   case RefType(inner: SyslType)  // &T — ref-counted heap reference
   case EnumType(name: String, variants: List[(String, List[(String, SyslType)])])  // tagged union
   case InterfaceType(name: String, methods: List[(String, List[SyslType], SyslType)])  // {itable_ptr, data_ptr}
+  // Nominal/constrained numeric type. Nominal=true means it is NOT compatible with `base`
+  // (requires an explicit cast to mix). `range` carries optional runtime-checked bounds.
+  // A transparent alias (nominal=false && range.isEmpty) should NOT be wrapped — resolve to base.
+  case NamedType(name: String, base: SyslType, nominal: Boolean, range: Option[TypeRange], predicateFunc: Option[String] = None)
+
+  // Strip any NamedType wrappers to expose the structural base type.
+  def underlying: SyslType = this match
+    case NamedType(_, b, _, _, _) => b.underlying
+    case other => other
 
   def isNumeric: Boolean = this match
     case _: IntType | _: UIntType => true
-    case DoubleType => true
+    case _: FloatType => true
+    case NamedType(_, b, _, _, _) => b.isNumeric
     case _ => false
 
   def isIntegral: Boolean = this match
     case _: IntType | _: UIntType => true
+    case NamedType(_, b, _, _, _) => b.isIntegral
+    case _ => false
+
+  def isFloat: Boolean = this match
+    case _: FloatType => true
+    case NamedType(_, b, _, _, _) => b.isFloat
     case _ => false
 
   def isSigned: Boolean = this match
     case _: IntType => true
+    case NamedType(_, b, _, _, _) => b.isSigned
     case _ => false
 
   def isUnsigned: Boolean = this match
     case _: UIntType => true
+    case NamedType(_, b, _, _, _) => b.isUnsigned
     case _ => false
 
   def isBoolOrNumeric: Boolean = this match
-    case _: IntType | _: UIntType | BoolType | DoubleType => true
+    case _: IntType | _: UIntType | BoolType => true
+    case _: FloatType => true
+    case NamedType(_, b, _, _, _) => b.isBoolOrNumeric
     case _ => false
 
   def isPointerLike: Boolean = this match
     case PtrType(_) | ArrayType(_, _) | SliceType(_) | RefType(_) => true
+    case NamedType(_, b, _, _, _) => b.isPointerLike
     case _ => false
 
   // Size in bytes
@@ -48,14 +74,14 @@ enum SyslType:
     case BoolType => 1
     case VoidType => 0
     case PtrType(_) => 8
-    case FuncType(_, _) => 16       // {func_ptr(8), env_ptr(8)} — closure-ready fat pointer
+    case _: FuncType => 16           // {func_ptr(8), env_ptr(8)} — closure-ready fat pointer
     case InterfaceType(_, _) => 16   // {itable_ptr(8), data_ptr(8)} — Go-style interface
     case ArrayType(elem, size) => elem.sizeOf * size
-    case DoubleType => 8
+    case FloatType(w) => w / 8
     case StringType => 16        // ptr(8) + len(8) — Go-style fat pointer
     case SliceType(_) => 24      // ptr(8) + len(4) + cap(4) + backref(8)
     case RefType(_) => 8         // pointer to heap object (refcount header + data)
-    case st @ StructType(_, fields) =>
+    case st @ StructType(_, fields, _) =>
       var offset = 0L
       for (_, typ) <- fields do
         val align = typ.alignOf
@@ -78,6 +104,7 @@ enum SyslType:
       val totalAlign = et.alignOf
       val raw = dataOffset + maxDataSize
       ((raw + totalAlign - 1) / totalAlign) * totalAlign
+    case NamedType(_, b, _, _, _) => b.sizeOf
 
   def alignOf: Long = this match
     case IntType(w) => (w / 8).toLong.min(8)
@@ -85,25 +112,27 @@ enum SyslType:
     case BoolType => 1
     case VoidType => 1
     case PtrType(_) => 8
-    case FuncType(_, _) => 8
+    case _: FuncType => 8
     case InterfaceType(_, _) => 8
     case ArrayType(elem, _) => elem.alignOf
-    case DoubleType => 8
+    case FloatType(w) => (w / 8).toLong.min(8)
     case StringType => 8
     case SliceType(_) => 8
     case RefType(_) => 8
-    case StructType(_, fields) => if fields.isEmpty then 1 else fields.map(_._2.alignOf).max
+    case StructType(_, fields, _) => if fields.isEmpty then 1 else fields.map(_._2.alignOf).max
     case EnumType(_, variants) =>
       val fieldAligns = variants.flatMap(_._2.map(_._2.alignOf))
       if fieldAligns.isEmpty then 4 else fieldAligns.max.max(4)  // at least 4 for tag
+    case NamedType(_, b, _, _, _) => b.alignOf
 
   // Width in bits (for integer types)
   def bitWidth: Int = this match
     case IntType(w) => w
     case UIntType(w) => w
-    case DoubleType => 64
+    case FloatType(w) => w
     case BoolType => 8
     case PtrType(_) => 64
+    case NamedType(_, b, _, _, _) => b.bitWidth
     case _ => 64
 
   override def toString: String = this match
@@ -117,41 +146,44 @@ enum SyslType:
     case UIntType(32) => "u32"
     case UIntType(64) => "u64"
     case UIntType(w) => s"u$w"
-    case DoubleType => "f64"
+    case FloatType(w) => s"f$w"
     case BoolType => "bool"
     case VoidType => "unit"
     case PtrType(t) => s"*$t"
     case ArrayType(t, n) => s"[$n]$t"
-    case FuncType(params, ret) => s"(${params.mkString(", ")}) -> $ret"
-    case StructType(name, _) => name
+    case FuncType(params, ret, esc) => s"${if esc then "@escaping " else ""}(${params.mkString(", ")}) -> $ret"
+    case StructType(name, _, _) => name
     case StringType => "string"
     case SliceType(t) => s"[]$t"
     case RefType(t) => s"&$t"
     case EnumType(name, _) => name
     case InterfaceType(name, _) => name
+    case NamedType(name, _, _, _, _) => name
 
   def toPrefix: String = this match
     case IntType(w) => s"i$w"
     case UIntType(w) => s"u$w"
-    case DoubleType => "f64"
+    case FloatType(w) => s"f$w"
     case BoolType => "bool"
     case VoidType => "void"
     case PtrType(t) => s"ptr ${t.toPrefix}"
     case ArrayType(t, n) => s"arr $n ${t.toPrefix}"
-    case FuncType(params, ret) => s"func ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}"
+    case FuncType(params, ret, _) => s"func ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}"
     case StringType => "string"
     case SliceType(t) => s"slice ${t.toPrefix}"
     case RefType(t) => s"ref ${t.toPrefix}"
-    case StructType(name, fields) => s"struct $name ${fields.size} ${fields.map((n, t) => s"$n ${t.toPrefix}").mkString(" ")}"
+    case StructType(name, fields, _) => s"struct $name ${fields.size} ${fields.map((n, t) => s"$n ${t.toPrefix}").mkString(" ")}"
     case EnumType(name, variants) =>
       val vs = variants.map { (vn, fields) => s"$vn ${fields.size} ${fields.map((n, t) => s"$n ${t.toPrefix}").mkString(" ")}" }.mkString(" ")
       s"enum $name ${variants.size} $vs"
     case InterfaceType(name, methods) =>
       val ms = methods.map { (mn, params, ret) => s"$mn ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}" }.mkString(" ")
       s"iface $name ${methods.size} $ms"
+    // Named/derived types are erased to their underlying representation in serialized form.
+    case NamedType(_, b, _, _, _) => b.toPrefix
 
   def isTuple: Boolean = this match
-    case StructType(name, _) => name.startsWith("_Tuple")
+    case StructType(name, _, _) => name.startsWith("_Tuple")
     case _ => false
 
   // For EnumType: alignment of the data portion (excluding tag)
@@ -173,7 +205,7 @@ object SyslType:
   def mangleType(t: SyslType): String = t match
     case IntType(w) => s"i$w"
     case UIntType(w) => s"u$w"
-    case DoubleType => "f64"
+    case FloatType(w) => s"f$w"
     case BoolType => "bool"
     case VoidType => "void"
     case StringType => "string"
@@ -181,10 +213,11 @@ object SyslType:
     case RefType(inner) => s"r${mangleType(inner)}"
     case SliceType(elem) => s"s${mangleType(elem)}"
     case ArrayType(elem, size) => s"a${size}_${mangleType(elem)}"
-    case FuncType(params, ret) => s"fn${params.length}_${params.map(mangleType).mkString("_")}_${mangleType(ret)}"
-    case StructType(name, _) => name
+    case FuncType(params, ret, _) => s"fn${params.length}_${params.map(mangleType).mkString("_")}_${mangleType(ret)}"
+    case StructType(name, _, _) => name
     case EnumType(name, _) => name
     case InterfaceType(name, _) => name
+    case NamedType(_, b, _, _, _) => mangleType(b)
 
   def tupleType(elemTypes: List[SyslType]): StructType =
     val suffix = elemTypes.map(mangleType).mkString("_")
@@ -202,11 +235,16 @@ object SyslType:
   val U32: UIntType = UIntType(32)
   val U64: UIntType = UIntType(64)
 
+  // Canonical type aliases — floating-point
+  val F32: FloatType = FloatType(32)
+  val F64: FloatType = FloatType(64)
+
   // Source-level aliases
   val Byte: UIntType = U8
   val Char: UIntType = U32
   val Int: IntType = I32
-  val Double: DoubleType.type = DoubleType
+  val Float: FloatType = F32
+  val Double: FloatType = F64
 
   def fromPrefix(s: String): SyslType =
     val tokens = s.split("\\s+").iterator
@@ -220,9 +258,17 @@ object SyslType:
         UIntType(s.drop(1).toInt)
       case s if s.startsWith("i") && s.drop(1).forall(_.isDigit) =>
         IntType(s.drop(1).toInt)
-      case "f64" | "double" => DoubleType
+      case s if s.startsWith("f") && s.drop(1).forall(_.isDigit) =>
+        FloatType(s.drop(1).toInt)
+      case "double" => F64
+      case "float"  => F32
       // Legacy prefix names for backward compatibility
       case "int"  => I32
+      case "uint" => U32
+      case "long" => I64
+      case "ulong" => U64
+      case "short" => I16
+      case "ushort" => U16
       case "char" => U32
       case "byte" => U8
       case "string" => StringType

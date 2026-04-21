@@ -1,0 +1,286 @@
+package io.github.edadma.trisc
+
+import org.scalatest.freespec.AnyFreeSpec
+import org.scalatest.matchers.should.Matchers
+import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach}
+
+/** x86_64 QEMU integration tests for the SLIX login + nsh shell.
+  *
+  * Prerequisites: build the kernel, programs, and ramdisk before running:
+  *   bash oskit/arch/x86_64/build.sh app_nsh
+  *   bash oskit/arch/x86_64/build_prog.sh all
+  *   bash oskit/arch/x86_64/build_servers.sh all
+  *   sbt "triscCliJVM/runMain io.github.edadma.trisc.MakeX86RamdiskMain"
+  *   sbt "triscCliJVM/runMain io.github.edadma.trisc.MakeX86BootInfoMain"
+  *
+  * These tests boot through login (root/toor) before testing the shell. */
+class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
+
+  private var qemu: QemuTestHarness = null
+
+  private def requirePrebuilt(): Unit =
+    assume(
+      new java.io.File("/tmp/slix-x86_64/kernel.elf").exists(),
+      "x86_64 kernel not built — run: bash oskit/arch/x86_64/build.sh app_nsh",
+    )
+
+  override def beforeEach(): Unit =
+    requirePrebuilt()
+    qemu = new QemuTestHarness(timeoutMs = 30000)
+    qemu.start()
+    // Wait for login prompt, then authenticate
+    qemu.waitFor("login: ")
+    qemu.send("root\n")
+    qemu.waitFor("password: ")
+    qemu.send("toor\n")
+    // Wait for shell prompt (login spawns nsh in /root)
+    qemu.waitFor("> ")
+
+  override def afterEach(): Unit =
+    if qemu != null then qemu.close()
+
+  "x86 login: echo command" in {
+    val output = qemu.command("echo hello x86")
+    output should include("hello x86")
+  }
+
+  "x86 login: pwd shows home" in {
+    val output = qemu.command("pwd")
+    output should include("/root")
+  }
+
+  "x86 login: help command" in {
+    val output = qemu.command("help")
+    output should include("builtins:")
+  }
+
+  "x86 login: hello program" in {
+    val output = qemu.command("hello")
+    output should include("Hello")
+  }
+
+  "x86 login: uptime command" in {
+    val output = qemu.command("uptime")
+    // uptime prints a number
+    output.trim should not be empty
+  }
+
+  "x86 login: ls root" in {
+    val output = qemu.command("ls")
+    output should include("etc")
+    output should include("bin")
+  }
+
+  "x86 login: cat /etc/ttytab" in {
+    val output = qemu.command("cat /etc/ttytab")
+    output should include("tty0 login")
+  }
+
+  "x86 login: whoami" in {
+    val output = qemu.command("whoami")
+    output should include("0")
+  }
+
+  "x86 login: ps lists threads" in {
+    val output = qemu.command("ps")
+    // Should show at least RS, disk, tfs, tty, pm, vfs
+    output should include("rs")
+  }
+
+  "x86 login: multiple commands" in {
+    qemu.command("echo first")
+    val output = qemu.command("echo second")
+    output should include("second")
+  }
+
+  "x86 kill: background process" in {
+    // Start count in background — nsh prints "[1] PID"
+    qemu.send("count &\n")
+    val bgOutput = qemu.waitFor("> ")
+    Thread.sleep(2000)
+
+    // Extract PID from nsh's "[N] PID" output
+    val pidPattern = """\[\d+\]\s+(\d+)""".r
+    val countPid = pidPattern.findFirstMatchIn(bgOutput).map(_.group(1))
+    countPid shouldBe defined
+
+    // Kill it
+    qemu.command(s"kill ${countPid.get}")
+    Thread.sleep(1000)
+
+    // Verify count is gone
+    val psAfter = qemu.command("ps")
+    psAfter should not include ("count")
+  }
+
+  "x86 pipe: echo hello | cat" in {
+    val output = qemu.command("echo hello | cat")
+    output should include("hello")
+  }
+
+  "x86 pipe: echo hello | cat | cat" in {
+    val output = qemu.command("echo hello | cat | cat")
+    output should include("hello")
+  }
+
+  // Redirect tests use "/root> " as prompt to avoid matching ">" in commands
+  private val rootPrompt = "/root> "
+
+  "x86 redirect: echo hello > /tmp/out" in {
+    qemu.command("echo hello > /tmp/out", rootPrompt)
+    val output = qemu.command("cat /tmp/out")
+    output should include("hello")
+  }
+
+  "x86 redirect: echo append >>" in {
+    qemu.command("echo line1 > /tmp/app", rootPrompt)
+    qemu.command("echo line2 >> /tmp/app", rootPrompt)
+    val output = qemu.command("cat /tmp/app")
+    output should include("line1")
+    output should include("line2")
+  }
+
+  "x86 redirect: cat < /tmp/in" in {
+    qemu.command("echo inputdata > /tmp/in", rootPrompt)
+    val output = qemu.command("cat < /tmp/in")
+    output should include("inputdata")
+  }
+
+  "x86 redirect: pipe with output redirect" in {
+    qemu.command("echo piped > /tmp/p1", rootPrompt)
+    qemu.command("cat /tmp/p1 | cat > /tmp/p2", rootPrompt)
+    val output = qemu.command("cat /tmp/p2")
+    output should include("piped")
+  }
+
+  "x86 head: first 3 lines from pipe" in {
+    val output = qemu.command("echo aaa | head -3")
+    output should include("aaa")
+  }
+
+  "x86 head: first 2 lines of file" in {
+    qemu.command("echo line1 > /tmp/hf", rootPrompt)
+    qemu.command("echo line2 >> /tmp/hf", rootPrompt)
+    qemu.command("echo line3 >> /tmp/hf", rootPrompt)
+    val output = qemu.command("head -2 /tmp/hf")
+    output should include("line1")
+    output should include("line2")
+    output should not include "line3"
+  }
+
+  "x86 tail: last 2 lines of file" in {
+    qemu.command("echo aaa > /tmp/tf", rootPrompt)
+    qemu.command("echo bbb >> /tmp/tf", rootPrompt)
+    qemu.command("echo ccc >> /tmp/tf", rootPrompt)
+    val output = qemu.command("tail -2 /tmp/tf")
+    output should not include "aaa"
+    output should include("bbb")
+    output should include("ccc")
+  }
+
+  "x86 tail: pipe from cat" in {
+    qemu.command("echo first > /tmp/tp", rootPrompt)
+    qemu.command("echo second >> /tmp/tp", rootPrompt)
+    qemu.command("echo third >> /tmp/tp", rootPrompt)
+    val output = qemu.command("cat /tmp/tp | tail -1")
+    output should not include "first"
+    output should include("third")
+  }
+
+  "x86 wc: count from file" in {
+    qemu.command("echo hello > /tmp/wcf", rootPrompt)
+    val output = qemu.command("wc /tmp/wcf")
+    output should include("1")
+  }
+
+  "x86 pipe: test_pipe 1 write" in {
+    val output = qemu.command("echo x | test_pipe 1")
+    output should include("A")
+  }
+
+  "x86 pipe: test_pipe 2 writes" in {
+    val output = qemu.command("echo x | test_pipe 2")
+    output should include("B")
+  }
+
+  "x86 pipe: test_pipe 3 writes" in {
+    val output = qemu.command("echo x | test_pipe 3")
+    output should include("C")
+  }
+
+  "x86 pipe: test_pipe 4 writes" in {
+    val output = qemu.command("echo x | test_pipe 4")
+    output should include("D")
+  }
+
+  "x86 wc: echo piped to wc" in {
+    val output = qemu.command("echo asdf | wc")
+    output should include("1")
+  }
+
+  "x86 pipe: echo piped to tail" in {
+    val output = qemu.command("echo asdf | tail -1")
+    output should include("asdf")
+  }
+
+  "x86 signal: ctrl-c kills foreground process" in {
+    // Byte 0x03 passes through -chardev stdio,signal=off directly to COM1,
+    // since Java's process pipe bypasses the host terminal.
+    qemu.send("count\n")
+    Thread.sleep(2000)
+    qemu.send("\u0003")
+    qemu.waitFor(rootPrompt)
+    val ps = qemu.command("ps")
+    ps should not include "count"
+  }
+
+  "x86 ds: publish, retrieve, delete int and string" in {
+    // Int round-trip
+    qemu.command("ds set answer 42")
+    val getAnswer = qemu.command("ds get answer")
+    getAnswer should include("42")
+
+    // String round-trip
+    qemu.command("ds set greeting hello")
+    val getGreeting = qemu.command("ds get greeting")
+    getGreeting should include("hello")
+
+    // Delete + retrieve should miss
+    qemu.command("ds del answer")
+    val afterDel = qemu.command("ds get answer")
+    afterDel should include("not found")
+  }
+
+  "x86 C program: test_c receives argc and argv" in {
+    // test_c is written in C and linked with c_crt0.c (the POSIX->Sysl
+    // crt0 bridge). It prints argc and joined argv[1..], returning argc
+    // as exit code — exercises the C side of the POSIX argv contract.
+    val output = qemu.command("test_c hello world")
+    output should include("argc=3")
+    output should include("hello world")
+  }
+
+  "x86 crash recovery: kill tfs and restart" in {
+    // Find tfs PID from ps output
+    val psOut = qemu.command("ps")
+    val tfsLine = psOut.split('\n').find(_.contains("tfs"))
+    tfsLine shouldBe defined
+    val nums = tfsLine.get.trim.split("\\s+")
+    val tfsPid = nums(1) // PID is second column
+
+    // Kill tfs and verify RS detects and restarts it
+    qemu.send(s"kill $tfsPid\n")
+    val killOutput = qemu.waitFor("restarted ok")
+    killOutput should include("RS: restarting tfs")
+    killOutput should include("RS: tfs restarted ok")
+
+    // Verify system is fully functional after restart —
+    // port transfer means clients keep working transparently
+    Thread.sleep(200)
+    val psAfter = qemu.command("ps")
+    psAfter should include("tfs")
+
+    val after = qemu.command("cat /etc/ttytab")
+    after should include("tty0 login")
+  }
+}

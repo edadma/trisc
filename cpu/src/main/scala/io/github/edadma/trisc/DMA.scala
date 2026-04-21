@@ -22,6 +22,7 @@ package io.github.edadma.trisc
  *   bit 8      — IRQ_QUIET: if 0, raise interrupt on completion
  *   bit 9      — ENABLE: channel is active (set on trigger, cleared on completion)
  *   bit 10     — BUSY: transfer in progress (read-only)
+ *   bit 11     — PHYS_MODE: bypass MMU, addresses are physical
  *
  * Global registers (offset 192):
  *   +192  INTS     (2B, R)   — interrupt status (bit per channel, read-only)
@@ -72,6 +73,7 @@ class DMA(val base: Long, var mem: Addressable, intc: InterruptController, irq: 
   private val IRQ_QUIET = 0x100
   private val ENABLE = 0x200
   private val BUSY = 0x400
+  private val PHYS_MODE = 0x800
 
   private def dataSize(ch: Int): Int = 1 << (ctrl(ch) & DATA_SIZE_MASK) // 1, 2, 4, or 8
   private def chainTo(ch: Int): Int = (ctrl(ch) & CHAIN_TO_MASK) >> CHAIN_TO_SHIFT
@@ -79,12 +81,13 @@ class DMA(val base: Long, var mem: Addressable, intc: InterruptController, irq: 
 
   /** Translate a virtual address through the MMU (if present and enabled).
     * DMA uses supervisor mode since it's initiated by kernel code. */
-  private def xlat(addr: Long, access: Access): Long =
-    mmu match
+  private def xlat(addr: Long, access: Access, phys: Boolean = false): Long =
+    if phys then addr
+    else mmu match
       case Some(m) if m.enabled =>
         m.translate(addr, access, supervisor = true) match
-          case Right(phys) => phys
-          case Left(_)     => addr // fallback on fault (shouldn't happen with correct OS)
+          case Right(p) => p
+          case Left(_)  => addr // fallback on fault (shouldn't happen with correct OS)
       case _ => addr
 
   // ===== Register access =====
@@ -205,11 +208,12 @@ class DMA(val base: Long, var mem: Addressable, intc: InterruptController, irq: 
     val count = transCount(ch)
     val incrRead = (ctrl(ch) & INCR_READ) != 0
     val incrWrite = (ctrl(ch) & INCR_WRITE) != 0
+    val physMode = (ctrl(ch) & PHYS_MODE) != 0
 
     var i = 0
     while i < count do
-      val rAddr = xlat(readAddr(ch), Access.Read)
-      val wAddr = xlat(writeAddr(ch), Access.Write)
+      val rAddr = xlat(readAddr(ch), Access.Read, physMode)
+      val wAddr = xlat(writeAddr(ch), Access.Write, physMode)
       sz match
         case 1 => mem.writeByte(wAddr, mem.readByte(rAddr))
         case 2 => mem.writeShort(wAddr, mem.readShort(rAddr))
@@ -246,10 +250,11 @@ class DMA(val base: Long, var mem: Addressable, intc: InterruptController, irq: 
     while ch < NUM_CHANNELS do
       if isEnabled(ch) && transCount(ch) > 0 then
         val sz = dataSize(ch)
+        val physMode = (ctrl(ch) & PHYS_MODE) != 0
 
         // Transfer one element
-        val rAddr = xlat(readAddr(ch), Access.Read)
-        val wAddr = xlat(writeAddr(ch), Access.Write)
+        val rAddr = xlat(readAddr(ch), Access.Read, physMode)
+        val wAddr = xlat(writeAddr(ch), Access.Write, physMode)
         sz match
           case 1 =>
             val b = mem.readByte(rAddr)

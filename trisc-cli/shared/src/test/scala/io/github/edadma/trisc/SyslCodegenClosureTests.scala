@@ -148,6 +148,36 @@ class SyslCodegenClosureTests extends SyslCodegenHelpers {
         |""".stripMargin) shouldBe 42
   }
 
+  // ===== Non-escaping (no malloc needed) =====
+  //
+  // Closures with captures that are all non-rc-bearing (ints, raw pointers, etc.)
+  // and that are passed directly as a function argument get a stack-allocated env
+  // pre-allocated by the caller — no malloc, no free. This is what makes closures
+  // usable in no-allocator contexts (kernel, bare-metal). See FuncKind.StackEnv
+  // in SyslTriscCodegen for details.
+
+  "non-escaping capture: no malloc required" in {
+    // This test has NO malloc — proves the env is stack-allocated
+    compileAndRun(
+      """apply(f: (int) -> int, x: int) -> int = f(x)
+        |
+        |main() -> int
+        |    val a = 10
+        |    apply(x -> x + a, 32)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "non-escaping capture: multiple captures no malloc" in {
+    compileAndRun(
+      """apply(f: (int) -> int, x: int) -> int = f(x)
+        |
+        |main() -> int
+        |    val a = 10
+        |    val b = 20
+        |    apply(x -> x + a + b, 12)
+        |""".stripMargin) shouldBe 42
+  }
+
   // ===== Expressions =====
 
   "closure in arithmetic expression" in {

@@ -54,14 +54,15 @@ Source code always uses the short name — the compiler resolves it to the mangl
 | Type | Alias | Size | Description |
 |------|-------|------|-------------|
 | `i8` | | 1 byte | signed 8-bit integer |
-| `i16` | | 2 bytes | signed 16-bit integer |
+| `i16` | `short` | 2 bytes | signed 16-bit integer |
 | `i32` | `int` | 4 bytes | signed 32-bit integer |
-| `i64` | | 8 bytes | signed 64-bit integer |
+| `i64` | `long` | 8 bytes | signed 64-bit integer |
 | `u8` | `byte` | 1 byte | unsigned 8-bit integer |
-| `u16` | | 2 bytes | unsigned 16-bit integer |
-| `u32` | `char` | 4 bytes | unsigned 32-bit integer (Unicode codepoint) |
-| `u64` | | 8 bytes | unsigned 64-bit integer |
-| `f64` | `double` | 8 bytes | 64-bit floating point |
+| `u16` | `ushort` | 2 bytes | unsigned 16-bit integer |
+| `u32` | `char`, `uint` | 4 bytes | unsigned 32-bit integer (Unicode codepoint) |
+| `u64` | `ulong` | 8 bytes | unsigned 64-bit integer |
+| `f32` | `float` | 4 bytes | IEEE-754 single-precision floating point |
+| `f64` | `double` | 8 bytes | IEEE-754 double-precision floating point |
 | `bool` | | 1 byte | `true` or `false` |
 | `unit` | | 0 bytes | no value |
 | `string` | | 16 bytes | fat pointer: `{ptr: *u8, len: i64}` |
@@ -78,10 +79,38 @@ To avoid wrapping, widen operands explicitly before arithmetic: `int(a) + int(b)
 
 This matches Go, Rust, and Swift. C-style implicit integer promotion is not used.
 
+### Overflow Intrinsics
+
+When you want explicit, intent-marked overflow behavior, use the polymorphic
+intrinsics. All take two operands of the same integer type and return the
+same integer type:
+
+| Intrinsic | Behavior |
+|-----------|----------|
+| `wrapping_add(a, b)` | Two's-complement wrap on overflow (current default for `+`) |
+| `wrapping_sub(a, b)` | Two's-complement wrap on underflow |
+| `wrapping_mul(a, b)` | Low bits of the true product |
+| `saturating_add(a, b)` | Clamp to the type's MAX (or MIN for signed underflow) |
+| `saturating_sub(a, b)` | Clamp to the type's MIN (0 for unsigned) |
+| `saturating_mul(a, b)` | Clamp to the type's MAX/MIN on overflow |
+
+```sysl
+var a: u8 = 200
+var b: u8 = 100
+wrapping_add(a, b)     // 44   (300 & 0xFF)
+saturating_add(a, b)   // 255  (clamped to u8 MAX)
+saturating_sub(b, a)   // 0    (clamped to u8 MIN, would have been -100)
+```
+
+> **TRISC backend:** `saturating_*` on 64-bit types and `saturating_mul` on
+> `u32` are not yet supported (would require explicit overflow detection or
+> 128-bit intermediate). LLVM backend supports all widths.
+
 ### Composite Types
 
 ```sysl
 *T              // raw pointer (8 bytes, unmanaged)
+*T not null     // raw pointer constrained to be non-null at produce sites
 &T              // ref-counted reference (8 bytes, auto-freed at rc=0)
 [n]T            // fixed-size array (n * sizeof(T) bytes, stack-allocated)
 []T             // slice: {ptr: *T, len: i32, cap: i32} (16 bytes)
@@ -89,6 +118,13 @@ This matches Go, Rust, and Swift. C-style implicit integer promotion is not used
 (T1, T2, T3)   // tuple (desugars to anonymous struct)
 (P1, P2) -> R  // function pointer / closure (16 bytes: {func_ptr, env_ptr})
 ```
+
+**`not null` pointers.** `*T not null` is a subtype of `*T` with a runtime check: every
+assignment, parameter bind, return, or cast that produces a `*T not null` value verifies the
+pointer is non-null. A null value traps at the produce site. The check is inserted via the
+same `where`-predicate mechanism used for user-defined predicates (a synthesized checker
+function per inner type). `*T not null` is pointer-compatible with `*T`, so it can be passed
+anywhere a `*T` is expected.
 
 ### Struct Types
 
@@ -153,6 +189,12 @@ s match
     Empty -> 0                 // match no-data variant
 ```
 
+**Exhaustiveness.** A `match` on a data-enum value must cover every variant, or include a
+wildcard `_ -> ...` or `else -> ...` default. Missing variants produce a compile error
+listing them. Guarded arms (`Circle(r) if r > 0 -> ...`) do not count toward exhaustiveness
+since the guard may be false. (Non-enum matches, e.g. on integers or strings, do not require
+exhaustiveness — the user is responsible for covering their own domain.)
+
 **As function parameters and return values:**
 ```sysl
 area(s: Shape) -> int
@@ -212,7 +254,55 @@ enum Tree
 
 **Memory layout:** `{tag: i32, padding, data: union of variant fields}`. The tag is a small integer (0, 1, 2...) identifying the variant. Data is overlapping storage sized to the largest variant. `sizeof(Shape)` returns the total size including tag and padding.
 
+### Type Declarations
+
+Two orthogonal modifiers compose, plus optional runtime checks. Forms:
+
+```sysl
+type Callback = (int) -> int                // plain alias (transparent)
+type Age      = int within 0..150            // subtype: base-compatible, range-checked
+type Meters   = new f64                      // derived: nominally distinct, no cast mixing
+type SafeAge  = new int within 0..150        // derived + constrained
+type Even     = int where value % 2 == 0     // arbitrary predicate on value
+type PosEven  = int within 0..100 where value % 2 == 0   // within + where combined
+```
+
+| Form                              | Base-compatible? | Runtime check? |
+|-----------------------------------|------------------|----------------|
+| `type A = B`                      | yes              | no             |
+| `type A = B within r`             | yes              | range          |
+| `type A = B where p`              | yes              | predicate      |
+| `type A = new B`                  | no               | no             |
+| `type A = new B within r`         | no               | range          |
+| `type A = new B where p`          | no               | predicate      |
+| `type A = [new] B within r where p` | …              | both           |
+
+**Range syntax.** Bounds must be numeric literals (including `char`, which is `u32`) or
+references to a `const`; optional unary sign is allowed.
+
+| Syntax     | Meaning                     | Example                                     |
+|------------|-----------------------------|---------------------------------------------|
+| `lo..hi`   | Inclusive: `[lo, hi]`        | `type Age = int within 0..150`              |
+| `lo..<hi`  | Exclusive upper: `[lo, hi)`  | `type Prob = f64 within 0.0..<1.0`          |
+
+**Where predicates.** `where <bool-expr>` attaches an arbitrary boolean predicate. Inside the
+predicate, `value` binds to the value being checked. The predicate runs at every produce site
+(assignment, parameter bind, return, explicit cast). A dedicated synthetic function
+`__pred_<TypeName>(value) -> value` is emitted and called at each check site; unlike
+`within` bounds, `where` predicates are not compile-time folded even for literals.
+
+**Compatibility.** Subtypes (without `new`) are transparently compatible with their base; no
+cast is needed, and runtime checks (range and/or predicate) fire on each assignment, parameter
+bind, return, or explicit cast that produces a value of the constrained type. Derived types
+(with `new`) are nominally distinct from both their base and other derived types over the same
+base — mixing them with the base in arithmetic or assignment is a compile error; use an
+explicit cast (`Meters(3.0)` to wrap, `f64(m)` to unwrap). Arithmetic between two values of
+the same derived type yields that derived type. Out-of-range literal bounds are caught at
+compile time; any runtime violation traps.
+
 ### Type Aliases
+
+Plain aliases are the first form above — a transparent name for a type:
 
 ```sysl
 type IntPtr = *int
@@ -238,7 +328,7 @@ The same struct definition supports three usage modes at the use site:
 - `ref -> ptr`: `&r` (unsafe, no refcount change)
 - `ptr -> ref`: **always an error** (can't manufacture a refcount)
 - `value -> ptr`: `&v` (address-of)
-- `ptr -> value`: `*p` (dereference)
+- `ptr -> value`: `*p` (dereference); implicit for struct function arguments
 
 ---
 
@@ -262,7 +352,31 @@ var p: *Node
 // Inferred type (mutable by default in blocks)
 x = 42               // inferred as int
 name = "hello"       // inferred as string
+
+// Volatile — prevents load/store optimization (MMIO, shared memory)
+volatile var status: u32 = 0
+volatile var flag: int
 ```
+
+### Volatile
+
+The `volatile` qualifier prevents the compiler from optimizing away, reordering, or coalescing loads and stores. Use it for memory-mapped I/O registers and shared-memory variables.
+
+Variables:
+```sysl
+volatile var mmio_status: u32 = 0
+volatile var shared_flag: int
+```
+
+Struct fields:
+```sysl
+struct UartRegs
+    volatile status: u32
+    volatile data: u32
+    baud: int            // non-volatile, normal optimization allowed
+```
+
+In the LLVM backend, `volatile` emits `load volatile` and `store volatile` instructions. The TRISC backend is unaffected (it does not optimize loads/stores).
 
 ### Discard Binding (`_`)
 
@@ -297,18 +411,29 @@ main() -> int
 
 ### Compile-Time Constants
 
-Immutable `val` declarations with constant integer initializers are folded at compile time. References to such vals are replaced with their literal values — no variable is allocated, no load is generated.
+Use `const` to declare a compile-time integer constant. The initializer must be evaluable at
+compile time; the declaration emits no storage and references are replaced with the folded
+literal value.
 
 ```sysl
-val BASE = 0x1000
-val STATUS = BASE + 4        // folded to 0x1004
-val DATA = BASE + 8          // folded to 0x1008
-val MASK = 0xFF & (1 << 4)   // folded to 0x10
+const BASE = 0x1000
+const STATUS = BASE + 4        // folded to 0x1004
+const DATA = BASE + 8          // folded to 0x1008
+const MASK = 0xFF & (1 << 4)   // folded to 0x10
+
+type Age = int within 0..MAX_AGE   // const can be used in `within` bounds
 ```
 
-Constant folding supports `+`, `-`, `*`, `/`, `%`, `<<`, `>>`, `&`, `|`, `^`, unary `-`/`~`, and casts. Chained references work: `val C = A + B` where `A` and `B` are themselves constant vals. Values are truncated to the target type's width (e.g., `u32` wraps at 2^32).
+Supported in initializers: `+`, `-`, `*`, `/`, `%`, `<<`, `>>`, `&`, `|`, `^`, unary `-`/`~`,
+numeric/char/bool literals, and references to other `const` names. An initializer that
+cannot be folded is a compile error. Values are truncated to the target type's width.
 
-This works for both module-level and local vals, across module boundaries.
+`const` is valid at both module and function scope. Currently only integer types are
+supported — `const PI: f64 = 3.14` is not yet accepted.
+
+Note: `val` is also folded when the initializer happens to be constant, but unlike `const`
+it additionally allocates storage (and accepts non-const initializers). Prefer `const` when
+you want the guarantee and zero-storage behaviour.
 
 ---
 
@@ -339,6 +464,64 @@ getAnswer() -> int = 42
 uart_puts(s: string) = for c in s do uart_putc(int(c))
 wait_ready() = while !ready() do noop()
 ```
+
+### Design by Contract — `require` / `ensure`
+
+A block-body function can declare preconditions and postconditions at the top of its body:
+
+```sysl
+sqrt(x: f64) -> f64
+    require x >= 0.0
+    ensure result >= 0.0
+    ensure result * result <= x + 1.0e-6
+    var r = x / 2.0
+    for _ in 0 downTo 20 step 1 do r = 0.5 * (r + x / r)
+    r
+```
+
+- **`require <bool> [, "message"]`** — evaluated once on function entry. Traps if false.
+- **`ensure <bool> [, "message"]`** — evaluated before every return site (including the
+  implicit fall-through return of a trailing expression). Traps if false.
+- Multiple `require` and `ensure` clauses are allowed, in any order. All clauses must appear
+  before the first regular statement.
+- Both run-time checks go through the standard trap path (same as range checks).
+
+An optional string message can follow the condition, comma-separated (like Scala's
+`require(cond, msg)`). The message appears in the runtime error for debugging:
+
+```sysl
+pos(x: int) -> int
+    require x >= 0, "x must be non-negative"
+    ensure result > 0, "pos() result must be positive"
+    x + 1
+```
+
+On failure: `"precondition check failed: x must be non-negative"`. The message is emitted
+by the LLVM backend and the interpreter; the TRISC and SVM backends currently trap with a
+fixed error code.
+
+**`result` in `ensure` clauses.** Inside an `ensure` expression, the identifier `result`
+refers to the function's return value. Outside `ensure` — in `require` or in the body —
+`result` is just a normal identifier and may be used for your own variables. The analyzer
+aliases `result` → `__result__` only while typechecking ensure expressions (same pattern
+used for `self` → `__self__` in methods).
+
+**`old(expr)` in `ensure` clauses.** Captures the value of `expr` at function entry, before
+any body statement runs. Essential for contracts about mutation:
+
+```sysl
+increment(p: *int)
+    ensure *p == old(*p) + 1
+    *p = *p + 1
+```
+
+`old()` may only appear inside `ensure` clauses; using it elsewhere is a normal undefined-
+function error. Each `old(expr)` call allocates a hidden snapshot local that is initialized
+at the top of the function body — so later mutations of the underlying variable or pointee
+do not affect what `old()` sees. `old()` accepts any expression (pointer derefs, field
+accesses, arithmetic, calls), but nested `old(old(...))` is rejected.
+
+Contracts are not yet supported on expression-body functions or on closures.
 
 ### Default Parameter Values
 
@@ -829,7 +1012,24 @@ val f: (int) -> int = x -> x * 2
 f(21)                            // 42
 ```
 
-**Implementation:** All function values (including plain function pointers) are 16-byte fat pointers: `{func_ptr: i64, env_ptr: i64}`. Plain function pointers have `env_ptr = 0`. Closures with captures heap-allocate an environment struct and store captured values by copy. The `env_ptr` is passed to the closure function via register r3 in the TRISC calling convention.
+**Escaping closures:** Function parameters are **non-escaping by default** — the closure's captured environment is stack-allocated. Use `@escaping` to mark parameters where the callee may store the closure beyond the call's lifetime:
+
+```sysl
+// Non-escaping (default): env lives on caller's stack frame
+sort_by(arr: []int, cmp: (int, int) -> bool)
+
+// Escaping: env is heap-allocated via malloc
+on_click(handler: @escaping () -> unit)
+```
+
+Non-escaping closures are more efficient (no heap allocation) but the compiler trusts the annotation — storing a non-escaping closure into a global, struct field, or returning it is undefined behavior. Closures with no expected type context (e.g., `val f = x -> x + 1`) default to escaping.
+
+**Implementation:** All function values (including plain function pointers) are 16-byte fat pointers: `{func_ptr: i64, env_ptr: i64}`. Plain function pointers have `env_ptr = 0`. The environment allocation strategy depends on capture types:
+
+- **Non-escaping, captures all non-rc-bearing** (ints, raw pointers, etc.): the environment is allocated on the caller's stack frame — no malloc, no free. This is what makes closures usable in no-allocator (kernel/bare-metal) contexts.
+- **Escaping, OR any rc-bearing capture** (string, ref, struct-with-string, enum-with-string, …): the environment is heap-allocated with a `[rc:i64 @ -16 | deinit_ptr:i8* @ -8 | data]` header. Closure descriptor scope-exit decrements the env's refcount; at zero, a per-closure-id deinit walks the captures (decr'ing rc-bearing entries) and `free` reclaims the env block.
+
+The `env_ptr` is passed to the closure function via register r3 in the TRISC calling convention (LLVM passes it as the first hidden parameter `i8* %env`).
 
 ### Extern Declarations
 
@@ -875,7 +1075,14 @@ true, false           // bool
 0xFFu64               // u64
 ```
 
-Float literals (`3.14`, `1e5`) are always `f64`. There is no `f32` type.
+Float literals (`3.14`, `1e5`) default to `f64`, but coerce to `f32` when the
+context demands it (`var x: f32 = 1.5` works without a cast). Mixed-width float
+arithmetic widens to the wider operand; `f64 -> f32` requires explicit `f32(x)`.
+
+> **Backend note:** TRISC stores `f32` as 4 bytes in memory but works with it as
+> `f64` in registers (using `f32tof64`/`f64tof32` at memory boundaries). LLVM
+> uses native `float` throughout. Both backends are correct; TRISC's approach
+> trades 4 bytes per `f32` register slot for simpler arithmetic codegen.
 
 **Escape sequences** in string and char literals:
 
@@ -943,6 +1150,8 @@ bool(42)          // int -> bool: true (nonzero)
 byte(0x1FF)       // truncate to u8: 255
 char(65)          // int -> u32: 65
 i64(3.14)         // float -> int: 3
+f32(3.14)         // f64 -> f32 (precision narrowing)
+f64(x: f32)       // f32 -> f64 (lossless widening, also implicit)
 
 // Pointer / int conversions
 *i8(address)      // int -> pointer
@@ -957,6 +1166,12 @@ bool(ptr)         // pointer -> bool (null = false)
 // Function pointers
 i64(funcPtr)      // func -> int (address)
 bool(funcPtr)     // func -> bool (non-null = true)
+
+// Array decay (address of first element)
+*byte(arr)        // [N]T -> *byte
+*i64(arr)         // [N]T -> *i64
+i64(arr)          // [N]T -> i64 (address as integer)
+string(arr, len)  // [N]byte + len -> string
 ```
 
 ### sizeof
@@ -1339,7 +1554,7 @@ puts(s"cost is $$5")        // prints "cost is $5" ($$ = literal $)
 
 Plain strings (`"..."`) are never interpolated — `$` is just a regular character.
 
-Non-string expressions are automatically converted via `str()`. Integer, boolean, and float (`f64`) types are supported.
+Non-string expressions are automatically converted via `str()`. Integer, boolean, and float (`f32`/`f64`) types are supported.
 
 ### Format Strings (f-strings)
 
@@ -1401,11 +1616,17 @@ str(-5)                   // "-5"
 str(0)                    // "0"
 str("hello")              // "hello" (identity for strings)
 str(3.14)                 // "3.140000" (codegen: fixed 6-digit fractional)
+str(Circle(5))            // "Circle" (variant name of a data-enum value)
 ```
 
 Float formatting uses fixed 6-digit fractional precision in TRISC codegen
 (`3.14 -> "3.140000"`). The interpreter uses the host's default float
 formatting (`3.14 -> "3.14"`).
+
+`str()` on a data-enum (tagged union) value returns the variant name as a string, regardless
+of the variant's field contents. Each enum type gets one synthesized `__str_<EnumName>`
+helper the first time it's referenced. Simple integer enums and struct values are not yet
+supported — use field formatting manually.
 
 ### String Construction from Bytes
 
@@ -1462,7 +1683,8 @@ User-defined functions shadow builtins of the same name.
 - Signed: `i8` -> `i16` -> `i32` -> `i64`
 - Unsigned: `u8` -> `u16` -> `u32` -> `u64`
 - Cross-sign: `u8` -> `i16` (unsigned fits in wider signed)
-- Int to float: any integer -> `f64`
+- Float: `f32` -> `f64`
+- Int to float: any integer -> `f32` or `f64`
 
 ### Mixed Signed/Unsigned Rules
 
@@ -1483,6 +1705,44 @@ var y: int = big + 1     // ERROR: u32 doesn't fit in i32
 - `string` -> `*u8` or `*i8`
 - `&T` -> `*U` (ref decays to raw pointer)
 - Any `*T` -> any `*U` (permissive pointer casting)
+
+### Pointer Dereference Is Explicit
+
+Passing `*T` to a function parameter of type `T` is a **type error**. Implicit
+deref-and-copy was removed because it hides cost: a pointer-passing site that
+*looks* like pass-by-reference silently becomes a `memcpy` of the entire pointee.
+For a small struct that's free; for a 4 KB packet it isn't. Write the deref:
+
+```sysl
+struct Point
+    x: int
+    y: int
+
+sum(p: Point) -> int = p.x + p.y
+
+main() -> int
+    var p = Point(20, 22)
+    val ptr: *Point = &p
+    sum(*ptr)              // explicit: sum receives a copy of *ptr
+```
+
+Equivalently, take the pointer's pointee directly: `sum(p)` (no `&`/`*` at all).
+
+The reverse direction (`T` -> `*T`) is also not implicit — it would create
+a dangling pointer to a temporary.
+
+### Exception: `self` In Methods
+
+Inside a method body `self` has type `*StructName`. Passing `self` to a function
+that expects the value type auto-derefs, because the method-call sugar already
+hides the pointer:
+
+```sysl
+Point.total() -> int = sum(self)   // self is *Point; sum gets a copy of *self
+```
+
+This is the **only** implicit `*T -> T` allowed. Local variables of pointer
+type, function parameters, struct fields — all require explicit `*ptr`.
 
 ### Explicit Casts Required
 

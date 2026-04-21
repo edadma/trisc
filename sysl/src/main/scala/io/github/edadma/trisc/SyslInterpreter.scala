@@ -33,13 +33,14 @@ enum Value:
   case PtrVal(ptr: Pointer)
   case ArrVal(cells: Array[Cell], offset: Int)
   case FuncVal(name: String)
-  case StrVal(s: String)
   case SliceVal(cells: Array[Cell], offset: Int, length: Int, capacity: Int)
   case RefVal(cells: Array[Cell], refCount: java.util.concurrent.atomic.AtomicInteger, typeName: String = "")
   case RefSliceVal(cells: Array[Cell], length: Int, refCount: java.util.concurrent.atomic.AtomicInteger)
   case EnumVal(tag: Int, fields: Array[Cell])
   case RefEnumVal(tag: Int, fields: Array[Cell], refCount: java.util.concurrent.atomic.AtomicInteger)
-  case RefStringVal(bytes: Array[Byte], length: Int, refCount: java.util.concurrent.atomic.AtomicInteger)
+  // Sysl strings: immutable UTF-8 byte sequence. JVM GC handles lifetime — no refcount.
+  // Iterate bytes when needed (matches native semantics where strings are byte arrays).
+  case StringVal(bytes: Array[Byte])
   case ClosureVal(body: TFunBody, params: List[TParam], captured: scala.collection.mutable.LinkedHashMap[String, Cell])
   case InterfaceVal(methodMap: Map[String, String], dataVal: Value, concreteType: SyslType)
 
@@ -63,8 +64,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val pv = evalAny(expr, env)
         // String comparison must be structural (byte-for-byte), not pointer-based.
         (pv, value) match
-          case (RefStringVal(lb, ll, _), RefStringVal(rb, rl, _)) =>
-            java.util.Arrays.equals(lb, 0, ll, rb, 0, rl)
+          case (StringVal(lb), StringVal(rb)) => java.util.Arrays.equals(lb, rb)
           case _ => toLong(pv) == toLong(value)
       case TRangePattern(low, high) =>
         val v = toLong(value)
@@ -106,11 +106,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case ArrVal(cells, off) => pointerToLong(ArrayPtr(cells, off))
     case RefVal(cells, _, _) => pointerToLong(ArrayPtr(cells, 0))
     case RefSliceVal(cells, _, _) => pointerToLong(ArrayPtr(cells, 0))
-    case RefStringVal(bytes, _, _) => pointerToLong(ArrayPtr(bytes.map(b => new Cell(IntVal(b & 0xff))), 0))
+    case StringVal(bytes) => pointerToLong(ArrayPtr(bytes.map(b => new Cell(IntVal(b & 0xff))), 0))
     case FuncVal(_)         => 1L // non-zero sentinel for casts (address not meaningful in interpreter)
     case ClosureVal(_, _, _) => 1L // non-zero sentinel
     case InterfaceVal(_, _, _) => throw RuntimeError("expected integer, got interface")
-    case StrVal(_)          => throw RuntimeError("expected integer, got string")
     case SliceVal(_, _, _, _) => throw RuntimeError("expected integer, got slice")
     case EnumVal(_, _) => throw RuntimeError("expected integer, got enum value")
     case RefEnumVal(_, _, _) => throw RuntimeError("expected integer, got ref enum value")
@@ -189,7 +188,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     "putchar" -> (args => { output(toLong(args.head).toChar.toString); args.head }),
     "print" -> (args => { args.foreach { case FloatVal(d) => output(formatDouble(d)); case a => output(toLong(a).toString) }; IntVal(0) }),
     "println" -> (args => { args.foreach { case FloatVal(d) => output(formatDouble(d)); case a => output(toLong(a).toString) }; output("\n"); IntVal(0) }),
-    "puts" -> (args => { args.head match { case RefStringVal(bytes, len, _) => output(new String(bytes, 0, len, "UTF-8")); case _ => throw RuntimeError("puts: expected string") }; IntVal(0) }),
+    "puts" -> (args => { args.head match { case StringVal(bytes) => output(new String(bytes, "UTF-8")); case _ => throw RuntimeError("puts: expected string") }; IntVal(0) }),
     "puti" -> (args => { output(toLong(args.head).toString); IntVal(0) }),
     "malloc" -> (args => {
       val size = toLong(args.head).toInt
@@ -234,16 +233,14 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     "abort" -> (_ => throw RuntimeError("abort")),
     "panic" -> (args => {
       val msg = args.headOption match
-        case Some(RefStringVal(bytes, len, _)) => new String(bytes, 0, len, "UTF-8")
-        case Some(StrVal(s)) => s
+        case Some(StringVal(bytes)) => new String(bytes, "UTF-8")
         case _ => "panic"
       throw RuntimeError(msg)
     }),
     "assert" -> (args => {
       if toLong(args.head) == 0 then
         val msg = args.lift(1) match
-          case Some(RefStringVal(bytes, len, _)) => new String(bytes, 0, len, "UTF-8")
-          case Some(StrVal(s)) => s
+          case Some(StringVal(bytes)) => new String(bytes, "UTF-8")
           case _ => "assertion failed"
         throw RuntimeError(msg)
       IntVal(0)
@@ -253,8 +250,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       val expected = toLong(args(1))
       if actual != expected then
         val label = args.lift(2) match
-          case Some(RefStringVal(bytes, len, _)) => new String(bytes, 0, len, "UTF-8")
-          case Some(StrVal(s)) => s
+          case Some(StringVal(bytes)) => new String(bytes, "UTF-8")
           case _ => "expect"
         throw RuntimeError(s"$label: expected $expected, got $actual")
       IntVal(0)
@@ -278,6 +274,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TEnumDecl => // type only, no runtime effect
         case _: TDataEnumDecl => // type only, no runtime effect
         case _: TTypeAliasDecl => // type only, no runtime effect
+        case _: TConstDecl => // const is fully folded at analyzer level
         case _: TInterfaceDecl => // type only, no runtime effect
         case f: TFunDecl =>
           functions(f.name) = f
@@ -286,7 +283,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case -1 => f.name.dropRight(7)
               case i  => f.name.substring(i + 2).dropRight(7)
             deinitMap(structName) = f.name
-        case TVarDecl(name, _, init, _) =>
+        case TVarDecl(name, _, init, _, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
     functions.get("main") match
@@ -305,6 +302,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         case _: TEnumDecl => // type only
         case _: TDataEnumDecl => // type only
         case _: TTypeAliasDecl => // type only
+        case _: TConstDecl => // const is fully folded at analyzer level
         case _: TInterfaceDecl => // type only
         case f: TFunDecl =>
           functions(f.name) = f
@@ -313,7 +311,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case -1 => f.name.dropRight(7)
               case i  => f.name.substring(i + 2).dropRight(7)
             deinitMap(structName) = f.name
-        case TVarDecl(name, _, init, _) =>
+        case TVarDecl(name, _, init, _, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
   /** Invoke a zero-arg function by name. Throws RuntimeError on panic. */
@@ -382,7 +380,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case RefVal(_, rc, _) => if rc.get() != IMMORTAL_RC then rc.incrementAndGet()
     case RefEnumVal(_, _, rc) => if rc.get() != IMMORTAL_RC then rc.incrementAndGet()
     case RefSliceVal(_, _, rc) => if rc.get() != IMMORTAL_RC then rc.incrementAndGet()
-    case RefStringVal(_, _, rc) => if rc.get() != IMMORTAL_RC then rc.incrementAndGet()
+    // strings: JVM GC handles lifetime, no refcount
     case _ =>
 
   private def refDecr(v: Value): Unit = v match
@@ -402,9 +400,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case RefSliceVal(_, _, rc) =>
       if rc.get() != IMMORTAL_RC then
         if rc.decrementAndGet() <= 0 then ()
-    case RefStringVal(_, _, rc) =>
-      if rc.get() != IMMORTAL_RC then
-        if rc.decrementAndGet() <= 0 then ()
+    // strings: JVM GC handles lifetime, no refcount
     case _ =>
 
   private def derefCell(v: Value): Cell = v match
@@ -443,19 +439,19 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case SyslType.SliceType(_) =>
       SliceVal(Array.empty[Cell], 0, 0, 0)
     case SyslType.BoolType => IntVal(0)
-    case SyslType.StringType =>
-      RefStringVal(Array.empty, 0, new java.util.concurrent.atomic.AtomicInteger(1))
+    case SyslType.StringType => StringVal(Array.empty)
     case _: SyslType.IntType | _: SyslType.UIntType => IntVal(0)
-    case SyslType.DoubleType => FloatVal(0.0)
-    case SyslType.VoidType | SyslType.FuncType(_, _) | SyslType.InterfaceType(_, _) => IntVal(0)
+    case _: SyslType.FloatType => FloatVal(0.0)
+    case SyslType.VoidType | (_: SyslType.FuncType) | SyslType.InterfaceType(_, _) => IntVal(0)
     case SyslType.EnumType(_, _) => EnumVal(0, Array.empty)
     case SyslType.RefType(inner) =>
       // Uninitialized ref cell — represented as null-ish placeholder
       zeroValueForType(SyslType.PtrType(inner), env)
+    case SyslType.NamedType(_, base, _, _, _) => zeroValueForType(base, env)
 
   private def exec(stmt: TStmt, env: Env): Unit =
     stmt match
-      case TVarStmt(name, _, init) =>
+      case TVarStmt(name, _, init, _) =>
         val v = evalAny(init, env)
         // Increment refcount for copies only — TNew/TNewArray already set refcount=1
         init match
@@ -626,6 +622,15 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TAsmStmt(_) => // no-op in interpreter
 
+      case TMultiStmt(children) =>
+        for s <- children do exec(s, env)
+
+      case TContractCheck(kind, expr, message) =>
+        val v = toLong(evalAny(expr, env))
+        if v == 0 then
+          val suffix = if message == kind then "" else s": $message"
+          throw RuntimeError(s"$kind check failed$suffix")
+
       case TExprStmt(expr) =>
         evalAny(expr, env)
 
@@ -635,9 +640,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TFloatLit(d, _) => FloatVal(d)
       case TBoolLit(b, _) => IntVal(if b then 1L else 0L)
 
-      case TStringLit(s, _) =>
-        val bytes = s.getBytes("UTF-8")
-        RefStringVal(bytes, bytes.length, new java.util.concurrent.atomic.AtomicInteger(IMMORTAL_RC))
+      case TStringLit(s, _) => StringVal(s.getBytes("UTF-8"))
 
       case TArrayDecl(size, typ) =>
         def initElem(t: SyslType): Value = t match
@@ -748,8 +751,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val arrVal = evalAny(arr, env)
         val idx = toLong(evalAny(index, env)).toInt
         arrVal match
-          case RefStringVal(bytes, length, _) =>
-            if idx < 0 || idx >= length then throw RuntimeError(s"string index out of bounds: $idx (length $length)")
+          case StringVal(bytes) =>
+            if idx < 0 || idx >= bytes.length then throw RuntimeError(s"string index out of bounds: $idx (length ${bytes.length})")
             IntVal(bytes(idx) & 0xff)
           case SliceVal(cells, off, len, _) =>
             if idx < 0 || idx >= len then throw RuntimeError(s"slice index out of bounds: $idx (length $len)")
@@ -760,6 +763,12 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TSliceExpr(arr, low, high, _) =>
         val arrVal = evalAny(arr, env)
         arrVal match
+          case StringVal(bytes) =>
+            val lo = low.map(l => toLong(evalAny(l, env)).toInt).getOrElse(0)
+            val hi = high.map(h => toLong(evalAny(h, env)).toInt).getOrElse(bytes.length)
+            if lo < 0 || hi < lo || hi > bytes.length then
+              throw RuntimeError(s"string slice bounds out of range [$lo:$hi] with length ${bytes.length}")
+            StringVal(bytes.slice(lo, hi))
           case SliceVal(cells, off, len, cap) =>
             val lo = low.map(l => toLong(evalAny(l, env)).toInt).getOrElse(0)
             val hi = high.map(h => toLong(evalAny(h, env)).toInt).getOrElse(len)
@@ -804,8 +813,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case IntVal(n) => n.toString
           case FloatVal(d) => d.toString
           case _ => throw RuntimeError(s"str(): unsupported value $v")
-        val bytes = s.getBytes("UTF-8")
-        RefStringVal(bytes, bytes.length, new java.util.concurrent.atomic.AtomicInteger(1))
+        StringVal(s.getBytes("UTF-8"))
 
       case TFmtStr(inner, spec) =>
         val v = evalAny(inner, env)
@@ -827,7 +835,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               if spec.upperCase then unsigned.toUpperCase else unsigned
             s
           case FloatVal(d) => d.toString
-          case RefStringVal(b, l, _) => new String(b, 0, l, "UTF-8")
+          case StringVal(b) => new String(b, "UTF-8")
           case _ => throw RuntimeError(s"fmt: unsupported value $v")
         // Apply width padding
         val padded = if spec.width > 0 && raw.length < spec.width then
@@ -839,8 +847,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             else "0" * pad + raw
           else " " * pad + raw
         else raw
-        val bytes = padded.getBytes("UTF-8")
-        RefStringVal(bytes, bytes.length, new java.util.concurrent.atomic.AtomicInteger(1))
+        StringVal(padded.getBytes("UTF-8"))
 
       case TStringFromPtr(ptrExpr, lenExpr, _) =>
         val ptr = evalAny(ptrExpr, env)
@@ -854,7 +861,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             for i <- 0 until len do
               bytes(i) = toLong(cells(off + i).value).toByte
           case _ => throw RuntimeError(s"string(): expected pointer, got $ptr")
-        RefStringVal(bytes, len, new java.util.concurrent.atomic.AtomicInteger(IMMORTAL_RC))
+        StringVal(bytes)
 
       case TStringFromSlice(sliceExpr, _) =>
         val (cells, off, slen) = evalAny(sliceExpr, env) match
@@ -864,7 +871,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val bytes = new Array[Byte](slen)
         for i <- 0 until slen do
           bytes(i) = toLong(cells(off + i).value).toByte
-        RefStringVal(bytes, slen, new java.util.concurrent.atomic.AtomicInteger(IMMORTAL_RC))
+        StringVal(bytes)
 
       case TIfExpr(cond, thenBody, elseBody, _) =>
         if toLong(evalAny(cond, env)) != 0 then
@@ -918,15 +925,15 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
         // String path: concatenation and comparison
         (lv, rv) match
-          case (RefStringVal(lb, ll, _), RefStringVal(rb, rl, _)) =>
+          case (StringVal(lb), StringVal(rb)) =>
             return (op match
               case "+" =>
-                val newBytes = new Array[Byte](ll + rl)
-                System.arraycopy(lb, 0, newBytes, 0, ll)
-                System.arraycopy(rb, 0, newBytes, ll, rl)
-                RefStringVal(newBytes, newBytes.length, new java.util.concurrent.atomic.AtomicInteger(1))
-              case "==" => IntVal(if java.util.Arrays.equals(lb, 0, ll, rb, 0, rl) then 1L else 0L)
-              case "!=" => IntVal(if !java.util.Arrays.equals(lb, 0, ll, rb, 0, rl) then 1L else 0L)
+                val newBytes = new Array[Byte](lb.length + rb.length)
+                System.arraycopy(lb, 0, newBytes, 0, lb.length)
+                System.arraycopy(rb, 0, newBytes, lb.length, rb.length)
+                StringVal(newBytes)
+              case "==" => IntVal(if java.util.Arrays.equals(lb, rb) then 1L else 0L)
+              case "!=" => IntVal(if !java.util.Arrays.equals(lb, rb) then 1L else 0L)
               case _ => throw RuntimeError(s"unsupported string operator: $op")
             )
           case _ =>
@@ -998,14 +1005,30 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case _   => throw RuntimeError(s"unknown unary operator: $op")
             IntVal(truncateNarrow(raw, resultType))
 
+      case TRangeCheck(inner, range, aliasName, _) =>
+        val v = evalAny(inner, env)
+        import SyslType.*
+        range match
+          case IntRange(lo, hi, excl) =>
+            val n = toLong(v)
+            val ok = if excl then n >= lo && n < hi else n >= lo && n <= hi
+            if !ok then throw RuntimeError(s"range check failed: $aliasName (value $n out of range ${lo}..${if excl then "<" else ""}${hi})")
+          case FloatRange(lo, hi, excl) =>
+            val d = toDouble(v)
+            val ok = if excl then d >= lo && d < hi else d >= lo && d <= hi
+            if !ok then throw RuntimeError(s"range check failed: $aliasName (value $d out of range ${lo}..${if excl then "<" else ""}${hi})")
+        v
+
       case TCast(inner, target) =>
         val v = evalAny(inner, env)
         import SyslType.*
-        target match
-          case DoubleType  => FloatVal(toDouble(v))
+        target.underlying match
+          case FloatType(32) => FloatVal(toDouble(v).toFloat.toDouble)  // narrow to f32 precision
+          case FloatType(64) => FloatVal(toDouble(v))
+          case _: FloatType  => FloatVal(toDouble(v))
           case BoolType => v match
             case FuncVal(_) => IntVal(1L) // function references are always non-null
-            case RefVal(_, _, _) | RefEnumVal(_, _, _) | RefSliceVal(_, _, _) | RefStringVal(_, _, _) => IntVal(1L)
+            case RefVal(_, _, _) | RefEnumVal(_, _, _) | RefSliceVal(_, _, _) | StringVal(_) => IntVal(1L)
             case _ => IntVal(if toLong(v) != 0 then 1L else 0L)
           case IntType(64)  => IntVal(toLong(v))
           case IntType(32)  => IntVal((toLong(v) << 32) >> 32)  // sign-extend from 32 bits
@@ -1033,7 +1056,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TLen(inner, _) =>
         evalAny(inner, env) match
-          case RefStringVal(_, length, _) => IntVal(length.toLong)
+          case StringVal(bytes) => IntVal(bytes.length.toLong)
           case SliceVal(_, _, len, _) => IntVal(len.toLong)
           case ArrVal(cells, _) => IntVal(cells.length.toLong)
           case RefSliceVal(_, length, _) => IntVal(length.toLong)
@@ -1045,6 +1068,35 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case ArrVal(cells, _) => IntVal(cells.length.toLong)
           case RefSliceVal(_, length, _) => IntVal(length.toLong)
           case _ => throw RuntimeError("cap: unsupported type")
+
+      case TIntrinsicCall(name, args, typ) =>
+        val a = toLong(evalAny(args(0), env))
+        val b = toLong(evalAny(args(1), env))
+        val width = typ.bitWidth
+        val signed = typ.isSigned
+        val (minV, maxV) =
+          if signed then (-(1L << (width - 1)), (1L << (width - 1)) - 1)
+          else (0L, if width == 64 then -1L else (1L << width) - 1)  // unsigned: -1L = max u64
+        def mask(v: Long): Long = truncateNarrow(v, typ)
+        def saturate(v: java.math.BigInteger): Long =
+          val mn = java.math.BigInteger.valueOf(minV)
+          val mx =
+            if !signed && width == 64 then
+              new java.math.BigInteger("FFFFFFFFFFFFFFFF", 16)
+            else java.math.BigInteger.valueOf(maxV)
+          if v.compareTo(mn) < 0 then minV
+          else if v.compareTo(mx) > 0 then if !signed && width == 64 then -1L else maxV
+          else v.longValue()
+        val ba = java.math.BigInteger.valueOf(a)
+        val bb = java.math.BigInteger.valueOf(b)
+        name match
+          case "wrapping_add" => IntVal(mask(a + b))
+          case "wrapping_sub" => IntVal(mask(a - b))
+          case "wrapping_mul" => IntVal(mask(a * b))
+          case "saturating_add" => IntVal(saturate(ba.add(bb)))
+          case "saturating_sub" => IntVal(saturate(ba.subtract(bb)))
+          case "saturating_mul" => IntVal(saturate(ba.multiply(bb)))
+          case other => throw RuntimeError(s"unknown intrinsic: $other")
 
       case TFieldPreInc(obj, fieldIndex, _) =>
         val ArrVal(cells, off) = evalAny(obj, env): @unchecked
@@ -1074,11 +1126,11 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         cell.value = IntVal(old - 1)
         IntVal(old)
 
-      case TStructLit(SyslType.StructType(_, fields)) =>
+      case TStructLit(SyslType.StructType(_, fields, _)) =>
         val cells = fields.map((_, typ) => new Cell(zeroValueForType(typ, env))).toArray
         ArrVal(cells, 0)
 
-      case TNew(SyslType.StructType(name, fields), args) =>
+      case TNew(SyslType.StructType(name, fields, _), args) =>
         val cells = fields.zip(args).map { case ((_, _), arg) =>
           new Cell(evalAny(arg, env))
         }.toArray
@@ -1093,7 +1145,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val cells = Array.fill(n)(new Cell(zeroValueForType(elemType, env)))
         RefSliceVal(cells, n, new java.util.concurrent.atomic.AtomicInteger(1))
 
-      case TStructConstruct(SyslType.StructType(_, fields), args) =>
+      case TStructConstruct(SyslType.StructType(_, fields, _), args) =>
         val cells = fields.zip(args).map { case ((_, typ), arg) =>
           val value = evalAny(arg, env)
           new Cell(value)
@@ -1113,7 +1165,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TFuncRef(name, _) => FuncVal(name)
 
-      case TClosure(params, _, body, captures) =>
+      case TClosure(params, _, body, captures, _) =>
         // Capture current values by value (copy)
         val capturedEnv = new mutable.LinkedHashMap[String, Cell]
         for (varName, _) <- captures do
@@ -1125,9 +1177,9 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val dataVal = evalAny(expr, env)
         // Build method map: interface method name → actual registered function name
         val structName = expr.typ match
-          case SyslType.StructType(name, _) => name
-          case SyslType.PtrType(SyslType.StructType(name, _)) => name
-          case SyslType.RefType(SyslType.StructType(name, _)) => name
+          case SyslType.StructType(name, _, _) => name
+          case SyslType.PtrType(SyslType.StructType(name, _, _)) => name
+          case SyslType.RefType(SyslType.StructType(name, _, _)) => name
           case other => throw RuntimeError(s"cannot box $other into interface")
         val methodMap = iface.methods.map { (mname, _, _) =>
           val shortKey = s"${structName}_$mname"

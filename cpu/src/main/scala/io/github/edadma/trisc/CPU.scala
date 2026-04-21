@@ -21,7 +21,7 @@ enum State:
     Trace, Overflow, BoundsCheck,
     Halt, Run, Wfi, DoubleFault
 
-class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU] = None, mpuBase: Long = 0, val mmu: Option[MMU] = None) extends Processor:
+class CPU(mem: Addressable, var tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU] = None, mpuBase: Long = 0, val mmu: Option[MMU] = None, val coreId: Int = 0, reservationMonitor: Option[ReservationMonitor] = None) extends Processor:
   val name: String = mem.name
   val base: Long = mem.base
   val size: Long = mem.size
@@ -83,9 +83,17 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
       mpu.get.writeRegister((addr - mpuBase).toInt, data.toInt)
     else
       val paddr = xlate(addr, Access.Write)
-      if paddr != -1L && !checkMPU(paddr, Access.Write) then mem.writeByte(paddr, data)
+      if paddr != -1L && !checkMPU(paddr, Access.Write) then
+        mem.writeByte(paddr, data)
+        notifyWrite(paddr)
 
   def loadByte(addr: Long, data: Long): Unit = mem.loadByte(addr, data)
+
+  /** Notify reservation monitor of a write (for SMP LL/SC invalidation). */
+  private inline def notifyWrite(addr: Long): Unit =
+    reservationMonitor match
+      case Some(mon) => mon.invalidateOthers(coreId, addr)
+      case None => // single-core, no-op
 
   private def checkAlign(addr: Long, align: Int): Boolean =
     if (addr & (align - 1)) != 0 then
@@ -121,17 +129,23 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
   override def writeShort(addr: Long, data: Long): Unit =
     if !checkAlign(addr, 2) then
       val paddr = xlate(addr, Access.Write)
-      if paddr != -1L && !checkMPU(paddr, Access.Write) then mem.writeShort(paddr, data)
+      if paddr != -1L && !checkMPU(paddr, Access.Write) then
+        mem.writeShort(paddr, data)
+        notifyWrite(paddr)
 
   override def writeInt(addr: Long, data: Long): Unit =
     if !checkAlign(addr, 4) then
       val paddr = xlate(addr, Access.Write)
-      if paddr != -1L && !checkMPU(paddr, Access.Write) then mem.writeInt(paddr, data)
+      if paddr != -1L && !checkMPU(paddr, Access.Write) then
+        mem.writeInt(paddr, data)
+        notifyWrite(paddr)
 
   override def writeLong(addr: Long, data: Long): Unit =
     if !checkAlign(addr, 8) then
       val paddr = xlate(addr, Access.Write)
-      if paddr != -1L && !checkMPU(paddr, Access.Write) then mem.writeLong(paddr, data)
+      if paddr != -1L && !checkMPU(paddr, Access.Write) then
+        mem.writeLong(paddr, data)
+        notifyWrite(paddr)
 
   val r = immutable.ArraySeq(
     new Reg0,
@@ -147,8 +161,43 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
   var psr: Int = 0
   var usp: Long = 0
   var state: State = State.Halt
-  var reservationAddr: Long = 0
-  var reservationValid: Boolean = false
+  // Local reservation state (single-core fallback). When reservationMonitor is present,
+  // these are not used — the monitor tracks all cores' reservations.
+  private var _reservationAddr: Long = 0
+  private var _reservationValid: Boolean = false
+
+  /** Set a reservation (called by LL instruction). */
+  def setReservation(addr: Long): Unit =
+    reservationMonitor match
+      case Some(mon) => mon.setReservation(coreId, addr)
+      case None =>
+        _reservationAddr = addr
+        _reservationValid = true
+
+  /** Check and clear a reservation (called by SC instruction).
+    * Returns true if the reservation was valid and matches the address. */
+  def checkAndClearReservation(addr: Long): Boolean =
+    reservationMonitor match
+      case Some(mon) => mon.checkAndClear(coreId, addr)
+      case None =>
+        val valid = _reservationValid && _reservationAddr == addr
+        _reservationValid = false
+        valid
+
+  /** Clear the reservation (called on exception entry). */
+  def clearReservation(): Unit =
+    reservationMonitor match
+      case Some(mon) => mon.clearReservation(coreId)
+      case None => _reservationValid = false
+
+  /** Execute an atomic CAS (called by CAS instruction). */
+  def atomicCAS(addr: Long, expected: Long, newValue: Long): Long =
+    reservationMonitor match
+      case Some(mon) => mon.atomicCAS(mem, addr, expected, newValue)
+      case None =>
+        val old = readLong(addr)
+        if old == expected then writeLong(addr, newValue)
+        old
   var cycles: Long = 0
   private var inException: Boolean = false
 
@@ -213,7 +262,7 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
         state = State.Run
         set(Status.Mode, true)
         set(Status.Ind, true)
-        reservationValid = false
+        clearReservation()
       else
         // Swap r7 <-> usp if coming from user mode
         if !test(Status.Mode) then
@@ -237,7 +286,7 @@ class CPU(mem: Addressable, tick: Seq[Processor => Unit] = Nil, mpu: Option[MPU]
         set(Status.Mode, true)
         set(Status.Ind, true)
         set(Status.T, false)
-        reservationValid = false
+        clearReservation()
     catch
       case e: RuntimeException =>
         if !quiet then
@@ -480,6 +529,9 @@ object Decode:
         "110 aaa bbb 01 01111" -> ((args: Map[Char, Int]) => new FATAN2(args('a'), args('b'))),
         "110 aaa bbb 01 10000" -> ((args: Map[Char, Int]) => new FEXP(args('a'), args('b'))),
         "110 aaa bbb 01 10001" -> ((args: Map[Char, Int]) => new FLOG(args('a'), args('b'))),
+        // Single/double precision float conversion
+        "110 aaa bbb 01 10010" -> ((args: Map[Char, Int]) => new F32TOF64(args('a'), args('b'))),
+        "110 aaa bbb 01 10011" -> ((args: Map[Char, Int]) => new F64TOF32(args('a'), args('b'))),
         // MMU instructions
         "110 aaa bbb 01 00001" -> ((args: Map[Char, Int]) => new TLBI(args('a'), args('b'))),
         "110 aaa bbb 01 00010" -> ((args: Map[Char, Int]) => new TLBIA(args('a'), args('b'))),

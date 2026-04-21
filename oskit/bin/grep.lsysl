@@ -11,7 +11,7 @@ Outputs each matching line to stdout (handle 1).
 
     module oskit.bin.grep
 
-    import oskit.ulib.{open, read, close, puts, exit, get_args, skip_arg0, write_handle, STDIN, STDOUT}
+    import oskit.ulib.{open, read, close, puts, exit, write_handle, STDIN, STDOUT}
 
     val GREP_BUF_SIZE = 4096
 
@@ -51,52 +51,35 @@ last unprocessed bytes.
             i += 1
         line_start
 
-    main()
-        val args = get_args()
-        val rest = skip_arg0(args)
-
-        // Parse pattern (first word)
-        val rp = *byte(rest)
-        val rlen = len(rest)
-        var pattern_end = 0
-        while pattern_end < rlen
-            if rp[pattern_end] == 32  // space
-                break
-            pattern_end += 1
-        if pattern_end == 0
+    main(argv: []string)
+        val nargs = len(argv)
+        if nargs < 2
             puts("usage: grep pattern [file]\n")
-            exit()
             return
 
-        val pattern = rp
-        val plen = pattern_end
-
-        // Check for file argument
-        var file_start = pattern_end
-        while file_start < rlen
-            if rp[file_start] != 32
-                break
-            file_start += 1
+        val pat_str = argv[1]
+        val pattern = *byte(pat_str)
+        val plen = len(pat_str)
+        if plen == 0
+            puts("usage: grep pattern [file]\n")
+            return
 
         var fid = -1
-        if file_start < rlen
-            // File argument given
-            val file_path = string(rp + file_start, rlen - file_start)
+        if nargs > 2
+            val file_path = argv[2]
             fid = open(file_path)
             if fid < 0
                 puts(file_path)
                 puts(": not found\n")
-                exit()
                 return
         else
-            // No file — read from stdin
             fid = STDIN
 
         // Read and grep
         var buf: [4096]byte
-        var nr = read(fid, &buf[0], GREP_BUF_SIZE)
+        var nr = read(fid, buf, GREP_BUF_SIZE)
         while nr > 0
-            val consumed = grep_buf(&buf[0], nr, pattern, plen)
+            val consumed = grep_buf(buf, nr, pattern, plen)
             // Move leftover bytes to start
             var leftover = nr - consumed
             var j = 0
@@ -108,10 +91,9 @@ last unprocessed bytes.
                 nr += leftover
             else if leftover > 0
                 // Process final partial line
-                if contains(&buf[0], leftover, pattern, plen) == 1
-                    write_handle(STDOUT, &buf[0], leftover)
+                if contains(buf, leftover, pattern, plen) == 1
+                    write_handle(STDOUT, buf, leftover)
                     write_handle(STDOUT, *byte("\n"), 1)
 
         if fid != STDIN
             close(fid)
-        exit()

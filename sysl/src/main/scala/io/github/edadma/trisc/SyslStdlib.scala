@@ -6,23 +6,14 @@ import scala.util.chaining.*
 object SyslStdlib:
   import Value.*
 
-  private val IMMORTAL_RC = -1
-
   // Helper: extract Scala string from any string value
   private def asString(v: Value): String = v match
-    case RefStringVal(bytes, len, _) => new String(bytes, 0, len, "UTF-8")
-    case StrVal(s) => s // legacy fallback
+    case StringVal(bytes) => new String(bytes, "UTF-8")
     case _ => throw RuntimeException(s"expected string, got $v")
 
-  // Helper: create a ref-counted string (heap-allocated, refcount=1)
-  private def mkString(s: String): RefStringVal =
-    val bytes = s.getBytes("UTF-8")
-    RefStringVal(bytes, bytes.length, new java.util.concurrent.atomic.AtomicInteger(1))
-
-  // Helper: create an immortal string (literal, refcount=-1)
-  private def mkStaticString(s: String): RefStringVal =
-    val bytes = s.getBytes("UTF-8")
-    RefStringVal(bytes, bytes.length, new java.util.concurrent.atomic.AtomicInteger(IMMORTAL_RC))
+  // Helper: build a sysl string from a Scala string (UTF-8 encoded). JVM GC handles lifetime.
+  private def mkString(s: String): StringVal =
+    StringVal(s.getBytes("UTF-8"))
 
   // Modules that have JVM runtime implementations (builtins).
   // Metadata is now derived from .lsysl sources on the filesystem.

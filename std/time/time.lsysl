@@ -1,0 +1,892 @@
+std.time — Time and date
+========================
+
+Core time types: `Instant` (machine time), `Duration`
+(time span), and `DateTime` (civil time with UTC offset).
+Inspired by `java.time` but lighter.
+
+`Instant` uses seconds + nanoseconds (like Java) for
+unlimited date range with nanosecond precision. `DateTime`
+carries a UTC offset so it's always unambiguous.
+
+The `Clock` interface provides both `instant()` and
+`datetime()` — platforms implement whichever is native
+(RTC → datetime, tick counter → instant) and derive the
+other via calendar math.
+
+Dependencies: none.
+
+
+    module std.time
+
+    import std.debug.{assert}
+
+
+Constants
+---------
+
+    val NANOS_PER_SECOND  = 1000000000i64
+    val NANOS_PER_MILLI   = 1000000i64
+    val NANOS_PER_MICRO   = 1000i64
+    val SECONDS_PER_MINUTE = 60i64
+    val SECONDS_PER_HOUR   = 3600i64
+    val SECONDS_PER_DAY    = 86400i64
+
+    val SUNDAY    = 0
+    val MONDAY    = 1
+    val TUESDAY   = 2
+    val WEDNESDAY = 3
+    val THURSDAY  = 4
+    val FRIDAY    = 5
+    val SATURDAY  = 6
+
+
+Instant
+-------
+
+A point on the time-line, measured as seconds and
+nanoseconds from the Unix epoch (1970-01-01T00:00:00Z).
+The two-field representation avoids the ~292 year limit
+of a single i64 nanosecond counter.
+
+    struct Instant
+        seconds: i64
+        nano: int
+
+    new_instant(seconds: i64, nano: int) -> Instant
+        var s = seconds
+        var n = nano
+
+        // Normalize: nano must be in [0, 999_999_999]
+        if n < 0
+            val borrow = (-n + 999999999) / 1000000000
+            s -= i64(borrow)
+            n += borrow * 1000000000
+
+        if n >= 1000000000
+            s += i64(n / 1000000000)
+            n = n % 1000000000
+
+        return Instant(s, n)
+
+    val EPOCH = Instant(0i64, 0)
+
+    Instant.add_duration(d: Duration) -> Instant
+        return new_instant(self.seconds + d.seconds, self.nano + d.nano)
+
+    Instant.sub_duration(d: Duration) -> Instant
+        return new_instant(self.seconds - d.seconds, self.nano - d.nano)
+
+    Instant.elapsed_since(earlier: Instant) -> Duration
+        return new_duration(self.seconds - earlier.seconds, self.nano - earlier.nano)
+
+    Instant.before(other: Instant) -> bool
+        if self.seconds < other.seconds then return true
+        if self.seconds > other.seconds then return false
+        return self.nano < other.nano
+
+    Instant.after(other: Instant) -> bool
+        return other.before(self)
+
+    Instant.equals(other: Instant) -> bool
+        return self.seconds == other.seconds && self.nano == other.nano
+
+    Instant.to_epoch_millis() -> i64
+        return self.seconds * 1000i64 + i64(self.nano / 1000000)
+
+
+Duration
+--------
+
+A time span with seconds and nanosecond precision.
+Can be negative. The `nano` field is always normalized
+to [0, 999_999_999]; the `seconds` field carries the
+sign.
+
+    struct Duration
+        seconds: i64
+        nano: int
+
+    new_duration(seconds: i64, nano: int) -> Duration
+        var s = seconds
+        var n = nano
+
+        if n < 0
+            val borrow = (-n + 999999999) / 1000000000
+            s -= i64(borrow)
+            n += borrow * 1000000000
+
+        if n >= 1000000000
+            s += i64(n / 1000000000)
+            n = n % 1000000000
+
+        return Duration(s, n)
+
+### Construction
+
+    of_nanos(n: i64) -> Duration
+        return new_duration(n / NANOS_PER_SECOND, int(n - (n / NANOS_PER_SECOND) * NANOS_PER_SECOND))
+
+    of_micros(us: i64) -> Duration
+        return new_duration(us / 1000000i64, int((us - (us / 1000000i64) * 1000000i64) * 1000i64))
+
+    of_millis(ms: i64) -> Duration
+        return new_duration(ms / 1000i64, int((ms - (ms / 1000i64) * 1000i64) * 1000000i64))
+
+    of_seconds(s: i64) -> Duration
+        return Duration(s, 0)
+
+    of_minutes(m: i64) -> Duration
+        return Duration(m * SECONDS_PER_MINUTE, 0)
+
+    of_hours(h: i64) -> Duration
+        return Duration(h * SECONDS_PER_HOUR, 0)
+
+    of_days(d: i64) -> Duration
+        return Duration(d * SECONDS_PER_DAY, 0)
+
+### Extraction
+
+    Duration.to_nanos() -> i64
+        return self.seconds * NANOS_PER_SECOND + i64(self.nano)
+
+    Duration.to_millis() -> i64
+        return self.seconds * 1000i64 + i64(self.nano / 1000000)
+
+    Duration.to_seconds() -> i64 = self.seconds
+
+### Arithmetic
+
+    Duration.add(other: Duration) -> Duration
+        return new_duration(self.seconds + other.seconds, self.nano + other.nano)
+
+    Duration.sub(other: Duration) -> Duration
+        return new_duration(self.seconds - other.seconds, self.nano - other.nano)
+
+    Duration.negate() -> Duration
+        if self.nano == 0 then return Duration(-self.seconds, 0)
+        return Duration(-self.seconds - 1i64, 1000000000 - self.nano)
+
+    Duration.is_zero() -> bool
+        return self.seconds == 0i64 && self.nano == 0
+
+    Duration.is_negative() -> bool
+        return self.seconds < 0i64
+
+
+DateTime
+--------
+
+Civil date and time with UTC offset. The offset makes
+the value unambiguous — you always know what moment it
+represents. Full timezone support (DST rules, IANA names)
+is deferred to a future `std.time.tz` module.
+
+    struct DateTime
+        year: int
+        month: int
+        day: int
+        hour: int
+        minute: int
+        second: int
+        nano: int
+        offset_minutes: int
+
+    new_datetime(year: int, month: int, day: int, hour: int, minute: int, second: int) -> DateTime
+        return DateTime(year, month, day, hour, minute, second, 0, 0)
+
+    new_datetime_offset(year: int, month: int, day: int, hour: int, minute: int, second: int, offset_minutes: int) -> DateTime
+        return DateTime(year, month, day, hour, minute, second, 0, offset_minutes)
+
+
+Calendar math
+-------------
+
+Uses Howard Hinnant's algorithms for days-since-epoch
+to year/month/day conversion and back. These are exact,
+require no lookup tables, and handle the full range of
+the proleptic Gregorian calendar.
+
+### is_leap_year
+
+    is_leap_year(year: int) -> bool
+        if year % 4 != 0 then return false
+        if year % 100 != 0 then return true
+        return year % 400 == 0
+
+### days_in_month
+
+    days_in_month(year: int, month: int) -> int
+        if month == 2
+            if is_leap_year(year) then return 29
+            return 28
+        if month == 4 || month == 6 || month == 9 || month == 11 then return 30
+        return 31
+
+### civil_from_days
+
+`civil_from_days(z)` converts a day count from the Unix
+epoch (1970-01-01 = day 0) to year/month/day. Based on
+Hinnant's algorithm.
+
+    civil_from_days(day_count: i64) -> (int, int, int)
+        val z = day_count + 719468i64
+        val era_i64 = (if z >= 0i64 then z else z - 146096i64) / 146097i64
+        val doe = z - era_i64 * 146097i64
+        val yoe = (doe - doe / 1460i64 + doe / 36524i64 - doe / 146096i64) / 365i64
+        val y_i64 = yoe + era_i64 * 400i64
+        val doy = doe - (365i64 * yoe + yoe / 4i64 - yoe / 100i64)
+        val mp = (5i64 * doy + 2i64) / 153i64
+        val d = doy - (153i64 * mp + 2i64) / 5i64 + 1i64
+        val m = if mp < 10i64 then mp + 3i64 else mp - 9i64
+        val y = if m <= 2i64 then y_i64 + 1i64 else y_i64
+        return int(y), int(m), int(d)
+
+### days_from_civil
+
+`days_from_civil(y, m, d)` converts year/month/day to
+days since Unix epoch. Inverse of `civil_from_days`.
+
+    days_from_civil(year: int, month: int, day: int) -> i64
+        val y_i64 = if month <= 2 then i64(year - 1) else i64(year)
+        val m_i64 = if month <= 2 then i64(month + 9) else i64(month - 3)
+        val era = (if y_i64 >= 0i64 then y_i64 else y_i64 - 399i64) / 400i64
+        val yoe = y_i64 - era * 400i64
+        val doy = (153i64 * m_i64 + 2i64) / 5i64 + i64(day) - 1i64
+        val doe = 365i64 * yoe + yoe / 4i64 - yoe / 100i64 + doy
+        return era * 146097i64 + doe - 719468i64
+
+### day_of_week
+
+Returns 0=Monday through 6=Sunday.
+
+    day_of_week(year: int, month: int, day: int) -> int
+        val z = days_from_civil(year, month, day)
+        // Day 0 (1970-01-01) is Thursday (4). Sunday=0.
+        if z >= -4i64 then return int((z + 4i64) % 7i64)
+        return int((z + 5i64) % 7i64 + 6i64)
+
+
+Conversions
+-----------
+
+### datetime_to_instant
+
+Converts a `DateTime` to an `Instant` by computing
+epoch seconds from the calendar fields and adjusting
+for the UTC offset.
+
+    datetime_to_instant(dt: DateTime) -> Instant
+        val days = days_from_civil(dt.year, dt.month, dt.day)
+        val secs = days * SECONDS_PER_DAY + i64(dt.hour) * SECONDS_PER_HOUR + i64(dt.minute) * SECONDS_PER_MINUTE + i64(dt.second) - i64(dt.offset_minutes) * SECONDS_PER_MINUTE
+        return Instant(secs, dt.nano)
+
+### instant_to_datetime
+
+Converts an `Instant` to a `DateTime` in the given
+UTC offset.
+
+    instant_to_datetime(t: Instant, offset_minutes: int) -> DateTime
+        val total_secs = t.seconds + i64(offset_minutes) * SECONDS_PER_MINUTE
+        val days = if total_secs >= 0i64 then total_secs / SECONDS_PER_DAY else (total_secs - SECONDS_PER_DAY + 1i64) / SECONDS_PER_DAY
+        var rem = total_secs - days * SECONDS_PER_DAY
+
+        val hour = int(rem / SECONDS_PER_HOUR)
+        rem = rem - i64(hour) * SECONDS_PER_HOUR
+        val minute = int(rem / SECONDS_PER_MINUTE)
+        val second = int(rem - i64(minute) * SECONDS_PER_MINUTE)
+
+        val y, m, d = civil_from_days(days)
+
+        return DateTime(y, m, d, hour, minute, second, t.nano, offset_minutes)
+
+### instant_to_utc
+
+    instant_to_utc(t: Instant) -> DateTime
+        return instant_to_datetime(t, 0)
+
+
+Clock interface
+---------------
+
+Platforms implement whichever method is native. The
+library provides default conversions so implementors
+only need to supply one.
+
+    interface Clock
+        instant() -> Instant
+        datetime() -> DateTime
+
+
+Formatting
+----------
+
+Format a `DateTime` using a pattern string. The pattern
+language matches the Scala `datetime` library:
+
+- `YYYY` — 4-digit year, `YY` — 2-digit, `Y` — unpadded
+- `MMMM` — full month name, `MMM` — short, `MM` — 2-digit, `M` — unpadded
+- `DD` — 2-digit day, `D` — unpadded
+- `WWWW` — full weekday, `WWW` — short
+- `hh` — 2-digit 24h hour, `h` — unpadded
+- `h12` — 12h hour unpadded, `hh12` — 2-digit 12h hour
+- `mm` — 2-digit minute, `m` — unpadded
+- `ss` — 2-digit second, `s` — unpadded
+- `f`..`fffffffff` — fractional seconds (1-9 digits)
+- `a` — a.m./p.m.
+- `|text|` — literal text
+
+    import std.builder.{StrBuilder, new_builder_cap}
+    import std.strconv.{format_int}
+
+### Name tables
+
+    val MONTHS_SHORT: [12]string = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    val MONTHS_LONG: [12]string = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+    val WEEKDAYS_SHORT: [7]string = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    val WEEKDAYS_LONG: [7]string = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+### pad2
+
+Zero-pad an integer to 2 digits.
+
+    pad2(b: StrBuilder, v: int)
+        if v < 10
+            b.write_byte(byte('0'))
+        b.write(format_int(v))
+
+### pad4
+
+Zero-pad an integer to 4 digits.
+
+    pad4(b: StrBuilder, v: int)
+        if v < 10
+            b.write("000")
+        else if v < 100
+            b.write("00")
+        else if v < 1000
+            b.write("0")
+        b.write(format_int(v))
+
+### format_datetime
+
+    format_datetime(dt: DateTime, pattern: string) -> string
+        val n = len(pattern)
+        var b = new_builder_cap(32)
+        var i = 0
+
+        while i < n
+            val ch = pattern[i]
+
+            if ch == byte('|')
+                // Literal: |text|
+                i++
+
+                while i < n && pattern[i] != byte('|')
+                    b.write_byte(pattern[i])
+                    i++
+
+                if i < n then i++
+            else if ch == byte('Y')
+                var count = 0
+
+                while i < n && pattern[i] == byte('Y')
+                    count++
+                    i++
+
+                if count == 4 then pad4(b, dt.year)
+                else if count == 2 then pad2(b, dt.year % 100)
+                else b.write(format_int(dt.year))
+            else if ch == byte('M')
+                var count = 0
+
+                while i < n && pattern[i] == byte('M')
+                    count++
+                    i++
+
+                if count == 4 then b.write(MONTHS_LONG[dt.month - 1])
+                else if count == 3 then b.write(MONTHS_SHORT[dt.month - 1])
+                else if count == 2 then pad2(b, dt.month)
+                else b.write(format_int(dt.month))
+            else if ch == byte('D')
+                var count = 0
+
+                while i < n && pattern[i] == byte('D')
+                    count++
+                    i++
+
+                if count == 2 then pad2(b, dt.day)
+                else b.write(format_int(dt.day))
+            else if ch == byte('W')
+                var count = 0
+
+                while i < n && pattern[i] == byte('W')
+                    count++
+                    i++
+
+                val dow = day_of_week(dt.year, dt.month, dt.day)
+
+                if count == 4 then b.write(WEEKDAYS_LONG[dow])
+                else b.write(WEEKDAYS_SHORT[dow])
+            else if ch == byte('h')
+                // Check for h12 or hh12
+                if i + 2 < n && pattern[i + 1] == byte('1') && pattern[i + 2] == byte('2')
+                    val raw = dt.hour % 12
+                    val hr = if raw == 0 then 12 else raw
+
+                    b.write(format_int(hr))
+                    i += 3
+                else if i + 3 < n && pattern[i + 1] == byte('h') && pattern[i + 2] == byte('1') && pattern[i + 3] == byte('2')
+                    val raw = dt.hour % 12
+                    val hr = if raw == 0 then 12 else raw
+
+                    pad2(b, hr)
+                    i += 4
+                else
+                    var count = 0
+
+                    while i < n && pattern[i] == byte('h')
+                        count++
+                        i++
+
+                    if count == 2 then pad2(b, dt.hour)
+                    else b.write(format_int(dt.hour))
+            else if ch == byte('m')
+                var count = 0
+
+                while i < n && pattern[i] == byte('m')
+                    count++
+                    i++
+
+                if count == 2 then pad2(b, dt.minute)
+                else b.write(format_int(dt.minute))
+            else if ch == byte('s')
+                var count = 0
+
+                while i < n && pattern[i] == byte('s')
+                    count++
+                    i++
+
+                if count == 2 then pad2(b, dt.second)
+                else b.write(format_int(dt.second))
+            else if ch == byte('f')
+                var count = 0
+
+                while i < n && pattern[i] == byte('f')
+                    count++
+                    i++
+
+                var v = dt.nano
+                var digits = 9
+
+                while digits > count
+                    v = v / 10
+                    digits--
+
+                var pad_count = count - 1
+                var threshold = 1
+
+                while pad_count > 0
+                    threshold = threshold * 10
+                    pad_count--
+
+                while v < threshold && threshold > 1
+                    b.write_byte(byte('0'))
+                    threshold = threshold / 10
+
+                if v > 0 then b.write(format_int(v))
+                else b.write_byte(byte('0'))
+            else if ch == byte('a')
+                if dt.hour < 12 then b.write("a.m.")
+                else b.write("p.m.")
+                i++
+            else
+                b.write_byte(ch)
+                i++
+
+        return b.to_str()
+
+### DateTime.format
+
+Convenience method.
+
+    DateTime.format(pattern: string) -> string
+        return format_datetime(self, pattern)
+
+### to_iso_string
+
+ISO 8601 format: `2026-04-15T12:30:00.000Z`
+
+    DateTime.to_iso_string() -> string
+        return self.format("YYYY-MM-DDThh:mm:ss.fffZ")
+
+
+Tests
+=====
+
+
+### Duration construction
+
+    #test
+    test_of_seconds() -> unit
+        val d = of_seconds(5i64)
+        assert(d.seconds == 5i64, "seconds")
+        assert(d.nano == 0, "nano")
+
+    #test
+    test_of_millis() -> unit
+        val d = of_millis(1500i64)
+        assert(d.seconds == 1i64, "seconds")
+        assert(d.nano == 500000000, s"nano: ${d.nano}")
+
+    #test
+    test_of_nanos() -> unit
+        val d = of_nanos(2500000000i64)
+        assert(d.seconds == 2i64, "seconds")
+        assert(d.nano == 500000000, "nano")
+
+    #test
+    test_of_hours() -> unit
+        val d = of_hours(2i64)
+        assert(d.seconds == 7200i64, "7200s")
+
+    #test
+    test_of_days() -> unit
+        val d = of_days(1i64)
+        assert(d.seconds == 86400i64, "86400s")
+
+### Duration arithmetic
+
+    #test
+    test_duration_add() -> unit
+        val a = of_millis(1500i64)
+        val b = of_millis(700i64)
+        val c = a.add(b)
+        assert(c.seconds == 2i64, "seconds")
+        assert(c.nano == 200000000, "nano")
+
+    #test
+    test_duration_sub() -> unit
+        val a = of_seconds(5i64)
+        val b = of_millis(1500i64)
+        val c = a.sub(b)
+        assert(c.seconds == 3i64, "seconds")
+        assert(c.nano == 500000000, "nano")
+
+    #test
+    test_duration_negate() -> unit
+        val d = of_millis(1500i64)
+        val neg = d.negate()
+        assert(neg.seconds == -2i64, "seconds")
+        assert(neg.nano == 500000000, "nano")
+        assert(neg.is_negative(), "negative")
+
+    #test
+    test_duration_to_millis() -> unit
+        val d = new_duration(2i64, 500000000)
+        assert(d.to_millis() == 2500i64, "2500ms")
+
+    #test
+    test_duration_to_nanos() -> unit
+        val d = new_duration(1i64, 500000000)
+        assert(d.to_nanos() == 1500000000i64, "1.5B nanos")
+
+    #test
+    test_duration_is_zero() -> unit
+        assert(of_seconds(0i64).is_zero(), "zero")
+        assert(!of_seconds(1i64).is_zero(), "not zero")
+
+
+### Instant
+
+    #test
+    test_instant_epoch() -> unit
+        assert(EPOCH.seconds == 0i64, "seconds")
+        assert(EPOCH.nano == 0, "nano")
+
+    #test
+    test_instant_add_duration() -> unit
+        val t = new_instant(1000i64, 0)
+        val d = of_millis(500i64)
+        val t2 = t.add_duration(d)
+        assert(t2.seconds == 1000i64, "seconds")
+        assert(t2.nano == 500000000, "nano")
+
+    #test
+    test_instant_elapsed() -> unit
+        val t1 = new_instant(100i64, 0)
+        val t2 = new_instant(105i64, 500000000)
+        val d = t2.elapsed_since(t1)
+        assert(d.seconds == 5i64, "5 seconds")
+        assert(d.nano == 500000000, "500ms")
+
+    #test
+    test_instant_before_after() -> unit
+        val t1 = new_instant(100i64, 0)
+        val t2 = new_instant(200i64, 0)
+        assert(t1.before(t2), "before")
+        assert(t2.after(t1), "after")
+        assert(!t1.after(t2), "not after")
+
+    #test
+    test_instant_equals() -> unit
+        val t1 = new_instant(100i64, 500)
+        val t2 = new_instant(100i64, 500)
+        assert(t1.equals(t2), "equal")
+
+    #test
+    test_instant_to_millis() -> unit
+        val t = new_instant(1i64, 500000000)
+        assert(t.to_epoch_millis() == 1500i64, "1500ms")
+
+
+### Calendar math
+
+    #test
+    test_is_leap_year() -> unit
+        assert(is_leap_year(2000), "2000")
+        assert(is_leap_year(2024), "2024")
+        assert(!is_leap_year(1900), "1900")
+        assert(!is_leap_year(2023), "2023")
+
+    #test
+    test_days_in_month() -> unit
+        assert(days_in_month(2024, 2) == 29, "feb leap")
+        assert(days_in_month(2023, 2) == 28, "feb normal")
+        assert(days_in_month(2024, 1) == 31, "jan")
+        assert(days_in_month(2024, 4) == 30, "apr")
+
+    #test
+    test_civil_roundtrip_epoch() -> unit
+        val y, m, d = civil_from_days(0i64)
+        assert(y == 1970, s"year: $y")
+        assert(m == 1, s"month: $m")
+        assert(d == 1, s"day: $d")
+        assert(days_from_civil(1970, 1, 1) == 0i64, "back to 0")
+
+    #test
+    test_civil_roundtrip_2026() -> unit
+        // 2026-04-15 is day 20558 from epoch
+        val days = days_from_civil(2026, 4, 15)
+        val y, m, d = civil_from_days(days)
+        assert(y == 2026, s"year: $y")
+        assert(m == 4, s"month: $m")
+        assert(d == 15, s"day: $d")
+
+    #test
+    test_civil_roundtrip_1969() -> unit
+        // Before epoch
+        val days = days_from_civil(1969, 12, 31)
+        assert(days == -1i64, s"dec 31 1969: $days")
+        val y, m, d = civil_from_days(-1i64)
+        assert(y == 1969, s"year: $y")
+        assert(m == 12, s"month: $m")
+        assert(d == 31, s"day: $d")
+
+    #test
+    test_civil_roundtrip_2000() -> unit
+        val days = days_from_civil(2000, 1, 1)
+        val y, m, d = civil_from_days(days)
+        assert(y == 2000, "year")
+        assert(m == 1, "month")
+        assert(d == 1, "day")
+
+    #test
+    test_day_of_week_known() -> unit
+        // 2026-04-15 is a Wednesday (3)
+        assert(day_of_week(2026, 4, 15) == WEDNESDAY, s"wednesday: ${day_of_week(2026, 4, 15)}")
+        // 1970-01-01 is a Thursday (4)
+        assert(day_of_week(1970, 1, 1) == THURSDAY, s"thursday: ${day_of_week(1970, 1, 1)}")
+        // 2026-04-19 is a Sunday (0)
+        assert(day_of_week(2026, 4, 19) == SUNDAY, s"sunday: ${day_of_week(2026, 4, 19)}")
+
+
+### DateTime ↔ Instant conversion
+
+    #test
+    test_datetime_to_instant_epoch() -> unit
+        val dt = new_datetime(1970, 1, 1, 0, 0, 0)
+        val t = datetime_to_instant(dt)
+        assert(t.seconds == 0i64, s"seconds: ${t.seconds}")
+        assert(t.nano == 0, "nano")
+
+    #test
+    test_datetime_to_instant_2026() -> unit
+        val dt = new_datetime(2026, 4, 15, 12, 30, 0)
+        val t = datetime_to_instant(dt)
+        // Should be positive and large
+        assert(t.seconds > 0i64, "positive")
+        // Round-trip back
+        val dt2 = instant_to_utc(t)
+        assert(dt2.year == 2026, s"year: ${dt2.year}")
+        assert(dt2.month == 4, s"month: ${dt2.month}")
+        assert(dt2.day == 15, s"day: ${dt2.day}")
+        assert(dt2.hour == 12, s"hour: ${dt2.hour}")
+        assert(dt2.minute == 30, s"minute: ${dt2.minute}")
+
+    #test
+    test_instant_to_datetime_with_offset() -> unit
+        // 2026-04-15 12:00:00 UTC = 2026-04-15 08:00:00 EDT (-240 minutes)
+        val dt_utc = new_datetime(2026, 4, 15, 12, 0, 0)
+        val t = datetime_to_instant(dt_utc)
+        val dt_edt = instant_to_datetime(t, -240)
+        assert(dt_edt.hour == 8, s"hour: ${dt_edt.hour}")
+        assert(dt_edt.offset_minutes == -240, "offset")
+
+    #test
+    test_datetime_with_offset_roundtrip() -> unit
+        // Create datetime in EST (-300), convert to instant, back to UTC
+        val dt_est = new_datetime_offset(2026, 4, 15, 8, 0, 0, -300)
+        val t = datetime_to_instant(dt_est)
+        val dt_utc = instant_to_utc(t)
+        assert(dt_utc.hour == 13, s"UTC hour: ${dt_utc.hour}")
+
+    #test
+    test_instant_to_datetime_midnight() -> unit
+        val t = new_instant(0i64, 0)
+        val dt = instant_to_utc(t)
+        assert(dt.year == 1970, "year")
+        assert(dt.month == 1, "month")
+        assert(dt.day == 1, "day")
+        assert(dt.hour == 0, "hour")
+        assert(dt.minute == 0, "minute")
+        assert(dt.second == 0, "second")
+
+    #test
+    test_instant_to_datetime_nano_preserved() -> unit
+        val t = new_instant(1000i64, 123456789)
+        val dt = instant_to_utc(t)
+        assert(dt.nano == 123456789, s"nano: ${dt.nano}")
+
+
+### Normalization
+
+    #test
+    test_instant_normalize_overflow() -> unit
+        val t = new_instant(0i64, 1500000000)
+        assert(t.seconds == 1i64, "carry seconds")
+        assert(t.nano == 500000000, "remaining nano")
+
+    #test
+    test_instant_normalize_negative_nano() -> unit
+        val t = new_instant(2i64, -500000000)
+        assert(t.seconds == 1i64, s"seconds: ${t.seconds}")
+        assert(t.nano == 500000000, s"nano: ${t.nano}")
+
+    #test
+    test_duration_normalize() -> unit
+        val d = new_duration(0i64, 2500000000)
+        assert(d.seconds == 2i64, "seconds")
+        assert(d.nano == 500000000, "nano")
+
+
+### Formatting
+
+    #test
+    test_format_iso() -> unit
+        val dt = DateTime(2026, 4, 15, 12, 30, 5, 123000000, 0)
+        val s = dt.to_iso_string()
+        assert(s == "2026-04-15T12:30:05.123Z", s"iso: $s")
+
+    #test
+    test_format_date_only() -> unit
+        val dt = new_datetime(2026, 4, 15, 0, 0, 0)
+        val s = format_datetime(dt, "YYYY-MM-DD")
+        assert(s == "2026-04-15", s"date: $s")
+
+    #test
+    test_format_display() -> unit
+        val dt = new_datetime(2026, 4, 15, 14, 30, 0)
+        val s = format_datetime(dt, "WWWW, MMMM D, Y |at| h12:mm a")
+        assert(s == "Wednesday, April 15, 2026 at 2:30 p.m.", s"display: $s")
+
+    #test
+    test_format_short_month() -> unit
+        val dt = new_datetime(2026, 1, 5, 0, 0, 0)
+        val s = format_datetime(dt, "MMM D, YYYY")
+        assert(s == "Jan 5, 2026", s"short: $s")
+
+    #test
+    test_format_24h() -> unit
+        val dt = new_datetime(2026, 4, 15, 21, 5, 9)
+        val s = format_datetime(dt, "hh:mm:ss")
+        assert(s == "21:05:09", s"24h: $s")
+
+    #test
+    test_format_12h_midnight() -> unit
+        val dt = new_datetime(2026, 4, 15, 0, 0, 0)
+        val s = format_datetime(dt, "h12:mm a")
+        assert(s == "12:00 a.m.", s"midnight: $s")
+
+    #test
+    test_format_12h_noon() -> unit
+        val dt = new_datetime(2026, 4, 15, 12, 0, 0)
+        val s = format_datetime(dt, "h12:mm a")
+        assert(s == "12:00 p.m.", s"noon: $s")
+
+    #test
+    test_format_12h_afternoon() -> unit
+        val dt = new_datetime(2026, 4, 15, 15, 30, 0)
+        val s = format_datetime(dt, "h12:mm a")
+        assert(s == "3:30 p.m.", s"afternoon: $s")
+
+    #test
+    test_format_weekday_short() -> unit
+        val dt = new_datetime(2026, 4, 15, 0, 0, 0)
+        val s = format_datetime(dt, "WWW")
+        assert(s == "Wed", s"weekday: $s")
+
+    #test
+    test_format_fractional_millis() -> unit
+        val dt = DateTime(2026, 4, 15, 12, 0, 0, 123456789, 0)
+        val s = format_datetime(dt, "ss.fff")
+        assert(s == "00.123", s"millis: $s")
+
+    #test
+    test_format_fractional_nanos() -> unit
+        val dt = DateTime(2026, 4, 15, 12, 0, 0, 123456789, 0)
+        val s = format_datetime(dt, "ss.fffffffff")
+        assert(s == "00.123456789", s"nanos: $s")
+
+    #test
+    test_format_literal_pipe() -> unit
+        val dt = new_datetime(2026, 4, 15, 0, 0, 0)
+        val s = format_datetime(dt, "Y |is| |the| |year|")
+        assert(s == "2026 is the year", s"literal: $s")
+
+    #test
+    test_format_year_2digit() -> unit
+        val dt = new_datetime(2026, 4, 15, 0, 0, 0)
+        val s = format_datetime(dt, "YY")
+        assert(s == "26", s"2digit: $s")
+
+
+Design notes
+------------
+
+**Two-field Instant.** `seconds: i64` + `nano: int` gives
+unlimited date range with nanosecond precision. A single
+i64 of nanoseconds only covers ~292 years. This matches
+Java's `java.time.Instant` representation.
+
+**UTC offset, not timezone.** `DateTime` carries an integer
+offset in minutes, not a timezone name. This keeps the core
+library free of the IANA timezone database. A future
+`std.time.tz` module can add full timezone support.
+
+**Hinnant's algorithms.** The `civil_from_days` and
+`days_from_civil` functions use Howard Hinnant's public
+domain algorithms for proleptic Gregorian calendar math.
+These are exact, branchless (mostly), and require no
+lookup tables.
+
+**Clock interface.** Platforms implement `instant()` or
+`datetime()` based on what their hardware provides natively.
+An RTC gives `DateTime` directly; a tick counter gives
+`Instant`. The library bridges between them via calendar
+conversion.
+
+**Normalization.** Both `Instant` and `Duration` normalize
+the nano field to `[0, 999_999_999]` on construction.
+This ensures consistent comparison and arithmetic without
+special-casing negative nanoseconds.

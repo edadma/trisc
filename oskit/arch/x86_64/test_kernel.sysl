@@ -1,0 +1,11 @@
+// Minimal test kernel for x86_64 boot.
+// Uses the Sysl runtime for UART output.
+
+import oskit.arch.x86_64.uart_puts
+
+kernel_init()
+    uart_puts("kernel_init: ok\n")
+
+kernel_main() -> i64
+    uart_puts("kernel_main: SLIX alive on x86_64!\n")
+    i64(0)

@@ -9,6 +9,7 @@ case class RunCommand(
     limit: Int = 0,
     trace: Boolean = false,
     gui: Boolean = false,
+    smp: Int = 1,
 ) extends TriscCommand
 case class AsmCommand(
     input: String = "",
@@ -70,6 +71,14 @@ object TriscCli:
             .action((_, c) =>
               c.copy(command = c.command match
                 case rc: RunCommand => rc.copy(gui = true)
+                case other          => other
+              )
+            ),
+          opt[Int]("smp")
+            .text("Number of CPU cores (default 1)")
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case rc: RunCommand => rc.copy(smp = v.max(1).min(8))
                 case other          => other
               )
             ),
@@ -194,11 +203,79 @@ object TriscCli:
     val tof = TOF.deserialize(tofStr)
     if tof.tofType == TOFType.Executable then tof else Linker.link(Seq(Runtime.bootTof, tof, Runtime.ioTof))
 
+  /** Boot info header address — must match oskit/config BOOT_INFO_ADDR. */
+  private val BootInfoAddr = 0x600000L
+  /** Boot info magic: "SLIX" */
+  private val BootInfoMagic: Array[Byte] = Array(0x53, 0x4C, 0x49, 0x58).map(_.toByte)
+
+  /** Write boot info header and module blobs into RAM.
+    *
+    * Layout at BootInfoAddr:
+    *   +0: magic (4 bytes) = "SLIX"
+    *   +4: module_count (4 bytes, little-endian)
+    *   +8: per module (24 bytes each):
+    *     +0: name (8 bytes, NUL-padded)
+    *     +8: addr (8 bytes, little-endian i64)
+    *    +16: size (8 bytes, little-endian i64)
+    *
+    * Module blobs are placed at page-aligned addresses starting
+    * after the header. They sit in RAM as unused data until RS
+    * reads them in a later step.
+    */
+  def writeBootInfo(mem: Addressable, modules: Seq[(String, Array[Byte])], verbose: Boolean = true): Unit =
+    if modules.isEmpty then return
+    val headerSize = 8 + modules.length * 24
+    // Module blobs start at next page after the header
+    var blobAddr = (BootInfoAddr + headerSize + 0xFFF) & ~0xFFF
+
+    // Compute module addresses and load blobs into RAM
+    val entries = modules.map { case (name, blob) =>
+      val addr = blobAddr
+      for (i <- blob.indices) mem.writeByte(addr + i, blob(i))
+      blobAddr = ((addr + blob.length) + 0xFFF) & ~0xFFF // page-align next
+      (name, addr, blob.length)
+    }
+
+    // Write header magic
+    for (i <- BootInfoMagic.indices)
+      mem.writeByte(BootInfoAddr + i, BootInfoMagic(i))
+
+    // Write module count (4 bytes, little-endian)
+    val count = modules.length
+    mem.writeByte(BootInfoAddr + 4, (count & 0xFF).toByte)
+    mem.writeByte(BootInfoAddr + 5, ((count >> 8) & 0xFF).toByte)
+    mem.writeByte(BootInfoAddr + 6, ((count >> 16) & 0xFF).toByte)
+    mem.writeByte(BootInfoAddr + 7, ((count >> 24) & 0xFF).toByte)
+
+    // Write module entries
+    for ((name, addr, size) <- entries.zipWithIndex.map { case ((n, a, s), _) => (n, a, s) }) do
+      val i = entries.indexWhere(_._1 == name)
+      val entryBase = BootInfoAddr + 8 + i * 24
+
+      // Name (8 bytes, NUL-padded)
+      val nameBytes = name.getBytes("UTF-8").take(7)
+      for (j <- nameBytes.indices) mem.writeByte(entryBase + j, nameBytes(j))
+      for (j <- nameBytes.length until 8) mem.writeByte(entryBase + j, 0)
+
+      // Addr (8 bytes, little-endian)
+      for (j <- 0 until 8)
+        mem.writeByte(entryBase + 8 + j, ((addr >> (j * 8)) & 0xFF).toByte)
+
+      // Size (8 bytes, little-endian)
+      for (j <- 0 until 8)
+        mem.writeByte(entryBase + 16 + j, ((size >> (j * 8)) & 0xFF).toByte)
+
+    if verbose then
+      System.err.println(s"boot info: ${modules.length} module(s) at 0x${BootInfoAddr.toHexString}")
+      for (name, addr, size) <- entries do
+        System.err.println(f"  $name%-8s @ 0x${addr}%06X ($size%d bytes)")
+
   def setupCpu(
       linked: TOF,
       outputFn: String => Unit = s => { print(s); System.out.flush() },
       extraDevices: Seq[Addressable] = Nil,
       intc: InterruptController = new InterruptController(Runtime.intcAddress),
+      bootModules: Seq[(String, Array[Byte])] = Nil,
   ): (CPU, Memory) =
     val stdout = new Stdout(Runtime.stdoutAddress, outputFn)
     val timer = new Timer(Runtime.timerAddress, intc, irq = 0)
@@ -230,12 +307,91 @@ object TriscCli:
     val mem = new Memory("Memory", (Seq(ram, stdout, intc, timer, ramdisk, sha, dma) ++ extraDevices)*)
     dma.mem = mem
     linked.load(mem)
+
+    // Load boot modules into RAM (unused data for now — RS will read them later)
+    writeBootInfo(mem, bootModules)
+
     val mmu = new SimpleMMU(mem)
     mmu.setIdentityRange(0x7FE000L, 0xC00000L) // kernel PTBR, identity-mapped up to 12MB
     dma.mmu = Some(mmu)
     val cpu = new CPU(mem, Seq(timer, intc), mmu = Some(mmu))
     cpu.reset() // like 68000: reads SSP from vector[0], PC from vector[1], enters supervisor mode
     (cpu, mem)
+
+  /** Set up a multi-core system. Returns the MultiCore runner and shared memory.
+    *
+    * Each core gets its own INTC (at intcAddress + coreId * 16) and IPI device
+    * (at ipiBaseAddress + coreId * 16). Core 0 gets the timer in its tick sequence.
+    * All cores share the same Memory.
+    */
+  def setupMultiCore(
+      linked: TOF,
+      numCores: Int,
+      outputFn: String => Unit = s => { print(s); System.out.flush() },
+      extraDevices: Seq[Addressable] = Nil,
+      bootModules: Seq[(String, Array[Byte])] = Nil,
+  ): (MultiCore, Memory) =
+    val stdout = new Stdout(Runtime.stdoutAddress, outputFn)
+    val ramSize = Runtime.stdoutAddress.toInt
+    val ram = new RAM(0, ramSize)
+
+    // Per-core interrupt controllers (spaced 16 bytes apart)
+    val intcs = Array.tabulate(numCores)(i =>
+      new InterruptController(Runtime.intcAddress + i * 16))
+
+    // Per-core IPI devices (spaced 16 bytes apart)
+    val ipis = Array.tabulate(numCores)(i =>
+      new IPI(Runtime.ipiBaseAddress + i * 16, selfCoreId = i, intcs))
+
+    // Timer on core 0's INTC
+    val timer = new Timer(Runtime.timerAddress, intcs(0), irq = 0)
+
+    val ramdisk = new Ramdisk(
+      Runtime.ramdiskAddress, ram, sectors = 256, sectorSize = 4096,
+      intcs(0), irq = 3,
+      prefill = """
+        /dev/tty0 char 0 0
+        /dev/disk0 block 1 0
+        /dev/null char 0 1
+        /root dir
+        /home dir
+        /home/ed dir
+        /etc/passwd file "root:x:0:0:root:/root:/nsh\ned:x:1000:1000:ed:/home/ed:/nsh"
+        /etc/shadow file "root:slix:3b1b8291c0bdb62febcd914f45884bca403ae1c42a4bb1c41755881f3886d158\ned:slix:c638d5b6e91f70b96934aac8d7be42363ce4ea5927f9a9bbbe2d64a8b51926b5"
+        /etc/ttytab file "tty0 login"
+      """,
+      files = RamdiskBinPrograms.loadEmbeddedBinaries(),
+    )
+    val sha = new ShaAccelerator(Runtime.shaAccelAddress)
+    val dma = new DMA(Runtime.dmaAddress, null, intcs(0), irq = 4)
+    val allDevices: Seq[Addressable] = Seq(ram, stdout, timer, ramdisk, sha, dma) ++
+      intcs.toSeq ++ ipis.toSeq ++ extraDevices
+    val mem = new Memory("Memory", allDevices*)
+    dma.mem = mem
+    linked.load(mem)
+    writeBootInfo(mem, bootModules)
+
+    val mmu0 = new SimpleMMU(mem)
+    mmu0.setIdentityRange(0x7FE000L, 0xC00000L)
+    dma.mmu = Some(mmu0)
+
+    val mc = new MultiCore(mem, numCores, coreFactory = (m, id, mon) => {
+      val mmuN = if id == 0 then mmu0 else {
+        val mm = new SimpleMMU(mem)
+        mm.setIdentityRange(0x7FE000L, 0xC00000L)
+        mm
+      }
+      new CPU(m, coreId = id, reservationMonitor = Some(mon), mmu = Some(mmuN))
+    })
+
+    // Core 0: timer + its INTC. Other cores: only their INTC.
+    mc.core(0).tick = Seq(timer, intcs(0))
+    for i <- 1 until numCores do
+      mc.core(i).tick = Seq(intcs(i))
+
+    mc.resetAll()
+    System.err.println(s"SMP: $numCores core(s), per-core INTC + IPI")
+    (mc, mem)
 
   private def executeRun(cmd: RunCommand): Unit =
     val linked = loadTof(cmd)
@@ -246,6 +402,14 @@ object TriscCli:
         case None =>
           System.err.println("error: --gui not available on this platform")
           return
+
+    else if cmd.smp > 1 then
+      val (mc, _) = setupMultiCore(linked, cmd.smp)
+      if cmd.trace then mc.core(0).trace = true
+      if cmd.limit > 0 then mc.cores.foreach(_.limit = cmd.limit)
+      mc.runAll()
+      val result = mc.core(0).r(1).read
+      if result != 0 then System.err.println(s"exit: $result")
 
     else
       val (cpu, _) = setupCpu(linked)

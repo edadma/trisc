@@ -1,0 +1,101 @@
+OSKit Arch — TRISC CPU Primitives
+
+Architecture-specific CPU operations for TRISC: interrupt
+enable/disable and thread stack frame construction.
+
+    module oskit.arch
+
+Offset from saved SSP to the return-value register (r1)
+in the context frame. Used by syscall_return to write the
+result where restore_thread will pop it into r1.
+
+The TRISC context frame is saved in boot.asm as:
+USP, r6, r5, r4, r3, r2, r1, PC, PSR
+(pushed in that order, so PSR is at lowest address).
+SSP points at USP (bottom). r1 is at SSP + 6*8 = 48.
+
+    val SYSCALL_RETURN_OFFSET = 48
+
+Disable interrupts. Must be called before accessing
+shared kernel state (run queues, thread table, etc.).
+
+    arch_cli()
+        asm("cli")
+
+Enable interrupts. Called after kernel state updates
+are complete, allowing the timer and device IRQs to fire.
+
+    arch_sti()
+        asm("sti")
+
+Spinlock acquire. Spins using atomic CAS until the lock
+is obtained, then disables interrupts. The lock word is 0
+when free, 1 when held. r1 = lock address (from param).
+Uses r2 (expected=0) and r3 (new=1) as scratch.
+
+    arch_spinlock_acquire(lock: *i64)
+        asm("ldi r3, 1\n_spin_acq\nldi r2, 0\ncas r2, r1, r3\nbne r2, r0, _spin_acq\ncli")
+
+Spinlock release. Enables interrupts, then stores 0 to
+the lock word (8-byte store). r1 = lock address (from param).
+
+    arch_spinlock_release(lock: *i64)
+        asm("sti\nstd r0, r1, r0")
+
+Build a fake context frame on the supervisor stack so
+that restore_thread in boot.asm can pop it and RTE into
+the new thread. TRISC layout (9 fields, top to bottom):
+PSR, PC, r1, r2, r3, r4, r5, r6, USP
+
+    val STACK_FRAME_SIZE = 72        // 9 fields × 8 bytes (PSR, PC, r1-r6, USP)
+
+Per-process kernel stack top. Updated by tss_set_rsp0 on
+context switch. The trap handler reads this to switch to the
+kernel stack before calling slow-path syscall handlers.
+
+    var current_kstack_top: i64 = 0
+
+    tss_set_rsp0(rsp0: i64)
+        current_kstack_top = rsp0
+
+    extern thread_exit: byte
+
+    build_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64
+        var sp = ssp
+        sp -= 8
+        *(*i64(sp)) = 2                 // PSR: Mode=1 (supervisor), Ind=0 (interrupts on)
+        sp -= 8
+        *(*i64(sp)) = entry_point       // PC
+        sp -= 8
+        *(*i64(sp)) = 0                 // r1
+        sp -= 8
+        *(*i64(sp)) = 0                 // r2
+        sp -= 8
+        *(*i64(sp)) = 0                 // r3
+        sp -= 8
+        *(*i64(sp)) = 0                 // r4
+        sp -= 8
+        *(*i64(sp)) = 0                 // r5
+        sp -= 8
+        *(*i64(sp)) = i64(&thread_exit) // r6 = return address (exit trampoline)
+        sp -= 8
+        *(*i64(sp)) = usp               // USP
+        sp
+
+TRISC build_user_stack_frame — same as build_stack_frame.
+TRISC doesn't distinguish ring 0/3 in the context frame.
+
+    build_user_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64 =
+        build_stack_frame(entry_point, usp, ssp)
+
+Set up the initial context frame for a new process. On TRISC,
+the context frame lives on the process's SSP (because the hardware
+pushes PC+PSR there on trap). Build in a temp buffer and copy
+to the child's address space. Returns the SSP value for the thread.
+
+    arch_setup_process_frame(entry_point: i64, usp: i64, ssp: i64, kstack_top_val: i64, ptbr_val: u64) -> i64
+        var frame_buf: [72]byte
+        val frame_ssp = i64(&frame_buf[0]) + STACK_FRAME_SIZE
+        build_stack_frame(entry_point, usp, frame_ssp)
+        vm_copy_to(ptbr_val, u64(ssp) - u64(STACK_FRAME_SIZE), &frame_buf[0], STACK_FRAME_SIZE)
+        ssp - STACK_FRAME_SIZE

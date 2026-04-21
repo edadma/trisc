@@ -21,7 +21,7 @@ Syscall numbers:
 
     module oskit.services
 
-    import oskit.kernel.{kernel_getuid, kernel_setuid}
+    // No kernel imports — all services go through syscalls
 
     extern syscall(number: int, arg: i64) -> i64
 
@@ -188,8 +188,199 @@ Slot range: 0-3. Value range: 0 to 16777215.
     get_thread_pid(id: int) -> int
         syscall(SYS_THREAD_PID, id)
 
+    val SYS_KB_SET_NOTIFY = 64
+
+    svc_kb_set_notify(tid: int)
+        syscall(SYS_KB_SET_NOTIFY, tid)
+
+    val SYS_VM_CREATE_SERVER_PT = 63
+
+    svc_vm_create_server_pt(io_page: int) -> u64
+        u64(syscall(SYS_VM_CREATE_SERVER_PT, io_page))
+
+    val SYS_GETUID = 61
+    val SYS_SETUID = 62
+
     getuid() -> int
-        kernel_getuid()
+        syscall(SYS_GETUID, 0)
 
     setuid(uid: int)
-        kernel_setuid(uid)
+        syscall(SYS_SETUID, uid)
+
+Server isolation syscalls. These allow PM and VFS to call
+kernel functions through the syscall interface instead of
+importing them directly.
+
+    val SYS_VM_CREATE_PT       = 44
+    val SYS_CREATE_PROC_SUSP   = 45
+    val SYS_RESUME_PROC        = 46
+    val SYS_REAP_PROC          = 47
+    val SYS_KILL_PROC          = 48
+    val SYS_REGISTER_PM        = 49
+    val SYS_SET_THREAD_PTBR    = 50
+    val SYS_VM_SET_PTBR_SC     = 51
+    val SYS_GET_THREAD_PID     = 52
+    val SYS_GET_THREAD_PTBR    = 53
+    val SYS_VM_COPY_TO         = 54
+    val SYS_VM_COPY_FROM       = 55
+    val SYS_PROC_STATE         = 56
+    val SYS_PROC_EXIT_CODE     = 57
+    val SYS_PROC_MAIN_TID      = 58
+    val SYS_PROC_PARENT_TID    = 59
+    val SYS_PROC_SET_PARENT_TID = 60
+
+    svc_vm_create_pt() -> u64
+        u64(syscall(SYS_VM_CREATE_PT, 0))
+
+    svc_create_proc_susp(entry: i64, usp: i64, ssp: i64, name: string, ptbr: u64) -> int
+        var args: [6]i64
+        args[0] = entry
+        args[1] = usp
+        args[2] = ssp
+        args[3] = i64(*byte(name))
+        args[4] = len(name)
+        args[5] = i64(ptbr)
+        syscall(SYS_CREATE_PROC_SUSP, i64(args))
+
+    svc_resume_proc(pid: int)
+        syscall(SYS_RESUME_PROC, pid)
+
+    svc_reap_proc(pid: int)
+        syscall(SYS_REAP_PROC, pid)
+
+    svc_kill_proc(pid: int) -> int
+        syscall(SYS_KILL_PROC, pid)
+
+    svc_register_pm(tid: int)
+        syscall(SYS_REGISTER_PM, tid)
+
+    svc_set_thread_ptbr(tid: int, ptbr: u64)
+        var args: [2]i64
+        args[0] = tid
+        args[1] = i64(ptbr)
+        syscall(SYS_SET_THREAD_PTBR, i64(args))
+
+    svc_vm_set_ptbr(addr: u64)
+        syscall(SYS_VM_SET_PTBR_SC, i64(addr))
+
+    svc_get_thread_pid(tid: int) -> int
+        syscall(SYS_GET_THREAD_PID, tid)
+
+    svc_get_thread_ptbr(tid: int) -> u64
+        u64(syscall(SYS_GET_THREAD_PTBR, tid))
+
+    svc_vm_copy_to(dst_ptbr: u64, dst_vaddr: u64, src: *byte, vlen: int)
+        var args: [4]i64
+        args[0] = i64(dst_ptbr)
+        args[1] = i64(dst_vaddr)
+        args[2] = i64(src)
+        args[3] = vlen
+        syscall(SYS_VM_COPY_TO, i64(args))
+
+    svc_vm_copy_from(src_ptbr: u64, src_vaddr: u64, dst: *byte, vlen: int)
+        var args: [4]i64
+        args[0] = i64(src_ptbr)
+        args[1] = i64(src_vaddr)
+        args[2] = i64(dst)
+        args[3] = vlen
+        syscall(SYS_VM_COPY_FROM, i64(args))
+
+    svc_proc_state(pid: int) -> int
+        syscall(SYS_PROC_STATE, pid)
+
+    svc_proc_exit_code(pid: int) -> int
+        syscall(SYS_PROC_EXIT_CODE, pid)
+
+    svc_proc_main_tid(pid: int) -> int
+        syscall(SYS_PROC_MAIN_TID, pid)
+
+    svc_proc_parent_tid(pid: int) -> int
+        syscall(SYS_PROC_PARENT_TID, pid)
+
+    svc_proc_set_parent_tid(pid: int, parent_tid: int)
+        var args: [2]i64
+        args[0] = pid
+        args[1] = parent_tid
+        syscall(SYS_PROC_SET_PARENT_TID, i64(args))
+
+Translate a virtual address to physical using the current
+thread's page table. Used by drivers that need DMA addresses.
+
+    val SYS_VM_V2P = 66
+
+    svc_vm_v2p(vaddr: u64) -> u64
+        u64(syscall(SYS_VM_V2P, i64(vaddr)))
+
+    val SYS_PORT_TRANSFER = 68
+    val SYS_SET_PRIV      = 69
+
+    svc_set_priv(pid: int, allow_lo: i64, allow_hi: i64, ipc_mask: int)
+        var args: [4]i64
+        args[0] = pid
+        args[1] = allow_lo
+        args[2] = allow_hi
+        args[3] = ipc_mask
+        syscall(SYS_SET_PRIV, i64(args))
+
+    svc_port_transfer(port: int, new_owner_tid: int)
+        var args: [2]i64
+        args[0] = port
+        args[1] = new_owner_tid
+        syscall(SYS_PORT_TRANSFER, i64(args))
+
+    val SYS_SET_IPC_MASK = 70
+
+    svc_set_ipc_mask(pid: int, mask: int)
+        syscall(SYS_SET_IPC_MASK, (pid << 8) | (mask & 0xFF))
+
+    val SYS_PHYS_READ = 67
+
+    svc_phys_read(src_phys: u64, dst: *byte, vlen: int)
+        var args: [3]i64
+        args[0] = i64(src_phys)
+        args[1] = i64(dst)
+        args[2] = vlen
+        syscall(SYS_PHYS_READ, i64(args))
+
+Grant-based IPC. Clients create grants to allow servers
+to access their memory. The kernel mediates copies.
+
+    val SYS_GRANT_CREATE = 71
+    val SYS_GRANT_REVOKE = 72
+    val SYS_GRANT_COPY   = 73
+
+    val GRANT_READ  = 1
+    val GRANT_WRITE = 2
+    val GRANT_RW    = 3
+
+    svc_grant_create(vaddr: u64, len: int, flags: int) -> int
+        var args: [3]i64
+        args[0] = i64(vaddr)
+        args[1] = len
+        args[2] = flags
+        syscall(SYS_GRANT_CREATE, i64(args))
+
+    svc_grant_revoke(grant_id: int)
+        syscall(SYS_GRANT_REVOKE, grant_id)
+
+    svc_grant_copy(grant_id: int, offset: int, local_buf: *byte, len: int, direction: int) -> int
+        var args: [5]i64
+        args[0] = grant_id
+        args[1] = offset
+        args[2] = i64(local_buf)
+        args[3] = len
+        args[4] = direction
+        syscall(SYS_GRANT_COPY, i64(args))
+
+    val SYS_GRANT_MAP   = 74
+    val SYS_GRANT_UNMAP = 75
+
+    svc_grant_map(grant_id: int, offset: int, len: int) -> int
+        var args: [3]i64
+        args[0] = grant_id
+        args[1] = offset
+        args[2] = len
+        syscall(SYS_GRANT_MAP, i64(args))
+
+    svc_grant_unmap(grant_id: int)
+        syscall(SYS_GRANT_UNMAP, grant_id)

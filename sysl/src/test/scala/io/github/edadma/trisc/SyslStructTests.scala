@@ -168,7 +168,7 @@ class SyslStructTests extends SyslTestHelpers {
         |""".stripMargin): @unchecked
     ast.decls(0) shouldBe a[StructDeclAST]
     ast.decls(0).asInstanceOf[StructDeclAST].name shouldBe "Point"
-    ast.decls(0).asInstanceOf[StructDeclAST].fields shouldBe List(("x", NamedTypeAST("int")), ("y", NamedTypeAST("int")))
+    ast.decls(0).asInstanceOf[StructDeclAST].fields shouldBe List(("x", NamedTypeAST("int"), false), ("y", NamedTypeAST("int"), false))
   }
 
   // ===== Struct in loop =====
@@ -201,5 +201,65 @@ class SyslStructTests extends SyslTestHelpers {
     val tangled = LiterateRenderer.tangle(new LiterateParser().parse(raw))
     val Right(ast) = (new SyslParser).parseProgram(tangled): @unchecked
     (new SyslAnalyzer).analyze(ast)
+  }
+
+  // ===== Literate programming: prose can split a single function body =====
+  //
+  // When an .lsysl file interleaves indented code blocks with markdown prose,
+  // a function body declared in one block and continued in the next must
+  // tangle into a single function (not two separate declarations or a parse
+  // error). The existing mechanism is:
+  //   - LiterateParser collects indented code blocks in source order
+  //   - LiterateRenderer.tangle joins them with "\n"
+  //   - SyslParser's IndentationLexical treats the resulting blank lines as
+  //     continuation within the indented block, so the function body stays whole
+
+  "literate prose between indented blocks keeps a single function body" in {
+    val raw =
+      """# sum of two
+        |
+        |Declare the first local:
+        |
+        |    compute() -> int
+        |        val x = 40
+        |
+        |Then the second, after some explanatory prose:
+        |
+        |        val y = 2
+        |        x + y
+        |
+        |Finally the entry point:
+        |
+        |    main() -> int = compute()
+        |""".stripMargin
+    val tangled = LiterateRenderer.tangle(new LiterateParser().parse(raw))
+    val Right(ast) = (new SyslParser).parseProgram(tangled): @unchecked
+    // Exactly two function decls — compute and main, not three or four
+    val funs = ast.decls.collect { case f: FunDeclAST => f.name }
+    funs shouldBe List("compute", "main")
+    val typed = (new SyslAnalyzer).analyze(ast)
+    (new SyslInterpreter(_ => ())).run(typed) shouldBe 42L
+  }
+
+  "literate prose between nested indented blocks preserves if/else body" in {
+    val raw =
+      """# choose
+        |
+        |    choose(b: bool) -> int
+        |        if b
+        |            val hit = 100
+        |
+        |The `else` branch is separated by a prose paragraph:
+        |
+        |            hit
+        |        else
+        |            50
+        |
+        |    main() -> int = choose(true)
+        |""".stripMargin
+    val tangled = LiterateRenderer.tangle(new LiterateParser().parse(raw))
+    val Right(ast) = (new SyslParser).parseProgram(tangled): @unchecked
+    val typed = (new SyslAnalyzer).analyze(ast)
+    (new SyslInterpreter(_ => ())).run(typed) shouldBe 100L
   }
 }

@@ -1,0 +1,13 @@
+// Test port I/O via asm() with explicit register moves
+
+outb(port: int, v: byte)
+    asm("movl %edi, %edx\nmovb %sil, %al\noutb %al, %dx")
+
+inb(port: int) -> int
+    asm("movl %edi, %edx\ninb %dx, %al\nmovzbl %al, %eax")
+    0
+
+main() -> int
+    outb(0x3F8, byte(65))
+    val x = inb(0x3F8)
+    0
