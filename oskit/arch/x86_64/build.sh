@@ -51,6 +51,7 @@ case "$APP" in
             oskit/arch/x86_64/pci.lsysl
             oskit/drivers/virtio/virtio_transport_pci.lsysl
             oskit/drivers/virtio/virtio_net.lsysl
+            oskit/drivers/virtio/virtio_dma_kernel.lsysl
             oskit/drivers/virtio/virtio_bringup_x86.lsysl
         )
         ;;
