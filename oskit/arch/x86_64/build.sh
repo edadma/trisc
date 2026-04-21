@@ -44,7 +44,15 @@ SYSL_FILES=(
 # App-specific extra modules
 case "$APP" in
     app_nsh)
-        # All servers are boot modules — kernel only needs base modules
+        # All servers are boot modules. nsh pulls in virtio-net
+        # so the nic server (boot module in a later commit) can
+        # attach to a ready driver.
+        SYSL_FILES+=(
+            oskit/arch/x86_64/pci.lsysl
+            oskit/drivers/virtio/virtio_transport_pci.lsysl
+            oskit/drivers/virtio/virtio_net.lsysl
+            oskit/drivers/virtio/virtio_bringup_x86.lsysl
+        )
         ;;
     app_test_spawn)
         # All servers are boot modules — kernel only needs base modules
@@ -83,6 +91,15 @@ echo "=== Built: $OUT/kernel.elf ($APP) ==="
 if [ "$RUN" = "run" ]; then
     echo "=== QEMU (Ctrl-A X to quit) ==="
     QEMU_ARGS="-kernel $OUT/kernel.elf -serial stdio -no-reboot -display none"
+    # virtio-net on the default pc machine (i440fx). User-mode
+    # networking is enough for bringup — the guest gets a
+    # 10.0.2.x address and can ping 10.0.2.2.
+    # disable-legacy=on forces non-transitional (modern-only)
+    # device ID 0x1041. Default is transitional (ID 0x1000) which
+    # presents the virtio device type via the Subsystem ID
+    # register instead of device_id — that path isn't implemented
+    # here yet (see pci_find_virtio).
+    QEMU_ARGS="$QEMU_ARGS -netdev user,id=n0 -device virtio-net-pci,netdev=n0,disable-legacy=on"
     # Load ramdisk (module 0) and boot info (module 1) as multiboot modules
     if [ -f "$OUT/ramdisk.img" ]; then
         if [ -f "$OUT/bootinfo.img" ]; then

@@ -5,6 +5,7 @@
 import oskit.kernel.{create_process_suspended, resume_process, first_thread_ssp}
 import oskit.arch.{vm_create_server_pt, vm_copy_to}
 import oskit.arch.x86_64.uart_puts
+import oskit.drivers.virtio.virtio_net_bringup
 import oskit.ipc.ipc_init
 import oskit.hal.memset
 
@@ -66,6 +67,11 @@ k_load_elf64(buf: *byte, buflen: int, ptbr: u64) -> i64
 
 kernel_main() -> i64
     ipc_init()
+
+    // Probe virtio-pci for virtio-net and log MAC/fail-code.
+    // Runs before RS so the nic server (later: as a boot module)
+    // can assume the driver is ready.
+    virtio_net_bringup()
 
     // Get ramdisk (first multiboot module)
     val rd_base = get_mboot_mod_start()

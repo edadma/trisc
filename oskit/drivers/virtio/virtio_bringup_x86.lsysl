@@ -1,0 +1,70 @@
+Virtio-net bringup (x86_64)
+============================
+
+One-shot probe + init helper, kicked off from `kernel_main`
+before RS starts. Logs the MAC (or a fail-code) to the serial
+console, same shape as the aarch64 equivalent in
+`board/virt/hello.lsysl`.
+
+Lives in `oskit.drivers.virtio` — the bringup is a thin helper
+that *uses* virtio_net, so it belongs with the virtio driver
+(arch-code depending on drivers is the wrong direction and
+creates an import cycle with `virtio_transport_pci.lsysl`).
+x86-specific only because it talks to the COM1 UART via
+`oskit.arch.x86_64.uart_puts`.
+
+    module oskit.drivers.virtio
+
+    import oskit.arch.x86_64.{uart_puts, uart_putc}
+
+
+Render `v` as two hex nibbles (no 0x prefix) to the UART.
+
+    vb_put_byte_hex(v: int)
+        val hi = (v >> 4) & 0xF
+        val lo = v & 0xF
+        if hi < 10
+            uart_putc(int('0') + hi)
+        else
+            uart_putc(int('a') + hi - 10)
+        if lo < 10
+            uart_putc(int('0') + lo)
+        else
+            uart_putc(int('a') + lo - 10)
+
+
+One-nibble renderer for the fail-code.
+
+    vb_put_nibble(v: int)
+        if v < 10
+            uart_putc(int('0') + v)
+        else
+            uart_putc(int('a') + v - 10)
+
+
+Probe + init virtio-net. On failure, log a small numeric code
+from `virtio_net_last_fail` (1=not found, 2=no VERSION_1,
+3=FEATURES_OK rejected, 4=RX queue setup, 5=TX queue setup).
+On success, log the negotiated MAC.
+
+Must run before any networking code depends on `virtio_net_send`
+/ `virtio_net_recv`.
+
+    virtio_net_bringup()
+        if virtio_net_init() == 0
+            uart_puts("virtio-net: init failed, code=")
+            vb_put_nibble(virtio_net_last_fail())
+            uart_puts("\n")
+            return
+        var mac: [6]byte
+        if virtio_net_get_mac(mac) != 0
+            uart_puts("virtio-net: MAC=")
+            var i = 0
+            while i < 6
+                vb_put_byte_hex(int(mac[i]) & 0xff)
+                if i < 5
+                    uart_putc(int(':'))
+                i += 1
+            uart_puts("\n")
+        else
+            uart_puts("virtio-net: no MAC configured\n")

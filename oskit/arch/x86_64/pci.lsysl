@@ -1,0 +1,274 @@
+OSKit Arch -- x86_64 PCI config-space + enumeration
+=====================================================
+
+Port-based PCI configuration access (0xCF8/0xCFC), device
+enumeration, BAR decoding, and capability-list walk. This is the
+x86-specific transport plumbing that sits underneath
+`virtio_transport_pci.lsysl` — this file knows nothing about
+virtio except for the vendor ID + modern-device ID range used by
+`pci_find_virtio`.
+
+QEMU's `pc` / `q35` machines expose a flat bus 0 and we don't
+walk behind PCI-to-PCI bridges; for virtio-net in QEMU that's
+not a concern. Multi-bus walking is a future problem.
+
+    module oskit.arch.x86_64
+
+
+32-bit port I/O (implemented in boot.s as proper `outl`/`inl`
+instructions). The byte-wide `outb`/`inb` the rest of the
+runtime uses aren't sufficient for PCI — the host bridge expects
+a single 4-byte bus cycle per config access.
+
+    extern outl(port: int, v: u32)
+    extern inl(port: int) -> u32
+
+
+Config-space port addresses.
+
+    val PCI_CONFIG_ADDRESS = 0xCF8
+    val PCI_CONFIG_DATA    = 0xCFC
+
+
+Standard type-0 header offsets we actually touch.
+
+    val PCI_CFG_VENDOR        = 0x00
+    val PCI_CFG_DEVICE        = 0x02
+    val PCI_CFG_COMMAND       = 0x04
+    val PCI_CFG_STATUS_REG    = 0x06
+    val PCI_CFG_BAR0          = 0x10
+    val PCI_CFG_CAP_PTR       = 0x34
+
+
+Command-register bits we set.
+
+    val PCI_CMD_MEM_SPACE     = 0x0002
+    val PCI_CMD_BUS_MASTER    = 0x0004
+
+Status-register bit 4 — "has capability list at offset 0x34".
+
+    val PCI_STATUS_CAP_LIST   = 0x0010
+
+
+Generic PCI capability ID. 0x09 is vendor-specific — virtio uses
+this for every one of its COMMON/NOTIFY/ISR/DEVICE caps.
+
+    val PCI_CAP_VENDOR        = 0x09
+
+
+BAR decoding. Memory BARs have bit 0 = 0; bits 1-2 encode the
+locator (00 = 32-bit, 10 = 64-bit); bit 3 = prefetchable. The
+usable base is `bar & ~0xf`. I/O BARs (bit 0 = 1) are ignored
+— virtio-pci modern places everything in memory BARs.
+
+    val PCI_BAR_IO_MASK             = 0x1
+    val PCI_BAR_TYPE_64             = 0x4
+    val PCI_BAR_ADDR_MASK_MEM: u32  = 0xFFFFFFF0
+
+
+Virtio-over-PCI constants. Modern virtio devices present vendor
+0x1AF4 and device ID 0x1040 + `virtio_device_id` (so 0x1041 for
+net, 0x1042 for block, …). The transitional range
+(0x1000..0x103F) isn't supported; the driver requires VERSION_1
+which only modern devices offer.
+
+    val VIRTIO_PCI_VENDOR: int       = 0x1AF4
+    val VIRTIO_PCI_MODERN_BASE: int  = 0x1040
+
+Virtio capability `cfg_type` values (the byte at offset 3 of a
+vendor-specific virtio cap).
+
+    val VIRTIO_PCI_CAP_COMMON_CFG    = 1
+    val VIRTIO_PCI_CAP_NOTIFY_CFG    = 2
+    val VIRTIO_PCI_CAP_ISR_CFG       = 3
+    val VIRTIO_PCI_CAP_DEVICE_CFG    = 4
+    val VIRTIO_PCI_CAP_PCI_CFG       = 5
+
+Virtio cap byte layout (all offsets from the cap header start):
+
+- 0: cap_vndr   (= 0x09)
+- 1: cap_next
+- 2: cap_len
+- 3: cfg_type
+- 4: bar
+- 5: id
+- 6..7: padding
+- 8..11: offset (u32, little-endian)
+- 12..15: length (u32, little-endian)
+- 16..19: notify_off_multiplier (u32, only if cfg_type == NOTIFY_CFG)
+
+    val VPCI_CAP_CFG_TYPE        = 3
+    val VPCI_CAP_BAR             = 4
+    val VPCI_CAP_OFFSET          = 8
+    val VPCI_CAP_LENGTH          = 12
+    val VPCI_CAP_NOTIFY_MULT     = 16
+
+
+BDF packing. High byte: bus, next 5 bits: device, low 3 bits:
+function. -1 means "no device".
+
+    val PCI_BDF_NONE = -1
+
+    pci_bdf(bus: int, dev: int, fn: int) -> int
+        (bus << 8) | (dev << 3) | (fn & 0x7)
+
+    pci_bdf_bus(bdf: int) -> int
+        (bdf >> 8) & 0xff
+
+    pci_bdf_dev(bdf: int) -> int
+        (bdf >> 3) & 0x1f
+
+    pci_bdf_fn(bdf: int) -> int
+        bdf & 0x7
+
+
+Pack (bus, dev, fn, off) into the 32-bit value 0xCF8 expects.
+`off` must be 4-byte aligned; the byte/word readers fold in the
+low bits on the data-port side.
+
+    pci_cfg_addr(bus: int, dev: int, fn: int, off: int) -> u32
+        val b = u32(bus & 0xff) << 16
+        val d = u32(dev & 0x1f) << 11
+        val f = u32(fn  & 0x07) << 8
+        val o = u32(off & 0xfc)
+        u32(0x80000000) | b | d | f | o
+
+
+32-bit config-space read/write.
+
+    pci_read32(bdf: int, off: int) -> u32
+        outl(PCI_CONFIG_ADDRESS,
+             pci_cfg_addr(pci_bdf_bus(bdf), pci_bdf_dev(bdf),
+                          pci_bdf_fn(bdf), off))
+        inl(PCI_CONFIG_DATA)
+
+    pci_write32(bdf: int, off: int, v: u32)
+        outl(PCI_CONFIG_ADDRESS,
+             pci_cfg_addr(pci_bdf_bus(bdf), pci_bdf_dev(bdf),
+                          pci_bdf_fn(bdf), off))
+        outl(PCI_CONFIG_DATA, v)
+
+
+16- and 8-bit readers — align down, shift.
+
+    pci_read16(bdf: int, off: int) -> int
+        val dword = pci_read32(bdf, off & ~3)
+        val shift = (off & 2) * 8
+        int((dword >> u32(shift)) & u32(0xffff))
+
+    pci_read8(bdf: int, off: int) -> int
+        val dword = pci_read32(bdf, off & ~3)
+        val shift = (off & 3) * 8
+        int((dword >> u32(shift)) & u32(0xff))
+
+Read/modify/write for 16-bit fields, preserving dword neighbours.
+
+    pci_write16(bdf: int, off: int, v: int)
+        val dword = pci_read32(bdf, off & ~3)
+        val shift = (off & 2) * 8
+        val mask  = u32(0xffff) << u32(shift)
+        val updated = (dword & ~mask) | ((u32(v & 0xffff)) << u32(shift))
+        pci_write32(bdf, off & ~3, updated)
+
+
+Vendor + device IDs. Vendor 0xFFFF indicates "no device here" —
+PCI returns all-ones for an absent slot.
+
+    pci_vendor(bdf: int) -> int
+        pci_read16(bdf, PCI_CFG_VENDOR)
+
+    pci_device(bdf: int) -> int
+        pci_read16(bdf, PCI_CFG_DEVICE)
+
+
+Walk bus 0, function 0 of each slot, for the first virtio
+device of `dev_id`. Returns the matching BDF or `PCI_BDF_NONE`.
+We don't probe function > 0: virtio isn't multi-function in
+QEMU, and skipping the multi-function bit keeps the walk tiny.
+
+    pci_find_virtio(dev_id: int) -> int
+        val target = VIRTIO_PCI_MODERN_BASE + dev_id
+        var d = 0
+        while d < 32
+            val bdf = pci_bdf(0, d, 0)
+            if pci_vendor(bdf) == VIRTIO_PCI_VENDOR
+                if pci_device(bdf) == target
+                    return bdf
+            d += 1
+        PCI_BDF_NONE
+
+
+Enable memory decoding + bus mastering. Required before the CPU
+can touch any MMIO BAR and before the device can DMA.
+
+    pci_enable(bdf: int)
+        val cmd = pci_read16(bdf, PCI_CFG_COMMAND)
+        pci_write16(bdf, PCI_CFG_COMMAND,
+            cmd | PCI_CMD_MEM_SPACE | PCI_CMD_BUS_MASTER)
+
+
+BAR decoding. Reads BAR[i] (0..5). For a 32-bit memory BAR,
+returns the base address. For a 64-bit memory BAR (type bits =
+0b10), stitches BAR[i] and BAR[i+1] into a 64-bit address.
+Returns 0 for I/O BARs (we don't consume them) or unused BARs
+(which read as 0).
+
+    pci_bar_raw(bdf: int, i: int) -> u32
+        pci_read32(bdf, PCI_CFG_BAR0 + i * 4)
+
+    pci_bar_is_64(bdf: int, i: int) -> int
+        val raw = pci_bar_raw(bdf, i)
+        if (raw & u32(PCI_BAR_IO_MASK)) != 0
+            return 0
+        if (raw & u32(PCI_BAR_TYPE_64)) != 0
+            return 1
+        0
+
+    pci_bar_addr(bdf: int, i: int) -> u64
+        val raw = pci_bar_raw(bdf, i)
+        if (raw & u32(PCI_BAR_IO_MASK)) != 0
+            return u64(0)
+        val low = u64(raw & PCI_BAR_ADDR_MASK_MEM)
+        if (raw & u32(PCI_BAR_TYPE_64)) != 0
+            val hi = u64(pci_bar_raw(bdf, i + 1))
+            return (hi << 32) | low
+        low
+
+
+Find the first virtio vendor-specific capability whose
+`cfg_type` matches. The caller usually wants the four
+well-known types (COMMON / NOTIFY / ISR / DEVICE); duplicates
+are rare enough that "find the first" is the right default.
+
+Returns the config-space offset of the cap header, or -1 if
+not present.
+
+    pci_find_virtio_cap(bdf: int, cfg_type: int) -> int
+        val status = pci_read16(bdf, PCI_CFG_STATUS_REG)
+        if (status & PCI_STATUS_CAP_LIST) == 0
+            return -1
+        var off = pci_read8(bdf, PCI_CFG_CAP_PTR) & 0xfc
+        var guard = 48
+        while off != 0 && guard > 0
+            val id = pci_read8(bdf, off)
+            if id == PCI_CAP_VENDOR
+                val t = pci_read8(bdf, off + VPCI_CAP_CFG_TYPE)
+                if t == cfg_type
+                    return off
+            off = pci_read8(bdf, off + 1) & 0xfc
+            guard -= 1
+        -1
+
+
+Read a u32 virtio-cap field (offset, length, notify_off_
+multiplier). Virtio caps store little-endian u32 at byte
+granularity in config space; the containing dwords aren't
+aligned the same way the cap header is, so assemble from 4
+byte reads.
+
+    pci_cap_u32(bdf: int, cap_off: int, field_off: int) -> u32
+        val b0 = u32(pci_read8(bdf, cap_off + field_off)     & 0xff)
+        val b1 = u32(pci_read8(bdf, cap_off + field_off + 1) & 0xff)
+        val b2 = u32(pci_read8(bdf, cap_off + field_off + 2) & 0xff)
+        val b3 = u32(pci_read8(bdf, cap_off + field_off + 3) & 0xff)
+        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
