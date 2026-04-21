@@ -65,6 +65,11 @@ class SyslLLVMCodegen(target: String = "host"):
   private def funcKindOfExpr(e: TExpr): FuncKind = e match
     case c: TClosure => closureKindOf(c)
     case _: TFuncRef => FuncKind.NullEnv
+    case TVarRef(name, _) if funcBorrowParams.contains(name) =>
+      // FuncType params are borrowed from the caller — treat as HeapEnv (could
+      // be NullEnv at runtime; dispatch's null-check handles that). Lets the
+      // copy/return paths emit the right incr to balance shared ownership.
+      FuncKind.HeapEnv
     case TVarRef(name, _) => closureLocalKind.getOrElse(name, FuncKind.NullEnv)
     case _: TCall | _: TIndirectCall | _: TInterfaceDispatch => FuncKind.HeapEnv
     case _ => FuncKind.NullEnv
@@ -464,6 +469,7 @@ class SyslLLVMCodegen(target: String = "host"):
     fun.body match
       case TExprBody(expr) =>
         val result = genExpr(expr)
+        emitFuncReturnIncrIfBorrowed(expr, result)
         val rt = exprType(expr)
         val finalVal = if isAggregate(expr.typ) then
           val loaded = newReg()
@@ -556,6 +562,7 @@ class SyslLLVMCodegen(target: String = "host"):
     closure.body match
       case TExprBody(expr) =>
         val result = genExpr(expr)
+        emitFuncReturnIncrIfBorrowed(expr, result)
         val rt = exprType(expr)
         val finalVal = if isAggregate(expr.typ) then
           val loaded = newReg()
@@ -819,6 +826,7 @@ class SyslLLVMCodegen(target: String = "host"):
 
       case TReturnStmt(Some(value)) =>
         val v = genExpr(value)
+        emitFuncReturnIncrIfBorrowed(value, v)
         val retType = llvmType(currentFunction.returnType)
         val vt = exprType(value)
         val finalVal = if isAggregate(value.typ) then
@@ -4033,6 +4041,17 @@ class SyslLLVMCodegen(target: String = "host"):
     val envPtr = newReg()
     emit(s"  $envPtr = load i8*, i8** $envGep")
     emitRefIncr(envPtr, 16)
+
+  /** When a function returns a borrowed FuncType local (param OR HeapEnv local),
+    * incr the env so the caller's TCall=HeapEnv decr balances. `descAlloca` is
+    * the descriptor pointer (genExpr's result for an aggregate). No-op for any
+    * other expression. */
+  private def emitFuncReturnIncrIfBorrowed(value: TExpr, descAlloca: String): Unit =
+    value match
+      case TVarRef(_, t) if t.isInstanceOf[SyslType.FuncType]
+        && funcKindOfExpr(value) == FuncKind.HeapEnv =>
+        emitClosureDescrIncr(descAlloca)
+      case _ =>
 
   /** Emit inline refcount decrement + free when count reaches 0.
     * ptr is the data pointer (past header).

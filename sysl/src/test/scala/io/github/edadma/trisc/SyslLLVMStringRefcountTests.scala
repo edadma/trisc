@@ -1666,4 +1666,22 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
     // Caller's scope cleanup must decr h's env via __closure_env_dispatch
     ir should include("@__closure_env_dispatch")
   }
+
+  "passthrough(closure) — callee returns borrowed funcparam, caller balances" in {
+    llvmExit(
+      """make() -> (int) -> int
+        |    val cap = "ab" + "cd"
+        |    (x: int) -> x + len(cap)
+        |
+        |passthrough(g: (int) -> int) -> (int) -> int = g
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val original = make()
+        |        val passthru = passthrough(original)
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
 }

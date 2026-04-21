@@ -84,6 +84,11 @@ class SyslTriscCodegen(addresses: Int = 4):
   private def funcKindOfExpr(e: TExpr): FuncKind = e match
     case c: TClosure => closureKindOf(c)
     case _: TFuncRef => FuncKind.NullEnv
+    case TVarRef(name, _) if funcBorrowParams.contains(name) =>
+      // FuncType params are borrowed from the caller — treat as HeapEnv (could
+      // be NullEnv at runtime; dispatch's null-check handles that). Lets the
+      // copy/return paths emit the right incr to balance shared ownership.
+      FuncKind.HeapEnv
     case TVarRef(name, _) => closureLocalKind.getOrElse(name, FuncKind.NullEnv)
     case _: TCall | _: TIndirectCall | _: TInterfaceDispatch =>
       if needsAllocExtern then FuncKind.HeapEnv else FuncKind.NullEnv
@@ -1343,6 +1348,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     fun.body match
       case TExprBody(expr) =>
         genExpr(expr) // result in r1
+        emitFuncReturnIncrIfBorrowed(expr)
         if structReturn then emitStructReturn()
         emitDefers()
         emitRefCleanup()
@@ -1354,6 +1360,16 @@ class SyslTriscCodegen(addresses: Int = 4):
     currentFunction = null
     stringBorrowParams = Set.empty
     funcBorrowParams = Set.empty
+
+  /** When the function returns a borrowed FuncType local (param OR HeapEnv
+    * local), incr the env so the caller's TCall=HeapEnv decr balances. r1 must
+    * hold the descriptor address at call time. No-op for any other expression. */
+  private def emitFuncReturnIncrIfBorrowed(value: TExpr): Unit =
+    value match
+      case TVarRef(_, t) if t.isInstanceOf[SyslType.FuncType]
+        && funcKindOfExpr(value) == FuncKind.HeapEnv =>
+        emitClosureDescrIncr(1, 0)
+      case _ =>
 
   private def genClosureFunction(name: String, closure: TClosure): Unit =
     // Create a TFunDecl for the closure so we can reuse epilogue/return machinery
@@ -1543,6 +1559,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     fun.body match
       case TExprBody(expr) =>
         genExpr(expr)
+        emitFuncReturnIncrIfBorrowed(expr)
         if structReturn then emitStructReturn()
         emitDefers()
         emitRefCleanup()
@@ -2099,6 +2116,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
       case TReturnStmt(Some(value)) =>
         genExpr(value) // result in r1
+        emitFuncReturnIncrIfBorrowed(value)
         if currentFunction != null && returnsViaPointer(currentFunction.returnType) then
           emitStructReturn()
         emitDefers()
