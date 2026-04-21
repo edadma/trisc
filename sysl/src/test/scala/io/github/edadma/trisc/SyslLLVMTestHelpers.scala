@@ -85,18 +85,23 @@ trait SyslLLVMTestHelpers extends AnyFreeSpec with Matchers {
     }))
     (new SyslLLVMCodegen).generate(merged)
 
-  private def runIR(ir: String): (Int, String) =
+  private def runIR(ir: String, sanitize: Boolean = false): (Int, String) =
     withTempDir { dir =>
       val llFile = dir.resolve("test.ll")
       val exeFile = dir.resolve("test")
       Files.writeString(llFile, ir)
       // Files.writeString(java.nio.file.Paths.get(s"/tmp/test-${ir.length}.ll"), ir)
-      val compileResult = Process(Seq("clang", "-w", llFile.toString, "-o", exeFile.toString)).!
+      val sanFlags = if sanitize then Seq("-fsanitize=address") else Seq.empty
+      val compileResult = Process(Seq("clang", "-w") ++ sanFlags ++ Seq(llFile.toString, "-o", exeFile.toString)).!
       if compileResult != 0 then
         fail(s"clang failed with exit code $compileResult\n\nLLVM IR:\n$ir")
       val outBuf = new StringBuilder
       val errBuf = new StringBuilder
       val exitCode = Process(exeFile.toString).!(ProcessLogger(s => { outBuf ++= s; outBuf += '\n' }, s => { errBuf ++= s; errBuf += '\n' }))
+      // Surface ASan diagnostics (which go to stderr) so a regressing test fails loudly
+      // with the actual ASan report instead of just a non-zero exit.
+      if sanitize && errBuf.toString.contains("AddressSanitizer") then
+        fail(s"AddressSanitizer reported an error (exit $exitCode):\n${errBuf.toString}")
       (exitCode, outBuf.toString.stripSuffix("\n"))
     }
 
@@ -105,6 +110,12 @@ trait SyslLLVMTestHelpers extends AnyFreeSpec with Matchers {
   def runLLVMMulti(sources: Map[String, String]): (Int, String) = runIR(compileLLVMMulti(sources))
 
   def runLLVMWithStd(source: String): (Int, String) = runIR(compileLLVMWithStd(source))
+
+  /** Compile + run with AddressSanitizer enabled. ASan catches use-after-free and
+    * double-free; macOS does not support LeakSanitizer, but the rc work primarily
+    * cares about UAF/double-free regressions (a missing incr / extra decr / wrong
+    * deinit traversal all manifest as UAF). */
+  def runLLVMASan(source: String): (Int, String) = runIR(compileLLVM(source), sanitize = true)
 
   def llvmOutput(source: String): String = runLLVM(source)._2
 
@@ -117,4 +128,6 @@ trait SyslLLVMTestHelpers extends AnyFreeSpec with Matchers {
   def llvmOutputWithStd(source: String): String = runLLVMWithStd(source)._2
 
   def llvmExitWithStd(source: String): Int = runLLVMWithStd(source)._1
+
+  def llvmExitASan(source: String): Int = runLLVMASan(source)._1
 }

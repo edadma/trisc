@@ -54,11 +54,11 @@ Source code always uses the short name — the compiler resolves it to the mangl
 | Type | Alias | Size | Description |
 |------|-------|------|-------------|
 | `i8` | | 1 byte | signed 8-bit integer |
-| `i16` | | 2 bytes | signed 16-bit integer |
+| `i16` | `short` | 2 bytes | signed 16-bit integer |
 | `i32` | `int` | 4 bytes | signed 32-bit integer |
 | `i64` | `long` | 8 bytes | signed 64-bit integer |
 | `u8` | `byte` | 1 byte | unsigned 8-bit integer |
-| `u16` | | 2 bytes | unsigned 16-bit integer |
+| `u16` | `ushort` | 2 bytes | unsigned 16-bit integer |
 | `u32` | `char`, `uint` | 4 bytes | unsigned 32-bit integer (Unicode codepoint) |
 | `u64` | `ulong` | 8 bytes | unsigned 64-bit integer |
 | `f32` | `float` | 4 bytes | IEEE-754 single-precision floating point |
@@ -110,6 +110,7 @@ saturating_sub(b, a)   // 0    (clamped to u8 MIN, would have been -100)
 
 ```sysl
 *T              // raw pointer (8 bytes, unmanaged)
+*T not null     // raw pointer constrained to be non-null at produce sites
 &T              // ref-counted reference (8 bytes, auto-freed at rc=0)
 [n]T            // fixed-size array (n * sizeof(T) bytes, stack-allocated)
 []T             // slice: {ptr: *T, len: i32, cap: i32} (16 bytes)
@@ -117,6 +118,13 @@ saturating_sub(b, a)   // 0    (clamped to u8 MIN, would have been -100)
 (T1, T2, T3)   // tuple (desugars to anonymous struct)
 (P1, P2) -> R  // function pointer / closure (16 bytes: {func_ptr, env_ptr})
 ```
+
+**`not null` pointers.** `*T not null` is a subtype of `*T` with a runtime check: every
+assignment, parameter bind, return, or cast that produces a `*T not null` value verifies the
+pointer is non-null. A null value traps at the produce site. The check is inserted via the
+same `where`-predicate mechanism used for user-defined predicates (a synthesized checker
+function per inner type). `*T not null` is pointer-compatible with `*T`, so it can be passed
+anywhere a `*T` is expected.
 
 ### Struct Types
 
@@ -180,6 +188,12 @@ s match
     Rect(w, h) -> w * h       // bind multiple fields
     Empty -> 0                 // match no-data variant
 ```
+
+**Exhaustiveness.** A `match` on a data-enum value must cover every variant, or include a
+wildcard `_ -> ...` or `else -> ...` default. Missing variants produce a compile error
+listing them. Guarded arms (`Circle(r) if r > 0 -> ...`) do not count toward exhaustiveness
+since the guard may be false. (Non-enum matches, e.g. on integers or strings, do not require
+exhaustiveness — the user is responsible for covering their own domain.)
 
 **As function parameters and return values:**
 ```sysl
@@ -465,12 +479,26 @@ sqrt(x: f64) -> f64
     r
 ```
 
-- **`require <bool>`** — evaluated once on function entry. Traps if false.
-- **`ensure <bool>`** — evaluated before every return site (including the implicit fall-through
-  return of a trailing expression). Traps if false.
+- **`require <bool> [, "message"]`** — evaluated once on function entry. Traps if false.
+- **`ensure <bool> [, "message"]`** — evaluated before every return site (including the
+  implicit fall-through return of a trailing expression). Traps if false.
 - Multiple `require` and `ensure` clauses are allowed, in any order. All clauses must appear
   before the first regular statement.
 - Both run-time checks go through the standard trap path (same as range checks).
+
+An optional string message can follow the condition, comma-separated (like Scala's
+`require(cond, msg)`). The message appears in the runtime error for debugging:
+
+```sysl
+pos(x: int) -> int
+    require x >= 0, "x must be non-negative"
+    ensure result > 0, "pos() result must be positive"
+    x + 1
+```
+
+On failure: `"precondition check failed: x must be non-negative"`. The message is emitted
+by the LLVM backend and the interpreter; the TRISC and SVM backends currently trap with a
+fixed error code.
 
 **`result` in `ensure` clauses.** Inside an `ensure` expression, the identifier `result`
 refers to the function's return value. Outside `ensure` — in `require` or in the body —
@@ -1588,11 +1616,17 @@ str(-5)                   // "-5"
 str(0)                    // "0"
 str("hello")              // "hello" (identity for strings)
 str(3.14)                 // "3.140000" (codegen: fixed 6-digit fractional)
+str(Circle(5))            // "Circle" (variant name of a data-enum value)
 ```
 
 Float formatting uses fixed 6-digit fractional precision in TRISC codegen
 (`3.14 -> "3.140000"`). The interpreter uses the host's default float
 formatting (`3.14 -> "3.14"`).
+
+`str()` on a data-enum (tagged union) value returns the variant name as a string, regardless
+of the variant's field contents. Each enum type gets one synthesized `__str_<EnumName>`
+helper the first time it's referenced. Simple integer enums and struct values are not yet
+supported — use field formatting manually.
 
 ### String Construction from Bytes
 

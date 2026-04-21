@@ -590,6 +590,8 @@ class SyslAnalyzer:
         case VarDeclAST(name, _, _, _, _, _, _, _) =>
           if globalScope.contains(name) then
             throw AnalysisError(s"duplicate global: '$name'", decl)
+        case _: StaticAssertDeclAST => // evaluated in pass 2
+        case _ => // other decls (e.g. CondDeclAST) handled elsewhere
 
     // Pre-pass: evaluate module-level `const` initializers eagerly so they are available
     // to `within` range bounds and other contexts that resolve types before function bodies.
@@ -671,9 +673,28 @@ class SyslAnalyzer:
       case _: TraitDeclAST => Nil // traits emit nothing; only impls do
       case i: InterfaceDeclAST => List(TInterfaceDecl(i.name, interfaceTypes(i.name)))
       case impl: ImplDeclAST   => analyzeImplMethods(impl)
+      case sa: StaticAssertDeclAST =>
+        evalStaticAssert(sa)
+        Nil
       case d => List(analyzeDecl(d))
     }
     TProgram(tDecls ++ specializedDecls.toList)
+
+  /** Evaluate a `static_assert` at compile time and throw if the condition is false. */
+  private def evalStaticAssert(sa: StaticAssertDeclAST): Unit =
+    // Analyze in a blank function scope so params/locals are inaccessible (module-scope only).
+    val savedScope = scopeStack
+    scopeStack = null
+    val te = try analyzeExpr(sa.cond) finally scopeStack = savedScope
+    if te.typ != BoolType then
+      throw AnalysisError(s"static_assert condition must be bool, got ${te.typ}", sa)
+    tryConstEval(te) match
+      case Some(n) =>
+        if n == 0 then
+          val msg = sa.message.map(m => s": $m").getOrElse("")
+          throw AnalysisError(s"static_assert failed$msg", sa)
+      case None =>
+        throw AnalysisError(s"static_assert condition is not compile-time evaluable", sa)
 
   private def analyzeDecl(decl: DeclAST): TDecl =
     decl match
@@ -848,8 +869,8 @@ class SyslAnalyzer:
       case "float" | "f32"  => F32
       case "byte" | "u8"  => U8
       case "i8"  => I8
-      case "i16"  => I16
-      case "u16"  => U16
+      case "short" | "i16"  => I16
+      case "ushort" | "u16"  => U16
       case "bool" => BoolType
       case "void" => VoidType
       case "string" => StringType
@@ -868,6 +889,22 @@ class SyslAnalyzer:
       case name if interfaceTypes.contains(name) => interfaceTypes(name)
       case other => throw AnalysisError(s"unknown type: '$other'")
     case PtrTypeAST(inner) => PtrType(resolveType(inner))
+    case PtrNonNullTypeAST(inner) =>
+      val innerType = resolveType(inner)
+      val base = PtrType(innerType)
+      val aliasName = s"NonNull_${SyslType.mangleType(innerType)}"
+      val funcName = s"__pred_$aliasName"
+      if !functions.contains(funcName) then
+        functions(funcName) = FunInfo(funcName, List(("value", base)), base)
+        val nullLit = TIntLit(0L, base)
+        val body = TBlockBody(List(
+          TContractCheck("type predicate",
+            TBinary(TVarRef("value", base), "!=", nullLit, BoolType),
+            s"not null pointer"),
+          TExprStmt(TVarRef("value", base))
+        ))
+        specializedDecls += TFunDecl(funcName, List(TParam("value", base)), base, body)
+      NamedType(aliasName, base, nominal = false, range = None, predicateFunc = Some(funcName))
     case ArrayTypeAST(size, elem) => ArrayType(resolveType(elem), size)
     case SliceTypeAST(elem) => SliceType(resolveType(elem))
     case TupleTypeAST(elems) => SyslType.tupleType(elems.map(resolveType))
@@ -886,18 +923,22 @@ class SyslAnalyzer:
     case UnaryAST("~", inner) => evalConstExprAST(inner).map(~_)
     case UnaryAST("!", inner) => evalConstExprAST(inner).map(v => if v == 0 then 1L else 0L)
     case BinaryAST(l, op, r) =>
-      for a <- evalConstExprAST(l); b <- evalConstExprAST(r) yield op match
-        case "+"  => a + b
-        case "-"  => a - b
-        case "*"  => a * b
-        case "/"  => if b == 0 then return None else a / b
-        case "%"  => if b == 0 then return None else a % b
-        case "&"  => a & b
-        case "|"  => a | b
-        case "^"  => a ^ b
-        case "<<" => a << b.toInt
-        case ">>" => a >> b.toInt
-        case _    => return None
+      for
+        a <- evalConstExprAST(l)
+        b <- evalConstExprAST(r)
+        result <- op match
+          case "+"  => Some(a + b)
+          case "-"  => Some(a - b)
+          case "*"  => Some(a * b)
+          case "/"  => if b == 0 then None else Some(a / b)
+          case "%"  => if b == 0 then None else Some(a % b)
+          case "&"  => Some(a & b)
+          case "|"  => Some(a | b)
+          case "^"  => Some(a ^ b)
+          case "<<" => Some(a << b.toInt)
+          case ">>" => Some(a >> b.toInt)
+          case _    => None
+      yield result
     case VarRefAST(n) if compileTimeConstants.contains(n) => Some(compileTimeConstants(n))
     case _ => None
 
@@ -935,6 +976,23 @@ class SyslAnalyzer:
         FloatRange(lo, hi, ra.exclusiveHi)
       case other =>
         throw AnalysisError(s"'within' requires a numeric base type, but '$aliasName' has base $other")
+
+  /** Generate (once per enum) a synthetic `__str_<EnumName>(v: T) -> string` that returns the
+   * variant name of `v`. Used by `str()` on data-enum values. */
+  private def materializeEnumStrFunc(et: SyslType.EnumType): String =
+    val funcName = s"__str_${et.name}"
+    if functions.contains(funcName) then return funcName
+    functions(funcName) = FunInfo(funcName, List(("v", et)), StringType)
+    val arms = et.variants.zipWithIndex.map { case ((vname, vFields), idx) =>
+      val bindings = vFields.map(_ => None)
+      val fieldTypes = vFields.map(_._2)
+      val pattern = TVariantPattern(et, idx, bindings, fieldTypes)
+      TMatchArm(List(pattern), None, List(TExprStmt(TStringLit(vname, StringType))))
+    }
+    val matchExpr = TMatchExpr(TVarRef("v", et), arms.toList, None, StringType)
+    val body = TBlockBody(List(TExprStmt(matchExpr)))
+    specializedDecls += TFunDecl(funcName, List(TParam("v", et)), StringType, body)
+    funcName
 
   /** Generate a synthetic predicate-checker function for a `where`-constrained named type.
    * The function takes `value: base`, traps if the predicate is false, and returns value.
@@ -1136,9 +1194,11 @@ class SyslAnalyzer:
   private def tryConstEval(expr: TExpr): Option[Long] = expr match
     case TIntLit(n, _) => Some(n)
     case TBoolLit(b, _) => Some(if b then 1 else 0)
+    case TSizeof(n, _) => Some(n)
     case TVarRef(name, _) => compileTimeConstants.get(name)
     case TUnary("-", operand, _) => tryConstEval(operand).map(-_)
     case TUnary("~", operand, _) => tryConstEval(operand).map(~_)
+    case TUnary("!", operand, _) => tryConstEval(operand).map(v => if v == 0 then 1L else 0L)
     case TBinary(left, "+", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield l + r
     case TBinary(left, "-", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield l - r
     case TBinary(left, "*", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield l * r
@@ -1149,6 +1209,14 @@ class SyslAnalyzer:
     case TBinary(left, "&", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield l & r
     case TBinary(left, "|", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield l | r
     case TBinary(left, "^", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield l ^ r
+    case TBinary(left, "==", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield if l == r then 1L else 0L
+    case TBinary(left, "!=", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield if l != r then 1L else 0L
+    case TBinary(left, "<",  right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield if l <  r then 1L else 0L
+    case TBinary(left, ">",  right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield if l >  r then 1L else 0L
+    case TBinary(left, "<=", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield if l <= r then 1L else 0L
+    case TBinary(left, ">=", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield if l >= r then 1L else 0L
+    case TBinary(left, "&&", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield if (l != 0 && r != 0) then 1L else 0L
+    case TBinary(left, "||", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield if (l != 0 || r != 0) then 1L else 0L
     case TCast(inner, _) => tryConstEval(inner)
     case _ => None
 
@@ -1206,6 +1274,7 @@ class SyslAnalyzer:
     case StructType(n, _, _)    => n
     case EnumType(n, _)      => n
     case InterfaceType(n, _) => n
+    case NamedType(n, _, _, _, _) => n
 
   private def mangleGenericName(base: String, typeArgs: List[SyslType]): String =
     base + "_" + typeArgs.map(typeToMangled).mkString("_")
@@ -1273,6 +1342,7 @@ class SyslAnalyzer:
     case NamedTypeAST(name, Nil) if subst.contains(name) => subst(name)
     case NamedTypeAST(name, args) => NamedTypeAST(name, args.map(substituteTypeAST(_, subst)))
     case PtrTypeAST(inner) => PtrTypeAST(substituteTypeAST(inner, subst))
+    case PtrNonNullTypeAST(inner) => PtrNonNullTypeAST(substituteTypeAST(inner, subst))
     case ArrayTypeAST(size, elem) => ArrayTypeAST(size, substituteTypeAST(elem, subst))
     case SliceTypeAST(elem) => SliceTypeAST(substituteTypeAST(elem, subst))
     case FuncTypeAST(params, ret, esc) => FuncTypeAST(params.map(substituteTypeAST(_, subst)), substituteTypeAST(ret, subst), esc)
@@ -1608,10 +1678,10 @@ class SyslAnalyzer:
     if hasResult then
       currentScope("__result__") = SymInfo("__result__", returnType, mutable = true)
       currentScope("result") = SymInfo("__result__", returnType, mutable = false)
-    val requireChecks: List[TStmt] = contracts.collect { case ContractClauseAST(ContractRequire, e) =>
+    val requireChecks: List[TStmt] = contracts.collect { case ContractClauseAST(ContractRequire, e, msg) =>
       val te = analyzeExpr(e)
       if te.typ != BoolType then throw AnalysisError(s"require expression must be bool, got ${te.typ}")
-      TContractCheck("precondition", te, "precondition")
+      TContractCheck("precondition", te, msg.getOrElse("precondition"))
     }
     // Enable `old()` interception while analyzing ensure clauses. Snapshot declarations
     // accumulated during analysis are emitted as TVarStmts at the very top of the body so
@@ -1619,10 +1689,10 @@ class SyslAnalyzer:
     val savedEnsureMode = inEnsureAnalysis
     val snapshotsBefore = oldSnapshots.length
     inEnsureAnalysis = true
-    val ensureChecks: List[TStmt] = try contracts.collect { case ContractClauseAST(ContractEnsure, e) =>
+    val ensureChecks: List[TStmt] = try contracts.collect { case ContractClauseAST(ContractEnsure, e, msg) =>
       val te = analyzeExpr(e)
       if te.typ != BoolType then throw AnalysisError(s"ensure expression must be bool, got ${te.typ}")
-      TContractCheck("postcondition", te, "postcondition")
+      TContractCheck("postcondition", te, msg.getOrElse("postcondition"))
     } finally inEnsureAnalysis = savedEnsureMode
     val capturedSnapshots = oldSnapshots.drop(snapshotsBefore).toList
     oldSnapshots.remove(snapshotsBefore, capturedSnapshots.length)
@@ -1883,6 +1953,11 @@ class SyslAnalyzer:
 
       case AsmStmtAST(code) =>
         TAsmStmt(code)
+
+      case InvariantStmtAST(e) =>
+        val te = analyzeExpr(e)
+        if te.typ != BoolType then throw AnalysisError(s"invariant expression must be bool, got ${te.typ}")
+        TContractCheck("invariant", te, "invariant")
 
       case ExprStmtAST(expr) =>
         TExprStmt(analyzeExpr(expr))
@@ -2378,7 +2453,7 @@ class SyslAnalyzer:
 
       case DerefAST(inner) =>
         val tInner = analyzeExpr(inner)
-        val resultType = tInner.typ match
+        val resultType = tInner.typ.underlying match
           case PtrType(t) => t
           case RefType(t) => t
           case ArrayType(t, _) => t
@@ -2617,9 +2692,12 @@ class SyslAnalyzer:
       case CallAST("str", args) =>
         if args.size != 1 then throw AnalysisError("str() takes exactly 1 argument")
         val tArg = analyzeExpr(args.head)
-        tArg.typ match
+        tArg.typ.underlying match
           case StringType => tArg // identity — already a string
           case t if t.isNumeric || t == BoolType => TStr(tArg)
+          case et: EnumType =>
+            val funcName = materializeEnumStrFunc(et)
+            TCall(funcName, List(tArg), StringType)
           case t => throw AnalysisError(s"str() not supported on $t")
 
       case CallAST("string", args) =>
@@ -3024,6 +3102,26 @@ class SyslAnalyzer:
           TMatchArm(tPatterns, tGuard, tBody)
         }
         val tDefault = default.map { stmts => pushScope(); val r = analyzeBlock(stmts); popScope(); r }
+        // Exhaustiveness check for matches on enum types. A guarded arm does not cover
+        // its variant (the guard could be false). Wildcard or default provides full coverage.
+        tScrutinee.typ.underlying match
+          case et: EnumType if tDefault.isEmpty =>
+            val coveredVariants = mutable.Set.empty[Int]
+            var wildcardCovers = false
+            for arm <- tArms; pat <- arm.patterns do
+              if arm.guard.isEmpty then pat match
+                case TWildcard => wildcardCovers = true
+                case TVariantPattern(_, idx, _, _) => coveredVariants += idx
+                case _ =>
+            if !wildcardCovers then
+              val missing = et.variants.zipWithIndex.collect {
+                case ((vname, _), idx) if !coveredVariants.contains(idx) => vname
+              }
+              if missing.nonEmpty then
+                throw AnalysisError(
+                  s"non-exhaustive match on enum '${et.name}': missing variant(s): ${missing.mkString(", ")}"
+                )
+          case _ => // non-enum or has default — skip
         val resultType = tArms.headOption.flatMap(_.body.lastOption) match
           case Some(TExprStmt(e)) => e.typ
           case _ => VoidType

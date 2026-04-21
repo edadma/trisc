@@ -1842,4 +1842,55 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |    0
         |""".stripMargin, heapSize = 256) shouldBe 0
   }
+
+  "closure stored in struct field — auto-deinit decrs env (heap pressure)" in {
+    runWithAlloc(
+      """struct Holder
+        |    cb: (int) -> int
+        |    name: string
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 12
+        |        val cap = "aa" + "bb"
+        |        val h = new Holder((x: int) -> x + len(cap), "h" + "h")
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "closure stored in enum variant — auto-deinit decrs env (heap pressure)" in {
+    runWithAlloc(
+      """enum Tagged
+        |    Some(cb: (int) -> int)
+        |    None
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 12
+        |        val cap = "xx" + "yy"
+        |        val h = new Some((x: int) -> x + len(cap))
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "closure field reassignment — old env decr'd, new env incr'd (heap pressure)" in {
+    runWithAlloc(
+      """struct Holder
+        |    cb: (int) -> int
+        |
+        |make() -> (int) -> int
+        |    val cap = "aa" + "bb"
+        |    (x: int) -> x + len(cap)
+        |
+        |main() -> int
+        |    var h = Holder(make())
+        |    var i = 0
+        |    while i < 10
+        |        h.cb = make()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
 }

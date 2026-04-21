@@ -1750,4 +1750,70 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
         |""".stripMargin)
     ir should include("@__closure_env_dispatch")
   }
+
+  "closure stored in struct field — auto-deinit decrs env" in {
+    llvmExit(
+      """struct Holder
+        |    cb: (int) -> int
+        |    name: string
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val cap = "aa" + "bb"
+        |        val h = new Holder((x: int) -> x + len(cap), "h" + "h")
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "closure stored in enum variant — auto-deinit decrs env" in {
+    llvmExit(
+      """enum Tagged
+        |    Some(cb: (int) -> int)
+        |    None
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val cap = "xx" + "yy"
+        |        val h = new Some((x: int) -> x + len(cap))
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "closure field reassignment — old env decr'd, new env incr'd" in {
+    llvmExit(
+      """struct Holder
+        |    cb: (int) -> int
+        |
+        |make() -> (int) -> int
+        |    val cap = "aa" + "bb"
+        |    (x: int) -> x + len(cap)
+        |
+        |main() -> int
+        |    var h = Holder(make())
+        |    var i = 0
+        |    while i < 100
+        |        h.cb = make()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "IR-shape: __struct_deinit walks FuncType field via emitClosureDescrDecr" in {
+    val ir = compileLLVM(
+      """struct Holder
+        |    cb: (int) -> int
+        |    name: string
+        |
+        |main() -> int
+        |    val cap = "aa" + "bb"
+        |    val h = new Holder((x: int) -> x + len(cap), "h" + "h")
+        |    0
+        |""".stripMargin)
+    ir should include("@__struct_deinit_Holder")
+    ir should include("@__closure_env_dispatch")
+  }
 }
