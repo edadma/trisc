@@ -242,38 +242,49 @@ enum Tree
 
 ### Type Declarations
 
-Two orthogonal modifiers compose into four forms:
+Two orthogonal modifiers compose, plus optional runtime checks. Forms:
 
 ```sysl
-type Callback = (int) -> int            // plain alias (transparent)
-type Age      = int within 0..150        // subtype: base-compatible, range-checked
-type Meters   = new f64                  // derived: nominally distinct, no cast mixing
-type SafeAge  = new int within 0..150    // derived + constrained
+type Callback = (int) -> int                // plain alias (transparent)
+type Age      = int within 0..150            // subtype: base-compatible, range-checked
+type Meters   = new f64                      // derived: nominally distinct, no cast mixing
+type SafeAge  = new int within 0..150        // derived + constrained
+type Even     = int where value % 2 == 0     // arbitrary predicate on value
+type PosEven  = int within 0..100 where value % 2 == 0   // within + where combined
 ```
 
-| Form                              | Base-compatible? | Range-checked? |
+| Form                              | Base-compatible? | Runtime check? |
 |-----------------------------------|------------------|----------------|
 | `type A = B`                      | yes              | no             |
-| `type A = B within r`             | yes              | yes            |
+| `type A = B within r`             | yes              | range          |
+| `type A = B where p`              | yes              | predicate      |
 | `type A = new B`                  | no               | no             |
-| `type A = new B within r`         | no               | yes            |
+| `type A = new B within r`         | no               | range          |
+| `type A = new B where p`          | no               | predicate      |
+| `type A = [new] B within r where p` | …              | both           |
 
-**Range syntax.** Bounds must be numeric literals (including `char`, which is `u32`); optional
-unary sign is allowed.
+**Range syntax.** Bounds must be numeric literals (including `char`, which is `u32`) or
+references to a `const`; optional unary sign is allowed.
 
 | Syntax     | Meaning                     | Example                                     |
 |------------|-----------------------------|---------------------------------------------|
 | `lo..hi`   | Inclusive: `[lo, hi]`        | `type Age = int within 0..150`              |
 | `lo..<hi`  | Exclusive upper: `[lo, hi)`  | `type Prob = f64 within 0.0..<1.0`          |
 
+**Where predicates.** `where <bool-expr>` attaches an arbitrary boolean predicate. Inside the
+predicate, `value` binds to the value being checked. The predicate runs at every produce site
+(assignment, parameter bind, return, explicit cast). A dedicated synthetic function
+`__pred_<TypeName>(value) -> value` is emitted and called at each check site; unlike
+`within` bounds, `where` predicates are not compile-time folded even for literals.
+
 **Compatibility.** Subtypes (without `new`) are transparently compatible with their base; no
-cast is needed, and a runtime range check fires on each assignment, parameter bind, return, or
-explicit cast that produces a value of the constrained type. Derived types (with `new`) are
-nominally distinct from both their base and other derived types over the same base — mixing
-them with the base in arithmetic or assignment is a compile error; use an explicit cast
-(`Meters(3.0)` to wrap, `f64(m)` to unwrap). Arithmetic between two values of the same derived
-type yields that derived type. Out-of-range literal bounds are caught at compile time; any
-runtime violation traps.
+cast is needed, and runtime checks (range and/or predicate) fire on each assignment, parameter
+bind, return, or explicit cast that produces a value of the constrained type. Derived types
+(with `new`) are nominally distinct from both their base and other derived types over the same
+base — mixing them with the base in arithmetic or assignment is a compile error; use an
+explicit cast (`Meters(3.0)` to wrap, `f64(m)` to unwrap). Arithmetic between two values of
+the same derived type yields that derived type. Out-of-range literal bounds are caught at
+compile time; any runtime violation traps.
 
 ### Type Aliases
 
@@ -466,6 +477,21 @@ refers to the function's return value. Outside `ensure` — in `require` or in t
 `result` is just a normal identifier and may be used for your own variables. The analyzer
 aliases `result` → `__result__` only while typechecking ensure expressions (same pattern
 used for `self` → `__self__` in methods).
+
+**`old(expr)` in `ensure` clauses.** Captures the value of `expr` at function entry, before
+any body statement runs. Essential for contracts about mutation:
+
+```sysl
+increment(p: *int)
+    ensure *p == old(*p) + 1
+    *p = *p + 1
+```
+
+`old()` may only appear inside `ensure` clauses; using it elsewhere is a normal undefined-
+function error. Each `old(expr)` call allocates a hidden snapshot local that is initialized
+at the top of the function body — so later mutations of the underlying variable or pointee
+do not affect what `old()` sees. `old()` accepts any expression (pointer derefs, field
+accesses, arithmetic, calls), but nested `old(old(...))` is rejected.
 
 Contracts are not yet supported on expression-body functions or on closures.
 

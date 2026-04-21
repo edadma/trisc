@@ -23,48 +23,48 @@ enum SyslType:
   // Nominal/constrained numeric type. Nominal=true means it is NOT compatible with `base`
   // (requires an explicit cast to mix). `range` carries optional runtime-checked bounds.
   // A transparent alias (nominal=false && range.isEmpty) should NOT be wrapped — resolve to base.
-  case NamedType(name: String, base: SyslType, nominal: Boolean, range: Option[TypeRange])
+  case NamedType(name: String, base: SyslType, nominal: Boolean, range: Option[TypeRange], predicateFunc: Option[String] = None)
 
   // Strip any NamedType wrappers to expose the structural base type.
   def underlying: SyslType = this match
-    case NamedType(_, b, _, _) => b.underlying
+    case NamedType(_, b, _, _, _) => b.underlying
     case other => other
 
   def isNumeric: Boolean = this match
     case _: IntType | _: UIntType => true
     case _: FloatType => true
-    case NamedType(_, b, _, _) => b.isNumeric
+    case NamedType(_, b, _, _, _) => b.isNumeric
     case _ => false
 
   def isIntegral: Boolean = this match
     case _: IntType | _: UIntType => true
-    case NamedType(_, b, _, _) => b.isIntegral
+    case NamedType(_, b, _, _, _) => b.isIntegral
     case _ => false
 
   def isFloat: Boolean = this match
     case _: FloatType => true
-    case NamedType(_, b, _, _) => b.isFloat
+    case NamedType(_, b, _, _, _) => b.isFloat
     case _ => false
 
   def isSigned: Boolean = this match
     case _: IntType => true
-    case NamedType(_, b, _, _) => b.isSigned
+    case NamedType(_, b, _, _, _) => b.isSigned
     case _ => false
 
   def isUnsigned: Boolean = this match
     case _: UIntType => true
-    case NamedType(_, b, _, _) => b.isUnsigned
+    case NamedType(_, b, _, _, _) => b.isUnsigned
     case _ => false
 
   def isBoolOrNumeric: Boolean = this match
     case _: IntType | _: UIntType | BoolType => true
     case _: FloatType => true
-    case NamedType(_, b, _, _) => b.isBoolOrNumeric
+    case NamedType(_, b, _, _, _) => b.isBoolOrNumeric
     case _ => false
 
   def isPointerLike: Boolean = this match
     case PtrType(_) | ArrayType(_, _) | SliceType(_) | RefType(_) => true
-    case NamedType(_, b, _, _) => b.isPointerLike
+    case NamedType(_, b, _, _, _) => b.isPointerLike
     case _ => false
 
   // Size in bytes
@@ -104,7 +104,7 @@ enum SyslType:
       val totalAlign = et.alignOf
       val raw = dataOffset + maxDataSize
       ((raw + totalAlign - 1) / totalAlign) * totalAlign
-    case NamedType(_, b, _, _) => b.sizeOf
+    case NamedType(_, b, _, _, _) => b.sizeOf
 
   def alignOf: Long = this match
     case IntType(w) => (w / 8).toLong.min(8)
@@ -123,7 +123,7 @@ enum SyslType:
     case EnumType(_, variants) =>
       val fieldAligns = variants.flatMap(_._2.map(_._2.alignOf))
       if fieldAligns.isEmpty then 4 else fieldAligns.max.max(4)  // at least 4 for tag
-    case NamedType(_, b, _, _) => b.alignOf
+    case NamedType(_, b, _, _, _) => b.alignOf
 
   // Width in bits (for integer types)
   def bitWidth: Int = this match
@@ -132,7 +132,7 @@ enum SyslType:
     case FloatType(w) => w
     case BoolType => 8
     case PtrType(_) => 64
-    case NamedType(_, b, _, _) => b.bitWidth
+    case NamedType(_, b, _, _, _) => b.bitWidth
     case _ => 64
 
   override def toString: String = this match
@@ -158,7 +158,7 @@ enum SyslType:
     case RefType(t) => s"&$t"
     case EnumType(name, _) => name
     case InterfaceType(name, _) => name
-    case NamedType(name, _, _, _) => name
+    case NamedType(name, _, _, _, _) => name
 
   def toPrefix: String = this match
     case IntType(w) => s"i$w"
@@ -180,7 +180,7 @@ enum SyslType:
       val ms = methods.map { (mn, params, ret) => s"$mn ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}" }.mkString(" ")
       s"iface $name ${methods.size} $ms"
     // Named/derived types are erased to their underlying representation in serialized form.
-    case NamedType(_, b, _, _) => b.toPrefix
+    case NamedType(_, b, _, _, _) => b.toPrefix
 
   def isTuple: Boolean = this match
     case StructType(name, _, _) => name.startsWith("_Tuple")
@@ -217,7 +217,7 @@ object SyslType:
     case StructType(name, _, _) => name
     case EnumType(name, _) => name
     case InterfaceType(name, _) => name
-    case NamedType(_, b, _, _) => mangleType(b)
+    case NamedType(_, b, _, _, _) => mangleType(b)
 
   def tupleType(elemTypes: List[SyslType]): StructType =
     val suffix = elemTypes.map(mangleType).mkString("_")

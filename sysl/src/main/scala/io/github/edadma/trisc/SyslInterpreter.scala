@@ -447,7 +447,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case SyslType.RefType(inner) =>
       // Uninitialized ref cell — represented as null-ish placeholder
       zeroValueForType(SyslType.PtrType(inner), env)
-    case SyslType.NamedType(_, base, _, _) => zeroValueForType(base, env)
+    case SyslType.NamedType(_, base, _, _, _) => zeroValueForType(base, env)
 
   private def exec(stmt: TStmt, env: Env): Unit =
     stmt match
