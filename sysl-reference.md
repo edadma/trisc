@@ -1602,11 +1602,17 @@ str(-5)                   // "-5"
 str(0)                    // "0"
 str("hello")              // "hello" (identity for strings)
 str(3.14)                 // "3.140000" (codegen: fixed 6-digit fractional)
+str(Circle(5))            // "Circle" (variant name of a data-enum value)
 ```
 
 Float formatting uses fixed 6-digit fractional precision in TRISC codegen
 (`3.14 -> "3.140000"`). The interpreter uses the host's default float
 formatting (`3.14 -> "3.14"`).
+
+`str()` on a data-enum (tagged union) value returns the variant name as a string, regardless
+of the variant's field contents. Each enum type gets one synthesized `__str_<EnumName>`
+helper the first time it's referenced. Simple integer enums and struct values are not yet
+supported — use field formatting manually.
 
 ### String Construction from Bytes
 

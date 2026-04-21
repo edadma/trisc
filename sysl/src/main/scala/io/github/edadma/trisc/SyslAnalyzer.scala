@@ -973,6 +973,23 @@ class SyslAnalyzer:
       case other =>
         throw AnalysisError(s"'within' requires a numeric base type, but '$aliasName' has base $other")
 
+  /** Generate (once per enum) a synthetic `__str_<EnumName>(v: T) -> string` that returns the
+   * variant name of `v`. Used by `str()` on data-enum values. */
+  private def materializeEnumStrFunc(et: SyslType.EnumType): String =
+    val funcName = s"__str_${et.name}"
+    if functions.contains(funcName) then return funcName
+    functions(funcName) = FunInfo(funcName, List(("v", et)), StringType)
+    val arms = et.variants.zipWithIndex.map { case ((vname, vFields), idx) =>
+      val bindings = vFields.map(_ => None)
+      val fieldTypes = vFields.map(_._2)
+      val pattern = TVariantPattern(et, idx, bindings, fieldTypes)
+      TMatchArm(List(pattern), None, List(TExprStmt(TStringLit(vname, StringType))))
+    }
+    val matchExpr = TMatchExpr(TVarRef("v", et), arms.toList, None, StringType)
+    val body = TBlockBody(List(TExprStmt(matchExpr)))
+    specializedDecls += TFunDecl(funcName, List(TParam("v", et)), StringType, body)
+    funcName
+
   /** Generate a synthetic predicate-checker function for a `where`-constrained named type.
    * The function takes `value: base`, traps if the predicate is false, and returns value.
    * Caches by alias name so repeated resolutions reuse the same synth function. */
@@ -2669,9 +2686,12 @@ class SyslAnalyzer:
       case CallAST("str", args) =>
         if args.size != 1 then throw AnalysisError("str() takes exactly 1 argument")
         val tArg = analyzeExpr(args.head)
-        tArg.typ match
+        tArg.typ.underlying match
           case StringType => tArg // identity — already a string
           case t if t.isNumeric || t == BoolType => TStr(tArg)
+          case et: EnumType =>
+            val funcName = materializeEnumStrFunc(et)
+            TCall(funcName, List(tArg), StringType)
           case t => throw AnalysisError(s"str() not supported on $t")
 
       case CallAST("string", args) =>
