@@ -721,11 +721,15 @@ class SyslTriscCodegen(addresses: Int = 4):
       case _ => false
     }
 
-  // True if a value type (recursively) holds any string fields whose buffers need RC.
-  // Stops at refs/pointers/slices (handled by their own paths). Recurses through
-  // value-struct fields, value-array elements, and enum variant fields.
+  // True if a value type (recursively) holds any rc-bearing content: string buffers
+  // or closure descriptors with heap envs. Stops at refs/pointers/slices (handled by
+  // their own paths). Recurses through value-struct fields, value-array elements,
+  // and enum variant fields. FuncType is included because closure descriptors carry
+  // an env_ptr that may point to a heap-allocated env (rc-tracked); the runtime
+  // null-check in emitRefDecr makes always-decr safe for NullEnv descriptors too.
   private def structHasStringFields(t: SyslType): Boolean = t match
     case SyslType.StringType => true
+    case _: SyslType.FuncType => true
     case st: SyslType.StructType =>
       st.fields.exists((_, ft) => structHasStringFields(ft))
     case SyslType.ArrayType(elem, _) => structHasStringFields(elem)
@@ -756,6 +760,16 @@ class SyslTriscCodegen(addresses: Int = 4):
     case _: TIfExpr | _: TMatchExpr => true
     case _ => false
 
+  // Expressions that produce a freshly-owned closure descriptor (caller has the only
+  // share of the env — no copy-incr needed when storing into a struct/enum field).
+  // TVarRef and TFieldAccess fall through as "borrowed" — incr needed.
+  private def isOwnedClosureExpr(expr: TExpr): Boolean = expr match
+    case _: TClosure => true       // fresh env (rc=1 from malloc) or NullEnv
+    case _: TFuncRef => true       // NullEnv (no env to track)
+    case _: TCall | _: TIndirectCall | _: TInterfaceDispatch => true
+    case _: TIfExpr | _: TMatchExpr => true
+    case _ => false
+
   // Increment or decrement the RC of every string field (recursively into nested
   // value-struct fields and value-array elements) inside a struct at [r{baseReg} + baseOff].
   // Clobbers r3, r4 (via emitRefIncr/Decr) and uses r1 for the field ptr. baseReg
@@ -778,6 +792,13 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  ldd r1, r1, r0")
         if incr then emitRefIncr(1, 8) else emitRefDecr(1, 8)
         emit("  popd r1")
+      case _: SyslType.FuncType =>
+        // Closure descriptor at [baseReg+baseOff] is 16 bytes {func_ptr, env_ptr}.
+        // env_ptr is null for NullEnv closures (descr just literal func ptr) — the
+        // null-check inside emitRefDecr makes always-walk safe. emitClosureDescr*
+        // operates on the descriptor's address.
+        if incr then emitClosureDescrIncr(baseReg, baseOff)
+        else emitClosureDescrDecr(baseReg, baseOff)
       case nested: SyslType.StructType if structHasStringFields(nested) =>
         emitStructStringFieldsRC(baseReg, baseOff, nested, incr)
       case SyslType.ArrayType(elem, count) if structHasStringFields(elem) =>
@@ -1798,6 +1819,8 @@ class SyslTriscCodegen(addresses: Int = 4):
                   emit("  popd r1")
                 case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
                   emitStructStringFieldsRC(5, local.offset + off, nested, incr = true)
+                case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+                  emitClosureDescrIncr(5, local.offset + off)
                 case _ =>
           case TEnumConstruct(et, variantIndex, args) =>
             // Allocate enum on stack, zero-initialize, set tag + fields
@@ -1827,7 +1850,7 @@ class SyslTriscCodegen(addresses: Int = 4):
               genExpr(arg)
               emitAddImm(2, 5, local.offset + dataOff + fieldOff)
               emitStore(1, 2, fieldType)
-              // Borrowed string/struct/enum field: incr the buffer (caller still owns its copy)
+              // Borrowed string/struct/enum/closure field: incr (caller still owns its copy)
               fieldType match
                 case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
                   emit("  pshd r1")
@@ -1839,6 +1862,8 @@ class SyslTriscCodegen(addresses: Int = 4):
                   emitStructStringFieldsRC(5, local.offset + dataOff + fieldOff, nested, incr = true)
                 case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
                   emitEnumStringFieldsRC(5, local.offset + dataOff + fieldOff, nested, incr = true)
+                case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+                  emitClosureDescrIncr(5, local.offset + dataOff + fieldOff)
                 case _ =>
               fieldOff += fieldType.sizeOf.toInt
           case call @ TCall(_, _, retType) if returnsViaPointer(retType) =>
@@ -2378,6 +2403,7 @@ class SyslTriscCodegen(addresses: Int = 4):
                       fieldType.isInstanceOf[SyslType.RefType] ||
                       (fieldType match
                         case s: SyslType.StructType => structHasStringFields(s) && needsAllocExtern
+                        case _: SyslType.FuncType => needsAllocExtern
                         case _ => false)
 
         if !needsRC then
@@ -2406,6 +2432,9 @@ class SyslTriscCodegen(addresses: Int = 4):
               emitRefDecr(1, refHeaderOffset(rt), deinitFor(rt))
             case s: SyslType.StructType =>
               emitStructStringFieldsRC(1, 0, s, incr = false)
+            case _: SyslType.FuncType =>
+              // r1 = field address — descriptor is at [r1+0]; decr its env_ptr.
+              emitClosureDescrDecr(1, 0)
             case _ =>
           // Compute new value (clobbers everything; may push its descriptor)
           genExpr(value)              // r1 = new value
@@ -2428,6 +2457,9 @@ class SyslTriscCodegen(addresses: Int = 4):
             case s: SyslType.StructType =>
               if !isOwnedStructExpr(value) then
                 emitStructStringFieldsRC(2, 0, s, incr = true)
+            case _: SyslType.FuncType =>
+              if !isOwnedClosureExpr(value) then
+                emitClosureDescrIncr(2, 0)
             case _ =>
 
       case TFieldCompoundAssignStmt(obj, fieldIndex, op, value) =>
@@ -5016,6 +5048,10 @@ class SyslTriscCodegen(addresses: Int = 4):
               emitAddImm(3, 5, ptrOffset)
               emit("  ldd r3, r3, r0")
               emitEnumStringFieldsRC(3, 8 + off, nested, incr = true)
+            case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitClosureDescrIncr(3, 8 + off)
             case _ =>
         // r1 = data pointer (past refcount header)
         emitAddImm(1, 5, ptrOffset)
@@ -5095,6 +5131,10 @@ class SyslTriscCodegen(addresses: Int = 4):
               emitAddImm(3, 5, ptrOffset)
               emit("  ldd r3, r3, r0")
               emitEnumStringFieldsRC(3, 8 + dataOff + fieldOff, nested, incr = true)
+            case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+              emitAddImm(3, 5, ptrOffset)
+              emit("  ldd r3, r3, r0")
+              emitClosureDescrIncr(3, 8 + dataOff + fieldOff)
             case _ =>
           fieldOff += fieldType.sizeOf.toInt
         // r1 = data pointer (past refcount header)
@@ -5124,7 +5164,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           genExpr(arg)                                    // r1 = field value
           emitAddImm(2, 5, structBaseOffset + off)       // r2 = field address (fp-relative)
           emitStore(1, 2, fieldType)
-          // Borrowed string field: incr the buffer (caller still owns its copy)
+          // Borrowed string/closure field: incr (caller still owns its copy)
           fieldType match
             case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
               emit("  pshd r1")
@@ -5134,6 +5174,8 @@ class SyslTriscCodegen(addresses: Int = 4):
               emit("  popd r1")
             case nested: SyslType.StructType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
               emitStructStringFieldsRC(5, structBaseOffset + off, nested, incr = true)
+            case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+              emitClosureDescrIncr(5, structBaseOffset + off)
             case _ =>
         // r1 = struct base address (fp-relative, stable)
         emitAddImm(1, 5, structBaseOffset)
@@ -5165,7 +5207,7 @@ class SyslTriscCodegen(addresses: Int = 4):
           genExpr(arg) // r1 = field value
           emitAddImm(2, 5, enumBaseOffset + dataOff + fieldOff)
           emitStore(1, 2, fieldType)
-          // Borrowed string/struct/enum field: incr the buffer (caller still owns its copy)
+          // Borrowed string/struct/enum/closure field: incr (caller still owns its copy)
           fieldType match
             case SyslType.StringType if needsAllocExtern && !isOwnedStringExpr(arg) =>
               emit("  pshd r1")
@@ -5177,6 +5219,8 @@ class SyslTriscCodegen(addresses: Int = 4):
               emitStructStringFieldsRC(5, enumBaseOffset + dataOff + fieldOff, nested, incr = true)
             case nested: SyslType.EnumType if structHasStringFields(nested) && !isOwnedStructExpr(arg) =>
               emitEnumStringFieldsRC(5, enumBaseOffset + dataOff + fieldOff, nested, incr = true)
+            case _: SyslType.FuncType if needsAllocExtern && !isOwnedClosureExpr(arg) =>
+              emitClosureDescrIncr(5, enumBaseOffset + dataOff + fieldOff)
             case _ =>
           fieldOff += fieldType.sizeOf.toInt
         // r1 = enum base address
