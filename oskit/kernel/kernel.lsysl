@@ -157,9 +157,9 @@ mediates copies via grant_copy, validating access rights.
         mapped_pages: int
         mapper_ptbr: u64
 
-    val GRANT_READ  = 1
-    val GRANT_WRITE = 2
-    val GRANT_RW    = 3
+    private val GRANT_READ  = 1
+    private val GRANT_WRITE = 2
+    private val GRANT_RW    = 3
     val MAX_GRANTS  = 128
     var grant_table: [128]Grant
 

@@ -295,8 +295,8 @@ kernel_main() -> int
     mouse_init()
 
     // Display server and client at same priority (round-robin scheduling)
-    create_thread_pri(server_main, 0x20000, 0x1F000, "disp", 0)
-    create_thread_pri(app_main, 0x30000, 0x2F000, "app", 0)
+    create_thread(server_main, 0x20000, 0x1F000, "disp")
+    create_thread(app_main, 0x30000, 0x2F000, "app")
 
     register_irq(TIMER_IRQ, timer_handler)
     timer_init(1000)

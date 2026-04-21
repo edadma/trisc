@@ -54,6 +54,7 @@ object RamdiskBinPrograms:
     val stringSource = Source.fromFile("posix/string/string.sysl")(using Codec.UTF8).mkString
     val ctypeSource = Source.fromFile("posix/ctype/ctype.sysl")(using Codec.UTF8).mkString
     val dsClientSource = tangledLsysl("oskit/ds/client.lsysl")
+    val progConfigSource = Source.fromFile("oskit/arch/trisc/prog_config.sysl")(using Codec.UTF8).mkString
     val allSources = Map(
       unitPath -> source,
       "oskit/ulib/ulib" -> ulibSource,
@@ -63,6 +64,7 @@ object RamdiskBinPrograms:
       "posix/string/string" -> stringSource,
       "posix/ctype/ctype" -> ctypeSource,
       "oskit/ds/client" -> dsClientSource,
+      "oskit/arch/prog_config" -> progConfigSource,
     )
     val driver = new SyslDriver
     val result = driver.compile(allSources)
@@ -120,6 +122,7 @@ object RamdiskBinPrograms:
     val binarySource = tangledLsysl("std/encoding/binary/binary.lsysl")
     val memSource = tangledLsysl("std/mem/mem.lsysl")
     val debugSource = tangledLsysl("std/debug/debug.lsysl")
+    val progConfigSource = Source.fromFile("oskit/arch/trisc/prog_config.sysl")(using Codec.UTF8).mkString
     val allSources = Map(
       unitPath -> source,
       "oskit/ulib/ulib" -> ulibSource,
@@ -134,6 +137,7 @@ object RamdiskBinPrograms:
       "std/encoding/binary/binary" -> binarySource,
       "std/mem/mem" -> memSource,
       "std/debug/debug" -> debugSource,
+      "oskit/arch/prog_config" -> progConfigSource,
     )
     val driver = new SyslDriver
     val result = driver.compile(allSources)
