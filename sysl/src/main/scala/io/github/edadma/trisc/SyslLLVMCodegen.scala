@@ -2617,9 +2617,6 @@ class SyslLLVMCodegen(target: String = "host"):
                 cmp
               case _: TDestructurePattern =>
                 "true" // destructure always matches
-              case _ =>
-                emit(s"  ; TODO: match pattern ${pat.getClass.getSimpleName}")
-                "true"
           }
           // OR all pattern results
           val finalCond = if matched.length == 1 then matched.head
