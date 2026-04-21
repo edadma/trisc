@@ -72,6 +72,7 @@ class SyslLLVMCodegen(target: String = "host"):
       FuncKind.HeapEnv
     case TVarRef(name, _) => closureLocalKind.getOrElse(name, FuncKind.NullEnv)
     case _: TCall | _: TIndirectCall | _: TInterfaceDispatch => FuncKind.HeapEnv
+    case _: TIfExpr | _: TMatchExpr => FuncKind.HeapEnv
     case _ => FuncKind.NullEnv
   private val funcWrappers = new mutable.LinkedHashMap[String, String] // original name -> wrapper name
   private val pendingWrappers = new mutable.ListBuffer[(String, String, List[SyslType], SyslType)] // (wrapperName, origName, params, retType)

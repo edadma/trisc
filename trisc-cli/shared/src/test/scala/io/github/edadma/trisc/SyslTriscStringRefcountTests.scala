@@ -1796,4 +1796,50 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |    0
         |""".stripMargin, heapSize = 256) shouldBe 0
   }
+
+  "if-expr returning closure — caller decr's at scope exit (heap pressure)" in {
+    runWithAlloc(
+      """make_a() -> (int) -> int
+        |    val cap = "aa" + "bb"
+        |    (x: int) -> x + len(cap)
+        |
+        |make_b() -> (int) -> int
+        |    val cap = "cc" + "dd"
+        |    (x: int) -> x * len(cap)
+        |
+        |choose(b: bool) -> (int) -> int =
+        |    if b then make_a() else make_b()
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 15
+        |        val f = choose(i % 2 == 0)
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "match-expr returning closure — caller decr's at scope exit (heap pressure)" in {
+    runWithAlloc(
+      """make_a() -> (int) -> int
+        |    val cap = "aa" + "bb"
+        |    (x: int) -> x + len(cap)
+        |
+        |make_b() -> (int) -> int
+        |    val cap = "cc" + "dd"
+        |    (x: int) -> x * len(cap)
+        |
+        |choose(n: int) -> (int) -> int =
+        |    n match
+        |        0 -> make_a()
+        |        else -> make_b()
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 15
+        |        val f = choose(i % 3)
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
 }

@@ -92,6 +92,8 @@ class SyslTriscCodegen(addresses: Int = 4):
     case TVarRef(name, _) => closureLocalKind.getOrElse(name, FuncKind.NullEnv)
     case _: TCall | _: TIndirectCall | _: TInterfaceDispatch =>
       if needsAllocExtern then FuncKind.HeapEnv else FuncKind.NullEnv
+    case _: TIfExpr | _: TMatchExpr =>
+      if needsAllocExtern then FuncKind.HeapEnv else FuncKind.NullEnv
     case _ => FuncKind.NullEnv
 
   // Interface tables: (struct, interface) → itable label + method function names
@@ -4038,7 +4040,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         val elseLabel = newLabel("else")
         val endLabel = newLabel("endif")
         val isString = typ == SyslType.StringType
-        val isAggregate = typ.isInstanceOf[SyslType.EnumType] || typ.isInstanceOf[SyslType.StructType] || typ.isInstanceOf[SyslType.SliceType]
+        val isAggregate = typ.isInstanceOf[SyslType.EnumType] || typ.isInstanceOf[SyslType.StructType] || typ.isInstanceOf[SyslType.SliceType] || typ.isInstanceOf[SyslType.FuncType] || typ.isInstanceOf[SyslType.InterfaceType]
         val aggregateSize = if isAggregate then stackSize(typ) else 0
         // For string/aggregate results: pre-allocate a result slot BEFORE the if/else
         val resultSlotOffset = if isString then

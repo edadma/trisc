@@ -1684,4 +1684,70 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
         |    0
         |""".stripMargin) shouldBe 0
   }
+
+  "if-expr returning closure — caller decr's at scope exit" in {
+    llvmExit(
+      """make_a() -> (int) -> int
+        |    val cap = "aa" + "bb"
+        |    (x: int) -> x + len(cap)
+        |
+        |make_b() -> (int) -> int
+        |    val cap = "cc" + "dd"
+        |    (x: int) -> x * len(cap)
+        |
+        |choose(b: bool) -> (int) -> int =
+        |    if b then make_a() else make_b()
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val f = choose(i % 2 == 0)
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "match-expr returning closure — caller decr's at scope exit" in {
+    llvmExit(
+      """make_a() -> (int) -> int
+        |    val cap = "aa" + "bb"
+        |    (x: int) -> x + len(cap)
+        |
+        |make_b() -> (int) -> int
+        |    val cap = "cc" + "dd"
+        |    (x: int) -> x * len(cap)
+        |
+        |choose(n: int) -> (int) -> int =
+        |    n match
+        |        0 -> make_a()
+        |        else -> make_b()
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val f = choose(i % 3)
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "if-expr returning closure — IR emits emitClosureDescrDecr at caller scope" in {
+    val ir = compileLLVM(
+      """make_a() -> (int) -> int
+        |    val cap = "aa" + "bb"
+        |    (x: int) -> x + len(cap)
+        |
+        |make_b() -> (int) -> int
+        |    val cap = "cc" + "dd"
+        |    (x: int) -> x * len(cap)
+        |
+        |choose(b: bool) -> (int) -> int =
+        |    if b then make_a() else make_b()
+        |
+        |main() -> int
+        |    val f = choose(true)
+        |    0
+        |""".stripMargin)
+    ir should include("@__closure_env_dispatch")
+  }
 }
