@@ -12,6 +12,9 @@ OUT_DIR=/tmp/slix-aarch64
 SECONDS_TO_RUN="${1:-8}"
 LOGFILE="${2:-/tmp/vnet-boot.txt}"
 
+PCAP_FILE="${PCAP_FILE:-/tmp/vnet-pkts.pcap}"
+rm -f "$PCAP_FILE"
+
 qemu-system-aarch64 \
     -machine virt \
     -cpu cortex-a72 \
@@ -22,6 +25,7 @@ qemu-system-aarch64 \
     -kernel "$OUT_DIR/kernel.elf" \
     -netdev user,id=n0 \
     -device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56 \
+    -object filter-dump,id=f0,netdev=n0,file="$PCAP_FILE" \
     -device loader,file="$OUT_DIR/bootinfo.img",addr=0x44000000 \
     -device loader,file="$OUT_DIR/ramdisk.img",addr=0x50000000 \
     > "$LOGFILE" 2>&1 &

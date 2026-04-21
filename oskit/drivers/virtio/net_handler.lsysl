@@ -1,0 +1,375 @@
+Net handler — ARP + ICMP echo on top of virtio-net
+===================================================
+
+Kernel-side packet handler that runs on the virtio-net driver to
+prove the full TX/RX loop works end-to-end. Handles the two
+protocols the QEMU user-mode stack actually cares about:
+
+- ARP: respond to requests for our IP (10.0.2.15, the default
+  QEMU DHCP lease) with our MAC. Also sends an unsolicited
+  request for the gateway (10.0.2.2) at startup — the reply
+  arriving proves both TX and RX are alive.
+- ICMP echo: respond to echo-request, log echo-reply.
+
+This is a temporary shim until we split the NIC into a proper
+Minix-style server and wire the socket layer behind it. Runs as
+a kernel thread created by `kernel_main_rs`.
+
+    module oskit.drivers.virtio
+
+    import oskit.arch.{page_alloc_zero}
+    import oskit.services.{yield, sleep}
+
+
+The guest's fake IP + gateway under QEMU's user-mode networking.
+These are hardcoded defaults — QEMU offers the same lease to
+every guest it boots with `-netdev user`.
+
+    val NET_OUR_IP_A = 10
+    val NET_OUR_IP_B = 0
+    val NET_OUR_IP_C = 2
+    val NET_OUR_IP_D = 15
+
+    val NET_GW_IP_A = 10
+    val NET_GW_IP_B = 0
+    val NET_GW_IP_C = 2
+    val NET_GW_IP_D = 2
+
+
+Protocol numbers used by the packet parser.
+
+    val ETHERTYPE_IPV4 = 0x0800
+    val ETHERTYPE_ARP  = 0x0806
+    val ARP_OP_REQUEST = 1
+    val ARP_OP_REPLY   = 2
+    val IP_PROTO_ICMP  = 1
+    val ICMP_ECHO_REQ  = 8
+    val ICMP_ECHO_REP  = 0
+
+
+Learned gateway MAC (filled in when we see an ARP reply from
+10.0.2.2). Zero bytes until then.
+
+    var net_gw_mac: [6]byte
+    var net_gw_mac_known: int = 0
+
+
+ICMP ping state. `net_pings_sent` = how many echo requests we've
+emitted; `net_pings_received` = how many matching replies. The
+net thread prints a single line when these both advance.
+
+    var net_pings_sent: int = 0
+    var net_pings_received: int = 0
+
+
+Byte-buffer helpers for wire-format packets. Everything on the
+wire is big-endian; these write host-order ints into a buffer.
+
+    pkt_write_u16(p: *byte, off: int, v: int)
+        p[off]     = byte((v >> 8) & 0xff)
+        p[off + 1] = byte(v & 0xff)
+
+    pkt_read_u16(p: *byte, off: int) -> int
+        ((int(p[off]) & 0xff) << 8) | (int(p[off + 1]) & 0xff)
+
+    pkt_write_mac(p: *byte, off: int, mac: *byte)
+        var i = 0
+        while i < 6
+            p[off + i] = mac[i]
+            i += 1
+
+    pkt_write_ipv4(p: *byte, off: int, a: int, b: int, c: int, d: int)
+        p[off]     = byte(a & 0xff)
+        p[off + 1] = byte(b & 0xff)
+        p[off + 2] = byte(c & 0xff)
+        p[off + 3] = byte(d & 0xff)
+
+    pkt_match_ipv4(p: *byte, off: int, a: int, b: int, c: int, d: int) -> int
+        if int(p[off])     != (a & 0xff)
+            return 0
+        if int(p[off + 1]) != (b & 0xff)
+            return 0
+        if int(p[off + 2]) != (c & 0xff)
+            return 0
+        if int(p[off + 3]) != (d & 0xff)
+            return 0
+        1
+
+
+Internet checksum (RFC 1071) over `len` bytes at `p`. Used for
+IPv4 and ICMP headers.
+
+    net_checksum(p: *byte, len: int) -> int
+        var sum = 0
+        var i = 0
+        while i + 1 < len
+            sum += pkt_read_u16(p, i)
+            i += 2
+        if i < len
+            sum += (int(p[i]) & 0xff) << 8
+        while (sum >> 16) != 0
+            sum = (sum & 0xffff) + (sum >> 16)
+        (~sum) & 0xffff
+
+
+Build and send an ARP request for `tpa` (target IPv4). Uses our
+MAC as sender, broadcast as destination.
+
+    net_send_arp_request(our_mac: *byte,
+                         ta: int, tb: int, tc: int, td: int) -> int
+        var frame: [42]byte
+        var i = 0
+        while i < 6
+            frame[i] = 0xff
+            i += 1
+        pkt_write_mac(frame, 6, our_mac)
+        pkt_write_u16(frame, 12, ETHERTYPE_ARP)
+        pkt_write_u16(frame, 14, 1)              // htype = Ethernet
+        pkt_write_u16(frame, 16, ETHERTYPE_IPV4) // ptype = IPv4
+        frame[18] = 6                            // hlen
+        frame[19] = 4                            // plen
+        pkt_write_u16(frame, 20, ARP_OP_REQUEST)
+        pkt_write_mac(frame, 22, our_mac)
+        pkt_write_ipv4(frame, 28,
+            NET_OUR_IP_A, NET_OUR_IP_B, NET_OUR_IP_C, NET_OUR_IP_D)
+        i = 0
+        while i < 6
+            frame[32 + i] = 0
+            i += 1
+        pkt_write_ipv4(frame, 38, ta, tb, tc, td)
+        virtio_net_send(frame, 42)
+
+
+Build and send an ARP reply for a received request. `req` points
+at the start of the Ethernet frame that carried the request.
+
+    net_send_arp_reply(our_mac: *byte, req: *byte) -> int
+
+Senders from the request become targets in the reply.
+
+        var frame: [42]byte
+        pkt_write_mac(frame, 0, req + 22)       // dst = requester's MAC
+        pkt_write_mac(frame, 6, our_mac)        // src = us
+        pkt_write_u16(frame, 12, ETHERTYPE_ARP)
+        pkt_write_u16(frame, 14, 1)
+        pkt_write_u16(frame, 16, ETHERTYPE_IPV4)
+        frame[18] = 6
+        frame[19] = 4
+        pkt_write_u16(frame, 20, ARP_OP_REPLY)
+        pkt_write_mac(frame, 22, our_mac)
+        pkt_write_ipv4(frame, 28,
+            NET_OUR_IP_A, NET_OUR_IP_B, NET_OUR_IP_C, NET_OUR_IP_D)
+        pkt_write_mac(frame, 32, req + 22)      // target MAC = requester
+        pkt_write_ipv4(frame, 38,
+            int(req[28]) & 0xff,
+            int(req[29]) & 0xff,
+            int(req[30]) & 0xff,
+            int(req[31]) & 0xff)
+        virtio_net_send(frame, 42)
+
+
+Build and send an ICMP echo request for the gateway. Destination
+MAC must have already been learned via ARP. `id` and `seq` are
+reflected by the peer in its reply so we can match replies to
+requests.
+
+    net_send_icmp_echo(our_mac: *byte, id: int, seq: int) -> int
+        if net_gw_mac_known == 0
+            return 0
+        var frame: [42]byte
+
+Ethernet header.
+
+        pkt_write_mac(frame, 0, net_gw_mac)
+        pkt_write_mac(frame, 6, our_mac)
+        pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
+
+IPv4 header (20 bytes, no options).
+
+        frame[14] = 0x45                         // version 4, IHL 5
+        frame[15] = 0                            // DSCP/ECN
+        pkt_write_u16(frame, 16, 28)             // total length = 20 + 8
+        pkt_write_u16(frame, 18, 0)              // id
+        pkt_write_u16(frame, 20, 0)              // flags+frag = 0
+        frame[22] = 64                           // TTL
+        frame[23] = byte(IP_PROTO_ICMP)
+        pkt_write_u16(frame, 24, 0)              // checksum placeholder
+        pkt_write_ipv4(frame, 26,
+            NET_OUR_IP_A, NET_OUR_IP_B, NET_OUR_IP_C, NET_OUR_IP_D)
+        pkt_write_ipv4(frame, 30,
+            NET_GW_IP_A, NET_GW_IP_B, NET_GW_IP_C, NET_GW_IP_D)
+        pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+
+ICMP echo (8 bytes, no payload).
+
+        frame[34] = byte(ICMP_ECHO_REQ)
+        frame[35] = 0                            // code
+        pkt_write_u16(frame, 36, 0)              // checksum placeholder
+        pkt_write_u16(frame, 38, id)
+        pkt_write_u16(frame, 40, seq)
+        pkt_write_u16(frame, 36, net_checksum(frame + 34, 8))
+
+        val r = virtio_net_send(frame, 42)
+        if r != 0
+            net_pings_sent += 1
+        r
+
+
+Build and send an ICMP echo reply in response to `req`. `req`
+points at the start of the Ethernet frame (ICMP payload starts
+at offset 14 + ihl).
+
+    net_send_icmp_reply(our_mac: *byte, req: *byte, total_len: int) -> int
+
+Frame layout: Ethernet(14) + IPv4 hdr(20) + ICMP echo.
+
+        var frame: [1514]byte
+        if total_len > 1514
+            return 0
+        if total_len < 14 + 20 + 8
+            return 0
+
+Copy the whole request into our buffer as a starting point; we
+then rewrite the bits that change between request and reply.
+
+        var i = 0
+        while i < total_len
+            frame[i] = req[i]
+            i += 1
+
+Ethernet: swap src and dst.
+
+        pkt_write_mac(frame, 0, req + 6)
+        pkt_write_mac(frame, 6, our_mac)
+
+IPv4: swap src and dst IP, zero checksum, recompute.
+
+        var j = 0
+        while j < 4
+            frame[14 + 12 + j] = req[14 + 16 + j]   // dst <- old src
+            frame[14 + 16 + j] = req[14 + 12 + j]   // src <- old dst
+            j += 1
+        pkt_write_u16(frame, 14 + 10, 0)
+        val ihl_bytes = (int(frame[14]) & 0x0f) * 4
+        pkt_write_u16(frame, 14 + 10, net_checksum(frame + 14, ihl_bytes))
+
+ICMP: flip type from echo-request to echo-reply, zero checksum,
+recompute over the full ICMP message.
+
+        val icmp_off = 14 + ihl_bytes
+        frame[icmp_off] = byte(ICMP_ECHO_REP)
+        pkt_write_u16(frame, icmp_off + 2, 0)
+        val icmp_len = total_len - icmp_off
+        pkt_write_u16(frame, icmp_off + 2,
+            net_checksum(frame + icmp_off, icmp_len))
+
+        virtio_net_send(frame, total_len)
+
+
+Dispatch one received frame. Called from the poll loop with a
+pointer to the bytes and their length. Returns 1 if we acted on
+the frame, 0 otherwise (diagnostic only).
+
+    net_handle_frame(our_mac: *byte, frame: *byte, len: int) -> int
+        if len < 14
+            return 0
+        val etype = pkt_read_u16(frame, 12)
+        if etype == ETHERTYPE_ARP
+            if len < 14 + 28
+                return 0
+            val op = pkt_read_u16(frame, 14 + 6)
+            if op == ARP_OP_REQUEST
+                if pkt_match_ipv4(frame, 14 + 24,
+                        NET_OUR_IP_A, NET_OUR_IP_B,
+                        NET_OUR_IP_C, NET_OUR_IP_D) == 0
+                    return 0
+                net_send_arp_reply(our_mac, frame)
+                return 1
+            if op == ARP_OP_REPLY
+                if pkt_match_ipv4(frame, 14 + 14,
+                        NET_GW_IP_A, NET_GW_IP_B,
+                        NET_GW_IP_C, NET_GW_IP_D) != 0
+                    var k = 0
+                    while k < 6
+                        net_gw_mac[k] = frame[14 + 8 + k]
+                        k += 1
+                    net_gw_mac_known = 1
+                    return 1
+            return 0
+        if etype == ETHERTYPE_IPV4
+            if len < 14 + 20
+                return 0
+            val ihl_bytes = (int(frame[14]) & 0x0f) * 4
+            if ihl_bytes < 20
+                return 0
+            val proto = int(frame[14 + 9]) & 0xff
+            if proto != IP_PROTO_ICMP
+                return 0
+            if pkt_match_ipv4(frame, 14 + 16,
+                    NET_OUR_IP_A, NET_OUR_IP_B,
+                    NET_OUR_IP_C, NET_OUR_IP_D) == 0
+                return 0
+            val icmp_off = 14 + ihl_bytes
+            if len < icmp_off + 8
+                return 0
+            val itype = int(frame[icmp_off]) & 0xff
+            if itype == ICMP_ECHO_REQ
+                net_send_icmp_reply(our_mac, frame, len)
+                return 1
+            if itype == ICMP_ECHO_REP
+                net_pings_received += 1
+                return 1
+            return 0
+        0
+
+
+Simple getter for the learned gateway MAC. Returns 1 if known,
+fills `out[0..5]` with the MAC.
+
+    net_gw_mac_get(out: *byte) -> int
+        if net_gw_mac_known == 0
+            return 0
+        var i = 0
+        while i < 6
+            out[i] = net_gw_mac[i]
+            i += 1
+        1
+
+
+Diagnostic counters so callers (tests, hello.lsysl) can verify
+that the full send/receive loop is flowing.
+
+    net_pings_sent_count() -> int
+        net_pings_sent
+
+    net_pings_received_count() -> int
+        net_pings_received
+
+
+Main packet poll loop — one kernel thread that drains the RX
+queue, dispatches to the handlers above, and yields when idle.
+
+After a brief settle, issues one ARP request for the gateway. As
+soon as the reply comes back (`net_gw_mac_known` flips to 1) it
+also sends one ICMP echo — that gives us end-to-end proof of the
+full TX/RX + protocol loop at boot time.
+
+    net_thread()
+        var our_mac: [6]byte
+        if virtio_net_get_mac(our_mac) == 0
+            return
+        sleep(10)
+        net_send_arp_request(our_mac,
+            NET_GW_IP_A, NET_GW_IP_B, NET_GW_IP_C, NET_GW_IP_D)
+
+        var buf: [1514]byte
+        var ping_sent = 0
+        while true
+            val n = virtio_net_recv(buf, 1514)
+            if n > 0
+                net_handle_frame(our_mac, buf, n)
+            else
+                if ping_sent == 0 && net_gw_mac_known != 0
+                    net_send_icmp_echo(our_mac, 0x1234, 1)
+                    ping_sent = 1
+                yield()

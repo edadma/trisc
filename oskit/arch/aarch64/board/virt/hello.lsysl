@@ -42,6 +42,8 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
     import oskit.hal.memset
     import oskit.drivers.virtio.{virtio_find, virtio_device_id, virtio_present,
         virtio_net_init, virtio_net_get_mac, virtio_net_last_fail,
+        net_thread, net_gw_mac_get,
+        net_pings_sent_count, net_pings_received_count,
         VIRTIO_MMIO_BASE, VIRTIO_MMIO_STRIDE, VIRTIO_MMIO_MAX, VIRTIO_DEV_NET}
 
     extern arch_syscall_call(arg: i64, handler: i64)
@@ -781,6 +783,15 @@ which is the baseline we want for this commit).
         create_thread_pri(i64(&idle_thread_body),
             kernel_stack_usp(0), kernel_stack_ssp(0),
             "idle", NUM_PRIORITIES - 1, kernel_ptbr())
+
+Spawn the kernel-side packet handler thread. It runs the
+virtio-net RX poll loop, responds to ARP + ICMP echo, and issues
+one unsolicited ARP request for the gateway at startup. Kernel
+stack slot 1 (slot 0 belongs to idle). Temporary — will be
+replaced by a Minix-style nic server once MMIO grants are in.
+
+        create_thread(i64(&net_thread),
+            kernel_stack_usp(1), kernel_stack_ssp(1), "net")
 
         uart_puts("[rs] creating process PT\n")
         val new_pt = vm_create_process_pt()
