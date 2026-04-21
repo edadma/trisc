@@ -1,42 +1,62 @@
 /* basename — return non-directory portion of a pathname */
-import std/process.*
-import std/string.*
+import std.process.*
+import std.string.*
 
-main() -> int
-    if argc() < 2
-        puts("usage: basename path [suffix]\n")
-        return 1
-
-    var s = argv(1)
+/* Core logic (no trailing newline); suffix may be empty to skip stripping. */
+basename_path(path: string, suffix: string) -> string
+    val s = path
     val slen = length(s)
+    var r = slen
 
-    // Strip trailing slashes
-    var end = slen
+    while r > 1 && char_at(s, r - 1) == '/'
+        r--
 
-    while end > 1 && char_at(s, end - 1) == '/'
-        end--
+    if r == 0
+        return "/"
 
-    if end == 0
-        puts("/\n")
-        return 0
-
-    // Find last slash
-    var start = end - 1
+    var start = r - 1
 
     while start > 0 && char_at(s, start - 1) != '/'
         start--
 
-    var result = substr(s, start, end - start)
+    var result = substr(s, start, r - start)
 
-    // Strip suffix if provided
-    if argc() > 2
-        val suffix = argv(2)
+    if length(suffix) > 0
         val rlen = length(result)
         val suflen = length(suffix)
 
         if suflen < rlen && ends_with(result, suffix)
             result = substr(result, 0, rlen - suflen)
 
-    puts(result)
-    putc('\n')
+    result
+
+main() -> int
+    if argc() < 2
+        puts("usage: basename path [suffix]\n")
+        return 1
+
+    val sfx = if argc() > 2 then argv(2) else ""
+
+    puts(basename_path(argv(1), sfx))
+    putchar('\n')
     0
+
+#test
+test_basename_simple() -> unit
+    assert(basename_path("/usr/lib", "") == "lib", "last component")
+
+#test
+test_basename_trailing_slash() -> unit
+    assert(basename_path("/usr/lib/", "") == "lib", "strip trailing slashes")
+
+#test
+test_basename_suffix() -> unit
+    assert(basename_path("/tmp/foo.c", ".c") == "foo", "strip suffix")
+
+#test
+test_basename_root() -> unit
+    assert(basename_path("/", "") == "/", "root")
+
+#test
+test_basename_no_dir() -> unit
+    assert(basename_path("foo", "") == "foo", "plain name")

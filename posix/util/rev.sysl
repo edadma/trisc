@@ -1,12 +1,12 @@
 /* rev — reverse lines of a file */
-import std/process.*
-import std/io.*
-import std/string.*
-import std/fs.*
+import std.process.*
+import std.io.*
+import std.string.*
+import std.fs.*
 
 main() -> int
     if argc() < 2
-        write_string(STDERR, "rev: reading from stdin not yet supported\n")
+        write_str(STDERR, "rev: reading from stdin not yet supported\n")
         return 1
 
     for var i = 1; i < argc(); i++

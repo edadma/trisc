@@ -1,7 +1,7 @@
 /* tee — copy stdin to stdout and files */
-import std/process.*
-import std/io.*
-import std/fs.*
+import std.process.*
+import std.io.*
+import std.fs.*
 
 main() -> int
     var buf: [4096]u8

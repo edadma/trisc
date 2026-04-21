@@ -1,8 +1,8 @@
 /* cut — extract fields from lines */
-import std/process.*
-import std/io.*
-import std/string.*
-import std/fs.*
+import std.process.*
+import std.io.*
+import std.string.*
+import std.fs.*
 
 /* Usage: cut -d delim -f field_list [file...]
  * Extracts fields separated by delim (default tab).
@@ -10,7 +10,7 @@ import std/fs.*
  */
 
 main() -> int
-    var delim = '\t'
+    var delim = int('\t')
     var field = 1
     var file_start = 1
 
@@ -24,15 +24,15 @@ main() -> int
             i++
 
             if i >= argc()
-                write_string(STDERR, "cut: missing delimiter\n")
+                write_str(STDERR, "cut: missing delimiter\n")
                 return 1
 
-            delim = char_at(argv(i), 0)
+            delim = int(char_at(argv(i), 0))
         elif equal(arg, "-f")
             i++
 
             if i >= argc()
-                write_string(STDERR, "cut: missing field number\n")
+                write_str(STDERR, "cut: missing field number\n")
                 return 1
 
             field = to_int(argv(i))
@@ -43,7 +43,7 @@ main() -> int
         i++
 
     if i >= argc()
-        write_string(STDERR, "cut: missing file\n")
+        write_str(STDERR, "cut: missing file\n")
         return 1
 
     for var fi = file_start; fi < argc(); fi++
@@ -52,7 +52,7 @@ main() -> int
 
         for var j = 0; j <= length(content); j++
             val at_end = j == length(content)
-            val is_nl = !at_end && char_at(content, j) == '\n'
+            val is_nl = !at_end && char_at(content, j) == 10
 
             if is_nl || at_end
                 val line = substr(content, start, j - start)

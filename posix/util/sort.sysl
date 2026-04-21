@@ -1,8 +1,8 @@
 /* sort — sort lines of text */
-import std/process.*
-import std/io.*
-import std/string.*
-import std/fs.*
+import std.process.*
+import std.io.*
+import std.string.*
+import std.fs.*
 
 /* Split content into lines, returning a slice */
 private split_lines(content: string) -> []string
@@ -63,7 +63,7 @@ main() -> int
     if argc() >= 2
         content = read_file(argv(1))
     else
-        write_string(STDERR, "sort: reading from stdin not yet supported\n")
+        write_str(STDERR, "sort: reading from stdin not yet supported\n")
         return 1
 
     var lines = split_lines(content)

@@ -1,7 +1,7 @@
 /* tr — translate characters */
-import std/process.*
-import std/io.*
-import std/string.*
+import std.process.*
+import std.io.*
+import std.string.*
 
 /* Usage: tr string1 string2
  * Reads stdin, replaces characters in string1 with
@@ -10,7 +10,7 @@ import std/string.*
 
 main() -> int
     if argc() < 3
-        write_string(STDERR, "tr: missing operand\n")
+        write_str(STDERR, "tr: missing operand\n")
         return 1
 
     val set1 = argv(1)

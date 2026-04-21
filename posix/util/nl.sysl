@@ -1,12 +1,12 @@
 /* nl — number lines of a file */
-import std/process.*
-import std/io.*
-import std/string.*
-import std/fs.*
+import std.process.*
+import std.io.*
+import std.string.*
+import std.fs.*
 
 main() -> int
     if argc() < 2
-        write_string(STDERR, "nl: reading from stdin not yet supported\n")
+        write_str(STDERR, "nl: reading from stdin not yet supported\n")
         return 1
 
     for var fi = 1; fi < argc(); fi++

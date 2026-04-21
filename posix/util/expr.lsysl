@@ -60,7 +60,7 @@ Any syntax or evaluation error prints a message to stderr and
 exits immediately with code 2.
 
     err(msg: string)
-        write_string(STDERR, s"expr: $msg\n")
+        write_str(STDERR, s"expr: $msg\n")
         exit(2)
 
 
@@ -448,7 +448,7 @@ error.
         ac = argc()
 
         if ac < 1
-            write_string(STDERR, "expr: missing operand\n")
+            write_str(STDERR, "expr: missing operand\n")
             return 2
 
         pos = 0

@@ -1,35 +1,50 @@
 /* dirname — return the directory portion of a pathname */
-import std/process.*
-import std/string.*
+import std.process.*
+import std.string.*
+
+/* Directory portion without trailing newline. */
+dirname_path(path: string) -> string
+    val s = path
+    val slen = length(s)
+    var r = slen
+
+    while r > 1 && char_at(s, r - 1) == '/'
+        r--
+
+    var pos = r - 1
+
+    while pos > 0 && char_at(s, pos - 1) != '/'
+        pos--
+
+    if pos == 0
+        return "."
+
+    while pos > 1 && char_at(s, pos - 1) == '/'
+        pos--
+
+    substr(s, 0, pos)
 
 main() -> int
     if argc() < 2
         puts("usage: dirname path\n")
         return 1
 
-    var s = argv(1)
-    val slen = length(s)
-
-    // Strip trailing slashes
-    var end = slen
-
-    while end > 1 && char_at(s, end - 1) == '/'
-        end--
-
-    // Find last slash
-    var pos = end - 1
-
-    while pos > 0 && char_at(s, pos - 1) != '/'
-        pos--
-
-    if pos == 0
-        puts(".\n")
-        return 0
-
-    // Strip trailing slashes from directory
-    while pos > 1 && char_at(s, pos - 1) == '/'
-        pos--
-
-    puts(substr(s, 0, pos))
-    putc('\n')
+    puts(dirname_path(argv(1)))
+    putchar('\n')
     0
+
+#test
+test_dirname_simple() -> unit
+    assert(dirname_path("/usr/lib") == "/usr", "parent of file")
+
+#test
+test_dirname_trailing_slash() -> unit
+    assert(dirname_path("/usr/lib/") == "/usr", "trailing slashes")
+
+#test
+test_dirname_dot() -> unit
+    assert(dirname_path("foo") == ".", "no slash")
+
+#test
+test_dirname_root() -> unit
+    assert(dirname_path("/") == ".", "root edge case matches this implementation")
