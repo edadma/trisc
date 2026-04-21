@@ -185,7 +185,7 @@ class SyslParser extends StandardTokenParsers {
 
   // Accept identifiers and type keywords (e.g., "string") in import paths
   private lazy val importIdent: Parser[String] =
-    ident | "int" | "uint" | "long" | "ulong" | "char" | "byte" | "bool" | "unit" | "string" |
+    ident | "int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "bool" | "unit" | "string" |
       "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" |
       "float" | "f32" | "double" | "f64"
 
@@ -341,7 +341,7 @@ class SyslParser extends StandardTokenParsers {
     opt("[" ~> rep1sep(typeRef, ",") <~ "]") ^^ (_.getOrElse(Nil))
 
   lazy val typeName: Parser[TypeAST] =
-    ("int" | "uint" | "long" | "ulong" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool" | "string") ^^ (n => NamedTypeAST(n)) |
+    ("int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool" | "string") ^^ (n => NamedTypeAST(n)) |
       "unit" ^^^ NamedTypeAST("void") |
       ident ~ typeArgList ^^ { case name ~ args => NamedTypeAST(name, args) }
 
@@ -802,12 +802,12 @@ class SyslParser extends StandardTokenParsers {
       "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => SizeofTypeAST(ArrayTypeAST(n.toInt, t)) } |
       funcTypeRef ^^ SizeofTypeAST.apply |
       "[" ~> "]" ~> typeRef ^^ (t => SizeofTypeAST(SliceTypeAST(t))) |
-      ("int" | "uint" | "long" | "ulong" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool" | "string") ^^ (n => SizeofTypeAST(NamedTypeAST(n))) |
+      ("int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool" | "string") ^^ (n => SizeofTypeAST(NamedTypeAST(n))) |
       "unit" ^^ (_ => SizeofTypeAST(NamedTypeAST("void"))) |
       expr ^^ SizeofExprAST.apply
 
   lazy val scalarCastType: Parser[String] =
-    "int" | "uint" | "long" | "ulong" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool"
+    "int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool"
 
   lazy val castType: Parser[String] =
     scalarCastType
@@ -835,7 +835,7 @@ class SyslParser extends StandardTokenParsers {
       cast |
       ident ~ ("(" ~> repsep(callArg, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |
       // Scalar type keywords as expressions — used inside [] for generic type args: Box[int](42)
-      ("int" | "uint" | "long" | "ulong" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool") ^^ VarRefAST.apply |
+      ("int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool") ^^ VarRefAST.apply |
       ident ^^ VarRefAST.apply |
       "(" ~> expr ~ rep("," ~> expr) <~ ")" ^^ {
         case first ~ Nil => first  // (expr) — parenthesized expression

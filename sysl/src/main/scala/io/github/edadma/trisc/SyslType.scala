@@ -267,6 +267,8 @@ object SyslType:
       case "uint" => U32
       case "long" => I64
       case "ulong" => U64
+      case "short" => I16
+      case "ushort" => U16
       case "char" => U32
       case "byte" => U8
       case "string" => StringType
