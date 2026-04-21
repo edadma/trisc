@@ -42,8 +42,6 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
     import oskit.hal.memset
     import oskit.drivers.virtio.{virtio_find, virtio_device_id, virtio_present,
         virtio_net_init, virtio_net_get_mac, virtio_net_last_fail,
-        net_gw_mac_get,
-        net_pings_sent_count, net_pings_received_count,
         VIRTIO_MMIO_BASE, VIRTIO_MMIO_STRIDE, VIRTIO_MMIO_MAX, VIRTIO_DEV_NET}
     import oskit.servers.{nic_server, nic_poller}
 

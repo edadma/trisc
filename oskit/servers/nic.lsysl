@@ -9,15 +9,12 @@ mapping + DMA-capable page grants; for now it runs as a kernel
 thread in the driver's address space so we can nail the IPC
 shape without needing new VM plumbing.
 
-Coexists with `oskit/drivers/virtio/net_handler.lsysl` — which
-still owns the ARP + ICMP echo demo — by splitting
-responsibilities: net_handler does the RX poll / ARP / ICMP
-round-trip at boot, and nic_server handles TX + MAC queries
-from clients. The two do not share any mutable driver state
-except the underlying split virtqueues, and for phase 13 the
-driver's send/recv paths are called serially (no overlap) by
-design. Once inet becomes a proper RX subscriber, the
-net_handler shim goes away and nic_server owns everything.
+Owns the full virtio-net front door: TX (SEND_PACKET), MAC
+queries (GET_MAC), and RX (SUBSCRIBE_RX + RECV_PACKET). The
+inet server is the RX subscriber — it owns ARP + ICMP dispatch
+and the higher-level socket layer. `nic.lsysl` is the single
+consumer of `virtio_net_recv`; the poller pumps frames into an
+internal RX queue and notifies the subscriber.
 
 IPC protocol
 ------------
@@ -29,11 +26,10 @@ always start with a 1-byte status (0 on success, -1 on error).
 - SEND_PACKET: `cmd, len(2, big-endian), frame(len)` → `status`
 - SUBSCRIBE_RX: `cmd` → `status`
     Registers the calling thread as the single RX notification
-    target. On each frame the poller (currently `net_thread` in
-    net_handler.lsysl) calls `nic_deliver_rx(frame, len)`, which
-    enqueues the frame into the nic's 8-slot RX queue and sends
-    a `notify_send_to(subscriber_tid, 1)` ping so the subscriber
-    can drain the queue.
+    target. On each frame `nic_poller` calls `nic_deliver_rx`,
+    which enqueues the frame into the nic's 8-slot RX queue and
+    sends a `notify_send_to(subscriber_tid, 1)` ping so the
+    subscriber can drain the queue.
 - RECV_PACKET: `cmd` → `status, len(2, big-endian), frame(len)`
     Non-blocking fetch of the head of the RX queue. `status = 0`
     + the frame on success; `status = -1` + `len = 0` when the
@@ -45,11 +41,9 @@ the stack. Unknown commands reply `status = -1`.
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply}
-    import oskit.services.{notify_send_to, sleep, yield}
+    import oskit.services.{notify_send_to, yield}
     import oskit.drivers.virtio.{virtio_net_get_mac, virtio_net_send,
-        virtio_net_recv, net_send_arp_request, net_send_icmp_echo,
-        net_handle_frame, net_gw_mac_known,
-        NET_GW_IP_A, NET_GW_IP_B, NET_GW_IP_C, NET_GW_IP_D}
+        virtio_net_recv}
 
 
 Command codes (byte value of buf[0]).
@@ -234,40 +228,23 @@ to drain.
 ### nic_poller
 
 Kernel-thread entry point that owns the RX side of the driver.
-Replaces the old `net_thread` from `oskit/drivers/virtio/
-net_handler.lsysl` — we moved the loop here so `nic.lsysl` is
-the single consumer of `virtio_net_recv`, and so ownership of
-the RX path matches the architectural picture even while nic
-is still a kernel thread.
+`nic.lsysl` is the single consumer of `virtio_net_recv`, and the
+poller's job is to pump frames into the RX queue via
+`nic_deliver_rx` — subscribers (currently just inet, which owns
+ARP + ICMP dispatch) are woken by notify and pull frames back
+out via `RECV_PACKET`.
 
-At boot the poller still drives the ARP + ICMP echo demo that
-proved TX/RX end-to-end (send one ARP request for the gateway;
-once the reply arrives, send one ICMP echo). Every frame passes
-through both `net_handle_frame` (ARP / ICMP responder) **and**
-`nic_deliver_rx` (enqueue for subscribers). The demo is a
-temporary shim — once inet becomes the RX subscriber and owns
-ARP/ICMP, the `net_handle_frame` call goes away and this loop
-shrinks to "recv → deliver → yield".
+No ARP or ICMP state lives here anymore; that all moved to
+`oskit/servers/inet_proto.lsysl` with the migration off
+`net_handler.lsysl`.
 
     nic_poller()
-        var our_mac: [6]byte
-        if virtio_net_get_mac(our_mac) == 0
-            return
-        sleep(10)
-        net_send_arp_request(our_mac,
-            NET_GW_IP_A, NET_GW_IP_B, NET_GW_IP_C, NET_GW_IP_D)
-
         var buf: [1514]byte
-        var ping_sent = 0
         while true
             val n = virtio_net_recv(buf, 1514)
             if n > 0
-                net_handle_frame(our_mac, buf, n)
                 nic_deliver_rx(buf, n)
             else
-                if ping_sent == 0 && net_gw_mac_known != 0
-                    net_send_icmp_echo(our_mac, 0x1234, 1)
-                    ping_sent = 1
                 yield()
 
 

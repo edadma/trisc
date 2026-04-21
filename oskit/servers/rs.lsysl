@@ -109,6 +109,14 @@ created but before it is resumed.
             hi = hi | i64(0xE00)
         svc_set_priv(pid, lo, hi, ipc)
 
+The nic server isn't an RS-managed boot module (it runs as a
+kernel thread in the driver's address space). We still need its
+port id to give inet send access — looked up once just before
+rs_set_ipc_masks runs. -1 if no nic is registered (e.g. x86
+builds, which have no virtio-net).
+
+    var rs_nic_port = -1
+
 Per-server IPC send mask. Single source of truth — consulted
 both at boot (rs_set_ipc_masks) and after a restart
 (rs_set_ipc_mask_for). A mask of 0 means the server is a pure
@@ -120,7 +128,7 @@ receiver. Servers not listed fall through to 0.
         val tty_port = rs_server_ports[2]
         val pm_port = rs_server_ports[3]
         val vfs_port = rs_server_ports[4]
-        // idx 0 (disk), 5 (ds), 6 (inet) are pure receivers → 0.
+        // idx 0 (disk), 5 (ds) are pure receivers → 0.
         if idx == 1
             // tfs: sends to disk
             return 1 << disk_port
@@ -133,6 +141,12 @@ receiver. Servers not listed fall through to 0.
         else if idx == 4
             // vfs: sends to tfs and tty
             return (1 << tfs_port) | (1 << tty_port)
+        else if idx == 6
+            // inet: sends to nic (ARP replies, ICMP replies, future
+            // UDP-over-wire). No nic registered → 0.
+            if rs_nic_port < 0
+                return 0
+            return 1 << rs_nic_port
         else if idx == 7
             // init: sends to pm, vfs
             return (1 << pm_port) | (1 << vfs_port)
@@ -609,7 +623,12 @@ After boot, RS stays alive in a monitoring loop.
             rs_print(" ok\n")
             i += 1
 
-        // Tighten IPC masks now that all port IDs are known
+Tighten IPC masks now that all port IDs are known. Look up the
+nic server's port too (kernel thread, not an RS-managed boot
+module) so inet's mask can include the nic bit. A missing nic
+leaves `rs_nic_port = -1` and inet's mask at 0.
+
+        rs_nic_port = port_lookup("nic")
         rs_set_ipc_masks()
 
         // RS stays alive — monitoring loop

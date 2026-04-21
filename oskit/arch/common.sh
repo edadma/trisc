@@ -290,7 +290,9 @@ build_inet() {
     build_server inet inet_server \
         "import oskit.servers.{inet_server}" \
         oskit/servers/inet.lsysl \
-        std/net/net.lsysl
+        oskit/servers/inet_proto.lsysl \
+        std/net/net.lsysl \
+        std/net/packet.lsysl
 }
 
 build_init() {

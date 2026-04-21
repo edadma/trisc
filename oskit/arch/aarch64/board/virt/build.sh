@@ -45,7 +45,6 @@ SYSL_FILES=(
     oskit/arch/aarch64/board/virt/uart.lsysl
     oskit/drivers/virtio/virtio_mmio.lsysl
     oskit/drivers/virtio/virtio_net.lsysl
-    oskit/drivers/virtio/net_handler.lsysl
     oskit/servers/nic.lsysl
     oskit/arch/aarch64/board/virt/hello.lsysl
 )

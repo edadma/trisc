@@ -29,8 +29,8 @@ families / types, and any unknown command code, return
 
     module oskit.servers
 
-    import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply}
-    import oskit.services.{rs_ready}
+    import oskit.ipc.{port_create, port_register, ipc_recv_notify, ipc_reply}
+    import oskit.services.{rs_ready, notify_read_self}
     import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY, INADDR_LOOPBACK, ipv4, ipv4_octet}
 
 
@@ -413,16 +413,34 @@ the caller doesn't block forever.
 
 ### Server main loop
 
+Uses `ipc_recv_notify` so the same loop wakes on both socket IPC
+(SOCKET/BIND/SENDTO/...) and async nic RX notifications. On a
+notification we drain the nic's RX queue via
+`inet_nic_recv_packet` and dispatch each frame through
+`inet_handle_frame` (ARP + ICMP echo).
+
+Before the loop, `inet_link_init()` grabs our MAC from the nic,
+subscribes for RX notifications, and fires the boot ARP request
+for the gateway. It's a best-effort call — if the nic isn't
+reachable (e.g. the x86 build, which has no virtio-net yet) we
+silently skip link-layer setup and still serve UDP loopback.
+
     inet_server()
         inet_init_sockets()
         inet_port = port_create()
         port_register(inet_port, "inet")
         rs_ready()
 
+        inet_link_init()
+
         var buf: [540]byte
         while 1 == 1
-            val sender = ipc_recv(inet_port, buf, INET_MSG_BUF)
-            if sender >= 0
+            val r = ipc_recv_notify(inet_port, buf, INET_MSG_BUF)
+            if r == -2
+                notify_read_self()
+                inet_drain_rx()
+            else if r >= 0
+                val sender = r
                 val cmd = int(buf[0]) & 0xff
                 if cmd == INET_CMD_SOCKET
                     inet_handle_socket(sender, buf)
