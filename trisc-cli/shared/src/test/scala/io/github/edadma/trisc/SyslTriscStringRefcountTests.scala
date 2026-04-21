@@ -1387,14 +1387,32 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
   }
 
   "closure with no rc-bearing captures: deinit_ptr is null (no walk needed)" in {
+    // `val f = ...` (no expected type) defaults to escaping per analyzer convention.
+    // → HeapEnv path → malloc. deinit_ptr=null since captures are non-rc-bearing.
     val asm = compile(
       """main()
         |    val a = 10
         |    val f = (x: int) -> x + a
         |""".stripMargin)
-    // Still mallocs (always-heap), but deinit is null
     asm should include("movi r4, malloc")
     asm should not include "__closure_env_deinit_"  // no per-id deinit registered
+  }
+
+  "stack-env optimization: closure as call arg with int capture has no malloc" in {
+    // Non-escaping context (closure passed to `apply(f: (int) -> int, ...)`) +
+    // non-rc-bearing captures → StackEnv → no malloc, no free, no dispatch.
+    // This is what makes closures usable in no-allocator (kernel/bare-metal) builds.
+    val asm = compile(
+      """apply(f: (int) -> int, x: int) -> int = f(x)
+        |
+        |main() -> int
+        |    val a = 10
+        |    apply(x -> x + a, 32)
+        |""".stripMargin)
+    asm should not include "movi r4, malloc"
+    asm should not include "movi r4, free"
+    asm should not include "__closure_env_dispatch"
+    asm should not include "__closure_env_deinit_"
   }
 
   "closure capturing struct-with-string field: env deinit walks struct" in {
@@ -1434,5 +1452,86 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |""".stripMargin, heapSize = 256) shouldBe 0
   }
 
+  // ====================================================================
+  // 13. *string parameters — pointer-to-string-descriptor
+  //
+  // *string was previously crashing in TDeref because the aggregate-pointer
+  // case in genExpr only listed Struct/Enum/Array/Func — strings (and slices)
+  // weren't handled and fell through to emitLoad which only handles scalars
+  // ("emitLoad: unexpected type string"). Fix is one line: extend the
+  // aggregate case to include StringType and SliceType. All rc bracketing
+  // (val copy through deref, *p = new_str assignment, scope-exit cleanup)
+  // already worked via the existing isOwnedStringExpr machinery — the deref
+  // of *string is correctly treated as a borrowed source, so the buffer's
+  // rc gets incr'd on copy and decr'd on scope exit.
+  //
+  // (&string would be RefType(StringType) — that's a separate language
+  // feature: `new string(...)` doesn't currently parse.)
+  // ====================================================================
 
+  "*string param: read len through deref" in {
+    runWithAlloc(
+      """take(p: *string) -> int = len(*p)
+        |
+        |main() -> int
+        |    val s = "ab" + "cd"
+        |    take(&s)
+        |""".stripMargin) shouldBe 4
+  }
+
+  "*string param: heap-pressure (caller still owns buffer)" in {
+    runWithAlloc(
+      """take(p: *string) -> int = len(*p)
+        |
+        |fill()
+        |    val s = "ab" + "cd"
+        |    val n = take(&s)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 30
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "*string param: val s = *p copies descriptor and incr's borrowed buffer rc" in {
+    // Without correct rc bracketing, callee's local s would decr the buffer
+    // at scope exit while caller still owns it → use-after-free.
+    runWithAlloc(
+      """take(p: *string) -> int
+        |    val s = *p
+        |    len(s)
+        |
+        |fill()
+        |    val s = "ab" + "cd"
+        |    val n = take(&s)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 30
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
+
+  "*p = new_string assigns through pointer (decr old, incr new)" in {
+    runWithAlloc(
+      """write(p: *string)
+        |    *p = "x" + "y"
+        |
+        |fill()
+        |    var s = "ab" + "cd"
+        |    write(&s)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 20
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) shouldBe 0
+  }
 }

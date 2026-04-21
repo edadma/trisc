@@ -996,7 +996,12 @@ on_click(handler: @escaping () -> unit)
 
 Non-escaping closures are more efficient (no heap allocation) but the compiler trusts the annotation — storing a non-escaping closure into a global, struct field, or returning it is undefined behavior. Closures with no expected type context (e.g., `val f = x -> x + 1`) default to escaping.
 
-**Implementation:** All function values (including plain function pointers) are 16-byte fat pointers: `{func_ptr: i64, env_ptr: i64}`. Plain function pointers have `env_ptr = 0`. For escaping closures with captures, the environment struct is heap-allocated. For non-escaping closures, the environment is allocated on the caller's stack frame. The `env_ptr` is passed to the closure function via register r3 in the TRISC calling convention.
+**Implementation:** All function values (including plain function pointers) are 16-byte fat pointers: `{func_ptr: i64, env_ptr: i64}`. Plain function pointers have `env_ptr = 0`. The environment allocation strategy depends on capture types:
+
+- **Non-escaping, captures all non-rc-bearing** (ints, raw pointers, etc.): the environment is allocated on the caller's stack frame — no malloc, no free. This is what makes closures usable in no-allocator (kernel/bare-metal) contexts.
+- **Escaping, OR any rc-bearing capture** (string, ref, struct-with-string, enum-with-string, …): the environment is heap-allocated with a `[rc:i64 @ -16 | deinit_ptr:i8* @ -8 | data]` header. Closure descriptor scope-exit decrements the env's refcount; at zero, a per-closure-id deinit walks the captures (decr'ing rc-bearing entries) and `free` reclaims the env block.
+
+The `env_ptr` is passed to the closure function via register r3 in the TRISC calling convention (LLVM passes it as the first hidden parameter `i8* %env`).
 
 ### Extern Declarations
 

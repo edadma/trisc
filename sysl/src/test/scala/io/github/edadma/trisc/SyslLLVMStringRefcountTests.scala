@@ -1295,15 +1295,104 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
   }
 
   "closure with no rc-bearing captures: deinit_ptr is null (no per-id deinit)" in {
+    // `val f = ...` (no expected type) defaults to escaping per analyzer convention.
+    // → HeapEnv path → malloc. deinit_ptr=null since captures are non-rc-bearing.
     val ir = compileLLVM(
       """main()
         |    val a = 10
         |    val f = (x: int) -> x + a
         |""".stripMargin)
-    // Always heap, but deinit_ptr stored as null
     ir should include("call i8* @malloc")
     ir should include regex """store i8\* null, i8\*\*"""
     // No per-id deinit registered
     ir should not include "@__closure_env_deinit_"
+  }
+
+  "stack-env optimization: closure as call arg with int capture has no malloc" in {
+    // Non-escaping context (closure passed to `apply(f: (int) -> int, ...)`) +
+    // non-rc-bearing captures → StackEnv → alloca, no malloc, no free.
+    val ir = compileLLVM(
+      """apply(f: (int) -> int, x: int) -> int = f(x)
+        |
+        |main() -> int
+        |    val a = 10
+        |    apply(x -> x + a, 32)
+        |""".stripMargin)
+    // No malloc/free for the closure env
+    ir should not include "call i8* @malloc"
+    ir should not include "@__closure_env_deinit_"
+    ir should not include "@__closure_env_dispatch"
+  }
+
+  // ====================================================================
+  // 13. *string parameters
+  //
+  // LLVM was already correct (TDeref uses isAggregate which includes
+  // StringType). TRISC needed a one-line fix to its TDeref aggregate-case.
+  // These tests assert end-to-end correctness on LLVM as a sanity check.
+  // ====================================================================
+
+  "*string param: read len through deref" in {
+    llvmExit(
+      """take(p: *string) -> int = len(*p)
+        |
+        |main() -> int
+        |    val s = "ab" + "cd"
+        |    take(&s)
+        |""".stripMargin) shouldBe 4
+  }
+
+  "*string param: heap-pressure" in {
+    llvmExit(
+      """take(p: *string) -> int = len(*p)
+        |
+        |fill()
+        |    val s = "ab" + "cd"
+        |    val n = take(&s)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "*string param: val s = *p copies descriptor (borrowed-source rc)" in {
+    llvmExit(
+      """take(p: *string) -> int
+        |    val s = *p
+        |    len(s)
+        |
+        |fill()
+        |    val s = "ab" + "cd"
+        |    val n = take(&s)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "*p = new_string assigns through pointer" in {
+    llvmExit(
+      """write(p: *string)
+        |    *p = "x" + "y"
+        |
+        |fill()
+        |    var s = "ab" + "cd"
+        |    write(&s)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        fill()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
   }
 }
