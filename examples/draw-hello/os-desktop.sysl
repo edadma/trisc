@@ -6,6 +6,7 @@
 import oskit.kernel.*
 import oskit.services.*
 import oskit.ipc.*
+import oskit.arch.{timer_init, timer_handler, TIMER_IRQ}
 import oskit.drivers.display.*
 import oskit.drivers.kbd.*
 import suit.*
@@ -297,5 +298,6 @@ kernel_main() -> int
     create_thread_pri(server_main, 0x20000, 0x1F000, "disp", 0)
     create_thread_pri(app_main, 0x30000, 0x2F000, "app", 0)
 
+    register_irq(TIMER_IRQ, timer_handler)
     timer_init(1000)
     first_thread_ssp()

@@ -17,7 +17,7 @@ class OSKitIPCTests extends OSKitTestHelpers {
   def runIPC(userSources: Map[String, String], maxCycles: Int = 2000000): (CPU, String) =
     val bootTof = assemble(bootAsm, relocatable = true)
     val allSources = Map(
-      "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl,
+      "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/arch/timer" -> timerSysl,
       "oskit/sync/semaphore" -> semaphoreSysl, "oskit/sync/mutex" -> mutexSysl,
       "oskit/ipc/ipc" -> ipcSysl, "std/mem/mem" -> memSysl, "oskit/hal/mem" -> halMemSysl, "oskit/arch/vm" -> archVmSysl, "oskit/arch/cpu" -> archCpuSysl, "oskit/config/config" -> configSysl,
     ) ++ userSources
