@@ -854,7 +854,7 @@ class SyslLLVMCodegen(target: String = "host"):
       case TMultiStmt(children) =>
         children.foreach(genStmt)
 
-      case TContractCheck(kind, expr, _) =>
+      case TContractCheck(kind, expr, message) =>
         val v = genExpr(expr)
         val lt = llvmType(expr.typ)
         val cmp = newReg()
@@ -864,7 +864,9 @@ class SyslLLVMCodegen(target: String = "host"):
         labelCounter += 1
         emit(s"  br i1 $cmp, label %$passLbl, label %$failLbl")
         emit(s"$failLbl:")
-        val (nameLbl, nameLen) = internCString(kind)
+        // If the user provided a custom message, emit "<kind>: <message>"; otherwise just "<kind>".
+        val text = if message == kind then kind else s"$kind: $message"
+        val (nameLbl, nameLen) = internCString(text)
         emit(s"  %${failLbl}_name = getelementptr [$nameLen x i8], [$nameLen x i8]* $nameLbl, i32 0, i32 0")
         emit(s"  call void @__range_fail(i8* %${failLbl}_name, i64 ${nameLen - 1})")
         emit(s"  unreachable")

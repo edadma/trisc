@@ -86,7 +86,7 @@ case class BlockBodyAST(stmts: List[StmtAST], contracts: List[ContractClauseAST]
 sealed trait ContractKind
 case object ContractRequire extends ContractKind
 case object ContractEnsure extends ContractKind
-case class ContractClauseAST(kind: ContractKind, expr: ExpressionAST) extends Positional
+case class ContractClauseAST(kind: ContractKind, expr: ExpressionAST, message: Option[String] = None) extends Positional
 
 // Statements
 trait StmtAST extends Positional

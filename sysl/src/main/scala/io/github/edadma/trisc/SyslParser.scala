@@ -314,8 +314,8 @@ class SyslParser extends StandardTokenParsers {
       funBlockBody ^^ { body => (None, body) }
 
   lazy val contractClause: Parser[ContractClauseAST] =
-    "require" ~> expr ^^ (e => ContractClauseAST(ContractRequire, e)) |
-    "ensure" ~> expr ^^ (e => ContractClauseAST(ContractEnsure, e))
+    "require" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => ContractClauseAST(ContractRequire, e, msg) } |
+    "ensure" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => ContractClauseAST(ContractEnsure, e, msg) }
 
   /** A function block body: zero or more contract clauses at the top, followed by statements. */
   lazy val funBlockBody: Parser[BlockBodyAST] =
