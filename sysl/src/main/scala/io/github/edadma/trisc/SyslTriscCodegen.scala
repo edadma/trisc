@@ -651,6 +651,11 @@ class SyslTriscCodegen(addresses: Int = 4):
     * runs before the value's expression flips needsAllocExtern, so the decr is
     * skipped. Lazily-set flags + sequential codegen don't compose. */
   private def scanNeedsAlloc(program: TProgram): Boolean =
+    // Names of functions declared in this unit — calls to anything NOT in this
+    // set are external (different compilation unit) and may return a heap-env
+    // closure we can't inspect. Used to flag TCall-returning-FuncType
+    // conservatively without over-pulling extern free for purely-local programs.
+    val localFuncs = program.decls.collect { case TFunDecl(n, _, _, _, _, _, _) => n }.toSet
     def scanE(e: TExpr): Boolean = e match
       case TBinary(_, "+", _, SyslType.StringType) => true
       case _: TStringFromPtr | _: TStringFromSlice | _: TStr | _: TFmtStr => true
@@ -665,9 +670,20 @@ class SyslTriscCodegen(addresses: Int = 4):
           case TBlockBody(ss) => ss.exists(scanS))
       case TBinary(l, _, r, _) => scanE(l) || scanE(r)
       case TUnary(_, op, _) => scanE(op)
-      case TCall(_, args, _) => args.exists(scanE)
-      case TIndirectCall(callee, args, _) => scanE(callee) || args.exists(scanE)
-      case TInterfaceDispatch(obj, _, args, _) => scanE(obj) || args.exists(scanE)
+      // Cross-unit call returning FuncType: callee may be producing a heap-env
+      // closure we can't inspect. Without needsAllocExtern=true here, the caller
+      // would skip the scope-exit decr and leak the env. Local calls don't need
+      // this — if a local function returns a heap closure, scanNeedsAlloc already
+      // visits its body through the TFunDecl walk below.
+      case TCall(name, args, retType) =>
+        (retType.isInstanceOf[SyslType.FuncType] && !localFuncs.contains(name)) ||
+          args.exists(scanE)
+      // Indirect and interface calls always go through an opaque function pointer
+      // whose body we can't inspect — treat FuncType return as possibly heap-env.
+      case TIndirectCall(callee, args, retType) =>
+        retType.isInstanceOf[SyslType.FuncType] || scanE(callee) || args.exists(scanE)
+      case TInterfaceDispatch(obj, _, args, retType) =>
+        retType.isInstanceOf[SyslType.FuncType] || scanE(obj) || args.exists(scanE)
       case TInterfaceBox(inner, _) => scanE(inner)
       case TIntrinsicCall(_, args, _) => args.exists(scanE)
       case TIfExpr(c, t, e, _) => scanE(c) || t.exists(scanS) || e.exists(_.exists(scanS))

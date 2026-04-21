@@ -1893,4 +1893,34 @@ class SyslTriscStringRefcountTests extends SyslCodegenHelpers {
         |    0
         |""".stripMargin, heapSize = 256) shouldBe 0
   }
+
+  // ====================================================================
+  // Cross-module heap-env closure return: main unit has no allocations of
+  // its own, but calls another module's closure-returning function. Pre-fix,
+  // main's needsAllocExtern was false (scanNeedsAlloc didn't consider TCall
+  // return types), so the scope-exit decr was skipped and the env leaked.
+  // ====================================================================
+
+  "cross-module: main calls heap-closure factory in another module" in {
+    compileMultiAndRun(allocSources(
+      """import posix.stdlib.*
+        |import heapmod.*
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 10
+        |        val f = make_closure()
+        |        i += 1
+        |    0
+        |""".stripMargin, heapSize = 256) ++ Map(
+      "heapmod/make_closure" ->
+        """module heapmod
+          |import posix.stdlib.*
+          |
+          |make_closure() -> (int) -> int
+          |    val cap = "aa" + "bb"
+          |    (x: int) -> x + len(cap)
+          |""".stripMargin,
+    )) shouldBe 0
+  }
 }
