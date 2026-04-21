@@ -7,11 +7,19 @@ pokes have been pushed down into `virtio_transport_mmio.lsysl` /
 virtqueue memory layout and the virtio-net spec. One transport is
 compiled per build (selected by the arch's build script).
 
-Runs in kernel address space. On aarch64 the 1GB RAM block is
-identity-mapped and MMIO is mapped already; on x86 the kernel's
-identity map covers low phys and the virtio-pci transport maps
-the selected device's BARs. Either way, `page_alloc_zero` returns
-pages the device can DMA to directly.
+Composes in both kernel and standalone-server contexts. The only
+context-dependent primitive — converting a CPU-side VA to a
+device-side PA — is pushed into a sibling provider file:
+
+- `virtio_dma_kernel.lsysl` — kernel image; VA == PA (identity map).
+- A future `virtio_dma_server.lsysl` will call `svc_vm_v2p(va)`
+  once the nic driver lives in its own boot-module address space.
+
+DMA buffers (ring pages + RX/TX payload pages) are carved from a
+static BSS region inside this file by a tiny bump allocator. That
+eliminates the kernel-only `page_alloc_zero` import and keeps all
+driver storage inside the driver's own module, which the server
+build can inherit.
 
 Queue layout:
 
@@ -29,8 +37,6 @@ them on both transports.
 
     module oskit.drivers.virtio
 
-    import oskit.arch.{page_alloc_zero}
-
 
 Tunables. Keep small for first bring-up; growing later is just a
 matter of bumping the constants and reallocating.
@@ -41,6 +47,37 @@ matter of bumping the constants and reallocating.
     val VNET_RX_QLEN  = 16
     val VNET_TX_QLEN  = 8
     val VNET_BUF_BYTES = 2048          // one MTU + virtio hdr + slack
+
+
+Static DMA region. Sized for 6 ring pages + 16 RX buffer pages +
+8 TX buffer pages = 30 pages. One extra page is reserved for
+4KB alignment slack (the region is BSS so its start isn't
+page-aligned in general). 31 × 4096 = 126976 bytes.
+
+    val VNET_DMA_PAGES = 30
+    var vnet_dma_storage: [126976]byte
+    var vnet_dma_base_va: i64 = 0
+    var vnet_dma_next: int = 0
+
+    vnet_dma_reset()
+        val raw = i64(vnet_dma_storage)
+        vnet_dma_base_va = (raw + i64(4095)) & ~i64(4095)
+        vnet_dma_next = 0
+
+Carve one zero-initialised page from the DMA region and return
+its CPU-side VA. Returns 0 if the region is exhausted.
+
+    vnet_dma_alloc_page() -> i64
+        if vnet_dma_next >= VNET_DMA_PAGES
+            return 0
+        val va = vnet_dma_base_va + i64(vnet_dma_next) * i64(4096)
+        vnet_dma_next += 1
+        var p: *byte = *byte(va)
+        var i = 0
+        while i < 4096
+            p[i] = 0
+            i += 1
+        va
 
 
 virtio-net header (virtio 1.0, MRG_RXBUF implied by VERSION_1).
@@ -84,55 +121,63 @@ during init if the device offered `VIRTIO_NET_F_MAC`.
     var vnet_fail: int = 0
 
 
-Per-queue bookkeeping. We split the state by queue so TX and RX
-don't step on each other. Memory for each ring is one page each
-(desc/avail/used).
+Per-queue bookkeeping. Each ring lives in one DMA page; we keep
+both its CPU-side VA (for the driver's own reads/writes) and its
+device-side PA (what we hand to the transport + descriptor rings).
 
+    var vnet_rx_desc_va: i64 = 0
     var vnet_rx_desc_pa: i64 = 0
+    var vnet_rx_avail_va: i64 = 0
     var vnet_rx_avail_pa: i64 = 0
+    var vnet_rx_used_va: i64 = 0
     var vnet_rx_used_pa: i64 = 0
     var vnet_rx_last_used: int = 0     // used.idx snapshot we last consumed
     var vnet_rx_avail_idx: int = 0     // monotonic avail.idx we wrote
 
+    var vnet_tx_desc_va: i64 = 0
     var vnet_tx_desc_pa: i64 = 0
+    var vnet_tx_avail_va: i64 = 0
     var vnet_tx_avail_pa: i64 = 0
+    var vnet_tx_used_va: i64 = 0
     var vnet_tx_used_pa: i64 = 0
     var vnet_tx_last_used: int = 0
     var vnet_tx_avail_idx: int = 0
     var vnet_tx_next_slot: int = 0     // round-robin TX buffer
 
 
-Static buffer arrays. Each RX slot owns one `VNET_BUF_BYTES` buffer;
-each TX slot owns one. Allocated from `page_alloc_zero` at init
-time; stored as physical addresses because we hand them to the
-device.
+Per-buffer VA + PA. The CPU touches `_va` when building headers /
+copying payload; the device sees `_pa` in the descriptor's `addr`
+field.
 
-    var vnet_rx_bufs: [16]i64           // = VNET_RX_QLEN
-    var vnet_tx_bufs: [8]i64            // = VNET_TX_QLEN
+    var vnet_rx_bufs_va: [16]i64        // = VNET_RX_QLEN
+    var vnet_rx_bufs_pa: [16]i64
+    var vnet_tx_bufs_va: [8]i64         // = VNET_TX_QLEN
+    var vnet_tx_bufs_pa: [8]i64
 
 
-Raw u16 / u32 accessors over kernel-side physical memory.
-Identity map makes PA==VA here, so a plain pointer works.
+Raw u16 / u32 accessors. All CPU-side — they take the ring's VA.
 
-    vnet_write_u16(pa: i64, off: int, v: int)
-        var p: *u16 = *u16(pa + i64(off))
+    vnet_write_u16(va: i64, off: int, v: int)
+        var p: *u16 = *u16(va + i64(off))
         *p = u16(v & 0xffff)
 
-    vnet_read_u16(pa: i64, off: int) -> int
-        var p: *u16 = *u16(pa + i64(off))
+    vnet_read_u16(va: i64, off: int) -> int
+        var p: *u16 = *u16(va + i64(off))
         int(*p)
 
-    vnet_read_u32(pa: i64, off: int) -> i32
-        var p: *i32 = *i32(pa + i64(off))
+    vnet_read_u32(va: i64, off: int) -> i32
+        var p: *i32 = *i32(va + i64(off))
         *p
 
 
-Write a VirtqDesc at `desc_pa + idx * 16`.
+Write a VirtqDesc at `ring_va + idx * 16`. `buf_pa` is the
+device-facing address stored in the descriptor's `addr` field —
+the CPU never dereferences it directly.
 
-    vnet_desc_set(desc_pa: i64, idx: int, addr: i64, len: int, flags: int, next: int)
-        val entry = desc_pa + i64(idx * 16)
+    vnet_desc_set(ring_va: i64, idx: int, buf_pa: i64, len: int, flags: int, next: int)
+        val entry = ring_va + i64(idx * 16)
         var p_addr: *u64 = *u64(entry)
-        *p_addr = u64(addr)
+        *p_addr = u64(buf_pa)
         var p_len: *u32 = *u32(entry + 8)
         *p_len = i32(len)
         var p_flags: *u16 = *u16(entry + 12)
@@ -148,16 +193,18 @@ avail ring lists every descriptor index in order.
     vnet_rx_prefill()
         var i = 0
         while i < VNET_RX_QLEN
-            vnet_rx_bufs[i] = i64(page_alloc_zero())
-            vnet_desc_set(vnet_rx_desc_pa, i,
-                vnet_rx_bufs[i], VNET_BUF_BYTES,
+            val va = vnet_dma_alloc_page()
+            vnet_rx_bufs_va[i] = va
+            vnet_rx_bufs_pa[i] = vnet_va_to_pa(va)
+            vnet_desc_set(vnet_rx_desc_va, i,
+                vnet_rx_bufs_pa[i], VNET_BUF_BYTES,
                 VIRTQ_DESC_F_WRITE, 0)
             // avail.ring[i] = i
-            vnet_write_u16(vnet_rx_avail_pa, 4 + i * 2, i)
+            vnet_write_u16(vnet_rx_avail_va, 4 + i * 2, i)
             i += 1
         vnet_rx_avail_idx = VNET_RX_QLEN
         // avail.idx = QLEN
-        vnet_write_u16(vnet_rx_avail_pa, 2, vnet_rx_avail_idx)
+        vnet_write_u16(vnet_rx_avail_va, 2, vnet_rx_avail_idx)
 
 
 Allocate TX buffers. The descriptors themselves are filled in
@@ -166,7 +213,9 @@ on each `virtio_net_send` call; here we just reserve pages.
     vnet_tx_alloc_bufs()
         var i = 0
         while i < VNET_TX_QLEN
-            vnet_tx_bufs[i] = i64(page_alloc_zero())
+            val va = vnet_dma_alloc_page()
+            vnet_tx_bufs_va[i] = va
+            vnet_tx_bufs_pa[i] = vnet_va_to_pa(va)
             i += 1
 
 
@@ -195,6 +244,8 @@ failure, `virtio_net_last_fail()` reports a small numeric code
 indicating which step blew up (for diagnostics only).
 
     virtio_net_init() -> int
+        vnet_dma_reset()
+
         if v_find(VIRTIO_DEV_NET) == 0
             vnet_fail = 1
             return 0
@@ -229,28 +280,36 @@ device accepted our subset. If not, abort.
             vnet_fail = 3
             return 0
 
-Allocate ring memory and hand it to the transport for setup.
+Allocate ring memory and hand the PAs to the transport for setup.
+Each ring page's VA (for CPU reads/writes) and PA (for device) are
+cached in the per-queue state.
 
-        vnet_rx_desc_pa  = i64(page_alloc_zero())
-        vnet_rx_avail_pa = i64(page_alloc_zero())
-        vnet_rx_used_pa  = i64(page_alloc_zero())
-        if vnet_rx_desc_pa == 0 || vnet_rx_avail_pa == 0 || vnet_rx_used_pa == 0
+        vnet_rx_desc_va  = vnet_dma_alloc_page()
+        vnet_rx_avail_va = vnet_dma_alloc_page()
+        vnet_rx_used_va  = vnet_dma_alloc_page()
+        if vnet_rx_desc_va == 0 || vnet_rx_avail_va == 0 || vnet_rx_used_va == 0
             v_status_or(VIRTIO_STATUS_FAILED)
             vnet_fail = 4
             return 0
+        vnet_rx_desc_pa  = vnet_va_to_pa(vnet_rx_desc_va)
+        vnet_rx_avail_pa = vnet_va_to_pa(vnet_rx_avail_va)
+        vnet_rx_used_pa  = vnet_va_to_pa(vnet_rx_used_va)
         if v_queue_setup(VNET_Q_RX, VNET_RX_QLEN,
                 vnet_rx_desc_pa, vnet_rx_avail_pa, vnet_rx_used_pa) == 0
             v_status_or(VIRTIO_STATUS_FAILED)
             vnet_fail = 4
             return 0
 
-        vnet_tx_desc_pa  = i64(page_alloc_zero())
-        vnet_tx_avail_pa = i64(page_alloc_zero())
-        vnet_tx_used_pa  = i64(page_alloc_zero())
-        if vnet_tx_desc_pa == 0 || vnet_tx_avail_pa == 0 || vnet_tx_used_pa == 0
+        vnet_tx_desc_va  = vnet_dma_alloc_page()
+        vnet_tx_avail_va = vnet_dma_alloc_page()
+        vnet_tx_used_va  = vnet_dma_alloc_page()
+        if vnet_tx_desc_va == 0 || vnet_tx_avail_va == 0 || vnet_tx_used_va == 0
             v_status_or(VIRTIO_STATUS_FAILED)
             vnet_fail = 5
             return 0
+        vnet_tx_desc_pa  = vnet_va_to_pa(vnet_tx_desc_va)
+        vnet_tx_avail_pa = vnet_va_to_pa(vnet_tx_avail_va)
+        vnet_tx_used_pa  = vnet_va_to_pa(vnet_tx_used_va)
         if v_queue_setup(VNET_Q_TX, VNET_TX_QLEN,
                 vnet_tx_desc_pa, vnet_tx_avail_pa, vnet_tx_used_pa) == 0
             v_status_or(VIRTIO_STATUS_FAILED)
@@ -309,8 +368,9 @@ frame is too large.
         val slot = vnet_tx_next_slot
         vnet_tx_next_slot = (slot + 1) % VNET_TX_QLEN
 
-        val buf = vnet_tx_bufs[slot]
-        val hdr: *byte = *byte(buf)
+        val buf_va = vnet_tx_bufs_va[slot]
+        val buf_pa = vnet_tx_bufs_pa[slot]
+        val hdr: *byte = *byte(buf_va)
 
 Zero the virtio-net header.
 
@@ -321,18 +381,18 @@ Zero the virtio-net header.
 
 Copy the caller's frame in after the header.
 
-        val body: *byte = *byte(buf + i64(12))
+        val body: *byte = *byte(buf_va + i64(12))
         i = 0
         while i < len
             body[i] = frame[i]
             i += 1
 
-        vnet_desc_set(vnet_tx_desc_pa, slot, buf, 12 + len, 0, 0)
+        vnet_desc_set(vnet_tx_desc_va, slot, buf_pa, 12 + len, 0, 0)
 
         // avail.ring[avail_idx % QLEN] = slot
-        vnet_write_u16(vnet_tx_avail_pa, 4 + (vnet_tx_avail_idx % VNET_TX_QLEN) * 2, slot)
+        vnet_write_u16(vnet_tx_avail_va, 4 + (vnet_tx_avail_idx % VNET_TX_QLEN) * 2, slot)
         vnet_tx_avail_idx = (vnet_tx_avail_idx + 1) & 0xffff
-        vnet_write_u16(vnet_tx_avail_pa, 2, vnet_tx_avail_idx)
+        vnet_write_u16(vnet_tx_avail_va, 2, vnet_tx_avail_idx)
 
         v_queue_notify(VNET_Q_TX)
         1
@@ -346,15 +406,15 @@ length. Returns 0 if no packet is ready, -1 on error.
     virtio_net_recv(out: *byte, max_len: int) -> int
         if vnet_ready == 0
             return -1
-        val used_idx = vnet_read_u16(vnet_rx_used_pa, 2)
+        val used_idx = vnet_read_u16(vnet_rx_used_va, 2)
         if used_idx == vnet_rx_last_used
             return 0
 
         val slot = vnet_rx_last_used % VNET_RX_QLEN
         // used.ring[slot] = { id:u32, len:u32 }
         val elem_off = 4 + slot * 8
-        val desc_id = int(vnet_read_u32(vnet_rx_used_pa, elem_off))
-        val raw_len = int(vnet_read_u32(vnet_rx_used_pa, elem_off + 4))
+        val desc_id = int(vnet_read_u32(vnet_rx_used_va, elem_off))
+        val raw_len = int(vnet_read_u32(vnet_rx_used_va, elem_off + 4))
         // raw_len includes the 12-byte virtio-net header.
         var frame_len = raw_len - 12
         if frame_len < 0
@@ -362,20 +422,20 @@ length. Returns 0 if no packet is ready, -1 on error.
         if frame_len > max_len
             frame_len = max_len
 
-        val buf = vnet_rx_bufs[desc_id]
-        val src: *byte = *byte(buf + i64(12))
+        val buf_va = vnet_rx_bufs_va[desc_id]
+        val src: *byte = *byte(buf_va + i64(12))
         var i = 0
         while i < frame_len
             out[i] = src[i]
             i += 1
 
         // Return the descriptor to the device.
-        vnet_desc_set(vnet_rx_desc_pa, desc_id,
-            buf, VNET_BUF_BYTES, VIRTQ_DESC_F_WRITE, 0)
-        vnet_write_u16(vnet_rx_avail_pa,
+        vnet_desc_set(vnet_rx_desc_va, desc_id,
+            vnet_rx_bufs_pa[desc_id], VNET_BUF_BYTES, VIRTQ_DESC_F_WRITE, 0)
+        vnet_write_u16(vnet_rx_avail_va,
             4 + (vnet_rx_avail_idx % VNET_RX_QLEN) * 2, desc_id)
         vnet_rx_avail_idx = (vnet_rx_avail_idx + 1) & 0xffff
-        vnet_write_u16(vnet_rx_avail_pa, 2, vnet_rx_avail_idx)
+        vnet_write_u16(vnet_rx_avail_va, 2, vnet_rx_avail_idx)
         v_queue_notify(VNET_Q_RX)
 
         vnet_rx_last_used = (vnet_rx_last_used + 1) & 0xffff
