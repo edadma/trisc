@@ -27,6 +27,17 @@ always start with a 1-byte status (0 on success, -1 on error).
 
 - GET_MAC: `cmd` → `status, mac(6)`
 - SEND_PACKET: `cmd, len(2, big-endian), frame(len)` → `status`
+- SUBSCRIBE_RX: `cmd` → `status`
+    Registers the calling thread as the single RX notification
+    target. On each frame the poller (currently `net_thread` in
+    net_handler.lsysl) calls `nic_deliver_rx(frame, len)`, which
+    enqueues the frame into the nic's 8-slot RX queue and sends
+    a `notify_send_to(subscriber_tid, 1)` ping so the subscriber
+    can drain the queue.
+- RECV_PACKET: `cmd` → `status, len(2, big-endian), frame(len)`
+    Non-blocking fetch of the head of the RX queue. `status = 0`
+    + the frame on success; `status = -1` + `len = 0` when the
+    queue is empty.
 
 All multi-byte wire fields are big-endian to match the rest of
 the stack. Unknown commands reply `status = -1`.
@@ -34,13 +45,19 @@ the stack. Unknown commands reply `status = -1`.
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply}
-    import oskit.drivers.virtio.{virtio_net_get_mac, virtio_net_send}
+    import oskit.services.{notify_send_to, sleep, yield}
+    import oskit.drivers.virtio.{virtio_net_get_mac, virtio_net_send,
+        virtio_net_recv, net_send_arp_request, net_send_icmp_echo,
+        net_handle_frame, net_gw_mac_known,
+        NET_GW_IP_A, NET_GW_IP_B, NET_GW_IP_C, NET_GW_IP_D}
 
 
 Command codes (byte value of buf[0]).
 
-    val NIC_CMD_GET_MAC     = 1
-    val NIC_CMD_SEND_PACKET = 2
+    val NIC_CMD_GET_MAC      = 1
+    val NIC_CMD_SEND_PACKET  = 2
+    val NIC_CMD_SUBSCRIBE_RX = 3
+    val NIC_CMD_RECV_PACKET  = 4
 
 
 Capacity. Ethernet II frames without VLAN cap at 1514 bytes; the
@@ -49,6 +66,31 @@ len) plus a little slop.
 
     val NIC_MAX_FRAME = 1514
     val NIC_MSG_BUF   = 1520
+
+
+RX queue — fixed-size circular buffer. Eight slots is plenty for
+bring-up (QEMU's user stack sends handfuls of frames per demo);
+the size is constrained by the module-level storage budget more
+than by any protocol concern.
+
+    val NIC_RX_QUEUE = 8
+
+    struct NicRxFrame
+        data: [1514]byte
+        len: int
+
+    var nic_rx_queue: [8]NicRxFrame
+    var nic_rx_head = 0
+    var nic_rx_tail = 0
+    var nic_rx_count = 0
+    var nic_rx_drops = 0
+
+
+Notification subscriber. Only one subscriber today — inet will
+be the sole consumer once ARP/ICMP dispatch moves there. A full
+pub/sub list is a later refinement.
+
+    var nic_subscriber_tid = -1
 
 
 Cached port, set once in `nic_server`.
@@ -114,6 +156,121 @@ is out of range or the driver rejects the frame.
         ipc_reply(sender, reply, 1)
 
 
+### SUBSCRIBE_RX handler
+
+Record the sender's thread ID as the sole RX notification
+target. Subsequent `nic_deliver_rx` calls from the poller will
+wake this thread via `notify_send_to` so it can drain the queue
+with RECV_PACKET.
+
+    nic_handle_subscribe_rx(sender: int)
+        nic_subscriber_tid = sender
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+### RECV_PACKET handler
+
+Pop one frame off the head of the RX queue. Non-blocking: when
+the queue is empty we reply with `status = -1` and `len = 0`
+rather than deferring, so clients can poll freely without
+worrying about leaking waiters in the nic.
+
+    nic_handle_recv_packet(sender: int)
+        if nic_rx_count <= 0
+            var empty: [3]byte
+            empty[0] = byte(-1)
+            empty[1] = 0
+            empty[2] = 0
+            ipc_reply(sender, empty, 3)
+            return
+        val slot = nic_rx_head
+        val len = nic_rx_queue[slot].len
+        var reply: [1517]byte
+        reply[0] = 0
+        reply[1] = byte((len >> 8) & 0xff)
+        reply[2] = byte(len & 0xff)
+        var i = 0
+        while i < len
+            reply[3 + i] = nic_rx_queue[slot].data[i]
+            i += 1
+        nic_rx_head = (slot + 1) % NIC_RX_QUEUE
+        nic_rx_count -= 1
+        ipc_reply(sender, reply, 3 + len)
+
+
+### nic_deliver_rx
+
+Called from whichever thread is currently draining
+`virtio_net_recv` (for this phase that's `net_thread` in
+`oskit/drivers/virtio/net_handler.lsysl`). Enqueues `frame`
+into the internal queue and, if a subscriber is registered,
+sends them a 1-valued notification so they know to RECV_PACKET.
+
+On overflow the frame is dropped and `nic_rx_drops` is bumped —
+UDP-ish semantics. We do not notify on drop, since the queue
+was already full and the subscriber presumably has something
+to drain.
+
+    nic_deliver_rx(frame: *byte, len: int)
+        if len <= 0 || len > NIC_MAX_FRAME
+            return
+        if nic_rx_count >= NIC_RX_QUEUE
+            nic_rx_drops += 1
+            return
+        val slot = nic_rx_tail
+        nic_rx_queue[slot].len = len
+        var i = 0
+        while i < len
+            nic_rx_queue[slot].data[i] = frame[i]
+            i += 1
+        nic_rx_tail = (slot + 1) % NIC_RX_QUEUE
+        nic_rx_count += 1
+        if nic_subscriber_tid >= 0
+            notify_send_to(nic_subscriber_tid, 1)
+
+
+### nic_poller
+
+Kernel-thread entry point that owns the RX side of the driver.
+Replaces the old `net_thread` from `oskit/drivers/virtio/
+net_handler.lsysl` — we moved the loop here so `nic.lsysl` is
+the single consumer of `virtio_net_recv`, and so ownership of
+the RX path matches the architectural picture even while nic
+is still a kernel thread.
+
+At boot the poller still drives the ARP + ICMP echo demo that
+proved TX/RX end-to-end (send one ARP request for the gateway;
+once the reply arrives, send one ICMP echo). Every frame passes
+through both `net_handle_frame` (ARP / ICMP responder) **and**
+`nic_deliver_rx` (enqueue for subscribers). The demo is a
+temporary shim — once inet becomes the RX subscriber and owns
+ARP/ICMP, the `net_handle_frame` call goes away and this loop
+shrinks to "recv → deliver → yield".
+
+    nic_poller()
+        var our_mac: [6]byte
+        if virtio_net_get_mac(our_mac) == 0
+            return
+        sleep(10)
+        net_send_arp_request(our_mac,
+            NET_GW_IP_A, NET_GW_IP_B, NET_GW_IP_C, NET_GW_IP_D)
+
+        var buf: [1514]byte
+        var ping_sent = 0
+        while true
+            val n = virtio_net_recv(buf, 1514)
+            if n > 0
+                net_handle_frame(our_mac, buf, n)
+                nic_deliver_rx(buf, n)
+            else
+                if ping_sent == 0 && net_gw_mac_known != 0
+                    net_send_icmp_echo(our_mac, 0x1234, 1)
+                    ping_sent = 1
+                yield()
+
+
 ### Server main loop
 
 Kernel-thread entry point. Spawned from `kernel_main_rs` in
@@ -138,6 +295,10 @@ threads don't have a clean "exit" path in SLIX yet).
                     nic_handle_get_mac(sender)
                 else if cmd == NIC_CMD_SEND_PACKET
                     nic_handle_send_packet(sender, buf)
+                else if cmd == NIC_CMD_SUBSCRIBE_RX
+                    nic_handle_subscribe_rx(sender)
+                else if cmd == NIC_CMD_RECV_PACKET
+                    nic_handle_recv_packet(sender)
                 else
                     var reply: [1]byte
                     reply[0] = byte(-1)

@@ -164,12 +164,17 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("recv=5 'hello'")
   }
 
-  "aarch64 nic: GET_MAC via test_nic" in {
-    // test_nic asks the nic server for the NIC's MAC and prints
-    // it. QEMU boots virtio-net-device with a fixed MAC so we
-    // can assert on the exact value.
+  "aarch64 nic: GET_MAC + subscribe + drain via test_nic" in {
+    // test_nic exercises the full nic IPC ABI: GET_MAC,
+    // SUBSCRIBE_RX, and RECV_PACKET drain loop. QEMU boots
+    // virtio-net-device with a fixed MAC. The RX queue gets
+    // the ARP/ICMP boot frames enqueued by nic_poller, so
+    // the drain count is non-zero by the time test_nic runs
+    // under login.
     val output = qemu.command("test_nic")
     output should include("mac=52:54:00:12:34:56")
+    output should include("sub=ok")
+    output should include("rx=")
   }
 
   "aarch64 crash recovery: kill tfs and restart" in {

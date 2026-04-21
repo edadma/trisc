@@ -30,8 +30,10 @@ Cached nic port, resolved lazily on first call.
 
 Command codes — must track `oskit/servers/nic.lsysl`.
 
-    val NIC_CLI_CMD_GET_MAC     = 1
-    val NIC_CLI_CMD_SEND_PACKET = 2
+    val NIC_CLI_CMD_GET_MAC      = 1
+    val NIC_CLI_CMD_SEND_PACKET  = 2
+    val NIC_CLI_CMD_SUBSCRIBE_RX = 3
+    val NIC_CLI_CMD_RECV_PACKET  = 4
 
     val NIC_CLI_MAX_FRAME = 1514
 
@@ -87,3 +89,59 @@ on any error.
         if int(reply[0]) != 0
             return -1
         0
+
+
+### nic_subscribe_rx
+
+Register the caller's thread as the nic's sole RX notification
+target. On each received frame the nic calls
+`notify_send_to(sender_tid, 1)` + enqueues the frame; the
+subscriber is expected to drain with `nic_recv_packet` until it
+returns -1. Returns 0 on success, -1 on any IPC failure.
+
+    nic_subscribe_rx() -> int
+        val port = nic_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(NIC_CLI_CMD_SUBSCRIBE_RX)
+        var reply: [1]byte
+        val r = ipc_send(port, &msg[0], 1, &reply[0], 1)
+        if r < 0
+            return -1
+        if int(reply[0]) != 0
+            return -1
+        0
+
+
+### nic_recv_packet
+
+Non-blocking fetch of the next queued RX frame. Writes up to
+`maxlen` bytes of the frame into `out` and returns the frame's
+length, or -1 when the queue is empty / on IPC failure. Shorter
+`maxlen` truncates the returned frame (the nic already sent the
+full frame bytes, so this is purely a caller-side clamp).
+
+    nic_recv_packet(out: *byte, maxlen: int) -> int
+        val port = nic_get_port()
+        if port < 0
+            return -1
+        if maxlen < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(NIC_CLI_CMD_RECV_PACKET)
+        var reply: [1517]byte
+        val r = ipc_send(port, &msg[0], 1, &reply[0], 1517)
+        if r < 0
+            return -1
+        if int(reply[0]) != 0
+            return -1
+        val raw_len = ((int(reply[1]) & 0xff) << 8) | (int(reply[2]) & 0xff)
+        var take = raw_len
+        if take > maxlen
+            take = maxlen
+        var i = 0
+        while i < take
+            out[i] = reply[3 + i]
+            i += 1
+        raw_len

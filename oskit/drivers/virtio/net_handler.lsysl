@@ -18,7 +18,6 @@ a kernel thread created by `kernel_main_rs`.
     module oskit.drivers.virtio
 
     import oskit.arch.{page_alloc_zero}
-    import oskit.services.{yield, sleep}
     import std.net.{ETHERTYPE_IPV4, ETHERTYPE_ARP,
         ARP_OP_REQUEST, ARP_OP_REPLY,
         IP_PROTO_ICMP, ICMP_ECHO_REQ, ICMP_ECHO_REP,
@@ -289,32 +288,3 @@ that the full send/receive loop is flowing.
 
     net_pings_received_count() -> int
         net_pings_received
-
-
-Main packet poll loop — one kernel thread that drains the RX
-queue, dispatches to the handlers above, and yields when idle.
-
-After a brief settle, issues one ARP request for the gateway. As
-soon as the reply comes back (`net_gw_mac_known` flips to 1) it
-also sends one ICMP echo — that gives us end-to-end proof of the
-full TX/RX + protocol loop at boot time.
-
-    net_thread()
-        var our_mac: [6]byte
-        if virtio_net_get_mac(our_mac) == 0
-            return
-        sleep(10)
-        net_send_arp_request(our_mac,
-            NET_GW_IP_A, NET_GW_IP_B, NET_GW_IP_C, NET_GW_IP_D)
-
-        var buf: [1514]byte
-        var ping_sent = 0
-        while true
-            val n = virtio_net_recv(buf, 1514)
-            if n > 0
-                net_handle_frame(our_mac, buf, n)
-            else
-                if ping_sent == 0 && net_gw_mac_known != 0
-                    net_send_icmp_echo(our_mac, 0x1234, 1)
-                    ping_sent = 1
-                yield()
