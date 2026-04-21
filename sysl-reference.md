@@ -242,38 +242,49 @@ enum Tree
 
 ### Type Declarations
 
-Two orthogonal modifiers compose into four forms:
+Two orthogonal modifiers compose, plus optional runtime checks. Forms:
 
 ```sysl
-type Callback = (int) -> int            // plain alias (transparent)
-type Age      = int within 0..150        // subtype: base-compatible, range-checked
-type Meters   = new f64                  // derived: nominally distinct, no cast mixing
-type SafeAge  = new int within 0..150    // derived + constrained
+type Callback = (int) -> int                // plain alias (transparent)
+type Age      = int within 0..150            // subtype: base-compatible, range-checked
+type Meters   = new f64                      // derived: nominally distinct, no cast mixing
+type SafeAge  = new int within 0..150        // derived + constrained
+type Even     = int where value % 2 == 0     // arbitrary predicate on value
+type PosEven  = int within 0..100 where value % 2 == 0   // within + where combined
 ```
 
-| Form                              | Base-compatible? | Range-checked? |
+| Form                              | Base-compatible? | Runtime check? |
 |-----------------------------------|------------------|----------------|
 | `type A = B`                      | yes              | no             |
-| `type A = B within r`             | yes              | yes            |
+| `type A = B within r`             | yes              | range          |
+| `type A = B where p`              | yes              | predicate      |
 | `type A = new B`                  | no               | no             |
-| `type A = new B within r`         | no               | yes            |
+| `type A = new B within r`         | no               | range          |
+| `type A = new B where p`          | no               | predicate      |
+| `type A = [new] B within r where p` | …              | both           |
 
-**Range syntax.** Bounds must be numeric literals (including `char`, which is `u32`); optional
-unary sign is allowed.
+**Range syntax.** Bounds must be numeric literals (including `char`, which is `u32`) or
+references to a `const`; optional unary sign is allowed.
 
 | Syntax     | Meaning                     | Example                                     |
 |------------|-----------------------------|---------------------------------------------|
 | `lo..hi`   | Inclusive: `[lo, hi]`        | `type Age = int within 0..150`              |
 | `lo..<hi`  | Exclusive upper: `[lo, hi)`  | `type Prob = f64 within 0.0..<1.0`          |
 
+**Where predicates.** `where <bool-expr>` attaches an arbitrary boolean predicate. Inside the
+predicate, `value` binds to the value being checked. The predicate runs at every produce site
+(assignment, parameter bind, return, explicit cast). A dedicated synthetic function
+`__pred_<TypeName>(value) -> value` is emitted and called at each check site; unlike
+`within` bounds, `where` predicates are not compile-time folded even for literals.
+
 **Compatibility.** Subtypes (without `new`) are transparently compatible with their base; no
-cast is needed, and a runtime range check fires on each assignment, parameter bind, return, or
-explicit cast that produces a value of the constrained type. Derived types (with `new`) are
-nominally distinct from both their base and other derived types over the same base — mixing
-them with the base in arithmetic or assignment is a compile error; use an explicit cast
-(`Meters(3.0)` to wrap, `f64(m)` to unwrap). Arithmetic between two values of the same derived
-type yields that derived type. Out-of-range literal bounds are caught at compile time; any
-runtime violation traps.
+cast is needed, and runtime checks (range and/or predicate) fire on each assignment, parameter
+bind, return, or explicit cast that produces a value of the constrained type. Derived types
+(with `new`) are nominally distinct from both their base and other derived types over the same
+base — mixing them with the base in arithmetic or assignment is a compile error; use an
+explicit cast (`Meters(3.0)` to wrap, `f64(m)` to unwrap). Arithmetic between two values of
+the same derived type yields that derived type. Out-of-range literal bounds are caught at
+compile time; any runtime violation traps.
 
 ### Type Aliases
 
@@ -439,6 +450,50 @@ getAnswer() -> int = 42
 uart_puts(s: string) = for c in s do uart_putc(int(c))
 wait_ready() = while !ready() do noop()
 ```
+
+### Design by Contract — `require` / `ensure`
+
+A block-body function can declare preconditions and postconditions at the top of its body:
+
+```sysl
+sqrt(x: f64) -> f64
+    require x >= 0.0
+    ensure result >= 0.0
+    ensure result * result <= x + 1.0e-6
+    var r = x / 2.0
+    for _ in 0 downTo 20 step 1 do r = 0.5 * (r + x / r)
+    r
+```
+
+- **`require <bool>`** — evaluated once on function entry. Traps if false.
+- **`ensure <bool>`** — evaluated before every return site (including the implicit fall-through
+  return of a trailing expression). Traps if false.
+- Multiple `require` and `ensure` clauses are allowed, in any order. All clauses must appear
+  before the first regular statement.
+- Both run-time checks go through the standard trap path (same as range checks).
+
+**`result` in `ensure` clauses.** Inside an `ensure` expression, the identifier `result`
+refers to the function's return value. Outside `ensure` — in `require` or in the body —
+`result` is just a normal identifier and may be used for your own variables. The analyzer
+aliases `result` → `__result__` only while typechecking ensure expressions (same pattern
+used for `self` → `__self__` in methods).
+
+**`old(expr)` in `ensure` clauses.** Captures the value of `expr` at function entry, before
+any body statement runs. Essential for contracts about mutation:
+
+```sysl
+increment(p: *int)
+    ensure *p == old(*p) + 1
+    *p = *p + 1
+```
+
+`old()` may only appear inside `ensure` clauses; using it elsewhere is a normal undefined-
+function error. Each `old(expr)` call allocates a hidden snapshot local that is initialized
+at the top of the function body — so later mutations of the underlying variable or pointee
+do not affect what `old()` sees. `old()` accepts any expression (pointer derefs, field
+accesses, arithmetic, calls), but nested `old(old(...))` is rejected.
+
+Contracts are not yet supported on expression-body functions or on closures.
 
 ### Default Parameter Values
 
@@ -941,7 +996,12 @@ on_click(handler: @escaping () -> unit)
 
 Non-escaping closures are more efficient (no heap allocation) but the compiler trusts the annotation — storing a non-escaping closure into a global, struct field, or returning it is undefined behavior. Closures with no expected type context (e.g., `val f = x -> x + 1`) default to escaping.
 
-**Implementation:** All function values (including plain function pointers) are 16-byte fat pointers: `{func_ptr: i64, env_ptr: i64}`. Plain function pointers have `env_ptr = 0`. For escaping closures with captures, the environment struct is heap-allocated. For non-escaping closures, the environment is allocated on the caller's stack frame. The `env_ptr` is passed to the closure function via register r3 in the TRISC calling convention.
+**Implementation:** All function values (including plain function pointers) are 16-byte fat pointers: `{func_ptr: i64, env_ptr: i64}`. Plain function pointers have `env_ptr = 0`. The environment allocation strategy depends on capture types:
+
+- **Non-escaping, captures all non-rc-bearing** (ints, raw pointers, etc.): the environment is allocated on the caller's stack frame — no malloc, no free. This is what makes closures usable in no-allocator (kernel/bare-metal) contexts.
+- **Escaping, OR any rc-bearing capture** (string, ref, struct-with-string, enum-with-string, …): the environment is heap-allocated with a `[rc:i64 @ -16 | deinit_ptr:i8* @ -8 | data]` header. Closure descriptor scope-exit decrements the env's refcount; at zero, a per-closure-id deinit walks the captures (decr'ing rc-bearing entries) and `free` reclaims the env block.
+
+The `env_ptr` is passed to the closure function via register r3 in the TRISC calling convention (LLVM passes it as the first hidden parameter `i8* %env`).
 
 ### Extern Declarations
 

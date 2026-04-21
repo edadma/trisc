@@ -445,6 +445,16 @@ class SyslSVMCodegen:
       // TODO: defer support
       ()
 
+    case TMultiStmt(children) =>
+      children.foreach(genStmt)
+
+    case TContractCheck(_, expr, _) =>
+      genExpr(expr)
+      val pass = newLabel("contract_pass")
+      emit(s"  jumpnz $pass")
+      emit("  halt")
+      emit(s"$pass:")
+
     case TFieldCompoundAssignStmt(obj, fieldIndex, op, value) =>
       val st = obj.typ.asInstanceOf[SyslType.StructType]
       val off = fieldOffset(st, fieldIndex)

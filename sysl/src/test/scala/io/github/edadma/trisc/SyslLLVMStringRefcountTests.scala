@@ -1295,16 +1295,33 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
   }
 
   "closure with no rc-bearing captures: deinit_ptr is null (no per-id deinit)" in {
+    // `val f = ...` (no expected type) defaults to escaping per analyzer convention.
+    // → HeapEnv path → malloc. deinit_ptr=null since captures are non-rc-bearing.
     val ir = compileLLVM(
       """main()
         |    val a = 10
         |    val f = (x: int) -> x + a
         |""".stripMargin)
-    // Always heap, but deinit_ptr stored as null
     ir should include("call i8* @malloc")
     ir should include regex """store i8\* null, i8\*\*"""
     // No per-id deinit registered
     ir should not include "@__closure_env_deinit_"
+  }
+
+  "stack-env optimization: closure as call arg with int capture has no malloc" in {
+    // Non-escaping context (closure passed to `apply(f: (int) -> int, ...)`) +
+    // non-rc-bearing captures → StackEnv → alloca, no malloc, no free.
+    val ir = compileLLVM(
+      """apply(f: (int) -> int, x: int) -> int = f(x)
+        |
+        |main() -> int
+        |    val a = 10
+        |    apply(x -> x + a, 32)
+        |""".stripMargin)
+    // No malloc/free for the closure env
+    ir should not include "call i8* @malloc"
+    ir should not include "@__closure_env_deinit_"
+    ir should not include "@__closure_env_dispatch"
   }
 
   // ====================================================================
@@ -1377,5 +1394,360 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
         |        i += 1
         |    0
         |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // Destructure pattern bindings (TDestructurePattern)
+  // ====================================================================
+
+  "destructure struct with string field extracts value" in {
+    llvmExit(
+      """struct Pair
+        |    name: string
+        |    n: int
+        |
+        |main() -> int
+        |    p = Pair("hi" + "!", 42)
+        |    p match
+        |        Pair(_, n) -> n - 42
+        |""".stripMargin) shouldBe 0
+  }
+
+  "destructure bound string field usable in arm body" in {
+    llvmExit(
+      """struct Pair
+        |    name: string
+        |    n: int
+        |
+        |main() -> int
+        |    p = Pair("ho" + "ld", 1)
+        |    p match
+        |        Pair(s, _) -> if s == "hold" then 0 else 1
+        |""".stripMargin) shouldBe 0
+  }
+
+  "destructure with string field in loop — no heap leak" in {
+    llvmExit(
+      """struct Pair
+        |    name: string
+        |    n: int
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val p = Pair("iter" + "_v", i)
+        |        val sum = p match
+        |            Pair(_, n) -> n
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // Closure descriptor copy (var g = f)
+  // ====================================================================
+
+  "closure descriptor copy (var g = f) does not double-decr heap env" in {
+    llvmExit(
+      """make() -> (int) -> int
+        |    val cap = "ab" + "cd"
+        |    (x: int) -> x + len(cap)
+        |
+        |main() -> int
+        |    val f = make()
+        |    val g = f
+        |    f(0) - g(0)
+        |""".stripMargin) shouldBe 0
+  }
+
+  "closure descriptor copy in loop — no use-after-free" in {
+    llvmExit(
+      """make(i: int) -> (int) -> int
+        |    val cap = "iter" + "_v"
+        |    (x: int) -> x + len(cap) + i
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val f = make(i)
+        |        val g = f
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "closure descriptor reassignment in loop — no leak" in {
+    llvmExit(
+      """make(i: int) -> (int) -> int
+        |    val cap = "iter" + "_v"
+        |    (x: int) -> x + len(cap) + i
+        |
+        |main() -> int
+        |    var f = make(0)
+        |    var i = 1
+        |    while i < 100
+        |        f = make(i)
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  // ====================================================================
+  // &MyEnum (RefType(EnumType)) — TNewEnum + per-enum deinit
+  // ====================================================================
+
+  "new MyEnum(string) — heap enum reaches rc=0 walks active variant strings" in {
+    llvmExit(
+      """enum E
+        |    Wrap(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val e = new Wrap("iter" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "new MyEnum reassignment in loop — old enum's strings freed" in {
+    llvmExit(
+      """enum E
+        |    Wrap(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var e = new Wrap("init" + "_v")
+        |    var i = 0
+        |    while i < 100
+        |        e = new Wrap("iter" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "new MyEnum with multi-string variant" in {
+    llvmExit(
+      """enum E
+        |    Two(a: string, b: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val e = new Two("aa" + "_v", "bb" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "new MyEnum with empty variant — no spurious decr" in {
+    llvmExit(
+      """enum E
+        |    Wrap(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val e = new Empty()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "enum deinit IR emits __enum_deinit_<name>" in {
+    val ir = compileLLVM(
+      """enum E
+        |    Wrap(s: string)
+        |    Empty
+        |
+        |main() -> int
+        |    val e = new Wrap("hi" + "!")
+        |    0
+        |""".stripMargin)
+    ir should include("define i32 @__enum_deinit_E")
+    ir should include("call i32 @__enum_deinit_E")
+  }
+
+  // ====================================================================
+  // &MyStruct (RefType(StructType)) auto-deinit
+  // ====================================================================
+
+  "new MyStruct(string) — heap struct reaches rc=0 walks string fields" in {
+    llvmExit(
+      """struct Holder
+        |    name: string
+        |    n: int
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val h = new Holder("iter" + "_v", i)
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "new MyStruct reassignment in loop — old struct's strings freed" in {
+    llvmExit(
+      """struct Holder
+        |    name: string
+        |
+        |main() -> int
+        |    var h = new Holder("init" + "_v")
+        |    var i = 0
+        |    while i < 100
+        |        h = new Holder("iter" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "new MyStruct with multi-string field" in {
+    llvmExit(
+      """struct Pair
+        |    a: string
+        |    b: string
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val p = new Pair("aa" + "_v", "bb" + "_v")
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "struct deinit IR emits __struct_deinit_<name>" in {
+    val ir = compileLLVM(
+      """struct Holder
+        |    name: string
+        |
+        |main() -> int
+        |    val h = new Holder("hi" + "!")
+        |    0
+        |""".stripMargin)
+    ir should include("define i32 @__struct_deinit_Holder")
+    ir should include("call i32 @__struct_deinit_Holder")
+  }
+
+  // ====================================================================
+  // TCall returning heap-env closure — caller decr's at scope exit
+  // (funcKindOfExpr now defaults TCall to HeapEnv)
+  // ====================================================================
+
+  "val h = make_heap_closure() — caller decr's at scope exit" in {
+    llvmExit(
+      """make() -> (int) -> int
+        |    val cap = "ab" + "cd"
+        |    (x: int) -> x + len(cap)
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val h = make()
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "TCall return IR emits emitClosureDescrDecr (env_ptr load + dispatch)" in {
+    val ir = compileLLVM(
+      """make() -> (int) -> int
+        |    val cap = "ab" + "cd"
+        |    (x: int) -> x + len(cap)
+        |
+        |main() -> int
+        |    val h = make()
+        |    0
+        |""".stripMargin)
+    // Caller's scope cleanup must decr h's env via __closure_env_dispatch
+    ir should include("@__closure_env_dispatch")
+  }
+
+  "passthrough(closure) — callee returns borrowed funcparam, caller balances" in {
+    llvmExit(
+      """make() -> (int) -> int
+        |    val cap = "ab" + "cd"
+        |    (x: int) -> x + len(cap)
+        |
+        |passthrough(g: (int) -> int) -> (int) -> int = g
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val original = make()
+        |        val passthru = passthrough(original)
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "if-expr returning closure — caller decr's at scope exit" in {
+    llvmExit(
+      """make_a() -> (int) -> int
+        |    val cap = "aa" + "bb"
+        |    (x: int) -> x + len(cap)
+        |
+        |make_b() -> (int) -> int
+        |    val cap = "cc" + "dd"
+        |    (x: int) -> x * len(cap)
+        |
+        |choose(b: bool) -> (int) -> int =
+        |    if b then make_a() else make_b()
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val f = choose(i % 2 == 0)
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "match-expr returning closure — caller decr's at scope exit" in {
+    llvmExit(
+      """make_a() -> (int) -> int
+        |    val cap = "aa" + "bb"
+        |    (x: int) -> x + len(cap)
+        |
+        |make_b() -> (int) -> int
+        |    val cap = "cc" + "dd"
+        |    (x: int) -> x * len(cap)
+        |
+        |choose(n: int) -> (int) -> int =
+        |    n match
+        |        0 -> make_a()
+        |        else -> make_b()
+        |
+        |main() -> int
+        |    var i = 0
+        |    while i < 100
+        |        val f = choose(i % 3)
+        |        i += 1
+        |    0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "if-expr returning closure — IR emits emitClosureDescrDecr at caller scope" in {
+    val ir = compileLLVM(
+      """make_a() -> (int) -> int
+        |    val cap = "aa" + "bb"
+        |    (x: int) -> x + len(cap)
+        |
+        |make_b() -> (int) -> int
+        |    val cap = "cc" + "dd"
+        |    (x: int) -> x * len(cap)
+        |
+        |choose(b: bool) -> (int) -> int =
+        |    if b then make_a() else make_b()
+        |
+        |main() -> int
+        |    val f = choose(true)
+        |    0
+        |""".stripMargin)
+    ir should include("@__closure_env_dispatch")
   }
 }

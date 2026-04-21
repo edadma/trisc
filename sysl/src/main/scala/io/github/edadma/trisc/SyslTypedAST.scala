@@ -45,6 +45,11 @@ case object TBreakStmt extends TStmt
 case object TContinueStmt extends TStmt
 case class TDeferStmt(body: TStmt) extends TStmt
 case class TAsmStmt(code: String) extends TStmt
+// Sequence of statements executed in order — used to splice multiple stmts into a single slot
+// (e.g. rewriting `return x` into `__result__ = x; <ensure checks>; return __result__`).
+case class TMultiStmt(stmts: List[TStmt]) extends TStmt
+// A contract runtime check. Evaluates expr; traps with the given message if it is false.
+case class TContractCheck(kind: String, expr: TExpr, message: String) extends TStmt
 case class TAsmExpr(code: String, typ: SyslType) extends TExpr
 case class TExprStmt(expr: TExpr) extends TStmt
 

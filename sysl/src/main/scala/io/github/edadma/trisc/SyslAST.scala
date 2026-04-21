@@ -46,7 +46,7 @@ case class StructDeclAST(name: String, fields: List[(String, TypeAST, Boolean)],
 case class EnumDeclAST(name: String, members: List[(String, Option[Long])], attributes: List[Attribute] = Nil) extends DeclAST
 case class DataEnumDeclAST(name: String, variants: List[EnumVariantAST], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil) extends DeclAST
 case class EnumVariantAST(name: String, fields: List[(String, TypeAST)])
-case class TypeAliasDeclAST(name: String, target: TypeAST, typeParams: List[String] = Nil, attributes: List[Attribute] = Nil, isNew: Boolean = false, range: Option[RangeAST] = None) extends DeclAST
+case class TypeAliasDeclAST(name: String, target: TypeAST, typeParams: List[String] = Nil, attributes: List[Attribute] = Nil, isNew: Boolean = false, range: Option[RangeAST] = None, predicate: Option[ExpressionAST] = None) extends DeclAST
 
 // Range for `within lo..hi` / `within lo..<hi` type constraints
 case class RangeAST(lo: ExpressionAST, hi: ExpressionAST, exclusiveHi: Boolean) extends Positional
@@ -75,7 +75,13 @@ case class ParamAST(name: String, typ: TypeAST, default: Option[ExpressionAST] =
 // Function body
 trait FunBodyAST
 case class ExprBodyAST(expr: ExpressionAST) extends FunBodyAST
-case class BlockBodyAST(stmts: List[StmtAST]) extends FunBodyAST
+case class BlockBodyAST(stmts: List[StmtAST], contracts: List[ContractClauseAST] = Nil) extends FunBodyAST
+
+// Design-by-contract clauses at the top of a function's block body.
+sealed trait ContractKind
+case object ContractRequire extends ContractKind
+case object ContractEnsure extends ContractKind
+case class ContractClauseAST(kind: ContractKind, expr: ExpressionAST) extends Positional
 
 // Statements
 trait StmtAST extends Positional

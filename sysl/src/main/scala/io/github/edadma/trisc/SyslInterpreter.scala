@@ -447,7 +447,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case SyslType.RefType(inner) =>
       // Uninitialized ref cell — represented as null-ish placeholder
       zeroValueForType(SyslType.PtrType(inner), env)
-    case SyslType.NamedType(_, base, _, _) => zeroValueForType(base, env)
+    case SyslType.NamedType(_, base, _, _, _) => zeroValueForType(base, env)
 
   private def exec(stmt: TStmt, env: Env): Unit =
     stmt match
@@ -621,6 +621,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TContinueStmt => throw ContinueException
 
       case TAsmStmt(_) => // no-op in interpreter
+
+      case TMultiStmt(children) =>
+        for s <- children do exec(s, env)
+
+      case TContractCheck(kind, expr, _) =>
+        val v = toLong(evalAny(expr, env))
+        if v == 0 then throw RuntimeError(s"$kind check failed")
 
       case TExprStmt(expr) =>
         evalAny(expr, env)

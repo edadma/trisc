@@ -69,7 +69,7 @@ object SyslPrettyPrinter:
         val retStr = returnType.map(t => s" -> ${typeToSource(t)}").getOrElse("")
         val bodyStr = body match
           case ExprBodyAST(expr) => s" = ${exprToSource(expr)}"
-          case BlockBodyAST(stmts) =>
+          case BlockBodyAST(stmts, _) =>
             val b = stmts.map(s => s"${IND}${stmtToSource(s, 1)}").mkString("\n")
             s"\n$b"
         s"$priv${defKw}$name$retStr$bodyStr"
@@ -97,7 +97,7 @@ object SyslPrettyPrinter:
 
   private def bodyToSource(body: FunBodyAST, depth: Int): String = body match
     case ExprBodyAST(expr) => s" = ${exprToSource(expr, depth)}"
-    case BlockBodyAST(stmts) =>
+    case BlockBodyAST(stmts, _) =>
       val body = stmts.map(s => s"${IND * depth}${stmtToSource(s, depth)}").mkString("\n")
       s"\n$body"
 
