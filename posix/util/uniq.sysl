@@ -1,8 +1,8 @@
 /* uniq — filter adjacent duplicate lines */
-import std/process.*
-import std/io.*
-import std/string.*
-import std/fs.*
+import std.process.*
+import std.io.*
+import std.string.*
+import std.fs.*
 
 main() -> int
     var content: string
@@ -10,7 +10,7 @@ main() -> int
     if argc() >= 2
         content = read_file(argv(1))
     else
-        write_string(STDERR, "uniq: reading from stdin not yet supported\n")
+        write_str(STDERR, "uniq: reading from stdin not yet supported\n")
         return 1
 
     var prev = ""

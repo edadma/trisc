@@ -136,13 +136,13 @@ Main
                     'q' -> flag_quiet = true
                     's' -> flag_suppress = true
                     _ ->
-                        write_string(STDERR, "grep: invalid option\n")
+                        write_str(STDERR, "grep: invalid option\n")
                         return 2
 
             i++
 
         if i >= ac
-            write_string(STDERR, "grep: missing pattern\n")
+            write_str(STDERR, "grep: missing pattern\n")
             return 2
 
         /* Compile pattern */
@@ -164,7 +164,7 @@ Main
             root, nodes, classes, n_groups, err, err_msg, err_pos = parse_bre(pattern)
 
         if err
-            write_string(STDERR, s"grep: invalid pattern: $err_msg\n")
+            write_str(STDERR, s"grep: invalid pattern: $err_msg\n")
             return 2
 
         g_insts = compile(root, nodes, n_groups)
@@ -177,7 +177,7 @@ Main
 
         if n_files == 0
             /* TODO: stdin support needs line-by-line reading */
-            write_string(STDERR, "grep: reading from stdin not yet supported\n")
+            write_str(STDERR, "grep: reading from stdin not yet supported\n")
             return 2
 
         while i < ac
@@ -185,7 +185,7 @@ Main
 
             if !exists(filename)
                 if !flag_suppress
-                    write_string(STDERR, s"grep: $filename: No such file or directory\n")
+                    write_str(STDERR, s"grep: $filename: No such file or directory\n")
             else
                 val content = read_file(filename)
 

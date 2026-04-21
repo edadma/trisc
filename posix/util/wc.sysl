@@ -1,7 +1,31 @@
 /* wc — word, line, and byte count */
-import std/process.*
-import std/fs.*
-import std/string.*
+import std.process.*
+import std.fs.*
+import std.string.*
+
+struct wc_counts
+    lines: int
+    words: int
+    bytes: int
+
+wc_count(content: string) -> wc_counts
+    var lines = 0
+    var words = 0
+    val bytes = length(content)
+    var in_word = false
+
+    for var j = 0; j < bytes; j++
+        val c = char_at(content, j)
+
+        if c == '\n' then lines++
+
+        if c == ' ' || c == '\t' || c == '\n' || c == '\r'
+            in_word = false
+        else if !in_word
+            in_word = true
+            words++
+
+    wc_counts(lines, words, bytes)
 
 main() -> int
     if argc() < 2
@@ -19,30 +43,19 @@ main() -> int
             puts(s"wc: ${argv(i)}: No such file or directory\n")
             return 1
 
-        var lines = 0
-        var words = 0
-        val bytes = length(content)
-        var in_word = false
-
-        for var j = 0; j < bytes; j++
-            val c = char_at(content, j)
-
-            if c == '\n' then lines++
-
-            if c == ' ' || c == '\t' || c == '\n' || c == '\r'
-                in_word = false
-            else if !in_word
-                in_word = true
-                words++
+        val w = wc_count(content)
+        val lines = w.lines
+        val words = w.words
+        val bytes = w.bytes
 
         puti(lines)
-        putc(' ')
+        putchar(' ')
         puti(words)
-        putc(' ')
+        putchar(' ')
         puti(bytes)
-        putc(' ')
+        putchar(' ')
         puts(argv(i))
-        putc('\n')
+        putchar('\n')
 
         total_lines += lines
         total_words += words
@@ -50,10 +63,33 @@ main() -> int
 
     if argc() > 2
         puti(total_lines)
-        putc(' ')
+        putchar(' ')
         puti(total_words)
-        putc(' ')
+        putchar(' ')
         puti(total_bytes)
         puts(" total\n")
 
     0
+
+#test
+test_wc_empty() -> unit
+    val w = wc_count("")
+
+    assert(w.lines == 0, "lines")
+    assert(w.words == 0, "words")
+    assert(w.bytes == 0, "bytes")
+
+#test
+test_wc_one_line() -> unit
+    val w = wc_count("hello world\n")
+
+    assert(w.lines == 1, "lines")
+    assert(w.words == 2, "words")
+    assert(w.bytes == 12, "bytes")
+
+#test
+test_wc_multiline() -> unit
+    val w = wc_count("a b\nc\n")
+
+    assert(w.lines == 2, "lines")
+    assert(w.words == 3, "words")

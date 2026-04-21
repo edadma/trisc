@@ -1,8 +1,8 @@
 /* head — display first lines of a file */
-import std/process.*
-import std/io.*
-import std/fs.*
-import std/string.*
+import std.process.*
+import std.io.*
+import std.fs.*
+import std.string.*
 
 main() -> int
     var n = 10
@@ -33,7 +33,7 @@ main() -> int
         while j < length(content) && lines < n
             val c = char_at(content, j)
 
-            putc(c)
+            putchar(c)
 
             if c == '\n' then lines++
 

@@ -1,2 +1,9 @@
 /* false — exit with status 1 */
-main() -> int = 1
+
+false_exit() -> int = 1
+
+main() -> int = false_exit()
+
+#test
+test_false_exit() -> unit
+    assert(false_exit() == 1, "false exits 1")
