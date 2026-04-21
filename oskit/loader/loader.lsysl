@@ -29,7 +29,7 @@ pressure regardless of file size.
 
     module oskit.loader
 
-    import oskit.fs.{fs_open, fs_read, fs_close}
+    import oskit.fs.{fs_open, fs_read, fs_close, fs_stat}
     import std.alloc.{malloc, free}
     import oskit.hal.{memcpy, memset}
     import oskit.services.svc_vm_copy_to
@@ -491,25 +491,42 @@ Load a binary file into a different address space. Reads the
 file via VFS, detects format from magic bytes (ELF or TRB),
 and copies segments into the target address space.
 
-    val LOAD_CROSS_BUF_SIZE = 262144
+    val LOAD_CROSS_BUF_MIN = 4096
+    val LOAD_CROSS_BUF_MAX = 1048576
 
     load_tof_to_ptbr(path: string, dst_ptbr: i64) -> i64
+        // Stat the file first so we allocate only what's needed.
+        // PM's server heap is tight (~136KB on x86), so a one-size-fits-all
+        // buffer is fragile as binaries grow.
+        var st: [7]int
+        if fs_stat(path, st) < 0
+            return LOAD_ERR_NOT_FOUND
+        val size = st[4]
+        if size <= 0
+            return LOAD_ERR_FORMAT
+        if size > LOAD_CROSS_BUF_MAX
+            return LOAD_ERR_READ
+
+        var cap = size
+        if cap < LOAD_CROSS_BUF_MIN
+            cap = LOAD_CROSS_BUF_MIN
+
         val fid = fs_open(path)
         if fid < 0
             return LOAD_ERR_NOT_FOUND
 
-        val buf = malloc(LOAD_CROSS_BUF_SIZE)
+        val buf = malloc(i64(cap))
         if i64(buf) <= 0
             fs_close(fid)
             return LOAD_ERR_READ
 
         var total = 0
-        var nr = fs_read(fid, buf, LOAD_CROSS_BUF_SIZE)
+        var nr = fs_read(fid, buf, cap)
         while nr > 0
             total += nr
-            if total >= LOAD_CROSS_BUF_SIZE
+            if total >= cap
                 break
-            nr = fs_read(fid, buf + total, LOAD_CROSS_BUF_SIZE - total)
+            nr = fs_read(fid, buf + total, cap - total)
         fs_close(fid)
 
         if total <= 0
