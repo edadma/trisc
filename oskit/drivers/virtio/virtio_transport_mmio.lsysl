@@ -1,0 +1,252 @@
+Virtio MMIO transport (QEMU virt, aarch64)
+============================================
+
+`virtio-mmio v2` implementation of the transport-ops surface used
+by `virtio_net`. SLIX picks exactly one transport at build time;
+aarch64 builds include this file, x86 builds include
+`virtio_transport_pci.lsysl`. The op names (`v_status_read`,
+`v_queue_setup`, `v_queue_notify`, …) are identical across
+transports so the upper driver is unchanged.
+
+Legacy MMIO v1 is not supported. QEMU's `virt` machine exposes
+32 slots `VIRTIO_MMIO_STRIDE` bytes apart starting at
+`VIRTIO_MMIO_BASE`; a slot is "present" when its MagicValue
+register reads as `'virt'` (little-endian `0x74726976`) and
+inhabited when its DeviceID is non-zero.
+
+    module oskit.drivers.virtio
+
+
+Virtio spec-wide constants. Defined here because this file is the
+aarch64 build's home for `module oskit.drivers.virtio` transport
+symbols; the PCI transport re-declares them with identical values
+so `virtio_net` sees the same names regardless of arch.
+
+    val VIRTIO_STATUS_ACKNOWLEDGE = 1
+    val VIRTIO_STATUS_DRIVER      = 2
+    val VIRTIO_STATUS_DRIVER_OK   = 4
+    val VIRTIO_STATUS_FEATURES_OK = 8
+    val VIRTIO_STATUS_NEEDS_RESET = 64
+    val VIRTIO_STATUS_FAILED      = 128
+
+    val VIRTIO_DEV_NONE = 0
+    val VIRTIO_DEV_NET  = 1
+    val VIRTIO_DEV_BLK  = 2
+
+    val VIRTIO_INT_USED_BUF      = 1
+    val VIRTIO_INT_CONFIG_CHANGE = 2
+
+
+MMIO transport layout (private to this file).
+
+    val VIRTIO_MMIO_BASE: i64 = 0x0a000000
+    val VIRTIO_MMIO_STRIDE: i64 = 0x200
+    val VIRTIO_MMIO_MAX = 32
+
+    val VIRTIO_MMIO_MAGIC: i32 = 0x74726976
+
+
+Register offsets (v2). Only the ones we actually touch are listed.
+
+    val VIRTIO_REG_MAGIC              = 0x00
+    val VIRTIO_REG_VERSION            = 0x04
+    val VIRTIO_REG_DEVICE_ID          = 0x08
+    val VIRTIO_REG_VENDOR_ID          = 0x0c
+    val VIRTIO_REG_DEVICE_FEATURES    = 0x10
+    val VIRTIO_REG_DEVICE_FEAT_SEL    = 0x14
+    val VIRTIO_REG_DRIVER_FEATURES    = 0x20
+    val VIRTIO_REG_DRIVER_FEAT_SEL    = 0x24
+    val VIRTIO_REG_QUEUE_SEL          = 0x30
+    val VIRTIO_REG_QUEUE_NUM_MAX      = 0x34
+    val VIRTIO_REG_QUEUE_NUM          = 0x38
+    val VIRTIO_REG_QUEUE_READY        = 0x44
+    val VIRTIO_REG_QUEUE_NOTIFY       = 0x50
+    val VIRTIO_REG_INT_STATUS         = 0x60
+    val VIRTIO_REG_INT_ACK            = 0x64
+    val VIRTIO_REG_STATUS             = 0x70
+    val VIRTIO_REG_QUEUE_DESC_LOW     = 0x80
+    val VIRTIO_REG_QUEUE_DESC_HIGH    = 0x84
+    val VIRTIO_REG_QUEUE_AVAIL_LOW    = 0x90
+    val VIRTIO_REG_QUEUE_AVAIL_HIGH   = 0x94
+    val VIRTIO_REG_QUEUE_USED_LOW     = 0xa0
+    val VIRTIO_REG_QUEUE_USED_HIGH    = 0xa4
+    val VIRTIO_REG_CONFIG_GEN         = 0xfc
+    val VIRTIO_REG_CONFIG             = 0x100
+
+
+Selected-transport state. `v_find` populates this; every op reads
+it. One device per build (nic driver only claims one), so a single
+module-level slot is fine.
+
+    var vt_base: i64 = 0
+
+
+Raw u32 MMIO read/write. Volatile-pointer-cast pattern matches
+PL011 UART driver — compiler can't reorder these.
+
+    virtio_read32(base: i64, off: int) -> i32
+        volatile var p: *i32 = *i32(base + i64(off))
+        *p
+
+    virtio_write32(base: i64, off: int, v: i32)
+        volatile var p: *i32 = *i32(base + i64(off))
+        *p = v
+
+
+Probe helpers. A slot is present when its MagicValue reads as
+`'virt'`; inhabited when DeviceID is non-zero. Exposed publicly
+so the aarch64 boot diagnostic can walk every slot and log what
+it finds before `v_find` commits to one.
+
+    virtio_present(base: i64) -> int
+        if virtio_read32(base, VIRTIO_REG_MAGIC) == VIRTIO_MMIO_MAGIC
+            return 1
+        0
+
+    virtio_device_id(base: i64) -> int
+        int(virtio_read32(base, VIRTIO_REG_DEVICE_ID))
+
+
+========================================================================
+Transport ops — same signatures as `virtio_transport_pci.lsysl`.
+========================================================================
+
+
+Scan MMIO slots for the first device of `dev_id` and select it.
+Returns 1 on success, 0 if no matching slot is inhabited.
+
+    v_find(dev_id: int) -> int
+        var i = 0
+        while i < VIRTIO_MMIO_MAX
+            val base: i64 = VIRTIO_MMIO_BASE + i64(i) * VIRTIO_MMIO_STRIDE
+            if virtio_present(base) != 0
+                val id = virtio_device_id(base)
+                if id == dev_id
+                    vt_base = base
+                    return 1
+            i += 1
+        0
+
+
+Status register. MMIO treats STATUS as a u32 even though only the
+low 8 bits carry spec-defined meaning.
+
+    v_status_read() -> int
+        int(virtio_read32(vt_base, VIRTIO_REG_STATUS))
+
+    v_status_write(v: int)
+        virtio_write32(vt_base, VIRTIO_REG_STATUS, i32(v))
+
+    v_status_or(bit: int)
+        val cur = v_status_read()
+        virtio_write32(vt_base, VIRTIO_REG_STATUS, i32(cur | bit))
+
+
+Device feature query. `bit` is an absolute feature number; splits
+into bank-select + bit-within-bank. Returns 1 if the device offers
+the feature.
+
+    v_feat_has(bit: int) -> int
+        val sel = bit / 32
+        val off = bit % 32
+        virtio_write32(vt_base, VIRTIO_REG_DEVICE_FEAT_SEL, i32(sel))
+        val feats = virtio_read32(vt_base, VIRTIO_REG_DEVICE_FEATURES)
+        if (int(feats) & (1 << off)) != 0
+            return 1
+        0
+
+
+Ack a driver-side feature bit. Preserves other bits in the same
+bank.
+
+    v_feat_ack(bit: int)
+        val sel = bit / 32
+        val off = bit % 32
+        virtio_write32(vt_base, VIRTIO_REG_DRIVER_FEAT_SEL, i32(sel))
+        val cur = virtio_read32(vt_base, VIRTIO_REG_DRIVER_FEATURES)
+        virtio_write32(vt_base, VIRTIO_REG_DRIVER_FEATURES,
+            cur | i32(1 << off))
+
+
+Full queue setup. Wires desc/avail/used ring addresses, sets the
+requested size, and marks the queue ready. Returns 1 on success,
+0 if the device refuses (QueueNumMax < size) or a page isn't
+actually available. MMIO ordering: addrs then QueueReady=1.
+
+    v_queue_setup(q: int, size: int,
+                  desc_pa: i64, avail_pa: i64, used_pa: i64) -> int
+        virtio_write32(vt_base, VIRTIO_REG_QUEUE_SEL, i32(q))
+        val max = int(virtio_read32(vt_base, VIRTIO_REG_QUEUE_NUM_MAX))
+        if max == 0
+            return 0
+        if size > max
+            return 0
+        virtio_write32(vt_base, VIRTIO_REG_QUEUE_NUM, i32(size))
+
+        virtio_write32(vt_base, VIRTIO_REG_QUEUE_DESC_LOW,
+            i32(desc_pa & i64(0xffffffff)))
+        virtio_write32(vt_base, VIRTIO_REG_QUEUE_DESC_HIGH,
+            i32((desc_pa >> 32) & i64(0xffffffff)))
+        virtio_write32(vt_base, VIRTIO_REG_QUEUE_AVAIL_LOW,
+            i32(avail_pa & i64(0xffffffff)))
+        virtio_write32(vt_base, VIRTIO_REG_QUEUE_AVAIL_HIGH,
+            i32((avail_pa >> 32) & i64(0xffffffff)))
+        virtio_write32(vt_base, VIRTIO_REG_QUEUE_USED_LOW,
+            i32(used_pa & i64(0xffffffff)))
+        virtio_write32(vt_base, VIRTIO_REG_QUEUE_USED_HIGH,
+            i32((used_pa >> 32) & i64(0xffffffff)))
+
+        virtio_write32(vt_base, VIRTIO_REG_QUEUE_READY, i32(1))
+        1
+
+
+Poke the device — "queue `q` has new avail entries."
+
+    v_queue_notify(q: int)
+        virtio_write32(vt_base, VIRTIO_REG_QUEUE_NOTIFY, i32(q))
+
+
+Interrupt status / ack. Used by IRQ paths; current nic driver
+polls the used ring, so these are unused for now but belong in
+the op surface.
+
+    v_int_status() -> int
+        int(virtio_read32(vt_base, VIRTIO_REG_INT_STATUS))
+
+    v_int_ack(bits: int)
+        virtio_write32(vt_base, VIRTIO_REG_INT_ACK, i32(bits))
+
+
+Device-specific config area (virtio-net: first 6 bytes = MAC).
+MMIO config is word-addressable; read the containing u32 and
+shift/mask the right byte out.
+
+    v_config_byte(off: int) -> int
+        val base_i32 = VIRTIO_REG_CONFIG + (off & ~3)
+        val shift    = (off & 3) * 8
+        val word     = virtio_read32(vt_base, base_i32)
+        int((word >> i32(shift)) & i32(0xff))
+
+
+Diagnostics. Not called during normal operation.
+
+    v_debug_version() -> int
+        if vt_base == 0
+            return -1
+        int(virtio_read32(vt_base, VIRTIO_REG_VERSION))
+
+    v_debug_feats(sel: int) -> i32
+        if vt_base == 0
+            return i32(0)
+        virtio_write32(vt_base, VIRTIO_REG_DEVICE_FEAT_SEL, i32(sel))
+        virtio_read32(vt_base, VIRTIO_REG_DEVICE_FEATURES)
+
+
+`v_have_device` — 1 iff `v_find` has populated `vt_base`. The
+upper driver uses this in place of the old `vnet_base != 0`
+check.
+
+    v_have_device() -> int
+        if vt_base != 0
+            return 1
+        0
