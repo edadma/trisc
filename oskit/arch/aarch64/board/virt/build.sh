@@ -40,6 +40,8 @@ SYSL_FILES=(
     oskit/services/services.lsysl
     oskit/ipc/ipc.lsysl
     std/alloc/alloc.lsysl
+    std/net/net.lsysl
+    std/net/packet.lsysl
     oskit/arch/aarch64/board/virt/uart.lsysl
     oskit/drivers/virtio/virtio_mmio.lsysl
     oskit/drivers/virtio/virtio_net.lsysl

@@ -1,0 +1,303 @@
+std.net — Wire-format packet helpers
+=====================================
+
+Low-level byte-buffer helpers and protocol constants for building
+and parsing link-layer / network-layer packets: Ethernet II, ARP,
+IPv4, ICMP. Paired with the core `std/net/net.lsysl` (IPv4, MAC,
+byte-order); both files belong to `module std.net` so callers see
+a single flat import surface.
+
+Everything here is pure — no OS dependencies — so kernel drivers
+(e.g. `oskit/drivers/virtio/net_handler.lsysl`) and the inet
+server can both import the same helpers.
+
+    module std.net
+
+    import std.debug.{assert}
+
+
+Ethernet II
+-----------
+
+Common EtherType values. The 16-bit field sits at offset 12 of
+every Ethernet II frame, big-endian.
+
+    val ETHERTYPE_IPV4 = 0x0800
+    val ETHERTYPE_ARP  = 0x0806
+    val ETHERTYPE_IPV6 = 0x86dd
+
+
+ARP
+---
+
+Opcodes for the 2-byte `oper` field at offset 6 of the ARP
+message (offset 20 of the encapsulating Ethernet frame).
+
+    val ARP_OP_REQUEST = 1
+    val ARP_OP_REPLY   = 2
+
+
+IPv4
+----
+
+`IP_PROTO_*` mirrors POSIX's `IPPROTO_*` (`std.net.net`) for use at
+the byte-field level. Keeping both names avoids churn in existing
+call sites while letting packet code read `IP_PROTO_ICMP` at the
+offset-9 protocol field.
+
+    val IP_PROTO_ICMP = 1
+    val IP_PROTO_TCP  = 6
+    val IP_PROTO_UDP  = 17
+
+
+ICMP
+----
+
+Type codes for the 1-byte `type` field at the start of the ICMP
+message. We only handle echo request / echo reply today.
+
+    val ICMP_ECHO_REQ = 8
+    val ICMP_ECHO_REP = 0
+
+
+Byte-buffer helpers
+-------------------
+
+All wire-format multi-byte fields are big-endian. These helpers
+read/write 16-bit fields at arbitrary byte offsets without any
+alignment assumptions — pointers come from IPC buffers or NIC
+DMA regions.
+
+
+### pkt_read_u16
+
+Read a big-endian u16 from `p + off`. Returns an `int` so callers
+can compare against plain integer literals.
+
+    pkt_read_u16(p: *byte, off: int) -> int
+        ((int(p[off]) & 0xff) << 8) | (int(p[off + 1]) & 0xff)
+
+
+### pkt_write_u16
+
+Write `v` as a big-endian u16 into `p + off`. Only the low 16 bits
+of `v` are used.
+
+    pkt_write_u16(p: *byte, off: int, v: int)
+        p[off]     = byte((v >> 8) & 0xff)
+        p[off + 1] = byte(v & 0xff)
+
+
+### pkt_write_mac
+
+Copy 6 bytes from `mac` into `p + off`. No byte swapping — MAC
+addresses are already on-the-wire order in both memory and
+packets.
+
+    pkt_write_mac(p: *byte, off: int, mac: *byte)
+        var i = 0
+        while i < 6
+            p[off + i] = mac[i]
+            i += 1
+
+
+### pkt_write_ipv4
+
+Write an IPv4 address as 4 consecutive bytes (`a.b.c.d` order, MSB
+first) into `p + off`. Takes `int` octets rather than a `u32` so
+callers can emit literal addresses without constructing an IP
+value first.
+
+    pkt_write_ipv4(p: *byte, off: int, a: int, b: int, c: int, d: int)
+        p[off]     = byte(a & 0xff)
+        p[off + 1] = byte(b & 0xff)
+        p[off + 2] = byte(c & 0xff)
+        p[off + 3] = byte(d & 0xff)
+
+
+### pkt_match_ipv4
+
+Compare the 4-byte IPv4 field at `p + off` against the octets
+`a.b.c.d`. Returns 1 on match, 0 otherwise. Used by packet
+handlers to check "is this destined for us" without allocating.
+
+    pkt_match_ipv4(p: *byte, off: int, a: int, b: int, c: int, d: int) -> int
+        if int(p[off])     != (a & 0xff)
+            return 0
+        if int(p[off + 1]) != (b & 0xff)
+            return 0
+        if int(p[off + 2]) != (c & 0xff)
+            return 0
+        if int(p[off + 3]) != (d & 0xff)
+            return 0
+        1
+
+
+Internet checksum (RFC 1071)
+----------------------------
+
+16-bit one's-complement sum over `len` bytes at `p`. Used by IPv4
+headers and ICMP messages. The caller is responsible for zeroing
+the checksum field in the buffer before calling (the checksum is
+computed over the full buffer including that field).
+
+    net_checksum(p: *byte, len: int) -> int
+        var sum = 0
+        var i = 0
+        while i + 1 < len
+            sum += pkt_read_u16(p, i)
+            i += 2
+        if i < len
+            sum += (int(p[i]) & 0xff) << 8
+        while (sum >> 16) != 0
+            sum = (sum & 0xffff) + (sum >> 16)
+        (~sum) & 0xffff
+
+
+Tests
+=====
+
+### u16 round-trip
+
+    #test
+    test_pkt_u16_roundtrip() -> unit
+        var buf: [4]byte
+        pkt_write_u16(buf, 0, 0x1234)
+        pkt_write_u16(buf, 2, 0xbeef)
+        assert(buf[0] == 0x12, "hi byte at 0")
+        assert(buf[1] == 0x34, "lo byte at 1")
+        assert(pkt_read_u16(buf, 0) == 0x1234, "read back offset 0")
+        assert(pkt_read_u16(buf, 2) == 0xbeef, "read back offset 2")
+
+
+### u16 write truncates
+
+High bits above 16 are masked off.
+
+    #test
+    test_pkt_u16_truncates_high_bits() -> unit
+        var buf: [2]byte
+        pkt_write_u16(buf, 0, 0xdead1234)
+        assert(buf[0] == 0x12, "hi byte truncated")
+        assert(buf[1] == 0x34, "lo byte")
+
+
+### MAC copy
+
+    #test
+    test_pkt_write_mac_copies_six_bytes() -> unit
+        var src: [6]byte
+        var i = 0
+        while i < 6
+            src[i] = byte(0xa0 + i)
+            i += 1
+        var buf: [8]byte
+        buf[0] = 0x11
+        buf[7] = 0x22
+        pkt_write_mac(buf, 1, src)
+        assert(buf[0] == 0x11, "before untouched")
+        assert(buf[1] == 0xa0, "mac[0]")
+        assert(buf[2] == 0xa1, "mac[1]")
+        assert(buf[6] == 0xa5, "mac[5]")
+        assert(buf[7] == 0x22, "after untouched")
+
+
+### IPv4 write
+
+    #test
+    test_pkt_write_ipv4_order_abcd() -> unit
+        var buf: [4]byte
+        pkt_write_ipv4(buf, 0, 192, 168, 1, 1)
+        assert(buf[0] == 192, "a")
+        assert(buf[1] == 168, "b")
+        assert(buf[2] == 1, "c")
+        assert(buf[3] == 1, "d")
+
+
+### IPv4 match
+
+    #test
+    test_pkt_match_ipv4_matches_and_rejects() -> unit
+        var buf: [4]byte
+        pkt_write_ipv4(buf, 0, 10, 0, 2, 15)
+        assert(pkt_match_ipv4(buf, 0, 10, 0, 2, 15) == 1, "matches self")
+        assert(pkt_match_ipv4(buf, 0, 10, 0, 2, 14) == 0, "wrong last octet")
+        assert(pkt_match_ipv4(buf, 0, 10, 0, 2, 16) == 0, "other last octet")
+        assert(pkt_match_ipv4(buf, 0, 192, 168, 1, 1) == 0, "entirely different")
+
+
+### Checksum — empty and all-zero
+
+    #test
+    test_net_checksum_zero_bytes() -> unit
+        var buf: [4]byte
+        var i = 0
+        while i < 4
+            buf[i] = 0
+            i += 1
+        assert(net_checksum(buf, 4) == 0xffff, "zero bytes checksum is 0xffff")
+
+
+### Checksum — known IPv4 header
+
+RFC 1071's worked example uses the IPv4 header `45 00 00 73 00 00
+40 00 40 11 00 00 c0 a8 00 01 c0 a8 00 c7`, which has checksum
+`0xb861`. The checksum field (bytes 10..11) is zero when the sum
+is computed.
+
+    #test
+    test_net_checksum_rfc1071_example() -> unit
+        var buf: [20]byte
+        buf[0]  = 0x45
+        buf[1]  = 0x00
+        buf[2]  = 0x00
+        buf[3]  = 0x73
+        buf[4]  = 0x00
+        buf[5]  = 0x00
+        buf[6]  = 0x40
+        buf[7]  = 0x00
+        buf[8]  = 0x40
+        buf[9]  = 0x11
+        buf[10] = 0x00
+        buf[11] = 0x00
+        buf[12] = 0xc0
+        buf[13] = 0xa8
+        buf[14] = 0x00
+        buf[15] = 0x01
+        buf[16] = 0xc0
+        buf[17] = 0xa8
+        buf[18] = 0x00
+        buf[19] = 0xc7
+        assert(net_checksum(buf, 20) == 0xb861, "RFC 1071 IPv4 header checksum")
+
+
+### Checksum — odd length
+
+Odd-length buffers pad the final byte into the high half of a u16.
+
+    #test
+    test_net_checksum_odd_length() -> unit
+        var buf: [3]byte
+        buf[0] = 0x12
+        buf[1] = 0x34
+        buf[2] = 0x56
+        // sum = 0x1234 + 0x5600 = 0x6834 → ~ = 0x97cb
+        assert(net_checksum(buf, 3) == 0x97cb, "odd length padding")
+
+
+### Checksum — verification round-trip
+
+A buffer with its checksum written back in should checksum to 0.
+
+    #test
+    test_net_checksum_roundtrip_to_zero() -> unit
+        var buf: [6]byte
+        buf[0] = 0x11
+        buf[1] = 0x22
+        buf[2] = 0x33
+        buf[3] = 0x44
+        buf[4] = 0x00
+        buf[5] = 0x00
+        val c = net_checksum(buf, 6)
+        pkt_write_u16(buf, 4, c)
+        assert(net_checksum(buf, 6) == 0, "verify sums to 0")

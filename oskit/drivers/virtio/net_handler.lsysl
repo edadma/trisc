@@ -19,6 +19,12 @@ a kernel thread created by `kernel_main_rs`.
 
     import oskit.arch.{page_alloc_zero}
     import oskit.services.{yield, sleep}
+    import std.net.{ETHERTYPE_IPV4, ETHERTYPE_ARP,
+        ARP_OP_REQUEST, ARP_OP_REPLY,
+        IP_PROTO_ICMP, ICMP_ECHO_REQ, ICMP_ECHO_REP,
+        pkt_read_u16, pkt_write_u16,
+        pkt_write_mac, pkt_write_ipv4, pkt_match_ipv4,
+        net_checksum}
 
 
 The guest's fake IP + gateway under QEMU's user-mode networking.
@@ -36,17 +42,6 @@ every guest it boots with `-netdev user`.
     val NET_GW_IP_D = 2
 
 
-Protocol numbers used by the packet parser.
-
-    val ETHERTYPE_IPV4 = 0x0800
-    val ETHERTYPE_ARP  = 0x0806
-    val ARP_OP_REQUEST = 1
-    val ARP_OP_REPLY   = 2
-    val IP_PROTO_ICMP  = 1
-    val ICMP_ECHO_REQ  = 8
-    val ICMP_ECHO_REP  = 0
-
-
 Learned gateway MAC (filled in when we see an ARP reply from
 10.0.2.2). Zero bytes until then.
 
@@ -60,56 +55,6 @@ net thread prints a single line when these both advance.
 
     var net_pings_sent: int = 0
     var net_pings_received: int = 0
-
-
-Byte-buffer helpers for wire-format packets. Everything on the
-wire is big-endian; these write host-order ints into a buffer.
-
-    pkt_write_u16(p: *byte, off: int, v: int)
-        p[off]     = byte((v >> 8) & 0xff)
-        p[off + 1] = byte(v & 0xff)
-
-    pkt_read_u16(p: *byte, off: int) -> int
-        ((int(p[off]) & 0xff) << 8) | (int(p[off + 1]) & 0xff)
-
-    pkt_write_mac(p: *byte, off: int, mac: *byte)
-        var i = 0
-        while i < 6
-            p[off + i] = mac[i]
-            i += 1
-
-    pkt_write_ipv4(p: *byte, off: int, a: int, b: int, c: int, d: int)
-        p[off]     = byte(a & 0xff)
-        p[off + 1] = byte(b & 0xff)
-        p[off + 2] = byte(c & 0xff)
-        p[off + 3] = byte(d & 0xff)
-
-    pkt_match_ipv4(p: *byte, off: int, a: int, b: int, c: int, d: int) -> int
-        if int(p[off])     != (a & 0xff)
-            return 0
-        if int(p[off + 1]) != (b & 0xff)
-            return 0
-        if int(p[off + 2]) != (c & 0xff)
-            return 0
-        if int(p[off + 3]) != (d & 0xff)
-            return 0
-        1
-
-
-Internet checksum (RFC 1071) over `len` bytes at `p`. Used for
-IPv4 and ICMP headers.
-
-    net_checksum(p: *byte, len: int) -> int
-        var sum = 0
-        var i = 0
-        while i + 1 < len
-            sum += pkt_read_u16(p, i)
-            i += 2
-        if i < len
-            sum += (int(p[i]) & 0xff) << 8
-        while (sum >> 16) != 0
-            sum = (sum & 0xffff) + (sum >> 16)
-        (~sum) & 0xffff
 
 
 Build and send an ARP request for `tpa` (target IPv4). Uses our
