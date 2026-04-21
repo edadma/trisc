@@ -147,6 +147,15 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("1")
   }
 
+  "aarch64 virtio: probe finds the attached virtio-net device" in {
+    // The boot log (captured before the login prompt) should have
+    // the virtio probe line confirming QEMU's virtio-net-device is
+    // reachable over virtio-mmio.
+    val banner = qemu.allOutput
+    banner should include("virtio: slot")
+    banner should include("(net)")
+  }
+
   "aarch64 inet: UDP loopback via test_net" in {
     // test_net opens a UDP socket on 127.0.0.1:5000, sends "hello"
     // to itself, and prints what recvfrom returned.

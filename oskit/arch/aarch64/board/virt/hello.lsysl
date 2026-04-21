@@ -40,6 +40,8 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         ipc_send, ipc_recv, ipc_reply}
     import oskit.services.{get_thread_count, uptime, sleep, yield}
     import oskit.hal.memset
+    import oskit.drivers.virtio.{virtio_find, virtio_device_id, virtio_present,
+        VIRTIO_MMIO_BASE, VIRTIO_MMIO_STRIDE, VIRTIO_MMIO_MAX, VIRTIO_DEV_NET}
 
     extern arch_syscall_call(arg: i64, handler: i64)
 
@@ -386,6 +388,29 @@ a handful of messages, and prints each reply before wfi-ing out.
         while true
             arch_wfi()
 
+    virtio_probe()
+        // Walk the 32 virtio-mmio slots QEMU virt exposes and print
+        // a one-line summary of every present device. Diagnostic only
+        // for now; the real driver comes in a follow-up.
+        var i = 0
+        var found = 0
+        while i < VIRTIO_MMIO_MAX
+            val base: i64 = VIRTIO_MMIO_BASE + i64(i) * VIRTIO_MMIO_STRIDE
+            if virtio_present(base) != 0
+                val dev = virtio_device_id(base)
+                if dev != 0
+                    uart_puts("virtio: slot @ ")
+                    uart_puthex(base)
+                    uart_puts(" dev=")
+                    uart_puthex(i64(dev))
+                    if dev == VIRTIO_DEV_NET
+                        uart_puts(" (net)")
+                    uart_puts("\n")
+                    found += 1
+            i += 1
+        if found == 0
+            uart_puts("virtio: no devices\n")
+
     kernel_main()
         uart_puts("SLIX aarch64 boot (sysl, MMU on)\n")
         uart_puts("Hello, aarch64!\n")
@@ -393,6 +418,8 @@ a handful of messages, and prints each reply before wfi-ing out.
         uart_puts("kernel_ptbr=")
         uart_puthex(kernel_ptbr())
         uart_puts("\n")
+
+        virtio_probe()
 
         if DEMO_MODE == 0
             kernel_main_kern()

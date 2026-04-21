@@ -41,6 +41,7 @@ SYSL_FILES=(
     oskit/ipc/ipc.lsysl
     std/alloc/alloc.lsysl
     oskit/arch/aarch64/board/virt/uart.lsysl
+    oskit/drivers/virtio/virtio_mmio.lsysl
     oskit/arch/aarch64/board/virt/hello.lsysl
 )
 

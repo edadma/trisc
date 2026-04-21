@@ -1,0 +1,86 @@
+Virtio MMIO transport (QEMU virt)
+==================================
+
+Thin register-layout wrapper over the memory-mapped virtio
+transport the QEMU `virt` machine exposes at `0x0a000000`. QEMU
+places 32 slots 0x200 bytes apart; a slot is "present" when its
+`MagicValue` register reads as `'virt'` (little-endian
+`0x74726976`). `DeviceID` (0=none, 1=net, 2=blk, ...) says what
+device lives in the slot, if any.
+
+This phase is a probe only — enough to enumerate the transports
+at boot. The full virtio-net driver (virtqueue setup, TX/RX
+rings, MSI/IRQ plumbing) lands in a later iteration on top of
+this scaffold.
+
+Follows **virtio-mmio v2** (modern). Legacy v1 isn't supported.
+
+    module oskit.drivers.virtio
+
+
+Transport region layout.
+
+    val VIRTIO_MMIO_BASE: i64 = 0x0a000000
+    val VIRTIO_MMIO_STRIDE: i64 = 0x200
+    val VIRTIO_MMIO_MAX = 32
+
+
+Register offsets. Every register is 4 bytes.
+
+    val VIRTIO_REG_MAGIC      = 0x00
+    val VIRTIO_REG_VERSION    = 0x04
+    val VIRTIO_REG_DEVICE_ID  = 0x08
+    val VIRTIO_REG_VENDOR_ID  = 0x0c
+    val VIRTIO_REG_STATUS     = 0x70
+
+
+Magic for present slots. Reads as the ASCII bytes `'v'`, `'i'`,
+`'r'`, `'t'` in little-endian order.
+
+    val VIRTIO_MMIO_MAGIC: i32 = 0x74726976
+
+
+Device IDs we care about.
+
+    val VIRTIO_DEV_NONE = 0
+    val VIRTIO_DEV_NET  = 1
+    val VIRTIO_DEV_BLK  = 2
+
+
+MMIO read — every register on virtio-mmio is u32. Uses the same
+raw-pointer cast pattern as the PL011 UART driver so the
+compiler doesn't try to reorder the read.
+
+    virtio_read32(base: i64, off: int) -> i32
+        volatile var p: *i32 = *i32(base + i64(off))
+        *p
+
+
+Is the slot at `base` present? True when its magic reads as
+`'virt'`.
+
+    virtio_present(base: i64) -> int
+        if virtio_read32(base, VIRTIO_REG_MAGIC) == VIRTIO_MMIO_MAGIC
+            return 1
+        0
+
+
+`DeviceID` register: 0 if unused, otherwise a virtio device
+type number (see the spec).
+
+    virtio_device_id(base: i64) -> int
+        int(virtio_read32(base, VIRTIO_REG_DEVICE_ID))
+
+
+Walk all slots looking for the first one whose `DeviceID`
+matches `dev_id`. Returns 0 when no slot matches.
+
+    virtio_find(dev_id: int) -> i64
+        var i = 0
+        while i < VIRTIO_MMIO_MAX
+            val base: i64 = VIRTIO_MMIO_BASE + i64(i) * VIRTIO_MMIO_STRIDE
+            if virtio_present(base) != 0
+                if virtio_device_id(base) == dev_id
+                    return base
+            i += 1
+        0

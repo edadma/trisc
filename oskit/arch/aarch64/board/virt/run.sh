@@ -27,4 +27,6 @@ exec qemu-system-aarch64 \
     -no-reboot \
     -kernel "$KERNEL" \
     -device "loader,file=$BOOTINFO,addr=0x44000000" \
-    -device "loader,file=$RAMDISK,addr=0x50000000"
+    -device "loader,file=$RAMDISK,addr=0x50000000" \
+    -netdev user,id=n0 \
+    -device "virtio-net-device,netdev=n0,mac=52:54:00:12:34:56"

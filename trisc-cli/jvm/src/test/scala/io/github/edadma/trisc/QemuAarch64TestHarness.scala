@@ -34,6 +34,8 @@ class QemuAarch64TestHarness(
     cmd.add("-no-reboot")
     cmd.add("-display"); cmd.add("none")
     cmd.add("-monitor"); cmd.add("none")
+    cmd.add("-netdev"); cmd.add("user,id=n0")
+    cmd.add("-device"); cmd.add("virtio-net-device,netdev=n0,mac=52:54:00:12:34:56")
     if new java.io.File(bootinfoPath).exists() then
       cmd.add("-device")
       cmd.add(s"loader,file=$bootinfoPath,addr=0x44000000")
