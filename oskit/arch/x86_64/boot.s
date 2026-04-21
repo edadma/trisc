@@ -51,9 +51,22 @@
 .align 4096
 
 # Identity-map page tables
-pml4:   .skip 4096
-pdpt:   .skip 4096
-pd:     .skip 4096
+#
+# pd covers 0-1GB via 2MB superpages, split at runtime by
+# vm_init so PD[0]'s 0-2MB can be remapped per process.
+#
+# pd_hi{1,2,3} cover 1-2GB, 2-3GB, 3-4GB with raw 2MB
+# superpages. Reachable only via kernel PT — on by default in
+# the boot PML4 so kernel threads (incl. the nic server) see
+# virtio-pci memory BARs that QEMU places in the PCI hole near
+# the 4GB boundary. Per-process PTs don't copy PDPT[1..3], so
+# user code can't touch MMIO.
+pml4:    .skip 4096
+pdpt:    .skip 4096
+pd:      .skip 4096
+pd_hi1:  .skip 4096
+pd_hi2:  .skip 4096
+pd_hi3:  .skip 4096
 
 # Kernel stack (16 KB)
 .align 16
@@ -109,6 +122,17 @@ _start:
     orl  $0x03, %eax
     movl %eax, pdpt
 
+    # PDPT[1..3] -> hi PDs (1GB, 2GB, 3GB)
+    movl $pd_hi1, %eax
+    orl  $0x03, %eax
+    movl %eax, pdpt + 8
+    movl $pd_hi2, %eax
+    orl  $0x03, %eax
+    movl %eax, pdpt + 16
+    movl $pd_hi3, %eax
+    orl  $0x03, %eax
+    movl %eax, pdpt + 24
+
     # PD[0..15] -> identity-map first 32MB via 2MB pages
     # PS bit (0x80) = 2MB page, present + writable + PS
     movl $pd, %edi
@@ -120,6 +144,42 @@ _start:
     addl $0x200000, %eax       # next 2MB
     addl $8, %edi
     loop 1b
+
+    # pd_hi1[0..511] -> identity-map 1-2GB via 2MB pages
+    # (BAR mapping for virtio-pci — QEMU default places these
+    # near 0xFEBF0000 which is in pd_hi3, but keep the whole
+    # 1-4GB coverage so BARs anywhere in that range work.)
+    movl $pd_hi1, %edi
+    movl $0x40000083, %eax     # 1GB, present+write+PS
+    movl $512, %ecx
+2:
+    movl %eax, (%edi)
+    movl $0, 4(%edi)
+    addl $0x200000, %eax
+    addl $8, %edi
+    loop 2b
+
+    # pd_hi2[0..511] -> identity-map 2-3GB
+    movl $pd_hi2, %edi
+    movl $0x80000083, %eax     # 2GB, present+write+PS
+    movl $512, %ecx
+3:
+    movl %eax, (%edi)
+    movl $0, 4(%edi)
+    addl $0x200000, %eax
+    addl $8, %edi
+    loop 3b
+
+    # pd_hi3[0..511] -> identity-map 3-4GB
+    movl $pd_hi3, %edi
+    movl $0xC0000083, %eax     # 3GB, present+write+PS
+    movl $512, %ecx
+4:
+    movl %eax, (%edi)
+    movl $0, 4(%edi)
+    addl $0x200000, %eax
+    addl $8, %edi
+    loop 4b
 
     # CR3 = PML4
     movl $pml4, %eax
@@ -316,6 +376,22 @@ inb:
 .global io_wait
 io_wait:
     outb %al, $0x80
+    retq
+
+# outl(port: int, val: u32)  — rdi = port, esi = val (32-bit)
+# inl(port: int) -> u32      — rdi = port, returns in eax
+
+.global outl
+outl:
+    movl %edi, %edx
+    movl %esi, %eax
+    outl %eax, %dx
+    retq
+
+.global inl
+inl:
+    movl %edi, %edx
+    inl %dx, %eax
     retq
 
 # ============================================================================
