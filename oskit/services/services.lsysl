@@ -331,7 +331,7 @@ thread's page table. Used by drivers that need DMA addresses.
     val SYS_SET_IPC_MASK = 70
 
     svc_set_ipc_mask(pid: int, mask: int)
-        syscall(SYS_SET_IPC_MASK, (pid << 8) | (mask & 0xFF))
+        syscall(SYS_SET_IPC_MASK, (pid << 16) | (mask & 0xFFFF))
 
     val SYS_PHYS_READ = 67
 

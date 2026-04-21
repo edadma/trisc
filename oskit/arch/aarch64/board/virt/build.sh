@@ -46,6 +46,7 @@ SYSL_FILES=(
     oskit/drivers/virtio/virtio_mmio.lsysl
     oskit/drivers/virtio/virtio_net.lsysl
     oskit/drivers/virtio/net_handler.lsysl
+    oskit/servers/nic.lsysl
     oskit/arch/aarch64/board/virt/hello.lsysl
 )
 
@@ -98,7 +99,7 @@ echo "=== Build ramdisk apps ==="
 # that fails to build is listed but doesn't abort the whole build —
 # this is a bring-up harness, not a release. MakeAarch64RamdiskMain
 # picks up whatever ELFs actually land in /tmp/slix-aarch64/bin/.
-APPS=(login nsh su ls cat echo whoami uptime ps stat touch mkdir rmdir rm mv chmod head tail wc grep hello count write test_net)
+APPS=(login nsh su ls cat echo whoami uptime ps stat touch mkdir rmdir rm mv chmod head tail wc grep hello count write test_net test_nic)
 for app in "${APPS[@]}"; do
     bash "$ARCH_DIR/build_prog.sh" "$app" > "$OUT/build-$app.log" 2>&1
     if [ ! -f "$OUT/bin/$app" ]; then

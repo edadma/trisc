@@ -164,6 +164,14 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("recv=5 'hello'")
   }
 
+  "aarch64 nic: GET_MAC via test_nic" in {
+    // test_nic asks the nic server for the NIC's MAC and prints
+    // it. QEMU boots virtio-net-device with a fixed MAC so we
+    // can assert on the exact value.
+    val output = qemu.command("test_nic")
+    output should include("mac=52:54:00:12:34:56")
+  }
+
   "aarch64 crash recovery: kill tfs and restart" in {
     val psOut = qemu.command("ps")
     val tfsLine = psOut.split('\n').find(_.contains("tfs"))

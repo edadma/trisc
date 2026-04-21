@@ -359,8 +359,8 @@ Set just the IPC send mask for a process.
 Arg = (pid << 8) | mask.
 
     sys_set_ipc_mask_handler(arg: int)
-        val pid = (arg >> 8) & 0xFF
-        val mask = arg & 0xFF
+        val pid = (arg >> 16) & 0xFF
+        val mask = arg & 0xFFFF
         if pid > 0
             if pid < MAX_PROCESSES
                 processes[pid].ipc_send_mask = mask
@@ -1236,7 +1236,7 @@ process ID (0 for kernel threads).
         processes[pid].name = threads[tid].name
         processes[pid].syscall_allow_lo = i64(-1)
         processes[pid].syscall_allow_hi = i64(-1)
-        processes[pid].ipc_send_mask = 0xFF
+        processes[pid].ipc_send_mask = 0xFFFF
 
         // Link thread to process
         threads[tid].pid = pid
@@ -1337,7 +1337,7 @@ Unlike create_process, the thread is never enqueued — no race.
         processes[pid].name = threads[tid].name
         processes[pid].syscall_allow_lo = i64(-1)
         processes[pid].syscall_allow_hi = i64(-1)
-        processes[pid].ipc_send_mask = 0xFF
+        processes[pid].ipc_send_mask = 0xFFFF
 
         // Link thread to process
         threads[tid].pid = pid

@@ -88,9 +88,9 @@ created but before it is resumed.
     rs_set_server_priv(pid: int, idx: int)
         var lo: i64 = PRIV_COMMON_LO
         var hi: i64 = i64(0x182)                // PRIV_COMMON_HI
-        // IPC mask set to 0xFF during boot (all allowed).
+        // IPC mask set to 0xFFFF during boot (all 16 ports allowed).
         // Tightened after all servers are up via rs_set_ipc_masks().
-        var ipc = 0xFF
+        var ipc = 0xFFFF
         if idx == 0
             // disk: needs vm_v2p(66) for DMA
             hi = hi | i64(4)

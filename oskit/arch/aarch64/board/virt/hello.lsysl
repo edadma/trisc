@@ -45,6 +45,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         net_thread, net_gw_mac_get,
         net_pings_sent_count, net_pings_received_count,
         VIRTIO_MMIO_BASE, VIRTIO_MMIO_STRIDE, VIRTIO_MMIO_MAX, VIRTIO_DEV_NET}
+    import oskit.servers.{nic_server}
 
     extern arch_syscall_call(arg: i64, handler: i64)
 
@@ -792,6 +793,16 @@ replaced by a Minix-style nic server once MMIO grants are in.
 
         create_thread(i64(&net_thread),
             kernel_stack_usp(1), kernel_stack_ssp(1), "net")
+
+The nic server — Minix-style link-layer front door. Still a
+kernel thread (same address space as net_handler / the
+virtio-net driver); the isolated-boot-module form lands once
+MMIO + DMA grants exist. Owns port "nic" so clients can query
+the MAC or enqueue raw Ethernet frames via IPC without going
+through the driver directly. Kernel stack slot 2.
+
+        create_thread(i64(&nic_server),
+            kernel_stack_usp(2), kernel_stack_ssp(2), "nic")
 
         uart_puts("[rs] creating process PT\n")
         val new_pt = vm_create_process_pt()

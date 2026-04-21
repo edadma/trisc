@@ -1,0 +1,144 @@
+OSKit NIC server — virtio-net front door (kernel-thread first cut)
+===================================================================
+
+Minix 3-style server that fronts the single virtio-net driver.
+Clients go through IPC; the driver is no longer a grab-it-
+yourself kernel symbol. Phase 13's end state is for this server
+to run as an isolated boot module with a kernel-granted MMIO
+mapping + DMA-capable page grants; for now it runs as a kernel
+thread in the driver's address space so we can nail the IPC
+shape without needing new VM plumbing.
+
+Coexists with `oskit/drivers/virtio/net_handler.lsysl` — which
+still owns the ARP + ICMP echo demo — by splitting
+responsibilities: net_handler does the RX poll / ARP / ICMP
+round-trip at boot, and nic_server handles TX + MAC queries
+from clients. The two do not share any mutable driver state
+except the underlying split virtqueues, and for phase 13 the
+driver's send/recv paths are called serially (no overlap) by
+design. Once inet becomes a proper RX subscriber, the
+net_handler shim goes away and nic_server owns everything.
+
+IPC protocol
+------------
+
+Each request carries a 1-byte command code in `buf[0]`. Replies
+always start with a 1-byte status (0 on success, -1 on error).
+
+- GET_MAC: `cmd` → `status, mac(6)`
+- SEND_PACKET: `cmd, len(2, big-endian), frame(len)` → `status`
+
+All multi-byte wire fields are big-endian to match the rest of
+the stack. Unknown commands reply `status = -1`.
+
+    module oskit.servers
+
+    import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply}
+    import oskit.drivers.virtio.{virtio_net_get_mac, virtio_net_send}
+
+
+Command codes (byte value of buf[0]).
+
+    val NIC_CMD_GET_MAC     = 1
+    val NIC_CMD_SEND_PACKET = 2
+
+
+Capacity. Ethernet II frames without VLAN cap at 1514 bytes; the
+message buffer carries that plus the 3-byte header (cmd + u16
+len) plus a little slop.
+
+    val NIC_MAX_FRAME = 1514
+    val NIC_MSG_BUF   = 1520
+
+
+Cached port, set once in `nic_server`.
+
+    var nic_port = -1
+
+
+### Byte-buffer helpers
+
+Match the rest of the stack — big-endian u16 read out of an
+arbitrary byte offset, no alignment assumptions.
+
+    nic_read_u16(p: *byte, off: int) -> int
+        ((int(p[off]) & 0xff) << 8) | (int(p[off + 1]) & 0xff)
+
+
+### GET_MAC handler
+
+Reply: `[status(1), mac(6)]`. Returns `status = -1` and a zero
+MAC if the virtio-net device has no MAC configured (shouldn't
+happen under QEMU with `-device virtio-net-device,mac=...`, but
+we don't want to trust that invariant unconditionally).
+
+    nic_handle_get_mac(sender: int)
+        var reply: [7]byte
+        var mac: [6]byte
+        if virtio_net_get_mac(mac) == 0
+            reply[0] = byte(-1)
+            var i = 0
+            while i < 6
+                reply[1 + i] = 0
+                i += 1
+            ipc_reply(sender, reply, 7)
+            return
+        reply[0] = 0
+        var i = 0
+        while i < 6
+            reply[1 + i] = mac[i]
+            i += 1
+        ipc_reply(sender, reply, 7)
+
+
+### SEND_PACKET handler
+
+Expects a raw Ethernet frame including the 14-byte L2 header
+but WITHOUT the 12-byte virtio-net header (the driver prepends
+that internally). Returns status 0 on success, -1 if the length
+is out of range or the driver rejects the frame.
+
+    nic_handle_send_packet(sender: int, buf: *byte)
+        val len = nic_read_u16(buf, 1)
+        var reply: [1]byte
+        if len <= 0 || len > NIC_MAX_FRAME
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        val frame: *byte = buf + 3
+        val r = virtio_net_send(frame, len)
+        if r == 0
+            reply[0] = byte(-1)
+        else
+            reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+### Server main loop
+
+Kernel-thread entry point. Spawned from `kernel_main_rs` in
+`hello.lsysl` on aarch64. Creates port "nic", registers the
+name so clients can look it up, and blocks on ipc_recv for each
+request.
+
+`ipc_recv` returning a negative sender is only possible on
+shutdown; we just loop back and try again in that case (kernel
+threads don't have a clean "exit" path in SLIX yet).
+
+    nic_server()
+        nic_port = port_create()
+        port_register(nic_port, "nic")
+
+        var buf: [1520]byte
+        while 1 == 1
+            val sender = ipc_recv(nic_port, buf, NIC_MSG_BUF)
+            if sender >= 0
+                val cmd = int(buf[0]) & 0xff
+                if cmd == NIC_CMD_GET_MAC
+                    nic_handle_get_mac(sender)
+                else if cmd == NIC_CMD_SEND_PACKET
+                    nic_handle_send_packet(sender, buf)
+                else
+                    var reply: [1]byte
+                    reply[0] = byte(-1)
+                    ipc_reply(sender, reply, 1)

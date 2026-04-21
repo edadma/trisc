@@ -100,6 +100,7 @@ build_program() {
         oskit/ulib/srt0.lsysl
         oskit/ds/client.lsysl
         oskit/net/client.lsysl
+        oskit/net/nic_client.lsysl
         std/alloc/alloc.lsysl
         std/net/net.lsysl
     )
