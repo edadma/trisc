@@ -110,6 +110,7 @@ saturating_sub(b, a)   // 0    (clamped to u8 MIN, would have been -100)
 
 ```sysl
 *T              // raw pointer (8 bytes, unmanaged)
+*T not null     // raw pointer constrained to be non-null at produce sites
 &T              // ref-counted reference (8 bytes, auto-freed at rc=0)
 [n]T            // fixed-size array (n * sizeof(T) bytes, stack-allocated)
 []T             // slice: {ptr: *T, len: i32, cap: i32} (16 bytes)
@@ -117,6 +118,13 @@ saturating_sub(b, a)   // 0    (clamped to u8 MIN, would have been -100)
 (T1, T2, T3)   // tuple (desugars to anonymous struct)
 (P1, P2) -> R  // function pointer / closure (16 bytes: {func_ptr, env_ptr})
 ```
+
+**`not null` pointers.** `*T not null` is a subtype of `*T` with a runtime check: every
+assignment, parameter bind, return, or cast that produces a `*T not null` value verifies the
+pointer is non-null. A null value traps at the produce site. The check is inserted via the
+same `where`-predicate mechanism used for user-defined predicates (a synthesized checker
+function per inner type). `*T not null` is pointer-compatible with `*T`, so it can be passed
+anywhere a `*T` is expected.
 
 ### Struct Types
 
@@ -180,6 +188,12 @@ s match
     Rect(w, h) -> w * h       // bind multiple fields
     Empty -> 0                 // match no-data variant
 ```
+
+**Exhaustiveness.** A `match` on a data-enum value must cover every variant, or include a
+wildcard `_ -> ...` or `else -> ...` default. Missing variants produce a compile error
+listing them. Guarded arms (`Circle(r) if r > 0 -> ...`) do not count toward exhaustiveness
+since the guard may be false. (Non-enum matches, e.g. on integers or strings, do not require
+exhaustiveness — the user is responsible for covering their own domain.)
 
 **As function parameters and return values:**
 ```sysl
