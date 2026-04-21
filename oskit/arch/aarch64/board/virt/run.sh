@@ -25,6 +25,7 @@ exec qemu-system-aarch64 \
     -m 512M \
     -nographic \
     -no-reboot \
+    -global virtio-mmio.force-legacy=false \
     -kernel "$KERNEL" \
     -device "loader,file=$BOOTINFO,addr=0x44000000" \
     -device "loader,file=$RAMDISK,addr=0x50000000" \

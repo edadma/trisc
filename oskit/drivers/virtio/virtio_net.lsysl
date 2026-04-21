@@ -1,0 +1,453 @@
+Virtio-net driver (split virtqueue, MMIO v2)
+=============================================
+
+Minimal virtio-net driver on top of `virtio_mmio`. Runs in kernel
+address space on aarch64 — the 1GB RAM block is identity-mapped
+and the MMIO region is already mapped, so guest-physical ==
+guest-virtual for both virtqueue pages and the MMIO base. Uses
+`page_alloc_zero` for all ring/buffer memory.
+
+Queue layout:
+
+- Queue 0 = RX. Pre-populated with `VNET_RX_QLEN` single-descriptor
+  entries, each pointing at a `VNET_BUF_BYTES`-byte buffer. The
+  device writes a `virtio_net_hdr` (12 bytes) followed by the
+  incoming Ethernet frame.
+- Queue 1 = TX. Used ad-hoc: the driver copies a caller's frame
+  into one of `VNET_TX_QLEN` static TX buffers, prepends a zero
+  header, fills a descriptor, advances the avail ring, and kicks.
+
+Feature negotiation: we only acknowledge `VIRTIO_F_VERSION_1`
+(bit 32) + `VIRTIO_NET_F_MAC` (bit 5). The legacy features are
+left alone; modern QEMU always offers them.
+
+    module oskit.drivers.virtio
+
+    import oskit.arch.{page_alloc_zero}
+
+
+Tunables. Keep small for first bring-up; growing later is just a
+matter of bumping the constants and reallocating.
+
+    val VNET_Q_RX = 0
+    val VNET_Q_TX = 1
+
+    val VNET_RX_QLEN  = 16
+    val VNET_TX_QLEN  = 8
+    val VNET_BUF_BYTES = 2048          // one MTU + virtio hdr + slack
+
+
+virtio-net header (virtio 1.0, MRG_RXBUF implied by VERSION_1).
+
+    struct VirtioNetHdr
+        flags: byte
+        gso_type: byte
+        hdr_len: u16
+        gso_size: u16
+        csum_start: u16
+        csum_offset: u16
+        num_buffers: u16
+
+    static_assert(sizeof(VirtioNetHdr) == 12, "virtio-net hdr must be 12 bytes")
+
+
+Descriptor flags.
+
+    val VIRTQ_DESC_F_NEXT  = 1
+    val VIRTQ_DESC_F_WRITE = 2
+
+
+Split virtqueue descriptor.
+
+    struct VirtqDesc
+        addr: u64
+        len:  u32
+        flags: u16
+        next: u16
+
+    static_assert(sizeof(VirtqDesc) == 16, "virtq desc must be 16 bytes")
+
+
+Negotiated device.
+
+    var vnet_base: i64 = 0
+    var vnet_mac: [6]byte
+    var vnet_mac_ok: int = 0
+    var vnet_fail: int = 0
+
+
+Per-queue bookkeeping. We split the state by queue so TX and RX
+don't step on each other. Memory for each ring is one page each
+(desc/avail/used) — the driver never needs to write to a ring
+from more than one queue at a time.
+
+    var vnet_rx_desc_pa: i64 = 0
+    var vnet_rx_avail_pa: i64 = 0
+    var vnet_rx_used_pa: i64 = 0
+    var vnet_rx_last_used: int = 0     // used.idx snapshot we last consumed
+    var vnet_rx_avail_idx: int = 0     // monotonic avail.idx we wrote
+
+    var vnet_tx_desc_pa: i64 = 0
+    var vnet_tx_avail_pa: i64 = 0
+    var vnet_tx_used_pa: i64 = 0
+    var vnet_tx_last_used: int = 0
+    var vnet_tx_avail_idx: int = 0
+    var vnet_tx_next_slot: int = 0     // round-robin TX buffer
+
+
+Static buffer arrays. Each RX slot owns one `VNET_BUF_BYTES` buffer;
+each TX slot owns one. Allocated from `page_alloc_zero` at init
+time; stored as physical addresses because we hand them to the
+device.
+
+    var vnet_rx_bufs: [16]i64           // = VNET_RX_QLEN
+    var vnet_tx_bufs: [8]i64            // = VNET_TX_QLEN
+
+
+Raw u16 / u32 / u64 accessors over kernel-side physical memory.
+Identity map makes PA==VA here, so a plain pointer works.
+
+    vnet_write_u16(pa: i64, off: int, v: int)
+        var p: *u16 = *u16(pa + i64(off))
+        *p = u16(v & 0xffff)
+
+    vnet_read_u16(pa: i64, off: int) -> int
+        var p: *u16 = *u16(pa + i64(off))
+        int(*p)
+
+    vnet_write_u32(pa: i64, off: int, v: i32)
+        var p: *i32 = *i32(pa + i64(off))
+        *p = v
+
+    vnet_read_u32(pa: i64, off: int) -> i32
+        var p: *i32 = *i32(pa + i64(off))
+        *p
+
+
+Write a VirtqDesc at `desc_pa + idx * 16`.
+
+    vnet_desc_set(desc_pa: i64, idx: int, addr: i64, len: int, flags: int, next: int)
+        val entry = desc_pa + i64(idx * 16)
+        var p_addr: *u64 = *u64(entry)
+        *p_addr = u64(addr)
+        var p_len: *u32 = *u32(entry + 8)
+        *p_len = i32(len)
+        var p_flags: *u16 = *u16(entry + 12)
+        *p_flags = u16(flags & 0xffff)
+        var p_next: *u16 = *u16(entry + 14)
+        *p_next = u16(next & 0xffff)
+
+
+Device feature check. Reads the 32-bit slice selected by
+DEVICE_FEAT_SEL. Bit index within [0..31] for slice 0 and
+[32..63] for slice 1.
+
+    vnet_has_feature(bit: int) -> int
+        val sel = bit / 32
+        val off = bit % 32
+        virtio_write32(vnet_base, VIRTIO_REG_DEVICE_FEAT_SEL, i32(sel))
+        val feats = virtio_read32(vnet_base, VIRTIO_REG_DEVICE_FEATURES)
+        if (int(feats) & (1 << off)) != 0
+            return 1
+        0
+
+
+Ack feature bit by ORing it into DRIVER_FEATURES at the right
+slice. Leaves other feature bits untouched.
+
+    vnet_ack_feature(bit: int)
+        val sel = bit / 32
+        val off = bit % 32
+        virtio_write32(vnet_base, VIRTIO_REG_DRIVER_FEAT_SEL, i32(sel))
+        val cur = virtio_read32(vnet_base, VIRTIO_REG_DRIVER_FEATURES)
+        virtio_write32(vnet_base, VIRTIO_REG_DRIVER_FEATURES,
+            cur | i32(1 << off))
+
+
+Read/update the STATUS register.
+
+    vnet_status_read() -> int
+        int(virtio_read32(vnet_base, VIRTIO_REG_STATUS))
+
+    vnet_status_or(bit: int)
+        val cur = vnet_status_read()
+        virtio_write32(vnet_base, VIRTIO_REG_STATUS, i32(cur | bit))
+
+    vnet_status_write(v: int)
+        virtio_write32(vnet_base, VIRTIO_REG_STATUS, i32(v))
+
+
+Set up one queue: allocate desc/avail/used pages, wire them into
+the device, and mark the queue ready. Queue must not already be
+selected-and-ready when this is called.
+
+Returns 1 on success, 0 if the device refused the requested
+`size` (signalled as QUEUE_NUM_MAX < size). The ring pages are
+stored into the caller-supplied pointers.
+
+    vnet_queue_setup(q: int, size: int,
+                     desc_out: *i64, avail_out: *i64, used_out: *i64) -> int
+        virtio_write32(vnet_base, VIRTIO_REG_QUEUE_SEL, i32(q))
+        val max = int(virtio_read32(vnet_base, VIRTIO_REG_QUEUE_NUM_MAX))
+        if max == 0
+            return 0
+        if size > max
+            return 0
+        virtio_write32(vnet_base, VIRTIO_REG_QUEUE_NUM, i32(size))
+
+        val desc_pa  = i64(page_alloc_zero())
+        val avail_pa = i64(page_alloc_zero())
+        val used_pa  = i64(page_alloc_zero())
+        if desc_pa == 0 || avail_pa == 0 || used_pa == 0
+            return 0
+        *desc_out = desc_pa
+        *avail_out = avail_pa
+        *used_out = used_pa
+
+        virtio_write32(vnet_base, VIRTIO_REG_QUEUE_DESC_LOW,
+            i32(desc_pa & i64(0xffffffff)))
+        virtio_write32(vnet_base, VIRTIO_REG_QUEUE_DESC_HIGH,
+            i32((desc_pa >> 32) & i64(0xffffffff)))
+        virtio_write32(vnet_base, VIRTIO_REG_QUEUE_AVAIL_LOW,
+            i32(avail_pa & i64(0xffffffff)))
+        virtio_write32(vnet_base, VIRTIO_REG_QUEUE_AVAIL_HIGH,
+            i32((avail_pa >> 32) & i64(0xffffffff)))
+        virtio_write32(vnet_base, VIRTIO_REG_QUEUE_USED_LOW,
+            i32(used_pa & i64(0xffffffff)))
+        virtio_write32(vnet_base, VIRTIO_REG_QUEUE_USED_HIGH,
+            i32((used_pa >> 32) & i64(0xffffffff)))
+
+        virtio_write32(vnet_base, VIRTIO_REG_QUEUE_READY, i32(1))
+        1
+
+
+Pre-populate the RX queue: every descriptor points at one of the
+RX buffers and has the WRITE flag set (device-writable). The
+avail ring lists every descriptor index in order.
+
+    vnet_rx_prefill()
+        var i = 0
+        while i < VNET_RX_QLEN
+            vnet_rx_bufs[i] = i64(page_alloc_zero())
+            vnet_desc_set(vnet_rx_desc_pa, i,
+                vnet_rx_bufs[i], VNET_BUF_BYTES,
+                VIRTQ_DESC_F_WRITE, 0)
+            // avail.ring[i] = i
+            vnet_write_u16(vnet_rx_avail_pa, 4 + i * 2, i)
+            i += 1
+        vnet_rx_avail_idx = VNET_RX_QLEN
+        // avail.idx = QLEN
+        vnet_write_u16(vnet_rx_avail_pa, 2, vnet_rx_avail_idx)
+
+
+Allocate TX buffers. The descriptors themselves are filled in
+on each `virtio_net_send` call; here we just reserve pages.
+
+    vnet_tx_alloc_bufs()
+        var i = 0
+        while i < VNET_TX_QLEN
+            vnet_tx_bufs[i] = i64(page_alloc_zero())
+            i += 1
+
+
+Report the fail-code from the last failed `virtio_net_init` call.
+
+    virtio_net_last_fail() -> int
+        vnet_fail
+
+
+Diagnostic — read a specific 32-bit feature slice. `sel = 0` for
+bits 0-31, `sel = 1` for bits 32-63.
+
+    virtio_net_debug_feats(sel: int) -> i32
+        if vnet_base == 0
+            return i32(0)
+        virtio_write32(vnet_base, VIRTIO_REG_DEVICE_FEAT_SEL, i32(sel))
+        virtio_read32(vnet_base, VIRTIO_REG_DEVICE_FEATURES)
+
+
+Diagnostic — read the transport version register (should be 2
+for v2 MMIO, 1 for legacy).
+
+    virtio_net_debug_version() -> int
+        if vnet_base == 0
+            return -1
+        int(virtio_read32(vnet_base, 0x04))
+
+
+Device init handshake — returns 1 on success, 0 on failure. On
+failure, `virtio_net_last_fail()` reports a small numeric code
+indicating which step blew up (for diagnostics only).
+
+    virtio_net_init() -> int
+        val base = virtio_find(VIRTIO_DEV_NET)
+        if base == 0
+            vnet_fail = 1
+            return 0
+        vnet_base = base
+
+Reset the device: status = 0 (virtio spec 4.2.3.1.1 step 1).
+
+        vnet_status_write(0)
+
+ACKNOWLEDGE (step 2) and DRIVER (step 3) — tell the device we've
+noticed it and are going to drive it.
+
+        vnet_status_or(VIRTIO_STATUS_ACKNOWLEDGE)
+        vnet_status_or(VIRTIO_STATUS_DRIVER)
+
+Feature negotiation. Bit 5 = VIRTIO_NET_F_MAC, bit 32 =
+VIRTIO_F_VERSION_1. We require VERSION_1; MAC is optional.
+
+        if vnet_has_feature(32) == 0
+            vnet_status_or(VIRTIO_STATUS_FAILED)
+            vnet_fail = 2
+            return 0
+        vnet_ack_feature(32)
+        if vnet_has_feature(5) != 0
+            vnet_ack_feature(5)
+
+FEATURES_OK (step 5 of the handshake) — re-read to confirm the
+device accepted our subset. If not, abort.
+
+        vnet_status_or(VIRTIO_STATUS_FEATURES_OK)
+        if (vnet_status_read() & VIRTIO_STATUS_FEATURES_OK) == 0
+            vnet_status_or(VIRTIO_STATUS_FAILED)
+            vnet_fail = 3
+            return 0
+
+Set up the RX and TX queues.
+
+        if vnet_queue_setup(VNET_Q_RX, VNET_RX_QLEN,
+                &vnet_rx_desc_pa, &vnet_rx_avail_pa, &vnet_rx_used_pa) == 0
+            vnet_status_or(VIRTIO_STATUS_FAILED)
+            vnet_fail = 4
+            return 0
+        if vnet_queue_setup(VNET_Q_TX, VNET_TX_QLEN,
+                &vnet_tx_desc_pa, &vnet_tx_avail_pa, &vnet_tx_used_pa) == 0
+            vnet_status_or(VIRTIO_STATUS_FAILED)
+            vnet_fail = 5
+            return 0
+
+        vnet_rx_prefill()
+        vnet_tx_alloc_bufs()
+
+        // Load MAC from config space (first 6 bytes) if the device
+        // offered VIRTIO_NET_F_MAC.
+        var i = 0
+        while i < 6
+            vnet_mac[i] = byte(virtio_read_config_byte(vnet_base, i))
+            i += 1
+        vnet_mac_ok = 1
+
+        // 6. DRIVER_OK — device is live.
+        vnet_status_or(VIRTIO_STATUS_DRIVER_OK)
+
+        // Kick the RX queue so the device sees the descriptors we
+        // made available.
+        virtio_write32(vnet_base, VIRTIO_REG_QUEUE_NOTIFY, i32(VNET_Q_RX))
+        1
+
+
+Get the negotiated MAC into `out[0..5]`. Returns 1 if MAC was
+configured, 0 otherwise.
+
+    virtio_net_get_mac(out: *byte) -> int
+        if vnet_mac_ok == 0
+            return 0
+        var i = 0
+        while i < 6
+            out[i] = vnet_mac[i]
+            i += 1
+        1
+
+
+Send a raw Ethernet frame. Copies caller's bytes into the next
+round-robin TX buffer, prepends a zero `VirtioNetHdr`, wires up
+one descriptor, bumps avail.idx, and notifies.
+
+Returns 1 on success, 0 if the driver isn't initialized or the
+frame is too large.
+
+    virtio_net_send(frame: *byte, len: int) -> int
+        if vnet_base == 0
+            return 0
+        if len <= 0
+            return 0
+        if len + 12 > VNET_BUF_BYTES
+            return 0
+
+        val slot = vnet_tx_next_slot
+        vnet_tx_next_slot = (slot + 1) % VNET_TX_QLEN
+
+        val buf = vnet_tx_bufs[slot]
+        val hdr: *byte = *byte(buf)
+
+Zero the virtio-net header.
+
+        var i = 0
+        while i < 12
+            hdr[i] = 0
+            i += 1
+
+Copy the caller's frame in after the header.
+
+        val body: *byte = *byte(buf + i64(12))
+        i = 0
+        while i < len
+            body[i] = frame[i]
+            i += 1
+
+        vnet_desc_set(vnet_tx_desc_pa, slot, buf, 12 + len, 0, 0)
+
+        // avail.ring[avail_idx % QLEN] = slot
+        vnet_write_u16(vnet_tx_avail_pa, 4 + (vnet_tx_avail_idx % VNET_TX_QLEN) * 2, slot)
+        vnet_tx_avail_idx = (vnet_tx_avail_idx + 1) & 0xffff
+        vnet_write_u16(vnet_tx_avail_pa, 2, vnet_tx_avail_idx)
+
+        virtio_write32(vnet_base, VIRTIO_REG_QUEUE_NOTIFY, i32(VNET_Q_TX))
+        1
+
+
+Poll the RX used ring once. If a packet is available, copy it
+(minus the virtio-net header) into `out` up to `max_len`, make
+the descriptor available again, and return the Ethernet frame
+length. Returns 0 if no packet is ready, -1 on error.
+
+    virtio_net_recv(out: *byte, max_len: int) -> int
+        if vnet_base == 0
+            return -1
+        val used_idx = vnet_read_u16(vnet_rx_used_pa, 2)
+        if used_idx == vnet_rx_last_used
+            return 0
+
+        val slot = vnet_rx_last_used % VNET_RX_QLEN
+        // used.ring[slot] = { id:u32, len:u32 }
+        val elem_off = 4 + slot * 8
+        val desc_id = int(vnet_read_u32(vnet_rx_used_pa, elem_off))
+        val raw_len = int(vnet_read_u32(vnet_rx_used_pa, elem_off + 4))
+        // raw_len includes the 12-byte virtio-net header.
+        var frame_len = raw_len - 12
+        if frame_len < 0
+            frame_len = 0
+        if frame_len > max_len
+            frame_len = max_len
+
+        val buf = vnet_rx_bufs[desc_id]
+        val src: *byte = *byte(buf + i64(12))
+        var i = 0
+        while i < frame_len
+            out[i] = src[i]
+            i += 1
+
+        // Return the descriptor to the device.
+        vnet_desc_set(vnet_rx_desc_pa, desc_id,
+            buf, VNET_BUF_BYTES, VIRTQ_DESC_F_WRITE, 0)
+        vnet_write_u16(vnet_rx_avail_pa,
+            4 + (vnet_rx_avail_idx % VNET_RX_QLEN) * 2, desc_id)
+        vnet_rx_avail_idx = (vnet_rx_avail_idx + 1) & 0xffff
+        vnet_write_u16(vnet_rx_avail_pa, 2, vnet_rx_avail_idx)
+        virtio_write32(vnet_base, VIRTIO_REG_QUEUE_NOTIFY, i32(VNET_Q_RX))
+
+        vnet_rx_last_used = (vnet_rx_last_used + 1) & 0xffff
+        frame_len

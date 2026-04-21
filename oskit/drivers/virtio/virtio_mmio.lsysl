@@ -25,13 +25,45 @@ Transport region layout.
     val VIRTIO_MMIO_MAX = 32
 
 
-Register offsets. Every register is 4 bytes.
+Register offsets. Every register is 4 bytes (unless noted). Only
+the ones we actually use are listed — see the virtio spec §4.2
+for the full v2 MMIO layout.
 
-    val VIRTIO_REG_MAGIC      = 0x00
-    val VIRTIO_REG_VERSION    = 0x04
-    val VIRTIO_REG_DEVICE_ID  = 0x08
-    val VIRTIO_REG_VENDOR_ID  = 0x0c
-    val VIRTIO_REG_STATUS     = 0x70
+    val VIRTIO_REG_MAGIC              = 0x00
+    val VIRTIO_REG_VERSION            = 0x04
+    val VIRTIO_REG_DEVICE_ID          = 0x08
+    val VIRTIO_REG_VENDOR_ID          = 0x0c
+    val VIRTIO_REG_DEVICE_FEATURES    = 0x10
+    val VIRTIO_REG_DEVICE_FEAT_SEL    = 0x14
+    val VIRTIO_REG_DRIVER_FEATURES    = 0x20
+    val VIRTIO_REG_DRIVER_FEAT_SEL    = 0x24
+    val VIRTIO_REG_QUEUE_SEL          = 0x30
+    val VIRTIO_REG_QUEUE_NUM_MAX      = 0x34
+    val VIRTIO_REG_QUEUE_NUM          = 0x38
+    val VIRTIO_REG_QUEUE_READY        = 0x44
+    val VIRTIO_REG_QUEUE_NOTIFY       = 0x50
+    val VIRTIO_REG_INT_STATUS         = 0x60
+    val VIRTIO_REG_INT_ACK            = 0x64
+    val VIRTIO_REG_STATUS             = 0x70
+    val VIRTIO_REG_QUEUE_DESC_LOW     = 0x80
+    val VIRTIO_REG_QUEUE_DESC_HIGH    = 0x84
+    val VIRTIO_REG_QUEUE_AVAIL_LOW    = 0x90
+    val VIRTIO_REG_QUEUE_AVAIL_HIGH   = 0x94
+    val VIRTIO_REG_QUEUE_USED_LOW     = 0xa0
+    val VIRTIO_REG_QUEUE_USED_HIGH    = 0xa4
+    val VIRTIO_REG_CONFIG_GEN         = 0xfc
+    val VIRTIO_REG_CONFIG             = 0x100
+
+
+Device status bits (writable to the STATUS register — driver
+ORs these in as it walks the init handshake).
+
+    val VIRTIO_STATUS_ACKNOWLEDGE     = 1
+    val VIRTIO_STATUS_DRIVER          = 2
+    val VIRTIO_STATUS_DRIVER_OK       = 4
+    val VIRTIO_STATUS_FEATURES_OK     = 8
+    val VIRTIO_STATUS_NEEDS_RESET     = 64
+    val VIRTIO_STATUS_FAILED          = 128
 
 
 Magic for present slots. Reads as the ASCII bytes `'v'`, `'i'`,
@@ -47,6 +79,13 @@ Device IDs we care about.
     val VIRTIO_DEV_BLK  = 2
 
 
+Interrupt status bits (read from INT_STATUS, written back to
+INT_ACK to clear).
+
+    val VIRTIO_INT_USED_BUF           = 1
+    val VIRTIO_INT_CONFIG_CHANGE      = 2
+
+
 MMIO read — every register on virtio-mmio is u32. Uses the same
 raw-pointer cast pattern as the PL011 UART driver so the
 compiler doesn't try to reorder the read.
@@ -54,6 +93,23 @@ compiler doesn't try to reorder the read.
     virtio_read32(base: i64, off: int) -> i32
         volatile var p: *i32 = *i32(base + i64(off))
         *p
+
+
+MMIO write companion — write a u32 register.
+
+    virtio_write32(base: i64, off: int, v: i32)
+        volatile var p: *i32 = *i32(base + i64(off))
+        *p = v
+
+
+Read a byte-granularity offset in the device-specific config area
+(starts at 0x100). virtio-net uses the first 6 bytes for the MAC.
+
+    virtio_read_config_byte(base: i64, off: int) -> int
+        val base_i32 = VIRTIO_REG_CONFIG + (off & ~3)
+        val shift    = (off & 3) * 8
+        val word     = virtio_read32(base, base_i32)
+        int((word >> i32(shift)) & i32(0xff))
 
 
 Is the slot at `base` present? True when its magic reads as
