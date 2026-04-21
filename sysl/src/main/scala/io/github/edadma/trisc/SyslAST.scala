@@ -9,6 +9,9 @@ case class ProgramAST(decls: List[DeclAST])
 sealed trait TypeAST
 case class NamedTypeAST(name: String, typeArgs: List[TypeAST] = Nil) extends TypeAST
 case class PtrTypeAST(inner: TypeAST) extends TypeAST
+// `*T not null` — a pointer type constrained to be non-null at produce sites.
+// Resolved as a NamedType wrapping PtrType(inner) with a synth predicate.
+case class PtrNonNullTypeAST(inner: TypeAST) extends TypeAST
 case class ArrayTypeAST(size: Int, elem: TypeAST) extends TypeAST
 case class SliceTypeAST(elem: TypeAST) extends TypeAST
 case class FuncTypeAST(params: List[TypeAST], ret: TypeAST, escaping: Boolean = false) extends TypeAST
@@ -62,6 +65,8 @@ case class ImplDeclAST(traitName: String, targetType: TypeAST, methods: List[Fun
 case class InterfaceDeclAST(name: String, methods: List[InterfaceMethodAST], embedded: List[String], attributes: List[Attribute] = Nil) extends DeclAST
 case class InterfaceMethodAST(name: String, params: List[ParamAST], returnType: TypeAST) extends Positional
 case class CondDeclAST(cond: CondExpr, thenDecls: List[DeclAST], elseDecls: Option[List[DeclAST]]) extends DeclAST
+// `static_assert(cond)` or `static_assert(cond, "message")` at module scope — compile-time check.
+case class StaticAssertDeclAST(cond: ExpressionAST, message: Option[String]) extends DeclAST
 
 // Conditional compilation expressions
 sealed trait CondExpr
@@ -101,6 +106,9 @@ case class BreakStmtAST() extends StmtAST
 case class ContinueStmtAST() extends StmtAST
 case class DeferStmtAST(body: StmtAST) extends StmtAST
 case class AsmStmtAST(code: String) extends StmtAST
+// `invariant <bool>` statement — traps on false. Essentially `assert` with nicer name; intended
+// at the top of loop bodies for loop-invariant documentation/checking.
+case class InvariantStmtAST(expr: ExpressionAST) extends StmtAST
 case class AsmExprAST(code: String) extends ExpressionAST
 case class ExprStmtAST(expr: ExpressionAST) extends StmtAST
 

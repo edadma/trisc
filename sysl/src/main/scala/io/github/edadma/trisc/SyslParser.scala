@@ -42,7 +42,12 @@ class SyslParser extends StandardTokenParsers {
     }
 
   lazy val declBare: Parser[DeclAST] =
-    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | interfaceDecl | typeAliasDecl | "private" ~> "def" ~> defDecl(true) | "private" ~> declBody(true) | "def" ~> defDecl(false) | declBody(false)
+    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | interfaceDecl | typeAliasDecl | staticAssertDecl | "private" ~> "def" ~> defDecl(true) | "private" ~> declBody(true) | "def" ~> defDecl(false) | declBody(false)
+
+  lazy val staticAssertDecl: Parser[StaticAssertDeclAST] =
+    "static_assert" ~> "(" ~> expr ~ opt("," ~> stringLit) <~ ")" ^^ {
+      case cond ~ msg => StaticAssertDeclAST(cond, msg)
+    }
 
   // --- Attributes ---
 
@@ -347,7 +352,10 @@ class SyslParser extends StandardTokenParsers {
 
   // Full type reference: *int, **int, &Node, [5]int, []int (slice), (int)->int, @escaping (int)->int, string, int, etc.
   lazy val typeRef: Parser[TypeAST] =
-    "*" ~> typeRef ^^ PtrTypeAST.apply |
+    "*" ~> typeRef ~ opt("not" ~> "null") ^^ {
+      case t ~ Some(_) => PtrNonNullTypeAST(t)
+      case t ~ None    => PtrTypeAST(t)
+    } |
       "&" ~> typeRef ^^ RefTypeAST.apply |
       "[" ~> "]" ~> typeRef ^^ SliceTypeAST.apply |
       "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => ArrayTypeAST(n.toInt, t) } |
@@ -380,8 +388,11 @@ class SyslParser extends StandardTokenParsers {
   lazy val asmStmt: Parser[AsmStmtAST] =
     "asm" ~> "(" ~> stringLit <~ ")" ^^ AsmStmtAST.apply
 
+  lazy val invariantStmt: Parser[InvariantStmtAST] =
+    "invariant" ~> expr ^^ InvariantStmtAST.apply
+
   lazy val stmt: Parser[StmtAST] =
-    asmStmt | forStmt | doWhileStmt | whileStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+    asmStmt | invariantStmt | forStmt | doWhileStmt | whileStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
 
   lazy val destructureStmt: Parser[DestructureStmtAST] =
     mutability ~ ("(" ~> rep1sep(bindName, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case mut ~ names ~ init => DestructureStmtAST(names, init, mut.isMutable) } |
