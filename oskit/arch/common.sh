@@ -99,7 +99,9 @@ build_program() {
         oskit/ulib/ulib.lsysl
         oskit/ulib/srt0.lsysl
         oskit/ds/client.lsysl
+        oskit/net/client.lsysl
         std/alloc/alloc.lsysl
+        std/net/net.lsysl
     )
     case "$NAME" in
         login|su)
@@ -283,6 +285,13 @@ build_ds() {
         oskit/servers/ds.lsysl
 }
 
+build_inet() {
+    build_server inet inet_server \
+        "import oskit.servers.{inet_server}" \
+        oskit/servers/inet.lsysl \
+        std/net/net.lsysl
+}
+
 build_init() {
     build_server init init \
         "import oskit.apps.init.{init}" \
@@ -311,11 +320,12 @@ dispatch_servers_arg() {
             pm)   build_pm ;;
             vfs)  build_vfs ;;
             ds)   build_ds ;;
+            inet) build_inet ;;
             init) build_init ;;
-            all)  build_rs; build_disk; build_tfs; build_tty; build_pm; build_vfs; build_ds; build_init ;;
+            all)  build_rs; build_disk; build_tfs; build_tty; build_pm; build_vfs; build_ds; build_inet; build_init ;;
             *)    echo "Unknown server: $1" >&2; exit 1 ;;
         esac
     else
-        build_rs; build_disk; build_tfs; build_tty; build_pm; build_vfs; build_ds; build_init
+        build_rs; build_disk; build_tfs; build_tty; build_pm; build_vfs; build_ds; build_inet; build_init
     fi
 }

@@ -147,6 +147,14 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("1")
   }
 
+  "aarch64 inet: UDP loopback via test_net" in {
+    // test_net opens a UDP socket on 127.0.0.1:5000, sends "hello"
+    // to itself, and prints what recvfrom returned.
+    val output = qemu.command("test_net")
+    output should include("sent=5")
+    output should include("recv=5 'hello'")
+  }
+
   "aarch64 crash recovery: kill tfs and restart" in {
     val psOut = qemu.command("ps")
     val tfsLine = psOut.split('\n').find(_.contains("tfs"))

@@ -102,6 +102,7 @@ object RamdiskBinPrograms:
       "/bin/tail"   -> compileExecutable("oskit/bin/tail/tail", "oskit/bin/tail.lsysl"),
       "/bin/login"  -> compileLoginExecutable(),
       "/bin/su"     -> compileCryptoExecutable("oskit/bin/su/su", "oskit/bin/su.lsysl"),
+      "/bin/test_net" -> compileNetExecutable("oskit/bin/test_net/test_net", "oskit/bin/test_net.lsysl"),
     )
 
   /** Compile a program that needs crypto libraries (sha256, hmac, pbkdf2). */
@@ -152,6 +153,47 @@ object RamdiskBinPrograms:
   def compileLoginExecutable(): Array[Byte] =
     compileCryptoExecutable("oskit/bin/login/login", "oskit/bin/login.lsysl")
 
+  /** Compile a program that uses the socket client library. */
+  def compileNetExecutable(unitPath: String, lsyslRepoPath: String): Array[Byte] =
+    val syscallAsm =
+      Source.fromFile("oskit/ulib/syscall.asm")(using Codec.UTF8).mkString
+    val syscallTof = assemble(syscallAsm, relocatable = true)
+    val source     = tangledLsysl(lsyslRepoPath)
+    val ulibSource = tangledLsysl("oskit/ulib/ulib.lsysl")
+    val srt0Source = tangledLsysl("oskit/ulib/srt0.lsysl")
+    val sbrkSource = Source.fromFile("oskit/ulib/sbrk.sysl")(using Codec.UTF8).mkString
+    val allocSource = Source.fromFile("posix/stdlib/alloc.sysl")(using Codec.UTF8).mkString
+    val stringSource = Source.fromFile("posix/string/string.sysl")(using Codec.UTF8).mkString
+    val ctypeSource = Source.fromFile("posix/ctype/ctype.sysl")(using Codec.UTF8).mkString
+    val dsClientSource = tangledLsysl("oskit/ds/client.lsysl")
+    val netClientSource = tangledLsysl("oskit/net/client.lsysl")
+    val stdNetSource = tangledLsysl("std/net/net.lsysl")
+    val stdDebugSource = tangledLsysl("std/debug/debug.lsysl")
+    val progConfigSource = Source.fromFile("oskit/arch/trisc/prog_config.sysl")(using Codec.UTF8).mkString
+    val allSources = Map(
+      unitPath -> source,
+      "oskit/ulib/ulib" -> ulibSource,
+      "oskit/ulib/srt0" -> srt0Source,
+      "posix/unistd/sbrk" -> sbrkSource,
+      "posix/stdlib/alloc" -> allocSource,
+      "posix/string/string" -> stringSource,
+      "posix/ctype/ctype" -> ctypeSource,
+      "oskit/ds/client" -> dsClientSource,
+      "oskit/net/client" -> netClientSource,
+      "std/net/net" -> stdNetSource,
+      "std/debug/debug" -> stdDebugSource,
+      "oskit/arch/prog_config" -> progConfigSource,
+    )
+    val driver = new SyslDriver
+    val result = driver.compile(allSources)
+    val codegen = new SyslTriscCodegen
+    val tofs = for unit <- result.units yield
+      val asm = codegen.generate(unit.typed)
+      assemble(asm, relocatable = true)
+    val syslTof = Linker.link(tofs, relocatable = true)
+    val linked = Linker.link(Seq(syscallTof, syslTof), progScript, 0)
+    TriscBinary.serialize(linked)
+
   private def loadResourceStream(path: String): Option[Array[Byte]] =
     val inOpt =
       Option(RamdiskBinPrograms.getClass.getResourceAsStream("/" + path))
@@ -172,7 +214,7 @@ object RamdiskBinPrograms:
   // Load pre-built .trb resources only (no compilation). Used by the emulator at runtime.
   // Run RegenRamdiskBinMain to update embedded .trb files after editing oskit/bin or ulib.
   def loadEmbeddedBinaries(): Map[String, Array[Byte]] =
-    Seq("hello", "echo", "cat", "ps", "count", "grep", "wc", "ls", "touch", "write", "mkdir", "rm", "rmdir", "mv", "chmod", "stat", "uptime", "whoami", "nsh", "head", "tail", "login", "su").flatMap { short =>
+    Seq("hello", "echo", "cat", "ps", "count", "grep", "wc", "ls", "touch", "write", "mkdir", "rm", "rmdir", "mv", "chmod", "stat", "uptime", "whoami", "nsh", "head", "tail", "login", "su", "test_net").flatMap { short =>
       loadResource(short).map(bytes => s"/bin/$short" -> bytes)
     }.toMap
 

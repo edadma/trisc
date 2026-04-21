@@ -1,0 +1,440 @@
+OSKit INET Server — Internet Sockets (loopback skeleton)
+========================================================
+
+Minix 3-style socket server. First cut only implements UDP-style
+datagram sockets over the loopback address (127.0.0.1). That's
+enough to exercise the full IPC socket API from userspace without
+any NIC driver or packet layer behind it — the datagrams never
+leave the server, they just move between per-socket queues.
+
+Follow-up phases will plug a real NIC driver server in behind
+this one and grow the protocol set (ARP / IP / ICMP / UDP / TCP).
+
+IPC protocol
+------------
+
+Each request has a 1-byte command code in `buf[0]`, followed by
+a command-specific payload. Replies always start with a 1-byte
+status (0 on success, -1 on error).
+
+- SOCKET: `cmd, family, sock_type, proto` → `status, fd`
+- BIND: `cmd, fd, family, port(2), ip(4)` → `status`
+- SENDTO: `cmd, fd, family, port(2), ip(4), len(2), data...` → `status, nsent(2)`
+- RECVFROM: `cmd, fd, maxlen(2)` → `status, family, port(2), ip(4), len(2), data...` (deferred until a packet arrives)
+- CLOSE: `cmd, fd` → `status`
+
+All multi-byte integers are big-endian. Unsupported SOCKET
+families / types, and any unknown command code, return
+`status = -1`.
+
+    module oskit.servers
+
+    import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply}
+    import oskit.services.{rs_ready}
+    import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY, INADDR_LOOPBACK, ipv4, ipv4_octet}
+
+
+Protocol command codes (byte value of buf[0]).
+
+    val INET_CMD_SOCKET   = 1
+    val INET_CMD_BIND     = 2
+    val INET_CMD_SENDTO   = 3
+    val INET_CMD_RECVFROM = 4
+    val INET_CMD_CLOSE    = 5
+
+
+Capacity limits.
+
+    val INET_MAX_SOCKETS = 32
+    val INET_MAX_QUEUE   = 4
+    val INET_MAX_DATA    = 512
+    val INET_MSG_BUF     = 540   // cmd(1)+fd(1)+hdr(9)+maxlen(2)+data(512)+slop
+
+
+A queued datagram awaiting recvfrom. Source address is stored
+host-order to simplify comparisons.
+
+    struct InetDgram
+        src_ip: u32
+        src_port: int
+        data: [512]byte
+        data_len: int
+
+
+Per-socket state. `bound_port == 0` means unbound (port 0 is
+reserved for auto-bind, which isn't implemented yet).
+
+    struct InetSocket
+        in_use: int
+        owner_tid: int
+        bound: int
+        bound_ip: u32
+        bound_port: int
+        queue: [4]InetDgram
+        q_head: int
+        q_tail: int
+        q_count: int
+        pending_tid: int
+        pending_maxlen: int
+
+    var inet_sockets: [32]InetSocket
+    var inet_port = -1
+
+
+### Byte-buffer helpers
+
+Read / write the big-endian u16s used in the wire protocol. No
+alignment assumptions — pointers come from IPC buffers.
+
+    inet_read_u16(p: *byte, off: int) -> int
+        ((int(p[off]) & 0xff) << 8) | (int(p[off + 1]) & 0xff)
+
+    inet_write_u16(p: *byte, off: int, v: int)
+        p[off]     = byte((v >> 8) & 0xff)
+        p[off + 1] = byte(v & 0xff)
+
+    inet_read_ipv4(p: *byte, off: int) -> u32
+        ipv4(int(p[off]), int(p[off + 1]), int(p[off + 2]), int(p[off + 3]))
+
+    inet_write_ipv4(p: *byte, off: int, ip: u32)
+        p[off]     = byte(ipv4_octet(ip, 0))
+        p[off + 1] = byte(ipv4_octet(ip, 1))
+        p[off + 2] = byte(ipv4_octet(ip, 2))
+        p[off + 3] = byte(ipv4_octet(ip, 3))
+
+
+Initialize the socket table once. Called from the server main
+loop before `port_register` so sockets are consistent before any
+client can reach us.
+
+    inet_init_sockets()
+        var i = 0
+        while i < INET_MAX_SOCKETS
+            inet_sockets[i].in_use = 0
+            inet_sockets[i].pending_tid = -1
+            i += 1
+
+
+### Locate a bound socket
+
+Linear scan — fine at 32 sockets; a hash on (ip, port) would be
+the obvious upgrade once the stack grows.
+
+    inet_find_bound(ip: u32, port: int) -> int
+        var i = 0
+        while i < INET_MAX_SOCKETS
+            if inet_sockets[i].in_use != 0
+                if inet_sockets[i].bound != 0
+                    if inet_sockets[i].bound_port == port
+                        val bi = inet_sockets[i].bound_ip
+                        if bi == INADDR_ANY
+                            return i
+                        if bi == ip
+                            return i
+            i += 1
+        -1
+
+
+### Enqueue an incoming datagram
+
+Returns 1 on success, 0 if the queue is full (caller drops the
+packet per UDP semantics).
+
+    inet_enqueue(fd: int, src_ip: u32, src_port: int, data: *byte, dlen: int) -> int
+        if inet_sockets[fd].q_count >= INET_MAX_QUEUE
+            return 0
+        val slot = inet_sockets[fd].q_tail
+        inet_sockets[fd].queue[slot].src_ip = src_ip
+        inet_sockets[fd].queue[slot].src_port = src_port
+        var copy_len = dlen
+        if copy_len > INET_MAX_DATA
+            copy_len = INET_MAX_DATA
+        var i = 0
+        while i < copy_len
+            inet_sockets[fd].queue[slot].data[i] = data[i]
+            i += 1
+        inet_sockets[fd].queue[slot].data_len = copy_len
+        inet_sockets[fd].q_tail = (slot + 1) % INET_MAX_QUEUE
+        inet_sockets[fd].q_count += 1
+        1
+
+
+### Deliver one queued datagram to a pending recvfrom
+
+Writes the recvfrom reply into `reply` and returns its length.
+Only called when we know there's both a queued dgram and a
+waiter. `maxlen` caps how many payload bytes we hand back.
+
+    inet_deliver_head(fd: int, maxlen: int, reply: *byte) -> int
+        val slot = inet_sockets[fd].q_head
+        val src_ip = inet_sockets[fd].queue[slot].src_ip
+        val src_port = inet_sockets[fd].queue[slot].src_port
+        var dlen = inet_sockets[fd].queue[slot].data_len
+        if dlen > maxlen
+            dlen = maxlen
+        reply[0] = 0
+        reply[1] = byte(AF_INET & 0xff)
+        inet_write_u16(reply, 2, src_port)
+        inet_write_ipv4(reply, 4, src_ip)
+        inet_write_u16(reply, 8, dlen)
+        var i = 0
+        while i < dlen
+            reply[10 + i] = inet_sockets[fd].queue[slot].data[i]
+            i += 1
+        inet_sockets[fd].q_head = (slot + 1) % INET_MAX_QUEUE
+        inet_sockets[fd].q_count -= 1
+        10 + dlen
+
+
+### SOCKET handler
+
+    inet_handle_socket(sender: int, buf: *byte)
+        val family = int(buf[1]) & 0xff
+        val stype  = int(buf[2]) & 0xff
+        if family != AF_INET
+            var err: [2]byte
+            err[0] = byte(-1)
+            err[1] = 0
+            ipc_reply(sender, err, 2)
+            return
+        if stype != SOCK_DGRAM
+            var err: [2]byte
+            err[0] = byte(-1)
+            err[1] = 0
+            ipc_reply(sender, err, 2)
+            return
+        var idx = -1
+        var i = 0
+        while i < INET_MAX_SOCKETS
+            if inet_sockets[i].in_use == 0
+                idx = i
+                i = INET_MAX_SOCKETS
+            else
+                i += 1
+        if idx < 0
+            var err: [2]byte
+            err[0] = byte(-1)
+            err[1] = 0
+            ipc_reply(sender, err, 2)
+            return
+        inet_sockets[idx].in_use = 1
+        inet_sockets[idx].owner_tid = sender
+        inet_sockets[idx].bound = 0
+        inet_sockets[idx].bound_ip = INADDR_ANY
+        inet_sockets[idx].bound_port = 0
+        inet_sockets[idx].q_head = 0
+        inet_sockets[idx].q_tail = 0
+        inet_sockets[idx].q_count = 0
+        inet_sockets[idx].pending_tid = -1
+        var reply: [2]byte
+        reply[0] = 0
+        reply[1] = byte(idx & 0xff)
+        ipc_reply(sender, reply, 2)
+
+
+Validate an fd. Returns 1 if the slot is in use, 0 otherwise.
+Does not enforce ownership yet — that's a TODO once PIDs are
+plumbed through.
+
+    inet_fd_valid(fd: int) -> int
+        if fd < 0
+            return 0
+        if fd >= INET_MAX_SOCKETS
+            return 0
+        inet_sockets[fd].in_use
+
+
+### BIND handler
+
+    inet_handle_bind(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if inet_fd_valid(fd) == 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        val family = int(buf[2]) & 0xff
+        if family != AF_INET
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        val port = inet_read_u16(buf, 3)
+        val ip = inet_read_ipv4(buf, 5)
+        if port <= 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        if ip != INADDR_ANY
+            if ip != INADDR_LOOPBACK
+                var err: [1]byte
+                err[0] = byte(-1)
+                ipc_reply(sender, err, 1)
+                return
+        if inet_find_bound(ip, port) >= 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        inet_sockets[fd].bound = 1
+        inet_sockets[fd].bound_ip = ip
+        inet_sockets[fd].bound_port = port
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+### SENDTO handler
+
+Only loopback delivery for now — any other destination is
+silently dropped (reported as "success, 0 bytes sent") so
+client code behaves sanely until we add a NIC.
+
+    inet_handle_sendto(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if inet_fd_valid(fd) == 0
+            var err: [3]byte
+            err[0] = byte(-1)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        val family = int(buf[2]) & 0xff
+        if family != AF_INET
+            var err: [3]byte
+            err[0] = byte(-1)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        val dst_port = inet_read_u16(buf, 3)
+        val dst_ip = inet_read_ipv4(buf, 5)
+        val dlen = inet_read_u16(buf, 9)
+        val data: *byte = buf + 11
+        // Source address is the caller's bound port, if any,
+        // else port 0 — good enough for loopback testing.
+        val src_port = inet_sockets[fd].bound_port
+        val src_ip = INADDR_LOOPBACK
+        if dst_ip == INADDR_LOOPBACK
+            val target = inet_find_bound(dst_ip, dst_port)
+            if target >= 0
+                // Pending recv? Deliver directly.
+                if inet_sockets[target].pending_tid >= 0
+                    val waiter = inet_sockets[target].pending_tid
+                    val mlen = inet_sockets[target].pending_maxlen
+                    inet_sockets[target].pending_tid = -1
+                    var wr: [540]byte
+                    var deliver_len = dlen
+                    if deliver_len > mlen
+                        deliver_len = mlen
+                    wr[0] = 0
+                    wr[1] = byte(AF_INET & 0xff)
+                    inet_write_u16(wr, 2, src_port)
+                    inet_write_ipv4(wr, 4, src_ip)
+                    inet_write_u16(wr, 8, deliver_len)
+                    var i = 0
+                    while i < deliver_len
+                        wr[10 + i] = data[i]
+                        i += 1
+                    ipc_reply(waiter, wr, 10 + deliver_len)
+                else
+                    inet_enqueue(target, src_ip, src_port, data, dlen)
+        var reply: [3]byte
+        reply[0] = 0
+        inet_write_u16(reply, 1, dlen)
+        ipc_reply(sender, reply, 3)
+
+
+### RECVFROM handler
+
+If the socket already has queued datagrams, deliver the head
+immediately. Otherwise park the sender's thread id in
+`pending_tid` and return without replying — the reply is
+produced later when a matching sendto arrives.
+
+Only one pending recv per socket. A second recv while one is
+already pending is rejected. Good enough for single-threaded
+programs; multi-waiter support is on the list.
+
+    inet_handle_recvfrom(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if inet_fd_valid(fd) == 0
+            var err: [10]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 10)
+            return
+        val maxlen_raw = inet_read_u16(buf, 2)
+        var maxlen = maxlen_raw
+        if maxlen > INET_MAX_DATA
+            maxlen = INET_MAX_DATA
+        if inet_sockets[fd].q_count > 0
+            var reply: [540]byte
+            val n = inet_deliver_head(fd, maxlen, reply)
+            ipc_reply(sender, reply, n)
+            return
+        if inet_sockets[fd].pending_tid >= 0
+            var err: [10]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 10)
+            return
+        inet_sockets[fd].pending_tid = sender
+        inet_sockets[fd].pending_maxlen = maxlen
+        // No reply — deferred until a dgram arrives or close.
+
+
+### CLOSE handler
+
+Closes the slot. If a recv was pending, reply with an error so
+the caller doesn't block forever.
+
+    inet_handle_close(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if inet_fd_valid(fd) == 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        if inet_sockets[fd].pending_tid >= 0
+            val waiter = inet_sockets[fd].pending_tid
+            inet_sockets[fd].pending_tid = -1
+            var wr: [10]byte
+            wr[0] = byte(-1)
+            ipc_reply(waiter, wr, 10)
+        inet_sockets[fd].in_use = 0
+        inet_sockets[fd].bound = 0
+        inet_sockets[fd].q_count = 0
+        inet_sockets[fd].q_head = 0
+        inet_sockets[fd].q_tail = 0
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+### Server main loop
+
+    inet_server()
+        inet_init_sockets()
+        inet_port = port_create()
+        port_register(inet_port, "inet")
+        rs_ready()
+
+        var buf: [540]byte
+        while 1 == 1
+            val sender = ipc_recv(inet_port, buf, INET_MSG_BUF)
+            if sender >= 0
+                val cmd = int(buf[0]) & 0xff
+                if cmd == INET_CMD_SOCKET
+                    inet_handle_socket(sender, buf)
+                else if cmd == INET_CMD_BIND
+                    inet_handle_bind(sender, buf)
+                else if cmd == INET_CMD_SENDTO
+                    inet_handle_sendto(sender, buf)
+                else if cmd == INET_CMD_RECVFROM
+                    inet_handle_recvfrom(sender, buf)
+                else if cmd == INET_CMD_CLOSE
+                    inet_handle_close(sender, buf)
+                else
+                    var reply: [1]byte
+                    reply[0] = byte(-1)
+                    ipc_reply(sender, reply, 1)

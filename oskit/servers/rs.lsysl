@@ -35,13 +35,14 @@ starts the next server.
     import oskit.arch.{SRV_USP, SRV_SSP, INFO_PAGE_VA}
 
 Server tracking. PIDs and MMIO page grants for each server
-in boot order (0=disk, 1=tfs, 2=tty, 3=pm, 4=vfs, 5=init).
-Used by crash recovery to restart a dead server.
+in boot order (0=disk, 1=tfs, 2=tty, 3=pm, 4=vfs, 5=ds,
+6=inet, 7=init). Used by crash recovery to restart a dead
+server.
 
-    val RS_TOTAL_SERVERS = 7
-    var rs_server_pids: [7]int
-    var rs_server_io_page: [7]int
-    var rs_server_ports: [7]int
+    val RS_TOTAL_SERVERS = 8
+    var rs_server_pids: [8]int
+    var rs_server_io_page: [8]int
+    var rs_server_ports: [8]int
 
 Syscall privilege masks. Each server gets a bitmask (lo=bits 0-63,
 hi=bits 64-95) specifying which syscalls it may call. The kernel
@@ -119,7 +120,7 @@ receiver. Servers not listed fall through to 0.
         val tty_port = rs_server_ports[2]
         val pm_port = rs_server_ports[3]
         val vfs_port = rs_server_ports[4]
-        // idx 0 (disk) and 5 (ds) are pure receivers → 0.
+        // idx 0 (disk), 5 (ds), 6 (inet) are pure receivers → 0.
         if idx == 1
             // tfs: sends to disk
             return 1 << disk_port
@@ -132,7 +133,7 @@ receiver. Servers not listed fall through to 0.
         else if idx == 4
             // vfs: sends to tfs and tty
             return (1 << tfs_port) | (1 << tty_port)
-        else if idx == 6
+        else if idx == 7
             // init: sends to pm, vfs
             return (1 << pm_port) | (1 << vfs_port)
         return 0
@@ -194,10 +195,8 @@ so it can use ipc_recv_notify to block for notifications.
 
 Hardcoded boot order. Each entry has a name and length.
 
-    val RS_NUM_SERVERS = 6
-
-    var rs_boot_names: [56]byte   // 7 entries * 8 bytes each
-    var rs_boot_nlen: [7]int
+    var rs_boot_names: [64]byte   // 8 entries * 8 bytes each
+    var rs_boot_nlen: [8]int
 
     rs_init_boot_order()
         // disk
@@ -218,9 +217,12 @@ Hardcoded boot order. Each entry has a name and length.
         // ds
         rs_boot_names[40] = 'd'; rs_boot_names[41] = 's'; rs_boot_names[42] = 0
         rs_boot_nlen[5] = 2
-        // init
-        rs_boot_names[48] = 'i'; rs_boot_names[49] = 'n'; rs_boot_names[50] = 'i'; rs_boot_names[51] = 't'; rs_boot_names[52] = 0
+        // inet
+        rs_boot_names[48] = 'i'; rs_boot_names[49] = 'n'; rs_boot_names[50] = 'e'; rs_boot_names[51] = 't'; rs_boot_names[52] = 0
         rs_boot_nlen[6] = 4
+        // init
+        rs_boot_names[56] = 'i'; rs_boot_names[57] = 'n'; rs_boot_names[58] = 'i'; rs_boot_names[59] = 't'; rs_boot_names[60] = 0
+        rs_boot_nlen[7] = 4
 
 Boot info parsing. RS reads a copy of the boot info header
 from its info page at 0xBF000+24.
@@ -494,8 +496,8 @@ restart it from the boot module, and update tracking.
         if srv_idx < 0
             return
 
-        // Don't restart init (index 5)
-        if srv_idx == 5
+        // Don't restart init (last in boot order)
+        if srv_idx == RS_TOTAL_SERVERS - 1
             return
 
         val name = &rs_boot_names[srv_idx * 8]
@@ -570,10 +572,10 @@ After boot, RS stays alive in a monitoring loop.
             rs_print("ERROR: invalid boot info\n")
             return
 
-        // Start the 5 servers + init from boot modules
-        // Servers that need MMIO get IO_PAGE_DEVICES; others get 0
+        // Start all servers + init from boot modules.
+        // Servers that need MMIO get IO_PAGE_DEVICES; others get 0.
         var i = 0
-        while i <= RS_NUM_SERVERS
+        while i < RS_TOTAL_SERVERS
             val name = &rs_boot_names[i * 8]
             val nlen = rs_boot_nlen[i]
             rs_print("  ")

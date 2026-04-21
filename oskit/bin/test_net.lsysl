@@ -1,0 +1,68 @@
+test_net — UDP loopback sanity test
+====================================
+
+Creates a UDP socket, binds it to a port on `127.0.0.1`, sends a
+short datagram to itself, and prints what comes back. If the
+inet server's loopback delivery is working, the output is two
+lines: `test_net: sent=5` then `test_net: recv=5 'hello'`.
+
+If anything goes sideways (no inet port, out-of-sockets, bind
+fails) the program prints the failing step and exits with a
+non-zero code.
+
+    module oskit.bin.test_net
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{socket, bind, sendto, recvfrom, close_socket}
+    import std.net.{AF_INET, SOCK_DGRAM, INADDR_LOOPBACK}
+
+    print_int(prefix: string, v: int)
+        puts(prefix)
+        if v < 0
+            puts("-")
+            print_udec(0 - v)
+        else
+            print_udec(v)
+        puts("\n")
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+    main(argv: []string)
+        val fd = socket(AF_INET, SOCK_DGRAM, 0)
+        if fd < 0
+            puts("test_net: socket failed\n")
+            exit_with(1)
+            return
+        val br = bind(fd, INADDR_LOOPBACK, 5000)
+        if br < 0
+            puts("test_net: bind failed\n")
+            exit_with(2)
+            return
+        var msg: [5]byte
+        msg[0] = 'h'; msg[1] = 'e'; msg[2] = 'l'; msg[3] = 'l'; msg[4] = 'o'
+        val sent = sendto(fd, &msg[0], 5, INADDR_LOOPBACK, 5000)
+        if sent < 0
+            puts("test_net: sendto failed\n")
+            exit_with(3)
+            return
+        print_int("test_net: sent=", sent)
+        var rbuf: [16]byte
+        var sip: u32 = 0u32
+        var sport: int = 0
+        val got = recvfrom(fd, &rbuf[0], 16, &sip, &sport)
+        if got < 0
+            puts("test_net: recvfrom failed\n")
+            exit_with(4)
+            return
+        puts("test_net: recv=")
+        print_udec(got)
+        puts(" '")
+        puts(string(&rbuf[0], got))
+        puts("'\n")
+        close_socket(fd)
+        exit()
