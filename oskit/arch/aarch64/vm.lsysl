@@ -386,22 +386,45 @@ shared kernel code that references them.
     val PTE_G = 0
     val PTE_PS: i64 = 0
 
-Create a server page table. Same structure as vm_create_process_pt
+Server-accessible MMIO slot in the user L3 carve-out. L3[256] =
+VA 0x60100000, chosen to sit well above the user code/stack/info
+pages (which top out at L3[144]) so future growth there doesn't
+collide. A server whose `io_page` is non-zero gets the physical
+page `io_page × PAGE_SIZE` mapped here with Device memory attrs
++ EL0 R/W + UXN. Register blocks that aren't page-aligned (e.g.
+virtio-mmio slot 31 at PA 0x0a003e00) land at VA
+`MMIO_SERVER_VA + (PA & 0xfff)` — the caller adds the offset.
+
+    val MMIO_SERVER_L3_IDX  = 256
+    val MMIO_SERVER_VA: u64 = u64(0x60100000)
+
+
+Create a server page table. Same structure as `vm_create_process_pt`
 (L2+L3 carve-out at VA 0x60000000); an `io_page` argument lets the
-caller ask for a specific MMIO page mapping at EL0. For the QEMU
-virt board we map the requested MMIO page into the user region's
-L3 table at a known slot (L3[2]); the caller can grant the server
-access to its designated I/O region by passing the page's physical
-index. A value of 0 means "no extra MMIO mapping".
+caller ask for a specific MMIO page mapping at EL0. `io_page = 0`
+means "no extra MMIO mapping" (the common case for pure servers
+like pm, vfs, init).
+
+When `io_page != 0` we walk the freshly-built PT
+(PTBR → L0[0] → L1[1] → L2[256] → L3), inherit the low + upper
+attribute bits from the kernel's L1[0] Device block (giving us
+the correct MAIR index + SH + AF), switch from block to page
+encoding (bit 1), mark the page EL0-accessible (AP[1]=1) and
+UXN, and write the mapping at `L3[MMIO_SERVER_L3_IDX]`.
 
     vm_create_server_pt(io_page: int) -> u64
         val pt = vm_create_process_pt()
         if pt == 0
             return 0
-        // Future: map io_page as an additional EL0-accessible page
-        // inside the carve-out. For now the Device block at L1[0]
-        // is already mapped EL1-only; servers that need real MMIO
-        // access (e.g. the UART) issue syscalls for now.
+        if io_page != 0
+            val mmio_pa = i64(io_page) * i64(PAGE_SIZE)
+            val l1 = u64(vm_read_pte64(pt) & PTE_ADDR_MASK)
+            val l2 = u64(vm_read_pte64(l1 + u64(8)) & PTE_ADDR_MASK)
+            val l3 = u64(vm_read_pte64(l2 + u64(256 * 8)) & PTE_ADDR_MASK)
+            val kernel_l1 = u64(i64(&l1_table))
+            val device_block = vm_read_pte64(kernel_l1)
+            val device_attrs = (device_block & ~PTE_ADDR_MASK & ~i64(2)) | PTE_PAGE | PTE_AP_EL0 | PTE_UXN
+            vm_write_pte64(l3 + u64(MMIO_SERVER_L3_IDX * 8), mmio_pa | device_attrs)
         pt
 
 Grant region for zero-copy IPC. We put it at VA 0x62000000, sitting
