@@ -31,7 +31,10 @@ families / types, and any unknown command code, return
 
     import oskit.ipc.{port_create, port_register, ipc_recv_notify, ipc_reply}
     import oskit.services.{rs_ready, notify_read_self}
-    import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY, INADDR_LOOPBACK, ipv4, ipv4_octet}
+    import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY, INADDR_LOOPBACK, ipv4, ipv4_octet,
+        ETHERTYPE_IPV4, ETHERTYPE_ARP, ARP_OP_REQUEST, ARP_OP_REPLY,
+        IP_PROTO_ICMP, IP_PROTO_UDP, ICMP_ECHO_REQ, ICMP_ECHO_REP,
+        pkt_read_u16, pkt_match_ipv4}
 
 
 Protocol command codes (byte value of buf[0]).
@@ -135,6 +138,25 @@ the obvious upgrade once the stack grows.
         -1
 
 
+### Locate any socket bound to `port`
+
+Port-only variant for UDP RX dispatch. The guest has a single unicast
+IPv4 address plus `INADDR_ANY`, so IP matching on inbound packets
+would just restate what's already true (the nic delivered the frame
+to our MAC). Returning the first port match keeps the RX path simple
+and matches how typical single-homed stacks behave.
+
+    inet_find_bound_port(port: int) -> int
+        var i = 0
+        while i < INET_MAX_SOCKETS
+            if inet_sockets[i].in_use != 0
+                if inet_sockets[i].bound != 0
+                    if inet_sockets[i].bound_port == port
+                        return i
+            i += 1
+        -1
+
+
 ### Enqueue an incoming datagram
 
 Returns 1 on success, 0 if the queue is full (caller drops the
@@ -157,6 +179,33 @@ packet per UDP semantics).
         inet_sockets[fd].q_tail = (slot + 1) % INET_MAX_QUEUE
         inet_sockets[fd].q_count += 1
         1
+
+
+### Deliver a datagram directly to a socket's pending recvfrom
+
+Used by both the loopback sendto path and the UDP RX path. Assumes
+`inet_sockets[fd].pending_tid >= 0`. Clears the waiter slot, builds
+the recvfrom reply (same shape as `inet_deliver_head` produces), and
+replies via IPC.
+
+    inet_deliver_to_waiter(fd: int, src_ip: u32, src_port: int, data: *byte, dlen: int)
+        val waiter = inet_sockets[fd].pending_tid
+        val mlen = inet_sockets[fd].pending_maxlen
+        inet_sockets[fd].pending_tid = -1
+        var wr: [540]byte
+        var deliver_len = dlen
+        if deliver_len > mlen
+            deliver_len = mlen
+        wr[0] = 0
+        wr[1] = byte(AF_INET & 0xff)
+        inet_write_u16(wr, 2, src_port)
+        inet_write_ipv4(wr, 4, src_ip)
+        inet_write_u16(wr, 8, deliver_len)
+        var i = 0
+        while i < deliver_len
+            wr[10 + i] = data[i]
+            i += 1
+        ipc_reply(waiter, wr, 10 + deliver_len)
 
 
 ### Deliver one queued datagram to a pending recvfrom
@@ -287,9 +336,13 @@ plumbed through.
 
 ### SENDTO handler
 
-Only loopback delivery for now — any other destination is
-silently dropped (reported as "success, 0 bytes sent") so
-client code behaves sanely until we add a NIC.
+Loopback (`INADDR_LOOPBACK`) is delivered in-process against the
+socket table. Non-loopback destinations go out the wire via
+`inet_send_udp` — requires the socket to be bound so we have a valid
+source port, and requires the gateway MAC to have been learned via
+boot ARP. Either failure reports `status=-1, nsent=0`; UDP semantics
+let us drop unmatched loopback targets silently with
+`status=0, nsent=dlen`.
 
     inet_handle_sendto(sender: int, buf: *byte)
         val fd = int(buf[1]) & 0xff
@@ -312,34 +365,34 @@ client code behaves sanely until we add a NIC.
         val dst_ip = inet_read_ipv4(buf, 5)
         val dlen = inet_read_u16(buf, 9)
         val data: *byte = buf + 11
-        // Source address is the caller's bound port, if any,
-        // else port 0 — good enough for loopback testing.
         val src_port = inet_sockets[fd].bound_port
-        val src_ip = INADDR_LOOPBACK
         if dst_ip == INADDR_LOOPBACK
             val target = inet_find_bound(dst_ip, dst_port)
             if target >= 0
-                // Pending recv? Deliver directly.
                 if inet_sockets[target].pending_tid >= 0
-                    val waiter = inet_sockets[target].pending_tid
-                    val mlen = inet_sockets[target].pending_maxlen
-                    inet_sockets[target].pending_tid = -1
-                    var wr: [540]byte
-                    var deliver_len = dlen
-                    if deliver_len > mlen
-                        deliver_len = mlen
-                    wr[0] = 0
-                    wr[1] = byte(AF_INET & 0xff)
-                    inet_write_u16(wr, 2, src_port)
-                    inet_write_ipv4(wr, 4, src_ip)
-                    inet_write_u16(wr, 8, deliver_len)
-                    var i = 0
-                    while i < deliver_len
-                        wr[10 + i] = data[i]
-                        i += 1
-                    ipc_reply(waiter, wr, 10 + deliver_len)
+                    inet_deliver_to_waiter(target, INADDR_LOOPBACK, src_port, data, dlen)
                 else
-                    inet_enqueue(target, src_ip, src_port, data, dlen)
+                    inet_enqueue(target, INADDR_LOOPBACK, src_port, data, dlen)
+            var reply: [3]byte
+            reply[0] = 0
+            inet_write_u16(reply, 1, dlen)
+            ipc_reply(sender, reply, 3)
+            return
+        if inet_sockets[fd].bound == 0
+            var err: [3]byte
+            err[0] = byte(-1)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        val r = inet_send_udp(dst_ip, dst_port, src_port, data, dlen)
+        if r < 0
+            var err: [3]byte
+            err[0] = byte(-1)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
         var reply: [3]byte
         reply[0] = 0
         inet_write_u16(reply, 1, dlen)
@@ -409,6 +462,128 @@ the caller doesn't block forever.
         var reply: [1]byte
         reply[0] = 0
         ipc_reply(sender, reply, 1)
+
+
+### UDP — inbound
+
+Dispatch an IPv4/UDP frame that already passed the destination-IP
+check. Pulls header fields, looks up a socket bound to `dst_port`,
+and either hands the datagram to a waiting recvfrom or enqueues it.
+Dropping on no-match matches standard UDP semantics.
+
+    inet_handle_udp(frame: *byte, total_len: int, ihl_bytes: int)
+        val udp_off = 14 + ihl_bytes
+        if total_len < udp_off + 8
+            return
+        val src_port = pkt_read_u16(frame, udp_off)
+        val dst_port = pkt_read_u16(frame, udp_off + 2)
+        val udp_len = pkt_read_u16(frame, udp_off + 4)
+        if udp_len < 8
+            return
+        if total_len < udp_off + udp_len
+            return
+        val payload_len = udp_len - 8
+        val data: *byte = frame + udp_off + 8
+        val src_ip = ipv4(int(frame[14 + 12]) & 0xff, int(frame[14 + 13]) & 0xff, int(frame[14 + 14]) & 0xff, int(frame[14 + 15]) & 0xff)
+        val target = inet_find_bound_port(dst_port)
+        if target < 0
+            return
+        if inet_sockets[target].pending_tid >= 0
+            inet_deliver_to_waiter(target, src_ip, src_port, data, payload_len)
+        else
+            inet_enqueue(target, src_ip, src_port, data, payload_len)
+
+
+### EtherType dispatch
+
+Called by the RX drain for every frame. ARP requests for us ->
+reply, ARP reply from gateway -> cache gw MAC + send one ICMP
+echo, ICMP echo request -> reply, ICMP echo reply -> diag count,
+UDP -> socket dispatch. Returns 1 if we acted, 0 otherwise
+(diagnostic only).
+
+    inet_handle_frame(frame: *byte, len: int) -> int
+        if len < 14
+            return 0
+        val etype = pkt_read_u16(frame, 12)
+        if etype == ETHERTYPE_ARP
+            if len < 14 + 28
+                return 0
+            val op = pkt_read_u16(frame, 14 + 6)
+            if op == ARP_OP_REQUEST
+                if pkt_match_ipv4(frame, 14 + 24, INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D) == 0
+                    return 0
+                inet_send_arp_reply(frame)
+                return 1
+            if op == ARP_OP_REPLY
+                if pkt_match_ipv4(frame, 14 + 14, INET_GW_IP_A, INET_GW_IP_B, INET_GW_IP_C, INET_GW_IP_D) != 0
+                    inet_cache_gw_mac(frame + 14 + 8)
+                    inet_send_icmp_echo(0x1234, 1)
+                    return 1
+            return 0
+        if etype == ETHERTYPE_IPV4
+            if len < 14 + 20
+                return 0
+            val ihl_bytes = (int(frame[14]) & 0x0f) * 4
+            if ihl_bytes < 20
+                return 0
+            if pkt_match_ipv4(frame, 14 + 16, INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D) == 0
+                return 0
+            val proto = int(frame[14 + 9]) & 0xff
+            if proto == IP_PROTO_ICMP
+                val icmp_off = 14 + ihl_bytes
+                if len < icmp_off + 8
+                    return 0
+                val itype = int(frame[icmp_off]) & 0xff
+                if itype == ICMP_ECHO_REQ
+                    inet_send_icmp_reply(frame, len)
+                    return 1
+                if itype == ICMP_ECHO_REP
+                    inet_bump_pings_received()
+                    return 1
+                return 0
+            if proto == IP_PROTO_UDP
+                inet_handle_udp(frame, len, ihl_bytes)
+                return 1
+            return 0
+        0
+
+
+### RX drain
+
+Called on every `ipc_recv_notify` wake where the result was -2
+(a nic notification). Drains the RX queue non-blockingly, feeding
+each frame into `inet_handle_frame`.
+
+    inet_drain_rx()
+        var frame: [1514]byte
+        while true
+            val n = inet_nic_recv_packet(frame, 1514)
+            if n <= 0
+                break
+            inet_handle_frame(frame, n)
+
+
+### Link-layer init
+
+Called once from `inet_server()` after it registers its port.
+Fetches our MAC from the nic, subscribes for RX notifications,
+and fires the boot ARP request for the gateway (so the familiar
+ARP + ICMP echo pcap still drops out of a cold boot).
+
+Returns 1 if the nic responded and we subscribed successfully, 0
+if the nic isn't reachable (e.g. x86 builds without virtio-net).
+UDP loopback works either way.
+
+    inet_link_init() -> int
+        var mac: [6]byte
+        if inet_nic_get_mac(mac) != 0
+            return 0
+        inet_set_our_mac(mac)
+        if inet_nic_subscribe_rx() != 0
+            return 0
+        inet_send_arp_request(INET_GW_IP_A, INET_GW_IP_B, INET_GW_IP_C, INET_GW_IP_D)
+        1
 
 
 ### Server main loop

@@ -23,10 +23,12 @@ live in kernel-thread space and call `virtio_net_send` directly.
     import oskit.ipc.{ipc_send, port_lookup}
     import std.net.{ETHERTYPE_IPV4, ETHERTYPE_ARP,
         ARP_OP_REQUEST, ARP_OP_REPLY,
-        IP_PROTO_ICMP, ICMP_ECHO_REQ, ICMP_ECHO_REP,
+        IP_PROTO_ICMP, IP_PROTO_UDP,
+        ICMP_ECHO_REQ, ICMP_ECHO_REP,
         pkt_read_u16, pkt_write_u16,
         pkt_write_mac, pkt_write_ipv4,
-        pkt_match_ipv4, net_checksum}
+        pkt_match_ipv4, net_checksum,
+        ipv4, ipv4_octet}
 
 
 The guest's IP and gateway IP under QEMU user-mode networking.
@@ -193,6 +195,16 @@ frame's raw length (up to `maxlen` bytes copied into `out`), or
             i += 1
         inet_our_mac_known = 1
 
+    inet_cache_gw_mac(mac: *byte)
+        var i = 0
+        while i < 6
+            inet_gw_mac[i] = mac[i]
+            i += 1
+        inet_gw_mac_known = 1
+
+    inet_bump_pings_received()
+        inet_pings_received += 1
+
 
 ARP request for the IPv4 address `ta.tb.tc.td`, broadcast. Uses
 our MAC (must be known — early-returns -1 otherwise). Returns 0
@@ -349,101 +361,63 @@ recompute over the full ICMP message.
         inet_nic_send_packet(frame, total_len)
 
 
-### EtherType dispatch
+### UDP — outbound
 
-Called by the RX drain for every frame. ARP requests for us ->
-reply, ARP reply from gateway -> cache gw MAC + send one ICMP
-echo, ICMP echo request -> reply, ICMP echo reply -> diag count.
-Returns 1 if we acted, 0 otherwise (diagnostic only).
+Builds a full Ethernet/IPv4/UDP frame and hands it to the nic. The
+gateway MAC is the only link-layer destination we know (no general
+ARP cache yet), and QEMU user-mode networking routes everything
+through the gateway anyway, so we send every non-loopback packet
+there. Returns 0 on success, -1 if the link isn't ready
+(`inet_our_mac_known` or `inet_gw_mac_known` still 0), if `dlen` is
+out of range, or if the nic rejects the frame.
 
-    inet_handle_frame(frame: *byte, len: int) -> int
-        if len < 14
-            return 0
-        val etype = pkt_read_u16(frame, 12)
-        if etype == ETHERTYPE_ARP
-            if len < 14 + 28
-                return 0
-            val op = pkt_read_u16(frame, 14 + 6)
-            if op == ARP_OP_REQUEST
-                if pkt_match_ipv4(frame, 14 + 24,
-                        INET_OUR_IP_A, INET_OUR_IP_B,
-                        INET_OUR_IP_C, INET_OUR_IP_D) == 0
-                    return 0
-                inet_send_arp_reply(frame)
-                return 1
-            if op == ARP_OP_REPLY
-                if pkt_match_ipv4(frame, 14 + 14,
-                        INET_GW_IP_A, INET_GW_IP_B,
-                        INET_GW_IP_C, INET_GW_IP_D) != 0
-                    var k = 0
-                    while k < 6
-                        inet_gw_mac[k] = frame[14 + 8 + k]
-                        k += 1
-                    inet_gw_mac_known = 1
-                    // Boot ICMP echo — keeps run-net.sh's pcap showing the full ARP+ICMP round-trip.
-                    inet_send_icmp_echo(0x1234, 1)
-                    return 1
-            return 0
-        if etype == ETHERTYPE_IPV4
-            if len < 14 + 20
-                return 0
-            val ihl_bytes = (int(frame[14]) & 0x0f) * 4
-            if ihl_bytes < 20
-                return 0
-            val proto = int(frame[14 + 9]) & 0xff
-            if proto != IP_PROTO_ICMP
-                return 0
-            if pkt_match_ipv4(frame, 14 + 16,
-                    INET_OUR_IP_A, INET_OUR_IP_B,
-                    INET_OUR_IP_C, INET_OUR_IP_D) == 0
-                return 0
-            val icmp_off = 14 + ihl_bytes
-            if len < icmp_off + 8
-                return 0
-            val itype = int(frame[icmp_off]) & 0xff
-            if itype == ICMP_ECHO_REQ
-                inet_send_icmp_reply(frame, len)
-                return 1
-            if itype == ICMP_ECHO_REP
-                inet_pings_received += 1
-                return 1
-            return 0
-        0
+UDP checksum is left zero — the IPv4 spec makes it optional, and
+skipping the pseudo-header computation keeps this first cut small.
 
-
-### RX drain
-
-Called on every `ipc_recv_notify` wake where the result was -2
-(a nic notification). Drains the RX queue non-blockingly, feeding
-each frame into `inet_handle_frame`.
-
-    inet_drain_rx()
+    inet_send_udp(dst_ip: u32, dst_port: int, src_port: int, data: *byte, dlen: int) -> int
+        if inet_our_mac_known == 0
+            return -1
+        if inet_gw_mac_known == 0
+            return -1
+        if dlen < 0
+            return -1
+        if dlen > 1472
+            return -1
         var frame: [1514]byte
-        while true
-            val n = inet_nic_recv_packet(frame, 1514)
-            if n <= 0
-                break
-            inet_handle_frame(frame, n)
+        val total_len = 14 + 20 + 8 + dlen
+
+Ethernet header.
+
+        pkt_write_mac(frame, 0, inet_gw_mac)
+        pkt_write_mac(frame, 6, inet_our_mac)
+        pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
+
+IPv4 header (20 bytes, no options).
+
+        frame[14] = 0x45
+        frame[15] = 0
+        pkt_write_u16(frame, 16, 20 + 8 + dlen)
+        pkt_write_u16(frame, 18, 0)
+        pkt_write_u16(frame, 20, 0)
+        frame[22] = 64
+        frame[23] = byte(IP_PROTO_UDP)
+        pkt_write_u16(frame, 24, 0)
+        pkt_write_ipv4(frame, 26,
+            INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+        pkt_write_ipv4(frame, 30, ipv4_octet(dst_ip, 0), ipv4_octet(dst_ip, 1), ipv4_octet(dst_ip, 2), ipv4_octet(dst_ip, 3))
+        pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+
+UDP header + payload.
+
+        pkt_write_u16(frame, 34, src_port)
+        pkt_write_u16(frame, 36, dst_port)
+        pkt_write_u16(frame, 38, 8 + dlen)
+        pkt_write_u16(frame, 40, 0)
+        var i = 0
+        while i < dlen
+            frame[42 + i] = data[i]
+            i += 1
+
+        inet_nic_send_packet(frame, total_len)
 
 
-### Link-layer init
-
-Called once from `inet_server()` after it registers its port.
-Fetches our MAC from the nic, subscribes for RX notifications,
-and fires the boot ARP request for the gateway (so the familiar
-ARP + ICMP echo pcap still drops out of a cold boot).
-
-Returns 1 if the nic responded and we subscribed successfully, 0
-if the nic isn't reachable (e.g. x86 builds without virtio-net).
-UDP loopback works either way.
-
-    inet_link_init() -> int
-        var mac: [6]byte
-        if inet_nic_get_mac(mac) != 0
-            return 0
-        inet_set_our_mac(mac)
-        if inet_nic_subscribe_rx() != 0
-            return 0
-        inet_send_arp_request(
-            INET_GW_IP_A, INET_GW_IP_B, INET_GW_IP_C, INET_GW_IP_D)
-        1

@@ -1,20 +1,30 @@
-test_net — UDP loopback sanity test
-====================================
+test_net — UDP sanity test (loopback + real-wire sendto)
+========================================================
 
-Creates a UDP socket, binds it to a port on `127.0.0.1`, sends a
-short datagram to itself, and prints what comes back. If the
-inet server's loopback delivery is working, the output is two
-lines: `test_net: sent=5` then `test_net: recv=5 'hello'`.
+Two phases:
 
-If anything goes sideways (no inet port, out-of-sockets, bind
-fails) the program prints the failing step and exits with a
-non-zero code.
+1. Loopback: creates a UDP socket, binds to `127.0.0.1:5000`,
+   sends "hello" to itself, and prints what comes back. If the
+   inet server's loopback delivery is working, it prints
+   `test_net: sent=5` then `test_net: recv=5 'hello'`.
+
+2. Real-wire: creates a second UDP socket, binds `0.0.0.0:6000`,
+   and tries `sendto 10.0.2.2:9` (the discard port under QEMU's
+   default slirp lease). On targets where inet's link layer is up
+   (aarch64 virt with virtio-net), this produces an outbound UDP
+   frame visible in a pcap; prints `test_net: wire sent=5`. On
+   targets without a nic (x86 today), sendto returns -1 and we
+   print `test_net: wire sendto failed (no nic?)` and keep going.
+
+If anything in phase 1 goes sideways (no inet port, out-of-sockets,
+bind fails) the program prints the failing step and exits with a
+non-zero code. Phase 2 is advisory — failures don't abort.
 
     module oskit.bin.test_net
 
     import oskit.ulib.{puts, exit, exit_with}
     import oskit.net.{socket, bind, sendto, recvfrom, close_socket}
-    import std.net.{AF_INET, SOCK_DGRAM, INADDR_LOOPBACK}
+    import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY, INADDR_LOOPBACK, ipv4}
 
     print_int(prefix: string, v: int)
         puts(prefix)
@@ -65,4 +75,29 @@ non-zero code.
         puts(string(&rbuf[0], got))
         puts("'\n")
         close_socket(fd)
+
+Phase 2 — real-wire sendto. Bind on 0.0.0.0:6000 and try to send
+"hello" to the gateway discard port. Non-fatal on failure so this
+test still passes on targets without a nic.
+
+        val fd2 = socket(AF_INET, SOCK_DGRAM, 0)
+        if fd2 < 0
+            puts("test_net: wire socket failed\n")
+            exit()
+            return
+        val br2 = bind(fd2, INADDR_ANY, 6000)
+        if br2 < 0
+            puts("test_net: wire bind failed\n")
+            close_socket(fd2)
+            exit()
+            return
+        var wmsg: [5]byte
+        wmsg[0] = 'h'; wmsg[1] = 'e'; wmsg[2] = 'l'; wmsg[3] = 'l'; wmsg[4] = 'o'
+        val gw = ipv4(10, 0, 2, 2)
+        val wsent = sendto(fd2, &wmsg[0], 5, gw, 9)
+        if wsent < 0
+            puts("test_net: wire sendto failed (no nic?)\n")
+        else
+            print_int("test_net: wire sent=", wsent)
+        close_socket(fd2)
         exit()
