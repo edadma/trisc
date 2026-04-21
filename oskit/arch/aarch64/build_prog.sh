@@ -6,95 +6,31 @@
 #   ./build_prog.sh all         # builds all programs in oskit/bin/
 #
 # Output: /tmp/slix-aarch64/bin/<name>       (ELF64)
-#         /tmp/slix-aarch64/bin/<name>.bin   (flat raw binary, .text+.rodata+.data)
+#         /tmp/slix-aarch64/bin/<name>.bin   (raw binary, consumed by ramdisk packer)
 
 set -e
 
 ARCH_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$ARCH_DIR/../../.." && pwd)"
-OUT=/tmp/slix-aarch64
+
+ARCH_NAME=aarch64
+OUT=/tmp/slix-${ARCH_NAME}
 BIN_OUT="$OUT/bin"
 mkdir -p "$BIN_OUT"
 
-build_one() {
-    local NAME="$1"
-    local SRC="oskit/bin/${NAME}.lsysl"
+SYSL_TARGET=aarch64-elf
+TOOLCHAIN_PREFIX=aarch64-elf-
+CLANG_TARGET=aarch64-unknown-none-elf
+CLANG_EXTRA_FLAGS=""
+GCC_EXTRA_FLAGS=""
+AS_EXTRA_FLAGS=""
+# -z max-page-size=0x1000 drops aarch64-elf-ld's default 64KB page
+# alignment, which otherwise leaves ~60KB of padding before .text
+# in the output ELF and blows past the loader's LOAD_CROSS_BUF_SIZE.
+LD_EXTRA_FLAGS="-z max-page-size=0x1000"
+PROG_CONFIG=oskit/arch/aarch64/prog_config.sysl
+NEEDS_FLAT_BIN=1
 
-    if [ ! -f "$REPO_ROOT/$SRC" ]; then
-        echo "ERROR: $SRC not found" >&2
-        return 1
-    fi
+source "$REPO_ROOT/oskit/arch/common.sh"
 
-    echo "=== Building /bin/$NAME ==="
-
-    local SYSL_FILES=(
-        "$SRC"
-        oskit/ulib/ulib.lsysl
-        oskit/ulib/srt0.lsysl
-        oskit/ds/client.lsysl
-        oskit/arch/aarch64/prog_config.sysl
-        std/alloc/alloc.lsysl
-    )
-
-    # Per-program extra dependencies (mirror oskit/arch/x86_64/build_prog.sh)
-    case "$NAME" in
-        login|su)
-            SYSL_FILES+=(
-                std/crypto/pbkdf2/pbkdf2.lsysl
-                std/crypto/hmac/hmac.lsysl
-                std/crypto/sha256/sha256.lsysl
-                std/encoding/binary/binary.lsysl
-                std/mem/mem.lsysl
-                std/debug/debug.lsysl
-            )
-            ;;
-    esac
-
-    cd "$REPO_ROOT"
-    sbt "syslCliJVM/run compile --emit llvm --target=aarch64-elf ${SYSL_FILES[*]} -o $OUT/prog_${NAME}.ll" > /tmp/sbt-aa-prog-${NAME}.log 2>&1
-    if ! grep -q "success" "/tmp/sbt-aa-prog-${NAME}.log"; then
-        echo "  Sysl compile failed:" >&2
-        tail -10 "/tmp/sbt-aa-prog-${NAME}.log" >&2
-        return 1
-    fi
-    echo "  Sysl -> LLVM IR ok"
-
-    clang -target aarch64-unknown-none-elf -ffreestanding -nostdlib \
-        -fno-pic -fno-pie -w \
-        -c -o "$OUT/prog_${NAME}.o" "$OUT/prog_${NAME}.ll"
-    echo "  LLVM IR -> object ok"
-
-    aarch64-elf-as -o "$OUT/prog_start.o" "$ARCH_DIR/prog_start.s"
-
-    aarch64-elf-gcc -ffreestanding -nostdlib \
-        -fno-pic -fno-pie -c -o "$OUT/prog_stubs.o" "$ARCH_DIR/prog_stubs.c"
-
-    # -z max-page-size=0x1000 drops aarch64-elf-ld's default 64KB page
-    # alignment, which otherwise leaves ~60KB of padding before .text
-    # in the output ELF and blows past the loader's LOAD_CROSS_BUF_SIZE.
-    aarch64-elf-ld -T "$ARCH_DIR/prog.ld" \
-        -z max-page-size=0x1000 \
-        -o "$BIN_OUT/${NAME}" \
-        "$OUT/prog_start.o" "$OUT/prog_stubs.o" "$OUT/prog_${NAME}.o" 2>&1 \
-        | grep -v "missing .note.GNU-stack" \
-        | grep -v "deprecated" \
-        | grep -v "RWX permissions" || true
-    echo "  Link -> ELF ok ($(wc -c < "$BIN_OUT/${NAME}" | tr -d ' ') bytes)"
-
-    aarch64-elf-objcopy -O binary \
-        -j .text -j .rodata -j .data -j .got -j .got.plt \
-        "$BIN_OUT/${NAME}" "$BIN_OUT/${NAME}.bin"
-    echo "  objcopy -> raw ok ($(wc -c < "$BIN_OUT/${NAME}.bin" | tr -d ' ') bytes)"
-}
-
-if [ "$1" = "all" ]; then
-    for src in "$REPO_ROOT"/oskit/bin/*.lsysl; do
-        name=$(basename "$src" .lsysl)
-        build_one "$name" || echo "  FAILED: $name" >&2
-    done
-elif [ -n "$1" ]; then
-    build_one "$1"
-else
-    echo "Usage: $0 <program|all>" >&2
-    exit 1
-fi
+dispatch_program_arg "$1"
