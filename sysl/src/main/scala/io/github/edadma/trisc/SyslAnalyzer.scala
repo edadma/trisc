@@ -923,18 +923,22 @@ class SyslAnalyzer:
     case UnaryAST("~", inner) => evalConstExprAST(inner).map(~_)
     case UnaryAST("!", inner) => evalConstExprAST(inner).map(v => if v == 0 then 1L else 0L)
     case BinaryAST(l, op, r) =>
-      for a <- evalConstExprAST(l); b <- evalConstExprAST(r) yield op match
-        case "+"  => a + b
-        case "-"  => a - b
-        case "*"  => a * b
-        case "/"  => if b == 0 then return None else a / b
-        case "%"  => if b == 0 then return None else a % b
-        case "&"  => a & b
-        case "|"  => a | b
-        case "^"  => a ^ b
-        case "<<" => a << b.toInt
-        case ">>" => a >> b.toInt
-        case _    => return None
+      for
+        a <- evalConstExprAST(l)
+        b <- evalConstExprAST(r)
+        result <- op match
+          case "+"  => Some(a + b)
+          case "-"  => Some(a - b)
+          case "*"  => Some(a * b)
+          case "/"  => if b == 0 then None else Some(a / b)
+          case "%"  => if b == 0 then None else Some(a % b)
+          case "&"  => Some(a & b)
+          case "|"  => Some(a | b)
+          case "^"  => Some(a ^ b)
+          case "<<" => Some(a << b.toInt)
+          case ">>" => Some(a >> b.toInt)
+          case _    => None
+      yield result
     case VarRefAST(n) if compileTimeConstants.contains(n) => Some(compileTimeConstants(n))
     case _ => None
 
@@ -1253,6 +1257,7 @@ class SyslAnalyzer:
     case StructType(n, _, _)    => n
     case EnumType(n, _)      => n
     case InterfaceType(n, _) => n
+    case NamedType(n, _, _, _, _) => n
 
   private def mangleGenericName(base: String, typeArgs: List[SyslType]): String =
     base + "_" + typeArgs.map(typeToMangled).mkString("_")
@@ -1320,6 +1325,7 @@ class SyslAnalyzer:
     case NamedTypeAST(name, Nil) if subst.contains(name) => subst(name)
     case NamedTypeAST(name, args) => NamedTypeAST(name, args.map(substituteTypeAST(_, subst)))
     case PtrTypeAST(inner) => PtrTypeAST(substituteTypeAST(inner, subst))
+    case PtrNonNullTypeAST(inner) => PtrNonNullTypeAST(substituteTypeAST(inner, subst))
     case ArrayTypeAST(size, elem) => ArrayTypeAST(size, substituteTypeAST(elem, subst))
     case SliceTypeAST(elem) => SliceTypeAST(substituteTypeAST(elem, subst))
     case FuncTypeAST(params, ret, esc) => FuncTypeAST(params.map(substituteTypeAST(_, subst)), substituteTypeAST(ret, subst), esc)
