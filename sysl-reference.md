@@ -478,6 +478,21 @@ refers to the function's return value. Outside `ensure` — in `require` or in t
 aliases `result` → `__result__` only while typechecking ensure expressions (same pattern
 used for `self` → `__self__` in methods).
 
+**`old(expr)` in `ensure` clauses.** Captures the value of `expr` at function entry, before
+any body statement runs. Essential for contracts about mutation:
+
+```sysl
+increment(p: *int)
+    ensure *p == old(*p) + 1
+    *p = *p + 1
+```
+
+`old()` may only appear inside `ensure` clauses; using it elsewhere is a normal undefined-
+function error. Each `old(expr)` call allocates a hidden snapshot local that is initialized
+at the top of the function body — so later mutations of the underlying variable or pointee
+do not affect what `old()` sees. `old()` accepts any expression (pointer derefs, field
+accesses, arithmetic, calls), but nested `old(old(...))` is rejected.
+
 Contracts are not yet supported on expression-body functions or on closures.
 
 ### Default Parameter Values

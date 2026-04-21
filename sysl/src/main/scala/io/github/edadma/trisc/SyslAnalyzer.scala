@@ -101,6 +101,11 @@ class SyslAnalyzer:
 
   // Expected type for bidirectional inference (used by generic variant constructors)
   private var currentExpected: Option[SyslType] = None
+  // While analyzing an `ensure` expression, `old(x)` gets intercepted and rewritten
+  // into a reference to a snapshot local captured at function entry.
+  private var inEnsureAnalysis: Boolean = false
+  private var oldSnapshotCounter: Int = 0
+  private val oldSnapshots = mutable.ListBuffer.empty[(String, SyslType, TExpr)]
 
   // Built-in binary operator → (trait name, method name). Extensible via #operator("sym") on trait methods.
   private val builtinBinaryOperatorTraits: Map[String, (String, String)] = Map(
@@ -1608,10 +1613,21 @@ class SyslAnalyzer:
       if te.typ != BoolType then throw AnalysisError(s"require expression must be bool, got ${te.typ}")
       TContractCheck("precondition", te, "precondition")
     }
-    val ensureChecks: List[TStmt] = contracts.collect { case ContractClauseAST(ContractEnsure, e) =>
+    // Enable `old()` interception while analyzing ensure clauses. Snapshot declarations
+    // accumulated during analysis are emitted as TVarStmts at the very top of the body so
+    // they capture values *before* any mutation in the body.
+    val savedEnsureMode = inEnsureAnalysis
+    val snapshotsBefore = oldSnapshots.length
+    inEnsureAnalysis = true
+    val ensureChecks: List[TStmt] = try contracts.collect { case ContractClauseAST(ContractEnsure, e) =>
       val te = analyzeExpr(e)
       if te.typ != BoolType then throw AnalysisError(s"ensure expression must be bool, got ${te.typ}")
       TContractCheck("postcondition", te, "postcondition")
+    } finally inEnsureAnalysis = savedEnsureMode
+    val capturedSnapshots = oldSnapshots.drop(snapshotsBefore).toList
+    oldSnapshots.remove(snapshotsBefore, capturedSnapshots.length)
+    val snapshotDecls: List[TStmt] = capturedSnapshots.map { (name, typ, expr) =>
+      TVarStmt(name, typ, expr)
     }
     // Drop the `result` alias so user code in the body cannot pick it up unintentionally.
     // `__result__` stays in scope — the body rewrite references it.
@@ -1622,7 +1638,7 @@ class SyslAnalyzer:
     val resultDecl: List[TStmt] =
       if hasResult then List(TVarStmt("__result__", returnType, zeroExprFor(returnType)))
       else Nil
-    TBlockBody(resultDecl ++ requireChecks ++ finalized)
+    TBlockBody(snapshotDecls ++ resultDecl ++ requireChecks ++ finalized)
 
   /** Zero-value expression for a scalar/pointer return type. */
   private def zeroExprFor(t: SyslType): TExpr = t.underlying match
@@ -2575,6 +2591,20 @@ class SyslAnalyzer:
             val coreCast = if tInner.typ.underlying == base then tInner else TCast(tInner, base)
             applyTargetType(coreCast, nt)
           case _ => TCast(tInner, target)
+
+      case CallAST("old", args) if inEnsureAnalysis =>
+        if args.length != 1 then throw AnalysisError("old() takes exactly 1 argument")
+        // Temporarily suspend the intercept so nested `old(old(...))` cases fall through
+        // to a normal CallAST (undefined function) — we disallow nesting for now.
+        val savedMode = inEnsureAnalysis
+        inEnsureAnalysis = false
+        val tArg = try analyzeExpr(args.head) finally inEnsureAnalysis = savedMode
+        val snapshotName = s"__old_${oldSnapshotCounter}"
+        oldSnapshotCounter += 1
+        oldSnapshots += ((snapshotName, tArg.typ, tArg))
+        if scopeStack != null then
+          currentScope(snapshotName) = SymInfo(snapshotName, tArg.typ, mutable = false)
+        TVarRef(snapshotName, tArg.typ)
 
       case CallAST(name, args) if integerArithIntrinsics.contains(name) =>
         if args.size != 2 then throw AnalysisError(s"$name() takes exactly 2 arguments")
