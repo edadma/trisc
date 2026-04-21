@@ -625,9 +625,11 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TMultiStmt(children) =>
         for s <- children do exec(s, env)
 
-      case TContractCheck(kind, expr, _) =>
+      case TContractCheck(kind, expr, message) =>
         val v = toLong(evalAny(expr, env))
-        if v == 0 then throw RuntimeError(s"$kind check failed")
+        if v == 0 then
+          val suffix = if message == kind then "" else s": $message"
+          throw RuntimeError(s"$kind check failed$suffix")
 
       case TExprStmt(expr) =>
         evalAny(expr, env)

@@ -1678,10 +1678,10 @@ class SyslAnalyzer:
     if hasResult then
       currentScope("__result__") = SymInfo("__result__", returnType, mutable = true)
       currentScope("result") = SymInfo("__result__", returnType, mutable = false)
-    val requireChecks: List[TStmt] = contracts.collect { case ContractClauseAST(ContractRequire, e) =>
+    val requireChecks: List[TStmt] = contracts.collect { case ContractClauseAST(ContractRequire, e, msg) =>
       val te = analyzeExpr(e)
       if te.typ != BoolType then throw AnalysisError(s"require expression must be bool, got ${te.typ}")
-      TContractCheck("precondition", te, "precondition")
+      TContractCheck("precondition", te, msg.getOrElse("precondition"))
     }
     // Enable `old()` interception while analyzing ensure clauses. Snapshot declarations
     // accumulated during analysis are emitted as TVarStmts at the very top of the body so
@@ -1689,10 +1689,10 @@ class SyslAnalyzer:
     val savedEnsureMode = inEnsureAnalysis
     val snapshotsBefore = oldSnapshots.length
     inEnsureAnalysis = true
-    val ensureChecks: List[TStmt] = try contracts.collect { case ContractClauseAST(ContractEnsure, e) =>
+    val ensureChecks: List[TStmt] = try contracts.collect { case ContractClauseAST(ContractEnsure, e, msg) =>
       val te = analyzeExpr(e)
       if te.typ != BoolType then throw AnalysisError(s"ensure expression must be bool, got ${te.typ}")
-      TContractCheck("postcondition", te, "postcondition")
+      TContractCheck("postcondition", te, msg.getOrElse("postcondition"))
     } finally inEnsureAnalysis = savedEnsureMode
     val capturedSnapshots = oldSnapshots.drop(snapshotsBefore).toList
     oldSnapshots.remove(snapshotsBefore, capturedSnapshots.length)

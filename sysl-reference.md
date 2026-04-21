@@ -479,12 +479,26 @@ sqrt(x: f64) -> f64
     r
 ```
 
-- **`require <bool>`** — evaluated once on function entry. Traps if false.
-- **`ensure <bool>`** — evaluated before every return site (including the implicit fall-through
-  return of a trailing expression). Traps if false.
+- **`require <bool> [, "message"]`** — evaluated once on function entry. Traps if false.
+- **`ensure <bool> [, "message"]`** — evaluated before every return site (including the
+  implicit fall-through return of a trailing expression). Traps if false.
 - Multiple `require` and `ensure` clauses are allowed, in any order. All clauses must appear
   before the first regular statement.
 - Both run-time checks go through the standard trap path (same as range checks).
+
+An optional string message can follow the condition, comma-separated (like Scala's
+`require(cond, msg)`). The message appears in the runtime error for debugging:
+
+```sysl
+pos(x: int) -> int
+    require x >= 0, "x must be non-negative"
+    ensure result > 0, "pos() result must be positive"
+    x + 1
+```
+
+On failure: `"precondition check failed: x must be non-negative"`. The message is emitted
+by the LLVM backend and the interpreter; the TRISC and SVM backends currently trap with a
+fixed error code.
 
 **`result` in `ensure` clauses.** Inside an `ensure` expression, the identifier `result`
 refers to the function's return value. Outside `ensure` — in `require` or in the body —
