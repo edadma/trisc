@@ -36,9 +36,10 @@ class QemuTestHarness(
     cmd.add("none")
     // virtio-net-pci with user-mode networking and hostfwd entries
     // for the inbound tests: UDP 17777→7777 for test_udp_echo,
-    // TCP 28080→7890 for test_tcp_srv (phase-2 passive open).
+    // TCP 28080→7890 for test_tcp_srv (phase-2 passive open),
+    // TCP 28082→7892 for test_tcp_big (large-transfer stress).
     cmd.add("-netdev")
-    cmd.add("user,id=n0,hostfwd=udp::17777-:7777,hostfwd=tcp::28080-:7890")
+    cmd.add("user,id=n0,hostfwd=udp::17777-:7777,hostfwd=tcp::28080-:7890,hostfwd=tcp::28082-:7892")
     cmd.add("-device")
     cmd.add("virtio-net-pci,netdev=n0,disable-legacy=on")
     if new java.io.File(ramdiskPath).exists() then

@@ -369,6 +369,53 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       got.exists(_.startsWith(s"ping$i#")) shouldBe true
   }
 
+  "aarch64 tcp: 900-byte multi-segment transfer" in {
+    // test_tcp_big listens on :7892. Host writes exactly 900 bytes
+    // of a known pattern (byte i -> i & 0xff), reads a 6-byte
+    // summary (count u16 BE + checksum u32 BE), asserts both match.
+    // Exercises the guest's drain-recv loop, multi-segment
+    // reassembly at the byte level, and a short reply from the
+    // server while the peer is still in ESTABLISHED.
+    qemu.send("test_tcp_big\n")
+    qemu.waitFor("test_tcp_big: listening fd=")
+
+    val n = 900
+    var expectedSum = 0L
+    val payload = new Array[Byte](n)
+    for i <- 0 until n do
+      val b = (i & 0xff).toByte
+      payload(i) = b
+      expectedSum += (b & 0xff).toLong
+
+    val sock = new java.net.Socket()
+    sock.setSoTimeout(15000)
+    sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28082), 5000)
+    try
+      val out = sock.getOutputStream
+      val in  = sock.getInputStream
+      out.write(payload)
+      out.flush()
+      val reply = new Array[Byte](6)
+      var read = 0
+      while read < 6 do
+        val r = in.read(reply, read, 6 - read)
+        if r <= 0 then throw new RuntimeException(s"short read: got $read")
+        read += r
+      val gotCount = ((reply(0) & 0xff) << 8) | (reply(1) & 0xff)
+      val gotSum =
+        ((reply(2) & 0xffL) << 24) |
+        ((reply(3) & 0xffL) << 16) |
+        ((reply(4) & 0xffL) << 8)  |
+        (reply(5) & 0xffL)
+      gotCount shouldBe n
+      gotSum shouldBe expectedSum
+    finally sock.close()
+
+    val output = qemu.waitFor("test_tcp_big: ok")
+    output should include("test_tcp_big: drained count=900")
+    output should include("test_tcp_big: ok")
+  }
+
   "aarch64 crash recovery: kill tfs and restart" in {
     val psOut = qemu.command("ps")
     val tfsLine = psOut.split('\n').find(_.contains("tfs"))

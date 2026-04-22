@@ -39,7 +39,9 @@ class QemuAarch64TestHarness(
     // so async-RX tests (test_udp_echo) can inject unsolicited inbound.
     // hostfwd=tcp::28080-:7890 forwards host:28080 to guest:7890 for
     // the phase-2 test_tcp_srv passive-open smoke test.
-    cmd.add("-netdev"); cmd.add("user,id=n0,hostfwd=udp::17777-:7777,hostfwd=tcp::28080-:7890")
+    // hostfwd=tcp::28082-:7892 forwards host:28082 to guest:7892 for
+    // the large-transfer stress (test_tcp_big).
+    cmd.add("-netdev"); cmd.add("user,id=n0,hostfwd=udp::17777-:7777,hostfwd=tcp::28080-:7890,hostfwd=tcp::28082-:7892")
     cmd.add("-device"); cmd.add("virtio-net-device,netdev=n0,mac=52:54:00:12:34:56")
     if new java.io.File(bootinfoPath).exists() then
       cmd.add("-device")
