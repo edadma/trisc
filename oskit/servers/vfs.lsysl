@@ -17,6 +17,7 @@ index, and reference count. A slot is free when refcount is 0.
     val OFT_TYPE_FILE = 0
     val OFT_TYPE_TTY  = 1
     val OFT_TYPE_PIPE = 2
+    val OFT_TYPE_TCP  = 3
 
     var oft_ino: [32]int
     var oft_pos: [32]int
@@ -26,6 +27,7 @@ index, and reference count. A slot is free when refcount is 0.
     var oft_console: [32]int
     var oft_pipe_id: [32]int
     var oft_pipe_write: [32]int
+    var oft_tcp_fd: [32]int
 
 Pipe infrastructure. Each pipe is a 512-byte circular buffer
 managed entirely within VFS. Deferred-reply pattern: when a
@@ -73,6 +75,8 @@ reaches 0, mark that end as closed and wake blocked readers.
                 if oft_ref[fid] <= 0
                     if oft_type[fid] == OFT_TYPE_PIPE
                         vfs_pipe_close_end(fid)
+                    else if oft_type[fid] == OFT_TYPE_TCP
+                        vfs_tcp_close_end(fid)
 
 Per-process handle table. Each process has up to MAX_HANDLES
 entries. A handle maps to an open file table index. The table
@@ -585,6 +589,14 @@ without a scheme default to the "vfs" (filesystem) handler.
                         vfs_handle_connect_tty(sender, name, colon, name_len)
                         return
 
+        // Check for "tcp" scheme
+        if colon == 3
+            if name[0] == 116  // t
+                if name[1] == 99  // c
+                    if name[2] == 112  // p
+                        vfs_handle_connect_tcp(sender, name, colon, name_len)
+                        return
+
         // Look up scheme handler
         val handler = vfs_lookup_scheme(name, colon)
         if handler < 0
@@ -642,6 +654,257 @@ forwards read/write to the TTY server.
         vfs_msg_write_i32(reply, 1, handle)
         vfs_msg_write_i32(reply, 5, 0)
         ipc_reply(sender, reply, 9)
+
+Handle connect("tcp:A.B.C.D:P") — parse IPv4 + port, dial inet's
+TCP_CONNECT on behalf of the caller, then publish the resulting
+socket as a VFS handle so read/write/close go through this server.
+
+Wire format for INET_CMD_TCP_CONNECT (see oskit/servers/inet.lsysl):
+  request:  [cmd(1), ip(4), port(2)]
+  reply:    [status(1), fd(1)]
+The reply is deferred until the 3-way handshake completes, so
+VFS's ipc_send blocks here — same pattern as vfs_tty_read.
+
+    vfs_handle_connect_tcp(sender: int, name: *byte, colon: int, name_len: int)
+        val pid = svc_get_thread_pid(sender)
+        val inet = vfs_lookup_inet()
+        if inet < 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+
+        // Parse "A.B.C.D:P" starting at offset colon+1
+        var i = colon + 1
+        var octets: [4]int
+        octets[0] = 0
+        octets[1] = 0
+        octets[2] = 0
+        octets[3] = 0
+        var oct = 0
+        var v = 0
+        var ok = 1
+        while i < name_len && oct < 4
+            val c = int(name[i]) & 0xFF
+            if c == 46  // '.'
+                if oct >= 3
+                    ok = 0
+                    break
+                octets[oct] = v & 0xFF
+                v = 0
+                oct += 1
+                i += 1
+            else if c == 58  // ':'
+                break
+            else if c >= 48 && c <= 57
+                v = v * 10 + (c - 48)
+                i += 1
+            else
+                ok = 0
+                break
+        if oct != 3
+            ok = 0
+        octets[3] = v & 0xFF
+
+        // Expect ':' then decimal port
+        if ok != 0
+            if i >= name_len
+                ok = 0
+            else if int(name[i]) != 58
+                ok = 0
+        var port = 0
+        if ok != 0
+            i += 1
+            if i >= name_len
+                ok = 0
+        if ok != 0
+            while i < name_len
+                val c2 = int(name[i]) & 0xFF
+                if c2 < 48 || c2 > 57
+                    ok = 0
+                    break
+                port = port * 10 + (c2 - 48)
+                i += 1
+            if port <= 0 || port > 65535
+                ok = 0
+
+        if ok == 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+
+        // Send INET_CMD_TCP_CONNECT. Reply is deferred by inet until
+        // ESTABLISHED, so ipc_send blocks VFS — one TCP connect at a
+        // time per VFS, matching our single-threaded server pattern.
+        var msg: [7]byte
+        msg[0] = 10  // INET_CMD_TCP_CONNECT
+        msg[1] = byte(octets[0])
+        msg[2] = byte(octets[1])
+        msg[3] = byte(octets[2])
+        msg[4] = byte(octets[3])
+        msg[5] = byte((port >> 8) & 0xFF)
+        msg[6] = byte(port & 0xFF)
+        var icreply: [2]byte
+        ipc_send(inet, msg, 7, icreply, 2)
+        if icreply[0] != 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        val tcp_fd = int(icreply[1]) & 0xFF
+
+        val oft_idx = vfs_oft_alloc(0, 0, OFT_TYPE_TCP)
+        if oft_idx < 0
+            // Socket leaks on inet side — acceptable, callers rarely
+            // hit OFT exhaustion and the inet slot frees on FIN.
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        oft_tcp_fd[oft_idx] = tcp_fd
+
+        val handle = vfs_handle_alloc(pid, oft_idx)
+        if handle < 0
+            vfs_oft_free(oft_idx)
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+
+        var reply: [9]byte
+        reply[0] = 0
+        vfs_msg_write_i32(reply, 1, handle)
+        vfs_msg_write_i32(reply, 5, 0)
+        ipc_reply(sender, reply, 9)
+
+Inet server port (cached, looked up lazily; may remain -1 on
+builds without inet, in which case connect("tcp:...") errors
+and FS_CMD_READ/WRITE on a phantom TCP handle short-circuit).
+
+    var vfs_inet_port = -1
+
+    vfs_lookup_inet() -> int
+        if vfs_inet_port < 0
+            vfs_inet_port = port_lookup("inet")
+        vfs_inet_port
+
+Forward FS_CMD_READ on a TCP handle to INET_CMD_TCP_RECV. Blocks
+VFS's server loop while inet defers the reply (data arrival or
+peer FIN). On wake, copy up to `len` bytes from inet's reply buf
+through the caller's grant.
+
+Wire: request [cmd(1), fd(2), maxlen(2)], reply [status(1), len(2), data].
+`len == 0` with `status == 0` means peer closed (EOF).
+
+    vfs_tcp_read(sender: int, fid: int, grant_id: int, len: int)
+        val inet = vfs_lookup_inet()
+        if inet < 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        var maxlen = len
+        if maxlen > 480
+            maxlen = 480
+        if maxlen < 0
+            maxlen = 0
+        val tcp_fd = oft_tcp_fd[fid]
+        var msg: [5]byte
+        msg[0] = 12  // INET_CMD_TCP_RECV
+        msg[1] = byte((tcp_fd >> 8) & 0xFF)
+        msg[2] = byte(tcp_fd & 0xFF)
+        msg[3] = byte((maxlen >> 8) & 0xFF)
+        msg[4] = byte(maxlen & 0xFF)
+        var icreply: [540]byte
+        ipc_send(inet, msg, 5, icreply, 540)
+        if icreply[0] != 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        val nread = ((int(icreply[1]) & 0xFF) << 8) | (int(icreply[2]) & 0xFF)
+        if nread > 0
+            val mapped = svc_grant_map(grant_id, 0, nread)
+            if mapped > 0
+                var dst: *byte = *byte(mapped)
+                var k = 0
+                while k < nread
+                    dst[k] = icreply[3 + k]
+                    k += 1
+                svc_grant_unmap(grant_id)
+        var reply: [5]byte
+        reply[0] = 0
+        vfs_msg_write_i32(reply, 1, nread)
+        ipc_reply(sender, reply, 5)
+
+Forward FS_CMD_WRITE on a TCP handle to INET_CMD_TCP_SEND. Copies
+up to INET_MAX_TCP_SEG (480) bytes from the caller's grant into a
+local staging buffer, then sends. Returns bytes buffered by inet.
+
+Wire: request [cmd(1), fd(2), len(2), data], reply [status(1), nsent(2)].
+
+    vfs_tcp_write(sender: int, fid: int, grant_id: int, len: int)
+        val inet = vfs_lookup_inet()
+        if inet < 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        var wlen = len
+        if wlen > 480
+            wlen = 480
+        if wlen < 0
+            wlen = 0
+        val tcp_fd = oft_tcp_fd[fid]
+        var msg: [485]byte
+        msg[0] = 11  // INET_CMD_TCP_SEND
+        msg[1] = byte((tcp_fd >> 8) & 0xFF)
+        msg[2] = byte(tcp_fd & 0xFF)
+        msg[3] = byte((wlen >> 8) & 0xFF)
+        msg[4] = byte(wlen & 0xFF)
+        if wlen > 0
+            val mapped = svc_grant_map(grant_id, 0, wlen)
+            if mapped <= 0
+                var err: [1]byte
+                err[0] = byte(-1)
+                ipc_reply(sender, err, 1)
+                return
+            var src: *byte = *byte(mapped)
+            var k = 0
+            while k < wlen
+                msg[5 + k] = src[k]
+                k += 1
+            svc_grant_unmap(grant_id)
+        var icreply: [3]byte
+        ipc_send(inet, msg, 5 + wlen, icreply, 3)
+        if icreply[0] != 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        val nsent = ((int(icreply[1]) & 0xFF) << 8) | (int(icreply[2]) & 0xFF)
+        var reply: [5]byte
+        reply[0] = 0
+        vfs_msg_write_i32(reply, 1, nsent)
+        ipc_reply(sender, reply, 5)
+
+Invoked from vfs_oft_free when a TCP OFT slot's refcount hits zero.
+Sends INET_CMD_TCP_CLOSE and blocks until inet's close handshake
+completes (or errors). Result is ignored — the caller already
+replied (or will reply) with status 0 to the user.
+
+    vfs_tcp_close_end(fid: int)
+        val inet = vfs_lookup_inet()
+        if inet < 0
+            return
+        val tcp_fd = oft_tcp_fd[fid]
+        var msg: [3]byte
+        msg[0] = 13  // INET_CMD_TCP_CLOSE
+        msg[1] = byte((tcp_fd >> 8) & 0xFF)
+        msg[2] = byte(tcp_fd & 0xFF)
+        var icreply: [1]byte
+        ipc_send(inet, msg, 3, icreply, 1)
 
 TTY server port (cached, looked up lazily).
 
@@ -749,6 +1012,10 @@ position, forwards to TFS, advances position by bytes_read.
             vfs_pipe_read(sender, fid, grant_id, len)
             return
 
+        if oft_type[fid] == OFT_TYPE_TCP
+            vfs_tcp_read(sender, fid, grant_id, len)
+            return
+
         val ino = oft_ino[fid]
         val offset = oft_pos[fid]
 
@@ -789,6 +1056,10 @@ Client request:  [cmd(1), fid(4), len(4), buf_addr(4)]  (13 bytes)
 
         if oft_type[fid] == OFT_TYPE_PIPE
             vfs_pipe_write(sender, fid, grant_id, len)
+            return
+
+        if oft_type[fid] == OFT_TYPE_TCP
+            vfs_tcp_write(sender, fid, grant_id, len)
             return
 
         val ino = oft_ino[fid]

@@ -480,6 +480,68 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       srvThread.join(2000)
   }
 
+  "aarch64 tcp: VFS bridge (connect/read/write/close)" in {
+    // Same shape as the test_tcp_rx test, but the guest program
+    // (test_tcp_vfs) calls only connect("tcp:...") + read/write/close —
+    // no tcp_* wrappers. Proves VFS routes FS_CMD_READ/WRITE/CLOSE on a
+    // tcp-typed handle through INET_CMD_TCP_RECV/SEND/CLOSE.
+    val n = 900
+    var expectedSum = 0L
+    val payload = new Array[Byte](n)
+    for i <- 0 until n do
+      val b = (i & 0xff).toByte
+      payload(i) = b
+      expectedSum += (b & 0xff).toLong
+
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18081))
+    server.setSoTimeout(15000)
+
+    val resultBox = new java.util.concurrent.atomic.AtomicReference[String]("")
+    val srvThread = new Thread(() => {
+      try
+        val client = server.accept()
+        try {
+          val out = client.getOutputStream
+          val in  = client.getInputStream
+          out.write(payload)
+          out.flush()
+          val reply = new Array[Byte](6)
+          var read = 0
+          while read < 6 do
+            val r = in.read(reply, read, 6 - read)
+            if r <= 0 then throw new RuntimeException(s"short read: got $read")
+            read += r
+          val gotCount = ((reply(0) & 0xff) << 8) | (reply(1) & 0xff)
+          val gotSum =
+            ((reply(2) & 0xffL) << 24) |
+            ((reply(3) & 0xffL) << 16) |
+            ((reply(4) & 0xffL) << 8)  |
+            (reply(5) & 0xffL)
+          resultBox.set(s"count=$gotCount sum=$gotSum")
+        } finally client.close()
+      catch
+        case e: Throwable => resultBox.set(s"ERR: ${e.getMessage}")
+    }, "tcp-pattern-server-vfs")
+    srvThread.setDaemon(true)
+    srvThread.start()
+
+    try
+      qemu.send("test_tcp_vfs\n")
+      val output = qemu.waitFor("test_tcp_vfs: ok")
+      output should include("test_tcp_vfs: connected h=")
+      output should include("test_tcp_vfs: drained count=900")
+      output should include("test_tcp_vfs: sent=6")
+      output should include("test_tcp_vfs: ok")
+
+      srvThread.join(5000)
+      resultBox.get() shouldBe s"count=$n sum=$expectedSum"
+    finally
+      server.close()
+      srvThread.join(2000)
+  }
+
   "aarch64 crash recovery: kill tfs and restart" in {
     val psOut = qemu.command("ps")
     val tfsLine = psOut.split('\n').find(_.contains("tfs"))
