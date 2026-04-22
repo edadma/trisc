@@ -198,9 +198,8 @@ class SyslPureAttrTests extends SyslTestHelpers {
     t.getMessage should include("indirect")
   }
 
-  "pure function rejects calling a function from another module by default" in {
+  "pure function rejects calling an unannotated function in the same file" in {
     // No #pure on `twice` → it's impure by default, even though trivially safe.
-    // This is the "cross-module without annotation" guardrail.
     val t = intercept[Exception] {
       eval("""
         |twice(x: int) -> int = x + x
@@ -228,5 +227,68 @@ class SyslPureAttrTests extends SyslTestHelpers {
         |""".stripMargin)
     }
     t.getMessage should include("field")
+  }
+
+  // ===== Cross-module purity propagation (SMETA) =====
+
+  "pure function may call pure function from imported module" in {
+    evalWithLibs(
+      Map(
+        "mymod/nums" -> """
+          |module mymod
+          |#pure
+          |sq(x: int) -> int = x * x
+          |""".stripMargin,
+      ),
+      """
+        |import mymod.*
+        |#pure
+        |quad(x: int) -> int = sq(x) + sq(x)
+        |main() -> int = quad(3)
+        |""".stripMargin,
+    ) shouldBe 18
+  }
+
+  "pure function rejects calling unannotated function from imported module" in {
+    // `twice` has no #pure in mymod — imports with Func(isPure=false) — caller must fail.
+    val t = intercept[Exception] {
+      evalWithLibs(
+        Map(
+          "mymod/nums" -> """
+            |module mymod
+            |twice(x: int) -> int = x + x
+            |""".stripMargin,
+        ),
+        """
+          |import mymod.*
+          |#pure
+          |bad(x: int) -> int = twice(x)
+          |main() -> int = bad(5)
+          |""".stripMargin,
+      )
+    }
+    t.getMessage should include("#pure")
+    t.getMessage should include("twice")
+  }
+
+  "SMETA round-trips #pure flag via toSmeta / fromSmeta" in {
+    // Guards the wire format: compile a #pure decl, serialize to SMETA text,
+    // parse it back, assert the flag survived.
+    val Right(ast) = (new SyslParser).parseProgram(
+      """#pure
+        |sq(x: int) -> int = x * x
+        |""".stripMargin): @unchecked
+    val typed = (new SyslAnalyzer).analyze(ast)
+    val metaOut = ModuleMeta.fromProgram(typed)
+    metaOut.symbols.find(_.name == "sq").get.typ match
+      case SymbolMeta.Kind.Func(_, _, _, isPure) => isPure shouldBe true
+      case other                                  => fail(s"expected Func, got $other")
+
+    val text = metaOut.toSmeta
+    text should include("FUNCP sq")
+    val Some(metaIn) = ModuleMeta.fromSmeta(text): @unchecked
+    metaIn.symbols.find(_.name == "sq").get.typ match
+      case SymbolMeta.Kind.Func(_, _, _, isPure) => isPure shouldBe true
+      case other                                  => fail(s"expected Func, got $other")
   }
 }

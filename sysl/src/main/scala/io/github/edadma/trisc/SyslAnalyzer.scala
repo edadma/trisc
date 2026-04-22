@@ -387,7 +387,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       val sn = shortName(sym.name)
       val localKey = shortToAlias.getOrElse(sn, sn) // use alias if provided
       sym.typ match
-        case SymbolMeta.Kind.Func(params, returnType, isDef) =>
+        case SymbolMeta.Kind.Func(params, returnType, isDef, isPure) =>
           val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
           if functions.contains(localKey) then
             // Allow same-module sibling re-registration (same mangled name) and externs
@@ -395,7 +395,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             if !sym.isExtern && existing.name != sym.name then
               throw AnalysisError(s"imported symbol '$localKey' conflicts with existing function")
           else
-            functions(localKey) = FunInfo(sym.name, paramPairs, returnType, isDef)
+            functions(localKey) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure)
             externalSymbols += localKey
         case SymbolMeta.Kind.Data(dataType) =>
           if globalScope.contains(localKey) then
@@ -984,9 +984,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       if callee == funcName then true
       else if purePermittedBuiltins.contains(callee) then true
       else if builtinFunctions.contains(callee) then false // other builtins are impure
-      else functions.get(callee) match
-        case Some(info) => info.isPure
-        case None       => false // unknown: conservative reject
+      else
+        // TCall carries the mangled name (for codegen), but the `functions` map is
+        // keyed by the *local* name. Look up by key first; if that misses, fall back
+        // to scanning FunInfo.name so cross-module calls (e.g. `mymod__sq`) resolve.
+        val info = functions.get(callee).orElse(functions.values.find(_.name == callee))
+        info match
+          case Some(i) => i.isPure
+          case None    => false // unknown: conservative reject
 
     def checkExpr(e: TExpr): Unit = e match
       case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit => ()
@@ -3128,7 +3133,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           .getOrElse(throw AnalysisError(s"module '$nsName' has no symbol '$member'"))
         sym.typ match
           case SymbolMeta.Kind.Data(dataType) => TVarRef(sym.name, dataType)
-          case SymbolMeta.Kind.Func(params, retType, _) => TFuncRef(sym.name, SyslType.FuncType(params, retType))
+          case SymbolMeta.Kind.Func(params, retType, _, _) => TFuncRef(sym.name, SyslType.FuncType(params, retType))
           case SymbolMeta.Kind.Struct(st) => throw AnalysisError(s"'$nsName.$member' is a struct type, not a value")
           case SymbolMeta.Kind.Enum(_) => throw AnalysisError(s"'$nsName.$member' is an enum type, not a value")
           case SymbolMeta.Kind.Interface(_) => throw AnalysisError(s"'$nsName.$member' is an interface type, not a value")
@@ -3421,7 +3426,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val funcSym = meta.publicSymbols.find(s => shortName(s.name) == method)
           .getOrElse(throw AnalysisError(s"module '$nsName' has no function '$method'"))
         funcSym.typ match
-          case SymbolMeta.Kind.Func(params, returnType, _) =>
+          case SymbolMeta.Kind.Func(params, returnType, _, _) =>
             val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
             val checkedArgs = checkArgs(s"$nsName.$method", paramPairs, tArgs)
             TCall(funcSym.name, checkedArgs, returnType)
