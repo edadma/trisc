@@ -12,18 +12,21 @@ extern oskit_ulib__sysl_start
 global _start, func
 entry _start
 
-; Program entry. PM has written the POSIX argv blob at 0xBF000:
-;   +0   argc (i32)
-;   +4   padding
-;   +8   argv[0] pointer (i64, absolute)
+; Program entry. PM has built a System V ABI init stack frame on
+; the new process's user stack, and r7 points at argc on entry:
+;   [r7]         argc (i64)
+;   [r7 + 8]     argv[0] pointer
 ;   ...
-;   +8+8*argc  NULL terminator
+;   [r7 + 8+8*argc]  NULL          (argv terminator)
+;   [r7 + 16+8*argc] envp[0]..., NULL (envp terminator)
+;   ... auxv pairs, AT_NULL terminated
+;   ... string data argv/envp point into
+;
 ; Hands (argc, &argv[0]) to sysl_start, which wraps the C-style
 ; argv into a sysl `[]string` and calls the program's main.
 _start
-    movi r2, 0xBF000
-    ldw  r1, r2, r0              ; r1 = argc (sign-extended i32)
-    movi r2, 0xBF008             ; cargv = &argv[0]
+    ldd  r1, r7, r0              ; r1 = argc (full i64 at [r7])
+    addi r2, r7, 8               ; r2 = &argv[0]
     pshd r2                       ; push 2nd arg (cargv) on stack
     movi r4, oskit_ulib__sysl_start
     jalr r6, r4

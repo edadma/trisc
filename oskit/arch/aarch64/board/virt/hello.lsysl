@@ -713,8 +713,17 @@ line per 64 bytes of code.
         user_load_program(new_pt, blob_start, blob_len)
         user_sync_icache(new_pt, blob_len)
 
+        // Build a minimal argc=0 System V init stack (40 bytes →
+        // 48 for 16-byte alignment, all zeros) so the user program's
+        // `_start` (which reads argc from [sp]) sees a valid empty
+        // frame instead of whatever lives at PROG_USP.
+        var user_stack_buf: [48]byte
+        memset(&user_stack_buf[0], 0, 48)
+        val user_sp = i64(PROG_USP) - 48
+        vm_copy_to(new_pt, u64(user_sp), user_stack_buf, 48)
+
         val pid = create_process_suspended(
-            i64(0x60000000), i64(PROG_USP), i64(PROG_SSP),
+            i64(0x60000000), user_sp, i64(PROG_SSP),
             "user1", new_pt)
         if pid <= 0
             uart_puts("[user] create_process_suspended failed pid=")
@@ -776,8 +785,15 @@ ipc_write_saved_r1 / syscall_return_for PTBR-awareness.
         user_load_program(new_pt, blob_start, blob_len)
         user_sync_icache(new_pt, blob_len)
 
+        // argc=0 SysV frame — see comment on the same pattern in
+        // kernel_main_user_process above.
+        var uipc_stack_buf: [48]byte
+        memset(&uipc_stack_buf[0], 0, 48)
+        val uipc_sp = i64(PROG_USP) - 48
+        vm_copy_to(new_pt, u64(uipc_sp), uipc_stack_buf, 48)
+
         val pid = create_process_suspended(
-            i64(0x60000000), i64(PROG_USP), i64(PROG_SSP),
+            i64(0x60000000), uipc_sp, i64(PROG_SSP),
             "user1", new_pt)
         if pid <= 0
             uart_puts("[uipc] create_process_suspended failed\n")

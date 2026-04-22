@@ -463,10 +463,26 @@ Returns the PID on success, 0 on failure.
         if entry < 0
             return 0
 
+        // Build a minimal argc=0 System V init stack frame at the
+        // bottom of the new process's user stack. Required so that
+        // programs using the prog_start.s convention (which does
+        // `ldr w0, [sp]` to read argc) see a valid argc=0 instead
+        // of whatever happens to live at SRV_USP. Servers using
+        // srv_start.s (which just `bl main`) don't read the frame
+        // but it's harmless sitting there.
+        //
+        // Frame: argc(8) + argv NULL(8) + envp NULL(8) + AT_NULL
+        // pair(16) = 40 bytes, rounded up to 48 for 16-byte SP
+        // alignment. All bytes are zero.
+        var rs_stack_buf: [48]byte
+        memset(&rs_stack_buf[0], 0, 48)
+        val child_sp = SRV_USP - 48
+        svc_vm_copy_to(ptbr, u64(child_sp), &rs_stack_buf[0], 48)
+
         // Create process suspended — no PTBR switch needed;
         // create_process_suspended uses vm_copy_to for the stack frame
         val sname = string(name, nlen)
-        val pid = svc_create_proc_susp(entry, SRV_USP, SRV_SSP, sname, ptbr)
+        val pid = svc_create_proc_susp(entry, child_sp, SRV_SSP, sname, ptbr)
         if pid < 0
             return 0
 

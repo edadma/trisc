@@ -1,22 +1,23 @@
 srt0 — Sysl runtime crt0
 ========================
 
-The arch-specific `_start` (in `prog_start.s` on x86_64, in
-`syscall.asm` on TRISC) reads argc/argv from the POSIX blob at
-`PROG_ARGS_ADDR` and calls [[sysl_start]]. This module walks the
-C-style argv, wraps each entry as a sysl `string`, and invokes the
-program's `main(argv: []string)`. When main returns, srt0 exits
-via syscall.
+The arch-specific `_start` (`prog_start.s` on x86_64 / aarch64,
+`syscall.asm` on TRISC) reads argc from the top of the stack and
+`&argv[0]` from sp+8, then calls [[sysl_start]]. This module walks
+the C-style argv, wraps each entry as a sysl `string`, and invokes
+the program's `main(argv: []string)`. When main returns, srt0
+exits via syscall.
 
 C programs link against `crt0.c` instead — same ABI on the inside
 (`oskit_ulib__sysl_start`), but forwards argc/argv straight to a
 C `int main(int argc, char **argv)` without the `[]string` wrap.
 
-Layout at `PROG_ARGS_ADDR` (written by PM during spawn): 4-byte
-argc at offset 0, 4 zero padding, then an array of argc 8-byte
-absolute pointers (baked by the sender since `PROG_ARGS_ADDR` is
-fixed across processes), followed by an 8-byte NULL terminator
-and the NUL-separated string data that each argv entry points at.
+Initial stack layout (built by PM in the child's stack region
+before resume, matching the System V Application Binary Interface
+process-initialization convention that Linux / NetBSD / Minix 3
+also use): sp points at argc (i64), followed by argv[0..argc-1]
+then NULL, then envp[] then NULL, then auxv pairs terminated by
+AT_NULL, then the NUL-separated string data argv/envp point into.
 
     module oskit.ulib
 
