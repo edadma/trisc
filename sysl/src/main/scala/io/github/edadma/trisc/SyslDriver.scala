@@ -23,6 +23,15 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
 
   case class DriverError(msg: String) extends RuntimeException(msg)
 
+  /** `--no-contracts` build flag: strip all runtime contract checks
+   *  (require/ensure/invariant/variant/struct-invariants/type-predicates/type-attribute
+   *  traps). Set via `config("contracts") = "off"` or `= "false"`. Ada pragma
+   *  Assertion_Policy(Disable) equivalent — the user takes responsibility for
+   *  correctness in exchange for no runtime overhead. */
+  val contractsEnabled: Boolean = config.get("contracts") match
+    case Some("off") | Some("false") | Some("disabled") => false
+    case _ => true
+
   def compile(sources: Map[String, String], keepTests: Boolean = false): CompilationResult =
     // Step 1: Parse all sources
     val parsedAsts = parseSources(sources)
@@ -119,7 +128,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
                 case f: FunDeclAST => !f.attributes.exists(_.name == "test")
                 case _ => true
               })
-            val analyzer = new SyslAnalyzer
+            val analyzer = new SyslAnalyzer(contractsEnabled = contractsEnabled)
             // Register extern names so they are never mangled (ABI-level symbols)
             analyzer.registerNoMangle(globalExternNames)
             for src <- sourceNames if src != name do
@@ -162,7 +171,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
           case f: FunDeclAST => !f.attributes.exists(_.name == "test")
           case _ => true
         })
-      val analyzer = new SyslAnalyzer
+      val analyzer = new SyslAnalyzer(contractsEnabled = contractsEnabled)
 
       // Register extern names so they are never mangled (ABI-level symbols)
       analyzer.registerNoMangle(globalExternNames)
@@ -340,7 +349,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
           case _ => false
         }
         scala.util.Try {
-          val analyzer = new SyslAnalyzer
+          val analyzer = new SyslAnalyzer(contractsEnabled = contractsEnabled)
           val typed = analyzer.analyze(stripped)
           val meta = ModuleMeta.fromProgram(typed)
           new ModuleMeta(meta.symbols, templates ++ analyzer.getTraitDecls, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances)

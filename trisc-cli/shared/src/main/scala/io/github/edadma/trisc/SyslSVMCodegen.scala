@@ -37,9 +37,9 @@ class SyslSVMCodegen:
     def scanStmts(stmts: List[TStmt]): Unit = stmts.foreach(scanStmt)
     def scanStmt(s: TStmt): Unit = s match
       case TVarStmt(_, _, _, _) => count += 1
-      case TWhileStmt(_, body) => scanStmts(body)
-      case TForStmt(init, _, update, body) => scanStmt(init); scanStmt(update); scanStmts(body)
-      case TDoWhileStmt(_, body) => scanStmts(body)
+      case TWhileStmt(_, body, _) => scanStmts(body)
+      case TForStmt(init, _, update, body, _) => scanStmt(init); scanStmt(update); scanStmts(body)
+      case TDoWhileStmt(_, body, _) => scanStmts(body)
       case TIfExpr(_, thenBody, elseBody, _) => scanStmts(thenBody); elseBody.foreach(scanStmts)
       case TExprStmt(TIfExpr(_, thenBody, elseBody, _)) => scanStmts(thenBody); elseBody.foreach(scanStmts)
       case TDestructureStmt(names, _, _) => count += names.length
@@ -383,7 +383,7 @@ class SyslSVMCodegen:
     case TReturnStmt(None) =>
       emit("  ret")
 
-    case TWhileStmt(cond, body) =>
+    case TWhileStmt(cond, body, _) =>
       val loopLabel = newLabel("while")
       val endLabel = newLabel("while_end")
       breakLabels.push(endLabel)
@@ -397,7 +397,7 @@ class SyslSVMCodegen:
       breakLabels.pop()
       continueLabels.pop()
 
-    case TForStmt(init, cond, update, body) =>
+    case TForStmt(init, cond, update, body, _) =>
       val loopLabel = newLabel("for")
       val updateLabel = newLabel("for_upd")
       val endLabel = newLabel("for_end")
@@ -415,7 +415,7 @@ class SyslSVMCodegen:
       breakLabels.pop()
       continueLabels.pop()
 
-    case TDoWhileStmt(cond, body) =>
+    case TDoWhileStmt(cond, body, _) =>
       val loopLabel = newLabel("do")
       val endLabel = newLabel("do_end")
       breakLabels.push(endLabel)
@@ -428,10 +428,10 @@ class SyslSVMCodegen:
       breakLabels.pop()
       continueLabels.pop()
 
-    case TBreakStmt =>
+    case TBreakStmt(_) =>
       emit(s"  jump ${breakLabels.top}")
 
-    case TContinueStmt =>
+    case TContinueStmt(_) =>
       emit(s"  jump ${continueLabels.top}")
 
     case TExprStmt(expr) =>

@@ -1876,6 +1876,22 @@ The codegen emits `trap 1` for runtime errors. On the OS, the trap handler termi
 | 3 | `abort()` called |
 | 4 | `panic()` or `assert()` failure |
 
+### Disabling Contracts
+
+Pass `--no-contracts` to `sysl compile` or `sysl run` to strip every contract check at compile time:
+
+- `require` / `ensure` clauses
+- `invariant` statements in loops
+- `variant` statements in loops (entire hoisted check state is elided)
+- struct `invariant` clauses (no per-assignment check)
+- `where`-predicate bodies (synthesized predicate function still runs but performs no check)
+- `within`-range checks (compile-time literal check + runtime range check both skipped)
+- enum `::Pos` / `::Val` / `::Value` / `::Succ` / `::Pred` and within `::Succ` / `::Pred` traps (helper still returns a value, but invalid input yields garbage: `-1` for enum helpers, `v+1` / `v-1` past the bound for within helpers)
+
+This is Ada's `pragma Assertion_Policy(Disable)` equivalent — the user takes responsibility for correctness in exchange for no runtime overhead. Contract clauses still **type-check** at compile time regardless of the flag; only the runtime traps are elided.
+
+`::Valid(x)` is *not* a contract — it is non-throwing introspection — and is never stripped.
+
 ---
 
 ## Conditional Compilation

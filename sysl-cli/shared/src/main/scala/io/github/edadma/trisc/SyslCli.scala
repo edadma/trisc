@@ -8,10 +8,12 @@ case class CompileCommand(
     output: Option[String] = None,
     emit: String = "asm", // asm, tof, llvm
     target: String = "host", // host, x86_64-elf, x86_64-linux, aarch64-elf, aarch64-linux
+    noContracts: Boolean = false,
 ) extends SyslCommand
 case class RunCommand(
     inputs: Seq[String] = Seq.empty,
     programArgs: Seq[String] = Seq.empty,
+    noContracts: Boolean = false,
 ) extends SyslCommand
 case class DocCommand(
     inputs: Seq[String] = Seq.empty,
@@ -70,6 +72,14 @@ object SyslCli:
                 case other              => other
               )
             ),
+          opt[Unit]("no-contracts")
+            .text("Strip runtime contract checks (require/ensure/invariant/variant/type-predicates/type-attrs). Ada pragma Assertion_Policy(Disable).")
+            .action((_, c) =>
+              c.copy(command = c.command match
+                case cc: CompileCommand => cc.copy(noContracts = true)
+                case other              => other
+              )
+            ),
           arg[String]("<source>...")
             .unbounded()
             .text("Sysl source files or a directory")
@@ -85,6 +95,14 @@ object SyslCli:
         .text("Interpret a Sysl program (file, files, or directory)")
         .action((_, c) => c.copy(command = RunCommand()))
         .children(
+          opt[Unit]("no-contracts")
+            .text("Strip runtime contract checks (require/ensure/invariant/variant/type-predicates/type-attrs).")
+            .action((_, c) =>
+              c.copy(command = c.command match
+                case rc: RunCommand => rc.copy(noContracts = true)
+                case other          => other
+              )
+            ),
           arg[String]("<source>...")
             .unbounded()
             .text("Sysl source files or a directory")
@@ -198,9 +216,9 @@ object SyslCli:
         ),
       checkConfig(c =>
         c.command match
-          case CompileCommand(inputs, _, _, _) if inputs.isEmpty =>
+          case CompileCommand(inputs, _, _, _, _) if inputs.isEmpty =>
             failure("No input files specified")
-          case RunCommand(inputs, _) if inputs.isEmpty =>
+          case RunCommand(inputs, _, _) if inputs.isEmpty =>
             failure("No input files specified for run")
           case DocCommand(inputs, _) if inputs.isEmpty =>
             failure("No input files specified for doc")
@@ -247,7 +265,8 @@ object SyslCli:
       case Nil => List(".")
       case dirs => dirs
 
-    val driver = new SyslDriver(Some(io), baseDirs, tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
+    val config = if cmd.noContracts then Map("contracts" -> "off") else Map.empty[String, String]
+    val driver = new SyslDriver(Some(io), baseDirs, config = config, tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
     val result = driver.compile(sources)
 
     // Write .smeta files for package modules
@@ -295,7 +314,8 @@ object SyslCli:
       case Nil => List(".")
       case dirs => dirs
     val sources = resolveTransitiveSources(initialSources, baseDirs)
-    val driver = new SyslDriver(Some(io), baseDirs, tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
+    val config = if cmd.noContracts then Map("contracts" -> "off") else Map.empty[String, String]
+    val driver = new SyslDriver(Some(io), baseDirs, config = config, tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
     val result = driver.compile(sources)
     val stdlibImports = driver.collectStdlibImports(result.units)
     val merged = stripTestDecls(TProgram(result.units.flatMap(_.typed.decls)))

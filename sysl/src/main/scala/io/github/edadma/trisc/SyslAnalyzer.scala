@@ -3,8 +3,19 @@ package io.github.edadma.trisc
 import scala.collection.mutable
 import SyslType.*
 
-class SyslAnalyzer:
+class SyslAnalyzer(val contractsEnabled: Boolean = true):
   case class AnalysisError(msg: String, node: Any = null) extends RuntimeException(msg)
+
+  /** Build a contract-check statement, or a no-op when contracts are disabled (via
+   *  `--no-contracts` / `config("contracts") = "off"`). Used by every contract emission
+   *  site — require/ensure/invariant/type predicate/type attribute — so the strip is
+   *  centralized. When disabled, the check becomes `TMultiStmt(Nil)`: every backend
+   *  already iterates zero children. The surrounding expression (e.g. `v + 1` in
+   *  `__succ`) continues to execute without a guard, giving Ada-style "suppressed
+   *  check" semantics: fast path, undefined on bad input. */
+  private def contract(kind: String, expr: TExpr, message: String): TStmt =
+    if contractsEnabled then TContractCheck(kind, expr, message)
+    else TMultiStmt(Nil)
 
   private case class SymInfo(name: String, typ: SyslType, mutable: Boolean, isConst: Boolean = false)
   private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false)
@@ -105,7 +116,7 @@ class SyslAnalyzer:
           val tExpr = analyzeExpr(rewritten)
           if tExpr.typ != BoolType then
             throw AnalysisError(s"struct invariant must be bool, got ${tExpr.typ}")
-          TContractCheck("invariant", tExpr, s"$structName invariant")
+          contract("invariant", tExpr, s"$structName invariant")
         }
 
   /** Extract top-level `variant <expr>` statements from a loop body. Returns a pair of
@@ -113,6 +124,9 @@ class SyslAnalyzer:
    *  pre-decls in the current scope (outside the loop) and the rewritten body in the
    *  loop's own body scope. */
   private def extractVariants(body: List[StmtAST]): (List[StmtAST], List[StmtAST]) =
+    if !contractsEnabled then
+      // --no-contracts: elide loop variants entirely — no hoisted state, no per-iter check.
+      return (Nil, body.filter { case _: VariantStmtAST => false; case _ => true })
     val pre = mutable.ListBuffer.empty[StmtAST]
     val newBody = body.flatMap {
       case VariantStmtAST(expr) =>
@@ -1015,7 +1029,7 @@ class SyslAnalyzer:
         functions(funcName) = FunInfo(funcName, List(("value", base)), base)
         val nullLit = TIntLit(0L, base)
         val body = TBlockBody(List(
-          TContractCheck("type predicate",
+          contract("type predicate",
             TBinary(TVarRef("value", base), "!=", nullLit, BoolType),
             s"not null pointer"),
           TExprStmt(TVarRef("value", base))
@@ -1130,7 +1144,7 @@ class SyslAnalyzer:
     // Body: if !predicate then abort(); value
     //   compiled as a block with a contract check + trailing expression return
     val body = TBlockBody(List(
-      TContractCheck("type predicate", tPred, s"type predicate '$aliasName'"),
+      contract("type predicate", tPred, s"type predicate '$aliasName'"),
       TExprStmt(TVarRef("value", base))
     ))
     specializedDecls += TFunDecl(funcName, List(TParam("value", base)), base, body)
@@ -1164,7 +1178,7 @@ class SyslAnalyzer:
       val value = members(vname)
       TMatchArm(List(TValuePattern(TIntLit(value, I32))), None, List(TExprStmt(TIntLit(idx.toLong, I32))))
     }
-    val trap = TContractCheck("type attribute", TBoolLit(false, BoolType), s"invalid enum value for ${et.name}::Pos")
+    val trap = contract("type attribute", TBoolLit(false, BoolType), s"invalid enum value for ${et.name}::Pos")
     val default = Some(List[TStmt](trap, TExprStmt(TIntLit(-1L, I32))))
     val matchExpr = TMatchExpr(TVarRef("v", I32), arms.toList, default, I32)
     specializedDecls += TFunDecl(funcName, List(TParam("v", I32)), I32,
@@ -1182,7 +1196,7 @@ class SyslAnalyzer:
       val value = members(vname)
       TMatchArm(List(TValuePattern(TIntLit(idx.toLong, I32))), None, List(TExprStmt(TIntLit(value, I32))))
     }
-    val trap = TContractCheck("type attribute", TBoolLit(false, BoolType), s"out-of-range position for ${et.name}::Val")
+    val trap = contract("type attribute", TBoolLit(false, BoolType), s"out-of-range position for ${et.name}::Val")
     val default = Some(List[TStmt](trap, TExprStmt(TIntLit(-1L, I32))))
     val matchExpr = TMatchExpr(TVarRef("p", I32), arms.toList, default, I32)
     specializedDecls += TFunDecl(funcName, List(TParam("p", I32)), I32,
@@ -1218,7 +1232,7 @@ class SyslAnalyzer:
       val value = members(vname)
       TMatchArm(List(TValuePattern(TStringLit(vname, StringType))), None, List(TExprStmt(TIntLit(value, I32))))
     }
-    val trap = TContractCheck("type attribute", TBoolLit(false, BoolType), s"no variant matches string for ${et.name}::Value")
+    val trap = contract("type attribute", TBoolLit(false, BoolType), s"no variant matches string for ${et.name}::Value")
     val default = Some(List[TStmt](trap, TExprStmt(TIntLit(-1L, I32))))
     val matchExpr = TMatchExpr(TVarRef("s", StringType), arms.toList, default, I32)
     specializedDecls += TFunDecl(funcName, List(TParam("s", StringType)), I32,
@@ -1237,7 +1251,7 @@ class SyslAnalyzer:
       val nextValue = members(et.variants(idx + 1)._1)
       TMatchArm(List(TValuePattern(TIntLit(value, I32))), None, List(TExprStmt(TIntLit(nextValue, I32))))
     }
-    val trap = TContractCheck("type attribute", TBoolLit(false, BoolType), s"no successor for ${et.name}::Succ (past last variant)")
+    val trap = contract("type attribute", TBoolLit(false, BoolType), s"no successor for ${et.name}::Succ (past last variant)")
     val default = Some(List[TStmt](trap, TExprStmt(TIntLit(-1L, I32))))
     val matchExpr = TMatchExpr(TVarRef("v", I32), arms.toList, default, I32)
     specializedDecls += TFunDecl(funcName, List(TParam("v", I32)), I32,
@@ -1256,7 +1270,7 @@ class SyslAnalyzer:
       val prevValue = members(et.variants(idx - 1)._1)
       TMatchArm(List(TValuePattern(TIntLit(value, I32))), None, List(TExprStmt(TIntLit(prevValue, I32))))
     }
-    val trap = TContractCheck("type attribute", TBoolLit(false, BoolType), s"no predecessor for ${et.name}::Pred (past first variant)")
+    val trap = contract("type attribute", TBoolLit(false, BoolType), s"no predecessor for ${et.name}::Pred (past first variant)")
     val default = Some(List[TStmt](trap, TExprStmt(TIntLit(-1L, I32))))
     val matchExpr = TMatchExpr(TVarRef("v", I32), arms.toList, default, I32)
     specializedDecls += TFunDecl(funcName, List(TParam("v", I32)), I32,
@@ -1269,7 +1283,7 @@ class SyslAnalyzer:
     if functions.contains(funcName) then return funcName
     functions(funcName) = FunInfo(funcName, List(("v", base)), base)
     val hi = if range.exclusiveHi then range.hi - 1 else range.hi
-    val check = TContractCheck("type attribute",
+    val check = contract("type attribute",
       TBinary(TVarRef("v", base), "<", TIntLit(hi, base), BoolType),
       s"no successor for $aliasName::Succ (value is at upper bound)")
     val result = TBinary(TVarRef("v", base), "+", TIntLit(1L, base), base)
@@ -1282,7 +1296,7 @@ class SyslAnalyzer:
     val funcName = s"__pred_${aliasName}"
     if functions.contains(funcName) then return funcName
     functions(funcName) = FunInfo(funcName, List(("v", base)), base)
-    val check = TContractCheck("type attribute",
+    val check = contract("type attribute",
       TBinary(TVarRef("v", base), ">", TIntLit(range.lo, base), BoolType),
       s"no predecessor for $aliasName::Pred (value is at lower bound)")
     val result = TBinary(TVarRef("v", base), "-", TIntLit(1L, base), base)
@@ -1529,8 +1543,10 @@ class SyslAnalyzer:
     target match
       case nt @ NamedType(aliasName, base, _, rangeOpt, predFuncOpt) =>
         // Step 1: range check (if any). Literal values are validated at compile time.
+        // With contracts disabled, both the compile-time literal check and the runtime
+        // TRangeCheck emission are skipped — the value is cast without any guard.
         val afterRange: TExpr = rangeOpt match
-          case Some(range) =>
+          case Some(range) if contractsEnabled =>
             val literalChecked: Option[TExpr] = (expr, range) match
               case (TIntLit(v, _), IntRange(lo, hi, excl)) =>
                 val ok = if excl then v >= lo && v < hi else v >= lo && v <= hi
@@ -1542,6 +1558,9 @@ class SyslAnalyzer:
                 Some(if expr.typ == nt then expr else TCast(expr, nt))
               case _ => None
             literalChecked.getOrElse(TRangeCheck(expr, range, aliasName, nt))
+          case Some(_) =>
+            // Contracts off: bare cast, no range verification.
+            if expr.typ == nt then expr else TCast(expr, nt)
           case None => expr
         // Step 2: where-predicate check (if any). Synth function does the trap and returns value.
         val afterPred: TExpr = predFuncOpt match
@@ -2064,7 +2083,7 @@ class SyslAnalyzer:
     val requireChecks: List[TStmt] = contracts.collect { case ContractClauseAST(ContractRequire, e, msg) =>
       val te = analyzeExpr(e)
       if te.typ != BoolType then throw AnalysisError(s"require expression must be bool, got ${te.typ}")
-      TContractCheck("precondition", te, msg.getOrElse("precondition"))
+      contract("precondition", te, msg.getOrElse("precondition"))
     }
     // Enable `old()` interception while analyzing ensure clauses. Snapshot declarations
     // accumulated during analysis are emitted as TVarStmts at the very top of the body so
@@ -2075,7 +2094,7 @@ class SyslAnalyzer:
     val ensureChecks: List[TStmt] = try contracts.collect { case ContractClauseAST(ContractEnsure, e, msg) =>
       val te = analyzeExpr(e)
       if te.typ != BoolType then throw AnalysisError(s"ensure expression must be bool, got ${te.typ}")
-      TContractCheck("postcondition", te, msg.getOrElse("postcondition"))
+      contract("postcondition", te, msg.getOrElse("postcondition"))
     } finally inEnsureAnalysis = savedEnsureMode
     val capturedSnapshots = oldSnapshots.drop(snapshotsBefore).toList
     oldSnapshots.remove(snapshotsBefore, capturedSnapshots.length)
@@ -2390,7 +2409,7 @@ class SyslAnalyzer:
       case InvariantStmtAST(e) =>
         val te = analyzeExpr(e)
         if te.typ != BoolType then throw AnalysisError(s"invariant expression must be bool, got ${te.typ}")
-        TContractCheck("invariant", te, "invariant")
+        contract("invariant", te, "invariant")
 
       case ExprStmtAST(expr) =>
         TExprStmt(analyzeExpr(expr))
