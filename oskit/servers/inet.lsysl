@@ -30,7 +30,7 @@ families / types, and any unknown command code, return
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, ipc_recv_notify, ipc_reply}
-    import oskit.services.{rs_ready, notify_read_self, sleep}
+    import oskit.services.{rs_ready, notify_read_self}
     import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY, INADDR_LOOPBACK, ipv4, ipv4_octet,
         ETHERTYPE_IPV4, ETHERTYPE_ARP, ARP_OP_REQUEST, ARP_OP_REPLY,
         IP_PROTO_ICMP, IP_PROTO_UDP, ICMP_ECHO_REQ, ICMP_ECHO_REP,
@@ -583,24 +583,6 @@ UDP loopback works either way.
         if inet_nic_subscribe_rx() != 0
             return 0
         inet_send_arp_request(INET_GW_IP_A, INET_GW_IP_B, INET_GW_IP_C, INET_GW_IP_D)
-
-Poke nic a few times after QEMU has had time to reply. The nic
-server is single-threaded and drains the virtio RX ring only on
-IPC wake, so without these pokes the boot ARP reply sits in the
-ring unread. Each `inet_nic_get_mac` call wakes nic, triggers a
-drain, and — once the reply lands — the drain notifies us. The
-pending notification flushes through `inet_drain_rx` on our very
-next main-loop `ipc_recv_notify`.
-
-Follow-up: virtio-mmio IRQ routing → notify_send_to(nic_tid)
-would remove the need for these boot pokes (and enable truly
-async inbound from unsolicited traffic).
-
-        var tries = 5
-        while tries > 0
-            sleep(2)
-            inet_nic_get_mac(mac)
-            tries -= 1
         1
 
 

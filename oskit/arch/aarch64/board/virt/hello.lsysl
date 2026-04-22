@@ -34,6 +34,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         create_process_suspended, resume_process,
         register_syscall, syscall_return,
         kb_enqueue, kb_notify_tid, notify_send,
+        virtio_notify_tid,
         current_thread, ticks}
     import oskit.config.{NUM_PRIORITIES}
     import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
@@ -66,14 +67,16 @@ and the per-CPU CPU interface at 0x08010000.
     val GICD_CTLR:        u64 = u64(0x08000000)
     val GICD_ISENABLER0:  u64 = u64(0x08000100)
     val GICD_ISENABLER1:  u64 = u64(0x08000104)  // SPIs 32..63
+    val GICD_ISENABLER2:  u64 = u64(0x08000108)  // SPIs 64..95
     val GICD_IPRIORITYR:  u64 = u64(0x08000400)  // 1 byte per IRQ
     val GICD_ITARGETSR:   u64 = u64(0x08000800)  // 1 byte per IRQ (SPIs only)
     val GICC_CTLR:        u64 = u64(0x08010000)
     val GICC_PMR:         u64 = u64(0x08010004)
     val GICC_IAR:         u64 = u64(0x0801000C)
     val GICC_EOIR:        u64 = u64(0x08010010)
-    val IRQ_TIMER: int = 30                // EL1 phys timer (PPI 14)
-    val IRQ_UART:  int = 33                // PL011 on QEMU virt (SPI 1)
+    val IRQ_TIMER:       int = 30          // EL1 phys timer (PPI 14)
+    val IRQ_UART:        int = 33          // PL011 on QEMU virt (SPI 1)
+    val IRQ_VIRTIO_NET:  int = 79          // virtio-mmio slot 31 (SPI 47)
 
     gic_init()
         var dctl: *i32 = *i32(GICD_CTLR)
@@ -91,6 +94,14 @@ and the per-CPU CPU interface at 0x08010000.
         *prio_uart = byte(0xA0)
         var target_uart: *byte = *byte(GICD_ITARGETSR + u64(IRQ_UART))
         *target_uart = byte(1)             // CPU 0
+        // Enable IRQ 79 (virtio-mmio slot 31, SPI 47) in ISENABLER2 at
+        // bit (79 - 64) = 15. Priority + target match the UART.
+        var isen2: *i32 = *i32(GICD_ISENABLER2)
+        *isen2 = i32(1 << 15)
+        var prio_vnet: *byte = *byte(GICD_IPRIORITYR + u64(IRQ_VIRTIO_NET))
+        *prio_vnet = byte(0xA0)
+        var target_vnet: *byte = *byte(GICD_ITARGETSR + u64(IRQ_VIRTIO_NET))
+        *target_vnet = byte(1)             // CPU 0
         var pmr: *i32 = *i32(GICC_PMR)
         *pmr = i32(0xFF)
         var cctl: *i32 = *i32(GICC_CTLR)
@@ -123,6 +134,29 @@ raw-ASCII path. Acks the PL011 interrupt before GIC EOI.
         if got == 1
             if kb_notify_tid >= 0
                 notify_send(kb_notify_tid, 1)
+
+Virtio-mmio IRQ handler. virtio-mmio slot 31 (virtio-net) is the
+only device we route; its INT_STATUS/INT_ACK registers live at
+fixed PA 0x0a003e00, directly reachable from kernel Device map.
+Must clear the device-side pending bits before the GIC EOI,
+otherwise the level-sensitive line re-asserts immediately.
+
+Kernel doesn't know what queue fired — the nic server walks used
+rings itself. We just ack the device and wake the registered
+notify TID (set via `svc_virtio_set_notify`).
+
+    val VIRTIO_NET_IRQ_PA: u64 = u64(0x0a003e00)
+    val VIRTIO_REG_INT_STATUS_OFF: u64 = u64(0x60)
+    val VIRTIO_REG_INT_ACK_OFF:    u64 = u64(0x64)
+
+    virtio_handler()
+        var sp: *i32 = *i32(VIRTIO_NET_IRQ_PA + VIRTIO_REG_INT_STATUS_OFF)
+        val status = *sp
+        if status != i32(0)
+            var ap: *i32 = *i32(VIRTIO_NET_IRQ_PA + VIRTIO_REG_INT_ACK_OFF)
+            *ap = status
+        if virtio_notify_tid >= 0
+            notify_send(virtio_notify_tid, 1)
 
     timer_init_periodic(interval_ticks: u64)
         cntp_tval_set(interval_ticks)
@@ -195,6 +229,8 @@ scheduler pass and the kernel threads themselves produce output.
             cntp_tval_set(cntfrq_el0() / u64(100))
         else if irq == IRQ_UART
             serial_handler()
+        else if irq == IRQ_VIRTIO_NET
+            virtio_handler()
         gic_eoi(irq)
 
 Scheduler hook. Five shapes:

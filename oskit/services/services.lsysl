@@ -384,3 +384,13 @@ to access their memory. The kernel mediates copies.
 
     svc_grant_unmap(grant_id: int)
         syscall(SYS_GRANT_UNMAP, grant_id)
+
+Register caller's thread as the recipient of virtio-device IRQ
+notifications. Exactly one thread at a time (last caller wins).
+Pass -1 to unregister. Nic server uses this to avoid polling on
+every IPC wake.
+
+    val SYS_VIRTIO_SET_NOTIFY = 76
+
+    svc_virtio_set_notify(tid: int)
+        syscall(SYS_VIRTIO_SET_NOTIFY, tid)

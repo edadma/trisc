@@ -108,8 +108,9 @@ created but before it is resumed.
             // vfs: needs grant_copy(73), grant_map(74), grant_unmap(75)
             hi = hi | i64(0xE00)
         else if idx == 6
-            // nic: needs vm_v2p(66) for virtio-net DMA descriptors
-            hi = hi | i64(4)
+            // nic: needs vm_v2p(66) for virtio DMA descriptors and
+            // virtio_set_notify(76) to register for device IRQ wakes.
+            hi = hi | i64(4) | i64(0x1000)
         svc_set_priv(pid, lo, hi, ipc)
 
 Per-server IPC send mask. Single source of truth — consulted

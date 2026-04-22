@@ -822,6 +822,17 @@ Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
         syscall_return(0)
         kernel_continue_current()
 
+SYS_VIRTIO_SET_NOTIFY (76): Register a thread to receive a
+notification on every virtio device IRQ. Mirrors the keyboard
+notify pattern; the platform IRQ handler (aarch64
+`arch_dispatch_irq` / future x86 MSI-X) calls
+`notify_send(virtio_notify_tid, 1)` after device-side INT_ACK.
+
+    sys_virtio_set_notify_handler(arg: int)
+        virtio_set_notify(int(i64(arg)))
+        syscall_return(0)
+        kernel_continue_current()
+
     sys_vm_v2p_handler(arg: int)
         val vaddr = u64(arg)
         val paddr = vm_v2p(threads[current_thread].ptbr, vaddr)
@@ -944,6 +955,7 @@ Used by ps and other user programs via ulib.
         register_syscall(73, sys_grant_copy_handler)
         register_syscall(74, sys_grant_map_handler)
         register_syscall(75, sys_grant_unmap_handler)
+        register_syscall(76, sys_virtio_set_notify_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events
@@ -958,6 +970,17 @@ via kbhit/getkey syscalls.
 
     keyboard_set_notify(tid: int)
         kb_notify_tid = tid
+
+Virtio IRQ target. Set via `svc_virtio_set_notify(tid)`; the
+aarch64 GIC handler reads this after writing the device-side
+`INT_ACK` and fires a 1-valued notification so the nic server
+(or any future virtio consumer) wakes up. -1 means "no target,
+drop the wake" — keyboard path mirrors this on boot.
+
+    var virtio_notify_tid = -1
+
+    virtio_set_notify(tid: int)
+        virtio_notify_tid = tid
 
     kb_has_key() -> int
         if kb_count > 0

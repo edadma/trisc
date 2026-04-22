@@ -12,16 +12,20 @@ own BSS. `virtio_dma_server.lsysl` provides the `vnet_va_to_pa`
 primitive via `svc_vm_v2p`, so descriptors point the device at
 the PA of each server-owned page.
 
-Because the server is single-threaded (no user-facing
-`create_thread` yet), RX polling only happens when the server
-wakes for an IPC request. Every IPC handler drains the virtio-net
-RX ring into the internal 8-slot queue first and notifies the
-subscriber if any frames landed. Unsolicited async inbound (e.g. a
-UDP datagram that isn't a response to something we sent) won't
-be delivered until the next IPC wake — that limitation is
-documented in `project_slix_nic_isolation.md` and is the next
-follow-up. For now boot ARP relies on inet polling RECV_PACKET
-during `inet_link_init` to force a drain.
+Single-threaded (no user-facing `create_thread` yet). Two wake
+sources feed the main `ipc_recv_notify` loop:
+
+1. Platform virtio IRQ — the kernel's `virtio_handler()` acks the
+   device-side INT_STATUS and fires `notify_send(nic_tid, 1)`.
+   The nic registers for this once via `svc_virtio_set_notify` at
+   startup; every subsequent used-ring update wakes us.
+2. Client IPC — GET_MAC / SEND_PACKET / SUBSCRIBE_RX /
+   RECV_PACKET.
+
+Every wake runs `nic_drain_rx` first, so even rare IRQ misses
+(e.g. if the notify target was unregistered) get caught the next
+time a client pings the server. The subscriber (inet) gets a
+single notification per drained batch.
 
 IPC protocol
 ------------
@@ -46,7 +50,8 @@ the stack. Unknown commands reply `status = -1`.
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, ipc_recv_notify, ipc_reply}
-    import oskit.services.{rs_ready, notify_send_to, notify_read_self}
+    import oskit.services.{rs_ready, notify_send_to, notify_read_self,
+        thread_id, svc_virtio_set_notify}
     import oskit.drivers.virtio.{virtio_net_init, virtio_net_get_mac,
         virtio_net_send, virtio_net_recv, v_attach, VIRTIO_DEV_NET}
     import oskit.arch.{MMIO_SERVER_VA}
@@ -231,6 +236,16 @@ UDP loopback keeps working. Matches the inet "best effort" pattern.
 
         nic_port = port_create()
         port_register(nic_port, "nic")
+
+Register this thread as the virtio IRQ notify target. On aarch64
+the kernel's `virtio_handler()` acks the device and sends us a
+notification whenever the used ring grows — `ipc_recv_notify`
+below returns -2, we drain, back to sleep. Unregistered
+(kernel-side -1 default) means polling-only; harmless on
+builds without IRQ routing wired yet.
+
+        svc_virtio_set_notify(thread_id())
+
         rs_ready()
 
         var buf: [1520]byte
