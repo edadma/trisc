@@ -911,19 +911,31 @@ Used by ps and other user programs via ulib.
         syscall_return(query_thread_state(arg))
         kernel_continue_current()
 
-    sys_thread_name_handler(arg: int)
-        // Copy name to caller's info page so user processes
-        // can read it — kernel BSS has no PTE_U on x86_64.
-        val src = query_thread_name(arg)
-        val nlen = query_thread_name_len(arg)
-        val dst = *byte(INFO_PAGE_VA + 0x100)  // past args area in user page
+    sys_thread_name_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        // Copy-out form (registered via register_syscall6).
+        //   a0 = thread id
+        //   a1 = *byte user buffer (runs under caller PTBR, so direct)
+        //   a2 = buffer capacity
+        // Writes at most cap-1 name bytes plus a NUL terminator, and
+        // returns the number of bytes copied. cap <= 0 returns 0 and
+        // writes nothing.
+        val id = int(a0)
+        val dst = *byte(a1)
+        val cap = int(a2)
+        var n = query_thread_name_len(id)
+        if cap <= 0
+            kernel_continue_current()
+            return i64(0)
+        if n > cap - 1
+            n = cap - 1
+        val src = query_thread_name(id)
         var ni = 0
-        while ni < nlen
+        while ni < n
             dst[ni] = src[ni]
             ni += 1
-        dst[ni] = 0
-        syscall_return(i64(dst))
+        dst[n] = 0
         kernel_continue_current()
+        i64(n)
 
     sys_thread_pid_handler(arg: int)
         syscall_return(query_thread_pid(arg))
@@ -974,7 +986,7 @@ Used by ps and other user programs via ulib.
         register_syscall(6, sys_uptime_handler)
         register_syscall(7, sys_thread_count_handler)
         register_syscall(8, sys_thread_state_handler)
-        register_syscall(9, sys_thread_name_handler)
+        register_syscall6(9, sys_thread_name_handler)
         register_syscall(42, sys_thread_pid_handler)
         register_syscall(43, sys_thread_name_len_handler)
         register_syscall(11, sys_kbhit_handler)

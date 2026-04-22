@@ -46,6 +46,18 @@ syscall
     trap 0               ; enter kernel: r1 = number, r2 = arg
     jalr r0, r6          ; return to caller (result in r1)
 
+; syscall6(number, a0, a1, a2, a3, a4, a5) -> i64
+;
+; TRISC multi-arg calling convention already places a0..a5 on the
+; caller's stack at [sp+0..+40] (first arg in r1 is the syscall number).
+; The kernel's trap_handler slow path reads them straight off the user
+; stack via the saved USP. No reshuffling required here.
+global syscall6, func
+
+syscall6
+    trap 0
+    jalr r0, r6
+
 ; malloc/free are provided by posix/stdlib/alloc, linked into the
 ; external program binary. The codegen emits extern refs to these
 ; for any module with string types.

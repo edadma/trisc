@@ -42,6 +42,24 @@ syscall:
     svc #0
     ret
 
+// syscall6(number, a0, a1, a2, a3, a4, a5) -> i64
+//   AAPCS64 call site: x0=num, x1=a0, x2=a1, x3=a2, x4=a3, x5=a4, x6=a5.
+//   SLIX 6-arg dispatcher reads x8=num, x0..x5=a0..a5 from the saved
+//   frame, so the wrapper shifts the args one register down and hoists
+//   num into x8 before the SVC. x0 already carries the return value on
+//   resume.
+.global syscall6
+syscall6:
+    mov x8, x0
+    mov x0, x1
+    mov x1, x2
+    mov x2, x3
+    mov x3, x4
+    mov x4, x5
+    mov x5, x6
+    svc #0
+    ret
+
 // thread_exit — sysl build_stack_frame pre-loads x30 with this so
 // that returning from a thread's entry function halts cleanly
 // via SYS_EXIT instead of falling off the end of the stack.

@@ -36,6 +36,18 @@ syscall:
     int $0x80
     retq
 
+# syscall6(number, a0, a1, a2, a3, a4, a5) -> i64
+#
+# SysV AMD64 passes 7 args as: rdi=num, rsi=a0, rdx=a1, rcx=a2, r8=a3,
+# r9=a4, [rsp+8]=a5 (after the `call`). The SLIX 6-arg dispatcher
+# reads num from RDI and a5 from R10, so we only need to lift a5 off
+# the stack into r10 before `int $0x80`. Return value is in RAX.
+.global syscall6
+syscall6:
+    movq 8(%rsp), %r10
+    int $0x80
+    retq
+
 # thread_exit — called when a thread function returns
 .global thread_exit
 thread_exit:

@@ -15,6 +15,12 @@ External programs include their own copy of the trampoline
 
     extern syscall(number: int, arg: i64) -> i64
 
+Multi-arg variant for syscalls registered via `register_syscall6`.
+The asm wrapper (per-arch) arranges for the kernel's 6-arg dispatch
+path to receive a0..a5 in the appropriate saved-frame slots.
+
+    extern syscall6(number: int, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+
 Syscall numbers — must match the kernel and IPC modules.
 
     val SYS_SLEEP        = 0
@@ -115,8 +121,17 @@ Thread and process queries.
     get_thread_state(id: int) -> int
         syscall(SYS_THREAD_STATE, id)
 
-    get_thread_name(id: int) -> *byte
-        syscall(SYS_THREAD_NAME, id)
+Copy the name of thread `id` into the caller-provided buffer of
+`cap` bytes. Writes at most `cap-1` bytes plus a terminating NUL.
+Returns the number of name bytes copied (not counting the NUL), or
+0 if `cap <= 0`.
+
+First consumer of the 6-arg dispatch path — kills the old handler's
+INFO_PAGE_VA+0x100 scratch region. Handler runs under the caller's
+PTBR so the buffer VA is written directly.
+
+    get_thread_name(id: int, buf: *byte, cap: int) -> int
+        int(syscall6(SYS_THREAD_NAME, i64(id), i64(buf), i64(cap), 0, 0, 0))
 
     get_thread_name_len(id: int) -> int
         syscall(SYS_THREAD_NAME_LEN, id)
