@@ -46,14 +46,113 @@ gets the same lease so this is fine for bring-up).
     val INET_GW_IP_D = 2
 
 
-Link-layer state. `*_known` flags guard every use because the
-nic may not be available (e.g. on x86 builds where the virtio-net
-stack isn't wired in), and ARP replies may not have arrived yet.
+Link-layer state. `inet_our_mac_known` guards every outbound
+build because the nic may not be available (e.g. on x86 builds
+where the virtio-net stack isn't wired in).
 
     var inet_our_mac: [6]byte
     var inet_our_mac_known: int = 0
-    var inet_gw_mac: [6]byte
-    var inet_gw_mac_known: int = 0
+
+
+### ARP cache
+
+16-entry (IP, MAC) table shared by every outbound send. Replaces
+the previous `inet_gw_mac + inet_gw_mac_known` pair so the stack
+can talk to peers other than the default gateway once their MAC
+has been learned via ARP. Full cache evicts slot 0 (FIFO-ish —
+promote to LRU if traffic starts churning).
+
+    val INET_ARP_SIZE = 16
+
+    struct InetArpEntry
+        ip: u32
+        mac: [6]byte
+        in_use: int
+
+    var inet_arp_cache: [16]InetArpEntry
+
+
+Slot index for `ip`, or -1 if not cached.
+
+    inet_arp_lookup_idx(ip: u32) -> int
+        var i = 0
+        while i < INET_ARP_SIZE
+            if inet_arp_cache[i].in_use != 0
+                if inet_arp_cache[i].ip == ip
+                    return i
+            i += 1
+        -1
+
+
+Copy the cached MAC for `ip` into `out`. Returns 1 on hit, 0 on
+miss (in which case `out` is untouched).
+
+    inet_arp_lookup(ip: u32, out: *byte) -> int
+        val idx = inet_arp_lookup_idx(ip)
+        if idx < 0
+            return 0
+        var j = 0
+        while j < 6
+            out[j] = inet_arp_cache[idx].mac[j]
+            j += 1
+        1
+
+
+Insert or update (ip, mac). Re-use an existing slot for `ip` if
+present; otherwise grab the first free slot; otherwise evict
+slot 0 (simplest FIFO-ish policy). Good enough at this scale.
+
+    inet_arp_insert(ip: u32, mac: *byte)
+        var idx = inet_arp_lookup_idx(ip)
+        if idx < 0
+            var i = 0
+            while i < INET_ARP_SIZE
+                if inet_arp_cache[i].in_use == 0
+                    idx = i
+                    i = INET_ARP_SIZE
+                else
+                    i += 1
+        if idx < 0
+            idx = 0
+        inet_arp_cache[idx].ip = ip
+        var j = 0
+        while j < 6
+            inet_arp_cache[idx].mac[j] = mac[j]
+            j += 1
+        inet_arp_cache[idx].in_use = 1
+
+
+Returns 1 if `ip` lives in our local /24 subnet (matches our
+first 3 octets). Off-subnet destinations route via the default
+gateway.
+
+    inet_in_subnet(ip: u32) -> int
+        if ipv4_octet(ip, 0) != INET_OUR_IP_A
+            return 0
+        if ipv4_octet(ip, 1) != INET_OUR_IP_B
+            return 0
+        if ipv4_octet(ip, 2) != INET_OUR_IP_C
+            return 0
+        1
+
+
+Resolve the next-hop MAC for `dst_ip`: the cached entry for
+`dst_ip` itself if on-subnet, otherwise the default gateway's
+entry. On miss, fires an ARP request for the target and returns
+0 — caller drops the packet (UDP best-effort). Returns 1 on hit
+with `out` filled.
+
+    inet_resolve_mac(dst_ip: u32, out: *byte) -> int
+        var target_ip = dst_ip
+        if inet_in_subnet(dst_ip) == 0
+            target_ip = ipv4(INET_GW_IP_A, INET_GW_IP_B,
+                INET_GW_IP_C, INET_GW_IP_D)
+        if inet_arp_lookup(target_ip, out) != 0
+            return 1
+        inet_send_arp_request(
+            ipv4_octet(target_ip, 0), ipv4_octet(target_ip, 1),
+            ipv4_octet(target_ip, 2), ipv4_octet(target_ip, 3))
+        0
 
 
 Diagnostic counters. Useful for asserting the TX / RX loop is
@@ -195,13 +294,6 @@ frame's raw length (up to `maxlen` bytes copied into `out`), or
             i += 1
         inet_our_mac_known = 1
 
-    inet_cache_gw_mac(mac: *byte)
-        var i = 0
-        while i < 6
-            inet_gw_mac[i] = mac[i]
-            i += 1
-        inet_gw_mac_known = 1
-
     inet_bump_pings_received()
         inet_pings_received += 1
 
@@ -271,13 +363,16 @@ in its reply so we can match replies to requests.
     inet_send_icmp_echo(id: int, seq: int) -> int
         if inet_our_mac_known == 0
             return -1
-        if inet_gw_mac_known == 0
+        var gw_mac: [6]byte
+        val gw_ip = ipv4(INET_GW_IP_A, INET_GW_IP_B,
+            INET_GW_IP_C, INET_GW_IP_D)
+        if inet_arp_lookup(gw_ip, gw_mac) == 0
             return -1
         var frame: [42]byte
 
 Ethernet header.
 
-        pkt_write_mac(frame, 0, inet_gw_mac)
+        pkt_write_mac(frame, 0, gw_mac)
         pkt_write_mac(frame, 6, inet_our_mac)
         pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
 
@@ -427,13 +522,12 @@ on valid, 0 on corrupt.
 
 ### UDP — outbound
 
-Builds a full Ethernet/IPv4/UDP frame and hands it to the nic. The
-gateway MAC is the only link-layer destination we know (no general
-ARP cache yet), and QEMU user-mode networking routes everything
-through the gateway anyway, so we send every non-loopback packet
-there. Returns 0 on success, -1 if the link isn't ready
-(`inet_our_mac_known` or `inet_gw_mac_known` still 0), if `dlen` is
-out of range, or if the nic rejects the frame.
+Builds a full Ethernet/IPv4/UDP frame and hands it to the nic.
+`inet_resolve_mac` picks the next-hop MAC: the destination's own
+cached MAC for on-subnet targets, the gateway's for off-subnet.
+Cache miss fires an ARP request and returns -1 (UDP semantics let
+the caller retry). Also returns -1 if the link isn't ready,
+`dlen` is out of range, or the nic rejects the frame.
 
 UDP checksum is computed over the IPv4 pseudo-header + UDP header
 + payload — required for IPv6 peers and recommended for IPv4.
@@ -441,18 +535,19 @@ UDP checksum is computed over the IPv4 pseudo-header + UDP header
     inet_send_udp(dst_ip: u32, dst_port: int, src_port: int, data: *byte, dlen: int) -> int
         if inet_our_mac_known == 0
             return -1
-        if inet_gw_mac_known == 0
-            return -1
         if dlen < 0
             return -1
         if dlen > 1472
+            return -1
+        var next_hop_mac: [6]byte
+        if inet_resolve_mac(dst_ip, next_hop_mac) == 0
             return -1
         var frame: [1514]byte
         val total_len = 14 + 20 + 8 + dlen
 
 Ethernet header.
 
-        pkt_write_mac(frame, 0, inet_gw_mac)
+        pkt_write_mac(frame, 0, next_hop_mac)
         pkt_write_mac(frame, 6, inet_our_mac)
         pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
 
