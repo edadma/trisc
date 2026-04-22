@@ -416,6 +416,70 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("test_tcp_big: ok")
   }
 
+  "aarch64 tcp: active-open drain-recv 900 bytes" in {
+    // test_tcp_rx dials 10.0.2.2:18081 (slirp routes to host's
+    // 18081 via user-mode networking — no hostfwd needed for
+    // outbound). We stand up a Scala ServerSocket on 127.0.0.1:18081
+    // that writes 900 bytes of pattern (byte i = i & 0xff), reads
+    // the guest's 6-byte summary, verifies count + checksum.
+    // Mirror of test_tcp_big but from the active-open side.
+    val n = 900
+    var expectedSum = 0L
+    val payload = new Array[Byte](n)
+    for i <- 0 until n do
+      val b = (i & 0xff).toByte
+      payload(i) = b
+      expectedSum += (b & 0xff).toLong
+
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18081))
+    server.setSoTimeout(15000)
+
+    val resultBox = new java.util.concurrent.atomic.AtomicReference[String]("")
+    val srvThread = new Thread(() => {
+      try
+        val client = server.accept()
+        try {
+          val out = client.getOutputStream
+          val in  = client.getInputStream
+          out.write(payload)
+          out.flush()
+          val reply = new Array[Byte](6)
+          var read = 0
+          while read < 6 do
+            val r = in.read(reply, read, 6 - read)
+            if r <= 0 then throw new RuntimeException(s"short read: got $read")
+            read += r
+          val gotCount = ((reply(0) & 0xff) << 8) | (reply(1) & 0xff)
+          val gotSum =
+            ((reply(2) & 0xffL) << 24) |
+            ((reply(3) & 0xffL) << 16) |
+            ((reply(4) & 0xffL) << 8)  |
+            (reply(5) & 0xffL)
+          resultBox.set(s"count=$gotCount sum=$gotSum")
+        } finally client.close()
+      catch
+        case e: Throwable => resultBox.set(s"ERR: ${e.getMessage}")
+    }, "tcp-pattern-server")
+    srvThread.setDaemon(true)
+    srvThread.start()
+
+    try
+      qemu.send("test_tcp_rx\n")
+      val output = qemu.waitFor("test_tcp_rx: ok")
+      output should include("test_tcp_rx: connected fd=")
+      output should include("test_tcp_rx: drained count=900")
+      output should include("test_tcp_rx: sent=6")
+      output should include("test_tcp_rx: ok")
+
+      srvThread.join(5000)
+      resultBox.get() shouldBe s"count=$n sum=$expectedSum"
+    finally
+      server.close()
+      srvThread.join(2000)
+  }
+
   "aarch64 crash recovery: kill tfs and restart" in {
     val psOut = qemu.command("ps")
     val tfsLine = psOut.split('\n').find(_.contains("tfs"))
