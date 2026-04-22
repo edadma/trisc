@@ -272,6 +272,21 @@ remain hardcoded in boot.asm.
     var syscall_table_6: [512]i64
     var syscall_ssp: i64
 
+System information available via sys_getinfo. Replaces the old
+per-process INFO_PAGE_VA scratch page. Populated during boot
+by arch-specific code (aarch64 hello.lsysl, x86 nsh kernel main,
+TRISC kernel main); queried by RS and system servers.
+
+    var system_ramdisk_base: i64 = 0
+    var system_ramdisk_size: i64 = 0
+    var system_boot_info_pa: i64 = 0
+    var system_rs_tid: i64 = -1
+
+    kernel_set_system_info(ramdisk_base: i64, ramdisk_size: i64, boot_info_pa: i64)
+        system_ramdisk_base = ramdisk_base
+        system_ramdisk_size = ramdisk_size
+        system_boot_info_pa = boot_info_pa
+
 Platform dispatch uses this to hand the saved frame pointer to
 syscall_return. Imported module-level vars are read-only, so go
 through a setter when the arch layer needs to write it.
@@ -904,6 +919,64 @@ Used by ps and other user programs via ulib.
         syscall_return(query_thread_name_len(arg))
         kernel_continue_current()
 
+SYS_GETINFO (77): Query system information. Replaces the per-process
+INFO_PAGE_VA read. Args: a0=type, a1=buf, a2=cap.
+
+  type 0 (GETINFO_RS_TID):    returns RS TID, or -1 if not yet set.
+  type 1 (GETINFO_RAMDISK_BASE): returns ramdisk physical base.
+  type 2 (GETINFO_RAMDISK_SIZE): returns ramdisk size in bytes.
+  type 3 (GETINFO_BOOT_INFO): copy boot info header + entries into
+         caller's buffer. Returns bytes copied, or -1 if buf too small
+         or boot info not available. The boot info blob starts with
+         8-byte "SLIX" magic + u32 module_count; total length is
+         8 + module_count * 24.
+
+Runs under caller PTBR, so copy-out writes land directly in caller
+memory.
+
+    sys_getinfo_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val info_type = int(a0)
+        if info_type == 0
+            kernel_continue_current()
+            return system_rs_tid
+        if info_type == 1
+            kernel_continue_current()
+            return system_ramdisk_base
+        if info_type == 2
+            kernel_continue_current()
+            return system_ramdisk_size
+        if info_type == 3
+            val cap = int(a2)
+            if system_boot_info_pa == 0
+                kernel_continue_current()
+                return i64(-1)
+            val bi_src = *byte(system_boot_info_pa)
+            // boot info header layout: magic(8) + u32 module_count (little-endian)
+            val mc = int(bi_src[8]) | (int(bi_src[9]) << 8) | (int(bi_src[10]) << 16) | (int(bi_src[11]) << 24)
+            val total = 8 + mc * 24
+            if cap < total
+                kernel_continue_current()
+                return i64(-1)
+            val dst = *byte(a1)
+            var ci = 0
+            while ci < total
+                dst[ci] = bi_src[ci]
+                ci += 1
+            kernel_continue_current()
+            return i64(total)
+        kernel_continue_current()
+        i64(-1)
+
+SYS_SET_RS_TID (78): Register the calling thread as RS. Called once
+during rs_main() so later sys_getinfo(GETINFO_RS_TID) from system
+servers returns the right TID. No args needed beyond the caller's
+identity. Returns 0 on success.
+
+    sys_set_rs_tid_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        system_rs_tid = i64(current_thread)
+        kernel_continue_current()
+        i64(0)
+
     kernel_init()
         vm_init()
         register_syscall(0, sleep_current)
@@ -962,6 +1035,8 @@ Used by ps and other user programs via ulib.
         register_syscall6(74, sys_grant_map_handler)
         register_syscall(75, sys_grant_unmap_handler)
         register_syscall(76, sys_virtio_set_notify_handler)
+        register_syscall6(77, sys_getinfo_handler)
+        register_syscall6(78, sys_set_rs_tid_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events

@@ -36,6 +36,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         terminate_current,
         kb_enqueue, kb_notify_tid, notify_send,
         virtio_notify_tid,
+        kernel_set_system_info,
         current_thread, ticks}
     import oskit.config.{NUM_PRIORITIES, MAX_SYSCALLS}
     import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
@@ -844,6 +845,11 @@ which is the baseline we want for this commit).
         kernel_init()
         ipc_init()
         register_syscall(1, sys_putc_handler)
+
+        // Populate kernel-side system info so sys_getinfo can
+        // answer RS and server queries without the per-process
+        // INFO_PAGE_VA scratch page.
+        kernel_set_system_info(i64(0x50000000), i64(0x200000), i64(BOOT_INFO_PA))
 
         // Create the idle thread at the lowest priority. It runs
         // `arch_sti(); wfi()` in a loop on its own kernel stack

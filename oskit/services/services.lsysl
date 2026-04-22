@@ -346,3 +346,34 @@ every IPC wake.
 
     svc_virtio_set_notify(tid: int)
         syscall(SYS_VIRTIO_SET_NOTIFY, tid)
+
+System info (sys_getinfo) — replaces the per-process INFO_PAGE_VA.
+Types:
+  0 = RS TID
+  1 = ramdisk physical base
+  2 = ramdisk size in bytes
+  3 = boot info blob (copy-out; buf+cap must be large enough for
+      the SLIX-magic header + module entries)
+
+    val SYS_GETINFO    = 77
+    val SYS_SET_RS_TID = 78
+
+    val GETINFO_RS_TID        = 0
+    val GETINFO_RAMDISK_BASE  = 1
+    val GETINFO_RAMDISK_SIZE  = 2
+    val GETINFO_BOOT_INFO     = 3
+
+    svc_getinfo(info_type: int, buf: *byte, cap: int) -> i64
+        syscall6(SYS_GETINFO, i64(info_type), i64(buf), i64(cap), 0, 0, 0)
+
+    svc_get_rs_tid() -> int
+        int(syscall6(SYS_GETINFO, i64(GETINFO_RS_TID), 0, 0, 0, 0, 0))
+
+    svc_get_ramdisk_base() -> u64
+        u64(syscall6(SYS_GETINFO, i64(GETINFO_RAMDISK_BASE), 0, 0, 0, 0, 0))
+
+    svc_get_ramdisk_size() -> u64
+        u64(syscall6(SYS_GETINFO, i64(GETINFO_RAMDISK_SIZE), 0, 0, 0, 0, 0))
+
+    svc_set_rs_tid_self()
+        syscall6(SYS_SET_RS_TID, 0, 0, 0, 0, 0, 0)
