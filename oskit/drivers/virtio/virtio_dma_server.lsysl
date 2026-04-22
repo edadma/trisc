@@ -1,0 +1,20 @@
+Virtio DMA helper — server-context provider for `vnet_va_to_pa`
+================================================================
+
+Second file of `module oskit.drivers.virtio`. Sibling alternative
+to `virtio_dma_kernel.lsysl`. Exactly one of the two is linked
+into any given build: the kernel image picks the trivial identity
+provider, the standalone nic server picks this one.
+
+When virtio-net runs inside the nic server, its ring pages and
+buffer pages are ordinary server-owned pages — the server PT maps
+them, but the device sees physical addresses. `svc_vm_v2p` walks
+the calling thread's page table and returns the PA backing a
+given VA, which is exactly what the descriptor rings need.
+
+    module oskit.drivers.virtio
+
+    import oskit.services.{svc_vm_v2p}
+
+    vnet_va_to_pa(va: i64) -> i64
+        i64(svc_vm_v2p(u64(va)))

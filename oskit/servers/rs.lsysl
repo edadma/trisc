@@ -36,13 +36,13 @@ starts the next server.
 
 Server tracking. PIDs and MMIO page grants for each server
 in boot order (0=disk, 1=tfs, 2=tty, 3=pm, 4=vfs, 5=ds,
-6=inet, 7=init). Used by crash recovery to restart a dead
+6=nic, 7=inet, 8=init). Used by crash recovery to restart a dead
 server.
 
-    val RS_TOTAL_SERVERS = 8
-    var rs_server_pids: [8]int
-    var rs_server_io_page: [8]int
-    var rs_server_ports: [8]int
+    val RS_TOTAL_SERVERS = 9
+    var rs_server_pids: [9]int
+    var rs_server_io_page: [9]int
+    var rs_server_ports: [9]int
 
 Syscall privilege masks. Each server gets a bitmask (lo=bits 0-63,
 hi=bits 64-95) specifying which syscalls it may call. The kernel
@@ -107,15 +107,10 @@ created but before it is resumed.
         else if idx == 4
             // vfs: needs grant_copy(73), grant_map(74), grant_unmap(75)
             hi = hi | i64(0xE00)
+        else if idx == 6
+            // nic: needs vm_v2p(66) for virtio-net DMA descriptors
+            hi = hi | i64(4)
         svc_set_priv(pid, lo, hi, ipc)
-
-The nic server isn't an RS-managed boot module (it runs as a
-kernel thread in the driver's address space). We still need its
-port id to give inet send access — looked up once just before
-rs_set_ipc_masks runs. -1 if no nic is registered (e.g. x86
-builds, which have no virtio-net).
-
-    var rs_nic_port = -1
 
 Per-server IPC send mask. Single source of truth — consulted
 both at boot (rs_set_ipc_masks) and after a restart
@@ -128,7 +123,8 @@ receiver. Servers not listed fall through to 0.
         val tty_port = rs_server_ports[2]
         val pm_port = rs_server_ports[3]
         val vfs_port = rs_server_ports[4]
-        // idx 0 (disk), 5 (ds) are pure receivers → 0.
+        val nic_port = rs_server_ports[6]
+        // idx 0 (disk), 5 (ds), 6 (nic) are pure receivers → 0.
         if idx == 1
             // tfs: sends to disk
             return 1 << disk_port
@@ -141,13 +137,14 @@ receiver. Servers not listed fall through to 0.
         else if idx == 4
             // vfs: sends to tfs and tty
             return (1 << tfs_port) | (1 << tty_port)
-        else if idx == 6
-            // inet: sends to nic (ARP replies, ICMP replies, future
-            // UDP-over-wire). No nic registered → 0.
-            if rs_nic_port < 0
-                return 0
-            return 1 << rs_nic_port
         else if idx == 7
+            // inet: sends to nic (ARP replies, ICMP replies,
+            // UDP-over-wire). Missing nic leaves the mask at 0 and
+            // inet's nic IPC wrappers degrade to returning -1.
+            if nic_port < 0
+                return 0
+            return 1 << nic_port
+        else if idx == 8
             // init: sends to pm, vfs
             return (1 << pm_port) | (1 << vfs_port)
         return 0
@@ -158,7 +155,8 @@ IDs are known.
     rs_set_ipc_masks()
         var i = 0
         while i < RS_TOTAL_SERVERS
-            svc_set_ipc_mask(rs_server_pids[i], rs_ipc_mask_for_idx(i))
+            if rs_server_pids[i] > 0
+                svc_set_ipc_mask(rs_server_pids[i], rs_ipc_mask_for_idx(i))
             i += 1
 
 Set IPC mask for a single server by index. Used after restart
@@ -173,9 +171,10 @@ Ramdisk info, read from info page at startup.
     var rs_ramdisk_size = 0
 
 Boot info, copied from info page at startup.
-Max 256 bytes covers header + plenty of module entries.
+512 bytes = 8-byte header + 21 × 24-byte module entries, room for
+the 11-entry aarch64 set (user + 10 servers) with growth headroom.
 
-    var rs_boot_info: [256]byte
+    var rs_boot_info: [512]byte
     var rs_boot_info_len = 0
 
 Module loading buffer (128 KB). Boot module TRB/ELF data
@@ -209,8 +208,8 @@ so it can use ipc_recv_notify to block for notifications.
 
 Hardcoded boot order. Each entry has a name and length.
 
-    var rs_boot_names: [64]byte   // 8 entries * 8 bytes each
-    var rs_boot_nlen: [8]int
+    var rs_boot_names: [72]byte   // 9 entries * 8 bytes each
+    var rs_boot_nlen: [9]int
 
     rs_init_boot_order()
         // disk
@@ -231,12 +230,15 @@ Hardcoded boot order. Each entry has a name and length.
         // ds
         rs_boot_names[40] = 'd'; rs_boot_names[41] = 's'; rs_boot_names[42] = 0
         rs_boot_nlen[5] = 2
+        // nic
+        rs_boot_names[48] = 'n'; rs_boot_names[49] = 'i'; rs_boot_names[50] = 'c'; rs_boot_names[51] = 0
+        rs_boot_nlen[6] = 3
         // inet
-        rs_boot_names[48] = 'i'; rs_boot_names[49] = 'n'; rs_boot_names[50] = 'e'; rs_boot_names[51] = 't'; rs_boot_names[52] = 0
-        rs_boot_nlen[6] = 4
-        // init
-        rs_boot_names[56] = 'i'; rs_boot_names[57] = 'n'; rs_boot_names[58] = 'i'; rs_boot_names[59] = 't'; rs_boot_names[60] = 0
+        rs_boot_names[56] = 'i'; rs_boot_names[57] = 'n'; rs_boot_names[58] = 'e'; rs_boot_names[59] = 't'; rs_boot_names[60] = 0
         rs_boot_nlen[7] = 4
+        // init
+        rs_boot_names[64] = 'i'; rs_boot_names[65] = 'n'; rs_boot_names[66] = 'i'; rs_boot_names[67] = 't'; rs_boot_names[68] = 0
+        rs_boot_nlen[8] = 4
 
 Boot info parsing. RS reads a copy of the boot info header
 from its info page at 0xBF000+24.
@@ -558,6 +560,13 @@ After boot, RS stays alive in a monitoring loop.
 
     val IO_PAGE_DEVICES = 0x800
 
+Virtio-mmio page-frame-number for slot 24..31 on QEMU's virt
+machine (physical 0x0a003000 = frame 0x0a003 = 0xa003). Granted
+to the nic server so it can reach virtio-net at slot 31 (0xe00
+bytes into the page; server VA = MMIO_SERVER_VA + 0xe00).
+
+    val IO_PAGE_NIC_VIRT = 0xa003
+
     rs_main()
         rs_set_tid(thread_id())
 
@@ -571,8 +580,8 @@ After boot, RS stays alive in a monitoring loop.
         // Read module count to determine copy size
         val mod_count = int(rs_read_u32_le(bi_src + 4))
         rs_boot_info_len = 8 + mod_count * 24
-        if rs_boot_info_len > 256
-            rs_boot_info_len = 256
+        if rs_boot_info_len > 512
+            rs_boot_info_len = 512
         var ci = 0
         while ci < rs_boot_info_len
             rs_boot_info[ci] = bi_src[ci]
@@ -588,6 +597,9 @@ After boot, RS stays alive in a monitoring loop.
 
         // Start all servers + init from boot modules.
         // Servers that need MMIO get IO_PAGE_DEVICES; others get 0.
+        // nic (idx 6) is optional — x86 has no PCI BAR grants yet,
+        // so x86's ramdisk omits the nic module and the slot is
+        // left empty (inet's nic IPC wrappers degrade to -1).
         var i = 0
         while i < RS_TOTAL_SERVERS
             val name = &rs_boot_names[i * 8]
@@ -597,38 +609,45 @@ After boot, RS stays alive in a monitoring loop.
 
             val mod_idx = rs_find_boot_module(name, nlen)
             if mod_idx < 0
-                rs_print(" MISSING\n")
-                return
-
-            // pm, vfs, init don't need MMIO
-            var io_page = IO_PAGE_DEVICES
-            if i >= 3
-                io_page = 0
-            val pid = rs_start_from_module(mod_idx, name, nlen, io_page)
-            if pid <= 0
-                rs_print(" FAILED\n")
-                return
-            rs_server_pids[i] = pid
-            rs_server_io_page[i] = io_page
-            rs_set_server_priv(pid, i)
-
-            rs_print(" [mod]")
-            rs_wait_ready()
-            // Record server's port for transparent restart.
-            // VFS registers as "fs" (not "vfs") — use correct port name.
-            if i == 4
-                rs_server_ports[i] = port_lookup("fs")
+                if i == 6
+                    rs_print(" [skipped]\n")
+                    rs_server_pids[i] = 0
+                    rs_server_io_page[i] = 0
+                    rs_server_ports[i] = -1
+                else
+                    rs_print(" MISSING\n")
+                    return
             else
-                rs_server_ports[i] = port_lookup(string(name, nlen))
-            rs_print(" ok\n")
+                // Device-access grants:
+                //   disk(0), tfs(1), tty(2) → IO_PAGE_DEVICES (ramdisk + UART page)
+                //   nic(6) → virtio-mmio page on aarch64 (0xa003)
+                //   pm(3), vfs(4), ds(5), inet(7), init(8) → no MMIO.
+                var io_page = 0
+                if i < 3
+                    io_page = IO_PAGE_DEVICES
+                else if i == 6
+                    io_page = IO_PAGE_NIC_VIRT
+                val pid = rs_start_from_module(mod_idx, name, nlen, io_page)
+                if pid <= 0
+                    rs_print(" FAILED\n")
+                    return
+                rs_server_pids[i] = pid
+                rs_server_io_page[i] = io_page
+                rs_set_server_priv(pid, i)
+
+                rs_print(" [mod]")
+                rs_wait_ready()
+                // Record server's port for transparent restart.
+                // VFS registers as "fs" (not "vfs") — use correct port name.
+                if i == 4
+                    rs_server_ports[i] = port_lookup("fs")
+                else
+                    rs_server_ports[i] = port_lookup(string(name, nlen))
+                rs_print(" ok\n")
             i += 1
 
-Tighten IPC masks now that all port IDs are known. Look up the
-nic server's port too (kernel thread, not an RS-managed boot
-module) so inet's mask can include the nic bit. A missing nic
-leaves `rs_nic_port = -1` and inet's mask at 0.
+Tighten IPC masks now that all port IDs are known.
 
-        rs_nic_port = port_lookup("nic")
         rs_set_ipc_masks()
 
         // RS stays alive — monitoring loop

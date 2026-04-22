@@ -395,8 +395,12 @@ page `io_page × PAGE_SIZE` mapped here with Device memory attrs
 virtio-mmio slot 31 at PA 0x0a003e00) land at VA
 `MMIO_SERVER_VA + (PA & 0xfff)` — the caller adds the offset.
 
+`MMIO_SERVER_VA` is the constant servers import from `oskit.arch`;
+it lives in `prog_config.sysl` so both kernel and server builds
+see the same value (the kernel build doesn't need the VA itself —
+it pokes PTEs via `MMIO_SERVER_L3_IDX` directly).
+
     val MMIO_SERVER_L3_IDX  = 256
-    val MMIO_SERVER_VA: u64 = u64(0x60100000)
 
 
 Create a server page table. Same structure as `vm_create_process_pt`

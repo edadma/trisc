@@ -246,9 +246,15 @@ indicating which step blew up (for diagnostics only).
     virtio_net_init() -> int
         vnet_dma_reset()
 
-        if v_find(VIRTIO_DEV_NET) == 0
-            vnet_fail = 1
-            return 0
+If the caller already ran `v_attach()` on a server-granted MMIO
+mapping, `v_have_device()` is already 1 and we skip probing —
+`v_find` would scan 32 slots at `VIRTIO_MMIO_BASE`, none of
+which are mapped in the server's page table.
+
+        if v_have_device() == 0
+            if v_find(VIRTIO_DEV_NET) == 0
+                vnet_fail = 1
+                return 0
 
 Reset the device: status = 0 (virtio spec 4.2.3.1.1 step 1).
 

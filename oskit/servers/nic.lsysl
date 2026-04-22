@@ -1,20 +1,27 @@
-OSKit NIC server — virtio-net front door (kernel-thread first cut)
+OSKit NIC server — virtio-net front door (standalone boot module)
 ===================================================================
 
 Minix 3-style server that fronts the single virtio-net driver.
-Clients go through IPC; the driver is no longer a grab-it-
-yourself kernel symbol. Phase 13's end state is for this server
-to run as an isolated boot module with a kernel-granted MMIO
-mapping + DMA-capable page grants; for now it runs as a kernel
-thread in the driver's address space so we can nail the IPC
-shape without needing new VM plumbing.
+Runs as an isolated boot-module process with its own page table,
+its own copy of `virtio_net.lsysl`, and an MMIO grant that maps
+virtio-mmio slot 31 (virtio-net) at a fixed VA inside the server.
+Kernel code on the aarch64 side no longer links the driver.
 
-Owns the full virtio-net front door: TX (SEND_PACKET), MAC
-queries (GET_MAC), and RX (SUBSCRIBE_RX + RECV_PACKET). The
-inet server is the RX subscriber — it owns ARP + ICMP dispatch
-and the higher-level socket layer. `nic.lsysl` is the single
-consumer of `virtio_net_recv`; the poller pumps frames into an
-internal RX queue and notifies the subscriber.
+DMA buffers (rings + RX/TX payload pages) live in the server's
+own BSS. `virtio_dma_server.lsysl` provides the `vnet_va_to_pa`
+primitive via `svc_vm_v2p`, so descriptors point the device at
+the PA of each server-owned page.
+
+Because the server is single-threaded (no user-facing
+`create_thread` yet), RX polling only happens when the server
+wakes for an IPC request. Every IPC handler drains the virtio-net
+RX ring into the internal 8-slot queue first and notifies the
+subscriber if any frames landed. Unsolicited async inbound (e.g. a
+UDP datagram that isn't a response to something we sent) won't
+be delivered until the next IPC wake — that limitation is
+documented in `project_slix_nic_isolation.md` and is the next
+follow-up. For now boot ARP relies on inet polling RECV_PACKET
+during `inet_link_init` to force a drain.
 
 IPC protocol
 ------------
@@ -26,10 +33,8 @@ always start with a 1-byte status (0 on success, -1 on error).
 - SEND_PACKET: `cmd, len(2, big-endian), frame(len)` → `status`
 - SUBSCRIBE_RX: `cmd` → `status`
     Registers the calling thread as the single RX notification
-    target. On each frame `nic_poller` calls `nic_deliver_rx`,
-    which enqueues the frame into the nic's 8-slot RX queue and
-    sends a `notify_send_to(subscriber_tid, 1)` ping so the
-    subscriber can drain the queue.
+    target. Every subsequent drain that picks up a frame bumps
+    a `notify_send_to(subscriber_tid, 1)` on the subscriber.
 - RECV_PACKET: `cmd` → `status, len(2, big-endian), frame(len)`
     Non-blocking fetch of the head of the RX queue. `status = 0`
     + the frame on success; `status = -1` + `len = 0` when the
@@ -40,13 +45,14 @@ the stack. Unknown commands reply `status = -1`.
 
     module oskit.servers
 
-    import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply}
-    import oskit.services.{notify_send_to, yield}
-    import oskit.drivers.virtio.{virtio_net_get_mac, virtio_net_send,
-        virtio_net_recv}
+    import oskit.ipc.{port_create, port_register, ipc_recv_notify, ipc_reply}
+    import oskit.services.{rs_ready, notify_send_to, notify_read_self}
+    import oskit.drivers.virtio.{virtio_net_init, virtio_net_get_mac,
+        virtio_net_send, virtio_net_recv, v_attach, VIRTIO_DEV_NET}
+    import oskit.arch.{MMIO_SERVER_VA}
 
 
-Command codes (byte value of buf[0]).
+Command codes.
 
     val NIC_CMD_GET_MAC      = 1
     val NIC_CMD_SEND_PACKET  = 2
@@ -54,18 +60,16 @@ Command codes (byte value of buf[0]).
     val NIC_CMD_RECV_PACKET  = 4
 
 
-Capacity. Ethernet II frames without VLAN cap at 1514 bytes; the
-message buffer carries that plus the 3-byte header (cmd + u16
-len) plus a little slop.
+Capacity. Ethernet II without VLAN caps at 1514 bytes; IPC
+message buffer carries that plus a 3-byte header plus slop.
 
     val NIC_MAX_FRAME = 1514
     val NIC_MSG_BUF   = 1520
 
 
 RX queue — fixed-size circular buffer. Eight slots is plenty for
-bring-up (QEMU's user stack sends handfuls of frames per demo);
-the size is constrained by the module-level storage budget more
-than by any protocol concern.
+bring-up; the size is constrained by the module-level storage
+budget more than by any protocol concern.
 
     val NIC_RX_QUEUE = 8
 
@@ -80,33 +84,61 @@ than by any protocol concern.
     var nic_rx_drops = 0
 
 
-Notification subscriber. Only one subscriber today — inet will
-be the sole consumer once ARP/ICMP dispatch moves there. A full
-pub/sub list is a later refinement.
+Single subscriber for now — inet is the sole RX consumer.
 
     var nic_subscriber_tid = -1
-
-
-Cached port, set once in `nic_server`.
-
     var nic_port = -1
 
 
-### Byte-buffer helpers
+virtio-mmio slot 31 on QEMU virt lives at PA `0x0a003e00`
+(`VIRTIO_MMIO_BASE + 31 * 0x200`). The RS grant maps page `0xa003`
+at `MMIO_SERVER_VA` (`0x60100000`) with Device memory attrs, so
+the virtio-net slot shows up at `0x60100e00` inside the server.
 
-Match the rest of the stack — big-endian u16 read out of an
-arbitrary byte offset, no alignment assumptions.
+    val VIRTIO_NET_SLOT_OFFSET: i64 = i64(0xe00)
+
+
+### Byte-buffer helpers
 
     nic_read_u16(p: *byte, off: int) -> int
         ((int(p[off]) & 0xff) << 8) | (int(p[off + 1]) & 0xff)
 
 
-### GET_MAC handler
+### RX drain
 
-Reply: `[status(1), mac(6)]`. Returns `status = -1` and a zero
-MAC if the virtio-net device has no MAC configured (shouldn't
-happen under QEMU with `-device virtio-net-device,mac=...`, but
-we don't want to trust that invariant unconditionally).
+Pull frames out of the virtio-net RX ring and park them in the
+internal queue. Called at the top of every IPC wake so each
+request implicitly polls the wire. Drops frames silently when
+the queue is full (UDP-ish semantics); bumps `nic_rx_drops` for
+diagnostics.
+
+    nic_drain_rx()
+        var buf: [1514]byte
+        var notified = 0
+        while true
+            val n = virtio_net_recv(buf, 1514)
+            if n <= 0
+                break
+            if n > NIC_MAX_FRAME
+                nic_rx_drops += 1
+            else if nic_rx_count >= NIC_RX_QUEUE
+                nic_rx_drops += 1
+            else
+                val slot = nic_rx_tail
+                nic_rx_queue[slot].len = n
+                var i = 0
+                while i < n
+                    nic_rx_queue[slot].data[i] = buf[i]
+                    i += 1
+                nic_rx_tail = (slot + 1) % NIC_RX_QUEUE
+                nic_rx_count += 1
+                notified = 1
+        if notified != 0
+            if nic_subscriber_tid >= 0
+                notify_send_to(nic_subscriber_tid, 1)
+
+
+### GET_MAC handler
 
     nic_handle_get_mac(sender: int)
         var reply: [7]byte
@@ -129,11 +161,6 @@ we don't want to trust that invariant unconditionally).
 
 ### SEND_PACKET handler
 
-Expects a raw Ethernet frame including the 14-byte L2 header
-but WITHOUT the 12-byte virtio-net header (the driver prepends
-that internally). Returns status 0 on success, -1 if the length
-is out of range or the driver rejects the frame.
-
     nic_handle_send_packet(sender: int, buf: *byte)
         val len = nic_read_u16(buf, 1)
         var reply: [1]byte
@@ -152,11 +179,6 @@ is out of range or the driver rejects the frame.
 
 ### SUBSCRIBE_RX handler
 
-Record the sender's thread ID as the sole RX notification
-target. Subsequent `nic_deliver_rx` calls from the poller will
-wake this thread via `notify_send_to` so it can drain the queue
-with RECV_PACKET.
-
     nic_handle_subscribe_rx(sender: int)
         nic_subscriber_tid = sender
         var reply: [1]byte
@@ -166,10 +188,8 @@ with RECV_PACKET.
 
 ### RECV_PACKET handler
 
-Pop one frame off the head of the RX queue. Non-blocking: when
-the queue is empty we reply with `status = -1` and `len = 0`
-rather than deferring, so clients can poll freely without
-worrying about leaking waiters in the nic.
+Pop one frame off the head of the RX queue. Non-blocking: empty
+queue returns `status = -1, len = 0`.
 
     nic_handle_recv_packet(sender: int)
         if nic_rx_count <= 0
@@ -194,79 +214,34 @@ worrying about leaking waiters in the nic.
         ipc_reply(sender, reply, 3 + len)
 
 
-### nic_deliver_rx
-
-Called from whichever thread is currently draining
-`virtio_net_recv` (for this phase that's `net_thread` in
-`oskit/drivers/virtio/net_handler.lsysl`). Enqueues `frame`
-into the internal queue and, if a subscriber is registered,
-sends them a 1-valued notification so they know to RECV_PACKET.
-
-On overflow the frame is dropped and `nic_rx_drops` is bumped —
-UDP-ish semantics. We do not notify on drop, since the queue
-was already full and the subscriber presumably has something
-to drain.
-
-    nic_deliver_rx(frame: *byte, len: int)
-        if len <= 0 || len > NIC_MAX_FRAME
-            return
-        if nic_rx_count >= NIC_RX_QUEUE
-            nic_rx_drops += 1
-            return
-        val slot = nic_rx_tail
-        nic_rx_queue[slot].len = len
-        var i = 0
-        while i < len
-            nic_rx_queue[slot].data[i] = frame[i]
-            i += 1
-        nic_rx_tail = (slot + 1) % NIC_RX_QUEUE
-        nic_rx_count += 1
-        if nic_subscriber_tid >= 0
-            notify_send_to(nic_subscriber_tid, 1)
-
-
-### nic_poller
-
-Kernel-thread entry point that owns the RX side of the driver.
-`nic.lsysl` is the single consumer of `virtio_net_recv`, and the
-poller's job is to pump frames into the RX queue via
-`nic_deliver_rx` — subscribers (currently just inet, which owns
-ARP + ICMP dispatch) are woken by notify and pull frames back
-out via `RECV_PACKET`.
-
-No ARP or ICMP state lives here anymore; that all moved to
-`oskit/servers/inet_proto.lsysl` with the migration off
-`net_handler.lsysl`.
-
-    nic_poller()
-        var buf: [1514]byte
-        while true
-            val n = virtio_net_recv(buf, 1514)
-            if n > 0
-                nic_deliver_rx(buf, n)
-            else
-                yield()
-
-
 ### Server main loop
 
-Kernel-thread entry point. Spawned from `kernel_main_rs` in
-`hello.lsysl` on aarch64. Creates port "nic", registers the
-name so clients can look it up, and blocks on ipc_recv for each
-request.
+Attach the driver to the granted MMIO slot, bring up the device,
+register port "nic", signal RS, then service IPC. Every IPC wake
+implicitly drains the virtio RX ring first.
 
-`ipc_recv` returning a negative sender is only possible on
-shutdown; we just loop back and try again in that case (kernel
-threads don't have a clean "exit" path in SLIX yet).
+`virtio_net_init()` may fail (e.g. if QEMU was started without
+virtio-net). We still register the port and call `rs_ready()` in
+that case — inet's nic IPC wrappers degrade to returning -1 and
+UDP loopback keeps working. Matches the inet "best effort" pattern.
 
     nic_server()
+        v_attach(MMIO_SERVER_VA + VIRTIO_NET_SLOT_OFFSET, VIRTIO_DEV_NET)
+        virtio_net_init()
+
         nic_port = port_create()
         port_register(nic_port, "nic")
+        rs_ready()
 
         var buf: [1520]byte
         while 1 == 1
-            val sender = ipc_recv(nic_port, buf, NIC_MSG_BUF)
-            if sender >= 0
+            val r = ipc_recv_notify(nic_port, buf, NIC_MSG_BUF)
+            if r == -2
+                notify_read_self()
+                nic_drain_rx()
+            else if r >= 0
+                nic_drain_rx()
+                val sender = r
                 val cmd = int(buf[0]) & 0xff
                 if cmd == NIC_CMD_GET_MAC
                     nic_handle_get_mac(sender)

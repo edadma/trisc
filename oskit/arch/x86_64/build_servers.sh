@@ -45,4 +45,13 @@ build_disk() {
     SERVER_LINKER_SCRIPT=$orig_server_ld
 }
 
+# x86 doesn't run nic as a boot module — virtio-pci BARs live in the
+# kernel's identity map and there's no per-BAR grant syscall yet.
+# The virtio-net driver stays linked into the kernel (see build.sh's
+# app_nsh case), and x86 bootinfo omits nic so RS treats slot 6 as
+# [skipped]. Override build_nic to a no-op so `all` succeeds.
+build_nic() {
+    echo "=== Skipping nic on x86 (kernel-linked virtio-pci; see build.sh) ==="
+}
+
 dispatch_servers_arg "$1"

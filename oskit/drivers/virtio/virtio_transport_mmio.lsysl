@@ -128,6 +128,21 @@ Returns 1 on success, 0 if no matching slot is inhabited.
         0
 
 
+Attach to a pre-chosen MMIO base. Used when the transport state
+lives in a server that only has a single device's slot mapped in
+its page table — `v_find` can't walk 32 slots when only one is
+reachable. Validates the Magic register and device-id before
+committing `vt_base`. Returns 1 on success, 0 otherwise.
+
+    v_attach(base: i64, dev_id: int) -> int
+        if virtio_present(base) == 0
+            return 0
+        if virtio_device_id(base) != dev_id
+            return 0
+        vt_base = base
+        1
+
+
 Status register. MMIO treats STATUS as a u32 even though only the
 low 8 bits carry spec-defined meaning.
 

@@ -16,3 +16,9 @@ val PROG_SSP = 0x60080000
 val SRV_USP  = 0x60090000
 val SRV_SSP  = 0x60080000
 val INFO_PAGE_VA: i64 = 0x60090000
+
+// Server-side VA of the MMIO page granted by vm_create_server_pt
+// (L3[256] under the user carve-out). Must match the kernel-side
+// definition in oskit/arch/aarch64/vm.lsysl. Sub-page register
+// blocks land at MMIO_SERVER_VA + (PA & 0xfff).
+val MMIO_SERVER_VA: i64 = 0x60100000

@@ -295,6 +295,15 @@ build_inet() {
         std/net/packet.lsysl
 }
 
+build_nic() {
+    build_server nic nic_server \
+        "import oskit.servers.{nic_server}" \
+        oskit/servers/nic.lsysl \
+        oskit/drivers/virtio/virtio_transport_mmio.lsysl \
+        oskit/drivers/virtio/virtio_net.lsysl \
+        oskit/drivers/virtio/virtio_dma_server.lsysl
+}
+
 build_init() {
     build_server init init \
         "import oskit.apps.init.{init}" \
@@ -323,12 +332,13 @@ dispatch_servers_arg() {
             pm)   build_pm ;;
             vfs)  build_vfs ;;
             ds)   build_ds ;;
+            nic)  build_nic ;;
             inet) build_inet ;;
             init) build_init ;;
-            all)  build_rs; build_disk; build_tfs; build_tty; build_pm; build_vfs; build_ds; build_inet; build_init ;;
+            all)  build_rs; build_disk; build_tfs; build_tty; build_pm; build_vfs; build_ds; build_nic; build_inet; build_init ;;
             *)    echo "Unknown server: $1" >&2; exit 1 ;;
         esac
     else
-        build_rs; build_disk; build_tfs; build_tty; build_pm; build_vfs; build_ds; build_inet; build_init
+        build_rs; build_disk; build_tfs; build_tty; build_pm; build_vfs; build_ds; build_nic; build_inet; build_init
     fi
 }
