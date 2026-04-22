@@ -2013,6 +2013,46 @@ Exit code is 0 iff all tests pass. Failing tests print the source file and line 
 
 **Test output capture:** Any output from `print`, `println`, `puts`, or `puti` inside a test function is captured and displayed below the failure message if the test fails. This is useful for debugging intermediate values.
 
+### `#pure` — mark side-effect-free functions
+
+A function marked `#pure` is checked by the compiler to have no observable side effects. Pure functions are a discipline enforcement tool: any violation is a compile-time error, not a warning.
+
+```
+#pure
+square(x: int) -> int = x * x
+
+#pure
+fact(n: int) -> int
+    if n <= 1 then return 1
+    return n * fact(n - 1)
+```
+
+**What a `#pure` function may do:**
+- Read its parameters and module-level `const`s
+- Declare and mutate **local** variables (can't escape)
+- Call other `#pure` functions (same or different file)
+- Recurse (including mutually)
+- Use arithmetic, comparison, casts, control flow (if/while/for/match/break/continue)
+- Call `assert(cond, msg)` — termination is the only side effect, consistent with Ada `pragma Assert` policy
+
+**What a `#pure` function may NOT do:**
+- Call any non-`#pure` user function
+- Call IO builtins (`puts`, `print`, `println`, `putchar`, `puti`)
+- Call allocation builtins (`malloc`, `free`, `calloc`, `realloc`, `sbrk`)
+- Call `panic` / `abort` / `expect` (side-effecting traps with observable output)
+- Write to module-level `var`s
+- Write through a pointer (`*p = v`), indexed slot (`arr[i] = v`), or struct field (`p.f = v`) — callers might see the write
+- Increment/decrement struct fields (`p.f++`)
+- Heap-allocate (`new`), append to a slice, construct closures
+- Make indirect (function-pointer) calls or interface-dispatch calls
+- Contain `asm` blocks
+
+Cross-module purity propagation is currently best-effort: if an imported function is seen without `#pure`, it is assumed impure. Annotate library functions you intend to call from pure code.
+
+**Interaction with `--no-contracts`:** `#pure` checking is not a contract — it is a static enforcement and always runs. Only the runtime verification that contracts describe is elided by `--no-contracts`.
+
+Future work: allow `#pure` calls inside `const` initializers and as default-parameter expressions, so that `const TABLE = build_table(16)` becomes legal at compile time.
+
 ### `#deprecated` — warn on use
 
 Marks a function as deprecated. Calls to the function emit a warning to stderr during analysis (once per callee per compilation):

@@ -18,7 +18,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     else TMultiStmt(Nil)
 
   private case class SymInfo(name: String, typ: SyslType, mutable: Boolean, isConst: Boolean = false)
-  private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false)
+  private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false)
 
   private val globalScope = new mutable.LinkedHashMap[String, SymInfo]
   private val functions = new mutable.LinkedHashMap[String, FunInfo]
@@ -610,7 +610,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             if functions.contains(name) || genericTemplates.contains(name) then
               throw AnalysisError(s"duplicate function: '$name'", decl)
             val mangledName = if shouldMangle(name) then mangleName(name) else name
-            functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty)
+            val isPure = fd.attributes.exists(_.name == "pure")
+            functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty, isPure)
             // Record #deprecated info
             for attr <- fd.attributes if attr.name == "deprecated" do
               val reason = attr.args.collectFirst { case AttrPositional(AttrLitString(s)) => s }
@@ -914,6 +915,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         currentReturnType = savedReturnType
         scopeStack = null
         validateTestAttr(fdAst, funInfo)
+        if funInfo.isPure then validatePureFn(name, tBody, funInfo.params.map(_._1))
         TFunDecl(funInfo.name, tParams, retType, tBody, isPrivate, attrs, funInfo.isDef)
 
       case VarDeclAST(name, typOpt, init, isPrivate, isMutable, _, isVolatile, isConst) =>
@@ -958,6 +960,150 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       warnedDeprecations += name
       val suffix = deprecations(name).map(r => s": $r").getOrElse("")
       System.err.println(s"warning: '$name' is deprecated$suffix")
+
+  /** Names of builtins that are safe to call from a #pure function. Arithmetic/comparison
+   *  intrinsics aren't calls (they lower to TBinary/TUnary) so they don't need listing.
+   *  `assert` is allowed because its only observable effect is termination — consistent
+   *  with Ada's policy of letting pragma Assert live in pure functions. IO, allocation
+   *  (malloc/free/…), and side-effecting traps (panic/abort/expect) are *not* listed. */
+  private val purePermittedBuiltins: Set[String] = Set("assert")
+
+  /** Analyze a #pure function body. Reject any construct that could have observable
+   *  side effects on state outside the function: writes to non-local vars, writes
+   *  through pointers/fields, calls to non-pure user functions, indirect calls, asm,
+   *  and IO/allocation builtins. Local-variable mutation is fine — it cannot escape.
+   *  Called after body analysis so the typed AST is complete; purity of callees is
+   *  read from their FunInfo, which was populated in the pre-collection pass. */
+  private def validatePureFn(funcName: String, body: TFunBody, paramNames: List[String]): Unit =
+    val localVars = mutable.HashSet.from(paramNames)
+
+    def reject(msg: String): Nothing = throw AnalysisError(s"#pure function '$funcName' $msg")
+
+    def isPureCallee(callee: String): Boolean =
+      // Self-recursion is always fine (the function has isPure=true in the table).
+      if callee == funcName then true
+      else if purePermittedBuiltins.contains(callee) then true
+      else if builtinFunctions.contains(callee) then false // other builtins are impure
+      else functions.get(callee) match
+        case Some(info) => info.isPure
+        case None       => false // unknown: conservative reject
+
+    def checkExpr(e: TExpr): Unit = e match
+      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit => ()
+      case _: TVarRef | _: TAddrOf | _: TAddrLit | _: TFuncRef | _: TSizeof | _: TArrayDecl => ()
+      case TArrayLit(els, _)               => els.foreach(checkExpr)
+      case TAddrOfIndex(a, i, _)           => checkExpr(a); checkExpr(i)
+      case TAddrOfField(o, _, _)           => checkExpr(o)
+      case TTempAddr(e, _)                 => checkExpr(e)
+      case TDeref(e, _)                    => checkExpr(e)
+      case TIndex(e, i, _)                 => checkExpr(e); checkExpr(i)
+      case TFieldAccess(o, _, _)           => checkExpr(o)
+      case _: TFieldPreInc =>
+        reject("cannot increment/decrement struct fields (side effect)")
+      case _: TFieldPreDec =>
+        reject("cannot increment/decrement struct fields (side effect)")
+      case _: TFieldPostInc =>
+        reject("cannot increment/decrement struct fields (side effect)")
+      case _: TFieldPostDec =>
+        reject("cannot increment/decrement struct fields (side effect)")
+      case _: TStructLit                   => ()
+      case TStructConstruct(_, args)       => args.foreach(checkExpr)
+      case TPreInc(n, _) =>
+        if !localVars.contains(n) then reject(s"cannot mutate non-local '$n'")
+      case TPreDec(n, _) =>
+        if !localVars.contains(n) then reject(s"cannot mutate non-local '$n'")
+      case TPostInc(n, _) =>
+        if !localVars.contains(n) then reject(s"cannot mutate non-local '$n'")
+      case TPostDec(n, _) =>
+        if !localVars.contains(n) then reject(s"cannot mutate non-local '$n'")
+      case TUnary(_, o, _)                 => checkExpr(o)
+      case TBinary(l, _, r, _)             => checkExpr(l); checkExpr(r)
+      case TCall(callee, args, _) =>
+        if !isPureCallee(callee) then reject(s"cannot call impure function '$callee'")
+        args.foreach(checkExpr)
+      case TIndirectCall(_, _, _)          => reject("cannot make indirect calls (purity of callee is unknown)")
+      case TCast(e, _)                     => checkExpr(e)
+      case TIfExpr(c, t, el, _)            => checkExpr(c); t.foreach(checkStmt); el.foreach(_.foreach(checkStmt))
+      case TMatchExpr(e, arms, deflt, _) =>
+        checkExpr(e)
+        for arm <- arms do
+          arm.guard.foreach(checkExpr)
+          arm.body.foreach(checkStmt)
+        deflt.foreach(_.foreach(checkStmt))
+      case _: TEnumConstruct               => () // data-less construction
+      case _: TNew =>
+        reject("cannot heap-allocate (`new`) — allocation is observable")
+      case _: TNewEnum =>
+        reject("cannot heap-allocate (`new`) — allocation is observable")
+      case _: TNewArray =>
+        reject("cannot heap-allocate (`new`) — allocation is observable")
+      case TLen(e, _)                      => checkExpr(e)
+      case TCap(e, _)                      => checkExpr(e)
+      case TSliceExpr(a, lo, hi, _)        => checkExpr(a); lo.foreach(checkExpr); hi.foreach(checkExpr)
+      case TAppend(_, _, _)                => reject("cannot append to a slice (allocating side effect)")
+      case TStringFromPtr(p, l, _)         => checkExpr(p); checkExpr(l)
+      case TStringFromSlice(s, _)          => checkExpr(s)
+      case TStr(e)                         => checkExpr(e)
+      case TFmtStr(e, _)                   => checkExpr(e)
+      case _: TClosure                     => reject("cannot construct closures (may capture mutable state)")
+      case TInterfaceBox(e, _)             => checkExpr(e)
+      case TInterfaceDispatch(_, _, _, _)  => reject("cannot make interface-dispatch calls (purity of impl is unknown)")
+      case TIntrinsicCall(name, args, _)   =>
+        if !purePermittedBuiltins.contains(name) then reject(s"cannot call intrinsic '$name'")
+        args.foreach(checkExpr)
+      case TRangeCheck(e, _, _, _)         => checkExpr(e)
+      case TAsmExpr(_, _)                  => reject("cannot contain asm expressions")
+
+    def checkStmt(s: TStmt): Unit = s match
+      case TVarStmt(n, _, init, _) =>
+        checkExpr(init)
+        localVars += n
+      case TDestructureStmt(ns, _, init) =>
+        checkExpr(init)
+        localVars ++= ns
+      case TDestructureAssignStmt(ns, _, init) =>
+        checkExpr(init)
+        for n <- ns do
+          if !localVars.contains(n) then reject(s"cannot write to non-local '$n'")
+      case TAssignStmt(target, value) =>
+        if !localVars.contains(target) then reject(s"cannot write to non-local '$target'")
+        checkExpr(value)
+      case TCompoundAssignStmt(target, _, value) =>
+        if !localVars.contains(target) then reject(s"cannot write to non-local '$target'")
+        checkExpr(value)
+      case TDerefAssignStmt(_, _) =>
+        reject("cannot write through a pointer (possible non-local side effect)")
+      case TIndexAssignStmt(_, _, _) =>
+        reject("cannot write to an index (possible non-local side effect)")
+      case TFieldAssignStmt(_, _, _) =>
+        reject("cannot write to a struct field (possible non-local side effect)")
+      case TFieldCompoundAssignStmt(_, _, _, _) =>
+        reject("cannot compound-assign to a struct field (possible non-local side effect)")
+      case TReturnStmt(v) =>
+        v.foreach(checkExpr)
+      case TWhileStmt(c, b, _) =>
+        checkExpr(c); b.foreach(checkStmt)
+      case TForStmt(init, c, u, b, _) =>
+        checkStmt(init); checkExpr(c); checkStmt(u); b.foreach(checkStmt)
+      case TDoWhileStmt(c, b, _) =>
+        checkExpr(c); b.foreach(checkStmt)
+      case TBreakStmt(_) => ()
+      case TContinueStmt(_) => ()
+      case TDeferStmt(inner) =>
+        // Defer executes on function exit — allowed if inner is pure too.
+        checkStmt(inner)
+      case TAsmStmt(_) =>
+        reject("cannot contain asm blocks")
+      case TContractCheck(_, e, _) =>
+        checkExpr(e)
+      case TMultiStmt(ss) =>
+        ss.foreach(checkStmt)
+      case TExprStmt(e) =>
+        checkExpr(e)
+
+    body match
+      case TExprBody(e) => checkExpr(e)
+      case TBlockBody(stmts) => stmts.foreach(checkStmt)
 
   private def validateTestAttr(fd: FunDeclAST, info: FunInfo): Unit =
     fd.attributes.find(_.name == "test") match
