@@ -90,6 +90,23 @@ syscall:
     svc #0
     ret
 
+// syscall6(number, a0, a1, a2, a3, a4, a5) -> i64
+//   Kernel-side wrapper (mirrors the one in prog_start.s for user
+//   programs). AAPCS64 call site: x0=num, x1=a0, x2=a1, x3=a2, x4=a3,
+//   x5=a4, x6=a5. The 6-arg dispatcher reads x8=num and x0..x5=a0..a5
+//   from the saved frame, so shift args down and hoist num into x8.
+.global syscall6
+syscall6:
+    mov x8, x0
+    mov x0, x1
+    mov x1, x2
+    mov x2, x3
+    mov x3, x4
+    mov x4, x5
+    mov x5, x6
+    svc #0
+    ret
+
 // arch_syscall_call(arg: i64, handler: i64)
 //   Tail-call a syscall handler whose address came from syscall_table.
 //   register_syscall stores the address of a __wrap_ trampoline

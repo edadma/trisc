@@ -932,6 +932,18 @@ syscall:
     int $0x80
     retq
 
+# syscall6(number, a0, a1, a2, a3, a4, a5) -> i64
+#
+# Kernel-side wrapper (mirrors the one in prog_start.s for user
+# programs). SysV AMD64: rdi=num, rsi=a0, rdx=a1, rcx=a2, r8=a3,
+# r9=a4, [rsp+8]=a5. The 6-arg dispatcher reads num from RDI and a5
+# from R10; everything else is already in the right register.
+.global syscall6
+syscall6:
+    movq 8(%rsp), %r10
+    int $0x80
+    retq
+
 # ============================================================================
 # thread_exit trampoline
 # ============================================================================

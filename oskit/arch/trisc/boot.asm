@@ -902,6 +902,19 @@ syscall
   trap 0                ; r1 = number, r2 = arg
   jalr r0, r6           ; return (r1 = return value from trap handler)
 
+; syscall6(number, a0, a1, a2, a3, a4, a5) -> i64
+;
+; Kernel-side wrapper (mirrors the user-side one in oskit/ulib/syscall.asm).
+; TRISC multi-arg convention already places a0..a5 on the caller's stack
+; at [sp+0..+40] (first arg in r1 is the syscall number). The kernel's
+; 6-arg dispatch path reads them straight off the user stack via the
+; saved USP — so `trap 0` is all we need.
+global syscall6, func
+
+syscall6
+  trap 0
+  jalr r0, r6
+
 ; thread_exit — trampoline for tasks that return from their entry function.
 ; create_thread sets r6 in the fake context to this address, so when a
 ; task's main function does "jalr r0, r6" (return), it lands here.
