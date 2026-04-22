@@ -45,7 +45,7 @@ case class ExternFuncDeclAST(name: String, params: List[ParamAST], returnType: O
 case class ExternVarDeclAST(name: String, typ: TypeAST, attributes: List[Attribute] = Nil) extends DeclAST
 case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST], body: FunBodyAST, isPrivate: Boolean = false, typeParams: List[String] = Nil, typeBounds: Map[String, List[String]] = Map.empty, attributes: List[Attribute] = Nil, isDef: Boolean = false) extends DeclAST
 case class VarDeclAST(name: String, typ: Option[TypeAST], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true, attributes: List[Attribute] = Nil, isVolatile: Boolean = false, isConst: Boolean = false) extends DeclAST
-case class StructDeclAST(name: String, fields: List[(String, TypeAST, Boolean)], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil) extends DeclAST
+case class StructDeclAST(name: String, fields: List[(String, TypeAST, Boolean)], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil, invariants: List[ExpressionAST] = Nil) extends DeclAST
 case class EnumDeclAST(name: String, members: List[(String, Option[Long])], attributes: List[Attribute] = Nil) extends DeclAST
 case class DataEnumDeclAST(name: String, variants: List[EnumVariantAST], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil) extends DeclAST
 case class EnumVariantAST(name: String, fields: List[(String, TypeAST)])
@@ -109,6 +109,10 @@ case class AsmStmtAST(code: String) extends StmtAST
 // `invariant <bool>` statement — traps on false. Essentially `assert` with nicer name; intended
 // at the top of loop bodies for loop-invariant documentation/checking.
 case class InvariantStmtAST(expr: ExpressionAST) extends StmtAST
+// `variant <expr>` statement — loop termination witness. Must appear at the top level of a
+// loop body. The expression must strictly decrease between iterations and stay >= 0; both
+// are runtime-asserted. Analyzer hoists a prev-value / init-flag pair into the enclosing scope.
+case class VariantStmtAST(expr: ExpressionAST) extends StmtAST
 case class AsmExprAST(code: String) extends ExpressionAST
 case class ExprStmtAST(expr: ExpressionAST) extends StmtAST
 

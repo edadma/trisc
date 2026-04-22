@@ -49,7 +49,7 @@ object SyslPrettyPrinter:
       }.mkString("\n")
       s"enum $name$tpStr\n$body"
 
-    case StructDeclAST(name, fields, tps, _) =>
+    case StructDeclAST(name, fields, tps, _, _) =>
       val tpStr = if tps.nonEmpty then s"[${tps.mkString(", ")}]" else ""
       val body = fields.map((n, t, _) => s"${IND}$n: ${typeToSource(t)}").mkString("\n")
       s"struct $name$tpStr\n$body"

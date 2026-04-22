@@ -212,7 +212,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
       val modPath = modules.get(name)
       // Extract generic templates and trait declarations from the source AST
       val templates = ast.decls.filter {
-        case StructDeclAST(_, _, tps, _) => tps.nonEmpty
+        case StructDeclAST(_, _, tps, _, _) => tps.nonEmpty
         case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
         case FunDeclAST(_, _, _, _, _, tps, _, _, _) => tps.nonEmpty
         case _ => false
@@ -334,7 +334,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         })
         // Extract generic templates (structs, enums, functions with type params)
         val templates = stripped.decls.filter {
-          case StructDeclAST(_, _, tps, _) => tps.nonEmpty
+          case StructDeclAST(_, _, tps, _, _) => tps.nonEmpty
           case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
           case FunDeclAST(_, _, _, _, _, tps, _, _, _) => tps.nonEmpty
           case _ => false

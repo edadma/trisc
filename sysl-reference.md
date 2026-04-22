@@ -138,6 +138,31 @@ struct Node
     next: *Node       // recursive via pointer
 ```
 
+**Struct invariants.** A struct may declare one or more `invariant <bool>` clauses
+among its fields. Each invariant is checked after every field assignment or compound
+assignment on a value of that struct type. Bare field names are in scope in the
+invariant; so are module-level consts and globals. Non-bool invariants are rejected
+at declaration time.
+
+```sysl
+struct Account
+    balance: int
+    limit: int
+    invariant balance >= -limit
+
+struct Range
+    lo: int
+    hi: int
+    invariant lo <= hi
+    invariant hi - lo <= 100      // multiple clauses: all must hold
+```
+
+A violating mutation traps via the standard contract-check path. The invariant is
+re-evaluated at each mutation site — so an invariant that refers to an expression
+with side effects re-runs those side effects. Current scope: checks fire on
+`s.field = v` and `s.field op= v` (and through pointer/ref: `(*p).field = v`);
+struct construction itself does not yet run the invariant.
+
 ### Enum Types (Simple)
 
 Simple enums are integer constants with auto-incrementing values:
@@ -327,6 +352,10 @@ Day::Last      // Sun (value 6)
 Day::Image(d)  // "Tue" for d = Day.Tue
 Day::Pos(d)    // 1    for d = Day.Tue
 Day::Val(2)    // Day.Wed
+Day::Succ(d)   // Wed  for d = Day.Tue
+Day::Pred(d)   // Mon  for d = Day.Tue
+Age::Succ(a)   // a+1, traps if a is already 150
+Age::Pred(a)   // a-1, traps if a is already 0
 ```
 
 | Attribute     | Applies to                              | Result                                              |
@@ -337,11 +366,14 @@ Day::Val(2)    // Day.Wed
 | `T::Image(x)` | simple enum, constrained numeric type   | variant name string / `str(x)` for numerics         |
 | `T::Pos(x)`   | simple enum                             | 0-based declaration position                        |
 | `T::Val(n)`   | simple enum                             | variant at position `n`; traps on out-of-range      |
+| `T::Succ(x)`  | `within`-constrained int, simple enum   | next value; traps at the upper end                  |
+| `T::Pred(x)`  | `within`-constrained int, simple enum   | previous value; traps at the lower end              |
 
-`::First` and `::Last` fold to compile-time constants. `::Image`, `::Pos`, `::Val` lower
-to synthesized helper functions (`__image_T`, `__pos_T`, `__val_T`) generated once per
-target type. `::Pos` on an unknown value and `::Val` on an out-of-range position both
-trap via the standard contract-check path.
+`::First` and `::Last` fold to compile-time constants. The others lower to synthesized
+helper functions (`__image_T`, `__pos_T`, `__val_T`, `__succ_T`, `__pred_T`) generated
+once per target type. `::Pos` on an unknown value, `::Val` on an out-of-range position,
+`::Succ` past the upper bound, and `::Pred` past the lower bound all trap via the
+standard contract-check path.
 
 `::Range` is syntactic sugar: `for i in T::Range body` parses as
 `for i in T::First..T::Last body`. Using `::Range` outside a for-loop is a compile error.
@@ -1379,6 +1411,15 @@ while true
     if done then break
     if skip then continue
     process()
+
+// `variant <expr>` — loop termination witness. The expression must strictly decrease
+// between iterations and stay >= 0. On the first iteration nothing is checked (there's
+// no prior value); on every subsequent one the analyzer-emitted check traps if either
+// condition is violated. Must appear at the top level of a loop body.
+var remaining = 100
+while remaining > 0
+    variant remaining          // monotonic-decrease witness
+    remaining = remaining - step()
 
 // Labeled loops — break / continue can target an outer loop by name.
 // A label is an identifier followed by `:` immediately before `for`, `while`, or `do`.

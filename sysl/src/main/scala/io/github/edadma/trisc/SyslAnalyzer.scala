@@ -14,6 +14,9 @@ class SyslAnalyzer:
   // Default parameter expressions: function name → list of defaults (one per param, None if no default)
   private val functionDefaults = new mutable.LinkedHashMap[String, List[Option[TExpr]]]
   private val structTypes = new mutable.LinkedHashMap[String, SyslType.StructType]
+  // Struct name → list of invariant expressions declared in the struct body.
+  // Checked at every field-assignment / field-compound-assignment on a value of that type.
+  private val structInvariants = new mutable.LinkedHashMap[String, List[ExpressionAST]]
   private val enumTypes = new mutable.LinkedHashMap[String, Map[String, Long]]  // enum name → (member name → value)
   // Simple enums registered as EnumType so they can appear in type positions.
   // Distinct from dataEnumTypes because simple-enum `Name.Member` access still
@@ -47,6 +50,98 @@ class SyslAnalyzer:
       if loopLabelStack.contains(Some(lbl)) then
         throw AnalysisError(s"duplicate loop label '$lbl': already in use by an enclosing loop")
     }
+
+  // Counter for uniquely naming hoisted `variant` state across nested / sibling loops.
+  private var variantIdCounter: Int = 0
+
+  /** Type-check each invariant expression at struct declaration time. Invariants are
+   *  analyzed in a scope where each field name binds to a local of the field's type, so
+   *  type errors (wrong field name, non-bool result) are caught before any mutation site. */
+  private def validateStructInvariants(structName: String, fields: List[(String, SyslType)], invariants: List[ExpressionAST]): Unit =
+    val savedScope = scopeStack
+    scopeStack = new mutable.ArrayBuffer
+    pushScope()
+    for (fname, ftype) <- fields do
+      currentScope(fname) = SymInfo(fname, ftype, mutable = false)
+    try
+      for inv <- invariants do
+        val tInv = analyzeExpr(inv)
+        if tInv.typ != BoolType then
+          throw AnalysisError(s"struct '$structName' invariant must be bool, got ${tInv.typ}")
+    finally scopeStack = savedScope
+
+  /** Rewrite `VarRefAST(fieldName)` → `FieldAccessAST(objAst, fieldName)` for any name that
+   *  is a field of the struct. Used to bind bare field names in a struct invariant expression
+   *  against a concrete struct-valued sub-expression at a mutation site. */
+  private def substituteStructFieldRefs(expr: ExpressionAST, objAst: ExpressionAST, fields: Set[String]): ExpressionAST =
+    def rec(e: ExpressionAST): ExpressionAST = e match
+      case VarRefAST(name) if fields.contains(name) => FieldAccessAST(objAst, name)
+      case BinaryAST(l, op, r)      => BinaryAST(rec(l), op, rec(r))
+      case UnaryAST(op, operand)    => UnaryAST(op, rec(operand))
+      case CallAST(name, args)      => CallAST(name, args.map(rec))
+      case MethodCallAST(o, m, args)=> MethodCallAST(rec(o), m, args.map(rec))
+      case CastAST(t, inner)        => CastAST(t, rec(inner))
+      case FieldAccessAST(o, f)     => FieldAccessAST(rec(o), f)
+      case IndexAST(a, i)           => IndexAST(rec(a), rec(i))
+      case DerefAST(inner)          => DerefAST(rec(inner))
+      case TupleLitAST(es)          => TupleLitAST(es.map(rec))
+      case IfExprAST(c, tb, eb)     => IfExprAST(rec(c), tb, eb)  // stmt bodies not rewritten
+      case NamedArgAST(n, v)        => NamedArgAST(n, rec(v))
+      case TypeAttrAST(t, a, argO)  => TypeAttrAST(t, a, argO.map(rec))
+      case other => other
+    rec(expr)
+
+  /** Build a TContractCheck stmt sequence that verifies all invariants of `structType` for
+   *  the struct-valued expression `objAst`, using its struct name. Returns empty if no
+   *  invariants are declared for this struct. */
+  private def buildStructInvariantChecks(objAst: ExpressionAST, structName: String): List[TStmt] =
+    structInvariants.get(structName) match
+      case None => Nil
+      case Some(invs) =>
+        val st = structTypes(structName)
+        val fieldNames = st.fields.map(_._1).toSet
+        invs.map { inv =>
+          val rewritten = substituteStructFieldRefs(inv, objAst, fieldNames)
+          val tExpr = analyzeExpr(rewritten)
+          if tExpr.typ != BoolType then
+            throw AnalysisError(s"struct invariant must be bool, got ${tExpr.typ}")
+          TContractCheck("invariant", tExpr, s"$structName invariant")
+        }
+
+  /** Extract top-level `variant <expr>` statements from a loop body. Returns a pair of
+   *  AST stmt lists: (hoisted-pre-decls, rewritten-body). The caller must analyze the
+   *  pre-decls in the current scope (outside the loop) and the rewritten body in the
+   *  loop's own body scope. */
+  private def extractVariants(body: List[StmtAST]): (List[StmtAST], List[StmtAST]) =
+    val pre = mutable.ListBuffer.empty[StmtAST]
+    val newBody = body.flatMap {
+      case VariantStmtAST(expr) =>
+        variantIdCounter += 1
+        val id = variantIdCounter
+        val initName = s"__variant_init_$id"
+        val prevName = s"__variant_prev_$id"
+        val curName  = s"__variant_cur_$id"
+        // Hoisted state: init flag + prev value (i64 is wide enough for any integer expr).
+        pre += VarStmtAST(initName, Some(NamedTypeAST("bool")), BoolLitAST(false))
+        pre += VarStmtAST(prevName, Some(NamedTypeAST("i64")), IntLitAST(0))
+        // Inline per-iteration check and state update.
+        val castExpr: ExpressionAST = CastAST(NamedTypeAST("i64"), expr)
+        val okExpr: ExpressionAST = BinaryAST(
+          BinaryAST(VarRefAST(curName), "<", VarRefAST(prevName)),
+          "&&",
+          BinaryAST(VarRefAST(curName), ">=", IntLitAST(0)),
+        )
+        val assertCall: ExpressionAST = CallAST("assert", List(okExpr, StringLitAST("loop variant failed")))
+        val guardedCheck: ExpressionAST = IfExprAST(VarRefAST(initName), List(ExprStmtAST(assertCall)), None)
+        List(
+          VarStmtAST(curName, Some(NamedTypeAST("i64")), castExpr),
+          ExprStmtAST(guardedCheck),
+          AssignStmtAST(prevName, VarRefAST(curName)),
+          AssignStmtAST(initName, BoolLitAST(true)),
+        )
+      case other => List(other)
+    }
+    (pre.toList, newBody)
   private var currentReturnType: SyslType = VoidType
 
   // Module-path name mangling: set from ModuleDeclAST during analyze()
@@ -394,7 +489,7 @@ class SyslAnalyzer:
         case fd @ FunDeclAST(name, _, _, _, _, tps, _, _, _) if tps.nonEmpty =>
           if !genericTemplates.contains(name) && !functions.contains(name) then
             genericTemplates(name) = fd
-        case sd @ StructDeclAST(name, _, tps, _) if tps.nonEmpty =>
+        case sd @ StructDeclAST(name, _, tps, _, _) if tps.nonEmpty =>
           if !genericStructs.contains(name) then
             genericStructs(name) = sd
         case de @ DataEnumDeclAST(name, variants, tps, _) if tps.nonEmpty =>
@@ -420,7 +515,7 @@ class SyslAnalyzer:
     val pass0Enums = mutable.HashSet[String]()
     for decl <- program.decls do
       decl match
-        case StructDeclAST(name, _, typeParams, _) if typeParams.isEmpty =>
+        case StructDeclAST(name, _, typeParams, _, _) if typeParams.isEmpty =>
           if pass0Structs.contains(name) || structTypes.contains(name) then
             throw AnalysisError(s"duplicate struct: '$name'", decl)
           pass0Structs += name
@@ -457,7 +552,7 @@ class SyslAnalyzer:
             globalScope(name) = SymInfo(name, resolved, mutable = false)
             externalSymbols += name
           // else: already registered from same-module sibling or import — skip
-        case sd @ StructDeclAST(name, fields, typeParams, _) =>
+        case sd @ StructDeclAST(name, fields, typeParams, _, invariants) =>
           if typeParams.nonEmpty then
             // Generic struct: store as template, don't resolve fields yet
             if genericStructs.contains(name) then
@@ -469,6 +564,7 @@ class SyslAnalyzer:
             val volSet = fields.zipWithIndex.collect { case ((_, _, true), i) => i }.toSet
             // Update the placeholder with resolved fields
             structTypes(name) = SyslType.StructType(name, resolvedFields, volSet)
+            if invariants.nonEmpty then structInvariants(name) = invariants
         case fd @ FunDeclAST(name, params, returnType, _, _, typeParams, _, _, isDef) =>
           // Duplicate-parameter-name check.
           val seenParams = mutable.HashSet[String]()
@@ -618,9 +714,19 @@ class SyslAnalyzer:
               compileTimeConstants(name) = masked
               val mangled = if shouldMangle(name) then mangleName(name) else name
               compileTimeConstants(mangled) = masked
+              // Also publish the const in globalScope so name-based lookups during this pass
+              // (e.g. struct invariant validation) can find it.
+              if !globalScope.contains(name) then
+                globalScope(name) = SymInfo(mangled, declType, mutable = false, isConst = true)
             case None =>
               throw AnalysisError(s"const '$name' initializer is not compile-time evaluable", decl)
         case _ =>
+
+    // Validate all struct invariants now that constants are registered — catches wrong field
+    // names, unknown identifiers, and non-bool result types before any mutation site sees them.
+    for (structName, invariants) <- structInvariants do
+      val st = structTypes(structName)
+      validateStructInvariants(structName, st.fields, invariants)
 
     // Intermediate pass: register impl blocks (traits now known; signatures may reference traits)
     for decl <- program.decls do
@@ -723,7 +829,7 @@ class SyslAnalyzer:
       case ExternVarDeclAST(name, typ, _) =>
         TExternVarDecl(name, resolveType(typ))
 
-      case StructDeclAST(name, _, _, _) =>
+      case StructDeclAST(name, _, _, _, _) =>
         val st = structTypes(name)
         TStructDecl(name, st.fields, st.volatileFields)
 
@@ -1083,6 +1189,71 @@ class SyslAnalyzer:
       TBlockBody(List(TExprStmt(matchExpr))))
     funcName
 
+  /** Generate `__succ_<EnumName>(v: i32) -> i32` — next variant value by declaration order.
+   * Traps if `v` is the last variant or not a known variant. */
+  private def materializeEnumSuccFunc(et: SyslType.EnumType): String =
+    val funcName = s"__succ_${et.name}"
+    if functions.contains(funcName) then return funcName
+    val members = enumTypes(et.name)
+    functions(funcName) = FunInfo(funcName, List(("v", I32)), I32)
+    val arms = et.variants.zipWithIndex.dropRight(1).map { case ((vname, _), idx) =>
+      val value = members(vname)
+      val nextValue = members(et.variants(idx + 1)._1)
+      TMatchArm(List(TValuePattern(TIntLit(value, I32))), None, List(TExprStmt(TIntLit(nextValue, I32))))
+    }
+    val trap = TContractCheck("type attribute", TBoolLit(false, BoolType), s"no successor for ${et.name}::Succ (past last variant)")
+    val default = Some(List[TStmt](trap, TExprStmt(TIntLit(-1L, I32))))
+    val matchExpr = TMatchExpr(TVarRef("v", I32), arms.toList, default, I32)
+    specializedDecls += TFunDecl(funcName, List(TParam("v", I32)), I32,
+      TBlockBody(List(TExprStmt(matchExpr))))
+    funcName
+
+  /** Generate `__pred_<EnumName>(v: i32) -> i32` — previous variant value by declaration order.
+   * Traps if `v` is the first variant or not a known variant. */
+  private def materializeEnumPredFunc(et: SyslType.EnumType): String =
+    val funcName = s"__pred_${et.name}"
+    if functions.contains(funcName) then return funcName
+    val members = enumTypes(et.name)
+    functions(funcName) = FunInfo(funcName, List(("v", I32)), I32)
+    val arms = et.variants.zipWithIndex.drop(1).map { case ((vname, _), idx) =>
+      val value = members(vname)
+      val prevValue = members(et.variants(idx - 1)._1)
+      TMatchArm(List(TValuePattern(TIntLit(value, I32))), None, List(TExprStmt(TIntLit(prevValue, I32))))
+    }
+    val trap = TContractCheck("type attribute", TBoolLit(false, BoolType), s"no predecessor for ${et.name}::Pred (past first variant)")
+    val default = Some(List[TStmt](trap, TExprStmt(TIntLit(-1L, I32))))
+    val matchExpr = TMatchExpr(TVarRef("v", I32), arms.toList, default, I32)
+    specializedDecls += TFunDecl(funcName, List(TParam("v", I32)), I32,
+      TBlockBody(List(TExprStmt(matchExpr))))
+    funcName
+
+  /** Generate `__succ_<AliasName>(v: base) -> base` — v+1 with upper-bound trap. */
+  private def materializeWithinSuccFunc(aliasName: String, nt: NamedType, base: SyslType, range: IntRange): String =
+    val funcName = s"__succ_${aliasName}"
+    if functions.contains(funcName) then return funcName
+    functions(funcName) = FunInfo(funcName, List(("v", base)), base)
+    val hi = if range.exclusiveHi then range.hi - 1 else range.hi
+    val check = TContractCheck("type attribute",
+      TBinary(TVarRef("v", base), "<", TIntLit(hi, base), BoolType),
+      s"no successor for $aliasName::Succ (value is at upper bound)")
+    val result = TBinary(TVarRef("v", base), "+", TIntLit(1L, base), base)
+    specializedDecls += TFunDecl(funcName, List(TParam("v", base)), base,
+      TBlockBody(List(check, TExprStmt(result))))
+    funcName
+
+  /** Generate `__pred_<AliasName>(v: base) -> base` — v-1 with lower-bound trap. */
+  private def materializeWithinPredFunc(aliasName: String, nt: NamedType, base: SyslType, range: IntRange): String =
+    val funcName = s"__pred_${aliasName}"
+    if functions.contains(funcName) then return funcName
+    functions(funcName) = FunInfo(funcName, List(("v", base)), base)
+    val check = TContractCheck("type attribute",
+      TBinary(TVarRef("v", base), ">", TIntLit(range.lo, base), BoolType),
+      s"no predecessor for $aliasName::Pred (value is at lower bound)")
+    val result = TBinary(TVarRef("v", base), "-", TIntLit(1L, base), base)
+    specializedDecls += TFunDecl(funcName, List(TParam("v", base)), base,
+      TBlockBody(List(check, TExprStmt(result))))
+    funcName
+
   /** Resolve a `Type::First` or `Type::Last` attribute to a compile-time constant expression. */
   private def analyzeTypeFirstLast(typeName: String, typ: SyslType, isFirst: Boolean): TExpr =
     val attrName = if isFirst then "First" else "Last"
@@ -1137,6 +1308,26 @@ class SyslAnalyzer:
         TCall(materializeEnumValFunc(et), List(asInt), I32)
       case other =>
         throw AnalysisError(s"$typeName::Val requires a simple enum, got $other")
+
+  /** Resolve `Type::Succ(x)` / `Type::Pred(x)` — next/previous value. For simple enums,
+   * steps by declaration order; for int `within` types, by one. Both trap at the boundary. */
+  private def analyzeTypeSuccPred(typeName: String, typ: SyslType, argAst: ExpressionAST, isSucc: Boolean): TExpr =
+    val tArg = analyzeExpr(argAst)
+    val attrName = if isSucc then "Succ" else "Pred"
+    typ match
+      case et @ EnumType(name, _) if simpleEnumTypes.contains(name) =>
+        val asInt = if tArg.typ == I32 then tArg else TCast(tArg, I32)
+        val fn = if isSucc then materializeEnumSuccFunc(et) else materializeEnumPredFunc(et)
+        TCall(fn, List(asInt), I32)
+      case nt @ NamedType(_, base, _, Some(range: IntRange), _) =>
+        val unwrapped = if tArg.typ == nt then TCast(tArg, base) else tArg
+        val fn = if isSucc then materializeWithinSuccFunc(typeName, nt, base, range)
+                 else materializeWithinPredFunc(typeName, nt, base, range)
+        val raw = TCall(fn, List(unwrapped), base)
+        // Re-wrap in the named type (range-check at entry happens on the arg; the result is in-range by construction)
+        if nt.nominal then TCast(raw, nt) else applyTargetType(raw, nt)
+      case other =>
+        throw AnalysisError(s"$typeName::$attrName requires a simple enum or range-constrained int, got $other")
 
   /** `PtrType` / `RefType` may embed a recursive generic `StructType` placeholder (empty `fields`); use `structTypes`. */
   private def latestStruct(st: SyslType.StructType): SyslType.StructType =
@@ -2004,7 +2195,9 @@ class SyslAnalyzer:
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
-        TFieldAssignStmt(resolvedObj, idx, tValue)
+        val assign = TFieldAssignStmt(resolvedObj, idx, tValue)
+        val checks = buildStructInvariantChecks(obj, structType.name)
+        if checks.isEmpty then assign else TMultiStmt(assign :: checks)
 
       case FieldCompoundAssignStmtAST(obj, field, op, value) =>
         val tObj = analyzeExpr(obj)
@@ -2017,7 +2210,9 @@ class SyslAnalyzer:
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
-        TFieldCompoundAssignStmt(resolvedObj, idx, op, tValue)
+        val assign = TFieldCompoundAssignStmt(resolvedObj, idx, op, tValue)
+        val checks = buildStructInvariantChecks(obj, structType.name)
+        if checks.isEmpty then assign else TMultiStmt(assign :: checks)
 
       case ReturnStmtAST(value) =>
         TReturnStmt(value.map { v =>
@@ -2027,6 +2222,9 @@ class SyslAnalyzer:
 
       case ForStmtAST(init, cond, update, body, label) =>
         checkLoopLabelUnique(label)
+        // Hoist variant state to caller scope (before pushScope for for-init).
+        val (preDecls, rewrittenBody) = extractVariants(body)
+        val tPreDecls = preDecls.map(analyzeStmt)
         pushScope()
         val tInit = analyzeStmt(init)
         val tCond = analyzeExpr(cond)
@@ -2034,39 +2232,49 @@ class SyslAnalyzer:
         loopDepth += 1
         loopLabelStack += label
         pushScope()
-        val tBody = analyzeBlock(body)
+        val tBody = analyzeBlock(rewrittenBody)
         popScope()
         val tUpdate = analyzeStmt(update)
         loopLabelStack.remove(loopLabelStack.length - 1)
         loopDepth -= 1
         popScope()
-        TForStmt(tInit, tCond, tUpdate, tBody, label)
+        val loopStmt = TForStmt(tInit, tCond, tUpdate, tBody, label)
+        if tPreDecls.isEmpty then loopStmt else TMultiStmt(tPreDecls ++ List(loopStmt))
 
       case WhileStmtAST(cond, body, label) =>
         checkLoopLabelUnique(label)
+        val (preDecls, rewrittenBody) = extractVariants(body)
+        val tPreDecls = preDecls.map(analyzeStmt)
         val tCond = analyzeExpr(cond)
         if tCond.typ != BoolType then throw AnalysisError(s"while condition must be bool, got ${tCond.typ}")
         loopDepth += 1
         loopLabelStack += label
         pushScope()
-        val tBody = analyzeBlock(body)
+        val tBody = analyzeBlock(rewrittenBody)
         popScope()
         loopLabelStack.remove(loopLabelStack.length - 1)
         loopDepth -= 1
-        TWhileStmt(tCond, tBody, label)
+        val loopStmt = TWhileStmt(tCond, tBody, label)
+        if tPreDecls.isEmpty then loopStmt else TMultiStmt(tPreDecls ++ List(loopStmt))
 
       case DoWhileStmtAST(cond, body, label) =>
         checkLoopLabelUnique(label)
+        val (preDecls, rewrittenBody) = extractVariants(body)
+        val tPreDecls = preDecls.map(analyzeStmt)
         val tCond = analyzeExpr(cond)
         if tCond.typ != BoolType then throw AnalysisError(s"do/while condition must be bool, got ${tCond.typ}")
         loopDepth += 1
         loopLabelStack += label
         pushScope()
-        val tBody = analyzeBlock(body)
+        val tBody = analyzeBlock(rewrittenBody)
         popScope()
         loopLabelStack.remove(loopLabelStack.length - 1)
         loopDepth -= 1
-        TDoWhileStmt(tCond, tBody, label)
+        val loopStmt = TDoWhileStmt(tCond, tBody, label)
+        if tPreDecls.isEmpty then loopStmt else TMultiStmt(tPreDecls ++ List(loopStmt))
+
+      case VariantStmtAST(_) =>
+        throw AnalysisError("variant statement must appear at the top level of a loop body")
 
       case BreakStmtAST(label) =>
         if loopDepth == 0 then throw AnalysisError("break outside of loop")
@@ -2201,8 +2409,14 @@ class SyslAnalyzer:
           case "Val" =>
             val arg = argOpt.getOrElse(throw AnalysisError(s"$typeName::Val requires one argument"))
             analyzeTypeVal(typeName, resolved, arg)
+          case "Succ" =>
+            val arg = argOpt.getOrElse(throw AnalysisError(s"$typeName::Succ requires one argument"))
+            analyzeTypeSuccPred(typeName, resolved, arg, isSucc = true)
+          case "Pred" =>
+            val arg = argOpt.getOrElse(throw AnalysisError(s"$typeName::Pred requires one argument"))
+            analyzeTypeSuccPred(typeName, resolved, arg, isSucc = false)
           case other =>
-            throw AnalysisError(s"unknown type attribute: $typeName::$other (expected First, Last, Range, Image, Pos, Val)")
+            throw AnalysisError(s"unknown type attribute: $typeName::$other (expected First, Last, Range, Image, Pos, Val, Succ, Pred)")
       case TupleLitAST(elements) =>
         val tElems = elements.map(analyzeExpr)
         val tupleType = SyslType.tupleType(tElems.map(_.typ))

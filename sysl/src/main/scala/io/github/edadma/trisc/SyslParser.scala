@@ -104,9 +104,17 @@ class SyslParser extends StandardTokenParsers {
       "false" ^^^ "false"
 
   lazy val structDecl: Parser[StructDeclAST] =
-    "struct" ~> ident ~ typeParamList ~ (Newline ~> Indent ~> rep1sep(structField, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
-      case name ~ tps ~ fields => StructDeclAST(name, fields, tps)
+    "struct" ~> ident ~ typeParamList ~ (Newline ~> Indent ~> rep1sep(structMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
+      case name ~ tps ~ members =>
+        val fields = members.collect { case Left(f) => f }
+        val invariants = members.collect { case Right(e) => e }
+        StructDeclAST(name, fields, tps, Nil, invariants)
     }
+
+  // A struct body member is either a field declaration or an `invariant <expr>` clause.
+  lazy val structMember: Parser[Either[(String, TypeAST, Boolean), ExpressionAST]] =
+    "invariant" ~> expr ^^ (e => Right(e)) |
+    structField ^^ (f => Left(f))
 
   lazy val structField: Parser[(String, TypeAST, Boolean)] =
     opt("volatile") ~ ident ~ (":" ~> typeRef) ^^ { case vol ~ name ~ typ => (name, typ, vol.isDefined) }
@@ -391,8 +399,11 @@ class SyslParser extends StandardTokenParsers {
   lazy val invariantStmt: Parser[InvariantStmtAST] =
     "invariant" ~> expr ^^ InvariantStmtAST.apply
 
+  lazy val variantStmt: Parser[VariantStmtAST] =
+    "variant" ~> expr ^^ VariantStmtAST.apply
+
   lazy val stmt: Parser[StmtAST] =
-    asmStmt | invariantStmt | labeledLoop | forStmt | doWhileStmt | whileStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+    asmStmt | invariantStmt | variantStmt | labeledLoop | forStmt | doWhileStmt | whileStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
 
   lazy val destructureStmt: Parser[DestructureStmtAST] =
     mutability ~ ("(" ~> rep1sep(bindName, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case mut ~ names ~ init => DestructureStmtAST(names, init, mut.isMutable) } |
