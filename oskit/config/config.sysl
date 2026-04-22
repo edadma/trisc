@@ -11,7 +11,7 @@ val DEFAULT_QUANTUM = 5
 val TLS_SLOTS       = 4
 val MAX_TIMERS      = 8
 val MAX_IRQS        = 8
-val MAX_SYSCALLS    = 96
+val MAX_SYSCALLS    = 512
 val MAX_CORES       = 8
 
 // [memory]

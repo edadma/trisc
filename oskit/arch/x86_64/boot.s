@@ -570,7 +570,7 @@ syscall_entry:
 
     # --- Slow path: table dispatch ---
     # Bounds check
-    cmpq $96, %rbx             # MAX_SYSCALLS
+    cmpq $512, %rbx            # MAX_SYSCALLS
     jge .bad_syscall
     cmpq $0, %rbx
     jl .bad_syscall
